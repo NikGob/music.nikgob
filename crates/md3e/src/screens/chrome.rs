@@ -1,0 +1,555 @@
+//! State shared by the floating player, Now Playing and the supporting pane:
+//! track menus, the playlist picker, the volume popover, small dialogs and
+//! requests the shell carries out (navigation, opening a pane tab).
+
+use std::time::Duration;
+
+use egui::{
+    Area, Context, Id, Key, Modifiers, Order, Rect, Response, Sense, Stroke, Ui, UiBuilder, Vec2,
+    pos2, vec2,
+};
+use nikgob_view::{
+    Command, LIKED_PLAYLIST, LikeTarget, Route, TrackId, TrackRow, ViewState,
+};
+
+use super::{PaneTab, tag_editor::TagEditorUi, visualizer::Viz};
+use crate::{
+    Elevation, Icon, Theme, TypeRole,
+    components::{
+        Dialog, IconButton, Menu, MenuItem, Size, TextInputDialog, Radii, anim,
+        dialog::TextInputResult, paint,
+    },
+    tokens::shape,
+};
+
+/// An entry of a track's ⋮ menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Act {
+    Like,
+    Lyrics,
+    Volume,
+    Playlist,
+    Artist,
+    Album,
+    Info,
+    Tags,
+    Replace,
+    Visualizer,
+    Trash,
+    /// A divider.
+    Sep,
+}
+
+/// Where a menu was opened, which decides what "show the lyrics" means.
+pub enum Where<'a> {
+    /// The floating player: the shell shows the pane tab.
+    Bar,
+    /// Now Playing: switch its own tab and open its pane.
+    Np { tab: &'a mut PaneTab },
+}
+
+/// What the "В плейлист" picker is for.
+#[derive(Clone)]
+struct Picker {
+    tracks: Vec<TrackId>,
+    anchor: Rect,
+}
+
+/// Which text-input dialog is open.
+#[derive(Clone)]
+enum Ask {
+    SaveQueue,
+    NewPlaylist(Vec<TrackId>),
+}
+
+const POPOVER: Vec2 = vec2(56.0, 200.0);
+
+#[derive(Default)]
+struct Volume {
+    /// The 🔊 button as drawn last frame (the hover zone), if shown.
+    button: Option<Rect>,
+    /// The popover last frame, if it was visible.
+    popover: Option<Rect>,
+    /// Opened from the ⋮ menu: anchored there until a click outside.
+    pinned: Option<Rect>,
+    open_until: f64,
+    dragging: bool,
+    /// The value we just sent, shown until the runtime state catches up.
+    shadow: Option<(f32, f64)>,
+}
+
+/// Presentation state outside the page content.
+#[derive(Default)]
+pub struct Chrome {
+    pub visualizer: bool,
+    pub viz: Viz,
+    pub bands: Vec<f32>,
+    /// Now Playing's Queue / Lyrics / Info is open (side column when it
+    /// fits, bottom sheet otherwise). Closed by default.
+    pub np_sheet: bool,
+    /// A navigation for the shell (it also closes Now Playing).
+    pub nav: Option<Route>,
+    /// Show this tab in the shell's pane.
+    pub open_pane: Option<PaneTab>,
+    pub tag: TagEditorUi,
+    picker: Option<Picker>,
+    ask: Option<Ask>,
+    ask_text: String,
+    add_after_create: Option<(String, Vec<TrackId>)>,
+    trash: Option<(TrackId, String)>,
+    vol: Volume,
+}
+
+/// "<artist> <album> FLAC": the torrent search for a better copy.
+pub fn replace_query(t: &TrackRow) -> String {
+    format!("{} {} FLAC", t.artist, t.album.as_deref().unwrap_or(&t.title))
+}
+
+/// ⏮: a second press within 400 ms of one that restarted the track goes to
+/// the previous track (the runtime restarts first when past 3 s).
+pub fn press_previous(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+    let key = Id::new("md3e-prev-press");
+    let now = ctx.input(|i| i.time);
+    let (at, restarted): (f64, bool) = ctx
+        .data(|d| d.get_temp(key))
+        .unwrap_or((f64::MIN, false));
+    let past = state.player.position_now() > Duration::from_secs(3);
+    out.push(Command::Previous);
+    let restarts = past && !(now - at < 0.4 && restarted);
+    ctx.data_mut(|d| d.insert_temp(key, (now, restarts)));
+}
+
+impl Chrome {
+    // ---- track menu -----------------------------------------------------
+
+    fn item(act: Act, t: &TrackRow, state: &ViewState) -> MenuItem {
+        match act {
+            Act::Like => MenuItem::new(if t.liked { "Убрать из любимых" } else { "В любимые" })
+                .icon(Icon::Favorite)
+                .shortcut("Ctrl+L"),
+            Act::Lyrics => MenuItem::new("Текст песни").icon(Icon::Lyrics),
+            Act::Volume => MenuItem::new("Громкость…").icon(
+                if state.player.muted || state.player.volume == 0.0 {
+                    Icon::VolumeOff
+                } else {
+                    Icon::VolumeUp
+                },
+            ),
+            Act::Playlist => MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd),
+            Act::Artist => MenuItem::new("К исполнителю")
+                .icon(Icon::Person)
+                .enabled(t.artist_id.is_some()),
+            Act::Album => MenuItem::new("К альбому")
+                .icon(Icon::Album)
+                .enabled(t.release_id.is_some()),
+            Act::Info => MenuItem::new("Источник и качество").icon(Icon::Info),
+            Act::Tags => MenuItem::new("Редактировать теги…").icon(Icon::Edit),
+            Act::Replace => {
+                MenuItem::new("Заменить на лучшее качество…").icon(Icon::CloudDownload)
+            }
+            Act::Visualizer => MenuItem::new("Визуализатор")
+                .icon(Icon::GraphicEq)
+                .shortcut("F11"),
+            Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete),
+            Act::Sep => MenuItem::new(""),
+        }
+    }
+
+    /// A ⋮ menu on `anchor`, right-aligned, with `acts` for `track`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn track_menu(
+        &mut self,
+        anchor: &Response,
+        salt: &'static str,
+        acts: &[Act],
+        track: &TrackRow,
+        state: &ViewState,
+        wh: Where<'_>,
+        out: &mut Vec<Command>,
+    ) {
+        let mut menu = Menu::new(("md3e-track-menu", salt)).align_right(true);
+        let mut picks = Vec::new();
+        for &a in acts {
+            if a == Act::Sep {
+                menu = menu.divider();
+            } else {
+                menu = menu.item(Self::item(a, track, state));
+                picks.push(a);
+            }
+        }
+        if let Some(i) = menu.attach(anchor) {
+            self.apply(picks[i], track, anchor.rect, wh, out);
+        }
+    }
+
+    fn apply(
+        &mut self,
+        act: Act,
+        t: &TrackRow,
+        anchor: Rect,
+        wh: Where<'_>,
+        out: &mut Vec<Command>,
+    ) {
+        match act {
+            Act::Like => out.push(Command::Like(LikeTarget::Track(t.id), !t.liked)),
+            Act::Lyrics | Act::Info => {
+                let tab = if act == Act::Lyrics { PaneTab::Lyrics } else { PaneTab::Info };
+                match wh {
+                    Where::Bar => self.open_pane = Some(tab),
+                    Where::Np { tab: current } => {
+                        *current = tab;
+                        self.np_sheet = true;
+                    }
+                }
+            }
+            Act::Volume => self.vol.pinned = Some(anchor),
+            Act::Playlist => {
+                self.picker = Some(Picker { tracks: vec![t.id], anchor });
+            }
+            Act::Artist => self.nav = t.artist_id.map(Route::Artist),
+            Act::Album => self.nav = t.release_id.map(Route::Release),
+            Act::Tags => out.push(Command::OpenTagEditor(t.id)),
+            Act::Replace => out.push(Command::SearchTorrents(replace_query(t))),
+            Act::Visualizer => self.visualizer = true,
+            Act::Trash => self.trash = Some((t.id, t.title.clone())),
+            Act::Sep => {}
+        }
+    }
+
+    /// Opens the "Сохранить как плейлист" name dialog.
+    pub fn ask_save_queue(&mut self, default: &str) {
+        self.ask_text = default.to_owned();
+        self.ask = Some(Ask::SaveQueue);
+    }
+
+    // ---- overlays -------------------------------------------------------
+
+    /// Menus, dialogs and popovers that float above the screens.
+    pub fn overlays(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+        self.picker_ui(ctx, state, out);
+        self.dialogs(ctx, state, out);
+        self.tag.show(ctx, state, out);
+        self.volume_ui(ctx, state, out);
+    }
+
+    fn picker_ui(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+        let Some(p) = self.picker.clone() else { return };
+        let user: Vec<_> = state.library.playlists.iter().filter(|p| !p.pinned).collect();
+        let mut menu = Menu::new("md3e-playlist-picker")
+            .item(MenuItem::new("Любимые").icon(Icon::Favorite));
+        for pl in &user {
+            menu = menu.item(MenuItem::new(&pl.name).icon(Icon::QueueMusic));
+        }
+        menu = menu
+            .divider()
+            .item(MenuItem::new("Новый плейлист…").icon(Icon::Add))
+            .align_right(true);
+        let mut open = true;
+        let picked = menu.popup(ctx, p.anchor, &mut open);
+        match picked {
+            Some(0) => out.push(Command::AddToPlaylist(LIKED_PLAYLIST, p.tracks.clone())),
+            Some(i) if i <= user.len() => {
+                out.push(Command::AddToPlaylist(user[i - 1].id, p.tracks.clone()));
+            }
+            Some(_) => {
+                self.ask_text.clear();
+                self.ask = Some(Ask::NewPlaylist(p.tracks.clone()));
+            }
+            None => {}
+        }
+        if picked.is_some() || !open {
+            self.picker = None;
+        }
+    }
+
+    fn dialogs(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+        if let Some(ask) = self.ask.clone() {
+            let mut open = true;
+            let dialog = match &ask {
+                Ask::SaveQueue => {
+                    TextInputDialog::new("md3e-save-queue", "Сохранить очередь", "Название")
+                        .icon(Icon::PlaylistAdd)
+                        .buttons("Сохранить", "Отмена")
+                }
+                Ask::NewPlaylist(_) => {
+                    TextInputDialog::new("md3e-new-playlist", "Новый плейлист", "Название")
+                        .icon(Icon::PlaylistAdd)
+                        .buttons("Создать", "Отмена")
+                }
+            }
+            .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned()));
+            match dialog.show(ctx, &mut open, &mut self.ask_text) {
+                Some(TextInputResult::Confirmed) => {
+                    let name = self.ask_text.trim().to_owned();
+                    match ask {
+                        Ask::SaveQueue => out.push(Command::SaveQueueAsPlaylist(name)),
+                        Ask::NewPlaylist(tracks) => {
+                            out.push(Command::CreatePlaylist(name.clone()));
+                            self.add_after_create = Some((name, tracks));
+                        }
+                    }
+                    self.ask = None;
+                }
+                Some(TextInputResult::Cancelled) => self.ask = None,
+                None if !open => self.ask = None,
+                None => {}
+            }
+        }
+        // Tracks waiting for the playlist we just created.
+        if let Some((name, tracks)) = self.add_after_create.clone()
+            && let Some(p) = state
+                .library
+                .playlists
+                .iter()
+                .find(|p| p.name == name && !p.pinned)
+        {
+            out.push(Command::AddToPlaylist(p.id, tracks));
+            self.add_after_create = None;
+        }
+
+        if let Some((id, title)) = self.trash.clone() {
+            let mut open = true;
+            let r = Dialog::new("md3e-confirm-trash", "Удалить из библиотеки?")
+                .icon(Icon::Delete)
+                .supporting(format!(
+                    "«{title}» вместе с файлами уйдёт в корзину на 30 дней."
+                ))
+                .action("Отмена")
+                .action("Удалить")
+                .show(ctx, &mut open);
+            if r.action == Some(1) {
+                out.push(Command::TrashTrack(id));
+            }
+            if r.action.is_some() || r.dismissed || !open {
+                self.trash = None;
+            }
+        }
+    }
+
+    // ---- volume ---------------------------------------------------------
+
+    /// The volume to show: what we just sent, until the runtime catches up.
+    pub fn volume_now(&self, ctx: &Context, state: &ViewState) -> f32 {
+        match self.vol.shadow {
+            Some((v, t)) if anim::now(ctx) - t < 0.6 => v,
+            _ => state.player.volume,
+        }
+    }
+
+    fn send_volume(&mut self, ctx: &Context, v: f32, out: &mut Vec<Command>) {
+        let v = v.clamp(0.0, 1.0);
+        self.vol.shadow = Some((v, anim::now(ctx)));
+        out.push(Command::SetVolume(v));
+    }
+
+    /// Reports where the 🔊 button is (the hover zone of the popover).
+    /// The volume popover is on screen (its button's tooltip would cover it).
+    pub fn volume_open(&self) -> bool {
+        self.vol.popover.is_some()
+    }
+
+    pub fn set_volume_button(&mut self, rect: Option<Rect>) {
+        self.vol.button = rect;
+    }
+
+    /// The wheel over the 🔊 button or its popover changes the volume. Runs
+    /// first in the frame so the page underneath does not scroll too.
+    pub fn wheel(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+        let Some(p) = ctx.pointer_hover_pos() else { return };
+        let inside = self.vol.button.is_some_and(|b| b.contains(p))
+            || self.vol.popover.is_some_and(|r| r.contains(p));
+        if !inside {
+            return;
+        }
+        // Raw wheel events, not the smoothed scroll: one notch = 5 %,
+        // whatever the platform's line height or scroll smoothing.
+        let step: f32 = ctx.input(|i| {
+            i.raw
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::MouseWheel { unit, delta, .. } => Some(match unit {
+                        egui::MouseWheelUnit::Line => delta.y * 0.05,
+                        egui::MouseWheelUnit::Page => delta.y * 0.2,
+                        egui::MouseWheelUnit::Point => delta.y / 400.0,
+                    }),
+                    _ => None,
+                })
+                .sum()
+        });
+        // The page underneath must not scroll while the pointer is here.
+        ctx.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+        if step == 0.0 {
+            return;
+        }
+        let v = self.volume_now(ctx, state) + step;
+        self.send_volume(ctx, v, out);
+    }
+
+    fn volume_ui(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+        let theme = Theme::get(ctx);
+        let s = theme.scheme;
+        let now = anim::now(ctx);
+        let anchor = self.vol.pinned.or(self.vol.button);
+        let ptr = ctx.pointer_hover_pos();
+
+        let mut wanted = false;
+        if let Some(a) = anchor {
+            let zone = self.vol.popover.map_or(a, |p| a.union(p)).expand(2.0);
+            let inside = ptr.is_some_and(|p| zone.contains(p));
+            if self.vol.pinned.is_some() {
+                let press_out = ctx.input(|i| {
+                    i.pointer.any_pressed()
+                        && i.pointer.interact_pos().is_some_and(|p| !zone.contains(p))
+                });
+                let esc = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+                if press_out || esc {
+                    self.vol.pinned = None;
+                }
+                wanted = self.vol.pinned.is_some();
+            } else {
+                if inside || self.vol.dragging {
+                    self.vol.open_until = now + 0.25;
+                }
+                wanted = now < self.vol.open_until;
+                if wanted && !inside {
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                }
+            }
+        }
+        let alpha = anim::fraction(
+            ctx,
+            Id::new("md3e-volume-popover"),
+            f32::from(u8::from(wanted)),
+            theme.motion.fast_effects,
+        )
+        .clamp(0.0, 1.0);
+        let Some(a) = anchor.filter(|_| alpha > 0.01) else {
+            self.vol.popover = None;
+            self.vol.dragging = false;
+            return;
+        };
+
+        let screen = ctx.content_rect().shrink(8.0);
+        let x = (a.center().x - POPOVER.x * 0.5)
+            .clamp(screen.left(), (screen.right() - POPOVER.x).max(screen.left()));
+        let above = a.top() - 8.0 - POPOVER.y;
+        let y = if above >= screen.top() { above } else { a.bottom() + 8.0 };
+        let rect = Rect::from_min_size(pos2(x, y + (1.0 - alpha) * 8.0), POPOVER);
+        self.vol.popover = Some(rect);
+
+        let volume = if state.player.muted { 0.0 } else { self.volume_now(ctx, state) };
+        let mut new_value = None;
+        let mut toggle_mute = false;
+        let mut dragging = false;
+        Area::new(Id::new("md3e-volume-area"))
+            .order(Order::Foreground)
+            .fixed_pos(rect.min)
+            .constrain(false)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.set_opacity(alpha);
+                let (r, _) = ui.allocate_exact_size(POPOVER, Sense::hover());
+                let radii = Radii::all(shape::EXTRA_LARGE);
+                paint::shadow(ui.painter(), r, radii, Elevation::Level2);
+                paint::container(ui.painter(), r, radii, s.surface_container_high, Stroke::NONE);
+                ui.interact(r, Id::new("md3e-volume-bg"), Sense::click());
+
+                let label = format!("{}", (volume * 100.0).round() as i32);
+                let g = ui.painter().layout_no_wrap(
+                    label,
+                    TypeRole::LabelMedium.font_id(),
+                    s.on_surface_variant,
+                );
+                ui.painter().galley(
+                    pos2(r.center().x - g.size().x * 0.5, r.top() + 14.0),
+                    g,
+                    s.on_surface_variant,
+                );
+
+                let track = Rect::from_min_max(
+                    pos2(r.center().x - 22.0, r.top() + 40.0),
+                    pos2(r.center().x + 22.0, r.bottom() - 56.0),
+                );
+                let resp = ui.interact(track, Id::new("md3e-volume-slider"), Sense::click_and_drag());
+                dragging = resp.dragged();
+                if let Some(p) = resp.interact_pointer_pos()
+                    && (resp.dragged() || resp.is_pointer_button_down_on() || resp.clicked())
+                {
+                    new_value = Some(((track.bottom() - p.y) / track.height()).clamp(0.0, 1.0));
+                }
+                paint_vslider(ui, track, new_value.unwrap_or(volume), dragging);
+
+                let btn = Rect::from_center_size(pos2(r.center().x, r.bottom() - 28.0), vec2(40.0, 40.0));
+                let mute = ui
+                    .scope_builder(UiBuilder::new().max_rect(btn), |ui| {
+                        ui.add(
+                            IconButton::new(if volume == 0.0 { Icon::VolumeOff } else { Icon::VolumeUp })
+                                .size(Size::S)
+                                .tooltip("Без звука")
+                                .id_salt("md3e-volume-mute"),
+                        )
+                    })
+                    .inner;
+                toggle_mute = mute.clicked();
+            });
+        self.vol.dragging = dragging;
+        if let Some(v) = new_value
+            && (v - volume).abs() > 0.002
+        {
+            self.send_volume(ctx, v, out);
+        }
+        if toggle_mute {
+            out.push(Command::ToggleMute);
+        }
+    }
+}
+
+/// The vertical Expressive slider: 16 wide track, 44×4 handle with 6 gaps.
+fn paint_vslider(ui: &Ui, rect: Rect, value: f32, pressed: bool) {
+    let theme = Theme::get(ui.ctx());
+    let s = theme.scheme;
+    let w = 16.0;
+    let gap = 6.0;
+    let handle_h = anim::f32(
+        ui.ctx(),
+        Id::new("md3e-volume-handle"),
+        if pressed { 2.0 } else { 4.0 },
+        theme.motion.fast_spatial,
+    );
+    let cx = rect.center().x;
+    let y = rect.bottom() - value.clamp(0.0, 1.0) * rect.height();
+    let top = Rect::from_min_max(
+        pos2(cx - w * 0.5, rect.top()),
+        pos2(cx + w * 0.5, (y - gap - handle_h * 0.5).max(rect.top())),
+    );
+    if top.height() > 0.5 {
+        paint::container(
+            ui.painter(),
+            top,
+            Radii([shape::FULL, shape::FULL, 2.0, 2.0]),
+            s.secondary_container,
+            Stroke::NONE,
+        );
+    }
+    let bottom = Rect::from_min_max(
+        pos2(cx - w * 0.5, (y + gap + handle_h * 0.5).min(rect.bottom())),
+        pos2(cx + w * 0.5, rect.bottom()),
+    );
+    if bottom.height() > 0.5 {
+        paint::container(
+            ui.painter(),
+            bottom,
+            Radii([2.0, 2.0, shape::FULL, shape::FULL]),
+            s.primary,
+            Stroke::NONE,
+        );
+    }
+    paint::container(
+        ui.painter(),
+        Rect::from_center_size(pos2(cx, y), vec2(rect.width(), handle_h)),
+        Radii::all(shape::FULL),
+        s.primary,
+        Stroke::NONE,
+    );
+}

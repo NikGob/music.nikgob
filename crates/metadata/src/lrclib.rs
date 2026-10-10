@@ -1,0 +1,168 @@
+//! LRCLIB: synchronized (LRC) and plain lyrics.
+
+use std::time::Duration;
+
+use serde::Deserialize;
+use url::Url;
+
+use crate::error::{MetadataError, Result};
+use crate::http::{Http, Service, base_url, build_url};
+use crate::lrc::parse_lrc;
+use crate::text::{artist_key, similarity, title_key};
+
+const DEFAULT_BASE: &str = "https://lrclib.net/";
+/// LRCLIB itself matches `/api/get` within +-2 s; the same window is used to
+/// accept `/api/search` hits.
+const DURATION_WINDOW_SECS: f64 = 3.0;
+/// Minimum text similarity (0..=1, see `text::similarity`) of a search hit.
+const MIN_TITLE_SIMILARITY: f64 = 0.85;
+const MIN_ARTIST_SIMILARITY: f64 = 0.7;
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Lyrics {
+    pub id: i64,
+    pub track_name: String,
+    pub artist_name: String,
+    pub album_name: Option<String>,
+    /// Seconds.
+    pub duration: Option<f64>,
+    pub instrumental: bool,
+    pub plain_lyrics: Option<String>,
+    /// Raw LRC text; see [`Lyrics::synced_lines`].
+    pub synced_lyrics: Option<String>,
+}
+
+impl Lyrics {
+    pub fn has_synced(&self) -> bool {
+        self.synced_lyrics
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Parsed synchronized lyrics (empty if there are none).
+    pub fn synced_lines(&self) -> Vec<(Duration, String)> {
+        self.synced_lyrics
+            .as_deref()
+            .map(parse_lrc)
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Lrclib {
+    http: Http,
+    base: Url,
+}
+
+impl Lrclib {
+    pub fn new(http: Http) -> Self {
+        Self {
+            http,
+            base: base_url(DEFAULT_BASE).expect("default base URL is valid"),
+        }
+    }
+
+    pub fn with_base_url(http: Http, base: &str) -> Result<Self> {
+        Ok(Self {
+            http,
+            base: base_url(base)?,
+        })
+    }
+
+    /// `GET /api/get`; `None` when LRCLIB has no such track.
+    pub async fn get(
+        &self,
+        artist: &str,
+        track: &str,
+        album: Option<&str>,
+        duration: Option<Duration>,
+    ) -> Result<Option<Lyrics>> {
+        let secs = duration.map(|d| d.as_secs_f64().round().to_string());
+        let mut params = vec![("artist_name", artist), ("track_name", track)];
+        if let Some(a) = album.map(str::trim).filter(|a| !a.is_empty()) {
+            params.push(("album_name", a));
+        }
+        if let Some(d) = secs.as_deref() {
+            params.push(("duration", d));
+        }
+        let url = build_url(&self.base, "api/get", &params)?;
+        match self.http.get_json::<Lyrics>(Service::Lrclib, url).await {
+            Ok(l) => Ok(Some(l)),
+            Err(MetadataError::NotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `GET /api/search` by track (and optionally artist/album) name.
+    pub async fn search(
+        &self,
+        artist: Option<&str>,
+        track: &str,
+        album: Option<&str>,
+    ) -> Result<Vec<Lyrics>> {
+        let mut params = vec![("track_name", track)];
+        if let Some(a) = artist.map(str::trim).filter(|a| !a.is_empty()) {
+            params.push(("artist_name", a));
+        }
+        if let Some(a) = album.map(str::trim).filter(|a| !a.is_empty()) {
+            params.push(("album_name", a));
+        }
+        let url = build_url(&self.base, "api/search", &params)?;
+        self.http.get_json(Service::Lrclib, url).await
+    }
+
+    /// Exact `get` first, then `search` as a fallback. Among search hits the
+    /// closest duration (within a few seconds) wins, synced lyrics preferred.
+    pub async fn find(
+        &self,
+        artist: &str,
+        track: &str,
+        album: Option<&str>,
+        duration: Option<Duration>,
+    ) -> Result<Option<Lyrics>> {
+        if let Some(found) = self.get(artist, track, album, duration).await? {
+            return Ok(Some(found));
+        }
+        let hits = self.search(Some(artist), track, None).await?;
+        Ok(pick_best(hits, artist, track, duration))
+    }
+}
+
+/// LRCLIB's search is fuzzy: a hit has to be the same song, or the lyrics of
+/// some other song end up in the user's file.
+fn same_song(hit: &Lyrics, artist: &str, track: &str) -> bool {
+    let (want_title, got_title) = (title_key(track).base, title_key(&hit.track_name).base);
+    if !want_title.is_empty()
+        && !got_title.is_empty()
+        && similarity(&want_title, &got_title) < MIN_TITLE_SIMILARITY
+    {
+        return false;
+    }
+    let (want_artist, got_artist) = (artist_key(artist), artist_key(&hit.artist_name));
+    want_artist.is_empty()
+        || got_artist.is_empty()
+        || similarity(&want_artist, &got_artist) >= MIN_ARTIST_SIMILARITY
+}
+
+fn pick_best(
+    hits: Vec<Lyrics>,
+    artist: &str,
+    track: &str,
+    duration: Option<Duration>,
+) -> Option<Lyrics> {
+    let want = duration.map(|d| d.as_secs_f64());
+    let mut scored: Vec<(f64, Lyrics)> = hits
+        .into_iter()
+        .filter(|l| same_song(l, artist, track))
+        .filter_map(|l| {
+            let diff = match (want, l.duration) {
+                (Some(w), Some(d)) => (w - d).abs(),
+                _ => 0.0,
+            };
+            (diff <= DURATION_WINDOW_SECS).then_some((diff, l))
+        })
+        .collect();
+    scored.sort_by(|(da, a), (db, b)| b.has_synced().cmp(&a.has_synced()).then(da.total_cmp(db)));
+    scored.into_iter().next().map(|(_, l)| l)
+}

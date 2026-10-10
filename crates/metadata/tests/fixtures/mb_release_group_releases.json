@@ -1,0 +1,35 @@
+{
+  "release-count": 3,
+  "release-offset": 0,
+  "releases": [
+    {
+      "id": "2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01",
+      "title": "Группа крови",
+      "status": "Official",
+      "date": "1988-06-01",
+      "country": "SU",
+      "barcode": "",
+      "artist-credit": [{"name": "Кино", "joinphrase": "", "artist": {"id": "8e2a3a4c-8f0b-4a3e-bd0a-0e7a4d1c2f11", "name": "Кино", "sort-name": "Kino"}}],
+      "label-info": [{"catalog-number": "A60 00415", "label": {"id": "99999999-0000-4000-8000-000000000001", "name": "Мелодия"}}],
+      "media": [{"position": 1, "format": "Vinyl", "track-count": 9}]
+    },
+    {
+      "id": "4b4c3d8e-8fa0-4175-9c91-7f7c2b5d1e03",
+      "title": "Группа крови",
+      "status": "Official",
+      "date": "2000",
+      "country": "RU",
+      "artist-credit": [{"name": "Кино", "joinphrase": "", "artist": {"id": "8e2a3a4c-8f0b-4a3e-bd0a-0e7a4d1c2f11", "name": "Кино", "sort-name": "Kino"}}],
+      "label-info": [],
+      "media": [{"position": 1, "format": "CD", "track-count": 9}]
+    },
+    {
+      "id": "5c5d4e9f-9ab1-4286-8da2-8a8d3c6e2f04",
+      "title": "Группа крови",
+      "status": "Bootleg",
+      "date": "",
+      "artist-credit": [],
+      "media": []
+    }
+  ]
+}

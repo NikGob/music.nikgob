@@ -1,0 +1,19 @@
+{
+  "id": 302127,
+  "title": "Группа крови",
+  "upc": "4600000000000",
+  "cover_big": "https://cdn-images.dzcdn.net/images/cover/abc/500x500-000000-80-0-0.jpg",
+  "cover_xl": "https://cdn-images.dzcdn.net/images/cover/abc/1000x1000-000000-80-0-0.jpg",
+  "label": "Moroz Records",
+  "nb_tracks": 2,
+  "release_date": "1988-06-01",
+  "record_type": "album",
+  "artist": {"id": 1001, "name": "Кино", "type": "artist"},
+  "tracks": {
+    "data": [
+      {"id": 3135548, "title": "Закрой за мной дверь", "duration": 245, "rank": 300000, "artist": {"id": 1001, "name": "Кино"}},
+      {"id": 3135556, "title": "Группа крови", "duration": 285, "rank": 412345, "artist": {"id": 1001, "name": "Кино"}}
+    ]
+  },
+  "type": "album"
+}

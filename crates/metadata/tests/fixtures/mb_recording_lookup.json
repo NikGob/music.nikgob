@@ -1,0 +1,93 @@
+{
+  "id": "b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+  "title": "Группа крови",
+  "length": 284000,
+  "disambiguation": "",
+  "video": false,
+  "first-release-date": "1988-06-01",
+  "isrcs": ["RUA011100001"],
+  "artist-credit": [
+    {
+      "name": "Кино",
+      "joinphrase": "",
+      "artist": {
+        "id": "8e2a3a4c-8f0b-4a3e-bd0a-0e7a4d1c2f11",
+        "name": "Кино",
+        "sort-name": "Kino",
+        "disambiguation": "Soviet rock band"
+      }
+    }
+  ],
+  "releases": [
+    {
+      "id": "2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01",
+      "title": "Группа крови",
+      "status": "Official",
+      "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+      "date": "1988-06-01",
+      "country": "SU",
+      "barcode": "",
+      "artist-credit": [
+        {
+          "name": "Кино",
+          "joinphrase": "",
+          "artist": {
+            "id": "8e2a3a4c-8f0b-4a3e-bd0a-0e7a4d1c2f11",
+            "name": "Кино",
+            "sort-name": "Kino",
+            "disambiguation": "Soviet rock band"
+          }
+        }
+      ],
+      "release-group": {
+        "id": "7c5d4a3b-1e2f-4a6b-8c9d-0e1f2a3b4c5d",
+        "title": "Группа крови",
+        "primary-type": "Album",
+        "secondary-types": [],
+        "first-release-date": "1988-06-01"
+      },
+      "media": [
+        {
+          "position": 1,
+          "format": "CD",
+          "title": "",
+          "track-count": 9,
+          "tracks": [
+            {
+              "id": "11111111-aaaa-4bbb-8ccc-000000000001",
+              "number": "9",
+              "position": 9,
+              "title": "Группа крови",
+              "length": 284000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3a3b2c7d-7e9f-4064-8b80-6e6b1a4c0d02",
+      "title": "The Best Of Kino",
+      "status": "Official",
+      "date": "",
+      "country": "XE",
+      "artist-credit": [
+        {
+          "name": "Кино",
+          "joinphrase": "",
+          "artist": {
+            "id": "8e2a3a4c-8f0b-4a3e-bd0a-0e7a4d1c2f11",
+            "name": "Кино",
+            "sort-name": "Kino"
+          }
+        }
+      ],
+      "release-group": {
+        "id": "8d6e5b4c-2f3a-4b7c-9dae-1f2a3b4c5d6e",
+        "title": "The Best Of Kino",
+        "primary-type": "Album",
+        "secondary-types": ["Compilation"]
+      },
+      "media": []
+    }
+  ]
+}

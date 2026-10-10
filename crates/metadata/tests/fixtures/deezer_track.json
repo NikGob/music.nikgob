@@ -1,0 +1,21 @@
+{
+  "id": 3135556,
+  "readable": true,
+  "title": "Группа крови",
+  "title_short": "Группа крови",
+  "isrc": "RUA011100001",
+  "duration": 285,
+  "track_position": 9,
+  "disk_number": 1,
+  "release_date": "1988-06-01",
+  "explicit_lyrics": false,
+  "artist": {"id": 1001, "name": "Кино", "type": "artist"},
+  "album": {
+    "id": 302127,
+    "title": "Группа крови",
+    "cover_xl": "https://cdn-images.dzcdn.net/images/cover/abc/1000x1000-000000-80-0-0.jpg",
+    "release_date": "1988-06-01",
+    "type": "album"
+  },
+  "type": "track"
+}

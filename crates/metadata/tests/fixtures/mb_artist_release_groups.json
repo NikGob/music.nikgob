@@ -1,0 +1,29 @@
+{
+  "release-group-count": 3,
+  "release-group-offset": 0,
+  "release-groups": [
+    {
+      "id": "7c5d4a3b-1e2f-4a6b-8c9d-0e1f2a3b4c5d",
+      "title": "Группа крови",
+      "primary-type": "Album",
+      "secondary-types": [],
+      "first-release-date": "1988-06-01",
+      "artist-credit": [{"name": "Кино", "joinphrase": "", "artist": {"id": "8e2a3a4c-8f0b-4a3e-bd0a-0e7a4d1c2f11", "name": "Кино", "sort-name": "Kino"}}]
+    },
+    {
+      "id": "8d6e5b4c-2f3a-4b7c-9dae-1f2a3b4c5d6e",
+      "title": "The Best Of Kino",
+      "primary-type": "Album",
+      "secondary-types": ["Compilation"],
+      "first-release-date": "",
+      "artist-credit": []
+    },
+    {
+      "id": "9e7f6c5d-3a4b-4c8d-8ebf-2a3b4c5d6e7f",
+      "title": "Последний герой",
+      "primary-type": "Single",
+      "secondary-types": null,
+      "first-release-date": "1989"
+    }
+  ]
+}

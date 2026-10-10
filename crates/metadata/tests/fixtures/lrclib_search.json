@@ -1,0 +1,35 @@
+[
+  {
+    "id": 11,
+    "name": "Группа крови",
+    "trackName": "Группа крови",
+    "artistName": "Кино",
+    "albumName": "Концерт",
+    "duration": 330,
+    "instrumental": false,
+    "plainLyrics": "Тёплое место",
+    "syncedLyrics": null
+  },
+  {
+    "id": 12,
+    "name": "Группа крови",
+    "trackName": "Группа крови",
+    "artistName": "Кино",
+    "albumName": "Группа крови",
+    "duration": 285.4,
+    "instrumental": false,
+    "plainLyrics": "Тёплое место, но улицы ждут",
+    "syncedLyrics": "[00:12.00]Тёплое место, но улицы ждут\n[00:18.30]Отпечатков наших ног"
+  },
+  {
+    "id": 13,
+    "name": "Группа крови",
+    "trackName": "Группа крови",
+    "artistName": "Кино",
+    "albumName": "Группа крови",
+    "duration": 284,
+    "instrumental": false,
+    "plainLyrics": "Тёплое место",
+    "syncedLyrics": null
+  }
+]

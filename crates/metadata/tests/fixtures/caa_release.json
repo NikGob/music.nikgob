@@ -1,0 +1,35 @@
+{
+  "images": [
+    {
+      "types": ["Back"],
+      "front": false,
+      "back": true,
+      "edit": 100,
+      "image": "http://coverartarchive.org/release/2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01/2002.jpg",
+      "comment": "",
+      "approved": true,
+      "id": 2002,
+      "thumbnails": {
+        "250": "http://coverartarchive.org/release/2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01/2002-250.jpg"
+      }
+    },
+    {
+      "types": ["Front"],
+      "front": true,
+      "back": false,
+      "edit": 99,
+      "image": "http://coverartarchive.org/release/2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01/1001.jpg",
+      "comment": "",
+      "approved": true,
+      "id": 1001,
+      "thumbnails": {
+        "250": "http://coverartarchive.org/release/2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01/1001-250.jpg",
+        "500": "http://coverartarchive.org/release/2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01/1001-500.jpg",
+        "1200": "http://coverartarchive.org/release/2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01/1001-1200.jpg",
+        "small": "http://coverartarchive.org/release/2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01/1001-250.jpg",
+        "large": "http://coverartarchive.org/release/2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01/1001-500.jpg"
+      }
+    }
+  ],
+  "release": "https://musicbrainz.org/release/2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01"
+}

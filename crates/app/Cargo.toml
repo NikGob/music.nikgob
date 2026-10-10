@@ -1,0 +1,40 @@
+[package]
+name = "nikgob"
+description = "music.nikgob desktop player."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nikgob"
+path = "src/main.rs"
+
+[dependencies]
+nikgob-core.workspace = true
+nikgob-md3e.workspace = true
+nikgob-view.workspace = true
+nikgob-runtime = { path = "../runtime" }
+nikgob-library = { path = "../library" }
+nikgob-audio = { path = "../audio" }
+crossbeam-channel = "0.5"
+serde_json = "1"
+egui.workspace = true
+eframe.workspace = true
+egui_extras = { workspace = true, features = ["file", "image", "svg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+directories = "6"
+fastframe-text.workspace = true
+fastframe-scroll.workspace = true
+fastframe-shell.workspace = true
+fastframe-tray.workspace = true
+fastframe-now-playing.workspace = true
+log.workspace = true
+env_logger.workspace = true
+
+[lints]
+workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }

@@ -1,0 +1,15 @@
+[package]
+name = "nikgob-view"
+description = "UI-agnostic view model shared by every design system: state snapshots, routes and commands."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nikgob-core.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "nikgob-core"
+description = "Player core: library, playback state, commands and events. Knows nothing about UI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+log.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+thiserror = "2"
+directories = "6"
+uuid = { version = "1", features = ["v7", "serde"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

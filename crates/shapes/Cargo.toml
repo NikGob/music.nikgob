@@ -1,0 +1,14 @@
+[package]
+name = "nikgob-shapes"
+description = "Rounded polygons and shape morphing (port of androidx.graphics.shapes) plus the Material shape library."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+egui.workspace = true
+
+[lints]
+workspace = true

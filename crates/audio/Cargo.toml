@@ -1,0 +1,27 @@
+[package]
+name = "nikgob-audio"
+description = "Audio engine: Symphonia + pure-Rust Opus decoding, gapless/crossfade, ring-buffered cpal output via fastframe-audio, visualizer tap."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+log.workspace = true
+fastframe-audio = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+symphonia = { version = "0.6.1", default-features = false, features = ["flac", "mp3", "aac", "isomp4", "alac", "ogg", "vorbis", "wav", "pcm", "aiff", "mkv", "id3v2"] }
+ropus = "0.12.18"
+rtrb = "0.4"
+rubato = "5.0.1"
+realfft = "3.5"
+crossbeam-channel = "0.5"
+thiserror = "2"
+
+[dev-dependencies]
+hound = "3.5"
+tempfile = "3"
+ogg = "0.9"
+
+[lints]
+workspace = true

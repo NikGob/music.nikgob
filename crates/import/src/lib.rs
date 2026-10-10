@@ -1,0 +1,34 @@
+//! Import pipeline.
+
+pub mod analysis;
+pub mod config;
+pub mod cover;
+pub mod decide;
+pub mod decode;
+pub mod encode;
+pub mod error;
+pub mod events;
+pub mod fsutil;
+pub mod identity;
+pub mod importer;
+pub mod layout;
+pub mod resample;
+pub mod retag;
+pub mod rebuild;
+pub mod sanitize;
+pub mod spectrum;
+mod store;
+pub mod tags;
+pub mod trash;
+pub mod watch;
+
+pub use config::ImportConfig;
+pub use encode::{EncodeOptions, EncodedInfo, Encoder, FfmpegEncoder, RopusEncoder};
+pub use error::{ImportError, Result};
+pub use events::{ConfirmItem, ConfirmOption, ImportEvent, ItemId, JobId, Stage};
+pub use importer::{FileOutcome, ImportJob, Importer};
+pub use rebuild::{RebuildReport, rebuild_from_files};
+pub use retag::TagChanges;
+pub use spectrum::{SpectrumReport, Verdict};
+pub use trash::{PurgeReport, TRASH_DAYS, delete_track_to_trash, trash_file, trash_purge};
+pub use watch::InboxWatcher;

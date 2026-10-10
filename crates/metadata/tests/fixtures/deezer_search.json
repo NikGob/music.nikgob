@@ -1,0 +1,37 @@
+{
+  "data": [
+    {
+      "id": 3135556,
+      "readable": true,
+      "title": "Группа крови",
+      "title_short": "Группа крови",
+      "title_version": "",
+      "link": "https://www.deezer.com/track/3135556",
+      "duration": 285,
+      "rank": 412345,
+      "explicit_lyrics": false,
+      "preview": "https://cdnt-preview.dzcdn.net/api/1/1/a/b/c.mp3",
+      "artist": {"id": 1001, "name": "Кино", "link": "https://www.deezer.com/artist/1001", "type": "artist"},
+      "album": {
+        "id": 302127,
+        "title": "Группа крови",
+        "cover": "https://api.deezer.com/album/302127/image",
+        "cover_small": "https://cdn-images.dzcdn.net/images/cover/abc/56x56-000000-80-0-0.jpg",
+        "cover_medium": "https://cdn-images.dzcdn.net/images/cover/abc/250x250-000000-80-0-0.jpg",
+        "cover_big": "https://cdn-images.dzcdn.net/images/cover/abc/500x500-000000-80-0-0.jpg",
+        "cover_xl": "https://cdn-images.dzcdn.net/images/cover/abc/1000x1000-000000-80-0-0.jpg",
+        "type": "album"
+      },
+      "type": "track"
+    },
+    {
+      "id": 3135560,
+      "title": "Группа крови - Live",
+      "title_short": "Группа крови",
+      "duration": 312,
+      "artist": {"id": 1001, "name": "Кино"},
+      "album": {"id": 302199, "title": "Концерт в Лужниках", "cover_xl": "https://cdn-images.dzcdn.net/images/cover/def/1000x1000-000000-80-0-0.jpg"}
+    }
+  ],
+  "total": 2
+}

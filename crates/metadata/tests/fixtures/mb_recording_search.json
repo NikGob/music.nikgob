@@ -1,0 +1,74 @@
+{
+  "created": "2026-10-09T10:00:00.000Z",
+  "count": 2,
+  "offset": 0,
+  "recordings": [
+    {
+      "id": "b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+      "score": 100,
+      "title": "Группа крови",
+      "length": 284000,
+      "video": null,
+      "artist-credit": [
+        {
+          "name": "Кино",
+          "artist": {
+            "id": "8e2a3a4c-8f0b-4a3e-bd0a-0e7a4d1c2f11",
+            "name": "Кино",
+            "sort-name": "Kino"
+          }
+        }
+      ],
+      "first-release-date": "1988-06-01",
+      "isrcs": ["RUA011100001"],
+      "releases": [
+        {
+          "id": "2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01",
+          "title": "Группа крови",
+          "status": "Official",
+          "date": "1988-06-01",
+          "country": "SU",
+          "release-group": {
+            "id": "7c5d4a3b-1e2f-4a6b-8c9d-0e1f2a3b4c5d",
+            "title": "Группа крови",
+            "primary-type": "Album"
+          },
+          "media": [
+            {
+              "position": 1,
+              "format": "CD",
+              "track": [
+                {
+                  "id": "11111111-aaaa-4bbb-8ccc-000000000001",
+                  "number": "9",
+                  "title": "Группа крови",
+                  "length": 284000
+                }
+              ],
+              "track-count": 9,
+              "track-offset": 8
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "c2b0d1fa-e098-4153-bf02-89e7b4378e7a",
+      "score": 87,
+      "title": "Группа крови (live)",
+      "disambiguation": "live, 1990-06-24: Luzhniki",
+      "length": 311000,
+      "artist-credit": [
+        {
+          "name": "Кино",
+          "artist": {
+            "id": "8e2a3a4c-8f0b-4a3e-bd0a-0e7a4d1c2f11",
+            "name": "Кино",
+            "sort-name": "Kino"
+          }
+        }
+      ],
+      "releases": []
+    }
+  ]
+}

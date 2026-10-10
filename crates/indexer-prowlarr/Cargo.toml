@@ -1,0 +1,23 @@
+[package]
+name = "nikgob-indexer-prowlarr"
+description = "Indexer implementation backed by Prowlarr's native API. The only crate that knows about Prowlarr."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nikgob-core.workspace = true
+log.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+wiremock = "0.6"
+
+[lints]
+workspace = true
