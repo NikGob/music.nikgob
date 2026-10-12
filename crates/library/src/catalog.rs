@@ -415,6 +415,70 @@ impl Library {
         })
     }
 
+    /// Moves every track of `from` onto `to` and removes `from` (its palette,
+    /// artist links and, when `to` has none, its like move over). Fields `to` has
+    /// no value for (cover, year, total, MBIDs) are taken from `from`. Two
+    /// different MBIDs are two editions: that is an error and nothing changes.
+    /// Returns how many tracks moved.
+    pub fn merge_releases(&self, from: ReleaseId, to: ReleaseId) -> Result<u32> {
+        if from == to {
+            return Ok(0);
+        }
+        self.write(|tx| {
+            let (f, t) = (from.to_string(), to.to_string());
+            for (id, rid) in [(&f, from), (&t, to)] {
+                first_string(tx, "SELECT id FROM release WHERE id = ?1", [id])?
+                    .ok_or_else(|| LibraryError::not_found("release", rid))?;
+            }
+            for column in ["mbid", "release_group_mbid"] {
+                let sql = format!("SELECT {column} FROM release WHERE id = ?1");
+                let ids: Vec<Option<String>> = [&f, &t]
+                    .iter()
+                    .map(|id| tx.query_row(&sql, [id], |r| r.get(0)))
+                    .collect::<rusqlite::Result<_>>()?;
+                if let [Some(a), Some(b)] = &ids[..]
+                    && a != b
+                {
+                    return Err(LibraryError::Invalid(format!("releases {f} and {t} are different editions")));
+                }
+            }
+            let mbid: Option<String> =
+                tx.query_row("SELECT mbid FROM release WHERE id = ?1", [&f], |r| r.get(0))?;
+            tx.execute(
+                "UPDATE release SET
+                        cover_ref = coalesce(cover_ref, (SELECT cover_ref FROM release WHERE id = ?1)),
+                        year = coalesce(year, (SELECT year FROM release WHERE id = ?1)),
+                        total_tracks = coalesce(total_tracks, (SELECT total_tracks FROM release WHERE id = ?1)),
+                        release_group_mbid = coalesce(release_group_mbid,
+                                (SELECT release_group_mbid FROM release WHERE id = ?1))
+                  WHERE id = ?2",
+                params![f, t],
+            )?;
+            let moved = tx.execute(
+                "UPDATE track SET release_id = ?2,
+                        album_key = (SELECT title_key FROM release WHERE id = ?2)
+                  WHERE release_id = ?1",
+                params![f, t],
+            )?;
+            tx.execute(
+                "UPDATE likes SET target_id = ?2, updated_at = ?3
+                  WHERE target_kind = 'release' AND target_id = ?1
+                    AND NOT EXISTS (SELECT 1 FROM likes
+                                     WHERE target_kind = 'release' AND target_id = ?2)",
+                params![f, t, now_ms()],
+            )?;
+            tx.execute("DELETE FROM release_artist WHERE release_id = ?1", [&f])?;
+            tx.execute("DELETE FROM palette WHERE release_id = ?1", [&f])?;
+            tx.execute("DELETE FROM release WHERE id = ?1", [&f])?;
+            // After the delete: an MBID may be held by one row only.
+            tx.execute(
+                "UPDATE release SET mbid = coalesce(mbid, ?2) WHERE id = ?1",
+                params![t, mbid],
+            )?;
+            Ok(moved as u32)
+        })
+    }
+
     /// Inserts or updates a track.
     ///
     /// Matching: the row with the same `id` (so the import crate can pass the

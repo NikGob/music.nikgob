@@ -20,8 +20,10 @@ mod derived;
 mod error;
 mod events;
 pub mod fractional;
+mod lyrics;
 mod masters;
 mod migrations;
+mod photos;
 mod playlists;
 pub mod search;
 mod trash;
@@ -33,6 +35,7 @@ mod util;
 mod tests;
 
 pub use db::Library;
+pub use lyrics::StoredLyrics;
 pub use error::{LibraryError, Result};
 pub use migrations::SCHEMA_VERSION;
 pub use playlists::LIKED_PLAYLIST_NAME;

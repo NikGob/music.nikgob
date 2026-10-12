@@ -1,7 +1,7 @@
 //! Plain tooltip: `inverse-surface`, 4 dp corners, body-small text and an
 //! optional keyboard shortcut. Replaces egui's `on_hover_text` styling.
 
-use egui::{Color32, Frame, Label, Margin, Response, RichText, Stroke, TextWrapMode, Tooltip};
+use egui::{Color32, Frame, Label, Margin, Response, Stroke, TextWrapMode, Tooltip};
 
 use crate::{Theme, TypeRole, tokens::shape};
 
@@ -18,7 +18,7 @@ pub fn tooltip(response: Response, text: &str, shortcut: Option<&str>) -> Respon
         stroke: Stroke::NONE,
     };
     let style = TypeRole::BodySmall.style();
-    let rich = |t: &str, c: Color32| -> RichText { style.rich(t, c) };
+    let rich = |t: &str, c: Color32| -> egui::WidgetText { style.rich(t, c) };
     let mut tip = Tooltip::for_enabled(&response);
     tip.popup = tip.popup.frame(frame);
     tip.show(|ui| {

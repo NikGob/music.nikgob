@@ -40,21 +40,22 @@ pub fn item_colors(color: ToolbarColor, s: &crate::ColorScheme) -> Colors {
 }
 
 /// Paints the toolbar pill at `rect` and lays out `add_contents` inside it.
+/// Also returns the pill's own response (clicks between the items).
 pub fn floating_toolbar<R>(
     ui: &mut Ui,
     rect: Rect,
     color: ToolbarColor,
     add_contents: impl FnOnce(&mut Ui) -> R,
-) -> R {
+) -> (egui::Response, R) {
     let theme = Theme::get(ui.ctx());
     let (bg, _) = colors(color, &theme.scheme);
     let radii = Radii::all(shape::FULL);
     paint::shadow(ui.painter(), rect, radii, Elevation::Level3);
     paint::container(ui.painter(), rect, radii, bg, Stroke::NONE);
     // Swallow clicks on the pill itself so content beneath does not get them.
-    ui.interact(rect, ui.id().with("toolbar-bg"), egui::Sense::click());
+    let bg = ui.interact(rect, ui.id().with("toolbar-bg"), egui::Sense::click());
     let inner = rect.shrink2(egui::vec2(8.0, 4.0));
-    ui.scope_builder(
+    let r = ui.scope_builder(
         UiBuilder::new()
             .max_rect(inner)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
@@ -63,5 +64,6 @@ pub fn floating_toolbar<R>(
             add_contents(ui)
         },
     )
-    .inner
+    .inner;
+    (bg, r)
 }

@@ -415,7 +415,7 @@ impl Button {
         } else {
             role.style()
         };
-        LayoutJob::single_section(self.label.clone(), style.text_format(color))
+        style.job(self.label.clone(), color)
     }
 
     /// Natural width without group adjustments.

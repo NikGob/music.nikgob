@@ -1533,3 +1533,44 @@ fn moving_a_source_to_another_track_fixes_both_tracks() {
     let on_two = lib.sources_of_track(t2.id).unwrap();
     assert_eq!(on_two.iter().filter(|s| s.is_active).count(), 1);
 }
+
+#[test]
+fn merging_releases_moves_tracks_and_removes_the_source_release() {
+    let lib = lib();
+    let a = artist(&lib, "Radwimps");
+    let main = release(&lib, &a, "Suzume", None);
+    let mut piece = Release::new("Suzume", credit(&a));
+    piece.year = Some(2022);
+    piece.cover_ref = Some("c.jpg".into());
+    let piece = lib.upsert_release(&piece).unwrap();
+    let t1 = track(&lib, &a, Some(&main), "One", 1);
+    let t2 = track(&lib, &a, Some(&piece), "Two", 2);
+    local(&lib, &t2, "two.opus", Codec::Opus, Some(160));
+    lib.like(LikeTarget::Release(piece.id)).unwrap();
+
+    assert_eq!(lib.merge_releases(piece.id, main.id).unwrap(), 1);
+    assert!(lib.get_release(piece.id).unwrap().is_none());
+    let merged = lib.get_release(main.id).unwrap().unwrap();
+    assert_eq!((merged.year, merged.cover_ref.as_deref()), (Some(2022), Some("c.jpg")));
+    let rows = lib.tracks_of_release(main.id).unwrap();
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![t1.id, t2.id]);
+    assert_eq!(lib.count_releases().unwrap(), 1);
+    assert!(lib.is_liked(LikeTarget::Release(main.id)).unwrap());
+    assert_eq!(lib.search("two", 5).unwrap().tracks.len(), 1);
+}
+
+#[test]
+fn merging_keeps_one_mbid_and_refuses_two() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let with_mbid = |title: &str, mbid: Option<&str>| {
+        let mut r = Release::new(title, credit(&a));
+        r.mbid = mbid.map(Into::into);
+        lib.upsert_release(&r).unwrap()
+    };
+    let (plain, one, two) = (with_mbid("X", None), with_mbid("Y", Some("m1")), with_mbid("Z", Some("m2")));
+    assert!(matches!(lib.merge_releases(one.id, two.id), Err(LibraryError::Invalid(_))));
+    assert_eq!(lib.count_releases().unwrap(), 3, "nothing changed");
+    lib.merge_releases(one.id, plain.id).unwrap();
+    assert_eq!(lib.get_release(plain.id).unwrap().unwrap().mbid.as_deref(), Some("m1"));
+}

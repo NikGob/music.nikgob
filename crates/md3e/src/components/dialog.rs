@@ -161,6 +161,7 @@ impl Dialog {
         let mut clicked = None;
         let actions = self.actions;
         let area = Area::new(self.id.with("dialog"))
+            .fade_in(false)
             .order(Order::Tooltip)
             .fixed_pos(screen.center())
             .pivot(Align2::CENTER_CENTER)
@@ -185,7 +186,7 @@ impl Dialog {
                             egui::Label::new(
                                 TypeRole::HeadlineSmall
                                     .style()
-                                    .rich(&self.headline, s.on_surface),
+                                    .rich_para(&self.headline, s.on_surface),
                             )
                             .wrap(),
                         );
@@ -195,7 +196,7 @@ impl Dialog {
                                 egui::Label::new(
                                     TypeRole::BodyMedium
                                         .style()
-                                        .rich(text, s.on_surface_variant),
+                                        .rich_para(text, s.on_surface_variant),
                                 )
                                 .wrap(),
                             );

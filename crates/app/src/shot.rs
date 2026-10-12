@@ -4,6 +4,8 @@
 //!
 //! Synthetic input (logical points): `move:x,y`, `click:x,y`, `rclick:x,y`,
 //! `dblclick:x,y`, `drag:x1,y1,x2,y2`, `wheel:x,y,dy`, `key:space|escape|f11`.
+//! `prefs:{json}` merges into the prefs.
+//! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -27,6 +29,15 @@ fn nums(arg: &str) -> Vec<f32> {
 
 fn button(pos: Pos2, button: PointerButton, pressed: bool) -> Event {
     Event::PointerButton { pos, button, pressed, modifiers: Modifiers::NONE }
+}
+
+/// `NIKGOB_SHOT_SIZE=w,h`: the window size for a screenshot run.
+pub fn window_size() -> Option<[f32; 2]> {
+    std::env::var_os("NIKGOB_SHOT")?;
+    match nums(&std::env::var("NIKGOB_SHOT_SIZE").ok()?)[..] {
+        [w, h] => Some([w, h]),
+        _ => None,
+    }
 }
 
 impl Shot {
@@ -146,8 +157,9 @@ impl Shot {
                 self.wait = 10;
             }
             "np" => {
+                // `np:5` shoots 5 frames in (mid-transition).
                 ui.set_now_playing(ctx, true);
-                self.wait = 60;
+                self.wait = arg.parse().unwrap_or(60);
             }
             "move" => {
                 if let [x, y] = nums(arg)[..] {
@@ -221,6 +233,19 @@ impl Shot {
             "search" => {
                 ui.set_search(arg, out);
                 self.wait = 20;
+            }
+            // `prefs:{"ring_style":"Bars"}`: merges JSON into the prefs.
+            "prefs" => {
+                let mut v = serde_json::to_value(&state.prefs).unwrap_or_default();
+                if let (Some(obj), Ok(serde_json::Value::Object(patch))) =
+                    (v.as_object_mut(), serde_json::from_str::<serde_json::Value>(arg))
+                {
+                    obj.extend(patch);
+                }
+                if let Ok(p) = serde_json::from_value(v) {
+                    out.push(Command::SetPrefs(Box::new(p)));
+                }
+                self.wait = 10;
             }
             "light" => out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs {
                 theme: nikgob_view::ThemeMode::Light,

@@ -32,6 +32,7 @@ pub(crate) enum Internal {
     Import(ImportEvent),
     Resolved { item: u64, error: Option<String> },
     Lyrics(TrackId, v::LyricsView),
+    Enrich(crate::enrich::Event),
     TagSuggestions(TrackId, Result<Vec<(String, v::TagEdit)>, String>),
     Retagged(TrackId, Result<(), String>),
     TorrentResults(String, Result<Vec<nikgob_core::indexer::Candidate>, String>),
@@ -88,7 +89,9 @@ pub(crate) struct ImportService {
     dirty: bool,
     last_reload: Instant,
     /// Lyrics looked up this session (found or not): no second request.
-    lyrics_tried: HashSet<TrackId>,
+    pub(crate) lyrics_tried: HashSet<TrackId>,
+    /// Background lyrics backfill and artist photos.
+    pub(crate) enrich: crate::enrich::Enrich,
     lyrics_cache: HashMap<TrackId, v::LyricsView>,
     pub(crate) last_trashed: Option<Trashed>,
     /// New settings, applied once nothing is importing.
@@ -113,6 +116,12 @@ impl ImportService {
                 .map_err(|e| log::warn!("online metadata disabled: {e}"))
                 .ok()
         });
+        // Albums imported before folders were imported as a whole may be in pieces.
+        match nikgob_import::merge_split_releases(&library) {
+            Ok(0) => {}
+            Ok(n) => log::info!("merged {n} split releases"),
+            Err(e) => log::warn!("merging split releases: {e}"),
+        }
         let importer = Importer::new(setup.config, library.clone(), metadata.clone());
         let mut svc = Self {
             rt,
@@ -129,6 +138,7 @@ impl ImportService {
             dirty: false,
             last_reload: Instant::now(),
             lyrics_tried: HashSet::new(),
+            enrich: Default::default(),
             lyrics_cache: HashMap::new(),
             last_trashed: None,
             reconfigure: None,
@@ -249,6 +259,7 @@ impl ImportService {
                     rate: None,
                     eta: None,
                     paused: false,
+                    controllable: false,
                     error: p.last_error.clone(),
                 }
             })
@@ -427,6 +438,7 @@ impl Worker {
             Internal::TorrentFilesListed(i, r) => self.files_listed(i, r),
             Internal::TorrentAdded(r) => self.torrent_added(r),
             Internal::SeedStopped(list) => self.seed_stopped(list),
+            Internal::Enrich(ev) => self.enrich_event(ev),
             Internal::Lyrics(track, lyrics) => {
                 if let Some(svc) = &mut self.import {
                     svc.lyrics_cache.insert(track, lyrics.clone());
@@ -527,6 +539,7 @@ impl Worker {
                     rate: None,
                     eta: None,
                     paused: false,
+                    controllable: false,
                     error: (failed > 0).then(|| format!("Не удалось: {failed}")),
                 });
                 svc.history.truncate(100);
@@ -566,6 +579,7 @@ impl Worker {
         self.res.invalidate();
         self.load_library();
         self.load_home();
+        self.start_enrich();
         let (release, artist, playlist) = {
             let s = self.state.read();
             (
@@ -696,6 +710,7 @@ impl Worker {
             .ok();
         svc.reconfigure = Some(svc.reconfigure.take().unwrap_or_else(|| svc.config().clone()));
         svc.apply_reconfigure();
+        self.start_enrich();
     }
 
     // ------------------------------------------------------------- lyrics & tags
@@ -740,38 +755,29 @@ impl Worker {
             });
         }
 
-        // Lyrics: cache → .lrc next to the file → tags → LRCLIB.
+        // Lyrics: session cache → .lrc / tags of the file → library cache → LRCLIB.
         if let Some(l) = self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)).cloned() {
             self.publish(|s, _| s.lyrics = l);
             return;
         }
-        let local = path.as_deref().and_then(|p| {
-            let lrc = nikgob_import::sanitize::long_path(&p.with_extension("lrc"));
-            if let Ok(text) = std::fs::read_to_string(&lrc) {
-                let lines = nikgob_metadata::parse_lrc(&text);
-                if !lines.is_empty() {
-                    return Some(v::LyricsView {
-                        track: Some(track),
-                        lines,
-                        plain: None,
-                        loading: false,
-                    });
-                }
-            }
-            let text = tags.as_ref()?.lyrics.clone()?;
-            let lines = nikgob_metadata::parse_lrc(&text);
-            Some(v::LyricsView {
-                track: Some(track),
-                plain: lines.is_empty().then_some(text),
-                lines,
-                loading: false,
-            })
-        });
-        if let Some(l) = local {
+        if let Some((synced, plain)) = path
+            .as_deref()
+            .and_then(|p| crate::enrich::local_lyrics(p, tags.as_ref()))
+        {
+            let l = crate::enrich::lyrics_view(track, synced.as_deref(), plain.as_deref());
+            self.publish(|s, _| s.lyrics = l);
+            return;
+        }
+        let stored = self.lib.lyrics(track).ok().flatten();
+        if let Some(st) = stored.filter(|st| {
+            !st.is_miss() || nikgob_library::now_ms() - st.fetched_at < crate::enrich::LYRICS_RETRY_MS
+        }) {
+            let l = crate::enrich::lyrics_view(track, st.synced.as_deref(), st.plain.as_deref());
             self.publish(|s, _| s.lyrics = l);
             return;
         }
         let row = self.lib.get_track_row(track).ok().flatten();
+        let lib = self.lib.clone();
         let lookup = self.import.as_mut().and_then(|svc| {
             let meta = svc.metadata.clone()?;
             let row = row?;
@@ -789,28 +795,22 @@ impl Worker {
         let tx = svc.internal.clone();
         let lrc_path = path.map(|p| p.with_extension("lrc"));
         svc.rt.spawn(async move {
-            let duration = row.duration_ms.map(|ms| Duration::from_millis(ms.into()));
-            let found = tokio::time::timeout(
-                Duration::from_secs(15),
-                meta.lrclib.find(&row.artist, &row.title, row.album.as_deref(), duration),
-            )
-            .await;
-            let mut view = v::LyricsView {
-                track: Some(track),
-                ..Default::default()
-            };
-            if let Ok(Ok(Some(l))) = found {
-                if let Some(text) = l.synced_lyrics.as_deref().filter(|_| l.has_synced()) {
-                    view.lines = nikgob_metadata::parse_lrc(text);
-                    if let Some(p) = &lrc_path {
+            let msg = match crate::enrich::fetch_and_store(&meta.lrclib, &lib, &row).await {
+                Ok(st) => {
+                    if let (Some(text), Some(p)) = (&st.synced, &lrc_path) {
                         let _ = std::fs::write(nikgob_import::sanitize::long_path(p), text);
                     }
+                    Internal::Lyrics(
+                        track,
+                        crate::enrich::lyrics_view(track, st.synced.as_deref(), st.plain.as_deref()),
+                    )
                 }
-                if view.lines.is_empty() {
-                    view.plain = l.plain_lyrics.filter(|p| !p.trim().is_empty());
+                Err(e) => {
+                    log::debug!("lyrics lookup: {e}");
+                    Internal::Enrich(crate::enrich::Event::LyricsFailed(track))
                 }
-            }
-            let _ = tx.send(Internal::Lyrics(track, view));
+            };
+            let _ = tx.send(msg);
         });
         self.publish(|s, _| {
             s.lyrics = v::LyricsView {

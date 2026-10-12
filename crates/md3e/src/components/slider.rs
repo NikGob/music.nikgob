@@ -247,7 +247,9 @@ impl Slider {
     }
 }
 
-/// A sine polyline from `x0` to `x1` around `cy`, with round caps.
+/// A sine polyline from `x0` to `x1` around `cy`, with round caps. The wave
+/// is anchored at `x1` (the handle) and runs away from it as `phase` grows,
+/// so it seems to come out of the handle.
 #[allow(clippy::too_many_arguments)]
 pub fn wave_line(
     ui: &Ui,
@@ -269,7 +271,7 @@ pub fn wave_line(
     let pts: Vec<Pos2> = (0..=n)
         .map(|i| {
             let x = x0 + (x1 - x0) * i as f32 / n as f32;
-            pos2(x, cy + amplitude * (k * (x - x0) - phase).sin())
+            pos2(x, cy + amplitude * (k * (x1 - x) - phase).sin())
         })
         .collect();
     let (first, last) = (pts[0], pts[pts.len() - 1]);

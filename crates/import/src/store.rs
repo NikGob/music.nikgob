@@ -11,6 +11,7 @@ use nikgob_library::{ArtistSort, Library, ReleaseSort};
 use nikgob_metadata::text::{album_key, artist_key};
 
 use crate::error::Result;
+use crate::folder::primary_credit;
 use crate::identity::{Identity, credit_parts, parse_credit};
 use crate::layout::VARIOUS_ARTISTS;
 
@@ -21,6 +22,8 @@ pub(crate) struct Store {
     loaded: bool,
     artists: HashMap<String, ArtistId>,
     releases: HashMap<(String, String), ReleaseId>,
+    /// By first credited name; `None` when two releases share it.
+    releases_by_lead: HashMap<(String, String), Option<ReleaseId>>,
     releases_by_mbid: HashMap<String, ReleaseId>,
 }
 
@@ -33,6 +36,27 @@ fn name_key(name: &str) -> String {
     }
 }
 
+/// What makes two releases the same one: the album title and the full credit of
+/// the artist it is filed under, both case- and punctuation-insensitive. "A & B"
+/// and "A & C" are two artists.
+pub(crate) fn release_key(title: &str, artist_line: &str) -> (String, String) {
+    (album_key(title), name_key(artist_line))
+}
+
+/// Like [`release_key`] with only the first name of the credit: where the album
+/// artist is missing and a track artist stands in, "A" and "A, B" (a guest) are
+/// one artist.
+pub(crate) fn lead_key(title: &str, artist_line: &str) -> (String, String) {
+    (album_key(title), name_key(primary_credit(artist_line)))
+}
+
+/// The release has a real album artist (not just the track artist standing in).
+fn has_album_artist(id: &Identity) -> bool {
+    id.compilation
+        || id.release_type == nikgob_core::model::ReleaseType::Compilation
+        || id.album_artist.as_deref().is_some_and(|a| !a.trim().is_empty())
+}
+
 impl Store {
     pub fn new(lib: Library) -> Self {
         Self {
@@ -40,6 +64,7 @@ impl Store {
             loaded: false,
             artists: HashMap::new(),
             releases: HashMap::new(),
+            releases_by_lead: HashMap::new(),
             releases_by_mbid: HashMap::new(),
         }
     }
@@ -74,9 +99,7 @@ impl Store {
                 .releases(offset, PAGE, ReleaseSort::asc(Default::default()))?;
             for row in &page {
                 let r = &row.release;
-                self.releases
-                    .entry((album_key(&r.title), name_key(&r.artist_credit.display())))
-                    .or_insert(r.id);
+                self.index_release(&r.title, &r.artist_credit.display(), r.id);
                 if let Some(m) = &r.mbid {
                     self.releases_by_mbid.insert(m.clone(), r.id);
                 }
@@ -116,11 +139,24 @@ impl Store {
         {
             return Ok(Some(*r));
         }
-        let key = (
-            album_key(&Self::release_title(id)),
-            name_key(&Self::release_artist_line(id)),
-        );
-        Ok(self.releases.get(&key).copied())
+        let (title, line) = (Self::release_title(id), Self::release_artist_line(id));
+        if let Some(r) = self.releases.get(&release_key(&title, &line)) {
+            return Ok(Some(*r));
+        }
+        // An explicit album artist matches in full; a track artist standing in
+        // for it may carry guests.
+        if has_album_artist(id) {
+            return Ok(None);
+        }
+        Ok(self.releases_by_lead.get(&lead_key(&title, &line)).copied().flatten())
+    }
+
+    fn index_release(&mut self, title: &str, credit: &str, id: ReleaseId) {
+        self.releases.entry(release_key(title, credit)).or_insert(id);
+        let lead = self.releases_by_lead.entry(lead_key(title, credit)).or_insert(Some(id));
+        if *lead != Some(id) {
+            *lead = None;
+        }
     }
 
     /// Artist rows for the credit parts `(join_before, name)`; only the first
@@ -172,20 +208,32 @@ impl Store {
     pub fn ensure_release(&mut self, id: &Identity, cover_ref: Option<String>) -> Result<Release> {
         self.ensure_loaded()?;
         let existing = self.find_release(id)?;
-        let line = Self::release_artist_line(id);
-        let parts = parse_credit(&line);
-        let parts = if parts.is_empty() {
-            vec![(String::new(), line.clone())]
-        } else {
-            parts
+        // A track credited to the artist and a guest must not rename the album
+        // it lands on; only a real album artist may.
+        let no_album_artist = id.album_artist.as_deref().is_none_or(|a| a.trim().is_empty());
+        let old = match existing {
+            Some(r) if no_album_artist => self.lib.get_release(r)?,
+            _ => None,
         };
-        // The album artist's MBID is unknown here; the track artist's MBID only
-        // fits when both are the same person.
-        let same_artist = id.album_artist.is_none() || id.album_artist.as_deref() == Some(&id.artist_line);
-        let credit = self.ensure_credit(
-            &parts,
-            if same_artist { id.artist_mbid.as_deref() } else { None },
-        )?;
+        let credit = match old {
+            Some(old) => old.artist_credit,
+            None => {
+                let line = Self::release_artist_line(id);
+                let parts = parse_credit(&line);
+                let parts = if parts.is_empty() {
+                    vec![(String::new(), line.clone())]
+                } else {
+                    parts
+                };
+                // The album artist's MBID is unknown here; the track artist's MBID
+                // only fits when both are the same person.
+                let same_artist = id.album_artist.is_none() || id.album_artist.as_deref() == Some(&id.artist_line);
+                self.ensure_credit(
+                    &parts,
+                    if same_artist { id.artist_mbid.as_deref() } else { None },
+                )?
+            }
+        };
         let mut release = Release::new(Self::release_title(id), credit);
         if let Some(r) = existing {
             release.id = r;
@@ -197,16 +245,56 @@ impl Store {
         release.total_tracks = id.track_total;
         release.cover_ref = cover_ref;
         let stored = self.lib.upsert_release(&release)?;
-        self.releases.insert(
-            (
-                album_key(&stored.title),
-                name_key(&stored.artist_credit.display()),
-            ),
-            stored.id,
-        );
+        self.index_release(&stored.title, &stored.artist_credit.display(), stored.id);
         if let Some(m) = &stored.mbid {
             self.releases_by_mbid.insert(m.clone(), stored.id);
         }
         Ok(stored)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::identity_from_tags;
+    use crate::tags::TagSet;
+    use std::path::Path;
+
+    fn identity(artist: &str, album_artist: Option<&str>, album: &str) -> Identity {
+        identity_from_tags(
+            &TagSet {
+                title: Some("Song".into()),
+                artist: Some(artist.into()),
+                album_artist: album_artist.map(Into::into),
+                album: Some(album.into()),
+                ..TagSet::default()
+            },
+            Path::new("x.flac"),
+        )
+    }
+
+    #[test]
+    fn explicit_album_artists_are_compared_in_full() {
+        let mut store = Store::new(Library::open_in_memory().unwrap());
+        let ab = store.ensure_release(&identity("A", Some("A & B"), "Live"), None).unwrap();
+        let ac = store.ensure_release(&identity("A", Some("A & C"), "Live"), None).unwrap();
+        assert_ne!(ab.id, ac.id);
+        assert_eq!(ab.artist_credit.display(), "A & B", "the second import did not overwrite the credit");
+        let again = store.ensure_release(&identity("A", Some("a & b"), "LIVE"), None).unwrap();
+        assert_eq!(again.id, ab.id, "case does not matter");
+    }
+
+    #[test]
+    fn a_track_artist_standing_in_for_the_album_artist_may_carry_guests() {
+        let mut store = Store::new(Library::open_in_memory().unwrap());
+        let plain = store.ensure_release(&identity("Radwimps", Some("Radwimps"), "Suzume"), None).unwrap();
+        let guest = identity("RADWIMPS, Kazuma Jinnouchi", None, "Suzume");
+        assert_eq!(store.find_release(&guest).unwrap(), Some(plain.id));
+        // Two releases that share the first name make the guess ambiguous.
+        store.ensure_release(&identity("Radwimps", Some("Radwimps & Friend"), "Suzume"), None).unwrap();
+        assert_eq!(store.find_release(&guest).unwrap(), None);
+        // An explicit album artist never falls back to the first name.
+        let explicit = identity("Radwimps", Some("Radwimps, Kazuma Jinnouchi"), "Suzume");
+        assert_eq!(store.find_release(&explicit).unwrap(), None);
     }
 }

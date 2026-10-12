@@ -8,7 +8,7 @@ use url::Url;
 use crate::error::{MetadataError, Result};
 use crate::http::{Http, Service, base_url, build_url};
 use crate::lrc::parse_lrc;
-use crate::text::{artist_key, similarity, title_key};
+use crate::text::{artist_key, search_artist, search_title, similarity, title_key};
 
 const DEFAULT_BASE: &str = "https://lrclib.net/";
 /// LRCLIB itself matches `/api/get` within +-2 s; the same window is used to
@@ -114,6 +114,10 @@ impl Lrclib {
 
     /// Exact `get` first, then `search` as a fallback. Among search hits the
     /// closest duration (within a few seconds) wins, synced lyrics preferred.
+    ///
+    /// Tags are messy ("Song (feat. X)", "Song - Remastered 2011", "Song [Live]"),
+    /// so when the raw names find nothing the lookup is repeated with the
+    /// normalized title and artist, and finally by title alone.
     pub async fn find(
         &self,
         artist: &str,
@@ -124,8 +128,26 @@ impl Lrclib {
         if let Some(found) = self.get(artist, track, album, duration).await? {
             return Ok(Some(found));
         }
-        let hits = self.search(Some(artist), track, None).await?;
-        Ok(pick_best(hits, artist, track, duration))
+        let clean_artist = search_artist(artist);
+        let clean_track = search_title(track);
+        if (clean_artist != artist.trim() || clean_track != track.trim())
+            && let Some(found) = self
+                .get(&clean_artist, &clean_track, album, duration)
+                .await?
+        {
+            return Ok(Some(found));
+        }
+        let hits = self.search(Some(&clean_artist), &clean_track, None).await?;
+        let empty = hits.is_empty();
+        if let Some(best) = pick_best(hits, &clean_artist, &clean_track, duration) {
+            return Ok(Some(best));
+        }
+        if empty {
+            // The artist spelling may be what misses (transliteration, "A & B").
+            let hits = self.search(None, &clean_track, None).await?;
+            return Ok(pick_best(hits, &clean_artist, &clean_track, duration));
+        }
+        Ok(None)
     }
 }
 

@@ -209,3 +209,62 @@ fn queue_without_playable_files_does_not_loop_forever() {
     rt.send(Command::CreatePlaylist("p".into()));
     wait_for(&rt, "the playlist", |s| s.library.playlists.iter().any(|p| p.name == "p"));
 }
+
+/// Pause/cancel of a folder import used to reach the torrent client with a
+/// non-torrent id ("torrent not found"). Imports are not controllable: the
+/// commands are refused with a toast and the import runs to the end.
+#[test]
+fn pausing_a_folder_import_never_reaches_the_torrent_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let cfg = ImportConfig::with_root(root);
+    std::fs::create_dir_all(&cfg.inbox_dir).unwrap();
+    let folder = root.join("Album");
+    std::fs::create_dir_all(&folder).unwrap();
+    for i in 0..3 {
+        write_wav(&folder.join(format!("{i}.wav")), 2.0 + i as f32);
+    }
+
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: Library::open_in_memory().unwrap(),
+            library_dir: cfg.library_dir.clone(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: Some(ImportSetup {
+                config: cfg.clone(),
+                metadata: None,
+                watch_inbox: false,
+                torrent_state_dir: root.join("torrent-state"),
+                torrent_offline: true,
+            }),
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+
+    rt.send(Command::ImportFolder(folder));
+    wait_for(&rt, "the import job", |s| {
+        !s.downloads.active.is_empty() || !s.downloads.history.is_empty()
+    });
+    // The state guard must not outlive this block: the worker needs the lock.
+    let (id, controllable) = {
+        let s = rt.state();
+        let job = s.downloads.active.first().or(s.downloads.history.first()).unwrap();
+        (job.id, job.controllable)
+    };
+    assert!(!controllable, "a folder import offers no pause/cancel");
+
+    rt.send(Command::PauseJob(id, true));
+    rt.send(Command::CancelJob(id));
+    wait_for(&rt, "the refusal", |s| s.toasts.iter().any(|t| t.text.contains("Импорт нельзя")));
+    wait_for(&rt, "the import", |s| s.library.track_count == 3 && s.downloads.active.is_empty());
+    let s = rt.state();
+    assert!(
+        s.toasts.iter().all(|t| !t.text.contains("торрент") && !t.text.contains("Торрент")),
+        "{:?}",
+        s.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+    assert!(s.downloads.active.iter().all(|j| j.error.is_none()));
+}

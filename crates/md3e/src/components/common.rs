@@ -6,7 +6,7 @@ use std::sync::Arc;
 use egui::{
     Color32, Context, Galley, Id, LayerId, Painter, Pos2, Response,
     emath::TSTransform,
-    text::{LayoutJob, TextWrapping},
+    text::TextWrapping,
 };
 use nikgob_motion::{Animated, Spring};
 
@@ -122,7 +122,7 @@ pub(crate) fn line(
     color: Color32,
     max_width: f32,
 ) -> Arc<Galley> {
-    let mut job = LayoutJob::single_section(text.to_owned(), style.text_format(color));
+    let mut job = style.job(text, color);
     job.wrap = TextWrapping::truncate_at_width(max_width.max(1.0));
     painter.layout_job(job)
 }
@@ -134,10 +134,7 @@ pub(crate) fn plain(
     style: TypeStyle,
     color: Color32,
 ) -> Arc<Galley> {
-    painter.layout_job(LayoutJob::single_section(
-        text.to_owned(),
-        style.text_format(color),
-    ))
+    painter.layout_job(style.job(text, color))
 }
 
 /// `color` at `opacity` (for disabled content and fades).
@@ -154,6 +151,18 @@ pub(crate) fn paint_image(
     corner: egui::CornerRadius,
     fallback: crate::Icon,
 ) {
+    paint_image_zoomed(ui, rect, uri, corner, fallback, 1.0);
+}
+
+/// [`paint_image`] with the picture magnified `zoom` times inside its frame.
+pub(crate) fn paint_image_zoomed(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    uri: Option<&str>,
+    corner: egui::CornerRadius,
+    fallback: crate::Icon,
+    zoom: f32,
+) {
     use egui::{Image, ImageSource, Rect, load::TexturePoll, pos2, vec2};
     use std::borrow::Cow;
 
@@ -161,7 +170,9 @@ pub(crate) fn paint_image(
 
     if let Some(uri) = uri {
         let img =
-            Image::new(ImageSource::Uri(Cow::Owned(uri.to_owned()))).fit_to_exact_size(rect.size());
+            Image::new(ImageSource::Uri(Cow::Owned(uri.to_owned())))
+            .fit_to_exact_size(rect.size())
+            .texture_options(super::PHOTO_TEXTURE);
         if let Ok(TexturePoll::Ready { texture }) = img.load_for_size(ui.ctx(), rect.size()) {
             let (tw, th) = (texture.size.x.max(1.0), texture.size.y.max(1.0));
             let target = rect.width() / rect.height().max(1.0);
@@ -173,6 +184,7 @@ pub(crate) fn paint_image(
                 let f = aspect / target;
                 Rect::from_min_max(pos2(0.0, (1.0 - f) * 0.5), pos2(1.0, (1.0 + f) * 0.5))
             };
+            let uv = Rect::from_center_size(uv.center(), uv.size() / zoom.max(1.0));
             img.uv(uv).corner_radius(corner).paint_at(ui, rect);
             return;
         }
@@ -213,6 +225,7 @@ pub(crate) fn scrim(ctx: &Context, id: Id, alpha: f32) -> Response {
         .scrim_overlay()
         .gamma_multiply(alpha.clamp(0.0, 1.0));
     egui::Area::new(id)
+        .fade_in(false)
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
         .constrain(false)

@@ -15,8 +15,10 @@
 use std::sync::Arc;
 
 use egui::{
-    Color32, FontData, FontDefinitions, FontFamily, FontId, RichText, TextFormat,
+    Align, Color32, FontData, FontDefinitions, FontFamily, FontId, RichText, TextFormat,
+    WidgetText,
     epaint::text::VariationCoords,
+    text::LayoutJob,
 };
 
 /// Roboto Flex variable font (SIL OFL, see `assets/fonts/OFL.txt`).
@@ -112,8 +114,34 @@ impl TypeStyle {
         }
     }
 
-    /// For `Label`s and buttons.
-    pub fn rich(&self, text: impl Into<String>, color: Color32) -> RichText {
+    /// A one-line job with the text centred in its line box.
+    ///
+    /// egui puts glyphs at the top of a row and all extra line height below
+    /// them, so a `line_height` line centred by its galley sits 2-3 px high.
+    /// Here the text keeps its natural height inside a row forced to
+    /// `line_height` (`first_row_min_height`) with centre valign, which
+    /// splits the extra evenly. Only the first row gets it: wrapping
+    /// paragraphs use [`Self::text_format`] / [`Self::rich_para`].
+    pub fn job(&self, text: impl Into<String>, color: Color32) -> LayoutJob {
+        let mut job = LayoutJob::single_section(
+            text.into(),
+            TextFormat {
+                line_height: None,
+                valign: Align::Center,
+                ..self.text_format(color)
+            },
+        );
+        job.first_row_min_height = self.line_height;
+        job
+    }
+
+    /// For one-line `Label`s and buttons (see [`Self::job`]).
+    pub fn rich(&self, text: impl Into<String>, color: Color32) -> WidgetText {
+        WidgetText::from(self.job(text, color))
+    }
+
+    /// For `Label`s that wrap into paragraphs: every row `line_height` tall.
+    pub fn rich_para(&self, text: impl Into<String>, color: Color32) -> RichText {
         RichText::new(text)
             .font(self.font_id())
             .extra_letter_spacing(self.tracking)

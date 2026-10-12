@@ -21,7 +21,7 @@ pub mod text;
 pub use acoustid::{AcoustId, AcoustIdRecording, AcoustIdResult};
 pub use config::MetadataConfig;
 pub use coverart::{CoverArtArchive, CoverImage, CoverTarget, FetchedCover};
-pub use deezer::{Deezer, DeezerAlbum, DeezerTrack};
+pub use deezer::{Deezer, DeezerAlbum, DeezerArtistHit, DeezerTrack};
 pub use error::{MetadataError, Result};
 pub use http::{Http, RateLimiter, RateLimits, RetryPolicy};
 pub use lrc::parse_lrc;

@@ -226,7 +226,14 @@ pub fn artist(
             ui,
             160.0,
             a.card.image.as_ref(),
-            Some((&widgets::initials(&a.card.name), nikgob_shapes::MaterialShape::Cookie12Sided)),
+            Some((
+                &widgets::initials(&a.card.name),
+                if a.card.image.is_some() {
+                    nikgob_shapes::MaterialShape::Circle
+                } else {
+                    nikgob_shapes::MaterialShape::Cookie12Sided
+                },
+            )),
             |ui| {
                 ui.label(TypeRole::LabelLarge.style().rich("ИСПОЛНИТЕЛЬ", s.primary));
                 let n = (a.albums.len() + a.singles_eps.len()) as u64;
@@ -301,7 +308,7 @@ pub fn artist(
             ui.add_space(widgets::SECTION_GAP);
         }
         widgets::section_header(ui, "Нет в библиотеке", false);
-        ui.label(TypeRole::BodyMedium.style().rich(
+        ui.label(TypeRole::BodyMedium.style().rich_para(
             "Дискография из MusicBrainz со стримингом и загрузкой появится на этапах 2–3.",
             s.on_surface_variant,
         ));

@@ -308,8 +308,20 @@ impl MediaCard {
         let response = ui.interact(rect, id, Sense::click());
         let radii = Radii::all(shape::MEDIUM);
         let hover = response.contains_pointer() || common::focused(&response);
+        // Playful feedback: the picture leans in under the pointer and the
+        // whole card squishes on press, both on springs.
+        let squish = anim::f32(
+            &ctx,
+            id.with("squish"),
+            if response.is_pointer_button_down_on() { 0.95 } else { 1.0 },
+            motion.fast_spatial,
+        );
+        let zoom = 1.0 + 0.06 * anim::fraction(&ctx, id.with("zoom"), f32::from(u8::from(hover)), motion.default_effects);
+        let layout_rect = rect;
+        let rect = Rect::from_center_size(rect.center(), rect.size() * squish);
+        let w = w * squish;
 
-        if ui.is_rect_visible(rect) {
+        if ui.is_rect_visible(layout_rect) {
             let painter = ui.painter().clone();
             let pad = if let Some(kind) = self.container {
                 let (fill, border, elevation) = container_colors(kind, &s);
@@ -338,7 +350,7 @@ impl MediaCard {
             } else {
                 CornerRadius::same(r)
             };
-            common::paint_image(ui, cover, self.cover.as_deref(), corner, self.placeholder);
+            common::paint_image_zoomed(ui, cover, self.cover.as_deref(), corner, self.placeholder, zoom);
             if let Some(text) = &self.badge {
                 badge::text_badge(
                     &painter,

@@ -201,6 +201,21 @@ impl eframe::App for Window {
     }
 }
 
+/// Installed fonts for the scripts Roboto Flex does not draw (CJK, Arabic,
+/// ...), behind every family, so Japanese titles are not boxes.
+fn add_system_fallbacks(fonts: &mut egui::FontDefinitions) {
+    for f in fastframe_fonts::system::fallbacks() {
+        let mut data = egui::FontData::from_static(&f.bytes);
+        data.index = f.index;
+        data.tweak.scale = f.scale;
+        data.tweak.y_offset_factor = f.y_offset_factor;
+        fonts.font_data.insert(f.name.clone(), Arc::new(data));
+        for family in fonts.families.values_mut() {
+            family.push(f.name.clone());
+        }
+    }
+}
+
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let mut paths = paths();
@@ -329,7 +344,7 @@ fn main() -> eframe::Result {
                         width: 64,
                         height: 64,
                     })
-                    .with_inner_size([1280.0, 800.0])
+                    .with_inner_size(shot::window_size().unwrap_or([1280.0, 800.0]))
                     .with_min_inner_size([360.0, 560.0]),
                 ..Default::default()
             },
@@ -337,6 +352,7 @@ fn main() -> eframe::Result {
                 let ctx = cc.egui_ctx.clone();
                 let mut fonts = egui::FontDefinitions::default();
                 nikgob_md3e::typography::install_fonts(&mut fonts);
+                add_system_fallbacks(&mut fonts);
                 fastframe_text::detect().apply_to(&mut fonts);
                 ctx.set_fonts(fonts);
                 nikgob_md3e::icons::install(&ctx);

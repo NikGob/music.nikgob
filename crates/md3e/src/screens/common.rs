@@ -52,6 +52,7 @@ pub fn cover(ui: &Ui, cover: Option<&Cover>, rect: Rect, radius: f32) {
         Some(c) => {
             paint::container(ui.painter(), rect, radii, s.surface_container_highest, Stroke::NONE);
             egui::Image::new(c.uri())
+                .texture_options(crate::components::PHOTO_TEXTURE)
                 .corner_radius(radius.min(255.0) as u8)
                 .show_loading_spinner(false)
                 .paint_at(ui, rect);

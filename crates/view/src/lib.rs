@@ -412,6 +412,8 @@ pub struct Job {
     pub rate: Option<String>,
     pub eta: Option<String>,
     pub paused: bool,
+    /// Pause / cancel make sense (torrents); a folder import runs to the end.
+    pub controllable: bool,
     pub error: Option<String>,
 }
 
@@ -492,6 +494,128 @@ pub struct Prefs {
     /// KiB/s, 0 = unlimited.
     pub download_limit_kbps: u32,
     pub upload_limit_kbps: u32,
+    /// Now Playing's queue / lyrics / info column was left open.
+    pub np_pane: bool,
+    /// The dotted ring around the Now Playing cover turns while playing.
+    pub spin_ring: bool,
+    /// How synced lyrics animate: 0 karaoke, 1 focus, 2 wave.
+    pub lyrics_style: u8,
+    /// The outline the Now Playing cover takes while playing.
+    pub cover_shape: CoverShape,
+    /// The cover's outline turns while playing (the picture stays put).
+    pub cover_spin: bool,
+    /// The cover swells a little on each beat.
+    pub cover_pulse: bool,
+    /// The dotted ring around the cover is shown.
+    pub ring: bool,
+    /// The ring's dots jump with the music.
+    pub ring_beat: bool,
+    /// What the ring is made of and where it sits.
+    pub ring_style: RingStyle,
+    /// The ring turns counter-clockwise.
+    pub ring_ccw: bool,
+    /// The cover's outline turns counter-clockwise.
+    pub cover_ccw: bool,
+    /// Now Playing shows a volume slider (otherwise just the mute button;
+    /// the wheel still sets the volume).
+    pub np_volume: bool,
+    /// How Now Playing opens and closes: 0 smooth, 1 lively, 2 fast.
+    pub np_motion: u8,
+}
+
+/// The ring around the Now Playing cover.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RingStyle {
+    /// Dots on a soft circle.
+    Circle,
+    /// Dots following the cover's outline at a fixed gap.
+    #[default]
+    Contour,
+    /// Rounded bars growing out of the outline with the spectrum.
+    Bars,
+}
+
+/// The Now Playing cover's outline while playing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum CoverShape {
+    /// No outline: the square cover as is.
+    Original,
+    /// A new random shape whenever a track starts.
+    Random,
+    #[default]
+    Cookie12,
+    Cookie9,
+    Cookie7,
+    Cookie6,
+    Cookie4,
+    Sunny,
+    VerySunny,
+    Flower,
+    Clover4,
+    Clover8,
+    SoftBurst,
+    SoftBoom,
+    Puffy,
+    PuffyDiamond,
+    Circle,
+    Pentagon,
+    Gem,
+    Heart,
+}
+
+impl CoverShape {
+    pub const ALL: [Self; 20] = [
+        Self::Original,
+        Self::Random,
+        Self::Cookie12,
+        Self::Cookie9,
+        Self::Cookie7,
+        Self::Cookie6,
+        Self::Cookie4,
+        Self::Sunny,
+        Self::VerySunny,
+        Self::Flower,
+        Self::Clover4,
+        Self::Clover8,
+        Self::SoftBurst,
+        Self::SoftBoom,
+        Self::Puffy,
+        Self::PuffyDiamond,
+        Self::Circle,
+        Self::Pentagon,
+        Self::Gem,
+        Self::Heart,
+    ];
+
+    /// The shapes [`CoverShape::Random`] picks from.
+    pub fn shapes() -> &'static [Self] {
+        &Self::ALL[2..]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Original => "Оригинал (квадрат)",
+            Self::Random => "Случайная",
+            Self::Cookie12 => "Печенье, 12 волн",
+            Self::Cookie9 => "Печенье, 9 волн",
+            Self::Cookie7 => "Печенье, 7 волн",
+            Self::Cookie6 => "Печенье, 6 волн",
+            Self::Cookie4 => "Печенье, 4 волны",
+            Self::Sunny => "Солнце",
+            Self::VerySunny => "Яркое солнце",
+            Self::Flower => "Цветок",
+            Self::Clover4 => "Клевер, 4 листа",
+            Self::Clover8 => "Клевер, 8 листьев",
+            Self::SoftBurst => "Вспышка",
+            Self::SoftBoom => "Взрыв",
+            Self::Puffy => "Облако",
+            Self::PuffyDiamond => "Пухлый ромб",
+            Self::Circle => "Круг",
+            Self::Pentagon => "Пятиугольник",
+            Self::Gem => "Самоцвет",
+            Self::Heart => "Сердце",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -695,6 +819,19 @@ impl Default for Prefs {
             seed_ratio: 2.0,
             download_limit_kbps: 0,
             upload_limit_kbps: 0,
+            np_pane: false,
+            spin_ring: true,
+            lyrics_style: 0,
+            cover_shape: CoverShape::default(),
+            cover_spin: true,
+            cover_pulse: true,
+            ring: true,
+            ring_beat: true,
+            ring_style: RingStyle::default(),
+            ring_ccw: false,
+            cover_ccw: true,
+            np_volume: false,
+            np_motion: 1,
         }
     }
 }

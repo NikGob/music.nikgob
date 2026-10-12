@@ -2,7 +2,7 @@
 //! as a whole new `Prefs`.
 
 use egui::Ui;
-use nikgob_view::{Ambient, Command, Prefs, Route, ThemeMode, ViewState};
+use nikgob_view::{Ambient, Command, CoverShape, Prefs, RingStyle, Route, ThemeMode, ViewState};
 
 use super::{PageState, connected};
 use crate::{
@@ -25,7 +25,7 @@ fn row(ui: &mut Ui, label: &str, supporting: Option<&str>, control: impl FnOnce(
         ui.add_space(8.0);
         ui.label(TypeRole::BodyLarge.style().rich(label, s.on_surface));
         if let Some(t) = supporting {
-            ui.label(TypeRole::BodyMedium.style().rich(t, s.on_surface_variant));
+            ui.label(TypeRole::BodyMedium.style().rich_para(t, s.on_surface_variant));
         }
         ui.add_space(4.0);
         control(ui);
@@ -45,7 +45,7 @@ fn row(ui: &mut Ui, label: &str, supporting: Option<&str>, control: impl FnOnce(
                 ui.add_space(((h - block) * 0.5).max(0.0));
                 ui.label(TypeRole::BodyLarge.style().rich(label, s.on_surface));
                 if let Some(t) = supporting {
-                    ui.label(TypeRole::BodyMedium.style().rich(t, s.on_surface_variant));
+                    ui.label(TypeRole::BodyMedium.style().rich_para(t, s.on_surface_variant));
                 }
             });
             ui.add_space(16.0);
@@ -188,6 +188,62 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     row(ui, "Меньше движения", Some("Без отскоков, вращения и волн"), |ui| {
         ui.add(Switch::new(&mut p.reduced_motion).id_salt("set-rm"));
     });
+
+    group(ui, "Сейчас играет");
+    row(ui, "Открытие экрана", Some("Как он вырастает из плеера и сворачивается"), |ui| {
+        let i = usize::from(p.np_motion).min(2);
+        if let (Some(n), _) = connected(ui, egui::Id::new("set-np-motion"), &["Плавно", "Живо", "Быстро"], i, &[]) {
+            p.np_motion = n as u8;
+        }
+    });
+    row(ui, "Ползунок громкости", Some("Без него — кнопка звука, громкость колесом"), |ui| {
+        ui.add(Switch::new(&mut p.np_volume).id_salt("set-np-volume"));
+    });
+    row(ui, "Форма обложки", Some("Пока играет музыка; на паузе — квадрат"), |ui| {
+        let options: Vec<(String, bool)> =
+            CoverShape::ALL.iter().map(|c| (c.label().to_owned(), *c == p.cover_shape)).collect();
+        if let Some(n) = dropdown(ui, "set-cover-shape", p.cover_shape.label(), &options) {
+            p.cover_shape = CoverShape::ALL[n];
+        }
+    });
+    row(ui, "Вращать форму", Some("Контур медленно крутится, картинка стоит"), |ui| {
+        ui.add(Switch::new(&mut p.cover_spin).id_salt("set-cover-spin"));
+    });
+    if p.cover_spin {
+        row(ui, "Направление формы", None, |ui| {
+            if let (Some(n), _) = connected(ui, egui::Id::new("set-cover-dir"), &["По часовой", "Против"], usize::from(p.cover_ccw), &[]) {
+                p.cover_ccw = n == 1;
+            }
+        });
+    }
+    row(ui, "Пульсация в такт", Some("Обложка чуть вздрагивает на долях"), |ui| {
+        ui.add(Switch::new(&mut p.cover_pulse).id_salt("set-cover-pulse"));
+    });
+    row(ui, "Кольцо вокруг обложки", None, |ui| {
+        ui.add(Switch::new(&mut p.ring).id_salt("set-ring-on"));
+    });
+    if p.ring {
+        row(ui, "Вид кольца", Some("Круг из точек, точки по контуру формы или бары"), |ui| {
+            let styles = [RingStyle::Circle, RingStyle::Contour, RingStyle::Bars];
+            let i = styles.iter().position(|r| *r == p.ring_style).unwrap_or(1);
+            if let (Some(n), _) = connected(ui, egui::Id::new("set-ring-style"), &["Круг", "Контур", "Бары"], i, &[]) {
+                p.ring_style = styles[n];
+            }
+        });
+        row(ui, "Кольцо крутится", Some("Пока играет музыка"), |ui| {
+            ui.add(Switch::new(&mut p.spin_ring).id_salt("set-ring"));
+        });
+        if p.spin_ring {
+            row(ui, "Направление кольца", None, |ui| {
+                if let (Some(n), _) = connected(ui, egui::Id::new("set-ring-dir"), &["По часовой", "Против"], usize::from(p.ring_ccw), &[]) {
+                    p.ring_ccw = n == 1;
+                }
+            });
+        }
+        row(ui, "Кольцо в такт музыке", Some("Прыгает на ударных и всплесках спектра"), |ui| {
+            ui.add(Switch::new(&mut p.ring_beat).id_salt("set-ring-beat"));
+        });
+    }
 
     group(ui, "Звук");
     row(ui, "Устройство вывода", Some("Переключается сразу, без паузы"), |ui| {

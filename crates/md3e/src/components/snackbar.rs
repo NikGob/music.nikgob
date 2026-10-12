@@ -222,6 +222,7 @@ impl SnackbarHost {
                 let mut close_hit = false;
                 let alpha = pres.alpha();
                 Area::new(self.id.with("area"))
+                    .fade_in(false)
                     .order(Order::Foreground)
                     .fixed_pos(bottom_center)
                     .pivot(Align2::CENTER_BOTTOM)

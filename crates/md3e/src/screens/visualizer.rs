@@ -150,6 +150,7 @@ impl Viz {
         let mut closed = false;
 
         Area::new(Id::new("md3e-visualizer"))
+            .fade_in(false)
             .order(Order::Foreground)
             .fixed_pos(screen.min)
             .constrain(false)

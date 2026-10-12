@@ -6,7 +6,11 @@ use crate::error::{LibraryError, Result};
 
 /// Migration `n` (1-based) is `MIGRATIONS[n - 1]`. Never edit a released entry,
 /// append a new one.
-pub(crate) const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+pub(crate) const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_lyrics_artist_photo.sql"),
+    include_str!("../migrations/0003_artist_photo_lock.sql"),
+];
 
 /// Number of migrations known to this build (= the schema version it produces).
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;

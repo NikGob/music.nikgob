@@ -75,12 +75,14 @@ fn header(
         .paint_at(ui, Rect::from_center_size(lead_c, vec2(24.0, 24.0)));
 
     // Input.
+    // One row tall: TextEdit draws its hint at the top of the rect.
     let has_text = !text.is_empty();
+    let row_h = ui.ctx().fonts_mut(|f| f.row_height(&TypeRole::BodyLarge.font_id()));
     let text_rect = Rect::from_min_max(
-        pos2(rect.left() + 56.0, rect.center().y - 12.0),
+        pos2(rect.left() + 56.0, rect.center().y - row_h * 0.5),
         pos2(
             rect.right() - if has_text { 56.0 } else { 16.0 },
-            rect.center().y + 12.0,
+            rect.center().y + row_h * 0.5,
         ),
     );
     let edit = ui
@@ -370,6 +372,7 @@ impl Search {
             let radii = Radii::all(RADIUS);
             let mut clicked_close = false;
             let area = Area::new(id.with("view"))
+                .fade_in(false)
                 .order(Order::Foreground)
                 .fixed_pos(bar.min)
                 .constrain(false)

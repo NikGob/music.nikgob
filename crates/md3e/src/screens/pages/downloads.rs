@@ -47,43 +47,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
                 job(ui, j, out, true);
             }
         }
-        1 => {
-            if d.confirm.is_empty() {
-                widgets::empty_state(ui, Icon::Check, "Всё подтверждено", "Сомнительные совпадения появятся здесь.", None);
-            }
-            for c in &d.confirm {
-                let key = egui::Id::new(("confirm-choice", c.id));
-                let mut choice: usize = ui.ctx().data(|m| m.get_temp(key)).unwrap_or_else(|| {
-                    c.options.iter().position(|o| o.recommended).unwrap_or(0)
-                });
-                Card::outlined().id_salt(("confirm", c.id)).show(ui, |ui| {
-                    ui.label(TypeRole::TitleMedium.style().rich(&c.title, s.on_surface));
-                    ui.label(TypeRole::BodySmall.style().rich(&c.origin, s.on_surface_variant));
-                    ui.add_space(8.0);
-                    for (i, o) in c.options.iter().enumerate() {
-                        let text = if o.recommended {
-                            format!("{} · {}   ← рекоменд.", o.label, o.detail)
-                        } else {
-                            format!("{} · {}", o.label, o.detail)
-                        };
-                        if ui.radio(choice == i, TypeRole::BodyMedium.style().rich(text, s.on_surface)).clicked() {
-                            choice = i;
-                        }
-                    }
-                    ui.add_space(8.0);
-                    ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(Button::new(c.accept_label.as_str()).style(Style::Filled).id_salt(("cf-ok", c.id))).clicked() {
-                            out.push(Command::ConfirmChoice { id: c.id, option: Some(choice) });
-                        }
-                        if ui.add(Button::new(c.skip_label.as_str()).style(Style::Text).id_salt(("cf-skip", c.id))).clicked() {
-                            out.push(Command::ConfirmChoice { id: c.id, option: None });
-                        }
-                    });
-                });
-                ui.ctx().data_mut(|m| m.insert_temp(key, choice));
-                ui.add_space(12.0);
-            }
-        }
+        1 => confirm(ui, state, out),
         2 => nav = seeding(ui, state, pages, out),
         _ => {
             if d.history.is_empty() {
@@ -95,6 +59,119 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         }
     }
     nav
+}
+
+/// "Подтверди": imports whose tags the matcher was not sure about. Each
+/// card asks which found release the file is (or to keep the file's own
+/// tags); the header says what this is about and can accept every
+/// recommended match at once.
+fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let d = &state.downloads;
+    if d.confirm.is_empty() {
+        widgets::empty_state(ui, Icon::Check, "Всё подтверждено", "Сомнительные совпадения появятся здесь.", None);
+        return;
+    }
+    Card::filled().id_salt("confirm-help").show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(TypeRole::TitleMedium.style().rich("Проверь, что это за треки", s.on_surface));
+        ui.add_space(4.0);
+        ui.label(
+            TypeRole::BodyMedium.style().rich_para(
+                "Для этих файлов нашлось несколько похожих релизов, и уверенности нет.                  Выбери правильный вариант — название, альбом, номер и обложка возьмутся из него.                  Если ни один не подходит, оставь теги, которые уже записаны в файле.",
+                s.on_surface_variant,
+            ),
+        );
+        ui.add_space(12.0);
+        let recommended: Vec<(u64, usize)> = d
+            .confirm
+            .iter()
+            .filter_map(|c| c.options.iter().position(|o| o.recommended).map(|i| (c.id, i)))
+            .collect();
+        if !recommended.is_empty()
+            && ui
+                .add(
+                    Button::new(format!("Принять все рекомендованные ({})", recommended.len()))
+                        .icon(Icon::Check)
+                        .style(Style::Tonal)
+                        .id_salt("cf-all"),
+                )
+                .clicked()
+        {
+            for (id, option) in recommended {
+                out.push(Command::ConfirmChoice { id, option: Some(option) });
+            }
+        }
+    });
+    ui.add_space(12.0);
+
+    for c in &d.confirm {
+        let key = egui::Id::new(("confirm-choice", c.id));
+        let mut choice: usize = ui
+            .ctx()
+            .data(|m| m.get_temp(key))
+            .unwrap_or_else(|| c.options.iter().position(|o| o.recommended).unwrap_or(0));
+        Card::outlined().id_salt(("confirm", c.id)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(TypeRole::TitleMedium.style().rich(&c.title, s.on_surface));
+            ui.label(TypeRole::BodySmall.style().rich(&c.origin, s.on_surface_variant));
+            ui.add_space(12.0);
+            ui.label(TypeRole::LabelLarge.style().rich("Это какой трек?", s.on_surface_variant));
+            ui.add_space(4.0);
+            for (i, o) in c.options.iter().enumerate() {
+                let bg = ui.painter().add(egui::Shape::Noop);
+                let row = ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    let r = ui.radio(choice == i, "");
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.horizontal(|ui| {
+                            ui.label(TypeRole::TitleSmall.style().rich(&o.label, s.on_surface));
+                            if o.recommended {
+                                ui.add_space(6.0);
+                                ui.label(TypeRole::LabelSmall.emphasized().rich("РЕКОМЕНДУЕМ", s.primary));
+                            }
+                        });
+                        ui.label(TypeRole::BodySmall.style().rich(&o.detail, s.on_surface_variant));
+                    });
+                    r
+                });
+                let area = row.response.rect.expand2(vec2(4.0, 4.0));
+                let hit = ui.interact(area, ui.id().with(("cf-row", c.id, i)), egui::Sense::click());
+                if hit.clicked() || row.inner.clicked() {
+                    choice = i;
+                }
+                let fill = if choice == i {
+                    s.secondary_container.gamma_multiply(0.6)
+                } else if hit.hovered() {
+                    s.on_surface.gamma_multiply(0.06)
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                ui.painter().set(bg, egui::Shape::rect_filled(area, 12, fill));
+                ui.add_space(6.0);
+            }
+            ui.add_space(8.0);
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(Button::new(c.accept_label.as_str()).style(Style::Filled).id_salt(("cf-ok", c.id)))
+                    .on_hover_text("Импортировать с тегами выбранного варианта")
+                    .clicked()
+                {
+                    out.push(Command::ConfirmChoice { id: c.id, option: Some(choice) });
+                }
+                if ui
+                    .add(Button::new(c.skip_label.as_str()).style(Style::Text).id_salt(("cf-skip", c.id)))
+                    .on_hover_text("Импортировать как есть, с тегами из самого файла")
+                    .clicked()
+                {
+                    out.push(Command::ConfirmChoice { id: c.id, option: None });
+                }
+            });
+        });
+        ui.ctx().data_mut(|m| m.insert_temp(key, choice));
+        ui.add_space(12.0);
+    }
 }
 
 /// "Раздача": uploaded vs the limit, the cleanup policy, one row per torrent.
@@ -218,7 +295,7 @@ fn job(ui: &mut Ui, j: &Job, out: &mut Vec<Command>, active: bool) {
                 }
             }
         });
-        if active {
+        if active && j.controllable {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(IconButton::new(Icon::Close).size(Size::S).tooltip("Отменить").id_salt(("job-x", j.id)))

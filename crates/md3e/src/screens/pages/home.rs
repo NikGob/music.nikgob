@@ -115,7 +115,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         ui.label(
             TypeRole::BodyMedium
                 .style()
-                .rich("Подборки из Spotify и YouTube Music появятся, когда подключишь аккаунты.", s.on_surface_variant),
+                .rich_para("Подборки из Spotify и YouTube Music появятся, когда подключишь аккаунты.", s.on_surface_variant),
         );
     }
     nav

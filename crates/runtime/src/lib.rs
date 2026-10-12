@@ -6,6 +6,7 @@
 //! read lock and never calls the library or the audio engine itself.
 
 mod convert;
+mod enrich;
 mod home;
 mod import;
 mod search;
@@ -276,6 +277,7 @@ impl Worker {
         let fast = tick(Duration::from_secs(1));
         self.publish_downloads();
         self.resume_torrents();
+        self.start_enrich();
         loop {
             select! {
                 recv(rx) -> m => match m {
@@ -1046,6 +1048,7 @@ impl Worker {
         self.publish(|s, res| {
             s.artist = Some(res.artist_detail(&artist, &top, &releases, liked));
         });
+        self.kick_photos(Some(id));
     }
 
     fn playlist_tracks(&mut self, id: PlaylistId) -> (Vec<TrackId>, String) {

@@ -7,6 +7,7 @@
 mod ambient;
 mod chrome;
 mod common;
+mod lyrics;
 mod pages;
 mod pane;
 mod player_bar;
@@ -47,6 +48,8 @@ pub struct Md3eUi {
     was_inline: bool,
     now_playing: bool,
     np_anim: Animated<f32>,
+    /// `Prefs::np_motion`, for the spring Now Playing opens with.
+    np_motion: u8,
     /// Where the floating player was last frame (container-transform origin).
     bar_rect: Rect,
     /// The content panel (for snackbars and centred popups).
@@ -79,6 +82,7 @@ impl Md3eUi {
             was_inline: true,
             now_playing: false,
             np_anim: Animated::new(0.0, crate::tokens::Motion::expressive().slow_spatial),
+            np_motion: 1,
             bar_rect: Rect::NOTHING,
             content_rect: Rect::NOTHING,
             search: String::new(),
@@ -139,12 +143,12 @@ impl Md3eUi {
     pub fn set_now_playing(&mut self, ctx: &Context, open: bool) {
         self.now_playing = open;
         if !open {
-            self.chrome.np_sheet = false;
+            self.chrome.np_modal = false;
         } else if !self.was_inline {
             // A modal pane sheet must not stay on top of Now Playing.
             self.pane = None;
         }
-        let spring = anim::effective(ctx, Theme::get(ctx).motion.slow_spatial);
+        let spring = anim::effective(ctx, np_spring(self.np_motion));
         self.np_anim
             .animate_to(if open { 1.0 } else { 0.0 }, spring, anim::now(ctx));
     }
@@ -190,9 +194,12 @@ impl Md3eUi {
     }
 
     /// Draws one frame.
-    pub fn frame(&mut self, root: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {        let ctx = &root.ctx().clone();
+    pub fn frame(&mut self, root: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
+        let ctx = &root.ctx().clone();
         let first_cmd = out.len();
         self.update_theme(ctx, state);
+        self.np_motion = state.prefs.np_motion;
+        self.chrome.np_covering = self.np_anim.value(anim::now(ctx)) > 0.01;
         self.chrome.wheel(ctx, state, out);
         self.shortcuts(ctx, state, out);
         let theme = Theme::get(ctx);
@@ -205,7 +212,8 @@ impl Md3eUi {
                 let class = size_class(full.width());
                 if class == SizeClass::Compact {
                     // Mini mode: Now Playing only.
-                    now_playing::show(ui, full, state, 1.0, true, &mut self.pages, &mut self.chrome, out);
+                    now_playing::container(ui, full, 1.0);
+                    now_playing::show(ui, full, state, true, &mut self.pages, &mut self.chrome, out);
                     return;
                 }
                 self.layout(ui, full, class, state, out);
@@ -226,7 +234,9 @@ impl Md3eUi {
             .overlays(ctx, state, self.content_rect, out);
         self.chrome.overlays(ctx, state, out);
 
-        // Now Playing overlay, transformed out of the floating player.
+        // Now Playing overlay, transformed out of the floating player: the
+        // container grows from the pill to the window while the content,
+        // laid out for the full window, scales up from the pill and fades in.
         let t = anim::now(ctx);
         let k = self.np_anim.value(t);
         if !self.np_anim.is_settled(t) {
@@ -235,27 +245,65 @@ impl Md3eUi {
         if k > 0.001 {
             let full = ctx.content_rect();
             if size_class(full.width()) != SizeClass::Compact {
-                egui::Area::new(egui::Id::new("md3e-now-playing"))
+                let from = if self.bar_rect.is_positive() {
+                    self.bar_rect
+                } else {
+                    full
+                };
+                let kc = k.clamp(0.0, 1.0);
+                let rect = Rect::from_min_max(
+                    from.min + (full.min - from.min) * kc,
+                    from.max + (full.max - from.max) * kc,
+                );
+                // Areas fade in when they appear; this one animates itself.
+                egui::Area::new(egui::Id::new("md3e-np-container"))
                     .order(egui::Order::Foreground)
                     .fixed_pos(full.min)
+                    .interactable(false)
+                    .fade_in(false)
                     .show(ctx, |ui| {
-                        let from = if self.bar_rect.is_positive() {
-                            self.bar_rect
-                        } else {
-                            full
-                        };
-                        let rect = Rect::from_min_max(
-                            from.min + (full.min - from.min) * k,
-                            from.max + (full.max - from.max) * k,
-                        );
-                        ui.set_clip_rect(rect);
-                        let closed = now_playing::show(
-                            ui, rect, state, k, false, &mut self.pages, &mut self.chrome, out,
-                        );
-                        if closed {
-                            self.set_now_playing(ctx, false);
+                        ui.set_clip_rect(full);
+                        now_playing::container(ui, rect, kc);
+                        // The bar rides the container's bottom edge and
+                        // dissolves into it, so the pill never goes blank.
+                        let fade = 1.0 - (kc / 0.3).clamp(0.0, 1.0);
+                        if fade > 0.0 && self.bar_rect.is_positive() && state.player.current.is_some() {
+                            let bar = Rect::from_center_size(
+                                pos2(rect.center().x, rect.bottom() - from.height() * 0.5),
+                                from.size(),
+                            );
+                            let mut bui = ui.new_child(UiBuilder::new().max_rect(bar).id_salt("np-bar"));
+                            bui.multiply_opacity(fade * fade);
+                            let medium = size_class(full.width()) == SizeClass::Medium;
+                            player_bar::show(&mut bui, bar, state, self.pane, medium, &mut self.chrome, &mut Vec::new());
                         }
                     });
+                // Scaled around the point between the pill and the window
+                // centre; the spring's overshoot gives it a little bounce.
+                let pivot = from.center().lerp(full.center(), kc).to_vec2();
+                let scale = 0.86 + 0.14 * k;
+                let lift = (from.center().y - full.center().y) * (1.0 - kc) * 0.25;
+                let transform = egui::emath::TSTransform::from_translation(pivot + vec2(0.0, lift))
+                    * egui::emath::TSTransform::from_scaling(scale)
+                    * egui::emath::TSTransform::from_translation(-pivot);
+                let content = egui::Area::new(egui::Id::new("md3e-now-playing"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(full.min)
+                    .fade_in(false)
+                    .show(ctx, |ui| {
+                        // Revealed inside the growing container only.
+                        // (inset so the corners stay inside the container's
+                        // rounding)
+                        let inset = 0.3 * crate::components::toolbar::HEIGHT * 0.5 * (1.0 - kc);
+                        ui.set_clip_rect((transform.inverse() * rect.shrink(inset)).intersect(full));
+                        let a = ((k - 0.12) / 0.5).clamp(0.0, 1.0);
+                        ui.multiply_opacity(a * a * (3.0 - 2.0 * a));
+                        now_playing::show(ui, full, state, false, &mut self.pages, &mut self.chrome, out)
+                    });
+                if content.inner {
+                    self.set_now_playing(ctx, false);
+                }
+                ctx.set_transform_layer(content.response.layer_id, transform);
             }
         }
 
@@ -385,7 +433,8 @@ impl Md3eUi {
             &ctx,
             egui::Id::new("rail-expansion"),
             if wants_expanded { 1.0 } else { 0.0 },
-            theme.motion.default_spatial,
+            // Widths move the whole layout: no bounce, or everything wobbles.
+            theme.motion.default_spatial.without_bounce(),
         );
         let rail_w = rail::width(expansion);
         let rail_rect = Rect::from_min_size(full.min, vec2(rail_w, full.height()));
@@ -407,10 +456,10 @@ impl Md3eUi {
             &ctx,
             egui::Id::new("pane-width"),
             pane_target,
-            theme.motion.default_spatial,
+            theme.motion.default_spatial.without_bounce(),
         )
         .max(0.0);
-        let gap = if pane_w > 1.0 { 24.0 } else { 0.0 };
+        let gap = 24.0 * (pane_w / 360.0).min(1.0);
         let content = Rect::from_min_max(
             pos2(rail_rect.right(), full.top()),
             pos2(full.right() - pane_w - gap, full.bottom()),
@@ -466,7 +515,8 @@ impl Md3eUi {
         }
         // Rail collapse toggle on Large+, in the rail's top space.
         if class >= SizeClass::Large {
-            let r = Rect::from_min_size(rail_rect.min + vec2(28.0, 2.0), vec2(40.0, 40.0));
+            // Centred over the FAB icon (x 48 collapsed, 40 expanded).
+            let r = Rect::from_min_size(rail_rect.min + vec2(28.0 - 8.0 * expansion, 2.0), vec2(40.0, 40.0));
             let mut tui = ui.new_child(UiBuilder::new().max_rect(r).id_salt("rail-toggle"));
             let expanded = self.rail_expanded;
             if tui
@@ -522,7 +572,8 @@ impl Md3eUi {
             vec2(bar_w, 64.0),
         );
         self.bar_rect = bar;
-        if state.player.current.is_some() || !state.queue.next.is_empty() {
+        // While Now Playing grows out of it, the overlay draws the bar.
+        if (state.player.current.is_some() || !state.queue.next.is_empty()) && !self.chrome.np_covering {
             let mut bar_ui = ui.new_child(UiBuilder::new().max_rect(bar).id_salt("bar"));
             let bo = player_bar::show(
                 &mut bar_ui,
@@ -688,5 +739,15 @@ impl Md3eUi {
     pub fn set_bands(&mut self, bands: &[f32]) {
         self.chrome.bands.clear();
         self.chrome.bands.extend_from_slice(bands);
+    }
+}
+
+/// The spring Now Playing opens and closes on (`Prefs::np_motion`):
+/// smooth, lively (a quick one with a little bounce) or fast.
+fn np_spring(motion: u8) -> nikgob_motion::Spring {
+    match motion {
+        0 => nikgob_motion::Spring::new(0.85, 220.0),
+        2 => nikgob_motion::Spring::new(0.9, 1000.0),
+        _ => nikgob_motion::Spring::new(0.72, 520.0),
     }
 }

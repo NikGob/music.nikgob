@@ -60,7 +60,8 @@ impl NavRail<'_> {
             );
             let w_e = 16.0 + 24.0 + 8.0 + label_galley.size().x + 16.0;
             let w = w_c + (w_e - w_c) * k;
-            let x = full.left() + 20.0 + (16.0 - 20.0) * k;
+            // Expanded, its left edge and icon line up with the indicators'.
+            let x = full.left() + 20.0 + (12.0 - 20.0) * k;
             let rect = Rect::from_min_size(pos2(x, y), vec2(w, 56.0));
             let id = self.id.with("fab");
             let r = ui.interact(rect, id, Sense::click());
@@ -105,15 +106,20 @@ impl NavRail<'_> {
             for (i, item) in items.iter().enumerate() {
                 let item_h = 56.0 + 8.0 * (1.0 - k);
                 let row = Rect::from_min_size(pos2(full.left(), *y), vec2(full.width(), item_h));
-                // Indicator: 56×32 centred at the top (collapsed) → full-width
-                // pill 56 tall (expanded).
+                // Indicator: 56×32 centred at the top (collapsed) → a pill 56
+                // tall hugging icon and label (expanded).
                 let ind_c = Rect::from_center_size(
                     pos2(full.left() + COLLAPSED_WIDTH * 0.5, row.top() + 16.0),
                     vec2(56.0, 32.0),
                 );
-                let ind_e = Rect::from_min_max(
+                let label_w = ui
+                    .painter()
+                    .layout_no_wrap(item.label.to_owned(), TypeRole::LabelLarge.font_id(), Color32::WHITE)
+                    .size()
+                    .x;
+                let ind_e = Rect::from_min_size(
                     pos2(full.left() + 12.0, row.top()),
-                    pos2(full.right() - 12.0, row.top() + 56.0),
+                    vec2(16.0 + 24.0 + 12.0 + label_w + 20.0, 56.0),
                 );
                 let ind = lerp_rect(ind_c, ind_e, k);
                 let id = self.id.with((group, i));

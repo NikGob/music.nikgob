@@ -10,7 +10,7 @@
 //!   imported at once cannot both become tracks.
 //! * Nothing online ever blocks an import: timeouts and errors mean "tags only".
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -31,6 +31,7 @@ use crate::decide::{Decision, Incoming, decide, find_existing};
 use crate::encode::{EncodeOptions, Encoder, RopusEncoder};
 use crate::error::{ImportError, Result};
 use crate::events::{ConfirmItem, ImportEvent, ItemId, JobId, Stage};
+use crate::folder::{Anchor, Member, album_group_dir, plan};
 use crate::fsutil;
 use crate::identity::{
     Identity, Lookup, apply_candidate, confirm_option, evidence, identity_from_tags,
@@ -116,6 +117,24 @@ struct Analyzed {
     audio: AudioAnalysis,
     fake_lossless: bool,
     score: i32,
+}
+
+/// A file that is read and identified and waits for its folder's other files.
+struct Ready {
+    analyzed: Analyzed,
+    /// What the tags alone say.
+    base: Identity,
+    identity: Identity,
+}
+
+enum Step {
+    Ready(Box<Ready>),
+    Done(FileOutcome),
+}
+
+enum Identified {
+    Ready(Box<Ready>),
+    Done(FileOutcome),
 }
 
 struct Parked {
@@ -265,26 +284,72 @@ impl Importer {
         for t in torrents {
             ctx.emit(ImportEvent::TorrentFound(t));
         }
-        let mut set = tokio::task::JoinSet::new();
+        // One album folder at a time: identify all its files, agree on a single
+        // release, then import them.
+        let mut folders: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
         for path in files {
-            let Ok(permit) = self.inner.permits.clone().acquire_owned().await else {
-                break;
-            };
-            let (this, ctx, origin) = (self.clone(), ctx.clone(), origin.clone());
-            set.spawn(async move {
-                let outcome = this.process_file(&ctx, path, origin).await;
-                drop(permit);
-                outcome
-            });
+            folders.entry(album_group_dir(&path)).or_default().push(path);
         }
         let (mut imported, mut duplicates, mut failed, mut pending) = (0, 0, 0, 0);
-        while let Some(res) = set.join_next().await {
-            match res {
-                Ok(FileOutcome::Imported { .. }) => imported += 1,
-                Ok(FileOutcome::Duplicate { .. }) => duplicates += 1,
-                Ok(FileOutcome::Parked(_)) => pending += 1,
-                Ok(FileOutcome::Failed) | Err(_) => failed += 1,
-                Ok(FileOutcome::Skipped) => {}
+        for (_, files) in folders {
+            let mut set = tokio::task::JoinSet::new();
+            for path in files {
+                let Ok(permit) = self.inner.permits.clone().acquire_owned().await else {
+                    break;
+                };
+                let (this, ctx, origin) = (self.clone(), ctx.clone(), origin.clone());
+                set.spawn(async move {
+                    let identified = this.identify_file(&ctx, path, origin).await;
+                    drop(permit);
+                    identified
+                });
+            }
+            let mut outcomes = Vec::new();
+            let mut ready = Vec::new();
+            while let Some(res) = set.join_next().await {
+                match res {
+                    Ok(Identified::Ready(r)) => ready.push(r),
+                    Ok(Identified::Done(o)) => outcomes.push(o),
+                    Err(_) => failed += 1,
+                }
+            }
+            // Task completion order is arbitrary; the folder's vote must not be.
+            ready.sort_by(|a, b| a.analyzed.path.cmp(&b.analyzed.path));
+            let members: Vec<_> = ready
+                .iter()
+                .map(|r| Member {
+                    id: &r.identity,
+                    base: &r.base,
+                })
+                .collect();
+            let anchor = plan(&members).map(Arc::new);
+            drop(members);
+            let mut set = tokio::task::JoinSet::new();
+            for r in ready {
+                let Ok(permit) = self.inner.permits.clone().acquire_owned().await else {
+                    break;
+                };
+                let (this, ctx, anchor) = (self.clone(), ctx.clone(), anchor.clone());
+                set.spawn(async move {
+                    let outcome = this.complete_file(&ctx, *r, anchor.as_deref()).await;
+                    drop(permit);
+                    outcome
+                });
+            }
+            while let Some(res) = set.join_next().await {
+                match res {
+                    Ok(o) => outcomes.push(o),
+                    Err(_) => failed += 1,
+                }
+            }
+            for o in outcomes {
+                match o {
+                    FileOutcome::Imported { .. } => imported += 1,
+                    FileOutcome::Duplicate { .. } => duplicates += 1,
+                    FileOutcome::Parked(_) => pending += 1,
+                    FileOutcome::Failed => failed += 1,
+                    FileOutcome::Skipped => {}
+                }
             }
         }
         ctx.emit(ImportEvent::Finished {
@@ -296,28 +361,55 @@ impl Importer {
         });
     }
 
-    /// Imports one file; never returns an error, failures become events.
-    async fn process_file(&self, ctx: &Ctx, path: PathBuf, origin: SourceOrigin) -> FileOutcome {
+    /// Reads and identifies one file; never returns an error, failures become events.
+    async fn identify_file(&self, ctx: &Ctx, path: PathBuf, origin: SourceOrigin) -> Identified {
         if !lock(&self.inner.active).insert(path.clone()) {
-            return FileOutcome::Skipped;
+            return Identified::Done(FileOutcome::Skipped);
         }
-        let result = self.process_inner(ctx, &path, origin).await;
-        let outcome = match result {
-            Ok(o) => o,
-            Err(e) => {
-                log::warn!("import of {} failed: {e}", path.display());
-                ctx.emit(ImportEvent::Failed {
-                    job: ctx.job,
-                    path: path.clone(),
-                    error: e.to_string(),
-                });
-                FileOutcome::Failed
+        match self.identify(ctx, &path, origin).await {
+            Ok(Step::Ready(r)) => Identified::Ready(r),
+            Ok(Step::Done(o)) => {
+                if !matches!(o, FileOutcome::Parked(_)) {
+                    lock(&self.inner.active).remove(&path);
+                }
+                Identified::Done(o)
             }
-        };
-        if !matches!(outcome, FileOutcome::Parked(_)) {
-            lock(&self.inner.active).remove(&path);
+            Err(e) => {
+                lock(&self.inner.active).remove(&path);
+                Identified::Done(self.failed(ctx, &path, &e))
+            }
         }
+    }
+
+    /// Imports an identified file under the folder's agreed release.
+    async fn complete_file(&self, ctx: &Ctx, ready: Ready, anchor: Option<&Anchor>) -> FileOutcome {
+        let Ready {
+            analyzed,
+            base,
+            mut identity,
+        } = ready;
+        if let Some(a) = anchor
+            && a.fits(&identity, &base)
+        {
+            a.apply(&mut identity, &base);
+        }
+        let path = analyzed.path.clone();
+        let outcome = match self.finish_import(ctx, analyzed, identity).await {
+            Ok(o) => o,
+            Err(e) => self.failed(ctx, &path, &e),
+        };
+        lock(&self.inner.active).remove(&path);
         outcome
+    }
+
+    fn failed(&self, ctx: &Ctx, path: &Path, e: &ImportError) -> FileOutcome {
+        log::warn!("import of {} failed: {e}", path.display());
+        ctx.emit(ImportEvent::Failed {
+            job: ctx.job,
+            path: path.to_path_buf(),
+            error: e.to_string(),
+        });
+        FileOutcome::Failed
     }
 
     fn file_origin(&self, origin: &SourceOrigin, path: &Path) -> SourceOrigin {
@@ -341,12 +433,8 @@ impl Importer {
         }
     }
 
-    async fn process_inner(
-        &self,
-        ctx: &Ctx,
-        path: &Path,
-        origin: SourceOrigin,
-    ) -> Result<FileOutcome> {
+    /// Steps 1..3: probe, fingerprint, identify.
+    async fn identify(&self, ctx: &Ctx, path: &Path, origin: SourceOrigin) -> Result<Step> {
         let inner = self.inner.clone();
         ctx.stage(path, Stage::Probing);
         let origin = self.file_origin(&origin, path);
@@ -369,7 +457,7 @@ impl Importer {
                         path: path.to_path_buf(),
                         kept: t.id,
                     });
-                    Ok(FileOutcome::Duplicate { kept: t.id })
+                    Ok(Step::Done(FileOutcome::Duplicate { kept: t.id }))
                 }
                 None => Err(ImportError::Other(
                     "file is inside the library folder; use the library rebuild instead".into(),
@@ -389,15 +477,19 @@ impl Importer {
                 let ev = evidence(&analyzed.tags, &analyzed.info, path);
                 match online_lookup(meta, &inner.cfg, ev, analyzed.audio.fingerprint.as_ref()).await {
                     Lookup::Sure(best) => apply_candidate(&base, &best),
-                    Lookup::None => base,
+                    Lookup::None => base.clone(),
                     Lookup::Unsure(options) => {
-                        return Ok(self.park(ctx, analyzed, base, options));
+                        return Ok(Step::Done(self.park(ctx, analyzed, base, options)));
                     }
                 }
             }
-            _ => base,
+            _ => base.clone(),
         };
-        self.finish_import(ctx, analyzed, identity).await
+        Ok(Step::Ready(Box::new(Ready {
+            analyzed,
+            base,
+            identity,
+        })))
     }
 
     fn park(

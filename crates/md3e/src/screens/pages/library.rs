@@ -39,7 +39,9 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     let is_list = list_view(ui.ctx());
 
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
+    // Fixed height so the title and the 40 dp controls share a centre.
+    let row = vec2(ui.available_width(), 48.0);
+    ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.label(TypeRole::HeadlineMedium.style().rich("Библиотека", s.on_surface));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Sort applies to the release grid only; the table sorts by header.

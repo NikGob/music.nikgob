@@ -1,6 +1,6 @@
 //! The supporting pane: Очередь | Текст | Инфо (md3e-player.md §2.4).
 
-use egui::{Rect, Sense, Ui};
+use egui::{Rect, Ui};
 use nikgob_view::{Command, TrackRow, ViewState};
 
 use super::{
@@ -158,8 +158,7 @@ fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Comm
 }
 
 fn lyrics(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
-    let theme = Theme::get(ui.ctx());
-    let s = theme.scheme;
+    let s = Theme::get(ui.ctx()).scheme;
     let l = &state.lyrics;
     if l.loading {
         ui.vertical_centered(|ui| {
@@ -173,53 +172,11 @@ fn lyrics(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     if l.lines.is_empty() {
         let text = l.plain.as_deref().unwrap_or("Текста нет");
         egui::ScrollArea::vertical().id_salt("lyrics-plain").show(ui, |ui| {
-            ui.label(TypeRole::BodyLarge.style().rich(text, s.on_surface_variant));
+            ui.label(TypeRole::BodyLarge.style().rich_para(text, s.on_surface_variant));
         });
         return;
     }
-    let pos = state.player.position_now();
-    let current = l.lines.iter().rposition(|(t, _)| *t <= pos);
-    let area = egui::ScrollArea::vertical()
-        .id_salt("lyrics-synced")
-        .auto_shrink([false, false]);
-    area.show(ui, |ui| {
-        let mut target = None;
-        for (i, (t, line)) in l.lines.iter().enumerate() {
-            let is_cur = Some(i) == current;
-            let (style, color) = if is_cur {
-                (TypeRole::TitleLarge.emphasized(), s.on_surface)
-            } else {
-                (TypeRole::BodyLarge.style(), s.on_surface_variant)
-            };
-            let text = if line.trim().is_empty() { "♪" } else { line.as_str() };
-            let r = ui.add(
-                egui::Label::new(style.rich(text, color))
-                    .wrap()
-                    .sense(Sense::click())
-                    .selectable(false),
-            );
-            if r.clicked() {
-                out.push(Command::Seek(*t));
-            }
-            if is_cur {
-                target = Some(r.rect);
-            }
-            ui.add_space(8.0);
-        }
-        // Follow the current line only when it changes, so manual
-        // scrolling is not fought every frame.
-        let id = ui.id().with("lyrics-follow");
-        let last: Option<usize> = ui.ctx().data(|d| d.get_temp(id));
-        if current != last {
-            ui.ctx().data_mut(|d| d.insert_temp(id, current));
-            if let Some(r) = target {
-                ui.scroll_to_rect(r, Some(egui::Align::Center));
-            }
-        }
-    });
-    if state.player.status == nikgob_view::Status::Playing {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
-    }
+    super::lyrics::show(ui, state, out);
 }
 
 fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {

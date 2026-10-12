@@ -7,7 +7,7 @@ use nikgob_import::{
     EncodeOptions, Encoder, ImportEvent, Importer, RopusEncoder, delete_track_to_trash,
     rebuild_from_files, trash_purge,
 };
-use nikgob_library::{Library, TrackFilter};
+use nikgob_library::{Library, ReleaseSort, TrackFilter};
 
 const RATE: u32 = 44_100;
 
@@ -465,4 +465,169 @@ async fn retag_deletes_emptied_fields_and_renames_on_a_case_change() {
     assert_eq!(set.title.as_deref(), Some("Song"));
     assert_eq!(set.track_id, Some(track_id));
     assert_eq!(lib.active_source(track_id).unwrap().unwrap().locator, path.to_string_lossy());
+}
+
+fn album_tags(title: &str, no: u32, artist: &str, album_artist: Option<&str>, album: &str) -> TagSet {
+    TagSet {
+        title: Some(title.into()),
+        artists: artist.split(", ").map(Into::into).collect(),
+        artist: Some(artist.into()),
+        album: Some(album.into()),
+        album_artist: album_artist.map(Into::into),
+        track_no: Some(no),
+        year: Some(2022),
+        ..TagSet::default()
+    }
+}
+
+fn write_album_track(dir: &std::path::Path, tags: &TagSet) {
+    std::fs::create_dir_all(dir).unwrap();
+    let no = tags.track_no.unwrap();
+    let wav = dir.join(format!("{no:02}.wav"));
+    write_wav(&wav, &broadband(RATE, 3.0, 10 + u64::from(no)), RATE);
+    tags::write_tags(&wav, tags).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_with_a_guest_track_and_other_casing_is_one_release() {
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let dir = root.inbox("Suzume");
+    write_album_track(&dir, &album_tags("A", 1, "Radwimps", Some("Radwimps"), "Suzume"));
+    write_album_track(&dir, &album_tags("B", 2, "RADWIMPS", Some("RADWIMPS"), "Suzume"));
+    write_album_track(&dir, &album_tags("C", 3, "Radwimps", Some("Radwimps"), "Suzume"));
+    // The guest track has no album artist, its credit names a second artist.
+    write_album_track(&dir, &album_tags("D", 4, "RADWIMPS, Kazuma Jinnouchi", None, "Suzume"));
+
+    let events = importer.import_paths(vec![dir], SourceOrigin::Inbox).wait().await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    assert_eq!(imported(&events).len(), 4, "{events:?}");
+    assert_eq!(lib.count_releases().unwrap(), 1);
+    let release = lib.releases(0, 10, ReleaseSort::asc(Default::default())).unwrap().remove(0);
+    assert_eq!(release.known_tracks, 4);
+    assert_eq!(release.release.artist_credit.display().to_lowercase(), "radwimps");
+    assert_eq!(lib.count_artists().unwrap(), 2, "Radwimps and Kazuma Jinnouchi, no joint artist");
+
+    // A guest track imported later on its own joins the album and does not rename it.
+    let late = root.inbox("late");
+    write_album_track(&late, &album_tags("E", 5, "Radwimps, Kazuma Jinnouchi", None, "Suzume"));
+    let events = importer.import_paths(vec![late], SourceOrigin::Inbox).wait().await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    assert_eq!(lib.count_releases().unwrap(), 1);
+    let release = lib.releases(0, 10, ReleaseSort::asc(Default::default())).unwrap().remove(0);
+    assert_eq!(release.known_tracks, 5);
+    assert_eq!(release.release.artist_credit.display().to_lowercase(), "radwimps");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn casing_and_suffix_variants_of_the_album_title_do_not_split_the_folder() {
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let dir = root.inbox("Made in Abyss OST 2");
+    for (no, album) in [
+        (1, "Made in Abyss Original Soundtrack 2"),
+        (2, "MADE IN ABYSS ORIGINAL SOUNDTRACK 2"),
+        (3, "Made in Abyss Original Soundtrack 2"),
+        (4, "Made in Abyss Original Soundtrack 2 Bonus"),
+    ] {
+        let artist = if no == 2 { "KEVIN PENKIN" } else { "Kevin Penkin" };
+        write_album_track(&dir, &album_tags(&format!("T{no}"), no, artist, Some(artist), album));
+    }
+    let events = importer.import_paths(vec![dir], SourceOrigin::Inbox).wait().await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    assert_eq!(imported(&events).len(), 4, "{events:?}");
+    assert_eq!(lib.count_releases().unwrap(), 1);
+    assert_eq!(lib.count_artists().unwrap(), 1);
+    let release = lib.releases(0, 10, ReleaseSort::asc(Default::default())).unwrap().remove(0);
+    assert_eq!(release.known_tracks, 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unrelated_files_in_one_folder_stay_separate_releases() {
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let dir = root.inbox("downloads");
+    for no in 1..=3u32 {
+        let (artist, album) = (format!("Artist {no}"), format!("Album {no}"));
+        write_album_track(&dir, &album_tags(&format!("T{no}"), no, &artist, Some(&artist), &album));
+    }
+    let events = importer.import_paths(vec![dir], SourceOrigin::Inbox).wait().await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    assert_eq!(lib.count_releases().unwrap(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_of_another_album_is_not_pulled_into_a_two_against_one_folder() {
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let dir = root.inbox("mix");
+    write_album_track(&dir, &album_tags("A1", 1, "Artist A", Some("Artist A"), "Album A"));
+    write_album_track(&dir, &album_tags("A2", 2, "Artist A", Some("Artist A"), "Album A"));
+    write_album_track(&dir, &album_tags("B1", 3, "Artist B", Some("Artist B"), "Album B"));
+    let events = importer.import_paths(vec![dir], SourceOrigin::Inbox).wait().await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    assert_eq!(lib.count_releases().unwrap(), 2);
+    let b = lib.search("B1", 5).unwrap().tracks.remove(0);
+    let release = lib.get_release(lib.get_track(b.id).unwrap().unwrap().release_id.unwrap()).unwrap().unwrap();
+    assert_eq!(release.title, "Album B");
+    let (tags, _) = tags::read_tags(std::path::Path::new(&lib.active_source(b.id).unwrap().unwrap().locator)).unwrap();
+    assert_eq!((tags.album.as_deref(), tags.album_artist.as_deref()), (Some("Album B"), Some("Artist B")));
+}
+
+fn release_with(lib: &Library, title: &str, credit: &str, mbid: Option<&str>, tracks: &[u32]) -> nikgob_core::model::ReleaseId {
+    use nikgob_core::model::{ArtistCredit, Release, Track};
+    let mut release = Release::new(title, ArtistCredit::single(credit, None));
+    release.mbid = mbid.map(Into::into);
+    let release = lib.upsert_release(&release).unwrap();
+    for &no in tracks {
+        let mut t = Track::new(format!("T{no}"), ArtistCredit::single(credit, None));
+        t.release_id = Some(release.id);
+        t.track_no = no;
+        lib.upsert_track(&t).unwrap();
+    }
+    release.id
+}
+
+#[test]
+fn releases_split_by_an_earlier_version_are_merged() {
+    let lib = Library::open_in_memory().unwrap();
+    let main = release_with(&lib, "Suzume (Motion Picture Soundtrack)", "Radwimps", None, &[1, 2]);
+    let same = release_with(&lib, "SUZUME (MOTION PICTURE SOUNDTRACK)", "RADWIMPS", None, &[3]);
+    let guest = release_with(&lib, "Suzume (Motion Picture Soundtrack)", "RADWIMPS, Kazuma Jinnouchi", None, &[4]);
+    let other = release_with(&lib, "Another Album", "Radwimps", None, &[1]);
+    assert_eq!(nikgob_import::merge_split_releases(&lib).unwrap(), 2);
+    assert_eq!(lib.count_releases().unwrap(), 2);
+    assert_eq!(lib.tracks_of_release(main).unwrap().len(), 4);
+    assert!(lib.get_release(same).unwrap().is_none() && lib.get_release(guest).unwrap().is_none());
+    assert!(lib.get_release(other).unwrap().is_some());
+    assert_eq!(nikgob_import::merge_split_releases(&lib).unwrap(), 0, "nothing left to merge");
+}
+
+#[test]
+fn merging_never_joins_editions_artists_or_clashing_numbers() {
+    let lib = Library::open_in_memory().unwrap();
+    // Two different MusicBrainz editions next to a release without an id: none of them merge.
+    let big = release_with(&lib, "Album", "A", None, &[1, 2]);
+    release_with(&lib, "Album", "A", Some("mbid-1"), &[3]);
+    release_with(&lib, "Album", "A", Some("mbid-2"), &[4]);
+    // Explicitly different album artists with the same title.
+    release_with(&lib, "Live", "A & B", None, &[1]);
+    release_with(&lib, "Live", "A & C", None, &[2]);
+    // The same track numbers twice: another edition.
+    release_with(&lib, "Hits", "X", None, &[1, 2]);
+    release_with(&lib, "Hits", "x", None, &[2]);
+    assert_eq!(nikgob_import::merge_split_releases(&lib).unwrap(), 0);
+    assert_eq!(lib.count_releases().unwrap(), 7);
+    assert_eq!(lib.tracks_of_release(big).unwrap().len(), 2);
+}
+
+#[test]
+fn merging_keeps_the_one_known_musicbrainz_id() {
+    let lib = Library::open_in_memory().unwrap();
+    let main = release_with(&lib, "Album", "A", None, &[1, 2]);
+    release_with(&lib, "Album", "A", Some("mbid-1"), &[3]);
+    assert_eq!(nikgob_import::merge_split_releases(&lib).unwrap(), 1);
+    assert_eq!(lib.count_releases().unwrap(), 1);
+    assert_eq!(lib.get_release(main).unwrap().unwrap().mbid.as_deref(), Some("mbid-1"));
+    assert_eq!(lib.tracks_of_release(main).unwrap().len(), 3);
 }

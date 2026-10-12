@@ -61,6 +61,7 @@ impl TagEditorUi {
 
         // Scrim: swallows input; a click does not discard the edits.
         Area::new(fade.with("scrim"))
+            .fade_in(false)
             .order(Order::Foreground)
             .fixed_pos(screen.min)
             .constrain(false)
@@ -76,6 +77,7 @@ impl TagEditorUi {
         let bg = if compact { s.surface } else { s.surface_container_high };
         let layer = egui::LayerId::new(Order::Tooltip, fade.with("dialog"));
         let area = Area::new(fade.with("dialog"))
+            .fade_in(false)
             .order(Order::Tooltip)
             .fixed_pos(if compact { screen.min } else { screen.center() })
             .pivot(if compact { Align2::LEFT_TOP } else { Align2::CENTER_CENTER })
@@ -267,7 +269,7 @@ impl TagEditorUi {
         if let Some(e) = &ed.error {
             ui.add_space(12.0);
             ui.add(
-                egui::Label::new(TypeRole::BodyMedium.style().rich(e, s.error)).wrap(),
+                egui::Label::new(TypeRole::BodyMedium.style().rich_para(e, s.error)).wrap(),
             );
         }
         if !ed.suggestions.is_empty() {

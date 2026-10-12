@@ -30,7 +30,10 @@ pub const SECTION_GAP: f32 = 32.0;
 pub fn section_header(ui: &mut Ui, title: &str, all: bool) -> bool {
     let s = Theme::get(ui.ctx()).scheme;
     let mut clicked = false;
-    ui.horizontal(|ui| {
+    // A fixed-height row so the title and the 40 dp button share a centre
+    // (`horizontal` would top-align the title in a shorter row).
+    let row = egui::vec2(ui.available_width(), 40.0);
+    ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.label(TypeRole::TitleLarge.style().rich(title, s.on_surface));
         if all {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -228,6 +231,7 @@ pub fn shape_image(ui: &Ui, uri: Option<&str>, initials: &str, rect: Rect, shape
     let opts = shape_paint::FillOptions::for_ppp(ui.ctx().pixels_per_point());
     let tex = uri.and_then(|u| {
         egui::Image::new(u.to_owned())
+            .texture_options(crate::components::PHOTO_TEXTURE)
             .load_for_size(ui.ctx(), rect.size())
             .ok()
             .and_then(|p| p.texture_id())
@@ -322,7 +326,8 @@ fn artist_impl(
         a.image.as_ref().map(|c| c.uri()).as_deref(),
         &initials(&a.name),
         img.expand(grow * 0.5),
-        avatar_shape(&a.id),
+        // A real photo is a circle; the initials keep their playful shape.
+        if a.image.is_some() { MaterialShape::Circle } else { avatar_shape(&a.id) },
     );
     let text_rect = Rect::from_min_max(pos2(rect.left(), img.bottom() + 6.0), rect.max);
     let galley = ui.painter().layout(
@@ -726,7 +731,7 @@ pub fn empty_state(ui: &mut Ui, icon: Icon, title: &str, body: &str, action: Opt
         ui.add_space(16.0);
         ui.label(TypeRole::TitleLarge.style().rich(title, s.on_surface));
         ui.add_space(4.0);
-        ui.label(TypeRole::BodyMedium.style().rich(body, s.on_surface_variant));
+        ui.label(TypeRole::BodyMedium.style().rich_para(body, s.on_surface_variant));
         if let Some(a) = action {
             ui.add_space(16.0);
             clicked = ui

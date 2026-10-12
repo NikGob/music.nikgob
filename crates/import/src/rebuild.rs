@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use nikgob_core::model::{Palette, Source, SourceKind, Track, TrackId, quality_score};
-use nikgob_library::Library;
+use nikgob_library::{Library, ReleaseRow, ReleaseSort};
 use serde::Deserialize;
 
 use crate::config::ImportConfig;
@@ -18,7 +18,7 @@ use crate::error::Result;
 use crate::fsutil;
 use crate::identity::identity_from_tags;
 use crate::sanitize::long_path;
-use crate::store::Store;
+use crate::store::{Store, lead_key, release_key};
 use crate::tags::{self, TagSet};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -160,4 +160,95 @@ pub fn rebuild_from_files(library: &Library, cfg: &ImportConfig) -> Result<Rebui
         }
     }
     Ok(report)
+}
+
+/// Joins releases of one album that were imported in pieces: same title and
+/// the same credit (case, punctuation), and a release credited to "A, B" (a
+/// guest on a track artist line) into the plain "A" one when that is the only
+/// such pair. Two different artist credits, two MusicBrainz editions, or the
+/// same track numbers twice are left alone. Returns how many releases were
+/// merged away.
+pub fn merge_split_releases(library: &Library) -> Result<usize> {
+    let mut merged = 0;
+    let mut by_credit: HashMap<(String, String), Vec<ReleaseRow>> = HashMap::new();
+    for row in all_releases(library)? {
+        let r = &row.release;
+        by_credit
+            .entry(release_key(&r.title, &r.artist_credit.display()))
+            .or_default()
+            .push(row);
+    }
+    for (_, rows) in by_credit {
+        merged += merge_group(library, rows)?;
+    }
+    // What is left: "A" next to a single "A, B" of the same album.
+    let mut by_lead: HashMap<(String, String), Vec<ReleaseRow>> = HashMap::new();
+    for row in all_releases(library)? {
+        let r = &row.release;
+        by_lead
+            .entry(lead_key(&r.title, &r.artist_credit.display()))
+            .or_default()
+            .push(row);
+    }
+    for (_, rows) in by_lead {
+        let (plain, joint): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| {
+            let credit = r.release.artist_credit.display();
+            lead_key("", &credit) == release_key("", &credit)
+        });
+        if plain.len() == 1 && joint.len() == 1 {
+            merged += merge_group(library, plain.into_iter().chain(joint).collect())?;
+        }
+    }
+    Ok(merged)
+}
+
+fn all_releases(library: &Library) -> Result<Vec<ReleaseRow>> {
+    const PAGE: u32 = 500;
+    let mut all = Vec::new();
+    loop {
+        let page = library.releases(all.len() as u32, PAGE, ReleaseSort::asc(Default::default()))?;
+        let last = page.len() < PAGE as usize;
+        all.extend(page);
+        if last {
+            return Ok(all);
+        }
+    }
+}
+
+/// Merges `rows` into the fullest one, unless the group holds two different
+/// MusicBrainz ids (editions); a release whose track numbers collide with the
+/// survivor's stays.
+fn merge_group(library: &Library, mut rows: Vec<ReleaseRow>) -> Result<usize> {
+    let known = |id: fn(&ReleaseRow) -> Option<&String>| {
+        let mut ids: Vec<&String> = rows.iter().filter_map(id).collect();
+        ids.sort();
+        ids.dedup();
+        ids.len() > 1
+    };
+    if rows.len() < 2 || known(|r| r.release.mbid.as_ref()) || known(|r| r.release.release_group_mbid.as_ref()) {
+        return Ok(0);
+    }
+    // The fullest release stays; the oldest one among equals.
+    rows.sort_by_key(|r| (std::cmp::Reverse(r.known_tracks), r.release.added_at));
+    let target = rows.remove(0).release;
+    let numbered = |id| -> Result<Vec<(u32, u32)>> {
+        Ok(library
+            .tracks_of_release(id)?
+            .iter()
+            .filter(|t| t.track_no > 0)
+            .map(|t| (t.disc_no, t.track_no))
+            .collect())
+    };
+    let mut taken = numbered(target.id)?;
+    let mut merged = 0;
+    for row in rows {
+        let theirs = numbered(row.release.id)?;
+        if theirs.iter().any(|n| taken.contains(n)) {
+            continue;
+        }
+        library.merge_releases(row.release.id, target.id)?;
+        taken.extend(theirs);
+        merged += 1;
+    }
+    Ok(merged)
 }

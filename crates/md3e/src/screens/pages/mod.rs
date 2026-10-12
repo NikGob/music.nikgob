@@ -304,7 +304,7 @@ impl PageState {
                         });
                     if f.result.is_none() {
                         ui.add_space(8.0);
-                        ui.label(TypeRole::BodySmall.style().rich(
+                        ui.label(TypeRole::BodySmall.style().rich_para(
                             "Выбор файлов для .torrent и magnet пока недоступен: список только для просмотра.",
                             s.on_surface_variant,
                         ));
@@ -572,7 +572,9 @@ pub(super) fn connected(
     let inner = Size::S.connected_inner();
     let mut picked = None;
     let mut rects = Vec::with_capacity(n);
-    ui.horizontal(|ui| {
+    // One button tall, so the group sits on its parent's centre line.
+    let row = egui::vec2(ui.available_width(), Size::S.height());
+    ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         for (i, label) in labels.iter().enumerate() {
             let sel = i == selected;

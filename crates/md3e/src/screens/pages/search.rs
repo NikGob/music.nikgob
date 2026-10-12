@@ -211,7 +211,7 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, out: &mut Vec<Command>)
     if t.searching {
         ui.horizontal(|ui| {
             ui.add(LoadingIndicator::new().size(32.0));
-            ui.label(TypeRole::BodyMedium.style().rich(
+            ui.label(TypeRole::BodyMedium.style().rich_para(
                 format!("Ищу раздачи «{}»… Prowlarr отвечает не сразу.", t.query),
                 s.on_surface_variant,
             ));
@@ -220,7 +220,7 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, out: &mut Vec<Command>)
     }
 
     if !state.prefs.prowlarr_configured {
-        ui.label(TypeRole::BodyMedium.style().rich(
+        ui.label(TypeRole::BodyMedium.style().rich_para(
             "Prowlarr не настроен: адрес и ключ задаются в Настройках, раздел «Торренты».",
             s.on_surface_variant,
         ));

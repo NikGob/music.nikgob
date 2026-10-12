@@ -517,6 +517,7 @@ impl<'a> FabMenu<'a> {
             let col = Rect::from_min_size(pos2(col_x, col_y), vec2(col_w, total_h));
             let items = self.items;
             Area::new(id.with("items"))
+                .fade_in(false)
                 .order(Order::Foreground)
                 .fixed_pos(col.min)
                 .constrain(false)

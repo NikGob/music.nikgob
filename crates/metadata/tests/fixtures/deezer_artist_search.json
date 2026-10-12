@@ -1,0 +1,11 @@
+{
+  "data": [
+    {"id": 9, "name": "Кино (cover band)", "nb_fan": 12, "picture_xl": "https://cdn-images.dzcdn.net/images/artist/zzz/1000x1000-000000-80-0-0.jpg"},
+    {"id": 1001, "name": "Кино", "nb_fan": 900000,
+     "picture_small": "https://cdn-images.dzcdn.net/images/artist/abc/56x56-000000-80-0-0.jpg",
+     "picture_big": "https://cdn-images.dzcdn.net/images/artist/abc/500x500-000000-80-0-0.jpg",
+     "picture_xl": "https://cdn-images.dzcdn.net/images/artist/abc/1000x1000-000000-80-0-0.jpg"},
+    {"id": 1002, "name": "Кино", "nb_fan": 5, "picture_xl": "https://cdn-images.dzcdn.net/images/artist//1000x1000-000000-80-0-0.jpg"}
+  ],
+  "total": 3
+}

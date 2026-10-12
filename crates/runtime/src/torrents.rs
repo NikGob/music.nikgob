@@ -112,6 +112,7 @@ fn job(t: &TorrentStatus) -> v::Job {
         rate: (t.down_bps > 0).then(|| format!("{}/с", human_bytes(t.down_bps))),
         eta: t.eta.map(eta_label),
         paused: matches!(t.state, TorrentState::Paused),
+        controllable: true,
         error: match &t.state {
             TorrentState::Error(e) => Some(e.clone()),
             _ => None,
@@ -225,6 +226,11 @@ impl Worker {
                 } else {
                     self.toast("Это не magnet-ссылка", None);
                 }
+            }
+            // Import jobs (folders, files) have no pause or cancel: their ids
+            // are not torrent ids and must never reach the torrent client.
+            Command::PauseJob(id, _) | Command::CancelJob(id) if id & crate::IMPORT_ID != 0 => {
+                self.toast("Импорт нельзя остановить — он идёт до конца", None);
             }
             Command::PauseJob(id, pause) => self.with_client(Box::new(move |w, c| {
                 w.spawn_torrent_op(async move {
@@ -539,6 +545,7 @@ impl Worker {
             rate: None,
             eta: None,
             paused: false,
+            controllable: false,
             error: None,
         });
         self.torrents.history.truncate(100);

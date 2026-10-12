@@ -64,6 +64,15 @@ enum Ask {
 
 const POPOVER: Vec2 = vec2(56.0, 200.0);
 
+/// Where the wheel turns the volume besides the 🔊 button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WheelZone {
+    /// The floating player: the popover shows what changed.
+    Bar,
+    /// Now Playing: its own slider shows it.
+    Np,
+}
+
 #[derive(Default)]
 struct Volume {
     /// The 🔊 button as drawn last frame (the hover zone), if shown.
@@ -76,6 +85,20 @@ struct Volume {
     dragging: bool,
     /// The value we just sent, shown until the runtime state catches up.
     shadow: Option<(f32, f64)>,
+    /// Wheel zones and the rects inside them that scroll instead, as drawn
+    /// last frame (`zones`) and this frame (`next_*`).
+    zones: Vec<(Rect, WheelZone)>,
+    blocks: Vec<Rect>,
+    next_zones: Vec<(Rect, WheelZone)>,
+    next_blocks: Vec<Rect>,
+    /// Wheel speed in notches per second (smoothed) and the last notch.
+    rate: f32,
+    last_notch: f64,
+    /// Fractions of a percent not applied yet (touchpads).
+    carry: f32,
+    /// The popover shown after a wheel turn over the bar, until then.
+    flash_until: f64,
+    flash_at: Option<Rect>,
 }
 
 /// Presentation state outside the page content.
@@ -84,9 +107,16 @@ pub struct Chrome {
     pub visualizer: bool,
     pub viz: Viz,
     pub bands: Vec<f32>,
-    /// Now Playing's Queue / Lyrics / Info is open (side column when it
-    /// fits, bottom sheet otherwise). Closed by default.
+    /// Now Playing's Queue / Lyrics / Info column is open (where it fits).
+    /// Remembered between openings and in the prefs.
     pub np_sheet: bool,
+    /// The same as a bottom sheet in a narrow window: only until closed.
+    pub np_modal: bool,
+    /// `np_sheet` was read from the prefs; the value last saved there.
+    pub np_loaded: bool,
+    pub np_saved: Option<bool>,
+    /// Now Playing covers the shell: the bar under it must not react.
+    pub np_covering: bool,
     /// A navigation for the shell (it also closes Now Playing).
     pub nav: Option<Route>,
     /// Show this tab in the shell's pane.
@@ -199,6 +229,7 @@ impl Chrome {
                     Where::Np { tab: current } => {
                         *current = tab;
                         self.np_sheet = true;
+                        self.np_modal = true;
                     }
                 }
             }
@@ -352,45 +383,92 @@ impl Chrome {
         self.vol.button = rect;
     }
 
-    /// The wheel over the 🔊 button or its popover changes the volume. Runs
-    /// first in the frame so the page underneath does not scroll too.
+    /// The wheel turns the volume over `rect` (from this frame on: zones
+    /// are read a frame late, before anything else uses the wheel).
+    pub fn volume_zone(&mut self, rect: Rect, zone: WheelZone) {
+        self.vol.next_zones.push((rect, zone));
+    }
+
+    /// Inside a volume zone, `rect` scrolls as usual (lists, lyrics).
+    pub fn wheel_block(&mut self, rect: Rect) {
+        self.vol.next_blocks.push(rect);
+    }
+
+    /// The wheel over the 🔊 button, its popover, the floating player or
+    /// Now Playing changes the volume by whole percents: 1 % a notch when
+    /// turned slowly, up to 5 % when spun fast. Runs first in the frame so
+    /// the page underneath does not scroll too.
     pub fn wheel(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+        let zones = std::mem::take(&mut self.vol.next_zones);
+        let blocks = std::mem::take(&mut self.vol.next_blocks);
+        self.vol.zones = zones;
+        self.vol.blocks = blocks;
         let Some(p) = ctx.pointer_hover_pos() else { return };
-        let inside = self.vol.button.is_some_and(|b| b.contains(p))
+        let on_button = self.vol.button.is_some_and(|b| b.contains(p))
             || self.vol.popover.is_some_and(|r| r.contains(p));
-        if !inside {
+        let zone = if on_button {
+            None
+        } else if self.vol.blocks.iter().any(|b| b.contains(p)) {
             return;
-        }
-        // Raw wheel events, not the smoothed scroll: one notch = 5 %,
-        // whatever the platform's line height or scroll smoothing.
-        let step: f32 = ctx.input(|i| {
-            i.raw
-                .events
-                .iter()
-                .filter_map(|e| match e {
-                    egui::Event::MouseWheel { unit, delta, .. } => Some(match unit {
-                        egui::MouseWheelUnit::Line => delta.y * 0.05,
-                        egui::MouseWheelUnit::Page => delta.y * 0.2,
-                        egui::MouseWheelUnit::Point => delta.y / 400.0,
-                    }),
-                    _ => None,
-                })
-                .sum()
+        } else {
+            match self.vol.zones.iter().rev().find(|(r, _)| r.contains(p)) {
+                Some(&(_, z)) => Some(z),
+                None => return,
+            }
+        };
+        // Raw wheel events, not the smoothed scroll: whatever the platform's
+        // line height or scroll smoothing.
+        let (notches, points): (f32, f32) = ctx.input(|i| {
+            i.raw.events.iter().fold((0.0, 0.0), |(n, pt), e| match e {
+                egui::Event::MouseWheel { unit, delta, .. } => match unit {
+                    egui::MouseWheelUnit::Line => (n + delta.y, pt),
+                    egui::MouseWheelUnit::Page => (n + delta.y * 5.0, pt),
+                    egui::MouseWheelUnit::Point => (n, pt + delta.y),
+                },
+                _ => (n, pt),
+            })
         });
         // The page underneath must not scroll while the pointer is here.
         ctx.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
-        if step == 0.0 {
+        if notches == 0.0 && points == 0.0 {
             return;
         }
-        let v = self.volume_now(ctx, state) + step;
-        self.send_volume(ctx, v, out);
+        let now = anim::now(ctx);
+        let percent = if notches != 0.0 {
+            let dt = (now - self.vol.last_notch).clamp(1.0 / 240.0, 1.0) as f32;
+            let rate = notches.abs() / dt;
+            self.vol.rate = if dt >= 1.0 { rate.min(8.0) } else { self.vol.rate * 0.6 + rate * 0.4 };
+            self.vol.last_notch = now;
+            let per_notch = (1.0 + (self.vol.rate - 8.0) / 6.0).clamp(1.0, 5.0).round();
+            notches * per_notch
+        } else {
+            // Touchpads: 1 % per 12 points.
+            points / 12.0
+        };
+        self.vol.carry += percent;
+        let whole = self.vol.carry.trunc();
+        self.vol.carry -= whole;
+        if zone == Some(WheelZone::Bar) {
+            self.vol.flash_until = now + 1.2;
+            self.vol.flash_at = Some(Rect::from_center_size(p, vec2(8.0, 8.0)));
+        }
+        if whole == 0.0 {
+            return;
+        }
+        let current = (self.volume_now(ctx, state) * 100.0).round();
+        self.send_volume(ctx, (current + whole) / 100.0, out);
     }
 
     fn volume_ui(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
         let theme = Theme::get(ctx);
         let s = theme.scheme;
         let now = anim::now(ctx);
-        let anchor = self.vol.pinned.or(self.vol.button);
+        let flashing = now < self.vol.flash_until;
+        let anchor = self
+            .vol
+            .pinned
+            .or(self.vol.button)
+            .or(self.vol.flash_at.filter(|_| flashing));
         let ptr = ctx.pointer_hover_pos();
 
         let mut wanted = false;
@@ -411,7 +489,7 @@ impl Chrome {
                 if inside || self.vol.dragging {
                     self.vol.open_until = now + 0.25;
                 }
-                wanted = now < self.vol.open_until;
+                wanted = now < self.vol.open_until || flashing;
                 if wanted && !inside {
                     ctx.request_repaint_after(Duration::from_millis(50));
                 }
@@ -443,6 +521,7 @@ impl Chrome {
         let mut toggle_mute = false;
         let mut dragging = false;
         Area::new(Id::new("md3e-volume-area"))
+            .fade_in(false)
             .order(Order::Foreground)
             .fixed_pos(rect.min)
             .constrain(false)

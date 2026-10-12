@@ -8,6 +8,7 @@ pub mod decode;
 pub mod encode;
 pub mod error;
 pub mod events;
+mod folder;
 pub mod fsutil;
 pub mod identity;
 pub mod importer;
@@ -27,7 +28,7 @@ pub use encode::{EncodeOptions, EncodedInfo, Encoder, FfmpegEncoder, RopusEncode
 pub use error::{ImportError, Result};
 pub use events::{ConfirmItem, ConfirmOption, ImportEvent, ItemId, JobId, Stage};
 pub use importer::{FileOutcome, ImportJob, Importer};
-pub use rebuild::{RebuildReport, rebuild_from_files};
+pub use rebuild::{RebuildReport, merge_split_releases, rebuild_from_files};
 pub use retag::TagChanges;
 pub use spectrum::{SpectrumReport, Verdict};
 pub use trash::{PurgeReport, TRASH_DAYS, delete_track_to_trash, trash_file, trash_purge};

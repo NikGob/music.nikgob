@@ -121,6 +121,7 @@ impl SideSheet {
         let title = self.title;
         let mut close_clicked = false;
         Area::new(id.with("sheet"))
+            .fade_in(false)
             .order(Order::Tooltip)
             .fixed_pos(rect.min)
             .constrain(false)
@@ -261,6 +262,7 @@ impl BottomSheet {
         let mut drag_value: Option<f32> = None;
         let mut released_at: Option<f32> = None;
         Area::new(id.with("sheet"))
+            .fade_in(false)
             .order(Order::Tooltip)
             .fixed_pos(rect.min)
             .constrain(false)

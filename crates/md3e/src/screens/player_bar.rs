@@ -8,7 +8,7 @@ use nikgob_view::{Command, LikeTarget, Status, ViewState};
 
 use super::{
     PaneTab,
-    chrome::{self, Act, Chrome, Where},
+    chrome::{self, Act, Chrome, WheelZone, Where},
     common,
 };
 use crate::{
@@ -45,10 +45,22 @@ pub fn show(
     // thin progress line instead of the slider.
     let wide = !medium && rect.width() >= 820.0;
     let compact = medium || rect.width() < 700.0;
-    let (_, on) = toolbar::colors(ToolbarColor::Vibrant, &s);
+    let (bar_bg, on) = toolbar::colors(ToolbarColor::Vibrant, &s);
     chrome.set_volume_button(None);
+    if !chrome.np_covering {
+        chrome.volume_zone(rect, WheelZone::Bar);
+    }
+    // The hero button must stand out from the pill whatever the palette:
+    // primary on primary-container can be nearly the same tone.
+    let play_colors = if crate::color::contrast_ratio(s.primary, bar_bg) >= 2.5 {
+        Colors { container: s.primary, content: s.on_primary, border: egui::Color32::TRANSPARENT }
+    } else {
+        Colors { container: on, content: bar_bg, border: egui::Color32::TRANSPARENT }
+    };
+    let mut title_rect = Rect::NOTHING;
+    let mut no_slider = false;
 
-    floating_toolbar(ui, rect, ToolbarColor::Vibrant, |ui| {
+    let (pill, ()) = floating_toolbar(ui, rect, ToolbarColor::Vibrant, |ui| {
         // Cover + title: opens Now Playing.
         let info_w = if wide { 220.0 } else { 172.0 };
         let (info_rect, info) = ui.allocate_exact_size(vec2(info_w, 48.0), Sense::click());
@@ -60,6 +72,7 @@ pub fn show(
             info_rect.min + vec2(56.0, 4.0),
             info_rect.max - vec2(0.0, 4.0),
         );
+        title_rect = text_rect;
         let mut tui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(text_rect)
@@ -96,11 +109,7 @@ pub fn show(
                     .size(Size::M)
                     .style(Style::Filled)
                     .selected(playing)
-                    .colors(Colors {
-                        container: s.primary,
-                        content: s.on_primary,
-                        border: egui::Color32::TRANSPARENT,
-                    })
+                    .colors(play_colors)
                     .filled_icon(true)
                     .tooltip("Пауза / играть (Space)")
                     .id_salt("bar-play"),
@@ -117,10 +126,25 @@ pub fn show(
         }
         ui.add_space(8.0);
 
-        // Progress: label, slider, label (on Medium, a thin line instead).
+        // Progress: label, slider, label; a bare slider when narrower; a
+        // line under the title when there is no room at all.
         let trailing_w = if wide { 5.0 * 44.0 } else if compact { 2.0 * 44.0 } else { 3.0 * 44.0 };
         let avail = ui.available_width() - trailing_w - 8.0;
-        if compact {
+        if compact && avail >= 112.0 {
+            let dur = p.duration.unwrap_or_default();
+            let out_s = Slider::new("bar-progress", p.fraction_now())
+                .width(avail - 8.0)
+                .track(8.0)
+                .wavy(playing)
+                .colors(on, on.gamma_multiply(0.24))
+                .value_label(move |v| common::fmt_time(dur.mul_f32(v)))
+                .show(ui);
+            if let Some(v) = out_s.committed {
+                out.push(Command::Seek(dur.mul_f32(v)));
+            }
+            ui.add_space(4.0);
+        } else if compact {
+            no_slider = true;
             ui.add_space(avail.max(0.0));
         } else if avail > 160.0 {
             let pos = p.position_now();
@@ -136,8 +160,6 @@ pub fn show(
             if let Some(v) = out_s.committed {
                 out.push(Command::Seek(dur.mul_f32(v)));
             }
-            let shown = out_s.dragging.map_or(pos, |v| dur.mul_f32(v));
-            let _ = shown;
             time_label(ui, dur, on);
         } else {
             ui.add_space(avail.max(0.0));
@@ -197,7 +219,9 @@ pub fn show(
                 btn = btn.tooltip("Громкость: наведи или крути колесо");
             }
             let vol = ui.add(btn);
-            chrome.set_volume_button(Some(vol.rect));
+            if !chrome.np_covering {
+                chrome.set_volume_button(Some(vol.rect));
+            }
             if vol.clicked() {
                 out.push(Command::ToggleMute);
             }
@@ -221,21 +245,21 @@ pub fn show(
             chrome.track_menu(&more, "bar-more", &acts, t, state, Where::Bar, out);
         }
     });
+    // A click on the pill between the controls opens Now Playing too.
+    if pill.clicked() && p.current.is_some() {
+        result.open_now_playing = true;
+    }
 
-    // Medium: a 4 dp progress line along the bottom of the pill.
-    if compact {
+    // No room for a slider: a 3 dp line under the title.
+    if no_slider && title_rect.is_positive() {
         let f = p.fraction_now();
-        let y = rect.bottom() - 6.0;
-        let x0 = rect.left() + 32.0;
-        let x1 = rect.right() - 32.0;
-        ui.painter().line_segment(
-            [egui::pos2(x0, y), egui::pos2(x1, y)],
-            egui::Stroke::new(4.0, on.gamma_multiply(0.24)),
-        );
-        ui.painter().line_segment(
-            [egui::pos2(x0, y), egui::pos2(x0 + (x1 - x0) * f, y)],
-            egui::Stroke::new(4.0, on),
-        );
+        let y = title_rect.bottom();
+        let (x0, x1) = (title_rect.left(), title_rect.right() - 8.0);
+        let stroke = |c| egui::Stroke::new(3.0, c);
+        ui.painter().line_segment([egui::pos2(x0, y), egui::pos2(x1, y)], stroke(on.gamma_multiply(0.24)));
+        if f > 0.0 {
+            ui.painter().line_segment([egui::pos2(x0, y), egui::pos2(x0 + (x1 - x0) * f, y)], stroke(on));
+        }
     }
     if p.status == Status::Playing {
         // Labels tick once a second; the wave asks for frames itself.

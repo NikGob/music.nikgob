@@ -26,6 +26,7 @@ egui_extras = { workspace = true, features = ["file", "image", "svg"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 directories = "6"
 fastframe-text.workspace = true
+fastframe-fonts.workspace = true
 fastframe-scroll.workspace = true
 fastframe-shell.workspace = true
 fastframe-tray.workspace = true

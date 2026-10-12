@@ -19,6 +19,7 @@ const ALBUMS: &[(&str, &str, i32, ReleaseType, [u8; 3], &[&str])] = &[
     ("Aphex Twin", "Selected Ambient Works 85-92", 1992, ReleaseType::Album, [120, 120, 120], &["Xtal", "Tha", "Pulsewidth", "Ageispolis", "i", "Green Calx", "Heliosphan"]),
     ("Molchat Doma", "Этажи", 2018, ReleaseType::Album, [30, 30, 60], &["Тоска", "Клетка", "Судно (Борис Рыжий)", "Танцевать", "Discoteque", "Звезды"]),
     ("Massive Attack", "Mezzanine", 1998, ReleaseType::Album, [200, 200, 210], &["Angel", "Risingson", "Teardrop", "Inertia Creeps", "Exchange", "Dissolved Girl", "Man Next Door"]),
+    ("RADWIMPS", "すずめの戸締まり", 2022, ReleaseType::Album, [60, 140, 220], &["すずめ feat. 十明", "カナタハルカ", "Tamaki", "ダイジンの歌"]),
     ("Boards of Canada", "Dayvan Cowboy", 2006, ReleaseType::Ep, [240, 120, 60], &["Dayvan Cowboy", "Ataronchronon", "Dayvan Cowboy (Odd Nosdam Remix)"]),
 ];
 
@@ -75,7 +76,15 @@ fn make_cover(path: &Path, rgb: [u8; 3], seed: u32) {
 }
 
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v2";
+pub const VERSION: &str = "seed-v4";
+
+/// Synced lyrics for every demo track (6 s each), with a gap.
+const DEMO_LRC: &str = "[00:00.00]Свет из окна ложится на пол
+[00:01.00]Город ещё не проснулся
+[00:02.00]
+[00:02.80]Мы считаем шаги до утра
+[00:04.00]и слова, что не сказаны вслух, звучат громче всего остального
+[00:05.20]Тишина";
 
 pub fn seed(lib: &Library, root: &Path) {
     if lib.count_releases().unwrap_or(0) > 0 {
@@ -127,6 +136,7 @@ pub fn seed(lib: &Library, root: &Path) {
             s.sample_rate = Some(44_100);
             s.bit_depth = Some(16);
             let _ = lib.add_source(&s);
+            let _ = lib.put_lyrics(t.id, Some(DEMO_LRC), None, false);
             if n == 0 {
                 first_tracks.push(t.id);
             }

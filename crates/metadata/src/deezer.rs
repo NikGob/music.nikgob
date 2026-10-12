@@ -11,16 +11,56 @@ use url::Url;
 
 use crate::error::{MetadataError, Result};
 use crate::http::{Http, Service, base_url, build_url};
+use crate::text::{album_key, artist_key, search_artist, search_title, similarity, title_key};
 
 const DEFAULT_BASE: &str = "https://api.deezer.com/";
 const ALBUM_TRACKS_PAGE: usize = 100;
 const ALBUM_TRACKS_MAX_PAGES: usize = 10;
+const MAX_IMAGE_BYTES: usize = 12 << 20;
+/// Minimum name similarity (0..=1, see `text::similarity`) of an artist hit.
+const MIN_ARTIST_SIMILARITY: f64 = 0.85;
+/// Minimum title similarity of a track / album match.
+const MIN_TITLE_SIMILARITY: f64 = 0.9;
+/// Track durations further apart than this (seconds) are different recordings.
+const MAX_DURATION_DIFF_SECS: u64 = 5;
+/// How many same-named artists are checked against the local titles.
+const MAX_VERIFIED_CANDIDATES: usize = 5;
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct DeezerArtist {
     pub id: u64,
     pub name: String,
+}
+
+/// An artist from `search/artist`, with photos.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct DeezerArtistHit {
+    pub id: u64,
+    pub name: String,
+    pub picture_small: Option<String>,
+    pub picture_medium: Option<String>,
+    pub picture_big: Option<String>,
+    /// 1000x1000.
+    pub picture_xl: Option<String>,
+    pub nb_fan: Option<u64>,
+}
+
+impl DeezerArtistHit {
+    /// Largest real photo; Deezer's grey "no photo" placeholder (an image URL
+    /// with an empty hash, `/images/artist//...`) does not count.
+    pub fn best_picture(&self) -> Option<&str> {
+        [
+            &self.picture_xl,
+            &self.picture_big,
+            &self.picture_medium,
+            &self.picture_small,
+        ]
+        .into_iter()
+        .filter_map(|c| c.as_deref())
+        .find(|c| !c.is_empty() && !c.contains("/artist//"))
+    }
 }
 
 /// Album as embedded in a track, or the full album from [`Deezer::album`].
@@ -155,6 +195,148 @@ impl Deezer {
             .get("search/track", &[("q", q), ("limit", limit.as_str())])
             .await?;
         Ok(raw.data)
+    }
+
+    /// `GET /search/artist?q=name`.
+    pub async fn search_artist(&self, name: &str, limit: u32) -> Result<Vec<DeezerArtistHit>> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default, deserialize_with = "null_default")]
+            data: Vec<DeezerArtistHit>,
+        }
+        let limit = limit.clamp(1, 50).to_string();
+        let q = strip_quotes(name);
+        let raw: Raw = self
+            .get("search/artist", &[("q", q.as_str()), ("limit", limit.as_str())])
+            .await?;
+        Ok(raw.data)
+    }
+
+    /// `GET /artist/{id}`.
+    pub async fn artist(&self, id: u64) -> Result<DeezerArtistHit> {
+        self.get(&format!("artist/{id}"), &[]).await
+    }
+
+    /// `GET /artist/{id}/albums`.
+    pub async fn artist_albums(&self, id: u64, limit: u32) -> Result<Vec<DeezerAlbum>> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default, deserialize_with = "null_default")]
+            data: Vec<DeezerAlbum>,
+        }
+        let limit = limit.clamp(1, 100).to_string();
+        let raw: Raw = self
+            .get(&format!("artist/{id}/albums"), &[("limit", limit.as_str())])
+            .await?;
+        Ok(raw.data)
+    }
+
+    /// `GET /artist/{id}/top`.
+    pub async fn artist_top(&self, id: u64, limit: u32) -> Result<Vec<DeezerTrack>> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default, deserialize_with = "null_default")]
+            data: Vec<DeezerTrack>,
+        }
+        let limit = limit.clamp(1, 100).to_string();
+        let raw: Raw = self
+            .get(&format!("artist/{id}/top"), &[("limit", limit.as_str())])
+            .await?;
+        Ok(raw.data)
+    }
+
+    /// Photo URL of the artist who recorded the given local track. The track is
+    /// searched on Deezer and only a confident match (artist, title and, when
+    /// both are known, duration) lends its `artist.id`: immune to name clashes.
+    pub async fn artist_picture_by_track(
+        &self,
+        artist: &str,
+        title: &str,
+        duration: Option<Duration>,
+    ) -> Result<Option<String>> {
+        let want_artist = artist_key(artist);
+        let want_title = title_key(title).base;
+        if want_artist.is_empty() || want_title.is_empty() {
+            return Ok(None);
+        }
+        let hits = self
+            .search_track(Some(&search_artist(artist)), &search_title(title), 10)
+            .await?;
+        let found = hits.into_iter().find(|t| {
+            let Some(a) = t.artist.as_ref().filter(|a| a.id != 0) else {
+                return false;
+            };
+            let duration_ok = match (duration, t.duration) {
+                (Some(local), Some(remote)) => {
+                    local.as_secs().abs_diff(u64::from(remote)) <= MAX_DURATION_DIFF_SECS
+                }
+                _ => true,
+            };
+            duration_ok
+                && similarity(&want_artist, &artist_key(&a.name)) >= MIN_ARTIST_SIMILARITY
+                && similarity(&want_title, &title_key(&t.title).base) >= MIN_TITLE_SIMILARITY
+        });
+        let Some(id) = found.and_then(|t| t.artist).map(|a| a.id) else {
+            return Ok(None);
+        };
+        Ok(self.artist(id).await?.best_picture().map(str::to_owned))
+    }
+
+    /// Photo URL of the artist called `name`, accepted only when one of that
+    /// Deezer artist's albums or top tracks matches one of `known_titles` (titles
+    /// of the user's own albums and tracks by this artist). Among same-named
+    /// candidates the most popular verified one wins; none verified -> `None`.
+    pub async fn verified_artist_picture(
+        &self,
+        name: &str,
+        known_titles: &[String],
+    ) -> Result<Option<String>> {
+        let want = artist_key(name);
+        let known: Vec<String> = known_titles
+            .iter()
+            .map(|t| album_key(t))
+            .filter(|k| !k.is_empty())
+            .collect();
+        if want.is_empty() || known.is_empty() {
+            return Ok(None);
+        }
+        let mut candidates: Vec<DeezerArtistHit> = self
+            .search_artist(name, 10)
+            .await?
+            .into_iter()
+            .filter(|h| h.best_picture().is_some())
+            .filter(|h| similarity(&want, &artist_key(&h.name)) >= MIN_ARTIST_SIMILARITY)
+            .collect();
+        candidates.sort_by_key(|h| std::cmp::Reverse(h.nb_fan.unwrap_or(0)));
+        for hit in candidates.into_iter().take(MAX_VERIFIED_CANDIDATES) {
+            let mut theirs: Vec<String> = Vec::new();
+            match self.artist_albums(hit.id, 100).await {
+                Ok(a) => theirs.extend(a.into_iter().map(|a| a.title)),
+                Err(MetadataError::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+            match self.artist_top(hit.id, 50).await {
+                Ok(t) => theirs.extend(t.into_iter().map(|t| t.title)),
+                Err(MetadataError::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+            let overlaps = theirs.iter().map(|t| album_key(t)).any(|t| {
+                !t.is_empty() && known.iter().any(|k| similarity(k, &t) >= MIN_TITLE_SIMILARITY)
+            });
+            if overlaps {
+                return Ok(hit.best_picture().map(str::to_owned));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Downloads an image URL from Deezer's CDN (photos, covers).
+    pub async fn download_image(&self, url: &str) -> Result<Vec<u8>> {
+        let url = Url::parse(url)
+            .map_err(|e| MetadataError::InvalidArgument(format!("bad image URL: {e}")))?;
+        self.http
+            .get_bytes(Service::Deezer, url, MAX_IMAGE_BYTES)
+            .await
     }
 
     /// Track lookup; unlike search results it carries the ISRC and release date.

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use nikgob_core::model::{Codec, Release, ReleaseId, Source, SourceKind};
+use nikgob_core::model::{ArtistId, Codec, Release, ReleaseId, Source, SourceKind};
 use nikgob_library::{
     ArtistRow, Library, PlaylistKind, PlaylistSummary, ReleaseProgress, ReleaseRow, TrackRow,
 };
@@ -17,6 +17,8 @@ pub struct Resolver {
     lib: Library,
     root: PathBuf,
     covers: HashMap<ReleaseId, Option<v::Cover>>,
+    /// Artist photos on disk; loaded on first use.
+    photos: Option<HashMap<ArtistId, v::Cover>>,
 }
 
 impl Resolver {
@@ -25,6 +27,7 @@ impl Resolver {
             lib,
             root,
             covers: HashMap::new(),
+            photos: None,
         }
     }
 
@@ -67,6 +70,26 @@ impl Resolver {
         });
         self.covers.insert(id, cover.clone());
         cover
+    }
+
+    /// The photo of an artist, if one was downloaded and is still on disk.
+    pub fn photo(&mut self, id: ArtistId) -> Option<v::Cover> {
+        if self.photos.is_none() {
+            let stored = self.lib.artist_photos().unwrap_or_default();
+            let map = stored
+                .into_iter()
+                .map(|(id, p)| (id, self.path(&p)))
+                .filter(|(_, p)| p.exists())
+                .map(|(id, path)| (id, v::Cover { path, seed: None, ambient: None }))
+                .collect();
+            self.photos = Some(map);
+        }
+        self.photos.as_ref().and_then(|m| m.get(&id)).cloned()
+    }
+
+    /// Reload artist photos from the library on next use.
+    pub fn invalidate_photos(&mut self) {
+        self.photos = None;
     }
 
     /// Forget cached covers (after an import changed them).
@@ -117,7 +140,7 @@ impl Resolver {
         v::ArtistCard {
             id: a.artist.id,
             name: a.artist.name.clone(),
-            image: None,
+            image: self.photo(a.artist.id),
             liked: self.lib.is_liked(a.artist.id).unwrap_or(false),
         }
     }
@@ -177,7 +200,7 @@ impl Resolver {
             card: v::ArtistCard {
                 id: a.id,
                 name: a.name.clone(),
-                image: None,
+                image: self.photo(a.id),
                 liked,
             },
             top_tracks: top.iter().map(|t| self.track(t)).collect(),
@@ -279,5 +302,45 @@ fn summarize_quality(tracks: &[v::TrackRow]) -> Option<String> {
         [] => None,
         [one] => Some((*one).to_owned()),
         many => Some(many.join(" · ")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nikgob_core::model::Artist;
+
+    use super::*;
+
+    #[test]
+    fn artist_cards_carry_the_stored_photo_when_the_file_exists() {
+        let lib = Library::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let with = lib.upsert_artist(&Artist::new("Кино")).unwrap();
+        let gone = lib.upsert_artist(&Artist::new("Земфира")).unwrap();
+        let none = lib.upsert_artist(&Artist::new("Nobody")).unwrap();
+        std::fs::write(dir.path().join("kino.jpg"), [0xFF, 0xD8, 0xFF]).unwrap();
+        // One absolute path would also do; this one is relative to the library root.
+        lib.set_artist_photo(with.id, Some("kino.jpg")).unwrap();
+        lib.set_artist_photo(gone.id, Some("missing.jpg")).unwrap();
+        lib.set_artist_photo(none.id, None).unwrap();
+
+        let mut res = Resolver::new(lib.clone(), dir.path().to_owned());
+        let card = |res: &mut Resolver, a: &nikgob_core::model::Artist| {
+            let row = ArtistRow { artist: a.clone(), release_count: 0, local_track_count: 0 };
+            res.artist(&row)
+        };
+        assert_eq!(
+            card(&mut res, &with).image.map(|c| c.path),
+            Some(dir.path().join("kino.jpg"))
+        );
+        assert!(card(&mut res, &gone).image.is_none());
+        assert!(card(&mut res, &none).image.is_none());
+
+        // A photo that arrives later shows up after the cache is dropped.
+        std::fs::write(dir.path().join("late.jpg"), [0xFF, 0xD8, 0xFF]).unwrap();
+        lib.set_artist_photo(none.id, Some("late.jpg")).unwrap();
+        assert!(card(&mut res, &none).image.is_none());
+        res.invalidate_photos();
+        assert!(card(&mut res, &none).image.is_some());
     }
 }

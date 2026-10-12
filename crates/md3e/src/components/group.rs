@@ -159,7 +159,10 @@ impl<'a> ConnectedGroup<'a> {
         let inner = self.size.connected_inner();
         let pressed_inner = inner * 0.5;
         let mut changed = None;
-        ui.horizontal(|ui| {
+        // Exactly one button tall: `horizontal` starts from a shorter row
+        // and pushes the buttons off the parent's centre line.
+        let row = egui::vec2(ui.available_width(), self.size.height());
+        ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             for i in 0..n {
                 let sel = i == selected;

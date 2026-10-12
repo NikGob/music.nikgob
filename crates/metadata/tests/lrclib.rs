@@ -171,3 +171,64 @@ async fn find_rejects_search_hits_of_another_song() {
         assert!(best.is_none(), "{artist} - {title}: {best:?}");
     }
 }
+
+#[tokio::test]
+async fn find_retries_with_the_normalized_title_and_artist() {
+    let server = MockServer::start().await;
+    // The tag says "Группа крови (feat. Кто-то) - Remastered 2011" by "Кино feat. Кто-то":
+    // only the cleaned names are known to LRCLIB.
+    Mock::given(method("GET"))
+        .and(path("/api/get"))
+        .and(query_param("track_name", "Группа крови"))
+        .and(query_param("artist_name", "Кино"))
+        .respond_with(json_body(200, fixture!("lrclib_get.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/get"))
+        .respond_with(json_body(404, fixture!("lrclib_not_found.json")))
+        .mount(&server)
+        .await;
+    let found = client(&server)
+        .find(
+            "Кино feat. Кто-то",
+            "Группа крови (feat. Кто-то) - Remastered 2011",
+            None,
+            Some(Duration::from_secs(285)),
+        )
+        .await
+        .unwrap();
+    assert!(found.is_some());
+}
+
+#[tokio::test]
+async fn find_searches_by_title_alone_when_the_artist_search_is_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/get"))
+        .respond_with(json_body(404, fixture!("lrclib_not_found.json")))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/search"))
+        .and(query_param("artist_name", "Kino"))
+        .respond_with(json_body(200, "[]"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/search"))
+        .respond_with(json_body(200, fixture!("lrclib_search.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // The artist-less search returns the Russian-spelled hits; the transliterated
+    // "Kino" still passes the similarity check.
+    let found = client(&server)
+        .find("Kino", "Группа крови", None, Some(Duration::from_secs(285)))
+        .await
+        .unwrap()
+        .expect("a match");
+    assert_eq!(found.id, 12);
+}

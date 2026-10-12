@@ -294,6 +294,7 @@ impl Menu {
         let entries = &self.entries;
         let mut hovered_item = None;
         let area = Area::new(area_id)
+            .fade_in(false)
             .order(Order::Tooltip)
             .fixed_pos(top_left)
             .constrain(false)

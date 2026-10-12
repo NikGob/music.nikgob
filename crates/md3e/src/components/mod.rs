@@ -18,6 +18,11 @@ pub use toolbar::{ToolbarColor, floating_toolbar};
 
 mod common;
 pub(crate) use common::paint_image;
+
+/// Filtering for photos drawn smaller than their file (covers, avatars):
+/// trilinear mipmaps, so a 1200 px cover at 48 dp does not alias.
+pub const PHOTO_TEXTURE: egui::TextureOptions =
+    egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear));
 pub mod badge;
 pub mod divider;
 pub mod switch;
