@@ -14,16 +14,20 @@ use std::time::Duration;
 
 use egui::{Align2, Color32, Galley, Rect, Sense, Ui, pos2, text::LayoutJob, vec2};
 use nikgob_motion::Spring;
-use nikgob_view::{Command, Prefs, Status, ViewState};
+use nikgob_view::{Command, LyricLine, LyricsAvail, LyricsSource, Prefs, Status, ViewState};
 
 use crate::{
-    Theme, TypeStyle,
-    components::{ConnectedGroup, anim},
+    Icon, Theme, TypeRole, TypeStyle,
+    components::{ConnectedGroup, Menu, MenuItem, anim},
 };
 
 /// Point sizes of the current line and of the others.
 const BIG: f32 = 26.0;
 const SMALL: f32 = 20.0;
+/// Translations under a line.
+const SUB: f32 = 15.0;
+/// Background vocals, relative to a main line.
+const BG_SCALE: f32 = 0.72;
 
 fn style_at(size: f32) -> TypeStyle {
     TypeStyle::new(size, (size * 1.28).round(), 600, 0.0)
@@ -83,20 +87,31 @@ fn paint(
     let pos = state.player.position_now();
     let playing = state.player.status == Status::Playing;
 
-    // The current line and how far into its singing the song is: a pace
-    // of ~15 letters a second, never past the next line's start.
-    let cur = lines.iter().rposition(|(t, _)| *t <= pos);
+    // The current line is the last main line that has started; background
+    // vocals light up on their own while they are sung.
+    let cur = lines.iter().rposition(|l| !l.background && l.start <= pos);
     let ci = cur.unwrap_or(0);
-    let progress = cur.map_or(0.0, |i| {
-        let start = lines[i].0;
-        let gap = lines
-            .get(i + 1)
-            .map_or(Duration::from_secs(6), |(t, _)| t.saturating_sub(start))
+    let next_start = |i: usize| lines[i + 1..].iter().find(|l| !l.background).map(|l| l.start);
+    let active = |i: usize| {
+        let l = &lines[i];
+        if l.background {
+            l.start <= pos && pos < l.end.unwrap_or(l.start + Duration::from_secs(5))
+        } else {
+            cur == Some(i)
+        }
+    };
+    // How far into its singing a line is. Without an end time: a pace of
+    // ~15 letters a second, never past the next line's start.
+    let progress = |i: usize| {
+        let l = &lines[i];
+        let gap = l
+            .end
+            .or_else(|| next_start(i))
+            .map_or(Duration::from_secs(6), |t| t.saturating_sub(l.start))
             .as_secs_f32();
-        let letters = lines[i].1.chars().filter(|c| !c.is_whitespace()).count() as f32;
-        let sung = (0.4 + letters * 0.066).clamp(0.8, (gap * 0.92).max(0.3));
-        (pos.saturating_sub(start).as_secs_f32() / sung).clamp(0.0, 1.0)
-    });
+        let sung = if l.end.is_some() { gap.max(0.3) } else { speaking_secs(&l.text, gap) };
+        (pos.saturating_sub(l.start).as_secs_f32() / sung).clamp(0.0, 1.0)
+    };
 
     // Slots are laid out at the big size, so nothing moves when a line
     // grows; the drawn size flows inside its slot.
@@ -108,13 +123,30 @@ fn paint(
         job.wrap.max_width = wrap * size / BIG;
         painter.layout_job(job)
     };
-    let slots: Vec<f32> = lines.iter().map(|(_, t)| layout(t, BIG).size().y).collect();
+    let sub_layout = |text: &str| -> Arc<Galley> {
+        let mut job = LayoutJob::single_section(text.to_owned(), style_at(SUB).text_format(Color32::WHITE));
+        job.wrap.max_width = wrap;
+        painter.layout_job(job)
+    };
+    let scale = |l: &LyricLine| if l.background { BG_SCALE } else { 1.0 };
+    let slots: Vec<(f32, f32)> = lines
+        .iter()
+        .map(|l| {
+            let main = layout(&l.text, BIG * scale(l)).size().y;
+            let extra = sub(l).map_or(0.0, |t| sub_layout(t).size().y + 4.0);
+            (main, extra)
+        })
+        .collect();
     let gap = 18.0;
     let mut tops = Vec::with_capacity(slots.len());
     let mut y = 0.0;
-    for h in &slots {
+    for (i, (h, extra)) in slots.iter().enumerate() {
+        // Background vocals hug the line they belong to.
+        if lines[i].background && i > 0 {
+            y -= gap * 0.6;
+        }
         tops.push(y);
-        y += h + gap;
+        y += h + extra + gap;
     }
 
     // Follow the song, unless the user scrolled in the last three seconds.
@@ -136,11 +168,11 @@ fn paint(
         ctx.request_repaint_after(Duration::from_millis(100));
     }
     let anchor = rect.height() * 0.38;
-    let scroll = tops[ci] + slots[ci] * 0.5 - anchor + manual;
+    let scroll = tops[ci] + slots[ci].0 * 0.5 - anchor + manual;
 
     let hover = resp.hover_pos();
     let mut clicked = None;
-    for i in 0..lines.len() {
+    for (i, l) in lines.iter().enumerate() {
         let dist = i as i32 - ci as i32;
         let far = dist.unsigned_abs().min(8) as f32;
         // A wave: lines further from the current one follow more lazily,
@@ -151,11 +183,11 @@ fn paint(
             Spring::new(0.9, (300.0 - 26.0 * far).max(110.0))
         };
         let y = anim::f32(&ctx, id.with(("y", i)), rect.top() + tops[i] - scroll, spring);
-        let slot_h = slots[i];
-        if y + slot_h < rect.top() - 60.0 || y > rect.bottom() + 60.0 {
+        let (slot_h, extra) = slots[i];
+        if y + slot_h + extra < rect.top() - 60.0 || y > rect.bottom() + 60.0 {
             continue;
         }
-        let is_cur = cur == Some(i);
+        let is_cur = active(i);
         // 0 → 1 as the line becomes the current one, and back.
         let focus = anim::f32(
             &ctx,
@@ -164,15 +196,20 @@ fn paint(
             Spring::new(1.0, 170.0),
         )
         .clamp(0.0, 1.0);
-        let size = SMALL + (BIG - SMALL) * focus;
-        let g = layout(&lines[i].1, size);
-        let line = Rect::from_min_size(
-            pos2(rect.left() + 12.0, y + (slot_h - g.size().y) * 0.5),
-            g.size(),
-        );
+        let size = (SMALL + (BIG - SMALL) * focus) * scale(l);
+        let g = layout(&l.text, size);
+        // The second voice of a duet sings from the other side.
+        let side = |w: f32| {
+            if l.duet {
+                rect.left() + 12.0 + (wrap - w).max(0.0)
+            } else {
+                rect.left() + 12.0
+            }
+        };
+        let line = Rect::from_min_size(pos2(side(g.size().x), y + (slot_h - g.size().y) * 0.5), g.size());
         // Fade out towards the edges.
         let edge = ((y + slot_h - rect.top()) / 72.0).min((rect.bottom() - y) / 72.0).clamp(0.0, 1.0);
-        let slot = Rect::from_min_size(pos2(rect.left() + 12.0, y), vec2(wrap, slot_h));
+        let slot = Rect::from_min_size(pos2(rect.left() + 12.0, y), vec2(wrap, slot_h + extra));
         let hovered = hover.is_some_and(|p| slot.expand2(vec2(8.0, gap * 0.5)).contains(p));
         if hovered {
             painter.rect_filled(slot.expand2(vec2(10.0, 6.0)), 14, s.on_surface.gamma_multiply(0.06 * edge));
@@ -182,39 +219,73 @@ fn paint(
         }
         // Brightness of a line at rest: past lines a bit brighter than the
         // ones to come; focus mode pushes the rest far back.
-        let rest = match style {
+        let mut rest = match style {
             Style::Focus => 0.62f32.powf(far).max(0.08) * 0.7,
             _ => (if dist < 0 { 0.5 } else { 0.42 }) * 0.86f32.powf((far - 1.0).max(0.0)),
         };
-        if lines[i].1.trim().is_empty() {
-            dots(&painter, line, if is_cur { progress } else { 0.0 }, focus, edge, s.on_surface);
+        if l.background {
+            rest *= 0.8;
+        }
+        if l.text.trim().is_empty() {
+            let p = if is_cur { progress(i) } else { 0.0 };
+            dots(&painter, line, p, focus, edge, s.on_surface);
             continue;
         }
         let dim = s.on_surface.gamma_multiply(edge * (rest + (1.0 - rest) * focus * 0.4));
-        let lit = s.on_surface.gamma_multiply(edge);
+        let lit = s.on_surface.gamma_multiply(edge * if l.background { 0.8 } else { 1.0 });
+
+        if let Some(t) = sub(l) {
+            let sg = sub_layout(t);
+            let c = crate::lerp_color(dim, lit, focus * 0.6).gamma_multiply(0.8);
+            painter.galley_with_override_text_color(pos2(side(sg.size().x), y + slot_h + 4.0), sg, c);
+        }
         if !is_cur && focus < 0.01 {
             painter.galley_with_override_text_color(line.min, g, dim);
             continue;
         }
+        // Per-letter singing: real timing for word-synced lines, else an
+        // even pace over the line.
+        let timing = Timing::new(l, &g);
+        let line_p = progress(i);
+        let n = glyph_count(&g) as f32;
+        let sung = |k: usize| -> f32 {
+            if !is_cur {
+                return 1.0;
+            }
+            match &timing {
+                Some(t) => t.lit(k, pos),
+                None => ((line_p * (n + 2.0) - k as f32) / 2.0).clamp(0.0, 1.0),
+            }
+        };
         match style {
             Style::Karaoke => {
                 // A line that just stopped being current keeps its fill and
                 // fades with its focus.
-                let p = if is_cur { progress } else { 1.0 };
-                karaoke(&painter, &g, line, p, dim, lit.gamma_multiply(focus.max(0.35)));
+                let widths = glyph_widths(&g);
+                let total = widths.iter().sum::<f32>().max(1.0);
+                let head = if !is_cur {
+                    f32::INFINITY
+                } else if timing.is_some() {
+                    let at: f32 = widths.iter().enumerate().map(|(k, w)| w * sung(k)).sum();
+                    if at >= total - 0.5 {
+                        f32::INFINITY
+                    } else {
+                        at + FEATHER * (0.5 + 0.5 * at / total)
+                    }
+                } else {
+                    (total + FEATHER) * line_p
+                };
+                karaoke(&painter, &g, line, head, dim, lit.gamma_multiply(focus.max(0.35)));
             }
             Style::Focus => {
                 let c = crate::lerp_color(dim, lit, focus);
                 painter.galley_with_override_text_color(line.min, g, c);
             }
-            Style::Wave => {
-                let p = if is_cur { progress } else { 1.0 };
-                wave(&painter, &g, line, p, focus, size, dim, lit);
-            }
+            Style::Wave => wave(&painter, &g, line, &sung, focus, size, dim, lit),
         }
     }
     if let Some(i) = clicked {
-        out.push(Command::Seek(lines[i].0));
+        out.push(Command::Seek(lines[i].start));
     }
     if resp.hovered() {
         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -224,23 +295,105 @@ fn paint(
     }
 }
 
-/// The line lit left to right (row by row when it wraps) as it is sung,
-/// the edge of the light a soft gradient.
-fn karaoke(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, progress: f32, base: Color32, lit: Color32) {
+/// How long a line without an end time takes to sing: ~15 letters a second,
+/// at least 0.8 s, but never past 92 % of the `gap` (seconds) to the next line.
+fn speaking_secs(text: &str, gap: f32) -> f32 {
+    let letters = text.chars().filter(|c| !c.is_whitespace()).count() as f32;
+    // Not `clamp`: with lines closer than 0.87 s the cap is the smaller
+    // bound, and `clamp` panics on that.
+    (0.4 + letters * 0.066).max(0.8).min((gap * 0.92).max(0.3))
+}
+
+/// Per-glyph singing times of a word-synced line.
+struct Timing {
+    /// (start, end) in seconds for each glyph of the galley, rows flattened.
+    glyphs: Vec<(f32, f32)>,
+}
+
+impl Timing {
+    /// `None` for line-synced lines. Letters of a word share its time
+    /// evenly; spaces take the end of the letter before them.
+    fn new(l: &LyricLine, g: &Galley) -> Option<Self> {
+        if l.words.is_empty() {
+            return None;
+        }
+        let mut letters = Vec::new();
+        for w in &l.words {
+            let n = w.text.chars().filter(|c| !c.is_whitespace()).count();
+            let (s, e) = (w.start.as_secs_f32(), w.end.as_secs_f32());
+            let e = e.max(s);
+            for k in 0..n {
+                let (a, b) = (k as f32 / n as f32, (k + 1) as f32 / n as f32);
+                letters.push((s + (e - s) * a, s + (e - s) * b));
+            }
+        }
+        let mut next = letters.iter().copied();
+        let mut last = letters.first().copied().unwrap_or_default();
+        let glyphs = g
+            .rows
+            .iter()
+            .flat_map(|r| r.row.glyphs.iter())
+            .map(|gl| {
+                if !gl.chr.is_whitespace()
+                    && let Some(t) = next.next()
+                {
+                    last = t;
+                    t
+                } else {
+                    (last.1, last.1)
+                }
+            })
+            .collect();
+        Some(Self { glyphs })
+    }
+
+    /// 0 → 1 as glyph `k` is sung.
+    fn lit(&self, k: usize, pos: Duration) -> f32 {
+        let Some(&(s, e)) = self.glyphs.get(k) else { return 1.0 };
+        let p = pos.as_secs_f32();
+        ((p - s + 0.04) / (e - s + 0.08).max(0.1)).clamp(0.0, 1.0)
+    }
+}
+
+/// The small line under a lyric line: its translation, else romanization.
+fn sub(l: &LyricLine) -> Option<&str> {
+    l.translation.as_deref().or(l.romanization.as_deref())
+}
+
+fn glyph_count(g: &Galley) -> usize {
+    g.rows.iter().map(|r| r.row.glyphs.len()).sum::<usize>().max(1)
+}
+
+/// Advance of every glyph, rows flattened.
+fn glyph_widths(g: &Galley) -> Vec<f32> {
+    g.rows
+        .iter()
+        .flat_map(|r| r.row.glyphs.iter().map(|gl| gl.advance_width))
+        .collect()
+}
+
+const FEATHER: f32 = 36.0;
+
+/// The line lit left to right (row by row when it wraps) up to `head`
+/// pixels of its glyphs (rows flattened), the edge of the light a soft
+/// gradient.
+fn karaoke(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, head: f32, base: Color32, lit: Color32) {
+    if head.is_infinite() {
+        painter.galley_with_override_text_color(line.min, g.clone(), lit);
+        return;
+    }
     painter.galley_with_override_text_color(line.min, g.clone(), base);
-    let feather = 36.0;
-    let total: f32 = g.rows.iter().map(|r| r.rect().width()).sum::<f32>() + feather;
-    let mut left = total * progress;
+    let mut left = head;
     for row in &g.rows {
         let r = row.rect().translate(line.min.to_vec2()).expand2(vec2(0.0, 6.0));
-        let w = r.width();
+        let w: f32 = row.row.glyphs.iter().map(|gl| gl.advance_width).sum();
         let head = left;
         left -= w;
         if head <= 0.0 {
             break;
         }
         // Solid up to the gradient, then slices fading out.
-        let solid = (head - feather).clamp(0.0, w);
+        let solid = (head - FEATHER).clamp(0.0, w);
         if solid > 0.0 {
             let clip = Rect::from_min_max(r.min, pos2(r.left() + solid, r.bottom()));
             painter
@@ -249,8 +402,8 @@ fn karaoke(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, progress: f32, 
         }
         const SLICES: usize = 8;
         for k in 0..SLICES {
-            let x0 = head - feather + feather * k as f32 / SLICES as f32;
-            let x1 = head - feather + feather * (k + 1) as f32 / SLICES as f32;
+            let x0 = head - FEATHER + FEATHER * k as f32 / SLICES as f32;
+            let x1 = head - FEATHER + FEATHER * (k + 1) as f32 / SLICES as f32;
             let (x0, x1) = (x0.clamp(0.0, w), x1.clamp(0.0, w));
             if x1 <= x0 {
                 continue;
@@ -264,27 +417,24 @@ fn karaoke(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, progress: f32, 
     }
 }
 
-/// Letter by letter: each one rises a little and lights up as the song
-/// reaches it, and stays up until the line is done.
+/// Letter by letter: each one rises a little and lights up as it is sung
+/// (`sung(k)` goes 0 → 1), and stays up until the line is done.
 #[allow(clippy::too_many_arguments)]
 fn wave(
     painter: &egui::Painter,
     g: &Arc<Galley>,
     line: Rect,
-    progress: f32,
+    sung: &dyn Fn(usize) -> f32,
     focus: f32,
     size: f32,
     base: Color32,
     lit: Color32,
 ) {
-    let n: usize = g.rows.iter().map(|r| r.row.glyphs.len()).sum::<usize>().max(1);
-    // The head runs a little past the end so the last letters settle too.
-    let head = progress * (n as f32 + 2.0);
     let font = style_at(size).font_id();
     let mut k = 0usize;
     for row in &g.rows {
         for glyph in &row.row.glyphs {
-            let t = ((head - k as f32) / 2.0).clamp(0.0, 1.0);
+            let t = sung(k);
             k += 1;
             if glyph.chr.is_whitespace() {
                 continue;
@@ -315,4 +465,79 @@ fn dots(painter: &egui::Painter, line: Rect, progress: f32, focus: f32, edge: f3
 
 fn anim_time(painter: &egui::Painter) -> f32 {
     (anim::now(painter.ctx()) % 1000.0) as f32
+}
+
+/// A small "where is this text from" line; clicking it picks another source.
+pub fn source_picker(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
+    let l = &state.lyrics;
+    let (Some(track), false) = (l.track, l.sources.is_empty()) else { return };
+    let s = Theme::get(ui.ctx()).scheme;
+    let sync = |src: LyricsSource| {
+        l.sources.iter().find(|o| o.source == src).and_then(|o| match o.state {
+            LyricsAvail::Ready(sync) => Some(sync),
+            _ => None,
+        })
+    };
+    let text = match l.source {
+        Some(src) => match sync(src) {
+            Some(sync) => format!("{} · {}", src.label(), sync.label()),
+            None => src.label().to_owned(),
+        },
+        None if l.sources.iter().any(|o| o.state == LyricsAvail::Loading) => "Ищу текст…".to_owned(),
+        None => "Источник текста".to_owned(),
+    };
+    let more = l.sources.len() > 1;
+    let resp = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let r = ui.add(
+                egui::Label::new(TypeRole::LabelSmall.style().rich(text, s.on_surface_variant.gamma_multiply(0.8)))
+                    .selectable(false)
+                    .sense(if more { Sense::click() } else { Sense::hover() }),
+            );
+            if more {
+                Icon::ExpandMore
+                    .widget(false, s.on_surface_variant.gamma_multiply(0.8), 14.0)
+                    .paint_at(ui, Rect::from_min_size(pos2(r.rect.right() + 2.0, r.rect.center().y - 7.0), vec2(14.0, 14.0)));
+            }
+            r
+        })
+        .inner;
+    if !more {
+        return;
+    }
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let mut menu = Menu::new(("lyrics-source", track))
+        .item(MenuItem::new("Автоматически").selected(!l.picked))
+        .divider();
+    for o in &l.sources {
+        let state = match o.state {
+            LyricsAvail::Ready(sync) => sync.label(),
+            LyricsAvail::Loading => "ищу…",
+            LyricsAvail::Missing => "нет текста",
+        };
+        menu = menu.item(
+            MenuItem::new(format!("{} · {state}", o.source.label()))
+                .enabled(matches!(o.state, LyricsAvail::Ready(_)))
+                .selected(l.picked && l.source == Some(o.source)),
+        );
+    }
+    if let Some(i) = menu.attach(&resp) {
+        let pick = if i == 0 { None } else { l.sources.get(i - 1).map(|o| o.source) };
+        out.push(Command::PickLyricsSource(track, pick));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_lines_do_not_panic_and_keep_the_pace_inside_the_gap() {
+        // Lines 0.5 s apart (and duplicate stamps) used to panic in `clamp`.
+        assert!((speaking_secs("вторая быстро", 0.5) - 0.46).abs() < 1e-4);
+        assert_eq!(speaking_secs("a", 0.0), 0.3);
+        assert_eq!(speaking_secs("a", 6.0), 0.8);
+        assert!((speaking_secs("слова звучат громче всего", 6.0) - (0.4 + 22.0 * 0.066)).abs() < 1e-4);
+    }
 }

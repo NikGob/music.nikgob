@@ -73,6 +73,8 @@ pub struct RateLimits {
     pub cover_art: Duration,
     pub deezer: Duration,
     pub lrclib: Duration,
+    pub netease: Duration,
+    pub qq: Duration,
 }
 
 impl Default for RateLimits {
@@ -86,6 +88,8 @@ impl Default for RateLimits {
             // Deezer: 50 requests / 5 s.
             deezer: Duration::from_millis(200),
             lrclib: Duration::from_millis(200),
+            netease: Duration::from_millis(300),
+            qq: Duration::from_millis(300),
         }
     }
 }
@@ -98,6 +102,8 @@ impl RateLimits {
             cover_art: Duration::ZERO,
             deezer: Duration::ZERO,
             lrclib: Duration::ZERO,
+            netease: Duration::ZERO,
+            qq: Duration::ZERO,
         }
     }
 }
@@ -135,6 +141,8 @@ pub(crate) enum Service {
     CoverArt,
     Deezer,
     Lrclib,
+    Netease,
+    Qq,
 }
 
 #[derive(Debug)]
@@ -144,6 +152,8 @@ struct Limiters {
     cover_art: RateLimiter,
     deezer: RateLimiter,
     lrclib: RateLimiter,
+    netease: RateLimiter,
+    qq: RateLimiter,
 }
 
 impl Limiters {
@@ -154,6 +164,8 @@ impl Limiters {
             cover_art: RateLimiter::new(l.cover_art),
             deezer: RateLimiter::new(l.deezer),
             lrclib: RateLimiter::new(l.lrclib),
+            netease: RateLimiter::new(l.netease),
+            qq: RateLimiter::new(l.qq),
         }
     }
 
@@ -164,6 +176,8 @@ impl Limiters {
             Service::CoverArt => &self.cover_art,
             Service::Deezer => &self.deezer,
             Service::Lrclib => &self.lrclib,
+            Service::Netease => &self.netease,
+            Service::Qq => &self.qq,
         }
     }
 }
@@ -266,6 +280,22 @@ impl Http {
     ) -> Result<T> {
         let resp = self.send(service, self.client.get(url)).await?;
         parse_json(&ok_body(resp).await?)
+    }
+
+    /// Like [`Http::get_json`] with extra request headers (a browser-like
+    /// `User-Agent` and `Referer` for the Chinese services).
+    pub(crate) async fn get_body_with(
+        &self,
+        service: Service,
+        url: Url,
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<u8>> {
+        let mut req = self.client.get(url);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let resp = self.send(service, req).await?;
+        ok_body(resp).await
     }
 
     pub(crate) async fn get_bytes(

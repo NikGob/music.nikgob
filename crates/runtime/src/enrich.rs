@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nikgob_core::model::{ArtistId, TrackId};
+use nikgob_core::model::ArtistId;
 use nikgob_library::{Library, StoredLyrics, TrackRow, now_ms};
 use nikgob_metadata::{Deezer, Lrclib, Lyrics, MetadataError};
 use nikgob_view as v;
@@ -53,9 +53,6 @@ pub(crate) enum Event {
     ArtistPhoto(ArtistId),
     PhotosDone,
     BackfillDone,
-    /// The lookup for the playing track failed for lack of network; not cached,
-    /// so the next play asks again.
-    LyricsFailed(TrackId),
 }
 
 #[derive(Default)]
@@ -67,24 +64,6 @@ pub(crate) struct Enrich {
 }
 
 // ------------------------------------------------------------------- lyrics
-
-/// The view of lyrics text: synced lines when there are any, else plain text.
-pub(crate) fn lyrics_view(
-    track: TrackId,
-    synced: Option<&str>,
-    plain: Option<&str>,
-) -> v::LyricsView {
-    let lines = synced.map(nikgob_metadata::parse_lrc).unwrap_or_default();
-    let plain = plain
-        .filter(|p| lines.is_empty() && !p.trim().is_empty())
-        .map(str::to_owned);
-    v::LyricsView {
-        track: Some(track),
-        lines,
-        plain,
-        loading: false,
-    }
-}
 
 /// Lyrics that came with the file: a `.lrc` next to it, else the tag. Returns
 /// `(synced LRC text, plain text)`.
@@ -449,16 +428,6 @@ impl Worker {
                     svc.enrich.backfill_running = false;
                 }
             }
-            Event::LyricsFailed(track) => {
-                if let Some(svc) = &mut self.import {
-                    svc.lyrics_tried.remove(&track);
-                }
-                self.publish(|s, _| {
-                    if s.lyrics.track == Some(track) {
-                        s.lyrics.loading = false;
-                    }
-                });
-            }
         }
     }
 }
@@ -609,18 +578,6 @@ mod tests {
         assert!(!lib.lyrics(a.id).unwrap().unwrap().is_miss());
         assert!(lib.lyrics(b.id).unwrap().unwrap().is_miss());
         assert!(lib.tracks_needing_lyrics(now_ms() - LYRICS_RETRY_MS, 10).unwrap().is_empty());
-    }
-
-    #[test]
-    fn views_prefer_synced_lines_and_fall_back_to_plain() {
-        let id = TrackId::new();
-        let synced = lyrics_view(id, Some("[00:01.00]a\n[00:02.00]b"), Some("a\nb"));
-        assert_eq!(synced.lines.len(), 2);
-        assert!(synced.plain.is_none());
-        let plain = lyrics_view(id, None, Some("a\nb"));
-        assert!(plain.lines.is_empty());
-        assert_eq!(plain.plain.as_deref(), Some("a\nb"));
-        assert_eq!(lyrics_view(id, None, Some("  ")).plain, None);
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+pub use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource, LyricsSync};
 pub use nikgob_core::model::{
     ArtistId, LikeTarget, PlaylistId, ReleaseId, ReleaseType, SourceKind, TrackId,
 };
@@ -251,10 +252,31 @@ pub struct QueueEntry {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LyricsView {
     pub track: Option<TrackId>,
-    pub lines: Vec<(Duration, String)>,
+    pub lines: Vec<LyricLine>,
     /// Unsynced fallback text.
     pub plain: Option<String>,
     pub loading: bool,
+    /// Where the shown text comes from.
+    pub source: Option<LyricsSource>,
+    /// The source was picked by the user (not chosen automatically).
+    pub picked: bool,
+    /// Every source that has, or may still get, a text for this track.
+    pub sources: Vec<LyricsOption>,
+}
+
+/// One source in the lyrics source picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LyricsOption {
+    pub source: LyricsSource,
+    pub state: LyricsAvail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LyricsAvail {
+    Loading,
+    /// Looked up, nothing there.
+    Missing,
+    Ready(LyricsSync),
 }
 
 /// Technical details of the current track ("Инфо" tab).
@@ -707,6 +729,8 @@ pub enum Command {
     Previous,
     Seek(Duration),
     SeekBy(i64),
+    /// Show this track's lyrics from another source; `None` = automatic.
+    PickLyricsSource(TrackId, Option<LyricsSource>),
     SetVolume(f32),
     ToggleMute,
     ToggleShuffle,

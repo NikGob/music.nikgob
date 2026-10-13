@@ -163,7 +163,10 @@ async fn find_rejects_search_hits_of_another_song() {
         .mount(&server)
         .await;
     // The duration fits id 12, but it is "Группа крови" by Кино, not this song.
-    for (artist, title) in [("Кино", "Звезда по имени Солнце"), ("Земфира", "Группа крови")] {
+    for (artist, title) in [
+        ("Кино", "Звезда по имени Солнце"),
+        ("Земфира", "Группа крови"),
+    ] {
         let best = client(&server)
             .find(artist, title, None, Some(Duration::from_secs(285)))
             .await

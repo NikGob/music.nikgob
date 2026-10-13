@@ -67,6 +67,60 @@ impl Library {
         })
     }
 
+    /// A text from another source (`source` is a `LyricsSource::key`):
+    /// `Some((body, fetched_at))` once looked up, body `None` = nothing found.
+    pub fn lyrics_text(&self, track: TrackId, source: &str) -> Result<Option<(Option<String>, UnixMs)>> {
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT body, fetched_at FROM lyrics_text WHERE track_id = ?1 AND source = ?2",
+                params![track.to_string(), source],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+        })
+    }
+
+    /// Stores a looked-up text; `None` (or blank) records "not found".
+    pub fn put_lyrics_text(&self, track: TrackId, source: &str, body: Option<&str>) -> Result<()> {
+        let body = body.filter(|s| !s.trim().is_empty());
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO lyrics_text(track_id, source, body, fetched_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(track_id, source) DO UPDATE SET body = excluded.body,
+                    fetched_at = excluded.fetched_at",
+                params![track.to_string(), source, body, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The lyrics source the user picked for a track, if any.
+    pub fn lyrics_pick(&self, track: TrackId) -> Result<Option<String>> {
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT source FROM lyrics_pick WHERE track_id = ?1",
+                [track.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })
+    }
+
+    /// Remembers the picked source; `None` goes back to the automatic choice.
+    pub fn set_lyrics_pick(&self, track: TrackId, source: Option<&str>) -> Result<()> {
+        self.write(|tx| {
+            match source {
+                Some(s) => tx.execute(
+                    "INSERT INTO lyrics_pick(track_id, source) VALUES (?1, ?2)
+                     ON CONFLICT(track_id) DO UPDATE SET source = excluded.source",
+                    params![track.to_string(), s],
+                )?,
+                None => tx.execute("DELETE FROM lyrics_pick WHERE track_id = ?1", [track.to_string()])?,
+            };
+            Ok(())
+        })
+    }
+
     /// Local tracks without lyrics that are worth a lookup: never tried, or
     /// "not found" markers older than `retry_before` (unix ms). Untried first.
     pub fn tracks_needing_lyrics(&self, retry_before: UnixMs, limit: u32) -> Result<Vec<TrackId>> {
@@ -120,6 +174,24 @@ mod tests {
         assert!(!got.is_miss());
         assert_eq!(got.synced.as_deref(), Some("[00:01.00]Привет"));
         assert_eq!(got.plain.as_deref(), Some("Привет"));
+    }
+
+    #[test]
+    fn other_sources_and_pick() {
+        let lib = Library::open_in_memory().unwrap();
+        let t = local_track(&lib, "Кукушка");
+        assert!(lib.lyrics_text(t.id, "netease").unwrap().is_none());
+        lib.put_lyrics_text(t.id, "netease", Some(" ")).unwrap();
+        assert_eq!(lib.lyrics_text(t.id, "netease").unwrap().unwrap().0, None);
+        lib.put_lyrics_text(t.id, "netease", Some("<tt/>")).unwrap();
+        assert_eq!(lib.lyrics_text(t.id, "netease").unwrap().unwrap().0.as_deref(), Some("<tt/>"));
+
+        assert_eq!(lib.lyrics_pick(t.id).unwrap(), None);
+        lib.set_lyrics_pick(t.id, Some("lrclib")).unwrap();
+        lib.set_lyrics_pick(t.id, Some("netease")).unwrap();
+        assert_eq!(lib.lyrics_pick(t.id).unwrap().as_deref(), Some("netease"));
+        lib.set_lyrics_pick(t.id, None).unwrap();
+        assert_eq!(lib.lyrics_pick(t.id).unwrap(), None);
     }
 
     #[test]

@@ -48,6 +48,34 @@ fn paths() -> Paths {
     }
 }
 
+/// A windowed app has no stderr: panics (thread, message, place, backtrace)
+/// are appended to `crash.log` next to the library, then handled as usual.
+fn log_panics(dir: PathBuf) {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let thread = std::thread::current();
+        let report = format!(
+            "--- panic at unix {at} in thread '{}'\n{info}\n{}\n",
+            thread.name().unwrap_or("?"),
+            std::backtrace::Backtrace::force_capture(),
+        );
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("crash.log"))
+        {
+            let _ = f.write_all(report.as_bytes());
+        }
+        log::error!("{info}");
+        default(info);
+    }));
+}
+
 fn load_prefs(paths: &Paths) -> Prefs {
     let mut p: Prefs = std::fs::read(&paths.prefs)
         .ok()
@@ -219,6 +247,9 @@ fn add_system_fallbacks(fonts: &mut egui::FontDefinitions) {
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let mut paths = paths();
+    if let Some(dir) = paths.db.parent() {
+        log_panics(dir.to_owned());
+    }
     let demo = std::env::var_os("NIKGOB_DEMO").is_some();
     if demo {
         let dir = std::env::temp_dir().join("nikgob-demo");

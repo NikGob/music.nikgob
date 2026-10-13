@@ -9,6 +9,7 @@ mod convert;
 mod enrich;
 mod home;
 mod import;
+mod lyrics;
 mod search;
 mod tags;
 mod torrents;
@@ -385,6 +386,7 @@ impl Worker {
                 }
             }
             Command::Seek(p) => self.seek(p),
+            Command::PickLyricsSource(t, src) => self.pick_lyrics_source(t, src),
             Command::SeekBy(ms) => {
                 let p = self.position_now().as_millis() as i64 + ms;
                 self.seek(Duration::from_millis(p.max(0) as u64));

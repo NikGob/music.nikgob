@@ -206,7 +206,13 @@ async fn verified_picture_takes_the_candidate_whose_titles_overlap() {
     // Top tracks count too.
     let server = MockServer::start().await;
     mount_artist_search(&server).await;
-    mount_titles(&server, 1001, "", r#"{"id": 2, "title": "Звезда по имени Солнце"}"#).await;
+    mount_titles(
+        &server,
+        1001,
+        "",
+        r#"{"id": 2, "title": "Звезда по имени Солнце"}"#,
+    )
+    .await;
     let url = client(&server)
         .verified_artist_picture("Кино", &["Звезда по имени Солнце".to_owned()])
         .await
@@ -219,7 +225,13 @@ async fn verified_picture_takes_the_candidate_whose_titles_overlap() {
 async fn verified_picture_is_none_when_no_candidate_overlaps() {
     let server = MockServer::start().await;
     mount_artist_search(&server).await;
-    mount_titles(&server, 1001, r#"{"id": 1, "title": "Other Album"}"#, r#"{"id": 2, "title": "Other Song"}"#).await;
+    mount_titles(
+        &server,
+        1001,
+        r#"{"id": 1, "title": "Other Album"}"#,
+        r#"{"id": 2, "title": "Other Song"}"#,
+    )
+    .await;
     let deezer = client(&server);
     assert_eq!(
         deezer
@@ -235,7 +247,10 @@ async fn verified_picture_is_none_when_no_candidate_overlaps() {
             .unwrap(),
         None
     );
-    assert_eq!(deezer.verified_artist_picture("Кино", &[]).await.unwrap(), None);
+    assert_eq!(
+        deezer.verified_artist_picture("Кино", &[]).await.unwrap(),
+        None
+    );
 }
 
 #[tokio::test]
@@ -269,11 +284,17 @@ async fn picture_by_track_uses_the_matched_tracks_artist_id() {
     assert!(url.contains("/artist/real/"), "{url}");
     // A different artist or title is not a confident match.
     assert_eq!(
-        deezer.artist_picture_by_track("Цой", "Группа крови", None).await.unwrap(),
+        deezer
+            .artist_picture_by_track("Цой", "Группа крови", None)
+            .await
+            .unwrap(),
         None
     );
     assert_eq!(
-        deezer.artist_picture_by_track("Кино", "Совсем другая песня", None).await.unwrap(),
+        deezer
+            .artist_picture_by_track("Кино", "Совсем другая песня", None)
+            .await
+            .unwrap(),
         None
     );
 }

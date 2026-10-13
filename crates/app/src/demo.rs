@@ -76,7 +76,7 @@ fn make_cover(path: &Path, rgb: [u8; 3], seed: u32) {
 }
 
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v4";
+pub const VERSION: &str = "seed-v6";
 
 /// Synced lyrics for every demo track (6 s each), with a gap.
 const DEMO_LRC: &str = "[00:00.00]Свет из окна ложится на пол
@@ -85,6 +85,10 @@ const DEMO_LRC: &str = "[00:00.00]Свет из окна ложится на п�
 [00:02.80]Мы считаем шаги до утра
 [00:04.00]и слова, что не сказаны вслух, звучат громче всего остального
 [00:05.20]Тишина";
+
+/// Word-synced TTML (Apple Music style) next to every demo track: a duet
+/// line, background vocals and a translation.
+const DEMO_TTML: &str = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" itunes:timing="Word"><head><metadata><ttm:agent type="person" xml:id="v1"/><ttm:agent type="person" xml:id="v2"/><ttm:agent type="group" xml:id="v1000"/></metadata></head><body dur="6.000"><div><p begin="0.000" end="0.950" ttm:agent="v1"><span begin="0.000" end="0.146">Свет</span> <span begin="0.158" end="0.304">из</span> <span begin="0.317" end="0.462">окна</span> <span begin="0.475" end="0.621">ложится</span> <span begin="0.633" end="0.779">на</span> <span begin="0.792" end="0.937">пол</span></p><p begin="1.000" end="1.750" ttm:agent="v2"><span begin="1.000" end="1.173">Город</span> <span begin="1.188" end="1.360">ещё</span> <span begin="1.375" end="1.548">не</span> <span begin="1.562" end="1.735">проснулся</span><span ttm:role="x-translation" xml:lang="en">The city is not awake yet</span></p><p begin="2.800" end="3.900" ttm:agent="v1"><span begin="2.800" end="3.002">Мы</span> <span begin="3.020" end="3.222">считаем</span> <span begin="3.240" end="3.442">шаги</span> <span begin="3.460" end="3.662">до</span> <span begin="3.680" end="3.882">утра</span><span ttm:role="x-bg" begin="3.300" end="3.900"><span begin="3.300" end="3.576">(до</span> <span begin="3.600" end="3.876">утра)</span></span></p><p begin="4.000" end="5.100" ttm:agent="v1"><span begin="4.000" end="4.202">и</span> <span begin="4.220" end="4.422">слова</span> <span begin="4.440" end="4.642">звучат</span> <span begin="4.660" end="4.862">громче</span> <span begin="4.880" end="5.082">всего</span></p><p begin="5.200" end="5.900" ttm:agent="v1000"><span begin="5.200" end="5.844">Тишина</span></p></div></body></tt>"#;
 
 pub fn seed(lib: &Library, root: &Path) {
     if lib.count_releases().unwrap_or(0) > 0 {
@@ -137,6 +141,7 @@ pub fn seed(lib: &Library, root: &Path) {
             s.bit_depth = Some(16);
             let _ = lib.add_source(&s);
             let _ = lib.put_lyrics(t.id, Some(DEMO_LRC), None, false);
+            let _ = std::fs::write(path.with_extension("ttml"), DEMO_TTML);
             if n == 0 {
                 first_tracks.push(t.id);
             }

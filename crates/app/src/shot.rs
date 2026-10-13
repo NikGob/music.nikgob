@@ -3,7 +3,7 @@
 //! look at screens without a human at the keyboard.
 //!
 //! Synthetic input (logical points): `move:x,y`, `click:x,y`, `rclick:x,y`,
-//! `dblclick:x,y`, `drag:x1,y1,x2,y2`, `wheel:x,y,dy`, `key:space|escape|f11`.
+//! `dblclick:x,y`, `drag:x1,y1,x2,y2`, `wheel:x,y,dy`, `key:space|escape|f11|f12`.
 //! `prefs:{json}` merges into the prefs.
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 
@@ -211,6 +211,7 @@ impl Shot {
                     "space" => Some(egui::Key::Space),
                     "escape" => Some(egui::Key::Escape),
                     "f11" => Some(egui::Key::F11),
+                    "f12" => Some(egui::Key::F12),
                     _ => None,
                 };
                 if let Some(key) = key {
@@ -228,6 +229,10 @@ impl Shot {
             }
             "queue" => {
                 ui.open_queue();
+                self.wait = 40;
+            }
+            "lyrics" => {
+                ui.open_lyrics();
                 self.wait = 40;
             }
             "search" => {

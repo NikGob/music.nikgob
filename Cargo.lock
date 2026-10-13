@@ -3828,7 +3828,9 @@ name = "nikgob-metadata"
 version = "0.1.0"
 dependencies = [
  "log",
+ "nikgob-core",
  "reqwest",
+ "roxmltree",
  "serde",
  "serde_json",
  "strsim",

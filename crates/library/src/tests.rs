@@ -453,9 +453,12 @@ fn many_inserts_at_the_same_spot_stay_ordered() {
     );
 
     // Insert in the middle, at the front and clamp past the end.
-    let mid = lib.playlist_insert(p.id, tracks[0].id, 60).unwrap();
-    let first = lib.playlist_insert(p.id, tracks[1].id, 0).unwrap();
-    let last = lib.playlist_insert(p.id, tracks[2].id, 10_000).unwrap();
+    let extra: Vec<Track> = (120..123)
+        .map(|i| track(&lib, &a, None, &format!("t{i:03}"), i))
+        .collect();
+    let mid = lib.playlist_insert(p.id, extra[0].id, 60).unwrap();
+    let first = lib.playlist_insert(p.id, extra[1].id, 0).unwrap();
+    let last = lib.playlist_insert(p.id, extra[2].id, 10_000).unwrap();
     let ids: Vec<_> = lib
         .playlist_entries(p.id, 0, 1000)
         .unwrap()
@@ -512,11 +515,19 @@ fn move_and_remove_entries() {
         .unwrap();
     assert_eq!(dead, 1);
 
-    // The same track may appear twice (separate entries).
+    // Re-adding a track already in the playlist is a no-op returning its entry.
     let t = track(&lib, &a, None, "a", 9);
-    lib.playlist_add(p.id, t.id).unwrap();
-    lib.playlist_add(p.id, t.id).unwrap();
-    assert_eq!(lib.playlist_len(p.id).unwrap(), 6);
+    let first = lib.playlist_add(p.id, t.id).unwrap();
+    let again = lib.playlist_add(p.id, t.id).unwrap();
+    assert_eq!(first.id, again.id);
+    let many = lib.playlist_add_many(p.id, &[t.id, t.id]).unwrap();
+    assert!(many.iter().all(|e| e.id == first.id));
+    assert_eq!(lib.playlist_len(p.id).unwrap(), 5);
+
+    // A removed track can be added back.
+    lib.playlist_remove(first.id).unwrap();
+    assert_ne!(lib.playlist_add(p.id, t.id).unwrap().id, first.id);
+    assert_eq!(lib.playlist_len(p.id).unwrap(), 5);
 }
 
 #[test]

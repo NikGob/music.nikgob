@@ -160,6 +160,8 @@ fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Comm
 fn lyrics(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let l = &state.lyrics;
+    super::lyrics::source_picker(ui, state, out);
+    ui.add_space(4.0);
     if l.loading {
         ui.vertical_centered(|ui| {
             ui.add_space(32.0);

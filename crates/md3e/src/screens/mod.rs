@@ -61,6 +61,8 @@ pub struct Md3eUi {
     chrome: chrome::Chrome,
     system_reduced_motion: bool,
     fullscreen: bool,
+    /// Window fullscreen asked for with F11 (the visualizer forces it too).
+    user_fullscreen: bool,
 }
 
 impl Default for Md3eUi {
@@ -92,6 +94,7 @@ impl Md3eUi {
             chrome: chrome::Chrome::default(),
             system_reduced_motion: false,
             fullscreen: false,
+            user_fullscreen: false,
         }
     }
 
@@ -311,8 +314,9 @@ impl Md3eUi {
             self.chrome.visualizer = false;
         }
         // The visualizer takes the whole screen, not just the window.
-        if self.chrome.visualizer != self.fullscreen {
-            self.fullscreen = self.chrome.visualizer;
+        let want = self.chrome.visualizer || self.user_fullscreen;
+        if want != self.fullscreen {
+            self.fullscreen = want;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
         }
 
@@ -359,6 +363,9 @@ impl Md3eUi {
         let mut previous = false;
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::NONE, Key::F11) {
+                self.user_fullscreen = !self.user_fullscreen;
+            }
+            if i.consume_key(Modifiers::NONE, Key::F12) {
                 self.chrome.visualizer = !self.chrome.visualizer;
             }
             if self.chrome.visualizer && i.consume_key(Modifiers::NONE, Key::Escape) {
@@ -705,6 +712,11 @@ impl Md3eUi {
         } else {
             self.pane = Some(PaneTab::Queue);
         }
+    }
+
+    /// Opens the side pane on the lyrics (scripted screenshots).
+    pub fn open_lyrics(&mut self) {
+        self.pane = Some(PaneTab::Lyrics);
     }
 
     /// Switches the library page's tab (scripted screenshots).

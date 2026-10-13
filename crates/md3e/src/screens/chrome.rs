@@ -179,7 +179,7 @@ impl Chrome {
             }
             Act::Visualizer => MenuItem::new("Визуализатор")
                 .icon(Icon::GraphicEq)
-                .shortcut("F11"),
+                .shortcut("F12"),
             Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete),
             Act::Sep => MenuItem::new(""),
         }

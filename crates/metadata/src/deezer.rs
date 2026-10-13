@@ -207,7 +207,10 @@ impl Deezer {
         let limit = limit.clamp(1, 50).to_string();
         let q = strip_quotes(name);
         let raw: Raw = self
-            .get("search/artist", &[("q", q.as_str()), ("limit", limit.as_str())])
+            .get(
+                "search/artist",
+                &[("q", q.as_str()), ("limit", limit.as_str())],
+            )
             .await?;
         Ok(raw.data)
     }
@@ -321,7 +324,10 @@ impl Deezer {
                 Err(e) => return Err(e),
             }
             let overlaps = theirs.iter().map(|t| album_key(t)).any(|t| {
-                !t.is_empty() && known.iter().any(|k| similarity(k, &t) >= MIN_TITLE_SIMILARITY)
+                !t.is_empty()
+                    && known
+                        .iter()
+                        .any(|k| similarity(k, &t) >= MIN_TITLE_SIMILARITY)
             });
             if overlaps {
                 return Ok(hit.best_picture().map(str::to_owned));

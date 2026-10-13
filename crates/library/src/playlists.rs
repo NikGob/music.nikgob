@@ -163,6 +163,20 @@ fn insert_entry(
 ) -> Result<PlaylistEntry> {
     live_playlist(conn, playlist)?;
     let pid = playlist.to_string();
+    // A track lives in a playlist at most once: re-adding returns the existing entry.
+    let existing = conn
+        .query_row(
+            &format!(
+                "SELECT {ENTRY_COLS} FROM playlist_entry
+                  WHERE playlist_id = ?1 AND track_id = ?2 AND deleted = 0 LIMIT 1"
+            ),
+            params![pid, track.to_string()],
+            entry_from_row,
+        )
+        .optional()?;
+    if let Some(entry) = existing {
+        return Ok(entry);
+    }
     let position = position_for(conn, &pid, None, index, now, device)?;
     let entry = PlaylistEntry {
         id: EntryId::new(),

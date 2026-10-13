@@ -232,7 +232,7 @@ impl Viz {
                         IconButton::new(Icon::Close)
                             .size(Size::S)
                             .style(Style::Tonal)
-                            .tooltip("Закрыть (Esc, F11)")
+                            .tooltip("Закрыть (Esc, F12)")
                             .id_salt("viz-close"),
                     )
                     .clicked()
