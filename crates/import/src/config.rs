@@ -15,6 +15,10 @@ pub struct ImportConfig {
     pub downloads_dir: PathBuf,
     /// `Trash/`: deleted and replaced files, kept for 30 days.
     pub trash_dir: PathBuf,
+    /// Optional custom directory (e.g. on another drive) for lossless FLAC/WAV
+    /// masters and their `.json` sidecars. When empty, `<library_dir>/.musiclib/masters`
+    /// is used.
+    pub masters_dir: PathBuf,
     /// Opus VBR target for lossless inputs. Default 160.
     pub opus_bitrate_kbps: u32,
     /// Run the spectrum check on lossless inputs.
@@ -25,7 +29,7 @@ pub struct ImportConfig {
     /// Off by default: the PLAN forbids lossy-to-lossy conversion, so such a
     /// file is kept as a FLAC/WAV copy and scored as lossy.
     pub convert_fake_lossless: bool,
-    /// Look up synchronized lyrics on LRCLIB after the import (never blocks it).
+    /// Enable background online lyrics enrichment in the runtime.
     pub fetch_lyrics: bool,
     /// Fetch a cover online when the file has none.
     pub fetch_cover_online: bool,
@@ -49,6 +53,7 @@ impl ImportConfig {
             inbox_dir: inbox_dir.into(),
             downloads_dir: downloads_dir.into(),
             trash_dir: trash_dir.into(),
+            masters_dir: PathBuf::new(),
             opus_bitrate_kbps: 160,
             check_fake_lossless: true,
             cover_max_edge: 1200,
@@ -77,8 +82,32 @@ impl ImportConfig {
         self.library_dir.join(".musiclib")
     }
 
-    /// Where lossless masters wait for their backup (PLAN section 6, step 9).
+    /// Where lossless masters wait for their backup (PLAN section 6, step 9),
+    /// or the custom archive folder/drive chosen by the user.
     pub fn masters_dir(&self) -> PathBuf {
-        self.musiclib_dir().join("masters")
+        if self.masters_dir.as_os_str().is_empty() {
+            self.musiclib_dir().join("masters")
+        } else {
+            self.masters_dir.clone()
+        }
+    }
+
+    pub fn with_masters_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.masters_dir = dir.into();
+        self
+    }
+}
+
+/// Normalizes a user-chosen path for the lossless masters folder:
+/// - Empty or equal to `library_dir` -> `<library_dir>/.musiclib/masters`.
+/// - Drive root (`D:\`, `/`) with no folder name -> `<chosen>/FLAC`.
+/// - Any specific folder -> `<chosen>`.
+pub fn normalize_masters_dir(chosen: &Path, library_dir: &Path) -> PathBuf {
+    if chosen.as_os_str().is_empty() || chosen == library_dir {
+        library_dir.join(".musiclib").join("masters")
+    } else if chosen.file_name().is_none() {
+        chosen.join("FLAC")
+    } else {
+        chosen.to_path_buf()
     }
 }

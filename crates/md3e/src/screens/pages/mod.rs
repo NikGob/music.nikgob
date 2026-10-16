@@ -37,10 +37,10 @@ enum Ask {
 /// Page-level presentation state that outlives a frame.
 #[derive(Default)]
 pub struct PageState {
-    pub np_tab: PaneTab,
-    pub np_sheet: bool,
     /// A navigation requested from inside an overlay or menu.
     pub pending_nav: Option<Route>,
+    /// One-shot scroll to the lyrics settings header.
+    pub scroll_to_lyrics: bool,
     /// Latest bass level for the ambient glow (set by the host each frame).
     pub levels_bass: f32,
     /// Ask the shell to open a pane tab (e.g. "Источник и качество").
@@ -77,6 +77,11 @@ pub struct PageState {
 }
 
 impl PageState {
+    pub fn request_lyrics_settings(&mut self) {
+        self.scroll_to_lyrics = true;
+        self.pending_nav = Some(Route::Settings);
+    }
+
     /// The "Добавить" FAB menu (§2.1): the rail's FAB turns into a close button
     /// with pills below it. The rail already drew a plain FAB at `fab`; the
     /// menu takes its place so it can morph.
@@ -521,7 +526,7 @@ pub fn page(
     pages: &mut PageState,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
-    let mut nav = pages.pending_nav.take();
+    let mut nav = None;
     let id = format!("{route:?}");
     egui::ScrollArea::vertical()
         .id_salt(("page-scroll", id))

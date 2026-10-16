@@ -5,12 +5,15 @@
 use std::f32::consts::TAU;
 
 use egui::{
-    Align2, Color32, Id, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, epaint::PathShape, pos2,
+    Align2, Color32, Context, Id, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, epaint::PathShape, pos2,
     vec2,
 };
 
 use super::{anim, paint, paint::Radii};
 use crate::{Theme, TypeRole, tokens::shape};
+
+/// Thickness of the active track while it is a wave (a bar is the track's).
+const WAVE_THICKNESS: f32 = 6.0;
 
 /// Wave geometry (wavy progress: amplitude 3, wavelength 40).
 #[derive(Clone, Copy, Debug)]
@@ -141,13 +144,17 @@ impl Slider {
                 if pressed { 2.0 } else { 4.0 },
                 theme.motion.fast_spatial,
             );
+            // No bounce: a spatial spring undershoots 0 on pause and would
+            // have to be clamped there, which cuts the flattening short.
+            let running = self.wavy && !theme.reduced_motion;
             let wave_k = anim::fraction(
                 &ctx,
                 id.with("wave"),
-                if self.wavy && !theme.reduced_motion { 1.0 } else { 0.0 },
-                theme.motion.default_spatial,
+                if running { 1.0 } else { 0.0 },
+                theme.motion.slow_effects,
             )
-            .max(0.0);
+            .clamp(0.0, 1.0);
+            let phase = wave_phase(&ctx, id.with("phase"), running, self.wave.speed);
             let gap = 6.0;
             let cy = rect.center().y;
             let x = rect.left() + value * rect.width();
@@ -177,13 +184,17 @@ impl Slider {
             }
 
             // Active track (left of the handle): a bar that turns into a wave.
+            // One shape for the whole transition: thickness, amplitude and
+            // the corner by the handle all follow `wave_k`, so pausing flattens
+            // it without a pop where a bar would replace the wave.
             let left_end = (x - gap - handle_w * 0.5).max(rect.left());
             if left_end - rect.left() > 0.5 {
-                if wave_k > 0.01 {
-                    let thickness = t + (6.0 - t) * wave_k.min(1.0);
-                    let amp = self.wave.amplitude * wave_k;
-                    let phase = (anim::now(&ctx) as f32 * self.wave.speed).fract() * TAU;
-                    wave_line(
+                let thickness = t + (WAVE_THICKNESS.min(t) - t) * wave_k;
+                let amp = self.wave.amplitude * wave_k;
+                // 2 dp inner corner as a bar, a round cap as a wave.
+                let end_r = 2.0 + (thickness * 0.5 - 2.0) * wave_k;
+                if amp > 0.05 {
+                    wave_path(
                         ui,
                         rect.left() + thickness * 0.5,
                         left_end - thickness * 0.5,
@@ -192,22 +203,23 @@ impl Slider {
                         self.wave.wavelength,
                         phase,
                         Stroke::new(thickness, active),
+                        end_r,
                     );
-                    if self.wavy {
-                        ctx.request_repaint();
-                    }
                 } else {
                     let bar = Rect::from_min_max(
-                        pos2(rect.left(), cy - t * 0.5),
-                        pos2(left_end, cy + t * 0.5),
+                        pos2(rect.left(), cy - thickness * 0.5),
+                        pos2(left_end, cy + thickness * 0.5),
                     );
                     paint::container(
                         ui.painter(),
                         bar,
-                        Radii([shape::FULL, 2.0, 2.0, shape::FULL]),
+                        Radii([thickness * 0.5, end_r, end_r, thickness * 0.5]),
                         active,
                         Stroke::NONE,
                     );
+                }
+                if running {
+                    ctx.request_repaint();
                 }
             }
 
@@ -261,6 +273,23 @@ pub fn wave_line(
     phase: f32,
     stroke: Stroke,
 ) {
+    wave_path(ui, x0, x1, cy, amplitude, wavelength, phase, stroke, stroke.width * 0.5);
+}
+
+/// [`wave_line`] whose end at `x1` has corners of radius `end_radius` (up to
+/// half the stroke width, which is the round cap).
+#[allow(clippy::too_many_arguments)]
+fn wave_path(
+    ui: &Ui,
+    x0: f32,
+    x1: f32,
+    cy: f32,
+    amplitude: f32,
+    wavelength: f32,
+    phase: f32,
+    stroke: Stroke,
+    end_radius: f32,
+) {
     if x1 <= x0 {
         ui.painter().circle_filled(pos2(x0, cy), stroke.width * 0.5, stroke.color);
         return;
@@ -275,9 +304,34 @@ pub fn wave_line(
         })
         .collect();
     let (first, last) = (pts[0], pts[pts.len() - 1]);
+    let half = stroke.width * 0.5;
     ui.painter().add(Shape::Path(PathShape::line(pts, stroke)));
-    ui.painter().circle_filled(first, stroke.width * 0.5, stroke.color);
-    ui.painter().circle_filled(last, stroke.width * 0.5, stroke.color);
+    ui.painter().circle_filled(first, half, stroke.color);
+    if end_radius >= half - 0.01 {
+        ui.painter().circle_filled(last, half, stroke.color);
+    } else {
+        let cap = Rect::from_min_max(pos2(last.x, last.y - half), pos2(last.x + half, last.y + half));
+        let r = end_radius.max(0.0);
+        paint::container(ui.painter(), cap, Radii([0.0, r, r, 0.0]), stroke.color, Stroke::NONE);
+    }
+}
+
+/// The wave's phase (0..TAU) of the slider `id`. It advances while `running`
+/// and holds its value otherwise, so a wave that is flattening by a pause
+/// stays where it was instead of running on, and the next play continues
+/// from the same crest.
+fn wave_phase(ctx: &Context, id: Id, running: bool, speed: f32) -> f32 {
+    let now = anim::now(ctx);
+    ctx.data_mut(|d| {
+        let (turns, last) = d.get_temp_mut_or_insert_with(id, || (0.0_f64, now));
+        // A frame that comes late (a minimized window) must not spin the wave.
+        let dt = (now - *last).clamp(0.0, 0.1);
+        if running {
+            *turns = (*turns + dt * f64::from(speed)).rem_euclid(1.0);
+        }
+        *last = now;
+        *turns as f32 * TAU
+    })
 }
 
 /// The wavy linear progress indicator (4 dp, gap 4, stop dot). `fraction` in 0..1.
@@ -316,4 +370,107 @@ pub fn wavy_progress(ui: &mut Ui, id_salt: impl egui::AsId, fraction: f32, width
         }
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context() -> Context {
+        let ctx = Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        crate::typography::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+        ctx
+    }
+
+    /// One frame of a 400 px slider at `time`; returns the vertical extent
+    /// of the wave (0 if the active track is drawn as a flat bar).
+    fn frame(ctx: &Context, time: f64, value: f32, wavy: bool) -> f32 {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 100.0))),
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            Slider::new("t", value).width(400.0).wavy(wavy).show(ui);
+        });
+        out.textures_delta.clear();
+        out.shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Path(p) if !p.closed && p.points.len() > 5 => {
+                    let (lo, hi) = p.points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), q| {
+                        (lo.min(q.y), hi.max(q.y))
+                    });
+                    Some(hi - lo)
+                }
+                _ => None,
+            })
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn pausing_flattens_the_wave_smoothly_and_playing_brings_it_back() {
+        let ctx = context();
+        let dt = 1.0 / 60.0;
+        let mut t = 0.0;
+        for _ in 0..90 {
+            frame(&ctx, t, 0.5, true);
+            t += dt;
+        }
+        let full = frame(&ctx, t, 0.5, true);
+        assert!(full > 5.0, "a playing slider is wavy: {full}");
+
+        // Pause: the amplitude only ever shrinks, never jumps, and ends flat.
+        let mut last = full;
+        let mut biggest_step: f32 = 0.0;
+        for _ in 0..180 {
+            t += dt;
+            let a = frame(&ctx, t, 0.5, false);
+            assert!(a <= last + 0.05, "the wave grew while pausing: {last} -> {a}");
+            biggest_step = biggest_step.max(last - a);
+            last = a;
+        }
+        assert!(last == 0.0, "the wave did not flatten: {last}");
+        assert!(biggest_step < full * 0.25, "the wave popped: step {biggest_step} of {full}");
+
+        // Play again: it grows from flat without a jump.
+        let mut last = 0.0;
+        for _ in 0..180 {
+            t += dt;
+            let a = frame(&ctx, t, 0.5, true);
+            assert!(a <= full + 0.05, "overshoot: {a}");
+            assert!(a + 0.05 >= last || last == 0.0, "the wave shrank while starting: {last} -> {a}");
+            assert!(a - last < full * 0.25, "the wave popped in: {last} -> {a}");
+            last = a;
+        }
+        assert!((last - full).abs() < 0.2, "{last} vs {full}");
+    }
+
+    #[test]
+    fn phase_holds_while_paused_and_ignores_a_long_gap() {
+        let ctx = context();
+        let id = Id::new("phase");
+        let at = |t: f64, running: bool| {
+            let mut phase = 0.0;
+            let mut out = ctx.run_ui(egui::RawInput { time: Some(t), ..Default::default() }, |_| {
+                phase = wave_phase(&ctx, id, running, 0.6);
+            });
+            out.textures_delta.clear();
+            phase
+        };
+        let a = at(0.0, true);
+        let b = at(0.05, true);
+        assert!(b > a, "the wave runs while playing");
+        let held = at(0.1, false);
+        assert_eq!(at(0.15, false), held, "paused: the phase holds");
+        assert_eq!(at(5.0, false), held, "paused for long: still the same");
+        let c = at(5.05, true);
+        assert!((c - held).abs() < 0.5, "playing resumes where it was: {held} -> {c}");
+        // A frame hours late (a minimized window) advances by at most 0.1 s.
+        let late = at(5.05 + 3600.0, true);
+        let max_step = 0.1 * 0.6 * TAU;
+        assert!(((late - c).rem_euclid(TAU)) <= max_step + 1e-3, "{c} -> {late}");
+    }
 }

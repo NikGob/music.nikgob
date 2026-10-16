@@ -10,11 +10,12 @@ use crate::{
     components::{Button, Divider, FilterChip, Menu, MenuItem, Slider, Style, Switch, TextField},
 };
 
-fn group(ui: &mut Ui, title: &str) {
+fn group(ui: &mut Ui, title: &str) -> egui::Response {
     let s = Theme::get(ui.ctx()).scheme;
     ui.add_space(24.0);
-    ui.label(TypeRole::TitleSmall.style().rich(title, s.primary));
+    let header = ui.label(TypeRole::TitleSmall.style().rich(title, s.primary));
     ui.add_space(4.0);
+    header
 }
 
 /// A 56/72 row: label (+ supporting) on the left, a control on the right.
@@ -245,6 +246,72 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         });
     }
 
+    let lyrics_header = group(ui, "Текст песен");
+    row(ui, "Анимация", Some("Караоке — заливка по слогам, Фокус — строка целиком, Волна — буква за буквой"), |ui| {
+        let i = usize::from(p.lyrics_style).min(2);
+        if let (Some(n), _) = connected(ui, egui::Id::new("set-lyrics-style"), &["Караоке", "Фокус", "Волна"], i, &[]) {
+            p.lyrics_style = n as u8;
+        }
+    });
+    if p.lyrics_style == 2 {
+        row(ui, "Если нет разметки по слогам", Some("Для анимации «Волна»"), |ui| {
+            let labels = ["Волна — прыгающие буквы", "Спокойный Фокус"];
+            let i = usize::from(p.wave_syllables_only);
+            let options = labels.iter().enumerate().map(|(n, label)| ((*label).to_owned(), n == i)).collect::<Vec<_>>();
+            if let Some(n) = dropdown(ui, "set-wave-syllables", labels[i], &options) {
+                p.wave_syllables_only = n == 1;
+            }
+        });
+        row(ui, "Высота прыжка букв", Some("0 — буквы только подсвечиваются"), |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-jump", p.lyrics_wave_jump, (0.0, 2.0), 0.1, |v| format!("{v:.1}")) {
+                p.lyrics_wave_jump = v;
+            }
+        });
+    }
+    row(ui, "Приглушение остальных строк", Some("0% — без приглушения, 100% — сильное"), |ui| {
+        if let Some(v) = range_slider(ui, "set-lyrics-dim", p.lyrics_dim, (0.0, 1.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+            p.lyrics_dim = v;
+        }
+    });
+    row(ui, "Размер текста", None, |ui| {
+        if let Some(v) = range_slider(ui, "set-lyrics-scale", p.lyrics_scale, (0.8, 1.4), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+            p.lyrics_scale = v;
+        }
+    });
+    row(ui, "Каскад строк", Some("Дальние строки следуют за прокруткой с задержкой"), |ui| {
+        ui.add(Switch::new(&mut p.lyrics_cascade).id_salt("set-lyrics-cascade"));
+    });
+    row(ui, "Свечение текста", Some("Лёгкое свечение спетой части"), |ui| {
+        ui.add(Switch::new(&mut p.lyrics_glow).id_salt("set-lyrics-glow"));
+    });
+    row(ui, &format!("Возвращаться к текущей строке через {:.0} с", p.lyrics_return_s), Some("После ручной прокрутки текста"), |ui| {
+        if let Some(v) = range_slider(ui, "set-lyrics-return", p.lyrics_return_s, (1.0, 15.0), 1.0, |v| format!("{v:.0} с")) {
+            p.lyrics_return_s = v;
+        }
+    });
+    row(ui, "Индикатор паузы", Some("Кольцо между строками"), |ui| {
+        let labels = ["Линия", "Волна", "Толстая линия", "Толстая волна"];
+        let i = usize::from(p.lyrics_gap_style).min(3);
+        let options = labels.iter().enumerate().map(|(n, label)| ((*label).to_owned(), n == i)).collect::<Vec<_>>();
+        if let Some(n) = dropdown(ui, "set-lyrics-gap", labels[i], &options) {
+            p.lyrics_gap_style = n as u8;
+        }
+    });
+    if matches!(p.lyrics_gap_style, 1 | 3) {
+        row(ui, "Длина волны", Some("Чем больше гребней, тем короче волна"), |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-gap-waves", p.lyrics_gap_waves, (3.0, 16.0), 1.0, |v| format!("{v:.0} гребней")) {
+                p.lyrics_gap_waves = v;
+            }
+        });
+    }
+    row(ui, "Обратный отсчёт 3-2-1 в конце паузы", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_countdown).id_salt("set-lyrics-countdown"));
+    });
+    row(ui, "Открыть текст", Some("L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке"), |_| {});
+    row(ui, "Сохранять найденный текст в файл трека", Some("Встраивает синхронизированный текст в теги, чтобы он был доступен без интернета"), |ui| {
+        ui.add(Switch::new(&mut p.save_found_lyrics).id_salt("set-save-lyrics"));
+    });
+
     group(ui, "Звук");
     row(ui, "Устройство вывода", Some("Переключается сразу, без паузы"), |ui| {
         const DEFAULT: &str = "Системное по умолчанию";
@@ -277,6 +344,32 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         if ui.add(Button::new("Открыть").style(Style::Outlined).id_salt("open-lib")).clicked() {
             let _ = open_folder(&p.library_dir);
         }
+    });
+    let default_masters = p.library_dir.join(".musiclib").join("masters");
+    let masters_dir = if p.masters_dir.as_os_str().is_empty() {
+        default_masters
+    } else {
+        p.masters_dir.clone()
+    };
+    row(ui, "Архив FLAC (оригиналы)", Some(&masters_dir.display().to_string()), |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if ui
+                .add(Button::new("Перенести…").style(Style::Tonal).id_salt("move-masters"))
+                .clicked()
+                && let Some(dir) = rfd::FileDialog::new()
+                    .set_title("Выбери диск или папку для FLAC-оригиналов")
+                    .pick_folder()
+            {
+                out.push(Command::MoveMastersDir(dir));
+            }
+            if ui
+                .add(Button::new("Открыть").style(Style::Outlined).id_salt("open-masters"))
+                .clicked()
+            {
+                let _ = open_folder(&masters_dir);
+            }
+        });
     });
     row(ui, "Inbox", Some(&p.inbox_dir.display().to_string()), |ui| {
         if ui.add(Button::new("Открыть").style(Style::Outlined).id_salt("open-inbox")).clicked() {
@@ -434,6 +527,10 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     row(ui, "Raspberry Pi, сервер, телефон", Some("Этап 6"), |_| {});
     ui.add(Divider::new());
 
+    if std::mem::take(&mut pages.scroll_to_lyrics) {
+        // Request after the controls so their nested scroll areas cannot consume it.
+        ui.scroll_to_rect(lyrics_header.rect, Some(egui::Align::TOP));
+    }
     if p != before {
         out.push(Command::SetPrefs(Box::new(p)));
     }

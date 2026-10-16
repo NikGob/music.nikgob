@@ -43,17 +43,28 @@ struct SidecarScore {
 }
 
 fn master_scores(cfg: &ImportConfig) -> HashMap<TrackId, i32> {
-    let mut out = HashMap::new();
-    let Ok(rd) = std::fs::read_dir(long_path(&cfg.masters_dir())) else {
-        return out;
+    let mut out: HashMap<TrackId, i32> = HashMap::new();
+    let default_dir = cfg.musiclib_dir().join("masters");
+    let configured_dir = cfg.masters_dir();
+    let dirs = if configured_dir == default_dir {
+        vec![configured_dir]
+    } else {
+        vec![configured_dir, default_dir]
     };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.extension().is_some_and(|x| x == "json")
-            && let Ok(bytes) = std::fs::read(&p)
-            && let Ok(s) = serde_json::from_slice::<SidecarScore>(&bytes)
-        {
-            out.insert(s.track_id, s.quality_score);
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(long_path(&dir)) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "json")
+                && let Ok(bytes) = std::fs::read(&p)
+                && let Ok(s) = serde_json::from_slice::<SidecarScore>(&bytes)
+            {
+                out.entry(s.track_id)
+                    .and_modify(|q| *q = (*q).max(s.quality_score))
+                    .or_insert(s.quality_score);
+            }
         }
     }
     out
@@ -62,10 +73,14 @@ fn master_scores(cfg: &ImportConfig) -> HashMap<TrackId, i32> {
 /// Walks `cfg.library_dir` and recreates artist, release, track and source rows.
 pub fn rebuild_from_files(library: &Library, cfg: &ImportConfig) -> Result<RebuildReport> {
     let (files, _) = fsutil::scan(std::slice::from_ref(&cfg.library_dir));
+    let masters_dir = cfg.masters_dir();
     let masters = master_scores(cfg);
     let mut store = Store::new(library.clone());
     let mut report = RebuildReport::default();
     for path in files {
+        if path.starts_with(&masters_dir) {
+            continue;
+        }
         report.files += 1;
         let (tags, info) = match tags::read_tags(&path) {
             Ok(v) => v,

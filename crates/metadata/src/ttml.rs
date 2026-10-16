@@ -595,6 +595,18 @@ mod tests {
     }
 
     #[test]
+    fn lrc_red_namespaces_keep_keys_words_background_and_duet() {
+        let xml = doc(
+            r#"<iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal"><translations><translation><text for="L1">Hi</text></translation></translations></iTunesMetadata>"#,
+            r#"<p begin="1" end="3" itunes:key="L1" ttm:agent="v2"><span begin="1" end="2">Hello</span><span ttm:role="x-bg"><span begin="2" end="3">Oh</span></span></p>"#,
+        ).replace("itunes:", "lrc:").replace("xmlns:itunes", "xmlns:lrc").replace("http://music.apple.com/lyric-ttml-internal", "http://lrc.red/lyric-ttml-internal").replace("iTunesMetadata", "sourceMetadata");
+        let lines = parse_ttml(&xml).unwrap().lines;
+        assert_eq!(lines[0].translation.as_deref(), Some("Hi"));
+        assert_eq!(lines[0].words[0].start, ms(1000));
+        assert!(lines[0].duet && lines[1].duet && lines[1].background);
+    }
+
+    #[test]
     fn background_vocals_become_a_line_after_their_parent() {
         let xml = doc(
             "",

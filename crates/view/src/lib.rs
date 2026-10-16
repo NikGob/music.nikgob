@@ -500,6 +500,9 @@ pub struct Prefs {
     pub check_fake_lossless: bool,
     pub library_dir: PathBuf,
     pub inbox_dir: PathBuf,
+    /// Where lossless masters (`.flac` originals and `.json` sidecars) are kept.
+    /// Defaults to `<library_dir>/.musiclib/masters`, or another drive/folder chosen by the user.
+    pub masters_dir: PathBuf,
     pub fallback_seed: u32,
     pub prowlarr_url: String,
     pub prowlarr_configured: bool,
@@ -516,12 +519,35 @@ pub struct Prefs {
     /// KiB/s, 0 = unlimited.
     pub download_limit_kbps: u32,
     pub upload_limit_kbps: u32,
-    /// Now Playing's queue / lyrics / info column was left open.
-    pub np_pane: bool,
+    /// Content beside the cover in Now Playing.
+    pub np_slot: NpSlot,
     /// The dotted ring around the Now Playing cover turns while playing.
     pub spin_ring: bool,
-    /// How synced lyrics animate: 0 karaoke, 1 focus, 2 wave.
+    /// How synced lyrics animate: 0 karaoke, 1 focus, 2 wave (letter by letter).
     pub lyrics_style: u8,
+    /// Wave only for syllable-synced lyrics; other texts use Focus.
+    pub wave_syllables_only: bool,
+    /// Wave letters jump up as they are sung (off: they only light up).
+    pub lyrics_wave_jump: f32,
+    /// How far lines other than the current one fade (0 none .. 1 strong).
+    pub lyrics_dim: f32,
+    /// Text size multiplier for synced lyrics (0.8..1.4).
+    pub lyrics_scale: f32,
+    /// Lines further from the current one follow the scroll more lazily.
+    pub lyrics_cascade: bool,
+    /// The sung part glows a little.
+    pub lyrics_glow: bool,
+    /// Seconds after a manual scroll before the view returns to the song.
+    pub lyrics_return_s: f32,
+    /// The pause indicator between lines: 0 flat thin, 1 wavy thin,
+    /// 2 flat thick, 3 wavy thick (the four Material 3 Expressive forms).
+    pub lyrics_gap_style: u8,
+    /// Crests around the pause ring (wavelength = circumference / this).
+    pub lyrics_gap_waves: f32,
+    /// The last seconds of a pause count down in digits instead.
+    pub lyrics_countdown: bool,
+    /// Embed the selected online lyrics in the track tags.
+    pub save_found_lyrics: bool,
     /// The outline the Now Playing cover takes while playing.
     pub cover_shape: CoverShape,
     /// The cover's outline turns while playing (the picture stays put).
@@ -543,6 +569,22 @@ pub struct Prefs {
     pub np_volume: bool,
     /// How Now Playing opens and closes: 0 smooth, 1 lively, 2 fast.
     pub np_motion: u8,
+}
+
+/// The single content slot beside the Now Playing cover.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NpSlot {
+    #[default]
+    None,
+    Lyrics,
+    Queue,
+    Info,
+}
+
+impl NpSlot {
+    pub fn toggle(&mut self, slot: Self) {
+        *self = if *self == slot { Self::None } else { slot };
+    }
 }
 
 /// The ring around the Now Playing cover.
@@ -806,6 +848,8 @@ pub enum Command {
 
     // Settings
     SetPrefs(Box<Prefs>),
+    /// Move lossless FLAC/WAV masters to another drive or folder (copy -> hash verify -> delete old).
+    MoveMastersDir(PathBuf),
     /// Prowlarr address and API key (stored in settings.toml, never shown again).
     SetIndexer { url: String, api_key: String },
     /// MusicBrainz contact and AcoustID key (stored in settings.toml).
@@ -830,6 +874,7 @@ impl Default for Prefs {
             check_fake_lossless: true,
             library_dir: PathBuf::new(),
             inbox_dir: PathBuf::new(),
+            masters_dir: PathBuf::new(),
             fallback_seed: 0xFF6750A4,
             prowlarr_url: String::new(),
             prowlarr_configured: false,
@@ -843,9 +888,20 @@ impl Default for Prefs {
             seed_ratio: 2.0,
             download_limit_kbps: 0,
             upload_limit_kbps: 0,
-            np_pane: false,
+            np_slot: NpSlot::None,
             spin_ring: true,
             lyrics_style: 0,
+            wave_syllables_only: true,
+            lyrics_wave_jump: 1.0,
+            lyrics_dim: 0.5,
+            lyrics_scale: 1.0,
+            lyrics_cascade: true,
+            lyrics_glow: false,
+            lyrics_return_s: 4.0,
+            lyrics_gap_style: 1,
+            lyrics_gap_waves: 6.0,
+            lyrics_countdown: true,
+            save_found_lyrics: false,
             cover_shape: CoverShape::default(),
             cover_spin: true,
             cover_pulse: true,
@@ -859,3 +915,4 @@ impl Default for Prefs {
         }
     }
 }
+

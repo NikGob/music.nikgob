@@ -33,6 +33,7 @@ pub(crate) enum Internal {
     Import(ImportEvent),
     Resolved { item: u64, error: Option<String> },
     LyricsFetched(TrackId, LyricsSource, Result<Option<crate::lyrics::Text>, String>),
+    LyricsEmbedded(TrackId, Result<String, String>),
     Enrich(crate::enrich::Event),
     TagSuggestions(TrackId, Result<Vec<(String, v::TagEdit)>, String>),
     Retagged(TrackId, Result<(), String>),
@@ -49,6 +50,18 @@ pub(crate) enum Internal {
     #[allow(clippy::type_complexity)]
     TorrentAdded(Result<(String, String, Option<Vec<usize>>, Option<String>), String>),
     SeedStopped(Vec<nikgob_torrent::TorrentStatus>),
+    MastersMoveProgress {
+        job: u64,
+        done: usize,
+        total: usize,
+        file: String,
+    },
+    MastersMoved {
+        job: u64,
+        old_dir: PathBuf,
+        new_dir: PathBuf,
+        result: Result<nikgob_import::RelocateReport, String>,
+    },
 }
 
 /// Bits above this mark ids of import jobs in the shared "Загрузки" lists;
@@ -94,9 +107,15 @@ pub(crate) struct ImportService {
     /// Background lyrics backfill and artist photos.
     pub(crate) enrich: crate::enrich::Enrich,
     pub(crate) lyrics_cache: HashMap<TrackId, crate::lyrics::TrackLyrics>,
+    /// `lyrics_cache` keys, least recently stored first.
+    pub(crate) lyrics_order: VecDeque<TrackId>,
+    /// Lyrics to write into files that were playing (or preloaded) when the
+    /// text settled: rewriting a file under the decoder shifts its pages.
+    pub(crate) embed_later: HashSet<TrackId>,
     pub(crate) last_trashed: Option<Trashed>,
     /// New settings, applied once nothing is importing.
     reconfigure: Option<ImportConfig>,
+    next_move_id: u64,
 }
 
 impl ImportService {
@@ -141,8 +160,11 @@ impl ImportService {
             lyrics_tried: HashSet::new(),
             enrich: Default::default(),
             lyrics_cache: HashMap::new(),
+            lyrics_order: VecDeque::new(),
+            embed_later: HashSet::new(),
             last_trashed: None,
             reconfigure: None,
+            next_move_id: 0,
         };
         svc.attach();
 
@@ -439,8 +461,90 @@ impl Worker {
             Internal::TorrentFilesListed(i, r) => self.files_listed(i, r),
             Internal::TorrentAdded(r) => self.torrent_added(r),
             Internal::SeedStopped(list) => self.seed_stopped(list),
+            Internal::MastersMoveProgress {
+                job,
+                done,
+                total,
+                file,
+            } => {
+                if let Some(svc) = &mut self.import
+                    && let Some(p) = svc.jobs.get_mut(&job)
+                {
+                    p.files = total;
+                    p.done = done;
+                    p.current = Some((file, Stage::Placing));
+                }
+                self.publish_downloads();
+            }
+            Internal::MastersMoved {
+                job,
+                old_dir,
+                new_dir,
+                result,
+            } => {
+                if let Some(svc) = &mut self.import {
+                    svc.jobs.remove(&job);
+                }
+                match result {
+                    Ok(report) => {
+                        if let Some(svc) = &mut self.import {
+                            let subtitle = if report.audio_moved > 0 {
+                                format!(
+                                    "перенесено {} · проверено BLAKE3 → {}",
+                                    report.audio_moved,
+                                    new_dir.display()
+                                )
+                            } else {
+                                format!("папка → {}", new_dir.display())
+                            };
+                            svc.history.push_front(v::Job {
+                                id: IMPORT_ID | job,
+                                title: "Перенос архива FLAC".to_owned(),
+                                subtitle,
+                                progress: Some(1.0),
+                                rate: None,
+                                eta: None,
+                                paused: false,
+                                controllable: false,
+                                error: None,
+                            });
+                            svc.history.truncate(100);
+                            svc.apply_reconfigure();
+                        }
+                        self.publish_downloads();
+                        if report.audio_moved > 0 {
+                            self.toast(
+                                format!(
+                                    "Перенесено FLAC-оригиналов: {} (проверено по хешу, старые удалены)",
+                                    report.audio_moved
+                                ),
+                                None,
+                            );
+                        } else {
+                            self.toast(format!("Папка FLAC: {}", new_dir.display()), None);
+                        }
+                    }
+                    Err(err) => {
+                        log::error!("moving masters from {} to {}: {err}", old_dir.display(), new_dir.display());
+                        if let Some(svc) = &mut self.import {
+                            let mut cfg = svc
+                                .reconfigure
+                                .take()
+                                .unwrap_or_else(|| svc.config().clone());
+                            cfg.masters_dir = old_dir.clone();
+                            svc.reconfigure = Some(cfg);
+                            svc.apply_reconfigure();
+                        }
+                        self.publish(|s, _| s.prefs.masters_dir = old_dir);
+                        self.save_prefs();
+                        self.publish_downloads();
+                        self.toast(format!("Не удалось перенести FLAC: {err}"), None);
+                    }
+                }
+            }
             Internal::Enrich(ev) => self.enrich_event(ev),
             Internal::LyricsFetched(track, source, got) => self.lyrics_fetched(track, source, got),
+            Internal::LyricsEmbedded(track, result) => self.lyrics_embedded(track, result),
         }
     }
 
@@ -671,27 +775,122 @@ impl Worker {
 
     /// Import-related prefs changed: rebuild the importer when it is idle.
     pub(crate) fn import_prefs(&mut self, p: &v::Prefs) {
-        let Some(svc) = &mut self.import else { return };
-        let old = svc.reconfigure.as_ref().unwrap_or(svc.config());
-        let mut cfg = old.clone();
-        cfg.opus_bitrate_kbps = p.opus_bitrate;
-        cfg.check_fake_lossless = p.check_fake_lossless;
-        cfg.fallback_seed_argb = p.fallback_seed;
-        if !p.library_dir.as_os_str().is_empty() {
-            cfg.library_dir = p.library_dir.clone();
+        let move_to = {
+            let Some(svc) = &mut self.import else { return };
+            let old = svc.reconfigure.as_ref().unwrap_or(svc.config());
+            let mut cfg = old.clone();
+            cfg.opus_bitrate_kbps = p.opus_bitrate;
+            cfg.check_fake_lossless = p.check_fake_lossless;
+            cfg.fallback_seed_argb = p.fallback_seed;
+            if !p.library_dir.as_os_str().is_empty() {
+                cfg.library_dir = p.library_dir.clone();
+            }
+            if !p.inbox_dir.as_os_str().is_empty() {
+                cfg.inbox_dir = p.inbox_dir.clone();
+            }
+            let move_to = if !p.masters_dir.as_os_str().is_empty() {
+                let normalized = nikgob_import::normalize_masters_dir(&p.masters_dir, &cfg.library_dir);
+                (normalized != old.masters_dir()).then_some(p.masters_dir.clone())
+            } else {
+                None
+            };
+            let same = cfg.opus_bitrate_kbps == old.opus_bitrate_kbps
+                && cfg.check_fake_lossless == old.check_fake_lossless
+                && cfg.fallback_seed_argb == old.fallback_seed_argb
+                && cfg.library_dir == old.library_dir
+                && cfg.inbox_dir == old.inbox_dir;
+            if !same {
+                svc.reconfigure = Some(cfg);
+                svc.apply_reconfigure();
+            }
+            move_to
+        };
+        if let Some(dir) = move_to {
+            self.move_masters_dir(dir);
         }
-        if !p.inbox_dir.as_os_str().is_empty() {
-            cfg.inbox_dir = p.inbox_dir.clone();
+    }
+
+    /// Relocates lossless masters (`.flac` originals and `.json` sidecars) to a
+    /// new directory or drive, verifying every file's BLAKE3 hash before
+    /// deleting the old copy.
+    pub(crate) fn move_masters_dir(&mut self, chosen: PathBuf) {
+        let Some(svc) = &mut self.import else {
+            self.toast("Перенос папки FLAC недоступен", None);
+            return;
+        };
+        let cur_cfg = svc.reconfigure.as_ref().unwrap_or(svc.config()).clone();
+        let new_dir = nikgob_import::normalize_masters_dir(&chosen, &cur_cfg.library_dir);
+        let old_dir = cur_cfg.masters_dir();
+
+        let default_masters = cur_cfg.musiclib_dir().join("masters");
+        let inside_work_dir = new_dir != default_masters
+            && (new_dir.starts_with(&cur_cfg.inbox_dir)
+                || new_dir.starts_with(&cur_cfg.downloads_dir)
+                || new_dir.starts_with(&cur_cfg.trash_dir)
+                || (new_dir.starts_with(&cur_cfg.library_dir)
+                    && !new_dir.starts_with(cur_cfg.musiclib_dir())));
+        if inside_work_dir {
+            self.toast(
+                "Нельзя хранить FLAC-архив внутри папки музыки, Inbox или загрузок",
+                None,
+            );
+            return;
         }
-        let same = cfg.opus_bitrate_kbps == old.opus_bitrate_kbps
-            && cfg.check_fake_lossless == old.check_fake_lossless
-            && cfg.fallback_seed_argb == old.fallback_seed_argb
-            && cfg.library_dir == old.library_dir
-            && cfg.inbox_dir == old.inbox_dir;
-        if !same {
-            svc.reconfigure = Some(cfg);
-            svc.apply_reconfigure();
+
+        if old_dir == new_dir {
+            self.publish(|s, _| s.prefs.masters_dir = new_dir);
+            self.save_prefs();
+            self.toast("Эта папка FLAC уже используется", None);
+            return;
         }
+
+        let mut cfg = cur_cfg;
+        cfg.masters_dir = new_dir.clone();
+        svc.reconfigure = Some(cfg);
+        svc.apply_reconfigure();
+
+        svc.next_move_id += 1;
+        let job_id = (1u64 << 40) | svc.next_move_id;
+        svc.jobs.insert(
+            job_id,
+            Progress {
+                title: "Перенос архива FLAC".to_owned(),
+                files: 0,
+                done: 0,
+                imported: 0,
+                duplicates: 0,
+                failed: 0,
+                parked: 0,
+                current: None,
+                last_error: None,
+            },
+        );
+
+        let lib = self.lib.clone();
+        let tx = svc.internal.clone();
+        let (from, to) = (old_dir, new_dir.clone());
+        svc.spawn_blocking(move || {
+            let tx_prog = tx.clone();
+            let result = nikgob_import::relocate_masters(&lib, &from, &to, |done, total, path| {
+                let _ = tx_prog.send(Internal::MastersMoveProgress {
+                    job: job_id,
+                    done,
+                    total,
+                    file: file_name(path),
+                });
+            })
+            .map_err(|e| e.to_string());
+            let _ = tx.send(Internal::MastersMoved {
+                job: job_id,
+                old_dir: from,
+                new_dir: to,
+                result,
+            });
+        });
+
+        self.publish(|s, _| s.prefs.masters_dir = new_dir);
+        self.save_prefs();
+        self.publish_downloads();
     }
 
     /// The MusicBrainz contact or AcoustID key changed.
@@ -709,6 +908,15 @@ impl Worker {
 
     /// Lyrics and file tags of the track that just started.
     pub(crate) fn track_details(&mut self, track: TrackId) {
+        // The previous track is no longer under the decoder.
+        let later: Vec<TrackId> = self
+            .import
+            .as_mut()
+            .map(|s| std::mem::take(&mut s.embed_later).into_iter().collect())
+            .unwrap_or_default();
+        for t in later {
+            self.embed_lyrics(t);
+        }
         let src = self
             .lib
             .active_source(track)

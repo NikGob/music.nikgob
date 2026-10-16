@@ -631,3 +631,53 @@ fn merging_keeps_the_one_known_musicbrainz_id() {
     assert_eq!(lib.get_release(main).unwrap().unwrap().mbid.as_deref(), Some("mbid-1"));
     assert_eq!(lib.tracks_of_release(main).unwrap().len(), 3);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn masters_relocate_to_another_folder_with_hash_verification_and_cleanup() {
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let wav = root.inbox("song.wav");
+    write_wav(&wav, &broadband(RATE, 4.0, 11), RATE);
+    tags::write_tags(&wav, &song_tags("Звезда по имени Солнце")).unwrap();
+
+    let events = importer
+        .import_paths(vec![root.cfg.inbox_dir.clone()], SourceOrigin::Inbox)
+        .wait()
+        .await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    let (track_id, _) = imported(&events)[0];
+
+    let old_masters = root.cfg.masters_dir();
+    assert!(old_masters.is_dir());
+    let opus_locator = lib.active_source(track_id).unwrap().unwrap().locator;
+    assert!(std::path::Path::new(&opus_locator).is_file());
+
+    let new_masters = root.dir.path().join("external_drive").join("FLAC");
+    let report = nikgob_import::relocate_masters(&lib, &old_masters, &new_masters, |_, _, _| {}).unwrap();
+    assert_eq!(report.audio_moved, 1);
+    assert_eq!(report.sidecars_moved, 1);
+    assert!(report.bytes_moved > 0);
+    assert!(!old_masters.exists(), "old masters folder removed once empty");
+
+    // Opus file stays untouched on the fast library drive.
+    assert!(std::path::Path::new(&opus_locator).is_file());
+
+    // New masters folder has both the verified lossless original and the updated sidecar.
+    let mut moved_cfg = root.cfg.clone().with_masters_dir(&new_masters);
+    assert_eq!(moved_cfg.masters_dir(), new_masters);
+    let entries: Vec<_> = std::fs::read_dir(&new_masters)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(entries.iter().any(|n| n.ends_with(".wav")), "{entries:?}");
+    assert!(entries.iter().any(|n| n.ends_with(".json")), "{entries:?}");
+
+    // Rebuilding from files still finds the master quality score in the new folder.
+    let fresh = Library::open_in_memory().unwrap();
+    moved_cfg.masters_dir = new_masters;
+    let rb = rebuild_from_files(&fresh, &moved_cfg).unwrap();
+    assert_eq!(rb.files, 1);
+    assert_eq!(fresh.active_source(track_id).unwrap().unwrap().quality_score, 900);
+}
+

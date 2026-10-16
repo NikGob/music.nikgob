@@ -76,19 +76,26 @@ fn make_cover(path: &Path, rgb: [u8; 3], seed: u32) {
 }
 
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v6";
+pub const VERSION: &str = "seed-v8";
 
-/// Synced lyrics for every demo track (6 s each), with a gap.
-const DEMO_LRC: &str = "[00:00.00]Свет из окна ложится на пол
-[00:01.00]Город ещё не проснулся
-[00:02.00]
-[00:02.80]Мы считаем шаги до утра
-[00:04.00]и слова, что не сказаны вслух, звучат громче всего остального
-[00:05.20]Тишина";
+/// The intro, instrumental gap and long line exercise both lyrics layouts.
+const DEMO_LRC: &str = "[00:03.00]Свет из окна ложится на пол
+[00:05.00]Город ещё не проснулся
+[00:12.80]и слова, что не сказаны вслух, звучат громче всего остального, пока город считает шаги до утра
+[00:19.00]Мы считаем шаги до утра
+[00:22.00]Тишина";
 
-/// Word-synced TTML (Apple Music style) next to every demo track: a duet
-/// line, background vocals and a translation.
-const DEMO_TTML: &str = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" itunes:timing="Word"><head><metadata><ttm:agent type="person" xml:id="v1"/><ttm:agent type="person" xml:id="v2"/><ttm:agent type="group" xml:id="v1000"/></metadata></head><body dur="6.000"><div><p begin="0.000" end="0.950" ttm:agent="v1"><span begin="0.000" end="0.146">Свет</span> <span begin="0.158" end="0.304">из</span> <span begin="0.317" end="0.462">окна</span> <span begin="0.475" end="0.621">ложится</span> <span begin="0.633" end="0.779">на</span> <span begin="0.792" end="0.937">пол</span></p><p begin="1.000" end="1.750" ttm:agent="v2"><span begin="1.000" end="1.173">Город</span> <span begin="1.188" end="1.360">ещё</span> <span begin="1.375" end="1.548">не</span> <span begin="1.562" end="1.735">проснулся</span><span ttm:role="x-translation" xml:lang="en">The city is not awake yet</span></p><p begin="2.800" end="3.900" ttm:agent="v1"><span begin="2.800" end="3.002">Мы</span> <span begin="3.020" end="3.222">считаем</span> <span begin="3.240" end="3.442">шаги</span> <span begin="3.460" end="3.662">до</span> <span begin="3.680" end="3.882">утра</span><span ttm:role="x-bg" begin="3.300" end="3.900"><span begin="3.300" end="3.576">(до</span> <span begin="3.600" end="3.876">утра)</span></span></p><p begin="4.000" end="5.100" ttm:agent="v1"><span begin="4.000" end="4.202">и</span> <span begin="4.220" end="4.422">слова</span> <span begin="4.440" end="4.642">звучат</span> <span begin="4.660" end="4.862">громче</span> <span begin="4.880" end="5.082">всего</span></p><p begin="5.200" end="5.900" ttm:agent="v1000"><span begin="5.200" end="5.844">Тишина</span></p></div></body></tt>"#;
+/// Syllable, word and line timing also check the sweep across forced rows, a duet and a
+/// background voice which belongs to singing rather than the long gap.
+const DEMO_TTML: &str = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" itunes:timing="Word">
+<head><metadata><ttm:agent type="person" xml:id="v1"/><ttm:agent type="person" xml:id="v2"/></metadata></head>
+<body dur="24.000"><div>
+<p begin="3.000" end="4.600" ttm:agent="v1"><span begin="3.000" end="3.250">Свет</span> <span begin="3.260" end="3.500">из</span> <span begin="3.510" end="3.750">окна</span> <span begin="3.760" end="4.000">ложится</span> <span begin="4.010" end="4.250">на</span> <span begin="4.260" end="4.600">пол</span></p>
+<p begin="5.000" end="8.600" ttm:agent="v2"><span begin="5.000" end="5.400">Го</span><span begin="5.500" end="7.200">род</span> <span begin="7.250" end="7.600">ещё</span> <span begin="7.650" end="7.950">не</span> <span begin="8.000" end="8.600">проснулся</span><span ttm:role="x-translation" xml:lang="en">The city is not awake yet</span></p>
+<p begin="12.800" end="18.600" ttm:agent="v1"><span begin="12.800" end="13.060">и</span> <span begin="13.100" end="13.360">слова,</span> <span begin="13.400" end="13.660">что</span> <span begin="13.700" end="13.960">не</span> <span begin="14.000" end="14.260">сказаны</span> <span begin="14.300" end="14.560">вслух,</span> <span begin="14.600" end="14.860">звучат</span> <span begin="14.900" end="15.160">громче</span> <span begin="15.200" end="15.460">всего</span> <span begin="15.500" end="15.760">остального,</span> <span begin="15.800" end="16.060">пока</span> <span begin="16.100" end="16.360">город</span> <span begin="16.400" end="16.660">считает</span> <span begin="16.700" end="16.960">шаги</span> <span begin="17.000" end="17.260">до</span> <span begin="17.300" end="17.560">утра</span></p>
+<p begin="19.000" end="21.600" ttm:agent="v1"><span begin="19.000" end="19.400">Мы</span> <span begin="19.420" end="19.820">считаем</span> <span begin="19.840" end="20.240">шаги</span> <span begin="20.260" end="20.660">до</span> <span begin="20.680" end="21.600">утра</span><span ttm:role="x-bg" begin="20.800" end="21.600"><span begin="20.800" end="21.160">(до</span> <span begin="21.180" end="21.600">утра)</span></span></p>
+<p begin="22.000" end="23.900" ttm:agent="v1">Тишина</p>
+</div></body></tt>"#;
 
 pub fn seed(lib: &Library, root: &Path) {
     if lib.count_releases().unwrap_or(0) > 0 {
@@ -130,11 +137,11 @@ pub fn seed(lib: &Library, root: &Path) {
             let mut t = Track::new(*title, credit.clone());
             t.release_id = Some(r.id);
             t.track_no = n as u32 + 1;
-            t.duration_ms = Some(6_000);
+            t.duration_ms = Some(24_000);
             let t = lib.upsert_track(&t).expect("track");
             let codec = Codec::Wav;
             let path = dir.join(format!("{:02} - {title}.wav", n + 1));
-            write_tone(&path, 220.0 * 2f32.powf((i * 3 + n) as f32 / 12.0), 6.0);
+            write_tone(&path, 220.0 * 2f32.powf((i * 3 + n) as f32 / 12.0), 24.0);
             let mut s = Source::new(t.id, SourceKind::LocalFile, path.display().to_string(), codec);
             s.bitrate = Some(705);
             s.sample_rate = Some(44_100);

@@ -268,3 +268,74 @@ fn pausing_a_folder_import_never_reaches_the_torrent_client() {
     );
     assert!(s.downloads.active.iter().all(|j| j.error.is_none()));
 }
+
+#[test]
+fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_opus() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let cfg = ImportConfig::with_root(root);
+    let old_masters = cfg.masters_dir();
+    std::fs::create_dir_all(&cfg.inbox_dir).unwrap();
+    let wav1 = root.join("first.wav");
+    write_wav(&wav1, 2.5);
+
+    let lib = Library::open_in_memory().unwrap();
+    let prefs_path = root.join("prefs.json");
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            library_dir: cfg.library_dir.clone(),
+            prefs: Prefs::default(),
+            prefs_path: Some(prefs_path.clone()),
+            settings_path: None,
+            import: Some(ImportSetup {
+                config: cfg.clone(),
+                metadata: None,
+                watch_inbox: false,
+                torrent_state_dir: root.join("torrent-state"),
+                torrent_offline: true,
+            }),
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+
+    rt.send(Command::ImportFiles(vec![wav1]));
+    wait_for(&rt, "first import", |s| s.library.track_count == 1);
+    let track1 = rt.state().library.tracks[0].id;
+    let opus1 = std::path::PathBuf::from(lib.active_source(track1).unwrap().unwrap().locator);
+    assert!(opus1.is_file(), "Opus is in the library");
+    assert!(old_masters.is_dir(), "initial master in default masters_dir");
+
+    // Move FLAC masters to another folder/drive.
+    let new_masters = root.join("hdd_flac_archive");
+    rt.send(Command::MoveMastersDir(new_masters.clone()));
+    wait_for(&rt, "masters relocation", |s| {
+        s.prefs.masters_dir == new_masters
+            && s.toasts.iter().any(|t| t.text.contains("Перенесено FLAC"))
+    });
+
+    assert!(!old_masters.exists(), "old masters folder cleaned up after verified transfer");
+    assert!(opus1.is_file(), "Opus stays on the fast library disk");
+    let moved_files: Vec<_> = std::fs::read_dir(&new_masters)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(moved_files.iter().any(|n| n.ends_with(".wav")), "{moved_files:?}");
+    assert!(moved_files.iter().any(|n| n.ends_with(".json")), "{moved_files:?}");
+
+    // Subsequent imports store new masters directly into the new folder.
+    let wav2 = root.join("second.wav");
+    write_wav(&wav2, 3.2);
+    rt.send(Command::ImportFiles(vec![wav2]));
+    wait_for(&rt, "second import", |s| s.library.track_count == 2);
+    let count_wavs = std::fs::read_dir(&new_masters)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".wav"))
+        .count();
+    assert_eq!(count_wavs, 2, "second master went straight into new_masters");
+    assert!(!old_masters.exists());
+}
+

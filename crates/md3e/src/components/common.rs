@@ -163,31 +163,30 @@ pub(crate) fn paint_image_zoomed(
     fallback: crate::Icon,
     zoom: f32,
 ) {
-    use egui::{Image, ImageSource, Rect, load::TexturePoll, pos2, vec2};
-    use std::borrow::Cow;
+    use egui::{Image, Rect, pos2, vec2};
 
     use super::paint::{self, Radii};
 
-    if let Some(uri) = uri {
-        let img =
-            Image::new(ImageSource::Uri(Cow::Owned(uri.to_owned())))
-            .fit_to_exact_size(rect.size())
-            .texture_options(super::PHOTO_TEXTURE);
-        if let Ok(TexturePoll::Ready { texture }) = img.load_for_size(ui.ctx(), rect.size()) {
-            let (tw, th) = (texture.size.x.max(1.0), texture.size.y.max(1.0));
-            let target = rect.width() / rect.height().max(1.0);
-            let aspect = tw / th;
-            let uv = if aspect > target {
-                let f = target / aspect;
-                Rect::from_min_max(pos2((1.0 - f) * 0.5, 0.0), pos2((1.0 + f) * 0.5, 1.0))
-            } else {
-                let f = aspect / target;
-                Rect::from_min_max(pos2(0.0, (1.0 - f) * 0.5), pos2(1.0, (1.0 + f) * 0.5))
-            };
-            let uv = Rect::from_center_size(uv.center(), uv.size() / zoom.max(1.0));
-            img.uv(uv).corner_radius(corner).paint_at(ui, rect);
-            return;
-        }
+    if let Some(uri) = uri
+        && let Some(texture) = crate::covers::texture(ui.ctx(), uri, rect.size(), zoom)
+    {
+        let (tw, th) = (texture.size.x.max(1.0), texture.size.y.max(1.0));
+        let target = rect.width() / rect.height().max(1.0);
+        let aspect = tw / th;
+        let uv = if aspect > target {
+            let f = target / aspect;
+            Rect::from_min_max(pos2((1.0 - f) * 0.5, 0.0), pos2((1.0 + f) * 0.5, 1.0))
+        } else {
+            let f = aspect / target;
+            Rect::from_min_max(pos2(0.0, (1.0 - f) * 0.5), pos2(1.0, (1.0 + f) * 0.5))
+        };
+        let uv = Rect::from_center_size(uv.center(), uv.size() / zoom.max(1.0));
+        Image::from_texture(texture)
+            .texture_options(super::PHOTO_TEXTURE)
+            .uv(uv)
+            .corner_radius(corner)
+            .paint_at(ui, rect);
+        return;
     }
     let s = Theme::get(ui.ctx()).scheme;
     let radii = Radii([

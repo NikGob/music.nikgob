@@ -9,7 +9,7 @@ use egui::{
     pos2, vec2,
 };
 use nikgob_view::{
-    Command, LIKED_PLAYLIST, LikeTarget, Route, TrackId, TrackRow, ViewState,
+    Command, LIKED_PLAYLIST, LikeTarget, NpSlot, Route, TrackId, TrackRow, ViewState,
 };
 
 use super::{PaneTab, tag_editor::TagEditorUi, visualizer::Viz};
@@ -41,11 +41,11 @@ pub enum Act {
 }
 
 /// Where a menu was opened, which decides what "show the lyrics" means.
-pub enum Where<'a> {
+pub enum Where {
     /// The floating player: the shell shows the pane tab.
     Bar,
-    /// Now Playing: switch its own tab and open its pane.
-    Np { tab: &'a mut PaneTab },
+    /// Now Playing: select its content slot.
+    Np,
 }
 
 /// What the "В плейлист" picker is for.
@@ -107,14 +107,10 @@ pub struct Chrome {
     pub visualizer: bool,
     pub viz: Viz,
     pub bands: Vec<f32>,
-    /// Now Playing's Queue / Lyrics / Info column is open (where it fits).
-    /// Remembered between openings and in the prefs.
-    pub np_sheet: bool,
-    /// The same as a bottom sheet in a narrow window: only until closed.
-    pub np_modal: bool,
-    /// `np_sheet` was read from the prefs; the value last saved there.
+    /// Now Playing's content, remembered between openings and in prefs.
+    pub np_slot: NpSlot,
     pub np_loaded: bool,
-    pub np_saved: Option<bool>,
+    pub np_saved: Option<NpSlot>,
     /// Now Playing covers the shell: the bar under it must not react.
     pub np_covering: bool,
     /// A navigation for the shell (it also closes Now Playing).
@@ -194,7 +190,7 @@ impl Chrome {
         acts: &[Act],
         track: &TrackRow,
         state: &ViewState,
-        wh: Where<'_>,
+        wh: Where,
         out: &mut Vec<Command>,
     ) {
         let mut menu = Menu::new(("md3e-track-menu", salt)).align_right(true);
@@ -212,12 +208,12 @@ impl Chrome {
         }
     }
 
-    fn apply(
+    pub(super) fn apply(
         &mut self,
         act: Act,
         t: &TrackRow,
         anchor: Rect,
-        wh: Where<'_>,
+        wh: Where,
         out: &mut Vec<Command>,
     ) {
         match act {
@@ -226,11 +222,7 @@ impl Chrome {
                 let tab = if act == Act::Lyrics { PaneTab::Lyrics } else { PaneTab::Info };
                 match wh {
                     Where::Bar => self.open_pane = Some(tab),
-                    Where::Np { tab: current } => {
-                        *current = tab;
-                        self.np_sheet = true;
-                        self.np_modal = true;
-                    }
+                    Where::Np => self.np_slot = if act == Act::Lyrics { NpSlot::Lyrics } else { NpSlot::Info },
                 }
             }
             Act::Volume => self.vol.pinned = Some(anchor),

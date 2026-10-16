@@ -91,7 +91,6 @@ pub fn show(
         if info.clicked() && current.is_some() {
             result.open_now_playing = true;
         }
-        info.on_hover_text("Открыть «Сейчас играет»");
 
         ui.add_space(8.0);
         if ui

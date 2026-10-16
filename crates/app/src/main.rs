@@ -9,6 +9,7 @@
 mod audio;
 mod demo;
 mod desktop;
+mod geometry;
 mod shot;
 mod sysmotion;
 
@@ -76,16 +77,34 @@ fn log_panics(dir: PathBuf) {
     }));
 }
 
+fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let slot = if value.get("lyrics_mega").and_then(|v| v.as_bool()) == Some(true) {
+        nikgob_view::NpSlot::Lyrics
+    } else if value.get("np_pane").and_then(|v| v.as_bool()) == Some(true) {
+        nikgob_view::NpSlot::Queue
+    } else {
+        nikgob_view::NpSlot::None
+    };
+    let legacy = value.get("np_slot").is_none();
+    let mut prefs: Prefs = serde_json::from_value(value)?;
+    if legacy { prefs.np_slot = slot; }
+    Ok(prefs)
+}
+
 fn load_prefs(paths: &Paths) -> Prefs {
     let mut p: Prefs = std::fs::read(&paths.prefs)
         .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
+        .and_then(|b| parse_prefs(&b).ok())
         .unwrap_or_default();
     if p.library_dir.as_os_str().is_empty() {
         p.library_dir = paths.root.join("Music");
     }
     if p.inbox_dir.as_os_str().is_empty() {
         p.inbox_dir = paths.root.join("Inbox");
+    }
+    if p.masters_dir.as_os_str().is_empty() {
+        p.masters_dir = p.library_dir.join(".musiclib").join("masters");
     }
     if let Some(s) = paths
         .settings
@@ -117,6 +136,11 @@ struct Core {
     quit: bool,
     wants_show: bool,
     last_frame: Instant,
+    /// One clock for every window: each new window's egui starts its time
+    /// at zero, and animations started in the old one would sit in the
+    /// future (the page stayed blank until enough clicks repainted it).
+    started: Instant,
+    geometry: geometry::Keeper,
 }
 
 impl Core {
@@ -141,6 +165,7 @@ impl Resident for Core {
     }
 
     fn window_gone(&mut self) {
+        self.geometry.flush();
         self.wants_show = false;
     }
 
@@ -156,6 +181,7 @@ impl Resident for Core {
     }
 
     fn shutdown(&mut self) {
+        self.geometry.flush();
         self.runtime.send(Command::Pause);
     }
 }
@@ -170,6 +196,7 @@ struct Window {
 
 impl eframe::App for Window {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        raw_input.time = Some(self.core.started.elapsed().as_secs_f64());
         if let Some(s) = self.core.shot.as_mut() {
             s.raw_input(raw_input);
         }
@@ -184,6 +211,7 @@ impl eframe::App for Window {
             self.core.ui.set_system_reduced_motion(sysmotion::reduced());
         }
         let core = &mut *self.core;
+        core.geometry.observe(ctx);
         core.poll_desktop();
         if core.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -313,6 +341,7 @@ fn main() -> eframe::Result {
             paths.root.join("Downloads"),
             paths.root.join("Trash"),
         );
+        cfg.masters_dir = prefs.masters_dir.clone();
         cfg.opus_bitrate_kbps = prefs.opus_bitrate;
         cfg.check_fake_lossless = prefs.check_fake_lossless;
         cfg.fallback_seed_argb = prefs.fallback_seed;
@@ -361,13 +390,18 @@ fn main() -> eframe::Result {
         quit: false,
         wants_show: false,
         last_frame: Instant::now(),
+        started: Instant::now(),
+        // Screenshot runs get their own size and leave the real one alone.
+        geometry: geometry::Keeper::load(
+            shot::window_size().is_none().then(|| paths.prefs.with_file_name("window.json")),
+        ),
     };
 
     Shell::new(core, &waker).run(|lease| {
         eframe::run_native(
             "music.nikgob",
             eframe::NativeOptions {
-                viewport: egui::ViewportBuilder::default()
+                viewport: lease.peek(|core| core.geometry.apply(egui::ViewportBuilder::default()))
                     .with_title("music.nikgob")
                     .with_app_id("music.nikgob")
                     .with_icon(egui::IconData {
@@ -375,8 +409,7 @@ fn main() -> eframe::Result {
                         width: 64,
                         height: 64,
                     })
-                    .with_inner_size(shot::window_size().unwrap_or([1280.0, 800.0]))
-                    .with_min_inner_size([360.0, 560.0]),
+                    .with_min_inner_size(geometry::MIN_SIZE),
                 ..Default::default()
             },
             Box::new(move |cc| {
@@ -399,4 +432,33 @@ fn main() -> eframe::Result {
             }),
         )
     })
+}
+
+#[cfg(test)]
+mod prefs_tests {
+    use super::*;
+    use nikgob_view::NpSlot;
+
+    #[test]
+    fn migrates_legacy_slots_and_preserves_explicit_new_slots() {
+        for (json, slot) in [
+            (r#"{}"#, NpSlot::None),
+            (r#"{"lyrics_mega":true}"#, NpSlot::Lyrics),
+            (r#"{"np_pane":true}"#, NpSlot::Queue),
+            (r#"{"lyrics_mega":true,"np_pane":true,"old_unknown":42}"#, NpSlot::Lyrics),
+            (r#"{"lyrics_mega":false,"np_pane":false}"#, NpSlot::None),
+            (r#"{"np_slot":"None","lyrics_mega":true}"#, NpSlot::None),
+            (r#"{"np_slot":"Info","np_pane":true}"#, NpSlot::Info),
+        ] {
+            assert_eq!(parse_prefs(json.as_bytes()).unwrap().np_slot, slot);
+        }
+        for slot in [NpSlot::None, NpSlot::Lyrics, NpSlot::Queue, NpSlot::Info] {
+            let prefs = Prefs { np_slot: slot, ..Prefs::default() };
+            let json = serde_json::to_vec(&prefs).unwrap();
+            assert_eq!(parse_prefs(&json).unwrap(), prefs);
+            let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+            assert!(value.get("lyrics_mega").is_none());
+            assert!(value.get("np_pane").is_none());
+        }
+    }
 }

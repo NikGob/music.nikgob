@@ -77,10 +77,11 @@ macro_rules! material_icons {
             }
         }
 
-        /// Registers the icons and egui's image loaders with `ctx`. Call once
-        /// at start-up; calling it again is harmless.
+        /// Registers the icons, egui's image loaders and the cover loader
+        /// with `ctx`. Call once at start-up; calling it again is harmless.
         pub fn install(ctx: &Context) {
             egui_extras::install_image_loaders(ctx);
+            crate::covers::install(ctx);
             fastframe_icons::install::<outlined::Set>(ctx);
             fastframe_icons::install::<filled::Set>(ctx);
         }

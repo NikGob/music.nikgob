@@ -609,7 +609,6 @@ impl Importer {
                     }
                     ctx.emit(ImportEvent::MasterRegistered(master));
                 }
-                self.spawn_lyrics(&done.path, &identity, &analyzed);
                 ctx.emit(ImportEvent::Imported {
                     job: ctx.job,
                     path,
@@ -701,50 +700,7 @@ impl Importer {
         blocking(move || process_cover(&bytes, max)).await.ok()
     }
 
-    /// Fetches lyrics in the background; failures are ignored.
-    fn spawn_lyrics(&self, file: &Path, id: &Identity, a: &Analyzed) {
-        if !self.inner.cfg.fetch_lyrics || self.inner.metadata.is_none() {
-            return;
-        }
-        let inner = self.inner.clone();
-        let (file, artist, title, album) = (
-            file.to_path_buf(),
-            id.artist_line.clone(),
-            id.title.clone(),
-            id.album.clone(),
-        );
-        let duration = Some(a.info.duration).filter(|d| !d.is_zero());
-        // Lyrics the file came with are the user's; only an empty slot is filled.
-        let has_lyrics = a.tags.lyrics.is_some();
-        tokio::spawn(async move {
-            let Some(meta) = &inner.metadata else {
-                return;
-            };
-            let found = tokio::time::timeout(
-                inner.cfg.online_timeout,
-                meta.lrclib.find(&artist, &title, album.as_deref(), duration),
-            )
-            .await;
-            let Ok(Ok(Some(lyrics))) = found else {
-                return;
-            };
-            let _ = blocking(move || {
-                if lyrics.has_synced()
-                    && let Some(text) = &lyrics.synced_lyrics
-                {
-                    std::fs::write(long_path(&file.with_extension("lrc")), text)
-                        .map_err(fsutil::io_err(&file))?;
-                }
-                if !has_lyrics
-                    && let Some(plain) = lyrics.plain_lyrics.as_deref().filter(|p| !p.trim().is_empty())
-                {
-                    tags::write_lyrics(&file, plain)?;
-                }
-                Ok(())
-            })
-            .await;
-        });
-    }
+
 }
 
 // ------------------------------------------------------------------ stages
@@ -852,7 +808,6 @@ fn convert(inner: &Inner, a: &Analyzed, album_dir: &Path) -> Result<Prepared> {
 struct Done {
     track_id: TrackId,
     upgraded: bool,
-    path: PathBuf,
     master: Option<Master>,
 }
 
@@ -935,12 +890,16 @@ fn register_master(
             let dest = dir.join(format!("{hash}.{ext}"));
             if !long_path(&dest).exists() {
                 if a.path.starts_with(&cfg.inbox_dir) {
-                    fsutil::move_file(&a.path, &dest)?;
+                    fsutil::move_file_verified(&a.path, &dest, Some(hash))?;
                 } else {
-                    fsutil::copy_file(&a.path, &dest)?;
+                    fsutil::copy_file_verified(&a.path, &dest, Some(hash))?;
                 }
             } else if a.path.starts_with(&cfg.inbox_dir) {
-                fsutil::remove_file(&a.path)?;
+                if fsutil::hash_file(&dest).ok().as_deref() == Some(hash) {
+                    fsutil::remove_file(&a.path)?;
+                } else {
+                    fsutil::move_file_verified(&a.path, &dest, Some(hash))?;
+                }
             }
             dest
         }
@@ -972,6 +931,173 @@ fn register_master(
         origin: Some(a.origin.clone()),
         replicas: Vec::new(),
     })
+}
+
+/// Summary of relocating lossless masters to a new directory/drive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelocateReport {
+    /// Lossless audio files copied, verified by BLAKE3 hash, and removed from `old_dir`.
+    pub audio_moved: usize,
+    /// Sidecar `.json` files moved and updated to point to `new_dir`.
+    pub sidecars_moved: usize,
+    /// Total audio bytes transferred and verified.
+    pub bytes_moved: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OwnedMasterSidecar {
+    track_id: TrackId,
+    codec: Codec,
+    file_hash: String,
+    size_bytes: u64,
+    origin: SourceOrigin,
+    path: String,
+    original_name: String,
+    quality_score: i32,
+}
+
+/// Safely migrates all lossless master files and `.json` sidecars from `old_dir`
+/// to `new_dir`:
+/// 1. Probes `new_dir` for write access.
+/// 2. Copies each audio file to a `.nikgob-part` temporary file in `new_dir`,
+///    flushes to disk (`sync_all`), verifies its byte size and BLAKE3 hash,
+///    renames into place, and deletes the original in `old_dir` only after
+///    verification succeeds.
+/// 3. Moves and updates `.json` sidecars and rewrites `master.origin_path` in
+///    the library database.
+/// 4. Removes `old_dir` if it becomes empty.
+pub fn relocate_masters<F>(
+    lib: &Library,
+    old_dir: &Path,
+    new_dir: &Path,
+    mut on_progress: F,
+) -> Result<RelocateReport>
+where
+    F: FnMut(usize, usize, &Path),
+{
+    fsutil::create_dir_all(new_dir)?;
+    let probe = new_dir.join(".nikgob-write-probe");
+    std::fs::write(long_path(&probe), b"ok").map_err(fsutil::io_err(&probe))?;
+    fsutil::remove_file(&probe)?;
+
+    if old_dir == new_dir || !long_path(old_dir).exists() {
+        return Ok(RelocateReport::default());
+    }
+    if let (Ok(a), Ok(b)) = (
+        std::fs::canonicalize(long_path(old_dir)),
+        std::fs::canonicalize(long_path(new_dir)),
+    ) {
+        if a == b {
+            return Ok(RelocateReport::default());
+        }
+    }
+
+    let rd = std::fs::read_dir(long_path(old_dir)).map_err(fsutil::io_err(old_dir))?;
+    let mut audio_files = Vec::new();
+    let mut sidecar_files = Vec::new();
+    for entry in rd.flatten() {
+        let path = old_dir.join(entry.file_name());
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            if name.ends_with(".nikgob-part") || name.ends_with(".nikgob-write-probe") {
+                let _ = fsutil::remove_file(&path);
+            }
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(long_path(&path)) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        {
+            sidecar_files.push(path);
+        } else if fsutil::is_audio_file(&path) {
+            audio_files.push(path);
+        }
+    }
+    audio_files.sort();
+    sidecar_files.sort();
+
+    let mut report = RelocateReport::default();
+    let total = audio_files.len();
+
+    for (idx, src) in audio_files.iter().enumerate() {
+        on_progress(idx, total, src);
+        let size = fsutil::file_size(src)?;
+        let stem = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let sidecar_path = old_dir.join(format!("{stem}.json"));
+        let sidecar_hash = std::fs::read(long_path(&sidecar_path))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<OwnedMasterSidecar>(&b).ok())
+            .map(|s| s.file_hash);
+        let expected_hash = sidecar_hash.or_else(|| {
+            (stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| stem.to_ascii_lowercase())
+        });
+
+        let dst = new_dir.join(src.file_name().unwrap());
+        fsutil::move_file_verified(src, &dst, expected_hash.as_deref())?;
+        report.audio_moved += 1;
+        report.bytes_moved += size;
+    }
+
+    for src_json in &sidecar_files {
+        let file_name = src_json.file_name().unwrap();
+        let dst_json = new_dir.join(file_name);
+        let raw = std::fs::read(long_path(src_json)).map_err(fsutil::io_err(src_json))?;
+        let out_bytes = match serde_json::from_slice::<OwnedMasterSidecar>(&raw) {
+            Ok(mut sc) => {
+                let p = Path::new(&sc.path);
+                if let Ok(rel) = p.strip_prefix(old_dir) {
+                    sc.path = new_dir.join(rel).to_string_lossy().into_owned();
+                }
+                serde_json::to_vec_pretty(&sc).unwrap_or(raw)
+            }
+            Err(_) => raw,
+        };
+        let tmp = dst_json.with_file_name(format!(
+            ".{}.nikgob-part",
+            file_name.to_string_lossy()
+        ));
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(long_path(&tmp)).map_err(fsutil::io_err(&tmp))?;
+            f.write_all(&out_bytes).map_err(fsutil::io_err(&tmp))?;
+            f.sync_all().map_err(fsutil::io_err(&tmp))?;
+        }
+        let verified_size = fsutil::file_size(&tmp)?;
+        if verified_size != out_bytes.len() as u64 {
+            let _ = fsutil::remove_file(&tmp);
+            return Err(ImportError::Other(format!(
+                "sidecar verification failed for {}",
+                dst_json.display()
+            )));
+        }
+        std::fs::rename(long_path(&tmp), long_path(&dst_json)).map_err(|e| {
+            let _ = fsutil::remove_file(&tmp);
+            ImportError::io(&dst_json, e)
+        })?;
+        fsutil::remove_file(src_json)?;
+        report.sidecars_moved += 1;
+    }
+
+    let _ = lib.relocate_master_paths(old_dir, new_dir);
+
+    if let Ok(mut rd) = std::fs::read_dir(long_path(old_dir)) {
+        if rd.next().is_none() {
+            let _ = std::fs::remove_dir(long_path(old_dir));
+        }
+    }
+
+    Ok(report)
 }
 
 /// Writes `cover.jpg` and `ambient.png` when the album folder has none or a
@@ -1194,7 +1320,6 @@ fn commit_locked(
         Ok(Done {
             track_id: track.id,
             upgraded: matches!(decision, Decision::Upgrade(_)),
-            path: dest.clone(),
             master,
         })
     })();

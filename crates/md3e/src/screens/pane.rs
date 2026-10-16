@@ -20,8 +20,9 @@ pub fn show(
     state: &ViewState,
     tab: &mut PaneTab,
     chrome: &mut Chrome,
+    bass: f32,
     out: &mut Vec<Command>,
-) {
+) -> bool {
     let tabs = ["Очередь", "Текст", "Инфо"];
     let idx = match tab {
         PaneTab::Queue => 0,
@@ -38,9 +39,15 @@ pub fn show(
     }
     ui.add_space(12.0);
     match tab {
-        PaneTab::Queue => queue(ui, state, chrome, out),
-        PaneTab::Lyrics => lyrics(ui, state, out),
-        PaneTab::Info => info(ui, state, out),
+        PaneTab::Queue => {
+            queue(ui, state, chrome, out);
+            false
+        }
+        PaneTab::Lyrics => lyrics(ui, state, bass, out),
+        PaneTab::Info => {
+            info(ui, state, out);
+            false
+        }
     }
 }
 
@@ -53,7 +60,7 @@ fn queue_item<'a>(t: &'a TrackRow, salt: impl egui::AsId) -> ListItem<'a> {
         .id_salt(salt)
 }
 
-fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
+pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let q = &state.queue;
     let bottom_h = 56.0;
@@ -157,10 +164,10 @@ fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Comm
     });
 }
 
-fn lyrics(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
+pub(super) fn lyrics(ui: &mut Ui, state: &ViewState, bass: f32, out: &mut Vec<Command>) -> bool {
     let s = Theme::get(ui.ctx()).scheme;
     let l = &state.lyrics;
-    super::lyrics::source_picker(ui, state, out);
+    let configure = super::lyrics::source_picker(ui, state, out);
     ui.add_space(4.0);
     if l.loading {
         ui.vertical_centered(|ui| {
@@ -169,19 +176,19 @@ fn lyrics(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
             ui.add_space(8.0);
             common::label(ui, "Ищу текст…", TypeRole::BodyMedium, s.on_surface_variant);
         });
-        return;
+        return configure;
     }
     if l.lines.is_empty() {
         let text = l.plain.as_deref().unwrap_or("Текста нет");
         egui::ScrollArea::vertical().id_salt("lyrics-plain").show(ui, |ui| {
             ui.label(TypeRole::BodyLarge.style().rich_para(text, s.on_surface_variant));
         });
-        return;
+        return configure;
     }
-    super::lyrics::show(ui, state, out);
+    super::lyrics::show(ui, state, bass, false, out) || configure
 }
 
-fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
+pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let i = &state.info;
     egui::ScrollArea::vertical().id_salt("info").show(ui, |ui| {

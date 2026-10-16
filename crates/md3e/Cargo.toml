@@ -17,6 +17,7 @@ egui_extras.workspace = true
 material-colors.workspace = true
 fastframe-icons.workspace = true
 log.workspace = true
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rfd = { version = "0.15", default-features = false }
 
 [lints]

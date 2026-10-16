@@ -4,7 +4,7 @@
 -- body NULL = looked up, nothing found (retried after a while).
 CREATE TABLE lyrics_text (
     track_id   TEXT NOT NULL,
-    source     TEXT NOT NULL,                -- 'netease', 'qq'
+    source     TEXT NOT NULL,                -- online source key
     body       TEXT,                         -- JSON of the parsed lines
     fetched_at INTEGER NOT NULL,
     PRIMARY KEY (track_id, source)
@@ -12,5 +12,5 @@ CREATE TABLE lyrics_text (
 
 CREATE TABLE lyrics_pick (
     track_id TEXT PRIMARY KEY,
-    source   TEXT NOT NULL                   -- 'file', 'lrclib', 'netease', 'qq'
+    source   TEXT NOT NULL                   -- lyrics source key
 ) WITHOUT ROWID;

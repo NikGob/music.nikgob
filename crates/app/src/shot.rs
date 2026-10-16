@@ -3,7 +3,7 @@
 //! look at screens without a human at the keyboard.
 //!
 //! Synthetic input (logical points): `move:x,y`, `click:x,y`, `rclick:x,y`,
-//! `dblclick:x,y`, `drag:x1,y1,x2,y2`, `wheel:x,y,dy`, `key:space|escape|f11|f12`.
+//! `dblclick:x,y`, `drag:x1,y1,x2,y2`, `wheel:x,y,dy`, `key:space|escape|l|q|f11|f12`.
 //! `prefs:{json}` merges into the prefs.
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 
@@ -150,6 +150,14 @@ impl Shot {
                 }
                 self.wait = 20;
             }
+            "seek" => {
+                if let Ok(seconds) = arg.parse::<f32>()
+                    && let Ok(position) = std::time::Duration::try_from_secs_f32(seconds)
+                {
+                    out.push(Command::Seek(position));
+                }
+                self.wait = 20;
+            }
             "like" => {
                 if let Some(t) = &state.player.current {
                     out.push(Command::Like(nikgob_view::LikeTarget::Track(t.id), !t.liked));
@@ -210,6 +218,8 @@ impl Shot {
                 let key = match arg {
                     "space" => Some(egui::Key::Space),
                     "escape" => Some(egui::Key::Escape),
+                    "l" => Some(egui::Key::L),
+                    "q" => Some(egui::Key::Q),
                     "f11" => Some(egui::Key::F11),
                     "f12" => Some(egui::Key::F12),
                     _ => None,

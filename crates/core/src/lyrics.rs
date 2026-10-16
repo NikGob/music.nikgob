@@ -1,6 +1,6 @@
 //! Timed lyrics shared by the parsers, the runtime and the UI.
 //!
-//! A line always has a start; word-synced sources (TTML, NetEase YRC, enhanced LRC)
+//! A line always has a start; word-synced sources (TTML, LyricsPlus, enhanced LRC)
 //! also carry the timing of every word (syllable), which lets the view light
 //! the line up exactly as it is sung instead of guessing a pace.
 
@@ -56,24 +56,24 @@ impl LyricLine {
 pub enum LyricsSource {
     /// A `.ttml` / `.lrc` next to the file, or the file's own lyrics tag.
     File,
+    LyricsPlus,
+    LrcRed,
+    BetterLyrics,
     /// lrclib.net.
     Lrclib,
-    /// NetEase Cloud Music (word-synced where it has YRC).
-    Netease,
-    /// QQ Music.
-    Qq,
 }
 
 impl LyricsSource {
-    pub const ALL: [Self; 4] = [Self::File, Self::Netease, Self::Lrclib, Self::Qq];
+    pub const ALL: [Self; 5] = [Self::File, Self::LyricsPlus, Self::LrcRed, Self::BetterLyrics, Self::Lrclib];
 
     /// Stable key for storage.
     pub fn key(self) -> &'static str {
         match self {
             Self::File => "file",
             Self::Lrclib => "lrclib",
-            Self::Netease => "netease",
-            Self::Qq => "qq",
+            Self::LyricsPlus => "lyricsplus",
+            Self::LrcRed => "lrcred",
+            Self::BetterLyrics => "betterlyrics",
         }
     }
 
@@ -86,8 +86,9 @@ impl LyricsSource {
         match self {
             Self::File => "Файл",
             Self::Lrclib => "LRCLIB",
-            Self::Netease => "NetEase",
-            Self::Qq => "QQ Музыка",
+            Self::LyricsPlus => "LyricsPlus",
+            Self::LrcRed => "lrc.red",
+            Self::BetterLyrics => "Better Lyrics",
         }
     }
 }
@@ -98,6 +99,7 @@ pub enum LyricsSync {
     Plain,
     Line,
     Word,
+    Syllable,
 }
 
 impl LyricsSync {
@@ -106,16 +108,39 @@ impl LyricsSync {
             Self::Plain => "без синхронизации",
             Self::Line => "по строкам",
             Self::Word => "по словам",
+            Self::Syllable => "по слогам",
         }
     }
 
     pub fn of(lines: &[LyricLine]) -> Option<Self> {
-        if lines.iter().any(LyricLine::is_word_synced) {
+        if lines.iter().any(|l| l.words.windows(2).any(|w| !w[0].text.ends_with(char::is_whitespace))) {
+            Some(Self::Syllable)
+        } else if lines.iter().any(LyricLine::is_word_synced) {
             Some(Self::Word)
         } else if lines.is_empty() {
             None
         } else {
             Some(Self::Line)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_detects_glued_pieces_and_orders_precision() {
+        assert_eq!(LyricsSync::of(&[]), None);
+        let mut l = LyricLine::new(Duration::ZERO, "Hello world");
+        assert_eq!(LyricsSync::of(&[l.clone()]), Some(LyricsSync::Line));
+        l.words = ["Hello ", "world"].map(|text| LyricWord { text: text.into(), ..Default::default() }).to_vec();
+        assert_eq!(LyricsSync::of(&[l.clone()]), Some(LyricsSync::Word));
+        l.words = ["Hel", "lo ", "world"].map(|text| LyricWord { text: text.into(), ..Default::default() }).to_vec();
+        assert_eq!(LyricsSync::of(&[l]), Some(LyricsSync::Syllable));
+        assert!(LyricsSync::Plain < LyricsSync::Line);
+        assert!(LyricsSync::Line < LyricsSync::Word);
+        assert!(LyricsSync::Word < LyricsSync::Syllable);
+        assert_eq!(LyricsSync::Syllable.label(), "по слогам");
     }
 }

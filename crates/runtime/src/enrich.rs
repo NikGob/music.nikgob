@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use nikgob_core::model::ArtistId;
 use nikgob_library::{Library, StoredLyrics, TrackRow, now_ms};
-use nikgob_metadata::{Deezer, Lrclib, Lyrics, MetadataError};
+use nikgob_metadata::{Deezer, Lrclib, Lyrics, Metadata, MetadataError};
 use nikgob_view as v;
 
 use crate::Worker;
@@ -23,7 +23,6 @@ use crate::import::Internal;
 pub(crate) const LYRICS_RETRY_MS: i64 = 7 * 86_400_000;
 /// Same for artist photos.
 const PHOTO_RETRY_MS: i64 = 14 * 86_400_000;
-const LOOKUP_TIMEOUT: Duration = Duration::from_secs(15);
 const BATCH: u32 = 25;
 /// Consecutive network failures after which a background job gives up until the next trigger.
 const MAX_FAILURES: u32 = 3;
@@ -53,6 +52,7 @@ pub(crate) enum Event {
     ArtistPhoto(ArtistId),
     PhotosDone,
     BackfillDone,
+    LyricsReady(nikgob_core::model::TrackId, crate::lyrics::TrackLyrics),
 }
 
 #[derive(Default)]
@@ -95,7 +95,7 @@ pub(crate) async fn fetch_and_store(
 ) -> Result<StoredLyrics, MetadataError> {
     let duration = row.duration_ms.map(|ms| Duration::from_millis(ms.into()));
     let lookup = tokio::time::timeout(
-        LOOKUP_TIMEOUT,
+        crate::lyrics::LOOKUP_TIMEOUT,
         lrclib.find(&row.artist, &row.title, row.album.as_deref(), duration),
     )
     .await
@@ -130,12 +130,13 @@ pub(crate) async fn fetch_and_store(
 }
 
 /// Fills in the lyrics of every local track that has none, slowly, for as long
-/// as there is work. Lyrics the files already carry are only recorded.
+/// as there is work, using the same source chain as playback.
 pub(crate) async fn backfill_lyrics(
-    lrclib: Lrclib,
+    meta: Metadata,
     lib: Library,
     library_dir: PathBuf,
     pace: Pace,
+    tx: crossbeam_channel::Sender<Internal>,
 ) {
     tokio::time::sleep(pace.start).await;
     let mut failures = 0;
@@ -159,23 +160,14 @@ pub(crate) async fn backfill_lyrics(
                 .flatten()
                 .filter(|s| s.kind.is_local())
                 .map(|s| resolve(&library_dir, &s.locator));
-            if let Some(file) = &file {
-                let tags = nikgob_import::tags::read_tags(file).ok().map(|(t, _)| t);
-                if let Some((synced, plain)) = local_lyrics(file, tags.as_ref()) {
-                    let _ = lib.put_lyrics(id, synced.as_deref(), plain.as_deref(), false);
-                    continue;
-                }
+            let tl = crate::lyrics::fetch_track_lyrics(meta.clone(), lib.clone(), row, file).await;
+            if tl.failed {
+                failures += 1;
+                if failures >= MAX_FAILURES { return }
+            } else {
+                failures = 0;
             }
-            match fetch_and_store(&lrclib, &lib, &row).await {
-                Ok(_) => failures = 0,
-                Err(e) => {
-                    failures += 1;
-                    log::debug!("lyrics backfill: {e}");
-                    if failures >= MAX_FAILURES {
-                        return;
-                    }
-                }
-            }
+            let _ = tx.send(Internal::Enrich(Event::LyricsReady(id, tl)));
             tokio::time::sleep(pace.between).await;
         }
     }
@@ -348,7 +340,7 @@ impl Worker {
         let dir = svc.config().library_dir.clone();
         let tx = svc.internal();
         svc.spawn(async move {
-            backfill_lyrics(meta.lrclib, lib, dir, Pace::LYRICS).await;
+            backfill_lyrics(meta, lib, dir, Pace::LYRICS, tx.clone()).await;
             let _ = tx.send(Internal::Enrich(Event::BackfillDone));
         });
     }
@@ -423,6 +415,7 @@ impl Worker {
                     svc.enrich.photos_running = false;
                 }
             }
+            Event::LyricsReady(track, tl) => self.lyrics_backfilled(track, tl),
             Event::BackfillDone => {
                 if let Some(svc) = &mut self.import {
                     svc.enrich.backfill_running = false;
@@ -457,6 +450,17 @@ mod tests {
                 base_delay: Duration::from_millis(1),
                 max_delay: Duration::from_millis(1),
             })
+    }
+
+    async fn metadata(server: &MockServer) -> Metadata {
+        let mut meta = Metadata::new(&MetadataConfig::new("tests@example.invalid")).unwrap();
+        meta.lrclib = Lrclib::with_base_url(http(), &server.uri()).unwrap();
+        meta.lyricsplus = nikgob_metadata::LyricsPlus::with_base_url(http(), &server.uri()).unwrap();
+        meta.lrcred = nikgob_metadata::LrcRed::with_base_url(http(), &server.uri()).unwrap();
+        meta.deezer = Deezer::with_base_url(http(), &server.uri()).unwrap();
+        meta.betterlyrics = nikgob_metadata::BetterLyrics::with_base_urls(http(), &server.uri(), &server.uri()).unwrap();
+        Mock::given(path("/search/track")).respond_with(json(r#"{"data":[]}"#)).mount(server).await;
+        meta
     }
 
     fn json(body: &str) -> ResponseTemplate {
@@ -530,7 +534,7 @@ mod tests {
         let row = lib.get_track_row(tracks[0].id).unwrap().unwrap();
         assert!(fetch_and_store(&lrclib, &lib, &row).await.is_err());
 
-        backfill_lyrics(lrclib, lib.clone(), PathBuf::from("/nonexistent"), NO_WAIT).await;
+        backfill_lyrics(metadata(&server).await, lib.clone(), PathBuf::from("/nonexistent"), NO_WAIT, crossbeam_channel::unbounded().0).await;
         for t in &tracks {
             assert!(lib.lyrics(t.id).unwrap().is_none(), "outage must not leave misses");
         }
@@ -569,12 +573,11 @@ mod tests {
             .respond_with(json("[]"))
             .mount(&server)
             .await;
-        let lrclib = Lrclib::with_base_url(http(), &server.uri()).unwrap();
         let lib = Library::open_in_memory().unwrap();
         let (_, a) = library_track(&lib, "Кино", "Группа крови");
         let (_, b) = library_track(&lib, "Кино", "Нет такой песни");
 
-        backfill_lyrics(lrclib, lib.clone(), PathBuf::from("/nonexistent"), NO_WAIT).await;
+        backfill_lyrics(metadata(&server).await, lib.clone(), PathBuf::from("/nonexistent"), NO_WAIT, crossbeam_channel::unbounded().0).await;
         assert!(!lib.lyrics(a.id).unwrap().unwrap().is_miss());
         assert!(lib.lyrics(b.id).unwrap().unwrap().is_miss());
         assert!(lib.tracks_needing_lyrics(now_ms() - LYRICS_RETRY_MS, 10).unwrap().is_empty());

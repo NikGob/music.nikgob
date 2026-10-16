@@ -1,5 +1,5 @@
 //! Online metadata for the player: MusicBrainz, AcoustID, Cover Art Archive,
-//! Deezer, LRCLIB, NetEase and QQ Music clients, LRC, YRC and TTML lyrics parsers, and the pure [`matcher`] that decides
+//! Deezer, LyricsPlus, lrc.red, Better Lyrics and LRCLIB clients, LRC and TTML lyrics parsers, and the pure [`matcher`] that decides
 //! whether a local file has been identified for sure.
 //!
 //! All clients share one [`Http`] (User-Agent `music.nikgob/<version> ( <contact> )`,
@@ -7,7 +7,6 @@
 //! everything up from a [`MetadataConfig`].
 
 pub mod acoustid;
-mod cn;
 mod config;
 pub mod coverart;
 pub mod deezer;
@@ -17,8 +16,9 @@ pub mod lrc;
 pub mod lrclib;
 pub mod matcher;
 pub mod musicbrainz;
-pub mod netease;
-pub mod qqmusic;
+pub mod lyricsplus;
+pub mod lrcred;
+pub mod betterlyrics;
 pub mod text;
 pub mod ttml;
 
@@ -36,8 +36,9 @@ pub use matcher::{
     match_candidates,
 };
 pub use musicbrainz::{MusicBrainz, RecordingQuery};
-pub use netease::{Netease, NeteaseLyrics, netease_lines, parse_yrc};
-pub use qqmusic::{QqLyrics, QqMusic, qq_lines};
+pub use lyricsplus::LyricsPlus;
+pub use lrcred::LrcRed;
+pub use betterlyrics::BetterLyrics;
 pub use ttml::{TtmlLyrics, parse_ttml};
 
 /// Every client, built from one config and sharing one HTTP stack.
@@ -49,8 +50,9 @@ pub struct Metadata {
     pub cover_art: CoverArtArchive,
     pub deezer: Deezer,
     pub lrclib: Lrclib,
-    pub netease: Netease,
-    pub qq: QqMusic,
+    pub lyricsplus: LyricsPlus,
+    pub lrcred: LrcRed,
+    pub betterlyrics: BetterLyrics,
 }
 
 impl Metadata {
@@ -64,8 +66,9 @@ impl Metadata {
             cover_art: CoverArtArchive::new(http.clone()),
             deezer: Deezer::new(http.clone()),
             lrclib: Lrclib::new(http.clone()),
-            netease: Netease::new(http.clone()),
-            qq: QqMusic::new(http),
+            lyricsplus: LyricsPlus::new(http.clone()),
+            lrcred: LrcRed::new(http.clone()),
+            betterlyrics: BetterLyrics::new(http),
         })
     }
 }

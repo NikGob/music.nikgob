@@ -138,8 +138,16 @@ impl Runtime {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (pb_tx, pb_rx) = crossbeam_channel::unbounded();
         let (in_tx, in_rx) = crossbeam_channel::unbounded();
+        let mut initial_prefs = config.prefs.clone();
+        if initial_prefs.masters_dir.as_os_str().is_empty() {
+            if let Some(imp) = &config.import {
+                initial_prefs.masters_dir = imp.config.masters_dir();
+            } else if !initial_prefs.library_dir.as_os_str().is_empty() {
+                initial_prefs.masters_dir = initial_prefs.library_dir.join(".musiclib").join("masters");
+            }
+        }
         let state = Arc::new(RwLock::new(ViewState {
-            prefs: config.prefs.clone(),
+            prefs: initial_prefs,
             ..ViewState::default()
         }));
         let worker = {
@@ -196,6 +204,14 @@ impl Drop for Runtime {
     }
 }
 
+/// How far the engine's position may differ from our extrapolation before
+/// the view is told (normal jitter is a few tens of milliseconds).
+const POSITION_DRIFT: Duration = Duration::from_millis(1500);
+/// After we move the position ourselves (seek, start), a report the engine
+/// sent before it heard about that can still be on its way: such a far-off
+/// report is ignored for this long.
+const POSITION_SETTLE: Duration = Duration::from_millis(500);
+
 struct Worker {
     lib: Library,
     res: Resolver,
@@ -205,9 +221,15 @@ struct Worker {
     queue: Queue,
     /// What the backend is playing (entry id) and since when.
     playing: Option<Entry>,
+    /// The entry we just handed to `playback.play()`: the backend reports
+    /// that start too (as `Started` or `TrackChanged`), and it must not be
+    /// mistaken for a gapless repeat-one loop of the same entry.
+    restarted: Option<u64>,
     status: Status,
     position: Duration,
     position_at: Instant,
+    /// When we last moved `position` ourselves (see [`POSITION_SETTLE`]).
+    jumped_at: Instant,
     volume: f32,
     muted: bool,
     services: Vec<Box<dyn Service>>,
@@ -253,9 +275,11 @@ impl Worker {
             wake,
             queue: Queue::default(),
             playing: None,
+            restarted: None,
             status: Status::Stopped,
             position: Duration::ZERO,
             position_at: Instant::now(),
+            jumped_at: Instant::now(),
             volume,
             muted: false,
             services: Vec::new(),
@@ -613,20 +637,22 @@ impl Worker {
             Command::LoadPlaylist(id) => self.load_playlist(id),
             Command::LoadHome => self.load_home(),
             Command::Search(q) => self.search(q),
-            Command::SetPrefs(p) => {
-                if let Some(path) = &self.prefs_path
-                    && let Ok(json) = serde_json::to_vec_pretty(&*p)
-                {
-                    let tmp = path.with_extension("json.tmp");
-                    if std::fs::write(&tmp, json).is_ok() {
-                        let _ = std::fs::rename(&tmp, path);
-                    }
+            Command::SetPrefs(mut p) => {
+                let old = self.state.read().prefs.clone();
+                if p.masters_dir.as_os_str().is_empty() && !old.masters_dir.as_os_str().is_empty() {
+                    p.masters_dir = old.masters_dir.clone();
                 }
                 self.playback.configure(crossfade(&p), p.normalization);
-                self.import_prefs(&p);
                 self.torrent_prefs(&p);
-                let old = self.state.read().prefs.clone();
                 self.publish(|s, _| s.prefs = *p.clone());
+                self.save_prefs();
+                self.import_prefs(&p);
+                let lyrics_track = self.state.read().lyrics.track;
+                if !old.save_found_lyrics && p.save_found_lyrics
+                    && let Some(track) = lyrics_track
+                {
+                    self.embed_lyrics(track);
+                }
                 if old.gapless != p.gapless {
                     self.preload_next();
                 }
@@ -634,6 +660,7 @@ impl Worker {
                     self.switch_device(p.output_device.clone());
                 }
             }
+            Command::MoveMastersDir(dir) => self.move_masters_dir(dir),
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
             Command::DismissToast(id) => {
                 self.publish(|s, _| s.toasts.retain(|t| t.id != id));
@@ -731,10 +758,12 @@ impl Worker {
         for attempt in 0..=self.queue.len() {
             if let Some(req) = self.request(e) {
                 self.playback.play(req);
+                self.restarted = Some(e.id);
                 self.playing = Some(e);
                 self.status = Status::Playing;
                 self.position = Duration::ZERO;
                 self.position_at = Instant::now();
+                self.jumped_at = Instant::now();
                 let _ = self.lib.record_event(
                     e.track,
                     EventType::Start,
@@ -810,6 +839,7 @@ impl Worker {
         self.playback.seek(p);
         self.position = p;
         self.position_at = Instant::now();
+        self.jumped_at = Instant::now();
         if let Some(e) = self.playing {
             let _ = self.lib.record_event(
                 e.track,
@@ -850,6 +880,9 @@ impl Worker {
     fn playback_event(&mut self, ev: PlaybackEvent) {
         match ev {
             PlaybackEvent::Started { id } => {
+                if self.restarted == Some(id) {
+                    self.restarted = None;
+                }
                 if self.playing.map(|e| e.id) == Some(id) {
                     self.position = Duration::ZERO;
                     self.position_at = Instant::now();
@@ -858,8 +891,10 @@ impl Worker {
             }
             PlaybackEvent::TrackChanged { to } => {
                 // `play()` over a playing item also reports a change: that one
-                // we started ourselves.
-                if self.playing.map(|e| e.id) == Some(to) {
+                // we started ourselves. The same entry changing to itself
+                // otherwise is repeat-one looping gaplessly: handled below
+                // like any auto-advance, so the position starts over.
+                if self.restarted.take() == Some(to) {
                     return;
                 }
                 if self.queue.peek_auto_next().map(|e| e.id) != Some(to) {
@@ -884,8 +919,20 @@ impl Worker {
             }
             PlaybackEvent::Position { id, position } => {
                 if self.playing.map(|e| e.id) == Some(id) {
+                    // The view extrapolates from its last publish and stops at
+                    // the track's end. When the engine reports somewhere else
+                    // (a repeat-one loop or a seek we did not hear about), it
+                    // would stay frozen there: publish the real position.
+                    let drifted = self.status == Status::Playing
+                        && self.position_now().abs_diff(position) > POSITION_DRIFT;
+                    if drifted && self.jumped_at.elapsed() < POSITION_SETTLE {
+                        return;
+                    }
                     self.position = position;
                     self.position_at = Instant::now();
+                    if drifted {
+                        self.publish_player();
+                    }
                 }
             }
             PlaybackEvent::Paused | PlaybackEvent::Resumed => {}
@@ -1238,6 +1285,7 @@ impl Worker {
         let status = self.status;
         if let Some(req) = self.request(e) {
             self.playback.play(req);
+            self.restarted = Some(e.id);
             self.playback.seek(pos);
             if status == Status::Paused {
                 self.playback.pause();
@@ -1330,6 +1378,18 @@ fn crossfade(p: &nikgob_view::Prefs) -> Option<Duration> {
 }
 
 impl Worker {
+    pub(crate) fn save_prefs(&self) {
+        if let Some(path) = &self.prefs_path {
+            let prefs = self.state.read().prefs.clone();
+            if let Ok(json) = serde_json::to_vec_pretty(&prefs) {
+                let tmp = path.with_extension("json.tmp");
+                if std::fs::write(&tmp, json).is_ok() {
+                    let _ = std::fs::rename(&tmp, path);
+                }
+            }
+        }
+    }
+
     /// Writes playlists, likes and history next to the library (PLAN §4:
     /// the DB can be rebuilt from files + this export). At most once a
     /// minute while things change, and once more on shutdown.

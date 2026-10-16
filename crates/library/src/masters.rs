@@ -217,6 +217,37 @@ impl Library {
         })
     }
 
+    /// Rewrites `origin_path` of masters that lived inside `old_dir` to point
+    /// into `new_dir`. Returns the number of rows updated.
+    pub fn relocate_master_paths(
+        &self,
+        old_dir: &std::path::Path,
+        new_dir: &std::path::Path,
+    ) -> Result<usize> {
+        self.write(|tx| {
+            let rows: Vec<(String, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT track_id, origin_path FROM master WHERE origin_path IS NOT NULL",
+                )?;
+                let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                mapped.collect::<rusqlite::Result<_>>()?
+            };
+            let mut updated = 0usize;
+            for (track_id, path_str) in rows {
+                let p = std::path::Path::new(&path_str);
+                if let Ok(rel) = p.strip_prefix(old_dir) {
+                    let target = new_dir.join(rel).to_string_lossy().into_owned();
+                    tx.execute(
+                        "UPDATE master SET origin_path = ?2 WHERE track_id = ?1",
+                        params![track_id, target],
+                    )?;
+                    updated += 1;
+                }
+            }
+            Ok(updated)
+        })
+    }
+
     /// Inserts or updates one replica.
     pub fn put_replica(&self, replica: &Replica) -> Result<()> {
         self.write(|tx| upsert_replica(tx, replica))

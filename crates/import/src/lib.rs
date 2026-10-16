@@ -23,11 +23,11 @@ pub mod tags;
 pub mod trash;
 pub mod watch;
 
-pub use config::ImportConfig;
+pub use config::{ImportConfig, normalize_masters_dir};
 pub use encode::{EncodeOptions, EncodedInfo, Encoder, FfmpegEncoder, RopusEncoder};
 pub use error::{ImportError, Result};
 pub use events::{ConfirmItem, ConfirmOption, ImportEvent, ItemId, JobId, Stage};
-pub use importer::{FileOutcome, ImportJob, Importer};
+pub use importer::{FileOutcome, ImportJob, Importer, RelocateReport, relocate_masters};
 pub use rebuild::{RebuildReport, merge_split_releases, rebuild_from_files};
 pub use retag::TagChanges;
 pub use spectrum::{SpectrumReport, Verdict};

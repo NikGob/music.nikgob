@@ -180,16 +180,16 @@ mod tests {
     fn other_sources_and_pick() {
         let lib = Library::open_in_memory().unwrap();
         let t = local_track(&lib, "Кукушка");
-        assert!(lib.lyrics_text(t.id, "netease").unwrap().is_none());
-        lib.put_lyrics_text(t.id, "netease", Some(" ")).unwrap();
-        assert_eq!(lib.lyrics_text(t.id, "netease").unwrap().unwrap().0, None);
-        lib.put_lyrics_text(t.id, "netease", Some("<tt/>")).unwrap();
-        assert_eq!(lib.lyrics_text(t.id, "netease").unwrap().unwrap().0.as_deref(), Some("<tt/>"));
+        assert!(lib.lyrics_text(t.id, "lyricsplus").unwrap().is_none());
+        lib.put_lyrics_text(t.id, "lyricsplus", Some(" ")).unwrap();
+        assert_eq!(lib.lyrics_text(t.id, "lyricsplus").unwrap().unwrap().0, None);
+        lib.put_lyrics_text(t.id, "lyricsplus", Some("<tt/>")).unwrap();
+        assert_eq!(lib.lyrics_text(t.id, "lyricsplus").unwrap().unwrap().0.as_deref(), Some("<tt/>"));
 
         assert_eq!(lib.lyrics_pick(t.id).unwrap(), None);
         lib.set_lyrics_pick(t.id, Some("lrclib")).unwrap();
-        lib.set_lyrics_pick(t.id, Some("netease")).unwrap();
-        assert_eq!(lib.lyrics_pick(t.id).unwrap().as_deref(), Some("netease"));
+        lib.set_lyrics_pick(t.id, Some("lyricsplus")).unwrap();
+        assert_eq!(lib.lyrics_pick(t.id).unwrap().as_deref(), Some("lyricsplus"));
         lib.set_lyrics_pick(t.id, None).unwrap();
         assert_eq!(lib.lyrics_pick(t.id).unwrap(), None);
     }

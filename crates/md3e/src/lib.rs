@@ -18,6 +18,7 @@
 
 pub mod color;
 pub mod components;
+pub mod covers;
 pub mod screens;
 pub mod icons;
 pub mod theme;

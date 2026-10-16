@@ -51,11 +51,12 @@ pub fn cover(ui: &Ui, cover: Option<&Cover>, rect: Rect, radius: f32) {
     match cover {
         Some(c) => {
             paint::container(ui.painter(), rect, radii, s.surface_container_highest, Stroke::NONE);
-            egui::Image::new(c.uri())
-                .texture_options(crate::components::PHOTO_TEXTURE)
-                .corner_radius(radius.min(255.0) as u8)
-                .show_loading_spinner(false)
-                .paint_at(ui, rect);
+            if let Some(texture) = crate::covers::texture(ui.ctx(), &c.uri(), rect.size(), 1.0) {
+                egui::Image::from_texture(texture)
+                    .texture_options(crate::components::PHOTO_TEXTURE)
+                    .corner_radius(radius.min(255.0) as u8)
+                    .paint_at(ui, rect);
+            }
         }
         None => {
             paint::container(ui.painter(), rect, radii, s.secondary_container, Stroke::NONE);

@@ -229,13 +229,9 @@ pub fn shape_image(ui: &Ui, uri: Option<&str>, initials: &str, rect: Rect, shape
     let s = Theme::get(ui.ctx()).scheme;
     let cubics = shape.polygon().cubics();
     let opts = shape_paint::FillOptions::for_ppp(ui.ctx().pixels_per_point());
-    let tex = uri.and_then(|u| {
-        egui::Image::new(u.to_owned())
-            .texture_options(crate::components::PHOTO_TEXTURE)
-            .load_for_size(ui.ctx(), rect.size())
-            .ok()
-            .and_then(|p| p.texture_id())
-    });
+    let tex = uri
+        .and_then(|u| crate::covers::texture(ui.ctx(), u, rect.size(), 1.0))
+        .map(|t| t.id);
     let mesh: Mesh = match tex {
         Some(t) => shape_paint::texture_mesh(
             cubics,

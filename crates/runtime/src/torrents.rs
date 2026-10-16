@@ -607,9 +607,8 @@ impl Worker {
                     let ext = f.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
                     let dest = cfg.masters_dir().join(format!("{}.{ext}", m.file_hash));
                     let _ = std::fs::create_dir_all(cfg.masters_dir());
-                    let moved = dest.exists() || nikgob_import::fsutil::move_file(&f, &dest).is_ok();
+                    let moved = nikgob_import::fsutil::move_file_verified(&f, &dest, Some(&m.file_hash)).is_ok();
                     if moved {
-                        let _ = std::fs::remove_file(&f);
                         let _ = self.lib.set_master_origin_path(m.track_id, &dest.to_string_lossy());
                     }
                 } else if let Err(e) = std::fs::remove_file(&f)

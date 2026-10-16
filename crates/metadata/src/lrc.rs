@@ -4,6 +4,35 @@ use std::time::Duration;
 
 use nikgob_core::lyrics::{LyricLine, LyricWord};
 
+/// Normal LRC for lines, enhanced LRC for syllables. Empty end tags preserve
+/// gaps between syllables; concatenating their text preserves word gluing.
+pub fn serialize_lrc(lines: &[LyricLine]) -> String {
+    fn stamp(time: Duration) -> String {
+        let ms = time.as_millis();
+        // Millisecond precision avoids rounding the timing supplied by TTML.
+        format!("{:02}:{:02}.{:03}", ms / 60_000, ms / 1000 % 60, ms % 1000)
+    }
+    let mut out = String::new();
+    let mut lines: Vec<_> = lines.iter().collect();
+    lines.sort_by_key(|line| line.start);
+    for line in lines {
+        out.push_str(&format!("[{}]", stamp(line.start)));
+        if line.words.is_empty() {
+            out.push_str(&line.text);
+        } else {
+            for (i, word) in line.words.iter().enumerate() {
+                let text = if i + 1 == line.words.len() { word.text.trim_end() } else { &word.text };
+                out.push_str(&format!("<{}>{text}", stamp(word.start)));
+                if line.words.get(i + 1).is_none_or(|next| next.start != word.end) {
+                    out.push_str(&format!("<{}>", stamp(word.end)));
+                }
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Parses LRC text into `(timestamp, line)` pairs sorted by time.
 ///
 /// Handles several timestamps per line (`[00:12.00][01:30.00]chorus`), `[offset:+500]`
@@ -264,6 +293,19 @@ mod tests {
 
     fn ms(v: u64) -> Duration {
         Duration::from_millis(v)
+    }
+
+    #[test]
+    fn lrc_and_enhanced_lrc_round_trip_with_syllables_and_gaps() {
+        let mut line = LyricLine::new(ms(1001), "Hello world");
+        line.words = vec![
+            LyricWord { start: ms(1001), end: ms(1254), text: "Hel".into() },
+            LyricWord { start: ms(1254), end: ms(1507), text: "lo ".into() },
+            LyricWord { start: ms(2009), end: ms(3012), text: "world".into() },
+        ];
+        line.end = Some(ms(3012));
+        let lines = vec![line, LyricLine::new(ms(5000), "next line")];
+        assert_eq!(parse_lrc_lines(&serialize_lrc(&lines)), lines);
     }
 
     #[test]

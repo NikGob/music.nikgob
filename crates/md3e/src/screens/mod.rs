@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use egui::{Context, Key, Modifiers, Rect, Ui, UiBuilder, pos2, vec2};
 use nikgob_motion::{Animated, Spring};
-use nikgob_view::{Command, Route, ThemeMode, ViewState};
+use nikgob_view::{Command, NpSlot, Route, ThemeMode, ViewState};
 
 use crate::{
     ColorScheme, Contrast, Icon, SchemeVariant, SizeClass, Theme,
@@ -145,9 +145,10 @@ impl Md3eUi {
 
     pub fn set_now_playing(&mut self, ctx: &Context, open: bool) {
         self.now_playing = open;
-        if !open {
-            self.chrome.np_modal = false;
-        } else if !self.was_inline {
+        if open {
+            self.chrome.np_loaded = false;
+        }
+        if open && !self.was_inline {
             // A modal pane sheet must not stay on top of Now Playing.
             self.pane = None;
         }
@@ -201,7 +202,18 @@ impl Md3eUi {
         let ctx = &root.ctx().clone();
         let first_cmd = out.len();
         self.update_theme(ctx, state);
+        // The current and the next cover stay loaded while off screen.
+        let pinned: Vec<String> = (state.player.current.iter())
+            .chain(state.queue.next.first().map(|e| &e.track))
+            .filter_map(|t| t.cover.as_ref().map(|c| c.uri()))
+            .collect();
+        crate::covers::pin(ctx, pinned.iter().map(String::as_str));
         self.np_motion = state.prefs.np_motion;
+        if !self.chrome.np_loaded {
+            self.chrome.np_loaded = true;
+            self.chrome.np_slot = state.prefs.np_slot;
+            self.chrome.np_saved = Some(state.prefs.np_slot);
+        }
         self.chrome.np_covering = self.np_anim.value(anim::now(ctx)) > 0.01;
         self.chrome.wheel(ctx, state, out);
         self.shortcuts(ctx, state, out);
@@ -214,7 +226,17 @@ impl Md3eUi {
                 let full = ui.max_rect();
                 let class = size_class(full.width());
                 if class == SizeClass::Compact {
+                    if self.route() == &Route::Settings {
+                        self.content_rect = full;
+                        if ui.add(crate::components::IconButton::new(crate::Icon::ExpandMore)
+                            .tooltip("Вернуться к плееру").id_salt("compact-settings-close")).clicked() {
+                            self.navigate(ctx, Route::Home, out);
+                        }
+                        pages::page(ui, &Route::Settings, state, 16.0, &mut self.pages, out);
+                        return;
+                    }
                     // Mini mode: Now Playing only.
+                    self.chrome.np_covering = true;
                     now_playing::container(ui, full, 1.0);
                     now_playing::show(ui, full, state, true, &mut self.pages, &mut self.chrome, out);
                     return;
@@ -228,10 +250,6 @@ impl Md3eUi {
         }
         if let Some(tab) = self.pages.open_pane.take() {
             self.pane = Some(tab);
-            self.pages.np_tab = tab;
-        }
-        if self.now_playing && self.pages.pending_nav.is_some() {
-            self.set_now_playing(ctx, false);
         }
         self.pages
             .overlays(ctx, state, self.content_rect, out);
@@ -310,6 +328,19 @@ impl Md3eUi {
             }
         }
 
+        if let Some(route) = self.pages.pending_nav.take() {
+            if self.pages.scroll_to_lyrics && route == Route::Settings {
+                self.pane = None;
+                // Keep the page width stable while resolving its scroll target.
+                anim::snap_f32(ctx, egui::Id::new("pane-width"), 0.0);
+            }
+            if self.now_playing {
+                self.set_now_playing(ctx, false);
+            }
+            self.search.clear();
+            self.navigate(ctx, route, out);
+        }
+
         if self.chrome.visualizer && self.chrome.viz.show(ctx, state, &self.chrome.bands) {
             self.chrome.visualizer = false;
         }
@@ -330,7 +361,6 @@ impl Md3eUi {
         }
         if let Some(tab) = self.chrome.open_pane.take() {
             self.pane = Some(tab);
-            self.pages.np_tab = tab;
         }
         // A torrent search for a better copy shows its results on the search page.
         let query = out[first_cmd..].iter().rev().find_map(|c| match c {
@@ -348,18 +378,36 @@ impl Md3eUi {
         // Esc last: open dialogs, menus and sheets take it first. Order:
         // visualizer (in `shortcuts`), dialogs, sheet, Now Playing, search, back.
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-            if self.now_playing {
+            let compact = size_class(ctx.content_rect().width()) == SizeClass::Compact;
+            if (self.now_playing || (compact && self.route() != &Route::Settings)) && self.chrome.np_slot != NpSlot::None {
+                self.chrome.np_slot = NpSlot::None;
+            } else if self.now_playing {
                 self.set_now_playing(ctx, false);
             } else if !self.search.is_empty() {
                 self.search.clear();
+            } else if compact && self.route() == &Route::Settings {
+                self.navigate(ctx, Route::Home, out);
             } else {
                 self.back(ctx, out);
+            }
+        }
+        if self.chrome.np_saved != Some(self.chrome.np_slot) {
+            self.chrome.np_saved = Some(self.chrome.np_slot);
+            // Preserve any other preference edited during this frame.
+            if let Some(Command::SetPrefs(prefs)) = out[first_cmd..].iter_mut().rev().find(|c| matches!(c, Command::SetPrefs(_))) {
+                prefs.np_slot = self.chrome.np_slot;
+            } else {
+                out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs {
+                    np_slot: self.chrome.np_slot,
+                    ..state.prefs.clone()
+                })));
             }
         }
     }
 
     fn shortcuts(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
         let typing = ctx.memory(|m| m.focused().is_some()) && ctx.egui_wants_keyboard_input();
+        let now_playing_open = self.now_playing || (size_class(ctx.content_rect().width()) == SizeClass::Compact && self.route() != &Route::Settings);
         let mut previous = false;
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::NONE, Key::F11) {
@@ -374,7 +422,7 @@ impl Md3eUi {
             if i.consume_key(Modifiers::COMMAND, Key::K) || i.consume_key(Modifiers::COMMAND, Key::F) {
                 self.search_focus = true;
             }
-            if i.consume_key(Modifiers::COMMAND, Key::Q) {
+            if !now_playing_open && i.consume_key(Modifiers::COMMAND, Key::Q) {
                 self.pane = if self.pane == Some(PaneTab::Queue) {
                     None
                 } else {
@@ -394,6 +442,15 @@ impl Md3eUi {
             }
             if typing {
                 return;
+            }
+            if !self.chrome.visualizer
+                && now_playing_open
+                && i.consume_key(Modifiers::NONE, Key::L)
+            {
+                self.chrome.np_slot.toggle(NpSlot::Lyrics);
+            }
+            if !self.chrome.visualizer && now_playing_open && i.consume_key(Modifiers::NONE, Key::Q) {
+                self.chrome.np_slot.toggle(NpSlot::Queue);
             }
             if i.consume_key(Modifiers::NONE, Key::Space) {
                 out.push(Command::TogglePlay);
@@ -600,6 +657,7 @@ impl Md3eUi {
         }
 
         // Supporting pane.
+        let mut configure_lyrics = false;
         if let Some(mut tab) = self.pane.or(Some(self.last_pane)) {
             if inline_pane && pane_w > 1.0 {
                 let rect = Rect::from_min_max(
@@ -617,7 +675,7 @@ impl Md3eUi {
                         .id_salt("pane"),
                 );
                 pui.set_clip_rect(rect);
-                pane::show(&mut pui, state, &mut tab, &mut self.chrome, out);
+                configure_lyrics = pane::show(&mut pui, state, &mut tab, &mut self.chrome, self.pages.levels_bass, out);
                 if self.pane.is_some() {
                     self.pane = Some(tab);
                     self.last_pane = tab;
@@ -626,7 +684,7 @@ impl Md3eUi {
                 // Medium/Expanded: a modal side sheet over the content.
                 let mut open = self.pane.is_some();
                 SideSheet::new("md3e-pane-sheet").show(&ctx, &mut open, |ui| {
-                    pane::show(ui, state, &mut tab, &mut self.chrome, out);
+                    configure_lyrics = pane::show(ui, state, &mut tab, &mut self.chrome, self.pages.levels_bass, out);
                 });
                 if self.pane.is_some() {
                     self.pane = open.then_some(tab);
@@ -635,6 +693,9 @@ impl Md3eUi {
                     }
                 }
             }
+        }
+        if configure_lyrics {
+            self.pages.request_lyrics_settings();
         }
     }
 }
@@ -708,7 +769,7 @@ impl Md3eUi {
     /// screenshots).
     pub fn open_queue(&mut self) {
         if self.now_playing {
-            self.chrome.np_sheet = true;
+            self.chrome.np_slot = NpSlot::Queue;
         } else {
             self.pane = Some(PaneTab::Queue);
         }
@@ -716,7 +777,11 @@ impl Md3eUi {
 
     /// Opens the side pane on the lyrics (scripted screenshots).
     pub fn open_lyrics(&mut self) {
-        self.pane = Some(PaneTab::Lyrics);
+        if self.now_playing {
+            self.chrome.np_slot = NpSlot::Lyrics;
+        } else {
+            self.pane = Some(PaneTab::Lyrics);
+        }
     }
 
     /// Switches the library page's tab (scripted screenshots).
@@ -734,7 +799,7 @@ impl Md3eUi {
 impl Md3eUi {
     /// Whether the ambient glow is on screen and wants audio levels.
     pub fn wants_levels(&self) -> bool {
-        self.now_playing || self.np_anim.target() > 0.5 || self.chrome.visualizer
+        self.now_playing || self.chrome.np_covering || self.np_anim.target() > 0.5 || self.chrome.visualizer || self.pane == Some(PaneTab::Lyrics)
     }
 
     /// The latest bass energy (0..1) for the ambient glow.
@@ -761,5 +826,158 @@ fn np_spring(motion: u8) -> nikgob_motion::Spring {
         0 => nikgob_motion::Spring::new(0.85, 220.0),
         2 => nikgob_motion::Spring::new(0.9, 1000.0),
         _ => nikgob_motion::Spring::new(0.72, 520.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context() -> Context {
+        let ctx = Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        crate::typography::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+        crate::icons::install(&ctx);
+        ctx
+    }
+
+    fn frame(ctx: &Context, ui: &mut Md3eUi, state: &mut ViewState, time: f64, width: f32, key: Option<Key>) -> egui::FullOutput {
+        let events = key.into_iter().map(|key| egui::Event::Key {
+            key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE,
+        }).collect();
+        let mut commands = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 900.0))),
+            time: Some(time), events, ..Default::default()
+        }, |root| ui.frame(root, state, &mut commands));
+        output.textures_delta.clear();
+        for command in commands {
+            if let Command::SetPrefs(prefs) = command { state.prefs = *prefs; }
+        }
+        output
+    }
+
+    #[test]
+    fn lyrics_settings_closes_overlays_and_scrolls_once_in_all_window_sizes() {
+        for width in [380.0, 800.0, 1440.0] {
+            let ctx = context();
+            let mut ui = Md3eUi::new();
+            let mut state = ViewState::default();
+            ui.set_now_playing(&ctx, true);
+            ui.pane = Some(PaneTab::Lyrics);
+            frame(&ctx, &mut ui, &mut state, 0.0, width, None);
+            ui.pages.request_lyrics_settings();
+            frame(&ctx, &mut ui, &mut state, 1.0, width, None);
+            assert_eq!(ui.route(), &Route::Settings);
+            assert!(!ui.now_playing);
+            assert_eq!(ui.pane, None);
+            assert!(ui.pages.scroll_to_lyrics);
+            frame(&ctx, &mut ui, &mut state, 2.0, width, None);
+            assert!(!ui.pages.scroll_to_lyrics);
+            assert_eq!(ui.route(), &Route::Settings);
+            frame(&ctx, &mut ui, &mut state, 2.5, width, None);
+            let output = frame(&ctx, &mut ui, &mut state, 2.6, width, None);
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.text() == "Текст песен" && text.pos.y < 200.0
+            )), "lyrics header was not scrolled into view at width {width}");
+            if width == 380.0 {
+                frame(&ctx, &mut ui, &mut state, 3.0, width, Some(Key::Escape));
+                assert_eq!(ui.route(), &Route::Home);
+            }
+            // Opening from lyrics while Settings is already the current route
+            // must still request another scroll.
+            ui.navigate(&ctx, Route::Settings, &mut Vec::new());
+            ui.pages.request_lyrics_settings();
+            frame(&ctx, &mut ui, &mut state, 4.0, width, None);
+            frame(&ctx, &mut ui, &mut state, 5.0, width, None);
+            assert_eq!(ui.route(), &Route::Settings);
+            assert!(!ui.pages.scroll_to_lyrics);
+        }
+    }
+
+    #[test]
+    fn slots_toggle_restore_and_escape_in_narrow_and_wide_windows() {
+        for width in [380.0, 800.0, 1440.0] {
+            let ctx = context();
+            let mut ui = Md3eUi::new();
+            let mut state = ViewState::default();
+            ui.set_now_playing(&ctx, true);
+            frame(&ctx, &mut ui, &mut state, 0.0, width, None);
+            // Lyrics is available even when this track has no text.
+            for (time, key, slot) in [
+                (1.0, Key::L, NpSlot::Lyrics),
+                (2.0, Key::L, NpSlot::None),
+                (3.0, Key::Q, NpSlot::Queue),
+                (4.0, Key::Q, NpSlot::None),
+                (5.0, Key::Q, NpSlot::Queue),
+                (6.0, Key::L, NpSlot::Lyrics),
+            ] {
+                frame(&ctx, &mut ui, &mut state, time, width, Some(key));
+                assert_eq!(ui.chrome.np_slot, slot);
+                assert_eq!(state.prefs.np_slot, slot);
+            }
+            for (i, slot) in [NpSlot::None, NpSlot::Lyrics, NpSlot::Queue, NpSlot::Info].into_iter().enumerate() {
+                state.prefs.np_slot = slot;
+                state.prefs.reduced_motion = i % 2 == 0;
+                ui.set_now_playing(&ctx, true);
+                let t = 10.0 + i as f64 * 5.0;
+                frame(&ctx, &mut ui, &mut state, t, width, None);
+                assert_eq!(ui.chrome.np_slot, slot);
+                frame(&ctx, &mut ui, &mut state, t + 1.0, width, None);
+                frame(&ctx, &mut ui, &mut state, t + 2.0, width, Some(Key::Escape));
+                assert_eq!(state.prefs.np_slot, NpSlot::None);
+                assert_eq!(ui.now_playing, slot != NpSlot::None);
+                if slot != NpSlot::None {
+                    frame(&ctx, &mut ui, &mut state, t + 3.0, width, Some(Key::Escape));
+                    assert!(!ui.now_playing);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn info_menu_selects_slot_and_bar_menu_keeps_the_shell_pane() {
+        let mut chrome = chrome::Chrome::default();
+        let track = nikgob_view::TrackRow {
+            id: nikgob_view::TrackId::new(), title: "Track".into(), artist: "Artist".into(),
+            album: None, release_id: None, artist_id: None, disc_no: 1, track_no: 1,
+            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None,
+        };
+        let mut out = Vec::new();
+        chrome.apply(chrome::Act::Info, &track, Rect::NOTHING, chrome::Where::Np, &mut out);
+        assert_eq!(chrome.np_slot, NpSlot::Info);
+        assert_eq!(chrome.open_pane, None);
+        chrome.apply(chrome::Act::Info, &track, Rect::NOTHING, chrome::Where::Bar, &mut out);
+        assert_eq!(chrome.open_pane, Some(PaneTab::Info));
+        assert_eq!(chrome.np_slot, NpSlot::Info);
+    }
+
+    #[test]
+    fn content_wheel_scrolls_and_the_rest_changes_volume() {
+        for width in [380.0, 1440.0] {
+            for slot in [NpSlot::Lyrics, NpSlot::Queue, NpSlot::Info] {
+                let ctx = context();
+                let mut ui = Md3eUi::new();
+                let mut state = ViewState::default();
+                state.prefs.np_slot = slot;
+                ui.set_now_playing(&ctx, true);
+                frame(&ctx, &mut ui, &mut state, 0.0, width, None);
+                frame(&ctx, &mut ui, &mut state, 1.0, width, None);
+                for (i, pos) in [pos2(width * 0.75, 400.0), pos2(20.0, 40.0)].into_iter().enumerate() {
+                    let mut commands = Vec::new();
+                    let mut output = ctx.run_ui(egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 900.0))),
+                        time: Some(2.0 + i as f64),
+                        events: vec![egui::Event::PointerMoved(pos), egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, -1.0),
+                            phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE,
+                        }], ..Default::default()
+                    }, |root| ui.frame(root, &state, &mut commands));
+                    output.textures_delta.clear();
+                    assert_eq!(commands.iter().any(|c| matches!(c, Command::SetVolume(_))), i == 1);
+                }
+            }
+        }
     }
 }

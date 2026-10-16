@@ -1,6 +1,6 @@
 //! Now Playing (md3e-player.md §3.5): morphing cover inside a dotted ring
 //! that turns and follows the spectrum, wavy progress, the hero play button
-//! in a standard button group, the supporting pane, and the ambient
+//! in a standard button group, one content slot, and the ambient
 //! background (soft colour clouds following the bass).
 //!
 //! Wide windows put the cover on the left and the text and controls beside
@@ -15,7 +15,8 @@ use std::sync::{Mutex, OnceLock};
 
 use egui::{Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_shapes::{CornerRounding, Cubic, MaterialShape, Morph, Point, RoundedPolygon, paint as shape_paint};
-use nikgob_view::{Command, CoverShape, LikeTarget, Prefs, Repeat, RingStyle, Status, TrackRow, ViewState};
+use nikgob_motion::Animated;
+use nikgob_view::{Command, CoverShape, LikeTarget, NpSlot, Repeat, RingStyle, Status, TrackRow, ViewState};
 
 use super::{
     chrome::{self, Act, Chrome, WheelZone, Where},
@@ -24,14 +25,13 @@ use super::{
     pane,
 };
 use crate::{
-    Icon, SizeClass, Theme, TypeRole,
+    Icon, Theme, TypeRole,
     components::{
-        BottomSheet, ButtonGroup, IconButton, Item, Size, Slider, Style, anim,
+        ButtonGroup, IconButton, Item, Size, Slider, Style, anim,
         button::{Colors, Shape as BtnShape},
         paint::{self, Radii},
     },
     size_class,
-    tokens::shape,
 };
 
 /// The shape a [`CoverShape`] stands for; `None` keeps the square cover.
@@ -160,7 +160,9 @@ impl Outline {
         Self {
             cubics: cover_morph(shape).as_cubics(progress),
             rect,
-            // Unwinds to upright as it turns back into the square.
+            // Unwinds to upright as it turns back into the square. The
+            // fraction is clamped above, so a bouncing morph spring adds no
+            // extra turn.
             rotation: rotation * progress,
         }
     }
@@ -214,13 +216,9 @@ impl Outline {
     pub fn paint(&self, ui: &Ui, uri: Option<&str>) {
         let s = Theme::get(ui.ctx()).scheme;
         let rect = self.rect;
-        let texture = uri.and_then(|u| {
-            egui::Image::new(u.to_owned())
-                .texture_options(crate::components::PHOTO_TEXTURE)
-                .load_for_size(ui.ctx(), rect.size())
-                .ok()
-                .and_then(|p| p.texture_id())
-        });
+        let texture = uri
+            .and_then(|u| crate::covers::texture(ui.ctx(), u, rect.size(), 1.0))
+            .map(|t| t.id);
         let opts = shape_paint::FillOptions::for_ppp(ui.ctx().pixels_per_point());
         let mesh: Mesh = match texture {
             Some(tex) => shape_paint::texture_mesh(
@@ -387,6 +385,58 @@ fn turn(ui: &Ui, key: &str, playing: bool, bass: f32, period: f32, ccw: bool) ->
     angle
 }
 
+/// How many times the playing `shape` maps onto itself in one revolution
+/// (its lobes), read off the definitions in `nikgob_shapes`: the cookies and
+/// clovers are named by it, `repeat`ed custom shapes by their `reps`,
+/// the lopsided ones (pentagon, gem, heart) have none. `None`, the square
+/// cover, never turns.
+fn symmetry(shape: Option<MaterialShape>) -> u32 {
+    match shape {
+        None => 1,
+        Some(shape) => match shape {
+            MaterialShape::Cookie12Sided => 12,
+            MaterialShape::Cookie9Sided => 9,
+            MaterialShape::Cookie7Sided => 7,
+            MaterialShape::Cookie6Sided => 6,
+            MaterialShape::Cookie4Sided | MaterialShape::Clover4Leaf | MaterialShape::PuffyDiamond => 4,
+            MaterialShape::Sunny | MaterialShape::VerySunny | MaterialShape::Flower | MaterialShape::Clover8Leaf => 8,
+            MaterialShape::SoftBurst | MaterialShape::Circle => 10,
+            MaterialShape::SoftBoom => 16,
+            MaterialShape::Puffy => 2,
+            _ => 1,
+        },
+    }
+}
+
+/// `spin` moved by whole lobes (`n`-fold symmetry) into `[-lobe/2, lobe/2)`.
+/// The shape looks the same there, but turning back to upright from it is
+/// at most half a lobe instead of up to a whole revolution.
+fn unwind(spin: f32, n: u32) -> f32 {
+    let lobe = TAU / n.max(1) as f32;
+    (spin + lobe * 0.5).rem_euclid(lobe) - lobe * 0.5
+}
+
+/// The angle the cover outline is turned by. While the shape is fully the
+/// playing one it is [`unwind`] of `spin`; while the morph is under way (a
+/// pause or resume) it follows the spin's steps from the last angle, so it
+/// never meets a wrap that would jump the half-way shape: not the spin
+/// crossing `TAU`, nor a lopsided shape's angle crossing a half turn.
+fn cover_angle(ui: &Ui, shape: Option<MaterialShape>, spin: f32, morph: f32) -> f32 {
+    let ctx = ui.ctx();
+    let id = egui::Id::new("np-cover-lobes");
+    let n = symmetry(shape);
+    let last: Option<(u32, f32, f32)> = ctx.data(|d| d.get_temp(id));
+    let angle = match last {
+        Some((seen, last_spin, last_angle)) if seen == n && morph < 0.999 => {
+            let step = (spin - last_spin + std::f32::consts::PI).rem_euclid(TAU) - std::f32::consts::PI;
+            last_angle + step
+        }
+        _ => unwind(spin, n),
+    };
+    ctx.data_mut(|d| d.insert_temp(id, (n, spin, angle)));
+    angle
+}
+
 /// Beat follower over the analyzer's smoothed levels. Those sit high for
 /// any loud track, so what moves is how far they jump above their own
 /// recent average.
@@ -490,20 +540,8 @@ pub fn show(
     let class = size_class(rect.width());
     let margin = class.margin();
     let inner = rect.shrink2(vec2(margin, 16.0));
-    let two_col = class >= SizeClass::Expanded;
-    if !chrome.np_loaded {
-        chrome.np_loaded = true;
-        chrome.np_sheet = state.prefs.np_pane;
-        chrome.np_saved = Some(state.prefs.np_pane);
-    }
-    if two_col {
-        chrome.np_modal = false;
-    }
-    // The wheel turns the volume anywhere but the pane (blocked below) and
-    // the bottom sheet, which scrolls.
-    if !chrome.np_modal {
-        chrome.volume_zone(rect, WheelZone::Np);
-    }
+    // Content scrolls; the wheel elsewhere changes volume.
+    chrome.volume_zone(rect, WheelZone::Np);
 
     // Header.
     let header = snap(ui, Rect::from_min_size(inner.min, vec2(inner.width(), 48.0)));
@@ -523,8 +561,8 @@ pub fn show(
         .context
         .as_deref()
         .map_or_else(|| "Сейчас играет".to_owned(), |c| format!("Играет из «{c}»"));
-    let sheet_open = if two_col { chrome.np_sheet } else { chrome.np_modal };
-    hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    let left_used = hui.min_rect().right() - header.left();
+    let right_used = hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let more = ui.add(IconButton::new(Icon::MoreVert).tooltip("Ещё").id_salt("np-more"));
         if let Some(t) = p.current.as_ref() {
             let acts = [
@@ -538,65 +576,46 @@ pub fn show(
                 Act::Sep,
                 Act::Trash,
             ];
-            let wh = Where::Np { tab: &mut pages.np_tab };
+            let wh = Where::Np;
             chrome.track_menu(&more, "np-more", &acts, t, state, wh, out);
         }
-        // Queue, lyrics and info: a side column when it fits, a bottom
-        // sheet otherwise.
-        if ui
-            .add(
-                IconButton::new(Icon::QueueMusic)
-                    .style(Style::Tonal)
-                    .selected(sheet_open)
-                    .tooltip("Очередь, текст, инфо")
-                    .id_salt("np-sheet-btn"),
-            )
-            .clicked()
-        {
-            if two_col {
-                chrome.np_sheet = !chrome.np_sheet;
-            } else {
-                chrome.np_modal = !chrome.np_modal;
-            }
+        if ui.add(
+            IconButton::new(Icon::QueueMusic)
+                .style(Style::Tonal)
+                .selected(chrome.np_slot == NpSlot::Queue)
+                .tooltip("Очередь (Q)")
+                .id_salt("np-queue-btn"),
+        ).clicked() {
+            chrome.np_slot.toggle(NpSlot::Queue);
         }
-        ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
-            common::label(ui, &ctx_text, TypeRole::TitleSmall, s.on_surface_variant);
-        });
-    });
-
-    // The pane slides in from the right edge (no bounce: it moves the
-    // whole layout).
-    let body = Rect::from_min_max(pos2(inner.left(), header.bottom() + 16.0), inner.max);
-    let pane_full = if class >= SizeClass::ExtraLarge { 412.0 } else { 360.0 };
-    let pane_k = anim::fraction(
-        &ctx,
-        egui::Id::new("np-pane-open"),
-        if two_col && chrome.np_sheet { 1.0 } else { 0.0 },
-        theme.motion.default_spatial.without_bounce(),
-    )
-    .clamp(0.0, 1.0);
-    let pane_w = (pane_full + 24.0) * pane_k;
-    let main = Rect::from_min_max(body.min, pos2(body.right() - pane_w, body.bottom()));
-    if two_col && pane_k > 0.01 {
-        let pr = snap(
-            ui,
-            Rect::from_min_size(
-                pos2(body.right() - pane_w + 24.0 * pane_k, body.top()),
-                vec2(pane_full, body.height()),
-            ),
+        if ui.add(
+            IconButton::new(Icon::Lyrics)
+                .style(Style::Tonal)
+                .selected(chrome.np_slot == NpSlot::Lyrics)
+                .tooltip("Текст (L)")
+                .id_salt("np-lyrics-btn"),
+        ).clicked() {
+            chrome.np_slot.toggle(NpSlot::Lyrics);
+        }
+        header.right() - ui.min_rect().left()
+    }).inner;
+    // Centred on the whole screen, not in the gap between the buttons.
+    let side = left_used.max(right_used).max(0.0) + 8.0;
+    let title = Rect::from_min_max(pos2(header.left() + side, header.top()), pos2(header.right() - side, header.bottom()));
+    if title.width() > 40.0 {
+        let mut tui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(title)
+                .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)),
         );
-        let clip = Rect::from_min_max(pr.min, pos2(rect.right(), pr.bottom()));
-        // Clicks on the pane's empty parts must not close Now Playing, and
-        // the wheel scrolls it.
-        ui.interact(clip.intersect(pr), ui.id().with("np-pane-bg"), Sense::click());
-        chrome.wheel_block(clip.intersect(pr));
-        let painter = ui.painter().with_clip_rect(clip);
-        painter.rect_filled(pr, shape::EXTRA_LARGE as u8, s.surface_container_low.gamma_multiply(0.85 * pane_k));
-        let mut pui = ui.new_child(UiBuilder::new().max_rect(pr.shrink(16.0)).id_salt("np-pane"));
-        pui.set_clip_rect(clip.intersect(pr).intersect(ui.clip_rect()));
-        pui.multiply_opacity(pane_k);
-        pane::show(&mut pui, state, &mut pages.np_tab, chrome, out);
+        common::label(&mut tui, &ctx_text, TypeRole::TitleSmall, s.on_surface_variant);
     }
+
+    let body = Rect::from_min_max(pos2(inner.left(), header.bottom() + 16.0), inner.max);
+    let slot_open = chrome.np_slot != NpSlot::None;
+    let mega_k = anim::fraction(&ctx, egui::Id::new("np-mega"), if slot_open { 1.0 } else { 0.0 }, theme.motion.default_spatial).clamp(0.0, 1.0);
+    let content_alpha = slot_opacities(&ctx, chrome.np_slot);
+    let main = body;
 
     // Layout: cover beside the text when there is room, above it otherwise.
     let info_h = INFO_H;
@@ -639,7 +658,9 @@ pub fn show(
     );
     let prefs = &state.prefs;
     let motion = !theme.reduced_motion;
-    let cover_rect = cover_box.shrink(RING_PAD);
+    let mega = mega_layout(body);
+    let normal_cover = cover_box.shrink(RING_PAD);
+    let cover_rect = if theme.reduced_motion { normal_cover } else { lerp_rect(normal_cover, mega.cover, mega_k) };
     let bass = if playing { pages.levels_bass } else { 0.0 };
     let (kick, transients) = if playing && motion {
         pulse(ui, bass, &chrome.bands)
@@ -654,15 +675,15 @@ pub fn show(
     let spin = turn(ui, "np-cover-angle", playing, bass, period, prefs.cover_ccw);
     let swell = if prefs.cover_pulse { 1.0 + 0.035 * kick } else { 1.0 };
     let shaped = Rect::from_center_size(cover_rect.center(), cover_rect.size() * swell);
-    let outline = Outline::new(shape, morph, shaped, spin);
+    // The outline unwinds to upright by the shortest way, not by every
+    // turn it has made.
+    let outline = Outline::new(shape, morph, shaped, cover_angle(ui, shape, spin, morph));
+    let mega_outline = Outline::new(shape, morph, mega.cover, 0.0);
     if prefs.ring {
         let period = if prefs.spin_ring && motion { 36.0 } else { 0.0 };
         let angle = turn(ui, "np-ring-angle", playing, bass, period, prefs.ring_ccw);
         let beat = prefs.ring_beat && playing;
-        ring(
-            ui,
-            &outline,
-            &RingInput {
+        let mut input = RingInput {
                 style: prefs.ring_style,
                 angle,
                 transients: if beat { &transients } else { &[] },
@@ -671,10 +692,25 @@ pub fn show(
                 // The contour ring stays around the square too; the
                 // circle one only belongs to a shape.
                 alpha: if prefs.ring_style == RingStyle::Circle { shown } else { 0.35 + 0.65 * shown },
-            },
-        );
+        };
+        let alpha = input.alpha;
+        input.alpha *= if theme.reduced_motion || !mega.wide { 1.0 - mega_k } else { 1.0 };
+        ring(ui, &outline, &input);
+        if theme.reduced_motion && mega.wide {
+            input.alpha = alpha * mega_k;
+            ring(ui, &mega_outline, &input);
+        }
     }
-    outline.paint(ui, uri.as_deref());
+    if theme.reduced_motion {
+        let mut normal_ui = ui.new_child(UiBuilder::new().max_rect(body).id_salt("np-cover-fade"));
+        normal_ui.multiply_opacity(1.0 - mega_k);
+        outline.paint(&normal_ui, uri.as_deref());
+        let mut mega_ui = ui.new_child(UiBuilder::new().max_rect(body).id_salt("mega-cover-fade"));
+        mega_ui.multiply_opacity(mega_k);
+        mega_outline.paint(&mega_ui, uri.as_deref());
+    } else {
+        outline.paint(ui, uri.as_deref());
+    }
     ui.interact(cover_rect, ui.id().with("np-cover"), Sense::click());
     if playing && !theme.reduced_motion {
         ctx.request_repaint();
@@ -682,27 +718,76 @@ pub fn show(
 
     let info_rect = snap(ui, info_rect);
     ui.interact(info_rect, ui.id().with("np-info-bg"), Sense::click());
-    info(ui, info_rect, wide, state, pages, chrome, out);
-
-    // Single column: the pane lives in a bottom sheet.
-    if !two_col {
-        let mut open = chrome.np_modal;
-        BottomSheet::new("np-sheet").show(&ctx, &mut open, |ui| {
-            pane::show(ui, state, &mut pages.np_tab, chrome, out);
-        });
-        chrome.np_modal = open;
+    if mega_k < 0.999 {
+        let mut normal_ui = ui.new_child(UiBuilder::new().max_rect(info_rect).id_salt("np-normal-info"));
+        normal_ui.multiply_opacity(1.0 - mega_k);
+        if slot_open { normal_ui.disable(); }
+        info(&mut normal_ui, info_rect, wide, InfoMode::Normal, state, pages, chrome, out);
     }
-
-    // Remember whether the column was left open.
-    if two_col && chrome.np_saved != Some(chrome.np_sheet) {
-        chrome.np_saved = Some(chrome.np_sheet);
-        out.push(Command::SetPrefs(Box::new(Prefs {
-            np_pane: chrome.np_sheet,
-            ..state.prefs.clone()
-        })));
+    if mega_k > 0.001 {
+        let mut mega_ui = ui.new_child(UiBuilder::new().max_rect(body).id_salt("np-mega-body"));
+        mega_ui.multiply_opacity(mega_k);
+        if !slot_open { mega_ui.disable(); }
+        if mega.wide {
+            info(&mut mega_ui, mega.info, false, InfoMode::Compact, state, pages, chrome, out);
+        } else {
+            thumbnail_info(&mut mega_ui, mega.cover, state);
+            info(&mut mega_ui, mega.info, false, InfoMode::Transport, state, pages, chrome, out);
+        }
+        let slide = if theme.reduced_motion { 0.0 } else { 32.0 * (1.0 - mega_k) };
+        let content = mega.content.translate(vec2(slide, 0.0));
+        mega_ui.interact(content, mega_ui.id().with("np-content-bg"), Sense::click());
+        chrome.wheel_block(content);
+        for (slot, alpha) in [NpSlot::Lyrics, NpSlot::Queue, NpSlot::Info].into_iter().zip(content_alpha) {
+            if alpha <= 0.001 { continue; }
+            let width = if slot == NpSlot::Lyrics { content.width() } else { content.width().min(720.0) };
+            let area = Rect::from_min_size(content.min, vec2(width, content.height()));
+            let mut cui = mega_ui.new_child(UiBuilder::new().max_rect(area).id_salt(("np-content", slot as u8)));
+            cui.set_clip_rect(area.intersect(ui.clip_rect()));
+            cui.multiply_opacity(alpha);
+            if chrome.np_slot != slot { cui.disable(); }
+            match slot {
+                NpSlot::Lyrics => {
+                    if super::lyrics::show(&mut cui, state, pages.levels_bass, true, out) {
+                        pages.request_lyrics_settings();
+                        closed = true;
+                    }
+                }
+                NpSlot::Queue => pane::queue(&mut cui, state, chrome, out),
+                NpSlot::Info => pane::info(&mut cui, state, out),
+                NpSlot::None => unreachable!(),
+            }
+        }
     }
 
     closed
+}
+
+/// Retain the last content on close; only switching open slots crossfades it.
+fn slot_opacities(ctx: &egui::Context, slot: NpSlot) -> [f32; 4] {
+    let theme = Theme::get(ctx);
+    let spring = anim::effective(ctx, theme.motion.fast_effects);
+    let now = anim::now(ctx);
+    let (alpha, settled) = ctx.data_mut(|d| {
+        let target = match slot {
+            NpSlot::None | NpSlot::Lyrics => [1.0, 0.0, 0.0, 0.0],
+            NpSlot::Queue => [0.0, 1.0, 0.0, 0.0],
+            NpSlot::Info => [0.0, 0.0, 1.0, 0.0],
+        };
+        let (last, a) = d.get_temp_mut_or_insert_with(egui::Id::new("np-content-fade"), || (slot, Animated::new(target, spring)));
+        if slot != NpSlot::None {
+            if *last == NpSlot::None { a.snap(target); }
+            if a.spring() != spring {
+                a.animate_to(target, spring, now);
+            } else {
+                a.set_target(target, now);
+            }
+        }
+        *last = slot;
+        (a.value(now), a.is_settled(now))
+    });
+    if !settled { ctx.request_repaint(); }
+    alpha.map(|a| a.clamp(0.0, 1.0))
 }
 
 /// Height of the text and controls block.
@@ -712,12 +797,84 @@ const PROGRESS_GAP: f32 = 28.0;
 const TITLE_H: f32 = 44.0;
 const CONTROLS_H: f32 = 96.0;
 
+const COMPACT_INFO_H: f32 = 32.0 + 4.0 + 24.0 + 16.0 + 64.0 + 16.0 + 56.0;
+const TRANSPORT_H: f32 = 64.0 + 16.0 + 56.0;
+
+struct MegaLayout {
+    wide: bool,
+    cover: Rect,
+    info: Rect,
+    content: Rect,
+}
+
+/// Wide: the cover column and the content form one group centred in the
+/// window, so a big screen has no empty half on the right.
+fn mega_layout(body: Rect) -> MegaLayout {
+    if body.width() >= 900.0 {
+        // Apple Music style: the window splits in halves. The cover column
+        // sits in the middle of the left half; the lyrics / queue start just
+        // right of the centre line. Room at the window edges throughout.
+        let pad = (body.width() * 0.05).clamp(24.0, 96.0);
+        let mid = body.center().x;
+        let half = mid - body.left() - pad;
+        let col = (half - 24.0).clamp(300.0, 500.0).min(half);
+        let left = body.left() + pad + (half - col) * 0.5;
+        let gap = (body.width() * 0.03).clamp(24.0, 64.0);
+        let content_left = mid + gap * 0.5;
+        let lyrics_w = (body.right() - pad - content_left).min(860.0);
+        // Air above and below, so the transport row never hugs the
+        // window's bottom edge.
+        let vpad = (body.height() * 0.06).clamp(24.0, 56.0);
+        let cover = (col - 2.0 * RING_PAD)
+            .min(body.height() - 2.0 * vpad - 2.0 * RING_PAD - 16.0 - COMPACT_INFO_H)
+            .clamp(120.0, 440.0);
+        let height = cover + 2.0 * RING_PAD + 16.0 + COMPACT_INFO_H;
+        let top = body.center().y - height * 0.5;
+        MegaLayout {
+            wide: true,
+            cover: Rect::from_center_size(pos2(left + col * 0.5, top + RING_PAD + cover * 0.5), vec2(cover, cover)),
+            info: Rect::from_min_size(pos2(left, top + cover + 2.0 * RING_PAD + 16.0), vec2(col, COMPACT_INFO_H)),
+            // The source line under the lyrics lines up with the transport row.
+            content: Rect::from_min_max(pos2(content_left, body.top()), pos2(content_left + lyrics_w, body.bottom() - vpad)),
+        }
+    } else {
+        MegaLayout {
+            wide: false,
+            cover: Rect::from_min_size(body.min, vec2(56.0, 56.0)),
+            info: Rect::from_min_size(pos2(body.left(), body.bottom() - TRANSPORT_H), vec2(body.width(), TRANSPORT_H)),
+            content: Rect::from_min_max(pos2(body.left(), body.top() + 72.0), pos2(body.right(), body.bottom() - TRANSPORT_H - 16.0)),
+        }
+    }
+}
+
+fn lerp_rect(from: Rect, to: Rect, k: f32) -> Rect {
+    Rect::from_min_max(from.min.lerp(to.min, k), from.max.lerp(to.max, k))
+}
+
+fn thumbnail_info(ui: &mut Ui, cover: Rect, state: &ViewState) {
+    let Some(t) = &state.player.current else { return };
+    let s = Theme::get(ui.ctx()).scheme;
+    let rect = Rect::from_min_max(pos2(cover.right() + 16.0, cover.top()), pos2(ui.max_rect().right(), cover.bottom()));
+    let mut tui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("mega-title"));
+    tui.add(egui::Label::new(TypeRole::TitleLarge.emphasized().rich(&t.title, s.on_surface)).truncate());
+    tui.add(egui::Label::new(TypeRole::TitleMedium.style().rich(&t.artist, s.on_surface_variant)).truncate());
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InfoMode {
+    Normal,
+    Compact,
+    Transport,
+}
+
 /// Title, artist · album, progress, transport and the action row (like,
 /// add to playlist, volume).
+#[allow(clippy::too_many_arguments)]
 fn info(
     ui: &mut Ui,
     rect: Rect,
     wide: bool,
+    mode: InfoMode,
     state: &ViewState,
     pages: &mut PageState,
     chrome: &mut Chrome,
@@ -731,40 +888,44 @@ fn info(
     let col = rect;
     let mut y = col.top();
 
+    let compact = mode != InfoMode::Normal;
+    let title_h = if compact { 32.0 } else { TITLE_H };
     // Title and links.
-    let text_rect = Rect::from_min_size(pos2(col.left(), y), vec2(col.width(), TITLE_H + 4.0 + 24.0));
-    let mut tui = ui.new_child(UiBuilder::new().max_rect(text_rect).id_salt("np-text"));
-    tui.spacing_mut().item_spacing.y = 4.0;
-    let title_role = if wide { TypeRole::DisplaySmall } else { TypeRole::HeadlineLarge };
-    match current {
-        Some(t) => {
-            tui.add(egui::Label::new(title_role.emphasized().rich(&t.title, s.on_surface)).truncate());
-            tui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                let link = |ui: &mut Ui, text: &str| {
-                    let r = ui.add(
-                        egui::Label::new(TypeRole::TitleMedium.style().rich(text, s.on_surface_variant))
-                            .truncate()
-                            .sense(Sense::click()),
-                    );
-                    r.on_hover_cursor(egui::CursorIcon::PointingHand)
-                };
-                if link(ui, &t.artist).clicked() {
-                    chrome.nav = t.artist_id.map(nikgob_view::Route::Artist);
-                }
-                if let Some(a) = &t.album {
-                    ui.label(TypeRole::TitleMedium.style().rich(" · ", s.on_surface_variant));
-                    if link(ui, a).clicked() {
-                        chrome.nav = t.release_id.map(nikgob_view::Route::Release);
+    if mode != InfoMode::Transport {
+        let text_rect = Rect::from_min_size(pos2(col.left(), y), vec2(col.width(), title_h + 4.0 + 24.0));
+        let mut tui = ui.new_child(UiBuilder::new().max_rect(text_rect).id_salt("np-text"));
+        tui.spacing_mut().item_spacing.y = 4.0;
+        let title_role = if compact { TypeRole::HeadlineSmall } else if wide { TypeRole::DisplaySmall } else { TypeRole::HeadlineLarge };
+        match current {
+            Some(t) => {
+                tui.add(egui::Label::new(title_role.emphasized().rich(&t.title, s.on_surface)).truncate());
+                tui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let link = |ui: &mut Ui, text: &str| {
+                        let r = ui.add(
+                            egui::Label::new(TypeRole::TitleMedium.style().rich(text, s.on_surface_variant))
+                                .truncate()
+                                .sense(Sense::click()),
+                        );
+                        r.on_hover_cursor(egui::CursorIcon::PointingHand)
+                    };
+                    if link(ui, &t.artist).clicked() {
+                        chrome.nav = t.artist_id.map(nikgob_view::Route::Artist);
                     }
-                }
-            });
+                    if !compact && let Some(a) = &t.album {
+                        ui.label(TypeRole::TitleMedium.style().rich(" · ", s.on_surface_variant));
+                        if link(ui, a).clicked() {
+                            chrome.nav = t.release_id.map(nikgob_view::Route::Release);
+                        }
+                    }
+                });
+            }
+            None => {
+                tui.label(title_role.style().rich("Ничего не играет", s.on_surface));
+            }
         }
-        None => {
-            tui.label(title_role.style().rich("Ничего не играет", s.on_surface));
-        }
+        y += title_h + 4.0 + 24.0 + if compact { 16.0 } else { 24.0 };
     }
-    y += TITLE_H + 4.0 + 24.0 + 24.0;
 
     // Progress.
     let dur = p.duration.unwrap_or_default();
@@ -789,15 +950,17 @@ fn info(
             }
         });
     });
-    y += 64.0 + PROGRESS_GAP;
+    y += 64.0 + if compact { 16.0 } else { PROGRESS_GAP };
 
     // Controls: standard button group, hero play in the middle.
-    let group_w = 4.0 * 56.0 + 96.0 + 4.0 * 8.0 + 2.0 * 16.0;
+    let button_size = if compact { Size::S } else { Size::M };
+    let hero_size = if compact { Size::M } else { Size::L };
+    let group_w = if compact { 4.0 * 40.0 + 56.0 + 4.0 * 12.0 } else { 4.0 * 56.0 + 96.0 + 4.0 * 8.0 + 2.0 * 16.0 };
     let controls = snap(
         ui,
         Rect::from_min_size(
             pos2(col.left() + ((col.width() - group_w) * 0.5).max(0.0), y),
-            vec2(group_w.min(col.width()), CONTROLS_H),
+            vec2(group_w.min(col.width()), hero_size.height()),
         ),
     );
     let mut cui = ui.new_child(
@@ -806,11 +969,11 @@ fn info(
             .layout(egui::Layout::left_to_right(egui::Align::Center))
             .id_salt("np-controls"),
     );
-    let tonal = |icon: Icon| IconButton::new(icon).size(Size::M).style(Style::Tonal);
+    let tonal = |icon: Icon| IconButton::new(icon).size(button_size).style(Style::Tonal);
     let repeat_icon = if p.repeat == Repeat::One { Icon::RepeatOne } else { Icon::Repeat };
     let hero = IconButton::new(Icon::PlayArrow)
         .selected_icon(Icon::Pause)
-        .size(Size::L)
+        .size(hero_size)
         .style(Style::Filled)
         .shape(BtnShape::Round)
         .selected(playing)
@@ -821,7 +984,7 @@ fn info(
             border: Color32::TRANSPARENT,
         })
         .tooltip("Играть / пауза (Space)");
-    let r = ButtonGroup::new("np-group", Size::M).show(
+    let r = ButtonGroup::new("np-group", button_size).show(
         &mut cui,
         vec![
             Item::from(tonal(Icon::Shuffle).selected(p.shuffle).tooltip("Перемешать")),
@@ -849,6 +1012,9 @@ fn info(
     }
     if r[4].clicked() {
         out.push(Command::CycleRepeat);
+    }
+    if compact {
+        return;
     }
     y += CONTROLS_H + 16.0;
 
@@ -918,4 +1084,125 @@ fn ambient(ui: &Ui, rect: Rect, state: &ViewState, pages: &PageState) {
     };
     let level = anim::fraction(ui.ctx(), egui::Id::new("np-glow"), bass, theme.motion.fast_effects);
     super::ambient::paint(ui.ctx(), ui.painter(), rect, level.clamp(0.0, 1.0), playing);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unwinding_takes_at_most_half_a_lobe() {
+        for n in [1u32, 2, 4, 7, 8, 12, 16] {
+            let lobe = TAU / n as f32;
+            for i in 0..720 {
+                let spin = i as f32 / 720.0 * TAU;
+                let r = unwind(spin, n);
+                assert!(r.abs() <= lobe * 0.5 + 1e-4, "n={n} spin={spin} r={r}");
+                // Same pose: they differ by whole lobes only.
+                let lobes = (spin - r) / lobe;
+                assert!((lobes - lobes.round()).abs() < 1e-3, "n={n} spin={spin} r={r}");
+            }
+        }
+        // A spin just short of a revolution is a small step back, not 340°.
+        assert!(unwind(TAU - 0.05, 12).abs() < 0.06);
+        assert!(unwind(TAU - 0.05, 1).abs() < 0.06);
+        assert!(unwind(0.0, 12).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_pause_never_jumps_the_half_way_shape() {
+        let ctx = egui::Context::default();
+        let lopsided = Some(MaterialShape::Heart);
+        assert_eq!(symmetry(lopsided), 1);
+        let mut last = None;
+        // Playing just short of a half turn, then the pause morph starts and
+        // the braking spin crosses it, and then crosses TAU too.
+        for (i, (spin, morph)) in [(3.10, 1.0), (3.12, 0.95), (3.16, 0.9), (3.20, 0.8), (6.27, 0.5), (0.02, 0.4)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut out = ctx.run_ui(egui::RawInput { time: Some(i as f64 / 60.0), ..Default::default() }, |ui| {
+                let a = cover_angle(ui, lopsided, spin, morph);
+                if let Some(prev) = last {
+                    let step: f32 = a - prev;
+                    let expected = (spin - [3.10f32, 3.12, 3.16, 3.20, 6.27, 0.02][i.saturating_sub(1)] + std::f32::consts::PI).rem_euclid(TAU) - std::f32::consts::PI;
+                    if i > 0 && morph < 0.999 {
+                        assert!((step - expected).abs() < 1e-4, "frame {i}: {prev} -> {a}");
+                    }
+                }
+                last = Some(a);
+            });
+            out.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn shapes_look_the_same_after_a_lobe() {
+        // The orders in `symmetry` against the real outlines: turning the
+        // playing shape by one lobe must not change it.
+        let rect = Rect::from_center_size(pos2(0.0, 0.0), vec2(200.0, 200.0));
+        for choice in CoverShape::shapes() {
+            let shape = material(*choice);
+            let lobe = TAU / symmetry(shape) as f32;
+            let (a, b) = (Outline::new(shape, 1.0, rect, 0.0).radii(), Outline::new(shape, 1.0, rect, lobe).radii());
+            let worst = a.iter().zip(&b).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+            assert!(worst < 3.0, "{shape:?}: radii differ by {worst}");
+        }
+    }
+
+    #[test]
+    fn switching_slots_crossfades_without_moving_the_cover() {
+        let ctx = egui::Context::default();
+        for reduced in [false, true] {
+            Theme::new(crate::ColorScheme::baseline(true), true).with_reduced_motion(reduced).install(&ctx);
+            for (time, slot, expected) in [
+                (0.0, NpSlot::Lyrics, Some([1.0, 0.0, 0.0, 0.0])),
+                (1.0, NpSlot::Queue, Some([1.0, 0.0, 0.0, 0.0])),
+                (1.05, NpSlot::Queue, None),
+                (2.0, NpSlot::Queue, Some([0.0, 1.0, 0.0, 0.0])),
+                (3.0, NpSlot::None, Some([0.0, 1.0, 0.0, 0.0])),
+                (4.0, NpSlot::Info, Some([0.0, 0.0, 1.0, 0.0])),
+            ] {
+                let mut output = ctx.run_ui(egui::RawInput { time: Some(time + if reduced { 10.0 } else { 0.0 }), ..Default::default() }, |ui| {
+                    let alpha = slot_opacities(ui.ctx(), slot);
+                    if let Some(expected) = expected { assert_eq!(alpha, expected); }
+                    else { assert!(alpha[0] > 0.0 && alpha[1] > 0.0); }
+                    assert!((alpha.iter().sum::<f32>() - 1.0).abs() < 0.001);
+                    if slot != NpSlot::None {
+                        let k = anim::fraction(ui.ctx(), egui::Id::new("np-mega"), 1.0, Theme::get(ui.ctx()).motion.default_spatial);
+                        assert_eq!(k, 1.0);
+                    }
+                });
+                output.textures_delta.clear();
+            }
+            ctx.data_mut(|d| d.remove::<(NpSlot, Animated<[f32; 4]>)>(egui::Id::new("np-content-fade")));
+        }
+    }
+
+    #[test]
+    fn mega_columns_and_thumbnail_leave_lyrics_and_controls_room() {
+        for width in [360.0, 800.0, 899.0, 900.0, 1280.0, 1800.0] {
+            let body = Rect::from_min_size(pos2(24.0, 80.0), vec2(width, 780.0));
+            let layout = mega_layout(body);
+            assert!(body.contains_rect(layout.cover));
+            assert!(body.contains_rect(layout.info));
+            assert!(body.contains_rect(layout.content));
+            assert!(layout.content.is_positive());
+            assert!(!layout.info.intersects(layout.content));
+            if layout.wide {
+                // Halves: the cover column is centred in the left half, the
+                // content starts right of the centre line.
+                let mid = body.center().x;
+                assert!(layout.info.right() < mid && layout.content.left() > mid);
+                let col_mid = layout.info.center().x;
+                assert!((col_mid - (body.left() + mid) * 0.5).abs() < (body.width() * 0.05).clamp(24.0, 96.0), "{width}");
+                assert!(layout.cover.width() <= 440.0);
+            } else {
+                assert_eq!(layout.cover.size(), vec2(56.0, 56.0));
+                assert_eq!(layout.info.bottom(), body.bottom());
+            }
+            assert_eq!(lerp_rect(body, layout.cover, 0.0), body);
+            assert_eq!(lerp_rect(body, layout.cover, 1.0), layout.cover);
+        }
+    }
 }

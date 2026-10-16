@@ -73,8 +73,9 @@ pub struct RateLimits {
     pub cover_art: Duration,
     pub deezer: Duration,
     pub lrclib: Duration,
-    pub netease: Duration,
-    pub qq: Duration,
+    pub lyricsplus: Duration,
+    pub lrcred: Duration,
+    pub betterlyrics: Duration,
 }
 
 impl Default for RateLimits {
@@ -88,8 +89,9 @@ impl Default for RateLimits {
             // Deezer: 50 requests / 5 s.
             deezer: Duration::from_millis(200),
             lrclib: Duration::from_millis(200),
-            netease: Duration::from_millis(300),
-            qq: Duration::from_millis(300),
+            lyricsplus: Duration::from_millis(500),
+            lrcred: Duration::from_millis(500),
+            betterlyrics: Duration::from_millis(500),
         }
     }
 }
@@ -102,8 +104,9 @@ impl RateLimits {
             cover_art: Duration::ZERO,
             deezer: Duration::ZERO,
             lrclib: Duration::ZERO,
-            netease: Duration::ZERO,
-            qq: Duration::ZERO,
+            lyricsplus: Duration::ZERO,
+            lrcred: Duration::ZERO,
+            betterlyrics: Duration::ZERO,
         }
     }
 }
@@ -141,8 +144,9 @@ pub(crate) enum Service {
     CoverArt,
     Deezer,
     Lrclib,
-    Netease,
-    Qq,
+    LyricsPlus,
+    LrcRed,
+    BetterLyrics,
 }
 
 #[derive(Debug)]
@@ -152,8 +156,9 @@ struct Limiters {
     cover_art: RateLimiter,
     deezer: RateLimiter,
     lrclib: RateLimiter,
-    netease: RateLimiter,
-    qq: RateLimiter,
+    lyricsplus: RateLimiter,
+    lrcred: RateLimiter,
+    betterlyrics: RateLimiter,
 }
 
 impl Limiters {
@@ -164,8 +169,9 @@ impl Limiters {
             cover_art: RateLimiter::new(l.cover_art),
             deezer: RateLimiter::new(l.deezer),
             lrclib: RateLimiter::new(l.lrclib),
-            netease: RateLimiter::new(l.netease),
-            qq: RateLimiter::new(l.qq),
+            lyricsplus: RateLimiter::new(l.lyricsplus),
+            lrcred: RateLimiter::new(l.lrcred),
+            betterlyrics: RateLimiter::new(l.betterlyrics),
         }
     }
 
@@ -176,8 +182,9 @@ impl Limiters {
             Service::CoverArt => &self.cover_art,
             Service::Deezer => &self.deezer,
             Service::Lrclib => &self.lrclib,
-            Service::Netease => &self.netease,
-            Service::Qq => &self.qq,
+            Service::LyricsPlus => &self.lyricsplus,
+            Service::LrcRed => &self.lrcred,
+            Service::BetterLyrics => &self.betterlyrics,
         }
     }
 }
@@ -259,6 +266,9 @@ impl Http {
                     // too, also when this caller gives up (the server is still angry).
                     limiter.penalize(delay);
                     if attempt >= max {
+                        if status.is_server_error() && matches!(service, Service::BetterLyrics) {
+                            return Ok(resp);
+                        }
                         return Err(MetadataError::RateLimited(hinted));
                     }
                     log::warn!("{service:?}: HTTP {status}, retry {attempt}/{max} in {delay:?}");
@@ -282,19 +292,8 @@ impl Http {
         parse_json(&ok_body(resp).await?)
     }
 
-    /// Like [`Http::get_json`] with extra request headers (a browser-like
-    /// `User-Agent` and `Referer` for the Chinese services).
-    pub(crate) async fn get_body_with(
-        &self,
-        service: Service,
-        url: Url,
-        headers: &[(&str, &str)],
-    ) -> Result<Vec<u8>> {
-        let mut req = self.client.get(url);
-        for (k, v) in headers {
-            req = req.header(*k, *v);
-        }
-        let resp = self.send(service, req).await?;
+    pub(crate) async fn get_body(&self, service: Service, url: Url) -> Result<Vec<u8>> {
+        let resp = self.send(service, self.client.get(url)).await?;
         ok_body(resp).await
     }
 

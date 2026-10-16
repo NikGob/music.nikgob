@@ -81,6 +81,79 @@ pub fn copy_file(from: &Path, to: &Path) -> Result<u64> {
     fs::copy(long_path(from), long_path(to)).map_err(io_err(to))
 }
 
+/// Copies `from` to `to` via a temporary `.nikgob-part` sibling, flushes it to
+/// disk (`sync_all`), verifies that size and BLAKE3 hash match `expected_hash`
+/// (or the source file's hash), and atomically renames into `to`.
+pub fn copy_file_verified(from: &Path, to: &Path, expected_hash: Option<&str>) -> Result<String> {
+    let expected = match expected_hash {
+        Some(h) if !h.is_empty() => h.to_ascii_lowercase(),
+        _ => hash_file(from)?,
+    };
+    let expected_size = file_size(from)?;
+    if let Some(parent) = to.parent() {
+        create_dir_all(parent)?;
+    }
+    if long_path(to).exists() {
+        if file_size(to).ok() == Some(expected_size)
+            && hash_file(to).ok().as_deref() == Some(expected.as_str())
+        {
+            return Ok(expected);
+        }
+        remove_file(to)?;
+    }
+    let name = to
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_owned());
+    let tmp = to.with_file_name(format!(".{name}.nikgob-part"));
+    let _ = remove_file(&tmp);
+    {
+        let mut reader = File::open(long_path(from)).map_err(io_err(from))?;
+        let mut writer = File::create(long_path(&tmp)).map_err(io_err(&tmp))?;
+        std::io::copy(&mut reader, &mut writer).map_err(io_err(&tmp))?;
+        writer.sync_all().map_err(io_err(&tmp))?;
+    }
+    let actual_size = file_size(&tmp)?;
+    let actual_hash = hash_file(&tmp)?;
+    if actual_size != expected_size || actual_hash != expected {
+        let _ = remove_file(&tmp);
+        return Err(ImportError::Other(format!(
+            "проверка хеша не прошла для {}: ожидалось {expected} ({expected_size} B), получено {actual_hash} ({actual_size} B)",
+            to.display()
+        )));
+    }
+    fs::rename(long_path(&tmp), long_path(to)).map_err(|e| {
+        let _ = remove_file(&tmp);
+        ImportError::io(to, e)
+    })?;
+    Ok(expected)
+}
+
+/// Transfers `from` to `to`, verifies the destination file's size and BLAKE3
+/// hash on disk, and deletes `from` **only** after verification succeeds.
+pub fn move_file_verified(from: &Path, to: &Path, expected_hash: Option<&str>) -> Result<String> {
+    if from == to {
+        let expected = match expected_hash {
+            Some(h) if !h.is_empty() => h.to_ascii_lowercase(),
+            _ => hash_file(from)?,
+        };
+        let actual = hash_file(to)?;
+        if actual != expected {
+            return Err(ImportError::Other(format!(
+                "проверка хеша не прошла для {}: ожидалось {expected}, получено {actual}",
+                to.display()
+            )));
+        }
+        return Ok(expected);
+    }
+    let hash = copy_file_verified(from, to, expected_hash)?;
+    fs::remove_file(long_path(from)).map_err(|e| {
+        let _ = remove_file(to);
+        ImportError::io(from, e)
+    })?;
+    Ok(hash)
+}
+
 pub fn remove_file(path: &Path) -> Result<()> {
     match fs::remove_file(long_path(path)) {
         Ok(()) => Ok(()),
