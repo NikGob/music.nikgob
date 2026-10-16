@@ -433,10 +433,12 @@ impl Widget for Button {
     fn ui(self, ui: &mut Ui) -> Response {
         let natural = self.natural_width(ui);
         let size = vec2(natural + self.width_delta, self.size.height());
-        let (visual, _) = ui.allocate_exact_size(size, Sense::hover());
+        // The id before the allocation: afterwards `next_auto_id` is the
+        // next widget's, whose rect would replace this button's hit area.
         let id = self
             .id_salt
             .map_or_else(|| ui.next_auto_id(), |s| ui.id().with(s));
+        let (visual, _) = ui.allocate_exact_size(size, Sense::hover());
         let response = ui.interact(hit_rect(visual), id, Sense::click());
 
         if ui.is_rect_visible(visual) {
@@ -631,10 +633,12 @@ impl IconButton {
 impl Widget for IconButton {
     fn ui(self, ui: &mut Ui) -> Response {
         let size = vec2(self.natural_width() + self.width_delta, self.size.height());
-        let (visual, _) = ui.allocate_exact_size(size, Sense::hover());
+        // The id before the allocation: afterwards `next_auto_id` is the
+        // next widget's, whose rect would replace this button's hit area.
         let id = self
             .id_salt
             .map_or_else(|| ui.next_auto_id(), |s| ui.id().with(s));
+        let (visual, _) = ui.allocate_exact_size(size, Sense::hover());
         let mut response = ui.interact(hit_rect(visual), id, Sense::click());
 
         if ui.is_rect_visible(visual) {

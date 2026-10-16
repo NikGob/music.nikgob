@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use egui::{Rect, Sense, Ui, vec2};
-use nikgob_view::{Command, LikeTarget, Status, ViewState};
+use nikgob_view::{Command, LikeTarget, Repeat, Route, Status, ViewState};
 
 use super::{
     PaneTab,
@@ -82,7 +82,20 @@ pub fn show(
         match current {
             Some(t) => {
                 common::label(&mut tui, &t.title, TypeRole::TitleSmall, on);
-                common::label(&mut tui, &t.artist, TypeRole::BodySmall, on.gamma_multiply(0.8));
+                // The artist opens their page; the rest of the block opens
+                // Now Playing.
+                let artist = tui.add(
+                    egui::Label::new(TypeRole::BodySmall.style().rich(&t.artist, on.gamma_multiply(0.8)))
+                        .truncate()
+                        .selectable(false)
+                        .sense(Sense::click()),
+                );
+                if let Some(id) = t.artist_id {
+                    let artist = artist.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if artist.clicked() {
+                        chrome.nav = Some(Route::Artist(id));
+                    }
+                }
             }
             None => {
                 common::label(&mut tui, "Ничего не играет", TypeRole::TitleSmall, on);
@@ -122,6 +135,18 @@ pub fn show(
             .clicked()
         {
             out.push(Command::Next);
+        }
+        if ui
+            .add(
+                IconButton::new(repeat_icon(p.repeat))
+                    .selected(p.repeat != Repeat::Off)
+                    .colors(item)
+                    .tooltip("Повтор: выкл → всё → один")
+                    .id_salt("bar-repeat"),
+            )
+            .clicked()
+        {
+            out.push(Command::CycleRepeat);
         }
         ui.add_space(8.0);
 
@@ -207,13 +232,10 @@ pub fn show(
             result.toggle_pane = Some(PaneTab::Lyrics);
         }
         if show_volume {
-            let mut btn = IconButton::new(if p.muted || p.volume == 0.0 {
-                Icon::VolumeOff
-            } else {
-                Icon::VolumeUp
-            })
-            .colors(item)
-            .id_salt("bar-volume");
+            let level = chrome.volume_now(ui.ctx(), state);
+            let mut btn = IconButton::new(Icon::volume(level, p.muted))
+                .colors(item)
+                .id_salt("bar-volume");
             if !chrome.volume_open() {
                 btn = btn.tooltip("Громкость: наведи или крути колесо");
             }
@@ -265,6 +287,11 @@ pub fn show(
         ui.ctx().request_repaint_after(Duration::from_millis(250));
     }
     result
+}
+
+/// The repeat button's glyph: a "1" on it while one track repeats.
+pub fn repeat_icon(repeat: Repeat) -> Icon {
+    if repeat == Repeat::One { Icon::RepeatOne } else { Icon::Repeat }
 }
 
 fn time_label(ui: &mut Ui, d: Duration, color: egui::Color32) {

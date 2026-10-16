@@ -159,3 +159,43 @@ fn overlays_render_open_and_closing() {
         });
     });
 }
+
+/// A button without an id salt keeps its own hit area when the widget after
+/// it allocates (the floating player's "previous" lost its clicks to the
+/// play button next to it).
+#[test]
+fn unsalted_button_keeps_its_clicks() {
+    let ctx = context();
+    let mut rect = Rect::NOTHING;
+    let mut clicks = 0;
+    for i in 0..6 {
+        let at = rect.center();
+        let events = match i {
+            2 => vec![egui::Event::PointerMoved(at)],
+            3 | 4 => vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: i == 3,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            _ => Vec::new(),
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 200.0))),
+            time: Some(i as f64 * 0.05),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            ui.horizontal(|ui| {
+                let prev = ui.add(IconButton::new(Icon::SkipPrevious));
+                ui.add(IconButton::new(Icon::PlayArrow).size(Size::M).style(Style::Filled).id_salt("play"));
+                ui.add(IconButton::new(Icon::SkipNext));
+                rect = prev.rect;
+                clicks += usize::from(prev.clicked());
+            });
+        });
+        out.textures_delta.clear();
+    }
+    assert_eq!(clicks, 1);
+}

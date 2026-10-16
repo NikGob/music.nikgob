@@ -154,13 +154,8 @@ impl Chrome {
                 .icon(Icon::Favorite)
                 .shortcut("Ctrl+L"),
             Act::Lyrics => MenuItem::new("Текст песни").icon(Icon::Lyrics),
-            Act::Volume => MenuItem::new("Громкость…").icon(
-                if state.player.muted || state.player.volume == 0.0 {
-                    Icon::VolumeOff
-                } else {
-                    Icon::VolumeUp
-                },
-            ),
+            Act::Volume => MenuItem::new("Громкость…")
+                .icon(Icon::volume(state.player.volume, state.player.muted)),
             Act::Playlist => MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd),
             Act::Artist => MenuItem::new("К исполнителю")
                 .icon(Icon::Person)
@@ -555,7 +550,7 @@ impl Chrome {
                 let mute = ui
                     .scope_builder(UiBuilder::new().max_rect(btn), |ui| {
                         ui.add(
-                            IconButton::new(if volume == 0.0 { Icon::VolumeOff } else { Icon::VolumeUp })
+                            IconButton::new(Icon::volume(volume, state.player.muted))
                                 .size(Size::S)
                                 .tooltip("Без звука")
                                 .id_salt("md3e-volume-mute"),

@@ -171,10 +171,12 @@ impl Widget for Fab {
             .label
             .as_deref()
             .map_or(h, |l| extended_width(ui, self.size, l));
-        let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        // The id before the allocation: afterwards `next_auto_id` is the
+        // next widget's, whose rect would replace this button's hit area.
         let id = self
             .id_salt
             .map_or_else(|| ui.next_auto_id(), |salt| ui.id().with(salt));
+        let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
         let response = ui.interact(hit_rect(rect), id, Sense::click());
         if ui.is_rect_visible(rect) {
             paint_fab(
