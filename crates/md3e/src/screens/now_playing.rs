@@ -270,6 +270,23 @@ impl Outline {
         out
     }
 
+    /// Whether `p` falls inside the outline itself (not just its square):
+    /// even-odd test on the flattened path.
+    pub fn contains(&self, p: Pos2) -> bool {
+        if !self.rect.expand(self.rect.width() * 0.1).contains(p) {
+            return false;
+        }
+        let path = shape_paint::shape_path(&self.cubics, self.rect, self.rotation, 0.5);
+        let mut inside = false;
+        for (k, a) in path.iter().enumerate() {
+            let b = path[(k + 1) % path.len()];
+            if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y) {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
     /// The cover texture cropped to the outline. The picture itself never
     /// turns, only its outline.
     pub fn paint(&self, ui: &Ui, uri: Option<&str>) {
@@ -692,7 +709,6 @@ fn change_shape(ctx: &egui::Context, prefs: &nikgob_view::Prefs, out: &mut Vec<C
 /// Which single tap is waiting out the double click delay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tap {
-    Close,
     Pause,
 }
 
@@ -950,32 +966,39 @@ pub fn show(
         outline.paint(ui, uri.as_deref());
     }
     let mut cover_resp = ui.interact(cover_rect, ui.id().with("np-cover"), Sense::click());
-    if prefs.cover_click_pause {
+    // Only the shape itself is the cover: its square's corners count as
+    // the background.
+    let on_shape = |pos: Option<Pos2>| pos.is_some_and(|p| outline.contains(p));
+    let hover_shape = cover_resp.hovered() && on_shape(cover_resp.hover_pos());
+    if prefs.cover_click_pause && hover_shape {
         cover_resp = cover_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     }
+    let shape_clicked = cover_resp.clicked() && on_shape(cover_resp.interact_pointer_pos());
+    let shape_double = cover_resp.double_clicked() && on_shape(cover_resp.interact_pointer_pos());
+    let corner_clicked = cover_resp.clicked() && !shape_clicked;
     if playing && !theme.reduced_motion {
         ctx.request_repaint();
     }
 
     let info_rect = snap(ui, info_rect);
-    let info_bg = ui.interact(info_rect, ui.id().with("np-info-bg"), Sense::click());
+    // Swallows clicks on the info column so they don't close the player.
+    ui.interact(info_rect, ui.id().with("np-info-bg"), Sense::click());
 
-    // Taps: a click on empty space closes, one on the cover pauses; a
-    // double click anywhere changes the outline. While the gesture is on,
-    // a single tap waits out the double click delay first.
+    // Taps: a click on empty space closes at once, one on the cover shape
+    // pauses; a double click on the shape itself changes the outline. While
+    // that gesture is on, only a tap on the shape waits out the double
+    // click delay; closing never waits.
     let gesture = match prefs.dbl_click_shape {
         0 => false,
         1 => prefs.cover_shape == CoverShape::Random,
         _ => prefs.cover_shape != CoverShape::Original,
     };
-    let single = if !embedded && bg.clicked() {
-        Some(Tap::Close)
-    } else if prefs.cover_click_pause && cover_resp.clicked() {
-        Some(Tap::Pause)
-    } else {
-        None
-    };
-    let double = bg.double_clicked() || cover_resp.double_clicked() || info_bg.double_clicked();
+    if !embedded && (bg.clicked() || corner_clicked) {
+        ctx.data_mut(|d| d.remove::<(Tap, f64)>(egui::Id::new("np-tap")));
+        closed = true;
+    }
+    let single = (prefs.cover_click_pause && shape_clicked).then_some(Tap::Pause);
+    let double = shape_double;
     let tap_id = egui::Id::new("np-tap");
     let fire = if gesture {
         let now = ctx.input(|i| i.time);
@@ -1002,7 +1025,6 @@ pub fn show(
         single
     };
     match fire {
-        Some(Tap::Close) => closed = true,
         Some(Tap::Pause) => out.push(Command::TogglePlay),
         None => {}
     }
@@ -1463,6 +1485,21 @@ fn ambient(ui: &Ui, rect: Rect, state: &ViewState, pages: &PageState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_shape_itself_is_the_cover() {
+        let rect = Rect::from_min_size(pos2(100.0, 100.0), vec2(200.0, 200.0));
+        for shape in [MaterialShape::Cookie9Sided, MaterialShape::Clover4Leaf, MaterialShape::Sunny] {
+            let o = Outline::new(Some(shape), 1.0, rect, 0.0);
+            assert!(o.contains(rect.center()), "{shape:?} centre");
+            // The square's corners are outside every rounded shape.
+            for c in [rect.left_top(), rect.right_top(), rect.left_bottom(), rect.right_bottom()] {
+                let inward = c + (rect.center() - c) * 0.06;
+                assert!(!o.contains(inward), "{shape:?} corner {inward:?}");
+            }
+            assert!(!o.contains(pos2(400.0, 200.0)));
+        }
+    }
 
     #[test]
     fn unwinding_takes_at_most_half_a_lobe() {

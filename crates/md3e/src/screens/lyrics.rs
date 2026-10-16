@@ -830,8 +830,10 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
     // wavelengths a second) and the ring itself stays put. Wall-clock
     // time while playing, so it never looks frozen; still when paused.
     let ramp = (progress / 0.1).min((1.0 - progress) / 0.05).clamp(0.0, 1.0);
+    // About half the stroke: anything less reads as a lumpy polygon, and
+    // the tip (where the wave comes out) looks straight half the time.
     let requested_amp = if prefs.lyrics_gap_style % 2 == 1 {
-        ramp * k * shrink * (0.7 + 0.35 * if motion && playing { bass.clamp(0.0, 1.0) } else { 0.0 })
+        ramp * k * shrink * (1.4 + 0.5 * if motion && playing { bass.clamp(0.0, 1.0) } else { 0.0 })
     } else { 0.0 };
     let (waves, amp) = wave_geometry(prefs.lyrics_gap_waves, radius, thick, requested_amp);
     let clock = if motion && playing { anim::now(painter.ctx()) as f32 } else { 0.0 };
@@ -873,8 +875,11 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
 fn wave_geometry(waves: f32, radius: f32, stroke: f32, requested_amp: f32) -> (f32, f32) {
     let waves = waves.clamp(3.0, 16.0).round();
     let wavelength = std::f32::consts::TAU * radius / waves;
-    // Also bound crest curvature: a thick stroke must not fold over itself.
-    let amp = requested_amp.max(0.0).min(wavelength * 0.12).min(radius * radius / (2.0 * stroke * waves * waves));
+    // Also bound the curvature so a thick stroke never folds over itself:
+    // for r = R + A·sin(nθ) the crest/trough curvature is ≈ (R ± A·n²)/R²,
+    // which must stay under 2/stroke.
+    let fold = (2.0 * radius * radius / stroke - radius).max(0.0) / (waves * waves + 1.0);
+    let amp = requested_amp.max(0.0).min(wavelength * 0.12).min(fold);
     (waves, amp)
 }
 
@@ -1214,12 +1219,19 @@ mod tests {
         assert_eq!(wave_geometry(6.49, 13.0, 3.0, 0.0).0, 6.0);
         assert_eq!(wave_geometry(6.5, 13.0, 3.0, 0.0).0, 7.0);
         assert_eq!(wave_geometry(20.0, 13.0, 3.0, 0.0).0, 16.0);
+        // The default thin ring (6 crests) gets a wave about half its stroke.
+        assert!(wave_geometry(6.0, 13.0, 3.0, 100.0).1 >= 1.5);
         for radius in [13.0, 16.0, 24.0] {
             for stroke in [3.0, 6.0, 9.0] {
                 for count in 3..=16 {
                     let (waves, amp) = wave_geometry(count as f32, radius, stroke, 100.0);
                     assert!(amp <= std::f32::consts::TAU * radius / waves * 0.12);
-                    assert!(amp <= radius * radius / (2.0 * stroke * waves * waves));
+                    // Exact polar curvature at a crest and a trough stays
+                    // under the stroke's half-width limit (no folding).
+                    for (r, d2) in [(radius + amp, -amp * waves * waves), (radius - amp, amp * waves * waves)] {
+                        let curvature: f32 = (r * r - r * d2) / (r * r * r);
+                        assert!(curvature.abs() <= 2.0 / stroke + 1e-4, "R={radius} s={stroke} n={waves} A={amp}");
+                    }
                     assert!(((waves * std::f32::consts::TAU).sin()).abs() < 1e-4);
                 }
             }
