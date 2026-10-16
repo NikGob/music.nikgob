@@ -32,6 +32,9 @@ pub use nikgob_metadata::MetadataConfig;
 use import::{IMPORT_ID, ImportService, Internal};
 use queue::{Entry, Queue};
 
+/// How many of the tracks before the current one the queue view lists.
+const HISTORY_SHOWN: usize = 50;
+
 /// What the playback backend should play: a queue entry id and its file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayRequest {
@@ -966,6 +969,8 @@ impl Worker {
         let (shuffle, repeat) = (self.queue.shuffle, self.queue.repeat);
         let context = self.queue.context.clone();
         let upcoming: Vec<Entry> = self.queue.upcoming().iter().take(200).copied().collect();
+        let history = self.queue.history();
+        let history: Vec<Entry> = history[history.len().saturating_sub(HISTORY_SHOWN)..].to_vec();
         let lib = self.lib.clone();
         self.publish(|s, res| {
             let p = &mut s.player;
@@ -977,15 +982,18 @@ impl Worker {
             p.shuffle = shuffle;
             p.repeat = repeat;
             p.context = context;
-            s.queue.next = upcoming
-                .iter()
-                .filter_map(|e| {
-                    lib.get_track_row(e.track).ok().flatten().map(|r| nikgob_view::QueueEntry {
-                        entry: e.id,
-                        track: res.track(&r),
+            let mut rows = |list: &[Entry]| -> Vec<nikgob_view::QueueEntry> {
+                list.iter()
+                    .filter_map(|e| {
+                        lib.get_track_row(e.track).ok().flatten().map(|r| nikgob_view::QueueEntry {
+                            entry: e.id,
+                            track: res.track(&r),
+                        })
                     })
-                })
-                .collect();
+                    .collect()
+            };
+            s.queue.next = rows(&upcoming);
+            s.queue.prev = rows(&history);
         });
     }
 
@@ -1178,6 +1186,7 @@ impl Worker {
                 fix(c);
             }
             s.queue.next.iter_mut().for_each(|e| fix(&mut e.track));
+            s.queue.prev.iter_mut().for_each(|e| fix(&mut e.track));
             s.library.tracks.iter_mut().for_each(fix);
             s.search.tracks.iter_mut().for_each(fix);
             if let Some(r) = s.release.as_mut() {

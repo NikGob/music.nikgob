@@ -15,6 +15,15 @@ use crate::{
     },
 };
 
+/// What the user asked of the pane this frame.
+#[derive(Default)]
+pub struct PaneOutput {
+    /// Closed: the ✕ in the header or a click on the tab already open.
+    pub closed: bool,
+    /// The lyrics tab asked for its settings.
+    pub configure_lyrics: bool,
+}
+
 pub fn show(
     ui: &mut Ui,
     state: &ViewState,
@@ -22,7 +31,7 @@ pub fn show(
     chrome: &mut Chrome,
     bass: f32,
     out: &mut Vec<Command>,
-) -> bool {
+) -> PaneOutput {
     let tabs = ["Очередь", "Текст", "Инфо"];
     let idx = match tab {
         PaneTab::Queue => 0,
@@ -30,15 +39,41 @@ pub fn show(
         PaneTab::Info => 2,
     };
     ui.add_space(8.0);
-    let w = ((ui.available_width() - 4.0) / 3.0).floor();
+    // Tabs on the left, ✕ on the right.
+    let close_w = Size::S.height();
+    let row = Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), close_w));
+    let w = ((row.width() - 4.0 - close_w - 8.0) / 3.0).floor();
+    let mut gui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_size(row.min, egui::vec2(3.0 * w + 4.0, close_w)))
+            .id_salt("pane-tabs-row"),
+    );
+    let mut closed = false;
     if let Some(i) = ConnectedGroup::new("pane-tabs", &tabs)
         .equal_width(w)
-        .show(ui, idx)
+        .reselect(true)
+        .show(&mut gui, idx)
     {
-        *tab = [PaneTab::Queue, PaneTab::Lyrics, PaneTab::Info][i];
+        if i == idx {
+            closed = true;
+        } else {
+            *tab = [PaneTab::Queue, PaneTab::Lyrics, PaneTab::Info][i];
+        }
     }
+    let mut cui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_size(egui::pos2(row.right() - close_w, row.top()), egui::vec2(close_w, close_w)))
+            .id_salt("pane-close-slot"),
+    );
+    if cui
+        .add(IconButton::new(Icon::Close).size(Size::S).tooltip("Закрыть").id_salt("pane-close"))
+        .clicked()
+    {
+        closed = true;
+    }
+    ui.advance_cursor_after_rect(row);
     ui.add_space(12.0);
-    match tab {
+    let configure_lyrics = match tab {
         PaneTab::Queue => {
             queue(ui, state, chrome, out);
             false
@@ -48,7 +83,8 @@ pub fn show(
             info(ui, state, out);
             false
         }
-    }
+    };
+    PaneOutput { closed, configure_lyrics }
 }
 
 /// A queue row: cover, title and artist.
@@ -70,10 +106,36 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
         .max_height(list_h)
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // What already played, dimmed, above the current track; a
+            // double click goes back to it.
+            if !q.prev.is_empty() {
+                common::label(ui, "Ранее", TypeRole::TitleSmall, s.on_surface_variant);
+                ui.add_space(4.0);
+                ui.scope(|ui| {
+                    ui.multiply_opacity(0.6);
+                    for e in &q.prev {
+                        let o = queue_item(&e.track, ("q-prev", e.entry)).muted(true).show(ui);
+                        if o.response.double_clicked() {
+                            out.push(Command::PlayQueueEntry(e.entry));
+                        }
+                    }
+                });
+                ui.add_space(12.0);
+            }
             if let Some(t) = &q.current {
+                let top = ui.cursor().min.y;
                 common::label(ui, "Сейчас играет", TypeRole::TitleSmall, s.on_surface_variant);
                 ui.add_space(4.0);
-                queue_item(t, "q-current").selected(true).show(ui);
+                let o = queue_item(t, "q-current").selected(true).show(ui);
+                // The history must not push the current track out of view:
+                // bring it to the top whenever it changes (and on first show).
+                let key = ui.id().with("q-shown");
+                let shown = (t.id, q.prev.len());
+                if ui.ctx().data(|d| d.get_temp::<(nikgob_view::TrackId, usize)>(key)) != Some(shown) {
+                    ui.ctx().data_mut(|d| d.insert_temp(key, shown));
+                    let r = Rect::from_min_max(egui::pos2(o.rect.left(), top), o.rect.max);
+                    ui.scroll_to_rect(r, Some(egui::Align::TOP));
+                }
                 ui.add_space(12.0);
             }
             if q.next.is_empty() {

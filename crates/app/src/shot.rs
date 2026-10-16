@@ -3,7 +3,7 @@
 //! look at screens without a human at the keyboard.
 //!
 //! Synthetic input (logical points): `move:x,y`, `click:x,y`, `rclick:x,y`,
-//! `dblclick:x,y`, `drag:x1,y1,x2,y2`, `wheel:x,y,dy`, `key:space|escape|l|q|f11|f12`.
+//! `dblclick:x,y` (`click:x,y,frames` sets the wait after it), `drag:x1,y1,x2,y2`, `wheel:x,y,dy`, `key:space|escape|l|q|f11|f12`.
 //! `prefs:{json}` merges into the prefs.
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 
@@ -176,15 +176,21 @@ impl Shot {
                 self.wait = 20;
             }
             "click" | "rclick" | "dblclick" => {
-                if let [x, y] = nums(arg)[..] {
-                    let (b, n) = match verb {
+                // `click:x,y,frames`: how long to wait after it (default 20;
+                // 0 = the next step right after the release, for rapid clicks).
+                let n = nums(arg);
+                self.wait = 20;
+                if let [x, y, ref rest @ ..] = n[..] {
+                    let (b, times) = match verb {
                         "rclick" => (PointerButton::Secondary, 1),
                         "dblclick" => (PointerButton::Primary, 2),
                         _ => (PointerButton::Primary, 1),
                     };
-                    self.press(pos2(x, y), b, n);
+                    self.press(pos2(x, y), b, times);
+                    if let Some(&f) = rest.first() {
+                        self.wait = f as u32;
+                    }
                 }
-                self.wait = 20;
             }
             "drag" => {
                 if let [x1, y1, x2, y2] = nums(arg)[..] {

@@ -819,6 +819,17 @@ pub fn show(
         ).clicked() {
             chrome.np_slot.toggle(NpSlot::Lyrics);
         }
+        // Track info (also opened from ⋮ → «Источник и качество»): its own
+        // toggle, so closing it is one click, not a detour via the queue.
+        if ui.add(
+            IconButton::new(Icon::Info)
+                .style(Style::Tonal)
+                .selected(chrome.np_slot == NpSlot::Info)
+                .tooltip("Инфо о треке")
+                .id_salt("np-info-btn"),
+        ).clicked() {
+            chrome.np_slot.toggle(NpSlot::Info);
+        }
         header.right() - ui.min_rect().left()
     }).inner;
     // Centred on the whole screen, not in the gap between the buttons.

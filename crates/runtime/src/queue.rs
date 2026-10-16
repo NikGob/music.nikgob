@@ -67,6 +67,15 @@ impl Queue {
         }
     }
 
+    /// Items before the current one, in play order: what has played (or
+    /// was skipped past) and what "previous" goes back to.
+    pub fn history(&self) -> &[Entry] {
+        match self.pos {
+            Some(p) => &self.items[..p.min(self.items.len())],
+            None => &[],
+        }
+    }
+
     /// What plays after the current item when it ends by itself.
     pub fn peek_auto_next(&self) -> Option<Entry> {
         let p = self.pos?;
@@ -298,6 +307,27 @@ mod tests {
         let extra = ids(1);
         q.enqueue(&extra);
         assert_eq!(q.current().map(|e| e.track), Some(extra[0]));
+    }
+
+    #[test]
+    fn history_is_what_came_before_and_jumping_back_works() {
+        let t = ids(4);
+        let mut q = Queue::default();
+        q.set(&t, 0, None);
+        assert!(q.history().is_empty());
+        q.advance_auto();
+        q.skip_forward();
+        let back: Vec<TrackId> = q.history().iter().map(|e| e.track).collect();
+        assert_eq!(back, vec![t[0], t[1]]);
+        let first = q.history()[0].id;
+        assert_eq!(q.jump(first).map(|e| e.track), Some(t[0]));
+        assert!(q.history().is_empty());
+        assert_eq!(q.upcoming().len(), 3);
+        // Played out: nothing is current, so nothing is "before" it.
+        q.set(&t, 3, None);
+        assert_eq!(q.history().len(), 3);
+        assert_eq!(q.advance_auto(), None);
+        assert!(q.history().is_empty());
     }
 
     #[test]
