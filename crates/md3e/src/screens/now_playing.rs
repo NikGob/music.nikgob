@@ -915,6 +915,17 @@ pub fn show(
     let period = if prefs.cover_spin && motion { 48.0 } else { 0.0 };
     let spin = turn(ui, "np-cover-angle", playing, bass, period, prefs.cover_ccw);
     let swell = if prefs.cover_pulse { 1.0 + 0.035 * kick } else { 1.0 };
+    // Instant feedback: the cover sinks a little while pressed, so a tap
+    // feels taken even while it waits to see whether a second one comes.
+    let pressing = (prefs.cover_click_pause || prefs.dbl_click_shape > 0)
+        && ctx.input(|i| {
+            let inside = |p: Pos2| p.distance(cover_rect.center()) < cover_rect.width() * 0.45;
+            i.pointer.primary_down()
+                && i.pointer.press_origin().is_some_and(inside)
+                && i.pointer.interact_pos().is_some_and(inside)
+        });
+    let press = anim::fraction(&ctx, egui::Id::new("np-cover-press"), if pressing { 1.0 } else { 0.0 }, theme.motion.fast_spatial);
+    let swell = swell * (1.0 - 0.04 * press);
     let shaped = Rect::from_center_size(cover_rect.center(), cover_rect.size() * swell);
     // The outline unwinds to upright by the shortest way, not by every
     // turn it has made.
@@ -970,7 +981,6 @@ pub fn show(
         cover_resp = cover_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     }
     let shape_clicked = cover_resp.clicked() && on_shape(cover_resp.interact_pointer_pos());
-    let shape_double = cover_resp.double_clicked() && on_shape(cover_resp.interact_pointer_pos());
     let corner_clicked = cover_resp.clicked() && !shape_clicked;
     if playing && !theme.reduced_motion {
         ctx.request_repaint();
@@ -981,38 +991,44 @@ pub fn show(
     ui.interact(info_rect, ui.id().with("np-info-bg"), Sense::click());
 
     // Taps: a click on empty space closes at once, one on the cover shape
-    // pauses; a double click on the shape itself changes the outline. While
-    // that gesture is on, only a tap on the shape waits out the double
-    // click delay; closing never waits.
+    // pauses; a second tap on the shape soon after changes the outline
+    // instead. While that gesture is on, a tap on the shape waits only our
+    // own short double-tap window (not egui's 0.3 s); closing never waits.
+    const DOUBLE_TAP: f64 = 0.22;
     let gesture = match prefs.dbl_click_shape {
         0 => false,
         1 => prefs.cover_shape == CoverShape::Random,
         _ => prefs.cover_shape != CoverShape::Original,
     };
+    let tap_id = egui::Id::new("np-tap");
     if !embedded && (bg.clicked() || corner_clicked) {
-        ctx.data_mut(|d| d.remove::<(Tap, f64)>(egui::Id::new("np-tap")));
+        ctx.data_mut(|d| d.remove::<(Option<Tap>, f64)>(tap_id));
         closed = true;
     }
     let single = (prefs.cover_click_pause && shape_clicked).then_some(Tap::Pause);
-    let double = shape_double;
-    let tap_id = egui::Id::new("np-tap");
     let fire = if gesture {
         let now = ctx.input(|i| i.time);
-        let delay = ctx.options(|o| o.input_options.max_double_click_delay);
-        if double {
-            ctx.data_mut(|d| d.remove::<(Tap, f64)>(tap_id));
-            change_shape(&ctx, prefs, out);
-        } else if let Some(tap) = single {
-            ctx.data_mut(|d| d.insert_temp(tap_id, (tap, now)));
+        // (what the first tap will do, when it landed).
+        let pending = ctx.data(|d| d.get_temp::<(Option<Tap>, f64)>(tap_id));
+        if shape_clicked {
+            match pending {
+                Some((_, at)) if now - at <= DOUBLE_TAP => {
+                    ctx.data_mut(|d| d.remove::<(Option<Tap>, f64)>(tap_id));
+                    change_shape(&ctx, prefs, out);
+                }
+                _ => {
+                    ctx.data_mut(|d| d.insert_temp(tap_id, (single, now)));
+                }
+            }
         }
-        match ctx.data(|d| d.get_temp::<(Tap, f64)>(tap_id)) {
-            Some((tap, at)) if now - at > delay => {
-                ctx.data_mut(|d| d.remove::<(Tap, f64)>(tap_id));
+        match ctx.data(|d| d.get_temp::<(Option<Tap>, f64)>(tap_id)) {
+            Some((tap, at)) if now - at > DOUBLE_TAP => {
+                ctx.data_mut(|d| d.remove::<(Option<Tap>, f64)>(tap_id));
                 // Left from before the player was closed: drop it.
-                (now - at < delay + 0.25).then_some(tap)
+                tap.filter(|_| now - at < DOUBLE_TAP + 0.25)
             }
             Some((_, at)) => {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64((at + delay - now).max(0.0) + 0.01));
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64((at + DOUBLE_TAP - now).max(0.0) + 0.01));
                 None
             }
             None => None,
