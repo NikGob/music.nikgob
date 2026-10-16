@@ -540,7 +540,7 @@ impl ToastKind {
             Self::Error
         } else if t.ends_with('…') || any(&["начался", "качается", "добавляю"]) {
             Self::Working
-        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "следующим"]) {
+        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "удалено", "следующим", "в любимых", "убран", "в корзине"]) {
             Self::Success
         } else {
             Self::Info
@@ -1073,6 +1073,9 @@ mod toast_tests {
             ("Теги сохранены", ToastKind::Success),
             ("Плейлист «Ночь» сохранён", ToastKind::Success),
             ("Добавлено в очередь", ToastKind::Success),
+            ("Альбом в Любимых · 3 трека", ToastKind::Success),
+            ("Альбом в корзине (30 дней)", ToastKind::Success),
+            ("Удалено навсегда: 2", ToastKind::Success),
             ("Импорт: 12 треков", ToastKind::Info),
         ] {
             assert_eq!(ToastKind::guess(text), kind, "{text}");
