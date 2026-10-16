@@ -136,12 +136,19 @@ pub fn show(
         {
             out.push(Command::Next);
         }
+        // On (the whole queue or one track) it sits on a tinted disc: the
+        // pill's flat item colours alone look the same either way.
+        let repeat_colors = if p.repeat == Repeat::Off {
+            item
+        } else {
+            Colors { container: on.gamma_multiply(0.24), ..item }
+        };
         if ui
             .add(
                 IconButton::new(repeat_icon(p.repeat))
                     .selected(p.repeat != Repeat::Off)
-                    .colors(item)
-                    .tooltip("Повтор: выкл → всё → один")
+                    .colors(repeat_colors)
+                    .tooltip(repeat_tip(p.repeat))
                     .id_salt("bar-repeat"),
             )
             .clicked()
@@ -290,6 +297,15 @@ pub fn show(
 }
 
 /// The repeat button's glyph: a "1" on it while one track repeats.
+/// What the repeat button does now and on the next press.
+pub fn repeat_tip(repeat: Repeat) -> &'static str {
+    match repeat {
+        Repeat::Off => "Повтор выключен — нажми, чтобы повторять очередь",
+        Repeat::All => "Повторяется вся очередь — нажми, чтобы повторять один трек",
+        Repeat::One => "Повторяется этот трек — нажми, чтобы выключить",
+    }
+}
+
 pub fn repeat_icon(repeat: Repeat) -> Icon {
     if repeat == Repeat::One { Icon::RepeatOne } else { Icon::Repeat }
 }

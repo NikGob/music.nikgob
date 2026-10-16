@@ -1486,7 +1486,7 @@ fn info(
             Item::from(
                 tonal(repeat_icon)
                     .selected(p.repeat != Repeat::Off)
-                    .tooltip("Повтор: выкл → всё → один"),
+                    .tooltip(super::player_bar::repeat_tip(p.repeat)),
             ),
         ],
     );

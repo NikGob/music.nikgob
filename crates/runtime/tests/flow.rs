@@ -420,3 +420,61 @@ fn custom_playlist_cover_copy_goes_when_switching_to_auto() {
     wait_for(&rt, "the copy to go", |_| !copy.exists());
     assert!(mine.is_file(), "the user's own file stays");
 }
+#[test]
+fn volume_and_queue_come_back_after_a_restart_paused_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let cfg = ImportConfig::with_root(root);
+    std::fs::create_dir_all(&cfg.inbox_dir).unwrap();
+    let wav = root.join("song.wav");
+    write_wav(&wav, 3.0);
+    let lib = Library::open_in_memory().unwrap();
+    let start = || {
+        Runtime::start(
+            RuntimeConfig {
+                library: lib.clone(),
+                library_dir: cfg.library_dir.clone(),
+                prefs: Prefs::default(),
+                prefs_path: Some(root.join("prefs.json")),
+                settings_path: None,
+                import: Some(ImportSetup {
+                    config: cfg.clone(),
+                    metadata: None,
+                    watch_inbox: false,
+                    torrent_state_dir: root.join("torrent-state"),
+                    torrent_offline: true,
+                }),
+            },
+            Box::new(NullPlayback),
+            Arc::new(|| {}),
+        )
+    };
+
+    let rt = start();
+    rt.send(Command::ImportFiles(vec![wav.clone()]));
+    wait_for(&rt, "the import", |s| s.library.track_count == 1);
+    let track = rt.state().library.tracks[0].id;
+    rt.send(Command::PlayTracks { tracks: vec![track], start: 0, context: "Тест".into() });
+    wait_for(&rt, "playing", |s| s.player.current.as_ref().is_some_and(|t| t.id == track));
+    rt.send(Command::SetVolume(0.3));
+    rt.send(Command::CycleRepeat);
+    rt.send(Command::Pause);
+    rt.send(Command::Seek(Duration::from_millis(1500)));
+    wait_for(&rt, "the seek", |s| s.player.position == Duration::from_millis(1500));
+    drop(rt);
+    assert!(root.join("session.json").is_file());
+
+    let rt = start();
+    wait_for(&rt, "the restored track", |s| s.player.current.as_ref().is_some_and(|t| t.id == track));
+    let s = rt.state();
+    assert!((s.player.volume - 0.3).abs() < 1e-6);
+    assert_eq!(s.player.repeat, nikgob_view::Repeat::All);
+    assert_eq!(s.player.status, nikgob_view::Status::Paused);
+    assert_eq!(s.player.position, Duration::from_millis(1500));
+    assert_eq!(s.player.context.as_deref(), Some("Тест"));
+    drop(s);
+    rt.send(Command::TogglePlay);
+    wait_for(&rt, "play from there", |s| {
+        s.player.status == nikgob_view::Status::Playing && s.player.position >= Duration::from_millis(1500)
+    });
+}

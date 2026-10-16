@@ -3865,6 +3865,7 @@ dependencies = [
  "nikgob-torrent",
  "nikgob-view",
  "parking_lot",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

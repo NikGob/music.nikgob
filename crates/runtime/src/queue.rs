@@ -5,6 +5,7 @@
 
 use nikgob_core::model::TrackId;
 use nikgob_view::Repeat;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -26,7 +27,59 @@ pub struct Queue {
     next_id: u64,
 }
 
+/// A queue as saved between runs (entry ids are not kept: they are only
+/// meaningful within one run).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Snapshot {
+    /// Tracks in play order.
+    pub items: Vec<TrackId>,
+    /// The order to go back to when shuffle goes off, as indices into `items`.
+    pub original: Vec<usize>,
+    pub pos: Option<usize>,
+    pub shuffle: bool,
+    /// 0 off, 1 all, 2 one.
+    pub repeat: u8,
+    pub context: Option<String>,
+}
+
 impl Queue {
+    pub fn snapshot(&self) -> Snapshot {
+        let original = self
+            .original
+            .iter()
+            .filter_map(|o| self.items.iter().position(|e| e.id == o.id))
+            .collect();
+        Snapshot {
+            items: self.items.iter().map(|e| e.track).collect(),
+            original,
+            pos: self.pos,
+            shuffle: self.shuffle,
+            repeat: match self.repeat {
+                Repeat::Off => 0,
+                Repeat::All => 1,
+                Repeat::One => 2,
+            },
+            context: self.context.clone(),
+        }
+    }
+
+    /// Replaces the queue with a saved one (fresh entry ids).
+    pub fn restore(&mut self, s: &Snapshot) {
+        self.items = s.items.iter().map(|&t| self.entry(t)).collect();
+        let original: Vec<Entry> = s.original.iter().filter_map(|&i| self.items.get(i).copied()).collect();
+        // A damaged file: fall back to the play order.
+        self.original = if original.len() == self.items.len() { original } else { self.items.clone() };
+        self.pos = s.pos.filter(|&p| p < self.items.len());
+        self.shuffle = s.shuffle;
+        self.repeat = match s.repeat {
+            1 => Repeat::All,
+            2 => Repeat::One,
+            _ => Repeat::Off,
+        };
+        self.context = s.context.clone();
+    }
+
     fn entry(&mut self, track: TrackId) -> Entry {
         self.next_id += 1;
         Entry {
@@ -361,6 +414,24 @@ mod tests {
         // The current item never moves.
         assert!(!q.move_next_to(cur, all[4], false));
         assert!(!q.move_next_to(all[4], all[4], true));
+    }
+
+    #[test]
+    fn a_saved_queue_comes_back_the_same() {
+        let t = ids(5);
+        let mut q = Queue::default();
+        q.set(&t, 2, Some("Альбом".into()));
+        q.set_shuffle(true);
+        q.repeat = Repeat::All;
+        let saved = q.snapshot();
+        let json = serde_json::to_string(&saved).unwrap();
+        let mut back = Queue::default();
+        back.restore(&serde_json::from_str(&json).unwrap());
+        assert_eq!(back.snapshot(), saved);
+        assert_eq!(back.current().map(|e| e.track), q.current().map(|e| e.track));
+        back.set_shuffle(false);
+        q.set_shuffle(false);
+        assert_eq!(back.tracks(), q.tracks());
     }
 
     #[test]

@@ -15,6 +15,7 @@ mod search;
 mod tags;
 mod torrents;
 pub mod queue;
+mod session;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -236,6 +237,13 @@ struct Worker {
     jumped_at: Instant,
     volume: f32,
     muted: bool,
+    /// The queue came back from the last run, paused here; nothing is
+    /// loaded in the backend until play (see [`session`]).
+    resume_at: Option<Duration>,
+    /// `session.json` (volume and queue between runs) and what was last
+    /// written to it.
+    session_path: Option<PathBuf>,
+    session_saved: String,
     services: Vec<Box<dyn Service>>,
     toast_id: u64,
     revision: u64,
@@ -268,8 +276,10 @@ impl Worker {
             .import
             .and_then(|setup| ImportService::start(setup, config.library.clone(), internal));
         let mut playback = playback;
-        let volume = 0.8;
-        playback.set_volume(volume);
+        let session_path = config.prefs_path.as_ref().map(|p| p.with_file_name("session.json"));
+        let saved = session_path.as_deref().map(session::Session::load).unwrap_or_default();
+        let volume = saved.volume.unwrap_or(0.8).clamp(0.0, 1.0);
+        playback.set_volume(if saved.muted { 0.0 } else { volume });
         playback.configure(crossfade(&config.prefs), config.prefs.normalization);
         Self {
             res: Resolver::new(config.library.clone(), config.library_dir),
@@ -285,7 +295,10 @@ impl Worker {
             position_at: Instant::now(),
             jumped_at: Instant::now(),
             volume,
-            muted: false,
+            muted: saved.muted,
+            resume_at: None,
+            session_path,
+            session_saved: String::new(),
             services: Vec::new(),
             toast_id: 0,
             revision: 0,
@@ -308,6 +321,7 @@ impl Worker {
         self.publish_downloads();
         self.resume_torrents();
         self.start_enrich();
+        self.restore_session();
         loop {
             select! {
                 recv(rx) -> m => match m {
@@ -321,9 +335,11 @@ impl Worker {
                 recv(ticker) -> _ => {
                     self.expire_toasts();
                     self.maybe_export(false);
+                    self.save_session();
                 }
             }
         }
+        self.save_session();
         self.maybe_export(true);
         self.playback.stop();
         self.shutdown_torrents();
@@ -771,6 +787,7 @@ impl Worker {
     }
 
     fn start(&mut self, e: Entry) {
+        self.resume_at = None;
         let mut e = e;
         // Skip forward over unplayable items rather than stall. With repeat on,
         // `skip_forward` wraps around, so the walk is bounded by the queue
@@ -830,6 +847,7 @@ impl Worker {
 
     fn resume(&mut self) {
         match self.status {
+            Status::Paused if self.playing.is_none() => self.start_restored(),
             Status::Paused => {
                 self.position_at = Instant::now();
                 self.status = Status::Playing;
@@ -855,6 +873,12 @@ impl Worker {
 
     fn seek(&mut self, p: Duration) {
         if self.playing.is_none() {
+            // The restored track: play will start from here.
+            if self.resume_at.is_some() {
+                self.resume_at = Some(p);
+                self.position = p;
+                self.publish_player();
+            }
             return;
         }
         self.playback.seek(p);
@@ -1018,11 +1042,10 @@ impl Worker {
     }
 
     fn publish_now_playing(&mut self) {
-        let current = self
-            .playing
+        let shown = self.playing.or_else(|| self.resume_at.and(self.queue.current()));
+        let current = shown
             .and_then(|e| self.lib.get_track_row(e.track).ok().flatten());
-        let src = self
-            .playing
+        let src = shown
             .and_then(|e| self.lib.active_source(e.track).ok().flatten());
         let changed = self.state.read().player.current.as_ref().map(|r| r.id)
             != current.as_ref().map(|r| r.id);

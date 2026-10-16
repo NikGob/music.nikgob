@@ -62,7 +62,7 @@ enum Ask {
     NewPlaylist(Vec<TrackId>),
 }
 
-const POPOVER: Vec2 = vec2(56.0, 200.0);
+const POPOVER: Vec2 = vec2(52.0, 164.0);
 
 /// Where the wheel turns the volume besides the 🔊 button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -531,14 +531,14 @@ impl Chrome {
                     s.on_surface_variant,
                 );
                 ui.painter().galley(
-                    pos2(r.center().x - g.size().x * 0.5, r.top() + 14.0),
+                    pos2(r.center().x - g.size().x * 0.5, r.top() + 11.0),
                     g,
                     s.on_surface_variant,
                 );
 
                 let track = Rect::from_min_max(
-                    pos2(r.center().x - 22.0, r.top() + 40.0),
-                    pos2(r.center().x + 22.0, r.bottom() - 56.0),
+                    pos2(r.center().x - 18.0, r.top() + 34.0),
+                    pos2(r.center().x + 18.0, r.bottom() - 50.0),
                 );
                 let resp = ui.interact(track, Id::new("md3e-volume-slider"), Sense::click_and_drag());
                 dragging = resp.dragged();
@@ -549,7 +549,7 @@ impl Chrome {
                 }
                 paint_vslider(ui, track, new_value.unwrap_or(volume), dragging);
 
-                let btn = Rect::from_center_size(pos2(r.center().x, r.bottom() - 28.0), vec2(40.0, 40.0));
+                let btn = Rect::from_center_size(pos2(r.center().x, r.bottom() - 25.0), vec2(40.0, 40.0));
                 let mute = ui
                     .scope_builder(UiBuilder::new().max_rect(btn), |ui| {
                         ui.add(
@@ -574,12 +574,12 @@ impl Chrome {
     }
 }
 
-/// The vertical Expressive slider: 16 wide track, 44×4 handle with 6 gaps.
+/// The vertical Expressive slider: 14 wide track, 36×4 handle with 5 gaps.
 fn paint_vslider(ui: &Ui, rect: Rect, value: f32, pressed: bool) {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
-    let w = 16.0;
-    let gap = 6.0;
+    let w = 14.0;
+    let gap = 5.0;
     let handle_h = anim::f32(
         ui.ctx(),
         Id::new("md3e-volume-handle"),
