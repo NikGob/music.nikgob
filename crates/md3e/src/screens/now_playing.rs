@@ -994,8 +994,12 @@ pub fn show(
     // Taps: a click on empty space closes at once, one on the cover shape
     // pauses; a second tap on the shape soon after changes the outline
     // instead. While that gesture is on, a tap on the shape waits only our
-    // own short double-tap window (not egui's 0.3 s); closing never waits.
-    const DOUBLE_TAP: f64 = 0.22;
+    // own double-tap window (`Prefs::np_tap_wait`, not egui's 0.3 s);
+    // closing never waits. With no wait at all the tap pauses at once and
+    // a second one undoes the pause as it changes the shape.
+    let wait = f64::from(prefs.np_tap_wait.clamp(0.0, 0.4));
+    let instant = wait < 0.05;
+    let double_tap = if instant { 0.3 } else { wait };
     let gesture = match prefs.dbl_click_shape {
         0 => false,
         1 => prefs.cover_shape == CoverShape::Random,
@@ -1011,28 +1015,36 @@ pub fn show(
         let now = ctx.input(|i| i.time);
         // (what the first tap will do, when it landed).
         let pending = ctx.data(|d| d.get_temp::<(Option<Tap>, f64)>(tap_id));
+        let mut now_fire = None;
         if shape_clicked {
             match pending {
-                Some((_, at)) if now - at <= DOUBLE_TAP => {
+                Some((done, at)) if now - at <= double_tap => {
                     ctx.data_mut(|d| d.remove::<(Option<Tap>, f64)>(tap_id));
                     change_shape(&ctx, prefs, out);
+                    if instant {
+                        // The first tap already paused: take it back.
+                        now_fire = done;
+                    }
                 }
                 _ => {
                     ctx.data_mut(|d| d.insert_temp(tap_id, (single, now)));
+                    if instant {
+                        now_fire = single;
+                    }
                 }
             }
         }
         match ctx.data(|d| d.get_temp::<(Option<Tap>, f64)>(tap_id)) {
-            Some((tap, at)) if now - at > DOUBLE_TAP => {
+            Some((tap, at)) if now - at > double_tap => {
                 ctx.data_mut(|d| d.remove::<(Option<Tap>, f64)>(tap_id));
                 // Left from before the player was closed: drop it.
-                tap.filter(|_| now - at < DOUBLE_TAP + 0.25)
+                if instant { None } else { tap.filter(|_| now - at < double_tap + 0.25) }
             }
             Some((_, at)) => {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64((at + DOUBLE_TAP - now).max(0.0) + 0.01));
-                None
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64((at + double_tap - now).max(0.0) + 0.01));
+                now_fire
             }
-            None => None,
+            None => now_fire,
         }
     } else {
         single

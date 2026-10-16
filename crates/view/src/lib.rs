@@ -652,6 +652,9 @@ pub struct Prefs {
     /// A double click in Now Playing changes the cover outline: 0 never,
     /// 1 only in the random mode, 2 always (a fixed shape steps on).
     pub dbl_click_shape: u8,
+    /// How long a tap on the cover waits for a second one, in seconds;
+    /// 0 pauses at once (a second tap then undoes it).
+    pub np_tap_wait: f32,
     /// Material shapes behind Now Playing that follow the music.
     pub bg_shapes: BgShapes,
     /// How many of them (4..=32).
@@ -1058,6 +1061,7 @@ impl Default for Prefs {
             random_shapes: Vec::new(),
             cover_click_pause: true,
             dbl_click_shape: 1,
+            np_tap_wait: 0.22,
             bg_shapes: BgShapes::Off,
             bg_shapes_count: 14,
             bg_shapes_size: 1.0,

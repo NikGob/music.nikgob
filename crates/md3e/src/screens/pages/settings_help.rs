@@ -78,6 +78,7 @@ pub enum SettingId {
     // Основные.
     CoverClickPause,
     DblClickShape,
+    TapWait,
     Keys,
     SaveLyrics,
     LyricsReturn,
@@ -212,6 +213,7 @@ impl SettingId {
             FpsLimit => "Как часто перерисовывается экран. Меньше — тише вентилятор и дольше работает батарея.",
             CoverClickPause => "Нажатие на обложку на экране трека ставит музыку на паузу и снова запускает.",
             DblClickShape => "Двойной клик по экрану трека меняет фигуру обложки.",
+            TapWait => "Чтобы отличить одиночный клик (пауза) от двойного (другая фигура), плеер чуть ждёт второго клика. Меньше — пауза срабатывает быстрее, но двойной клик нужно делать быстрее. «Сразу» — пауза мгновенная, а второй клик снимает её обратно и меняет фигуру.",
             Keys => "Клавиши, которые работают на экране трека.",
             SaveLyrics => "Найденный в интернете текст песни сохраняется прямо в файл трека и потом показывается без интернета.",
             LyricsReturn => "Если ты сам прокрутил текст, через столько секунд он вернётся к строке, которую поют.",
@@ -1292,7 +1294,8 @@ fn paint_preview(ui: &mut Ui, rect: Rect, kind: Preview, prefs: &Prefs, salt: Op
         Preview::Lyrics => lyrics::preview(ui, rect, prefs),
         // The ring's look: no countdown over it.
         Preview::Gap => lyrics::gap_preview(ui, rect, &Prefs { lyrics_countdown: false, ..prefs.clone() }),
-        Preview::Countdown => lyrics::gap_preview(ui, rect, prefs),
+        // What turning it on gives, whatever the switch says now.
+        Preview::Countdown => lyrics::countdown_preview(ui, rect, &Prefs { lyrics_countdown: true, ..prefs.clone() }),
         Preview::Motion => motion_preview(ui, rect, prefs),
         Preview::Volume => volume_preview(ui, rect, prefs),
         Preview::Turn(ring) => turn_preview(ui, rect, prefs, ring),

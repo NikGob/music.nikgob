@@ -539,6 +539,37 @@ pub(crate) fn gap_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     waiting(&painter, line, k, Duration::ZERO, Duration::from_secs(7), pos, true, true, bass, 1.0, prefs);
 }
 
+/// The countdown in context for its setting's card: a sung line, the wait
+/// under it (ring, then 3-2-1 when on) and the next line, which lights up
+/// right when the count ends.
+pub(crate) fn countdown_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
+    const PAD: f32 = 12.0;
+    // A 1.4 s ring, the count, then the next line sung for a moment.
+    const GAP: f32 = 4.4;
+    const LOOP: f64 = 6.2;
+    let t = anim::now(ui.ctx()).rem_euclid(LOOP) as f32;
+    let rest = 1.0 - (1.0 - 0.42) * prefs.lyrics_dim.clamp(0.0, 1.0);
+    let dim = s.on_surface.gamma_multiply(rest);
+    let small = PANE.small * 0.75;
+    let k = 0.8;
+    let row_h = 42.0 * k;
+    let prev = fixed_layout(&painter, "Слышишь этот ритм", small);
+    let next = fixed_layout(&painter, "Он ведёт меня", small);
+    let total = prev.size().y + row_h + next.size().y + 8.0;
+    let top = rect.center().y - total * 0.5;
+    painter.galley_with_override_text_color(pos2(rect.left() + PAD, top), prev.clone(), dim);
+    let line = Rect::from_min_size(pos2(rect.left() + PAD, top + prev.size().y + 4.0), vec2(56.0 * k, row_h));
+    let bass = super::pages::settings_help::beat(anim::now(ui.ctx()) as f32) * 0.5;
+    let pos = Duration::from_secs_f32(t);
+    waiting(&painter, line, k, Duration::ZERO, Duration::from_secs_f32(GAP), pos, true, true, bass, 1.0, prefs);
+    // The next line: dim while waiting, sung once the wait is over.
+    let on = ((t - GAP) / 0.18).clamp(0.0, 1.0);
+    let color = crate::lerp_color(dim, s.on_surface, on);
+    painter.galley_with_override_text_color(pos2(rect.left() + PAD, line.bottom() + 4.0), next, color);
+}
+
 /// Unsynced text still gets a readable column, with its source kept outside
 /// the scroll area so changing providers never requires scrolling to the end.
 fn plain(ui: &mut Ui, size: egui::Vec2, state: &ViewState) {

@@ -556,6 +556,16 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
     row(ui, Id::DblClickShape, "Двойной клик — другая фигура", Some("Двойной клик в открытом треке меняет форму обложки"), |ui| {
         choice_menu(ui, Id::DblClickShape, p);
     });
+    dimmed(ui, p.dbl_click_shape == 0, |ui| {
+        let label = |v: f32| if v < 0.05 { "сразу".to_owned() } else { format!("{:.0} мс", v * 1000.0) };
+        let wait = p.np_tap_wait.clamp(0.0, 0.4);
+        let title = format!("Ожидание второго клика: {}", label(wait));
+        row(ui, Id::TapWait, &title, Some("Меньше — пауза по клику срабатывает быстрее"), |ui| {
+            if let Some(v) = range_slider(ui, "set-tap-wait", wait, (0.0, 0.4), 0.02, label) {
+                p.np_tap_wait = v;
+            }
+        });
+    });
     row(ui, Id::Keys, "Клавиши", Some("L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке"), |_| {});
 
     group(ui, "Текст песен");
