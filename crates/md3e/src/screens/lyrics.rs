@@ -25,6 +25,8 @@ struct Sizes {
 
 const PANE: Sizes = Sizes { big: 26.0, small: 20.0, sub: 15.0, gap: 18.0, anchor: 0.38 };
 const MEGA: Sizes = Sizes { big: 44.0, small: 32.0, sub: 20.0, gap: 28.0, anchor: 0.4 };
+/// How bright the not-yet-sung part of the current line gets at most.
+const UNSUNG: f32 = 0.45;
 /// Background vocals, relative to a main line.
 const BG_SCALE: f32 = 0.72;
 
@@ -183,6 +185,11 @@ fn paint(
         manual = returning_offset(manual, until, now) - dy;
         until = now + f64::from(state.prefs.lyrics_return_s.max(0.0));
     }
+    // Scrolling stops at the text's ends: the first line or the last one
+    // at the anchor, never into empty space.
+    let centre = |i: usize| tops[i] + slots[i].0 * 0.5;
+    let last = tops.len().saturating_sub(1);
+    manual = manual.clamp(centre(0) - centre(ci), centre(last) - centre(ci));
     let manual_on = now < until;
     ctx.data_mut(|d| d.insert_temp(id, (manual, until)));
     if manual_on {
@@ -303,7 +310,11 @@ fn paint(
             painter.galley_with_override_text_color(line.min, g, crate::lerp_color(dim, lit, focus));
             continue;
         };
-        let base = lit.gamma_multiply(0.38);
+        // The not-yet-sung part eases with focus from the line's resting
+        // brightness to a darker tone (for contrast with the sung part): a
+        // fixed tone here made a line dip darker the moment it became
+        // current, and jump back when it stopped being so.
+        let base = s.on_surface.gamma_multiply(edge * (rest + (rest.min(UNSUNG) - rest) * focus));
         let color = crate::lerp_color(dim, lit, focus);
         if theme.reduced_motion {
             if state.prefs.lyrics_glow {
@@ -470,7 +481,10 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     };
     let scale = prefs.lyrics_scale.clamp(0.8, 1.4);
     let (mut big, mut small) = (PANE.big * 0.8 * scale, PANE.small * 0.8 * scale);
-    const LOOP: f64 = 3.2;
+    // Sung by ~2.9 s, held lit, then eased back to unsung before the loop
+    // starts over (a snap back read as a glitch).
+    const LOOP: f64 = 3.7;
+    const BACK: f32 = 3.2;
     const PAD: f32 = 10.0;
     const TEXTS: [&str; 3] = ["Где-то рядом", "Слышишь этот ритм", "Он ведёт меня"];
     let pos = Duration::from_secs_f64(anim::now(ui.ctx()).rem_euclid(LOOP));
@@ -516,8 +530,15 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
         let top = if y < cur.top() { y - sg.size().y } else { y };
         painter.galley_with_override_text_color(pos2(cur.left(), top), sg, dim);
     }
+    let base = s.on_surface.gamma_multiply(rest.min(UNSUNG));
     if let Some(timing) = Timing::new(&line, &g) {
-        timed_line(&painter, &g, cur, &timing, pos, true, 1.0, big, style, lit.gamma_multiply(0.38), lit, prefs);
+        // Past the end the line is drawn as no longer current, its light
+        // (and the wave's lift) easing out with `focus`.
+        let back = ((pos.as_secs_f32() - BACK) / 0.4).clamp(0.0, 1.0);
+        let back = back * back * (3.0 - 2.0 * back);
+        let (current, focus) = if back > 0.0 { (false, 1.0 - back) } else { (true, 1.0) };
+        let color = crate::lerp_color(base, lit, focus);
+        timed_line(&painter, &g, cur, &timing, pos, current, focus, big, style, base, color, prefs);
     }
 }
 
@@ -646,22 +667,35 @@ impl Timing {
         Some(Self { syllables, glyphs, words })
     }
 
-    /// No estimated pace or movement between timed pieces.
+    /// The light front as (centre of its soft edge, edge width): solid up
+    /// to the sung position, the edge just ahead of it. No estimated pace or
+    /// movement between timed pieces, but the edge keeps its width at piece
+    /// boundaries and in the pauses between them (a hard cut mid-word reads
+    /// as a glitch); it only fades in as the line starts and out once the
+    /// last piece is sung, so the front never jumps.
     fn head(&self, pos: Duration, feather: f32) -> (f32, f32) {
+        const FADE: f32 = 0.15;
         let p = pos.as_secs_f32();
-        let mut head = 0.0;
-        for syllable in &self.syllables {
-            if p < syllable.start {
-                return (head, 0.0);
-            }
-            if p < syllable.end {
-                let at = syllable_head(syllable.from, syllable.to, syllable.start, syllable.end, p);
-                // Shrink the edge at piece boundaries: completed pieces are fully lit.
-                return (at, feather.min(2.0 * (at - syllable.from)).min(2.0 * (syllable.to - at)));
-            }
-            head = syllable.to;
+        let (Some(first), Some(last)) = (self.syllables.first(), self.syllables.last()) else {
+            return (f32::INFINITY, 0.0);
+        };
+        let out = 1.0 - ((p - last.end) / FADE).clamp(0.0, 1.0);
+        if out <= 0.0 {
+            return (f32::INFINITY, 0.0);
         }
-        (f32::INFINITY, 0.0)
+        let mut at = 0.0;
+        for s in &self.syllables {
+            if p < s.start {
+                break;
+            }
+            if p < s.end {
+                at = syllable_head(s.from, s.to, s.start, s.end, p);
+                break;
+            }
+            at = s.to;
+        }
+        let f = feather * ((p - first.start) / FADE).clamp(0.0, 1.0).min(out);
+        (at + 0.5 * f, f)
     }
 }
 
@@ -1205,13 +1239,22 @@ mod tests {
             let t = Timing::new(&l, &g).unwrap();
             assert_eq!(t.words, [0, 2]);
             assert_eq!(t.syllables.iter().map(|s| s.word).collect::<Vec<_>>(), [0, 0, 1]);
-            assert_eq!(t.head(Duration::from_secs(1), 15.0), (0.0, 0.0));
-            assert_eq!(t.head(Duration::from_millis(3500), 15.0), (t.syllables[0].to, 0.0));
-            assert_eq!(t.head(Duration::from_millis(6500), 15.0), (t.syllables[1].to, 0.0));
-            let (head, feather) = t.head(Duration::from_secs(5), 15.0);
-            assert!((head - (t.syllables[1].from + t.syllables[1].to) * 0.5).abs() < 0.001);
-            assert!(feather > 0.0);
-            assert!(t.head(Duration::from_secs(8), 15.0).0.is_infinite());
+            // Solid up to the sung position; the soft edge sits ahead of it
+            // and keeps its width in the pauses (no hard cut mid-word).
+            let solid = |ms| {
+                let (head, feather) = t.head(Duration::from_millis(ms), 15.0);
+                (head - 0.5 * feather, feather)
+            };
+            assert_eq!(solid(1000), (0.0, 0.0));
+            assert_eq!(solid(3500), (t.syllables[0].to, 15.0));
+            assert_eq!(solid(6500), (t.syllables[1].to, 15.0));
+            let (at, feather) = solid(5000);
+            assert!((at - (t.syllables[1].from + t.syllables[1].to) * 0.5).abs() < 0.001);
+            assert_eq!(feather, 15.0);
+            // It fades in and out instead of popping.
+            assert!(solid(2050).1 > 0.0 && solid(2050).1 < 15.0);
+            assert!(solid(8050).1 > 0.0 && solid(8050).1 < 15.0);
+            assert!(t.head(Duration::from_millis(8200), 15.0).0.is_infinite());
         });
     }
 
