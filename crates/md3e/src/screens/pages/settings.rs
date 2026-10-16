@@ -5,6 +5,7 @@ use egui::{Sense, Ui};
 use nikgob_shapes::paint as shape_paint;
 use nikgob_view::{Ambient, BgShapes, Command, CoverShape, Prefs, RingStyle, Route, ThemeMode, ViewState};
 
+use super::settings_help::{self, SettingId as Id};
 use super::{PageState, connected};
 use crate::screens::now_playing;
 use crate::{
@@ -22,7 +23,11 @@ fn group(ui: &mut Ui, title: &str) -> egui::Response {
 
 /// A 56/72 row: label (+ supporting) on the left, a control on the right.
 /// In a narrow page the control goes under the text.
-fn row(ui: &mut Ui, label: &str, supporting: Option<&str>, control: impl FnOnce(&mut Ui)) {
+fn row(ui: &mut Ui, id: Id, label: &str, supporting: Option<&str>, control: impl FnOnce(&mut Ui)) {
+    settings_help::item(ui, id, label, |ui| row_body(ui, label, supporting, control));
+}
+
+fn row_body(ui: &mut Ui, label: &str, supporting: Option<&str>, control: impl FnOnce(&mut Ui)) {
     let s = Theme::get(ui.ctx()).scheme;
     if ui.available_width() < 540.0 {
         ui.add_space(8.0);
@@ -174,21 +179,22 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     ui.add_space(8.0);
     ui.label(TypeRole::HeadlineMedium.style().rich("Настройки", s.on_surface));
     ui.add_space(16.0);
-    if std::mem::take(&mut pages.scroll_to_lyrics) {
-        pages.settings_tab = 1;
-        pages.scroll_to_lyrics_now = true;
+    if let Some(id) = pages.focus_setting.take() {
+        pages.settings_tab = id.tab();
+        settings_help::begin_focus(ui.ctx(), id);
     }
     let tab = pages.settings_tab.min(1);
     if let (Some(n), _) = connected(ui, egui::Id::new("set-tab"), &["Основные", "Внешний вид"], tab, &[]) {
         pages.settings_tab = n;
     }
 
-    if pages.settings_tab == 1 {
-        appearance(ui, &mut p, pages);
+    if pages.settings_tab == settings_help::TAB_APPEARANCE {
+        appearance(ui, &mut p);
     } else {
         general(ui, &mut p, pages, out);
     }
     ui.add(Divider::new());
+    settings_help::finish(ui, &p);
 
     if p != before {
         out.push(Command::SetPrefs(Box::new(p)));
@@ -198,13 +204,13 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
 
 /// Everything about looks: theme, the player, the cover and its ring, the
 /// background and the lyrics' animation.
-fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
-    group(ui, "Тема");
-    row(ui, "Дизайн", Some("Nothing и Liquid Glass — скоро"), |ui| {
+fn appearance(ui: &mut Ui, p: &mut Prefs) {
+    group(ui, "Тема и цвета");
+    row(ui, Id::Design, "Дизайн", Some("Nothing и Liquid Glass — скоро"), |ui| {
         // Only MD3E exists so far; the others are shown but off.
         connected(ui, egui::Id::new("set-design"), &["Material 3", "Nothing", "Glass"], 0, &[1, 2]);
     });
-    row(ui, "Тема", None, |ui| {
+    row(ui, Id::Theme, "Тема", None, |ui| {
         let i = match p.theme {
             ThemeMode::Light => 0,
             ThemeMode::Dark => 1,
@@ -214,14 +220,14 @@ fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
             p.theme = [ThemeMode::Light, ThemeMode::Dark, ThemeMode::System][n];
         }
     });
-    row(ui, "Контраст", None, |ui| {
+    row(ui, Id::Contrast, "Контраст", None, |ui| {
         let labels = ["Обычный", "Средний", "Высокий"];
         let i = usize::from(p.contrast).min(2);
         if let (Some(n), _) = connected(ui, egui::Id::new("set-contrast"), &labels, i, &[]) {
             p.contrast = n as u8;
         }
     });
-    row(ui, "Схема цвета", Some("Палитра интерфейса из обложки трека"), |ui| {
+    row(ui, Id::Scheme, "Схема цвета", Some("Палитра интерфейса из обложки трека"), |ui| {
         const VARIANTS: [&str; 7] =
             ["Content", "Tonal Spot", "Vibrant", "Expressive", "Fidelity", "Monochrome", "Neutral"];
         let cur = usize::from(p.scheme_variant).min(VARIANTS.len() - 1);
@@ -231,49 +237,17 @@ fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
             p.scheme_variant = n as u8;
         }
     });
-    row(ui, "Ambient", Some("Мягкие облака в цветах темы, под звук"), |ui| {
-        let i = match p.ambient {
-            Ambient::Off => 0,
-            Ambient::Glow => 1,
-            Ambient::Reactive => 2,
-        };
-        if let (Some(n), _) = connected(ui, egui::Id::new("set-ambient"), &["Выкл", "Свечение", "Под звук"], i, &[]) {
-            p.ambient = [Ambient::Off, Ambient::Glow, Ambient::Reactive][n];
-        }
-    });
-    row(ui, "Лимит кадров", Some(&format!("{} FPS", p.fps_limit)), |ui| {
-        if let Some(v) = range_slider(ui, "set-fps", p.fps_limit as f32, (30.0, 144.0), 1.0, |v| format!("{v:.0}")) {
-            p.fps_limit = v as u32;
-        }
-    });
-    row(ui, "Меньше движения", Some("Без отскоков, вращения и волн"), |ui| {
-        ui.add(Switch::new(&mut p.reduced_motion).id_salt("set-rm"));
-    });
-    row(
-        ui,
-        "Боковая панель всегда скрыта",
-        Some("Разделы — Ctrl+1…4 или подведи курсор к левому краю окна"),
-        |ui| {
-            ui.add(Switch::new(&mut p.nav_hidden).id_salt("set-nav-hidden"));
-        },
-    );
 
     group(ui, "Сейчас играет");
-    row(ui, "Открытие экрана", Some("Как он вырастает из плеера и сворачивается"), |ui| {
-        let i = usize::from(p.np_motion).min(2);
-        if let (Some(n), _) = connected(ui, egui::Id::new("set-np-motion"), &["Плавно", "Живо", "Быстро"], i, &[]) {
-            p.np_motion = n as u8;
-        }
-    });
-    row(ui, "Волна на полосе прогресса", Some("Выключи — прогресс всегда ровная линия"), |ui| {
+    row(ui, Id::ProgressWave, "Волна на полосе прогресса", Some("Выключи — прогресс всегда ровная линия"), |ui| {
         ui.add(Switch::new(&mut p.progress_wave).id_salt("set-progress-wave"));
     });
-    row(ui, "Ползунок громкости", Some("Без него — кнопка звука, громкость колесом"), |ui| {
+    row(ui, Id::NpVolume, "Ползунок громкости", Some("Без него — кнопка звука, громкость колесом"), |ui| {
         ui.add(Switch::new(&mut p.np_volume).id_salt("set-np-volume"));
     });
 
     group(ui, "Обложка");
-    row(ui, "Форма обложки", Some("Пока играет музыка; на паузе — квадрат"), |ui| {
+    row(ui, Id::CoverShape, "Форма обложки", Some("Пока играет музыка; на паузе — квадрат"), |ui| {
         let i = match p.cover_shape {
             CoverShape::Original => 0,
             CoverShape::Random => 2,
@@ -294,6 +268,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
             let all = pool.len() == CoverShape::shapes().len();
             row(
                 ui,
+                Id::ShapeRange,
                 "Из каких фигур выбирать",
                 Some(&format!(
                     "{} из {} — новая на каждом треке и по двойному клику",
@@ -324,32 +299,32 @@ fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
             }
         }
         current => {
-            row(ui, "Фигура", Some(current.label()), |_| {});
+            row(ui, Id::ShapePick, "Фигура", Some(current.label()), |_| {});
             if let Some(c) = shape_grid(ui, "set-shape-fixed", |c| c == current) {
                 p.cover_shape = c;
             }
         }
     }
-    row(ui, "Вращать форму", Some("Контур медленно крутится, картинка стоит"), |ui| {
+    row(ui, Id::CoverSpin, "Вращать форму", Some("Контур медленно крутится, картинка стоит"), |ui| {
         ui.add(Switch::new(&mut p.cover_spin).id_salt("set-cover-spin"));
     });
     if p.cover_spin {
-        row(ui, "Направление формы", None, |ui| {
+        row(ui, Id::CoverDir, "Направление формы", None, |ui| {
             if let (Some(n), _) = connected(ui, egui::Id::new("set-cover-dir"), &["По часовой", "Против"], usize::from(p.cover_ccw), &[]) {
                 p.cover_ccw = n == 1;
             }
         });
     }
-    row(ui, "Пульсация в такт", Some("Обложка чуть вздрагивает на долях"), |ui| {
+    row(ui, Id::CoverPulse, "Пульсация в такт", Some("Обложка чуть вздрагивает на долях"), |ui| {
         ui.add(Switch::new(&mut p.cover_pulse).id_salt("set-cover-pulse"));
     });
 
     group(ui, "Кольцо вокруг обложки");
-    row(ui, "Кольцо", None, |ui| {
+    row(ui, Id::Ring, "Кольцо", None, |ui| {
         ui.add(Switch::new(&mut p.ring).id_salt("set-ring-on"));
     });
     if p.ring {
-        row(ui, "Вид кольца", Some("Круг из точек, точки по контуру формы или точки, вырастающие в бары под музыку (как в caelestia)"), |ui| {
+        row(ui, Id::RingStyle, "Вид кольца", Some("Круг из точек, точки по контуру формы или точки, вырастающие в бары под музыку (как в caelestia)"), |ui| {
             let styles = [RingStyle::Circle, RingStyle::Contour, RingStyle::Bars];
             let i = styles.iter().position(|r| *r == p.ring_style).unwrap_or(1);
             if let (Some(n), _) = connected(ui, egui::Id::new("set-ring-style"), &["Круг", "Контур", "Бары"], i, &[]) {
@@ -358,24 +333,34 @@ fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
         });
         // The bars stand on fixed angles, like a spectrum.
         if p.ring_style != RingStyle::Bars {
-            row(ui, "Кольцо крутится", Some("Пока играет музыка"), |ui| {
+            row(ui, Id::RingSpin, "Кольцо крутится", Some("Пока играет музыка"), |ui| {
                 ui.add(Switch::new(&mut p.spin_ring).id_salt("set-ring"));
             });
             if p.spin_ring {
-                row(ui, "Направление кольца", None, |ui| {
+                row(ui, Id::RingDir, "Направление кольца", None, |ui| {
                     if let (Some(n), _) = connected(ui, egui::Id::new("set-ring-dir"), &["По часовой", "Против"], usize::from(p.ring_ccw), &[]) {
                         p.ring_ccw = n == 1;
                     }
                 });
             }
         }
-        row(ui, "Кольцо в такт музыке", Some("Прыгает на ударных и всплесках спектра"), |ui| {
+        row(ui, Id::RingBeat, "Кольцо в такт музыке", Some("Прыгает на ударных и всплесках спектра"), |ui| {
             ui.add(Switch::new(&mut p.ring_beat).id_salt("set-ring-beat"));
         });
     }
 
-    group(ui, "Фигуры на фоне");
-    row(ui, "Режим", Some(match p.bg_shapes {
+    group(ui, "Фон");
+    row(ui, Id::Ambient, "Ambient", Some("Мягкие облака в цветах темы, под звук"), |ui| {
+        let i = match p.ambient {
+            Ambient::Off => 0,
+            Ambient::Glow => 1,
+            Ambient::Reactive => 2,
+        };
+        if let (Some(n), _) = connected(ui, egui::Id::new("set-ambient"), &["Выкл", "Свечение", "Под звук"], i, &[]) {
+            p.ambient = [Ambient::Off, Ambient::Glow, Ambient::Reactive][n];
+        }
+    });
+    row(ui, Id::BgShapes, "Фигуры на фоне", Some(match p.bg_shapes {
         BgShapes::Off => "Фигуры Material за открытым треком, под музыку",
         BgShapes::Bounce => "Лежат внизу и подпрыгивают на долях",
         BgShapes::Float => "Парят по экрану и светятся в такт",
@@ -388,33 +373,33 @@ fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
         }
     });
     if p.bg_shapes != BgShapes::Off {
-        row(ui, "Количество", Some(&format!("{} фигур", p.bg_shapes_count)), |ui| {
+        row(ui, Id::BgCount, "Количество", Some(&format!("{} фигур", p.bg_shapes_count)), |ui| {
             if let Some(v) = range_slider(ui, "set-bg-count", p.bg_shapes_count as f32, (4.0, 32.0), 1.0, |v| format!("{v:.0}")) {
                 p.bg_shapes_count = v as u32;
             }
         });
         let pct = |v: f32| format!("{:.0}%", v * 100.0);
-        row(ui, "Размер", None, |ui| {
+        row(ui, Id::BgSize, "Размер", None, |ui| {
             if let Some(v) = range_slider(ui, "set-bg-size", p.bg_shapes_size, (0.5, 2.0), 0.05, pct) {
                 p.bg_shapes_size = v;
             }
         });
-        row(ui, "Яркость", None, |ui| {
+        row(ui, Id::BgOpacity, "Яркость", None, |ui| {
             if let Some(v) = range_slider(ui, "set-bg-opacity", p.bg_shapes_opacity, (0.25, 2.0), 0.05, pct) {
                 p.bg_shapes_opacity = v;
             }
         });
-        row(ui, "Скорость", Some("Дрейф, вращение и прыжки"), |ui| {
+        row(ui, Id::BgSpeed, "Скорость", Some("Дрейф, вращение и прыжки"), |ui| {
             if let Some(v) = range_slider(ui, "set-bg-speed", p.bg_shapes_speed, (0.25, 3.0), 0.05, pct) {
                 p.bg_shapes_speed = v;
             }
         });
-        row(ui, "Реакция на музыку", Some("0% — просто украшение"), |ui| {
+        row(ui, Id::BgReact, "Реакция на музыку", Some("0% — просто украшение"), |ui| {
             if let Some(v) = range_slider(ui, "set-bg-react", p.bg_shapes_react, (0.0, 2.0), 0.05, pct) {
                 p.bg_shapes_react = v;
             }
         });
-        row(ui, "Цвета", Some("Контейнеры темы, один акцент или яркие акценты"), |ui| {
+        row(ui, Id::BgColors, "Цвета", Some("Контейнеры темы, один акцент или яркие акценты"), |ui| {
             let i = usize::from(p.bg_shapes_colors).min(2);
             if let (Some(n), _) = connected(ui, egui::Id::new("set-bg-colors"), &["Тема", "Акцент", "Яркие"], i, &[]) {
                 p.bg_shapes_colors = n as u8;
@@ -422,15 +407,15 @@ fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
         });
     }
 
-    let lyrics_header = group(ui, "Текст песен");
-    row(ui, "Анимация", Some("Караоке — заливка по слогам, Фокус — строка целиком, Волна — буква за буквой"), |ui| {
+    group(ui, "Текст песен");
+    row(ui, Id::LyricsStyle, "Анимация", Some("Караоке — заливка по слогам, Фокус — строка целиком, Волна — буква за буквой"), |ui| {
         let i = usize::from(p.lyrics_style).min(2);
         if let (Some(n), _) = connected(ui, egui::Id::new("set-lyrics-style"), &["Караоке", "Фокус", "Волна"], i, &[]) {
             p.lyrics_style = n as u8;
         }
     });
     if p.lyrics_style == 2 {
-        row(ui, "Если нет разметки по слогам", Some("Для анимации «Волна»"), |ui| {
+        row(ui, Id::WaveFallback, "Если нет разметки по слогам", Some("Для анимации «Волна»"), |ui| {
             let labels = ["Волна — прыгающие буквы", "Спокойный Фокус"];
             let i = usize::from(p.wave_syllables_only);
             let options = labels.iter().enumerate().map(|(n, label)| ((*label).to_owned(), n == i)).collect::<Vec<_>>();
@@ -438,29 +423,29 @@ fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
                 p.wave_syllables_only = n == 1;
             }
         });
-        row(ui, "Высота прыжка букв", Some("0 — буквы только подсвечиваются"), |ui| {
+        row(ui, Id::WaveJump, "Высота прыжка букв", Some("0 — буквы только подсвечиваются"), |ui| {
             if let Some(v) = range_slider(ui, "set-lyrics-jump", p.lyrics_wave_jump, (0.0, 2.0), 0.1, |v| format!("{v:.1}")) {
                 p.lyrics_wave_jump = v;
             }
         });
     }
-    row(ui, "Приглушение остальных строк", Some("0% — без приглушения, 100% — сильное"), |ui| {
+    row(ui, Id::LyricsDim, "Приглушение остальных строк", Some("0% — без приглушения, 100% — сильное"), |ui| {
         if let Some(v) = range_slider(ui, "set-lyrics-dim", p.lyrics_dim, (0.0, 1.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
             p.lyrics_dim = v;
         }
     });
-    row(ui, "Размер текста", None, |ui| {
+    row(ui, Id::LyricsScale, "Размер текста", None, |ui| {
         if let Some(v) = range_slider(ui, "set-lyrics-scale", p.lyrics_scale, (0.8, 1.4), 0.05, |v| format!("{:.0}%", v * 100.0)) {
             p.lyrics_scale = v;
         }
     });
-    row(ui, "Каскад строк", Some("Дальние строки следуют за прокруткой с задержкой"), |ui| {
+    row(ui, Id::LyricsCascade, "Каскад строк", Some("Дальние строки следуют за прокруткой с задержкой"), |ui| {
         ui.add(Switch::new(&mut p.lyrics_cascade).id_salt("set-lyrics-cascade"));
     });
-    row(ui, "Свечение текста", Some("Лёгкое свечение спетой части"), |ui| {
+    row(ui, Id::LyricsGlow, "Свечение текста", Some("Лёгкое свечение спетой части"), |ui| {
         ui.add(Switch::new(&mut p.lyrics_glow).id_salt("set-lyrics-glow"));
     });
-    row(ui, "Индикатор паузы", Some("Кольцо между строками"), |ui| {
+    row(ui, Id::LyricsGap, "Индикатор паузы", Some("Кольцо между строками"), |ui| {
         let labels = ["Линия", "Волна", "Толстая линия", "Толстая волна"];
         let i = usize::from(p.lyrics_gap_style).min(3);
         let options = labels.iter().enumerate().map(|(n, label)| ((*label).to_owned(), n == i)).collect::<Vec<_>>();
@@ -469,29 +454,51 @@ fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
         }
     });
     if matches!(p.lyrics_gap_style, 1 | 3) {
-        row(ui, "Длина волны", Some("Чем больше гребней, тем короче волна"), |ui| {
+        row(ui, Id::LyricsGapWaves, "Длина волны", Some("Чем больше гребней, тем короче волна"), |ui| {
             if let Some(v) = range_slider(ui, "set-lyrics-gap-waves", p.lyrics_gap_waves, (3.0, 16.0), 1.0, |v| format!("{v:.0} гребней")) {
                 p.lyrics_gap_waves = v;
             }
         });
     }
-    row(ui, "Обратный отсчёт 3-2-1 в конце паузы", None, |ui| {
+    row(ui, Id::LyricsCountdown, "Обратный отсчёт 3-2-1 в конце паузы", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_countdown).id_salt("set-lyrics-countdown"));
     });
 
-    if std::mem::take(&mut pages.scroll_to_lyrics_now) {
-        // Request after the controls so their nested scroll areas cannot consume it.
-        ui.scroll_to_rect(lyrics_header.rect, Some(egui::Align::TOP));
-    }
+    group(ui, "Навигация");
+    row(
+        ui,
+        Id::NavHidden,
+        "Боковая панель всегда скрыта",
+        Some("Разделы — Ctrl+1…4 или подведи курсор к левому краю окна"),
+        |ui| {
+            ui.add(Switch::new(&mut p.nav_hidden).id_salt("set-nav-hidden"));
+        },
+    );
+
+    group(ui, "Движение");
+    row(ui, Id::NpMotion, "Открытие экрана", Some("Как он вырастает из плеера и сворачивается"), |ui| {
+        let i = usize::from(p.np_motion).min(2);
+        if let (Some(n), _) = connected(ui, egui::Id::new("set-np-motion"), &["Плавно", "Живо", "Быстро"], i, &[]) {
+            p.np_motion = n as u8;
+        }
+    });
+    row(ui, Id::ReducedMotion, "Меньше движения", Some("Без отскоков, вращения и волн"), |ui| {
+        ui.add(Switch::new(&mut p.reduced_motion).id_salt("set-rm"));
+    });
+    row(ui, Id::FpsLimit, "Лимит кадров", Some(&format!("{} FPS", p.fps_limit)), |ui| {
+        if let Some(v) = range_slider(ui, "set-fps", p.fps_limit as f32, (30.0, 144.0), 1.0, |v| format!("{v:.0}")) {
+            p.fps_limit = v as u32;
+        }
+    });
 }
 
 /// Behaviour: controls, lyrics sources, sound, library, import, torrents.
 fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
     group(ui, "Управление");
-    row(ui, "Клик по обложке — пауза", Some("В открытом треке"), |ui| {
+    row(ui, Id::CoverClickPause, "Клик по обложке — пауза", Some("В открытом треке"), |ui| {
         ui.add(Switch::new(&mut p.cover_click_pause).id_salt("set-cover-click"));
     });
-    row(ui, "Двойной клик — другая фигура", Some("Двойной клик в открытом треке меняет форму обложки"), |ui| {
+    row(ui, Id::DblClickShape, "Двойной клик — другая фигура", Some("Двойной клик в открытом треке меняет форму обложки"), |ui| {
         let labels = ["Выкл", "Только в режиме «Случайная»", "Всегда"];
         let i = usize::from(p.dbl_click_shape).min(2);
         let options = labels.iter().enumerate().map(|(n, label)| ((*label).to_owned(), n == i)).collect::<Vec<_>>();
@@ -499,20 +506,20 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
             p.dbl_click_shape = n as u8;
         }
     });
-    row(ui, "Клавиши", Some("L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке"), |_| {});
+    row(ui, Id::Keys, "Клавиши", Some("L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке"), |_| {});
 
     group(ui, "Текст песен");
-    row(ui, "Сохранять найденный текст в файл трека", Some("Встраивает синхронизированный текст в теги, чтобы он был доступен без интернета"), |ui| {
+    row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", Some("Встраивает синхронизированный текст в теги, чтобы он был доступен без интернета"), |ui| {
         ui.add(Switch::new(&mut p.save_found_lyrics).id_salt("set-save-lyrics"));
     });
-    row(ui, &format!("Возвращаться к текущей строке через {:.0} с", p.lyrics_return_s), Some("После ручной прокрутки текста"), |ui| {
+    row(ui, Id::LyricsReturn, &format!("Возвращаться к текущей строке через {:.0} с", p.lyrics_return_s), Some("После ручной прокрутки текста"), |ui| {
         if let Some(v) = range_slider(ui, "set-lyrics-return", p.lyrics_return_s, (1.0, 15.0), 1.0, |v| format!("{v:.0} с")) {
             p.lyrics_return_s = v;
         }
     });
 
     group(ui, "Звук");
-    row(ui, "Устройство вывода", Some("Переключается сразу, без паузы"), |ui| {
+    row(ui, Id::OutputDevice, "Устройство вывода", Some("Переключается сразу, без паузы"), |ui| {
         const DEFAULT: &str = "Системное по умолчанию";
         let mut options = vec![(DEFAULT.to_owned(), p.output_device.is_none())];
         options.extend(p.output_devices.iter().map(|d| (d.clone(), p.output_device.as_deref() == Some(d.as_str()))));
@@ -521,11 +528,12 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
             p.output_device = if n == 0 { None } else { p.output_devices.get(n - 1).cloned() };
         }
     });
-    row(ui, "Без пауз между треками", Some("Gapless"), |ui| {
+    row(ui, Id::Gapless, "Без пауз между треками", Some("Gapless"), |ui| {
         ui.add(Switch::new(&mut p.gapless).id_salt("set-gapless"));
     });
     row(
         ui,
+        Id::Crossfade,
         "Кроссфейд",
         Some(&if p.crossfade_s < 0.5 { "выключен".to_owned() } else { format!("{:.0} с", p.crossfade_s) }),
         |ui| {
@@ -534,12 +542,12 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
             }
         },
     );
-    row(ui, "Нормализация громкости", Some("ReplayGain / R128"), |ui| {
+    row(ui, Id::Normalization, "Нормализация громкости", Some("ReplayGain / R128"), |ui| {
         ui.add(Switch::new(&mut p.normalization).id_salt("set-norm"));
     });
 
     group(ui, "Библиотека");
-    row(ui, "Папка музыки", Some(&p.library_dir.display().to_string()), |ui| {
+    row(ui, Id::LibraryDir, "Папка музыки", Some(&p.library_dir.display().to_string()), |ui| {
         if ui.add(Button::new("Открыть").style(Style::Outlined).id_salt("open-lib")).clicked() {
             let _ = open_folder(&p.library_dir);
         }
@@ -550,7 +558,7 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
     } else {
         p.masters_dir.clone()
     };
-    row(ui, "Архив FLAC (оригиналы)", Some(&masters_dir.display().to_string()), |ui| {
+    row(ui, Id::MastersDir, "Архив FLAC (оригиналы)", Some(&masters_dir.display().to_string()), |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             if ui
@@ -570,27 +578,27 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
             }
         });
     });
-    row(ui, "Inbox", Some(&p.inbox_dir.display().to_string()), |ui| {
+    row(ui, Id::Inbox, "Inbox", Some(&p.inbox_dir.display().to_string()), |ui| {
         if ui.add(Button::new("Открыть").style(Style::Outlined).id_salt("open-inbox")).clicked() {
             let _ = open_folder(&p.inbox_dir);
         }
     });
-    row(ui, "Правила имён", Some("Исполнитель/Год - Альбом/01 - Трек.opus"), |_| {});
+    row(ui, Id::NamingRules, "Правила имён", Some("Исполнитель/Год - Альбом/01 - Трек.opus"), |_| {});
     let trash = p.library_dir.parent().map_or_else(|| p.library_dir.join("Trash"), |d| d.join("Trash"));
-    row(ui, "Корзина", Some("Удалённые треки лежат 30 дней"), |ui| {
+    row(ui, Id::Trash, "Корзина", Some("Удалённые треки лежат 30 дней"), |ui| {
         if ui.add(Button::new("Открыть").style(Style::Outlined).id_salt("open-trash")).clicked() {
             let _ = open_folder(&trash);
         }
     });
     let userdata = p.library_dir.join(".musiclib").join("userdata");
-    row(ui, "Экспорт данных", Some("Лайки и плейлисты в .musiclib/userdata рядом с музыкой"), |ui| {
+    row(ui, Id::ExportData, "Экспорт данных", Some("Лайки и плейлисты в .musiclib/userdata рядом с музыкой"), |ui| {
         if ui.add(Button::new("Открыть папку").style(Style::Outlined).id_salt("open-userdata")).clicked() {
             let _ = open_folder(&userdata);
         }
     });
 
     group(ui, "Импорт и качество");
-    row(ui, "Битрейт Opus", Some(&format!("{} кбит/с", p.opus_bitrate)), |ui| {
+    row(ui, Id::OpusBitrate, "Битрейт Opus", Some(&format!("{} кбит/с", p.opus_bitrate)), |ui| {
         let vals = [128, 160, 192, 256];
         let labels = ["128", "160", "192", "256"];
         let i = vals.iter().position(|v| *v == p.opus_bitrate).unwrap_or(1);
@@ -598,7 +606,7 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
             p.opus_bitrate = vals[n];
         }
     });
-    row(ui, "Проверять «фейковый» FLAC", Some("Срез спектра выдаёт перекодированный lossy"), |ui| {
+    row(ui, Id::FakeFlac, "Проверять «фейковый» FLAC", Some("Срез спектра выдаёт перекодированный lossy"), |ui| {
         ui.add(Switch::new(&mut p.check_fake_lossless).id_salt("set-fake"));
     });
     if !pages.metadata_synced {
@@ -606,24 +614,28 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
         pages.metadata_synced = true;
     }
     ui.add_space(8.0);
-    TextField::new(&mut pages.metadata_contact, "Контакт для MusicBrainz")
-        .placeholder("почта или адрес сайта")
-        .supporting("Попадает в User-Agent запросов: так просит MusicBrainz.")
-        .leading_icon(Icon::Person)
-        .width(480.0)
-        .id_salt("set-mb-contact")
-        .show(ui);
+    settings_help::item(ui, Id::MusicBrainz, "Контакт для MusicBrainz", |ui| {
+        TextField::new(&mut pages.metadata_contact, "Контакт для MusicBrainz")
+            .placeholder("почта или адрес сайта")
+            .supporting("Попадает в User-Agent запросов: так просит MusicBrainz.")
+            .leading_icon(Icon::Person)
+            .width(480.0)
+            .id_salt("set-mb-contact")
+            .show(ui);
+    });
     ui.add_space(8.0);
-    TextField::new(&mut pages.acoustid_key, "Ключ AcoustID")
-        .password(true)
-        .supporting(if p.acoustid_configured {
-            "Ключ задан. Введи новый, чтобы заменить."
-        } else {
-            "Нужен для опознания треков по звуку. Хранится в settings.toml."
-        })
-        .width(480.0)
-        .id_salt("set-acoustid")
-        .show(ui);
+    settings_help::item(ui, Id::AcoustId, "Ключ AcoustID", |ui| {
+        TextField::new(&mut pages.acoustid_key, "Ключ AcoustID")
+            .password(true)
+            .supporting(if p.acoustid_configured {
+                "Ключ задан. Введи новый, чтобы заменить."
+            } else {
+                "Нужен для опознания треков по звуку. Хранится в settings.toml."
+            })
+            .width(480.0)
+            .id_salt("set-acoustid")
+            .show(ui);
+    });
     ui.add_space(8.0);
     let contact_changed = pages.metadata_contact.trim() != p.metadata_contact.trim();
     if ui
@@ -647,53 +659,56 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
         pages.indexer_url = p.prowlarr_url.clone();
     }
     ui.add_space(4.0);
-    TextField::new(&mut pages.indexer_url, "Адрес Prowlarr")
-        .placeholder("https://…")
-        .leading_icon(Icon::Link)
-        .width(480.0)
-        .id_salt("set-prowlarr-url")
-        .show(ui);
-    ui.add_space(8.0);
-    TextField::new(&mut pages.indexer_key, "API-ключ")
-        .password(true)
-        .supporting(if p.prowlarr_configured {
-            "Ключ сохранён. Введи новый, чтобы заменить."
-        } else {
-            "Хранится в settings.toml, в коде его нет."
-        })
-        .width(480.0)
-        .id_salt("set-prowlarr-key")
-        .show(ui);
-    ui.add_space(8.0);
-    if ui
-        .add(
-            Button::new("Сохранить")
-                .style(Style::Tonal)
-                .enabled(!pages.indexer_url.trim().is_empty() && !pages.indexer_key.trim().is_empty())
-                .id_salt("set-prowlarr-save"),
-        )
-        .clicked()
-    {
-        out.push(Command::SetIndexer {
-            url: pages.indexer_url.trim().to_owned(),
-            api_key: std::mem::take(&mut pages.indexer_key).trim().to_owned(),
-        });
-    }
-    row(ui, "Не раздавать", Some("Скачанное сразу перестаёт раздаваться"), |ui| {
+    settings_help::item(ui, Id::Prowlarr, "Prowlarr", |ui| {
+        TextField::new(&mut pages.indexer_url, "Адрес Prowlarr")
+            .placeholder("https://…")
+            .leading_icon(Icon::Link)
+            .width(480.0)
+            .id_salt("set-prowlarr-url")
+            .show(ui);
+        ui.add_space(8.0);
+        TextField::new(&mut pages.indexer_key, "API-ключ")
+            .password(true)
+            .supporting(if p.prowlarr_configured {
+                "Ключ сохранён. Введи новый, чтобы заменить."
+            } else {
+                "Хранится в settings.toml, в коде его нет."
+            })
+            .width(480.0)
+            .id_salt("set-prowlarr-key")
+            .show(ui);
+        ui.add_space(8.0);
+        if ui
+            .add(
+                Button::new("Сохранить")
+                    .style(Style::Tonal)
+                    .enabled(!pages.indexer_url.trim().is_empty() && !pages.indexer_key.trim().is_empty())
+                    .id_salt("set-prowlarr-save"),
+            )
+            .clicked()
+        {
+            out.push(Command::SetIndexer {
+                url: pages.indexer_url.trim().to_owned(),
+                api_key: std::mem::take(&mut pages.indexer_key).trim().to_owned(),
+            });
+        }
+    });
+    row(ui, Id::NoSeed, "Не раздавать", Some("Скачанное сразу перестаёт раздаваться"), |ui| {
         ui.add(Switch::new(&mut p.no_seed).id_salt("set-noseed"));
     });
-    row(ui, "Лимит раздачи", Some(&format!("{} ГБ", p.seed_limit_gb)), |ui| {
+    row(ui, Id::SeedLimit, "Лимит раздачи", Some(&format!("{} ГБ", p.seed_limit_gb)), |ui| {
         if let Some(v) = range_slider(ui, "set-seed", p.seed_limit_gb as f32, (0.0, 500.0), 5.0, |v| format!("{v:.0} ГБ")) {
             p.seed_limit_gb = v as u32;
         }
     });
-    row(ui, "Срок раздачи", Some(&format!("чистка через {} дн.", p.seed_days)), |ui| {
+    row(ui, Id::SeedDays, "Срок раздачи", Some(&format!("чистка через {} дн.", p.seed_days)), |ui| {
         if let Some(v) = range_slider(ui, "set-seed-days", p.seed_days as f32, (1.0, 90.0), 1.0, |v| format!("{v:.0} дн.")) {
             p.seed_days = v as u32;
         }
     });
     row(
         ui,
+        Id::SeedRatio,
         "Ratio",
         Some(&if p.seed_ratio < 0.05 { "без лимита".to_owned() } else { format!("до {:.1}", p.seed_ratio) }),
         |ui| {
@@ -703,27 +718,27 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
             }
         },
     );
-    row(ui, "Скорость загрузки", Some(&fmt_speed(p.download_limit_kbps)), |ui| {
+    row(ui, Id::DownloadLimit, "Скорость загрузки", Some(&fmt_speed(p.download_limit_kbps)), |ui| {
         if let Some(v) = speed_slider(ui, "set-dl-limit", p.download_limit_kbps) {
             p.download_limit_kbps = v;
         }
     });
-    row(ui, "Скорость отдачи", Some(&fmt_speed(p.upload_limit_kbps)), |ui| {
+    row(ui, Id::UploadLimit, "Скорость отдачи", Some(&fmt_speed(p.upload_limit_kbps)), |ui| {
         if let Some(v) = speed_slider(ui, "set-ul-limit", p.upload_limit_kbps) {
             p.upload_limit_kbps = v;
         }
     });
 
     group(ui, "Аккаунты");
-    row(ui, "Spotify", Some("Этап 3"), |ui| {
+    row(ui, Id::Spotify, "Spotify", Some("Этап 3"), |ui| {
         ui.add(Button::new("Войти").style(Style::Outlined).enabled(false).id_salt("acc-sp"));
     });
-    row(ui, "YouTube Music", Some("Этап 3"), |ui| {
+    row(ui, Id::YouTube, "YouTube Music", Some("Этап 3"), |ui| {
         ui.add(Button::new("Войти").style(Style::Outlined).enabled(false).id_salt("acc-yt"));
     });
 
     group(ui, "Узлы и бэкап");
-    row(ui, "Raspberry Pi, сервер, телефон", Some("Этап 6"), |_| {});
+    row(ui, Id::Nodes, "Raspberry Pi, сервер, телефон", Some("Этап 6"), |_| {});
 }
 
 fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
