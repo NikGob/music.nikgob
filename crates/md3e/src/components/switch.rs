@@ -62,10 +62,12 @@ impl<'a> Switch<'a> {
 
 impl Widget for Switch<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let (visual, _) = ui.allocate_exact_size(vec2(TRACK_WIDTH, TRACK_HEIGHT), Sense::hover());
+        // The id before the allocation: afterwards `next_auto_id` is the
+        // next widget's, whose rect would replace this button's hit area.
         let id = self
             .id_salt
             .map_or_else(|| ui.next_auto_id(), |s| ui.id().with(s));
+        let (visual, _) = ui.allocate_exact_size(vec2(TRACK_WIDTH, TRACK_HEIGHT), Sense::hover());
         let sense = if self.enabled {
             Sense::click()
         } else {

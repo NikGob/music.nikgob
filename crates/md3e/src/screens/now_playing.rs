@@ -1019,7 +1019,7 @@ pub fn show(
         if mega.wide {
             info(&mut mega_ui, mega.info, false, InfoMode::Compact, state, pages, chrome, out);
         } else {
-            thumbnail_info(&mut mega_ui, mega.cover, state);
+            thumbnail_info(&mut mega_ui, mega.cover, state, chrome);
             info(&mut mega_ui, mega.info, false, InfoMode::Transport, state, pages, chrome, out);
         }
         let slide = if theme.reduced_motion { 0.0 } else { 32.0 * (1.0 - mega_k) };
@@ -1203,13 +1203,20 @@ fn lerp_rect(from: Rect, to: Rect, k: f32) -> Rect {
     Rect::from_min_max(from.min.lerp(to.min, k), from.max.lerp(to.max, k))
 }
 
-fn thumbnail_info(ui: &mut Ui, cover: Rect, state: &ViewState) {
+fn thumbnail_info(ui: &mut Ui, cover: Rect, state: &ViewState, chrome: &mut Chrome) {
     let Some(t) = &state.player.current else { return };
     let s = Theme::get(ui.ctx()).scheme;
     let rect = Rect::from_min_max(pos2(cover.right() + 16.0, cover.top()), pos2(ui.max_rect().right(), cover.bottom()));
     let mut tui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("mega-title"));
     tui.add(egui::Label::new(TypeRole::TitleLarge.emphasized().rich(&t.title, s.on_surface)).truncate());
-    tui.add(egui::Label::new(TypeRole::TitleMedium.style().rich(&t.artist, s.on_surface_variant)).truncate());
+    let artist = tui.add(
+        egui::Label::new(TypeRole::TitleMedium.style().rich(&t.artist, s.on_surface_variant))
+            .truncate()
+            .sense(Sense::click()),
+    );
+    if artist.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        chrome.nav = t.artist_id.map(nikgob_view::Route::Artist);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1305,9 +1312,24 @@ fn info(
     y += 64.0 + if compact { 16.0 } else { PROGRESS_GAP };
 
     // Controls: standard button group, hero play in the middle.
-    let button_size = if compact { Size::S } else { Size::M };
-    let hero_size = if compact { Size::M } else { Size::L };
-    let group_w = if compact { 4.0 * 40.0 + 56.0 + 4.0 * 12.0 } else { 4.0 * 56.0 + 96.0 + 4.0 * 8.0 + 2.0 * 16.0 };
+    // The largest sizes whose row fits the column (a narrow window steps
+    // the side buttons down first, so play stays the biggest).
+    let row_w = |button: Size, hero: Size| {
+        4.0 * IconButton::new(Icon::Shuffle).size(button).natural_width()
+            + IconButton::new(Icon::PlayArrow).size(hero).natural_width()
+            + 4.0 * button.group_gap()
+    };
+    let tiers: &[(Size, Size)] = if compact {
+        &[(Size::S, Size::M)]
+    } else {
+        &[(Size::M, Size::L), (Size::S, Size::L), (Size::S, Size::M)]
+    };
+    let (button_size, hero_size) = tiers
+        .iter()
+        .copied()
+        .find(|&(b, h)| row_w(b, h) <= col.width())
+        .unwrap_or(tiers[tiers.len() - 1]);
+    let group_w = row_w(button_size, hero_size);
     let controls = snap(
         ui,
         Rect::from_min_size(
@@ -1409,7 +1431,7 @@ fn info(
         }
         if ui
             .add(
-                IconButton::new(if p.muted || volume == 0.0 { Icon::VolumeOff } else { Icon::VolumeUp })
+                IconButton::new(Icon::volume(volume, p.muted))
                     .tooltip("Звук (колесо мыши — громкость)")
                     .id_salt("np-mute"),
             )

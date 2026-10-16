@@ -108,6 +108,9 @@ material_icons! {
     Lyrics => "lyrics",
     VolumeUp => "volume_up",
     VolumeOff => "volume_off",
+    VolumeDown => "volume_down",
+    /// The bare speaker: the quietest level, not muted.
+    VolumeMute => "volume_mute",
     MoreVert => "more_vert",
     MoreHoriz => "more_horiz",
     ExpandMore => "expand_more",
@@ -146,6 +149,18 @@ impl Icon {
     /// Symbols; both forms are then the same drawing.
     pub fn has_filled_form(self) -> bool {
         self.bytes(false) != self.bytes(true)
+    }
+
+    /// The speaker for `volume` (0..1): crossed out when muted or silent,
+    /// then no, one or two waves as it goes up.
+    pub fn volume(volume: f32, muted: bool) -> Self {
+        match volume {
+            _ if muted => Self::VolumeOff,
+            v if v <= 0.0 => Self::VolumeOff,
+            v if v < 0.34 => Self::VolumeMute,
+            v if v < 0.67 => Self::VolumeDown,
+            _ => Self::VolumeUp,
+        }
     }
 
     /// The icon as an egui image source. Wrap it in `egui::Image::new` and
@@ -224,6 +239,16 @@ mod tests {
                 .unwrap_or_else(|e| panic!("load failed: {e}"));
             assert!(matches!(poll, TexturePoll::Ready { .. }));
         }
+    }
+
+    #[test]
+    fn volume_icon_follows_the_level() {
+        assert_eq!(Icon::volume(0.8, true), Icon::VolumeOff);
+        assert_eq!(Icon::volume(0.0, false), Icon::VolumeOff);
+        assert_eq!(Icon::volume(0.1, false), Icon::VolumeMute);
+        assert_eq!(Icon::volume(0.5, false), Icon::VolumeDown);
+        assert_eq!(Icon::volume(0.67, false), Icon::VolumeUp);
+        assert_eq!(Icon::volume(1.0, false), Icon::VolumeUp);
     }
 
     #[test]

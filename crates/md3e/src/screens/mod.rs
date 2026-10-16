@@ -235,13 +235,22 @@ impl Md3eUi {
                 let full = ui.max_rect();
                 let class = size_class(full.width());
                 if class == SizeClass::Compact {
-                    if self.route() == &Route::Settings {
+                    if compact_page(self.route()) {
                         self.content_rect = full;
-                        if ui.add(crate::components::IconButton::new(crate::Icon::ExpandMore)
+                        // The page margins of the full layout.
+                        let inner = full.shrink2(vec2(class.margin(), 0.0));
+                        let mut pui = ui.new_child(UiBuilder::new().max_rect(inner).id_salt("compact-page"));
+                        pui.set_clip_rect(full);
+                        if pui.add(crate::components::IconButton::new(crate::Icon::ExpandMore)
                             .tooltip("Вернуться к плееру").id_salt("compact-settings-close")).clicked() {
                             self.navigate(ctx, Route::Home, out);
                         }
-                        pages::page(ui, &Route::Settings, state, 16.0, &mut self.pages, out);
+                        let route = self.route().clone();
+                        // Another artist from this page stays here; the
+                        // rest has no room in mini mode.
+                        if let Some(next @ Route::Artist(_)) = pages::page(&mut pui, &route, state, 16.0, &mut self.pages, out) {
+                            self.navigate(ctx, next, out);
+                        }
                         return;
                     }
                     // Mini mode: Now Playing only.
@@ -416,7 +425,7 @@ impl Md3eUi {
         // search, back.
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             let compact = size_class(ctx.content_rect().width()) == SizeClass::Compact;
-            if (self.now_playing || (compact && self.route() != &Route::Settings)) && self.chrome.np_slot != NpSlot::None {
+            if (self.now_playing || (compact && !compact_page(self.route()))) && self.chrome.np_slot != NpSlot::None {
                 self.chrome.np_slot = NpSlot::None;
             } else if self.now_playing {
                 self.set_now_playing(ctx, false);
@@ -425,7 +434,7 @@ impl Md3eUi {
                 self.pane = None;
             } else if !self.search.is_empty() {
                 self.search.clear();
-            } else if compact && self.route() == &Route::Settings {
+            } else if compact && compact_page(self.route()) {
                 self.navigate(ctx, Route::Home, out);
             } else {
                 self.back(ctx, out);
@@ -447,7 +456,7 @@ impl Md3eUi {
 
     fn shortcuts(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
         let typing = ctx.memory(|m| m.focused().is_some()) && ctx.egui_wants_keyboard_input();
-        let now_playing_open = self.now_playing || (size_class(ctx.content_rect().width()) == SizeClass::Compact && self.route() != &Route::Settings);
+        let now_playing_open = self.now_playing || (size_class(ctx.content_rect().width()) == SizeClass::Compact && !compact_page(self.route()));
         let mut previous = false;
         let mut go = None;
         ctx.input_mut(|i| {
@@ -981,6 +990,12 @@ fn np_spring(motion: u8) -> nikgob_motion::Spring {
         2 => nikgob_motion::Spring::new(0.9, 1000.0),
         _ => nikgob_motion::Spring::new(0.72, 520.0),
     }
+}
+
+/// Pages mini mode shows in place of Now Playing: settings, and the artist
+/// opened from the player.
+fn compact_page(route: &Route) -> bool {
+    matches!(route, Route::Settings | Route::Artist(_))
 }
 
 #[cfg(test)]
