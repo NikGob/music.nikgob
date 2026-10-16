@@ -214,7 +214,9 @@ fn upserts_are_idempotent() {
     let r = release(&lib, &a, "Группа крови", Some(1988));
     let r2 = lib.upsert_release(&r).unwrap();
     assert_eq!(r, r2);
-    assert_eq!(lib.count_releases().unwrap(), 1);
+    // Stored once; listed only once it has a track.
+    assert!(lib.get_release(r.id).unwrap().is_some());
+    assert_eq!(lib.count_releases().unwrap(), 0);
 
     let mut t = Track::new("Группа крови", credit(&a));
     t.release_id = Some(r.id);
@@ -222,6 +224,7 @@ fn upserts_are_idempotent() {
     let t1 = lib.upsert_track(&t).unwrap();
     let t2 = lib.upsert_track(&t).unwrap();
     assert_eq!(t1, t2);
+    assert_eq!(lib.count_releases().unwrap(), 1);
     assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), 1);
 
     // Changing a field updates in place and keeps `added_at`.
@@ -861,7 +864,10 @@ fn release_and_artist_paging_with_local_counts() {
     let abbey = lib.upsert_release(&abbey).unwrap();
     let blood = release(&lib, &kino, "Группа крови", Some(1988));
     let undated = release(&lib, &zero, "Undated", None);
-    release(&lib, &zero, "Early", Some(1960));
+    let early = release(&lib, &zero, "Early", Some(1960));
+    // Albums are listed once they have a track (stream-only ones too).
+    track(&lib, &zero, Some(&undated), "u1", 1);
+    track(&lib, &zero, Some(&early), "e1", 1);
 
     // 3 of 17 locally for Abbey Road; one more track known but not local.
     for i in 1..=4 {
@@ -880,7 +886,7 @@ fn release_and_artist_paging_with_local_counts() {
     track(&lib, &kino, Some(&blood), "b2", 2);
     let p = lib.release_progress(blood.id).unwrap().unwrap();
     assert_eq!((p.local, p.total), (1, 2));
-    assert!(lib.release_progress(undated.id).unwrap().unwrap().total == 0);
+    assert!(lib.release_progress(undated.id).unwrap().unwrap().total == 1);
 
     let by_year = lib
         .releases(0, 10, ReleaseSort::asc(ReleaseSortKey::Year))
@@ -1581,7 +1587,9 @@ fn merging_keeps_one_mbid_and_refuses_two() {
     };
     let (plain, one, two) = (with_mbid("X", None), with_mbid("Y", Some("m1")), with_mbid("Z", Some("m2")));
     assert!(matches!(lib.merge_releases(one.id, two.id), Err(LibraryError::Invalid(_))));
-    assert_eq!(lib.count_releases().unwrap(), 3, "nothing changed");
+    for r in [&plain, &one, &two] {
+        assert!(lib.get_release(r.id).unwrap().is_some(), "nothing changed");
+    }
     lib.merge_releases(one.id, plain.id).unwrap();
     assert_eq!(lib.get_release(plain.id).unwrap().unwrap().mbid.as_deref(), Some("m1"));
 }
@@ -1835,4 +1843,34 @@ fn job_log_keeps_the_latest_entries() {
         lib.log_job("import", &i.to_string(), "", None).unwrap();
     }
     assert_eq!(lib.job_log(None, 10_000).unwrap().len(), crate::JOB_LOG_KEEP as usize);
+}
+
+#[test]
+fn albums_without_live_tracks_are_not_listed_but_kept() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let old = release(&lib, &a, "Old", None);
+    let new = release(&lib, &a, "New", None);
+    let mut t = track(&lib, &a, Some(&old), "Song", 1);
+    local(&lib, &t, "song.opus", Codec::Opus, Some(160));
+    let listed = |lib: &Library| -> Vec<String> {
+        lib.releases(0, 10, ReleaseSort::asc(ReleaseSortKey::Title))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.release.title)
+            .collect()
+    };
+    assert_eq!(listed(&lib), ["Old"]);
+    // A retag moves the only track into another album: the emptied one is
+    // no album card any more, anywhere, but its row stays for the importer.
+    t.release_id = Some(new.id);
+    lib.upsert_track(&t).unwrap();
+    assert_eq!(listed(&lib), ["New"]);
+    assert_eq!(lib.count_releases().unwrap(), 1);
+    assert_eq!(lib.releases_of_artist(a.id).unwrap().len(), 1);
+    assert_eq!(lib.artists(0, 10, ArtistSort::asc(ArtistSortKey::Name)).unwrap()[0].release_count, 1);
+    assert!(lib.search("old", 10).unwrap().releases.is_empty());
+    assert!(lib.release_progress(old.id).unwrap().is_none());
+    assert!(lib.get_release(old.id).unwrap().is_some());
+    assert_eq!(lib.releases_with_deleted(0, 10, ReleaseSort::asc(ReleaseSortKey::Title)).unwrap().len(), 2);
 }

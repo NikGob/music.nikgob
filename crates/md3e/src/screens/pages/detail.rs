@@ -103,6 +103,18 @@ pub fn release(
         });
     };
     let c = &r.card;
+    // The album was deleted (or its last track): nothing left to show, go
+    // back like ← does.
+    // Once: the page may still be drawn while the transition runs.
+    let left = Id::new(("release-left-empty", id));
+    if r.tracks.is_empty() {
+        if !ui.ctx().data(|d| d.get_temp::<bool>(left).unwrap_or(false)) {
+            ui.ctx().data_mut(|d| d.insert_temp(left, true));
+            pages.go_back = true;
+        }
+    } else {
+        ui.ctx().data_mut(|d| d.remove::<bool>(left));
+    }
     with_bar(ui, &c.title, pages, |ui, pages| {
         let mut nav = None;
         let size = cover_size(ui);

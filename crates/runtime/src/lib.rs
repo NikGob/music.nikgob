@@ -1256,7 +1256,17 @@ impl Worker {
             // A picture comes through `SetPlaylistCover`.
             nikgob_view::PlaylistCoverMode::Custom => return,
         };
+        let previous = self.lib.get_playlist(id).ok().flatten().and_then(|p| p.cover);
         if self.log_err("обложка", self.lib.set_playlist_cover(id, stored)).is_some() {
+            // The custom picture it leaves: ours to delete only when it is a
+            // copy in `.musiclib/covers` (never a file of the user's).
+            if let Some(old) = previous.filter(|c| playlist_cover::mode_of(Some(c)) == nikgob_view::PlaylistCoverMode::Custom) {
+                let old = self.res.path(&old);
+                let covers = self.res.path(".musiclib/covers");
+                if old.parent() == Some(covers.as_path()) && old.is_file() {
+                    let _ = std::fs::remove_file(&old);
+                }
+            }
             self.load_library();
             self.load_playlist(id);
         }

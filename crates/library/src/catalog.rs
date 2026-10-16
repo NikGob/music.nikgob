@@ -1018,12 +1018,12 @@ impl Library {
     }
 }
 
-/// A release (alias `rv`) is listed unless every one of its tracks is deleted
-/// (a release with no tracks at all stays, as before).
+/// A release (alias `rv`) is listed while it has a live track: one whose
+/// tracks are all deleted, or that a retag emptied, is no album to show. The
+/// row itself stays (the importer may still point at it).
 macro_rules! release_visible {
     () => {
-        "(EXISTS (SELECT 1 FROM track t WHERE t.release_id = rv.id AND t.deleted_at IS NULL)
-          OR NOT EXISTS (SELECT 1 FROM track t WHERE t.release_id = rv.id))"
+        "EXISTS (SELECT 1 FROM track t WHERE t.release_id = rv.id AND t.deleted_at IS NULL)"
     };
 }
 

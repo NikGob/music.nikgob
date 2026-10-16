@@ -376,3 +376,47 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
     assert!(!old_masters.exists());
 }
 
+
+/// Switching a playlist away from its custom picture deletes our copy in
+/// `.musiclib/covers`, never the user's original.
+#[test]
+fn custom_playlist_cover_copy_goes_when_switching_to_auto() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let cfg = ImportConfig::with_root(root);
+    std::fs::create_dir_all(&cfg.library_dir).unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            library_dir: cfg.library_dir.clone(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let p = lib.create_playlist("P").unwrap();
+    let mine = root.join("mine.png");
+    std::fs::write(&mine, b"not really a png").unwrap();
+    rt.send(Command::SetPlaylistCover(p.id, mine.clone()));
+    let t = Instant::now();
+    let copy = loop {
+        if let Some(c) = lib.get_playlist(p.id).unwrap().and_then(|p| p.cover) {
+            break cfg.library_dir.join(c);
+        }
+        assert!(t.elapsed() < Duration::from_secs(30), "the cover was not set");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(copy.is_file());
+    rt.send(Command::SetPlaylistCoverMode(p.id, nikgob_view::PlaylistCoverMode::Smart));
+    let t = Instant::now();
+    while lib.get_playlist(p.id).unwrap().unwrap().cover.is_some() {
+        assert!(t.elapsed() < Duration::from_secs(30), "the mode was not set");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    wait_for(&rt, "the copy to go", |_| !copy.exists());
+    assert!(mine.is_file(), "the user's own file stays");
+}
