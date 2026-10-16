@@ -124,6 +124,7 @@ pub struct ConnectedGroup<'a> {
     labels: &'a [&'a str],
     icons: Option<&'a [crate::Icon]>,
     equal_width: Option<f32>,
+    reselect: bool,
 }
 
 impl<'a> ConnectedGroup<'a> {
@@ -134,7 +135,15 @@ impl<'a> ConnectedGroup<'a> {
             labels,
             icons: None,
             equal_width: None,
+            reselect: false,
         }
+    }
+
+    /// Also report a click on the member that is already selected (for
+    /// groups where that means "close").
+    pub fn reselect(mut self, on: bool) -> Self {
+        self.reselect = on;
+        self
     }
 
     pub fn size(mut self, size: Size) -> Self {
@@ -198,7 +207,7 @@ impl<'a> ConnectedGroup<'a> {
                     }
                     ui.add(b)
                 };
-                if response.clicked() && !sel {
+                if response.clicked() && (!sel || self.reselect) {
                     changed = Some(i);
                 }
             }

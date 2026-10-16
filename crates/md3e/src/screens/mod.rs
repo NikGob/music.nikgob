@@ -51,6 +51,9 @@ pub struct Md3eUi {
     was_inline: bool,
     now_playing: bool,
     np_anim: Animated<f32>,
+    /// Now Playing's content takes input (it has nearly arrived), not the
+    /// moving container.
+    np_live: bool,
     /// `Prefs::np_motion`, for the spring Now Playing opens with.
     np_motion: u8,
     /// Where the floating player was last frame (container-transform origin).
@@ -88,6 +91,7 @@ impl Md3eUi {
             was_inline: true,
             now_playing: false,
             np_anim: Animated::new(0.0, crate::tokens::Motion::expressive().slow_spatial),
+            np_live: false,
             np_motion: 1,
             bar_rect: Rect::NOTHING,
             content_rect: Rect::NOTHING,
@@ -281,14 +285,32 @@ impl Md3eUi {
                     from.min + (full.min - from.min) * kc,
                     from.max + (full.max - from.max) * kc,
                 );
+                // Never a cooldown: a click on the moving container turns
+                // the spring around from wherever it is, keeping its speed.
+                // Closing, the container (and the pill riding it) takes the
+                // clicks and reopens; opening, it closes again until it has
+                // nearly arrived (the half-faded content's own controls, the
+                // cover say, must not swallow a click meant to turn it back).
+                let closing = !self.now_playing;
+                // Which layer takes the clicks only changes between presses,
+                // or a press on one and the release on the other is lost.
+                if !ctx.input(|i| i.pointer.any_down() || i.pointer.any_released()) {
+                    self.np_live = !closing && k > 0.9;
+                }
+                let live = self.np_live && !closing;
+                let mut toggle = false;
+                let mut bar_out = Vec::new();
                 // Areas fade in when they appear; this one animates itself.
                 egui::Area::new(egui::Id::new("md3e-np-container"))
                     .order(egui::Order::Foreground)
                     .fixed_pos(full.min)
-                    .interactable(false)
+                    .interactable(!live)
                     .fade_in(false)
                     .show(ctx, |ui| {
                         ui.set_clip_rect(full);
+                        if !live && ui.interact(rect, ui.id().with("np-toggle"), egui::Sense::click()).clicked() {
+                            toggle = true;
+                        }
                         now_playing::container(ui, rect, kc);
                         // The bar rides the container's bottom edge and
                         // dissolves into it, so the pill never goes blank.
@@ -301,9 +323,14 @@ impl Md3eUi {
                             let mut bui = ui.new_child(UiBuilder::new().max_rect(bar).id_salt("np-bar"));
                             bui.multiply_opacity(fade * fade);
                             let medium = size_class(full.width()) == SizeClass::Medium;
-                            player_bar::show(&mut bui, bar, state, self.pane, medium, &mut self.chrome, &mut Vec::new());
+                            let bo = player_bar::show(&mut bui, bar, state, self.pane, medium, &mut self.chrome, &mut bar_out);
+                            toggle |= bo.open_now_playing;
                         }
                     });
+                // Only a closing pill is live; opening, it is just a picture.
+                if closing {
+                    out.append(&mut bar_out);
+                }
                 // Scaled around the point between the pill and the window
                 // centre; the spring's overshoot gives it a little bounce.
                 let pivot = from.center().lerp(full.center(), kc).to_vec2();
@@ -315,6 +342,7 @@ impl Md3eUi {
                 let content = egui::Area::new(egui::Id::new("md3e-now-playing"))
                     .order(egui::Order::Foreground)
                     .fixed_pos(full.min)
+                    .interactable(live)
                     .fade_in(false)
                     .show(ctx, |ui| {
                         // Revealed inside the growing container only.
@@ -326,8 +354,11 @@ impl Md3eUi {
                         ui.multiply_opacity(a * a * (3.0 - 2.0 * a));
                         now_playing::show(ui, full, state, false, &mut self.pages, &mut self.chrome, out)
                     });
-                if content.inner {
+                if content.inner && live {
                     self.set_now_playing(ctx, false);
+                }
+                if toggle && !live {
+                    self.set_now_playing(ctx, closing && state.player.current.is_some());
                 }
                 ctx.set_transform_layer(content.response.layer_id, transform);
             }
@@ -381,13 +412,17 @@ impl Md3eUi {
         }
 
         // Esc last: open dialogs, menus and sheets take it first. Order:
-        // visualizer (in `shortcuts`), dialogs, sheet, Now Playing, search, back.
+        // visualizer (in `shortcuts`), dialogs, sheet, Now Playing, track info,
+        // search, back.
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             let compact = size_class(ctx.content_rect().width()) == SizeClass::Compact;
             if (self.now_playing || (compact && self.route() != &Route::Settings)) && self.chrome.np_slot != NpSlot::None {
                 self.chrome.np_slot = NpSlot::None;
             } else if self.now_playing {
                 self.set_now_playing(ctx, false);
+            } else if self.pane == Some(PaneTab::Info) {
+                // Track info is a look-up opened from a menu: Esc puts it away.
+                self.pane = None;
             } else if !self.search.is_empty() {
                 self.search.clear();
             } else if compact && self.route() == &Route::Settings {
@@ -643,6 +678,14 @@ impl Md3eUi {
             if let Some(tab) = bo.toggle_pane {
                 self.pane = if self.pane == Some(tab) { None } else { Some(tab) };
             }
+        } else if self.chrome.np_covering && state.player.current.is_some() {
+            // The overlay's layers miss a click now and then (an area's first
+            // frame takes no input): the pill's spot still turns Now Playing
+            // around instead of clicking the page under it.
+            if ui.interact(bar, ui.id().with("bar-under-np"), egui::Sense::click()).clicked() {
+                let open = !self.now_playing;
+                self.set_now_playing(&ctx, open);
+            }
         }
 
         // Supporting pane.
@@ -664,17 +707,23 @@ impl Md3eUi {
                         .id_salt("pane"),
                 );
                 pui.set_clip_rect(rect);
-                configure_lyrics = pane::show(&mut pui, state, &mut tab, &mut self.chrome, self.pages.levels_bass, out);
+                let po = pane::show(&mut pui, state, &mut tab, &mut self.chrome, self.pages.levels_bass, out);
+                configure_lyrics = po.configure_lyrics;
+                let closed = po.closed;
                 if self.pane.is_some() {
-                    self.pane = Some(tab);
+                    self.pane = (!closed).then_some(tab);
                     self.last_pane = tab;
                 }
             } else if !inline_pane {
                 // Medium/Expanded: a modal side sheet over the content.
                 let mut open = self.pane.is_some();
+                let mut closed = false;
                 SideSheet::new("md3e-pane-sheet").show(&ctx, &mut open, |ui| {
-                    configure_lyrics = pane::show(ui, state, &mut tab, &mut self.chrome, self.pages.levels_bass, out);
+                    let po = pane::show(ui, state, &mut tab, &mut self.chrome, self.pages.levels_bass, out);
+                    configure_lyrics = po.configure_lyrics;
+                    closed = po.closed;
                 });
+                open &= !closed;
                 if self.pane.is_some() {
                     self.pane = open.then_some(tab);
                     if open {
@@ -1084,5 +1133,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// One frame with a pointer press or release at `pos`.
+    fn pointer(ctx: &Context, ui: &mut Md3eUi, state: &ViewState, time: f64, pos: egui::Pos2, pressed: bool) {
+        let events = vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE },
+        ];
+        let mut commands = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1263.0, 900.0))),
+            time: Some(time), events, ..Default::default()
+        }, |root| ui.frame(root, state, &mut commands));
+        output.textures_delta.clear();
+    }
+
+    /// The point a click on the moving Now Playing container lands on.
+    fn container_point(ui: &Md3eUi, ctx: &Context, time: f64) -> egui::Pos2 {
+        let k = ui.np_anim.value(time).clamp(0.0, 1.0);
+        let full = ctx.content_rect();
+        ui.bar_rect.center().lerp(full.center(), k)
+    }
+
+    #[test]
+    fn now_playing_turns_around_mid_flight_without_a_cooldown() {
+        let ctx = context();
+        let mut ui = Md3eUi::new();
+        let mut state = ViewState::default();
+        state.player.current = Some(nikgob_view::TrackRow {
+            id: nikgob_view::TrackId::new(), title: "Track".into(), artist: "Artist".into(),
+            album: None, release_id: None, artist_id: None, disc_no: 1, track_no: 1,
+            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None,
+        });
+        for i in 0..3 {
+            frame(&ctx, &mut ui, &mut state, i as f64 * 0.016, 1263.0, None);
+        }
+        // Closing: a click on the shrinking container reopens it at once.
+        ui.set_now_playing(&ctx, true);
+        frame(&ctx, &mut ui, &mut state, 2.0, 1263.0, None);
+        ui.set_now_playing(&ctx, false);
+        let t = 2.05;
+        frame(&ctx, &mut ui, &mut state, t, 1263.0, None);
+        let k = ui.np_anim.value(t);
+        assert!(k > 0.05 && k < 0.95, "mid-close, k = {k}");
+        let p = container_point(&ui, &ctx, t);
+        pointer(&ctx, &mut ui, &state, t + 0.01, p, true);
+        pointer(&ctx, &mut ui, &state, t + 0.02, p, false);
+        assert!(ui.now_playing, "a click mid-close reopens");
+        // Retargeted from where it was (with its speed), not restarted from 0.
+        assert_eq!(ui.np_anim.target(), 1.0);
+        assert!(ui.np_anim.value(t + 0.03) > 0.05);
+
+        // Opening: a click on the growing container closes it again, even
+        // when the press and the release straddle the moment the content
+        // becomes clickable.
+        ui.set_now_playing(&ctx, false);
+        frame(&ctx, &mut ui, &mut state, 5.0, 1263.0, None);
+        ui.set_now_playing(&ctx, true);
+        let t = 5.02;
+        frame(&ctx, &mut ui, &mut state, t, 1263.0, None);
+        let p = container_point(&ui, &ctx, t);
+        pointer(&ctx, &mut ui, &state, t + 0.01, p, true);
+        pointer(&ctx, &mut ui, &state, t + 0.4, p, false);
+        assert!(!ui.now_playing, "a click mid-open closes");
     }
 }

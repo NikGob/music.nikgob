@@ -237,6 +237,9 @@ impl PlayerView {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QueueView {
+    /// What played before the current track (the last few, oldest first);
+    /// "previous" walks back through these.
+    pub prev: Vec<QueueEntry>,
     pub current: Option<TrackRow>,
     /// Upcoming tracks in play order; `entry` ids are stable for drag & drop.
     pub next: Vec<QueueEntry>,
