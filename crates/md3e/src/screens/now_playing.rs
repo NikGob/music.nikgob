@@ -1237,9 +1237,24 @@ fn info(
     y += 64.0 + if compact { 16.0 } else { PROGRESS_GAP };
 
     // Controls: standard button group, hero play in the middle.
-    let button_size = if compact { Size::S } else { Size::M };
-    let hero_size = if compact { Size::M } else { Size::L };
-    let group_w = if compact { 4.0 * 40.0 + 56.0 + 4.0 * 12.0 } else { 4.0 * 56.0 + 96.0 + 4.0 * 8.0 + 2.0 * 16.0 };
+    // The largest sizes whose row fits the column (a narrow window steps
+    // the side buttons down first, so play stays the biggest).
+    let row_w = |button: Size, hero: Size| {
+        4.0 * IconButton::new(Icon::Shuffle).size(button).natural_width()
+            + IconButton::new(Icon::PlayArrow).size(hero).natural_width()
+            + 4.0 * button.group_gap()
+    };
+    let tiers: &[(Size, Size)] = if compact {
+        &[(Size::S, Size::M)]
+    } else {
+        &[(Size::M, Size::L), (Size::S, Size::L), (Size::S, Size::M)]
+    };
+    let (button_size, hero_size) = tiers
+        .iter()
+        .copied()
+        .find(|&(b, h)| row_w(b, h) <= col.width())
+        .unwrap_or(tiers[tiers.len() - 1]);
+    let group_w = row_w(button_size, hero_size);
     let controls = snap(
         ui,
         Rect::from_min_size(
