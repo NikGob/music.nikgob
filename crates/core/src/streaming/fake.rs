@@ -20,9 +20,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use super::{
-    Account, AlbumRef, ArtistRef, AudioStream, BoxFuture, EntityKind, LoginInput, Played,
-    RemoteId, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch,
-    StreamService, StreamTrack, TrackKind, format,
+    Account, AlbumRef, ArtistRef, AudioStream, BoxFuture, EntityKind, LoginInput, Played, RemoteId,
+    Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService,
+    StreamTrack, TrackKind, format,
 };
 use crate::model::{ReleaseType, UnixMs};
 
@@ -96,7 +96,11 @@ const ALBUMS: &[AlbumData] = &[
             ("One More Time", 320, Some("ZZFAK0100001")),
             ("Aerodynamic", 212, Some("ZZFAK0100002")),
             ("Digital Love", 301, Some("ZZFAK0100003")),
-            ("Harder, Better, Faster, Stronger", 224, Some("ZZFAK0100004")),
+            (
+                "Harder, Better, Faster, Stronger",
+                224,
+                Some("ZZFAK0100004"),
+            ),
         ],
     },
     AlbumData {
@@ -114,14 +118,24 @@ const ALBUMS: &[AlbumData] = &[
 ];
 
 /// `(key, name, editable, tracks as album key + number)`.
-type PlaylistData = (&'static str, &'static str, bool, &'static [(&'static str, u32)]);
+type PlaylistData = (
+    &'static str,
+    &'static str,
+    bool,
+    &'static [(&'static str, u32)],
+);
 
 const PLAYLISTS: &[PlaylistData] = &[
     (
         "evening",
         "Вечер",
         true,
-        &[("gruppa", 1), ("firstlove", 3), ("homogenic", 2), ("discovery", 3)],
+        &[
+            ("gruppa", 1),
+            ("firstlove", 3),
+            ("homogenic", 2),
+            ("discovery", 3),
+        ],
     ),
     (
         "mix",
@@ -135,11 +149,7 @@ const PLAYLISTS: &[PlaylistData] = &[
 const LIKED: &[(&str, u32)] = &[("gruppa", 1), ("discovery", 1), ("firstlove", 1)];
 
 /// Listening history, newest first: `(album, number, hours after T0)`.
-const RECENT: &[(&str, u32, i64)] = &[
-    ("discovery", 2, 3),
-    ("gruppa", 1, 2),
-    ("homogenic", 2, 1),
-];
+const RECENT: &[(&str, u32, i64)] = &[("discovery", 2, 3), ("gruppa", 1, 2), ("homogenic", 2, 1)];
 
 fn prefix(service: Service) -> &'static str {
     match service {
@@ -379,7 +389,10 @@ impl FakeService {
     }
 
     fn track_now(&self, id: &str) -> Result<StreamTrack, StreamError> {
-        self.catalog.track(id).cloned().ok_or(StreamError::Unavailable)
+        self.catalog
+            .track(id)
+            .cloned()
+            .ok_or(StreamError::Unavailable)
     }
 
     fn search_now(&self, query: &str) -> StreamSearch {
@@ -653,7 +666,10 @@ impl StreamService for FakeService {
             RECENT
                 .iter()
                 .filter_map(|&(album, n, hours)| {
-                    let track = self.catalog.track(&track_id(self.service, album, n))?.clone();
+                    let track = self
+                        .catalog
+                        .track(&track_id(self.service, album, n))?
+                        .clone();
                     Some(Played {
                         track,
                         at_ms: HISTORY_T0 + hours * HOUR_MS,
@@ -665,7 +681,8 @@ impl StreamService for FakeService {
     }
 
     fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError> {
-        self.open_now(id).map(|a| Box::new(a) as Box<dyn AudioStream>)
+        self.open_now(id)
+            .map(|a| Box::new(a) as Box<dyn AudioStream>)
     }
 
     fn save_audio(&self, id: &str, dir: &Path) -> BoxFuture<'_, Result<PathBuf, StreamError>> {
@@ -888,8 +905,8 @@ mod tests {
         assert_eq!(mine.len(), 2);
         assert!(mine.iter().all(|p| p.tracks.is_empty()));
         let id = now(sp.create_playlist("Новый")).unwrap();
-        let v = now(sp.playlist_edit(&id, &["sp-gruppa-2".into(), "sp-michi-1".into()], &[]))
-            .unwrap();
+        let v =
+            now(sp.playlist_edit(&id, &["sp-gruppa-2".into(), "sp-michi-1".into()], &[])).unwrap();
         assert_eq!(v.as_deref(), Some("2"));
         let v = now(sp.playlist_edit(&id, &[], &["sp-gruppa-2".into()])).unwrap();
         assert_eq!(v.as_deref(), Some("3"));
@@ -921,7 +938,10 @@ mod tests {
         assert!(!sp.account().is_logged_in());
 
         let yt = FakeService::youtube().logged_out();
-        assert!(yt.open_audio("yt-gruppa-1").is_ok(), "YouTube plays without login");
+        assert!(
+            yt.open_audio("yt-gruppa-1").is_ok(),
+            "YouTube plays without login"
+        );
     }
 
     #[test]
@@ -946,7 +966,9 @@ mod tests {
 
         let fake = FakeService::youtube();
         fake.set_unavailable("yt-gruppa-3", true);
-        let mut a = fake.open_audio("yt-gruppa-3").expect("opening needs no network");
+        let mut a = fake
+            .open_audio("yt-gruppa-3")
+            .expect("opening needs no network");
         assert!(a.read(&mut [0; 16]).is_err(), "fails on the first read");
         assert_eq!(fake.opened(), vec!["yt-gruppa-3".to_owned()]);
     }

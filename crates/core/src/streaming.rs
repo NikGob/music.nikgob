@@ -583,7 +583,10 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         assert_eq!(serde_json::from_str::<StreamTrack>(&json).unwrap(), t);
         assert_eq!(t.artist_line(), "A, B");
-        assert_eq!(RemoteId::new(Service::Youtube, "x").to_string(), "youtube:x");
+        assert_eq!(
+            RemoteId::new(Service::Youtube, "x").to_string(),
+            "youtube:x"
+        );
         let dbg = format!("{:?}", LoginInput::Cookies("SID=secret".into()));
         assert!(!dbg.contains("secret"), "{dbg}");
     }
