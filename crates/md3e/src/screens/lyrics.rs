@@ -501,7 +501,8 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
         let h: f32 = TEXTS.iter().zip(sizes).map(|(t, z)| fixed_layout(&painter, t, z).size().y).sum();
         (w, h + 2.0 * 6.0 + big * 0.25)
     };
-    let (w, h) = measure(big, small);
+    // Fitted at the largest size, so the size setting still shows.
+    let (w, h) = measure(big / scale * 1.4, small / scale * 1.4);
     let fit = ((rect.width() - 2.0 * PAD) / w).min((rect.height() - 2.0 * 6.0) / h).min(1.0);
     if fit < 1.0 {
         big *= fit;

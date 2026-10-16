@@ -118,6 +118,14 @@ impl Menu {
         self
     }
 
+    /// Where the items of the menu `id_salt` are on screen, while it is
+    /// shown this pass (for help cards about the item under the pointer).
+    pub fn item_rects(ctx: &Context, id_salt: impl egui::AsId) -> Option<Vec<Rect>> {
+        let key = Id::new(id_salt).with("item-rects");
+        let pass = ctx.cumulative_pass_nr();
+        ctx.data(|d| d.get_temp::<(u64, Vec<Rect>)>(key)).filter(|(p, _)| *p == pass).map(|(_, r)| r)
+    }
+
     fn items(&self) -> impl Iterator<Item = &MenuItem> {
         self.entries.iter().filter_map(|e| match e {
             Entry::Item(i) => Some(i),
@@ -293,6 +301,7 @@ impl Menu {
         let id = self.id;
         let entries = &self.entries;
         let mut hovered_item = None;
+        let mut item_rects = Vec::new();
         let area = Area::new(area_id)
             .fade_in(false)
             .order(Order::Tooltip)
@@ -333,6 +342,7 @@ impl Menu {
                             } else {
                                 Sense::hover()
                             };
+                            item_rects.push(row);
                             let r = ui.interact(row, id.with(("item", index)), sense);
                             if item.enabled && r.hovered() {
                                 hovered_item = Some(index);
@@ -355,6 +365,9 @@ impl Menu {
                 }
             });
         common::layer_scale(ctx, area.response.layer_id, pivot, 0.9 + 0.1 * pres.spatial);
+
+        let pass = ctx.cumulative_pass_nr();
+        ctx.data_mut(|d| d.insert_temp(id.with("item-rects"), (pass, item_rects)));
 
         // Pointer moves the highlight; a press outside closes.
         if let Some(h) = hovered_item {

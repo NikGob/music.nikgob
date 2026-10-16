@@ -30,15 +30,11 @@ fn row(ui: &mut Ui, id: Id, label: &str, supporting: Option<&str>, control: impl
 /// The row's label with its ⓘ right after the last word.
 fn row_label(ui: &mut Ui, id: Id, label: &str) {
     let s = Theme::get(ui.ctx()).scheme;
-    let name = ui
-        .horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let text = ui.label(TypeRole::BodyLarge.style().rich(label, s.on_surface)).rect;
-            settings_help::help_button(ui, id);
-            text
-        })
-        .inner;
-    settings_help::report_label(ui.ctx(), name);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(TypeRole::BodyLarge.style().rich(label, s.on_surface));
+        settings_help::help_button(ui, id);
+    });
 }
 
 /// The control, reported so the row's cards line up with it.
@@ -99,7 +95,13 @@ fn choice_menu(ui: &mut Ui, id: Id, p: &mut Prefs) {
     let cur = id.chosen(p);
     let options: Vec<(String, bool)> =
         id.choices().iter().enumerate().map(|(i, c)| (c.label.to_owned(), i == cur)).collect();
-    if let Some(n) = dropdown(ui, &format!("set-menu-{id:?}"), id.choices()[cur].label, &options) {
+    let salt = format!("set-menu-{id:?}");
+    let pick = dropdown(ui, &salt, id.choices()[cur].label, &options);
+    // Hovering an item of the open menu explains it.
+    if let Some(rects) = Menu::item_rects(ui.ctx(), (salt.as_str(), "menu")) {
+        settings_help::report_menu(ui.ctx(), rects);
+    }
+    if let Some(n) = pick {
         id.choose(p, n);
     }
 }
@@ -254,7 +256,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     });
     row(ui, Id::Theme, "Тема", None, |ui| choice(ui, Id::Theme, p));
     row(ui, Id::Contrast, "Контраст", None, |ui| choice(ui, Id::Contrast, p));
-    row(ui, Id::Scheme, "Схема цвета", Some("Палитра интерфейса из обложки трека"), |ui| {
+    row(ui, Id::Scheme, "Схема цвета", Some("Цвета приложения берутся из обложки"), |ui| {
         choice_menu(ui, Id::Scheme, p);
     });
 
@@ -263,6 +265,20 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         ui.add(Switch::new(&mut p.progress_wave).id_salt("set-progress-wave"));
     });
     row(ui, Id::NpVolume, "Громкость", Some("Где регулируется звук в открытом треке"), |ui| choice(ui, Id::NpVolume, p));
+    let pop = p.np_volume_pop && !p.np_volume;
+    dimmed(ui, !pop, |ui| {
+        row(ui, Id::NpVolumeHold, "Плашка исчезает через", Some("Для варианта «При изменении»"), |ui| {
+            let hold = p.np_volume_pop_hold.clamp(0.3, 3.0);
+            if let Some(v) = range_slider(ui, "set-np-volume-hold", hold, (0.3, 3.0), 0.1, |v| format!("{v:.1} с")) {
+                p.np_volume_pop_hold = v;
+                if !pop {
+                    // Tuning the pill turns it on.
+                    p.np_volume = false;
+                    p.np_volume_pop = true;
+                }
+            }
+        });
+    });
 
     group(ui, "Обложка");
     row(ui, Id::CoverShape, "Форма обложки", Some("Пока играет музыка; на паузе — квадрат"), |ui| {
@@ -312,13 +328,13 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
             }
         }
     }
-    row(ui, Id::CoverSpin, "Вращать форму", Some("Контур медленно крутится, картинка стоит"), |ui| {
+    row(ui, Id::CoverSpin, "Вращать форму", Some("Край поворачивается, картинка стоит"), |ui| {
         ui.add(Switch::new(&mut p.cover_spin).id_salt("set-cover-spin"));
     });
     if p.cover_spin {
         row(ui, Id::CoverDir, "Направление формы", None, |ui| choice(ui, Id::CoverDir, p));
     }
-    row(ui, Id::CoverPulse, "Пульсация в такт", Some("Обложка чуть вздрагивает на долях"), |ui| {
+    row(ui, Id::CoverPulse, "Пульсация в такт", Some("Обложка вздрагивает в такт музыке"), |ui| {
         ui.add(Switch::new(&mut p.cover_pulse).id_salt("set-cover-pulse"));
     });
 
@@ -327,7 +343,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         ui.add(Switch::new(&mut p.ring).id_salt("set-ring-on"));
     });
     if p.ring {
-        row(ui, Id::RingStyle, "Вид кольца", Some("Круг из точек, точки по контуру формы или точки, вырастающие в бары под музыку (как в caelestia)"), |ui| {
+        row(ui, Id::RingStyle, "Вид кольца", Some("Как выглядят точки вокруг обложки"), |ui| {
             choice(ui, Id::RingStyle, p);
         });
         // The bars stand on fixed angles, like a spectrum.
@@ -339,7 +355,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
                 row(ui, Id::RingDir, "Направление кольца", None, |ui| choice(ui, Id::RingDir, p));
             }
         }
-        row(ui, Id::RingBeat, "Кольцо в такт музыке", Some("Прыгает на ударных и всплесках спектра"), |ui| {
+        row(ui, Id::RingBeat, "Кольцо в такт музыке", Some("Точки подскакивают на ударных"), |ui| {
             ui.add(Switch::new(&mut p.ring_beat).id_salt("set-ring-beat"));
         });
     }
@@ -347,7 +363,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     background(ui, p);
 
     group(ui, "Текст песен");
-    row(ui, Id::LyricsStyle, "Анимация", Some("Караоке — заливка по слогам, Фокус — строка целиком, Волна — буква за буквой"), |ui| {
+    row(ui, Id::LyricsStyle, "Анимация", Some("Как выделяется строка, которую поют"), |ui| {
         choice(ui, Id::LyricsStyle, p);
     });
     if p.lyrics_style == 2 {
@@ -376,11 +392,11 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     row(ui, Id::LyricsGlow, "Свечение текста", Some("Лёгкое свечение спетой части"), |ui| {
         ui.add(Switch::new(&mut p.lyrics_glow).id_salt("set-lyrics-glow"));
     });
-    row(ui, Id::LyricsGap, "Индикатор паузы", Some("Кольцо между строками"), |ui| {
+    row(ui, Id::LyricsGap, "Индикатор паузы", Some("Кружок, пока в песне нет слов"), |ui| {
         choice_menu(ui, Id::LyricsGap, p);
     });
     if matches!(p.lyrics_gap_style, 1 | 3) {
-        row(ui, Id::LyricsGapWaves, "Длина волны", Some("Чем больше гребней, тем короче волна"), |ui| {
+        row(ui, Id::LyricsGapWaves, "Длина волны", Some("Больше — волны мельче и чаще"), |ui| {
             if let Some(v) = range_slider(ui, "set-lyrics-gap-waves", p.lyrics_gap_waves, (3.0, 16.0), 1.0, |v| format!("{v:.0} гребней")) {
                 p.lyrics_gap_waves = v;
             }
@@ -402,7 +418,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     );
 
     group(ui, "Движение");
-    row(ui, Id::NpMotion, "Открытие экрана", Some("Как он вырастает из плеера и сворачивается"), |ui| {
+    row(ui, Id::NpMotion, "Открытие экрана", Some("Как экран трека открывается и закрывается"), |ui| {
         choice(ui, Id::NpMotion, p);
     });
     row(ui, Id::ReducedMotion, "Меньше движения", Some("Без отскоков, вращения и волн"), |ui| {
@@ -419,7 +435,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
 /// always shown: dimmed while they are off, and touching one turns them on.
 fn background(ui: &mut Ui, p: &mut Prefs) {
     group(ui, "Фон");
-    row(ui, Id::Ambient, "Ambient", Some("Мягкие облака в цветах темы, под звук"), |ui| choice(ui, Id::Ambient, p));
+    row(ui, Id::Ambient, "Ambient", Some("Цветные пятна за экраном трека"), |ui| choice(ui, Id::Ambient, p));
     let clouds_off = p.ambient == Ambient::Off;
     dimmed(ui, clouds_off, |ui| {
         row(ui, Id::AmbientStrength, "Яркость облаков", None, |ui| {
@@ -459,12 +475,12 @@ fn background(ui: &mut Ui, p: &mut Prefs) {
                 p.bg_shapes_opacity = v;
             }
         });
-        row(ui, Id::BgSpeed, "Скорость", Some("Дрейф, вращение и прыжки"), |ui| {
+        row(ui, Id::BgSpeed, "Скорость", Some("Как быстро двигаются фигуры"), |ui| {
             if let Some(v) = range_slider(ui, "set-bg-speed", p.bg_shapes_speed, (0.25, 3.0), 0.05, pct) {
                 p.bg_shapes_speed = v;
             }
         });
-        row(ui, Id::BgReact, "Реакция на музыку", Some("0% — просто украшение"), |ui| {
+        row(ui, Id::BgReact, "Реакция на музыку", Some("0% — двигаются сами по себе"), |ui| {
             if let Some(v) = range_slider(ui, "set-bg-react", p.bg_shapes_react, (0.0, 2.0), 0.05, pct) {
                 p.bg_shapes_react = v;
             }
@@ -503,14 +519,15 @@ fn dimmed(ui: &mut Ui, dim: bool, add: impl FnOnce(&mut Ui)) {
 fn swatches(ui: &mut Ui, p: &Prefs) -> Option<u8> {
     let s = Theme::get(ui.ctx()).scheme;
     let mut picked = None;
+    let mut rects = Vec::new();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        for (i, (_, name)) in bg_shapes::HUES.iter().enumerate() {
-            let i = i as u8;
+        for i in 0..bg_shapes::HUES.len() as u8 {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::hover());
+            rects.push(rect);
+            // The help card names and shows the colour.
             let resp = ui
                 .interact(rect, egui::Id::new(("set-bg-hue", i)), Sense::click())
-                .on_hover_text(*name)
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             let on = p.bg_shapes_colors == 3 && p.bg_shapes_hue == i;
             let color = bg_shapes::hue_color(&s, i);
@@ -525,6 +542,8 @@ fn swatches(ui: &mut Ui, p: &Prefs) -> Option<u8> {
             }
         }
     });
+    // Hovering a swatch previews it.
+    settings_help::report_choices(ui.ctx(), rects);
     picked
 }
 
@@ -540,7 +559,7 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
     row(ui, Id::Keys, "Клавиши", Some("L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке"), |_| {});
 
     group(ui, "Текст песен");
-    row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", Some("Встраивает синхронизированный текст в теги, чтобы он был доступен без интернета"), |ui| {
+    row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", Some("Чтобы текст показывался и без интернета"), |ui| {
         ui.add(Switch::new(&mut p.save_found_lyrics).id_salt("set-save-lyrics"));
     });
     row(ui, Id::LyricsReturn, &format!("Возвращаться к текущей строке через {:.0} с", p.lyrics_return_s), Some("После ручной прокрутки текста"), |ui| {
@@ -559,7 +578,7 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
             p.output_device = if n == 0 { None } else { p.output_devices.get(n - 1).cloned() };
         }
     });
-    row(ui, Id::Gapless, "Без пауз между треками", Some("Gapless"), |ui| {
+    row(ui, Id::Gapless, "Без пауз между треками", Some("Треки альбома идут без тишины между ними"), |ui| {
         ui.add(Switch::new(&mut p.gapless).id_salt("set-gapless"));
     });
     row(
@@ -573,7 +592,7 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
             }
         },
     );
-    row(ui, Id::Normalization, "Нормализация громкости", Some("ReplayGain / R128"), |ui| {
+    row(ui, Id::Normalization, "Нормализация громкости", Some("Все треки примерно одинаково громкие"), |ui| {
         ui.add(Switch::new(&mut p.normalization).id_salt("set-norm"));
     });
 
@@ -646,7 +665,7 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
     row(ui, Id::OpusBitrate, "Битрейт Opus", Some(&format!("{} кбит/с", p.opus_bitrate)), |ui| {
         choice(ui, Id::OpusBitrate, p);
     });
-    row(ui, Id::FakeFlac, "Проверять «фейковый» FLAC", Some("Срез спектра выдаёт перекодированный lossy"), |ui| {
+    row(ui, Id::FakeFlac, "Проверять «фейковый» FLAC", Some("Находит FLAC, сделанные из MP3"), |ui| {
         ui.add(Switch::new(&mut p.check_fake_lossless).id_salt("set-fake"));
     });
     if !pages.metadata_synced {
@@ -770,15 +789,15 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
     });
 
     group(ui, "Аккаунты");
-    row(ui, Id::Spotify, "Spotify", Some("Этап 3"), |ui| {
+    row(ui, Id::Spotify, "Spotify", Some("Появится позже"), |ui| {
         ui.add(Button::new("Войти").style(Style::Outlined).enabled(false).id_salt("acc-sp"));
     });
-    row(ui, Id::YouTube, "YouTube Music", Some("Этап 3"), |ui| {
+    row(ui, Id::YouTube, "YouTube Music", Some("Появится позже"), |ui| {
         ui.add(Button::new("Войти").style(Style::Outlined).enabled(false).id_salt("acc-yt"));
     });
 
     group(ui, "Узлы и бэкап");
-    row(ui, Id::Nodes, "Raspberry Pi, сервер, телефон", Some("Этап 6"), |_| {});
+    row(ui, Id::Nodes, "Raspberry Pi, сервер, телефон", Some("Появится позже"), |_| {});
 }
 
 fn open_folder(path: &std::path::Path) -> std::io::Result<()> {

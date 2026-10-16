@@ -639,6 +639,8 @@ pub struct Prefs {
     /// Instead of a fixed slider: a volume pill pops up at the bottom
     /// centre of Now Playing only while the volume changes.
     pub np_volume_pop: bool,
+    /// How long the volume pill stays after the last change, in seconds.
+    pub np_volume_pop_hold: f32,
     /// How Now Playing opens and closes: 0 smooth, 1 lively, 2 fast.
     pub np_motion: u8,
     /// Progress bars turn into a wave while playing (off: always flat).
@@ -1050,6 +1052,7 @@ impl Default for Prefs {
             cover_ccw: true,
             np_volume: false,
             np_volume_pop: false,
+            np_volume_pop_hold: 0.8,
             np_motion: 1,
             progress_wave: true,
             random_shapes: Vec::new(),

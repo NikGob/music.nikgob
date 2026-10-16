@@ -39,6 +39,7 @@ pub enum SettingId {
     Scheme,
     ProgressWave,
     NpVolume,
+    NpVolumeHold,
     CoverShape,
     ShapeRange,
     ShapePick,
@@ -123,6 +124,12 @@ enum Preview {
     Gap,
     Motion,
     Volume,
+    /// Which way the cover outline (false) or the ring (true) turns.
+    Turn(bool),
+    /// Lines following a scroll, with or without the cascade.
+    Cascade,
+    /// The end of a pause: digits 3-2-1, or the ring simply fading away.
+    Countdown,
 }
 
 /// One option of a choice row: its label (as on the button) and what it does.
@@ -146,7 +153,7 @@ impl SettingId {
     pub fn tab(self) -> usize {
         use SettingId::*;
         match self {
-            Design | Theme | Contrast | Scheme | ProgressWave | NpVolume | CoverShape | ShapeRange | ShapePick
+            Design | Theme | Contrast | Scheme | ProgressWave | NpVolume | NpVolumeHold | CoverShape | ShapeRange | ShapePick
             | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
             | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
             | LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsCascade | LyricsGlow
@@ -161,76 +168,77 @@ impl SettingId {
     pub fn help(self) -> &'static str {
         use SettingId::*;
         match self {
-            Design => "Общий стиль интерфейса. Пока есть только Material 3 Expressive.",
-            Theme => "Светлая, тёмная или как в системе.",
-            Contrast => "Насколько текст и элементы отличаются от фона.",
-            Scheme => "Как из обложки трека получается палитра: от спокойной до яркой.",
-            ProgressWave => "Сыгранная часть полосы прогресса бежит волной, пока играет музыка.",
-            NpVolume => "Как в открытом треке показывается громкость: ползунок всегда, плашка при изменении или только кнопка звука.",
-            CoverShape => "Квадратная обложка, одна фигура Material или случайная на каждый трек.",
-            ShapeRange => "Набор фигур, из которых выбирается случайная. Клик — добавить или убрать.",
-            ShapePick => "Какой фигурой обрезана обложка, пока играет музыка.",
-            CoverSpin => "Контур обложки медленно крутится, сама картинка стоит.",
-            CoverDir => "В какую сторону крутится контур обложки.",
-            CoverPulse => "Обложка чуть увеличивается на каждой доле.",
-            Ring => "Точки или бары вокруг обложки, которые двигаются под музыку.",
-            RingStyle => "Круг из точек, точки по контуру фигуры или бары-спектр.",
-            RingSpin => "Кольцо медленно вращается, пока играет музыка.",
+            Design => "Общий вид всего приложения. Пока доступен только Material 3, другие появятся позже.",
+            Theme => "Светлый или тёмный фон приложения.",
+            Contrast => "Насколько текст и кнопки выделяются на фоне. Выше — читать легче, но цвета резче.",
+            Scheme => "Приложение окрашивается в цвета обложки играющего трека. Здесь выбирается, насколько ярко.",
+            ProgressWave => "Пока играет музыка, полоска прогресса трека бежит волной. Выключи — будет ровной линией.",
+            NpVolume => "Как менять громкость на экране трека: ползунок, всплывающая плашка или только кнопка.",
+            NpVolumeHold => "Сколько плашка громкости остаётся на экране после того, как ты перестал крутить колесо или двигать ползунок.",
+            CoverShape => "Обложка на экране трека может быть квадратной или вырезанной красивой фигурой.",
+            ShapeRange => "Из этих фигур выбирается случайная для каждого трека. Нажми на фигуру, чтобы добавить или убрать её.",
+            ShapePick => "Этой фигурой вырезается обложка, пока играет музыка.",
+            CoverSpin => "Край обложки медленно поворачивается, а сама картинка остаётся на месте.",
+            CoverDir => "В какую сторону поворачивается край обложки.",
+            CoverPulse => "Обложка слегка увеличивается в такт музыке, как будто дышит.",
+            Ring => "Вокруг обложки появляется кольцо из точек, которое шевелится под музыку.",
+            RingStyle => "Как выглядит кольцо вокруг обложки.",
+            RingSpin => "Кольцо из точек медленно вращается, пока играет музыка.",
             RingDir => "В какую сторону вращается кольцо.",
-            RingBeat => "Точки отскакивают на ударных и там, где громче спектр.",
-            Ambient => "Мягкие цветные облака за плеером; «Под звук» — дышат с басом.",
-            AmbientStrength => "Насколько заметны облака: от лёгкой дымки до насыщенного цвета.",
-            BgShapes => "Фигуры Material за открытым треком: прыгают, парят или меняют форму.",
+            RingBeat => "Точки кольца подскакивают на ударных и громких местах.",
+            Ambient => "За экраном трека плывут мягкие цветные пятна в цветах обложки.",
+            AmbientStrength => "Насколько заметны цветные пятна за экраном трека: от лёгкой дымки до яркого цвета.",
+            BgShapes => "За экраном трека двигаются фигуры. Выбери, как они ведут себя.",
             BgCount => "Сколько фигур на фоне.",
-            BgSize => "Размер фигур на фоне.",
-            BgOpacity => "Насколько фигуры заметны на фоне.",
-            BgSpeed => "Как быстро фигуры плывут, вращаются и прыгают.",
-            BgReact => "Насколько сильно фигуры отзываются на музыку.",
-            BgColors => "Цвета фигур: контейнеры темы, один акцент, все яркие акценты или свой оттенок.",
-            BgHue => "Оттенок фигур в режиме «Свой». Светлота подстраивается под тему, поэтому цвет не спорит с интерфейсом.",
-            LyricsStyle => "Как подсвечивается строка, которую сейчас поют.",
-            WaveFallback => "Что показывать вместо «Волны», если у текста нет разметки по слогам.",
-            WaveJump => "Как высоко подпрыгивают буквы в анимации «Волна».",
-            LyricsDim => "Насколько приглушены строки, которые сейчас не поют.",
-            LyricsScale => "Размер шрифта в тексте песен.",
-            LyricsCascade => "Дальние строки догоняют прокрутку с задержкой, как каскад.",
-            LyricsGlow => "Спетая часть строки слегка светится.",
-            LyricsGap => "Как выглядит индикатор паузы между строками.",
-            LyricsGapWaves => "Сколько гребней у волнистого индикатора паузы.",
-            LyricsCountdown => "В последние секунды паузы индикатор считает 3-2-1.",
-            RailCompact => "Левая панель остаётся узкой — только значки разделов, подписи и кнопка раскрытия не показываются.",
-            NpMotion => "Скорость и характер анимации, с которой открывается экран трека.",
-            ReducedMotion => "Убирает отскоки, вращение и волны во всём интерфейсе.",
-            FpsLimit => "Максимум кадров в секунду. Меньше — тише вентилятор и дольше батарея.",
-            CoverClickPause => "Клик по обложке в открытом треке ставит на паузу и снимает с неё.",
-            DblClickShape => "Двойной клик в открытом треке меняет фигуру обложки.",
-            Keys => "Горячие клавиши в открытом треке.",
-            SaveLyrics => "Найденный в сети текст записывается в теги файла и работает без интернета.",
-            LyricsReturn => "Через сколько секунд после ручной прокрутки текст вернётся к текущей строке.",
-            OutputDevice => "Куда идёт звук. Переключается без паузы.",
-            Gapless => "Треки альбома играют встык, без тишины между ними.",
-            Crossfade => "Конец трека плавно перетекает в начало следующего.",
-            Normalization => "Выравнивает громкость треков по ReplayGain / R128.",
-            LibraryDir => "Где лежит музыка библиотеки.",
-            MastersDir => "Куда складываются исходные FLAC после перекодирования в Opus.",
-            Inbox => "Папка, из которой новые файлы импортируются в библиотеку.",
-            NamingRules => "Как называются папки и файлы после импорта.",
-            Trash => "Включена — удалённое 30 дней лежит в Библиотека → Корзина; выключена — удаление сразу стирает файлы.",
-            ExportData => "Лайки и плейлисты лежат файлами рядом с музыкой.",
-            OpusBitrate => "Качество Opus при импорте: выше — лучше звук и больше файлы.",
-            FakeFlac => "Ищет FLAC, перекодированные из MP3: у них обрезан спектр.",
-            MusicBrainz => "Контакт, который MusicBrainz просит указывать в запросах.",
-            AcoustId => "Ключ для опознания треков по звуку.",
-            Prowlarr => "Адрес и ключ Prowlarr — через него идёт поиск раздач.",
-            NoSeed => "Скачанное сразу перестаёт раздаваться.",
-            SeedLimit => "Сколько всего можно отдать, прежде чем раздачи остановятся.",
-            SeedDays => "Сколько дней держать раздачу, потом чистка.",
-            SeedRatio => "Раздача останавливается, когда отдано в столько раз больше скачанного.",
-            DownloadLimit => "Ограничение скорости загрузки торрентов.",
-            UploadLimit => "Ограничение скорости отдачи торрентов.",
-            Spotify => "Импорт лайков и плейлистов из Spotify — появится позже.",
-            YouTube => "Импорт из YouTube Music — появится позже.",
-            Nodes => "Синхронизация и бэкап на другие устройства — появится позже.",
+            BgSize => "Насколько крупные фигуры на фоне.",
+            BgOpacity => "Насколько фигуры видны: от еле заметных до ярких.",
+            BgSpeed => "Как быстро фигуры плывут, крутятся и прыгают.",
+            BgReact => "Насколько сильно фигуры отзываются на музыку. 0% — двигаются сами по себе.",
+            BgColors => "В какие цвета окрашены фигуры на фоне.",
+            BgHue => "Цвет фигур для варианта «Свой». Яркость подстраивается под тему, чтобы фон не спорил с интерфейсом.",
+            LyricsStyle => "Как выделяется строка, которую сейчас поют.",
+            WaveFallback => "Не у всех песен текст размечен по слогам. Что делать с такими песнями при анимации «Волна».",
+            WaveJump => "Как высоко подпрыгивают буквы в анимации «Волна». 0 — буквы только загораются.",
+            LyricsDim => "Насколько бледнее остальные строки по сравнению с той, что поют сейчас.",
+            LyricsScale => "Размер букв в тексте песни.",
+            LyricsCascade => "При прокрутке дальние строки догоняют с небольшой задержкой — текст движется мягко, волной.",
+            LyricsGlow => "Уже спетая часть строки слегка светится.",
+            LyricsGap => "Когда в песне долго нет слов, между строками крутится кружок ожидания. Здесь выбирается его вид.",
+            LyricsGapWaves => "Сколько волн на кружке ожидания. Больше — волны мельче и чаще.",
+            LyricsCountdown => "За три секунды до новой строки кружок ожидания сменяется отсчётом 3, 2, 1.",
+            RailCompact => "Левая панель всегда узкая: только значки разделов, без подписей и кнопки раскрытия.",
+            NpMotion => "Как экран трека открывается из плеера внизу и закрывается обратно.",
+            ReducedMotion => "Убирает подпрыгивания, вращения и волны во всём приложении.",
+            FpsLimit => "Как часто перерисовывается экран. Меньше — тише вентилятор и дольше работает батарея.",
+            CoverClickPause => "Нажатие на обложку на экране трека ставит музыку на паузу и снова запускает.",
+            DblClickShape => "Двойной клик по экрану трека меняет фигуру обложки.",
+            Keys => "Клавиши, которые работают на экране трека.",
+            SaveLyrics => "Найденный в интернете текст песни сохраняется прямо в файл трека и потом показывается без интернета.",
+            LyricsReturn => "Если ты сам прокрутил текст, через столько секунд он вернётся к строке, которую поют.",
+            OutputDevice => "Через что играет звук: колонки, наушники и т. д. Переключается без паузы.",
+            Gapless => "Треки альбома идут друг за другом без тишины, как на диске.",
+            Crossfade => "Конец трека плавно затихает, пока начинается следующий.",
+            Normalization => "Все треки звучат примерно одинаково громко, не нужно крутить громкость.",
+            LibraryDir => "Папка на диске, где лежит твоя музыка.",
+            MastersDir => "Сюда откладываются исходные файлы FLAC после сжатия в Opus, чтобы ничего не потерять.",
+            Inbox => "Положи файлы в эту папку — и они сами добавятся в библиотеку.",
+            NamingRules => "Как называются папки и файлы после добавления в библиотеку.",
+            Trash => "Включена — удалённое 30 дней лежит в Библиотека → Корзина, и его можно вернуть. Выключена — удаляется сразу.",
+            ExportData => "Лайки и плейлисты хранятся в обычных файлах рядом с музыкой, их легко сохранить.",
+            OpusBitrate => "Качество звука при сжатии новых треков. Выше — звук лучше, но файлы больше.",
+            FakeFlac => "Находит «ненастоящий» FLAC — файлы, сделанные из MP3: высокое качество в них только на бумаге.",
+            MusicBrainz => "Почта или сайт для сервиса MusicBrainz, откуда берутся названия и обложки. Сервис просит его указать.",
+            AcoustId => "Ключ сервиса AcoustID: он узнаёт трек по звуку, если у файла нет названий.",
+            Prowlarr => "Адрес и ключ программы Prowlarr — через неё ищутся раздачи с музыкой.",
+            NoSeed => "Скачанные треки сразу перестают раздаваться другим.",
+            SeedLimit => "Сколько всего можно отдать другим, после чего раздача остановится.",
+            SeedDays => "Сколько дней раздавать скачанное, потом раздача удаляется.",
+            SeedRatio => "Раздача остановится, когда ты отдашь во столько раз больше, чем скачал.",
+            DownloadLimit => "Максимальная скорость скачивания, чтобы не занимать весь интернет.",
+            UploadLimit => "Максимальная скорость раздачи другим.",
+            Spotify => "Перенос лайков и плейлистов из Spotify — появится позже.",
+            YouTube => "Перенос из YouTube Music — появится позже.",
+            Nodes => "Синхронизация и резервная копия на другие устройства — появится позже.",
         }
     }
 
@@ -239,23 +247,23 @@ impl SettingId {
     pub fn choices(self) -> &'static [Choice] {
         match self {
             Self::Theme => &[
-                c!("Светлая", "Светлый фон и тёмный текст — лучше днём."),
-                c!("Тёмная", "Тёмный фон — спокойнее вечером, обложки ярче."),
-                c!("Системная", "Как в Windows: переключается вместе с системой."),
+                c!("Светлая", "Белый фон и тёмный текст. Удобно днём."),
+                c!("Тёмная", "Тёмный фон. Меньше слепит вечером, обложки смотрятся ярче."),
+                c!("Системная", "Как в настройках Windows: меняется вместе с системой."),
             ],
             Self::Contrast => &[
-                c!("Обычный", "Стандартные цвета Material 3."),
-                c!("Средний", "Текст и границы заметнее на фоне."),
+                c!("Обычный", "Стандартные мягкие цвета."),
+                c!("Средний", "Текст и края кнопок заметнее."),
                 c!("Высокий", "Самый чёткий текст, цвета жёстче."),
             ],
             Self::Scheme => &[
-                c!("Content", "Ближе всего к цветам обложки."),
-                c!("Tonal Spot", "Спокойная приглушённая палитра, как в Android."),
-                c!("Vibrant", "Насыщенные яркие акценты."),
-                c!("Expressive", "Смелые сдвиги оттенков, неожиданные сочетания."),
-                c!("Fidelity", "Как Content, но контейнеры точно в цвет обложки."),
-                c!("Monochrome", "Только оттенки серого."),
-                c!("Neutral", "Почти серая, с лёгким тоном обложки."),
+                c!("Как обложка", "Цвета почти как на обложке."),
+                c!("Спокойная", "Мягкие, приглушённые цвета из обложки."),
+                c!("Яркая", "Насыщенные, сочные цвета из обложки."),
+                c!("Смелая", "Неожиданные сочетания: оттенки уходят в сторону от обложки."),
+                c!("Точная", "Цвета точь-в-точь как на обложке, даже у кнопок."),
+                c!("Чёрно-белая", "Только чёрный, белый и серый, без цвета."),
+                c!("Сдержанная", "Почти серые цвета с лёгким оттенком обложки."),
             ],
             Self::NpVolume => &[
                 c!("Всегда", "Ползунок всегда рядом с кнопкой звука."),
@@ -263,66 +271,76 @@ impl SettingId {
                 c!("Нет", "Только кнопка звука; громкость — колесом мыши."),
             ],
             Self::CoverShape => &[
-                c!("Квадрат", "Обложка как есть, без обрезки."),
-                c!("Фигура", "Обложка обрезана одной выбранной фигурой."),
-                c!("Случайная", "Новая фигура на каждом треке."),
+                c!("Квадрат", "Обложка как есть, обычный квадрат."),
+                c!("Фигура", "Обложка вырезана одной фигурой, которую ты выберешь ниже."),
+                c!("Случайная", "У каждого трека своя случайная фигура."),
             ],
             Self::CoverDir | Self::RingDir => &[
-                c!("По часовой", "Крутится по часовой стрелке."),
-                c!("Против", "Крутится против часовой стрелки."),
+                c!("По часовой", "Поворачивается как стрелки часов: 12 → 3 → 6."),
+                c!("Против", "Поворачивается против часовой стрелки: 12 → 9 → 6."),
             ],
             Self::RingStyle => &[
-                c!("Круг", "Точки мягким волнистым кругом, какой бы ни была форма."),
-                c!("Контур", "Точки идут вдоль контура обложки на равном расстоянии."),
-                c!("Бары", "Точки вырастают в столбики спектра."),
+                c!("Круг", "Точки стоят ровным кругом вокруг обложки."),
+                c!("Контур", "Точки повторяют форму обложки."),
+                c!("Бары", "Вокруг обложки столбики, которые растут под музыку, как эквалайзер."),
             ],
             Self::Ambient => &[
-                c!("Выкл", "Ровный фон, без облаков."),
-                c!("Свечение", "Облака медленно плывут и не слушают музыку."),
-                c!("Под звук", "Облака дышат и разгораются с басом."),
+                c!("Выкл", "Обычный ровный фон."),
+                c!("Свечение", "Цветные пятна медленно плывут за экраном."),
+                c!("Под звук", "Пятна плывут и вспыхивают на басах."),
             ],
             Self::BgShapes => &[
                 c!("Выкл", "Фон без фигур."),
-                c!("Прыгают", "Лежат внизу и подпрыгивают на сильных долях."),
-                c!("Парят", "Плавают по экрану и светятся в такт."),
-                c!("Меняют форму", "Плывут и превращаются в другие фигуры на ударах."),
+                c!("Прыгают", "Фигуры лежат внизу экрана и подпрыгивают в такт ударным."),
+                c!("Парят", "Фигуры медленно плавают по экрану и светятся в такт."),
+                c!("Меняют форму", "Фигуры плывут и на ударах превращаются в другие."),
             ],
             Self::BgColors => &[
-                c!("Тема", "Мягкие контейнеры темы — спокойно и ненавязчиво."),
-                c!("Акцент", "Один основной цвет темы."),
-                c!("Яркие", "Основной, вторичный и третичный акценты."),
-                c!("Свой", "Оттенок, выбранный в строке «Свой цвет»."),
+                c!("Тема", "Мягкие светлые цвета приложения — спокойно и ненавязчиво."),
+                c!("Акцент", "Все фигуры одного главного цвета."),
+                c!("Яркие", "Фигуры трёх ярких цветов приложения."),
+                c!("Свой", "Цвет, который ты выберешь в строке «Свой цвет»."),
+            ],
+            Self::BgHue => &[
+                c!("Красный", "Фигуры в красных тонах."),
+                c!("Оранжевый", "Фигуры в оранжевых тонах."),
+                c!("Жёлтый", "Фигуры в жёлтых тонах."),
+                c!("Зелёный", "Фигуры в зелёных тонах."),
+                c!("Бирюзовый", "Фигуры в бирюзовых тонах."),
+                c!("Синий", "Фигуры в синих тонах."),
+                c!("Фиолетовый", "Фигуры в фиолетовых тонах."),
+                c!("Розовый", "Фигуры в розовых тонах."),
             ],
             Self::LyricsStyle => &[
-                c!("Караоке", "Строка заливается цветом по слогам."),
-                c!("Фокус", "Текущая строка подсвечивается целиком."),
-                c!("Волна", "Буквы загораются и подпрыгивают одна за другой."),
+                c!("Караоке", "Строка закрашивается слева направо, слог за слогом, как в караоке."),
+                c!("Фокус", "Строка, которую поют, становится яркой целиком."),
+                c!("Волна", "Буквы по очереди загораются и подпрыгивают."),
             ],
             Self::WaveFallback => &[
-                c!("Волна — прыгающие буквы", "Буквы прыгают и без разметки, по примерному времени."),
-                c!("Спокойный Фокус", "Без разметки строка просто подсвечивается целиком."),
+                c!("Волна — прыгающие буквы", "Буквы всё равно прыгают — время для них угадывается."),
+                c!("Спокойный Фокус", "Такие песни показываются спокойно: строка просто становится яркой."),
             ],
             Self::LyricsGap => &[
-                c!("Линия", "Тонкое ровное кольцо."),
-                c!("Волна", "Тонкое волнистое кольцо."),
-                c!("Толстая линия", "Толстое ровное кольцо."),
-                c!("Толстая волна", "Толстое волнистое кольцо."),
+                c!("Линия", "Тонкий ровный кружок."),
+                c!("Волна", "Тонкий волнистый кружок."),
+                c!("Толстая линия", "Толстый ровный кружок."),
+                c!("Толстая волна", "Толстый волнистый кружок."),
             ],
             Self::NpMotion => &[
-                c!("Плавно", "Мягко и неторопливо, без отскока."),
-                c!("Живо", "Быстро, с небольшим отскоком в конце."),
-                c!("Быстро", "Почти мгновенно, без отскока."),
+                c!("Плавно", "Экран открывается мягко и неторопливо."),
+                c!("Живо", "Быстро и с лёгким пружинящим толчком в конце."),
+                c!("Быстро", "Почти мгновенно, без толчка."),
             ],
             Self::DblClickShape => &[
                 c!("Выкл", "Двойной клик ничего не меняет."),
-                c!("Только в режиме «Случайная»", "Новая фигура, только когда она выбирается случайно."),
+                c!("Только в режиме «Случайная»", "Новая случайная фигура, только если выбрана «Случайная»."),
                 c!("Всегда", "Всегда; выбранная фигура сменяется следующей."),
             ],
             Self::OpusBitrate => &[
-                c!("128", "Компактно; на слух почти как оригинал."),
-                c!("160", "Баланс качества и размера."),
-                c!("192", "С запасом для хороших наушников."),
-                c!("256", "Максимум; файлы вдвое больше, чем при 128."),
+                c!("128", "Файлы поменьше; на слух почти как оригинал."),
+                c!("160", "Хороший звук при разумном размере файлов."),
+                c!("192", "Звук с запасом для хороших наушников."),
+                c!("256", "Лучший звук; файлы вдвое больше, чем при 128."),
             ],
             _ => &[],
         }
@@ -367,6 +385,7 @@ impl SettingId {
                 v::BgShapes::Morph => 3,
             },
             Self::BgColors => usize::from(p.bg_shapes_colors).min(3),
+            Self::BgHue => usize::from(p.bg_shapes_hue).min(7),
             Self::LyricsStyle => usize::from(p.lyrics_style).min(2),
             Self::WaveFallback => usize::from(p.wave_syllables_only),
             Self::LyricsGap => usize::from(p.lyrics_gap_style).min(3),
@@ -400,7 +419,20 @@ impl SettingId {
             Self::BgShapes => {
                 p.bg_shapes = [v::BgShapes::Off, v::BgShapes::Bounce, v::BgShapes::Float, v::BgShapes::Morph][i.min(3)]
             }
-            Self::BgColors => p.bg_shapes_colors = i.min(3) as u8,
+            // Picking a colour shows the shapes (as the other fields do).
+            Self::BgColors => {
+                p.bg_shapes_colors = i.min(3) as u8;
+                if p.bg_shapes == v::BgShapes::Off {
+                    p.bg_shapes = v::BgShapes::Float;
+                }
+            }
+            Self::BgHue => {
+                if p.bg_shapes == v::BgShapes::Off {
+                    p.bg_shapes = v::BgShapes::Float;
+                }
+                p.bg_shapes_colors = 3;
+                p.bg_shapes_hue = i.min(7) as u8;
+            }
             Self::LyricsStyle => p.lyrics_style = i.min(2) as u8,
             Self::WaveFallback => p.wave_syllables_only = i == 1,
             Self::LyricsGap => p.lyrics_gap_style = i.min(3) as u8,
@@ -417,13 +449,17 @@ impl SettingId {
             Theme | Contrast | Scheme => Preview::Palette,
             Ambient | AmbientStrength => Preview::Ambient,
             ProgressWave | ReducedMotion => Preview::Wave,
-            CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverPulse => Preview::Cover,
-            Ring | RingStyle | RingSpin | RingDir | RingBeat => Preview::Ring,
+            CoverDir | CoverSpin => Preview::Turn(false),
+            RingDir | RingSpin => Preview::Turn(true),
+            CoverShape | ShapeRange | ShapePick | CoverPulse => Preview::Cover,
+            Ring | RingStyle | RingBeat => Preview::Ring,
+            LyricsCascade => Preview::Cascade,
             BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue => Preview::Background,
             LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsGlow => Preview::Lyrics,
-            LyricsGap | LyricsGapWaves | LyricsCountdown => Preview::Gap,
+            LyricsGap | LyricsGapWaves => Preview::Gap,
+            LyricsCountdown => Preview::Countdown,
             NpMotion => Preview::Motion,
-            NpVolume => Preview::Volume,
+            NpVolume | NpVolumeHold => Preview::Volume,
             _ => return None,
         })
     }
@@ -447,9 +483,9 @@ struct Focus {
 #[derive(Clone, Debug, Default)]
 struct Parts {
     button: Option<Rect>,
-    label: Option<Rect>,
     control: Option<Rect>,
     choices: Vec<Rect>,
+    menu: Vec<Rect>,
 }
 
 /// One row drawn this pass, for the cards.
@@ -459,10 +495,10 @@ struct Row {
     label: String,
     rect: Rect,
     button: Rect,
-    /// The name (with its ⓘ): hovering it shows every option.
-    name: Rect,
     control: Option<Rect>,
+    /// Its segmented buttons, and the items of its open menu.
     choices: Vec<Rect>,
+    menu: Vec<Rect>,
     clip: Rect,
     hovered: bool,
 }
@@ -481,6 +517,10 @@ struct Pinned {
     opened: u64,
     /// When it opened, for its fade-in.
     at: f64,
+    /// What it shows (an option while the pointer is on its button) and
+    /// since when, for the cross-fade.
+    body: Body,
+    changed: f64,
     /// Where the card was last drawn.
     card: Option<Rect>,
 }
@@ -488,11 +528,11 @@ struct Pinned {
 /// What a card shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Body {
-    /// The row's explanation (and preview).
+    /// The row's explanation and its current preview.
     Row,
     /// One option of a choice, previewed.
     Option(usize),
-    /// Every option side by side (the pinned card; read-only on hover).
+    /// The explanation and the options as lines (nothing to preview).
     All,
 }
 
@@ -500,6 +540,8 @@ enum Body {
 struct CardKey {
     id: SettingId,
     body: Body,
+    /// About an item of the row's open menu (the card goes beside it).
+    menu: bool,
 }
 
 /// The hover card between frames: what it shows, the pointer's timing,
@@ -518,6 +560,8 @@ struct Hover {
     content: Animated<f32>,
     /// Where the card was drawn last frame.
     drawn: Option<Rect>,
+    /// The pointer last frame, for its speed.
+    last: Option<(Pos2, f64)>,
 }
 
 fn focus_key() -> Id {
@@ -610,9 +654,9 @@ pub fn item<R>(ui: &mut Ui, id: SettingId, label: &str, add: impl FnOnce(&mut Ui
         label: label.to_owned(),
         rect: rect.union(button),
         button,
-        name: parts.label.map_or(button, |l| l.union(button)),
         control: parts.control,
         choices: parts.choices,
+        menu: parts.menu,
         clip: ui.clip_rect(),
         hovered: ui.rect_contains_pointer(rect.union(button)),
     };
@@ -639,9 +683,9 @@ pub fn help_button(ui: &mut Ui, id: SettingId) {
     ui.ctx().data_mut(|d| d.get_temp_mut_or_default::<Parts>(parts_key()).button = Some(rect));
 }
 
-/// The rect of the item's name, so hovering it shows every option.
-pub fn report_label(ctx: &egui::Context, rect: Rect) {
-    ctx.data_mut(|d| d.get_temp_mut_or_default::<Parts>(parts_key()).label = Some(rect));
+/// The rects of the item's open menu, in [`SettingId::choices`] order.
+pub fn report_menu(ctx: &egui::Context, rects: Vec<Rect>) {
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Parts>(parts_key()).menu = rects);
 }
 
 /// The rect of the item's control, so cards line up with it.
@@ -664,7 +708,7 @@ fn help_button_at(ui: &Ui, id: SettingId, rect: Rect) {
     let was = pinned(ctx).is_some_and(|p| p.id == id);
     if resp.clicked() {
         let at = anim::now(ctx);
-        set_pinned(ctx, (!was).then(|| Pinned { id, opened: ctx.cumulative_pass_nr(), at, card: None }));
+        set_pinned(ctx, (!was).then(|| Pinned { id, opened: ctx.cumulative_pass_nr(), at, body: Body::Row, changed: at, card: None }));
     }
     let on = was != resp.clicked();
     let painter = ui.painter();
@@ -727,8 +771,27 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs) {
             set_pinned(&ctx, None);
             return;
         }
-        let layout = Layout::new(&ctx, row, Body::All, true);
-        let target = Rect::from_min_size(place(row.rect, layout.anchor_x, layout.size, ctx.content_rect()), layout.size);
+        // The row's current option, or the option whose button the
+        // pointer is on.
+        let now = anim::now(&ctx);
+        let pointer = ctx.pointer_hover_pos();
+        let n = row.id.choices().len();
+        let body = match pointer.and_then(|p| row.choices.iter().position(|r| r.contains(p))).filter(|i| *i < n) {
+            Some(i) => Body::Option(i),
+            None => base_body(row.id),
+        };
+        if body != pin.body {
+            pin.body = body;
+            pin.changed = now;
+        }
+        let content = ((now - pin.changed) / 0.14).clamp(0.0, 1.0) as f32;
+        if content < 1.0 {
+            ctx.request_repaint();
+        }
+        let layout = Layout::new(&ctx, row, body, true);
+        // Stays where it opened while its content swaps.
+        let x = row.control.map_or(row.button.left(), |r| r.left());
+        let target = Rect::from_min_size(place(row.rect, x, layout.size, ctx.content_rect()), layout.size);
         // A short fade and rise from the row (effects timing, no bounce).
         let t = ((anim::now(&ctx) - pin.at) / 0.18).clamp(0.0, 1.0) as f32;
         let k = 1.0 - (1.0 - t).powi(3);
@@ -737,7 +800,7 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs) {
         }
         let rise = if target.top() >= row.rect.bottom() { -1.0 } else { 1.0 } * 8.0 * (1.0 - k);
         let rect = target.translate(vec2(0.0, -rise));
-        let out = show_card(&ctx, Id::new("settings-help-pinned-card"), rect, k, 1.0, &layout, row, prefs, true);
+        let out = show_card(&ctx, Id::new("settings-help-pinned-card"), rect, k, content, &layout, row, prefs, true);
         if let Some(i) = out.pick {
             row.id.choose(prefs, i);
         }
@@ -748,26 +811,42 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs) {
     hover(&ctx, &rows, prefs);
 }
 
-/// First card after the pointer rests this long on something.
-const ENTER_DELAY: f64 = 0.25;
+/// First card: the pointer rests this long on an option or an ⓘ.
+const ENTER_DELAY: f64 = 0.3;
+/// With a card up, resting this long on another one switches to it.
+const SWITCH_DELAY: f64 = 0.12;
+/// Faster than this (px/s) the pointer is passing by, not resting.
+const PASSING: f32 = 300.0;
 /// The card waits this long after the pointer leaves.
 const LEAVE_GRACE: f64 = 0.15;
 
-/// What the pointer at `p` asks for in `row`.
-fn key_at(row: &Row, p: Pos2) -> CardKey {
+/// What the pointer at `p` asks for: an option button or menu item of a
+/// row (that option), or its ⓘ (every option, else the row). Labels,
+/// sliders and switches ask for nothing.
+fn key_at(row: &Row, p: Pos2) -> Option<CardKey> {
     let n = row.id.choices().len();
-    let body = match row.choices.iter().position(|r| r.contains(p)).filter(|i| *i < n) {
-        Some(i) => Body::Option(i),
-        None if n > 0 && row.name.contains(p) => Body::All,
-        None => Body::Row,
-    };
-    CardKey { id: row.id, body }
+    if let Some(i) = row.menu.iter().position(|r| r.contains(p)).filter(|i| *i < n) {
+        return Some(CardKey { id: row.id, body: Body::Option(i), menu: true });
+    }
+    if !row.hovered {
+        return None;
+    }
+    if let Some(i) = row.choices.iter().position(|r| r.contains(p)).filter(|i| *i < n) {
+        return Some(CardKey { id: row.id, body: Body::Option(i), menu: false });
+    }
+    row.button.contains(p).then(|| CardKey { id: row.id, body: base_body(row.id), menu: false })
 }
 
-/// The hover card: a short wait before the first one (none while the
-/// pointer only passes by), then it follows the pointer between rows and
-/// options at once, gliding and cross-fading; it stays while the pointer
-/// is on it and a moment after the pointer leaves.
+/// What the ⓘ card of `id` shows: the explanation and the current
+/// option's preview, or the options as lines when nothing is previewed.
+fn base_body(id: SettingId) -> Body {
+    if !id.choices().is_empty() && id.preview().is_none() { Body::All } else { Body::Row }
+}
+
+/// The hover card: only for an option button, a menu item or an ⓘ the
+/// pointer rests on (a pass over them opens nothing). With a card up, a
+/// short rest on a neighbour switches it, gliding and cross-fading; it
+/// stays while the pointer is on it and a moment after the pointer leaves.
 fn hover(ctx: &egui::Context, rows: &[Row], prefs: &mut Prefs) {
     let theme = Theme::get(ctx);
     let now = anim::now(ctx);
@@ -783,51 +862,60 @@ fn hover(ctx: &egui::Context, rows: &[Row], prefs: &mut Prefs) {
         alpha: Animated::new(0.0, effects),
         content: Animated::new(1.0, effects),
         drawn: None,
+        last: None,
     });
     let pointer = ctx.pointer_hover_pos();
+    let speed = match (pointer, h.last) {
+        (Some(p), Some((q, t))) if now > t => p.distance(q) / (now - t) as f32,
+        _ => 0.0,
+    };
+    h.last = pointer.map(|p| (p, now));
     // On the card itself: keep what it shows.
     let on_card = h.open && pointer.is_some_and(|p| h.drawn.is_some_and(|r| r.contains(p)));
-    let want = if on_card {
-        h.key
-    } else {
-        pointer.and_then(|p| rows.iter().find(|r| r.hovered).map(|r| key_at(r, p)))
-    };
+    let want = if on_card { h.key } else { pointer.and_then(|p| rows.iter().find_map(|r| key_at(r, p))) };
+    if want.is_some() {
+        h.left = None;
+    }
+    if h.candidate != want || speed > PASSING {
+        h.candidate = want;
+        h.since = now;
+    }
+    let rested = now - h.since;
+    let showing = h.open || h.alpha.value(now) > 0.05;
     match want {
-        Some(k) => {
-            h.left = None;
-            if h.open || h.alpha.value(now) > 0.05 {
-                if h.key != Some(k) {
-                    // Another row or option while a card is up: switch now.
+        Some(k) if showing => {
+            if h.key != Some(k) {
+                if rested >= SWITCH_DELAY {
                     if h.key.is_some() {
                         h.content.snap(0.0);
                         h.content.set_target(1.0, now);
                     }
+                    if h.key.is_some_and(|o| o.menu != k.menu) {
+                        h.drawn = None;
+                    }
                     h.key = Some(k);
-                }
-                if !h.open {
-                    h.open = true;
-                    h.alpha.set_target(1.0, now);
-                }
-            } else {
-                if h.candidate != Some(k) {
-                    h.candidate = Some(k);
-                    h.since = now;
-                }
-                let wait = ENTER_DELAY - (now - h.since);
-                if wait <= 0.0 {
-                    h.key = Some(k);
-                    h.open = true;
-                    h.drawn = None;
-                    h.content.snap(1.0);
-                    h.alpha.snap(0.0);
-                    h.alpha.set_target(1.0, now);
                 } else {
-                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(SWITCH_DELAY - rested));
                 }
+            }
+            if !h.open && h.key == Some(k) {
+                h.open = true;
+                h.alpha.set_target(1.0, now);
+            }
+        }
+        Some(k) => {
+            if rested >= ENTER_DELAY {
+                h.key = Some(k);
+                h.open = true;
+                h.drawn = None;
+                h.content.snap(1.0);
+                h.alpha.snap(0.0);
+                h.alpha.set_target(1.0, now);
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64((ENTER_DELAY - rested).max(0.01)));
             }
         }
         None => {
-            h.candidate = None;
             if h.open {
                 let left = *h.left.get_or_insert(now);
                 if now - left >= LEAVE_GRACE {
@@ -845,11 +933,19 @@ fn hover(ctx: &egui::Context, rows: &[Row], prefs: &mut Prefs) {
     match row {
         Some((key, row)) if alpha > 0.005 || h.open => {
             let layout = Layout::new(ctx, row, key.body, false);
-            let target = Rect::from_min_size(place(row.rect, layout.anchor_x, layout.size, ctx.content_rect()), layout.size);
+            let screen = ctx.content_rect();
+            let item = match key.body {
+                Body::Option(i) if key.menu => row.menu.get(i).copied(),
+                _ => None,
+            };
+            let target = match item {
+                Some(item) => Rect::from_min_size(beside(&row.menu, item, layout.size, screen), layout.size),
+                None => Rect::from_min_size(place(row.rect, layout.anchor_x, layout.size, screen), layout.size),
+            };
             let goal = [target.left(), target.top(), target.width(), target.height()];
             if h.drawn.is_none() {
                 // Appearing: rise a little from the row's side.
-                let rise = if target.top() >= row.rect.bottom() { -8.0 } else { 8.0 };
+                let rise = if item.is_some() { 0.0 } else if target.top() >= row.rect.bottom() { -8.0 } else { 8.0 };
                 h.rect.snap([goal[0], goal[1] - rise, goal[2], goal[3]]);
             }
             h.rect.set_target(goal, now);
@@ -870,14 +966,22 @@ fn hover(ctx: &egui::Context, rows: &[Row], prefs: &mut Prefs) {
     ctx.data_mut(|d| d.insert_temp(hover_key(), h));
 }
 
+/// Where a card about a menu item goes: beside the open menu (right, else
+/// left), level with the item, inside `screen`.
+fn beside(menu: &[Rect], item: Rect, size: Vec2, screen: Rect) -> Pos2 {
+    let screen = screen.shrink2(vec2(8.0, 4.0));
+    let all = menu.iter().fold(item, |a, r| a.union(*r)).expand(8.0);
+    let x = if all.right() + GAP + size.x <= screen.right() { all.right() + GAP } else { (all.left() - GAP - size.x).max(screen.left()) };
+    let y = item.top().clamp(screen.top(), (screen.bottom() - size.y).max(screen.top()));
+    pos2(x, y)
+}
+
 /// Text width of a one-thing card.
 const CARD_W: f32 = 280.0;
 const PREVIEW_H: f32 = 120.0;
 const PAD: f32 = 12.0;
 /// Between a row and its card.
 const GAP: f32 = 6.0;
-const TILE_GAP: f32 = 8.0;
-const HINT: &str = "Наведи на название — все варианты рядом";
 
 /// A paragraph in `role`, wrapped at `width`.
 fn para(painter: &Painter, role: TypeRole, text: &str, color: Color32, width: f32) -> Arc<Galley> {
@@ -921,21 +1025,6 @@ fn with_choice(id: SettingId, prefs: &Prefs, i: usize) -> Prefs {
     p
 }
 
-/// Tile size of a preview kind in the grid of options.
-fn tile_size(kind: Preview) -> Vec2 {
-    match kind {
-        Preview::Palette => vec2(124.0, 64.0),
-        Preview::Ambient => vec2(150.0, 90.0),
-        Preview::Cover | Preview::Ring => vec2(124.0, 124.0),
-        Preview::Background => vec2(168.0, 104.0),
-        Preview::Lyrics => vec2(264.0, 100.0),
-        Preview::Gap => vec2(124.0, 100.0),
-        Preview::Motion => vec2(150.0, 100.0),
-        Preview::Volume => vec2(150.0, 80.0),
-        Preview::Wave => vec2(150.0, 60.0),
-    }
-}
-
 /// A card laid out: its size, where it lines up, and its texts.
 struct Layout {
     size: Vec2,
@@ -944,123 +1033,57 @@ struct Layout {
     kind: Option<Preview>,
     title: Arc<Galley>,
     help: Arc<Galley>,
-    hint: Option<Arc<Galley>>,
-    /// [`Body::All`]: each option's name and explanation.
+    /// [`Body::All`]: each option's name and what it does.
     texts: Vec<(Arc<Galley>, Arc<Galley>)>,
-    /// [`Body::All`] with previews: tile size, columns and each grid row's
-    /// text height.
-    tiles: Option<(Preview, Vec2, usize, Vec<f32>)>,
-    /// Content width and header height.
-    w: f32,
-    header_h: f32,
+    /// A close button in the header (the pinned card).
     close: bool,
 }
+
+/// Room for the close button beside the title.
+const CLOSE_W: f32 = 32.0;
 
 impl Layout {
     fn new(ctx: &egui::Context, row: &Row, body: Body, pinned: bool) -> Self {
         let s = Theme::get(ctx).scheme;
         let painter = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, Id::new("settings-help-measure")));
         let choices = row.id.choices();
-        let kind = row.id.preview();
-        match body {
-            Body::Row | Body::Option(_) => {
-                let (title, help) = match body {
-                    Body::Option(i) => (format!("{} · {}", row.label, choices[i].label), choices[i].help),
-                    _ => (row.label.clone(), row.id.help()),
-                };
-                let title = para(&painter, TypeRole::TitleSmall, &title, s.on_surface, CARD_W);
-                let help = para(&painter, TypeRole::BodyMedium, help, s.on_surface_variant, CARD_W);
-                let hint = (body == Body::Row && !choices.is_empty())
-                    .then(|| para(&painter, TypeRole::LabelMedium, HINT, s.primary, CARD_W));
-                let h = PAD
-                    + kind.map_or(0.0, |_| PREVIEW_H + 10.0)
-                    + title.size().y
-                    + 2.0
-                    + help.size().y
-                    + hint.as_ref().map_or(0.0, |g| 6.0 + g.size().y)
-                    + PAD;
-                let anchor_x = match body {
-                    Body::Option(i) => row.choices.get(i).map(|r| r.left()),
-                    _ => None,
-                }
-                .or(row.control.map(|r| r.left()))
-                .unwrap_or(row.button.left());
-                Self {
-                    size: vec2(CARD_W + 2.0 * PAD, h),
-                    anchor_x,
-                    body,
-                    kind,
-                    title,
-                    help,
-                    hint,
-                    texts: Vec::new(),
-                    tiles: None,
-                    w: CARD_W,
-                    header_h: 0.0,
-                    close: false,
-                }
-            }
-            Body::All => {
-                let screen = ctx.content_rect();
-                let grid = (!choices.is_empty()).then_some(kind).flatten();
-                let (tile, cols) = match grid {
-                    Some(k) => {
-                        let tile = tile_size(k);
-                        let fit = ((screen.width() - 16.0 - 2.0 * PAD + TILE_GAP) / (tile.x + TILE_GAP)).floor().max(1.0) as usize;
-                        (tile, choices.len().min(4).min(fit))
-                    }
-                    None => (Vec2::ZERO, 1),
-                };
-                let inner_w = if grid.is_some() { cols as f32 * tile.x + (cols - 1) as f32 * TILE_GAP } else { 320.0 };
-                let w = inner_w.max(280.0);
-                let close_w = if pinned { 36.0 } else { 0.0 };
-                let title = para(&painter, TypeRole::TitleMedium, &row.label, s.on_surface, w - close_w);
-                let help = para(&painter, TypeRole::BodyMedium, row.id.help(), s.on_surface_variant, w);
-                let texts: Vec<(Arc<Galley>, Arc<Galley>)> = choices
-                    .iter()
-                    .map(|c| {
-                        let tw = if grid.is_some() { tile.x - 4.0 } else { w - 40.0 };
-                        (
-                            para(&painter, TypeRole::LabelLarge, c.label, s.on_surface, tw),
-                            para(&painter, TypeRole::BodySmall, c.help, s.on_surface_variant, tw),
-                        )
-                    })
-                    .collect();
-                let text_h = |i: usize| texts[i].0.size().y + 2.0 + texts[i].1.size().y;
-                let header_h = title.size().y.max(if pinned { 28.0 } else { 0.0 });
-                let mut h = PAD + header_h + 4.0 + help.size().y + 12.0;
-                let mut grid_rows = Vec::new();
-                if grid.is_some() {
-                    for r in 0..choices.len().div_ceil(cols) {
-                        let th = (r * cols..((r + 1) * cols).min(choices.len())).map(text_h).fold(0.0, f32::max);
-                        grid_rows.push(th);
-                        h += tile.y + 6.0 + th + 8.0 + TILE_GAP;
-                    }
-                    h -= TILE_GAP;
-                } else if !choices.is_empty() {
-                    for i in 0..choices.len() {
-                        h += text_h(i) + 16.0;
-                    }
-                } else if kind.is_some() {
-                    h += PREVIEW_H;
-                }
-                h += PAD;
-                Self {
-                    size: vec2(w + 2.0 * PAD, h),
-                    anchor_x: row.control.map_or(row.button.left(), |r| r.left().min(row.button.left())),
-                    body,
-                    kind,
-                    title,
-                    help,
-                    hint: None,
-                    texts,
-                    tiles: grid.map(|k| (k, tile, cols, grid_rows)),
-                    w,
-                    header_h,
-                    close: pinned,
-                }
-            }
+        let kind = if body == Body::All { None } else { row.id.preview() };
+        let (title, help) = match body {
+            Body::Option(i) => (format!("{} · {}", row.label, choices[i].label), choices[i].help),
+            _ => (row.label.clone(), row.id.help()),
+        };
+        let close_w = if pinned { CLOSE_W } else { 0.0 };
+        let title = para(&painter, TypeRole::TitleSmall, &title, s.on_surface, CARD_W - close_w);
+        let help = para(&painter, TypeRole::BodyMedium, help, s.on_surface_variant, CARD_W);
+        let texts: Vec<(Arc<Galley>, Arc<Galley>)> = if body == Body::All {
+            choices
+                .iter()
+                .map(|c| {
+                    (
+                        para(&painter, TypeRole::LabelLarge, c.label, s.on_surface, CARD_W - 28.0),
+                        para(&painter, TypeRole::BodySmall, c.help, s.on_surface_variant, CARD_W - 28.0),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let header_h = title.size().y.max(if pinned { 24.0 } else { 0.0 });
+        let mut h = PAD + header_h + 2.0 + help.size().y;
+        if kind.is_some() {
+            h += 10.0 + PREVIEW_H;
         }
+        for (lg, hg) in &texts {
+            h += 8.0 + lg.size().y + hg.size().y;
+        }
+        h += PAD;
+        let anchor_x = match body {
+            Body::Option(i) => row.choices.get(i).map(|r| r.left()),
+            _ => None,
+        }
+        .or(row.control.map(|r| r.left()))
+        .unwrap_or(row.button.left());
+        Self { size: vec2(CARD_W + 2.0 * PAD, h), anchor_x, body, kind, title, help, texts, close: pinned }
     }
 }
 
@@ -1072,6 +1095,9 @@ struct CardOut {
 
 /// Paints `layout` into `rect` (which may still be gliding to its size) at
 /// `alpha`, the content at `content`; `interactive` cards take clicks.
+/// Title (with a close button when pinned), explanation, then the preview
+/// of the option it is about (the current one for the row), or the
+/// options as lines when there is nothing to preview.
 #[allow(clippy::too_many_arguments)]
 fn show_card(
     ctx: &egui::Context,
@@ -1097,132 +1123,72 @@ fn show_card(
             let sense = if interactive { Sense::click() } else { Sense::hover() };
             let (_, _) = ui.allocate_exact_size(rect.size(), sense);
             card_frame(ui.painter(), rect, &s);
+            let x0 = rect.left() + PAD;
+            let mut y = rect.top() + PAD;
+            let header_h = layout.title.size().y.max(if layout.close { 24.0 } else { 0.0 });
+            if layout.close {
+                let close_r = Rect::from_center_size(pos2(rect.right() - PAD - 10.0, y + header_h * 0.5), Vec2::splat(28.0));
+                let resp = ui.interact(close_r, area.with("close"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+                if resp.hovered() {
+                    ui.painter().circle_filled(close_r.center(), 14.0, s.on_surface.gamma_multiply(0.08));
+                }
+                Icon::Close.widget(false, s.on_surface_variant, 18.0).paint_at(ui, Rect::from_center_size(close_r.center(), Vec2::splat(18.0)));
+                out.close = resp.clicked();
+            }
             let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
             ui.set_clip_rect(rect.intersect(ui.clip_rect()));
             ui.multiply_opacity(content);
             let ui = &mut ui;
-            let x0 = rect.left() + PAD;
-            let mut y = rect.top() + PAD;
-            match layout.body {
-                Body::Row | Body::Option(_) => {
-                    if let Some(kind) = layout.kind {
-                        let r = Rect::from_min_size(pos2(x0, y), vec2(CARD_W, PREVIEW_H));
-                        match layout.body {
-                            Body::Option(i) => {
-                                sample(ui, r, kind, &with_choice(row.id, prefs, i), Some(Id::new(("hover", row.id, i))));
-                            }
-                            _ => sample(ui, r, kind, prefs, None),
-                        }
-                        y += PREVIEW_H + 10.0;
+            let th = layout.title.size().y;
+            ui.painter().galley(pos2(x0, y + (header_h - th) * 0.5), layout.title.clone(), s.on_surface);
+            y += header_h + 2.0;
+            ui.painter().galley(pos2(x0, y), layout.help.clone(), s.on_surface_variant);
+            y += layout.help.size().y;
+            if let Some(kind) = layout.kind {
+                y += 10.0;
+                let r = Rect::from_min_size(pos2(x0, y), vec2(CARD_W, PREVIEW_H));
+                match layout.body {
+                    Body::Option(i) => {
+                        sample(ui, r, kind, &with_choice(row.id, prefs, i), Some(Id::new(("card", row.id, i))));
                     }
-                    let painter = ui.painter();
-                    painter.galley(pos2(x0, y), layout.title.clone(), s.on_surface);
-                    y += layout.title.size().y + 2.0;
-                    painter.galley(pos2(x0, y), layout.help.clone(), s.on_surface_variant);
-                    y += layout.help.size().y + 6.0;
-                    if let Some(g) = &layout.hint {
-                        painter.galley(pos2(x0, y), g.clone(), s.primary);
+                    // A choice shows its current option exactly; a slider or
+                    // switch may show a stand-in while its effect is off.
+                    _ if !row.id.choices().is_empty() => {
+                        let i = row.id.chosen(prefs);
+                        sample(ui, r, kind, &with_choice(row.id, prefs, i), Some(Id::new(("card", row.id, i))));
                     }
+                    _ => sample(ui, r, kind, prefs, None),
                 }
-                Body::All => {
-                    out = all_options(ui, rect, layout, row, prefs, interactive);
+            }
+            if !layout.texts.is_empty() {
+                // The options as lines: a radio mark, the name, what it does.
+                let chosen = row.id.chosen(prefs);
+                for (i, (lg, hg)) in layout.texts.iter().enumerate() {
+                    y += 8.0;
+                    let rh = lg.size().y + hg.size().y;
+                    let r = Rect::from_min_size(pos2(x0 - 4.0, y - 4.0), vec2(CARD_W + 8.0, rh + 8.0));
+                    let sel = i == chosen;
+                    if interactive {
+                        let resp = ui.interact(r, area.with(("opt", i)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+                        if resp.hovered() && !sel {
+                            ui.painter().rect_filled(r, shape::SMALL, s.on_surface.gamma_multiply(0.06));
+                        }
+                        if resp.clicked() && !sel {
+                            out.pick = Some(i);
+                        }
+                    }
+                    let dot = pos2(x0 + 8.0, y + lg.size().y * 0.5);
+                    ui.painter().circle_stroke(dot, 6.0, Stroke::new(2.0, if sel { s.primary } else { s.on_surface_variant }));
+                    if sel {
+                        ui.painter().circle_filled(dot, 3.0, s.primary);
+                    }
+                    let lh = lg.size().y;
+                    ui.painter().galley(pos2(x0 + 24.0, y), lg.clone(), if sel { s.primary } else { s.on_surface });
+                    ui.painter().galley(pos2(x0 + 24.0, y + lh), hg.clone(), s.on_surface_variant);
+                    y += rh;
                 }
             }
         });
-    out
-}
-
-/// The body of a [`Body::All`] card: header, explanation and the options.
-fn all_options(ui: &mut Ui, rect: Rect, l: &Layout, row: &Row, prefs: &Prefs, interactive: bool) -> CardOut {
-    let s = Theme::get(ui.ctx()).scheme;
-    let mut out = CardOut { pick: None, close: false };
-    let area = Id::new(("settings-help-all", row.id));
-    let chosen = row.id.chosen(prefs);
-    let x0 = rect.left() + PAD;
-    let mut y = rect.top() + PAD;
-    let tg = l.title.size().y;
-    ui.painter().galley(pos2(x0, y + (l.header_h - tg) * 0.5), l.title.clone(), s.on_surface);
-    if l.close {
-        let close_r = Rect::from_center_size(pos2(rect.right() - PAD - 14.0, y + l.header_h * 0.5), Vec2::splat(28.0));
-        let resp = ui.interact(close_r, area.with("close"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-        if resp.hovered() {
-            ui.painter().circle_filled(close_r.center(), 14.0, s.on_surface.gamma_multiply(0.08));
-        }
-        Icon::Close.widget(false, s.on_surface_variant, 18.0).paint_at(ui, Rect::from_center_size(close_r.center(), Vec2::splat(18.0)));
-        out.close = resp.clicked();
-    }
-    y += l.header_h + 4.0;
-    ui.painter().galley(pos2(x0, y), l.help.clone(), s.on_surface_variant);
-    y += l.help.size().y + 12.0;
-    let sense = if interactive { Sense::click() } else { Sense::hover() };
-    let text_h = |i: usize| l.texts[i].0.size().y + 2.0 + l.texts[i].1.size().y;
-
-    if let Some((k, tile, cols, grid_rows)) = &l.tiles {
-        let (tile, cols) = (*tile, *cols);
-        for (r, th) in grid_rows.iter().enumerate() {
-            for col in 0..cols {
-                let i = r * cols + col;
-                if i >= l.texts.len() {
-                    break;
-                }
-                let tx = x0 + col as f32 * (tile.x + TILE_GAP);
-                let whole = Rect::from_min_size(pos2(tx, y), vec2(tile.x, tile.y + 6.0 + th + 8.0)).expand(4.0);
-                let mut resp = ui.interact(whole, area.with(("tile", i)), sense);
-                if interactive {
-                    resp = resp.on_hover_cursor(CursorIcon::PointingHand);
-                }
-                let sel = i == chosen;
-                if sel {
-                    ui.painter().rect_filled(whole, shape::SMALL + 4.0, s.secondary_container.gamma_multiply(0.6));
-                } else if interactive && resp.hovered() {
-                    ui.painter().rect_filled(whole, shape::SMALL + 4.0, s.on_surface.gamma_multiply(0.06));
-                }
-                let pr = Rect::from_min_size(pos2(tx, y), tile);
-                sample(ui, pr, *k, &with_choice(row.id, prefs, i), Some(area.with(("tile", i))));
-                if sel {
-                    ui.painter().rect_stroke(pr, shape::SMALL, Stroke::new(2.0, s.primary), egui::StrokeKind::Inside);
-                }
-                let (lg, hg) = l.texts[i].clone();
-                let lh = lg.size().y;
-                ui.painter().galley(pos2(tx + 2.0, pr.bottom() + 6.0), lg, if sel { s.primary } else { s.on_surface });
-                ui.painter().galley(pos2(tx + 2.0, pr.bottom() + 8.0 + lh), hg, s.on_surface_variant);
-                if interactive && resp.clicked() && !sel {
-                    out.pick = Some(i);
-                }
-            }
-            y += tile.y + 6.0 + th + 8.0 + TILE_GAP;
-        }
-    } else if !l.texts.is_empty() {
-        // A list: a radio mark, the option and what it does.
-        for (i, (lg, hg)) in l.texts.iter().enumerate() {
-            let rh = text_h(i) + 16.0;
-            let r = Rect::from_min_size(pos2(x0 - 4.0, y), vec2(l.w + 8.0, rh));
-            let mut resp = ui.interact(r, area.with(("opt", i)), sense);
-            if interactive {
-                resp = resp.on_hover_cursor(CursorIcon::PointingHand);
-            }
-            let sel = i == chosen;
-            if sel {
-                ui.painter().rect_filled(r, shape::SMALL, s.secondary_container.gamma_multiply(0.6));
-            } else if interactive && resp.hovered() {
-                ui.painter().rect_filled(r, shape::SMALL, s.on_surface.gamma_multiply(0.06));
-            }
-            let dot = pos2(x0 + 10.0, y + 8.0 + lg.size().y * 0.5);
-            ui.painter().circle_stroke(dot, 7.0, Stroke::new(2.0, if sel { s.primary } else { s.on_surface_variant }));
-            if sel {
-                ui.painter().circle_filled(dot, 3.5, s.primary);
-            }
-            let lh = lg.size().y;
-            ui.painter().galley(pos2(x0 + 28.0, y + 8.0), lg.clone(), if sel { s.primary } else { s.on_surface });
-            ui.painter().galley(pos2(x0 + 28.0, y + 10.0 + lh), hg.clone(), s.on_surface_variant);
-            if interactive && resp.clicked() && !sel {
-                out.pick = Some(i);
-            }
-            y += rh;
-        }
-    } else if let Some(k) = l.kind {
-        sample(ui, Rect::from_min_size(pos2(x0, y), vec2(l.w, PREVIEW_H)), k, prefs, None);
-    }
     out
 }
 
@@ -1293,7 +1259,7 @@ fn paint_preview(ui: &mut Ui, rect: Rect, kind: Preview, prefs: &Prefs, salt: Op
             let cy = rect.center().y;
             let (x0, x1) = (rect.left() + 20.0, rect.right() - 20.0);
             let head = x0 + (x1 - x0) * (0.25 + 0.5 * ((t * 0.1).fract()));
-            let wavy = prefs.progress_wave && !theme.reduced_motion;
+            let wavy = prefs.progress_wave && !theme.reduced_motion && !prefs.reduced_motion;
             let amp = if wavy { 3.0 } else { 0.0 };
             let phase = (t * 0.6).fract() * std::f32::consts::TAU;
             wave_line(ui, x0, head, cy, amp, 40.0, phase, Stroke::new(4.0, s.primary));
@@ -1324,9 +1290,13 @@ fn paint_preview(ui: &mut Ui, rect: Rect, kind: Preview, prefs: &Prefs, salt: Op
             }
         }
         Preview::Lyrics => lyrics::preview(ui, rect, prefs),
-        Preview::Gap => lyrics::gap_preview(ui, rect, prefs),
+        // The ring's look: no countdown over it.
+        Preview::Gap => lyrics::gap_preview(ui, rect, &Prefs { lyrics_countdown: false, ..prefs.clone() }),
+        Preview::Countdown => lyrics::gap_preview(ui, rect, prefs),
         Preview::Motion => motion_preview(ui, rect, prefs),
         Preview::Volume => volume_preview(ui, rect, prefs),
+        Preview::Turn(ring) => turn_preview(ui, rect, prefs, ring),
+        Preview::Cascade => cascade_preview(ui, rect, prefs),
     }
     ui.ctx().request_repaint();
 }
@@ -1364,9 +1334,12 @@ fn motion_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
 fn volume_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let s = Theme::get(ui.ctx()).scheme;
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
-    let t = (anim::now(ui.ctx()) as f32).rem_euclid(3.0);
-    // The volume drifts up and down while it is "being changed".
-    let level = 0.35 + 0.3 * (t * 2.1).sin().abs();
+    // A second of changing the volume, then the pill's hold, then a rest.
+    let hold = prefs.np_volume_pop_hold.clamp(0.3, 5.0);
+    let cycle = 1.0 + hold + 0.7;
+    let t = (anim::now(ui.ctx()) as f32).rem_euclid(cycle);
+    let changing = t.min(1.0);
+    let level = 0.35 + 0.3 * (changing * 2.1).sin().abs();
     let pad = (rect.height() * 0.14).clamp(6.0, 14.0);
     let r = (rect.height() * 0.12).clamp(7.0, 12.0);
     let button = pos2(rect.left() + pad + r, rect.top() + pad + r);
@@ -1381,20 +1354,108 @@ fn volume_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     if prefs.np_volume {
         bar(&painter, button + vec2(r + 8.0, 0.0), (rect.right() - pad - button.x - r - 8.0).max(10.0), 1.0);
     } else if prefs.np_volume_pop {
-        // Rises for two seconds of every three.
-        let k = ((t / 0.25).min((2.0 - t) / 0.25)).clamp(0.0, 1.0);
+        // Rises while the volume changes, stays for the hold, then hides.
+        let k = ((t / 0.2).min((1.0 + hold + 0.25 - t) / 0.25)).clamp(0.0, 1.0);
         let k = k * k * (3.0 - 2.0 * k);
         let w = (rect.width() * 0.6).min(160.0);
         let h = 20.0;
         let pill = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - pad - h * 0.5 + (1.0 - k) * 10.0), vec2(w, h));
+        // Where it appears, faintly, while it is hidden.
+        painter.rect_stroke(pill, h * 0.5, Stroke::new(1.0, s.outline_variant.gamma_multiply(0.6 * (1.0 - k))), egui::StrokeKind::Inside);
         painter.rect_filled(pill, h * 0.5, s.surface_container_highest.gamma_multiply(k));
         bar(&painter, pos2(pill.left() + 12.0, pill.center().y), w - 24.0, k);
     } else {
         // The wheel: a small mouse beside the button.
         let m = Rect::from_center_size(button + vec2(r + 16.0, 0.0), vec2(12.0, 18.0));
         painter.rect_stroke(m, 6.0, Stroke::new(1.5, s.on_surface_variant), egui::StrokeKind::Inside);
-        let wy = m.top() + 4.0 + 3.0 * (t * 4.0).sin().abs();
+        let wy = m.top() + 4.0 + 3.0 * (anim::now(ui.ctx()) as f32 * 4.0).sin().abs();
         painter.line_segment([pos2(m.center().x, wy), pos2(m.center().x, wy + 3.0)], Stroke::new(2.0, s.primary));
+    }
+}
+
+/// Which way the cover's outline (or the ring) turns: a clock face, the
+/// shape turning in it with a bright marker, and an arrow running ahead of
+/// the marker the same way. Clockwise goes 12 → 3 → 6.
+fn turn_preview(ui: &Ui, rect: Rect, prefs: &Prefs, ring: bool) {
+    use std::f32::consts::TAU;
+    let s = Theme::get(ui.ctx()).scheme;
+    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
+    let ccw = if ring { prefs.ring_ccw } else { prefs.cover_ccw };
+    let sign = if ccw { -1.0 } else { 1.0 };
+    // Not turning at all: no marker run, no arrow.
+    let turning = if ring { prefs.spin_ring } else { prefs.cover_spin };
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.5 - 18.0;
+    let a = if turning { sign * (anim::now(ui.ctx()) as f32 * TAU / 6.0) } else { 0.0 };
+    let dir = |th: f32| vec2(th.sin(), -th.cos());
+    // Clock hints: 12, 3, 6, 9.
+    let font = TypeRole::LabelSmall.style().font_id();
+    for (i, n) in ["12", "3", "6", "9"].iter().enumerate() {
+        let th = i as f32 * TAU / 4.0;
+        painter.text(c + dir(th) * (r + 11.0), egui::Align2::CENTER_CENTER, *n, font.clone(), s.on_surface_variant.gamma_multiply(0.7));
+    }
+    if ring {
+        for i in 0..24 {
+            let th = a + i as f32 * TAU / 24.0;
+            painter.circle_filled(c + dir(th) * (r - 4.0), 2.0, s.primary.gamma_multiply(0.45));
+        }
+        painter.circle_filled(c, r * 0.55, s.surface_container_highest);
+    } else {
+        let shape = match prefs.cover_shape {
+            v::CoverShape::Original | v::CoverShape::Random => v::CoverShape::Cookie12,
+            other => other,
+        };
+        if let Some(m) = now_playing::material(shape) {
+            let box_ = Rect::from_center_size(c, Vec2::splat((r - 6.0) * 2.0));
+            nikgob_shapes::paint::fill_shape(&painter, now_playing::shape_cubics(m), box_, a.rem_euclid(TAU), s.secondary_container);
+        }
+    }
+    // The marker on the turning part, and an arrow ahead of it.
+    let mr = if ring { r - 4.0 } else { r - 12.0 };
+    painter.circle_filled(c + dir(a) * mr, 4.5, s.primary);
+    if !turning {
+        return;
+    }
+    let ar = r + 1.0;
+    let span = 0.9;
+    let pts: Vec<Pos2> = (0..=16).map(|k| c + dir(a + sign * (0.25 + span * k as f32 / 16.0)) * ar).collect();
+    let stroke = Stroke::new(2.0, s.tertiary);
+    painter.add(Shape::line(pts.clone(), stroke));
+    // Arrowhead at the end, along the way of the turn.
+    let tip = *pts.last().unwrap_or(&c);
+    let th = a + sign * (0.25 + span);
+    let along = vec2(th.cos(), th.sin()) * sign;
+    let out = dir(th);
+    painter.add(Shape::convex_polygon(
+        vec![tip + along * 6.0, tip - along * 2.0 + out * 4.5, tip - along * 2.0 - out * 4.5],
+        s.tertiary,
+        Stroke::NONE,
+    ));
+}
+
+/// Lines of text scrolling up one line at a time; with the cascade the
+/// lines further from the sung one follow later, like a wave.
+fn cascade_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
+    const STEP: f32 = 1.4;
+    let t = anim::now(ui.ctx()) as f32;
+    let (n, f) = ((t / STEP).floor(), (t / STEP).fract() * STEP);
+    let line_h = (rect.height() / 5.0).clamp(14.0, 26.0);
+    let cur_y = rect.center().y;
+    let widths = [0.8, 0.55, 0.7, 0.45, 0.65, 0.75, 0.5, 0.6];
+    for k in -3i32..=4 {
+        // Line `idx` sits `k` lines below the current one after this step.
+        let idx = (n as i32 + k).rem_euclid(widths.len() as i32) as usize;
+        let delay = if prefs.lyrics_cascade { (k.unsigned_abs() as f32) * 0.12 } else { 0.0 };
+        let x = ((f - delay) / 0.45).clamp(0.0, 1.0);
+        let ease = 1.0 - (1.0 - x).powi(3);
+        let y = cur_y + (k as f32 + 1.0 - ease) * line_h;
+        let current = k == 0;
+        let w = (rect.width() - 24.0) * widths[idx];
+        let bar = Rect::from_min_size(pos2(rect.left() + 12.0, y - line_h * 0.22), vec2(w, line_h * 0.44));
+        let color = if current { s.on_surface } else { s.on_surface.gamma_multiply(0.35) };
+        painter.rect_filled(bar, line_h * 0.22, color);
     }
 }
 
@@ -1435,7 +1496,7 @@ mod tests {
         for id in [
             S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::RingDir, S::RingStyle, S::Ambient,
             S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
-            S::OpusBitrate,
+            S::OpusBitrate, S::NpVolume,
         ] {
             assert!(id.choices().len() >= 2, "{id:?}");
             for i in 0..id.choices().len() {

@@ -914,7 +914,8 @@ pub fn show(
     let uri = current.and_then(|t| t.cover.as_ref()).map(|c| c.uri());
     let period = if prefs.cover_spin && motion { 48.0 } else { 0.0 };
     let spin = turn(ui, "np-cover-angle", playing, bass, period, prefs.cover_ccw);
-    let swell = if prefs.cover_pulse { 1.0 + 0.035 * kick } else { 1.0 };
+    // Stronger than in the player, so a small sample shows it.
+    let swell = if prefs.cover_pulse { 1.0 + 0.08 * kick } else { 1.0 };
     // Instant feedback: the cover sinks a little while pressed, so a tap
     // feels taken even while it waits to see whether a second one comes.
     let pressing = (prefs.cover_click_pause || prefs.dbl_click_shape > 0)
@@ -1090,10 +1091,10 @@ pub fn show(
 
 /// «Громкость — при изменении»: a floating pill at the bottom centre that
 /// shows the volume while it changes (wheel, keys, media keys, the menu)
-/// and slips away 1.5 s after the last change; it stays while the pointer
-/// is on it, so it can be dragged too.
+/// and slips away `Prefs::np_volume_pop_hold` after the last change; it
+/// stays while the pointer is on it, so it can be dragged too.
 fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
-    const HOLD: f64 = 1.5;
+    let hold = f64::from(state.prefs.np_volume_pop_hold.clamp(0.3, 5.0));
     let ctx = ui.ctx().clone();
     let theme = Theme::get(&ctx);
     let s = theme.scheme;
@@ -1106,10 +1107,10 @@ fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, o
         .data(|d| d.get_temp::<(f32, bool, f64, bool)>(id))
         .unwrap_or((volume, p.muted, f64::NEG_INFINITY, false));
     let at = if (last - volume).abs() > 1e-4 || muted != p.muted { now } else { at };
-    let shown = held || now - at < HOLD;
+    let shown = held || now - at < hold;
     let k = anim::fraction(&ctx, id.with("k"), if shown { 1.0 } else { 0.0 }, theme.motion.fast_spatial);
     if shown && !held {
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64((at + HOLD - now).max(0.0) + 0.02));
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64((at + hold - now).max(0.0) + 0.02));
     }
     let mut hovered = false;
     if k > 0.001 {
@@ -1163,7 +1164,8 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &nikgob_view::Prefs, with_ring
     let sign = |ccw: bool| if ccw { -1.0 } else { 1.0 };
     // Faster than in the player (48 s and 36 s a turn) so it is seen at all.
     let spin = if prefs.cover_spin && motion { t * TAU / 12.0 * sign(prefs.cover_ccw) } else { 0.0 };
-    let swell = if prefs.cover_pulse { 1.0 + 0.035 * kick } else { 1.0 };
+    // Stronger than in the player, so a small sample shows it.
+    let swell = if prefs.cover_pulse { 1.0 + 0.08 * kick } else { 1.0 };
     let pad = if with_ring { RING_PAD * 0.8 } else { 8.0 };
     let side = (rect.width().min(rect.height()) - 2.0 * pad).max(16.0);
     let cover = Rect::from_center_size(rect.center(), vec2(side, side) * swell);

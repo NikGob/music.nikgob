@@ -250,8 +250,14 @@ impl Md3eUi {
         if let Some(tab) = self.pages.open_pane.take() {
             self.pane = Some(tab);
         }
-        self.pages
-            .overlays(ctx, state, self.content_rect, out);
+        // Snackbars and centred popups: over the content panel, or the whole
+        // window while Now Playing (or the visualizer) covers it.
+        let overlay_area = if self.now_playing || self.chrome.np_covering || self.chrome.visualizer {
+            ctx.content_rect()
+        } else {
+            self.content_rect
+        };
+        self.pages.overlays(ctx, state, overlay_area, out);
         self.chrome.overlays(ctx, state, out);
 
         // Now Playing overlay, transformed out of the floating player: the
