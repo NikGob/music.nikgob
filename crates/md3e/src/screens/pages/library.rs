@@ -535,6 +535,11 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         let row = Rect::from_min_size(pos2(rect.left(), y), vec2(width, ROW_H));
         let id = ui.id().with(("trow", i));
         let resp = ui.interact(row, id, Sense::click());
+        // The # cell is its own button on top of the row: the ▶ shown there
+        // on hover plays with one click (the row itself still needs two).
+        let num_c = pos2((cols.num.0 + cols.num.1) * 0.5, row.center().y);
+        let cell = ui.interact(Rect::from_center_size(num_c, vec2(40.0, 40.0)), id.with("num"), Sense::click());
+        let hovered = resp.hovered() || cell.hovered();
         let track = i.checked_sub(lib.tracks_offset).and_then(|j| lib.tracks.get(j));
         let is_cur = track.is_some_and(|t| current == Some(t.id));
         let (fg, variant, layer_color) = if is_cur {
@@ -553,7 +558,7 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         let layer = anim::fraction(
             ui.ctx(),
             id.with("layer"),
-            if resp.hovered() { state_layer::HOVER } else { 0.0 },
+            if hovered { state_layer::HOVER } else { 0.0 },
             motion.fast_effects,
         );
         paint::state_layer(ui.painter(), row, radii, layer_color, layer);
@@ -572,12 +577,25 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         };
 
         // #: number, ▶ on hover, equalizer on the playing row.
-        let num_c = pos2((cols.num.0 + cols.num.1) * 0.5, cy);
+        let cell_layer = if cell.is_pointer_button_down_on() {
+            state_layer::PRESSED
+        } else if cell.hovered() {
+            state_layer::HOVER
+        } else {
+            0.0
+        };
+        paint::state_layer(
+            ui.painter(),
+            Rect::from_center_size(num_c, vec2(40.0, 40.0)),
+            Radii::all(20.0),
+            layer_color,
+            cell_layer,
+        );
         if is_cur {
             Equalizer::new(("tbl-eq", i), fg)
                 .playing(playing)
                 .paint_at(ui, Rect::from_center_size(num_c, vec2(24.0, 24.0)));
-        } else if resp.hovered() {
+        } else if hovered {
             Icon::PlayArrow.widget(true, variant, 24.0).paint_at(ui, Rect::from_center_size(num_c, vec2(24.0, 24.0)));
         } else {
             let g = plain(ui.painter(), &(i + 1).to_string(), TypeRole::BodyLarge.style(), variant);
@@ -619,7 +637,8 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         let more = mui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("tbl-more-btn", i)));
         nav = pages.track_menu_attach(&more, t, state, out).or(nav);
 
-        if resp.double_clicked() {
+        // A second tap of a double click on ▶ must not pause what the first started.
+        if resp.double_clicked() || (cell.clicked() && !cell.double_clicked()) {
             out.push(if is_cur {
                 Command::TogglePlay
             } else {
