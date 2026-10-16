@@ -31,6 +31,19 @@
 //! discarded, so the target sample is bit-identical to linear decoding).
 //! Multichannel (mapping family > 0) Opus is not supported.
 //!
+//! Opus in WebM/Matroska (YouTube) is demuxed by Symphonia and decoded by
+//! the same `ropus` path; see `decode::symphonia_src` for its timeline and
+//! seeking details.
+//!
+//! # Streams
+//!
+//! [`ItemSource::Stream`] plays encoded bytes from a [`ByteSource`] (a
+//! streaming service's download) exactly like a file. Its opener runs on a
+//! short-lived opener thread, so slow network setup never blocks the
+//! decoder: a `play` of a stream silences the output until it is open, a
+//! `set_next` of one opens in the background and the current item waits at
+//! its end if the stream is still not open.
+//!
 //! # Threads
 //!
 //! * **Audio callback** ([`render`]): lock-free, allocation-free. Drains an
@@ -39,7 +52,7 @@
 //!   visualizer tap. Where things happen in the stream (item boundaries,
 //!   flushes) travels on a second SPSC queue of marks and is applied at the
 //!   exact sample, so `TrackChanged` and position are sample-accurate.
-//! * **Decoder thread** (`pipeline`): opens items, decodes, resamples with
+//! * **Decoder thread** (`pipeline`): opens items (streams on an opener thread), decodes, resamples with
 //!   rubato's FFT resampler, maps channels, applies the normalization gain,
 //!   mixes crossfades, and keeps about 300 ms of audio in the ring. The next
 //!   item is opened and its resampler built ahead of time, so the hand-over
@@ -81,5 +94,6 @@ pub use offline::{OfflineDevice, OfflineOptions};
 pub use player::{Player, PlayerOptions, WakeFn};
 pub use tap::{SNAPSHOT_LEN, VisualizerTap};
 pub use types::{
-    DecodeError, Event, ItemSource, PcmError, PcmRead, PcmSource, PlayItem, SpawnError,
+    ByteSource, DecodeError, Event, ItemSource, PcmError, PcmRead, PcmSource, PlayItem, SpawnError,
+    StreamOpener,
 };

@@ -42,6 +42,11 @@ pub(crate) enum DecCmd {
     Stop {
         gen_id: u64,
     },
+    /// An [`ItemSource::Stream`] finished opening on its opener thread.
+    Opened {
+        token: u64,
+        result: Result<Item, (u64, DecodeError)>,
+    },
     Shutdown,
 }
 
@@ -71,7 +76,7 @@ struct Cfg {
 }
 
 /// An opened but not yet started item.
-struct Item {
+pub(crate) struct Item {
     id: u64,
     gain_db: f32,
     src: Box<dyn FrameSource>,
@@ -84,10 +89,18 @@ struct Item {
 impl Item {
     fn open(item: PlayItem) -> Result<Self, (u64, DecodeError)> {
         let id = item.id;
-        let hint = item.duration_hint;
+        let mut hint = item.duration_hint;
+        let mut gain_db = item.gain_db;
         let src: Box<dyn FrameSource> = match item.source {
             ItemSource::File(path) => Box::new(decode::open_file(&path).map_err(|e| (id, e))?),
             ItemSource::Pcm(pcm) => Box::new(PcmFrames::new(pcm).map_err(|e| (id, e))?),
+            ItemSource::Stream(open) => {
+                let bytes = open().map_err(|m| (id, DecodeError::Stream(m)))?;
+                let (src, info) = decode::open_stream(bytes).map_err(|e| (id, e))?;
+                gain_db = info.gain_db.unwrap_or(gain_db);
+                hint = info.duration.or(hint);
+                Box::new(src)
+            }
         };
         let src_rate = src.sample_rate();
         // A zero length means "unknown" (an unset tag, a FLAC without a
@@ -98,8 +111,8 @@ impl Item {
             .filter(|&n| n > 0);
         Ok(Self {
             id,
-            gain_db: if item.gain_db.is_finite() {
-                item.gain_db.clamp(-60.0, 30.0)
+            gain_db: if gain_db.is_finite() {
+                gain_db.clamp(-60.0, 30.0)
             } else {
                 0.0
             },
@@ -397,6 +410,15 @@ struct Crossfade {
 
 pub(crate) struct Decoder {
     rx: Receiver<DecCmd>,
+    /// Where opener threads post [`DecCmd::Opened`].
+    tx: Sender<DecCmd>,
+    /// Last token handed to an opener thread.
+    open_seq: u64,
+    /// A `Play` of a stream waiting for its opener: `(token, gen_id)`.
+    pending_play: Option<(u64, u64)>,
+    /// A `SetNext` of a stream waiting for its opener (token). While it is
+    /// set, the current item does not end into nothing: it waits.
+    pending_next: Option<u64>,
     events: Sender<DecEvent>,
     sh: Arc<Shared>,
     ring: Producer<f32>,
@@ -428,6 +450,7 @@ enum Step {
 impl Decoder {
     pub(crate) fn new(
         rx: Receiver<DecCmd>,
+        tx: Sender<DecCmd>,
         events: Sender<DecEvent>,
         sh: Arc<Shared>,
         ring: Producer<f32>,
@@ -436,6 +459,10 @@ impl Decoder {
         let ring_capacity = ring.buffer().capacity();
         Self {
             rx,
+            tx,
+            open_seq: 0,
+            pending_play: None,
+            pending_next: None,
             events,
             sh,
             ring,
@@ -517,18 +544,68 @@ impl Decoder {
             DecCmd::SetNext(item) => self.set_next(item),
             DecCmd::ClearNext => {
                 self.next = None;
+                self.pending_next = None;
             }
             DecCmd::Seek { pos, id, gen_id } => self.seek(pos, id, gen_id),
             DecCmd::Stop { gen_id } => {
+                self.pending_play = None;
+                self.pending_next = None;
                 self.last_gen = gen_id;
                 self.cur = None;
                 self.next = None;
                 self.xfade = None;
                 self.push_flush(gen_id, None);
             }
+            DecCmd::Opened { token, result } => self.opened(token, result),
             DecCmd::Shutdown => return false,
         }
         true
+    }
+
+    /// Opens a stream item on its own thread; the result comes back as
+    /// [`DecCmd::Opened`] with the returned token. Counted as a command in
+    /// flight until then (the offline device waits for it).
+    fn open_async(&mut self, item: PlayItem) -> u64 {
+        self.open_seq += 1;
+        let token = self.open_seq;
+        let id = item.id;
+        self.sh.inflight.fetch_add(1, Ordering::AcqRel);
+        let tx = self.tx.clone();
+        let sh = Arc::clone(&self.sh);
+        let spawned = std::thread::Builder::new()
+            .name("nikgob-audio-open".into())
+            .spawn(move || {
+                let result = Item::open(item);
+                if tx.send(DecCmd::Opened { token, result }).is_err() {
+                    sh.inflight.fetch_sub(1, Ordering::AcqRel);
+                }
+            });
+        if let Err(e) = spawned {
+            self.sh.inflight.fetch_sub(1, Ordering::AcqRel);
+            self.report(
+                Some(id),
+                &DecodeError::Stream(format!("cannot start opener: {e}")),
+            );
+        }
+        token
+    }
+
+    /// A stream finished opening: start it, or make it the next item, if it
+    /// is still wanted.
+    fn opened(&mut self, token: u64, result: Result<Item, (u64, DecodeError)>) {
+        if let Some((want, gen_id)) = self.pending_play
+            && want == token
+        {
+            self.pending_play = None;
+            match result {
+                Ok(item) => self.start_item(item, gen_id),
+                Err((id, e)) => self.report(Some(id), &e),
+            }
+        } else if self.pending_next == Some(token) {
+            self.pending_next = None;
+            self.accept_next(result);
+        }
+        // Anything else was superseded meanwhile and is dropped.
     }
 
     fn report(&self, id: Option<u64>, error: &DecodeError) {
@@ -539,24 +616,39 @@ impl Decoder {
     }
 
     fn play(&mut self, item: PlayItem, gen_id: u64) {
-        let active = match Item::open(item) {
+        self.pending_play = None;
+        self.pending_next = None;
+        if item.source.is_stream() {
+            // Cut what plays now and start the stream once it is open.
+            self.last_gen = gen_id;
+            self.play_gen = gen_id;
+            self.xfade = None;
+            self.next = None;
+            self.cur = None;
+            self.push_flush(gen_id, None);
+            let token = self.open_async(item);
+            self.pending_play = Some((token, gen_id));
+            return;
+        }
+        match Item::open(item) {
             Ok(item) => {
-                let _ = self.events.send(DecEvent::Opened {
-                    id: item.id,
-                    duration: item.duration(),
-                });
-                Active::new(item)
+                self.next = None;
+                self.start_item(item, gen_id);
             }
-            Err((id, e)) => {
-                self.report(Some(id), &e);
-                return;
-            }
-        };
+            Err((id, e)) => self.report(Some(id), &e),
+        }
+    }
+
+    fn start_item(&mut self, item: Item, gen_id: u64) {
+        let _ = self.events.send(DecEvent::Opened {
+            id: item.id,
+            duration: item.duration(),
+        });
+        let active = Active::new(item);
         let id = active.id();
         self.last_gen = gen_id;
         self.play_gen = gen_id;
         self.xfade = None;
-        self.next = None;
         self.cur = Some(active);
         self.push_flush(
             gen_id,
@@ -569,7 +661,17 @@ impl Decoder {
     }
 
     fn set_next(&mut self, item: PlayItem) {
-        match Item::open(item) {
+        if item.source.is_stream() {
+            self.next = None;
+            self.pending_next = Some(self.open_async(item));
+            return;
+        }
+        self.pending_next = None;
+        self.accept_next(Item::open(item));
+    }
+
+    fn accept_next(&mut self, result: Result<Item, (u64, DecodeError)>) {
+        match result {
             Ok(item) => {
                 let _ = self.events.send(DecEvent::Opened {
                     id: item.id,
@@ -798,6 +900,12 @@ impl Decoder {
                 Step::Worked
             }
             Ok(StreamRead::Pending) => {
+                self.short_wait = true;
+                Step::Idle
+            }
+            Ok(StreamRead::Eof) if self.pending_next.is_some() => {
+                // The next item is a stream still opening: wait for it
+                // rather than end into nothing.
                 self.short_wait = true;
                 Step::Idle
             }

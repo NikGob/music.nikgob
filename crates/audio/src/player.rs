@@ -399,6 +399,7 @@ impl Parts {
 
         let decoder = Decoder::new(
             dec_rx,
+            dec_tx.clone(),
             dec_ev_tx,
             Arc::clone(&self.shared),
             self.ring_tx,
