@@ -23,7 +23,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select, tick};
-use nikgob_core::model::{EventContext, EventType, LikeTarget, PlaylistId, TrackId};
+use nikgob_core::model::{EventContext, EventType, LikeTarget, PlaylistId, SourceId, SourceKind, TrackId};
+use nikgob_core::streaming::{Service as StreamKind, StreamService};
 use nikgob_library::{Library, ReleaseSortKey, Sort, TrackSortKey};
 use nikgob_view::{Command, LIKED_PLAYLIST, Status, Toast, ViewState};
 use parking_lot::{RwLock, RwLockReadGuard};
@@ -38,12 +39,24 @@ use queue::{Entry, Queue};
 /// How many of the tracks before the current one the queue view lists.
 const HISTORY_SHOWN: usize = 50;
 
-/// What the playback backend should play: a queue entry id and its file.
+/// Where the audio of a [`PlayRequest`] comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlaySource {
+    /// A local file.
+    File(PathBuf),
+    /// A track of a streaming service, opened through the
+    /// [`StreamService`] registered for `service` (`id` is the remote id,
+    /// the locator of the library source).
+    Stream { service: StreamKind, id: String },
+}
+
+/// What the playback backend should play: a queue entry id and its audio.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayRequest {
     pub id: u64,
-    pub path: PathBuf,
-    /// ReplayGain/R128 track gain to apply, in dB.
+    pub source: PlaySource,
+    /// ReplayGain/R128 track gain to apply, in dB (0 for streams: their
+    /// gain comes with the stream).
     pub gain_db: f32,
     pub duration: Option<Duration>,
 }
@@ -117,6 +130,10 @@ pub struct RuntimeConfig {
     pub settings_path: Option<PathBuf>,
     /// Import, Inbox, Trash and lyrics; None = playback only.
     pub import: Option<ImportSetup>,
+    /// The streaming services (at most one per [`StreamKind`]). Tracks whose
+    /// sources are streams play through them; without one, such a source is
+    /// skipped.
+    pub streams: Vec<Arc<dyn StreamService>>,
 }
 
 enum Msg {
@@ -256,6 +273,12 @@ struct Worker {
     exported_rev: u64,
     last_export: Instant,
     import: Option<ImportService>,
+    /// Registered streaming services (see [`RuntimeConfig::streams`]).
+    streams: Vec<Arc<dyn StreamService>>,
+    /// Sources of the playing entry that failed to open, and the one asked
+    /// for last (see [`Worker::request`]).
+    tried: Vec<SourceId>,
+    playing_source: Option<(SourceId, SourceKind)>,
     indexer: Option<Arc<dyn nikgob_core::indexer::Indexer>>,
     /// Last torrent search, indexed like `SearchView::torrents.results`.
     candidates: Vec<nikgob_core::indexer::Candidate>,
@@ -315,6 +338,9 @@ impl Worker {
             candidates: Vec::new(),
             torrents: torrents::Torrents::new(torrent_state, torrent_offline),
             import,
+            streams: config.streams,
+            tried: Vec::new(),
+            playing_source: None,
         }
     }
 
@@ -413,7 +439,7 @@ impl Worker {
         }
         match c {
             Command::TogglePlay => match self.status {
-                Status::Playing => self.pause(),
+                Status::Playing | Status::Buffering => self.pause(),
                 Status::Paused => self.resume(),
                 _ => {
                     if let Some(e) = self.queue.current() {
@@ -740,11 +766,26 @@ impl Worker {
         }
     }
 
-    fn request(&mut self, e: Entry) -> Option<PlayRequest> {
-        let src = self.lib.active_source(e.track).ok().flatten()?;
-        if src.kind != nikgob_core::model::SourceKind::LocalFile {
-            return None;
-        }
+    /// The registered service of a stream kind.
+    fn stream(&self, kind: StreamKind) -> Option<&Arc<dyn StreamService>> {
+        self.streams.iter().find(|s| s.service() == kind)
+    }
+
+    /// What to hand the engine for `e`: its best source that is usable and
+    /// not in `skip` (local > Spotify > YouTube, then quality). A stream
+    /// source needs its service registered. Returns the source too.
+    fn request_skipping(
+        &mut self,
+        e: Entry,
+        skip: &[SourceId],
+    ) -> Option<(PlayRequest, SourceId, SourceKind)> {
+        let mut sources = self.lib.sources_of_track(e.track).ok()?;
+        sources.retain(|s| s.available && !skip.contains(&s.id));
+        sources.sort_by_key(|s| (s.kind.priority(), std::cmp::Reverse(s.quality_score)));
+        let src = sources.into_iter().find(|s| match s.kind.service() {
+            None => true,
+            Some(service) => self.stream(service).is_some(),
+        })?;
         let duration = self
             .lib
             .get_track(e.track)
@@ -752,13 +793,66 @@ impl Worker {
             .flatten()
             .and_then(|t| t.duration_ms)
             .map(|ms| Duration::from_millis(u64::from(ms)));
-        let path = self.res.path(&src.locator);
-        Some(PlayRequest {
+        let (source, gain_db) = match src.kind.service() {
+            None => {
+                let path = self.res.path(&src.locator);
+                let gain = import::file_gain_db(&path);
+                (PlaySource::File(path), gain)
+            }
+            Some(service) => (
+                PlaySource::Stream {
+                    service,
+                    id: src.locator.clone(),
+                },
+                0.0,
+            ),
+        };
+        let req = PlayRequest {
             id: e.id,
-            gain_db: import::file_gain_db(&path),
-            path,
+            source,
+            gain_db,
             duration,
-        })
+        };
+        Some((req, src.id, src.kind))
+    }
+
+    /// [`Self::request_skipping`] with nothing skipped.
+    fn request(&mut self, e: Entry) -> Option<PlayRequest> {
+        self.request_skipping(e, &[]).map(|(req, ..)| req)
+    }
+
+    /// Hands `req` (for the playing entry `e`) to the engine. A stream reads
+    /// Buffering until the engine reports its start.
+    fn play_request(&mut self, e: Entry, req: PlayRequest, source: SourceId, kind: SourceKind) {
+        self.playback.play(req);
+        self.restarted = Some(e.id);
+        self.playing = Some(e);
+        self.playing_source = Some((source, kind));
+        self.status = if kind.is_local() {
+            Status::Playing
+        } else {
+            Status::Buffering
+        };
+    }
+
+    /// The source playing `e` did not open: tries its next source. Returns
+    /// false when there is none left.
+    fn try_next_source(&mut self, e: Entry) -> bool {
+        if let Some((failed, _)) = self.playing_source.take() {
+            self.tried.push(failed);
+        }
+        let skip = self.tried.clone();
+        let Some((req, source, kind)) = self.request_skipping(e, &skip) else {
+            return false;
+        };
+        log::info!("playing {} from its next source ({kind})", e.track);
+        self.play_request(e, req, source, kind);
+        self.position = Duration::ZERO;
+        self.position_at = Instant::now();
+        self.jumped_at = Instant::now();
+        self.preload_next();
+        self.publish_player();
+        true
     }
 
     fn play_list(
@@ -801,18 +895,16 @@ impl Worker {
         // length (otherwise a queue without a single playable file recurses
         // until the stack overflows).
         for attempt in 0..=self.queue.len() {
-            if let Some(req) = self.request(e) {
-                self.playback.play(req);
-                self.restarted = Some(e.id);
-                self.playing = Some(e);
-                self.status = Status::Playing;
+            self.tried.clear();
+            if let Some((req, source, kind)) = self.request_skipping(e, &[]) {
+                self.play_request(e, req, source, kind);
                 self.position = Duration::ZERO;
                 self.position_at = Instant::now();
                 self.jumped_at = Instant::now();
                 let _ = self.lib.record_event(
                     e.track,
                     EventType::Start,
-                    None,
+                    (!kind.is_local()).then_some(kind),
                     Some(0),
                     self.play_context,
                 );
@@ -844,7 +936,7 @@ impl Worker {
     }
 
     fn pause(&mut self) {
-        if self.status == Status::Playing {
+        if matches!(self.status, Status::Playing | Status::Buffering) {
             self.position = self.position_now();
             self.status = Status::Paused;
             self.playback.pause();
@@ -873,6 +965,7 @@ impl Worker {
     fn stop(&mut self) {
         self.playback.stop();
         self.playing = None;
+        self.playing_source = None;
         self.status = Status::Stopped;
         self.position = Duration::ZERO;
         self.publish_now_playing();
@@ -936,6 +1029,9 @@ impl Worker {
                     self.restarted = None;
                 }
                 if self.playing.map(|e| e.id) == Some(id) {
+                    if self.status == Status::Buffering {
+                        self.status = Status::Playing;
+                    }
                     self.position = Duration::ZERO;
                     self.position_at = Instant::now();
                     self.publish_player();
@@ -947,6 +1043,10 @@ impl Worker {
                 // otherwise is repeat-one looping gaplessly: handled below
                 // like any auto-advance, so the position starts over.
                 if self.restarted.take() == Some(to) {
+                    if self.status == Status::Buffering {
+                        self.status = Status::Playing;
+                        self.publish_player();
+                    }
                     return;
                 }
                 if self.queue.peek_auto_next().map(|e| e.id) != Some(to) {
@@ -956,6 +1056,11 @@ impl Worker {
                 self.record_end(false);
                 if let Some(e) = self.queue.advance_auto() {
                     self.playing = Some(e);
+                    self.tried.clear();
+                    // The engine took over what `preload_next` asked for.
+                    self.playing_source = self
+                        .request_skipping(e, &[])
+                        .map(|(_, source, kind)| (source, kind));
                     self.position = Duration::ZERO;
                     self.position_at = Instant::now();
                     let _ = self.lib.record_event(
@@ -1000,8 +1105,19 @@ impl Worker {
             }
             PlaybackEvent::Error { id, message } => {
                 log::error!("playback error on {id}: {message}");
+                let playing = self.playing.filter(|e| e.id == id);
+                if playing.is_none() && self.queue.peek_auto_next().is_some_and(|n| n.id == id) {
+                    // The preloaded next track: it is tried again (with
+                    // all its sources) when its turn comes.
+                    return;
+                }
+                if let Some(e) = playing
+                    && self.try_next_source(e)
+                {
+                    return;
+                }
                 self.toast("Не получилось воспроизвести трек", None);
-                if self.playing.map(|e| e.id) == Some(id) {
+                if playing.is_some() {
                     match self.queue.skip_forward() {
                         Some(e) if e.id != id => self.start(e),
                         _ => self.stop(),

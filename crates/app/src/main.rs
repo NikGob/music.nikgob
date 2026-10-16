@@ -316,6 +316,17 @@ fn main() -> eframe::Result {
     let prefs = load_prefs(&paths);
     let waker = Waker::default();
 
+    // Streaming services. The real ones are wired in a later stage; the demo
+    // gets the deterministic fakes.
+    let streams: Vec<Arc<dyn nikgob_core::streaming::StreamService>> = if demo {
+        vec![
+            Arc::new(nikgob_core::streaming::FakeService::spotify()),
+            Arc::new(nikgob_core::streaming::FakeService::youtube()),
+        ]
+    } else {
+        Vec::new()
+    };
+
     // Audio: the real engine unless disabled.
     let (backend, links): (Box<dyn Playback>, _) = if std::env::var_os("NIKGOB_NO_AUDIO").is_some() {
         (Box::new(NullPlayback), None)
@@ -324,7 +335,7 @@ fn main() -> eframe::Result {
             .output_device
             .clone()
             .filter(|d| prefs.output_devices.contains(d));
-        match audio::Engine::start(device) {
+        match audio::Engine::start(device, streams.clone()) {
             Ok((engine, links)) => (Box::new(engine), Some(links)),
             Err(e) => {
                 log::error!("audio engine failed to start: {e}");
@@ -376,6 +387,7 @@ fn main() -> eframe::Result {
             prefs_path: Some(paths.prefs.clone()),
             settings_path: paths.settings.clone(),
             import: Some(import),
+            streams,
         },
         backend,
         Arc::new(wake.clone()),

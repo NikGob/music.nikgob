@@ -1,18 +1,27 @@
 //! Bridges the audio engine (`nikgob-audio`) to the runtime's `Playback`.
 //!
+//! Stream tracks (Spotify, YouTube) are opened through the registered
+//! [`StreamService`]s: the request becomes an [`ItemSource::Stream`] whose
+//! opener calls `open_audio` on the engine's opener thread, and the
+//! service's [`AudioStream`] is read like a file. Its loudness (when the
+//! service gives one) replaces the item gain, so normalization covers
+//! streams too.
+//!
 //! Switching the output device restarts the engine: the old `Player` is
 //! dropped (its threads stop and the device closes), a new one opens the
 //! chosen device, and the runtime replays the current track from where it
 //! was. Events and the analyzer go through shared slots so the runtime and
 //! the window never hold a stale engine.
 
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
-use nikgob_audio::{Analyzer, Event, ItemSource, PlayItem, Player, PlayerOptions};
-use nikgob_runtime::{PlayRequest, Playback, PlaybackEvent};
+use nikgob_audio::{Analyzer, ByteSource, Event, ItemSource, PlayItem, Player, PlayerOptions};
+use nikgob_core::streaming::{AudioStream, StreamService};
+use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent};
 
 /// The analyzer of the engine that plays right now.
 pub type AnalyzerSlot = Arc<Mutex<Option<Analyzer>>>;
@@ -35,6 +44,7 @@ impl Links {
 pub struct Engine {
     player: Player,
     links: Links,
+    streams: Vec<Arc<dyn StreamService>>,
 }
 
 fn spawn(device: Option<String>, links: &Links) -> Result<Player, String> {
@@ -50,37 +60,90 @@ fn spawn(device: Option<String>, links: &Links) -> Result<Player, String> {
 }
 
 impl Engine {
-    /// Starts the engine on `device` (None = system default).
-    pub fn start(device: Option<String>) -> Result<(Self, Links), String> {
+    /// Starts the engine on `device` (None = system default); stream
+    /// requests play through `streams`.
+    pub fn start(
+        device: Option<String>,
+        streams: Vec<Arc<dyn StreamService>>,
+    ) -> Result<(Self, Links), String> {
         let links = Links::default();
         let player = spawn(device, &links)?;
         Ok((
             Self {
                 player,
                 links: links.clone(),
+                streams,
             },
             links,
         ))
     }
+
+    fn item(&self, r: PlayRequest) -> PlayItem {
+        let source = match r.source {
+            PlaySource::File(path) => ItemSource::File(path),
+            PlaySource::Stream { service, id } => {
+                let svc = self.streams.iter().find(|s| s.service() == service).cloned();
+                ItemSource::Stream(Box::new(move || {
+                    let svc = svc.ok_or_else(|| format!("{service} is not available"))?;
+                    let stream = svc.open_audio(&id).map_err(|e| format!("{service}: {e}"))?;
+                    Ok(Box::new(StreamBytes(stream)) as Box<dyn ByteSource>)
+                }))
+            }
+        };
+        PlayItem {
+            id: r.id,
+            source,
+            gain_db: r.gain_db,
+            duration_hint: r.duration,
+        }
+    }
 }
 
-fn item(r: PlayRequest) -> PlayItem {
-    PlayItem {
-        id: r.id,
-        source: ItemSource::File(r.path),
-        gain_db: r.gain_db,
-        duration_hint: r.duration,
+/// A service's [`AudioStream`] as the engine's [`ByteSource`].
+struct StreamBytes(Box<dyn AudioStream>);
+
+impl Read for StreamBytes {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Seek for StreamBytes {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
+impl ByteSource for StreamBytes {
+    fn byte_len(&self) -> Option<u64> {
+        self.0.byte_len()
+    }
+
+    fn format_hint(&self) -> &str {
+        self.0.format_hint()
+    }
+
+    fn gain_db(&self) -> Option<f32> {
+        self.0.gain_db()
+    }
+
+    fn duration(&self) -> Option<Duration> {
+        self.0.duration()
     }
 }
 
 impl Playback for Engine {
     fn play(&mut self, req: PlayRequest) {
-        self.player.play(item(req));
+        let item = self.item(req);
+        self.player.play(item);
     }
 
     fn set_next(&mut self, next: Option<PlayRequest>) {
         match next {
-            Some(r) => self.player.set_next(item(r)),
+            Some(r) => {
+                let item = self.item(r);
+                self.player.set_next(item);
+            }
             None => self.player.clear_next(),
         }
     }

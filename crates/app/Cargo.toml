@@ -12,7 +12,7 @@ name = "nikgob"
 path = "src/main.rs"
 
 [dependencies]
-nikgob-core.workspace = true
+nikgob-core = { workspace = true, features = ["fake"] }
 nikgob-md3e.workspace = true
 nikgob-view.workspace = true
 nikgob-runtime = { path = "../runtime" }

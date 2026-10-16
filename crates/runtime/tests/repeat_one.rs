@@ -49,6 +49,7 @@ fn playing_on_repeat_one() -> (Runtime, u64) {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib,
+            streams: Vec::new(),
             library_dir: std::env::temp_dir(),
             prefs: Prefs::default(),
             prefs_path: None,

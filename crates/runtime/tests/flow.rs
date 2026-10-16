@@ -59,6 +59,7 @@ fn import_retag_trash_undo() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -177,6 +178,7 @@ fn torrent_download_imports_and_cleans_up() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -216,6 +218,7 @@ fn torrent_download_imports_and_cleans_up() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -251,6 +254,7 @@ fn queue_without_playable_files_does_not_loop_forever() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib,
+            streams: Vec::new(),
             library_dir: std::env::temp_dir(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -290,6 +294,7 @@ fn pausing_a_folder_import_never_reaches_the_torrent_client() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: Library::open_in_memory().unwrap(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -346,6 +351,7 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: Some(prefs_path.clone()),
@@ -414,6 +420,7 @@ fn custom_playlist_cover_copy_goes_when_switching_to_auto() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -458,6 +465,7 @@ fn volume_and_queue_come_back_after_a_restart_paused_in_place() {
         Runtime::start(
             RuntimeConfig {
                 library: lib.clone(),
+                streams: Vec::new(),
                 library_dir: cfg.library_dir.clone(),
                 prefs: Prefs::default(),
                 prefs_path: Some(root.join("prefs.json")),

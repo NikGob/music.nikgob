@@ -111,6 +111,7 @@ fn setting_and_manual_pick_embed_tags_without_sidecars_or_duplicate_tracks() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: Some(prefs_path.clone()),
