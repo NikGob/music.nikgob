@@ -207,6 +207,31 @@ fn torrent_download_imports_and_cleans_up() {
         .filter(|n| n.ends_with(".wav"))
         .collect();
     assert_eq!(masters.len(), 2, "{masters:?}: the lossless originals are kept as masters");
+    // One line in the history (not one more from the backfill of older
+    // torrents), and it is still there after a restart.
+    let album_rows = |s: &ViewState| s.downloads.history.iter().filter(|j| j.title == "Album").count();
+    assert_eq!(album_rows(&rt.state()), 1);
+    assert_eq!(lib.job_log(Some("torrent"), 10).unwrap().len(), 1);
+    drop(rt);
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            library_dir: cfg.library_dir.clone(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: Some(ImportSetup {
+                config: cfg.clone(),
+                metadata: None,
+                watch_inbox: false,
+                torrent_state_dir: root.join("torrent-state"),
+                torrent_offline: true,
+            }),
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    wait_for(&rt, "the history after a restart", |s| album_rows(s) == 1);
 }
 
 /// Repeat-all over a queue where nothing has a file used to recurse forever

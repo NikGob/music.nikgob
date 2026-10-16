@@ -481,6 +481,31 @@ impl Worker {
             }
             self.import_torrent(t);
         }
+        // Finished before the history was kept (or its line got lost):
+        // log it now, so it stays in "История" after seeding is over.
+        for t in list.iter().filter(|t| complete(t)) {
+            let done = downloads
+                .get(&t.info_hash)
+                .is_some_and(|d| matches!(d.status, DownloadStatus::Seeding | DownloadStatus::Done));
+            if done && !t.name.is_empty() && !self.torrents.history.iter().any(|j| j.title == t.name) {
+                let subtitle = format!("Скачано {}", human_bytes(t.total));
+                if let Err(e) = self.lib.log_job("torrent", &t.name, &subtitle, None) {
+                    log::warn!("job log: {e}");
+                }
+                self.torrents.history.push_back(v::Job {
+                    id: t.id,
+                    title: t.name.clone(),
+                    subtitle,
+                    progress: Some(1.0),
+                    rate: None,
+                    eta: None,
+                    paused: false,
+                    controllable: false,
+                    error: None,
+                });
+                self.torrents.last_view = None;
+            }
+        }
 
         let seed_days = self.state.read().prefs.seed_days;
         let active: Vec<v::Job> = list.iter().filter(|t| !complete(t)).map(job).collect();
