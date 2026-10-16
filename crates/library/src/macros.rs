@@ -23,7 +23,7 @@ macro_rules! release_liked_expr {
                                                     AND l.target_id = t.id AND l.deleted = 0))
                  END
             FROM track t
-           WHERE t.release_id = r.id AND t.deleted_at IS NULL
+           WHERE t.release_id = r.id AND t.deleted_at IS NULL AND t.in_library = 1
              AND (t.has_local = 1 OR NOT EXISTS (
                      SELECT 1 FROM track t2 WHERE t2.release_id = r.id
                         AND t2.deleted_at IS NULL AND t2.has_local = 1)))"

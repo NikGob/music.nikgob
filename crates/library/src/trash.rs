@@ -17,6 +17,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::catalog::{SOURCE_COLS, refresh_active, source_by_id, source_from_row, track_row_at};
 use crate::db::Library;
 use crate::error::{LibraryError, Result};
+use crate::streams::refresh_in_library;
 use crate::types::{DeletedTrack, PurgedFile, PurgedTrack, TrashEntry};
 use crate::util::{get_id, now_ms};
 
@@ -155,6 +156,13 @@ impl Library {
                 ),
                 [cutoff],
             )?;
+            // A stream track whose last downloaded file is gone for good is
+            // a stream track again.
+            let mut touched: Vec<String> = purged.iter().map(|p| p.track_id.to_string()).collect();
+            touched.dedup();
+            for t in &touched {
+                refresh_in_library(tx, t)?;
+            }
             Ok(purged)
         })
     }

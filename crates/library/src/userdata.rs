@@ -7,7 +7,11 @@
 //! * `playlists.json` - playlists with their entries, tombstones included;
 //! * `likes.json` - the LWW like set, tombstones included;
 //! * `events.jsonl` - one event per line, oldest first (append-friendly: tools
-//!   may append lines, import ignores ids it already has).
+//!   may append lines, import ignores ids it already has);
+//! * `streams.json` - the stream-only tracks the likes and playlists point at
+//!   (no file to rebuild them from): their ids and their remote ids and
+//!   metadata per service, so an import recreates them under the same ids.
+//!   Written only once there is something to write.
 //!
 //! Every file is written to a temp file and renamed into place. Import merges
 //! with last-writer-wins per row: the copy with the larger `updated_at` wins;
@@ -19,7 +23,8 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
-use nikgob_core::model::{Event, Like, Playlist, PlaylistEntry, Uuid};
+use nikgob_core::model::{Event, Like, Playlist, PlaylistEntry, TrackId, Uuid};
+use nikgob_core::streaming::StreamTrack;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +32,7 @@ use crate::db::Library;
 use crate::error::{LibraryError, Result};
 use crate::events::insert_event;
 use crate::playlists::{ENTRY_COLS, PLAYLIST_COLS, entry_from_row, playlist_from_row};
+use crate::streams::{refresh_in_library_all, stream_refs_in, upsert_stream_track_in};
 use crate::types::{ExportReport, ImportReport};
 use crate::util::{meta_get, meta_set};
 
@@ -36,6 +42,7 @@ pub const USERDATA_VERSION: u32 = 1;
 pub const PLAYLISTS_FILE: &str = "playlists.json";
 pub const LIKES_FILE: &str = "likes.json";
 pub const EVENTS_FILE: &str = "events.jsonl";
+pub const STREAMS_FILE: &str = "streams.json";
 
 #[derive(Serialize, Deserialize)]
 struct PlaylistsFile {
@@ -49,6 +56,19 @@ struct PlaylistDoc {
     playlist: Playlist,
     #[serde(default)]
     entries: Vec<PlaylistEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StreamsFile {
+    version: u32,
+    tracks: Vec<StreamDoc>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StreamDoc {
+    track_id: TrackId,
+    /// One per service the track streams from.
+    refs: Vec<StreamTrack>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -118,9 +138,10 @@ impl Library {
         let events_path = dir.join(EVENTS_FILE);
 
         // One snapshot for everything.
-        let (playlists, likes, events_done, event_count) = self.read(|c| {
+        let (playlists, likes, streams, events_done, event_count) = self.read(|c| {
             let playlists = read_playlists(c)?;
             let likes = read_likes(c)?;
+            let streams = read_streams(c)?;
             let event_count: u64 =
                 c.query_row("SELECT COUNT(*) FROM event", [], |r| r.get::<_, i64>(0))? as u64;
             let up_to_date = events_path.exists()
@@ -129,7 +150,7 @@ impl Library {
             if !up_to_date {
                 atomic_with(&events_path, |w| write_events(c, w))?;
             }
-            Ok((playlists, likes, up_to_date, event_count))
+            Ok((playlists, likes, streams, up_to_date, event_count))
         })?;
 
         let mut report = ExportReport {
@@ -137,8 +158,17 @@ impl Library {
             playlist_entries: playlists.iter().map(|p| p.entries.len()).sum(),
             likes: likes.len(),
             events: event_count as usize,
+            stream_tracks: streams.len(),
             files_written: usize::from(!events_done),
         };
+        let streams_path = dir.join(STREAMS_FILE);
+        if !streams.is_empty() || streams_path.exists() {
+            let json = serde_json::to_vec_pretty(&StreamsFile {
+                version: USERDATA_VERSION,
+                tracks: streams,
+            })?;
+            report.files_written += usize::from(write_atomic(&streams_path, &json)?);
+        }
 
         let playlists_json = serde_json::to_vec_pretty(&PlaylistsFile {
             version: USERDATA_VERSION,
@@ -165,9 +195,11 @@ impl Library {
 
         let playlists: Option<PlaylistsFile> = read_json(&dir.join(PLAYLISTS_FILE))?;
         let likes: Option<LikesFile> = read_json(&dir.join(LIKES_FILE))?;
+        let streams: Option<StreamsFile> = read_json(&dir.join(STREAMS_FILE))?;
         for version in [
             playlists.as_ref().map(|f| f.version),
             likes.as_ref().map(|f| f.version),
+            streams.as_ref().map(|f| f.version),
         ]
         .into_iter()
         .flatten()
@@ -201,6 +233,12 @@ impl Library {
                 invalid_lines,
                 ..ImportReport::default()
             };
+            for doc in streams.iter().flat_map(|f| &f.tracks) {
+                for r in &doc.refs {
+                    upsert_stream_track_in(tx, r, Some(doc.track_id))?;
+                }
+                report.stream_tracks += 1;
+            }
             for doc in playlists.iter().flat_map(|f| &f.playlists) {
                 merge_playlist(tx, &doc.playlist, &mut report)?;
                 for entry in &doc.entries {
@@ -215,6 +253,8 @@ impl Library {
                     report.events_added += 1;
                 }
             }
+            // Likes and entries came in: stream tracks may join or leave.
+            refresh_in_library_all(tx)?;
             Ok(report)
         })
     }
@@ -245,6 +285,35 @@ fn read_playlists(conn: &Connection) -> Result<Vec<PlaylistDoc>> {
             Ok(PlaylistDoc { playlist, entries })
         })
         .collect()
+}
+
+/// Stream-only tracks (no local source row) that a live like or a live
+/// playlist entry points at.
+fn read_streams(conn: &Connection) -> Result<Vec<StreamDoc>> {
+    let ids: Vec<TrackId> = {
+        let mut stmt = conn.prepare(
+            "SELECT t.id FROM track t
+              WHERE NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id
+                                   AND s.kind = 'local_file')
+                AND EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id
+                               AND s.kind != 'local_file' AND s.trashed_at IS NULL)
+                AND (EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track'
+                                AND l.target_id = t.id AND l.deleted = 0)
+                     OR EXISTS (SELECT 1 FROM playlist_entry e WHERE e.track_id = t.id
+                                   AND e.deleted = 0))
+              ORDER BY t.id",
+        )?;
+        let rows = stmt.query_map([], |r| crate::util::get_id(r, 0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut out = Vec::new();
+    for track_id in ids {
+        let refs = stream_refs_in(conn, track_id)?;
+        if !refs.is_empty() {
+            out.push(StreamDoc { track_id, refs });
+        }
+    }
+    Ok(out)
 }
 
 fn read_likes(conn: &Connection) -> Result<Vec<Like>> {

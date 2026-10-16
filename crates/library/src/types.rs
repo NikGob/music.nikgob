@@ -261,8 +261,24 @@ pub struct ExportReport {
     pub playlist_entries: usize,
     pub likes: usize,
     pub events: usize,
+    /// Stream-only tracks written to `streams.json` (liked or in playlists).
+    pub stream_tracks: usize,
     /// Files whose content actually changed on disk.
     pub files_written: usize,
+}
+
+/// A library playlist linked to a playlist in a streaming service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaylistRemote {
+    pub playlist_id: nikgob_core::model::PlaylistId,
+    pub remote: nikgob_core::streaming::RemoteId,
+    pub sync_mode: nikgob_core::streaming::PlaylistSyncMode,
+    /// The service's snapshot id / etag at the last sync.
+    pub remote_version: Option<String>,
+    pub synced_at: Option<nikgob_core::model::UnixMs>,
+    /// The content at the last sync (JSON, shape owned by the sync code):
+    /// the base of a three-way merge.
+    pub base_json: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +288,8 @@ pub struct ImportReport {
     /// Rows ignored because the local copy was newer (or identical).
     pub skipped: usize,
     pub events_added: usize,
+    /// Stream tracks recreated (or re-linked) from `streams.json`.
+    pub stream_tracks: usize,
     /// Unparsable lines in `events.jsonl`.
     pub invalid_lines: usize,
 }

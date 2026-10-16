@@ -27,6 +27,7 @@ mod migrations;
 mod photos;
 mod playlists;
 pub mod search;
+mod streams;
 mod trash;
 mod types;
 mod userdata;
@@ -43,9 +44,10 @@ pub use migrations::SCHEMA_VERSION;
 pub use playlists::LIKED_PLAYLIST_NAME;
 pub use types::{
     ArtistRow, ArtistSort, ArtistSortKey, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
-    PlaylistEntryRow, PlaylistKind, PlaylistSummary, PurgedFile, PurgedTrack, ReleaseProgress,
+    PlaylistEntryRow, PlaylistKind, PlaylistRemote, PlaylistSummary, PurgedFile, PurgedTrack,
+    ReleaseProgress,
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,
     TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };
-pub use userdata::{EVENTS_FILE, LIKES_FILE, PLAYLISTS_FILE, USERDATA_VERSION};
+pub use userdata::{EVENTS_FILE, LIKES_FILE, PLAYLISTS_FILE, STREAMS_FILE, USERDATA_VERSION};
 pub use util::{fold, now_ms, sort_key};

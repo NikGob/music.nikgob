@@ -19,6 +19,7 @@ use crate::catalog::{
 use crate::db::Library;
 use crate::error::{LibraryError, Result};
 use crate::fractional::{key_between, n_keys_between};
+use crate::streams::{refresh_in_library, refresh_in_library_of_playlist};
 use crate::types::{
     ArtistRow, PlaylistEntryRow, PlaylistKind, PlaylistSummary, ReleaseRow, TrackRow,
 };
@@ -201,6 +202,7 @@ fn insert_entry(
             device.as_str()
         ],
     )?;
+    refresh_in_library(conn, &track.to_string())?;
     Ok(entry)
 }
 
@@ -273,6 +275,7 @@ impl Library {
                 "UPDATE playlist SET deleted = 1, updated_at = ?2, updated_by = ?3 WHERE id = ?1",
                 params![id.to_string(), now, device.as_str()],
             )?;
+            refresh_in_library_of_playlist(tx, &id.to_string())?;
             Ok(())
         })
     }
@@ -413,12 +416,13 @@ impl Library {
         let device = self.device_id();
         let now = self.tick();
         self.write(|tx| {
-            live_entry(tx, entry)?;
+            let removed = live_entry(tx, entry)?;
             tx.execute(
                 "UPDATE playlist_entry SET deleted = 1, updated_at = ?2, updated_by = ?3
                   WHERE id = ?1",
                 params![entry.to_string(), now, device.as_str()],
             )?;
+            refresh_in_library(tx, &removed.track_id.to_string())?;
             Ok(())
         })
     }
@@ -451,6 +455,9 @@ impl Library {
                     deleted
                 ],
             )?;
+            if let LikeTarget::Track(t) = target {
+                refresh_in_library(tx, &t.to_string())?;
+            }
             Ok(())
         })
     }
@@ -554,6 +561,9 @@ impl Library {
                 upsert.execute(params!["track", id, at, device.as_str(), !on])?;
             }
             upsert.execute(params!["release", rid, now, device.as_str(), !on])?;
+            for id in &ids {
+                refresh_in_library(tx, id)?;
+            }
             ids.iter().map(|s| s.parse().map_err(|_| LibraryError::Invalid(s.clone()))).collect()
         })
     }

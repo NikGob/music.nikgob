@@ -6,8 +6,9 @@
 //! torrent client, so they stay out of the CRDT-synced user data.
 
 use nikgob_core::model::{
-    Codec, DeviceId, Download, DownloadStatus, Master, Replica, SeedPolicy, SourceOrigin, TrackId,
-    WishlistId, WishlistItem, WishlistStatus,
+    Codec, DeviceId, Download, DownloadStatus, Master, ReleaseId, Replica, SeedPolicy,
+    SourceOrigin, TrackId, WishlistId, WishlistItem, WishlistOrigin, WishlistScope,
+    WishlistStatus,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -91,7 +92,8 @@ fn download_from_row(row: &Row<'_>) -> rusqlite::Result<Download> {
 }
 
 const WISHLIST_COLS: &str = "id, title, artist, recording_mbid, isrc, spotify_id, youtube_id, \
-    status, candidates_json, created_at, updated_at";
+    status, candidates_json, created_at, updated_at, track_id, release_id, scope, origin, \
+    attempts, next_try_at, note";
 
 fn wishlist_from_row(row: &Row<'_>) -> rusqlite::Result<WishlistItem> {
     Ok(WishlistItem {
@@ -106,6 +108,13 @@ fn wishlist_from_row(row: &Row<'_>) -> rusqlite::Result<WishlistItem> {
         candidates_json: row.get(8)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+        track_id: get_opt_id(row, 11)?,
+        release_id: get_opt_id(row, 12)?,
+        scope: get_enum::<WishlistScope>(row, 13)?,
+        origin: get_enum::<WishlistOrigin>(row, 14)?,
+        attempts: row.get::<_, i64>(15)?.max(0) as u32,
+        next_try_at: row.get(16)?,
+        note: row.get(17)?,
     })
 }
 
@@ -381,14 +390,20 @@ impl Library {
         self.write(|tx| {
             tx.execute(
                 "INSERT INTO wishlist(id, title, artist, recording_mbid, isrc, spotify_id,
-                                      youtube_id, status, candidates_json, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                                      youtube_id, status, candidates_json, created_at, updated_at,
+                                      track_id, release_id, scope, origin, attempts, next_try_at,
+                                      note)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                         ?17, ?18)
                  ON CONFLICT(id) DO UPDATE SET
                     title = excluded.title, artist = excluded.artist,
                     recording_mbid = excluded.recording_mbid, isrc = excluded.isrc,
                     spotify_id = excluded.spotify_id, youtube_id = excluded.youtube_id,
                     status = excluded.status, candidates_json = excluded.candidates_json,
-                    updated_at = excluded.updated_at",
+                    updated_at = excluded.updated_at, track_id = excluded.track_id,
+                    release_id = excluded.release_id, scope = excluded.scope,
+                    origin = excluded.origin, attempts = excluded.attempts,
+                    next_try_at = excluded.next_try_at, note = excluded.note",
                 params![
                     w.id.to_string(),
                     w.title,
@@ -400,7 +415,14 @@ impl Library {
                     w.status.as_str(),
                     w.candidates_json,
                     w.created_at,
-                    w.updated_at
+                    w.updated_at,
+                    w.track_id.map(|t| t.to_string()),
+                    w.release_id.map(|r| r.to_string()),
+                    w.scope.as_str(),
+                    w.origin.as_str(),
+                    w.attempts,
+                    w.next_try_at,
+                    w.note
                 ],
             )?;
             Ok(())
@@ -428,6 +450,68 @@ impl Library {
                 .query_map([status.as_str()], wishlist_from_row)?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(rows)
+        })
+    }
+
+    /// Every wishlist item, oldest first.
+    pub fn list_wishlist(&self) -> Result<Vec<WishlistItem>> {
+        self.wishlist_where("1 ORDER BY created_at, id", rusqlite::params![])
+    }
+
+    /// Items for a track, oldest first.
+    pub fn wishlist_for_track(&self, track: TrackId) -> Result<Vec<WishlistItem>> {
+        self.wishlist_where("track_id = ?1 ORDER BY created_at, id", rusqlite::params![track.to_string()])
+    }
+
+    /// Items for an album, oldest first.
+    pub fn wishlist_for_release(&self, release: ReleaseId) -> Result<Vec<WishlistItem>> {
+        self.wishlist_where("release_id = ?1 ORDER BY created_at, id", rusqlite::params![release.to_string()])
+    }
+
+    /// Items in `status` whose `next_try_at` is unset or not after `now`,
+    /// oldest first, at most `limit`.
+    pub fn wishlist_due(
+        &self,
+        status: WishlistStatus,
+        now: nikgob_core::model::UnixMs,
+        limit: u32,
+    ) -> Result<Vec<WishlistItem>> {
+        self.wishlist_where(
+            "status = ?1 AND (next_try_at IS NULL OR next_try_at <= ?2)
+              ORDER BY created_at, id LIMIT ?3",
+            rusqlite::params![status.as_str(), now, limit],
+        )
+    }
+
+    fn wishlist_where(
+        &self,
+        filter: &str,
+        params: &[&dyn rusqlite::ToSql],
+    ) -> Result<Vec<WishlistItem>> {
+        self.read(|c| {
+            let mut stmt =
+                c.prepare(&format!("SELECT {WISHLIST_COLS} FROM wishlist WHERE {filter}"))?;
+            let rows = stmt
+                .query_map(params, wishlist_from_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Sets the status (and note, when given) of an item, stamping
+    /// `updated_at`. Returns whether the item exists.
+    pub fn set_wishlist_status(
+        &self,
+        id: WishlistId,
+        status: WishlistStatus,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        self.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE wishlist SET status = ?2, note = coalesce(?3, note), updated_at = ?4
+                  WHERE id = ?1",
+                params![id.to_string(), status.as_str(), note, now_ms()],
+            )? > 0)
         })
     }
 
@@ -652,6 +736,7 @@ mod tests {
             candidates_json: Some("[]".into()),
             created_at: created,
             updated_at: created,
+            ..WishlistItem::new(WishlistStatus::New, created)
         };
         let a = mk("A", WishlistStatus::New, 1);
         let b = mk("B", WishlistStatus::New, 2);
@@ -685,11 +770,65 @@ mod tests {
 
         assert!(lib.delete_wishlist_item(b.id).unwrap());
         assert!(!lib.delete_wishlist_item(b.id).unwrap());
+        assert_eq!(lib.list_wishlist().unwrap().len(), 2);
         assert_eq!(
             lib.list_wishlist_by_status(WishlistStatus::New)
                 .unwrap()
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn wishlist_stage3_fields_and_lookups() {
+        let lib = lib();
+        let track = TrackId::new();
+        let release = ReleaseId::new();
+        let mut w = WishlistItem::new(WishlistStatus::Waiting, 10);
+        w.track_id = Some(track);
+        w.release_id = Some(release);
+        w.scope = WishlistScope::Album;
+        w.origin = WishlistOrigin::Import;
+        w.attempts = 2;
+        w.next_try_at = Some(1_000);
+        w.note = Some("нет раздачи".into());
+        lib.put_wishlist_item(&w).unwrap();
+        assert_eq!(lib.get_wishlist_item(w.id).unwrap().unwrap(), w);
+        assert_eq!(lib.wishlist_for_track(track).unwrap(), vec![w.clone()]);
+        assert_eq!(lib.wishlist_for_release(release).unwrap(), vec![w.clone()]);
+        assert!(lib.wishlist_for_track(TrackId::new()).unwrap().is_empty());
+
+        let mut other = WishlistItem::new(WishlistStatus::Waiting, 20);
+        other.title = Some("x".into());
+        lib.put_wishlist_item(&other).unwrap();
+        let due = lib.wishlist_due(WishlistStatus::Waiting, 500, 10).unwrap();
+        assert_eq!(due, vec![other.clone()], "the first one waits until 1000");
+        assert_eq!(lib.wishlist_due(WishlistStatus::Waiting, 1_000, 1).unwrap(), vec![w.clone()]);
+
+        assert!(lib.set_wishlist_status(w.id, WishlistStatus::Dismissed, None).unwrap());
+        let got = lib.get_wishlist_item(w.id).unwrap().unwrap();
+        assert_eq!(got.status, WishlistStatus::Dismissed);
+        assert_eq!(got.note.as_deref(), Some("нет раздачи"));
+        assert!(!lib.set_wishlist_status(WishlistId::new(), WishlistStatus::Done, None).unwrap());
+    }
+
+    #[test]
+    fn old_wishlist_rows_read_with_defaults() {
+        let lib = lib();
+        lib.write(|tx| {
+            tx.execute(
+                "INSERT INTO wishlist(id, title, status, created_at, updated_at)
+                 VALUES (?1, 'old', 'searching', 1, 1)",
+                [WishlistId::new().to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let all = lib.list_wishlist().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].status, WishlistStatus::Searching);
+        assert_eq!(all[0].scope, WishlistScope::Track);
+        assert_eq!(all[0].origin, WishlistOrigin::Manual);
+        assert_eq!(all[0].attempts, 0);
     }
 }

@@ -33,7 +33,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 pub use crate::indexer::BoxFuture;
-use crate::model::{ReleaseType, SourceKind, UnixMs};
+use crate::model::{Codec, ReleaseType, SourceKind, UnixMs, score};
 
 #[cfg(feature = "fake")]
 mod fake;
@@ -77,6 +77,32 @@ impl Service {
         match self {
             Self::Spotify => "Spotify",
             Self::Youtube => "YouTube Music",
+        }
+    }
+
+    /// Codec of the audio the service streams (YouTube also has AAC
+    /// formats; Opus is what is asked for).
+    pub fn codec(self) -> Codec {
+        match self {
+            Self::Spotify => Codec::Vorbis,
+            Self::Youtube => Codec::Opus,
+        }
+    }
+
+    /// Nominal bitrate of the stream in kbps.
+    pub const fn bitrate_kbps(self) -> u32 {
+        match self {
+            Self::Spotify => 320,
+            Self::Youtube => 160,
+        }
+    }
+
+    /// `quality_score` of the library source of a stream: below every
+    /// local file ([`crate::model::score`]).
+    pub const fn quality_score(self) -> i32 {
+        match self {
+            Self::Spotify => score::STREAM_SPOTIFY,
+            Self::Youtube => score::STREAM_YOUTUBE,
         }
     }
 
@@ -179,6 +205,41 @@ impl fmt::Display for RemoteId {
     /// `spotify:4uLU6hMCjMI75M1A2tKUQC`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.service, self.id)
+    }
+}
+
+/// How a library playlist follows its counterpart in a service.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistSyncMode {
+    /// Changes go both ways (our edits are pushed to the service).
+    TwoWay,
+    /// The service is followed: its changes come to us, ours stay local.
+    #[default]
+    Follow,
+    /// A one-time snapshot, never synced again.
+    Once,
+}
+
+impl PlaylistSyncMode {
+    pub const ALL: &'static [Self] = &[Self::TwoWay, Self::Follow, Self::Once];
+
+    /// Stable name in the database (`playlist_remote.sync_mode`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TwoWay => "two_way",
+            Self::Follow => "follow",
+            Self::Once => "once",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "two_way" => Some(Self::TwoWay),
+            "follow" => Some(Self::Follow),
+            "once" => Some(Self::Once),
+            _ => None,
+        }
     }
 }
 
@@ -563,6 +624,15 @@ mod tests {
             Service::try_from(SourceKind::LocalFile),
             Err(SourceKind::LocalFile)
         );
+    }
+
+    #[test]
+    fn sync_mode_strings() {
+        for &m in PlaylistSyncMode::ALL {
+            assert_eq!(PlaylistSyncMode::parse(m.as_str()), Some(m));
+            assert_eq!(serde_json::to_string(&m).unwrap(), format!("\"{}\"", m.as_str()));
+        }
+        assert_eq!(PlaylistSyncMode::default(), PlaylistSyncMode::Follow);
     }
 
     #[test]

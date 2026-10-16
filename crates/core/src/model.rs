@@ -266,15 +266,59 @@ impl Default for EventContext {
 }
 
 str_enum!(
+    /// Where a wishlist item stands (docs/stage3.md §3.7).
     pub enum WishlistStatus {
+        /// Imported, waits for the user's "download" (bulk buttons).
+        Waiting = "waiting",
+        /// To be searched for automatically.
         New = "new",
         Searching = "searching",
+        /// A doubtful match waits for the user.
         Confirm = "confirm",
         Downloading = "downloading",
         Done = "done",
+        /// Nothing found; searched again later (`next_try_at`).
+        NoTorrent = "no_torrent",
         Failed = "failed",
+        /// The user said no: never offered again.
+        Dismissed = "dismissed",
     }
 );
+
+str_enum!(
+    /// What a wishlist item wants downloaded.
+    pub enum WishlistScope {
+        Track = "track",
+        Album = "album",
+    }
+);
+
+#[allow(clippy::derivable_impls)]
+impl Default for WishlistScope {
+    fn default() -> Self {
+        Self::Track
+    }
+}
+
+str_enum!(
+    /// Why a wishlist item exists.
+    pub enum WishlistOrigin {
+        /// The user liked a stream track or album.
+        Like = "like",
+        /// Brought in by an import of likes / playlists.
+        Import = "import",
+        /// A like or playlist that arrived from a service sync.
+        Sync = "sync",
+        Manual = "manual",
+    }
+);
+
+#[allow(clippy::derivable_impls)]
+impl Default for WishlistOrigin {
+    fn default() -> Self {
+        Self::Manual
+    }
+}
 
 str_enum!(
     pub enum DownloadStatus {
@@ -391,6 +435,11 @@ pub mod score {
     /// A "lossless" file whose spectrum is cut like a lossy one. Below MP3 V0.
     pub const FAKE_LOSSLESS: i32 = 690;
     pub const OTHER: i32 = 300;
+    /// A Spotify stream (Vorbis 320). Below every local file: a downloaded
+    /// copy always wins, whatever its codec.
+    pub const STREAM_SPOTIFY: i32 = 290;
+    /// A YouTube stream (Opus ~160 or AAC), below Spotify.
+    pub const STREAM_YOUTUBE: i32 = 280;
 }
 
 /// Ranks a source by quality, PLAN §6:
@@ -906,6 +955,51 @@ pub struct WishlistItem {
     pub candidates_json: Option<String>,
     pub created_at: UnixMs,
     pub updated_at: UnixMs,
+    /// The library track it is for (a stream track until the file arrives).
+    #[serde(default)]
+    pub track_id: Option<TrackId>,
+    /// The album, for [`WishlistScope::Album`] (or the track's album).
+    #[serde(default)]
+    pub release_id: Option<ReleaseId>,
+    #[serde(default)]
+    pub scope: WishlistScope,
+    #[serde(default)]
+    pub origin: WishlistOrigin,
+    /// Searches done so far.
+    #[serde(default)]
+    pub attempts: u32,
+    /// Not searched again before this time (unix ms).
+    #[serde(default)]
+    pub next_try_at: Option<UnixMs>,
+    /// Free text for the user (why it failed, what was chosen).
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+impl WishlistItem {
+    /// A fresh item in `status`, stamped `now`, with every optional field empty.
+    pub fn new(status: WishlistStatus, now: UnixMs) -> Self {
+        Self {
+            id: WishlistId::new(),
+            title: None,
+            artist: None,
+            recording_mbid: None,
+            isrc: None,
+            spotify_id: None,
+            youtube_id: None,
+            status,
+            candidates_json: None,
+            created_at: now,
+            updated_at: now,
+            track_id: None,
+            release_id: None,
+            scope: WishlistScope::Track,
+            origin: WishlistOrigin::Manual,
+            attempts: 0,
+            next_try_at: None,
+            note: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1031,6 +1125,9 @@ mod tests {
         assert!(v0 > fake, "fake FLAC is below MP3 V0");
         assert!(fake > mp3_128);
         assert!(mp3_128 > other);
+        // Streams rank below every local file, YouTube below Spotify.
+        assert!(score::STREAM_SPOTIFY < other.min(q(Codec::Mp3, Some(64), None, None, false)));
+        const { assert!(score::STREAM_YOUTUBE < score::STREAM_SPOTIFY) };
         // Opus / AAC / MP3 rank by bitrate too.
         assert!(q(Codec::Opus, Some(192), None, None, false) > opus);
         assert!(opus > q(Codec::Opus, Some(96), None, None, false));
