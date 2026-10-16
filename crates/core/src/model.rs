@@ -435,6 +435,9 @@ pub mod score {
     /// A "lossless" file whose spectrum is cut like a lossy one. Below MP3 V0.
     pub const FAKE_LOSSLESS: i32 = 690;
     pub const OTHER: i32 = 300;
+    /// Audio saved from a stream as it is ("Сохранить с YouTube"): a local
+    /// file, but marked low quality, so any real download upgrades it.
+    pub const SAVED_STREAM: i32 = 295;
     /// A Spotify stream (Vorbis 320). Below every local file: a downloaded
     /// copy always wins, whatever its codec.
     pub const STREAM_SPOTIFY: i32 = 290;

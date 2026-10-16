@@ -31,6 +31,7 @@ base64 = "0.22"
 thread-priority = "3"
 
 [dev-dependencies]
+nikgob-core = { workspace = true, features = ["fake"] }
 tempfile = "3"
 wiremock = "0.6"
 hound = "3.5"

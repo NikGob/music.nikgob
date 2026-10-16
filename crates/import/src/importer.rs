@@ -27,7 +27,7 @@ use tokio::sync::{Semaphore, broadcast, mpsc};
 use crate::analysis::{AudioAnalysis, analyze_file};
 use crate::config::ImportConfig;
 use crate::cover::{ProcessedCover, derive_visuals, process_cover};
-use crate::decide::{Decision, Incoming, decide, find_existing};
+use crate::decide::{Decision, ImportTargets, Incoming, decide, find_existing, stream_doubt};
 use crate::encode::{EncodeOptions, Encoder, RopusEncoder};
 use crate::error::{ImportError, Result};
 use crate::events::{ConfirmItem, ImportEvent, ItemId, JobId, Stage};
@@ -35,7 +35,7 @@ use crate::folder::{Anchor, Member, album_group_dir, plan};
 use crate::fsutil;
 use crate::identity::{
     Identity, Lookup, apply_candidate, confirm_option, evidence, identity_from_tags,
-    lookup as online_lookup,
+    identity_of_track, lookup as online_lookup,
 };
 use crate::layout::LayoutInput;
 use crate::sanitize::long_path;
@@ -90,6 +90,8 @@ struct Ctx {
     job: JobId,
     tx: mpsc::UnboundedSender<ImportEvent>,
     events: broadcast::Sender<ImportEvent>,
+    /// The tracks the job's files are meant for.
+    targets: Arc<ImportTargets>,
 }
 
 impl Ctx {
@@ -117,6 +119,11 @@ struct Analyzed {
     audio: AudioAnalysis,
     fake_lossless: bool,
     score: i32,
+    /// The job's targets (see [`ImportTargets`]).
+    targets: Arc<ImportTargets>,
+    /// The track this file is, whatever the tags say: the job's forced
+    /// target, or the stream track the user confirmed.
+    force_track: Option<TrackId>,
 }
 
 /// A file that is read and identified and waits for its folder's other files.
@@ -143,6 +150,9 @@ struct Parked {
     base: Identity,
     options: Vec<MatchCandidate>,
     item: ConfirmItem,
+    /// The stream track offered as the only option (the file's length is
+    /// off): accepting attaches the file to it.
+    attach: Option<TrackId>,
 }
 
 pub(crate) struct Inner {
@@ -262,12 +272,28 @@ impl Importer {
     /// inside a tokio runtime. `.torrent` files among the paths are reported as
     /// [`ImportEvent::TorrentFound`].
     pub fn import_paths(&self, paths: Vec<PathBuf>, origin: SourceOrigin) -> ImportJob {
+        self.import_paths_for(paths, origin, ImportTargets::default())
+    }
+
+    /// [`Self::import_paths`] for files meant for `targets` (a wishlist
+    /// download): a file that fits one of them becomes its local source.
+    /// [`SourceOrigin::Stream`] marks audio saved from a stream: kept as it
+    /// is (never converted, no master) with the low
+    /// [`nikgob_core::model::score::SAVED_STREAM`] score, so a real download
+    /// upgrades it later.
+    pub fn import_paths_for(
+        &self,
+        paths: Vec<PathBuf>,
+        origin: SourceOrigin,
+        targets: ImportTargets,
+    ) -> ImportJob {
         let id = JobId(self.inner.next_job.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = mpsc::unbounded_channel();
         let ctx = Ctx {
             job: id,
             tx,
             events: self.inner.events.clone(),
+            targets: Arc::new(targets),
         };
         let this = self.clone();
         tokio::spawn(async move { this.run_job(ctx, paths, origin).await });
@@ -439,10 +465,12 @@ impl Importer {
         ctx.stage(path, Stage::Probing);
         let origin = self.file_origin(&origin, path);
         ctx.stage(path, Stage::Fingerprinting);
-        let analyzed = {
+        let mut analyzed = {
             let (p, o, i) = (path.to_path_buf(), origin, inner.clone());
             blocking(move || analyze(&i.cfg, &p, o)).await?
         };
+        analyzed.force_track = ctx.targets.forced();
+        analyzed.targets = ctx.targets.clone();
         ctx.stage(path, Stage::QualityCheck);
 
         if path.starts_with(&inner.cfg.library_dir) {
@@ -465,11 +493,19 @@ impl Importer {
             };
         }
 
-        let base = identity_from_tags(&analyzed.tags, path);
-        let known_track = analyzed
-            .tags
-            .track_id
-            .is_some_and(|t| inner.library.get_track(t).ok().flatten().is_some());
+        let mut base = identity_from_tags(&analyzed.tags, path);
+        // A file the user (or the stream it was saved from) says is a given
+        // track takes that track's metadata: its own tags may say nothing.
+        if let Some(t) = analyzed.force_track
+            && let Some(id) = identity_of_track(&inner.library, t, &base)
+        {
+            base = id;
+        }
+        let known_track = analyzed.force_track.is_some()
+            || analyzed
+                .tags
+                .track_id
+                .is_some_and(|t| inner.library.get_track(t).ok().flatten().is_some());
         let fully_tagged = analyzed.tags.recording_mbid.is_some() && analyzed.tags.release_mbid.is_some();
         let identity = match &inner.metadata {
             Some(meta) if !known_track && !fully_tagged => {
@@ -485,11 +521,74 @@ impl Importer {
             }
             _ => base.clone(),
         };
+        // A liked stream track of another length (TV size, radio edit) is
+        // asked about rather than attached silently.
+        if analyzed.force_track.is_none() && !known_track {
+            let (i, a, id) = (inner.clone(), analyzed.clone(), identity.clone());
+            let doubt = blocking(move || {
+                let mut store = lock(&i.store);
+                let inc = incoming(&a, &id);
+                match find_existing(&mut store, &inc)? {
+                    Some(_) => Ok(None),
+                    None => stream_doubt(&mut store, &inc),
+                }
+            })
+            .await?;
+            if let Some(track) = doubt {
+                return Ok(Step::Done(self.park_stream(ctx, analyzed, identity, &track)));
+            }
+        }
         Ok(Step::Ready(Box::new(Ready {
             analyzed,
             base,
             identity,
         })))
+    }
+
+    /// Parks a file that may be the stream track `track` (its length is
+    /// off): the only option attaches it to that track; skipping imports it
+    /// as a track of its own.
+    fn park_stream(&self, ctx: &Ctx, analyzed: Analyzed, identity: Identity, track: &Track) -> FileOutcome {
+        let lib = &self.inner.library;
+        let album = track
+            .release_id
+            .and_then(|r| lib.get_release(r).ok().flatten())
+            .map(|r| r.title);
+        let option = crate::events::ConfirmOption {
+            title: track.title.clone(),
+            artist: track.artist_credit.display(),
+            album,
+            year: None,
+            track_no: (track.track_no > 0).then_some(track.track_no),
+            score: 0.5,
+            source: crate::events::STREAM_OPTION,
+            recording_mbid: track.recording_mbid.clone(),
+            release_mbid: None,
+        };
+        let id = ItemId(self.inner.next_item.fetch_add(1, Ordering::Relaxed));
+        let item = ConfirmItem {
+            id,
+            job: ctx.job,
+            path: analyzed.path.clone(),
+            tag_title: analyzed.tags.title.clone(),
+            tag_artist: analyzed.tags.artist.clone(),
+            tag_album: analyzed.tags.album.clone(),
+            duration_ms: Some(analyzed.info.duration_ms()),
+            options: vec![option],
+        };
+        lock(&self.inner.pending).insert(
+            id,
+            Parked {
+                ctx: ctx.clone(),
+                analyzed,
+                base: identity,
+                options: Vec::new(),
+                item: item.clone(),
+                attach: Some(track.id),
+            },
+        );
+        ctx.emit(ImportEvent::NeedsConfirmation { item });
+        FileOutcome::Parked(id)
     }
 
     fn park(
@@ -518,6 +617,7 @@ impl Importer {
                 base,
                 options,
                 item: item.clone(),
+                attach: None,
             },
         );
         ctx.emit(ImportEvent::NeedsConfirmation { item });
@@ -525,21 +625,23 @@ impl Importer {
     }
 
     /// Continues a parked import: `Some(i)` takes option `i`, `None` imports with
-    /// the file's own tags.
+    /// the file's own tags. For a file parked against a stream track, option 0
+    /// attaches it to that track.
     pub async fn resolve(&self, item: ItemId, choice: Option<usize>) -> Result<FileOutcome> {
-        let identity = {
+        let (identity, force) = {
             let pending = lock(&self.inner.pending);
             let parked = pending
                 .get(&item)
                 .ok_or_else(|| ImportError::Other(format!("no pending item {}", item.0)))?;
-            match choice {
-                Some(i) => {
+            match (choice, parked.attach) {
+                (Some(0), Some(track)) => (parked.base.clone(), Some(track)),
+                (Some(i), _) => {
                     let cand = parked.options.get(i).ok_or_else(|| {
                         ImportError::Other(format!("option {i} does not exist"))
                     })?;
-                    apply_candidate(&parked.base, cand)
+                    (apply_candidate(&parked.base, cand), None)
                 }
-                None => parked.base.clone(),
+                (None, _) => (parked.base.clone(), None),
             }
         };
         let Some(parked) = lock(&self.inner.pending).remove(&item) else {
@@ -547,7 +649,11 @@ impl Importer {
         };
         let path = parked.analyzed.path.clone();
         let ctx = parked.ctx.clone();
-        let result = self.finish_import(&ctx, parked.analyzed, identity).await;
+        let mut analyzed = parked.analyzed;
+        if force.is_some() {
+            analyzed.force_track = force;
+        }
+        let result = self.finish_import(&ctx, analyzed, identity).await;
         lock(&self.inner.active).remove(&path);
         match result {
             Ok(o) => Ok(o),
@@ -722,7 +828,11 @@ fn analyze(cfg: &ImportConfig, path: &Path, origin: SourceOrigin) -> Result<Anal
     } else {
         (info.sample_rate, info.bit_depth)
     };
-    let score = quality_score(&info.codec, info.bitrate_kbps, rate, depth, fake_lossless);
+    let score = if origin == SourceOrigin::Stream {
+        nikgob_core::model::score::SAVED_STREAM
+    } else {
+        quality_score(&info.codec, info.bitrate_kbps, rate, depth, fake_lossless)
+    };
     Ok(Analyzed {
         path: path.to_path_buf(),
         origin,
@@ -731,7 +841,20 @@ fn analyze(cfg: &ImportConfig, path: &Path, origin: SourceOrigin) -> Result<Anal
         audio,
         fake_lossless,
         score,
+        targets: Arc::default(),
+        force_track: None,
     })
+}
+
+/// What [`find_existing`] needs about an analyzed file.
+fn incoming<'a>(a: &'a Analyzed, id: &'a Identity) -> Incoming<'a> {
+    Incoming {
+        identity: id,
+        tag_track_id: a.force_track.or(a.tags.track_id),
+        fingerprint: a.audio.fingerprint.as_ref().map(|f| f.raw.as_slice()),
+        targets: &a.targets.tracks,
+        duration_ms: (!a.info.duration.is_zero()).then(|| a.info.duration_ms()),
+    }
 }
 
 pub(crate) fn layout_input(id: &Identity) -> LayoutInput {
@@ -750,14 +873,7 @@ pub(crate) fn layout_input(id: &Identity) -> LayoutInput {
 }
 
 fn decide_for(store: &mut Store, a: &Analyzed, id: &Identity) -> Result<Decision> {
-    let existing = find_existing(
-        store,
-        &Incoming {
-            identity: id,
-            tag_track_id: a.tags.track_id,
-            fingerprint: a.audio.fingerprint.as_ref().map(|f| f.raw.as_slice()),
-        },
-    )?;
+    let existing = find_existing(store, &incoming(a, id))?;
     Ok(decide(existing, a.score))
 }
 
@@ -773,7 +889,8 @@ struct Prepared {
 /// result is an untagged temporary file inside the target album folder.
 fn convert(inner: &Inner, a: &Analyzed, album_dir: &Path) -> Result<Prepared> {
     fsutil::create_dir_all(album_dir)?;
-    let lossless = a.info.codec.is_lossless();
+    // Audio saved from a stream is kept exactly as it came.
+    let lossless = a.info.codec.is_lossless() && a.origin != SourceOrigin::Stream;
     let encode = lossless && (!a.fake_lossless || inner.cfg.convert_fake_lossless);
     let ext = if encode {
         "opus".to_owned()

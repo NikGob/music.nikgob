@@ -219,6 +219,46 @@ pub fn identity_from_tags(tags: &TagSet, path: &Path) -> Identity {
     }
 }
 
+/// The identity of the library track `track` (its title, credit, album and
+/// numbers), for a file that is known to be that track whatever its tags
+/// say (attached by the user, saved from the track's stream). What the
+/// library does not know stays as in `base`.
+pub fn identity_of_track(
+    lib: &nikgob_library::Library,
+    track: nikgob_core::model::TrackId,
+    base: &Identity,
+) -> Option<Identity> {
+    let t = lib.get_track(track).ok()??;
+    let release = t.release_id.and_then(|r| lib.get_release(r).ok().flatten());
+    let mut id = base.clone();
+    id.title = t.title.clone();
+    let names: Vec<String> = t.artist_credit.0.iter().map(|p| p.name.clone()).collect();
+    if !names.is_empty() {
+        id.artists = names;
+        id.artist_line = t.artist_credit.display();
+    }
+    id.track_no = t.track_no;
+    id.disc_no = t.disc_no.max(1);
+    id.isrc = t.isrc.clone().or(id.isrc);
+    id.recording_mbid = t.recording_mbid.clone().or(id.recording_mbid);
+    match release {
+        Some(r) => {
+            id.album = Some(r.title.clone());
+            id.album_artist = Some(r.artist_credit.display()).filter(|a| !a.is_empty());
+            id.year = r.year.or(id.year);
+            id.release_type = r.release_type;
+            id.compilation = r.release_type == ReleaseType::Compilation;
+            id.track_total = r.total_tracks.or(id.track_total);
+        }
+        None => {
+            id.album = None;
+            id.release_type = ReleaseType::Single;
+            id.compilation = false;
+        }
+    }
+    Some(id)
+}
+
 fn year_of(date: &str) -> Option<i32> {
     let y: String = date.chars().take(4).collect();
     (y.len() == 4).then(|| y.parse().ok()).flatten().filter(|y| *y > 0)

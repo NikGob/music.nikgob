@@ -31,6 +31,9 @@ pub enum Stage {
     Deriving,
 }
 
+/// [`ConfirmOption::source`] of "attach to this stream track".
+pub const STREAM_OPTION: &str = "stream";
+
 /// One possible identity offered to the user.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfirmOption {
@@ -41,7 +44,8 @@ pub struct ConfirmOption {
     pub track_no: Option<u32>,
     /// 0..=1, from the matcher.
     pub score: f64,
-    /// `"musicbrainz"` or `"deezer"`.
+    /// `"musicbrainz"`, `"deezer"`, or [`STREAM_OPTION`] for a liked stream
+    /// track the file may be (its length is off).
     pub source: &'static str,
     pub recording_mbid: Option<String>,
     pub release_mbid: Option<String>,

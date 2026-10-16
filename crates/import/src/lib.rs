@@ -24,6 +24,7 @@ pub mod trash;
 pub mod watch;
 
 pub use config::{ImportConfig, normalize_masters_dir};
+pub use decide::ImportTargets;
 pub use encode::{EncodeOptions, EncodedInfo, Encoder, FfmpegEncoder, RopusEncoder};
 pub use error::{ImportError, Result};
 pub use events::{ConfirmItem, ConfirmOption, ImportEvent, ItemId, JobId, Stage};
