@@ -12,6 +12,7 @@ mod desktop;
 mod geometry;
 mod shot;
 mod sysmotion;
+mod titlebar;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -192,6 +193,7 @@ struct Window {
     recovery_checked: bool,
     /// When the system animation setting was last read.
     motion_checked: Option<Instant>,
+    titlebar: titlebar::TitleBar,
 }
 
 impl eframe::App for Window {
@@ -224,7 +226,7 @@ impl eframe::App for Window {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.scrolling.apply(ui.ctx());
         let core = &mut *self.core;
         if core.ui.wants_levels()
@@ -238,6 +240,7 @@ impl eframe::App for Window {
         let fps = {
             let state = core.runtime.state();
             core.ui.frame(ui, &state, &mut core.commands);
+            self.titlebar.sync(ui.ctx(), frame, state.prefs.theme);
             if let Some(s) = core.shot.as_mut() {
                 if s.frame(ui.ctx(), &mut core.ui, &state, &mut core.commands) {
                     core.quit = true;
@@ -428,6 +431,7 @@ fn main() -> eframe::Result {
                     scrolling: fastframe_scroll::Scrolling::default(),
                     recovery_checked: false,
                     motion_checked: None,
+                    titlebar: titlebar::TitleBar::default(),
                 }))
             }),
         )

@@ -479,6 +479,42 @@ pub struct Toast {
     pub text: String,
     pub action: Option<(String, Command)>,
     pub at: Instant,
+    /// What the message is about, for its icon and accent.
+    pub kind: ToastKind,
+}
+
+/// What a toast reports: drawn with its own icon and accent colour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToastKind {
+    #[default]
+    Info,
+    /// Something got done ("Сохранено", "Добавлено в очередь").
+    Success,
+    /// Something started and goes on in the background ("Добавляю раздачу…").
+    Working,
+    /// Something failed or is not available.
+    Error,
+}
+
+impl ToastKind {
+    /// Guesses the kind from the (Russian) message text, so call sites only
+    /// say what happened.
+    pub fn guess(text: &str) -> Self {
+        let t = text.to_lowercase();
+        let any = |words: &[&str]| words.iter().any(|w| t.contains(w));
+        if any(&[
+            "ошибка", "не получилось", "не удалось", "недоступ", "не читается", "нельзя", "не запустил",
+            "некуда", "нечего", "нет файла", "нет локального", "это не ", "устарел", "не скачать", "не всё",
+        ]) {
+            Self::Error
+        } else if t.ends_with('…') || any(&["начался", "качается", "добавляю"]) {
+            Self::Working
+        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "следующим"]) {
+            Self::Success
+        } else {
+            Self::Info
+        }
+    }
 }
 
 /// User-facing settings the UI edits (the runtime persists them).
@@ -592,6 +628,9 @@ pub struct Prefs {
     pub bg_shapes_react: f32,
     /// Colours: 0 theme containers, 1 accent only, 2 bright accents.
     pub bg_shapes_colors: u8,
+    /// The navigation rail is never shown (nor its expand button); pages
+    /// are reached with Ctrl+1…4 or by touching the window's left edge.
+    pub nav_hidden: bool,
 }
 
 /// Material shapes behind the open track.
@@ -960,6 +999,31 @@ impl Default for Prefs {
             bg_shapes_speed: 1.0,
             bg_shapes_react: 1.0,
             bg_shapes_colors: 0,
+            nav_hidden: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod toast_tests {
+    use super::ToastKind;
+
+    #[test]
+    fn toast_kinds_are_guessed_from_the_text() {
+        for (text, kind) in [
+            ("Не получилось воспроизвести трек", ToastKind::Error),
+            ("Торренты недоступны", ToastKind::Error),
+            ("Это не magnet-ссылка", ToastKind::Error),
+            ("Восстановить удалось не всё", ToastKind::Error),
+            ("Добавляю раздачу…", ToastKind::Working),
+            ("Импорт начался · смотри «Загрузки»", ToastKind::Working),
+            ("Сохранено", ToastKind::Success),
+            ("Теги сохранены", ToastKind::Success),
+            ("Плейлист «Ночь» сохранён", ToastKind::Success),
+            ("Добавлено в очередь", ToastKind::Success),
+            ("Импорт: 12 треков", ToastKind::Info),
+        ] {
+            assert_eq!(ToastKind::guess(text), kind, "{text}");
         }
     }
 }

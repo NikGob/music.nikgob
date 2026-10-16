@@ -3,7 +3,8 @@
 //! look at screens without a human at the keyboard.
 //!
 //! Synthetic input (logical points): `move:x,y`, `click:x,y`, `rclick:x,y`,
-//! `dblclick:x,y`, `drag:x1,y1,x2,y2`, `wheel:x,y,dy`, `key:space|escape|l|q|f11|f12`.
+//! `dblclick:x,y`, `drag:x1,y1,x2,y2`, `wheel:x,y,dy`, `key:space|escape|l|q|f11|f12`
+//! (`key:ctrl+2` and other egui key names too), `toasts` (a few snackbars).
 //! `prefs:{json}` merges into the prefs.
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 
@@ -215,6 +216,11 @@ impl Shot {
                 self.wait = 20;
             }
             "key" => {
+                // `key:ctrl+2`: with Ctrl (Cmd on macOS).
+                let (modifiers, arg) = match arg.strip_prefix("ctrl+") {
+                    Some(rest) => (Modifiers::COMMAND, rest),
+                    None => (Modifiers::NONE, arg),
+                };
                 let key = match arg {
                     "space" => Some(egui::Key::Space),
                     "escape" => Some(egui::Key::Escape),
@@ -222,7 +228,7 @@ impl Shot {
                     "q" => Some(egui::Key::Q),
                     "f11" => Some(egui::Key::F11),
                     "f12" => Some(egui::Key::F12),
-                    _ => None,
+                    other => egui::Key::from_name(other),
                 };
                 if let Some(key) = key {
                     for pressed in [true, false] {
@@ -231,11 +237,20 @@ impl Shot {
                             physical_key: None,
                             pressed,
                             repeat: false,
-                            modifiers: Modifiers::NONE,
+                            modifiers,
                         }]);
                     }
                 }
                 self.wait = 20;
+            }
+            // A few snackbars of different kinds, from real commands.
+            "toasts" => {
+                if let Some(t) = &state.player.current {
+                    out.push(Command::Enqueue(vec![t.id]));
+                }
+                out.push(Command::AddMagnet("not a magnet".into()));
+                out.push(Command::AddMagnet("magnet:?xt=urn:btih:0000000000000000000000000000000000000000".into()));
+                self.wait = 30;
             }
             "queue" => {
                 ui.open_queue();

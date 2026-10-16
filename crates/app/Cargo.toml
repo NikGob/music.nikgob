@@ -39,3 +39,5 @@ workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+# The winit eframe runs on (patched to the fork); for the caption colours.
+winit = { version = "0.30", default-features = false }
