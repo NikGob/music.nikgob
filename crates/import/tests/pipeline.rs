@@ -751,3 +751,28 @@ fn editions_of_one_album_fold_into_the_fullest_one() {
     assert!(lib.get_track_row(a).unwrap().unwrap().liked, "the like moved over");
     assert!(nikgob_import::find_release_editions(&lib).unwrap().is_empty(), "nothing left");
 }
+
+#[test]
+fn a_release_group_alone_is_not_enough_to_offer_a_merge() {
+    use nikgob_core::model::{ArtistCredit, Release, Track};
+    let lib = Library::open_in_memory().unwrap();
+    let release = |title: &str, artist: &str, mbid: &str, songs: &[(&str, &str)]| {
+        let mut r = Release::new(title, ArtistCredit::single(artist, None));
+        r.mbid = Some(mbid.into());
+        r.release_group_mbid = Some("group".into());
+        let r = lib.upsert_release(&r).unwrap();
+        for (i, (title, rec)) in songs.iter().enumerate() {
+            let mut t = Track::new(*title, ArtistCredit::single(artist, None));
+            t.release_id = Some(r.id);
+            t.track_no = i as u32 + 1;
+            t.recording_mbid = Some((*rec).into());
+            lib.upsert_track(&t).unwrap();
+        }
+    };
+    release("Album", "A", "r1", &[("One", "rec-1"), ("Two", "rec-2")]);
+    // Same group by a wrong lookup, but no song in common.
+    release("Other Album", "A", "r2", &[("Three", "rec-3")]);
+    // Same group and a shared song, but another artist.
+    release("Album", "B", "r3", &[("One", "rec-1")]);
+    assert!(nikgob_import::find_release_editions(&lib).unwrap().is_empty());
+}

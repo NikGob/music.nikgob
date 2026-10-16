@@ -249,17 +249,28 @@ pub fn find_release_editions(library: &Library) -> Result<Vec<EditionGroup>> {
         rows.sort_by_key(|r| (std::cmp::Reverse(r.known_tracks), r.release.added_at));
         let keep = rows.remove(0);
         let album = songs(library, keep.release.id)?;
+        let artist = release_key("", &keep.release.artist_credit.display()).1;
         let (mut same_songs, mut new_songs) = (0, 0);
-        for row in &rows {
-            for song in songs(library, row.release.id)? {
-                if album.iter().any(|a| a.same_song(&song)) {
-                    same_songs += 1;
-                } else {
-                    new_songs += 1;
-                }
+        let mut others = Vec::new();
+        for row in rows {
+            // The release group alone may come from a wrong lookup: an
+            // edition must also be by the same artist and share at least
+            // one song with the album.
+            if release_key("", &row.release.artist_credit.display()).1 != artist {
+                continue;
             }
+            let fates = plan(&album, &songs(library, row.release.id)?);
+            let same = fates.iter().filter(|(_, f)| matches!(f, Fate::Same(_))).count() as u32;
+            if same == 0 {
+                continue;
+            }
+            same_songs += same;
+            new_songs += fates.len() as u32 - same;
+            others.push(row);
         }
-        found.push(EditionGroup { group, keep, others: rows, same_songs, new_songs });
+        if !others.is_empty() {
+            found.push(EditionGroup { group, keep, others, same_songs, new_songs });
+        }
     }
     found.sort_by(|a, b| a.keep.release.title.cmp(&b.keep.release.title));
     Ok(found)
@@ -277,9 +288,20 @@ pub fn fold_editions(library: &Library, g: &EditionGroup) -> Result<()> {
         if library.get_release(row.release.id)?.is_none() {
             continue;
         }
-        for song in songs(library, row.release.id)? {
-            if let Some(same) = album.iter().find(|a| a.same_song(&song)) {
-                library.merge_track_into(song.id, same.id)?;
+        for (song, fate) in plan(&album, &songs(library, row.release.id)?) {
+            match fate {
+                Fate::Same(same) => {
+                    library.merge_track_into(song, same)?;
+                }
+                // Numbered the way this album counts.
+                Fate::Join(Some((disc, no))) => {
+                    if let Some(mut t) = library.get_track(song)? {
+                        t.disc_no = disc;
+                        t.track_no = no;
+                        library.upsert_track(&t)?;
+                    }
+                }
+                Fate::Join(None) => {}
             }
         }
         library.absorb_edition(row.release.id, target)?;
@@ -299,6 +321,7 @@ fn songs(library: &Library, release: nikgob_core::model::ReleaseId) -> Result<Ve
                 base: key.base,
                 variant: key.variant,
                 number: (t.disc_no, t.track_no),
+                duration_ms: t.duration_ms,
             })
         })
         .collect()
@@ -311,6 +334,74 @@ struct Song {
     base: String,
     variant: nikgob_metadata::text::Variant,
     number: (u32, u32),
+    duration_ms: Option<u32>,
+}
+
+/// What becomes of a track of another edition.
+#[derive(Debug, PartialEq)]
+enum Fate {
+    /// The album has this song already: folds into that track.
+    Same(TrackId),
+    /// Joins the album, renumbered when its place is known.
+    Join(Option<(u32, u32)>),
+}
+
+/// Matches another edition's tracks against the album. Editions number
+/// differently (the Japanese one straight through, 1..30, where the
+/// international one has two discs), so the songs both have tell where the
+/// rest go: one 5 places after a shared song sits 5 places after it here
+/// too. A track that lands on a song of the same length is that song under
+/// another title (a translation: "Ningyō x 龍" is "Doll x Dragon").
+fn plan(album: &[Song], other: &[Song]) -> Vec<(TrackId, Fate)> {
+    let mut pairs: Vec<((u32, u32), (u32, u32))> = Vec::new();
+    let mut fates: Vec<(TrackId, Option<Fate>)> = Vec::new();
+    for o in other {
+        match album.iter().find(|a| a.same_song(o)) {
+            Some(a) => {
+                if o.number.1 > 0 && a.number.1 > 0 {
+                    pairs.push((o.number, a.number));
+                }
+                fates.push((o.id, Some(Fate::Same(a.id))));
+            }
+            None => fates.push((o.id, None)),
+        }
+    }
+    let taken = |slot: (u32, u32)| album.iter().find(|a| a.number == slot);
+    fates
+        .into_iter()
+        .zip(other)
+        .map(|((id, fate), o)| {
+            if let Some(f) = fate {
+                return (id, f);
+            }
+            let (disc, no) = o.number;
+            if no == 0 {
+                return (id, Fate::Join(None));
+            }
+            // The nearest shared songs before and after it on its disc.
+            let on_disc = || pairs.iter().filter(|(from, _)| from.0 == disc);
+            let before = on_disc().filter(|(from, _)| from.1 < no).max_by_key(|(from, _)| from.1);
+            let after = on_disc().filter(|(from, _)| from.1 > no).min_by_key(|(from, _)| from.1);
+            let slot = match (before, after) {
+                // Between two discs of the album (its first disc ended in
+                // between): counted back from the song after it.
+                (Some(b), Some(a)) if b.1.0 != a.1.0 && a.1.1 > a.0.1 - no => Some((a.1.0, a.1.1 - (a.0.1 - no))),
+                (Some(&(from, to)), _) => Some((to.0, to.1 + (no - from.1))),
+                (None, Some(&(from, to))) if to.1 > from.1 - no => Some((to.0, to.1 - (from.1 - no))),
+                _ => None,
+            };
+            let Some(slot) = slot else {
+                return (id, Fate::Join(None));
+            };
+            match taken(slot) {
+                Some(a) => {
+                    let close = matches!((a.duration_ms, o.duration_ms), (Some(x), Some(y)) if x.abs_diff(y) <= 3_000);
+                    (id, if close { Fate::Same(a.id) } else { Fate::Join(None) })
+                }
+                None => (id, Fate::Join(Some(slot))),
+            }
+        })
+        .collect()
 }
 
 impl Song {
@@ -377,4 +468,43 @@ fn merge_group(library: &Library, mut rows: Vec<ReleaseRow>) -> Result<usize> {
         merged += 1;
     }
     Ok(merged)
+}
+
+#[cfg(test)]
+mod edition_tests {
+    use super::*;
+
+    fn song(title: &str, number: (u32, u32), secs: u32) -> Song {
+        let key = title_key(title);
+        // Shared songs carry one recording id, as MusicBrainz tags give them.
+        Song { id: TrackId::new(), recording: Some(title.to_owned()), base: key.base, variant: key.variant, number, duration_ms: Some(secs * 1000) }
+    }
+
+    #[test]
+    fn another_editions_numbers_are_mapped_through_the_songs_both_have() {
+        // International: two discs of 15 and 17; Japanese: 1..32 straight.
+        let album: Vec<Song> = (1..=15)
+            .map(|n| song(&format!("A{n}"), (1, n), 100 + n))
+            .chain((1..=17).map(|n| song(&format!("B{n}"), (2, n), 200 + n)))
+            .collect();
+        let jp = vec![
+            song("A14", (1, 14), 114),
+            song("A15", (1, 15), 115),
+            // Only here, right where disc 2 starts: 2-1 is taken by B1
+            // (another length), so it keeps its own number.
+            song("Extra", (1, 16), 999),
+            song("B2", (1, 17), 202),
+            // Translated title, same place and length: the same song.
+            song("Ningyō x 龍", (1, 30), 215),
+            // After the last shared song, on a free place.
+            song("Bonus", (1, 33), 300),
+        ];
+        let fates = plan(&album, &jp);
+        let id = |n: (u32, u32)| album.iter().find(|a| a.number == n).unwrap().id;
+        assert_eq!(fates[0].1, Fate::Same(id((1, 14))));
+        assert_eq!(fates[2].1, Fate::Join(None));
+        assert_eq!(fates[3].1, Fate::Same(id((2, 2))));
+        assert_eq!(fates[4].1, Fate::Same(id((2, 15))));
+        assert_eq!(fates[5].1, Fate::Join(Some((2, 18))));
+    }
 }

@@ -471,7 +471,18 @@ pub fn track_list_ext(
     let two_line = lead == Lead::Cover || is_compilation(tracks);
     let mut rows: Vec<Rect> = Vec::with_capacity(tracks.len());
     let (mut dragging, mut dropped) = (None, None);
+    // An album on several discs numbers each disc from 1: a "Диск N" line
+    // above each, or the numbers would read as broken.
+    let discs = lead == Lead::Number && tracks.iter().any(|t| t.disc_no != tracks[0].disc_no);
     for (i, t) in tracks.iter().enumerate() {
+        if discs && (i == 0 || tracks[i - 1].disc_no != t.disc_no) {
+            ui.add_space(if i == 0 { 4.0 } else { 16.0 });
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                ui.label(TypeRole::TitleSmall.style().rich(format!("Диск {}", t.disc_no.max(1)), s.on_surface_variant));
+            });
+            ui.add_space(4.0);
+        }
         let is_cur = current == Some(t.id);
         let leading = match lead {
             Lead::Number if is_cur => Leading::Number(String::new()),
