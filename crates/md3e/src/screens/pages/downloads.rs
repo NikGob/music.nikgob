@@ -179,7 +179,6 @@ fn seeding(ui: &mut Ui, state: &ViewState, pages: &mut PageState, _out: &mut Vec
     let s = Theme::get(ui.ctx()).scheme;
     let d = &state.downloads;
     let p = &state.prefs;
-    let mut nav = None;
     let limit = u64::from(p.seed_limit_gb) * (1 << 30);
 
     Card::filled().id_salt("seed-header").show(ui, |ui| {
@@ -233,7 +232,7 @@ fn seeding(ui: &mut Ui, state: &ViewState, pages: &mut PageState, _out: &mut Vec
                 .add(Button::new("Политика раздачи").style(Style::Text).icon(Icon::Settings).id_salt("seed-policy"))
                 .clicked()
             {
-                nav = Some(Route::Settings);
+                pages.open_setting(super::SettingId::NoSeed);
             }
         });
     });
@@ -245,7 +244,7 @@ fn seeding(ui: &mut Ui, state: &ViewState, pages: &mut PageState, _out: &mut Vec
     for r in &d.seeding {
         seed_row(ui, r);
     }
-    nav
+    None
 }
 
 fn seed_row(ui: &mut Ui, r: &SeedRow) {

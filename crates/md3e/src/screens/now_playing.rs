@@ -1026,7 +1026,7 @@ pub fn show(
             match slot {
                 NpSlot::Lyrics => {
                     if super::lyrics::show(&mut cui, state, pages.levels_bass, true, out) {
-                        pages.request_lyrics_settings();
+                        pages.open_setting(super::pages::SettingId::LyricsStyle);
                         closed = true;
                     }
                 }
@@ -1038,6 +1038,70 @@ pub fn show(
     }
 
     closed
+}
+
+/// A small live sample of the cover under `prefs` for the settings' hover
+/// card: its shape (going through the pool for «Случайная»), spin, beat
+/// pulse and, with `with_ring`, the ring, all on a made-up beat. It keeps
+/// its own clock, so the real player's angles are untouched.
+pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &nikgob_view::Prefs, with_ring: bool) {
+    let motion = !Theme::get(ui.ctx()).reduced_motion;
+    let t = anim::now(ui.ctx()) as f32;
+    let kick = if motion { super::pages::settings_help::beat(t) } else { 0.0 };
+    let sign = |ccw: bool| if ccw { -1.0 } else { 1.0 };
+    // Faster than in the player (48 s and 36 s a turn) so it is seen at all.
+    let spin = if prefs.cover_spin && motion { t * TAU / 12.0 * sign(prefs.cover_ccw) } else { 0.0 };
+    let swell = if prefs.cover_pulse { 1.0 + 0.035 * kick } else { 1.0 };
+    let pad = if with_ring { RING_PAD * 0.8 } else { 8.0 };
+    let side = (rect.width().min(rect.height()) - 2.0 * pad).max(16.0);
+    let cover = Rect::from_center_size(rect.center(), vec2(side, side) * swell);
+    let outline = match prefs.cover_shape {
+        CoverShape::Random => {
+            let pool = random_pool(&prefs.random_shapes);
+            let step = (t / 1.6).floor() as usize;
+            let (from, to) = (pool[step.wrapping_sub(1) % pool.len()], pool[step % pool.len()]);
+            let k = ((t / 1.6).fract() / 0.35).clamp(0.0, 1.0);
+            match (material(from), material(to)) {
+                (Some(a), Some(b)) if k < 1.0 && a != b => Outline::swap(a, b, k * k * (3.0 - 2.0 * k), cover, spin),
+                (_, b) => Outline::new(b, 1.0, cover, spin),
+            }
+        }
+        c => Outline::new(material(c), 1.0, cover, spin),
+    };
+    outline.paint(ui, None);
+    if with_ring {
+        let angle = if prefs.spin_ring && motion && prefs.ring_style != RingStyle::Bars {
+            t * TAU / 10.0 * sign(prefs.ring_ccw)
+        } else {
+            0.0
+        };
+        let beat = prefs.ring_beat && motion;
+        let transients: Vec<f32> = if beat {
+            (0..12).map(|i| kick * (0.5 + 0.5 * (i as f32 * 1.3 + t * 3.0).sin()).powi(2)).collect()
+        } else {
+            Vec::new()
+        };
+        let bars: Vec<f32> = if beat {
+            (0..BAR_COUNT)
+                .map(|i| {
+                    let x = i as f32 / BAR_COUNT as f32 * TAU;
+                    (0.25 + 0.45 * kick) * (0.55 + 0.45 * (x * 3.0 + t * 2.0).sin()) * (0.6 + 0.4 * (x * 7.0 - t).cos())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let input = RingInput {
+            style: prefs.ring_style,
+            angle,
+            transients: &transients,
+            bars: &bars,
+            room: pad,
+            kick: if beat { kick } else { 0.0 },
+            alpha: 1.0,
+        };
+        ring(ui, &outline, &input);
+    }
 }
 
 /// Retain the last content on close; only switching open slots crossfades it.

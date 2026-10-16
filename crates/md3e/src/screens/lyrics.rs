@@ -457,6 +457,62 @@ fn fixed_layout(painter: &egui::Painter, text: &str, size: f32) -> Arc<Galley> {
     painter.layout_job(LayoutJob::single_section(text.to_owned(), style_at(size).text_format(Color32::WHITE)))
 }
 
+/// A looping sample for the settings' hover card: the line being sung
+/// between two resting ones, painted by the real line painter under `prefs`
+/// (animation, glow, dimming, size, letter jump).
+pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
+    let style = match prefs.lyrics_style {
+        1 => Style::Focus,
+        2 => Style::Wave,
+        _ => Style::Karaoke,
+    };
+    let scale = prefs.lyrics_scale.clamp(0.8, 1.4);
+    let (big, small) = (PANE.big * 0.8 * scale, PANE.small * 0.8 * scale);
+    const LOOP: f64 = 3.2;
+    let pos = Duration::from_secs_f64(anim::now(ui.ctx()).rem_euclid(LOOP));
+    let mut at = 0.3;
+    let words = ["Слы", "шишь ", "этот ", "ритм"]
+        .iter()
+        .map(|w| {
+            let d = 0.16 * w.trim().chars().count() as f32;
+            let word = nikgob_view::LyricWord {
+                start: Duration::from_secs_f32(at),
+                end: Duration::from_secs_f32(at + d),
+                text: (*w).to_owned(),
+            };
+            at += d + 0.05;
+            word
+        })
+        .collect::<Vec<_>>();
+    let line = LyricLine { text: words.iter().map(|w| w.text.as_str()).collect(), words, ..Default::default() };
+    let rest = 1.0 - (1.0 - 0.42) * prefs.lyrics_dim.clamp(0.0, 1.0);
+    let dim = s.on_surface.gamma_multiply(rest);
+    let lit = s.on_surface;
+    let g = fixed_layout(&painter, &line.text, big);
+    let cur = Rect::from_min_size(pos2(rect.left() + 16.0, rect.center().y - g.size().y * 0.5), g.size());
+    for (text, y) in [("Где-то рядом", cur.top() - 8.0), ("Он ведёт меня", cur.bottom() + 8.0)] {
+        let sg = fixed_layout(&painter, text, small);
+        let top = if y < cur.top() { y - sg.size().y } else { y };
+        painter.galley_with_override_text_color(pos2(cur.left(), top), sg, dim);
+    }
+    if let Some(timing) = Timing::new(&line, &g) {
+        timed_line(&painter, &g, cur, &timing, pos, true, 1.0, big, style, lit.gamma_multiply(0.38), lit, prefs);
+    }
+}
+
+/// The pause indicator between lines for the settings' hover card: a
+/// four-second gap on loop, with the countdown at its end.
+pub(crate) fn gap_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
+    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
+    let k = 1.4;
+    let line = Rect::from_center_size(rect.center(), vec2(56.0 * k, 42.0 * k));
+    let pos = Duration::from_secs_f64(anim::now(ui.ctx()).rem_euclid(4.6));
+    let bass = super::pages::settings_help::beat(anim::now(ui.ctx()) as f32) * 0.5;
+    waiting(&painter, line, k, Duration::ZERO, Duration::from_secs(4), pos, true, true, bass, 1.0, prefs);
+}
+
 /// Unsynced text still gets a readable column, with its source kept outside
 /// the scroll area so changing providers never requires scrolling to the end.
 fn plain(ui: &mut Ui, size: egui::Vec2, state: &ViewState) {

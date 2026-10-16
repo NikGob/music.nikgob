@@ -330,7 +330,7 @@ impl Md3eUi {
         }
 
         if let Some(route) = self.pages.pending_nav.take() {
-            if self.pages.scroll_to_lyrics && route == Route::Settings {
+            if self.pages.focus_setting.is_some() && route == Route::Settings {
                 self.pane = None;
                 // Keep the page width stable while resolving its scroll target.
                 anim::snap_f32(ctx, egui::Id::new("pane-width"), 0.0);
@@ -696,7 +696,7 @@ impl Md3eUi {
             }
         }
         if configure_lyrics {
-            self.pages.request_lyrics_settings();
+            self.pages.open_setting(pages::SettingId::LyricsStyle);
         }
     }
 }
@@ -860,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn lyrics_settings_closes_overlays_and_scrolls_once_in_all_window_sizes() {
+    fn lyrics_link_closes_overlays_and_scrolls_to_its_row_in_all_window_sizes() {
         for width in [380.0, 800.0, 1440.0] {
             let ctx = context();
             let mut ui = Md3eUi::new();
@@ -868,20 +868,20 @@ mod tests {
             ui.set_now_playing(&ctx, true);
             ui.pane = Some(PaneTab::Lyrics);
             frame(&ctx, &mut ui, &mut state, 0.0, width, None);
-            ui.pages.request_lyrics_settings();
+            ui.pages.open_setting(pages::SettingId::LyricsStyle);
             frame(&ctx, &mut ui, &mut state, 1.0, width, None);
             assert_eq!(ui.route(), &Route::Settings);
             assert!(!ui.now_playing);
             assert_eq!(ui.pane, None);
-            assert!(ui.pages.scroll_to_lyrics);
+            assert!(ui.pages.focus_setting.is_some());
             frame(&ctx, &mut ui, &mut state, 2.0, width, None);
-            assert!(!ui.pages.scroll_to_lyrics);
+            assert!(ui.pages.focus_setting.is_none());
             assert_eq!(ui.route(), &Route::Settings);
             frame(&ctx, &mut ui, &mut state, 2.5, width, None);
             let output = frame(&ctx, &mut ui, &mut state, 2.6, width, None);
             assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
-                egui::Shape::Text(text) if text.galley.text() == "Текст песен" && text.pos.y < 200.0
-            )), "lyrics header was not scrolled into view at width {width}");
+                egui::Shape::Text(text) if text.galley.text() == "Анимация" && (150.0..750.0).contains(&text.pos.y)
+            )), "lyrics animation row was not scrolled into view at width {width}");
             if width == 380.0 {
                 frame(&ctx, &mut ui, &mut state, 3.0, width, Some(Key::Escape));
                 assert_eq!(ui.route(), &Route::Home);
@@ -889,11 +889,11 @@ mod tests {
             // Opening from lyrics while Settings is already the current route
             // must still request another scroll.
             ui.navigate(&ctx, Route::Settings, &mut Vec::new());
-            ui.pages.request_lyrics_settings();
+            ui.pages.open_setting(pages::SettingId::LyricsStyle);
             frame(&ctx, &mut ui, &mut state, 4.0, width, None);
             frame(&ctx, &mut ui, &mut state, 5.0, width, None);
             assert_eq!(ui.route(), &Route::Settings);
-            assert!(!ui.pages.scroll_to_lyrics);
+            assert!(ui.pages.focus_setting.is_none());
         }
     }
 

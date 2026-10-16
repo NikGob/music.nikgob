@@ -163,13 +163,26 @@ fn level(levels: &[f32], band: f32) -> f32 {
 /// Paints the shapes into `rect` under the current prefs. `kick` (0..1) is
 /// the beat, `transients` the per-band jumps, `bass` the smoothed bass.
 pub fn paint(ui: &Ui, rect: Rect, prefs: &Prefs, playing: bool, kick: f32, transients: &[f32], bass: f32) {
+    let scale = (rect.height() / 900.0).clamp(0.6, 1.6);
+    field(ui, egui::Id::new("np-bg-shapes"), rect, prefs, scale, playing, kick, transients, bass);
+}
+
+/// A small sample for the settings' hover card, on its own field so the
+/// player's shapes stay where they are.
+pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs, kick: f32, transients: &[f32]) {
+    let scale = rect.height() / 600.0;
+    field(ui, egui::Id::new("settings-bg-shapes"), rect, prefs, scale, true, kick, transients, kick * 0.5);
+}
+
+/// [`paint`] with the field kept under `id`, shapes sized by `scale`.
+#[allow(clippy::too_many_arguments)]
+fn field(ui: &Ui, id: egui::Id, rect: Rect, prefs: &Prefs, scale: f32, playing: bool, kick: f32, transients: &[f32], bass: f32) {
     let mode = prefs.bg_shapes;
     if mode == BgShapes::Off || !rect.is_positive() {
         return;
     }
     let ctx = ui.ctx();
     let theme = Theme::get(ctx);
-    let id = egui::Id::new("np-bg-shapes");
     let count = prefs.bg_shapes_count.clamp(4, 32) as usize;
     let mut f: Field = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
     if f.rng == 0 {
@@ -192,7 +205,7 @@ pub fn paint(ui: &Ui, rect: Rect, prefs: &Prefs, playing: bool, kick: f32, trans
     let now = anim::now(ctx);
     let dt = if f.last == 0.0 { 1.0 / 60.0 } else { (now - f.last).clamp(0.0, 0.05) as f32 };
     f.last = now;
-    let scale = (h / 900.0).clamp(0.6, 1.6) * prefs.bg_shapes_size.clamp(0.5, 2.0);
+    let scale = scale * prefs.bg_shapes_size.clamp(0.5, 2.0);
     let react = prefs.bg_shapes_react.clamp(0.0, 2.0);
     let speed = prefs.bg_shapes_speed.clamp(0.25, 3.0);
     let moving = !theme.reduced_motion && (playing || mode == BgShapes::Bounce);

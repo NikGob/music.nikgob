@@ -106,7 +106,7 @@ pub fn search_results(
                 nav = library(ui, query, state, f == Filter::Library, pages, out).or(nav.take());
             }
             if f != Filter::Library {
-                nav = torrents(ui, query, state, out).or(nav.take());
+                nav = torrents(ui, query, state, pages, out).or(nav.take());
             }
             if f == Filter::All {
                 ui.add_space(widgets::SECTION_GAP);
@@ -199,12 +199,11 @@ fn library(
     nav
 }
 
-fn torrents(ui: &mut Ui, query: &str, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
+fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let t = &state.search.torrents;
     let q = query.trim();
     let stale = t.query.trim() != q;
-    let mut nav = None;
     ui.add_space(8.0);
     group_label(ui, "Торренты");
 
@@ -225,7 +224,7 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, out: &mut Vec<Command>)
             s.on_surface_variant,
         ));
         if ui.add(Button::new("Открыть настройки").style(Style::Text).icon(Icon::Settings).id_salt("tor-settings")).clicked() {
-            nav = Some(Route::Settings);
+            pages.open_setting(super::SettingId::Prowlarr);
         }
     }
 
@@ -249,14 +248,14 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, out: &mut Vec<Command>)
         {
             out.push(Command::SearchTorrents(q.to_owned()));
         }
-        return nav;
+        return None;
     }
 
     if t.results.is_empty() {
         if !stale && !t.query.is_empty() {
             ui.label(TypeRole::BodyMedium.style().rich("Раздач не нашлось.", s.on_surface_variant));
         }
-        return nav;
+        return None;
     }
     if stale {
         ui.label(TypeRole::BodySmall.style().rich(format!("Результаты для «{}»", t.query), s.on_surface_variant));
@@ -266,7 +265,7 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, out: &mut Vec<Command>)
     for r in &t.results {
         torrent_row(ui, r, wide, out);
     }
-    nav
+    None
 }
 
 fn torrent_row(ui: &mut Ui, r: &TorrentResult, wide: bool, out: &mut Vec<Command>) {

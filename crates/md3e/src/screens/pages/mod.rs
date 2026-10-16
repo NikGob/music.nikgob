@@ -6,9 +6,11 @@ mod home;
 mod library;
 mod search;
 mod settings;
+pub(crate) mod settings_help;
 pub mod widgets;
 
 pub use search::search_results;
+pub use settings_help::SettingId;
 
 use egui::{Context, Rect, Response, Ui, UiBuilder, vec2};
 use nikgob_view::{
@@ -39,10 +41,9 @@ enum Ask {
 pub struct PageState {
     /// A navigation requested from inside an overlay or menu.
     pub pending_nav: Option<Route>,
-    /// One-shot scroll to the lyrics settings header.
-    pub scroll_to_lyrics: bool,
-    /// The scroll waits for the appearance tab to be drawn.
-    scroll_to_lyrics_now: bool,
+    /// A settings row a "настроить" link asked for: Settings opens on its
+    /// tab, scrolls to it and makes it glow.
+    pub focus_setting: Option<SettingId>,
     /// Settings tab: 0 general, 1 appearance.
     settings_tab: usize,
     /// Latest bass level for the ambient glow (set by the host each frame).
@@ -81,8 +82,9 @@ pub struct PageState {
 }
 
 impl PageState {
-    pub fn request_lyrics_settings(&mut self) {
-        self.scroll_to_lyrics = true;
+    /// Opens Settings at row `id` (its tab, scrolled into view, glowing).
+    pub fn open_setting(&mut self, id: SettingId) {
+        self.focus_setting = Some(id);
         self.pending_nav = Some(Route::Settings);
     }
 
