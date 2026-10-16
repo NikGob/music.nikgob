@@ -277,12 +277,11 @@ pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     let i = &state.info;
     egui::ScrollArea::vertical().id_salt("info").show(ui, |ui| {
         if let Some(q) = &i.quality {
-            ui.add(
-                Button::new(q.clone())
-                    .style(Style::Outlined)
-                    .size(Size::Xs)
-                    .id_salt("info-q"),
-            );
+            // A label in an outline, not a button: there is nothing to press.
+            let g = ui.painter().layout_no_wrap(q.clone(), TypeRole::LabelLarge.font_id(), s.on_surface_variant);
+            let (r, _) = ui.allocate_exact_size(egui::vec2(g.size().x + 24.0, 32.0), egui::Sense::hover());
+            ui.painter().rect_stroke(r, 8, egui::Stroke::new(1.0, s.outline_variant), egui::StrokeKind::Inside);
+            ui.painter().galley(r.center() - g.size() * 0.5, g, s.on_surface_variant);
             ui.add_space(8.0);
         }
         let row = |ui: &mut Ui, k: &str, v: &str| {
@@ -294,7 +293,24 @@ pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
             row(ui, "Источник", src);
         }
         if let Some(p) = &i.path {
-            row(ui, "Файл", &p.display().to_string());
+            ui.label(TypeRole::LabelMedium.style().rich("Файл", s.on_surface_variant));
+            ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich(p.display().to_string(), s.on_surface)).selectable(true));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add(Button::new("Показать в папке").icon(Icon::Folder).style(Style::Tonal).size(Size::Xs).id_salt("info-reveal"))
+                    .clicked()
+                {
+                    reveal(p);
+                }
+                if ui
+                    .add(Button::new("Скопировать путь").style(Style::Text).size(Size::Xs).id_salt("info-copy-path"))
+                    .clicked()
+                {
+                    ui.ctx().copy_text(p.display().to_string());
+                }
+            });
+            ui.add_space(10.0);
         }
         for (k, v) in &i.tags {
             row(ui, k, v);
@@ -321,4 +337,20 @@ pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
             }
         }
     });
+}
+
+/// Opens the file's folder with the file selected.
+fn reveal(path: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // `explorer /select,"C:\a b\c.opus"`: the quotes must reach it as is.
+        let _ = std::process::Command::new("explorer")
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    if let Some(dir) = path.parent() {
+        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    }
 }
