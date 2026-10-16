@@ -414,8 +414,10 @@ pub(crate) struct Decoder {
     tx: Sender<DecCmd>,
     /// Last token handed to an opener thread.
     open_seq: u64,
-    /// A `Play` of a stream waiting for its opener: `(token, gen_id)`.
-    pending_play: Option<(u64, u64)>,
+    /// A `Play` of a stream waiting for its opener: `(token, gen_id, item id)`.
+    pending_play: Option<(u64, u64, u64)>,
+    /// A seek of that item asked for meanwhile: `(position, gen_id)`.
+    pending_seek: Option<(Duration, u64)>,
     /// A `SetNext` of a stream waiting for its opener (token). While it is
     /// set, the current item does not end into nothing: it waits.
     pending_next: Option<u64>,
@@ -462,6 +464,7 @@ impl Decoder {
             tx,
             open_seq: 0,
             pending_play: None,
+            pending_seek: None,
             pending_next: None,
             events,
             sh,
@@ -549,6 +552,7 @@ impl Decoder {
             DecCmd::Seek { pos, id, gen_id } => self.seek(pos, id, gen_id),
             DecCmd::Stop { gen_id } => {
                 self.pending_play = None;
+                self.drop_pending_seek();
                 self.pending_next = None;
                 self.last_gen = gen_id;
                 self.cur = None;
@@ -593,13 +597,25 @@ impl Decoder {
     /// A stream finished opening: start it, or make it the next item, if it
     /// is still wanted.
     fn opened(&mut self, token: u64, result: Result<Item, (u64, DecodeError)>) {
-        if let Some((want, gen_id)) = self.pending_play
+        if let Some((want, gen_id, _)) = self.pending_play
             && want == token
         {
             self.pending_play = None;
+            let seek = self.pending_seek.take();
             match result {
-                Ok(item) => self.start_item(item, gen_id),
-                Err((id, e)) => self.report(Some(id), &e),
+                Ok(item) => {
+                    let id = item.id;
+                    self.start_item(item, gen_id);
+                    if let Some((pos, seek_gen)) = seek {
+                        self.seek(pos, id, seek_gen);
+                    }
+                }
+                Err((id, e)) => {
+                    self.report(Some(id), &e);
+                    if let Some((_, seek_gen)) = seek {
+                        let _ = self.events.send(DecEvent::SeekDropped { gen_id: seek_gen });
+                    }
+                }
             }
         } else if self.pending_next == Some(token) {
             self.pending_next = None;
@@ -618,16 +634,19 @@ impl Decoder {
     fn play(&mut self, item: PlayItem, gen_id: u64) {
         self.pending_play = None;
         self.pending_next = None;
+        self.drop_pending_seek();
         if item.source.is_stream() {
-            // Cut what plays now and start the stream once it is open.
-            self.last_gen = gen_id;
-            self.play_gen = gen_id;
+            // Cut what plays now and start the stream once it is open. The
+            // silence keeps the old generation, so until the start the
+            // player reports the requested item at its start (and a seek of
+            // it waits for it, see `seek`).
             self.xfade = None;
             self.next = None;
             self.cur = None;
-            self.push_flush(gen_id, None);
+            self.push_flush(self.last_gen, None);
+            let id = item.id;
             let token = self.open_async(item);
-            self.pending_play = Some((token, gen_id));
+            self.pending_play = Some((token, gen_id, id));
             return;
         }
         match Item::open(item) {
@@ -686,7 +705,19 @@ impl Decoder {
         }
     }
 
+    fn drop_pending_seek(&mut self) {
+        if let Some((_, gen_id)) = self.pending_seek.take() {
+            let _ = self.events.send(DecEvent::SeekDropped { gen_id });
+        }
+    }
+
     fn seek(&mut self, pos: Duration, id: u64, gen_id: u64) {
+        if self.pending_play.is_some_and(|(_, _, want)| want == id) {
+            // The stream is still opening: seek once it is there.
+            self.drop_pending_seek();
+            self.pending_seek = Some((pos, gen_id));
+            return;
+        }
         // The callback trails the decoder by up to ~300 ms, so the item the
         // listener saw may already be over here. Seeking its successor to a
         // position meant for another track would jump the wrong item (and

@@ -354,3 +354,37 @@ fn stream_play_cuts_the_current_file_at_once() {
         "{seen:?}"
     );
 }
+
+#[test]
+fn a_seek_while_the_stream_opens_applies_once_it_is_open() {
+    let total = RATE as usize * 3;
+    let (bytes, original) = wav16(0, total);
+    let release = Arc::new(AtomicBool::new(false));
+    let gate = Arc::clone(&release);
+    let slow: StreamOpener = Box::new(move || {
+        while !gate.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Ok(Box::new(Memory::new(bytes, "wav")) as Box<dyn ByteSource>)
+    });
+    let mut rig = rig(RATE);
+    rig.player.play(PlayItem::stream(1, slow));
+    assert_eq!(
+        rig.player.current_id(),
+        Some(1),
+        "the requested item, at its start"
+    );
+    assert_eq!(rig.player.position(), Some(Duration::ZERO));
+    let target = Duration::from_secs(2);
+    rig.player.seek(target);
+    assert_eq!(rig.player.position(), Some(target));
+    release.store(true, Ordering::Release);
+    let out = rig.device.render(RATE as usize / 4);
+    let pos = rig.player.position().unwrap();
+    assert!(
+        pos > target && pos < target + Duration::from_millis(400),
+        "{pos:?}"
+    );
+    let end = (pos.as_secs_f64() * f64::from(RATE)).round() as usize;
+    assert!(tail_matches(&out[out.len() - 128..], end, &original, 1e-6));
+}

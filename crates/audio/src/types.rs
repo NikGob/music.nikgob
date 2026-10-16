@@ -96,8 +96,9 @@ pub enum ItemSource {
     /// answering commands meanwhile. Later reads run on the decoder thread.
     ///
     /// While a [`Player::play`](crate::Player::play) of a stream is opening,
-    /// nothing is heard (what played before is cut at once) and no position
-    /// is reported; `Started` / `TrackChanged` follow once it is open, an
+    /// nothing is heard (what played before is cut at once) and the
+    /// position reads the item at its start; a seek meanwhile is applied
+    /// once it is open. `Started` follows once it is open, an
     /// [`Event::Error`] for the item if it cannot be opened. A stream given to
     /// [`Player::set_next`](crate::Player::set_next) is opened in the
     /// background; if the current item ends first, playback waits for it.
