@@ -469,8 +469,10 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
         _ => Style::Karaoke,
     };
     let scale = prefs.lyrics_scale.clamp(0.8, 1.4);
-    let (big, small) = (PANE.big * 0.8 * scale, PANE.small * 0.8 * scale);
+    let (mut big, mut small) = (PANE.big * 0.8 * scale, PANE.small * 0.8 * scale);
     const LOOP: f64 = 3.2;
+    const PAD: f32 = 10.0;
+    const TEXTS: [&str; 3] = ["Где-то рядом", "Слышишь этот ритм", "Он ведёт меня"];
     let pos = Duration::from_secs_f64(anim::now(ui.ctx()).rem_euclid(LOOP));
     let mut at = 0.3;
     let words = ["Слы", "шишь ", "этот ", "ритм"]
@@ -490,9 +492,25 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let rest = 1.0 - (1.0 - 0.42) * prefs.lyrics_dim.clamp(0.0, 1.0);
     let dim = s.on_surface.gamma_multiply(rest);
     let lit = s.on_surface;
+    // Fit the three lines into the sample (a small tile shrinks the text;
+    // the size setting still shows, relative to the others): the widest
+    // line with padding, and the three rows with the wave's jump above.
+    let measure = |big: f32, small: f32| {
+        let sizes = [small, big, small];
+        let w = TEXTS.iter().zip(sizes).map(|(t, z)| fixed_layout(&painter, t, z).size().x).fold(0.0, f32::max);
+        let h: f32 = TEXTS.iter().zip(sizes).map(|(t, z)| fixed_layout(&painter, t, z).size().y).sum();
+        (w, h + 2.0 * 6.0 + big * 0.25)
+    };
+    let (w, h) = measure(big, small);
+    let fit = ((rect.width() - 2.0 * PAD) / w).min((rect.height() - 2.0 * 6.0) / h).min(1.0);
+    if fit < 1.0 {
+        big *= fit;
+        small *= fit;
+    }
+    let gap = 6.0 * fit.min(1.0);
     let g = fixed_layout(&painter, &line.text, big);
-    let cur = Rect::from_min_size(pos2(rect.left() + 16.0, rect.center().y - g.size().y * 0.5), g.size());
-    for (text, y) in [("Где-то рядом", cur.top() - 8.0), ("Он ведёт меня", cur.bottom() + 8.0)] {
+    let cur = Rect::from_min_size(pos2(rect.left() + PAD, rect.center().y - g.size().y * 0.5 + big * 0.1), g.size());
+    for (text, y) in [(TEXTS[0], cur.top() - gap), (TEXTS[2], cur.bottom() + gap)] {
         let sg = fixed_layout(&painter, text, small);
         let top = if y < cur.top() { y - sg.size().y } else { y };
         painter.galley_with_override_text_color(pos2(cur.left(), top), sg, dim);
@@ -502,15 +520,22 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     }
 }
 
-/// The pause indicator between lines for the settings' hover card: a
-/// four-second gap on loop, with the countdown at its end.
+/// The pause indicator between lines for the settings' cards: a gap on
+/// loop, with the countdown at its end.
 pub(crate) fn gap_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
-    let k = 1.4;
-    let line = Rect::from_center_size(rect.center(), vec2(56.0 * k, 42.0 * k));
-    let pos = Duration::from_secs_f64(anim::now(ui.ctx()).rem_euclid(4.6));
+    // The ring (with its wave and the countdown's pop) fits the sample with
+    // ~10 px around it, centred.
+    let base = if prefs.lyrics_gap_style >= 2 { 16.0 } else { 13.0 };
+    let reach = base + 8.0;
+    let k = ((rect.width().min(rect.height()) - 20.0) / (2.0 * reach)).clamp(0.6, 1.4);
+    let left = rect.center().x - 2.0 * k - base * k;
+    let line = Rect::from_min_size(pos2(left, rect.center().y - 21.0 * k), vec2(56.0 * k, 42.0 * k));
+    // A seven-second gap: four of the ring (its style is what is compared),
+    // then the countdown when it is on.
+    let pos = Duration::from_secs_f64(anim::now(ui.ctx()).rem_euclid(7.6));
     let bass = super::pages::settings_help::beat(anim::now(ui.ctx()) as f32) * 0.5;
-    waiting(&painter, line, k, Duration::ZERO, Duration::from_secs(4), pos, true, true, bass, 1.0, prefs);
+    waiting(&painter, line, k, Duration::ZERO, Duration::from_secs(7), pos, true, true, bass, 1.0, prefs);
 }
 
 /// Unsynced text still gets a readable column, with its source kept outside

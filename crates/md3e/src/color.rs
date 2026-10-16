@@ -9,6 +9,7 @@ use egui::Color32;
 use material_colors::{
     color::Argb,
     dynamic_color::{DynamicScheme, Variant},
+    hct::Hct,
     quantize::{Quantizer, QuantizerCelebi},
     scheme::Scheme,
     score::Score,
@@ -285,6 +286,14 @@ pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
         ch(a.b(), b.b()),
         ch(a.a(), b.a()),
     )
+}
+
+/// `hue` (HCT degrees) at the lightness of `like`, at least `chroma`
+/// colourful: a hue the user picks that still sits in the theme's tones.
+pub fn hue_like(like: Color32, hue: f64, chroma: f64) -> Color32 {
+    let reference = Hct::new(Argb::new(255, like.r(), like.g(), like.b()));
+    let argb: Argb = Hct::from(hue.rem_euclid(360.0), chroma.max(reference.get_chroma()), reference.get_tone()).into();
+    color(argb)
 }
 
 /// `c` at `opacity` (0..=1) of its own alpha; for state layers and disabled

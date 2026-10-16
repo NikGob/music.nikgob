@@ -164,7 +164,7 @@ impl Viz {
                 // Soft clouds behind everything (not tied to the cover).
                 if state.prefs.ambient != Ambient::Off {
                     let playing = state.player.status == nikgob_view::Status::Playing;
-                    super::ambient::paint(ctx, ui.painter(), rect, self.bass, playing);
+                    super::ambient::paint(ctx, ui.painter(), rect, self.bass, playing, state.prefs.ambient_strength);
                 }
                 let c = rect.center();
                 let r = rect.width().min(rect.height()) * 0.5;

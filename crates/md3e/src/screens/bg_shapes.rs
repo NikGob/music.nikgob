@@ -93,6 +93,8 @@ struct Field {
     last: f64,
     rng: u64,
     bodies: Vec<Body>,
+    /// Jump height factor (0 = as in the player).
+    jump: f32,
 }
 
 impl Field {
@@ -164,19 +166,58 @@ fn level(levels: &[f32], band: f32) -> f32 {
 /// the beat, `transients` the per-band jumps, `bass` the smoothed bass.
 pub fn paint(ui: &Ui, rect: Rect, prefs: &Prefs, playing: bool, kick: f32, transients: &[f32], bass: f32) {
     let scale = (rect.height() / 900.0).clamp(0.6, 1.6);
-    field(ui, egui::Id::new("np-bg-shapes"), rect, prefs, scale, playing, kick, transients, bass);
+    field(ui, egui::Id::new("np-bg-shapes"), rect, prefs, Look { scale, vis: 1.0, prewarm: false, jump: 1.0 }, playing, kick, transients, bass);
 }
 
-/// A small sample for the settings' hover card, on its own field so the
-/// player's shapes stay where they are.
-pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs, kick: f32, transients: &[f32]) {
-    let scale = rect.height() / 600.0;
-    field(ui, egui::Id::new("settings-bg-shapes"), rect, prefs, scale, true, kick, transients, kick * 0.5);
+/// A small sample for the settings' cards, on its own field (one per
+/// `salt`, so samples side by side keep their own shapes) so the player's
+/// shapes stay where they are.
+///
+/// A sample is a few hundred px, not a window: fewer, larger and much more
+/// visible shapes (the user's count, size and brightness still scale
+/// them), and a fresh field starts settled, so bouncing ones lie on the
+/// floor at once.
+pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs, kick: f32, transients: &[f32], salt: egui::Id) {
+    let prefs = Prefs { bg_shapes_count: (prefs.bg_shapes_count / 2).max(4), ..prefs.clone() };
+    // Jumps sized to the sample, so they hop instead of leaving it.
+    let look = Look { scale: rect.height() / 380.0, vis: 3.2, prewarm: true, jump: 0.55 };
+    field(ui, egui::Id::new("settings-bg-shapes").with(salt), rect, &prefs, look, true, kick, transients, kick * 0.5);
+}
+
+/// How a field is drawn: shape size, an opacity multiplier and whether a
+/// fresh field is run until it settles first.
+#[derive(Clone, Copy, Debug)]
+struct Look {
+    scale: f32,
+    vis: f32,
+    prewarm: bool,
+    jump: f32,
+}
+
+/// The hues the user can give the shapes (HCT degrees, with their names):
+/// red, orange, yellow, green, teal, blue, violet, pink.
+pub(crate) const HUES: [(f64, &str); 8] = [
+    (25.0, "Красный"),
+    (55.0, "Оранжевый"),
+    (95.0, "Жёлтый"),
+    (145.0, "Зелёный"),
+    (195.0, "Бирюзовый"),
+    (260.0, "Синий"),
+    (300.0, "Фиолетовый"),
+    (345.0, "Розовый"),
+];
+
+/// Swatch `i` of [`HUES`] in the tones of `s`: the primary's lightness, so
+/// it reads like an accent of the current theme.
+pub(crate) fn hue_color(s: &crate::ColorScheme, i: u8) -> Color32 {
+    let (hue, _) = HUES[usize::from(i).min(HUES.len() - 1)];
+    crate::color::hue_like(s.primary, hue, 40.0)
 }
 
 /// [`paint`] with the field kept under `id`, shapes sized by `scale`.
 #[allow(clippy::too_many_arguments)]
-fn field(ui: &Ui, id: egui::Id, rect: Rect, prefs: &Prefs, scale: f32, playing: bool, kick: f32, transients: &[f32], bass: f32) {
+fn field(ui: &Ui, id: egui::Id, rect: Rect, prefs: &Prefs, look: Look, playing: bool, kick: f32, transients: &[f32], bass: f32) {
+    let scale = look.scale;
     let mode = prefs.bg_shapes;
     if mode == BgShapes::Off || !rect.is_positive() {
         return;
@@ -189,9 +230,17 @@ fn field(ui: &Ui, id: egui::Id, rect: Rect, prefs: &Prefs, scale: f32, playing: 
         f.rng = 0x9E37_79B9_7F4A_7C15;
     }
     let (w, h) = (rect.width(), rect.height());
+    f.jump = look.jump;
     if f.mode != Some(mode) || f.count != count || f.bodies.is_empty() {
         f.reset(mode, count, w, h);
         f.size = rect.size();
+        if look.prewarm {
+            // Two quiet seconds: bouncing shapes land, the others spread.
+            let s = scale * prefs.bg_shapes_size.clamp(0.5, 2.0);
+            for _ in 0..120 {
+                step(&mut f, mode, 1.0 / 60.0, s, false, 0.0, &[], 0.0, 1.0, w, h);
+            }
+        }
     } else if f.size != rect.size() {
         // Keep the picture when the window resizes.
         let (sx, sy) = (w / f.size.x.max(1.0), h / f.size.y.max(1.0));
@@ -218,7 +267,7 @@ fn field(ui: &Ui, id: egui::Id, rect: Rect, prefs: &Prefs, scale: f32, playing: 
             b.y = h - b.size * scale * 0.5;
         }
     }
-    draw(ui, rect, &f, mode, prefs, scale);
+    draw(ui, rect, &f, mode, prefs, scale, look.vis);
     ctx.data_mut(|d| d.insert_temp(id, f));
     if busy || (moving && playing) {
         ctx.request_repaint();
@@ -267,7 +316,8 @@ fn step(
                     if playing && b.cooldown <= 0.0 && hit > 0.35 {
                         // Small ones jump higher.
                         let lift = (MAX_SIZE / b.size).sqrt();
-                        b.vy = -(380.0 + 900.0 * hit.min(1.5)) * lift * scale.sqrt();
+                        let jump = if f.jump > 0.0 { f.jump } else { 1.0 };
+                        b.vy = -(380.0 + 900.0 * hit.min(1.5)) * lift * scale.sqrt() * jump;
                         let jitter = f.signed(20.0, 120.0);
                         b.vx += jitter;
                         b.vr = f.signed(60.0, 260.0);
@@ -349,7 +399,8 @@ fn step(
     busy
 }
 
-fn draw(ui: &Ui, rect: Rect, f: &Field, mode: BgShapes, prefs: &Prefs, scale: f32) {
+#[allow(clippy::too_many_arguments)]
+fn draw(ui: &Ui, rect: Rect, f: &Field, mode: BgShapes, prefs: &Prefs, scale: f32, vis: f32) {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
@@ -361,6 +412,16 @@ fn draw(ui: &Ui, rect: Rect, f: &Field, mode: BgShapes, prefs: &Prefs, scale: f3
             [s.primary, s.secondary, s.tertiary, s.primary],
             if theme.dark { [0.12, 0.10, 0.12, 0.08] } else { [0.18, 0.14, 0.18, 0.12] },
         ),
+        3 => {
+            // The user's hue: as an accent and as a container, plus its two
+            // neighbours, so the field is not flat.
+            let (hue, _) = HUES[usize::from(prefs.bg_shapes_hue).min(HUES.len() - 1)];
+            let like = |c: Color32, h: f64| crate::color::hue_like(c, hue + h, 36.0);
+            (
+                [like(s.primary, 0.0), like(s.primary_container, 0.0), like(s.primary, 22.0), like(s.primary_container, -22.0)],
+                if theme.dark { [0.13, 0.22, 0.10, 0.18] } else { [0.18, 0.32, 0.14, 0.26] },
+            )
+        }
         _ => (
             [s.primary_container, s.secondary_container, s.tertiary_container, s.outline_variant],
             if theme.dark { [0.20, 0.18, 0.16, 0.16] } else { [0.34, 0.30, 0.24, 0.2] },
@@ -387,13 +448,13 @@ fn draw(ui: &Ui, rect: Rect, f: &Field, mode: BgShapes, prefs: &Prefs, scale: f3
             Cow::Borrowed(shape_cubics(POOL[b.shape]))
         };
         let rot = b.rot.to_radians().rem_euclid(TAU);
-        let base = (alphas[b.color] * opacity).min(1.0);
+        let base = (alphas[b.color] * opacity * vis).min(1.0);
         let color = colors[b.color];
         if mode == BgShapes::Float && b.glow > 0.02 {
             // A soft halo: the same shape, larger and fainter, twice.
             for (grow, a) in [(1.55, 0.18), (1.25, 0.32)] {
                 let halo = Rect::from_center_size(center, shape_rect.size() * (1.0 + (grow - 1.0) * b.glow));
-                let mesh = shape_paint::fill_mesh(&cubics, halo, rot, color.gamma_multiply(a * b.glow * opacity.min(1.5)), &opts);
+                let mesh = shape_paint::fill_mesh(&cubics, halo, rot, color.gamma_multiply((a * b.glow * opacity.min(1.5) * vis).min(1.0)), &opts);
                 if !mesh.is_empty() {
                     painter.add(Shape::mesh(mesh));
                 }

@@ -1,11 +1,11 @@
 //! The supporting pane: Очередь | Текст | Инфо (md3e-player.md §2.4).
 
 use egui::{Rect, Ui};
-use nikgob_view::{Command, TrackRow, ViewState};
+use nikgob_view::{Command, QueueEntry, TrackRow, ViewState};
 
 use super::{
     PaneTab,
-    chrome::{Chrome, replace_query},
+    chrome::Chrome,
     common,
 };
 use crate::{
@@ -96,6 +96,40 @@ fn queue_item<'a>(t: &'a TrackRow, salt: impl egui::AsId) -> ListItem<'a> {
         .id_salt(salt)
 }
 
+/// A movable queue row (✕ and a drag handle); played ones are dimmed.
+/// Returns its rect and whether its handle is dragged / was released.
+fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, out: &mut Vec<Command>) -> (Rect, bool, bool) {
+    let entry = e.entry;
+    ui.scope(|ui| {
+        if played {
+            ui.multiply_opacity(0.6);
+        }
+        let o = queue_item(&e.track, ("q", entry))
+            .muted(played)
+            .drag_handle(true)
+            .trailing(|ui| {
+                if ui
+                    .add(
+                        IconButton::new(Icon::Close)
+                            .size(Size::Xs)
+                            .tooltip("Убрать из очереди")
+                            .id_salt(("q-x", entry)),
+                    )
+                    .clicked()
+                {
+                    out.push(Command::RemoveFromQueue(entry));
+                }
+            })
+            .show(ui);
+        if o.response.double_clicked() {
+            out.push(Command::PlayQueueEntry(entry));
+        }
+        let (drag, drop) = o.handle.as_ref().map_or((false, false), |h| (h.dragged(), h.drag_stopped()));
+        (o.rect, drag, drop)
+    })
+    .inner
+}
+
 pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let q = &state.queue;
@@ -106,20 +140,32 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
         .max_height(list_h)
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // The queue is a temporary playlist: every row but the current
+            // one can be removed or dragged anywhere, across the current
+            // track too (a played one back up next, an upcoming one into
+            // the history). Rows in queue order: (entry, rect).
+            let mut rows: Vec<(u64, Rect)> = Vec::new();
+            // Index into `rows` of the row whose handle is dragged / was released.
+            let mut dragging = None;
+            let mut dropped = None;
+            let mut row = |ui: &mut Ui, e: &QueueEntry, played: bool, rows: &mut Vec<(u64, Rect)>| {
+                let (rect, drag, drop) = queue_row(ui, e, played, out);
+                if drag {
+                    dragging = Some(rows.len());
+                }
+                if drop {
+                    dropped = Some(rows.len());
+                }
+                rows.push((e.entry, rect));
+            };
             // What already played, dimmed, above the current track; a
             // double click goes back to it.
             if !q.prev.is_empty() {
                 common::label(ui, "Ранее", TypeRole::TitleSmall, s.on_surface_variant);
                 ui.add_space(4.0);
-                ui.scope(|ui| {
-                    ui.multiply_opacity(0.6);
-                    for e in &q.prev {
-                        let o = queue_item(&e.track, ("q-prev", e.entry)).muted(true).show(ui);
-                        if o.response.double_clicked() {
-                            out.push(Command::PlayQueueEntry(e.entry));
-                        }
-                    }
-                });
+                for e in &q.prev {
+                    row(ui, e, true, &mut rows);
+                }
                 ui.add_space(12.0);
             }
             if let Some(t) = &q.current {
@@ -127,11 +173,15 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                 common::label(ui, "Сейчас играет", TypeRole::TitleSmall, s.on_surface_variant);
                 ui.add_space(4.0);
                 let o = queue_item(t, "q-current").selected(true).show(ui);
+                if let Some(entry) = q.current_entry {
+                    rows.push((entry, o.rect));
+                }
                 // The history must not push the current track out of view:
-                // bring it to the top whenever it changes (and on first show).
+                // bring it to the top whenever it changes (and on first show),
+                // not when a row is removed or moved.
                 let key = ui.id().with("q-shown");
-                let shown = (t.id, q.prev.len());
-                if ui.ctx().data(|d| d.get_temp::<(nikgob_view::TrackId, usize)>(key)) != Some(shown) {
+                let shown = q.current_entry;
+                if ui.ctx().data(|d| d.get_temp::<Option<u64>>(key)) != Some(shown) {
                     ui.ctx().data_mut(|d| d.insert_temp(key, shown));
                     let r = Rect::from_min_max(egui::pos2(o.rect.left(), top), o.rect.max);
                     ui.scroll_to_rect(r, Some(egui::Align::TOP));
@@ -140,53 +190,25 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             }
             if q.next.is_empty() {
                 common::label(ui, "Дальше ничего нет", TypeRole::BodyMedium, s.on_surface_variant);
+            } else {
+                common::label(ui, "Далее", TypeRole::TitleSmall, s.on_surface_variant);
+                ui.add_space(4.0);
+                for e in &q.next {
+                    row(ui, e, false, &mut rows);
+                }
+            }
+            if rows.is_empty() {
                 return;
             }
-            common::label(ui, "Далее", TypeRole::TitleSmall, s.on_surface_variant);
-            ui.add_space(4.0);
-            let n = q.next.len();
-            let mut rects: Vec<Rect> = Vec::with_capacity(n);
-            // (index, entry) of the row whose handle is being dragged / was released.
-            let mut dragging = None;
-            let mut dropped = None;
-            for (i, e) in q.next.iter().enumerate() {
-                let entry = e.entry;
-                let o = queue_item(&e.track, ("q", entry))
-                    .drag_handle(true)
-                    .trailing(|ui| {
-                        if ui
-                            .add(
-                                IconButton::new(Icon::Close)
-                                    .size(Size::Xs)
-                                    .tooltip("Убрать из очереди")
-                                    .id_salt(("q-x", entry)),
-                            )
-                            .clicked()
-                        {
-                            out.push(Command::RemoveFromQueue(entry));
-                        }
-                    })
-                    .show(ui);
-                rects.push(o.rect);
-                if o.response.double_clicked() {
-                    out.push(Command::PlayQueueEntry(entry));
-                }
-                if let Some(h) = &o.handle {
-                    if h.dragged() {
-                        dragging = Some((i, entry));
-                    }
-                    if h.drag_stopped() {
-                        dropped = Some((i, entry));
-                    }
-                }
-            }
-            // The row under the pointer is where the dragged one lands.
-            let target_at = |y: f32| rects.iter().position(|r| y < r.bottom()).unwrap_or(n - 1);
+            // The row under the pointer is where the dragged one lands:
+            // after it when dragged down, before it when dragged up.
+            let last = rows.len() - 1;
+            let target_at = |y: f32| rows.iter().position(|(_, r)| y < r.bottom()).unwrap_or(last);
             let pointer = ui.ctx().pointer_latest_pos();
-            if let (Some((from, _)), Some(p)) = (dragging, pointer) {
+            if let (Some(from), Some(p)) = (dragging, pointer) {
                 let to = target_at(p.y);
                 if to != from {
-                    let r = rects[to];
+                    let r = rows[to].1;
                     let y = if to < from { r.top() } else { r.bottom() };
                     ui.painter().rect_filled(
                         Rect::from_min_max(
@@ -198,10 +220,10 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                     );
                 }
             }
-            if let (Some((from, entry)), Some(p)) = (dropped, pointer) {
+            if let (Some(from), Some(p)) = (dropped, pointer) {
                 let to = target_at(p.y);
                 if to != from {
-                    out.push(Command::MoveInQueue { entry, to });
+                    out.push(Command::MoveInQueue { entry: rows[from].0, anchor: rows[to].0, after: to > from });
                 }
             }
         });
@@ -294,19 +316,6 @@ pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
                     .clicked()
                 {
                     out.push(Command::OpenTagEditor(t.id));
-                }
-                ui.add_space(8.0);
-                if ui
-                    .add(
-                        Button::new("Заменить на лучшее качество…")
-                            .icon(Icon::CloudDownload)
-                            .style(Style::Tonal)
-                            .size(Size::S)
-                            .id_salt("info-replace"),
-                    )
-                    .clicked()
-                {
-                    out.push(Command::SearchTorrents(replace_query(t)));
                 }
                 ui.add_space(8.0);
             }

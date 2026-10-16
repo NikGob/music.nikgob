@@ -172,18 +172,24 @@ impl Queue {
         true
     }
 
-    /// Moves an upcoming entry to index `to` within the upcoming list.
-    pub fn move_upcoming(&mut self, entry: u64, to: usize) -> bool {
-        let base = self.pos.map_or(0, |p| p + 1);
+    /// Moves `entry` right after (or before) `anchor`, anywhere in the queue:
+    /// a played track can go back among the upcoming ones and the other way
+    /// round. The current item itself never moves and stays current.
+    pub fn move_next_to(&mut self, entry: u64, anchor: u64, after: bool) -> bool {
+        let current = self.current().map(|c| c.id);
+        if entry == anchor || current == Some(entry) {
+            return false;
+        }
         let Some(i) = self.items.iter().position(|e| e.id == entry) else {
             return false;
         };
-        if i < base {
+        if !self.items.iter().any(|e| e.id == anchor) {
             return false;
         }
         let e = self.items.remove(i);
-        let to = (base + to).min(self.items.len());
-        self.items.insert(to, e);
+        let j = self.items.iter().position(|e| e.id == anchor).unwrap_or(self.items.len());
+        self.items.insert(if after { j + 1 } else { j }, e);
+        self.pos = current.and_then(|c| self.items.iter().position(|e| e.id == c));
         if !self.shuffle {
             // `original` is the order shuffle-off restores: keep the edit.
             self.original.clone_from(&self.items);
@@ -291,7 +297,7 @@ mod tests {
         let mut q = Queue::default();
         q.set(&t, 0, None);
         let up: Vec<u64> = q.upcoming().iter().map(|e| e.id).collect();
-        assert!(q.move_upcoming(up[2], 0)); // t3 first
+        assert!(q.move_next_to(up[2], up[0], false)); // t3 first
         q.set_shuffle(true);
         q.set_shuffle(false);
         assert_eq!(q.tracks(), vec![t[0], t[3], t[1], t[2]]);
@@ -331,6 +337,33 @@ mod tests {
     }
 
     #[test]
+    fn played_tracks_can_be_moved_and_removed_like_upcoming_ones() {
+        let t = ids(5);
+        let mut q = Queue::default();
+        q.set(&t, 2, None);
+        let all: Vec<u64> = q.history().iter().chain(q.current().iter()).chain(q.upcoming()).map(|e| e.id).collect();
+        let cur = all[2];
+        // A played track back after the current one: it plays next.
+        assert!(q.move_next_to(all[0], cur, true));
+        assert_eq!(q.current().map(|e| e.id), Some(cur));
+        assert_eq!(q.history().iter().map(|e| e.track).collect::<Vec<_>>(), vec![t[1]]);
+        assert_eq!(q.upcoming()[0].track, t[0]);
+        // An upcoming one into the history, before the current.
+        assert!(q.move_next_to(all[4], cur, false));
+        assert_eq!(q.history().iter().map(|e| e.track).collect::<Vec<_>>(), vec![t[1], t[4]]);
+        assert_eq!(q.current().map(|e| e.track), Some(t[2]));
+        // Reorder inside the history, then drop one of it.
+        assert!(q.move_next_to(all[4], all[1], false));
+        assert_eq!(q.history().iter().map(|e| e.track).collect::<Vec<_>>(), vec![t[4], t[1]]);
+        assert!(q.remove(all[1]));
+        assert_eq!(q.history().iter().map(|e| e.track).collect::<Vec<_>>(), vec![t[4]]);
+        assert_eq!(q.current().map(|e| e.id), Some(cur));
+        // The current item never moves.
+        assert!(!q.move_next_to(cur, all[4], false));
+        assert!(!q.move_next_to(all[4], all[4], true));
+    }
+
+    #[test]
     fn edit_upcoming() {
         let t = ids(4);
         let mut q = Queue::default();
@@ -338,7 +371,7 @@ mod tests {
         let up: Vec<u64> = q.upcoming().iter().map(|e| e.id).collect();
         assert!(q.remove(up[0]));
         assert_eq!(q.upcoming().len(), 2);
-        assert!(q.move_upcoming(up[2], 0));
+        assert!(q.move_next_to(up[2], up[1], false));
         assert_eq!(q.upcoming()[0].track, t[3]);
         let extra = ids(1);
         q.play_next(&extra);

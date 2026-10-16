@@ -349,6 +349,9 @@ struct RingInput<'a> {
     room: f32,
     kick: f32,
     alpha: f32,
+    /// Gaps, wobble and dot spacing relative to the player's (1); a small
+    /// sample shrinks them so each style still reads as itself.
+    scale: f32,
 }
 
 /// The ring around the cover: dots on a soft 12-lobed circle, dots riding
@@ -363,16 +366,19 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
     let center = outline.rect.center();
     let dir = |th: f32| vec2(th.sin(), -th.cos());
     let kick = input.kick;
+    let sc = input.scale;
+    // Dots shrink less than the gaps, so a sample stays legible.
+    let kd = sc.sqrt();
     match input.style {
         RingStyle::Circle => {
-            let n = 72;
-            let radius = outline.rect.width() * 0.5 + 14.0;
+            let n = ((72.0 * kd).round() as usize).max(24);
+            let radius = outline.rect.width() * 0.5 + 14.0 * sc;
             for i in 0..n {
                 let u = i as f32 / n as f32;
                 let theta = input.angle + u * TAU;
                 let level = band_at(input.transients, theta);
-                let r = radius + 3.0 * (12.0 * u * TAU).cos() + level * 16.0 + kick * 8.0;
-                let dot = 2.0 + level * 2.0 + kick * 0.8;
+                let r = radius + 3.0 * sc * (12.0 * u * TAU).cos() + (level * 16.0 + kick * 8.0) * sc;
+                let dot = (2.0 + level * 2.0 + kick * 0.8) * kd;
                 let a = input.alpha * (0.45 + 0.55 * level.max(kick * 0.6));
                 painter.circle_filled(center + dir(theta) * r, dot, s.primary.gamma_multiply(a));
             }
@@ -382,7 +388,7 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
             // its length (not by angle: a square's corners would thin out),
             // sliding along it as the ring turns.
             let radii = outline.radii();
-            let gap = 14.0;
+            let gap = 14.0 * sc;
             let pts: Vec<Pos2> = (0..BINS)
                 .map(|i| center + dir(i as f32 * TAU / BINS as f32) * (radii[i] + gap))
                 .collect();
@@ -393,7 +399,7 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
                 total += pts[i].distance(pts[(i + 1) % BINS]);
                 acc.push(total);
             }
-            let spacing = 11.0;
+            let spacing = 11.0 * kd;
             let n = ((total / spacing).round() as usize).max(12);
             let phase = (input.angle / TAU).rem_euclid(1.0) * total;
             let mut bin = 0;
@@ -411,8 +417,8 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
                 let p = a + (b - a) * f;
                 let theta = (bin as f32 + f) * TAU / BINS as f32;
                 let level = band_at(input.transients, theta);
-                let out = dir(theta) * (level * 14.0 + kick * 7.0);
-                let dot = 2.0 + level * 1.8 + kick * 0.8;
+                let out = dir(theta) * (level * 14.0 + kick * 7.0) * sc;
+                let dot = (2.0 + level * 1.8 + kick * 0.8) * kd;
                 let alpha = input.alpha * (0.5 + 0.5 * level.max(kick * 0.6));
                 painter.circle_filled(p + out, dot, s.primary.gamma_multiply(alpha));
             }
@@ -425,7 +431,7 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
             // the cover.
             let radii = outline.radii();
             let n = BAR_COUNT;
-            let gap = 8.0;
+            let gap = 8.0 * sc;
             let r_mid = outline.rect.width() * 0.5 + gap;
             let width = (TAU * r_mid / n as f32 - 3.0).clamp(2.5, 7.0);
             let room = (input.room - gap - width).max(4.0);
@@ -835,17 +841,6 @@ pub fn show(
         ).clicked() {
             chrome.np_slot.toggle(NpSlot::Lyrics);
         }
-        // Track info (also opened from ⋮ → «Источник и качество»): its own
-        // toggle, so closing it is one click, not a detour via the queue.
-        if ui.add(
-            IconButton::new(Icon::Info)
-                .style(Style::Tonal)
-                .selected(chrome.np_slot == NpSlot::Info)
-                .tooltip("Инфо о треке")
-                .id_salt("np-info-btn"),
-        ).clicked() {
-            chrome.np_slot.toggle(NpSlot::Info);
-        }
         header.right() - ui.min_rect().left()
     }).inner;
     // Centred on the whole screen, not in the gap between the buttons.
@@ -946,6 +941,7 @@ pub fn show(
                 // The contour ring stays around the square too; the
                 // circle one only belongs to a shape.
                 alpha: if prefs.ring_style == RingStyle::Circle { shown } else { 0.35 + 0.65 * shown },
+                scale: 1.0,
         };
         let alpha = input.alpha;
         input.alpha *= if theme.reduced_motion || !mega.wide { 1.0 - mega_k } else { 1.0 };
@@ -1069,8 +1065,75 @@ pub fn show(
             }
         }
     }
+    if state.prefs.np_volume_pop && !state.prefs.np_volume {
+        volume_pop(ui, rect, state, chrome, out);
+    }
 
     closed
+}
+
+/// «Громкость — при изменении»: a floating pill at the bottom centre that
+/// shows the volume while it changes (wheel, keys, media keys, the menu)
+/// and slips away 1.5 s after the last change; it stays while the pointer
+/// is on it, so it can be dragged too.
+fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
+    const HOLD: f64 = 1.5;
+    let ctx = ui.ctx().clone();
+    let theme = Theme::get(&ctx);
+    let s = theme.scheme;
+    let p = &state.player;
+    let volume = if p.muted { 0.0 } else { chrome.volume_now(&ctx, state) };
+    let now = ctx.input(|i| i.time);
+    let id = egui::Id::new("np-vol-pop");
+    // (last volume, muted, when it last changed, pointer on the pill).
+    let (last, muted, at, held) = ctx
+        .data(|d| d.get_temp::<(f32, bool, f64, bool)>(id))
+        .unwrap_or((volume, p.muted, f64::NEG_INFINITY, false));
+    let at = if (last - volume).abs() > 1e-4 || muted != p.muted { now } else { at };
+    let shown = held || now - at < HOLD;
+    let k = anim::fraction(&ctx, id.with("k"), if shown { 1.0 } else { 0.0 }, theme.motion.fast_spatial);
+    if shown && !held {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64((at + HOLD - now).max(0.0) + 0.02));
+    }
+    let mut hovered = false;
+    if k > 0.001 {
+        let size = vec2(area.width().min(360.0) - 32.0, 64.0);
+        let rise = if theme.reduced_motion { 0.0 } else { 28.0 * (1.0 - k) };
+        let pill = Rect::from_center_size(
+            pos2(area.center().x, area.bottom() - 24.0 - size.y * 0.5 + rise),
+            size * (0.92 + 0.08 * k),
+        );
+        let radii = Radii::all(pill.height() * 0.5);
+        let mut pui = ui.new_child(UiBuilder::new().max_rect(pill).id_salt("np-vol-pop-ui"));
+        pui.multiply_opacity(k.clamp(0.0, 1.0));
+        // Clicks on the pill must not close the player under it.
+        let back = pui.interact(pill, id.with("bg"), Sense::click());
+        paint::shadow(pui.painter(), pill, radii, crate::tokens::Elevation::Level3);
+        paint::container(pui.painter(), pill, radii, s.surface_container_high, Stroke::NONE);
+        let inner = pill.shrink2(vec2(12.0, 8.0));
+        let mut row = pui.new_child(
+            UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::left_to_right(egui::Align::Center))
+                .id_salt("np-vol-pop-row"),
+        );
+        if row
+            .add(IconButton::new(Icon::volume(volume, p.muted)).tooltip("Звук").id_salt("np-vol-pop-mute"))
+            .clicked()
+        {
+            out.push(Command::ToggleMute);
+        }
+        let label_w = 44.0;
+        let w = (row.available_width() - label_w - 8.0).max(64.0);
+        let vo = Slider::new("np-vol-pop-slider", volume).track(12.0).width(w).show(&mut row);
+        if let Some(v) = vo.dragging.or(vo.committed) {
+            out.push(Command::SetVolume(v));
+        }
+        common::label(&mut row, &format!("{:.0}%", volume * 100.0), TypeRole::LabelLarge, s.on_surface);
+        hovered = back.contains_pointer() || vo.dragging.is_some();
+        chrome.volume_zone(pill, WheelZone::Np);
+    }
+    ctx.data_mut(|d| d.insert_temp(id, (volume, p.muted, if hovered { now } else { at }, hovered)));
 }
 
 /// A small live sample of the cover under `prefs` for the settings' hover
@@ -1132,6 +1195,9 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &nikgob_view::Prefs, with_ring
             room: pad,
             kick: if beat { kick } else { 0.0 },
             alpha: 1.0,
+            // The player's cover is ~300 px: at sample size the gaps and
+            // the circle's wobble would swamp the shape.
+            scale: (side / 300.0).clamp(0.3, 1.0),
         };
         ring(ui, &outline, &input);
     }
@@ -1479,7 +1545,7 @@ fn ambient(ui: &Ui, rect: Rect, state: &ViewState, pages: &PageState) {
         0.0
     };
     let level = anim::fraction(ui.ctx(), egui::Id::new("np-glow"), bass, theme.motion.fast_effects);
-    super::ambient::paint(ui.ctx(), ui.painter(), rect, level.clamp(0.0, 1.0), playing);
+    super::ambient::paint(ui.ctx(), ui.painter(), rect, level.clamp(0.0, 1.0), playing, state.prefs.ambient_strength);
 }
 
 #[cfg(test)]

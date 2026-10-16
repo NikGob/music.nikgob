@@ -44,8 +44,6 @@ pub struct Md3eUi {
     nav_dir: f32,
     nav_anim: Animated<f32>,
     rail_expanded: bool,
-    /// The always-hidden rail is slid in over the content for now.
-    rail_peek: bool,
     pane: Option<PaneTab>,
     last_pane: PaneTab,
     was_inline: bool,
@@ -84,7 +82,6 @@ impl Md3eUi {
             nav_dir: 0.0,
             nav_anim: Animated::new(0.0, crate::tokens::Motion::expressive().slow_effects),
             rail_expanded: true,
-            rail_peek: false,
             // The pane opens on demand (queue / lyrics buttons), not always.
             pane: None,
             last_pane: PaneTab::Queue,
@@ -168,11 +165,6 @@ impl Md3eUi {
     /// Recomputes and animates the colour scheme from the current cover.
     fn update_theme(&mut self, ctx: &Context, state: &ViewState) {
         let prefs = &state.prefs;
-        let dark = match prefs.theme {
-            ThemeMode::Dark => true,
-            ThemeMode::Light => false,
-            ThemeMode::System => ctx.system_theme() != Some(egui::Theme::Light),
-        };
         let seed = state
             .player
             .current
@@ -180,20 +172,9 @@ impl Md3eUi {
             .and_then(|t| t.cover.as_ref())
             .and_then(|c| c.seed)
             .unwrap_or(prefs.fallback_seed);
-        let variant = match prefs.scheme_variant {
-            1 => SchemeVariant::TonalSpot,
-            2 => SchemeVariant::Vibrant,
-            3 => SchemeVariant::Expressive,
-            4 => SchemeVariant::Fidelity,
-            5 => SchemeVariant::Monochrome,
-            6 => SchemeVariant::Neutral,
-            _ => SchemeVariant::Content,
-        };
-        let contrast = match prefs.contrast {
-            1 => Contrast::Medium,
-            2 => Contrast::High,
-            _ => Contrast::Standard,
-        };
+        // The settings' samples paint other variants of the same seed.
+        ctx.data_mut(|d| d.insert_temp(scheme_seed_id(), seed));
+        let (dark, variant, contrast) = theme_key(ctx, prefs);
         let spring = anim::effective(ctx, Theme::get(ctx).motion.slow_effects);
         let scheme = self
             .scheme
@@ -460,8 +441,7 @@ impl Md3eUi {
         let mut previous = false;
         let mut go = None;
         ctx.input_mut(|i| {
-            // Ctrl+1…4: the rail's destinations (the way there when the
-            // rail is always hidden).
+            // Ctrl+1…4: the rail's destinations.
             for (n, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4].into_iter().enumerate() {
                 if i.consume_key(Modifiers::COMMAND, key) {
                     go = Some(n);
@@ -552,7 +532,9 @@ impl Md3eUi {
         let s = theme.scheme;
 
         // Rail.
-        let wants_expanded = self.rail_expanded && class >= SizeClass::Large;
+        // "Always compact": icons only, whatever the window size.
+        let compact_rail = state.prefs.rail_compact;
+        let wants_expanded = self.rail_expanded && class >= SizeClass::Large && !compact_rail;
         let expansion = anim::fraction(
             &ctx,
             egui::Id::new("rail-expansion"),
@@ -561,17 +543,8 @@ impl Md3eUi {
             theme.motion.default_spatial.without_bounce(),
         );
         let rail_w = rail::width(expansion);
-        // "Always hidden": the rail slides out of the layout; touching the
-        // window's left edge brings it back over the content for a moment.
-        let nav_hidden = state.prefs.nav_hidden;
-        let hide = anim::fraction(
-            &ctx,
-            egui::Id::new("rail-hidden"),
-            if nav_hidden { 1.0 } else { 0.0 },
-            theme.motion.default_spatial.without_bounce(),
-        );
-        let rail_slot = rail_w * (1.0 - hide);
-        let rail_rect = Rect::from_min_size(full.min - vec2(rail_w - rail_slot, 0.0), vec2(rail_w, full.height()));
+        let rail_slot = rail_w;
+        let rail_rect = Rect::from_min_size(full.min, vec2(rail_w, full.height()));
 
         // Supporting pane (inline on Large/XL).
         let inline_pane = class >= SizeClass::Large;
@@ -600,12 +573,10 @@ impl Md3eUi {
         );
         self.content_rect = content;
 
-        if hide < 0.999 {
-            self.rail(ui, rail_rect, expansion, state, out);
-        }
+        self.rail(ui, rail_rect, expansion, state, out);
         // Rail collapse toggle on Large+, in the rail's top space (gone
-        // with the rail when it is always hidden).
-        if class >= SizeClass::Large && !nav_hidden && hide < 0.001 {
+        // when the rail is always compact).
+        if class >= SizeClass::Large && !compact_rail {
             // Centred over the FAB icon (x 48 collapsed, 40 expanded).
             let r = Rect::from_min_size(rail_rect.min + vec2(28.0 - 8.0 * expansion, 2.0), vec2(40.0, 40.0));
             let mut tui = ui.new_child(UiBuilder::new().max_rect(r).id_salt("rail-toggle"));
@@ -620,11 +591,6 @@ impl Md3eUi {
             {
                 self.rail_expanded = !expanded;
             }
-        }
-        if nav_hidden && hide >= 0.999 {
-            self.rail_peek(&ctx, full, expansion, state, out);
-        } else {
-            self.rail_peek = false;
         }
         let route = self.route().clone();
 
@@ -761,6 +727,35 @@ fn load_for(route: &Route, out: &mut Vec<Command>) {
 
 type SchemeKey = (u32, bool, SchemeVariant, Contrast);
 
+/// Where [`Md3eUi`] keeps the seed the scheme is made from.
+pub(crate) fn scheme_seed_id() -> egui::Id {
+    egui::Id::new("md3e-scheme-seed")
+}
+
+/// Dark or light, the scheme variant and the contrast `prefs` ask for.
+pub(crate) fn theme_key(ctx: &Context, prefs: &nikgob_view::Prefs) -> (bool, SchemeVariant, Contrast) {
+    let dark = match prefs.theme {
+        ThemeMode::Dark => true,
+        ThemeMode::Light => false,
+        ThemeMode::System => ctx.system_theme() != Some(egui::Theme::Light),
+    };
+    let variant = match prefs.scheme_variant {
+        1 => SchemeVariant::TonalSpot,
+        2 => SchemeVariant::Vibrant,
+        3 => SchemeVariant::Expressive,
+        4 => SchemeVariant::Fidelity,
+        5 => SchemeVariant::Monochrome,
+        6 => SchemeVariant::Neutral,
+        _ => SchemeVariant::Content,
+    };
+    let contrast = match prefs.contrast {
+        1 => Contrast::Medium,
+        2 => Contrast::High,
+        _ => Contrast::Standard,
+    };
+    (dark, variant, contrast)
+}
+
 /// Animates the whole scheme from one palette to the next (slow effects).
 struct SchemeAnim {
     key: Option<SchemeKey>,
@@ -866,10 +861,6 @@ impl Md3eUi {
     }
 }
 
-/// How close to the window's left edge the pointer has to be to bring back
-/// an always-hidden rail.
-const PEEK_EDGE: f32 = 8.0;
-
 impl Md3eUi {
     /// The rail's destinations, in order: Главная, Библиотека, Загрузки,
     /// then Настройки at the bottom (also Ctrl+1…4).
@@ -929,62 +920,11 @@ impl Md3eUi {
         }
         picked.is_some()
     }
-
-    /// With the rail always hidden: touching the window's left edge slides
-    /// it in over the content, like a modal drawer; it slides away when the
-    /// pointer leaves it or a destination is picked.
-    fn rail_peek(&mut self, ctx: &Context, full: Rect, expansion: f32, state: &ViewState, out: &mut Vec<Command>) {
-        let theme = Theme::get(ctx);
-        let s = theme.scheme;
-        let w = rail::width(expansion);
-        let shown = Rect::from_min_size(full.min, vec2(w, full.height()));
-        let menu_open = ctx
-            .data(|d| d.get_temp::<bool>(egui::Id::new("add-fab-menu").with("open")))
-            .unwrap_or(false);
-        let covered = self.now_playing || self.chrome.np_covering || self.chrome.visualizer;
-        let dragging = ctx.dragged_id().is_some();
-        self.rail_peek = match ctx.pointer_hover_pos() {
-            _ if covered => false,
-            Some(p) if !dragging && p.x <= full.left() + PEEK_EDGE && full.y_range().contains(p.y) => true,
-            Some(p) => self.rail_peek && (menu_open || shown.expand(24.0).contains(p)),
-            None => self.rail_peek && menu_open,
-        };
-        let k = anim::fraction(
-            ctx,
-            egui::Id::new("rail-peek"),
-            if self.rail_peek { 1.0 } else { 0.0 },
-            theme.motion.default_spatial,
-        );
-        if k <= 0.001 {
-            return;
-        }
-        // Out of sight (shadow included) at 0.
-        let rect = shown.translate(vec2(-(w + 24.0) * (1.0 - k), 0.0));
-        let picked = egui::Area::new(egui::Id::new("md3e-rail-peek"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(full.min)
-            .constrain(false)
-            .fade_in(false)
-            .show(ctx, |ui| {
-                use crate::components::{paint, paint::Radii};
-                let r = crate::tokens::shape::EXTRA_LARGE;
-                let radii = Radii([0.0, r, r, 0.0]);
-                paint::shadow(ui.painter(), rect, radii, crate::tokens::Elevation::Level2);
-                // `surface`, like the rail's own background, so the FAB
-                // menu's backdrop matches it.
-                paint::container(ui.painter(), rect, radii, s.surface, egui::Stroke::NONE);
-                self.rail(ui, rect, expansion, state, out)
-            })
-            .inner;
-        if picked {
-            self.rail_peek = false;
-        }
-    }
 }
 
 /// The spring Now Playing opens and closes on (`Prefs::np_motion`):
 /// smooth, lively (a quick one with a little bounce) or fast.
-fn np_spring(motion: u8) -> nikgob_motion::Spring {
+pub(crate) fn np_spring(motion: u8) -> nikgob_motion::Spring {
     match motion {
         0 => nikgob_motion::Spring::new(0.85, 220.0),
         2 => nikgob_motion::Spring::new(0.9, 1000.0),

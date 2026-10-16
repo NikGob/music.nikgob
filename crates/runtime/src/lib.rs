@@ -521,8 +521,8 @@ impl Worker {
                 self.preload_next();
                 self.publish_player();
             }
-            Command::MoveInQueue { entry, to } => {
-                self.queue.move_upcoming(entry, to);
+            Command::MoveInQueue { entry, anchor, after } => {
+                self.queue.move_next_to(entry, anchor, after);
                 self.preload_next();
                 self.publish_player();
             }
@@ -989,6 +989,7 @@ impl Worker {
         let upcoming: Vec<Entry> = self.queue.upcoming().iter().take(200).copied().collect();
         let history = self.queue.history();
         let history: Vec<Entry> = history[history.len().saturating_sub(HISTORY_SHOWN)..].to_vec();
+        let current_entry = self.queue.current().map(|e| e.id);
         let lib = self.lib.clone();
         self.publish(|s, res| {
             let p = &mut s.player;
@@ -1012,6 +1013,7 @@ impl Worker {
             };
             s.queue.next = rows(&upcoming);
             s.queue.prev = rows(&history);
+            s.queue.current_entry = current_entry;
         });
     }
 

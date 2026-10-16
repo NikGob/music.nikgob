@@ -3,11 +3,11 @@
 
 use egui::{Sense, Ui};
 use nikgob_shapes::paint as shape_paint;
-use nikgob_view::{Ambient, BgShapes, Command, CoverShape, Prefs, RingStyle, Route, ThemeMode, ViewState};
+use nikgob_view::{Ambient, BgShapes, Command, CoverShape, Prefs, RingStyle, Route, ViewState};
 
 use super::settings_help::{self, SettingId as Id};
 use super::{PageState, connected};
-use crate::screens::now_playing;
+use crate::screens::{bg_shapes, now_playing};
 use crate::{
     Icon, Theme, TypeRole,
     components::{Button, Divider, FilterChip, Menu, MenuItem, Slider, Style, Switch, TextField},
@@ -24,19 +24,39 @@ fn group(ui: &mut Ui, title: &str) -> egui::Response {
 /// A 56/72 row: label (+ supporting) on the left, a control on the right.
 /// In a narrow page the control goes under the text.
 fn row(ui: &mut Ui, id: Id, label: &str, supporting: Option<&str>, control: impl FnOnce(&mut Ui)) {
-    settings_help::item(ui, id, label, |ui| row_body(ui, label, supporting, control));
+    settings_help::item(ui, id, label, |ui| row_body(ui, id, label, supporting, control));
 }
 
-fn row_body(ui: &mut Ui, label: &str, supporting: Option<&str>, control: impl FnOnce(&mut Ui)) {
+/// The row's label with its ⓘ right after the last word.
+fn row_label(ui: &mut Ui, id: Id, label: &str) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let name = ui
+        .horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let text = ui.label(TypeRole::BodyLarge.style().rich(label, s.on_surface)).rect;
+            settings_help::help_button(ui, id);
+            text
+        })
+        .inner;
+    settings_help::report_label(ui.ctx(), name);
+}
+
+/// The control, reported so the row's cards line up with it.
+fn row_control(ui: &mut Ui, control: impl FnOnce(&mut Ui)) {
+    let r = ui.scope(control).response.rect;
+    settings_help::report_control(ui.ctx(), r);
+}
+
+fn row_body(ui: &mut Ui, id: Id, label: &str, supporting: Option<&str>, control: impl FnOnce(&mut Ui)) {
     let s = Theme::get(ui.ctx()).scheme;
     if ui.available_width() < 540.0 {
         ui.add_space(8.0);
-        ui.label(TypeRole::BodyLarge.style().rich(label, s.on_surface));
+        row_label(ui, id, label);
         if let Some(t) = supporting {
             ui.label(TypeRole::BodyMedium.style().rich_para(t, s.on_surface_variant));
         }
         ui.add_space(4.0);
-        control(ui);
+        row_control(ui, control);
         ui.add_space(8.0);
         return;
     }
@@ -47,19 +67,41 @@ fn row_body(ui: &mut Ui, label: &str, supporting: Option<&str>, control: impl Fn
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.vertical(|ui| {
-                ui.set_width(label_w);
+                // Room for the ⓘ after the longest labels.
+                ui.set_width(label_w + settings_help::BTN + 4.0);
                 // Centre the text block against the control.
                 let block = if supporting.is_some() { 44.0 } else { 24.0 };
                 ui.add_space(((h - block) * 0.5).max(0.0));
-                ui.label(TypeRole::BodyLarge.style().rich(label, s.on_surface));
+                row_label(ui, id, label);
                 if let Some(t) = supporting {
                     ui.label(TypeRole::BodyMedium.style().rich_para(t, s.on_surface_variant));
                 }
             });
             ui.add_space(16.0);
-            control(ui);
+            row_control(ui, control);
         },
     );
+}
+
+/// Segmented buttons for a choice row (labels and values from
+/// [`Id::choices`]); hovering one previews it in the row's card.
+fn choice(ui: &mut Ui, id: Id, p: &mut Prefs) {
+    let labels: Vec<&str> = id.choices().iter().map(|c| c.label).collect();
+    let (pick, rects) = connected(ui, egui::Id::new(("set-choice", id)), &labels, id.chosen(p), &[]);
+    settings_help::report_choices(ui.ctx(), rects);
+    if let Some(n) = pick {
+        id.choose(p, n);
+    }
+}
+
+/// A menu chip for a choice row with long labels.
+fn choice_menu(ui: &mut Ui, id: Id, p: &mut Prefs) {
+    let cur = id.chosen(p);
+    let options: Vec<(String, bool)> =
+        id.choices().iter().enumerate().map(|(i, c)| (c.label.to_owned(), i == cur)).collect();
+    if let Some(n) = dropdown(ui, &format!("set-menu-{id:?}"), id.choices()[cur].label, &options) {
+        id.choose(p, n);
+    }
 }
 
 /// A chip that opens a menu of `options` (label, selected). Returns the pick.
@@ -194,7 +236,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         general(ui, &mut p, pages, out);
     }
     ui.add(Divider::new());
-    settings_help::finish(ui, &p);
+    settings_help::finish(ui, &mut p);
 
     if p != before {
         out.push(Command::SetPrefs(Box::new(p)));
@@ -210,56 +252,21 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         // Only MD3E exists so far; the others are shown but off.
         connected(ui, egui::Id::new("set-design"), &["Material 3", "Nothing", "Glass"], 0, &[1, 2]);
     });
-    row(ui, Id::Theme, "Тема", None, |ui| {
-        let i = match p.theme {
-            ThemeMode::Light => 0,
-            ThemeMode::Dark => 1,
-            ThemeMode::System => 2,
-        };
-        if let (Some(n), _) = connected(ui, egui::Id::new("set-theme"), &["Светлая", "Тёмная", "Системная"], i, &[]) {
-            p.theme = [ThemeMode::Light, ThemeMode::Dark, ThemeMode::System][n];
-        }
-    });
-    row(ui, Id::Contrast, "Контраст", None, |ui| {
-        let labels = ["Обычный", "Средний", "Высокий"];
-        let i = usize::from(p.contrast).min(2);
-        if let (Some(n), _) = connected(ui, egui::Id::new("set-contrast"), &labels, i, &[]) {
-            p.contrast = n as u8;
-        }
-    });
+    row(ui, Id::Theme, "Тема", None, |ui| choice(ui, Id::Theme, p));
+    row(ui, Id::Contrast, "Контраст", None, |ui| choice(ui, Id::Contrast, p));
     row(ui, Id::Scheme, "Схема цвета", Some("Палитра интерфейса из обложки трека"), |ui| {
-        const VARIANTS: [&str; 7] =
-            ["Content", "Tonal Spot", "Vibrant", "Expressive", "Fidelity", "Monochrome", "Neutral"];
-        let cur = usize::from(p.scheme_variant).min(VARIANTS.len() - 1);
-        let options: Vec<(String, bool)> =
-            VARIANTS.iter().enumerate().map(|(i, v)| ((*v).to_owned(), i == cur)).collect();
-        if let Some(n) = dropdown(ui, "set-variant", VARIANTS[cur], &options) {
-            p.scheme_variant = n as u8;
-        }
+        choice_menu(ui, Id::Scheme, p);
     });
 
     group(ui, "Сейчас играет");
     row(ui, Id::ProgressWave, "Волна на полосе прогресса", Some("Выключи — прогресс всегда ровная линия"), |ui| {
         ui.add(Switch::new(&mut p.progress_wave).id_salt("set-progress-wave"));
     });
-    row(ui, Id::NpVolume, "Ползунок громкости", Some("Без него — кнопка звука, громкость колесом"), |ui| {
-        ui.add(Switch::new(&mut p.np_volume).id_salt("set-np-volume"));
-    });
+    row(ui, Id::NpVolume, "Громкость", Some("Где регулируется звук в открытом треке"), |ui| choice(ui, Id::NpVolume, p));
 
     group(ui, "Обложка");
     row(ui, Id::CoverShape, "Форма обложки", Some("Пока играет музыка; на паузе — квадрат"), |ui| {
-        let i = match p.cover_shape {
-            CoverShape::Original => 0,
-            CoverShape::Random => 2,
-            _ => 1,
-        };
-        if let (Some(n), _) = connected(ui, egui::Id::new("set-cover-mode"), &["Квадрат", "Фигура", "Случайная"], i, &[]) {
-            p.cover_shape = match n {
-                0 => CoverShape::Original,
-                2 => CoverShape::Random,
-                _ => now_playing::random_pool(&p.random_shapes)[0],
-            };
-        }
+        choice(ui, Id::CoverShape, p);
     });
     match p.cover_shape {
         CoverShape::Original => {}
@@ -309,11 +316,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         ui.add(Switch::new(&mut p.cover_spin).id_salt("set-cover-spin"));
     });
     if p.cover_spin {
-        row(ui, Id::CoverDir, "Направление формы", None, |ui| {
-            if let (Some(n), _) = connected(ui, egui::Id::new("set-cover-dir"), &["По часовой", "Против"], usize::from(p.cover_ccw), &[]) {
-                p.cover_ccw = n == 1;
-            }
-        });
+        row(ui, Id::CoverDir, "Направление формы", None, |ui| choice(ui, Id::CoverDir, p));
     }
     row(ui, Id::CoverPulse, "Пульсация в такт", Some("Обложка чуть вздрагивает на долях"), |ui| {
         ui.add(Switch::new(&mut p.cover_pulse).id_salt("set-cover-pulse"));
@@ -325,11 +328,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     });
     if p.ring {
         row(ui, Id::RingStyle, "Вид кольца", Some("Круг из точек, точки по контуру формы или точки, вырастающие в бары под музыку (как в caelestia)"), |ui| {
-            let styles = [RingStyle::Circle, RingStyle::Contour, RingStyle::Bars];
-            let i = styles.iter().position(|r| *r == p.ring_style).unwrap_or(1);
-            if let (Some(n), _) = connected(ui, egui::Id::new("set-ring-style"), &["Круг", "Контур", "Бары"], i, &[]) {
-                p.ring_style = styles[n];
-            }
+            choice(ui, Id::RingStyle, p);
         });
         // The bars stand on fixed angles, like a spectrum.
         if p.ring_style != RingStyle::Bars {
@@ -337,11 +336,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
                 ui.add(Switch::new(&mut p.spin_ring).id_salt("set-ring"));
             });
             if p.spin_ring {
-                row(ui, Id::RingDir, "Направление кольца", None, |ui| {
-                    if let (Some(n), _) = connected(ui, egui::Id::new("set-ring-dir"), &["По часовой", "Против"], usize::from(p.ring_ccw), &[]) {
-                        p.ring_ccw = n == 1;
-                    }
-                });
+                row(ui, Id::RingDir, "Направление кольца", None, |ui| choice(ui, Id::RingDir, p));
             }
         }
         row(ui, Id::RingBeat, "Кольцо в такт музыке", Some("Прыгает на ударных и всплесках спектра"), |ui| {
@@ -349,79 +344,15 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         });
     }
 
-    group(ui, "Фон");
-    row(ui, Id::Ambient, "Ambient", Some("Мягкие облака в цветах темы, под звук"), |ui| {
-        let i = match p.ambient {
-            Ambient::Off => 0,
-            Ambient::Glow => 1,
-            Ambient::Reactive => 2,
-        };
-        if let (Some(n), _) = connected(ui, egui::Id::new("set-ambient"), &["Выкл", "Свечение", "Под звук"], i, &[]) {
-            p.ambient = [Ambient::Off, Ambient::Glow, Ambient::Reactive][n];
-        }
-    });
-    row(ui, Id::BgShapes, "Фигуры на фоне", Some(match p.bg_shapes {
-        BgShapes::Off => "Фигуры Material за открытым треком, под музыку",
-        BgShapes::Bounce => "Лежат внизу и подпрыгивают на долях",
-        BgShapes::Float => "Парят по экрану и светятся в такт",
-        BgShapes::Morph => "Плывут и превращаются в другие фигуры на ударах",
-    }), |ui| {
-        let modes = [BgShapes::Off, BgShapes::Bounce, BgShapes::Float, BgShapes::Morph];
-        let i = modes.iter().position(|m| *m == p.bg_shapes).unwrap_or(0);
-        if let (Some(n), _) = connected(ui, egui::Id::new("set-bg-shapes"), &["Выкл", "Прыгают", "Парят", "Меняют форму"], i, &[]) {
-            p.bg_shapes = modes[n];
-        }
-    });
-    if p.bg_shapes != BgShapes::Off {
-        row(ui, Id::BgCount, "Количество", Some(&format!("{} фигур", p.bg_shapes_count)), |ui| {
-            if let Some(v) = range_slider(ui, "set-bg-count", p.bg_shapes_count as f32, (4.0, 32.0), 1.0, |v| format!("{v:.0}")) {
-                p.bg_shapes_count = v as u32;
-            }
-        });
-        let pct = |v: f32| format!("{:.0}%", v * 100.0);
-        row(ui, Id::BgSize, "Размер", None, |ui| {
-            if let Some(v) = range_slider(ui, "set-bg-size", p.bg_shapes_size, (0.5, 2.0), 0.05, pct) {
-                p.bg_shapes_size = v;
-            }
-        });
-        row(ui, Id::BgOpacity, "Яркость", None, |ui| {
-            if let Some(v) = range_slider(ui, "set-bg-opacity", p.bg_shapes_opacity, (0.25, 2.0), 0.05, pct) {
-                p.bg_shapes_opacity = v;
-            }
-        });
-        row(ui, Id::BgSpeed, "Скорость", Some("Дрейф, вращение и прыжки"), |ui| {
-            if let Some(v) = range_slider(ui, "set-bg-speed", p.bg_shapes_speed, (0.25, 3.0), 0.05, pct) {
-                p.bg_shapes_speed = v;
-            }
-        });
-        row(ui, Id::BgReact, "Реакция на музыку", Some("0% — просто украшение"), |ui| {
-            if let Some(v) = range_slider(ui, "set-bg-react", p.bg_shapes_react, (0.0, 2.0), 0.05, pct) {
-                p.bg_shapes_react = v;
-            }
-        });
-        row(ui, Id::BgColors, "Цвета", Some("Контейнеры темы, один акцент или яркие акценты"), |ui| {
-            let i = usize::from(p.bg_shapes_colors).min(2);
-            if let (Some(n), _) = connected(ui, egui::Id::new("set-bg-colors"), &["Тема", "Акцент", "Яркие"], i, &[]) {
-                p.bg_shapes_colors = n as u8;
-            }
-        });
-    }
+    background(ui, p);
 
     group(ui, "Текст песен");
     row(ui, Id::LyricsStyle, "Анимация", Some("Караоке — заливка по слогам, Фокус — строка целиком, Волна — буква за буквой"), |ui| {
-        let i = usize::from(p.lyrics_style).min(2);
-        if let (Some(n), _) = connected(ui, egui::Id::new("set-lyrics-style"), &["Караоке", "Фокус", "Волна"], i, &[]) {
-            p.lyrics_style = n as u8;
-        }
+        choice(ui, Id::LyricsStyle, p);
     });
     if p.lyrics_style == 2 {
         row(ui, Id::WaveFallback, "Если нет разметки по слогам", Some("Для анимации «Волна»"), |ui| {
-            let labels = ["Волна — прыгающие буквы", "Спокойный Фокус"];
-            let i = usize::from(p.wave_syllables_only);
-            let options = labels.iter().enumerate().map(|(n, label)| ((*label).to_owned(), n == i)).collect::<Vec<_>>();
-            if let Some(n) = dropdown(ui, "set-wave-syllables", labels[i], &options) {
-                p.wave_syllables_only = n == 1;
-            }
+            choice_menu(ui, Id::WaveFallback, p);
         });
         row(ui, Id::WaveJump, "Высота прыжка букв", Some("0 — буквы только подсвечиваются"), |ui| {
             if let Some(v) = range_slider(ui, "set-lyrics-jump", p.lyrics_wave_jump, (0.0, 2.0), 0.1, |v| format!("{v:.1}")) {
@@ -446,12 +377,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         ui.add(Switch::new(&mut p.lyrics_glow).id_salt("set-lyrics-glow"));
     });
     row(ui, Id::LyricsGap, "Индикатор паузы", Some("Кольцо между строками"), |ui| {
-        let labels = ["Линия", "Волна", "Толстая линия", "Толстая волна"];
-        let i = usize::from(p.lyrics_gap_style).min(3);
-        let options = labels.iter().enumerate().map(|(n, label)| ((*label).to_owned(), n == i)).collect::<Vec<_>>();
-        if let Some(n) = dropdown(ui, "set-lyrics-gap", labels[i], &options) {
-            p.lyrics_gap_style = n as u8;
-        }
+        choice_menu(ui, Id::LyricsGap, p);
     });
     if matches!(p.lyrics_gap_style, 1 | 3) {
         row(ui, Id::LyricsGapWaves, "Длина волны", Some("Чем больше гребней, тем короче волна"), |ui| {
@@ -467,20 +393,17 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     group(ui, "Навигация");
     row(
         ui,
-        Id::NavHidden,
-        "Боковая панель всегда скрыта",
-        Some("Разделы — Ctrl+1…4 или подведи курсор к левому краю окна"),
+        Id::RailCompact,
+        "Боковая панель всегда компактная",
+        Some("Только значки, без кнопки раскрытия"),
         |ui| {
-            ui.add(Switch::new(&mut p.nav_hidden).id_salt("set-nav-hidden"));
+            ui.add(Switch::new(&mut p.rail_compact).id_salt("set-rail-compact"));
         },
     );
 
     group(ui, "Движение");
     row(ui, Id::NpMotion, "Открытие экрана", Some("Как он вырастает из плеера и сворачивается"), |ui| {
-        let i = usize::from(p.np_motion).min(2);
-        if let (Some(n), _) = connected(ui, egui::Id::new("set-np-motion"), &["Плавно", "Живо", "Быстро"], i, &[]) {
-            p.np_motion = n as u8;
-        }
+        choice(ui, Id::NpMotion, p);
     });
     row(ui, Id::ReducedMotion, "Меньше движения", Some("Без отскоков, вращения и волн"), |ui| {
         ui.add(Switch::new(&mut p.reduced_motion).id_salt("set-rm"));
@@ -492,6 +415,119 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     });
 }
 
+/// Ambient clouds and the shapes behind Now Playing. The shapes' fields are
+/// always shown: dimmed while they are off, and touching one turns them on.
+fn background(ui: &mut Ui, p: &mut Prefs) {
+    group(ui, "Фон");
+    row(ui, Id::Ambient, "Ambient", Some("Мягкие облака в цветах темы, под звук"), |ui| choice(ui, Id::Ambient, p));
+    let clouds_off = p.ambient == Ambient::Off;
+    dimmed(ui, clouds_off, |ui| {
+        row(ui, Id::AmbientStrength, "Яркость облаков", None, |ui| {
+            if let Some(v) = range_slider(ui, "set-ambient-strength", p.ambient_strength, (0.25, 2.0), 0.05, pct) {
+                p.ambient_strength = v;
+                if clouds_off {
+                    p.ambient = Ambient::Reactive;
+                }
+            }
+        });
+    });
+
+    let off = p.bg_shapes == BgShapes::Off;
+    row(ui, Id::BgShapes, "Фигуры на фоне", Some(match p.bg_shapes {
+        BgShapes::Off => "Выключены — тронь параметр ниже, и они включатся",
+        BgShapes::Bounce => "Лежат внизу и подпрыгивают на долях",
+        BgShapes::Float => "Парят по экрану и светятся в такт",
+        BgShapes::Morph => "Плывут и превращаются в другие фигуры на ударах",
+    }), |ui| choice(ui, Id::BgShapes, p));
+    let fields = |p: &Prefs| {
+        (p.bg_shapes_count, p.bg_shapes_size, p.bg_shapes_opacity, p.bg_shapes_speed, p.bg_shapes_react, p.bg_shapes_colors, p.bg_shapes_hue)
+    };
+    let before = fields(p);
+    dimmed(ui, off, |ui| {
+        row(ui, Id::BgCount, "Количество", Some(&format!("{} фигур", p.bg_shapes_count)), |ui| {
+            if let Some(v) = range_slider(ui, "set-bg-count", p.bg_shapes_count as f32, (4.0, 32.0), 1.0, |v| format!("{v:.0}")) {
+                p.bg_shapes_count = v as u32;
+            }
+        });
+        row(ui, Id::BgSize, "Размер", None, |ui| {
+            if let Some(v) = range_slider(ui, "set-bg-size", p.bg_shapes_size, (0.5, 2.0), 0.05, pct) {
+                p.bg_shapes_size = v;
+            }
+        });
+        row(ui, Id::BgOpacity, "Яркость", None, |ui| {
+            if let Some(v) = range_slider(ui, "set-bg-opacity", p.bg_shapes_opacity, (0.25, 2.0), 0.05, pct) {
+                p.bg_shapes_opacity = v;
+            }
+        });
+        row(ui, Id::BgSpeed, "Скорость", Some("Дрейф, вращение и прыжки"), |ui| {
+            if let Some(v) = range_slider(ui, "set-bg-speed", p.bg_shapes_speed, (0.25, 3.0), 0.05, pct) {
+                p.bg_shapes_speed = v;
+            }
+        });
+        row(ui, Id::BgReact, "Реакция на музыку", Some("0% — просто украшение"), |ui| {
+            if let Some(v) = range_slider(ui, "set-bg-react", p.bg_shapes_react, (0.0, 2.0), 0.05, pct) {
+                p.bg_shapes_react = v;
+            }
+        });
+        row(ui, Id::BgColors, "Цвета", Some("Тема, акцент, яркие или свой оттенок"), |ui| {
+            choice(ui, Id::BgColors, p);
+        });
+        let hue = (p.bg_shapes_colors == 3).then(|| bg_shapes::HUES[usize::from(p.bg_shapes_hue).min(7)].1);
+        row(ui, Id::BgHue, "Свой цвет", Some(hue.unwrap_or("Клик по цвету включает режим «Свой»")), |ui| {
+            if let Some(i) = swatches(ui, p) {
+                p.bg_shapes_hue = i;
+                p.bg_shapes_colors = 3;
+            }
+        });
+    });
+    if off && fields(p) != before {
+        p.bg_shapes = BgShapes::Float;
+    }
+}
+
+fn pct(v: f32) -> String {
+    format!("{:.0}%", v * 100.0)
+}
+
+/// Rows drawn faded while what they tune is off (they still work).
+fn dimmed(ui: &mut Ui, dim: bool, add: impl FnOnce(&mut Ui)) {
+    ui.scope(|ui| {
+        if dim {
+            ui.multiply_opacity(0.55);
+        }
+        add(ui);
+    });
+}
+
+/// The hue swatches for the shapes, in the theme's tones. Returns a click.
+fn swatches(ui: &mut Ui, p: &Prefs) -> Option<u8> {
+    let s = Theme::get(ui.ctx()).scheme;
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for (i, (_, name)) in bg_shapes::HUES.iter().enumerate() {
+            let i = i as u8;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::hover());
+            let resp = ui
+                .interact(rect, egui::Id::new(("set-bg-hue", i)), Sense::click())
+                .on_hover_text(*name)
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            let on = p.bg_shapes_colors == 3 && p.bg_shapes_hue == i;
+            let color = bg_shapes::hue_color(&s, i);
+            let painter = ui.painter();
+            let r = if resp.hovered() || on { 12.0 } else { 10.0 };
+            painter.circle_filled(rect.center(), r, color);
+            if on {
+                painter.circle_stroke(rect.center(), 13.5, egui::Stroke::new(2.0, s.on_surface));
+            }
+            if resp.clicked() {
+                picked = Some(i);
+            }
+        }
+    });
+    picked
+}
+
 /// Behaviour: controls, lyrics sources, sound, library, import, torrents.
 fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
     group(ui, "Управление");
@@ -499,12 +535,7 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
         ui.add(Switch::new(&mut p.cover_click_pause).id_salt("set-cover-click"));
     });
     row(ui, Id::DblClickShape, "Двойной клик — другая фигура", Some("Двойной клик в открытом треке меняет форму обложки"), |ui| {
-        let labels = ["Выкл", "Только в режиме «Случайная»", "Всегда"];
-        let i = usize::from(p.dbl_click_shape).min(2);
-        let options = labels.iter().enumerate().map(|(n, label)| ((*label).to_owned(), n == i)).collect::<Vec<_>>();
-        if let Some(n) = dropdown(ui, "set-dbl-click", labels[i], &options) {
-            p.dbl_click_shape = n as u8;
-        }
+        choice_menu(ui, Id::DblClickShape, p);
     });
     row(ui, Id::Keys, "Клавиши", Some("L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке"), |_| {});
 
@@ -613,12 +644,7 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
 
     group(ui, "Импорт и качество");
     row(ui, Id::OpusBitrate, "Битрейт Opus", Some(&format!("{} кбит/с", p.opus_bitrate)), |ui| {
-        let vals = [128, 160, 192, 256];
-        let labels = ["128", "160", "192", "256"];
-        let i = vals.iter().position(|v| *v == p.opus_bitrate).unwrap_or(1);
-        if let (Some(n), _) = connected(ui, egui::Id::new("set-opus"), &labels, i, &[]) {
-            p.opus_bitrate = vals[n];
-        }
+        choice(ui, Id::OpusBitrate, p);
     });
     row(ui, Id::FakeFlac, "Проверять «фейковый» FLAC", Some("Срез спектра выдаёт перекодированный lossy"), |ui| {
         ui.add(Switch::new(&mut p.check_fake_lossless).id_salt("set-fake"));

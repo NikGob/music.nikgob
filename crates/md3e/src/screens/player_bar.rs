@@ -262,7 +262,7 @@ pub fn show(
             if !acts.is_empty() {
                 acts.push(Act::Sep);
             }
-            acts.extend([Act::Playlist, Act::Artist, Act::Album, Act::Info, Act::Sep, Act::Tags]);
+            acts.extend([Act::Playlist, Act::Artist, Act::Album, Act::Info, Act::Sep, Act::Tags, Act::Replace]);
             chrome.track_menu(&more, "bar-more", &acts, t, state, Where::Bar, out);
         }
     });

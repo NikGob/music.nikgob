@@ -32,13 +32,14 @@ const CLOUDS: [Cloud; 4] = [
 /// Paints the clouds into `rect`. `bass` is the smoothed level (0..1);
 /// `moving` advances the drift (playing and motion allowed). The drift phase
 /// is accumulated, so pausing freezes the picture and reopening the window
-/// continues where it was.
-pub fn paint(ctx: &Context, painter: &Painter, rect: Rect, bass: f32, moving: bool) {
+/// continues where it was. `strength` is the user's multiplier
+/// (`Prefs::ambient_strength`).
+pub fn paint(ctx: &Context, painter: &Painter, rect: Rect, bass: f32, moving: bool, strength: f32) {
     let theme = Theme::get(ctx);
     let s = theme.scheme;
     let phase = drift(ctx, moving && !theme.reduced_motion);
     let colors = [s.primary, s.tertiary, s.secondary, s.primary_container];
-    let strength = if theme.dark { 0.20 } else { 0.16 } * (1.0 + 0.6 * bass);
+    let strength = (if theme.dark { 0.20 } else { 0.16 } * (1.0 + 0.6 * bass) * strength.clamp(0.25, 2.0)).min(1.0);
     let size = rect.width().max(rect.height());
     let painter = painter.with_clip_rect(painter.clip_rect().intersect(rect));
     let mut mesh = Mesh::default();

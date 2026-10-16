@@ -194,10 +194,16 @@ impl Shot {
                 self.wait = arg.parse().unwrap_or(60);
             }
             "move" => {
-                if let [x, y] = nums(arg)[..] {
-                    self.input.push_back(vec![Event::PointerMoved(pos2(x, y))]);
-                }
+                // `move:x,y,frames`: how long to wait after it (default 20;
+                // 1 = the next step on the next frame, for fast sweeps).
+                let n = nums(arg);
                 self.wait = 20;
+                if let [x, y, ref rest @ ..] = n[..] {
+                    self.input.push_back(vec![Event::PointerMoved(pos2(x, y))]);
+                    if let Some(&f) = rest.first() {
+                        self.wait = f as u32;
+                    }
+                }
             }
             "click" | "rclick" | "dblclick" => {
                 // `click:x,y,frames`: how long to wait after it (default 20;

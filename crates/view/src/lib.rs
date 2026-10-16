@@ -267,6 +267,8 @@ pub struct QueueView {
     /// "previous" walks back through these.
     pub prev: Vec<QueueEntry>,
     pub current: Option<TrackRow>,
+    /// The current track's queue entry id (a drop target in the queue).
+    pub current_entry: Option<u64>,
     /// Upcoming tracks in play order; `entry` ids are stable for drag & drop.
     pub next: Vec<QueueEntry>,
 }
@@ -634,6 +636,9 @@ pub struct Prefs {
     /// Now Playing shows a volume slider (otherwise just the mute button;
     /// the wheel still sets the volume).
     pub np_volume: bool,
+    /// Instead of a fixed slider: a volume pill pops up at the bottom
+    /// centre of Now Playing only while the volume changes.
+    pub np_volume_pop: bool,
     /// How Now Playing opens and closes: 0 smooth, 1 lively, 2 fast.
     pub np_motion: u8,
     /// Progress bars turn into a wave while playing (off: always flat).
@@ -657,11 +662,16 @@ pub struct Prefs {
     pub bg_shapes_speed: f32,
     /// How strongly they react to the music (0..=2).
     pub bg_shapes_react: f32,
-    /// Colours: 0 theme containers, 1 accent only, 2 bright accents.
+    /// Colours: 0 theme containers, 1 accent only, 2 bright accents,
+    /// 3 the user's hue ([`Self::bg_shapes_hue`]).
     pub bg_shapes_colors: u8,
-    /// The navigation rail is never shown (nor its expand button); pages
-    /// are reached with Ctrl+1…4 or by touching the window's left edge.
-    pub nav_hidden: bool,
+    /// The hue for colour mode 3: an index into the UI's swatches (0..8).
+    pub bg_shapes_hue: u8,
+    /// How strong the ambient clouds are (0.25..=2).
+    pub ambient_strength: f32,
+    /// The navigation rail always stays narrow (icons only) and its expand
+    /// button is gone.
+    pub rail_compact: bool,
     /// Deleting moves tracks into the Trash for 30 days; off: they are
     /// deleted for good at once (after a confirmation).
     pub use_trash: bool,
@@ -900,7 +910,8 @@ pub enum Command {
     EnqueueArtist(ArtistId),
     PlayQueueEntry(u64),
     RemoveFromQueue(u64),
-    MoveInQueue { entry: u64, to: usize },
+    /// Puts queue `entry` right after (or before) the `anchor` entry.
+    MoveInQueue { entry: u64, anchor: u64, after: bool },
     ClearQueue,
     SaveQueueAsPlaylist(String),
 
@@ -1038,6 +1049,7 @@ impl Default for Prefs {
             ring_ccw: false,
             cover_ccw: true,
             np_volume: false,
+            np_volume_pop: false,
             np_motion: 1,
             progress_wave: true,
             random_shapes: Vec::new(),
@@ -1050,7 +1062,9 @@ impl Default for Prefs {
             bg_shapes_speed: 1.0,
             bg_shapes_react: 1.0,
             bg_shapes_colors: 0,
-            nav_hidden: false,
+            bg_shapes_hue: 5,
+            ambient_strength: 1.0,
+            rail_compact: false,
             use_trash: true,
         }
     }
