@@ -5,13 +5,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use nikgob_core::model::{ArtistId, Codec, Release, ReleaseId, Source, SourceKind};
+use nikgob_core::model::{ArtistId, Codec, PlaylistId, Release, ReleaseId, Source, SourceKind};
 use nikgob_library::{
     ArtistRow, Library, PlaylistKind, PlaylistSummary, ReleaseProgress, ReleaseRow, TrackRow,
 };
 use nikgob_view as v;
 
 use crate::home::Home;
+use crate::playlist_cover;
 
 pub struct Resolver {
     lib: Library,
@@ -116,7 +117,7 @@ impl Resolver {
         }
     }
 
-    pub fn release_card(&mut self, r: &Release, local: u32, total: Option<u32>) -> v::ReleaseCard {
+    pub fn release_card(&mut self, r: &Release, local: u32, total: Option<u32>, liked: bool) -> v::ReleaseCard {
         v::ReleaseCard {
             id: r.id,
             title: r.title.clone(),
@@ -127,13 +128,13 @@ impl Resolver {
             cover: self.cover_for(Some(r.id), r.cover_ref.as_deref()),
             local_tracks: local,
             total_tracks: total,
-            liked: self.lib.is_liked(r.id).unwrap_or(false),
+            liked,
         }
     }
 
     pub fn release(&mut self, r: &ReleaseRow) -> v::ReleaseCard {
         let p = r.progress();
-        self.release_card(&r.release, p.local, Some(p.total))
+        self.release_card(&r.release, p.local, Some(p.total), r.liked)
     }
 
     pub fn artist(&mut self, a: &ArtistRow) -> v::ArtistCard {
@@ -146,16 +147,46 @@ impl Resolver {
     }
 
     pub fn playlist(&mut self, p: &PlaylistSummary) -> v::PlaylistCard {
-        v::PlaylistCard {
-            id: p.id.unwrap_or(v::LIKED_PLAYLIST),
-            name: p.name.clone(),
-            cover: p.cover.as_ref().map(|c| v::Cover {
+        let cover_mode = playlist_cover::mode_of(p.cover.as_deref());
+        let cover = match (p.id, cover_mode) {
+            // "Любимые" keeps its heart.
+            (None, _) => None,
+            (Some(_), v::PlaylistCoverMode::Custom) => p.cover.as_ref().map(|c| v::Cover {
                 path: self.path(c),
                 seed: None,
                 ambient: None,
             }),
+            (Some(id), mode) => self.auto_cover(id, mode),
+        };
+        v::PlaylistCard {
+            id: p.id.unwrap_or(v::LIKED_PLAYLIST),
+            name: p.name.clone(),
+            cover,
             track_count: p.track_count,
             pinned: p.kind == PlaylistKind::Liked,
+            cover_mode,
+        }
+    }
+
+    /// A collage / smart cover from the playlist's album covers.
+    fn auto_cover(&mut self, id: PlaylistId, mode: v::PlaylistCoverMode) -> Option<v::Cover> {
+        // Covers whose file is gone count as none (checked once per album).
+        let mut exists: HashMap<ReleaseId, bool> = HashMap::new();
+        let refs: Vec<(ReleaseId, PathBuf)> = self
+            .lib
+            .playlist_cover_refs(id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(r, c)| (r, self.path(&c)))
+            .filter(|(r, p)| *exists.entry(*r).or_insert_with(|| p.exists()))
+            .collect();
+        let plain = |path: PathBuf| v::Cover { path, seed: None, ambient: None };
+        match playlist_cover::pick(&refs, mode) {
+            playlist_cover::Pick::Single(r) => self.cover_for(Some(r), None),
+            playlist_cover::Pick::Collage(files) => playlist_cover::collage(&self.root, &files).map(plain),
+            playlist_cover::Pick::Placeholder => {
+                playlist_cover::placeholder(&self.root, &id.to_string()).map(plain)
+            }
         }
     }
 
@@ -171,7 +202,7 @@ impl Resolver {
         let total_duration = tracks.iter().filter_map(|t| t.duration).sum();
         let quality = summarize_quality(&tracks);
         v::ReleaseDetail {
-            card: self.release_card(r, local, total),
+            card: self.release_card(r, local, total, liked),
             tracks,
             total_duration,
             quality,

@@ -308,22 +308,36 @@ async fn upgrade_replaces_the_file_keeps_the_track_and_worse_copies_are_duplicat
     assert_eq!(lib.active_source(track_id).unwrap().unwrap().id, new.id);
     assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), 1);
 
-    // 4. Deleting the track sends the file to Trash; the track itself stays.
+    // 4. Deleting the track sends the file to Trash and the track out of the
+    //    library (into the Trash view); the album folder keeps its cover for
+    //    a restore.
     let moved = delete_track_to_trash(&lib, &root.cfg.trash_dir, &root.cfg.library_dir, track_id).unwrap();
     assert_eq!(moved.len(), 1);
     assert!(moved[0].is_file());
     assert!(!std::path::Path::new(&new.locator).exists());
-    assert_eq!(lib.count_tracks(TrackFilter::NoLocalFile).unwrap(), 1);
+    assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), 0);
+    assert_eq!(lib.count_releases().unwrap(), 0);
+    assert_eq!(lib.deleted_tracks().unwrap().len(), 1);
     assert!(lib.get_track(track_id).unwrap().is_some());
-    assert!(!root.cfg.library_dir.join("Кино").exists(), "empty album folders are pruned");
 
-    // 5. Purge after the retention period removes rows and files.
+    // 5. Restore brings the file and the track back; deleting again for the purge.
+    let r = nikgob_import::restore_track(&lib, track_id).unwrap();
+    assert_eq!((r.files_restored, r.files_failed), (1, 0));
+    assert!(std::path::Path::new(&new.locator).is_file());
+    assert_eq!(lib.count_tracks(TrackFilter::LocalOnly).unwrap(), 1);
+    let moved = delete_track_to_trash(&lib, &root.cfg.trash_dir, &root.cfg.library_dir, track_id).unwrap();
+
+    // 6. Purge after the retention period removes rows and files, the old
+    //    replaced file included, and the empty album folder.
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let report = trash_purge(&lib, 0).unwrap();
-    assert_eq!(report.rows, 2, "{report:?}");
-    assert_eq!(report.files_deleted, 2);
+    assert_eq!(trash_purge(&lib, 0).unwrap().rows, 0, "a deleted track's files go with it");
+    let report = nikgob_import::purge_deleted_tracks(&lib, &root.cfg, 0).unwrap();
+    assert_eq!(report.rows, 1, "{report:?}");
+    assert!(report.files_deleted >= 2, "{report:?}");
     assert!(lib.list_trash().unwrap().is_empty());
+    assert!(lib.get_track(track_id).unwrap().is_none());
     assert!(!moved[0].exists() && !in_trash.exists());
+    assert!(!root.cfg.library_dir.join("Кино").exists(), "empty album folders are pruned");
 }
 
 #[tokio::test(flavor = "multi_thread")]

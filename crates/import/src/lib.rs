@@ -31,5 +31,8 @@ pub use importer::{FileOutcome, ImportJob, Importer, RelocateReport, relocate_ma
 pub use rebuild::{RebuildReport, merge_split_releases, rebuild_from_files};
 pub use retag::TagChanges;
 pub use spectrum::{SpectrumReport, Verdict};
-pub use trash::{PurgeReport, TRASH_DAYS, delete_track_to_trash, trash_file, trash_purge};
+pub use trash::{
+    PurgeReport, RestoreReport, TRASH_DAYS, delete_track_to_trash, purge_deleted_tracks, purge_track,
+    restore_track, trash_file, trash_purge,
+};
 pub use watch::InboxWatcher;

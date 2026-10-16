@@ -1585,3 +1585,254 @@ fn merging_keeps_one_mbid_and_refuses_two() {
     lib.merge_releases(one.id, plain.id).unwrap();
     assert_eq!(lib.get_release(plain.id).unwrap().unwrap().mbid.as_deref(), Some("m1"));
 }
+
+// ------------------------------------------------------ deleted tracks (Корзина)
+
+/// Deletes a track the way the import crate does: sources trashed and the
+/// track marked, with one timestamp.
+fn delete(lib: &Library, t: &Track, at: i64) {
+    for s in lib.sources_of_track(t.id).unwrap() {
+        lib.trash_source_at(s.id, Some(&format!("Trash/{}", s.locator)), at).unwrap();
+    }
+    lib.mark_track_deleted(t.id, at).unwrap();
+}
+
+#[test]
+fn deleted_tracks_leave_every_listing_and_come_back_on_restore() {
+    let lib = lib();
+    let solo = artist(&lib, "Solo");
+    let other = artist(&lib, "Other");
+    let gone = release(&lib, &solo, "Gone", Some(2001));
+    let kept = release(&lib, &other, "Kept", Some(2002));
+    let g1 = track(&lib, &solo, Some(&gone), "Gone One", 1);
+    let k1 = track(&lib, &other, Some(&kept), "Kept One", 1);
+    let k2 = track(&lib, &other, Some(&kept), "Kept Two", 2);
+    for (t, f) in [(&g1, "g1.opus"), (&k1, "k1.opus"), (&k2, "k2.opus")] {
+        local(&lib, t, f, Codec::Opus, Some(160));
+    }
+    let p = lib.create_playlist("Mix").unwrap();
+    lib.playlist_add_many(p.id, &[g1.id, k1.id]).unwrap();
+    lib.like(g1.id).unwrap();
+
+    delete(&lib, &g1, 1_000);
+    delete(&lib, &k2, 2_000);
+    let all = TrackSort::asc(TrackSortKey::Title);
+    assert_eq!(titles(&lib.tracks(0, 100, all).unwrap()), vec!["Kept One"]);
+    assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), 1);
+    // The album with only deleted tracks and its artist disappear; the other
+    // album counts its live tracks only (no "0/1" dead weight).
+    let rels = lib.releases(0, 100, ReleaseSort::asc(ReleaseSortKey::Title)).unwrap();
+    assert_eq!(rels.iter().map(|r| r.release.title.as_str()).collect::<Vec<_>>(), vec!["Kept"]);
+    assert_eq!((rels[0].local_tracks, rels[0].known_tracks), (1, 1));
+    assert_eq!(lib.count_releases().unwrap(), 1);
+    let names: Vec<_> = lib
+        .artists(0, 100, ArtistSort::asc(ArtistSortKey::Name))
+        .unwrap()
+        .into_iter()
+        .map(|a| a.artist.name)
+        .collect();
+    assert_eq!(names, vec!["Other"]);
+    assert_eq!(lib.count_artists().unwrap(), 1);
+    assert!(lib.search("gone", 10).unwrap().is_empty());
+    assert_eq!(entry_tracks(&lib, p.id), vec!["Kept One"]);
+    assert_eq!(lib.liked_count().unwrap(), 0);
+    assert_eq!(titles(&lib.tracks_of_release(kept.id).unwrap()), vec!["Kept One"]);
+    // ... but the importer still finds them, so a re-import revives instead of duplicating.
+    assert_eq!(lib.tracks_of_release_with_deleted(gone.id).unwrap().len(), 1);
+    assert_eq!(lib.releases_with_deleted(0, 100, ReleaseSort::asc(ReleaseSortKey::Title)).unwrap().len(), 2);
+    assert_eq!(lib.artists_with_deleted(0, 100, ArtistSort::asc(ArtistSortKey::Name)).unwrap().len(), 2);
+
+    let trash = lib.deleted_tracks().unwrap();
+    assert_eq!(trash.iter().map(|d| d.track.title.as_str()).collect::<Vec<_>>(), vec!["Kept Two", "Gone One"]);
+    assert_eq!(trash[1].deleted_at, 1_000);
+    assert_eq!(lib.deleted_tracks_before(1_500).unwrap(), vec![g1.id]);
+
+    // Restore: what was trashed with the deletion comes back, older leftovers stay.
+    let back = lib.deleted_track_sources(g1.id).unwrap();
+    assert_eq!(back.len(), 1);
+    lib.restore_source(back[0].source.id).unwrap();
+    lib.undelete_track(g1.id).unwrap();
+    assert!(lib.get_track_row(g1.id).unwrap().unwrap().has_local);
+    assert_eq!(lib.count_releases().unwrap(), 2);
+    assert_eq!(entry_tracks(&lib, p.id), vec!["Gone One", "Kept One"]);
+    assert_eq!(lib.liked_count().unwrap(), 1, "likes survive the trip to the Trash");
+
+    // A live file for a deleted track (the same song imported again) revives it.
+    local(&lib, &k2, "k2-again.opus", Codec::Opus, Some(160));
+    assert_eq!(lib.track_deleted_at(k2.id).unwrap(), None);
+    assert!(lib.deleted_tracks().unwrap().is_empty());
+}
+
+#[test]
+fn purging_removes_rows_files_and_empty_albums() {
+    let lib = lib();
+    let a = artist(&lib, "Solo");
+    let r = release(&lib, &a, "Only", None);
+    let t = track(&lib, &a, Some(&r), "Song", 1);
+    let live = local(&lib, &t, "Music/song.opus", Codec::Opus, Some(160));
+    lib.trash_source_at(live.id, Some("Trash/2026-01-01 old.mp3"), 5).unwrap();
+    local(&lib, &t, "Music/song.opus", Codec::Opus, Some(256));
+    lib.put_master(&nikgob_core::model::Master {
+        track_id: t.id,
+        codec: Codec::Flac,
+        file_hash: "abc".into(),
+        size_bytes: 10,
+        origin: None,
+        replicas: Vec::new(),
+    })
+    .unwrap();
+    let p = lib.create_playlist("P").unwrap();
+    lib.playlist_add(p.id, t.id).unwrap();
+    lib.like(t.id).unwrap();
+    lib.record_event(t.id, EventType::Start, None, None, EventContext::Album).unwrap();
+
+    // Straight from the library (no Trash): live and trashed files are reported.
+    let purged = lib.purge_track(t.id).unwrap();
+    assert_eq!(purged.live_files, vec!["Music/song.opus"]);
+    assert_eq!(purged.trash_files, vec!["Trash/2026-01-01 old.mp3"]);
+    assert_eq!(purged.master_hash.as_deref(), Some("abc"));
+    assert!(purged.release_removed);
+    assert!(lib.get_track(t.id).unwrap().is_none());
+    assert!(lib.get_release(r.id).unwrap().is_none());
+    assert!(lib.get_artist(a.id).unwrap().is_none(), "an artist left without credits goes");
+    assert!(lib.get_master(t.id).unwrap().is_none());
+    assert!(lib.list_trash().unwrap().is_empty());
+    assert!(lib.liked_track_ids().unwrap().is_empty(), "the like is tombstoned");
+    assert_eq!(lib.playlist_len(p.id).unwrap(), 0);
+    assert_eq!(lib.count_events().unwrap(), 1, "history is append-only");
+    assert!(matches!(lib.purge_track(t.id), Err(LibraryError::NotFound { .. })));
+}
+
+#[test]
+fn liking_an_album_likes_all_its_tracks() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let r = release(&lib, &a, "Album", None);
+    let t1 = track(&lib, &a, Some(&r), "One", 1);
+    let t2 = track(&lib, &a, Some(&r), "Two", 2);
+    let stream_only = track(&lib, &a, Some(&r), "Three", 3);
+    local(&lib, &t1, "1.opus", Codec::Opus, Some(160));
+    local(&lib, &t2, "2.opus", Codec::Opus, Some(160));
+    let liked = |lib: &Library| {
+        lib.releases(0, 10, ReleaseSort::asc(ReleaseSortKey::Title)).unwrap()[0].liked
+    };
+    assert!(!liked(&lib) && !lib.release_liked(r.id).unwrap());
+
+    // Liking the album = liking its local tracks; it reads as liked.
+    let ids = lib.like_release(r.id, true).unwrap();
+    assert_eq!(ids, vec![t1.id, t2.id]);
+    assert!(liked(&lib) && lib.release_liked(r.id).unwrap());
+    assert_eq!(titles(&lib.liked_tracks(0, 10).unwrap()), vec!["One", "Two"], "album order");
+    assert!(!lib.is_liked(stream_only.id).unwrap());
+
+    // Unliking one track: the album is no longer liked.
+    lib.unlike(t2.id).unwrap();
+    assert!(!lib.release_liked(r.id).unwrap());
+    lib.like(t2.id).unwrap();
+    assert!(lib.release_liked(r.id).unwrap());
+
+    // Unliking the album unlikes all its tracks.
+    lib.like_release(r.id, false).unwrap();
+    assert_eq!(lib.liked_count().unwrap(), 0);
+    assert!(!liked(&lib));
+
+    // An album without local files: all its tracks count.
+    let r2 = release(&lib, &a, "Streams", None);
+    let s1 = track(&lib, &a, Some(&r2), "S1", 1);
+    assert_eq!(lib.like_release(r2.id, true).unwrap(), vec![s1.id]);
+    assert!(lib.release_liked(r2.id).unwrap());
+}
+
+/// Regression guard for "the history went to zero after an import": every
+/// path an import, a re-import, a folder merge or a rescan takes keeps the
+/// track ids, so the history stays attached and readable.
+#[test]
+fn listening_history_survives_reimport_merge_and_trash() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let main = release(&lib, &a, "Album", None);
+    let piece = release(&lib, &a, "Album ", None);
+    let mut t = Track::new("Song", credit(&a));
+    t.recording_mbid = Some("rec-1".into());
+    t.release_id = Some(piece.id);
+    t.track_no = 2;
+    let t = lib.upsert_track(&t).unwrap();
+    let other = track(&lib, &a, Some(&main), "Other", 1);
+    local(&lib, &t, "Music/song.mp3", Codec::Mp3, Some(128));
+    for _ in 0..3 {
+        lib.record_event(t.id, EventType::Start, None, None, EventContext::Album).unwrap();
+        lib.record_event(t.id, EventType::Complete, None, None, EventContext::Album).unwrap();
+    }
+    lib.record_event(other.id, EventType::Start, None, None, EventContext::Album).unwrap();
+    let before = lib.track_stats(t.id).unwrap();
+    assert_eq!(before.plays, 3);
+
+    // Startup folder merge.
+    lib.merge_releases(piece.id, main.id).unwrap();
+    // Re-import of the same recording (matched by MBID on the release) and an upgrade.
+    let mut again = Track::new("Song (remaster)", credit(&a));
+    again.recording_mbid = Some("rec-1".into());
+    again.release_id = Some(main.id);
+    assert_eq!(lib.upsert_track(&again).unwrap().id, t.id);
+    let old = lib.active_source(t.id).unwrap().unwrap();
+    lib.trash_source(old.id, Some("Trash/2026-01-01 song.mp3")).unwrap();
+    local(&lib, &t, "Music/song.opus", Codec::Opus, Some(256));
+    lib.purge_trash_before(i64::MAX).unwrap();
+    // Delete and restore.
+    delete(&lib, &t, 10);
+    lib.undelete_track(t.id).unwrap();
+
+    assert_eq!(lib.track_stats(t.id).unwrap(), before);
+    assert_eq!(lib.count_events().unwrap(), 7);
+    let recent = lib.recent_events(10).unwrap();
+    assert!(recent.iter().all(|e| lib.get_track(e.track_id).unwrap().is_some()));
+    let rel = lib.get_track(t.id).unwrap().unwrap().release_id;
+    assert_eq!(rel, Some(main.id), "history points at the merged album");
+}
+
+#[test]
+fn migration_moves_old_deletions_into_the_trash() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.db");
+    {
+        // A v4 database with one deleted-the-old-way track and one live one.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for (i, sql) in crate::migrations::MIGRATIONS.iter().take(4).enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i as u32 + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO track(id, title, title_key, artist_credit, artist_display, artist_key, added_at)
+             VALUES ('00000000-0000-0000-0000-000000000001', 'Dead', 'dead', '[]', '', '', 1),
+                    ('00000000-0000-0000-0000-000000000002', 'Live', 'live', '[]', '', '', 1);
+             INSERT INTO source(id, track_id, kind, locator, codec, added_at, trashed_at, trash_path)
+             VALUES ('00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-000000000001',
+                     'local_file', 'dead.opus', 'opus', 1, 777, 'Trash/dead.opus'),
+                    ('00000000-0000-0000-0000-00000000000b', '00000000-0000-0000-0000-000000000002',
+                     'local_file', 'live.opus', 'opus', 1, NULL, NULL);",
+        )
+        .unwrap();
+    }
+    let lib = Library::open(&path).unwrap();
+    assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
+    let trash = lib.deleted_tracks().unwrap();
+    assert_eq!(trash.len(), 1);
+    assert_eq!((trash[0].track.title.as_str(), trash[0].deleted_at), ("Dead", 777));
+    assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), 1);
+}
+
+#[test]
+fn job_log_keeps_the_latest_entries() {
+    let lib = lib();
+    lib.log_job("import", "Импорт «A»", "добавлено 3", None).unwrap();
+    lib.log_job("torrent", "B", "Скачано", None).unwrap();
+    lib.log_job("import", "Импорт «C»", "добавлено 0", Some("Не удалось: 1")).unwrap();
+    let imports = lib.job_log(Some("import"), 10).unwrap();
+    assert_eq!(imports.iter().map(|e| e.title.as_str()).collect::<Vec<_>>(), vec!["Импорт «C»", "Импорт «A»"]);
+    assert_eq!(imports[0].error.as_deref(), Some("Не удалось: 1"));
+    assert_eq!(lib.job_log(None, 10).unwrap().len(), 3);
+    for i in 0..crate::JOB_LOG_KEEP + 5 {
+        lib.log_job("import", &i.to_string(), "", None).unwrap();
+    }
+    assert_eq!(lib.job_log(None, 10_000).unwrap().len(), crate::JOB_LOG_KEEP as usize);
+}

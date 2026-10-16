@@ -332,13 +332,16 @@ impl Chrome {
 
         if let Some((id, title)) = self.trash.clone() {
             let mut open = true;
-            let r = Dialog::new("md3e-confirm-trash", "Удалить из библиотеки?")
+            let trash = state.prefs.use_trash;
+            let r = Dialog::new("md3e-confirm-trash", if trash { "Удалить из библиотеки?" } else { "Удалить навсегда?" })
                 .icon(Icon::Delete)
-                .supporting(format!(
-                    "«{title}» вместе с файлами уйдёт в корзину на 30 дней."
-                ))
+                .supporting(if trash {
+                    format!("«{title}» вместе с файлами уйдёт в корзину на 30 дней.")
+                } else {
+                    format!("«{title}»: файлы будут стёрты с диска. Корзина выключена, отменить нельзя.")
+                })
                 .action("Отмена")
-                .action("Удалить")
+                .action(if trash { "Удалить" } else { "Удалить навсегда" })
                 .show(ctx, &mut open);
             if r.action == Some(1) {
                 out.push(Command::TrashTrack(id));

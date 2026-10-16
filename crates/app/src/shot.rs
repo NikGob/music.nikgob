@@ -127,6 +127,8 @@ impl Shot {
                 let r = match arg {
                     "library" => Route::Library(LibraryTab::All),
                     "tracks" => Route::Library(LibraryTab::Tracks),
+                    "playlists" => Route::Library(LibraryTab::Playlists),
+                    "trash" => Route::Library(LibraryTab::Trash),
                     "downloads" => Route::Downloads(DownloadsTab::Active),
                     "settings" => Route::Settings,
                     _ => Route::Home,
@@ -141,6 +143,27 @@ impl Shot {
                 // The first album of the loaded library.
                 if let Some(r) = state.library.releases.first() {
                     ui.navigate(ctx, Route::Release(r.id), out);
+                }
+                self.wait = 30;
+            }
+            "trash_album" => {
+                // Deletes the first album of the library (into the Trash).
+                if let Some(r) = state.library.releases.first() {
+                    out.push(Command::TrashRelease(r.id));
+                }
+                out.push(Command::LoadTrash);
+                self.wait = 30;
+            }
+            "like_album" => {
+                if let Some(r) = state.library.releases.first() {
+                    out.push(Command::Like(nikgob_view::LikeTarget::Release(r.id), !r.liked));
+                }
+                self.wait = 20;
+            }
+            "playlist" => {
+                // The first user playlist.
+                if let Some(p) = state.library.playlists.iter().find(|p| !p.pinned) {
+                    ui.navigate(ctx, Route::Playlist(p.id), out);
                 }
                 self.wait = 30;
             }

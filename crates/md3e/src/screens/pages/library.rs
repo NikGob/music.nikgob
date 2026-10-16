@@ -18,12 +18,13 @@ use crate::{
     tokens::{shape, state as state_layer},
 };
 
-const TABS: [(LibraryTab, &str); 5] = [
+const TABS: [(LibraryTab, &str); 6] = [
     (LibraryTab::All, "Всё"),
     (LibraryTab::Playlists, "Плейлисты"),
     (LibraryTab::Albums, "Альбомы"),
     (LibraryTab::Artists, "Исполнители"),
     (LibraryTab::Tracks, "Треки"),
+    (LibraryTab::Trash, "Корзина"),
 ];
 
 /// Grid (false) or list (true) for playlists, releases and artists.
@@ -83,9 +84,15 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         if pages.library_tab == LibraryTab::Tracks {
             out.push(Command::LoadTracks { offset: 0, limit: 200, sort: lib.track_sort });
         }
+        if pages.library_tab == LibraryTab::Trash {
+            out.push(Command::LoadTrash);
+        }
     }
     ui.add_space(16.0);
 
+    if pages.library_tab == LibraryTab::Trash {
+        return trash(ui, state, pages, out);
+    }
     if lib.loaded && lib.releases.is_empty() && lib.playlists.len() <= 1 {
         if widgets::empty_state(
             ui,
@@ -129,6 +136,91 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         nav = tracks(ui, state, pages, out).or(nav);
     }
     nav
+}
+
+/// "Корзина": deleted tracks with "Восстановить" and "Удалить навсегда";
+/// everything goes for good after 30 days.
+fn trash(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
+    let s = Theme::get(ui.ctx()).scheme;
+    let items = &state.library.trash;
+    let row = vec2(ui.available_width(), 40.0);
+    ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        let n = items.len() as u64;
+        ui.label(TypeRole::TitleLarge.style().rich(
+            format!("{n} {} в корзине", common::plural(n, "трек", "трека", "треков")),
+            s.on_surface,
+        ));
+        if !items.is_empty() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(crate::components::Button::new("Очистить корзину").icon(Icon::Delete).style(crate::components::Style::Tonal).id_salt("trash-empty"))
+                    .clicked()
+                {
+                    pages.confirm_empty_trash = true;
+                }
+                if ui
+                    .add(crate::components::Button::new("Восстановить всё").style(crate::components::Style::Text).id_salt("trash-restore-all"))
+                    .clicked()
+                {
+                    out.push(Command::RestoreTracks(items.iter().map(|i| i.track.id).collect()));
+                }
+            });
+        }
+    });
+    ui.label(TypeRole::BodyMedium.style().rich_para(
+        if state.prefs.use_trash {
+            "Удалённое не видно в библиотеке и через 30 дней стирается навсегда вместе с файлами."
+        } else {
+            "Корзина выключена в настройках: удаление сразу стирает файлы. Здесь остаётся то, что удалили раньше."
+        },
+        s.on_surface_variant,
+    ));
+    ui.add_space(8.0);
+    if items.is_empty() {
+        widgets::empty_state(ui, Icon::Delete, "Корзина пуста", "Удалённые треки и альбомы появятся здесь.", None);
+        return None;
+    }
+    for (i, item) in items.iter().enumerate() {
+        let t = &item.track;
+        let mut line = t.artist.clone();
+        if let Some(a) = &t.album {
+            line = format!("{line} · {a}");
+        }
+        line = format!("{line} · удалено {} · осталось {} дн.", item.deleted, item.days_left);
+        let (mut restore, mut purge) = (false, false);
+        let o = ListItem::new(&t.title)
+            .supporting(line)
+            .leading(Leading::Image(t.cover.as_ref().map(|c| c.uri()), Icon::MusicNote))
+            .trailing(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    purge = ui
+                        .add(IconButton::new(Icon::Delete).size(Size::S).tooltip("Удалить навсегда").id_salt(("trash-purge", i)))
+                        .clicked();
+                    restore = ui
+                        .add(crate::components::Button::new("Восстановить").size(Size::S).style(crate::components::Style::Tonal).id_salt(("trash-restore", i)))
+                        .clicked();
+                });
+            })
+            .id_salt(("trash-row", t.id))
+            .show(ui);
+        if restore {
+            out.push(Command::RestoreTracks(vec![t.id]));
+        }
+        if purge {
+            pages.confirm_purge = Some((super::Doomed::Tracks(vec![t.id]), format!("«{}»", t.title)));
+        }
+        let picked = Menu::new(("trash-menu", t.id))
+            .item(MenuItem::new("Восстановить"))
+            .divider()
+            .item(MenuItem::new("Удалить навсегда").icon(Icon::Delete))
+            .context_menu(&o.response);
+        match picked {
+            Some(0) => out.push(Command::RestoreTracks(vec![t.id])),
+            Some(1) => pages.confirm_purge = Some((super::Doomed::Tracks(vec![t.id]), format!("«{}»", t.title))),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn playlists(

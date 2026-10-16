@@ -34,6 +34,19 @@ enum Ask {
     Magnet,
 }
 
+/// What a delete confirmation is about.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Doomed {
+    Tracks(Vec<TrackId>),
+    Release(nikgob_view::ReleaseId),
+}
+
+/// Asks [`PageState::overlays`] to confirm deleting an album; set from menus
+/// that have no `PageState` at hand. `(album, title, for good)`.
+pub(crate) fn request_release_delete(ctx: &Context, id: nikgob_view::ReleaseId, title: &str, forever: bool) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("release-delete-request"), (id, title.to_owned(), forever)));
+}
+
 /// Page-level presentation state that outlives a frame.
 #[derive(Default)]
 pub struct PageState {
@@ -58,8 +71,13 @@ pub struct PageState {
     ask: Option<Ask>,
     ask_text: String,
     confirm_delete: Option<nikgob_view::PlaylistId>,
-    /// Track waiting for the "Удалить из библиотеки" confirmation.
-    confirm_trash: Option<(TrackId, String)>,
+    /// Tracks or an album waiting for the "Удалить" confirmation (into the
+    /// Trash, or for good when the Trash is off).
+    confirm_trash: Option<(Doomed, String)>,
+    /// ... and for "Удалить навсегда".
+    confirm_purge: Option<(Doomed, String)>,
+    /// "Очистить корзину".
+    confirm_empty_trash: bool,
     /// "Очистить сейчас" confirmation on the seeding tab.
     confirm_clean: bool,
     /// Which torrent the files picker shows (result, job, file count) and the ticked files.
@@ -157,7 +175,8 @@ impl PageState {
             .item(MenuItem::new("Источник и качество").icon(Icon::Info))
             .item(MenuItem::new("Редактировать теги…").icon(Icon::Edit).enabled(track.has_local))
             .divider()
-            .item(MenuItem::new("Удалить из библиотеки").icon(Icon::Delete).enabled(track.has_local));
+            .item(MenuItem::new("Удалить из библиотеки").icon(Icon::Delete))
+            .item(MenuItem::new("Удалить навсегда").icon(Icon::Delete));
         m = m.align_right(true);
         m
     }
@@ -178,7 +197,8 @@ impl PageState {
             4 => return track.artist_id.map(Route::Artist),
             5 => self.open_pane = Some(PaneTab::Info),
             6 => out.push(Command::OpenTagEditor(track.id)),
-            7 => self.confirm_trash = Some((track.id, track.title.clone())),
+            7 => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
+            8 => self.confirm_purge = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
             _ => {}
         }
         None
@@ -431,22 +451,76 @@ impl PageState {
             }
         }
 
-        // Track deletion (to Trash, 30 days).
-        if let Some((id, title)) = self.confirm_trash.clone() {
+        // Album deletion asked from a card's menu.
+        if let Some((id, title, forever)) =
+            ctx.data_mut(|d| d.remove_temp::<(nikgob_view::ReleaseId, String, bool)>(egui::Id::new("release-delete-request")))
+        {
+            let what = (Doomed::Release(id), format!("Альбом «{title}»"));
+            if forever {
+                self.confirm_purge = Some(what);
+            } else {
+                self.confirm_trash = Some(what);
+            }
+        }
+        // Deletion: into the Trash (30 days), or for good when it is off.
+        if let Some((what, title)) = self.confirm_trash.clone() {
             let mut open = true;
-            let r = crate::components::Dialog::new("confirm-trash", "Удалить из библиотеки?")
+            let trash = state.prefs.use_trash;
+            let r = crate::components::Dialog::new("confirm-trash", if trash { "Удалить из библиотеки?" } else { "Удалить навсегда?" })
                 .icon(Icon::Delete)
-                .supporting(format!(
-                    "«{title}» переедет в Корзину на 30 дней. Вернуть можно кнопкой «Отменить» в уведомлении."
-                ))
+                .supporting(if trash {
+                    format!("{title} переедет в Корзину на 30 дней: из библиотеки пропадёт сразу, вернуть можно из Библиотеки → Корзина.")
+                } else {
+                    format!("{title}: файлы будут стёрты с диска. Корзина выключена в настройках, отменить нельзя.")
+                })
                 .action("Отмена")
-                .action("Удалить")
+                .action(if trash { "Удалить" } else { "Удалить навсегда" })
                 .show(ctx, &mut open);
             if r.action == Some(1) {
-                out.push(Command::TrashTrack(id));
+                match what {
+                    Doomed::Tracks(ids) => out.extend(ids.into_iter().map(Command::TrashTrack)),
+                    Doomed::Release(id) => out.push(Command::TrashRelease(id)),
+                }
             }
             if r.action.is_some() || !open || r.dismissed {
                 self.confirm_trash = None;
+            }
+        }
+        if let Some((what, title)) = self.confirm_purge.clone() {
+            let mut open = true;
+            let r = crate::components::Dialog::new("confirm-purge", "Удалить навсегда?")
+                .icon(Icon::Delete)
+                .supporting(format!("{title}: файлы будут стёрты с диска, треки уйдут из плейлистов и Любимых. Отменить нельзя."))
+                .action("Отмена")
+                .action("Удалить навсегда")
+                .show(ctx, &mut open);
+            if r.action == Some(1) {
+                out.push(match what {
+                    Doomed::Tracks(ids) => Command::DeleteForever(ids),
+                    Doomed::Release(id) => Command::DeleteReleaseForever(id),
+                });
+            }
+            if r.action.is_some() || !open || r.dismissed {
+                self.confirm_purge = None;
+            }
+        }
+        if self.confirm_empty_trash {
+            let mut open = true;
+            let n = state.library.trash.len() as u64;
+            let r = crate::components::Dialog::new("confirm-empty-trash", "Очистить корзину?")
+                .icon(Icon::Delete)
+                .supporting(format!(
+                    "{n} {} и их файлы будут стёрты навсегда. Отменить нельзя.",
+                    crate::screens::common::plural(n, "трек", "трека", "треков")
+                ))
+                .action("Отмена")
+                .action("Очистить")
+                .show(ctx, &mut open);
+            if r.action == Some(1) {
+                out.push(Command::EmptyTrash);
+            }
+            if r.action.is_some() || !open || r.dismissed {
+                self.confirm_empty_trash = false;
             }
         }
 

@@ -133,9 +133,35 @@ pub struct ArtistDetail {
 pub struct PlaylistCard {
     pub id: PlaylistId,
     pub name: String,
+    /// What to show: the custom picture, the 2x2 collage or the most common
+    /// album cover, or a generated placeholder (see [`PlaylistCoverMode`]).
     pub cover: Option<Cover>,
     pub track_count: u32,
     pub pinned: bool,
+    pub cover_mode: PlaylistCoverMode,
+}
+
+/// How a playlist's cover is chosen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PlaylistCoverMode {
+    /// A collage when the tracks have 4+ different album covers, else the most
+    /// common cover, else a generated gradient.
+    #[default]
+    Smart,
+    /// The first 4 different album covers, 2x2.
+    Collage,
+    /// A picture the user picked.
+    Custom,
+}
+
+/// A deleted track in the "Корзина" view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrashItem {
+    pub track: TrackRow,
+    /// "сегодня", "3 дн. назад".
+    pub deleted: String,
+    /// Days until it is removed for good.
+    pub days_left: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -330,6 +356,8 @@ pub struct LibraryView {
     pub tracks: Vec<TrackRow>,
     pub track_sort: TrackSort,
     pub loaded: bool,
+    /// Deleted tracks ("Корзина"), most recent first; filled by [`Command::LoadTrash`].
+    pub trash: Vec<TrashItem>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -592,6 +620,9 @@ pub struct Prefs {
     pub bg_shapes_react: f32,
     /// Colours: 0 theme containers, 1 accent only, 2 bright accents.
     pub bg_shapes_colors: u8,
+    /// Deleting moves tracks into the Trash for 30 days; off: they are
+    /// deleted for good at once (after a confirmation).
+    pub use_trash: bool,
 }
 
 /// Material shapes behind the open track.
@@ -784,6 +815,8 @@ pub enum LibraryTab {
     Albums,
     Artists,
     Tracks,
+    /// Deleted tracks.
+    Trash,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -837,10 +870,25 @@ pub enum Command {
     AddToPlaylist(PlaylistId, Vec<TrackId>),
     RemoveFromPlaylist(PlaylistId, TrackId),
     MoveInPlaylist { playlist: PlaylistId, track: TrackId, to: usize },
-    /// Move the track's files to Trash (30 days).
+    /// Delete a track: into the Trash (30 days), or for good when
+    /// [`Prefs::use_trash`] is off.
     TrashTrack(TrackId),
-    /// Take the last trashed track back.
+    /// Take a deleted track back out of the Trash.
     UndoTrash(TrackId),
+    /// Delete every track of an album (like [`Command::TrashTrack`]).
+    TrashRelease(ReleaseId),
+    /// Take deleted tracks back out of the Trash.
+    RestoreTracks(Vec<TrackId>),
+    /// Delete tracks for good: files, master and rows.
+    DeleteForever(Vec<TrackId>),
+    /// Delete every track of an album for good.
+    DeleteReleaseForever(ReleaseId),
+    /// Delete everything in the Trash for good.
+    EmptyTrash,
+    /// Fill [`LibraryView::trash`].
+    LoadTrash,
+    /// Collage / smart cover (a custom one is set by [`Command::SetPlaylistCover`]).
+    SetPlaylistCoverMode(PlaylistId, PlaylistCoverMode),
 
     // Loads
     LoadLibrary,
@@ -960,6 +1008,7 @@ impl Default for Prefs {
             bg_shapes_speed: 1.0,
             bg_shapes_react: 1.0,
             bg_shapes_colors: 0,
+            use_trash: true,
         }
     }
 }

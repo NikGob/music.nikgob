@@ -10,6 +10,7 @@ mod enrich;
 mod home;
 mod import;
 mod lyrics;
+mod playlist_cover;
 mod search;
 mod tags;
 mod torrents;
@@ -300,6 +301,7 @@ impl Worker {
     fn run(&mut self, rx: Receiver<Msg>, pb: Receiver<PlaybackEvent>, internal: Receiver<Internal>) {
         let ticker = tick(Duration::from_secs(5));
         let fast = tick(Duration::from_secs(1));
+        self.load_torrent_history();
         self.publish_downloads();
         self.resume_torrents();
         self.start_enrich();
@@ -532,6 +534,7 @@ impl Worker {
                     self.load_library();
                 }
             }
+            Command::Like(LikeTarget::Release(id), on) => self.like_release(id, on),
             Command::Like(target, on) => {
                 let r = if on {
                     self.lib.like(target)
@@ -615,8 +618,21 @@ impl Worker {
                 }
                 self.load_playlist(playlist);
             }
-            Command::TrashTrack(t) => self.trash_track(t),
-            Command::UndoTrash(t) => self.undo_trash(t),
+            Command::TrashTrack(t) => self.delete_tracks(vec![t], "Трек"),
+            Command::UndoTrash(t) => self.restore_tracks(vec![t]),
+            Command::TrashRelease(id) => {
+                let ids = self.release_track_ids(id);
+                self.delete_tracks(ids, "Альбом");
+            }
+            Command::RestoreTracks(ids) => self.restore_tracks(ids),
+            Command::DeleteForever(ids) => self.purge_tracks(ids),
+            Command::DeleteReleaseForever(id) => {
+                let ids = self.release_track_ids(id);
+                self.purge_tracks(ids);
+            }
+            Command::EmptyTrash => self.empty_trash(),
+            Command::LoadTrash => self.load_trash(),
+            Command::SetPlaylistCoverMode(id, mode) => self.set_playlist_cover_mode(id, mode),
             Command::ImportFiles(paths) => self.import_paths(paths),
             Command::ImportFolder(dir) => self.import_paths(vec![dir]),
             Command::ConfirmChoice { id, option } if id & IMPORT_ID != 0 => {
@@ -1072,7 +1088,7 @@ impl Worker {
         };
         let rows = self.lib.tracks_of_release(id).unwrap_or_default();
         let progress = self.lib.release_progress(id).ok().flatten();
-        let liked = self.lib.is_liked(id).unwrap_or(false);
+        let liked = self.lib.release_liked(id).unwrap_or(false);
         self.publish(|s, res| {
             s.release = Some(res.release_detail(&release, &rows, progress, liked));
         });
@@ -1163,6 +1179,89 @@ impl Worker {
         });
     }
 
+    /// Liking an album = liking all its tracks; unliking unlikes them all.
+    fn like_release(&mut self, id: nikgob_core::model::ReleaseId, on: bool) {
+        let Some(tracks) = self.log_err("лайк", self.lib.like_release(id, on)) else { return };
+        for &t in &tracks {
+            let _ = self.lib.record_event(
+                t,
+                if on { EventType::Like } else { EventType::Unlike },
+                None,
+                None,
+                EventContext::Album,
+            );
+        }
+        let n = tracks.len() as u64;
+        let what = format!("{n} {}", if n % 10 == 1 && n % 100 != 11 {
+            "трек"
+        } else if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) {
+            "трека"
+        } else {
+            "треков"
+        });
+        self.toast(
+            if on { format!("Альбом в Любимых · {what}") } else { format!("Альбом убран из Любимых · {what}") },
+            Some(("Отменить".into(), Command::Like(LikeTarget::Release(id), !on))),
+        );
+        self.publish(|s, _| {
+            let fix = |t: &mut nikgob_view::TrackRow| {
+                if tracks.contains(&t.id) {
+                    t.liked = on;
+                }
+            };
+            if let Some(c) = s.player.current.as_mut() {
+                fix(c);
+            }
+            if let Some(c) = s.queue.current.as_mut() {
+                fix(c);
+            }
+            s.queue.next.iter_mut().for_each(|e| fix(&mut e.track));
+            s.library.tracks.iter_mut().for_each(fix);
+            s.search.tracks.iter_mut().for_each(fix);
+            for r in [&mut s.home.continue_listening, &mut s.home.long_unplayed, &mut s.home.recently_added, &mut s.search.releases] {
+                r.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
+            }
+        });
+        self.after_like_change();
+    }
+
+    /// Track likes changed: album hearts and "Любимые" follow.
+    fn after_like_change(&mut self) {
+        self.load_library();
+        let (release, playlist) = {
+            let s = self.state.read();
+            (s.release.as_ref().map(|r| r.card.id), s.playlist.as_ref().map(|p| p.card.id))
+        };
+        if let Some(r) = release {
+            self.load_release(r);
+        }
+        if playlist == Some(LIKED_PLAYLIST) {
+            self.load_playlist(LIKED_PLAYLIST);
+        }
+    }
+
+    fn release_track_ids(&self, id: nikgob_core::model::ReleaseId) -> Vec<TrackId> {
+        self.lib
+            .tracks_of_release(id)
+            .unwrap_or_default()
+            .iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    fn set_playlist_cover_mode(&mut self, id: PlaylistId, mode: nikgob_view::PlaylistCoverMode) {
+        let stored = match mode {
+            nikgob_view::PlaylistCoverMode::Smart => None,
+            nikgob_view::PlaylistCoverMode::Collage => Some(playlist_cover::COLLAGE_COVER),
+            // A picture comes through `SetPlaylistCover`.
+            nikgob_view::PlaylistCoverMode::Custom => return,
+        };
+        if self.log_err("обложка", self.lib.set_playlist_cover(id, stored)).is_some() {
+            self.load_library();
+            self.load_playlist(id);
+        }
+    }
+
     /// Updates `liked` flags already shown without reloading everything.
     fn refresh_liked(&mut self, target: LikeTarget, on: bool) {
         self.publish(|s, _| {
@@ -1219,10 +1318,7 @@ impl Worker {
             s.home.artist_mixes.iter_mut().for_each(fix_artist);
         });
         if let LikeTarget::Track(_) = target {
-            self.load_library();
-            if self.state.read().playlist.as_ref().map(|p| p.card.id) == Some(LIKED_PLAYLIST) {
-                self.load_playlist(LIKED_PLAYLIST);
-            }
+            self.after_like_change();
         }
     }
 }

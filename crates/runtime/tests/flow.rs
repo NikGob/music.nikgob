@@ -105,10 +105,47 @@ fn import_retag_trash_undo() {
     wait_for(&rt, "the trash", |_| !expected.exists());
     assert!(lib.active_source(track).unwrap().is_none());
     assert_eq!(std::fs::read_dir(&cfg.trash_dir).unwrap().count(), 1);
+    // Gone from the library at once (no "0/1" album), listed in the Trash.
+    wait_for(&rt, "the Trash view", |s| {
+        s.library.track_count == 0 && !s.library.releases.iter().any(|r| r.title == "Альбом") && s.library.trash.len() == 1
+    });
+    assert_eq!(rt.state().library.trash[0].days_left, 30);
 
     rt.send(Command::UndoTrash(track));
     wait_for(&rt, "the undo", |_| expected.is_file());
     assert!(lib.active_source(track).unwrap().is_some());
+    wait_for(&rt, "the restored album", |s| {
+        s.library.track_count == 1 && s.library.releases.iter().any(|r| r.title == "Альбом") && s.library.trash.is_empty()
+    });
+
+    // For good: the file, its lossless master and every row go.
+    assert!(lib.get_master(track).unwrap().is_some(), "a WAV import keeps a master");
+    rt.send(Command::DeleteForever(vec![track]));
+    wait_for(&rt, "the purge", |s| s.library.track_count == 0 && !s.library.releases.iter().any(|r| r.title == "Альбом"));
+    assert!(!expected.exists());
+    assert!(lib.get_track(track).unwrap().is_none());
+    assert!(lib.get_master(track).unwrap().is_none());
+    let masters: Vec<_> = std::fs::read_dir(cfg.masters_dir()).map(|d| d.flatten().collect()).unwrap_or_default();
+    assert!(masters.is_empty(), "master files left: {masters:?}");
+    assert!(!expected.parent().unwrap().exists(), "the empty album folder goes too");
+
+    // The finished import is in the persistent history.
+    assert!(lib.job_log(Some("import"), 10).unwrap().iter().any(|e| e.subtitle.contains("добавлено 1")));
+
+    // With the Trash off, deleting erases at once.
+    let wav2 = root.join("other.wav");
+    write_wav(&wav2, 2.0);
+    rt.send(Command::ImportFiles(vec![wav2]));
+    wait_for(&rt, "the second import", |s| s.library.track_count == 1);
+    let second = rt.state().library.tracks[0].id;
+    let file = std::path::PathBuf::from(lib.active_source(second).unwrap().unwrap().locator);
+    let in_trash = std::fs::read_dir(&cfg.trash_dir).unwrap().count();
+    rt.send(Command::SetPrefs(Box::new(Prefs { use_trash: false, ..rt.state().prefs.clone() })));
+    rt.send(Command::TrashTrack(second));
+    wait_for(&rt, "the direct delete", |s| s.library.track_count == 0);
+    assert!(!file.exists());
+    assert!(lib.get_track(second).unwrap().is_none());
+    assert_eq!(std::fs::read_dir(&cfg.trash_dir).unwrap().count(), in_trash);
 }
 
 /// A .torrent whose data is already in Downloads/: the client verifies it,

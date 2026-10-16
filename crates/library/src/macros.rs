@@ -11,6 +11,25 @@ macro_rules! track_row_cols {
     };
 }
 
+/// Whether an album (alias `r`) counts as liked: every one of its live tracks
+/// is liked (the local ones, when it has any); an album without tracks falls
+/// back to its own like row.
+macro_rules! release_liked_expr {
+    () => {
+        "(SELECT CASE WHEN COUNT(*) = 0
+                     THEN EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release'
+                                     AND l.target_id = r.id AND l.deleted = 0)
+                     ELSE COUNT(*) = SUM(EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track'
+                                                    AND l.target_id = t.id AND l.deleted = 0))
+                 END
+            FROM track t
+           WHERE t.release_id = r.id AND t.deleted_at IS NULL
+             AND (t.has_local = 1 OR NOT EXISTS (
+                     SELECT 1 FROM track t2 WHERE t2.release_id = r.id
+                        AND t2.deleted_at IS NULL AND t2.has_local = 1)))"
+    };
+}
+
 macro_rules! track_row_from {
     () => {
         "FROM track t LEFT JOIN release r ON r.id = t.release_id"

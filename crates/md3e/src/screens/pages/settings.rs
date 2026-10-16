@@ -569,11 +569,24 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
     });
     row(ui, "Правила имён", Some("Исполнитель/Год - Альбом/01 - Трек.opus"), |_| {});
     let trash = p.library_dir.parent().map_or_else(|| p.library_dir.join("Trash"), |d| d.join("Trash"));
-    row(ui, "Корзина", Some("Удалённые треки лежат 30 дней"), |ui| {
-        if ui.add(Button::new("Открыть").style(Style::Outlined).id_salt("open-trash")).clicked() {
-            let _ = open_folder(&trash);
-        }
-    });
+    row(
+        ui,
+        "Корзина",
+        Some(if p.use_trash {
+            "Удалённое лежит 30 дней: Библиотека → Корзина"
+        } else {
+            "Выключена: удаление сразу стирает файлы"
+        }),
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                ui.add(Switch::new(&mut p.use_trash).id_salt("set-use-trash"));
+                if ui.add(Button::new("Открыть папку").style(Style::Outlined).id_salt("open-trash")).clicked() {
+                    let _ = open_folder(&trash);
+                }
+            });
+        },
+    );
     let userdata = p.library_dir.join(".musiclib").join("userdata");
     row(ui, "Экспорт данных", Some("Лайки и плейлисты в .musiclib/userdata рядом с музыкой"), |ui| {
         if ui.add(Button::new("Открыть папку").style(Style::Outlined).id_salt("open-userdata")).clicked() {

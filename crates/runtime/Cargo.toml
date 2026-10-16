@@ -21,6 +21,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 fastrand = "2"
 jiff = "0.2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 log.workspace = true
 
 [dev-dependencies]

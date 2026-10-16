@@ -2,13 +2,16 @@
 //!
 //! Files move to `Trash/<YYYY-MM-DD> <name>`; the library marks the source as
 //! trashed; [`trash_purge`] removes both after the retention period. A track
-//! whose last file is trashed stays in playlists and likes ("нет файла").
+//! the user deletes leaves the library at once ([`delete_track_to_trash`]),
+//! sits in the Trash view until [`restore_track`] or [`purge_track`], and
+//! [`purge_deleted_tracks`] removes it after the retention period.
 
 use std::path::{Path, PathBuf};
 
 use nikgob_core::model::TrackId;
 use nikgob_library::Library;
 
+use crate::config::ImportConfig;
 use crate::error::Result;
 use crate::fsutil::{
     create_dir_all, move_file, prune_empty_dirs, remove_file, reserve_unique, unix_secs, ymd_from_unix,
@@ -42,15 +45,19 @@ pub fn trash_file(trash_dir: &Path, file: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
-/// Moves every live local file of the track into Trash and marks the sources.
-/// Returns the new locations. Lyrics next to a file go along. The lossless
-/// master, if any, is left alone (it belongs to the backup).
+/// Deletes a track into Trash: every live local file moves there, the sources
+/// are marked trashed and the track deleted, all with one timestamp, so the
+/// track leaves the library and [`restore_track`] knows what to bring back.
+/// Returns the new locations. Lyrics next to a file go along. The album folder
+/// keeps its cover (a restore needs it; [`purge_track`] tidies up). The
+/// lossless master, if any, is left alone until the track is purged.
 pub fn delete_track_to_trash(
     library: &Library,
     trash_dir: &Path,
-    library_dir: &Path,
+    _library_dir: &Path,
     track: TrackId,
 ) -> Result<Vec<PathBuf>> {
+    let at = nikgob_library::now_ms();
     let mut moved = Vec::new();
     for source in library.sources_of_track(track)? {
         if !source.kind.is_local() {
@@ -63,20 +70,139 @@ pub fn delete_track_to_trash(
             if long_path(&lrc).exists() {
                 let _ = trash_file(trash_dir, &lrc);
             }
-            if let Some(dir) = path.parent() {
-                prune_empty_dirs(dir, library_dir);
-            }
             Some(dest)
         } else {
             None
         };
-        library.trash_source(
+        library.trash_source_at(
             source.id,
             dest.as_ref().map(|d| d.to_string_lossy().into_owned()).as_deref(),
+            at,
         )?;
         moved.extend(dest);
     }
+    library.mark_track_deleted(track, at)?;
     Ok(moved)
+}
+
+/// What [`restore_track`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RestoreReport {
+    pub files_restored: usize,
+    /// Files that could not go back (gone from Trash, or something else took
+    /// their place in the library); their sources stay in Trash.
+    pub files_failed: usize,
+}
+
+/// Takes a deleted track out of Trash: its files go back where they were and
+/// the track shows up in the library again (without a file, if none could
+/// return).
+pub fn restore_track(library: &Library, track: TrackId) -> Result<RestoreReport> {
+    let mut report = RestoreReport::default();
+    for entry in library.deleted_track_sources(track)? {
+        let Some(in_trash) = entry.trash_path.as_deref().map(PathBuf::from) else {
+            // The file was already missing when it was deleted.
+            continue;
+        };
+        let orig = PathBuf::from(&entry.source.locator);
+        if let Some(dir) = orig.parent() {
+            let _ = create_dir_all(dir);
+        }
+        // Something new took the old path (an upgrade): never overwrite it.
+        let moved = long_path(&in_trash).exists()
+            && !long_path(&orig).exists()
+            && move_file(&in_trash, &orig).is_ok();
+        if !moved {
+            report.files_failed += 1;
+            continue;
+        }
+        let lrc = in_trash.with_extension("lrc");
+        if long_path(&lrc).exists() {
+            let _ = move_file(&lrc, &orig.with_extension("lrc"));
+        }
+        library.restore_source(entry.source.id)?;
+        report.files_restored += 1;
+    }
+    library.undelete_track(track)?;
+    Ok(report)
+}
+
+/// Removes a track for good: its files (in Trash or still in the library, with
+/// their lyrics), its lossless master in `.musiclib/masters/` and every row
+/// ([`Library::purge_track`]). Nothing is left for a rescan to bring back.
+pub fn purge_track(library: &Library, cfg: &ImportConfig, track: TrackId) -> Result<PurgeReport> {
+    let purged = library.purge_track(track)?;
+    let mut report = PurgeReport {
+        rows: 1,
+        ..PurgeReport::default()
+    };
+    let delete = |path: &Path, report: &mut PurgeReport| match std::fs::remove_file(long_path(path)) {
+        Ok(()) => report.files_deleted += 1,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => report.files_missing += 1,
+        Err(e) => {
+            log::warn!("cannot delete {}: {e}", path.display());
+            report.files_failed += 1;
+        }
+    };
+    for p in &purged.trash_files {
+        let path = Path::new(p);
+        if !is_trash_name(path) {
+            log::warn!("not deleting {p}: it is not a Trash file");
+            continue;
+        }
+        delete(path, &mut report);
+        let lrc = path.with_extension("lrc");
+        if long_path(&lrc).exists() {
+            let _ = std::fs::remove_file(long_path(&lrc));
+        }
+    }
+    for p in &purged.live_files {
+        let path = Path::new(p);
+        if !path.starts_with(&cfg.library_dir) {
+            log::warn!("not deleting {p}: it is outside the library folder");
+            continue;
+        }
+        delete(path, &mut report);
+        let lrc = path.with_extension("lrc");
+        if long_path(&lrc).exists() {
+            let _ = std::fs::remove_file(long_path(&lrc));
+        }
+    }
+    // Album folders left without music (cover and lyrics only) go too.
+    for p in &purged.places {
+        if let Some(dir) = Path::new(p).parent()
+            && dir.starts_with(&cfg.library_dir)
+        {
+            prune_empty_dirs(dir, &cfg.library_dir);
+        }
+    }
+    if let Some(hash) = &purged.master_hash {
+        // `<hash>.<ext>` and its `<hash>.json` sidecar; a master still seeding
+        // in Downloads goes with the torrent's cleanup (no master row keeps it).
+        if let Ok(rd) = std::fs::read_dir(long_path(&cfg.masters_dir())) {
+            for e in rd.flatten() {
+                let path = e.path();
+                if path.file_stem().is_some_and(|s| s.to_string_lossy() == hash.as_str()) {
+                    delete(&path, &mut report);
+                }
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Purges tracks deleted more than `days` ago (the Trash retention).
+pub fn purge_deleted_tracks(library: &Library, cfg: &ImportConfig, days: u32) -> Result<PurgeReport> {
+    let cutoff = nikgob_library::now_ms() - i64::from(days) * 24 * 60 * 60 * 1000;
+    let mut total = PurgeReport::default();
+    for track in library.deleted_tracks_before(cutoff)? {
+        let r = purge_track(library, cfg, track)?;
+        total.rows += r.rows;
+        total.files_deleted += r.files_deleted;
+        total.files_missing += r.files_missing;
+        total.files_failed += r.files_failed;
+    }
+    Ok(total)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
