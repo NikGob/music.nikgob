@@ -16,6 +16,7 @@ pub mod lrc;
 pub mod lrclib;
 pub mod matcher;
 pub mod musicbrainz;
+pub mod odesli;
 pub mod lyricsplus;
 pub mod lrcred;
 pub mod betterlyrics;
@@ -36,6 +37,7 @@ pub use matcher::{
     match_candidates,
 };
 pub use musicbrainz::{MusicBrainz, RecordingQuery};
+pub use odesli::{Odesli, OdesliPage};
 pub use lyricsplus::LyricsPlus;
 pub use lrcred::LrcRed;
 pub use betterlyrics::BetterLyrics;

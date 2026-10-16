@@ -281,6 +281,18 @@ pub struct PlaylistRemote {
     pub base_json: Option<String>,
 }
 
+/// One liked track of a streaming service as the last pull saw it (table
+/// `remote_like`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteLike {
+    pub remote: nikgob_core::streaming::RemoteId,
+    pub track_id: TrackId,
+    /// The local like was made by a pull from this service (so the service
+    /// may take it back); `false` = the user liked it here (or before).
+    pub pulled: bool,
+    pub seen_at: UnixMs,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportReport {
     /// Rows inserted or overwritten because the incoming copy won.

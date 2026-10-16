@@ -24,11 +24,19 @@ use nikgob_core::streaming::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::catalog::{add_source_in, upsert_artist_in, upsert_release_in, upsert_track_in};
+use crate::catalog::{
+    TRACK_COLS, add_source_in, track_from_row, upsert_artist_in, upsert_release_in,
+    upsert_track_in,
+};
 use crate::db::Library;
 use crate::error::{LibraryError, Result};
-use crate::types::PlaylistRemote;
-use crate::util::{get_id, sort_key};
+use crate::types::{PlaylistRemote, RemoteLike};
+use crate::util::{get_id, meta_get, meta_set, sort_key};
+
+/// `meta` key of the time a service's likes were first pulled.
+fn likes_key(service: Service) -> String {
+    format!("likes_pulled.{}", service.as_str())
+}
 
 /// `in_library` of the track row aliased `track` (see the module docs).
 const IN_LIBRARY_EXPR: &str = "(
@@ -305,6 +313,22 @@ fn link_known(conn: &Connection, track: TrackId, t: &StreamTrack) -> Result<()> 
     Ok(())
 }
 
+/// The track has a live source of a service ranked above `service`.
+fn better_stream_source(conn: &Connection, track: &str, service: Service) -> Result<bool> {
+    let mine = service.source_kind().priority();
+    let mut stmt = conn.prepare_cached(
+        "SELECT DISTINCT kind FROM source
+          WHERE track_id = ?1 AND kind != 'local_file' AND trashed_at IS NULL",
+    )?;
+    let kinds = stmt.query_map([track], |r| r.get::<_, String>(0))?;
+    for kind in kinds {
+        if SourceKind::parse(&kind?).is_some_and(|k| k.priority() < mine) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn has_local_source(conn: &Connection, track: &str) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM source WHERE track_id = ?1 AND kind = 'local_file')",
@@ -330,7 +354,12 @@ pub(crate) fn upsert_stream_track_in(
             (found.then_some(id), !found)
         }
         None => match linked(conn, "track", service, EntityKind::Track, &t.id.id)? {
-            Some(id) => (Some(parse(&id)?), true),
+            // The metadata follows the best service the track has (a
+            // YouTube copy attached to a Spotify track does not rename it).
+            Some(id) => {
+                let better = better_stream_source(conn, &id, service)?;
+                (Some(parse(&id)?), !better)
+            }
             None => {
                 let by_isrc: Option<String> = match &isrc {
                     Some(isrc) => conn
@@ -550,6 +579,139 @@ impl Library {
     /// The stream tracks a library track is known as (one per stream source).
     pub fn stream_refs(&self, track: TrackId) -> Result<Vec<StreamTrack>> {
         self.read(|c| stream_refs_in(c, track))
+    }
+
+    /// Adds the stream `t` as one more source of the existing `track` and
+    /// links its remote ids (track, and album / artists where the names
+    /// agree), keeping the track's own metadata. For a match found some
+    /// other way than by ISRC (the YouTube copy of a Spotify-only track,
+    /// found by name and duration): [`Self::upsert_stream_track`] would make
+    /// a second track of it. The stream's ISRC fills an empty one.
+    pub fn attach_stream_source(&self, track: TrackId, t: &StreamTrack) -> Result<()> {
+        self.write(|tx| {
+            let tid = track.to_string();
+            if !exists(tx, "track", &tid)? {
+                return Err(LibraryError::not_found("track", tid));
+            }
+            upsert_stream_track_in(tx, t, Some(track))?;
+            if let Some(isrc) = normal_isrc(t.isrc.as_deref()) {
+                tx.execute(
+                    "UPDATE track SET isrc = ?2 WHERE id = ?1 AND (isrc IS NULL OR isrc = '')",
+                    params![tid, isrc],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Live tracks without a local file that have a stream source: what a
+    /// downloaded file may turn out to be (the importer's Decide stage).
+    pub fn stream_only_tracks(&self) -> Result<Vec<Track>> {
+        self.read(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {TRACK_COLS} FROM track
+                  WHERE deleted_at IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id
+                                       AND s.kind = 'local_file' AND s.trashed_at IS NULL)
+                    AND EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id
+                                   AND s.kind != 'local_file' AND s.trashed_at IS NULL)
+                  ORDER BY seq"
+            ))?;
+            let rows = stmt.query_map([], track_from_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    // ---- likes of the services
+
+    /// The service's liked tracks as the last pull saw them.
+    pub fn remote_likes(&self, service: Service) -> Result<Vec<RemoteLike>> {
+        self.read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT remote_id, track_id, pulled, seen_at FROM remote_like
+                  WHERE service = ?1 ORDER BY seen_at, remote_id",
+            )?;
+            let rows = stmt.query_map([service.as_str()], |r| {
+                Ok(RemoteLike {
+                    remote: RemoteId::new(service, r.get::<_, String>(0)?),
+                    track_id: get_id(r, 1)?,
+                    pulled: r.get(2)?,
+                    seen_at: r.get(3)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// The remote likes of a track, in every service.
+    pub fn remote_likes_of(&self, track: TrackId) -> Result<Vec<RemoteLike>> {
+        self.read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT service, remote_id, pulled, seen_at FROM remote_like
+                  WHERE track_id = ?1 ORDER BY service, remote_id",
+            )?;
+            let rows = stmt.query_map([track.to_string()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (service, remote, pulled, seen_at) = row?;
+                if let Some(service) = Service::parse(&service) {
+                    out.push(RemoteLike {
+                        remote: RemoteId::new(service, remote),
+                        track_id: track,
+                        pulled,
+                        seen_at,
+                    });
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// Records that the service likes `like.remote` (insert or replace).
+    pub fn put_remote_like(&self, like: &RemoteLike) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO remote_like(service, remote_id, track_id, pulled, seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(service, remote_id) DO UPDATE SET track_id = excluded.track_id,
+                    pulled = excluded.pulled, seen_at = excluded.seen_at",
+                params![
+                    like.remote.service.as_str(),
+                    like.remote.id,
+                    like.track_id.to_string(),
+                    like.pulled,
+                    like.seen_at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The service no longer likes `remote`; returns whether it was recorded.
+    pub fn delete_remote_like(&self, remote: &RemoteId) -> Result<bool> {
+        self.write(|tx| {
+            Ok(tx.execute(
+                "DELETE FROM remote_like WHERE service = ?1 AND remote_id = ?2",
+                params![remote.service.as_str(), remote.id],
+            )? > 0)
+        })
+    }
+
+    /// Whether the service's likes were pulled at least once (the first pull
+    /// is an import: its likes wait in the wishlist instead of downloading).
+    pub fn likes_pulled(&self, service: Service) -> Result<bool> {
+        self.read(|c| Ok(meta_get(c, &likes_key(service))?.is_some()))
+    }
+
+    pub fn set_likes_pulled(&self, service: Service, at: UnixMs) -> Result<()> {
+        self.write(|tx| meta_set(tx, &likes_key(service), &at.to_string()))
     }
 
     /// Whether the track is shown in the library; `None` for an unknown track.

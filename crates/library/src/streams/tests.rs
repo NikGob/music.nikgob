@@ -381,7 +381,75 @@ fn stream_tracks_survive_a_userdata_round_trip() {
 }
 
 #[test]
+fn a_stream_found_by_name_attaches_to_the_same_track() {
+    let lib = lib();
+    let spotify = FakeService::spotify();
+    let youtube = FakeService::youtube();
+    // "Группа крови": the YouTube copy has no ISRC.
+    let id = lib.upsert_stream_track(&find(&spotify, "sp-gruppa-1")).unwrap();
+    let mut yt = find(&youtube, "yt-gruppa-1");
+    assert!(yt.isrc.is_none());
+    lib.attach_stream_source(id, &yt).unwrap();
+    assert_eq!(lib.track_by_remote(&yt.id).unwrap(), Some(id));
+    let kinds: Vec<SourceKind> = lib.sources_of_track(id).unwrap().iter().map(|s| s.kind).collect();
+    assert_eq!(kinds.len(), 2);
+    assert!(kinds.contains(&SourceKind::Youtube));
+    // The track keeps its title; upserting the YouTube copy finds it now.
+    yt.title = "Gruppa krovi (official audio)".into();
+    assert_eq!(lib.upsert_stream_track(&yt).unwrap(), id);
+    assert_eq!(lib.get_track(id).unwrap().unwrap().title, "Группа крови");
+    assert!(matches!(
+        lib.attach_stream_source(TrackId::new(), &yt),
+        Err(LibraryError::NotFound { .. })
+    ));
+}
+
+#[test]
+fn stream_only_tracks_are_those_without_a_file() {
+    let lib = lib();
+    let a = lib.upsert_stream_track(&sp(0)).unwrap();
+    let b = lib.upsert_stream_track(&sp(1)).unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let bare = lib
+        .upsert_track(&Track::new("Bare", ArtistCredit::single("A", Some(artist.id))))
+        .unwrap();
+    let ids = |lib: &Library| -> Vec<TrackId> {
+        lib.stream_only_tracks().unwrap().iter().map(|t| t.id).collect()
+    };
+    assert_eq!(ids(&lib), vec![a, b], "a track without any source is not a stream track");
+    lib.add_source(&Source::new(b, SourceKind::LocalFile, "Music/b.opus", Codec::Opus))
+        .unwrap();
+    assert_eq!(ids(&lib), vec![a]);
+    let _ = bare;
+}
+
+#[test]
+fn remote_likes_crud() {
+    let lib = lib();
+    let id = lib.upsert_stream_track(&sp(0)).unwrap();
+    assert!(lib.remote_likes(Service::Spotify).unwrap().is_empty());
+    assert!(!lib.likes_pulled(Service::Spotify).unwrap());
+    let like = RemoteLike {
+        remote: sp(0).id,
+        track_id: id,
+        pulled: true,
+        seen_at: 5,
+    };
+    lib.put_remote_like(&like).unwrap();
+    assert_eq!(lib.remote_likes(Service::Spotify).unwrap(), vec![like.clone()]);
+    assert!(lib.remote_likes(Service::Youtube).unwrap().is_empty());
+    assert_eq!(lib.remote_likes_of(id).unwrap(), vec![like.clone()]);
+    lib.put_remote_like(&RemoteLike { pulled: false, ..like.clone() }).unwrap();
+    assert!(!lib.remote_likes(Service::Spotify).unwrap()[0].pulled);
+    assert!(lib.delete_remote_like(&like.remote).unwrap());
+    assert!(!lib.delete_remote_like(&like.remote).unwrap());
+    lib.set_likes_pulled(Service::Spotify, 9).unwrap();
+    assert!(lib.likes_pulled(Service::Spotify).unwrap());
+    assert!(!lib.likes_pulled(Service::Youtube).unwrap());
+}
+
+#[test]
 fn schema_has_the_streaming_tables() {
     let lib = lib();
-    assert_eq!(lib.schema_version().unwrap(), 6);
+    assert_eq!(lib.schema_version().unwrap(), 7);
 }

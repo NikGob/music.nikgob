@@ -45,7 +45,7 @@ pub use playlists::LIKED_PLAYLIST_NAME;
 pub use types::{
     ArtistRow, ArtistSort, ArtistSortKey, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
     PlaylistEntryRow, PlaylistKind, PlaylistRemote, PlaylistSummary, PurgedFile, PurgedTrack,
-    ReleaseProgress,
+    ReleaseProgress, RemoteLike,
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,
     TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };

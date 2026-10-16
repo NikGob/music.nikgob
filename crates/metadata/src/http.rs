@@ -76,6 +76,8 @@ pub struct RateLimits {
     pub lyricsplus: Duration,
     pub lrcred: Duration,
     pub betterlyrics: Duration,
+    /// Odesli (song.link): 10 requests a minute without an API key.
+    pub odesli: Duration,
 }
 
 impl Default for RateLimits {
@@ -92,6 +94,7 @@ impl Default for RateLimits {
             lyricsplus: Duration::from_millis(500),
             lrcred: Duration::from_millis(500),
             betterlyrics: Duration::from_millis(500),
+            odesli: Duration::from_secs(6),
         }
     }
 }
@@ -107,6 +110,7 @@ impl RateLimits {
             lyricsplus: Duration::ZERO,
             lrcred: Duration::ZERO,
             betterlyrics: Duration::ZERO,
+            odesli: Duration::ZERO,
         }
     }
 }
@@ -147,6 +151,7 @@ pub(crate) enum Service {
     LyricsPlus,
     LrcRed,
     BetterLyrics,
+    Odesli,
 }
 
 #[derive(Debug)]
@@ -159,6 +164,7 @@ struct Limiters {
     lyricsplus: RateLimiter,
     lrcred: RateLimiter,
     betterlyrics: RateLimiter,
+    odesli: RateLimiter,
 }
 
 impl Limiters {
@@ -172,6 +178,7 @@ impl Limiters {
             lyricsplus: RateLimiter::new(l.lyricsplus),
             lrcred: RateLimiter::new(l.lrcred),
             betterlyrics: RateLimiter::new(l.betterlyrics),
+            odesli: RateLimiter::new(l.odesli),
         }
     }
 
@@ -185,6 +192,7 @@ impl Limiters {
             Service::LyricsPlus => &self.lyricsplus,
             Service::LrcRed => &self.lrcred,
             Service::BetterLyrics => &self.betterlyrics,
+            Service::Odesli => &self.odesli,
         }
     }
 }

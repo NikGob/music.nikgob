@@ -80,10 +80,10 @@ fn release_from_row(row: &Row<'_>) -> rusqlite::Result<Release> {
     })
 }
 
-const TRACK_COLS: &str = "id, recording_mbid, isrc, acoustid, title, artist_credit, release_id, \
+pub(crate) const TRACK_COLS: &str = "id, recording_mbid, isrc, acoustid, title, artist_credit, release_id, \
                           disc_no, track_no, duration_ms, added_at";
 
-fn track_from_row(row: &Row<'_>) -> rusqlite::Result<Track> {
+pub(crate) fn track_from_row(row: &Row<'_>) -> rusqlite::Result<Track> {
     Ok(Track {
         id: get_id(row, 0)?,
         recording_mbid: row.get(1)?,
