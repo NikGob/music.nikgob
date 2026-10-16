@@ -677,6 +677,14 @@ impl Library {
                     id
                 }
             };
+            // A live file brings a deleted track back (the same song imported
+            // again lands on its old id).
+            if source.trashed_at.is_none() {
+                tx.execute(
+                    "UPDATE track SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
+                    [&track],
+                )?;
+            }
             // A source handed over to another track must not stay "active" on
             // the track it left.
             if let Some(old) = moved_from {
@@ -800,9 +808,21 @@ impl Library {
 
     /// Tracks of a release in album order (disc, track number).
     pub fn tracks_of_release(&self, release: ReleaseId) -> Result<Vec<TrackRow>> {
+        self.tracks_of_release_impl(release, false)
+    }
+
+    /// [`Self::tracks_of_release`] with deleted tracks too (an import of the
+    /// same song brings the deleted track back instead of making a twin).
+    pub fn tracks_of_release_with_deleted(&self, release: ReleaseId) -> Result<Vec<TrackRow>> {
+        self.tracks_of_release_impl(release, true)
+    }
+
+    fn tracks_of_release_impl(&self, release: ReleaseId, deleted: bool) -> Result<Vec<TrackRow>> {
+        let live = if deleted { "" } else { "AND t.deleted_at IS NULL" };
         self.read(|c| {
             let mut stmt = c.prepare(&format!(
-                "{TRACK_ROW_SELECT} WHERE t.release_id = ?1 ORDER BY t.disc_no, t.track_no, t.seq"
+                "{TRACK_ROW_SELECT} WHERE t.release_id = ?1 {live}
+                  ORDER BY t.disc_no, t.track_no, t.seq"
             ))?;
             let rows = stmt.query_map([release.to_string()], track_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -820,6 +840,7 @@ impl Library {
             let mut stmt = c.prepare(&format!(
                 "{TRACK_ROW_SELECT}
                   WHERE t.id IN (SELECT track_id FROM track_artist WHERE artist_id = ?1)
+                    AND t.deleted_at IS NULL
                   ORDER BY t.album_key, t.disc_no, t.track_no, t.seq LIMIT ?2 OFFSET ?3"
             ))?;
             let rows = stmt.query_map(params![artist.to_string(), limit, offset], track_row)?;
@@ -853,9 +874,9 @@ impl Library {
             TrackSortKey::Quality => format!("t.active_quality {d}, t.seq {d}"),
         };
         let where_ = match filter {
-            TrackFilter::All => "",
-            TrackFilter::LocalOnly => "WHERE t.has_local = 1",
-            TrackFilter::NoLocalFile => "WHERE t.has_local = 0",
+            TrackFilter::All => "WHERE t.deleted_at IS NULL",
+            TrackFilter::LocalOnly => "WHERE t.deleted_at IS NULL AND t.has_local = 1",
+            TrackFilter::NoLocalFile => "WHERE t.deleted_at IS NULL AND t.has_local = 0",
         };
         self.read(|c| {
             let mut stmt = c.prepare(&format!(
@@ -868,9 +889,9 @@ impl Library {
 
     pub fn count_tracks(&self, filter: TrackFilter) -> Result<u32> {
         let where_ = match filter {
-            TrackFilter::All => "",
-            TrackFilter::LocalOnly => "WHERE has_local = 1",
-            TrackFilter::NoLocalFile => "WHERE has_local = 0",
+            TrackFilter::All => "WHERE deleted_at IS NULL",
+            TrackFilter::LocalOnly => "WHERE deleted_at IS NULL AND has_local = 1",
+            TrackFilter::NoLocalFile => "WHERE deleted_at IS NULL AND has_local = 0",
         };
         self.read(|c| {
             Ok(
@@ -882,15 +903,42 @@ impl Library {
     }
 
     pub fn count_releases(&self) -> Result<u32> {
-        self.read(|c| Ok(c.query_row("SELECT COUNT(*) FROM release", [], |r| r.get(0))?))
+        self.read(|c| {
+            let sql = format!("SELECT COUNT(*) FROM release rv WHERE {RELEASE_VISIBLE}");
+            Ok(c.query_row(&sql, [], |r| r.get(0))?)
+        })
     }
 
     pub fn count_artists(&self) -> Result<u32> {
-        self.read(|c| Ok(c.query_row("SELECT COUNT(*) FROM artist", [], |r| r.get(0))?))
+        self.read(|c| {
+            let sql = format!("SELECT COUNT(*) FROM artist av WHERE {ARTIST_VISIBLE}");
+            Ok(c.query_row(&sql, [], |r| r.get(0))?)
+        })
     }
 
     /// One page of releases with their "N of total locally" counters.
     pub fn releases(&self, offset: u32, limit: u32, sort: ReleaseSort) -> Result<Vec<ReleaseRow>> {
+        self.releases_impl(offset, limit, sort, RELEASE_ROW_SELECT)
+    }
+
+    /// [`Self::releases`] including releases of deleted tracks only (the
+    /// importer must find them rather than create twins).
+    pub fn releases_with_deleted(
+        &self,
+        offset: u32,
+        limit: u32,
+        sort: ReleaseSort,
+    ) -> Result<Vec<ReleaseRow>> {
+        self.releases_impl(offset, limit, sort, RELEASE_ROW_SELECT_ALL)
+    }
+
+    fn releases_impl(
+        &self,
+        offset: u32,
+        limit: u32,
+        sort: ReleaseSort,
+        select: &str,
+    ) -> Result<Vec<ReleaseRow>> {
         let d = if sort.desc { "DESC" } else { "ASC" };
         // Unknown years always sort last, whatever the direction.
         let order = match sort.key {
@@ -904,9 +952,7 @@ impl Library {
             ReleaseSortKey::Added => format!("r.added_at {d}, r.seq {d}"),
         };
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
-                "{RELEASE_ROW_SELECT} ORDER BY {order} LIMIT ?1 OFFSET ?2"
-            ))?;
+            let mut stmt = c.prepare(&format!("{select} ORDER BY {order} LIMIT ?1 OFFSET ?2"))?;
             let rows = stmt.query_map(params![limit, offset], release_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
@@ -939,42 +985,126 @@ impl Library {
     }
 
     pub fn artists(&self, offset: u32, limit: u32, sort: ArtistSort) -> Result<Vec<ArtistRow>> {
+        self.artists_impl(offset, limit, sort, ARTIST_ROW_SELECT)
+    }
+
+    /// [`Self::artists`] including artists of deleted tracks only.
+    pub fn artists_with_deleted(
+        &self,
+        offset: u32,
+        limit: u32,
+        sort: ArtistSort,
+    ) -> Result<Vec<ArtistRow>> {
+        self.artists_impl(offset, limit, sort, ARTIST_ROW_SELECT_ALL)
+    }
+
+    fn artists_impl(
+        &self,
+        offset: u32,
+        limit: u32,
+        sort: ArtistSort,
+        select: &str,
+    ) -> Result<Vec<ArtistRow>> {
         let d = if sort.desc { "DESC" } else { "ASC" };
         let order = match sort.key {
             ArtistSortKey::Name => format!("a.sort_key {d}, a.seq {d}"),
             ArtistSortKey::Added => format!("a.added_at {d}, a.seq {d}"),
         };
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
-                "{ARTIST_ROW_SELECT} ORDER BY {order} LIMIT ?1 OFFSET ?2"
-            ))?;
+            let mut stmt = c.prepare(&format!("{select} ORDER BY {order} LIMIT ?1 OFFSET ?2"))?;
             let rows = stmt.query_map(params![limit, offset], artist_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 }
 
-pub(crate) const RELEASE_ROW_SELECT: &str = "\
-SELECT r.id, r.mbid, r.release_group_mbid, r.title, r.artist_credit, r.year, r.release_type,
-       r.cover_ref, r.total_tracks, r.added_at,
-       (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.has_local = 1),
-       (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id)
-  FROM release r";
+/// A release (alias `rv`) is listed while it has a live track: one whose
+/// tracks are all deleted, or that a retag emptied, is no album to show. The
+/// row itself stays (the importer may still point at it).
+macro_rules! release_visible {
+    () => {
+        "EXISTS (SELECT 1 FROM track t WHERE t.release_id = rv.id AND t.deleted_at IS NULL)"
+    };
+}
+
+/// An artist (alias `av`) is listed unless all it is credited on (its tracks
+/// and the tracks of its releases) is deleted. An artist without any stays.
+macro_rules! artist_visible {
+    () => {
+        "(EXISTS (SELECT 1 FROM track_artist ta JOIN track t ON t.id = ta.track_id
+                   WHERE ta.artist_id = av.id AND t.deleted_at IS NULL)
+          OR EXISTS (SELECT 1 FROM release_artist ra JOIN track t ON t.release_id = ra.release_id
+                      WHERE ra.artist_id = av.id AND t.deleted_at IS NULL)
+          OR NOT (EXISTS (SELECT 1 FROM track_artist ta WHERE ta.artist_id = av.id)
+                  OR EXISTS (SELECT 1 FROM release_artist ra JOIN track t
+                                ON t.release_id = ra.release_id WHERE ra.artist_id = av.id)))"
+    };
+}
+
+pub(crate) const RELEASE_VISIBLE: &str = release_visible!();
+pub(crate) const ARTIST_VISIBLE: &str = artist_visible!();
+
+/// The columns of a [`ReleaseRow`] (alias `r`); deleted tracks count nowhere.
+macro_rules! release_row_cols {
+    () => {
+        concat!(
+            "SELECT r.id, r.mbid, r.release_group_mbid, r.title, r.artist_credit, r.year,
+                    r.release_type, r.cover_ref, r.total_tracks, r.added_at,
+                    (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.has_local = 1
+                                                    AND t.deleted_at IS NULL),
+                    (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.deleted_at IS NULL),
+                    ",
+            release_liked_expr!()
+        )
+    };
+}
+
+/// Visible releases with their counters. Callers append `JOIN` / `WHERE` /
+/// `ORDER BY` against alias `r`.
+pub(crate) const RELEASE_ROW_SELECT: &str = concat!(
+    release_row_cols!(),
+    " FROM (SELECT * FROM release rv WHERE ",
+    release_visible!(),
+    ") r"
+);
+
+/// Every release, those of deleted tracks included (the importer's matching).
+const RELEASE_ROW_SELECT_ALL: &str = concat!(release_row_cols!(), " FROM release r");
 
 pub(crate) fn release_row(row: &Row<'_>) -> rusqlite::Result<ReleaseRow> {
     Ok(ReleaseRow {
         release: release_from_row(row)?,
         local_tracks: row.get::<_, i64>(10)? as u32,
         known_tracks: row.get::<_, i64>(11)? as u32,
+        liked: row.get(12)?,
     })
 }
 
-pub(crate) const ARTIST_ROW_SELECT: &str = "\
-SELECT a.id, a.mbid, a.name, a.sort_name, a.images, a.added_at,
-       (SELECT COUNT(*) FROM release_artist ra WHERE ra.artist_id = a.id),
-       (SELECT COUNT(*) FROM track_artist ta JOIN track t ON t.id = ta.track_id
-         WHERE ta.artist_id = a.id AND t.has_local = 1)
-  FROM artist a";
+/// The columns of an [`ArtistRow`] (alias `a`): visible releases, live local tracks.
+macro_rules! artist_row_cols {
+    () => {
+        concat!(
+            "SELECT a.id, a.mbid, a.name, a.sort_name, a.images, a.added_at,
+                    (SELECT COUNT(*) FROM release_artist ra2 JOIN release rv ON rv.id = ra2.release_id
+                      WHERE ra2.artist_id = a.id AND ",
+            release_visible!(),
+            "),
+                    (SELECT COUNT(*) FROM track_artist ta JOIN track t ON t.id = ta.track_id
+                      WHERE ta.artist_id = a.id AND t.has_local = 1 AND t.deleted_at IS NULL)"
+        )
+    };
+}
+
+/// Visible artists with their counters.
+pub(crate) const ARTIST_ROW_SELECT: &str = concat!(
+    artist_row_cols!(),
+    " FROM (SELECT * FROM artist av WHERE ",
+    artist_visible!(),
+    ") a"
+);
+
+/// Every artist, those credited on deleted tracks only included.
+const ARTIST_ROW_SELECT_ALL: &str = concat!(artist_row_cols!(), " FROM artist a");
 
 pub(crate) fn artist_row(row: &Row<'_>) -> rusqlite::Result<ArtistRow> {
     Ok(ArtistRow {

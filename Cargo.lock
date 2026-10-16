@@ -3853,6 +3853,7 @@ dependencies = [
  "crossbeam-channel",
  "fastrand",
  "hound",
+ "image",
  "jiff",
  "librqbit",
  "log",

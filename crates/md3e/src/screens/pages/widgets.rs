@@ -110,6 +110,11 @@ pub fn release_card(
     }
 }
 
+/// What liking an album does: all its tracks go into (or out of) "Любимые".
+pub fn album_like_label(liked: bool) -> &'static str {
+    if liked { "Убрать альбом из Любимых" } else { "Добавить альбом в Любимые" }
+}
+
 /// Right-click menu of an album (card or row).
 pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<Route> {
     let picked = Menu::new(("release-menu", resp.id))
@@ -118,10 +123,10 @@ pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) ->
         .item(MenuItem::new("В очередь").icon(Icon::QueueMusic))
         .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(r.artist_id.is_some()))
         .divider()
-        .item(
-            MenuItem::new(if r.liked { "Убрать из избранного" } else { "В избранное" })
-                .icon(Icon::Favorite),
-        )
+        .item(MenuItem::new(album_like_label(r.liked)).icon(Icon::Favorite).selected(r.liked))
+        .divider()
+        .item(MenuItem::new("Удалить альбом").icon(Icon::Delete))
+        .item(MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete))
         .context_menu(resp);
     match picked? {
         0 => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false }),
@@ -129,6 +134,8 @@ pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) ->
         2 => out.push(Command::EnqueueRelease(r.id)),
         3 => return r.artist_id.map(Route::Artist),
         4 => out.push(Command::Like(LikeTarget::Release(r.id), !r.liked)),
+        5 => super::request_release_delete(&resp.ctx, r.id, &r.title, false),
+        6 => super::request_release_delete(&resp.ctx, r.id, &r.title, true),
         _ => {}
     }
     None

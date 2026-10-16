@@ -100,6 +100,8 @@ pub struct ReleaseRow {
     pub local_tracks: u32,
     /// Tracks of this release known to the library.
     pub known_tracks: u32,
+    /// Every (local) track of the album is liked; see [`crate::Library::like_release`].
+    pub liked: bool,
 }
 
 impl ReleaseRow {
@@ -202,6 +204,44 @@ pub struct TrashEntry {
     pub trashed_at: UnixMs,
     pub track_title: String,
     pub artist: String,
+}
+
+/// A track the user deleted ("Корзина").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedTrack {
+    pub track: TrackRow,
+    pub deleted_at: UnixMs,
+}
+
+/// What [`crate::Library::purge_track`] removed; the caller deletes the files.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgedTrack {
+    /// Files of trashed sources, inside `Trash/` (or their original place when
+    /// the file was already gone at trashing time and nothing lives there now).
+    pub trash_files: Vec<String>,
+    /// Files of live local sources (a permanent delete straight from the library).
+    pub live_files: Vec<String>,
+    /// Where every local file of the track lived in the library (trashed ones
+    /// too): the album folders to tidy up.
+    pub places: Vec<String>,
+    /// Content hash of the lossless master, when the track had one: its file
+    /// and sidecar in `.musiclib/masters/` go too.
+    pub master_hash: Option<String>,
+    /// The release went with its last track.
+    pub release_removed: bool,
+}
+
+/// One finished job of "Загрузки → История".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobLogEntry {
+    /// Row id, increasing.
+    pub seq: i64,
+    /// `import` or `torrent`.
+    pub kind: String,
+    pub title: String,
+    pub subtitle: String,
+    pub error: Option<String>,
+    pub at: UnixMs,
 }
 
 /// What [`crate::Library::purge_trash`] removed from the DB; the caller deletes the files.

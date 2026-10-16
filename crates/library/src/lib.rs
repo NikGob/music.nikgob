@@ -20,6 +20,7 @@ mod derived;
 mod error;
 mod events;
 pub mod fractional;
+mod joblog;
 mod lyrics;
 mod masters;
 mod migrations;
@@ -37,13 +38,14 @@ mod tests;
 pub use db::Library;
 pub use lyrics::StoredLyrics;
 pub use error::{LibraryError, Result};
+pub use joblog::JOB_LOG_KEEP;
 pub use migrations::SCHEMA_VERSION;
 pub use playlists::LIKED_PLAYLIST_NAME;
 pub use types::{
-    ArtistRow, ArtistSort, ArtistSortKey, ExportReport, ImportReport, PlaylistEntryRow,
-    PlaylistKind, PlaylistSummary, PurgedFile, ReleaseProgress, ReleaseRow, ReleaseSort,
-    ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow, TrackSort, TrackSortKey,
-    TrackStats, TrashEntry,
+    ArtistRow, ArtistSort, ArtistSortKey, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
+    PlaylistEntryRow, PlaylistKind, PlaylistSummary, PurgedFile, PurgedTrack, ReleaseProgress,
+    ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,
+    TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };
 pub use userdata::{EVENTS_FILE, LIKES_FILE, PLAYLISTS_FILE, USERDATA_VERSION};
 pub use util::{fold, now_ms, sort_key};

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use egui::{Context, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
-    ArtistId, Command, Cover, LIKED_PLAYLIST, LikeTarget, PlaylistDetail, PlaylistId, ReleaseId,
+    ArtistId, Command, Cover, LIKED_PLAYLIST, LikeTarget, PlaylistCoverMode, PlaylistDetail, PlaylistId, ReleaseId,
     ReleaseType, Route, TrackId, ViewState,
 };
 
@@ -12,7 +12,7 @@ use super::{PageState, widgets};
 use crate::{
     Icon, Theme, TypeRole,
     components::{
-        AssistChip, Button, ButtonRow, Dialog, DialogAction, FlexibleAppBar, IconButton, ListItem,
+        AssistChip, Button, ButtonRow, Dialog, DialogAction, FilterChip, FlexibleAppBar, IconButton, ListItem,
         LoadingIndicator, Member, Menu, MenuItem, Size, SplitButton, Style, TextField, app_bar,
     },
     screens::common,
@@ -103,6 +103,18 @@ pub fn release(
         });
     };
     let c = &r.card;
+    // The album was deleted (or its last track): nothing left to show, go
+    // back like ← does.
+    // Once: the page may still be drawn while the transition runs.
+    let left = Id::new(("release-left-empty", id));
+    if r.tracks.is_empty() {
+        if !ui.ctx().data(|d| d.get_temp::<bool>(left).unwrap_or(false)) {
+            ui.ctx().data_mut(|d| d.insert_temp(left, true));
+            pages.go_back = true;
+        }
+    } else {
+        ui.ctx().data_mut(|d| d.remove::<bool>(left));
+    }
     with_bar(ui, &c.title, pages, |ui, pages| {
         let mut nav = None;
         let size = cover_size(ui);
@@ -163,7 +175,7 @@ pub fn release(
             );
         }
         members.push(
-            IconButton::new(Icon::Favorite).size(Size::M).style(Style::Tonal).selected(r.liked).tooltip("Нравится").into(),
+            IconButton::new(Icon::Favorite).size(Size::M).style(Style::Tonal).selected(r.liked).tooltip(widgets::album_like_label(r.liked)).into(),
         );
         members.push(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into());
         let row = ButtonRow::new("rel-actions", Size::M).show(ui, members);
@@ -189,6 +201,9 @@ pub fn release(
             .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
             .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
             .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(c.artist_id.is_some()))
+            .divider()
+            .item(MenuItem::new("Удалить альбом").icon(Icon::Delete))
+            .item(MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete))
             .attach(more);
         match picked {
             Some(0) => out.push(Command::PlayNext(ids.clone())),
@@ -198,6 +213,8 @@ pub fn release(
                 pages.pending_add_anchor = Some(more.rect);
             }
             Some(3) => nav = c.artist_id.map(Route::Artist),
+            Some(4) => super::request_release_delete(ui.ctx(), id, &c.title, false),
+            Some(5) => super::request_release_delete(ui.ctx(), id, &c.title, true),
             _ => {}
         }
         ui.add_space(16.0);
@@ -323,6 +340,8 @@ struct EditState {
     shown: bool,
     name: String,
     cover: Option<PathBuf>,
+    /// Cover mode picked in the dialog (`None` = as it was).
+    mode: Option<PlaylistCoverMode>,
 }
 
 /// State of the "Добавить треки" dialog.
@@ -347,7 +366,7 @@ fn edit_dialog(ctx: &Context, p: &PlaylistDetail, out: &mut Vec<Command>) {
     let key = Id::new(("pl-edit", p.card.id));
     let st: EditState = get(ctx, key);
     let s = Theme::get(ctx).scheme;
-    let (mut open, mut shown, mut name, mut cover) = (st.open, st.shown, st.name, st.cover);
+    let (mut open, mut shown, mut name, mut cover, mut mode) = (st.open, st.shown, st.name, st.cover, st.mode);
     let valid = !name.trim().is_empty();
     let mut submitted = false;
     let current = p.card.cover.clone();
@@ -365,8 +384,34 @@ fn edit_dialog(ctx: &Context, p: &PlaylistDetail, out: &mut Vec<Command>) {
                 common::cover(ui, shown_cover.as_ref(), r, shape::MEDIUM);
                 ui.add_space(16.0);
                 ui.vertical(|ui| {
+                    // Smart: a collage with 4+ albums, else the most common
+                    // album cover, else a gradient.
+                    let cur = mode.unwrap_or(p.card.cover_mode);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        for (m, label, tip) in [
+                            (PlaylistCoverMode::Smart, "Авто", "Коллаж, если в плейлисте 4+ альбома, иначе самая частая обложка"),
+                            (PlaylistCoverMode::Collage, "Коллаж", "Обложки первых четырёх альбомов, 2×2"),
+                        ] {
+                            if ui
+                                .add(FilterChip::new(label, cur == m && cover.is_none()).id_salt(("pl-cover-mode", label)))
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                mode = Some(m);
+                                cover = None;
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
                     if ui
-                        .add(Button::new("Выбрать обложку…").icon(Icon::Edit).style(Style::Tonal).id_salt("pick-cover"))
+                        .add(
+                            Button::new("Своя картинка…")
+                                .icon(Icon::Edit)
+                                .style(Style::Tonal)
+                                .selected(cover.is_some() || (mode.is_none() && cur == PlaylistCoverMode::Custom))
+                                .id_salt("pick-cover"),
+                        )
                         .clicked()
                         && let Some(f) = rfd::FileDialog::new()
                             .set_title("Обложка плейлиста")
@@ -374,6 +419,7 @@ fn edit_dialog(ctx: &Context, p: &PlaylistDetail, out: &mut Vec<Command>) {
                             .pick_file()
                     {
                         cover = Some(f);
+                        mode = Some(PlaylistCoverMode::Custom);
                     }
                     if let Some(f) = cover.as_ref().and_then(|c| c.file_name()) {
                         ui.add_space(4.0);
@@ -399,13 +445,19 @@ fn edit_dialog(ctx: &Context, p: &PlaylistDetail, out: &mut Vec<Command>) {
         if let Some(path) = cover.take() {
             out.push(Command::SetPlaylistCover(p.card.id, path));
             out.push(Command::LoadPlaylist(p.card.id));
+        } else if let Some(m) = mode.take()
+            && m != PlaylistCoverMode::Custom
+            && m != p.card.cover_mode
+        {
+            out.push(Command::SetPlaylistCoverMode(p.card.id, m));
         }
         open = false;
     }
     if !open {
         shown = false;
+        mode = None;
     }
-    put(ctx, key, EditState { open, shown, name, cover });
+    put(ctx, key, EditState { open, shown, name, cover, mode });
 }
 
 /// Search the library and add tracks to the playlist.
@@ -543,7 +595,7 @@ pub fn playlist(
                 Some(0) => put(
                     ui.ctx(),
                     edit_key,
-                    EditState { open: true, shown: false, name: p.card.name.clone(), cover: None },
+                    EditState { open: true, shown: false, name: p.card.name.clone(), cover: None, mode: None },
                 ),
                 Some(1) => out.push(Command::Enqueue(p.tracks.iter().map(|t| t.id).collect())),
                 Some(2) => pages.confirm_delete = Some(id),

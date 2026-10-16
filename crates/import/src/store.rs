@@ -81,7 +81,7 @@ impl Store {
         loop {
             let page = self
                 .lib
-                .artists(offset, PAGE, ArtistSort::asc(Default::default()))?;
+                .artists_with_deleted(offset, PAGE, ArtistSort::asc(Default::default()))?;
             for row in &page {
                 self.artists
                     .entry(name_key(&row.artist.name))
@@ -96,7 +96,7 @@ impl Store {
         loop {
             let page = self
                 .lib
-                .releases(offset, PAGE, ReleaseSort::asc(Default::default()))?;
+                .releases_with_deleted(offset, PAGE, ReleaseSort::asc(Default::default()))?;
             for row in &page {
                 let r = &row.release;
                 self.index_release(&r.title, &r.artist_credit.display(), r.id);

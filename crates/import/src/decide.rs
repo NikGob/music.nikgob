@@ -129,7 +129,7 @@ pub(crate) fn find_existing(store: &mut Store, inc: &Incoming<'_>) -> Result<Opt
         return Ok(None);
     };
     let want = title_key(&id.title);
-    for row in lib.tracks_of_release(release)? {
+    for row in lib.tracks_of_release_with_deleted(release)? {
         if seen.contains(&row.id) {
             continue;
         }

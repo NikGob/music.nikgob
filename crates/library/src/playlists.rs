@@ -9,7 +9,7 @@
 //! * Likes are an LWW-element-set keyed by `(kind, id)`.
 
 use nikgob_core::model::{
-    DeviceId, EntryId, LikeTarget, Playlist, PlaylistEntry, PlaylistId, TrackId, UnixMs,
+    DeviceId, EntryId, LikeTarget, Playlist, PlaylistEntry, PlaylistId, ReleaseId, TrackId, UnixMs,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -64,7 +64,7 @@ SELECT p.id, p.name, p.cover,
        max(p.updated_at, coalesce((SELECT MAX(e.updated_at) FROM playlist_entry e
                                     WHERE e.playlist_id = p.id), 0)),
        (SELECT COUNT(*) FROM playlist_entry e JOIN track t ON t.id = e.track_id
-         WHERE e.playlist_id = p.id AND e.deleted = 0)
+         WHERE e.playlist_id = p.id AND e.deleted = 0 AND t.deleted_at IS NULL)
   FROM playlist p";
 
 pub(crate) fn playlist_summary(row: &Row<'_>) -> rusqlite::Result<PlaylistSummary> {
@@ -331,7 +331,7 @@ impl Library {
                 track_row_cols!(),
                 " FROM playlist_entry e JOIN track t ON t.id = e.track_id \
                   LEFT JOIN release r ON r.id = t.release_id \
-                  WHERE e.playlist_id = ?1 AND e.deleted = 0 \
+                  WHERE e.playlist_id = ?1 AND e.deleted = 0 AND t.deleted_at IS NULL \
                   ORDER BY e.position, e.id LIMIT ?2 OFFSET ?3"
             ))?;
             let rows = stmt.query_map(params![playlist.to_string(), limit, offset], |r| {
@@ -349,7 +349,7 @@ impl Library {
         self.read(|c| {
             Ok(c.query_row(
                 "SELECT COUNT(*) FROM playlist_entry e JOIN track t ON t.id = e.track_id
-                  WHERE e.playlist_id = ?1 AND e.deleted = 0",
+                  WHERE e.playlist_id = ?1 AND e.deleted = 0 AND t.deleted_at IS NULL",
                 [playlist.to_string()],
                 |r| r.get(0),
             )?)
@@ -475,7 +475,7 @@ impl Library {
                 track_row_cols!(),
                 " FROM likes l JOIN track t ON t.id = l.target_id \
                   LEFT JOIN release r ON r.id = t.release_id \
-                  WHERE l.target_kind = 'track' AND l.deleted = 0 \
+                  WHERE l.target_kind = 'track' AND l.deleted = 0 AND t.deleted_at IS NULL \
                   ORDER BY l.updated_at DESC, t.seq DESC LIMIT ?1 OFFSET ?2"
             ))?;
             let rows = stmt.query_map(params![limit, offset], |r| track_row_at(r, 0))?;
@@ -487,7 +487,7 @@ impl Library {
         self.read(|c| {
             Ok(c.query_row(
                 "SELECT COUNT(*) FROM likes l JOIN track t ON t.id = l.target_id
-                  WHERE l.target_kind = 'track' AND l.deleted = 0",
+                  WHERE l.target_kind = 'track' AND l.deleted = 0 AND t.deleted_at IS NULL",
                 [],
                 |r| r.get(0),
             )?)
@@ -514,6 +514,77 @@ impl Library {
                  WHERE l.deleted = 0 ORDER BY l.updated_at DESC, a.seq DESC LIMIT ?1 OFFSET ?2"
             ))?;
             let rows = stmt.query_map(params![limit, offset], artist_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Likes (or unlikes) an album: every live track of it goes into (or out
+    /// of) "Любимые" — the local ones when it has any, all of them otherwise —
+    /// and the release's own like row follows, so the album reads as liked
+    /// exactly when [`crate::ReleaseRow::liked`] says so. Returns the tracks.
+    pub fn like_release(&self, release: ReleaseId, on: bool) -> Result<Vec<TrackId>> {
+        let device = self.device_id();
+        let now = self.tick();
+        self.write(|tx| {
+            let rid = release.to_string();
+            let ids: Vec<String> = {
+                let mut stmt = tx.prepare(
+                    "SELECT t.id FROM track t
+                      WHERE t.release_id = ?1 AND t.deleted_at IS NULL
+                        AND (t.has_local = 1 OR NOT EXISTS (
+                              SELECT 1 FROM track t2 WHERE t2.release_id = ?1
+                                 AND t2.deleted_at IS NULL AND t2.has_local = 1))
+                      ORDER BY t.disc_no, t.track_no, t.seq",
+                )?;
+                let rows = stmt.query_map([&rid], |r| r.get(0))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            let mut upsert = tx.prepare_cached(
+                "INSERT INTO likes(target_kind, target_id, updated_at, updated_by, deleted)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(target_kind, target_id) DO UPDATE SET
+                    updated_at = excluded.updated_at, updated_by = excluded.updated_by,
+                    deleted = excluded.deleted
+                  WHERE likes.deleted != excluded.deleted",
+            )?;
+            // Album order in "Любимые" (most recent first): the first track
+            // gets the newest stamp.
+            for (i, id) in ids.iter().enumerate() {
+                let at = now - i as i64;
+                upsert.execute(params!["track", id, at, device.as_str(), !on])?;
+            }
+            upsert.execute(params!["release", rid, now, device.as_str(), !on])?;
+            ids.iter().map(|s| s.parse().map_err(|_| LibraryError::Invalid(s.clone()))).collect()
+        })
+    }
+
+    /// Whether the album counts as liked (see [`Self::like_release`]).
+    pub fn release_liked(&self, release: ReleaseId) -> Result<bool> {
+        self.read(|c| {
+            Ok(c.query_row(
+                concat!("SELECT ", release_liked_expr!(), " FROM release r WHERE r.id = ?1"),
+                [release.to_string()],
+                |r| r.get::<_, Option<bool>>(0),
+            )
+            .optional()?
+            .flatten()
+            .unwrap_or(false))
+        })
+    }
+
+    /// `(release, cover_ref)` of every live track of a playlist that has an
+    /// album cover, in playlist order (one item per track, for counting).
+    pub fn playlist_cover_refs(&self, playlist: PlaylistId) -> Result<Vec<(ReleaseId, String)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT r.id, r.cover_ref FROM playlist_entry e
+                   JOIN track t ON t.id = e.track_id
+                   JOIN release r ON r.id = t.release_id
+                  WHERE e.playlist_id = ?1 AND e.deleted = 0 AND t.deleted_at IS NULL
+                    AND r.cover_ref IS NOT NULL
+                  ORDER BY e.position, e.id",
+            )?;
+            let rows = stmt.query_map([playlist.to_string()], |r| Ok((get_id(r, 0)?, r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }

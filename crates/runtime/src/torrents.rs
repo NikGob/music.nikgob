@@ -535,12 +535,29 @@ impl Worker {
         self.run_cleanup();
     }
 
+    /// Finished downloads of earlier sessions ("Загрузки → История").
+    pub(crate) fn load_torrent_history(&mut self) {
+        let logged: Vec<v::Job> = self
+            .lib
+            .job_log(Some("torrent"), 100)
+            .unwrap_or_default()
+            .iter()
+            .map(|e| crate::import::logged_job(e, 0))
+            .collect();
+        self.torrents.history.extend(logged.iter().cloned());
+        self.publish(|s, _| s.downloads.history.extend(logged));
+    }
+
     fn import_torrent(&mut self, t: &TorrentStatus) {
         let files: Vec<PathBuf> = t.selected_files.iter().filter(|p| p.is_file()).cloned().collect();
+        let subtitle = format!("Скачано {} · импорт в библиотеку", human_bytes(t.total));
+        if let Err(e) = self.lib.log_job("torrent", &t.name, &subtitle, None) {
+            log::warn!("job log: {e}");
+        }
         self.torrents.history.push_front(v::Job {
             id: t.id,
             title: t.name.clone(),
-            subtitle: format!("Скачано {} · импорт в библиотеку", human_bytes(t.total)),
+            subtitle,
             progress: Some(1.0),
             rate: None,
             eta: None,

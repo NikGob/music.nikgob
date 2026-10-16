@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use nikgob_core::lyrics::LyricsSource;
-use nikgob_core::model::{SourceId, SourceOrigin, TrackId};
+use nikgob_core::model::{SourceOrigin, TrackId};
 use nikgob_import::{ImportConfig, ImportEvent, Importer, InboxWatcher, ItemId, Stage};
 use nikgob_metadata::{Metadata, MetadataConfig};
 use nikgob_view::{self as v, Command};
@@ -80,10 +80,23 @@ struct Progress {
     last_error: Option<String>,
 }
 
-/// One file the user trashed, for "Отменить".
-pub(crate) struct Trashed {
-    track: TrackId,
-    files: Vec<(SourceId, PathBuf, PathBuf)>,
+/// Ids of history entries loaded from the job log (above any job id of
+/// this session).
+pub(crate) const LOGGED_ID: u64 = 1 << 40;
+
+/// A persisted job as a history row; `kind_bit` is [`IMPORT_ID`] or 0.
+pub(crate) fn logged_job(e: &nikgob_library::JobLogEntry, kind_bit: u64) -> v::Job {
+    v::Job {
+        id: kind_bit | LOGGED_ID | e.seq.max(0) as u64,
+        title: e.title.clone(),
+        subtitle: e.subtitle.clone(),
+        progress: Some(1.0),
+        rate: None,
+        eta: None,
+        paused: false,
+        controllable: false,
+        error: e.error.clone(),
+    }
 }
 
 pub(crate) struct ImportService {
@@ -112,7 +125,6 @@ pub(crate) struct ImportService {
     /// Lyrics to write into files that were playing (or preloaded) when the
     /// text settled: rewriting a file under the decoder shifts its pages.
     pub(crate) embed_later: HashSet<TrackId>,
-    pub(crate) last_trashed: Option<Trashed>,
     /// New settings, applied once nothing is importing.
     reconfigure: Option<ImportConfig>,
     next_move_id: u64,
@@ -154,7 +166,13 @@ impl ImportService {
             titles: HashMap::new(),
             launching: HashMap::new(),
             resolving: 0,
-            history: VecDeque::new(),
+            // Finished imports survive a restart ("Загрузки → История").
+            history: library
+                .job_log(Some("import"), 100)
+                .unwrap_or_default()
+                .iter()
+                .map(|e| logged_job(e, IMPORT_ID))
+                .collect(),
             dirty: false,
             last_reload: Instant::now(),
             lyrics_tried: HashSet::new(),
@@ -162,18 +180,26 @@ impl ImportService {
             lyrics_cache: HashMap::new(),
             lyrics_order: VecDeque::new(),
             embed_later: HashSet::new(),
-            last_trashed: None,
             reconfigure: None,
             next_move_id: 0,
         };
         svc.attach();
 
-        // Trash older than 30 days goes for good, once per start.
+        // Trash older than 30 days goes for good, once per start: deleted
+        // tracks first (with their files and masters), then replaced files.
         let lib = library;
-        svc.rt.spawn_blocking(move || match nikgob_import::trash_purge(&lib, nikgob_import::TRASH_DAYS) {
-            Ok(r) if r.rows > 0 => log::info!("trash purge: {r:?}"),
-            Ok(_) => {}
-            Err(e) => log::warn!("trash purge: {e}"),
+        let cfg = svc.config().clone();
+        svc.rt.spawn_blocking(move || {
+            match nikgob_import::purge_deleted_tracks(&lib, &cfg, nikgob_import::TRASH_DAYS) {
+                Ok(r) if r.rows > 0 => log::info!("deleted tracks purge: {r:?}"),
+                Ok(_) => {}
+                Err(e) => log::warn!("deleted tracks purge: {e}"),
+            }
+            match nikgob_import::trash_purge(&lib, nikgob_import::TRASH_DAYS) {
+                Ok(r) if r.rows > 0 => log::info!("trash purge: {r:?}"),
+                Ok(_) => {}
+                Err(e) => log::warn!("trash purge: {e}"),
+            }
         });
         Some(svc)
     }
@@ -627,6 +653,10 @@ impl Worker {
                     parts.push(format!("ждут подтверждения {pending}"));
                 }
                 let summary = parts.join(" · ");
+                let error = (failed > 0).then(|| format!("Не удалось: {failed}"));
+                if let Err(e) = self.lib.log_job("import", &title, &summary, error.as_deref()) {
+                    log::warn!("job log: {e}");
+                }
                 svc.history.push_front(v::Job {
                     id: IMPORT_ID | job.0,
                     title,
@@ -636,7 +666,7 @@ impl Worker {
                     eta: None,
                     paused: false,
                     controllable: false,
-                    error: (failed > 0).then(|| format!("Не удалось: {failed}")),
+                    error,
                 });
                 svc.history.truncate(100);
                 finished = Some((summary, pending));
@@ -697,79 +727,135 @@ impl Worker {
 
     // ------------------------------------------------------------- trash
 
-    pub(crate) fn trash_track(&mut self, track: TrackId) {
+    /// Deletes tracks: into the Trash (30 days), or for good when the Trash
+    /// is off in the settings.
+    pub(crate) fn delete_tracks(&mut self, tracks: Vec<TrackId>, what: &str) {
+        if tracks.is_empty() {
+            return;
+        }
+        if !self.state.read().prefs.use_trash {
+            self.purge_tracks(tracks);
+            return;
+        }
         let Some(svc) = &self.import else {
             self.toast("Удаление недоступно", None);
             return;
         };
         let cfg = svc.config().clone();
-        if self.playing.map(|e| e.track) == Some(track) {
+        if self.playing.is_some_and(|e| tracks.contains(&e.track)) {
             self.command(Command::Next);
         }
-        let before: Vec<_> = self
-            .lib
-            .sources_of_track(track)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|s| s.kind.is_local())
-            .collect();
-        match nikgob_import::delete_track_to_trash(&self.lib, &cfg.trash_dir, &cfg.library_dir, track) {
-            Ok(_) => {
-                // Pair each source with where its file went, as recorded in the
-                // library. (Pairing by order would hand a source whose file was
-                // already missing the next source's file.)
-                let trash = self.lib.list_trash().unwrap_or_default();
-                let mut files = Vec::new();
-                for s in before {
-                    let dest = trash
-                        .iter()
-                        .find(|t| t.source.id == s.id)
-                        .and_then(|t| t.trash_path.clone());
-                    if let Some(dest) = dest {
-                        files.push((s.id, PathBuf::from(&s.locator), PathBuf::from(dest)));
-                    }
-                }
-                if let Some(svc) = &mut self.import {
-                    svc.last_trashed = Some(Trashed { track, files });
-                }
-                self.toast(
-                    "Перемещено в корзину (30 дней)",
-                    Some(("Отменить".into(), Command::UndoTrash(track))),
-                );
-                self.reload_after_import();
-            }
-            Err(e) => {
-                log::error!("trash {track}: {e}");
-                self.toast("Не получилось удалить", None);
+        let mut failed = 0;
+        for &t in &tracks {
+            if let Err(e) = nikgob_import::delete_track_to_trash(&self.lib, &cfg.trash_dir, &cfg.library_dir, t) {
+                log::error!("trash {t}: {e}");
+                failed += 1;
             }
         }
+        if failed == tracks.len() {
+            self.toast("Не получилось удалить", None);
+        } else {
+            self.toast(
+                format!("{what} в корзине (30 дней)"),
+                Some(("Отменить".into(), Command::RestoreTracks(tracks))),
+            );
+        }
+        self.after_delete();
     }
 
-    pub(crate) fn undo_trash(&mut self, track: TrackId) {
-        let Some(t) = self
-            .import
-            .as_mut()
-            .and_then(|s| s.last_trashed.take_if(|t| t.track == track))
-        else {
-            return;
-        };
+    /// Takes deleted tracks back out of the Trash.
+    pub(crate) fn restore_tracks(&mut self, tracks: Vec<TrackId>) {
         let mut ok = true;
-        for (source, orig, dest) in t.files {
-            if let Some(dir) = orig.parent() {
-                let _ = std::fs::create_dir_all(nikgob_import::sanitize::long_path(dir));
+        for t in tracks {
+            match nikgob_import::restore_track(&self.lib, t) {
+                Ok(r) => ok &= r.files_failed == 0,
+                Err(e) => {
+                    log::error!("restore {t}: {e}");
+                    ok = false;
+                }
             }
-            // Something new took the old path (an upgrade): never overwrite it.
-            let taken = nikgob_import::sanitize::long_path(&orig).exists();
-            let moved = !taken && nikgob_import::fsutil::move_file(&dest, &orig).is_ok();
-            let lrc = dest.with_extension("lrc");
-            if moved && nikgob_import::sanitize::long_path(&lrc).exists() {
-                let _ = nikgob_import::fsutil::move_file(&lrc, &orig.with_extension("lrc"));
-            }
-            ok &= moved && self.lib.restore_source(source).is_ok();
         }
         self.toast(if ok { "Восстановлено" } else { "Восстановить удалось не всё" }, None);
-        self.reload_after_import();
+        self.after_delete();
     }
+
+    /// Deletes tracks for good: files, master, rows.
+    pub(crate) fn purge_tracks(&mut self, tracks: Vec<TrackId>) {
+        let Some(svc) = &self.import else {
+            self.toast("Удаление недоступно", None);
+            return;
+        };
+        let cfg = svc.config().clone();
+        if self.playing.is_some_and(|e| tracks.contains(&e.track)) {
+            self.command(Command::Next);
+        }
+        let (mut done, mut failed) = (0usize, 0usize);
+        for &t in &tracks {
+            match nikgob_import::purge_track(&self.lib, &cfg, t) {
+                Ok(r) => {
+                    done += 1;
+                    failed += r.files_failed;
+                }
+                Err(e) => {
+                    log::error!("purge {t}: {e}");
+                    failed += 1;
+                }
+            }
+        }
+        self.toast(
+            if failed > 0 {
+                "Удалено, но не все файлы получилось стереть".to_owned()
+            } else {
+                format!("Удалено навсегда: {done}")
+            },
+            None,
+        );
+        self.after_delete();
+    }
+
+    pub(crate) fn empty_trash(&mut self) {
+        let ids: Vec<TrackId> = self
+            .lib
+            .deleted_tracks()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| d.track.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.purge_tracks(ids);
+    }
+
+    /// The "Корзина" list.
+    pub(crate) fn load_trash(&mut self) {
+        const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+        let now = nikgob_library::now_ms();
+        let rows = self.lib.deleted_tracks().unwrap_or_default();
+        self.publish(|s, res| {
+            s.library.trash = rows
+                .iter()
+                .map(|d| {
+                    let ago = ((now - d.deleted_at).max(0) / DAY_MS) as u32;
+                    v::TrashItem {
+                        track: res.track(&d.track),
+                        deleted: match ago {
+                            0 => "сегодня".to_owned(),
+                            1 => "вчера".to_owned(),
+                            n => format!("{n} дн. назад"),
+                        },
+                        days_left: nikgob_import::TRASH_DAYS.saturating_sub(ago),
+                    }
+                })
+                .collect();
+        });
+    }
+
+    fn after_delete(&mut self) {
+        self.reload_after_import();
+        self.load_trash();
+    }
+
 
     // ------------------------------------------------------------- settings
 
