@@ -271,12 +271,16 @@ pub fn item<R>(ui: &mut Ui, id: SettingId, label: &str, add: impl FnOnce(&mut Ui
         let a = glow_at(t);
         if a > 0.0 {
             let s = Theme::get(&ctx).scheme;
-            let r = rect.expand2(vec2(8.0, 2.0));
-            ui.painter().set(
-                bg,
-                Shape::rect_filled(r, shape::LARGE, s.primary.gamma_multiply(0.18 * a)),
-            );
-            ui.painter().rect_stroke(r, shape::LARGE, Stroke::new(2.0, s.primary.gamma_multiply(0.7 * a)), egui::StrokeKind::Inside);
+            // The whole row of the column, with room around the text. It
+            // may reach past the page's left edge, so only the vertical clip
+            // of the scroll area applies.
+            let row = Rect::from_x_y_ranges(ui.max_rect().x_range(), rect.y_range());
+            let r = row.expand2(vec2(12.0, 7.0));
+            let clip = ui.clip_rect();
+            let mut painter = ui.painter().clone();
+            painter.set_clip_rect(Rect::from_x_y_ranges(r.x_range(), clip.y_range()));
+            painter.set(bg, Shape::rect_filled(r, shape::LARGE, s.primary.gamma_multiply(0.18 * a)));
+            painter.rect_stroke(r, shape::LARGE, Stroke::new(2.0, s.primary.gamma_multiply(0.7 * a)), egui::StrokeKind::Inside);
             ctx.request_repaint();
         }
         f.rect = Some(rect);
