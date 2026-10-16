@@ -315,6 +315,7 @@ impl FakeService {
                 account: Account::LoggedIn {
                     name: USER.into(),
                     premium: Some(true),
+                    audio: true,
                 },
                 liked,
                 playlists,
@@ -338,6 +339,18 @@ impl FakeService {
     #[must_use]
     pub fn logged_out(self) -> Self {
         self.lock().account = Account::LoggedOut;
+        self
+    }
+
+    /// Logged in without the right to stream sound (Spotify Free, or no
+    /// playback authorization): catalog calls work, `open_audio` answers
+    /// [`StreamError::PremiumRequired`].
+    pub fn without_audio(self) -> Self {
+        self.lock().account = Account::LoggedIn {
+            name: USER.into(),
+            premium: Some(false),
+            audio: false,
+        };
         self
     }
 
@@ -554,10 +567,16 @@ impl StreamService for FakeService {
                 st.account = Account::Failed("empty cookies".into());
                 Err(StreamError::NotLoggedIn)
             }
+            LoginInput::Playback | LoginInput::PersonalApp { .. }
+                if self.service != Service::Spotify =>
+            {
+                Err(StreamError::Unsupported)
+            }
             _ => {
                 st.account = Account::LoggedIn {
                     name: USER.into(),
                     premium: Some(true),
+                    audio: true,
                 };
                 Ok(())
             }
@@ -681,6 +700,9 @@ impl StreamService for FakeService {
     }
 
     fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError> {
+        if matches!(self.lock().account, Account::LoggedIn { audio: false, .. }) {
+            return Err(StreamError::PremiumRequired);
+        }
         self.open_now(id)
             .map(|a| Box::new(a) as Box<dyn AudioStream>)
     }

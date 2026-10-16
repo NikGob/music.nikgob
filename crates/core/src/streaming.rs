@@ -428,6 +428,10 @@ pub enum Account {
         name: String,
         /// `None` when the service does not say.
         premium: Option<bool>,
+        /// The service can play sound right now. Spotify needs its separate
+        /// playback authorization ([`LoginInput::Playback`]) and Premium;
+        /// without it the runtime plays the same track from YouTube Music.
+        audio: bool,
     },
     /// The last login failed or the session expired.
     Failed(String),
@@ -452,7 +456,14 @@ pub enum LoginPrompt {
 #[derive(Clone, PartialEq, Eq)]
 pub enum LoginInput {
     /// Browser based OAuth (redirect or device code, whatever the service uses).
+    /// For Spotify this is the Web API grant of the shared public app.
     Browser,
+    /// Spotify only: the separate local playback authorization (librespot,
+    /// `streaming` scope). Other services answer [`StreamError::Unsupported`].
+    Playback,
+    /// Spotify only: a Web API grant of the user's own developer app, which
+    /// gets its own quota. Must verify as the same account as `Browser`.
+    PersonalApp { client_id: String },
     /// Pasted cookies (`cookies.txt` content or a `Cookie:` header).
     Cookies(String),
 }
@@ -462,6 +473,8 @@ impl fmt::Debug for LoginInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Browser => f.write_str("Browser"),
+            Self::Playback => f.write_str("Playback"),
+            Self::PersonalApp { .. } => f.write_str("PersonalApp"),
             Self::Cookies(c) => write!(f, "Cookies({} bytes)", c.len()),
         }
     }
@@ -478,6 +491,9 @@ pub enum StreamError {
     NotConfigured,
     #[error("not logged in")]
     NotLoggedIn,
+    /// The account cannot stream audio from this service (Spotify Free).
+    #[error("premium account required")]
+    PremiumRequired,
     #[error("rate limited")]
     RateLimited { retry_after: Option<Duration> },
     /// Not available (region, withdrawn, private, no such id).
