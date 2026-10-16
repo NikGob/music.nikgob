@@ -479,6 +479,99 @@ impl Library {
         })
     }
 
+    /// Folds `from` into `into` (one recording imported twice): its sources
+    /// become more sources of `into` (the best one plays), its playlist
+    /// entries, like and listening history move over, and the `from` row
+    /// goes. No file is touched. Returns false when either track is missing.
+    pub fn merge_track_into(&self, from: TrackId, into: TrackId) -> Result<bool> {
+        if from == into {
+            return Ok(false);
+        }
+        let device = self.device_id();
+        let now = self.tick();
+        self.write(|tx| {
+            let (f, t) = (from.to_string(), into.to_string());
+            for id in [&f, &t] {
+                if first_string(tx, "SELECT id FROM track WHERE id = ?1", [id])?.is_none() {
+                    return Ok(false);
+                }
+            }
+            tx.execute("UPDATE source SET track_id = ?2, is_active = 0 WHERE track_id = ?1", params![f, t])?;
+            tx.execute(
+                "UPDATE playlist_entry SET track_id = ?2, updated_at = ?3, updated_by = ?4
+                  WHERE track_id = ?1 AND deleted = 0",
+                params![f, t, now, device.as_str()],
+            )?;
+            let liked: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM likes WHERE target_kind = 'track' AND target_id = ?1 AND deleted = 0)",
+                [&f],
+                |r| r.get(0),
+            )?;
+            if liked {
+                tx.execute(
+                    "INSERT INTO likes(target_kind, target_id, updated_at, updated_by, deleted)
+                     VALUES ('track', ?1, ?2, ?3, 0)
+                     ON CONFLICT(target_kind, target_id) DO UPDATE SET
+                        deleted = 0, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+                    params![t, now, device.as_str()],
+                )?;
+                tx.execute(
+                    "UPDATE likes SET deleted = 1, updated_at = ?2, updated_by = ?3
+                      WHERE target_kind = 'track' AND target_id = ?1",
+                    params![f, now, device.as_str()],
+                )?;
+            }
+            tx.execute("UPDATE event SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+            for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "master"] {
+                tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&f])?;
+            }
+            tx.execute("DELETE FROM track WHERE id = ?1", [&f])?;
+            refresh_active(tx, into)?;
+            Ok(true)
+        })
+    }
+
+    /// Moves the tracks of `from`, another edition of the same album, onto
+    /// `to` and removes `from`; `to` keeps its title and MBIDs (unlike
+    /// [`Self::merge_releases`], two editions are allowed). Returns how many
+    /// tracks moved.
+    pub fn absorb_edition(&self, from: ReleaseId, to: ReleaseId) -> Result<u32> {
+        if from == to {
+            return Ok(0);
+        }
+        self.write(|tx| {
+            let (f, t) = (from.to_string(), to.to_string());
+            for (id, rid) in [(&f, from), (&t, to)] {
+                first_string(tx, "SELECT id FROM release WHERE id = ?1", [id])?
+                    .ok_or_else(|| LibraryError::not_found("release", rid))?;
+            }
+            tx.execute(
+                "UPDATE release SET
+                        cover_ref = coalesce(cover_ref, (SELECT cover_ref FROM release WHERE id = ?1)),
+                        year = coalesce(year, (SELECT year FROM release WHERE id = ?1))
+                  WHERE id = ?2",
+                params![f, t],
+            )?;
+            let moved = tx.execute(
+                "UPDATE track SET release_id = ?2,
+                        album_key = (SELECT title_key FROM release WHERE id = ?2)
+                  WHERE release_id = ?1",
+                params![f, t],
+            )?;
+            tx.execute(
+                "UPDATE likes SET target_id = ?2, updated_at = ?3
+                  WHERE target_kind = 'release' AND target_id = ?1
+                    AND NOT EXISTS (SELECT 1 FROM likes
+                                     WHERE target_kind = 'release' AND target_id = ?2)",
+                params![f, t, now_ms()],
+            )?;
+            tx.execute("DELETE FROM release_artist WHERE release_id = ?1", [&f])?;
+            tx.execute("DELETE FROM palette WHERE release_id = ?1", [&f])?;
+            tx.execute("DELETE FROM release WHERE id = ?1", [&f])?;
+            Ok(moved as u32)
+        })
+    }
+
     /// Inserts or updates a track.
     ///
     /// Matching: the row with the same `id` (so the import crate can pass the

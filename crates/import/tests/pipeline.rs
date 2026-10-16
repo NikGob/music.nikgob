@@ -695,3 +695,59 @@ async fn masters_relocate_to_another_folder_with_hash_verification_and_cleanup()
     assert_eq!(fresh.active_source(track_id).unwrap().unwrap().quality_score, 900);
 }
 
+
+#[test]
+fn editions_of_one_album_fold_into_the_fullest_one() {
+    use nikgob_core::model::{ArtistCredit, Codec, Release, Source, SourceKind, Track};
+    let lib = Library::open_in_memory().unwrap();
+    let credit = ArtistCredit::single("Kevin Penkin", None);
+    let release = |title: &str, mbid: &str| {
+        let mut r = Release::new(title, credit.clone());
+        r.mbid = Some(mbid.into());
+        r.release_group_mbid = Some("group".into());
+        lib.upsert_release(&r).unwrap().id
+    };
+    let track = |release, title: &str, no: u32, rec: Option<&str>, codec: Codec, score: i32| {
+        let mut t = Track::new(title, credit.clone());
+        t.release_id = Some(release);
+        t.track_no = no;
+        t.recording_mbid = rec.map(Into::into);
+        let t = lib.upsert_track(&t).unwrap();
+        let mut s = Source::new(t.id, SourceKind::LocalFile, format!("C:/Music/{}", t.id), codec);
+        s.quality_score = score;
+        lib.add_source(&s).unwrap();
+        t.id
+    };
+    let intl = release("MADE IN ABYSS ORIGINAL SOUNDTRACK", "intl");
+    let a = track(intl, "Made in Abyss", 1, Some("rec-1"), Codec::Opus, 900);
+    let b = track(intl, "Days in the Sun", 4, Some("rec-4"), Codec::Opus, 900);
+    track(intl, "Riko's Theme", 18, Some("rec-18"), Codec::Opus, 900);
+    let jp = release("TVアニメ「メイドインアビス」オリジナルサウンドトラック", "jp");
+    let a2 = track(jp, "Made in Abyss", 1, Some("rec-1"), Codec::Mp3, 700);
+    // Lost its number and its recording id.
+    let b2 = track(jp, "Days in the Sun", 0, None, Codec::Mp3, 700);
+    // Only this edition has it.
+    let extra = track(jp, "Bonus", 30, Some("rec-30"), Codec::Mp3, 700);
+    lib.like(nikgob_core::model::LikeTarget::Track(a2)).unwrap();
+
+    let found = nikgob_import::find_release_editions(&lib).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].keep.release.id, intl);
+    assert_eq!((found[0].same_songs, found[0].new_songs), (2, 1));
+    // Finding changes nothing.
+    assert_eq!(lib.count_releases().unwrap(), 2);
+    nikgob_import::fold_editions(&lib, &found[0]).unwrap();
+    assert_eq!(lib.count_releases().unwrap(), 1);
+    assert_eq!(lib.get_release(intl).unwrap().unwrap().title, "MADE IN ABYSS ORIGINAL SOUNDTRACK");
+    let tracks = lib.tracks_of_release(intl).unwrap();
+    assert_eq!(tracks.len(), 4, "the three songs plus the bonus one");
+    assert!(tracks.iter().any(|t| t.id == extra));
+    for (dup, kept) in [(a2, a), (b2, b)] {
+        assert!(lib.get_track(dup).unwrap().is_none());
+        // The better file still plays; the other one is a spare source.
+        assert_eq!(lib.sources_of_track(kept).unwrap().len(), 2);
+        assert_eq!(lib.active_source(kept).unwrap().unwrap().codec, Codec::Opus);
+    }
+    assert!(lib.get_track_row(a).unwrap().unwrap().liked, "the like moved over");
+    assert!(nikgob_import::find_release_editions(&lib).unwrap().is_empty(), "nothing left");
+}

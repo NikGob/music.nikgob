@@ -312,6 +312,7 @@ pub fn artist(
             .or(nav);
             ui.add_space(widgets::SECTION_GAP);
         }
+        widgets::edition_offers(ui, state, Some(&a.card.name), out);
         for (title, list) in [("Альбомы", &a.albums), ("Синглы и EP", &a.singles_eps)] {
             if list.is_empty() {
                 continue;

@@ -772,3 +772,49 @@ pub fn grid<T>(
     }
     nav
 }
+
+/// "Похоже, это один альбом": editions of one album the runtime found,
+/// with a yes and a no (nothing merges on its own). `artist` narrows them
+/// to one artist's page.
+pub fn edition_offers(ui: &mut Ui, state: &ViewState, artist: Option<&str>, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let offers = state.editions.iter().filter(|o| artist.is_none_or(|a| o.artist == a));
+    for o in offers {
+        crate::components::Card::filled().id_salt(("edition", o.id)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(TypeRole::TitleMedium.style().rich("Похоже, это один альбом", s.on_surface));
+            ui.add_space(4.0);
+            let names = std::iter::once(&o.keep).chain(&o.others).map(|t| format!("«{t}»")).collect::<Vec<_>>().join(" и ");
+            let mut what = format!("{names} — издания одного альбома ({}).", o.artist);
+            if o.same_songs > 0 {
+                what.push_str(&format!(" Одинаковых песен: {} — останется по одной, файл получше будет играть.", o.same_songs));
+            }
+            if o.new_songs > 0 {
+                what.push_str(&format!(" Ещё {} добавится в «{}».", o.new_songs, o.keep));
+            }
+            ui.label(TypeRole::BodyMedium.style().rich_para(what, s.on_surface_variant));
+            ui.add_space(8.0);
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), 40.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if ui
+                        .add(crate::components::Button::new("Объединить").style(Style::Filled).id_salt(("ed-merge", o.id)))
+                        .on_hover_text(format!("Всё окажется в «{}»; файлы на диске не трогаются", o.keep))
+                        .clicked()
+                    {
+                        out.push(Command::MergeEditions(o.id));
+                    }
+                    if ui
+                        .add(crate::components::Button::new("Оставить раздельно").style(Style::Text).id_salt(("ed-keep", o.id)))
+                        .on_hover_text("Больше не спрашивать про эти альбомы")
+                        .clicked()
+                    {
+                        out.push(Command::KeepEditionsApart(o.id));
+                    }
+                },
+            );
+        });
+        ui.add_space(12.0);
+    }
+}

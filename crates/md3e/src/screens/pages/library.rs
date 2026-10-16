@@ -108,6 +108,9 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     }
 
     let tab = pages.library_tab;
+    if matches!(tab, LibraryTab::All | LibraryTab::Albums) {
+        widgets::edition_offers(ui, state, None, out);
+    }
     if matches!(tab, LibraryTab::All | LibraryTab::Playlists) {
         nav = playlists(ui, state, pages, out, tab == LibraryTab::All, is_list).or(nav);
         ui.add_space(widgets::SECTION_GAP);

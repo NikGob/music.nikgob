@@ -20,6 +20,7 @@ use crate::identity::identity_from_tags;
 use crate::sanitize::long_path;
 use crate::store::{Store, lead_key, release_key};
 use crate::tags::{self, TagSet};
+use nikgob_metadata::text::title_key;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RebuildReport {
@@ -215,6 +216,116 @@ pub fn merge_split_releases(library: &Library) -> Result<usize> {
         }
     }
     Ok(merged)
+}
+
+/// Editions of one album found in the library (one MusicBrainz release
+/// group: the Japanese release next to the international one, a reissue),
+/// for the user to fold together or keep apart.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditionGroup {
+    pub group: String,
+    /// The fullest edition: the others would join it.
+    pub keep: ReleaseRow,
+    pub others: Vec<ReleaseRow>,
+    /// Songs the others have that `keep` already has (they would become one
+    /// track each) and songs only they have (they would join the album).
+    pub same_songs: u32,
+    pub new_songs: u32,
+}
+
+/// Finds releases that are editions of one album. Nothing changes.
+pub fn find_release_editions(library: &Library) -> Result<Vec<EditionGroup>> {
+    let mut groups: HashMap<String, Vec<ReleaseRow>> = HashMap::new();
+    for row in all_releases(library)? {
+        if let Some(g) = row.release.release_group_mbid.clone() {
+            groups.entry(g).or_default().push(row);
+        }
+    }
+    let mut found = Vec::new();
+    for (group, mut rows) in groups {
+        if rows.len() < 2 {
+            continue;
+        }
+        rows.sort_by_key(|r| (std::cmp::Reverse(r.known_tracks), r.release.added_at));
+        let keep = rows.remove(0);
+        let album = songs(library, keep.release.id)?;
+        let (mut same_songs, mut new_songs) = (0, 0);
+        for row in &rows {
+            for song in songs(library, row.release.id)? {
+                if album.iter().any(|a| a.same_song(&song)) {
+                    same_songs += 1;
+                } else {
+                    new_songs += 1;
+                }
+            }
+        }
+        found.push(EditionGroup { group, keep, others: rows, same_songs, new_songs });
+    }
+    found.sort_by(|a, b| a.keep.release.title.cmp(&b.keep.release.title));
+    Ok(found)
+}
+
+/// Folds the other editions of `g` into its fullest one: a song both have
+/// becomes one track (the extra file a spare source of it, the better file
+/// playing), songs only the others have join the album, which keeps its
+/// title and ids. Nothing on disk changes.
+pub fn fold_editions(library: &Library, g: &EditionGroup) -> Result<()> {
+    let target = g.keep.release.id;
+    let album = songs(library, target)?;
+    for row in &g.others {
+        // Gone or folded meanwhile.
+        if library.get_release(row.release.id)?.is_none() {
+            continue;
+        }
+        for song in songs(library, row.release.id)? {
+            if let Some(same) = album.iter().find(|a| a.same_song(&song)) {
+                library.merge_track_into(song.id, same.id)?;
+            }
+        }
+        library.absorb_edition(row.release.id, target)?;
+    }
+    Ok(())
+}
+
+fn songs(library: &Library, release: nikgob_core::model::ReleaseId) -> Result<Vec<Song>> {
+    library
+        .tracks_of_release(release)?
+        .iter()
+        .map(|t| {
+            let key = title_key(&t.title);
+            Ok(Song {
+                id: t.id,
+                recording: library.get_track(t.id)?.and_then(|t| t.recording_mbid),
+                base: key.base,
+                variant: key.variant,
+                number: (t.disc_no, t.track_no),
+            })
+        })
+        .collect()
+}
+
+/// What tells two tracks of two editions apart.
+struct Song {
+    id: TrackId,
+    recording: Option<String>,
+    base: String,
+    variant: nikgob_metadata::text::Variant,
+    number: (u32, u32),
+}
+
+impl Song {
+    /// The same recording, or the same title (and version) in the same
+    /// place on the album; editions may carry different recording ids for
+    /// one song, and a file may have lost its number.
+    fn same_song(&self, other: &Song) -> bool {
+        if self.recording.is_some() && self.recording == other.recording {
+            return true;
+        }
+        let numbered = self.number.1 > 0 && other.number.1 > 0;
+        self.base == other.base
+            && self.variant == other.variant
+            && (!numbered || self.number == other.number)
+    }
 }
 
 fn all_releases(library: &Library) -> Result<Vec<ReleaseRow>> {

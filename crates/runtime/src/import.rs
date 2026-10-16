@@ -681,6 +681,7 @@ impl Worker {
         }
         if let Some((summary, pending)) = finished {
             self.reload_after_import();
+            self.offer_editions();
             let _ = pending;
             self.toast(format!("Импорт: {summary}"), None);
             if let Some(svc) = &mut self.import {

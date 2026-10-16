@@ -16,6 +16,7 @@ mod tags;
 mod torrents;
 pub mod queue;
 mod session;
+mod editions;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -244,6 +245,8 @@ struct Worker {
     /// written to it.
     session_path: Option<PathBuf>,
     session_saved: String,
+    /// Editions of one album found last time (see [`editions`]).
+    editions: Vec<nikgob_import::EditionGroup>,
     services: Vec<Box<dyn Service>>,
     toast_id: u64,
     revision: u64,
@@ -299,6 +302,7 @@ impl Worker {
             resume_at: None,
             session_path,
             session_saved: String::new(),
+            editions: Vec::new(),
             services: Vec::new(),
             toast_id: 0,
             revision: 0,
@@ -322,6 +326,7 @@ impl Worker {
         self.resume_torrents();
         self.start_enrich();
         self.restore_session();
+        self.offer_editions();
         loop {
             select! {
                 recv(rx) -> m => match m {
@@ -656,6 +661,8 @@ impl Worker {
             Command::SetPlaylistCoverMode(id, mode) => self.set_playlist_cover_mode(id, mode),
             Command::ImportFiles(paths) => self.import_paths(paths),
             Command::ImportFolder(dir) => self.import_paths(vec![dir]),
+            Command::MergeEditions(id) => self.merge_editions(id),
+            Command::KeepEditionsApart(id) => self.keep_editions_apart(id),
             Command::ConfirmChoice { id, option } if id & IMPORT_ID != 0 => {
                 self.confirm_choice(id, option);
             }

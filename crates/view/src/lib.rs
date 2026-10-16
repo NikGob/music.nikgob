@@ -542,7 +542,7 @@ impl ToastKind {
             Self::Error
         } else if t.ends_with('…') || any(&["начался", "качается", "добавляю"]) {
             Self::Working
-        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "удалено", "следующим", "в любимых", "убран", "в корзине"]) {
+        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "удалено", "следующим", "в любимых", "убран", "в корзине", "объединено"]) {
             Self::Success
         } else {
             Self::Info
@@ -680,6 +680,8 @@ pub struct Prefs {
     /// Deleting moves tracks into the Trash for 30 days; off: they are
     /// deleted for good at once (after a confirmation).
     pub use_trash: bool,
+    /// Release groups whose editions the user chose to keep apart.
+    pub kept_editions: Vec<String>,
 }
 
 /// Material shapes behind the open track.
@@ -832,6 +834,21 @@ pub enum Ambient {
 }
 
 /// Everything a design system needs to draw a frame.
+/// Releases that are editions of one album (one MusicBrainz release
+/// group), offered to fold into one; nothing merges without a yes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditionOffer {
+    pub id: u64,
+    pub artist: String,
+    /// The fullest edition: the others would join it.
+    pub keep: String,
+    pub others: Vec<String>,
+    /// Songs both have (they would become one track each) and songs only
+    /// the others have (they would join the album).
+    pub same_songs: u32,
+    pub new_songs: u32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ViewState {
     pub player: PlayerView,
@@ -845,6 +862,8 @@ pub struct ViewState {
     pub playlist: Option<PlaylistDetail>,
     pub search: SearchView,
     pub downloads: DownloadsView,
+    /// Albums that look like editions of one album, offered to merge.
+    pub editions: Vec<EditionOffer>,
     pub tag_editor: TagEditor,
     pub toasts: Vec<Toast>,
     pub prefs: Prefs,
@@ -988,6 +1007,10 @@ pub enum Command {
     PauseJob(u64, bool),
     CancelJob(u64),
     ConfirmChoice { id: u64, option: Option<usize> },
+    /// Folds the editions of [`EditionOffer::id`] into one album.
+    MergeEditions(u64),
+    /// Keeps them apart and never offers them again.
+    KeepEditionsApart(u64),
 
     // Settings
     SetPrefs(Box<Prefs>),
@@ -1073,6 +1096,7 @@ impl Default for Prefs {
             ambient_strength: 1.0,
             rail_compact: false,
             use_trash: true,
+            kept_editions: Vec::new(),
         }
     }
 }
