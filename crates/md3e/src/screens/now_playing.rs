@@ -35,7 +35,7 @@ use crate::{
 };
 
 /// The shape a [`CoverShape`] stands for; `None` keeps the square cover.
-fn material(shape: CoverShape) -> Option<MaterialShape> {
+pub(crate) fn material(shape: CoverShape) -> Option<MaterialShape> {
     Some(match shape {
         CoverShape::Original | CoverShape::Random => return None,
         CoverShape::Cookie12 => MaterialShape::Cookie12Sided,
@@ -59,30 +59,83 @@ fn material(shape: CoverShape) -> Option<MaterialShape> {
     })
 }
 
+/// The shapes the random mode picks from: the user's range, or every
+/// shape when it is empty.
+pub(crate) fn random_pool(chosen: &[CoverShape]) -> Vec<CoverShape> {
+    let pool: Vec<CoverShape> = CoverShape::shapes().iter().copied().filter(|c| chosen.contains(c)).collect();
+    if pool.is_empty() { CoverShape::shapes().to_vec() } else { pool }
+}
+
+fn random_id() -> egui::Id {
+    egui::Id::new("np-random-shape")
+}
+
+/// The random mode draws another shape on the next frame (the double
+/// click gesture).
+pub(crate) fn reroll_shape(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(random_id().with("reroll"), true));
+}
+
 /// The outline for `track` under the user's choice: a fixed shape, none,
-/// or a random one drawn whenever another track starts (nothing is
-/// remembered per track, and never the same shape twice in a row).
-pub fn cover_shape(ctx: &egui::Context, choice: CoverShape, track: Option<&TrackRow>) -> Option<MaterialShape> {
+/// or a random one from `range` drawn whenever another track starts
+/// (nothing is remembered per track, and never the same shape twice in a
+/// row).
+pub fn cover_shape(
+    ctx: &egui::Context,
+    choice: CoverShape,
+    range: &[CoverShape],
+    track: Option<&TrackRow>,
+) -> Option<MaterialShape> {
     if choice != CoverShape::Random {
         return material(choice);
     }
-    let id = egui::Id::new("np-random-shape");
-    let all = CoverShape::shapes();
+    let id = random_id();
+    let pool = random_pool(range);
     let key = track.map(|t| t.id);
-    let (seen, mut pick): (Option<nikgob_view::TrackId>, usize) =
-        ctx.data(|d| d.get_temp(id)).unwrap_or((None, usize::MAX));
-    if seen != key || pick >= all.len() {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        std::time::SystemTime::now().hash(&mut h);
-        key.hash(&mut h);
-        let mut next = (h.finish() % all.len() as u64) as usize;
-        if next == pick {
-            next = (next + 1) % all.len();
+    let reroll = ctx.data_mut(|d| d.remove_temp::<bool>(id.with("reroll"))).unwrap_or(false);
+    let (seen, last): (Option<nikgob_view::TrackId>, Option<CoverShape>) =
+        ctx.data(|d| d.get_temp(id)).unwrap_or((None, None));
+    let pick = match last {
+        Some(last) if seen == key && !reroll && pool.contains(&last) => last,
+        _ => {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::time::SystemTime::now().hash(&mut h);
+            key.hash(&mut h);
+            let mut next = (h.finish() % pool.len() as u64) as usize;
+            if pool.len() > 1 && Some(pool[next]) == last {
+                next = (next + 1) % pool.len();
+            }
+            let pick = pool[next];
+            ctx.data_mut(|d| d.insert_temp(id, (key, Some(pick))));
+            pick
         }
-        pick = next;
-        ctx.data_mut(|d| d.insert_temp(id, (key, pick)));
-    }
-    material(all[pick])
+    };
+    material(pick)
+}
+
+/// The playing outline of `shape`, centred (see [`centred`]), built once
+/// per shape.
+pub(crate) fn shape_cubics(shape: MaterialShape) -> &'static [Cubic] {
+    static CACHE: OnceLock<Mutex<HashMap<MaterialShape, &'static [Cubic]>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .entry(shape)
+        .or_insert_with(|| Box::leak(centred(shape.polygon()).cubics().to_vec().into_boxed_slice()))
+}
+
+/// `from` → `to`, both playing outlines, built once per pair.
+pub(crate) fn pair_morph(from: MaterialShape, to: MaterialShape) -> &'static Morph {
+    static CACHE: OnceLock<Mutex<HashMap<(MaterialShape, MaterialShape), &'static Morph>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.entry((from, to)).or_insert_with(|| {
+        Box::leak(Box::new(Morph::new(&centred(from.polygon()), &centred(to.polygon()))))
+    })
 }
 
 /// `shape` (playing) ↔ rounded square with radius 48/480 (paused), built
@@ -111,7 +164,7 @@ fn cover_morph(shape: MaterialShape) -> &'static Morph {
 /// square, and scaled to fit the circle there. Shapes come normalised by
 /// their bounds, which puts a pentagon or a heart off centre: it would sit
 /// lopsided in the ring and wobble as it turns.
-fn centred(polygon: &RoundedPolygon) -> RoundedPolygon {
+pub(crate) fn centred(polygon: &RoundedPolygon) -> RoundedPolygon {
     let pts: Vec<Point> = polygon
         .cubics()
         .iter()
@@ -165,6 +218,12 @@ impl Outline {
             // extra turn.
             rotation: rotation * progress,
         }
+    }
+
+    /// The playing outline turning from `from` into `to` (`t` 0 → 1, may
+    /// overshoot a little) in `rect`, turned by `rotation`.
+    pub fn swap(from: MaterialShape, to: MaterialShape, t: f32, rect: Rect, rotation: f32) -> Self {
+        Self { cubics: pair_morph(from, to).as_cubics(t.clamp(0.0, 1.1)), rect, rotation }
     }
 
     /// Distance from the centre to the outline for [`BINS`] directions,
@@ -267,8 +326,10 @@ struct RingInput<'a> {
     angle: f32,
     /// Per-band transients (0..1); empty when the ring ignores the music.
     transients: &'a [f32],
-    /// Smoothed band levels, for the bars' resting length.
-    levels: &'a [f32],
+    /// Bar heights (0..1) for [`RingStyle::Bars`], one per bar; empty = rest.
+    bars: &'a [f32],
+    /// Room for the bars outside the outline.
+    room: f32,
     kick: f32,
     alpha: f32,
 }
@@ -340,26 +401,31 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
             }
         }
         RingStyle::Bars => {
-            // As in caelestia's cover visualiser: bars along the outline's
-            // normal-ish (radial) direction, starting a gap away from it.
+            // caelestia's cover visualiser: bars on fixed angles (they do not
+            // turn with the ring), each starting a gap off the turning
+            // outline, so their base breathes with it. In silence they are
+            // round dots; with the music they grow over all the room around
+            // the cover.
             let radii = outline.radii();
-            let n = 64;
-            let gap = 10.0;
+            let n = BAR_COUNT;
+            let gap = 8.0;
             let r_mid = outline.rect.width() * 0.5 + gap;
-            let width = (TAU * r_mid / n as f32 * 0.42).clamp(2.5, 6.0);
-            let stroke = Stroke::new(width, s.primary.gamma_multiply(input.alpha * 0.9));
+            let width = (TAU * r_mid / n as f32 - 3.0).clamp(2.5, 7.0);
+            let room = (input.room - gap - width).max(4.0);
+            let color = s.primary.gamma_multiply(input.alpha);
+            let stroke = Stroke::new(width, color);
             for i in 0..n {
-                let theta = input.angle + i as f32 / n as f32 * TAU;
-                let bin = ((theta / TAU).rem_euclid(1.0) * BINS as f32) as usize % BINS;
-                let rest = ((band_at(input.levels, theta) - 0.45) / 0.55).clamp(0.0, 1.0).powi(2);
-                let level = band_at(input.transients, theta).max(rest * 0.7);
-                let len = 2.0 + level * 20.0 + kick * 5.0;
+                let theta = i as f32 / n as f32 * TAU;
+                let bin = (i * BINS / n) % BINS;
+                let value = input.bars.get(i).copied().unwrap_or(0.0).clamp(0.01, 1.0);
                 let d = dir(theta);
                 let a = center + d * (radii[bin] + gap + width * 0.5);
-                let b = a + d * len;
-                painter.line_segment([a, b], stroke);
-                painter.circle_filled(a, width * 0.5, stroke.color);
-                painter.circle_filled(b, width * 0.5, stroke.color);
+                let b = a + d * value * room;
+                if value * room > 0.5 {
+                    painter.line_segment([a, b], stroke);
+                    painter.circle_filled(b, width * 0.5, color);
+                }
+                painter.circle_filled(a, width * 0.5, color);
             }
         }
     }
@@ -478,6 +544,149 @@ fn pulse(ui: &Ui, bass: f32, bands: &[f32]) -> (f32, Vec<f32>) {
     out
 }
 
+/// Bars around the cover in [`RingStyle::Bars`].
+const BAR_COUNT: usize = 48;
+
+/// cava-style processing of the analyzer's bands for the bars: one pass
+/// around the circle (no mirror), automatic sensitivity (normalised between
+/// a slow floor and a peak that falls back slowly), neighbour smoothing
+/// ("monstercat") and gravity on the way down.
+#[derive(Clone, Default)]
+struct Cava {
+    last: f64,
+    peak: f32,
+    floor: f32,
+    shown: Vec<f32>,
+    fall: Vec<f32>,
+}
+
+/// One step of the [`Cava`]: [`BAR_COUNT`] heights (0..1). `active` false
+/// lets the bars fall to rest.
+fn cava(ui: &Ui, bands: &[f32], active: bool) -> Vec<f32> {
+    const GRAVITY: f32 = 3.2;
+    let ctx = ui.ctx();
+    let id = egui::Id::new("np-cava");
+    let now = anim::now(ctx);
+    let mut c: Cava = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+    let dt = if c.last == 0.0 { 1.0 / 60.0 } else { (now - c.last).clamp(0.0, 0.1) as f32 };
+    c.last = now;
+    let ease = |tau: f32| 1.0 - (-dt / tau).exp();
+    if c.shown.len() != BAR_COUNT {
+        c.shown = vec![0.0; BAR_COUNT];
+        c.fall = vec![0.0; BAR_COUNT];
+    }
+    let target = cava_targets(&mut c, bands, active, ease(2.5), ease(1.5));
+    for ((shown, fall), t) in c.shown.iter_mut().zip(&mut c.fall).zip(target) {
+        if t >= *shown {
+            *shown = t;
+            *fall = 0.0;
+        } else {
+            *fall += GRAVITY * dt;
+            *shown = (*shown - *fall * dt).max(t);
+        }
+    }
+    let out = c.shown.clone();
+    if out.iter().any(|v| *v > 0.011) {
+        ctx.request_repaint();
+    }
+    ctx.data_mut(|d| d.insert_temp(id, c));
+    out
+}
+
+/// The bars' targets this frame: `bands` resampled to [`BAR_COUNT`] in one
+/// pass, auto-scaled and smoothed. `peak_k` / `floor_k` are this frame's
+/// easing fractions for the sensitivity envelopes.
+fn cava_targets(c: &mut Cava, bands: &[f32], active: bool, peak_k: f32, floor_k: f32) -> Vec<f32> {
+    let raw: Vec<f32> = (0..BAR_COUNT)
+        .map(|i| {
+            if !active || bands.is_empty() {
+                return 0.0;
+            }
+            let x = i as f32 / (BAR_COUNT - 1) as f32 * (bands.len() - 1) as f32;
+            let (i0, f) = (x.floor() as usize, x.fract());
+            let i1 = (i0 + 1).min(bands.len() - 1);
+            bands[i0] * (1.0 - f) + bands[i1] * f
+        })
+        .collect();
+    let max = raw.iter().copied().fold(0.0, f32::max);
+    let mean = raw.iter().sum::<f32>() / BAR_COUNT as f32;
+    c.peak = if max > c.peak { max } else { c.peak + (max - c.peak) * peak_k };
+    c.floor += (mean - c.floor) * floor_k;
+    let lo = c.floor * 0.9;
+    let span = (c.peak - lo).max(0.12);
+    let mut target: Vec<f32> = raw
+        .iter()
+        .map(|&v| if max < 0.05 { 0.0 } else { ((v - lo) / span).clamp(0.0, 1.0).powf(1.3) })
+        .collect();
+    // Monstercat: a bar lifts its neighbours, less the further they are.
+    for i in 0..BAR_COUNT {
+        let v = target[i];
+        let mut k = v;
+        for t in target.iter_mut().skip(i + 1) {
+            k /= 1.5;
+            if k < 0.01 {
+                break;
+            }
+            *t = t.max(k);
+        }
+        let mut k = v;
+        for t in target[..i].iter_mut().rev() {
+            k /= 1.5;
+            if k < 0.01 {
+                break;
+            }
+            *t = t.max(k);
+        }
+    }
+    target
+}
+
+/// The cover outline turning into another shape (a new random shape, a
+/// double click): `(from, to, t)` while it lasts. Remembers the last shape
+/// shown, so call it every frame.
+fn shape_swap(ctx: &egui::Context, shape: Option<MaterialShape>, reduced: bool) -> Option<(MaterialShape, MaterialShape, f32)> {
+    const DURATION: f64 = 0.65;
+    let id = egui::Id::new("np-shape-swap");
+    let now = anim::now(ctx);
+    let (last, from, start): (Option<MaterialShape>, Option<MaterialShape>, f64) =
+        ctx.data(|d| d.get_temp(id)).unwrap_or((shape, None, 0.0));
+    let (from, start) = if last != shape { (last, now) } else { (from, start) };
+    ctx.data_mut(|d| d.insert_temp(id, (shape, from, start)));
+    let (Some(from), Some(to)) = (from, shape) else { return None };
+    let x = ((now - start) / DURATION) as f32;
+    if reduced || x >= 1.0 {
+        return None;
+    }
+    ctx.request_repaint();
+    // A springy settle: quick, with a small overshoot.
+    let t = 1.0 - (-6.0 * x).exp() * (7.0 * x).cos();
+    Some((from, to, t))
+}
+
+/// The double click gesture: another outline for the cover. The random
+/// mode draws a new one; a fixed shape steps to the next one in the range.
+fn change_shape(ctx: &egui::Context, prefs: &nikgob_view::Prefs, out: &mut Vec<Command>) {
+    if prefs.cover_shape == CoverShape::Random {
+        reroll_shape(ctx);
+        return;
+    }
+    let pool = random_pool(&prefs.random_shapes);
+    let next = match pool.iter().position(|c| *c == prefs.cover_shape) {
+        Some(i) => pool[(i + 1) % pool.len()],
+        None => pool[0],
+    };
+    if next != prefs.cover_shape {
+        out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { cover_shape: next, ..prefs.clone() })));
+    }
+}
+
+/// Which single tap is waiting out the double click delay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tap {
+    Close,
+    Pause,
+}
+
 /// The container under Now Playing: the floating pill's colour and radius
 /// turning into the full surface as `k` goes 0 → 1.
 pub fn container(ui: &Ui, rect: Rect, k: f32) {
@@ -523,19 +732,23 @@ pub fn show(
     // Swallow input under the overlay; a click on empty space or a swipe
     // down closes it.
     let bg = ui.interact(rect, ui.id().with("np-bg"), Sense::click_and_drag());
-    if !embedded {
-        if bg.clicked() {
-            closed = true;
-        }
-        if bg.drag_stopped()
-            && let Some(d) = bg.total_drag_delta()
-            && d.y > 96.0
-            && d.y > d.x.abs() * 1.5
-        {
-            closed = true;
-        }
+    if !embedded
+        && bg.drag_stopped()
+        && let Some(d) = bg.total_drag_delta()
+        && d.y > 96.0
+        && d.y > d.x.abs() * 1.5
+    {
+        closed = true;
     }
     ambient(ui, rect, state, pages);
+    let motion = !theme.reduced_motion;
+    let bass = if playing { pages.levels_bass } else { 0.0 };
+    let (kick, transients) = if playing && motion {
+        pulse(ui, bass, &chrome.bands)
+    } else {
+        (0.0, Vec::new())
+    };
+    super::bg_shapes::paint(ui, rect, &state.prefs, playing, kick, &transients, bass);
 
     let class = size_class(rect.width());
     let margin = class.margin();
@@ -657,19 +870,16 @@ pub fn show(
         theme.motion.default_spatial,
     );
     let prefs = &state.prefs;
-    let motion = !theme.reduced_motion;
     let mega = mega_layout(body);
-    let normal_cover = cover_box.shrink(RING_PAD);
+    let bars = prefs.ring && prefs.ring_style == RingStyle::Bars;
+    // The bars want room to grow: the cover gives way to them.
+    let pad = if bars { (cover_box.width() * 0.13).clamp(RING_PAD, 80.0) } else { RING_PAD };
+    let normal_cover = cover_box.shrink(pad);
     let cover_rect = if theme.reduced_motion { normal_cover } else { lerp_rect(normal_cover, mega.cover, mega_k) };
-    let bass = if playing { pages.levels_bass } else { 0.0 };
-    let (kick, transients) = if playing && motion {
-        pulse(ui, bass, &chrome.bands)
-    } else {
-        (0.0, Vec::new())
-    };
     let shown = morph.clamp(0.0, 1.0);
     let current = p.current.as_ref();
-    let shape = cover_shape(&ctx, prefs.cover_shape, current);
+    let shape = cover_shape(&ctx, prefs.cover_shape, &prefs.random_shapes, current);
+    let swap = shape_swap(&ctx, shape, theme.reduced_motion);
     let uri = current.and_then(|t| t.cover.as_ref()).map(|c| c.uri());
     let period = if prefs.cover_spin && motion { 48.0 } else { 0.0 };
     let spin = turn(ui, "np-cover-angle", playing, bass, period, prefs.cover_ccw);
@@ -677,17 +887,25 @@ pub fn show(
     let shaped = Rect::from_center_size(cover_rect.center(), cover_rect.size() * swell);
     // The outline unwinds to upright by the shortest way, not by every
     // turn it has made.
-    let outline = Outline::new(shape, morph, shaped, cover_angle(ui, shape, spin, morph));
+    let angle = cover_angle(ui, shape, spin, morph);
+    let outline = match swap {
+        // Turned by the raw spin: a full turn or whole lobes of either
+        // shape look the same, so neither end of the swap jumps.
+        Some((from, to, t)) if morph >= 0.999 => Outline::swap(from, to, t, shaped, spin),
+        _ => Outline::new(shape, morph, shaped, angle),
+    };
     let mega_outline = Outline::new(shape, morph, mega.cover, 0.0);
     if prefs.ring {
         let period = if prefs.spin_ring && motion { 36.0 } else { 0.0 };
         let angle = turn(ui, "np-ring-angle", playing, bass, period, prefs.ring_ccw);
         let beat = prefs.ring_beat && playing;
+        let heights = if bars { cava(ui, &chrome.bands, beat && motion) } else { Vec::new() };
         let mut input = RingInput {
                 style: prefs.ring_style,
                 angle,
                 transients: if beat { &transients } else { &[] },
-                levels: if beat { &chrome.bands } else { &[] },
+                bars: &heights,
+                room: pad,
                 kick: if beat { kick } else { 0.0 },
                 // The contour ring stays around the square too; the
                 // circle one only belongs to a shape.
@@ -711,13 +929,62 @@ pub fn show(
     } else {
         outline.paint(ui, uri.as_deref());
     }
-    ui.interact(cover_rect, ui.id().with("np-cover"), Sense::click());
+    let mut cover_resp = ui.interact(cover_rect, ui.id().with("np-cover"), Sense::click());
+    if prefs.cover_click_pause {
+        cover_resp = cover_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
     if playing && !theme.reduced_motion {
         ctx.request_repaint();
     }
 
     let info_rect = snap(ui, info_rect);
-    ui.interact(info_rect, ui.id().with("np-info-bg"), Sense::click());
+    let info_bg = ui.interact(info_rect, ui.id().with("np-info-bg"), Sense::click());
+
+    // Taps: a click on empty space closes, one on the cover pauses; a
+    // double click anywhere changes the outline. While the gesture is on,
+    // a single tap waits out the double click delay first.
+    let gesture = match prefs.dbl_click_shape {
+        0 => false,
+        1 => prefs.cover_shape == CoverShape::Random,
+        _ => prefs.cover_shape != CoverShape::Original,
+    };
+    let single = if !embedded && bg.clicked() {
+        Some(Tap::Close)
+    } else if prefs.cover_click_pause && cover_resp.clicked() {
+        Some(Tap::Pause)
+    } else {
+        None
+    };
+    let double = bg.double_clicked() || cover_resp.double_clicked() || info_bg.double_clicked();
+    let tap_id = egui::Id::new("np-tap");
+    let fire = if gesture {
+        let now = ctx.input(|i| i.time);
+        let delay = ctx.options(|o| o.input_options.max_double_click_delay);
+        if double {
+            ctx.data_mut(|d| d.remove::<(Tap, f64)>(tap_id));
+            change_shape(&ctx, prefs, out);
+        } else if let Some(tap) = single {
+            ctx.data_mut(|d| d.insert_temp(tap_id, (tap, now)));
+        }
+        match ctx.data(|d| d.get_temp::<(Tap, f64)>(tap_id)) {
+            Some((tap, at)) if now - at > delay => {
+                ctx.data_mut(|d| d.remove::<(Tap, f64)>(tap_id));
+                Some(tap)
+            }
+            Some((_, at)) => {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64((at + delay - now).max(0.0) + 0.01));
+                None
+            }
+            None => None,
+        }
+    } else {
+        single
+    };
+    match fire {
+        Some(Tap::Close) => closed = true,
+        Some(Tap::Pause) => out.push(Command::TogglePlay),
+        None => {}
+    }
     if mega_k < 0.999 {
         let mut normal_ui = ui.new_child(UiBuilder::new().max_rect(info_rect).id_salt("np-normal-info"));
         normal_ui.multiply_opacity(1.0 - mega_k);
@@ -933,7 +1200,7 @@ fn info(
     let mut pui = ui.new_child(UiBuilder::new().max_rect(prog_rect).id_salt("np-progress"));
     let so = Slider::new("np-slider", p.fraction_now())
         .width(col.width())
-        .wavy(playing)
+        .wavy(playing && state.prefs.progress_wave)
         .value_label(move |v| common::fmt_time(dur.mul_f32(v)))
         .show(&mut pui);
     if let Some(v) = so.committed {
@@ -1134,6 +1401,49 @@ mod tests {
             });
             out.textures_delta.clear();
         }
+    }
+
+    #[test]
+    fn bars_follow_a_loud_track_and_rest_in_silence() {
+        let mut c = Cava::default();
+        // A loud track: every band high, one peak in the bass. The bars
+        // still tell the peak apart instead of all sitting at the top.
+        let mut bands = vec![0.8; 64];
+        bands[4] = 1.0;
+        let mut t = Vec::new();
+        for _ in 0..120 {
+            t = cava_targets(&mut c, &bands, true, 0.05, 0.05);
+        }
+        assert!(t[3] > 0.9, "{t:?}");
+        assert!(t[BAR_COUNT - 1] < 0.5, "{t:?}");
+        // One pass around the circle: no mirror, the highs end it.
+        let mut high = vec![0.2; 64];
+        high[63] = 1.0;
+        let mut c = Cava::default();
+        let t = cava_targets(&mut c, &high, true, 0.05, 0.05);
+        assert!(t[BAR_COUNT - 1] > 0.9 && t[0] < 0.2, "{t:?}");
+        // Silence and pause: nothing.
+        assert!(cava_targets(&mut c, &[0.01; 64], true, 0.05, 0.05).iter().all(|v| *v == 0.0));
+        assert!(cava_targets(&mut c, &bands, false, 0.05, 0.05).iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn random_range_and_reroll() {
+        let ctx = egui::Context::default();
+        let range = [CoverShape::Heart, CoverShape::Gem];
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..20 {
+            let shape = cover_shape(&ctx, CoverShape::Random, &range, None).expect("a shape");
+            assert!(matches!(shape, MaterialShape::Heart | MaterialShape::Gem));
+            // Stays put until a reroll, then never the same twice.
+            assert_eq!(cover_shape(&ctx, CoverShape::Random, &range, None), Some(shape));
+            reroll_shape(&ctx);
+            let next = cover_shape(&ctx, CoverShape::Random, &range, None).expect("a shape");
+            assert_ne!(next, shape);
+            seen.insert(next);
+        }
+        assert_eq!(seen.len(), 2);
+        assert_eq!(random_pool(&[]).len(), CoverShape::shapes().len());
     }
 
     #[test]

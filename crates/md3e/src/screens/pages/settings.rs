@@ -1,10 +1,12 @@
 //! Настройки (md3e-player.md §3.8): grouped list rows; every change is sent
 //! as a whole new `Prefs`.
 
-use egui::Ui;
-use nikgob_view::{Ambient, Command, CoverShape, Prefs, RingStyle, Route, ThemeMode, ViewState};
+use egui::{Sense, Ui};
+use nikgob_shapes::paint as shape_paint;
+use nikgob_view::{Ambient, BgShapes, Command, CoverShape, Prefs, RingStyle, Route, ThemeMode, ViewState};
 
 use super::{PageState, connected};
+use crate::screens::now_playing;
 use crate::{
     Icon, Theme, TypeRole,
     components::{Button, Divider, FilterChip, Menu, MenuItem, Slider, Style, Switch, TextField},
@@ -131,6 +133,39 @@ fn speed_slider(ui: &mut Ui, id: &str, kbps: u32) -> Option<u32> {
     o.committed.or(o.dragging).map(at)
 }
 
+/// Tiles with every cover shape drawn, for picking one or a set. The
+/// hovered tile turns its shape, as it would in the player. Returns the
+/// clicked shape.
+fn shape_grid(ui: &mut Ui, id: &str, selected: impl Fn(CoverShape) -> bool) -> Option<CoverShape> {
+    let s = Theme::get(ui.ctx()).scheme;
+    let time = ui.ctx().input(|i| i.time) as f32;
+    let mut clicked = None;
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        for &c in CoverShape::shapes() {
+            let Some(m) = now_playing::material(c) else { continue };
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), Sense::click());
+            let resp = ui.interact(rect, egui::Id::new((id, c)), Sense::click()).on_hover_text(c.label()).union(resp);
+            let on = selected(c);
+            let painter = ui.painter();
+            painter.rect_filled(rect, 16.0, if on { s.secondary_container } else { s.surface_container_high });
+            if resp.hovered() {
+                painter.rect_filled(rect, 16.0, s.on_surface.gamma_multiply(0.08));
+                ui.ctx().request_repaint();
+            }
+            let fill = if on { s.primary } else { s.on_surface_variant.gamma_multiply(0.5) };
+            let turn = if resp.hovered() { time * 0.9 } else { 0.0 };
+            shape_paint::fill_shape(painter, now_playing::shape_cubics(m), rect.shrink(9.0), turn, fill);
+            if resp.clicked() {
+                clicked = Some(c);
+            }
+        }
+    });
+    ui.add_space(8.0);
+    clicked
+}
+
 pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let mut p: Prefs = state.prefs.clone();
@@ -138,8 +173,33 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     ui.set_max_width(ui.available_width().min(840.0));
     ui.add_space(8.0);
     ui.label(TypeRole::HeadlineMedium.style().rich("Настройки", s.on_surface));
+    ui.add_space(16.0);
+    if std::mem::take(&mut pages.scroll_to_lyrics) {
+        pages.settings_tab = 1;
+        pages.scroll_to_lyrics_now = true;
+    }
+    let tab = pages.settings_tab.min(1);
+    if let (Some(n), _) = connected(ui, egui::Id::new("set-tab"), &["Основные", "Внешний вид"], tab, &[]) {
+        pages.settings_tab = n;
+    }
 
-    group(ui, "Внешний вид");
+    if pages.settings_tab == 1 {
+        appearance(ui, &mut p, pages);
+    } else {
+        general(ui, &mut p, pages, out);
+    }
+    ui.add(Divider::new());
+
+    if p != before {
+        out.push(Command::SetPrefs(Box::new(p)));
+    }
+    None
+}
+
+/// Everything about looks: theme, the player, the cover and its ring, the
+/// background and the lyrics' animation.
+fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
+    group(ui, "Тема");
     row(ui, "Дизайн", Some("Nothing и Liquid Glass — скоро"), |ui| {
         // Only MD3E exists so far; the others are shown but off.
         connected(ui, egui::Id::new("set-design"), &["Material 3", "Nothing", "Glass"], 0, &[1, 2]);
@@ -197,16 +257,71 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             p.np_motion = n as u8;
         }
     });
+    row(ui, "Волна на полосе прогресса", Some("Выключи — прогресс всегда ровная линия"), |ui| {
+        ui.add(Switch::new(&mut p.progress_wave).id_salt("set-progress-wave"));
+    });
     row(ui, "Ползунок громкости", Some("Без него — кнопка звука, громкость колесом"), |ui| {
         ui.add(Switch::new(&mut p.np_volume).id_salt("set-np-volume"));
     });
+
+    group(ui, "Обложка");
     row(ui, "Форма обложки", Some("Пока играет музыка; на паузе — квадрат"), |ui| {
-        let options: Vec<(String, bool)> =
-            CoverShape::ALL.iter().map(|c| (c.label().to_owned(), *c == p.cover_shape)).collect();
-        if let Some(n) = dropdown(ui, "set-cover-shape", p.cover_shape.label(), &options) {
-            p.cover_shape = CoverShape::ALL[n];
+        let i = match p.cover_shape {
+            CoverShape::Original => 0,
+            CoverShape::Random => 2,
+            _ => 1,
+        };
+        if let (Some(n), _) = connected(ui, egui::Id::new("set-cover-mode"), &["Квадрат", "Фигура", "Случайная"], i, &[]) {
+            p.cover_shape = match n {
+                0 => CoverShape::Original,
+                2 => CoverShape::Random,
+                _ => now_playing::random_pool(&p.random_shapes)[0],
+            };
         }
     });
+    match p.cover_shape {
+        CoverShape::Original => {}
+        CoverShape::Random => {
+            let pool = now_playing::random_pool(&p.random_shapes);
+            let all = pool.len() == CoverShape::shapes().len();
+            row(
+                ui,
+                "Из каких фигур выбирать",
+                Some(&format!(
+                    "{} из {} — новая на каждом треке и по двойному клику",
+                    pool.len(),
+                    CoverShape::shapes().len()
+                )),
+                |ui| {
+                    if !all && ui.add(Button::new("Все").style(Style::Outlined).id_salt("set-shapes-all")).clicked() {
+                        p.random_shapes.clear();
+                    }
+                },
+            );
+            if let Some(c) = shape_grid(ui, "set-shapes-range", |c| pool.contains(&c)) {
+                let mut next: Vec<CoverShape> = pool.clone();
+                if let Some(i) = next.iter().position(|x| *x == c) {
+                    // At least one shape stays.
+                    if next.len() > 1 {
+                        next.remove(i);
+                    }
+                } else {
+                    next.push(c);
+                }
+                p.random_shapes = if next.len() == CoverShape::shapes().len() {
+                    Vec::new()
+                } else {
+                    CoverShape::shapes().iter().copied().filter(|x| next.contains(x)).collect()
+                };
+            }
+        }
+        current => {
+            row(ui, "Фигура", Some(current.label()), |_| {});
+            if let Some(c) = shape_grid(ui, "set-shape-fixed", |c| c == current) {
+                p.cover_shape = c;
+            }
+        }
+    }
     row(ui, "Вращать форму", Some("Контур медленно крутится, картинка стоит"), |ui| {
         ui.add(Switch::new(&mut p.cover_spin).id_salt("set-cover-spin"));
     });
@@ -220,29 +335,82 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     row(ui, "Пульсация в такт", Some("Обложка чуть вздрагивает на долях"), |ui| {
         ui.add(Switch::new(&mut p.cover_pulse).id_salt("set-cover-pulse"));
     });
-    row(ui, "Кольцо вокруг обложки", None, |ui| {
+
+    group(ui, "Кольцо вокруг обложки");
+    row(ui, "Кольцо", None, |ui| {
         ui.add(Switch::new(&mut p.ring).id_salt("set-ring-on"));
     });
     if p.ring {
-        row(ui, "Вид кольца", Some("Круг из точек, точки по контуру формы или бары"), |ui| {
+        row(ui, "Вид кольца", Some("Круг из точек, точки по контуру формы или точки, вырастающие в бары под музыку (как в caelestia)"), |ui| {
             let styles = [RingStyle::Circle, RingStyle::Contour, RingStyle::Bars];
             let i = styles.iter().position(|r| *r == p.ring_style).unwrap_or(1);
             if let (Some(n), _) = connected(ui, egui::Id::new("set-ring-style"), &["Круг", "Контур", "Бары"], i, &[]) {
                 p.ring_style = styles[n];
             }
         });
-        row(ui, "Кольцо крутится", Some("Пока играет музыка"), |ui| {
-            ui.add(Switch::new(&mut p.spin_ring).id_salt("set-ring"));
-        });
-        if p.spin_ring {
-            row(ui, "Направление кольца", None, |ui| {
-                if let (Some(n), _) = connected(ui, egui::Id::new("set-ring-dir"), &["По часовой", "Против"], usize::from(p.ring_ccw), &[]) {
-                    p.ring_ccw = n == 1;
-                }
+        // The bars stand on fixed angles, like a spectrum.
+        if p.ring_style != RingStyle::Bars {
+            row(ui, "Кольцо крутится", Some("Пока играет музыка"), |ui| {
+                ui.add(Switch::new(&mut p.spin_ring).id_salt("set-ring"));
             });
+            if p.spin_ring {
+                row(ui, "Направление кольца", None, |ui| {
+                    if let (Some(n), _) = connected(ui, egui::Id::new("set-ring-dir"), &["По часовой", "Против"], usize::from(p.ring_ccw), &[]) {
+                        p.ring_ccw = n == 1;
+                    }
+                });
+            }
         }
         row(ui, "Кольцо в такт музыке", Some("Прыгает на ударных и всплесках спектра"), |ui| {
             ui.add(Switch::new(&mut p.ring_beat).id_salt("set-ring-beat"));
+        });
+    }
+
+    group(ui, "Фигуры на фоне");
+    row(ui, "Режим", Some(match p.bg_shapes {
+        BgShapes::Off => "Фигуры Material за открытым треком, под музыку",
+        BgShapes::Bounce => "Лежат внизу и подпрыгивают на долях",
+        BgShapes::Float => "Парят по экрану и светятся в такт",
+        BgShapes::Morph => "Плывут и превращаются в другие фигуры на ударах",
+    }), |ui| {
+        let modes = [BgShapes::Off, BgShapes::Bounce, BgShapes::Float, BgShapes::Morph];
+        let i = modes.iter().position(|m| *m == p.bg_shapes).unwrap_or(0);
+        if let (Some(n), _) = connected(ui, egui::Id::new("set-bg-shapes"), &["Выкл", "Прыгают", "Парят", "Меняют форму"], i, &[]) {
+            p.bg_shapes = modes[n];
+        }
+    });
+    if p.bg_shapes != BgShapes::Off {
+        row(ui, "Количество", Some(&format!("{} фигур", p.bg_shapes_count)), |ui| {
+            if let Some(v) = range_slider(ui, "set-bg-count", p.bg_shapes_count as f32, (4.0, 32.0), 1.0, |v| format!("{v:.0}")) {
+                p.bg_shapes_count = v as u32;
+            }
+        });
+        let pct = |v: f32| format!("{:.0}%", v * 100.0);
+        row(ui, "Размер", None, |ui| {
+            if let Some(v) = range_slider(ui, "set-bg-size", p.bg_shapes_size, (0.5, 2.0), 0.05, pct) {
+                p.bg_shapes_size = v;
+            }
+        });
+        row(ui, "Яркость", None, |ui| {
+            if let Some(v) = range_slider(ui, "set-bg-opacity", p.bg_shapes_opacity, (0.25, 2.0), 0.05, pct) {
+                p.bg_shapes_opacity = v;
+            }
+        });
+        row(ui, "Скорость", Some("Дрейф, вращение и прыжки"), |ui| {
+            if let Some(v) = range_slider(ui, "set-bg-speed", p.bg_shapes_speed, (0.25, 3.0), 0.05, pct) {
+                p.bg_shapes_speed = v;
+            }
+        });
+        row(ui, "Реакция на музыку", Some("0% — просто украшение"), |ui| {
+            if let Some(v) = range_slider(ui, "set-bg-react", p.bg_shapes_react, (0.0, 2.0), 0.05, pct) {
+                p.bg_shapes_react = v;
+            }
+        });
+        row(ui, "Цвета", Some("Контейнеры темы, один акцент или яркие акценты"), |ui| {
+            let i = usize::from(p.bg_shapes_colors).min(2);
+            if let (Some(n), _) = connected(ui, egui::Id::new("set-bg-colors"), &["Тема", "Акцент", "Яркие"], i, &[]) {
+                p.bg_shapes_colors = n as u8;
+            }
         });
     }
 
@@ -284,11 +452,6 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     row(ui, "Свечение текста", Some("Лёгкое свечение спетой части"), |ui| {
         ui.add(Switch::new(&mut p.lyrics_glow).id_salt("set-lyrics-glow"));
     });
-    row(ui, &format!("Возвращаться к текущей строке через {:.0} с", p.lyrics_return_s), Some("После ручной прокрутки текста"), |ui| {
-        if let Some(v) = range_slider(ui, "set-lyrics-return", p.lyrics_return_s, (1.0, 15.0), 1.0, |v| format!("{v:.0} с")) {
-            p.lyrics_return_s = v;
-        }
-    });
     row(ui, "Индикатор паузы", Some("Кольцо между строками"), |ui| {
         let labels = ["Линия", "Волна", "Толстая линия", "Толстая волна"];
         let i = usize::from(p.lyrics_gap_style).min(3);
@@ -307,9 +470,37 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     row(ui, "Обратный отсчёт 3-2-1 в конце паузы", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_countdown).id_salt("set-lyrics-countdown"));
     });
-    row(ui, "Открыть текст", Some("L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке"), |_| {});
+
+    if std::mem::take(&mut pages.scroll_to_lyrics_now) {
+        // Request after the controls so their nested scroll areas cannot consume it.
+        ui.scroll_to_rect(lyrics_header.rect, Some(egui::Align::TOP));
+    }
+}
+
+/// Behaviour: controls, lyrics sources, sound, library, import, torrents.
+fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    group(ui, "Управление");
+    row(ui, "Клик по обложке — пауза", Some("В открытом треке"), |ui| {
+        ui.add(Switch::new(&mut p.cover_click_pause).id_salt("set-cover-click"));
+    });
+    row(ui, "Двойной клик — другая фигура", Some("Двойной клик в открытом треке меняет форму обложки"), |ui| {
+        let labels = ["Выкл", "Только в режиме «Случайная»", "Всегда"];
+        let i = usize::from(p.dbl_click_shape).min(2);
+        let options = labels.iter().enumerate().map(|(n, label)| ((*label).to_owned(), n == i)).collect::<Vec<_>>();
+        if let Some(n) = dropdown(ui, "set-dbl-click", labels[i], &options) {
+            p.dbl_click_shape = n as u8;
+        }
+    });
+    row(ui, "Клавиши", Some("L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке"), |_| {});
+
+    group(ui, "Текст песен");
     row(ui, "Сохранять найденный текст в файл трека", Some("Встраивает синхронизированный текст в теги, чтобы он был доступен без интернета"), |ui| {
         ui.add(Switch::new(&mut p.save_found_lyrics).id_salt("set-save-lyrics"));
+    });
+    row(ui, &format!("Возвращаться к текущей строке через {:.0} с", p.lyrics_return_s), Some("После ручной прокрутки текста"), |ui| {
+        if let Some(v) = range_slider(ui, "set-lyrics-return", p.lyrics_return_s, (1.0, 15.0), 1.0, |v| format!("{v:.0} с")) {
+            p.lyrics_return_s = v;
+        }
     });
 
     group(ui, "Звук");
@@ -525,16 +716,6 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
 
     group(ui, "Узлы и бэкап");
     row(ui, "Raspberry Pi, сервер, телефон", Some("Этап 6"), |_| {});
-    ui.add(Divider::new());
-
-    if std::mem::take(&mut pages.scroll_to_lyrics) {
-        // Request after the controls so their nested scroll areas cannot consume it.
-        ui.scroll_to_rect(lyrics_header.rect, Some(egui::Align::TOP));
-    }
-    if p != before {
-        out.push(Command::SetPrefs(Box::new(p)));
-    }
-    None
 }
 
 fn open_folder(path: &std::path::Path) -> std::io::Result<()> {

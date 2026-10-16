@@ -569,6 +569,42 @@ pub struct Prefs {
     pub np_volume: bool,
     /// How Now Playing opens and closes: 0 smooth, 1 lively, 2 fast.
     pub np_motion: u8,
+    /// Progress bars turn into a wave while playing (off: always flat).
+    pub progress_wave: bool,
+    /// The shapes [`CoverShape::Random`] picks from; empty = all of them.
+    pub random_shapes: Vec<CoverShape>,
+    /// A click on the Now Playing cover toggles play / pause.
+    pub cover_click_pause: bool,
+    /// A double click in Now Playing changes the cover outline: 0 never,
+    /// 1 only in the random mode, 2 always (a fixed shape steps on).
+    pub dbl_click_shape: u8,
+    /// Material shapes behind Now Playing that follow the music.
+    pub bg_shapes: BgShapes,
+    /// How many of them (4..=32).
+    pub bg_shapes_count: u32,
+    /// Size multiplier (0.5..=2).
+    pub bg_shapes_size: f32,
+    /// Opacity multiplier (0.25..=2).
+    pub bg_shapes_opacity: f32,
+    /// Motion speed multiplier (0.25..=3).
+    pub bg_shapes_speed: f32,
+    /// How strongly they react to the music (0..=2).
+    pub bg_shapes_react: f32,
+    /// Colours: 0 theme containers, 1 accent only, 2 bright accents.
+    pub bg_shapes_colors: u8,
+}
+
+/// Material shapes behind the open track.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BgShapes {
+    #[default]
+    Off,
+    /// Lying on the floor and jumping on the beats.
+    Bounce,
+    /// Drifting and glowing with their band.
+    Float,
+    /// Drifting and turning into other shapes on the beats.
+    Morph,
 }
 
 /// The single content slot beside the Now Playing cover.
@@ -595,7 +631,8 @@ pub enum RingStyle {
     /// Dots following the cover's outline at a fixed gap.
     #[default]
     Contour,
-    /// Rounded bars growing out of the outline with the spectrum.
+    /// Dots around the outline that grow into bars with the spectrum
+    /// (caelestia's cover visualiser).
     Bars,
 }
 
@@ -912,6 +949,17 @@ impl Default for Prefs {
             cover_ccw: true,
             np_volume: false,
             np_motion: 1,
+            progress_wave: true,
+            random_shapes: Vec::new(),
+            cover_click_pause: true,
+            dbl_click_shape: 1,
+            bg_shapes: BgShapes::Off,
+            bg_shapes_count: 14,
+            bg_shapes_size: 1.0,
+            bg_shapes_opacity: 1.0,
+            bg_shapes_speed: 1.0,
+            bg_shapes_react: 1.0,
+            bg_shapes_colors: 0,
         }
     }
 }

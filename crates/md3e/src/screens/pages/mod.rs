@@ -41,6 +41,10 @@ pub struct PageState {
     pub pending_nav: Option<Route>,
     /// One-shot scroll to the lyrics settings header.
     pub scroll_to_lyrics: bool,
+    /// The scroll waits for the appearance tab to be drawn.
+    scroll_to_lyrics_now: bool,
+    /// Settings tab: 0 general, 1 appearance.
+    settings_tab: usize,
     /// Latest bass level for the ambient glow (set by the host each frame).
     pub levels_bass: f32,
     /// Ask the shell to open a pane tab (e.g. "Источник и качество").

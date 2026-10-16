@@ -134,7 +134,7 @@ pub fn show(
             let out_s = Slider::new("bar-progress", p.fraction_now())
                 .width(avail - 8.0)
                 .track(8.0)
-                .wavy(playing)
+                .wavy(playing && state.prefs.progress_wave)
                 .colors(on, on.gamma_multiply(0.24))
                 .value_label(move |v| common::fmt_time(dur.mul_f32(v)))
                 .show(ui);
@@ -152,7 +152,7 @@ pub fn show(
             let slider_w = avail - 2.0 * 44.0;
             let out_s = Slider::new("bar-progress", p.fraction_now())
                 .width(slider_w)
-                .wavy(playing)
+                .wavy(playing && state.prefs.progress_wave)
                 .colors(on, on.gamma_multiply(0.24))
                 .value_label(move |v| common::fmt_time(dur.mul_f32(v)))
                 .show(ui);

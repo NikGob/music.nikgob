@@ -5,6 +5,7 @@
 //! navigation stack, which panes are open, transitions.
 
 mod ambient;
+mod bg_shapes;
 mod chrome;
 mod common;
 mod lyrics;
