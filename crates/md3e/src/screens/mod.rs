@@ -229,14 +229,18 @@ impl Md3eUi {
                 if class == SizeClass::Compact {
                     if compact_page(self.route()) {
                         self.content_rect = full;
-                        if ui.add(crate::components::IconButton::new(crate::Icon::ExpandMore)
+                        // The page margins of the full layout.
+                        let inner = full.shrink2(vec2(class.margin(), 0.0));
+                        let mut pui = ui.new_child(UiBuilder::new().max_rect(inner).id_salt("compact-page"));
+                        pui.set_clip_rect(full);
+                        if pui.add(crate::components::IconButton::new(crate::Icon::ExpandMore)
                             .tooltip("Вернуться к плееру").id_salt("compact-settings-close")).clicked() {
                             self.navigate(ctx, Route::Home, out);
                         }
                         let route = self.route().clone();
                         // Another artist from this page stays here; the
                         // rest has no room in mini mode.
-                        if let Some(next @ Route::Artist(_)) = pages::page(ui, &route, state, 16.0, &mut self.pages, out) {
+                        if let Some(next @ Route::Artist(_)) = pages::page(&mut pui, &route, state, 16.0, &mut self.pages, out) {
                             self.navigate(ctx, next, out);
                         }
                         return;
