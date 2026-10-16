@@ -40,6 +40,10 @@ pub enum PaneTab {
 /// Presentation state of the MD3E window.
 pub struct Md3eUi {
     stack: Vec<Route>,
+    /// Browser-like history of whole stacks, for the mouse's back and
+    /// forward buttons (and Alt+← / Alt+→).
+    past: Vec<Vec<Route>>,
+    future: Vec<Vec<Route>>,
     /// +1 forward, -1 back, 0 fade-through (top-level switch).
     nav_dir: f32,
     nav_anim: Animated<f32>,
@@ -79,6 +83,8 @@ impl Md3eUi {
     pub fn new() -> Self {
         Self {
             stack: vec![Route::Home],
+            past: Vec::new(),
+            future: Vec::new(),
             nav_dir: 0.0,
             nav_anim: Animated::new(0.0, crate::tokens::Motion::expressive().slow_effects),
             rail_expanded: true,
@@ -113,6 +119,7 @@ impl Md3eUi {
         if self.route() == &route {
             return;
         }
+        self.remember();
         let top_level = matches!(
             route,
             Route::Home | Route::Library(_) | Route::Downloads(_) | Route::Settings
@@ -129,16 +136,60 @@ impl Md3eUi {
         self.restart_nav(ctx);
     }
 
+    /// Up one level (the page's ← and Esc). When that is where the user
+    /// came from it is a step back in the history, so forward returns.
     pub fn back(&mut self, ctx: &Context, out: &mut Vec<Command>) -> bool {
-        if self.stack.len() > 1 {
-            self.stack.pop();
-            self.nav_dir = -1.0;
-            load_for(self.route(), out);
-            self.restart_nav(ctx);
-            true
-        } else {
-            false
+        if self.stack.len() <= 1 {
+            return false;
         }
+        let parent = &self.stack[..self.stack.len() - 1];
+        if self.past.last().is_some_and(|p| p == parent) {
+            return self.history_back(ctx, out);
+        }
+        self.remember();
+        self.stack.pop();
+        self.nav_dir = -1.0;
+        load_for(self.route(), out);
+        self.restart_nav(ctx);
+        true
+    }
+
+    /// Where the user was before (the mouse's back button).
+    pub fn history_back(&mut self, ctx: &Context, out: &mut Vec<Command>) -> bool {
+        let Some(prev) = self.past.pop() else { return false };
+        self.future.push(std::mem::replace(&mut self.stack, prev));
+        self.arrive(ctx, -1.0, out);
+        true
+    }
+
+    /// Back again to where history-back came from.
+    pub fn history_forward(&mut self, ctx: &Context, out: &mut Vec<Command>) -> bool {
+        let Some(next) = self.future.pop() else { return false };
+        self.past.push(std::mem::replace(&mut self.stack, next));
+        self.arrive(ctx, 1.0, out);
+        true
+    }
+
+    /// Notes the current page before going somewhere new.
+    fn remember(&mut self) {
+        const KEEP: usize = 50;
+        if self.past.last() != Some(&self.stack) {
+            self.past.push(self.stack.clone());
+            if self.past.len() > KEEP {
+                self.past.remove(0);
+            }
+        }
+        self.future.clear();
+    }
+
+    fn arrive(&mut self, ctx: &Context, dir: f32, out: &mut Vec<Command>) {
+        if self.stack.is_empty() {
+            self.stack.push(Route::Home);
+        }
+        self.nav_dir = dir;
+        load_for(self.route(), out);
+        self.search.clear();
+        self.restart_nav(ctx);
     }
 
     fn restart_nav(&mut self, ctx: &Context) {
@@ -519,9 +570,25 @@ impl Md3eUi {
         if let Some(n) = go {
             self.chrome.nav = Some(Self::destinations()[n].clone());
         }
-        let mouse_back = ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Extra1));
-        if mouse_back && !self.now_playing && !self.chrome.visualizer {
-            self.back(ctx, out);
+        // The mouse's side buttons (and Alt+arrows) walk the history like a
+        // browser; back first closes Now Playing.
+        let (mouse_back, mouse_forward) = ctx.input_mut(|i| {
+            (
+                i.pointer.button_clicked(egui::PointerButton::Extra1) || i.consume_key(Modifiers::ALT, Key::ArrowLeft),
+                i.pointer.button_clicked(egui::PointerButton::Extra2) || i.consume_key(Modifiers::ALT, Key::ArrowRight),
+            )
+        });
+        if !self.chrome.visualizer {
+            if mouse_back {
+                if self.now_playing {
+                    self.set_now_playing(ctx, false);
+                } else if !self.history_back(ctx, out) {
+                    self.back(ctx, out);
+                }
+            }
+            if mouse_forward && !self.now_playing {
+                self.history_forward(ctx, out);
+            }
         }
     }
 
@@ -1009,6 +1076,34 @@ mod tests {
             assert_eq!(ui.route(), &Route::Settings);
             assert!(ui.pages.focus_setting.is_none());
         }
+    }
+
+    #[test]
+    fn back_and_forward_walk_the_pages_like_a_browser() {
+        let ctx = context();
+        let mut ui = Md3eUi::new();
+        let mut out = Vec::new();
+        let album = Route::Release(nikgob_view::ReleaseId::new());
+        ui.navigate(&ctx, Route::Library(nikgob_view::LibraryTab::All), &mut out);
+        ui.navigate(&ctx, album.clone(), &mut out);
+        ui.navigate(&ctx, Route::Settings, &mut out);
+        // Back across a top-level switch, which used to forget the album.
+        assert!(ui.history_back(&ctx, &mut out));
+        assert_eq!(ui.route(), &album);
+        // The page's own ← from there is the same step back.
+        assert!(ui.back(&ctx, &mut out));
+        assert_eq!(ui.route(), &Route::Library(nikgob_view::LibraryTab::All));
+        assert!(ui.history_forward(&ctx, &mut out));
+        assert_eq!(ui.route(), &album);
+        assert!(ui.history_forward(&ctx, &mut out));
+        assert_eq!(ui.route(), &Route::Settings);
+        assert!(!ui.history_forward(&ctx, &mut out), "nothing ahead");
+        // Going somewhere new drops what was ahead.
+        ui.history_back(&ctx, &mut out);
+        ui.navigate(&ctx, Route::Home, &mut out);
+        assert!(!ui.history_forward(&ctx, &mut out));
+        assert!(ui.history_back(&ctx, &mut out));
+        assert_eq!(ui.route(), &album);
     }
 
     #[test]
