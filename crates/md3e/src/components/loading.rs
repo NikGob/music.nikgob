@@ -53,6 +53,7 @@ pub fn phase(t: f32) -> (usize, f32) {
 pub struct LoadingIndicator {
     contained: bool,
     size: f32,
+    color: Option<egui::Color32>,
 }
 
 impl LoadingIndicator {
@@ -60,7 +61,15 @@ impl LoadingIndicator {
         Self {
             contained: false,
             size: CONTAINER,
+            color: None,
         }
+    }
+
+    /// The shape's colour instead of `primary` (for indicators on other
+    /// containers, like a snackbar's).
+    pub fn color(mut self, color: egui::Color32) -> Self {
+        self.color = Some(color);
+        self
     }
 
     /// The contained variant: `primary-container` disc, `on-primary-container` shape.
@@ -98,6 +107,7 @@ impl Widget for LoadingIndicator {
         } else {
             (None, s.primary)
         };
+        let fg = self.color.unwrap_or(fg);
         if let Some(bg) = bg {
             paint::container(
                 ui.painter(),

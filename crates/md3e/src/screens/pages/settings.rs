@@ -249,6 +249,14 @@ fn appearance(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
     row(ui, "Меньше движения", Some("Без отскоков, вращения и волн"), |ui| {
         ui.add(Switch::new(&mut p.reduced_motion).id_salt("set-rm"));
     });
+    row(
+        ui,
+        "Боковая панель всегда скрыта",
+        Some("Разделы — Ctrl+1…4 или подведи курсор к левому краю окна"),
+        |ui| {
+            ui.add(Switch::new(&mut p.nav_hidden).id_salt("set-nav-hidden"));
+        },
+    );
 
     group(ui, "Сейчас играет");
     row(ui, "Открытие экрана", Some("Как он вырастает из плеера и сворачивается"), |ui| {

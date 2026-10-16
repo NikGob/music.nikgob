@@ -1,17 +1,25 @@
-//! Snackbar host: a queue that shows one snackbar at a time above the
-//! floating player. `inverse-surface`, radius 4, level 3, body-medium text, a
-//! label-large action in `inverse-primary` and an optional close icon.
-//! It slides in on a default spatial spring, fades on fast effects and
-//! dismisses itself after 4 s (time-based; the timer holds while hovered).
+//! Snackbar host: a stack of up to three snackbars above the floating
+//! player, newest at the bottom. An Expressive take on the M3 snackbar:
+//! `inverse-surface` with large corners and a soft level-3 shadow, a
+//! leading shape chip whose shape and colour say what the message is about
+//! (a morphing loading shape while something works), body-medium text, a
+//! label-large action in `inverse-primary`, an optional close icon and a
+//! thin line running down with the time left.
+//!
+//! Each snackbar springs up from below with a little bounce (default
+//! spatial) while its corners settle, the stack glides to make room, and an
+//! ending one shrinks and fades in place. Timers are time-based and hold
+//! while the pointer is over any snackbar of the stack.
 
 use egui::{
-    Align2, Area, Context, Id, LayerId, Order, Rect, Sense, Stroke, Vec2, WidgetInfo, WidgetType,
+    Align2, Area, Context, Id, Order, Rect, Sense, Stroke, Vec2, WidgetInfo, WidgetType,
     pos2,
     text::{LayoutJob, TextWrapping},
     vec2,
 };
+use nikgob_shapes::{MaterialShape, paint::fill_shape};
 
-use super::{anim, common, paint, paint::Radii};
+use super::{LoadingIndicator, anim, common, paint, paint::Radii};
 use crate::{
     Icon, Theme, TypeRole,
     tokens::{Elevation, shape},
@@ -19,8 +27,25 @@ use crate::{
 
 /// Seconds a snackbar stays up by default.
 pub const AUTO_DISMISS: f64 = 4.0;
-/// Seconds the exit animation is given before the next snackbar appears.
-const EXIT: f64 = 0.15;
+/// Snackbars on screen at once; more wait their turn.
+pub const MAX_VISIBLE: usize = 3;
+/// Seconds an ending snackbar is still drawn (its exit animation).
+const EXIT: f64 = 0.35;
+/// Space between stacked snackbars.
+const GAP: f32 = 8.0;
+/// The leading chip.
+const CHIP: f32 = 36.0;
+
+/// What a snackbar reports; picks the chip's shape, colour and icon.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SnackbarKind {
+    #[default]
+    Info,
+    Success,
+    /// Work going on in the background: the chip is a loading shape.
+    Working,
+    Error,
+}
 
 /// One queue entry.
 #[derive(Clone, Copy, Debug)]
@@ -28,6 +53,7 @@ pub struct SnackbarItem<'a> {
     pub id: u64,
     pub text: &'a str,
     pub action: Option<&'a str>,
+    pub kind: SnackbarKind,
 }
 
 impl<'a> SnackbarItem<'a> {
@@ -36,6 +62,7 @@ impl<'a> SnackbarItem<'a> {
             id,
             text,
             action: None,
+            kind: SnackbarKind::Info,
         }
     }
 
@@ -43,11 +70,21 @@ impl<'a> SnackbarItem<'a> {
         self.action = Some(label);
         self
     }
+
+    pub fn kind(mut self, kind: SnackbarKind) -> Self {
+        self.kind = kind;
+        self
+    }
 }
 
 impl<'a> From<(u64, &'a str, Option<&'a str>)> for SnackbarItem<'a> {
     fn from((id, text, action): (u64, &'a str, Option<&'a str>)) -> Self {
-        Self { id, text, action }
+        Self {
+            id,
+            text,
+            action,
+            kind: SnackbarKind::Info,
+        }
     }
 }
 
@@ -67,48 +104,70 @@ struct Current {
     id: u64,
     text: String,
     action: Option<String>,
+    kind: SnackbarKind,
     shown_at: f64,
     leaving_at: Option<f64>,
+}
+
+impl Current {
+    /// The share of its time still left, 1 -> 0.
+    fn left(&self, now: f64, duration: f64) -> f32 {
+        if self.leaving_at.is_some() || duration <= 0.0 {
+            return 0.0;
+        }
+        (1.0 - (now - self.shown_at) / duration).clamp(0.0, 1.0) as f32
+    }
 }
 
 /// The queue logic, separated from painting so it can be tested.
 #[derive(Clone, Debug, Default)]
 struct Queue {
-    current: Option<Current>,
+    /// On screen, oldest first (ending ones too, until their exit is over).
+    shown: Vec<Current>,
     /// Ids already reported dismissed but possibly still in the caller's list.
     done: Vec<u64>,
 }
 
 impl Queue {
     /// Advances the queue; returns the ids that timed out this step.
-    /// `held` is the time the timer was paused (pointer over the snackbar).
-    fn step(&mut self, items: &[SnackbarItem<'_>], now: f64, held: f64, duration: f64) -> Vec<u64> {
+    /// `held` is the time the timers were paused (pointer over the stack).
+    fn step(
+        &mut self,
+        items: &[SnackbarItem<'_>],
+        now: f64,
+        held: f64,
+        duration: f64,
+        max: usize,
+    ) -> Vec<u64> {
         let mut dismissed = Vec::new();
         self.done.retain(|d| items.iter().any(|i| i.id == *d));
+        self.shown
+            .retain(|c| c.leaving_at.is_none_or(|t| now - t < EXIT));
 
-        if self
-            .current
-            .as_ref()
-            .and_then(|c| c.leaving_at)
-            .is_some_and(|t| now - t >= EXIT)
-        {
-            self.current = None;
-        }
-        if self.current.is_none()
-            && let Some(item) = items.iter().find(|i| !self.done.contains(&i.id))
-        {
-            self.current = Some(Current {
+        for item in items {
+            let active = self.shown.iter().filter(|c| c.leaving_at.is_none()).count();
+            if active >= max {
+                break;
+            }
+            if self.done.contains(&item.id) || self.shown.iter().any(|c| c.id == item.id) {
+                continue;
+            }
+            self.shown.push(Current {
                 id: item.id,
                 text: item.text.to_owned(),
                 action: item.action.map(str::to_owned),
+                kind: item.kind,
                 shown_at: now,
                 leaving_at: None,
             });
         }
-        if let Some(cur) = &mut self.current
-            && cur.leaving_at.is_none()
-        {
-            cur.shown_at += held;
+        for cur in &mut self.shown {
+            if cur.leaving_at.is_some() {
+                continue;
+            }
+            if cur.shown_at < now {
+                cur.shown_at += held;
+            }
             if !items.iter().any(|i| i.id == cur.id) {
                 // The caller withdrew it.
                 cur.leaving_at = Some(now);
@@ -121,22 +180,25 @@ impl Queue {
         dismissed
     }
 
-    /// The user dismissed the current snackbar. Returns its id.
-    fn dismiss(&mut self, now: f64) -> Option<u64> {
-        let cur = self.current.as_mut()?;
-        if cur.leaving_at.is_some() {
-            return None;
-        }
+    /// The user dismissed snackbar `id`. Returns it if it was still up.
+    fn dismiss(&mut self, id: u64, now: f64) -> Option<u64> {
+        let cur = self
+            .shown
+            .iter_mut()
+            .find(|c| c.id == id && c.leaving_at.is_none())?;
         cur.leaving_at = Some(now);
-        self.done.push(cur.id);
-        Some(cur.id)
+        self.done.push(id);
+        Some(id)
     }
 
+    /// Seconds until the next snackbar times out.
+    #[cfg(test)]
     fn remaining(&self, now: f64, duration: f64) -> Option<f64> {
-        let cur = self.current.as_ref()?;
-        cur.leaving_at
-            .is_none()
-            .then(|| (cur.shown_at + duration - now).max(0.0))
+        self.shown
+            .iter()
+            .filter(|c| c.leaving_at.is_none())
+            .map(|c| (c.shown_at + duration - now).max(0.0))
+            .reduce(f64::min)
     }
 }
 
@@ -145,6 +207,7 @@ pub struct SnackbarHost {
     id: Id,
     duration: f64,
     show_close: bool,
+    max_visible: usize,
 }
 
 impl SnackbarHost {
@@ -153,6 +216,7 @@ impl SnackbarHost {
             id: Id::new(id_salt),
             duration: AUTO_DISMISS,
             show_close: false,
+            max_visible: MAX_VISIBLE,
         }
     }
 
@@ -168,7 +232,13 @@ impl SnackbarHost {
         self
     }
 
-    /// Call once per frame. The snackbar sits centred in `area`, its bottom
+    /// How many snackbars may be up at once (1 = the classic one at a time).
+    pub fn max_visible(mut self, n: usize) -> Self {
+        self.max_visible = n.max(1);
+        self
+    }
+
+    /// Call once per frame. The stack sits centred in `area`, its bottom
     /// edge `bottom_inset` above the area's bottom (the floating player).
     pub fn show(
         &self,
@@ -191,12 +261,16 @@ impl SnackbarHost {
         };
 
         let mut events = SnackbarEvents {
-            dismissed: queue.step(items, now, held, self.duration),
+            dismissed: queue.step(items, now, held, self.duration, self.max_visible),
             ..SnackbarEvents::default()
         };
         let mut hovering = false;
+        let mut user_dismissed: Option<(u64, bool)> = None;
 
-        if let Some(cur) = queue.current.clone() {
+        // Newest at the bottom: lay the stack out upwards from there.
+        let max_w = (area.width() - 32.0).clamp(200.0, 600.0);
+        let mut bottom = area.bottom() - bottom_inset;
+        for cur in queue.shown.iter().rev() {
             let leaving = cur.leaving_at.is_some();
             let pres = common::presence(
                 ctx,
@@ -205,124 +279,157 @@ impl SnackbarHost {
                 motion.default_spatial,
                 motion.fast_effects,
             );
-            if pres.visible() {
-                let layer = LayerId::new(Order::Foreground, self.id.with("area"));
-                let painter = ctx.layer_painter(layer);
-                let max_w = (area.width() - 32.0).clamp(200.0, 672.0);
-                let lay = layout(
-                    &painter,
-                    &cur.text,
-                    cur.action.as_deref(),
-                    self.show_close,
-                    max_w,
-                );
-                let slide = (1.0 - pres.spatial) * 24.0;
-                let bottom_center = pos2(area.center().x, area.bottom() - bottom_inset + slide);
-                let mut action_hit = false;
-                let mut close_hit = false;
-                let alpha = pres.alpha();
-                Area::new(self.id.with("area"))
-                    .fade_in(false)
-                    .order(Order::Foreground)
-                    .fixed_pos(bottom_center)
-                    .pivot(Align2::CENTER_BOTTOM)
-                    .constrain(false)
-                    .interactable(true)
-                    .show(ctx, |ui| {
-                        ui.set_opacity(alpha);
-                        let (rect, _) = ui.allocate_exact_size(lay.size, Sense::hover());
-                        let id = self.id.with(("bar", cur.id));
-                        let bar = ui.interact(rect, id, Sense::hover());
-                        hovering = bar.contains_pointer();
-                        let radii = Radii::all(shape::EXTRA_SMALL);
-                        paint::shadow(ui.painter(), rect, radii, Elevation::Level3);
-                        paint::container(
+            let k = pres.spatial.clamp(0.0, 1.2);
+            let painter = ctx.layer_painter(egui::LayerId::new(Order::Foreground, self.id.with("measure")));
+            let lay = layout(&painter, &cur.text, cur.action.as_deref(), self.show_close, max_w);
+            // The slot collapses as a snackbar leaves, so the rest glide down.
+            let slot = (lay.size.y + GAP) * if leaving { k.min(1.0) } else { 1.0 };
+            let target = bottom;
+            bottom -= slot;
+            if !pres.visible() {
+                continue;
+            }
+            // Others glide to their new place; a new one starts at its own.
+            let y = anim::f32(
+                ctx,
+                self.id.with(("y", cur.id)),
+                target,
+                motion.default_spatial.without_bounce(),
+            );
+            // Rises from below on entry; shrinks in place on exit.
+            let rise = if leaving { 0.0 } else { (1.0 - k) * (lay.size.y * 0.5 + 24.0) };
+            let scale = 0.86 + 0.14 * k.min(1.0);
+            let bottom_center = pos2(area.center().x, y + rise);
+            let alpha = pres.alpha();
+            let area_id = self.id.with(("area", cur.id));
+            let resp = Area::new(area_id)
+                .fade_in(false)
+                .order(Order::Foreground)
+                .fixed_pos(bottom_center)
+                .pivot(Align2::CENTER_BOTTOM)
+                .constrain(false)
+                .interactable(!leaving)
+                .show(ctx, |ui| {
+                    ui.set_opacity(alpha);
+                    let (rect, _) = ui.allocate_exact_size(lay.size, Sense::hover());
+                    let id = self.id.with(("bar", cur.id));
+                    let bar = ui.interact(rect, id, Sense::hover());
+                    hovering |= bar.contains_pointer();
+                    // Corners settle from extra-large to large as it lands.
+                    let radius = shape::LARGE + (shape::EXTRA_LARGE - shape::LARGE) * (1.0 - k.min(1.0));
+                    let radii = Radii::all(radius);
+                    let elevation = if bar.contains_pointer() { Elevation::Level4 } else { Elevation::Level3 };
+                    paint::shadow(ui.painter(), rect, radii, elevation);
+                    paint::container(ui.painter(), rect, radii, s.inverse_surface, Stroke::NONE);
+
+                    // Leading chip: the shape turns into place.
+                    let chip = Rect::from_center_size(
+                        pos2(rect.left() + 12.0 + CHIP * 0.5, rect.center().y),
+                        Vec2::splat(CHIP),
+                    );
+                    paint_chip(ui, chip, cur.kind, (1.0 - k) * 1.2);
+
+                    ui.painter().galley(
+                        pos2(
+                            rect.left() + TEXT_LEFT,
+                            rect.center().y - lay.text.size().y * 0.5,
+                        ),
+                        lay.text.clone(),
+                        s.inverse_on_surface,
+                    );
+                    let mut right = rect.right();
+                    if self.show_close {
+                        let c = pos2(right - 28.0, rect.center().y);
+                        let hit = Rect::from_center_size(c, Vec2::splat(48.0));
+                        let r = ui.interact(hit, id.with("close"), Sense::click());
+                        if r.clicked() {
+                            user_dismissed = Some((cur.id, false));
+                        }
+                        let l = common::layer_opacity(ctx, id.with("close"), &r, true);
+                        paint::state_layer(
                             ui.painter(),
-                            rect,
-                            radii,
-                            s.inverse_surface,
-                            Stroke::NONE,
+                            Rect::from_center_size(c, Vec2::splat(40.0)),
+                            Radii::all(shape::FULL),
+                            s.inverse_on_surface,
+                            l,
+                        );
+                        Icon::Close
+                            .widget(false, s.inverse_on_surface.gamma_multiply(0.8), 20.0)
+                            .paint_at(ui, Rect::from_center_size(c, Vec2::splat(20.0)));
+                        r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Close"));
+                        right -= 52.0;
+                    }
+                    if let Some(g) = &lay.action {
+                        let w = g.size().x + 24.0;
+                        let btn = Rect::from_min_size(
+                            pos2(right - 8.0 - w, rect.center().y - 20.0),
+                            vec2(w, 40.0),
+                        );
+                        let hit = Rect::from_center_size(btn.center(), vec2(w, 48.0));
+                        let r = ui.interact(hit, id.with("action"), Sense::click());
+                        if r.clicked() {
+                            user_dismissed = Some((cur.id, true));
+                        }
+                        let l = common::layer_opacity(ctx, id.with("action"), &r, true);
+                        paint::state_layer(
+                            ui.painter(),
+                            btn,
+                            Radii::all(shape::FULL),
+                            s.inverse_primary,
+                            l,
                         );
                         ui.painter().galley(
-                            pos2(
-                                rect.left() + 16.0,
-                                rect.center().y - lay.text.size().y * 0.5,
-                            ),
-                            lay.text.clone(),
-                            s.inverse_on_surface,
+                            pos2(btn.left() + 12.0, btn.center().y - g.size().y * 0.5),
+                            g.clone(),
+                            s.inverse_primary,
                         );
-                        let mut right = rect.right();
-                        if self.show_close {
-                            let c = pos2(right - 24.0, rect.center().y);
-                            let hit = Rect::from_center_size(c, Vec2::splat(48.0));
-                            let r = ui.interact(hit, id.with("close"), Sense::click());
-                            close_hit = r.clicked();
-                            let l = common::layer_opacity(ctx, id.with("close"), &r, true);
-                            paint::state_layer(
-                                ui.painter(),
-                                Rect::from_center_size(c, Vec2::splat(40.0)),
-                                Radii::all(shape::FULL),
-                                s.inverse_on_surface,
-                                l,
-                            );
-                            Icon::Close
-                                .widget(false, s.inverse_on_surface, 24.0)
-                                .paint_at(ui, Rect::from_center_size(c, Vec2::splat(24.0)));
-                            r.widget_info(|| {
-                                WidgetInfo::labeled(WidgetType::Button, true, "Close")
-                            });
-                            right -= 48.0;
+                        if common::focused(&r) {
+                            paint::focus_ring(ui.painter(), btn, Radii::all(shape::FULL), s.secondary);
                         }
-                        if let Some(g) = &lay.action {
-                            let w = g.size().x + 24.0;
-                            let btn = Rect::from_min_size(
-                                pos2(right - 8.0 - w, rect.center().y - 20.0),
-                                vec2(w, 40.0),
-                            );
-                            let hit = Rect::from_center_size(btn.center(), vec2(w, 48.0));
-                            let r = ui.interact(hit, id.with("action"), Sense::click());
-                            action_hit = r.clicked();
-                            let l = common::layer_opacity(ctx, id.with("action"), &r, true);
-                            paint::state_layer(
-                                ui.painter(),
-                                btn,
-                                Radii::all(shape::FULL),
-                                s.inverse_primary,
-                                l,
-                            );
-                            ui.painter().galley(
-                                pos2(btn.left() + 12.0, btn.center().y - g.size().y * 0.5),
-                                g.clone(),
-                                s.inverse_primary,
-                            );
-                            if common::focused(&r) {
-                                paint::focus_ring(
-                                    ui.painter(),
-                                    btn,
-                                    Radii::all(shape::FULL),
-                                    s.secondary,
-                                );
-                            }
-                            let label = cur.action.clone().unwrap_or_default();
-                            r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &label));
-                        }
-                        bar.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &cur.text));
-                    });
-                if !leaving
-                    && (action_hit || close_hit)
-                    && let Some(id) = queue.dismiss(now)
-                {
-                    events.dismissed.push(id);
-                    if action_hit {
-                        events.action_clicked = Some(id);
+                        let label = cur.action.clone().unwrap_or_default();
+                        r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &label));
                     }
-                }
+
+                    // Time left: a thin line along the bottom, inside the corners.
+                    let left = cur.left(now, self.duration);
+                    if left > 0.0 && cur.kind != SnackbarKind::Working {
+                        let track = Rect::from_min_max(
+                            pos2(rect.left() + radius, rect.bottom() - 5.0),
+                            pos2(rect.right() - radius, rect.bottom() - 3.0),
+                        );
+                        paint::container(
+                            ui.painter(),
+                            track,
+                            Radii::all(shape::FULL),
+                            s.inverse_on_surface.gamma_multiply(0.12),
+                            Stroke::NONE,
+                        );
+                        let mut fill = track;
+                        fill.set_width(track.width() * left);
+                        paint::container(
+                            ui.painter(),
+                            fill,
+                            Radii::all(shape::FULL),
+                            s.inverse_primary.gamma_multiply(0.85),
+                            Stroke::NONE,
+                        );
+                    }
+                    bar.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &cur.text));
+                });
+            common::layer_scale(ctx, resp.response.layer_id, bottom_center, scale);
+        }
+
+        if let Some((id, action)) = user_dismissed
+            && let Some(id) = queue.dismiss(id, now)
+        {
+            events.dismissed.push(id);
+            if action {
+                events.action_clicked = Some(id);
             }
-            if let Some(rem) = queue.remaining(now, self.duration) {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(rem.max(0.016)));
-            } else {
-                ctx.request_repaint_after(std::time::Duration::from_millis(30));
-            }
+        }
+        if !queue.shown.is_empty() {
+            // The time-left line moves continuously.
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
         ctx.data_mut(|d| {
             d.insert_temp(state_id, queue);
@@ -330,6 +437,31 @@ impl SnackbarHost {
         });
         events
     }
+}
+
+/// Where the text starts: after the chip.
+const TEXT_LEFT: f32 = 12.0 + CHIP + 14.0;
+
+/// The leading chip: a Material shape in the kind's container colour with
+/// its icon, or a morphing loading shape for work in progress. `turn` is the
+/// extra rotation (radians) it still has to turn into place.
+fn paint_chip(ui: &mut egui::Ui, rect: Rect, kind: SnackbarKind, turn: f32) {
+    let s = Theme::get(ui.ctx()).scheme;
+    // Container tones are the opposite of the inverse surface's in either
+    // theme, so they stand out on it.
+    let (shape, fill, on, icon) = match kind {
+        SnackbarKind::Info => (MaterialShape::Circle, s.secondary_container, s.on_secondary_container, Icon::Info),
+        SnackbarKind::Success => (MaterialShape::Cookie9Sided, s.inverse_primary, s.inverse_surface, Icon::Check),
+        SnackbarKind::Error => (MaterialShape::Cookie4Sided, s.error_container, s.on_error_container, Icon::Error),
+        SnackbarKind::Working => {
+            ui.put(rect, LoadingIndicator::new().size(rect.width()).color(s.inverse_primary));
+            return;
+        }
+    };
+    let cubics = shape.polygon().cubics().to_vec();
+    fill_shape(ui.painter(), &cubics, rect, turn, fill);
+    icon.widget(false, on, 20.0)
+        .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(20.0)));
 }
 
 struct Layout {
@@ -351,13 +483,13 @@ fn layout(
     let right = action_g
         .as_ref()
         .map_or(0.0, |g| g.size().x + 24.0 + 8.0 + 8.0)
-        + if close { 48.0 } else { 0.0 }
+        + if close { 52.0 } else { 0.0 }
         + if action_g.is_none() && !close {
-            16.0
+            20.0
         } else {
             0.0
         };
-    let avail_text = (max_w - 16.0 - right).max(80.0);
+    let avail_text = (max_w - TEXT_LEFT - right).max(80.0);
     // Natural width first, then wrap at the available width (max 2 lines).
     let natural = common::plain(
         painter,
@@ -365,8 +497,8 @@ fn layout(
         TypeRole::BodyMedium.style(),
         s.inverse_on_surface,
     );
-    let width = (16.0 + natural.size().x + right).clamp(344.0_f32.min(max_w), max_w);
-    let text_w = (width - 16.0 - right).min(avail_text).max(80.0);
+    let width = (TEXT_LEFT + natural.size().x + right).clamp(320.0_f32.min(max_w), max_w);
+    let text_w = (width - TEXT_LEFT - right).min(avail_text).max(80.0);
     let mut job = LayoutJob::single_section(
         text.to_owned(),
         TypeRole::BodyMedium
@@ -379,9 +511,9 @@ fn layout(
         ..TextWrapping::default()
     };
     let galley = painter.layout_job(job);
-    let lines = if galley.size().y > 24.0 { 2.0 } else { 1.0 };
+    let lines: f32 = if galley.size().y > 24.0 { 2.0 } else { 1.0 };
     Layout {
-        size: vec2(width, 28.0 + 20.0 * lines),
+        size: vec2(width, (32.0 + 20.0 * lines).max(60.0)),
         text: galley,
         action: action_g,
     }
@@ -395,49 +527,65 @@ mod tests {
         ids.iter().map(|&i| SnackbarItem::new(i, "text")).collect()
     }
 
-    #[test]
-    fn shows_one_at_a_time_and_times_out_after_four_seconds() {
-        let mut q = Queue::default();
-        let list = items(&[1, 2]);
-        assert!(q.step(&list, 10.0, 0.0, AUTO_DISMISS).is_empty());
-        assert_eq!(q.current.as_ref().map(|c| c.id), Some(1));
-        assert!(q.step(&list, 13.9, 0.0, AUTO_DISMISS).is_empty());
-        assert_eq!(q.step(&list, 14.0, 0.0, AUTO_DISMISS), vec![1]);
-        // Still leaving: the second one waits for the exit.
-        assert_eq!(q.current.as_ref().map(|c| c.id), Some(1));
-        assert!(q.step(&list, 14.05, 0.0, AUTO_DISMISS).is_empty());
-        assert_eq!(q.current.as_ref().map(|c| c.id), Some(1));
-        // Caller did not remove 1 yet: it is still skipped.
-        assert!(q.step(&list, 14.2, 0.0, AUTO_DISMISS).is_empty());
-        assert_eq!(q.current.as_ref().map(|c| c.id), Some(2));
-        assert_eq!(q.step(&list, 18.2, 0.0, AUTO_DISMISS), vec![2]);
+    fn ids(q: &Queue) -> Vec<u64> {
+        q.shown.iter().filter(|c| c.leaving_at.is_none()).map(|c| c.id).collect()
     }
 
     #[test]
-    fn holding_pauses_the_timer() {
+    fn stacks_up_to_the_limit_and_each_times_out_on_its_own() {
+        let mut q = Queue::default();
+        let list = items(&[1, 2, 3, 4]);
+        assert!(q.step(&list, 10.0, 0.0, AUTO_DISMISS, 3).is_empty());
+        assert_eq!(ids(&q), vec![1, 2, 3]);
+        assert!(q.step(&list, 13.9, 0.0, AUTO_DISMISS, 3).is_empty());
+        assert_eq!(q.step(&list, 14.0, 0.0, AUTO_DISMISS, 3), vec![1, 2, 3]);
+        // The fourth comes up as soon as the others stop counting.
+        q.step(&list, 14.01, 0.0, AUTO_DISMISS, 3);
+        assert_eq!(ids(&q), vec![4]);
+        // The ending ones are kept for their exit, then dropped.
+        assert_eq!(q.shown.len(), 4);
+        q.step(&list, 14.5, 0.0, AUTO_DISMISS, 3);
+        assert_eq!(q.shown.len(), 1);
+        assert_eq!(q.step(&list, 18.01, 0.0, AUTO_DISMISS, 3), vec![4]);
+    }
+
+    #[test]
+    fn one_at_a_time_when_limited_to_one() {
+        let mut q = Queue::default();
+        let list = items(&[1, 2]);
+        q.step(&list, 0.0, 0.0, AUTO_DISMISS, 1);
+        assert_eq!(ids(&q), vec![1]);
+        assert_eq!(q.step(&list, 4.0, 0.0, AUTO_DISMISS, 1), vec![1]);
+        q.step(&list, 4.01, 0.0, AUTO_DISMISS, 1);
+        assert_eq!(ids(&q), vec![2]);
+    }
+
+    #[test]
+    fn holding_pauses_the_timers() {
         let mut q = Queue::default();
         let list = items(&[7]);
-        q.step(&list, 0.0, 0.0, AUTO_DISMISS);
-        q.step(&list, 3.0, 2.0, AUTO_DISMISS); // 2 s held
-        assert!(q.step(&list, 5.5, 0.0, AUTO_DISMISS).is_empty());
-        assert_eq!(q.step(&list, 6.0, 0.0, AUTO_DISMISS), vec![7]);
+        q.step(&list, 0.0, 0.0, AUTO_DISMISS, 3);
+        q.step(&list, 3.0, 2.0, AUTO_DISMISS, 3); // 2 s held
+        assert!(q.step(&list, 5.5, 0.0, AUTO_DISMISS, 3).is_empty());
+        assert!((q.shown[0].left(5.5, AUTO_DISMISS) - 0.125).abs() < 1e-3);
+        assert_eq!(q.step(&list, 6.0, 0.0, AUTO_DISMISS, 3), vec![7]);
+        assert_eq!(q.shown[0].left(6.0, AUTO_DISMISS), 0.0);
     }
 
     #[test]
     fn user_dismissal_and_withdrawal() {
         let mut q = Queue::default();
         let list = items(&[1, 2]);
-        q.step(&list, 0.0, 0.0, AUTO_DISMISS);
-        assert_eq!(q.dismiss(1.0), Some(1));
-        assert_eq!(q.dismiss(1.0), None);
-        // Caller dropped 1; 2 follows after the exit.
-        let rest = items(&[2]);
-        q.step(&rest, 1.2, 0.0, AUTO_DISMISS);
-        assert_eq!(q.current.as_ref().map(|c| c.id), Some(2));
+        q.step(&list, 0.0, 0.0, AUTO_DISMISS, 3);
+        assert_eq!(q.dismiss(1, 1.0), Some(1));
+        assert_eq!(q.dismiss(1, 1.0), None);
+        assert_eq!(ids(&q), vec![2]);
+        assert_eq!(q.remaining(1.0, AUTO_DISMISS), Some(3.0));
         // Withdrawn from outside: fades out without a dismissal event.
-        assert!(q.step(&[], 2.0, 0.0, AUTO_DISMISS).is_empty());
-        assert!(q.current.as_ref().is_some_and(|c| c.leaving_at.is_some()));
-        q.step(&[], 2.2, 0.0, AUTO_DISMISS);
-        assert!(q.current.is_none());
+        assert!(q.step(&[], 2.0, 0.0, AUTO_DISMISS, 3).is_empty());
+        assert!(ids(&q).is_empty());
+        q.step(&[], 2.5, 0.0, AUTO_DISMISS, 3);
+        assert!(q.shown.is_empty());
+        assert_eq!(q.remaining(2.5, AUTO_DISMISS), None);
     }
 }

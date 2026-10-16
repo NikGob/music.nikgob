@@ -44,6 +44,8 @@ pub struct Md3eUi {
     nav_dir: f32,
     nav_anim: Animated<f32>,
     rail_expanded: bool,
+    /// The always-hidden rail is slid in over the content for now.
+    rail_peek: bool,
     pane: Option<PaneTab>,
     last_pane: PaneTab,
     was_inline: bool,
@@ -79,6 +81,7 @@ impl Md3eUi {
             nav_dir: 0.0,
             nav_anim: Animated::new(0.0, crate::tokens::Motion::expressive().slow_effects),
             rail_expanded: true,
+            rail_peek: false,
             // The pane opens on demand (queue / lyrics buttons), not always.
             pane: None,
             last_pane: PaneTab::Queue,
@@ -203,6 +206,7 @@ impl Md3eUi {
         let ctx = &root.ctx().clone();
         let first_cmd = out.len();
         self.update_theme(ctx, state);
+        root.spacing_mut().scroll = crate::components::scrollbars::apply(ctx);
         // The current and the next cover stay loaded while off screen.
         let pinned: Vec<String> = (state.player.current.iter())
             .chain(state.queue.next.first().map(|e| &e.track))
@@ -410,7 +414,15 @@ impl Md3eUi {
         let typing = ctx.memory(|m| m.focused().is_some()) && ctx.egui_wants_keyboard_input();
         let now_playing_open = self.now_playing || (size_class(ctx.content_rect().width()) == SizeClass::Compact && self.route() != &Route::Settings);
         let mut previous = false;
+        let mut go = None;
         ctx.input_mut(|i| {
+            // Ctrl+1…4: the rail's destinations (the way there when the
+            // rail is always hidden).
+            for (n, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4].into_iter().enumerate() {
+                if i.consume_key(Modifiers::COMMAND, key) {
+                    go = Some(n);
+                }
+            }
             if i.consume_key(Modifiers::NONE, Key::F11) {
                 self.user_fullscreen = !self.user_fullscreen;
             }
@@ -474,6 +486,9 @@ impl Md3eUi {
         if previous {
             chrome::press_previous(ctx, state, out);
         }
+        if let Some(n) = go {
+            self.chrome.nav = Some(Self::destinations()[n].clone());
+        }
         let mouse_back = ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Extra1));
         if mouse_back && !self.now_playing && !self.chrome.visualizer {
             self.back(ctx, out);
@@ -502,7 +517,17 @@ impl Md3eUi {
             theme.motion.default_spatial.without_bounce(),
         );
         let rail_w = rail::width(expansion);
-        let rail_rect = Rect::from_min_size(full.min, vec2(rail_w, full.height()));
+        // "Always hidden": the rail slides out of the layout; touching the
+        // window's left edge brings it back over the content for a moment.
+        let nav_hidden = state.prefs.nav_hidden;
+        let hide = anim::fraction(
+            &ctx,
+            egui::Id::new("rail-hidden"),
+            if nav_hidden { 1.0 } else { 0.0 },
+            theme.motion.default_spatial.without_bounce(),
+        );
+        let rail_slot = rail_w * (1.0 - hide);
+        let rail_rect = Rect::from_min_size(full.min - vec2(rail_w - rail_slot, 0.0), vec2(rail_w, full.height()));
 
         // Supporting pane (inline on Large/XL).
         let inline_pane = class >= SizeClass::Large;
@@ -526,60 +551,17 @@ impl Md3eUi {
         .max(0.0);
         let gap = 24.0 * (pane_w / 360.0).min(1.0);
         let content = Rect::from_min_max(
-            pos2(rail_rect.right(), full.top()),
+            pos2(full.left() + rail_slot, full.top()),
             pos2(full.right() - pane_w - gap, full.bottom()),
         );
         self.content_rect = content;
 
-        // Rail.
-        let route = self.route().clone();
-        let selected = match route {
-            Route::Home => Some(0),
-            Route::Library(_) | Route::Release(_) | Route::Artist(_) | Route::Playlist(_) => {
-                Some(1)
-            }
-            Route::Downloads(_) => Some(2),
-            Route::Settings => None,
-        };
-        let pending = state.downloads.confirm.len() as u32;
-        let items = [
-            RailItem { icon: Icon::Home, label: "Главная", badge: None },
-            RailItem { icon: Icon::LibraryMusic, label: "Библиотека", badge: None },
-            RailItem { icon: Icon::Download, label: "Загрузки", badge: Some(pending) },
-        ];
-        let bottom = [RailItem { icon: Icon::Settings, label: "Настройки", badge: None }];
-        let rail_out = ui
-            .scope_builder(UiBuilder::new().max_rect(rail_rect), |ui| {
-                ui.set_clip_rect(rail_rect);
-                NavRail {
-                    id: egui::Id::new("md3e-rail"),
-                    expansion,
-                    fab: Some((Icon::Add, "Добавить")),
-                    items: &items,
-                    bottom: &bottom,
-                    selected,
-                    bottom_selected: (route == Route::Settings).then_some(0),
-                }
-                .show(ui)
-            })
-            .inner;
-        if let Some(i) = rail_out.clicked {
-            let r = [
-                Route::Home,
-                Route::Library(Default::default()),
-                Route::Downloads(Default::default()),
-            ][i]
-                .clone();
-            self.navigate(&ctx, r, out);
+        if hide < 0.999 {
+            self.rail(ui, rail_rect, expansion, state, out);
         }
-        if rail_out.bottom_clicked.is_some() {
-            self.navigate(&ctx, Route::Settings, out);
-        }
-        if let Some(fab) = &rail_out.fab {
-            self.pages.add_menu(ui, fab, out);
-        }
-        // Rail collapse toggle on Large+, in the rail's top space.
-        if class >= SizeClass::Large {
+        // Rail collapse toggle on Large+, in the rail's top space (gone
+        // with the rail when it is always hidden).
+        if class >= SizeClass::Large && !nav_hidden && hide < 0.001 {
             // Centred over the FAB icon (x 48 collapsed, 40 expanded).
             let r = Rect::from_min_size(rail_rect.min + vec2(28.0 - 8.0 * expansion, 2.0), vec2(40.0, 40.0));
             let mut tui = ui.new_child(UiBuilder::new().max_rect(r).id_salt("rail-toggle"));
@@ -595,6 +577,12 @@ impl Md3eUi {
                 self.rail_expanded = !expanded;
             }
         }
+        if nav_hidden && hide >= 0.999 {
+            self.rail_peek(&ctx, full, expansion, state, out);
+        } else {
+            self.rail_peek = false;
+        }
+        let route = self.route().clone();
 
         // Content panel: search bar on top, page under it, player floating.
         let margin = class.margin();
@@ -817,6 +805,122 @@ impl Md3eUi {
     pub fn set_bands(&mut self, bands: &[f32]) {
         self.chrome.bands.clear();
         self.chrome.bands.extend_from_slice(bands);
+    }
+}
+
+/// How close to the window's left edge the pointer has to be to bring back
+/// an always-hidden rail.
+const PEEK_EDGE: f32 = 8.0;
+
+impl Md3eUi {
+    /// The rail's destinations, in order: Главная, Библиотека, Загрузки,
+    /// then Настройки at the bottom (also Ctrl+1…4).
+    fn destinations() -> [Route; 4] {
+        [
+            Route::Home,
+            Route::Library(Default::default()),
+            Route::Downloads(Default::default()),
+            Route::Settings,
+        ]
+    }
+
+    /// Draws the rail in `rail_rect` and handles its clicks. True when a
+    /// destination was picked.
+    fn rail(&mut self, ui: &mut Ui, rail_rect: Rect, expansion: f32, state: &ViewState, out: &mut Vec<Command>) -> bool {
+        let ctx = ui.ctx().clone();
+        let route = self.route().clone();
+        let selected = match route {
+            Route::Home => Some(0),
+            Route::Library(_) | Route::Release(_) | Route::Artist(_) | Route::Playlist(_) => {
+                Some(1)
+            }
+            Route::Downloads(_) => Some(2),
+            Route::Settings => None,
+        };
+        let pending = state.downloads.confirm.len() as u32;
+        let items = [
+            RailItem { icon: Icon::Home, label: "Главная", badge: None },
+            RailItem { icon: Icon::LibraryMusic, label: "Библиотека", badge: None },
+            RailItem { icon: Icon::Download, label: "Загрузки", badge: Some(pending) },
+        ];
+        let bottom = [RailItem { icon: Icon::Settings, label: "Настройки", badge: None }];
+        let rail_out = ui
+            .scope_builder(UiBuilder::new().max_rect(rail_rect), |ui| {
+                ui.set_clip_rect(rail_rect);
+                NavRail {
+                    id: egui::Id::new("md3e-rail"),
+                    expansion,
+                    fab: Some((Icon::Add, "Добавить")),
+                    items: &items,
+                    bottom: &bottom,
+                    selected,
+                    bottom_selected: (route == Route::Settings).then_some(0),
+                }
+                .show(ui)
+            })
+            .inner;
+        let picked = rail_out
+            .clicked
+            .or(rail_out.bottom_clicked.map(|_| 3))
+            .map(|i| Self::destinations()[i].clone());
+        if let Some(r) = picked.clone() {
+            self.navigate(&ctx, r, out);
+        }
+        if let Some(fab) = &rail_out.fab {
+            self.pages.add_menu(ui, fab, out);
+        }
+        picked.is_some()
+    }
+
+    /// With the rail always hidden: touching the window's left edge slides
+    /// it in over the content, like a modal drawer; it slides away when the
+    /// pointer leaves it or a destination is picked.
+    fn rail_peek(&mut self, ctx: &Context, full: Rect, expansion: f32, state: &ViewState, out: &mut Vec<Command>) {
+        let theme = Theme::get(ctx);
+        let s = theme.scheme;
+        let w = rail::width(expansion);
+        let shown = Rect::from_min_size(full.min, vec2(w, full.height()));
+        let menu_open = ctx
+            .data(|d| d.get_temp::<bool>(egui::Id::new("add-fab-menu").with("open")))
+            .unwrap_or(false);
+        let covered = self.now_playing || self.chrome.np_covering || self.chrome.visualizer;
+        let dragging = ctx.dragged_id().is_some();
+        self.rail_peek = match ctx.pointer_hover_pos() {
+            _ if covered => false,
+            Some(p) if !dragging && p.x <= full.left() + PEEK_EDGE && full.y_range().contains(p.y) => true,
+            Some(p) => self.rail_peek && (menu_open || shown.expand(24.0).contains(p)),
+            None => self.rail_peek && menu_open,
+        };
+        let k = anim::fraction(
+            ctx,
+            egui::Id::new("rail-peek"),
+            if self.rail_peek { 1.0 } else { 0.0 },
+            theme.motion.default_spatial,
+        );
+        if k <= 0.001 {
+            return;
+        }
+        // Out of sight (shadow included) at 0.
+        let rect = shown.translate(vec2(-(w + 24.0) * (1.0 - k), 0.0));
+        let picked = egui::Area::new(egui::Id::new("md3e-rail-peek"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(full.min)
+            .constrain(false)
+            .fade_in(false)
+            .show(ctx, |ui| {
+                use crate::components::{paint, paint::Radii};
+                let r = crate::tokens::shape::EXTRA_LARGE;
+                let radii = Radii([0.0, r, r, 0.0]);
+                paint::shadow(ui.painter(), rect, radii, crate::tokens::Elevation::Level2);
+                // `surface`, like the rail's own background, so the FAB
+                // menu's backdrop matches it.
+                paint::container(ui.painter(), rect, radii, s.surface, egui::Stroke::NONE);
+                self.rail(ui, rect, expansion, state, out)
+            })
+            .inner;
+        if picked {
+            self.rail_peek = false;
+        }
     }
 }
 

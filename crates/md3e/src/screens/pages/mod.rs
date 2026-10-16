@@ -479,14 +479,21 @@ impl PageState {
             .toasts
             .iter()
             .map(|t| {
-                let i = SnackbarItem::new(t.id, &t.text);
+                let i = SnackbarItem::new(t.id, &t.text).kind(match t.kind {
+                    nikgob_view::ToastKind::Info => crate::components::SnackbarKind::Info,
+                    nikgob_view::ToastKind::Success => crate::components::SnackbarKind::Success,
+                    nikgob_view::ToastKind::Working => crate::components::SnackbarKind::Working,
+                    nikgob_view::ToastKind::Error => crate::components::SnackbarKind::Error,
+                });
                 match &t.action {
                     Some((label, _)) => i.action(label),
                     None => i,
                 }
             })
             .collect();
-        let ev = SnackbarHost::new("toasts").show(ctx, area, 64.0 + 16.0 + 16.0, &items);
+        let ev = SnackbarHost::new("toasts")
+            .show_close(true)
+            .show(ctx, area, 64.0 + 16.0 + 16.0, &items);
         if let Some(id) = ev.action_clicked
             && let Some(t) = state.toasts.iter().find(|t| t.id == id)
             && let Some((_, cmd)) = &t.action

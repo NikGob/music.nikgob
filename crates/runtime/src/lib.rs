@@ -336,9 +336,11 @@ impl Worker {
 
     fn toast(&mut self, text: impl Into<String>, action: Option<(String, Command)>) {
         self.toast_id += 1;
+        let text = text.into();
         let t = Toast {
             id: self.toast_id,
-            text: text.into(),
+            kind: nikgob_view::ToastKind::guess(&text),
+            text,
             action,
             at: Instant::now(),
         };
