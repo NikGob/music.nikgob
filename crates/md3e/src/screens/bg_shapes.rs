@@ -11,6 +11,7 @@
 //! reopening Now Playing continues where it was; nothing moves while paused
 //! (bouncing shapes still land).
 
+use std::borrow::Cow;
 use std::f32::consts::TAU;
 
 use egui::{Color32, Rect, Shape, Ui, pos2, vec2};
@@ -44,6 +45,12 @@ const POOL: [MaterialShape; 21] = [
     MaterialShape::Puffy,
     MaterialShape::Heart,
 ];
+
+/// The shapes the background draws from.
+#[cfg(test)]
+pub(crate) fn pool() -> &'static [MaterialShape] {
+    &POOL
+}
 
 /// Smallest and largest shape (px at a 900 px tall window, before the
 /// user's size).
@@ -192,6 +199,11 @@ pub fn paint(ui: &Ui, rect: Rect, prefs: &Prefs, playing: bool, kick: f32, trans
     let mut busy = false;
     if moving {
         busy = step(&mut f, mode, dt * speed, scale, playing, kick, transients, bass, react, w, h);
+    } else if mode == BgShapes::Bounce {
+        // Nothing falls without motion: they lie where they would land.
+        for b in &mut f.bodies {
+            b.y = h - b.size * scale * 0.5;
+        }
     }
     draw(ui, rect, &f, mode, prefs, scale);
     ctx.data_mut(|d| d.insert_temp(id, f));
@@ -229,13 +241,16 @@ fn step(
                 let grounded = b.y >= floor - 0.5 && b.vy.abs() < 1.0;
                 if grounded {
                     b.y = floor;
+                    b.x += b.vx * dt;
                     b.vx *= (-dt / 0.15).exp();
                     b.vr *= (-dt / 0.1).exp();
                     // Lie flat-ish: settle the turn towards the nearest
                     // quarter.
                     let target = (b.rot / 90.0).round() * 90.0;
                     b.rot += (target - b.rot) * (1.0 - (-dt / 0.2).exp());
-                    let hit = lvl.max(kick * 0.7) * react;
+                    // The kick lifts the bass shapes most; the others
+                    // mostly follow their own band.
+                    let hit = lvl.max(kick * 0.7 * (1.0 - b.band)) * react;
                     if playing && b.cooldown <= 0.0 && hit > 0.35 {
                         // Small ones jump higher.
                         let lift = (MAX_SIZE / b.size).sqrt();
@@ -350,13 +365,13 @@ fn draw(ui: &Ui, rect: Rect, f: &Field, mode: BgShapes, prefs: &Prefs, scale: f3
         let (bw, bh) = (size * swell * sx, size * swell * sy);
         let center = pos2(rect.left() + b.x, rect.top() + b.y + (size - bh) * 0.5);
         let shape_rect = Rect::from_center_size(center, vec2(bw, bh));
-        let cubics = if b.morph < 1.0 {
+        let cubics: Cow<'_, [_]> = if b.morph < 1.0 {
             // Ease out with a touch of overshoot.
             let x = b.morph;
             let t = 1.0 - (-6.0 * x).exp() * (7.0 * x).cos();
-            pair_morph(POOL[b.from], POOL[b.shape]).as_cubics(t.clamp(0.0, 1.1))
+            Cow::Owned(pair_morph(POOL[b.from], POOL[b.shape]).as_cubics(t.clamp(0.0, 1.1)))
         } else {
-            shape_cubics(POOL[b.shape]).to_vec()
+            Cow::Borrowed(shape_cubics(POOL[b.shape]))
         };
         let rot = b.rot.to_radians().rem_euclid(TAU);
         let base = (alphas[b.color] * opacity).min(1.0);

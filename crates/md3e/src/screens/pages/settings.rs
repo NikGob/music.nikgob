@@ -145,8 +145,8 @@ fn shape_grid(ui: &mut Ui, id: &str, selected: impl Fn(CoverShape) -> bool) -> O
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
         for &c in CoverShape::shapes() {
             let Some(m) = now_playing::material(c) else { continue };
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), Sense::click());
-            let resp = ui.interact(rect, egui::Id::new((id, c)), Sense::click()).on_hover_text(c.label()).union(resp);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), Sense::hover());
+            let resp = ui.interact(rect, egui::Id::new((id, c)), Sense::click()).on_hover_text(c.label());
             let on = selected(c);
             let painter = ui.painter();
             painter.rect_filled(rect, 16.0, if on { s.secondary_container } else { s.surface_container_high });

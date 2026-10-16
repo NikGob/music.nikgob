@@ -642,15 +642,24 @@ fn cava_targets(c: &mut Cava, bands: &[f32], active: bool, peak_k: f32, floor_k:
 }
 
 /// The cover outline turning into another shape (a new random shape, a
-/// double click): `(from, to, t)` while it lasts. Remembers the last shape
+/// double click): `(from, to, t)` while it lasts. Only while the outline is
+/// fully the playing shape (`live`): a change during a pause or its morph
+/// just shows the new shape, and a pause drops a swap under way, so a
+/// resume never jumps back to a half-way blend. Remembers the last shape
 /// shown, so call it every frame.
-fn shape_swap(ctx: &egui::Context, shape: Option<MaterialShape>, reduced: bool) -> Option<(MaterialShape, MaterialShape, f32)> {
+fn shape_swap(
+    ctx: &egui::Context,
+    shape: Option<MaterialShape>,
+    live: bool,
+    reduced: bool,
+) -> Option<(MaterialShape, MaterialShape, f32)> {
     const DURATION: f64 = 0.65;
     let id = egui::Id::new("np-shape-swap");
     let now = anim::now(ctx);
     let (last, from, start): (Option<MaterialShape>, Option<MaterialShape>, f64) =
         ctx.data(|d| d.get_temp(id)).unwrap_or((shape, None, 0.0));
     let (from, start) = if last != shape { (last, now) } else { (from, start) };
+    let from = from.filter(|_| live && !reduced);
     ctx.data_mut(|d| d.insert_temp(id, (shape, from, start)));
     let (Some(from), Some(to)) = (from, shape) else { return None };
     let x = ((now - start) / DURATION) as f32;
@@ -879,7 +888,7 @@ pub fn show(
     let shown = morph.clamp(0.0, 1.0);
     let current = p.current.as_ref();
     let shape = cover_shape(&ctx, prefs.cover_shape, &prefs.random_shapes, current);
-    let swap = shape_swap(&ctx, shape, theme.reduced_motion);
+    let swap = shape_swap(&ctx, shape, morph >= 0.999, theme.reduced_motion);
     let uri = current.and_then(|t| t.cover.as_ref()).map(|c| c.uri());
     let period = if prefs.cover_spin && motion { 48.0 } else { 0.0 };
     let spin = turn(ui, "np-cover-angle", playing, bass, period, prefs.cover_ccw);
@@ -891,7 +900,7 @@ pub fn show(
     let outline = match swap {
         // Turned by the raw spin: a full turn or whole lobes of either
         // shape look the same, so neither end of the swap jumps.
-        Some((from, to, t)) if morph >= 0.999 => Outline::swap(from, to, t, shaped, spin),
+        Some((from, to, t)) => Outline::swap(from, to, t, shaped, spin),
         _ => Outline::new(shape, morph, shaped, angle),
     };
     let mega_outline = Outline::new(shape, morph, mega.cover, 0.0);
@@ -969,7 +978,8 @@ pub fn show(
         match ctx.data(|d| d.get_temp::<(Tap, f64)>(tap_id)) {
             Some((tap, at)) if now - at > delay => {
                 ctx.data_mut(|d| d.remove::<(Tap, f64)>(tap_id));
-                Some(tap)
+                // Left from before the player was closed: drop it.
+                (now - at < delay + 0.25).then_some(tap)
             }
             Some((_, at)) => {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64((at + delay - now).max(0.0) + 0.01));
@@ -1425,6 +1435,23 @@ mod tests {
         // Silence and pause: nothing.
         assert!(cava_targets(&mut c, &[0.01; 64], true, 0.05, 0.05).iter().all(|v| *v == 0.0));
         assert!(cava_targets(&mut c, &bands, false, 0.05, 0.05).iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn every_pair_of_shapes_morphs() {
+        // `Morph::new` panics on polygons it cannot match; the cover swaps
+        // between any two cover shapes, the background between its pool.
+        let mut shapes: Vec<MaterialShape> = CoverShape::shapes().iter().filter_map(|c| material(*c)).collect();
+        shapes.extend(super::super::bg_shapes::pool());
+        shapes.sort();
+        shapes.dedup();
+        for &a in &shapes {
+            for &b in &shapes {
+                if a != b {
+                    assert!(!pair_morph(a, b).as_cubics(0.5).is_empty(), "{a:?} -> {b:?}");
+                }
+            }
+        }
     }
 
     #[test]
