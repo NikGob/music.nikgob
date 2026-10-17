@@ -171,7 +171,7 @@ fn spotify_export_imports_history_likes_and_playlists_once() {
     // Again: nothing twice. An unlike and a dismissal are respected.
     let before = snapshot(&lib);
     let sub = import(&rt, Command::ImportExportFiles(fixtures().join("spotify")));
-    assert!(sub.contains("новых: 0 прослушиваний, 0 лайков, 0 плейлистов"), "{sub}");
+    assert!(sub.contains("новых: ничего"), "{sub}");
     assert_eq!(snapshot(&lib), before);
     rt.send(Command::Like(nikgob_core::model::LikeTarget::Track(michi), false));
     wait_until("the unlike", || !lib.is_liked(michi).unwrap());
@@ -305,7 +305,7 @@ fn import_from_the_api_and_again() {
 
     let before = snapshot(&lib);
     let sub = import(&rt, Command::ImportFromService(Service::Spotify));
-    assert!(sub.contains("новых: 0 прослушиваний, 0 лайков, 0 плейлистов"), "{sub}");
+    assert!(sub.contains("новых: ничего"), "{sub}");
     assert_eq!(snapshot(&lib), before);
 }
 

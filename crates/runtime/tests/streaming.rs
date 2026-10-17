@@ -1,7 +1,9 @@
 //! Stage 3 runtime flows on the fake services: unified search merging,
 //! YouTube sound for a Spotify track without Spotify sound, like → wishlist
 //! → torrent → the file on the same track, no torrent, dismiss, saving from
-//! YouTube, likes both ways without echo, sharing.
+//! YouTube, likes both ways without echo, sharing; «Скачать» without a like,
+//! likes that download nothing, the undo of a dismissal, the service chips
+//! of the search, following a service's playlist.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -11,15 +13,15 @@ use nikgob_core::indexer::{
     BoxFuture, Candidate, CandidateHandle, Indexer, IndexerError, SearchQuery, TorrentPayload,
 };
 use nikgob_core::model::{
-    Codec, LikeTarget, Source, SourceKind, TrackId, WishlistOrigin, WishlistStatus, score,
+    Codec, LikeTarget, Source, SourceKind, TrackId, WishlistOrigin, WishlistScope, WishlistStatus, score,
 };
-use nikgob_core::streaming::{FakeService, Service, StreamService, StreamTrack};
+use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service, StreamService, StreamTrack};
 use nikgob_library::Library;
 use nikgob_runtime::{
     ImportConfig, ImportSetup, PlayRequest, PlaySource, Playback, Runtime,
     RuntimeConfig,
 };
-use nikgob_view::{Command, Prefs, ShareTarget, ViewState};
+use nikgob_view::{Command, Link, Prefs, Route, SearchSources, SettingLink, ShareTarget, ViewState};
 
 fn write_wav(path: &Path, secs: f32) {
     let rate = 44_100;
@@ -533,4 +535,159 @@ fn an_album_says_the_same_count_on_its_card_its_page_and_in_the_library() {
     let release = card.release.unwrap();
     let p = lib.release_progress(release).unwrap().unwrap();
     assert_eq!((p.local, p.in_library, p.total), (1, 2, 4));
+}
+
+/// The last toast whose text starts with `start`.
+fn toast_starting(rt: &Runtime, start: &str) -> Option<nikgob_view::Toast> {
+    rt.state().toasts.iter().rev().find(|t| t.text.starts_with(start)).cloned()
+}
+
+fn album_items(lib: &Library, release: nikgob_core::model::ReleaseId) -> Vec<nikgob_core::model::WishlistItem> {
+    lib.wishlist_for_release(release)
+        .unwrap()
+        .into_iter()
+        .filter(|i| i.scope == WishlistScope::Album)
+        .collect()
+}
+
+#[test]
+fn download_without_a_like_waits_for_torrents_and_leaves_the_likes_alone() {
+    let lib = Library::open_in_memory().unwrap();
+    let track = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-gruppa-2")).unwrap();
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], false);
+    r.rt.send(Command::DownloadTracks(vec![track]));
+    wait_for(&r.rt, "the toast", |s| s.toasts.iter().any(|t| t.text.starts_with("В «Хочу скачать»")));
+    let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
+    assert_eq!(
+        (item.origin, item.scope, item.status),
+        (WishlistOrigin::Manual, WishlistScope::Track, WishlistStatus::New)
+    );
+    assert!(!lib.is_liked(track).unwrap(), "no like");
+    assert_eq!(lib.track_in_library(track).unwrap(), Some(false), "in the library once its file is here");
+    // No torrents: the toast says so and leads to their settings.
+    let toast = toast_starting(&r.rt, "В «Хочу скачать»").unwrap();
+    assert!(toast.text.ends_with("скачается, когда подключишь торренты"), "{}", toast.text);
+    assert_eq!(toast.open, Some(("Настроить".to_owned(), Link::Setting(SettingLink::Torrents))));
+
+    // Asked again: it is on its way already, still one item.
+    r.rt.send(Command::DownloadTracks(vec![track]));
+    wait_for(&r.rt, "the second toast", |s| s.toasts.iter().any(|t| t.text == "Уже в «Хочу скачать»"));
+    assert_eq!(lib.wishlist_for_track(track).unwrap().len(), 1);
+
+    // A like and its undo leave the download alone.
+    r.rt.send(Command::Like(LikeTarget::Track(track), true));
+    r.rt.send(Command::Like(LikeTarget::Track(track), false));
+    wait_for(&r.rt, "the unlike", |s| s.toasts.iter().any(|t| t.text == "Убрано из Любимых"));
+    assert!(!lib.is_liked(track).unwrap());
+    assert_eq!(wish_status(&lib, track), Some(WishlistStatus::New), "«Скачать» stays");
+}
+
+#[test]
+fn download_a_stream_track_and_a_stream_album() {
+    let lib = Library::open_in_memory().unwrap();
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], false);
+    // A row of the search: known to the runtime by its remote id.
+    r.rt.send(Command::Search("кино".into()));
+    wait_for(&r.rt, "the section", |s| s.search.streams.iter().any(|x| !x.searching && !x.tracks.is_empty()));
+    let row = r.rt.state().search.streams[0].tracks[1].clone();
+    r.rt.send(Command::DownloadStream { tracks: vec![row.remote.clone()] });
+    wait_until("the track item", || {
+        lib.track_by_remote(&row.remote).unwrap().is_some_and(|t| wish_status(&lib, t).is_some())
+    });
+    let track = lib.track_by_remote(&row.remote).unwrap().unwrap();
+    assert!(!lib.is_liked(track).unwrap());
+    assert_eq!(lib.wishlist_for_track(track).unwrap()[0].origin, WishlistOrigin::Manual);
+
+    // The album: one album item for the songs without a file.
+    let album = RemoteId::new(Service::Spotify, "sp-alb-gruppa");
+    r.rt.send(Command::DownloadStreamAlbum(album.clone()));
+    wait_until("the album item", || {
+        lib.release_by_remote(&album).unwrap().is_some_and(|rel| !album_items(&lib, rel).is_empty())
+    });
+    let release = lib.release_by_remote(&album).unwrap().unwrap();
+    let items = album_items(&lib, release);
+    assert_eq!(items.len(), 1);
+    assert_eq!((items[0].origin, items[0].status), (WishlistOrigin::Manual, WishlistStatus::New));
+    assert!(lib.liked_track_ids().unwrap().is_empty(), "nothing liked");
+    // From the library album's page: queued already.
+    r.rt.send(Command::DownloadRelease(release));
+    wait_for(&r.rt, "the toast", |s| s.toasts.iter().filter(|t| t.text == "Уже в «Хочу скачать»").count() == 1);
+    assert_eq!(album_items(&lib, release).len(), 1);
+}
+
+#[test]
+fn with_likes_that_download_nothing_a_like_is_only_a_like() {
+    let lib = Library::open_in_memory().unwrap();
+    let track = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-gruppa-3")).unwrap();
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], false);
+    r.rt.send(Command::SetPrefs(Box::new(Prefs { like_downloads: false, ..Prefs::default() })));
+    r.rt.send(Command::Like(LikeTarget::Track(track), true));
+    wait_for(&r.rt, "the toast", |s| s.toasts.iter().any(|t| t.text == "Добавлено в Любимые"));
+    assert!(lib.is_liked(track).unwrap());
+    assert!(lib.wishlist_for_track(track).unwrap().is_empty(), "nothing to download");
+    // «Скачать» downloads all the same.
+    r.rt.send(Command::DownloadTracks(vec![track]));
+    wait_until("the item", || wish_status(&lib, track) == Some(WishlistStatus::New));
+}
+
+#[test]
+fn a_dismissed_download_comes_back_with_its_undo() {
+    let lib = Library::open_in_memory().unwrap();
+    let track = lib.upsert_stream_track(&find(&FakeService::youtube(), "yt-gruppa-2")).unwrap();
+    let r = rig(&lib, vec![Arc::new(FakeService::youtube().logged_out())], false);
+    r.rt.send(Command::DownloadTracks(vec![track]));
+    wait_until("the item", || wish_status(&lib, track).is_some());
+    let id = lib.wishlist_for_track(track).unwrap()[0].id;
+    r.rt.send(Command::WishlistDismiss(vec![id]));
+    wait_for(&r.rt, "the undo", |s| {
+        s.toasts.iter().any(|t| t.action.as_ref().is_some_and(|(_, c)| *c == Command::WishlistRestore(vec![id])))
+    });
+    assert_eq!(wish_status(&lib, track), Some(WishlistStatus::Dismissed));
+    r.rt.send(Command::WishlistRestore(vec![id]));
+    wait_until("back", || wish_status(&lib, track) == Some(WishlistStatus::New));
+}
+
+#[test]
+fn under_a_service_chip_its_songs_in_the_library_stay_in_its_list() {
+    let lib = Library::open_in_memory().unwrap();
+    let omt = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-discovery-1")).unwrap();
+    lib.add_source(&Source::new(omt, SourceKind::LocalFile, "Music/omt.opus", Codec::Opus))
+        .unwrap();
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], false);
+    r.rt.send(Command::SetSearchSources(SearchSources {
+        library: false,
+        spotify: true,
+        youtube: false,
+        torrents: false,
+    }));
+    r.rt.send(Command::Search("daft".into()));
+    wait_for(&r.rt, "the Spotify section", |s| {
+        s.search.query == "daft"
+            && s.search.streams.iter().any(|x| x.service == Service::Spotify && !x.searching && !x.tracks.is_empty())
+    });
+    let s = r.rt.state();
+    assert!(s.search.tracks.is_empty(), "no library section under the chip");
+    let sp = s.search.streams.iter().find(|x| x.service == Service::Spotify).unwrap();
+    let row = sp.tracks.iter().find(|t| t.title == "One More Time").expect("kept under the chip");
+    assert!(row.has_local, "marked as on disk");
+}
+
+#[test]
+fn a_followed_playlist_is_linked_in_follow_mode() {
+    let lib = Library::open_in_memory().unwrap();
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], false);
+    let remote = RemoteId::new(Service::Spotify, "sp-pl-mix");
+    r.rt.send(Command::FollowStreamPlaylist(remote.clone()));
+    wait_for(&r.rt, "the toast", |s| s.toasts.iter().any(|t| t.text == "«Fake Mix» в библиотеке"));
+    let link = lib.playlist_by_remote(&remote).unwrap().unwrap();
+    assert_eq!(link.sync_mode, PlaylistSyncMode::Follow, "someone else's playlist: follow");
+    assert_eq!(link.remote_version.as_deref(), Some("1"));
+    assert_eq!(lib.get_playlist(link.playlist_id).unwrap().unwrap().name, "Fake Mix");
+    assert_eq!(lib.playlist_entries(link.playlist_id, 0, 100).unwrap().len(), 3);
+    let toast = toast_starting(&r.rt, "«Fake Mix» в библиотеке").unwrap();
+    assert_eq!(toast.open, Some(("Открыть".to_owned(), Link::Route(Route::Playlist(link.playlist_id)))));
+    // Again: it is there already, not a second copy.
+    r.rt.send(Command::FollowStreamPlaylist(remote.clone()));
+    wait_for(&r.rt, "the second toast", |s| s.toasts.iter().any(|t| t.text == "«Fake Mix» уже в библиотеке"));
+    assert_eq!(lib.list_playlists().unwrap().iter().filter(|p| p.name == "Fake Mix").count(), 1);
 }
