@@ -170,7 +170,7 @@ impl Worker {
             self.publish(|s, _| {
                 s.search.torrents = v::TorrentSearch {
                     query: q,
-                    error: Some("Prowlarr не настроен — адрес и ключ в Настройках → Торренты".into()),
+                    error: Some("Prowlarr не настроен — адрес и ключ в Настройках → Источники → Торренты".into()),
                     ..Default::default()
                 };
             });
