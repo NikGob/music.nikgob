@@ -1,0 +1,5 @@
+{ "data": [
+  { "id": 9100200300, "title": "Лёд и снег", "public": true, "nb_tracks": 40, "link": "https://www.deezer.com/playlist/9100200300",
+    "picture_xl": "https://cdn-images.dzcdn.net/images/playlist/0f0e0d0c0b0a09080706050403020100/1000x1000-000000-80-0-0.jpg",
+    "checksum": "c0ffee", "user": { "id": 5, "name": "Deezer Editor", "type": "user" }, "type": "playlist" }
+], "total": 1 }

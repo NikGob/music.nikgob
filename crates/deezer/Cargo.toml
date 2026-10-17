@@ -1,0 +1,23 @@
+[package]
+name = "nikgob-deezer"
+description = "The Deezer catalogue (public API, no key, no login) as a StreamService: search, albums, artists, playlists, ISRCs. No sound: its tracks play from YouTube Music."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nikgob-core.workspace = true
+log.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "query"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "test-util"] }
+wiremock = "0.6"
+
+[lints]
+workspace = true

@@ -1,0 +1,9 @@
+{ "id": 9100200300, "title": "Лёд и снег", "description": "", "duration": 600, "public": true, "nb_tracks": 3,
+  "picture_xl": "https://cdn-images.dzcdn.net/images/playlist/0f0e0d0c0b0a09080706050403020100/1000x1000-000000-80-0-0.jpg",
+  "checksum": "c0ffee", "creator": { "id": 5, "name": "Deezer Editor", "type": "user" }, "type": "playlist",
+  "tracks": { "data": [
+    { "id": 1551523502, "title": "Лёд", "duration": 186, "artist": { "id": 13612387, "name": "Монеточка" },
+      "album": { "id": 278000001, "title": "Раскраски для взрослых", "md5_image": "4b2c1f0e0a1b2c3d4e5f60718293a4b5" }, "type": "track" },
+    { "id": 3135553, "title": "One More Time", "duration": 320, "artist": { "id": 27, "name": "Daft Punk" },
+      "album": { "id": 302127, "title": "Discovery" }, "type": "track" }
+  ] } }

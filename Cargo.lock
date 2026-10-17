@@ -4702,6 +4702,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nikgob-deezer"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "nikgob-core",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "nikgob-import"
 version = "0.1.0"
 dependencies = [

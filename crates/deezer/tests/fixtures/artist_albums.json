@@ -1,0 +1,6 @@
+{ "data": [
+  { "id": 302127, "title": "Discovery", "cover_xl": "https://cdn-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/1000x1000-000000-80-0-0.jpg",
+    "release_date": "2001-03-07", "record_type": "album", "type": "album" },
+  { "id": 6575789, "title": "Random Access Memories", "release_date": "2013-05-17", "record_type": "album", "md5_image": "311bba0fc112d15f72c8b5a65f0456c1", "type": "album" },
+  { "id": 1111, "title": "Get Lucky (Radio Edit)", "release_date": "2013-04-19", "record_type": "single", "type": "album" }
+], "total": 3 }

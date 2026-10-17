@@ -1,0 +1,7 @@
+{ "data": [
+  { "id": 13612387, "name": "Монеточка", "link": "https://www.deezer.com/artist/13612387",
+    "picture_xl": "https://cdn-images.dzcdn.net/images/artist/9a8b7c6d5e4f30211223344556677889/1000x1000-000000-80-0-0.jpg",
+    "nb_album": 14, "nb_fan": 120345, "radio": true, "type": "artist" },
+  { "id": 4242, "name": "Лёд и Пламя", "picture_xl": "https://cdn-images.dzcdn.net/images/artist//1000x1000-000000-80-0-0.jpg",
+    "nb_album": 1, "nb_fan": 3, "type": "artist" }
+], "total": 2 }

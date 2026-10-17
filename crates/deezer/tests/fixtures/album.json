@@ -1,0 +1,15 @@
+{ "id": 302127, "title": "Discovery", "upc": "724384960650", "link": "https://www.deezer.com/album/302127",
+  "cover_xl": "https://cdn-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/1000x1000-000000-80-0-0.jpg",
+  "md5_image": "2e018122cb56986277102d2041a592c8", "genre_id": 113, "label": "Parlophone (France)", "nb_tracks": 3,
+  "duration": 836, "fans": 300000, "release_date": "2001-03-07", "record_type": "album", "available": true,
+  "explicit_lyrics": false,
+  "artist": { "id": 27, "name": "Daft Punk", "picture_xl": "https://cdn-images.dzcdn.net/images/artist/f2bc007e9133c946ac3c3907ddc5d2ea/1000x1000-000000-80-0-0.jpg", "type": "artist" },
+  "type": "album",
+  "tracks": { "data": [
+    { "id": 3135553, "readable": true, "title": "One More Time", "duration": 320, "rank": 900000, "md5_image": "2e018122cb56986277102d2041a592c8",
+      "artist": { "id": 27, "name": "Daft Punk" }, "type": "track" },
+    { "id": 3135554, "readable": true, "title": "Aerodynamic", "duration": 212, "rank": 700000,
+      "artist": { "id": 27, "name": "Daft Punk" }, "type": "track" },
+    { "id": 3135556, "readable": true, "title": "Digital Love", "duration": 301, "rank": 800000,
+      "artist": { "id": 27, "name": "Daft Punk" }, "type": "track" }
+  ] } }

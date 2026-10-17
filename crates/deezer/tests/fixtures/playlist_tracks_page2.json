@@ -1,0 +1,4 @@
+{ "data": [
+    { "id": 3135556, "title": "Digital Love", "duration": 301, "artist": { "id": 27, "name": "Daft Punk" },
+      "album": { "id": 302127, "title": "Discovery" }, "type": "track" }
+], "total": 3 }
