@@ -10,6 +10,10 @@
 //! oldest first, until the textures fit the [budget](DEFAULT_BUDGET). The
 //! loader hands every decoded image to egui's texture loader and keeps no
 //! copy, and it reads files itself, so a cover costs only its texture.
+//!
+//! Web covers (`https://`) are loaded by the app's loader; with a
+//! [web sizer](set_web_sizer) the url is asked at the size it is drawn at
+//! (the same tiers), and they are forgotten off screen like files.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -48,6 +52,9 @@ struct Jobs {
 }
 
 struct Use {
+    /// The cover this is a size of: the file URI without its tier, or the
+    /// web url before sizing.
+    origin: String,
     /// Pass it was last drawn in.
     last: u64,
     /// Texture bytes; 0 while decoding.
@@ -61,8 +68,13 @@ struct Lru {
     budget: usize,
 }
 
+/// The url of a web cover for drawing at a tier (`None`: full size), or
+/// `None` to draw the url as it is.
+pub type WebSizer = fn(&str, Option<u32>) -> Option<String>;
+
 struct Shared {
     slots: Mutex<HashMap<String, Slot>>,
+    web_sizer: Mutex<Option<WebSizer>>,
     jobs: Mutex<Jobs>,
     lru: Mutex<Lru>,
 }
@@ -94,6 +106,7 @@ pub fn install(ctx: &Context) {
     }
     let shared = Arc::new(Shared {
         slots: Mutex::default(),
+        web_sizer: Mutex::default(),
         jobs: Mutex::default(),
         lru: Mutex::new(Lru {
             used: HashMap::new(),
@@ -117,6 +130,15 @@ pub fn set_budget(ctx: &Context, bytes: usize) {
     }
 }
 
+/// How web cover urls are sized for the tier they are drawn at (the app
+/// knows which services' urls can be resized).
+pub fn set_web_sizer(ctx: &Context, sizer: WebSizer) {
+    install(ctx);
+    if let Some(s) = shared(ctx) {
+        *lock(&s.web_sizer) = Some(sizer);
+    }
+}
+
 /// Keeps every tier of these covers loaded while off screen (the current and
 /// the next track). Replaces the previous set.
 pub fn pin<'a>(ctx: &Context, uris: impl IntoIterator<Item = &'a str>) {
@@ -134,36 +156,48 @@ pub fn texture(ctx: &Context, uri: &str, size: Vec2, zoom: f32) -> Option<SizedT
         Ok(TexturePoll::Pending { .. }) => Ok(None),
         Err(e) => Err(e),
     };
+    let web = is_web(uri);
     let shared = match shared(ctx) {
-        Some(s) if parse(uri).is_some() => s,
+        Some(s) if web || parse(uri).is_some() => s,
         _ => return load(uri).ok().flatten(),
     };
     let px = size.max_elem() * ctx.pixels_per_point() * zoom.max(1.0);
-    let wanted = match TIERS.iter().find(|t| px <= **t as f32) {
-        Some(t) => format!("{}#{t}", base(uri)),
-        None => base(uri).to_owned(),
+    let tier = TIERS.iter().find(|t| px <= **t as f32).copied();
+    let origin = if web { uri } else { base(uri) };
+    let wanted = if web {
+        let sizer = *lock(&shared.web_sizer);
+        sizer.and_then(|f| f(uri, tier)).unwrap_or_else(|| uri.to_owned())
+    } else {
+        match tier {
+            Some(t) => format!("{origin}#{t}"),
+            None => origin.to_owned(),
+        }
     };
     let pass = ctx.cumulative_pass_nr();
     match load(&wanted) {
         Ok(Some(texture)) => {
-            shared.used(&wanted, pass, texture_bytes(texture.size));
+            shared.used(&wanted, origin, pass, texture_bytes(texture.size));
             Some(texture)
         }
         Ok(None) => {
-            shared.used(&wanted, pass, 0);
-            // Another tier of the file meanwhile, so a growing cover does
+            shared.used(&wanted, origin, pass, 0);
+            // Another size of the cover meanwhile, so a growing cover does
             // not blink.
-            let other = shared.loaded_tier(base(uri))?;
+            let other = shared.loaded_tier(origin)?;
             let texture = load(&other).ok().flatten()?;
-            shared.used(&other, pass, texture_bytes(texture.size));
+            shared.used(&other, origin, pass, texture_bytes(texture.size));
             Some(texture)
         }
         Err(_) => {
             // Kept while drawn so a broken file is not decoded every pass.
-            shared.used(&wanted, pass, 0);
+            shared.used(&wanted, origin, pass, 0);
             None
         }
     }
+}
+
+fn is_web(uri: &str) -> bool {
+    uri.starts_with("https://") || uri.starts_with("http://")
 }
 
 /// The URI without its tier suffix.
@@ -220,19 +254,19 @@ fn decode(path: &Path, tier: Option<u32>) -> Result<ColorImage, String> {
 }
 
 impl Shared {
-    fn used(&self, uri: &str, pass: u64, bytes: usize) {
+    fn used(&self, uri: &str, origin: &str, pass: u64, bytes: usize) {
         let mut lru = lock(&self.lru);
-        let u = lru.used.entry(uri.to_owned()).or_insert(Use { last: pass, bytes });
+        let u = lru.used.entry(uri.to_owned()).or_insert_with(|| Use { origin: origin.to_owned(), last: pass, bytes });
         u.last = pass;
         u.bytes = bytes;
     }
 
-    /// The largest loaded tier of the file `base`.
-    fn loaded_tier(&self, base_uri: &str) -> Option<String> {
+    /// The largest loaded size of the cover `origin`.
+    fn loaded_tier(&self, origin: &str) -> Option<String> {
         let lru = lock(&self.lru);
         lru.used
             .iter()
-            .filter(|(uri, u)| u.bytes > 0 && base(uri) == base_uri)
+            .filter(|(_, u)| u.bytes > 0 && u.origin == origin)
             .max_by_key(|(_, u)| u.bytes)
             .map(|(uri, _)| uri.clone())
     }
@@ -303,7 +337,7 @@ impl Shared {
             if total > *budget {
                 let mut old: Vec<(u64, String, usize)> = used
                     .iter()
-                    .filter(|(uri, u)| !shown(u) && !pinned.contains(base(uri)))
+                    .filter(|(_, u)| !shown(u) && !pinned.contains(&u.origin))
                     .map(|(uri, u)| (u.last, uri.clone(), u.bytes))
                     .collect();
                 old.sort_unstable();
@@ -489,6 +523,65 @@ mod tests {
         show(&ctx, &uris, 48.0);
         let first = pass(&ctx, &uris, 400.0);
         assert_eq!(first[0].map(|t| t.size), Some(vec2(128.0, 128.0)));
+    }
+
+    /// Web "covers" of the size their url says (`https://x/a=w226`), ready
+    /// at once unless the url ends in `slow`; counts what was forgotten.
+    #[derive(Default)]
+    struct WebStub {
+        forgotten: Mutex<Vec<String>>,
+    }
+
+    impl ImageLoader for WebStub {
+        fn id(&self) -> &str {
+            "web-stub"
+        }
+        fn load(&self, _: &Context, uri: &str, _: SizeHint) -> ImageLoadResult {
+            if !is_web(uri) {
+                return Err(LoadError::NotSupported);
+            }
+            if uri.ends_with("slow") {
+                return Ok(ImagePoll::Pending { size: None });
+            }
+            let side: usize = uri.rsplit_once("=w").and_then(|(_, n)| n.parse().ok()).unwrap_or(640);
+            Ok(ImagePoll::Ready { image: Arc::new(ColorImage::filled([side, side], egui::Color32::RED)) })
+        }
+        fn forget(&self, uri: &str) {
+            lock(&self.forgotten).push(uri.to_owned());
+        }
+        fn forget_all(&self) {}
+        fn byte_size(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn web_covers_are_asked_at_the_drawn_size_and_forgotten_off_screen() {
+        let ctx = ctx();
+        let stub = Arc::new(WebStub::default());
+        ctx.add_image_loader(stub.clone());
+        // Resizable urls end in `=w…`; `big` stands for "full size".
+        set_web_sizer(&ctx, |url, tier| {
+            let (b, _) = url.rsplit_once("=w")?;
+            Some(match tier {
+                Some(t) if t <= 256 => format!("{b}=w226"),
+                _ => format!("{b}=w1200slow"),
+            })
+        });
+        let yt = vec!["https://g/a=w544".to_owned()];
+        let got = pass(&ctx, &yt, 48.0);
+        assert_eq!(got[0].map(|t| t.size), Some(vec2(226.0, 226.0)));
+        // Bigger: the full size is pending, the small one stands in.
+        let got = pass(&ctx, &yt, 700.0);
+        assert_eq!(got[0].map(|t| t.size), Some(vec2(226.0, 226.0)));
+        // A url the sizer leaves alone is drawn as it is.
+        let sp = vec!["https://spotify/abc".to_owned()];
+        assert_eq!(pass(&ctx, &sp, 48.0)[0].map(|t| t.size), Some(vec2(640.0, 640.0)));
+        // The pending full size scrolled away: forgotten (it leaves the
+        // download queue).
+        pass(&ctx, &sp, 48.0);
+        pass(&ctx, &sp, 48.0);
+        assert!(lock(&stub.forgotten).iter().any(|u| u == "https://g/a=w1200slow"));
     }
 
     #[test]

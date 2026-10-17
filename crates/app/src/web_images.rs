@@ -1,52 +1,94 @@
 //! Covers of streaming services (`https://` urls) for egui's image loaders.
 //!
 //! A bytes loader: the image loader egui_extras installs decodes what it
-//! returns. Fetches run on a small tokio runtime of their own, never on
-//! the UI thread; a failed url is remembered so it is not asked again
-//! every frame (the page then draws its placeholder).
+//! returns. A cover is looked up in memory, then on disk
+//! ([`DiskCache`], `data/cache/covers`), then downloaded, at most
+//! [`PARALLEL`] at a time, the most recently drawn first; covers that are no
+//! longer drawn before their turn are dropped from the queue (md3e's cover
+//! LRU forgets them). A failed download is asked again after [`RETRY`]
+//! unless the server said the image is gone (404 / 410). Finished covers
+//! ask for one repaint per batch, not one each.
+//!
+//! YouTube Music covers (Google image urls with `=w…-h…` size parameters)
+//! are asked at the size they are drawn at ([`sized_url`], given to md3e as
+//! its web sizer); Spotify's urls cannot be resized and are kept.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use egui::load::{Bytes, BytesLoadResult, BytesLoader, BytesPoll, LoadError};
 
-/// Bytes kept at most; the oldest images are dropped past it (egui keeps
-/// their decoded textures as long as they are drawn).
+use crate::cover_cache::DiskCache;
+
+/// Bytes kept in memory at most; the oldest images are dropped past it
+/// (egui keeps their decoded textures as long as they are drawn).
 const BUDGET: usize = 48 << 20;
 /// An image larger than this is not a cover.
 const MAX_BYTES: usize = 8 << 20;
+/// Downloads at once.
+pub const PARALLEL: usize = 6;
+/// A failed download is tried again after this long.
+const RETRY: Duration = Duration::from_secs(60);
+/// Finished covers within this window share one repaint.
+const REPAINT_BATCH: Duration = Duration::from_millis(40);
 
 enum Slot {
-    Pending,
-    Ready { bytes: Arc<[u8]>, mime: Option<String> },
-    Failed(String),
+    /// Being read from the disk cache.
+    Reading,
+    /// Waiting for a download slot; `seen` is the last time it was drawn.
+    Queued { seen: Instant },
+    Fetching,
+    Ready { bytes: Arc<[u8]> },
+    Failed { error: String, at: Instant, gone: bool },
 }
 
 #[derive(Default)]
-struct Cache {
+struct Counts {
+    disk: u32,
+    net: u32,
+    failed: u32,
+    logged: (u32, u32, u32),
+}
+
+#[derive(Default)]
+struct State {
     slots: HashMap<String, Slot>,
     /// Ready urls, oldest first.
-    order: Vec<String>,
+    order: VecDeque<String>,
     size: usize,
+    /// Urls in `Slot::Queued`.
+    queue: Vec<String>,
+    running: usize,
+    counts: Counts,
+}
+
+struct Inner {
+    state: Mutex<State>,
+    http: reqwest::Client,
+    disk: Option<DiskCache>,
+    ctx: egui::Context,
+    /// A repaint is already asked for the covers that finished.
+    repaint_asked: AtomicBool,
 }
 
 pub struct WebImages {
-    cache: Arc<Mutex<Cache>>,
+    inner: Arc<Inner>,
     rt: tokio::runtime::Runtime,
-    http: reqwest::Client,
 }
 
-fn lock(m: &Mutex<Cache>) -> MutexGuard<'_, Cache> {
+fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl WebImages {
     pub const ID: &'static str = egui::generate_loader_id!(WebImages);
 
-    /// Registers the loader with `ctx`; without a runtime or a client
-    /// covers simply stay placeholders.
-    pub fn install(ctx: &egui::Context) {
+    /// Registers the loader with `ctx`, caching covers in `cache_dir`;
+    /// without a runtime or a client covers simply stay placeholders.
+    pub fn install(ctx: &egui::Context, cache_dir: PathBuf) {
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("web-images")
@@ -71,55 +113,140 @@ impl WebImages {
                 return;
             }
         };
-        ctx.add_bytes_loader(Arc::new(Self { cache: Arc::default(), rt, http }));
+        let disk = match DiskCache::open(&cache_dir, crate::cover_cache::DEFAULT_LIMIT) {
+            Ok(d) => {
+                log::info!("web covers: disk cache {} ({} MB)", d.dir().display(), d.size() >> 20);
+                Some(d)
+            }
+            Err(e) => {
+                log::warn!("web covers: no disk cache at {}: {e}", cache_dir.display());
+                None
+            }
+        };
+        let inner = Arc::new(Inner {
+            state: Mutex::default(),
+            http,
+            disk,
+            ctx: ctx.clone(),
+            repaint_asked: AtomicBool::new(false),
+        });
+        let me = Arc::clone(&inner);
+        ctx.on_begin_pass("web-images", Arc::new(move |_| me.repaint_asked.store(false, Ordering::Relaxed)));
+        nikgob_md3e::covers::set_web_sizer(ctx, sized_url);
+        ctx.add_bytes_loader(Arc::new(Self { inner, rt }));
+    }
+}
+
+impl Inner {
+    /// One repaint for every cover that finishes before the next pass.
+    fn repaint(&self) {
+        if !self.repaint_asked.swap(true, Ordering::Relaxed) {
+            self.ctx.request_repaint_after(REPAINT_BATCH);
+        }
     }
 
-    fn fetch(&self, ctx: &egui::Context, uri: &str) {
-        let (cache, http, ctx, uri) = (Arc::clone(&self.cache), self.http.clone(), ctx.clone(), uri.to_owned());
-        self.rt.spawn(async move {
-            let result = async {
-                let resp = http
-                    .get(&uri)
-                    .header("Accept", "image/jpeg,image/png;q=0.9,*/*;q=0.1")
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                if !resp.status().is_success() {
-                    return Err(format!("HTTP {}", resp.status().as_u16()));
-                }
-                let mime = resp
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
-                let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-                if bytes.len() > MAX_BYTES {
-                    return Err("too large".to_owned());
-                }
-                Ok((bytes, mime))
+    fn ready(&self, s: &mut State, uri: String, bytes: Arc<[u8]>) {
+        s.size += bytes.len();
+        s.order.push_back(uri.clone());
+        s.slots.insert(uri, Slot::Ready { bytes });
+        while s.size > BUDGET && s.order.len() > 1 {
+            let Some(old) = s.order.pop_front() else { break };
+            if let Some(Slot::Ready { bytes }) = s.slots.remove(&old) {
+                s.size -= bytes.len();
             }
-            .await;
-            let mut c = lock(&cache);
-            match result {
-                Ok((bytes, mime)) => {
-                    c.size += bytes.len();
-                    c.order.push(uri.clone());
-                    c.slots.insert(uri, Slot::Ready { bytes: Arc::from(&bytes[..]), mime });
-                    while c.size > BUDGET && c.order.len() > 1 {
-                        let old = c.order.remove(0);
-                        if let Some(Slot::Ready { bytes, .. }) = c.slots.remove(&old) {
-                            c.size -= bytes.len();
+        }
+    }
+
+    /// Starts downloads while there are free slots, the most recently drawn
+    /// cover first.
+    fn pump(self: &Arc<Self>, rt: &tokio::runtime::Handle) {
+        let mut s = lock(&self.state);
+        while s.running < PARALLEL && !s.queue.is_empty() {
+            let seen = |s: &State, u: &str| match s.slots.get(u) {
+                Some(Slot::Queued { seen }) => Some(*seen),
+                _ => None,
+            };
+            let Some(i) = (0..s.queue.len()).max_by_key(|&i| seen(&s, &s.queue[i])) else { break };
+            let uri = s.queue.swap_remove(i);
+            if seen(&s, &uri).is_none() {
+                continue;
+            }
+            s.slots.insert(uri.clone(), Slot::Fetching);
+            s.running += 1;
+            let (me, h) = (Arc::clone(self), rt.clone());
+            rt.spawn(async move {
+                let result = me.download(&uri).await;
+                if let Ok(bytes) = &result
+                    && me.disk.is_some()
+                {
+                    let (me2, uri2, bytes2) = (Arc::clone(&me), uri.clone(), Arc::clone(bytes));
+                    // Off the async threads; the cover shows meanwhile.
+                    h.spawn_blocking(move || {
+                        if let Some(disk) = &me2.disk
+                            && let Err(e) = disk.put(&uri2, &bytes2)
+                        {
+                            log::debug!("web cover {uri2}: not cached: {e}");
+                        }
+                    });
+                }
+                {
+                    let mut s = lock(&me.state);
+                    s.running -= 1;
+                    match result {
+                        Ok(bytes) => {
+                            s.counts.net += 1;
+                            me.ready(&mut s, uri, bytes);
+                        }
+                        Err((error, gone)) => {
+                            log::debug!("web cover {uri}: {error}");
+                            s.counts.failed += 1;
+                            s.slots.insert(uri, Slot::Failed { error, at: Instant::now(), gone });
                         }
                     }
+                    me.log_when_idle(&mut s);
                 }
-                Err(e) => {
-                    log::debug!("web cover {uri}: {e}");
-                    c.slots.insert(uri, Slot::Failed(e));
-                }
-            }
-            drop(c);
-            ctx.request_repaint();
-        });
+                me.repaint();
+                me.pump(&h);
+            });
+        }
+    }
+
+    /// The image at `uri`; the error says whether it is gone for good.
+    async fn download(&self, uri: &str) -> Result<Arc<[u8]>, (String, bool)> {
+        let resp = self
+            .http
+            .get(uri)
+            .header("Accept", "image/jpeg,image/png;q=0.9,*/*;q=0.1")
+            .send()
+            .await
+            .map_err(|e| (e.to_string(), false))?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return Err((format!("HTTP {status}"), matches!(status, 404 | 410)));
+        }
+        let bytes = resp.bytes().await.map_err(|e| (e.to_string(), false))?;
+        if bytes.len() > MAX_BYTES {
+            return Err(("too large".to_owned(), true));
+        }
+        Ok(Arc::from(&bytes[..]))
+    }
+
+    /// A line in the log each time the covers asked so far are all in.
+    fn log_when_idle(&self, s: &mut State) {
+        let c = &s.counts;
+        let now = (c.disk, c.net, c.failed);
+        let busy = s.running > 0
+            || s.slots.values().any(|x| matches!(x, Slot::Reading | Slot::Queued { .. } | Slot::Fetching));
+        if !busy && now != c.logged {
+            log::info!(
+                "web covers: {} from disk, {} downloaded, {} failed so far (disk cache {} MB)",
+                c.disk,
+                c.net,
+                c.failed,
+                self.disk.as_ref().map_or(0, |d| d.size() >> 20)
+            );
+            s.counts.logged = now;
+        }
     }
 }
 
@@ -128,45 +255,164 @@ impl BytesLoader for WebImages {
         Self::ID
     }
 
-    fn load(&self, ctx: &egui::Context, uri: &str) -> BytesLoadResult {
+    fn load(&self, _ctx: &egui::Context, uri: &str) -> BytesLoadResult {
         if !(uri.starts_with("https://") || uri.starts_with("http://")) {
             return Err(LoadError::NotSupported);
         }
-        let mut c = lock(&self.cache);
-        match c.slots.get(uri) {
-            Some(Slot::Ready { bytes, mime }) => Ok(BytesPoll::Ready {
-                size: None,
-                bytes: Bytes::Shared(Arc::clone(bytes)),
-                mime: mime.clone(),
-            }),
-            Some(Slot::Failed(e)) => Err(LoadError::Loading(e.clone())),
-            Some(Slot::Pending) => Ok(BytesPoll::Pending { size: None }),
-            None => {
-                c.slots.insert(uri.to_owned(), Slot::Pending);
-                drop(c);
-                self.fetch(ctx, uri);
-                Ok(BytesPoll::Pending { size: None })
+        let inner = &self.inner;
+        let mut s = lock(&inner.state);
+        match s.slots.get_mut(uri) {
+            Some(Slot::Ready { bytes }) => {
+                return Ok(BytesPoll::Ready { size: None, bytes: Bytes::Shared(Arc::clone(bytes)), mime: None });
             }
+            Some(Slot::Failed { error, at, gone }) if *gone || at.elapsed() < RETRY => {
+                return Err(LoadError::Loading(error.clone()));
+            }
+            Some(Slot::Queued { seen }) => {
+                *seen = Instant::now();
+                return Ok(BytesPoll::Pending { size: None });
+            }
+            Some(Slot::Reading | Slot::Fetching) => return Ok(BytesPoll::Pending { size: None }),
+            // Never asked, or failed long enough ago to try again.
+            Some(Slot::Failed { .. }) | None => {}
         }
+        let uri = uri.to_owned();
+        if inner.disk.is_some() {
+            s.slots.insert(uri.clone(), Slot::Reading);
+            drop(s);
+            let (me, h) = (Arc::clone(inner), self.rt.handle().clone());
+            self.rt.spawn_blocking(move || {
+                let hit = me.disk.as_ref().and_then(|d| d.get(&uri));
+                let mut s = lock(&me.state);
+                // Forgotten meanwhile: nothing to do.
+                if !matches!(s.slots.get(&uri), Some(Slot::Reading)) {
+                    return;
+                }
+                match hit {
+                    Some(bytes) => {
+                        s.counts.disk += 1;
+                        me.ready(&mut s, uri, Arc::from(bytes));
+                        me.log_when_idle(&mut s);
+                        drop(s);
+                        me.repaint();
+                    }
+                    None => {
+                        s.slots.insert(uri.clone(), Slot::Queued { seen: Instant::now() });
+                        s.queue.push(uri);
+                        drop(s);
+                        me.pump(&h);
+                    }
+                }
+            });
+        } else {
+            s.slots.insert(uri.clone(), Slot::Queued { seen: Instant::now() });
+            s.queue.push(uri);
+            drop(s);
+            inner.pump(self.rt.handle());
+        }
+        Ok(BytesPoll::Pending { size: None })
     }
 
+    /// A cover no longer drawn: its bytes leave memory (the disk keeps
+    /// them), and if it still waits for a download it leaves the queue.
     fn forget(&self, uri: &str) {
-        let mut c = lock(&self.cache);
-        if let Some(Slot::Ready { bytes, .. }) = c.slots.remove(uri) {
-            c.size -= bytes.len();
-            c.order.retain(|u| u != uri);
+        let mut s = lock(&self.inner.state);
+        match s.slots.get(uri) {
+            Some(Slot::Ready { .. }) => {
+                if let Some(Slot::Ready { bytes }) = s.slots.remove(uri) {
+                    s.size -= bytes.len();
+                    s.order.retain(|u| u != uri);
+                }
+            }
+            Some(Slot::Queued { .. } | Slot::Reading) => {
+                s.slots.remove(uri);
+                s.queue.retain(|u| u != uri);
+            }
+            _ => {}
         }
     }
 
     fn forget_all(&self) {
-        *lock(&self.cache) = Cache::default();
+        let mut s = lock(&self.inner.state);
+        s.slots.retain(|_, x| matches!(x, Slot::Fetching | Slot::Failed { gone: true, .. }));
+        s.order.clear();
+        s.queue.clear();
+        s.size = 0;
     }
 
     fn byte_size(&self) -> usize {
-        lock(&self.cache).size
+        lock(&self.inner.state).size
     }
 
     fn has_pending(&self) -> bool {
-        lock(&self.cache).slots.values().any(|s| matches!(s, Slot::Pending))
+        lock(&self.inner.state)
+            .slots
+            .values()
+            .any(|s| matches!(s, Slot::Reading | Slot::Queued { .. } | Slot::Fetching))
+    }
+}
+
+/// The url of a web cover for drawing at `tier` pixels (`None`: as large as
+/// it gets): Google-hosted covers (YouTube Music: `lh3.googleusercontent.com`,
+/// `yt3.ggpht.com`, `…=w544-h544-l90-rj`) at 226 px for rows and cards, 544
+/// for a medium cover, 1200 for Now Playing and page headers. Other urls
+/// (Spotify, video thumbnails) cannot be resized: `None`, drawn as they are.
+pub fn sized_url(url: &str, tier: Option<u32>) -> Option<String> {
+    let px = match tier {
+        Some(t) if t <= 256 => 226,
+        Some(t) if t <= 544 => 544,
+        _ => 1200,
+    };
+    let rest = url.strip_prefix("https://")?;
+    let host = rest.split('/').next()?;
+    if !(host.ends_with(".googleusercontent.com") || host.ends_with(".ggpht.com")) {
+        return None;
+    }
+    let (base, params) = url.rsplit_once('=')?;
+    if base.len() <= "https://".len() + host.len() || params.contains('/') {
+        return None;
+    }
+    let parts: Vec<&str> = params.split('-').collect();
+    let size = |p: &str, c: char| p.strip_prefix(c).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    let (has_w, has_h) = (parts.iter().any(|p| size(p, 'w')), parts.iter().any(|p| size(p, 'h')));
+    let has_s = parts.iter().any(|p| size(p, 's'));
+    if !(has_w && has_h || has_s) {
+        return None;
+    }
+    let mut out = format!("{base}=w{px}-h{px}");
+    for p in parts.iter().filter(|p| !(size(p, 'w') || size(p, 'h') || size(p, 's'))) {
+        out.push('-');
+        out.push_str(p);
+    }
+    (out != url).then_some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn youtube_covers_are_asked_at_the_size_they_are_drawn_at() {
+        let u = "https://lh3.googleusercontent.com/abc=w544-h544-l90-rj";
+        assert_eq!(sized_url(u, Some(128)).as_deref(), Some("https://lh3.googleusercontent.com/abc=w226-h226-l90-rj"));
+        assert_eq!(sized_url(u, Some(256)).as_deref(), Some("https://lh3.googleusercontent.com/abc=w226-h226-l90-rj"));
+        assert_eq!(sized_url(u, Some(512)), None, "already 544");
+        assert_eq!(sized_url(u, None).as_deref(), Some("https://lh3.googleusercontent.com/abc=w1200-h1200-l90-rj"));
+        let a = "https://yt3.ggpht.com/xyz=s120-c-k-c0x00ffffff-no-rj";
+        assert_eq!(sized_url(a, Some(256)).as_deref(), Some("https://yt3.ggpht.com/xyz=w226-h226-c-k-c0x00ffffff-no-rj"));
+    }
+
+    #[test]
+    fn other_covers_are_kept() {
+        for u in [
+            "https://i.scdn.co/image/ab67616d0000b273abcdef",
+            "https://i.ytimg.com/vi/x/sddefault.jpg",
+            "https://lh3.googleusercontent.com/abc",
+            "https://lh3.googleusercontent.com/abc=l90-rj",
+            "https://evil.example/googleusercontent.com/a=w60-h60",
+            "http://lh3.googleusercontent.com/abc=w60-h60",
+        ] {
+            assert_eq!(sized_url(u, Some(256)), None, "{u}");
+        }
     }
 }

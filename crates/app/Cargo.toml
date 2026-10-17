@@ -29,6 +29,7 @@ eframe.workspace = true
 egui_extras = { workspace = true, features = ["file", "image", "svg"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 directories = "6"
+blake3 = "1.8"
 fastframe-text.workspace = true
 fastframe-fonts.workspace = true
 fastframe-scroll.workspace = true
@@ -37,6 +38,9 @@ fastframe-tray.workspace = true
 fastframe-now-playing.workspace = true
 log.workspace = true
 env_logger.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

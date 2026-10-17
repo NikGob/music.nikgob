@@ -7,6 +7,7 @@
 #![windows_subsystem = "windows"]
 
 mod audio;
+mod cover_cache;
 mod demo;
 mod desktop;
 mod geometry;
@@ -357,6 +358,8 @@ fn main() -> eframe::Result {
         streams::real(&data_dir, &secrets)
     };
     let relogin = streams::relogin(&streams, &secrets);
+    // Covers of the services, kept on disk between starts.
+    let covers_dir = data_dir.join("cache").join("covers");
 
     // Audio: the real engine unless disabled.
     let (backend, links): (Box<dyn Playback>, _) = if std::env::var_os("NIKGOB_NO_AUDIO").is_some() {
@@ -452,6 +455,7 @@ fn main() -> eframe::Result {
     };
 
     Shell::new(core, &waker).run(|lease| {
+        let covers_dir = covers_dir.clone();
         eframe::run_native(
             "music.nikgob",
             eframe::NativeOptions {
@@ -474,7 +478,7 @@ fn main() -> eframe::Result {
                 fastframe_text::detect().apply_to(&mut fonts);
                 ctx.set_fonts(fonts);
                 nikgob_md3e::icons::install(&ctx);
-                web_images::WebImages::install(&ctx);
+                web_images::WebImages::install(&ctx, covers_dir);
                 nikgob_md3e::Theme::new(nikgob_md3e::ColorScheme::baseline(true), true).install(&ctx);
                 let mut core = lease.take(&ctx);
                 core.desktop.attach();
