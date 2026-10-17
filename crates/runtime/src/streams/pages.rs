@@ -386,7 +386,7 @@ impl Worker {
         let start_remote = remotes.get(start).cloned();
         let known: Vec<RemoteId> = remotes
             .iter()
-            .filter(|r| self.streaming.known.contains_key(*r))
+            .filter(|r| self.streaming.known.contains_key(r))
             .cloned()
             .collect();
         let ids = self.seen_tracks(&known);

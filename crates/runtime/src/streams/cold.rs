@@ -72,8 +72,6 @@ const YT_LOOKUP_EVERY: Duration = Duration::from_secs(1);
 /// (Spotify's quota is shared).
 const ENRICH_BATCH_SPOTIFY: u32 = 50;
 const ENRICH_BATCH_YOUTUBE: u32 = 10;
-const ENRICH_PAUSE_SPOTIFY: Duration = Duration::from_secs(60);
-const ENRICH_PAUSE_YOUTUBE: Duration = Duration::from_secs(20);
 /// Nothing to complete: look again after this.
 const ENRICH_IDLE: Duration = Duration::from_secs(10 * 60);
 /// A play the app recorded itself within this of a play the API reports
@@ -988,8 +986,8 @@ impl Worker {
 
     fn enriched(&mut self, service: Service, results: Vec<(TrackId, String, Result<StreamTrack, StreamError>)>) {
         let pause = match service {
-            Service::Spotify => ENRICH_PAUSE_SPOTIFY,
-            Service::Youtube => ENRICH_PAUSE_YOUTUBE,
+            Service::Spotify => self.streaming.schedule.enrich_pause.0,
+            Service::Youtube => self.streaming.schedule.enrich_pause.1,
         };
         let mut next = Instant::now() + pause;
         let mut done = 0;

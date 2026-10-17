@@ -391,7 +391,7 @@ impl Worker {
     }
 
     fn run(&mut self, rx: Receiver<Msg>, pb: Receiver<PlaybackEvent>, internal: Receiver<Internal>) {
-        let ticker = tick(Duration::from_secs(5));
+        let ticker = tick(self.streaming.schedule.tick);
         let fast = tick(Duration::from_secs(1));
         // Once: the song liked on both services as two tracks becomes one.
         match self.lib.merge_duplicate_stream_tracks() {

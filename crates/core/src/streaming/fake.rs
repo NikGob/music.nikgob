@@ -33,8 +33,9 @@ const AUDIO_RATE: u32 = 22_050;
 /// Start of the fake listening history (2025-10-09).
 const HISTORY_T0: UnixMs = 1_760_000_000_000;
 const HOUR_MS: UnixMs = 3_600_000;
-/// Tracks in the first page of [`StreamService::liked_head`].
-const LIKED_PAGE: usize = 50;
+/// Tracks in the first page of [`StreamService::liked_head`] (small, so
+/// tests see a head that is not the whole list).
+const LIKED_PAGE: usize = 2;
 
 struct AlbumData {
     artist: &'static str,
@@ -433,11 +434,14 @@ impl FakeService {
         self
     }
 
-    /// Likes `id` on the service side (as if the user liked it elsewhere).
-    pub fn like_remotely(&self, id: &str) {
+    /// Likes (or unlikes) `id` on the service side, as if the user did it
+    /// in another app. Not counted as a call.
+    pub fn set_liked_remotely(&self, id: &str, liked: bool) {
         let mut st = self.lock();
         st.liked.retain(|l| l != id);
-        st.liked.insert(0, id.to_owned());
+        if liked {
+            st.liked.insert(0, id.to_owned());
+        }
     }
 
     /// How many times the trait method `name` was called (`"search"`,

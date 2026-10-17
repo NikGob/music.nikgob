@@ -43,6 +43,11 @@ pub struct StreamSchedule {
     pub album_ttl: Duration,
     pub artist_ttl: Duration,
     pub playlist_ttl: Duration,
+    /// Imported tracks are completed from Spotify / YouTube a batch at a
+    /// time with this pause between batches.
+    pub enrich_pause: (Duration, Duration),
+    /// The worker's slow tick (toasts, the session file, the jobs above).
+    pub tick: Duration,
     /// ± this share of every periodic interval.
     pub jitter: f64,
 }
@@ -63,6 +68,8 @@ impl Default for StreamSchedule {
             album_ttl: Duration::from_secs(24 * 3600),
             artist_ttl: Duration::from_secs(6 * 3600),
             playlist_ttl: Duration::from_secs(30 * 60),
+            enrich_pause: (Duration::from_secs(60), Duration::from_secs(20)),
+            tick: Duration::from_secs(5),
             jitter: 0.2,
         }
     }
