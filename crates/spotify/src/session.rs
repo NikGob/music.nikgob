@@ -21,7 +21,10 @@ use librespot_protocol::extended_metadata::{
     BatchedEntityRequest, BatchedExtensionResponse, EntityRequest, ExtensionQuery,
 };
 use librespot_protocol::extension_kind::ExtensionKind;
-use nikgob_core::streaming::{AlbumRef, ArtistRef, StreamPlaylist, StreamTrack};
+use nikgob_core::model::ReleaseType;
+use nikgob_core::streaming::{
+    AlbumRef, ArtistRef, StreamAlbum, StreamArtist, StreamPlaylist, StreamTrack,
+};
 use protobuf::{EnumOrUnknown, Message as _};
 
 use crate::convert::{isrc, rid};
@@ -273,6 +276,125 @@ fn answers(response: BatchedExtensionResponse) -> HashMap<String, StreamTrack> {
         }
     }
     out
+}
+
+/// A session album (from the artist's groups) as a core album, without
+/// its tracks.
+fn album(a: &librespot_metadata::Album) -> Option<StreamAlbum> {
+    use librespot_metadata::album::AlbumType;
+    let id = base62(&a.id)?;
+    let release_type = match a.album_type {
+        AlbumType::SINGLE => ReleaseType::Single,
+        AlbumType::EP => ReleaseType::Ep,
+        AlbumType::COMPILATION => ReleaseType::Compilation,
+        AlbumType::ALBUM => ReleaseType::Album,
+        _ => ReleaseType::Other,
+    };
+    let tracks = a.tracks().count();
+    Some(StreamAlbum {
+        id: rid(&id),
+        title: a.name.clone(),
+        artists: a
+            .artists
+            .iter()
+            .map(|ar| ArtistRef::new(base62(&ar.id).map(|i| rid(&i)), ar.name.clone()))
+            .collect(),
+        year: Some(a.date.year()).filter(|y| *y > 1),
+        release_type,
+        cover_url: a
+            .covers
+            .iter()
+            .filter(|c| c.width <= crate::convert::COVER_MAX as i32)
+            .max_by_key(|c| c.width)
+            .or_else(|| a.covers.first())
+            .map(|c| image_url(&c.id)),
+        total_tracks: u32::try_from(tracks).ok().filter(|n| *n > 0),
+        tracks: Vec::new(),
+    })
+}
+
+/// Albums by uri in batched extended-metadata requests (one per
+/// [`METADATA_BATCH`]), by base-62 id. Refused entries are absent.
+async fn albums(session: &Session, uris: &[SpotifyUri]) -> Result<HashMap<String, StreamAlbum>, Error> {
+    let mut out = HashMap::new();
+    for chunk in uris.chunks(METADATA_BATCH) {
+        let mut request = BatchedEntityRequest::new();
+        for uri in chunk {
+            let Ok(text) = uri.to_uri() else { continue };
+            request.entity_request.push(EntityRequest {
+                entity_uri: text,
+                query: vec![ExtensionQuery {
+                    extension_kind: EnumOrUnknown::new(ExtensionKind::ALBUM_V4),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        }
+        if request.entity_request.is_empty() {
+            continue;
+        }
+        let response = session.spclient().get_extended_metadata(request).await?;
+        for array in response.extended_metadata {
+            if array.extension_kind.enum_value() != Ok(ExtensionKind::ALBUM_V4) {
+                continue;
+            }
+            for data in array.extension_data {
+                if !matches!(data.header.status_code, 0 | 200) {
+                    continue;
+                }
+                let Some(any) = data.extension_data.as_ref() else { continue };
+                let Ok(message) = librespot_protocol::metadata::Album::parse_from_bytes(&any.value)
+                else {
+                    continue;
+                };
+                let Ok(a) = librespot_metadata::Album::try_from(&message) else { continue };
+                if let Some(s) = album(&a) {
+                    out.insert(s.id.id.clone(), s);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// An artist with its discography (albums, singles, compilations; the
+/// current release of each, newest first), read over the session: two
+/// requests, no Web API quota.
+pub async fn artist(session: &Session, id: &str) -> Result<StreamArtist, Error> {
+    let uri = SpotifyUri::Artist {
+        id: SpotifyId::from_base62(id)?,
+    };
+    let a = librespot_metadata::Artist::get(session, &uri).await?;
+    let uris: Vec<SpotifyUri> = a
+        .albums
+        .current_releases()
+        .chain(a.singles.current_releases())
+        .chain(a.compilations.current_releases())
+        .cloned()
+        .collect();
+    let found = albums(session, &uris).await?;
+    if found.is_empty() && !uris.is_empty() {
+        return Err(Error::unavailable("no album metadata"));
+    }
+    let mut list: Vec<StreamAlbum> = uris
+        .iter()
+        .filter_map(base62)
+        .filter_map(|id| found.get(&id).cloned())
+        .collect();
+    list.sort_by_key(|a| std::cmp::Reverse(a.year));
+    let image = a
+        .portraits
+        .iter()
+        .filter(|c| c.width <= crate::convert::COVER_MAX as i32)
+        .max_by_key(|c| c.width)
+        .or_else(|| a.portraits.first())
+        .map(|c| image_url(&c.id));
+    Ok(StreamArtist {
+        id: rid(id),
+        name: a.name.clone(),
+        image_url: image,
+        albums: list,
+    })
 }
 
 /// The artist's most popular tracks in the account's market (or worldwide),
