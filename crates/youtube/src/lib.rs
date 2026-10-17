@@ -642,6 +642,53 @@ impl StreamService for Youtube {
         })
     }
 
+    /// The «Всё» page: one mixed request (`music_search_main`): songs,
+    /// clips, albums, artists and playlists as YouTube Music ranks them
+    /// together. The five category requests stay for its own chip.
+    fn search_top(
+        &self,
+        query: &str,
+        _part: SearchParts,
+    ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        let q = query.trim().to_owned();
+        self.run(move |inner| async move {
+            if q.is_empty() {
+                return Ok(StreamSearch::default());
+            }
+            inner.gate.check()?;
+            let me = inner.me();
+            let started = std::time::Instant::now();
+            let r = timed("main", started, inner.rp.query().music_search_main(&q)).await;
+            let r = match r {
+                Ok(r) => r,
+                Err(e) => {
+                    let e = map_err(e);
+                    inner.gate.note(&Err::<(), _>(e.clone()));
+                    return Err(e);
+                }
+            };
+            let mut out = StreamSearch::default();
+            for item in &r.items.items {
+                match item {
+                    rustypipe::model::MusicItem::Track(t) => out.tracks.push(convert::track(t)),
+                    rustypipe::model::MusicItem::Album(a) => out.albums.push(convert::album_item(a)),
+                    rustypipe::model::MusicItem::Artist(a) => out.artists.push(convert::artist_item(a)),
+                    rustypipe::model::MusicItem::Playlist(p) => out.playlists.push(convert::playlist_item(p, me.as_deref())),
+                    _ => {}
+                }
+            }
+            log::debug!(
+                "youtube: mixed search done in {} ms: {} tracks, {} albums, {} artists, {} playlists",
+                started.elapsed().as_millis(),
+                out.tracks.len(),
+                out.albums.len(),
+                out.artists.len(),
+                out.playlists.len()
+            );
+            Ok(out)
+        })
+    }
+
     /// One category: one request, in the spaced catalogue lane.
     fn search_kind(
         &self,

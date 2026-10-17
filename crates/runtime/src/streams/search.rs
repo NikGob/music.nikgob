@@ -287,14 +287,13 @@ impl Worker {
             });
             return;
         }
-        // Under a chip, Spotify without a login answers «не вошёл» at once,
-        // without a request; the UI says «войди, чтобы искать и там». The
-        // «Всё» page asks only the services that can answer.
+        // A Spotify that is not connected is never asked (see
+        // `Worker::service`); the UI says so under its chip.
         let mixed = sources.mixed;
         let asked: Vec<Service> = Service::ALL
             .iter()
             .copied()
-            .filter(|&s| sources.service(s) && self.service(s).is_some() && (!mixed || self.can_search(s)))
+            .filter(|&s| sources.service(s) && self.service(s).is_some())
             .collect();
         // Sections that stay keep what they showed until the new answer.
         let mut old = std::mem::take(&mut self.streaming.search.raw);
@@ -525,7 +524,9 @@ impl Worker {
             slot.wait = None;
             slot.fresh = true;
         }
-        self.maybe_settle(Some(service));
+        // A first part (tracks only) does not start the grace: the artists,
+        // which may be the top result, are on their way.
+        self.maybe_settle((!partial).then_some(service));
         let rebuilt = Instant::now();
         self.rebuild_sections();
         log::debug!(
@@ -772,14 +773,40 @@ impl Worker {
                 });
             }
         }
+        // A clip or upload shows only when nothing official (a library
+        // track, a service's song) covers its song: «MORGENSHTERN -
+        // ARISTOCRAT (Клип)» goes when «ARISTOCRAT» by MORGENSHTERN is here.
+        let official: Vec<(String, String)> = groups
+            .iter()
+            .filter_map(|g| match &g.row {
+                v::SearchTrack::Library(r) => Some((rank::song_title(&r.title), rank::norm(&r.artist))),
+                v::SearchTrack::Stream(r) if r.kind == TrackKind::Song => {
+                    Some((rank::song_title(&r.title), rank::norm(&r.artist)))
+                }
+                _ => None,
+            })
+            .collect();
+        groups.retain(|g| match &g.row {
+            v::SearchTrack::Stream(r) if r.kind != TrackKind::Song => {
+                let (left, title) = rank::clip_parts(&r.title);
+                let who: Vec<String> = left.into_iter().chain([rank::norm(&r.artist)]).filter(|w| !w.is_empty()).collect();
+                !official.iter().any(|(t, a)| {
+                    let by = |w: &String| a.contains(w.as_str()) || w.contains(a.as_str());
+                    (*t == title && who.iter().any(by)) || title == format!("{a} {t}")
+                })
+            }
+            _ => true,
+        });
         let mut track_order: Vec<usize> = (0..groups.len()).collect();
         let quant = |s: f64| (s * 100.0).round() as i64;
-        track_order.sort_by_key(|&i| (std::cmp::Reverse(quant(groups[i].score)), groups[i].pos, groups[i].origin));
+        // Ties: the library's first (its songs are «у тебя»), then each
+        // source in its own order.
+        track_order.sort_by_key(|&i| (std::cmp::Reverse(quant(groups[i].score)), groups[i].origin, groups[i].pos));
 
         // Albums, artists, playlists: the library's first in a tie, the
         // services' cards as their sections give them (deduplicated).
         let lib_release_ids: Vec<_> = lib_releases.iter().map(|r| r.id).collect();
-        let mut albums: Vec<(v::SearchAlbum, f64, usize, usize, (String, String))> = lib_releases
+        let mut albums: Vec<Ranked<v::SearchAlbum, (String, String)>> = lib_releases
             .into_iter()
             .enumerate()
             .map(|(i, r)| {
@@ -789,7 +816,7 @@ impl Worker {
             })
             .collect();
         let lib_artist_ids: Vec<_> = lib_artists.iter().map(|a| a.id).collect();
-        let mut artists: Vec<(v::SearchArtist, f64, usize, usize, String)> = lib_artists
+        let mut artists: Vec<Ranked<v::SearchArtist, String>> = lib_artists
             .into_iter()
             .enumerate()
             .map(|(i, a)| {
@@ -821,6 +848,15 @@ impl Worker {
             for (i, a) in sec.artists.iter().enumerate() {
                 let key = artist_key(&a.name);
                 if a.artist.is_some_and(|id| lib_artist_ids.contains(&id)) || artists.iter().any(|x| x.4 == key) {
+                    // A library artist without a picture shows the service's.
+                    if let Some(url) = &a.image_url
+                        && let Some((v::SearchArtist::Library(c), ..)) = artists
+                            .iter_mut()
+                            .find(|x| x.4 == key || matches!(&x.0, v::SearchArtist::Library(c) if Some(c.id) == a.artist))
+                        && c.image.is_none()
+                    {
+                        c.image = Some(v::Cover::web(url.clone()));
+                    }
                     continue;
                 }
                 artists.push((v::SearchArtist::Stream(a.clone()), q.artist(&a.name), i, origin + 1, key));
@@ -839,7 +875,16 @@ impl Worker {
         // The top result: settled once, then found again by its key.
         let st = &mut self.streaming.search;
         let settled = st.settled;
-        if settled && st.frozen_top.is_none() && st.frozen_tracks.is_empty() {
+        // A settled top that is gone (a clip that an official song came to
+        // cover) is picked again.
+        let present = |k: &TopKey| match k {
+            TopKey::Artist(k) => artists.iter().any(|x| x.4 == *k),
+            TopKey::Album(t, a) => albums.iter().any(|x| x.4.0 == *t && x.4.1 == *a),
+            TopKey::Track(k) => track_order.iter().any(|&i| groups[i].key.same(k)),
+        };
+        let gone = st.frozen_top.as_ref().is_some_and(|k| !present(k));
+        let first_pick = st.frozen_top.is_none() && st.frozen_tracks.is_empty();
+        if settled && (first_pick || gone) {
             let t_scores: Vec<f64> = track_order.iter().map(|&i| groups[i].score).collect();
             let a_scores: Vec<f64> = artists.iter().map(|x| x.1).collect();
             let al_scores: Vec<f64> = albums.iter().map(|x| x.1).collect();
@@ -848,15 +893,20 @@ impl Worker {
                 rank::Top::Track(i) => TopKey::Track(groups[track_order[i]].key.clone()),
                 rank::Top::Album(i) => TopKey::Album(albums[i].4.0.clone(), albums[i].4.1.clone()),
             });
+        }
+        if settled && first_pick {
             let top_track = match &st.frozen_top {
                 Some(TopKey::Track(k)) => track_order.iter().position(|&i| groups[i].key.same(k)),
                 _ => None,
             };
+            // Only good matches hold their place: a weak one shown early
+            // gives way to better ones that come later.
             st.frozen_tracks = track_order
                 .iter()
                 .enumerate()
                 .filter(|(n, _)| Some(*n) != top_track)
                 .take(v::TOP_TRACKS)
+                .filter(|(_, i)| groups[**i].score >= rank::TOP_MIN)
                 .map(|(_, &i)| groups[i].key.clone())
                 .collect();
         }
@@ -929,6 +979,10 @@ impl Worker {
         }
     }
 }
+
+/// A card of the merged answer: it, its score, its place in its source,
+/// the source (0 the library, then [`MERGE_ORDER`]), its dedup key.
+type Ranked<T, K> = (T, f64, usize, usize, K);
 
 /// One song of the merged answer and the copy it shows (and plays).
 struct Group {

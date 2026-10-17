@@ -10,11 +10,17 @@
 //!   the artist and the title («morgenshtern aristocrat», «кино группа
 //!   крови»), the query as a prefix of the words (still typing), then the
 //!   artist and the album alone.
+//! * Another take of a song counts for much less unless the query asks for
+//!   it: reactions, 8D, nightcore, slowed / sped up, covers, karaoke; a
+//!   remix goes below the original. A clip or upload whose channel is not
+//!   the song's artist («MORGENSHTERN ARISTOCRAT.» by «утка утиная 2») counts
+//!   less too.
 //! * A Cyrillic query that only meets a Latin hit (YouTube Music
 //!   transliterates «лед» and finds Led Zeppelin) and the reverse count for
 //!   much less; clips and uploads less than official songs.
-//! * Ties keep the source's own order (Deezer ranks by popularity, YouTube
-//!   by its relevance), then the source (library, Spotify, Deezer, YouTube).
+//! * Ties go by the source (library, Spotify, Deezer, YouTube), then the
+//!   source's own order (Deezer ranks by popularity, YouTube by its
+//!   relevance): see `Worker::rebuild_answer`.
 //! * The top result is an artist whose name is the query; else the best of
 //!   the best track and the best album (a track on a tie), if it matches at
 //!   all well.
@@ -83,11 +89,11 @@ fn scripts(s: &str) -> (bool, bool) {
     (s.chars().any(is_cyrillic), s.chars().any(|c| c.is_ascii_alphabetic()))
 }
 
-/// The title without what follows its first bracket, dash or «feat.»:
+/// The title without what follows its first bracket or «feat.»:
 /// «Лёд (feat. X)» → «Лёд».
 fn base_title(t: &str) -> &str {
     let mut end = t.len();
-    for sep in [" (", " [", " - ", " – ", " — ", " feat", " ft.", " Feat", " FEAT"] {
+    for sep in [" (", " [", " feat", " ft.", " Feat", " FEAT"] {
         if let Some(i) = t.find(sep)
             && i > 0
         {
@@ -95,6 +101,60 @@ fn base_title(t: &str) -> &str {
         }
     }
     &t[..end]
+}
+
+/// Words that make a title another take of the song: pushed down hard.
+const JUNK: &[&str] = &[
+    "reaction", "реакция", "реакции", "8d", "nightcore", "slowed", "sped", "speed", "cover", "кавер",
+    "karaoke", "караоке", "минус", "instrumental", "инструментал", "tiktok", "1 hour", "1 час",
+];
+/// Words of a remix: below the original.
+const REMIX: &[&str] = &["remix", "ремикс", "mix", "rmx", "edit", "bootleg", "flip", "mashup"];
+
+/// What the normalised `words` say about the take: 1 for the song
+/// itself, less for another take the query does not ask for.
+fn take_factor(q: &Query, words: &[&str]) -> f64 {
+    let asked = |w: &str| q.words.iter().any(|x| x == w);
+    let has = |list: &[&str]| {
+        list.iter().any(|j| {
+            if j.contains(' ') {
+                words.join(" ").contains(j)
+            } else {
+                words.contains(j) && !asked(j)
+            }
+        })
+    };
+    if has(JUNK) {
+        0.2
+    } else if has(REMIX) {
+        0.75
+    } else {
+        1.0
+    }
+}
+
+/// A clip's «Artist - Title» split for the merge: its artist side (if
+/// any) and its title side, both normalised, the title without brackets.
+pub(crate) fn clip_parts(title: &str) -> (Option<String>, String) {
+    match dash_parts(title) {
+        Some((l, r)) => (Some(norm(l)), norm(base_title(r))),
+        None => (None, norm(base_title(title))),
+    }
+}
+
+/// The normalised title of a song without brackets («Лёд (feat. X)» →
+/// «лед»), for the merge.
+pub(crate) fn song_title(title: &str) -> String {
+    norm(base_title(title))
+}
+
+/// A clip's «Artist - Title»: the two sides of its first dash.
+fn dash_parts(t: &str) -> Option<(&str, &str)> {
+    [" - ", " – ", " — "]
+        .iter()
+        .filter_map(|sep| t.split_once(sep))
+        .min_by_key(|(left, _)| left.len())
+        .filter(|(l, r)| !l.trim().is_empty() && !r.trim().is_empty())
 }
 
 impl Query {
@@ -160,9 +220,8 @@ impl Query {
     /// friend): «лед» → «Led Zeppelin», «kino» → «Кино».
     fn script_penalty(&self, text: &str) -> f64 {
         let (cyr, lat) = scripts(text);
-        if self.cyrillic && !self.latin && !cyr && lat {
-            0.35
-        } else if self.latin && !self.cyrillic && cyr && !lat {
+        let only_other = (self.cyrillic && !self.latin && !cyr && lat) || (self.latin && !self.cyrillic && cyr && !lat);
+        if only_other {
             0.35
         } else {
             1.0
@@ -170,23 +229,54 @@ impl Query {
     }
 
     /// A track: its title, its artists, its album.
+    ///
+    /// The title proper counts most; what its brackets add («(Daft Punk
+    /// Remix)», «(feat. X)») less; a clip's «Artist - Title» counts by its
+    /// title side, its artist side only a little. A song by the artist
+    /// named in the query comes before songs that merely mention it.
     pub(crate) fn track(&self, title: &str, artists: &[&str], album: Option<&str>, kind: TrackKind) -> f64 {
         let full = norm(title);
-        let base = norm(base_title(title));
-        let title_s = self.field(&full).max(self.field(&base));
+        let (left, right) = match dash_parts(title) {
+            Some((l, r)) => (norm(l), norm(base_title(r))),
+            None => (String::new(), norm(base_title(title))),
+        };
+        let mut title_s = self.field(&right).max(0.8 * self.field(&full));
+        if !left.is_empty() {
+            title_s = title_s.max(0.6 * self.field(&left));
+        }
         let artist_norms: Vec<String> = artists.iter().map(|a| norm(a)).collect();
         let artist_s = artist_norms.iter().map(|a| self.field(a)).fold(0.0, f64::max);
         let split_s = artist_norms
             .iter()
-            .map(|a| self.split(a, &base).max(self.split(a, &full)))
+            .map(|a| {
+                let who = if left.is_empty() { a.clone() } else { format!("{a} {left}") };
+                self.split(&who, &right).max(0.9 * self.split(a, &full))
+            })
             .fold(0.0, f64::max);
         let album_s = album.map_or(0.0, |a| self.field(&norm(a)));
-        let mut s = title_s.max(split_s).max(0.55 * artist_s).max(0.45 * album_s);
+        let mut s = title_s.max(split_s).max(0.85 * artist_s).max(0.45 * album_s);
         s *= self.script_penalty(&format!("{full} {}", artist_norms.join(" ")));
+        let words: Vec<&str> = full.split(' ').collect();
+        s *= take_factor(self, &words);
+        // A clip or upload by someone else than the song's artist.
+        if kind != TrackKind::Song && !artist_norms.is_empty() {
+            let theirs = |a: &String| {
+                if left.is_empty() {
+                    // No «Artist - Title»: the channel shares a word with
+                    // the title or the query.
+                    a.split(' ').any(|w| words.contains(&w) || self.words.iter().any(|q| q == w))
+                } else {
+                    a.contains(left.as_str()) || left.contains(a.as_str())
+                }
+            };
+            if !artist_norms.iter().any(theirs) {
+                s *= 0.6;
+            }
+        }
         s *= match kind {
             TrackKind::Song => 1.0,
-            TrackKind::Video => 0.85,
-            TrackKind::Upload => 0.7,
+            TrackKind::Video => 0.8,
+            TrackKind::Upload => 0.65,
         };
         s
     }
@@ -376,6 +466,53 @@ mod tests {
         assert_eq!(top(&artists, &[], &[]), Some(Top::Artist(1)));
         // Ties keep the sources' order.
         assert_eq!(ranked("x", &[song("A", "B"), song("C", "D")]), ["A", "C"]);
+    }
+
+    #[test]
+    fn songs_by_the_artist_come_before_songs_that_only_mention_it() {
+        let hits = [
+            song("Get Lucky (Daft Punk Remix)", "Pharrell Williams"),
+            Hit { title: "Daft Punk - Harder, Better, Faster, Stronger", artist: "Trap Nation", kind: TrackKind::Video },
+            song("Starboy (feat. Daft Punk)", "The Weeknd"),
+            song("One More Time", "Daft Punk"),
+        ];
+        let got = ranked("daft punk", &hits);
+        assert_eq!(got[0], "One More Time", "{got:?}");
+        // A clip «Кино - Группа крови» is the song by its title side.
+        let q = Query::new("группа крови");
+        let clip = q.track("Кино - Группа крови (клип)", &["КИНО Цоя"], None, TrackKind::Video);
+        let other = q.track("Группа крови (Live)", &["Кино"], None, TrackKind::Song);
+        assert!(clip >= 0.75 && other > clip, "{clip} {other}");
+    }
+
+    #[test]
+    fn other_takes_and_strangers_uploads_go_down() {
+        // What YouTube Music gave for «morgenshtern aristocrat».
+        let hits = [
+            Hit { title: "MORGENSHTERN ARISTOCRAT (8D Music) (трек из альбома)", artist: "Crucian BEATS", kind: TrackKind::Video },
+            Hit { title: "MORGENSHTERN ARISTOCRAT.", artist: "утка утиная 2", kind: TrackKind::Video },
+            Hit { title: "MORGENSHTERN - ARISTOCRAT реакция", artist: "Реакции Бабы Нины", kind: TrackKind::Video },
+            song("ARISTOCRAT (ROCK REMIX)", "MORGENSHTERN"),
+            Hit { title: "MORGENSHTERN - ARISTOCRAT (Клип)", artist: "MORGENSHTERN", kind: TrackKind::Video },
+            song("ARISTOCRAT", "MORGENSHTERN"),
+        ];
+        let got = ranked("morgenshtern aristocrat", &hits);
+        assert_eq!(
+            got,
+            [
+                "ARISTOCRAT",
+                "ARISTOCRAT (ROCK REMIX)",
+                "MORGENSHTERN - ARISTOCRAT (Клип)",
+                "MORGENSHTERN ARISTOCRAT.",
+                "MORGENSHTERN ARISTOCRAT (8D Music) (трек из альбома)",
+                "MORGENSHTERN - ARISTOCRAT реакция",
+            ]
+        );
+        // Asked for: the remix is the match.
+        let q = Query::new("aristocrat remix");
+        let remix = q.track("ARISTOCRAT (ROCK REMIX)", &["MORGENSHTERN"], None, TrackKind::Song);
+        assert!(remix >= TOP_MIN && remix > q.track("ARISTOCRAT", &["MORGENSHTERN"], None, TrackKind::Song));
+        assert_eq!(clip_parts("MORGENSHTERN - ARISTOCRAT (Клип)"), (Some("morgenshtern".into()), "aristocrat".into()));
     }
 
     #[test]

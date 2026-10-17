@@ -72,7 +72,7 @@ fn a_spotify_that_is_not_connected_is_asked_nothing() {
     let one = sp.tracks().into_iter().find(|t| t.id.id == "sp-gruppa-1").unwrap();
     let track: TrackId = lib.upsert_stream_track(&one).unwrap();
     let (rt, asked) = start(&lib, vec![sp.clone(), yt.clone()]);
-    wait_for("the account views", || rt.state().accounts.len() == 2);
+    wait_for("the account views", || rt.state().accounts.len() == Service::ALL.len());
     let s = rt.state();
     assert!(!account(&s, Service::Spotify).usable, "not connected: not usable");
     assert!(account(&s, Service::Youtube).usable, "YouTube Music works without a login");

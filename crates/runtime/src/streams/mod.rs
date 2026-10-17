@@ -129,10 +129,10 @@ pub(crate) enum Msg {
         track: TrackId,
         found: resolve::Lookup,
         /// The full Deezer track asked for its ISRC on the way.
-        filled: Option<StreamTrack>,
+        filled: Option<Box<StreamTrack>>,
     },
     /// The full Deezer track of a liked track (its ISRC).
-    IsrcFilled(TrackId, StreamTrack),
+    IsrcFilled(TrackId, Box<StreamTrack>),
     /// The top of the «Всё» answer is settled (the grace after the first
     /// answer ended).
     SearchSettle { seq: u64 },
@@ -298,11 +298,12 @@ pub(crate) fn error_text(e: &StreamError) -> String {
 
 /// Whether a service can be asked anything in this account state: Spotify
 /// only while connected (it needs Premium and the user's own app, docs/
-/// stage3.md §0); YouTube Music answers without a login.
+/// stage3.md §0); YouTube Music answers without a login, the Deezer
+/// catalogue has none.
 pub(crate) fn usable(kind: Service, account: &Account) -> bool {
     match kind {
         Service::Spotify => account.is_logged_in(),
-        Service::Youtube => true,
+        Service::Youtube | Service::Deezer => true,
     }
 }
 
@@ -353,15 +354,6 @@ impl Worker {
         }
     }
 
-    /// The service answers the search now: registered, switched on, and —
-    /// for Spotify — logged in (YouTube Music searches without a login, a
-    /// catalogue needs none).
-    pub(crate) fn can_search(&self, kind: Service) -> bool {
-        let Some(s) = self.service(kind) else {
-            return false;
-        };
-        s.catalogue_only() || kind != Service::Spotify || s.account().is_logged_in()
-    }
 
     /// The services' audio caches follow [`v::Prefs::stream_cache_mb`].
     pub(crate) fn apply_stream_cache(&mut self) {

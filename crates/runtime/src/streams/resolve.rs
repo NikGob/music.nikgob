@@ -309,7 +309,7 @@ impl Worker {
                 match dz.track(&id).await {
                     Ok(full) => {
                         q.isrc = full.isrc.clone();
-                        filled = Some(full);
+                        filled = Some(Box::new(full));
                     }
                     Err(e) => log::info!("deezer: no ISRC for {id}: {e}"),
                 }
@@ -362,7 +362,7 @@ impl Worker {
         true
     }
 
-    pub(crate) fn resolved(&mut self, track: TrackId, found: Lookup, filled: Option<StreamTrack>) {
+    pub(crate) fn resolved(&mut self, track: TrackId, found: Lookup, filled: Option<Box<StreamTrack>>) {
         self.streaming.resolving.remove(&track);
         if let Some(full) = &filled {
             self.isrc_filled(track, full);

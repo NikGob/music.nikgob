@@ -609,10 +609,10 @@ impl Worker {
             let rid = remote.id.clone();
             self.streaming.spawn(async move {
                 match dz.track(&rid).await {
-                    Ok(full) => Msg::IsrcFilled(id, full),
+                    Ok(full) => Msg::IsrcFilled(id, Box::new(full)),
                     Err(e) => {
                         log::info!("deezer: no ISRC for {rid}: {e}");
-                        Msg::IsrcFilled(id, StreamTrack::new(RemoteId::new(Service::Deezer, rid), ""))
+                        Msg::IsrcFilled(id, Box::new(StreamTrack::new(RemoteId::new(Service::Deezer, rid), "")))
                     }
                 }
             });
