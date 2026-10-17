@@ -38,7 +38,7 @@ pub use matcher::{
 };
 pub use musicbrainz::{MusicBrainz, RecordingQuery};
 pub use odesli::{Odesli, OdesliPage};
-pub use lyricsplus::LyricsPlus;
+pub use lyricsplus::{LyricsPlus, LyricsPlusText};
 pub use lrcred::LrcRed;
 pub use betterlyrics::BetterLyrics;
 pub use ttml::{TtmlLyrics, parse_ttml};
