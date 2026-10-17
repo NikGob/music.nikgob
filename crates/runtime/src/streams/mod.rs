@@ -96,6 +96,8 @@ pub(crate) struct LikeSync {
     pub(crate) last: Option<Instant>,
     pub(crate) next_at: Option<Instant>,
     pub(crate) pulling: bool,
+    /// Checks rate-limited in a row (their retry is set in `next_at`).
+    pub(crate) limited: u32,
 }
 
 /// Results of background work, for [`Worker::stream_msg`].
@@ -277,6 +279,13 @@ impl Worker {
             return None;
         }
         self.streams.iter().find(|s| s.service() == kind).cloned()
+    }
+
+    /// How long the service is still paused by a rate limit, if it says
+    /// (see [`StreamService::paused_until`]). No network.
+    pub(crate) fn pause_left(&self, kind: Service) -> Option<Duration> {
+        let until = self.service(kind)?.paused_until()?;
+        until.duration_since(std::time::SystemTime::now()).ok()
     }
 
     /// The service plays sound for this account right now (Spotify needs

@@ -7,6 +7,15 @@
 
 use std::time::Duration;
 
+/// Tries of a rate-limited background job before it waits for its normal
+/// interval (see [`StreamSchedule::rate_limit_retry`]).
+pub(crate) const RATE_LIMIT_RETRIES: u32 = 3;
+
+/// 0–500 ms, so retries woken by the same pause do not fire together.
+pub(crate) fn wake_jitter() -> Duration {
+    Duration::from_millis(fastrand::u64(0..=500))
+}
+
 /// The intervals; [`Default`] is what the app runs. Tests make them short
 /// (see [`crate::Runtime::start_scheduled`]).
 #[derive(Clone, Debug)]
@@ -50,6 +59,12 @@ pub struct StreamSchedule {
     pub tick: Duration,
     /// ± this share of every periodic interval.
     pub jitter: f64,
+    /// A like check or playlist check that a service rate-limited tries
+    /// again when the pause ends (+ up to 0.5 s), then after 2× and 4× the
+    /// pause, at most this far away; after those the normal interval.
+    pub rate_limit_cap: Duration,
+    /// The pause assumed when the service did not say how long it is.
+    pub rate_limit_unknown: Duration,
 }
 
 impl Default for StreamSchedule {
@@ -71,6 +86,8 @@ impl Default for StreamSchedule {
             enrich_pause: (Duration::from_secs(60), Duration::from_secs(20)),
             tick: Duration::from_secs(5),
             jitter: 0.2,
+            rate_limit_cap: Duration::from_secs(10 * 60),
+            rate_limit_unknown: Duration::from_secs(30),
         }
     }
 }
@@ -105,6 +122,20 @@ impl StreamSchedule {
         a + (b - a).mul_f64((h % 10_000) as f64 / 10_000.0)
     }
 
+    /// When a background job a service rate-limited tries again: after the
+    /// `failures`-th limit in a row (1, 2, 3) the pause times 1, 2, 4
+    /// (never sooner than `retry_after`, at most [`Self::rate_limit_cap`]),
+    /// plus up to 0.5 s; `None` past [`RATE_LIMIT_RETRIES`] (the normal
+    /// interval again).
+    pub(crate) fn rate_limit_retry(&self, retry_after: Option<Duration>, failures: u32) -> Option<Duration> {
+        if failures == 0 || failures > RATE_LIMIT_RETRIES {
+            return None;
+        }
+        let pause = retry_after.unwrap_or(self.rate_limit_unknown);
+        let backoff = pause.saturating_mul(1 << (failures - 1)).min(self.rate_limit_cap).max(pause);
+        Some(backoff + wake_jitter())
+    }
+
     pub(crate) fn like_wait(&self) -> Duration {
         self.like_delay + Duration::from_millis(fastrand::u64(0..=500))
     }
@@ -123,6 +154,13 @@ mod tests {
             let f = StreamSchedule::between(s.sync_first);
             assert!(f >= s.sync_first.0 && f <= s.sync_first.1);
         }
+        for (n, x) in [(1, 6), (2, 12), (3, 24)] {
+            let d = s.rate_limit_retry(Some(Duration::from_secs(6)), n).unwrap();
+            assert!(d >= Duration::from_secs(x) && d <= Duration::from_millis(x * 1000 + 500), "{n}: {d:?}");
+        }
+        assert_eq!(s.rate_limit_retry(Some(Duration::from_secs(6)), 4), None, "then the normal interval");
+        let capped = s.rate_limit_retry(Some(Duration::from_secs(400)), 3).unwrap();
+        assert!(capped >= s.rate_limit_cap && capped <= s.rate_limit_cap + Duration::from_millis(500));
         let a = StreamSchedule::between_for("spotify:x", s.stale);
         assert_eq!(a, StreamSchedule::between_for("spotify:x", s.stale));
         assert!(a >= s.stale.0 && a <= s.stale.1);

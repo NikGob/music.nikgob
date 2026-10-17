@@ -108,6 +108,12 @@ pub(crate) struct SyncState {
     /// The user asked for these: tell how it went.
     announce: HashSet<PlaylistId>,
     errors: HashMap<PlaylistId, String>,
+    /// Checks of a service rate-limited in a row (their retry is set in
+    /// `next_check`).
+    limited: HashMap<Service, u32>,
+    /// A retry after a rate limit is set for these (one per service, so
+    /// the playlists one check fetches do not each count as a limit).
+    retry_set: HashSet<Service>,
 }
 
 /// What a sync changed here and there.
@@ -294,6 +300,7 @@ impl Worker {
                 continue;
             }
             *next = now + every;
+            self.streaming.sync.retry_set.remove(&service);
             services.push(service);
         }
         if services.is_empty() {
@@ -384,6 +391,16 @@ impl Worker {
         match m {
             SyncMsg::Listed { service, result, due } => {
                 self.streaming.sync.checking.remove(&service);
+                if let Err(StreamError::RateLimited { retry_after }) = &result {
+                    // Nothing is fetched under the limit: the whole check
+                    // runs again when the pause ends.
+                    log::info!("{service}: playlist check rate limited");
+                    self.sync_rate_limited(service, *retry_after);
+                    return;
+                }
+                if result.is_ok() {
+                    self.streaming.sync.limited.remove(&service);
+                }
                 let listed_ok = result.is_ok();
                 let list = result.unwrap_or_else(|e| {
                     log::warn!("{service}: my_playlists: {e}");
@@ -421,7 +438,14 @@ impl Worker {
                 Ok(Some(v)) if known.as_deref() != Some(v.as_str()) => self.sync_playlist(playlist),
                 Ok(None) if stale => self.sync_playlist(playlist),
                 Ok(_) => {}
-                Err(e) => log::info!("sync {playlist}: version: {e}"),
+                Err(e) => {
+                    log::info!("sync {playlist}: version: {e}");
+                    if let StreamError::RateLimited { retry_after } = e
+                        && let Some(link) = self.lib.playlist_remote(playlist).ok().flatten()
+                    {
+                        self.sync_rate_limited(link.remote.service, retry_after);
+                    }
+                }
             },
             SyncMsg::Fetched { playlist, result } => {
                 self.streaming.sync.fetching.remove(&playlist);
@@ -430,6 +454,22 @@ impl Worker {
                         self.streaming.learn(&p.tracks);
                         self.streaming.pages.put(PageData::Playlist(p.clone()));
                         self.apply_sync(playlist, &p);
+                    }
+                    Err(StreamError::RateLimited { retry_after }) => {
+                        // Not a failure: the next check (when the pause
+                        // ends) fetches it again, its version being old.
+                        log::info!("sync {playlist}: rate limited");
+                        let service = self.lib.playlist_remote(playlist).ok().flatten().map(|l| l.remote.service);
+                        if let Some(service) = service {
+                            self.sync_rate_limited(service, retry_after);
+                            if self.streaming.sync.announce.remove(&playlist) {
+                                self.toast(
+                                    format!("{} просит подождать — синхронизирую сам", service.display_name()),
+                                    None,
+                                );
+                            }
+                        }
+                        self.publish_playlist_sync(playlist);
                     }
                     Err(e) => {
                         log::warn!("sync {playlist}: {e}");
@@ -488,6 +528,26 @@ impl Worker {
                 }
             },
         }
+    }
+
+    /// A service rate-limited a sync: its next playlist check is when the
+    /// pause ends, then 2× and 4× it, then the normal interval (see
+    /// [`StreamSchedule::rate_limit_retry`]). One retry at a time.
+    fn sync_rate_limited(&mut self, service: Service, retry_after: Option<std::time::Duration>) {
+        if !self.streaming.sync.retry_set.insert(service) {
+            return;
+        }
+        let pause = retry_after.or_else(|| self.pause_left(service));
+        let n = self.streaming.sync.limited.entry(service).or_default();
+        *n += 1;
+        let Some(after) = self.streaming.schedule.rate_limit_retry(pause, *n) else {
+            log::info!("{service}: playlists still rate limited: next check at the usual time");
+            self.streaming.sync.limited.remove(&service);
+            return;
+        };
+        let at = Instant::now() + after;
+        self.streaming.sync.next_check.insert(service, at);
+        log::info!("{service}: checking playlists again in {} s", after.as_secs());
     }
 
     /// Asks a playlist's version alone (one tiny request).

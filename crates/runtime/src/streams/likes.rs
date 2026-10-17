@@ -140,7 +140,10 @@ impl Worker {
                 .streaming
                 .likes
                 .get(&s)
-                .is_some_and(|l| !l.pulling && l.last.is_some_and(|t| t.elapsed() >= fresh));
+                .is_some_and(|l| {
+                    // A rate-limited check already has its retry set.
+                    !l.pulling && l.limited == 0 && l.last.is_some_and(|t| t.elapsed() >= fresh)
+                });
             if stale {
                 self.pull_likes(s);
             }
@@ -186,10 +189,11 @@ impl Worker {
             Ok(h) => h,
             Err(e) => {
                 log::warn!("{service}: checking likes: {e}");
-                self.streaming.likes.entry(service).or_default().pulling = false;
+                self.likes_failed(service, &e);
                 return;
             }
         };
+        self.streaming.likes.entry(service).or_default().limited = 0;
         if head.complete {
             self.likes_pulled(service, Ok(head.tracks));
             return;
@@ -223,17 +227,54 @@ impl Worker {
     }
 
     pub(crate) fn likes_pulled(&mut self, service: Service, r: Result<Vec<StreamTrack>, StreamError>) {
-        self.streaming.likes.entry(service).or_default().pulling = false;
         let liked = match r {
             Ok(l) => l,
             Err(e) => {
                 log::warn!("{service}: pulling likes: {e}");
+                self.likes_failed(service, &e);
                 return;
             }
         };
+        let l = self.streaming.likes.entry(service).or_default();
+        l.pulling = false;
+        l.limited = 0;
         self.apply_remote_likes(service, &liked, false, false);
         let now = nikgob_library::now_ms();
         let _ = self.lib.cache_put(&full_key(service), now, "");
+    }
+
+    /// A check failed. A rate limit tries again when the service's pause
+    /// ends, then after 2× and 4× it (so the first likes after a login come
+    /// within a minute or two even under 429s), then at the normal
+    /// interval; anything else waits for the normal interval.
+    fn likes_failed(&mut self, service: Service, e: &StreamError) {
+        let pause = match e {
+            StreamError::RateLimited { retry_after } => Some(retry_after.or_else(|| self.pause_left(service))),
+            _ => None,
+        };
+        let schedule = self.streaming.schedule.clone();
+        let l = self.streaming.likes.entry(service).or_default();
+        l.pulling = false;
+        let Some(pause) = pause else {
+            l.limited = 0;
+            return;
+        };
+        l.limited += 1;
+        match schedule.rate_limit_retry(pause, l.limited) {
+            Some(after) => {
+                log::info!(
+                    "{service}: checking likes again in {} s (rate limit {} of {})",
+                    after.as_secs(),
+                    l.limited,
+                    super::schedule::RATE_LIMIT_RETRIES
+                );
+                l.next_at = Some(Instant::now() + after);
+            }
+            None => {
+                log::info!("{service}: likes still rate limited: next check at the usual time");
+                l.limited = 0;
+            }
+        }
     }
 
     /// Brings the service's liked list in (see the module docs). With
