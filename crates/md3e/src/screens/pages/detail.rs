@@ -152,7 +152,7 @@ pub fn release(
                     ui.add(AssistChip::new("стрим").icon(Icon::GraphicEq).id_salt("rel-stream"))
                         .on_hover_text("Файлов нет: играет из Spotify или YouTube Music");
                 }
-                if let Some(b) = widgets::progress_badge(c) {
+                if let Some(b) = widgets::progress_badge(c).filter(|_| c.local_tracks > 0) {
                     ui.add(AssistChip::new(format!("{b} у тебя")).icon(Icon::Download).id_salt("rel-have"));
                 }
             });

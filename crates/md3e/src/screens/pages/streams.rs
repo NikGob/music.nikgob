@@ -231,22 +231,13 @@ fn album_subtitle(a: &StreamAlbumCard) -> String {
     }
 }
 
-/// "3 из 12" when the library has some of the album's files.
-fn have_badge(local: u32, total: Option<u32>) -> Option<String> {
-    match total {
-        Some(t) if local > 0 && local < t => Some(format!("{local} из {t}")),
-        Some(t) if local > 0 && local >= t => Some("у тебя".to_owned()),
-        _ => None,
-    }
-}
-
 /// An album of a service as a card: opens its page, ▶ plays it, right
 /// click: Слушать · Перемешать · Скачать · Поделиться.
 pub fn album_card(ui: &mut Ui, a: &StreamAlbumCard, width: f32, row: &str, out: &mut Vec<Command>) -> Option<Route> {
     let o = MediaCard::new(&a.title)
         .subtitle(album_subtitle(a))
         .cover_opt(a.cover_url.clone())
-        .badge_opt(have_badge(a.local_tracks, a.total_tracks))
+        .badge_opt(a.have.label())
         .width(width)
         .id_salt(("st-album", row, &a.remote))
         .show(ui);
@@ -455,10 +446,10 @@ fn album_page(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.add(AssistChip::new("стрим").icon(Icon::GraphicEq).id_salt("st-chip-stream"));
-            if local > 0 {
-                ui.add(AssistChip::new(format!("{local} из {} у тебя", v.tracks.len())).icon(Icon::Download).id_salt("st-chip-have"));
+            if let Some(have) = v.have.files_label() {
+                ui.add(AssistChip::new(have).icon(Icon::Download).id_salt("st-chip-have"));
             }
-            if let Some(r) = v.release
+            if let Some(r) = v.release.filter(|_| v.have.in_library > 0)
                 && ui.add(AssistChip::new("В библиотеке").icon(Icon::LibraryMusic).id_salt("st-chip-lib")).clicked()
             {
                 nav = Some(Route::Release(r));
@@ -467,7 +458,7 @@ fn album_page(
     });
     ui.add_space(16.0);
     let remotes: Vec<RemoteId> = v.tracks.iter().map(|t| t.remote.clone()).collect();
-    let all_local = !v.tracks.is_empty() && local == v.tracks.len();
+    let all_local = v.have.complete() || (!v.tracks.is_empty() && local == v.tracks.len());
     let members: Vec<Member> = vec![
         Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
         Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Tonal).into(),
@@ -604,7 +595,7 @@ fn artist_page(ui: &mut Ui, id: &RemoteId, v: &StreamPageView, out: &mut Vec<Com
             format!("{n} {} в {}", common::plural(n, "релиз", "релиза", "релизов"), id.service.display_name()),
             s.on_surface_variant,
         ));
-        let have: u32 = v.albums.iter().map(|a| a.local_tracks).sum();
+        let have: u32 = v.albums.iter().map(|a| a.have.local).sum();
         if have > 0 {
             ui.add_space(8.0);
             ui.add(AssistChip::new(format!("{have} {} у тебя", common::plural(u64::from(have), "трек", "трека", "треков"))).icon(Icon::Download).id_salt("st-ar-have"));

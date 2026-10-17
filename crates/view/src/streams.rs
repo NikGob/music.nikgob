@@ -85,8 +85,57 @@ pub struct StreamAlbumCard {
     pub total_tracks: Option<u32>,
     /// The library album it is linked to, if any.
     pub release: Option<ReleaseId>,
-    /// Tracks of it the library has files of ("3 из 12 у тебя").
-    pub local_tracks: u32,
+    /// How much of it the library has ([`AlbumHave::label`]).
+    pub have: AlbumHave,
+}
+
+/// How much of an album the library has, counted one way for every place
+/// that says it (search cards, discography, the album page of a service,
+/// library cards): over the tracks of the linked library album.
+///
+/// * `local` — tracks with a file: "у тебя" when all, else "3 из 12";
+/// * `in_library` — tracks in the library, files or not (a stream-only
+///   track is in it while liked or in a playlist): with no file at all the
+///   album is "в библиотеке" on a service's card, "стрим" on a library card;
+/// * `total` — the larger of the album's track count and the tracks known.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AlbumHave {
+    pub local: u32,
+    pub in_library: u32,
+    pub total: u32,
+}
+
+impl AlbumHave {
+    /// Every track has a file.
+    pub fn complete(&self) -> bool {
+        self.total > 0 && self.local >= self.total
+    }
+
+    /// The badge of a service's album card: "у тебя", "3 из 12", "в
+    /// библиотеке" or nothing.
+    pub fn label(&self) -> Option<String> {
+        if self.complete() {
+            Some("у тебя".to_owned())
+        } else if self.local > 0 {
+            Some(format!("{} из {}", self.local, self.total))
+        } else if self.in_library > 0 {
+            Some("в библиотеке".to_owned())
+        } else {
+            None
+        }
+    }
+
+    /// The chip of a service's album page: "у тебя", "3 из 12 у тебя", or
+    /// nothing (files only; "В библиотеке" is a chip of its own).
+    pub fn files_label(&self) -> Option<String> {
+        if self.complete() {
+            Some("у тебя".to_owned())
+        } else if self.local > 0 {
+            Some(format!("{} из {} у тебя", self.local, self.total))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -217,6 +266,8 @@ pub struct StreamPageView {
     /// An artist's discography, newest first (empty otherwise).
     pub albums: Vec<StreamAlbumCard>,
     pub total_duration: Duration,
+    /// Album: how much of it the library has (the same count as its card).
+    pub have: AlbumHave,
     /// Album: every track is liked. Artist: followed (library artist liked).
     pub liked: bool,
     /// The linked library album / artist / playlist.
@@ -241,6 +292,7 @@ impl StreamPageView {
             tracks: Vec::new(),
             albums: Vec::new(),
             total_duration: Duration::ZERO,
+            have: AlbumHave::default(),
             liked: false,
             release: None,
             artist: None,
@@ -387,4 +439,25 @@ pub struct ShareView {
 pub struct ClipboardRequest {
     pub id: u64,
     pub text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AlbumHave;
+
+    fn have(local: u32, in_library: u32, total: u32) -> AlbumHave {
+        AlbumHave { local, in_library, total }
+    }
+
+    #[test]
+    fn one_wording_for_how_much_of_an_album_is_here() {
+        assert_eq!(have(0, 0, 4).label(), None);
+        assert_eq!(have(0, 2, 4).label().as_deref(), Some("в библиотеке"));
+        assert_eq!(have(0, 2, 4).files_label(), None, "stream only: no files");
+        assert_eq!(have(3, 3, 12).label().as_deref(), Some("3 из 12"));
+        assert_eq!(have(3, 3, 12).files_label().as_deref(), Some("3 из 12 у тебя"));
+        assert_eq!(have(4, 4, 4).label().as_deref(), Some("у тебя"));
+        assert_eq!(have(4, 4, 4).files_label().as_deref(), Some("у тебя"));
+        assert_eq!(have(0, 0, 0).label(), None);
+    }
 }

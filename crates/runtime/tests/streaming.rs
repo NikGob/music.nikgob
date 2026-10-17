@@ -504,3 +504,33 @@ fn a_song_liked_on_both_services_is_one_track_and_one_wishlist_item() {
     assert_eq!(r.rt.state().downloads.wishlist.items.len(), 3);
 }
 
+#[test]
+fn an_album_says_the_same_count_on_its_card_its_page_and_in_the_library() {
+    let lib = Library::open_in_memory().unwrap();
+    let spotify = FakeService::spotify();
+    // One of the four songs of "Discovery" is a file, one more is liked.
+    let omt = lib.upsert_stream_track(&find(&spotify, "sp-discovery-1")).unwrap();
+    lib.add_source(&Source::new(omt, SourceKind::LocalFile, "Music/omt.opus", Codec::Opus))
+        .unwrap();
+    let aero = lib.upsert_stream_track(&find(&spotify, "sp-discovery-2")).unwrap();
+    lib.like(aero).unwrap();
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], false);
+    r.rt.send(Command::Search("daft".into()));
+    wait_for(&r.rt, "the section", |s| s.search.streams.iter().any(|x| !x.searching && !x.albums.is_empty()));
+    let card = r.rt.state().search.streams[0].albums[0].clone();
+    assert_eq!(card.title, "Discovery");
+    assert_eq!(card.have, nikgob_view::AlbumHave { local: 1, in_library: 2, total: 4 });
+    assert_eq!(card.have.label().as_deref(), Some("1 из 4"));
+
+    r.rt.send(Command::LoadStream(nikgob_view::StreamPage::Album(card.remote.clone())));
+    wait_for(&r.rt, "the page", |s| s.stream_page.as_ref().is_some_and(|p| !p.loading && !p.tracks.is_empty()));
+    let page = r.rt.state().stream_page.clone().unwrap();
+    assert_eq!(page.have, card.have, "page and card agree");
+    assert_eq!(page.have.files_label().as_deref(), Some("1 из 4 у тебя"));
+    assert_eq!(page.tracks.iter().filter(|t| t.has_local).count(), 1);
+
+    // The library card of the linked album counts the same.
+    let release = card.release.unwrap();
+    let p = lib.release_progress(release).unwrap().unwrap();
+    assert_eq!((p.local, p.in_library, p.total), (1, 2, 4));
+}

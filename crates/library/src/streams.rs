@@ -641,6 +641,35 @@ impl Library {
         })
     }
 
+    /// What a service says about an album the library links to (search
+    /// hits, pages, discographies): fills the release's track count and
+    /// cover url when it has none (a cover file and a known count stay).
+    /// Returns whether it changed.
+    pub fn learn_stream_album(
+        &self,
+        album: &RemoteId,
+        total_tracks: Option<u32>,
+        cover_url: Option<&str>,
+    ) -> Result<bool> {
+        let cover = cover_url.filter(|u| is_web_ref(u));
+        if total_tracks.is_none() && cover.is_none() {
+            return Ok(false);
+        }
+        self.write(|tx| {
+            let Some(id) = linked(tx, "release", album.service, EntityKind::Album, &album.id)? else {
+                return Ok(false);
+            };
+            Ok(tx.execute(
+                "UPDATE release SET total_tracks = coalesce(total_tracks, ?2),
+                        cover_ref = CASE WHEN cover_ref IS NULL OR cover_ref = '' THEN ?3 ELSE cover_ref END
+                  WHERE id = ?1
+                    AND ((total_tracks IS NULL AND ?2 IS NOT NULL)
+                         OR ((cover_ref IS NULL OR cover_ref = '') AND ?3 IS NOT NULL))",
+                params![id, total_tracks, cover],
+            )? > 0)
+        })
+    }
+
     /// Gives a library artist the image url a service shows for it, unless
     /// it has an image of another kind (a file); returns whether it changed.
     pub fn set_stream_artist_image(&self, artist: ArtistId, url: &str) -> Result<bool> {

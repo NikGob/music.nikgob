@@ -170,6 +170,9 @@ impl Worker {
         }
         if let Ok(r) = &result {
             self.streaming.learn(&r.tracks);
+            for a in &r.albums {
+                self.learn_album(a);
+            }
         }
         if let Some(slot) = self
             .streaming

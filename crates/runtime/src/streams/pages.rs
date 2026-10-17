@@ -79,6 +79,7 @@ impl Worker {
     fn remember(&mut self, data: &PageData) {
         match data {
             PageData::Album(a) => {
+                self.learn_album(a);
                 self.streaming.learn(&a.tracks);
                 self.streaming.albums.insert(a.id.clone(), a.clone());
             }
@@ -144,7 +145,7 @@ impl Worker {
                 view.year = a.year;
                 view.release_type = Some(a.release_type);
                 view.tracks = a.tracks.iter().map(|t| self.stream_row_auto(t)).collect();
-                view.release = self.lib.release_by_remote(&a.id).ok().flatten();
+                (view.release, view.have) = self.album_have(a);
                 view.liked = !view.tracks.is_empty() && view.tracks.iter().all(|t| t.liked);
             }
             PageData::Playlist(p) => {
@@ -201,11 +202,35 @@ impl Worker {
         }
     }
 
-    pub(crate) fn album_card(&self, a: &StreamAlbum) -> v::StreamAlbumCard {
+    /// How much of a service's album the library has: the one count its
+    /// card, its page and the library card of the linked album all show
+    /// ([`v::AlbumHave`]). Counted over the linked library album; the total
+    /// is the larger of the service's track count (of the full album when
+    /// it was fetched) and the library's.
+    pub(crate) fn album_have(&self, a: &StreamAlbum) -> (Option<nikgob_core::model::ReleaseId>, v::AlbumHave) {
         let release = self.lib.release_by_remote(&a.id).ok().flatten();
-        let local = release
-            .and_then(|r| self.lib.release_progress(r).ok().flatten())
-            .map_or(0, |p| p.local);
+        let full = self.streaming.albums.get(&a.id).unwrap_or(a);
+        let listed = (!full.tracks.is_empty()).then_some(full.tracks.len() as u32);
+        let theirs = full.total_tracks.max(a.total_tracks).max(listed).unwrap_or(0);
+        let p = release.and_then(|r| self.lib.release_progress(r).ok().flatten());
+        let have = v::AlbumHave {
+            local: p.map_or(0, |p| p.local),
+            in_library: p.map_or(0, |p| p.in_library),
+            total: p.map_or(0, |p| p.total).max(theirs),
+        };
+        (release, have)
+    }
+
+    /// The linked library album learns the track count and cover.
+    pub(crate) fn learn_album(&self, a: &StreamAlbum) {
+        let listed = (!a.tracks.is_empty()).then_some(a.tracks.len() as u32);
+        let _ = self
+            .lib
+            .learn_stream_album(&a.id, a.total_tracks.max(listed), a.cover_url.as_deref());
+    }
+
+    pub(crate) fn album_card(&self, a: &StreamAlbum) -> v::StreamAlbumCard {
+        let (release, have) = self.album_have(a);
         v::StreamAlbumCard {
             remote: a.id.clone(),
             title: a.title.clone(),
@@ -216,7 +241,7 @@ impl Worker {
             cover_url: a.cover_url.clone(),
             total_tracks: a.total_tracks,
             release,
-            local_tracks: local,
+            have,
         }
     }
 

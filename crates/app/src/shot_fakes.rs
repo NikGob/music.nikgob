@@ -96,7 +96,7 @@ fn discography(artist: &str, library: &[nikgob_view::ReleaseCard]) -> Discograph
             cover_url: a.cover_url.clone(),
             total_tracks: a.total_tracks,
             release: None,
-            local_tracks: 0,
+            have: Default::default(),
         })
         .collect();
     DiscographyView { loading: false, error: None, albums }

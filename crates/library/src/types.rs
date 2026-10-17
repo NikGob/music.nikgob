@@ -117,7 +117,12 @@ impl ReleaseRow {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseProgress {
+    /// Tracks with a local file ("3 из 12 у тебя").
     pub local: u32,
+    /// Tracks in the library: with a file, or liked / in a playlist from a
+    /// service (stream only, "стрим").
+    #[serde(default)]
+    pub in_library: u32,
     /// `total_tracks` of the release, or the number of known tracks if larger/unknown.
     pub total: u32,
 }
@@ -126,6 +131,7 @@ impl ReleaseProgress {
     pub(crate) fn new(local: u32, known: u32, total_tracks: Option<u32>) -> Self {
         Self {
             local,
+            in_library: known,
             total: total_tracks.unwrap_or(0).max(known),
         }
     }
