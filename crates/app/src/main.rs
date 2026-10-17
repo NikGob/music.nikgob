@@ -10,6 +10,7 @@ mod audio;
 mod demo;
 mod desktop;
 mod geometry;
+mod logfile;
 mod shot;
 mod shot_fakes;
 mod streams;
@@ -290,7 +291,7 @@ fn add_system_fallbacks(fonts: &mut egui::FontDefinitions) {
 }
 
 fn main() -> eframe::Result {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    logfile::init();
     let mut paths = paths();
     if let Some(dir) = paths.db.parent() {
         log_panics(dir.to_owned());
