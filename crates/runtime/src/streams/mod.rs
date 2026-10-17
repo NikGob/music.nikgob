@@ -270,13 +270,37 @@ pub(crate) fn error_text(e: &StreamError) -> String {
     }
 }
 
+/// Whether a service can be asked anything in this account state: Spotify
+/// only while connected (it needs Premium and the user's own app, docs/
+/// stage3.md §0); YouTube Music answers without a login.
+pub(crate) fn usable(kind: Service, account: &Account) -> bool {
+    match kind {
+        Service::Spotify => account.is_logged_in(),
+        Service::Youtube => true,
+    }
+}
+
 impl Worker {
-    /// The registered service of `kind`, if it is switched on.
+    /// The registered service of `kind`, if it is switched on and can be
+    /// asked ([`usable`]): a Spotify that is not connected gets no request
+    /// at all (no search, likes, playlist checks or enrichment).
     pub(crate) fn service(&self, kind: Service) -> Option<Arc<dyn StreamService>> {
         if !self.state.read().prefs.service_enabled(kind) {
             return None;
         }
-        self.streams.iter().find(|s| s.service() == kind).cloned()
+        self.streams
+            .iter()
+            .find(|s| s.service() == kind && usable(kind, &s.account()))
+            .cloned()
+    }
+
+    /// Why [`Self::service`] has nothing, as the user reads it.
+    pub(crate) fn off_text(&self, kind: Service) -> String {
+        if self.state.read().prefs.service_enabled(kind) {
+            format!("{} не подключён", kind.display_name())
+        } else {
+            format!("{} выключен", kind.display_name())
+        }
     }
 
     /// The service plays sound for this account right now (Spotify needs

@@ -410,8 +410,9 @@ fn discography_shows_the_albums_the_library_lacks() {
     let t = lib.upsert_track(&t).unwrap();
     lib.add_source(&Source::new(t.id, SourceKind::LocalFile, "Music/a.flac", Codec::Flac)).unwrap();
 
+    // Spotify connected (a Spotify that is not is asked nothing).
     let streams: Vec<Arc<dyn StreamService>> = vec![
-        Arc::new(FakeService::spotify().logged_out()),
+        Arc::new(FakeService::spotify()),
         Arc::new(FakeService::youtube().logged_out()),
     ];
     let rt = start(&lib, streams);

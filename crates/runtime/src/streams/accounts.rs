@@ -35,6 +35,7 @@ impl Worker {
                     registered: registered.is_some(),
                     enabled,
                     audio: registered.is_some() && enabled && self.has_audio(service),
+                    usable: registered.is_some() && enabled && super::usable(service, &account),
                     account,
                     busy: self.streaming.busy.contains(&service),
                     error: self.streaming.errors.get(&service).cloned(),
@@ -92,8 +93,12 @@ impl Worker {
                 log::warn!("{service}: login failed: {e}");
                 // A login's own message (a busy port, a refused grant) is
                 // already for the user; the rest reads as any service error.
+                // Spotify without Premium is not connected at all.
                 let text = match &e {
                     StreamError::Network(m) if !m.trim().is_empty() => m.clone(),
+                    StreamError::PremiumRequired if service == Service::Spotify => {
+                        nikgob_core::streaming::SPOTIFY_PREMIUM_REQUIRED.to_owned()
+                    }
                     e => error_text(e),
                 };
                 self.streaming.errors.insert(service, text);
@@ -104,18 +109,19 @@ impl Worker {
         self.preload_next();
     }
 
-    /// What a finished login says. A Spotify Premium account without the
-    /// playback login yet is offered the second step right away.
+    /// What a finished login says. A Spotify account without the playback
+    /// login yet is offered the second step right away (a login without
+    /// Premium does not get here: it is not connected).
     fn login_toast(&mut self, service: Service, input: &LoginInput) {
         let account = self.streams.iter().find(|s| s.service() == service).map(|s| s.account());
-        let premium_without_sound = matches!(
+        let without_sound = matches!(
             account,
-            Some(nikgob_core::streaming::Account::LoggedIn { premium: Some(true), audio: false, .. })
+            Some(nikgob_core::streaming::Account::LoggedIn { premium: Some(true) | None, audio: false, .. })
         );
         match (service, input) {
             (Service::Spotify, LoginInput::Playback) => self.toast("Звук из Spotify включён", None),
-            (Service::Spotify, _) if premium_without_sound => self.toast(
-                "Spotify подключён · звук пока с YouTube Music",
+            (Service::Spotify, _) if without_sound => self.toast(
+                "Spotify подключён · осталось включить звук",
                 Some((
                     "Включить звук".into(),
                     nikgob_view::Command::StreamLogin { service, input: LoginInput::Playback },

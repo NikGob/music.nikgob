@@ -31,6 +31,10 @@ pub struct AccountView {
     pub enabled: bool,
     /// What the service says about the login (cheap, polled while busy).
     pub account: Account,
+    /// The service can be used now: registered, switched on, and (Spotify)
+    /// connected. A Spotify that is not connected is asked nothing at all
+    /// (it needs Premium, docs/stage3.md §0); the search can leave it out.
+    pub usable: bool,
     /// A login is running ([`crate::Command::StreamLogin`]).
     pub busy: bool,
     /// The last login error, in Russian ("Порт 8989 занят", …).

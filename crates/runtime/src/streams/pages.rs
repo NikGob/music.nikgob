@@ -133,7 +133,7 @@ impl Worker {
         let Some(svc) = self.service(remote.service) else {
             let mut view = v::StreamPageView::loading(page);
             view.loading = false;
-            view.error = Some(format!("{} выключен", remote.service.display_name()));
+            view.error = Some(self.off_text(remote.service));
             self.publish(|s, _| s.stream_page = Some(view));
             return;
         };
@@ -435,7 +435,7 @@ impl Worker {
             return;
         }
         let Some(svc) = self.service(key.1.service) else {
-            self.toast(format!("{} выключен", key.1.service.display_name()), None);
+            self.toast(self.off_text(key.1.service), None);
             return;
         };
         self.fetch_page(key, Waiter::Then(then), svc);
