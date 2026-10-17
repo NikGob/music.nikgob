@@ -170,6 +170,8 @@ pub struct PlaylistCard {
     pub track_count: u32,
     pub pinned: bool,
     pub cover_mode: PlaylistCoverMode,
+    /// The service whose playlist it follows (or is synced with), if any.
+    pub service: Option<Service>,
 }
 
 /// How a playlist's cover is chosen.
@@ -256,8 +258,8 @@ pub struct PlayerView {
     /// file): the "звук: YouTube" label, e.g. for a Spotify track played
     /// from YouTube Music because Spotify has no sound for this account.
     pub audio_service: Option<Service>,
-    /// What the sound of a stream actually is ("Opus ~160 kbps", "AAC
-    /// ~128 kbps", "Vorbis 320 kbps"): the source that plays, not the
+    /// What the sound of a stream actually is ("Opus ~160 кбит/с", "AAC
+    /// ~128 кбит/с", "Vorbis 320 кбит/с"): the source that plays, not the
     /// track's best source. `None` for a local file (its row says).
     pub audio_quality: Option<String>,
 }
@@ -293,7 +295,7 @@ impl PlayerView {
         };
         let unquote = |s: &str| s.trim().trim_start_matches('«').trim_end_matches('»').to_owned();
         const PHRASES: [&str; 5] = ["поиска", "альбома ", "плейлиста ", "исполнителя ", "микса "];
-        if PHRASES.iter().any(|p| c.starts_with(p)) {
+        if PHRASES.iter().any(|p| c.starts_with(p)) || c == "библиотеки" {
             return format!("Играет из {c}");
         }
         if let Some(q) = c.strip_prefix("Поиск ") {
@@ -390,11 +392,22 @@ pub struct TrackInfo {
     pub tags: Vec<(String, String)>,
 }
 
+/// One card of «Продолжить»: an album of the library, or an album of a
+/// service that was streamed without joining the library (it opens the
+/// service's page).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContinueCard {
+    Release(ReleaseCard),
+    Stream(StreamAlbumCard),
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HomeView {
     pub greeting_hour: u8,
     pub mix: Vec<TrackRow>,
-    pub continue_listening: Vec<ReleaseCard>,
+    /// Albums played lately, most recent first: library albums and streamed
+    /// ones.
+    pub continue_listening: Vec<ContinueCard>,
     pub artist_mixes: Vec<ArtistCard>,
     pub long_unplayed: Vec<ReleaseCard>,
     pub recently_added: Vec<ReleaseCard>,
@@ -592,9 +605,35 @@ pub struct Toast {
     pub id: u64,
     pub text: String,
     pub action: Option<(String, Command)>,
+    /// A place the toast's button takes the user to (used when there is no
+    /// `action`): «Открыть» → «Хочу скачать», «Войти» → the service's row.
+    pub open: Option<(String, Link)>,
     pub at: Instant,
     /// What the message is about, for its icon and accent.
     pub kind: ToastKind,
+}
+
+/// A place in the app a message can lead to; the design system navigates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Link {
+    Route(Route),
+    /// A row of the settings (each design system knows where it is).
+    Setting(SettingLink),
+}
+
+/// Settings rows other parts of the app point to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SettingLink {
+    /// The Spotify account (login).
+    Spotify,
+    /// «Звук из Spotify» (the playback login).
+    SpotifyPlayback,
+    /// The YouTube Music account.
+    Youtube,
+    /// Prowlarr and the torrents.
+    Torrents,
+    /// «Что качать по лайку».
+    LikeDownload,
 }
 
 /// What a toast reports: drawn with its own icon and accent colour.
@@ -619,12 +658,12 @@ impl ToastKind {
         if any(&[
             "ошибка", "не получилось", "не удалось", "недоступ", "не читается", "нельзя", "не запустил",
             "некуда", "нечего", "нет файла", "нет локального", "это не ", "устарел", "не скачать", "не всё",
-            "не нашёл", "не нашел", "нужно войти",
+            "не нашёл", "не нашел", "нужно войти", "не подключ", "нет связи",
         ]) {
             Self::Error
         } else if t.ends_with('…') || any(&["начался", "качается", "добавляю"]) {
             Self::Working
-        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "удалено", "следующим", "в любимых", "убран", "в корзине", "объединено", "скопирован", "вошёл", "вход выполнен"]) {
+        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "удалено", "следующим", "в любимых", "убран", "в корзине", "объединено", "скопирован", "вошёл", "вход выполнен", "подключён", "включён", "в «хочу скачать»", "в библиотеке"]) {
             Self::Success
         } else {
             Self::Info
@@ -775,6 +814,9 @@ pub struct Prefs {
     /// What a like of a stream track downloads: the track (from its
     /// album's torrent) or the whole album. An album like is always the album.
     pub like_download_scope: WishlistScope,
+    /// Likes download at all («Ничего» turns it off: a like is only a like;
+    /// «Скачать» still downloads).
+    pub like_downloads: bool,
     /// Sync mode of a playlist newly linked to a service.
     pub playlist_sync_default: PlaylistSyncMode,
     /// Likes and unlikes here go to the services the track is in.
@@ -1200,6 +1242,16 @@ pub enum Command {
     /// Like every track of an album of a service (the wishlist downloads
     /// the whole album).
     LikeStreamAlbum { album: RemoteId, on: bool },
+    /// Download stream tracks without liking them: each goes to «Хочу
+    /// скачать» and joins the library once its file is here (not as a like).
+    DownloadStream { tracks: Vec<RemoteId> },
+    /// The same for a whole album of a service (one album item).
+    DownloadStreamAlbum(RemoteId),
+    /// Library tracks without a file → «Хочу скачать» (no like).
+    DownloadTracks(Vec<TrackId>),
+    /// The missing files of a library album → one album item of «Хочу
+    /// скачать».
+    DownloadRelease(ReleaseId),
     /// Stream tracks into a library playlist (they join the library).
     AddStreamToPlaylist(PlaylistId, Vec<RemoteId>),
     /// A song.link / album.link for a track or album → [`ViewState::share`]
@@ -1214,6 +1266,9 @@ pub enum Command {
     WishlistDownload(WishlistSelect),
     /// Never offer these again (also not by a pull or a re-import).
     WishlistDismiss(Vec<WishlistId>),
+    /// Take dismissed items back: they wait again (imported ones) or are
+    /// searched for at once.
+    WishlistRestore(Vec<WishlistId>),
     /// Search a torrent for this item now (instead of next week).
     WishlistRetry(WishlistId),
     /// Save the audio of the item's track from YouTube Music as it is (low
@@ -1241,6 +1296,10 @@ pub enum Command {
     WindowState { visible: bool, focused: bool },
     /// How a library playlist linked to a service follows it.
     SetPlaylistSync { playlist: PlaylistId, mode: PlaylistSyncMode },
+    /// A playlist of a service into the library: a library playlist that
+    /// follows it ([`Prefs::playlist_sync_default`]; someone else's
+    /// playlist is only followed).
+    FollowStreamPlaylist(RemoteId),
     /// Fill [`ArtistDetail::discography`] ("Нет в библиотеке").
     LoadDiscography(ArtistId),
 }
@@ -1322,6 +1381,7 @@ impl Default for Prefs {
             spotify_enabled: true,
             youtube_enabled: true,
             like_download_scope: WishlistScope::Track,
+            like_downloads: true,
             playlist_sync_default: PlaylistSyncMode::Follow,
             push_likes: true,
             library_only_downloaded: false,
@@ -1366,6 +1426,10 @@ mod toast_tests {
             ("Импорт: 12 треков", ToastKind::Info),
             ("Не нашёл раздачу: Кино — Война", ToastKind::Error),
             ("Ссылка скопирована", ToastKind::Success),
+            ("Spotify подключён · звук пока с YouTube Music", ToastKind::Success),
+            ("Spotify не подключён", ToastKind::Error),
+            ("В «Хочу скачать»: «Война»", ToastKind::Success),
+            ("Нет связи — проверь интернет", ToastKind::Error),
             ("Скоро", ToastKind::Info),
         ] {
             assert_eq!(ToastKind::guess(text), kind, "{text}");
@@ -1386,6 +1450,7 @@ mod context_tests {
     fn contexts_read_without_quotes_in_quotes() {
         assert_eq!(line(None), "Сейчас играет");
         assert_eq!(line(Some("Библиотека")), "Играет из «Библиотека»");
+        assert_eq!(line(Some("библиотеки")), "Играет из библиотеки");
         assert_eq!(line(Some("альбома «Группа крови»")), "Играет из альбома «Группа крови»");
         assert_eq!(line(Some("плейлиста «Вечер»")), "Играет из плейлиста «Вечер»");
         assert_eq!(line(Some("поиска Spotify: лёд")), "Играет из поиска Spotify: лёд");

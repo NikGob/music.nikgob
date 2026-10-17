@@ -152,7 +152,7 @@ impl Chrome {
 
     fn item(act: Act, t: &TrackRow, state: &ViewState) -> MenuItem {
         match act {
-            Act::Like => MenuItem::new(if t.liked { "Убрать из любимых" } else { "В любимые" })
+            Act::Like => MenuItem::new(if t.liked { "Убрать из Любимых" } else { "В Любимые" })
                 .icon(Icon::Favorite)
                 .shortcut("Ctrl+L"),
             Act::Lyrics => MenuItem::new("Текст песни").icon(Icon::Lyrics),
@@ -166,14 +166,16 @@ impl Chrome {
                 .icon(Icon::Album)
                 .enabled(t.release_id.is_some()),
             Act::Info => MenuItem::new("Источник и качество").icon(Icon::Info),
-            Act::Tags => MenuItem::new("Редактировать теги…").icon(Icon::Edit),
-            Act::Replace => {
-                MenuItem::new("Заменить на лучшее качество…").icon(Icon::CloudDownload)
-            }
+            // A stream has no file: no tags to edit; «Скачать» instead of a
+            // better copy.
+            Act::Tags => MenuItem::new("Редактировать теги…").icon(Icon::Edit).enabled(t.has_local),
+            Act::Replace if t.has_local => MenuItem::new("Найти качество лучше…").icon(Icon::Search),
+            Act::Replace => MenuItem::new("Скачать").icon(Icon::Download),
             Act::Visualizer => MenuItem::new("Визуализатор")
                 .icon(Icon::GraphicEq)
                 .shortcut("F12"),
-            Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete),
+            // Only what is in the library (a file, or a like) can leave it.
+            Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete).enabled(t.has_local || t.liked),
             Act::Share => MenuItem::new("Поделиться").icon(Icon::Share),
             Act::Sep => MenuItem::new(""),
         }
@@ -230,7 +232,8 @@ impl Chrome {
             Act::Artist => self.nav = t.artist_id.map(Route::Artist),
             Act::Album => self.nav = t.release_id.map(Route::Release),
             Act::Tags => out.push(Command::OpenTagEditor(t.id)),
-            Act::Replace => out.push(Command::SearchTorrents(replace_query(t))),
+            Act::Replace if t.has_local => out.push(Command::SearchTorrents(replace_query(t))),
+            Act::Replace => out.push(Command::DownloadTracks(vec![t.id])),
             Act::Visualizer => self.visualizer = true,
             Act::Trash => self.trash = Some((t.id, t.title.clone())),
             Act::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),

@@ -2,7 +2,7 @@
 //! "Подтверди" queue, seeding and history.
 
 use egui::{Rect, Stroke, Ui, vec2};
-use nikgob_view::{Command, DownloadsTab, Job, Route, SeedRow, ViewState, WishlistStatus};
+use nikgob_view::{Command, DownloadsTab, Job, Route, SeedRow, ViewState};
 
 use super::{PageState, connected, fmt_size, widgets};
 use crate::{
@@ -48,13 +48,6 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         && let Some(r) = rects.get(tab_index(DownloadsTab::Confirm))
     {
         badge::count(ui.painter(), badge::large_anchor(*r), d.confirm.len() as u32);
-    }
-    // What waits for the user on the wishlist: no torrent found.
-    let stuck = d.wishlist.count(WishlistStatus::NoTorrent);
-    if stuck > 0
-        && let Some(r) = rects.get(tab_index(DownloadsTab::Wishlist))
-    {
-        badge::count(ui.painter(), badge::large_anchor(*r), stuck);
     }
     ui.add_space(16.0);
     match TABS[tab].0 {
@@ -104,7 +97,7 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
         ui.add_space(4.0);
         ui.label(
             TypeRole::BodyMedium.style().rich_para(
-                "Для этих файлов нашлось несколько похожих релизов, и уверенности нет.                  Выбери правильный вариант — название, альбом, номер и обложка возьмутся из него.                  Если ни один не подходит, оставь теги, которые уже записаны в файле.",
+                "Для этих файлов нашлось несколько похожих релизов, и уверенности нет. Выбери правильный вариант — название, альбом, номер и обложка возьмутся из него. Если ни один не подходит, оставь теги, которые уже записаны в файле.",
                 s.on_surface_variant,
             ),
         );

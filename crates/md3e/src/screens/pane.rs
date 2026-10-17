@@ -321,17 +321,13 @@ pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
             }
             Some(t) => {
                 ui.add_space(12.0);
+                // A file has tags to edit; a stream can be downloaded.
+                let (label, icon) = if t.has_local { ("Редактировать теги…", Icon::Edit) } else { ("Скачать", Icon::Download) };
                 if ui
-                    .add(
-                        Button::new("Редактировать теги…")
-                            .icon(Icon::Edit)
-                            .style(Style::Outlined)
-                            .size(Size::S)
-                            .id_salt("info-tags"),
-                    )
+                    .add(Button::new(label).icon(icon).style(Style::Outlined).size(Size::S).id_salt("info-tags"))
                     .clicked()
                 {
-                    out.push(Command::OpenTagEditor(t.id));
+                    out.push(if t.has_local { Command::OpenTagEditor(t.id) } else { Command::DownloadTracks(vec![t.id]) });
                 }
                 ui.add_space(8.0);
             }

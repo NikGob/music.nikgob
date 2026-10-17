@@ -107,6 +107,11 @@ impl Resolver {
         self.covers.clear();
     }
 
+    /// The cover of a release (its file, or a service's https url).
+    pub fn release_cover(&mut self, id: ReleaseId) -> Option<v::Cover> {
+        self.cover_for(Some(id), None)
+    }
+
     pub fn track(&mut self, r: &TrackRow) -> v::TrackRow {
         v::TrackRow {
             id: r.id,
@@ -141,6 +146,34 @@ impl Resolver {
         }
     }
 
+    /// A streamed album outside the library as a card of its service.
+    pub fn stream_album(
+        &mut self,
+        remote: &nikgob_core::streaming::RemoteId,
+        r: &Release,
+        progress: Option<ReleaseProgress>,
+    ) -> v::StreamAlbumCard {
+        let have = progress.map_or_else(v::AlbumHave::default, |p| v::AlbumHave {
+            local: p.local,
+            in_library: p.in_library,
+            total: p.total.max(r.total_tracks.unwrap_or(0)),
+        });
+        v::StreamAlbumCard {
+            remote: remote.clone(),
+            title: r.title.clone(),
+            artist: r.artist_credit.display(),
+            artist_id: None,
+            year: r.year,
+            release_type: r.release_type,
+            cover_url: self
+                .cover_for(Some(r.id), r.cover_ref.as_deref())
+                .and_then(|c| c.web_url().map(str::to_owned)),
+            total_tracks: r.total_tracks,
+            release: None,
+            have,
+        }
+    }
+
     pub fn release(&mut self, r: &ReleaseRow) -> v::ReleaseCard {
         let p = r.progress();
         self.release_card(&r.release, p.local, Some(p.total), r.liked)
@@ -167,6 +200,10 @@ impl Resolver {
             }),
             (Some(id), mode) => self.auto_cover(id, mode),
         };
+        let service = p
+            .id
+            .and_then(|id| self.lib.playlist_remote(id).ok().flatten())
+            .map(|link| link.remote.service);
         v::PlaylistCard {
             id: p.id.unwrap_or(v::LIKED_PLAYLIST),
             name: p.name.clone(),
@@ -174,6 +211,7 @@ impl Resolver {
             track_count: p.track_count,
             pinned: p.kind == PlaylistKind::Liked,
             cover_mode,
+            service,
         }
     }
 
@@ -315,7 +353,16 @@ impl Resolver {
         v::HomeView {
             greeting_hour: h.hour,
             mix: h.mix.iter().map(|t| self.track(t)).collect(),
-            continue_listening: h.continue_listening.iter().map(|r| self.release(r)).collect(),
+            continue_listening: h
+                .continue_listening
+                .iter()
+                .map(|c| match c {
+                    crate::home::Continue::Release(r) => v::ContinueCard::Release(self.release(r)),
+                    crate::home::Continue::Stream { remote, release, progress } => {
+                        v::ContinueCard::Stream(self.stream_album(remote, release, *progress))
+                    }
+                })
+                .collect(),
             artist_mixes: h.artists.iter().map(|a| self.artist(a)).collect(),
             long_unplayed: h.long_unplayed.iter().map(|r| self.release(r)).collect(),
             recently_added: h.recently_added.iter().map(|r| self.release(r)).collect(),

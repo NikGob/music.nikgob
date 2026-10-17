@@ -544,6 +544,24 @@ impl Worker {
             }
         }
 
+        // How far the torrents of wishlist items are, for their rows.
+        let wish: HashMap<nikgob_core::model::WishlistId, u8> = list
+            .iter()
+            .filter(|t| !complete(t))
+            .filter_map(|t| {
+                let item = downloads.get(&t.info_hash)?.wishlist_id?;
+                Some((item, (t.progress.clamp(0.0, 1.0) * 100.0) as u8))
+            })
+            .collect();
+        if wish != self.streaming.wish.progress {
+            self.streaming.wish.progress = wish.clone();
+            self.publish(|s, _| {
+                for r in &mut s.downloads.wishlist.items {
+                    r.progress = wish.get(&r.id).copied().filter(|_| r.status == nikgob_view::WishlistStatus::Downloading);
+                }
+            });
+        }
+
         let seed_days = self.state.read().prefs.seed_days;
         let active: Vec<v::Job> = list.iter().filter(|t| !complete(t)).map(job).collect();
         let seeding: Vec<v::SeedRow> = list

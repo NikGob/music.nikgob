@@ -13,6 +13,9 @@
 //! - `fake:link` — the open playlist follows a Spotify playlist.
 //! - `fake:lyrics` — word-synced lyrics (LyricsPlus) for whatever plays:
 //!   the demo has no network to fetch any for a stream track.
+//! - `fake:paused:youtube` / `fake:paused:spotify` — the service asked to
+//!   wait (until 14:05).
+//! - `fake:torrents` — Prowlarr looks set up (the demo has none).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -29,6 +32,8 @@ pub struct Fakes {
     audio: Option<Service>,
     link: bool,
     lyrics: bool,
+    paused: Option<Service>,
+    torrents: bool,
 }
 
 impl Fakes {
@@ -43,13 +48,24 @@ impl Fakes {
             "audio:spotify" => self.audio = Some(Service::Spotify),
             "link" => self.link = true,
             "lyrics" => self.lyrics = true,
+            "paused:youtube" => self.paused = Some(Service::Youtube),
+            "paused:spotify" => self.paused = Some(Service::Spotify),
+            "torrents" => self.torrents = true,
             _ => return false,
         }
         true
     }
 
     pub fn any(&self) -> bool {
-        self.discography || self.wishlist || self.album_status || self.buffering || self.audio.is_some() || self.link || self.lyrics
+        self.discography
+            || self.wishlist
+            || self.album_status
+            || self.buffering
+            || self.audio.is_some()
+            || self.link
+            || self.lyrics
+            || self.paused.is_some()
+            || self.torrents
     }
 
     /// `state` with the fakes laid over it.
@@ -78,6 +94,15 @@ impl Fakes {
         }
         if self.buffering {
             s.player.status = Status::Buffering;
+        }
+        if let Some(svc) = self.paused
+            && let Some(a) = s.accounts.iter_mut().find(|a| a.service == svc)
+        {
+            a.paused_until = Some(0);
+            a.paused_until_hm = Some("14:05".into());
+        }
+        if self.torrents {
+            s.prefs.prowlarr_configured = true;
         }
         if let Some(svc) = self.audio {
             s.player.audio_service = Some(svc);
@@ -222,9 +247,11 @@ fn row(n: u128, title: &str, artist: &str, album: &str, status: St) -> WishlistR
             St::Confirm => Some("Длительность расходится на 40 с".into()),
             _ => None,
         },
-        next_try: (status == St::NoTorrent).then(|| "следующий поиск через 6 дн.".into()),
+        next_try: (status == St::NoTorrent).then(|| "поищу снова через 6 дн.".into()),
         attempts: u32::from(status == St::NoTorrent),
         can_save_from_youtube: status == St::NoTorrent,
+        cover: None,
+        progress: (status == St::Downloading).then_some(38),
     }
 }
 

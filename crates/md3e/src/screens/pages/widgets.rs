@@ -5,9 +5,11 @@ use egui::{
     Color32, Id, Mesh, Rect, Response, Sense, Shape, Stroke, Ui, UiBuilder, pos2, vec2,
 };
 use nikgob_shapes::{MaterialShape, paint as shape_paint};
+use std::collections::HashMap;
+
 use nikgob_view::{
-    ArtistCard, Command, LIKED_PLAYLIST, LikeTarget, PlaylistCard, PlaylistId, ReleaseCard,
-    Route, SourceKind, Status, TrackRow, ViewState,
+    ArtistCard, Command, LIKED_PLAYLIST, LikeTarget, PlaylistCard, PlaylistId, ReleaseCard, ReleaseId,
+    Route, SourceKind, Status, TrackId, TrackRow, ViewState, WishlistScope, WishlistStatus, WishlistView,
 };
 
 use super::{Ask, PageState};
@@ -162,11 +164,15 @@ pub fn playlist_card_with(
     pages: Option<&mut PageState>,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
-    let subtitle = format!(
+    // A playlist that follows a service says which, in words.
+    let mut subtitle = format!(
         "{} {}",
         p.track_count,
         common::plural(u64::from(p.track_count), "трек", "трека", "треков")
     );
+    if let Some(s) = p.service {
+        subtitle = format!("{} · {subtitle}", s.display_name());
+    }
     let o = MediaCard::new(&p.name)
         .subtitle(subtitle)
         .cover_opt(p.cover.as_ref().map(|c| c.uri()))
@@ -463,7 +469,8 @@ pub fn track_list(
 
 /// [`track_list`] with playlist extras. Rows are 56 (one line) or 72 (two
 /// lines: compilations and lists with covers); the playing row is
-/// `secondary-container` with a mini equalizer instead of the number.
+/// `secondary-container` with a mini equalizer instead of the number. A
+/// long list (a big «Любимые») lays out only the rows on screen.
 #[allow(clippy::too_many_arguments)]
 pub fn track_list_ext(
     ui: &mut Ui,
@@ -478,123 +485,15 @@ pub fn track_list_ext(
 ) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let mut nav = None;
-    let current = state.player.current.as_ref().map(|t| t.id);
-    let playing = state.player.status == Status::Playing;
     let two_line = lead == Lead::Cover || is_compilation(tracks);
-    let mut rows: Vec<Rect> = Vec::with_capacity(tracks.len());
     let (mut dragging, mut dropped) = (None, None);
     // An album on several discs numbers each disc from 1: a "Диск N" line
     // above each, or the numbers would read as broken.
     let discs = lead == Lead::Number && tracks.iter().any(|t| t.disc_no != tracks[0].disc_no);
-    for (i, t) in tracks.iter().enumerate() {
-        if discs && (i == 0 || tracks[i - 1].disc_no != t.disc_no) {
-            ui.add_space(if i == 0 { 4.0 } else { 16.0 });
-            ui.horizontal(|ui| {
-                ui.add_space(16.0);
-                ui.label(TypeRole::TitleSmall.style().rich(format!("Диск {}", t.disc_no.max(1)), s.on_surface_variant));
-            });
-            ui.add_space(4.0);
-        }
-        let is_cur = current == Some(t.id);
-        let leading = match lead {
-            Lead::Number if is_cur => Leading::Number(String::new()),
-            Lead::Number => Leading::Number(if t.track_no > 0 {
-                t.track_no.to_string()
-            } else {
-                (i + 1).to_string()
-            }),
-            Lead::Cover => Leading::Image(t.cover.as_ref().map(|c| c.uri()), Icon::MusicNote),
-        };
-        let mut supporting = t.artist.clone();
-        if lead == Lead::Cover
-            && let Some(a) = &t.album
-        {
-            supporting = format!("{supporting} · {a}");
-        }
-        let dur = t.duration.map(common::fmt_time).unwrap_or_default();
-        let status = (!t.has_local).then_some(match t.source {
-            Some(SourceKind::Spotify | SourceKind::Youtube) => "стрим",
-            _ => "нет файла",
-        });
-        let download = format!("{} {}", t.artist, t.album.as_deref().unwrap_or(&t.title));
-        let track_id = t.id;
-        let (liked, has_local) = (t.liked, t.has_local);
-        let mut menu_resp: Option<Response> = None;
-        let mut item = ListItem::new(&t.title)
-            .leading(leading)
-            .selected(is_cur)
-            .muted(!has_local)
-            .enabled(true)
-            .trailing(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let m = ui.add(
-                        IconButton::new(Icon::MoreVert)
-                            .size(Size::Xs)
-                            .tooltip("Ещё")
-                            .id_salt(("track-more", id, i)),
-                    );
-                    menu_resp = Some(m);
-                    if !has_local
-                        && ui
-                            .add(
-                                IconButton::new(Icon::Download)
-                                    .size(Size::Xs)
-                                    .tooltip("Скачать")
-                                    .id_salt(("track-dl", id, i)),
-                            )
-                            .clicked()
-                    {
-                        out.push(Command::SearchTorrents(download));
-                    }
-                    if ui
-                        .add(
-                            IconButton::new(Icon::Favorite)
-                                .size(Size::Xs)
-                                .selected(liked)
-                                .tooltip("Нравится")
-                                .id_salt(("track-like", id, i)),
-                        )
-                        .clicked()
-                    {
-                        out.push(Command::Like(LikeTarget::Track(track_id), !liked));
-                    }
-                    let variant = Theme::get(ui.ctx()).scheme.on_surface_variant;
-                    ui.label(TypeRole::BodyMedium.style().rich(dur, variant));
-                    if let Some(st) = status {
-                        ui.label(TypeRole::LabelSmall.style().rich(st, variant));
-                    }
-                });
-            })
-            .id_salt(("track", id, i, t.id));
-        if two_line {
-            item = item.supporting(supporting);
-        }
-        if opts.reorder {
-            item = item.drag_handle(true);
-        }
-        let o = item.show(ui);
-        rows.push(o.rect);
-        if is_cur {
-            let (center, backdrop) = match lead {
-                Lead::Number => (pos2(o.rect.left() + 16.0 + 14.0, o.rect.center().y), None),
-                Lead::Cover => {
-                    let c = pos2(o.rect.left() + 16.0 + 28.0, o.rect.center().y);
-                    (c, Some(Rect::from_center_size(c, vec2(56.0, 56.0))))
-                }
-            };
-            if let Some(b) = backdrop {
-                paint::container(
-                    ui.painter(),
-                    b,
-                    Radii::all(shape::SMALL),
-                    s.secondary_container.gamma_multiply(0.85),
-                    Stroke::NONE,
-                );
-            }
-            Equalizer::new(("eq", id, i), s.on_secondary_container)
-                .playing(playing)
-                .paint_at(ui, Rect::from_center_size(center, vec2(24.0, 24.0)));
-        }
+    let wish = WishIndex::of(ui.ctx(), &state.downloads.wishlist);
+    let mut row = |ui: &mut Ui, i: usize, nav: &mut Option<Route>| -> Option<Response> {
+        let t = &tracks[i];
+        let o = track_row(ui, id, i, t, lead, two_line, opts, &wish, state, out);
         if let Some(h) = &o.handle {
             if h.dragged() {
                 dragging = Some(i);
@@ -603,39 +502,282 @@ pub fn track_list_ext(
                 dropped = Some(i);
             }
         }
-        let resp = o.response;
-        // Desktop convention: double-click plays; on the playing row it pauses.
-        if resp.double_clicked() {
-            out.push(if is_cur {
-                Command::TogglePlay
-            } else {
-                play_from(from, tracks, i)
-            });
+        let is_cur = state.player.current.as_ref().map(|c| c.id) == Some(t.id);
+        // Desktop convention: double-click plays; on the playing row it
+        // pauses. The ▶ on the cover / number plays with one click.
+        if o.response.double_clicked() || o.play_clicked {
+            out.push(if is_cur { Command::TogglePlay } else { play_from(from, tracks, i) });
         }
         let menu_key = Id::new(("pl-track-menu", id, i));
         match opts.playlist {
             Some(pl) => {
-                if let Some(m) = &menu_resp {
+                if let Some(m) = &o.more {
                     let picked = playlist_track_menu(menu_key, t, pl).attach(m);
-                    nav = playlist_track_pick(picked, t, pl, Some(m.rect), pages, out).or(nav);
+                    *nav = playlist_track_pick(picked, t, pl, Some(m.rect), pages, out).or(nav.take());
                 }
-                let picked = playlist_track_menu(menu_key.with("ctx"), t, pl).context_menu(&resp);
-                nav = playlist_track_pick(picked, t, pl, None, pages, out).or(nav);
+                let picked = playlist_track_menu(menu_key.with("ctx"), t, pl).context_menu(&o.response);
+                *nav = playlist_track_pick(picked, t, pl, None, pages, out).or(nav.take());
             }
             None => {
-                if let Some(m) = &menu_resp {
-                    nav = pages.track_menu_attach(m, t, state, out).or(nav);
+                if let Some(m) = &o.more {
+                    *nav = pages.track_menu_attach(m, t, state, out).or(nav.take());
                 }
-                nav = pages.track_context_menu(&resp, t, state, out).or(nav);
+                *nav = pages.track_context_menu(&o.response, t, state, out).or(nav.take());
             }
         }
-    }
+        Some(o.response)
+    };
+    let rects: Vec<Rect> = if discs {
+        let mut rects = Vec::with_capacity(tracks.len());
+        for i in 0..tracks.len() {
+            let t = &tracks[i];
+            if i == 0 || tracks[i - 1].disc_no != t.disc_no {
+                ui.add_space(if i == 0 { 4.0 } else { 16.0 });
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.label(TypeRole::TitleSmall.style().rich(format!("Диск {}", t.disc_no.max(1)), s.on_surface_variant));
+                });
+                ui.add_space(4.0);
+            }
+            if let Some(r) = row(ui, i, &mut nav) {
+                rects.push(r.rect);
+            }
+        }
+        rects
+    } else {
+        let row_h = if two_line { crate::components::list::TWO_LINE } else { crate::components::list::ONE_LINE };
+        virtual_rows(ui, (id, "rows"), tracks.len(), row_h, |ui, i| {
+            row(ui, i, &mut nav);
+        })
+    };
     if let Some(pl) = opts.playlist.filter(|_| opts.reorder)
         && let Some(i) = dragging.or(dropped)
     {
-        reorder(ui, pl, tracks, &rows, i, dragging.is_some(), out);
+        reorder(ui, pl, tracks, &rects, i, dragging.is_some(), out);
     }
     nav
+}
+
+/// What a drawn track row reported.
+struct RowOut {
+    response: Response,
+    handle: Option<Response>,
+    more: Option<Response>,
+    play_clicked: bool,
+}
+
+/// One row of [`track_list_ext`].
+#[allow(clippy::too_many_arguments)]
+fn track_row(
+    ui: &mut Ui,
+    id: &str,
+    i: usize,
+    t: &TrackRow,
+    lead: Lead,
+    two_line: bool,
+    opts: TrackListOpts,
+    wish: &WishIndex,
+    state: &ViewState,
+    out: &mut Vec<Command>,
+) -> RowOut {
+    let s = Theme::get(ui.ctx()).scheme;
+    let current = state.player.current.as_ref().map(|t| t.id);
+    let playing = state.player.status == Status::Playing;
+    let is_cur = current == Some(t.id);
+    let leading = match lead {
+        Lead::Number if is_cur => Leading::Number(String::new()),
+        Lead::Number => Leading::Number(if t.track_no > 0 { t.track_no.to_string() } else { (i + 1).to_string() }),
+        Lead::Cover => Leading::Image(t.cover.as_ref().map(|c| c.uri()), Icon::MusicNote),
+    };
+    let mut supporting = t.artist.clone();
+    if lead == Lead::Cover
+        && let Some(a) = &t.album
+    {
+        supporting = format!("{supporting} · {a}");
+    }
+    let dur = t.duration.map(common::fmt_time).unwrap_or_default();
+    // No file: it streams (a ⬇ to «Хочу скачать», or how far it is there),
+    // or nothing plays it at all («нет файла»).
+    let streams = matches!(t.source, Some(SourceKind::Spotify | SourceKind::Youtube));
+    let wished = (!t.has_local).then(|| wish.of_track(Some(t.id), t.release_id)).flatten();
+    let track_id = t.id;
+    let (liked, has_local) = (t.liked, t.has_local);
+    let mut menu_resp: Option<Response> = None;
+    let mut item = ListItem::new(&t.title)
+        .leading(leading)
+        .selected(is_cur)
+        .muted(!has_local && !streams)
+        .hover_play(!is_cur)
+        .enabled(true)
+        .trailing(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let m = ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("track-more", id, i)));
+                menu_resp = Some(m);
+                if !has_local {
+                    match wished {
+                        Some(st) => {
+                            if wish_mark(ui, st, ("track-wish", id, i)).clicked() {
+                                ui.ctx().data_mut(|d| d.insert_temp(Id::new(OPEN_WISHLIST), true));
+                            }
+                        }
+                        None => {
+                            if ui
+                                .add(
+                                    IconButton::new(Icon::Download)
+                                        .size(Size::Xs)
+                                        .tooltip("Скачать — в «Хочу скачать»")
+                                        .id_salt(("track-dl", id, i)),
+                                )
+                                .clicked()
+                            {
+                                out.push(Command::DownloadTracks(vec![track_id]));
+                            }
+                        }
+                    }
+                }
+                if ui
+                    .add(
+                        IconButton::new(Icon::Favorite)
+                            .size(Size::Xs)
+                            .selected(liked)
+                            .tooltip(if liked { "Убрать из Любимых" } else { "В Любимые" })
+                            .id_salt(("track-like", id, i)),
+                    )
+                    .clicked()
+                {
+                    out.push(Command::Like(LikeTarget::Track(track_id), !liked));
+                }
+                let variant = Theme::get(ui.ctx()).scheme.on_surface_variant;
+                ui.label(TypeRole::BodyMedium.style().rich(dur, variant));
+                if !has_local && !streams {
+                    ui.label(TypeRole::LabelSmall.style().rich("нет файла", variant));
+                }
+            });
+        })
+        .id_salt(("track", id, i, t.id));
+    if two_line {
+        item = item.supporting(supporting);
+    }
+    if opts.reorder {
+        item = item.drag_handle(true);
+    }
+    let o = item.show(ui);
+    if is_cur {
+        let (center, backdrop) = match lead {
+            Lead::Number => (pos2(o.rect.left() + 16.0 + 14.0, o.rect.center().y), None),
+            Lead::Cover => {
+                let c = pos2(o.rect.left() + 16.0 + 28.0, o.rect.center().y);
+                (c, Some(Rect::from_center_size(c, vec2(56.0, 56.0))))
+            }
+        };
+        if let Some(b) = backdrop {
+            paint::container(ui.painter(), b, Radii::all(shape::SMALL), s.secondary_container.gamma_multiply(0.85), Stroke::NONE);
+        }
+        Equalizer::new(("eq", id, i), s.on_secondary_container)
+            .playing(playing)
+            .paint_at(ui, Rect::from_center_size(center, vec2(24.0, 24.0)));
+    }
+    RowOut { response: o.response, handle: o.handle, more: menu_resp, play_clicked: o.play_clicked }
+}
+
+/// Lays out `n` rows of `row_h` one under another (the page's item
+/// spacing between them) and draws only those that meet the viewport.
+/// Returns where every row is.
+pub fn virtual_rows(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    n: usize,
+    row_h: f32,
+    mut draw: impl FnMut(&mut Ui, usize),
+) -> Vec<Rect> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let gap = ui.spacing().item_spacing.y;
+    let step = row_h + gap;
+    let width = ui.available_width();
+    let (area, _) = ui.allocate_exact_size(vec2(width, n as f32 * step - gap), Sense::hover());
+    let rect_of = |i: usize| Rect::from_min_size(pos2(area.left(), area.top() + i as f32 * step), vec2(width, row_h));
+    let clip = ui.clip_rect();
+    // A row above and below the viewport stay drawn (focus, menus, hover).
+    let first = (((clip.top() - area.top()) / step).floor().max(0.0) as usize).saturating_sub(1);
+    let last = ((((clip.bottom() - area.top()) / step).ceil().max(0.0)) as usize + 1).min(n);
+    let base = Id::new(id);
+    for i in first..last.max(first) {
+        let mut child = ui.new_child(UiBuilder::new().max_rect(rect_of(i)).id_salt(base.with(i)));
+        draw(&mut child, i);
+    }
+    (0..n).map(rect_of).collect()
+}
+
+/// Where «Хочу скачать» is for a track: its own item, else its album's
+/// (dismissed and finished items count as none). Built once a frame.
+#[derive(Clone, Default)]
+pub struct WishIndex {
+    tracks: HashMap<TrackId, WishlistStatus>,
+    releases: HashMap<ReleaseId, WishlistStatus>,
+}
+
+impl WishIndex {
+    pub fn of(ctx: &egui::Context, w: &WishlistView) -> std::sync::Arc<Self> {
+        let key = Id::new("md3e-wish-index");
+        let pass = ctx.cumulative_pass_nr();
+        if let Some((at, ix)) = ctx.data(|d| d.get_temp::<(u64, std::sync::Arc<Self>)>(key))
+            && at == pass
+        {
+            return ix;
+        }
+        let mut ix = Self::default();
+        for r in &w.items {
+            if matches!(r.status, WishlistStatus::Done | WishlistStatus::Dismissed) {
+                continue;
+            }
+            match (r.scope, r.track, r.release) {
+                (WishlistScope::Track, Some(t), _) => {
+                    ix.tracks.insert(t, r.status);
+                }
+                (WishlistScope::Album, _, Some(rel)) => {
+                    ix.releases.insert(rel, r.status);
+                }
+                (_, Some(t), _) => {
+                    ix.tracks.insert(t, r.status);
+                }
+                _ => {}
+            }
+        }
+        let ix = std::sync::Arc::new(ix);
+        ctx.data_mut(|d| d.insert_temp(key, (pass, ix.clone())));
+        ix
+    }
+
+    pub fn of_track(&self, track: Option<TrackId>, release: Option<ReleaseId>) -> Option<WishlistStatus> {
+        track
+            .and_then(|t| self.tracks.get(&t).copied())
+            .or_else(|| release.and_then(|r| self.releases.get(&r).copied()))
+    }
+
+    pub fn of_release(&self, release: ReleaseId) -> Option<WishlistStatus> {
+        self.releases.get(&release).copied()
+    }
+}
+
+/// A key a row sets when its «Хочу скачать» mark is clicked; the shell
+/// opens the tab.
+pub const OPEN_WISHLIST: &str = "md3e-open-wishlist";
+
+/// How far a track is in «Хочу скачать», said quietly: one small icon (a
+/// tooltip names it); a click opens «Хочу скачать».
+pub fn wish_mark(ui: &mut Ui, st: WishlistStatus, salt: impl std::hash::Hash + std::fmt::Debug) -> Response {
+    use WishlistStatus as St;
+    let (icon, tip) = match st {
+        St::Waiting => (Icon::HourglassEmpty, "Ждёт в «Хочу скачать» — скачается по кнопке"),
+        St::New | St::Searching => (Icon::Search, "Ищу раздачу"),
+        St::Confirm => (Icon::Info, "Нужно выбрать раздачу — «Хочу скачать»"),
+        St::Downloading => (Icon::CloudDownload, "Качается"),
+        St::NoTorrent | St::Failed => (Icon::Error, "Не нашёл раздачу — «Хочу скачать»"),
+        St::Done | St::Dismissed => (Icon::Check, "Скачано"),
+    };
+    ui.add(IconButton::new(icon).size(Size::Xs).tooltip(tip).id_salt(Id::new(salt)))
 }
 
 /// ⋮ / right-click menu of a playlist row.

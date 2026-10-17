@@ -42,6 +42,8 @@ pub struct AccountView {
     /// (unix ms, rounded up to the minute), e.g. «YouTube Music просит
     /// подождать до 14:05». `None` when not paused.
     pub paused_until: Option<i64>,
+    /// The same as local time, «14:05», for the UI to say.
+    pub paused_until_hm: Option<String>,
 }
 
 // ---------------------------------------------------------------- rows
@@ -347,12 +349,16 @@ pub struct WishlistRow {
     pub origin: WishlistOrigin,
     /// Why it failed, what was chosen ("Не нашёл раздачу", "FLAC · 12 сидов").
     pub note: Option<String>,
-    /// "следующий поиск через 6 дн." for an item without a torrent.
+    /// "поищу снова через 6 дн." for an item without a torrent.
     pub next_try: Option<String>,
     pub attempts: u32,
     /// "Сохранить с YouTube" makes sense (the track streams from YouTube or
     /// can be found there, and YouTube Music is on).
     pub can_save_from_youtube: bool,
+    /// The album's cover (a file or a service's https url).
+    pub cover: Option<crate::Cover>,
+    /// While downloading: how much of its torrent is here, 0..=100.
+    pub progress: Option<u8>,
 }
 
 /// Items of one album or one artist, for the grouped view and its bulk

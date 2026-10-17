@@ -3,7 +3,7 @@
 
 use egui::{Rect, Sense, Stroke, Ui, pos2, vec2};
 use nikgob_shapes::MaterialShape;
-use nikgob_view::{Command, LibraryTab, Route, ViewState};
+use nikgob_view::{Command, ContinueCard, LibraryTab, Route, ViewState};
 
 use super::{PageState, widgets};
 use crate::{
@@ -42,18 +42,39 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     });
     ui.add_space(16.0);
 
-    let empty = h.mix.is_empty() && h.recently_added.is_empty();
+    let empty = h.mix.is_empty() && h.recently_added.is_empty() && h.continue_listening.is_empty();
     if empty {
+        // Nothing here yet: the search already plays anything from YouTube
+        // Music, without a login; own files come in from a folder.
         if widgets::empty_state(
             ui,
-            Icon::LibraryMusic,
-            "Библиотека пуста",
-            "Добавь файлы или папку — приложение само разложит их и подберёт обложки.",
-            Some("Добавить музыку"),
-        ) && let Some(dir) = rfd::FileDialog::new().set_title("Добавить папку").pick_folder()
-        {
-            out.push(Command::ImportFolder(dir));
+            Icon::Search,
+            "Начни с поиска",
+            "Поиск сразу ищет и в YouTube Music — без входа. Понравилось — лайк, и трек останется у тебя.",
+            Some("Найти музыку"),
+        ) {
+            pages.focus_search = true;
         }
+        ui.vertical_centered(|ui| {
+            if ui
+                .add(crate::components::Button::new("Добавить свои файлы…").style(Style::Text).id_salt("home-add-files"))
+                .clicked()
+                && let Some(dir) = rfd::FileDialog::new().set_title("Добавить папку").pick_folder()
+            {
+                out.push(Command::ImportFolder(dir));
+            }
+            if !connected(state)
+                && ui
+                    .add(
+                        crate::components::Button::new("Подключить Spotify или YouTube Music")
+                            .style(Style::Text)
+                            .id_salt("home-connect"),
+                    )
+                    .clicked()
+            {
+                pages.open_setting(super::SettingId::SpotifyEnabled);
+            }
+        });
         return None;
     }
 
@@ -71,8 +92,15 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             nav = Some(Route::Library(LibraryTab::Albums));
         }
         widgets::card_row(ui, "home-continue", |ui| {
-            for r in &h.continue_listening {
-                nav = widgets::release_card(ui, r, widgets::CARD_W, "continue", out).or(nav.take());
+            for c in &h.continue_listening {
+                nav = match c {
+                    ContinueCard::Release(r) => widgets::release_card(ui, r, widgets::CARD_W, "continue", out),
+                    // Streamed, not in the library: its service's page.
+                    ContinueCard::Stream(a) => {
+                        super::streams::album_card(ui, a, widgets::CARD_W, "continue", &state.downloads.wishlist, out)
+                    }
+                }
+                .or(nav.take());
             }
         });
         ui.add_space(widgets::SECTION_GAP);
@@ -110,15 +138,29 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         ui.add_space(widgets::SECTION_GAP);
     }
 
-    if show_new {
+    // Picks from the services arrive in stage 4; until then the section
+    // only shows the way to connect one (and stays away once connected).
+    if show_new && !connected(state) {
         widgets::section_header(ui, "Новое для тебя", false);
-        ui.label(
-            TypeRole::BodyMedium
-                .style()
-                .rich_para("Подборки из Spotify и YouTube Music появятся, когда подключишь аккаунты.", s.on_surface_variant),
-        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label(TypeRole::BodyMedium.style().rich_para(
+                "Подключи Spotify или YouTube Music — подтяну лайки и плейлисты, а здесь появятся подборки.",
+                s.on_surface_variant,
+            ));
+            if ui
+                .add(crate::components::Button::new("Подключить").style(Style::Tonal).id_salt("home-new-connect"))
+                .clicked()
+            {
+                pages.open_setting(super::SettingId::SpotifyEnabled);
+            }
+        });
     }
     nav
+}
+
+/// Some service is signed in.
+fn connected(state: &ViewState) -> bool {
+    state.accounts.iter().any(|a| a.enabled && a.account.is_logged_in())
 }
 
 /// The hero card: covers cropped into Material shapes, title, play L.

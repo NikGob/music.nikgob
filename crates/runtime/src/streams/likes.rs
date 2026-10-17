@@ -289,6 +289,11 @@ impl Worker {
         }
         if first {
             let _ = self.lib.set_likes_pulled(service, now);
+            // The first pull is an import the user did not ask for: say what
+            // came and where it waits (an API import says it in its summary).
+            if !import && !new.is_empty() {
+                self.first_likes_toast(service, new.len());
+            }
         }
         let changed = new.len() + unliked.len();
         log::info!(
@@ -302,6 +307,28 @@ impl Worker {
             self.wish_tick();
         }
         new.len()
+    }
+
+    /// «Spotify: 312 лайков теперь в Любимых · ждут скачивания» with the way
+    /// to «Хочу скачать».
+    fn first_likes_toast(&mut self, service: Service, n: usize) {
+        let likes = if n % 10 == 1 && n % 100 != 11 {
+            "лайк"
+        } else if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) {
+            "лайка"
+        } else {
+            "лайков"
+        };
+        let head = format!("{}: {n} {likes} теперь в Любимых", service.display_name());
+        if self.state.read().prefs.like_downloads {
+            self.toast_open(
+                format!("{head} · ждут скачивания"),
+                "Открыть",
+                nikgob_view::Link::Route(nikgob_view::Route::Downloads(nikgob_view::DownloadsTab::Wishlist)),
+            );
+        } else {
+            self.toast(head, None);
+        }
     }
 
     /// Queues a like / unlike of a library track for its services (sent

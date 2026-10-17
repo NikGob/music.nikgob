@@ -75,7 +75,7 @@ pub enum PlaybackEvent {
     Resumed,
     Ended { id: u64 },
     Error { id: u64, message: String },
-    /// What a stream item actually plays ("Opus ~160 kbps"), once opened.
+    /// What a stream item actually plays ("Opus ~160 кбит/с"), once opened.
     Quality { id: u64, label: String },
 }
 
@@ -448,13 +448,22 @@ impl Worker {
     }
 
     fn toast(&mut self, text: impl Into<String>, action: Option<(String, Command)>) {
+        self.push_toast(text.into(), action, None);
+    }
+
+    /// A toast whose button takes the user somewhere ([`nikgob_view::Link`]).
+    fn toast_open(&mut self, text: impl Into<String>, label: &str, link: nikgob_view::Link) {
+        self.push_toast(text.into(), None, Some((label.to_owned(), link)));
+    }
+
+    fn push_toast(&mut self, text: String, action: Option<(String, Command)>, open: Option<(String, nikgob_view::Link)>) {
         self.toast_id += 1;
-        let text = text.into();
         let t = Toast {
             id: self.toast_id,
             kind: nikgob_view::ToastKind::guess(&text),
             text,
             action,
+            open,
             at: Instant::now(),
         };
         self.publish(|s, _| s.toasts.push(t));
@@ -656,6 +665,7 @@ impl Worker {
                     self.lib.unlike(target)
                 };
                 if self.log_err("лайк", r).is_some() {
+                    let mut wished = false;
                     if let LikeTarget::Track(t) = target {
                         let _ = self.lib.record_event(
                             t,
@@ -664,12 +674,17 @@ impl Worker {
                             None,
                             EventContext::Other,
                         );
-                        self.track_liked(t, on);
+                        wished = self.track_liked(t, on);
                     }
-                    self.toast(
-                        if on { "Добавлено в Любимые" } else { "Убрано из Любимых" },
-                        Some(("Отменить".into(), Command::Like(target, !on))),
-                    );
+                    // A like that downloads says so (a like of a track
+                    // without a file puts it into «Хочу скачать»).
+                    let text = match (on, wished) {
+                        (true, true) if self.indexer.is_some() => "В Любимых · скачаю в фоне",
+                        (true, true) => "В Любимых · скачается, когда подключишь торренты",
+                        (true, false) => "Добавлено в Любимые",
+                        (false, _) => "Убрано из Любимых",
+                    };
+                    self.toast(text, Some(("Отменить".into(), Command::Like(target, !on))));
                     self.refresh_liked(target, on);
                 }
             }
@@ -851,11 +866,17 @@ impl Worker {
             | Command::EnqueueStream(_)
             | Command::LikeStream { .. }
             | Command::LikeStreamAlbum { .. }
+            | Command::DownloadStream { .. }
+            | Command::DownloadStreamAlbum(_)
+            | Command::DownloadTracks(_)
+            | Command::DownloadRelease(_)
+            | Command::FollowStreamPlaylist(_)
             | Command::AddStreamToPlaylist(..)
             | Command::Share(_)
             | Command::LoadWishlist
             | Command::WishlistDownload(_)
             | Command::WishlistDismiss(_)
+            | Command::WishlistRestore(_)
             | Command::WishlistRetry(_)
             | Command::WishlistSaveFromYoutube(_)
             | Command::WishlistAttach { .. }
@@ -874,15 +895,19 @@ impl Worker {
 
     /// A track was liked / unliked here: the services hear about it, and a
     /// new like of a track without a file starts its download.
-    fn track_liked(&mut self, track: TrackId, on: bool) {
+    /// A like / unlike of a track: to its services, and to «Хочу скачать».
+    /// True when the like put the track there.
+    fn track_liked(&mut self, track: TrackId, on: bool) -> bool {
         self.push_like(track, on);
-        if on {
-            self.wish_for_like(track, nikgob_core::model::WishlistOrigin::Like);
+        let wished = if on {
+            self.wish_for_like(track, nikgob_core::model::WishlistOrigin::Like)
         } else {
             self.wish_drop_unstarted(track);
-        }
+            false
+        };
         self.publish_wishlist();
         self.wish_tick();
+        wished
     }
 
     // ---------------------------------------------------------------- playback
@@ -1294,7 +1319,10 @@ impl Worker {
                     .map(|t| t.title);
                 let why = playing.and_then(|e| self.streaming.failures.remove(&e.track));
                 match (title, why) {
-                    (Some(t), Some(why)) => self.toast(format!("{t}: {why}"), None),
+                    (Some(t), Some((why, Some(link)))) => {
+                        self.toast_open(format!("{t}: {why}"), "Войти", nikgob_view::Link::Setting(link));
+                    }
+                    (Some(t), Some((why, None))) => self.toast(format!("{t}: {why}"), None),
                     _ => self.toast("Не получилось воспроизвести трек", None),
                 }
                 if playing.is_some() {
@@ -1597,9 +1625,8 @@ impl Worker {
             self.push_like(t, on);
         }
         // An album like downloads the whole album (one wishlist item).
-        if on {
-            self.wish_for_album(id, &tracks, nikgob_core::model::WishlistOrigin::Like);
-        } else {
+        let wished = on && self.wish_for_album(id, &tracks, nikgob_core::model::WishlistOrigin::Like);
+        if !on {
             self.wish_drop_album(id);
             for &t in &tracks {
                 self.wish_drop_unstarted(t);
@@ -1615,10 +1642,13 @@ impl Worker {
         } else {
             "треков"
         });
-        self.toast(
-            if on { format!("Альбом в Любимых · {what}") } else { format!("Альбом убран из Любимых · {what}") },
-            Some(("Отменить".into(), Command::Like(LikeTarget::Release(id), !on))),
-        );
+        let text = match (on, wished) {
+            (true, true) if self.indexer.is_some() => format!("Альбом в Любимых · {what} · скачаю в фоне"),
+            (true, true) => format!("Альбом в Любимых · {what} · скачается, когда подключишь торренты"),
+            (true, false) => format!("Альбом в Любимых · {what}"),
+            (false, _) => format!("Альбом убран из Любимых · {what}"),
+        };
+        self.toast(text, Some(("Отменить".into(), Command::Like(LikeTarget::Release(id), !on))));
         self.publish(|s, _| {
             let fix = |t: &mut nikgob_view::TrackRow| {
                 if tracks.contains(&t.id) {
@@ -1634,8 +1664,15 @@ impl Worker {
             s.queue.next.iter_mut().for_each(|e| fix(&mut e.track));
             s.library.tracks.iter_mut().for_each(fix);
             s.search.tracks.iter_mut().for_each(fix);
-            for r in [&mut s.home.continue_listening, &mut s.home.long_unplayed, &mut s.home.recently_added, &mut s.search.releases] {
+            for r in [&mut s.home.long_unplayed, &mut s.home.recently_added, &mut s.search.releases] {
                 r.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
+            }
+            for c in &mut s.home.continue_listening {
+                if let nikgob_view::ContinueCard::Release(c) = c
+                    && c.id == id
+                {
+                    c.liked = on;
+                }
             }
         });
         self.after_like_change();
@@ -1735,7 +1772,11 @@ impl Worker {
             };
             s.library.releases.iter_mut().for_each(fix_release);
             s.search.releases.iter_mut().for_each(fix_release);
-            s.home.continue_listening.iter_mut().for_each(fix_release);
+            for c in &mut s.home.continue_listening {
+                if let nikgob_view::ContinueCard::Release(c) = c {
+                    fix_release(c);
+                }
+            }
             s.home.long_unplayed.iter_mut().for_each(fix_release);
             s.home.recently_added.iter_mut().for_each(fix_release);
             if let Some(r) = s.release.as_mut() {

@@ -1,7 +1,9 @@
 //! Настройки → «Источники» (docs/stage3.md §0 "Где настройки", §3.1, §3.6):
-//! Spotify and YouTube Music (switch, account, sound, personal app,
-//! cookies), what a like downloads, playlist sync, cold-start imports, and
-//! the torrents (Prowlarr, seeding) moved here from «Основные».
+//! Spotify and YouTube Music (switch, account, sound, import of playlists
+//! and history once signed in, personal app, cookies), what a like
+//! downloads, playlist sync, the export files, the stream cache, and the
+//! torrents (Prowlarr, seeding) moved here from «Основные». A service that
+//! asked to wait says until when, quietly.
 
 use egui::{Sense, Stroke, Ui, Widget as _, vec2};
 use nikgob_view::{Account, AccountView, Command, LoginInput, LoginPrompt, Prefs, Service, ViewState};
@@ -22,14 +24,19 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     let s = Theme::get(ui.ctx()).scheme;
     ui.add_space(12.0);
     ui.label(TypeRole::BodyMedium.style().rich_para(
-        "Каждый сервис включается отдельно, и всё работает бесплатно: Spotify Free, YouTube Music без Premium и торренты.",
+        "Всё работает и бесплатно: Spotify Free, YouTube Music без Premium, торренты.",
         s.on_surface_variant,
     ));
     spotify(ui, state, p, pages, out);
     youtube(ui, state, p, pages, out);
 
     group(ui, "Лайки и загрузки");
-    row(ui, Id::LikeDownload, "Что качать по лайку", Some("Лайк альбома — всегда весь альбом"), |ui| {
+    let scope_hint = if p.like_downloads {
+        "Лайк альбома — всегда весь альбом"
+    } else {
+        "Лайк — только лайк; «Скачать» качает и так"
+    };
+    row(ui, Id::LikeDownload, "Что качать по лайку", Some(scope_hint), |ui| {
         choice(ui, Id::LikeDownload, p);
     });
     row(ui, Id::PushLikes, "Лайки обратно в сервисы", Some("Лайк здесь ставится и в Spotify / YouTube Music"), |ui| {
@@ -51,7 +58,8 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
         |ui| choice(ui, Id::PlaylistSync, p),
     );
 
-    imports(ui, state, out);
+    imports(ui, out);
+    group(ui, "Кэш");
     stream_cache(ui, state, p, out);
     torrents(ui, p, pages, out);
 }
@@ -94,9 +102,9 @@ fn account_line(a: Option<&AccountView>) -> String {
         Account::LoggingIn(Some(LoginPrompt::Window(_))) => "Вход… заверши его в открывшемся окне".to_owned(),
         Account::LoggingIn(_) => "Вход… заверши его в браузере".to_owned(),
         Account::LoggedIn { name, premium, .. } => match (a.service, premium) {
-            (Service::Spotify, Some(true)) => format!("Вошёл как {name} · Premium"),
-            (Service::Spotify, Some(false)) => format!("Вошёл как {name} · без Premium"),
-            _ => format!("Вошёл как {name}"),
+            (Service::Spotify, Some(true)) => format!("{name} · Premium"),
+            (Service::Spotify, Some(false)) => format!("{name} · без Premium"),
+            _ => name.clone(),
         },
         Account::Failed(_) => "Вход не удался".to_owned(),
     }
@@ -111,7 +119,7 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
     let acc = state.account(Service::Spotify);
     let registered = acc.is_some_and(|a| a.registered);
     group(ui, "Spotify");
-    row(ui, Id::SpotifyEnabled, "Spotify", Some("Поиск, лайки, плейлисты; звук — с Premium"), |ui| {
+    row(ui, Id::SpotifyEnabled, "Использовать Spotify", Some("Поиск, лайки, плейлисты; звук — с Premium"), |ui| {
         ui.add(Switch::new(&mut p.spotify_enabled).id_salt("set-sp-on"));
     });
     dimmed(ui, !p.spotify_enabled, |ui| {
@@ -148,31 +156,82 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
         if let Some(a) = acc {
             login_prompt(ui, a, out);
             login_error(ui, a);
+            paused_line(ui, a);
         }
+        // Sound: on; impossible without Premium (no button that cannot
+        // help); one more consent away; or not known yet.
         let audio = acc.is_some_and(|a| a.audio);
-        let sound_line = if audio {
-            "Включён: треки Spotify играют из Spotify"
-        } else {
-            "Нужен Premium. Без него те же треки играют с YouTube Music"
+        let premium = match acc.map(|a| &a.account) {
+            Some(Account::LoggedIn { premium, .. }) => *premium,
+            _ => None,
+        };
+        let signed = logged_in(acc);
+        let (sound_line, offer) = match (signed, audio, premium) {
+            (_, true, _) => ("Включён: треки Spotify играют из Spotify", false),
+            (false, _, _) => ("С Premium — прямо из Spotify; без него те же треки играют с YouTube Music", false),
+            (true, false, Some(false)) => ("Нужен Premium — пока треки Spotify играют с YouTube Music", false),
+            (true, false, Some(true)) => ("Ещё одно разрешение — и звук пойдёт прямо из Spotify", true),
+            (true, false, None) => ("С Premium — прямо из Spotify; без него те же треки играют с YouTube Music", true),
         };
         row(ui, Id::SpotifyPlayback, "Звук из Spotify", Some(sound_line), |ui| {
-            if audio {
-                ui.label(TypeRole::LabelLarge.style().rich("✓ включён", s.primary));
-            } else if ui
-                .add(
-                    Button::new("Включить звук")
-                        .icon(Icon::GraphicEq)
-                        .style(Style::Tonal)
-                        .enabled(logged_in(acc) && !busy)
-                        .id_salt("sp-playback"),
-                )
-                .on_disabled_hover_text("Сначала войди в Spotify")
-                .clicked()
+            if offer
+                && ui
+                    .add(
+                        Button::new("Включить звук")
+                            .icon(Icon::VolumeUp)
+                            .style(Style::Tonal)
+                            .enabled(!busy)
+                            .id_salt("sp-playback"),
+                    )
+                    .clicked()
             {
                 out.push(Command::StreamLogin { service: Service::Spotify, input: LoginInput::Playback });
             }
         });
+        if signed {
+            import_row(ui, state, Service::Spotify, out);
+        }
         personal_app(ui, p, pages, registered, out);
+    });
+    let _ = s;
+}
+
+/// «Spotify просит подождать до 14:05»: the service paused our calls.
+fn paused_line(ui: &mut Ui, a: &AccountView) {
+    let s = Theme::get(ui.ctx()).scheme;
+    if let Some(hm) = &a.paused_until_hm {
+        ui.horizontal(|ui| {
+            Icon::HourglassEmpty.widget(false, s.on_surface_variant, 18.0).ui(ui);
+            ui.label(TypeRole::BodyMedium.style().rich_para(
+                format!("{} просит подождать до {hm} — до тех пор поиск и страницы сервиса молчат", a.service.display_name()),
+                s.on_surface_variant,
+            ));
+        });
+        ui.add_space(8.0);
+    }
+}
+
+/// «Плейлисты и история» of a signed-in service: its own playlists and
+/// recent plays (its likes come by themselves after the sign-in).
+fn import_row(ui: &mut Ui, state: &ViewState, service: Service, out: &mut Vec<Command>) {
+    let id = match service {
+        Service::Spotify => Id::ImportSpotify,
+        Service::Youtube => Id::ImportYouTube,
+    };
+    let ready = state.prefs.service_enabled(service);
+    row(ui, id, "Плейлисты и история", Some("Свои плейлисты и недавние прослушивания; лайки приходят сами"), |ui| {
+        if ui
+            .add(
+                Button::new("Импортировать")
+                    .icon(Icon::Download)
+                    .style(Style::Tonal)
+                    .enabled(ready)
+                    .id_salt(("import", service.as_str())),
+            )
+            .clicked()
+        {
+            out.push(Command::ImportFromService(service));
+        }
     });
 }
 
@@ -371,7 +430,7 @@ fn youtube(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
     let acc = state.account(Service::Youtube);
     let registered = acc.is_some_and(|a| a.registered);
     group(ui, "YouTube Music");
-    row(ui, Id::YouTubeEnabled, "YouTube Music", Some("Поиск и звук работают без входа"), |ui| {
+    row(ui, Id::YouTubeEnabled, "Использовать YouTube Music", Some("Поиск и звук — без входа; вход — для лайков и плейлистов"), |ui| {
         ui.add(Switch::new(&mut p.youtube_enabled).id_salt("set-yt-on"));
     });
     dimmed(ui, !p.youtube_enabled, |ui| {
@@ -422,6 +481,10 @@ fn youtube(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
         if let Some(a) = acc {
             login_prompt(ui, a, out);
             login_error(ui, a);
+            paused_line(ui, a);
+        }
+        if logged_in(acc) {
+            import_row(ui, state, Service::Youtube, out);
         }
         if !logged_in(acc) && (pages.yt_form || p.youtube_cookies_set) {
             cookies_form(ui, p, pages, registered && !busy, out);
@@ -507,30 +570,10 @@ fn cookies_form(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &
     });
 }
 
-/// «Импорт»: the services' APIs and the export files (cold start).
-fn imports(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
-    group(ui, "Импорт");
-    for (id, service, label, hint) in [
-        (Id::ImportSpotify, Service::Spotify, "Из Spotify", "Лайки, свои плейлисты и недавние прослушивания"),
-        (Id::ImportYouTube, Service::Youtube, "Из YouTube Music", "То же из YouTube Music; нужен вход"),
-    ] {
-        let ready = state.prefs.service_enabled(service) && logged_in(state.account(service));
-        row(ui, id, label, Some(hint), |ui| {
-            if ui
-                .add(
-                    Button::new("Импортировать")
-                        .icon(Icon::Download)
-                        .style(Style::Tonal)
-                        .enabled(ready)
-                        .id_salt(("import", service.as_str())),
-                )
-                .on_disabled_hover_text("Сначала войди в сервис выше")
-                .clicked()
-            {
-                out.push(Command::ImportFromService(service));
-            }
-        });
-    }
+/// «Импорт истории»: the export files (years of listening; the services'
+/// own imports sit in their blocks above).
+fn imports(ui: &mut Ui, out: &mut Vec<Command>) {
+    group(ui, "Импорт истории");
     row(
         ui,
         Id::ImportFiles,

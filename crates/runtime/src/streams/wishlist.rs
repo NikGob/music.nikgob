@@ -82,6 +82,19 @@ pub(crate) struct WishState {
     next_confirm: u64,
     /// Audio saved from YouTube that the importer is taking, by file.
     saving: HashMap<PathBuf, WishlistId>,
+    /// How much of an item's torrent is here (0..=100), while it downloads.
+    pub(crate) progress: HashMap<WishlistId, u8>,
+}
+
+/// What asking for a download did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Wished {
+    /// A new item, or one that waited / was dismissed and starts now.
+    Started,
+    /// It is on its way already.
+    Already,
+    /// Nothing to download (the files are here).
+    Nothing,
 }
 
 /// What an item wants, for building queries and picking files.
@@ -312,15 +325,16 @@ impl Worker {
     }
 
     /// A new like of `track`: a wishlist item when it has no file (an album
-    /// item when the prefs say so), unless one exists or was dismissed.
-    pub(crate) fn wish_for_like(&mut self, track: TrackId, origin: WishlistOrigin) {
-        if !self.stream_only(track) {
-            return;
+    /// item when the prefs say so), unless one exists or was dismissed, or
+    /// likes do not download («Ничего»). True when an item was made.
+    pub(crate) fn wish_for_like(&mut self, track: TrackId, origin: WishlistOrigin) -> bool {
+        if !self.state.read().prefs.like_downloads || !self.stream_only(track) {
+            return false;
         }
         let existing = self.lib.wishlist_for_track(track).unwrap_or_default();
         let open = |i: &WishlistItem| !matches!(i.status, WishlistStatus::Done | WishlistStatus::Failed);
         if existing.iter().any(open) {
-            return; // waiting already, or dismissed for good
+            return false; // waiting already, or dismissed for good
         }
         let scope = self.state.read().prefs.like_download_scope;
         let release = self.lib.get_track(track).ok().flatten().and_then(|t| t.release_id);
@@ -328,9 +342,9 @@ impl Worker {
             && let Some(r) = release
             && self.lib.wishlist_for_release(r).unwrap_or_default().iter().any(open)
         {
-            return;
+            return false;
         }
-        let Some(mut item) = self.item_for(Some(track), release) else { return };
+        let Some(mut item) = self.item_for(Some(track), release) else { return false };
         item.scope = if release.is_some() { scope } else { WishlistScope::Track };
         if item.scope == WishlistScope::Album
             && let Some(r) = release.and_then(|r| self.lib.get_release(r).ok().flatten())
@@ -346,18 +360,20 @@ impl Worker {
         };
         log::info!("wishlist: {} ({:?}, {:?})", item.title.as_deref().unwrap_or("?"), item.scope, origin);
         self.put_item(&item);
+        true
     }
 
-    /// A new like of an album: one album item, when some of it has no file.
-    pub(crate) fn wish_for_album(&mut self, release: ReleaseId, tracks: &[TrackId], origin: WishlistOrigin) {
-        if !tracks.iter().any(|&t| self.stream_only(t)) {
-            return;
+    /// A new like of an album: one album item, when some of it has no file
+    /// (and likes download). True when an item was made.
+    pub(crate) fn wish_for_album(&mut self, release: ReleaseId, tracks: &[TrackId], origin: WishlistOrigin) -> bool {
+        if !self.state.read().prefs.like_downloads || !tracks.iter().any(|&t| self.stream_only(t)) {
+            return false;
         }
         let open = |i: &WishlistItem| !matches!(i.status, WishlistStatus::Done | WishlistStatus::Failed);
         if self.lib.wishlist_for_release(release).unwrap_or_default().iter().any(open) {
-            return;
+            return false;
         }
-        let Some(mut item) = self.item_for(None, Some(release)) else { return };
+        let Some(mut item) = self.item_for(None, Some(release)) else { return false };
         item.scope = WishlistScope::Album;
         item.origin = origin;
         item.status = if origin == WishlistOrigin::Import {
@@ -366,6 +382,168 @@ impl Worker {
             WishlistStatus::New
         };
         self.put_item(&item);
+        true
+    }
+
+    // ------------------------------------------------------------- download without a like
+
+    /// An item that waits, found nothing or was dismissed starts again.
+    fn start_again(&mut self, item: &WishlistItem) -> Wished {
+        match item.status {
+            WishlistStatus::Waiting
+            | WishlistStatus::NoTorrent
+            | WishlistStatus::Failed
+            | WishlistStatus::Dismissed => {
+                self.set_item(item.id, |i| {
+                    i.status = WishlistStatus::New;
+                    i.next_try_at = None;
+                });
+                Wished::Started
+            }
+            WishlistStatus::Done => Wished::Nothing,
+            _ => Wished::Already,
+        }
+    }
+
+    /// `track` to «Хочу скачать» now (no like): its item starts, or a new
+    /// track item is made for it.
+    fn wish_track_now(&mut self, track: TrackId) -> Wished {
+        let has_file = self.lib.get_track_row(track).ok().flatten().is_some_and(|r| r.has_local);
+        if has_file {
+            return Wished::Nothing;
+        }
+        let existing = self.lib.wishlist_for_track(track).unwrap_or_default();
+        if let Some(i) = existing.iter().find(|i| i.status != WishlistStatus::Done) {
+            return self.start_again(i);
+        }
+        let release = self.lib.get_track(track).ok().flatten().and_then(|t| t.release_id);
+        if let Some(r) = release
+            && let Some(i) = self
+                .lib
+                .wishlist_for_release(r)
+                .unwrap_or_default()
+                .iter()
+                .find(|i| i.scope == WishlistScope::Album && !matches!(i.status, WishlistStatus::Done))
+        {
+            return self.start_again(i);
+        }
+        let Some(mut item) = self.item_for(Some(track), release) else { return Wished::Nothing };
+        item.scope = WishlistScope::Track;
+        item.origin = WishlistOrigin::Manual;
+        item.status = WishlistStatus::New;
+        self.put_item(&item);
+        Wished::Started
+    }
+
+    /// The missing files of `release` to «Хочу скачать» now: one album
+    /// item (started at once).
+    fn wish_release_now(&mut self, release: ReleaseId) -> Wished {
+        let p = self.lib.release_progress(release).ok().flatten();
+        let tracks = self.lib.tracks_of_release(release).unwrap_or_default();
+        let missing = p.is_none_or(|p| p.local < p.total) || tracks.iter().any(|t| !t.has_local);
+        if !missing {
+            return Wished::Nothing;
+        }
+        let items = self.lib.wishlist_for_release(release).unwrap_or_default();
+        if let Some(i) = items
+            .iter()
+            .find(|i| i.scope == WishlistScope::Album && i.status != WishlistStatus::Done)
+        {
+            return self.start_again(i);
+        }
+        let Some(mut item) = self.item_for(None, Some(release)) else { return Wished::Nothing };
+        item.scope = WishlistScope::Album;
+        item.origin = WishlistOrigin::Manual;
+        item.status = WishlistStatus::New;
+        self.put_item(&item);
+        Wished::Started
+    }
+
+    /// The toast after a download was asked for: where it went, and where
+    /// to look (or what is missing to download at all).
+    fn download_toast(&mut self, started: usize, already: usize, what: Option<String>) {
+        let wishlist = v::Link::Route(v::Route::Downloads(v::DownloadsTab::Wishlist));
+        if started == 0 {
+            if already > 0 {
+                self.toast_open("Уже в «Хочу скачать»", "Открыть", wishlist);
+            } else {
+                self.toast("Всё уже скачано", None);
+            }
+            return;
+        }
+        let text = match (started, what) {
+            (1, Some(w)) => format!("В «Хочу скачать»: {w}"),
+            (n, _) => format!(
+                "В «Хочу скачать»: {n} {}",
+                if n % 10 == 1 && n % 100 != 11 {
+                    "трек"
+                } else if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) {
+                    "трека"
+                } else {
+                    "треков"
+                }
+            ),
+        };
+        if self.indexer.is_some() {
+            self.toast_open(text, "Открыть", wishlist);
+        } else {
+            self.toast_open(
+                format!("{text} · скачается, когда подключишь торренты"),
+                "Настроить",
+                v::Link::Setting(v::SettingLink::Torrents),
+            );
+        }
+    }
+
+    /// `Command::DownloadStream`: stream tracks to «Хочу скачать» without a
+    /// like. Each gets its track row (outside the library until its file is
+    /// here, then a library track as any downloaded one).
+    pub(crate) fn download_stream(&mut self, remotes: &[nikgob_core::streaming::RemoteId]) {
+        let known: Vec<nikgob_core::streaming::StreamTrack> =
+            remotes.iter().filter_map(|r| self.streaming.known.get(r).cloned()).collect();
+        if known.is_empty() {
+            self.toast("Трек устарел — найди его заново", None);
+            return;
+        }
+        let ids = self.upsert_streams(&known);
+        self.download_tracks(&ids);
+    }
+
+    /// `Command::DownloadTracks`: library tracks without a file → «Хочу
+    /// скачать», each its own track item.
+    pub(crate) fn download_tracks(&mut self, tracks: &[TrackId]) {
+        let (mut started, mut already) = (0, 0);
+        let mut first = None;
+        for &t in tracks {
+            match self.wish_track_now(t) {
+                Wished::Started => {
+                    started += 1;
+                    if first.is_none() {
+                        first = self.lib.get_track(t).ok().flatten().map(|t| format!("«{}»", t.title));
+                    }
+                }
+                Wished::Already => already += 1,
+                Wished::Nothing => {}
+            }
+        }
+        self.download_toast(started, already, first);
+        self.publish_wishlist();
+        self.wish_tick();
+        self.refresh_stream_page();
+    }
+
+    /// `Command::DownloadRelease` and the album of a service once fetched
+    /// (`Command::DownloadStreamAlbum`): one album item.
+    pub(crate) fn download_release(&mut self, release: ReleaseId) {
+        let title = self.lib.get_release(release).ok().flatten().map(|r| format!("альбом «{}»", r.title));
+        match self.wish_release_now(release) {
+            Wished::Started => self.download_toast(1, 0, title),
+            Wished::Already => self.download_toast(0, 1, None),
+            Wished::Nothing => self.download_toast(0, 0, None),
+        }
+        self.publish_wishlist();
+        self.wish_tick();
+        self.refresh_stream_page();
     }
 
     /// The like went away: items that did not start yet go too.
@@ -688,7 +866,7 @@ impl Worker {
             };
             let action = (item.track_id.is_some() && self.service(Service::Youtube).is_some())
                 .then(|| ("Сохранить с YouTube".to_owned(), Command::WishlistSaveFromYoutube(id)));
-            self.toast(format!("Не нашёл раздачу: {what} · Wishlist в «Загрузках»"), action);
+            self.toast(format!("Не нашёл раздачу: {what}"), action);
         }
         self.publish_wishlist();
     }
@@ -744,14 +922,45 @@ impl Worker {
     }
 
     pub(crate) fn wish_dismiss(&mut self, ids: &[WishlistId]) {
+        let mut title = None;
+        let mut n = 0;
         for &id in ids {
             self.streaming.wish.cands.remove(&id);
-            self.set_item(id, |i| {
+            if let Some(i) = self.set_item(id, |i| {
                 i.status = WishlistStatus::Dismissed;
                 i.next_try_at = None;
+            }) {
+                n += 1;
+                title = i.title;
+            }
+        }
+        if n > 0 {
+            let text = match (n, title) {
+                (1, Some(t)) => format!("Не буду качать «{t}»"),
+                (n, _) => format!("Не буду качать: {n}"),
+            };
+            self.toast(text, Some(("Отменить".into(), Command::WishlistRestore(ids.to_vec()))));
+        }
+        self.publish_wishlist();
+    }
+
+    /// `Command::WishlistRestore`: dismissed items come back; an imported
+    /// one waits for «скачать» again, the others start.
+    pub(crate) fn wish_restore(&mut self, ids: &[WishlistId]) {
+        for &id in ids {
+            self.set_item(id, |i| {
+                if i.status == WishlistStatus::Dismissed {
+                    i.status = if i.origin == WishlistOrigin::Import {
+                        WishlistStatus::Waiting
+                    } else {
+                        WishlistStatus::New
+                    };
+                    i.next_try_at = None;
+                }
             });
         }
         self.publish_wishlist();
+        self.wish_tick();
     }
 
     pub(crate) fn wish_retry(&mut self, id: WishlistId) {
@@ -994,6 +1203,7 @@ impl Worker {
         let mut by_artist: Vec<v::WishlistGroup> = Vec::new();
         let mut counts: Vec<(WishlistStatus, u32)> = Vec::new();
         let mut confirms = Vec::new();
+        let mut covers = Vec::new();
         for item in &items {
             let track = item.track_id.and_then(|t| self.lib.get_track(t).ok().flatten());
             let release_id = item.release_id.or(track.as_ref().and_then(|t| t.release_id));
@@ -1059,7 +1269,7 @@ impl Worker {
                 .filter(|_| item.status == WishlistStatus::NoTorrent)
                 .map(|at| {
                     let days = ((at - now).max(0) as u64).div_ceil(86_400_000);
-                    format!("следующий поиск через {days} дн.")
+                    format!("поищу снова через {days} дн.")
                 });
             rows.push(v::WishlistRow {
                 id: item.id,
@@ -1080,7 +1290,12 @@ impl Worker {
                 can_save_from_youtube: youtube
                     && item.track_id.is_some()
                     && !matches!(item.status, WishlistStatus::Done | WishlistStatus::Dismissed),
+                cover: None,
+                progress: (item.status == WishlistStatus::Downloading)
+                    .then(|| self.streaming.wish.progress.get(&item.id).copied())
+                    .flatten(),
             });
+            covers.push(release_id);
         }
         counts.sort_by_key(|(s, _)| status_rank(*s));
         let view = v::WishlistView {
@@ -1090,7 +1305,11 @@ impl Worker {
             by_artist,
             counts,
         };
-        self.publish(|s, _| {
+        self.publish(|s, res| {
+            let mut view = view;
+            for (row, release) in view.items.iter_mut().zip(covers) {
+                row.cover = release.and_then(|r| res.release_cover(r));
+            }
             s.downloads.wishlist = view;
             s.downloads.confirm.retain(|c| c.id & WISH_ID == 0);
             s.downloads.confirm.extend(confirms);
@@ -1115,14 +1334,14 @@ impl Worker {
         let what = match (&item.artist, &item.title) {
             (Some(a), Some(t)) => format!("{t} — {a}"),
             (_, Some(t)) => t.clone(),
-            _ => "Wishlist".into(),
+            _ => "Хочу скачать".into(),
         };
         v::Confirm {
             id,
             title: what,
             origin: match item.scope {
-                WishlistScope::Track => "Wishlist · трек".into(),
-                WishlistScope::Album => "Wishlist · альбом".into(),
+                WishlistScope::Track => "Хочу скачать · трек".into(),
+                WishlistScope::Album => "Хочу скачать · альбом".into(),
             },
             options: cands
                 .iter()

@@ -1,7 +1,11 @@
 //! Поиск (md3e-player.md §3.6, docs/stage3.md §3.2): a docked search view
 //! (radius 28, 56 dp header with source filter chips) under the bar.
 //! Sections: Библиотека → Spotify → YouTube Music (as each answers) →
-//! Торренты, which run only on request (Enter or the button).
+//! Торренты, which run only on request (the button, or Enter once Prowlarr
+//! is set up). Every section reads the same way: its name, then Треки →
+//! Альбомы → Исполнители → Плейлисты; under «Всё» five tracks and «Все →»
+//! to that source's chip. A service that cannot answer says why quietly
+//! (sign in, it asked to wait, no connection), never in red.
 
 use egui::{Align, Id, Layout, Rect, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{Account, Command, Route, SearchSources, Service, StreamSearchSection, TorrentResult, ViewState};
@@ -9,9 +13,7 @@ use nikgob_view::{Account, Command, Route, SearchSources, Service, StreamSearchS
 use super::{PageState, fmt_size, streams, widgets};
 use crate::{
     Icon, Theme, TypeRole,
-    components::{
-        Button, FilterChip, ListItem, LoadingIndicator, Radii, Style, badge, paint,
-    },
+    components::{Button, FilterChip, ListItem, LoadingIndicator, Radii, Style, badge, paint},
     screens::common,
     tokens::shape,
 };
@@ -50,6 +52,13 @@ impl Filter {
             _ => None,
         }
     }
+
+    fn of(service: Service) -> Self {
+        match service {
+            Service::Spotify => Self::Spotify,
+            Service::Youtube => Self::Youtube,
+        }
+    }
 }
 
 const FILTER_KEY: &str = "md3e-search-filter";
@@ -63,6 +72,8 @@ pub fn set_filter(ctx: &egui::Context, f: Filter) {
 }
 
 const HEADER: f32 = 56.0;
+/// Tracks a section shows under «Всё» (its chip shows them all).
+const FEW: usize = 5;
 
 pub fn search_results(
     ui: &mut Ui,
@@ -99,7 +110,7 @@ pub fn search_results(
                 if ui.add(FilterChip::new("Библиотека", f == Filter::Library).id_salt("sf-lib")).clicked() {
                     f = Filter::Library;
                 }
-                for (name, chip) in [("Spotify", Filter::Spotify), ("YouTube", Filter::Youtube)] {
+                for (name, chip) in [("Spotify", Filter::Spotify), ("YouTube Music", Filter::Youtube)] {
                     if ui.add(FilterChip::new(name, f == chip).id_salt(("sf", name))).clicked() {
                         f = chip;
                     }
@@ -109,6 +120,47 @@ pub fn search_results(
                 }
             });
         });
+
+    // Body.
+    let body = Rect::from_min_max(
+        pos2(panel.left() + 16.0, header.bottom() + 1.0),
+        pos2(panel.right() - 16.0, panel.bottom()),
+    );
+    let mut bui = ui.new_child(UiBuilder::new().max_rect(body).id_salt("search-body"));
+    bui.set_clip_rect(body.intersect(ui.clip_rect()));
+    let mut nav = None;
+    let mut go = None;
+    egui::ScrollArea::vertical()
+        .id_salt(("search-scroll", f as u8))
+        .auto_shrink([false, false])
+        .show(&mut bui, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.add_space(8.0);
+            let all = f == Filter::All;
+            if matches!(f, Filter::All | Filter::Library) {
+                let (n, more) = library(ui, query, state, all, pages, out);
+                nav = n.or(nav.take());
+                if more {
+                    go = Some(Filter::Library);
+                }
+            }
+            for service in [Service::Spotify, Service::Youtube] {
+                if all || f.service() == Some(service) {
+                    let (n, more) = stream_section(ui, query, service, state, all, pages, out);
+                    nav = n.or(nav.take());
+                    if more {
+                        go = Some(Filter::of(service));
+                    }
+                }
+            }
+            if matches!(f, Filter::All | Filter::Torrents) {
+                nav = torrents(ui, query, state, pages, out).or(nav.take());
+            }
+            ui.add_space(bottom_inset);
+        });
+    if let Some(g) = go {
+        f = g;
+    }
     set_filter(&ctx, f);
     // The services asked follow the chip (the runtime searches again).
     let wanted = f.sources();
@@ -123,54 +175,42 @@ pub fn search_results(
         [header.left_bottom(), header.right_bottom()],
         Stroke::new(1.0, s.outline_variant),
     );
-
-    // Body.
-    let body = Rect::from_min_max(
-        pos2(panel.left() + 16.0, header.bottom() + 1.0),
-        pos2(panel.right() - 16.0, panel.bottom()),
-    );
-    let mut bui = ui.new_child(UiBuilder::new().max_rect(body).id_salt("search-body"));
-    bui.set_clip_rect(body.intersect(ui.clip_rect()));
-    let mut nav = None;
-    egui::ScrollArea::vertical()
-        .id_salt("search-scroll")
-        .auto_shrink([false, false])
-        .show(&mut bui, |ui| {
-            ui.spacing_mut().item_spacing.y = 8.0;
-            ui.add_space(8.0);
-            if matches!(f, Filter::All | Filter::Library) {
-                nav = library(ui, query, state, f == Filter::Library, pages, out).or(nav.take());
-            }
-            for service in [Service::Spotify, Service::Youtube] {
-                if f == Filter::All || f.service() == Some(service) {
-                    nav = stream_section(ui, query, service, state, f == Filter::All, pages, out).or(nav.take());
-                }
-            }
-            if matches!(f, Filter::All | Filter::Torrents) {
-                nav = torrents(ui, query, state, pages, out).or(nav.take());
-            }
-            ui.add_space(bottom_inset);
-        });
     nav
 }
 
-/// Section label ("Библиотека", "Торренты"), with a small loading
-/// indicator beside it while its results are on their way (the previous
-/// ones stay below, so nothing jumps while typing).
-fn group_label(ui: &mut Ui, text: &str, loading: bool) {
+/// A section's head: its name (title-large) with a small loading indicator
+/// while its results are on their way (the previous ones stay below, so
+/// nothing jumps while typing), and «Все →» to its chip under «Всё».
+/// True when «Все» was clicked.
+fn section_head(ui: &mut Ui, title: &str, loading: bool, all: bool) -> bool {
     let s = Theme::get(ui.ctx()).scheme;
-    ui.horizontal(|ui| {
-        ui.set_min_height(LABEL_H);
-        ui.label(TypeRole::LabelLarge.style().rich(text, s.primary));
+    let mut clicked = false;
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), Layout::left_to_right(Align::Center), |ui| {
+        ui.label(TypeRole::TitleLarge.style().rich(title, s.on_surface));
+        ui.add_space(4.0);
         loading_mark(ui, loading);
+        if all {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                clicked = ui
+                    .add(Button::new("Все").style(Style::Text).icon(Icon::ArrowForward).id_salt(("search-all", title)))
+                    .clicked();
+            });
+        }
     });
-    ui.add_space(4.0);
+    clicked
 }
 
-/// Height of a section label row (the indicator does not change it).
+/// A part of a section (Треки, Альбомы…), quieter than the section.
+fn part_label(ui: &mut Ui, text: &str) {
+    let s = Theme::get(ui.ctx()).scheme;
+    ui.add_space(4.0);
+    ui.label(TypeRole::TitleSmall.style().rich(text, s.on_surface_variant));
+}
+
+/// Height of the loading mark.
 const LABEL_H: f32 = 20.0;
 
-/// The label's loading indicator; the same room is kept when idle.
+/// The section's loading indicator; the same room is kept when idle.
 fn loading_mark(ui: &mut Ui, loading: bool) {
     if loading {
         ui.add(LoadingIndicator::new().size(LABEL_H));
@@ -179,57 +219,54 @@ fn loading_mark(ui: &mut Ui, loading: bool) {
     }
 }
 
+/// A quiet line saying why a section is empty, with an optional text
+/// button. True when the button was clicked.
+fn quiet(ui: &mut Ui, text: &str, button: Option<(&str, Icon, &str)>) -> bool {
+    let s = Theme::get(ui.ctx()).scheme;
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.label(TypeRole::BodyMedium.style().rich(text, s.on_surface_variant));
+        if let Some((label, icon, salt)) = button {
+            clicked = ui.add(Button::new(label).style(Style::Text).icon(icon).id_salt(salt)).clicked();
+        }
+    });
+    clicked
+}
+
+/// The library part. Returns a route, and whether «Все» was clicked.
 fn library(
     ui: &mut Ui,
     query: &str,
     state: &ViewState,
-    alone: bool,
+    all: bool,
     pages: &mut PageState,
     out: &mut Vec<Command>,
-) -> Option<Route> {
-    let s = Theme::get(ui.ctx()).scheme;
+) -> (Option<Route>, bool) {
     let r = &state.search;
     let mut nav = None;
     let loading = r.query.trim() != query.trim() || r.searching;
-    group_label(ui, "Библиотека", loading);
     let empty = r.tracks.is_empty() && r.releases.is_empty() && r.artists.is_empty() && r.playlists.is_empty();
+    let more = section_head(ui, "Библиотека", loading, all && !empty);
     if empty && loading {
-        return None;
+        return (None, more);
     }
     if empty {
-        if alone {
-            widgets::empty_state(ui, Icon::Search, "Ничего не нашлось", "В библиотеке такого нет.", None);
+        if all {
+            quiet(ui, "В библиотеке такого нет.", None);
         } else {
-            ui.label(TypeRole::BodyMedium.style().rich("В библиотеке ничего не нашлось.", s.on_surface_variant));
+            widgets::empty_state(ui, Icon::Search, "Ничего не нашлось", "В библиотеке такого нет.", None);
         }
-        return None;
-    }
-    // Compact rows first, so a long track list does not bury them.
-    if !r.artists.is_empty() {
-        widgets::section_header(ui, "Исполнители", false);
-        widgets::card_row(ui, "search-artists", |ui| {
-            for a in &r.artists {
-                nav = widgets::artist_avatar(ui, a, 120.0, out).or(nav.take());
-            }
-        });
         ui.add_space(widgets::SECTION_GAP);
-    }
-    if !r.releases.is_empty() {
-        widgets::section_header(ui, "Альбомы", false);
-        widgets::card_row(ui, "search-releases", |ui| {
-            for rel in &r.releases {
-                nav = widgets::release_card(ui, rel, widgets::CARD_W, "search", out).or(nav.take());
-            }
-        });
-        ui.add_space(widgets::SECTION_GAP);
+        return (None, more);
     }
     if !r.tracks.is_empty() {
-        widgets::section_header(ui, "Треки", false);
+        part_label(ui, "Треки");
+        let n = if all { r.tracks.len().min(FEW) } else { r.tracks.len() };
         let ids = r.tracks.iter().map(|t| t.id).collect();
         nav = widgets::track_list(
             ui,
             "search",
-            &r.tracks,
+            &r.tracks[..n],
             Lead::Cover,
             &PlayFrom::Tracks(ids, format!("поиска: {}", r.query.trim())),
             state,
@@ -237,10 +274,25 @@ fn library(
             out,
         )
         .or(nav.take());
-        ui.add_space(widgets::SECTION_GAP);
+    }
+    if !r.releases.is_empty() {
+        part_label(ui, "Альбомы");
+        widgets::card_row(ui, "search-releases", |ui| {
+            for rel in &r.releases {
+                nav = widgets::release_card(ui, rel, widgets::CARD_W, "search", out).or(nav.take());
+            }
+        });
+    }
+    if !r.artists.is_empty() {
+        part_label(ui, "Исполнители");
+        widgets::card_row(ui, "search-artists", |ui| {
+            for a in &r.artists {
+                nav = widgets::artist_avatar(ui, a, 120.0, out).or(nav.take());
+            }
+        });
     }
     if !r.playlists.is_empty() {
-        widgets::section_header(ui, "Плейлисты", false);
+        part_label(ui, "Плейлисты");
         widgets::card_row(ui, "search-playlists", |ui| {
             for p in &r.playlists {
                 nav = widgets::playlist_card_with(ui, p, widgets::CARD_W, "search", Some(&mut *pages), out)
@@ -248,7 +300,8 @@ fn library(
             }
         });
     }
-    nav
+    ui.add_space(widgets::SECTION_GAP);
+    (nav, more)
 }
 
 fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
@@ -256,28 +309,25 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
     let t = &state.search.torrents;
     let q = query.trim();
     let stale = t.query.trim() != q;
-    ui.add_space(8.0);
-    group_label(ui, "Торренты", false);
+    section_head(ui, "Торренты", t.searching, false);
 
     if t.searching {
-        ui.horizontal(|ui| {
-            ui.add(LoadingIndicator::new().size(32.0));
-            ui.label(TypeRole::BodyMedium.style().rich_para(
-                format!("Ищу раздачи «{}»… Prowlarr отвечает не сразу.", t.query),
-                s.on_surface_variant,
-            ));
-        });
+        ui.label(TypeRole::BodyMedium.style().rich_para(
+            format!("Ищу раздачи «{}»… Prowlarr отвечает не сразу.", t.query),
+            s.on_surface_variant,
+        ));
         return None;
     }
 
     if !state.prefs.prowlarr_configured {
-        ui.label(TypeRole::BodyMedium.style().rich_para(
-            "Prowlarr не настроен: адрес и ключ задаются в Настройках → Источники → Торренты.",
-            s.on_surface_variant,
-        ));
-        if ui.add(Button::new("Открыть настройки").style(Style::Text).icon(Icon::Settings).id_salt("tor-settings")).clicked() {
+        if quiet(
+            ui,
+            "Для раздач нужен Prowlarr: адрес и ключ — в Настройках → Источники → Торренты.",
+            Some(("Настроить", Icon::Settings, "tor-settings")),
+        ) {
             pages.open_setting(super::SettingId::Prowlarr);
         }
+        return None;
     }
 
     // Not searched for this text yet: offer the search.
@@ -294,10 +344,8 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
     }
 
     if let Some(err) = &t.error {
-        ui.label(TypeRole::BodyMedium.style().rich(err, s.error));
-        if !stale
-            && ui.add(Button::new("Повторить").style(Style::Text).id_salt("tor-retry")).clicked()
-        {
+        let retry = !stale && quiet(ui, err, Some(("Повторить", Icon::Refresh, "tor-retry")));
+        if retry {
             out.push(Command::SearchTorrents(q.to_owned()));
         }
         return None;
@@ -305,7 +353,7 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
 
     if t.results.is_empty() {
         if !stale && !t.query.is_empty() {
-            ui.label(TypeRole::BodyMedium.style().rich("Раздач не нашлось.", s.on_surface_variant));
+            quiet(ui, "Раздач не нашлось.", None);
         }
         return None;
     }
@@ -383,63 +431,108 @@ fn marker(ui: &mut Ui, text: &str) {
     badge::text_badge(ui.painter(), rect.left_center(), text, s.tertiary_container, s.on_tertiary_container);
 }
 
-/// "Spotify" / "YouTube Music" as a section label.
-fn service_label(ui: &mut Ui, service: Service, loading: bool) {
-    let s = Theme::get(ui.ctx()).scheme;
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.set_min_height(LABEL_H);
-        ui.label(TypeRole::LabelLarge.style().rich(service.display_name(), s.primary));
-        loading_mark(ui, loading);
-    });
-    ui.add_space(4.0);
+/// Why a service cannot answer now, said quietly, and what helps: off, not
+/// in this build, not signed in (Spotify), paused by the service.
+enum Why {
+    Off,
+    Missing,
+    SignIn,
+    SigningIn,
+    Paused(String),
 }
 
-/// Why a service has no section: off, or not in this build.
-fn unavailable(state: &ViewState, service: Service) -> Option<&'static str> {
-    if !state.account(service).is_some_and(|a| a.registered) {
-        Some("не подключён в этой сборке")
-    } else if !state.prefs.service_enabled(service) {
-        Some("выключен")
-    } else {
-        None
+fn why_not(state: &ViewState, service: Service) -> Option<Why> {
+    let acc = state.account(service);
+    if !acc.is_some_and(|a| a.registered) {
+        return Some(Why::Missing);
     }
+    if !state.prefs.service_enabled(service) {
+        return Some(Why::Off);
+    }
+    let a = acc?;
+    if let Some(hm) = &a.paused_until_hm {
+        return Some(Why::Paused(hm.clone()));
+    }
+    // Spotify answers nothing without a login (YouTube Music does).
+    if service == Service::Spotify {
+        match &a.account {
+            Account::LoggingIn(_) => return Some(Why::SigningIn),
+            Account::LoggedIn { .. } => {}
+            Account::LoggedOut | Account::Failed(_) => return Some(Why::SignIn),
+        }
+    }
+    None
 }
 
-/// The results of one service: tracks, albums, artists, playlists.
+/// The results of one service: tracks, albums, artists, playlists. Returns
+/// a route, and whether «Все» was clicked.
 fn stream_section(
     ui: &mut Ui,
     query: &str,
     service: Service,
     state: &ViewState,
-    compact: bool,
+    all: bool,
     pages: &mut PageState,
     out: &mut Vec<Command>,
-) -> Option<Route> {
-    let s = Theme::get(ui.ctx()).scheme;
+) -> (Option<Route>, bool) {
     let mut nav = None;
     let salt = service.as_str();
+    let name = service.display_name();
     let sec: Option<&StreamSearchSection> = state.search.streams.iter().find(|x| x.service == service);
     let q = query.trim();
     let stale = state.search.query.trim() != q;
-    let loading = !q.is_empty() && unavailable(state, service).is_none() && (stale || sec.is_none_or(|x| x.searching));
-    service_label(ui, service, loading);
-    if let Some(why) = unavailable(state, service) {
-        ui.horizontal(|ui| {
-            ui.label(TypeRole::BodyMedium.style().rich(format!("{} {why}.", service.display_name()), s.on_surface_variant));
-            if ui
-                .add(Button::new("Источники").style(Style::Text).icon(Icon::Settings).id_salt(("sv-settings", salt)))
-                .clicked()
-            {
+    let why = why_not(state, service);
+    let loading = !q.is_empty() && why.is_none() && (stale || sec.is_none_or(|x| x.searching));
+    let empty = |x: &StreamSearchSection| {
+        x.tracks.is_empty() && x.albums.is_empty() && x.artists.is_empty() && x.playlists.is_empty()
+    };
+    let has_rows = sec.is_some_and(|x| !empty(x) && x.error.is_none());
+    let more = section_head(ui, name, loading, all && has_rows && why.is_none());
+    match why {
+        Some(Why::Missing) => {
+            quiet(ui, &format!("{name} нет в этой сборке."), None);
+        }
+        Some(Why::Off) => {
+            if quiet(ui, &format!("{name} выключен."), Some(("Включить", Icon::Settings, &format!("sv-on-{salt}")))) {
                 pages.open_setting(match service {
                     Service::Spotify => super::SettingId::SpotifyEnabled,
                     Service::Youtube => super::SettingId::YouTubeEnabled,
                 });
             }
-        });
-        ui.add_space(widgets::SECTION_GAP);
-        return None;
+        }
+        Some(Why::SignIn) => {
+            if quiet(ui, &format!("Войди в {name}, чтобы искать и там."), Some(("Войти", Icon::Login, &format!("sv-login-{salt}")))) {
+                pages.open_setting(super::SettingId::Spotify);
+            }
+        }
+        Some(Why::SigningIn) => {
+            quiet(ui, &format!("Вхожу в {name}…"), None);
+        }
+        Some(Why::Paused(hm)) => {
+            quiet(ui, &format!("{name} просит подождать до {hm}."), None);
+        }
+        None => {
+            nav = results(ui, q, service, sec, loading, all, state, pages, out);
+        }
     }
+    ui.add_space(widgets::SECTION_GAP);
+    (nav, more)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn results(
+    ui: &mut Ui,
+    q: &str,
+    service: Service,
+    sec: Option<&StreamSearchSection>,
+    loading: bool,
+    all: bool,
+    state: &ViewState,
+    pages: &mut PageState,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    let salt = service.as_str();
+    let mut nav = None;
     let empty = |x: &StreamSearchSection| {
         x.tracks.is_empty() && x.albums.is_empty() && x.artists.is_empty() && x.playlists.is_empty()
     };
@@ -452,57 +545,39 @@ fn stream_section(
         Some(x) if loading && empty(x) => {}
         Some(x) if x.error.is_some() => {
             let e = x.error.as_deref().unwrap_or_default();
-            ui.horizontal(|ui| {
-                ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
-                let login = matches!(state.account(service).map(|a| &a.account), Some(Account::LoggedOut | Account::Failed(_)));
-                if login
-                    && ui.add(Button::new("Войти").style(Style::Text).icon(Icon::Login).id_salt(("sv-login", salt))).clicked()
-                {
-                    pages.open_setting(match service {
-                        Service::Spotify => super::SettingId::Spotify,
-                        Service::Youtube => super::SettingId::YouTube,
-                    });
-                }
-                if ui.add(Button::new("Повторить").style(Style::Text).id_salt(("sv-retry", salt))).clicked() {
-                    out.push(Command::Search(q.to_owned()));
-                }
-            });
+            if quiet(ui, e, Some(("Повторить", Icon::Refresh, &format!("sv-retry-{salt}")))) {
+                out.push(Command::Search(q.to_owned()));
+            }
         }
         Some(x) if empty(x) => {
-            ui.label(TypeRole::BodyMedium.style().rich(
-                format!("В {} ничего не нашлось.", service.display_name()),
-                s.on_surface_variant,
-            ));
+            quiet(ui, &format!("В {} ничего не нашлось.", service.display_name()), None);
         }
         Some(x) => {
             if !x.tracks.is_empty() {
-                widgets::section_header(ui, "Треки", false);
-                let n = if compact { x.tracks.len().min(5) } else { x.tracks.len() };
+                part_label(ui, "Треки");
+                let n = if all { x.tracks.len().min(FEW) } else { x.tracks.len() };
                 let from = streams::StreamFrom::Rows(format!("поиска {}: {shown_q}", service.display_name()));
                 nav = streams::track_rows(ui, &format!("sv-tracks-{salt}"), &x.tracks[..n], false, &from, state, pages, out)
                     .or(nav.take());
-                ui.add_space(16.0);
             }
             if !x.albums.is_empty() {
-                widgets::section_header(ui, "Альбомы", false);
+                part_label(ui, "Альбомы");
                 widgets::card_row(ui, &format!("sv-albums-{salt}"), |ui| {
                     for a in &x.albums {
                         nav = streams::album_card(ui, a, widgets::CARD_W, salt, &state.downloads.wishlist, out).or(nav.take());
                     }
                 });
-                ui.add_space(16.0);
             }
             if !x.artists.is_empty() {
-                widgets::section_header(ui, "Исполнители", false);
+                part_label(ui, "Исполнители");
                 widgets::card_row(ui, &format!("sv-artists-{salt}"), |ui| {
                     for a in &x.artists {
                         nav = streams::artist_card(ui, a, 120.0).or(nav.take());
                     }
                 });
-                ui.add_space(16.0);
             }
             if !x.playlists.is_empty() {
-                widgets::section_header(ui, "Плейлисты", false);
+                part_label(ui, "Плейлисты");
                 widgets::card_row(ui, &format!("sv-playlists-{salt}"), |ui| {
                     for p in &x.playlists {
                         nav = streams::playlist_card(ui, p, widgets::CARD_W, salt, out).or(nav.take());
@@ -511,6 +586,5 @@ fn stream_section(
             }
         }
     }
-    ui.add_space(widgets::SECTION_GAP);
     nav
 }

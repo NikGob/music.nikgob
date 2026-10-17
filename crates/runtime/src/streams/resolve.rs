@@ -147,25 +147,27 @@ pub(crate) async fn search_youtube(
 }
 
 /// Why a stream did not play, from the engine's error text, as the user
-/// reads it ("ARISTOCRAT: <this>").
-pub(crate) fn failure_text(message: &str, youtube_signed_in: bool) -> String {
+/// reads it ("ARISTOCRAT: <this>"), and the settings row that helps, if
+/// one does (the toast's «Войти»).
+pub(crate) fn failure_text(message: &str, youtube_signed_in: bool) -> (String, Option<nikgob_view::SettingLink>) {
+    use nikgob_view::SettingLink;
     let m = message.to_lowercase();
     if m.contains("age-restricted") {
         if youtube_signed_in {
-            "на YouTube только для 18+, и со входом не открылся".into()
+            ("на YouTube только для 18+, и со входом не открылся".into(), None)
         } else {
-            "на YouTube только для 18+ — войди в YouTube Music в «Источниках»".into()
+            ("на YouTube только для 18+ — нужен вход в YouTube Music".into(), Some(SettingLink::Youtube))
         }
     } else if m.contains("blocked in this region") {
-        "недоступно в твоём регионе".into()
+        ("недоступно в твоём регионе".into(), None)
     } else if m.contains("premium") {
-        "для звука из Spotify нужен Premium".into()
+        ("для звука из Spotify нужен Premium".into(), None)
     } else if m.contains("rate limited") {
-        "сервис просит подождать — попробуй позже".into()
+        ("сервис просит подождать — повтори через минуту".into(), None)
     } else if m.contains("not available") || m.contains("недоступ") {
-        "трек недоступен".into()
+        ("трек недоступен".into(), None)
     } else {
-        "не получилось воспроизвести".into()
+        ("не получилось воспроизвести".into(), None)
     }
 }
 
@@ -321,12 +323,14 @@ impl Worker {
                 }
                 None => {
                     let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
-                    let text = match why {
+                    match why {
                         // The only copies did not play: say why.
-                        Some(why) => format!("{title}: {why}"),
-                        None => format!("{title}: не нашёл на YouTube Music"),
-                    };
-                    self.toast(text, None);
+                        Some((why, Some(link))) => {
+                            self.toast_open(format!("{title}: {why}"), "Войти", nikgob_view::Link::Setting(link));
+                        }
+                        Some((why, None)) => self.toast(format!("{title}: {why}"), None),
+                        None => self.toast(format!("{title}: не нашёл на YouTube Music"), None),
+                    }
                     match self.queue.skip_forward() {
                         Some(n) if n.id != e.id => self.start(n),
                         _ => self.stop(),

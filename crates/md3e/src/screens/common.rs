@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use egui::{Color32, Rect, Stroke, Ui, vec2};
-use nikgob_view::{Cover, SourceKind};
+use nikgob_view::Cover;
 
 use crate::{
     Icon, Theme,
@@ -68,23 +68,6 @@ pub fn cover(ui: &Ui, cover: Option<&Cover>, rect: Rect, radius: f32) {
     }
 }
 
-/// The source badge on a cover corner: nothing for local files.
-pub fn source_badge(ui: &Ui, rect: Rect, source: Option<SourceKind>) {
-    let s = Theme::get(ui.ctx()).scheme;
-    // The scheme's colours, not the services' brand green and red.
-    let icon = match source {
-        Some(SourceKind::Spotify) => Icon::GraphicEq,
-        Some(SourceKind::Youtube) => Icon::PlayArrow,
-        _ => return,
-    };
-    let color = s.on_surface_variant;
-    let size = (rect.width() * 0.4).clamp(14.0, 22.0);
-    let b = Rect::from_min_size(rect.right_bottom() - vec2(size, size), vec2(size, size));
-    ui.painter().circle_filled(b.center(), size * 0.5, s.surface_container_highest);
-    icon.widget(true, color, size * 0.7)
-        .paint_at(ui, Rect::from_center_size(b.center(), vec2(size * 0.7, size * 0.7)));
-}
-
 /// Ellipsized single-line text.
 pub fn label(ui: &mut Ui, text: &str, role: crate::TypeRole, color: Color32) -> egui::Response {
     ui.add(
@@ -104,12 +87,20 @@ pub fn buffering_overlay(ui: &mut Ui, button: Rect, bg: Color32, fg: Color32) {
     child.add(crate::components::LoadingIndicator::new().size(size).color(fg));
 }
 
-/// "звук: YouTube" for a stream (None for a local file).
-pub fn audio_label(state: &nikgob_view::ViewState) -> Option<String> {
-    let service = state.player.audio_service?;
-    let name = match service {
+/// What plays, in one quiet line: «YouTube · Opus ~160 кбит/с» for a
+/// stream (where its sound really comes from: a Spotify track may play
+/// from YouTube Music), the file's own format for a local track.
+pub fn sound_line(state: &nikgob_view::ViewState) -> Option<String> {
+    let p = &state.player;
+    let quality = p.audio_quality.as_deref().or_else(|| p.current.as_ref().and_then(|t| t.quality.as_deref()));
+    let service = p.audio_service.map(|s| match s {
         nikgob_view::Service::Spotify => "Spotify",
         nikgob_view::Service::Youtube => "YouTube",
-    };
-    Some(format!("звук: {name}"))
+    });
+    match (service, quality) {
+        (Some(s), Some(q)) => Some(format!("{s} · {q}")),
+        (Some(s), None) => Some(s.to_owned()),
+        (None, Some(q)) => Some(q.to_owned()),
+        (None, None) => None,
+    }
 }

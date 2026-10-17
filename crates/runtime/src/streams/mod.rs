@@ -172,8 +172,9 @@ pub(crate) struct Streams {
     /// YouTube videos that did not play, by video id (not by track: the
     /// same song has other copies).
     refused: HashMap<String, Instant>,
-    /// Why the last source of a track failed, for the toast.
-    pub(crate) failures: HashMap<TrackId, String>,
+    /// Why the last source of a track failed, for the toast (and where
+    /// the toast's button leads, if anywhere).
+    pub(crate) failures: HashMap<TrackId, (String, Option<v::SettingLink>)>,
     /// Wishlist items whose "save from YouTube" waits for the lookup.
     save_after_resolve: HashMap<TrackId, WishlistId>,
     likes: HashMap<Service, LikeSync>,
@@ -254,13 +255,14 @@ pub(crate) fn error_text(e: &StreamError) -> String {
         StreamError::NotConfigured => "Сервис не настроен".into(),
         StreamError::NotLoggedIn => "Нужно войти".into(),
         StreamError::PremiumRequired => "Нужен Premium".into(),
-        StreamError::RateLimited { .. } => "Сервис просит подождать — попробуй позже".into(),
+        StreamError::RateLimited { .. } => "Сервис просит подождать — повтори через минуту".into(),
         StreamError::Unavailable => "Недоступно".into(),
         StreamError::Unsupported => "Сервис так не умеет".into(),
         StreamError::AgeRestricted => "Только для 18+ — нужно войти".into(),
         StreamError::RegionBlocked => "Недоступно в твоём регионе".into(),
         StreamError::Http { status } => format!("Сервис ответил ошибкой (HTTP {status})"),
-        StreamError::Network(m) => format!("Нет связи: {m}"),
+        // The details go to the log at the call site.
+        StreamError::Network(_) => "Нет связи — проверь интернет".into(),
         StreamError::Parse(_) => "Сервис ответил непонятно".into(),
     }
 }
@@ -381,6 +383,11 @@ impl Worker {
             }
             Command::LikeStream { track, on } => self.like_stream(&track, on),
             Command::LikeStreamAlbum { album, on } => self.with_album(album, pages::Then::Like(on)),
+            Command::DownloadStream { tracks } => self.download_stream(&tracks),
+            Command::DownloadStreamAlbum(album) => self.with_album(album, pages::Then::Download),
+            Command::DownloadTracks(tracks) => self.download_tracks(&tracks),
+            Command::DownloadRelease(release) => self.download_release(release),
+            Command::FollowStreamPlaylist(playlist) => self.with_playlist(playlist, pages::Then::Follow),
             Command::AddStreamToPlaylist(playlist, tracks) => {
                 let ids = self.seen_tracks(&tracks);
                 if !ids.is_empty() {
@@ -391,6 +398,7 @@ impl Worker {
             Command::LoadWishlist => self.publish_wishlist(),
             Command::WishlistDownload(select) => self.wish_download(&select),
             Command::WishlistDismiss(ids) => self.wish_dismiss(&ids),
+            Command::WishlistRestore(ids) => self.wish_restore(&ids),
             Command::WishlistRetry(id) => self.wish_retry(id),
             Command::WishlistSaveFromYoutube(id) => self.wish_save_from_youtube(id),
             Command::WishlistAttach { item, what } => self.wish_attach(item, what),

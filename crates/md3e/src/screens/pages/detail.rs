@@ -125,17 +125,21 @@ pub fn release(
             };
             ui.label(TypeRole::LabelLarge.style().rich(line, s.primary));
             let n = r.tracks.len() as u64;
+            // How much is here, in the same line as its size: «стрим» (no
+            // files: it plays from a service), «3 из 12 у тебя».
+            let mut line = format!(
+                "{} · {n} {} · {}",
+                c.artist,
+                common::plural(n, "трек", "трека", "треков"),
+                common::fmt_total(r.total_duration)
+            );
+            if c.local_tracks == 0 {
+                line.push_str(" · стрим");
+            } else if let Some(b) = widgets::progress_badge(c) {
+                line = format!("{line} · {b} у тебя");
+            }
             let artist = ui.add(
-                egui::Label::new(TypeRole::TitleMedium.style().rich(
-                    format!(
-                        "{} · {n} {} · {}",
-                        c.artist,
-                        common::plural(n, "трек", "трека", "треков"),
-                        common::fmt_total(r.total_duration)
-                    ),
-                    s.on_surface_variant,
-                ))
-                .sense(Sense::click()),
+                egui::Label::new(TypeRole::TitleMedium.style().rich(line, s.on_surface_variant)).sense(Sense::click()),
             );
             if artist.clicked()
                 && let Some(a) = c.artist_id
@@ -143,38 +147,37 @@ pub fn release(
                 nav = Some(Route::Artist(a));
             }
             artist.on_hover_cursor(egui::CursorIcon::PointingHand);
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if let Some(q) = &r.quality {
-                    ui.add(AssistChip::new(q).icon(Icon::GraphicEq).id_salt("rel-q"));
-                }
-                if c.local_tracks == 0 {
-                    ui.add(AssistChip::new("стрим").icon(Icon::GraphicEq).id_salt("rel-stream"))
-                        .on_hover_text("Файлов нет: играет из Spotify или YouTube Music");
-                }
-                if let Some(b) = widgets::progress_badge(c).filter(|_| c.local_tracks > 0) {
-                    ui.add(AssistChip::new(format!("{b} у тебя")).icon(Icon::Download).id_salt("rel-have"));
-                }
-            });
+            if let Some(q) = &r.quality {
+                ui.add_space(8.0);
+                ui.add(AssistChip::new(q).icon(Icon::GraphicEq).id_salt("rel-q"));
+            }
         });
         ui.add_space(16.0);
 
         // Actions: standard button group, "Слушать" is the only filled button.
         let missing = c.total_tracks.is_some_and(|t| c.local_tracks < t);
         let query = format!("{} {}", c.artist, c.title);
+        // The album's «Хочу скачать» item, if it is on its way.
+        let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist).of_release(id);
+        let dl_label = match wish {
+            Some(nikgob_view::WishlistStatus::Downloading) => "Качается",
+            Some(nikgob_view::WishlistStatus::New | nikgob_view::WishlistStatus::Searching | nikgob_view::WishlistStatus::Confirm) => "В очереди",
+            Some(nikgob_view::WishlistStatus::NoTorrent | nikgob_view::WishlistStatus::Failed) => "Нет раздачи",
+            _ => "Скачать недостающие",
+        };
         let mut members: Vec<Member> = vec![
             Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
             Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Tonal).into(),
         ];
         if missing {
             members.push(
-                SplitButton::new("rel-download", "Скачать недостающие")
+                SplitButton::new("rel-download", dl_label)
                     .icon(Icon::Download)
                     .size(Size::M)
                     .style(Style::Tonal)
                     .item(MenuItem::new("Все недостающие").icon(Icon::Download))
-                    .item(MenuItem::new("Выбрать треки…").icon(Icon::Check))
-                    .item(MenuItem::new("Заменить всё на лучшее качество").icon(Icon::GraphicEq))
+                    .item(MenuItem::new("Выбрать раздачу вручную…").icon(Icon::Search))
+                    .item(MenuItem::new("Заменить всё на лучшее качество…").icon(Icon::Search))
                     .into(),
             );
         }
@@ -191,9 +194,22 @@ pub fn release(
         if resp[1].clicked() {
             out.push(Command::PlayRelease { id, start: None, shuffle: true });
         }
-        // The shell turns this into the torrent search view.
-        if (missing && resp[2].clicked()) || row.picked.is_some() {
-            out.push(Command::SearchTorrents(query));
+        // «Скачать недостающие»: one album item of «Хочу скачать» (it picks
+        // the release and the files itself); once on its way, the button
+        // opens it. By hand: the torrent search view.
+        if missing && resp[2].clicked() {
+            match wish {
+                Some(nikgob_view::WishlistStatus::Waiting | nikgob_view::WishlistStatus::Dismissed) | None => {
+                    out.push(Command::DownloadRelease(id));
+                }
+                Some(_) => nav = Some(Route::Downloads(nikgob_view::DownloadsTab::Wishlist)),
+            }
+        }
+        match row.picked {
+            Some((2, 0)) => out.push(Command::DownloadRelease(id)),
+            Some((2, 1)) => out.push(Command::SearchTorrents(query.clone())),
+            Some((2, 2)) => out.push(Command::SearchTorrents(format!("{query} FLAC"))),
+            _ => {}
         }
         if resp[2 + off].clicked() {
             out.push(Command::Like(LikeTarget::Release(id), !r.liked));
@@ -272,7 +288,7 @@ pub fn artist(
             vec![
                 Button::new("Микс исполнителя").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
                 IconButton::new(Icon::Shuffle).size(Size::M).style(Style::Tonal).tooltip("Перемешать").into(),
-                Button::new(if a.liked { "Вы подписаны" } else { "Подписаться" })
+                Button::new(if a.liked { "В подписках" } else { "Подписаться" })
                     .icon(Icon::Favorite)
                     .size(Size::M)
                     .style(Style::Outlined)
@@ -356,7 +372,7 @@ fn discography(
     }
     widgets::section_header(ui, "Нет в библиотеке", false);
     ui.label(TypeRole::BodyMedium.style().rich_para(
-        "Есть в Spotify или YouTube Music, а у тебя нет. Играют из стрима; скачать альбом можно с обложки или из меню по правому клику.",
+        "Есть в Spotify или YouTube Music, а у тебя нет — играют из стрима.",
         s.on_surface_variant,
     ));
     ui.add_space(8.0);
@@ -623,24 +639,28 @@ pub fn playlist(
                     [super::settings_help::sync_index(l.mode)]
                 .label
                 .to_lowercase();
+                // Which service it follows and how, in words (the modes are
+                // in ⋮), then a small status: running, failed, or when.
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.add(
-                        AssistChip::new(format!("{} · {mode}", l.remote.service.display_name()))
-                            .icon(Icon::Sync)
-                            .id_salt("pl-link"),
-                    )
-                    .on_hover_text("Связан с плейлистом сервиса; как синхронизировать — в ⋮");
-                    // A small status line: running, failed, or when.
+                    let when = if l.syncing {
+                        "синхронизируется…".to_owned()
+                    } else {
+                        l.synced.as_ref().map_or_else(String::new, |t| format!("синхронизирован {t}"))
+                    };
+                    let mut line = format!("{} · {mode}", l.remote.service.display_name());
+                    if !when.is_empty() && l.error.is_none() {
+                        line = format!("{line} · {when}");
+                    }
+                    ui.label(TypeRole::BodyMedium.style().rich(line, s.on_surface_variant))
+                        .on_hover_text("Связан с плейлистом сервиса; как синхронизировать — в ⋮");
                     if l.syncing {
-                        ui.add(LoadingIndicator::new().size(24.0));
-                        ui.label(TypeRole::BodySmall.style().rich("синхронизируется…", s.on_surface_variant));
-                    } else if let Some(e) = &l.error {
-                        ui.label(TypeRole::BodySmall.style().rich(e, s.error));
-                    } else if let Some(t) = &l.synced {
-                        ui.label(TypeRole::BodySmall.style().rich(format!("синхронизирован {t}"), s.on_surface_variant));
+                        ui.add(LoadingIndicator::new().size(20.0));
                     }
                 });
+                if let Some(e) = &l.error {
+                    ui.label(TypeRole::BodySmall.style().rich(e, s.on_surface_variant));
+                }
             }
         });
         ui.add_space(16.0);
@@ -679,8 +699,11 @@ pub fn playlist(
                 }
                 nikgob_view::PlaylistSyncMode::ALL.len() + 1
             } else {
+                // Not linked: send it to a service (two-way; it is made there).
+                menu = menu.item(MenuItem::new("Связать с сервисом…").icon(Icon::Sync));
                 0
             };
+            let link_at = (p.sync.is_none()).then_some(2);
             let picked = menu
                 .divider()
                 .item(MenuItem::new("Удалить плейлист").icon(Icon::Delete))
@@ -692,6 +715,10 @@ pub fn playlist(
                     EditState { open: true, shown: false, name: p.card.name.clone(), cover: None, mode: None },
                 ),
                 Some(1) => out.push(Command::Enqueue(p.tracks.iter().map(|t| t.id).collect())),
+                Some(i) if link_at == Some(i) => out.push(Command::SetPlaylistSync {
+                    playlist: id,
+                    mode: nikgob_view::PlaylistSyncMode::TwoWay,
+                }),
                 Some(2) if sync_n > 0 => {}
                 Some(i) if i >= 3 && i < 2 + sync_n => out.push(Command::SetPlaylistSync {
                     playlist: id,

@@ -114,7 +114,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             ui,
             Icon::LibraryMusic,
             "Здесь пока пусто",
-            "Брось файлы в папку Inbox или нажми «Добавить».",
+            "Лайкни трек в поиске — он появится здесь. Свои файлы: папка Inbox или «Добавить».",
             Some("Добавить папку"),
         ) && let Some(dir) = rfd::FileDialog::new().pick_folder()
         {
@@ -168,6 +168,7 @@ fn only_downloaded(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     } else {
         "Только скачанное"
     });
+    // Not the ⬇ of downloads: a check over a line, what is on disk.
     if resp.hovered() {
         ui.painter().circle_filled(rect.center(), 14.0, s.on_surface.gamma_multiply(0.06));
     }
@@ -176,7 +177,7 @@ fn only_downloaded(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
         (false, true) => s.outline,
         (false, false) => s.outline_variant,
     };
-    Icon::Download.widget(on, tint, 18.0).paint_at(ui, Rect::from_center_size(rect.center(), vec2(18.0, 18.0)));
+    Icon::DownloadDone.widget(on, tint, 18.0).paint_at(ui, Rect::from_center_size(rect.center(), vec2(18.0, 18.0)));
     if resp.clicked() {
         out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { library_only_downloaded: !on, ..state.prefs.clone() })));
     }
@@ -346,18 +347,21 @@ fn releases(
     ui.horizontal(|ui| {
         ui.label(TypeRole::TitleLarge.style().rich("Альбомы и релизы", Theme::get(ui.ctx()).scheme.on_surface));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Where the albums play from: files, or only a service.
-            const SOURCES: [&str; 3] = ["Все источники", "Скачанные", "Стрим"];
-            let cur = pages.release_source.min(2);
-            let chip = ui.add(FilterChip::new(SOURCES[cur], cur != 0).trailing_icon(Icon::ExpandMore).id_salt("rel-source"));
-            let mut menu = Menu::new("rel-source-menu").align_right(true);
-            for (i, l) in SOURCES.iter().enumerate() {
-                menu = menu.item(MenuItem::new(*l).selected(i == cur));
+            // Where the albums play from: files, or only a service (no use
+            // while «только скачанное» hides the stream anyway).
+            if !state.prefs.library_only_downloaded {
+                const SOURCES: [&str; 3] = ["Все источники", "Скачанные", "Стрим"];
+                let cur = pages.release_source.min(2);
+                let chip = ui.add(FilterChip::new(SOURCES[cur], cur != 0).trailing_icon(Icon::ExpandMore).id_salt("rel-source"));
+                let mut menu = Menu::new("rel-source-menu").align_right(true);
+                for (i, l) in SOURCES.iter().enumerate() {
+                    menu = menu.item(MenuItem::new(*l).selected(i == cur));
+                }
+                if let Some(i) = menu.attach(&chip) {
+                    pages.release_source = i;
+                }
+                ui.add_space(8.0);
             }
-            if let Some(i) = menu.attach(&chip) {
-                pages.release_source = i;
-            }
-            ui.add_space(8.0);
             for (i, label) in ["EP", "Синглы", "Альбомы", "Всё"].iter().enumerate() {
                 let idx = 3 - i;
                 if ui
@@ -381,6 +385,7 @@ fn releases(
             _ => true,
         })
         .filter(|r| match pages.release_source {
+            _ if state.prefs.library_only_downloaded => true,
             1 => r.local_tracks > 0,
             2 => r.total_tracks.map_or(r.local_tracks == 0, |t| r.local_tracks < t),
             _ => true,
@@ -718,7 +723,7 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
                 Command::PlayTracks {
                     tracks: ids.clone(),
                     start: i - lib.tracks_offset,
-                    context: "Библиотека".into(),
+                    context: "библиотеки".into(),
                 }
             });
         }

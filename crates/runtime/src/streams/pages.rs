@@ -36,6 +36,10 @@ pub(crate) enum Then {
         shuffle: bool,
     },
     Like(bool),
+    /// The album to «Хочу скачать» without a like.
+    Download,
+    /// The playlist into the library, following its service.
+    Follow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -403,6 +407,15 @@ impl Worker {
         if let Some(e) = self.queue.current() {
             self.start(e);
         }
+        self.after_stream_play();
+    }
+
+    /// Stream rows that just got their track rows show which one plays: the
+    /// open page and the search sections are drawn again with them.
+    fn after_stream_play(&mut self) {
+        self.refresh_stream_page();
+        self.streaming.search.forget_links();
+        self.rebuild_sections();
     }
 
     pub(crate) fn with_album(&mut self, id: RemoteId, then: Then) {
@@ -437,6 +450,10 @@ impl Worker {
                 return;
             }
         };
+        if let (Then::Follow, PageData::Playlist(p)) = (&then, &data) {
+            self.follow_playlist(p);
+            return;
+        }
         let (tracks, title, ctx, album) = match &data {
             PageData::Album(a) => {
                 (a.tracks.clone(), format!("альбома «{}»", a.title), EventContext::Album, Some(a.id.clone()))
@@ -454,7 +471,23 @@ impl Worker {
                     .and_then(|r| playable.iter().position(|t| t.id == r))
                     .and_then(|i| ids.get(i).copied());
                 self.play_list(ids, start, shuffle, Some(title), ctx);
+                self.after_stream_play();
             }
+            Then::Download => {
+                let ids = self.upsert_streams(&playable);
+                let release = album
+                    .and_then(|a| self.lib.release_by_remote(&a).ok().flatten())
+                    .or_else(|| {
+                        ids.first()
+                            .and_then(|t| self.lib.get_track(*t).ok().flatten())
+                            .and_then(|t| t.release_id)
+                    });
+                match release {
+                    Some(r) => self.download_release(r),
+                    None => self.toast("Не получилось скачать альбом", None),
+                }
+            }
+            Then::Follow => {}
             Then::Like(on) => {
                 let ids = self.upsert_streams(&playable);
                 let release = album
@@ -471,6 +504,50 @@ impl Worker {
                 self.refresh_stream_page();
             }
         }
+    }
+
+    /// `Command::FollowStreamPlaylist`: a library playlist that follows
+    /// `p` (the default sync mode; someone else's playlist is only
+    /// followed), its tracks in the library (waiting in «Хочу скачать» like
+    /// an imported playlist's).
+    fn follow_playlist(&mut self, p: &StreamPlaylist) {
+        let open = |id| v::Link::Route(v::Route::Playlist(id));
+        if let Some(link) = self.lib.playlist_by_remote(&p.id).ok().flatten()
+            && self.lib.get_playlist(link.playlist_id).ok().flatten().is_some()
+        {
+            self.toast_open(format!("«{}» уже в библиотеке", p.name), "Открыть", open(link.playlist_id));
+            return;
+        }
+        let Some(created) = self.log_err("плейлист", self.lib.create_playlist(&p.name)) else { return };
+        let pid = created.id;
+        let ids = self.upsert_streams(&p.tracks);
+        let _ = self.log_err("плейлист", self.lib.playlist_add_many(pid, &ids));
+        for &t in &ids {
+            self.wish_for_like(t, nikgob_core::model::WishlistOrigin::Import);
+        }
+        let mode = match self.state.read().prefs.playlist_sync_default {
+            nikgob_core::streaming::PlaylistSyncMode::TwoWay if !p.editable => {
+                nikgob_core::streaming::PlaylistSyncMode::Follow
+            }
+            m => m,
+        };
+        let base: Vec<String> = p.tracks.iter().map(|t| t.id.id.clone()).collect();
+        let synced = self.sync_stamp(pid);
+        let _ = self.log_err(
+            "плейлист",
+            self.lib.put_playlist_remote(&nikgob_library::PlaylistRemote {
+                playlist_id: pid,
+                remote: p.id.clone(),
+                sync_mode: mode,
+                remote_version: super::sync::version_of(p),
+                synced_at: Some(synced),
+                base_json: serde_json::to_string(&base).ok(),
+            }),
+        );
+        self.load_library();
+        self.publish_wishlist();
+        self.refresh_stream_page();
+        self.toast_open(format!("«{}» в библиотеке", p.name), "Открыть", open(pid));
     }
 
     pub(crate) fn like_stream(&mut self, remote: &RemoteId, on: bool) {

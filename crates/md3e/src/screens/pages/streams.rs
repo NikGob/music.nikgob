@@ -1,14 +1,15 @@
 //! What the streaming services show (docs/stage3.md §3.2–3.4): their
-//! tracks, albums, artists and playlists as rows and cards with a source
-//! badge, and the album / playlist / artist page of a service
-//! ([`Route::Stream`]), laid out like the library's release, playlist and
-//! artist pages.
+//! tracks, albums, artists and playlists as rows and cards, and the album /
+//! playlist / artist page of a service ([`Route::Stream`]), laid out like
+//! the library's release, playlist and artist pages. Where something comes
+//! from is said in words (the page's overline, the search section), never
+//! with brand colours or badges.
 
 use egui::{CornerRadius, Rect, Sense, Stroke, Ui, pos2, vec2};
 use nikgob_view::{
     Command, LikeTarget, ReleaseType, RemoteId, Route, Service, ShareTarget, Status, StreamAlbumCard,
     StreamArtistCard, StreamPage, StreamPageView, StreamPlaylistCard, StreamTrackRow, TrackKind, ViewState,
-    WishlistView,
+    WishlistStatus, WishlistView,
 };
 
 use super::{PageState, widgets};
@@ -16,49 +17,25 @@ use crate::{
     Icon, Theme, TypeRole,
     components::{
         AssistChip, Button, ButtonRow, CoverStatus, Equalizer, IconButton, Leading, ListItem, LoadingIndicator, MediaCard,
-        Member, Menu, MenuItem, Radii, Size, Style, badge, paint,
+        Member, Menu, MenuItem, Radii, Size, Style, paint,
     },
     screens::common,
     tokens::shape,
 };
 
-/// "Spotify", "YouTube" (short, for chips and badges).
-pub fn service_short(service: Service) -> &'static str {
+/// "Spotify", "YouTube Music" as a page's overline says it.
+pub fn service_upper(service: Service) -> &'static str {
     match service {
-        Service::Spotify => "Spotify",
-        Service::Youtube => "YouTube",
+        Service::Spotify => "SPOTIFY",
+        Service::Youtube => "YOUTUBE MUSIC",
     }
 }
 
-/// A round badge with the service's mark on the top-right corner of a cover,
-/// in the scheme's colours (no brand green or red: they clash with the
-/// palette taken from the cover).
-pub fn service_badge(ui: &Ui, cover: Rect, service: Service) {
+/// A page's overline in one style: «АЛЬБОМ · 1988 · SPOTIFY».
+fn overline(ui: &mut Ui, parts: &[&str]) {
     let s = Theme::get(ui.ctx()).scheme;
-    let size = (cover.width() * 0.16).clamp(16.0, 24.0);
-    let c = pos2(cover.right() - size * 0.5 - 6.0, cover.top() + size * 0.5 + 6.0);
-    ui.painter().circle_filled(c, size * 0.5 + 1.5, s.surface_container_highest);
-    let icon = match service {
-        Service::Spotify => Icon::GraphicEq,
-        Service::Youtube => Icon::PlayArrow,
-    };
-    icon.widget(true, s.on_surface_variant, size * 0.72)
-        .paint_at(ui, Rect::from_center_size(c, vec2(size * 0.72, size * 0.72)));
-}
-
-/// "· Spotify" after a page's overline, in the overline's own type: where
-/// the page comes from, said in words rather than with a coloured dot.
-pub fn service_tag(ui: &mut Ui, service: Service) {
-    let s = Theme::get(ui.ctx()).scheme;
-    ui.label(TypeRole::LabelLarge.style().rich(format!("·  {}", service_short(service)), s.on_surface_variant));
-}
-
-/// A small tonal mark ("стрим", "клип", "у тебя").
-pub fn mark(ui: &mut Ui, text: &str) {
-    let s = Theme::get(ui.ctx()).scheme;
-    let g = ui.painter().layout_no_wrap(text.to_owned(), TypeRole::LabelSmall.font_id(), s.on_secondary_container);
-    let (rect, _) = ui.allocate_exact_size(vec2(g.size().x + 10.0, badge::LARGE_HEIGHT), Sense::hover());
-    badge::text_badge(ui.painter(), rect.left_center(), text, s.secondary_container, s.on_secondary_container);
+    let text = parts.iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(" · ");
+    ui.label(TypeRole::LabelLarge.style().rich(text, s.primary));
 }
 
 /// Where a list of stream tracks plays from.
@@ -84,8 +61,14 @@ fn play_from(from: &StreamFrom, rows: &[StreamTrackRow], i: usize) -> Command {
     }
 }
 
-/// Rows of stream tracks: cover (or number), title, artist · album, marks,
-/// duration, like and ⋮. Double click plays from the row.
+/// How far a stream track is in «Хочу скачать» (its library track's item).
+fn wish_of(t: &StreamTrackRow, wish: &widgets::WishIndex) -> Option<WishlistStatus> {
+    (!t.has_local).then(|| wish.of_track(t.track, None)).flatten()
+}
+
+/// Rows of stream tracks: cover (or number, ▶ on hover), title, artist ·
+/// album (· клип · у тебя), duration, like and ⋮. Double click (or the ▶)
+/// plays from the row. A long list lays out only the rows on screen.
 #[allow(clippy::too_many_arguments)]
 pub fn track_rows(
     ui: &mut Ui,
@@ -97,93 +80,138 @@ pub fn track_rows(
     pages: &mut PageState,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
-    let s = Theme::get(ui.ctx()).scheme;
     let mut nav = None;
-    let current = state.player.current.as_ref().map(|t| t.id);
-    let playing = state.player.status == Status::Playing;
     // An album by one artist needs no artist line under every title.
     let two_line = !numbered || rows.first().is_some_and(|f| rows.iter().any(|t| t.artist != f.artist));
-    for (i, t) in rows.iter().enumerate() {
-        let is_cur = t.track.is_some() && t.track == current;
-        let leading = if numbered {
-            Leading::Number(if is_cur { String::new() } else if t.track_no > 0 { t.track_no.to_string() } else { (i + 1).to_string() })
-        } else {
-            Leading::Image(t.cover_url.clone(), Icon::MusicNote)
-        };
-        let mut supporting = t.artist.clone();
-        if !numbered && let Some(a) = &t.album {
-            supporting = format!("{supporting} · {a}");
-        }
-        let dur = t.duration.map(common::fmt_time).unwrap_or_default();
-        let mut menu_resp = None;
-        let mut item = ListItem::new(&t.title);
-        if two_line {
-            item = item.supporting(supporting);
-        }
-        let o = item
-            .leading(leading)
-            .selected(is_cur)
-            .muted(!t.playable)
-            .trailing(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    menu_resp = Some(ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("st-more", id, i))));
-                    if ui
-                        .add(
-                            IconButton::new(Icon::Favorite)
-                                .size(Size::Xs)
-                                .selected(t.liked)
-                                .tooltip(if t.liked { "Убрать из Любимых" } else { "Нравится — и в «Хочу скачать»" })
-                                .id_salt(("st-like", id, i)),
-                        )
-                        .clicked()
-                    {
-                        out.push(Command::LikeStream { track: t.remote.clone(), on: !t.liked });
-                    }
-                    ui.label(TypeRole::BodyMedium.style().rich(dur, s.on_surface_variant));
-                    if t.has_local {
-                        mark(ui, "у тебя");
-                    }
-                    if t.kind == TrackKind::Video {
-                        mark(ui, "клип");
-                    }
-                    if !t.playable {
-                        ui.label(TypeRole::LabelSmall.style().rich("недоступен", s.on_surface_variant));
-                    }
-                    for &other in &t.also_on {
-                        ui.label(TypeRole::LabelSmall.style().rich(format!("+ {}", service_short(other)), s.on_surface_variant))
-                            .on_hover_text(format!("Тот же трек есть в {}", other.display_name()));
-                    }
-                });
-            })
-            .id_salt(("st-row", id, i))
-            .show(ui);
-        if is_cur {
-            let c = if numbered {
-                pos2(o.rect.left() + 16.0 + 14.0, o.rect.center().y)
-            } else {
-                let c = pos2(o.rect.left() + 16.0 + 28.0, o.rect.center().y);
-                paint::container(ui.painter(), Rect::from_center_size(c, vec2(56.0, 56.0)), Radii::all(shape::SMALL), s.secondary_container.gamma_multiply(0.85), Stroke::NONE);
-                c
-            };
-            Equalizer::new(("st-eq", id, i), s.on_secondary_container)
-                .playing(playing)
-                .paint_at(ui, Rect::from_center_size(c, vec2(24.0, 24.0)));
-        }
-        if o.response.double_clicked() && t.playable {
-            out.push(if is_cur { Command::TogglePlay } else { play_from(from, rows, i) });
-        }
-        if let Some(m) = &menu_resp {
-            let picked = track_menu(egui::Id::new(("st-menu", id, i)), t).attach(m);
-            nav = track_pick(picked, t, Some(m.rect), pages, out).or(nav);
-        }
-        let picked = track_menu(egui::Id::new(("st-menu-ctx", id, i)), t).context_menu(&o.response);
-        nav = track_pick(picked, t, None, pages, out).or(nav);
-    }
+    let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
+    let row_h = if two_line { crate::components::list::TWO_LINE } else { crate::components::list::ONE_LINE };
+    widgets::virtual_rows(ui, (id, "st-rows"), rows.len(), row_h, |ui, i| {
+        nav = track_row(ui, id, rows, i, numbered, two_line, from, &wish, state, pages, out).or(nav.take());
+    });
     nav
 }
 
-fn track_menu(key: egui::Id, t: &StreamTrackRow) -> Menu {
+#[allow(clippy::too_many_arguments)]
+fn track_row(
+    ui: &mut Ui,
+    id: &str,
+    rows: &[StreamTrackRow],
+    i: usize,
+    numbered: bool,
+    two_line: bool,
+    from: &StreamFrom,
+    wish: &widgets::WishIndex,
+    state: &ViewState,
+    pages: &mut PageState,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    let s = Theme::get(ui.ctx()).scheme;
+    let t = &rows[i];
+    let current = state.player.current.as_ref().map(|t| t.id);
+    let playing = state.player.status == Status::Playing;
+    let is_cur = t.track.is_some() && t.track == current;
+    let leading = if numbered {
+        Leading::Number(if is_cur { String::new() } else if t.track_no > 0 { t.track_no.to_string() } else { (i + 1).to_string() })
+    } else {
+        Leading::Image(t.cover_url.clone(), Icon::MusicNote)
+    };
+    // What the row is, in words: a music video, a song already on disk.
+    let mut supporting = t.artist.clone();
+    if !numbered && let Some(a) = &t.album {
+        supporting = format!("{supporting} · {a}");
+    }
+    let mut extras = Vec::new();
+    if t.kind == TrackKind::Video {
+        extras.push("клип");
+    }
+    if t.has_local {
+        extras.push("у тебя");
+    }
+    if !t.playable {
+        extras.push("недоступен");
+    }
+    // Two lines: after the artist; one line (an album page): quiet text by
+    // the duration, so every row keeps its height.
+    let trailing_extras = if two_line {
+        for e in &extras {
+            supporting = format!("{supporting} · {e}");
+        }
+        String::new()
+    } else {
+        extras.join(" · ")
+    };
+    let wished = wish_of(t, wish);
+    let dur = t.duration.map(common::fmt_time).unwrap_or_default();
+    let mut menu_resp = None;
+    let mut item = ListItem::new(&t.title);
+    if two_line {
+        item = item.supporting(supporting);
+    }
+    let o = item
+        .leading(leading)
+        .selected(is_cur)
+        .muted(!t.playable)
+        .hover_play(!is_cur && t.playable)
+        .trailing(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                menu_resp = Some(ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("st-more", id, i))));
+                if let Some(st) = wished
+                    && widgets::wish_mark(ui, st, ("st-wish", id, i)).clicked()
+                {
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(widgets::OPEN_WISHLIST), true));
+                }
+                if ui
+                    .add(
+                        IconButton::new(Icon::Favorite)
+                            .size(Size::Xs)
+                            .selected(t.liked)
+                            .tooltip(if t.liked { "Убрать из Любимых" } else { "В Любимые" })
+                            .id_salt(("st-like", id, i)),
+                    )
+                    .clicked()
+                {
+                    out.push(Command::LikeStream { track: t.remote.clone(), on: !t.liked });
+                }
+                ui.label(TypeRole::BodyMedium.style().rich(dur, s.on_surface_variant));
+                if !trailing_extras.is_empty() {
+                    ui.label(TypeRole::LabelSmall.style().rich(trailing_extras.as_str(), s.on_surface_variant));
+                }
+            });
+        })
+        .id_salt(("st-row", id, i))
+        .show(ui);
+    if is_cur {
+        let c = if numbered {
+            pos2(o.rect.left() + 16.0 + 14.0, o.rect.center().y)
+        } else {
+            let c = pos2(o.rect.left() + 16.0 + 28.0, o.rect.center().y);
+            paint::container(ui.painter(), Rect::from_center_size(c, vec2(56.0, 56.0)), Radii::all(shape::SMALL), s.secondary_container.gamma_multiply(0.85), Stroke::NONE);
+            c
+        };
+        Equalizer::new(("st-eq", id, i), s.on_secondary_container)
+            .playing(playing)
+            .paint_at(ui, Rect::from_center_size(c, vec2(24.0, 24.0)));
+    }
+    if (o.response.double_clicked() || o.play_clicked) && t.playable {
+        out.push(if is_cur { Command::TogglePlay } else { play_from(from, rows, i) });
+    }
+    let mut nav = None;
+    if let Some(m) = &menu_resp {
+        let picked = track_menu(egui::Id::new(("st-menu", id, i)), t, wished).attach(m);
+        nav = track_pick(picked, t, Some(m.rect), pages, out);
+    }
+    let picked = track_menu(egui::Id::new(("st-menu-ctx", id, i)), t, wished).context_menu(&o.response);
+    track_pick(picked, t, None, pages, out).or(nav)
+}
+
+fn track_menu(key: egui::Id, t: &StreamTrackRow, wished: Option<WishlistStatus>) -> Menu {
+    let (download, can) = match (t.has_local, wished) {
+        (true, _) => ("Уже скачан", false),
+        (false, Some(WishlistStatus::Waiting | WishlistStatus::NoTorrent | WishlistStatus::Failed)) => ("Скачать сейчас", true),
+        (false, Some(_)) => ("Уже в «Хочу скачать»", false),
+        (false, None) => ("Скачать", true),
+    };
     Menu::new(key)
         .align_right(true)
         .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic).enabled(t.playable))
@@ -194,7 +222,7 @@ fn track_menu(key: egui::Id, t: &StreamTrackRow) -> Menu {
         .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(t.artist_id.is_some()))
         .item(MenuItem::new("Поделиться").icon(Icon::Share))
         .divider()
-        .item(MenuItem::new(if t.has_local { "Уже скачан" } else { "Лайк и скачать" }).icon(Icon::Download).enabled(!t.has_local && !t.liked))
+        .item(MenuItem::new(download).icon(Icon::Download).enabled(can))
 }
 
 fn track_pick(picked: Option<usize>, t: &StreamTrackRow, anchor: Option<Rect>, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
@@ -205,7 +233,8 @@ fn track_pick(picked: Option<usize>, t: &StreamTrackRow, anchor: Option<Rect>, p
         3 => return t.album_id.clone().map(|a| Route::Stream(StreamPage::Album(a))),
         4 => return t.artist_id.clone().map(|a| Route::Stream(StreamPage::Artist(a))),
         5 => out.push(Command::Share(ShareTarget::StreamTrack(t.remote.clone()))),
-        6 => out.push(Command::LikeStream { track: t.remote.clone(), on: true }),
+        // Download without a like: the like stays the ♡'s.
+        6 => out.push(Command::DownloadStream { tracks: vec![t.remote.clone()] }),
         _ => {}
     }
     None
@@ -229,7 +258,10 @@ pub fn album_status(a: &StreamAlbumCard, wishlist: &WishlistView) -> CoverStatus
     let same = |x: &str, y: &str| x.trim().to_lowercase() == y.trim().to_lowercase();
     let mine = |r: &&nikgob_view::WishlistRow| match (r.release, a.release) {
         (Some(x), Some(y)) => x == y,
-        _ => r.album.as_deref().is_some_and(|t| same(t, &a.title)) && same(&r.artist, &a.artist),
+        _ => {
+            let title = r.album.as_deref().unwrap_or(&r.title);
+            same(title, &a.title) && same(&r.artist, &a.artist)
+        }
     };
     let rows: Vec<_> = wishlist.items.iter().filter(mine).collect();
     if rows.iter().any(|r| r.status == St::Downloading) {
@@ -243,9 +275,9 @@ pub fn album_status(a: &StreamAlbumCard, wishlist: &WishlistView) -> CoverStatus
 }
 
 /// An album of a service as a card, like a library album: opens its page,
-/// ▶ plays it; on hover a small ⬇ (the album to «Хочу скачать») and ⋮;
-/// right click or ⋮: Слушать · Скачать · В Любимые · Поделиться · Открыть.
-/// The cover corner shows its download status ([`album_status`]).
+/// ▶ plays it; on hover a small ⬇ (the album to «Хочу скачать», no like)
+/// and ⋮; right click or ⋮: Слушать · Скачать · В Любимые · Поделиться ·
+/// Открыть. The cover corner shows its download status ([`album_status`]).
 pub fn album_card(
     ui: &mut Ui,
     a: &StreamAlbumCard,
@@ -266,10 +298,8 @@ pub fn album_card(
         .width(width)
         .id_salt(("st-album", row, &a.remote))
         .show(ui);
-    let cover = Rect::from_min_size(o.response.rect.min, vec2(width, width));
-    service_badge(ui, cover, a.remote.service);
     if o.download_clicked {
-        out.push(Command::LikeStreamAlbum { album: a.remote.clone(), on: true });
+        out.push(Command::DownloadStreamAlbum(a.remote.clone()));
     }
     let mut nav = None;
     if let Some(m) = &o.menu {
@@ -300,8 +330,10 @@ fn album_menu(key: impl egui::AsId, a: &StreamAlbumCard, can_download: bool) -> 
 fn album_pick(picked: Option<usize>, a: &StreamAlbumCard, out: &mut Vec<Command>) -> Option<Route> {
     match picked? {
         0 => out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: false }),
-        // A like of the album puts the whole album on the wishlist.
-        1 | 2 => out.push(Command::LikeStreamAlbum { album: a.remote.clone(), on: true }),
+        // «Скачать» downloads without a like; «В Любимые» is the like (which
+        // also downloads, as the settings say).
+        1 => out.push(Command::DownloadStreamAlbum(a.remote.clone())),
+        2 => out.push(Command::LikeStreamAlbum { album: a.remote.clone(), on: true }),
         3 => out.push(Command::Share(ShareTarget::StreamAlbum(a.remote.clone()))),
         4 => return Some(Route::Stream(StreamPage::Album(a.remote.clone()))),
         _ => {}
@@ -321,7 +353,6 @@ pub fn artist_card(ui: &mut Ui, a: &StreamArtistCard, size: f32) -> Option<Route
         widgets::avatar_shape(&a.remote.id)
     };
     widgets::shape_image(ui, a.image_url.as_deref(), &widgets::initials(&a.name), img, shape);
-    service_badge(ui, img, a.remote.service);
     let g = common_line(ui, &a.name, size);
     ui.painter().galley(pos2(rect.center().x - g.size().x * 0.5, img.bottom() + 6.0), g, s.on_surface);
     if resp.hovered() {
@@ -357,7 +388,6 @@ pub fn playlist_card(ui: &mut Ui, p: &StreamPlaylistCard, width: f32, row: &str,
         .width(width)
         .id_salt(("st-playlist", row, &p.remote))
         .show(ui);
-    service_badge(ui, Rect::from_min_size(o.response.rect.min, vec2(width, width)), p.remote.service);
     if o.play_clicked {
         out.push(Command::PlayStreamPlaylist { id: p.remote.clone(), start: None, shuffle: false });
         None
@@ -447,6 +477,20 @@ fn count_line(lead: &str, n: usize, total: std::time::Duration) -> String {
     parts.join(" · ")
 }
 
+/// The download button of a service's album page: what «Хочу скачать»
+/// says about the album, and whether a click downloads it.
+fn album_download(v: &StreamPageView, wish: &widgets::WishIndex, all_local: bool) -> (&'static str, bool) {
+    if all_local {
+        return ("Скачан", false);
+    }
+    match v.release.and_then(|r| wish.of_release(r)) {
+        None | Some(WishlistStatus::Waiting | WishlistStatus::Dismissed | WishlistStatus::Done) => ("Скачать", true),
+        Some(WishlistStatus::Downloading) => ("Качается", false),
+        Some(WishlistStatus::NoTorrent | WishlistStatus::Failed) => ("Нет раздачи", false),
+        Some(_) => ("В очереди", false),
+    }
+}
+
 fn album_page(
     ui: &mut Ui,
     id: &RemoteId,
@@ -460,50 +504,44 @@ fn album_page(
     let local = v.tracks.iter().filter(|t| t.has_local).count();
     let artist_id = v.tracks.iter().find_map(|t| t.artist_id.clone());
     header(ui, v, false, |ui| {
-        let line = match v.year {
-            Some(y) => format!("{} · {y}", type_label(v.release_type)),
-            None => type_label(v.release_type).to_owned(),
-        };
-        ui.horizontal(|ui| {
-            ui.label(TypeRole::LabelLarge.style().rich(line, s.primary));
-            service_tag(ui, id.service);
-        });
+        let year = v.year.map(|y| y.to_string()).unwrap_or_default();
+        overline(ui, &[type_label(v.release_type), &year, service_upper(id.service)]);
+        // How much of it is here, in the same line as its size.
+        let mut line = count_line(&v.subtitle, v.tracks.len(), v.total_duration);
+        if v.have.local > 0 && !v.have.complete() {
+            line = format!("{line} · {} у тебя", v.have.local);
+        } else if v.have.complete() {
+            line = format!("{line} · у тебя");
+        }
         let artist = ui.add(
-            egui::Label::new(TypeRole::TitleMedium.style().rich(count_line(&v.subtitle, v.tracks.len(), v.total_duration), s.on_surface_variant))
-                .sense(Sense::click()),
+            egui::Label::new(TypeRole::TitleMedium.style().rich(line, s.on_surface_variant)).sense(Sense::click()),
         );
         if artist.clicked() && let Some(a) = &artist_id {
             nav = Some(Route::Stream(StreamPage::Artist(a.clone())));
         }
         artist.on_hover_cursor(egui::CursorIcon::PointingHand);
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.add(AssistChip::new("стрим").icon(Icon::GraphicEq).id_salt("st-chip-stream"));
-            if let Some(have) = v.have.files_label() {
-                ui.add(AssistChip::new(have).icon(Icon::Download).id_salt("st-chip-have"));
-            }
-            if let Some(r) = v.release.filter(|_| v.have.in_library > 0)
-                && ui.add(AssistChip::new("В библиотеке").icon(Icon::LibraryMusic).id_salt("st-chip-lib")).clicked()
-            {
+        if let Some(r) = v.release.filter(|_| v.have.in_library > 0) {
+            ui.add_space(8.0);
+            if ui.add(AssistChip::new("Открыть в библиотеке").icon(Icon::LibraryMusic).id_salt("st-chip-lib")).clicked() {
                 nav = Some(Route::Release(r));
             }
-        });
+        }
     });
     ui.add_space(16.0);
     let remotes: Vec<RemoteId> = v.tracks.iter().map(|t| t.remote.clone()).collect();
     let all_local = v.have.complete() || (!v.tracks.is_empty() && local == v.tracks.len());
+    let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
+    let (dl_label, dl_can) = album_download(v, &wish, all_local);
     let members: Vec<Member> = vec![
         Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
         Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Tonal).into(),
-        Button::new(if all_local { "Скачан" } else { "Скачать" }).icon(Icon::Download).size(Size::M).style(Style::Tonal).enabled(!all_local).into(),
+        Button::new(dl_label).icon(Icon::Download).size(Size::M).style(Style::Tonal).enabled(!all_local).into(),
         IconButton::new(Icon::Favorite)
             .size(Size::M)
             .style(Style::Tonal)
             .selected(v.liked)
-            .tooltip(if v.liked { "Убрать альбом из Любимых" } else { "Добавить альбом в Любимые" })
+            .tooltip(if v.liked { "Убрать альбом из Любимых" } else { "Альбом в Любимые" })
             .into(),
-        IconButton::new(Icon::Share).size(Size::M).style(Style::Tonal).tooltip("Поделиться").into(),
         IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into(),
     ];
     let row = ButtonRow::new("st-album-actions", Size::M).show(ui, members);
@@ -514,21 +552,30 @@ fn album_page(
     if r[1].clicked() {
         out.push(Command::PlayStreamAlbum { id: id.clone(), start: None, shuffle: true });
     }
-    // A like of the album puts the whole album on the wishlist.
-    if r[2].clone().on_hover_text("Весь альбом — в Любимые и в «Хочу скачать»").clicked() {
-        out.push(Command::LikeStreamAlbum { album: id.clone(), on: true });
+    // «Скачать» downloads without a like; once on its way, the button says
+    // how far it is and opens «Хочу скачать».
+    let dl = r[2].clone().on_hover_text(if dl_can {
+        "Весь альбом — в «Хочу скачать» (без лайка)"
+    } else {
+        "Открыть «Хочу скачать»"
+    });
+    if dl.clicked() {
+        if dl_can {
+            out.push(Command::DownloadStreamAlbum(id.clone()));
+        } else {
+            nav = Some(Route::Downloads(nikgob_view::DownloadsTab::Wishlist));
+        }
     }
     if r[3].clicked() {
         out.push(Command::LikeStreamAlbum { album: id.clone(), on: !v.liked });
     }
-    if r[4].clicked() {
-        out.push(Command::Share(ShareTarget::StreamAlbum(id.clone())));
-    }
-    let more = &r[5];
+    let more = &r[4];
     let picked = Menu::new("st-album-more")
         .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
         .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
         .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
+        .divider()
+        .item(MenuItem::new("Поделиться").icon(Icon::Share))
         .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(artist_id.is_some()))
         .item(MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic).enabled(v.release.is_some()))
         .attach(more);
@@ -536,8 +583,9 @@ fn album_page(
         Some(0) => out.push(Command::PlayStreamNext(remotes.clone())),
         Some(1) => out.push(Command::EnqueueStream(remotes.clone())),
         Some(2) => pages.add_stream_to_playlist(remotes.clone(), Some(more.rect)),
-        Some(3) => nav = artist_id.clone().map(|a| Route::Stream(StreamPage::Artist(a))),
-        Some(4) => nav = v.release.map(Route::Release),
+        Some(3) => out.push(Command::Share(ShareTarget::StreamAlbum(id.clone()))),
+        Some(4) => nav = artist_id.clone().map(|a| Route::Stream(StreamPage::Artist(a))),
+        Some(5) => nav = v.release.map(Route::Release),
         _ => {}
     }
     ui.add_space(16.0);
@@ -556,32 +604,29 @@ fn playlist_page(
     let s = Theme::get(ui.ctx()).scheme;
     let mut nav = None;
     header(ui, v, false, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(TypeRole::LabelLarge.style().rich("ПЛЕЙЛИСТ", s.primary));
-            service_tag(ui, id.service);
-        });
+        overline(ui, &["ПЛЕЙЛИСТ", service_upper(id.service)]);
         ui.label(TypeRole::TitleMedium.style().rich(count_line(&v.subtitle, v.tracks.len(), v.total_duration), s.on_surface_variant));
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if v.editable {
-                ui.add(AssistChip::new("твой").icon(Icon::Person).id_salt("st-pl-own"));
-            }
-            if let Some(p) = v.playlist
-                && ui.add(AssistChip::new("В библиотеке").icon(Icon::LibraryMusic).id_salt("st-pl-lib")).clicked()
-            {
+        if let Some(p) = v.playlist {
+            ui.add_space(8.0);
+            if ui.add(AssistChip::new("Открыть в библиотеке").icon(Icon::LibraryMusic).id_salt("st-pl-lib")).clicked() {
                 nav = Some(Route::Playlist(p));
             }
-        });
+        }
     });
     ui.add_space(16.0);
     let remotes: Vec<RemoteId> = v.tracks.iter().map(|t| t.remote.clone()).collect();
+    let followed = v.playlist.is_some();
     let row = ButtonRow::new("st-pl-actions", Size::M).show(
         ui,
         vec![
             Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
             Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Tonal).into(),
-            Button::new("В плейлист").icon(Icon::PlaylistAdd).size(Size::M).style(Style::Outlined).into(),
+            Button::new(if followed { "В библиотеке" } else { "В библиотеку" })
+                .icon(if followed { Icon::Check } else { Icon::LibraryMusic })
+                .size(Size::M)
+                .style(Style::Outlined)
+                .selected(followed)
+                .into(),
             IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into(),
         ],
     );
@@ -592,18 +637,26 @@ fn playlist_page(
     if r[1].clicked() {
         out.push(Command::PlayStreamPlaylist { id: id.clone(), start: None, shuffle: true });
     }
-    if r[2].clone().on_hover_text("Все треки — в свой плейлист (и в библиотеку)").clicked() {
-        pages.add_stream_to_playlist(remotes.clone(), Some(r[2].rect));
+    let follow = r[2].clone().on_hover_text(if followed {
+        "Плейлист в библиотеке и следит за сервисом — открыть"
+    } else {
+        "Плейлист в библиотеку: он будет следить за сервисом"
+    });
+    if follow.clicked() {
+        match v.playlist {
+            Some(p) => nav = Some(Route::Playlist(p)),
+            None => out.push(Command::FollowStreamPlaylist(id.clone())),
+        }
     }
     let picked = Menu::new("st-pl-more")
         .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
         .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
-        .item(MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic).enabled(v.playlist.is_some()))
+        .item(MenuItem::new("Треки в свой плейлист…").icon(Icon::PlaylistAdd))
         .attach(&r[3]);
     match picked {
         Some(0) => out.push(Command::PlayStreamNext(remotes.clone())),
         Some(1) => out.push(Command::EnqueueStream(remotes.clone())),
-        Some(2) => nav = v.playlist.map(Route::Playlist),
+        Some(2) => pages.add_stream_to_playlist(remotes.clone(), Some(r[3].rect)),
         _ => {}
     }
     ui.add_space(16.0);
@@ -624,29 +677,23 @@ fn artist_page(
     let s = Theme::get(ui.ctx()).scheme;
     let mut nav = None;
     header(ui, v, true, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(TypeRole::LabelLarge.style().rich("ИСПОЛНИТЕЛЬ", s.primary));
-            service_tag(ui, id.service);
-        });
+        overline(ui, &["ИСПОЛНИТЕЛЬ", service_upper(id.service)]);
         let n = v.albums.len() as u64;
-        ui.label(TypeRole::TitleMedium.style().rich(
-            format!("{n} {} в {}", common::plural(n, "релиз", "релиза", "релизов"), id.service.display_name()),
-            s.on_surface_variant,
-        ));
+        let mut line = format!("{n} {}", common::plural(n, "релиз", "релиза", "релизов"));
         let have: u32 = v.albums.iter().map(|a| a.have.local).sum();
         if have > 0 {
-            ui.add_space(8.0);
-            ui.add(AssistChip::new(format!("{have} {} у тебя", common::plural(u64::from(have), "трек", "трека", "треков"))).icon(Icon::Download).id_salt("st-ar-have"));
+            line = format!("{line} · {have} {} у тебя", common::plural(u64::from(have), "трек", "трека", "треков"));
         }
+        ui.label(TypeRole::TitleMedium.style().rich(line, s.on_surface_variant));
     });
     ui.add_space(16.0);
     let newest = v.albums.first().map(|a| a.remote.clone());
     let mut members: Vec<Member> = vec![
-        Button::new("Слушать новое").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).enabled(newest.is_some()).into(),
+        Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).enabled(newest.is_some()).into(),
     ];
     if v.artist.is_some() {
         members.push(
-            Button::new(if v.liked { "Вы подписаны" } else { "Подписаться" })
+            Button::new(if v.liked { "В подписках" } else { "Подписаться" })
                 .icon(Icon::Favorite)
                 .size(Size::M)
                 .style(Style::Outlined)

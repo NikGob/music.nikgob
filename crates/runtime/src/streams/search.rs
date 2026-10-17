@@ -180,10 +180,12 @@ impl Worker {
             self.publish(|s, _| s.search.streams.clear());
             return;
         }
+        // Spotify answers nothing without a login: it is not asked (the UI
+        // says «войди, чтобы искать и там» instead of an error).
         let asked: Vec<Service> = Service::ALL
             .iter()
             .copied()
-            .filter(|&s| sources.service(s) && self.service(s).is_some())
+            .filter(|&s| sources.service(s) && self.service(s).is_some_and(|svc| s != Service::Spotify || svc.account().is_logged_in()))
             .collect();
         // Sections that stay keep what they showed until the new answer.
         let mut old = std::mem::take(&mut self.streaming.search.raw);
@@ -336,6 +338,9 @@ impl Worker {
         let mut kept_albums: Vec<(String, String)> = Vec::new();
         let mut kept_artists: Vec<String> = Vec::new();
         let mut sections: Vec<v::StreamSearchSection> = Vec::new();
+        // Under a service's chip the library section is not shown: its
+        // songs stay in the service's list (marked «у тебя»).
+        let library_shown = self.streaming.search.sources.library;
         for (service, result, done) in raw {
             let mut section = v::StreamSearchSection::new(service);
             section.searching = !done;
@@ -358,7 +363,8 @@ impl Worker {
                                 l
                             }
                         };
-                        if let Some(id) = linked
+                        if library_shown
+                            && let Some(id) = linked
                             && self.lib.track_in_library(id).ok().flatten() == Some(true)
                         {
                             if !lib_keys.iter().any(|(t, _)| *t == id)
@@ -438,8 +444,9 @@ impl Worker {
 fn search_error(service: Service, e: &StreamError) -> String {
     match e {
         StreamError::RateLimited { .. } => {
-            format!("{} занят, повтори позже", service.display_name())
+            format!("{} просит подождать — повтори через минуту", service.display_name())
         }
+        StreamError::Network(_) => format!("Нет связи с {}", service.display_name()),
         other => super::error_text(other),
     }
 }

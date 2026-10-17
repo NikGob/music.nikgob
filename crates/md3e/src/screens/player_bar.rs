@@ -67,7 +67,6 @@ pub fn show(
         let cover = Rect::from_min_size(info_rect.min, vec2(48.0, 48.0));
         let current = p.current.as_ref();
         common::cover(ui, current.and_then(|t| t.cover.as_ref()), cover, 24.0);
-        common::source_badge(ui, cover, current.and_then(|t| t.source));
         let text_rect = Rect::from_min_max(
             info_rect.min + vec2(56.0, 4.0),
             info_rect.max - vec2(0.0, 4.0),

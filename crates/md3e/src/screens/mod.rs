@@ -67,6 +67,9 @@ pub struct Md3eUi {
     content_rect: Rect,
     search: String,
     search_focus: bool,
+    /// The search text of pages left from the search results, by the stack
+    /// they were on: going back there shows the results again.
+    search_marks: Vec<(Vec<Route>, String)>,
     /// The query last sent to the runtime, and when the text last changed:
     /// it is sent once typing pauses for [`SEARCH_DEBOUNCE`].
     search_sent: String,
@@ -107,6 +110,7 @@ impl Md3eUi {
             content_rect: Rect::NOTHING,
             search: String::new(),
             search_focus: false,
+            search_marks: Vec::new(),
             search_sent: String::new(),
             search_edited: None,
             scheme: SchemeAnim::default(),
@@ -128,6 +132,7 @@ impl Md3eUi {
         if self.route() == &route {
             return;
         }
+        self.mark_search(self.stack.clone());
         self.remember();
         let top_level = matches!(
             route,
@@ -152,6 +157,32 @@ impl Md3eUi {
         self.restart_nav(ctx);
     }
 
+    /// Remembers the search on screen before going to a page from it.
+    fn mark_search(&mut self, stack: Vec<Route>) {
+        const KEEP: usize = 20;
+        if self.search.trim().is_empty() {
+            return;
+        }
+        self.search_marks.retain(|(s, _)| *s != stack);
+        self.search_marks.push((stack, self.search.clone()));
+        if self.search_marks.len() > KEEP {
+            self.search_marks.remove(0);
+        }
+    }
+
+    /// Back on a stack that was left from the search: its results again
+    /// (the services answer from their cache).
+    fn restore_search(&mut self) {
+        if let Some(i) = self.search_marks.iter().rposition(|(s, _)| *s == self.stack) {
+            let (_, text) = self.search_marks.remove(i);
+            self.search = text;
+            self.search_sent.clear();
+            self.search_edited = None;
+        } else {
+            self.search.clear();
+        }
+    }
+
     /// Up one level (the page's ← and Esc). When that is where the user
     /// came from it is a step back in the history, so forward returns.
     pub fn back(&mut self, ctx: &Context, out: &mut Vec<Command>) -> bool {
@@ -166,6 +197,7 @@ impl Md3eUi {
         self.stack.pop();
         self.nav_dir = -1.0;
         load_for(self.route(), out);
+        self.restore_search();
         self.restart_nav(ctx);
         true
     }
@@ -204,7 +236,7 @@ impl Md3eUi {
         }
         self.nav_dir = dir;
         load_for(self.route(), out);
-        self.search.clear();
+        self.restore_search();
         self.restart_nav(ctx);
     }
 
@@ -690,7 +722,10 @@ impl Md3eUi {
         let search_rect = Rect::from_min_size(inner.min + vec2(0.0, 16.0), vec2(inner.width(), 56.0));
         let page_rect = Rect::from_min_max(pos2(inner.left(), search_rect.bottom() + 16.0), inner.max);
 
-        if pages::search_bar(ui, search_rect, &mut self.search, &mut self.search_focus, out) {
+        if std::mem::take(&mut self.pages.focus_search) {
+            self.search_focus = true;
+        }
+        if pages::search_bar(ui, search_rect, &mut self.search, &mut self.search_focus, state.prefs.prowlarr_configured, out) {
             self.search_edited = Some(std::time::Instant::now());
         }
         self.flush_search(&ctx, out);

@@ -1419,19 +1419,13 @@ fn info(
         ui.label(TypeRole::LabelMedium.style().rich(common::fmt_time(shown), s.on_surface_variant));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(TypeRole::LabelMedium.style().rich(common::fmt_time(dur), s.on_surface_variant));
-            // A stream says what really plays (YouTube's Opus for a Spotify
-            // track without Spotify sound), a file its own format.
-            let quality = p.audio_quality.as_deref().or_else(|| current.and_then(|t| t.quality.as_deref()));
-            if let Some(q) = quality {
+            // What really plays, in one quiet line: where a stream's sound
+            // comes from (a Spotify track may play from YouTube Music) and
+            // its format, or a file's own format.
+            if let Some(line) = common::sound_line(state) {
                 ui.add_space(8.0);
-                ui.label(TypeRole::LabelMedium.style().rich(q, s.primary));
-            }
-            // Where the sound of a stream comes from (a Spotify track may
-            // play from YouTube Music).
-            if let Some(a) = common::audio_label(state) {
-                ui.add_space(8.0);
-                ui.label(TypeRole::LabelMedium.style().rich(a, s.on_surface_variant))
-                    .on_hover_text("Откуда идёт звук этого трека");
+                ui.label(TypeRole::LabelMedium.style().rich(line, s.on_surface_variant))
+                    .on_hover_text("Откуда идёт звук и в каком качестве");
             }
         });
     });

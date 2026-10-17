@@ -3,15 +3,28 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nikgob_core::model::{ArtistId, ReleaseId, TrackId};
+use nikgob_core::model::{ArtistId, Release, ReleaseId, TrackId};
+use nikgob_core::streaming::{EntityKind, RemoteId};
 use nikgob_library::{
-    ArtistRow, ArtistSortKey, Library, ReleaseRow, ReleaseSortKey, Sort, TrackRow, now_ms,
+    ArtistRow, ArtistSortKey, Library, ReleaseProgress, ReleaseRow, ReleaseSortKey, Sort, TrackRow, now_ms,
 };
+
+/// An album of «Продолжить».
+pub enum Continue {
+    /// In the library.
+    Release(ReleaseRow),
+    /// Streamed from a service without joining the library: its page opens.
+    Stream {
+        remote: RemoteId,
+        release: Release,
+        progress: Option<ReleaseProgress>,
+    },
+}
 
 pub struct Home {
     pub hour: u8,
     pub mix: Vec<TrackRow>,
-    pub continue_listening: Vec<ReleaseRow>,
+    pub continue_listening: Vec<Continue>,
     pub artists: Vec<ArtistRow>,
     pub long_unplayed: Vec<ReleaseRow>,
     pub recently_added: Vec<ReleaseRow>,
@@ -29,19 +42,30 @@ pub fn build(lib: &Library) -> Home {
     let stats = lib.all_track_stats().unwrap_or_default();
     let stat: HashMap<TrackId, _> = stats.iter().copied().collect();
 
-    // Continue: releases of the most recently started tracks.
+    // Continue: releases of the most recently started tracks; an album
+    // streamed from a service (not in the library) opens its page.
     let mut continue_listening = Vec::new();
     let mut seen = HashSet::new();
     for e in lib.recent_events(400).unwrap_or_default() {
         if continue_listening.len() >= 12 {
             break;
         }
-        if let Ok(Some(t)) = lib.get_track(e.track_id)
-            && let Some(rid) = t.release_id
-            && seen.insert(rid)
-            && let Some(r) = by_id.get(&rid)
+        let Ok(Some(t)) = lib.get_track(e.track_id) else { continue };
+        let Some(rid) = t.release_id else { continue };
+        if !seen.insert(rid) {
+            continue;
+        }
+        if let Some(r) = by_id.get(&rid) {
+            continue_listening.push(Continue::Release((*r).clone()));
+        } else if let Some(remote) = lib
+            .external_ids(EntityKind::Album, *rid.as_uuid())
+            .unwrap_or_default()
+            .into_iter()
+            .next()
+            && let Ok(Some(release)) = lib.get_release(rid)
         {
-            continue_listening.push((*r).clone());
+            let progress = lib.release_progress(rid).ok().flatten();
+            continue_listening.push(Continue::Stream { remote, release, progress });
         }
     }
 

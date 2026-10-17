@@ -15,6 +15,12 @@ fn minute_up(at: std::time::SystemTime) -> i64 {
     (ms + 59_999) / 60_000 * 60_000
 }
 
+/// «14:05»: unix ms as the local time of day.
+fn local_hm(ms: i64) -> Option<String> {
+    let at = jiff::Timestamp::from_millisecond(ms).ok()?;
+    Some(at.to_zoned(jiff::tz::TimeZone::system()).strftime("%H:%M").to_string())
+}
+
 impl Worker {
     /// Refreshes [`v::ViewState::accounts`] (published only when changed).
     pub(crate) fn publish_accounts(&mut self) {
@@ -33,6 +39,7 @@ impl Worker {
                     busy: self.streaming.busy.contains(&service),
                     error: self.streaming.errors.get(&service).cloned(),
                     paused_until: registered.and_then(|s| s.paused_until()).map(minute_up),
+                    paused_until_hm: registered.and_then(|s| s.paused_until()).map(minute_up).and_then(local_hm),
                 }
             })
             .collect();
@@ -71,24 +78,51 @@ impl Worker {
             Ok(()) => {
                 log::info!("{service}: logged in");
                 // What the user typed is kept for the next start.
-                match input {
+                match &input {
                     LoginInput::PersonalApp { client_id } => {
-                        self.save_stream_secrets(Some(client_id), None, false);
+                        self.save_stream_secrets(Some(client_id.clone()), None, false);
                     }
-                    LoginInput::Cookies(c) => self.save_stream_secrets(None, Some(c), false),
+                    LoginInput::Cookies(c) => self.save_stream_secrets(None, Some(c.clone()), false),
                     LoginInput::Browser | LoginInput::Playback => {}
                 }
-                self.toast(format!("{}: вход выполнен", service.display_name()), None);
+                self.login_toast(service, &input);
                 self.pull_likes(service);
             }
             Err(e) => {
                 log::warn!("{service}: login failed: {e}");
-                self.streaming.errors.insert(service, error_text(&e));
+                // A login's own message (a busy port, a refused grant) is
+                // already for the user; the rest reads as any service error.
+                let text = match &e {
+                    StreamError::Network(m) if !m.trim().is_empty() => m.clone(),
+                    e => error_text(e),
+                };
+                self.streaming.errors.insert(service, text);
             }
         }
         self.publish_accounts();
         // Sound may have come (Premium) or gone: the next track resolves anew.
         self.preload_next();
+    }
+
+    /// What a finished login says. A Spotify Premium account without the
+    /// playback login yet is offered the second step right away.
+    fn login_toast(&mut self, service: Service, input: &LoginInput) {
+        let account = self.streams.iter().find(|s| s.service() == service).map(|s| s.account());
+        let premium_without_sound = matches!(
+            account,
+            Some(nikgob_core::streaming::Account::LoggedIn { premium: Some(true), audio: false, .. })
+        );
+        match (service, input) {
+            (Service::Spotify, LoginInput::Playback) => self.toast("Звук из Spotify включён", None),
+            (Service::Spotify, _) if premium_without_sound => self.toast(
+                "Spotify подключён · звук пока с YouTube Music",
+                Some((
+                    "Включить звук".into(),
+                    nikgob_view::Command::StreamLogin { service, input: LoginInput::Playback },
+                )),
+            ),
+            _ => self.toast(format!("{} подключён", service.display_name()), None),
+        }
     }
 
     pub(crate) fn stream_logout(&mut self, service: Service) {
