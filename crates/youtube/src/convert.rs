@@ -25,7 +25,7 @@ pub(crate) fn best_image(thumbs: &[Thumbnail]) -> Option<String> {
     Some(upscale(&t.url, t.width, t.height))
 }
 
-fn upscale(url: &str, width: u32, height: u32) -> String {
+pub(crate) fn upscale(url: &str, width: u32, height: u32) -> String {
     let googleusercontent = url.contains(".googleusercontent.com/") || url.contains(".ggpht.com/");
     if !googleusercontent || width != height || width >= COVER_PX {
         return url.to_owned();

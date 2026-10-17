@@ -21,6 +21,33 @@ async fn call(rp: &RustyPipe, endpoint: &str, body: Value) -> Result<Value, Stre
     serde_json::from_str(&text).map_err(|e| StreamError::Parse(format!("{endpoint}: {e}")))
 }
 
+/// What YouTube Music's queue says about `video_id` (one `next` request,
+/// as the player asks it): the item and, for a music video, its song (see
+/// `counterpart`). With the login when `signed_in`: the counterpart comes
+/// with the user's session.
+pub(crate) async fn watch(
+    rp: &RustyPipe,
+    video_id: &str,
+    signed_in: bool,
+) -> Result<Option<crate::counterpart::Watch>, StreamError> {
+    let body = json!({
+        "videoId": video_id,
+        "isAudioOnly": true,
+        "enablePersistentPlaylistPanel": true,
+        "tunerSettingValue": "AUTOMIX_SETTING_NORMAL",
+    });
+    let mut q = rp.query();
+    if signed_in {
+        q = q.authenticated();
+    }
+    let text = q
+        .raw(ClientType::DesktopMusic, "next", &body)
+        .await
+        .map_err(map_err)?;
+    let v: Value = serde_json::from_str(&text).map_err(|e| StreamError::Parse(format!("next: {e}")))?;
+    Ok(crate::counterpart::parse_watch(&v, video_id))
+}
+
 /// Display name of the logged-in account.
 pub(crate) async fn account_name(rp: &RustyPipe) -> Result<Option<String>, StreamError> {
     let v = call(rp, "account/account_menu", json!({})).await?;

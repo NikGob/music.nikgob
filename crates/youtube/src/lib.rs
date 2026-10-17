@@ -23,6 +23,7 @@
 
 mod cache;
 mod convert;
+mod counterpart;
 mod innertube;
 mod limit;
 mod player;
@@ -827,6 +828,65 @@ impl StreamService for Youtube {
                     t.isrc = Some(isrc.clone());
                     t
                 }))
+        })
+    }
+
+    /// The counterpart YouTube Music links the video to (one `next`
+    /// request, signed in: the switch of its own clients), else a song
+    /// search by the cleaned title, one per half of a dual title, at most
+    /// two (see `counterpart`). Logged out, the `next` request is left
+    /// out: without the session it never has the counterpart. Every request
+    /// waits for its turn in the spaced lanes and obeys the pause.
+    fn song_for_video(&self, video: &StreamTrack) -> BoxFuture<'_, Result<Option<StreamTrack>, StreamError>> {
+        let video = video.clone();
+        self.run(move |inner| async move {
+            let i = &inner;
+            let id = video.id.id.clone();
+            let mut clip = video;
+            if i.account().is_logged_in() {
+                let w = i
+                    .gate
+                    .run(Lane::SignedIn, innertube::watch(&i.rp, &id, true))
+                    .await;
+                match w {
+                    Ok(Some(w)) => {
+                        if w.item.kind == nikgob_core::streaming::TrackKind::Song {
+                            return Ok(Some(w.item));
+                        }
+                        if let Some(song) = w.counterpart {
+                            log::debug!("youtube: {id}: the song is {}", song.id.id);
+                            return Ok(Some(song));
+                        }
+                        // Its own title and length, as YouTube says them now.
+                        if clip.duration_ms.is_none() {
+                            clip.duration_ms = w.item.duration_ms;
+                        }
+                        if clip.artists.is_empty() {
+                            clip.artists = w.item.artists;
+                        }
+                    }
+                    Ok(None) => log::debug!("youtube: {id}: not in its own queue"),
+                    Err(e @ StreamError::RateLimited { .. }) => return Err(e),
+                    Err(e) => log::info!("youtube: {id}: next: {e}"),
+                }
+            }
+            for q in counterpart::queries(&clip) {
+                let r = i
+                    .gate
+                    .run(Lane::Catalog, async {
+                        i.rp.query().music_search_tracks(&q).await.map_err(map_err)
+                    })
+                    .await?;
+                let hits: Vec<StreamTrack> = r.items.items.iter().map(convert::track).collect();
+                if let Some(song) = counterpart::pick_song(&hits, &clip) {
+                    log::debug!("youtube: {id}: found the song {} by its title", song.id.id);
+                    return Ok(Some(song));
+                }
+                if hits.iter().any(|h| h.id.id == id && h.kind == nikgob_core::streaming::TrackKind::Song) {
+                    return Ok(hits.into_iter().find(|h| h.id.id == id));
+                }
+            }
+            Ok(None)
         })
     }
 
