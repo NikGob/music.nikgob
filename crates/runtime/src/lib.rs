@@ -34,6 +34,7 @@ pub use convert::Resolver;
 pub use import::ImportSetup;
 pub use nikgob_import::ImportConfig;
 pub use nikgob_metadata::MetadataConfig;
+pub use streams::{WINDOW_HINT, WebLogin, WebLoginError};
 use import::{IMPORT_ID, ImportService, Internal};
 use queue::{Entry, Queue};
 
@@ -142,6 +143,7 @@ enum Msg {
     Service(Box<dyn Service>),
     Indexer(Arc<dyn nikgob_core::indexer::Indexer>),
     OdesliBase(String),
+    WebLogin(StreamKind, Arc<dyn WebLogin>),
     Shutdown,
 }
 
@@ -224,6 +226,13 @@ impl Runtime {
     /// (another backend, or a fake one in tests).
     pub fn set_indexer(&self, indexer: Arc<dyn nikgob_core::indexer::Indexer>) {
         let _ = self.tx.send(Msg::Indexer(indexer));
+    }
+
+    /// Logs `service` in through this sign-in window of the app for a
+    /// [`nikgob_core::streaming::LoginInput::Browser`] login (YouTube Music's
+    /// Google sign-in; see [`WebLogin`]). A logout also forgets its session.
+    pub fn set_web_login(&self, service: StreamKind, login: Arc<dyn WebLogin>) {
+        let _ = self.tx.send(Msg::WebLogin(service, login));
     }
 
     /// Asks this Odesli base url for share links instead of
@@ -390,6 +399,7 @@ impl Worker {
                         self.wish_tick();
                     }
                     Ok(Msg::OdesliBase(base)) => self.set_odesli_base(&base),
+                    Ok(Msg::WebLogin(service, login)) => self.set_web_login(service, login),
                     Ok(Msg::Shutdown) | Err(_) => break,
                 },
                 recv(pb) -> e => if let Ok(e) = e { self.playback_event(e) },
