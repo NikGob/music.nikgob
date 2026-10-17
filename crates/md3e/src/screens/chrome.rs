@@ -38,6 +38,9 @@ pub enum Act {
     Trash,
     /// A song.link of the track into the clipboard.
     Share,
+    /// «Найти песню…» for a clip, «Другая версия…» for another stream
+    /// that plays from YouTube (only shown then).
+    FindSong,
     /// A divider.
     Sep,
 }
@@ -177,6 +180,7 @@ impl Chrome {
             // Only what is in the library (a file, or a like) can leave it.
             Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete).enabled(t.has_local || t.liked),
             Act::Share => MenuItem::new("Поделиться").icon(Icon::Share),
+            Act::FindSong => MenuItem::new(super::find_song::label(t).unwrap_or("Найти песню…")).icon(Icon::MusicNote),
             Act::Sep => MenuItem::new(""),
         }
     }
@@ -204,6 +208,7 @@ impl Chrome {
             .filter(|&a| match a {
                 Act::Tags => track.has_local,
                 Act::Trash => track.has_local || track.liked,
+                Act::FindSong => super::find_song::label(track).is_some(),
                 _ => true,
             })
             .collect();
@@ -252,6 +257,7 @@ impl Chrome {
             Act::Visualizer => self.visualizer = true,
             Act::Trash => self.trash = Some((t.id, t.title.clone())),
             Act::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),
+            Act::FindSong => out.push(Command::FindSong { track: t.id, query: None }),
             Act::Sep => {}
         }
     }

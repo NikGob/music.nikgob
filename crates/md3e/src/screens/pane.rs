@@ -325,6 +325,16 @@ pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
                 {
                     out.push(if t.has_local { Command::OpenTagEditor(t.id) } else { Command::DownloadTracks(vec![t.id]) });
                 }
+                // A clip: its song by hand; a stream from YouTube: another version.
+                if let Some(find) = super::find_song::label(t) {
+                    ui.add_space(8.0);
+                    if ui
+                        .add(Button::new(find).icon(Icon::MusicNote).style(Style::Outlined).size(Size::S).id_salt("info-find-song"))
+                        .clicked()
+                    {
+                        out.push(Command::FindSong { track: t.id, query: None });
+                    }
+                }
                 ui.add_space(8.0);
             }
         }

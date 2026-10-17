@@ -234,7 +234,12 @@ impl PageState {
             .item(MenuItem::new("Источник и качество").icon(Icon::Info))
             .item(MenuItem::new("Поделиться").icon(Icon::Share))
             .item(MenuItem::new(fetch).icon(fetch_icon))
-            .item(MenuItem::new(if track.has_local { "Найти качество лучше…" } else { "Искать раздачу…" }).icon(Icon::Search))
+            .item(MenuItem::new(if track.has_local { "Найти качество лучше…" } else { "Искать раздачу…" }).icon(Icon::Search));
+        // A clip: its song by hand; a stream from YouTube: another version.
+        if let Some(find) = super::find_song::label(track) {
+            m = m.item(MenuItem::new(find).icon(Icon::MusicNote));
+        }
+        m = m
             .divider()
             .item(MenuItem::new("Удалить из библиотеки").icon(Icon::Delete))
             .item(MenuItem::new("Удалить навсегда").icon(Icon::Delete).enabled(track.has_local));
@@ -248,7 +253,17 @@ impl PageState {
         track: &TrackRow,
         out: &mut Vec<Command>,
     ) -> Option<Route> {
-        match picked? {
+        let find = super::find_song::label(track).is_some();
+        // The deletes come after the optional «Найти песню…».
+        let picked = match picked? {
+            9 if find => {
+                out.push(Command::FindSong { track: track.id, query: None });
+                return None;
+            }
+            n if find && n > 9 => n - 1,
+            n => n,
+        };
+        match picked {
             0 => out.push(Command::PlayNext(vec![track.id])),
             1 => out.push(Command::Enqueue(vec![track.id])),
             2 => {

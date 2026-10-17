@@ -8,6 +8,7 @@ mod ambient;
 mod bg_shapes;
 mod chrome;
 mod common;
+mod find_song;
 mod lyrics;
 mod pages;
 mod pane;
@@ -78,6 +79,8 @@ pub struct Md3eUi {
     scheme: SchemeAnim,
     pub(crate) pages: pages::PageState,
     chrome: chrome::Chrome,
+    /// «Найти песню…» over everything.
+    find_song: find_song::FindSongUi,
     system_reduced_motion: bool,
     fullscreen: bool,
     /// Window fullscreen asked for with F11 (the visualizer forces it too).
@@ -117,6 +120,7 @@ impl Md3eUi {
             scheme: SchemeAnim::default(),
             pages: pages::PageState::default(),
             chrome: chrome::Chrome::default(),
+            find_song: find_song::FindSongUi::default(),
             system_reduced_motion: false,
             fullscreen: false,
             user_fullscreen: false,
@@ -360,6 +364,7 @@ impl Md3eUi {
         };
         self.pages.overlays(ctx, state, overlay_area, out);
         self.chrome.overlays(ctx, state, out);
+        self.find_song.show(ctx, state, out);
 
         // Now Playing overlay, transformed out of the floating player: the
         // container grows from the pill to the window while the content,

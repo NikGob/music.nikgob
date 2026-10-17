@@ -848,13 +848,17 @@ pub fn wish_mark(ui: &mut Ui, st: WishlistStatus, torrents: bool, salt: impl std
 
 /// ⋮ / right-click menu of a playlist row.
 fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId) -> Menu {
-    Menu::new(key)
+    let mut m = Menu::new(key)
         .align_right(true)
         .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
         .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
         .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
-        .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()))
-        .divider()
+        .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()));
+    // A clip: its song by hand; a stream from YouTube: another version.
+    if let Some(find) = crate::screens::find_song::label(track) {
+        m = m.item(MenuItem::new(find).icon(Icon::MusicNote));
+    }
+    m.divider()
         .item(
             MenuItem::new(if playlist == LIKED_PLAYLIST {
                 "Убрать из Любимых"
@@ -873,6 +877,7 @@ fn playlist_track_pick(
     pages: &mut PageState,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
+    let find = crate::screens::find_song::label(track).is_some();
     match picked? {
         0 => out.push(Command::PlayNext(vec![track.id])),
         1 => out.push(Command::Enqueue(vec![track.id])),
@@ -881,7 +886,8 @@ fn playlist_track_pick(
             pages.pending_add_anchor = anchor;
         }
         3 => return track.release_id.map(Route::Release),
-        4 => out.push(Command::RemoveFromPlaylist(playlist, track.id)),
+        4 if find => out.push(Command::FindSong { track: track.id, query: None }),
+        4 | 5 => out.push(Command::RemoveFromPlaylist(playlist, track.id)),
         _ => {}
     }
     None

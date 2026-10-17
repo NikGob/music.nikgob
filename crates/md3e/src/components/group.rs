@@ -125,6 +125,7 @@ pub struct ConnectedGroup<'a> {
     icons: Option<&'a [crate::Icon]>,
     equal_width: Option<f32>,
     reselect: bool,
+    enabled: Option<&'a [bool]>,
 }
 
 impl<'a> ConnectedGroup<'a> {
@@ -136,7 +137,14 @@ impl<'a> ConnectedGroup<'a> {
             icons: None,
             equal_width: None,
             reselect: false,
+            enabled: None,
         }
+    }
+
+    /// Which members can be chosen (the rest are drawn disabled).
+    pub fn enabled(mut self, enabled: &'a [bool]) -> Self {
+        self.enabled = Some(enabled);
+        self
     }
 
     /// Also report a click on the member that is already selected (for
@@ -175,6 +183,7 @@ impl<'a> ConnectedGroup<'a> {
             ui.spacing_mut().item_spacing.x = 2.0;
             for i in 0..n {
                 let sel = i == selected;
+                let on = self.enabled.is_none_or(|e| e.get(i).copied().unwrap_or(true));
                 let l = if i == 0 || sel { shape::FULL } else { inner };
                 let r = if i + 1 == n || sel { shape::FULL } else { inner };
                 let rest = Radii::sides(l, r);
@@ -187,6 +196,7 @@ impl<'a> ConnectedGroup<'a> {
                         .size(self.size)
                         .style(super::button::Style::Tonal)
                         .selected(sel)
+                        .enabled(on)
                         .tooltip(self.labels[i])
                         .radii(rest, pressed)
                         .id_salt((self.id, i));
@@ -200,6 +210,7 @@ impl<'a> ConnectedGroup<'a> {
                         .size(self.size)
                         .style(super::button::Style::Tonal)
                         .selected(sel)
+                        .enabled(on)
                         .radii(rest, pressed)
                         .id_salt((self.id, i));
                     if let Some(w) = self.equal_width {
@@ -207,7 +218,7 @@ impl<'a> ConnectedGroup<'a> {
                     }
                     ui.add(b)
                 };
-                if response.clicked() && (!sel || self.reselect) {
+                if on && response.clicked() && (!sel || self.reselect) {
                     changed = Some(i);
                 }
             }

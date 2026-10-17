@@ -812,6 +812,7 @@ pub fn show(
                 Act::Album,
                 Act::Info,
                 Act::Share,
+                Act::FindSong,
                 Act::Tags,
                 Act::Replace,
                 Act::Visualizer,
