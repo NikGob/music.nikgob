@@ -100,6 +100,19 @@ impl Queue {
         }
     }
 
+    /// Every entry of `from` plays `to` instead (the track was merged into
+    /// another one). Returns whether any did.
+    pub fn retarget(&mut self, from: TrackId, to: TrackId) -> bool {
+        let mut any = false;
+        for e in self.items.iter_mut().chain(self.original.iter_mut()) {
+            if e.track == from {
+                e.track = to;
+                any = true;
+            }
+        }
+        any
+    }
+
     pub fn current(&self) -> Option<Entry> {
         self.pos.and_then(|p| self.items.get(p).copied())
     }

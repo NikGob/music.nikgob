@@ -212,7 +212,7 @@ impl Worker {
             }
             HeadVerdict::New(new) => {
                 self.streaming.likes.entry(service).or_default().pulling = false;
-                self.apply_remote_likes(service, &new, false, true);
+                self.take_likes(service, new, true);
             }
             HeadVerdict::Full => {
                 log::debug!("{service}: likes changed beyond their first page: reading them all");
@@ -238,9 +238,20 @@ impl Worker {
         let l = self.streaming.likes.entry(service).or_default();
         l.pulling = false;
         l.limited = 0;
-        self.apply_remote_likes(service, &liked, false, false);
         let now = nikgob_library::now_ms();
         let _ = self.lib.cache_put(&full_key(service), now, "");
+        self.take_likes(service, liked, false);
+    }
+
+    /// Stores a pull's likes; a few new YouTube clips first ask for their
+    /// songs (see [`super::clips`]).
+    fn take_likes(&mut self, service: Service, liked: Vec<StreamTrack>, partial: bool) {
+        let videos = self.videos_to_convert(service, &liked);
+        if videos.is_empty() {
+            self.apply_remote_likes(service, &liked, false, partial);
+        } else {
+            self.convert_then_apply(service, liked, videos, partial);
+        }
     }
 
     /// A check failed. A rate limit tries again when the service's pause
@@ -288,6 +299,19 @@ impl Worker {
         import: bool,
         partial: bool,
     ) -> usize {
+        self.apply_remote_likes_with(service, liked, import, partial, &super::clips::Songs::new())
+    }
+
+    /// [`Self::apply_remote_likes`] storing each liked clip in `songs` as
+    /// its song (see [`super::clips`]).
+    pub(crate) fn apply_remote_likes_with(
+        &mut self,
+        service: Service,
+        liked: &[StreamTrack],
+        import: bool,
+        partial: bool,
+        songs: &super::clips::Songs,
+    ) -> usize {
         let first = !self.lib.likes_pulled(service).unwrap_or(true);
         let known = self.lib.remote_likes(service).unwrap_or_default();
         let known_ids: HashSet<&str> = known.iter().map(|k| k.remote.id.as_str()).collect();
@@ -319,7 +343,7 @@ impl Worker {
         let (new, unliked) = if adds.is_empty() && gone.is_empty() {
             (Vec::new(), Vec::new())
         } else {
-            self.log_err("лайки", self.lib.take_remote_likes(&adds, &gone, now))
+            self.log_err("лайки", self.lib.take_remote_likes_with(&adds, songs, &gone, now))
                 .unwrap_or_default()
         };
         for &t in &new {
@@ -372,29 +396,50 @@ impl Worker {
         }
     }
 
+    /// The ids of `track` a like / unlike goes to: one per service. An
+    /// unlike goes to what the service likes (a liked clip that is a song
+    /// here is unliked as the clip); a like to the id that plays (the
+    /// song, not its clip), else the first known.
+    fn like_targets(&self, track: TrackId, on: bool) -> Vec<RemoteId> {
+        let mut remotes = self
+            .lib
+            .external_ids(nikgob_core::streaming::EntityKind::Track, *track.as_uuid())
+            .unwrap_or_default();
+        let liked_there = if on { Vec::new() } else { self.lib.remote_likes_of(track).unwrap_or_default() };
+        let mut sources = self.lib.sources_of_track(track).unwrap_or_default();
+        sources.retain(|s| s.available && s.trashed_at.is_none());
+        sources.sort_by_key(|s| std::cmp::Reverse(s.quality_score));
+        // Best first: liked there, then what plays, then the rest.
+        remotes.sort_by_key(|r| {
+            let liked = liked_there.iter().any(|l| l.remote == *r);
+            let plays = sources.iter().position(|s| s.kind.service() == Some(r.service) && s.locator == r.id);
+            (!liked, plays.unwrap_or(usize::MAX))
+        });
+        let mut out: Vec<RemoteId> = Vec::new();
+        for r in remotes {
+            let first = !out.iter().any(|o| o.service == r.service);
+            // Every like there is taken back; else one id per service.
+            if first || liked_there.iter().any(|l| l.remote == r) {
+                out.push(r);
+            }
+        }
+        out
+    }
+
     /// Queues a like / unlike of a library track for its services (sent
     /// together a moment later, see the module docs).
     pub(crate) fn push_like(&mut self, track: TrackId, on: bool) {
         if !self.state.read().prefs.push_likes {
             return;
         }
-        let remotes = self
-            .lib
-            .external_ids(nikgob_core::streaming::EntityKind::Track, *track.as_uuid())
-            .unwrap_or_default();
+        let remotes = self.like_targets(track, on);
         let now = nikgob_library::now_ms();
-        let mut pushed = Vec::new();
         for remote in remotes {
-            // One id per service (a track may have collected several).
-            if pushed.contains(&remote.service) {
-                continue;
-            }
             let Some(svc) = self.service(remote.service) else { continue };
             // A catalogue (Deezer) keeps no likes: they stay here.
             if svc.catalogue_only() || !svc.account().is_logged_in() {
                 continue;
             }
-            pushed.push(remote.service);
             // Recorded now, so the next pull sees it as known, not as news.
             if on {
                 let _ = self.lib.put_remote_like(&RemoteLike {

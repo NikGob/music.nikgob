@@ -55,6 +55,11 @@ pub struct StreamSchedule {
     /// Imported tracks are completed from Spotify / YouTube a batch at a
     /// time with this pause between batches.
     pub enrich_pause: (Duration, Duration),
+    /// Liked YouTube clips are asked for their songs one at a time, this
+    /// far apart (± jitter; see `clips`)…
+    pub clip_gap: Duration,
+    /// …and the clips left are looked for in the library at most this often.
+    pub clip_refill: Duration,
     /// The worker's slow tick (toasts, the session file, the jobs above).
     pub tick: Duration,
     /// ± this share of every periodic interval.
@@ -84,6 +89,8 @@ impl Default for StreamSchedule {
             artist_ttl: Duration::from_secs(6 * 3600),
             playlist_ttl: Duration::from_secs(30 * 60),
             enrich_pause: (Duration::from_secs(60), Duration::from_secs(20)),
+            clip_gap: Duration::from_secs(4),
+            clip_refill: Duration::from_secs(30 * 60),
             tick: Duration::from_secs(5),
             jitter: 0.2,
             rate_limit_cap: Duration::from_secs(10 * 60),

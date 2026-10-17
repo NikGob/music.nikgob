@@ -14,6 +14,7 @@
 //! discography of library artists ([`discography`]).
 
 mod accounts;
+mod clips;
 mod cold;
 mod discography;
 mod export;
@@ -142,6 +143,20 @@ pub(crate) enum Msg {
     LikesPulled(Service, Result<Vec<StreamTrack>, StreamError>),
     /// Its first page and length.
     LikesHead(Service, Result<nikgob_core::streaming::LikedHead, StreamError>),
+    /// The songs of a like check's new clips (see [`clips`]); the likes
+    /// are stored with them.
+    LikesConverted {
+        service: Service,
+        liked: Vec<StreamTrack>,
+        songs: clips::Songs,
+        misses: Vec<String>,
+        partial: bool,
+    },
+    /// The repair's answer for one liked clip.
+    ClipSong {
+        clip: Box<nikgob_library::LikedClip>,
+        result: Result<Option<StreamTrack>, StreamError>,
+    },
     /// Time to send the queued likes of a service.
     LikeFlush(Service),
     LikesPushed {
@@ -197,6 +212,8 @@ pub(crate) struct Streams {
     save_after_resolve: HashMap<TrackId, WishlistId>,
     likes: HashMap<Service, LikeSync>,
     like_queue: likes::LikeQueue,
+    /// Liked YouTube clips turning into their songs.
+    clips: clips::ClipRepair,
     pub(crate) wish: wishlist::WishState,
     share_seq: u64,
     /// The «Ищу ссылку…» toast of the share that runs, replaced by its end.
@@ -240,6 +257,7 @@ impl Streams {
             save_after_resolve: HashMap::new(),
             likes: HashMap::new(),
             like_queue: likes::LikeQueue::default(),
+            clips: clips::ClipRepair::default(),
             wish: wishlist::WishState::default(),
             share_seq: 0,
             share_toast: None,
@@ -397,6 +415,7 @@ impl Worker {
         if !idle {
             self.enrich_tick();
             self.likes_tick();
+            self.clips_tick();
         }
         self.publish_accounts();
         let every = self.streaming.schedule.wish_every;
@@ -509,6 +528,14 @@ impl Worker {
             Msg::ResolveRetry(track) => self.resolve_retry(track),
             Msg::LikesPulled(service, r) => self.likes_pulled(service, r),
             Msg::LikesHead(service, r) => self.likes_head(service, r),
+            Msg::LikesConverted {
+                service,
+                liked,
+                songs,
+                misses,
+                partial,
+            } => self.likes_converted(service, &liked, &songs, &misses, partial),
+            Msg::ClipSong { clip, result } => self.clip_song(*clip, result),
             Msg::LikeFlush(service) => self.flush_likes(service),
             Msg::LikesPushed {
                 service,

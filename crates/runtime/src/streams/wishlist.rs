@@ -305,6 +305,15 @@ impl Worker {
             item.recording_mbid = t.recording_mbid.clone();
             item.track_id = Some(t.id);
             item.release_id = release.or(t.release_id);
+            // The YouTube id is the one that plays (a song, not its clip).
+            let plays = self
+                .lib
+                .sources_of_track(t.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| s.kind == SourceKind::Youtube && s.available && s.trashed_at.is_none())
+                .max_by_key(|s| s.quality_score)
+                .map(|s| s.locator);
             for r in self
                 .lib
                 .external_ids(EntityKind::Track, *t.id.as_uuid())
@@ -312,7 +321,8 @@ impl Worker {
             {
                 match r.service {
                     Service::Spotify => item.spotify_id = Some(r.id),
-                    Service::Youtube => item.youtube_id = Some(r.id),
+                    Service::Youtube if plays.is_none() => item.youtube_id = Some(r.id),
+                    Service::Youtube => item.youtube_id.clone_from(&plays),
                     // The wishlist searches torrents by name and ISRC.
                     Service::Deezer => {}
                 }
@@ -324,6 +334,27 @@ impl Worker {
             item.release_id = Some(r.id);
         }
         Some(item)
+    }
+
+    /// The track's metadata changed (a liked clip became its song): its
+    /// track items that did not start yet take the new title, artist,
+    /// album and ids.
+    pub(crate) fn wish_track_changed(&mut self, track: TrackId) {
+        let Some(fresh) = self.item_for(Some(track), None) else { return };
+        for item in self.lib.wishlist_for_track(track).unwrap_or_default() {
+            let unstarted = matches!(item.status, WishlistStatus::New | WishlistStatus::Waiting | WishlistStatus::NoTorrent);
+            if !unstarted || item.scope != WishlistScope::Track {
+                continue;
+            }
+            self.set_item(item.id, |i| {
+                i.title.clone_from(&fresh.title);
+                i.artist.clone_from(&fresh.artist);
+                i.isrc.clone_from(&fresh.isrc);
+                i.release_id = fresh.release_id;
+                i.youtube_id.clone_from(&fresh.youtube_id);
+            });
+        }
+        self.publish_wishlist();
     }
 
     /// A new like of `track`: a wishlist item when it has no file (an album
@@ -1027,7 +1058,8 @@ impl Worker {
             .sources_of_track(track)
             .unwrap_or_default()
             .into_iter()
-            .find(|s| s.kind == SourceKind::Youtube && s.available && s.trashed_at.is_none());
+            .filter(|s| s.kind == SourceKind::Youtube && s.available && s.trashed_at.is_none())
+            .max_by_key(|s| s.quality_score);
         let Some(source) = source else {
             if self.can_resolve(track) {
                 self.streaming.save_after_resolve.insert(track, id);
