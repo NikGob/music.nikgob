@@ -1,5 +1,10 @@
 //! File, LyricsPlus, lrc.red, Better Lyrics and LRCLIB lyrics. Synced file
 //! lyrics win automatically; online texts compete by sync, then source order.
+//! A LyricsPlus text whose generated word timing was dropped (QQ Music, see
+//! [`nikgob_metadata::lyricsplus`]) is a weak line sync: any other line
+//! sync beats it. LyricsPlus is asked with the track's full artist credit
+//! («WENARO, LXNER», which finds Apple's lines) and with the main artist
+//! only when that finds nothing.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -26,6 +31,17 @@ pub(crate) const LYRICS_KEPT: usize = 16;
 pub(crate) struct Text {
     pub(crate) lines: Vec<LyricLine>,
     pub(crate) plain: Option<String>,
+    /// Its line times are less trustworthy than another source's of the
+    /// same sync (a QQ Music text without its generated words).
+    pub(crate) weak: bool,
+}
+
+/// How a weak text is cached (a plain list of lines is a normal one).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Stored {
+    lines: Vec<LyricLine>,
+    #[serde(default)]
+    weak: bool,
 }
 
 impl Text {
@@ -35,7 +51,7 @@ impl Text {
         let plain = plain
             .filter(|p| lines.is_empty() && !p.trim().is_empty())
             .map(str::to_owned);
-        (!lines.is_empty() || plain.is_some()).then_some(Self { lines, plain })
+        (!lines.is_empty() || plain.is_some()).then_some(Self { lines, plain, weak: false })
     }
 
     pub(crate) fn from_ttml(xml: &str) -> Option<Self> {
@@ -43,11 +59,20 @@ impl Text {
             .map_err(|e| log::debug!("bad TTML: {e}"))
             .ok()?
             .lines;
-        (!lines.is_empty()).then_some(Self { lines, plain: None })
+        (!lines.is_empty()).then_some(Self { lines, plain: None, weak: false })
     }
 
     fn from_lines(lines: Vec<LyricLine>) -> Option<Self> {
-        (!lines.is_empty()).then_some(Self { lines, plain: None })
+        (!lines.is_empty()).then_some(Self { lines, plain: None, weak: false })
+    }
+
+    /// The cached body of an online text (see [`stored_lines`]).
+    fn body(&self) -> Option<String> {
+        if self.weak {
+            serde_json::to_string(&Stored { lines: self.lines.clone(), weak: true }).ok()
+        } else {
+            serde_json::to_string(&self.lines).ok()
+        }
     }
 
     fn serialized(&self) -> String {
@@ -84,15 +109,15 @@ impl TrackLyrics {
         }
         LyricsSource::ALL.into_iter()
             .filter(|s| *s != LyricsSource::File || !self.duplicate_file())
-            .filter_map(|s| self.texts.get(&s).map(|t| (s, t.sync())))
-            .max_by_key(|(source, sync)| (*sync, match source {
+            .filter_map(|s| self.texts.get(&s).map(|t| (s, t.sync(), !t.weak)))
+            .max_by_key(|(source, sync, strong)| (*sync, *strong, match source {
                 LyricsSource::File => 0,
                 LyricsSource::Lrclib => 1,
                 LyricsSource::BetterLyrics => 2,
                 LyricsSource::LrcRed => 3,
                 LyricsSource::LyricsPlus => 4,
             }))
-            .map(|(s, _)| s)
+            .map(|(s, ..)| s)
     }
 
     fn duplicate_file(&self) -> bool {
@@ -177,6 +202,48 @@ fn local_ttml(file: &Path) -> Option<Text> {
     Text::from_ttml(&std::fs::read_to_string(path).ok()?)
 }
 
+/// The artists LyricsPlus is asked with, in order: the full credit
+/// («WENARO, LXNER»), then the main artist alone when that differs.
+fn lyricsplus_artists(lib: &Library, row: &TrackRow) -> Vec<String> {
+    let names: Vec<String> = lib
+        .get_track(row.id)
+        .ok()
+        .flatten()
+        .map(|t| t.artist_credit.0.into_iter().map(|p| p.name).filter(|n| !n.trim().is_empty()).collect())
+        .unwrap_or_default();
+    let (full, main) = match names.first() {
+        Some(first) => (names.join(", "), first.clone()),
+        None => {
+            let main = row.artist.split([',', '&']).next().unwrap_or(&row.artist);
+            let main = main.split(" feat").next().unwrap_or(main).trim();
+            (row.artist.clone(), main.to_owned())
+        }
+    };
+    let mut out = vec![full];
+    if !main.is_empty() && !out.contains(&main) {
+        out.push(main);
+    }
+    out
+}
+
+/// LyricsPlus for `row`: the full credit first, the main artist only when
+/// that finds nothing (see the module docs).
+async fn find_lyricsplus(meta: &Metadata, lib: &Library, row: &TrackRow) -> Result<Option<Text>, MetadataError> {
+    let duration = row.duration_ms.map(|ms| Duration::from_millis(ms.into()));
+    for artist in lyricsplus_artists(lib, row) {
+        if let Some(t) = meta.lyricsplus.find_text(&artist, &row.title, row.album.as_deref(), duration).await? {
+            log::debug!(
+                "lyricsplus: «{artist} — {}» from {}{}",
+                row.title,
+                t.provider.as_deref().unwrap_or("?"),
+                if t.words_dropped { ", generated word timing dropped" } else { "" }
+            );
+            return Ok(Text::from_lines(t.lines).map(|x| Text { weak: t.words_dropped, ..x }));
+        }
+    }
+    Ok(None)
+}
+
 /// Asks an online source and caches the answer ("not found" included) as
 /// parsed lines. Network failures are returned and nothing is stored.
 async fn fetch_online(
@@ -186,30 +253,35 @@ async fn fetch_online(
     source: LyricsSource,
 ) -> Result<Option<Text>, MetadataError> {
     let duration = row.duration_ms.map(|ms| Duration::from_millis(ms.into()));
-    let album = row.album.as_deref();
     let lookup = async {
         Ok::<_, MetadataError>(match source {
-            LyricsSource::LyricsPlus => meta.lyricsplus.find(&row.artist, &row.title, album, duration).await?,
+            LyricsSource::LyricsPlus => find_lyricsplus(&meta, &lib, &row).await?,
             LyricsSource::LrcRed => {
                 let isrc = lib.get_track(row.id).ok().flatten().and_then(|t| t.isrc);
-                meta.lrcred.find(&meta.deezer, isrc.as_deref(), &row.artist, &row.title, duration).await?
+                meta.lrcred
+                    .find(&meta.deezer, isrc.as_deref(), &row.artist, &row.title, duration)
+                    .await?
+                    .and_then(Text::from_lines)
             }
-            LyricsSource::BetterLyrics => meta.betterlyrics.find(&row.artist, &row.title).await?,
+            LyricsSource::BetterLyrics => meta.betterlyrics.find(&row.artist, &row.title).await?.and_then(Text::from_lines),
             LyricsSource::File | LyricsSource::Lrclib => None,
         })
     };
-    let lines = tokio::time::timeout(LOOKUP_TIMEOUT, lookup)
+    let text = tokio::time::timeout(LOOKUP_TIMEOUT, lookup)
         .await
-        .unwrap_or_else(|_| Err(MetadataError::Network("timeout".into())))?
-        .filter(|l| !l.is_empty());
-    let body = lines.as_ref().and_then(|l| serde_json::to_string(l).ok());
+        .unwrap_or_else(|_| Err(MetadataError::Network("timeout".into())))?;
+    let body = text.as_ref().and_then(Text::body);
     let _ = lib.put_lyrics_text(row.id, source.key(), body.as_deref());
-    Ok(lines.and_then(Text::from_lines))
+    Ok(text)
 }
 
-/// Lines cached by [`fetch_online`].
+/// A text cached by [`fetch_online`]: a list of lines, or a weak text.
 fn stored_lines(body: &str) -> Option<Text> {
-    Text::from_lines(serde_json::from_str(body).ok()?)
+    if let Ok(lines) = serde_json::from_str::<Vec<LyricLine>>(body) {
+        return Text::from_lines(lines);
+    }
+    let s: Stored = serde_json::from_str(body).ok()?;
+    Text::from_lines(s.lines).map(|t| Text { weak: s.weak, ..t })
 }
 
 /// Reads only files and caches; expired misses become pending lookups.
@@ -494,7 +566,7 @@ mod tests {
             end: Duration::from_millis(1500),
             text: "a".into(),
         });
-        Text { lines: vec![l], plain: None }
+        Text { lines: vec![l], plain: None, weak: false }
     }
 
     #[test]
@@ -675,6 +747,86 @@ mod tests {
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         embed_text(&path, &text).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    }
+
+    #[test]
+    fn a_weak_line_sync_loses_to_any_other_line_sync_but_not_to_plain_text() {
+        let lrc = |t: &str| Text::from_lrc(Some(t), None);
+        let mut weak = lrc("[00:01.00]a").unwrap();
+        weak.weak = true;
+        let mut tl = TrackLyrics::default();
+        tl.insert(LyricsSource::LyricsPlus, Some(weak.clone()));
+        tl.insert(LyricsSource::Lrclib, Text::from_lrc(None, Some("a")));
+        assert_eq!(tl.chosen(), Some(LyricsSource::LyricsPlus), "lines beat plain text");
+        for other in [LyricsSource::Lrclib, LyricsSource::BetterLyrics, LyricsSource::LrcRed] {
+            let mut tl = tl.clone();
+            tl.insert(other, lrc("[00:01.50]a"));
+            assert_eq!(tl.chosen(), Some(other), "an accurate line sync beats the weak one");
+            // Real word sync of LyricsPlus wins again.
+            tl.insert(LyricsSource::LyricsPlus, Some(worded()));
+            assert_eq!(tl.chosen(), Some(LyricsSource::LyricsPlus));
+        }
+        // Cached and read back as weak; a normal text stays a plain list.
+        let back = stored_lines(&weak.body().unwrap()).unwrap();
+        assert!(back.weak);
+        assert_eq!(back.lines, weak.lines);
+        let normal = worded();
+        assert!(normal.body().unwrap().starts_with('['));
+        assert!(!stored_lines(&normal.body().unwrap()).unwrap().weak);
+    }
+
+    #[tokio::test]
+    async fn lyricsplus_is_asked_with_the_full_credit_before_the_main_artist() {
+        use nikgob_core::model::{ArtistCredit, Track};
+        use nikgob_metadata::{LyricsPlus, MetadataConfig};
+        use wiremock::matchers::{path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let mut meta = Metadata::new(&MetadataConfig::new("tests@example.invalid")).unwrap();
+        meta.lyricsplus = LyricsPlus::with_base_url(nikgob_metadata::Http::new(&MetadataConfig::new("tests@example.invalid")).unwrap(), &server.uri()).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let mut credit = ArtistCredit::single("WENARO", None);
+        credit.push(", ", "LXNER", None);
+        let t = lib.upsert_track(&Track::new("Лёд", credit)).unwrap();
+        let row = lib.get_track_row(t.id).unwrap().unwrap();
+        let apple = r#"{"type":"Line","metadata":{"source":"Apple"},"lyrics":[{"time":1000,"duration":2000,"text":"Ты мой лёд"}]}"#;
+        let qq = r#"{"type":"Word","metadata":{"source":"QQ Music"},"lyrics":[{"time":0,"duration":500,"text":"Composed by：Еремин Василий Сергеевич"},{"time":1000,"duration":2000,"text":"Ты мой лёд","syllabus":[{"time":1000,"duration":500,"text":"Ты "},{"time":1500,"duration":500,"text":"мой "},{"time":2000,"duration":1000,"text":"лёд"}]}]}"#;
+        let found = |body: &'static str| ResponseTemplate::new(200).set_body_raw(body, "application/json");
+
+        // The full credit is found: one request, Apple's lines.
+        Mock::given(path("/v2/lyrics/get")).and(query_param("artist", "WENARO, LXNER")).respond_with(found(apple)).mount(&server).await;
+        Mock::given(path("/v2/lyrics/get")).and(query_param("artist", "WENARO")).respond_with(found(qq)).mount(&server).await;
+        let text = fetch_online(meta.clone(), lib.clone(), row.clone(), LyricsSource::LyricsPlus).await.unwrap().unwrap();
+        assert!(!text.weak);
+        assert_eq!(text.lines[0].text, "Ты мой лёд");
+        let asked: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.url.query_pairs().find(|(k, _)| k == "artist").map(|(_, v)| v.into_owned()))
+            .collect();
+        assert_eq!(asked, ["WENARO, LXNER"]);
+
+        // Not found under the full credit: the main artist next, whose QQ
+        // text is a weak line sync without credits.
+        server.reset().await;
+        Mock::given(path("/v2/lyrics/get")).and(query_param("artist", "WENARO, LXNER")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
+        Mock::given(path("/v2/lyrics/get")).and(query_param("artist", "WENARO")).respond_with(found(qq)).mount(&server).await;
+        let text = fetch_online(meta.clone(), lib.clone(), row.clone(), LyricsSource::LyricsPlus).await.unwrap().unwrap();
+        assert!(text.weak);
+        assert_eq!(text.sync(), LyricsSync::Line);
+        assert_eq!(text.lines.len(), 1, "{:?}", text.lines);
+        let asked: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.url.query_pairs().find(|(k, _)| k == "artist").map(|(_, v)| v.into_owned()))
+            .collect();
+        assert_eq!(asked, ["WENARO, LXNER", "WENARO"]);
+        // Cached weak.
+        assert!(cached_lyrics(&lib, t.id, None, None).texts[&LyricsSource::LyricsPlus].weak);
     }
 
     #[tokio::test]
