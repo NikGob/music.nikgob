@@ -87,6 +87,9 @@ pub struct ListItemOutput {
     /// The drag handle's response (drag it to reorder), if the item has one.
     pub handle: Option<Response>,
     pub rect: Rect,
+    /// The ▶ over the leading image / number was clicked
+    /// ([`ListItem::hover_play`]): play from this row with one click.
+    pub play_clicked: bool,
 }
 
 type TrailingFn<'a> = Box<dyn FnOnce(&mut Ui) + 'a>;
@@ -108,6 +111,7 @@ pub struct ListItem<'a> {
     fill: Option<Color32>,
     radii: Option<Radii>,
     min_height: Option<f32>,
+    hover_play: bool,
     id_salt: Option<Id>,
 }
 
@@ -128,8 +132,16 @@ impl<'a> ListItem<'a> {
             fill: None,
             radii: None,
             min_height: None,
+            hover_play: false,
             id_salt: None,
         }
+    }
+
+    /// With the pointer on the row, the leading image or number turns
+    /// into ▶, which plays with one click ([`ListItemOutput::play_clicked`]).
+    pub fn hover_play(mut self, on: bool) -> Self {
+        self.hover_play = on;
+        self
     }
 
     /// A second line (72 dp row).
@@ -266,6 +278,20 @@ impl<'a> ListItem<'a> {
             .then(|| ui.interact(handle_rect, id.with("handle"), Sense::drag()));
         let handle_active = handle.as_ref().is_some_and(|h| h.dragged());
 
+        // The one-click ▶ over the leading part (registered after the row,
+        // so it takes the click there).
+        let lead_x = rect.left() + SIDE;
+        let lead_rect = match &self.leading {
+            Leading::Image(..) => Some(Rect::from_center_size(pos2(lead_x + 28.0, rect.center().y), vec2(56.0, 56.0))),
+            Leading::Number(_) => Some(Rect::from_center_size(pos2(lead_x + 14.0, rect.center().y), vec2(40.0, 40.0))),
+            Leading::Avatar(..) => Some(Rect::from_center_size(pos2(lead_x + 20.0, rect.center().y), vec2(40.0, 40.0))),
+            _ => None,
+        };
+        let lead = lead_rect
+            .filter(|_| self.hover_play && self.enabled)
+            .map(|r| ui.interact(r, id.with("lead-play"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand));
+        let show_play = lead.as_ref().is_some_and(|l| l.hovered() || response.hovered());
+
         // Trailing widgets: measured last frame, laid out at the end.
         let handle_w = if self.drag_handle { HANDLE_SLOT } else { 0.0 };
         let trailing_right =
@@ -362,24 +388,35 @@ impl<'a> ListItem<'a> {
                     );
                 }
                 Leading::Image(uri, icon) => {
-                    common::paint_image(
-                        ui,
-                        Rect::from_center_size(pos2(x + 28.0, rect.center().y), vec2(56.0, 56.0)),
-                        uri.as_deref(),
-                        CornerRadius::same(shape::SMALL as u8),
-                        *icon,
-                    );
+                    let r = Rect::from_center_size(pos2(x + 28.0, rect.center().y), vec2(56.0, 56.0));
+                    common::paint_image(ui, r, uri.as_deref(), CornerRadius::same(shape::SMALL as u8), *icon);
+                    if show_play {
+                        // The card's play button, small: a filled disc.
+                        let pressed = lead.as_ref().is_some_and(Response::is_pointer_button_down_on);
+                        let d = if pressed { 30.0 } else { 32.0 };
+                        ui.painter().circle_filled(r.center(), d * 0.5, s.primary);
+                        Icon::PlayArrow
+                            .widget(true, s.on_primary, 20.0)
+                            .paint_at(ui, Rect::from_center_size(r.center(), vec2(20.0, 20.0)));
+                    }
                 }
                 Leading::Number(n) => {
-                    let g = common::line(ui.painter(), n, TypeRole::BodyLarge.style(), variant, lw);
-                    ui.painter().galley(
-                        pos2(
-                            x + (lw - g.size().x).max(0.0) * 0.5,
-                            rect.center().y - g.size().y * 0.5,
-                        ),
-                        g,
-                        variant,
-                    );
+                    if show_play {
+                        Icon::PlayArrow.widget(true, variant, 24.0).paint_at(
+                            ui,
+                            Rect::from_center_size(pos2(x + lw * 0.5, rect.center().y), vec2(24.0, 24.0)),
+                        );
+                    } else {
+                        let g = common::line(ui.painter(), n, TypeRole::BodyLarge.style(), variant, lw);
+                        ui.painter().galley(
+                            pos2(
+                                x + (lw - g.size().x).max(0.0) * 0.5,
+                                rect.center().y - g.size().y * 0.5,
+                            ),
+                            g,
+                            variant,
+                        );
+                    }
                 }
             }
             if lw > 0.0 {
@@ -467,6 +504,7 @@ impl<'a> ListItem<'a> {
             response,
             handle,
             rect,
+            play_clicked: lead.as_ref().is_some_and(|l| l.clicked() && !l.double_clicked()),
         }
     }
 }
