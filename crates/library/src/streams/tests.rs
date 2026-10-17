@@ -743,8 +743,11 @@ fn a_clip_without_a_song_is_marked_and_plays_after_a_song() {
     assert_eq!(src.quality_score, score::STREAM_YOUTUBE);
 }
 
+/// Everything a track is made of: its row, sources, ids and remote likes.
+type Whole = (Option<crate::TrackRow>, Vec<(String, i32, bool)>, Vec<RemoteId>, Vec<RemoteLike>);
+
 /// Everything a track is made of, to compare before and after.
-fn whole(lib: &Library, track: TrackId) -> (Option<crate::TrackRow>, Vec<(String, i32, bool)>, Vec<RemoteId>, Vec<RemoteLike>) {
+fn whole(lib: &Library, track: TrackId) -> Whole {
     let mut sources: Vec<(String, i32, bool)> = lib
         .sources_of_track(track)
         .unwrap()
