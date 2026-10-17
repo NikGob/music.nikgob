@@ -9,8 +9,15 @@
 //! at a time: songs, videos only when no song fits (2 requests instead of
 //! up to 11). The next one or two tracks of the queue are looked up ahead,
 //! one after the other, so a Spotify-only track starts without waiting.
+//!
+//! A rate limit is not a miss: nothing is recorded, the lookups ahead wait
+//! for the pause to end, and a track that waits for its lookup (Buffering)
+//! is looked up again by itself when a pause of up to a minute ends («YouTube
+//! Music просит подождать — продолжу сам»), at most three times. After a
+//! longer pause playback stops and the toast says when to try again.
 
-use std::time::Instant;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use nikgob_core::model::{SourceKind, TrackId};
 use nikgob_core::streaming::{SearchKind, Service, StreamTrack, TrackKind};
@@ -100,13 +107,31 @@ fn miss_key(track: TrackId) -> String {
     format!("yt_miss.{track}")
 }
 
+/// Re-lookups of a waiting track after rate limits.
+const LIMIT_RETRIES: u32 = 3;
+/// The pause assumed when YouTube Music does not say how long it is.
+const UNKNOWN_PAUSE: Duration = Duration::from_secs(30);
+
+/// A lookup's answer: the hit (or none), or `Err(retry_after)` when the
+/// service rate-limited it.
+pub(crate) type Lookup = Result<Option<StreamTrack>, Option<Duration>>;
+
+/// Rate-limit state of the lookups.
+#[derive(Default)]
+pub(crate) struct ResolveLimit {
+    /// No lookup ahead starts before this.
+    until: Option<Instant>,
+    /// Re-lookups of the waiting track so far.
+    retries: HashMap<TrackId, u32>,
+}
+
 /// Songs, then videos only when no song fits; a rate limit stops it.
 async fn songs_then_videos(
     yt: &dyn nikgob_core::streaming::StreamService,
     text: &str,
     keep: &(dyn Fn(&StreamTrack) -> bool + Sync),
     q: &ResolveQuery,
-) -> Result<Option<StreamTrack>, ()> {
+) -> Lookup {
     for kind in [SearchKind::Songs, SearchKind::Videos] {
         match yt.search_kind(text, kind).await {
             Ok(r) => {
@@ -115,9 +140,9 @@ async fn songs_then_videos(
                     return Ok(Some(hit));
                 }
             }
-            Err(e @ nikgob_core::streaming::StreamError::RateLimited { .. }) => {
+            Err(e @ nikgob_core::streaming::StreamError::RateLimited { retry_after }) => {
                 log::warn!("YouTube lookup of {text}: {e}");
-                return Err(());
+                return Err(retry_after);
             }
             Err(e) => log::warn!("YouTube lookup of {text}: {e}"),
         }
@@ -126,13 +151,18 @@ async fn songs_then_videos(
 }
 
 /// "artist title" first; when that finds nothing, the title alone with the
-/// artist checked on the hits.
+/// artist checked on the hits. A rate limit is `None` too.
 pub(crate) async fn search_youtube(
     yt: &dyn nikgob_core::streaming::StreamService,
     q: &ResolveQuery,
 ) -> Option<StreamTrack> {
-    if let Some(hit) = songs_then_videos(yt, &q.text(), &|_| true, q).await.ok()? {
-        return Some(hit);
+    lookup_youtube(yt, q).await.ok().flatten()
+}
+
+/// [`search_youtube`] telling a rate limit apart.
+async fn lookup_youtube(yt: &dyn nikgob_core::streaming::StreamService, q: &ResolveQuery) -> Lookup {
+    if let Some(hit) = songs_then_videos(yt, &q.text(), &|_| true, q).await? {
+        return Ok(Some(hit));
     }
     let artist = artist_key(&q.artist);
     let by_artist = move |h: &StreamTrack| {
@@ -140,16 +170,17 @@ pub(crate) async fn search_youtube(
             .iter()
             .any(|a| similarity(&artist_key(&a.name), &artist) >= MIN_ARTIST)
     };
-    songs_then_videos(yt, &search_title(&q.title), &by_artist, q)
-        .await
-        .ok()
-        .flatten()
+    songs_then_videos(yt, &search_title(&q.title), &by_artist, q).await
 }
 
 /// Why a stream did not play, from the engine's error text, as the user
 /// reads it ("ARISTOCRAT: <this>"), and the settings row that helps, if
 /// one does (the toast's «Войти»).
-pub(crate) fn failure_text(message: &str, youtube_signed_in: bool) -> (String, Option<nikgob_view::SettingLink>) {
+pub(crate) fn failure_text(
+    message: &str,
+    youtube_signed_in: bool,
+    service: Option<Service>,
+) -> (String, Option<nikgob_view::SettingLink>) {
     use nikgob_view::SettingLink;
     let m = message.to_lowercase();
     if m.contains("age-restricted") {
@@ -163,7 +194,9 @@ pub(crate) fn failure_text(message: &str, youtube_signed_in: bool) -> (String, O
     } else if m.contains("premium") {
         ("для звука из Spotify нужен Premium".into(), None)
     } else if m.contains("rate limited") {
-        ("сервис просит подождать — повтори через минуту".into(), None)
+        // Playback goes on with the next track; this one waits for the user.
+        let who = service.map_or("сервис", |s| s.display_name());
+        (format!("{who} просит подождать — включи трек чуть позже"), None)
     } else if m.contains("not available") || m.contains("недоступ") {
         ("трек недоступен".into(), None)
     } else {
@@ -189,7 +222,7 @@ impl Worker {
         let signed_in = self
             .service(Service::Youtube)
             .is_some_and(|y| y.account().is_logged_in());
-        let why = failure_text(message, signed_in);
+        let why = failure_text(message, signed_in, src.kind.service());
         log::info!("{track}: {} source {} failed: {message}", src.kind.as_str(), src.locator);
         self.streaming.failures.insert(track, why);
         if src.kind == SourceKind::Youtube {
@@ -256,12 +289,12 @@ impl Worker {
             {
                 return Msg::Resolved {
                     track,
-                    found: Some(hit),
+                    found: Ok(Some(hit)),
                 };
             }
             Msg::Resolved {
                 track,
-                found: search_youtube(yt.as_ref(), &q).await,
+                found: lookup_youtube(yt.as_ref(), &q).await,
             }
         });
     }
@@ -284,8 +317,15 @@ impl Worker {
         true
     }
 
-    pub(crate) fn resolved(&mut self, track: TrackId, found: Option<StreamTrack>) {
+    pub(crate) fn resolved(&mut self, track: TrackId, found: Lookup) {
         self.streaming.resolving.remove(&track);
+        let found = match found {
+            Ok(f) => {
+                self.streaming.resolve_limit.retries.remove(&track);
+                f
+            }
+            Err(retry_after) => return self.resolve_limited(track, retry_after),
+        };
         match &found {
             Some(hit) => {
                 log::info!("{track} plays from YouTube Music as {}", hit.id.id);
@@ -343,12 +383,73 @@ impl Worker {
         self.resolve_ahead();
     }
 
+    /// YouTube Music rate-limited the lookup of `track` (see the module
+    /// docs): not a miss. The waiting track is looked up again when a short
+    /// pause ends; after a long one playback stops and says until when.
+    fn resolve_limited(&mut self, track: TrackId, retry_after: Option<Duration>) {
+        let pause = retry_after.or_else(|| self.pause_left(Service::Youtube));
+        let wait = pause.unwrap_or(UNKNOWN_PAUSE);
+        self.streaming.resolve_limit.until = Some(Instant::now() + wait);
+        self.streaming.failures.remove(&track);
+        let waiting = self
+            .playing
+            .filter(|e| e.track == track && self.playing_source.is_none());
+        if waiting.is_none() {
+            // A lookup ahead: done again when the pause is over.
+            log::info!("{track}: YouTube lookup rate limited, later");
+            return;
+        }
+        let n = self.streaming.resolve_limit.retries.entry(track).or_default();
+        *n += 1;
+        let n = *n;
+        if wait <= super::search::SHORT_WAIT && n <= LIMIT_RETRIES {
+            log::info!("{track}: YouTube lookup rate limited, again in {} s ({n} of {LIMIT_RETRIES})", wait.as_secs());
+            if n == 1 {
+                self.toast("YouTube Music просит подождать — продолжу сам", None);
+            }
+            let after = wait + super::schedule::wake_jitter();
+            self.streaming.spawn(async move {
+                tokio::time::sleep(after).await;
+                Msg::ResolveRetry(track)
+            });
+            return;
+        }
+        self.streaming.resolve_limit.retries.remove(&track);
+        let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
+        let until = pause
+            .filter(|p| *p > super::search::SHORT_WAIT)
+            .and_then(super::accounts::hm_after)
+            .map(|hm| format!(" до {hm}"))
+            .unwrap_or_default();
+        log::info!("{track}: YouTube lookup still rate limited: stopping");
+        // Not skipped: the next tracks would hit the same pause.
+        self.toast(format!("{title}: YouTube Music просит подождать{until} — включи трек позже"), None);
+        self.stop();
+    }
+
+    /// The pause of a waiting track's lookup ended: it is looked up again
+    /// if it still waits.
+    pub(crate) fn resolve_retry(&mut self, track: TrackId) {
+        let waiting = self
+            .playing
+            .is_some_and(|e| e.track == track && self.playing_source.is_none());
+        if !waiting {
+            self.streaming.resolve_limit.retries.remove(&track);
+            return;
+        }
+        self.begin_resolve(track);
+    }
+
     /// Looks up the next [`AHEAD`] tracks of the queue that only YouTube
     /// Music may have, one at a time (the next starts when this one
-    /// answered), whatever the gapless setting.
+    /// answered), whatever the gapless setting; none while YouTube Music
+    /// asked to wait.
     pub(crate) fn resolve_ahead(&mut self) {
         if !self.streaming.resolving.is_empty() {
             return; // one lookup at a time; the playing track's goes first
+        }
+        if self.streaming.resolve_limit.until.is_some_and(|t| Instant::now() < t) {
+            return;
         }
         let mut next: Vec<Entry> = self.queue.peek_auto_next().into_iter().collect();
         next.extend(self.queue.upcoming().iter().skip(1).take(AHEAD - 1).copied());

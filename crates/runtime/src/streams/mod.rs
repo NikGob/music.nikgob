@@ -126,8 +126,10 @@ pub(crate) enum Msg {
     },
     Resolved {
         track: TrackId,
-        found: Option<StreamTrack>,
+        found: resolve::Lookup,
     },
+    /// A rate-limit pause of a waiting track's lookup ended.
+    ResolveRetry(TrackId),
     /// The whole liked list.
     LikesPulled(Service, Result<Vec<StreamTrack>, StreamError>),
     /// Its first page and length.
@@ -175,6 +177,7 @@ pub(crate) struct Streams {
     page_seq: u64,
     /// YouTube lookups running / failed recently (unix ms), by track.
     resolving: HashSet<TrackId>,
+    resolve_limit: resolve::ResolveLimit,
     misses: HashMap<TrackId, i64>,
     /// YouTube videos that did not play, by video id (not by track: the
     /// same song has other copies).
@@ -222,6 +225,7 @@ impl Streams {
             search: search::SearchState::default(),
             page_seq: 0,
             resolving: HashSet::new(),
+            resolve_limit: resolve::ResolveLimit::default(),
             misses: HashMap::new(),
             refused: HashMap::new(),
             failures: HashMap::new(),
@@ -265,7 +269,14 @@ pub(crate) fn error_text(e: &StreamError) -> String {
         StreamError::NotConfigured => "Сервис не настроен".into(),
         StreamError::NotLoggedIn => "Нужно войти".into(),
         StreamError::PremiumRequired => "Нужен Premium".into(),
-        StreamError::RateLimited { .. } => "Сервис просит подождать — повтори через минуту".into(),
+        // Said with its end when that is a while away.
+        StreamError::RateLimited { retry_after } => match retry_after
+            .filter(|d| *d > search::SHORT_WAIT)
+            .and_then(accounts::hm_after)
+        {
+            Some(hm) => format!("Сервис просит подождать до {hm}"),
+            None => "Сервис просит подождать".into(),
+        },
         StreamError::Unavailable => "Недоступно".into(),
         StreamError::Unsupported => "Сервис так не умеет".into(),
         StreamError::AgeRestricted => "Только для 18+ — нужно войти".into(),
@@ -449,6 +460,7 @@ impl Worker {
             Msg::SearchRetry { seq, service } => self.search_retry(seq, service),
             Msg::Loaded { key, result } => self.loaded(key, result),
             Msg::Resolved { track, found } => self.resolved(track, found),
+            Msg::ResolveRetry(track) => self.resolve_retry(track),
             Msg::LikesPulled(service, r) => self.likes_pulled(service, r),
             Msg::LikesHead(service, r) => self.likes_head(service, r),
             Msg::LikeFlush(service) => self.flush_likes(service),
