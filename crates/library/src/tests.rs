@@ -1874,3 +1874,45 @@ fn albums_without_live_tracks_are_not_listed_but_kept() {
     assert!(lib.get_release(old.id).unwrap().is_some());
     assert_eq!(lib.releases_with_deleted(0, 10, ReleaseSort::asc(ReleaseSortKey::Title)).unwrap().len(), 2);
 }
+#[test]
+fn migration_drops_cached_lyricsplus_texts_and_picks_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.db");
+    {
+        // A v7 database: one track, liked, with cached lyrics of two sources
+        // and picks of each.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for (i, sql) in crate::migrations::MIGRATIONS.iter().take(7).enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i as u32 + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO track(id, title, title_key, artist_credit, artist_display, artist_key, added_at)
+             VALUES ('00000000-0000-0000-0000-000000000001', 'Лёд', 'лед', '[]', 'WENARO', 'wenaro', 1),
+                    ('00000000-0000-0000-0000-000000000002', 'Two', 'two', '[]', 'X', 'x', 1);
+             INSERT INTO likes(target_kind, target_id, updated_at, updated_by)
+             VALUES ('track', '00000000-0000-0000-0000-000000000001', 1, 'test');
+             INSERT INTO lyrics_text(track_id, source, body, fetched_at) VALUES
+               ('00000000-0000-0000-0000-000000000001', 'lyricsplus', '[]', 1),
+               ('00000000-0000-0000-0000-000000000002', 'lyricsplus', NULL, 1),
+               ('00000000-0000-0000-0000-000000000001', 'lrcred', '[]', 1);
+             INSERT INTO lyrics_pick(track_id, source) VALUES
+               ('00000000-0000-0000-0000-000000000001', 'lyricsplus'),
+               ('00000000-0000-0000-0000-000000000002', 'lrclib');",
+        )
+        .unwrap();
+    }
+    let lib = Library::open(&path).unwrap();
+    assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
+    let one: TrackId = "00000000-0000-0000-0000-000000000001".parse().unwrap();
+    let two: TrackId = "00000000-0000-0000-0000-000000000002".parse().unwrap();
+    assert!(lib.lyrics_text(one, "lyricsplus").unwrap().is_none());
+    assert!(lib.lyrics_text(two, "lyricsplus").unwrap().is_none());
+    assert_eq!(lib.lyrics_text(one, "lrcred").unwrap().unwrap().0.as_deref(), Some("[]"));
+    assert_eq!(lib.lyrics_pick(one).unwrap(), None);
+    assert_eq!(lib.lyrics_pick(two).unwrap().as_deref(), Some("lrclib"));
+    // Tracks and likes stay.
+    assert_eq!(lib.get_track(one).unwrap().unwrap().title, "Лёд");
+    assert!(lib.is_liked(one).unwrap());
+    assert!(lib.get_track(two).unwrap().is_some());
+}
