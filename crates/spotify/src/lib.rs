@@ -78,6 +78,8 @@ const SEARCH_TTL: Duration = Duration::from_secs(10 * 60);
 const PROFILE_TTL: Duration = Duration::from_secs(24 * 3600);
 /// A `Retry-After` pause this long is shown as «paused until».
 const SHOWN_PAUSE: Duration = Duration::from_secs(30);
+/// After a failed session connect, reads use the Web API for this long.
+const CONNECT_BACKOFF: Duration = Duration::from_secs(5 * 60);
 /// The playlist part of a search (the shared app) waits no longer.
 const PLAYLIST_SEARCH_TIMEOUT: Duration = Duration::from_secs(6);
 /// Pages read at most from one list (a playlist, the liked songs).
@@ -222,6 +224,8 @@ pub struct Spotify {
     recent: audio::Recent,
     /// Opens sign-in pages (the system browser; a stub in tests).
     opener: Mutex<auth::Opener>,
+    /// When connecting the session for reads last failed.
+    connect_failed: Mutex<Option<Instant>>,
 }
 
 /// The system browser; in tests a stub that only logs (a test reads the
@@ -331,6 +335,7 @@ impl Spotify {
             searches: TtlCache::new(SEARCH_TTL, 100),
             recent: Default::default(),
             opener: Mutex::new(default_opener()),
+            connect_failed: Mutex::new(None),
         });
         for client in [&spotify.shared, &spotify.personal] {
             let me = spotify.me.clone();
@@ -793,13 +798,25 @@ impl Spotify {
             .map(|c| c.to_librespot())
     }
 
-    /// The session if it is up, else a new one when there is a credential.
+    /// The session if it is up, else a new one when there is a credential
+    /// (not again for [`CONNECT_BACKOFF`] after a failed connect, so reads
+    /// that would like the session never wait on an unreachable one).
     async fn session_or_connect(&self) -> Option<librespot_core::Session> {
         if let Some(s) = self.sessions.current() {
             return Some(s);
         }
         let credential = self.playback_credential()?;
-        self.sessions.get(credential).await.ok()
+        if lock(&self.connect_failed).is_some_and(|t| t.elapsed() < CONNECT_BACKOFF) {
+            return None;
+        }
+        match self.sessions.get(credential).await {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log::info!("spotify: no session for reads: {e}");
+                *lock(&self.connect_failed) = Some(Instant::now());
+                None
+            }
+        }
     }
 
     // ---- reads -------------------------------------------------------------
