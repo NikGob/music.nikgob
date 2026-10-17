@@ -150,6 +150,8 @@ material_icons! {
     Refresh => "refresh",
     Block => "block",
     HourglassEmpty => "hourglass_empty",
+    /// A check over a line: what is on disk already.
+    DownloadDone => "download_done",
 }
 
 impl Icon {
