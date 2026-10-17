@@ -434,7 +434,8 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
                         split = o.picked;
                     }
                     St::Dismissed => {
-                        if ui.add(Button::new("Вернуть").style(Style::Text).size(Size::S).id_salt(("wish-restore", id))).clicked() {
+                        let back = ui.add(Button::new("Вернуть").style(Style::Text).size(Size::S).id_salt(("wish-restore", id)));
+                        if back.clicked() {
                             out.push(Command::WishlistRestore(vec![id]));
                         }
                     }
