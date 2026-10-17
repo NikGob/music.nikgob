@@ -280,6 +280,8 @@ impl Worker {
                     a.discography.loading = false;
                 }
             });
+            // Asked by every artist page: no toast, the section stays hidden.
+            return;
         }
         self.toast("Скоро", None);
     }

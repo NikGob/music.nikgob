@@ -113,6 +113,14 @@ pub struct StreamPlaylistCard {
     pub sync_mode: Option<PlaylistSyncMode>,
 }
 
+/// A library playlist linked to a playlist of a service
+/// ([`crate::PlaylistDetail::link`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaylistLink {
+    pub remote: RemoteId,
+    pub sync_mode: PlaylistSyncMode,
+}
+
 // ---------------------------------------------------------------- search
 
 /// Which sources the unified search asks ([`crate::Command::Search`]); the

@@ -1420,8 +1420,14 @@ impl Worker {
             .into_iter()
             .find(|p| p.id.unwrap_or(LIKED_PLAYLIST) == id);
         let Some(summary) = summary else { return };
+        let link = self.lib.playlist_remote(id).ok().flatten().map(|r| nikgob_view::PlaylistLink {
+            remote: r.remote,
+            sync_mode: r.sync_mode,
+        });
         self.publish(|s, res| {
-            s.playlist = Some(res.playlist_detail(&summary, &rows));
+            let mut detail = res.playlist_detail(&summary, &rows);
+            detail.link = link;
+            s.playlist = Some(detail);
         });
     }
 
