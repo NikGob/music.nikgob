@@ -388,6 +388,27 @@ fn put_remote_like_in(tx: &Connection, like: &RemoteLike) -> Result<()> {
     Ok(())
 }
 
+/// The track has a live source of `service` other than `locator`.
+fn other_source_of(conn: &Connection, track: &str, service: Service, locator: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM source WHERE track_id = ?1 AND kind = ?2 AND locator != ?3
+                          AND trashed_at IS NULL)",
+        params![track, service.source_kind().as_str(), locator],
+        |r| r.get(0),
+    )?)
+}
+
+/// `quality_score` of the source of a stream track: a music video ranks
+/// one below the song of the same service ([`score::STREAM_YOUTUBE_CLIP`]).
+///
+/// [`score::STREAM_YOUTUBE_CLIP`]: nikgob_core::model::score::STREAM_YOUTUBE_CLIP
+fn stream_score(t: &StreamTrack) -> i32 {
+    match (t.id.service, t.kind) {
+        (Service::Youtube, TrackKind::Video) => nikgob_core::model::score::STREAM_YOUTUBE_CLIP,
+        (service, _) => service.quality_score(),
+    }
+}
+
 pub(crate) fn upsert_stream_track_in(
     conn: &Connection,
     t: &StreamTrack,
@@ -395,6 +416,16 @@ pub(crate) fn upsert_stream_track_in(
 ) -> Result<TrackId> {
     let service = t.id.service;
     let isrc = normal_isrc(t.isrc.as_deref());
+    // A clip whose track plays its song (a liked clip turned into the song,
+    // the clip id kept for the like): the track stays the song, the clip
+    // gets no source of its own.
+    if want.is_none()
+        && t.kind == TrackKind::Video
+        && let Some(id) = linked(conn, "track", service, EntityKind::Track, &t.id.id)?
+        && other_source_of(conn, &id, service, &t.id.id)?
+    {
+        return parse(&id);
+    }
     // Which track, and may its metadata follow the stream?
     let (existing, own) = match want {
         Some(id) => {
@@ -438,40 +469,44 @@ pub(crate) fn upsert_stream_track_in(
             set_stream_cover(conn, id, t, false)?;
             id
         }
-        _ => {
-            let credit = credit_for(conn, &t.artists)?;
-            let release_id = t
-                .album
-                .as_ref()
-                .map(|a| release_for(conn, a, &t.artists))
-                .transpose()?;
-            let mut track = Track::new(t.title.clone(), credit);
-            track.id = existing.or(want).unwrap_or_default();
-            track.isrc = isrc;
-            track.release_id = release_id;
-            track.disc_no = t.disc_no.unwrap_or(1).max(1);
-            track.track_no = t.track_no.unwrap_or(0);
-            track.duration_ms = t.duration_ms.and_then(|ms| u32::try_from(ms).ok());
-            let fresh = existing.is_none();
-            let id = upsert_track_in(conn, &track)?.id;
-            set_stream_cover(conn, id, t, true)?;
-            if fresh {
-                // Out of the library from the start (no flash of a new row).
-                conn.execute(
-                    "UPDATE track SET in_library = 0 WHERE id = ?1",
-                    [id.to_string()],
-                )?;
-            }
-            id
-        }
+        _ => write_stream_meta(conn, t, existing.or(want), existing.is_none())?,
     };
     let mut source = Source::new(id, service.source_kind(), t.id.id.clone(), service.codec());
     source.bitrate = Some(service.bitrate_kbps());
-    source.quality_score = service.quality_score();
+    source.quality_score = stream_score(t);
     source.available = t.playable;
     add_source_in(conn, &source)?;
     set_external(conn, service, EntityKind::Track, &t.id.id, &id.to_string())?;
     refresh_in_library(conn, &id.to_string())?;
+    Ok(id)
+}
+
+/// Writes the metadata of the stream `t` (title, credit, album, numbers,
+/// length, ISRC, cover) onto the track `id` (a new track when `None`);
+/// a `fresh` track starts outside the library.
+fn write_stream_meta(conn: &Connection, t: &StreamTrack, id: Option<TrackId>, fresh: bool) -> Result<TrackId> {
+    let credit = credit_for(conn, &t.artists)?;
+    let release_id = t
+        .album
+        .as_ref()
+        .map(|a| release_for(conn, a, &t.artists))
+        .transpose()?;
+    let mut track = Track::new(t.title.clone(), credit);
+    track.id = id.unwrap_or_default();
+    track.isrc = normal_isrc(t.isrc.as_deref());
+    track.release_id = release_id;
+    track.disc_no = t.disc_no.unwrap_or(1).max(1);
+    track.track_no = t.track_no.unwrap_or(0);
+    track.duration_ms = t.duration_ms.and_then(|ms| u32::try_from(ms).ok());
+    let id = upsert_track_in(conn, &track)?.id;
+    set_stream_cover(conn, id, t, true)?;
+    if fresh {
+        // Out of the library from the start (no flash of a new row).
+        conn.execute(
+            "UPDATE track SET in_library = 0 WHERE id = ?1",
+            [id.to_string()],
+        )?;
+    }
     Ok(id)
 }
 
@@ -542,21 +577,24 @@ pub(crate) fn stream_refs_in(conn: &Connection, track: TrackId) -> Result<Vec<St
             .optional()?,
         None => None,
     };
-    let sources: Vec<(String, String, bool)> = {
+    let sources: Vec<(String, String, bool, i32)> = {
         let mut stmt = conn.prepare(
-            "SELECT kind, locator, available FROM source
+            "SELECT kind, locator, available, quality_score FROM source
               WHERE track_id = ?1 AND kind != 'local_file' AND trashed_at IS NULL
               ORDER BY kind, added_at, id",
         )?;
-        let rows = stmt.query_map([&tid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let rows = stmt.query_map([&tid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
     let mut out = Vec::new();
-    for (kind, locator, available) in sources {
+    for (kind, locator, available, score) in sources {
         let Some(service) = SourceKind::parse(&kind).and_then(SourceKind::service) else {
             continue;
         };
         let mut t = StreamTrack::new(RemoteId::new(service, locator), title.clone());
+        if service == Service::Youtube && score == nikgob_core::model::score::STREAM_YOUTUBE_CLIP {
+            t.kind = TrackKind::Video;
+        }
         t.artists = artist_refs(conn, &credit, service)?;
         if let (Some(rid), Some((atitle, acredit, year))) = (&release, &album) {
             let acredit: ArtistCredit = serde_json::from_str(acredit)?;
@@ -877,13 +915,31 @@ impl Library {
         gone: &[RemoteLike],
         seen_at: UnixMs,
     ) -> Result<(Vec<TrackId>, Vec<TrackId>)> {
+        self.take_remote_likes_with(liked, &std::collections::HashMap::new(), gone, seen_at)
+    }
+
+    /// [`Self::take_remote_likes`] where a liked music video whose id is in
+    /// `songs` is stored as that song: the library track is the song's
+    /// (its source, metadata, the same-song match), and the video's id is
+    /// linked to it and kept as the like's identity (module `clips`).
+    pub fn take_remote_likes_with(
+        &self,
+        liked: &[StreamTrack],
+        songs: &std::collections::HashMap<String, StreamTrack>,
+        gone: &[RemoteLike],
+        seen_at: UnixMs,
+    ) -> Result<(Vec<TrackId>, Vec<TrackId>)> {
         let device = self.device_id();
         self.write(|tx| {
             let mut new = Vec::new();
             for t in liked {
-                let Ok(track) = upsert_stream_track_in(tx, t, None) else {
+                let song = songs.get(&t.id.id).filter(|s| s.id.service == t.id.service);
+                let Ok(track) = upsert_stream_track_in(tx, song.unwrap_or(t), None) else {
                     continue;
                 };
+                if song.is_some() {
+                    set_external(tx, t.id.service, EntityKind::Track, &t.id.id, &track.to_string())?;
+                }
                 let here = crate::playlists::is_liked_in(tx, nikgob_core::model::LikeTarget::Track(track))?;
                 if !here {
                     crate::playlists::set_like_in(tx, nikgob_core::model::LikeTarget::Track(track), false, self.tick(), &device)?;
@@ -1118,9 +1174,11 @@ impl Library {
     }
 }
 
+mod clips;
 mod import;
 mod same;
 
+pub use clips::LikedClip;
 pub use import::event_id;
 
 #[cfg(test)]

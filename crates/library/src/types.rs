@@ -91,6 +91,18 @@ pub struct TrackRow {
     pub liked: bool,
     /// The first credited artist, when linked to an artist row.
     pub artist_id: Option<nikgob_core::model::ArtistId>,
+    /// The video id of the active source when it is a YouTube one.
+    #[serde(default)]
+    pub youtube_id: Option<String>,
+}
+
+impl TrackRow {
+    /// What plays is a YouTube music video, not the song (a liked clip
+    /// whose song YouTube Music does not have).
+    pub fn is_clip(&self) -> bool {
+        self.active_kind == Some(SourceKind::Youtube)
+            && self.quality == Some(nikgob_core::model::score::STREAM_YOUTUBE_CLIP)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

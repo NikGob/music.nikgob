@@ -651,3 +651,94 @@ fn schema_has_the_streaming_tables() {
     let lib = lib();
     assert_eq!(lib.schema_version().unwrap(), 8);
 }
+
+/// The fake YouTube clip of «Группа крови» (no album, kind video) and its song.
+fn yt_clip_and_song() -> (StreamTrack, StreamTrack) {
+    let yt = FakeService::youtube();
+    (find(&yt, "yt-video-kino"), find(&yt, "yt-gruppa-1"))
+}
+
+#[test]
+fn a_liked_clip_becomes_its_song_and_keeps_the_like_identity() {
+    let lib = lib();
+    let (clip, song) = yt_clip_and_song();
+    let (new, _) = lib.take_remote_likes(std::slice::from_ref(&clip), &[], 1).unwrap();
+    let track = new[0];
+    let row = lib.get_track_row(track).unwrap().unwrap();
+    assert!(row.is_clip(), "a clip ranks and shows as one");
+    assert_eq!(row.youtube_id.as_deref(), Some("yt-video-kino"));
+    assert_eq!(row.album, None);
+    let clips = lib.liked_youtube_clips().unwrap();
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0].track, track);
+    assert_eq!(clips[0].video.title, "Группа крови (клип)");
+    assert_eq!(clips[0].video.artists[0].name, "Кино");
+
+    let now = lib.clip_to_song(track, &clip.id, &song).unwrap();
+    assert_eq!(now, track, "the same track, now the song");
+    let row = lib.get_track_row(track).unwrap().unwrap();
+    assert_eq!(row.title, "Группа крови");
+    assert_eq!(row.album.as_deref(), Some("Группа крови"));
+    assert!(row.cover_ref.as_deref().is_some_and(|c| c.starts_with("https://")));
+    assert_eq!(row.duration_ms, Some(285_000));
+    assert!(!row.is_clip());
+    assert_eq!(row.youtube_id.as_deref(), Some("yt-gruppa-1"));
+    assert!(row.liked);
+    let sources = lib.sources_of_track(track).unwrap();
+    assert_eq!(sources.len(), 1, "the clip is no source any more");
+    assert_eq!(sources[0].locator, "yt-gruppa-1");
+    // The like is still the clip's, both ways.
+    let likes = lib.remote_likes_of(track).unwrap();
+    assert_eq!(likes.len(), 1);
+    assert_eq!(likes[0].remote, clip.id);
+    assert_eq!(lib.track_by_remote(&clip.id).unwrap(), Some(track));
+    assert!(lib.liked_youtube_clips().unwrap().is_empty(), "done");
+    // The clip seen again (a search, a pull) stays the song, no second source.
+    assert_eq!(lib.upsert_stream_track(&clip).unwrap(), track);
+    assert_eq!(lib.get_track_row(track).unwrap().unwrap().title, "Группа крови");
+    assert_eq!(lib.sources_of_track(track).unwrap().len(), 1);
+    // And the song itself is the same track.
+    assert_eq!(lib.upsert_stream_track(&song).unwrap(), track);
+}
+
+#[test]
+fn a_clip_whose_song_is_in_the_library_is_merged_into_it() {
+    let lib = lib();
+    let (clip, song) = yt_clip_and_song();
+    // The same song liked on Spotify first.
+    let spotify = sp(0);
+    let (new, _) = lib.take_remote_likes(std::slice::from_ref(&spotify), &[], 1).unwrap();
+    let song_track = new[0];
+    let (new, _) = lib.take_remote_likes(std::slice::from_ref(&clip), &[], 2).unwrap();
+    let clip_track = new[0];
+    assert_ne!(clip_track, song_track, "a clip is never matched by its name");
+    let into = lib.clip_to_song(clip_track, &clip.id, &song).unwrap();
+    assert_eq!(into, song_track, "one song, one track");
+    assert!(lib.get_track_row(clip_track).unwrap().is_none());
+    assert_eq!(lib.liked_tracks(0, 10).unwrap().len(), 1);
+    let kinds: Vec<SourceKind> = lib.sources_of_track(song_track).unwrap().iter().map(|s| s.kind).collect();
+    assert_eq!(kinds.len(), 2);
+    assert!(kinds.contains(&SourceKind::Spotify) && kinds.contains(&SourceKind::Youtube));
+    assert!(lib.remote_likes_of(song_track).unwrap().iter().any(|l| l.remote == clip.id));
+}
+
+#[test]
+fn a_clip_without_a_song_is_marked_and_plays_after_a_song() {
+    let lib = lib();
+    let (mut clip, song) = yt_clip_and_song();
+    // Imported before clips were told apart: the full YouTube score.
+    clip.kind = TrackKind::Song;
+    let (new, _) = lib.take_remote_likes(std::slice::from_ref(&clip), &[], 1).unwrap();
+    let track = new[0];
+    assert!(!lib.get_track_row(track).unwrap().unwrap().is_clip());
+    assert_eq!(lib.liked_youtube_clips().unwrap().len(), 1, "no album: a candidate");
+    assert!(lib.mark_clip(&clip.id).unwrap());
+    assert!(!lib.mark_clip(&clip.id).unwrap(), "once");
+    assert!(lib.get_track_row(track).unwrap().unwrap().is_clip());
+    assert_eq!(lib.liked_youtube_clips().unwrap().len(), 1, "still a clip: asked again later");
+    // A song source of the same service plays first.
+    lib.attach_stream_source(track, &song).unwrap();
+    let src = lib.active_source(track).unwrap().unwrap();
+    assert_eq!(src.locator, "yt-gruppa-1");
+    assert_eq!(src.quality_score, score::STREAM_YOUTUBE);
+}

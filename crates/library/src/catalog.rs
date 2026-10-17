@@ -26,7 +26,7 @@ pub(crate) fn track_row(row: &Row<'_>) -> rusqlite::Result<TrackRow> {
     track_row_at(row, 0)
 }
 
-/// Maps the 15 columns of `track_row_cols!()` starting at column `base`.
+/// Maps the 16 columns of `track_row_cols!()` starting at column `base`.
 pub(crate) fn track_row_at(row: &Row<'_>, base: usize) -> rusqlite::Result<TrackRow> {
     Ok(TrackRow {
         id: get_id(row, base)?,
@@ -46,6 +46,7 @@ pub(crate) fn track_row_at(row: &Row<'_>, base: usize) -> rusqlite::Result<Track
         has_local: row.get(base + 12)?,
         liked: row.get(base + 13)?,
         artist_id: get_opt_id(row, base + 14)?,
+        youtube_id: row.get(base + 15)?,
     })
 }
 
