@@ -112,12 +112,15 @@ impl Library {
         })
     }
 
-    /// Releases with a cover but no palette yet (work queue).
+    /// Releases with a cover file but no palette yet (work queue; a stream
+    /// cover url is not read).
     pub fn releases_needing_palette(&self, limit: u32) -> Result<Vec<ReleaseId>> {
         self.read(|c| {
             let mut stmt = c.prepare(
                 "SELECT r.id FROM release r LEFT JOIN palette p ON p.release_id = r.id
-                  WHERE p.release_id IS NULL AND r.cover_ref IS NOT NULL ORDER BY r.seq LIMIT ?1",
+                  WHERE p.release_id IS NULL AND r.cover_ref IS NOT NULL
+                    AND r.cover_ref NOT LIKE 'https://%' AND r.cover_ref NOT LIKE 'http://%'
+                  ORDER BY r.seq LIMIT ?1",
             )?;
             let ids = stmt.query_map([limit], |r| get_id(r, 0))?;
             Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)

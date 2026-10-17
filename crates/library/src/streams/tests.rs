@@ -324,6 +324,42 @@ fn attaching_a_stream_with_a_track_of_its_own_merges_the_two() {
 }
 
 #[test]
+fn stream_covers_are_stored_and_a_cover_file_wins() {
+    let lib = lib();
+    let s = sp(0);
+    let id = lib.upsert_stream_track(&s).unwrap();
+    let release = lib.get_track(id).unwrap().unwrap().release_id.unwrap();
+    let cover = |lib: &Library| lib.get_release(release).unwrap().unwrap().cover_ref;
+    assert!(s.cover_url.is_some());
+    assert_eq!(cover(&lib), s.cover_url);
+    assert!(is_web_ref(cover(&lib).as_deref().unwrap()));
+    // The YouTube copy does not replace the Spotify cover...
+    let y = find(&FakeService::youtube(), "yt-gruppa-1");
+    lib.upsert_stream_track(&y).unwrap();
+    assert_eq!(cover(&lib), s.cover_url);
+    // ...a new url of the owning service does.
+    let mut s2 = s.clone();
+    s2.cover_url = Some("https://fake.invalid/sp/gruppa-640.jpg".into());
+    lib.upsert_stream_track(&s2).unwrap();
+    assert_eq!(cover(&lib), s2.cover_url);
+    // A cover file (the download's) stays.
+    let mut r = lib.get_release(release).unwrap().unwrap();
+    r.cover_ref = Some("Кино/1988 - Группа крови/cover.jpg".into());
+    lib.upsert_release(&r).unwrap();
+    lib.upsert_stream_track(&s).unwrap();
+    assert_eq!(
+        cover(&lib).as_deref(),
+        Some("Кино/1988 - Группа крови/cover.jpg")
+    );
+    // An url is no work for the palette.
+    let other = lib.upsert_stream_track(&sp(4)).unwrap();
+    let other = lib.get_track(other).unwrap().unwrap().release_id.unwrap();
+    let queue = lib.releases_needing_palette(10).unwrap();
+    assert!(queue.contains(&release));
+    assert!(!queue.contains(&other));
+}
+
+#[test]
 fn a_local_track_with_the_isrc_keeps_its_tags_and_place() {
     let lib = lib();
     let kino = lib.upsert_artist(&Artist::new("Кино")).unwrap();

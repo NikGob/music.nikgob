@@ -46,6 +46,8 @@ struct Found {
     /// The artist in the service, and whether this lookup matched it.
     artist: Option<RemoteId>,
     matched_now: bool,
+    /// Its image in the service.
+    image: Option<String>,
     albums: Result<Vec<StreamAlbum>, StreamError>,
 }
 
@@ -115,18 +117,21 @@ async fn lookup(
 ) -> Found {
     let service = svc.service();
     if let Some(id) = known {
-        let albums = svc.artist(&id).await.map(|a| a.albums);
+        let full = svc.artist(&id).await;
+        let image = full.as_ref().ok().and_then(|a| a.image_url.clone());
         return Found {
             service,
             artist: Some(RemoteId::new(service, id)),
             matched_now: false,
-            albums,
+            image,
+            albums: full.map(|a| a.albums),
         };
     }
     let none = |albums| Found {
         service,
         artist: None,
         matched_now: false,
+        image: None,
         albums,
     };
     let hits = match svc.search(&name).await {
@@ -148,6 +153,7 @@ async fn lookup(
                 service,
                 artist: Some(full.id.clone()),
                 matched_now: true,
+                image: full.image_url.clone(),
                 albums: Ok(full.albums),
             };
         }
@@ -225,6 +231,9 @@ impl Worker {
             {
                 log::info!("artist {artist} is {remote}");
                 let _ = self.lib.set_external_id(EntityKind::Artist, remote, *artist.as_uuid());
+            }
+            if let Some(url) = &f.image {
+                let _ = self.lib.set_stream_artist_image(artist, url);
             }
             match f.albums {
                 Ok(a) => {

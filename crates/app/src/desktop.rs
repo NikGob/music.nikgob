@@ -156,7 +156,7 @@ impl Desktop {
             artists: vec![t.artist.clone()],
             album: t.album.clone().unwrap_or_default(),
             duration: t.duration,
-            art_file: t.cover.as_ref().map(|c| c.path.clone()),
+            art_file: t.cover.as_ref().and_then(|c| c.file()).map(std::path::Path::to_path_buf),
             ..np::Track::default()
         });
         let id = track.as_ref().map(|t| t.id.clone());

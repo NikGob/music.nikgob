@@ -23,7 +23,7 @@ use nikgob_core::model::{
     TrackId, UnixMs, Uuid,
 };
 use nikgob_core::streaming::{
-    AlbumRef, ArtistRef, EntityKind, PlaylistSyncMode, RemoteId, Service, StreamTrack,
+    AlbumRef, ArtistRef, EntityKind, PlaylistSyncMode, RemoteId, Service, StreamTrack, TrackKind,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -318,6 +318,32 @@ fn link_known(conn: &Connection, track: TrackId, t: &StreamTrack) -> Result<()> 
     Ok(())
 }
 
+/// A cover reference that is a web address (a stream cover), not a file.
+pub fn is_web_ref(cover_ref: &str) -> bool {
+    cover_ref.starts_with("https://") || cover_ref.starts_with("http://")
+}
+
+/// Gives the release of a stream track the stream's cover url: when it has
+/// no cover, or (`own`, the stream owns the track's metadata) when its
+/// cover is another url. A cover file always stays.
+fn set_stream_cover(conn: &Connection, track: TrackId, t: &StreamTrack, own: bool) -> Result<()> {
+    let Some(url) = t.cover_url.as_deref().filter(|u| is_web_ref(u)) else {
+        return Ok(());
+    };
+    if t.kind == TrackKind::Video {
+        return Ok(()); // a frame of the clip, not the album's cover
+    }
+    conn.execute(
+        "UPDATE release SET cover_ref = ?2
+          WHERE id = (SELECT release_id FROM track WHERE id = ?1)
+            AND (cover_ref IS NULL OR cover_ref = ''
+                 OR (?3 AND (cover_ref LIKE 'https://%' OR cover_ref LIKE 'http://%')))
+            AND cover_ref IS NOT ?2",
+        params![track.to_string(), url, own],
+    )?;
+    Ok(())
+}
+
 /// The track has a live source of a service ranked above `service`.
 fn better_stream_source(conn: &Connection, track: &str, service: Service) -> Result<bool> {
     let mine = service.source_kind().priority();
@@ -392,6 +418,7 @@ pub(crate) fn upsert_stream_track_in(
         // (and its album and artists learn their ids in this service).
         Some(id) if !own || has_local_source(conn, &id.to_string())? => {
             link_known(conn, id, t)?;
+            set_stream_cover(conn, id, t, false)?;
             id
         }
         _ => {
@@ -410,6 +437,7 @@ pub(crate) fn upsert_stream_track_in(
             track.duration_ms = t.duration_ms.and_then(|ms| u32::try_from(ms).ok());
             let fresh = existing.is_none();
             let id = upsert_track_in(conn, &track)?.id;
+            set_stream_cover(conn, id, t, true)?;
             if fresh {
                 // Out of the library from the start (no flash of a new row).
                 conn.execute(
@@ -610,6 +638,27 @@ impl Library {
                 }
             }
             same::same_song_track(c, t)?.map(|id| parse(&id)).transpose()
+        })
+    }
+
+    /// Gives a library artist the image url a service shows for it, unless
+    /// it has an image of another kind (a file); returns whether it changed.
+    pub fn set_stream_artist_image(&self, artist: ArtistId, url: &str) -> Result<bool> {
+        if !is_web_ref(url) {
+            return Ok(false);
+        }
+        self.write(|tx| {
+            let images: Option<String> = tx
+                .query_row("SELECT images FROM artist WHERE id = ?1", [artist.to_string()], |r| r.get(0))
+                .optional()?;
+            let Some(images) = images else { return Ok(false) };
+            let images: Vec<String> = serde_json::from_str(&images).unwrap_or_default();
+            if images.first().is_some_and(|i| i == url) || !images.iter().all(|i| is_web_ref(i)) {
+                return Ok(false);
+            }
+            let json = serde_json::to_string(&[url])?;
+            tx.execute("UPDATE artist SET images = ?2 WHERE id = ?1", params![artist.to_string(), json])?;
+            Ok(true)
         })
     }
 

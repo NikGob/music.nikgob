@@ -160,6 +160,9 @@ impl Worker {
                 view.cover_url = a.image_url.clone();
                 view.albums = a.albums.iter().map(|al| self.album_card(al)).collect();
                 view.artist = self.lib.artist_by_remote(&a.id).ok().flatten();
+                if let (Some(id), Some(url)) = (view.artist, &a.image_url) {
+                    let _ = self.lib.set_stream_artist_image(id, url);
+                }
                 view.liked = view.artist.is_some_and(|id| self.lib.is_liked(id).unwrap_or(false));
             }
         }

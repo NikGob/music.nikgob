@@ -28,9 +28,34 @@ pub struct Cover {
 }
 
 impl Cover {
-    /// The egui image URI for this file.
+    /// A cover of a streaming service, drawn from its `https://` url (the
+    /// app's web image loader fetches it; a placeholder while it cannot).
+    pub fn web(url: impl Into<String>) -> Self {
+        Self {
+            path: PathBuf::from(url.into()),
+            seed: None,
+            ambient: None,
+        }
+    }
+
+    /// The url of a [`Self::web`] cover.
+    pub fn web_url(&self) -> Option<&str> {
+        self.path
+            .to_str()
+            .filter(|p| p.starts_with("https://") || p.starts_with("http://"))
+    }
+
+    /// The cover file on disk (`None` for a web cover).
+    pub fn file(&self) -> Option<&std::path::Path> {
+        self.web_url().is_none().then_some(self.path.as_path())
+    }
+
+    /// The egui image URI for this file (a web cover: its url).
     pub fn uri(&self) -> String {
-        file_uri(&self.path)
+        match self.web_url() {
+            Some(url) => url.to_owned(),
+            None => file_uri(&self.path),
+        }
     }
 
     pub fn ambient_uri(&self) -> Option<String> {
