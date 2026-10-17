@@ -383,14 +383,12 @@ fn marker(ui: &mut Ui, text: &str) {
     badge::text_badge(ui.painter(), rect.left_center(), text, s.tertiary_container, s.on_tertiary_container);
 }
 
-/// "Spotify" / "YouTube Music" with its dot, as a section label.
+/// "Spotify" / "YouTube Music" as a section label.
 fn service_label(ui: &mut Ui, service: Service, loading: bool) {
     let s = Theme::get(ui.ctx()).scheme;
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.set_min_height(LABEL_H);
-        let (r, _) = ui.allocate_exact_size(vec2(10.0, 16.0), egui::Sense::hover());
-        ui.painter().circle_filled(r.center(), 5.0, streams::service_color(service));
         ui.label(TypeRole::LabelLarge.style().rich(service.display_name(), s.primary));
         loading_mark(ui, loading);
     });

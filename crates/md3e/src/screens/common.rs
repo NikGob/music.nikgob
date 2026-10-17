@@ -71,11 +71,13 @@ pub fn cover(ui: &Ui, cover: Option<&Cover>, rect: Rect, radius: f32) {
 /// The source badge on a cover corner: nothing for local files.
 pub fn source_badge(ui: &Ui, rect: Rect, source: Option<SourceKind>) {
     let s = Theme::get(ui.ctx()).scheme;
-    let (icon, color) = match source {
-        Some(SourceKind::Spotify) => (Icon::GraphicEq, Color32::from_rgb(0x1E, 0xD7, 0x60)),
-        Some(SourceKind::Youtube) => (Icon::PlayArrow, s.error),
+    // The scheme's colours, not the services' brand green and red.
+    let icon = match source {
+        Some(SourceKind::Spotify) => Icon::GraphicEq,
+        Some(SourceKind::Youtube) => Icon::PlayArrow,
         _ => return,
     };
+    let color = s.on_surface_variant;
     let size = (rect.width() * 0.4).clamp(14.0, 22.0);
     let b = Rect::from_min_size(rect.right_bottom() - vec2(size, size), vec2(size, size));
     ui.painter().circle_filled(b.center(), size * 0.5, s.surface_container_highest);

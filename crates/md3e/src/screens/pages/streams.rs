@@ -4,7 +4,7 @@
 //! ([`Route::Stream`]), laid out like the library's release, playlist and
 //! artist pages.
 
-use egui::{Color32, CornerRadius, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{CornerRadius, Rect, Sense, Stroke, Ui, pos2, vec2};
 use nikgob_view::{
     Command, LikeTarget, ReleaseType, RemoteId, Route, Service, ShareTarget, Status, StreamAlbumCard,
     StreamArtistCard, StreamPage, StreamPageView, StreamPlaylistCard, StreamTrackRow, TrackKind, ViewState,
@@ -21,14 +21,6 @@ use crate::{
     tokens::shape,
 };
 
-/// The service's own colour, for its badge (Spotify green, YouTube red).
-pub fn service_color(service: Service) -> Color32 {
-    match service {
-        Service::Spotify => Color32::from_rgb(0x1E, 0xD7, 0x60),
-        Service::Youtube => Color32::from_rgb(0xFF, 0x33, 0x33),
-    }
-}
-
 /// "Spotify", "YouTube" (short, for chips and badges).
 pub fn service_short(service: Service) -> &'static str {
     match service {
@@ -37,7 +29,9 @@ pub fn service_short(service: Service) -> &'static str {
     }
 }
 
-/// A round badge with the service's mark on the top-right corner of a cover.
+/// A round badge with the service's mark on the top-right corner of a cover,
+/// in the scheme's colours (no brand green or red: they clash with the
+/// palette taken from the cover).
 pub fn service_badge(ui: &Ui, cover: Rect, service: Service) {
     let s = Theme::get(ui.ctx()).scheme;
     let size = (cover.width() * 0.16).clamp(16.0, 24.0);
@@ -47,21 +41,15 @@ pub fn service_badge(ui: &Ui, cover: Rect, service: Service) {
         Service::Spotify => Icon::GraphicEq,
         Service::Youtube => Icon::PlayArrow,
     };
-    icon.widget(true, service_color(service), size * 0.72)
+    icon.widget(true, s.on_surface_variant, size * 0.72)
         .paint_at(ui, Rect::from_center_size(c, vec2(size * 0.72, size * 0.72)));
 }
 
-/// A small pill with the service's dot and name, laid out inline.
-pub fn service_pill(ui: &mut Ui, service: Service) -> egui::Response {
+/// "· Spotify" after a page's overline, in the overline's own type: where
+/// the page comes from, said in words rather than with a coloured dot.
+pub fn service_tag(ui: &mut Ui, service: Service) {
     let s = Theme::get(ui.ctx()).scheme;
-    let text = service_short(service);
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), TypeRole::LabelMedium.font_id(), s.on_surface_variant);
-    let size = vec2(galley.size().x + 26.0, 22.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-    paint::container(ui.painter(), rect, Radii::all(shape::FULL), s.surface_container_highest, Stroke::NONE);
-    ui.painter().circle_filled(pos2(rect.left() + 11.0, rect.center().y), 4.0, service_color(service));
-    ui.painter().galley(pos2(rect.left() + 19.0, rect.center().y - galley.size().y * 0.5), galley, s.on_surface_variant);
-    resp
+    ui.label(TypeRole::LabelLarge.style().rich(format!("·  {}", service_short(service)), s.on_surface_variant));
 }
 
 /// A small tonal mark ("стрим", "клип", "у тебя").
@@ -431,8 +419,7 @@ fn album_page(
         };
         ui.horizontal(|ui| {
             ui.label(TypeRole::LabelLarge.style().rich(line, s.primary));
-            ui.add_space(8.0);
-            service_pill(ui, id.service);
+            service_tag(ui, id.service);
         });
         let artist = ui.add(
             egui::Label::new(TypeRole::TitleMedium.style().rich(count_line(&v.subtitle, v.tracks.len(), v.total_duration), s.on_surface_variant))
@@ -524,8 +511,7 @@ fn playlist_page(
     header(ui, v, false, |ui| {
         ui.horizontal(|ui| {
             ui.label(TypeRole::LabelLarge.style().rich("ПЛЕЙЛИСТ", s.primary));
-            ui.add_space(8.0);
-            service_pill(ui, id.service);
+            service_tag(ui, id.service);
         });
         ui.label(TypeRole::TitleMedium.style().rich(count_line(&v.subtitle, v.tracks.len(), v.total_duration), s.on_surface_variant));
         ui.add_space(8.0);
@@ -587,8 +573,7 @@ fn artist_page(ui: &mut Ui, id: &RemoteId, v: &StreamPageView, out: &mut Vec<Com
     header(ui, v, true, |ui| {
         ui.horizontal(|ui| {
             ui.label(TypeRole::LabelLarge.style().rich("ИСПОЛНИТЕЛЬ", s.primary));
-            ui.add_space(8.0);
-            service_pill(ui, id.service);
+            service_tag(ui, id.service);
         });
         let n = v.albums.len() as u64;
         ui.label(TypeRole::TitleMedium.style().rich(
