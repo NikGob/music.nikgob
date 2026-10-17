@@ -278,7 +278,7 @@ impl BytesLoader for WebImages {
         }
         let uri = uri.to_owned();
         // The demo's fake catalog: a picture made up from the url.
-        if uri.starts_with("https://fake.invalid/") {
+        if uri.starts_with("https://fake.invalid/") || uri.starts_with("https://i.ytimg.com/vi/yt-") {
             let bytes = fake_cover(&uri);
             inner.ready(&mut s, uri, bytes.clone());
             return Ok(BytesPoll::Ready { size: None, bytes: Bytes::Shared(bytes), mime: None });

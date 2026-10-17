@@ -14,7 +14,8 @@
 //! logged in without sound, `prompt` = a login waiting for the browser —
 //! for YouTube Music the app's Google sign-in window —, `failed`, and for
 //! Spotify `premium` = a login refused for want of Premium, `nosound` =
-//! Premium without the playback login yet).
+//! Premium without the playback login yet; for YouTube Music `clips` =
+//! likes made as music videos, one of them with its song).
 //! `NIKGOB_DEMO_REAL_STREAMS=1` registers the real services instead, with
 //! their folders inside the demo dir, so real results can be looked at
 //! without touching the user's library or accounts.
@@ -86,6 +87,20 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
     base.set_audio_secs(180.0);
     match mode {
         "out" => Arc::new(base.logged_out()),
+        // YouTube likes made as clips: one whose song YouTube Music has
+        // (it imports as the song), two without (they stay clips).
+        "clips" if service == Service::Youtube => {
+            let base = base
+                .with_video("ghost", "Ghost Avenue", "Eve", 232, None)
+                .with_video("natsuko", "夏子 - Natsuko", "Funky Monkey Bλby's", 301, None);
+            for id in base.liked_ids() {
+                base.set_liked_remotely(&id, false);
+            }
+            for id in ["yt-video-natsuko", "yt-discovery-1", "yt-video-ghost", "yt-video-kino"] {
+                base.set_liked_remotely(id, true);
+            }
+            Arc::new(base)
+        }
         "free" => Arc::new(base.without_audio()),
         "nosound" => Arc::new(base.premium_without_audio()),
         "premium" => Arc::new(Shown {

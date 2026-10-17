@@ -10,6 +10,8 @@
 //! `frames` frames (like a person; the bar's debounce applies).
 //! `snap:path.png` saves a screenshot there and goes on (a sequence of
 //! pictures in one run).
+//! `liked` opens «Любимые»; `play_clip` plays the first clip of the open
+//! playlist (`play_clip:song` its first stream song).
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 
 use std::collections::VecDeque;
@@ -188,6 +190,23 @@ impl Shot {
                 // `playlist:Name` picks one by name.
                 if let Some(p) = state.library.playlists.iter().find(|p| !p.pinned && (arg.is_empty() || p.name == arg)) {
                     ui.navigate(ctx, Route::Playlist(p.id), out);
+                }
+                self.wait = 30;
+            }
+            "liked" => {
+                // «Любимые».
+                ui.navigate(ctx, Route::Playlist(nikgob_view::LIKED_PLAYLIST), out);
+                self.wait = 30;
+            }
+            "play_clip" => {
+                // The first clip of the open playlist (`play_clip:song` plays
+                // its first stream track that is not a clip).
+                let want_clip = arg != "song";
+                let pick = state.playlist.as_ref().and_then(|p| {
+                    p.tracks.iter().find(|t| t.clip == want_clip && (want_clip || !t.has_local))
+                });
+                if let Some(t) = pick {
+                    out.push(Command::PlayTracks { tracks: vec![t.id], start: 0, context: "Любимые".into() });
                 }
                 self.wait = 30;
             }
