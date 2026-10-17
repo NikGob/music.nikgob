@@ -4192,8 +4192,12 @@ dependencies = [
  "nikgob-library",
  "nikgob-md3e",
  "nikgob-runtime",
+ "nikgob-spotify",
  "nikgob-view",
+ "nikgob-youtube",
+ "reqwest 0.13.5",
  "serde_json",
+ "tokio",
  "windows-sys 0.61.2",
  "winit",
 ]

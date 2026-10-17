@@ -11,8 +11,11 @@ mod demo;
 mod desktop;
 mod geometry;
 mod shot;
+mod shot_fakes;
+mod streams;
 mod sysmotion;
 mod titlebar;
+mod web_images;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -243,7 +246,9 @@ impl eframe::App for Window {
         }
         let fps = {
             let state = core.runtime.state();
-            core.ui.frame(ui, &state, &mut core.commands);
+            // Screenshot runs may lay states the demo cannot reach over it.
+            let faked = core.shot.as_ref().and_then(|s| s.overlay(&state));
+            core.ui.frame(ui, faked.as_ref().unwrap_or(&*state), &mut core.commands);
             // The runtime asks for the clipboard (a share link); copied once.
             if let Some(c) = state.clipboard.as_ref().filter(|c| c.id != core.copied) {
                 core.copied = c.id;
@@ -304,7 +309,8 @@ fn main() -> eframe::Result {
         paths.db = dir.join("library.sqlite");
         paths.root = dir.join("root");
         paths.prefs = dir.join("prefs.json");
-        paths.settings = None;
+        // The real services keep what is typed in next to the demo library.
+        paths.settings = streams::real_in_demo().then(|| dir.join("settings.toml"));
     }
     for sub in ["Music", "Inbox", "Downloads", "Trash"] {
         let _ = std::fs::create_dir_all(paths.root.join(sub));
@@ -325,16 +331,21 @@ fn main() -> eframe::Result {
     let prefs = load_prefs(&paths);
     let waker = Waker::default();
 
-    // Streaming services. The real ones are wired in a later stage; the demo
-    // gets the deterministic fakes.
-    let streams: Vec<Arc<dyn nikgob_core::streaming::StreamService>> = if demo {
-        vec![
-            Arc::new(nikgob_core::streaming::FakeService::spotify()),
-            Arc::new(nikgob_core::streaming::FakeService::youtube()),
-        ]
+    // Streaming services: each keeps its state in its own folder of the
+    // data dir (the demo's own, in demo mode).
+    let secrets = paths
+        .settings
+        .as_ref()
+        .and_then(|s| nikgob_core::settings::Settings::load(s).ok())
+        .unwrap_or_default()
+        .streaming;
+    let data_dir = paths.db.parent().map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
+    let streams = if demo {
+        streams::demo(&data_dir, &secrets)
     } else {
-        Vec::new()
+        streams::real(&data_dir, &secrets)
     };
+    let relogin = streams::relogin(&streams, &secrets);
 
     // Audio: the real engine unless disabled.
     let (backend, links): (Box<dyn Playback>, _) = if std::env::var_os("NIKGOB_NO_AUDIO").is_some() {
@@ -404,6 +415,9 @@ fn main() -> eframe::Result {
     if let Some(l) = &links {
         l.connect(runtime.playback_sender());
     }
+    if let Some(c) = relogin {
+        runtime.send(c);
+    }
     let core = Core {
         ui: Md3eUi::new(),
         runtime,
@@ -445,6 +459,7 @@ fn main() -> eframe::Result {
                 fastframe_text::detect().apply_to(&mut fonts);
                 ctx.set_fonts(fonts);
                 nikgob_md3e::icons::install(&ctx);
+                web_images::WebImages::install(&ctx);
                 nikgob_md3e::Theme::new(nikgob_md3e::ColorScheme::baseline(true), true).install(&ctx);
                 let mut core = lease.take(&ctx);
                 core.desktop.attach();

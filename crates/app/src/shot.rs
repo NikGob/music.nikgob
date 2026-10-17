@@ -22,6 +22,8 @@ pub struct Shot {
     requested: bool,
     /// Raw input to feed, one entry per frame.
     input: VecDeque<Vec<Event>>,
+    /// States laid over the view for the picture (`fake:…`).
+    fakes: crate::shot_fakes::Fakes,
 }
 
 fn nums(arg: &str) -> Vec<f32> {
@@ -56,7 +58,13 @@ impl Shot {
             wait: 40,
             requested: false,
             input: VecDeque::new(),
+            fakes: Default::default(),
         })
+    }
+
+    /// The view state with the `fake:` steps so far laid over it, if any.
+    pub fn overlay(&self, state: &nikgob_view::ViewState) -> Option<nikgob_view::ViewState> {
+        self.fakes.any().then(|| self.fakes.apply(state))
     }
 
     /// Feeds queued synthetic events into this frame's raw input.
@@ -131,6 +139,7 @@ impl Shot {
                     "playlists" => Route::Library(LibraryTab::Playlists),
                     "trash" => Route::Library(LibraryTab::Trash),
                     "downloads" => Route::Downloads(DownloadsTab::Active),
+                    "wishlist" => Route::Downloads(DownloadsTab::Wishlist),
                     "settings" => Route::Settings,
                     _ => Route::Home,
                 };
@@ -298,6 +307,59 @@ impl Shot {
             "search" => {
                 ui.set_search(arg, out);
                 self.wait = 20;
+            }
+            // `settings:sources` opens Settings on that tab / row.
+            "settings" => {
+                ui.open_settings_at(arg);
+                self.wait = 30;
+            }
+            // `stream:album:spotify:sp-alb-gruppa` opens a page of a service.
+            "stream" => {
+                let mut it = arg.splitn(3, ':');
+                if let (Some(kind), Some(service), Some(id)) = (it.next(), it.next(), it.next())
+                    && let Some(service) = nikgob_view::Service::parse(service)
+                {
+                    let remote = nikgob_view::RemoteId::new(service, id);
+                    let page = match kind {
+                        "artist" => nikgob_view::StreamPage::Artist(remote),
+                        "playlist" => nikgob_view::StreamPage::Playlist(remote),
+                        _ => nikgob_view::StreamPage::Album(remote),
+                    };
+                    ui.navigate(ctx, Route::Stream(page), out);
+                }
+                self.wait = 40;
+            }
+            // `play_stream:spotify:sp-gruppa-2` plays one stream track.
+            "play_stream" => {
+                if let Some((service, id)) = arg.split_once(':')
+                    && let Some(service) = nikgob_view::Service::parse(service)
+                {
+                    out.push(Command::PlayStreamTracks {
+                        tracks: vec![nikgob_view::RemoteId::new(service, id)],
+                        start: 0,
+                        context: "Скриншот".into(),
+                    });
+                }
+                self.wait = 30;
+            }
+            "artist" => {
+                // The library artist named `arg`, or the first one.
+                let a = state.library.artists.iter().find(|a| a.name == arg).or(state.library.artists.first());
+                if let Some(a) = a {
+                    ui.navigate(ctx, Route::Artist(a.id), out);
+                }
+                self.wait = 30;
+            }
+            // `fake:wishlist` etc. (see shot_fakes.rs).
+            "fake" => {
+                if !self.fakes.add(arg) {
+                    log::warn!("unknown fake {arg}");
+                }
+                self.wait = 10;
+            }
+            "unfold" => {
+                ui.unfold_sources();
+                self.wait = 10;
             }
             // `prefs:{"ring_style":"Bars"}`: merges JSON into the prefs.
             "prefs" => {

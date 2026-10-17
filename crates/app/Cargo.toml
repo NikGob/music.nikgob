@@ -18,6 +18,10 @@ nikgob-view.workspace = true
 nikgob-runtime = { path = "../runtime" }
 nikgob-library = { path = "../library" }
 nikgob-audio = { path = "../audio" }
+nikgob-spotify = { path = "../spotify" }
+nikgob-youtube = { path = "../youtube" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 crossbeam-channel = "0.5"
 serde_json = "1"
 egui.workspace = true

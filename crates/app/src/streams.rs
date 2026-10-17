@@ -1,0 +1,169 @@
+//! The streaming services the app runs (docs/stage3.md §1 "app").
+//!
+//! Normal start: the real Spotify and YouTube Music services, each with its
+//! own folder in the app's data dir (`spotify/`, `youtube/`) and its secrets
+//! from settings.toml. Both are always registered; whether one is used is
+//! the runtime's call (`Prefs::spotify_enabled` / `youtube_enabled`), so
+//! switching a service on in the settings works without a restart.
+//!
+//! Demo (`NIKGOB_DEMO=1`): the deterministic fakes. `NIKGOB_DEMO_ACCOUNTS`
+//! sets their account per service for screenshots, e.g.
+//! `spotify=prompt,youtube=out` (`in`, `out`, `free` = logged in without
+//! sound, `prompt` = a login waiting for the browser, `failed`).
+//! `NIKGOB_DEMO_REAL_STREAMS=1` registers the real services instead, with
+//! their folders inside the demo dir, so real results can be looked at
+//! without touching the user's library or accounts.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use nikgob_core::settings::StreamingSettings;
+use nikgob_core::streaming::{
+    Account, AudioStream, BoxFuture, EntityKind, FakeService, LoginInput, LoginPrompt, Played,
+    Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService,
+    StreamTrack,
+};
+
+pub type Services = Vec<Arc<dyn StreamService>>;
+
+/// The real services, their state under `data_dir`.
+pub fn real(data_dir: &Path, secrets: &StreamingSettings) -> Services {
+    let mut out: Services = Vec::new();
+    let mut sp = nikgob_spotify::SpotifyConfig::new(data_dir.join("spotify"));
+    sp.personal_client_id = secrets.spotify_client_id.clone();
+    out.push(nikgob_spotify::Spotify::new(sp));
+    match nikgob_youtube::Youtube::new(nikgob_youtube::YoutubeConfig::new(data_dir.join("youtube"))) {
+        Ok(yt) => out.push(yt),
+        Err(e) => log::error!("YouTube Music did not start: {e}"),
+    }
+    out
+}
+
+/// What the demo runs: the fakes (accounts per `NIKGOB_DEMO_ACCOUNTS`) or,
+/// with `NIKGOB_DEMO_REAL_STREAMS`, the real services in `demo_dir`.
+pub fn demo(demo_dir: &Path, secrets: &StreamingSettings) -> Services {
+    if real_in_demo() {
+        return real(demo_dir, secrets);
+    }
+    let accounts = std::env::var("NIKGOB_DEMO_ACCOUNTS").unwrap_or_default();
+    let mode = |name: &str| {
+        accounts
+            .split(',')
+            .filter_map(|kv| kv.split_once('='))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.trim().to_ascii_lowercase())
+            .unwrap_or_else(|| "in".to_owned())
+    };
+    [Service::Spotify, Service::Youtube]
+        .into_iter()
+        .map(|s| fake(s, &mode(s.as_str())))
+        .collect()
+}
+
+pub fn real_in_demo() -> bool {
+    std::env::var_os("NIKGOB_DEMO_REAL_STREAMS").is_some()
+}
+
+fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
+    let base = FakeService::new(service);
+    match mode {
+        "out" => Arc::new(base.logged_out()),
+        "free" => Arc::new(base.without_audio()),
+        "prompt" | "failed" => Arc::new(Shown {
+            inner: base.logged_out(),
+            account: if mode == "prompt" {
+                Account::LoggingIn(Some(LoginPrompt::OpenUrl(format!(
+                    "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&code_challenge_method=S256",
+                    nikgob_spotify::SHARED_CLIENT_ID,
+                    nikgob_spotify::WEB_REDIRECT_URI,
+                ))))
+            } else {
+                Account::Failed("Порт 8989 занят другой программой".into())
+            },
+        }),
+        _ => Arc::new(base),
+    }
+}
+
+/// A fake whose account always reads `account` (a login frozen in the
+/// middle, a failure), for screenshots of those states.
+struct Shown {
+    inner: FakeService,
+    account: Account,
+}
+
+impl StreamService for Shown {
+    fn service(&self) -> Service {
+        self.inner.service()
+    }
+    fn account(&self) -> Account {
+        self.account.clone()
+    }
+    fn login(&self, input: LoginInput) -> BoxFuture<'_, Result<(), StreamError>> {
+        self.inner.login(input)
+    }
+    fn logout(&self) {
+        self.inner.logout();
+    }
+    fn search(&self, query: &str) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        self.inner.search(query)
+    }
+    fn track(&self, id: &str) -> BoxFuture<'_, Result<StreamTrack, StreamError>> {
+        self.inner.track(id)
+    }
+    fn album(&self, id: &str) -> BoxFuture<'_, Result<StreamAlbum, StreamError>> {
+        self.inner.album(id)
+    }
+    fn artist(&self, id: &str) -> BoxFuture<'_, Result<StreamArtist, StreamError>> {
+        self.inner.artist(id)
+    }
+    fn playlist(&self, id: &str) -> BoxFuture<'_, Result<StreamPlaylist, StreamError>> {
+        self.inner.playlist(id)
+    }
+    fn find_isrc(&self, isrc: &str) -> BoxFuture<'_, Result<Option<StreamTrack>, StreamError>> {
+        self.inner.find_isrc(isrc)
+    }
+    fn liked(&self) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        self.inner.liked()
+    }
+    fn set_liked(&self, id: &str, liked: bool) -> BoxFuture<'_, Result<(), StreamError>> {
+        self.inner.set_liked(id, liked)
+    }
+    fn my_playlists(&self) -> BoxFuture<'_, Result<Vec<StreamPlaylist>, StreamError>> {
+        self.inner.my_playlists()
+    }
+    fn create_playlist(&self, name: &str) -> BoxFuture<'_, Result<String, StreamError>> {
+        self.inner.create_playlist(name)
+    }
+    fn playlist_edit(
+        &self,
+        id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> BoxFuture<'_, Result<Option<String>, StreamError>> {
+        self.inner.playlist_edit(id, add, remove)
+    }
+    fn recent(&self) -> BoxFuture<'_, Result<Vec<Played>, StreamError>> {
+        self.inner.recent()
+    }
+    fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError> {
+        self.inner.open_audio(id)
+    }
+    fn save_audio(&self, id: &str, dir: &Path) -> BoxFuture<'_, Result<PathBuf, StreamError>> {
+        self.inner.save_audio(id, dir)
+    }
+    fn web_url(&self, kind: EntityKind, id: &str) -> String {
+        self.inner.web_url(kind, id)
+    }
+}
+
+/// YouTube Music keeps its session in its own cache; when that is gone but
+/// settings.toml still has the cookies, log in with them again.
+pub fn relogin(services: &Services, secrets: &StreamingSettings) -> Option<nikgob_view::Command> {
+    let cookies = secrets.youtube_cookies.clone()?;
+    let yt = services.iter().find(|s| s.service() == Service::Youtube)?;
+    matches!(yt.account(), Account::LoggedOut).then(|| nikgob_view::Command::StreamLogin {
+        service: Service::Youtube,
+        input: LoginInput::Cookies(cookies),
+    })
+}
