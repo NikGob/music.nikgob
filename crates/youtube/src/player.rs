@@ -334,6 +334,12 @@ pub(crate) async fn resolve(
             Err(PlayerError::Other(e)) => break e,
         }
     };
+    // A rate limit or bot check is the service's, not the client's: a
+    // second player would only make it worse.
+    if matches!(first_err, StreamError::RateLimited { .. }) {
+        log::info!("youtube: {id}: visionOS player rate limited, no second player");
+        return Err(first_err);
+    }
     log::info!("youtube: {id}: visionOS player failed ({first_err}), trying RustyPipe's");
     let player = rustypipe_player(rp, id).await.map_err(|e| {
         log::info!("youtube: {id}: RustyPipe player: {e}");

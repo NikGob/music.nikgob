@@ -24,6 +24,7 @@
 mod cache;
 mod convert;
 mod innertube;
+mod limit;
 mod player;
 mod range;
 mod remux;
@@ -38,10 +39,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use nikgob_core::streaming::{
-    Account, AudioStream, BoxFuture, EntityKind, LoginInput, Played, SearchParts, Service, StreamAlbum,
-    StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService, StreamTrack, format,
-    join_names,
+    Account, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput, Played, SearchKind,
+    SearchParts, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch,
+    StreamService, StreamTrack, format, join_names,
 };
+use limit::Lane;
 use rustypipe::client::{ClientType, RustyPipe};
 use rustypipe::error::{AuthError, Error as RpError, ExtractionError, UnavailabilityReason};
 use rustypipe::model::TrackType;
@@ -64,6 +66,12 @@ const REFUSED_TTL: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_NAME: &str = "YouTube Music";
 /// Our own non-secret account notes next to RustyPipe's cache.
 const ACCOUNT_FILE: &str = "youtube_account.json";
+/// A resolved stream URL is used again until this long before it expires.
+const URL_MARGIN: Duration = Duration::from_secs(30 * 60);
+/// How long a stream URL lives when it does not say (YouTube's are ~6 h).
+const URL_LIFE: Duration = Duration::from_secs(5 * 3600);
+/// Resolved URLs kept.
+const URLS_MAX: usize = 200;
 
 /// Where and how the service runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +119,10 @@ struct Inner {
     cache: cache::AudioCache,
     /// Videos the player refused lately, by video id, and why.
     refused: Mutex<std::collections::HashMap<String, (std::time::Instant, StreamError)>>,
+    /// Turns and the service-wide pause (see `limit`).
+    gate: limit::Gate,
+    /// Stream URLs resolved lately, by video id, with when they expire.
+    urls: Mutex<std::collections::HashMap<String, (std::time::SystemTime, range::Resolved)>>,
 }
 
 impl Inner {
@@ -147,6 +159,45 @@ impl Inner {
     fn notes_path(&self) -> PathBuf {
         self.data_dir.join(ACCOUNT_FILE)
     }
+
+    /// A stream URL resolved lately that is still good.
+    fn known_url(&self, id: &str) -> Option<range::Resolved> {
+        let urls = self.urls.lock().unwrap_or_else(PoisonError::into_inner);
+        let (expires, r) = urls.get(id)?;
+        (std::time::SystemTime::now() + URL_MARGIN < *expires).then(|| r.clone())
+    }
+
+    fn keep_url(&self, id: &str, r: &range::Resolved) {
+        let expires = url_expiry(&r.url)
+            .unwrap_or_else(|| std::time::SystemTime::now() + URL_LIFE);
+        let mut urls = self.urls.lock().unwrap_or_else(PoisonError::into_inner);
+        if urls.len() >= URLS_MAX {
+            let now = std::time::SystemTime::now();
+            urls.retain(|_, (e, _)| *e > now + URL_MARGIN);
+            if urls.len() >= URLS_MAX {
+                urls.clear();
+            }
+        }
+        urls.insert(id.to_owned(), (expires, r.clone()));
+    }
+
+    fn drop_url(&self, id: &str) {
+        self.urls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+    }
+}
+
+/// The `expire=` (unix seconds) of a signed stream URL.
+fn url_expiry(url: &str) -> Option<std::time::SystemTime> {
+    let query = url.split_once('?')?.1;
+    let secs: u64 = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("expire="))?
+        .parse()
+        .ok()?;
+    Some(std::time::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
 /// The runtime every future of the service runs on.
@@ -238,6 +289,8 @@ impl Youtube {
                     .unwrap_or_else(|| "US".into()),
                 cache: cache::AudioCache::new(),
                 refused: Mutex::new(std::collections::HashMap::new()),
+                gate: limit::Gate::new(),
+                urls: Mutex::new(std::collections::HashMap::new()),
             }),
             runtime: Runtime(Some(runtime)),
         }))
@@ -379,9 +432,21 @@ pub(crate) fn map_err(e: RpError) -> StreamError {
 /// `keep`.
 fn stream(inner: &Arc<Inner>, runtime: tokio::runtime::Handle, id: &str, keep: bool) -> HttpStream {
     let (inner2, id2) = (Arc::clone(inner), id.to_owned());
+    // The first resolve may reuse a URL resolved lately; a second one (the
+    // URL was refused) asks the player again.
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let resolve: ResolveFn = Arc::new(move || {
         let (inner, id) = (Arc::clone(&inner2), id2.clone());
+        let first = first.swap(false, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
+            if first {
+                if let Some(r) = inner.known_url(&id) {
+                    log::debug!("youtube: {id}: stream URL reused");
+                    return Ok(r);
+                }
+            } else {
+                inner.drop_url(&id);
+            }
             let known = inner
                 .refused
                 .lock()
@@ -393,7 +458,12 @@ fn stream(inner: &Arc<Inner>, runtime: tokio::runtime::Handle, id: &str, keep: b
                 log::info!("youtube: {id}: refused lately ({e}), not asked again");
                 return Err(e);
             }
+            inner.gate.check()?;
             let r = player::resolve(&inner.rp, &inner.http, &id, &inner.hl, &inner.gl).await;
+            inner.gate.note(&r);
+            if let Ok(resolved) = &r {
+                inner.keep_url(&id, resolved);
+            }
             if let Err(e @ (StreamError::AgeRestricted | StreamError::RegionBlocked | StreamError::Unavailable)) = &r {
                 log::info!("youtube: {id}: player refused: {e}");
                 inner
@@ -509,6 +579,7 @@ impl StreamService for Youtube {
             if q.is_empty() {
                 return Ok(StreamSearch::default());
             }
+            inner.gate.check()?;
             let me = inner.me();
             let rq = inner.rp.query();
             let started = std::time::Instant::now();
@@ -535,6 +606,9 @@ impl StreamService for Youtube {
             let albums = part_of(albums, &mut first_err);
             let artists = part_of(artists, &mut first_err);
             let playlists = part_of(playlists, &mut first_err);
+            if let Some(e) = &first_err {
+                inner.gate.note(&Err::<(), _>(e.clone()));
+            }
             if songs.is_none() && videos.is_none() && albums.is_none() && artists.is_none() {
                 return Err(first_err.unwrap_or(StreamError::Unavailable));
             }
@@ -568,50 +642,116 @@ impl StreamService for Youtube {
         })
     }
 
+    /// One category: one request, in the spaced catalogue lane.
+    fn search_kind(
+        &self,
+        query: &str,
+        kind: SearchKind,
+    ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        let q = query.trim().to_owned();
+        self.run(move |inner| async move {
+            if q.is_empty() {
+                return Ok(StreamSearch::default());
+            }
+            let i = &inner;
+            i.gate
+                .run(Lane::Catalog, async {
+                    let rq = i.rp.query();
+                    let mut out = StreamSearch::default();
+                    match kind {
+                        SearchKind::Songs => {
+                            let r = rq.music_search_tracks(&q).await.map_err(map_err)?;
+                            out.tracks = r.items.items.iter().map(convert::track).collect();
+                        }
+                        SearchKind::Videos => {
+                            let r = rq.music_search_videos(&q).await.map_err(map_err)?;
+                            out.tracks = r.items.items.iter().map(convert::track).collect();
+                        }
+                        SearchKind::Albums => {
+                            let r = rq.music_search_albums(&q).await.map_err(map_err)?;
+                            out.albums = r.items.items.iter().map(convert::album_item).collect();
+                        }
+                        SearchKind::Artists => {
+                            let r = rq.music_search_artists(&q).await.map_err(map_err)?;
+                            out.artists = r.items.items.iter().map(convert::artist_item).collect();
+                        }
+                    }
+                    Ok(out)
+                })
+                .await
+        })
+    }
+
     fn track(&self, id: &str) -> BoxFuture<'_, Result<StreamTrack, StreamError>> {
         let id = id.to_owned();
         self.run(move |inner| async move {
-            let d = inner.rp.query().music_details(&id).await.map_err(map_err)?;
-            Ok(convert::track(&d.track))
+            let i = &inner;
+            i.gate
+                .run(Lane::Catalog, async {
+                    let d = i.rp.query().music_details(&id).await.map_err(map_err)?;
+                    Ok(convert::track(&d.track))
+                })
+                .await
         })
     }
 
     fn album(&self, id: &str) -> BoxFuture<'_, Result<StreamAlbum, StreamError>> {
         let id = id.to_owned();
         self.run(move |inner| async move {
-            let a = inner.rp.query().music_album(&id).await.map_err(map_err)?;
-            Ok(convert::album(&a))
+            let i = &inner;
+            i.gate
+                .run(Lane::Catalog, async {
+                    let a = i.rp.query().music_album(&id).await.map_err(map_err)?;
+                    Ok(convert::album(&a))
+                })
+                .await
         })
     }
 
     fn artist(&self, id: &str) -> BoxFuture<'_, Result<StreamArtist, StreamError>> {
         let id = id.to_owned();
         self.run(move |inner| async move {
-            let a = inner
-                .rp
-                .query()
-                .music_artist(&id, true)
+            let i = &inner;
+            i.gate
+                .run(Lane::Catalog, async {
+                    let a = i.rp.query().music_artist(&id, true).await.map_err(map_err)?;
+                    Ok(convert::artist(&a))
+                })
                 .await
-                .map_err(map_err)?;
-            Ok(convert::artist(&a))
         })
     }
 
     fn playlist(&self, id: &str) -> BoxFuture<'_, Result<StreamPlaylist, StreamError>> {
         let id = id.to_owned();
         self.run(move |inner| async move {
-            let logged_in = inner.account().is_logged_in();
-            let mut q = inner.rp.query();
-            if logged_in {
-                q = q.authenticated();
-            }
-            let mut p = q.music_playlist(&id).await.map_err(|e| inner.user_err(e))?;
-            p.tracks
-                .extend_limit(&q, PLAYLIST_LIMIT)
+            let i = &inner;
+            let logged_in = i.account().is_logged_in();
+            let lane = if logged_in { Lane::SignedIn } else { Lane::Catalog };
+            i.gate
+                .run(lane, async {
+                    let mut q = i.rp.query();
+                    if logged_in {
+                        q = q.authenticated();
+                    }
+                    let mut p = q.music_playlist(&id).await.map_err(|e| i.user_err(e))?;
+                    p.tracks
+                        .extend_limit(&q, PLAYLIST_LIMIT)
+                        .await
+                        .map_err(map_err)?;
+                    Ok(convert::playlist(&p, i.me().as_deref()))
+                })
                 .await
-                .map_err(map_err)?;
-            Ok(convert::playlist(&p, inner.me().as_deref()))
         })
+    }
+
+    /// YouTube has no playlist versions (the runtime goes by the track
+    /// count of the listing instead): no request.
+    fn playlist_version(&self, _id: &str) -> BoxFuture<'_, Result<Option<String>, StreamError>> {
+        Box::pin(std::future::ready(Ok(None)))
+    }
+
+    fn paused_until(&self) -> Option<std::time::SystemTime> {
+        self.inner.gate.paused_until()
     }
 
     /// YouTube Music finds a quoted ISRC in its song search.
@@ -621,12 +761,16 @@ impl StreamService for Youtube {
             if !valid_isrc(&isrc) {
                 return Ok(None);
             }
-            let r = inner
-                .rp
-                .query()
-                .music_search_tracks(format!("\"{isrc}\""))
-                .await
-                .map_err(map_err)?;
+            let i = &inner;
+            let r = i
+                .gate
+                .run(Lane::Catalog, async {
+                    i.rp.query()
+                        .music_search_tracks(format!("\"{isrc}\""))
+                        .await
+                        .map_err(map_err)
+                })
+                .await?;
             Ok(r.items
                 .items
                 .iter()
@@ -642,16 +786,40 @@ impl StreamService for Youtube {
     fn liked(&self) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
         self.run(move |inner| async move {
             inner.need_login()?;
-            let q = inner.rp.query().authenticated();
-            let mut p = q
-                .music_liked_tracks()
+            let i = &inner;
+            i.gate
+                .run(Lane::SignedIn, async {
+                    let q = i.rp.query().authenticated();
+                    let mut p = q.music_liked_tracks().await.map_err(|e| i.user_err(e))?;
+                    p.tracks
+                        .extend_limit(&q, PLAYLIST_LIMIT)
+                        .await
+                        .map_err(|e| i.user_err(e))?;
+                    Ok(p.tracks.items.iter().map(convert::track).collect())
+                })
                 .await
-                .map_err(|e| inner.user_err(e))?;
-            p.tracks
-                .extend_limit(&q, PLAYLIST_LIMIT)
+        })
+    }
+
+    /// The first page of «Понравившиеся» and its track count: one request.
+    fn liked_head(&self) -> BoxFuture<'_, Result<LikedHead, StreamError>> {
+        self.run(move |inner| async move {
+            inner.need_login()?;
+            let i = &inner;
+            i.gate
+                .run(Lane::SignedIn, async {
+                    let q = i.rp.query().authenticated();
+                    let p = q.music_liked_tracks().await.map_err(|e| i.user_err(e))?;
+                    Ok(LikedHead {
+                        tracks: p.tracks.items.iter().map(convert::track).collect(),
+                        total: p
+                            .track_count
+                            .or(p.tracks.count)
+                            .and_then(|n| u32::try_from(n).ok()),
+                        complete: p.tracks.is_exhausted(),
+                    })
+                })
                 .await
-                .map_err(|e| inner.user_err(e))?;
-            Ok(p.tracks.items.iter().map(convert::track).collect())
         })
     }
 
@@ -659,21 +827,26 @@ impl StreamService for Youtube {
         let id = id.to_owned();
         self.run(move |inner| async move {
             inner.need_login()?;
-            innertube::set_liked(&inner.rp, &id, liked).await
+            let i = &inner;
+            i.gate
+                .run(Lane::SignedIn, innertube::set_liked(&i.rp, &id, liked))
+                .await
         })
     }
 
     fn my_playlists(&self) -> BoxFuture<'_, Result<Vec<StreamPlaylist>, StreamError>> {
         self.run(move |inner| async move {
             inner.need_login()?;
-            let q = inner.rp.query().authenticated();
-            let mut p = q
-                .music_saved_playlists()
-                .await
-                .map_err(|e| inner.user_err(e))?;
-            p.extend_limit(&q, 1000)
-                .await
-                .map_err(|e| inner.user_err(e))?;
+            let i = &inner;
+            let p = i
+                .gate
+                .run(Lane::SignedIn, async {
+                    let q = i.rp.query().authenticated();
+                    let mut p = q.music_saved_playlists().await.map_err(|e| i.user_err(e))?;
+                    p.extend_limit(&q, 1000).await.map_err(|e| i.user_err(e))?;
+                    Ok(p)
+                })
+                .await?;
             let me = inner.me();
             Ok(p.items
                 .iter()
@@ -688,7 +861,10 @@ impl StreamService for Youtube {
         let name = name.to_owned();
         self.run(move |inner| async move {
             inner.need_login()?;
-            innertube::create_playlist(&inner.rp, &name).await
+            let i = &inner;
+            i.gate
+                .run(Lane::SignedIn, innertube::create_playlist(&i.rp, &name))
+                .await
         })
     }
 
@@ -702,7 +878,10 @@ impl StreamService for Youtube {
         let (id, add, remove) = (id.to_owned(), add.to_vec(), remove.to_vec());
         self.run(move |inner| async move {
             inner.need_login()?;
-            innertube::edit_playlist(&inner.rp, &id, &add, &remove).await?;
+            let i = &inner;
+            i.gate
+                .run(Lane::SignedIn, innertube::edit_playlist(&i.rp, &id, &add, &remove))
+                .await?;
             Ok(None)
         })
     }
@@ -710,12 +889,13 @@ impl StreamService for Youtube {
     fn recent(&self) -> BoxFuture<'_, Result<Vec<Played>, StreamError>> {
         self.run(move |inner| async move {
             inner.need_login()?;
-            let h = inner
-                .rp
-                .query()
-                .music_history()
-                .await
-                .map_err(|e| inner.user_err(e))?;
+            let i = &inner;
+            let h = i
+                .gate
+                .run(Lane::SignedIn, async {
+                    i.rp.query().music_history().await.map_err(|e| i.user_err(e))
+                })
+                .await?;
             let mut out = Vec::new();
             let (mut day, mut index) = (None, 0);
             let mut last_at = None;
@@ -855,6 +1035,14 @@ mod tests {
         assert!(a > b);
         assert_eq!(a % 1000, 0);
         assert_eq!(played_at(None, 0), None);
+    }
+
+    #[test]
+    fn stream_urls_say_when_they_expire() {
+        let at = url_expiry("https://rr1.googlevideo.com/videoplayback?expire=1792195200&ei=x&itag=251")
+            .unwrap();
+        assert_eq!(at, std::time::UNIX_EPOCH + Duration::from_secs(1_792_195_200));
+        assert_eq!(url_expiry("https://x/y?itag=251"), None);
     }
 
     #[test]
