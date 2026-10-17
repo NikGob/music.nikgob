@@ -1,0 +1,9 @@
+{
+  "tracks": [
+    {"artist": "Björk", "album": "Homogenic", "track": "Jóga", "uri": "spotify:track:sp-homogenic-2"},
+    {"artist": "宇多田ヒカル", "album": "道", "track": "道", "uri": "spotify:track:sp-michi-1"},
+    {"artist": "Somebody", "album": "Home Recordings", "track": "Not On Spotify", "uri": "spotify:local:Somebody:Home+Recordings:Not+On+Spotify:180"}
+  ],
+  "albums": [{"artist": "Daft Punk", "album": "Discovery", "uri": "spotify:album:sp-alb-discovery"}],
+  "shows": [], "episodes": [], "bannedTracks": [], "artists": [], "other": []
+}

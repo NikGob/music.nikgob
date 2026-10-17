@@ -1,0 +1,15 @@
+{
+  "playlists": [
+    {
+      "name": "Дорога",
+      "lastModifiedDate": "2020-02-01",
+      "items": [
+        {"track": {"trackName": "Закрой за мной дверь, я ухожу", "artistName": "Кино", "albumName": "Группа крови", "trackUri": "spotify:track:sp-gruppa-2"}, "episode": null, "localTrack": null, "addedDate": "2020-02-01"},
+        {"track": {"trackName": "First Love", "artistName": "宇多田ヒカル", "albumName": "First Love", "trackUri": "spotify:track:sp-firstlove-3"}, "episode": null, "localTrack": null, "addedDate": "2020-02-01"},
+        {"track": null, "episode": {"episodeName": "E", "showName": "S", "episodeUri": "spotify:episode:xyz"}, "localTrack": null, "addedDate": "2020-02-02"}
+      ],
+      "description": null,
+      "numberOfFollowers": 0
+    }
+  ]
+}

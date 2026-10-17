@@ -1,0 +1,20 @@
+[
+  {"ts": "2020-03-01T10:04:45Z", "platform": "windows", "ms_played": 285000, "conn_country": "RU",
+   "master_metadata_track_name": "Группа крови", "master_metadata_album_artist_name": "Кино",
+   "master_metadata_album_album_name": "Группа крови", "spotify_track_uri": "spotify:track:sp-gruppa-1",
+   "episode_name": null, "spotify_episode_uri": null, "reason_start": "clickrow", "reason_end": "trackdone",
+   "shuffle": false, "skipped": null, "offline": false, "incognito_mode": false},
+  {"ts": "2020-03-01T10:05:00Z", "platform": "windows", "ms_played": 10000, "conn_country": "RU",
+   "master_metadata_track_name": "Aerodynamic", "master_metadata_album_artist_name": "Daft Punk",
+   "master_metadata_album_album_name": "Discovery", "spotify_track_uri": "spotify:track:sp-discovery-2",
+   "reason_start": "trackdone", "reason_end": "fwdbtn", "shuffle": false, "skipped": true},
+  {"ts": "2020-03-01T11:00:00Z", "platform": "android", "ms_played": 1800000,
+   "master_metadata_track_name": null, "master_metadata_album_artist_name": null,
+   "master_metadata_album_album_name": null, "spotify_track_uri": null,
+   "episode_name": "Some Podcast Episode", "episode_show_name": "Some Show",
+   "spotify_episode_uri": "spotify:episode:xyz", "reason_start": "clickrow", "reason_end": "endplay"},
+  {"ts": "2020-03-02T09:00:00Z", "platform": "windows", "ms_played": 200000,
+   "master_metadata_track_name": "Local Song", "master_metadata_album_artist_name": "Local Artist",
+   "master_metadata_album_album_name": "Local Album", "spotify_track_uri": "spotify:local:Local+Artist:Local+Album:Local+Song:200",
+   "reason_start": "clickrow", "reason_end": "trackdone", "skipped": false}
+]
