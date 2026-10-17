@@ -220,35 +220,9 @@ fn loading_mark(ui: &mut Ui, loading: bool) {
 }
 
 /// A quiet line saying why a section is empty, with an optional text
-/// button beside it (under it when the line is long for the width). True
-/// when the button was clicked.
+/// button. True when the button was clicked.
 fn quiet(ui: &mut Ui, text: &str, button: Option<(&str, Icon, &str)>) -> bool {
-    let s = Theme::get(ui.ctx()).scheme;
-    let mut clicked = false;
-    let text_w = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), TypeRole::BodyMedium.font_id(), s.on_surface_variant)
-        .size()
-        .x;
-    // A text button: its label, an icon and the padding.
-    let button_w = button.map_or(0.0, |(label, ..)| {
-        ui.painter().layout_no_wrap(label.to_owned(), TypeRole::LabelLarge.font_id(), s.primary).size().x + 64.0
-    });
-    let mut add_button = |ui: &mut Ui| {
-        if let Some((label, icon, salt)) = button {
-            clicked = ui.add(Button::new(label).style(Style::Text).icon(icon).id_salt(salt)).clicked();
-        }
-    };
-    if text_w + button_w + 8.0 <= ui.available_width() {
-        ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), Layout::left_to_right(Align::Center), |ui| {
-            ui.label(TypeRole::BodyMedium.style().rich(text, s.on_surface_variant));
-            add_button(ui);
-        });
-    } else {
-        ui.label(TypeRole::BodyMedium.style().rich_para(text, s.on_surface_variant));
-        add_button(ui);
-    }
-    clicked
+    widgets::quiet_line(ui, text, button.map(|(label, icon, salt)| (label, Some(icon), Style::Text, salt)))
 }
 
 /// The library part. Returns a route, and whether «Все» was clicked.

@@ -18,6 +18,7 @@
 //! - `fake:torrents` — Prowlarr looks set up (the demo has none).
 //! - `fake:no-sound` — Spotify signed in with Premium, the sound consent
 //!   not given yet.
+//! - `fake:empty-home` — Главная of an empty library (the first launch).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -37,6 +38,7 @@ pub struct Fakes {
     paused: Option<Service>,
     torrents: bool,
     no_sound: bool,
+    empty_home: bool,
 }
 
 impl Fakes {
@@ -55,6 +57,7 @@ impl Fakes {
             "paused:spotify" => self.paused = Some(Service::Spotify),
             "torrents" => self.torrents = true,
             "no-sound" => self.no_sound = true,
+            "empty-home" => self.empty_home = true,
             _ => return false,
         }
         true
@@ -71,6 +74,7 @@ impl Fakes {
             || self.paused.is_some()
             || self.torrents
             || self.no_sound
+            || self.empty_home
     }
 
     /// `state` with the fakes laid over it.
@@ -108,6 +112,9 @@ impl Fakes {
         }
         if self.torrents {
             s.prefs.prowlarr_configured = true;
+        }
+        if self.empty_home {
+            s.home = nikgob_view::HomeView { greeting_hour: s.home.greeting_hour, ..Default::default() };
         }
         if self.no_sound
             && let Some(a) = s.accounts.iter_mut().find(|a| a.service == Service::Spotify)

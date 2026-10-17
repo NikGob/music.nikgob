@@ -12,7 +12,7 @@ use super::{PageState, widgets};
 use crate::{
     Icon, Theme, TypeRole,
     components::{
-        AssistChip, Button, ButtonRow, Dialog, DialogAction, FilterChip, FlexibleAppBar, IconButton, ListItem,
+        Button, ButtonRow, Dialog, DialogAction, FilterChip, FlexibleAppBar, IconButton, ListItem,
         LoadingIndicator, Member, Menu, MenuItem, Size, SplitButton, Style, TextField, app_bar,
     },
     screens::common,
@@ -147,9 +147,9 @@ pub fn release(
                 nav = Some(Route::Artist(a));
             }
             artist.on_hover_cursor(egui::CursorIcon::PointingHand);
+            // The formats, quietly: nothing to press.
             if let Some(q) = &r.quality {
-                ui.add_space(8.0);
-                ui.add(AssistChip::new(q).icon(Icon::GraphicEq).id_salt("rel-q"));
+                ui.label(TypeRole::BodyMedium.style().rich(q, s.on_surface_variant));
             }
         });
         ui.add_space(16.0);
@@ -181,8 +181,8 @@ pub fn release(
                     .size(Size::M)
                     .style(Style::Tonal)
                     .item(MenuItem::new("Все недостающие").icon(Icon::Download))
-                    .item(MenuItem::new("Выбрать раздачу вручную…").icon(Icon::Search))
-                    .item(MenuItem::new("Заменить всё на лучшее качество…").icon(Icon::Search))
+                    .item(MenuItem::new("Выбрать раздачу…").icon(Icon::Search))
+                    .item(MenuItem::new("Заменить на FLAC…").icon(Icon::Search))
                     .into(),
             );
         }

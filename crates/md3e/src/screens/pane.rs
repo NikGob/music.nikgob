@@ -276,14 +276,6 @@ pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let i = &state.info;
     egui::ScrollArea::vertical().id_salt("info").show(ui, |ui| {
-        if let Some(q) = &i.quality {
-            // A label in an outline, not a button: there is nothing to press.
-            let g = ui.painter().layout_no_wrap(q.clone(), TypeRole::LabelLarge.font_id(), s.on_surface_variant);
-            let (r, _) = ui.allocate_exact_size(egui::vec2(g.size().x + 24.0, 32.0), egui::Sense::hover());
-            ui.painter().rect_stroke(r, 8, egui::Stroke::new(1.0, s.outline_variant), egui::StrokeKind::Inside);
-            ui.painter().galley(r.center() - g.size() * 0.5, g, s.on_surface_variant);
-            ui.add_space(8.0);
-        }
         let row = |ui: &mut Ui, k: &str, v: &str| {
             ui.label(TypeRole::LabelMedium.style().rich(k, s.on_surface_variant));
             ui.label(TypeRole::BodyMedium.style().rich(v, s.on_surface));
@@ -291,6 +283,10 @@ pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
         };
         if let Some(src) = &i.source {
             row(ui, "Источник", src);
+        }
+        // A line like the others: there is nothing to press.
+        if let Some(q) = &i.quality {
+            row(ui, "Качество", q);
         }
         if let Some(p) = &i.path {
             ui.label(TypeRole::LabelMedium.style().rich("Файл", s.on_surface_variant));

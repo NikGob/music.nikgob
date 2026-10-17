@@ -142,18 +142,13 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     // only shows the way to connect one (and stays away once connected).
     if show_new && !connected(state) {
         widgets::section_header(ui, "Новое для тебя", false);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(TypeRole::BodyMedium.style().rich_para(
-                "Подключи Spotify или YouTube Music — подтяну лайки и плейлисты, а здесь появятся подборки.",
-                s.on_surface_variant,
-            ));
-            if ui
-                .add(crate::components::Button::new("Подключить").style(Style::Tonal).id_salt("home-new-connect"))
-                .clicked()
-            {
-                pages.open_setting(super::SettingId::SpotifyEnabled);
-            }
-        });
+        if widgets::quiet_line(
+            ui,
+            "Подключи Spotify или YouTube Music — подтяну лайки и плейлисты, а здесь появятся подборки.",
+            Some(("Подключить", None, Style::Tonal, "home-new-connect")),
+        ) {
+            pages.open_setting(super::SettingId::SpotifyEnabled);
+        }
     }
     nav
 }

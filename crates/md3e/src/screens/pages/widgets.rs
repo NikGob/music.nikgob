@@ -27,6 +27,43 @@ pub const CARD_W: f32 = 160.0;
 pub const CARD_GAP: f32 = 12.0;
 pub const SECTION_GAP: f32 = 32.0;
 
+/// A quiet line of text with one button after it, centred on the line;
+/// under it when the line is long for the width. `button`: its label, icon,
+/// style and id. True when the button was clicked.
+pub fn quiet_line(ui: &mut Ui, text: &str, button: Option<(&str, Option<Icon>, Style, &str)>) -> bool {
+    let s = Theme::get(ui.ctx()).scheme;
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), TypeRole::BodyMedium.font_id(), s.on_surface_variant)
+        .size()
+        .x;
+    // The button: its label, an icon and the padding.
+    let button_w = button.map_or(0.0, |(label, icon, ..)| {
+        let label_w = ui.painter().layout_no_wrap(label.to_owned(), TypeRole::LabelLarge.font_id(), s.primary).size().x;
+        label_w + if icon.is_some() { 64.0 } else { 48.0 }
+    });
+    let mut clicked = false;
+    let mut add_button = |ui: &mut Ui| {
+        if let Some((label, icon, style, salt)) = button {
+            let mut b = crate::components::Button::new(label).style(style).id_salt(salt);
+            if let Some(i) = icon {
+                b = b.icon(i);
+            }
+            clicked = ui.add(b).clicked();
+        }
+    };
+    if text_w + button_w + 8.0 <= ui.available_width() {
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.label(TypeRole::BodyMedium.style().rich(text, s.on_surface_variant));
+            add_button(ui);
+        });
+    } else {
+        ui.label(TypeRole::BodyMedium.style().rich_para(text, s.on_surface_variant));
+        add_button(ui);
+    }
+    clicked
+}
+
 /// «Перемешать» of a page's action row: a button, or in a narrow page an
 /// icon button, so the row keeps to one line.
 pub fn shuffle_member(ui: &Ui) -> crate::components::Member {
