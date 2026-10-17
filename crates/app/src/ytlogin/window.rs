@@ -159,7 +159,10 @@ impl App {
         let mut cookies = Vec::new();
         for u in COOKIE_URLS {
             match webview.cookies_for_url(u) {
-                Ok(list) => cookies.extend(list.iter().map(convert)),
+                Ok(list) => {
+                    let read_for = super::host(u);
+                    cookies.extend(list.iter().map(|c| convert(c, &read_for)));
+                }
                 Err(e) => log::warn!("cookies of {u}: {e}"),
             }
         }
@@ -178,9 +181,9 @@ impl App {
     }
 }
 
-fn convert(c: &wry::cookie::Cookie<'_>) -> Cookie {
+fn convert(c: &wry::cookie::Cookie<'_>, read_for_host: &str) -> Cookie {
     Cookie {
-        domain: c.domain().unwrap_or_default().to_owned(),
+        domain: super::cookie_domain(c.domain().unwrap_or_default(), read_for_host),
         path: c.path().unwrap_or("/").to_owned(),
         name: c.name().to_owned(),
         value: c.value().to_owned(),

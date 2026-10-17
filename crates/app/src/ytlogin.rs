@@ -167,6 +167,19 @@ pub fn netscape(cookies: &[Cookie]) -> String {
     out
 }
 
+/// A cookie's domain as the cookies file needs it. The `cookie` crate (what
+/// wry hands out) strips the leading dot of a domain cookie, so
+/// `.youtube.com` comes back as `youtube.com`; a cookie read for a page
+/// whose host is not its domain can only be a domain cookie and gets its
+/// dot back, a host-only one keeps its host.
+pub fn cookie_domain(raw: &str, read_for_host: &str) -> String {
+    if raw.is_empty() || raw.starts_with('.') || raw.eq_ignore_ascii_case(read_for_host) {
+        raw.to_owned()
+    } else {
+        format!(".{raw}")
+    }
+}
+
 /// The host of an http(s) url, lowercased.
 pub fn host(url: &str) -> String {
     let Some((_, rest)) = url.split_once("://") else { return String::new() };
@@ -188,7 +201,11 @@ pub fn signed_in(url: &str, cookies: &[Cookie]) -> bool {
     let has = |name: &str| {
         cookies
             .iter()
-            .any(|c| c.name == name && c.domain.eq_ignore_ascii_case(COOKIE_DOMAIN) && !c.value.is_empty())
+            .any(|c| {
+                c.name == name
+                    && c.domain.trim_start_matches('.').eq_ignore_ascii_case(COOKIE_DOMAIN.trim_start_matches('.'))
+                    && !c.value.is_empty()
+            })
     };
     host(url) == "music.youtube.com" && has("SAPISID") && has("LOGIN_INFO")
 }
@@ -388,6 +405,27 @@ mod tests {
                 "music.youtube.com\tFALSE\t/\tFALSE\t0\tS\t1",
             ]
         );
+    }
+
+    #[test]
+    fn domain_cookies_get_their_dot_back() {
+        // wry gives `.youtube.com` as `youtube.com` (the cookie crate strips the dot).
+        assert_eq!(cookie_domain("youtube.com", "music.youtube.com"), ".youtube.com");
+        assert_eq!(cookie_domain("youtube.com", "www.youtube.com"), ".youtube.com");
+        assert_eq!(cookie_domain(".youtube.com", "music.youtube.com"), ".youtube.com");
+        assert_eq!(cookie_domain("music.youtube.com", "music.youtube.com"), "music.youtube.com");
+        assert_eq!(cookie_domain("", "music.youtube.com"), "");
+    }
+
+    #[test]
+    fn signed_in_with_the_dot_stripped() {
+        let url = "https://music.youtube.com/";
+        let stripped = [c("youtube.com", "SAPISID", "x"), c("youtube.com", "LOGIN_INFO", "y")];
+        assert!(signed_in(url, &stripped));
+        let dotted = [c(".youtube.com", "SAPISID", "x"), c(".youtube.com", "LOGIN_INFO", "y")];
+        assert!(signed_in(url, &dotted));
+        assert!(!signed_in(url, &[c("youtube.com", "SAPISID", "x")]));
+        assert!(!signed_in(url, &[c("music.youtube.com", "SAPISID", "x"), c("music.youtube.com", "LOGIN_INFO", "y")]));
     }
 
     #[test]
