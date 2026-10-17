@@ -1,0 +1,780 @@
+//! YouTube Music as a [`StreamService`], on top of RustyPipe.
+//!
+//! * **Catalog** (search, tracks, albums, artists, playlists) works without
+//!   a login, through the YouTube Music web client.
+//! * **Audio** works without a login too: the player is fetched with the
+//!   visionOS client (plain URLs, no PO token, see `player`), RustyPipe's
+//!   own player being the fallback. [`Youtube::open_audio`]
+//!   returns a lazy ranged-HTTP reader (see `range`), [`Youtube::save_audio`]
+//!   keeps the Opus stream as an Ogg Opus file without re-encoding.
+//! * **Login** is by cookies of the user's main account
+//!   ([`LoginInput::Cookies`]): RustyPipe keeps them in its cache file in
+//!   [`YoutubeConfig::data_dir`]. OAuth device codes only work for RustyPipe's
+//!   TV client, which cannot read any user data, so [`LoginInput::Browser`]
+//!   answers [`StreamError::Unsupported`]. Likes, playlist creation and edits
+//!   go through RustyPipe's raw request (see `innertube`).
+//!
+//! Every future runs on the service's own small tokio runtime (so the pooled
+//! connections and timers always belong to one runtime) and is awaited
+//! through a handle that cancels it when dropped; callers may poll on any
+//! executor.
+
+mod convert;
+mod innertube;
+mod player;
+mod range;
+mod remux;
+
+use std::future::Future;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use nikgob_core::streaming::{
+    Account, AudioStream, BoxFuture, EntityKind, LoginInput, Played, Service, StreamAlbum,
+    StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService, StreamTrack, format,
+    join_names,
+};
+use rustypipe::client::{ClientType, RustyPipe};
+use rustypipe::error::{AuthError, Error as RpError, ExtractionError, UnavailabilityReason};
+use rustypipe::model::TrackType;
+use rustypipe::param::{Country, Language};
+use serde::{Deserialize, Serialize};
+use tokio::task::JoinHandle;
+
+pub use remux::Tags;
+
+use range::{HttpStream, ResolveFn};
+
+/// Upper bound of tracks fetched for one playlist (YouTube caps listings
+/// around 5000 anyway).
+const PLAYLIST_LIMIT: usize = 10_000;
+/// Name shown when the account menu does not say.
+const DEFAULT_NAME: &str = "YouTube Music";
+/// Our own non-secret account notes next to RustyPipe's cache.
+const ACCOUNT_FILE: &str = "youtube_account.json";
+
+/// Where and how the service runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct YoutubeConfig {
+    /// Holds RustyPipe's cache (`rustypipe_cache.json`: client versions,
+    /// deobfuscation code, **the login cookies**) and our account notes.
+    /// Created if missing.
+    pub data_dir: PathBuf,
+    /// Content language, e.g. `ru` or `ru-RU`; unknown → English.
+    pub language: String,
+    /// Content country, e.g. `RU`; unknown → US.
+    pub country: String,
+    /// Optional `rustypipe-botguard` binary (an external program) for
+    /// RustyPipe's fallback player, which then tries the desktop client with
+    /// PO tokens first. Not needed for the default visionOS player.
+    pub botguard_bin: Option<PathBuf>,
+}
+
+impl YoutubeConfig {
+    /// Russian content for Russia, no botguard.
+    pub fn new(data_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            data_dir: data_dir.into(),
+            language: "ru".into(),
+            country: "RU".into(),
+            botguard_bin: None,
+        }
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct AccountNotes {
+    name: Option<String>,
+}
+
+struct Inner {
+    rp: RustyPipe,
+    http: reqwest::Client,
+    account: Mutex<Account>,
+    data_dir: PathBuf,
+    /// Language and country for our own player requests.
+    hl: String,
+    gl: String,
+}
+
+impl Inner {
+    fn account(&self) -> MutexGuard<'_, Account> {
+        self.account.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn need_login(&self) -> Result<(), StreamError> {
+        if self.account().is_logged_in() {
+            Ok(())
+        } else {
+            Err(StreamError::NotLoggedIn)
+        }
+    }
+
+    /// Display name of the logged-in user (for "is this playlist mine").
+    fn me(&self) -> Option<String> {
+        match &*self.account() {
+            Account::LoggedIn { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Maps an error of an authenticated call; a refused session marks the
+    /// account as expired.
+    fn user_err(&self, e: RpError) -> StreamError {
+        let e = map_err(e);
+        if e == StreamError::NotLoggedIn {
+            *self.account() = Account::Failed("YouTube session expired, log in again".into());
+        }
+        e
+    }
+
+    fn notes_path(&self) -> PathBuf {
+        self.data_dir.join(ACCOUNT_FILE)
+    }
+}
+
+/// The runtime every future of the service runs on.
+struct Runtime(Option<tokio::runtime::Runtime>);
+
+impl Runtime {
+    fn handle(&self) -> &tokio::runtime::Handle {
+        self.0
+            .as_ref()
+            .expect("runtime lives as long as the service")
+            .handle()
+    }
+}
+
+impl Drop for Runtime {
+    /// The last `Arc<Youtube>` may go away inside some async context, where a
+    /// blocking shutdown would panic.
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
+/// YouTube Music; see the crate docs.
+pub struct Youtube {
+    inner: Arc<Inner>,
+    runtime: Runtime,
+}
+
+impl Youtube {
+    /// Builds the client (reads RustyPipe's cache file, no network) and the
+    /// service's runtime. Fails only if the runtime cannot start.
+    pub fn new(config: YoutubeConfig) -> Result<Arc<Self>, StreamError> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("youtube")
+            .enable_all()
+            .build()
+            .map_err(|e| StreamError::Network(format!("cannot start the runtime: {e}")))?;
+        if let Err(e) = std::fs::create_dir_all(&config.data_dir) {
+            log::warn!("youtube: cannot create {}: {e}", config.data_dir.display());
+        }
+        let lang = Language::from_str(&config.language).unwrap_or(Language::En);
+        let country = parse_country(&config.country).unwrap_or(Country::Us);
+        let mut builder = RustyPipe::builder()
+            .storage_dir(&config.data_dir)
+            .lang(lang)
+            .country(country)
+            .timeout(Duration::from_secs(20));
+        builder = match &config.botguard_bin {
+            Some(bin) => builder.botguard_bin(bin.as_os_str()),
+            None => builder.no_botguard(),
+        };
+        let rp = builder
+            .build()
+            .map_err(|e| StreamError::Network(format!("cannot build the YouTube client: {e}")))?;
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(20))
+            .build()
+            .map_err(|e| StreamError::Network(e.to_string()))?;
+        let notes: AccountNotes = std::fs::read(config.data_dir.join(ACCOUNT_FILE))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let account = if rp.query().auth_enabled(ClientType::DesktopMusic) {
+            Account::LoggedIn {
+                name: notes.name.unwrap_or_else(|| DEFAULT_NAME.into()),
+                premium: None,
+                audio: true,
+            }
+        } else {
+            Account::LoggedOut
+        };
+        Ok(Arc::new(Self {
+            inner: Arc::new(Inner {
+                rp,
+                http,
+                account: Mutex::new(account),
+                data_dir: config.data_dir,
+                hl: serde_json::to_value(lang)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "en".into()),
+                gl: serde_json::to_value(country)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "US".into()),
+            }),
+            runtime: Runtime(Some(runtime)),
+        }))
+    }
+
+    /// Runs `f` on the service's runtime; the returned future cancels it
+    /// when dropped.
+    fn run<T, F>(&self, f: impl FnOnce(Arc<Inner>) -> F) -> BoxFuture<'_, Result<T, StreamError>>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, StreamError>> + Send + 'static,
+    {
+        let task = self.runtime.handle().spawn(f(Arc::clone(&self.inner)));
+        Box::pin(Joined(task))
+    }
+
+    /// Metadata for the tags of a saved file (best effort).
+    async fn tags(inner: &Inner, id: &str) -> Tags {
+        match inner.rp.query().music_details(id).await {
+            Ok(d) => {
+                let t = convert::track(&d.track);
+                Tags {
+                    title: Some(t.title.clone()),
+                    artist: (!t.artists.is_empty()).then(|| join_names(&t.artists)),
+                    album: t.album.map(|a| a.title),
+                }
+            }
+            Err(e) => {
+                log::debug!("youtube: no tags for {id}: {e}");
+                Tags::default()
+            }
+        }
+    }
+}
+
+/// A spawned task, aborted when dropped.
+struct Joined<T>(JoinHandle<Result<T, StreamError>>);
+
+impl<T> Future for Joined<T> {
+    type Output = Result<T, StreamError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.0)
+            .poll(cx)
+            .map(|r| r.unwrap_or_else(|e| Err(StreamError::Network(format!("task failed: {e}")))))
+    }
+}
+
+impl<T> Drop for Joined<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// One part of a search; a failed part is logged and its error kept.
+fn part<T>(r: Result<T, RpError>, first_err: &mut Option<StreamError>) -> Option<T> {
+    r.map_err(|e| {
+        log::debug!("youtube: search part failed: {e}");
+        first_err.get_or_insert(map_err(e));
+    })
+    .ok()
+}
+
+fn parse_country(s: &str) -> Option<Country> {
+    serde_json::from_value(serde_json::Value::String(s.trim().to_ascii_uppercase())).ok()
+}
+
+/// RustyPipe's errors → [`StreamError`].
+pub(crate) fn map_err(e: RpError) -> StreamError {
+    match e {
+        RpError::Extraction(ExtractionError::Unavailable { reason, msg }) => match reason {
+            UnavailabilityReason::IpBan
+            | UnavailabilityReason::VpnBan
+            | UnavailabilityReason::Captcha
+            | UnavailabilityReason::TryAgain => {
+                log::warn!("youtube: blocked ({reason}): {msg}");
+                StreamError::RateLimited { retry_after: None }
+            }
+            _ => StreamError::Unavailable,
+        },
+        RpError::Extraction(ExtractionError::NotFound { .. }) => StreamError::Unavailable,
+        RpError::Extraction(ExtractionError::BadRequest(_)) => StreamError::Http { status: 400 },
+        RpError::Extraction(e) => StreamError::Parse(e.to_string()),
+        RpError::HttpStatus(429, _) => StreamError::RateLimited { retry_after: None },
+        RpError::HttpStatus(401 | 403, _) | RpError::Auth(AuthError::NoLogin) => {
+            StreamError::NotLoggedIn
+        }
+        RpError::HttpStatus(status, _) => StreamError::Http { status },
+        RpError::Auth(e) => {
+            log::warn!("youtube: auth error: {e}");
+            StreamError::NotLoggedIn
+        }
+        RpError::Http(e) => StreamError::Network(e.into_owned()),
+        RpError::Other(e) => StreamError::Network(e.into_owned()),
+    }
+}
+
+fn stream(inner: &Arc<Inner>, runtime: tokio::runtime::Handle, id: &str) -> HttpStream {
+    let (inner2, id) = (Arc::clone(inner), id.to_owned());
+    let resolve: ResolveFn = Arc::new(move || {
+        let (inner, id) = (Arc::clone(&inner2), id.clone());
+        Box::pin(
+            async move { player::resolve(&inner.rp, &inner.http, &id, &inner.hl, &inner.gl).await },
+        )
+    });
+    HttpStream::new(runtime, inner.http.clone(), resolve)
+}
+
+/// Unix ms of a history entry. YouTube only gives the day; entries of one
+/// day are spread one second apart below its end, so the order survives.
+fn played_at(date: Option<time::Date>, index_in_day: i64) -> Option<i64> {
+    let end = date?.next_day()?.midnight().assume_utc().unix_timestamp() * 1000;
+    Some(end - 1000 * (index_in_day + 1))
+}
+
+fn valid_isrc(isrc: &str) -> bool {
+    isrc.len() == 12 && isrc.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+impl StreamService for Youtube {
+    fn service(&self) -> Service {
+        Service::Youtube
+    }
+
+    fn account(&self) -> Account {
+        self.inner.account().clone()
+    }
+
+    fn login(&self, input: LoginInput) -> BoxFuture<'_, Result<(), StreamError>> {
+        let LoginInput::Cookies(cookies) = input else {
+            return Box::pin(std::future::ready(Err(StreamError::Unsupported)));
+        };
+        *self.inner.account() = Account::LoggingIn(None);
+        self.run(move |inner| async move {
+            let text = cookies.trim();
+            let set = if text.lines().any(|l| l.split('\t').count() >= 7) {
+                inner.rp.user_auth_set_cookie_txt(text).await
+            } else {
+                let header = text
+                    .strip_prefix("Cookie:")
+                    .or_else(|| text.strip_prefix("cookie:"))
+                    .unwrap_or(text)
+                    .trim();
+                inner.rp.user_auth_set_cookie(header).await
+            };
+            if let Err(e) = set {
+                let msg = format!("YouTube did not accept the cookies: {e}");
+                *inner.account() = Account::Failed(msg);
+                return Err(match map_err(e) {
+                    StreamError::Parse(_) => StreamError::NotLoggedIn,
+                    other => other,
+                });
+            }
+            let name = match innertube::account_name(&inner.rp).await {
+                Ok(n) => n,
+                Err(e) => {
+                    log::warn!("youtube: logged in, but no account name: {e}");
+                    None
+                }
+            };
+            let notes = AccountNotes { name: name.clone() };
+            if let Err(e) = serde_json::to_vec(&notes)
+                .map_err(std::io::Error::other)
+                .and_then(|b| std::fs::write(inner.notes_path(), b))
+            {
+                log::warn!("youtube: cannot save account notes: {e}");
+            }
+            *inner.account() = Account::LoggedIn {
+                name: name.unwrap_or_else(|| DEFAULT_NAME.into()),
+                premium: None,
+                audio: true,
+            };
+            Ok(())
+        })
+    }
+
+    fn logout(&self) {
+        *self.inner.account() = Account::LoggedOut;
+        let _ = std::fs::remove_file(self.inner.notes_path());
+        let rp = self.inner.rp.clone();
+        // Only touches the cache file, no network.
+        self.runtime.handle().spawn(async move {
+            if let Err(e) = rp.user_auth_remove_cookie().await {
+                log::debug!("youtube: logout: {e}");
+            }
+        });
+    }
+
+    fn search(&self, query: &str) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        let q = query.trim().to_owned();
+        self.run(move |inner| async move {
+            if q.is_empty() {
+                return Ok(StreamSearch::default());
+            }
+            let me = inner.me();
+            let rq = inner.rp.query();
+            let (songs, videos, albums, artists, playlists) = tokio::join!(
+                rq.music_search_tracks(&q),
+                rq.music_search_videos(&q),
+                rq.music_search_albums(&q),
+                rq.music_search_artists(&q),
+                rq.music_search_playlists(&q, true),
+            );
+            let mut first_err = None;
+            let songs = part(songs, &mut first_err);
+            let videos = part(videos, &mut first_err);
+            let albums = part(albums, &mut first_err);
+            let artists = part(artists, &mut first_err);
+            let playlists = part(playlists, &mut first_err);
+            if songs.is_none() && videos.is_none() && albums.is_none() && artists.is_none() {
+                return Err(first_err.unwrap_or(StreamError::Unavailable));
+            }
+            let mut out = StreamSearch::default();
+            for r in [songs, videos].into_iter().flatten() {
+                out.tracks.extend(r.items.items.iter().map(convert::track));
+            }
+            if let Some(r) = albums {
+                out.albums = r.items.items.iter().map(convert::album_item).collect();
+            }
+            if let Some(r) = artists {
+                out.artists = r.items.items.iter().map(convert::artist_item).collect();
+            }
+            if let Some(r) = playlists {
+                out.playlists = r
+                    .items
+                    .items
+                    .iter()
+                    .map(|p| convert::playlist_item(p, me.as_deref()))
+                    .collect();
+            }
+            Ok(out)
+        })
+    }
+
+    fn track(&self, id: &str) -> BoxFuture<'_, Result<StreamTrack, StreamError>> {
+        let id = id.to_owned();
+        self.run(move |inner| async move {
+            let d = inner.rp.query().music_details(&id).await.map_err(map_err)?;
+            Ok(convert::track(&d.track))
+        })
+    }
+
+    fn album(&self, id: &str) -> BoxFuture<'_, Result<StreamAlbum, StreamError>> {
+        let id = id.to_owned();
+        self.run(move |inner| async move {
+            let a = inner.rp.query().music_album(&id).await.map_err(map_err)?;
+            Ok(convert::album(&a))
+        })
+    }
+
+    fn artist(&self, id: &str) -> BoxFuture<'_, Result<StreamArtist, StreamError>> {
+        let id = id.to_owned();
+        self.run(move |inner| async move {
+            let a = inner
+                .rp
+                .query()
+                .music_artist(&id, true)
+                .await
+                .map_err(map_err)?;
+            Ok(convert::artist(&a))
+        })
+    }
+
+    fn playlist(&self, id: &str) -> BoxFuture<'_, Result<StreamPlaylist, StreamError>> {
+        let id = id.to_owned();
+        self.run(move |inner| async move {
+            let logged_in = inner.account().is_logged_in();
+            let mut q = inner.rp.query();
+            if logged_in {
+                q = q.authenticated();
+            }
+            let mut p = q.music_playlist(&id).await.map_err(|e| inner.user_err(e))?;
+            p.tracks
+                .extend_limit(&q, PLAYLIST_LIMIT)
+                .await
+                .map_err(map_err)?;
+            Ok(convert::playlist(&p, inner.me().as_deref()))
+        })
+    }
+
+    /// YouTube Music finds a quoted ISRC in its song search.
+    fn find_isrc(&self, isrc: &str) -> BoxFuture<'_, Result<Option<StreamTrack>, StreamError>> {
+        let isrc = isrc.trim().replace('-', "").to_ascii_uppercase();
+        self.run(move |inner| async move {
+            if !valid_isrc(&isrc) {
+                return Ok(None);
+            }
+            let r = inner
+                .rp
+                .query()
+                .music_search_tracks(format!("\"{isrc}\""))
+                .await
+                .map_err(map_err)?;
+            Ok(r.items
+                .items
+                .iter()
+                .find(|t| t.track_type == TrackType::Track)
+                .map(|t| {
+                    let mut t = convert::track(t);
+                    t.isrc = Some(isrc.clone());
+                    t
+                }))
+        })
+    }
+
+    fn liked(&self) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        self.run(move |inner| async move {
+            inner.need_login()?;
+            let q = inner.rp.query().authenticated();
+            let mut p = q
+                .music_liked_tracks()
+                .await
+                .map_err(|e| inner.user_err(e))?;
+            p.tracks
+                .extend_limit(&q, PLAYLIST_LIMIT)
+                .await
+                .map_err(|e| inner.user_err(e))?;
+            Ok(p.tracks.items.iter().map(convert::track).collect())
+        })
+    }
+
+    fn set_liked(&self, id: &str, liked: bool) -> BoxFuture<'_, Result<(), StreamError>> {
+        let id = id.to_owned();
+        self.run(move |inner| async move {
+            inner.need_login()?;
+            innertube::set_liked(&inner.rp, &id, liked).await
+        })
+    }
+
+    fn my_playlists(&self) -> BoxFuture<'_, Result<Vec<StreamPlaylist>, StreamError>> {
+        self.run(move |inner| async move {
+            inner.need_login()?;
+            let q = inner.rp.query().authenticated();
+            let mut p = q
+                .music_saved_playlists()
+                .await
+                .map_err(|e| inner.user_err(e))?;
+            p.extend_limit(&q, 1000)
+                .await
+                .map_err(|e| inner.user_err(e))?;
+            let me = inner.me();
+            Ok(p.items
+                .iter()
+                // Liked music and "episodes for later" are not playlists here.
+                .filter(|p| p.id != "LM" && p.id != "SE")
+                .map(|p| convert::playlist_item(p, me.as_deref()))
+                .collect())
+        })
+    }
+
+    fn create_playlist(&self, name: &str) -> BoxFuture<'_, Result<String, StreamError>> {
+        let name = name.to_owned();
+        self.run(move |inner| async move {
+            inner.need_login()?;
+            innertube::create_playlist(&inner.rp, &name).await
+        })
+    }
+
+    /// YouTube has no playlist version, so the result is always `None`.
+    fn playlist_edit(
+        &self,
+        id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> BoxFuture<'_, Result<Option<String>, StreamError>> {
+        let (id, add, remove) = (id.to_owned(), add.to_vec(), remove.to_vec());
+        self.run(move |inner| async move {
+            inner.need_login()?;
+            innertube::edit_playlist(&inner.rp, &id, &add, &remove).await?;
+            Ok(None)
+        })
+    }
+
+    fn recent(&self) -> BoxFuture<'_, Result<Vec<Played>, StreamError>> {
+        self.run(move |inner| async move {
+            inner.need_login()?;
+            let h = inner
+                .rp
+                .query()
+                .music_history()
+                .await
+                .map_err(|e| inner.user_err(e))?;
+            let mut out = Vec::new();
+            let (mut day, mut index) = (None, 0);
+            let mut last_at = None;
+            for item in &h.items {
+                let date = item.playback_date.or(day);
+                index = if date == day { index + 1 } else { 0 };
+                day = date;
+                let at = played_at(date, index).or(last_at).unwrap_or(0);
+                last_at = Some(at);
+                out.push(Played {
+                    track: convert::track(&item.item),
+                    at_ms: at,
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError> {
+        if id.is_empty() {
+            return Err(StreamError::Unavailable);
+        }
+        Ok(Box::new(stream(
+            &self.inner,
+            self.runtime.handle().clone(),
+            id,
+        )))
+    }
+
+    fn save_audio(&self, id: &str, dir: &Path) -> BoxFuture<'_, Result<PathBuf, StreamError>> {
+        let (id, dir) = (id.to_owned(), dir.to_owned());
+        let handle = self.runtime.handle().clone();
+        self.run(move |inner| async move {
+            let tags = Self::tags(&inner, &id).await;
+            let mut s = stream(&inner, handle, &id);
+            let task = tokio::task::spawn_blocking(move || -> Result<PathBuf, StreamError> {
+                let io = |e: std::io::Error| StreamError::Network(e.to_string());
+                let mut bytes = Vec::new();
+                s.read_to_end(&mut bytes).map_err(io)?;
+                let ext = if s.format_hint() == format::WEBM {
+                    "opus"
+                } else {
+                    "m4a"
+                };
+                std::fs::create_dir_all(&dir).map_err(io)?;
+                let path = dir.join(format!("{id}.{ext}"));
+                let part = dir.join(format!("{id}.{ext}.part"));
+                let file = std::io::BufWriter::new(std::fs::File::create(&part).map_err(io)?);
+                let written = if ext == "opus" {
+                    let serial = id
+                        .bytes()
+                        .fold(0x6e69_6b67_u32, |h, b| h.rotate_left(5) ^ u32::from(b));
+                    remux::webm_to_ogg(&bytes, &tags, serial, file).map_err(StreamError::Parse)
+                } else {
+                    let mut file = file;
+                    std::io::Write::write_all(&mut file, &bytes)
+                        .and_then(|()| std::io::Write::flush(&mut file))
+                        .map_err(io)
+                };
+                if let Err(e) = written.and_then(|()| std::fs::rename(&part, &path).map_err(io)) {
+                    let _ = std::fs::remove_file(&part);
+                    return Err(e);
+                }
+                Ok(path)
+            });
+            task.await
+                .unwrap_or_else(|e| Err(StreamError::Network(format!("task failed: {e}"))))
+        })
+    }
+
+    fn web_url(&self, kind: EntityKind, id: &str) -> String {
+        match kind {
+            EntityKind::Track => format!("https://music.youtube.com/watch?v={id}"),
+            EntityKind::Album => format!("https://music.youtube.com/browse/{id}"),
+            EntityKind::Artist => format!("https://music.youtube.com/channel/{id}"),
+            EntityKind::Playlist => format!("https://music.youtube.com/playlist?list={id}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_map_to_stream_errors() {
+        let unavailable = RpError::Extraction(ExtractionError::Unavailable {
+            reason: UnavailabilityReason::Geoblocked,
+            msg: "no".into(),
+        });
+        assert_eq!(map_err(unavailable), StreamError::Unavailable);
+        let ban = RpError::Extraction(ExtractionError::Unavailable {
+            reason: UnavailabilityReason::Captcha,
+            msg: "no".into(),
+        });
+        assert_eq!(map_err(ban), StreamError::RateLimited { retry_after: None });
+        assert_eq!(
+            map_err(RpError::HttpStatus(500, "x".into())),
+            StreamError::Http { status: 500 }
+        );
+        assert_eq!(
+            map_err(RpError::Auth(AuthError::NoLogin)),
+            StreamError::NotLoggedIn
+        );
+    }
+
+    #[test]
+    fn history_days_keep_their_order() {
+        let d = time::Date::from_calendar_date(2026, time::Month::October, 16).unwrap();
+        let a = played_at(Some(d), 0).unwrap();
+        // One second before 2026-10-17 00:00 UTC.
+        assert_eq!(a, 1_792_195_200_000 - 1000);
+        let b = played_at(Some(d), 1).unwrap();
+        assert!(a > b);
+        assert_eq!(a % 1000, 0);
+        assert_eq!(played_at(None, 0), None);
+    }
+
+    #[test]
+    fn isrc_check_and_country() {
+        assert!(valid_isrc("DEUM71602459"));
+        assert!(!valid_isrc("DEUM7160245"));
+        assert!(!valid_isrc("\"DEUM716024\""));
+        assert_eq!(parse_country("ru"), Some(Country::Ru));
+        assert_eq!(parse_country("nope"), None);
+    }
+
+    #[test]
+    fn web_urls_and_offline_behaviour() {
+        let dir = std::env::temp_dir().join(format!("nikgob-yt-unit-{}", std::process::id()));
+        let yt = Youtube::new(YoutubeConfig::new(&dir)).unwrap();
+        assert_eq!(yt.account(), Account::LoggedOut);
+        assert_eq!(
+            yt.web_url(EntityKind::Track, "xtxjm7ciwmc"),
+            "https://music.youtube.com/watch?v=xtxjm7ciwmc"
+        );
+        assert_eq!(
+            yt.web_url(EntityKind::Album, "MPREb_OLmD8O5IYNS"),
+            "https://music.youtube.com/browse/MPREb_OLmD8O5IYNS"
+        );
+        assert_eq!(
+            yt.web_url(EntityKind::Artist, "UC1"),
+            "https://music.youtube.com/channel/UC1"
+        );
+        assert_eq!(
+            yt.web_url(EntityKind::Playlist, "PL1"),
+            "https://music.youtube.com/playlist?list=PL1"
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            assert_eq!(yt.liked().await, Err(StreamError::NotLoggedIn));
+            assert_eq!(yt.recent().await, Err(StreamError::NotLoggedIn));
+            assert_eq!(yt.set_liked("x", true).await, Err(StreamError::NotLoggedIn));
+            assert_eq!(
+                yt.login(LoginInput::Browser).await,
+                Err(StreamError::Unsupported)
+            );
+            assert_eq!(
+                yt.login(LoginInput::Playback).await,
+                Err(StreamError::Unsupported)
+            );
+            assert_eq!(yt.find_isrc("nope").await, Ok(None));
+        });
+        // Opening does no network: an id that does not exist still opens.
+        assert!(yt.open_audio("does-not-exist").is_ok());
+        drop(yt);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
