@@ -371,6 +371,23 @@ fn has_local_source(conn: &Connection, track: &str) -> Result<bool> {
 /// See [`Library::upsert_stream_track`]. With `want`, the stream is attached
 /// to that track (created with that id when missing) instead of being looked
 /// up: the userdata import restores stream tracks under their old ids.
+fn put_remote_like_in(tx: &Connection, like: &RemoteLike) -> Result<()> {
+    tx.execute(
+        "INSERT INTO remote_like(service, remote_id, track_id, pulled, seen_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(service, remote_id) DO UPDATE SET track_id = excluded.track_id,
+            pulled = excluded.pulled, seen_at = excluded.seen_at",
+        params![
+            like.remote.service.as_str(),
+            like.remote.id,
+            like.track_id.to_string(),
+            like.pulled,
+            like.seen_at
+        ],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn upsert_stream_track_in(
     conn: &Connection,
     t: &StreamTrack,
@@ -655,6 +672,25 @@ impl Library {
         if total_tracks.is_none() && cover.is_none() {
             return Ok(false);
         }
+        // Read first: most albums in search results are not in the library,
+        // and a write transaction per card stalled the search.
+        let needed: bool = self.read(|c| {
+            let Some(id) = linked(c, "release", album.service, EntityKind::Album, &album.id)? else {
+                return Ok(false);
+            };
+            Ok(c.query_row(
+                "SELECT (total_tracks IS NULL AND ?2 IS NOT NULL)
+                     OR ((cover_ref IS NULL OR cover_ref = '') AND ?3 IS NOT NULL)
+                   FROM release WHERE id = ?1",
+                params![id, total_tracks, cover],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+        })?;
+        if !needed {
+            return Ok(false);
+        }
         self.write(|tx| {
             let Some(id) = linked(tx, "release", album.service, EntityKind::Album, &album.id)? else {
                 return Ok(false);
@@ -675,6 +711,17 @@ impl Library {
     pub fn set_stream_artist_image(&self, artist: ArtistId, url: &str) -> Result<bool> {
         if !is_web_ref(url) {
             return Ok(false);
+        }
+        let current: Option<String> = self.read(|c| {
+            Ok(c.query_row("SELECT images FROM artist WHERE id = ?1", [artist.to_string()], |r| r.get(0))
+                .optional()?)
+        })?;
+        let images: Vec<String> = current
+            .as_deref()
+            .and_then(|i| serde_json::from_str(i).ok())
+            .unwrap_or_default();
+        if current.is_none() || images.first().is_some_and(|i| i == url) {
+            return Ok(false); // nothing to write (shown again: no transaction)
         }
         self.write(|tx| {
             let images: Option<String> = tx
@@ -804,22 +851,7 @@ impl Library {
 
     /// Records that the service likes `like.remote` (insert or replace).
     pub fn put_remote_like(&self, like: &RemoteLike) -> Result<()> {
-        self.write(|tx| {
-            tx.execute(
-                "INSERT INTO remote_like(service, remote_id, track_id, pulled, seen_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(service, remote_id) DO UPDATE SET track_id = excluded.track_id,
-                    pulled = excluded.pulled, seen_at = excluded.seen_at",
-                params![
-                    like.remote.service.as_str(),
-                    like.remote.id,
-                    like.track_id.to_string(),
-                    like.pulled,
-                    like.seen_at
-                ],
-            )?;
-            Ok(())
-        })
+        self.write(|tx| put_remote_like_in(tx, like))
     }
 
     /// The service no longer likes `remote`; returns whether it was recorded.
@@ -829,6 +861,56 @@ impl Library {
                 "DELETE FROM remote_like WHERE service = ?1 AND remote_id = ?2",
                 params![remote.service.as_str(), remote.id],
             )? > 0)
+        })
+    }
+
+    /// Brings a service's likes in, in one transaction (a like pull of
+    /// hundreds of tracks used to take a few transactions per like):
+    /// every track of `liked` (in the order given) gets its library track,
+    /// a like here unless it has one, and its `remote_like` row (`pulled`
+    /// when the like came from there); every like in `gone` loses its row
+    /// and, when it was pulled from the service, its like here. Returns the
+    /// tracks newly liked here and the ones unliked here.
+    pub fn take_remote_likes(
+        &self,
+        liked: &[StreamTrack],
+        gone: &[RemoteLike],
+        seen_at: UnixMs,
+    ) -> Result<(Vec<TrackId>, Vec<TrackId>)> {
+        let device = self.device_id();
+        self.write(|tx| {
+            let mut new = Vec::new();
+            for t in liked {
+                let Ok(track) = upsert_stream_track_in(tx, t, None) else {
+                    continue;
+                };
+                let here = crate::playlists::is_liked_in(tx, nikgob_core::model::LikeTarget::Track(track))?;
+                if !here {
+                    crate::playlists::set_like_in(tx, nikgob_core::model::LikeTarget::Track(track), false, self.tick(), &device)?;
+                    new.push(track);
+                }
+                put_remote_like_in(
+                    tx,
+                    &RemoteLike {
+                        remote: t.id.clone(),
+                        track_id: track,
+                        pulled: !here,
+                        seen_at,
+                    },
+                )?;
+            }
+            let mut unliked = Vec::new();
+            for k in gone {
+                tx.execute(
+                    "DELETE FROM remote_like WHERE service = ?1 AND remote_id = ?2",
+                    params![k.remote.service.as_str(), k.remote.id],
+                )?;
+                if k.pulled && crate::playlists::is_liked_in(tx, nikgob_core::model::LikeTarget::Track(k.track_id))? {
+                    crate::playlists::set_like_in(tx, nikgob_core::model::LikeTarget::Track(k.track_id), true, self.tick(), &device)?;
+                    unliked.push(k.track_id);
+                }
+            }
+            Ok((new, unliked))
         })
     }
 

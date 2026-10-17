@@ -34,7 +34,7 @@ pub use convert::Resolver;
 pub use import::ImportSetup;
 pub use nikgob_import::ImportConfig;
 pub use nikgob_metadata::MetadataConfig;
-pub use streams::{WINDOW_HINT, WebLogin, WebLoginError};
+pub use streams::{StreamSchedule, WINDOW_HINT, WebLogin, WebLoginError};
 use import::{IMPORT_ID, ImportService, Internal};
 use queue::{Entry, Queue};
 
@@ -165,6 +165,17 @@ impl Runtime {
         playback: Box<dyn Playback>,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
+        Self::start_scheduled(config, playback, wake, StreamSchedule::default())
+    }
+
+    /// [`Self::start`] with other streaming intervals (tests make them
+    /// short).
+    pub fn start_scheduled(
+        config: RuntimeConfig,
+        playback: Box<dyn Playback>,
+        wake: Arc<dyn Fn() + Send + Sync>,
+        schedule: StreamSchedule,
+    ) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (pb_tx, pb_rx) = crossbeam_channel::unbounded();
         let (in_tx, in_rx) = crossbeam_channel::unbounded();
@@ -186,6 +197,7 @@ impl Runtime {
                 .name("nikgob-runtime".into())
                 .spawn(move || {
                     let mut w = Worker::new(config, playback, state, wake, in_tx);
+                    w.streaming.schedule = schedule;
                     w.run(rx, pb_rx, in_rx);
                 })
                 .expect("spawn runtime thread")
@@ -850,6 +862,7 @@ impl Worker {
             | Command::ImportFromService(_)
             | Command::ImportExportFiles(_)
             | Command::ClearStreamCache
+            | Command::WindowState { .. }
             | Command::SetPlaylistSync { .. }
             | Command::LoadDiscography(_)) => {
                 if let Some(c) = self.stream_command(c) {
@@ -1045,7 +1058,10 @@ impl Worker {
             self.play_context,
         );
         self.preload_next();
+        // What only YouTube Music may have is looked up ahead, gapless or not.
+        self.resolve_ahead();
         self.publish_now_playing();
+        self.likes_if_stale();
     }
 
     fn preload_next(&mut self) {
@@ -1056,13 +1072,6 @@ impl Worker {
         }
         let next = self.queue.peek_auto_next();
         let req = next.and_then(|n| self.request(n));
-        // The next track only YouTube Music may have: looked up ahead.
-        if req.is_none()
-            && let Some(n) = next
-            && self.can_resolve(n.track)
-        {
-            self.begin_resolve(n.track);
-        }
         self.playback.set_next(req);
     }
 

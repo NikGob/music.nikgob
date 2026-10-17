@@ -1234,6 +1234,11 @@ pub enum Command {
     ImportExportFiles(PathBuf),
     /// Empties the stream audio cache of every service.
     ClearStreamCache,
+    /// The app window was shown, hidden (tray, minimized) or (un)focused.
+    /// While it is hidden and nothing plays, the runtime's periodic network
+    /// work (like pulls, playlist checks, completing imports) waits; on
+    /// focus a like pull older than 10 minutes runs.
+    WindowState { visible: bool, focused: bool },
     /// How a library playlist linked to a service follows it.
     SetPlaylistSync { playlist: PlaylistId, mode: PlaylistSyncMode },
     /// Fill [`ArtistDetail::discography`] ("Нет в библиотеке").

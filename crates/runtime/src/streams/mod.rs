@@ -20,6 +20,7 @@ mod export;
 mod likes;
 mod pages;
 mod resolve;
+mod schedule;
 mod search;
 mod share;
 mod sync;
@@ -34,7 +35,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 use nikgob_core::model::{TrackId, WishlistId};
 use nikgob_core::streaming::{
-    Account, RemoteId, Service, StreamAlbum, StreamError, StreamPlaylist, StreamService,
+    Account, RemoteId, Service, StreamError, StreamService,
     StreamTrack,
 };
 use nikgob_view::{self as v, Command};
@@ -44,17 +45,58 @@ use crate::import::Internal;
 
 pub(crate) use cold::STREAM_JOB;
 pub(crate) use wishlist::WISH_ID;
+pub use schedule::StreamSchedule;
 pub use web_login::{WINDOW_HINT, WebLogin, WebLoginError};
 
 /// How long a YouTube video that did not play is not picked again.
 const REFUSED_TTL: Duration = Duration::from_secs(6 * 3600);
-/// How long a failed YouTube lookup of a track is not repeated.
-const MISS_TTL: Duration = Duration::from_secs(6 * 3600);
-/// How often the services' liked lists are pulled while the app runs.
-const PULL_EVERY: Duration = Duration::from_secs(15 * 60);
-/// Stream tracks kept by remote id for play / like by id; the cache is
-/// dropped when it grows past this.
+/// Stream tracks kept by remote id for play / like by id; past this the
+/// least recently learnt quarter goes.
 const KNOWN_MAX: usize = 20_000;
+
+/// Stream tracks seen in results and pages, by remote id; the oldest go
+/// first when it is full (a whole-map clear made tracks on screen
+/// «устарел» and fetched again).
+#[derive(Default)]
+pub(crate) struct Known {
+    map: HashMap<RemoteId, (u64, StreamTrack)>,
+    tick: u64,
+}
+
+impl Known {
+    pub(crate) fn get(&self, r: &RemoteId) -> Option<&StreamTrack> {
+        self.map.get(r).map(|(_, t)| t)
+    }
+
+    pub(crate) fn contains_key(&self, r: &RemoteId) -> bool {
+        self.map.contains_key(r)
+    }
+
+    pub(crate) fn insert(&mut self, t: &StreamTrack) {
+        self.tick += 1;
+        self.map.insert(t.id.clone(), (self.tick, t.clone()));
+        if self.map.len() > KNOWN_MAX {
+            let mut ticks: Vec<u64> = self.map.values().map(|(n, _)| *n).collect();
+            let cut = KNOWN_MAX / 4;
+            ticks.select_nth_unstable(cut);
+            let below = ticks[cut];
+            self.map.retain(|_, (n, _)| *n > below);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
+/// When a service's liked list was checked and is checked next.
+#[derive(Default)]
+pub(crate) struct LikeSync {
+    pub(crate) last: Option<Instant>,
+    pub(crate) next_at: Option<Instant>,
+    pub(crate) pulling: bool,
+}
 
 /// Results of background work, for [`Worker::stream_msg`].
 pub(crate) enum Msg {
@@ -68,19 +110,29 @@ pub(crate) enum Msg {
         /// The first part; the whole answer follows.
         partial: bool,
     },
-    Page {
-        seq: u64,
-        page: v::StreamPage,
+
+    /// A page (or an album / playlist for a play or like command) came;
+    /// everyone who waits for it hears.
+    Loaded {
+        key: pages::Key,
         result: Result<pages::PageData, StreamError>,
     },
-    /// An album or playlist fetched for a play / like command.
-    Fetched(pages::Then, Result<pages::PageData, StreamError>),
     Resolved {
         track: TrackId,
         found: Option<StreamTrack>,
     },
+    /// The whole liked list.
     LikesPulled(Service, Result<Vec<StreamTrack>, StreamError>),
-    LikePushed(RemoteId, bool, Result<(), StreamError>),
+    /// Its first page and length.
+    LikesHead(Service, Result<nikgob_core::streaming::LikedHead, StreamError>),
+    /// Time to send the queued likes of a service.
+    LikeFlush(Service),
+    LikesPushed {
+        service: Service,
+        remotes: Vec<RemoteId>,
+        on: bool,
+        result: Result<(), StreamError>,
+    },
     Wish(wishlist::WishMsg),
     Shared {
         seq: u64,
@@ -97,9 +149,14 @@ pub(crate) struct Streams {
     rt: tokio::runtime::Runtime,
     internal: Sender<Internal>,
     /// Stream tracks seen in results and pages, by remote id.
-    known: HashMap<RemoteId, StreamTrack>,
-    albums: HashMap<RemoteId, StreamAlbum>,
-    playlists: HashMap<RemoteId, StreamPlaylist>,
+    known: Known,
+    /// Albums, artists and playlists fetched, and who waits for a fetch.
+    pub(crate) pages: pages::PageCache,
+    pub(crate) schedule: StreamSchedule,
+    /// The app window is shown / has the focus ([`Command::WindowState`]).
+    window_visible: bool,
+    window_focused: bool,
+    last_wish_tick: Option<Instant>,
     /// Logins running, last login errors.
     busy: HashSet<Service>,
     errors: HashMap<Service, String>,
@@ -109,9 +166,9 @@ pub(crate) struct Streams {
     last_accounts: Vec<v::AccountView>,
     pub(crate) search: search::SearchState,
     page_seq: u64,
-    /// YouTube lookups running / failed recently, by track.
+    /// YouTube lookups running / failed recently (unix ms), by track.
     resolving: HashSet<TrackId>,
-    misses: HashMap<TrackId, Instant>,
+    misses: HashMap<TrackId, i64>,
     /// YouTube videos that did not play, by video id (not by track: the
     /// same song has other copies).
     refused: HashMap<String, Instant>,
@@ -119,8 +176,8 @@ pub(crate) struct Streams {
     pub(crate) failures: HashMap<TrackId, String>,
     /// Wishlist items whose "save from YouTube" waits for the lookup.
     save_after_resolve: HashMap<TrackId, WishlistId>,
-    last_pull: Option<Instant>,
-    pulling: HashSet<Service>,
+    likes: HashMap<Service, LikeSync>,
+    like_queue: likes::LikeQueue,
     pub(crate) wish: wishlist::WishState,
     share_seq: u64,
     clipboard_id: u64,
@@ -141,9 +198,12 @@ impl Streams {
         Self {
             rt,
             internal,
-            known: HashMap::new(),
-            albums: HashMap::new(),
-            playlists: HashMap::new(),
+            known: Known::default(),
+            pages: pages::PageCache::default(),
+            schedule: StreamSchedule::default(),
+            window_visible: true,
+            window_focused: true,
+            last_wish_tick: None,
             busy: HashSet::new(),
             errors: HashMap::new(),
             web: HashMap::new(),
@@ -156,8 +216,8 @@ impl Streams {
             refused: HashMap::new(),
             failures: HashMap::new(),
             save_after_resolve: HashMap::new(),
-            last_pull: None,
-            pulling: HashSet::new(),
+            likes: HashMap::new(),
+            like_queue: likes::LikeQueue::default(),
             wish: wishlist::WishState::default(),
             share_seq: 0,
             clipboard_id: 0,
@@ -182,11 +242,8 @@ impl Streams {
 
     /// Remembers stream tracks by remote id.
     fn learn<'a>(&mut self, tracks: impl IntoIterator<Item = &'a StreamTrack>) {
-        if self.known.len() > KNOWN_MAX {
-            self.known.clear();
-        }
         for t in tracks {
-            self.known.insert(t.id.clone(), t.clone());
+            self.known.insert(t);
         }
     }
 }
@@ -245,29 +302,51 @@ impl Worker {
         }
     }
 
-    /// Start-up: accounts, the first pull of likes, the wishlist view.
+    /// Start-up: accounts, the first check of likes (each service as soon
+    /// as its login is restored), the wishlist view.
     pub(crate) fn start_streams(&mut self) {
         self.apply_stream_cache();
         self.publish_accounts();
-        self.pull_all_likes();
+        self.likes_tick();
         self.publish_wishlist();
     }
 
-    /// Every 5 s: accounts while logging in, the periodic pull, the wishlist
-    /// scheduler, playlist sync, completing imported tracks.
+    /// The window is hidden and nothing plays: the periodic network work
+    /// waits (F20 of the request audit).
+    pub(crate) fn streams_idle(&self) -> bool {
+        !self.streaming.window_visible
+            && !matches!(self.status, v::Status::Playing | v::Status::Buffering)
+    }
+
+    /// Every 5 s: accounts while logging in, the like checks, playlist
+    /// sync, completing imported tracks (not while idle); the wishlist
+    /// scheduler (it also runs on every event) and the cache size once a
+    /// minute.
     pub(crate) fn stream_tick(&mut self) {
-        self.sync_tick();
-        self.enrich_tick();
-        self.publish_accounts();
-        self.publish_stream_cache();
-        if self
-            .streaming
-            .last_pull
-            .is_none_or(|t| t.elapsed() >= PULL_EVERY)
-        {
-            self.pull_all_likes();
+        let idle = self.streams_idle();
+        self.sync_tick(!idle);
+        if !idle {
+            self.enrich_tick();
+            self.likes_tick();
         }
-        self.wish_tick();
+        self.publish_accounts();
+        let every = self.streaming.schedule.wish_every;
+        if self.streaming.last_wish_tick.is_none_or(|t| t.elapsed() >= every) {
+            self.streaming.last_wish_tick = Some(Instant::now());
+            self.publish_stream_cache();
+            self.wish_tick();
+        }
+    }
+
+    /// `Command::WindowState`: a focus after a while checks the likes.
+    fn window_state(&mut self, visible: bool, focused: bool) {
+        let gained = focused && !self.streaming.window_focused;
+        self.streaming.window_visible = visible;
+        self.streaming.window_focused = focused;
+        log::debug!("window: visible {visible}, focused {focused}");
+        if visible && gained {
+            self.likes_if_stale();
+        }
     }
 
     /// Streaming commands; anything else is handed back.
@@ -317,6 +396,7 @@ impl Worker {
             Command::WishlistAttach { item, what } => self.wish_attach(item, what),
             Command::ImportFromService(service) => self.import_from_service(service),
             Command::ImportExportFiles(path) => self.import_export_files(path),
+            Command::WindowState { visible, focused } => self.window_state(visible, focused),
             Command::ClearStreamCache => {
                 for s in &self.streams {
                     s.clear_cache();
@@ -341,11 +421,17 @@ impl Worker {
                 result,
                 partial,
             } => self.stream_searched(seq, service, result, partial),
-            Msg::Page { seq, page, result } => self.page_loaded(seq, page, result),
-            Msg::Fetched(then, result) => self.fetched(then, result),
+            Msg::Loaded { key, result } => self.loaded(key, result),
             Msg::Resolved { track, found } => self.resolved(track, found),
             Msg::LikesPulled(service, r) => self.likes_pulled(service, r),
-            Msg::LikePushed(remote, on, r) => self.like_pushed(&remote, on, r),
+            Msg::LikesHead(service, r) => self.likes_head(service, r),
+            Msg::LikeFlush(service) => self.flush_likes(service),
+            Msg::LikesPushed {
+                service,
+                remotes,
+                on,
+                result,
+            } => self.likes_pushed(service, &remotes, on, result),
             Msg::Wish(w) => self.wish_msg(w),
             Msg::Shared {
                 seq,
@@ -386,5 +472,21 @@ impl Worker {
             Some(svc) => svc.config().downloads_dir.join(".youtube"),
             None => std::env::temp_dir().join("nikgob-youtube"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_known_tracks_drop_their_oldest_quarter_not_everything() {
+        let mut k = Known::default();
+        for i in 0..=KNOWN_MAX {
+            k.insert(&StreamTrack::new(RemoteId::new(Service::Spotify, format!("t{i}")), "x"));
+        }
+        assert!(k.len() >= KNOWN_MAX * 3 / 4 - 1 && k.len() < KNOWN_MAX, "{}", k.len());
+        assert!(k.contains_key(&RemoteId::new(Service::Spotify, format!("t{KNOWN_MAX}"))), "the newest stays");
+        assert!(!k.contains_key(&RemoteId::new(Service::Spotify, "t0")), "the oldest went");
     }
 }

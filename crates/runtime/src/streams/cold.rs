@@ -63,12 +63,15 @@ pub(crate) const IMPORT_DEVICE: &str = "import";
 const LIKES_PER_STEP: usize = 200;
 /// Plays written per transaction.
 const HISTORY_BATCH: usize = 1_000;
-/// Video ids looked up on YouTube Music for an export without titles.
+/// Video ids looked up on YouTube Music for an export without titles, one
+/// per [`YT_LOOKUP_EVERY`] (stopping at a rate limit).
 const YT_LOOKUPS: usize = 3_000;
-const YT_PARALLEL: usize = 4;
-/// Tracks completed from a service per batch, and the pause between
-/// batches (Spotify's quota is shared).
-const ENRICH_BATCH: u32 = 10;
+const YT_LOOKUP_EVERY: Duration = Duration::from_secs(1);
+/// Tracks completed from a service per batch (one request for Spotify:
+/// `tracks(ids)`; YouTube asks one by one), and the pause between batches
+/// (Spotify's quota is shared).
+const ENRICH_BATCH_SPOTIFY: u32 = 50;
+const ENRICH_BATCH_YOUTUBE: u32 = 10;
 const ENRICH_PAUSE_SPOTIFY: Duration = Duration::from_secs(60);
 const ENRICH_PAUSE_YOUTUBE: Duration = Duration::from_secs(20);
 /// Nothing to complete: look again after this.
@@ -254,20 +257,25 @@ fn wanted(i: &Item, full: &HashMap<String, StreamTrack>) -> Wanted {
     }
 }
 
-/// Looks up YouTube video ids an export lists without a title.
+/// Looks up YouTube video ids an export lists without a title: one a
+/// second, stopping at a rate limit (the rest keep the id as their title
+/// and are completed later, a few at a time).
 async fn youtube_lookups(svc: Arc<dyn StreamService>, ids: Vec<String>) -> HashMap<String, StreamTrack> {
     let mut out = HashMap::new();
-    let mut set = tokio::task::JoinSet::new();
-    let mut ids = ids.into_iter();
-    loop {
-        while set.len() < YT_PARALLEL {
-            let Some(id) = ids.next() else { break };
-            let svc = svc.clone();
-            set.spawn(async move { (id.clone(), svc.track(&id).await) });
+    let total = ids.len();
+    for (i, id) in ids.into_iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(YT_LOOKUP_EVERY).await;
         }
-        let Some(done) = set.join_next().await else { break };
-        if let Ok((id, Ok(t))) = done {
-            out.insert(id, t);
+        match svc.track(&id).await {
+            Ok(t) => {
+                out.insert(id, t);
+            }
+            Err(e @ StreamError::RateLimited { .. }) => {
+                log::warn!("youtube: export look-ups stopped after {i} of {total}: {e}");
+                break;
+            }
+            Err(_) => {}
         }
     }
     out
@@ -379,6 +387,13 @@ async fn read_export(
             .filter(|i| i.service == Service::Youtube && i.title.is_empty())
             .filter_map(|i| i.id.clone())
             .filter(|id| seen.insert(id.clone()))
+            // Known already (an earlier import, a like pull): nothing to ask.
+            .filter(|id| {
+                lib.track_by_remote(&RemoteId::new(Service::Youtube, id.clone()))
+                    .ok()
+                    .flatten()
+                    .is_none()
+            })
             .take(YT_LOOKUPS)
             .collect();
         if !blank.is_empty() {
@@ -589,7 +604,7 @@ impl Worker {
             Ok(liked) => {
                 self.streaming.learn(liked);
                 counts.likes = liked.len();
-                counts.new_likes = self.apply_remote_likes(service, liked, true);
+                counts.new_likes = self.apply_remote_likes(service, liked, true, false);
             }
             Err(e) => problems.push(format!("лайки: {}", error_text(e))),
         }
@@ -937,13 +952,17 @@ impl Worker {
             if e.busy || e.next_at.is_some_and(|t| Instant::now() < t) {
                 continue;
             }
+            let batch = match service {
+                Service::Spotify => ENRICH_BATCH_SPOTIFY,
+                Service::Youtube => ENRICH_BATCH_YOUTUBE,
+            };
             let todo: Vec<(TrackId, String)> = self
                 .lib
-                .stream_tracks_to_enrich(service, ENRICH_BATCH * 5)
+                .stream_tracks_to_enrich(service, batch * 3)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|(t, _)| !e.tried.contains(t))
-                .take(ENRICH_BATCH as usize)
+                .take(batch as usize)
                 .collect();
             if todo.is_empty() {
                 e.next_at = Some(Instant::now() + ENRICH_IDLE);
@@ -952,15 +971,16 @@ impl Worker {
             e.busy = true;
             e.tried.extend(todo.iter().map(|(t, _)| *t));
             self.streaming.spawn(async move {
-                let mut results = Vec::new();
-                for (track, id) in todo {
-                    let r = svc.track(&id).await;
-                    let stop = matches!(r, Err(StreamError::RateLimited { .. }));
-                    results.push((track, id, r));
-                    if stop {
-                        break;
-                    }
-                }
+                let ids: Vec<String> = todo.iter().map(|(_, id)| id.clone()).collect();
+                let results = match svc.tracks(&ids).await {
+                    Ok(found) => todo
+                        .into_iter()
+                        .zip(found)
+                        .map(|((track, id), t)| (track, id, t.ok_or(StreamError::Unavailable)))
+                        .collect(),
+                    // The whole batch failed (rate limited): tried again later.
+                    Err(e) => todo.into_iter().map(|(track, id)| (track, id, Err(e.clone()))).collect(),
+                };
                 Msg::Cold(ColdMsg::Enriched { service, results })
             });
         }

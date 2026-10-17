@@ -983,6 +983,12 @@ impl Worker {
         });
         let now = Self::now();
         let youtube = self.service(Service::Youtube).is_some();
+        // Albums and artists repeat over the items (an album of 12 = 12
+        // items): each is read once per publish.
+        let mut releases: std::collections::HashMap<nikgob_core::model::ReleaseId, Option<nikgob_core::model::Release>> =
+            std::collections::HashMap::new();
+        let mut artist_names: std::collections::HashMap<nikgob_core::model::ArtistId, Option<String>> =
+            std::collections::HashMap::new();
         let mut rows = Vec::new();
         let mut by_album: Vec<v::WishlistGroup> = Vec::new();
         let mut by_artist: Vec<v::WishlistGroup> = Vec::new();
@@ -991,7 +997,12 @@ impl Worker {
         for item in &items {
             let track = item.track_id.and_then(|t| self.lib.get_track(t).ok().flatten());
             let release_id = item.release_id.or(track.as_ref().and_then(|t| t.release_id));
-            let release = release_id.and_then(|r| self.lib.get_release(r).ok().flatten());
+            let release = release_id.and_then(|r| {
+                releases
+                    .entry(r)
+                    .or_insert_with(|| self.lib.get_release(r).ok().flatten())
+                    .clone()
+            });
             let artist_id = release
                 .as_ref()
                 .and_then(|r| r.artist_credit.0.first().and_then(|p| p.artist_id))
@@ -1026,7 +1037,11 @@ impl Worker {
                             g.waiting += waiting;
                         }
                         None => by_artist.push(v::WishlistGroup {
-                            title: self.lib.get_artist(a).ok().flatten().map_or_else(|| artist.clone(), |a| a.name),
+                            title: artist_names
+                                .entry(a)
+                                .or_insert_with(|| self.lib.get_artist(a).ok().flatten().map(|a| a.name))
+                                .clone()
+                                .unwrap_or_else(|| artist.clone()),
                             subtitle: String::new(),
                             release: None,
                             artist: Some(a),

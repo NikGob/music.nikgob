@@ -4,15 +4,19 @@
 //! background — ISRC first, then "artist title" with the official song
 //! preferred over a clip over an upload, a length within 3 s and the best
 //! title match — and the hit is attached to the same track id as one more
-//! source. Misses are not asked again for a while.
+//! source. Misses are not asked again for days (kept in the library's
+//! cache, so a restart does not ask either). The lookups ask one category
+//! at a time: songs, videos only when no song fits (2 requests instead of
+//! up to 11). The next one or two tracks of the queue are looked up ahead,
+//! one after the other, so a Spotify-only track starts without waiting.
 
 use std::time::Instant;
 
 use nikgob_core::model::{SourceKind, TrackId};
-use nikgob_core::streaming::{Service, StreamTrack, TrackKind};
+use nikgob_core::streaming::{SearchKind, Service, StreamTrack, TrackKind};
 use nikgob_metadata::text::{artist_key, search_artist, search_title, similarity, title_key};
 
-use super::{MISS_TTL, Msg};
+use super::Msg;
 use crate::Worker;
 use crate::queue::Entry;
 
@@ -89,31 +93,57 @@ pub(crate) fn pick_youtube(hits: &[StreamTrack], q: &ResolveQuery) -> Option<Str
     ranked.first().map(|(.., h)| (*h).clone())
 }
 
+/// Tracks to look up ahead in the queue.
+const AHEAD: usize = 2;
+/// Library cache key of a lookup that found nothing.
+fn miss_key(track: TrackId) -> String {
+    format!("yt_miss.{track}")
+}
+
+/// Songs, then videos only when no song fits; a rate limit stops it.
+async fn songs_then_videos(
+    yt: &dyn nikgob_core::streaming::StreamService,
+    text: &str,
+    keep: &(dyn Fn(&StreamTrack) -> bool + Sync),
+    q: &ResolveQuery,
+) -> Result<Option<StreamTrack>, ()> {
+    for kind in [SearchKind::Songs, SearchKind::Videos] {
+        match yt.search_kind(text, kind).await {
+            Ok(r) => {
+                let hits: Vec<StreamTrack> = r.tracks.into_iter().filter(|t| keep(t)).collect();
+                if let Some(hit) = pick_youtube(&hits, q) {
+                    return Ok(Some(hit));
+                }
+            }
+            Err(e @ nikgob_core::streaming::StreamError::RateLimited { .. }) => {
+                log::warn!("YouTube lookup of {text}: {e}");
+                return Err(());
+            }
+            Err(e) => log::warn!("YouTube lookup of {text}: {e}"),
+        }
+    }
+    Ok(None)
+}
+
 /// "artist title" first; when that finds nothing, the title alone with the
 /// artist checked on the hits.
 pub(crate) async fn search_youtube(
     yt: &dyn nikgob_core::streaming::StreamService,
     q: &ResolveQuery,
 ) -> Option<StreamTrack> {
-    match yt.search(&q.text()).await {
-        Ok(r) => {
-            if let Some(hit) = pick_youtube(&r.tracks, q) {
-                return Some(hit);
-            }
-        }
-        Err(e) => log::warn!("YouTube lookup of {}: {e}", q.text()),
+    if let Some(hit) = songs_then_videos(yt, &q.text(), &|_| true, q).await.ok()? {
+        return Some(hit);
     }
-    let hits = yt.search(&search_title(&q.title)).await.ok()?.tracks;
     let artist = artist_key(&q.artist);
-    let by_artist: Vec<StreamTrack> = hits
-        .into_iter()
-        .filter(|h| {
-            h.artists
-                .iter()
-                .any(|a| similarity(&artist_key(&a.name), &artist) >= MIN_ARTIST)
-        })
-        .collect();
-    pick_youtube(&by_artist, q)
+    let by_artist = move |h: &StreamTrack| {
+        h.artists
+            .iter()
+            .any(|a| similarity(&artist_key(&a.name), &artist) >= MIN_ARTIST)
+    };
+    songs_then_videos(yt, &search_title(&q.title), &by_artist, q)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Why a stream did not play, from the engine's error text, as the user
@@ -177,8 +207,20 @@ impl Worker {
         if self.streaming.resolving.contains(&track) {
             return true;
         }
-        if let Some(at) = self.streaming.misses.get(&track) {
-            if at.elapsed() < MISS_TTL {
+        let ttl = self.streaming.schedule.miss_ttl.as_millis() as i64;
+        let now = nikgob_library::now_ms();
+        let missed = match self.streaming.misses.get(&track) {
+            Some(at) => Some(*at),
+            None => self
+                .lib
+                .cache_get(&miss_key(track))
+                .ok()
+                .flatten()
+                .map(|(at, _)| at),
+        };
+        if let Some(at) = missed {
+            if now - at < ttl {
+                self.streaming.misses.insert(track, at);
                 return false;
             }
             self.streaming.misses.remove(&track);
@@ -251,7 +293,9 @@ impl Worker {
                 }
             }
             None => {
-                self.streaming.misses.insert(track, Instant::now());
+                let now = nikgob_library::now_ms();
+                self.streaming.misses.insert(track, now);
+                let _ = self.lib.cache_put(&miss_key(track), now, "");
             }
         }
         let why = self.streaming.failures.remove(&track);
@@ -291,6 +335,28 @@ impl Worker {
             }
         } else if self.queue.peek_auto_next().is_some_and(|n| n.track == track) {
             self.preload_next();
+        }
+        self.resolve_ahead();
+    }
+
+    /// Looks up the next [`AHEAD`] tracks of the queue that only YouTube
+    /// Music may have, one at a time (the next starts when this one
+    /// answered), whatever the gapless setting.
+    pub(crate) fn resolve_ahead(&mut self) {
+        if !self.streaming.resolving.is_empty() {
+            return; // one lookup at a time; the playing track's goes first
+        }
+        let mut next: Vec<Entry> = self.queue.peek_auto_next().into_iter().collect();
+        next.extend(self.queue.upcoming().iter().skip(1).take(AHEAD - 1).copied());
+        let current = self.queue.current().map(|c| c.track);
+        for e in next {
+            if Some(e.track) == current {
+                continue;
+            }
+            if self.request(e).is_none() && self.can_resolve(e.track) {
+                self.begin_resolve(e.track);
+                return;
+            }
         }
     }
 }

@@ -134,7 +134,8 @@ async fn lookup(
         image: None,
         albums,
     };
-    let hits = match svc.search(&name).await {
+    // Artists only: one request in the service's background lane.
+    let hits = match svc.search_kind(&name, nikgob_core::streaming::SearchKind::Artists).await {
         Ok(s) => s.artists,
         Err(e) => return none(Err(e)),
     };

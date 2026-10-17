@@ -1,8 +1,15 @@
 //! Album / playlist / artist pages of a service, and playing and liking
 //! stream items by remote id. Nothing joins the library by being shown; a
 //! track gets its (outside-the-library) row when it is queued.
+//!
+//! What was fetched is kept ([`PageCache`]): albums for a day, artists for
+//! six hours, playlists for half an hour or until a sync sees a new
+//! version. Opening it again (going back) shows it at once and asks
+//! nothing; one fetch serves everyone who asked while it ran (opening an
+//! album and pressing play is one request).
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use nikgob_core::model::{EventContext, LikeTarget, TrackId};
 use nikgob_core::streaming::{
@@ -31,6 +38,91 @@ pub(crate) enum Then {
     Like(bool),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Kind {
+    Album,
+    Playlist,
+    Artist,
+}
+
+/// A page of a service: its kind and remote id.
+pub(crate) type Key = (Kind, RemoteId);
+
+/// Pages kept at most.
+const PAGES_MAX: usize = 400;
+
+pub(crate) fn key_of(page: &v::StreamPage) -> Key {
+    let kind = match page {
+        v::StreamPage::Album(_) => Kind::Album,
+        v::StreamPage::Playlist(_) => Kind::Playlist,
+        v::StreamPage::Artist(_) => Kind::Artist,
+    };
+    (kind, page.remote().clone())
+}
+
+fn key_of_data(d: &PageData) -> Key {
+    match d {
+        PageData::Album(a) => (Kind::Album, a.id.clone()),
+        PageData::Playlist(p) => (Kind::Playlist, p.id.clone()),
+        PageData::Artist(a) => (Kind::Artist, a.id.clone()),
+    }
+}
+
+/// Who waits for a fetch.
+pub(crate) enum Waiter {
+    Page { seq: u64, page: v::StreamPage },
+    Then(Then),
+}
+
+/// Fetched pages, and the fetches running with who waits for them.
+#[derive(Default)]
+pub(crate) struct PageCache {
+    entries: HashMap<Key, (Instant, PageData)>,
+    inflight: HashMap<Key, Vec<Waiter>>,
+}
+
+impl PageCache {
+    /// Whatever was fetched, however long ago (marks, counts).
+    pub(crate) fn get(&self, key: &Key) -> Option<&PageData> {
+        self.entries.get(key).map(|(_, d)| d)
+    }
+
+    /// Fetched less than `ttl` ago.
+    pub(crate) fn fresh(&self, key: &Key, ttl: Duration) -> Option<&PageData> {
+        self.entries
+            .get(key)
+            .filter(|(at, _)| at.elapsed() < ttl)
+            .map(|(_, d)| d)
+    }
+
+    pub(crate) fn album(&self, id: &RemoteId) -> Option<&StreamAlbum> {
+        match self.get(&(Kind::Album, id.clone())) {
+            Some(PageData::Album(a)) => Some(a),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn put(&mut self, data: PageData) {
+        if self.entries.len() >= PAGES_MAX
+            && let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+        {
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(key_of_data(&data), (Instant::now(), data));
+    }
+
+    /// The playlist changed in its service: the next open fetches it.
+    pub(crate) fn stale_playlist(&mut self, id: &RemoteId) {
+        if let Some((at, _)) = self.entries.get_mut(&(Kind::Playlist, id.clone())) {
+            *at = Instant::now() - Duration::from_secs(365 * 24 * 3600);
+        }
+    }
+}
+
 impl Worker {
     pub(crate) fn load_stream(&mut self, page: v::StreamPage) {
         let remote = page.remote().clone();
@@ -43,52 +135,81 @@ impl Worker {
         };
         self.streaming.page_seq += 1;
         let seq = self.streaming.page_seq;
-        // Already fetched this session: shown at once, refreshed anyway.
-        let cached = match &page {
-            v::StreamPage::Album(id) => self.streaming.albums.get(id).cloned().map(PageData::Album),
-            v::StreamPage::Playlist(id) => {
-                self.streaming.playlists.get(id).cloned().map(PageData::Playlist)
-            }
-            v::StreamPage::Artist(_) => None,
-        };
-        let view = match &cached {
+        let key = key_of(&page);
+        let ttl = self.page_ttl(key.0);
+        // Fetched lately: shown at once, nothing is asked.
+        if let Some(data) = self.streaming.pages.fresh(&key, ttl).cloned() {
+            log::debug!("{:?} {}: from the page cache", key.0, key.1);
+            let view = self.page_view(&page, &data);
+            self.publish(|s, _| s.stream_page = Some(view));
+            return;
+        }
+        // Fetched long ago: shown while it is fetched again.
+        let view = match self.streaming.pages.get(&key).cloned() {
             Some(data) => {
-                let mut view = self.page_view(&page, data);
+                let mut view = self.page_view(&page, &data);
                 view.loading = true;
                 view
             }
             None => v::StreamPageView::loading(page.clone()),
         };
         self.publish(|s, _| s.stream_page = Some(view));
-        let p = page.clone();
+        self.fetch_page(key, Waiter::Page { seq, page }, svc);
+    }
+
+    /// How long a page of this kind is shown without asking again.
+    fn page_ttl(&self, kind: Kind) -> Duration {
+        let s = &self.streaming.schedule;
+        match kind {
+            Kind::Album => s.album_ttl,
+            Kind::Artist => s.artist_ttl,
+            Kind::Playlist => s.playlist_ttl,
+        }
+    }
+
+    /// Fetches a page for `waiter`, or adds it to the fetch already running.
+    fn fetch_page(&mut self, key: Key, waiter: Waiter, svc: std::sync::Arc<dyn nikgob_core::streaming::StreamService>) {
+        if let Some(waiting) = self.streaming.pages.inflight.get_mut(&key) {
+            log::debug!("{:?} {}: joins the fetch running", key.0, key.1);
+            waiting.push(waiter);
+            return;
+        }
+        self.streaming.pages.inflight.insert(key.clone(), vec![waiter]);
+        let k = key.clone();
         self.streaming.spawn(async move {
-            let id = p.remote().id.clone();
-            let result = match &p {
-                v::StreamPage::Album(_) => svc.album(&id).await.map(PageData::Album),
-                v::StreamPage::Playlist(_) => svc.playlist(&id).await.map(PageData::Playlist),
-                v::StreamPage::Artist(_) => svc.artist(&id).await.map(PageData::Artist),
+            let id = &k.1.id;
+            let result = match k.0 {
+                Kind::Album => svc.album(id).await.map(PageData::Album),
+                Kind::Playlist => svc.playlist(id).await.map(PageData::Playlist),
+                Kind::Artist => svc.artist(id).await.map(PageData::Artist),
             };
-            Msg::Page {
-                seq,
-                page: p,
-                result,
-            }
+            Msg::Loaded { key: k, result }
         });
     }
 
-    fn remember(&mut self, data: &PageData) {
+    /// A fetch came back: kept, and everyone waiting for it hears.
+    pub(crate) fn loaded(&mut self, key: Key, result: Result<PageData, StreamError>) {
+        if let Ok(data) = &result {
+            self.remember(data);
+        }
+        for w in self.streaming.pages.inflight.remove(&key).unwrap_or_default() {
+            match w {
+                Waiter::Page { seq, page } => self.page_loaded(seq, page, result.clone()),
+                Waiter::Then(then) => self.fetched(then, result.clone()),
+            }
+        }
+    }
+
+    pub(crate) fn remember(&mut self, data: &PageData) {
         match data {
             PageData::Album(a) => {
                 self.learn_album(a);
                 self.streaming.learn(&a.tracks);
-                self.streaming.albums.insert(a.id.clone(), a.clone());
             }
-            PageData::Playlist(p) => {
-                self.streaming.learn(&p.tracks);
-                self.streaming.playlists.insert(p.id.clone(), p.clone());
-            }
+            PageData::Playlist(p) => self.streaming.learn(&p.tracks),
             PageData::Artist(_) => {}
         }
+        self.streaming.pages.put(data.clone());
     }
 
     pub(crate) fn page_loaded(
@@ -97,9 +218,6 @@ impl Worker {
         page: v::StreamPage,
         result: Result<PageData, StreamError>,
     ) {
-        if let Ok(data) = &result {
-            self.remember(data);
-        }
         if seq != self.streaming.page_seq {
             return;
         }
@@ -121,13 +239,7 @@ impl Worker {
         let Some(page) = self.state.read().stream_page.as_ref().map(|p| p.page.clone()) else {
             return;
         };
-        let data = match &page {
-            v::StreamPage::Album(id) => self.streaming.albums.get(id).cloned().map(PageData::Album),
-            v::StreamPage::Playlist(id) => {
-                self.streaming.playlists.get(id).cloned().map(PageData::Playlist)
-            }
-            v::StreamPage::Artist(_) => None,
-        };
+        let data = self.streaming.pages.get(&key_of(&page)).cloned();
         if let Some(data) = data {
             let view = self.page_view(&page, &data);
             self.publish(|s, _| s.stream_page = Some(view));
@@ -209,7 +321,7 @@ impl Worker {
     /// it was fetched) and the library's.
     pub(crate) fn album_have(&self, a: &StreamAlbum) -> (Option<nikgob_core::model::ReleaseId>, v::AlbumHave) {
         let release = self.lib.release_by_remote(&a.id).ok().flatten();
-        let full = self.streaming.albums.get(&a.id).unwrap_or(a);
+        let full = self.streaming.pages.album(&a.id).unwrap_or(a);
         let listed = (!full.tracks.is_empty()).then_some(full.tracks.len() as u32);
         let theirs = full.total_tracks.max(a.total_tracks).max(listed).unwrap_or(0);
         let p = release.and_then(|r| self.lib.release_progress(r).ok().flatten());
@@ -294,33 +406,26 @@ impl Worker {
     }
 
     pub(crate) fn with_album(&mut self, id: RemoteId, then: Then) {
-        if let Some(a) = self.streaming.albums.get(&id).cloned() {
-            self.fetched(then, Ok(PageData::Album(a)));
-            return;
-        }
-        let Some(svc) = self.service(id.service) else {
-            self.toast(format!("{} выключен", id.service.display_name()), None);
-            return;
-        };
-        self.streaming.spawn(async move {
-            let r = svc.album(&id.id).await.map(PageData::Album);
-            Msg::Fetched(then, r)
-        });
+        self.with_page((Kind::Album, id), then);
     }
 
     pub(crate) fn with_playlist(&mut self, id: RemoteId, then: Then) {
-        if let Some(p) = self.streaming.playlists.get(&id).cloned() {
-            self.fetched(then, Ok(PageData::Playlist(p)));
+        self.with_page((Kind::Playlist, id), then);
+    }
+
+    /// Plays / likes a page: kept (fresh) → at once, else fetched (or the
+    /// fetch already running is joined).
+    fn with_page(&mut self, key: Key, then: Then) {
+        let ttl = self.page_ttl(key.0);
+        if let Some(data) = self.streaming.pages.fresh(&key, ttl).cloned() {
+            self.fetched(then, Ok(data));
             return;
         }
-        let Some(svc) = self.service(id.service) else {
-            self.toast(format!("{} выключен", id.service.display_name()), None);
+        let Some(svc) = self.service(key.1.service) else {
+            self.toast(format!("{} выключен", key.1.service.display_name()), None);
             return;
         };
-        self.streaming.spawn(async move {
-            let r = svc.playlist(&id.id).await.map(PageData::Playlist);
-            Msg::Fetched(then, r)
-        });
+        self.fetch_page(key, Waiter::Then(then), svc);
     }
 
     pub(crate) fn fetched(&mut self, then: Then, result: Result<PageData, StreamError>) {
@@ -332,7 +437,6 @@ impl Worker {
                 return;
             }
         };
-        self.remember(&data);
         let (tracks, title, ctx, album) = match &data {
             PageData::Album(a) => {
                 (a.tracks.clone(), format!("альбома «{}»", a.title), EventContext::Album, Some(a.id.clone()))
@@ -380,6 +484,7 @@ impl Worker {
         self.command(Command::Like(LikeTarget::Track(id), on));
         self.refresh_stream_page();
         // A liked track is a library hit now: the sections merge again.
+        self.streaming.search.forget_links();
         self.rebuild_sections();
     }
 }
