@@ -36,6 +36,8 @@ pub enum Act {
     Replace,
     Visualizer,
     Trash,
+    /// A song.link of the track into the clipboard.
+    Share,
     /// A divider.
     Sep,
 }
@@ -172,6 +174,7 @@ impl Chrome {
                 .icon(Icon::GraphicEq)
                 .shortcut("F12"),
             Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete),
+            Act::Share => MenuItem::new("Поделиться").icon(Icon::Share),
             Act::Sep => MenuItem::new(""),
         }
     }
@@ -230,6 +233,7 @@ impl Chrome {
             Act::Replace => out.push(Command::SearchTorrents(replace_query(t))),
             Act::Visualizer => self.visualizer = true,
             Act::Trash => self.trash = Some((t.id, t.title.clone())),
+            Act::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),
             Act::Sep => {}
         }
     }

@@ -113,21 +113,24 @@ pub fn show(
             chrome::press_previous(ui.ctx(), state, out);
         }
         let playing = p.status == Status::Playing;
+        let buffering = p.status == Status::Buffering;
         // Play/pause: filled toggle M; playing = square, paused = round.
-        if ui
-            .add(
-                IconButton::new(Icon::PlayArrow)
-                    .selected_icon(Icon::Pause)
-                    .size(Size::M)
-                    .style(Style::Filled)
-                    .selected(playing)
-                    .colors(play_colors)
-                    .filled_icon(true)
-                    .tooltip("Пауза / играть (Space)")
-                    .id_salt("bar-play"),
-            )
-            .clicked()
-        {
+        // A stream that is still opening shows a loading indicator instead.
+        let play = ui.add(
+            IconButton::new(Icon::PlayArrow)
+                .selected_icon(Icon::Pause)
+                .size(Size::M)
+                .style(Style::Filled)
+                .selected(playing || buffering)
+                .colors(play_colors)
+                .filled_icon(true)
+                .tooltip(if buffering { "Загружается… (Space — пауза)" } else { "Пауза / играть (Space)" })
+                .id_salt("bar-play"),
+        );
+        if buffering {
+            common::buffering_overlay(ui, play.rect, play_colors.container, play_colors.content);
+        }
+        if play.clicked() {
             out.push(Command::TogglePlay);
         }
         if ui
@@ -269,7 +272,7 @@ pub fn show(
             if !acts.is_empty() {
                 acts.push(Act::Sep);
             }
-            acts.extend([Act::Playlist, Act::Artist, Act::Album, Act::Info, Act::Sep, Act::Tags, Act::Replace]);
+            acts.extend([Act::Playlist, Act::Artist, Act::Album, Act::Info, Act::Share, Act::Sep, Act::Tags, Act::Replace]);
             chrome.track_menu(&more, "bar-more", &acts, t, state, Where::Bar, out);
         }
     });
@@ -289,7 +292,7 @@ pub fn show(
             ui.painter().line_segment([egui::pos2(x0, y), egui::pos2(x0 + (x1 - x0) * f, y)], stroke(on));
         }
     }
-    if p.status == Status::Playing {
+    if matches!(p.status, Status::Playing | Status::Buffering) {
         // Labels tick once a second; the wave asks for frames itself.
         ui.ctx().request_repaint_after(Duration::from_millis(250));
     }

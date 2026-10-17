@@ -65,11 +65,21 @@ pub fn card_row(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
         });
 }
 
-/// "3/12" when a release is incomplete locally.
+/// "3 из 12" when a release is incomplete locally.
 pub fn progress_badge(r: &ReleaseCard) -> Option<String> {
     match r.total_tracks {
-        Some(t) if r.local_tracks < t => Some(format!("{}/{}", r.local_tracks, t)),
+        Some(t) if r.local_tracks < t => Some(format!("{} из {}", r.local_tracks, t)),
         _ => None,
+    }
+}
+
+/// The badge on an album card: "стрим" when the library has none of its
+/// files (it is liked or in a playlist from a service), else "3 из 12".
+pub fn card_badge(r: &ReleaseCard) -> Option<String> {
+    if r.local_tracks == 0 {
+        Some("стрим".to_owned())
+    } else {
+        progress_badge(r)
     }
 }
 
@@ -91,7 +101,7 @@ pub fn release_card(
     let o = MediaCard::new(&r.title)
         .subtitle(release_subtitle(r))
         .cover_opt(r.cover.as_ref().map(|c| c.uri()))
-        .badge_opt(progress_badge(r))
+        .badge_opt(card_badge(r))
         .width(width)
         .id_salt(("release-card", row, r.id))
         .show(ui);
@@ -124,6 +134,7 @@ pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) ->
         .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(r.artist_id.is_some()))
         .divider()
         .item(MenuItem::new(album_like_label(r.liked)).icon(Icon::Favorite).selected(r.liked))
+        .item(MenuItem::new("Поделиться").icon(Icon::Share))
         .divider()
         .item(MenuItem::new("Удалить альбом").icon(Icon::Delete))
         .item(MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete))
@@ -134,8 +145,9 @@ pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) ->
         2 => out.push(Command::EnqueueRelease(r.id)),
         3 => return r.artist_id.map(Route::Artist),
         4 => out.push(Command::Like(LikeTarget::Release(r.id), !r.liked)),
-        5 => super::request_release_delete(&resp.ctx, r.id, &r.title, false),
-        6 => super::request_release_delete(&resp.ctx, r.id, &r.title, true),
+        5 => out.push(Command::Share(nikgob_view::ShareTarget::Release(r.id))),
+        6 => super::request_release_delete(&resp.ctx, r.id, &r.title, false),
+        7 => super::request_release_delete(&resp.ctx, r.id, &r.title, true),
         _ => {}
     }
     None

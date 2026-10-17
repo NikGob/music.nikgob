@@ -13,7 +13,7 @@ use crate::{
     components::{Button, Divider, FilterChip, Menu, MenuItem, Slider, Style, Switch, TextField},
 };
 
-fn group(ui: &mut Ui, title: &str) -> egui::Response {
+pub(super) fn group(ui: &mut Ui, title: &str) -> egui::Response {
     let s = Theme::get(ui.ctx()).scheme;
     ui.add_space(24.0);
     let header = ui.label(TypeRole::TitleSmall.style().rich(title, s.primary));
@@ -23,7 +23,7 @@ fn group(ui: &mut Ui, title: &str) -> egui::Response {
 
 /// A 56/72 row: label (+ supporting) on the left, a control on the right.
 /// In a narrow page the control goes under the text.
-fn row(ui: &mut Ui, id: Id, label: &str, supporting: Option<&str>, control: impl FnOnce(&mut Ui)) {
+pub(super) fn row(ui: &mut Ui, id: Id, label: &str, supporting: Option<&str>, control: impl FnOnce(&mut Ui)) {
     settings_help::item(ui, id, label, |ui| row_body(ui, id, label, supporting, control));
 }
 
@@ -81,7 +81,7 @@ fn row_body(ui: &mut Ui, id: Id, label: &str, supporting: Option<&str>, control:
 
 /// Segmented buttons for a choice row (labels and values from
 /// [`Id::choices`]); hovering one previews it in the row's card.
-fn choice(ui: &mut Ui, id: Id, p: &mut Prefs) {
+pub(super) fn choice(ui: &mut Ui, id: Id, p: &mut Prefs) {
     let labels: Vec<&str> = id.choices().iter().map(|c| c.label).collect();
     let (pick, rects) = connected(ui, egui::Id::new(("set-choice", id)), &labels, id.chosen(p), &[]);
     settings_help::report_choices(ui.ctx(), rects);
@@ -126,7 +126,7 @@ fn ellipsize(text: &str, max: usize) -> String {
 }
 
 /// A 0..=1 slider over `lo..=hi` that sends whole steps of `step`.
-fn range_slider(
+pub(super) fn range_slider(
     ui: &mut Ui,
     id: &str,
     value: f32,
@@ -160,7 +160,7 @@ fn speed_step(raw: f32) -> f32 {
     }
 }
 
-fn fmt_speed(kbps: u32) -> String {
+pub(super) fn fmt_speed(kbps: u32) -> String {
     match kbps {
         0 => "без лимита".to_owned(),
         k if k < 1024 => format!("{k} КиБ/с"),
@@ -168,7 +168,7 @@ fn fmt_speed(kbps: u32) -> String {
     }
 }
 
-fn speed_slider(ui: &mut Ui, id: &str, kbps: u32) -> Option<u32> {
+pub(super) fn speed_slider(ui: &mut Ui, id: &str, kbps: u32) -> Option<u32> {
     let frac = (kbps as f32 / SPEED_MAX).sqrt().clamp(0.0, 1.0);
     let at = |v: f32| {
         let raw = v * v * SPEED_MAX;
@@ -227,15 +227,15 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         pages.settings_tab = id.tab();
         settings_help::begin_focus(ui.ctx(), id);
     }
-    let tab = pages.settings_tab.min(1);
-    if let (Some(n), _) = connected(ui, egui::Id::new("set-tab"), &["Основные", "Внешний вид"], tab, &[]) {
+    let tab = pages.settings_tab.min(settings_help::TABS.len() - 1);
+    if let (Some(n), _) = connected(ui, egui::Id::new("set-tab"), &settings_help::TABS, tab, &[]) {
         pages.settings_tab = n;
     }
 
-    if pages.settings_tab == settings_help::TAB_APPEARANCE {
-        appearance(ui, &mut p);
-    } else {
-        general(ui, &mut p, pages, out);
+    match pages.settings_tab {
+        settings_help::TAB_APPEARANCE => appearance(ui, &mut p),
+        settings_help::TAB_SOURCES => super::sources::show(ui, state, &mut p, pages, out),
+        _ => general(ui, &mut p, pages, out),
     }
     ui.add(Divider::new());
     settings_help::finish(ui, &mut p);
@@ -506,7 +506,7 @@ fn pct(v: f32) -> String {
 }
 
 /// Rows drawn faded while what they tune is off (they still work).
-fn dimmed(ui: &mut Ui, dim: bool, add: impl FnOnce(&mut Ui)) {
+pub(super) fn dimmed(ui: &mut Ui, dim: bool, add: impl FnOnce(&mut Ui)) {
     ui.scope(|ui| {
         if dim {
             ui.multiply_opacity(0.55);
@@ -547,7 +547,8 @@ fn swatches(ui: &mut Ui, p: &Prefs) -> Option<u8> {
     picked
 }
 
-/// Behaviour: controls, lyrics sources, sound, library, import, torrents.
+/// Behaviour: controls, lyrics, sound, library, import and quality
+/// (streaming and torrents live on «Источники»).
 fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
     group(ui, "Управление");
     row(ui, Id::CoverClickPause, "Клик по обложке — пауза", Some("В открытом треке"), |ui| {
@@ -723,94 +724,11 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
         });
     }
 
-    group(ui, "Торренты");
-    if pages.indexer_url.is_empty() && !p.prowlarr_url.is_empty() {
-        pages.indexer_url = p.prowlarr_url.clone();
-    }
-    ui.add_space(4.0);
-    settings_help::item(ui, Id::Prowlarr, "Prowlarr", |ui| {
-        TextField::new(&mut pages.indexer_url, "Адрес Prowlarr")
-            .placeholder("https://…")
-            .leading_icon(Icon::Link)
-            .width(480.0)
-            .id_salt("set-prowlarr-url")
-            .show(ui);
-        ui.add_space(8.0);
-        TextField::new(&mut pages.indexer_key, "API-ключ")
-            .password(true)
-            .supporting(if p.prowlarr_configured {
-                "Ключ сохранён. Введи новый, чтобы заменить."
-            } else {
-                "Хранится в settings.toml, в коде его нет."
-            })
-            .width(480.0)
-            .id_salt("set-prowlarr-key")
-            .show(ui);
-        ui.add_space(8.0);
-        if ui
-            .add(
-                Button::new("Сохранить")
-                    .style(Style::Tonal)
-                    .enabled(!pages.indexer_url.trim().is_empty() && !pages.indexer_key.trim().is_empty())
-                    .id_salt("set-prowlarr-save"),
-            )
-            .clicked()
-        {
-            out.push(Command::SetIndexer {
-                url: pages.indexer_url.trim().to_owned(),
-                api_key: std::mem::take(&mut pages.indexer_key).trim().to_owned(),
-            });
-        }
-    });
-    row(ui, Id::NoSeed, "Не раздавать", Some("Скачанное сразу перестаёт раздаваться"), |ui| {
-        ui.add(Switch::new(&mut p.no_seed).id_salt("set-noseed"));
-    });
-    row(ui, Id::SeedLimit, "Лимит раздачи", Some(&format!("{} ГБ", p.seed_limit_gb)), |ui| {
-        if let Some(v) = range_slider(ui, "set-seed", p.seed_limit_gb as f32, (0.0, 500.0), 5.0, |v| format!("{v:.0} ГБ")) {
-            p.seed_limit_gb = v as u32;
-        }
-    });
-    row(ui, Id::SeedDays, "Срок раздачи", Some(&format!("чистка через {} дн.", p.seed_days)), |ui| {
-        if let Some(v) = range_slider(ui, "set-seed-days", p.seed_days as f32, (1.0, 90.0), 1.0, |v| format!("{v:.0} дн.")) {
-            p.seed_days = v as u32;
-        }
-    });
-    row(
-        ui,
-        Id::SeedRatio,
-        "Ratio",
-        Some(&if p.seed_ratio < 0.05 { "без лимита".to_owned() } else { format!("до {:.1}", p.seed_ratio) }),
-        |ui| {
-            let label = |v: f32| if v < 0.05 { "без лимита".to_owned() } else { format!("{v:.1}") };
-            if let Some(v) = range_slider(ui, "set-ratio", p.seed_ratio, (0.0, 5.0), 0.5, label) {
-                p.seed_ratio = v;
-            }
-        },
-    );
-    row(ui, Id::DownloadLimit, "Скорость загрузки", Some(&fmt_speed(p.download_limit_kbps)), |ui| {
-        if let Some(v) = speed_slider(ui, "set-dl-limit", p.download_limit_kbps) {
-            p.download_limit_kbps = v;
-        }
-    });
-    row(ui, Id::UploadLimit, "Скорость отдачи", Some(&fmt_speed(p.upload_limit_kbps)), |ui| {
-        if let Some(v) = speed_slider(ui, "set-ul-limit", p.upload_limit_kbps) {
-            p.upload_limit_kbps = v;
-        }
-    });
-
-    group(ui, "Аккаунты");
-    row(ui, Id::Spotify, "Spotify", Some("Появится позже"), |ui| {
-        ui.add(Button::new("Войти").style(Style::Outlined).enabled(false).id_salt("acc-sp"));
-    });
-    row(ui, Id::YouTube, "YouTube Music", Some("Появится позже"), |ui| {
-        ui.add(Button::new("Войти").style(Style::Outlined).enabled(false).id_salt("acc-yt"));
-    });
-
     group(ui, "Узлы и бэкап");
     row(ui, Id::Nodes, "Raspberry Pi, сервер, телефон", Some("Появится позже"), |_| {});
 }
 
-fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
+pub(super) fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
     let _ = std::fs::create_dir_all(path);
     std::process::Command::new("explorer").arg(path).spawn().map(|_| ())
 }

@@ -130,6 +130,13 @@ impl Md3eUi {
         } else {
             self.nav_dir = 1.0;
         }
+        // A route that names a tab of «Загрузки» opens it (the rail's
+        // plain «Загрузки» keeps the last one).
+        if let Route::Downloads(tab) = route
+            && tab != nikgob_view::DownloadsTab::Active
+        {
+            self.pages.set_downloads_tab(tab);
+        }
         load_for(&route, out);
         self.stack.push(route);
         self.search.clear();
@@ -792,10 +799,14 @@ fn load_for(route: &Route, out: &mut Vec<Command>) {
         Route::Home => out.push(Command::LoadHome),
         Route::Library(_) => out.push(Command::LoadLibrary),
         Route::Release(id) => out.push(Command::LoadRelease(*id)),
-        Route::Artist(id) => out.push(Command::LoadArtist(*id)),
+        Route::Artist(id) => {
+            out.push(Command::LoadArtist(*id));
+            out.push(Command::LoadDiscography(*id));
+        }
         Route::Playlist(id) => out.push(Command::LoadPlaylist(*id)),
         Route::Stream(page) => out.push(Command::LoadStream(page.clone())),
-        Route::Downloads(_) | Route::Settings => {}
+        Route::Downloads(_) => out.push(Command::LoadWishlist),
+        Route::Settings => {}
     }
 }
 
@@ -903,6 +914,29 @@ impl Md3eUi {
     /// Switches the library page's tab (scripted screenshots).
     pub fn set_library_tab(&mut self, tab: nikgob_view::LibraryTab) {
         self.pages.library_tab = tab;
+    }
+
+    /// Opens Settings on a tab, scrolled to the row named `row` (scripted
+    /// screenshots): `sources`, `spotify`, `youtube`, `import`, `torrents`,
+    /// `appearance`, anything else = «Основные».
+    pub fn open_settings_at(&mut self, row: &str) {
+        use pages::SettingId as S;
+        self.pages.open_setting(match row {
+            "sources" | "spotify" => S::SpotifyEnabled,
+            "youtube" => S::YouTubeEnabled,
+            "personal" => S::SpotifyPersonal,
+            "likes" => S::LikeDownload,
+            "import" => S::ImportFiles,
+            "torrents" => S::Prowlarr,
+            "appearance" => S::Design,
+            _ => S::CoverClickPause,
+        });
+    }
+
+    /// Opens the personal-app fold and the cookies form of «Источники»
+    /// (scripted screenshots).
+    pub fn unfold_sources(&mut self) {
+        self.pages.unfold_sources();
     }
 
     /// Types into the search bar (used by scripted screenshots).

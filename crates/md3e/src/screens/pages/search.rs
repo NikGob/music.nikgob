@@ -1,11 +1,12 @@
-//! Поиск (md3e-player.md §3.6): a docked search view (radius 28, 56 dp
-//! header with source filter chips) under the bar. Sections: Библиотека,
-//! then Торренты, which run only on request (Enter or the button).
+//! Поиск (md3e-player.md §3.6, docs/stage3.md §3.2): a docked search view
+//! (radius 28, 56 dp header with source filter chips) under the bar.
+//! Sections: Библиотека → Spotify → YouTube Music (as each answers) →
+//! Торренты, which run only on request (Enter or the button).
 
 use egui::{Align, Id, Layout, Rect, Stroke, Ui, UiBuilder, pos2, vec2};
-use nikgob_view::{Command, Route, TorrentResult, ViewState};
+use nikgob_view::{Account, Command, Route, SearchSources, Service, StreamSearchSection, TorrentResult, ViewState};
 
-use super::{PageState, fmt_size, widgets};
+use super::{PageState, fmt_size, streams, widgets};
 use crate::{
     Icon, Theme, TypeRole,
     components::{
@@ -16,14 +17,39 @@ use crate::{
 };
 use widgets::{Lead, PlayFrom};
 
-/// Which sources the view shows. Spotify and YouTube are chips but not yet
-/// selectable (stage 3).
+/// Which sources the view shows (one chip at a time). The services asked
+/// follow it ([`Command::SetSearchSources`]); torrents run on request only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Filter {
     #[default]
     All,
     Library,
+    Spotify,
+    Youtube,
     Torrents,
+}
+
+impl Filter {
+    /// The sources this filter asks.
+    fn sources(self) -> SearchSources {
+        let only = |library, spotify, youtube| SearchSources { library, spotify, youtube, torrents: false };
+        match self {
+            Self::All => only(true, true, true),
+            Self::Library => only(true, false, false),
+            Self::Spotify => only(false, true, false),
+            Self::Youtube => only(false, false, true),
+            // The library stays for context; the indexer is asked by its button.
+            Self::Torrents => only(true, false, false),
+        }
+    }
+
+    fn service(self) -> Option<Service> {
+        match self {
+            Self::Spotify => Some(Service::Spotify),
+            Self::Youtube => Some(Service::Youtube),
+            _ => None,
+        }
+    }
 }
 
 const FILTER_KEY: &str = "md3e-search-filter";
@@ -73,9 +99,10 @@ pub fn search_results(
                 if ui.add(FilterChip::new("Библиотека", f == Filter::Library).id_salt("sf-lib")).clicked() {
                     f = Filter::Library;
                 }
-                for name in ["Spotify", "YouTube"] {
-                    ui.add(FilterChip::new(name, false).enabled(false).id_salt(("sf", name)))
-                        .on_disabled_hover_text("Этап 3");
+                for (name, chip) in [("Spotify", Filter::Spotify), ("YouTube", Filter::Youtube)] {
+                    if ui.add(FilterChip::new(name, f == chip).id_salt(("sf", name))).clicked() {
+                        f = chip;
+                    }
                 }
                 if ui.add(FilterChip::new("Торренты", f == Filter::Torrents).id_salt("sf-tor")).clicked() {
                     f = Filter::Torrents;
@@ -83,6 +110,15 @@ pub fn search_results(
             });
         });
     set_filter(&ctx, f);
+    // The services asked follow the chip (the runtime searches again).
+    let wanted = f.sources();
+    if wanted != state.search.sources {
+        let asked = ctx.data(|d| d.get_temp::<SearchSources>(Id::new("md3e-search-asked")));
+        if asked != Some(wanted) {
+            ctx.data_mut(|d| d.insert_temp(Id::new("md3e-search-asked"), wanted));
+            out.push(Command::SetSearchSources(wanted));
+        }
+    }
     ui.painter().line_segment(
         [header.left_bottom(), header.right_bottom()],
         Stroke::new(1.0, s.outline_variant),
@@ -102,18 +138,16 @@ pub fn search_results(
         .show(&mut bui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
             ui.add_space(8.0);
-            if f != Filter::Torrents {
+            if matches!(f, Filter::All | Filter::Library) {
                 nav = library(ui, query, state, f == Filter::Library, pages, out).or(nav.take());
             }
-            if f != Filter::Library {
-                nav = torrents(ui, query, state, pages, out).or(nav.take());
+            for service in [Service::Spotify, Service::Youtube] {
+                if f == Filter::All || f.service() == Some(service) {
+                    nav = stream_section(ui, query, service, state, f == Filter::All, pages, out).or(nav.take());
+                }
             }
-            if f == Filter::All {
-                ui.add_space(widgets::SECTION_GAP);
-                ui.label(TypeRole::BodySmall.style().rich(
-                    "Spotify и YouTube Music появятся на этапе 3.",
-                    s.on_surface_variant,
-                ));
+            if matches!(f, Filter::All | Filter::Torrents) {
+                nav = torrents(ui, query, state, pages, out).or(nav.take());
             }
             ui.add_space(bottom_inset);
         });
@@ -220,7 +254,7 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
 
     if !state.prefs.prowlarr_configured {
         ui.label(TypeRole::BodyMedium.style().rich_para(
-            "Prowlarr не настроен: адрес и ключ задаются в Настройках, раздел «Торренты».",
+            "Prowlarr не настроен: адрес и ключ задаются в Настройках → Источники → Торренты.",
             s.on_surface_variant,
         ));
         if ui.add(Button::new("Открыть настройки").style(Style::Text).icon(Icon::Settings).id_salt("tor-settings")).clicked() {
@@ -329,4 +363,133 @@ fn marker(ui: &mut Ui, text: &str) {
     let w = galley.size().x + 8.0;
     let (rect, _) = ui.allocate_exact_size(vec2(w.max(badge::LARGE_HEIGHT), badge::LARGE_HEIGHT), egui::Sense::hover());
     badge::text_badge(ui.painter(), rect.left_center(), text, s.tertiary_container, s.on_tertiary_container);
+}
+
+/// "Spotify" / "YouTube Music" with its dot, as a section label.
+fn service_label(ui: &mut Ui, service: Service) {
+    let s = Theme::get(ui.ctx()).scheme;
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(10.0, 16.0), egui::Sense::hover());
+        ui.painter().circle_filled(r.center(), 5.0, streams::service_color(service));
+        ui.label(TypeRole::LabelLarge.style().rich(service.display_name(), s.primary));
+    });
+    ui.add_space(4.0);
+}
+
+/// Why a service has no section: off, or not in this build.
+fn unavailable(state: &ViewState, service: Service) -> Option<&'static str> {
+    if !state.account(service).is_some_and(|a| a.registered) {
+        Some("не подключён в этой сборке")
+    } else if !state.prefs.service_enabled(service) {
+        Some("выключен")
+    } else {
+        None
+    }
+}
+
+/// The results of one service: tracks, albums, artists, playlists.
+fn stream_section(
+    ui: &mut Ui,
+    query: &str,
+    service: Service,
+    state: &ViewState,
+    compact: bool,
+    pages: &mut PageState,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    let s = Theme::get(ui.ctx()).scheme;
+    let mut nav = None;
+    let salt = service.as_str();
+    service_label(ui, service);
+    if let Some(why) = unavailable(state, service) {
+        ui.horizontal(|ui| {
+            ui.label(TypeRole::BodyMedium.style().rich(format!("{} {why}.", service.display_name()), s.on_surface_variant));
+            if ui
+                .add(Button::new("Источники").style(Style::Text).icon(Icon::Settings).id_salt(("sv-settings", salt)))
+                .clicked()
+            {
+                pages.open_setting(match service {
+                    Service::Spotify => super::SettingId::SpotifyEnabled,
+                    Service::Youtube => super::SettingId::YouTubeEnabled,
+                });
+            }
+        });
+        ui.add_space(widgets::SECTION_GAP);
+        return None;
+    }
+    let sec: Option<&StreamSearchSection> = state.search.streams.iter().find(|x| x.service == service);
+    let q = query.trim();
+    let stale = state.search.query.trim() != q;
+    match sec {
+        _ if q.is_empty() => {}
+        None => {
+            ui.add(LoadingIndicator::new());
+        }
+        Some(x) if x.searching || stale => {
+            ui.add(LoadingIndicator::new());
+        }
+        Some(x) if x.error.is_some() => {
+            let e = x.error.as_deref().unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
+                let login = matches!(state.account(service).map(|a| &a.account), Some(Account::LoggedOut | Account::Failed(_)));
+                if login
+                    && ui.add(Button::new("Войти").style(Style::Text).icon(Icon::Login).id_salt(("sv-login", salt))).clicked()
+                {
+                    pages.open_setting(match service {
+                        Service::Spotify => super::SettingId::Spotify,
+                        Service::Youtube => super::SettingId::YouTube,
+                    });
+                }
+                if ui.add(Button::new("Повторить").style(Style::Text).id_salt(("sv-retry", salt))).clicked() {
+                    out.push(Command::Search(q.to_owned()));
+                }
+            });
+        }
+        Some(x) if x.tracks.is_empty() && x.albums.is_empty() && x.artists.is_empty() && x.playlists.is_empty() => {
+            ui.label(TypeRole::BodyMedium.style().rich(
+                format!("В {} ничего не нашлось.", service.display_name()),
+                s.on_surface_variant,
+            ));
+        }
+        Some(x) => {
+            if !x.tracks.is_empty() {
+                widgets::section_header(ui, "Треки", false);
+                let n = if compact { x.tracks.len().min(5) } else { x.tracks.len() };
+                let from = streams::StreamFrom::Rows(format!("{} · «{q}»", service.display_name()));
+                nav = streams::track_rows(ui, &format!("sv-tracks-{salt}"), &x.tracks[..n], false, &from, state, pages, out)
+                    .or(nav.take());
+                ui.add_space(16.0);
+            }
+            if !x.albums.is_empty() {
+                widgets::section_header(ui, "Альбомы", false);
+                widgets::card_row(ui, &format!("sv-albums-{salt}"), |ui| {
+                    for a in &x.albums {
+                        nav = streams::album_card(ui, a, widgets::CARD_W, salt, out).or(nav.take());
+                    }
+                });
+                ui.add_space(16.0);
+            }
+            if !x.artists.is_empty() {
+                widgets::section_header(ui, "Исполнители", false);
+                widgets::card_row(ui, &format!("sv-artists-{salt}"), |ui| {
+                    for a in &x.artists {
+                        nav = streams::artist_card(ui, a, 120.0).or(nav.take());
+                    }
+                });
+                ui.add_space(16.0);
+            }
+            if !x.playlists.is_empty() {
+                widgets::section_header(ui, "Плейлисты", false);
+                widgets::card_row(ui, &format!("sv-playlists-{salt}"), |ui| {
+                    for p in &x.playlists {
+                        nav = streams::playlist_card(ui, p, widgets::CARD_W, salt, out).or(nav.take());
+                    }
+                });
+            }
+        }
+    }
+    ui.add_space(widgets::SECTION_GAP);
+    nav
 }

@@ -7,6 +7,9 @@ mod library;
 mod search;
 mod settings;
 pub(crate) mod settings_help;
+mod sources;
+mod streams;
+mod wishlist;
 pub mod widgets;
 
 pub use search::search_results;
@@ -32,6 +35,10 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 enum Ask {
     NewPlaylist { then_add: Vec<TrackId> },
+    /// A new playlist for stream tracks.
+    NewPlaylistStream(Vec<nikgob_view::RemoteId>),
+    /// A magnet link for a wishlist item without a torrent.
+    WishMagnet(nikgob_view::WishlistId),
     RenamePlaylist(nikgob_view::PlaylistId),
     Magnet,
 }
@@ -67,6 +74,8 @@ pub struct PageState {
     pub go_back: bool,
     pub(crate) library_tab: LibraryTab,
     release_filter: usize,
+    /// Library albums by source: 0 all, 1 with files, 2 stream.
+    release_source: usize,
     downloads_tab: usize,
     home_filter: usize,
     ask: Option<Ask>,
@@ -91,15 +100,41 @@ pub struct PageState {
     acoustid_key: String,
     metadata_contact: String,
     metadata_synced: bool,
+    /// «Источники»: what is typed into the Spotify Client ID and the
+    /// YouTube cookies fields, and which folds are open.
+    sp_client_id: String,
+    sp_personal_open: bool,
+    yt_cookies: String,
+    yt_form: bool,
     track_window: (usize, usize),
     /// Tracks waiting for the "В плейлист" picker.
     pending_add: Option<Vec<TrackId>>,
     pending_add_anchor: Option<Rect>,
     /// (playlist name, tracks) to add once the new playlist appears.
     add_after_create: Option<(String, Vec<TrackId>)>,
+    /// Stream tracks waiting for the "В плейлист" picker, and for a new
+    /// playlist to appear.
+    pending_add_stream: Option<Vec<nikgob_view::RemoteId>>,
+    stream_after_create: Option<(String, Vec<nikgob_view::RemoteId>)>,
 }
 
 impl PageState {
+    /// Opens the "В плейлист" picker for stream tracks.
+    pub(crate) fn add_stream_to_playlist(&mut self, tracks: Vec<nikgob_view::RemoteId>, anchor: Option<Rect>) {
+        self.pending_add_stream = Some(tracks);
+        self.pending_add_anchor = anchor;
+    }
+
+    /// Shows `tab` of «Загрузки» (a route that names one).
+    pub(crate) fn set_downloads_tab(&mut self, tab: nikgob_view::DownloadsTab) {
+        self.downloads_tab = downloads::tab_index(tab);
+    }
+
+    pub(crate) fn unfold_sources(&mut self) {
+        self.sp_personal_open = true;
+        self.yt_form = true;
+    }
+
     /// Opens Settings at row `id` (its tab, scrolled into view, glowing).
     pub fn open_setting(&mut self, id: SettingId) {
         self.focus_setting = Some(id);
@@ -175,6 +210,7 @@ impl PageState {
             .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()))
             .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(track.artist_id.is_some()))
             .item(MenuItem::new("Источник и качество").icon(Icon::Info))
+            .item(MenuItem::new("Поделиться").icon(Icon::Share))
             .item(MenuItem::new("Редактировать теги…").icon(Icon::Edit).enabled(track.has_local))
             .divider()
             .item(MenuItem::new("Удалить из библиотеки").icon(Icon::Delete))
@@ -198,9 +234,10 @@ impl PageState {
             3 => return track.release_id.map(Route::Release),
             4 => return track.artist_id.map(Route::Artist),
             5 => self.open_pane = Some(PaneTab::Info),
-            6 => out.push(Command::OpenTagEditor(track.id)),
-            7 => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
-            8 => self.confirm_purge = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
+            6 => out.push(Command::Share(nikgob_view::ShareTarget::Track(track.id))),
+            7 => out.push(Command::OpenTagEditor(track.id)),
+            8 => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
+            9 => self.confirm_purge = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
             _ => {}
         }
         None
@@ -385,17 +422,49 @@ impl PageState {
             }
         }
 
+        // The same picker for stream tracks.
+        if let Some(tracks) = self.pending_add_stream.clone() {
+            let mut open = true;
+            let mut menu = Menu::new("playlist-picker-stream").item(MenuItem::new("Любимые").icon(Icon::Favorite));
+            let user: Vec<_> = state.library.playlists.iter().filter(|p| !p.pinned).collect();
+            for p in &user {
+                menu = menu.item(MenuItem::new(&p.name).icon(Icon::QueueMusic));
+            }
+            menu = menu.divider().item(MenuItem::new("Новый плейлист…").icon(Icon::Add));
+            let anchor = self
+                .pending_add_anchor
+                .unwrap_or_else(|| Rect::from_center_size(area.center(), egui::vec2(1.0, 1.0)));
+            let picked = menu.popup(ctx, anchor, &mut open);
+            match picked {
+                Some(0) => out.extend(tracks.into_iter().map(|track| Command::LikeStream { track, on: true })),
+                Some(i) if i <= user.len() => out.push(Command::AddStreamToPlaylist(user[i - 1].id, tracks)),
+                Some(_) => self.open_ask(Ask::NewPlaylistStream(tracks)),
+                None => {}
+            }
+            if picked.is_some() || !open {
+                self.pending_add_stream = None;
+                self.pending_add_anchor = None;
+            }
+        }
+
         // Text input dialogs.
         if let Some(ask) = self.ask.clone() {
             let mut open = true;
             let dialog = match &ask {
-                Ask::NewPlaylist { .. } => TextInputDialog::new("ask-new-playlist", "Новый плейлист", "Название")
+                Ask::NewPlaylist { .. } | Ask::NewPlaylistStream(_) => TextInputDialog::new("ask-new-playlist", "Новый плейлист", "Название")
                     .icon(Icon::PlaylistAdd)
                     .buttons("Создать", "Отмена")
                     .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned())),
                 Ask::RenamePlaylist(_) => TextInputDialog::new("ask-rename", "Переименовать", "Название")
                     .buttons("Сохранить", "Отмена")
                     .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned())),
+                Ask::WishMagnet(_) => TextInputDialog::new("ask-wish-magnet", "Magnet-ссылка", "magnet:?xt=…")
+                    .icon(Icon::Link)
+                    .supporting("Раздача скачается как этот трек из «Хочу скачать».")
+                    .buttons("Скачать", "Отмена")
+                    .validate(|t| {
+                        (!t.trim().starts_with("magnet:")).then(|| "Ссылка должна начинаться с magnet:".to_owned())
+                    }),
                 Ask::Magnet => TextInputDialog::new("ask-magnet", "Magnet-ссылка", "magnet:?xt=…")
                     .icon(Icon::Link)
                     .supporting("Загрузка появится во вкладке «Загрузки».")
@@ -416,6 +485,14 @@ impl PageState {
                         }
                         Ask::RenamePlaylist(id) => out.push(Command::RenamePlaylist(id, text)),
                         Ask::Magnet => out.push(Command::AddMagnet(text)),
+                        Ask::NewPlaylistStream(tracks) => {
+                            out.push(Command::CreatePlaylist(text.clone()));
+                            self.stream_after_create = Some((text, tracks));
+                        }
+                        Ask::WishMagnet(item) => out.push(Command::WishlistAttach {
+                            item,
+                            what: nikgob_view::WishlistAttach::Magnet(text),
+                        }),
                     }
                     self.ask = None;
                 }
@@ -433,6 +510,12 @@ impl PageState {
         {
             out.push(Command::AddToPlaylist(p.id, tracks));
             self.add_after_create = None;
+        }
+        if let Some((name, tracks)) = self.stream_after_create.clone()
+            && let Some(p) = state.library.playlists.iter().find(|p| p.name == name && !p.pinned)
+        {
+            out.push(Command::AddStreamToPlaylist(p.id, tracks));
+            self.stream_after_create = None;
         }
 
         // Delete confirmation.
@@ -628,17 +711,7 @@ pub fn page(
                 Route::Playlist(id) => detail::playlist(ui, *id, state, pages, out),
                 Route::Downloads(_) => downloads::show(ui, state, pages, out),
                 Route::Settings => settings::show(ui, state, pages, out),
-                // Stage 3 placeholder until the stream pages are designed.
-                Route::Stream(_) => {
-                    if let Some(p) = &state.stream_page {
-                        ui.heading(&p.title);
-                        ui.label(&p.subtitle);
-                        for t in &p.tracks {
-                            ui.label(format!("{} — {}", t.title, t.artist));
-                        }
-                    }
-                    None
-                }
+                Route::Stream(page) => streams::page(ui, page, state, pages, out),
             };
             nav = r.or(nav.take());
             ui.add_space(bottom_inset);

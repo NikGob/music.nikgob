@@ -814,6 +814,7 @@ pub fn show(
                 Act::Artist,
                 Act::Album,
                 Act::Info,
+                Act::Share,
                 Act::Tags,
                 Act::Replace,
                 Act::Visualizer,
@@ -1425,6 +1426,13 @@ fn info(
                 ui.add_space(8.0);
                 ui.label(TypeRole::LabelMedium.style().rich(q, s.primary));
             }
+            // Where the sound of a stream comes from (a Spotify track may
+            // play from YouTube Music).
+            if let Some(a) = common::audio_label(state) {
+                ui.add_space(8.0);
+                ui.label(TypeRole::LabelMedium.style().rich(a, s.on_surface_variant))
+                    .on_hover_text("Откуда идёт звук этого трека");
+            }
         });
     });
     y += 64.0 + if compact { 16.0 } else { PROGRESS_GAP };
@@ -1468,7 +1476,7 @@ fn info(
         .size(hero_size)
         .style(Style::Filled)
         .shape(BtnShape::Round)
-        .selected(playing)
+        .selected(playing || p.status == Status::Buffering)
         .filled_icon(true)
         .colors(Colors {
             container: s.primary,
@@ -1495,6 +1503,9 @@ fn info(
     }
     if r[1].clicked() {
         chrome::press_previous(&ctx, state, out);
+    }
+    if p.status == Status::Buffering {
+        common::buffering_overlay(ui, r[2].rect, s.primary, s.on_primary);
     }
     if r[2].clicked() {
         out.push(Command::TogglePlay);

@@ -96,6 +96,19 @@ pub enum SettingId {
     FakeFlac,
     MusicBrainz,
     AcoustId,
+    // Источники.
+    SpotifyEnabled,
+    SpotifyPlayback,
+    SpotifyPersonal,
+    YouTubeEnabled,
+    YouTubeCookies,
+    LikeDownload,
+    PushLikes,
+    AutoDownloads,
+    PlaylistSync,
+    ImportSpotify,
+    ImportYouTube,
+    ImportFiles,
     Prowlarr,
     NoSeed,
     SeedLimit,
@@ -110,7 +123,10 @@ pub enum SettingId {
 
 /// Settings tabs, in the order of the tab switch.
 pub const TAB_GENERAL: usize = 0;
-pub const TAB_APPEARANCE: usize = 1;
+pub const TAB_SOURCES: usize = 1;
+pub const TAB_APPEARANCE: usize = 2;
+/// Labels of the tab switch, in [`SettingId::tab`] order.
+pub const TABS: [&str; 3] = ["Основные", "Источники", "Внешний вид"];
 
 /// The live sample a card draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,6 +177,11 @@ impl SettingId {
             | LyricsGap | LyricsGapWaves | LyricsCountdown | RailCompact | NpMotion | ReducedMotion | FpsLimit => {
                 TAB_APPEARANCE
             }
+            // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
+            Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled
+            | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | PlaylistSync | ImportSpotify
+            | ImportYouTube | ImportFiles | Prowlarr | NoSeed | SeedLimit | SeedDays | SeedRatio
+            | DownloadLimit | UploadLimit => TAB_SOURCES,
             _ => TAB_GENERAL,
         }
     }
@@ -238,8 +259,20 @@ impl SettingId {
             SeedRatio => "Раздача остановится, когда ты отдашь во столько раз больше, чем скачал.",
             DownloadLimit => "Максимальная скорость скачивания, чтобы не занимать весь интернет.",
             UploadLimit => "Максимальная скорость раздачи другим.",
-            Spotify => "Перенос лайков и плейлистов из Spotify — появится позже.",
-            YouTube => "Перенос из YouTube Music — появится позже.",
+            Spotify => "Вход в аккаунт Spotify через браузер: поиск, лайки, плейлисты и история. Бесплатного аккаунта хватает; пароль приложение не видит.",
+            SpotifyEnabled => "Выключи — Spotify не используется нигде: ни в поиске, ни для звука, ни для лайков. Вход при этом не забывается.",
+            SpotifyPlayback => "Отдельное разрешение на звук из Spotify. Нужен Premium. Без него те же треки играют с YouTube Music — подпись «звук: YouTube» в плеере.",
+            SpotifyPersonal => "Своё приложение на developer.spotify.com даёт личную квоту запросов: поиск и лайки быстрее и не упираются в общий лимит. Необязательно.",
+            YouTube => "Вход нужен только для лайков, плейлистов и истории. Поиск и звук YouTube Music работают и без него.",
+            YouTubeEnabled => "Выключи — YouTube Music не используется: ни в поиске, ни как запасной звук для треков Spotify.",
+            YouTubeCookies => "YouTube Music пускает сторонние приложения только по cookies браузера. Выгрузи cookies.txt для music.youtube.com расширением браузера, пока ты вошёл, и вставь сюда.",
+            LikeDownload => "Что скачивать, когда лайкаешь трек из стрима: только его (вырезается из раздачи альбома) или сразу весь альбом. Лайк альбома — всегда весь альбом.",
+            PushLikes => "Лайк здесь ставится и в Spotify / YouTube Music, а снятый лайк снимается и там. Только для треков, которые есть в сервисе.",
+            AutoDownloads => "Сколько треков из «Хочу скачать» ищутся и качаются одновременно сами. Меньше — тише для сети.",
+            PlaylistSync => "Как новый плейлист, связанный с сервисом, следит за ним. У каждого плейлиста это можно поменять в его меню ⋮.",
+            ImportSpotify => "Забирает из Spotify лайки, свои плейлисты и недавние прослушивания. Лайки и плейлисты появятся в библиотеке и в «Хочу скачать».",
+            ImportYouTube => "То же из YouTube Music: лайки, плейлисты, история. Нужен вход.",
+            ImportFiles => "Файлы выгрузки — вся история прослушиваний за годы. Spotify: Аккаунт → Конфиденциальность → «Расширенная история». Google Takeout: YouTube и YouTube Music.",
             Nodes => "Синхронизация и резервная копия на другие устройства — появится позже.",
         }
     }
@@ -338,6 +371,15 @@ impl SettingId {
                 c!("Только в режиме «Случайная»", "Новая случайная фигура, только если выбрана «Случайная»."),
                 c!("Всегда", "Всегда; выбранная фигура сменяется следующей."),
             ],
+            Self::LikeDownload => &[
+                c!("Только трек", "Качается один трек: из раздачи альбома берётся только его файл."),
+                c!("Весь альбом", "Лайк трека скачивает весь альбом, в котором он вышел."),
+            ],
+            Self::PlaylistSync => &[
+                c!("Двусторонняя", "Правки здесь уходят в сервис, правки там приходят сюда."),
+                c!("Только слежка", "Плейлист повторяет сервис; свои правки здесь туда не уходят."),
+                c!("Разово", "Снимок: плейлист скопирован один раз и дальше живёт сам по себе."),
+            ],
             Self::OpusBitrate => &[
                 c!("128", "Файлы поменьше; на слух почти как оригинал."),
                 c!("160", "Хороший звук при разумном размере файлов."),
@@ -394,6 +436,8 @@ impl SettingId {
             Self::NpMotion => usize::from(p.np_motion).min(2),
             Self::DblClickShape => usize::from(p.dbl_click_shape).min(2),
             Self::OpusBitrate => OPUS.iter().position(|b| *b == p.opus_bitrate).unwrap_or(1),
+            Self::LikeDownload => usize::from(p.like_download_scope == v::WishlistScope::Album),
+            Self::PlaylistSync => sync_index(p.playlist_sync_default),
             _ => 0,
         }
     }
@@ -441,6 +485,10 @@ impl SettingId {
             Self::NpMotion => p.np_motion = i.min(2) as u8,
             Self::DblClickShape => p.dbl_click_shape = i.min(2) as u8,
             Self::OpusBitrate => p.opus_bitrate = OPUS[i.min(OPUS.len() - 1)],
+            Self::LikeDownload => {
+                p.like_download_scope = if i == 1 { v::WishlistScope::Album } else { v::WishlistScope::Track };
+            }
+            Self::PlaylistSync => p.playlist_sync_default = v::PlaylistSyncMode::ALL[i.min(2)],
             _ => {}
         }
     }
@@ -465,6 +513,12 @@ impl SettingId {
             _ => return None,
         })
     }
+}
+
+/// The index of `m` in [`v::PlaylistSyncMode::ALL`] (the order of the
+/// "Синхронизация" choices).
+pub fn sync_index(m: v::PlaylistSyncMode) -> usize {
+    v::PlaylistSyncMode::ALL.iter().position(|x| *x == m).unwrap_or(1)
 }
 
 /// How long the glow on a linked row lasts.
@@ -1486,8 +1540,14 @@ mod tests {
     fn linked_rows_know_their_tab_and_every_row_has_help() {
         assert_eq!(SettingId::LyricsStyle.tab(), TAB_APPEARANCE);
         assert_eq!(SettingId::BgHue.tab(), TAB_APPEARANCE);
-        assert_eq!(SettingId::Prowlarr.tab(), TAB_GENERAL);
-        assert_eq!(SettingId::NoSeed.tab(), TAB_GENERAL);
+        // Torrents moved to «Источники»: old links land there.
+        assert_eq!(SettingId::Prowlarr.tab(), TAB_SOURCES);
+        assert_eq!(SettingId::NoSeed.tab(), TAB_SOURCES);
+        assert_eq!(SettingId::Spotify.tab(), TAB_SOURCES);
+        assert_eq!(SettingId::MusicBrainz.tab(), TAB_GENERAL);
+        for id in [SettingId::SpotifyPersonal, SettingId::YouTubeCookies, SettingId::ImportFiles, SettingId::AutoDownloads] {
+            assert!(!id.help().is_empty());
+        }
         for id in [SettingId::Design, SettingId::FpsLimit, SettingId::Nodes, SettingId::RingBeat] {
             assert!(!id.help().is_empty());
         }
@@ -1499,7 +1559,7 @@ mod tests {
         for id in [
             S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::RingDir, S::RingStyle, S::Ambient,
             S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
-            S::OpusBitrate, S::NpVolume,
+            S::OpusBitrate, S::NpVolume, S::LikeDownload, S::PlaylistSync,
         ] {
             assert!(id.choices().len() >= 2, "{id:?}");
             for i in 0..id.choices().len() {

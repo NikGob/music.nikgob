@@ -33,7 +33,7 @@ fn type_label(t: ReleaseType) -> &'static str {
 /// Runs `body` under a large flexible app bar pinned to the top of the page
 /// viewport: it collapses to the small 64 bar as the page scrolls, its
 /// container turns `surface-container`, and ← goes back.
-fn with_bar<R>(
+pub(super) fn with_bar<R>(
     ui: &mut Ui,
     title: &str,
     pages: &mut PageState,
@@ -148,6 +148,10 @@ pub fn release(
                 if let Some(q) = &r.quality {
                     ui.add(AssistChip::new(q).icon(Icon::GraphicEq).id_salt("rel-q"));
                 }
+                if c.local_tracks == 0 {
+                    ui.add(AssistChip::new("стрим").icon(Icon::GraphicEq).id_salt("rel-stream"))
+                        .on_hover_text("Файлов нет: играет из Spotify или YouTube Music");
+                }
                 if let Some(b) = widgets::progress_badge(c) {
                     ui.add(AssistChip::new(format!("{b} у тебя")).icon(Icon::Download).id_salt("rel-have"));
                 }
@@ -201,6 +205,7 @@ pub fn release(
             .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
             .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
             .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(c.artist_id.is_some()))
+            .item(MenuItem::new("Поделиться").icon(Icon::Share))
             .divider()
             .item(MenuItem::new("Удалить альбом").icon(Icon::Delete))
             .item(MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete))
@@ -213,8 +218,9 @@ pub fn release(
                 pages.pending_add_anchor = Some(more.rect);
             }
             Some(3) => nav = c.artist_id.map(Route::Artist),
-            Some(4) => super::request_release_delete(ui.ctx(), id, &c.title, false),
-            Some(5) => super::request_release_delete(ui.ctx(), id, &c.title, true),
+            Some(4) => out.push(Command::Share(nikgob_view::ShareTarget::Release(id))),
+            Some(5) => super::request_release_delete(ui.ctx(), id, &c.title, false),
+            Some(6) => super::request_release_delete(ui.ctx(), id, &c.title, true),
             _ => {}
         }
         ui.add_space(16.0);
@@ -325,12 +331,50 @@ pub fn artist(
             });
             ui.add_space(widgets::SECTION_GAP);
         }
-        widgets::section_header(ui, "Нет в библиотеке", false);
-        ui.label(TypeRole::BodyMedium.style().rich_para(
-            "Дискография из MusicBrainz со стримингом и загрузкой появится на этапах 2–3.",
-            s.on_surface_variant,
-        ));
+        nav = discography(ui, &a.discography, out).or(nav);
         nav
+    })
+}
+
+/// «Нет в библиотеке»: the artist's albums in the services the library has
+/// no file of. They play from the stream; «Скачать» likes the album, which
+/// puts it on the wishlist. Hidden while there is nothing to show.
+fn discography(ui: &mut Ui, d: &nikgob_view::DiscographyView, out: &mut Vec<Command>) -> Option<Route> {
+    let s = Theme::get(ui.ctx()).scheme;
+    if d.albums.is_empty() {
+        if d.loading {
+            widgets::section_header(ui, "Нет в библиотеке", false);
+            ui.add(LoadingIndicator::new().size(32.0));
+        }
+        return None;
+    }
+    widgets::section_header(ui, "Нет в библиотеке", false);
+    ui.label(TypeRole::BodyMedium.style().rich_para(
+        "Есть в Spotify или YouTube Music, а у тебя нет. Играют из стрима; «Скачать» добавит альбом в «Хочу скачать».",
+        s.on_surface_variant,
+    ));
+    ui.add_space(8.0);
+    widgets::grid(ui, &d.albums, widgets::CARD_W, |ui, a, w| {
+        ui.vertical(|ui| {
+            ui.set_width(w);
+            ui.spacing_mut().item_spacing.y = 4.0;
+            let nav = super::streams::album_card(ui, a, w, "discography", out);
+            if ui
+                .add(
+                    Button::new("Скачать")
+                        .icon(Icon::Download)
+                        .style(Style::Text)
+                        .size(Size::S)
+                        .id_salt(("disco-dl", &a.remote)),
+                )
+                .on_hover_text("Весь альбом — в Любимые и в «Хочу скачать»")
+                .clicked()
+            {
+                out.push(Command::LikeStreamAlbum { album: a.remote.clone(), on: true });
+            }
+            nav
+        })
+        .inner
     })
 }
 
@@ -564,6 +608,19 @@ pub fn playlist(
                 ),
                 s.on_surface_variant,
             ));
+            if let Some(l) = &p.link {
+                ui.add_space(8.0);
+                let mode = super::settings_help::SettingId::PlaylistSync.choices()
+                    [super::settings_help::sync_index(l.sync_mode)]
+                .label
+                .to_lowercase();
+                ui.add(
+                    AssistChip::new(format!("{} · {mode}", l.remote.service.display_name()))
+                        .icon(Icon::Sync)
+                        .id_salt("pl-link"),
+                )
+                .on_hover_text("Связан с плейлистом сервиса; как синхронизировать — в ⋮");
+            }
         });
         ui.add_space(16.0);
         let mut members: Vec<Member> = vec![
@@ -586,9 +643,24 @@ pub fn playlist(
             if r[2].clicked() {
                 put(ui.ctx(), add_key, AddState { open: true, ..get(ui.ctx(), add_key) });
             }
-            let picked = Menu::new("pl-more")
+            let mut menu = Menu::new("pl-more")
                 .item(MenuItem::new("Изменить…").icon(Icon::Edit))
-                .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
+                .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic));
+            // A playlist that follows one of a service: how it syncs (a
+            // greyed title, then the three modes).
+            let sync_n = if let Some(l) = &p.link {
+                menu = menu
+                    .divider()
+                    .item(MenuItem::new(format!("Синхронизация с {}", l.remote.service.display_name())).enabled(false));
+                for (i, c) in super::settings_help::SettingId::PlaylistSync.choices().iter().enumerate() {
+                    let on = super::settings_help::sync_index(l.sync_mode) == i;
+                    menu = menu.item(MenuItem::new(c.label).icon(Icon::Sync).selected(on));
+                }
+                nikgob_view::PlaylistSyncMode::ALL.len() + 1
+            } else {
+                0
+            };
+            let picked = menu
                 .divider()
                 .item(MenuItem::new("Удалить плейлист").icon(Icon::Delete))
                 .attach(&r[3]);
@@ -599,7 +671,12 @@ pub fn playlist(
                     EditState { open: true, shown: false, name: p.card.name.clone(), cover: None, mode: None },
                 ),
                 Some(1) => out.push(Command::Enqueue(p.tracks.iter().map(|t| t.id).collect())),
-                Some(2) => pages.confirm_delete = Some(id),
+                Some(2) if sync_n > 0 => {}
+                Some(i) if i >= 3 && i < 2 + sync_n => out.push(Command::SetPlaylistSync {
+                    playlist: id,
+                    mode: nikgob_view::PlaylistSyncMode::ALL[i - 3],
+                }),
+                Some(_) => pages.confirm_delete = Some(id),
                 _ => {}
             }
         }

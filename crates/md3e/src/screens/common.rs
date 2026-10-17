@@ -91,3 +91,23 @@ pub fn label(ui: &mut Ui, text: &str, role: crate::TypeRole, color: Color32) -> 
             .selectable(false),
     )
 }
+
+/// A stream still opening: the play button's icon gives way to a loading
+/// indicator in the button's own colours (`bg` hides the icon).
+pub fn buffering_overlay(ui: &mut Ui, button: Rect, bg: Color32, fg: Color32) {
+    let size = (button.height().min(button.width()) * 0.62).max(20.0);
+    let c = button.center();
+    ui.painter().circle_filled(c, size * 0.5, bg);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(c, vec2(size, size))).id_salt(("buffering", button.min.x as i32, button.min.y as i32)));
+    child.add(crate::components::LoadingIndicator::new().size(size).color(fg));
+}
+
+/// "звук: YouTube" for a stream (None for a local file).
+pub fn audio_label(state: &nikgob_view::ViewState) -> Option<String> {
+    let service = state.player.audio_service?;
+    let name = match service {
+        nikgob_view::Service::Spotify => "Spotify",
+        nikgob_view::Service::Youtube => "YouTube",
+    };
+    Some(format!("звук: {name}"))
+}

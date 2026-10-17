@@ -2,7 +2,7 @@
 //! "Подтверди" queue, seeding and history.
 
 use egui::{Rect, Stroke, Ui, vec2};
-use nikgob_view::{Command, Job, Route, SeedRow, ViewState};
+use nikgob_view::{Command, DownloadsTab, Job, Route, SeedRow, ViewState, WishlistStatus};
 
 use super::{PageState, connected, fmt_size, widgets};
 use crate::{
@@ -14,6 +14,20 @@ use crate::{
     tokens::shape,
 };
 
+/// The tabs, in order.
+const TABS: [(DownloadsTab, &str); 5] = [
+    (DownloadsTab::Active, "Активные"),
+    (DownloadsTab::Confirm, "Подтверди"),
+    (DownloadsTab::Wishlist, "Хочу скачать"),
+    (DownloadsTab::Seeding, "Раздача"),
+    (DownloadsTab::History, "История"),
+];
+
+/// Where `tab` is in the tab switch.
+pub fn tab_index(tab: DownloadsTab) -> usize {
+    TABS.iter().position(|(t, _)| *t == tab).unwrap_or(0)
+}
+
 pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let d = &state.downloads;
@@ -21,19 +35,31 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     ui.add_space(8.0);
     ui.label(TypeRole::HeadlineMedium.style().rich("Загрузки", s.on_surface));
     ui.add_space(8.0);
-    let labels = ["Активные", "Подтверди", "Раздача", "История"];
-    let (picked, rects) = connected(ui, egui::Id::new("dl-tabs"), &labels, pages.downloads_tab, &[]);
+    let labels = TABS.map(|(_, l)| l);
+    let tab = pages.downloads_tab.min(TABS.len() - 1);
+    let (picked, rects) = connected(ui, egui::Id::new("dl-tabs"), &labels, tab, &[]);
     if let Some(i) = picked {
         pages.downloads_tab = i;
+        if TABS[i].0 == DownloadsTab::Wishlist {
+            out.push(Command::LoadWishlist);
+        }
     }
     if !d.confirm.is_empty()
-        && let Some(r) = rects.get(1)
+        && let Some(r) = rects.get(tab_index(DownloadsTab::Confirm))
     {
         badge::count(ui.painter(), badge::large_anchor(*r), d.confirm.len() as u32);
     }
+    // What waits for the user on the wishlist: no torrent found.
+    let stuck = d.wishlist.count(WishlistStatus::NoTorrent);
+    if stuck > 0
+        && let Some(r) = rects.get(tab_index(DownloadsTab::Wishlist))
+    {
+        badge::count(ui.painter(), badge::large_anchor(*r), stuck);
+    }
     ui.add_space(16.0);
-    match pages.downloads_tab {
-        0 => {
+    match TABS[tab].0 {
+        DownloadsTab::Wishlist => nav = super::wishlist::show(ui, state, pages, out),
+        DownloadsTab::Active => {
             if d.active.is_empty() {
                 widgets::empty_state(
                     ui,
@@ -47,9 +73,9 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
                 job(ui, j, out, true);
             }
         }
-        1 => confirm(ui, state, out),
-        2 => nav = seeding(ui, state, pages, out),
-        _ => {
+        DownloadsTab::Confirm => confirm(ui, state, out),
+        DownloadsTab::Seeding => nav = seeding(ui, state, pages, out),
+        DownloadsTab::History => {
             if d.history.is_empty() {
                 widgets::empty_state(ui, Icon::Check, "История пуста", "Завершённые импорты и загрузки.", None);
             }
@@ -186,7 +212,7 @@ fn seeding(ui: &mut Ui, state: &ViewState, pages: &mut PageState, _out: &mut Vec
         if p.no_seed {
             ui.label(TypeRole::TitleMedium.style().rich("Раздача выключена", s.on_surface));
             ui.label(TypeRole::BodySmall.style().rich(
-                "Скачанное сразу перестаёт раздаваться (Настройки → Торренты).",
+                "Скачанное сразу перестаёт раздаваться (Настройки → Источники → Торренты).",
                 s.on_surface_variant,
             ));
         } else {

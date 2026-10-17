@@ -141,6 +141,15 @@ material_icons! {
     Fullscreen => "fullscreen",
     DragIndicator => "drag_indicator",
     MusicNote => "music_note",
+    Share => "share",
+    ContentCopy => "content_copy",
+    OpenInNew => "open_in_new",
+    Logout => "logout",
+    Login => "login",
+    Sync => "sync",
+    Refresh => "refresh",
+    Block => "block",
+    HourglassEmpty => "hourglass_empty",
 }
 
 impl Icon {

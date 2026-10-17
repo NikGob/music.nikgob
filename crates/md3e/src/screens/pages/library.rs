@@ -79,7 +79,23 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     ui.add_space(8.0);
     let labels: Vec<&str> = TABS.iter().map(|t| t.1).collect();
     let idx = TABS.iter().position(|t| t.0 == pages.library_tab).unwrap_or(0);
-    if let Some(i) = ConnectedGroup::new("lib-tabs", &labels).show(ui, idx) {
+    // The tabs, and at the far end of their row the inconspicuous
+    // «только скачанное» (docs/stage3.md §0): a faint icon, nothing loud.
+    let picked = ui
+        .allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            let w = (ui.available_width() - 36.0).max(0.0);
+            let picked = ui
+                .allocate_ui_with_layout(vec2(w, 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ConnectedGroup::new("lib-tabs", &labels).show(ui, idx)
+                })
+                .inner;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                only_downloaded(ui, state, out);
+            });
+            picked
+        })
+        .inner;
+    if let Some(i) = picked {
         pages.library_tab = TABS[i].0;
         if pages.library_tab == LibraryTab::Tracks {
             out.push(Command::LoadTracks { offset: 0, limit: 200, sort: lib.track_sort });
@@ -139,6 +155,31 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         nav = tracks(ui, state, pages, out).or(nav);
     }
     nav
+}
+
+/// The faint «только скачанное» switch: a small outlined arrow that is
+/// barely there while off and a little firmer while on.
+fn only_downloaded(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let on = state.prefs.library_only_downloaded;
+    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if on {
+        "Только скачанное: стрим скрыт. Нажми, чтобы показать всё"
+    } else {
+        "Только скачанное"
+    });
+    if resp.hovered() {
+        ui.painter().circle_filled(rect.center(), 14.0, s.on_surface.gamma_multiply(0.06));
+    }
+    let tint = match (on, resp.hovered()) {
+        (true, _) => s.on_surface_variant,
+        (false, true) => s.outline,
+        (false, false) => s.outline_variant,
+    };
+    Icon::Download.widget(on, tint, 18.0).paint_at(ui, Rect::from_center_size(rect.center(), vec2(18.0, 18.0)));
+    if resp.clicked() {
+        out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { library_only_downloaded: !on, ..state.prefs.clone() })));
+    }
 }
 
 /// "Корзина": deleted tracks with "Восстановить" and "Удалить навсегда";
@@ -305,6 +346,18 @@ fn releases(
     ui.horizontal(|ui| {
         ui.label(TypeRole::TitleLarge.style().rich("Альбомы и релизы", Theme::get(ui.ctx()).scheme.on_surface));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Where the albums play from: files, or only a service.
+            const SOURCES: [&str; 3] = ["Все источники", "Скачанные", "Стрим"];
+            let cur = pages.release_source.min(2);
+            let chip = ui.add(FilterChip::new(SOURCES[cur], cur != 0).trailing_icon(Icon::ExpandMore).id_salt("rel-source"));
+            let mut menu = Menu::new("rel-source-menu").align_right(true);
+            for (i, l) in SOURCES.iter().enumerate() {
+                menu = menu.item(MenuItem::new(*l).selected(i == cur));
+            }
+            if let Some(i) = menu.attach(&chip) {
+                pages.release_source = i;
+            }
+            ui.add_space(8.0);
             for (i, label) in ["EP", "Синглы", "Альбомы", "Всё"].iter().enumerate() {
                 let idx = 3 - i;
                 if ui
@@ -327,6 +380,11 @@ fn releases(
             3 => r.release_type == ReleaseType::Ep,
             _ => true,
         })
+        .filter(|r| match pages.release_source {
+            1 => r.local_tracks > 0,
+            2 => r.total_tracks.map_or(r.local_tracks == 0, |t| r.local_tracks < t),
+            _ => true,
+        })
         .collect();
     if is_list {
         let mut nav = None;
@@ -341,7 +399,7 @@ fn releases(
 /// List view: an album row (cover, title, artist · year, "3/12", ▶).
 fn release_row(ui: &mut Ui, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
-    let badge = widgets::progress_badge(r);
+    let badge = widgets::card_badge(r);
     let mut play = false;
     let o = ListItem::new(&r.title)
         .supporting(widgets::release_subtitle(r))
@@ -624,10 +682,22 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
             let g = line(ui.painter(), a, TypeRole::BodyMedium.style(), variant, x1 - x0);
             ui.painter().galley(pos2(x0, cy - g.size().y * 0.5), g, variant);
         }
-        // Качество.
-        if let (Some((x0, x1)), Some(q)) = (cols.quality, &t.quality) {
-            let g = line(ui.painter(), q, TypeRole::BodyMedium.style(), variant, x1 - x0);
-            ui.painter().galley(pos2(x0, cy - g.size().y * 0.5), g, variant);
+        // Качество; a track without a file plays from a service: "стрим".
+        if let Some((x0, x1)) = cols.quality {
+            let stream = match (t.has_local, t.source) {
+                (false, Some(nikgob_view::SourceKind::Spotify)) => Some("стрим · Spotify"),
+                (false, Some(nikgob_view::SourceKind::Youtube)) => Some("стрим · YouTube"),
+                _ => None,
+            };
+            if let Some(m) = stream {
+                let g = plain(ui.painter(), m, TypeRole::LabelSmall.style(), s.on_secondary_container);
+                let r = Rect::from_min_size(pos2(x0, cy - 10.0), vec2((g.size().x + 12.0).min(x1 - x0), 20.0));
+                paint::container(ui.painter(), r, Radii::all(shape::SMALL), s.secondary_container, Stroke::NONE);
+                ui.painter().galley(pos2(r.left() + 6.0, cy - g.size().y * 0.5), g, s.on_secondary_container);
+            } else if let Some(q) = &t.quality {
+                let g = line(ui.painter(), q, TypeRole::BodyMedium.style(), variant, x1 - x0);
+                ui.painter().galley(pos2(x0, cy - g.size().y * 0.5), g, variant);
+            }
         }
         // Длительность, по правому краю.
         if let Some(d) = t.duration {
