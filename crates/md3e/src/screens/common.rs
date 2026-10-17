@@ -95,7 +95,8 @@ pub fn sound_line(state: &nikgob_view::ViewState) -> Option<String> {
     let quality = p.audio_quality.as_deref().or_else(|| p.current.as_ref().and_then(|t| t.quality.as_deref()));
     let service = p.audio_service.map(|s| match s {
         nikgob_view::Service::Spotify => "Spotify",
-        nikgob_view::Service::Youtube => "YouTube",
+        // A Deezer entry plays from YouTube Music.
+        nikgob_view::Service::Youtube | nikgob_view::Service::Deezer => "YouTube",
     });
     match (service, quality) {
         (Some(s), Some(q)) => Some(format!("{s} · {q}")),

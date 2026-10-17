@@ -313,6 +313,8 @@ impl Worker {
                 match r.service {
                     Service::Spotify => item.spotify_id = Some(r.id),
                     Service::Youtube => item.youtube_id = Some(r.id),
+                    // The wishlist searches torrents by name and ISRC.
+                    Service::Deezer => {}
                 }
             }
         } else {

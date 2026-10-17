@@ -19,6 +19,7 @@ mod discography;
 mod export;
 mod likes;
 mod pages;
+mod rank;
 mod resolve;
 mod schedule;
 mod search;
@@ -127,7 +128,14 @@ pub(crate) enum Msg {
     Resolved {
         track: TrackId,
         found: resolve::Lookup,
+        /// The full Deezer track asked for its ISRC on the way.
+        filled: Option<StreamTrack>,
     },
+    /// The full Deezer track of a liked track (its ISRC).
+    IsrcFilled(TrackId, StreamTrack),
+    /// The top of the «Всё» answer is settled (the grace after the first
+    /// answer ended).
+    SearchSettle { seq: u64 },
     /// A rate-limit pause of a waiting track's lookup ended.
     ResolveRetry(TrackId),
     /// The whole liked list.
@@ -305,15 +313,30 @@ impl Worker {
     }
 
     /// The service plays sound for this account right now (Spotify needs
-    /// Premium and the playback login; YouTube plays without a login).
+    /// Premium and the playback login; YouTube plays without a login; a
+    /// catalogue such as Deezer never does: its tracks play from YouTube
+    /// Music, see [`resolve`]).
     pub(crate) fn has_audio(&self, kind: Service) -> bool {
         let Some(s) = self.service(kind) else {
             return false;
         };
+        if s.catalogue_only() {
+            return false;
+        }
         match kind {
             Service::Spotify => matches!(s.account(), Account::LoggedIn { audio: true, .. }),
-            Service::Youtube => !matches!(s.account(), Account::LoggedIn { audio: false, .. }),
+            Service::Youtube | Service::Deezer => !matches!(s.account(), Account::LoggedIn { audio: false, .. }),
         }
+    }
+
+    /// The service answers the search now: registered, switched on, and —
+    /// for Spotify — logged in (YouTube Music searches without a login, a
+    /// catalogue needs none).
+    pub(crate) fn can_search(&self, kind: Service) -> bool {
+        let Some(s) = self.service(kind) else {
+            return false;
+        };
+        s.catalogue_only() || kind != Service::Spotify || s.account().is_logged_in()
     }
 
     /// The services' audio caches follow [`v::Prefs::stream_cache_mb`].
@@ -395,6 +418,11 @@ impl Worker {
                 start,
                 context,
             } => self.play_stream_tracks(&tracks, start, context),
+            Command::PlaySearch {
+                tracks,
+                start,
+                context,
+            } => self.play_search(&tracks, start, context),
             Command::PlayStreamAlbum { id, start, shuffle } => {
                 self.with_album(id, pages::Then::Play { start, shuffle });
             }
@@ -459,7 +487,9 @@ impl Worker {
             } => self.stream_searched(seq, service, result, partial),
             Msg::SearchRetry { seq, service } => self.search_retry(seq, service),
             Msg::Loaded { key, result } => self.loaded(key, result),
-            Msg::Resolved { track, found } => self.resolved(track, found),
+            Msg::Resolved { track, found, filled } => self.resolved(track, found, filled),
+            Msg::IsrcFilled(track, full) => self.isrc_filled(track, &full),
+            Msg::SearchSettle { seq } => self.search_settle(seq),
             Msg::ResolveRetry(track) => self.resolve_retry(track),
             Msg::LikesPulled(service, r) => self.likes_pulled(service, r),
             Msg::LikesHead(service, r) => self.likes_head(service, r),

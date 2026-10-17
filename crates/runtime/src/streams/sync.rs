@@ -311,7 +311,8 @@ impl Worker {
         let stale_range = self.streaming.schedule.stale;
         for service in services {
             let Some(svc) = self.service(service) else { continue };
-            if self.streaming.sync.checking.contains(&service) {
+            // A catalogue's playlists are snapshots (see `follow_playlist`).
+            if svc.catalogue_only() || self.streaming.sync.checking.contains(&service) {
                 continue;
             }
             let due: Vec<Due> = links
@@ -353,7 +354,7 @@ impl Worker {
             return;
         }
         let Some(svc) = self.service(link.remote.service) else { return };
-        if !self.streaming.sync.fetching.insert(playlist) {
+        if svc.catalogue_only() || !self.streaming.sync.fetching.insert(playlist) {
             return;
         }
         self.publish_playlist_sync(playlist);

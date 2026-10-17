@@ -658,7 +658,9 @@ fn under_a_service_chip_its_songs_in_the_library_stay_in_its_list() {
         library: false,
         spotify: true,
         youtube: false,
+        deezer: false,
         torrents: false,
+        mixed: false,
     }));
     r.rt.send(Command::Search("daft".into()));
     wait_for(&r.rt, "the Spotify section", |s| {

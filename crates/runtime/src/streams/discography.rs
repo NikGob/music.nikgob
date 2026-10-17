@@ -10,6 +10,9 @@
 //! * Albums the page has (a release of the artist with the same folded title
 //!   and a year within ±1, or linked to it) are left out, and so are the
 //!   same albums of a later service (Spotify first).
+//! * Which services: Spotify when it is signed in, else the Deezer
+//!   catalogue (its discographies are good and need no account), then
+//!   YouTube Music.
 //! * Order: albums, then singles and EPs, then compilations, the rest last;
 //!   newest first in each group.
 //! * Each service is asked at most once a day per artist ([`TTL_MS`], kept
@@ -167,8 +170,12 @@ impl Worker {
     /// cache when it is fresh (and, when `retry`, not a failure), else from
     /// the services.
     pub(crate) fn load_discography(&mut self, artist: ArtistId, retry: bool) {
+        let spotify = self
+            .service(Service::Spotify)
+            .filter(|s| s.account().is_logged_in());
+        let first = spotify.or_else(|| self.service(Service::Deezer));
         let services: Vec<Arc<dyn StreamService>> =
-            Service::ALL.iter().filter_map(|s| self.service(*s)).collect();
+            first.into_iter().chain(self.service(Service::Youtube)).collect();
         if services.is_empty() {
             self.publish_discography(artist, v::DiscographyView::default());
             return;

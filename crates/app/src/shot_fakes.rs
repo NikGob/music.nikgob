@@ -128,8 +128,8 @@ impl Fakes {
             }
             let name = svc.display_name();
             let other = match svc {
-                Service::Spotify => Service::Youtube,
-                Service::Youtube => Service::Spotify,
+                Service::Spotify | Service::Deezer => Service::Youtube,
+                Service::Youtube => Service::Deezer,
             }
             .display_name();
             for x in s.search.streams.iter_mut().filter(|x| x.service == svc) {
@@ -171,7 +171,7 @@ impl Fakes {
             s.player.audio_service = Some(svc);
             // What that service's sound is.
             s.player.audio_quality = Some(match svc {
-                Service::Youtube => nikgob_core::streaming::quality_label("Opus", 160, true),
+                Service::Youtube | Service::Deezer => nikgob_core::streaming::quality_label("Opus", 160, true),
                 Service::Spotify => nikgob_core::streaming::quality_label("Vorbis", 320, false),
             });
         }

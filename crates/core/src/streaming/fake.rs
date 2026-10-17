@@ -9,7 +9,11 @@
 //! The Spotify and YouTube flavours share the songs and their ISRCs (so
 //! cross-service matching can be tested) but not the ids; the YouTube one
 //! knows ISRCs only for "Discovery" (YouTube rarely exposes them) and has an
-//! extra music video. Every future is ready on its first poll. Audio is a
+//! extra music video. The Deezer flavour is a catalogue only
+//! ([`StreamService::catalogue_only`]): never logged in, no sound, and like
+//! the real one it gives ISRCs only for a single track (`track`, `tracks`,
+//! `find_isrc`), not in search results or album listings. Every future is
+//! ready on its first poll. Audio is a
 //! short sine as 16-bit mono WAV, generated on the first read; its pitch
 //! depends on the track.
 
@@ -158,6 +162,7 @@ fn prefix(service: Service) -> &'static str {
     match service {
         Service::Spotify => "sp",
         Service::Youtube => "yt",
+        Service::Deezer => "dz",
     }
 }
 
@@ -199,7 +204,7 @@ impl Catalog {
                 t.album = Some(album_ref.clone());
                 t.duration_ms = Some(secs * 1000);
                 t.isrc = match service {
-                    Service::Spotify => isrc,
+                    Service::Spotify | Service::Deezer => isrc,
                     Service::Youtube => isrc.filter(|_| a.key == "discovery"),
                 }
                 .map(str::to_owned);
@@ -293,10 +298,7 @@ impl FakeService {
     pub fn new(service: Service) -> Self {
         let catalog = Catalog::build(service);
         let p = prefix(service);
-        let owner = match service {
-            Service::Spotify => "Spotify",
-            Service::Youtube => "YouTube Music",
-        };
+        let owner = service.display_name();
         let playlists = PLAYLISTS
             .iter()
             .map(|&(key, name, editable, items)| {
@@ -320,15 +322,21 @@ impl FakeService {
             .iter()
             .map(|&(album, n)| track_id(service, album, n))
             .collect();
+        // A catalogue has no account.
+        let account = if service == Service::Deezer {
+            Account::LoggedOut
+        } else {
+            Account::LoggedIn {
+                name: USER.into(),
+                premium: Some(true),
+                audio: true,
+            }
+        };
         Self {
             service,
             catalog,
             state: Mutex::new(State {
-                account: Account::LoggedIn {
-                    name: USER.into(),
-                    premium: Some(true),
-                    audio: true,
-                },
+                account,
                 liked,
                 playlists,
                 created: 0,
@@ -348,6 +356,20 @@ impl FakeService {
 
     pub fn youtube() -> Self {
         Self::new(Service::Youtube)
+    }
+
+    pub fn deezer() -> Self {
+        Self::new(Service::Deezer)
+    }
+
+    /// What a listing of this flavour gives of a track: Deezer leaves the
+    /// ISRC out of search results and album tracks.
+    fn listed(&self, t: &StreamTrack) -> StreamTrack {
+        let mut t = t.clone();
+        if self.service == Service::Deezer {
+            t.isrc = None;
+        }
+        t
     }
 
     /// Starts logged out instead.
@@ -550,7 +572,7 @@ impl FakeService {
                     || t.artists.iter().any(|a| hit(&a.name))
                     || t.album.as_ref().is_some_and(|a| hit(&a.title))
             })
-            .cloned()
+            .map(|t| self.listed(t))
             .collect();
         let albums = self
             .catalog
@@ -653,6 +675,9 @@ impl FakeService {
     }
 
     fn open_now(&self, id: &str) -> Result<FakeAudio, StreamError> {
+        if self.service == Service::Deezer {
+            return Err(StreamError::Unsupported);
+        }
         if self.service == Service::Spotify {
             self.need_login()?;
         }
@@ -685,11 +710,18 @@ impl StreamService for FakeService {
         self.service
     }
 
+    fn catalogue_only(&self) -> bool {
+        self.service == Service::Deezer
+    }
+
     fn account(&self) -> Account {
         self.lock().account.clone()
     }
 
     fn login(&self, input: LoginInput) -> BoxFuture<'_, Result<(), StreamError>> {
+        if self.service == Service::Deezer {
+            return ready(Err(StreamError::Unsupported));
+        }
         let mut st = self.lock();
         let result = match input {
             LoginInput::Cookies(c) if c.trim().is_empty() => {
@@ -737,7 +769,7 @@ impl StreamService for FakeService {
         if let Err(e) = self.gate("search_kind") {
             return ready(Err(e));
         }
-        if self.service == Service::Spotify && kind == SearchKind::Videos {
+        if self.service != Service::Youtube && kind == SearchKind::Videos {
             return ready(Ok(StreamSearch::default()));
         }
         ready(Ok(only_kind(self.search_now(query), kind)))
@@ -760,7 +792,10 @@ impl StreamService for FakeService {
                 .albums
                 .iter()
                 .find(|a| a.id.id == id)
-                .cloned()
+                .map(|a| StreamAlbum {
+                    tracks: a.tracks.iter().map(|t| self.listed(t)).collect(),
+                    ..a.clone()
+                })
                 .ok_or(StreamError::Unavailable),
         )
     }
@@ -919,7 +954,7 @@ impl StreamService for FakeService {
     }
 
     fn save_audio(&self, id: &str, dir: &Path) -> BoxFuture<'_, Result<PathBuf, StreamError>> {
-        if self.service == Service::Spotify {
+        if self.service != Service::Youtube {
             return ready(Err(StreamError::Unsupported));
         }
         let path = dir.join(format!("{id}.wav"));
@@ -953,6 +988,15 @@ impl StreamService for FakeService {
                 EntityKind::Artist => format!("https://music.youtube.com/channel/{id}"),
                 EntityKind::Playlist => format!("https://music.youtube.com/playlist?list={id}"),
             },
+            Service::Deezer => {
+                let kind = match kind {
+                    EntityKind::Track => "track",
+                    EntityKind::Album => "album",
+                    EntityKind::Artist => "artist",
+                    EntityKind::Playlist => "playlist",
+                };
+                format!("https://www.deezer.com/{kind}/{id}")
+            }
         }
     }
 }

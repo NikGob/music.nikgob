@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use nikgob_core::model::{EventContext, LikeTarget, TrackId};
 use nikgob_core::streaming::{
-    RemoteId, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamTrack, join_names,
+    RemoteId, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamTrack, join_names,
 };
 use nikgob_view::{self as v, Command};
 
@@ -410,6 +410,42 @@ impl Worker {
         self.after_stream_play();
     }
 
+    /// `Command::PlaySearch`: the merged tracks of the «Всё» search as one
+    /// queue; stream rows become "seen" tracks, library rows are what they
+    /// are. A row the runtime does not know (any more) is left out.
+    pub(crate) fn play_search(&mut self, picks: &[v::SearchPick], start: usize, context: String) {
+        let mut ids = Vec::with_capacity(picks.len());
+        let mut start_at = 0;
+        for (i, p) in picks.iter().enumerate() {
+            let id = match p {
+                v::SearchPick::Library(t) => Some(*t),
+                v::SearchPick::Stream(r) => self
+                    .streaming
+                    .known
+                    .get(r)
+                    .cloned()
+                    .and_then(|t| self.upsert_streams(std::slice::from_ref(&t)).first().copied()),
+            };
+            if let Some(id) = id {
+                if i == start {
+                    start_at = ids.len();
+                }
+                ids.push(id);
+            }
+        }
+        if ids.is_empty() {
+            self.toast("Нечего играть", None);
+            return;
+        }
+        self.queue.shuffle = false;
+        self.queue.set(&ids, start_at, Some(context));
+        self.play_context = EventContext::Search;
+        if let Some(e) = self.queue.current() {
+            self.start(e);
+        }
+        self.after_stream_play();
+    }
+
     /// Stream rows that just got their track rows show which one plays: the
     /// open page and the search sections are drawn again with them.
     fn after_stream_play(&mut self) {
@@ -525,7 +561,11 @@ impl Worker {
         for &t in &ids {
             self.wish_for_like(t, nikgob_core::model::WishlistOrigin::Import);
         }
+        // A catalogue (Deezer) is not synced with: its playlist is a
+        // snapshot.
+        let catalogue = self.service(p.id.service).is_none_or(|s| s.catalogue_only());
         let mode = match self.state.read().prefs.playlist_sync_default {
+            _ if catalogue => nikgob_core::streaming::PlaylistSyncMode::Once,
             nikgob_core::streaming::PlaylistSyncMode::TwoWay if !p.editable => {
                 nikgob_core::streaming::PlaylistSyncMode::Follow
             }
@@ -559,6 +599,24 @@ impl Worker {
             return;
         };
         self.command(Command::Like(LikeTarget::Track(id), on));
+        // A liked Deezer track learns its ISRC (search hits and album
+        // tracks come without): one request for the track alone.
+        if on
+            && t.isrc.is_none()
+            && remote.service == Service::Deezer
+            && let Some(dz) = self.service(Service::Deezer)
+        {
+            let rid = remote.id.clone();
+            self.streaming.spawn(async move {
+                match dz.track(&rid).await {
+                    Ok(full) => Msg::IsrcFilled(id, full),
+                    Err(e) => {
+                        log::info!("deezer: no ISRC for {rid}: {e}");
+                        Msg::IsrcFilled(id, StreamTrack::new(RemoteId::new(Service::Deezer, rid), ""))
+                    }
+                }
+            });
+        }
         self.refresh_stream_page();
         // A liked track is a library hit now: the sections merge again.
         self.streaming.search.forget_links();

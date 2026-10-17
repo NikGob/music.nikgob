@@ -817,7 +817,9 @@ impl Worker {
                 if old.output_device != p.output_device {
                     self.switch_device(p.output_device.clone());
                 }
-                if (old.spotify_enabled, old.youtube_enabled) != (p.spotify_enabled, p.youtube_enabled) {
+                if (old.spotify_enabled, old.youtube_enabled, old.deezer_enabled)
+                    != (p.spotify_enabled, p.youtube_enabled, p.deezer_enabled)
+                {
                     self.publish_accounts();
                     self.preload_next();
                 }
@@ -861,6 +863,7 @@ impl Worker {
             | Command::SetSearchSources(_)
             | Command::LoadStream(_)
             | Command::PlayStreamTracks { .. }
+            | Command::PlaySearch { .. }
             | Command::PlayStreamAlbum { .. }
             | Command::PlayStreamPlaylist { .. }
             | Command::PlayStreamNext(_)
@@ -1601,8 +1604,10 @@ impl Worker {
                 playlists: r.playlists.iter().map(|p| res.playlist(p)).collect(),
                 searching: false,
                 sources,
-                // The services' sections stay until their new answers.
+                // The services' sections and the merged answer stay until
+                // their new answers.
                 streams: std::mem::take(&mut s.search.streams),
+                answer: std::mem::take(&mut s.search.answer),
                 torrents: std::mem::take(&mut s.search.torrents),
             };
         });

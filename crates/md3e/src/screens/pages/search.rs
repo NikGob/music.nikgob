@@ -34,7 +34,14 @@ pub enum Filter {
 impl Filter {
     /// The sources this filter asks.
     fn sources(self) -> SearchSources {
-        let only = |library, spotify, youtube| SearchSources { library, spotify, youtube, torrents: false };
+        let only = |library, spotify, youtube| SearchSources {
+            library,
+            spotify,
+            youtube,
+            deezer: false,
+            torrents: false,
+            mixed: false,
+        };
         match self {
             Self::All => only(true, true, true),
             Self::Library => only(true, false, false),
@@ -56,7 +63,7 @@ impl Filter {
     fn of(service: Service) -> Self {
         match service {
             Service::Spotify => Self::Spotify,
-            Service::Youtube => Self::Youtube,
+            Service::Youtube | Service::Deezer => Self::Youtube,
         }
     }
 }
@@ -516,7 +523,7 @@ fn stream_section(
             if quiet(ui, &format!("{name} выключен."), Some(("Включить", Icon::Settings, &format!("sv-on-{salt}")))) {
                 pages.open_setting(match service {
                     Service::Spotify => super::SettingId::SpotifyEnabled,
-                    Service::Youtube => super::SettingId::YouTubeEnabled,
+                    Service::Youtube | Service::Deezer => super::SettingId::YouTubeEnabled,
                 });
             }
         }

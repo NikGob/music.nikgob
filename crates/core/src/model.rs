@@ -213,16 +213,21 @@ str_enum!(
         LocalFile = "local_file",
         Spotify = "spotify",
         Youtube = "youtube",
+        /// A Deezer catalogue entry: it has no sound of its own, its track
+        /// plays from YouTube Music (docs/stage3.md §0 «Каталог Deezer»).
+        Deezer = "deezer",
     }
 );
 
 impl SourceKind {
-    /// Lower is better: local file > Spotify > YouTube (PLAN §4).
+    /// Lower is better: local file > Spotify > YouTube > Deezer (PLAN §4;
+    /// a Deezer entry never plays itself).
     pub const fn priority(self) -> u8 {
         match self {
             Self::LocalFile => 0,
             Self::Spotify => 1,
             Self::Youtube => 2,
+            Self::Deezer => 3,
         }
     }
 
@@ -443,6 +448,9 @@ pub mod score {
     pub const STREAM_SPOTIFY: i32 = 290;
     /// A YouTube stream (Opus ~160 or AAC), below Spotify.
     pub const STREAM_YOUTUBE: i32 = 280;
+    /// A Deezer catalogue entry: no sound of its own (it plays from YouTube
+    /// Music), so below every stream that plays.
+    pub const STREAM_DEEZER: i32 = 270;
 }
 
 /// Ranks a source by quality, PLAN §6:
@@ -1071,6 +1079,7 @@ mod tests {
         assert!("nope".parse::<ReleaseType>().is_err());
         assert!(SourceKind::LocalFile.priority() < SourceKind::Spotify.priority());
         assert!(SourceKind::Spotify.priority() < SourceKind::Youtube.priority());
+        assert!(SourceKind::Youtube.priority() < SourceKind::Deezer.priority());
     }
 
     #[test]

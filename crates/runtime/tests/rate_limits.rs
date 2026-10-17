@@ -285,12 +285,12 @@ fn a_rate_limited_playlist_check_runs_again_when_the_pause_ends() {
         pulled_before(&lib, std::slice::from_ref(&svc));
         let p = match service {
             Service::Spotify => "sp",
-            Service::Youtube => "yt",
+            Service::Youtube | Service::Deezer => "yt",
         };
         linked(&lib, RemoteId::new(service, format!("{p}-pl-evening")));
         match service {
             Service::Spotify => svc.rate_limit_next("my_playlists", 1, Some(Duration::from_millis(200))),
-            Service::Youtube => {
+            Service::Youtube | Service::Deezer => {
                 svc.rate_limit_next_paused("my_playlists", 1, Duration::from_millis(200));
             }
         }

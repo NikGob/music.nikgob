@@ -154,7 +154,7 @@ impl Worker {
     /// is due (first pull, once a day).
     pub(crate) fn pull_likes(&mut self, service: Service) {
         let Some(svc) = self.service(service) else { return };
-        if !svc.account().is_logged_in() {
+        if svc.catalogue_only() || !svc.account().is_logged_in() {
             return;
         }
         let every = self.streaming.schedule.jittered(self.streaming.schedule.likes_every);
@@ -390,7 +390,8 @@ impl Worker {
                 continue;
             }
             let Some(svc) = self.service(remote.service) else { continue };
-            if !svc.account().is_logged_in() {
+            // A catalogue (Deezer) keeps no likes: they stay here.
+            if svc.catalogue_only() || !svc.account().is_logged_in() {
                 continue;
             }
             pushed.push(remote.service);

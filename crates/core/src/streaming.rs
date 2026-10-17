@@ -1,4 +1,5 @@
-//! Streaming services (Spotify, YouTube Music) behind one trait.
+//! Streaming services (Spotify, YouTube Music, the Deezer catalogue) behind
+//! one trait.
 //!
 //! The rest of the app talks only to [`StreamService`]; the concrete backends
 //! live in their own crates (`nikgob-spotify`, `nikgob-youtube`) and are held as
@@ -45,22 +46,25 @@ pub use fake::FakeService;
 // ---------------------------------------------------------------------------
 
 /// A streaming service. Stored as the same lowercase string as the matching
-/// [`SourceKind`] (`"spotify"`, `"youtube"`).
+/// [`SourceKind`] (`"spotify"`, `"youtube"`, `"deezer"`). Deezer is a
+/// catalogue only ([`StreamService::catalogue_only`]): no account, no sound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Service {
     Spotify,
     Youtube,
+    Deezer,
 }
 
 impl Service {
-    pub const ALL: &'static [Self] = &[Self::Spotify, Self::Youtube];
+    pub const ALL: &'static [Self] = &[Self::Spotify, Self::Youtube, Self::Deezer];
 
     /// Stable lowercase name used in the database and in JSON.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Spotify => "spotify",
             Self::Youtube => "youtube",
+            Self::Deezer => "deezer",
         }
     }
 
@@ -68,6 +72,7 @@ impl Service {
         match s {
             "spotify" => Some(Self::Spotify),
             "youtube" => Some(Self::Youtube),
+            "deezer" => Some(Self::Deezer),
             _ => None,
         }
     }
@@ -77,15 +82,17 @@ impl Service {
         match self {
             Self::Spotify => "Spotify",
             Self::Youtube => "YouTube Music",
+            Self::Deezer => "Deezer",
         }
     }
 
     /// Codec of the audio the service streams (YouTube also has AAC
-    /// formats; Opus is what is asked for).
+    /// formats; Opus is what is asked for). A Deezer track plays from
+    /// YouTube Music.
     pub fn codec(self) -> Codec {
         match self {
             Self::Spotify => Codec::Vorbis,
-            Self::Youtube => Codec::Opus,
+            Self::Youtube | Self::Deezer => Codec::Opus,
         }
     }
 
@@ -94,7 +101,7 @@ impl Service {
     pub fn nominal_quality(self) -> String {
         match self {
             Self::Spotify => quality_label("Vorbis", 320, false),
-            Self::Youtube => quality_label("Opus", 160, true),
+            Self::Youtube | Self::Deezer => quality_label("Opus", 160, true),
         }
     }
 
@@ -102,7 +109,7 @@ impl Service {
     pub const fn bitrate_kbps(self) -> u32 {
         match self {
             Self::Spotify => 320,
-            Self::Youtube => 160,
+            Self::Youtube | Self::Deezer => 160,
         }
     }
 
@@ -112,6 +119,7 @@ impl Service {
         match self {
             Self::Spotify => score::STREAM_SPOTIFY,
             Self::Youtube => score::STREAM_YOUTUBE,
+            Self::Deezer => score::STREAM_DEEZER,
         }
     }
 
@@ -120,6 +128,7 @@ impl Service {
         match self {
             Self::Spotify => SourceKind::Spotify,
             Self::Youtube => SourceKind::Youtube,
+            Self::Deezer => SourceKind::Deezer,
         }
     }
 }
@@ -152,6 +161,7 @@ impl SourceKind {
             Self::LocalFile => None,
             Self::Spotify => Some(Service::Spotify),
             Self::Youtube => Some(Service::Youtube),
+            Self::Deezer => Some(Service::Deezer),
         }
     }
 }
@@ -637,6 +647,15 @@ pub fn only_kind(mut s: StreamSearch, kind: SearchKind) -> StreamSearch {
 pub trait StreamService: Send + Sync {
     fn service(&self) -> Service;
 
+    /// A catalogue without an account or sound of its own (Deezer): usable
+    /// whenever it is switched on, never logged in ([`Account::LoggedOut`] is
+    /// not a missing login here). Its tracks play from YouTube Music the way
+    /// a Spotify track without Premium does, and likes stay local: the
+    /// runtime sends it no likes and syncs no playlists with it.
+    fn catalogue_only(&self) -> bool {
+        false
+    }
+
     /// Current account state. Cheap, no network.
     fn account(&self) -> Account;
 
@@ -660,6 +679,19 @@ pub trait StreamService: Send + Sync {
     ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
         let _ = part;
         self.search(query)
+    }
+
+    /// The quick mixed answer for the «Всё» page of the search: what the
+    /// service can say in its fewest requests (YouTube Music: one mixed
+    /// request; Deezer: tracks, albums and artists, no playlists). The
+    /// category requests stay for the service's own chip
+    /// ([`Self::search_in_parts`]). Parts go to `part` as they come.
+    fn search_top(
+        &self,
+        query: &str,
+        part: SearchParts,
+    ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        self.search_in_parts(query, part)
     }
 
     /// One category of a search ([`SearchKind`]), for background work

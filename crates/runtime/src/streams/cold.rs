@@ -953,13 +953,17 @@ impl Worker {
             if service == Service::Spotify && !svc.account().is_logged_in() {
                 continue;
             }
+            // Imported tracks come from Spotify and YouTube Music only.
+            if svc.catalogue_only() {
+                continue;
+            }
             let e = self.streaming.cold.enrich.entry(service).or_default();
             if e.busy || e.next_at.is_some_and(|t| Instant::now() < t) {
                 continue;
             }
             let batch = match service {
                 Service::Spotify => ENRICH_BATCH_SPOTIFY,
-                Service::Youtube => ENRICH_BATCH_YOUTUBE,
+                Service::Youtube | Service::Deezer => ENRICH_BATCH_YOUTUBE,
             };
             let todo: Vec<(TrackId, String)> = self
                 .lib
@@ -994,7 +998,7 @@ impl Worker {
     fn enriched(&mut self, service: Service, results: Vec<(TrackId, String, Result<StreamTrack, StreamError>)>) {
         let pause = match service {
             Service::Spotify => self.streaming.schedule.enrich_pause.0,
-            Service::Youtube => self.streaming.schedule.enrich_pause.1,
+            Service::Youtube | Service::Deezer => self.streaming.schedule.enrich_pause.1,
         };
         let mut next = Instant::now() + pause;
         let mut done = 0;

@@ -339,6 +339,8 @@ impl Resolver {
                     SourceKind::LocalFile => "Локальный файл",
                     SourceKind::Spotify => "Spotify",
                     SourceKind::Youtube => "YouTube Music",
+                    // Never plays itself (the YouTube copy does).
+                    SourceKind::Deezer => "Deezer",
                 }
                 .to_owned()
             }),

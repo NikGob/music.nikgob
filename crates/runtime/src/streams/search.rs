@@ -15,18 +15,30 @@
 //! [`RETRIES`] times per query. A longer or unknown pause says the service
 //! is overloaded while the others answer, and asks once more when it ends.
 //!
+//! The «Всё» page ([`v::SearchSources::mixed`]) asks every service that can
+//! answer now (not Spotify without a login) its quick mixed search
+//! ([`StreamService::search_top`]: YouTube Music one request, Deezer three)
+//! and also gets one merged answer ([`v::SearchAnswer`], see
+//! [`Worker::rebuild_answer`]): the library and the services' rows ranked
+//! together ([`super::rank`]), each song once, played from the best source
+//! it has. The previous answer stays until a service of the new query
+//! answers; the top result and the first tracks are settled once Deezer
+//! answered or [`SETTLE_GRACE`] after the first answer, and keep their
+//! places while slower answers arrive below them.
+//!
 //! [`StreamService::search_in_parts`]: nikgob_core::streaming::StreamService::search_in_parts
+//! [`StreamService::search_top`]: nikgob_core::streaming::StreamService::search_top
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nikgob_core::model::TrackId;
-use nikgob_core::streaming::{Service, StreamError, StreamSearch, StreamTrack};
+use nikgob_core::streaming::{RemoteId, Service, StreamError, StreamSearch, StreamTrack, TrackKind};
 use nikgob_metadata::text::{TitleKey, album_key, artist_key, similarity, title_key};
 use nikgob_view as v;
 
-use super::Msg;
+use super::{Msg, rank};
 use crate::Worker;
 
 /// Wait before asking the services, so typing does not fire a request per
@@ -49,6 +61,20 @@ pub(crate) const RETRIES: u32 = 3;
 /// When a service rate-limited without saying for how long, it is asked
 /// again (once) this much later.
 const UNKNOWN_WAIT: Duration = Duration::from_secs(60);
+/// After the first service answered, how long the top of the «Всё» answer
+/// waits for Deezer (fast, and the best catalogue) before it is settled.
+pub(crate) const SETTLE_GRACE: Duration = Duration::from_millis(300);
+/// The order services are merged in (and win ties): Spotify (when it is
+/// asked at all), the Deezer catalogue, YouTube Music.
+const MERGE_ORDER: [Service; 3] = [Service::Spotify, Service::Deezer, Service::Youtube];
+
+/// What the settled top result is, to find it again in a later rebuild.
+#[derive(Clone, Debug)]
+enum TopKey {
+    Artist(String),
+    Track(SongKey),
+    Album(String, String),
+}
 
 #[derive(Default)]
 pub(crate) struct SearchState {
@@ -66,11 +92,22 @@ pub(crate) struct SearchState {
     /// The library track of each stream row of this query (the same-song
     /// lookup is a few queries; sections are rebuilt on every part).
     linked: HashMap<nikgob_core::streaming::RemoteId, Option<TrackId>>,
+    /// The «Всё» answer's top is settled for this query (see the module
+    /// docs) …
+    settled: bool,
+    /// … the grace timer runs …
+    settling: bool,
+    /// … and these keep their places: the top result and the first
+    /// [`v::TOP_TRACKS`] tracks.
+    frozen_top: Option<TopKey>,
+    frozen_tracks: Vec<SongKey>,
 }
 
-/// A query as the cache knows it: lower case, single spaces.
-fn cache_key(query: &str) -> String {
-    query.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+/// A query as the cache knows it: lower case, single spaces. The answers
+/// of the quick «Всё» search and of the full one are kept apart.
+fn cache_key(query: &str, mixed: bool) -> String {
+    let q = query.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    if mixed { format!("top:{q}") } else { q }
 }
 
 type Answer = Result<StreamSearch, StreamError>;
@@ -89,6 +126,8 @@ struct Slot {
     long_retried: bool,
     /// The service rate-limited this query: what the section says.
     wait: Option<Wait>,
+    /// `result` is this query's (not the previous one kept on screen).
+    fresh: bool,
 }
 
 impl Slot {
@@ -100,6 +139,7 @@ impl Slot {
             retries: 0,
             long_retried: false,
             wait: None,
+            fresh: done,
         }
     }
 }
@@ -226,6 +266,10 @@ impl Worker {
         st.query = query.to_owned();
         st.started = Some(Instant::now());
         st.linked.clear();
+        st.settled = false;
+        st.settling = false;
+        st.frozen_top = None;
+        st.frozen_tracks.clear();
         st.lib_tracks = library
             .into_iter()
             .map(|r| {
@@ -237,15 +281,20 @@ impl Worker {
         let sources = st.sources;
         if query.is_empty() {
             self.streaming.search.raw.clear();
-            self.publish(|s, _| s.search.streams.clear());
+            self.publish(|s, _| {
+                s.search.streams.clear();
+                s.search.answer = v::SearchAnswer::default();
+            });
             return;
         }
-        // Spotify without a login answers «не вошёл» at once, without a
-        // request; the UI says «войди, чтобы искать и там» instead.
+        // Under a chip, Spotify without a login answers «не вошёл» at once,
+        // without a request; the UI says «войди, чтобы искать и там». The
+        // «Всё» page asks only the services that can answer.
+        let mixed = sources.mixed;
         let asked: Vec<Service> = Service::ALL
             .iter()
             .copied()
-            .filter(|&s| sources.service(s) && self.service(s).is_some())
+            .filter(|&s| sources.service(s) && self.service(s).is_some() && (!mixed || self.can_search(s)))
             .collect();
         // Sections that stay keep what they showed until the new answer.
         let mut old = std::mem::take(&mut self.streaming.search.raw);
@@ -256,7 +305,7 @@ impl Worker {
                 .iter()
                 .position(|s| s.service == service)
                 .and_then(|i| old.swap_remove(i).result);
-            let key = (service, cache_key(query));
+            let key = (service, cache_key(query, mixed));
             if let Some((_, hit)) = st.cache.get(&key) {
                 log::debug!("search #{seq} «{query}»: {service} from the cache");
                 st.raw.push(Slot::new(service, Some(Ok(hit.clone())), true));
@@ -270,6 +319,43 @@ impl Worker {
             }
             self.ask_service(service, seq, query, DEBOUNCE);
         }
+        // Nothing to wait for (everything cached, or no service asked).
+        self.maybe_settle(None);
+        self.rebuild_sections();
+    }
+
+    /// Settles the top of the «Всё» answer when it is time: every asked
+    /// service is done, or Deezer answered; after the first answer
+    /// (`answered`) of another service the grace timer starts.
+    fn maybe_settle(&mut self, answered: Option<Service>) {
+        let st = &mut self.streaming.search;
+        if !st.sources.mixed || st.settled {
+            return;
+        }
+        let all_done = st.raw.iter().all(|s| s.done);
+        let deezer_done = st.raw.iter().any(|s| s.service == Service::Deezer && s.done);
+        if all_done || deezer_done {
+            st.settled = true;
+            return;
+        }
+        if answered.is_some() && !st.settling {
+            st.settling = true;
+            let seq = st.seq;
+            let task = self.streaming.spawn(async move {
+                tokio::time::sleep(SETTLE_GRACE).await;
+                Msg::SearchSettle { seq }
+            });
+            self.streaming.search.tasks.push(task);
+        }
+    }
+
+    /// The grace after the first answer ended: the top is settled.
+    pub(crate) fn search_settle(&mut self, seq: u64) {
+        let st = &mut self.streaming.search;
+        if seq != st.seq || st.settled {
+            return;
+        }
+        st.settled = true;
         self.rebuild_sections();
     }
 
@@ -278,6 +364,7 @@ impl Worker {
     /// [`Msg::Searched`].
     fn ask_service(&mut self, service: Service, seq: u64, query: &str, wait: Duration) {
         let Some(svc) = self.service(service) else { return };
+        let mixed = self.streaming.search.sources.mixed;
         let q = query.to_owned();
         let tx = self.streaming.internal.clone();
         let task = self.streaming.spawn(async move {
@@ -299,7 +386,11 @@ impl Worker {
                     partial: true,
                 }));
             });
-            let result = svc.search_in_parts(&q, part).await;
+            let result = if mixed {
+                svc.search_top(&q, part).await
+            } else {
+                svc.search_in_parts(&q, part).await
+            };
             match &result {
                 Ok(r) => log::debug!(
                     "search #{seq}: {service} answered in {} ms: {} tracks, {} albums, {} artists, {} playlists",
@@ -346,6 +437,7 @@ impl Worker {
             slot.done = true;
             // An older query's rows would read as this one's.
             slot.result = None;
+            slot.fresh = true;
             if retry {
                 slot.retries += 1;
                 slot.long_retried = true;
@@ -409,6 +501,7 @@ impl Worker {
         }
         if !partial && let Err(StreamError::RateLimited { retry_after }) = &result {
             self.search_limited(service, *retry_after);
+            self.maybe_settle(Some(service));
             self.rebuild_sections();
             return;
         }
@@ -420,7 +513,8 @@ impl Worker {
             if st.cache.len() >= CACHE_MAX {
                 st.cache.clear();
             }
-            st.cache.insert((service, cache_key(&st.query)), (Instant::now(), r.clone()));
+            let key = (service, cache_key(&st.query, st.sources.mixed));
+            st.cache.insert(key, (Instant::now(), r.clone()));
         }
         if let Some(slot) = st.raw.iter_mut().find(|s| s.service == service) {
             if slot.done {
@@ -429,7 +523,9 @@ impl Worker {
             slot.result = Some(result.clone());
             slot.done = !partial;
             slot.wait = None;
+            slot.fresh = true;
         }
+        self.maybe_settle(Some(service));
         let rebuilt = Instant::now();
         self.rebuild_sections();
         log::debug!(
@@ -559,6 +655,7 @@ impl Worker {
         if merged > Duration::from_millis(20) {
             log::debug!("search: merging the sections took {} ms", merged.as_millis());
         }
+        let answer = self.rebuild_answer(&sections);
         self.publish(|s, res| {
             if s.search.query.trim() != query {
                 return;
@@ -569,9 +666,316 @@ impl Worker {
                 }
             }
             s.search.streams = sections;
+            match answer {
+                Some(a) => s.search.answer = a,
+                // The previous answer stays while the new query runs.
+                None => s.search.answer.searching = true,
+            }
         });
     }
 
+    /// The merged «Всё» answer from the library hits, the services' fresh
+    /// answers and their `sections` (cards already deduplicated across
+    /// services); `None` while no service answered this query yet (the
+    /// previous answer stays). See the module docs.
+    fn rebuild_answer(&mut self, sections: &[v::StreamSearchSection]) -> Option<v::SearchAnswer> {
+        let st = &self.streaming.search;
+        if !st.sources.mixed {
+            return Some(v::SearchAnswer::default());
+        }
+        let query = st.query.clone();
+        if query.is_empty() {
+            return Some(v::SearchAnswer::default());
+        }
+        let all_done = st.raw.iter().all(|s| s.done);
+        if !all_done && !st.raw.iter().any(|s| s.fresh) {
+            return None;
+        }
+        let q = rank::Query::new(&query);
+        let fresh: Vec<Service> = st.raw.iter().filter(|s| s.fresh).map(|s| s.service).collect();
+        let lib_keys: Vec<(TrackId, SongKey)> = st
+            .lib_tracks
+            .iter()
+            .map(|(r, isrc)| (r.id, SongKey::of_library(r, isrc.as_deref())))
+            .collect();
+        let (lib_rows, lib_releases, lib_artists, lib_playlists) = {
+            let s = self.state.read();
+            let rows: Vec<v::TrackRow> = lib_keys
+                .iter()
+                .filter_map(|(id, _)| s.search.tracks.iter().find(|t| t.id == *id).cloned())
+                .collect();
+            (rows, s.search.releases.clone(), s.search.artists.clone(), s.search.playlists.clone())
+        };
+
+        // Tracks: one group per song.
+        let mut groups: Vec<Group> = Vec::new();
+        for (i, row) in lib_rows.into_iter().enumerate() {
+            let Some((_, key)) = lib_keys.iter().find(|(id, _)| *id == row.id) else { continue };
+            let score = q.track(&row.title, &[row.artist.as_str()], row.album.as_deref(), TrackKind::Song);
+            groups.push(Group {
+                key: key.clone(),
+                lib: Some(row.id),
+                row: v::SearchTrack::Library(row),
+                score,
+                pos: i,
+                origin: 0,
+                prio: 0,
+            });
+        }
+        let shown: HashMap<RemoteId, v::StreamTrackRow> = sections
+            .iter()
+            .flat_map(|x| x.tracks.iter())
+            .map(|r| (r.remote.clone(), r.clone()))
+            .collect();
+        let raw: Vec<(Service, StreamSearch)> = MERGE_ORDER
+            .iter()
+            .filter(|s| fresh.contains(s))
+            .filter_map(|&s| {
+                let slot = self.streaming.search.raw.iter().find(|x| x.service == s)?;
+                match &slot.result {
+                    Some(Ok(r)) => Some((s, r.clone())),
+                    _ => None,
+                }
+            })
+            .collect();
+        for (origin, (service, r)) in raw.iter().enumerate() {
+            for (i, t) in r.tracks.iter().enumerate() {
+                let key = SongKey::of_stream(t);
+                let linked = match self.streaming.search.linked.get(&t.id) {
+                    Some(l) => *l,
+                    None => {
+                        let l = self.library_track_of(t);
+                        self.streaming.search.linked.insert(t.id.clone(), l);
+                        l
+                    }
+                };
+                let names: Vec<&str> = t.artists.iter().map(|a| a.name.as_str()).collect();
+                let score = q.track(&t.title, &names, t.album.as_ref().map(|a| a.title.as_str()), t.kind);
+                let prio = self.play_prio(*service, t.kind);
+                let found = groups
+                    .iter_mut()
+                    .find(|g| g.key.same(&key) || (linked.is_some() && g.lib == linked));
+                if let Some(g) = found {
+                    g.score = g.score.max(score);
+                    g.merge(*service, prio, t, linked, &shown, self);
+                    continue;
+                }
+                let row = shown.get(&t.id).cloned().unwrap_or_else(|| self.stream_row(t, linked));
+                groups.push(Group {
+                    key,
+                    lib: linked,
+                    row: v::SearchTrack::Stream(row),
+                    score,
+                    pos: i,
+                    origin: origin + 1,
+                    prio,
+                });
+            }
+        }
+        let mut track_order: Vec<usize> = (0..groups.len()).collect();
+        let quant = |s: f64| (s * 100.0).round() as i64;
+        track_order.sort_by_key(|&i| (std::cmp::Reverse(quant(groups[i].score)), groups[i].pos, groups[i].origin));
+
+        // Albums, artists, playlists: the library's first in a tie, the
+        // services' cards as their sections give them (deduplicated).
+        let lib_release_ids: Vec<_> = lib_releases.iter().map(|r| r.id).collect();
+        let mut albums: Vec<(v::SearchAlbum, f64, usize, usize, (String, String))> = lib_releases
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let key = (album_key(&r.title), main_artist(&r.artist));
+                let s = q.album(&r.title, &r.artist);
+                (v::SearchAlbum::Library(r), s, i, 0, key)
+            })
+            .collect();
+        let lib_artist_ids: Vec<_> = lib_artists.iter().map(|a| a.id).collect();
+        let mut artists: Vec<(v::SearchArtist, f64, usize, usize, String)> = lib_artists
+            .into_iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let key = artist_key(&a.name);
+                let s = q.artist(&a.name);
+                (v::SearchArtist::Library(a), s, i, 0, key)
+            })
+            .collect();
+        let mut playlists: Vec<(v::SearchPlaylist, f64, usize, usize)> = lib_playlists
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let s = q.playlist(&p.name);
+                (v::SearchPlaylist::Library(p), s, i, 0)
+            })
+            .collect();
+        for (origin, service) in MERGE_ORDER.iter().enumerate() {
+            if !fresh.contains(service) {
+                continue;
+            }
+            let Some(sec) = sections.iter().find(|x| x.service == *service) else { continue };
+            for (i, a) in sec.albums.iter().enumerate() {
+                let key = (album_key(&a.title), main_artist(&a.artist));
+                if a.release.is_some_and(|r| lib_release_ids.contains(&r)) || albums.iter().any(|x| x.4 == key) {
+                    continue;
+                }
+                albums.push((v::SearchAlbum::Stream(a.clone()), q.album(&a.title, &a.artist), i, origin + 1, key));
+            }
+            for (i, a) in sec.artists.iter().enumerate() {
+                let key = artist_key(&a.name);
+                if a.artist.is_some_and(|id| lib_artist_ids.contains(&id)) || artists.iter().any(|x| x.4 == key) {
+                    continue;
+                }
+                artists.push((v::SearchArtist::Stream(a.clone()), q.artist(&a.name), i, origin + 1, key));
+            }
+            for (i, p) in sec.playlists.iter().enumerate() {
+                playlists.push((v::SearchPlaylist::Stream(p.clone()), q.playlist(&p.name), i, origin + 1));
+            }
+        }
+        // Coarse buckets: a slower source's card goes after the ones of
+        // the same kind of match already shown.
+        let bucket = |s: f64| (s * 4.0).floor() as i64;
+        albums.sort_by_key(|x| (std::cmp::Reverse(bucket(x.1)), x.2, x.3));
+        artists.sort_by_key(|x| (std::cmp::Reverse(bucket(x.1)), x.2, x.3));
+        playlists.sort_by_key(|x| (std::cmp::Reverse(bucket(x.1)), x.2, x.3));
+
+        // The top result: settled once, then found again by its key.
+        let st = &mut self.streaming.search;
+        let settled = st.settled;
+        if settled && st.frozen_top.is_none() && st.frozen_tracks.is_empty() {
+            let t_scores: Vec<f64> = track_order.iter().map(|&i| groups[i].score).collect();
+            let a_scores: Vec<f64> = artists.iter().map(|x| x.1).collect();
+            let al_scores: Vec<f64> = albums.iter().map(|x| x.1).collect();
+            st.frozen_top = rank::top(&a_scores, &t_scores, &al_scores).map(|t| match t {
+                rank::Top::Artist(i) => TopKey::Artist(artists[i].4.clone()),
+                rank::Top::Track(i) => TopKey::Track(groups[track_order[i]].key.clone()),
+                rank::Top::Album(i) => TopKey::Album(albums[i].4.0.clone(), albums[i].4.1.clone()),
+            });
+            let top_track = match &st.frozen_top {
+                Some(TopKey::Track(k)) => track_order.iter().position(|&i| groups[i].key.same(k)),
+                _ => None,
+            };
+            st.frozen_tracks = track_order
+                .iter()
+                .enumerate()
+                .filter(|(n, _)| Some(*n) != top_track)
+                .take(v::TOP_TRACKS)
+                .map(|(_, &i)| groups[i].key.clone())
+                .collect();
+        }
+        let mut top = None;
+        match st.frozen_top.clone() {
+            Some(TopKey::Artist(k)) => {
+                if let Some(i) = artists.iter().position(|x| x.4 == k) {
+                    top = Some(v::TopResult::Artist(artists.remove(i).0));
+                }
+            }
+            Some(TopKey::Album(t, a)) => {
+                if let Some(i) = albums.iter().position(|x| x.4.0 == t && x.4.1 == a) {
+                    top = Some(v::TopResult::Album(albums.remove(i).0));
+                }
+            }
+            Some(TopKey::Track(k)) => {
+                if let Some(n) = track_order.iter().position(|&i| groups[i].key.same(&k)) {
+                    let i = track_order.remove(n);
+                    top = Some(v::TopResult::Track(groups[i].row.clone()));
+                }
+            }
+            None => {}
+        }
+        // The first tracks keep their places; the rest follows by rank.
+        let mut ordered: Vec<usize> = Vec::with_capacity(track_order.len());
+        for k in &st.frozen_tracks {
+            if let Some(n) = track_order.iter().position(|&i| groups[i].key.same(k)) {
+                ordered.push(track_order.remove(n));
+            }
+        }
+        ordered.extend(track_order);
+
+        let note = st.raw.iter().find_map(|s| {
+            let w = s.wait.as_ref()?;
+            let other = st.raw.iter().map(|x| x.service).find(|&x| x != s.service);
+            Some(wait_note(s.service, w, other))
+        });
+        let mut answer = v::SearchAnswer {
+            query: query.clone(),
+            top,
+            top_pending: !settled,
+            tracks: ordered.into_iter().map(|i| groups[i].row.clone()).collect(),
+            albums: albums.into_iter().map(|x| x.0).collect(),
+            artists: artists.into_iter().map(|x| x.0).collect(),
+            playlists: playlists.into_iter().map(|x| x.0).collect(),
+            searching: !all_done,
+            note,
+            error: None,
+        };
+        if all_done && answer.is_empty() {
+            answer.error = st.raw.iter().find_map(|s| match &s.result {
+                Some(Err(StreamError::RateLimited { .. })) | None | Some(Ok(_)) => None,
+                Some(Err(e)) => Some(search_error(s.service, e)),
+            });
+        }
+        Some(answer)
+    }
+
+    /// Which copy of a song plays best (lower first): a library track,
+    /// Spotify with sound, a YouTube Music song, Spotify without sound
+    /// (plays from YouTube Music), Deezer (the same), a YouTube clip or
+    /// upload.
+    fn play_prio(&self, service: Service, kind: TrackKind) -> u8 {
+        match service {
+            Service::Spotify if self.has_audio(Service::Spotify) => 1,
+            Service::Youtube if kind == TrackKind::Song => 2,
+            Service::Spotify => 3,
+            Service::Deezer => 4,
+            Service::Youtube => 5,
+        }
+    }
+}
+
+/// One song of the merged answer and the copy it shows (and plays).
+struct Group {
+    key: SongKey,
+    /// Its library track, when it has one.
+    lib: Option<TrackId>,
+    row: v::SearchTrack,
+    /// The best score of its copies.
+    score: f64,
+    /// Its place in the first source that had it.
+    pos: usize,
+    /// That source: 0 the library, then [`MERGE_ORDER`].
+    origin: usize,
+    /// [`Worker::play_prio`] of the copy shown.
+    prio: u8,
+}
+
+impl Group {
+    /// One more copy of the song (from `service`): it is shown instead
+    /// when it plays better; the other services go to `also_on`.
+    fn merge(
+        &mut self,
+        service: Service,
+        prio: u8,
+        t: &StreamTrack,
+        linked: Option<TrackId>,
+        shown: &HashMap<RemoteId, v::StreamTrackRow>,
+        w: &Worker,
+    ) {
+        let v::SearchTrack::Stream(row) = &mut self.row else { return }; // the library wins
+        if prio < self.prio {
+            let mut better = shown.get(&t.id).cloned().unwrap_or_else(|| w.stream_row(t, linked));
+            better.also_on = row.also_on.clone();
+            if !better.also_on.contains(&row.remote.service) {
+                better.also_on.push(row.remote.service);
+            }
+            better.also_on.retain(|s| *s != service);
+            self.prio = prio;
+            self.lib = self.lib.or(linked);
+            *row = better;
+        } else if row.remote.service != service && !row.also_on.contains(&service) {
+            row.also_on.push(service);
+        }
+    }
+}
+
+impl Worker {
     /// The library track a stream track is: linked by its remote id, else
     /// the one with its ISRC.
     pub(crate) fn library_track_of(&self, t: &StreamTrack) -> Option<TrackId> {

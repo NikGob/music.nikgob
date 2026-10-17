@@ -177,8 +177,17 @@ pub struct SearchSources {
     pub library: bool,
     pub spotify: bool,
     pub youtube: bool,
+    /// The Deezer catalogue.
+    pub deezer: bool,
     /// The indexer (Prowlarr): slow, so off unless asked for.
     pub torrents: bool,
+    /// The «Всё» page: the runtime also builds one merged answer
+    /// ([`crate::SearchView::answer`]), asks each service its quick mixed
+    /// search ([`nikgob_core::streaming::StreamService::search_top`]) and
+    /// leaves out the services that cannot answer (Spotify without a
+    /// login). Off (the default, and a service's chip): every chosen
+    /// service is asked its full search, section by section.
+    pub mixed: bool,
 }
 
 impl Default for SearchSources {
@@ -187,7 +196,9 @@ impl Default for SearchSources {
             library: true,
             spotify: true,
             youtube: true,
+            deezer: true,
             torrents: false,
+            mixed: false,
         }
     }
 }
@@ -197,7 +208,131 @@ impl SearchSources {
         match s {
             Service::Spotify => self.spotify,
             Service::Youtube => self.youtube,
+            Service::Deezer => self.deezer,
         }
+    }
+
+    /// The «Всё» page: the library and every service, merged.
+    pub const fn all() -> Self {
+        Self {
+            library: true,
+            spotify: true,
+            youtube: true,
+            deezer: true,
+            torrents: false,
+            mixed: true,
+        }
+    }
+}
+
+/// A track of the merged «Всё» answer: a library track (it wins over the
+/// same song in a service), or a service's track.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SearchTrack {
+    Library(crate::TrackRow),
+    Stream(StreamTrackRow),
+}
+
+impl SearchTrack {
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Library(t) => &t.title,
+            Self::Stream(t) => &t.title,
+        }
+    }
+
+    pub fn artist(&self) -> &str {
+        match self {
+            Self::Library(t) => &t.artist,
+            Self::Stream(t) => &t.artist,
+        }
+    }
+
+    /// What [`crate::Command::PlaySearch`] plays for it.
+    pub fn pick(&self) -> SearchPick {
+        match self {
+            Self::Library(t) => SearchPick::Library(t.id),
+            Self::Stream(t) => SearchPick::Stream(t.remote.clone()),
+        }
+    }
+}
+
+/// One track of a mixed queue ([`crate::Command::PlaySearch`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum SearchPick {
+    Library(TrackId),
+    Stream(RemoteId),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SearchAlbum {
+    Library(crate::ReleaseCard),
+    Stream(StreamAlbumCard),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SearchArtist {
+    Library(crate::ArtistCard),
+    Stream(StreamArtistCard),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SearchPlaylist {
+    Library(crate::PlaylistCard),
+    Stream(StreamPlaylistCard),
+}
+
+/// «Лучший результат»: whatever matches the query best.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TopResult {
+    Artist(SearchArtist),
+    Track(SearchTrack),
+    Album(SearchAlbum),
+}
+
+/// The one answer of the «Всё» page ([`SearchSources::mixed`]): the
+/// library and every usable service merged, each song once (same ISRC, else
+/// the same artist and title folded and a length within 3 s), ranked by how
+/// well it matches the query. A service that cannot answer is simply left
+/// out; one that waits out a rate limit gives [`Self::note`].
+///
+/// Rows do not jump while answers arrive: once the top is settled (the
+/// first service answered plus a short grace for Deezer) [`Self::top`] and
+/// the first [`TOP_TRACKS`] tracks keep their places; slower answers go
+/// below them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SearchAnswer {
+    /// The query these rows are for (the previous one stays on screen
+    /// until the new one has something).
+    pub query: String,
+    pub top: Option<TopResult>,
+    /// The top may still change (it is settled a moment after the first
+    /// answer): its room is kept.
+    pub top_pending: bool,
+    pub tracks: Vec<SearchTrack>,
+    pub albums: Vec<SearchAlbum>,
+    pub artists: Vec<SearchArtist>,
+    pub playlists: Vec<SearchPlaylist>,
+    /// Some source has not answered yet.
+    pub searching: bool,
+    /// One quiet line: a service waits out a rate limit («YouTube Music
+    /// отвечает с задержкой — результаты появятся сами»).
+    pub note: Option<String>,
+    /// Nothing came and a service really failed (no connection): why.
+    pub error: Option<String>,
+}
+
+/// Tracks of [`SearchAnswer::tracks`] that stay in place once shown (the
+/// list beside the top result).
+pub const TOP_TRACKS: usize = 5;
+
+impl SearchAnswer {
+    pub fn is_empty(&self) -> bool {
+        self.top.is_none()
+            && self.tracks.is_empty()
+            && self.albums.is_empty()
+            && self.artists.is_empty()
+            && self.playlists.is_empty()
     }
 }
 

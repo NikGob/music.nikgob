@@ -28,6 +28,7 @@ pub fn service_upper(service: Service) -> &'static str {
     match service {
         Service::Spotify => "SPOTIFY",
         Service::Youtube => "YOUTUBE MUSIC",
+        Service::Deezer => "DEEZER",
     }
 }
 

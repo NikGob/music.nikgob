@@ -448,9 +448,10 @@ pub struct LibraryView {
     pub trash: Vec<TrashItem>,
 }
 
-/// The unified search ([`Command::Search`]): library → Spotify → YouTube
-/// Music → torrents. The library part is filled at once, the services'
-/// sections as they answer.
+/// The unified search ([`Command::Search`]): the library, Deezer, YouTube
+/// Music, Spotify, torrents. The library part is filled at once, the
+/// services' sections as they answer; on the «Всё» page
+/// ([`SearchSources::mixed`]) also one merged answer ([`Self::answer`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SearchView {
     pub query: String,
@@ -464,6 +465,8 @@ pub struct SearchView {
     pub sources: SearchSources,
     /// One section per registered, enabled and chosen service, Spotify first.
     pub streams: Vec<StreamSearchSection>,
+    /// The «Всё» page: the library and the services as one answer.
+    pub answer: SearchAnswer,
     /// Torrent search (Prowlarr) runs only on request (or with the torrents
     /// chip on): it is slow.
     pub torrents: TorrentSearch,
@@ -811,6 +814,9 @@ pub struct Prefs {
     pub spotify_enabled: bool,
     /// YouTube Music is used.
     pub youtube_enabled: bool,
+    /// The Deezer catalogue is used (search, albums, discographies; no
+    /// account, its tracks play from YouTube Music).
+    pub deezer_enabled: bool,
     /// What a like of a stream track downloads: the track (from its
     /// album's torrent) or the whole album. An album like is always the album.
     pub like_download_scope: WishlistScope,
@@ -1234,6 +1240,13 @@ pub enum Command {
         start: usize,
         context: String,
     },
+    /// Play the merged tracks of the «Всё» search: library tracks and
+    /// stream tracks in one queue ([`SearchAnswer::tracks`]).
+    PlaySearch {
+        tracks: Vec<SearchPick>,
+        start: usize,
+        context: String,
+    },
     /// Like [`Command::PlayRelease`] for an album of a service.
     PlayStreamAlbum {
         id: RemoteId,
@@ -1394,6 +1407,7 @@ impl Default for Prefs {
             kept_editions: Vec::new(),
             spotify_enabled: true,
             youtube_enabled: true,
+            deezer_enabled: true,
             like_download_scope: WishlistScope::Track,
             like_downloads: true,
             playlist_sync_default: PlaylistSyncMode::Follow,
@@ -1413,6 +1427,7 @@ impl Prefs {
         match s {
             Service::Spotify => self.spotify_enabled,
             Service::Youtube => self.youtube_enabled,
+            Service::Deezer => self.deezer_enabled,
         }
     }
 }

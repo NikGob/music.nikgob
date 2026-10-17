@@ -10,6 +10,11 @@
 //! up to 11). The next one or two tracks of the queue are looked up ahead,
 //! one after the other, so a Spotify-only track starts without waiting.
 //!
+//! A Deezer track (the catalogue has no sound) goes the same way. Deezer
+//! lists album tracks without their ISRC, so a track that has none yet is
+//! first asked of Deezer alone (`/track/{id}`, one request): the ISRC it
+//! brings is kept on the track and makes the YouTube lookup exact.
+//!
 //! A rate limit is not a miss: nothing is recorded, the lookups ahead wait
 //! for the pause to end, and a track that waits for its lookup (Buffering)
 //! is looked up again by itself when a pause of up to a minute ends («YouTube
@@ -266,6 +271,20 @@ impl Worker {
         !has_youtube && self.lib.get_track(track).ok().flatten().is_some()
     }
 
+    /// The Deezer id of a track that has no ISRC yet, and the catalogue to
+    /// ask it of (see the module docs).
+    pub(crate) fn isrc_source(&self, track: TrackId) -> Option<(std::sync::Arc<dyn nikgob_core::streaming::StreamService>, String)> {
+        let dz = self.service(Service::Deezer)?;
+        let id = self
+            .lib
+            .external_ids(nikgob_core::streaming::EntityKind::Track, *track.as_uuid())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| r.service == Service::Deezer)?
+            .id;
+        Some((dz, id))
+    }
+
     /// Starts the YouTube lookup of `track` (once).
     pub(crate) fn begin_resolve(&mut self, track: TrackId) {
         if self.streaming.resolving.contains(&track) {
@@ -273,16 +292,28 @@ impl Worker {
         }
         let Some(yt) = self.service(Service::Youtube) else { return };
         let Some(t) = self.lib.get_track(track).ok().flatten() else { return };
-        let q = ResolveQuery {
+        let mut q = ResolveQuery {
             title: t.title.clone(),
             artist: t.artist_credit.display(),
             duration_ms: t.duration_ms.map(u64::from),
             isrc: t.isrc.clone(),
             exclude: self.refused_videos(),
         };
+        let deezer = if q.isrc.is_none() { self.isrc_source(track) } else { None };
         self.streaming.resolving.insert(track);
         log::info!("looking up {} on YouTube Music", q.text());
         self.streaming.spawn(async move {
+            // A Deezer track without its ISRC: Deezer tells it first.
+            let mut filled = None;
+            if let Some((dz, id)) = deezer {
+                match dz.track(&id).await {
+                    Ok(full) => {
+                        q.isrc = full.isrc.clone();
+                        filled = Some(full);
+                    }
+                    Err(e) => log::info!("deezer: no ISRC for {id}: {e}"),
+                }
+            }
             if let Some(isrc) = &q.isrc
                 && let Ok(Some(hit)) = yt.find_isrc(isrc).await
                 && pick_youtube(std::slice::from_ref(&hit), &q).is_some()
@@ -290,13 +321,27 @@ impl Worker {
                 return Msg::Resolved {
                     track,
                     found: Ok(Some(hit)),
+                    filled,
                 };
             }
             Msg::Resolved {
                 track,
                 found: lookup_youtube(yt.as_ref(), &q).await,
+                filled,
             }
         });
+    }
+
+    /// The full Deezer track of a library track came (with its ISRC): the
+    /// ISRC fills the track's empty one.
+    pub(crate) fn isrc_filled(&mut self, track: TrackId, full: &StreamTrack) {
+        if full.isrc.is_none() {
+            return;
+        }
+        self.streaming.learn(std::slice::from_ref(full));
+        if let Err(e) = self.lib.attach_stream_source(track, full) {
+            log::warn!("keeping the ISRC of {track}: {e}");
+        }
     }
 
     /// `e` has nothing playable now but can be looked up: it waits
@@ -317,8 +362,11 @@ impl Worker {
         true
     }
 
-    pub(crate) fn resolved(&mut self, track: TrackId, found: Lookup) {
+    pub(crate) fn resolved(&mut self, track: TrackId, found: Lookup, filled: Option<StreamTrack>) {
         self.streaming.resolving.remove(&track);
+        if let Some(full) = &filled {
+            self.isrc_filled(track, full);
+        }
         let found = match found {
             Ok(f) => {
                 self.streaming.resolve_limit.retries.remove(&track);

@@ -219,7 +219,7 @@ fn paused_line(ui: &mut Ui, a: &AccountView) {
 fn import_row(ui: &mut Ui, state: &ViewState, service: Service, out: &mut Vec<Command>) {
     let id = match service {
         Service::Spotify => Id::ImportSpotify,
-        Service::Youtube => Id::ImportYouTube,
+        Service::Youtube | Service::Deezer => Id::ImportYouTube,
     };
     let ready = state.prefs.service_enabled(service);
     row(ui, id, "Плейлисты и история", Some("Свои плейлисты и недавние прослушивания; лайки приходят сами"), |ui| {
