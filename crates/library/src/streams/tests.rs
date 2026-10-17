@@ -742,3 +742,81 @@ fn a_clip_without_a_song_is_marked_and_plays_after_a_song() {
     assert_eq!(src.locator, "yt-gruppa-1");
     assert_eq!(src.quality_score, score::STREAM_YOUTUBE);
 }
+
+/// Everything a track is made of, to compare before and after.
+fn whole(lib: &Library, track: TrackId) -> (Option<crate::TrackRow>, Vec<(String, i32, bool)>, Vec<RemoteId>, Vec<RemoteLike>) {
+    let mut sources: Vec<(String, i32, bool)> = lib
+        .sources_of_track(track)
+        .unwrap()
+        .into_iter()
+        .map(|s| (s.locator, s.quality_score, s.is_active))
+        .collect();
+    sources.sort();
+    (
+        lib.get_track_row(track).unwrap(),
+        sources,
+        lib.external_ids(EntityKind::Track, *track.as_uuid()).unwrap(),
+        lib.remote_likes_of(track).unwrap(),
+    )
+}
+
+#[test]
+fn a_clip_replaced_by_hand_is_the_song_keeps_its_like_and_comes_back_whole() {
+    let lib = lib();
+    let (clip, _) = yt_clip_and_song();
+    let (new, _) = lib.take_remote_likes(std::slice::from_ref(&clip), &[], 1).unwrap();
+    let track = new[0];
+    lib.mark_clip(&clip.id).unwrap();
+    lib.put_lyrics_text(track, "lyricsplus", Some("[]")).unwrap();
+    let before = whole(&lib, track);
+    // A preview played the song first: a «seen» track holds its source.
+    let yt = FakeService::youtube();
+    let pick = find(&yt, "yt-gruppa-2");
+    let seen = lib.upsert_stream_track(&pick).unwrap();
+    assert_ne!(seen, track);
+    let seen_before = whole(&lib, seen);
+
+    let snap = lib.replace_with_song(track, std::slice::from_ref(&pick)).unwrap();
+    let row = lib.get_track_row(track).unwrap().unwrap();
+    assert_eq!(row.title, pick.title);
+    assert_eq!(row.album.as_deref(), Some("Группа крови"));
+    assert!(!row.is_clip());
+    assert!(row.liked);
+    assert_eq!(row.youtube_id.as_deref(), Some("yt-gruppa-2"));
+    let sources = lib.sources_of_track(track).unwrap();
+    assert_eq!(sources.len(), 1, "the clip is no source any more");
+    assert_eq!(lib.remote_likes_of(track).unwrap()[0].remote, clip.id, "the like is still the clip's");
+    assert_eq!(lib.track_by_remote(&clip.id).unwrap(), Some(track));
+    assert_eq!(lib.track_by_remote(&pick.id).unwrap(), Some(track));
+    assert!(lib.lyrics_text(track, "lyricsplus").unwrap().is_none(), "the clip's lyrics went");
+    assert!(lib.liked_youtube_clips().unwrap().is_empty());
+
+    lib.restore_track(&snap).unwrap();
+    assert_eq!(whole(&lib, track), before);
+    assert_eq!(whole(&lib, seen), seen_before, "the preview's track has its source back");
+    assert!(lib.lyrics_text(track, "lyricsplus").unwrap().is_some());
+    assert_eq!(lib.liked_tracks(0, 10).unwrap().len(), 1);
+}
+
+#[test]
+fn a_track_with_a_file_is_not_replaced() {
+    let lib = lib();
+    let (clip, song) = yt_clip_and_song();
+    let (new, _) = lib.take_remote_likes(std::slice::from_ref(&clip), &[], 1).unwrap();
+    let mut file = Source::new(new[0], SourceKind::LocalFile, "Кино/1.opus", Codec::Opus);
+    file.quality_score = 500;
+    lib.add_source(&file).unwrap();
+    assert!(lib.replace_with_song(new[0], std::slice::from_ref(&song)).is_err());
+}
+
+#[test]
+fn cached_answers_are_forgotten_by_prefix_and_value() {
+    let lib = lib();
+    lib.cache_put("yt_clip.a", 1, "clip").unwrap();
+    lib.cache_put("yt_clip.b", 1, "song").unwrap();
+    lib.cache_put("ytXclip.c", 1, "clip").unwrap();
+    assert_eq!(lib.cache_forget("yt_clip.", "clip").unwrap(), 1);
+    assert!(lib.cache_get("yt_clip.a").unwrap().is_none());
+    assert!(lib.cache_get("yt_clip.b").unwrap().is_some());
+    assert!(lib.cache_get("ytXclip.c").unwrap().is_some(), "«_» is no wildcard");
+}

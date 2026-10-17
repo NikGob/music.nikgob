@@ -247,6 +247,19 @@ impl Library {
     pub fn cache_put(&self, key: &str, at: UnixMs, value: &str) -> Result<()> {
         self.write(|tx| meta_set(tx, &format!("{CACHE_PREFIX}{key}"), &format!("{at}|{value}")))
     }
+
+    /// Forgets the cached answers whose key starts with `prefix` and whose
+    /// value is `value`; returns how many went.
+    pub fn cache_forget(&self, prefix: &str, value: &str) -> Result<usize> {
+        let prefix = format!("{CACHE_PREFIX}{prefix}");
+        self.write(|tx| {
+            Ok(tx.execute(
+                "DELETE FROM meta WHERE substr(key, 1, length(?1)) = ?1
+                    AND substr(value, instr(value, '|') + 1) = ?2",
+                rusqlite::params![prefix, value],
+            )?)
+        })
+    }
 }
 
 #[cfg(test)]

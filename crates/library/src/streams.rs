@@ -1176,9 +1176,11 @@ impl Library {
 
 mod clips;
 mod import;
+mod replace;
 mod same;
 
 pub use clips::LikedClip;
+pub use replace::TrackSnapshot;
 pub use import::event_id;
 
 #[cfg(test)]
