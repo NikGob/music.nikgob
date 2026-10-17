@@ -5,24 +5,36 @@
 //! (MIT, Copyright (c) 2026 Carmine Paolino); the ported files say so in
 //! their headers.
 //!
+//! # Spotify needs Premium (2026-10-17)
+//!
+//! The public Web API app several open-source clients share (Spotifast,
+//! spotify-player, ncspot) is not used any more: its quota is shared by all
+//! of their users and answered 429 with `Retry-After` 5–30 s even to a
+//! first request. Without it Spotify works only with Premium, and without
+//! Premium it is not connected at all (YouTube Music serves Free users):
+//! a login whose `/me` says another plan, whose app Spotify refuses because
+//! its owner has no Premium, or whose playback session is not Premium ends
+//! signed out with [`SPOTIFY_PREMIUM_REQUIRED`], keeping nothing.
+//!
 //! # Grants
 //!
-//! * **Shared** ([`LoginInput::Browser`]): the public Web API app several
-//!   open-source clients share. Its quota is shared by all of their users,
-//!   so it is asked little: playlists in search and other people's
-//!   playlists, and everything when there is no personal app.
-//! * **Personal** ([`LoginInput::PersonalApp`]): the user's own Development
-//!   Mode app with its own quota. It serves catalogue search, likes and the
-//!   user's own playlists. Both must be the same Spotify account.
+//! * **Web API** ([`LoginInput::PersonalApp`]; [`LoginInput::Browser`]
+//!   again with the remembered Client ID): the user's own Development Mode
+//!   app (Spotify lets it work only while its owner has Premium) with its
+//!   own quota. Every Web API request goes to it; the account is connected
+//!   while it has this grant.
 //! * **Playback** ([`LoginInput::Playback`]): Spotify's own desktop client
 //!   identity, exchanged once for a reusable librespot credential. Its
-//!   session plays audio (Premium only) and, when it is up, reads playlists
-//!   and artists' top tracks without any Web API quota.
+//!   session plays audio and, when it is up, reads other people's playlists
+//!   (Development Mode gives no entries of those), artists and track
+//!   details without any Web API quota.
 //!
 //! Grants and the credential live in Windows Credential Manager; a small
 //! state file (`state.json`, no secrets) in [`SpotifyConfig::data_dir`]
 //! remembers which exist, the profile and the personal Client ID, so the
-//! account shows at once on startup without a browser or a request.
+//! account shows at once on startup without a browser or a request. A
+//! state file from before still listing the shared app's grant has it
+//! deleted on start (see [`Spotify::new`]).
 //!
 //! # Quota
 //!
@@ -48,21 +60,20 @@ use std::time::{Duration, Instant};
 use librespot_core::authentication::Credentials;
 use nikgob_core::streaming::{
     Account, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput, LoginPrompt, Played,
-    SearchKind, SearchParts, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist,
-    StreamSearch, StreamService, StreamTrack,
+    SPOTIFY_PREMIUM_REQUIRED, SearchKind, Service, StreamAlbum, StreamArtist, StreamError,
+    StreamPlaylist, StreamSearch, StreamService, StreamTrack,
 };
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
-use api::{ApiClient, Endpoints, Lane, Source, TokenEvent};
+use api::{ApiClient, Endpoints, Lane, TokenEvent};
 use auth::{AuthError, Grant, StoredToken};
 use cache::TtlCache;
 use credentials::{PlaybackCredential, Profile, Secret, Slot, Store};
 
-pub use auth::{PLAYBACK_REDIRECT_PORT, SHARED_CLIENT_ID, WEB_REDIRECT_PORT};
+pub use auth::{PLAYBACK_REDIRECT_PORT, WEB_REDIRECT_PORT};
 
-/// The redirect URI a personal app must register (the same as the shared
-/// app's).
+/// The redirect URI the user's app must register.
 pub const WEB_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
 /// Where a personal app is created.
 pub const DEVELOPER_DASHBOARD: &str = "https://developer.spotify.com/dashboard";
@@ -80,8 +91,6 @@ const PROFILE_TTL: Duration = Duration::from_secs(24 * 3600);
 const SHOWN_PAUSE: Duration = Duration::from_secs(30);
 /// After a failed session connect, reads use the Web API for this long.
 const CONNECT_BACKOFF: Duration = Duration::from_secs(5 * 60);
-/// The playlist part of a search (the shared app) waits no longer.
-const PLAYLIST_SEARCH_TIMEOUT: Duration = Duration::from_secs(6);
 /// Pages read at most from one list (a playlist, the liked songs).
 const MAX_PAGES: u32 = 400;
 
@@ -106,7 +115,7 @@ impl SpotifyConfig {
     }
 }
 
-/// How the account relates to a playlist, which decides the grant reading it.
+/// How the account relates to a playlist, which decides what reads it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Access {
     Owned,
@@ -116,41 +125,12 @@ enum Access {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Op {
-    /// Catalogue search and reads (tracks, albums, artists).
-    Catalog,
-    /// Liked songs and listening history.
-    UserData,
-    /// The account's playlist list.
-    PlaylistLibrary,
-    PlaylistSearch,
-    PlaylistCreate,
-    PlaylistRead(Access),
-    PlaylistEdit(Access),
-}
-
-/// The grant an operation goes to. Ported from Spotifast's
-/// `src/api/gateway.rs` routing: the personal app takes what is the
-/// account's own; the shared app keeps the playlist part of search, the
-/// playlist list, and playlists that are not the account's (no personal
-/// app may read those in Development Mode).
-fn plan(op: Op, personal_ready: bool) -> Source {
-    use Access::*;
-    match op {
-        Op::PlaylistLibrary | Op::PlaylistSearch => Source::Shared,
-        Op::PlaylistRead(External | Unknown) | Op::PlaylistEdit(External | Unknown) => {
-            Source::Shared
-        }
-        _ if personal_ready => Source::Personal,
-        _ => Source::Shared,
-    }
-}
-
 /// Whether the librespot session, when up, reads a playlist instead of the
-/// Web API: whatever the shared app would have been asked for.
-fn session_reads_playlist(access: Access, personal_ready: bool) -> bool {
-    plan(Op::PlaylistRead(access), personal_ready) == Source::Shared
+/// Web API: playlists that are not the account's (a Development Mode app
+/// gets no entries of those; Spotifast's `src/api/gateway.rs` sent them to
+/// the shared app, which is gone). The account's own ones go to its app.
+fn session_reads_playlist(access: Access) -> bool {
+    matches!(access, Access::External | Access::Unknown)
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -206,8 +186,8 @@ pub struct Spotify {
     me: Weak<Spotify>,
     rt: Handle,
     http: reqwest::Client,
-    shared: ApiClient,
-    personal: ApiClient,
+    /// The Web API, through the user's own app.
+    web: ApiClient,
     store: Store,
     state: Mutex<AccountState>,
     sessions: session::Sessions,
@@ -285,19 +265,19 @@ impl Spotify {
     /// Creates the service and restores saved grants in the background
     /// (never blocking the caller). Uses the current tokio runtime, or a
     /// small one of its own when there is none.
+    ///
+    /// A state file from before 2026-10-17 that still lists the shared
+    /// app's grant has it deleted from the credential store and dropped
+    /// (one info line, no error and no browser): without a grant of the
+    /// user's own app the account reads as not connected.
     pub fn new(config: SpotifyConfig) -> Arc<Self> {
         let store = Store::native(config.data_dir.clone());
-        Self::with_parts(config, store, Endpoints::default(), Endpoints::default())
+        Self::with_parts(config, store, Endpoints::default())
     }
 
-    /// `shared` / `personal`: where each grant's requests go (tests point
-    /// them at mock servers).
-    fn with_parts(
-        config: SpotifyConfig,
-        store: Store,
-        shared: Endpoints,
-        personal: Endpoints,
-    ) -> Arc<Self> {
+    /// `endpoints`: where Web API requests go (tests point them at a mock
+    /// server).
+    fn with_parts(config: SpotifyConfig, store: Store, endpoints: Endpoints) -> Arc<Self> {
         install_crypto_provider();
         let http = reqwest::Client::builder()
             .user_agent(config.user_agent.clone())
@@ -312,8 +292,7 @@ impl Spotify {
         let spotify = Arc::new_cyclic(|me: &Weak<Spotify>| Spotify {
             me: me.clone(),
             rt: runtime(),
-            shared: ApiClient::new(Source::Shared, http.clone(), shared),
-            personal: ApiClient::new(Source::Personal, http.clone(), personal),
+            web: ApiClient::new(http.clone(), endpoints),
             http,
             store,
             state: Mutex::new(AccountState {
@@ -337,14 +316,12 @@ impl Spotify {
             opener: Mutex::new(default_opener()),
             connect_failed: Mutex::new(None),
         });
-        for client in [&spotify.shared, &spotify.personal] {
-            let me = spotify.me.clone();
-            client.set_listener(Box::new(move |source, event| {
-                if let Some(s) = me.upgrade() {
-                    s.token_event(source, event);
-                }
-            }));
-        }
+        let me = spotify.me.clone();
+        spotify.web.set_listener(Box::new(move |event| {
+            if let Some(s) = me.upgrade() {
+                s.token_event(event);
+            }
+        }));
         let me = spotify.clone();
         spotify
             .rt
@@ -372,19 +349,6 @@ impl Spotify {
         self.epoch.load(Ordering::SeqCst)
     }
 
-    fn client(&self, source: Source) -> &ApiClient {
-        match source {
-            Source::Shared => &self.shared,
-            Source::Personal => &self.personal,
-        }
-    }
-
-    fn slot_of(source: Source) -> Slot {
-        match source {
-            Source::Shared => Slot::Shared,
-            Source::Personal => Slot::Personal,
-        }
-    }
 
     /// The account's Spotify user id, once known.
     fn user_id(&self) -> Option<String> {
@@ -401,7 +365,7 @@ impl Spotify {
 
     /// The personal Client ID in use or remembered.
     pub fn personal_client_id(&self) -> Option<String> {
-        self.personal
+        self.web
             .client_id()
             .or_else(|| lock(&self.state).saved.personal_client_id.clone())
     }
@@ -417,14 +381,17 @@ impl Spotify {
         let mut kept = Vec::new();
         let mut playback = None;
         for slot in saved.slots.clone() {
+            if slot == Slot::Shared {
+                // The shared public app is not used any more: its grant is
+                // deleted, quietly (docs/stage3.md §0, 2026-10-17).
+                self.store.clear(Slot::Shared);
+                log::info!("spotify: the shared Web API app's saved grant is removed (no longer used)");
+                continue;
+            }
             match self.store.load(slot).await {
                 Ok(Some(Secret::Web(token))) => {
                     if epoch == self.epoch() {
-                        let source = match slot {
-                            Slot::Personal => Source::Personal,
-                            _ => Source::Shared,
-                        };
-                        self.client(source).install(token);
+                        self.web.install(token);
                     }
                     kept.push(slot);
                 }
@@ -444,7 +411,7 @@ impl Spotify {
             return;
         }
         self.apply_probes(&saved);
-        let has_web = self.shared.has_grant() || self.personal.has_grant();
+        let has_web = self.web.has_grant();
         // The name and plan were read lately: no `GET /me` on this start.
         let profile_fresh = saved.profile.is_some()
             && saved
@@ -458,18 +425,26 @@ impl Spotify {
             st.restoring = false;
             self.persist(&st);
         }
-        if has_web && !profile_fresh {
+        if !has_web {
+            // Not connected: nothing is asked, not even the session.
+            return;
+        }
+        if !profile_fresh {
             self.refresh_profile().await;
         }
         let (has_playback, premium) = {
             let st = lock(&self.state);
-            (st.playback.clone(), st.saved.session_premium)
+            (st.playback.clone(), st.premium())
         };
         match (has_playback, premium) {
+            (_, Some(false)) => self.premium_required(),
             (Some(c), None) => {
-                // The plan decides whether there is sound; ask the session once.
+                // The plan is not known yet; ask the session once.
                 if let Ok(s) = self.sessions.get(c.to_librespot()).await {
                     self.note_session(&s).await;
+                    if lock(&self.state).premium() == Some(false) {
+                        self.premium_required();
+                    }
                 }
             }
             (Some(c), Some(true)) => {
@@ -484,33 +459,22 @@ impl Spotify {
         }
     }
 
-    /// Gives each client what earlier starts learnt about its app.
+    /// Gives the client what earlier starts learnt about its app.
     fn apply_probes(&self, saved: &credentials::State) {
-        for client in [&self.shared, &self.personal] {
-            let Some(id) = client.client_id() else { continue };
-            if let Some((_, p)) = saved.probes.iter().find(|(c, _)| *c == id) {
-                client.set_probes(*p);
-            }
+        let Some(id) = self.web.client_id() else { return };
+        if let Some((_, p)) = saved.probes.iter().find(|(c, _)| *c == id) {
+            self.web.set_probes(*p);
         }
     }
 
-    /// One `GET /me` to refresh the name and plan (the personal grant
-    /// first, to spare the shared quota).
+    /// One `GET /me` to refresh the name and plan.
     async fn refresh_profile(&self) {
-        let client = if self.personal.has_grant() {
-            &self.personal
-        } else {
-            &self.shared
-        };
-        match client.me().await {
+        match self.web.me().await {
             Ok(me) if !me.id.is_empty() => {
                 let mut st = lock(&self.state);
                 let same = st.saved.profile.as_ref().is_none_or(|p| p.id == me.id);
                 if !same {
-                    log::warn!(
-                        "spotify: the {} grant is another account now",
-                        client.source
-                    );
+                    log::warn!("spotify: the Web API grant is another account now");
                     return;
                 }
                 let product = me
@@ -528,8 +492,19 @@ impl Spotify {
                 self.persist(&st);
             }
             Ok(_) => {}
+            // A refusal for want of Premium has signed out already (the
+            // client's listener).
             Err(e) => log::info!("spotify: profile refresh failed: {e}"),
         }
+    }
+
+    /// The account has no Premium: Spotify is not connected without it.
+    /// Every grant is signed out and forgotten (the Client ID stays, it is
+    /// the user's app), and the account says why.
+    fn premium_required(&self) {
+        log::info!("spotify: the account has no Premium; signed out");
+        self.logout();
+        lock(&self.state).failure = Some(SPOTIFY_PREMIUM_REQUIRED.into());
     }
 
     /// Records the account type a session reports.
@@ -544,8 +519,8 @@ impl Spotify {
         }
     }
 
-    fn token_event(&self, source: Source, event: TokenEvent) {
-        let slot = Self::slot_of(source);
+    fn token_event(&self, event: TokenEvent) {
+        let slot = Slot::Personal;
         match event {
             TokenEvent::Refreshed(token) => {
                 let store = self.store.clone();
@@ -557,8 +532,8 @@ impl Spotify {
                 });
             }
             TokenEvent::Probed(p) => {
-                let Some(id) = self.client(source).client_id() else { return };
-                log::info!("spotify: the {source} app lacks {p:?}; remembered");
+                let Some(id) = self.web.client_id() else { return };
+                log::info!("spotify: the app lacks {p:?}; remembered");
                 let mut st = lock(&self.state);
                 st.saved.probes.retain(|(c, _)| *c != id);
                 st.saved.probes.push((id, p));
@@ -568,10 +543,15 @@ impl Spotify {
                 self.store.clear(slot);
                 let mut st = lock(&self.state);
                 st.saved.slots.retain(|s| *s != slot);
-                if !self.shared.has_grant() && !self.personal.has_grant() && st.playback.is_none() {
-                    st.failure = Some("Вход в Spotify истёк, войди снова".into());
-                }
+                st.failure = Some("Вход в Spotify истёк, войди снова".into());
                 self.persist(&st);
+            }
+            TokenEvent::PremiumRequired => {
+                // Not inside the request that tells: the logout clears the
+                // client it runs on.
+                if let Some(me) = self.arc() {
+                    self.rt.spawn(async move { me.premium_required() });
+                }
             }
         }
     }
@@ -626,47 +606,43 @@ impl Spotify {
         Ok((code, flow.verifier, guard))
     }
 
-    async fn login_web(&self, source: Source, grant: Grant) -> Result<(), StreamError> {
+    /// The Web API sign-in with the user's own app. Verified with `GET /me`
+    /// on a scratch client before anything is kept: an account without
+    /// Premium (its plan, or Spotify refusing the app for its owner) ends
+    /// signed out with [`SPOTIFY_PREMIUM_REQUIRED`].
+    async fn login_web(&self, grant: Grant) -> Result<(), StreamError> {
         let epoch = self.epoch();
-        let endpoints = self.client(source).endpoints().clone();
+        let endpoints = self.web.endpoints().clone();
         let (code, verifier, _prompt) = self.browser_code(&grant).await?;
         let response = auth::exchange_code(&self.http, &endpoints.token, &grant, &code, &verifier)
             .await
             .map_err(|e| self.fail(e))?;
         let token = StoredToken::from_response(&grant.client_id, response, None)
             .ok_or_else(|| self.fail_text("Spotify не выдал refresh-токен"))?;
-        // Verify on a scratch client: routing never sees an unverified grant.
-        let probe = ApiClient::new(source, self.http.clone(), endpoints);
+        // Verify on a scratch client: nothing sees an unverified grant.
+        let probe = ApiClient::new(self.http.clone(), endpoints);
         probe.install(token.clone());
-        let me = probe
-            .me()
-            .await
-            .map_err(|e| self.fail_text(&format!("Spotify не подтвердил аккаунт: {e}")))?;
+        let me = match probe.me().await {
+            Ok(me) => me,
+            Err(e) if e.is_premium_refusal() => return Err(self.premium_login_failed(epoch)),
+            Err(e) => {
+                return Err(self.fail_text(&format!("Spotify не подтвердил аккаунт: {e}")));
+            }
+        };
         if epoch != self.epoch() {
             return Err(StreamError::NotLoggedIn);
         }
-        let other = match source {
-            Source::Shared => &self.personal,
-            Source::Personal => &self.shared,
-        };
-        let known = self.user_id();
-        if other.has_grant() && known.as_deref().is_some_and(|id| id != me.id) {
-            return Err(self.fail_text(match source {
-                Source::Personal => {
-                    "Личное приложение вошло другим аккаунтом Spotify: войди тем же аккаунтом"
-                }
-                Source::Shared => "Это другой аккаунт Spotify, чем у личного приложения",
-            }));
+        if me.product.as_deref().is_some_and(|p| p != "premium") {
+            return Err(self.premium_login_failed(epoch));
         }
-        let slot = Self::slot_of(source);
+        let known = self.user_id();
+        let slot = Slot::Personal;
         let generation = self.store.generation(slot);
-        self.client(source).install(token.clone());
+        self.web.install(token.clone());
         {
             let mut st = lock(&self.state);
             st.add_slot(slot);
-            if source == Source::Personal {
-                st.saved.personal_client_id = Some(grant.client_id.clone());
-            }
+            st.saved.personal_client_id = Some(grant.client_id.clone());
             let product = me.product.clone().or_else(|| {
                 st.saved
                     .profile
@@ -694,14 +670,26 @@ impl Spotify {
         if let Err(e) = self.store.save(slot, generation, Secret::Web(token)).await {
             log::warn!("spotify: the {slot:?} grant works but is not remembered: {e}");
         }
+        // A playback login kept from before that is known not to be Premium.
+        if lock(&self.state).premium() == Some(false) {
+            return Err(self.premium_login_failed(epoch));
+        }
         Ok(())
+    }
+
+    /// A login found no Premium: nothing is kept, the account says why.
+    fn premium_login_failed(&self, epoch: u64) -> StreamError {
+        if epoch == self.epoch() {
+            self.premium_required();
+        }
+        StreamError::PremiumRequired
     }
 
     async fn login_playback(&self) -> Result<(), StreamError> {
         let epoch = self.epoch();
         let grant = Grant::playback();
         let (code, verifier, _prompt) = self.browser_code(&grant).await?;
-        let token_url = self.shared.endpoints().token.clone();
+        let token_url = self.web.endpoints().token.clone();
         let response = auth::exchange_code(&self.http, &token_url, &grant, &code, &verifier)
             .await
             .map_err(|e| self.fail(e))?;
@@ -743,6 +731,9 @@ impl Spotify {
             log::warn!("spotify: the playback credential works but is not remembered: {e}");
         }
         self.note_session(&session).await;
+        if lock(&self.state).saved.session_premium == Some(false) {
+            return Err(self.premium_login_failed(epoch));
+        }
         Ok(())
     }
 
@@ -757,17 +748,14 @@ impl Spotify {
 
     // ---- routing -----------------------------------------------------------
 
-    /// The client for an operation: the planned one, else the other when
-    /// only that one has a grant.
-    fn client_for(&self, op: Op) -> Result<&ApiClient, StreamError> {
-        let planned = self.client(plan(op, self.personal.has_grant()));
-        if planned.has_grant() {
-            return Ok(planned);
+    /// The Web API client, when the user's app has a grant (every Web API
+    /// request goes there).
+    fn web(&self) -> Result<&ApiClient, StreamError> {
+        if self.web.has_grant() {
+            Ok(&self.web)
+        } else {
+            Err(StreamError::NotLoggedIn)
         }
-        [&self.shared, &self.personal]
-            .into_iter()
-            .find(|c| c.has_grant())
-            .ok_or(StreamError::NotLoggedIn)
     }
 
     fn access_of(&self, playlist: &str) -> Access {
@@ -821,16 +809,9 @@ impl Spotify {
 
     // ---- reads -------------------------------------------------------------
 
-    /// One `/search` per grant for every type at once (10 per type, the
-    /// Development Mode cap). With the personal app the catalogue and the
-    /// playlists come from two grants in parallel: the catalogue is handed
-    /// to `part` as soon as it is in, the playlists follow (the shared app
-    /// being throttled never hides or delays the catalogue).
-    async fn search_now(
-        &self,
-        query: &str,
-        part: Option<SearchParts>,
-    ) -> Result<StreamSearch, StreamError> {
+    /// One `/search` for every type at once (10 per type, the Development
+    /// Mode cap), playlists included.
+    async fn search_now(&self, query: &str) -> Result<StreamSearch, StreamError> {
         let query = query.trim();
         if query.is_empty() {
             return Ok(StreamSearch::default());
@@ -840,50 +821,18 @@ impl Spotify {
             log::debug!("spotify: search cache hit");
             return Ok(hit);
         }
-        let catalog = self.client_for(Op::Catalog)?;
-        let playlists = self.client_for(Op::PlaylistSearch)?;
+        let client = self.web()?;
         let me = self.user_id();
         let started = Instant::now();
-        let out = if std::ptr::eq(catalog, playlists) {
-            let all = catalog
-                .search(
-                    query,
-                    &["track", "album", "artist", "playlist"],
-                    api::SEARCH_LIMIT,
-                )
-                .await?;
-            let mut out = self.catalog_part(&all);
-            out.playlists = self.playlist_part(&all, me.as_deref());
-            out
-        } else {
-            let catalog_part = async {
-                let r = catalog
-                    .search(query, &["track", "album", "artist"], api::SEARCH_LIMIT)
-                    .await?;
-                let out = self.catalog_part(&r);
-                log::debug!(
-                    "spotify: catalogue part in {} ms",
-                    started.elapsed().as_millis()
-                );
-                if let Some(part) = &part {
-                    part(out.clone());
-                }
-                Ok::<_, StreamError>(out)
-            };
-            let playlist_part = tokio::time::timeout(
-                PLAYLIST_SEARCH_TIMEOUT,
-                playlists.search(query, &["playlist"], api::SEARCH_LIMIT),
-            );
-            let (c, p) = tokio::join!(catalog_part, playlist_part);
-            let mut out = c?;
-            match p {
-                Ok(Ok(r)) => out.playlists = self.playlist_part(&r, me.as_deref()),
-                // The shared app being throttled must not hide the catalogue.
-                Ok(Err(e)) => log::info!("spotify: playlist search failed: {e}"),
-                Err(_) => log::info!("spotify: playlist search timed out"),
-            }
-            out
-        };
+        let all = client
+            .search(
+                query,
+                &["track", "album", "artist", "playlist"],
+                api::SEARCH_LIMIT,
+            )
+            .await?;
+        let mut out = self.catalog_part(&all);
+        out.playlists = self.playlist_part(&all, me.as_deref());
         for t in &out.tracks {
             self.tracks.put(&t.id.id, t.clone());
         }
@@ -899,9 +848,8 @@ impl Spotify {
         Ok(out)
     }
 
-    /// One category of a search, in the background lane of the catalogue
-    /// grant (resolution, discography, share never queue the user's search
-    /// and never touch the shared app's playlist search).
+    /// One category of a search, in the background lane (resolution,
+    /// discography, share never queue the user's search).
     async fn search_kind_now(&self, query: &str, kind: SearchKind) -> Result<StreamSearch, StreamError> {
         let query = query.trim();
         let types: &[&str] = match kind {
@@ -918,7 +866,7 @@ impl Spotify {
         if let Some(hit) = self.searches.get(&key) {
             return Ok(hit);
         }
-        let client = self.client_for(Op::Catalog)?;
+        let client = self.web()?;
         let r = client
             .search_in(Lane::Background, query, types, api::SEARCH_LIMIT)
             .await?;
@@ -934,6 +882,7 @@ impl Spotify {
     /// there is a playback login (one request per 200, no quota), else one
     /// `/tracks?ids=` per 50, else one by one.
     async fn tracks_now(&self, ids: &[String]) -> Result<Vec<Option<StreamTrack>>, StreamError> {
+        let client = self.web()?;
         let mut found: HashMap<String, StreamTrack> = HashMap::new();
         let mut missing: Vec<String> = Vec::new();
         for id in ids {
@@ -953,7 +902,6 @@ impl Spotify {
             found.extend(map);
         }
         if !missing.is_empty() {
-            let client = self.client_for(Op::Catalog)?;
             let mut batched = true;
             for chunk in missing.chunks(50) {
                 match client.tracks(chunk).await? {
@@ -990,7 +938,7 @@ impl Spotify {
     }
 
     async fn liked_head_now(&self) -> Result<LikedHead, StreamError> {
-        let client = self.client_for(Op::UserData)?;
+        let client = self.web()?;
         let page = client.saved_tracks(0).await?;
         Ok(LikedHead {
             tracks: page
@@ -1005,8 +953,7 @@ impl Spotify {
 
     /// The snapshot id alone (`fields=snapshot_id`), never cached.
     async fn playlist_version_now(&self, id: &str) -> Result<Option<String>, StreamError> {
-        let client = self.client_for(Op::PlaylistRead(self.access_of(id)))?;
-        Ok(client.playlist_snapshot(id).await?)
+        Ok(self.web()?.playlist_snapshot(id).await?)
     }
 
     fn catalog_part(&self, r: &api::models::SearchResults) -> StreamSearch {
@@ -1048,6 +995,7 @@ impl Spotify {
         if let Some(t) = self.tracks.get(id) {
             return Ok(t);
         }
+        self.web()?;
         // The session spends no quota.
         if let Some(s) = self.sessions.current()
             && let Ok(t) = session::track_by_id(&s, id).await
@@ -1055,13 +1003,13 @@ impl Spotify {
             self.tracks.put(id, t.clone());
             return Ok(t);
         }
-        let result = match self.client_for(Op::Catalog) {
+        let result = match self.web() {
             Ok(c) => c.track(id).await.map_err(StreamError::from),
             Err(e) => Err(e),
         };
         let track = match result {
             Ok(t) => convert::track(&t, None).ok_or(StreamError::Unavailable)?,
-            Err(e @ (StreamError::NotLoggedIn | StreamError::RateLimited { .. })) => {
+            Err(e @ StreamError::RateLimited { .. }) => {
                 let s = self.session_or_connect().await.ok_or(e)?;
                 session::track_by_id(&s, id)
                     .await
@@ -1112,7 +1060,7 @@ impl Spotify {
         if let Some(a) = self.albums.get(id) {
             return Ok(a);
         }
-        let client = self.client_for(Op::Catalog)?;
+        let client = self.web()?;
         let raw = client.album(id).await?;
         let mut album = convert::album(&raw).ok_or(StreamError::Unavailable)?;
         let mut next = raw.tracks.as_ref().and_then(|p| p.next_offset());
@@ -1138,6 +1086,8 @@ impl Spotify {
         if let Some(a) = self.artists.get(id) {
             return Ok(a);
         }
+        // Not connected: nothing is asked, not even the session.
+        let client = self.web()?;
         // The session reads the whole discography in two requests without
         // quota (the personal app pages it 10 albums at a time).
         if let Some(s) = self.session_or_connect().await {
@@ -1149,7 +1099,6 @@ impl Spotify {
                 Err(e) => log::info!("spotify: artist {id} over the session: {e}"),
             }
         }
-        let client = self.client_for(Op::Catalog)?;
         let raw = client.artist(id).await?;
         let mut artist = convert::artist(&raw).ok_or(StreamError::Unavailable)?;
         let mut albums: Vec<api::models::Album> = Vec::new();
@@ -1181,16 +1130,16 @@ impl Spotify {
         }
         let access = self.access_of(id);
         let me = self.user_id();
-        let via_session = session_reads_playlist(access, self.personal.has_grant());
-        if via_session
+        if session_reads_playlist(access)
             && let Some(s) = self.sessions.current()
             && let Ok(p) = session::playlist(&s, id, me.as_deref()).await
         {
             self.playlists.put(id, p.clone());
             return Ok(p);
         }
-        let playlist = match self.playlist_web(id, access, me.as_deref()).await {
+        let playlist = match self.playlist_web(id, me.as_deref()).await {
             Ok(p) => p,
+            Err(StreamError::NotLoggedIn) => return Err(StreamError::NotLoggedIn),
             Err(e) => {
                 // Development Mode gives no entries of other people's
                 // playlists; the session has them.
@@ -1207,10 +1156,9 @@ impl Spotify {
     async fn playlist_web(
         &self,
         id: &str,
-        access: Access,
         me: Option<&str>,
     ) -> Result<StreamPlaylist, StreamError> {
-        let client = self.client_for(Op::PlaylistRead(access))?;
+        let client = self.web()?;
         let raw = client.playlist(id).await?;
         self.observe(&raw);
         let mut playlist = convert::playlist(&raw, me).ok_or(StreamError::Unavailable)?;
@@ -1245,7 +1193,7 @@ impl Spotify {
     }
 
     async fn liked_now(&self) -> Result<Vec<StreamTrack>, StreamError> {
-        let client = self.client_for(Op::UserData)?;
+        let client = self.web()?;
         let mut out = Vec::new();
         let mut offset = Some(0);
         let mut pages = 0;
@@ -1265,7 +1213,7 @@ impl Spotify {
     }
 
     async fn my_playlists_now(&self) -> Result<Vec<StreamPlaylist>, StreamError> {
-        let client = self.client_for(Op::PlaylistLibrary)?;
+        let client = self.web()?;
         let me = self.user_id();
         let mut out = Vec::new();
         let mut offset = Some(0);
@@ -1294,7 +1242,7 @@ impl Spotify {
         add: &[String],
         remove: &[String],
     ) -> Result<Option<String>, StreamError> {
-        let client = self.client_for(Op::PlaylistEdit(self.access_of(id)))?;
+        let client = self.web()?;
         let uri = |id: &String| format!("spotify:track:{id}");
         let mut version = None;
         let removes: Vec<String> = remove.iter().map(uri).collect();
@@ -1310,7 +1258,7 @@ impl Spotify {
     }
 
     async fn recent_now(&self) -> Result<Vec<Played>, StreamError> {
-        let client = self.client_for(Op::UserData)?;
+        let client = self.web()?;
         let page = client.recently_played().await?;
         Ok(page
             .items
@@ -1328,6 +1276,7 @@ impl Spotify {
     /// session: the Web API removed this endpoint in February 2026. Needs
     /// the playback login.
     pub async fn artist_top_tracks(&self, id: &str) -> Result<Vec<StreamTrack>, StreamError> {
+        self.web()?;
         let s = self
             .session_or_connect()
             .await
@@ -1396,11 +1345,18 @@ impl Spotify {
         Err(StreamError::Unavailable)
     }
 
+    /// The session found the account is not Premium (a track refused):
+    /// Spotify is not connected without it.
     fn set_session_premium(&self, premium: bool) {
-        let mut st = lock(&self.state);
-        if st.saved.session_premium != Some(premium) {
-            st.saved.session_premium = Some(premium);
-            self.persist(&st);
+        {
+            let mut st = lock(&self.state);
+            if st.saved.session_premium != Some(premium) {
+                st.saved.session_premium = Some(premium);
+                self.persist(&st);
+            }
+        }
+        if !premium && self.web.has_grant() {
+            self.premium_required();
         }
     }
 }
@@ -1428,7 +1384,9 @@ impl StreamService for Spotify {
         if let Some(prompt) = &st.prompt {
             return Account::LoggingIn(prompt.clone());
         }
-        if self.shared.has_grant() || self.personal.has_grant() || st.playback.is_some() {
+        // Connected while the user's app has a grant; a playback login kept
+        // from before alone does not make it.
+        if self.web.has_grant() {
             let name = st
                 .saved
                 .profile
@@ -1455,9 +1413,13 @@ impl StreamService for Spotify {
     fn login(&self, input: LoginInput) -> BoxFuture<'_, Result<(), StreamError>> {
         Box::pin(async move {
             match input {
-                LoginInput::Browser => self.login_web(Source::Shared, Grant::shared()).await,
+                // Again with the Client ID the last sign-in used.
+                LoginInput::Browser => match self.personal_client_id().as_deref().and_then(Grant::personal) {
+                    Some(grant) => self.login_web(grant).await,
+                    None => Err(StreamError::NotConfigured),
+                },
                 LoginInput::PersonalApp { client_id } => match Grant::personal(&client_id) {
-                    Some(grant) => self.login_web(Source::Personal, grant).await,
+                    Some(grant) => self.login_web(grant).await,
                     None => Err(StreamError::NotConfigured),
                 },
                 LoginInput::Playback => self.login_playback().await,
@@ -1471,8 +1433,7 @@ impl StreamService for Spotify {
         if let Some(cancel) = lock(&self.login_cancel).take() {
             let _ = cancel.send(true);
         }
-        self.shared.clear();
-        self.personal.clear();
+        self.web.clear();
         for slot in Slot::ALL {
             self.store.clear(slot);
         }
@@ -1492,16 +1453,7 @@ impl StreamService for Spotify {
 
     fn search(&self, query: &str) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
         let query = query.to_string();
-        Box::pin(async move { self.search_now(&query, None).await })
-    }
-
-    fn search_in_parts(
-        &self,
-        query: &str,
-        part: SearchParts,
-    ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
-        let query = query.to_owned();
-        Box::pin(async move { self.search_now(&query, Some(part)).await })
+        Box::pin(async move { self.search_now(&query).await })
     }
 
     fn track(&self, id: &str) -> BoxFuture<'_, Result<StreamTrack, StreamError>> {
@@ -1528,7 +1480,7 @@ impl StreamService for Spotify {
         let isrc = convert::isrc(Some(isrc));
         Box::pin(async move {
             let Some(isrc) = isrc else { return Ok(None) };
-            let client = self.client_for(Op::Catalog)?;
+            let client = self.web()?;
             let found = client
                 .search_in(Lane::Background, &format!("isrc:{isrc}"), &["track"], 1)
                 .await?;
@@ -1554,7 +1506,7 @@ impl StreamService for Spotify {
     fn set_liked_many(&self, ids: &[String], liked: bool) -> BoxFuture<'_, Result<(), StreamError>> {
         let ids = ids.to_vec();
         Box::pin(async move {
-            let client = self.client_for(Op::UserData)?;
+            let client = self.web()?;
             client.set_saved(&ids, liked).await.map_err(Into::into)
         })
     }
@@ -1587,9 +1539,9 @@ impl StreamService for Spotify {
         }
     }
 
-    /// The catalogue grant's `Retry-After` pause, when it is a long one.
+    /// The Web API's `Retry-After` pause, when it is a long one.
     fn paused_until(&self) -> Option<std::time::SystemTime> {
-        let client = self.client_for(Op::Catalog).ok()?;
+        let client = self.web().ok()?;
         let left = client.cooldown_left().filter(|l| *l >= SHOWN_PAUSE)?;
         Some(std::time::SystemTime::now() + left)
     }
@@ -1601,7 +1553,7 @@ impl StreamService for Spotify {
     fn create_playlist(&self, name: &str) -> BoxFuture<'_, Result<String, StreamError>> {
         let name = name.to_string();
         Box::pin(async move {
-            let client = self.client_for(Op::PlaylistCreate)?;
+            let client = self.web()?;
             let me = self.user_id().unwrap_or_default();
             let p = client.create_playlist(&name, &me).await?;
             if p.id.is_empty() {
@@ -1627,6 +1579,7 @@ impl StreamService for Spotify {
     }
 
     fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError> {
+        self.web()?;
         {
             let st = lock(&self.state);
             if st.playback.is_none() || st.premium() == Some(false) {

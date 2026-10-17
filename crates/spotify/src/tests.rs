@@ -16,35 +16,17 @@ fn both_tls_stacks_get_a_crypto_provider() {
     assert!(reqwest::Client::builder().build().is_ok());
 }
 
+/// The only Client IDs tests sign in with (never a real app).
+const TEST_CLIENT: &str = "test-client-id";
+
 #[test]
-fn routing_matrix() {
+fn the_session_reads_the_playlists_that_are_not_the_accounts() {
     use Access::*;
-    for op in [
-        Op::Catalog,
-        Op::UserData,
-        Op::PlaylistCreate,
-        Op::PlaylistRead(Owned),
-        Op::PlaylistRead(Collaborative),
-        Op::PlaylistEdit(Owned),
-        Op::PlaylistEdit(Collaborative),
-    ] {
-        assert_eq!(plan(op, true), Source::Personal, "{op:?}");
-        assert_eq!(plan(op, false), Source::Shared, "{op:?}");
-    }
-    for op in [
-        Op::PlaylistLibrary,
-        Op::PlaylistSearch,
-        Op::PlaylistRead(External),
-        Op::PlaylistRead(Unknown),
-        Op::PlaylistEdit(External),
-        Op::PlaylistEdit(Unknown),
-    ] {
-        assert_eq!(plan(op, true), Source::Shared, "{op:?}");
-    }
-    // The session reads what the shared app would have.
-    assert!(session_reads_playlist(External, true));
-    assert!(session_reads_playlist(Owned, false));
-    assert!(!session_reads_playlist(Owned, true));
+    // Development Mode gives no entries of those; the user's app reads the rest.
+    assert!(session_reads_playlist(External));
+    assert!(session_reads_playlist(Unknown));
+    assert!(!session_reads_playlist(Owned));
+    assert!(!session_reads_playlist(Collaborative));
 }
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -65,12 +47,29 @@ fn endpoints(server: &MockServer) -> Endpoints {
 }
 
 fn service(dir: &Path, store: Store, server: &MockServer) -> Arc<Spotify> {
-    Spotify::with_parts(
-        SpotifyConfig::new(dir),
-        store,
-        endpoints(server),
-        endpoints(server),
-    )
+    Spotify::with_parts(SpotifyConfig::new(dir), store, endpoints(server))
+}
+
+fn memory(dir: &Path) -> Store {
+    Store::with_backend(dir.to_path_buf(), Box::new(credentials::Memory::default()))
+}
+
+/// A temporary folder, removed when dropped.
+struct TempDir(PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A connected service (a grant of the test app) answering from `server`.
+async fn connected(name: &str, server: &MockServer) -> (Arc<Spotify>, TempDir) {
+    let dir = temp_dir(name);
+    let s = service(&dir, memory(&dir), server);
+    wait_restored(&s).await;
+    s.web.install(api::tests_support::token(TEST_CLIENT));
+    (s, TempDir(dir))
 }
 
 async fn mock_spotify(user: &str, product: Option<&str>) -> MockServer {
@@ -148,17 +147,16 @@ fn web_grant(client_id: &str, port: u16) -> Grant {
 async fn a_browser_login_verifies_persists_and_is_restored() {
     let server = mock_spotify("user1", Some("premium")).await;
     let dir = temp_dir("login");
-    let store = Store::with_backend(dir.clone(), Box::new(credentials::Memory::default()));
+    let store = memory(&dir);
     let s = service(&dir, store.clone(), &server);
     wait_restored(&s).await;
     assert_eq!(s.account(), Account::LoggedOut);
 
     let port = free_port();
     let browser = tokio::spawn(approve_in_browser(s.clone(), port, "c1"));
-    s.login_web(Source::Shared, web_grant(crate::auth::shared_client_id(), port))
-        .await
-        .unwrap();
+    s.login_web(web_grant(TEST_CLIENT, port)).await.unwrap();
     browser.await.unwrap();
+    assert_eq!(s.personal_client_id().as_deref(), Some(TEST_CLIENT));
     assert_eq!(
         s.account(),
         Account::LoggedIn {
@@ -173,32 +171,12 @@ async fn a_browser_login_verifies_persists_and_is_restored() {
         Err(StreamError::PremiumRequired)
     ));
 
-    // A personal app signed in as someone else is refused.
-    let other = mock_spotify("user2", None).await;
-    let personal = Spotify::with_parts(
-        SpotifyConfig::new(&dir),
-        store.clone(),
-        endpoints(&server),
-        endpoints(&other),
-    );
-    wait_restored(&personal).await;
-    assert!(personal.shared.has_grant(), "restored from the store");
-    let port = free_port();
-    let browser = tokio::spawn(approve_in_browser(personal.clone(), port, "c2"));
-    let e = personal
-        .login_web(Source::Personal, web_grant("my-app", port))
-        .await
-        .unwrap_err();
-    browser.await.unwrap();
-    assert!(matches!(e, StreamError::Network(m) if m.contains("другим аккаунтом")));
-    assert!(!personal.personal.has_grant());
-    assert!(personal.account().is_logged_in(), "the shared grant stays");
-
     // Restored without a browser from the store and the state file.
     drop(s);
     let restored = service(&dir, store.clone(), &server);
     wait_restored(&restored).await;
-    assert!(restored.shared.has_grant());
+    assert!(restored.web.has_grant());
+    assert_eq!(restored.personal_client_id().as_deref(), Some(TEST_CLIENT));
     assert!(matches!(
         restored.account(),
         Account::LoggedIn {
@@ -209,7 +187,12 @@ async fn a_browser_login_verifies_persists_and_is_restored() {
 
     restored.logout();
     assert_eq!(restored.account(), Account::LoggedOut);
-    assert!(!restored.shared.has_grant());
+    assert!(!restored.web.has_grant());
+    assert_eq!(
+        restored.personal_client_id().as_deref(),
+        Some(TEST_CLIENT),
+        "the key is the user's app: it stays for the next sign-in"
+    );
     let after = service(&dir, store, &server);
     wait_restored(&after).await;
     assert_eq!(after.account(), Account::LoggedOut, "logout is remembered");
@@ -220,18 +203,11 @@ async fn a_browser_login_verifies_persists_and_is_restored() {
 async fn a_busy_port_fails_the_login_with_a_human_message() {
     let server = mock_spotify("u", None).await;
     let dir = temp_dir("busy");
-    let s = service(
-        &dir,
-        Store::with_backend(dir.clone(), Box::new(credentials::Memory::default())),
-        &server,
-    );
+    let s = service(&dir, memory(&dir), &server);
     wait_restored(&s).await;
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = taken.local_addr().unwrap().port();
-    let e = s
-        .login_web(Source::Shared, web_grant(crate::auth::shared_client_id(), port))
-        .await
-        .unwrap_err();
+    let e = s.login_web(web_grant(TEST_CLIENT, port)).await.unwrap_err();
     let message = format!("Порт {port} занят другой программой");
     assert!(
         matches!(&e, StreamError::Network(m) if m.contains(&message)),
@@ -245,11 +221,7 @@ async fn a_busy_port_fails_the_login_with_a_human_message() {
 async fn simple_answers() {
     let server = mock_spotify("u", None).await;
     let dir = temp_dir("simple");
-    let s = service(
-        &dir,
-        Store::with_backend(dir.clone(), Box::new(credentials::Memory::default())),
-        &server,
-    );
+    let s = service(&dir, memory(&dir), &server);
     assert_eq!(
         s.web_url(EntityKind::Album, "abc"),
         "https://open.spotify.com/album/abc"
@@ -277,28 +249,20 @@ async fn simple_answers() {
         StreamError::NotConfigured
     );
     wait_restored(&s).await;
+    // «Войти» again needs a Client ID remembered from a sign-in.
+    assert_eq!(s.login(LoginInput::Browser).await.unwrap_err(), StreamError::NotConfigured);
     assert_eq!(s.liked().await.unwrap_err(), StreamError::NotLoggedIn);
     assert!(s.search("  ").await.unwrap().tracks.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn catalogue_reads_go_to_the_right_grant_and_are_cached() {
-    let server = mock_spotify("me", None).await;
-    let personal_server = MockServer::start().await;
+async fn reads_and_writes_go_to_the_users_app_and_are_cached() {
+    let personal_server = mock_spotify("me", None).await;
     let dir = temp_dir("routing");
-    // The personal app points at its own mock: whatever reaches the shared
-    // one for catalogue reads would be a routing bug.
-    let s = Spotify::with_parts(
-        SpotifyConfig::new(&dir),
-        Store::with_backend(dir.clone(), Box::new(credentials::Memory::default())),
-        endpoints(&server),
-        endpoints(&personal_server),
-    );
+    let s = service(&dir, memory(&dir), &personal_server);
     wait_restored(&s).await;
-    s.shared
-        .install(api::tests_support::token(crate::auth::shared_client_id()));
-    s.personal.install(api::tests_support::token("mine"));
+    s.web.install(api::tests_support::token(TEST_CLIENT));
     lock(&s.state).saved.profile = Some(Profile {
         id: "me".into(),
         name: "Me".into(),
@@ -343,7 +307,8 @@ async fn catalogue_reads_go_to_the_right_grant_and_are_cached() {
     let again = s.album("al").await.unwrap();
     assert_eq!(again, album, "cached");
 
-    // Other people's playlists stay on the shared app.
+    // Other people's playlists: the session reads them when it is up (none
+    // in tests); the user's app is asked otherwise.
     Mock::given(method("GET"))
         .and(path("/playlists/theirs"))
         .respond_with(ResponseTemplate::new(200).set_body_string(
@@ -352,7 +317,7 @@ async fn catalogue_reads_go_to_the_right_grant_and_are_cached() {
                          "items":[{"item":{"id":"x1","type":"track","name":"X1"}}]}}"#,
         ))
         .expect(1)
-        .mount(&server)
+        .mount(&personal_server)
         .await;
     Mock::given(method("GET"))
         .and(path("/playlists/theirs/items"))
@@ -361,7 +326,7 @@ async fn catalogue_reads_go_to_the_right_grant_and_are_cached() {
                 "items":[{"item":{"id":"x2","type":"track","name":"X2"}}]}"#,
         ))
         .expect(1)
-        .mount(&server)
+        .mount(&personal_server)
         .await;
     lock(&s.access).insert("theirs".into(), Access::External);
     let p = s.playlist("theirs").await.unwrap();
@@ -375,7 +340,7 @@ async fn catalogue_reads_go_to_the_right_grant_and_are_cached() {
         ["x1", "x2"]
     );
 
-    // Likes go to the personal app, as URIs.
+    // Likes go as URIs.
     Mock::given(method("PUT"))
         .and(path("/me/library"))
         .and(wiremock::matchers::query_param("uris", "spotify:track:t1"))
@@ -406,7 +371,6 @@ async fn catalogue_reads_go_to_the_right_grant_and_are_cached() {
         .unwrap();
     assert_eq!(v.as_deref(), Some("v3"));
 
-    server.verify().await;
     personal_server.verify().await;
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -414,15 +378,7 @@ async fn catalogue_reads_go_to_the_right_grant_and_are_cached() {
 #[tokio::test(flavor = "multi_thread")]
 async fn liked_songs_are_read_page_by_page() {
     let server = mock_spotify("me", None).await;
-    let dir = temp_dir("liked");
-    let s = service(
-        &dir,
-        Store::with_backend(dir.clone(), Box::new(credentials::Memory::default())),
-        &server,
-    );
-    wait_restored(&s).await;
-    s.shared
-        .install(api::tests_support::token(crate::auth::shared_client_id()));
+    let (s, _dir_s) = connected("liked", &server).await;
     struct Pages;
     impl wiremock::Respond for Pages {
         fn respond(&self, r: &wiremock::Request) -> ResponseTemplate {
@@ -452,7 +408,6 @@ async fn liked_songs_are_read_page_by_page() {
     assert_eq!(liked.len(), 120);
     assert_eq!(liked[119].id.id, "t119");
     server.verify().await;
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -461,9 +416,9 @@ async fn liked_songs_are_read_page_by_page() {
 //   set NIKGOB_SPOTIFY_LIVE_DIR=C:\Users\<you>\AppData\Roaming\nikgob\spotify-live
 //   cargo test -p nikgob-spotify -- --ignored --nocapture --test-threads=1
 //
-// The first run logs in (browser for the Web API, then once more for
-// playback); later runs reuse the grants from Credential Manager. Set
-// NIKGOB_SPOTIFY_CLIENT_ID to also try a personal app.
+// The first run logs in (browser for the Web API with the user's own app
+// from NIKGOB_SPOTIFY_CLIENT_ID, then once more for playback); later runs
+// reuse the grants from Credential Manager. Needs Premium.
 // ---------------------------------------------------------------------------
 
 fn live() -> Arc<Spotify> {
@@ -478,14 +433,10 @@ fn live() -> Arc<Spotify> {
 
 async fn live_logged_in(s: &Arc<Spotify>, playback: bool) {
     wait_restored(s).await;
-    if !s.shared.has_grant() {
-        eprintln!("log in to Spotify in the browser…");
-        s.login(LoginInput::Browser).await.unwrap();
-    }
-    if let Ok(id) = std::env::var("NIKGOB_SPOTIFY_CLIENT_ID")
-        && !s.personal.has_grant()
-    {
-        eprintln!("log in with the personal app…");
+    if !s.web.has_grant() {
+        let id = std::env::var("NIKGOB_SPOTIFY_CLIENT_ID")
+            .expect("live Spotify tests need NIKGOB_SPOTIFY_CLIENT_ID (the user's own app)");
+        eprintln!("log in with the user's app in the browser…");
         s.login(LoginInput::PersonalApp { client_id: id })
             .await
             .unwrap();
@@ -589,25 +540,10 @@ fn search_body() -> serde_json::Value {
                    "limit": 10, "offset": 0, "next": null},
         "albums": {"items": [], "limit": 10, "offset": 0, "next": null},
         "artists": {"items": [], "limit": 10, "offset": 0, "next": null},
-        "playlists": {"items": [], "limit": 10, "offset": 0, "next": null}
+        "playlists": {"items": [{"id": "p1", "name": "Лёд и пламя", "snapshot_id": "s",
+                                 "owner": {"id": "dj", "display_name": "DJ"}}],
+                      "limit": 10, "offset": 0, "next": null}
     })
-}
-
-/// A logged-in service whose two grants answer from `shared` / `personal`.
-async fn slow_service(name: &str, shared: &MockServer, personal: Option<&MockServer>) -> Arc<Spotify> {
-    let dir = temp_dir(name);
-    let s = Spotify::with_parts(
-        SpotifyConfig::new(&dir),
-        Store::with_backend(dir.clone(), Box::new(credentials::Memory::default())),
-        endpoints(shared),
-        endpoints(personal.unwrap_or(shared)),
-    );
-    wait_restored(&s).await;
-    s.shared.install(api::tests_support::token(crate::auth::shared_client_id()));
-    if personal.is_some() {
-        s.personal.install(api::tests_support::token("mine"));
-    }
-    s
 }
 
 async fn searches(server: &MockServer) -> usize {
@@ -621,42 +557,40 @@ async fn searches(server: &MockServer) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn search_is_one_request_per_grant_and_never_waits_out_throttling() {
-    // 1. Personal + shared, every request 300 ms.
-    let shared = MockServer::start().await;
-    let personal = MockServer::start().await;
-    for server in [&shared, &personal] {
-        Mock::given(method("GET"))
-            .and(path("/search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(search_body()).set_delay(MOCK_LATENCY))
-            .mount(server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/me/tracks"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(r#"{"items":[],"limit":50,"offset":0,"next":"more"}"#)
-                    .set_delay(MOCK_LATENCY),
-            )
-            .mount(server)
-            .await;
-    }
-    let s = slow_service("lat1", &shared, Some(&personal)).await;
+async fn search_is_one_request_and_never_waits_out_throttling() {
+    // 1. Every request 300 ms: one `/search` for every type, playlists too.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_body()).set_delay(MOCK_LATENCY))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/me/tracks"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"items":[],"limit":50,"offset":0,"next":"more"}"#)
+                .set_delay(MOCK_LATENCY),
+        )
+        .mount(&server)
+        .await;
+    let (s, _dir_s) = connected("lat1", &server).await;
     let t = Instant::now();
-    let r = s.search("лёд").await;
+    let r = s.search("лёд").await.unwrap();
     let plain = t.elapsed();
-    assert!(r.is_ok() && plain < Duration::from_millis(900), "{plain:?}");
-    assert_eq!((searches(&personal).await, searches(&shared).await), (1, 1));
+    assert!(plain < Duration::from_millis(900), "{plain:?}");
+    assert_eq!((r.tracks.len(), r.playlists.len()), (1, 1));
+    assert_eq!(searches(&server).await, 1);
+    let asked = server.received_requests().await.unwrap();
+    let types = asked
+        .iter()
+        .find(|r| r.url.path() == "/search")
+        .and_then(|r| r.url.query_pairs().find(|(k, _)| k == "type").map(|(_, v)| v.into_owned()));
+    assert_eq!(types.as_deref(), Some("track,album,artist,playlist"));
     // The same query again comes from the cache.
     s.search("лёд").await.unwrap();
-    assert_eq!(searches(&personal).await, 1);
-    eprintln!(
-        "[1] plain: {} ms, {} + {} /search requests, ok={}",
-        t.elapsed().as_millis(),
-        searches(&personal).await,
-        searches(&shared).await,
-        r.is_ok()
-    );
+    assert_eq!(searches(&server).await, 1);
+    eprintln!("[1] plain: {} ms", plain.as_millis());
 
     // 2. Background work (likes pulls, sync) holds the grant's request slots.
     let mut bg = Vec::new();
@@ -673,58 +607,26 @@ async fn search_is_one_request_per_grant_and_never_waits_out_throttling() {
         b.abort();
     }
 
-    // 3. The shared app (playlists in search) is throttled: 429 Retry-After 20.
-    let shared3 = MockServer::start().await;
-    let personal3 = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/search"))
-        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "20").set_delay(MOCK_LATENCY))
-        .mount(&shared3)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(search_body()).set_delay(MOCK_LATENCY))
-        .mount(&personal3)
-        .await;
-    let s3 = slow_service("lat3", &shared3, Some(&personal3)).await;
-    let t = Instant::now();
-    let parts = Arc::new(Mutex::new(Vec::new()));
-    let sink = {
-        let parts = parts.clone();
-        let t = Instant::now();
-        Arc::new(move |p: StreamSearch| lock(&parts).push((t.elapsed(), p.tracks.len())))
-    };
-    let r = tokio::time::timeout(Duration::from_secs(40), s3.search_in_parts("лёд", sink)).await;
-    assert!(t.elapsed() < Duration::from_millis(900), "{:?}", t.elapsed());
-    assert_eq!(lock(&parts).len(), 1, "the catalogue came first");
-    eprintln!(
-        "[3] shared throttled 20 s: {} ms, {} + {} requests, {:?}",
-        t.elapsed().as_millis(),
-        searches(&personal3).await,
-        searches(&shared3).await,
-        r.map(|r| r.map(|x| x.tracks.len()))
-    );
-
-    // 4. Shared app only, throttled with a short Retry-After (5 s).
-    let shared4 = MockServer::start().await;
+    // 3. Throttled with a short Retry-After (5 s): not waited out.
+    let throttled = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/search"))
         .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "5").set_delay(MOCK_LATENCY))
-        .mount(&shared4)
+        .mount(&throttled)
         .await;
-    let s4 = slow_service("lat4", &shared4, None).await;
+    let (s3, _dir_s3) = connected("lat3", &throttled).await;
     let t = Instant::now();
-    let r = tokio::time::timeout(Duration::from_secs(40), s4.search("лёд")).await;
+    let r = tokio::time::timeout(Duration::from_secs(40), s3.search("лёд")).await;
     eprintln!(
-        "[4] shared only, throttled 5 s: {} ms, {} requests",
+        "[3] throttled 5 s: {} ms, {} requests",
         t.elapsed().as_millis(),
-        searches(&shared4).await,
+        searches(&throttled).await,
     );
     assert!(t.elapsed() < Duration::from_millis(900));
     assert!(matches!(r, Ok(Err(StreamError::RateLimited { .. }))));
     // Paused: the next search does not even ask.
-    let _ = s4.search("лёд 2").await;
-    assert_eq!(searches(&shared4).await, 1);
+    let _ = s3.search("лёд 2").await;
+    assert_eq!(searches(&throttled).await, 1);
 }
 
 // ---- request counts (stage 3 speed audit) -----------------------------------
@@ -740,15 +642,15 @@ async fn hits(server: &MockServer, p: &str) -> usize {
         .count()
 }
 
-/// A store holding a shared grant and a state file as a previous start
-/// left them.
+/// A store holding a grant of the user's app and a state file as a
+/// previous start left them.
 async fn stored(dir: &Path, state: credentials::State) -> Store {
-    let store = Store::with_backend(dir.to_path_buf(), Box::new(credentials::Memory::default()));
+    let store = memory(dir);
     store
         .save(
-            Slot::Shared,
-            store.generation(Slot::Shared),
-            Secret::Web(api::tests_support::token(crate::auth::shared_client_id())),
+            Slot::Personal,
+            store.generation(Slot::Personal),
+            Secret::Web(api::tests_support::token(TEST_CLIENT)),
         )
         .await
         .unwrap();
@@ -758,7 +660,8 @@ async fn stored(dir: &Path, state: credentials::State) -> Store {
 
 fn profile_state(at: Option<u64>) -> credentials::State {
     credentials::State {
-        slots: vec![Slot::Shared],
+        slots: vec![Slot::Personal],
+        personal_client_id: Some(TEST_CLIENT.into()),
         profile: Some(Profile {
             id: "me".into(),
             name: "Me".into(),
@@ -786,6 +689,13 @@ async fn a_start_asks_for_the_profile_at_most_once_a_day() {
     let store2 = stored(&dir2, profile_state(Some(now_secs() - 2 * 86_400))).await;
     let s2 = service(&dir2, store2, &server2);
     wait_restored(&s2).await;
+    // The profile is asked right after the grants are restored.
+    let end = Instant::now() + Duration::from_secs(5);
+    while !lock(&s2.state).saved.profile_at.is_some_and(|t| t + 60 > now_secs()) {
+        assert!(Instant::now() < end, "the profile was not refreshed");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let stale = hits(&server2, "/me").await;
     eprintln!("[start] requests: profile fresh {fresh}, profile stale {stale}");
     assert_eq!(fresh, 0);
@@ -798,10 +708,7 @@ async fn a_start_asks_for_the_profile_at_most_once_a_day() {
 #[tokio::test(flavor = "multi_thread")]
 async fn likes_head_is_one_request_and_likes_go_40_per_request() {
     let server = mock_spotify("me", None).await;
-    let dir = temp_dir("head");
-    let s = service(&dir, Store::with_backend(dir.clone(), Box::new(credentials::Memory::default())), &server);
-    wait_restored(&s).await;
-    s.shared.install(api::tests_support::token(crate::auth::shared_client_id()));
+    let (s, _dir_s) = connected("head", &server).await;
     let items: Vec<serde_json::Value> = (0..50)
         .map(|i| serde_json::json!({"track": {"id": format!("t{i}"), "name": "x"}}))
         .collect();
@@ -827,16 +734,12 @@ async fn likes_head_is_one_request_and_likes_go_40_per_request() {
     let ninety: Vec<String> = (0..90).map(|i| format!("b{i}")).collect();
     s.set_liked_many(&ninety, true).await.unwrap();
     assert_eq!(hits(&server, "/me/library").await, 4);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn three_hundred_tracks_are_six_requests_and_versions_are_tiny() {
     let server = mock_spotify("me", None).await;
-    let dir = temp_dir("batch");
-    let s = service(&dir, Store::with_backend(dir.clone(), Box::new(credentials::Memory::default())), &server);
-    wait_restored(&s).await;
-    s.shared.install(api::tests_support::token(crate::auth::shared_client_id()));
+    let (s, _dir_s) = connected("batch", &server).await;
     struct Batch;
     impl wiremock::Respond for Batch {
         fn respond(&self, r: &wiremock::Request) -> ResponseTemplate {
@@ -873,7 +776,6 @@ async fn three_hundred_tracks_are_six_requests_and_versions_are_tiny() {
         .await;
     assert_eq!(s.playlist_version("p1").await.unwrap().as_deref(), Some("v9"));
     server.verify().await;
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -900,5 +802,170 @@ async fn what_an_app_lacks_is_asked_once_not_on_every_start() {
     again.tracks(&["t1".into()]).await.unwrap();
     assert_eq!(hits(&server, "/tracks").await, 1, "not probed again");
     assert_eq!(hits(&server, "/tracks/t1").await, 2);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// ---- Premium only, no shared app (docs/stage3.md §0, 2026-10-17) -------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_deletes_the_shared_apps_grant_quietly() {
+    let server = mock_spotify("me", Some("premium")).await;
+    let dir = temp_dir("migrate");
+    let store = memory(&dir);
+    // As an install from before left it: the shared app's grant and a
+    // playback login.
+    let old = serde_json::to_vec(&Secret::Web(api::tests_support::token("old-shared-client-id"))).unwrap();
+    store.put_raw(Slot::Shared, old).await;
+    store
+        .save(
+            Slot::Playback,
+            store.generation(Slot::Playback),
+            Secret::Playback(PlaybackCredential {
+                username: "me".into(),
+                auth_data: vec![1, 2, 3],
+            }),
+        )
+        .await
+        .unwrap();
+    store.save_state(&credentials::State {
+        slots: vec![Slot::Shared, Slot::Playback],
+        profile: Some(Profile {
+            id: "me".into(),
+            name: "Me".into(),
+            product: Some("premium".into()),
+        }),
+        profile_at: Some(now_secs()),
+        session_premium: Some(true),
+        ..Default::default()
+    });
+    let s = service(&dir, store.clone(), &server);
+    wait_restored(&s).await;
+    assert_eq!(s.account(), Account::LoggedOut, "not connected, and no error to show");
+    assert!(store.raw(Slot::Shared).await.is_none(), "deleted from the credential store");
+    let state = store.load_state().await;
+    assert_eq!(state.slots, [Slot::Playback], "the slot is dropped");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "nothing is asked while not connected"
+    );
+    let again = service(&dir, store, &server);
+    wait_restored(&again).await;
+    assert_eq!(again.account(), Account::LoggedOut);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// After a login that found no Premium: nothing kept, the account says why.
+async fn assert_signed_out_for_premium(s: &Spotify, store: &Store) {
+    assert_eq!(s.account(), Account::Failed(SPOTIFY_PREMIUM_REQUIRED.into()));
+    assert!(!s.web.has_grant());
+    assert!(store.raw(Slot::Personal).await.is_none(), "no grant is kept");
+    assert!(store.load_state().await.slots.is_empty());
+    assert!(lock(&s.state).saved.profile.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_without_premium_keeps_nothing() {
+    let server = mock_spotify("free-user", Some("free")).await;
+    let dir = temp_dir("free");
+    let store = memory(&dir);
+    let s = service(&dir, store.clone(), &server);
+    wait_restored(&s).await;
+    let port = free_port();
+    let browser = tokio::spawn(approve_in_browser(s.clone(), port, "c1"));
+    let e = s.login_web(web_grant(TEST_CLIENT, port)).await.unwrap_err();
+    browser.await.unwrap();
+    assert_eq!(e, StreamError::PremiumRequired);
+    assert_signed_out_for_premium(&s, &store).await;
+    // The next start shows it signed out, quietly.
+    let again = service(&dir, store, &server);
+    wait_restored(&again).await;
+    assert_eq!(again.account(), Account::LoggedOut);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+const OWNER_NEEDS_PREMIUM: &str =
+    r#"{"error":{"status":403,"message":"Active premium subscription required for the owner of the app."}}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_refused_for_an_owner_without_premium_keeps_nothing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#,
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        .respond_with(ResponseTemplate::new(403).set_body_string(OWNER_NEEDS_PREMIUM))
+        .mount(&server)
+        .await;
+    let dir = temp_dir("owner");
+    let store = memory(&dir);
+    let s = service(&dir, store.clone(), &server);
+    wait_restored(&s).await;
+    let port = free_port();
+    let browser = tokio::spawn(approve_in_browser(s.clone(), port, "c1"));
+    let e = s.login_web(web_grant(TEST_CLIENT, port)).await.unwrap_err();
+    browser.await.unwrap();
+    assert_eq!(e, StreamError::PremiumRequired);
+    assert_signed_out_for_premium(&s, &store).await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_for_want_of_premium_later_signs_out() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(403).set_body_string(OWNER_NEEDS_PREMIUM))
+        .mount(&server)
+        .await;
+    let dir = temp_dir("lapsed");
+    let store = stored(&dir, profile_state(Some(now_secs()))).await;
+    let s = service(&dir, store.clone(), &server);
+    wait_restored(&s).await;
+    assert!(s.account().is_logged_in());
+    assert!(s.search("лёд").await.is_err());
+    let end = Instant::now() + Duration::from_secs(5);
+    while s.account().is_logged_in() {
+        assert!(Instant::now() < end, "not signed out");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_signed_out_for_premium(&s, &store).await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_is_asked_while_not_connected() {
+    // Nothing is mounted: any request would be a bug (and answer 404).
+    let server = MockServer::start().await;
+    let dir = temp_dir("offline");
+    let s = service(&dir, memory(&dir), &server);
+    wait_restored(&s).await;
+    let nl = Err::<(), _>(StreamError::NotLoggedIn);
+    let ids = vec!["t1".to_owned()];
+    assert_eq!(s.search("лёд").await.map(drop), nl);
+    assert_eq!(s.search_kind("лёд", SearchKind::Songs).await.map(drop), nl);
+    assert_eq!(s.track("t1").await.map(drop), nl);
+    assert_eq!(s.tracks(&ids).await.map(drop), nl);
+    assert_eq!(s.album("al").await.map(drop), nl);
+    assert_eq!(s.artist("ar").await.map(drop), nl);
+    assert_eq!(s.artist_top_tracks("ar").await.map(drop), nl);
+    assert_eq!(s.playlist("pl").await.map(drop), nl);
+    assert_eq!(s.playlist_version("pl").await.map(drop), nl);
+    assert_eq!(s.find_isrc("USRC17607839").await.map(drop), nl);
+    assert_eq!(s.liked().await.map(drop), nl);
+    assert_eq!(s.liked_head().await.map(drop), nl);
+    assert_eq!(s.set_liked_many(&ids, true).await, nl);
+    assert_eq!(s.my_playlists().await.map(drop), nl);
+    assert_eq!(s.create_playlist("x").await.map(drop), nl);
+    assert_eq!(s.playlist_edit("pl", &ids, &[]).await.map(drop), nl);
+    assert_eq!(s.recent().await.map(drop), nl);
+    assert!(matches!(s.open_audio("t1"), Err(StreamError::NotLoggedIn)));
+    assert!(s.paused_until().is_none());
+    assert!(server.received_requests().await.unwrap().is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }

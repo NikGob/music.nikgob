@@ -439,7 +439,7 @@ pub enum Account {
         premium: Option<bool>,
         /// The service can play sound right now. Spotify needs its separate
         /// playback authorization ([`LoginInput::Playback`]) and Premium;
-        /// without it the runtime plays the same track from YouTube Music.
+        /// until then the runtime plays the same track from YouTube Music.
         audio: bool,
     },
     /// The last login failed or the session expired.
@@ -451,6 +451,12 @@ impl Account {
         matches!(self, Self::LoggedIn { .. })
     }
 }
+
+/// What Spotify's account says when it has no Premium: Spotify is not
+/// connected at all then (docs/stage3.md §0, 2026-10-17). The service's
+/// [`Account::Failed`] and the runtime's login error both read this.
+pub const SPOTIFY_PREMIUM_REQUIRED: &str =
+    "Нужен Spotify Premium — без него Spotify не подключить; YouTube Music работает и так";
 
 /// What the user must do to finish logging in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,16 +474,20 @@ pub enum LoginPrompt {
 #[derive(Clone, PartialEq, Eq)]
 pub enum LoginInput {
     /// Browser based OAuth (redirect or device code, whatever the service uses).
-    /// For Spotify this is the Web API grant of the shared public app. For
-    /// YouTube Music it is the Google sign-in window the app runs itself
-    /// (the runtime's `WebLogin`), which ends in a [`Self::Cookies`] login;
-    /// the service alone answers [`StreamError::Unsupported`].
+    /// For Spotify this signs in again with the Client ID it remembers (the
+    /// last [`Self::PersonalApp`]); without one it answers
+    /// [`StreamError::NotConfigured`]. For YouTube Music it is the Google
+    /// sign-in window the app runs itself (the runtime's `WebLogin`), which
+    /// ends in a [`Self::Cookies`] login; the service alone answers
+    /// [`StreamError::Unsupported`].
     Browser,
     /// Spotify only: the separate local playback authorization (librespot,
     /// `streaming` scope). Other services answer [`StreamError::Unsupported`].
     Playback,
-    /// Spotify only: a Web API grant of the user's own developer app, which
-    /// gets its own quota. Must verify as the same account as `Browser`.
+    /// Spotify only: the Web API sign-in (PKCE in the browser) with the
+    /// user's own Development Mode app, the only Web API grant Spotify is
+    /// used with. Needs Premium: without it the login ends in
+    /// [`StreamError::PremiumRequired`] and nothing is kept.
     PersonalApp { client_id: String },
     /// Pasted cookies (`cookies.txt` content or a `Cookie:` header).
     Cookies(String),

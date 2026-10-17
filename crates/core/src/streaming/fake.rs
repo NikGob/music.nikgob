@@ -272,6 +272,8 @@ struct State {
     audio_secs: f32,
     /// Calls per trait method, for request-counting tests.
     calls: HashMap<&'static str, usize>,
+    /// A login finds no Premium ([`FakeService::without_premium`]).
+    no_premium: bool,
 }
 
 /// Deterministic fake of a streaming service (feature `fake`).
@@ -329,6 +331,7 @@ impl FakeService {
                 opened: Vec::new(),
                 audio_secs: 2.0,
                 calls: HashMap::new(),
+                no_premium: false,
             }),
         }
     }
@@ -357,6 +360,28 @@ impl FakeService {
             premium: Some(false),
             audio: false,
         };
+        self
+    }
+
+    /// Spotify Premium signed in, the playback login not given yet.
+    pub fn premium_without_audio(self) -> Self {
+        self.lock().account = Account::LoggedIn {
+            name: USER.into(),
+            premium: Some(true),
+            audio: false,
+        };
+        self
+    }
+
+    /// Logged out, and a login finds no Premium (Spotify is not connected
+    /// without it): the login answers [`StreamError::PremiumRequired`] and
+    /// the account reads [`super::SPOTIFY_PREMIUM_REQUIRED`].
+    pub fn without_premium(self) -> Self {
+        {
+            let mut st = self.lock();
+            st.account = Account::LoggedOut;
+            st.no_premium = true;
+        }
         self
     }
 
@@ -651,6 +676,10 @@ impl StreamService for FakeService {
                 if self.service != Service::Spotify =>
             {
                 Err(StreamError::Unsupported)
+            }
+            _ if st.no_premium => {
+                st.account = Account::Failed(super::SPOTIFY_PREMIUM_REQUIRED.into());
+                Err(StreamError::PremiumRequired)
             }
             _ => {
                 st.account = Account::LoggedIn {

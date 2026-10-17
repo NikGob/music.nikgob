@@ -4,11 +4,9 @@
 //! (https://github.com/crmne/spotifast).
 //! Copyright (c) 2026 Carmine Paolino, MIT License.
 //!
-//! Each grant (the shared public app, the user's own app) has its own
-//! client: its own token, its own budget of [`MAX_IN_FLIGHT`] concurrent
-//! requests, and its own `Retry-After` cooldown, so a throttled shared app
-//! never pauses the personal one. The shared app's quota is shared by every
-//! user of several open-source clients: requests are few, small and paged.
+//! The grant of the user's own Development Mode app has its token, a budget
+//! of [`MAX_IN_FLIGHT`] concurrent requests and its `Retry-After` cooldown.
+//! Development Mode quotas are small: requests are few, small and paged.
 
 pub mod models;
 
@@ -39,7 +37,7 @@ pub const INTERACTIVE_WAIT: Duration = Duration::from_millis(1500);
 /// Concurrent interactive requests per grant, besides [`MAX_IN_FLIGHT`].
 const INTERACTIVE_IN_FLIGHT: usize = 2;
 /// Background requests of one grant start at least this far apart (~4 per
-/// second): a burst of paging never hammers the shared quota.
+/// second): a burst of paging never hammers the quota.
 pub const BACKGROUND_SPACING: Duration = Duration::from_millis(250);
 /// Waiters woken after a `Retry-After` pause are spread over this much, so
 /// they do not all hit Spotify in the same instant.
@@ -72,21 +70,6 @@ fn endpoint_name(path: &str) -> String {
 /// Development Mode caps every search type at 10 results.
 pub const SEARCH_LIMIT: u32 = 10;
 pub const PAGE: u32 = 50;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Source {
-    Shared,
-    Personal,
-}
-
-impl std::fmt::Display for Source {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Shared => "shared",
-            Self::Personal => "personal",
-        })
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ApiError {
@@ -154,6 +137,9 @@ pub enum TokenEvent {
     Rejected,
     /// The client learnt what this app lacks ([`Probes`]): remember it.
     Probed(Probes),
+    /// Spotify refused the app because its owner has no Premium (a
+    /// Development Mode app works only for a Premium owner).
+    PremiumRequired,
 }
 
 /// What an app was found to lack, so later starts do not ask again.
@@ -170,7 +156,7 @@ pub struct Probes {
     pub legacy_items: bool,
 }
 
-pub type TokenListener = Box<dyn Fn(Source, TokenEvent) + Send + Sync>;
+pub type TokenListener = Box<dyn Fn(TokenEvent) + Send + Sync>;
 
 /// Where requests go; tests point it at a mock server.
 #[derive(Clone, Debug)]
@@ -193,7 +179,6 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub struct ApiClient {
-    pub source: Source,
     http: reqwest::Client,
     endpoints: Endpoints,
     grant: Mutex<Option<StoredToken>>,
@@ -217,9 +202,8 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
-    pub fn new(source: Source, http: reqwest::Client, endpoints: Endpoints) -> Self {
+    pub fn new(http: reqwest::Client, endpoints: Endpoints) -> Self {
         Self {
-            source,
             http,
             endpoints,
             grant: Mutex::new(None),
@@ -280,7 +264,7 @@ impl ApiClient {
 
     fn notify(&self, event: TokenEvent) {
         if let Some(l) = self.listener.get() {
-            l(self.source, event);
+            l(event);
         }
     }
 
@@ -343,10 +327,7 @@ impl ApiClient {
             Err(AuthError::Rejected { .. }) => {
                 if self.generation.load(Ordering::SeqCst) == generation {
                     self.clear();
-                    log::warn!(
-                        "spotify: {} grant rejected on refresh, dropped",
-                        self.source
-                    );
+                    log::warn!("spotify: grant rejected on refresh, dropped");
                     self.notify(TokenEvent::Rejected);
                 }
                 Err(ApiError::SignInExpired)
@@ -433,8 +414,7 @@ impl ApiClient {
             let queued_ms = queued.elapsed().as_millis();
             if queued_ms > 50 {
                 log::debug!(
-                    "spotify: source={} {method} {endpoint} waited {queued_ms} ms for a request slot",
-                    self.source
+                    "spotify: {method} {endpoint} waited {queued_ms} ms for a request slot"
                 );
             }
             // After the permit: a 429 answered while this request queued has
@@ -442,8 +422,7 @@ impl ApiClient {
             if let Some(left) = self.cooldown_left() {
                 if left > max_wait {
                     log::info!(
-                        "spotify: source={} {method} {endpoint} not sent: Retry-After pause, {} s left",
-                        self.source,
+                        "spotify: {method} {endpoint} not sent: Retry-After pause, {} s left",
                         left.as_secs()
                     );
                     return Err(ApiError::RateLimited {
@@ -453,8 +432,7 @@ impl ApiClient {
                 // Spread out: every waiter woke at the same instant before.
                 let jitter = Duration::from_millis(rand::random_range(0..WAKE_JITTER_MS));
                 log::debug!(
-                    "spotify: source={} {method} {endpoint} waits out Retry-After: {} ms",
-                    self.source,
+                    "spotify: {method} {endpoint} waits out Retry-After: {} ms",
                     (left + jitter).as_millis()
                 );
                 tokio::time::sleep(left + jitter).await;
@@ -476,8 +454,7 @@ impl ApiClient {
                 Err(e) => {
                     let e = e.without_url();
                     log::info!(
-                        "spotify: source={} {method} {endpoint} failed after {} ms: {e}",
-                        self.source,
+                        "spotify: {method} {endpoint} failed after {} ms: {e}",
                         sent.elapsed().as_millis(),
                     );
                     return Err(ApiError::from(e));
@@ -486,8 +463,7 @@ impl ApiClient {
             let status = response.status();
             if status == StatusCode::UNAUTHORIZED && attempt == 1 {
                 log::debug!(
-                    "spotify: source={} {method} {endpoint} -> 401 in {} ms, refreshing the token",
-                    self.source,
+                    "spotify: {method} {endpoint} -> 401 in {} ms, refreshing the token",
                     sent.elapsed().as_millis()
                 );
                 drop(permit);
@@ -504,13 +480,12 @@ impl ApiClient {
                 let text = response.text().await.unwrap_or_default();
                 drop(permit);
                 if is_quota_exhausted(&text) {
-                    log::warn!("spotify: {} app quota exhausted", self.source);
+                    log::warn!("spotify: app quota exhausted");
                     self.extend_cooldown(MAX_RETRY_WAIT * 2);
                     return Err(ApiError::RateLimited { retry_after: None });
                 }
                 log::warn!(
-                    "spotify: source={} {method} {endpoint} -> 429 in {} ms, Retry-After {} s (attempt {attempt})",
-                    self.source,
+                    "spotify: {method} {endpoint} -> 429 in {} ms, Retry-After {} s (attempt {attempt})",
                     sent.elapsed().as_millis(),
                     wait.as_secs()
                 );
@@ -524,8 +499,7 @@ impl ApiClient {
             }
             if status.is_server_error() && method == Method::GET && attempt == 1 {
                 log::info!(
-                    "spotify: source={} {method} {endpoint} -> {} in {} ms, retrying",
-                    self.source,
+                    "spotify: {method} {endpoint} -> {} in {} ms, retrying",
                     status.as_u16(),
                     sent.elapsed().as_millis()
                 );
@@ -535,8 +509,7 @@ impl ApiClient {
             }
             let text = response.text().await?;
             log::debug!(
-                "spotify: source={} {method} {endpoint} -> {} in {} ms (total {} ms, attempt {attempt})",
-                self.source,
+                "spotify: {method} {endpoint} -> {} in {} ms (total {} ms, attempt {attempt})",
                 status.as_u16(),
                 sent.elapsed().as_millis(),
                 started.elapsed().as_millis()
@@ -549,6 +522,10 @@ impl ApiClient {
                 .map(|b| b.error.message)
                 .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| status.canonical_reason().unwrap_or("error").into());
+            if is_premium_refusal(status.as_u16(), &message) {
+                log::info!("spotify: {method} {endpoint} -> 403: the app's owner needs Premium");
+                self.notify(TokenEvent::PremiumRequired);
+            }
             return Err(ApiError::Status {
                 status: status.as_u16(),
                 message,
@@ -633,7 +610,7 @@ impl ApiClient {
         {
             Ok(t) => Ok(Some(t.tracks)),
             Err(e) if e.is_refusal() => {
-                log::info!("spotify: {} app has no batch track lookup", self.source);
+                log::info!("spotify: the app has no batch track lookup");
                 self.learn(&self.no_batch);
                 Ok(None)
             }
@@ -659,10 +636,7 @@ impl ApiClient {
 
     /// Development Mode apps get at most 10 albums per page.
     pub fn artist_albums_limit(&self) -> u32 {
-        match self.source {
-            Source::Shared => PAGE,
-            Source::Personal => 10,
-        }
+        10
     }
 
     pub async fn artist_albums(&self, id: &str, offset: u32) -> Result<Page<Album>> {
@@ -863,6 +837,20 @@ fn snapshot(value: Option<Value>) -> Option<String> {
         .and_then(|s| s.snapshot_id)
 }
 
+/// Spotify's answer when a Development Mode app's owner has no Premium (a
+/// 403 whose message says so, e.g. "Active premium subscription required
+/// for the owner of the app").
+pub(crate) fn is_premium_refusal(status: u16, message: &str) -> bool {
+    status == 403 && message.to_ascii_lowercase().contains("premium")
+}
+
+impl ApiError {
+    /// [`is_premium_refusal`] of this error.
+    pub fn is_premium_refusal(&self) -> bool {
+        matches!(self, Self::Status { status, message } if is_premium_refusal(*status, message))
+    }
+}
+
 fn is_quota_exhausted(body: &str) -> bool {
     serde_json::from_str::<ApiErrorBody>(body)
         .ok()
@@ -895,9 +883,8 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
-    fn client(server: &MockServer, source: Source) -> ApiClient {
+    fn client(server: &MockServer) -> ApiClient {
         let c = ApiClient::new(
-            source,
             reqwest::Client::new(),
             Endpoints {
                 api: server.uri(),
@@ -909,7 +896,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn retry_after_pauses_only_the_grant_that_was_throttled() {
+    async fn retry_after_pauses_only_the_client_that_was_throttled() {
         let server = MockServer::start().await;
         let calls = Arc::new(AtomicUsize::new(0));
         struct Once429(Arc<AtomicUsize>);
@@ -927,10 +914,10 @@ mod tests {
             .respond_with(Once429(calls.clone()))
             .mount(&server)
             .await;
-        let shared = client(&server, Source::Shared);
-        let personal = client(&server, Source::Personal);
+        let first = client(&server);
+        let other = client(&server);
         let started = Instant::now();
-        let me = shared.me().await.unwrap();
+        let me = first.me().await.unwrap();
         assert_eq!(me.id, "u");
         assert!(
             started.elapsed() >= Duration::from_millis(950),
@@ -946,12 +933,12 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let e = shared.me().await.unwrap_err();
+        let e = first.me().await.unwrap_err();
         assert!(
             matches!(e, ApiError::RateLimited { retry_after: Some(d) } if d == Duration::from_secs(120))
         );
         let started = Instant::now();
-        let again = shared.me().await.unwrap_err();
+        let again = first.me().await.unwrap_err();
         assert!(
             matches!(again, ApiError::RateLimited { retry_after: Some(d) } if d > Duration::from_secs(100))
         );
@@ -960,8 +947,8 @@ mod tests {
             "no request, no wait"
         );
         assert!(
-            personal.cooldown_left().is_none(),
-            "the other grant is not paused"
+            other.cooldown_left().is_none(),
+            "another client is not paused"
         );
         server.verify().await;
         assert_eq!(
@@ -994,10 +981,10 @@ mod tests {
             .respond_with(Slow(now.clone(), peak.clone()))
             .mount(&server)
             .await;
-        let shared = Arc::new(client(&server, Source::Shared));
+        let first = Arc::new(client(&server));
         let tasks: Vec<_> = (0..12)
             .map(|_| {
-                let c = shared.clone();
+                let c = first.clone();
                 tokio::spawn(async move { c.track("x").await })
             })
             .collect();
@@ -1006,7 +993,7 @@ mod tests {
         }
         let peak = peak.load(Ordering::SeqCst);
         assert!(peak <= MAX_IN_FLIGHT, "peak {peak}");
-        assert!(shared.limiter.available_permits() == MAX_IN_FLIGHT);
+        assert!(first.limiter.available_permits() == MAX_IN_FLIGHT);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1019,11 +1006,10 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let c = client(&server, Source::Personal);
+        let c = client(&server);
         let rejected = Arc::new(AtomicBool::new(false));
         let flag = rejected.clone();
-        c.set_listener(Box::new(move |source, event| {
-            assert_eq!(source, Source::Personal);
+        c.set_listener(Box::new(move |event| {
             if matches!(event, TokenEvent::Rejected) {
                 flag.store(true, Ordering::SeqCst);
             }
@@ -1058,11 +1044,44 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let c = client(&server, Source::Shared);
+        let c = client(&server);
         c.set_saved(&["a".into()], true).await.unwrap();
         c.set_saved(&["a".into()], true).await.unwrap();
         assert!(c.tracks(&["a".into()]).await.unwrap().is_none());
         assert!(c.tracks(&["a".into()]).await.unwrap().is_none());
         server.verify().await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refusal_for_an_owner_without_premium_is_reported() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(ResponseTemplate::new(403).set_body_string(
+                r#"{"error":{"status":403,"message":"Active premium subscription required for the owner of the app."}}"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/tracks/x"))
+            .respond_with(ResponseTemplate::new(403).set_body_string(
+                r#"{"error":{"status":403,"message":"Forbidden"}}"#,
+            ))
+            .mount(&server)
+            .await;
+        let c = client(&server);
+        let told = Arc::new(AtomicUsize::new(0));
+        let n = told.clone();
+        c.set_listener(Box::new(move |event| {
+            if matches!(event, TokenEvent::PremiumRequired) {
+                n.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let e = c.me().await.unwrap_err();
+        assert!(e.is_premium_refusal(), "{e:?}");
+        assert_eq!(told.load(Ordering::SeqCst), 1);
+        // Another 403 is not about Premium.
+        let e = c.track("x").await.unwrap_err();
+        assert!(!e.is_premium_refusal());
+        assert_eq!(told.load(Ordering::SeqCst), 1);
     }
 }
