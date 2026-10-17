@@ -17,6 +17,7 @@ mod torrents;
 pub mod queue;
 mod session;
 mod editions;
+mod streams;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -139,6 +140,8 @@ pub struct RuntimeConfig {
 enum Msg {
     Cmd(Command),
     Service(Box<dyn Service>),
+    Indexer(Arc<dyn nikgob_core::indexer::Indexer>),
+    OdesliBase(String),
     Shutdown,
 }
 
@@ -216,6 +219,18 @@ impl Runtime {
     pub fn add_service(&self, service: Box<dyn Service>) {
         let _ = self.tx.send(Msg::Service(service));
     }
+
+    /// Uses this torrent indexer instead of the one from settings.toml
+    /// (another backend, or a fake one in tests).
+    pub fn set_indexer(&self, indexer: Arc<dyn nikgob_core::indexer::Indexer>) {
+        let _ = self.tx.send(Msg::Indexer(indexer));
+    }
+
+    /// Asks this Odesli base url for share links instead of
+    /// api.song.link (tests).
+    pub fn set_odesli_base(&self, base: impl Into<String>) {
+        let _ = self.tx.send(Msg::OdesliBase(base.into()));
+    }
 }
 
 impl Drop for Runtime {
@@ -283,6 +298,8 @@ struct Worker {
     /// Last torrent search, indexed like `SearchView::torrents.results`.
     candidates: Vec<nikgob_core::indexer::Candidate>,
     torrents: torrents::Torrents,
+    /// Accounts, stream search and pages, likes sync, wishlist, sharing.
+    streaming: streams::Streams,
 }
 
 impl Worker {
@@ -298,6 +315,7 @@ impl Worker {
             .as_ref()
             .map(|i| (i.torrent_state_dir.clone(), i.torrent_offline))
             .unwrap_or_default();
+        let streaming = streams::Streams::new(internal.clone());
         let import = config
             .import
             .and_then(|setup| ImportService::start(setup, config.library.clone(), internal));
@@ -341,6 +359,7 @@ impl Worker {
             streams: config.streams,
             tried: Vec::new(),
             playing_source: None,
+            streaming,
         }
     }
 
@@ -353,11 +372,18 @@ impl Worker {
         self.start_enrich();
         self.restore_session();
         self.offer_editions();
+        self.wish_restart();
+        self.start_streams();
         loop {
             select! {
                 recv(rx) -> m => match m {
                     Ok(Msg::Cmd(c)) => self.command(c),
                     Ok(Msg::Service(s)) => self.services.push(s),
+                    Ok(Msg::Indexer(i)) => {
+                        self.indexer = Some(i);
+                        self.wish_tick();
+                    }
+                    Ok(Msg::OdesliBase(base)) => self.set_odesli_base(&base),
                     Ok(Msg::Shutdown) | Err(_) => break,
                 },
                 recv(pb) -> e => if let Ok(e) = e { self.playback_event(e) },
@@ -367,6 +393,7 @@ impl Worker {
                     self.expire_toasts();
                     self.maybe_export(false);
                     self.save_session();
+                    self.stream_tick();
                 }
             }
         }
@@ -602,6 +629,7 @@ impl Worker {
                             None,
                             EventContext::Other,
                         );
+                        self.track_liked(t, on);
                     }
                     self.toast(
                         if on { "Добавлено в Любимые" } else { "Убрано из Любимых" },
@@ -630,7 +658,9 @@ impl Worker {
             Command::AddToPlaylist(id, tracks) => {
                 if id == LIKED_PLAYLIST {
                     for t in &tracks {
-                        let _ = self.lib.like(*t);
+                        if self.lib.like(*t).is_ok() {
+                            self.track_liked(*t, true);
+                        }
                     }
                 } else {
                     let _ = self.log_err("плейлист", self.lib.playlist_add_many(id, &tracks));
@@ -689,6 +719,9 @@ impl Worker {
             Command::ImportFolder(dir) => self.import_paths(vec![dir]),
             Command::MergeEditions(id) => self.merge_editions(id),
             Command::KeepEditionsApart(id) => self.keep_editions_apart(id),
+            Command::ConfirmChoice { id, option } if id & streams::WISH_ID != 0 => {
+                self.wish_confirm(id, option);
+            }
             Command::ConfirmChoice { id, option } if id & IMPORT_ID != 0 => {
                 self.confirm_choice(id, option);
             }
@@ -729,6 +762,16 @@ impl Worker {
                 if old.output_device != p.output_device {
                     self.switch_device(p.output_device.clone());
                 }
+                if (old.spotify_enabled, old.youtube_enabled) != (p.spotify_enabled, p.youtube_enabled) {
+                    self.publish_accounts();
+                    self.preload_next();
+                }
+                if old.library_only_downloaded != p.library_only_downloaded {
+                    self.load_library();
+                }
+                if old.auto_download_limit != p.auto_download_limit {
+                    self.wish_tick();
+                }
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
@@ -753,7 +796,48 @@ impl Worker {
             Command::ConfirmChoice { .. } => {
                 log::warn!("confirm choice for an unknown item");
             }
+            c @ (Command::StreamLogin { .. }
+            | Command::StreamLogout(_)
+            | Command::SetStreamSecrets { .. }
+            | Command::SetSearchSources(_)
+            | Command::LoadStream(_)
+            | Command::PlayStreamTracks { .. }
+            | Command::PlayStreamAlbum { .. }
+            | Command::PlayStreamPlaylist { .. }
+            | Command::PlayStreamNext(_)
+            | Command::EnqueueStream(_)
+            | Command::LikeStream { .. }
+            | Command::LikeStreamAlbum { .. }
+            | Command::AddStreamToPlaylist(..)
+            | Command::Share(_)
+            | Command::LoadWishlist
+            | Command::WishlistDownload(_)
+            | Command::WishlistDismiss(_)
+            | Command::WishlistRetry(_)
+            | Command::WishlistSaveFromYoutube(_)
+            | Command::WishlistAttach { .. }
+            | Command::ImportFromService(_)
+            | Command::ImportExportFiles(_)
+            | Command::SetPlaylistSync { .. }
+            | Command::LoadDiscography(_)) => {
+                if let Some(c) = self.stream_command(c) {
+                    log::warn!("unhandled {c:?}");
+                }
+            }
         }
+    }
+
+    /// A track was liked / unliked here: the services hear about it, and a
+    /// new like of a track without a file starts its download.
+    fn track_liked(&mut self, track: TrackId, on: bool) {
+        self.push_like(track, on);
+        if on {
+            self.wish_for_like(track, nikgob_core::model::WishlistOrigin::Like);
+        } else {
+            self.wish_drop_unstarted(track);
+        }
+        self.publish_wishlist();
+        self.wish_tick();
     }
 
     // ---------------------------------------------------------------- playback
@@ -764,11 +848,6 @@ impl Worker {
         } else {
             self.position
         }
-    }
-
-    /// The registered service of a stream kind.
-    fn stream(&self, kind: StreamKind) -> Option<&Arc<dyn StreamService>> {
-        self.streams.iter().find(|s| s.service() == kind)
     }
 
     /// What to hand the engine for `e`: its best source that is usable and
@@ -782,9 +861,11 @@ impl Worker {
         let mut sources = self.lib.sources_of_track(e.track).ok()?;
         sources.retain(|s| s.available && !skip.contains(&s.id));
         sources.sort_by_key(|s| (s.kind.priority(), std::cmp::Reverse(s.quality_score)));
+        // A stream needs its service on and able to play sound for this
+        // account (Spotify Free: its tracks play from YouTube Music).
         let src = sources.into_iter().find(|s| match s.kind.service() {
             None => true,
-            Some(service) => self.stream(service).is_some(),
+            Some(service) => self.has_audio(service),
         })?;
         let duration = self
             .lib
@@ -843,7 +924,8 @@ impl Worker {
         }
         let skip = self.tried.clone();
         let Some((req, source, kind)) = self.request_skipping(e, &skip) else {
-            return false;
+            // Last chance: the same song on YouTube Music.
+            return self.wait_for_youtube(e);
         };
         log::info!("playing {} from its next source ({kind})", e.track);
         self.play_request(e, req, source, kind);
@@ -897,19 +979,11 @@ impl Worker {
         for attempt in 0..=self.queue.len() {
             self.tried.clear();
             if let Some((req, source, kind)) = self.request_skipping(e, &[]) {
-                self.play_request(e, req, source, kind);
-                self.position = Duration::ZERO;
-                self.position_at = Instant::now();
-                self.jumped_at = Instant::now();
-                let _ = self.lib.record_event(
-                    e.track,
-                    EventType::Start,
-                    (!kind.is_local()).then_some(kind),
-                    Some(0),
-                    self.play_context,
-                );
-                self.preload_next();
-                self.publish_now_playing();
+                self.start_with(e, req, source, kind);
+                return;
+            }
+            // Nothing plays now, but YouTube Music may have it: wait for it.
+            if self.wait_for_youtube(e) {
                 return;
             }
             log::warn!("no playable source for {}", e.track);
@@ -924,6 +998,24 @@ impl Worker {
         self.stop();
     }
 
+    /// Plays `e` from `req` and records the start (with the service that
+    /// actually plays, for a stream).
+    fn start_with(&mut self, e: Entry, req: PlayRequest, source: SourceId, kind: SourceKind) {
+        self.play_request(e, req, source, kind);
+        self.position = Duration::ZERO;
+        self.position_at = Instant::now();
+        self.jumped_at = Instant::now();
+        let _ = self.lib.record_event(
+            e.track,
+            EventType::Start,
+            (!kind.is_local()).then_some(kind),
+            Some(0),
+            self.play_context,
+        );
+        self.preload_next();
+        self.publish_now_playing();
+    }
+
     fn preload_next(&mut self) {
         // Gapless off: nothing is prepared, the next track starts after `Ended`.
         if !self.state.read().prefs.gapless {
@@ -932,6 +1024,13 @@ impl Worker {
         }
         let next = self.queue.peek_auto_next();
         let req = next.and_then(|n| self.request(n));
+        // The next track only YouTube Music may have: looked up ahead.
+        if req.is_none()
+            && let Some(n) = next
+            && self.can_resolve(n.track)
+        {
+            self.begin_resolve(n.track);
+        }
         self.playback.set_next(req);
     }
 
@@ -1063,10 +1162,11 @@ impl Worker {
                         .map(|(_, source, kind)| (source, kind));
                     self.position = Duration::ZERO;
                     self.position_at = Instant::now();
+                    let kind = self.playing_source.map(|(_, k)| k).filter(|k| !k.is_local());
                     let _ = self.lib.record_event(
                         e.track,
                         EventType::Start,
-                        None,
+                        kind,
                         Some(0),
                         self.play_context,
                     );
@@ -1137,10 +1237,12 @@ impl Worker {
         let history = self.queue.history();
         let history: Vec<Entry> = history[history.len().saturating_sub(HISTORY_SHOWN)..].to_vec();
         let current_entry = self.queue.current().map(|e| e.id);
+        let audio_service = self.playing_source.and_then(|(_, k)| k.service());
         let lib = self.lib.clone();
         self.publish(|s, res| {
             let p = &mut s.player;
             p.status = status;
+            p.audio_service = audio_service;
             p.position = position;
             p.at = Instant::now();
             p.volume = volume;
@@ -1207,9 +1309,19 @@ impl Worker {
                 self.lib.artists(0, 20_000, Sort::asc(nikgob_library::ArtistSortKey::Name)),
             )
             .unwrap_or_default();
+        // The inconspicuous "только скачанное": what has a file.
+        let only_local = self.state.read().prefs.library_only_downloaded;
+        let (releases, artists) = if only_local {
+            (
+                releases.into_iter().filter(|r| r.local_tracks > 0).collect(),
+                artists.into_iter().filter(|a| a.local_track_count > 0).collect(),
+            )
+        } else {
+            (releases, artists)
+        };
         let count = self
             .lib
-            .count_tracks(nikgob_library::TrackFilter::All)
+            .count_tracks(track_filter(only_local))
             .unwrap_or(0) as usize;
         self.publish(|s, res| {
             s.library.releases = releases.iter().map(|r| res.release(r)).collect();
@@ -1230,8 +1342,9 @@ impl Worker {
             nikgob_view::TrackSort::Added => Sort::desc(TrackSortKey::Added),
             nikgob_view::TrackSort::Duration => Sort::asc(TrackSortKey::Duration),
         };
+        let filter = track_filter(self.state.read().prefs.library_only_downloaded);
         let rows = self
-            .log_err("треки", self.lib.tracks(offset as u32, limit as u32, key))
+            .log_err("треки", self.lib.tracks_filtered(offset as u32, limit as u32, key, filter))
             .unwrap_or_default();
         self.publish(|s, res| {
             s.library.tracks_offset = offset;
@@ -1319,11 +1432,24 @@ impl Worker {
 
     fn search(&mut self, q: String) {
         let trimmed = q.trim().to_owned();
+        let sources = self.streaming.search.sources;
         if trimmed.is_empty() {
-            self.publish(|s, _| s.search = nikgob_view::SearchView::default());
+            self.search_streams("", Vec::new());
+            self.publish(|s, _| {
+                s.search = nikgob_view::SearchView {
+                    sources,
+                    ..Default::default()
+                };
+            });
             return;
         }
-        let r = self.lib.search(&trimmed, 20).unwrap_or_default();
+        // Library first (at once), then the services as they answer.
+        let r = if sources.library {
+            self.lib.search(&trimmed, 20).unwrap_or_default()
+        } else {
+            nikgob_library::SearchResults::default()
+        };
+        let lib_tracks = r.tracks.clone();
         self.publish(|s, res| {
             s.search = nikgob_view::SearchView {
                 query: q,
@@ -1332,9 +1458,15 @@ impl Worker {
                 artists: r.artists.iter().map(|a| res.artist(a)).collect(),
                 playlists: r.playlists.iter().map(|p| res.playlist(p)).collect(),
                 searching: false,
+                sources,
+                streams: Vec::new(),
                 torrents: std::mem::take(&mut s.search.torrents),
             };
         });
+        self.search_streams(&trimmed, lib_tracks);
+        if sources.torrents && self.state.read().search.torrents.query != trimmed {
+            self.search_torrents(trimmed);
+        }
     }
 
     /// Liking an album = liking all its tracks; unliking unlikes them all.
@@ -1348,7 +1480,19 @@ impl Worker {
                 None,
                 EventContext::Album,
             );
+            self.push_like(t, on);
         }
+        // An album like downloads the whole album (one wishlist item).
+        if on {
+            self.wish_for_album(id, &tracks, nikgob_core::model::WishlistOrigin::Like);
+        } else {
+            self.wish_drop_album(id);
+            for &t in &tracks {
+                self.wish_drop_unstarted(t);
+            }
+        }
+        self.publish_wishlist();
+        self.wish_tick();
         let n = tracks.len() as u64;
         let what = format!("{n} {}", if n % 10 == 1 && n % 100 != 11 {
             "трек"
@@ -1385,6 +1529,7 @@ impl Worker {
 
     /// Track likes changed: album hearts and "Любимые" follow.
     fn after_like_change(&mut self) {
+        self.refresh_stream_page();
         self.load_library();
         let (release, playlist) = {
             let s = self.state.read();
@@ -1634,6 +1779,15 @@ impl Worker {
             s.prefs.acoustid_configured = configured;
         });
         self.toast("Сохранено", None);
+    }
+}
+
+/// Which tracks the library lists ([`nikgob_view::Prefs::library_only_downloaded`]).
+fn track_filter(only_local: bool) -> nikgob_library::TrackFilter {
+    if only_local {
+        nikgob_library::TrackFilter::LocalOnly
+    } else {
+        nikgob_library::TrackFilter::All
     }
 }
 

@@ -1,0 +1,131 @@
+//! Accounts: login / logout in the background, the account view, secrets
+//! in settings.toml (never in prefs or logs).
+
+use nikgob_core::streaming::{LoginInput, Service, StreamError};
+use nikgob_view as v;
+
+use super::{Msg, error_text};
+use crate::Worker;
+
+impl Worker {
+    /// Refreshes [`v::ViewState::accounts`] (published only when changed).
+    pub(crate) fn publish_accounts(&mut self) {
+        let accounts: Vec<v::AccountView> = Service::ALL
+            .iter()
+            .map(|&service| {
+                let registered = self.streams.iter().find(|s| s.service() == service);
+                let enabled = self.state.read().prefs.service_enabled(service);
+                let account = registered.map(|s| s.account()).unwrap_or_default();
+                v::AccountView {
+                    service,
+                    registered: registered.is_some(),
+                    enabled,
+                    audio: registered.is_some() && enabled && self.has_audio(service),
+                    account,
+                    busy: self.streaming.busy.contains(&service),
+                    error: self.streaming.errors.get(&service).cloned(),
+                }
+            })
+            .collect();
+        if accounts != self.streaming.last_accounts {
+            self.streaming.last_accounts = accounts.clone();
+            self.publish(|s, _| s.accounts = accounts);
+        }
+    }
+
+    pub(crate) fn stream_login(&mut self, service: Service, input: LoginInput) {
+        let Some(svc) = self.streams.iter().find(|s| s.service() == service).cloned() else {
+            self.toast(format!("{} не подключён", service.display_name()), None);
+            return;
+        };
+        if !self.streaming.busy.insert(service) {
+            return;
+        }
+        self.streaming.errors.remove(&service);
+        log::info!("{service}: login ({input:?})");
+        let again = input.clone();
+        self.streaming
+            .spawn(async move { Msg::LoginDone(service, again, svc.login(input).await) });
+        self.publish_accounts();
+    }
+
+    pub(crate) fn login_done(&mut self, service: Service, input: LoginInput, r: Result<(), StreamError>) {
+        self.streaming.busy.remove(&service);
+        match r {
+            Ok(()) => {
+                log::info!("{service}: logged in");
+                // What the user typed is kept for the next start.
+                match input {
+                    LoginInput::PersonalApp { client_id } => {
+                        self.save_stream_secrets(Some(client_id), None, false);
+                    }
+                    LoginInput::Cookies(c) => self.save_stream_secrets(None, Some(c), false),
+                    LoginInput::Browser | LoginInput::Playback => {}
+                }
+                self.toast(format!("{}: вход выполнен", service.display_name()), None);
+                self.pull_likes(service);
+            }
+            Err(e) => {
+                log::warn!("{service}: login failed: {e}");
+                self.streaming.errors.insert(service, error_text(&e));
+            }
+        }
+        self.publish_accounts();
+        // Sound may have come (Premium) or gone: the next track resolves anew.
+        self.preload_next();
+    }
+
+    pub(crate) fn stream_logout(&mut self, service: Service) {
+        if let Some(s) = self.streams.iter().find(|s| s.service() == service) {
+            s.logout();
+        }
+        self.streaming.errors.remove(&service);
+        self.publish_accounts();
+        self.preload_next();
+    }
+
+    pub(crate) fn set_stream_secrets(&mut self, spotify: Option<String>, cookies: Option<String>) {
+        self.save_stream_secrets(spotify, cookies, true);
+    }
+
+    /// `None` keeps a value, `Some("")` clears it.
+    fn save_stream_secrets(&mut self, spotify: Option<String>, cookies: Option<String>, tell: bool) {
+        let Some(path) = self.settings_path.clone() else {
+            if tell {
+                self.toast("Некуда сохранить настройки", None);
+            }
+            return;
+        };
+        let mut settings = match nikgob_core::settings::Settings::load(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("loading settings: {e}");
+                self.toast("settings.toml не читается — поправь файл вручную", None);
+                return;
+            }
+        };
+        let clean = |v: String| Some(v.trim().to_owned()).filter(|v| !v.is_empty());
+        if let Some(id) = spotify {
+            settings.streaming.spotify_client_id = clean(id);
+        }
+        if let Some(c) = cookies {
+            settings.streaming.youtube_cookies = clean(c);
+        }
+        if let Err(e) = settings.save(&path) {
+            log::error!("saving settings: {e}");
+            self.toast("Не удалось сохранить настройки", None);
+            return;
+        }
+        let (personal, cookies) = (
+            settings.streaming.spotify_client_id.is_some(),
+            settings.streaming.youtube_cookies.is_some(),
+        );
+        self.publish(|s, _| {
+            s.prefs.spotify_personal_app = personal;
+            s.prefs.youtube_cookies_set = cookies;
+        });
+        if tell {
+            self.toast("Сохранено", None);
+        }
+    }
+}

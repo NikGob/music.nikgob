@@ -81,7 +81,7 @@ pub(crate) fn guess_format(title: &str) -> Option<String> {
 }
 
 /// Higher is better for automatic download.
-fn score(c: &Candidate, query: &str) -> f64 {
+pub(crate) fn score(c: &Candidate, query: &str) -> f64 {
     let t = c.title.to_lowercase();
     let q = query.to_lowercase();
     let wanted = |w: &str| has_stem(&q, w);

@@ -47,8 +47,9 @@ pub(crate) enum Internal {
         Box<dyn FnOnce(&mut Worker, nikgob_core::indexer::TorrentPayload) + Send>,
     ),
     TorrentFilesListed(usize, Result<nikgob_torrent::TorrentMeta, String>),
-    #[allow(clippy::type_complexity)]
-    TorrentAdded(Result<(String, String, Option<Vec<usize>>, Option<String>), String>),
+    TorrentAdded(Result<crate::torrents::Added, String>),
+    /// Streaming (stage 3), see [`crate::streams`].
+    Stream(crate::streams::Msg),
     SeedStopped(Vec<nikgob_torrent::TorrentStatus>),
     MastersMoveProgress {
         job: u64,
@@ -355,6 +356,9 @@ impl ImportService {
                             detail.push(match o.source {
                                 "musicbrainz" => "MusicBrainz".to_owned(),
                                 "deezer" => "Deezer".to_owned(),
+                                nikgob_import::events::STREAM_OPTION => {
+                                    "лайкнутый стрим-трек, другая длина".to_owned()
+                                }
                                 other => other.to_owned(),
                             });
                             v::ConfirmOption {
@@ -427,6 +431,17 @@ impl Worker {
     }
 
     pub(crate) fn import_with_origin(&mut self, paths: Vec<PathBuf>, title: String, origin: SourceOrigin) -> bool {
+        self.import_for(paths, title, origin, nikgob_import::ImportTargets::default())
+    }
+
+    /// An import whose files are meant for `targets` (a wishlist item).
+    pub(crate) fn import_for(
+        &mut self,
+        paths: Vec<PathBuf>,
+        title: String,
+        origin: SourceOrigin,
+        targets: nikgob_import::ImportTargets,
+    ) -> bool {
         let Some(svc) = &mut self.import else {
             self.toast("Импорт недоступен", None);
             return false;
@@ -436,7 +451,7 @@ impl Worker {
         }
         let job = {
             let _guard = svc.rt.enter();
-            svc.importer.import_paths(paths, origin)
+            svc.importer.import_paths_for(paths, origin, targets)
         };
         svc.titles.insert(job.id.0, title);
         svc.launching.insert(job.id.0, Instant::now());
@@ -486,6 +501,7 @@ impl Worker {
             Internal::PayloadFetched(i, r, then) => self.payload_fetched(i, r, then),
             Internal::TorrentFilesListed(i, r) => self.files_listed(i, r),
             Internal::TorrentAdded(r) => self.torrent_added(r),
+            Internal::Stream(m) => self.stream_msg(m),
             Internal::SeedStopped(list) => self.seed_stopped(list),
             Internal::MastersMoveProgress {
                 job,
@@ -575,6 +591,13 @@ impl Worker {
     }
 
     fn import_event(&mut self, ev: ImportEvent) {
+        // The wishlist hears about every file that landed (or failed).
+        match &ev {
+            ImportEvent::Imported { track_id, path, .. } => self.wish_imported(*track_id, path),
+            ImportEvent::Duplicate { kept, path, .. } => self.wish_imported(*kept, path),
+            ImportEvent::Failed { path, .. } => self.wish_import_failed(path),
+            _ => {}
+        }
         let Some(svc) = &mut self.import else { return };
         let mut finished = None;
         match ev {

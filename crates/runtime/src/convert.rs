@@ -238,6 +238,7 @@ impl Resolver {
             albums,
             singles_eps: singles,
             liked,
+            discography: v::DiscographyView::default(),
         }
     }
 

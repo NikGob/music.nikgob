@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use nikgob_core::indexer::TorrentPayload;
-use nikgob_core::model::{Download, DownloadStatus, SeedPolicy, SourceOrigin};
+use nikgob_core::model::{Download, DownloadStatus, SeedPolicy, SourceOrigin, WishlistId};
 use nikgob_torrent::{TorrentClient, TorrentConfig, TorrentMeta, TorrentState, TorrentStatus};
 use nikgob_view::{self as v, Command};
 
@@ -18,6 +18,16 @@ use crate::import::Internal;
 
 /// A request waiting for the client to start.
 pub(crate) type Op = Box<dyn FnOnce(&mut Worker, TorrentClient) + Send>;
+
+/// A torrent the client took.
+pub(crate) struct Added {
+    hash: String,
+    name: String,
+    files: Option<Vec<usize>>,
+    magnet: Option<String>,
+    /// The wishlist item it was added for.
+    wish: Option<WishlistId>,
+}
 
 pub(crate) struct Torrents {
     client: Option<TorrentClient>,
@@ -128,7 +138,7 @@ impl Worker {
     }
 
     /// Runs `op` with the client, starting it first if needed.
-    fn with_client(&mut self, op: Op) {
+    pub(crate) fn with_client(&mut self, op: Op) {
         if let Some(c) = self.torrents.client.clone() {
             op(self, c);
             return;
@@ -387,6 +397,18 @@ impl Worker {
     }
 
     fn add_payload(&mut self, p: TorrentPayload, files: Option<Vec<usize>>, magnet: Option<String>) {
+        self.add_payload_for(p, files, magnet, None);
+    }
+
+    /// Adds a torrent; `wish` = the wishlist item it is downloaded for (its
+    /// files are then imported as that item's tracks).
+    pub(crate) fn add_payload_for(
+        &mut self,
+        p: TorrentPayload,
+        files: Option<Vec<usize>>,
+        magnet: Option<String>,
+        wish: Option<WishlistId>,
+    ) {
         self.with_client(Box::new(move |w, c| {
             let Some(svc) = &w.import else { return };
             let tx = svc.internal();
@@ -394,8 +416,14 @@ impl Worker {
                 let r = match c.add(p, files.clone()).await {
                     Ok(id) => {
                         let st = c.list().into_iter().find(|t| t.id == id);
-                        st.map(|t| (t.info_hash, t.name, files, magnet))
-                            .ok_or_else(|| "торрент пропал из сессии".to_owned())
+                        st.map(|t| Added {
+                            hash: t.info_hash,
+                            name: t.name,
+                            files,
+                            magnet,
+                            wish,
+                        })
+                        .ok_or_else(|| "торрент пропал из сессии".to_owned())
                     }
                     Err(e) => Err(e.to_string()),
                 };
@@ -404,12 +432,15 @@ impl Worker {
         }));
     }
 
-    pub(crate) fn torrent_added(
-        &mut self,
-        r: Result<(String, String, Option<Vec<usize>>, Option<String>), String>,
-    ) {
+    pub(crate) fn torrent_added(&mut self, r: Result<Added, String>) {
         match r {
-            Ok((hash, name, files, magnet)) => {
+            Ok(Added {
+                hash,
+                name,
+                files,
+                magnet,
+                wish,
+            }) => {
                 let now = std::time::SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as i64);
@@ -431,9 +462,15 @@ impl Worker {
                     },
                     bytes_up: 0,
                     bytes_down: 0,
-                    wishlist_id: None,
+                    wishlist_id: wish,
                     created_at: now,
                     updated_at: now,
+                };
+                // A torrent known already keeps the item it was added for.
+                let known = self.lib.get_download(&d.info_hash).ok().flatten();
+                let d = Download {
+                    wishlist_id: d.wishlist_id.or(known.and_then(|k| k.wishlist_id)),
+                    ..d
                 };
                 if let Err(e) = self.lib.put_download(&d) {
                     log::warn!("saving download: {e}");
@@ -593,13 +630,23 @@ impl Worker {
         self.torrents.history.truncate(100);
         self.torrents.last_view = None;
         self.toast(format!("Скачано: {}", t.name), None);
-        self.import_with_origin(
+        // Downloaded for a wishlist item: its files become the item's tracks.
+        let targets = self
+            .lib
+            .get_download(&t.info_hash)
+            .ok()
+            .flatten()
+            .and_then(|d| d.wishlist_id)
+            .map(|item| self.wish_targets(item))
+            .unwrap_or_default();
+        self.import_for(
             files,
             format!("Импорт «{}»", t.name),
             SourceOrigin::Torrent {
                 info_hash: t.info_hash.clone(),
                 path_in_torrent: String::new(),
             },
+            targets,
         );
     }
 
