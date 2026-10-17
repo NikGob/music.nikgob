@@ -158,15 +158,19 @@ pub async fn open(session: &Session, id: &str, premium: Option<bool>) -> Result<
         Some(Duration::from_millis(u64::from(item.duration_ms))).filter(|d| !d.is_zero());
     let loaded_id = SpotifyId::try_from(&item.track_id).unwrap_or(track_id);
 
-    let file = AudioFile::open(session, file_id, bytes_per_second)
-        .await
-        .map_err(|e| failed(network(e)))?;
+    // The file and its key are asked for at once (one round trip less
+    // before the first sound).
+    let (file, key) = tokio::join!(
+        AudioFile::open(session, file_id, bytes_per_second),
+        session.audio_key().request(loaded_id, file_id)
+    );
+    let file = file.map_err(|e| failed(network(e)))?;
     let cached = file.is_cached();
     let controller = file
         .get_stream_loader_controller()
         .map_err(|e| failed(network(e)))?;
     let size = controller.len() as u64;
-    let key = match session.audio_key().request(loaded_id, file_id).await {
+    let key = match key {
         Ok(key) => key,
         Err(e) => {
             log::warn!("spotify: audio key refused for {id}: {e}");

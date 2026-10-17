@@ -25,6 +25,37 @@ use crate::types::{
 };
 use crate::util::get_id;
 
+/// Likes (or, `deleted`, unlikes) inside a transaction.
+pub(crate) fn set_like_in(
+    tx: &Connection,
+    target: LikeTarget,
+    deleted: bool,
+    now: UnixMs,
+    device: &DeviceId,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO likes(target_kind, target_id, updated_at, updated_by, deleted)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(target_kind, target_id) DO UPDATE SET
+            updated_at = excluded.updated_at, updated_by = excluded.updated_by,
+            deleted = excluded.deleted",
+        params![target.kind_str(), target.id_string(), now, device.as_str(), deleted],
+    )?;
+    if let LikeTarget::Track(t) = target {
+        refresh_in_library(tx, &t.to_string())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn is_liked_in(c: &Connection, target: LikeTarget) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM likes
+                        WHERE target_kind = ?1 AND target_id = ?2 AND deleted = 0)",
+        params![target.kind_str(), target.id_string()],
+        |r| r.get(0),
+    )?)
+}
+
 /// Name of the pinned virtual playlist of liked tracks.
 pub const LIKED_PLAYLIST_NAME: &str = "Любимые";
 
@@ -440,38 +471,12 @@ impl Library {
     fn set_like(&self, target: LikeTarget, deleted: bool) -> Result<()> {
         let device = self.device_id();
         let now = self.tick();
-        self.write(|tx| {
-            tx.execute(
-                "INSERT INTO likes(target_kind, target_id, updated_at, updated_by, deleted)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(target_kind, target_id) DO UPDATE SET
-                    updated_at = excluded.updated_at, updated_by = excluded.updated_by,
-                    deleted = excluded.deleted",
-                params![
-                    target.kind_str(),
-                    target.id_string(),
-                    now,
-                    device.as_str(),
-                    deleted
-                ],
-            )?;
-            if let LikeTarget::Track(t) = target {
-                refresh_in_library(tx, &t.to_string())?;
-            }
-            Ok(())
-        })
+        self.write(|tx| set_like_in(tx, target, deleted, now, &device))
     }
 
     pub fn is_liked(&self, target: impl Into<LikeTarget>) -> Result<bool> {
         let target = target.into();
-        self.read(|c| {
-            Ok(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM likes
-                                WHERE target_kind = ?1 AND target_id = ?2 AND deleted = 0)",
-                params![target.kind_str(), target.id_string()],
-                |r| r.get(0),
-            )?)
-        })
+        self.read(|c| is_liked_in(c, target))
     }
 
     /// Liked tracks, most recently liked first (the content of "Любимые").

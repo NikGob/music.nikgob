@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use nikgob_core::settings::StreamingSettings;
 use nikgob_core::streaming::{
-    Account, AudioStream, BoxFuture, EntityKind, FakeService, LoginInput, LoginPrompt, Played,
-    Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService,
+    Account, AudioStream, BoxFuture, EntityKind, FakeService, LikedHead, LoginInput, LoginPrompt,
+    Played, SearchKind, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService,
     StreamTrack,
 };
 
@@ -176,6 +176,21 @@ impl StreamService for Shown {
     }
     fn web_url(&self, kind: EntityKind, id: &str) -> String {
         self.inner.web_url(kind, id)
+    }
+    fn search_kind(&self, query: &str, kind: SearchKind) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        self.inner.search_kind(query, kind)
+    }
+    fn tracks(&self, ids: &[String]) -> BoxFuture<'_, Result<Vec<Option<StreamTrack>>, StreamError>> {
+        StreamService::tracks(&self.inner, ids)
+    }
+    fn liked_head(&self) -> BoxFuture<'_, Result<LikedHead, StreamError>> {
+        self.inner.liked_head()
+    }
+    fn set_liked_many(&self, ids: &[String], liked: bool) -> BoxFuture<'_, Result<(), StreamError>> {
+        self.inner.set_liked_many(ids, liked)
+    }
+    fn playlist_version(&self, id: &str) -> BoxFuture<'_, Result<Option<String>, StreamError>> {
+        self.inner.playlist_version(id)
     }
 }
 

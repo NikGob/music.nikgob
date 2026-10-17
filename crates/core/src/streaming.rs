@@ -583,6 +583,52 @@ pub fn quality_label(codec: &str, kbps: u32, approx: bool) -> String {
 /// has (each call carries everything found so far).
 pub type SearchParts = std::sync::Arc<dyn Fn(StreamSearch) + Send + Sync>;
 
+/// What a kind-limited search ([`StreamService::search_kind`]) asks for:
+/// one category, one request where the service can do that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SearchKind {
+    /// Official songs ([`TrackKind::Song`]; every Spotify track).
+    Songs,
+    /// Music videos and uploads (YouTube only; Spotify answers nothing).
+    Videos,
+    Albums,
+    Artists,
+}
+
+/// The newest end of the liked list ([`StreamService::liked_head`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LikedHead {
+    /// The most recently liked tracks (the first page), newest first.
+    pub tracks: Vec<StreamTrack>,
+    /// How many tracks the whole list has, if the service says.
+    pub total: Option<u32>,
+    /// `tracks` is the whole list.
+    pub complete: bool,
+}
+
+/// [`StreamTrack::kind`] fits `kind` (songs: everything but videos and
+/// uploads).
+fn fits(t: &StreamTrack, kind: SearchKind) -> bool {
+    match kind {
+        SearchKind::Songs => t.kind == TrackKind::Song,
+        SearchKind::Videos => t.kind != TrackKind::Song,
+        SearchKind::Albums | SearchKind::Artists => false,
+    }
+}
+
+/// Keeps only the `kind` part of a full search answer.
+pub fn only_kind(mut s: StreamSearch, kind: SearchKind) -> StreamSearch {
+    s.tracks.retain(|t| fits(t, kind));
+    if kind != SearchKind::Albums {
+        s.albums.clear();
+    }
+    if kind != SearchKind::Artists {
+        s.artists.clear();
+    }
+    s.playlists.clear();
+    s
+}
+
 // ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
@@ -615,7 +661,37 @@ pub trait StreamService: Send + Sync {
         self.search(query)
     }
 
+    /// One category of a search ([`SearchKind`]), for background work
+    /// (resolution, discography, share): one request where the service can
+    /// do that, sent in its background lane. The answer has only that part.
+    fn search_kind(
+        &self,
+        query: &str,
+        kind: SearchKind,
+    ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        let query = query.to_owned();
+        Box::pin(async move { self.search(&query).await.map(|s| only_kind(s, kind)) })
+    }
+
     fn track(&self, id: &str) -> BoxFuture<'_, Result<StreamTrack, StreamError>>;
+
+    /// Many tracks at once, in the order of `ids` (`None`: no such track),
+    /// in as few requests as the service allows. An error is the whole
+    /// call's (rate limited, not logged in).
+    fn tracks(&self, ids: &[String]) -> BoxFuture<'_, Result<Vec<Option<StreamTrack>>, StreamError>> {
+        let ids = ids.to_vec();
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(ids.len());
+            for id in &ids {
+                match self.track(id).await {
+                    Ok(t) => out.push(Some(t)),
+                    Err(StreamError::Unavailable) => out.push(None),
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(out)
+        })
+    }
 
     /// An album with its tracks.
     fn album(&self, id: &str) -> BoxFuture<'_, Result<StreamAlbum, StreamError>>;
@@ -626,14 +702,65 @@ pub trait StreamService: Send + Sync {
     /// A playlist with its tracks.
     fn playlist(&self, id: &str) -> BoxFuture<'_, Result<StreamPlaylist, StreamError>>;
 
+    /// Only the [`StreamPlaylist::version`] of a playlist, as cheaply as the
+    /// service can tell it (Spotify: `fields=snapshot_id`), never from a
+    /// cache. `None`: the service has no versions.
+    fn playlist_version(&self, id: &str) -> BoxFuture<'_, Result<Option<String>, StreamError>> {
+        let id = id.to_owned();
+        Box::pin(async move {
+            self.forget(EntityKind::Playlist, &id);
+            Ok(self.playlist(&id).await?.version)
+        })
+    }
+
+    /// Drops whatever the service keeps in memory about this item, so the
+    /// next read asks the service (a sync after the version changed). No
+    /// network.
+    fn forget(&self, kind: EntityKind, id: &str) {
+        let _ = (kind, id);
+    }
+
+    /// Until when the service is paused after a rate limit or a bot check
+    /// (calls fail at once with [`StreamError::RateLimited`] meanwhile).
+    /// Cheap, no network.
+    fn paused_until(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+
     /// The track with this ISRC, if the service can look ISRCs up and has it.
     fn find_isrc(&self, isrc: &str) -> BoxFuture<'_, Result<Option<StreamTrack>, StreamError>>;
 
     /// The user's liked tracks, most recently liked first. Needs a login.
     fn liked(&self) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>>;
 
+    /// The newest page of the liked list and the list's length: one
+    /// request, enough to tell "nothing new" (see [`LikedHead`]). Needs a
+    /// login.
+    fn liked_head(&self) -> BoxFuture<'_, Result<LikedHead, StreamError>> {
+        Box::pin(async move {
+            let tracks = self.liked().await?;
+            Ok(LikedHead {
+                total: u32::try_from(tracks.len()).ok(),
+                tracks,
+                complete: true,
+            })
+        })
+    }
+
     /// Likes (or unlikes) a track. Needs a login.
     fn set_liked(&self, id: &str, liked: bool) -> BoxFuture<'_, Result<(), StreamError>>;
+
+    /// [`Self::set_liked`] for many tracks, in as few requests as the
+    /// service allows (Spotify: 40 per request; YouTube: one at a time).
+    fn set_liked_many(&self, ids: &[String], liked: bool) -> BoxFuture<'_, Result<(), StreamError>> {
+        let ids = ids.to_vec();
+        Box::pin(async move {
+            for id in &ids {
+                self.set_liked(id, liked).await?;
+            }
+            Ok(())
+        })
+    }
 
     /// The user's own and followed playlists, without tracks. Needs a login.
     fn my_playlists(&self) -> BoxFuture<'_, Result<Vec<StreamPlaylist>, StreamError>>;

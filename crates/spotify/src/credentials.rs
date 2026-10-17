@@ -116,6 +116,13 @@ pub struct State {
     /// The playback session's account type, when it was last seen.
     #[serde(default)]
     pub session_premium: Option<bool>,
+    /// When `profile` was last read from `GET /me` (unix seconds).
+    #[serde(default)]
+    pub profile_at: Option<u64>,
+    /// What each app was found to lack, by Client ID (asked once, not on
+    /// every start).
+    #[serde(default)]
+    pub probes: Vec<(String, crate::api::Probes)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

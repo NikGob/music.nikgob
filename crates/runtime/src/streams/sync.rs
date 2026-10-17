@@ -19,12 +19,21 @@
 //! base is the remote list as it now is, with the version (Spotify's
 //! snapshot id) it had.
 //!
-//! When: every [`CHECK_EVERY`] the logged-in services' playlist lists are
-//! read (one request; they carry the versions), and a playlist is fetched
-//! when its version changed, when the service has no versions and the last
-//! sync is older than [`STALE`], or when a TwoWay playlist has edits here.
+//! When: every [`StreamSchedule::sync_every`] (± jitter; the first check
+//! 2–5 minutes after the start, each service a minute after the other, none
+//! while the window is hidden and nothing plays) the logged-in services'
+//! playlist lists are read (one request; they carry the versions — YouTube
+//! has none, its track count stands in), and a playlist is fetched when its
+//! version changed, when the service has no versions and the last sync is
+//! older than 6–12 hours ([`StreamSchedule::stale`]), or when a TwoWay
+//! playlist has edits here. A Spotify playlist that is not in the list
+//! (someone else's, not followed) is asked for its snapshot id alone. A
+//! sync always reads the service anew (its own cache is dropped first).
 //! Opening a linked playlist syncs it too (at most every [`OPEN_FRESH`]),
 //! and an edit of a TwoWay playlist is pushed [`PUSH_AFTER`] later.
+//!
+//! [`StreamSchedule::sync_every`]: super::StreamSchedule::sync_every
+//! [`StreamSchedule::stale`]: super::StreamSchedule::stale
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -36,13 +45,10 @@ use nikgob_core::streaming::{
 use nikgob_library::PlaylistRemote;
 use nikgob_view::{self as v, LIKED_PLAYLIST};
 
-use super::{Msg, error_text};
+use super::pages::PageData;
+use super::{Msg, StreamSchedule, error_text};
 use crate::Worker;
 
-/// How often the services' playlist lists are checked.
-pub(crate) const CHECK_EVERY: Duration = Duration::from_secs(5 * 60);
-/// A playlist of a service without versions is fetched after this.
-const STALE: Duration = Duration::from_secs(30 * 60);
 /// An opened playlist synced this recently is not synced again.
 const OPEN_FRESH: Duration = Duration::from_secs(60);
 /// An edit here reaches the service of a TwoWay playlist this much later.
@@ -54,6 +60,13 @@ pub(crate) enum SyncMsg {
         service: Service,
         result: Result<Vec<StreamPlaylist>, StreamError>,
         due: Vec<Due>,
+    },
+    /// The snapshot id of a playlist the list did not have.
+    Version {
+        playlist: PlaylistId,
+        known: Option<String>,
+        stale: bool,
+        result: Result<Option<String>, StreamError>,
     },
     Fetched {
         playlist: PlaylistId,
@@ -86,7 +99,8 @@ pub(crate) struct Due {
 
 #[derive(Default)]
 pub(crate) struct SyncState {
-    last_check: Option<Instant>,
+    /// When each service's list is checked next.
+    next_check: HashMap<Service, Instant>,
     checking: HashSet<Service>,
     fetching: HashSet<PlaylistId>,
     /// TwoWay playlists edited here, and when to push.
@@ -170,6 +184,14 @@ pub(crate) fn plan(
     p
 }
 
+/// The version of a playlist as a listing or a fetch gives it: Spotify's
+/// snapshot id, else (YouTube) its track count.
+pub(crate) fn version_of(p: &StreamPlaylist) -> Option<String> {
+    p.version
+        .clone()
+        .or_else(|| p.total_tracks.map(|n| format!("count:{n}")))
+}
+
 fn parse_base(json: Option<&str>) -> Option<Vec<String>> {
     serde_json::from_str(json?).ok()
 }
@@ -244,8 +266,8 @@ impl Worker {
             .collect()
     }
 
-    /// From the 5 s tick: due pushes, and the periodic check.
-    pub(crate) fn sync_tick(&mut self) {
+    /// From the 5 s tick: due pushes, and (`periodic`) the periodic check.
+    pub(crate) fn sync_tick(&mut self, periodic: bool) {
         let now = Instant::now();
         let due: Vec<PlaylistId> = self
             .streaming
@@ -259,13 +281,28 @@ impl Worker {
             self.streaming.sync.push_at.remove(&p);
             self.sync_playlist(p);
         }
-        if self.streaming.sync.last_check.is_some_and(|t| t.elapsed() < CHECK_EVERY) {
+        if !periodic {
             return;
         }
-        self.streaming.sync.last_check = Some(now);
+        let mut services = Vec::new();
+        for (i, &service) in Service::ALL.iter().enumerate() {
+            let schedule = &self.streaming.schedule;
+            let first = StreamSchedule::between(schedule.sync_first) + schedule.sync_stagger * i as u32;
+            let every = schedule.jittered(schedule.sync_every);
+            let next = self.streaming.sync.next_check.entry(service).or_insert(now + first);
+            if now < *next {
+                continue;
+            }
+            *next = now + every;
+            services.push(service);
+        }
+        if services.is_empty() {
+            return;
+        }
         let links = self.live_links();
         let now_ms = nikgob_library::now_ms();
-        for &service in Service::ALL {
+        let stale_range = self.streaming.schedule.stale;
+        for service in services {
             let Some(svc) = self.service(service) else { continue };
             if self.streaming.sync.checking.contains(&service) {
                 continue;
@@ -277,7 +314,10 @@ impl Worker {
                     playlist: l.playlist_id,
                     remote: l.remote.clone(),
                     version: l.remote_version.clone(),
-                    stale: l.synced_at.is_none_or(|t| now_ms - t >= STALE.as_millis() as i64),
+                    stale: l.synced_at.is_none_or(|t| {
+                        let after = StreamSchedule::between_for(&l.remote.to_string(), stale_range);
+                        now_ms - t >= after.as_millis() as i64
+                    }),
                     dirty: self.dirty(l),
                 })
                 .collect();
@@ -311,6 +351,9 @@ impl Worker {
         }
         self.publish_playlist_sync(playlist);
         let id = link.remote.id.clone();
+        // A sync reads the service, never its cached copy (that recorded
+        // an old version and fetched again on every check).
+        svc.forget(EntityKind::Playlist, &id);
         self.streaming.spawn(async move {
             let result = svc.playlist(&id).await;
             Msg::Sync(SyncMsg::Fetched { playlist, result })
@@ -341,29 +384,51 @@ impl Worker {
         match m {
             SyncMsg::Listed { service, result, due } => {
                 self.streaming.sync.checking.remove(&service);
+                let listed_ok = result.is_ok();
                 let list = result.unwrap_or_else(|e| {
                     log::warn!("{service}: my_playlists: {e}");
                     Vec::new()
                 });
+                let mut fetched = 0;
                 for d in due {
                     let listed = list.iter().find(|p| p.id == d.remote);
-                    let changed = match listed.map(|p| &p.version) {
+                    let changed = match listed.map(version_of) {
                         Some(Some(v)) => d.version.as_deref() != Some(v.as_str()),
-                        // No version in the service, or not in the list
-                        // (someone else's playlist): by age.
-                        _ => d.stale,
+                        // Listed without a version or a count: by age.
+                        Some(None) => d.stale,
+                        // Not in the list (someone else's playlist): Spotify
+                        // tells its snapshot id alone.
+                        None if listed_ok && service == Service::Spotify => {
+                            self.check_version(d);
+                            continue;
+                        }
+                        None => d.stale,
                     };
                     if changed || d.dirty {
+                        fetched += 1;
+                        self.streaming.pages.stale_playlist(&d.remote);
                         self.sync_playlist(d.playlist);
                     }
                 }
+                log::debug!("{service}: playlist check: {} listed, {fetched} to fetch", list.len());
             }
+            SyncMsg::Version {
+                playlist,
+                known,
+                stale,
+                result,
+            } => match result {
+                Ok(Some(v)) if known.as_deref() != Some(v.as_str()) => self.sync_playlist(playlist),
+                Ok(None) if stale => self.sync_playlist(playlist),
+                Ok(_) => {}
+                Err(e) => log::info!("sync {playlist}: version: {e}"),
+            },
             SyncMsg::Fetched { playlist, result } => {
                 self.streaming.sync.fetching.remove(&playlist);
                 match result {
                     Ok(p) => {
                         self.streaming.learn(&p.tracks);
-                        self.streaming.playlists.insert(p.id.clone(), p.clone());
+                        self.streaming.pages.put(PageData::Playlist(p.clone()));
                         self.apply_sync(playlist, &p);
                     }
                     Err(e) => {
@@ -425,6 +490,25 @@ impl Worker {
         }
     }
 
+    /// Asks a playlist's version alone (one tiny request).
+    fn check_version(&mut self, d: Due) {
+        if d.dirty {
+            self.sync_playlist(d.playlist);
+            return;
+        }
+        let Some(svc) = self.service(d.remote.service) else { return };
+        let (playlist, known, stale, id) = (d.playlist, d.version, d.stale, d.remote.id);
+        self.streaming.spawn(async move {
+            let result = svc.playlist_version(&id).await;
+            Msg::Sync(SyncMsg::Version {
+                playlist,
+                known,
+                stale,
+                result,
+            })
+        });
+    }
+
     /// Merges the fetched remote playlist into the linked library one;
     /// pushes the edits here for TwoWay.
     pub(crate) fn apply_sync(&mut self, playlist: PlaylistId, remote: &StreamPlaylist) -> Outcome {
@@ -480,7 +564,7 @@ impl Worker {
                 out.pushed_add.clone_from(&p.push_add);
                 out.pushed_remove.clone_from(&p.push_remove);
                 let (id, add, remove) = (link.remote.id.clone(), p.push_add, p.push_remove);
-                let version = remote.version.clone();
+                let version = version_of(remote);
                 let remote_list = remote_ids.clone();
                 self.streaming.spawn(async move {
                     let result = svc.playlist_edit(&id, &add, &remove).await;
@@ -495,7 +579,8 @@ impl Worker {
             }
             None => {
                 let json = serde_json::to_string(&remote_ids).ok();
-                let _ = self.lib.mark_playlist_synced(playlist, remote.version.as_deref(), now, json.as_deref());
+                let version = version_of(remote);
+                let _ = self.lib.mark_playlist_synced(playlist, version.as_deref(), now, json.as_deref());
                 self.streaming.sync.errors.remove(&playlist);
             }
         }

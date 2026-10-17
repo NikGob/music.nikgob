@@ -47,14 +47,14 @@ use std::time::{Duration, Instant};
 
 use librespot_core::authentication::Credentials;
 use nikgob_core::streaming::{
-    Account, AudioStream, BoxFuture, EntityKind, LoginInput, LoginPrompt, Played, Service,
-    StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService,
-    StreamTrack, SearchParts,
+    Account, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput, LoginPrompt, Played,
+    SearchKind, SearchParts, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist,
+    StreamSearch, StreamService, StreamTrack,
 };
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
-use api::{ApiClient, Endpoints, Source, TokenEvent};
+use api::{ApiClient, Endpoints, Lane, Source, TokenEvent};
 use auth::{AuthError, Grant, StoredToken};
 use cache::TtlCache;
 use credentials::{PlaybackCredential, Profile, Secret, Slot, Store};
@@ -67,8 +67,19 @@ pub const WEB_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
 /// Where a personal app is created.
 pub const DEVELOPER_DASHBOARD: &str = "https://developer.spotify.com/dashboard";
 
+/// Playlists change: a sync reads them fresh anyway ([`StreamService::forget`]).
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
-const SEARCH_TTL: Duration = Duration::from_secs(3 * 60);
+/// Tracks and albums hardly ever change.
+const CATALOG_TTL: Duration = Duration::from_secs(24 * 3600);
+/// A discography gains a release now and then.
+const ARTIST_TTL: Duration = Duration::from_secs(12 * 3600);
+const SEARCH_TTL: Duration = Duration::from_secs(10 * 60);
+/// `GET /me` is asked again only after this.
+const PROFILE_TTL: Duration = Duration::from_secs(24 * 3600);
+/// A `Retry-After` pause this long is shown as «paused until».
+const SHOWN_PAUSE: Duration = Duration::from_secs(30);
+/// After a failed session connect, reads use the Web API for this long.
+const CONNECT_BACKOFF: Duration = Duration::from_secs(5 * 60);
 /// The playlist part of a search (the shared app) waits no longer.
 const PLAYLIST_SEARCH_TIMEOUT: Duration = Duration::from_secs(6);
 /// Pages read at most from one list (a playlist, the liked songs).
@@ -146,6 +157,21 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// A search text as the cache knows it: lower case, single spaces.
+fn search_key(query: &str) -> String {
+    query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// What [`Spotify::account`] is computed from.
 #[derive(Default)]
 struct AccountState {
@@ -198,6 +224,8 @@ pub struct Spotify {
     recent: audio::Recent,
     /// Opens sign-in pages (the system browser; a stub in tests).
     opener: Mutex<auth::Opener>,
+    /// When connecting the session for reads last failed.
+    connect_failed: Mutex<Option<Instant>>,
 }
 
 /// The system browser; in tests a stub that only logs (a test reads the
@@ -300,13 +328,14 @@ impl Spotify {
             epoch: AtomicU64::new(0),
             login_cancel: Mutex::new(None),
             access: Mutex::new(HashMap::new()),
-            tracks: TtlCache::new(CACHE_TTL, 2000),
-            albums: TtlCache::new(CACHE_TTL, 200),
-            artists: TtlCache::new(CACHE_TTL, 100),
+            tracks: TtlCache::new(CATALOG_TTL, 5000),
+            albums: TtlCache::new(CATALOG_TTL, 300),
+            artists: TtlCache::new(ARTIST_TTL, 150),
             playlists: TtlCache::new(CACHE_TTL, 50),
-            searches: TtlCache::new(SEARCH_TTL, 50),
+            searches: TtlCache::new(SEARCH_TTL, 100),
             recent: Default::default(),
             opener: Mutex::new(default_opener()),
+            connect_failed: Mutex::new(None),
         });
         for client in [&spotify.shared, &spotify.personal] {
             let me = spotify.me.clone();
@@ -414,7 +443,13 @@ impl Spotify {
         if epoch != self.epoch() {
             return;
         }
+        self.apply_probes(&saved);
         let has_web = self.shared.has_grant() || self.personal.has_grant();
+        // The name and plan were read lately: no `GET /me` on this start.
+        let profile_fresh = saved.profile.is_some()
+            && saved
+                .profile_at
+                .is_some_and(|at| now_secs().saturating_sub(at) < PROFILE_TTL.as_secs());
         {
             let mut st = lock(&self.state);
             saved.slots = kept;
@@ -423,17 +458,38 @@ impl Spotify {
             st.restoring = false;
             self.persist(&st);
         }
-        if has_web {
+        if has_web && !profile_fresh {
             self.refresh_profile().await;
         }
         let (has_playback, premium) = {
             let st = lock(&self.state);
             (st.playback.clone(), st.saved.session_premium)
         };
-        if let (Some(c), None) = (has_playback, premium) {
-            // The plan decides whether there is sound; ask the session once.
-            if let Ok(s) = self.sessions.get(c.to_librespot()).await {
-                self.note_session(&s).await;
+        match (has_playback, premium) {
+            (Some(c), None) => {
+                // The plan decides whether there is sound; ask the session once.
+                if let Ok(s) = self.sessions.get(c.to_librespot()).await {
+                    self.note_session(&s).await;
+                }
+            }
+            (Some(c), Some(true)) => {
+                // Premium with the playback login: the session is connected
+                // ahead, so the first play (and the ISRCs of album pages,
+                // read over it without Web API quota) do not wait for it.
+                if let Err(e) = self.sessions.get(c.to_librespot()).await {
+                    log::info!("spotify: session not connected ahead: {e}");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Gives each client what earlier starts learnt about its app.
+    fn apply_probes(&self, saved: &credentials::State) {
+        for client in [&self.shared, &self.personal] {
+            let Some(id) = client.client_id() else { continue };
+            if let Some((_, p)) = saved.probes.iter().find(|(c, _)| *c == id) {
+                client.set_probes(*p);
             }
         }
     }
@@ -468,6 +524,7 @@ impl Spotify {
                     id: me.id,
                     product,
                 });
+                st.saved.profile_at = Some(now_secs());
                 self.persist(&st);
             }
             Ok(_) => {}
@@ -498,6 +555,14 @@ impl Spotify {
                         log::warn!("spotify: cannot save the refreshed {slot:?} grant: {e}");
                     }
                 });
+            }
+            TokenEvent::Probed(p) => {
+                let Some(id) = self.client(source).client_id() else { return };
+                log::info!("spotify: the {source} app lacks {p:?}; remembered");
+                let mut st = lock(&self.state);
+                st.saved.probes.retain(|(c, _)| *c != id);
+                st.saved.probes.push((id, p));
+                self.persist(&st);
             }
             TokenEvent::Rejected => {
                 self.store.clear(slot);
@@ -622,6 +687,7 @@ impl Spotify {
                 id: me.id.clone(),
                 product,
             });
+            st.saved.profile_at = Some(now_secs());
             st.failure = None;
             self.persist(&st);
         }
@@ -732,13 +798,25 @@ impl Spotify {
             .map(|c| c.to_librespot())
     }
 
-    /// The session if it is up, else a new one when there is a credential.
+    /// The session if it is up, else a new one when there is a credential
+    /// (not again for [`CONNECT_BACKOFF`] after a failed connect, so reads
+    /// that would like the session never wait on an unreachable one).
     async fn session_or_connect(&self) -> Option<librespot_core::Session> {
         if let Some(s) = self.sessions.current() {
             return Some(s);
         }
         let credential = self.playback_credential()?;
-        self.sessions.get(credential).await.ok()
+        if lock(&self.connect_failed).is_some_and(|t| t.elapsed() < CONNECT_BACKOFF) {
+            return None;
+        }
+        match self.sessions.get(credential).await {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log::info!("spotify: no session for reads: {e}");
+                *lock(&self.connect_failed) = Some(Instant::now());
+                None
+            }
+        }
     }
 
     // ---- reads -------------------------------------------------------------
@@ -757,7 +835,8 @@ impl Spotify {
         if query.is_empty() {
             return Ok(StreamSearch::default());
         }
-        if let Some(hit) = self.searches.get(query) {
+        let key = search_key(query);
+        if let Some(hit) = self.searches.get(&key) {
             log::debug!("spotify: search cache hit");
             return Ok(hit);
         }
@@ -816,8 +895,118 @@ impl Spotify {
             out.artists.len(),
             out.playlists.len()
         );
-        self.searches.put(query, out.clone());
+        self.searches.put(&key, out.clone());
         Ok(out)
+    }
+
+    /// One category of a search, in the background lane of the catalogue
+    /// grant (resolution, discography, share never queue the user's search
+    /// and never touch the shared app's playlist search).
+    async fn search_kind_now(&self, query: &str, kind: SearchKind) -> Result<StreamSearch, StreamError> {
+        let query = query.trim();
+        let types: &[&str] = match kind {
+            SearchKind::Songs => &["track"],
+            SearchKind::Albums => &["album"],
+            SearchKind::Artists => &["artist"],
+            // Spotify has no music videos.
+            SearchKind::Videos => return Ok(StreamSearch::default()),
+        };
+        if query.is_empty() {
+            return Ok(StreamSearch::default());
+        }
+        let key = format!("{kind:?}|{}", search_key(query));
+        if let Some(hit) = self.searches.get(&key) {
+            return Ok(hit);
+        }
+        let client = self.client_for(Op::Catalog)?;
+        let r = client
+            .search_in(Lane::Background, query, types, api::SEARCH_LIMIT)
+            .await?;
+        let out = self.catalog_part(&r);
+        for t in &out.tracks {
+            self.tracks.put(&t.id.id, t.clone());
+        }
+        self.searches.put(&key, out.clone());
+        Ok(out)
+    }
+
+    /// Many tracks: cached ones as they are, the rest from the session when
+    /// there is a playback login (one request per 200, no quota), else one
+    /// `/tracks?ids=` per 50, else one by one.
+    async fn tracks_now(&self, ids: &[String]) -> Result<Vec<Option<StreamTrack>>, StreamError> {
+        let mut found: HashMap<String, StreamTrack> = HashMap::new();
+        let mut missing: Vec<String> = Vec::new();
+        for id in ids {
+            match self.tracks.get(id) {
+                Some(t) => {
+                    found.insert(id.clone(), t);
+                }
+                None if !missing.contains(id) => missing.push(id.clone()),
+                None => {}
+            }
+        }
+        if !missing.is_empty()
+            && let Some(s) = self.session_or_connect().await
+            && let Ok(map) = session::tracks(&s, &missing).await
+        {
+            missing.retain(|id| !map.contains_key(id));
+            found.extend(map);
+        }
+        if !missing.is_empty() {
+            let client = self.client_for(Op::Catalog)?;
+            let mut batched = true;
+            for chunk in missing.chunks(50) {
+                match client.tracks(chunk).await? {
+                    Some(full) => found.extend(
+                        full.iter()
+                            .filter_map(|t| convert::track(t, None))
+                            .map(|t| (t.id.id.clone(), t)),
+                    ),
+                    None => {
+                        batched = false;
+                        break;
+                    }
+                }
+            }
+            if !batched {
+                let rest: Vec<String> = missing.iter().filter(|id| !found.contains_key(*id)).cloned().collect();
+                for id in &rest {
+                    match client.track(id).await {
+                        Ok(t) => {
+                            if let Some(t) = convert::track(&t, None) {
+                                found.insert(id.clone(), t);
+                            }
+                        }
+                        Err(e) if e.status() == Some(404) => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
+        }
+        for t in found.values() {
+            self.tracks.put(&t.id.id, t.clone());
+        }
+        Ok(ids.iter().map(|id| found.get(id).cloned()).collect())
+    }
+
+    async fn liked_head_now(&self) -> Result<LikedHead, StreamError> {
+        let client = self.client_for(Op::UserData)?;
+        let page = client.saved_tracks(0).await?;
+        Ok(LikedHead {
+            tracks: page
+                .items
+                .iter()
+                .filter_map(|s| convert::track(&s.track, None))
+                .collect(),
+            total: page.total,
+            complete: page.next_offset().is_none(),
+        })
+    }
+
+    /// The snapshot id alone (`fields=snapshot_id`), never cached.
+    async fn playlist_version_now(&self, id: &str) -> Result<Option<String>, StreamError> {
+        let client = self.client_for(Op::PlaylistRead(self.access_of(id)))?;
+        Ok(client.playlist_snapshot(id).await?)
     }
 
     fn catalog_part(&self, r: &api::models::SearchResults) -> StreamSearch {
@@ -897,7 +1086,9 @@ impl Spotify {
             return;
         }
         let mut found: HashMap<String, String> = HashMap::new();
-        if let Some(s) = self.sessions.current() {
+        // With a playback login the session is connected for this: one
+        // request for the whole album instead of the Web API.
+        if let Some(s) = self.session_or_connect().await {
             if let Ok(map) = session::tracks(&s, &missing).await {
                 found.extend(map.into_iter().filter_map(|(id, t)| Some((id, t.isrc?))));
             }
@@ -946,6 +1137,17 @@ impl Spotify {
     async fn artist_now(&self, id: &str) -> Result<StreamArtist, StreamError> {
         if let Some(a) = self.artists.get(id) {
             return Ok(a);
+        }
+        // The session reads the whole discography in two requests without
+        // quota (the personal app pages it 10 albums at a time).
+        if let Some(s) = self.session_or_connect().await {
+            match session::artist(&s, id).await {
+                Ok(a) => {
+                    self.artists.put(id, a.clone());
+                    return Ok(a);
+                }
+                Err(e) => log::info!("spotify: artist {id} over the session: {e}"),
+            }
         }
         let client = self.client_for(Op::Catalog)?;
         let raw = client.artist(id).await?;
@@ -1328,7 +1530,7 @@ impl StreamService for Spotify {
             let Some(isrc) = isrc else { return Ok(None) };
             let client = self.client_for(Op::Catalog)?;
             let found = client
-                .search(&format!("isrc:{isrc}"), &["track"], 1)
+                .search_in(Lane::Background, &format!("isrc:{isrc}"), &["track"], 1)
                 .await?;
             Ok(found
                 .tracks
@@ -1340,12 +1542,56 @@ impl StreamService for Spotify {
         Box::pin(self.liked_now())
     }
 
+    fn liked_head(&self) -> BoxFuture<'_, Result<LikedHead, StreamError>> {
+        Box::pin(self.liked_head_now())
+    }
+
     fn set_liked(&self, id: &str, liked: bool) -> BoxFuture<'_, Result<(), StreamError>> {
-        let id = id.to_string();
+        self.set_liked_many(std::slice::from_ref(&id.to_owned()), liked)
+    }
+
+    /// 40 ids per request.
+    fn set_liked_many(&self, ids: &[String], liked: bool) -> BoxFuture<'_, Result<(), StreamError>> {
+        let ids = ids.to_vec();
         Box::pin(async move {
             let client = self.client_for(Op::UserData)?;
-            client.set_saved(&[id], liked).await.map_err(Into::into)
+            client.set_saved(&ids, liked).await.map_err(Into::into)
         })
+    }
+
+    fn search_kind(
+        &self,
+        query: &str,
+        kind: SearchKind,
+    ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        let query = query.to_owned();
+        Box::pin(async move { self.search_kind_now(&query, kind).await })
+    }
+
+    fn tracks(&self, ids: &[String]) -> BoxFuture<'_, Result<Vec<Option<StreamTrack>>, StreamError>> {
+        let ids = ids.to_vec();
+        Box::pin(async move { self.tracks_now(&ids).await })
+    }
+
+    fn playlist_version(&self, id: &str) -> BoxFuture<'_, Result<Option<String>, StreamError>> {
+        let id = id.to_owned();
+        Box::pin(async move { self.playlist_version_now(&id).await })
+    }
+
+    fn forget(&self, kind: EntityKind, id: &str) {
+        match kind {
+            EntityKind::Track => self.tracks.remove(id),
+            EntityKind::Album => self.albums.remove(id),
+            EntityKind::Artist => self.artists.remove(id),
+            EntityKind::Playlist => self.playlists.remove(id),
+        }
+    }
+
+    /// The catalogue grant's `Retry-After` pause, when it is a long one.
+    fn paused_until(&self) -> Option<std::time::SystemTime> {
+        let client = self.client_for(Op::Catalog).ok()?;
+        let left = client.cooldown_left().filter(|l| *l >= SHOWN_PAUSE)?;
+        Some(std::time::SystemTime::now() + left)
     }
 
     fn my_playlists(&self) -> BoxFuture<'_, Result<Vec<StreamPlaylist>, StreamError>> {

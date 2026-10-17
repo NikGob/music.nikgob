@@ -38,10 +38,18 @@ pub const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
 pub const INTERACTIVE_WAIT: Duration = Duration::from_millis(1500);
 /// Concurrent interactive requests per grant, besides [`MAX_IN_FLIGHT`].
 const INTERACTIVE_IN_FLIGHT: usize = 2;
+/// Background requests of one grant start at least this far apart (~4 per
+/// second): a burst of paging never hammers the shared quota.
+pub const BACKGROUND_SPACING: Duration = Duration::from_millis(250);
+/// Waiters woken after a `Retry-After` pause are spread over this much, so
+/// they do not all hit Spotify in the same instant.
+const WAKE_JITTER_MS: u64 = 500;
+/// Ids per library write (`/me/library` takes at most 40 URIs).
+pub const SAVE_CHUNK: usize = 40;
 
 /// How a request waits for its turn (see [`ApiClient::send_in`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Lane {
+pub enum Lane {
     Background,
     Interactive,
 }
@@ -144,6 +152,22 @@ pub enum TokenEvent {
     Refreshed(StoredToken),
     /// Spotify rejected the refresh token: the grant was dropped.
     Rejected,
+    /// The client learnt what this app lacks ([`Probes`]): remember it.
+    Probed(Probes),
+}
+
+/// What an app was found to lack, so later starts do not ask again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Probes {
+    /// `GET /tracks?ids=` is removed (Development Mode).
+    #[serde(default)]
+    pub no_batch: bool,
+    /// `/me/library` is not there; the classic `/me/tracks` is.
+    #[serde(default)]
+    pub legacy_library: bool,
+    /// `/playlists/{id}/items` answers 404; `/tracks` works.
+    #[serde(default)]
+    pub legacy_items: bool,
 }
 
 pub type TokenListener = Box<dyn Fn(Source, TokenEvent) + Send + Sync>;
@@ -185,6 +209,11 @@ pub struct ApiClient {
     pub(crate) no_batch: AtomicBool,
     /// `/me/library` is not there; use the classic `/me/tracks`.
     pub(crate) legacy_library: AtomicBool,
+    /// `/playlists/{id}/items` is not there; use `/tracks`.
+    pub(crate) legacy_items: AtomicBool,
+    /// When the next background request may start (see
+    /// [`BACKGROUND_SPACING`]).
+    next_background: Mutex<Instant>,
 }
 
 impl ApiClient {
@@ -202,6 +231,46 @@ impl ApiClient {
             listener: OnceLock::new(),
             no_batch: AtomicBool::new(false),
             legacy_library: AtomicBool::new(false),
+            legacy_items: AtomicBool::new(false),
+            next_background: Mutex::new(Instant::now()),
+        }
+    }
+
+    /// What this app was found to lack.
+    pub fn probes(&self) -> Probes {
+        Probes {
+            no_batch: self.no_batch.load(Ordering::Relaxed),
+            legacy_library: self.legacy_library.load(Ordering::Relaxed),
+            legacy_items: self.legacy_items.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Takes what an earlier start learnt about this app.
+    pub fn set_probes(&self, p: Probes) {
+        self.no_batch.store(p.no_batch, Ordering::Relaxed);
+        self.legacy_library.store(p.legacy_library, Ordering::Relaxed);
+        self.legacy_items.store(p.legacy_items, Ordering::Relaxed);
+    }
+
+    /// Sets one probe flag; tells the listener when it is news.
+    fn learn(&self, flag: &AtomicBool) {
+        if !flag.swap(true, Ordering::Relaxed) {
+            self.notify(TokenEvent::Probed(self.probes()));
+        }
+    }
+
+    /// Waits for this background request's turn: starts are kept
+    /// [`BACKGROUND_SPACING`] apart.
+    async fn pace(&self) {
+        let wait = {
+            let mut next = lock(&self.next_background);
+            let now = Instant::now();
+            let at = (*next).max(now);
+            *next = at + BACKGROUND_SPACING;
+            at - now
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
         }
     }
 
@@ -347,6 +416,15 @@ impl ApiClient {
         loop {
             attempt += 1;
             let queued = Instant::now();
+            if lane == Lane::Background {
+                // Paused for longer than this lane waits: no turn is taken.
+                if let Some(left) = self.cooldown_left().filter(|l| *l > max_wait) {
+                    return Err(ApiError::RateLimited {
+                        retry_after: Some(left),
+                    });
+                }
+                self.pace().await;
+            }
             let permit = match lane {
                 Lane::Background => self.limiter.acquire().await,
                 Lane::Interactive => self.interactive.acquire().await,
@@ -372,12 +450,14 @@ impl ApiClient {
                         retry_after: Some(left),
                     });
                 }
+                // Spread out: every waiter woke at the same instant before.
+                let jitter = Duration::from_millis(rand::random_range(0..WAKE_JITTER_MS));
                 log::debug!(
                     "spotify: source={} {method} {endpoint} waits out Retry-After: {} ms",
                     self.source,
-                    left.as_millis()
+                    (left + jitter).as_millis()
                 );
-                tokio::time::sleep(left).await;
+                tokio::time::sleep(left + jitter).await;
             }
             let token = self.access_token(None).await?;
             let mut request = self
@@ -509,9 +589,21 @@ impl ApiClient {
 
     /// One `/search` with every type asked at once, in the interactive lane.
     pub async fn search(&self, query: &str, types: &[&str], limit: u32) -> Result<SearchResults> {
+        self.search_in(Lane::Interactive, query, types, limit).await
+    }
+
+    /// One `/search` in `lane` (background work searches in the background
+    /// lane, never queueing the user's searches).
+    pub async fn search_in(
+        &self,
+        lane: Lane,
+        query: &str,
+        types: &[&str],
+        limit: u32,
+    ) -> Result<SearchResults> {
         let text = self
             .send_in(
-                Lane::Interactive,
+                lane,
                 Method::GET,
                 "/search",
                 &[
@@ -542,7 +634,7 @@ impl ApiClient {
             Ok(t) => Ok(Some(t.tracks)),
             Err(e) if e.is_refusal() => {
                 log::info!("spotify: {} app has no batch track lookup", self.source);
-                self.no_batch.store(true, Ordering::Relaxed);
+                self.learn(&self.no_batch);
                 Ok(None)
             }
             Err(e) => Err(e),
@@ -591,6 +683,23 @@ impl ApiClient {
         self.get(&format!("/playlists/{id}"), &[]).await
     }
 
+    /// Only the snapshot id of a playlist (a few bytes instead of the list).
+    pub async fn playlist_snapshot(&self, id: &str) -> Result<Option<String>> {
+        let s: Snapshot = self
+            .get(&format!("/playlists/{id}"), &[("fields", "snapshot_id".to_string())])
+            .await?;
+        Ok(s.snapshot_id)
+    }
+
+    /// `/playlists/{id}/items`, or `/tracks` where this app lacks `/items`.
+    fn items_path(&self, id: &str) -> String {
+        if self.legacy_items.load(Ordering::Relaxed) {
+            format!("/playlists/{id}/tracks")
+        } else {
+            format!("/playlists/{id}/items")
+        }
+    }
+
     /// One page of a playlist's entries (`/items`; `/tracks` before 2026).
     pub async fn playlist_items(&self, id: &str, offset: u32) -> Result<PlaylistEntries> {
         let query = [
@@ -598,9 +707,13 @@ impl ApiClient {
             ("offset", offset.to_string()),
             ("additional_types", "track".to_string()),
         ];
-        match self.get(&format!("/playlists/{id}/items"), &query).await {
-            Err(e) if e.status() == Some(404) => {
-                self.get(&format!("/playlists/{id}/tracks"), &query).await
+        match self.get(&self.items_path(id), &query).await {
+            Err(e) if e.status() == Some(404) && !self.legacy_items.load(Ordering::Relaxed) => {
+                let r = self.get(&format!("/playlists/{id}/tracks"), &query).await;
+                if r.is_ok() {
+                    self.learn(&self.legacy_items);
+                }
+                r
             }
             other => other,
         }
@@ -639,15 +752,10 @@ impl ApiClient {
     pub async fn add_items(&self, id: &str, uris: &[String]) -> Result<Option<String>> {
         let body = json!({ "uris": uris });
         let value = match self
-            .write(
-                Method::POST,
-                &format!("/playlists/{id}/items"),
-                &[],
-                Some(&body),
-            )
+            .write(Method::POST, &self.items_path(id), &[], Some(&body))
             .await
         {
-            Err(e) if e.status() == Some(404) => {
+            Err(e) if e.status() == Some(404) && !self.legacy_items.load(Ordering::Relaxed) => {
                 self.write(
                     Method::POST,
                     &format!("/playlists/{id}/tracks"),
@@ -664,16 +772,26 @@ impl ApiClient {
     /// Removes every occurrence of up to 100 URIs; returns the new snapshot.
     pub async fn remove_items(&self, id: &str, uris: &[String]) -> Result<Option<String>> {
         let entries: Vec<Value> = uris.iter().map(|u| json!({ "uri": u })).collect();
-        let value = match self
-            .write(
+        let legacy = self.legacy_items.load(Ordering::Relaxed);
+        let first = if legacy {
+            self.write(
+                Method::DELETE,
+                &format!("/playlists/{id}/tracks"),
+                &[],
+                Some(&json!({ "tracks": entries })),
+            )
+            .await
+        } else {
+            self.write(
                 Method::DELETE,
                 &format!("/playlists/{id}/items"),
                 &[],
                 Some(&json!({ "items": entries })),
             )
             .await
-        {
-            Err(e) if e.status() == Some(404) => {
+        };
+        let value = match first {
+            Err(e) if e.status() == Some(404) && !legacy => {
                 self.write(
                     Method::DELETE,
                     &format!("/playlists/{id}/tracks"),
@@ -697,9 +815,18 @@ impl ApiClient {
         .await
     }
 
-    /// Saves or removes tracks by id: the URI-based `/me/library` since
-    /// February 2026, the classic `/me/tracks` where that is not there.
+    /// Saves or removes tracks by id, [`SAVE_CHUNK`] per request.
     pub async fn set_saved(&self, ids: &[String], saved: bool) -> Result<()> {
+        for chunk in ids.chunks(SAVE_CHUNK) {
+            self.set_saved_chunk(chunk, saved).await?;
+        }
+        Ok(())
+    }
+
+    /// Saves or removes up to [`SAVE_CHUNK`] tracks: the URI-based
+    /// `/me/library` since February 2026, the classic `/me/tracks` where
+    /// that is not there.
+    async fn set_saved_chunk(&self, ids: &[String], saved: bool) -> Result<()> {
         let method = if saved { Method::PUT } else { Method::DELETE };
         if !self.legacy_library.load(Ordering::Relaxed) {
             let uris: Vec<String> = ids.iter().map(|id| format!("spotify:track:{id}")).collect();
@@ -714,7 +841,7 @@ impl ApiClient {
             {
                 Ok(_) => return Ok(()),
                 Err(e) if matches!(e.status(), Some(404 | 405 | 410)) => {
-                    self.legacy_library.store(true, Ordering::Relaxed);
+                    self.learn(&self.legacy_library);
                 }
                 Err(e) => return Err(e),
             }

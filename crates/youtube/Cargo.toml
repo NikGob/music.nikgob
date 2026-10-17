@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+fastrand = "2"
 nikgob-core.workspace = true
 log.workspace = true
 # GPL-3.0. `userdata`: liked tracks, saved playlists, history.

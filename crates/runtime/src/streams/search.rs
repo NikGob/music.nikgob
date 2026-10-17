@@ -27,7 +27,7 @@ use crate::Worker;
 /// already waits ~180 ms before it sends the query: ~350 ms in all.
 const DEBOUNCE: Duration = Duration::from_millis(170);
 /// How long a service's answer to a query is reused.
-const CACHE_TTL: Duration = Duration::from_secs(3 * 60);
+const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 /// Answers kept (per service and query).
 const CACHE_MAX: usize = 64;
 /// How far two lengths may be apart for the same song.
@@ -48,6 +48,14 @@ pub(crate) struct SearchState {
     cache: HashMap<(Service, String), (Instant, StreamSearch)>,
     /// Library hits of the query (they win over stream rows).
     lib_tracks: Vec<(nikgob_library::TrackRow, Option<String>)>,
+    /// The library track of each stream row of this query (the same-song
+    /// lookup is a few queries; sections are rebuilt on every part).
+    linked: HashMap<nikgob_core::streaming::RemoteId, Option<TrackId>>,
+}
+
+/// A query as the cache knows it: lower case, single spaces.
+fn cache_key(query: &str) -> String {
+    query.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
 type Answer = Result<StreamSearch, StreamError>;
@@ -131,6 +139,13 @@ impl SongKey {
     }
 }
 
+impl SearchState {
+    /// The library changed: rows are matched against it again.
+    pub(crate) fn forget_links(&mut self) {
+        self.linked.clear();
+    }
+}
+
 impl Worker {
     /// The stream part of [`Command::Search`](nikgob_view::Command::Search):
     /// `library` are the library hits already published.
@@ -150,6 +165,7 @@ impl Worker {
         }
         st.query = query.to_owned();
         st.started = Some(Instant::now());
+        st.linked.clear();
         st.lib_tracks = library
             .into_iter()
             .map(|r| {
@@ -178,7 +194,7 @@ impl Worker {
                 .iter()
                 .position(|s| s.service == service)
                 .and_then(|i| old.swap_remove(i).result);
-            let key = (service, query.to_owned());
+            let key = (service, cache_key(query));
             if let Some((_, hit)) = st.cache.get(&key) {
                 log::debug!("search #{seq} «{query}»: {service} from the cache");
                 st.raw.push(Slot {
@@ -272,7 +288,7 @@ impl Worker {
             if st.cache.len() >= CACHE_MAX {
                 st.cache.clear();
             }
-            st.cache.insert((service, st.query.clone()), (Instant::now(), r.clone()));
+            st.cache.insert((service, cache_key(&st.query)), (Instant::now(), r.clone()));
         }
         if let Some(slot) = st.raw.iter_mut().find(|s| s.service == service) {
             if slot.done {
@@ -334,7 +350,14 @@ impl Worker {
                         if lib_keys.iter().any(|(_, k)| k.same(&key)) {
                             continue; // shown as the library hit
                         }
-                        let linked = self.library_track_of(t);
+                        let linked = match self.streaming.search.linked.get(&t.id) {
+                            Some(l) => *l,
+                            None => {
+                                let l = self.library_track_of(t);
+                                self.streaming.search.linked.insert(t.id.clone(), l);
+                                l
+                            }
+                        };
                         if let Some(id) = linked
                             && self.lib.track_in_library(id).ok().flatten() == Some(true)
                         {

@@ -54,7 +54,12 @@ async fn look_up(services: &[Arc<dyn StreamService>], what: &Lookup) -> Option<S
         }
         Lookup::Album { artist, title } => {
             for s in services {
-                let Ok(r) = s.search(&format!("{artist} {title}")).await else { continue };
+                let Ok(r) = s
+                    .search_kind(&format!("{artist} {title}"), nikgob_core::streaming::SearchKind::Albums)
+                    .await
+                else {
+                    continue;
+                };
                 if let Some(a) = r.albums.iter().find(|a| {
                     album_key(&a.title) == album_key(title)
                         && a.artists.iter().any(|ar| artist_key(&ar.name) == artist_key(artist))
@@ -113,8 +118,8 @@ impl Worker {
             v::ShareTarget::StreamAlbum(r) => {
                 let text = self
                     .streaming
-                    .albums
-                    .get(r)
+                    .pages
+                    .album(r)
                     .map(|a| format!("{} — {}", nikgob_core::streaming::join_names(&a.artists), a.title))
                     .unwrap_or_default();
                 (text, page_of(&services, EntityKind::Album, r), None)

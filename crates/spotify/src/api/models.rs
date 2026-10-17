@@ -40,6 +40,9 @@ pub struct Page<T> {
     pub offset: Option<u32>,
     #[serde(default)]
     pub next: Option<String>,
+    /// Items in the whole collection.
+    #[serde(default)]
+    pub total: Option<u32>,
 }
 
 impl<T> Page<T> {

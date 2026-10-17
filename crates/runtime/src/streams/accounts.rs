@@ -7,6 +7,14 @@ use nikgob_view as v;
 use super::{Msg, error_text};
 use crate::Worker;
 
+/// Unix ms of `at`, rounded up to the whole minute (stable between ticks).
+fn minute_up(at: std::time::SystemTime) -> i64 {
+    let ms = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    (ms + 59_999) / 60_000 * 60_000
+}
+
 impl Worker {
     /// Refreshes [`v::ViewState::accounts`] (published only when changed).
     pub(crate) fn publish_accounts(&mut self) {
@@ -24,6 +32,7 @@ impl Worker {
                     account,
                     busy: self.streaming.busy.contains(&service),
                     error: self.streaming.errors.get(&service).cloned(),
+                    paused_until: registered.and_then(|s| s.paused_until()).map(minute_up),
                 }
             })
             .collect();

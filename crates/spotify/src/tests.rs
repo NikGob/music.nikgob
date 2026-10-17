@@ -726,3 +726,179 @@ async fn search_is_one_request_per_grant_and_never_waits_out_throttling() {
     let _ = s4.search("лёд 2").await;
     assert_eq!(searches(&shared4).await, 1);
 }
+
+// ---- request counts (stage 3 speed audit) -----------------------------------
+
+/// Requests the mock got for a path ("/me", "/tracks", ...).
+async fn hits(server: &MockServer, p: &str) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == p)
+        .count()
+}
+
+/// A store holding a shared grant and a state file as a previous start
+/// left them.
+async fn stored(dir: &Path, state: credentials::State) -> Store {
+    let store = Store::with_backend(dir.to_path_buf(), Box::new(credentials::Memory::default()));
+    store
+        .save(
+            Slot::Shared,
+            store.generation(Slot::Shared),
+            Secret::Web(api::tests_support::token(crate::auth::shared_client_id())),
+        )
+        .await
+        .unwrap();
+    store.save_state(&state);
+    store
+}
+
+fn profile_state(at: Option<u64>) -> credentials::State {
+    credentials::State {
+        slots: vec![Slot::Shared],
+        profile: Some(Profile {
+            id: "me".into(),
+            name: "Me".into(),
+            product: Some("premium".into()),
+        }),
+        profile_at: at,
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_asks_for_the_profile_at_most_once_a_day() {
+    // Read an hour ago: this start sends nothing.
+    let server = mock_spotify("me", Some("premium")).await;
+    let dir = temp_dir("start-fresh");
+    let store = stored(&dir, profile_state(Some(now_secs() - 3600))).await;
+    let s = service(&dir, store, &server);
+    wait_restored(&s).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(s.account().is_logged_in());
+    let fresh = server.received_requests().await.unwrap().len();
+    // Read two days ago: one `GET /me`, and the time is remembered.
+    let server2 = mock_spotify("me", Some("premium")).await;
+    let dir2 = temp_dir("start-stale");
+    let store2 = stored(&dir2, profile_state(Some(now_secs() - 2 * 86_400))).await;
+    let s2 = service(&dir2, store2, &server2);
+    wait_restored(&s2).await;
+    let stale = hits(&server2, "/me").await;
+    eprintln!("[start] requests: profile fresh {fresh}, profile stale {stale}");
+    assert_eq!(fresh, 0);
+    assert_eq!(stale, 1);
+    assert!(lock(&s2.state).saved.profile_at.is_some_and(|t| t + 60 > now_secs()));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn likes_head_is_one_request_and_likes_go_40_per_request() {
+    let server = mock_spotify("me", None).await;
+    let dir = temp_dir("head");
+    let s = service(&dir, Store::with_backend(dir.clone(), Box::new(credentials::Memory::default())), &server);
+    wait_restored(&s).await;
+    s.shared.install(api::tests_support::token(crate::auth::shared_client_id()));
+    let items: Vec<serde_json::Value> = (0..50)
+        .map(|i| serde_json::json!({"track": {"id": format!("t{i}"), "name": "x"}}))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/me/tracks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "items": items, "total": 1200, "limit": 50, "offset": 0, "next": "more"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/me/library"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let head = s.liked_head().await.unwrap();
+    assert_eq!((head.tracks.len(), head.total, head.complete), (50, Some(1200), false));
+    assert_eq!(hits(&server, "/me/tracks").await, 1, "a full pull of 1200 likes was 24 pages");
+
+    let twelve: Vec<String> = (0..12).map(|i| format!("a{i}")).collect();
+    s.set_liked_many(&twelve, true).await.unwrap();
+    assert_eq!(hits(&server, "/me/library").await, 1, "an album of 12: one request (was 12)");
+    let ninety: Vec<String> = (0..90).map(|i| format!("b{i}")).collect();
+    s.set_liked_many(&ninety, true).await.unwrap();
+    assert_eq!(hits(&server, "/me/library").await, 4);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn three_hundred_tracks_are_six_requests_and_versions_are_tiny() {
+    let server = mock_spotify("me", None).await;
+    let dir = temp_dir("batch");
+    let s = service(&dir, Store::with_backend(dir.clone(), Box::new(credentials::Memory::default())), &server);
+    wait_restored(&s).await;
+    s.shared.install(api::tests_support::token(crate::auth::shared_client_id()));
+    struct Batch;
+    impl wiremock::Respond for Batch {
+        fn respond(&self, r: &wiremock::Request) -> ResponseTemplate {
+            let ids = r
+                .url
+                .query_pairs()
+                .find(|(k, _)| k == "ids")
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default();
+            let tracks: Vec<serde_json::Value> = ids
+                .split(',')
+                .map(|id| serde_json::json!({"id": id, "name": "x", "duration_ms": 1000}))
+                .collect();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "tracks": tracks }))
+        }
+    }
+    Mock::given(method("GET")).and(path("/tracks")).respond_with(Batch).mount(&server).await;
+    let ids: Vec<String> = (0..300).map(|i| format!("t{i}")).collect();
+    let got = s.tracks(&ids).await.unwrap();
+    assert_eq!(got.iter().flatten().count(), 300);
+    let batches = hits(&server, "/tracks").await;
+    eprintln!("[enrich] 300 tracks: {batches} requests (was 300)");
+    assert_eq!(batches, 6);
+    // Again: from the cache.
+    s.tracks(&ids[..10]).await.unwrap();
+    assert_eq!(hits(&server, "/tracks").await, 6);
+
+    Mock::given(method("GET"))
+        .and(path("/playlists/p1"))
+        .and(wiremock::matchers::query_param("fields", "snapshot_id"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"snapshot_id":"v9"}"#))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(s.playlist_version("p1").await.unwrap().as_deref(), Some("v9"));
+    server.verify().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_an_app_lacks_is_asked_once_not_on_every_start() {
+    let server = mock_spotify("me", None).await;
+    Mock::given(method("GET")).and(path("/tracks")).respond_with(ResponseTemplate::new(403)).mount(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/tracks/t1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"id":"t1","name":"One"}"#))
+        .mount(&server)
+        .await;
+    let dir = temp_dir("probes");
+    let store = stored(&dir, profile_state(Some(now_secs()))).await;
+    let s = service(&dir, store.clone(), &server);
+    wait_restored(&s).await;
+    assert_eq!(s.tracks(&["t1".into()]).await.unwrap()[0].as_ref().unwrap().title, "One");
+    assert_eq!(hits(&server, "/tracks").await, 1);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(s);
+    // The next start knows: straight to the single lookup.
+    let again = service(&dir, store, &server);
+    wait_restored(&again).await;
+    again.forget(EntityKind::Track, "t1");
+    again.tracks(&["t1".into()]).await.unwrap();
+    assert_eq!(hits(&server, "/tracks").await, 1, "not probed again");
+    assert_eq!(hits(&server, "/tracks/t1").await, 2);
+    let _ = std::fs::remove_dir_all(dir);
+}

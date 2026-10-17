@@ -38,6 +38,10 @@ pub struct AccountView {
     /// The account can play sound now (Spotify needs Premium and the
     /// playback login; otherwise its tracks play from YouTube Music).
     pub audio: bool,
+    /// The service asked us to slow down: its calls are paused until then
+    /// (unix ms, rounded up to the minute), e.g. «YouTube Music просит
+    /// подождать до 14:05». `None` when not paused.
+    pub paused_until: Option<i64>,
 }
 
 // ---------------------------------------------------------------- rows

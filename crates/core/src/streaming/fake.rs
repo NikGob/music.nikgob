@@ -13,16 +13,16 @@
 //! short sine as 16-bit mono WAV, generated on the first read; its pitch
 //! depends on the track.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use super::{
-    Account, AlbumRef, ArtistRef, AudioStream, BoxFuture, EntityKind, LoginInput, Played, RemoteId,
-    Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService,
-    StreamTrack, TrackKind, format,
+    Account, AlbumRef, ArtistRef, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput,
+    Played, RemoteId, SearchKind, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist,
+    StreamSearch, StreamService, StreamTrack, TrackKind, format, only_kind,
 };
 use crate::model::{ReleaseType, UnixMs};
 
@@ -33,6 +33,9 @@ const AUDIO_RATE: u32 = 22_050;
 /// Start of the fake listening history (2025-10-09).
 const HISTORY_T0: UnixMs = 1_760_000_000_000;
 const HOUR_MS: UnixMs = 3_600_000;
+/// Tracks in the first page of [`StreamService::liked_head`] (small, so
+/// tests see a head that is not the whole list).
+const LIKED_PAGE: usize = 2;
 
 struct AlbumData {
     artist: &'static str,
@@ -267,6 +270,8 @@ struct State {
     unavailable: HashSet<String>,
     opened: Vec<String>,
     audio_secs: f32,
+    /// Calls per trait method, for request-counting tests.
+    calls: HashMap<&'static str, usize>,
 }
 
 /// Deterministic fake of a streaming service (feature `fake`).
@@ -323,6 +328,7 @@ impl FakeService {
                 unavailable: HashSet::new(),
                 opened: Vec::new(),
                 audio_secs: 2.0,
+                calls: HashMap::new(),
             }),
         }
     }
@@ -391,6 +397,78 @@ impl FakeService {
     /// Ids passed to [`StreamService::open_audio`] so far, in order.
     pub fn opened(&self) -> Vec<String> {
         self.lock().opened.clone()
+    }
+
+    /// Adds an album of `n` tracks (`{prefix}-{key}-1` …), each with an
+    /// ISRC, to the catalog (for tests that need a big one).
+    #[must_use]
+    pub fn with_album(mut self, key: &str, title: &str, n: u32) -> Self {
+        let service = self.service;
+        let p = prefix(service);
+        let album_id = RemoteId::new(service, format!("{p}-alb-{key}"));
+        let artist = ArtistRef::new(Some(RemoteId::new(service, format!("{p}-art-{key}"))), "Big Band");
+        let mut album_ref = AlbumRef::new(Some(album_id.clone()), title);
+        album_ref.artists = vec![artist.clone()];
+        let tracks: Vec<StreamTrack> = (1..=n)
+            .map(|i| {
+                let mut t = StreamTrack::new(RemoteId::new(service, track_id(service, key, i)), format!("{title} {i}"));
+                t.artists = vec![artist.clone()];
+                t.album = Some(album_ref.clone());
+                t.duration_ms = Some(200_000 + u64::from(i) * 1000);
+                t.isrc = Some(format!("ZZBIG{:07}", i));
+                t.track_no = Some(i);
+                t
+            })
+            .collect();
+        self.catalog.tracks.extend(tracks.iter().cloned());
+        self.catalog.albums.push(StreamAlbum {
+            id: album_id,
+            title: title.to_owned(),
+            artists: vec![artist],
+            year: Some(2020),
+            release_type: ReleaseType::Album,
+            cover_url: None,
+            total_tracks: Some(n),
+            tracks,
+        });
+        self
+    }
+
+    /// Likes (or unlikes) `id` on the service side, as if the user did it
+    /// in another app. Not counted as a call.
+    pub fn set_liked_remotely(&self, id: &str, liked: bool) {
+        let mut st = self.lock();
+        st.liked.retain(|l| l != id);
+        if liked {
+            st.liked.insert(0, id.to_owned());
+        }
+    }
+
+    /// How many times the trait method `name` was called (`"search"`,
+    /// `"liked"`, `"liked_head"`, `"set_liked_many"`, …).
+    pub fn calls(&self, name: &str) -> usize {
+        self.lock().calls.get(name).copied().unwrap_or(0)
+    }
+
+    /// Every call so far, by method, sorted by name.
+    pub fn all_calls(&self) -> Vec<(&'static str, usize)> {
+        let mut v: Vec<_> = self.lock().calls.iter().map(|(k, v)| (*k, *v)).collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Calls in all (every call stands for at least one request of the
+    /// real service).
+    pub fn total_calls(&self) -> usize {
+        self.lock().calls.values().sum()
+    }
+
+    pub fn reset_calls(&self) {
+        self.lock().calls.clear();
+    }
+
+    fn count(&self, name: &'static str) {
+        *self.lock().calls.entry(name).or_default() += 1;
     }
 
     fn need_login(&self) -> Result<(), StreamError> {
@@ -591,14 +669,34 @@ impl StreamService for FakeService {
     }
 
     fn search(&self, query: &str) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        self.count("search");
         ready(Ok(self.search_now(query)))
     }
 
+    fn search_kind(
+        &self,
+        query: &str,
+        kind: SearchKind,
+    ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        self.count("search_kind");
+        if self.service == Service::Spotify && kind == SearchKind::Videos {
+            return ready(Ok(StreamSearch::default()));
+        }
+        ready(Ok(only_kind(self.search_now(query), kind)))
+    }
+
     fn track(&self, id: &str) -> BoxFuture<'_, Result<StreamTrack, StreamError>> {
+        self.count("track");
         ready(self.track_now(id))
     }
 
+    fn tracks(&self, ids: &[String]) -> BoxFuture<'_, Result<Vec<Option<StreamTrack>>, StreamError>> {
+        self.count("tracks");
+        ready(Ok(ids.iter().map(|id| self.track_now(id).ok()).collect()))
+    }
+
     fn album(&self, id: &str) -> BoxFuture<'_, Result<StreamAlbum, StreamError>> {
+        self.count("album");
         ready(
             self.catalog
                 .albums
@@ -610,6 +708,7 @@ impl StreamService for FakeService {
     }
 
     fn artist(&self, id: &str) -> BoxFuture<'_, Result<StreamArtist, StreamError>> {
+        self.count("artist");
         ready(
             self.catalog
                 .artists
@@ -621,6 +720,7 @@ impl StreamService for FakeService {
     }
 
     fn playlist(&self, id: &str) -> BoxFuture<'_, Result<StreamPlaylist, StreamError>> {
+        self.count("playlist");
         ready(
             self.lock()
                 .playlists
@@ -631,7 +731,20 @@ impl StreamService for FakeService {
         )
     }
 
+    fn playlist_version(&self, id: &str) -> BoxFuture<'_, Result<Option<String>, StreamError>> {
+        self.count("playlist_version");
+        ready(
+            self.lock()
+                .playlists
+                .iter()
+                .find(|p| p.id.id == id)
+                .map(|p| p.version.clone())
+                .ok_or(StreamError::Unavailable),
+        )
+    }
+
     fn find_isrc(&self, isrc: &str) -> BoxFuture<'_, Result<Option<StreamTrack>, StreamError>> {
+        self.count("find_isrc");
         let isrc = isrc.trim().to_uppercase();
         ready(Ok(self
             .catalog
@@ -642,6 +755,7 @@ impl StreamService for FakeService {
     }
 
     fn liked(&self) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        self.count("liked");
         let result = self.need_login().map(|()| {
             self.liked_ids()
                 .iter()
@@ -651,11 +765,35 @@ impl StreamService for FakeService {
         ready(result)
     }
 
+    fn liked_head(&self) -> BoxFuture<'_, Result<LikedHead, StreamError>> {
+        self.count("liked_head");
+        let result = self.need_login().map(|()| {
+            let ids = self.liked_ids();
+            LikedHead {
+                tracks: ids
+                    .iter()
+                    .take(LIKED_PAGE)
+                    .filter_map(|id| self.catalog.track(id).cloned())
+                    .collect(),
+                total: u32::try_from(ids.len()).ok(),
+                complete: ids.len() <= LIKED_PAGE,
+            }
+        });
+        ready(result)
+    }
+
     fn set_liked(&self, id: &str, liked: bool) -> BoxFuture<'_, Result<(), StreamError>> {
+        self.count("set_liked");
         ready(self.set_liked_now(id, liked))
     }
 
+    fn set_liked_many(&self, ids: &[String], liked: bool) -> BoxFuture<'_, Result<(), StreamError>> {
+        self.count("set_liked_many");
+        ready(ids.iter().try_for_each(|id| self.set_liked_now(id, liked)))
+    }
+
     fn my_playlists(&self) -> BoxFuture<'_, Result<Vec<StreamPlaylist>, StreamError>> {
+        self.count("my_playlists");
         let result = self.need_login().map(|()| {
             self.lock()
                 .playlists
@@ -670,6 +808,7 @@ impl StreamService for FakeService {
     }
 
     fn create_playlist(&self, name: &str) -> BoxFuture<'_, Result<String, StreamError>> {
+        self.count("create_playlist");
         ready(self.create_now(name))
     }
 
@@ -679,10 +818,12 @@ impl StreamService for FakeService {
         add: &[String],
         remove: &[String],
     ) -> BoxFuture<'_, Result<Option<String>, StreamError>> {
+        self.count("playlist_edit");
         ready(self.edit_now(id, add, remove))
     }
 
     fn recent(&self) -> BoxFuture<'_, Result<Vec<Played>, StreamError>> {
+        self.count("recent");
         let result = self.need_login().map(|()| {
             RECENT
                 .iter()
