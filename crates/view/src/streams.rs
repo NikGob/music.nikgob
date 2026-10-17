@@ -260,6 +260,20 @@ pub struct DiscographyView {
     pub albums: Vec<StreamAlbumCard>,
 }
 
+/// How a library playlist follows its playlist in a service
+/// ([`crate::PlaylistDetail::sync`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaylistSyncView {
+    pub remote: RemoteId,
+    pub mode: PlaylistSyncMode,
+    /// When it was last synced ("5 мин назад"); `None` = not yet.
+    pub synced: Option<String>,
+    /// A sync is running.
+    pub syncing: bool,
+    /// The last sync failed: why, in Russian.
+    pub error: Option<String>,
+}
+
 // ---------------------------------------------------------------- wishlist
 
 /// One wishlist item ("Загрузки → Wishlist").

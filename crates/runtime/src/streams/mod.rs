@@ -9,9 +9,8 @@
 //! as an [`Msg`], so the worker stays the only writer of the library state
 //! it publishes and never waits on the network (docs/stage3.md §1).
 //!
-//! Part B of the stage (cold-start imports, playlist sync modes, artist
-//! discography) has its commands in the view contract already; they are
-//! answered by [`Worker::part_b_stub`] for now.
+//! Part B: the sync of linked playlists ([`sync`]); the cold-start imports
+//! and the discography are answered by [`Worker::part_b_stub`] for now.
 
 mod accounts;
 mod likes;
@@ -19,6 +18,7 @@ mod pages;
 mod resolve;
 mod search;
 mod share;
+mod sync;
 mod wishlist;
 
 use std::collections::{HashMap, HashSet};
@@ -74,6 +74,7 @@ pub(crate) enum Msg {
         target: v::ShareTarget,
         result: share::Shared,
     },
+    Sync(sync::SyncMsg),
 }
 
 /// The worker's streaming state.
@@ -101,6 +102,7 @@ pub(crate) struct Streams {
     share_seq: u64,
     clipboard_id: u64,
     odesli: Option<nikgob_metadata::Odesli>,
+    sync: sync::SyncState,
 }
 
 impl Streams {
@@ -131,6 +133,7 @@ impl Streams {
             share_seq: 0,
             clipboard_id: 0,
             odesli: None,
+            sync: sync::SyncState::default(),
         }
     }
 
@@ -201,8 +204,9 @@ impl Worker {
     }
 
     /// Every 5 s: accounts while logging in, the periodic pull, the wishlist
-    /// scheduler.
+    /// scheduler, playlist sync.
     pub(crate) fn stream_tick(&mut self) {
+        self.sync_tick();
         self.publish_accounts();
         if self
             .streaming
@@ -259,18 +263,14 @@ impl Worker {
             Command::WishlistRetry(id) => self.wish_retry(id),
             Command::WishlistSaveFromYoutube(id) => self.wish_save_from_youtube(id),
             Command::WishlistAttach { item, what } => self.wish_attach(item, what),
-            c @ (Command::ImportFromService(_)
-            | Command::ImportExportFiles(_)
-            | Command::SetPlaylistSync { .. }
-            | Command::LoadDiscography(_)) => self.part_b_stub(&c),
+            c @ (Command::ImportFromService(_) | Command::ImportExportFiles(_) | Command::LoadDiscography(_)) => self.part_b_stub(&c),
+            Command::SetPlaylistSync { playlist, mode } => self.set_playlist_sync(playlist, mode),
             other => return Some(other),
         }
         None
     }
 
-    /// PART B (cold-start imports, playlist sync modes, discography): the
-    /// commands exist so the UI can be built against the final contract;
-    /// the follow-up stage implements them.
+    /// Cold start and discography (part B) are not done yet: "Скоро".
     fn part_b_stub(&mut self, c: &Command) {
         log::info!("not implemented yet: {c:?}");
         if let Command::LoadDiscography(id) = c {
@@ -303,6 +303,7 @@ impl Worker {
                 target,
                 result,
             } => self.shared(seq, target, result),
+            Msg::Sync(m) => self.sync_msg(m),
         }
     }
 

@@ -676,6 +676,7 @@ impl Worker {
                 };
                 self.toast(format!("Добавлено в «{name}»"), None);
                 self.load_library();
+                self.playlist_edited(id);
             }
             Command::RemoveFromPlaylist(id, track) => {
                 if id == LIKED_PLAYLIST {
@@ -687,6 +688,7 @@ impl Worker {
                 }
                 self.load_playlist(id);
                 self.load_library();
+                self.playlist_edited(id);
             }
             Command::MoveInPlaylist {
                 playlist,
@@ -737,7 +739,10 @@ impl Worker {
             }
             Command::LoadRelease(id) => self.load_release(id),
             Command::LoadArtist(id) => self.load_artist(id),
-            Command::LoadPlaylist(id) => self.load_playlist(id),
+            Command::LoadPlaylist(id) => {
+                self.load_playlist(id);
+                self.sync_on_open(id);
+            }
             Command::LoadHome => self.load_home(),
             Command::Search(q) => self.search(q),
             Command::SetPrefs(mut p) => {
@@ -1420,8 +1425,11 @@ impl Worker {
             .into_iter()
             .find(|p| p.id.unwrap_or(LIKED_PLAYLIST) == id);
         let Some(summary) = summary else { return };
+        let sync = self.playlist_sync_view(id);
         self.publish(|s, res| {
-            s.playlist = Some(res.playlist_detail(&summary, &rows));
+            let mut detail = res.playlist_detail(&summary, &rows);
+            detail.sync = sync;
+            s.playlist = Some(detail);
         });
     }
 

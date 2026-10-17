@@ -253,6 +253,7 @@ impl Resolver {
             card,
             tracks,
             total_duration,
+            sync: None,
         }
     }
 

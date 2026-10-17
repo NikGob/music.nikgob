@@ -175,6 +175,9 @@ pub struct PlaylistDetail {
     pub card: PlaylistCard,
     pub tracks: Vec<TrackRow>,
     pub total_duration: Duration,
+    /// The link to a playlist of a service, if any (the mode for its menu,
+    /// [`Command::SetPlaylistSync`]).
+    pub sync: Option<PlaylistSyncView>,
 }
 
 /// The liked-tracks playlist ("Любимые") is virtual: this id stands for it.
