@@ -192,6 +192,19 @@ pub struct Spotify {
     artists: TtlCache<StreamArtist>,
     playlists: TtlCache<StreamPlaylist>,
     searches: TtlCache<StreamSearch>,
+    /// Opens sign-in pages (the system browser; a stub in tests).
+    opener: Mutex<auth::Opener>,
+}
+
+/// The system browser; in tests a stub that only logs (a test reads the
+/// sign-in URL from the account's prompt and answers the redirect itself),
+/// unless the live tests run by hand.
+fn default_opener() -> auth::Opener {
+    #[cfg(test)]
+    if !auth::live_tests() {
+        return Arc::new(|url: &str| log::debug!("test: not opening {url}"));
+    }
+    Arc::new(auth::open_browser)
 }
 
 /// The runtime the service's work runs on: the caller's, or one of its own
@@ -271,6 +284,7 @@ impl Spotify {
             artists: TtlCache::new(CACHE_TTL, 100),
             playlists: TtlCache::new(CACHE_TTL, 50),
             searches: TtlCache::new(SEARCH_TTL, 50),
+            opener: Mutex::new(default_opener()),
         });
         for client in [&spotify.shared, &spotify.personal] {
             let me = spotify.me.clone();
@@ -285,6 +299,11 @@ impl Spotify {
             .rt
             .spawn(async move { me.restore(config.personal_client_id).await });
         spotify
+    }
+
+    /// Replaces how sign-in pages are opened (the system browser).
+    pub fn set_browser_opener(&self, open: auth::Opener) {
+        *lock(&self.opener) = open;
     }
 
     fn arc(&self) -> Option<Arc<Self>> {
@@ -505,7 +524,8 @@ impl Spotify {
             st.failure = None;
         }
         let guard = PromptGuard(self, flow.url.clone());
-        auth::open_browser(&flow.url);
+        let open = lock(&self.opener).clone();
+        open(&flow.url);
         let code = auth::wait_for_code(listener, &flow.state, cancelled)
             .await
             .map_err(|e| self.fail(e))?;

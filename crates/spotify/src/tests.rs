@@ -155,7 +155,7 @@ async fn a_browser_login_verifies_persists_and_is_restored() {
 
     let port = free_port();
     let browser = tokio::spawn(approve_in_browser(s.clone(), port, "c1"));
-    s.login_web(Source::Shared, web_grant(SHARED_CLIENT_ID, port))
+    s.login_web(Source::Shared, web_grant(crate::auth::shared_client_id(), port))
         .await
         .unwrap();
     browser.await.unwrap();
@@ -229,7 +229,7 @@ async fn a_busy_port_fails_the_login_with_a_human_message() {
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = taken.local_addr().unwrap().port();
     let e = s
-        .login_web(Source::Shared, web_grant(SHARED_CLIENT_ID, port))
+        .login_web(Source::Shared, web_grant(crate::auth::shared_client_id(), port))
         .await
         .unwrap_err();
     let message = format!("Порт {port} занят другой программой");
@@ -297,7 +297,7 @@ async fn catalogue_reads_go_to_the_right_grant_and_are_cached() {
     );
     wait_restored(&s).await;
     s.shared
-        .install(api::tests_support::token(SHARED_CLIENT_ID));
+        .install(api::tests_support::token(crate::auth::shared_client_id()));
     s.personal.install(api::tests_support::token("mine"));
     lock(&s.state).saved.profile = Some(Profile {
         id: "me".into(),
@@ -422,7 +422,7 @@ async fn liked_songs_are_read_page_by_page() {
     );
     wait_restored(&s).await;
     s.shared
-        .install(api::tests_support::token(SHARED_CLIENT_ID));
+        .install(api::tests_support::token(crate::auth::shared_client_id()));
     struct Pages;
     impl wiremock::Respond for Pages {
         fn respond(&self, r: &wiremock::Request) -> ResponseTemplate {
@@ -467,6 +467,9 @@ async fn liked_songs_are_read_page_by_page() {
 // ---------------------------------------------------------------------------
 
 fn live() -> Arc<Spotify> {
+    // The live tests sign in to the user's real account with the real
+    // browser and credential store: only on purpose.
+    assert!(auth::live_tests(), "live Spotify tests need NIKGOB_SPOTIFY_LIVE=1");
     let dir = std::env::var_os("NIKGOB_SPOTIFY_LIVE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("nikgob-spotify-live"));

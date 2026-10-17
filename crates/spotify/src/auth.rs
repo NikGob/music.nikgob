@@ -33,6 +33,27 @@ pub const PLAYBACK_REDIRECT_PORT: u16 = 8898;
 /// The public Web API application shared by spotify-player, ncspot and
 /// Spotifast.
 pub const SHARED_CLIENT_ID: &str = "d420a117a32841c2b3474932e49fb54b";
+/// What tests use instead of [`SHARED_CLIENT_ID`]: tests never sign in to
+/// the real app (only to a local mock).
+#[cfg(test)]
+pub const TEST_SHARED_CLIENT_ID: &str = "test-shared-client-id";
+
+/// The shared app's Client ID: the real one, except in tests (a fake one;
+/// only the live tests, run by hand with `NIKGOB_SPOTIFY_LIVE=1`, use the
+/// real app).
+pub fn shared_client_id() -> &'static str {
+    #[cfg(test)]
+    if !live_tests() {
+        return TEST_SHARED_CLIENT_ID;
+    }
+    SHARED_CLIENT_ID
+}
+
+/// The ignored live tests are being run on purpose (`NIKGOB_SPOTIFY_LIVE`).
+#[cfg(test)]
+pub fn live_tests() -> bool {
+    std::env::var_os("NIKGOB_SPOTIFY_LIVE").is_some()
+}
 pub const WEB_REDIRECT_PORT: u16 = 8989;
 
 pub const REDIRECT_PATH: &str = "/login";
@@ -100,7 +121,7 @@ impl Grant {
 
     pub fn shared() -> Self {
         Self {
-            client_id: SHARED_CLIENT_ID.into(),
+            client_id: shared_client_id().into(),
             redirect_port: WEB_REDIRECT_PORT,
             scopes: WEB_SCOPES,
         }
@@ -407,9 +428,16 @@ main{{max-width:28rem;padding:2rem;text-align:center}}</style>\
     )
 }
 
+/// How the service opens a sign-in page (the system browser; tests put a
+/// stub in, see [`open_browser`]).
+pub type Opener = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Opens `url` in the system browser. Failing is not fatal: the UI shows the
-/// link too.
+/// link too. A test must never get here (it would open the user's real
+/// browser on a real sign-in page): it panics, unless the live tests run.
 pub fn open_browser(url: &str) {
+    #[cfg(test)]
+    assert!(live_tests(), "a test tried to open the system browser at {url}");
     #[cfg(windows)]
     let result = std::process::Command::new("rundll32")
         .args(["url.dll,FileProtocolHandler", url])
@@ -434,7 +462,7 @@ mod tests {
         let url = url::Url::parse(&flow.url).unwrap();
         let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(url.host_str(), Some("accounts.spotify.com"));
-        assert_eq!(q["client_id"], SHARED_CLIENT_ID);
+        assert_eq!(q["client_id"], TEST_SHARED_CLIENT_ID);
         assert_eq!(q["redirect_uri"], "http://127.0.0.1:8989/login");
         assert_eq!(q["code_challenge_method"], "S256");
         assert_eq!(q["state"], flow.state);

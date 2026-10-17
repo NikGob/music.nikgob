@@ -341,6 +341,10 @@ pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
 
 /// Opens the file's folder with the file selected.
 fn reveal(path: &std::path::Path) {
+    // A test must never launch a program on the user's desktop.
+    if cfg!(test) {
+        panic!("a test tried to launch an external program");
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;

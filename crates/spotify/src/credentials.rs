@@ -88,7 +88,7 @@ impl Secret {
     fn valid_for(&self, slot: Slot) -> bool {
         match (slot, self) {
             (Slot::Shared, Self::Web(t)) => {
-                t.client_id == crate::auth::SHARED_CLIENT_ID && !t.refresh_token.is_empty()
+                t.client_id == crate::auth::shared_client_id() && !t.refresh_token.is_empty()
             }
             (Slot::Personal, Self::Web(t)) => {
                 !t.client_id.is_empty() && !t.refresh_token.is_empty()
@@ -411,7 +411,7 @@ mod tests {
         let store = Store::with_backend(dir.clone(), Box::new(Memory::default()));
         let g = store.generation(Slot::Shared);
         store
-            .save(Slot::Shared, g, web(crate::auth::SHARED_CLIENT_ID))
+            .save(Slot::Shared, g, web(crate::auth::shared_client_id()))
             .await
             .unwrap();
         assert!(store.load(Slot::Shared).await.unwrap().is_some());

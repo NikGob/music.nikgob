@@ -570,6 +570,10 @@ fn torrents(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Com
 
 /// Opens a web page in the default browser.
 pub(super) fn open_url(url: &str) {
+    // A test must never launch a program on the user's desktop.
+    if cfg!(test) {
+        panic!("a test tried to launch an external program");
+    }
     if let Err(e) = std::process::Command::new("explorer").arg(url).spawn() {
         log::warn!("cannot open {url}: {e}");
     }

@@ -729,6 +729,10 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
 }
 
 pub(super) fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
+    // A test must never launch a program on the user's desktop.
+    if cfg!(test) {
+        panic!("a test tried to launch an external program");
+    }
     let _ = std::fs::create_dir_all(path);
     std::process::Command::new("explorer").arg(path).spawn().map(|_| ())
 }
