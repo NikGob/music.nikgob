@@ -794,6 +794,7 @@ fn load_for(route: &Route, out: &mut Vec<Command>) {
         Route::Release(id) => out.push(Command::LoadRelease(*id)),
         Route::Artist(id) => out.push(Command::LoadArtist(*id)),
         Route::Playlist(id) => out.push(Command::LoadPlaylist(*id)),
+        Route::Stream(page) => out.push(Command::LoadStream(page.clone())),
         Route::Downloads(_) | Route::Settings => {}
     }
 }
@@ -957,7 +958,7 @@ impl Md3eUi {
                 Some(1)
             }
             Route::Downloads(_) => Some(2),
-            Route::Settings => None,
+            Route::Settings | Route::Stream(_) => None,
         };
         let pending = state.downloads.confirm.len() as u32;
         let items = [

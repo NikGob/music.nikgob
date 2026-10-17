@@ -8,10 +8,13 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod streams;
+
 pub use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource, LyricsSync};
 pub use nikgob_core::model::{
     ArtistId, LikeTarget, PlaylistId, ReleaseId, ReleaseType, SourceKind, TrackId,
 };
+pub use streams::*;
 
 /// A cover image on disk plus the palette seed computed at import.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -127,6 +130,9 @@ pub struct ArtistDetail {
     pub albums: Vec<ReleaseCard>,
     pub singles_eps: Vec<ReleaseCard>,
     pub liked: bool,
+    /// "Нет в библиотеке": the artist's albums in the services that the
+    /// library has no file of ([`Command::LoadDiscography`]).
+    pub discography: DiscographyView,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -218,6 +224,10 @@ pub struct PlayerView {
     pub repeat: Repeat,
     /// What the current queue was started from ("Играет из «…»").
     pub context: Option<String>,
+    /// The service the current track's sound comes from (`None` for a local
+    /// file): the "звук: YouTube" label, e.g. for a Spotify track played
+    /// from YouTube Music because Spotify has no sound for this account.
+    pub audio_service: Option<Service>,
 }
 
 impl Default for PlayerView {
@@ -233,6 +243,7 @@ impl Default for PlayerView {
             shuffle: false,
             repeat: Repeat::Off,
             context: None,
+            audio_service: None,
         }
     }
 }
@@ -365,15 +376,24 @@ pub struct LibraryView {
     pub trash: Vec<TrashItem>,
 }
 
+/// The unified search ([`Command::Search`]): library → Spotify → YouTube
+/// Music → torrents. The library part is filled at once, the services'
+/// sections as they answer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SearchView {
     pub query: String,
+    /// Library hits (and stream hits that turned out to be library tracks).
     pub tracks: Vec<TrackRow>,
     pub releases: Vec<ReleaseCard>,
     pub artists: Vec<ArtistCard>,
     pub playlists: Vec<PlaylistCard>,
     pub searching: bool,
-    /// Torrent search (Prowlarr) runs only on request: it is slow.
+    /// Which sources are asked (the chips).
+    pub sources: SearchSources,
+    /// One section per registered, enabled and chosen service, Spotify first.
+    pub streams: Vec<StreamSearchSection>,
+    /// Torrent search (Prowlarr) runs only on request (or with the torrents
+    /// chip on): it is slow.
     pub torrents: TorrentSearch,
 }
 
@@ -503,6 +523,8 @@ pub struct DownloadsView {
     pub seeded_bytes: u64,
     /// Files of a torrent the user is choosing from.
     pub files: Option<TorrentFiles>,
+    /// Liked stream tracks waiting for (or on their way to) a file.
+    pub wishlist: WishlistView,
 }
 
 /// A transient message ("Добавлено в Любимые · Отменить").
@@ -538,11 +560,12 @@ impl ToastKind {
         if any(&[
             "ошибка", "не получилось", "не удалось", "недоступ", "не читается", "нельзя", "не запустил",
             "некуда", "нечего", "нет файла", "нет локального", "это не ", "устарел", "не скачать", "не всё",
+            "не нашёл", "не нашел", "нужно войти",
         ]) {
             Self::Error
         } else if t.ends_with('…') || any(&["начался", "качается", "добавляю"]) {
             Self::Working
-        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "удалено", "следующим", "в любимых", "убран", "в корзине", "объединено"]) {
+        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "удалено", "следующим", "в любимых", "убран", "в корзине", "объединено", "скопирован", "вошёл", "вход выполнен"]) {
             Self::Success
         } else {
             Self::Info
@@ -682,6 +705,29 @@ pub struct Prefs {
     pub use_trash: bool,
     /// Release groups whose editions the user chose to keep apart.
     pub kept_editions: Vec<String>,
+
+    // ---- Sources (stage 3, the "Источники" settings tab). No secrets
+    // here: the Spotify Client ID and YouTube cookies live in settings.toml
+    // ([`Command::SetStreamSecrets`]).
+    /// Spotify is used (search, likes, sound when the account has it).
+    pub spotify_enabled: bool,
+    /// YouTube Music is used.
+    pub youtube_enabled: bool,
+    /// What a like of a stream track downloads: the track (from its
+    /// album's torrent) or the whole album. An album like is always the album.
+    pub like_download_scope: WishlistScope,
+    /// Sync mode of a playlist newly linked to a service.
+    pub playlist_sync_default: PlaylistSyncMode,
+    /// Likes and unlikes here go to the services the track is in.
+    pub push_likes: bool,
+    /// The library lists only tracks with a file (the inconspicuous switch).
+    pub library_only_downloaded: bool,
+    /// How many wishlist items search / download at once on their own.
+    pub auto_download_limit: u32,
+    /// settings.toml has a personal Spotify Client ID (the id is not here).
+    pub spotify_personal_app: bool,
+    /// settings.toml has YouTube Music cookies.
+    pub youtube_cookies_set: bool,
 }
 
 /// Material shapes behind the open track.
@@ -867,8 +913,23 @@ pub struct ViewState {
     pub tag_editor: TagEditor,
     pub toasts: Vec<Toast>,
     pub prefs: Prefs,
+    /// The streaming services, Spotify first (registered or not).
+    pub accounts: Vec<AccountView>,
+    /// The open album / playlist / artist of a service ([`Route::Stream`]).
+    pub stream_page: Option<StreamPageView>,
+    /// The last [`Command::Share`].
+    pub share: Option<ShareView>,
+    /// Text the app should put on the clipboard (one-shot, see
+    /// [`ClipboardRequest`]).
+    pub clipboard: Option<ClipboardRequest>,
     /// Bumped on every change, so a UI can skip work when nothing changed.
     pub revision: u64,
+}
+
+impl ViewState {
+    pub fn account(&self, service: Service) -> Option<&AccountView> {
+        self.accounts.iter().find(|a| a.service == service)
+    }
 }
 
 /// Where the user is.
@@ -881,6 +942,9 @@ pub enum Route {
     Release(ReleaseId),
     Artist(ArtistId),
     Playlist(PlaylistId),
+    /// An album, playlist or artist of a service (load it with
+    /// [`Command::LoadStream`]; shown from [`ViewState::stream_page`]).
+    Stream(StreamPage),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -902,6 +966,8 @@ pub enum DownloadsTab {
     Confirm,
     Seeding,
     History,
+    /// Liked stream tracks waiting for a file ([`DownloadsView::wishlist`]).
+    Wishlist,
 }
 
 /// What the UI asks the runtime to do. Loads are requests too: the runtime
@@ -1021,6 +1087,91 @@ pub enum Command {
     /// MusicBrainz contact and AcoustID key (stored in settings.toml).
     SetMetadata { contact: String, acoustid_key: Option<String> },
     DismissToast(u64),
+
+    // Streaming: accounts (stage 3). Every network call runs in the
+    // background; the result shows up in `ViewState::accounts` / a toast.
+    /// Logs in ([`AccountView::busy`] meanwhile; the prompt to act on is in
+    /// [`AccountView::account`]). A Spotify personal app's Client ID is
+    /// saved to settings.toml on success.
+    StreamLogin { service: Service, input: LoginInput },
+    StreamLogout(Service),
+    /// Secrets → settings.toml (never into prefs): `None` keeps the value,
+    /// `Some("")` clears it.
+    SetStreamSecrets {
+        spotify_client_id: Option<String>,
+        youtube_cookies: Option<String>,
+    },
+
+    // Streaming: search and pages
+    /// The chips of the unified search; runs the current query again.
+    SetSearchSources(SearchSources),
+    /// Fill [`ViewState::stream_page`].
+    LoadStream(StreamPage),
+    /// Play stream tracks (rows of a search, page or section). They become
+    /// "seen" tracks (a library row outside the library) as they play.
+    PlayStreamTracks {
+        tracks: Vec<RemoteId>,
+        start: usize,
+        context: String,
+    },
+    /// Like [`Command::PlayRelease`] for an album of a service.
+    PlayStreamAlbum {
+        id: RemoteId,
+        start: Option<RemoteId>,
+        shuffle: bool,
+    },
+    /// Like [`Command::PlayPlaylist`] for a playlist of a service.
+    PlayStreamPlaylist {
+        id: RemoteId,
+        start: Option<RemoteId>,
+        shuffle: bool,
+    },
+    /// Stream tracks after the current one / at the end of the queue.
+    PlayStreamNext(Vec<RemoteId>),
+    EnqueueStream(Vec<RemoteId>),
+    /// Like a stream track: it joins the library (marked "стрим"), the like
+    /// goes to the services ([`Prefs::push_likes`]) and, without a file, a
+    /// wishlist item downloads it ([`Prefs::like_download_scope`]).
+    LikeStream { track: RemoteId, on: bool },
+    /// Like every track of an album of a service (the wishlist downloads
+    /// the whole album).
+    LikeStreamAlbum { album: RemoteId, on: bool },
+    /// Stream tracks into a library playlist (they join the library).
+    AddStreamToPlaylist(PlaylistId, Vec<RemoteId>),
+    /// A song.link / album.link for a track or album → [`ViewState::share`]
+    /// and the clipboard, plus a toast.
+    Share(ShareTarget),
+
+    // Streaming: wishlist
+    /// Fill [`DownloadsView::wishlist`].
+    LoadWishlist,
+    /// Start downloading these waiting items (queued under
+    /// [`Prefs::auto_download_limit`]).
+    WishlistDownload(WishlistSelect),
+    /// Never offer these again (also not by a pull or a re-import).
+    WishlistDismiss(Vec<WishlistId>),
+    /// Search a torrent for this item now (instead of next week).
+    WishlistRetry(WishlistId),
+    /// Save the audio of the item's track from YouTube Music as it is (low
+    /// quality, a torrent upgrades it later).
+    WishlistSaveFromYoutube(WishlistId),
+    /// The user's own .torrent / magnet / file / folder for this item: it is
+    /// downloaded / imported as the item's track.
+    WishlistAttach { item: WishlistId, what: WishlistAttach },
+
+    // Streaming: cold start, sync, discography. Not done yet: answered with
+    // a "Скоро" toast (the UI can be built against them).
+    /// Likes, own playlists and recent plays from a service's API; progress
+    /// as a job in "Загрузки"; likes and playlists → library (stream) +
+    /// wishlist "ждёт", history → events only.
+    ImportFromService(Service),
+    /// Export files (Spotify Extended Streaming History / Account data,
+    /// Google Takeout YouTube Music): a folder or a .zip.
+    ImportExportFiles(PathBuf),
+    /// How a library playlist linked to a service follows it.
+    SetPlaylistSync { playlist: PlaylistId, mode: PlaylistSyncMode },
+    /// Fill [`ArtistDetail::discography`] ("Нет в библиотеке").
+    LoadDiscography(ArtistId),
 }
 
 impl Default for Prefs {
@@ -1097,6 +1248,25 @@ impl Default for Prefs {
             rail_compact: false,
             use_trash: true,
             kept_editions: Vec::new(),
+            spotify_enabled: true,
+            youtube_enabled: true,
+            like_download_scope: WishlistScope::Track,
+            playlist_sync_default: PlaylistSyncMode::Follow,
+            push_likes: true,
+            library_only_downloaded: false,
+            auto_download_limit: 2,
+            spotify_personal_app: false,
+            youtube_cookies_set: false,
+        }
+    }
+}
+
+impl Prefs {
+    /// The service is switched on.
+    pub const fn service_enabled(&self, s: Service) -> bool {
+        match s {
+            Service::Spotify => self.spotify_enabled,
+            Service::Youtube => self.youtube_enabled,
         }
     }
 }
@@ -1122,6 +1292,9 @@ mod toast_tests {
             ("Альбом в корзине (30 дней)", ToastKind::Success),
             ("Удалено навсегда: 2", ToastKind::Success),
             ("Импорт: 12 треков", ToastKind::Info),
+            ("Не нашёл раздачу: Кино — Война", ToastKind::Error),
+            ("Ссылка скопирована", ToastKind::Success),
+            ("Скоро", ToastKind::Info),
         ] {
             assert_eq!(ToastKind::guess(text), kind, "{text}");
         }

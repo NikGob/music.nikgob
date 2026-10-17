@@ -32,6 +32,32 @@ pub type Result<T, E = SettingsError> = std::result::Result<T, E>;
 pub struct Settings {
     pub indexer: IndexerSettings,
     pub metadata: MetadataSettings,
+    pub streaming: StreamingSettings,
+}
+
+/// Secrets of the streaming services (docs/stage3.md §0). Tokens and
+/// sessions live in each service's own cache in the data folder; this holds
+/// only what the user types in. Never copied into the prefs JSON or logs.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamingSettings {
+    /// Client ID of the user's own Spotify developer app (optional: its own
+    /// Web API quota). `None` = the shared public app only.
+    pub spotify_client_id: Option<String>,
+    /// YouTube Music cookies (`cookies.txt` content or a `Cookie:` header),
+    /// for the login when the device-code flow does not work; the app logs in
+    /// with them again on start.
+    pub youtube_cookies: Option<String>,
+}
+
+impl fmt::Debug for StreamingSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let redact = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
+        f.debug_struct("StreamingSettings")
+            .field("spotify_client_id", &redact(&self.spotify_client_id))
+            .field("youtube_cookies", &redact(&self.youtube_cookies))
+            .finish()
+    }
 }
 
 /// Online metadata lookups (MusicBrainz, AcoustID).
@@ -145,6 +171,10 @@ mod tests {
                 }),
             },
             metadata: MetadataSettings::default(),
+            streaming: StreamingSettings {
+                spotify_client_id: Some("my-client-id".into()),
+                youtube_cookies: Some("SID=cookie-secret".into()),
+            },
         }
     }
 
@@ -180,6 +210,8 @@ mod tests {
     fn debug_redacts_api_key() {
         let dbg = format!("{:?}", sample());
         assert!(!dbg.contains("s3cret-key"));
+        assert!(!dbg.contains("cookie-secret"));
+        assert!(!dbg.contains("my-client-id"));
         assert!(dbg.contains("localhost:9696"));
     }
 }

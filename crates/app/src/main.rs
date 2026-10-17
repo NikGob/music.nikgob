@@ -118,6 +118,8 @@ fn load_prefs(paths: &Paths) -> Prefs {
         }
         p.metadata_contact = s.metadata.contact;
         p.acoustid_configured = s.metadata.acoustid_key.is_some_and(|k| !k.trim().is_empty());
+        p.spotify_personal_app = s.streaming.spotify_client_id.is_some();
+        p.youtube_cookies_set = s.streaming.youtube_cookies.is_some();
     }
     p.output_devices = nikgob_audio::output_device_names().unwrap_or_default();
     if p.output_device.as_ref().is_some_and(|d| !p.output_devices.contains(d)) {
@@ -142,6 +144,8 @@ struct Core {
     /// future (the page stayed blank until enough clicks repainted it).
     started: Instant,
     geometry: geometry::Keeper,
+    /// The last [`nikgob_view::ClipboardRequest`] copied.
+    copied: u64,
 }
 
 impl Core {
@@ -240,6 +244,11 @@ impl eframe::App for Window {
         let fps = {
             let state = core.runtime.state();
             core.ui.frame(ui, &state, &mut core.commands);
+            // The runtime asks for the clipboard (a share link); copied once.
+            if let Some(c) = state.clipboard.as_ref().filter(|c| c.id != core.copied) {
+                core.copied = c.id;
+                ui.ctx().copy_text(c.text.clone());
+            }
             self.titlebar.sync(ui.ctx(), frame, state.prefs.theme);
             if let Some(s) = core.shot.as_mut() {
                 if s.frame(ui.ctx(), &mut core.ui, &state, &mut core.commands) {
@@ -407,6 +416,7 @@ fn main() -> eframe::Result {
         last_frame: Instant::now(),
         started: Instant::now(),
         // Screenshot runs get their own size and leave the real one alone.
+        copied: 0,
         geometry: geometry::Keeper::load(
             shot::window_size().is_none().then(|| paths.prefs.with_file_name("window.json")),
         ),

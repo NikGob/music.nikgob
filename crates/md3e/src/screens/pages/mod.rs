@@ -628,6 +628,17 @@ pub fn page(
                 Route::Playlist(id) => detail::playlist(ui, *id, state, pages, out),
                 Route::Downloads(_) => downloads::show(ui, state, pages, out),
                 Route::Settings => settings::show(ui, state, pages, out),
+                // Stage 3 placeholder until the stream pages are designed.
+                Route::Stream(_) => {
+                    if let Some(p) = &state.stream_page {
+                        ui.heading(&p.title);
+                        ui.label(&p.subtitle);
+                        for t in &p.tracks {
+                            ui.label(format!("{} — {}", t.title, t.artist));
+                        }
+                    }
+                    None
+                }
             };
             nav = r.or(nav.take());
             ui.add_space(bottom_inset);

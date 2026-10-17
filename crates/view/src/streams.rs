@@ -1,0 +1,376 @@
+//! The streaming part of the view model (stage 3, docs/stage3.md): accounts,
+//! the stream sections of the unified search, album / playlist / artist pages
+//! of a service, the wishlist, sharing.
+//!
+//! Stream items are keyed by [`RemoteId`]: they need no library row to be
+//! shown or played. A track gets a library row ([`StreamTrackRow::track`]) once
+//! it is played, liked or put in a playlist; the runtime then reports which
+//! library track it is, so the UI can mark it as liked / in the library.
+
+use std::time::Duration;
+
+pub use nikgob_core::model::{
+    WishlistId, WishlistOrigin, WishlistScope, WishlistStatus,
+};
+pub use nikgob_core::streaming::{
+    Account, EntityKind, LoginInput, LoginPrompt, PlaylistSyncMode, RemoteId, Service, TrackKind,
+};
+
+use crate::{ArtistId, PlaylistId, ReleaseId, ReleaseType, TrackId};
+
+// ---------------------------------------------------------------- accounts
+
+/// One streaming service as the settings show it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountView {
+    pub service: Service,
+    /// A backend for it is running (the app registered one).
+    pub registered: bool,
+    /// Switched on in the settings ([`crate::Prefs::spotify_enabled`] /
+    /// [`crate::Prefs::youtube_enabled`]).
+    pub enabled: bool,
+    /// What the service says about the login (cheap, polled while busy).
+    pub account: Account,
+    /// A login is running ([`crate::Command::StreamLogin`]).
+    pub busy: bool,
+    /// The last login error, in Russian ("Порт 8989 занят", …).
+    pub error: Option<String>,
+    /// The account can play sound now (Spotify needs Premium and the
+    /// playback login; otherwise its tracks play from YouTube Music).
+    pub audio: bool,
+}
+
+// ---------------------------------------------------------------- rows
+
+/// A track of a service: a search hit, an album or playlist row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamTrackRow {
+    pub remote: RemoteId,
+    pub title: String,
+    pub artist: String,
+    pub artist_id: Option<RemoteId>,
+    pub album: Option<String>,
+    pub album_id: Option<RemoteId>,
+    pub duration: Option<Duration>,
+    pub disc_no: u32,
+    pub track_no: u32,
+    /// Largest cover image (an `https://` url).
+    pub cover_url: Option<String>,
+    pub kind: TrackKind,
+    /// The service lists it but will not play it (region, withdrawn).
+    pub playable: bool,
+    /// The library track it is, when it has a row (played, liked, in a
+    /// playlist, or the same song as a library track).
+    pub track: Option<TrackId>,
+    /// That library track is liked.
+    pub liked: bool,
+    /// It is in the library (liked, in a playlist, or has a file).
+    pub in_library: bool,
+    /// The library has a file of it.
+    pub has_local: bool,
+    /// The other services the same song was found in (merged into this row).
+    pub also_on: Vec<Service>,
+}
+
+/// An album of a service (search hit, discography, artist page).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamAlbumCard {
+    pub remote: RemoteId,
+    pub title: String,
+    pub artist: String,
+    pub artist_id: Option<RemoteId>,
+    pub year: Option<i32>,
+    pub release_type: ReleaseType,
+    pub cover_url: Option<String>,
+    pub total_tracks: Option<u32>,
+    /// The library album it is linked to, if any.
+    pub release: Option<ReleaseId>,
+    /// Tracks of it the library has files of ("3 из 12 у тебя").
+    pub local_tracks: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamArtistCard {
+    pub remote: RemoteId,
+    pub name: String,
+    pub image_url: Option<String>,
+    /// The library artist it is linked to, if any.
+    pub artist: Option<ArtistId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamPlaylistCard {
+    pub remote: RemoteId,
+    pub name: String,
+    pub owner: Option<String>,
+    pub cover_url: Option<String>,
+    pub total_tracks: Option<u32>,
+    /// The user may change it in the service.
+    pub editable: bool,
+    /// The library playlist that follows it, if any.
+    pub playlist: Option<PlaylistId>,
+    /// How that playlist follows it.
+    pub sync_mode: Option<PlaylistSyncMode>,
+}
+
+// ---------------------------------------------------------------- search
+
+/// Which sources the unified search asks ([`crate::Command::Search`]); the
+/// chips of the search page ([`crate::Command::SetSearchSources`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SearchSources {
+    pub library: bool,
+    pub spotify: bool,
+    pub youtube: bool,
+    /// The indexer (Prowlarr): slow, so off unless asked for.
+    pub torrents: bool,
+}
+
+impl Default for SearchSources {
+    fn default() -> Self {
+        Self {
+            library: true,
+            spotify: true,
+            youtube: true,
+            torrents: false,
+        }
+    }
+}
+
+impl SearchSources {
+    pub const fn service(&self, s: Service) -> bool {
+        match s {
+            Service::Spotify => self.spotify,
+            Service::Youtube => self.youtube,
+        }
+    }
+}
+
+/// The results of one service for the current query. Sections arrive one by
+/// one (each service answers on its own time); a newer query replaces them.
+///
+/// Rows are merged: a track the library has is shown only in the library
+/// section ([`crate::SearchView::tracks`]), a song found in Spotify and in
+/// YouTube Music only in the first (with [`StreamTrackRow::also_on`]). Same
+/// song = same ISRC, else the same artist and title (folded like the
+/// importer folds them) and a length within 3 s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamSearchSection {
+    pub service: Service,
+    pub searching: bool,
+    /// "Spotify не отвечает", "Нужно войти", …
+    pub error: Option<String>,
+    pub tracks: Vec<StreamTrackRow>,
+    pub albums: Vec<StreamAlbumCard>,
+    pub artists: Vec<StreamArtistCard>,
+    pub playlists: Vec<StreamPlaylistCard>,
+}
+
+impl StreamSearchSection {
+    pub fn new(service: Service) -> Self {
+        Self {
+            service,
+            searching: false,
+            error: None,
+            tracks: Vec::new(),
+            albums: Vec::new(),
+            artists: Vec::new(),
+            playlists: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- pages
+
+/// An album, playlist or artist of a service, opened as a page without
+/// adding anything to the library ([`crate::Route::Stream`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum StreamPage {
+    Album(RemoteId),
+    Playlist(RemoteId),
+    Artist(RemoteId),
+}
+
+impl StreamPage {
+    pub fn remote(&self) -> &RemoteId {
+        match self {
+            Self::Album(r) | Self::Playlist(r) | Self::Artist(r) => r,
+        }
+    }
+}
+
+/// The content of the open [`StreamPage`] ([`crate::Command::LoadStream`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamPageView {
+    pub page: StreamPage,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// Album title, playlist name or artist name.
+    pub title: String,
+    /// Album artist, playlist owner; empty for an artist.
+    pub subtitle: String,
+    pub cover_url: Option<String>,
+    pub year: Option<i32>,
+    pub release_type: Option<ReleaseType>,
+    /// Album / playlist tracks in order (empty for an artist).
+    pub tracks: Vec<StreamTrackRow>,
+    /// An artist's discography, newest first (empty otherwise).
+    pub albums: Vec<StreamAlbumCard>,
+    pub total_duration: Duration,
+    /// Album: every track is liked. Artist: followed (library artist liked).
+    pub liked: bool,
+    /// The linked library album / artist / playlist.
+    pub release: Option<ReleaseId>,
+    pub artist: Option<ArtistId>,
+    pub playlist: Option<PlaylistId>,
+    /// Playlist: the user may edit it in the service.
+    pub editable: bool,
+}
+
+impl StreamPageView {
+    pub fn loading(page: StreamPage) -> Self {
+        Self {
+            page,
+            loading: true,
+            error: None,
+            title: String::new(),
+            subtitle: String::new(),
+            cover_url: None,
+            year: None,
+            release_type: None,
+            tracks: Vec::new(),
+            albums: Vec::new(),
+            total_duration: Duration::ZERO,
+            liked: false,
+            release: None,
+            artist: None,
+            playlist: None,
+            editable: false,
+        }
+    }
+}
+
+/// The "Нет в библиотеке" section of a library artist page: albums of the
+/// artist in the services the library has no file of ([`crate::Command::LoadDiscography`],
+/// filled by the discography part of stage 3).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiscographyView {
+    pub loading: bool,
+    pub error: Option<String>,
+    pub albums: Vec<StreamAlbumCard>,
+}
+
+// ---------------------------------------------------------------- wishlist
+
+/// One wishlist item ("Загрузки → Wishlist").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WishlistRow {
+    pub id: WishlistId,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub track: Option<TrackId>,
+    pub release: Option<ReleaseId>,
+    pub artist_id: Option<ArtistId>,
+    pub status: WishlistStatus,
+    pub scope: WishlistScope,
+    pub origin: WishlistOrigin,
+    /// Why it failed, what was chosen ("Не нашёл раздачу", "FLAC · 12 сидов").
+    pub note: Option<String>,
+    /// "следующий поиск через 6 дн." for an item without a torrent.
+    pub next_try: Option<String>,
+    pub attempts: u32,
+    /// "Сохранить с YouTube" makes sense (the track streams from YouTube or
+    /// can be found there, and YouTube Music is on).
+    pub can_save_from_youtube: bool,
+}
+
+/// Items of one album or one artist, for the grouped view and its bulk
+/// buttons ("скачать альбом / артиста").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WishlistGroup {
+    /// Album title or artist name.
+    pub title: String,
+    /// The album's artist; empty for an artist group.
+    pub subtitle: String,
+    pub release: Option<ReleaseId>,
+    pub artist: Option<ArtistId>,
+    pub items: Vec<WishlistId>,
+    /// Items still waiting for "скачать".
+    pub waiting: u32,
+}
+
+/// The wishlist ([`crate::Command::LoadWishlist`]; refreshed as items move).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WishlistView {
+    pub loaded: bool,
+    /// Every item that is not done, newest first; dismissed ones last.
+    pub items: Vec<WishlistRow>,
+    pub by_album: Vec<WishlistGroup>,
+    pub by_artist: Vec<WishlistGroup>,
+    /// How many items are in each status (statuses with none are left out).
+    pub counts: Vec<(WishlistStatus, u32)>,
+}
+
+impl WishlistView {
+    pub fn count(&self, status: WishlistStatus) -> u32 {
+        self.counts
+            .iter()
+            .find(|(s, _)| *s == status)
+            .map_or(0, |(_, n)| *n)
+    }
+}
+
+/// Which wishlist items a bulk action takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WishlistSelect {
+    Items(Vec<WishlistId>),
+    /// Every item of this album.
+    Album(ReleaseId),
+    /// Every item of this artist.
+    Artist(ArtistId),
+    /// Every waiting item.
+    AllWaiting,
+}
+
+/// What the user hands in for a wishlist item that has no torrent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WishlistAttach {
+    TorrentFile(std::path::PathBuf),
+    Magnet(String),
+    /// Audio files (a single file is taken as the item's track whatever its tags say).
+    Files(Vec<std::path::PathBuf>),
+    Folder(std::path::PathBuf),
+}
+
+// ---------------------------------------------------------------- sharing
+
+/// What to share ([`crate::Command::Share`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ShareTarget {
+    Track(TrackId),
+    Release(ReleaseId),
+    StreamTrack(RemoteId),
+    StreamAlbum(RemoteId),
+}
+
+/// The last share: a song.link / album.link page, or "Исполнитель —
+/// Название" when no service has it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareView {
+    pub target: ShareTarget,
+    /// Still looking it up.
+    pub busy: bool,
+    /// The aggregator page (or the service page when Odesli does not answer).
+    pub link: Option<String>,
+    /// What was copied (the link, or the text fallback).
+    pub text: String,
+}
+
+/// Text for the system clipboard. The app copies it when `id` changes (the
+/// runtime never touches the clipboard itself).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardRequest {
+    pub id: u64,
+    pub text: String,
+}
