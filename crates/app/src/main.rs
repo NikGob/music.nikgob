@@ -151,9 +151,20 @@ struct Core {
     geometry: geometry::Keeper,
     /// The last [`nikgob_view::ClipboardRequest`] copied.
     copied: u64,
+    /// The window state the runtime last heard (visible, focused).
+    window: Option<(bool, bool)>,
 }
 
 impl Core {
+    /// Tells the runtime when the window is shown, hidden or (un)focused:
+    /// it holds its periodic network work while hidden and idle.
+    fn report_window(&mut self, visible: bool, focused: bool) {
+        if self.window != Some((visible, focused)) {
+            self.window = Some((visible, focused));
+            self.runtime.send(Command::WindowState { visible, focused });
+        }
+    }
+
     fn poll_desktop(&mut self) {
         let req = {
             let state = self.runtime.state();
@@ -175,6 +186,7 @@ impl Resident for Core {
     }
 
     fn window_gone(&mut self) {
+        self.report_window(false, false);
         self.geometry.flush();
         self.wants_show = false;
     }
@@ -223,6 +235,11 @@ impl eframe::App for Window {
         }
         let core = &mut *self.core;
         core.geometry.observe(ctx);
+        let (minimized, focused) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.minimized.unwrap_or(false), v.focused.unwrap_or(true))
+        });
+        core.report_window(!minimized, focused && !minimized);
         core.poll_desktop();
         if core.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -446,6 +463,7 @@ fn main() -> eframe::Result {
         started: Instant::now(),
         // Screenshot runs get their own size and leave the real one alone.
         copied: 0,
+        window: None,
         geometry: geometry::Keeper::load(
             shot::window_size().is_none().then(|| paths.prefs.with_file_name("window.json")),
         ),
