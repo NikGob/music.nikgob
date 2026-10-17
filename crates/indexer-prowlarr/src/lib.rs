@@ -108,6 +108,18 @@ impl Indexer for Prowlarr {
         let handle = candidate.handle.clone();
         Box::pin(async move { inner.fetch(&handle).await })
     }
+
+    fn check(&self) -> BoxFuture<'_, Result<usize, IndexerError>> {
+        let inner = self.inner.clone();
+        Box::pin(async move { inner.check().await })
+    }
+}
+
+/// Subset of Prowlarr's `IndexerResource`: whether it is switched on.
+#[derive(Deserialize)]
+struct IndexerInfo {
+    #[serde(default)]
+    enable: bool,
 }
 
 /// Subset of Prowlarr's `ReleaseResource` (camelCase JSON) we care about.
@@ -205,6 +217,23 @@ impl Inner {
         } else {
             req
         }
+    }
+
+    /// `GET api/v1/indexer`: the key works and this many trackers are on.
+    async fn check(&self) -> Result<usize, IndexerError> {
+        let url = self.endpoint("api/v1/indexer");
+        let resp = self
+            .get(&url)
+            .timeout(CONNECT_TIMEOUT)
+            .send()
+            .await
+            .map_err(unreachable)?;
+        let resp = check_status(resp)?;
+        let list: Vec<IndexerInfo> = resp
+            .json()
+            .await
+            .map_err(|e| IndexerError::Parse(e.without_url().to_string()))?;
+        Ok(list.iter().filter(|i| i.enable).count())
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Vec<Candidate>, IndexerError> {

@@ -112,6 +112,11 @@ impl Fakes {
         }
         if self.torrents {
             s.prefs.prowlarr_configured = true;
+            s.indexer_check = Some(nikgob_view::IndexerCheck {
+                checking: false,
+                ok: true,
+                text: "Prowlarr отвечает · 12 трекеров".into(),
+            });
         }
         if self.empty_home {
             s.home = nikgob_view::HomeView { greeting_hour: s.home.greeting_hour, ..Default::default() };

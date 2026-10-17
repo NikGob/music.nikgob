@@ -43,7 +43,7 @@ use nikgob_view::{self as v, Command};
 use crate::Worker;
 use crate::import::Internal;
 
-pub(crate) use cold::STREAM_JOB;
+pub(crate) use cold::{STREAM_JOB, plural};
 pub(crate) use wishlist::WISH_ID;
 pub use schedule::StreamSchedule;
 pub use web_login::{WINDOW_HINT, WebLogin, WebLoginError};

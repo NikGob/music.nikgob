@@ -197,6 +197,36 @@ impl Worker {
         });
     }
 
+    /// `Command::CheckIndexer`: asks Prowlarr whether it answers (no search).
+    pub(crate) fn check_indexer(&mut self) {
+        let Some(indexer) = self.indexer.clone() else {
+            self.publish(|s, _| {
+                s.indexer_check =
+                    Some(v::IndexerCheck { checking: false, ok: false, text: "Prowlarr не настроен".into() });
+            });
+            return;
+        };
+        let Some(svc) = &self.import else { return };
+        let tx = svc.internal();
+        svc.spawn(async move {
+            let r = tokio::time::timeout(Duration::from_secs(20), indexer.check())
+                .await
+                .unwrap_or_else(|_| Err(nikgob_core::indexer::IndexerError::Unreachable("timeout".into())));
+            let _ = tx.send(Internal::IndexerChecked(r));
+        });
+        self.publish(|s, _| {
+            s.indexer_check = Some(v::IndexerCheck { checking: true, ok: false, text: "Проверяю…".into() });
+        });
+    }
+
+    pub(crate) fn indexer_checked(&mut self, r: Result<usize, nikgob_core::indexer::IndexerError>) {
+        if let Err(e) = &r {
+            log::warn!("prowlarr check: {e}");
+        }
+        let check = check_view(&r);
+        self.publish(|s, _| s.indexer_check = Some(check));
+    }
+
     pub(crate) fn torrent_results(&mut self, query: String, r: Result<Vec<Candidate>, String>) {
         if self.state.read().search.torrents.query != query {
             return;
@@ -221,6 +251,21 @@ impl Worker {
             }
         }
     }
+}
+
+/// What a check of Prowlarr says, in words.
+fn check_view(r: &Result<usize, nikgob_core::indexer::IndexerError>) -> v::IndexerCheck {
+    use nikgob_core::indexer::IndexerError as E;
+    let (ok, text) = match r {
+        Ok(0) => (true, "Prowlarr отвечает, но трекеры в нём не включены".to_owned()),
+        Ok(n) => (true, format!("Prowlarr отвечает · {n} {}", crate::streams::plural(*n, "трекер", "трекера", "трекеров"))),
+        Err(E::Unauthorized) => (false, "Prowlarr не принял ключ — проверь API-ключ".to_owned()),
+        Err(E::Unreachable(_)) => (false, "Prowlarr не отвечает по этому адресу".to_owned()),
+        Err(E::Http { status }) => (false, format!("Prowlarr ответил ошибкой {status}")),
+        Err(E::NotConfigured) => (false, "Prowlarr не настроен".to_owned()),
+        Err(E::Parse(_) | E::NothingToFetch) => (false, "По этому адресу отвечает не Prowlarr".to_owned()),
+    };
+    v::IndexerCheck { checking: false, ok, text }
 }
 
 #[cfg(test)]
@@ -269,5 +314,20 @@ mod tests {
             cand("Artist - Album (2019) FLAC", 40, 0.4),
         ];
         assert_eq!(recommend(&c, "Artist Album"), Some(3));
+    }
+
+    #[test]
+    fn a_check_of_prowlarr_says_what_it_found() {
+        use nikgob_core::indexer::IndexerError as E;
+        let text = |r: Result<usize, E>| {
+            let c = check_view(&r);
+            (c.ok, c.text)
+        };
+        assert_eq!(text(Ok(12)), (true, "Prowlarr отвечает · 12 трекеров".to_owned()));
+        assert_eq!(text(Ok(1)), (true, "Prowlarr отвечает · 1 трекер".to_owned()));
+        assert!(text(Ok(0)).1.contains("не включены"));
+        assert_eq!(text(Err(E::Unauthorized)), (false, "Prowlarr не принял ключ — проверь API-ключ".to_owned()));
+        assert_eq!(text(Err(E::Unreachable("refused".into()))).1, "Prowlarr не отвечает по этому адресу");
+        assert_eq!(text(Err(E::Http { status: 500 })).1, "Prowlarr ответил ошибкой 500");
     }
 }

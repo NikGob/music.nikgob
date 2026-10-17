@@ -288,3 +288,32 @@ fn works_as_dyn_indexer() {
     let dynamic: std::sync::Arc<dyn Indexer> = std::sync::Arc::new(p);
     assert_eq!(dynamic.name(), "Prowlarr");
 }
+
+#[tokio::test]
+async fn check_counts_the_enabled_indexers() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer"))
+        .and(header("X-Api-Key", KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": 1, "name": "RuTracker", "enable": true},
+            {"id": 2, "name": "Old", "enable": false},
+            {"id": 3, "name": "Nyaa", "enable": true}
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(client(&server).check().await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn check_with_a_wrong_key_is_unauthorized() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let err = client(&server).check().await.unwrap_err();
+    assert!(matches!(err, IndexerError::Unauthorized), "{err:?}");
+}

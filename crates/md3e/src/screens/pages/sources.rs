@@ -61,7 +61,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     imports(ui, out);
     group(ui, "Кэш");
     stream_cache(ui, state, p, out);
-    torrents(ui, p, pages, out);
+    torrents(ui, state, p, pages, out);
 }
 
 /// «Кэш стриминга»: its limit, how much it holds, «Очистить».
@@ -609,7 +609,8 @@ fn imports(ui: &mut Ui, out: &mut Vec<Command>) {
 }
 
 /// «Торренты»: Prowlarr and the seeding policy (moved from «Основные»).
-fn torrents(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+fn torrents(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
     group(ui, "Торренты");
     if pages.indexer_url.is_empty() && !p.prowlarr_url.is_empty() {
         pages.indexer_url = p.prowlarr_url.clone();
@@ -634,18 +635,46 @@ fn torrents(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Com
             .id_salt("set-prowlarr-key")
             .show(ui);
         ui.add_space(8.0);
-        if ui
-            .add(
-                Button::new("Сохранить")
-                    .style(Style::Tonal)
-                    .enabled(!pages.indexer_url.trim().is_empty() && !pages.indexer_key.trim().is_empty())
-                    .id_salt("set-prowlarr-save"),
-            )
-            .clicked()
-        {
-            out.push(Command::SetIndexer {
-                url: pages.indexer_url.trim().to_owned(),
-                api_key: std::mem::take(&mut pages.indexer_key).trim().to_owned(),
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if ui
+                .add(
+                    Button::new("Сохранить")
+                        .style(Style::Tonal)
+                        .enabled(!pages.indexer_url.trim().is_empty() && !pages.indexer_key.trim().is_empty())
+                        .id_salt("set-prowlarr-save"),
+                )
+                .clicked()
+            {
+                out.push(Command::SetIndexer {
+                    url: pages.indexer_url.trim().to_owned(),
+                    api_key: std::mem::take(&mut pages.indexer_key).trim().to_owned(),
+                });
+            }
+            // Whether Prowlarr answers with what is saved (no search).
+            let checking = state.indexer_check.as_ref().is_some_and(|c| c.checking);
+            if p.prowlarr_configured
+                && ui
+                    .add(
+                        Button::new("Проверить")
+                            .style(Style::Text)
+                            .enabled(!checking)
+                            .id_salt("set-prowlarr-check"),
+                    )
+                    .clicked()
+            {
+                out.push(Command::CheckIndexer);
+            }
+        });
+        // The answer, in words; a failure in the error colour (it is one).
+        if let Some(c) = &state.indexer_check {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if c.checking {
+                    ui.add(LoadingIndicator::new().size(20.0));
+                }
+                let color = if c.ok || c.checking { s.on_surface_variant } else { s.error };
+                ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich_para(&c.text, color)).wrap());
             });
         }
     });

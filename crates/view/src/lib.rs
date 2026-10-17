@@ -1023,6 +1023,9 @@ pub struct ViewState {
     pub stream_page: Option<StreamPageView>,
     /// The last [`Command::Share`].
     pub share: Option<ShareView>,
+    /// What the last check of Prowlarr found ([`Command::CheckIndexer`],
+    /// also after its settings are saved).
+    pub indexer_check: Option<IndexerCheck>,
     /// Bytes of stream audio cached on disk, all services together.
     pub stream_cache_bytes: u64,
     /// Text the app should put on the clipboard (one-shot, see
@@ -1036,6 +1039,15 @@ impl ViewState {
     pub fn account(&self, service: Service) -> Option<&AccountView> {
         self.accounts.iter().find(|a| a.service == service)
     }
+}
+
+/// The answer of Prowlarr to a check, in words: «отвечает · 12 трекеров»,
+/// «ключ не подходит».
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexerCheck {
+    pub checking: bool,
+    pub ok: bool,
+    pub text: String,
 }
 
 /// Where the user is.
@@ -1190,6 +1202,8 @@ pub enum Command {
     MoveMastersDir(PathBuf),
     /// Prowlarr address and API key (stored in settings.toml, never shown again).
     SetIndexer { url: String, api_key: String },
+    /// Asks Prowlarr whether it answers ([`ViewState::indexer_check`]).
+    CheckIndexer,
     /// MusicBrainz contact and AcoustID key (stored in settings.toml).
     SetMetadata { contact: String, acoustid_key: Option<String> },
     DismissToast(u64),

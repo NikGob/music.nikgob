@@ -833,6 +833,7 @@ impl Worker {
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
+            Command::CheckIndexer => self.check_indexer(),
             Command::DismissToast(id) => {
                 self.publish(|s, _| s.toasts.retain(|t| t.id != id));
             }
@@ -1826,6 +1827,10 @@ impl Worker {
                     if usable { "Prowlarr сохранён" } else { "Адрес или ключ Prowlarr не подходят" },
                     None,
                 );
+                // Whether it answers, right away (the settings show it).
+                if usable {
+                    self.check_indexer();
+                }
             }
             Err(e) => {
                 log::error!("saving settings: {e}");

@@ -38,6 +38,7 @@ pub(crate) enum Internal {
     TagSuggestions(TrackId, Result<Vec<(String, v::TagEdit)>, String>),
     Retagged(TrackId, Result<(), String>),
     TorrentResults(String, Result<Vec<nikgob_core::indexer::Candidate>, String>),
+    IndexerChecked(Result<usize, nikgob_core::indexer::IndexerError>),
     TorrentStarted(Result<nikgob_torrent::TorrentClient, String>),
     TorrentError(String),
     #[allow(clippy::type_complexity)]
@@ -495,6 +496,7 @@ impl Worker {
             }
             m @ (Internal::TagSuggestions(..) | Internal::Retagged(..)) => self.tag_result(m),
             Internal::TorrentResults(q, r) => self.torrent_results(q, r),
+            Internal::IndexerChecked(r) => self.indexer_checked(r),
             Internal::TorrentStarted(r) => self.torrent_started(r),
             Internal::TorrentError(e) => {
                 log::warn!("torrent: {e}");
