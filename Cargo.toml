@@ -8,7 +8,7 @@ default-members = ["crates/app"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
-license = "PolyForm-Strict-1.0.0"
+license = "MIT"
 publish = false
 
 [workspace.dependencies]
@@ -64,3 +64,6 @@ epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "ba6790fe7
 winit = { git = "https://github.com/crmne/winit", rev = "ed7caa9023f10b397f5b6ec8284a840cbd8a6f65" }
 # librespot-core 0.8.0 with a one-line fix so it builds next to librqbit (vendor/librespot-core/README.nikgob.md).
 librespot-core = { path = "vendor/librespot-core" }
+# librqbit-dualstack-sockets 0.7.0 that skips Windows per-datagram UDP receive errors, which
+# otherwise stop DHT and uTP for the session (vendor/librqbit-dualstack-sockets/README.nikgob.md).
+librqbit-dualstack-sockets = { path = "vendor/librqbit-dualstack-sockets" }

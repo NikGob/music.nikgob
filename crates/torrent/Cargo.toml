@@ -18,6 +18,9 @@ serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# tests/udp_errors.rs drives a bare uTP socket; the same version librqbit uses.
+librqbit-utp = "0.7"
+tokio = { version = "1", features = ["net"] }
 
 [lints]
 workspace = true
