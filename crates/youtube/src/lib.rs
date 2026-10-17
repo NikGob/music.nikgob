@@ -11,7 +11,9 @@
 //!   ([`LoginInput::Cookies`]): RustyPipe keeps them in its cache file in
 //!   [`YoutubeConfig::data_dir`]. OAuth device codes only work for RustyPipe's
 //!   TV client, which cannot read any user data, so [`LoginInput::Browser`]
-//!   answers [`StreamError::Unsupported`]. Likes, playlist creation and edits
+//!   answers [`StreamError::Unsupported`] here; the app's «Войти через
+//!   Google» window (the runtime's `WebLogin`) gets the cookies instead and
+//!   logs in with them. Likes, playlist creation and edits
 //!   go through RustyPipe's raw request (see `innertube`).
 //!
 //! Every future runs on the service's own small tokio runtime (so the pooled

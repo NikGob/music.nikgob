@@ -44,4 +44,6 @@ workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 # The winit eframe runs on (patched to the fork); for the caption colours.
-winit = { version = "0.30", default-features = false }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+# The YouTube Music sign-in window (system WebView2, see ytlogin.rs).
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }

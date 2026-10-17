@@ -91,6 +91,7 @@ fn account_line(a: Option<&AccountView>) -> String {
     };
     match &a.account {
         Account::LoggedOut => "Не выполнен вход".to_owned(),
+        Account::LoggingIn(Some(LoginPrompt::Window(_))) => "Вход… заверши его в открывшемся окне".to_owned(),
         Account::LoggingIn(_) => "Вход… заверши его в браузере".to_owned(),
         Account::LoggedIn { name, premium, .. } => match (a.service, premium) {
             (Service::Spotify, Some(true)) => format!("Вошёл как {name} · Premium"),
@@ -180,11 +181,15 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
 fn login_prompt(ui: &mut Ui, a: &AccountView, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let Account::LoggingIn(Some(prompt)) = &a.account else { return };
+    let salt = a.service.as_str();
     let (url, code) = match prompt {
         LoginPrompt::OpenUrl(u) => (u.as_str(), None),
         LoginPrompt::DeviceCode { url, code } => (url.as_str(), Some(code.as_str())),
+        LoginPrompt::Window(text) => {
+            window_prompt(ui, a, text, out);
+            return;
+        }
     };
-    let salt = a.service.as_str();
     Card::outlined().id_salt(("login-prompt", salt)).show(ui, |ui| {
         ui.set_width(ui.available_width().min(640.0));
         ui.label(TypeRole::TitleSmall.style().rich("Заверши вход в браузере", s.on_surface));
@@ -212,6 +217,28 @@ fn login_prompt(ui: &mut Ui, a: &AccountView, out: &mut Vec<Command>) {
                 out.push(Command::StreamLogout(a.service));
             }
         });
+    });
+    ui.add_space(8.0);
+}
+
+/// The app's own sign-in window is open: what to do there, and «Отмена»
+/// (closes it; the window's saved Google session stays).
+fn window_prompt(ui: &mut Ui, a: &AccountView, text: &str, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let salt = a.service.as_str();
+    Card::outlined().id_salt(("login-window", salt)).show(ui, |ui| {
+        ui.set_width(ui.available_width().min(640.0));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            Icon::OpenInNew.widget(false, s.primary, 20.0).ui(ui);
+            ui.label(TypeRole::TitleSmall.style().rich("Заверши вход в окне", s.on_surface));
+        });
+        ui.add_space(4.0);
+        ui.label(TypeRole::BodyMedium.style().rich_para(text, s.on_surface_variant));
+        ui.add_space(8.0);
+        if ui.add(Button::new("Отмена").style(Style::Text).size(Size::S).id_salt(("login-window-cancel", salt))).clicked() {
+            out.push(Command::StreamLogout(a.service));
+        }
     });
     ui.add_space(8.0);
 }
@@ -360,22 +387,40 @@ fn youtube(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
                     if ui.add(Button::new("Выйти").icon(Icon::Logout).style(Style::Outlined).id_salt("yt-logout")).clicked() {
                         out.push(Command::StreamLogout(Service::Youtube));
                     }
-                } else if ui
-                    .add(
-                        Button::new("Войти…")
-                            .icon(Icon::Login)
-                            .style(Style::Filled)
-                            .selected(pages.yt_form)
-                            .enabled(registered && !busy)
-                            .id_salt("yt-login"),
-                    )
-                    .clicked()
-                {
-                    pages.yt_form = !pages.yt_form;
+                } else if !busy {
+                    // The Google window first (lined up with the other controls),
+                    // the cookies form as the smaller fallback.
+                    if ui
+                        .add(
+                            Button::new("Войти через Google")
+                                .icon(Icon::Login)
+                                .style(Style::Filled)
+                                .enabled(registered)
+                                .id_salt("yt-login"),
+                        )
+                        .clicked()
+                    {
+                        pages.yt_form = false;
+                        out.push(Command::StreamLogin { service: Service::Youtube, input: LoginInput::Browser });
+                    }
+                    if ui
+                        .add(
+                            Button::new("Вставить cookies…")
+                                .style(Style::Text)
+                                .size(Size::S)
+                                .selected(pages.yt_form)
+                                .enabled(registered)
+                                .id_salt("yt-cookies-open"),
+                        )
+                        .clicked()
+                    {
+                        pages.yt_form = !pages.yt_form;
+                    }
                 }
             });
         });
         if let Some(a) = acc {
+            login_prompt(ui, a, out);
             login_error(ui, a);
         }
         if !logged_in(acc) && (pages.yt_form || p.youtube_cookies_set) {

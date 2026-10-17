@@ -459,13 +459,19 @@ pub enum LoginPrompt {
     OpenUrl(String),
     /// Open `url` and enter `code` (OAuth device flow).
     DeviceCode { url: String, code: String },
+    /// The app opened its own sign-in window (YouTube Music's Google
+    /// sign-in); the text says what to do there.
+    Window(String),
 }
 
 /// How to log in.
 #[derive(Clone, PartialEq, Eq)]
 pub enum LoginInput {
     /// Browser based OAuth (redirect or device code, whatever the service uses).
-    /// For Spotify this is the Web API grant of the shared public app.
+    /// For Spotify this is the Web API grant of the shared public app. For
+    /// YouTube Music it is the Google sign-in window the app runs itself
+    /// (the runtime's `WebLogin`), which ends in a [`Self::Cookies`] login;
+    /// the service alone answers [`StreamError::Unsupported`].
     Browser,
     /// Spotify only: the separate local playback authorization (librespot,
     /// `streaming` scope). Other services answer [`StreamError::Unsupported`].

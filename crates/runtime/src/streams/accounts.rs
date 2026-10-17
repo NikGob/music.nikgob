@@ -15,7 +15,7 @@ impl Worker {
             .map(|&service| {
                 let registered = self.streams.iter().find(|s| s.service() == service);
                 let enabled = self.state.read().prefs.service_enabled(service);
-                let account = registered.map(|s| s.account()).unwrap_or_default();
+                let account = self.web_account(service, registered.map(|s| s.account()).unwrap_or_default());
                 v::AccountView {
                     service,
                     registered: registered.is_some(),
@@ -38,6 +38,13 @@ impl Worker {
             self.toast(format!("{} не подключён", service.display_name()), None);
             return;
         };
+        if !matches!(self.streaming.web_state.get(&service), Some(super::web_login::WebState::Running(_))) {
+            self.streaming.web_state.remove(&service);
+        }
+        // YouTube Music: the app's Google sign-in window, then its cookies.
+        if input == LoginInput::Browser && self.start_web_login(service) {
+            return;
+        }
         if !self.streaming.busy.insert(service) {
             return;
         }
@@ -76,9 +83,17 @@ impl Worker {
     }
 
     pub(crate) fn stream_logout(&mut self, service: Service) {
+        // «Отмена» of an open sign-in window: it closes, its saved session stays.
+        if self.cancel_web_login(service) {
+            log::info!("{service}: sign-in window cancelled");
+            self.publish_accounts();
+            return;
+        }
         if let Some(s) = self.streams.iter().find(|s| s.service() == service) {
             s.logout();
         }
+        self.streaming.web_state.remove(&service);
+        self.forget_web_login(service);
         self.streaming.errors.remove(&service);
         self.publish_accounts();
         self.preload_next();

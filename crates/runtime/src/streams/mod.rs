@@ -23,6 +23,7 @@ mod resolve;
 mod search;
 mod share;
 mod sync;
+mod web_login;
 mod wishlist;
 
 use std::collections::{HashMap, HashSet};
@@ -43,6 +44,7 @@ use crate::import::Internal;
 
 pub(crate) use cold::STREAM_JOB;
 pub(crate) use wishlist::WISH_ID;
+pub use web_login::{WINDOW_HINT, WebLogin, WebLoginError};
 
 /// How long a YouTube video that did not play is not picked again.
 const REFUSED_TTL: Duration = Duration::from_secs(6 * 3600);
@@ -57,6 +59,8 @@ const KNOWN_MAX: usize = 20_000;
 /// Results of background work, for [`Worker::stream_msg`].
 pub(crate) enum Msg {
     LoginDone(Service, nikgob_core::streaming::LoginInput, Result<(), StreamError>),
+    /// The app's sign-in window is done (see [`web_login`]).
+    WebLoginDone(Service, Result<String, WebLoginError>),
     Searched {
         seq: u64,
         service: Service,
@@ -99,6 +103,9 @@ pub(crate) struct Streams {
     /// Logins running, last login errors.
     busy: HashSet<Service>,
     errors: HashMap<Service, String>,
+    /// The app's sign-in windows, and the ones open or failed (see [`web_login`]).
+    web: HashMap<Service, Arc<dyn WebLogin>>,
+    web_state: HashMap<Service, web_login::WebState>,
     last_accounts: Vec<v::AccountView>,
     pub(crate) search: search::SearchState,
     page_seq: u64,
@@ -139,6 +146,8 @@ impl Streams {
             playlists: HashMap::new(),
             busy: HashSet::new(),
             errors: HashMap::new(),
+            web: HashMap::new(),
+            web_state: HashMap::new(),
             last_accounts: Vec::new(),
             search: search::SearchState::default(),
             page_seq: 0,
@@ -325,6 +334,7 @@ impl Worker {
     pub(crate) fn stream_msg(&mut self, m: Msg) {
         match m {
             Msg::LoginDone(service, input, r) => self.login_done(service, input, r),
+            Msg::WebLoginDone(service, r) => self.web_login_done(service, r),
             Msg::Searched {
                 seq,
                 service,

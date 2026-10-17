@@ -17,6 +17,7 @@ mod streams;
 mod sysmotion;
 mod titlebar;
 mod web_images;
+mod ytlogin;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -291,6 +292,15 @@ fn add_system_fallbacks(fonts: &mut egui::FontDefinitions) {
 }
 
 fn main() -> eframe::Result {
+    // `--youtube-login`: this run is only the Google sign-in window. It logs to
+    // stderr, which the app copies into its own log; it must not write the
+    // app's log file itself.
+    if std::env::args().any(|a| a == "--youtube-login") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Some(code) = ytlogin::child_main() {
+            std::process::exit(code);
+        }
+    }
     logfile::init();
     let mut paths = paths();
     if let Some(dir) = paths.db.parent() {
@@ -415,6 +425,10 @@ fn main() -> eframe::Result {
     );
     if let Some(l) = &links {
         l.connect(runtime.playback_sender());
+    }
+    // «Войти через Google»: the sign-in window, its profile in youtube/webview.
+    if let Some(login) = ytlogin::WindowLogin::new(&data_dir.join("youtube")) {
+        runtime.set_web_login(nikgob_core::streaming::Service::Youtube, Arc::new(login));
     }
     if let Some(c) = relogin {
         runtime.send(c);

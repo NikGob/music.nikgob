@@ -9,7 +9,8 @@
 //! Demo (`NIKGOB_DEMO=1`): the deterministic fakes. `NIKGOB_DEMO_ACCOUNTS`
 //! sets their account per service for screenshots, e.g.
 //! `spotify=prompt,youtube=out` (`in`, `out`, `free` = logged in without
-//! sound, `prompt` = a login waiting for the browser, `failed`).
+//! sound, `prompt` = a login waiting for the browser — for YouTube Music the
+//! app's Google sign-in window —, `failed`).
 //! `NIKGOB_DEMO_REAL_STREAMS=1` registers the real services instead, with
 //! their folders inside the demo dir, so real results can be looked at
 //! without touching the user's library or accounts.
@@ -88,7 +89,11 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
         }
         "prompt" | "failed" => Arc::new(Shown {
             inner: base.logged_out(),
-            account: if mode == "prompt" {
+            account: if mode == "prompt" && service == Service::Youtube {
+                Account::LoggingIn(Some(LoginPrompt::Window(nikgob_runtime::WINDOW_HINT.into())))
+            } else if mode == "failed" && service == Service::Youtube {
+                Account::Failed(nikgob_runtime::WebLoginError::Refused.text())
+            } else if mode == "prompt" {
                 Account::LoggingIn(Some(LoginPrompt::OpenUrl(format!(
                     "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&code_challenge_method=S256",
                     nikgob_spotify::SHARED_CLIENT_ID,
