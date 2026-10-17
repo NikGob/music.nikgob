@@ -112,6 +112,11 @@ pub(crate) enum Msg {
         /// The first part; the whole answer follows.
         partial: bool,
     },
+    /// A rate-limit pause of a service's search ended: ask again.
+    SearchRetry {
+        seq: u64,
+        service: Service,
+    },
 
     /// A page (or an album / playlist for a play or like command) came;
     /// everyone who waits for it hears.
@@ -441,6 +446,7 @@ impl Worker {
                 result,
                 partial,
             } => self.stream_searched(seq, service, result, partial),
+            Msg::SearchRetry { seq, service } => self.search_retry(seq, service),
             Msg::Loaded { key, result } => self.loaded(key, result),
             Msg::Resolved { track, found } => self.resolved(track, found),
             Msg::LikesPulled(service, r) => self.likes_pulled(service, r),

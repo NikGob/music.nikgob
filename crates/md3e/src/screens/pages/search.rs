@@ -499,7 +499,9 @@ fn stream_section(
     let sec: Option<&StreamSearchSection> = state.search.streams.iter().find(|x| x.service == service);
     let q = query.trim();
     let stale = state.search.query.trim() != q;
-    let why = why_not(state, service);
+    // A section that waits out a rate limit by itself says so itself.
+    let noted = sec.is_some_and(|x| x.note.is_some());
+    let why = why_not(state, service).filter(|w| !(noted && matches!(w, Why::Paused(_))));
     let loading = !q.is_empty() && why.is_none() && (stale || sec.is_none_or(|x| x.searching));
     let empty = |x: &StreamSearchSection| {
         x.tracks.is_empty() && x.albums.is_empty() && x.artists.is_empty() && x.playlists.is_empty()
@@ -569,10 +571,17 @@ fn results(
     // What the section searched for (its rows are of that query while a
     // newer one runs).
     let shown_q = state.search.query.trim();
+    // A rate limit: a quiet line, never a button (the runtime asks again).
+    if !q.is_empty()
+        && let Some(note) = sec.and_then(|x| x.note.as_deref())
+    {
+        quiet(ui, note, None);
+    }
     match sec {
         _ if q.is_empty() => {}
         None => {}
         Some(x) if loading && empty(x) => {}
+        Some(x) if x.note.is_some() && empty(x) => {}
         Some(x) if x.error.is_some() => {
             let e = x.error.as_deref().unwrap_or_default();
             if quiet(ui, e, Some(("Повторить", Icon::Refresh, &format!("sv-retry-{salt}")))) {

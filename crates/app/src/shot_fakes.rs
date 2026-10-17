@@ -15,6 +15,12 @@
 //!   the demo has no network to fetch any for a stream track.
 //! - `fake:paused:youtube` / `fake:paused:spotify` — the service asked to
 //!   wait (until 14:05).
+//! - `fake:search-wait:spotify` / `fake:search-wait:youtube` — the service
+//!   answered the search with a short rate-limit pause: its section loads
+//!   and says it answers late.
+//! - `fake:search-busy:spotify` / `fake:search-busy:youtube` — a long
+//!   pause: the section says the service is overloaded while the other
+//!   answers.
 //! - `fake:torrents` — Prowlarr looks set up (the demo has none).
 //! - `fake:no-sound` — Spotify signed in with Premium, the sound consent
 //!   not given yet.
@@ -36,6 +42,7 @@ pub struct Fakes {
     link: bool,
     lyrics: bool,
     paused: Option<Service>,
+    search_wait: Option<(Service, bool)>,
     torrents: bool,
     no_sound: bool,
     empty_home: bool,
@@ -55,6 +62,10 @@ impl Fakes {
             "lyrics" => self.lyrics = true,
             "paused:youtube" => self.paused = Some(Service::Youtube),
             "paused:spotify" => self.paused = Some(Service::Spotify),
+            "search-wait:spotify" => self.search_wait = Some((Service::Spotify, false)),
+            "search-busy:spotify" => self.search_wait = Some((Service::Spotify, true)),
+            "search-wait:youtube" => self.search_wait = Some((Service::Youtube, false)),
+            "search-busy:youtube" => self.search_wait = Some((Service::Youtube, true)),
             "torrents" => self.torrents = true,
             "no-sound" => self.no_sound = true,
             "empty-home" => self.empty_home = true,
@@ -72,6 +83,7 @@ impl Fakes {
             || self.link
             || self.lyrics
             || self.paused.is_some()
+            || self.search_wait.is_some()
             || self.torrents
             || self.no_sound
             || self.empty_home
@@ -109,6 +121,32 @@ impl Fakes {
         {
             a.paused_until = Some(0);
             a.paused_until_hm = Some("14:05".into());
+        }
+        if let Some((svc, long)) = self.search_wait {
+            if !s.search.streams.iter().any(|x| x.service == svc) {
+                s.search.streams.insert(0, nikgob_view::StreamSearchSection::new(svc));
+            }
+            let name = svc.display_name();
+            let other = match svc {
+                Service::Spotify => Service::Youtube,
+                Service::Youtube => Service::Spotify,
+            }
+            .display_name();
+            for x in s.search.streams.iter_mut().filter(|x| x.service == svc) {
+                x.error = None;
+                x.tracks.clear();
+                x.albums.clear();
+                x.artists.clear();
+                x.playlists.clear();
+                // The runtime's words (streams/search.rs `wait_note`).
+                if long {
+                    x.searching = false;
+                    x.note = Some(format!("{name} сейчас перегружен до 14:05 — ищу в {other}"));
+                } else {
+                    x.searching = true;
+                    x.note = Some(format!("{name} отвечает с задержкой — результаты появятся сами"));
+                }
+            }
         }
         if self.torrents {
             s.prefs.prowlarr_configured = true;

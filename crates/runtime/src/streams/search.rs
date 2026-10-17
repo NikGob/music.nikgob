@@ -8,6 +8,13 @@
 //! are merged against the library (a library track wins) and across
 //! services (the first service, Spotify, keeps the row).
 //!
+//! A rate limit is not a failure: a service that answers 429 (or is not
+//! asked because its `Retry-After` pause runs) keeps its section loading
+//! with a quiet «отвечает с задержкой» and is asked again for the same
+//! query when a pause of up to [`SHORT_WAIT`] ends (+ up to 0.5 s), at most
+//! [`RETRIES`] times per query. A longer or unknown pause says the service
+//! is overloaded while the others answer, and asks once more when it ends.
+//!
 //! [`StreamService::search_in_parts`]: nikgob_core::streaming::StreamService::search_in_parts
 
 use std::collections::HashMap;
@@ -34,6 +41,14 @@ const CACHE_MAX: usize = 64;
 const SLACK_MS: u64 = 3_000;
 /// Artist names this similar (0..=1) are the same artist.
 const ARTIST_SIMILARITY: f64 = 0.85;
+/// A rate-limit pause up to this long is waited out with the section
+/// loading; a longer one says the service is overloaded.
+pub(crate) const SHORT_WAIT: Duration = Duration::from_secs(60);
+/// Automatic re-asks of a service per query after rate limits.
+pub(crate) const RETRIES: u32 = 3;
+/// When a service rate-limited without saying for how long, it is asked
+/// again (once) this much later.
+const UNKNOWN_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 pub(crate) struct SearchState {
@@ -68,6 +83,51 @@ struct Slot {
     result: Option<Result<StreamSearch, StreamError>>,
     /// The answer to this query is complete.
     done: bool,
+    /// Asked again after rate limits so far (at most [`RETRIES`]).
+    retries: u32,
+    /// The one re-ask after a long pause was used.
+    long_retried: bool,
+    /// The service rate-limited this query: what the section says.
+    wait: Option<Wait>,
+}
+
+impl Slot {
+    fn new(service: Service, result: Option<Answer>, done: bool) -> Self {
+        Self {
+            service,
+            result,
+            done,
+            retries: 0,
+            long_retried: false,
+            wait: None,
+        }
+    }
+}
+
+/// Why a section waits after a rate limit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Wait {
+    /// A pause up to [`SHORT_WAIT`]: asked again when it ends.
+    Short,
+    /// Longer, or not told: the other services go on. `until` is the local
+    /// time it ends, when known; `retry`: it is asked once more then.
+    Long { until: Option<String>, retry: bool },
+}
+
+/// The quiet line of a waiting section (`other`: a service also asked).
+fn wait_note(service: Service, wait: &Wait, other: Option<Service>) -> String {
+    let name = service.display_name();
+    match wait {
+        Wait::Short => format!("{name} отвечает с задержкой — результаты появятся сами"),
+        Wait::Long { until, retry } => {
+            let until = until.as_ref().map(|hm| format!(" до {hm}")).unwrap_or_default();
+            match other {
+                Some(o) => format!("{name} сейчас перегружен{until} — ищу в {}", o.display_name()),
+                None if *retry => format!("{name} сейчас перегружен{until} — поищу ещё раз сам"),
+                None => format!("{name} сейчас перегружен{until}"),
+            }
+        }
+    }
 }
 
 /// What makes two tracks the same song: the ISRC, else artist + title
@@ -199,67 +259,132 @@ impl Worker {
             let key = (service, cache_key(query));
             if let Some((_, hit)) = st.cache.get(&key) {
                 log::debug!("search #{seq} «{query}»: {service} from the cache");
-                st.raw.push(Slot {
-                    service,
-                    result: Some(Ok(hit.clone())),
-                    done: true,
-                });
+                st.raw.push(Slot::new(service, Some(Ok(hit.clone())), true));
                 continue;
             }
-            st.raw.push(Slot {
-                service,
-                result: prev,
-                done: false,
-            });
+            st.raw.push(Slot::new(service, prev, false));
         }
         for &service in &asked {
             if self.streaming.search.raw.iter().any(|s| s.service == service && s.done) {
                 continue;
             }
-            let Some(svc) = self.service(service) else { continue };
-            let q = query.to_owned();
-            let tx = self.streaming.internal.clone();
-            let task = self.streaming.spawn(async move {
-                tokio::time::sleep(DEBOUNCE).await;
-                let started = Instant::now();
-                log::debug!("search #{seq} «{q}»: {service} asked");
-                let part: nikgob_core::streaming::SearchParts = Arc::new(move |part| {
-                    log::debug!(
-                        "search #{seq}: {service} first part in {} ms ({} tracks)",
-                        started.elapsed().as_millis(),
-                        part.tracks.len()
-                    );
-                    let _ = tx.send(crate::import::Internal::Stream(Msg::Searched {
-                        seq,
-                        service,
-                        result: Ok(part),
-                        partial: true,
-                    }));
-                });
-                let result = svc.search_in_parts(&q, part).await;
-                match &result {
-                    Ok(r) => log::debug!(
-                        "search #{seq}: {service} answered in {} ms: {} tracks, {} albums, {} artists, {} playlists",
-                        started.elapsed().as_millis(),
-                        r.tracks.len(),
-                        r.albums.len(),
-                        r.artists.len(),
-                        r.playlists.len()
-                    ),
-                    Err(e) => log::info!(
-                        "search #{seq}: {service} failed in {} ms: {e}",
-                        started.elapsed().as_millis()
-                    ),
-                }
-                Msg::Searched {
+            self.ask_service(service, seq, query, DEBOUNCE);
+        }
+        self.rebuild_sections();
+    }
+
+    /// Asks one service for `query` after `wait` (the debounce, or none for
+    /// a re-ask after a rate limit); its parts and answer come back as
+    /// [`Msg::Searched`].
+    fn ask_service(&mut self, service: Service, seq: u64, query: &str, wait: Duration) {
+        let Some(svc) = self.service(service) else { return };
+        let q = query.to_owned();
+        let tx = self.streaming.internal.clone();
+        let task = self.streaming.spawn(async move {
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
+            }
+            let started = Instant::now();
+            log::debug!("search #{seq} «{q}»: {service} asked");
+            let part: nikgob_core::streaming::SearchParts = Arc::new(move |part| {
+                log::debug!(
+                    "search #{seq}: {service} first part in {} ms ({} tracks)",
+                    started.elapsed().as_millis(),
+                    part.tracks.len()
+                );
+                let _ = tx.send(crate::import::Internal::Stream(Msg::Searched {
                     seq,
                     service,
-                    result,
-                    partial: false,
-                }
+                    result: Ok(part),
+                    partial: true,
+                }));
             });
-            self.streaming.search.tasks.push(task);
+            let result = svc.search_in_parts(&q, part).await;
+            match &result {
+                Ok(r) => log::debug!(
+                    "search #{seq}: {service} answered in {} ms: {} tracks, {} albums, {} artists, {} playlists",
+                    started.elapsed().as_millis(),
+                    r.tracks.len(),
+                    r.albums.len(),
+                    r.artists.len(),
+                    r.playlists.len()
+                ),
+                Err(e) => log::info!(
+                    "search #{seq}: {service} failed in {} ms: {e}",
+                    started.elapsed().as_millis()
+                ),
+            }
+            Msg::Searched {
+                seq,
+                service,
+                result,
+                partial: false,
+            }
+        });
+        self.streaming.search.tasks.push(task);
+    }
+
+    /// The whole answer of `service` to the current query was a rate limit
+    /// (see the module docs): its section waits, and a re-ask is set when
+    /// that is still allowed.
+    fn search_limited(&mut self, service: Service, retry_after: Option<Duration>) {
+        let pause = retry_after.or_else(|| self.pause_left(service));
+        let st = &mut self.streaming.search;
+        let seq = st.seq;
+        let Some(slot) = st.raw.iter_mut().find(|s| s.service == service) else { return };
+        let again = if pause.is_some_and(|p| p <= SHORT_WAIT) && slot.retries < RETRIES {
+            slot.retries += 1;
+            slot.wait = Some(Wait::Short);
+            slot.done = false;
+            pause
+        } else {
+            let retry = slot.retries < RETRIES && !slot.long_retried;
+            slot.wait = Some(Wait::Long {
+                until: pause.filter(|p| *p > SHORT_WAIT).and_then(super::accounts::hm_after),
+                retry,
+            });
+            slot.done = true;
+            // An older query's rows would read as this one's.
+            slot.result = None;
+            if retry {
+                slot.retries += 1;
+                slot.long_retried = true;
+                Some(pause.unwrap_or(UNKNOWN_WAIT))
+            } else {
+                None
+            }
+        };
+        let tries = slot.retries;
+        match again {
+            Some(after) => {
+                let after = after + super::schedule::wake_jitter();
+                log::info!(
+                    "search #{seq}: {service} rate limited, asking again in {} ms ({tries} of {RETRIES})",
+                    after.as_millis()
+                );
+                let task = self.streaming.spawn(async move {
+                    tokio::time::sleep(after).await;
+                    Msg::SearchRetry { seq, service }
+                });
+                self.streaming.search.tasks.push(task);
+            }
+            None => log::info!("search #{seq}: {service} rate limited, not asked again for this query"),
         }
+    }
+
+    /// A rate-limit pause of `service` ended: it is asked again, if the
+    /// query is still the current one.
+    pub(crate) fn search_retry(&mut self, seq: u64, service: Service) {
+        let st = &mut self.streaming.search;
+        if seq != st.seq {
+            return; // a newer query
+        }
+        let Some(slot) = st.raw.iter_mut().find(|s| s.service == service && s.wait.is_some()) else {
+            return;
+        };
+        slot.done = false;
+        let query = st.query.clone();
+        self.ask_service(service, seq, &query, Duration::ZERO);
         self.rebuild_sections();
     }
 
@@ -282,6 +407,11 @@ impl Worker {
         if seq != self.streaming.search.seq {
             return; // an older query
         }
+        if !partial && let Err(StreamError::RateLimited { retry_after }) = &result {
+            self.search_limited(service, *retry_after);
+            self.rebuild_sections();
+            return;
+        }
         if let Err(e) = &result {
             log::warn!("{service} search: {e}");
         }
@@ -298,6 +428,7 @@ impl Worker {
             }
             slot.result = Some(result.clone());
             slot.done = !partial;
+            slot.wait = None;
         }
         let rebuilt = Instant::now();
         self.rebuild_sections();
@@ -319,13 +450,14 @@ impl Worker {
     /// Recomputes the stream sections from the raw answers (merging rows).
     pub(crate) fn rebuild_sections(&mut self) {
         let started = Instant::now();
-        let raw: Vec<(Service, Option<Answer>, bool)> = self
+        let raw: Vec<(Service, Option<Answer>, bool, Option<Wait>)> = self
             .streaming
             .search
             .raw
             .iter()
-            .map(|s| (s.service, s.result.clone(), s.done))
+            .map(|s| (s.service, s.result.clone(), s.done, s.wait.clone()))
             .collect();
+        let asked: Vec<Service> = raw.iter().map(|r| r.0).collect();
         let lib_keys: Vec<(TrackId, SongKey)> = self
             .streaming
             .search
@@ -341,13 +473,20 @@ impl Worker {
         // Under a service's chip the library section is not shown: its
         // songs stay in the service's list (marked «у тебя»).
         let library_shown = self.streaming.search.sources.library;
-        for (service, result, done) in raw {
+        for (service, result, done, wait) in raw {
             let mut section = v::StreamSearchSection::new(service);
             section.searching = !done;
+            let other = asked.iter().copied().find(|&s| s != service);
+            section.note = wait.as_ref().map(|w| wait_note(service, w, other));
             match result {
                 None => {}
                 // An old error is not shown while the new query runs.
                 Some(Err(_)) if !done => {}
+                // Never a failure (see the module docs).
+                Some(Err(StreamError::RateLimited { .. })) => {
+                    let w = Wait::Long { until: None, retry: false };
+                    section.note = Some(wait_note(service, &w, other));
+                }
                 Some(Err(e)) => section.error = Some(search_error(service, &e)),
                 Some(Ok(r)) => {
                     for t in &r.tracks {
@@ -443,9 +582,7 @@ impl Worker {
 /// Why a service's section is empty, as the user reads it.
 fn search_error(service: Service, e: &StreamError) -> String {
     match e {
-        StreamError::RateLimited { .. } => {
-            format!("{} просит подождать — повтори через минуту", service.display_name())
-        }
+        StreamError::RateLimited { .. } => format!("{} сейчас перегружен", service.display_name()),
         StreamError::Network(_) => format!("Нет связи с {}", service.display_name()),
         other => super::error_text(other),
     }

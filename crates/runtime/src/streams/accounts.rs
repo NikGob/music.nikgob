@@ -21,6 +21,11 @@ fn local_hm(ms: i64) -> Option<String> {
     Some(at.to_zoned(jiff::tz::TimeZone::system()).strftime("%H:%M").to_string())
 }
 
+/// «14:05»: the local minute (rounded up) this far from now.
+pub(crate) fn hm_after(left: std::time::Duration) -> Option<String> {
+    local_hm(minute_up(std::time::SystemTime::now() + left))
+}
+
 impl Worker {
     /// Refreshes [`v::ViewState::accounts`] (published only when changed).
     pub(crate) fn publish_accounts(&mut self) {

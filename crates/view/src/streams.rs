@@ -213,8 +213,14 @@ impl SearchSources {
 pub struct StreamSearchSection {
     pub service: Service,
     pub searching: bool,
-    /// "Spotify не отвечает", "Нужно войти", …
+    /// "Spotify не отвечает", "Нужно войти", … (a real failure; shown
+    /// with «Повторить»).
     pub error: Option<String>,
+    /// A quiet line, never with a button: the service rate-limited the
+    /// query and the runtime asks again by itself («Spotify отвечает с
+    /// задержкой — результаты появятся сами»), or it is overloaded for
+    /// longer («…сейчас перегружен — ищу в YouTube Music»).
+    pub note: Option<String>,
     pub tracks: Vec<StreamTrackRow>,
     pub albums: Vec<StreamAlbumCard>,
     pub artists: Vec<StreamArtistCard>,
@@ -227,6 +233,7 @@ impl StreamSearchSection {
             service,
             searching: false,
             error: None,
+            note: None,
             tracks: Vec::new(),
             albums: Vec::new(),
             artists: Vec::new(),
