@@ -278,7 +278,7 @@ mod tests {
         let mut all = Vec::new();
         s.read_to_end(&mut all).unwrap();
         assert_eq!((all.len(), s.byte_len(), s.gain_db()), (10, Some(10), Some(-2.0)));
-        assert_eq!(s.quality().as_deref(), Some("Opus ~160 kbps"));
+        assert_eq!(s.quality().as_deref(), Some("Opus ~160 кбит/с"));
         drop(s);
         std::thread::sleep(Duration::from_millis(30));
         c.store("def", &resolved(10), &[2; 10]);

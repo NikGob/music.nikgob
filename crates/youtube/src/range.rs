@@ -57,7 +57,7 @@ pub(crate) struct Resolved {
     pub bitrate: u32,
 }
 
-/// "Opus ~160 kbps", "AAC ~128 kbps": what an itag plays.
+/// "Opus ~160 кбит/с", "AAC ~128 кбит/с": what an itag plays.
 pub(crate) fn quality_of(itag: u32, opus: bool, bitrate: u32) -> String {
     let kbps = match itag {
         251 => 160,

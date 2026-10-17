@@ -90,7 +90,7 @@ impl Service {
     }
 
     /// What the stream usually is, until the opened stream says
-    /// ([`AudioStream::quality`]): "Vorbis 320 kbps", "Opus ~160 kbps".
+    /// ([`AudioStream::quality`]): "Vorbis 320 кбит/с", "Opus ~160 кбит/с".
     pub fn nominal_quality(self) -> String {
         match self {
             Self::Spotify => quality_label("Vorbis", 320, false),
@@ -567,16 +567,17 @@ pub trait AudioStream: Read + Seek + Send {
     fn duration(&self) -> Option<Duration> {
         None
     }
-    /// What actually plays, for the player ("Opus ~160 kbps", "AAC ~128
-    /// kbps", "Vorbis 320 kbps"), if known. Called after the first read.
+    /// What actually plays, for the player ("Opus ~160 кбит/с", "AAC ~128
+    /// кбит/с", "Vorbis 320 кбит/с"), if known. Called after the first read.
     fn quality(&self) -> Option<String> {
         None
     }
 }
 
-/// "Opus ~160 kbps": a codec and its bitrate, `approx` for a variable one.
+/// "Opus ~160 кбит/с": a codec and its bitrate, `approx` for a variable
+/// one (the UI's units are Russian, as in the settings' Opus bitrate).
 pub fn quality_label(codec: &str, kbps: u32, approx: bool) -> String {
-    format!("{codec} {}{kbps} kbps", if approx { "~" } else { "" })
+    format!("{codec} {}{kbps} кбит/с", if approx { "~" } else { "" })
 }
 
 /// Where [`StreamService::search_in_parts`] hands the results it already
