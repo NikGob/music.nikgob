@@ -752,6 +752,9 @@ pub struct Prefs {
     pub library_only_downloaded: bool,
     /// How many wishlist items search / download at once on their own.
     pub auto_download_limit: u32,
+    /// Size limit of the stream audio cache per service, in MB (0 = off):
+    /// recently played YouTube files and Spotify's encrypted files.
+    pub stream_cache_mb: u32,
     /// settings.toml has a personal Spotify Client ID (the id is not here).
     pub spotify_personal_app: bool,
     /// settings.toml has YouTube Music cookies.
@@ -947,6 +950,8 @@ pub struct ViewState {
     pub stream_page: Option<StreamPageView>,
     /// The last [`Command::Share`].
     pub share: Option<ShareView>,
+    /// Bytes of stream audio cached on disk, all services together.
+    pub stream_cache_bytes: u64,
     /// Text the app should put on the clipboard (one-shot, see
     /// [`ClipboardRequest`]).
     pub clipboard: Option<ClipboardRequest>,
@@ -1196,6 +1201,8 @@ pub enum Command {
     /// Export files (Spotify Extended Streaming History / Account data,
     /// Google Takeout YouTube Music): a folder or a .zip.
     ImportExportFiles(PathBuf),
+    /// Empties the stream audio cache of every service.
+    ClearStreamCache,
     /// How a library playlist linked to a service follows it.
     SetPlaylistSync { playlist: PlaylistId, mode: PlaylistSyncMode },
     /// Fill [`ArtistDetail::discography`] ("Нет в библиотеке").
@@ -1283,6 +1290,7 @@ impl Default for Prefs {
             push_likes: true,
             library_only_downloaded: false,
             auto_download_limit: 2,
+            stream_cache_mb: 500,
             spotify_personal_app: false,
             youtube_cookies_set: false,
         }

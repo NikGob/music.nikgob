@@ -109,6 +109,7 @@ pub enum SettingId {
     ImportSpotify,
     ImportYouTube,
     ImportFiles,
+    StreamCache,
     Prowlarr,
     NoSeed,
     SeedLimit,
@@ -180,7 +181,7 @@ impl SettingId {
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
             Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled
             | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | PlaylistSync | ImportSpotify
-            | ImportYouTube | ImportFiles | Prowlarr | NoSeed | SeedLimit | SeedDays | SeedRatio
+            | ImportYouTube | ImportFiles | StreamCache | Prowlarr | NoSeed | SeedLimit | SeedDays | SeedRatio
             | DownloadLimit | UploadLimit => TAB_SOURCES,
             _ => TAB_GENERAL,
         }
@@ -272,6 +273,7 @@ impl SettingId {
             PlaylistSync => "Как новый плейлист, связанный с сервисом, следит за ним. У каждого плейлиста это можно поменять в его меню ⋮.",
             ImportSpotify => "Забирает из Spotify лайки, свои плейлисты и недавние прослушивания. Лайки и плейлисты появятся в библиотеке и в «Хочу скачать».",
             ImportYouTube => "То же из YouTube Music: лайки, плейлисты, история. Нужен вход.",
+            StreamCache => "Недавно игравшие треки хранятся на диске, и «Назад» или повтор не качают их заново. YouTube — файлы как есть, Spotify — только в зашифрованном виде, как у официального клиента. Лимит у каждого сервиса свой; старое удаляется само.",
             ImportFiles => "Файлы выгрузки — вся история прослушиваний за годы. Spotify: Аккаунт → Конфиденциальность → «Расширенная история». Google Takeout: YouTube и YouTube Music.",
             Nodes => "Синхронизация и резервная копия на другие устройства — появится позже.",
         }

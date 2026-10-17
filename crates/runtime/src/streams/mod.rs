@@ -209,8 +209,25 @@ impl Worker {
         }
     }
 
+    /// The services' audio caches follow [`v::Prefs::stream_cache_mb`].
+    pub(crate) fn apply_stream_cache(&mut self) {
+        let bytes = u64::from(self.state.read().prefs.stream_cache_mb) * 1024 * 1024;
+        for s in &self.streams {
+            s.set_cache_limit(bytes);
+        }
+        self.publish_stream_cache();
+    }
+
+    pub(crate) fn publish_stream_cache(&mut self) {
+        let bytes: u64 = self.streams.iter().map(|s| s.cache_size()).sum();
+        if self.state.read().stream_cache_bytes != bytes {
+            self.publish(|s, _| s.stream_cache_bytes = bytes);
+        }
+    }
+
     /// Start-up: accounts, the first pull of likes, the wishlist view.
     pub(crate) fn start_streams(&mut self) {
+        self.apply_stream_cache();
         self.publish_accounts();
         self.pull_all_likes();
         self.publish_wishlist();
@@ -222,6 +239,7 @@ impl Worker {
         self.sync_tick();
         self.enrich_tick();
         self.publish_accounts();
+        self.publish_stream_cache();
         if self
             .streaming
             .last_pull
@@ -279,6 +297,13 @@ impl Worker {
             Command::WishlistAttach { item, what } => self.wish_attach(item, what),
             Command::ImportFromService(service) => self.import_from_service(service),
             Command::ImportExportFiles(path) => self.import_export_files(path),
+            Command::ClearStreamCache => {
+                for s in &self.streams {
+                    s.clear_cache();
+                }
+                self.publish_stream_cache();
+                self.toast("Кэш стриминга очищен", None);
+            }
             Command::SetPlaylistSync { playlist, mode } => self.set_playlist_sync(playlist, mode),
             Command::LoadDiscography(artist) => self.load_discography(artist, true),
             other => return Some(other),

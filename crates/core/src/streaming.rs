@@ -635,6 +635,19 @@ pub trait StreamService: Send + Sync {
     /// into `dir`; returns the file. Spotify: [`StreamError::Unsupported`].
     fn save_audio(&self, id: &str, dir: &Path) -> BoxFuture<'_, Result<PathBuf, StreamError>>;
 
+    /// Bytes of this service's recently played audio kept on disk.
+    fn cache_size(&self) -> u64 {
+        0
+    }
+
+    /// Bounds that cache (bytes); 0 turns it off.
+    fn set_cache_limit(&self, bytes: u64) {
+        let _ = bytes;
+    }
+
+    /// Empties that cache.
+    fn clear_cache(&self) {}
+
     /// Link to the item on the service's website (open.spotify.com/…,
     /// music.youtube.com/…). No network.
     fn web_url(&self, kind: EntityKind, id: &str) -> String;

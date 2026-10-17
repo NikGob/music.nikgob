@@ -294,6 +294,9 @@ struct Worker {
     /// for last (see [`Worker::request`]).
     tried: Vec<SourceId>,
     playing_source: Option<(SourceId, SourceKind)>,
+    /// What recent stream items really are, by item id (see
+    /// [`PlaybackEvent::Quality`]; the preloaded next one opens early).
+    qualities: Vec<(u64, String)>,
     indexer: Option<Arc<dyn nikgob_core::indexer::Indexer>>,
     /// Last torrent search, indexed like `SearchView::torrents.results`.
     candidates: Vec<nikgob_core::indexer::Candidate>,
@@ -783,6 +786,9 @@ impl Worker {
                 if old.auto_download_limit != p.auto_download_limit {
                     self.wish_tick();
                 }
+                if old.stream_cache_mb != p.stream_cache_mb {
+                    self.apply_stream_cache();
+                }
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
@@ -829,6 +835,7 @@ impl Worker {
             | Command::WishlistAttach { .. }
             | Command::ImportFromService(_)
             | Command::ImportExportFiles(_)
+            | Command::ClearStreamCache
             | Command::SetPlaylistSync { .. }
             | Command::LoadDiscography(_)) => {
                 if let Some(c) = self.stream_command(c) {

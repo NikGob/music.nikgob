@@ -194,6 +194,8 @@ pub struct Spotify {
     artists: TtlCache<StreamArtist>,
     playlists: TtlCache<StreamPlaylist>,
     searches: TtlCache<StreamSearch>,
+    /// The last track that played, still open (see [`audio::Recent`]).
+    recent: audio::Recent,
     /// Opens sign-in pages (the system browser; a stub in tests).
     opener: Mutex<auth::Opener>,
 }
@@ -207,6 +209,23 @@ fn default_opener() -> auth::Opener {
         return Arc::new(|url: &str| log::debug!("test: not opening {url}"));
     }
     Arc::new(auth::open_browser)
+}
+
+/// The default size limit of the encrypted audio cache.
+pub const DEFAULT_CACHE_LIMIT: u64 = 500 * 1024 * 1024;
+
+/// Bytes in a folder and its subfolders.
+fn dir_size(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| match e.metadata() {
+            Ok(m) if m.is_dir() => dir_size(&e.path()),
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        })
+        .sum()
 }
 
 /// The runtime the service's work runs on: the caller's, or one of its own
@@ -286,6 +305,7 @@ impl Spotify {
             artists: TtlCache::new(CACHE_TTL, 100),
             playlists: TtlCache::new(CACHE_TTL, 50),
             searches: TtlCache::new(SEARCH_TTL, 50),
+            recent: Default::default(),
             opener: Mutex::new(default_opener()),
         });
         for client in [&spotify.shared, &spotify.personal] {
@@ -306,6 +326,13 @@ impl Spotify {
     /// Replaces how sign-in pages are opened (the system browser).
     pub fn set_browser_opener(&self, open: auth::Opener) {
         *lock(&self.opener) = open;
+    }
+
+    /// Keeps played files in librespot's encrypted cache in `dir` (Spotify
+    /// audio is never stored decrypted).
+    pub fn with_audio_cache(self: Arc<Self>, dir: PathBuf) -> Arc<Self> {
+        self.sessions.set_cache_dir(dir);
+        self
     }
 
     fn arc(&self) -> Option<Arc<Self>> {
@@ -1111,6 +1138,26 @@ impl Spotify {
     // ---- audio -------------------------------------------------------------
 
     async fn open_track(&self, id: String) -> Result<audio::Opened, StreamError> {
+        if let Some(o) = audio::take_recent(&self.recent, &id) {
+            log::debug!("spotify: {id}: reopened from memory");
+            return Ok(o);
+        }
+        let started = Instant::now();
+        let r = self.open_track_now(&id).await;
+        match &r {
+            Ok(o) => log::debug!(
+                "spotify: {id}: opened in {} ms (Vorbis {} kbps, {})",
+                started.elapsed().as_millis(),
+                o.kbps,
+                if o.cached { "from the encrypted cache" } else { "downloading" }
+            ),
+            Err(e) => log::info!("spotify: {id}: did not open in {} ms: {e}", started.elapsed().as_millis()),
+        }
+        r
+    }
+
+    async fn open_track_now(&self, id: &str) -> Result<audio::Opened, StreamError> {
+        let id = id.to_owned();
         let credential = self
             .playback_credential()
             .ok_or(StreamError::PremiumRequired)?;
@@ -1343,9 +1390,32 @@ impl StreamService for Spotify {
         let me = self.arc().ok_or(StreamError::Unavailable)?;
         let id = id.to_string();
         let handle = self.rt.clone();
-        Ok(Box::new(audio::SpotifyStream::new(Box::new(move || {
-            audio::block_on_runtime(&handle, async move { me.open_track(id).await })
-        }))))
+        let recent = self.recent.clone();
+        let kept = id.clone();
+        Ok(Box::new(
+            audio::SpotifyStream::new(Box::new(move || {
+                audio::block_on_runtime(&handle, async move { me.open_track(id).await })
+            }))
+            .keep_in(kept, recent),
+        ))
+    }
+
+    fn cache_size(&self) -> u64 {
+        self.sessions.cache_dir().map_or(0, |d| dir_size(&d))
+    }
+
+    fn set_cache_limit(&self, bytes: u64) {
+        self.sessions.set_cache_limit(bytes);
+    }
+
+    fn clear_cache(&self) {
+        if let Some(d) = self.sessions.cache_dir() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+            }
+            log::info!("spotify: audio cache cleared");
+        }
     }
 
     fn save_audio(&self, _id: &str, _dir: &Path) -> BoxFuture<'_, Result<PathBuf, StreamError>> {

@@ -52,7 +52,36 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     );
 
     imports(ui, state, out);
+    stream_cache(ui, state, p, out);
     torrents(ui, p, pages, out);
+}
+
+/// «Кэш стриминга»: its limit, how much it holds, «Очистить».
+fn stream_cache(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Command>) {
+    let used = state.stream_cache_bytes;
+    let limit = p.stream_cache_mb;
+    let hint = if limit == 0 {
+        "Выключен: каждый раз качается заново".to_owned()
+    } else if used == 0 {
+        format!("Пока пусто · до {} на сервис", super::fmt_size(u64::from(limit) * 1024 * 1024))
+    } else {
+        format!("Занято {} · до {} на сервис", super::fmt_size(used), super::fmt_size(u64::from(limit) * 1024 * 1024))
+    };
+    row(ui, Id::StreamCache, "Кэш стриминга", Some(&hint), |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let fmt = |v: f32| if v < 1.0 { "выкл.".to_owned() } else { format!("{v:.0} МБ") };
+            if let Some(v) = range_slider(ui, "set-stream-cache", limit.min(4000) as f32, (0.0, 4000.0), 100.0, fmt) {
+                p.stream_cache_mb = v as u32;
+            }
+            if ui
+                .add(Button::new("Очистить").style(Style::Text).enabled(used > 0).id_salt("stream-cache-clear"))
+                .clicked()
+            {
+                out.push(Command::ClearStreamCache);
+            }
+        });
+    });
 }
 
 /// "Вошёл как …" and friends.

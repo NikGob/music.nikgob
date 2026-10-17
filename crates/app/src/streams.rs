@@ -31,7 +31,11 @@ pub fn real(data_dir: &Path, secrets: &StreamingSettings) -> Services {
     let mut out: Services = Vec::new();
     let mut sp = nikgob_spotify::SpotifyConfig::new(data_dir.join("spotify"));
     sp.personal_client_id = secrets.spotify_client_id.clone();
-    out.push(nikgob_spotify::Spotify::new(sp));
+    // Recently played audio: YouTube's files as they came, Spotify's
+    // encrypted by librespot (never decrypted on disk). Bounded by
+    // `Prefs::stream_cache_mb`, set by the runtime at start.
+    let cache = data_dir.join("cache").join("streams");
+    out.push(nikgob_spotify::Spotify::new(sp).with_audio_cache(cache.join("spotify")));
     match nikgob_youtube::Youtube::new(nikgob_youtube::YoutubeConfig::new(data_dir.join("youtube"))) {
         Ok(yt) => {
             yt.warm_up();

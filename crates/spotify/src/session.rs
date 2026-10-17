@@ -41,6 +41,10 @@ pub struct Sessions {
     connecting: tokio::sync::Mutex<()>,
     device_id: String,
     tmp_dir: PathBuf,
+    /// librespot's file cache for the next session: its folder and size
+    /// limit (0 = off). It keeps the files **encrypted**, as Spotify sends
+    /// them, like the official client; the key is fetched on every play.
+    audio_cache: Mutex<(Option<PathBuf>, u64)>,
 }
 
 impl Sessions {
@@ -50,6 +54,33 @@ impl Sessions {
             connecting: tokio::sync::Mutex::new(()),
             device_id,
             tmp_dir,
+            audio_cache: Mutex::new((None, crate::DEFAULT_CACHE_LIMIT)),
+        }
+    }
+
+    /// Where the encrypted audio cache lives (used by sessions made later).
+    pub fn set_cache_dir(&self, dir: PathBuf) {
+        lock(&self.audio_cache).0 = Some(dir);
+    }
+
+    /// The cache's size limit for sessions made later; 0 turns it off.
+    pub fn set_cache_limit(&self, bytes: u64) {
+        lock(&self.audio_cache).1 = bytes;
+    }
+
+    pub fn cache_dir(&self) -> Option<PathBuf> {
+        lock(&self.audio_cache).0.clone()
+    }
+
+    fn cache(&self) -> Option<librespot_core::cache::Cache> {
+        let (dir, limit) = lock(&self.audio_cache).clone();
+        let dir = dir.filter(|_| limit > 0)?;
+        match librespot_core::cache::Cache::new(None, None, Some(&dir), Some(limit)) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log::info!("spotify: no audio cache in {}: {e}", dir.display());
+                None
+            }
         }
     }
 
@@ -78,7 +109,7 @@ impl Sessions {
             ..SessionConfig::default()
         };
         let _ = std::fs::create_dir_all(&self.tmp_dir);
-        let session = Session::new(config, None);
+        let session = Session::new(config, self.cache());
         match tokio::time::timeout(CONNECT_TIMEOUT, session.connect(credentials, false)).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e),

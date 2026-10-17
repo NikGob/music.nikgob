@@ -108,6 +108,10 @@ pub struct Opened {
     pub body: OggBody<AudioDecrypt<AudioFile>>,
     pub gain_db: Option<f32>,
     pub duration: Option<Duration>,
+    /// Bitrate of the file (320, 160 or 96 kbps).
+    pub kbps: u32,
+    /// It came from librespot's encrypted file cache (no download).
+    pub cached: bool,
     /// Kept so the download is stopped when the stream is dropped.
     controller: StreamLoaderController,
 }
@@ -157,6 +161,7 @@ pub async fn open(session: &Session, id: &str, premium: Option<bool>) -> Result<
     let file = AudioFile::open(session, file_id, bytes_per_second)
         .await
         .map_err(|e| failed(network(e)))?;
+    let cached = file.is_cached();
     let controller = file
         .get_stream_loader_controller()
         .map_err(|e| failed(network(e)))?;
@@ -190,6 +195,8 @@ pub async fn open(session: &Session, id: &str, premium: Option<bool>) -> Result<
         body,
         gain_db,
         duration,
+        kbps,
+        cached,
         controller,
     })
 }
@@ -231,6 +238,24 @@ pub struct SpotifyStream {
     opener: Option<Opener>,
     opened: Option<Opened>,
     failure: Option<String>,
+    /// Where the opened track goes when this stream is dropped (see
+    /// [`Recent`]), with its id.
+    keep: Option<(String, Recent)>,
+}
+
+/// The last track that played, still open (its download running), so
+/// «Назад» or a repeat starts at once. One track: the one before is closed.
+pub type Recent = std::sync::Arc<std::sync::Mutex<Option<(String, Opened)>>>;
+
+/// Takes the kept track `id`, rewound, if it is the one kept.
+pub fn take_recent(recent: &Recent, id: &str) -> Option<Opened> {
+    let mut slot = recent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.as_ref().is_some_and(|(kept, _)| kept == id) {
+        let (_, mut o) = slot.take()?;
+        o.body.seek(SeekFrom::Start(0)).ok()?;
+        return Some(o);
+    }
+    None
 }
 
 impl SpotifyStream {
@@ -240,6 +265,12 @@ impl SpotifyStream {
             opened: None,
             failure: None,
         }
+    }
+
+    /// Keeps the opened track in `recent` when dropped.
+    pub fn keep_in(mut self, id: String, recent: Recent) -> Self {
+        self.keep = Some((id, recent));
+        self
     }
 
     fn body(&mut self) -> io::Result<&mut OggBody<AudioDecrypt<AudioFile>>> {
@@ -294,6 +325,24 @@ impl AudioStream for SpotifyStream {
 
     fn duration(&self) -> Option<Duration> {
         self.opened.as_ref().and_then(|o| o.duration)
+    }
+
+    fn quality(&self) -> Option<String> {
+        self.opened
+            .as_ref()
+            .map(|o| nikgob_core::streaming::quality_label("Vorbis", o.kbps, false))
+    }
+}
+
+impl Drop for SpotifyStream {
+    fn drop(&mut self) {
+        if let (Some(o), Some((id, recent))) = (self.opened.take(), self.keep.take()) {
+            let old = recent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .replace((id, o));
+            drop(old);
+        }
     }
 }
 

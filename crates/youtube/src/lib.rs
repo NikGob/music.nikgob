@@ -19,6 +19,7 @@
 //! through a handle that cancels it when dropped; callers may poll on any
 //! executor.
 
+mod cache;
 mod convert;
 mod innertube;
 mod player;
@@ -46,6 +47,7 @@ use rustypipe::param::{Country, Language};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
+pub use cache::DEFAULT_LIMIT as DEFAULT_CACHE_LIMIT;
 pub use remux::Tags;
 
 use range::{HttpStream, ResolveFn};
@@ -100,6 +102,10 @@ struct Inner {
     /// Language and country for our own player requests.
     hl: String,
     gl: String,
+    /// Recently played audio on disk.
+    cache: cache::AudioCache,
+    /// Videos the player refused lately, by video id, and why.
+    refused: Mutex<std::collections::HashMap<String, (std::time::Instant, StreamError)>>,
 }
 
 impl Inner {
@@ -225,6 +231,8 @@ impl Youtube {
                     .ok()
                     .and_then(|v| v.as_str().map(str::to_owned))
                     .unwrap_or_else(|| "US".into()),
+                cache: cache::AudioCache::new(),
+                refused: Mutex::new(std::collections::HashMap::new()),
             }),
             runtime: Runtime(Some(runtime)),
         }))
@@ -360,15 +368,21 @@ pub(crate) fn map_err(e: RpError) -> StreamError {
     }
 }
 
-fn stream(inner: &Arc<Inner>, runtime: tokio::runtime::Handle, id: &str) -> HttpStream {
-    let (inner2, id) = (Arc::clone(inner), id.to_owned());
+/// The audio of `id` over HTTP; a complete download goes to the cache when
+/// `keep`.
+fn stream(inner: &Arc<Inner>, runtime: tokio::runtime::Handle, id: &str, keep: bool) -> HttpStream {
+    let (inner2, id2) = (Arc::clone(inner), id.to_owned());
     let resolve: ResolveFn = Arc::new(move || {
         let (inner, id) = (Arc::clone(&inner2), id.clone());
         Box::pin(
             async move { player::resolve(&inner.rp, &inner.http, &id, &inner.hl, &inner.gl).await },
         )
     });
-    HttpStream::new(runtime, inner.http.clone(), resolve)
+    let on_complete: Option<range::CompleteFn> = keep.then(|| {
+        let (inner, id) = (Arc::clone(inner), id.to_owned());
+        Box::new(move |r: &range::Resolved, bytes: &[u8]| inner.cache.store(&id, r, bytes)) as range::CompleteFn
+    });
+    HttpStream::new(runtime, inner.http.clone(), resolve, on_complete)
 }
 
 /// Unix ms of a history entry. YouTube only gives the day; entries of one
@@ -697,6 +711,9 @@ impl StreamService for Youtube {
         if id.is_empty() {
             return Err(StreamError::Unavailable);
         }
+        if let Some(cached) = self.inner.cache.open(id) {
+            return Ok(Box::new(cached));
+        }
         Ok(Box::new(stream(
             &self.inner,
             self.runtime.handle().clone(),
@@ -709,7 +726,14 @@ impl StreamService for Youtube {
         let handle = self.runtime.handle().clone();
         self.run(move |inner| async move {
             let tags = Self::tags(&inner, &id).await;
-            let mut s = stream(&inner, handle, &id);
+            // A recently played track is on disk already.
+            let mut s: Box<dyn AudioStream> = match inner.cache.open(&id) {
+                Some(c) => {
+                    log::debug!("youtube: {id}: saved from the cache ({})", c.path().display());
+                    Box::new(c)
+                }
+                None => Box::new(stream(&inner, handle, &id, true)),
+            };
             let task = tokio::task::spawn_blocking(move || -> Result<PathBuf, StreamError> {
                 let io = |e: std::io::Error| StreamError::Network(e.to_string());
                 let mut bytes = Vec::new();
@@ -743,6 +767,18 @@ impl StreamService for Youtube {
             task.await
                 .unwrap_or_else(|e| Err(StreamError::Network(format!("task failed: {e}"))))
         })
+    }
+
+    fn cache_size(&self) -> u64 {
+        self.inner.cache.size()
+    }
+
+    fn set_cache_limit(&self, bytes: u64) {
+        self.inner.cache.set_limit(bytes);
+    }
+
+    fn clear_cache(&self) {
+        self.inner.cache.clear();
     }
 
     fn web_url(&self, kind: EntityKind, id: &str) -> String {

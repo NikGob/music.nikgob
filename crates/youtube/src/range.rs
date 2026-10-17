@@ -53,6 +53,22 @@ pub(crate) struct Resolved {
     pub gain_db: Option<f32>,
 }
 
+/// "Opus ~160 kbps", "AAC ~128 kbps": what an itag plays.
+pub(crate) fn quality_of(itag: u32, opus: bool, bitrate: u32) -> String {
+    let kbps = match itag {
+        251 => 160,
+        250 => 70,
+        249 => 50,
+        140 => 128,
+        141 => 256,
+        _ => (bitrate / 1000).max(1),
+    };
+    nikgob_core::streaming::quality_label(if opus { "Opus" } else { "AAC" }, kbps, true)
+}
+
+/// Gets the whole resource once it is downloaded (for the disk cache).
+pub(crate) type CompleteFn = Box<dyn FnOnce(&Resolved, &[u8]) + Send>;
+
 /// Resolves (again) where the bytes are. Called on the download task.
 pub(crate) type ResolveFn =
     Arc<dyn Fn() -> BoxFuture<'static, Result<Resolved, StreamError>> + Send + Sync>;
@@ -149,7 +165,12 @@ type StartFn = Box<dyn FnOnce(Arc<Shared>) + Send>;
 
 impl HttpStream {
     /// Nothing runs until the stream is first read, seeked or asked about.
-    pub(crate) fn new(runtime: Handle, http: reqwest::Client, resolve: ResolveFn) -> Self {
+    pub(crate) fn new(
+        runtime: Handle,
+        http: reqwest::Client,
+        resolve: ResolveFn,
+        on_complete: Option<CompleteFn>,
+    ) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 resolved: None,
@@ -166,7 +187,7 @@ impl HttpStream {
             shared,
             pos: 0,
             start: Mutex::new(Some(Box::new(move |shared: Arc<Shared>| {
-                runtime.spawn(download(shared, http, resolve));
+                runtime.spawn(download(shared, http, resolve, on_complete));
             }))),
         }
     }
@@ -305,7 +326,13 @@ enum Fail {
     Fatal(String),
 }
 
-async fn download(shared: Arc<Shared>, http: reqwest::Client, resolve: ResolveFn) {
+async fn download(
+    shared: Arc<Shared>,
+    http: reqwest::Client,
+    resolve: ResolveFn,
+    mut on_complete: Option<CompleteFn>,
+) {
+    let started = std::time::Instant::now();
     let mut resolved = match resolve().await {
         Ok(r) => r,
         Err(e) => return fail(&shared, format!("cannot resolve the stream: {e}")),
@@ -331,7 +358,17 @@ async fn download(shared: Arc<Shared>, http: reqwest::Client, resolve: ResolveFn
                 .or_else(|| st.have.gap_from(0, resolved.len))
         };
         let Some(gap) = next else {
-            // Everything is here; nothing to do but wait for the drop.
+            // Everything is here: kept for next time, then nothing to do
+            // but wait for the drop.
+            if let Some(done) = on_complete.take() {
+                log::debug!(
+                    "youtube: stream downloaded in {} ms",
+                    started.elapsed().as_millis()
+                );
+                let data = shared.lock().data.clone();
+                let r = resolved.clone();
+                let _ = tokio::task::spawn_blocking(move || done(&r, &data)).await;
+            }
             moved.await;
             if shared.lock().closed {
                 return;
