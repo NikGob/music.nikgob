@@ -42,6 +42,7 @@ pub use error::{LibraryError, Result};
 pub use joblog::JOB_LOG_KEEP;
 pub use migrations::SCHEMA_VERSION;
 pub use playlists::LIKED_PLAYLIST_NAME;
+pub use streams::event_id;
 pub use types::{
     ArtistRow, ArtistSort, ArtistSortKey, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
     PlaylistEntryRow, PlaylistKind, PlaylistRemote, PlaylistSummary, PurgedFile, PurgedTrack,
