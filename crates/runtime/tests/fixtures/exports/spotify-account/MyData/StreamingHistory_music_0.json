@@ -1,0 +1,6 @@
+[
+  {"endTime": "2019-05-01 20:00", "artistName": "Кино", "trackName": "Группа крови", "msPlayed": 285000},
+  {"endTime": "2019-05-01 20:05", "artistName": "Аквариум", "trackName": "Город золотой", "msPlayed": 15000},
+  {"endTime": "2019-05-02 20:05", "artistName": "Аквариум", "trackName": "Город золотой", "msPlayed": 190000},
+  {"endTime": "2019-05-03 08:00", "artistName": "Unknown Artist", "trackName": "Unknown Track", "msPlayed": 1000}
+]

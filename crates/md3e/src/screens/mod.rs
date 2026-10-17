@@ -799,10 +799,8 @@ fn load_for(route: &Route, out: &mut Vec<Command>) {
         Route::Home => out.push(Command::LoadHome),
         Route::Library(_) => out.push(Command::LoadLibrary),
         Route::Release(id) => out.push(Command::LoadRelease(*id)),
-        Route::Artist(id) => {
-            out.push(Command::LoadArtist(*id));
-            out.push(Command::LoadDiscography(*id));
-        }
+        // The runtime loads the discography with the artist (cached).
+        Route::Artist(id) => out.push(Command::LoadArtist(*id)),
         Route::Playlist(id) => out.push(Command::LoadPlaylist(*id)),
         Route::Stream(page) => out.push(Command::LoadStream(page.clone())),
         Route::Downloads(_) => out.push(Command::LoadWishlist),

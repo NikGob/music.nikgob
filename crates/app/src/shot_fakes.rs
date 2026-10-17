@@ -11,7 +11,7 @@
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
-    DiscographyView, PlaylistLink, Status, StreamAlbumCard, ViewState, WishlistGroup, WishlistId,
+    DiscographyView, PlaylistSyncView, Status, StreamAlbumCard, ViewState, WishlistGroup, WishlistId,
     WishlistOrigin, WishlistRow, WishlistScope, WishlistStatus as St, WishlistView,
 };
 
@@ -63,9 +63,12 @@ impl Fakes {
         if self.link
             && let Some(p) = s.playlist.as_mut()
         {
-            p.link = Some(PlaylistLink {
+            p.sync = Some(PlaylistSyncView {
                 remote: RemoteId::new(Service::Spotify, "sp-pl-evening"),
-                sync_mode: PlaylistSyncMode::Follow,
+                mode: PlaylistSyncMode::Follow,
+                synced: Some("5 мин назад".into()),
+                syncing: false,
+                error: None,
             });
         }
         s

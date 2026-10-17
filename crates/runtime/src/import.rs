@@ -407,11 +407,13 @@ impl Worker {
         let Some(svc) = &self.import else { return };
         let (active, confirm, history) = svc.view();
         self.publish(|s, _| {
-            s.downloads.active.retain(|j| j.id & IMPORT_ID == 0);
+            // Cold-start jobs of the streaming part share the id space.
+            let others = |id: u64| id & IMPORT_ID == 0 || id & crate::streams::STREAM_JOB != 0;
+            s.downloads.active.retain(|j| others(j.id));
             s.downloads.active.extend(active);
             s.downloads.confirm.retain(|c| c.id & IMPORT_ID == 0);
             s.downloads.confirm.extend(confirm);
-            s.downloads.history.retain(|j| j.id & IMPORT_ID == 0);
+            s.downloads.history.retain(|j| others(j.id));
             s.downloads.history.extend(history);
         });
     }

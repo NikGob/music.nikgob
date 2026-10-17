@@ -676,6 +676,7 @@ impl Worker {
                 };
                 self.toast(format!("Добавлено в «{name}»"), None);
                 self.load_library();
+                self.playlist_edited(id);
             }
             Command::RemoveFromPlaylist(id, track) => {
                 if id == LIKED_PLAYLIST {
@@ -687,6 +688,7 @@ impl Worker {
                 }
                 self.load_playlist(id);
                 self.load_library();
+                self.playlist_edited(id);
             }
             Command::MoveInPlaylist {
                 playlist,
@@ -737,7 +739,10 @@ impl Worker {
             }
             Command::LoadRelease(id) => self.load_release(id),
             Command::LoadArtist(id) => self.load_artist(id),
-            Command::LoadPlaylist(id) => self.load_playlist(id),
+            Command::LoadPlaylist(id) => {
+                self.load_playlist(id);
+                self.sync_on_open(id);
+            }
             Command::LoadHome => self.load_home(),
             Command::Search(q) => self.search(q),
             Command::SetPrefs(mut p) => {
@@ -1385,6 +1390,8 @@ impl Worker {
             s.artist = Some(res.artist_detail(&artist, &top, &releases, liked));
         });
         self.kick_photos(Some(id));
+        // "Нет в библиотеке": from the cache, or looked up once a day.
+        self.load_discography(id, false);
     }
 
     fn playlist_tracks(&mut self, id: PlaylistId) -> (Vec<TrackId>, String) {
@@ -1420,13 +1427,10 @@ impl Worker {
             .into_iter()
             .find(|p| p.id.unwrap_or(LIKED_PLAYLIST) == id);
         let Some(summary) = summary else { return };
-        let link = self.lib.playlist_remote(id).ok().flatten().map(|r| nikgob_view::PlaylistLink {
-            remote: r.remote,
-            sync_mode: r.sync_mode,
-        });
+        let sync = self.playlist_sync_view(id);
         self.publish(|s, res| {
             let mut detail = res.playlist_detail(&summary, &rows);
-            detail.link = link;
+            detail.sync = sync;
             s.playlist = Some(detail);
         });
     }

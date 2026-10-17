@@ -172,7 +172,8 @@ impl Shot {
             }
             "playlist" => {
                 // The first user playlist.
-                if let Some(p) = state.library.playlists.iter().find(|p| !p.pinned) {
+                // `playlist:Name` picks one by name.
+                if let Some(p) = state.library.playlists.iter().find(|p| !p.pinned && (arg.is_empty() || p.name == arg)) {
                     ui.navigate(ctx, Route::Playlist(p.id), out);
                 }
                 self.wait = 30;

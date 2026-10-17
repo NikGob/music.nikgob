@@ -11,8 +11,9 @@
 //!   echoes.
 //! * The very first pull of a service behaves like an import: its likes land
 //!   in the library with wishlist items that wait (`import`, "ждёт") for the
-//!   user's "скачать" instead of starting hundreds of downloads. Part B's
-//!   API import can run later; it finds these likes known and adds nothing.
+//!   user's "скачать" instead of starting hundreds of downloads. The API
+//!   import ([`super::cold`]) goes through the same code, so whichever runs
+//!   first takes the likes and the other finds them known.
 
 use nikgob_core::model::{TrackId, WishlistOrigin};
 use nikgob_core::streaming::{RemoteId, Service, StreamError, StreamTrack};
@@ -47,15 +48,23 @@ impl Worker {
                 return;
             }
         };
+        self.apply_remote_likes(service, &liked, false);
+    }
+
+    /// Brings the service's liked list in (see the module docs). With
+    /// `import` (the API import of part B), new likes wait in the wishlist
+    /// like on the first pull. Returns how many likes are new here.
+    pub(crate) fn apply_remote_likes(&mut self, service: Service, liked: &[StreamTrack], import: bool) -> usize {
         let first = !self.lib.likes_pulled(service).unwrap_or(true);
         let known = self.lib.remote_likes(service).unwrap_or_default();
         let now = nikgob_library::now_ms();
-        let origin = if first {
+        let origin = if first || import {
             WishlistOrigin::Import
         } else {
             WishlistOrigin::Sync
         };
         let mut changed = 0usize;
+        let mut new = 0usize;
         // Oldest first, so "Любимые" keeps the service's order (newest on top).
         for t in liked.iter().rev() {
             if known.iter().any(|k| k.remote == t.id) {
@@ -70,6 +79,7 @@ impl Worker {
                     continue;
                 }
                 changed += 1;
+                new += 1;
                 self.wish_for_like(track, origin);
             }
             let _ = self.lib.put_remote_like(&RemoteLike {
@@ -100,6 +110,7 @@ impl Worker {
             self.publish_wishlist();
             self.wish_tick();
         }
+        new
     }
 
     /// Pushes a like / unlike of a library track to its services.

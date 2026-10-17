@@ -113,14 +113,6 @@ pub struct StreamPlaylistCard {
     pub sync_mode: Option<PlaylistSyncMode>,
 }
 
-/// A library playlist linked to a playlist of a service
-/// ([`crate::PlaylistDetail::link`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlaylistLink {
-    pub remote: RemoteId,
-    pub sync_mode: PlaylistSyncMode,
-}
-
 // ---------------------------------------------------------------- search
 
 /// Which sources the unified search asks ([`crate::Command::Search`]); the
@@ -266,6 +258,20 @@ pub struct DiscographyView {
     pub loading: bool,
     pub error: Option<String>,
     pub albums: Vec<StreamAlbumCard>,
+}
+
+/// How a library playlist follows its playlist in a service
+/// ([`crate::PlaylistDetail::sync`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaylistSyncView {
+    pub remote: RemoteId,
+    pub mode: PlaylistSyncMode,
+    /// When it was last synced ("5 мин назад"); `None` = not yet.
+    pub synced: Option<String>,
+    /// A sync is running.
+    pub syncing: bool,
+    /// The last sync failed: why, in Russian.
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------- wishlist

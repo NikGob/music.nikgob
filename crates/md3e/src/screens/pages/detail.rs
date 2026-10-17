@@ -354,28 +354,50 @@ fn discography(ui: &mut Ui, d: &nikgob_view::DiscographyView, out: &mut Vec<Comm
         s.on_surface_variant,
     ));
     ui.add_space(8.0);
-    widgets::grid(ui, &d.albums, widgets::CARD_W, |ui, a, w| {
-        ui.vertical(|ui| {
-            ui.set_width(w);
-            ui.spacing_mut().item_spacing.y = 4.0;
-            let nav = super::streams::album_card(ui, a, w, "discography", out);
-            if ui
-                .add(
-                    Button::new("Скачать")
-                        .icon(Icon::Download)
-                        .style(Style::Text)
-                        .size(Size::S)
-                        .id_salt(("disco-dl", &a.remote)),
-                )
-                .on_hover_text("Весь альбом — в Любимые и в «Хочу скачать»")
-                .clicked()
-            {
-                out.push(Command::LikeStreamAlbum { album: a.remote.clone(), on: true });
-            }
-            nav
+    // Albums, then singles and EPs, then compilations (newest first each).
+    let kinds: [(&str, fn(ReleaseType) -> bool); 3] = [
+        ("Альбомы", |t| t == ReleaseType::Album),
+        ("Синглы и EP", |t| matches!(t, ReleaseType::Single | ReleaseType::Ep)),
+        ("Сборники и другое", |t| !matches!(t, ReleaseType::Album | ReleaseType::Single | ReleaseType::Ep)),
+    ];
+    let groups: Vec<(&str, Vec<&nikgob_view::StreamAlbumCard>)> = kinds
+        .iter()
+        .map(|(title, is)| (*title, d.albums.iter().filter(|a| is(a.release_type)).collect::<Vec<_>>()))
+        .filter(|(_, list)| !list.is_empty())
+        .collect();
+    let mut nav = None;
+    let titled = groups.len() > 1;
+    for (title, list) in groups {
+        if titled {
+            ui.label(TypeRole::TitleSmall.style().rich(title, s.on_surface_variant));
+            ui.add_space(4.0);
+        }
+        nav = widgets::grid(ui, &list, widgets::CARD_W, |ui, a, w| {
+            ui.vertical(|ui| {
+                ui.set_width(w);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                let nav = super::streams::album_card(ui, a, w, "discography", out);
+                if ui
+                    .add(
+                        Button::new("Скачать")
+                            .icon(Icon::Download)
+                            .style(Style::Text)
+                            .size(Size::S)
+                            .id_salt(("disco-dl", &a.remote)),
+                    )
+                    .on_hover_text("Весь альбом — в Любимые и в «Хочу скачать»")
+                    .clicked()
+                {
+                    out.push(Command::LikeStreamAlbum { album: a.remote.clone(), on: true });
+                }
+                nav
+            })
+            .inner
         })
-        .inner
-    })
+        .or(nav);
+        ui.add_space(8.0);
+    }
+    nav
 }
 
 /// State of the playlist edit dialog.
@@ -608,18 +630,30 @@ pub fn playlist(
                 ),
                 s.on_surface_variant,
             ));
-            if let Some(l) = &p.link {
+            if let Some(l) = &p.sync {
                 ui.add_space(8.0);
                 let mode = super::settings_help::SettingId::PlaylistSync.choices()
-                    [super::settings_help::sync_index(l.sync_mode)]
+                    [super::settings_help::sync_index(l.mode)]
                 .label
                 .to_lowercase();
-                ui.add(
-                    AssistChip::new(format!("{} · {mode}", l.remote.service.display_name()))
-                        .icon(Icon::Sync)
-                        .id_salt("pl-link"),
-                )
-                .on_hover_text("Связан с плейлистом сервиса; как синхронизировать — в ⋮");
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.add(
+                        AssistChip::new(format!("{} · {mode}", l.remote.service.display_name()))
+                            .icon(Icon::Sync)
+                            .id_salt("pl-link"),
+                    )
+                    .on_hover_text("Связан с плейлистом сервиса; как синхронизировать — в ⋮");
+                    // A small status line: running, failed, or when.
+                    if l.syncing {
+                        ui.add(LoadingIndicator::new().size(24.0));
+                        ui.label(TypeRole::BodySmall.style().rich("синхронизируется…", s.on_surface_variant));
+                    } else if let Some(e) = &l.error {
+                        ui.label(TypeRole::BodySmall.style().rich(e, s.error));
+                    } else if let Some(t) = &l.synced {
+                        ui.label(TypeRole::BodySmall.style().rich(format!("синхронизирован {t}"), s.on_surface_variant));
+                    }
+                });
             }
         });
         ui.add_space(16.0);
@@ -648,12 +682,12 @@ pub fn playlist(
                 .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic));
             // A playlist that follows one of a service: how it syncs (a
             // greyed title, then the three modes).
-            let sync_n = if let Some(l) = &p.link {
+            let sync_n = if let Some(l) = &p.sync {
                 menu = menu
                     .divider()
                     .item(MenuItem::new(format!("Синхронизация с {}", l.remote.service.display_name())).enabled(false));
                 for (i, c) in super::settings_help::SettingId::PlaylistSync.choices().iter().enumerate() {
-                    let on = super::settings_help::sync_index(l.sync_mode) == i;
+                    let on = super::settings_help::sync_index(l.mode) == i;
                     menu = menu.item(MenuItem::new(c.label).icon(Icon::Sync).selected(on));
                 }
                 nikgob_view::PlaylistSyncMode::ALL.len() + 1

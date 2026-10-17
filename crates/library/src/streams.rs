@@ -14,6 +14,9 @@
 //! * A downloaded file of a stream track is added to the *same* track as a
 //!   local source (the importer's job); the local file then plays, and the
 //!   track is a library track for good.
+//! * A track known only from an imported listening history, without an id in
+//!   any service ("seen", see [`import`]), has no source at all; a marker row
+//!   in `external_id` (service `seen`) keeps it out of the library too.
 
 use nikgob_core::model::{
     Artist, ArtistCredit, ArtistId, PlaylistId, Release, ReleaseId, Source, SourceKind, Track,
@@ -41,7 +44,9 @@ fn likes_key(service: Service) -> String {
 /// `in_library` of the track row aliased `track` (see the module docs).
 const IN_LIBRARY_EXPR: &str = "(
     EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id AND s.kind = 'local_file')
-    OR NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id AND s.kind != 'local_file')
+    OR (NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id AND s.kind != 'local_file')
+        AND NOT EXISTS (SELECT 1 FROM external_id x WHERE x.kind = 'track' AND x.local_id = track.id
+                                                      AND x.service = 'seen'))
     OR EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track' AND l.target_id = track.id
                                        AND l.deleted = 0)
     OR EXISTS (SELECT 1 FROM playlist_entry e JOIN playlist p ON p.id = e.playlist_id
@@ -907,6 +912,10 @@ impl Library {
         })
     }
 }
+
+mod import;
+
+pub use import::event_id;
 
 #[cfg(test)]
 mod tests;
