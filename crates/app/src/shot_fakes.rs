@@ -16,6 +16,8 @@
 //! - `fake:paused:youtube` / `fake:paused:spotify` — the service asked to
 //!   wait (until 14:05).
 //! - `fake:torrents` — Prowlarr looks set up (the demo has none).
+//! - `fake:no-sound` — Spotify signed in with Premium, the sound consent
+//!   not given yet.
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -34,6 +36,7 @@ pub struct Fakes {
     lyrics: bool,
     paused: Option<Service>,
     torrents: bool,
+    no_sound: bool,
 }
 
 impl Fakes {
@@ -51,6 +54,7 @@ impl Fakes {
             "paused:youtube" => self.paused = Some(Service::Youtube),
             "paused:spotify" => self.paused = Some(Service::Spotify),
             "torrents" => self.torrents = true,
+            "no-sound" => self.no_sound = true,
             _ => return false,
         }
         true
@@ -66,6 +70,7 @@ impl Fakes {
             || self.lyrics
             || self.paused.is_some()
             || self.torrents
+            || self.no_sound
     }
 
     /// `state` with the fakes laid over it.
@@ -104,8 +109,21 @@ impl Fakes {
         if self.torrents {
             s.prefs.prowlarr_configured = true;
         }
+        if self.no_sound
+            && let Some(a) = s.accounts.iter_mut().find(|a| a.service == Service::Spotify)
+        {
+            a.audio = false;
+            if let nikgob_view::Account::LoggedIn { premium, .. } = &mut a.account {
+                *premium = Some(true);
+            }
+        }
         if let Some(svc) = self.audio {
             s.player.audio_service = Some(svc);
+            // What that service's sound is.
+            s.player.audio_quality = Some(match svc {
+                Service::Youtube => nikgob_core::streaming::quality_label("Opus", 160, true),
+                Service::Spotify => nikgob_core::streaming::quality_label("Vorbis", 320, false),
+            });
         }
         if self.lyrics {
             s.lyrics = word_lyrics(state.player.current.as_ref().map(|t| t.id));

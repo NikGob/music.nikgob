@@ -195,9 +195,24 @@ impl Chrome {
     ) {
         let mut menu = Menu::new(("md3e-track-menu", salt)).align_right(true);
         let mut picks = Vec::new();
-        for &a in acts {
+        // A stream has no file to tag, and only what is in the library (a
+        // file, or a like) can leave it: those items are left out, with a
+        // divider that would end the menu or follow another.
+        let shown: Vec<Act> = acts
+            .iter()
+            .copied()
+            .filter(|&a| match a {
+                Act::Tags => track.has_local,
+                Act::Trash => track.has_local || track.liked,
+                _ => true,
+            })
+            .collect();
+        for (i, &a) in shown.iter().enumerate() {
             if a == Act::Sep {
-                menu = menu.divider();
+                let next = shown.get(i + 1).is_some_and(|&n| n != Act::Sep);
+                if next && i > 0 {
+                    menu = menu.divider();
+                }
             } else {
                 menu = menu.item(Self::item(a, track, state));
                 picks.push(a);

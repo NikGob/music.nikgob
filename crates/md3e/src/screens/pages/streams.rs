@@ -157,7 +157,7 @@ fn track_row(
                 ui.spacing_mut().item_spacing.x = 8.0;
                 menu_resp = Some(ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("st-more", id, i))));
                 if let Some(st) = wished
-                    && widgets::wish_mark(ui, st, ("st-wish", id, i)).clicked()
+                    && widgets::wish_mark(ui, st, state.prefs.prowlarr_configured, ("st-wish", id, i)).clicked()
                 {
                     ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(widgets::OPEN_WISHLIST), true));
                 }
@@ -479,7 +479,7 @@ fn count_line(lead: &str, n: usize, total: std::time::Duration) -> String {
 
 /// The download button of a service's album page: what «Хочу скачать»
 /// says about the album, and whether a click downloads it.
-fn album_download(v: &StreamPageView, wish: &widgets::WishIndex, all_local: bool) -> (&'static str, bool) {
+fn album_download(v: &StreamPageView, wish: &widgets::WishIndex, all_local: bool, torrents: bool) -> (&'static str, bool) {
     if all_local {
         return ("Скачан", false);
     }
@@ -487,6 +487,7 @@ fn album_download(v: &StreamPageView, wish: &widgets::WishIndex, all_local: bool
         None | Some(WishlistStatus::Waiting | WishlistStatus::Dismissed | WishlistStatus::Done) => ("Скачать", true),
         Some(WishlistStatus::Downloading) => ("Качается", false),
         Some(WishlistStatus::NoTorrent | WishlistStatus::Failed) => ("Нет раздачи", false),
+        Some(_) if !torrents => ("Ждёт торренты", false),
         Some(_) => ("В очереди", false),
     }
 }
@@ -507,11 +508,11 @@ fn album_page(
         let year = v.year.map(|y| y.to_string()).unwrap_or_default();
         overline(ui, &[type_label(v.release_type), &year, service_upper(id.service)]);
         // How much of it is here, in the same line as its size.
+        // («8 из 10 у тебя»: counted over the library album, as its card
+        // says.)
         let mut line = count_line(&v.subtitle, v.tracks.len(), v.total_duration);
-        if v.have.local > 0 && !v.have.complete() {
-            line = format!("{line} · {} у тебя", v.have.local);
-        } else if v.have.complete() {
-            line = format!("{line} · у тебя");
+        if let Some(have) = v.have.files_label() {
+            line = format!("{line} · {have}");
         }
         let artist = ui.add(
             egui::Label::new(TypeRole::TitleMedium.style().rich(line, s.on_surface_variant)).sense(Sense::click()),
@@ -531,10 +532,10 @@ fn album_page(
     let remotes: Vec<RemoteId> = v.tracks.iter().map(|t| t.remote.clone()).collect();
     let all_local = v.have.complete() || (!v.tracks.is_empty() && local == v.tracks.len());
     let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
-    let (dl_label, dl_can) = album_download(v, &wish, all_local);
+    let (dl_label, dl_can) = album_download(v, &wish, all_local, state.prefs.prowlarr_configured);
     let members: Vec<Member> = vec![
         Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
-        Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Tonal).into(),
+        widgets::shuffle_member(ui),
         Button::new(dl_label).icon(Icon::Download).size(Size::M).style(Style::Tonal).enabled(!all_local).into(),
         IconButton::new(Icon::Favorite)
             .size(Size::M)
@@ -620,7 +621,7 @@ fn playlist_page(
         ui,
         vec![
             Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
-            Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Tonal).into(),
+            widgets::shuffle_member(ui),
             Button::new(if followed { "В библиотеке" } else { "В библиотеку" })
                 .icon(if followed { Icon::Check } else { Icon::LibraryMusic })
                 .size(Size::M)

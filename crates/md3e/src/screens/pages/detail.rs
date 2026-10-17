@@ -161,13 +161,18 @@ pub fn release(
         let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist).of_release(id);
         let dl_label = match wish {
             Some(nikgob_view::WishlistStatus::Downloading) => "Качается",
+            Some(nikgob_view::WishlistStatus::New | nikgob_view::WishlistStatus::Searching | nikgob_view::WishlistStatus::Confirm)
+                if !state.prefs.prowlarr_configured =>
+            {
+                "Ждёт торренты"
+            }
             Some(nikgob_view::WishlistStatus::New | nikgob_view::WishlistStatus::Searching | nikgob_view::WishlistStatus::Confirm) => "В очереди",
             Some(nikgob_view::WishlistStatus::NoTorrent | nikgob_view::WishlistStatus::Failed) => "Нет раздачи",
             _ => "Скачать недостающие",
         };
         let mut members: Vec<Member> = vec![
             Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
-            Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Tonal).into(),
+            widgets::shuffle_member(ui),
         ];
         if missing {
             members.push(
@@ -666,7 +671,7 @@ pub fn playlist(
         ui.add_space(16.0);
         let mut members: Vec<Member> = vec![
             Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
-            Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Tonal).into(),
+            widgets::shuffle_member(ui),
         ];
         if !liked {
             members.push(Button::new("Добавить треки").icon(Icon::Add).size(Size::M).style(Style::Outlined).into());

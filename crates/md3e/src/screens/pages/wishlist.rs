@@ -53,11 +53,13 @@ impl Filter {
         (Self::Dismissed, "Не качать"),
     ];
 
-    fn takes(self, st: St) -> bool {
+    /// Without torrents nothing searches: what is queued waits with the
+    /// rest («Ждут»), and «Ищу» stays away.
+    fn takes(self, st: St, torrents: bool) -> bool {
         match self {
             Self::All => !matches!(st, St::Done | St::Dismissed),
-            Self::Waiting => st == St::Waiting,
-            Self::Searching => matches!(st, St::New | St::Searching),
+            Self::Waiting => st == St::Waiting || (!torrents && matches!(st, St::New | St::Searching)),
+            Self::Searching => torrents && matches!(st, St::New | St::Searching),
             Self::Downloading => st == St::Downloading,
             Self::Confirm => st == St::Confirm,
             Self::NoTorrent => matches!(st, St::NoTorrent | St::Failed),
@@ -96,17 +98,18 @@ fn by_artist(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(Id::new("wish-by-artist"))).unwrap_or(false)
 }
 
-/// One line of the list: a group's head or an item.
+/// One line of the list: a group's head or an item (and the head it is
+/// under).
 enum Line<'a> {
     Head { g: &'a WishlistGroup, waiting: u32, open: Vec<WishlistId> },
-    Item(&'a WishlistRow),
+    Item(&'a WishlistRow, Under),
 }
 
 impl Line<'_> {
     fn height(&self) -> f32 {
         match self {
             Line::Head { .. } => 56.0,
-            Line::Item(_) => crate::components::list::TWO_LINE,
+            Line::Item(..) => crate::components::list::TWO_LINE,
         }
     }
 }
@@ -148,15 +151,30 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     }
 
     let by_id: HashMap<WishlistId, &WishlistRow> = w.items.iter().map(|r| (r.id, r)).collect();
-    let count = |f: Filter| w.items.iter().filter(|r| f.takes(r.status)).count();
-    let live = count(Filter::All) as u64;
+    let count = |f: Filter| w.items.iter().filter(|r| f.takes(r.status, torrents)).count();
+    // What «Скачать все» starts, and what waits (without torrents: all of
+    // what is queued).
     let waiting = w.count(St::Waiting);
+    let idle = count(Filter::Waiting) as u64;
+    // What is on its way: «3 трека, 1 альбом».
+    let (tracks, albums) = w
+        .items
+        .iter()
+        .filter(|r| Filter::All.takes(r.status, torrents))
+        .fold((0u64, 0u64), |(t, a), r| if r.scope == WishlistScope::Album { (t, a + 1) } else { (t + 1, a) });
+    let mut parts = Vec::new();
+    if tracks > 0 || albums == 0 {
+        parts.push(format!("{tracks} {}", common::plural(tracks, "трек", "трека", "треков")));
+    }
+    if albums > 0 {
+        parts.push(format!("{albums} {}", common::plural(albums, "альбом", "альбома", "альбомов")));
+    }
 
     // Summary and «Скачать все».
     ui.allocate_ui_with_layout(vec2(ui.available_width(), 48.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        let mut line = format!("{live} {}", common::plural(live, "трек", "трека", "треков"));
-        if waiting > 0 {
-            line = format!("{line} · {waiting} {}", common::plural(u64::from(waiting), "ждёт", "ждут", "ждут"));
+        let mut line = parts.join(", ");
+        if idle > 0 {
+            line = format!("{line} · {idle} {}", common::plural(idle, "ждёт", "ждут", "ждут"));
         }
         ui.label(TypeRole::TitleMedium.style().rich(line, s.on_surface));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -221,7 +239,8 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         let groups = if artist_view { &w.by_artist } else { &w.by_album };
         let mut shown = std::collections::HashSet::new();
         for g in groups {
-            let rows: Vec<&WishlistRow> = g.items.iter().filter_map(|id| by_id.get(id).copied()).filter(|r| f.takes(r.status)).collect();
+            let rows: Vec<&WishlistRow> =
+                g.items.iter().filter_map(|id| by_id.get(id).copied()).filter(|r| f.takes(r.status, torrents)).collect();
             if rows.is_empty() {
                 continue;
             }
@@ -229,16 +248,18 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             let waiting = rows.iter().filter(|r| r.status == St::Waiting).count() as u32;
             let open = rows.iter().map(|r| r.id).collect();
             lines.push(Line::Head { g, waiting, open });
-            lines.extend(rows.into_iter().map(Line::Item));
+            let under = if artist_view { Under::Artist } else { Under::Album };
+            lines.extend(rows.into_iter().map(|r| Line::Item(r, under)));
         }
         // Items no group took (no album or artist known).
-        let rest: Vec<&WishlistRow> = w.items.iter().filter(|r| f.takes(r.status) && !shown.contains(&r.id)).collect();
+        let rest: Vec<&WishlistRow> =
+            w.items.iter().filter(|r| f.takes(r.status, torrents) && !shown.contains(&r.id)).collect();
         if !rest.is_empty() {
             lines.push(Line::Head { g: &LOOSE, waiting: rest.iter().filter(|r| r.status == St::Waiting).count() as u32, open: rest.iter().map(|r| r.id).collect() });
-            lines.extend(rest.into_iter().map(Line::Item));
+            lines.extend(rest.into_iter().map(|r| Line::Item(r, Under::Nothing)));
         }
     } else {
-        lines.extend(w.items.iter().filter(|r| f.takes(r.status)).map(Line::Item));
+        lines.extend(w.items.iter().filter(|r| f.takes(r.status, torrents)).map(|r| Line::Item(r, Under::Nothing)));
     }
     if f == Filter::Dismissed {
         ui.label(TypeRole::BodySmall.style().rich(
@@ -269,7 +290,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             Line::Head { g, waiting, open } => {
                 group_head(&mut child, g, if torrents { *waiting } else { 0 }, open, artist_view, out);
             }
-            Line::Item(row) => item(&mut child, row, torrents, pages, out),
+            Line::Item(row, under) => item(&mut child, row, *under, torrents, pages, out),
         }
     }
     None
@@ -332,16 +353,32 @@ fn group_head(ui: &mut Ui, g: &WishlistGroup, waiting: u32, open: &[WishlistId],
     });
 }
 
-/// One item: cover, title, what it is and where it is, the one action that
-/// helps now, ⋮ for the rest. Double click plays it.
-fn item(ui: &mut Ui, r: &WishlistRow, torrents: bool, pages: &mut PageState, out: &mut Vec<Command>) {
+/// The head a row is drawn under: what it says need not be said again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Under {
+    Album,
+    Artist,
+    Nothing,
+}
+
+/// One item: cover, title, what it is (less what its head says) and where
+/// it is, the one action that helps now, ⋮ for the rest. Double click
+/// plays it.
+fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut PageState, out: &mut Vec<Command>) {
     let id = r.id;
-    let what = match (r.scope, &r.album) {
-        (WishlistScope::Album, _) => format!("альбом · {}", r.artist),
-        (_, Some(a)) if !a.is_empty() => format!("{} · {a}", r.artist),
-        _ => r.artist.clone(),
+    let album = r.album.as_deref().filter(|a| !a.is_empty());
+    let what = match (under, r.scope, album) {
+        (Under::Album, WishlistScope::Album, _) => "весь альбом".to_owned(),
+        (Under::Album, ..) => String::new(),
+        (Under::Artist, WishlistScope::Album, _) => "альбом".to_owned(),
+        (Under::Artist, _, Some(a)) => a.to_owned(),
+        (Under::Artist, _, None) => String::new(),
+        (Under::Nothing, WishlistScope::Album, _) => format!("альбом · {}", r.artist),
+        (Under::Nothing, _, Some(a)) => format!("{} · {a}", r.artist),
+        (Under::Nothing, _, None) => r.artist.clone(),
     };
-    let line = format!("{what} · {}", status_text(r, torrents));
+    let status = status_text(r, torrents);
+    let line = if what.is_empty() { status } else { format!("{what} · {status}") };
     let mut more = None;
     let mut split = None;
     let o = ListItem::new(&r.title)

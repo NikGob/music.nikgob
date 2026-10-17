@@ -37,27 +37,40 @@ fn row_label(ui: &mut Ui, id: Id, label: &str) {
     });
 }
 
-/// The control, reported so the row's cards line up with it.
-fn row_control(ui: &mut Ui, control: impl FnOnce(&mut Ui)) {
+/// The control, reported so the row's cards line up with it. Beside the
+/// text its width is kept for the next frame's layout (under the text a
+/// control may stretch, which says nothing about the room it needs).
+fn row_control(ui: &mut Ui, id: Id, beside: bool, control: impl FnOnce(&mut Ui)) {
     let r = ui.scope(control).response.rect;
     settings_help::report_control(ui.ctx(), r);
+    if beside {
+        ui.ctx().data_mut(|d| d.insert_temp(control_width_key(id), r.width()));
+    }
+}
+
+fn control_width_key(id: Id) -> egui::Id {
+    egui::Id::new(("settings-control-w", id))
 }
 
 fn row_body(ui: &mut Ui, id: Id, label: &str, supporting: Option<&str>, control: impl FnOnce(&mut Ui)) {
     let s = Theme::get(ui.ctx()).scheme;
-    if ui.available_width() < 540.0 {
+    let label_w = (ui.available_width() * 0.4).clamp(180.0, 320.0);
+    // A control wider than the room beside the text goes under it, as in a
+    // narrow page (three segments do not fit beside the text at 720 px).
+    let control_w: f32 = ui.ctx().data(|d| d.get_temp(control_width_key(id))).unwrap_or(0.0);
+    let needed = label_w + settings_help::BTN + 4.0 + 16.0 + control_w;
+    if ui.available_width() < 540.0 || needed > ui.available_width() + 1.0 {
         ui.add_space(8.0);
         row_label(ui, id, label);
         if let Some(t) = supporting {
             ui.label(TypeRole::BodyMedium.style().rich_para(t, s.on_surface_variant));
         }
         ui.add_space(4.0);
-        row_control(ui, control);
+        row_control(ui, id, false, control);
         ui.add_space(8.0);
         return;
     }
     let h = if supporting.is_some() { 72.0 } else { 56.0 };
-    let label_w = (ui.available_width() * 0.4).clamp(180.0, 320.0);
     ui.allocate_ui_with_layout(
         egui::vec2(ui.available_width(), h),
         egui::Layout::left_to_right(egui::Align::Center),
@@ -74,7 +87,7 @@ fn row_body(ui: &mut Ui, id: Id, label: &str, supporting: Option<&str>, control:
                 }
             });
             ui.add_space(16.0);
-            row_control(ui, control);
+            row_control(ui, id, true, control);
         },
     );
 }

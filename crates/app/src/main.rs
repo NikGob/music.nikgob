@@ -321,9 +321,6 @@ fn main() -> eframe::Result {
     }
     logfile::init();
     let mut paths = paths();
-    if let Some(dir) = paths.db.parent() {
-        log_panics(dir.to_owned());
-    }
     let demo = std::env::var_os("NIKGOB_DEMO").is_some();
     if demo {
         let dir = std::env::temp_dir().join("nikgob-demo");
@@ -340,6 +337,10 @@ fn main() -> eframe::Result {
         paths.prefs = dir.join("prefs.json");
         // The real services keep what is typed in next to the demo library.
         paths.settings = streams::real_in_demo().then(|| dir.join("settings.toml"));
+    }
+    // Next to the library in use: a demo's crash stays in the demo's dir.
+    if let Some(dir) = paths.db.parent() {
+        log_panics(dir.to_owned());
     }
     for sub in ["Music", "Inbox", "Downloads", "Trash"] {
         let _ = std::fs::create_dir_all(paths.root.join(sub));

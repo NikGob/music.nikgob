@@ -27,6 +27,16 @@ pub const CARD_W: f32 = 160.0;
 pub const CARD_GAP: f32 = 12.0;
 pub const SECTION_GAP: f32 = 32.0;
 
+/// «Перемешать» of a page's action row: a button, or in a narrow page an
+/// icon button, so the row keeps to one line.
+pub fn shuffle_member(ui: &Ui) -> crate::components::Member {
+    if ui.available_width() < 640.0 {
+        IconButton::new(Icon::Shuffle).size(Size::M).style(Style::Tonal).tooltip("Перемешать").into()
+    } else {
+        crate::components::Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Tonal).into()
+    }
+}
+
 /// Title-large section header with an optional "Все →" text button.
 /// Returns true when "Все" is clicked.
 pub fn section_header(ui: &mut Ui, title: &str, all: bool) -> bool {
@@ -616,7 +626,7 @@ fn track_row(
                 if !has_local {
                     match wished {
                         Some(st) => {
-                            if wish_mark(ui, st, ("track-wish", id, i)).clicked() {
+                            if wish_mark(ui, st, state.prefs.prowlarr_configured, ("track-wish", id, i)).clicked() {
                                 ui.ctx().data_mut(|d| d.insert_temp(Id::new(OPEN_WISHLIST), true));
                             }
                         }
@@ -766,11 +776,13 @@ impl WishIndex {
 pub const OPEN_WISHLIST: &str = "md3e-open-wishlist";
 
 /// How far a track is in «Хочу скачать», said quietly: one small icon (a
-/// tooltip names it); a click opens «Хочу скачать».
-pub fn wish_mark(ui: &mut Ui, st: WishlistStatus, salt: impl std::hash::Hash + std::fmt::Debug) -> Response {
+/// tooltip names it); a click opens «Хочу скачать». Without torrents
+/// nothing searches: what is not on its way yet waits for them.
+pub fn wish_mark(ui: &mut Ui, st: WishlistStatus, torrents: bool, salt: impl std::hash::Hash + std::fmt::Debug) -> Response {
     use WishlistStatus as St;
     let (icon, tip) = match st {
-        St::Waiting => (Icon::HourglassEmpty, "Ждёт в «Хочу скачать» — скачается по кнопке"),
+        St::Waiting | St::New | St::Searching if !torrents => (Icon::HourglassEmpty, "Ждёт торренты — «Хочу скачать»"),
+        St::Waiting => (Icon::HourglassEmpty, "Ждёт в «Хочу скачать»"),
         St::New | St::Searching => (Icon::Search, "Ищу раздачу"),
         St::Confirm => (Icon::Info, "Нужно выбрать раздачу — «Хочу скачать»"),
         St::Downloading => (Icon::CloudDownload, "Качается"),

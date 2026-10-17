@@ -202,10 +202,13 @@ fn paused_line(ui: &mut Ui, a: &AccountView) {
     if let Some(hm) = &a.paused_until_hm {
         ui.horizontal(|ui| {
             Icon::HourglassEmpty.widget(false, s.on_surface_variant, 18.0).ui(ui);
-            ui.label(TypeRole::BodyMedium.style().rich_para(
-                format!("{} просит подождать до {hm} — до тех пор поиск и страницы сервиса молчат", a.service.display_name()),
-                s.on_surface_variant,
-            ));
+            ui.add(
+                egui::Label::new(TypeRole::BodyMedium.style().rich_para(
+                    format!("{} просит подождать до {hm} — до тех пор поиск и страницы сервиса молчат", a.service.display_name()),
+                    s.on_surface_variant,
+                ))
+                .wrap(),
+            );
         });
         ui.add_space(8.0);
     }
