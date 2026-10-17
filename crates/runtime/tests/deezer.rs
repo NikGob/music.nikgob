@@ -277,3 +277,38 @@ fn the_discography_comes_from_deezer_when_spotify_is_not_connected() {
     wait_until("Deezer's artist", || deezer.calls("artist") > 0);
     assert_eq!(spotify.calls("artist") + spotify.calls("search_kind"), 0, "{:?}", spotify.all_calls());
 }
+
+#[test]
+fn a_query_with_ye_finds_the_song_written_with_yo() {
+    let lib = Library::open_in_memory().unwrap();
+    // Only the «ё» spelling finds «Лёд»: the fake matches letters as
+    // written, like Deezer.
+    let deezer = Arc::new(FakeService::deezer().with_track("led", "Лёд", "WENARO, LXNER", 150));
+    let youtube = Arc::new(FakeService::youtube().logged_out());
+    let r = rig(&lib, vec![youtube.clone(), deezer.clone()]);
+    let a = search_all(&r, "лед");
+    let row = stream_row(&a, "Лёд");
+    assert_eq!(row.remote, RemoteId::new(Service::Deezer, "dz-x-led"));
+    // One variant, asked of Deezer's tracks only.
+    assert_eq!(deezer.calls("search"), 1);
+    assert_eq!(deezer.calls("search_kind"), 1);
+    assert_eq!(youtube.calls("search_kind"), 0, "{:?}", youtube.all_calls());
+
+    // Under Deezer's chip too.
+    r.rt.send(Command::SetSearchSources(SearchSources {
+        library: false,
+        spotify: false,
+        youtube: false,
+        deezer: true,
+        torrents: false,
+        mixed: false,
+    }));
+    r.rt.send(Command::Search("лед".into()));
+    wait_for(&r.rt, "the Deezer section", |s| {
+        s.search.streams.iter().any(|x| x.service == Service::Deezer && !x.searching && x.tracks.iter().any(|t| t.title == "Лёд"))
+    });
+    // «лёд» typed: no variant.
+    deezer.reset_calls();
+    let _ = search_all(&r, "лёд");
+    assert_eq!(deezer.calls("search_kind"), 0);
+}

@@ -26,6 +26,12 @@
 //! answered or [`SETTLE_GRACE`] after the first answer, and keep their
 //! places while slower answers arrive below them.
 //!
+//! A query written with «е» is also asked of Deezer's tracks (its chip and
+//! «Всё») under up to two «ё» spellings ([`rank::yo_variants`]: «лед» →
+//! «лёд»), since the catalogue matches the letters as written; the lists
+//! are taken in turn and the same-song merge and the ranking (which folds
+//! «ё») do the rest. YouTube Music and Spotify get the query as typed.
+//!
 //! [`StreamService::search_in_parts`]: nikgob_core::streaming::StreamService::search_in_parts
 //! [`StreamService::search_top`]: nikgob_core::streaming::StreamService::search_top
 
@@ -34,7 +40,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nikgob_core::model::TrackId;
-use nikgob_core::streaming::{RemoteId, Service, StreamError, StreamSearch, StreamTrack, TrackKind};
+use nikgob_core::streaming::{RemoteId, SearchKind, Service, StreamError, StreamSearch, StreamTrack, TrackKind};
 use nikgob_metadata::text::{TitleKey, album_key, artist_key, similarity, title_key};
 use nikgob_view as v;
 
@@ -365,6 +371,7 @@ impl Worker {
         let Some(svc) = self.service(service) else { return };
         let mixed = self.streaming.search.sources.mixed;
         let q = query.to_owned();
+        let yo = if service == Service::Deezer { rank::yo_variants(query) } else { Vec::new() };
         let tx = self.streaming.internal.clone();
         let task = self.streaming.spawn(async move {
             if !wait.is_zero() {
@@ -385,11 +392,31 @@ impl Worker {
                     partial: true,
                 }));
             });
-            let result = if mixed {
-                svc.search_top(&q, part).await
-            } else {
-                svc.search_in_parts(&q, part).await
+            let main = async {
+                if mixed {
+                    svc.search_top(&q, part).await
+                } else {
+                    svc.search_in_parts(&q, part).await
+                }
             };
+            // Deezer matches «е» and «ё» as written: its tracks are also
+            // asked under the «ё» spellings (one request each, cached by
+            // Deezer under its own query; this answer is cached under the
+            // query, whose variants they are).
+            let variants = async {
+                let mut out = Vec::new();
+                for v in &yo {
+                    match svc.search_kind(v, SearchKind::Songs).await {
+                        Ok(r) => out.push(r.tracks),
+                        Err(e) => log::debug!("search #{seq}: {service} «{v}» failed: {e}"),
+                    }
+                }
+                out
+            };
+            let (mut result, more) = tokio::join!(main, variants);
+            if let Ok(r) = &mut result {
+                r.tracks = interleave(std::mem::take(&mut r.tracks), more);
+            }
             match &result {
                 Ok(r) => log::debug!(
                     "search #{seq}: {service} answered in {} ms: {} tracks, {} albums, {} artists, {} playlists",
@@ -1034,6 +1061,31 @@ impl Worker {
     /// the one with its ISRC.
     pub(crate) fn library_track_of(&self, t: &StreamTrack) -> Option<TrackId> {
         self.lib.track_for_stream(t).ok().flatten()
+    }
+}
+
+/// The tracks of a query and of its «ё» spellings as one list: taken in
+/// turn (each list's best near the top), each track once.
+fn interleave(first: Vec<StreamTrack>, more: Vec<Vec<StreamTrack>>) -> Vec<StreamTrack> {
+    if more.iter().all(Vec::is_empty) {
+        return first;
+    }
+    let mut lists: Vec<std::vec::IntoIter<StreamTrack>> =
+        std::iter::once(first).chain(more).map(Vec::into_iter).collect();
+    let mut out: Vec<StreamTrack> = Vec::new();
+    loop {
+        let mut any = false;
+        for l in &mut lists {
+            if let Some(t) = l.next() {
+                any = true;
+                if !out.iter().any(|x| x.id == t.id) {
+                    out.push(t);
+                }
+            }
+        }
+        if !any {
+            return out;
+        }
     }
 }
 

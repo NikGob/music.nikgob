@@ -490,6 +490,19 @@ impl FakeService {
         self
     }
 
+    /// Adds one single track `{prefix}-x-{key}` (no album, no ISRC) to the
+    /// catalog. Its search matches the text as written (lower case only):
+    /// «лед» does not find «Лёд», as on the real services.
+    #[must_use]
+    pub fn with_track(mut self, key: &str, title: &str, artist: &str, secs: u64) -> Self {
+        let p = prefix(self.service);
+        let mut t = StreamTrack::new(RemoteId::new(self.service, format!("{p}-x-{key}")), title);
+        t.artists = vec![ArtistRef::new(None, artist)];
+        t.duration_ms = Some(secs * 1000);
+        self.catalog.tracks.push(t);
+        self
+    }
+
     /// Likes (or unlikes) `id` on the service side, as if the user did it
     /// in another app. Not counted as a call.
     pub fn set_liked_remotely(&self, id: &str, liked: bool) {

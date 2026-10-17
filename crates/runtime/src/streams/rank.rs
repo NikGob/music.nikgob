@@ -81,6 +81,49 @@ pub(crate) fn norm(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// At most this many «ё» spellings of a query are asked of the catalogue.
+pub(crate) const YO_VARIANTS: usize = 2;
+
+/// The «ё» spellings of a query written with «е» (the catalogues match
+/// letters as written: Deezer's «лед» and «лёд» barely overlap): one
+/// variant per Cyrillic «е» with only that letter made «ё», the ones in
+/// the shortest words first (then left to right), at most
+/// [`YO_VARIANTS`]. None when the query has a «ё» already (the catalogue
+/// finds it, the ranking folds it) or no Cyrillic «е».
+pub(crate) fn yo_variants(query: &str) -> Vec<String> {
+    let q = query.trim();
+    if q.chars().any(|c| matches!(c, 'ё' | 'Ё')) {
+        return Vec::new();
+    }
+    let chars: Vec<char> = q.chars().collect();
+    // (length of the word, position) of every «е».
+    let mut spots: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    for i in 0..=chars.len() {
+        if i < chars.len() && chars[i].is_alphanumeric() {
+            continue;
+        }
+        let word = &chars[start..i];
+        spots.extend(
+            word.iter()
+                .enumerate()
+                .filter(|(_, c)| matches!(c, 'е' | 'Е'))
+                .map(|(j, _)| (word.len(), start + j)),
+        );
+        start = i + 1;
+    }
+    spots.sort_unstable();
+    spots
+        .into_iter()
+        .take(YO_VARIANTS)
+        .map(|(_, at)| {
+            let mut v = chars.clone();
+            v[at] = if v[at] == 'Е' { 'Ё' } else { 'ё' };
+            v.into_iter().collect()
+        })
+        .collect()
+}
+
 fn is_cyrillic(c: char) -> bool {
     ('\u{0400}'..='\u{04FF}').contains(&c)
 }
@@ -390,6 +433,22 @@ mod tests {
         assert_eq!(norm("Don't  Stop (Remix)"), "dont stop remix");
         assert_eq!(norm("MORGENSHTERN"), "morgenshtern");
         assert_eq!(norm("Cafe\u{0301}"), "cafe");
+    }
+
+    #[test]
+    fn yo_variants_of_a_query_written_with_ye() {
+        assert_eq!(yo_variants("лед"), vec!["лёд"]);
+        assert_eq!(yo_variants(" Лед "), vec!["Лёд"]);
+        let green = yo_variants("зеленый");
+        assert!(green.len() <= YO_VARIANTS, "{green:?}");
+        assert!(green.contains(&"зелёный".to_owned()), "{green:?}");
+        // The short word first.
+        assert_eq!(yo_variants("песня про лед"), vec!["песня про лёд", "пёсня про лед"]);
+        assert!(yo_variants("led zeppelin").is_empty());
+        assert!(yo_variants("лёд").is_empty());
+        assert!(yo_variants("зелёный лес").is_empty());
+        assert!(yo_variants("кино").is_empty());
+        assert!(yo_variants("").is_empty());
     }
 
     #[test]
