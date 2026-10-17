@@ -7,7 +7,7 @@
 //! video alone). [`parse_watch`] reads it. When there is none, a song
 //! search finds it: the video's title cleaned of what clips add («Official
 //! Video», «MV», «(Lyrics)», a leading «Artist - »), both halves of a dual
-//! title («インソムニア - Insomnia») tried, and a hit taken only by the same
+//! title («インソムニア - Insomnia») tried ([`nikgob_core::clip_title`]), and a hit taken only by the same
 //! main artist, the same folded title and a length that fits a clip: the
 //! song up to [`SHORTER_MS`] shorter than the video (an intro, an outro, a
 //! scene), never more than [`LONGER_MS`] longer ([`pick_song`]).
@@ -16,6 +16,8 @@
 
 use nikgob_core::streaming::{AlbumRef, ArtistRef, StreamTrack, TrackKind};
 use serde_json::Value;
+
+use nikgob_core::clip_title::{fold, song_titles};
 
 use crate::convert;
 
@@ -180,159 +182,6 @@ fn panel_track(r: &Value) -> Option<StreamTrack> {
 
 // ------------------------------------------------------------------ titles
 
-/// Words a bracket or a tail may consist of and still be what clips add.
-const CLIP_NOISE: &[&str] = &[
-    "official", "video", "music", "mv", "m/v", "pv", "clip", "lyric", "lyrics", "audio", "visualizer",
-    "hd", "hq", "4k", "full", "ver", "version", "short", "teaser", "premiere", "remastered", "remaster",
-    "клип", "официальный", "official video", "anime", "animation", "the", "movie", "with", "subtitles",
-    "english", "sub", "subs", "romaji", "eng", "jp", "kr", "mv版", "公式", "オフィシャル",
-    "ミュージックビデオ", "歌詞", "歌詞付き", "リリックビデオ", "映像", "4k60", "60fps", "uhd",
-];
-
-/// Words that make another version of a song (they stay in the title).
-const VERSION_WORDS: &[&str] = &[
-    "remix", "mix", "live", "acoustic", "instrumental", "inst", "karaoke", "cover", "edit", "tv",
-    "size", "off", "vocal", "unplugged", "demo", "piano", "orchestra", "slowed", "sped", "nightcore",
-    "reprise", "extended", "ライブ", "カバー", "弾き語り",
-];
-
-/// Lower case, full-width forms folded, `ё` → `е`, only letters and digits.
-pub(crate) fn fold(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
-            _ => c,
-        })
-        .flat_map(char::to_lowercase)
-        .map(|c| if c == 'ё' { 'е' } else { c })
-        .filter(|c| c.is_alphanumeric())
-        .collect()
-}
-
-fn words(s: &str) -> Vec<String> {
-    s.split(|c: char| !(c.is_alphanumeric() || c == '/'))
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
-
-/// Only what clips add (every word noise), or the artist's own name.
-fn is_noise(body: &str, artist: &str) -> bool {
-    let a = fold(artist);
-    let ws = words(body);
-    !ws.is_empty()
-        && ws.iter().any(|w| CLIP_NOISE.contains(&w.as_str()) || fold(w) == a)
-        && ws.iter().all(|w| {
-            CLIP_NOISE.contains(&w.as_str())
-                || fold(w) == a
-                || a.contains(&fold(w)) && !fold(w).is_empty()
-                || w.chars().all(|c| c.is_ascii_digit())
-        })
-        && !ws.iter().any(|w| VERSION_WORDS.contains(&w.as_str()))
-}
-
-/// «feat. X», «ft. X», «with X»: a guest, not a title.
-fn is_feat(body: &str) -> bool {
-    let b = body.trim_start().to_lowercase();
-    ["feat.", "feat ", "ft.", "ft ", "featuring ", "with "].iter().any(|p| b.starts_with(p))
-}
-
-fn is_version(body: &str) -> bool {
-    words(body).iter().any(|w| VERSION_WORDS.contains(&w.as_str()))
-}
-
-const OPEN: &[char] = &['(', '[', '【', '「', '『', '〔', '（', '［', '〈', '《'];
-
-fn closing(open: char) -> char {
-    match open {
-        '(' => ')',
-        '[' => ']',
-        '【' => '】',
-        '「' => '」',
-        '『' => '』',
-        '〔' => '〕',
-        '（' => '）',
-        '［' => '］',
-        '〈' => '〉',
-        _ => '》',
-    }
-}
-
-fn squash(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// The titles a clip's song may have: the title without what clips add,
-/// and for a dual title each half (see the module docs). Never empty for
-/// a title with letters; the whole cleaned title comes first.
-pub(crate) fn song_titles(title: &str, artist: &str) -> Vec<String> {
-    let mut outside = String::new();
-    let mut inner: Vec<String> = Vec::new();
-    let mut rest = title;
-    // Brackets: noise goes, a title in quotes («Eve「Ghost Avenue」») and a
-    // translation («ファイトソング (Fight Song)») are halves, a version
-    // («(Live)») stays part of the title.
-    while let Some(open) = rest.find(OPEN) {
-        let ch = rest[open..].chars().next().unwrap_or('(');
-        outside.push_str(&rest[..open]);
-        let after = &rest[open + ch.len_utf8()..];
-        let close = closing(ch);
-        let (body, next) = match after.find(close) {
-            Some(c) => (&after[..c], &after[c + close.len_utf8()..]),
-            None => (after, ""),
-        };
-        if is_feat(body) {
-            outside.push(' ');
-        } else if is_version(body) && !is_noise(body, artist) {
-            outside.push_str(&format!(" ({body}) "));
-        } else if !is_noise(body, artist) && !body.trim().is_empty() {
-            inner.push(squash(body));
-            outside.push(' ');
-        } else {
-            outside.push(' ');
-        }
-        rest = next;
-    }
-    outside.push_str(rest);
-    // Tails and halves: " - ", " – ", " — ", " | ", " / ".
-    let mut parts: Vec<String> = vec![squash(&outside)];
-    for sep in [" | ", " / ", " - ", " – ", " — ", " ‐ "] {
-        parts = parts
-            .into_iter()
-            .flat_map(|p| p.split(sep).map(squash).collect::<Vec<_>>())
-            .collect();
-    }
-    let a = fold(artist);
-    let mut halves: Vec<String> = parts
-        .into_iter()
-        .filter(|p| !p.is_empty() && !is_noise(p, artist) && fold(p) != a)
-        .collect();
-    // «Artist「Title」», «Eve『Title』MV»: the bracket was the title.
-    let quoted = halves.is_empty() || halves.iter().all(|h| {
-        let f = fold(h);
-        f.is_empty() || f == a
-    });
-    if quoted {
-        halves.clear();
-    }
-    halves.extend(inner);
-    // A title that was only noise keeps itself.
-    if halves.is_empty() {
-        let t = squash(title);
-        return if fold(&t).is_empty() { Vec::new() } else { vec![t] };
-    }
-    let mut out = Vec::new();
-    if halves.len() > 1 {
-        out.push(halves.join(" "));
-    }
-    for h in halves {
-        if !out.contains(&h) {
-            out.push(h);
-        }
-    }
-    out
-}
-
 /// Song searches for a clip, best first: "artist half" for each half of
 /// a dual title (a Latin half first: YouTube Music finds romanized titles
 /// best), at most two.
@@ -393,38 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn clip_titles_lose_what_clips_add() {
-        assert_eq!(song_titles("インソムニア - Insomnia", "Eve"), ["インソムニア Insomnia", "インソムニア", "Insomnia"]);
-        assert_eq!(song_titles("アヴァン - Avant", "Eve"), ["アヴァン Avant", "アヴァン", "Avant"]);
-        assert_eq!(song_titles("夏子 - Natsuko", "Funky Monkey Bλby's"), ["夏子 Natsuko", "夏子", "Natsuko"]);
-        assert_eq!(song_titles("Ghost Avenue", "Eve"), ["Ghost Avenue"]);
-        assert_eq!(song_titles("Eve - Ghost Avenue (Official Video)", "Eve"), ["Ghost Avenue"]);
-        assert_eq!(song_titles("Eve「Ghost Avenue」MV", "Eve"), ["Ghost Avenue"]);
-        assert_eq!(song_titles("【MV】ドラマツルギー / Eve", "Eve"), ["ドラマツルギー"]);
-        assert_eq!(song_titles("Группа крови (Official Music Video)", "Кино"), ["Группа крови"]);
-        assert_eq!(song_titles("Кино - Группа крови (клип)", "Кино"), ["Группа крови"]);
-        assert_eq!(song_titles("Song (Lyrics)", "X"), ["Song"]);
-        assert_eq!(song_titles("Song [Official Audio] | X", "X"), ["Song"]);
-        assert_eq!(
-            song_titles("ファイトソング (Fight Song) - Eve Music Video", "Eve"),
-            ["ファイトソング Fight Song", "ファイトソング", "Fight Song"]
-        );
-        // A version stays part of the title.
-        assert_eq!(song_titles("Song (Live at Budokan)", "X"), ["Song (Live at Budokan)"]);
-        assert_eq!(song_titles("Song (Acoustic Version) - Official Video", "X"), ["Song (Acoustic Version)"]);
-        // A title that is only noise keeps itself.
-        assert_eq!(song_titles("MV", "X"), ["MV"]);
-    }
-
-    #[test]
-    fn folding_ignores_case_width_and_punctuation() {
-        assert_eq!(fold("Ghost  Avenue!"), "ghostavenue");
-        assert_eq!(fold("ＩＮＳＯＭＮＩＡ"), "insomnia");
-        assert_eq!(fold("Ёлка"), "елка");
-        assert_eq!(fold("Funky Monkey Bλby's"), "funkymonkeybλbys");
-    }
-
-    #[test]
     fn searches_try_each_half_latin_first() {
         let v = track("v", "インソムニア - Insomnia", "Eve", 241, TrackKind::Video);
         assert_eq!(queries(&v), ["Eve Insomnia", "Eve インソムニア"]);
@@ -456,6 +273,16 @@ mod tests {
         let natsuko = track("n", "夏子 - Natsuko", "Funky Monkey Bλby's", 300, TrackKind::Video);
         let song = track("ns", "夏子", "Funky Monkey Bλby's", 285, TrackKind::Song);
         assert_eq!(pick_song(&[song], &natsuko).unwrap().id.id, "ns");
+    }
+
+    #[test]
+    fn an_artist_music_video_tail_finds_the_song() {
+        let clip = track("aiyou-v", "AIYOU - Eve Music Video", "Eve", 165, TrackKind::Video);
+        assert_eq!(queries(&clip), ["Eve AIYOU"]);
+        let song = track("aiyou", "AIYOU", "Eve", 160, TrackKind::Song);
+        assert_eq!(pick_song(&[song], &clip).unwrap().id.id, "aiyou");
+        let clip = track("v", "AIYOU MV", "Eve", 165, TrackKind::Video);
+        assert_eq!(queries(&clip), ["Eve AIYOU"]);
     }
 
     fn fixture() -> Value {
