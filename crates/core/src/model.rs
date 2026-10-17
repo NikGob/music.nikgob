@@ -448,6 +448,11 @@ pub mod score {
     pub const STREAM_SPOTIFY: i32 = 290;
     /// A YouTube stream (Opus ~160 or AAC), below Spotify.
     pub const STREAM_YOUTUBE: i32 = 280;
+    /// A YouTube music video (a clip: its own intro and outro, not the
+    /// record), one below [`STREAM_YOUTUBE`] so the song of the same track
+    /// always plays first. A library track whose active source has this
+    /// score is shown as a clip.
+    pub const STREAM_YOUTUBE_CLIP: i32 = 279;
     /// A Deezer catalogue entry: no sound of its own (it plays from YouTube
     /// Music), so below every stream that plays.
     pub const STREAM_DEEZER: i32 = 270;

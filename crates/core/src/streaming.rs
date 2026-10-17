@@ -773,6 +773,17 @@ pub trait StreamService: Send + Sync {
     /// The track with this ISRC, if the service can look ISRCs up and has it.
     fn find_isrc(&self, isrc: &str) -> BoxFuture<'_, Result<Option<StreamTrack>, StreamError>>;
 
+    /// The song (ATV: the record, with its album and cover) of a music
+    /// video the service lists, if it has one; `video` is the video as the
+    /// library knows it (title, artists, length). A `video` that turns out
+    /// to be a song already answers itself. Background work: as few
+    /// requests as the service can do it in, in its background lane.
+    /// Services without music videos have none.
+    fn song_for_video(&self, video: &StreamTrack) -> BoxFuture<'_, Result<Option<StreamTrack>, StreamError>> {
+        let _ = video;
+        Box::pin(std::future::ready(Ok(None)))
+    }
+
     /// The user's liked tracks, most recently liked first. Needs a login.
     fn liked(&self) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>>;
 

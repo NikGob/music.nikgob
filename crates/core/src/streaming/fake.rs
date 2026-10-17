@@ -286,6 +286,9 @@ struct State {
     paused_until: Option<std::time::SystemTime>,
     /// A login finds no Premium ([`FakeService::without_premium`]).
     no_premium: bool,
+    /// The song of each music video ([`StreamService::song_for_video`]),
+    /// by video id.
+    songs: HashMap<String, String>,
 }
 
 /// Deterministic fake of a streaming service (feature `fake`).
@@ -349,6 +352,12 @@ impl FakeService {
                 limited: HashMap::new(),
                 paused_until: None,
                 no_premium: false,
+                // The clip of «Группа крови» is the album's song.
+                songs: if service == Service::Youtube {
+                    HashMap::from([(format!("{p}-video-kino"), track_id(service, "gruppa", 1))])
+                } else {
+                    HashMap::new()
+                },
             }),
         }
     }
@@ -500,6 +509,24 @@ impl FakeService {
         t.artists = vec![ArtistRef::new(None, artist)];
         t.duration_ms = Some(secs * 1000);
         self.catalog.tracks.push(t);
+        self
+    }
+
+    /// Adds a music video `{prefix}-video-{key}` (no album, no ISRC) whose
+    /// song is `song` (a catalog id) or none, to the catalog.
+    #[must_use]
+    pub fn with_video(mut self, key: &str, title: &str, artist: &str, secs: u64, song: Option<&str>) -> Self {
+        let p = prefix(self.service);
+        let id = format!("{p}-video-{key}");
+        let mut t = StreamTrack::new(RemoteId::new(self.service, id.clone()), title);
+        t.artists = vec![ArtistRef::new(None, artist)];
+        t.duration_ms = Some(secs * 1000);
+        t.kind = TrackKind::Video;
+        t.cover_url = Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"));
+        self.catalog.tracks.push(t);
+        if let Some(song) = song {
+            self.lock().songs.insert(id, song.to_owned());
+        }
         self
     }
 
@@ -891,6 +918,18 @@ impl StreamService for FakeService {
             .iter()
             .find(|t| t.isrc.as_deref() == Some(isrc.as_str()))
             .cloned()))
+    }
+
+    fn song_for_video(&self, video: &StreamTrack) -> BoxFuture<'_, Result<Option<StreamTrack>, StreamError>> {
+        if let Err(e) = self.gate("song_for_video") {
+            return ready(Err(e));
+        }
+        let id = video.id.id.as_str();
+        if let Some(t) = self.catalog.track(id).filter(|t| t.kind == TrackKind::Song) {
+            return ready(Ok(Some(t.clone())));
+        }
+        let song = self.lock().songs.get(id).cloned();
+        ready(Ok(song.and_then(|s| self.catalog.track(&s).cloned())))
     }
 
     fn liked(&self) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
