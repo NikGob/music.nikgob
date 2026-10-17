@@ -801,10 +801,7 @@ pub fn show(
     {
         closed = true;
     }
-    let ctx_text = p
-        .context
-        .as_deref()
-        .map_or_else(|| "Сейчас играет".to_owned(), |c| format!("Играет из «{c}»"));
+    let ctx_text = p.context_line();
     let left_used = hui.min_rect().right() - header.left();
     let right_used = hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let more = ui.add(IconButton::new(Icon::MoreVert).tooltip("Ещё").id_salt("np-more"));
@@ -1422,7 +1419,10 @@ fn info(
         ui.label(TypeRole::LabelMedium.style().rich(common::fmt_time(shown), s.on_surface_variant));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(TypeRole::LabelMedium.style().rich(common::fmt_time(dur), s.on_surface_variant));
-            if let Some(q) = current.and_then(|t| t.quality.as_deref()) {
+            // A stream says what really plays (YouTube's Opus for a Spotify
+            // track without Spotify sound), a file its own format.
+            let quality = p.audio_quality.as_deref().or_else(|| current.and_then(|t| t.quality.as_deref()));
+            if let Some(q) = quality {
                 ui.add_space(8.0);
                 ui.label(TypeRole::LabelMedium.style().rich(q, s.primary));
             }

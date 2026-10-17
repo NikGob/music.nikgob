@@ -30,6 +30,9 @@ pub(crate) struct ResolveQuery {
     pub(crate) artist: String,
     pub(crate) duration_ms: Option<u64>,
     pub(crate) isrc: Option<String>,
+    /// Videos that did not play (age gate, region block): another
+    /// candidate is picked instead.
+    pub(crate) exclude: Vec<String>,
 }
 
 impl ResolveQuery {
@@ -64,7 +67,7 @@ pub(crate) fn pick_youtube(hits: &[StreamTrack], q: &ResolveQuery) -> Option<Str
     let want_artist = artist_key(&q.artist);
     let mut ranked: Vec<(u8, f64, &StreamTrack)> = hits
         .iter()
-        .filter(|h| h.playable)
+        .filter(|h| h.playable && !q.exclude.contains(&h.id.id))
         .filter(|h| match (h.duration_ms, q.duration_ms) {
             (Some(a), Some(b)) => a.abs_diff(b) <= SLACK_MS,
             _ => true,
@@ -113,7 +116,58 @@ pub(crate) async fn search_youtube(
     pick_youtube(&by_artist, q)
 }
 
+/// Why a stream did not play, from the engine's error text, as the user
+/// reads it ("ARISTOCRAT: <this>").
+pub(crate) fn failure_text(message: &str, youtube_signed_in: bool) -> String {
+    let m = message.to_lowercase();
+    if m.contains("age-restricted") {
+        if youtube_signed_in {
+            "на YouTube только для 18+, и со входом не открылся".into()
+        } else {
+            "на YouTube только для 18+ — войди в YouTube Music в «Источниках»".into()
+        }
+    } else if m.contains("blocked in this region") {
+        "недоступно в твоём регионе".into()
+    } else if m.contains("premium") {
+        "для звука из Spotify нужен Premium".into()
+    } else if m.contains("rate limited") {
+        "сервис просит подождать — попробуй позже".into()
+    } else if m.contains("not available") || m.contains("недоступ") {
+        "трек недоступен".into()
+    } else {
+        "не получилось воспроизвести".into()
+    }
+}
+
 impl Worker {
+    /// Videos refused lately (see [`Self::stream_failed`]).
+    pub(crate) fn refused_videos(&mut self) -> Vec<String> {
+        self.streaming
+            .refused
+            .retain(|_, at| at.elapsed() < super::REFUSED_TTL);
+        self.streaming.refused.keys().cloned().collect()
+    }
+
+    /// The playing source of `track` did not open: a YouTube video that
+    /// is refused (age gate, region block, gone) is set aside, so the next
+    /// lookup picks another copy of the song; the reason is kept for the
+    /// toast if none plays.
+    pub(crate) fn stream_failed(&mut self, track: TrackId, source: nikgob_core::model::SourceId, message: &str) {
+        let Some(src) = self.lib.get_source(source).ok().flatten() else { return };
+        let signed_in = self
+            .service(Service::Youtube)
+            .is_some_and(|y| y.account().is_logged_in());
+        let why = failure_text(message, signed_in);
+        log::info!("{track}: {} source {} failed: {message}", src.kind.as_str(), src.locator);
+        self.streaming.failures.insert(track, why);
+        if src.kind == SourceKind::Youtube {
+            self.streaming.refused.insert(src.locator.clone(), Instant::now());
+            if let Err(e) = self.lib.set_source_available(source, false) {
+                log::warn!("setting aside the YouTube copy of {track}: {e}");
+            }
+        }
+    }
+
     /// The track can be looked up on YouTube Music: YouTube is on, the
     /// track has no YouTube source yet, and it did not miss recently.
     pub(crate) fn can_resolve(&mut self, track: TrackId) -> bool {
@@ -147,6 +201,7 @@ impl Worker {
             artist: t.artist_credit.display(),
             duration_ms: t.duration_ms.map(u64::from),
             isrc: t.isrc.clone(),
+            exclude: self.refused_videos(),
         };
         self.streaming.resolving.insert(track);
         log::info!("looking up {} on YouTube Music", q.text());
@@ -199,6 +254,7 @@ impl Worker {
                 self.streaming.misses.insert(track, Instant::now());
             }
         }
+        let why = self.streaming.failures.remove(&track);
         if let Some(item) = self.streaming.save_after_resolve.remove(&track) {
             self.wish_save_from_youtube(item);
         }
@@ -207,7 +263,10 @@ impl Worker {
             .filter(|e| e.track == track && self.playing_source.is_none());
         if let Some(e) = waiting {
             let paused = self.status == nikgob_view::Status::Paused;
-            match self.request_skipping(e, &[]) {
+            // Not the sources that failed a moment ago (Spotify refusing
+            // sound): straight to the copy just found.
+            let skip = self.tried.clone();
+            match self.request_skipping(e, &skip) {
                 Some((req, source, kind)) => {
                     self.start_with(e, req, source, kind);
                     if paused {
@@ -217,7 +276,13 @@ impl Worker {
                     }
                 }
                 None => {
-                    self.toast("Не нашёл этот трек на YouTube Music", None);
+                    let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
+                    let text = match why {
+                        // The only copies did not play: say why.
+                        Some(why) => format!("{title}: {why}"),
+                        None => format!("{title}: не нашёл на YouTube Music"),
+                    };
+                    self.toast(text, None);
                     match self.queue.skip_forward() {
                         Some(n) if n.id != e.id => self.start(n),
                         _ => self.stop(),
@@ -250,6 +315,7 @@ mod tests {
             artist: "Кино".into(),
             duration_ms: Some(285_000),
             isrc: None,
+            exclude: Vec::new(),
         };
         assert_eq!(q.text(), "Кино Группа крови");
         let clip = hit("clip", "Кино - Группа крови (клип)", 286, TrackKind::Video);
@@ -264,5 +330,11 @@ mod tests {
         let mut gone = song;
         gone.playable = false;
         assert!(pick_youtube(&[gone], &q).is_none());
+        // A video that did not play: the next candidate.
+        let q = ResolveQuery {
+            exclude: vec!["song".into()],
+            ..q
+        };
+        assert_eq!(pick_youtube(&all, &q).unwrap().id.id, "clip");
     }
 }

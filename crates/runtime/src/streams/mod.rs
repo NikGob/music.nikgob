@@ -44,6 +44,8 @@ use crate::import::Internal;
 pub(crate) use cold::STREAM_JOB;
 pub(crate) use wishlist::WISH_ID;
 
+/// How long a YouTube video that did not play is not picked again.
+const REFUSED_TTL: Duration = Duration::from_secs(6 * 3600);
 /// How long a failed YouTube lookup of a track is not repeated.
 const MISS_TTL: Duration = Duration::from_secs(6 * 3600);
 /// How often the services' liked lists are pulled while the app runs.
@@ -103,6 +105,11 @@ pub(crate) struct Streams {
     /// YouTube lookups running / failed recently, by track.
     resolving: HashSet<TrackId>,
     misses: HashMap<TrackId, Instant>,
+    /// YouTube videos that did not play, by video id (not by track: the
+    /// same song has other copies).
+    refused: HashMap<String, Instant>,
+    /// Why the last source of a track failed, for the toast.
+    pub(crate) failures: HashMap<TrackId, String>,
     /// Wishlist items whose "save from YouTube" waits for the lookup.
     save_after_resolve: HashMap<TrackId, WishlistId>,
     last_pull: Option<Instant>,
@@ -137,6 +144,8 @@ impl Streams {
             page_seq: 0,
             resolving: HashSet::new(),
             misses: HashMap::new(),
+            refused: HashMap::new(),
+            failures: HashMap::new(),
             save_after_resolve: HashMap::new(),
             last_pull: None,
             pulling: HashSet::new(),
@@ -182,6 +191,8 @@ pub(crate) fn error_text(e: &StreamError) -> String {
         StreamError::RateLimited { .. } => "Сервис просит подождать — попробуй позже".into(),
         StreamError::Unavailable => "Недоступно".into(),
         StreamError::Unsupported => "Сервис так не умеет".into(),
+        StreamError::AgeRestricted => "Только для 18+ — нужно войти".into(),
+        StreamError::RegionBlocked => "Недоступно в твоём регионе".into(),
         StreamError::Http { status } => format!("Сервис ответил ошибкой (HTTP {status})"),
         StreamError::Network(m) => format!("Нет связи: {m}"),
         StreamError::Parse(_) => "Сервис ответил непонятно".into(),

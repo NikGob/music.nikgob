@@ -388,3 +388,41 @@ fn a_seek_while_the_stream_opens_applies_once_it_is_open() {
     let end = (pos.as_secs_f64() * f64::from(RATE)).round() as usize;
     assert!(tail_matches(&out[out.len() - 128..], end, &original, 1e-6));
 }
+
+/// A source that failed and is played again under the same id (the next
+/// source of one queue entry: Spotify refused, YouTube Music plays), and an
+/// item played again over itself (restart), are announced as started: the
+/// runtime waits for that to leave Buffering.
+#[test]
+fn replaying_the_same_id_is_announced() {
+    let mut rig = rig(RATE);
+    let mut m = Memory::new(fixture("tone.ogg"), "ogg");
+    m.fail_reads = true;
+    rig.player.play(stream(7, m));
+    let seen = wait_event(&rig.events, Duration::from_secs(2), |e| {
+        matches!(e, Event::Error { .. })
+    });
+    assert!(seen.iter().any(|e| matches!(e, Event::Error { id: Some(7), .. })), "{seen:?}");
+    let _ = rig.device.drain(RATE as usize / 10);
+
+    let (bytes, _) = wav16(0, RATE as usize * 3);
+    rig.player.play(stream(7, Memory::new(bytes.clone(), "wav")));
+    let _ = rig.device.drain(RATE as usize / 2);
+    let seen = wait_event(&rig.events, Duration::from_secs(2), |e| {
+        matches!(e, Event::Started { id: 7, .. } | Event::TrackChanged { to: 7, .. })
+    });
+    assert!(
+        seen.iter().any(|e| matches!(e, Event::Started { id: 7, .. } | Event::TrackChanged { to: 7, .. })),
+        "after a failed source: {seen:?}"
+    );
+
+    rig.player.play(stream(7, Memory::new(bytes, "wav")));
+    let _ = rig.device.drain(RATE as usize / 2);
+    let seen = wait_event(&rig.events, Duration::from_secs(2), |e| {
+        matches!(e, Event::Started { id: 7, .. } | Event::TrackChanged { to: 7, .. })
+    });
+    assert!(
+        seen.iter().any(|e| matches!(e, Event::Started { id: 7, .. } | Event::TrackChanged { to: 7, .. })),
+        "played over itself: {seen:?}"
+    );
+}

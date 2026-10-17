@@ -764,8 +764,8 @@ impl Spotify {
         let catalog = self.client_for(Op::Catalog)?;
         let playlists = self.client_for(Op::PlaylistSearch)?;
         let me = self.user_id();
-        let mut out = StreamSearch::default();
-        let (catalog_results, playlist_results) = if std::ptr::eq(catalog, playlists) {
+        let started = Instant::now();
+        let out = if std::ptr::eq(catalog, playlists) {
             let all = catalog
                 .search(
                     query,
@@ -829,10 +829,10 @@ impl Spotify {
                 .filter_map(|t| convert::track(t, None))
                 .collect();
         }
-        if let Some(page) = &catalog_results.albums {
+        if let Some(page) = &r.albums {
             out.albums = page.items.iter().filter_map(convert::album).collect();
         }
-        if let Some(page) = &catalog_results.artists {
+        if let Some(page) = &r.artists {
             out.artists = page.items.iter().filter_map(convert::artist).collect();
         }
         out

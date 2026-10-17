@@ -334,8 +334,12 @@ impl Worker {
         };
         self.remember(&data);
         let (tracks, title, ctx, album) = match &data {
-            PageData::Album(a) => (a.tracks.clone(), a.title.clone(), EventContext::Album, Some(a.id.clone())),
-            PageData::Playlist(p) => (p.tracks.clone(), p.name.clone(), EventContext::Playlist, None),
+            PageData::Album(a) => {
+                (a.tracks.clone(), format!("альбома «{}»", a.title), EventContext::Album, Some(a.id.clone()))
+            }
+            PageData::Playlist(p) => {
+                (p.tracks.clone(), format!("плейлиста «{}»", p.name), EventContext::Playlist, None)
+            }
             PageData::Artist(_) => return,
         };
         let playable: Vec<StreamTrack> = tracks.into_iter().filter(|t| t.playable).collect();

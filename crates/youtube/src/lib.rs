@@ -55,6 +55,9 @@ use range::{HttpStream, ResolveFn};
 /// Upper bound of tracks fetched for one playlist (YouTube caps listings
 /// around 5000 anyway).
 const PLAYLIST_LIMIT: usize = 10_000;
+/// A video whose player refused it is not asked again for this long (a
+/// preload, a retry and the next play fail at once with the same reason).
+const REFUSED_TTL: Duration = Duration::from_secs(30 * 60);
 /// Name shown when the account menu does not say.
 const DEFAULT_NAME: &str = "YouTube Music";
 /// Our own non-secret account notes next to RustyPipe's cache.
@@ -349,6 +352,8 @@ pub(crate) fn map_err(e: RpError) -> StreamError {
                 log::warn!("youtube: blocked ({reason}): {msg}");
                 StreamError::RateLimited { retry_after: None }
             }
+            UnavailabilityReason::AgeRestricted => StreamError::AgeRestricted,
+            UnavailabilityReason::Geoblocked => StreamError::RegionBlocked,
             _ => StreamError::Unavailable,
         },
         RpError::Extraction(ExtractionError::NotFound { .. }) => StreamError::Unavailable,
@@ -373,10 +378,30 @@ pub(crate) fn map_err(e: RpError) -> StreamError {
 fn stream(inner: &Arc<Inner>, runtime: tokio::runtime::Handle, id: &str, keep: bool) -> HttpStream {
     let (inner2, id2) = (Arc::clone(inner), id.to_owned());
     let resolve: ResolveFn = Arc::new(move || {
-        let (inner, id) = (Arc::clone(&inner2), id.clone());
-        Box::pin(
-            async move { player::resolve(&inner.rp, &inner.http, &id, &inner.hl, &inner.gl).await },
-        )
+        let (inner, id) = (Arc::clone(&inner2), id2.clone());
+        Box::pin(async move {
+            let known = inner
+                .refused
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&id)
+                .filter(|(at, _)| at.elapsed() < REFUSED_TTL)
+                .map(|(_, e)| e.clone());
+            if let Some(e) = known {
+                log::info!("youtube: {id}: refused lately ({e}), not asked again");
+                return Err(e);
+            }
+            let r = player::resolve(&inner.rp, &inner.http, &id, &inner.hl, &inner.gl).await;
+            if let Err(e @ (StreamError::AgeRestricted | StreamError::RegionBlocked | StreamError::Unavailable)) = &r {
+                log::info!("youtube: {id}: player refused: {e}");
+                inner
+                    .refused
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(id.clone(), (std::time::Instant::now(), e.clone()));
+            }
+            r
+        })
     });
     let on_complete: Option<range::CompleteFn> = keep.then(|| {
         let (inner, id) = (Arc::clone(inner), id.to_owned());
@@ -718,6 +743,7 @@ impl StreamService for Youtube {
             &self.inner,
             self.runtime.handle().clone(),
             id,
+            true,
         )))
     }
 
@@ -801,7 +827,7 @@ mod tests {
             reason: UnavailabilityReason::Geoblocked,
             msg: "no".into(),
         });
-        assert_eq!(map_err(unavailable), StreamError::Unavailable);
+        assert_eq!(map_err(unavailable), StreamError::RegionBlocked);
         let ban = RpError::Extraction(ExtractionError::Unavailable {
             reason: UnavailabilityReason::Captcha,
             msg: "no".into(),

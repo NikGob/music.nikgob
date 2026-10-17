@@ -317,6 +317,9 @@ impl Renderer {
             // boundary mark which would have announced it.
             (None, Some(s)) => match self.cur {
                 Some(from) if from != s.id => self.push_event(CbEvent::Changed { from, to: s.id }),
+                // The same id played anew (a restart, or the next source of
+                // the same queue entry): a start the listener must hear of.
+                Some(_) if s.announce => self.push_event(CbEvent::Started(s.id)),
                 Some(_) => {}
                 None if s.announce => self.push_event(CbEvent::Started(s.id)),
                 None => {}

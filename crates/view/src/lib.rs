@@ -256,6 +256,10 @@ pub struct PlayerView {
     /// file): the "звук: YouTube" label, e.g. for a Spotify track played
     /// from YouTube Music because Spotify has no sound for this account.
     pub audio_service: Option<Service>,
+    /// What the sound of a stream actually is ("Opus ~160 kbps", "AAC
+    /// ~128 kbps", "Vorbis 320 kbps"): the source that plays, not the
+    /// track's best source. `None` for a local file (its row says).
+    pub audio_quality: Option<String>,
 }
 
 impl Default for PlayerView {
@@ -272,11 +276,38 @@ impl Default for PlayerView {
             repeat: Repeat::Off,
             context: None,
             audio_service: None,
+            audio_quality: None,
         }
     }
 }
 
 impl PlayerView {
+    /// The header line of Now Playing: "Играет из альбома «…»", "Играет
+    /// из поиска Spotify: лёд", "Играет из «Библиотека»" — never quotes in
+    /// quotes. A context that is a phrase ("альбома «…»", "поиска: …") is
+    /// used as it is, a bare name is quoted; old saved contexts ("Поиск
+    /// «…»", "Spotify · «…»") read the new way.
+    pub fn context_line(&self) -> String {
+        let Some(c) = self.context.as_deref().map(str::trim).filter(|c| !c.is_empty()) else {
+            return "Сейчас играет".to_owned();
+        };
+        let unquote = |s: &str| s.trim().trim_start_matches('«').trim_end_matches('»').to_owned();
+        const PHRASES: [&str; 5] = ["поиска", "альбома ", "плейлиста ", "исполнителя ", "микса "];
+        if PHRASES.iter().any(|p| c.starts_with(p)) {
+            return format!("Играет из {c}");
+        }
+        if let Some(q) = c.strip_prefix("Поиск ") {
+            return format!("Играет из поиска: {}", unquote(q));
+        }
+        if let Some((service, q)) = c.split_once(" · ") {
+            return format!("Играет из поиска {service}: {}", unquote(q));
+        }
+        if c.contains('«') || c.contains('»') {
+            return format!("Играет из {c}");
+        }
+        format!("Играет из «{c}»")
+    }
+
     /// Position now, extrapolated from the last update.
     pub fn position_now(&self) -> Duration {
         let p = if self.status == Status::Playing {
@@ -1337,3 +1368,28 @@ mod toast_tests {
     }
 }
 
+
+#[cfg(test)]
+mod context_tests {
+    use super::PlayerView;
+
+    fn line(c: Option<&str>) -> String {
+        PlayerView { context: c.map(str::to_owned), ..PlayerView::default() }.context_line()
+    }
+
+    #[test]
+    fn contexts_read_without_quotes_in_quotes() {
+        assert_eq!(line(None), "Сейчас играет");
+        assert_eq!(line(Some("Библиотека")), "Играет из «Библиотека»");
+        assert_eq!(line(Some("альбома «Группа крови»")), "Играет из альбома «Группа крови»");
+        assert_eq!(line(Some("плейлиста «Вечер»")), "Играет из плейлиста «Вечер»");
+        assert_eq!(line(Some("поиска Spotify: лёд")), "Играет из поиска Spotify: лёд");
+        assert_eq!(line(Some("поиска: лёд")), "Играет из поиска: лёд");
+        // Saved by older versions.
+        assert_eq!(line(Some("Spotify · «лёд»")), "Играет из поиска Spotify: лёд");
+        assert_eq!(line(Some("Поиск «лёд»")), "Играет из поиска: лёд");
+        for c in ["Spotify · «лёд»", "Поиск «лёд»", "альбома «X»", "Кино"] {
+            assert!(line(Some(c)).matches('«').count() <= 1, "{c}");
+        }
+    }
+}

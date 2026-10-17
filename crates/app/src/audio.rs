@@ -16,7 +16,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use nikgob_audio::{Analyzer, ByteSource, Event, ItemSource, PlayItem, Player, PlayerOptions};
@@ -83,10 +83,23 @@ impl Engine {
             PlaySource::File(path) => ItemSource::File(path),
             PlaySource::Stream { service, id } => {
                 let svc = self.streams.iter().find(|s| s.service() == service).cloned();
+                let events = self.links.events.clone();
+                let item = r.id;
                 ItemSource::Stream(Box::new(move || {
                     let svc = svc.ok_or_else(|| format!("{service} is not available"))?;
-                    let stream = svc.open_audio(&id).map_err(|e| format!("{service}: {e}"))?;
-                    Ok(Box::new(StreamBytes(stream)) as Box<dyn ByteSource>)
+                    log::debug!("opening {service} stream {id} (item {item})");
+                    let stream = svc.open_audio(&id).map_err(|e| {
+                        log::info!("{service} stream {id} did not open: {e}");
+                        format!("{service}: {e}")
+                    })?;
+                    Ok(Box::new(StreamBytes {
+                        inner: stream,
+                        item,
+                        what: format!("{service} stream {id}"),
+                        opened: Instant::now(),
+                        reported: false,
+                        events,
+                    }) as Box<dyn ByteSource>)
                 }))
             }
         };
@@ -99,36 +112,72 @@ impl Engine {
     }
 }
 
-/// A service's [`AudioStream`] as the engine's [`ByteSource`].
-struct StreamBytes(Box<dyn AudioStream>);
+/// A service's [`AudioStream`] as the engine's [`ByteSource`]. Its first
+/// bytes are logged (time to first byte) and tell the runtime what really
+/// plays ([`PlaybackEvent::Quality`]).
+struct StreamBytes {
+    inner: Box<dyn AudioStream>,
+    item: u64,
+    what: String,
+    opened: Instant,
+    reported: bool,
+    events: Arc<Mutex<Option<Sender<PlaybackEvent>>>>,
+}
+
+impl StreamBytes {
+    fn first_bytes(&mut self) {
+        self.reported = true;
+        let quality = self.inner.quality();
+        log::debug!(
+            "{}: first bytes after {} ms ({}, {:?}, {} bytes)",
+            self.what,
+            self.opened.elapsed().as_millis(),
+            self.inner.format_hint(),
+            quality,
+            self.inner.byte_len().unwrap_or(0)
+        );
+        let to = self.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let (Some(label), Some(to)) = (quality, to) {
+            let _ = to.send(PlaybackEvent::Quality { id: self.item, label });
+        }
+    }
+}
 
 impl Read for StreamBytes {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.0.read(buf)
+        let n = self.inner.read(buf).inspect_err(|e| {
+            if !self.reported {
+                log::info!("{}: failed after {} ms: {e}", self.what, self.opened.elapsed().as_millis());
+            }
+        })?;
+        if n > 0 && !self.reported {
+            self.first_bytes();
+        }
+        Ok(n)
     }
 }
 
 impl Seek for StreamBytes {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        self.0.seek(pos)
+        self.inner.seek(pos)
     }
 }
 
 impl ByteSource for StreamBytes {
     fn byte_len(&self) -> Option<u64> {
-        self.0.byte_len()
+        self.inner.byte_len()
     }
 
     fn format_hint(&self) -> &str {
-        self.0.format_hint()
+        self.inner.format_hint()
     }
 
     fn gain_db(&self) -> Option<f32> {
-        self.0.gain_db()
+        self.inner.gain_db()
     }
 
     fn duration(&self) -> Option<Duration> {
-        self.0.duration()
+        self.inner.duration()
     }
 }
 

@@ -8,6 +8,8 @@
 //! - `fake:buffering` — the player waits for a stream.
 //! - `fake:audio:youtube` / `fake:audio:spotify` — where the sound comes from.
 //! - `fake:link` — the open playlist follows a Spotify playlist.
+//! - `fake:lyrics` — word-synced lyrics (LyricsPlus) for whatever plays:
+//!   the demo has no network to fetch any for a stream track.
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -22,6 +24,7 @@ pub struct Fakes {
     buffering: bool,
     audio: Option<Service>,
     link: bool,
+    lyrics: bool,
 }
 
 impl Fakes {
@@ -34,13 +37,14 @@ impl Fakes {
             "audio:youtube" => self.audio = Some(Service::Youtube),
             "audio:spotify" => self.audio = Some(Service::Spotify),
             "link" => self.link = true,
+            "lyrics" => self.lyrics = true,
             _ => return false,
         }
         true
     }
 
     pub fn any(&self) -> bool {
-        self.discography || self.wishlist || self.buffering || self.audio.is_some() || self.link
+        self.discography || self.wishlist || self.buffering || self.audio.is_some() || self.link || self.lyrics
     }
 
     /// `state` with the fakes laid over it.
@@ -60,6 +64,9 @@ impl Fakes {
         if let Some(svc) = self.audio {
             s.player.audio_service = Some(svc);
         }
+        if self.lyrics {
+            s.lyrics = word_lyrics(state.player.current.as_ref().map(|t| t.id));
+        }
         if self.link
             && let Some(p) = s.playlist.as_mut()
         {
@@ -72,6 +79,53 @@ impl Fakes {
             });
         }
         s
+    }
+}
+
+/// Lines of three words, one word a second, a line every four seconds.
+fn word_lyrics(track: Option<nikgob_view::TrackId>) -> nikgob_view::LyricsView {
+    use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource};
+    use std::time::Duration;
+    let text = [
+        "Тёплое место на улице ждёт",
+        "Группа крови на рукаве",
+        "Мой порядковый номер",
+        "Пожелай мне удачи в бою",
+        "Не остаться в этой траве",
+        "Пожелай мне удачи",
+    ];
+    let ms = Duration::from_millis;
+    let lines = (0..40)
+        .map(|i| {
+            let line = text[i % text.len()];
+            let start = 1500 + 4000 * i as u64;
+            let words: Vec<&str> = line.split(' ').collect();
+            let step = 3200 / words.len() as u64;
+            LyricLine {
+                start: ms(start),
+                end: Some(ms(start + 3400)),
+                text: line.to_owned(),
+                words: words
+                    .iter()
+                    .enumerate()
+                    .map(|(j, w)| LyricWord {
+                        start: ms(start + step * j as u64),
+                        end: ms(start + step * (j as u64 + 1)),
+                        text: if j + 1 < words.len() { format!("{w} ") } else { (*w).to_owned() },
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        })
+        .collect();
+    nikgob_view::LyricsView {
+        track,
+        lines,
+        plain: None,
+        loading: false,
+        source: Some(LyricsSource::LyricsPlus),
+        picked: false,
+        sources: Vec::new(),
     }
 }
 

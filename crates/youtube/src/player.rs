@@ -82,6 +82,8 @@ fn resolved(f: &Format, fallback_duration: Option<Duration>) -> Result<Resolved,
             .map(Duration::from_millis)
             .or(fallback_duration),
         gain_db: gain_from_loudness(f.loudness_db),
+        itag: f.itag,
+        bitrate: f.bitrate,
     })
 }
 
@@ -151,17 +153,11 @@ pub(crate) fn parse_player(json: &str) -> Result<(Vec<Format>, Option<Duration>)
         .map_err(|e| PlayerError::Other(StreamError::Parse(format!("player: {e}"))))?;
     match a.playability_status {
         Some(p) if p.status == "OK" => {}
-        Some(p) if p.status == "LOGIN_REQUIRED" => {
-            log::debug!("youtube: player: {}", p.reason.unwrap_or_default());
-            return Err(PlayerError::Bot);
-        }
         Some(p) => {
-            log::debug!(
-                "youtube: player: {} {}",
-                p.status,
-                p.reason.unwrap_or_default()
-            );
-            return Err(PlayerError::Other(StreamError::Unavailable));
+            let reason = p.reason.unwrap_or_default();
+            let e = playability_error(&p.status, &reason);
+            log::info!("youtube: player: {} «{reason}» → {e:?}", p.status);
+            return Err(e);
         }
         None => {
             return Err(PlayerError::Other(StreamError::Parse(
@@ -203,11 +199,34 @@ pub(crate) fn parse_player(json: &str) -> Result<(Vec<Format>, Option<Duration>)
     Ok((formats, duration))
 }
 
+/// What a refused player answer means. The request asks for English, so
+/// the reasons can be told apart: "Sign in to confirm you're not a bot" (a
+/// fresh visitor id helps), "Sign in to confirm your age" / "inappropriate
+/// for some users" (the age gate: only a login helps), "not available in
+/// your country" (a region or label block).
+pub(crate) fn playability_error(status: &str, reason: &str) -> PlayerError {
+    let r = reason.to_lowercase();
+    if r.contains("bot") {
+        return PlayerError::Bot;
+    }
+    if r.contains("your age") || r.contains("age-restricted") || r.contains("inappropriate") {
+        return PlayerError::Other(StreamError::AgeRestricted);
+    }
+    if r.contains("country") || r.contains("region") || r.contains("location") {
+        return PlayerError::Other(StreamError::RegionBlocked);
+    }
+    match status {
+        // A sign-in wall without a stated reason: a fresh visitor id may do.
+        "LOGIN_REQUIRED" => PlayerError::Bot,
+        _ => PlayerError::Other(StreamError::Unavailable),
+    }
+}
+
 async fn visionos(
     http: &reqwest::Client,
     visitor_data: &str,
     id: &str,
-    hl: &str,
+    _hl: &str,
     gl: &str,
 ) -> Result<(Vec<Format>, Option<Duration>), PlayerError> {
     let body = json!({
@@ -218,7 +237,9 @@ async fn visionos(
             "deviceModel": "RealityDevice17,1",
             "osName": "visionOS",
             "osVersion": "26.5.23O471",
-            "hl": hl,
+            // English reasons (see `playability_error`); metadata does not
+            // come from here.
+            "hl": "en",
             "gl": gl,
             "visitorData": visitor_data,
         }},
@@ -251,6 +272,31 @@ async fn visionos(
         .await
         .map_err(|e| PlayerError::Other(StreamError::Network(e.without_url().to_string())))?;
     parse_player(&text)
+}
+
+/// RustyPipe's player: with the user's login first when there is one (the
+/// age gate opens for a signed-in adult; cookies sign in the web clients),
+/// else its default clients.
+async fn rustypipe_player(
+    rp: &RustyPipe,
+    id: &str,
+) -> Result<rustypipe::model::VideoPlayer, rustypipe::error::Error> {
+    use rustypipe::client::ClientType;
+    let q = rp.query();
+    let signed_in: Vec<ClientType> = [ClientType::DesktopMusic, ClientType::Desktop, ClientType::Tv]
+        .into_iter()
+        .filter(|c| q.auth_enabled(*c))
+        .collect();
+    if !signed_in.is_empty() {
+        match q.clone().authenticated().player_from_clients(id, &signed_in).await {
+            Ok(p) => {
+                log::debug!("youtube: {id}: player with login via {:?}", p.client_type);
+                return Ok(p);
+            }
+            Err(e) => log::info!("youtube: {id}: player with login failed: {e}"),
+        }
+    }
+    q.player(id).await
 }
 
 /// The best audio stream of a video: visionOS first, RustyPipe's player if
@@ -289,9 +335,14 @@ pub(crate) async fn resolve(
         }
     };
     log::info!("youtube: {id}: visionOS player failed ({first_err}), trying RustyPipe's");
-    let player = rp.query().player(id).await.map_err(|e| {
-        log::debug!("youtube: {id}: RustyPipe player: {e}");
-        first_err.clone()
+    let player = rustypipe_player(rp, id).await.map_err(|e| {
+        log::info!("youtube: {id}: RustyPipe player: {e}");
+        // The more telling reason of the two.
+        match (&first_err, crate::map_err(e)) {
+            (StreamError::AgeRestricted | StreamError::RegionBlocked, _) => first_err.clone(),
+            (_, e @ (StreamError::AgeRestricted | StreamError::RegionBlocked)) => e,
+            _ => first_err.clone(),
+        }
     })?;
     let formats: Vec<Format> = player
         .audio_streams
@@ -393,6 +444,14 @@ mod tests {
     fn playability_failures() {
         let bot = json!({"playabilityStatus": {"status": "LOGIN_REQUIRED", "reason": "bot"}});
         assert_eq!(parse_player(&bot.to_string()), Err(PlayerError::Bot));
+        let age = json!({"playabilityStatus": {"status": "LOGIN_REQUIRED",
+            "reason": "Sign in to confirm your age"}});
+        assert_eq!(parse_player(&age.to_string()), Err(PlayerError::Other(StreamError::AgeRestricted)));
+        let region = json!({"playabilityStatus": {"status": "UNPLAYABLE",
+            "reason": "The uploader has not made this video available in your country"}});
+        assert_eq!(parse_player(&region.to_string()), Err(PlayerError::Other(StreamError::RegionBlocked)));
+        let gone = json!({"playabilityStatus": {"status": "ERROR", "reason": "Video unavailable"}});
+        assert_eq!(parse_player(&gone.to_string()), Err(PlayerError::Other(StreamError::Unavailable)));
         let gone = json!({"playabilityStatus": {"status": "ERROR", "reason": "removed"}});
         assert_eq!(
             parse_player(&gone.to_string()),

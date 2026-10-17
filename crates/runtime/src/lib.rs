@@ -74,6 +74,8 @@ pub enum PlaybackEvent {
     Resumed,
     Ended { id: u64 },
     Error { id: u64, message: String },
+    /// What a stream item actually plays ("Opus ~160 kbps"), once opened.
+    Quality { id: u64, label: String },
 }
 
 /// The audio engine as the runtime sees it.
@@ -362,6 +364,7 @@ impl Worker {
             streams: config.streams,
             tried: Vec::new(),
             playing_source: None,
+            qualities: Vec::new(),
             streaming,
         }
     }
@@ -537,12 +540,13 @@ impl Worker {
                     .get_release(id)
                     .ok()
                     .flatten()
-                    .map(|r| r.title);
+                    .map(|r| format!("альбома «{}»", r.title));
                 let ids: Vec<TrackId> = rows.iter().map(|r| r.id).collect();
                 self.play_list(ids, start, shuffle, title, EventContext::Album);
             }
             Command::PlayPlaylist { id, start, shuffle } => {
                 let (ids, name) = self.playlist_tracks(id);
+                let name = format!("плейлиста «{name}»");
                 self.play_list(ids, start, shuffle, Some(name), EventContext::Playlist);
             }
             Command::PlayArtist { id, shuffle } => {
@@ -1193,6 +1197,22 @@ impl Worker {
                 }
             }
             PlaybackEvent::Position { id, position } => {
+                // The engine plays it: a start report that never came (or
+                // was taken for another item) must not leave the player in
+                // Buffering, where the view freezes the position and the
+                // lyrics stop following the words.
+                if self.playing.map(|e| e.id) == Some(id)
+                    && self.status == Status::Buffering
+                    && position > Duration::ZERO
+                {
+                    log::info!("item {id} plays without a start report; playing now");
+                    self.restarted = None;
+                    self.status = Status::Playing;
+                    self.position = position;
+                    self.position_at = Instant::now();
+                    self.publish_player();
+                    return;
+                }
                 if self.playing.map(|e| e.id) == Some(id) {
                     // The view extrapolates from its last publish and stops at
                     // the track's end. When the engine reports somewhere else
@@ -1211,6 +1231,17 @@ impl Worker {
                 }
             }
             PlaybackEvent::Paused | PlaybackEvent::Resumed => {}
+            PlaybackEvent::Quality { id, label } => {
+                log::debug!(target: "nikgob_runtime::streams", "item {id} plays as {label}");
+                self.qualities.retain(|(i, _)| *i != id);
+                if self.qualities.len() >= 4 {
+                    self.qualities.remove(0);
+                }
+                self.qualities.push((id, label));
+                if self.playing.map(|e| e.id) == Some(id) {
+                    self.publish_now_playing();
+                }
+            }
             PlaybackEvent::Ended { id } => {
                 if self.playing.map(|e| e.id) == Some(id) {
                     self.record_end(false);
@@ -1230,11 +1261,23 @@ impl Worker {
                     return;
                 }
                 if let Some(e) = playing
+                    && let Some((source, _)) = self.playing_source
+                {
+                    self.stream_failed(e.track, source, &message);
+                }
+                if let Some(e) = playing
                     && self.try_next_source(e)
                 {
                     return;
                 }
-                self.toast("Не получилось воспроизвести трек", None);
+                let title = playing
+                    .and_then(|e| self.lib.get_track(e.track).ok().flatten())
+                    .map(|t| t.title);
+                let why = playing.and_then(|e| self.streaming.failures.remove(&e.track));
+                match (title, why) {
+                    (Some(t), Some(why)) => self.toast(format!("{t}: {why}"), None),
+                    _ => self.toast("Не получилось воспроизвести трек", None),
+                }
                 if playing.is_some() {
                     match self.queue.skip_forward() {
                         Some(e) if e.id != id => self.start(e),
@@ -1243,6 +1286,15 @@ impl Worker {
                 }
             }
         }
+    }
+
+    /// What the playing stream is: what it said once opened, else what its
+    /// service usually streams. `None` for a local file.
+    fn audio_quality(&self) -> Option<String> {
+        let service = self.playing_source.and_then(|(_, k)| k.service())?;
+        let id = self.playing?.id;
+        let known = self.qualities.iter().find(|(i, _)| *i == id).map(|(_, q)| q.clone());
+        Some(known.unwrap_or_else(|| service.nominal_quality()))
     }
 
     fn publish_player(&mut self) {
@@ -1256,11 +1308,13 @@ impl Worker {
         let history: Vec<Entry> = history[history.len().saturating_sub(HISTORY_SHOWN)..].to_vec();
         let current_entry = self.queue.current().map(|e| e.id);
         let audio_service = self.playing_source.and_then(|(_, k)| k.service());
+        let audio_quality = self.audio_quality();
         let lib = self.lib.clone();
         self.publish(|s, res| {
             let p = &mut s.player;
             p.status = status;
             p.audio_service = audio_service;
+            p.audio_quality = audio_quality;
             p.position = position;
             p.at = Instant::now();
             p.volume = volume;
@@ -1288,8 +1342,14 @@ impl Worker {
         let shown = self.playing.or_else(|| self.resume_at.and(self.queue.current()));
         let current = shown
             .and_then(|e| self.lib.get_track_row(e.track).ok().flatten());
-        let src = shown
-            .and_then(|e| self.lib.active_source(e.track).ok().flatten());
+        // The source that plays (a Spotify track may sound from YouTube),
+        // else the track's best one.
+        let playing = self
+            .playing_source
+            .filter(|_| self.playing.is_some() && self.playing == shown)
+            .and_then(|(id, _)| self.lib.get_source(id).ok().flatten());
+        let src = playing.or_else(|| shown.and_then(|e| self.lib.active_source(e.track).ok().flatten()));
+        let audio_quality = self.audio_quality();
         let changed = self.state.read().player.current.as_ref().map(|r| r.id)
             != current.as_ref().map(|r| r.id);
         self.publish(|s, res| {
@@ -1298,6 +1358,9 @@ impl Worker {
             s.player.current = row.clone();
             s.queue.current = row;
             s.info = res.info(current.as_ref(), src.as_ref());
+            if audio_quality.is_some() {
+                s.info.quality = audio_quality;
+            }
         });
         if changed && let Some(t) = current.as_ref().map(|r| r.id) {
             self.track_details(t);
@@ -1467,6 +1530,7 @@ impl Worker {
             return;
         }
         // Library first (at once), then the services as they answer.
+        let started = Instant::now();
         let r = if sources.library {
             self.lib.search(&trimmed, 20).unwrap_or_default()
         } else {

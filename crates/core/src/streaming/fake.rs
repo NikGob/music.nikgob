@@ -538,12 +538,14 @@ impl FakeService {
         let mut st = self.lock();
         st.opened.push(id.to_owned());
         let fail = st.unavailable.contains(id) || !self.catalog.tracks[index].playable;
-        Ok(FakeAudio::new(
+        let mut audio = FakeAudio::new(
             220.0 + 20.0 * index as f32,
             st.audio_secs,
             fail,
             (self.service == Service::Spotify).then_some(-2.0),
-        ))
+        );
+        audio.quality = Some(self.service.nominal_quality());
+        Ok(audio)
     }
 }
 
@@ -754,6 +756,8 @@ struct FakeAudio {
     gain_db: Option<f32>,
     bytes: Option<Vec<u8>>,
     pos: u64,
+    /// What the real service would play (for the player's label).
+    quality: Option<String>,
 }
 
 impl FakeAudio {
@@ -765,6 +769,7 @@ impl FakeAudio {
             gain_db,
             bytes: None,
             pos: 0,
+            quality: None,
         }
     }
 
@@ -846,6 +851,10 @@ impl AudioStream for FakeAudio {
         Some(Duration::from_secs_f64(
             self.frames as f64 / f64::from(AUDIO_RATE),
         ))
+    }
+
+    fn quality(&self) -> Option<String> {
+        self.quality.clone()
     }
 }
 

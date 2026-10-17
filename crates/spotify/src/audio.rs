@@ -25,10 +25,10 @@ pub const SPOTIFY_OGG_HEADER_END: u64 = 0xa7;
 pub const NORMALISATION_OFFSET: u64 = 144;
 /// Ogg Vorbis only: the engine decodes Vorbis, and MP3/AAC files of
 /// Spotify are not what librespot streams for music.
-const FORMATS: [(AudioFileFormat, usize); 3] = [
-    (AudioFileFormat::OGG_VORBIS_320, 40 * 1024),
-    (AudioFileFormat::OGG_VORBIS_160, 20 * 1024),
-    (AudioFileFormat::OGG_VORBIS_96, 12 * 1024),
+const FORMATS: [(AudioFileFormat, usize, u32); 3] = [
+    (AudioFileFormat::OGG_VORBIS_320, 40 * 1024, 320),
+    (AudioFileFormat::OGG_VORBIS_160, 20 * 1024, 160),
+    (AudioFileFormat::OGG_VORBIS_96, 12 * 1024, 96),
 ];
 /// The whole open (metadata, key, first bytes) must not take longer.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(45);
@@ -150,9 +150,9 @@ pub async fn open(session: &Session, id: &str, premium: Option<bool>) -> Result<
     let item = playable(session, item)
         .await
         .ok_or_else(|| failed(StreamError::Unavailable))?;
-    let (file_id, bytes_per_second) = FORMATS
+    let (file_id, bytes_per_second, kbps) = FORMATS
         .iter()
-        .find_map(|(f, bps)| item.files.get(f).map(|id| (*id, *bps)))
+        .find_map(|(f, bps, kbps)| item.files.get(f).map(|id| (*id, *bps, *kbps)))
         .ok_or_else(|| failed(StreamError::Unavailable))?;
     let duration =
         Some(Duration::from_millis(u64::from(item.duration_ms))).filter(|d| !d.is_zero());
@@ -264,6 +264,7 @@ impl SpotifyStream {
             opener: Some(opener),
             opened: None,
             failure: None,
+            keep: None,
         }
     }
 

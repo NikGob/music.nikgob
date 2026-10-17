@@ -51,6 +51,10 @@ pub(crate) struct Resolved {
     pub format: &'static str,
     pub duration: Option<Duration>,
     pub gain_db: Option<f32>,
+    /// YouTube's format id (251 = Opus ~160 kbps, 140 = AAC 128 kbps).
+    pub itag: u32,
+    /// Peak bitrate in bit/s, as the player says.
+    pub bitrate: u32,
 }
 
 /// "Opus ~160 kbps", "AAC ~128 kbps": what an itag plays.
@@ -298,6 +302,11 @@ impl AudioStream for HttpStream {
     fn duration(&self) -> Option<Duration> {
         self.info_now().and_then(|r| r.duration)
     }
+
+    fn quality(&self) -> Option<String> {
+        self.info_now()
+            .map(|r| quality_of(r.itag, r.format == format::WEBM, r.bitrate))
+    }
 }
 
 impl Drop for HttpStream {
@@ -337,6 +346,12 @@ async fn download(
         Ok(r) => r,
         Err(e) => return fail(&shared, format!("cannot resolve the stream: {e}")),
     };
+    log::debug!(
+        "youtube: stream resolved in {} ms (itag {}, {} bytes)",
+        started.elapsed().as_millis(),
+        resolved.itag,
+        resolved.len
+    );
     {
         let mut st = shared.lock();
         st.data = vec![0; resolved.len as usize];
@@ -381,7 +396,16 @@ async fn download(
         let before = progress(&shared);
         match fetch(&shared, &http, &resolved.url, range).await {
             Ok(Stop::Closed) => return,
-            Ok(Stop::Moved | Stop::Done) => first = false,
+            Ok(Stop::Moved | Stop::Done) => {
+                if first {
+                    log::debug!(
+                        "youtube: first {} KB after {} ms",
+                        progress(&shared) / 1024,
+                        started.elapsed().as_millis()
+                    );
+                }
+                first = false;
+            }
             Err(Fail::Expired) => {
                 resolves = if progress(&shared) > before {
                     1
@@ -618,10 +642,12 @@ mod tests {
                     format: format::M4A,
                     duration: Some(Duration::from_secs(3)),
                     gain_db: Some(-1.5),
+                    itag: 140,
+                    bitrate: 128_000,
                 })
             })
         });
-        HttpStream::new(rt.handle().clone(), reqwest::Client::new(), resolve)
+        HttpStream::new(rt.handle().clone(), reqwest::Client::new(), resolve, None)
     }
 
     fn runtime() -> tokio::runtime::Runtime {

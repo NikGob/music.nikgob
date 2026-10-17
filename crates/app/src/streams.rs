@@ -73,9 +73,19 @@ pub fn real_in_demo() -> bool {
 
 fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
     let base = FakeService::new(service);
+    // Long enough to watch a track play (lyrics, progress) in screenshots.
+    base.set_audio_secs(180.0);
     match mode {
         "out" => Arc::new(base.logged_out()),
         "free" => Arc::new(base.without_audio()),
+        // Logged in with sound, but every track fails once it is read
+        // (Spotify refusing the key of a Free account mid-open).
+        "refused" => {
+            for t in base.tracks() {
+                base.set_unavailable(&t.id.id, true);
+            }
+            Arc::new(base)
+        }
         "prompt" | "failed" => Arc::new(Shown {
             inner: base.logged_out(),
             account: if mode == "prompt" {

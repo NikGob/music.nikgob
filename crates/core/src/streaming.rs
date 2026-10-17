@@ -89,6 +89,15 @@ impl Service {
         }
     }
 
+    /// What the stream usually is, until the opened stream says
+    /// ([`AudioStream::quality`]): "Vorbis 320 kbps", "Opus ~160 kbps".
+    pub fn nominal_quality(self) -> String {
+        match self {
+            Self::Spotify => quality_label("Vorbis", 320, false),
+            Self::Youtube => quality_label("Opus", 160, true),
+        }
+    }
+
     /// Nominal bitrate of the stream in kbps.
     pub const fn bitrate_kbps(self) -> u32 {
         match self {
@@ -499,6 +508,12 @@ pub enum StreamError {
     /// Not available (region, withdrawn, private, no such id).
     #[error("not available")]
     Unavailable,
+    /// Only for signed-in adults (YouTube's age gate): needs a login.
+    #[error("age-restricted")]
+    AgeRestricted,
+    /// Blocked where the user is (a label or region block).
+    #[error("blocked in this region")]
+    RegionBlocked,
     /// The service cannot do this at all (saving audio from Spotify).
     #[error("not supported by this service")]
     Unsupported,
@@ -544,6 +559,11 @@ pub trait AudioStream: Read + Seek + Send {
     }
     /// Length of the audio, if the service tells (the container usually does).
     fn duration(&self) -> Option<Duration> {
+        None
+    }
+    /// What actually plays, for the player ("Opus ~160 kbps", "AAC ~128
+    /// kbps", "Vorbis 320 kbps"), if known. Called after the first read.
+    fn quality(&self) -> Option<String> {
         None
     }
 }
