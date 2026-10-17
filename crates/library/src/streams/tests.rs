@@ -1,4 +1,4 @@
-use nikgob_core::model::{Codec, SourceKind, score};
+use nikgob_core::model::{Codec, SourceKind, WishlistItem, WishlistStatus, score};
 use nikgob_core::streaming::FakeService;
 
 use super::*;
@@ -151,14 +151,176 @@ fn same_isrc_from_the_other_service_is_a_second_source() {
         lib.external_ids(EntityKind::Track, *id.as_uuid()).unwrap(),
         vec![s.id.clone(), y.id.clone()]
     );
-    // Without an ISRC the other service's copy is a separate track.
+    // Without an ISRC the other service's copy is found by name and length.
     let y2 = find(&youtube, "yt-gruppa-1");
     assert!(y2.isrc.is_none());
     let s2 = find(&spotify, "sp-gruppa-1");
-    assert_ne!(
+    assert_eq!(
         lib.upsert_stream_track(&y2).unwrap(),
         lib.upsert_stream_track(&s2).unwrap()
     );
+}
+
+/// A YouTube copy of a fake track, as another version of the song.
+fn yt_variant(id: &str, title: &str, secs: u64) -> StreamTrack {
+    let mut t = find(&FakeService::youtube(), "yt-gruppa-1");
+    t.id = RemoteId::new(Service::Youtube, id);
+    t.title = title.into();
+    t.duration_ms = Some(secs * 1000);
+    t
+}
+
+/// The old upsert: a stream track of its own even when the song is known.
+fn separate(lib: &Library, t: &StreamTrack) -> TrackId {
+    lib.write(|tx| upsert_stream_track_in(tx, t, Some(TrackId::new())))
+        .unwrap()
+}
+
+#[test]
+fn the_same_song_from_both_services_is_one_track_other_versions_are_not() {
+    let lib = lib();
+    let spotify = FakeService::spotify();
+    let youtube = FakeService::youtube();
+    // Liked on both, YouTube first: no ISRC on the YouTube side.
+    let y = find(&youtube, "yt-gruppa-1");
+    let id = lib.upsert_stream_track(&y).unwrap();
+    lib.like(id).unwrap();
+    let s = find(&spotify, "sp-gruppa-1");
+    assert_eq!(lib.upsert_stream_track(&s).unwrap(), id);
+    lib.like(id).unwrap();
+    assert_eq!(listed(&lib).0, 1, "one track in the library");
+    assert_eq!(
+        lib.active_source(id).unwrap().unwrap().kind,
+        SourceKind::Spotify
+    );
+    assert_eq!(
+        lib.external_ids(EntityKind::Track, *id.as_uuid())
+            .unwrap()
+            .len(),
+        2
+    );
+    // A remaster tag is the same song; 2 s longer still is.
+    let remaster = yt_variant("yt-x1", "Группа крови (Remastered 2019)", 287);
+    let lib = self::lib();
+    let id = lib.upsert_stream_track(&s).unwrap();
+    assert_eq!(lib.upsert_stream_track(&remaster).unwrap(), id);
+    // Other versions and lengths are other tracks.
+    let lib = self::lib();
+    let id = lib.upsert_stream_track(&s).unwrap();
+    for (n, (title, secs)) in [
+        ("Группа крови (Remix)", 285),
+        ("Группа крови (Live)", 285),
+        ("Группа крови (TV Size)", 285),
+        ("Группа крови (Instrumental)", 285),
+        ("Группа крови", 290),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let other = lib
+            .upsert_stream_track(&yt_variant(&format!("yt-v{n}"), title, secs))
+            .unwrap();
+        assert_ne!(other, id, "{title} ({secs} s)");
+    }
+    // A clip of the same length is not the song either.
+    let mut clip = yt_variant("yt-clip", "Группа крови", 285);
+    clip.kind = nikgob_core::streaming::TrackKind::Video;
+    assert_ne!(lib.upsert_stream_track(&clip).unwrap(), id);
+    // Another album of the artist: another recording.
+    let mut live_album = yt_variant("yt-live", "Группа крови", 285);
+    live_album.album.as_mut().unwrap().title = "Последний концерт".into();
+    assert_ne!(lib.upsert_stream_track(&live_album).unwrap(), id);
+}
+
+#[test]
+fn a_local_file_of_the_song_gets_the_stream_by_name() {
+    let lib = lib();
+    let kino = lib.upsert_artist(&Artist::new("Кино")).unwrap();
+    let credit = ArtistCredit::single("Кино", Some(kino.id));
+    let release = lib
+        .upsert_release(&Release::new("Группа крови", credit.clone()))
+        .unwrap();
+    let mut local = Track::new("Группа крови", credit);
+    local.release_id = Some(release.id);
+    local.duration_ms = Some(284_500);
+    let local = lib.upsert_track(&local).unwrap();
+    lib.add_source(&Source::new(
+        local.id,
+        SourceKind::LocalFile,
+        "Music/g.flac",
+        Codec::Flac,
+    ))
+    .unwrap();
+    let y = find(&FakeService::youtube(), "yt-gruppa-1");
+    assert_eq!(lib.upsert_stream_track(&y).unwrap(), local.id);
+    assert_eq!(
+        lib.active_source(local.id).unwrap().unwrap().kind,
+        SourceKind::LocalFile
+    );
+}
+
+#[test]
+fn duplicates_made_before_are_merged_once_with_their_likes_and_wishlist() {
+    let lib = lib();
+    let y = find(&FakeService::youtube(), "yt-gruppa-1");
+    let a = lib.upsert_stream_track(&sp(0)).unwrap();
+    let b = separate(&lib, &y);
+    assert_ne!(a, b);
+    let remix = separate(&lib, &yt_variant("yt-r", "Группа крови (Remix)", 285));
+    for t in [a, b, remix] {
+        lib.like(t).unwrap();
+    }
+    let p = lib.create_playlist("P").unwrap();
+    lib.playlist_add_many(p.id, &[b]).unwrap();
+    lib.put_remote_like(&RemoteLike {
+        remote: y.id.clone(),
+        track_id: b,
+        pulled: true,
+        seen_at: 1,
+    })
+    .unwrap();
+    let mut wa = WishlistItem::new(WishlistStatus::Waiting, 10);
+    wa.track_id = Some(a);
+    let mut wb = WishlistItem::new(WishlistStatus::Waiting, 20);
+    wb.track_id = Some(b);
+    lib.put_wishlist_item(&wa).unwrap();
+    lib.put_wishlist_item(&wb).unwrap();
+    assert_eq!(listed(&lib).0, 3);
+
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 1);
+    assert!(lib.get_track(b).unwrap().is_none());
+    assert_eq!(listed(&lib).0, 2, "the remix stays");
+    assert!(lib.is_liked(a).unwrap());
+    assert_eq!(lib.track_by_remote(&y.id).unwrap(), Some(a));
+    assert_eq!(lib.remote_likes(Service::Youtube).unwrap()[0].track_id, a);
+    assert_eq!(lib.sources_of_track(a).unwrap().len(), 2);
+    let entries = lib.playlist_entries(p.id, 0, 10).unwrap();
+    assert_eq!(entries.iter().map(|e| e.entry.track_id).collect::<Vec<_>>(), vec![a]);
+    let items = lib.list_wishlist().unwrap();
+    assert_eq!(items.len(), 1, "one wishlist item per track");
+    assert_eq!(items[0].id, wa.id, "the older one");
+    assert_eq!(items[0].track_id, Some(a));
+    // Once: a duplicate made now stays (the upsert never makes one).
+    let c = separate(&lib, &yt_variant("yt-c", "Группа крови", 285));
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 0);
+    assert!(lib.get_track(c).unwrap().is_some());
+}
+
+#[test]
+fn attaching_a_stream_with_a_track_of_its_own_merges_the_two() {
+    let lib = lib();
+    let a = lib.upsert_stream_track(&sp(0)).unwrap();
+    let y = find(&FakeService::youtube(), "yt-gruppa-1");
+    let b = separate(&lib, &y);
+    lib.like(b).unwrap();
+    let mut w = WishlistItem::new(WishlistStatus::Waiting, 10);
+    w.track_id = Some(b);
+    lib.put_wishlist_item(&w).unwrap();
+    lib.attach_stream_source(a, &y).unwrap();
+    assert!(lib.get_track(b).unwrap().is_none());
+    assert!(lib.is_liked(a).unwrap());
+    assert_eq!(lib.wishlist_for_track(a).unwrap().len(), 1);
+    assert_eq!(lib.track_by_remote(&y.id).unwrap(), Some(a));
 }
 
 #[test]

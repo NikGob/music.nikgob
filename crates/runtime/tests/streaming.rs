@@ -468,3 +468,39 @@ fn a_doubtful_release_waits_in_confirm() {
     wait_for(&r.rt, "no torrent", |s| s.downloads.confirm.is_empty());
     assert_eq!(wish_status(&lib, track), Some(WishlistStatus::NoTorrent));
 }
+
+#[test]
+fn a_song_liked_on_both_services_is_one_track_and_one_wishlist_item() {
+    let lib = Library::open_in_memory().unwrap();
+    let spotify = Arc::new(FakeService::spotify());
+    let youtube = Arc::new(FakeService::youtube());
+    // A remix of a liked song, same artist and length, liked here before.
+    let mut remix = find(&youtube, "yt-firstlove-1");
+    remix.id = nikgob_core::streaming::RemoteId::new(Service::Youtube, "yt-automatic-remix");
+    remix.title = "Automatic (Remix)".into();
+    let remix = lib.upsert_stream_track(&remix).unwrap();
+    lib.like(remix).unwrap();
+    let r = rig(&lib, vec![spotify.clone(), youtube.clone()], false);
+    wait_until("both pulls", || {
+        lib.remote_likes(Service::Spotify).unwrap().len() == 3
+            && lib.remote_likes(Service::Youtube).unwrap().len() == 3
+    });
+    wait_for(&r.rt, "the wishlist", |s| s.downloads.wishlist.count(WishlistStatus::Waiting) == 3);
+    // "Группа крови" and "Automatic" have no ISRC on YouTube.
+    for (sp, yt) in [
+        ("sp-gruppa-1", "yt-gruppa-1"),
+        ("sp-firstlove-1", "yt-firstlove-1"),
+        ("sp-discovery-1", "yt-discovery-1"),
+    ] {
+        let a = lib.track_by_remote(&find(&spotify, sp).id).unwrap().unwrap();
+        let b = lib.track_by_remote(&find(&youtube, yt).id).unwrap().unwrap();
+        assert_eq!(a, b, "{sp} = {yt}");
+        assert_eq!(lib.wishlist_for_track(a).unwrap().len(), 1, "{sp}: one item");
+    }
+    assert_eq!(lib.liked_track_ids().unwrap().len(), 4, "three songs and the remix");
+    let automatic = lib.track_by_remote(&find(&spotify, "sp-firstlove-1").id).unwrap().unwrap();
+    assert_ne!(automatic, remix, "the remix stays its own track");
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(r.rt.state().downloads.wishlist.items.len(), 3);
+}
+

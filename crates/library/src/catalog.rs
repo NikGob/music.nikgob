@@ -2,7 +2,7 @@
 
 use nikgob_core::model::{
     Artist, ArtistCredit, ArtistId, Codec, Release, ReleaseId, Source, SourceId, SourceOrigin,
-    Track, TrackId,
+    Track, TrackId, UnixMs,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -607,6 +607,88 @@ pub(crate) fn add_source_in(tx: &Connection, source: &Source) -> Result<Source> 
     source_by_id(tx, sid)?.ok_or_else(|| LibraryError::not_found("source", sid))
 }
 
+/// See [`Library::merge_track_into`]. Wishlist items of the track: one
+/// per track stays (the one furthest along, else the oldest).
+pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, device: &str, now: UnixMs) -> Result<bool> {
+    if from == into {
+        return Ok(false);
+    }
+    let (f, t) = (from.to_string(), into.to_string());
+    for id in [&f, &t] {
+        if first_string(tx, "SELECT id FROM track WHERE id = ?1", [id])?.is_none() {
+            return Ok(false);
+        }
+    }
+    tx.execute("UPDATE source SET track_id = ?2, is_active = 0 WHERE track_id = ?1", params![f, t])?;
+    tx.execute(
+        "UPDATE playlist_entry SET track_id = ?2, updated_at = ?3, updated_by = ?4
+          WHERE track_id = ?1 AND deleted = 0",
+        params![f, t, now, device],
+    )?;
+    let liked: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM likes WHERE target_kind = 'track' AND target_id = ?1 AND deleted = 0)",
+        [&f],
+        |r| r.get(0),
+    )?;
+    if liked {
+        tx.execute(
+            "INSERT INTO likes(target_kind, target_id, updated_at, updated_by, deleted)
+             VALUES ('track', ?1, ?2, ?3, 0)
+             ON CONFLICT(target_kind, target_id) DO UPDATE SET
+                deleted = 0, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+            params![t, now, device],
+        )?;
+        tx.execute(
+            "UPDATE likes SET deleted = 1, updated_at = ?2, updated_by = ?3
+              WHERE target_kind = 'track' AND target_id = ?1",
+            params![f, now, device],
+        )?;
+    }
+    tx.execute("UPDATE event SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+    // Ids in the services and their likes follow; a "seen" marker would
+    // hide `into` from the library, so it goes.
+    tx.execute("DELETE FROM external_id WHERE kind = 'track' AND local_id = ?1 AND service = 'seen'", [&f])?;
+    tx.execute("UPDATE external_id SET local_id = ?2 WHERE kind = 'track' AND local_id = ?1", params![f, t])?;
+    tx.execute("UPDATE remote_like SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+    tx.execute("UPDATE wishlist SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+    dedupe_wishlist_of_track(tx, &t)?;
+    for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "master"] {
+        tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&f])?;
+    }
+    tx.execute("DELETE FROM track WHERE id = ?1", [&f])?;
+    refresh_active(tx, into)?;
+    refresh_in_library(tx, &t)?;
+    Ok(true)
+}
+
+/// Keeps one track-scope wishlist item of a track: the one furthest along
+/// (downloading, searching, waiting for a confirm, done, dismissed for good),
+/// else the oldest; downloads of the others point at it.
+fn dedupe_wishlist_of_track(tx: &Connection, track: &str) -> Result<()> {
+    let keep = first_string(
+        tx,
+        "SELECT id FROM wishlist WHERE track_id = ?1 AND scope = 'track'
+          ORDER BY CASE status WHEN 'downloading' THEN 0 WHEN 'searching' THEN 1
+                               WHEN 'confirm' THEN 2 WHEN 'done' THEN 3 WHEN 'dismissed' THEN 4
+                               WHEN 'no_torrent' THEN 5 WHEN 'new' THEN 6 WHEN 'waiting' THEN 7
+                               ELSE 8 END, created_at, id
+          LIMIT 1",
+        [track],
+    )?;
+    if let Some(keep) = keep {
+        tx.execute(
+            "UPDATE download SET wishlist_id = ?2
+              WHERE wishlist_id IN (SELECT id FROM wishlist WHERE track_id = ?1 AND scope = 'track' AND id != ?2)",
+            params![track, keep],
+        )?;
+        tx.execute(
+            "DELETE FROM wishlist WHERE track_id = ?1 AND scope = 'track' AND id != ?2",
+            params![track, keep],
+        )?;
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ public API
 
 impl Library {
@@ -692,55 +774,16 @@ impl Library {
 
     /// Folds `from` into `into` (one recording imported twice): its sources
     /// become more sources of `into` (the best one plays), its playlist
-    /// entries, like and listening history move over, and the `from` row
-    /// goes. No file is touched. Returns false when either track is missing.
+    /// entries, like, listening history, ids in the services and wishlist
+    /// items move over, and the `from` row goes. No file is touched. Returns
+    /// false when either track is missing.
     pub fn merge_track_into(&self, from: TrackId, into: TrackId) -> Result<bool> {
         if from == into {
             return Ok(false);
         }
         let device = self.device_id();
         let now = self.tick();
-        self.write(|tx| {
-            let (f, t) = (from.to_string(), into.to_string());
-            for id in [&f, &t] {
-                if first_string(tx, "SELECT id FROM track WHERE id = ?1", [id])?.is_none() {
-                    return Ok(false);
-                }
-            }
-            tx.execute("UPDATE source SET track_id = ?2, is_active = 0 WHERE track_id = ?1", params![f, t])?;
-            tx.execute(
-                "UPDATE playlist_entry SET track_id = ?2, updated_at = ?3, updated_by = ?4
-                  WHERE track_id = ?1 AND deleted = 0",
-                params![f, t, now, device.as_str()],
-            )?;
-            let liked: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM likes WHERE target_kind = 'track' AND target_id = ?1 AND deleted = 0)",
-                [&f],
-                |r| r.get(0),
-            )?;
-            if liked {
-                tx.execute(
-                    "INSERT INTO likes(target_kind, target_id, updated_at, updated_by, deleted)
-                     VALUES ('track', ?1, ?2, ?3, 0)
-                     ON CONFLICT(target_kind, target_id) DO UPDATE SET
-                        deleted = 0, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
-                    params![t, now, device.as_str()],
-                )?;
-                tx.execute(
-                    "UPDATE likes SET deleted = 1, updated_at = ?2, updated_by = ?3
-                      WHERE target_kind = 'track' AND target_id = ?1",
-                    params![f, now, device.as_str()],
-                )?;
-            }
-            tx.execute("UPDATE event SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
-            for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "master"] {
-                tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&f])?;
-            }
-            tx.execute("DELETE FROM track WHERE id = ?1", [&f])?;
-            refresh_active(tx, into)?;
-            refresh_in_library(tx, &t)?;
-            Ok(true)
-        })
+        self.write(|tx| merge_track_in(tx, from, into, device.as_str(), now))
     }
 
     /// Moves the tracks of `from`, another edition of the same album, onto

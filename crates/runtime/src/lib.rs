@@ -366,6 +366,12 @@ impl Worker {
     fn run(&mut self, rx: Receiver<Msg>, pb: Receiver<PlaybackEvent>, internal: Receiver<Internal>) {
         let ticker = tick(Duration::from_secs(5));
         let fast = tick(Duration::from_secs(1));
+        // Once: the song liked on both services as two tracks becomes one.
+        match self.lib.merge_duplicate_stream_tracks() {
+            Ok(0) => {}
+            Ok(n) => log::info!("library: {n} duplicate stream tracks merged"),
+            Err(e) => log::warn!("library: merging duplicate stream tracks: {e}"),
+        }
         self.load_torrent_history();
         self.publish_downloads();
         self.resume_torrents();

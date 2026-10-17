@@ -377,7 +377,13 @@ pub(crate) fn upsert_stream_track_in(
                         .optional()?,
                     None => None,
                 };
-                (by_isrc.map(|id| parse(&id)).transpose()?, false)
+                // Else the same song by name, artist, album and length
+                // (the YouTube copy of a Spotify track has no ISRC).
+                let found = match by_isrc {
+                    Some(id) => Some(id),
+                    None => same::same_song_track(conn, t)?,
+                };
+                (found.map(|id| parse(&id)).transpose()?, false)
             }
         },
     };
@@ -556,8 +562,9 @@ impl Library {
     // ---- stream tracks
 
     /// The library track of a stream track, creating it when needed, and
-    /// returns its id. Found by the stream's remote id, else by ISRC (so the
-    /// same song from the other service, or a downloaded file, gets this
+    /// returns its id. Found by the stream's remote id, else by ISRC, else
+    /// as the same song by artist, title, album and length (see [`same`]; so
+    /// the same song from the other service, or a downloaded file, gets this
     /// stream as one more source), else created: with its release and
     /// artists (matched by remote id, then by name), outside the library
     /// (`in_library = 0`) until liked or put in a playlist.
@@ -581,6 +588,31 @@ impl Library {
         })
     }
 
+    /// The library track a stream track already is, without writing: by
+    /// remote id, else ISRC (a live track), else the same song (see
+    /// [`same`]). What [`Self::upsert_stream_track`] would attach it to.
+    pub fn track_for_stream(&self, t: &StreamTrack) -> Result<Option<TrackId>> {
+        self.read(|c| {
+            if let Some(id) = linked(c, "track", t.id.service, EntityKind::Track, &t.id.id)? {
+                return parse(&id).map(Some);
+            }
+            if let Some(isrc) = normal_isrc(t.isrc.as_deref()) {
+                let found: Option<String> = c
+                    .query_row(
+                        "SELECT id FROM track WHERE isrc = ?1 AND deleted_at IS NULL
+                          ORDER BY has_local DESC, seq LIMIT 1",
+                        [isrc],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(id) = found {
+                    return parse(&id).map(Some);
+                }
+            }
+            same::same_song_track(c, t)?.map(|id| parse(&id)).transpose()
+        })
+    }
+
     /// The stream tracks a library track is known as (one per stream source).
     pub fn stream_refs(&self, track: TrackId) -> Result<Vec<StreamTrack>> {
         self.read(|c| stream_refs_in(c, track))
@@ -592,11 +624,24 @@ impl Library {
     /// other way than by ISRC (the YouTube copy of a Spotify-only track,
     /// found by name and duration): [`Self::upsert_stream_track`] would make
     /// a second track of it. The stream's ISRC fills an empty one.
+    ///
+    /// When the stream already has a track of its own (liked on that
+    /// service before the match was found), that track is merged into
+    /// `track` (its likes, playlist entries, history and wishlist item move
+    /// over; see [`Self::merge_track_into`]).
     pub fn attach_stream_source(&self, track: TrackId, t: &StreamTrack) -> Result<()> {
+        let device = self.device_id();
+        let now = self.tick();
         self.write(|tx| {
             let tid = track.to_string();
             if !exists(tx, "track", &tid)? {
                 return Err(LibraryError::not_found("track", tid));
+            }
+            // The stream is a track of its own already: one song, one track.
+            if let Some(other) = linked(tx, "track", t.id.service, EntityKind::Track, &t.id.id)?
+                && other != tid
+            {
+                crate::catalog::merge_track_in(tx, parse(&other)?, track, device.as_str(), now)?;
             }
             upsert_stream_track_in(tx, t, Some(track))?;
             if let Some(isrc) = normal_isrc(t.isrc.as_deref()) {
@@ -914,6 +959,7 @@ impl Library {
 }
 
 mod import;
+mod same;
 
 pub use import::event_id;
 

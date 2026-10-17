@@ -284,16 +284,7 @@ impl Worker {
     /// The library track a stream track is: linked by its remote id, else
     /// the one with its ISRC.
     pub(crate) fn library_track_of(&self, t: &StreamTrack) -> Option<TrackId> {
-        if let Some(id) = self.lib.track_by_remote(&t.id).ok().flatten() {
-            return Some(id);
-        }
-        let isrc = upper_isrc(t.isrc.as_deref())?;
-        self.lib
-            .tracks_by_isrc(&isrc)
-            .ok()?
-            .into_iter()
-            .find(|t| self.lib.track_deleted_at(t.id).ok().flatten().is_none())
-            .map(|t| t.id)
+        self.lib.track_for_stream(t).ok().flatten()
     }
 }
 
