@@ -512,6 +512,22 @@ impl FakeService {
         self
     }
 
+    /// Adds one song `{prefix}-x-{key}` on its own album `{prefix}-alb-{key}`
+    /// (titled `album`, with a cover), no ISRC.
+    #[must_use]
+    pub fn with_song(mut self, key: &str, title: &str, artist: &str, album: &str, secs: u64) -> Self {
+        let p = prefix(self.service);
+        let mut t = StreamTrack::new(RemoteId::new(self.service, format!("{p}-x-{key}")), title);
+        t.artists = vec![ArtistRef::new(None, artist)];
+        let mut a = AlbumRef::new(Some(RemoteId::new(self.service, format!("{p}-alb-{key}"))), album);
+        a.artists = t.artists.clone();
+        t.album = Some(a);
+        t.duration_ms = Some(secs * 1000);
+        t.cover_url = Some(format!("https://fake.invalid/{p}/{key}.jpg"));
+        self.catalog.tracks.push(t);
+        self
+    }
+
     /// Adds a music video `{prefix}-video-{key}` (no album, no ISRC) whose
     /// song is `song` (a catalog id) or none, to the catalog.
     #[must_use]
@@ -633,9 +649,14 @@ impl FakeService {
             .tracks
             .iter()
             .filter(|t| {
-                hit(&t.title)
-                    || t.artists.iter().any(|a| hit(&a.name))
-                    || t.album.as_ref().is_some_and(|a| hit(&a.title))
+                let fields: Vec<String> = std::iter::once(t.title.to_lowercase())
+                    .chain(t.artists.iter().map(|a| a.name.to_lowercase()))
+                    .chain(t.album.iter().map(|a| a.title.to_lowercase()))
+                    .collect();
+                // The query in one field, or each of its words in some
+                // field («aiyou eve»: the title and the artist).
+                fields.iter().any(|f| f.contains(&q))
+                    || q.split_whitespace().all(|w| fields.iter().any(|f| f.contains(w)))
             })
             .map(|t| self.listed(t))
             .collect();

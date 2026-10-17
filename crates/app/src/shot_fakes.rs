@@ -25,6 +25,8 @@
 //! - `fake:no-sound` — Spotify signed in with Premium, the sound consent
 //!   not given yet.
 //! - `fake:empty-home` — Главная of an empty library (the first launch).
+//! - `fake:find-song-off` — «Найти песню…» cannot replace on YouTube Music
+//!   (as when signed out).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -46,6 +48,7 @@ pub struct Fakes {
     torrents: bool,
     no_sound: bool,
     empty_home: bool,
+    find_song_off: bool,
 }
 
 impl Fakes {
@@ -69,6 +72,7 @@ impl Fakes {
             "torrents" => self.torrents = true,
             "no-sound" => self.no_sound = true,
             "empty-home" => self.empty_home = true,
+            "find-song-off" => self.find_song_off = true,
             _ => return false,
         }
         true
@@ -87,6 +91,7 @@ impl Fakes {
             || self.torrents
             || self.no_sound
             || self.empty_home
+            || self.find_song_off
     }
 
     /// `state` with the fakes laid over it.
@@ -115,6 +120,11 @@ impl Fakes {
         }
         if self.buffering {
             s.player.status = Status::Buffering;
+        }
+        if self.find_song_off
+            && let Some(f) = s.find_song.as_mut()
+        {
+            f.youtube_off = Some("Нужен вход в YouTube Music".into());
         }
         if let Some(svc) = self.paused
             && let Some(a) = s.accounts.iter_mut().find(|a| a.service == svc)

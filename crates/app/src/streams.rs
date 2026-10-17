@@ -15,7 +15,8 @@
 //! for YouTube Music the app's Google sign-in window —, `failed`, and for
 //! Spotify `premium` = a login refused for want of Premium, `nosound` =
 //! Premium without the playback login yet; for YouTube Music `clips` =
-//! likes made as music videos, one of them with its song).
+//! likes made as music videos, one of them with its song, and «AIYOU - Eve
+//! Music Video» whose song is only found by hand: «Найти песню…»).
 //! `NIKGOB_DEMO_REAL_STREAMS=1` registers the real services instead, with
 //! their folders inside the demo dir, so real results can be looked at
 //! without touching the user's library or accounts.
@@ -82,7 +83,17 @@ pub fn real_in_demo() -> bool {
 }
 
 fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
-    let base = FakeService::new(service);
+    // The songs «Найти песню…» finds for the demo's AIYOU clip.
+    let base = match service {
+        Service::Youtube => FakeService::new(service)
+            .with_song("aiyou", "AIYOU", "Eve", "AIYOU", 163)
+            .with_song("aiyou-inst", "AIYOU (Instrumental)", "Eve", "AIYOU", 163)
+            .with_song("kaikai", "Kaikai Kitan", "Eve", "Kaikai Kitan / Ao No Waltz", 221),
+        Service::Deezer => FakeService::new(service)
+            .with_song("aiyou", "AIYOU", "Eve", "AIYOU", 163)
+            .with_song("aiyou-tv", "AIYOU (TV Size)", "Eve", "AIYOU", 89),
+        Service::Spotify => FakeService::new(service),
+    };
     // Long enough to watch a track play (lyrics, progress) in screenshots.
     base.set_audio_secs(180.0);
     match mode {
@@ -92,11 +103,12 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
         "clips" if service == Service::Youtube => {
             let base = base
                 .with_video("ghost", "Ghost Avenue", "Eve", 232, None)
-                .with_video("natsuko", "夏子 - Natsuko", "Funky Monkey Bλby's", 301, None);
+                .with_video("natsuko", "夏子 - Natsuko", "Funky Monkey Bλby's", 301, None)
+                .with_video("aiyou", "AIYOU - Eve Music Video", "Eve", 165, None);
             for id in base.liked_ids() {
                 base.set_liked_remotely(&id, false);
             }
-            for id in ["yt-video-natsuko", "yt-discovery-1", "yt-video-ghost", "yt-video-kino"] {
+            for id in ["yt-video-natsuko", "yt-discovery-1", "yt-video-ghost", "yt-video-kino", "yt-video-aiyou"] {
                 base.set_liked_remotely(id, true);
             }
             Arc::new(base)

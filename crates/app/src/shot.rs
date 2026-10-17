@@ -12,6 +12,10 @@
 //! pictures in one run).
 //! `liked` opens «Любимые»; `play_clip` plays the first clip of the open
 //! playlist (`play_clip:song` its first stream song).
+//! `find_song` opens «Найти песню…» for the first clip of the open
+//! playlist (`find_song:Title` for the clip shown so, `find_song:song` «Другая
+//! версия…» for its first stream song); `replace_first` replaces it with the
+//! dialog's first result in the scope the dialog would offer.
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 
 use std::collections::VecDeque;
@@ -209,6 +213,31 @@ impl Shot {
                     out.push(Command::PlayTracks { tracks: vec![t.id], start: 0, context: "Любимые".into() });
                 }
                 self.wait = 30;
+            }
+            "find_song" => {
+                let pick = state.playlist.as_ref().and_then(|p| {
+                    p.tracks.iter().find(|t| match arg {
+                        "" => t.clip,
+                        "song" => !t.clip && !t.has_local,
+                        title => t.clip && t.title == title,
+                    })
+                });
+                if let Some(t) = pick {
+                    out.push(Command::FindSong { track: t.id, query: None });
+                }
+                self.wait = 40;
+            }
+            "replace_first" => {
+                if let Some(f) = &state.find_song
+                    && let Some(r) = f.results.first()
+                {
+                    out.push(Command::ReplaceTrack {
+                        track: f.track,
+                        with: r.remote.clone(),
+                        youtube: state.prefs.replace_in_youtube && f.youtube_off.is_none(),
+                    });
+                }
+                self.wait = 40;
             }
             "play" => {
                 if let Some(r) = state.library.releases.first() {

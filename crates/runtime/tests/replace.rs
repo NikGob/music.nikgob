@@ -100,6 +100,9 @@ fn search(rt: &Runtime, track: TrackId, query: &str) {
 
 /// The «Отменить» of the last toast.
 fn undo_of_last_toast(rt: &Runtime) -> Command {
+    wait_until("the undo toast", || {
+        rt.state().toasts.iter().any(|t| matches!(t.action, Some((_, Command::UndoReplace(_)))))
+    });
     let s = rt.state();
     let t = s.toasts.iter().rev().find(|t| matches!(t.action, Some((_, Command::UndoReplace(_))))).expect("an undo toast");
     t.action.clone().unwrap().1
@@ -160,6 +163,7 @@ fn only_here_the_like_stays_the_clips_and_undo_brings_the_clip_back() {
     assert_eq!(row.album.as_deref(), Some("Группа крови"));
     assert_eq!(row.youtube_id.as_deref(), Some("yt-gruppa-2"), "the song's audio");
     assert_eq!(remote_likes(&lib, track), ["yt-video-live"], "the like is still the clip's");
+    let _ = undo_of_last_toast(&rt);
     assert!(rt.state().find_song.is_none(), "the dialog closed");
     {
         let s = rt.state();
