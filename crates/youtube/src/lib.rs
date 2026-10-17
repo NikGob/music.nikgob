@@ -35,7 +35,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use nikgob_core::streaming::{
-    Account, AudioStream, BoxFuture, EntityKind, LoginInput, Played, Service, StreamAlbum,
+    Account, AudioStream, BoxFuture, EntityKind, LoginInput, Played, SearchParts, Service, StreamAlbum,
     StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService, StreamTrack, format,
     join_names,
 };
@@ -230,6 +230,27 @@ impl Youtube {
         }))
     }
 
+    /// Keeps recently played audio in `dir` (see `cache`), up to
+    /// [`DEFAULT_CACHE_LIMIT`] until [`StreamService::set_cache_limit`].
+    pub fn with_audio_cache(self: Arc<Self>, dir: PathBuf) -> Arc<Self> {
+        self.inner.cache.set_dir(dir);
+        self
+    }
+
+    /// Gets the client ready in the background (visitor data, client
+    /// version, a pooled connection), so the first search of a session does
+    /// not pay for it (~2.2 s instead of ~0.6 s). One small request.
+    pub fn warm_up(&self) {
+        let inner = Arc::clone(&self.inner);
+        self.runtime.handle().spawn(async move {
+            let started = std::time::Instant::now();
+            match inner.rp.query().music_search_suggestion("music").await {
+                Ok(_) => log::debug!("youtube: warmed up in {} ms", started.elapsed().as_millis()),
+                Err(e) => log::info!("youtube: warm-up failed: {e}"),
+            }
+        });
+    }
+
     /// Runs `f` on the service's runtime; the returned future cancels it
     /// when dropped.
     fn run<T, F>(&self, f: impl FnOnce(Arc<Inner>) -> F) -> BoxFuture<'_, Result<T, StreamError>>
@@ -279,13 +300,30 @@ impl<T> Drop for Joined<T> {
     }
 }
 
-/// One part of a search; a failed part is logged and its error kept.
-fn part<T>(r: Result<T, RpError>, first_err: &mut Option<StreamError>) -> Option<T> {
+/// One part of a search; a failed part keeps the first error.
+fn part_of<T>(r: Result<T, RpError>, first_err: &mut Option<StreamError>) -> Option<T> {
     r.map_err(|e| {
-        log::debug!("youtube: search part failed: {e}");
         first_err.get_or_insert(map_err(e));
     })
     .ok()
+}
+
+/// Logs how long one YouTube request took (`started`: the search's start)
+/// and how it ended.
+async fn timed<T>(
+    kind: &str,
+    started: std::time::Instant,
+    f: impl Future<Output = Result<T, RpError>>,
+) -> Result<T, RpError> {
+    let r = f.await;
+    match &r {
+        Ok(_) => log::debug!("youtube: {kind} -> ok in {} ms", started.elapsed().as_millis()),
+        Err(e) => log::info!(
+            "youtube: {kind} -> failed in {} ms: {e}",
+            started.elapsed().as_millis()
+        ),
+    }
+    r
 }
 
 fn parse_country(s: &str) -> Option<Country> {
@@ -414,6 +452,17 @@ impl StreamService for Youtube {
     }
 
     fn search(&self, query: &str) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        self.search_in_parts(query, Arc::new(|_| {}))
+    }
+
+    /// Songs, videos, albums, artists and playlists are five requests sent
+    /// at once; the songs go to `part` as soon as they are in (the section
+    /// shows while the rest still loads).
+    fn search_in_parts(
+        &self,
+        query: &str,
+        part: SearchParts,
+    ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
         let q = query.trim().to_owned();
         self.run(move |inner| async move {
             if q.is_empty() {
@@ -421,19 +470,30 @@ impl StreamService for Youtube {
             }
             let me = inner.me();
             let rq = inner.rp.query();
+            let started = std::time::Instant::now();
+            let songs = async {
+                let r = timed("songs", started, rq.music_search_tracks(&q)).await;
+                if let Ok(r) = &r {
+                    part(StreamSearch {
+                        tracks: r.items.items.iter().map(convert::track).collect(),
+                        ..StreamSearch::default()
+                    });
+                }
+                r
+            };
             let (songs, videos, albums, artists, playlists) = tokio::join!(
-                rq.music_search_tracks(&q),
-                rq.music_search_videos(&q),
-                rq.music_search_albums(&q),
-                rq.music_search_artists(&q),
-                rq.music_search_playlists(&q, true),
+                songs,
+                timed("videos", started, rq.music_search_videos(&q)),
+                timed("albums", started, rq.music_search_albums(&q)),
+                timed("artists", started, rq.music_search_artists(&q)),
+                timed("playlists", started, rq.music_search_playlists(&q, true)),
             );
             let mut first_err = None;
-            let songs = part(songs, &mut first_err);
-            let videos = part(videos, &mut first_err);
-            let albums = part(albums, &mut first_err);
-            let artists = part(artists, &mut first_err);
-            let playlists = part(playlists, &mut first_err);
+            let songs = part_of(songs, &mut first_err);
+            let videos = part_of(videos, &mut first_err);
+            let albums = part_of(albums, &mut first_err);
+            let artists = part_of(artists, &mut first_err);
+            let playlists = part_of(playlists, &mut first_err);
             if songs.is_none() && videos.is_none() && albums.is_none() && artists.is_none() {
                 return Err(first_err.unwrap_or(StreamError::Unavailable));
             }
@@ -455,6 +515,14 @@ impl StreamService for Youtube {
                     .map(|p| convert::playlist_item(p, me.as_deref()))
                     .collect();
             }
+            log::debug!(
+                "youtube: search done in {} ms: {} tracks, {} albums, {} artists, {} playlists",
+                started.elapsed().as_millis(),
+                out.tracks.len(),
+                out.albums.len(),
+                out.artists.len(),
+                out.playlists.len()
+            );
             Ok(out)
         })
     }

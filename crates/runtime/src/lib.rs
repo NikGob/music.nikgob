@@ -1465,6 +1465,13 @@ impl Worker {
         } else {
             nikgob_library::SearchResults::default()
         };
+        log::debug!(
+            target: "nikgob_runtime::streams",
+            "search «{trimmed}»: library {} tracks, {} albums in {} ms",
+            r.tracks.len(),
+            r.releases.len(),
+            started.elapsed().as_millis()
+        );
         let lib_tracks = r.tracks.clone();
         self.publish(|s, res| {
             s.search = nikgob_view::SearchView {
@@ -1475,7 +1482,8 @@ impl Worker {
                 playlists: r.playlists.iter().map(|p| res.playlist(p)).collect(),
                 searching: false,
                 sources,
-                streams: Vec::new(),
+                // The services' sections stay until their new answers.
+                streams: std::mem::take(&mut s.search.streams),
                 torrents: std::mem::take(&mut s.search.torrents),
             };
         });

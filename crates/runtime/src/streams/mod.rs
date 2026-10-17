@@ -59,6 +59,8 @@ pub(crate) enum Msg {
         seq: u64,
         service: Service,
         result: Result<nikgob_core::streaming::StreamSearch, StreamError>,
+        /// The first part; the whole answer follows.
+        partial: bool,
     },
     Page {
         seq: u64,
@@ -291,7 +293,8 @@ impl Worker {
                 seq,
                 service,
                 result,
-            } => self.stream_searched(seq, service, result),
+                partial,
+            } => self.stream_searched(seq, service, result, partial),
             Msg::Page { seq, page, result } => self.page_loaded(seq, page, result),
             Msg::Fetched(then, result) => self.fetched(then, result),
             Msg::Resolved { track, found } => self.resolved(track, found),

@@ -548,6 +548,15 @@ pub trait AudioStream: Read + Seek + Send {
     }
 }
 
+/// "Opus ~160 kbps": a codec and its bitrate, `approx` for a variable one.
+pub fn quality_label(codec: &str, kbps: u32, approx: bool) -> String {
+    format!("{codec} {}{kbps} kbps", if approx { "~" } else { "" })
+}
+
+/// Where [`StreamService::search_in_parts`] hands the results it already
+/// has (each call carries everything found so far).
+pub type SearchParts = std::sync::Arc<dyn Fn(StreamSearch) + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
@@ -567,6 +576,18 @@ pub trait StreamService: Send + Sync {
 
     /// Catalog search: tracks, albums, artists, playlists, best first.
     fn search(&self, query: &str) -> BoxFuture<'_, Result<StreamSearch, StreamError>>;
+
+    /// [`Self::search`] that shows its first part early: `part` gets what is
+    /// already found while slower parts (playlists, more categories) are
+    /// still on their way; the future resolves with the whole answer.
+    fn search_in_parts(
+        &self,
+        query: &str,
+        part: SearchParts,
+    ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        let _ = part;
+        self.search(query)
+    }
 
     fn track(&self, id: &str) -> BoxFuture<'_, Result<StreamTrack, StreamError>>;
 

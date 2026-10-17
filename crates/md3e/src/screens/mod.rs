@@ -29,6 +29,9 @@ use crate::{
     size_class,
 };
 
+/// How long the search text must rest before it is searched for.
+const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PaneTab {
     #[default]
@@ -64,6 +67,10 @@ pub struct Md3eUi {
     content_rect: Rect,
     search: String,
     search_focus: bool,
+    /// The query last sent to the runtime, and when the text last changed:
+    /// it is sent once typing pauses for [`SEARCH_DEBOUNCE`].
+    search_sent: String,
+    search_edited: Option<std::time::Instant>,
     scheme: SchemeAnim,
     pub(crate) pages: pages::PageState,
     chrome: chrome::Chrome,
@@ -100,6 +107,8 @@ impl Md3eUi {
             content_rect: Rect::NOTHING,
             search: String::new(),
             search_focus: false,
+            search_sent: String::new(),
+            search_edited: None,
             scheme: SchemeAnim::default(),
             pages: pages::PageState::default(),
             chrome: chrome::Chrome::default(),
@@ -462,6 +471,7 @@ impl Md3eUi {
                 self.set_now_playing(ctx, false);
             }
             self.search = q.clone();
+            self.search_sent = q.clone();
             out.push(Command::Search(q));
         }
 
@@ -680,7 +690,10 @@ impl Md3eUi {
         let search_rect = Rect::from_min_size(inner.min + vec2(0.0, 16.0), vec2(inner.width(), 56.0));
         let page_rect = Rect::from_min_max(pos2(inner.left(), search_rect.bottom() + 16.0), inner.max);
 
-        pages::search_bar(ui, search_rect, &mut self.search, &mut self.search_focus, out);
+        if pages::search_bar(ui, search_rect, &mut self.search, &mut self.search_focus, out) {
+            self.search_edited = Some(std::time::Instant::now());
+        }
+        self.flush_search(&ctx, out);
 
         // Page with nav transition.
         let t = anim::now(&ctx);
@@ -937,10 +950,27 @@ impl Md3eUi {
         self.pages.unfold_sources();
     }
 
-    /// Types into the search bar (used by scripted screenshots).
-    pub fn set_search(&mut self, query: &str, out: &mut Vec<Command>) {
+    /// Types into the search bar (used by scripted screenshots); sent like
+    /// typed text, once typing pauses.
+    pub fn set_search(&mut self, query: &str, _out: &mut Vec<Command>) {
         self.search = query.to_owned();
-        out.push(Command::Search(self.search.clone()));
+        self.search_edited = Some(std::time::Instant::now());
+    }
+
+    /// Sends the search text once it has not changed for
+    /// [`SEARCH_DEBOUNCE`] (clearing it is sent at once), so a burst of
+    /// keys is one search, not one per key.
+    fn flush_search(&mut self, ctx: &egui::Context, out: &mut Vec<Command>) {
+        if self.search == self.search_sent {
+            return;
+        }
+        let waited = self.search_edited.map_or(SEARCH_DEBOUNCE, |t| t.elapsed());
+        if self.search.trim().is_empty() || waited >= SEARCH_DEBOUNCE {
+            self.search_sent = self.search.clone();
+            out.push(Command::Search(self.search.clone()));
+        } else {
+            ctx.request_repaint_after(SEARCH_DEBOUNCE - waited);
+        }
     }
 }
 

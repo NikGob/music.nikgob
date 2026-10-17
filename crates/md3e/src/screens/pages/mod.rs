@@ -665,7 +665,9 @@ impl PageState {
     }
 }
 
-pub fn search_bar(ui: &mut Ui, rect: Rect, query: &mut String, focus: &mut bool, out: &mut Vec<Command>) {
+/// The search bar. Returns whether the text changed (the caller sends the
+/// query once typing pauses, see `Md3eUi::flush_search`).
+pub fn search_bar(ui: &mut Ui, rect: Rect, query: &mut String, focus: &mut bool, out: &mut Vec<Command>) -> bool {
     let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("search-bar"));
     let before = query.clone();
     let o = SearchBar::new("main-search")
@@ -676,14 +678,12 @@ pub fn search_bar(ui: &mut Ui, rect: Rect, query: &mut String, focus: &mut bool,
     if std::mem::take(focus) {
         o.response.request_focus();
     }
-    if *query != before {
-        out.push(Command::Search(query.clone()));
-    }
     // Enter looks for torrents: Prowlarr is slow, so never on typing.
     if o.submitted && !query.trim().is_empty() {
         out.push(Command::SearchTorrents(query.trim().to_owned()));
         search::set_filter(ui.ctx(), search::Filter::Torrents);
     }
+    *query != before
 }
 
 /// The page for `route`, inside a vertical scroll area that leaves room

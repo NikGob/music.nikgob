@@ -33,6 +33,34 @@ const RATE_LIMIT_RETRIES: u32 = 2;
 /// A longer `Retry-After` is not waited out: the caller gets
 /// [`ApiError::RateLimited`] at once (and later calls too, until it passes).
 pub const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
+/// The longest `Retry-After` pause an interactive request (search) waits
+/// out; a longer one answers [`ApiError::RateLimited`] at once.
+pub const INTERACTIVE_WAIT: Duration = Duration::from_millis(1500);
+/// Concurrent interactive requests per grant, besides [`MAX_IN_FLIGHT`].
+const INTERACTIVE_IN_FLIGHT: usize = 2;
+
+/// How a request waits for its turn (see [`ApiClient::send_in`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lane {
+    Background,
+    Interactive,
+}
+
+/// The path without ids and the query, for the log ("/albums/{id}/tracks").
+fn endpoint_name(path: &str) -> String {
+    let path = path.split('?').next().unwrap_or_default();
+    let path = path.strip_prefix(API_URL).unwrap_or(path);
+    path.split('/')
+        .map(|seg| {
+            if seg.len() >= 16 && seg.chars().all(|c| c.is_ascii_alphanumeric()) {
+                "{id}"
+            } else {
+                seg
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
 /// Development Mode caps every search type at 10 results.
 pub const SEARCH_LIMIT: u32 = 10;
 pub const PAGE: u32 = 50;
@@ -150,6 +178,7 @@ pub struct ApiClient {
     generation: AtomicU64,
     refreshing: tokio::sync::Mutex<()>,
     limiter: Semaphore,
+    interactive: Semaphore,
     cooldown_until: Mutex<Instant>,
     listener: OnceLock<TokenListener>,
     /// `GET /tracks?ids=` answered as removed (Development Mode).
@@ -168,6 +197,7 @@ impl ApiClient {
             generation: AtomicU64::new(0),
             refreshing: tokio::sync::Mutex::new(()),
             limiter: Semaphore::new(MAX_IN_FLIGHT),
+            interactive: Semaphore::new(INTERACTIVE_IN_FLIGHT),
             cooldown_until: Mutex::new(Instant::now()),
             listener: OnceLock::new(),
             no_batch: AtomicBool::new(false),
@@ -281,28 +311,72 @@ impl ApiClient {
         query: &[(&str, String)],
         body: Option<&Value>,
     ) -> Result<String> {
+        self.send_in(Lane::Background, method, path, query, body).await
+    }
+
+    /// Sends one request. `lane` decides how it waits: background work
+    /// shares [`MAX_IN_FLIGHT`] slots and sits out `Retry-After` pauses up to
+    /// [`MAX_RETRY_WAIT`]; an interactive request (search) has slots of its
+    /// own, so background paging never queues it, and gives up on a pause
+    /// longer than [`INTERACTIVE_WAIT`] at once (the user sees «занят»
+    /// instead of a search that hangs).
+    async fn send_in(
+        &self,
+        lane: Lane,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Value>,
+    ) -> Result<String> {
         let url = if path.starts_with("http") {
             path.to_string()
         } else {
             format!("{}{path}", self.endpoints.api)
         };
+        let endpoint = endpoint_name(path);
+        let max_wait = match lane {
+            Lane::Background => MAX_RETRY_WAIT,
+            Lane::Interactive => INTERACTIVE_WAIT,
+        };
+        let retries = match lane {
+            Lane::Background => RATE_LIMIT_RETRIES,
+            Lane::Interactive => 1,
+        };
         let started = Instant::now();
         let mut attempt = 0u32;
         loop {
             attempt += 1;
-            let permit = self
-                .limiter
-                .acquire()
-                .await
-                .map_err(|_| ApiError::NotSignedIn)?;
+            let queued = Instant::now();
+            let permit = match lane {
+                Lane::Background => self.limiter.acquire().await,
+                Lane::Interactive => self.interactive.acquire().await,
+            }
+            .map_err(|_| ApiError::NotSignedIn)?;
+            let queued_ms = queued.elapsed().as_millis();
+            if queued_ms > 50 {
+                log::debug!(
+                    "spotify: source={} {method} {endpoint} waited {queued_ms} ms for a request slot",
+                    self.source
+                );
+            }
             // After the permit: a 429 answered while this request queued has
             // extended the cooldown, and sending now would earn another.
             if let Some(left) = self.cooldown_left() {
-                if left > MAX_RETRY_WAIT {
+                if left > max_wait {
+                    log::info!(
+                        "spotify: source={} {method} {endpoint} not sent: Retry-After pause, {} s left",
+                        self.source,
+                        left.as_secs()
+                    );
                     return Err(ApiError::RateLimited {
                         retry_after: Some(left),
                     });
                 }
+                log::debug!(
+                    "spotify: source={} {method} {endpoint} waits out Retry-After: {} ms",
+                    self.source,
+                    left.as_millis()
+                );
                 tokio::time::sleep(left).await;
             }
             let token = self.access_token(None).await?;
@@ -316,9 +390,26 @@ impl ApiClient {
             } else if method != Method::GET {
                 request = request.header(reqwest::header::CONTENT_LENGTH, "0");
             }
-            let response = request.send().await?;
+            let sent = Instant::now();
+            let response = match request.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let e = e.without_url();
+                    log::info!(
+                        "spotify: source={} {method} {endpoint} failed after {} ms: {e}",
+                        self.source,
+                        sent.elapsed().as_millis(),
+                    );
+                    return Err(ApiError::from(e));
+                }
+            };
             let status = response.status();
             if status == StatusCode::UNAUTHORIZED && attempt == 1 {
+                log::debug!(
+                    "spotify: source={} {method} {endpoint} -> 401 in {} ms, refreshing the token",
+                    self.source,
+                    sent.elapsed().as_millis()
+                );
                 drop(permit);
                 self.access_token(Some(&token)).await?;
                 continue;
@@ -337,9 +428,14 @@ impl ApiClient {
                     self.extend_cooldown(MAX_RETRY_WAIT * 2);
                     return Err(ApiError::RateLimited { retry_after: None });
                 }
-                log::warn!("spotify: rate limited source={} wait={wait:?}", self.source);
+                log::warn!(
+                    "spotify: source={} {method} {endpoint} -> 429 in {} ms, Retry-After {} s (attempt {attempt})",
+                    self.source,
+                    sent.elapsed().as_millis(),
+                    wait.as_secs()
+                );
                 self.extend_cooldown(wait);
-                if wait > MAX_RETRY_WAIT || attempt > RATE_LIMIT_RETRIES {
+                if wait > max_wait || attempt > retries {
                     return Err(ApiError::RateLimited {
                         retry_after: Some(wait),
                     });
@@ -347,17 +443,22 @@ impl ApiClient {
                 continue;
             }
             if status.is_server_error() && method == Method::GET && attempt == 1 {
+                log::info!(
+                    "spotify: source={} {method} {endpoint} -> {} in {} ms, retrying",
+                    self.source,
+                    status.as_u16(),
+                    sent.elapsed().as_millis()
+                );
                 drop(permit);
                 tokio::time::sleep(Duration::from_millis(800)).await;
                 continue;
             }
             let text = response.text().await?;
             log::debug!(
-                "spotify: source={} {} {} -> {} in {} ms",
+                "spotify: source={} {method} {endpoint} -> {} in {} ms (total {} ms, attempt {attempt})",
                 self.source,
-                method,
-                path.split('?').next().unwrap_or_default(),
                 status.as_u16(),
+                sent.elapsed().as_millis(),
                 started.elapsed().as_millis()
             );
             if status.is_success() {
@@ -406,16 +507,22 @@ impl ApiClient {
 
     // ---- catalogue -------------------------------------------------------
 
+    /// One `/search` with every type asked at once, in the interactive lane.
     pub async fn search(&self, query: &str, types: &[&str], limit: u32) -> Result<SearchResults> {
-        self.get(
-            "/search",
-            &[
-                ("q", query.to_string()),
-                ("type", types.join(",")),
-                ("limit", limit.min(SEARCH_LIMIT).to_string()),
-            ],
-        )
-        .await
+        let text = self
+            .send_in(
+                Lane::Interactive,
+                Method::GET,
+                "/search",
+                &[
+                    ("q", query.to_string()),
+                    ("type", types.join(",")),
+                    ("limit", limit.min(SEARCH_LIMIT).to_string()),
+                ],
+                None,
+            )
+            .await?;
+        serde_json::from_str(&text).map_err(|e| ApiError::Decode(e.to_string()))
     }
 
     pub async fn track(&self, id: &str) -> Result<Track> {

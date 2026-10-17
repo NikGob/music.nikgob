@@ -576,3 +576,153 @@ async fn live_audio() {
         .await
         .unwrap();
 }
+
+// ---- search latency against a slow mock ------------------------------------
+
+const MOCK_LATENCY: Duration = Duration::from_millis(300);
+
+fn search_body() -> serde_json::Value {
+    serde_json::json!({
+        "tracks": {"items": [{"id": "t1", "name": "Лёд", "duration_ms": 200000,
+                              "artists": [{"id": "a1", "name": "Кто-то"}],
+                              "external_ids": {"isrc": "RUA1D2300001"}}],
+                   "limit": 10, "offset": 0, "next": null},
+        "albums": {"items": [], "limit": 10, "offset": 0, "next": null},
+        "artists": {"items": [], "limit": 10, "offset": 0, "next": null},
+        "playlists": {"items": [], "limit": 10, "offset": 0, "next": null}
+    })
+}
+
+/// A logged-in service whose two grants answer from `shared` / `personal`.
+async fn slow_service(name: &str, shared: &MockServer, personal: Option<&MockServer>) -> Arc<Spotify> {
+    let dir = temp_dir(name);
+    let s = Spotify::with_parts(
+        SpotifyConfig::new(&dir),
+        Store::with_backend(dir.clone(), Box::new(credentials::Memory::default())),
+        endpoints(shared),
+        endpoints(personal.unwrap_or(shared)),
+    );
+    wait_restored(&s).await;
+    s.shared.install(api::tests_support::token(crate::auth::shared_client_id()));
+    if personal.is_some() {
+        s.personal.install(api::tests_support::token("mine"));
+    }
+    s
+}
+
+async fn searches(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/search")
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn search_is_one_request_per_grant_and_never_waits_out_throttling() {
+    // 1. Personal + shared, every request 300 ms.
+    let shared = MockServer::start().await;
+    let personal = MockServer::start().await;
+    for server in [&shared, &personal] {
+        Mock::given(method("GET"))
+            .and(path("/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_body()).set_delay(MOCK_LATENCY))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me/tracks"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"items":[],"limit":50,"offset":0,"next":"more"}"#)
+                    .set_delay(MOCK_LATENCY),
+            )
+            .mount(server)
+            .await;
+    }
+    let s = slow_service("lat1", &shared, Some(&personal)).await;
+    let t = Instant::now();
+    let r = s.search("лёд").await;
+    let plain = t.elapsed();
+    assert!(r.is_ok() && plain < Duration::from_millis(900), "{plain:?}");
+    assert_eq!((searches(&personal).await, searches(&shared).await), (1, 1));
+    // The same query again comes from the cache.
+    s.search("лёд").await.unwrap();
+    assert_eq!(searches(&personal).await, 1);
+    eprintln!(
+        "[1] plain: {} ms, {} + {} /search requests, ok={}",
+        t.elapsed().as_millis(),
+        searches(&personal).await,
+        searches(&shared).await,
+        r.is_ok()
+    );
+
+    // 2. Background work (likes pulls, sync) holds the grant's request slots.
+    let mut bg = Vec::new();
+    for _ in 0..6 {
+        let s = s.clone();
+        bg.push(tokio::spawn(async move { s.liked().await }));
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let t = Instant::now();
+    let r = s.search("лёд 2").await;
+    eprintln!("[2] background busy: {} ms, ok={}", t.elapsed().as_millis(), r.is_ok());
+    assert!(r.is_ok() && t.elapsed() < Duration::from_millis(900));
+    for b in bg {
+        b.abort();
+    }
+
+    // 3. The shared app (playlists in search) is throttled: 429 Retry-After 20.
+    let shared3 = MockServer::start().await;
+    let personal3 = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "20").set_delay(MOCK_LATENCY))
+        .mount(&shared3)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_body()).set_delay(MOCK_LATENCY))
+        .mount(&personal3)
+        .await;
+    let s3 = slow_service("lat3", &shared3, Some(&personal3)).await;
+    let t = Instant::now();
+    let parts = Arc::new(Mutex::new(Vec::new()));
+    let sink = {
+        let parts = parts.clone();
+        let t = Instant::now();
+        Arc::new(move |p: StreamSearch| lock(&parts).push((t.elapsed(), p.tracks.len())))
+    };
+    let r = tokio::time::timeout(Duration::from_secs(40), s3.search_in_parts("лёд", sink)).await;
+    assert!(t.elapsed() < Duration::from_millis(900), "{:?}", t.elapsed());
+    assert_eq!(lock(&parts).len(), 1, "the catalogue came first");
+    eprintln!(
+        "[3] shared throttled 20 s: {} ms, {} + {} requests, {:?}",
+        t.elapsed().as_millis(),
+        searches(&personal3).await,
+        searches(&shared3).await,
+        r.map(|r| r.map(|x| x.tracks.len()))
+    );
+
+    // 4. Shared app only, throttled with a short Retry-After (5 s).
+    let shared4 = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "5").set_delay(MOCK_LATENCY))
+        .mount(&shared4)
+        .await;
+    let s4 = slow_service("lat4", &shared4, None).await;
+    let t = Instant::now();
+    let r = tokio::time::timeout(Duration::from_secs(40), s4.search("лёд")).await;
+    eprintln!(
+        "[4] shared only, throttled 5 s: {} ms, {} requests",
+        t.elapsed().as_millis(),
+        searches(&shared4).await,
+    );
+    assert!(t.elapsed() < Duration::from_millis(900));
+    assert!(matches!(r, Ok(Err(StreamError::RateLimited { .. }))));
+    // Paused: the next search does not even ask.
+    let _ = s4.search("лёд 2").await;
+    assert_eq!(searches(&shared4).await, 1);
+}

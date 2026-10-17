@@ -6,6 +6,10 @@
 //! `dblclick:x,y` (`click:x,y,frames` sets the wait after it), `drag:x1,y1,x2,y2`, `wheel:x,y,dy`,
 //! `key:space|escape|l|q|f11|f12` (`key:ctrl+2` and other egui key names too), `toasts` (a few snackbars).
 //! `prefs:{json}` merges into the prefs.
+//! `type:text,frames` types into the search bar one character every
+//! `frames` frames (like a person; the bar's debounce applies).
+//! `snap:path.png` saves a screenshot there and goes on (a sequence of
+//! pictures in one run).
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 
 use std::collections::VecDeque;
@@ -24,6 +28,8 @@ pub struct Shot {
     input: VecDeque<Vec<Event>>,
     /// States laid over the view for the picture (`fake:…`).
     fakes: crate::shot_fakes::Fakes,
+    /// Where the screenshot asked by `snap:` goes (None: the final one).
+    snap: Option<PathBuf>,
 }
 
 fn nums(arg: &str) -> Vec<f32> {
@@ -59,6 +65,7 @@ impl Shot {
             requested: false,
             input: VecDeque::new(),
             fakes: Default::default(),
+            snap: None,
         })
     }
 
@@ -100,8 +107,14 @@ impl Shot {
         if let Some(img) = image {
             let [w, h] = img.size;
             let raw: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+            let to = self.snap.take();
             if let Some(buf) = image::RgbaImage::from_raw(w as u32, h as u32, raw) {
-                let _ = buf.save(&self.path);
+                let _ = buf.save(to.as_ref().unwrap_or(&self.path));
+            }
+            if to.is_some() {
+                self.requested = false;
+                ctx.request_repaint();
+                return false;
             }
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return true;
@@ -289,6 +302,13 @@ impl Shot {
                 self.wait = 20;
             }
             // A few snackbars of different kinds, from real commands.
+            // `volume:0` (a screenshot run with the real engine stays quiet).
+            "volume" => {
+                if let Ok(v) = arg.parse::<f32>() {
+                    out.push(Command::SetVolume(v));
+                }
+                self.wait = 5;
+            }
             "toasts" => {
                 if let Some(t) = &state.player.current {
                     out.push(Command::Enqueue(vec![t.id]));
@@ -308,6 +328,30 @@ impl Shot {
             "search" => {
                 ui.set_search(arg, out);
                 self.wait = 20;
+            }
+            "type" => {
+                let (text, frames) = match arg.rsplit_once(',') {
+                    Some((t, f)) if f.trim().parse::<u32>().is_ok() => (t, f.trim().parse().unwrap_or(6)),
+                    _ => (arg, 6),
+                };
+                let chars: Vec<char> = text.chars().collect();
+                for n in (1..=chars.len()).rev() {
+                    let prefix: String = chars[..n].iter().collect();
+                    self.steps.insert(0, format!("typed:{frames}:{prefix}"));
+                }
+                self.wait = 0;
+            }
+            "typed" => {
+                if let Some((frames, text)) = arg.split_once(':') {
+                    ui.set_search(text, out);
+                    self.wait = frames.parse().unwrap_or(6);
+                }
+            }
+            "snap" => {
+                self.snap = Some(PathBuf::from(arg));
+                self.requested = true;
+                ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::default()));
+                self.wait = 0;
             }
             // `settings:sources` opens Settings on that tab / row.
             "settings" => {

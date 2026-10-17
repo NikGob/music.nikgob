@@ -154,11 +154,29 @@ pub fn search_results(
     nav
 }
 
-/// Section label ("Библиотека", "Торренты").
-fn group_label(ui: &mut Ui, text: &str) {
+/// Section label ("Библиотека", "Торренты"), with a small loading
+/// indicator beside it while its results are on their way (the previous
+/// ones stay below, so nothing jumps while typing).
+fn group_label(ui: &mut Ui, text: &str, loading: bool) {
     let s = Theme::get(ui.ctx()).scheme;
-    ui.label(TypeRole::LabelLarge.style().rich(text, s.primary));
+    ui.horizontal(|ui| {
+        ui.set_min_height(LABEL_H);
+        ui.label(TypeRole::LabelLarge.style().rich(text, s.primary));
+        loading_mark(ui, loading);
+    });
     ui.add_space(4.0);
+}
+
+/// Height of a section label row (the indicator does not change it).
+const LABEL_H: f32 = 20.0;
+
+/// The label's loading indicator; the same room is kept when idle.
+fn loading_mark(ui: &mut Ui, loading: bool) {
+    if loading {
+        ui.add(LoadingIndicator::new().size(LABEL_H));
+    } else {
+        ui.allocate_exact_size(vec2(LABEL_H, LABEL_H), egui::Sense::hover());
+    }
 }
 
 fn library(
@@ -172,12 +190,12 @@ fn library(
     let s = Theme::get(ui.ctx()).scheme;
     let r = &state.search;
     let mut nav = None;
-    group_label(ui, "Библиотека");
-    if r.query.trim() != query.trim() || r.searching {
-        ui.add(LoadingIndicator::new());
+    let loading = r.query.trim() != query.trim() || r.searching;
+    group_label(ui, "Библиотека", loading);
+    let empty = r.tracks.is_empty() && r.releases.is_empty() && r.artists.is_empty() && r.playlists.is_empty();
+    if empty && loading {
         return None;
     }
-    let empty = r.tracks.is_empty() && r.releases.is_empty() && r.artists.is_empty() && r.playlists.is_empty();
     if empty {
         if alone {
             widgets::empty_state(ui, Icon::Search, "Ничего не нашлось", "В библиотеке такого нет.", None);
@@ -213,7 +231,7 @@ fn library(
             "search",
             &r.tracks,
             Lead::Cover,
-            &PlayFrom::Tracks(ids, format!("Поиск «{query}»")),
+            &PlayFrom::Tracks(ids, format!("поиска: {}", r.query.trim())),
             state,
             pages,
             out,
@@ -239,7 +257,7 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
     let q = query.trim();
     let stale = t.query.trim() != q;
     ui.add_space(8.0);
-    group_label(ui, "Торренты");
+    group_label(ui, "Торренты", false);
 
     if t.searching {
         ui.horizontal(|ui| {
@@ -366,13 +384,15 @@ fn marker(ui: &mut Ui, text: &str) {
 }
 
 /// "Spotify" / "YouTube Music" with its dot, as a section label.
-fn service_label(ui: &mut Ui, service: Service) {
+fn service_label(ui: &mut Ui, service: Service, loading: bool) {
     let s = Theme::get(ui.ctx()).scheme;
     ui.add_space(8.0);
     ui.horizontal(|ui| {
+        ui.set_min_height(LABEL_H);
         let (r, _) = ui.allocate_exact_size(vec2(10.0, 16.0), egui::Sense::hover());
         ui.painter().circle_filled(r.center(), 5.0, streams::service_color(service));
         ui.label(TypeRole::LabelLarge.style().rich(service.display_name(), s.primary));
+        loading_mark(ui, loading);
     });
     ui.add_space(4.0);
 }
@@ -401,7 +421,11 @@ fn stream_section(
     let s = Theme::get(ui.ctx()).scheme;
     let mut nav = None;
     let salt = service.as_str();
-    service_label(ui, service);
+    let sec: Option<&StreamSearchSection> = state.search.streams.iter().find(|x| x.service == service);
+    let q = query.trim();
+    let stale = state.search.query.trim() != q;
+    let loading = !q.is_empty() && unavailable(state, service).is_none() && (stale || sec.is_none_or(|x| x.searching));
+    service_label(ui, service, loading);
     if let Some(why) = unavailable(state, service) {
         ui.horizontal(|ui| {
             ui.label(TypeRole::BodyMedium.style().rich(format!("{} {why}.", service.display_name()), s.on_surface_variant));
@@ -418,17 +442,16 @@ fn stream_section(
         ui.add_space(widgets::SECTION_GAP);
         return None;
     }
-    let sec: Option<&StreamSearchSection> = state.search.streams.iter().find(|x| x.service == service);
-    let q = query.trim();
-    let stale = state.search.query.trim() != q;
+    let empty = |x: &StreamSearchSection| {
+        x.tracks.is_empty() && x.albums.is_empty() && x.artists.is_empty() && x.playlists.is_empty()
+    };
+    // What the section searched for (its rows are of that query while a
+    // newer one runs).
+    let shown_q = state.search.query.trim();
     match sec {
         _ if q.is_empty() => {}
-        None => {
-            ui.add(LoadingIndicator::new());
-        }
-        Some(x) if x.searching || stale => {
-            ui.add(LoadingIndicator::new());
-        }
+        None => {}
+        Some(x) if loading && empty(x) => {}
         Some(x) if x.error.is_some() => {
             let e = x.error.as_deref().unwrap_or_default();
             ui.horizontal(|ui| {
@@ -447,7 +470,7 @@ fn stream_section(
                 }
             });
         }
-        Some(x) if x.tracks.is_empty() && x.albums.is_empty() && x.artists.is_empty() && x.playlists.is_empty() => {
+        Some(x) if empty(x) => {
             ui.label(TypeRole::BodyMedium.style().rich(
                 format!("В {} ничего не нашлось.", service.display_name()),
                 s.on_surface_variant,
@@ -457,7 +480,7 @@ fn stream_section(
             if !x.tracks.is_empty() {
                 widgets::section_header(ui, "Треки", false);
                 let n = if compact { x.tracks.len().min(5) } else { x.tracks.len() };
-                let from = streams::StreamFrom::Rows(format!("{} · «{q}»", service.display_name()));
+                let from = streams::StreamFrom::Rows(format!("поиска {}: {shown_q}", service.display_name()));
                 nav = streams::track_rows(ui, &format!("sv-tracks-{salt}"), &x.tracks[..n], false, &from, state, pages, out)
                     .or(nav.take());
                 ui.add_space(16.0);

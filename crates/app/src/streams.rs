@@ -33,7 +33,10 @@ pub fn real(data_dir: &Path, secrets: &StreamingSettings) -> Services {
     sp.personal_client_id = secrets.spotify_client_id.clone();
     out.push(nikgob_spotify::Spotify::new(sp));
     match nikgob_youtube::Youtube::new(nikgob_youtube::YoutubeConfig::new(data_dir.join("youtube"))) {
-        Ok(yt) => out.push(yt),
+        Ok(yt) => {
+            yt.warm_up();
+            out.push(yt.with_audio_cache(cache.join("youtube")));
+        }
         Err(e) => log::error!("YouTube Music did not start: {e}"),
     }
     out

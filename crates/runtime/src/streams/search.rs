@@ -1,8 +1,18 @@
 //! The stream part of the unified search: every chosen service is asked at
-//! once and its section is published as it answers; a newer query aborts
-//! the older requests and drops whatever they still bring. Rows are merged
-//! against the library (a library track wins) and across services (the
-//! first service, Spotify, keeps the row).
+//! once and its section is published as it answers (its first part first,
+//! see [`StreamService::search_in_parts`]); a newer query aborts the older
+//! requests and drops whatever they still bring. While a new query runs, a
+//! section keeps the previous answer on screen (marked searching), so typing
+//! never collapses the page. Answers are kept for [`CACHE_TTL`]: the same
+//! query again (backspace, retyping) shows at once without a request. Rows
+//! are merged against the library (a library track wins) and across
+//! services (the first service, Spotify, keeps the row).
+//!
+//! [`StreamService::search_in_parts`]: nikgob_core::streaming::StreamService::search_in_parts
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use nikgob_core::model::TrackId;
 use nikgob_core::streaming::{Service, StreamError, StreamSearch, StreamTrack};
@@ -13,8 +23,13 @@ use super::Msg;
 use crate::Worker;
 
 /// Wait before asking the services, so typing does not fire a request per
-/// key (an older query's task is aborted while it waits).
-const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
+/// key (an older query's task is aborted while it waits). The search bar
+/// already waits ~180 ms before it sends the query: ~350 ms in all.
+const DEBOUNCE: Duration = Duration::from_millis(170);
+/// How long a service's answer to a query is reused.
+const CACHE_TTL: Duration = Duration::from_secs(3 * 60);
+/// Answers kept (per service and query).
+const CACHE_MAX: usize = 64;
 /// How far two lengths may be apart for the same song.
 const SLACK_MS: u64 = 3_000;
 /// Artist names this similar (0..=1) are the same artist.
@@ -25,11 +40,26 @@ pub(crate) struct SearchState {
     pub(crate) seq: u64,
     pub(crate) query: String,
     pub(crate) sources: v::SearchSources,
-    /// Per asked service, in section order: `None` while it is searching.
-    raw: Vec<(Service, Option<Result<StreamSearch, StreamError>>)>,
+    /// Per asked service, in section order.
+    raw: Vec<Slot>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// When the current query was sent to the services.
+    started: Option<Instant>,
+    cache: HashMap<(Service, String), (Instant, StreamSearch)>,
     /// Library hits of the query (they win over stream rows).
     lib_tracks: Vec<(nikgob_library::TrackRow, Option<String>)>,
+}
+
+type Answer = Result<StreamSearch, StreamError>;
+
+/// One service's part of the search.
+struct Slot {
+    service: Service,
+    /// The latest answer: this query's (part or whole), or the previous
+    /// query's while this one runs.
+    result: Option<Result<StreamSearch, StreamError>>,
+    /// The answer to this query is complete.
+    done: bool,
 }
 
 /// What makes two tracks the same song: the ISRC, else artist + title
@@ -107,11 +137,19 @@ impl Worker {
     pub(crate) fn search_streams(&mut self, query: &str, library: Vec<nikgob_library::TrackRow>) {
         let st = &mut self.streaming.search;
         st.seq += 1;
+        let stale = st.tasks.iter().filter(|t| !t.is_finished()).count();
+        if stale > 0 {
+            log::debug!(
+                "search #{}: cancelled {stale} request(s) of «{}»",
+                st.seq - 1,
+                st.query
+            );
+        }
         for t in st.tasks.drain(..) {
             t.abort();
         }
         st.query = query.to_owned();
-        st.raw.clear();
+        st.started = Some(Instant::now());
         st.lib_tracks = library
             .into_iter()
             .map(|r| {
@@ -122,27 +160,87 @@ impl Worker {
         let seq = st.seq;
         let sources = st.sources;
         if query.is_empty() {
+            self.streaming.search.raw.clear();
             self.publish(|s, _| s.search.streams.clear());
             return;
         }
-        for &service in Service::ALL {
-            if !sources.service(service) {
+        let asked: Vec<Service> = Service::ALL
+            .iter()
+            .copied()
+            .filter(|&s| sources.service(s) && self.service(s).is_some())
+            .collect();
+        // Sections that stay keep what they showed until the new answer.
+        let mut old = std::mem::take(&mut self.streaming.search.raw);
+        let st = &mut self.streaming.search;
+        st.cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+        for &service in &asked {
+            let prev = old
+                .iter()
+                .position(|s| s.service == service)
+                .and_then(|i| old.swap_remove(i).result);
+            let key = (service, query.to_owned());
+            if let Some((_, hit)) = st.cache.get(&key) {
+                log::debug!("search #{seq} «{query}»: {service} from the cache");
+                st.raw.push(Slot {
+                    service,
+                    result: Some(Ok(hit.clone())),
+                    done: true,
+                });
+                continue;
+            }
+            st.raw.push(Slot {
+                service,
+                result: prev,
+                done: false,
+            });
+        }
+        for &service in &asked {
+            if self.streaming.search.raw.iter().any(|s| s.service == service && s.done) {
                 continue;
             }
             let Some(svc) = self.service(service) else { continue };
             let q = query.to_owned();
+            let tx = self.streaming.internal.clone();
             let task = self.streaming.spawn(async move {
                 tokio::time::sleep(DEBOUNCE).await;
-                let result = svc.search(&q).await;
+                let started = Instant::now();
+                log::debug!("search #{seq} «{q}»: {service} asked");
+                let part: nikgob_core::streaming::SearchParts = Arc::new(move |part| {
+                    log::debug!(
+                        "search #{seq}: {service} first part in {} ms ({} tracks)",
+                        started.elapsed().as_millis(),
+                        part.tracks.len()
+                    );
+                    let _ = tx.send(crate::import::Internal::Stream(Msg::Searched {
+                        seq,
+                        service,
+                        result: Ok(part),
+                        partial: true,
+                    }));
+                });
+                let result = svc.search_in_parts(&q, part).await;
+                match &result {
+                    Ok(r) => log::debug!(
+                        "search #{seq}: {service} answered in {} ms: {} tracks, {} albums, {} artists, {} playlists",
+                        started.elapsed().as_millis(),
+                        r.tracks.len(),
+                        r.albums.len(),
+                        r.artists.len(),
+                        r.playlists.len()
+                    ),
+                    Err(e) => log::info!(
+                        "search #{seq}: {service} failed in {} ms: {e}",
+                        started.elapsed().as_millis()
+                    ),
+                }
                 Msg::Searched {
                     seq,
                     service,
                     result,
+                    partial: false,
                 }
             });
-            let st = &mut self.streaming.search;
-            st.tasks.push(task);
-            st.raw.push((service, None));
+            self.streaming.search.tasks.push(task);
         }
         self.rebuild_sections();
     }
@@ -161,6 +259,7 @@ impl Worker {
         seq: u64,
         service: Service,
         result: Result<StreamSearch, StreamError>,
+        partial: bool,
     ) {
         if seq != self.streaming.search.seq {
             return; // an older query
@@ -168,32 +267,46 @@ impl Worker {
         if let Err(e) = &result {
             log::warn!("{service} search: {e}");
         }
-        if let Ok(r) = &result {
+        let st = &mut self.streaming.search;
+        if !partial && let Ok(r) = &result {
+            if st.cache.len() >= CACHE_MAX {
+                st.cache.clear();
+            }
+            st.cache.insert((service, st.query.clone()), (Instant::now(), r.clone()));
+        }
+        if let Some(slot) = st.raw.iter_mut().find(|s| s.service == service) {
+            if slot.done {
+                return; // a part after the whole answer
+            }
+            slot.result = Some(result.clone());
+            slot.done = !partial;
+        }
+        let rebuilt = Instant::now();
+        self.rebuild_sections();
+        log::debug!(
+            "search #{seq}: {service} {} shown {} ms after the query ({} ms to merge)",
+            if partial { "part" } else { "answer" },
+            self.streaming.search.started.map_or(0, |t| t.elapsed().as_millis()),
+            rebuilt.elapsed().as_millis()
+        );
+        // Learnt after the section is out: library writes never delay it.
+        if !partial && let Ok(r) = &result {
             self.streaming.learn(&r.tracks);
             for a in &r.albums {
                 self.learn_album(a);
             }
         }
-        if let Some(slot) = self
-            .streaming
-            .search
-            .raw
-            .iter_mut()
-            .find(|(s, _)| *s == service)
-        {
-            slot.1 = Some(result);
-        }
-        self.rebuild_sections();
     }
 
     /// Recomputes the stream sections from the raw answers (merging rows).
     pub(crate) fn rebuild_sections(&mut self) {
-        let raw: Vec<(Service, Option<Result<StreamSearch, StreamError>>)> = self
+        let started = Instant::now();
+        let raw: Vec<(Service, Option<Answer>, bool)> = self
             .streaming
             .search
             .raw
             .iter()
-            .map(|(s, r)| (*s, r.clone()))
+            .map(|s| (s.service, s.result.clone(), s.done))
             .collect();
         let lib_keys: Vec<(TrackId, SongKey)> = self
             .streaming
@@ -207,11 +320,14 @@ impl Worker {
         let mut kept_albums: Vec<(String, String)> = Vec::new();
         let mut kept_artists: Vec<String> = Vec::new();
         let mut sections: Vec<v::StreamSearchSection> = Vec::new();
-        for (service, result) in raw {
+        for (service, result, done) in raw {
             let mut section = v::StreamSearchSection::new(service);
+            section.searching = !done;
             match result {
-                None => section.searching = true,
-                Some(Err(e)) => section.error = Some(super::error_text(&e)),
+                None => {}
+                // An old error is not shown while the new query runs.
+                Some(Err(_)) if !done => {}
+                Some(Err(e)) => section.error = Some(search_error(service, &e)),
                 Some(Ok(r)) => {
                     for t in &r.tracks {
                         let key = SongKey::of_stream(t);
@@ -271,6 +387,10 @@ impl Worker {
             sections.push(section);
         }
         let query = self.streaming.search.query.clone();
+        let merged = started.elapsed();
+        if merged > Duration::from_millis(20) {
+            log::debug!("search: merging the sections took {} ms", merged.as_millis());
+        }
         self.publish(|s, res| {
             if s.search.query.trim() != query {
                 return;
@@ -288,6 +408,16 @@ impl Worker {
     /// the one with its ISRC.
     pub(crate) fn library_track_of(&self, t: &StreamTrack) -> Option<TrackId> {
         self.lib.track_for_stream(t).ok().flatten()
+    }
+}
+
+/// Why a service's section is empty, as the user reads it.
+fn search_error(service: Service, e: &StreamError) -> String {
+    match e {
+        StreamError::RateLimited { .. } => {
+            format!("{} занят, повтори позже", service.display_name())
+        }
+        other => super::error_text(other),
     }
 }
 

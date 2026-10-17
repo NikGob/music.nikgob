@@ -43,13 +43,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use librespot_core::authentication::Credentials;
 use nikgob_core::streaming::{
     Account, AudioStream, BoxFuture, EntityKind, LoginInput, LoginPrompt, Played, Service,
     StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService,
-    StreamTrack,
+    StreamTrack, SearchParts,
 };
 use tokio::runtime::Handle;
 use tokio::sync::watch;
@@ -68,7 +68,9 @@ pub const WEB_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
 pub const DEVELOPER_DASHBOARD: &str = "https://developer.spotify.com/dashboard";
 
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
-const SEARCH_TTL: Duration = Duration::from_secs(2 * 60);
+const SEARCH_TTL: Duration = Duration::from_secs(3 * 60);
+/// The playlist part of a search (the shared app) waits no longer.
+const PLAYLIST_SEARCH_TIMEOUT: Duration = Duration::from_secs(6);
 /// Pages read at most from one list (a playlist, the liked songs).
 const MAX_PAGES: u32 = 400;
 
@@ -714,12 +716,22 @@ impl Spotify {
 
     // ---- reads -------------------------------------------------------------
 
-    async fn search_now(&self, query: &str) -> Result<StreamSearch, StreamError> {
+    /// One `/search` per grant for every type at once (10 per type, the
+    /// Development Mode cap). With the personal app the catalogue and the
+    /// playlists come from two grants in parallel: the catalogue is handed
+    /// to `part` as soon as it is in, the playlists follow (the shared app
+    /// being throttled never hides or delays the catalogue).
+    async fn search_now(
+        &self,
+        query: &str,
+        part: Option<SearchParts>,
+    ) -> Result<StreamSearch, StreamError> {
         let query = query.trim();
         if query.is_empty() {
             return Ok(StreamSearch::default());
         }
         if let Some(hit) = self.searches.get(query) {
+            log::debug!("spotify: search cache hit");
             return Ok(hit);
         }
         let catalog = self.client_for(Op::Catalog)?;
@@ -734,15 +746,56 @@ impl Spotify {
                     api::SEARCH_LIMIT,
                 )
                 .await?;
-            (all.clone(), Ok(all))
+            let mut out = self.catalog_part(&all);
+            out.playlists = self.playlist_part(&all, me.as_deref());
+            out
         } else {
-            let (c, p) = tokio::join!(
-                catalog.search(query, &["track", "album", "artist"], api::SEARCH_LIMIT),
-                playlists.search(query, &["playlist"], api::SEARCH_LIMIT)
+            let catalog_part = async {
+                let r = catalog
+                    .search(query, &["track", "album", "artist"], api::SEARCH_LIMIT)
+                    .await?;
+                let out = self.catalog_part(&r);
+                log::debug!(
+                    "spotify: catalogue part in {} ms",
+                    started.elapsed().as_millis()
+                );
+                if let Some(part) = &part {
+                    part(out.clone());
+                }
+                Ok::<_, StreamError>(out)
+            };
+            let playlist_part = tokio::time::timeout(
+                PLAYLIST_SEARCH_TIMEOUT,
+                playlists.search(query, &["playlist"], api::SEARCH_LIMIT),
             );
-            (c?, p)
+            let (c, p) = tokio::join!(catalog_part, playlist_part);
+            let mut out = c?;
+            match p {
+                Ok(Ok(r)) => out.playlists = self.playlist_part(&r, me.as_deref()),
+                // The shared app being throttled must not hide the catalogue.
+                Ok(Err(e)) => log::info!("spotify: playlist search failed: {e}"),
+                Err(_) => log::info!("spotify: playlist search timed out"),
+            }
+            out
         };
-        if let Some(page) = &catalog_results.tracks {
+        for t in &out.tracks {
+            self.tracks.put(&t.id.id, t.clone());
+        }
+        log::debug!(
+            "spotify: search done in {} ms: {} tracks, {} albums, {} artists, {} playlists",
+            started.elapsed().as_millis(),
+            out.tracks.len(),
+            out.albums.len(),
+            out.artists.len(),
+            out.playlists.len()
+        );
+        self.searches.put(query, out.clone());
+        Ok(out)
+    }
+
+    fn catalog_part(&self, r: &api::models::SearchResults) -> StreamSearch {
+        let mut out = StreamSearch::default();
+        if let Some(page) = &r.tracks {
             out.tracks = page
                 .items
                 .iter()
@@ -755,27 +808,24 @@ impl Spotify {
         if let Some(page) = &catalog_results.artists {
             out.artists = page.items.iter().filter_map(convert::artist).collect();
         }
-        match playlist_results {
-            Ok(r) => {
-                if let Some(page) = r.playlists {
-                    for p in &page.items {
-                        self.observe(p);
-                    }
-                    out.playlists = page
-                        .items
-                        .iter()
-                        .filter_map(|p| convert::playlist(p, me.as_deref()))
-                        .collect();
-                }
-            }
-            // The shared app being throttled must not hide the catalogue.
-            Err(e) => log::info!("spotify: playlist search failed: {e}"),
+        out
+    }
+
+    fn playlist_part(
+        &self,
+        r: &api::models::SearchResults,
+        me: Option<&str>,
+    ) -> Vec<StreamPlaylist> {
+        let Some(page) = &r.playlists else {
+            return Vec::new();
+        };
+        for p in &page.items {
+            self.observe(p);
         }
-        for t in &out.tracks {
-            self.tracks.put(&t.id.id, t.clone());
-        }
-        self.searches.put(query, out.clone());
-        Ok(out)
+        page.items
+            .iter()
+            .filter_map(|p| convert::playlist(p, me))
+            .collect()
     }
 
     async fn track_now(&self, id: &str) -> Result<StreamTrack, StreamError> {
@@ -1193,7 +1243,16 @@ impl StreamService for Spotify {
 
     fn search(&self, query: &str) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
         let query = query.to_string();
-        Box::pin(async move { self.search_now(&query).await })
+        Box::pin(async move { self.search_now(&query, None).await })
+    }
+
+    fn search_in_parts(
+        &self,
+        query: &str,
+        part: SearchParts,
+    ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        let query = query.to_owned();
+        Box::pin(async move { self.search_now(&query, Some(part)).await })
     }
 
     fn track(&self, id: &str) -> BoxFuture<'_, Result<StreamTrack, StreamError>> {

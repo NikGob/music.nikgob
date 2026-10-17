@@ -254,3 +254,79 @@ fn live_smoke() {
     drop(yt);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// How long a search takes, cold and warm: `cargo test -p nikgob-youtube
+/// --test live live_search_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "network"]
+fn live_search_timing() {
+    let _ = env_logger::builder().is_test(true).filter_level(log::LevelFilter::Debug).try_init();
+    let dir = std::env::temp_dir().join(format!("nikgob-yt-timing-{}", std::process::id()));
+    let yt = Youtube::new(YoutubeConfig::new(dir.join("data"))).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    if std::env::var_os("WARM").is_some() {
+        yt.warm_up();
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    for q in ["лёд", "Кино Группа крови", "OMORI soundtrack", "лёд"] {
+        let t = Instant::now();
+        let first = Arc::new(Mutex::new(None));
+        let sink = {
+            let first = first.clone();
+            Arc::new(move |_: nikgob_core::streaming::StreamSearch| {
+                first.lock().unwrap().get_or_insert(t.elapsed());
+            })
+        };
+        let r = rt.block_on(yt.search_in_parts(q, sink)).unwrap();
+        println!(
+            "search «{q}»: first part {:?}, all {} ms ({} tracks, {} albums, {} artists, {} playlists)",
+            first.lock().unwrap().map(|d| d.as_millis()),
+            t.elapsed().as_millis(),
+            r.tracks.len(),
+            r.albums.len(),
+            r.artists.len(),
+            r.playlists.len()
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Opens the first songs of a search and reports what fails:
+/// `QUERY="MORGENSHTERN ARISTOCRAT" cargo test -p nikgob-youtube --test live
+/// live_open_search -- --ignored --nocapture`.
+#[test]
+#[ignore = "network"]
+fn live_open_search() {
+    let _ = env_logger::builder().is_test(true).filter_module("nikgob_youtube", log::LevelFilter::Debug).try_init();
+    let q = std::env::var("QUERY").unwrap_or_else(|_| "MORGENSHTERN ARISTOCRAT".into());
+    let dir = std::env::temp_dir().join(format!("nikgob-yt-open-{}", std::process::id()));
+    let yt = Youtube::new(YoutubeConfig::new(dir.join("data"))).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let found = rt.block_on(yt.search(&q)).unwrap();
+    let tracks = if std::env::var_os("ALBUM").is_some() {
+        let a = &found.albums[0];
+        println!("album {} — {}", a.title, a.id.id);
+        rt.block_on(yt.album(&a.id.id)).unwrap().tracks
+    } else {
+        found.tracks.iter().take(6).cloned().collect()
+    };
+    for t in &tracks {
+        let mut s = yt.open_audio(&t.id.id).unwrap();
+        let mut head = [0u8; 16];
+        let started = Instant::now();
+        let r = s.read_exact(&mut head);
+        println!(
+            "{} {:?} «{}» — {} ({:?} ms): {:?}",
+            t.id.id,
+            t.kind,
+            t.title,
+            t.artist_line(),
+            t.duration_ms,
+            r.map(|()| format!("ok in {} ms, {:?}", started.elapsed().as_millis(), s.quality()))
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
