@@ -1261,7 +1261,7 @@ mod tests {
         let track = nikgob_view::TrackRow {
             id: nikgob_view::TrackId::new(), title: "Track".into(), artist: "Artist".into(),
             album: None, release_id: None, artist_id: None, disc_no: 1, track_no: 1,
-            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None,
+            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
         };
         let mut out = Vec::new();
         chrome.apply(chrome::Act::Info, &track, Rect::NOTHING, chrome::Where::Np, &mut out);
@@ -1329,7 +1329,7 @@ mod tests {
         state.player.current = Some(nikgob_view::TrackRow {
             id: nikgob_view::TrackId::new(), title: "Track".into(), artist: "Artist".into(),
             album: None, release_id: None, artist_id: None, disc_no: 1, track_no: 1,
-            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None,
+            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
         });
         for i in 0..3 {
             frame(&ctx, &mut ui, &mut state, i as f64 * 0.016, 1263.0, None);

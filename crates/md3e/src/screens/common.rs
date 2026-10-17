@@ -89,18 +89,21 @@ pub fn buffering_overlay(ui: &mut Ui, button: Rect, bg: Color32, fg: Color32) {
 
 /// What plays, in one quiet line: «YouTube · Opus ~160 кбит/с» for a
 /// stream (where its sound really comes from: a Spotify track may play
-/// from YouTube Music), the file's own format for a local track.
+/// from YouTube Music), «YouTube · клип · Opus ~160 кбит/с» for a music
+/// video without its song, the file's own format for a local track.
 pub fn sound_line(state: &nikgob_view::ViewState) -> Option<String> {
     let p = &state.player;
+    let clip = p.current.as_ref().is_some_and(|t| t.clip);
     let quality = p.audio_quality.as_deref().or_else(|| p.current.as_ref().and_then(|t| t.quality.as_deref()));
     let service = p.audio_service.map(|s| match s {
         nikgob_view::Service::Spotify => "Spotify",
         // A Deezer entry plays from YouTube Music.
         nikgob_view::Service::Youtube | nikgob_view::Service::Deezer => "YouTube",
     });
+    let service = service.map(|s| if clip { format!("{s} · клип") } else { s.to_owned() });
     match (service, quality) {
         (Some(s), Some(q)) => Some(format!("{s} · {q}")),
-        (Some(s), None) => Some(s.to_owned()),
+        (Some(s), None) => Some(s),
         (None, Some(q)) => Some(q.to_owned()),
         (None, None) => None,
     }

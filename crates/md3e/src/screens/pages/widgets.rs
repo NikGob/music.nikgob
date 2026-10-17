@@ -652,6 +652,10 @@ fn track_row(
     {
         supporting = format!("{supporting} · {a}");
     }
+    // A liked YouTube clip without its song: said, as search says it.
+    if t.clip {
+        supporting = format!("{supporting} · клип");
+    }
     if opts.mark_local && t.has_local {
         supporting = format!("{supporting} · у тебя");
     }

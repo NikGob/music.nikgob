@@ -113,6 +113,8 @@ pub struct TrackRow {
     pub has_local: bool,
     pub liked: bool,
     pub cover: Option<Cover>,
+    /// What plays is a YouTube music video, not the song («· клип»).
+    pub clip: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

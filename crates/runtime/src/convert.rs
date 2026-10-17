@@ -127,7 +127,12 @@ impl Resolver {
             source: r.active_kind,
             has_local: r.has_local,
             liked: r.liked,
-            cover: self.cover_for(r.release_id, r.cover_ref.as_deref()),
+            // A clip has no album: the video's own picture.
+            cover: self.cover_for(r.release_id, r.cover_ref.as_deref()).or_else(|| {
+                let video = r.youtube_id.as_deref().filter(|_| r.is_clip())?;
+                Some(v::Cover::web(format!("https://i.ytimg.com/vi/{video}/hqdefault.jpg")))
+            }),
+            clip: r.is_clip(),
         }
     }
 

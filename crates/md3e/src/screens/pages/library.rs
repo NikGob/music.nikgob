@@ -680,7 +680,8 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         let tw = cols.title.1 - tx;
         let g = line(ui.painter(), &t.title, TypeRole::BodyLarge.style(), fg, tw);
         ui.painter().galley(pos2(tx, cy - 22.0), g, fg);
-        let g = line(ui.painter(), &t.artist, TypeRole::BodyMedium.style(), variant, tw);
+        let artist = if t.clip { format!("{} · клип", t.artist) } else { t.artist.clone() };
+        let g = line(ui.painter(), &artist, TypeRole::BodyMedium.style(), variant, tw);
         ui.painter().galley(pos2(tx, cy + 2.0), g, variant);
         // Альбом.
         if let (Some((x0, x1)), Some(a)) = (cols.album, &t.album) {
