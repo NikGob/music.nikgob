@@ -323,10 +323,15 @@ impl Worker {
         };
         // Oldest first, so "Любимые" keeps the service's order (newest on top).
         let mut seen = HashSet::new();
+        // A like change sent from here a moment ago wins over a list that
+        // does not show it yet (see `replace`): an id unliked here is no
+        // news, an id liked here is not gone.
+        let echo = &self.streaming.replace;
         let adds: Vec<StreamTrack> = liked
             .iter()
             .rev()
             .filter(|t| !known_ids.contains(t.id.id.as_str()) && seen.insert(t.id.id.as_str()))
+            .filter(|t| echo.echo(&t.id) != Some(false))
             .cloned()
             .collect();
         // Gone from the service: the like goes only if it came from there.
@@ -336,7 +341,7 @@ impl Worker {
             let there: HashSet<&str> = liked.iter().map(|t| t.id.id.as_str()).collect();
             known
                 .iter()
-                .filter(|k| !there.contains(k.remote.id.as_str()))
+                .filter(|k| !there.contains(k.remote.id.as_str()) && echo.echo(&k.remote) != Some(true))
                 .cloned()
                 .collect()
         };
@@ -451,14 +456,28 @@ impl Worker {
             } else {
                 let _ = self.lib.delete_remote_like(&remote);
             }
-            let service = remote.service;
-            if self.streaming.like_queue.push(remote, on) {
-                let wait = self.streaming.schedule.like_wait();
-                self.streaming.spawn(async move {
-                    tokio::time::sleep(wait).await;
-                    Msg::LikeFlush(service)
-                });
-            }
+            self.queue_remote_like(remote, on);
+        }
+    }
+
+    /// Queues `remote` → `on` for its service, unless that service keeps
+    /// no likes or is not logged in; the flush follows a moment later.
+    pub(crate) fn push_like_remote(&mut self, remote: RemoteId, on: bool) {
+        let Some(svc) = self.service(remote.service) else { return };
+        if svc.catalogue_only() || !svc.account().is_logged_in() {
+            return;
+        }
+        self.queue_remote_like(remote, on);
+    }
+
+    fn queue_remote_like(&mut self, remote: RemoteId, on: bool) {
+        let service = remote.service;
+        if self.streaming.like_queue.push(remote, on) {
+            let wait = self.streaming.schedule.like_wait();
+            self.streaming.spawn(async move {
+                tokio::time::sleep(wait).await;
+                Msg::LikeFlush(service)
+            });
         }
     }
 

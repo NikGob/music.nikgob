@@ -115,7 +115,8 @@ impl Resolver {
     pub fn track(&mut self, r: &TrackRow) -> v::TrackRow {
         v::TrackRow {
             id: r.id,
-            title: r.title.clone(),
+            // A clip without its song by the song's title («AIYOU»).
+            title: crate::streams::shown_title(r),
             artist: r.artist.clone(),
             album: r.album.clone(),
             release_id: r.release_id,

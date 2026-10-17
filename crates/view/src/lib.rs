@@ -668,7 +668,7 @@ impl ToastKind {
             Self::Error
         } else if t.ends_with('…') || any(&["начался", "качается", "добавляю"]) {
             Self::Working
-        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "удалено", "следующим", "в любимых", "убран", "в корзине", "объединено", "скопирован", "вошёл", "вход выполнен", "подключён", "включён", "в «хочу скачать»", "в библиотеке"]) {
+        } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "удалено", "следующим", "в любимых", "убран", "в корзине", "объединено", "скопирован", "заменено", "вошёл", "вход выполнен", "подключён", "включён", "в «хочу скачать»", "в библиотеке"]) {
             Self::Success
         } else {
             Self::Info
@@ -840,6 +840,9 @@ pub struct Prefs {
     pub spotify_personal_app: bool,
     /// settings.toml has YouTube Music cookies.
     pub youtube_cookies_set: bool,
+    /// «Найти песню…»: the last scope chosen, «И в YouTube Music» (true) or
+    /// «Только здесь».
+    pub replace_in_youtube: bool,
 }
 
 /// Material shapes behind the open track.
@@ -1039,6 +1042,8 @@ pub struct ViewState {
     /// Text the app should put on the clipboard (one-shot, see
     /// [`ClipboardRequest`]).
     pub clipboard: Option<ClipboardRequest>,
+    /// The open «Найти песню…» dialog ([`Command::FindSong`]).
+    pub find_song: Option<FindSongView>,
     /// Bumped on every change, so a UI can skip work when nothing changed.
     pub revision: u64,
 }
@@ -1331,6 +1336,20 @@ pub enum Command {
     FollowStreamPlaylist(RemoteId),
     /// Fill [`ArtistDetail::discography`] ("Нет в библиотеке").
     LoadDiscography(ArtistId),
+
+    // Streaming: a song by hand for a clip or a wrong match
+    /// Opens [`ViewState::find_song`] for this stream track and searches
+    /// songs for `query` (`None`: its cleaned title and artist).
+    FindSong { track: TrackId, query: Option<String> },
+    CloseFindSong,
+    /// The track becomes the song `with` (a result of the dialog); with
+    /// `youtube` the like moves there too: the liked clip is unliked on
+    /// YouTube Music and the song liked. The choice is kept as
+    /// [`Prefs::replace_in_youtube`].
+    ReplaceTrack { track: TrackId, with: RemoteId, youtube: bool },
+    /// Takes a replacement back (the toast's «Отменить»), on YouTube Music
+    /// too when it went there.
+    UndoReplace(u64),
 }
 
 impl Default for Prefs {
@@ -1419,6 +1438,7 @@ impl Default for Prefs {
             stream_cache_mb: 500,
             spotify_personal_app: false,
             youtube_cookies_set: false,
+            replace_in_youtube: false,
         }
     }
 }
@@ -1461,6 +1481,7 @@ mod toast_tests {
             ("Spotify не подключён", ToastKind::Error),
             ("В «Хочу скачать»: «Война»", ToastKind::Success),
             ("Нет связи — проверь интернет", ToastKind::Error),
+            ("Заменено на «AIYOU»", ToastKind::Success),
             ("Скоро", ToastKind::Info),
         ] {
             assert_eq!(ToastKind::guess(text), kind, "{text}");

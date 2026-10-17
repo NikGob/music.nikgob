@@ -21,6 +21,7 @@ mod export;
 mod likes;
 mod pages;
 mod rank;
+mod replace;
 mod resolve;
 mod schedule;
 mod search;
@@ -46,6 +47,7 @@ use crate::Worker;
 use crate::import::Internal;
 
 pub(crate) use cold::{STREAM_JOB, plural};
+pub(crate) use replace::shown_title;
 pub(crate) use wishlist::WISH_ID;
 pub use schedule::StreamSchedule;
 pub use web_login::{WINDOW_HINT, WebLogin, WebLoginError};
@@ -174,6 +176,19 @@ pub(crate) enum Msg {
     Cold(cold::ColdMsg),
     Sync(sync::SyncMsg),
     Disco(discography::DiscoMsg),
+    /// Songs for the «Найти песню…» dialog (see [`replace`]).
+    SongsFound {
+        seq: u64,
+        service: Service,
+        result: Result<Vec<StreamTrack>, StreamError>,
+    },
+    /// The YouTube song of a Deezer pick (or none): the replacement goes on.
+    ReplaceResolved {
+        track: TrackId,
+        pick: Box<StreamTrack>,
+        youtube_song: Option<Box<StreamTrack>>,
+        youtube: bool,
+    },
 }
 
 /// The worker's streaming state.
@@ -214,6 +229,8 @@ pub(crate) struct Streams {
     like_queue: likes::LikeQueue,
     /// Liked YouTube clips turning into their songs.
     clips: clips::ClipRepair,
+    /// «Найти песню…»: its searches, the undo of replacements.
+    replace: replace::ReplaceState,
     pub(crate) wish: wishlist::WishState,
     share_seq: u64,
     /// The «Ищу ссылку…» toast of the share that runs, replaced by its end.
@@ -258,6 +275,7 @@ impl Streams {
             likes: HashMap::new(),
             like_queue: likes::LikeQueue::default(),
             clips: clips::ClipRepair::default(),
+            replace: replace::ReplaceState::default(),
             wish: wishlist::WishState::default(),
             share_seq: 0,
             share_toast: None,
@@ -393,6 +411,7 @@ impl Worker {
     /// as its login is restored), the wishlist view.
     pub(crate) fn start_streams(&mut self) {
         self.apply_stream_cache();
+        self.retry_clip_misses_once();
         self.publish_accounts();
         self.likes_tick();
         self.publish_wishlist();
@@ -505,6 +524,10 @@ impl Worker {
             }
             Command::SetPlaylistSync { playlist, mode } => self.set_playlist_sync(playlist, mode),
             Command::LoadDiscography(artist) => self.load_discography(artist, true),
+            Command::FindSong { track, query } => self.find_song(track, query),
+            Command::CloseFindSong => self.publish(|s, _| s.find_song = None),
+            Command::ReplaceTrack { track, with, youtube } => self.replace_track(track, with, youtube),
+            Command::UndoReplace(id) => self.undo_replace(id),
             other => return Some(other),
         }
         None
@@ -552,6 +575,13 @@ impl Worker {
             Msg::Cold(m) => self.cold_msg(m),
             Msg::Sync(m) => self.sync_msg(m),
             Msg::Disco(m) => self.disco_msg(m),
+            Msg::SongsFound { seq, service, result } => self.songs_found(seq, service, result),
+            Msg::ReplaceResolved {
+                track,
+                pick,
+                youtube_song,
+                youtube,
+            } => self.replace_resolved(track, *pick, youtube_song.map(|s| *s), youtube),
         }
     }
 

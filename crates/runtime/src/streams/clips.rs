@@ -36,7 +36,7 @@ use crate::Worker;
 /// are stored; more go to the repair.
 pub(crate) const CONVERT_NOW: usize = 5;
 /// Library cache key of what a liked video turned out to be.
-fn clip_key(video: &str) -> String {
+pub(crate) fn clip_key(video: &str) -> String {
     format!("yt_clip.{video}")
 }
 /// The cached answers.
@@ -79,6 +79,8 @@ impl Worker {
         let new: Vec<StreamTrack> = liked
             .iter()
             .filter(|t| t.kind == TrackKind::Video && !known.contains(&t.id.id))
+            // Unliked here a moment ago (replaced by its song by hand).
+            .filter(|t| self.streaming.replace.echo(&t.id) != Some(false))
             .cloned()
             .collect();
         if new.len() > CONVERT_NOW {
@@ -156,6 +158,11 @@ impl Worker {
                 if into != track {
                     self.queue.retarget(track, into);
                 }
+                // The clip's lyrics were for its audio: the song's are looked up.
+                if let Some(svc) = self.import.as_mut() {
+                    svc.lyrics_cache.remove(&track);
+                    svc.lyrics_cache.remove(&into);
+                }
                 self.wish_track_changed(into);
                 self.streaming.clips.dirty = true;
             }
@@ -168,7 +175,7 @@ impl Worker {
         let ttl = self.streaming.schedule.miss_ttl.as_millis() as i64;
         let now = nikgob_library::now_ms();
         match self.lib.cache_get(&clip_key(video)).ok().flatten() {
-            Some((_, v)) if v == IS_SONG => true,
+            Some((_, v)) if v == IS_SONG || v == super::replace::MANUAL => true,
             Some((at, _)) => now - at < ttl,
             None => false,
         }
@@ -199,7 +206,7 @@ impl Worker {
                 .liked_youtube_clips()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|c| !self.clip_settled(&c.video.id.id))
+                .filter(|c| !self.clip_settled(&c.video.id.id) && !self.replaced_by_hand(c.track))
                 .collect();
             if !clips.is_empty() {
                 log::info!("youtube: {} liked clips to look up songs for", clips.len());
@@ -265,5 +272,25 @@ impl Worker {
                 self.streaming.clips.next_at = Some(Instant::now() + gap + Duration::from_secs(30));
             }
         }
+    }
+}
+
+/// Library cache key: the misses of an older title cleaner were forgotten.
+const MISSES_RETRIED: &str = "yt_clip_retry.v2";
+
+impl Worker {
+    /// Once: the clips the repair found no song for are asked again with
+    /// the better title cleaner (`nikgob_core::clip_title`), at the
+    /// repair's usual pace.
+    pub(crate) fn retry_clip_misses_once(&mut self) {
+        if self.lib.cache_get(MISSES_RETRIED).ok().flatten().is_some() {
+            return;
+        }
+        match self.lib.cache_forget("yt_clip.", NO_SONG) {
+            Ok(0) => {}
+            Ok(n) => log::info!("youtube: {n} liked clips without a song are looked up again"),
+            Err(e) => log::warn!("forgetting the clip misses: {e}"),
+        }
+        let _ = self.lib.cache_put(MISSES_RETRIED, nikgob_library::now_ms(), "");
     }
 }

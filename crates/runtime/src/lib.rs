@@ -889,7 +889,11 @@ impl Worker {
             | Command::ClearStreamCache
             | Command::WindowState { .. }
             | Command::SetPlaylistSync { .. }
-            | Command::LoadDiscography(_)) => {
+            | Command::LoadDiscography(_)
+            | Command::FindSong { .. }
+            | Command::CloseFindSong
+            | Command::ReplaceTrack { .. }
+            | Command::UndoReplace(_)) => {
                 if let Some(c) = self.stream_command(c) {
                     log::warn!("unhandled {c:?}");
                 }

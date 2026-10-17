@@ -589,6 +589,33 @@ pub struct ShareView {
     pub text: String,
 }
 
+/// The «Найти песню…» dialog of a stream track ([`crate::Command::FindSong`]):
+/// songs of YouTube Music and Deezer (no clips) to replace the track with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FindSongView {
+    pub track: TrackId,
+    /// Opened for a clip («Найти песню…»), else for another version of a
+    /// stream track («Другая версия…»).
+    pub clip: bool,
+    /// The track as it is shown (a clip by its cleaned title).
+    pub title: String,
+    pub artist: String,
+    /// The track's own length, to compare the results with.
+    pub duration: Option<Duration>,
+    /// What the results are for.
+    pub query: String,
+    /// Bumped each time the dialog opens anew (the UI resets its field).
+    pub opened: u64,
+    pub loading: bool,
+    pub results: Vec<StreamTrackRow>,
+    /// Nothing could be asked (no connection, the services off).
+    pub error: Option<String>,
+    /// Why «И в YouTube Music» cannot be chosen now, if it cannot.
+    pub youtube_off: Option<String>,
+    /// A pick is being replaced (a Deezer song looks for its YouTube song).
+    pub busy: bool,
+}
+
 /// Text for the system clipboard. The app copies it when `id` changes (the
 /// runtime never touches the clipboard itself).
 #[derive(Clone, Debug, PartialEq, Eq)]

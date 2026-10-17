@@ -214,6 +214,7 @@ fn a_track_with_a_song_and_its_clip_plays_the_song() {
     lib.attach_stream_source(track, &find(&yt, "yt-gruppa-1")).unwrap();
     // Keep the repair away: this test is about playback.
     lib.cache_put("yt_clip.yt-video-kino", nikgob_library::now_ms(), "clip").unwrap();
+    lib.cache_put("yt_clip_retry.v2", nikgob_library::now_ms(), "").unwrap();
     let (rt, asked) = start(&lib, &yt, quick());
     rt.send(Command::PlayTracks {
         tracks: vec![track],
@@ -253,4 +254,23 @@ fn a_clip_without_its_song_plays_as_today() {
         }
     );
     wait_until("now playing says clip", || rt.state().player.current.as_ref().is_some_and(|t| t.clip));
+}
+
+#[test]
+fn the_misses_of_the_old_title_cleaner_are_asked_once_more() {
+    let lib = Library::open_in_memory().unwrap();
+    let yt = Arc::new(with_lonely_clip());
+    liked_before(&lib, &yt, &["yt-video-live"]);
+    let now = nikgob_library::now_ms();
+    lib.mark_clip(&find(&yt, "yt-video-live").id).unwrap();
+    // Found without a song yesterday, before the better cleaner.
+    lib.cache_put("yt_clip.yt-video-live", now - 86_400_000, "clip").unwrap();
+    let (rt, _) = start(&lib, &yt, quick());
+    wait_until("the lookup again", || yt.calls("song_for_video") == 1);
+    wait_until("its new verdict", || lib.cache_get("yt_clip.yt-video-live").unwrap().is_some_and(|(at, _)| at >= now));
+    drop(rt);
+    // Only once: the new miss stays a miss.
+    let (_rt, _) = start(&lib, &yt, quick());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(yt.calls("song_for_video"), 1);
 }
