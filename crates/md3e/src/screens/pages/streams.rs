@@ -604,15 +604,10 @@ fn playlist_page(
 ) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let mut nav = None;
+    // (Once followed, «✓ В библиотеке» below opens the library playlist.)
     header(ui, v, false, |ui| {
         overline(ui, &["ПЛЕЙЛИСТ", service_upper(id.service)]);
         ui.label(TypeRole::TitleMedium.style().rich(count_line(&v.subtitle, v.tracks.len(), v.total_duration), s.on_surface_variant));
-        if let Some(p) = v.playlist {
-            ui.add_space(8.0);
-            if ui.add(AssistChip::new("Открыть в библиотеке").icon(Icon::LibraryMusic).id_salt("st-pl-lib")).clicked() {
-                nav = Some(Route::Playlist(p));
-            }
-        }
     });
     ui.add_space(16.0);
     let remotes: Vec<RemoteId> = v.tracks.iter().map(|t| t.remote.clone()).collect();
