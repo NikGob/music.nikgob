@@ -1,7 +1,7 @@
 //! Stage 3 part B on the fake services: cold-start imports from export files
 //! (Spotify Extended Streaming History and Account data, Google Takeout
 //! YouTube Music; fixtures in `tests/fixtures/exports`) and from the API,
-//! their idempotency, playlist sync modes.
+//! their idempotency, playlist sync modes, artist discography.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use nikgob_core::indexer::BoxFuture;
 use nikgob_core::model::{
-    ArtistCredit, Codec, Source, SourceKind, Track, TrackId, WishlistOrigin,
+    Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track, TrackId, WishlistOrigin,
     WishlistStatus,
 };
 use nikgob_core::streaming::{
@@ -394,4 +394,40 @@ fn a_local_playlist_becomes_two_way_with_its_stream_tracks_only() {
     let remote: Vec<String> = now(spotify.playlist(&link.remote.id)).unwrap().tracks.into_iter().map(|t| t.id.id).collect();
     assert_eq!(remote, ["sp-gruppa-3", "sp-homogenic-1"], "the local file stays local");
     assert_eq!(lib.playlist_len(p.id).unwrap(), 3);
+}
+
+#[test]
+fn discography_shows_the_albums_the_library_lacks() {
+    let lib = Library::open_in_memory().unwrap();
+    // A library artist known only by name (a local file of "First Love").
+    let artist = lib.upsert_artist(&Artist::new("宇多田ヒカル")).unwrap();
+    let credit = ArtistCredit::single("宇多田ヒカル", Some(artist.id));
+    let mut release = Release::new("First Love", credit.clone());
+    release.year = Some(1999);
+    let release = lib.upsert_release(&release).unwrap();
+    let mut t = Track::new("Automatic", credit);
+    t.release_id = Some(release.id);
+    let t = lib.upsert_track(&t).unwrap();
+    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, "Music/a.flac", Codec::Flac)).unwrap();
+
+    let streams: Vec<Arc<dyn StreamService>> = vec![
+        Arc::new(FakeService::spotify().logged_out()),
+        Arc::new(FakeService::youtube().logged_out()),
+    ];
+    let rt = start(&lib, streams);
+    rt.send(Command::LoadArtist(artist.id));
+    wait_for(&rt, "the discography", |s| {
+        s.artist.as_ref().is_some_and(|a| !a.discography.loading && !a.discography.albums.is_empty())
+    });
+    let s = rt.state();
+    let d = &s.artist.as_ref().unwrap().discography;
+    let titles: Vec<&str> = d.albums.iter().map(|a| a.title.as_str()).collect();
+    assert_eq!(titles, ["道"], "First Love is in the library; YouTube's 道 is the same album");
+    assert_eq!(d.albums[0].remote.service, Service::Spotify);
+    drop(s);
+    // The match is remembered for both services, and the result cached.
+    let ids = lib.external_ids(nikgob_core::streaming::EntityKind::Artist, *artist.id.as_uuid()).unwrap();
+    assert!(ids.contains(&RemoteId::new(Service::Spotify, "sp-art-utada")), "{ids:?}");
+    assert!(ids.contains(&RemoteId::new(Service::Youtube, "yt-art-utada")), "{ids:?}");
+    assert!(lib.cache_get(&format!("discography.{}", artist.id)).unwrap().is_some());
 }

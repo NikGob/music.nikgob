@@ -1390,6 +1390,8 @@ impl Worker {
             s.artist = Some(res.artist_detail(&artist, &top, &releases, liked));
         });
         self.kick_photos(Some(id));
+        // "Нет в библиотеке": from the cache, or looked up once a day.
+        self.load_discography(id, false);
     }
 
     fn playlist_tracks(&mut self, id: PlaylistId) -> (Vec<TrackId>, String) {

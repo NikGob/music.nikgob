@@ -10,11 +10,12 @@
 //! it publishes and never waits on the network (docs/stage3.md §1).
 //!
 //! Part B: the cold-start imports from the API and from export files
-//! ([`cold`], [`export`]) and the sync of linked playlists ([`sync`]); the
-//! discography of library artists is answered by [`Worker::part_b_stub`].
+//! ([`cold`], [`export`]), the sync of linked playlists ([`sync`]) and the
+//! discography of library artists ([`discography`]).
 
 mod accounts;
 mod cold;
+mod discography;
 mod export;
 mod likes;
 mod pages;
@@ -80,6 +81,7 @@ pub(crate) enum Msg {
     },
     Cold(cold::ColdMsg),
     Sync(sync::SyncMsg),
+    Disco(discography::DiscoMsg),
 }
 
 /// The worker's streaming state.
@@ -109,6 +111,7 @@ pub(crate) struct Streams {
     odesli: Option<nikgob_metadata::Odesli>,
     cold: cold::ColdState,
     sync: sync::SyncState,
+    disco: discography::DiscoState,
 }
 
 impl Streams {
@@ -141,6 +144,7 @@ impl Streams {
             odesli: None,
             cold: cold::ColdState::default(),
             sync: sync::SyncState::default(),
+            disco: discography::DiscoState::default(),
         }
     }
 
@@ -274,24 +278,10 @@ impl Worker {
             Command::ImportFromService(service) => self.import_from_service(service),
             Command::ImportExportFiles(path) => self.import_export_files(path),
             Command::SetPlaylistSync { playlist, mode } => self.set_playlist_sync(playlist, mode),
-            c @ Command::LoadDiscography(_) => self.part_b_stub(&c),
+            Command::LoadDiscography(artist) => self.load_discography(artist, true),
             other => return Some(other),
         }
         None
-    }
-
-    /// The discography (part B) is not done yet: answered with "Скоро".
-    fn part_b_stub(&mut self, c: &Command) {
-        log::info!("not implemented yet: {c:?}");
-        if let Command::LoadDiscography(id) = c {
-            let id = *id;
-            self.publish(|s, _| {
-                if let Some(a) = s.artist.as_mut().filter(|a| a.card.id == id) {
-                    a.discography.loading = false;
-                }
-            });
-        }
-        self.toast("Скоро", None);
     }
 
     pub(crate) fn stream_msg(&mut self, m: Msg) {
@@ -315,6 +305,7 @@ impl Worker {
             } => self.shared(seq, target, result),
             Msg::Cold(m) => self.cold_msg(m),
             Msg::Sync(m) => self.sync_msg(m),
+            Msg::Disco(m) => self.disco_msg(m),
         }
     }
 
