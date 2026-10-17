@@ -180,12 +180,12 @@ impl Worker {
             self.publish(|s, _| s.search.streams.clear());
             return;
         }
-        // Spotify answers nothing without a login: it is not asked (the UI
-        // says «войди, чтобы искать и там» instead of an error).
+        // Spotify without a login answers «не вошёл» at once, without a
+        // request; the UI says «войди, чтобы искать и там» instead.
         let asked: Vec<Service> = Service::ALL
             .iter()
             .copied()
-            .filter(|&s| sources.service(s) && self.service(s).is_some_and(|svc| s != Service::Spotify || svc.account().is_logged_in()))
+            .filter(|&s| sources.service(s) && self.service(s).is_some())
             .collect();
         // Sections that stay keep what they showed until the new answer.
         let mut old = std::mem::take(&mut self.streaming.search.raw);

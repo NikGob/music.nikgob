@@ -546,22 +546,28 @@ impl Worker {
         self.refresh_stream_page();
     }
 
-    /// The like went away: items that did not start yet go too.
+    /// The like went away: items it made that did not start yet go too
+    /// («Скачать» without a like stays: it was asked for on its own).
     pub(crate) fn wish_drop_unstarted(&mut self, track: TrackId) {
         for i in self.lib.wishlist_for_track(track).unwrap_or_default() {
-            if matches!(
-                i.status,
-                WishlistStatus::New | WishlistStatus::Waiting | WishlistStatus::NoTorrent | WishlistStatus::Confirm
-            ) {
+            if i.origin != WishlistOrigin::Manual
+                && matches!(
+                    i.status,
+                    WishlistStatus::New | WishlistStatus::Waiting | WishlistStatus::NoTorrent | WishlistStatus::Confirm
+                )
+            {
                 let _ = self.lib.delete_wishlist_item(i.id);
                 self.streaming.wish.cands.remove(&i.id);
             }
         }
     }
 
+    /// The album's like went away: its album item goes too, unless it was
+    /// asked for with «Скачать».
     pub(crate) fn wish_drop_album(&mut self, release: ReleaseId) {
         for i in self.lib.wishlist_for_release(release).unwrap_or_default() {
             if i.scope == WishlistScope::Album
+                && i.origin != WishlistOrigin::Manual
                 && matches!(i.status, WishlistStatus::New | WishlistStatus::Waiting | WishlistStatus::NoTorrent | WishlistStatus::Confirm)
             {
                 let _ = self.lib.delete_wishlist_item(i.id);
