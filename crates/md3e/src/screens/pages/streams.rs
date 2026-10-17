@@ -8,13 +8,14 @@ use egui::{CornerRadius, Rect, Sense, Stroke, Ui, pos2, vec2};
 use nikgob_view::{
     Command, LikeTarget, ReleaseType, RemoteId, Route, Service, ShareTarget, Status, StreamAlbumCard,
     StreamArtistCard, StreamPage, StreamPageView, StreamPlaylistCard, StreamTrackRow, TrackKind, ViewState,
+    WishlistView,
 };
 
 use super::{PageState, widgets};
 use crate::{
     Icon, Theme, TypeRole,
     components::{
-        AssistChip, Button, ButtonRow, Equalizer, IconButton, Leading, ListItem, LoadingIndicator, MediaCard,
+        AssistChip, Button, ButtonRow, CoverStatus, Equalizer, IconButton, Leading, ListItem, LoadingIndicator, MediaCard,
         Member, Menu, MenuItem, Radii, Size, Style, badge, paint,
     },
     screens::common,
@@ -219,44 +220,90 @@ fn album_subtitle(a: &StreamAlbumCard) -> String {
     }
 }
 
-/// An album of a service as a card: opens its page, ▶ plays it, right
-/// click: Слушать · Перемешать · Скачать · Поделиться.
-pub fn album_card(ui: &mut Ui, a: &StreamAlbumCard, width: f32, row: &str, out: &mut Vec<Command>) -> Option<Route> {
+/// What the cover of a service's album card says: «в очереди» or a ring
+/// while its wishlist item is on its way (downloading: filled to the tracks
+/// already on disk), a check when every track has a file, else the
+/// [`AlbumHave`](nikgob_view::AlbumHave) label alone.
+pub fn album_status(a: &StreamAlbumCard, wishlist: &WishlistView) -> CoverStatus {
+    use nikgob_view::WishlistStatus as St;
+    let same = |x: &str, y: &str| x.trim().to_lowercase() == y.trim().to_lowercase();
+    let mine = |r: &&nikgob_view::WishlistRow| match (r.release, a.release) {
+        (Some(x), Some(y)) => x == y,
+        _ => r.album.as_deref().is_some_and(|t| same(t, &a.title)) && same(&r.artist, &a.artist),
+    };
+    let rows: Vec<_> = wishlist.items.iter().filter(mine).collect();
+    if rows.iter().any(|r| r.status == St::Downloading) {
+        let h = a.have;
+        return CoverStatus::Progress((h.total > 0 && h.local > 0).then(|| h.local as f32 / h.total as f32));
+    }
+    if rows.iter().any(|r| matches!(r.status, St::New | St::Searching | St::Confirm)) {
+        return CoverStatus::Queued;
+    }
+    if a.have.complete() { CoverStatus::Done } else { CoverStatus::None }
+}
+
+/// An album of a service as a card, like a library album: opens its page,
+/// ▶ plays it; on hover a small ⬇ (the album to «Хочу скачать») and ⋮;
+/// right click or ⋮: Слушать · Скачать · В Любимые · Поделиться · Открыть.
+/// The cover corner shows its download status ([`album_status`]).
+pub fn album_card(
+    ui: &mut Ui,
+    a: &StreamAlbumCard,
+    width: f32,
+    row: &str,
+    wishlist: &WishlistView,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    let status = album_status(a, wishlist);
+    let can_download = status == CoverStatus::None;
     let o = MediaCard::new(&a.title)
         .subtitle(album_subtitle(a))
         .cover_opt(a.cover_url.clone())
         .badge_opt(a.have.label())
+        .status(status)
+        .download_button(can_download.then_some("Скачать альбом"))
+        .menu_button(true)
         .width(width)
         .id_salt(("st-album", row, &a.remote))
         .show(ui);
     let cover = Rect::from_min_size(o.response.rect.min, vec2(width, width));
     service_badge(ui, cover, a.remote.service);
-    let menu = album_menu(&o.response, a, out);
+    if o.download_clicked {
+        out.push(Command::LikeStreamAlbum { album: a.remote.clone(), on: true });
+    }
+    let mut nav = None;
+    if let Some(m) = &o.menu {
+        nav = album_pick(album_menu(("st-album-more", m.id), a, can_download).align_right(true).attach(m), a, out);
+    }
+    nav = album_pick(album_menu(("st-album-menu", o.response.id), a, can_download).context_menu(&o.response), a, out)
+        .or(nav);
     if o.play_clicked {
         out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: false });
         None
     } else if o.card_clicked {
         Some(Route::Stream(StreamPage::Album(a.remote.clone())))
     } else {
-        menu
+        nav
     }
 }
 
-fn album_menu(resp: &egui::Response, a: &StreamAlbumCard, out: &mut Vec<Command>) -> Option<Route> {
-    let picked = Menu::new(("st-album-menu", resp.id))
+fn album_menu(key: impl egui::AsId, a: &StreamAlbumCard, can_download: bool) -> Menu {
+    Menu::new(key)
         .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
-        .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
-        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(a.artist_id.is_some()))
+        .item(MenuItem::new("Скачать").icon(Icon::Download).enabled(can_download))
+        .item(MenuItem::new("В Любимые").icon(Icon::Favorite).enabled(!a.have.complete()))
         .divider()
-        .item(MenuItem::new("Скачать альбом").icon(Icon::Download))
         .item(MenuItem::new("Поделиться").icon(Icon::Share))
-        .context_menu(resp);
+        .item(MenuItem::new("Открыть").icon(Icon::Album))
+}
+
+fn album_pick(picked: Option<usize>, a: &StreamAlbumCard, out: &mut Vec<Command>) -> Option<Route> {
     match picked? {
         0 => out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: false }),
-        1 => out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: true }),
-        2 => return a.artist_id.clone().map(|r| Route::Stream(StreamPage::Artist(r))),
-        3 => out.push(Command::LikeStreamAlbum { album: a.remote.clone(), on: true }),
-        4 => out.push(Command::Share(ShareTarget::StreamAlbum(a.remote.clone()))),
+        // A like of the album puts the whole album on the wishlist.
+        1 | 2 => out.push(Command::LikeStreamAlbum { album: a.remote.clone(), on: true }),
+        3 => out.push(Command::Share(ShareTarget::StreamAlbum(a.remote.clone()))),
+        4 => return Some(Route::Stream(StreamPage::Album(a.remote.clone()))),
         _ => {}
     }
     None
@@ -342,7 +389,7 @@ pub fn page(ui: &mut Ui, page: &StreamPage, state: &ViewState, pages: &mut PageS
         match page {
             StreamPage::Album(id) => album_page(ui, id, v, state, pages, out),
             StreamPage::Playlist(id) => playlist_page(ui, id, v, state, pages, out),
-            StreamPage::Artist(id) => artist_page(ui, id, v, out),
+            StreamPage::Artist(id) => artist_page(ui, id, v, &state.downloads.wishlist, out),
         }
     })
 }
@@ -567,7 +614,13 @@ fn playlist_page(
     track_rows(ui, "st-playlist", &v.tracks, false, &StreamFrom::Playlist(id.clone()), state, pages, out).or(nav)
 }
 
-fn artist_page(ui: &mut Ui, id: &RemoteId, v: &StreamPageView, out: &mut Vec<Command>) -> Option<Route> {
+fn artist_page(
+    ui: &mut Ui,
+    id: &RemoteId,
+    v: &StreamPageView,
+    wishlist: &WishlistView,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let mut nav = None;
     header(ui, v, true, |ui| {
@@ -625,7 +678,7 @@ fn artist_page(ui: &mut Ui, id: &RemoteId, v: &StreamPageView, out: &mut Vec<Com
             continue;
         }
         widgets::section_header(ui, title, false);
-        nav = widgets::grid(ui, &list, widgets::CARD_W, |ui, a, w| album_card(ui, a, w, title, out)).or(nav);
+        nav = widgets::grid(ui, &list, widgets::CARD_W, |ui, a, w| album_card(ui, a, w, title, wishlist, out)).or(nav);
         ui.add_space(widgets::SECTION_GAP);
     }
     if v.albums.is_empty() {

@@ -331,15 +331,21 @@ pub fn artist(
             });
             ui.add_space(widgets::SECTION_GAP);
         }
-        nav = discography(ui, &a.discography, out).or(nav);
+        nav = discography(ui, &a.discography, &state.downloads.wishlist, out).or(nav);
         nav
     })
 }
 
 /// «Нет в библиотеке»: the artist's albums in the services the library has
-/// no file of. They play from the stream; «Скачать» likes the album, which
-/// puts it on the wishlist. Hidden while there is nothing to show.
-fn discography(ui: &mut Ui, d: &nikgob_view::DiscographyView, out: &mut Vec<Command>) -> Option<Route> {
+/// no file of, as plain album cards. They play from the stream; ⬇ on hover
+/// (or «Скачать» in the menu) likes the album, which puts it on the
+/// wishlist. Hidden while there is nothing to show.
+fn discography(
+    ui: &mut Ui,
+    d: &nikgob_view::DiscographyView,
+    wishlist: &nikgob_view::WishlistView,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     if d.albums.is_empty() {
         if d.loading {
@@ -350,7 +356,7 @@ fn discography(ui: &mut Ui, d: &nikgob_view::DiscographyView, out: &mut Vec<Comm
     }
     widgets::section_header(ui, "Нет в библиотеке", false);
     ui.label(TypeRole::BodyMedium.style().rich_para(
-        "Есть в Spotify или YouTube Music, а у тебя нет. Играют из стрима; «Скачать» добавит альбом в «Хочу скачать».",
+        "Есть в Spotify или YouTube Music, а у тебя нет. Играют из стрима; скачать альбом можно с обложки или из меню по правому клику.",
         s.on_surface_variant,
     ));
     ui.add_space(8.0);
@@ -373,26 +379,7 @@ fn discography(ui: &mut Ui, d: &nikgob_view::DiscographyView, out: &mut Vec<Comm
             ui.add_space(4.0);
         }
         nav = widgets::grid(ui, &list, widgets::CARD_W, |ui, a, w| {
-            ui.vertical(|ui| {
-                ui.set_width(w);
-                ui.spacing_mut().item_spacing.y = 4.0;
-                let nav = super::streams::album_card(ui, a, w, "discography", out);
-                if ui
-                    .add(
-                        Button::new("Скачать")
-                            .icon(Icon::Download)
-                            .style(Style::Text)
-                            .size(Size::S)
-                            .id_salt(("disco-dl", &a.remote)),
-                    )
-                    .on_hover_text("Весь альбом — в Любимые и в «Хочу скачать»")
-                    .clicked()
-                {
-                    out.push(Command::LikeStreamAlbum { album: a.remote.clone(), on: true });
-                }
-                nav
-            })
-            .inner
+            super::streams::album_card(ui, a, w, "discography", wishlist, out)
         })
         .or(nav);
         ui.add_space(8.0);

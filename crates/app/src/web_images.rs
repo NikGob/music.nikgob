@@ -277,6 +277,12 @@ impl BytesLoader for WebImages {
             Some(Slot::Failed { .. }) | None => {}
         }
         let uri = uri.to_owned();
+        // The demo's fake catalog: a picture made up from the url.
+        if uri.starts_with("https://fake.invalid/") {
+            let bytes = fake_cover(&uri);
+            inner.ready(&mut s, uri, bytes.clone());
+            return Ok(BytesPoll::Ready { size: None, bytes: Bytes::Shared(bytes), mime: None });
+        }
         if inner.disk.is_some() {
             s.slots.insert(uri.clone(), Slot::Reading);
             drop(s);
@@ -350,6 +356,21 @@ impl BytesLoader for WebImages {
             .values()
             .any(|s| matches!(s, Slot::Reading | Slot::Queued { .. } | Slot::Fetching))
     }
+}
+
+/// A cover for a url of the demo's fake catalog (`https://fake.invalid/…`):
+/// a diagonal gradient between two colours taken from the url's hash.
+fn fake_cover(url: &str) -> Arc<[u8]> {
+    let h = blake3::hash(url.as_bytes());
+    let b = h.as_bytes();
+    let (a, c) = (image::Rgb([b[0], b[1], b[2]]), image::Rgb([b[3] / 2, b[4] / 2, b[5] / 2]));
+    let img = image::RgbImage::from_fn(300, 300, |x, y| {
+        let t = (x + y) as f32 / 598.0;
+        image::Rgb(std::array::from_fn(|i| (f32::from(a.0[i]) * (1.0 - t) + f32::from(c.0[i]) * t) as u8))
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    let _ = img.write_to(&mut out, image::ImageFormat::Png);
+    Arc::from(out.into_inner())
 }
 
 /// The url of a web cover for drawing at `tier` pixels (`None`: as large as

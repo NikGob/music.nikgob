@@ -5,6 +5,9 @@
 //! - `fake:discography` — the open library artist gets a «Нет в библиотеке»
 //!   section from the fake Spotify catalog.
 //! - `fake:wishlist` — a wishlist with every status.
+//! - `fake:album-status` — the first stream album cards on screen (the
+//!   discography, a service's artist page, search) are queued, downloading,
+//!   fully local and partly local, in that order.
 //! - `fake:buffering` — the player waits for a stream.
 //! - `fake:audio:youtube` / `fake:audio:spotify` — where the sound comes from.
 //! - `fake:link` — the open playlist follows a Spotify playlist.
@@ -21,6 +24,7 @@ use nikgob_view::{
 pub struct Fakes {
     discography: bool,
     wishlist: bool,
+    album_status: bool,
     buffering: bool,
     audio: Option<Service>,
     link: bool,
@@ -33,6 +37,7 @@ impl Fakes {
         match arg {
             "discography" => self.discography = true,
             "wishlist" => self.wishlist = true,
+            "album-status" => self.album_status = true,
             "buffering" => self.buffering = true,
             "audio:youtube" => self.audio = Some(Service::Youtube),
             "audio:spotify" => self.audio = Some(Service::Spotify),
@@ -44,7 +49,7 @@ impl Fakes {
     }
 
     pub fn any(&self) -> bool {
-        self.discography || self.wishlist || self.buffering || self.audio.is_some() || self.link || self.lyrics
+        self.discography || self.wishlist || self.album_status || self.buffering || self.audio.is_some() || self.link || self.lyrics
     }
 
     /// `state` with the fakes laid over it.
@@ -57,6 +62,19 @@ impl Fakes {
         }
         if self.wishlist {
             s.downloads.wishlist = wishlist();
+        }
+        if self.album_status {
+            let mut rows = Vec::new();
+            if let Some(a) = s.artist.as_mut() {
+                album_statuses(&mut a.discography.albums, &mut rows);
+            }
+            if let Some(p) = s.stream_page.as_mut() {
+                album_statuses(&mut p.albums, &mut rows);
+            }
+            for x in &mut s.search.streams {
+                album_statuses(&mut x.albums, &mut rows);
+            }
+            s.downloads.wishlist.items.extend(rows);
         }
         if self.buffering {
             s.player.status = Status::Buffering;
@@ -137,7 +155,16 @@ fn discography(artist: &str, library: &[nikgob_view::ReleaseCard]) -> Discograph
     let mine: Vec<_> = missing.iter().copied().filter(|a| a.artists.iter().any(|x| x.name == artist)).collect();
     // The fake catalog is small: other artists' albums stand in for a
     // discography the library already has.
-    let pick = if mine.is_empty() { missing } else { mine };
+    let mut pick = if mine.is_empty() { missing } else { mine };
+    // Too few for a grid: the albums the library has too stand in.
+    for a in &all {
+        if pick.len() >= 6 {
+            break;
+        }
+        if !pick.iter().any(|x| x.id == a.id) {
+            pick.push(a);
+        }
+    }
     let albums = pick
         .into_iter()
         .map(|a| StreamAlbumCard {
@@ -154,6 +181,27 @@ fn discography(artist: &str, library: &[nikgob_view::ReleaseCard]) -> Discograph
         })
         .collect();
     DiscographyView { loading: false, error: None, albums }
+}
+
+/// Queued, downloading (3 of 10 on disk), all on disk, 4 of 12 on disk.
+fn album_statuses(albums: &mut [StreamAlbumCard], rows: &mut Vec<WishlistRow>) {
+    use nikgob_view::AlbumHave;
+    let n = rows.len() as u128;
+    for (i, a) in albums.iter_mut().take(4).enumerate() {
+        match i {
+            0 | 1 => {
+                let st = if i == 0 { St::New } else { St::Downloading };
+                let mut r = row(1000 + n + i as u128, &a.title, &a.artist, &a.title, st);
+                r.scope = WishlistScope::Album;
+                rows.push(r);
+                if i == 1 {
+                    a.have = AlbumHave { local: 3, in_library: 10, total: 10 };
+                }
+            }
+            2 => a.have = AlbumHave { local: 9, in_library: 9, total: 9 },
+            _ => a.have = AlbumHave { local: 4, in_library: 4, total: 12 },
+        }
+    }
 }
 
 fn row(n: u128, title: &str, artist: &str, album: &str, status: St) -> WishlistRow {

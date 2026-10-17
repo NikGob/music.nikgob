@@ -487,7 +487,7 @@ fn stream_section(
                 widgets::section_header(ui, "Альбомы", false);
                 widgets::card_row(ui, &format!("sv-albums-{salt}"), |ui| {
                     for a in &x.albums {
-                        nav = streams::album_card(ui, a, widgets::CARD_W, salt, out).or(nav.take());
+                        nav = streams::album_card(ui, a, widgets::CARD_W, salt, &state.downloads.wishlist, out).or(nav.take());
                     }
                 });
                 ui.add_space(16.0);
