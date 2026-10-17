@@ -981,7 +981,7 @@ impl Md3eUi {
         });
     }
 
-    /// Opens the personal-app fold and the cookies form of «Источники»
+    /// Opens the cookies form of «Источники»
     /// (scripted screenshots).
     pub fn unfold_sources(&mut self) {
         self.pages.unfold_sources();
