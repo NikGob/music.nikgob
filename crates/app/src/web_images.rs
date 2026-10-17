@@ -115,7 +115,7 @@ impl WebImages {
         };
         let disk = match DiskCache::open(&cache_dir, crate::cover_cache::DEFAULT_LIMIT) {
             Ok(d) => {
-                log::info!("web covers: disk cache {} ({} MB)", d.dir().display(), d.size() >> 20);
+                log::info!("web covers: disk cache {} ({} KB)", d.dir().display(), d.size() >> 10);
                 Some(d)
             }
             Err(e) => {
@@ -239,11 +239,11 @@ impl Inner {
             || s.slots.values().any(|x| matches!(x, Slot::Reading | Slot::Queued { .. } | Slot::Fetching));
         if !busy && now != c.logged {
             log::info!(
-                "web covers: {} from disk, {} downloaded, {} failed so far (disk cache {} MB)",
+                "web covers: {} from disk, {} downloaded, {} failed so far (disk cache {} KB)",
                 c.disk,
                 c.net,
                 c.failed,
-                self.disk.as_ref().map_or(0, |d| d.size() >> 20)
+                self.disk.as_ref().map_or(0, |d| d.size() >> 10)
             );
             s.counts.logged = now;
         }
