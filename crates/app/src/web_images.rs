@@ -376,9 +376,13 @@ fn fake_cover(url: &str) -> Arc<[u8]> {
 /// The url of a web cover for drawing at `tier` pixels (`None`: as large as
 /// it gets): Google-hosted covers (YouTube Music: `lh3.googleusercontent.com`,
 /// `yt3.ggpht.com`, `…=w544-h544-l90-rj`) at 226 px for rows and cards, 544
-/// for a medium cover, 1200 for Now Playing and page headers. Other urls
-/// (Spotify, video thumbnails) cannot be resized: `None`, drawn as they are.
+/// for a medium cover, 1200 for Now Playing and page headers; Deezer's
+/// (`…dzcdn.net/…/1000x1000-…`) at 250, 500 and 1000. Other urls (Spotify,
+/// video thumbnails) cannot be resized: `None`, drawn as they are.
 pub fn sized_url(url: &str, tier: Option<u32>) -> Option<String> {
+    if let Some(sized) = deezer_sized(url, tier) {
+        return (sized != url).then_some(sized);
+    }
     let px = match tier {
         Some(t) if t <= 256 => 226,
         Some(t) if t <= 544 => 544,
@@ -408,9 +412,50 @@ pub fn sized_url(url: &str, tier: Option<u32>) -> Option<String> {
     (out != url).then_some(out)
 }
 
+/// A Deezer cover (`https://cdn-images.dzcdn.net/images/cover/{md5}/1000x1000-000000-80-0-0.jpg`,
+/// also `e-cdns-images.dzcdn.net`, artists and playlists alike) at the size
+/// it is drawn at: 250 px for rows and cards, 500 medium, 1000 for Now
+/// Playing and page headers. `None`: not a Deezer image url.
+fn deezer_sized(url: &str, tier: Option<u32>) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let host = rest.split('/').next()?;
+    if !host.ends_with(".dzcdn.net") {
+        return None;
+    }
+    let (base, file) = url.rsplit_once('/')?;
+    let (size, tail) = file.split_once('-')?;
+    let (w, h) = size.split_once('x')?;
+    if w.is_empty() || w != h || !w.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let px = match tier {
+        Some(t) if t <= 256 => 250,
+        Some(t) if t <= 544 => 500,
+        _ => 1000,
+    };
+    Some(format!("{base}/{px}x{px}-{tail}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deezer_covers_are_asked_at_the_size_they_are_drawn_at() {
+        let u = "https://cdn-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/1000x1000-000000-80-0-0.jpg";
+        assert_eq!(
+            sized_url(u, Some(128)).as_deref(),
+            Some("https://cdn-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/250x250-000000-80-0-0.jpg")
+        );
+        assert_eq!(
+            sized_url(u, Some(400)).as_deref(),
+            Some("https://cdn-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/500x500-000000-80-0-0.jpg")
+        );
+        assert_eq!(sized_url(u, None), None, "already 1000");
+        let artist = "https://e-cdns-images.dzcdn.net/images/artist/f2bc007e9133c946ac3c3907ddc5d2ea/500x500-000000-80-0-0.jpg";
+        assert!(sized_url(artist, Some(200)).is_some_and(|s| s.contains("/250x250-000000-80-0-0.jpg")));
+        assert_eq!(sized_url("https://cdn-images.dzcdn.net/images/misc/logo.png", Some(100)), None);
+    }
 
     #[test]
     fn youtube_covers_are_asked_at_the_size_they_are_drawn_at() {

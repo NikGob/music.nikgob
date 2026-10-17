@@ -102,6 +102,7 @@ pub enum SettingId {
     SpotifyPersonal,
     YouTubeEnabled,
     YouTubeCookies,
+    DeezerEnabled,
     LikeDownload,
     PushLikes,
     AutoDownloads,
@@ -179,7 +180,7 @@ impl SettingId {
                 TAB_APPEARANCE
             }
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
-            Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled
+            Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
             | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | PlaylistSync | ImportSpotify
             | ImportYouTube | ImportFiles | StreamCache | Prowlarr | NoSeed | SeedLimit | SeedDays | SeedRatio
             | DownloadLimit | UploadLimit => TAB_SOURCES,
@@ -266,6 +267,7 @@ impl SettingId {
             SpotifyPersonal => "Ключ — это Client ID своего приложения на developer.spotify.com, со своей квотой запросов. Spotify пускает такое приложение, только пока у владельца Premium. Заводится один раз; хранится в settings.toml.",
             YouTube => "Вход нужен только для лайков, плейлистов и истории; поиск и звук работают и без него. «Войти через Google» открывает окно со страницей входа Google: пароль вводится только там, приложение его не видит и берёт лишь cookies сессии. Окно запоминает вход, так что повторный вход — в один клик; «Выйти» забывает и его. Если Google не пускает во встроенном окне — «Вставить cookies…».",
             YouTubeEnabled => "Выключи — YouTube Music не используется: ни в поиске, ни как запасной звук для треков Spotify.",
+            DeezerEnabled => "Deezer — открытый каталог: поиск, альбомы и дискографии исполнителей без аккаунта и без ключа. Своего звука у него нет: трек Deezer играет с YouTube Music (по ISRC, иначе по исполнителю, названию и длительности). Лайк трека Deezer остаётся здесь — в Deezer ничего не уходит. Выключи — поиск и дискографии обойдутся YouTube Music и Spotify.",
             YouTubeCookies => "Запасной вход, если окно «Войти через Google» не помогло: выгрузи cookies.txt для music.youtube.com расширением браузера, пока ты вошёл, и вставь сюда. Обычно хватает «Войти через Google».",
             LikeDownload => "Что скачивать, когда лайкаешь трек из стрима: только его (вырезается из раздачи альбома), сразу весь альбом или ничего — тогда лайк остаётся только лайком. Лайк альбома качает весь альбом. «Скачать» у трека или альбома качает всегда, без лайка.",
             PushLikes => "Лайк здесь ставится и в Spotify / YouTube Music, а снятый лайк снимается и там. Только для треков, которые есть в сервисе.",

@@ -20,6 +20,7 @@ nikgob-library = { path = "../library" }
 nikgob-audio = { path = "../audio" }
 nikgob-spotify = { path = "../spotify" }
 nikgob-youtube = { path = "../youtube" }
+nikgob-deezer = { path = "../deezer" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 crossbeam-channel = "0.5"

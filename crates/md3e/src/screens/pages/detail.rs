@@ -746,7 +746,7 @@ pub fn playlist(
             );
             return None;
         }
-        let opts = TrackListOpts { playlist: Some(id), reorder: !liked };
+        let opts = TrackListOpts { playlist: Some(id), reorder: !liked, mark_local: false };
         widgets::track_list_ext(ui, "playlist", &p.tracks, Lead::Cover, &PlayFrom::Playlist(id), opts, state, pages, out)
     });
     if !liked {

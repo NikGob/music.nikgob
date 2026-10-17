@@ -972,6 +972,7 @@ impl Md3eUi {
         self.pages.open_setting(match row {
             "sources" | "spotify" => S::SpotifyEnabled,
             "youtube" => S::YouTubeEnabled,
+            "deezer" => S::DeezerEnabled,
             "personal" => S::SpotifyPersonal,
             "likes" => S::LikeDownload,
             "import" => S::ImportFiles,

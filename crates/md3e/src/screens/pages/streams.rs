@@ -23,7 +23,7 @@ use crate::{
     tokens::shape,
 };
 
-/// "Spotify", "YouTube Music" as a page's overline says it.
+/// "Spotify", "YouTube Music", "Deezer" as a page's overline says it.
 pub fn service_upper(service: Service) -> &'static str {
     match service {
         Service::Spotify => "SPOTIFY",
@@ -46,6 +46,13 @@ pub enum StreamFrom {
     Rows(String),
     Album(RemoteId),
     Playlist(RemoteId),
+    /// The merged «Всё» search: a queue of library and stream tracks,
+    /// started at `at` (the row's own place in it).
+    Search {
+        picks: Vec<nikgob_view::SearchPick>,
+        at: usize,
+        context: String,
+    },
 }
 
 fn play_from(from: &StreamFrom, rows: &[StreamTrackRow], i: usize) -> Command {
@@ -59,6 +66,11 @@ fn play_from(from: &StreamFrom, rows: &[StreamTrackRow], i: usize) -> Command {
         StreamFrom::Playlist(id) => {
             Command::PlayStreamPlaylist { id: id.clone(), start: Some(rows[i].remote.clone()), shuffle: false }
         }
+        StreamFrom::Search { picks, at, context } => Command::PlaySearch {
+            tracks: picks.clone(),
+            start: *at,
+            context: context.clone(),
+        },
     }
 }
 

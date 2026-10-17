@@ -2,11 +2,13 @@
 //!
 //! Normal start: the real Spotify and YouTube Music services, each with its
 //! own folder in the app's data dir (`spotify/`, `youtube/`) and its secrets
-//! from settings.toml. Both are always registered; whether one is used is
-//! the runtime's call (`Prefs::spotify_enabled` / `youtube_enabled`), so
+//! from settings.toml, and the Deezer catalogue (no folder, no secrets).
+//! All are always registered; whether one is used is the runtime's call
+//! (`Prefs::spotify_enabled` / `youtube_enabled` / `deezer_enabled`), so
 //! switching a service on in the settings works without a restart.
 //!
-//! Demo (`NIKGOB_DEMO=1`): the deterministic fakes. `NIKGOB_DEMO_ACCOUNTS`
+//! Demo (`NIKGOB_DEMO=1`): the deterministic fakes (Deezer's is its fixed
+//! catalogue without an account). `NIKGOB_DEMO_ACCOUNTS`
 //! sets their account per service for screenshots, e.g.
 //! `spotify=prompt,youtube=out` (`in`, `out` = not connected, `free` =
 //! logged in without sound, `prompt` = a login waiting for the browser —
@@ -46,6 +48,10 @@ pub fn real(data_dir: &Path, secrets: &StreamingSettings) -> Services {
         }
         Err(e) => log::error!("YouTube Music did not start: {e}"),
     }
+    match nikgob_deezer::Deezer::new(nikgob_deezer::DeezerConfig::default()) {
+        Ok(dz) => out.push(dz),
+        Err(e) => log::error!("Deezer did not start: {e}"),
+    }
     out
 }
 
@@ -64,7 +70,7 @@ pub fn demo(demo_dir: &Path, secrets: &StreamingSettings) -> Services {
             .map(|(_, v)| v.trim().to_ascii_lowercase())
             .unwrap_or_else(|| "in".to_owned())
     };
-    [Service::Spotify, Service::Youtube]
+    [Service::Spotify, Service::Youtube, Service::Deezer]
         .into_iter()
         .map(|s| fake(s, &mode(s.as_str())))
         .collect()
@@ -123,6 +129,12 @@ struct Shown {
 impl StreamService for Shown {
     fn service(&self) -> Service {
         self.inner.service()
+    }
+    fn catalogue_only(&self) -> bool {
+        self.inner.catalogue_only()
+    }
+    fn search_top(&self, query: &str, part: nikgob_core::streaming::SearchParts) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
+        self.inner.search_top(query, part)
     }
     fn account(&self) -> Account {
         self.account.clone()

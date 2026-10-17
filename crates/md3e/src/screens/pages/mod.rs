@@ -735,7 +735,7 @@ pub fn search_bar(
     let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("search-bar"));
     let before = query.clone();
     let o = SearchBar::new("main-search")
-        .placeholder("Поиск: библиотека, Spotify, YouTube…")
+        .placeholder("Поиск: библиотека, Deezer, YouTube Music…")
         .width(rect.width())
         .shortcut(true)
         .show(&mut cui, query);

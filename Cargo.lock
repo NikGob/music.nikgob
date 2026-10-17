@@ -4655,6 +4655,7 @@ dependencies = [
  "log",
  "nikgob-audio",
  "nikgob-core",
+ "nikgob-deezer",
  "nikgob-library",
  "nikgob-md3e",
  "nikgob-runtime",

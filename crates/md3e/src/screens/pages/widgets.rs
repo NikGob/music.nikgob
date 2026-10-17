@@ -473,6 +473,13 @@ pub enum PlayFrom {
     Release(nikgob_view::ReleaseId),
     Playlist(nikgob_view::PlaylistId),
     Tracks(Vec<nikgob_view::TrackId>, String),
+    /// The merged «Всё» search: a queue of library and stream tracks,
+    /// started at `at` (the row's own place in it).
+    Search {
+        picks: Vec<nikgob_view::SearchPick>,
+        at: usize,
+        context: String,
+    },
 }
 
 /// How the leading column looks.
@@ -489,6 +496,9 @@ pub struct TrackListOpts {
     pub playlist: Option<PlaylistId>,
     /// Rows can be reordered by their drag handle (user playlists).
     pub reorder: bool,
+    /// A track with a file says «у тебя» (among the services' rows of the
+    /// merged search).
+    pub mark_local: bool,
 }
 
 /// Tracks of different artists on one release (a compilation).
@@ -641,6 +651,9 @@ fn track_row(
         && let Some(a) = &t.album
     {
         supporting = format!("{supporting} · {a}");
+    }
+    if opts.mark_local && t.has_local {
+        supporting = format!("{supporting} · у тебя");
     }
     let dur = t.duration.map(common::fmt_time).unwrap_or_default();
     // No file: it streams (a ⬇ to «Хочу скачать», or how far it is there),
@@ -931,6 +944,11 @@ fn play_from(from: &PlayFrom, tracks: &[TrackRow], i: usize) -> Command {
             tracks: ids.clone(),
             start: ids.iter().position(|t| *t == tracks[i].id).unwrap_or(i),
             context: ctx.clone(),
+        },
+        PlayFrom::Search { picks, at, context } => Command::PlaySearch {
+            tracks: picks.clone(),
+            start: *at,
+            context: context.clone(),
         },
     }
 }

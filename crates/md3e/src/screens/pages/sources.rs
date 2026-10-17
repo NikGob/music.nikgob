@@ -1,5 +1,5 @@
 //! Настройки → «Источники» (docs/stage3.md §0 "Где настройки", §3.1, §3.6):
-//! Spotify and YouTube Music (switch, account, sound, import of playlists
+//! Spotify, YouTube Music and the Deezer catalogue (switch, account, sound, import of playlists
 //! and history once signed in; Spotify's steps to connect — its own key
 //! and the sign-in, Premium only —; cookies), what a like
 //! downloads, playlist sync, the export files, the stream cache, and the
@@ -26,11 +26,12 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     let s = Theme::get(ui.ctx()).scheme;
     ui.add_space(12.0);
     ui.label(TypeRole::BodyMedium.style().rich_para(
-        "Бесплатно работают YouTube Music и торренты; Spotify — с Premium.",
+        "Бесплатно работают YouTube Music, Deezer и торренты; Spotify — с Premium.",
         s.on_surface_variant,
     ));
     spotify(ui, state, p, pages, out);
     youtube(ui, state, p, pages, out);
+    deezer(ui, state, p);
 
     group(ui, "Лайки и загрузки");
     let scope_hint = if p.like_downloads {
@@ -402,6 +403,26 @@ fn login_error(ui: &mut Ui, a: &AccountView) {
             ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich_para(t, color)).wrap());
         });
         ui.add_space(8.0);
+    }
+}
+
+/// Deezer: a catalogue without an account; one switch (and the quiet
+/// line of a pause).
+fn deezer(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
+    group(ui, "Deezer");
+    row(
+        ui,
+        Id::DeezerEnabled,
+        "Использовать Deezer",
+        Some("Каталог для поиска, альбомов и дискографий — без аккаунта; звук берётся с YouTube Music"),
+        |ui| {
+            ui.add(Switch::new(&mut p.deezer_enabled).id_salt("set-dz-on"));
+        },
+    );
+    if p.deezer_enabled
+        && let Some(a) = state.account(Service::Deezer)
+    {
+        paused_line(ui, a);
     }
 }
 
