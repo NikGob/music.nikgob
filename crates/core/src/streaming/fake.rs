@@ -272,6 +272,13 @@ struct State {
     audio_secs: f32,
     /// Calls per trait method, for request-counting tests.
     calls: HashMap<&'static str, usize>,
+    /// The next calls of a method that answer [`StreamError::RateLimited`]:
+    /// how many are left and the `retry_after` they carry.
+    /// The third field: a pause the service keeps itself, set from the
+    /// moment such an answer is given (see [`FakeService::rate_limit_next_paused`]).
+    limited: HashMap<&'static str, (usize, Option<Duration>, Option<Duration>)>,
+    /// What [`StreamService::paused_until`] answers.
+    paused_until: Option<std::time::SystemTime>,
 }
 
 /// Deterministic fake of a streaming service (feature `fake`).
@@ -329,6 +336,8 @@ impl FakeService {
                 opened: Vec::new(),
                 audio_secs: 2.0,
                 calls: HashMap::new(),
+                limited: HashMap::new(),
+                paused_until: None,
             }),
         }
     }
@@ -467,8 +476,48 @@ impl FakeService {
         self.lock().calls.clear();
     }
 
+    /// The next `n` calls of the trait method `name` (`"search"`,
+    /// `"liked"`, `"liked_head"`, `"my_playlists"`, `"playlist"`,
+    /// `"playlist_version"`, `"search_kind"`) answer
+    /// [`StreamError::RateLimited`] with `retry_after` (they are still
+    /// counted as calls). `n = 0` lifts it.
+    pub fn rate_limit_next(&self, name: &'static str, n: usize, retry_after: Option<Duration>) {
+        let mut st = self.lock();
+        if n == 0 {
+            st.limited.remove(name);
+        } else {
+            st.limited.insert(name, (n, retry_after, None));
+        }
+    }
+
+    /// Like [`Self::rate_limit_next`] without a `retry_after`, the way
+    /// YouTube Music answers: each such answer pauses the service for
+    /// `pause` from then on ([`StreamService::paused_until`]).
+    pub fn rate_limit_next_paused(&self, name: &'static str, n: usize, pause: Duration) {
+        self.lock().limited.insert(name, (n, None, Some(pause)));
+    }
+
     fn count(&self, name: &'static str) {
         *self.lock().calls.entry(name).or_default() += 1;
+    }
+
+    /// Counts the call; a rate limit set by [`Self::rate_limit_next`]
+    /// answers instead.
+    fn gate(&self, name: &'static str) -> Result<(), StreamError> {
+        self.count(name);
+        let mut st = self.lock();
+        let Some((left, retry_after, pause)) = st.limited.get_mut(name) else {
+            return Ok(());
+        };
+        let (retry_after, pause) = (*retry_after, *pause);
+        *left -= 1;
+        if *left == 0 {
+            st.limited.remove(name);
+        }
+        if let Some(p) = pause {
+            st.paused_until = Some(std::time::SystemTime::now() + p);
+        }
+        Err(StreamError::RateLimited { retry_after })
     }
 
     fn need_login(&self) -> Result<(), StreamError> {
@@ -668,8 +717,15 @@ impl StreamService for FakeService {
         self.lock().account = Account::LoggedOut;
     }
 
+    fn paused_until(&self) -> Option<std::time::SystemTime> {
+        let st = self.lock();
+        st.paused_until.filter(|t| *t > std::time::SystemTime::now())
+    }
+
     fn search(&self, query: &str) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
-        self.count("search");
+        if let Err(e) = self.gate("search") {
+            return ready(Err(e));
+        }
         ready(Ok(self.search_now(query)))
     }
 
@@ -678,7 +734,9 @@ impl StreamService for FakeService {
         query: &str,
         kind: SearchKind,
     ) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
-        self.count("search_kind");
+        if let Err(e) = self.gate("search_kind") {
+            return ready(Err(e));
+        }
         if self.service == Service::Spotify && kind == SearchKind::Videos {
             return ready(Ok(StreamSearch::default()));
         }
@@ -720,7 +778,9 @@ impl StreamService for FakeService {
     }
 
     fn playlist(&self, id: &str) -> BoxFuture<'_, Result<StreamPlaylist, StreamError>> {
-        self.count("playlist");
+        if let Err(e) = self.gate("playlist") {
+            return ready(Err(e));
+        }
         ready(
             self.lock()
                 .playlists
@@ -732,7 +792,9 @@ impl StreamService for FakeService {
     }
 
     fn playlist_version(&self, id: &str) -> BoxFuture<'_, Result<Option<String>, StreamError>> {
-        self.count("playlist_version");
+        if let Err(e) = self.gate("playlist_version") {
+            return ready(Err(e));
+        }
         ready(
             self.lock()
                 .playlists
@@ -755,7 +817,9 @@ impl StreamService for FakeService {
     }
 
     fn liked(&self) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
-        self.count("liked");
+        if let Err(e) = self.gate("liked") {
+            return ready(Err(e));
+        }
         let result = self.need_login().map(|()| {
             self.liked_ids()
                 .iter()
@@ -766,7 +830,9 @@ impl StreamService for FakeService {
     }
 
     fn liked_head(&self) -> BoxFuture<'_, Result<LikedHead, StreamError>> {
-        self.count("liked_head");
+        if let Err(e) = self.gate("liked_head") {
+            return ready(Err(e));
+        }
         let result = self.need_login().map(|()| {
             let ids = self.liked_ids();
             LikedHead {
@@ -793,7 +859,9 @@ impl StreamService for FakeService {
     }
 
     fn my_playlists(&self) -> BoxFuture<'_, Result<Vec<StreamPlaylist>, StreamError>> {
-        self.count("my_playlists");
+        if let Err(e) = self.gate("my_playlists") {
+            return ready(Err(e));
+        }
         let result = self.need_login().map(|()| {
             self.lock()
                 .playlists
