@@ -181,6 +181,8 @@ pub(crate) struct Streams {
     like_queue: likes::LikeQueue,
     pub(crate) wish: wishlist::WishState,
     share_seq: u64,
+    /// The «Ищу ссылку…» toast of the share that runs, replaced by its end.
+    share_toast: Option<u64>,
     clipboard_id: u64,
     odesli: Option<nikgob_metadata::Odesli>,
     cold: cold::ColdState,
@@ -221,6 +223,7 @@ impl Streams {
             like_queue: likes::LikeQueue::default(),
             wish: wishlist::WishState::default(),
             share_seq: 0,
+            share_toast: None,
             clipboard_id: 0,
             odesli: None,
             cold: cold::ColdState::default(),

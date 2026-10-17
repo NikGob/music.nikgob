@@ -12,7 +12,7 @@ mod streams;
 mod wishlist;
 pub mod widgets;
 
-pub use search::search_results;
+pub use search::{restore_search_scroll, search_results, search_scroll};
 pub use settings_help::SettingId;
 
 use egui::{Context, Rect, Response, Ui, UiBuilder, vec2};
@@ -564,7 +564,10 @@ impl PageState {
                 .as_ref()
                 .filter(|p| p.card.id == id)
                 .and_then(|p| p.sync.as_ref())
-                .map(|l| l.remote.service.display_name());
+                .map(|l| l.remote.service)
+                // From a card's menu: what the card knows.
+                .or_else(|| state.library.playlists.iter().find(|p| p.id == id).and_then(|p| p.service))
+                .map(|s| s.display_name());
             let text = match service {
                 Some(s) => format!("Треки останутся в библиотеке, а плейлист в {s} — как был."),
                 None => "Треки останутся в библиотеке.".to_owned(),

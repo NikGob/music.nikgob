@@ -1083,10 +1083,10 @@ impl Worker {
             v::WishlistAttach::Files(paths) => {
                 let force = paths.len() == 1 && item.scope == WishlistScope::Track && tracks.len() == 1;
                 let targets = ImportTargets { tracks, force };
-                self.import_for(paths, "Импорт для Wishlist".into(), SourceOrigin::Inbox, targets)
+                self.import_for(paths, "Импорт для «Хочу скачать»".into(), SourceOrigin::Inbox, targets)
             }
             v::WishlistAttach::Folder(dir) => {
-                self.import_for(vec![dir], "Импорт для Wishlist".into(), SourceOrigin::Inbox, ImportTargets::new(tracks))
+                self.import_for(vec![dir], "Импорт для «Хочу скачать»".into(), SourceOrigin::Inbox, ImportTargets::new(tracks))
             }
             v::WishlistAttach::TorrentFile(path) => match std::fs::read(&path) {
                 Ok(bytes) => {

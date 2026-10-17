@@ -67,9 +67,10 @@ pub struct Md3eUi {
     content_rect: Rect,
     search: String,
     search_focus: bool,
-    /// The search text of pages left from the search results, by the stack
-    /// they were on: going back there shows the results again.
-    search_marks: Vec<(Vec<Route>, String)>,
+    /// The search text (and how far its results were scrolled) of pages
+    /// left from the search results, by the stack they were on: going back
+    /// there shows the results again, where they were.
+    search_marks: Vec<(Vec<Route>, String, f32)>,
     /// The query last sent to the runtime, and when the text last changed:
     /// it is sent once typing pauses for [`SEARCH_DEBOUNCE`].
     search_sent: String,
@@ -132,7 +133,7 @@ impl Md3eUi {
         if self.route() == &route {
             return;
         }
-        self.mark_search(self.stack.clone());
+        self.mark_search(ctx, self.stack.clone());
         self.remember();
         let top_level = matches!(
             route,
@@ -158,26 +159,27 @@ impl Md3eUi {
     }
 
     /// Remembers the search on screen before going to a page from it.
-    fn mark_search(&mut self, stack: Vec<Route>) {
+    fn mark_search(&mut self, ctx: &Context, stack: Vec<Route>) {
         const KEEP: usize = 20;
         if self.search.trim().is_empty() {
             return;
         }
-        self.search_marks.retain(|(s, _)| *s != stack);
-        self.search_marks.push((stack, self.search.clone()));
+        self.search_marks.retain(|(s, ..)| *s != stack);
+        self.search_marks.push((stack, self.search.clone(), pages::search_scroll(ctx)));
         if self.search_marks.len() > KEEP {
             self.search_marks.remove(0);
         }
     }
 
     /// Back on a stack that was left from the search: its results again
-    /// (the services answer from their cache).
-    fn restore_search(&mut self) {
-        if let Some(i) = self.search_marks.iter().rposition(|(s, _)| *s == self.stack) {
-            let (_, text) = self.search_marks.remove(i);
+    /// (the services answer from their cache), scrolled where they were.
+    fn restore_search(&mut self, ctx: &Context) {
+        if let Some(i) = self.search_marks.iter().rposition(|(s, ..)| *s == self.stack) {
+            let (_, text, scroll) = self.search_marks.remove(i);
             self.search = text;
             self.search_sent.clear();
             self.search_edited = None;
+            pages::restore_search_scroll(ctx, scroll);
         } else {
             self.search.clear();
         }
@@ -197,7 +199,7 @@ impl Md3eUi {
         self.stack.pop();
         self.nav_dir = -1.0;
         load_for(self.route(), out);
-        self.restore_search();
+        self.restore_search(ctx);
         self.restart_nav(ctx);
         true
     }
@@ -236,7 +238,7 @@ impl Md3eUi {
         }
         self.nav_dir = dir;
         load_for(self.route(), out);
-        self.restore_search();
+        self.restore_search(ctx);
         self.restart_nav(ctx);
     }
 
@@ -1048,8 +1050,7 @@ impl Md3eUi {
     /// destination was picked.
     fn rail(&mut self, ui: &mut Ui, rail_rect: Rect, expansion: f32, state: &ViewState, out: &mut Vec<Command>) -> bool {
         let ctx = ui.ctx().clone();
-        let route = self.route().clone();
-        let selected = match route {
+        let of = |r: &Route| match r {
             Route::Home => Some(0),
             Route::Library(_) | Route::Release(_) | Route::Artist(_) | Route::Playlist(_) => {
                 Some(1)
@@ -1057,6 +1058,15 @@ impl Md3eUi {
             Route::Downloads(_) => Some(2),
             Route::Settings | Route::Stream(_) => None,
         };
+        // A service's page belongs where it was opened from (the search
+        // over Главная, an artist of the library…).
+        let selected = self
+            .stack
+            .iter()
+            .rev()
+            .find(|r| !matches!(r, Route::Stream(_)))
+            .filter(|_| matches!(self.route(), Route::Stream(_)))
+            .map_or_else(|| of(self.route()), of);
         let pending = state.downloads.confirm.len() as u32;
         let items = [
             RailItem { icon: Icon::Home, label: "Главная", badge: None },
@@ -1074,7 +1084,7 @@ impl Md3eUi {
                     items: &items,
                     bottom: &bottom,
                     selected,
-                    bottom_selected: (route == Route::Settings).then_some(0),
+                    bottom_selected: (*self.route() == Route::Settings).then_some(0),
                 }
                 .show(ui)
             })

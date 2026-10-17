@@ -71,6 +71,21 @@ pub fn set_filter(ctx: &egui::Context, f: Filter) {
     ctx.data_mut(|d| d.insert_temp(Id::new(FILTER_KEY), f));
 }
 
+/// How far the results are scrolled (kept every frame), and where to put
+/// them once they are back (going back to the search from a page).
+const SCROLL_KEY: &str = "md3e-search-scroll";
+const RESTORE_KEY: &str = "md3e-search-scroll-restore";
+
+/// How far the search results are scrolled now.
+pub fn search_scroll(ctx: &egui::Context) -> f32 {
+    ctx.data(|d| d.get_temp(Id::new(SCROLL_KEY))).unwrap_or(0.0)
+}
+
+/// Scrolls the results to `y` once they are there again.
+pub fn restore_search_scroll(ctx: &egui::Context, y: f32) {
+    ctx.data_mut(|d| d.insert_temp(Id::new(RESTORE_KEY), y));
+}
+
 const HEADER: f32 = 56.0;
 /// Tracks a section shows under «Всё» (its chip shows them all).
 const FEW: usize = 5;
@@ -130,9 +145,16 @@ pub fn search_results(
     bui.set_clip_rect(body.intersect(ui.clip_rect()));
     let mut nav = None;
     let mut go = None;
-    egui::ScrollArea::vertical()
-        .id_salt(("search-scroll", f as u8))
-        .auto_shrink([false, false])
+    let mut area = egui::ScrollArea::vertical().id_salt(("search-scroll", f as u8)).auto_shrink([false, false]);
+    // Back from a page: where the results were, once every section has
+    // answered again (until then they are shorter).
+    let settled = state.search.query.trim() == query.trim()
+        && !state.search.searching
+        && state.search.streams.iter().all(|x| !x.searching);
+    if settled && let Some(y) = ctx.data_mut(|d| d.remove_temp::<f32>(Id::new(RESTORE_KEY))) {
+        area = area.vertical_scroll_offset(y);
+    }
+    let scrolled = area
         .show(&mut bui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
             ui.add_space(8.0);
@@ -157,7 +179,11 @@ pub fn search_results(
                 nav = torrents(ui, query, state, pages, out).or(nav.take());
             }
             ui.add_space(bottom_inset);
-        });
+        })
+        .state
+        .offset
+        .y;
+    ctx.data_mut(|d| d.insert_temp(Id::new(SCROLL_KEY), scrolled));
     if let Some(g) = go {
         f = g;
     }
@@ -490,6 +516,18 @@ fn stream_section(
                     Service::Spotify => super::SettingId::SpotifyEnabled,
                     Service::Youtube => super::SettingId::YouTubeEnabled,
                 });
+            }
+        }
+        // Under its own chip the sign-in is all there is to show.
+        Some(Why::SignIn) if !all => {
+            if widgets::empty_state(
+                ui,
+                Icon::Login,
+                &format!("Войди в {name}"),
+                "Тогда поиск найдёт и там: треки, альбомы, исполнителей и плейлисты.",
+                Some(&format!("Войти через {name}")),
+            ) {
+                pages.open_setting(super::SettingId::Spotify);
             }
         }
         Some(Why::SignIn) => {

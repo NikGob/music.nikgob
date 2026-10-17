@@ -161,6 +161,11 @@ impl Worker {
                 text: text.clone(),
             });
         });
+        // The lookup can take a few seconds: say it started (the result
+        // replaces this toast).
+        self.drop_share_toast();
+        self.toast("Ищу ссылку…", None);
+        self.streaming.share_toast = Some(self.toast_id);
         let odesli = self.odesli();
         self.streaming.spawn(async move {
             let page = match (page, lookup) {
@@ -199,10 +204,18 @@ impl Worker {
         remotes.iter().find_map(|r| page_of(services, kind, r))
     }
 
+    /// Takes away the «Ищу ссылку…» toast, if it is still there.
+    fn drop_share_toast(&mut self) {
+        if let Some(id) = self.streaming.share_toast.take() {
+            self.publish(|s, _| s.toasts.retain(|t| t.id != id));
+        }
+    }
+
     pub(crate) fn shared(&mut self, seq: u64, target: v::ShareTarget, result: Shared) {
         if seq != self.streaming.share_seq {
             return;
         }
+        self.drop_share_toast();
         let copied = result.link.clone().unwrap_or_else(|| result.text.clone());
         if copied.is_empty() {
             self.publish(|s, _| s.share = None);
