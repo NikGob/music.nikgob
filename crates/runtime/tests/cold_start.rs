@@ -410,7 +410,8 @@ fn discography_shows_the_albums_the_library_lacks() {
     let t = lib.upsert_track(&t).unwrap();
     lib.add_source(&Source::new(t.id, SourceKind::LocalFile, "Music/a.flac", Codec::Flac)).unwrap();
 
-    // Spotify signed in: its discography first (else Deezer's).
+    // Spotify connected: its discography first (else Deezer's; a Spotify
+    // that is not connected is asked nothing).
     let streams: Vec<Arc<dyn StreamService>> = vec![
         Arc::new(FakeService::spotify()),
         Arc::new(FakeService::youtube().logged_out()),

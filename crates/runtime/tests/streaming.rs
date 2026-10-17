@@ -177,6 +177,16 @@ fn rig(lib: &Library, streams: Vec<Arc<dyn StreamService>>, import: bool) -> Rig
     }
 }
 
+/// Spotify connected (one that is not is asked nothing at all), with no
+/// likes of its own to pull into the library.
+fn spotify_without_likes() -> FakeService {
+    let sp = FakeService::spotify();
+    for id in sp.liked_ids() {
+        sp.set_liked_remotely(&id, false);
+    }
+    sp
+}
+
 fn wish_status(lib: &Library, track: TrackId) -> Option<WishlistStatus> {
     lib.wishlist_for_track(track)
         .unwrap()
@@ -192,7 +202,7 @@ fn search_merges_services_and_the_library_wins() {
     lib.add_source(&Source::new(omt, SourceKind::LocalFile, "Music/omt.opus", Codec::Opus))
         .unwrap();
     let streams: Vec<Arc<dyn StreamService>> = vec![
-        Arc::new(FakeService::spotify().logged_out()),
+        Arc::new(spotify_without_likes()),
         Arc::new(FakeService::youtube().logged_out()),
     ];
     let r = rig(&lib, streams, false);
@@ -435,7 +445,7 @@ fn share_copies_a_song_link() {
             nikgob_core::model::ArtistCredit::single("Кино", Some(artist.id)),
         ))
         .unwrap();
-    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], false);
+    let r = rig(&lib, vec![Arc::new(spotify_without_likes())], false);
     r.rt.set_odesli_base(uri);
     r.rt.send(Command::Share(ShareTarget::Track(t.id)));
     wait_for(&r.rt, "the link", |s| {
@@ -516,7 +526,7 @@ fn an_album_says_the_same_count_on_its_card_its_page_and_in_the_library() {
         .unwrap();
     let aero = lib.upsert_stream_track(&find(&spotify, "sp-discovery-2")).unwrap();
     lib.like(aero).unwrap();
-    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], false);
+    let r = rig(&lib, vec![Arc::new(spotify_without_likes())], false);
     r.rt.send(Command::Search("daft".into()));
     wait_for(&r.rt, "the section", |s| s.search.streams.iter().any(|x| !x.searching && !x.albums.is_empty()));
     let card = r.rt.state().search.streams[0].albums[0].clone();
@@ -585,7 +595,7 @@ fn download_without_a_like_waits_for_torrents_and_leaves_the_likes_alone() {
 #[test]
 fn download_a_stream_track_and_a_stream_album() {
     let lib = Library::open_in_memory().unwrap();
-    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], false);
+    let r = rig(&lib, vec![Arc::new(spotify_without_likes())], false);
     // A row of the search: known to the runtime by its remote id.
     r.rt.send(Command::Search("кино".into()));
     wait_for(&r.rt, "the section", |s| s.search.streams.iter().any(|x| !x.searching && !x.tracks.is_empty()));
@@ -653,7 +663,7 @@ fn under_a_service_chip_its_songs_in_the_library_stay_in_its_list() {
     let omt = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-discovery-1")).unwrap();
     lib.add_source(&Source::new(omt, SourceKind::LocalFile, "Music/omt.opus", Codec::Opus))
         .unwrap();
-    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], false);
+    let r = rig(&lib, vec![Arc::new(spotify_without_likes())], false);
     r.rt.send(Command::SetSearchSources(SearchSources {
         library: false,
         spotify: true,
@@ -677,7 +687,7 @@ fn under_a_service_chip_its_songs_in_the_library_stay_in_its_list() {
 #[test]
 fn a_followed_playlist_is_linked_in_follow_mode() {
     let lib = Library::open_in_memory().unwrap();
-    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], false);
+    let r = rig(&lib, vec![Arc::new(spotify_without_likes())], false);
     let remote = RemoteId::new(Service::Spotify, "sp-pl-mix");
     r.rt.send(Command::FollowStreamPlaylist(remote.clone()));
     wait_for(&r.rt, "the toast", |s| s.toasts.iter().any(|t| t.text == "«Fake Mix» в библиотеке"));

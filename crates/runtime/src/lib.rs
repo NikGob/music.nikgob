@@ -936,7 +936,8 @@ impl Worker {
         sources.retain(|s| s.available && !skip.contains(&s.id));
         sources.sort_by_key(|s| (s.kind.priority(), std::cmp::Reverse(s.quality_score)));
         // A stream needs its service on and able to play sound for this
-        // account (Spotify Free: its tracks play from YouTube Music).
+        // account (Spotify not connected, or before its playback login:
+        // the library's Spotify tracks play from YouTube Music).
         let src = sources.into_iter().find(|s| match s.kind.service() {
             None => true,
             Some(service) => self.has_audio(service),

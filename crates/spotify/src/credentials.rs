@@ -30,6 +30,10 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Slot {
+    /// Legacy: the grant of the shared public Web API app, no longer used
+    /// (docs/stage3.md §0, 2026-10-17). Still read from old state files so
+    /// that the start can delete it ([`crate::Spotify`]'s restore); never
+    /// saved or loaded.
     Shared,
     Personal,
     Playback,
@@ -87,9 +91,6 @@ pub enum Secret {
 impl Secret {
     fn valid_for(&self, slot: Slot) -> bool {
         match (slot, self) {
-            (Slot::Shared, Self::Web(t)) => {
-                t.client_id == crate::auth::shared_client_id() && !t.refresh_token.is_empty()
-            }
             (Slot::Personal, Self::Web(t)) => {
                 !t.client_id.is_empty() && !t.refresh_token.is_empty()
             }
@@ -368,6 +369,20 @@ impl Store {
         }));
     }
 
+    /// What a slot holds as stored, unchecked (tests of the migration).
+    #[cfg(test)]
+    pub(crate) async fn raw(&self, slot: Slot) -> Option<Vec<u8>> {
+        let key = self.key(slot);
+        self.run(move |b| b.read(&key)).await.ok()?.ok()?
+    }
+
+    /// Writes a slot as stored, unchecked (an install from before).
+    #[cfg(test)]
+    pub(crate) async fn put_raw(&self, slot: Slot, bytes: Vec<u8>) {
+        let key = self.key(slot);
+        self.run(move |b| b.write(&key, &bytes)).await.unwrap().unwrap();
+    }
+
     pub async fn load_state(&self) -> State {
         let path = self.state_path.clone();
         self.run(move |_| {
@@ -416,14 +431,16 @@ mod tests {
     async fn secrets_round_trip_and_logout_wins_over_a_late_save() {
         let dir = std::env::temp_dir().join(format!("nikgob-spotify-cred-{}", std::process::id()));
         let store = Store::with_backend(dir.clone(), Box::new(Memory::default()));
-        let g = store.generation(Slot::Shared);
+        let g = store.generation(Slot::Personal);
         store
-            .save(Slot::Shared, g, web(crate::auth::shared_client_id()))
+            .save(Slot::Personal, g, web("test-client-id"))
             .await
             .unwrap();
-        assert!(store.load(Slot::Shared).await.unwrap().is_some());
-        // A personal secret is not a shared one.
-        assert!(store.save(Slot::Shared, g, web("mine")).await.is_err());
+        assert!(store.load(Slot::Personal).await.unwrap().is_some());
+        // The legacy shared slot takes nothing any more.
+        let gs = store.generation(Slot::Shared);
+        assert!(store.save(Slot::Shared, gs, web("test-client-id")).await.is_err());
+        assert!(store.save(Slot::Playback, gs, web("test-client-id")).await.is_err());
 
         let playback = Secret::Playback(PlaybackCredential {
             username: "user".into(),
@@ -444,7 +461,7 @@ mod tests {
         );
 
         let state = State {
-            slots: vec![Slot::Shared],
+            slots: vec![Slot::Personal],
             profile: Some(Profile {
                 id: "u".into(),
                 name: "U".into(),

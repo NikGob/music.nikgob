@@ -1,11 +1,13 @@
 //! Настройки → «Источники» (docs/stage3.md §0 "Где настройки", §3.1, §3.6):
 //! Spotify and YouTube Music (switch, account, sound, import of playlists
-//! and history once signed in, personal app, cookies), what a like
+//! and history once signed in; Spotify's steps to connect — its own key
+//! and the sign-in, Premium only —; cookies), what a like
 //! downloads, playlist sync, the export files, the stream cache, and the
 //! torrents (Prowlarr, seeding) moved here from «Основные». A service that
 //! asked to wait says until when, quietly.
 
 use egui::{Sense, Stroke, Ui, Widget as _, vec2};
+use nikgob_core::streaming::SPOTIFY_PREMIUM_REQUIRED;
 use nikgob_view::{Account, AccountView, Command, LoginInput, LoginPrompt, Prefs, Service, ViewState};
 
 use super::PageState;
@@ -16,7 +18,7 @@ use crate::{
     components::{Button, Card, LoadingIndicator, Size, Style, Switch, TextField},
 };
 
-/// Where a personal Spotify app is made and what it must allow.
+/// Where the user's own Spotify app is made and what it must allow.
 const DASHBOARD: &str = "https://developer.spotify.com/dashboard";
 const REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
 
@@ -24,7 +26,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     let s = Theme::get(ui.ctx()).scheme;
     ui.add_space(12.0);
     ui.label(TypeRole::BodyMedium.style().rich_para(
-        "Всё работает и бесплатно: Spotify Free, YouTube Music без Premium, торренты.",
+        "Бесплатно работают YouTube Music и торренты; Spotify — с Premium.",
         s.on_surface_variant,
     ));
     spotify(ui, state, p, pages, out);
@@ -98,12 +100,13 @@ fn account_line(a: Option<&AccountView>) -> String {
         return "Не подключён в этой сборке".to_owned();
     };
     match &a.account {
+        // Spotify: why it is not connected is said under the row.
+        Account::LoggedOut | Account::Failed(_) if a.service == Service::Spotify => "Не подключён".to_owned(),
         Account::LoggedOut => "Не выполнен вход".to_owned(),
         Account::LoggingIn(Some(LoginPrompt::Window(_))) => "Вход… заверши его в открывшемся окне".to_owned(),
         Account::LoggingIn(_) => "Вход… заверши его в браузере".to_owned(),
         Account::LoggedIn { name, premium, .. } => match (a.service, premium) {
             (Service::Spotify, Some(true)) => format!("{name} · Premium"),
-            (Service::Spotify, Some(false)) => format!("{name} · без Premium"),
             _ => name.clone(),
         },
         Account::Failed(_) => "Вход не удался".to_owned(),
@@ -114,16 +117,19 @@ fn logged_in(a: Option<&AccountView>) -> bool {
     a.is_some_and(|a| a.account.is_logged_in())
 }
 
+/// Spotify works with Premium only (docs/stage3.md §0): connected, its
+/// sound, the import and «Выйти»; not connected, the steps to connect it
+/// (the user's own key, then the sign-in).
 fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
-    let s = Theme::get(ui.ctx()).scheme;
     let acc = state.account(Service::Spotify);
     let registered = acc.is_some_and(|a| a.registered);
     group(ui, "Spotify");
-    row(ui, Id::SpotifyEnabled, "Использовать Spotify", Some("Поиск, лайки, плейлисты; звук — с Premium"), |ui| {
+    row(ui, Id::SpotifyEnabled, "Использовать Spotify", Some("С Premium: поиск, лайки, плейлисты и звук"), |ui| {
         ui.add(Switch::new(&mut p.spotify_enabled).id_salt("set-sp-on"));
     });
     dimmed(ui, !p.spotify_enabled, |ui| {
         let busy = acc.is_some_and(|a| a.busy || matches!(a.account, Account::LoggingIn(_)));
+        let signed = logged_in(acc);
         let line = account_line(acc);
         row(ui, Id::Spotify, "Аккаунт", Some(&line), |ui| {
             ui.horizontal(|ui| {
@@ -131,25 +137,10 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
                 if busy {
                     ui.add(LoadingIndicator::new().size(32.0));
                 }
-                if logged_in(acc) {
-                    if ui.add(Button::new("Выйти").icon(Icon::Logout).style(Style::Outlined).id_salt("sp-logout")).clicked() {
-                        out.push(Command::StreamLogout(Service::Spotify));
-                    }
-                } else if !busy {
-                    let failed = acc.is_some_and(|a| a.error.is_some() || matches!(a.account, Account::Failed(_)));
-                    let label = if failed { "Попробовать снова" } else { "Войти через Spotify" };
-                    if ui
-                        .add(
-                            Button::new(label)
-                                .icon(Icon::Login)
-                                .style(Style::Filled)
-                                .enabled(registered)
-                                .id_salt("sp-login"),
-                        )
-                        .clicked()
-                    {
-                        out.push(Command::StreamLogin { service: Service::Spotify, input: LoginInput::Browser });
-                    }
+                if signed
+                    && ui.add(Button::new("Выйти").icon(Icon::Logout).style(Style::Outlined).id_salt("sp-logout")).clicked()
+                {
+                    out.push(Command::StreamLogout(Service::Spotify));
                 }
             });
         });
@@ -158,23 +149,20 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
             login_error(ui, a);
             paused_line(ui, a);
         }
-        // Sound: on; impossible without Premium (no button that cannot
-        // help); one more consent away; or not known yet.
+        if !signed {
+            setup_steps(ui, p, pages, registered && !busy, out);
+            return;
+        }
+        // Signed in means Premium: the sound is one more consent away, or on.
+        pages.sp_client_id.clear();
         let audio = acc.is_some_and(|a| a.audio);
-        let premium = match acc.map(|a| &a.account) {
-            Some(Account::LoggedIn { premium, .. }) => *premium,
-            _ => None,
-        };
-        let signed = logged_in(acc);
-        let (sound_line, offer) = match (signed, audio, premium) {
-            (_, true, _) => ("Включён: треки Spotify играют из Spotify", false),
-            (false, _, _) => ("С Premium — прямо из Spotify; без него те же треки играют с YouTube Music", false),
-            (true, false, Some(false)) => ("Нужен Premium — пока треки Spotify играют с YouTube Music", false),
-            (true, false, Some(true)) => ("Ещё одно разрешение — и звук пойдёт прямо из Spotify", true),
-            (true, false, None) => ("С Premium — прямо из Spotify; без него те же треки играют с YouTube Music", true),
+        let sound_line = if audio {
+            "Включён: треки Spotify играют из Spotify"
+        } else {
+            "Ещё одно разрешение — и звук пойдёт прямо из Spotify"
         };
         row(ui, Id::SpotifyPlayback, "Звук из Spotify", Some(sound_line), |ui| {
-            if offer
+            if !audio
                 && ui
                     .add(
                         Button::new("Включить звук")
@@ -188,12 +176,103 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
                 out.push(Command::StreamLogin { service: Service::Spotify, input: LoginInput::Playback });
             }
         });
-        if signed {
-            import_row(ui, state, Service::Spotify, out);
-        }
-        personal_app(ui, p, pages, registered, out);
+        import_row(ui, state, Service::Spotify, out);
     });
-    let _ = s;
+}
+
+/// Not connected: what it takes, and the numbered steps to it — the user's
+/// own app on Spotify for Developers (Spotify lets it work only for a
+/// Premium owner), its Client ID, the sign-in in the browser.
+fn setup_steps(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    settings_help::item(ui, Id::SpotifyPersonal, "Свой ключ Spotify", |ui| {
+        ui.set_max_width(ui.available_width().min(640.0));
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(TypeRole::BodyLarge.style().rich("Spotify работает с Premium: нужен свой ключ (2 минуты) и вход", s.on_surface));
+            settings_help::help_button(ui, Id::SpotifyPersonal);
+        });
+        ui.add_space(12.0);
+        numbered(ui, 1, 32.0, |ui| {
+            if ui
+                .add(Button::new("Открыть Spotify for Developers").icon(Icon::OpenInNew).style(Style::Tonal).id_salt("sp-dash"))
+                .clicked()
+            {
+                open_url(DASHBOARD);
+            }
+        });
+        numbered(ui, 2, 20.0, |ui| {
+            ui.label(TypeRole::BodyMedium.style().rich_para("Создай приложение (Create app), Redirect URI:", s.on_surface));
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.label(TypeRole::BodyMedium.emphasized().rich(REDIRECT_URI, s.on_surface));
+                copy_button(ui, "sp-redirect-copy", REDIRECT_URI);
+            });
+            ui.label(TypeRole::BodySmall.style().rich_para("Отметь Web API и Web Playback SDK, сохрани.", s.on_surface_variant));
+        });
+        numbered(ui, 3, 20.0, |ui| {
+            ui.label(TypeRole::BodyMedium.style().rich_para("Скопируй Client ID из Settings приложения:", s.on_surface));
+            ui.add_space(4.0);
+            TextField::new(&mut pages.sp_client_id, "Client ID")
+                .placeholder("32 символа")
+                .supporting(if p.spotify_personal_app {
+                    "Сохранён в settings.toml; введи новый, чтобы заменить"
+                } else {
+                    "Хранится в settings.toml"
+                })
+                .width(ui.available_width().min(420.0))
+                .id_salt("sp-client-id")
+                .show(ui);
+        });
+        let id = pages.sp_client_id.trim().to_owned();
+        let typed = id.len() >= 16;
+        numbered(ui, 4, 40.0, |ui| {
+            if ui
+                .add(
+                    Button::new("Войти через Spotify")
+                        .icon(Icon::Login)
+                        .style(Style::Filled)
+                        .size(Size::M)
+                        .enabled(can && (typed || p.spotify_personal_app))
+                        .id_salt("sp-login"),
+                )
+                .clicked()
+            {
+                // The typed key, else the saved one; it is kept once the
+                // sign-in works.
+                let input = if typed { LoginInput::PersonalApp { client_id: id.clone() } } else { LoginInput::Browser };
+                out.push(Command::StreamLogin { service: Service::Spotify, input });
+            }
+        });
+        ui.add_space(8.0);
+    });
+}
+
+/// A numbered step of text.
+fn step(ui: &mut Ui, n: u32, text: &str) {
+    let s = Theme::get(ui.ctx()).scheme;
+    numbered(ui, n, 20.0, |ui| {
+        ui.label(TypeRole::BodyMedium.style().rich_para(text, s.on_surface));
+    });
+}
+
+/// A numbered step: the number in a small tonal circle, centred on the
+/// first line (`line` high), and the step's content beside it.
+fn numbered(ui: &mut Ui, n: u32, line: f32, add: impl FnOnce(&mut Ui)) {
+    let s = Theme::get(ui.ctx()).scheme;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        let (r, _) = ui.allocate_exact_size(vec2(24.0, line.max(24.0)), Sense::hover());
+        let c = egui::pos2(r.center().x, r.top() + line.max(24.0) / 2.0);
+        ui.painter().circle_filled(c, 12.0, s.secondary_container);
+        ui.painter().text(c, egui::Align2::CENTER_CENTER, n.to_string(), TypeRole::LabelLarge.font_id(), s.on_secondary_container);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            add(ui);
+        });
+    });
+    ui.add_space(12.0);
 }
 
 /// «Spotify просит подождать до 14:05»: the service paused our calls.
@@ -312,121 +391,18 @@ fn login_error(ui: &mut Ui, a: &AccountView) {
         _ => None,
     });
     if let Some(t) = text {
+        // No Premium is not a fault to fix here: said quietly.
+        let (icon, color) = if t == SPOTIFY_PREMIUM_REQUIRED {
+            (Icon::Info, s.on_surface_variant)
+        } else {
+            (Icon::Error, s.error)
+        };
         ui.horizontal(|ui| {
-            Icon::Error.widget(false, s.error, 18.0).ui(ui);
-            ui.label(TypeRole::BodyMedium.style().rich_para(t, s.error));
+            icon.widget(false, color, 18.0).ui(ui);
+            ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich_para(t, color)).wrap());
         });
         ui.add_space(8.0);
     }
-}
-
-/// «Личное приложение (быстрее)»: folded; a short how-to, the Client ID.
-fn personal_app(ui: &mut Ui, p: &Prefs, pages: &mut PageState, registered: bool, out: &mut Vec<Command>) {
-    let s = Theme::get(ui.ctx()).scheme;
-    settings_help::item(ui, Id::SpotifyPersonal, "Личное приложение (быстрее)", |ui| {
-        ui.add_space(4.0);
-        let head = ui
-            .horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let icon = if pages.sp_personal_open { Icon::ExpandLess } else { Icon::ExpandMore };
-                icon.widget(false, s.on_surface_variant, 24.0).ui(ui);
-                ui.label(TypeRole::BodyLarge.style().rich("Личное приложение (быстрее)", s.on_surface));
-                settings_help::help_button(ui, Id::SpotifyPersonal);
-                if p.spotify_personal_app {
-                    ui.add_space(8.0);
-                    ui.label(TypeRole::LabelMedium.style().rich("задано", s.primary));
-                }
-            })
-            .response;
-        let hit = ui.interact(head.rect, egui::Id::new("sp-personal-head"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-        if hit.clicked() {
-            pages.sp_personal_open = !pages.sp_personal_open;
-        }
-        if !pages.sp_personal_open {
-            ui.add_space(8.0);
-            return;
-        }
-        ui.add_space(8.0);
-        Card::filled().id_salt("sp-personal").show(ui, |ui| {
-            ui.set_width(ui.available_width().min(640.0));
-            ui.label(TypeRole::BodyMedium.style().rich_para(
-                "Своя квота запросов Spotify: поиск и лайки быстрее. Нужно один раз завести приложение (владельцу нужен Premium):",
-                s.on_surface_variant,
-            ));
-            ui.add_space(8.0);
-            step(ui, 1, "Открой панель разработчика и создай приложение (Create app).");
-            ui.horizontal(|ui| {
-                ui.add_space(28.0);
-                if ui.add(Button::new("developer.spotify.com").icon(Icon::OpenInNew).style(Style::Text).size(Size::S).id_salt("sp-dash")).clicked() {
-                    open_url(DASHBOARD);
-                }
-            });
-            step(ui, 2, "В Redirect URIs вставь адрес:");
-            ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add_space(28.0);
-                ui.label(TypeRole::BodyMedium.emphasized().rich(REDIRECT_URI, s.on_surface));
-                copy_button(ui, "sp-redirect-copy", REDIRECT_URI);
-            });
-            step(ui, 3, "Отметь Web API, сохрани и скопируй Client ID из Settings.");
-            ui.add_space(8.0);
-            TextField::new(&mut pages.sp_client_id, "Client ID")
-                .placeholder("32 символа из Settings приложения")
-                .supporting(if p.spotify_personal_app {
-                    "Client ID сохранён в settings.toml. Введи новый, чтобы заменить."
-                } else {
-                    "Хранится в settings.toml, не в настройках интерфейса."
-                })
-                .leading_icon(Icon::Link)
-                .width(420.0)
-                .id_salt("sp-client-id")
-                .show(ui);
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                let id = pages.sp_client_id.trim().to_owned();
-                if ui
-                    .add(
-                        Button::new("Сохранить и войти")
-                            .style(Style::Tonal)
-                            .enabled(registered && id.len() >= 16)
-                            .id_salt("sp-personal-save"),
-                    )
-                    .clicked()
-                {
-                    out.push(Command::SetStreamSecrets { spotify_client_id: Some(id.clone()), youtube_cookies: None });
-                    out.push(Command::StreamLogin {
-                        service: Service::Spotify,
-                        input: LoginInput::PersonalApp { client_id: id },
-                    });
-                    pages.sp_client_id.clear();
-                }
-                if p.spotify_personal_app
-                    && ui.add(Button::new("Убрать").style(Style::Text).id_salt("sp-personal-clear")).clicked()
-                {
-                    out.push(Command::SetStreamSecrets { spotify_client_id: Some(String::new()), youtube_cookies: None });
-                }
-            });
-        });
-        ui.add_space(8.0);
-    });
-}
-
-fn step(ui: &mut Ui, n: u32, text: &str) {
-    let s = Theme::get(ui.ctx()).scheme;
-    ui.horizontal_top(|ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
-        ui.painter().circle_filled(r.center(), 10.0, s.secondary_container);
-        ui.painter().text(
-            r.center(),
-            egui::Align2::CENTER_CENTER,
-            n.to_string(),
-            TypeRole::LabelMedium.font_id(),
-            s.on_secondary_container,
-        );
-        ui.add_space(4.0);
-        ui.label(TypeRole::BodyMedium.style().rich_para(text, s.on_surface));
-    });
-    ui.add_space(4.0);
 }
 
 fn youtube(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {

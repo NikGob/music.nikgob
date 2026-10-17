@@ -8,9 +8,11 @@
 //!
 //! Demo (`NIKGOB_DEMO=1`): the deterministic fakes. `NIKGOB_DEMO_ACCOUNTS`
 //! sets their account per service for screenshots, e.g.
-//! `spotify=prompt,youtube=out` (`in`, `out`, `free` = logged in without
-//! sound, `prompt` = a login waiting for the browser — for YouTube Music the
-//! app's Google sign-in window —, `failed`).
+//! `spotify=prompt,youtube=out` (`in`, `out` = not connected, `free` =
+//! logged in without sound, `prompt` = a login waiting for the browser —
+//! for YouTube Music the app's Google sign-in window —, `failed`, and for
+//! Spotify `premium` = a login refused for want of Premium, `nosound` =
+//! Premium without the playback login yet).
 //! `NIKGOB_DEMO_REAL_STREAMS=1` registers the real services instead, with
 //! their folders inside the demo dir, so real results can be looked at
 //! without touching the user's library or accounts.
@@ -79,6 +81,11 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
     match mode {
         "out" => Arc::new(base.logged_out()),
         "free" => Arc::new(base.without_audio()),
+        "nosound" => Arc::new(base.premium_without_audio()),
+        "premium" => Arc::new(Shown {
+            inner: base.logged_out(),
+            account: Account::Failed(nikgob_core::streaming::SPOTIFY_PREMIUM_REQUIRED.into()),
+        }),
         // Logged in with sound, but every track fails once it is read
         // (Spotify refusing the key of a Free account mid-open).
         "refused" => {
@@ -95,8 +102,7 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
                 Account::Failed(nikgob_runtime::WebLoginError::Refused.text())
             } else if mode == "prompt" {
                 Account::LoggingIn(Some(LoginPrompt::OpenUrl(format!(
-                    "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&code_challenge_method=S256",
-                    nikgob_spotify::SHARED_CLIENT_ID,
+                    "https://accounts.spotify.com/authorize?client_id=demo-client-id&response_type=code&redirect_uri={}&code_challenge_method=S256",
                     nikgob_spotify::WEB_REDIRECT_URI,
                 ))))
             } else {

@@ -523,7 +523,7 @@ impl Worker {
     /// `Command::ImportFromService`.
     pub(crate) fn import_from_service(&mut self, service: Service) {
         let Some(svc) = self.service(service) else {
-            self.toast(format!("{} выключен", service.display_name()), None);
+            self.toast(self.off_text(service), None);
             return;
         };
         if !svc.account().is_logged_in() {

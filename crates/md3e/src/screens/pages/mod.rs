@@ -105,7 +105,6 @@ pub struct PageState {
     /// «Источники»: what is typed into the Spotify Client ID and the
     /// YouTube cookies fields, and which folds are open.
     sp_client_id: String,
-    sp_personal_open: bool,
     yt_cookies: String,
     yt_form: bool,
     track_window: (usize, usize),
@@ -133,7 +132,6 @@ impl PageState {
     }
 
     pub(crate) fn unfold_sources(&mut self) {
-        self.sp_personal_open = true;
         self.yt_form = true;
     }
 
