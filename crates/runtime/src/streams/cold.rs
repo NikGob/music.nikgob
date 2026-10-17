@@ -210,16 +210,18 @@ pub(crate) fn plural(n: usize, one: &'static str, few: &'static str, many: &'sta
     }
 }
 
+/// "3 прослушивания, 2 плейлиста": the counts that are not zero.
 fn count_line(plays: usize, likes: usize, playlists: usize) -> String {
-    format!(
-        "{} {}, {} {}, {} {}",
-        group(plays),
-        plural(plays, "прослушивание", "прослушивания", "прослушиваний"),
-        group(likes),
-        plural(likes, "лайк", "лайка", "лайков"),
-        group(playlists),
-        plural(playlists, "плейлист", "плейлиста", "плейлистов"),
-    )
+    let parts: Vec<String> = [
+        (plays, ["прослушивание", "прослушивания", "прослушиваний"]),
+        (likes, ["лайк", "лайка", "лайков"]),
+        (playlists, ["плейлист", "плейлиста", "плейлистов"]),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, [one, few, many])| format!("{} {}", group(n), plural(n, one, few, many)))
+    .collect();
+    if parts.is_empty() { "ничего".into() } else { parts.join(", ") }
 }
 
 /// The final toast: what is new ("Импорт: 1 240 прослушиваний, 312 лайков,
@@ -231,7 +233,12 @@ pub(crate) fn summary(c: &Counts) -> String {
         }
         return "Импорт: ничего нового — всё уже было".into();
     }
-    format!("Импорт: {}", count_line(c.new_plays, c.new_likes, c.new_playlists))
+    let mut text = format!("Импорт: {}", count_line(c.new_plays, c.new_likes, c.new_playlists));
+    // The likes came with the login already (its first pull).
+    if c.new_likes == 0 && c.likes > 0 {
+        text.push_str(&format!(" · лайки уже здесь ({})", group(c.likes)));
+    }
+    text
 }
 
 /// A stream track from what an export file says.
@@ -1047,5 +1054,8 @@ mod tests {
             "Импорт: 1\u{a0}240 прослушиваний, 312 лайков, 9 плейлистов"
         );
         assert_eq!(summary(&Counts { likes: 3, ..Counts::default() }), "Импорт: ничего нового — всё уже было");
+        let after_login = Counts { plays: 3, new_plays: 3, likes: 3, new_likes: 0, playlists: 2, new_playlists: 2 };
+        assert_eq!(summary(&after_login), "Импорт: 3 прослушивания, 2 плейлиста · лайки уже здесь (3)");
+        assert_eq!(count_line(0, 0, 0), "ничего");
     }
 }
