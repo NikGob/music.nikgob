@@ -563,6 +563,16 @@ fn swatches(ui: &mut Ui, p: &Prefs) -> Option<u8> {
 /// Behaviour: controls, lyrics, sound, library, import and quality
 /// (streaming and torrents live on «Источники»).
 fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    group(ui, "Запуск");
+    row(ui, Id::Autostart, "Запускать вместе с Windows", Some("Когда входишь в систему"), |ui| {
+        ui.add(Switch::new(&mut p.autostart).id_salt("set-autostart"));
+    });
+    dimmed(ui, !p.autostart, |ui| {
+        row(ui, Id::AutostartHidden, "Сразу в трей", Some("Без окна: музыка ждёт в значке у часов"), |ui| {
+            ui.add(Switch::new(&mut p.autostart_hidden).id_salt("set-autostart-hidden"));
+        });
+    });
+
     group(ui, "Управление");
     row(ui, Id::CoverClickPause, "Клик по обложке — пауза", Some("В открытом треке"), |ui| {
         ui.add(Switch::new(&mut p.cover_click_pause).id_salt("set-cover-click"));

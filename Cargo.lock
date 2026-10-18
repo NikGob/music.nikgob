@@ -2146,6 +2146,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastframe-instance"
+version = "0.4.1"
+source = "git+https://github.com/crmne/fastframe?rev=bb79dbddef01e660f9cfc37ccd9dff1c299a8d47#bb79dbddef01e660f9cfc37ccd9dff1c299a8d47"
+dependencies = [
+ "directories",
+ "getrandom 0.4.3",
+ "log",
+]
+
+[[package]]
 name = "fastframe-now-playing"
 version = "0.4.1"
 source = "git+https://github.com/crmne/fastframe?rev=bb79dbddef01e660f9cfc37ccd9dff1c299a8d47#bb79dbddef01e660f9cfc37ccd9dff1c299a8d47"
@@ -3259,7 +3269,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -4644,6 +4654,7 @@ dependencies = [
  "egui_extras",
  "env_logger",
  "fastframe-fonts",
+ "fastframe-instance",
  "fastframe-now-playing",
  "fastframe-scroll",
  "fastframe-shell",
@@ -4664,6 +4675,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "windows-registry",
  "windows-sys 0.61.2",
  "winit",
  "wry",
@@ -5112,7 +5124,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 3.5.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -8095,7 +8107,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows 0.62.2",
+ "windows 0.61.3",
 ]
 
 [[package]]

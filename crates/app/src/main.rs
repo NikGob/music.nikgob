@@ -7,6 +7,7 @@
 #![windows_subsystem = "windows"]
 
 mod audio;
+mod autostart;
 mod cover_cache;
 mod demo;
 mod desktop;
@@ -22,6 +23,7 @@ mod ytlogin;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use fastframe_shell::{Closed, Headless, Resident, Shell, Waker};
@@ -154,6 +156,10 @@ struct Core {
     copied: u64,
     /// The window state the runtime last heard (visible, focused).
     window: Option<(bool, bool)>,
+    /// The «Запускать вместе с Windows» switch, put into the system.
+    autostart: autostart::Keeper,
+    /// A second launch asked for the window.
+    show_asked: Arc<AtomicBool>,
 }
 
 impl Core {
@@ -172,12 +178,32 @@ impl Core {
             self.desktop.poll(&state, &mut self.commands)
         };
         self.quit |= req.quit;
-        self.wants_show |= req.show || req.toggle;
+        self.wants_show |= req.show || req.toggle || self.show_asked.swap(false, Ordering::Relaxed);
+        self.sync_autostart();
         self.runtime.send_all(self.commands.drain(..));
+    }
+
+    /// Puts a changed autostart switch into the system; one it refused
+    /// flips back in Settings.
+    fn sync_autostart(&mut self) {
+        let prefs = {
+            let state = self.runtime.state();
+            self.autostart
+                .sync(state.prefs.autostart)
+                .map(|system| Prefs { autostart: system, ..state.prefs.clone() })
+        };
+        if let Some(p) = prefs {
+            self.commands.push(Command::SetPrefs(Box::new(p)));
+        }
     }
 }
 
 impl Resident for Core {
+    /// A start at sign-in may stay in the tray, if the tray is there.
+    fn start_hidden(&mut self) -> bool {
+        self.desktop.can_hide()
+    }
+
     fn closed(&self) -> Closed {
         if !self.quit && self.desktop.can_hide() {
             Closed::Hide
@@ -322,6 +348,31 @@ fn main() -> eframe::Result {
     logfile::init();
     let mut paths = paths();
     let demo = std::env::var_os("NIKGOB_DEMO").is_some();
+    let at_sign_in = std::env::args().any(|a| a == autostart::FLAG);
+    // One player per user: a second launch (a click on the shortcut while
+    // the first waits in the tray) shows the running one's window and ends.
+    // Demo and screenshot runs live beside the real app.
+    let show_asked = Arc::new(AtomicBool::new(false));
+    let waker = Waker::default();
+    let _instance = if demo {
+        None
+    } else {
+        let asked = Arc::clone(&show_asked);
+        let w = waker.clone();
+        match fastframe_instance::Slot::new("music.nikgob").claim("show", move |request| {
+            (request == "show").then(|| {
+                asked.store(true, Ordering::Relaxed);
+                w.wake();
+                "ok".to_owned()
+            })
+        }) {
+            fastframe_instance::Claim::First(guard) => Some(guard),
+            other => {
+                log::info!("music.nikgob is already running: {other:?}");
+                return Ok(());
+            }
+        }
+    };
     if demo {
         let dir = std::env::temp_dir().join("nikgob-demo");
         // A demo library from an older seed (duplicate artists, old covers)
@@ -358,8 +409,17 @@ fn main() -> eframe::Result {
     if demo {
         demo::seed(&library, &paths.root.join("Music"));
     }
-    let prefs = load_prefs(&paths);
-    let waker = Waker::default();
+    let mut prefs = load_prefs(&paths);
+    // The system says whether autostart is on (Task Manager may have turned
+    // it off); demo runs leave it alone.
+    let autostart_system = (!demo).then(|| {
+        autostart::refresh();
+        autostart::enabled()
+    });
+    if let Some(on) = autostart_system {
+        prefs.autostart = on;
+    }
+    let start_hidden = at_sign_in && !demo && prefs.autostart_hidden;
 
     // Streaming services: each keeps its state in its own folder of the
     // data dir (the demo's own, in demo mode).
@@ -468,12 +528,14 @@ fn main() -> eframe::Result {
         // Screenshot runs get their own size and leave the real one alone.
         copied: 0,
         window: None,
+        autostart: autostart::Keeper::new(autostart_system),
+        show_asked,
         geometry: geometry::Keeper::load(
             shot::window_size().is_none().then(|| paths.prefs.with_file_name("window.json")),
         ),
     };
 
-    Shell::new(core, &waker).run(|lease| {
+    Shell::new(core, &waker).start_hidden(start_hidden).run(|lease| {
         let covers_dir = covers_dir.clone();
         eframe::run_native(
             "music.nikgob",

@@ -773,6 +773,11 @@ pub struct Prefs {
     pub progress_wave: bool,
     /// The shapes [`CoverShape::Random`] picks from; empty = all of them.
     pub random_shapes: Vec<CoverShape>,
+    /// Windows starts the app at sign-in (the app reads the system's own
+    /// state at start; this only mirrors and edits it).
+    pub autostart: bool,
+    /// A start at sign-in stays in the tray, with no window.
+    pub autostart_hidden: bool,
     /// A click on the Now Playing cover toggles play / pause.
     pub cover_click_pause: bool,
     /// A double click in Now Playing changes the cover outline: 0 never,
@@ -1411,6 +1416,8 @@ impl Default for Prefs {
             np_motion: 1,
             progress_wave: true,
             random_shapes: Vec::new(),
+            autostart: false,
+            autostart_hidden: true,
             cover_click_pause: true,
             dbl_click_shape: 1,
             np_tap_wait: 0.22,

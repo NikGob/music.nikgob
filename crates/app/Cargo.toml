@@ -37,6 +37,7 @@ fastframe-scroll.workspace = true
 fastframe-shell.workspace = true
 fastframe-tray.workspace = true
 fastframe-now-playing.workspace = true
+fastframe-instance.workspace = true
 log.workspace = true
 env_logger.workspace = true
 
@@ -52,3 +53,5 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 # The YouTube Music sign-in window (system WebView2, see ytlogin.rs).
 wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+# The «Запускать вместе с Windows» line under the user's Run key.
+windows-registry = "0.6"
