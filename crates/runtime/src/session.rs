@@ -1,6 +1,11 @@
 //! What survives a restart besides the prefs: the volume and the queue,
 //! with the place in the current track. It comes back paused; play picks
 //! up where the last run left off.
+//!
+//! Written every few seconds, so a crash or a PC switched off at the wall
+//! loses at most those seconds: the new file reaches the disk before it
+//! replaces the old one, and the one before stays as `session.json.bak`
+//! for a file a power cut still broke.
 
 use std::path::Path;
 use std::time::Duration;
@@ -24,11 +29,36 @@ pub(crate) struct Session {
 
 impl Session {
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+        let read = |p: &Path| std::fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        read(path)
+            .or_else(|| {
+                let saved = read(&backup(path));
+                if saved.is_some() {
+                    log::warn!("{} is unreadable; the queue comes from the backup", path.display());
+                }
+                saved
+            })
             .unwrap_or_default()
     }
+
+    /// Puts `json` at `path` so that a crash at any moment leaves a whole
+    /// file there or at its backup.
+    fn write(path: &Path, json: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        let tmp = path.with_extension("json.tmp");
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        if path.exists() {
+            std::fs::rename(path, backup(path))?;
+        }
+        std::fs::rename(&tmp, path)
+    }
+}
+
+fn backup(path: &Path) -> std::path::PathBuf {
+    path.with_extension("json.bak")
 }
 
 impl Worker {
@@ -74,9 +104,35 @@ impl Worker {
         if json == self.session_saved {
             return;
         }
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, &json).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-            self.session_saved = json;
+        match Session::write(&path, &json) {
+            Ok(()) => self.session_saved = json,
+            Err(e) => log::warn!("cannot save {}: {e}", path.display()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(volume: f32) -> Session {
+        Session { volume: Some(volume), ..Session::default() }
+    }
+
+    #[test]
+    fn a_broken_file_falls_back_to_the_one_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        assert_eq!(Session::load(&path), Session::default());
+        for v in [0.25, 0.5] {
+            Session::write(&path, &serde_json::to_string(&session(v)).unwrap()).unwrap();
+        }
+        assert_eq!(Session::load(&path), session(0.5));
+        assert_eq!(Session::load(&backup(&path)), session(0.25));
+        // What a power cut can leave: the name in place, the bytes not.
+        std::fs::write(&path, [0u8; 64]).unwrap();
+        assert_eq!(Session::load(&path), session(0.25));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(Session::load(&path), session(0.25));
     }
 }

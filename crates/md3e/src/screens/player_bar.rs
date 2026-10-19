@@ -105,6 +105,25 @@ pub fn show(
         }
 
         ui.add_space(8.0);
+        // Toggles sit on a tinted disc while on: the pill's flat item
+        // colours alone look the same either way.
+        let toggle_colors = |on_: bool| if on_ { Colors { container: on.gamma_multiply(0.24), ..item } } else { item };
+        if ui
+            .add(
+                IconButton::new(Icon::Shuffle)
+                    .selected(p.shuffle)
+                    .colors(toggle_colors(p.shuffle))
+                    .tooltip(if p.shuffle {
+                        "Очередь перемешана — нажми, чтобы вернуть порядок"
+                    } else {
+                        "Перемешать очередь"
+                    })
+                    .id_salt("bar-shuffle"),
+            )
+            .clicked()
+        {
+            out.push(Command::ToggleShuffle);
+        }
         if ui
             .add(IconButton::new(Icon::SkipPrevious).colors(item).tooltip("Назад (Ctrl+←)"))
             .clicked()
@@ -138,18 +157,11 @@ pub fn show(
         {
             out.push(Command::Next);
         }
-        // On (the whole queue or one track) it sits on a tinted disc: the
-        // pill's flat item colours alone look the same either way.
-        let repeat_colors = if p.repeat == Repeat::Off {
-            item
-        } else {
-            Colors { container: on.gamma_multiply(0.24), ..item }
-        };
         if ui
             .add(
                 IconButton::new(repeat_icon(p.repeat))
                     .selected(p.repeat != Repeat::Off)
-                    .colors(repeat_colors)
+                    .colors(toggle_colors(p.repeat != Repeat::Off))
                     .tooltip(repeat_tip(p.repeat))
                     .id_salt("bar-repeat"),
             )
