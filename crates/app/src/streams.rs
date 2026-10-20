@@ -97,7 +97,9 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
             .with_song("aiyou", "AIYOU", "Eve", "AIYOU", 163)
             .with_song("aiyou-tv", "AIYOU (TV Size)", "Eve", "AIYOU", 89)
             .with_new_release("utada", "kaze", "風の歌", 23)
-            .with_new_release("bjork", "aurora", "Aurora", 9),
+            .with_new_release("bjork", "aurora", "Aurora", 9)
+            // An artist of the demo library: «Новые релизы» has its single.
+            .with_new_release("daft", "voyager2", "Voyager 2", 12),
         Service::Spotify => FakeService::new(service),
     };
     // Long enough to watch a track play (lyrics, progress) in screenshots.

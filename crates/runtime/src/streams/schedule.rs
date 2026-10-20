@@ -72,6 +72,17 @@ pub struct StreamSchedule {
     pub analysis_gap: Duration,
     /// …at most this many a day.
     pub analysis_daily: u32,
+    /// The recommendations are built again this long after the library
+    /// changed (likes, playlists, imports, «Не рекомендовать»)…
+    pub recs_debounce: Duration,
+    /// …and at least this often anyway (the day part, decayed weights).
+    pub recs_every: Duration,
+    /// «Новое для тебя» asks the services one request at a time, somewhere
+    /// between these apart…
+    pub discover_gap: (Duration, Duration),
+    /// …and looks for new music again this long after the last pass (and
+    /// on a new day).
+    pub discover_every: Duration,
     /// The worker's slow tick (toasts, the session file, the jobs above).
     pub tick: Duration,
     /// ± this share of every periodic interval.
@@ -107,6 +118,10 @@ impl Default for StreamSchedule {
             analysis_idle: Duration::from_secs(5 * 60),
             analysis_gap: Duration::from_secs(20),
             analysis_daily: 300,
+            recs_debounce: Duration::from_secs(3),
+            recs_every: Duration::from_secs(3 * 3600),
+            discover_gap: (Duration::from_secs(2), Duration::from_secs(4)),
+            discover_every: Duration::from_secs(24 * 3600),
             tick: Duration::from_secs(5),
             jitter: 0.2,
             rate_limit_cap: Duration::from_secs(10 * 60),

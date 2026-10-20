@@ -1,12 +1,21 @@
 //! `NIKGOB_DEMO=1`: a throwaway library with generated covers, for looking
 //! at the interface without importing music. Files do not exist; playback
 //! goes to the null backend.
+//!
+//! For the recommendations (docs/stage4.md) every track gets a synthetic
+//! sound vector and the library a listening history of three months: the
+//! albums fall into three styles (Russian rock, electronic, dark and
+//! dreamy), tracks within a style spread over energy and brightness so
+//! every mood has its own, and plays lean to the evening and the night
+//! with a few early skips. The home then shows «Твой микс», six moods,
+//! three style mixes, and (from the fake services) discoveries and new
+//! releases.
 
 use std::path::Path;
 
 use nikgob_core::model::{
-    Artist, ArtistCredit, Codec, EventContext, EventType, Release, ReleaseType, Source, SourceKind,
-    Track,
+    Analysis, AnalysisSource, Artist, ArtistCredit, Codec, Event, EventContext, EventType, Release, ReleaseType,
+    Source, SourceKind, Track, TrackId,
 };
 use nikgob_library::Library;
 
@@ -21,7 +30,18 @@ const ALBUMS: &[(&str, &str, i32, ReleaseType, [u8; 3], &[&str])] = &[
     ("Massive Attack", "Mezzanine", 1998, ReleaseType::Album, [200, 200, 210], &["Angel", "Risingson", "Teardrop", "Inertia Creeps", "Exchange", "Dissolved Girl", "Man Next Door"]),
     ("RADWIMPS", "すずめの戸締まり", 2022, ReleaseType::Album, [60, 140, 220], &["すずめ feat. 十明", "カナタハルカ", "Tamaki", "ダイジンの歌"]),
     ("Boards of Canada", "Dayvan Cowboy", 2006, ReleaseType::Ep, [240, 120, 60], &["Dayvan Cowboy", "Ataronchronon", "Dayvan Cowboy (Odd Nosdam Remix)"]),
+    ("Мумий Тролль", "Морская", 1997, ReleaseType::Album, [60, 180, 200], &["Утекай", "Владивосток 2000", "Девочка", "Кот кота", "Забавы", "Скорость", "Роза Белая", "Сантименты", "Новая луна апреля", "Делай меня точно"]),
+    ("The Prodigy", "The Fat of the Land", 1997, ReleaseType::Album, [220, 60, 30], &["Smack My Bitch Up", "Breathe", "Diesel Power", "Funky Shit", "Serial Thrilla", "Mindfields", "Narayan", "Firestarter", "Climbatize", "Fuel My Fire"]),
 ];
+
+/// The style of each album (index in [`ALBUMS`]): 0 Russian rock, 1
+/// electronic, 2 dark and dreamy.
+const STYLES: &[usize] = &[0, 0, 2, 1, 0, 1, 2, 2, 2, 1, 0, 1];
+/// How much each style is listened to (a day's session is skipped above it).
+const STYLE_WEIGHT: [f32; 3] = [1.0, 0.7, 0.55];
+/// Days of history.
+const HISTORY_DAYS: i64 = 90;
+const DAY_MS: i64 = 24 * 3600 * 1000;
 
 /// A cover: abstract art from the hue (sun over stripes, diagonal bands,
 /// soft blobs or a dot grid, by `seed`) with a little grain, 600×600 JPEG.
@@ -76,7 +96,7 @@ fn make_cover(path: &Path, rgb: [u8; 3], seed: u32) {
 }
 
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v9";
+pub const VERSION: &str = "seed-v10";
 
 /// The intro, instrumental gap and long line exercise both lyrics layouts.
 const DEMO_LRC: &str = "[00:03.00]Свет из окна ложится на пол
@@ -109,6 +129,8 @@ pub fn seed(lib: &Library, root: &Path) {
         return;
     }
     let mut first_tracks = Vec::new();
+    // Every track with its album's index and number, for the history.
+    let mut all: Vec<(TrackId, usize, usize)> = Vec::new();
     // One row per artist: upsert matches by id / MBID, not by name.
     let mut artists = std::collections::HashMap::new();
     for (i, (artist, album, year, kind, rgb, tracks)) in ALBUMS.iter().enumerate() {
@@ -168,16 +190,104 @@ pub fn seed(lib: &Library, root: &Path) {
             if (n + i) % 4 == 0 {
                 let _ = lib.like(t.id);
             }
-            for _ in 0..((n * 7 + i * 3) % 5) {
-                let _ = lib.record_event(t.id, EventType::Start, None, Some(0), EventContext::Album);
-                let _ = lib.record_event(t.id, EventType::Complete, None, None, EventContext::Album);
-            }
+            let _ = lib.put_analysis(&Analysis {
+                track_id: t.id,
+                bliss_vector: vector(STYLES[i], i, n),
+                analyzed_with: nikgob_recs::ANALYZED_WITH.to_owned(),
+                source: AnalysisSource::File,
+            });
+            all.push((t.id, i, n));
         }
     }
+    history(lib, &all);
     if let Ok(p) = lib.create_playlist("Вечером") {
         let _ = lib.playlist_add_many(p.id, &first_tracks);
     }
     let _ = lib.create_playlist("В дорогу");
+}
+
+/// A number in −1..1 from the inputs (the same on every run).
+fn noise(a: usize, b: usize, c: usize, salt: u64) -> f32 {
+    let mut h = 0xcbf2_9ce4_8422_2325_u64 ^ salt;
+    for x in [a, b, c] {
+        h = (h ^ x as u64).wrapping_mul(0x100_0000_01b3);
+        h ^= h >> 29;
+    }
+    (h % 20_001) as f32 / 10_000.0 - 1.0
+}
+
+/// A synthetic bliss vector (features version 2 order: tempo, ZCR,
+/// spectral centroid mean and deviation, rolloff mean and deviation,
+/// flatness mean and deviation, loudness mean and deviation, 13 chroma
+/// features): the style sets the timbre and harmony features, each track
+/// its own energy, brightness and steadiness, so moods cut across styles.
+fn vector(style: usize, album: usize, n: usize) -> Vec<f32> {
+    let lean = [0.35, 0.15, -0.45][style];
+    let energy = (noise(album, n, 1, 11) * 0.85 + lean).clamp(-1.0, 1.0);
+    let bright = noise(album, n, 2, 13) * 0.9;
+    let steady = noise(album, n, 3, 17) * 0.9;
+    let mut v: Vec<f32> = (0..nikgob_recs::DIM)
+        .map(|d| ((style * 5 + d * 3) % 7) as f32 / 3.0 - 1.0 + noise(album, n, d, 19) * 0.12)
+        .collect();
+    v[0] = energy * 0.8;
+    v[1] = energy * 0.5 + bright * 0.2;
+    v[2] = energy * 0.4 + bright * 0.4;
+    v[3] = -steady * 0.5;
+    v[4] = bright * 0.6;
+    v[8] = energy * 0.7;
+    v[9] = -steady * 0.6;
+    v[16] += bright * 0.5;
+    v[17] -= bright * 0.5;
+    v
+}
+
+/// Three months of listening: every track completed once long ago, then
+/// sessions of one style a day (the first style most), mostly in the
+/// evening and at night, with a few early skips.
+fn history(lib: &Library, tracks: &[(TrackId, usize, usize)]) {
+    let now = nikgob_library::now_ms();
+    let today = now - now.rem_euclid(DAY_MS);
+    let device = lib.device_id();
+    let play = |track: TrackId, ts: i64, skip: bool| {
+        let mut start = Event::new(track, EventType::Start, ts, device.clone());
+        start.position_ms = Some(0);
+        start.context = EventContext::Album;
+        let _ = lib.record_event_raw(&start);
+        let mut end = if skip {
+            let mut e = Event::new(track, EventType::Skip, ts + 6_000, device.clone());
+            e.position_ms = Some(6_000);
+            e
+        } else {
+            Event::new(track, EventType::Complete, ts + 24_000, device.clone())
+        };
+        end.context = EventContext::Album;
+        let _ = lib.record_event_raw(&end);
+    };
+    for (k, (t, i, n)) in tracks.iter().enumerate() {
+        let day = HISTORY_DAYS - 1 - (noise(*i, *n, 4, 23).abs() * 30.0) as i64;
+        play(*t, today - day * DAY_MS + 20 * 3_600_000 + k as i64 * 60_000, false);
+    }
+    // Hours of the sessions (UTC), evening and night first.
+    const HOURS: [i64; 8] = [19, 20, 21, 22, 23, 1, 9, 14];
+    for day in 0..HISTORY_DAYS {
+        let d = day as usize;
+        if noise(d, 0, 5, 29) < -0.3 {
+            continue;
+        }
+        let hour = HOURS[(noise(d, 1, 6, 31).abs() * 7.99) as usize];
+        let style = (noise(d, 2, 7, 37).abs() * 2.99) as usize;
+        if noise(d, 3, 8, 41).abs() > STYLE_WEIGHT[style] {
+            continue;
+        }
+        let pool: Vec<&(TrackId, usize, usize)> = tracks.iter().filter(|(_, i, _)| STYLES[*i] == style).collect();
+        let mut ts = today - day * DAY_MS + hour * 3_600_000;
+        for p in 0..(6 + (noise(d, 4, 9, 43).abs() * 6.0) as usize) {
+            let (t, i, n) = pool[(noise(d, p, 10, 47).abs() * (pool.len() as f32 - 0.01)) as usize];
+            let skip = noise(*i, *n, d, 53) > 0.8;
+            play(*t, ts, skip);
+            ts += 30_000;
+        }
+    }
 }
 
 /// A short mono sine WAV so demo tracks really play (gapless joins audible).
@@ -210,4 +320,44 @@ fn write_tone(path: &Path, freq: f32, seconds: f32) {
         push16(&mut data, (s.clamp(-1.0, 1.0) * 32767.0) as i16 as u16);
     }
     let _ = std::fs::write(path, data);
+}
+
+#[cfg(test)]
+mod tests {
+    use nikgob_core::model::{ArtistId, ReleaseId, Uuid};
+    use nikgob_recs::{Catalog, Mood, Play, Recs, Taste, TasteInput, TrackInfo, VectorIndex};
+
+    use super::*;
+
+    /// The demo's vectors make three style mixes and every mood its own
+    /// tracks (what the home screenshots show).
+    #[test]
+    fn the_demo_sounds_make_three_styles_and_six_moods() {
+        let mut infos = Vec::new();
+        let mut index = VectorIndex::new();
+        let mut events = Vec::new();
+        for (i, (_, _, _, _, _, tracks)) in ALBUMS.iter().enumerate() {
+            for n in 0..tracks.len() {
+                let id = TrackId(Uuid::from_u128((i * 100 + n + 1) as u128));
+                let artist = ArtistId(Uuid::from_u128(1_000 + i as u128));
+                infos.push(TrackInfo::new(id, vec![artist], Some(ReleaseId(Uuid::from_u128(2_000 + i as u128)))));
+                let v = vector(STYLES[i], i, n);
+                index.insert(id, <[f32; nikgob_recs::DIM]>::try_from(v.as_slice()).unwrap());
+                events.push(Play {
+                    track: id,
+                    ts: 1_000_000,
+                    kind: EventType::Complete,
+                    position_ms: None,
+                });
+            }
+        }
+        let catalog = Catalog::new(infos);
+        let taste = Taste::build(&catalog, &TasteInput { events, ..TasteInput::default() }, 2_000_000);
+        let recs = Recs::new(&catalog, &taste, &index);
+        let styles = recs.style_mixes(&[], 1);
+        assert_eq!(styles.len(), 3, "{:?}", styles.iter().map(|s| s.size).collect::<Vec<_>>());
+        for m in Mood::ALL {
+            assert!(recs.mood_pool(m).len() >= 20, "{m:?}");
+        }
+    }
 }

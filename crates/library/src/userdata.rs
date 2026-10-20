@@ -12,6 +12,9 @@
 //!   (no file to rebuild them from): their ids and their remote ids and
 //!   metadata per service, so an import recreates them under the same ids.
 //!   Written only once there is something to write.
+//! * `rec_feedback.json` - «Не рекомендовать» marks (tracks, artists and the
+//!   songs and artists of the services), cleared ones included; merged by
+//!   their time like likes. Written only once there is something to write.
 //!
 //! Every file is written to a temp file and renamed into place. Import merges
 //! with last-writer-wins per row: the copy with the larger `updated_at` wins;
@@ -33,7 +36,7 @@ use crate::error::{LibraryError, Result};
 use crate::events::insert_event;
 use crate::playlists::{ENTRY_COLS, PLAYLIST_COLS, entry_from_row, playlist_from_row};
 use crate::streams::{refresh_in_library_all, stream_refs_in, upsert_stream_track_in};
-use crate::types::{ExportReport, ImportReport};
+use crate::types::{ExportReport, ImportReport, RecFeedback};
 use crate::util::{meta_get, meta_set};
 
 /// Format version written into the JSON files.
@@ -43,6 +46,7 @@ pub const PLAYLISTS_FILE: &str = "playlists.json";
 pub const LIKES_FILE: &str = "likes.json";
 pub const EVENTS_FILE: &str = "events.jsonl";
 pub const STREAMS_FILE: &str = "streams.json";
+pub const REC_FEEDBACK_FILE: &str = "rec_feedback.json";
 
 #[derive(Serialize, Deserialize)]
 struct PlaylistsFile {
@@ -69,6 +73,12 @@ struct StreamDoc {
     track_id: TrackId,
     /// One per service the track streams from.
     refs: Vec<StreamTrack>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RecFeedbackFile {
+    version: u32,
+    feedback: Vec<RecFeedback>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -138,10 +148,11 @@ impl Library {
         let events_path = dir.join(EVENTS_FILE);
 
         // One snapshot for everything.
-        let (playlists, likes, streams, events_done, event_count) = self.read(|c| {
+        let (playlists, likes, streams, feedback, events_done, event_count) = self.read(|c| {
             let playlists = read_playlists(c)?;
             let likes = read_likes(c)?;
             let streams = read_streams(c)?;
+            let feedback = read_feedback(c)?;
             let event_count: u64 =
                 c.query_row("SELECT COUNT(*) FROM event", [], |r| r.get::<_, i64>(0))? as u64;
             let up_to_date = events_path.exists()
@@ -150,7 +161,7 @@ impl Library {
             if !up_to_date {
                 atomic_with(&events_path, |w| write_events(c, w))?;
             }
-            Ok((playlists, likes, streams, up_to_date, event_count))
+            Ok((playlists, likes, streams, feedback, up_to_date, event_count))
         })?;
 
         let mut report = ExportReport {
@@ -159,8 +170,17 @@ impl Library {
             likes: likes.len(),
             events: event_count as usize,
             stream_tracks: streams.len(),
+            rec_feedback: feedback.len(),
             files_written: usize::from(!events_done),
         };
+        let feedback_path = dir.join(REC_FEEDBACK_FILE);
+        if !feedback.is_empty() || feedback_path.exists() {
+            let json = serde_json::to_vec_pretty(&RecFeedbackFile {
+                version: USERDATA_VERSION,
+                feedback,
+            })?;
+            report.files_written += usize::from(write_atomic(&feedback_path, &json)?);
+        }
         let streams_path = dir.join(STREAMS_FILE);
         if !streams.is_empty() || streams_path.exists() {
             let json = serde_json::to_vec_pretty(&StreamsFile {
@@ -196,10 +216,12 @@ impl Library {
         let playlists: Option<PlaylistsFile> = read_json(&dir.join(PLAYLISTS_FILE))?;
         let likes: Option<LikesFile> = read_json(&dir.join(LIKES_FILE))?;
         let streams: Option<StreamsFile> = read_json(&dir.join(STREAMS_FILE))?;
+        let feedback: Option<RecFeedbackFile> = read_json(&dir.join(REC_FEEDBACK_FILE))?;
         for version in [
             playlists.as_ref().map(|f| f.version),
             likes.as_ref().map(|f| f.version),
             streams.as_ref().map(|f| f.version),
+            feedback.as_ref().map(|f| f.version),
         ]
         .into_iter()
         .flatten()
@@ -247,6 +269,9 @@ impl Library {
             }
             for like in likes.iter().flat_map(|f| &f.likes) {
                 merge_like(tx, like, &mut report)?;
+            }
+            for f in feedback.iter().flat_map(|f| &f.feedback) {
+                merge_feedback(tx, f, &mut report)?;
             }
             for event in &events {
                 if insert_event(tx, event)? {
@@ -340,6 +365,39 @@ fn read_likes(conn: &Connection) -> Result<Vec<Like>> {
         }
     }
     Ok(out)
+}
+
+fn read_feedback(conn: &Connection) -> Result<Vec<RecFeedback>> {
+    let mut stmt = conn.prepare(
+        "SELECT target_kind, target_id, dislike, updated_at FROM rec_feedback
+          ORDER BY target_kind, target_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(RecFeedback {
+            target_kind: r.get(0)?,
+            target_id: r.get(1)?,
+            dislike: r.get(2)?,
+            updated_at: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The later mark wins (the stored one on a tie).
+fn merge_feedback(conn: &Connection, f: &RecFeedback, report: &mut ImportReport) -> Result<()> {
+    let n = conn.execute(
+        "INSERT INTO rec_feedback(target_kind, target_id, dislike, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(target_kind, target_id) DO UPDATE SET dislike = excluded.dislike,
+            updated_at = excluded.updated_at
+          WHERE excluded.updated_at > rec_feedback.updated_at",
+        params![f.target_kind, f.target_id, f.dislike, f.updated_at],
+    )?;
+    if n > 0 {
+        report.applied += 1;
+    } else {
+        report.skipped += 1;
+    }
+    Ok(())
 }
 
 fn write_events(conn: &Connection, w: &mut BufWriter<File>) -> io::Result<()> {

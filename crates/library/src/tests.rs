@@ -1675,6 +1675,30 @@ fn import_ties_prefer_tombstones_then_device() {
 }
 
 #[test]
+fn rec_feedback_travels_with_the_user_data() {
+    let a = lib();
+    let dir = tempfile::tempdir().unwrap();
+    a.export_userdata(dir.path()).unwrap();
+    assert!(!dir.path().join(crate::REC_FEEDBACK_FILE).exists(), "nothing to write yet");
+    a.set_rec_feedback("track", "t1", true).unwrap();
+    a.set_rec_feedback("artist", "a1", true).unwrap();
+    a.set_rec_feedback("artist", "a1", false).unwrap();
+    let rep = a.export_userdata(dir.path()).unwrap();
+    assert_eq!(rep.rec_feedback, 2, "cleared marks travel too");
+
+    let b = lib();
+    b.set_rec_feedback("track", "t2", true).unwrap();
+    b.import_userdata(dir.path()).unwrap();
+    assert!(b.is_rec_disliked("track", "t1").unwrap());
+    assert!(!b.is_rec_disliked("artist", "a1").unwrap());
+    assert!(b.is_rec_disliked("track", "t2").unwrap(), "its own mark stays");
+    // A newer local undo is not overwritten by the older mark.
+    b.set_rec_feedback("track", "t1", false).unwrap();
+    b.import_userdata(dir.path()).unwrap();
+    assert!(!b.is_rec_disliked("track", "t1").unwrap());
+}
+
+#[test]
 fn import_rejects_newer_format_and_tolerates_bad_event_lines() {
     let lib = lib();
     let dir = tempfile::tempdir().unwrap();

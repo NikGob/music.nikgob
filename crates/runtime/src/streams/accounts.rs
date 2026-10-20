@@ -93,6 +93,7 @@ impl Worker {
                 }
                 self.login_toast(service, &input);
                 self.pull_likes(service);
+                self.discover_signed_in(service);
             }
             Err(e) => {
                 log::warn!("{service}: login failed: {e}");

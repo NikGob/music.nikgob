@@ -289,7 +289,7 @@ impl Worker {
     }
 
     /// A row with its library track looked up.
-    fn stream_row_auto(&self, t: &StreamTrack) -> v::StreamTrackRow {
+    pub(crate) fn stream_row_auto(&self, t: &StreamTrack) -> v::StreamTrackRow {
         self.stream_row(t, self.library_track_of(t))
     }
 

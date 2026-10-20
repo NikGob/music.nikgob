@@ -4745,6 +4745,7 @@ dependencies = [
  "nikgob-deezer",
  "nikgob-library",
  "nikgob-md3e",
+ "nikgob-recs",
  "nikgob-runtime",
  "nikgob-spotify",
  "nikgob-view",

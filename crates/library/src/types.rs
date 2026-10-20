@@ -288,6 +288,8 @@ pub struct ExportReport {
     pub events: usize,
     /// Stream-only tracks written to `streams.json` (liked or in playlists).
     pub stream_tracks: usize,
+    /// «Не рекомендовать» marks written to `rec_feedback.json`.
+    pub rec_feedback: usize,
     /// Files whose content actually changed on disk.
     pub files_written: usize,
 }

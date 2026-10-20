@@ -366,9 +366,7 @@ impl FileAnalysis {
 
     /// The sound vectors of the library (files and streams), z-normalised
     /// neighbours via [`VectorIndex::nearest`]; filled at start and as the
-    /// analysis goes.
-    // Queried by the recommendations (stage 4, phase 2).
-    #[allow(dead_code)]
+    /// analysis goes. The recommendations copy it into their snapshot.
     pub(crate) fn index(&self) -> &SoundIndex {
         &self.index
     }

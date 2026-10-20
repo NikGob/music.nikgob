@@ -380,6 +380,8 @@ impl Resolver {
             artist_mixes: h.artists.iter().map(|a| self.artist(a)).collect(),
             long_unplayed: h.long_unplayed.iter().map(|r| self.release(r)).collect(),
             recently_added: h.recently_added.iter().map(|r| self.release(r)).collect(),
+            // The recommendations' parts come from `recs`.
+            ..v::HomeView::default()
         }
     }
 }

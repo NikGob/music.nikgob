@@ -25,6 +25,8 @@ pub(crate) struct Session {
     pub queue: Snapshot,
     /// Where in the current track, in milliseconds.
     pub position_ms: u64,
+    /// The radio the queue plays, if any (it goes on after a restart).
+    pub radio: Option<crate::recs::RadioSave>,
 }
 
 impl Session {
@@ -71,6 +73,9 @@ impl Worker {
             return;
         }
         self.queue.restore(&saved.queue);
+        if let Some(radio) = saved.radio {
+            self.radio_restore(radio);
+        }
         if self.queue.current().is_some() {
             let at = Duration::from_millis(saved.position_ms);
             self.resume_at = Some(at);
@@ -94,7 +99,9 @@ impl Worker {
     /// Writes `session.json` when something in it changed.
     pub(crate) fn save_session(&mut self) {
         let Some(path) = self.session_path.clone() else { return };
+        let radio = self.radio_save();
         let session = Session {
+            radio,
             volume: Some(self.volume),
             muted: self.muted,
             queue: self.queue.snapshot(),
