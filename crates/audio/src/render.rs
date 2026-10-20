@@ -537,6 +537,63 @@ impl Render for Renderer {
 mod tests {
     use super::*;
 
+    /// A renderer at 48 kHz stereo with an item started, and its feeds.
+    fn playing() -> (Renderer, Producer<f32>, Arc<Shared>) {
+        let sh = Arc::new(Shared::new());
+        let (mut ring_tx, ring_rx) = rtrb::RingBuffer::new(1 << 14);
+        let (mut marks_tx, marks_rx) = rtrb::RingBuffer::new(16);
+        let (events_tx, _events_rx) = rtrb::RingBuffer::new(16);
+        let mut r = Renderer::new(
+            ring_rx,
+            marks_rx,
+            events_tx,
+            Arc::clone(&sh),
+            Arc::new(OnceLock::new()),
+        );
+        r.configure(48_000, 2);
+        let cfg_gen = sh.cfg_gen.load(Ordering::Acquire);
+        marks_tx
+            .push(Mark {
+                at: 0,
+                flush: true,
+                cfg_gen,
+                gen_id: 1,
+                ended: None,
+                start: Some(Start {
+                    id: 7,
+                    pos_ns: 0,
+                    announce: true,
+                }),
+            })
+            .unwrap();
+        // One full block of audio.
+        for _ in 0..512 {
+            ring_tx.push(0.25).unwrap();
+        }
+        (r, ring_tx, sh)
+    }
+
+    #[test]
+    fn a_block_that_finds_the_ring_short_counts_an_underrun() {
+        let (mut r, mut ring_tx, sh) = playing();
+        let mut out = vec![1.0f32; 512];
+        r.render(&mut out);
+        assert_eq!(sh.underruns.load(Ordering::Relaxed), 0, "a full block");
+
+        // Half a block ready: the rest is silence and one underrun.
+        for _ in 0..256 {
+            ring_tx.push(0.25).unwrap();
+        }
+        let mut out = vec![1.0f32; 512];
+        r.render(&mut out);
+        assert_eq!(sh.underruns.load(Ordering::Relaxed), 1);
+        assert!(out[256..].iter().all(|&s| s == 0.0));
+
+        // Nothing ready at all: another one.
+        r.render(&mut out);
+        assert_eq!(sh.underruns.load(Ordering::Relaxed), 2);
+    }
+
     #[test]
     fn limiter_is_transparent_then_bounded_and_monotonic() {
         assert_eq!(soft_limit(0.5), 0.5);

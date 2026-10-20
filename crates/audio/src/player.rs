@@ -21,12 +21,12 @@ use crate::backend::{Backend, BackendNote, DeviceBackend, OfflineBackend, Render
 use crate::offline::{OfflineDevice, OfflineOptions};
 use crate::pipeline::{DecCmd, DecEvent, Decoder};
 use crate::render::{CbEvent, Mark, Renderer};
-use crate::shared::{ManualClock, PlayClock, Shared, volume_curve};
+use crate::shared::{LogLimiter, ManualClock, PlayClock, Shared, volume_curve};
 use crate::tap::VisualizerTap;
 use crate::types::{Event, PlayItem, SpawnError};
 
 /// Samples the ring can hold (about 5 s of 48 kHz stereo; the decoder keeps
-/// it only about 300 ms full).
+/// it only about 1 s full).
 const RING_SAMPLES: usize = 1 << 19;
 const MARK_QUEUE: usize = 1024;
 const EVENT_QUEUE: usize = 512;
@@ -39,6 +39,8 @@ const PAUSE_GRACE: Duration = Duration::from_millis(150);
 /// After playback ends, keep the device running this long (so its buffer
 /// drains to silence) before pausing it.
 const IDLE_PAUSE_DELAY: Duration = Duration::from_millis(400);
+/// At most one "the output ran dry" warning this often.
+const UNDERRUN_LOG_EVERY: Duration = Duration::from_secs(10);
 
 /// A callback for the application's event loop: called (from the engine's
 /// threads) every time an [`Event`] is queued, e.g. to request a repaint.
@@ -282,7 +284,7 @@ impl Player {
     }
 
     /// Applies each item's `gain_db` (or ignores it). The change is heard
-    /// after the audio already buffered (about 0.3 s) has played.
+    /// after the audio already buffered (about 1 s) has played.
     pub fn set_normalization(&self, on: bool) {
         self.inner.sh.normalization.store(on, Ordering::Relaxed);
     }
@@ -430,6 +432,8 @@ impl Parts {
             last_position: Instant::now(),
             last_maintain: Instant::now(),
             last_open_error: None,
+            underruns_seen: 0,
+            underrun_log: LogLimiter::new(UNDERRUN_LOG_EVERY),
         };
         std::thread::Builder::new()
             .name("nikgob-audio-control".into())
@@ -478,6 +482,9 @@ struct Control {
     last_position: Instant,
     last_maintain: Instant,
     last_open_error: Option<Instant>,
+    /// Underruns already reported (or seen) and the rate limit of the report.
+    underruns_seen: u64,
+    underrun_log: LogLimiter,
 }
 
 impl Control {
@@ -716,6 +723,8 @@ impl Control {
             }
         }
 
+        self.report_underruns(now);
+
         let maintain_every = if self.device_paused {
             Duration::from_secs(3)
         } else {
@@ -724,6 +733,19 @@ impl Control {
         if now.duration_since(self.last_maintain) >= maintain_every {
             self.last_maintain = now;
             self.maintain();
+        }
+    }
+
+    /// Logs the callback blocks that found the ring short (the callback only
+    /// bumps an atomic counter), at most once per [`UNDERRUN_LOG_EVERY`].
+    fn report_underruns(&mut self, now: Instant) {
+        let total = self.sh.underruns.load(Ordering::Relaxed);
+        let new = total.saturating_sub(self.underruns_seen);
+        self.underruns_seen = total;
+        if let Some(n) = self.underrun_log.record(new, now) {
+            log::warn!(
+                "audio: the output ran dry {n} time(s) since the last report ({total} in all): the decoder fell behind"
+            );
         }
     }
 

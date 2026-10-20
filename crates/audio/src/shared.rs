@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::tap::VisualizerTap;
 
@@ -170,6 +170,43 @@ impl Shared {
     }
 }
 
+/// Counts occurrences of something worth a warning and says when to report
+/// them: at most once per `every`, with everything counted since the last
+/// report. Not for the audio callback (it is used by the threads that log).
+#[derive(Debug)]
+pub(crate) struct LogLimiter {
+    every: Duration,
+    last: Option<Instant>,
+    pending: u64,
+}
+
+impl LogLimiter {
+    pub(crate) const fn new(every: Duration) -> Self {
+        Self {
+            every,
+            last: None,
+            pending: 0,
+        }
+    }
+
+    /// Adds `n` occurrences seen at `now` (0 just asks). Returns how many to
+    /// report when a report is due, and starts a new period.
+    pub(crate) fn record(&mut self, n: u64, now: Instant) -> Option<u64> {
+        self.pending = self.pending.saturating_add(n);
+        if self.pending == 0 {
+            return None;
+        }
+        let due = self
+            .last
+            .is_none_or(|t| now.saturating_duration_since(t) >= self.every);
+        if !due {
+            return None;
+        }
+        self.last = Some(now);
+        Some(std::mem::take(&mut self.pending))
+    }
+}
+
 /// Perceptual volume curve: slider position 0..1 to linear gain.
 pub(crate) fn volume_curve(v: f32) -> f32 {
     let v = if v.is_finite() {
@@ -223,6 +260,21 @@ mod tests {
         assert!((volume_curve(0.5) - 0.125).abs() < 1e-6);
         assert_eq!(volume_curve(2.0), 1.0);
         assert_eq!(volume_curve(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn log_limiter_reports_once_per_period_with_everything_counted() {
+        let every = Duration::from_secs(10);
+        let mut l = LogLimiter::new(every);
+        let t0 = Instant::now();
+        assert_eq!(l.record(0, t0), None, "nothing to report");
+        assert_eq!(l.record(1, t0), Some(1), "the first one goes out at once");
+        assert_eq!(l.record(2, t0 + Duration::from_secs(3)), None);
+        assert_eq!(l.record(0, t0 + Duration::from_secs(9)), None);
+        // The period is over: the held-back ones go out, even with no new one.
+        assert_eq!(l.record(0, t0 + every), Some(2));
+        assert_eq!(l.record(0, t0 + every * 3), None);
+        assert_eq!(l.record(4, t0 + every * 3), Some(4));
     }
 
     #[test]
