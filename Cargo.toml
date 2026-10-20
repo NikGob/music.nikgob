@@ -8,7 +8,7 @@ default-members = ["crates/app"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
-license = "MIT"
+license = "PolyForm-Strict-1.0.0"
 publish = false
 
 [workspace.dependencies]
@@ -45,6 +45,12 @@ dbg_macro = "warn"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# The audio engine's per-sample loops (decoder thread and the realtime
+# callback) run 2-4x slower unoptimised, which eats into the decoded-audio
+# headroom of a dev build; optimise it even in dev.
+[profile.dev.package.nikgob-audio]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

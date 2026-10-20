@@ -260,7 +260,8 @@ fn volume_uses_a_cubic_curve_without_steps() {
 #[test]
 fn normalization_applies_item_gain_only_when_enabled() {
     let dir = tmp();
-    let data = vec![0.4f32; RATE as usize * 4];
+    // 4 s of stereo.
+    let data = vec![0.4f32; RATE as usize * 8];
     let p = path(&dir, "c.wav");
     write_wav_f32(&p, RATE, 2, &data);
     let mut rig = rig(RATE);
@@ -272,8 +273,8 @@ fn normalization_applies_item_gain_only_when_enabled() {
         out[out.len() - 10]
     );
     rig.player.set_normalization(false);
-    // Audible after the already-buffered ~300 ms.
-    rig.device.render(RATE as usize / 2);
+    // Audible after the already-buffered ~1 s.
+    rig.device.render(RATE as usize * 3 / 2);
     let out = rig.device.render(RATE as usize / 2);
     assert!(
         (out[out.len() - 10] - 0.4).abs() < 1e-3,
@@ -614,11 +615,14 @@ fn device_change_mid_playback_carries_on_from_the_same_position() {
         (crossings as f64 - want).abs() <= 1.5,
         "{crossings} vs {want}"
     );
-    // No spurious start/track events from the reconfiguration.
-    let ev: Vec<_> = rig
-        .events
-        .try_iter()
-        .filter(|e| !matches!(e, Event::Position { .. }))
-        .collect();
+    // No spurious start/track events from the reconfiguration. The engine
+    // can render all of this before the control thread has passed on even
+    // the `Started`, so wait for that, then give stray ones a moment.
+    let mut ev = wait_event(&rig.events, Duration::from_secs(2), |e| {
+        matches!(e, Event::Started { .. })
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    ev.extend(rig.events.try_iter());
+    ev.retain(|e| !matches!(e, Event::Position { .. }));
     assert_eq!(ev.len(), 1, "{ev:?}");
 }

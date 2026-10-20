@@ -54,20 +54,27 @@
 //!   exact sample, so `TrackChanged` and position are sample-accurate.
 //! * **Decoder thread** (`pipeline`): opens items (streams on an opener thread), decodes, resamples with
 //!   rubato's FFT resampler, maps channels, applies the normalization gain,
-//!   mixes crossfades, and keeps about 300 ms of audio in the ring. The next
+//!   mixes crossfades, and keeps about 1 s of audio in the ring. The next
 //!   item is opened and its resampler built ahead of time, so the hand-over
 //!   at the end of an item is just "keep producing".
 //! * **Control thread** ([`Player`]): owns the `fastframe_audio::Output`,
 //!   calls `pause()`/`resume()`/`maintain()`, and turns reports into
 //!   [`Event`]s.
 //!
-//! Latency: the ring adds no latency beyond what is buffered (about 300 ms
+//! Latency: the ring adds no latency beyond what is buffered (about 1 s
 //! ahead, but seeks, replaces and device changes flush it at once, so they are
 //! audible within a callback plus the 8 ms de-click ramp). Volume changes are
 //! heard within one callback; normalization changes after the buffered
-//! 300 ms. [`Player::position`] is derived from fastframe's played clock
+//! second. [`Player::position`] is derived from fastframe's played clock
 //! (device latency already subtracted) and the position anchor published by
 //! the callback, so it is smooth and independent of event timing.
+//!
+//! Dropouts: a callback block that finds the ring short while an item plays
+//! bumps an atomic counter ([`Player::underruns`]); the control thread logs
+//! new ones as a warning at most every 10 s. The decoder thread warns (also
+//! rate-limited) when one production step held it up for 150 ms or more,
+//! with how much audio was buffered at the time, which tells a network or
+//! disk stall from a CPU that cannot keep up.
 //!
 //! # Not covered
 //!

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use rtrb::Producer;
@@ -16,14 +16,23 @@ use crate::channels;
 use crate::decode::{self, FrameSource, PcmFrames, ReadStatus};
 use crate::render::{Mark, Start};
 use crate::resample::StreamResampler;
-use crate::shared::{Shared, frames_to_ns, ns_to_frames};
+use crate::shared::{LogLimiter, Shared, frames_to_ns, ns_to_frames};
 use crate::types::{DecodeError, ItemSource, PlayItem};
 
 /// Frames produced per step. Small enough that commands are answered
 /// promptly, large enough to keep per-chunk overhead negligible.
 const CHUNK_FRAMES: usize = 1024;
-/// How much audio the decoder keeps ready in the ring.
-const FILL_TARGET_MS: u64 = 300;
+/// How much audio the decoder keeps ready in the ring. This is the headroom
+/// against everything that can hold the decoder thread up: a stream read
+/// waiting for the network, a slow disk, a busy CPU. Seeks, replaces and
+/// stops flush the ring, so it costs no latency there; only a normalization
+/// toggle is heard this much later.
+const FILL_TARGET_MS: u64 = 1000;
+/// One decoder step taking longer than this is logged (rate-limited): it
+/// is what eats the headroom above and the evidence when the output ran dry.
+const SLOW_STEP: Duration = Duration::from_millis(150);
+/// At most one slow-step warning this often.
+const SLOW_STEP_LOG_EVERY: Duration = Duration::from_secs(10);
 
 /// Commands for the decoder thread.
 pub(crate) enum DecCmd {
@@ -42,7 +51,8 @@ pub(crate) enum DecCmd {
     Stop {
         gen_id: u64,
     },
-    /// An [`ItemSource::Stream`] finished opening on its opener thread.
+    /// An item (a stream, or a file set as next) finished opening on its
+    /// opener thread.
     Opened {
         token: u64,
         result: Result<Item, (u64, DecodeError)>,
@@ -418,9 +428,13 @@ pub(crate) struct Decoder {
     pending_play: Option<(u64, u64, u64)>,
     /// A seek of that item asked for meanwhile: `(position, gen_id)`.
     pending_seek: Option<(Duration, u64)>,
-    /// A `SetNext` of a stream waiting for its opener (token). While it is
-    /// set, the current item does not end into nothing: it waits.
+    /// A `SetNext` of a file or stream waiting for its opener (token). While
+    /// it is set, the current item does not end into nothing: it waits.
     pending_next: Option<u64>,
+    /// That pending next item is a local file: it opens in moments, so the
+    /// current item holds just short of its end for it (see
+    /// [`Self::hold_for_next`]).
+    pending_next_file: bool,
     events: Sender<DecEvent>,
     sh: Arc<Shared>,
     ring: Producer<f32>,
@@ -442,6 +456,9 @@ pub(crate) struct Decoder {
     buf_b: Vec<f32>,
     /// Wait only briefly next time: a live source had nothing yet.
     short_wait: bool,
+    /// Rate limit of the slow-step warning: when it last went out, and the
+    /// slow steps since then.
+    slow_log: LogLimiter,
 }
 
 enum Step {
@@ -466,6 +483,7 @@ impl Decoder {
             pending_play: None,
             pending_seek: None,
             pending_next: None,
+            pending_next_file: false,
             events,
             sh,
             ring,
@@ -482,6 +500,7 @@ impl Decoder {
             buf: Vec::with_capacity(CHUNK_FRAMES * 2),
             buf_b: Vec::with_capacity(CHUNK_FRAMES * 2),
             short_wait: false,
+            slow_log: LogLimiter::new(SLOW_STEP_LOG_EVERY),
         }
     }
 
@@ -499,7 +518,10 @@ impl Decoder {
                 }
             }
             self.check_config();
+            let buffered = self.buffered_ms();
+            let began = Instant::now();
             let step = self.pump();
+            self.note_step_time(began, buffered);
             self.sh.decoder_idle.store(
                 self.cur.is_none() && self.xfade.is_none(),
                 Ordering::Release,
@@ -566,7 +588,7 @@ impl Decoder {
         true
     }
 
-    /// Opens a stream item on its own thread; the result comes back as
+    /// Opens an item on its own thread; the result comes back as
     /// [`DecCmd::Opened`] with the returned token. Counted as a command in
     /// flight until then (the offline device waits for it).
     fn open_async(&mut self, item: PlayItem) -> u64 {
@@ -680,8 +702,12 @@ impl Decoder {
     }
 
     fn set_next(&mut self, item: PlayItem) {
-        if item.source.is_stream() {
+        // Files open on the opener thread too: probing one (a cold disk, a
+        // virus scanner, a big embedded cover) can take longer than the
+        // buffered audio, and this runs while the current item plays.
+        if !matches!(item.source, ItemSource::Pcm(_)) {
             self.next = None;
+            self.pending_next_file = matches!(item.source, ItemSource::File(_));
             self.pending_next = Some(self.open_async(item));
             return;
         }
@@ -718,7 +744,7 @@ impl Decoder {
             self.pending_seek = Some((pos, gen_id));
             return;
         }
-        // The callback trails the decoder by up to ~300 ms, so the item the
+        // The callback trails the decoder by up to ~1 s, so the item the
         // listener saw may already be over here. Seeking its successor to a
         // position meant for another track would jump the wrong item (and
         // switch to it without an event).
@@ -816,9 +842,7 @@ impl Decoder {
             channels,
             gen_id,
         };
-        let target = u64::from(rate) * channels as u64 * FILL_TARGET_MS / 1000;
-        let ceiling = (self.ring_capacity / 2) as u64;
-        self.fill_target = target.min(ceiling) as usize;
+        self.fill_target = fill_target(rate, channels, self.ring_capacity);
 
         if let Some(x) = self.xfade.take() {
             self.cur = Some(x.to);
@@ -866,6 +890,32 @@ impl Decoder {
 
     // ----- production -----------------------------------------------------
 
+    /// Milliseconds of audio ready in the ring.
+    fn buffered_ms(&self) -> u64 {
+        let per_ms = u64::from(self.cfg.rate) * self.cfg.channels as u64 / 1000;
+        if per_ms == 0 {
+            return 0;
+        }
+        (self.ring_capacity - self.ring.slots()) as u64 / per_ms
+    }
+
+    /// Warns (rate-limited) when one production step held the thread up long
+    /// enough to matter: a stream read waiting for the network, a stalled
+    /// disk, a starved CPU. With `buffered` ms ready before it, a step longer
+    /// than that is a dropout.
+    fn note_step_time(&mut self, began: Instant, buffered: u64) {
+        let took = began.elapsed();
+        if took < SLOW_STEP || self.cur.is_none() {
+            return;
+        }
+        if let Some(n) = self.slow_log.record(1, Instant::now()) {
+            log::warn!(
+                "audio: decoding stalled for {} ms with {buffered} ms buffered ({n} slow step(s) since the last warning)",
+                took.as_millis()
+            );
+        }
+    }
+
     fn pump(&mut self) -> Step {
         self.short_wait = false;
         if self.cfg.rate == 0 || self.cur.is_none() {
@@ -912,6 +962,10 @@ impl Decoder {
             }
         }
         let want = want.max(1) as usize;
+        if self.hold_for_next(want) {
+            self.short_wait = true;
+            return Step::Idle;
+        }
         let normalization = self.sh.normalization.load(Ordering::Relaxed);
         self.buf.clear();
         let Some(cur) = self.cur.as_mut() else {
@@ -950,6 +1004,26 @@ impl Decoder {
                 Step::Worked
             }
         }
+    }
+
+    /// A local next file is still opening and the current item is about to
+    /// run out: wait for it a moment instead of reading on, so the stream can
+    /// still flow on into it through the same resampler (a continuous join),
+    /// as it did when files were opened on this thread. A stream that is
+    /// still opening is not waited for here: that can take seconds, and the
+    /// wait belongs at the very end (`StreamRead::Eof`), not inside the music.
+    fn hold_for_next(&self, want: usize) -> bool {
+        if self.pending_next.is_none() || !self.pending_next_file {
+            return false;
+        }
+        // The source reports its end once fewer than `want` frames are
+        // ready; the resampler's delay and a whole packet may still be
+        // pending behind that.
+        let margin = (want + 4 * CHUNK_FRAMES) as u64 + u64::from(self.cfg.rate) / 20;
+        self.cur
+            .as_ref()
+            .and_then(|c| c.remaining(self.cfg))
+            .is_some_and(|rem| rem <= margin)
     }
 
     /// Starts overlapping the prepared next item with the tail of the
@@ -1140,6 +1214,14 @@ impl Decoder {
     }
 }
 
+/// Samples the decoder keeps in the ring at `rate` and `channels`: about
+/// [`FILL_TARGET_MS`], but never more than half the ring.
+fn fill_target(rate: u32, channels: usize, ring_capacity: usize) -> usize {
+    let target = u64::from(rate) * channels as u64 * FILL_TARGET_MS / 1000;
+    let ceiling = (ring_capacity / 2) as u64;
+    target.min(ceiling) as usize
+}
+
 fn apply_gain(buf: &mut [f32], gain: f32) {
     if gain != 1.0 {
         for s in buf {
@@ -1207,6 +1289,20 @@ mod tests {
                 StreamRead::Eof => return (out.len() / 2) as u64,
             }
         }
+    }
+
+    #[test]
+    fn the_ring_is_kept_a_second_ahead() {
+        // The engine's ring (2^19 samples) holds a full second at every
+        // common rate, so the target is not cut by the half-ring ceiling.
+        let ring = 1 << 19;
+        for rate in [44_100u32, 48_000, 96_000] {
+            let samples = fill_target(rate, 2, ring);
+            let ms = samples as u64 * 1000 / (u64::from(rate) * 2);
+            assert!(ms >= 1000, "{rate} Hz: only {ms} ms ahead");
+        }
+        // A small ring still leaves half of itself free for the producer.
+        assert_eq!(fill_target(48_000, 2, 4096), 2048);
     }
 
     #[test]
