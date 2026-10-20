@@ -1326,13 +1326,9 @@ fn thumbnail_info(ui: &mut Ui, cover: Rect, state: &ViewState, chrome: &mut Chro
     let rect = Rect::from_min_max(pos2(cover.right() + 16.0, cover.top()), pos2(ui.max_rect().right(), cover.bottom()));
     let mut tui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("mega-title"));
     tui.add(egui::Label::new(TypeRole::TitleLarge.emphasized().rich(&t.title, s.on_surface)).truncate());
-    let artist = tui.add(
-        egui::Label::new(TypeRole::TitleMedium.style().rich(&t.artist, s.on_surface_variant))
-            .truncate()
-            .sense(Sense::click()),
-    );
-    if artist.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-        chrome.nav = t.artist_id.map(nikgob_view::Route::Artist);
+    let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
+    if let Some(r) = super::artist_links::label(&mut tui, "mega-artists", &t.artist, &t.artists, format) {
+        chrome.nav = Some(r);
     }
 }
 
@@ -1385,8 +1381,10 @@ fn info(
                         );
                         r.on_hover_cursor(egui::CursorIcon::PointingHand)
                     };
-                    if link(ui, &t.artist).clicked() {
-                        chrome.nav = t.artist_id.map(nikgob_view::Route::Artist);
+                    // Each artist is a link of its own.
+                    let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
+                    if let Some(r) = super::artist_links::label(ui, "np-artists", &t.artist, &t.artists, format) {
+                        chrome.nav = Some(r);
                     }
                     if !compact && let Some(a) = &t.album {
                         ui.label(TypeRole::TitleMedium.style().rich(" · ", s.on_surface_variant));

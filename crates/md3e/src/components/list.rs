@@ -90,6 +90,9 @@ pub struct ListItemOutput {
     /// The ▶ over the leading image / number was clicked
     /// ([`ListItem::hover_play`]): play from this row with one click.
     pub play_clicked: bool,
+    /// The link of the supporting text clicked this frame
+    /// ([`ListItem::supporting_links`]), by index.
+    pub link_clicked: Option<usize>,
 }
 
 type TrailingFn<'a> = Box<dyn FnOnce(&mut Ui) + 'a>;
@@ -99,6 +102,7 @@ type TrailingFn<'a> = Box<dyn FnOnce(&mut Ui) + 'a>;
 pub struct ListItem<'a> {
     headline: String,
     supporting: Option<String>,
+    supporting_links: Vec<std::ops::Range<usize>>,
     supporting_lines: usize,
     leading: Leading,
     trailing_text: Option<String>,
@@ -120,6 +124,7 @@ impl<'a> ListItem<'a> {
         Self {
             headline: headline.into(),
             supporting: None,
+            supporting_links: Vec::new(),
             supporting_lines: 1,
             leading: Leading::None,
             trailing_text: None,
@@ -147,6 +152,14 @@ impl<'a> ListItem<'a> {
     /// A second line (72 dp row).
     pub fn supporting(mut self, text: impl Into<String>) -> Self {
         self.supporting = Some(text.into());
+        self
+    }
+
+    /// Parts of the supporting text (byte ranges) that are links of their
+    /// own, e.g. each artist of "A, B · альбом": hover underlines one,
+    /// a click is [`ListItemOutput::link_clicked`] instead of the row's.
+    pub fn supporting_links(mut self, links: Vec<std::ops::Range<usize>>) -> Self {
+        self.supporting_links = links;
         self
     }
 
@@ -290,7 +303,13 @@ impl<'a> ListItem<'a> {
         let lead = lead_rect
             .filter(|_| self.hover_play && self.enabled)
             .map(|r| ui.interact(r, id.with("lead-play"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand));
-        let show_play = lead.as_ref().is_some_and(|l| l.hovered() || response.hovered());
+        // The pointer on a link of the supporting text is on the row too
+        // (last frame's answer: the links are laid out with the text).
+        let link_hover_key = id.with("link-hover");
+        let link_hover = ctx.data(|d| d.get_temp::<bool>(link_hover_key)).unwrap_or(false);
+        let show_play = lead.as_ref().is_some_and(|l| l.hovered() || response.hovered() || link_hover);
+        let mut link_clicked = None;
+        let mut link_hover_now = false;
 
         // Trailing widgets: measured last frame, laid out at the end.
         let handle_w = if self.drag_handle { HANDLE_SLOT } else { 0.0 };
@@ -348,12 +367,11 @@ impl<'a> ListItem<'a> {
             )
             .clamped(rect);
             paint::container(ui.painter(), rect, radii, fill, egui::Stroke::NONE);
-            let layer = anim::fraction(
-                &ctx,
-                id.with("layer"),
-                common::state_target(&response, self.enabled, self.dragging || handle_active),
-                motion.fast_effects,
-            );
+            let mut target = common::state_target(&response, self.enabled, self.dragging || handle_active);
+            if target == 0.0 && link_hover && self.enabled {
+                target = state::HOVER;
+            }
+            let layer = anim::fraction(&ctx, id.with("layer"), target, motion.fast_effects);
             let layer_color = if selected {
                 s.on_secondary_container
             } else {
@@ -469,6 +487,10 @@ impl<'a> ListItem<'a> {
                     ..TextWrapping::default()
                 };
                 let g = ui.painter().layout_job(job);
+                if self.enabled {
+                    (link_clicked, link_hover_now) =
+                        super::links::interact_links(ui, id, &g, pos2(x, y), &self.supporting_links, variant);
+                }
                 ui.painter().galley(pos2(x, y), g, variant);
             }
 
@@ -497,6 +519,9 @@ impl<'a> ListItem<'a> {
             }
         }
 
+        if link_hover_now != link_hover {
+            ctx.data_mut(|d| d.insert_temp(link_hover_key, link_hover_now));
+        }
         let label = self.headline.clone();
         let (enabled, sel) = (self.enabled, selected);
         response.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, sel, &label));
@@ -505,6 +530,7 @@ impl<'a> ListItem<'a> {
             handle,
             rect,
             play_clicked: lead.as_ref().is_some_and(|l| l.clicked() && !l.double_clicked()),
+            link_clicked,
         }
     }
 }

@@ -257,6 +257,7 @@ impl Worker {
             PageData::Album(a) => {
                 view.title = a.title.clone();
                 view.subtitle = join_names(&a.artists);
+                view.subtitle_artists = a.artists.as_slice().into();
                 view.cover_url = a.cover_url.clone();
                 view.year = a.year;
                 view.release_type = Some(a.release_type);
@@ -299,7 +300,7 @@ impl Worker {
             remote: t.id.clone(),
             title: t.title.clone(),
             artist: t.artist_line(),
-            artist_id: t.artists.first().and_then(|a| a.id.clone()),
+            artists: t.artists.as_slice().into(),
             album: album.map(|a| a.title.clone()),
             album_id: album.and_then(|a| a.id.clone()),
             duration: t.duration_ms.map(Duration::from_millis),
@@ -351,7 +352,7 @@ impl Worker {
             remote: a.id.clone(),
             title: a.title.clone(),
             artist: join_names(&a.artists),
-            artist_id: a.artists.first().and_then(|ar| ar.id.clone()),
+            artists: a.artists.as_slice().into(),
             year: a.year,
             release_type: a.release_type,
             cover_url: a.cover_url.clone(),

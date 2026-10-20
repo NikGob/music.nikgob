@@ -8,12 +8,14 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod credit;
 mod streams;
 
 pub use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource, LyricsSync};
 pub use nikgob_core::model::{
     ArtistId, LikeTarget, PlaylistId, ReleaseId, ReleaseType, SourceKind, TrackId,
 };
+pub use credit::*;
 pub use streams::*;
 
 /// A cover image on disk plus the palette seed computed at import.
@@ -102,7 +104,8 @@ pub struct TrackRow {
     pub artist: String,
     pub album: Option<String>,
     pub release_id: Option<ReleaseId>,
-    pub artist_id: Option<ArtistId>,
+    /// Every credited artist (a link on each name of `artist`).
+    pub artists: ArtistLinks,
     pub disc_no: u32,
     pub track_no: u32,
     pub duration: Option<Duration>,
@@ -117,18 +120,33 @@ pub struct TrackRow {
     pub clip: bool,
 }
 
+impl TrackRow {
+    /// The first (main) credited artist.
+    pub fn artist_id(&self) -> Option<ArtistId> {
+        self.artists.main().copied()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReleaseCard {
     pub id: ReleaseId,
     pub title: String,
     pub artist: String,
-    pub artist_id: Option<ArtistId>,
+    /// Every credited artist (a link on each name of `artist`).
+    pub artists: ArtistLinks,
     pub year: Option<i32>,
     pub release_type: ReleaseType,
     pub cover: Option<Cover>,
     pub local_tracks: u32,
     pub total_tracks: Option<u32>,
     pub liked: bool,
+}
+
+impl ReleaseCard {
+    /// The first (main) credited artist.
+    pub fn artist_id(&self) -> Option<ArtistId> {
+        self.artists.main().copied()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -89,14 +89,21 @@ pub struct TrackRow {
     /// The active source is a local file.
     pub has_local: bool,
     pub liked: bool,
-    /// The first credited artist, when linked to an artist row.
-    pub artist_id: Option<nikgob_core::model::ArtistId>,
+    /// Every credited artist with the text between them (`artist` is its
+    /// display).
+    #[serde(default)]
+    pub credit: nikgob_core::model::ArtistCredit,
     /// The video id of the active source when it is a YouTube one.
     #[serde(default)]
     pub youtube_id: Option<String>,
 }
 
 impl TrackRow {
+    /// The first credited artist, when linked to an artist row.
+    pub fn artist_id(&self) -> Option<nikgob_core::model::ArtistId> {
+        self.credit.primary().and_then(|p| p.artist_id)
+    }
+
     /// What plays is a YouTube music video, not the song (a liked clip
     /// whose song YouTube Music does not have).
     pub fn is_clip(&self) -> bool {

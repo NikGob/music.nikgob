@@ -15,6 +15,7 @@
 mod macros;
 
 mod catalog;
+mod credits;
 mod db;
 mod derived;
 mod error;

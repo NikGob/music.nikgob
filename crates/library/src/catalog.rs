@@ -45,7 +45,7 @@ pub(crate) fn track_row_at(row: &Row<'_>, base: usize) -> rusqlite::Result<Track
         active_kind: get_opt_enum(row, base + 11)?,
         has_local: row.get(base + 12)?,
         liked: row.get(base + 13)?,
-        artist_id: get_opt_id(row, base + 14)?,
+        credit: get_json(row, base + 14)?,
         youtube_id: row.get(base + 15)?,
     })
 }
@@ -199,7 +199,7 @@ fn parse_id<T: std::str::FromStr>(s: &str) -> Result<T> {
     s.parse().map_err(|_| LibraryError::Invalid(s.to_owned()))
 }
 
-fn write_credit_links(
+pub(crate) fn write_credit_links(
     conn: &Connection,
     table: &str,
     owner_col: &str,

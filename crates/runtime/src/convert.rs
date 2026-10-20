@@ -120,7 +120,7 @@ impl Resolver {
             artist: r.artist.clone(),
             album: r.album.clone(),
             release_id: r.release_id,
-            artist_id: r.artist_id,
+            artists: (&r.credit).into(),
             disc_no: r.disc_no,
             track_no: r.track_no,
             duration: r.duration_ms.map(|ms| Duration::from_millis(u64::from(ms))),
@@ -142,7 +142,7 @@ impl Resolver {
             id: r.id,
             title: r.title.clone(),
             artist: r.artist_credit.display(),
-            artist_id: r.artist_credit.0.first().and_then(|p| p.artist_id),
+            artists: (&r.artist_credit).into(),
             year: r.year,
             release_type: r.release_type,
             cover: self.cover_for(Some(r.id), r.cover_ref.as_deref()),
@@ -168,7 +168,8 @@ impl Resolver {
             remote: remote.clone(),
             title: r.title.clone(),
             artist: r.artist_credit.display(),
-            artist_id: None,
+            // Library ids, not the service's: no links.
+            artists: v::StreamArtistLinks::default(),
             year: r.year,
             release_type: r.release_type,
             cover_url: self

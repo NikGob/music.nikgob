@@ -76,7 +76,7 @@ fn make_cover(path: &Path, rgb: [u8; 3], seed: u32) {
 }
 
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v8";
+pub const VERSION: &str = "seed-v9";
 
 /// The intro, instrumental gap and long line exercise both lyrics layouts.
 const DEMO_LRC: &str = "[00:03.00]Свет из окна ложится на пол
@@ -134,7 +134,20 @@ pub fn seed(lib: &Library, root: &Path) {
             }
         }
         for (n, title) in tracks.iter().enumerate() {
-            let mut t = Track::new(*title, credit.clone());
+            // "Song feat. Guest": a track of two artists, each with a page.
+            let (title, credit) = match title.split_once(" feat. ") {
+                Some((song, guest)) => {
+                    let g = artists
+                        .entry(guest)
+                        .or_insert_with(|| lib.upsert_artist(&Artist::new(guest)).expect("artist"))
+                        .clone();
+                    let mut both = credit.clone();
+                    both.push(" feat. ", guest, Some(g.id));
+                    (song, both)
+                }
+                None => (*title, credit.clone()),
+            };
+            let mut t = Track::new(title, credit);
             t.release_id = Some(r.id);
             t.track_no = n as u32 + 1;
             t.duration_ms = Some(24_000);

@@ -16,7 +16,7 @@ pub use nikgob_core::streaming::{
     Account, EntityKind, LoginInput, LoginPrompt, PlaylistSyncMode, RemoteId, Service, TrackKind,
 };
 
-use crate::{ArtistId, PlaylistId, ReleaseId, ReleaseType, TrackId};
+use crate::{ArtistId, PlaylistId, ReleaseId, ReleaseType, StreamArtistLinks, TrackId};
 
 // ---------------------------------------------------------------- accounts
 
@@ -58,7 +58,8 @@ pub struct StreamTrackRow {
     pub remote: RemoteId,
     pub title: String,
     pub artist: String,
-    pub artist_id: Option<RemoteId>,
+    /// Every artist the service lists (a link on each name of `artist`).
+    pub artists: StreamArtistLinks,
     pub album: Option<String>,
     pub album_id: Option<RemoteId>,
     pub duration: Option<Duration>,
@@ -82,13 +83,21 @@ pub struct StreamTrackRow {
     pub also_on: Vec<Service>,
 }
 
+impl StreamTrackRow {
+    /// The first (main) artist.
+    pub fn artist_id(&self) -> Option<&RemoteId> {
+        self.artists.main()
+    }
+}
+
 /// An album of a service (search hit, discography, artist page).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamAlbumCard {
     pub remote: RemoteId,
     pub title: String,
     pub artist: String,
-    pub artist_id: Option<RemoteId>,
+    /// Every artist the service lists (a link on each name of `artist`).
+    pub artists: StreamArtistLinks,
     pub year: Option<i32>,
     pub release_type: ReleaseType,
     pub cover_url: Option<String>,
@@ -97,6 +106,13 @@ pub struct StreamAlbumCard {
     pub release: Option<ReleaseId>,
     /// How much of it the library has ([`AlbumHave::label`]).
     pub have: AlbumHave,
+}
+
+impl StreamAlbumCard {
+    /// The first (main) artist.
+    pub fn artist_id(&self) -> Option<&RemoteId> {
+        self.artists.main()
+    }
 }
 
 /// How much of an album the library has, counted one way for every place
@@ -410,6 +426,8 @@ pub struct StreamPageView {
     pub title: String,
     /// Album artist, playlist owner; empty for an artist.
     pub subtitle: String,
+    /// Album: its artists (a link on each name of `subtitle`).
+    pub subtitle_artists: StreamArtistLinks,
     pub cover_url: Option<String>,
     pub year: Option<i32>,
     pub release_type: Option<ReleaseType>,
@@ -438,6 +456,7 @@ impl StreamPageView {
             error: None,
             title: String::new(),
             subtitle: String::new(),
+            subtitle_artists: StreamArtistLinks::default(),
             cover_url: None,
             year: None,
             release_type: None,

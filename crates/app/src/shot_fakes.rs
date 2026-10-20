@@ -274,7 +274,7 @@ fn discography(artist: &str, library: &[nikgob_view::ReleaseCard]) -> Discograph
             remote: a.id.clone(),
             title: a.title.clone(),
             artist: nikgob_core::streaming::join_names(&a.artists),
-            artist_id: a.artists.first().and_then(|x| x.id.clone()),
+            artists: a.artists.as_slice().into(),
             year: a.year,
             release_type: a.release_type,
             cover_url: a.cover_url.clone(),
