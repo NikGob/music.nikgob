@@ -16,6 +16,15 @@
 //! ready on its first poll. Audio is a
 //! short sine as 16-bit mono WAV, generated on the first read; its pitch
 //! depends on the track.
+//!
+//! Discovery (`related`, `radio`, `similar_artists`, `artist_top`,
+//! `artist_radio`) follows a fixed table of similar artists that leads to
+//! five more artists outside the listings (Аквариум, Наутилус Помпилиус,
+//! 椎名林檎, Justice, Sigur Rós; [`FakeService::discovery_tracks`]), and
+//! supports what the real flavour does: everything on YouTube, no track
+//! radio on Deezer, nothing on Spotify. The YouTube flavour keeps every
+//! track it opened "on disk" for `cached_audio`.
+//! [`FakeService::with_new_release`] adds a fresh single for new releases.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -41,14 +50,16 @@ const HOUR_MS: UnixMs = 3_600_000;
 /// tests see a head that is not the whole list).
 const LIKED_PAGE: usize = 2;
 
-struct AlbumData {
-    artist: &'static str,
-    key: &'static str,
-    title: &'static str,
+struct AlbumData<'a> {
+    artist: &'a str,
+    key: &'a str,
+    title: &'a str,
     year: i32,
+    /// The day of release (Spotify and Deezer give it, YouTube only the year).
+    date: &'a str,
     release_type: ReleaseType,
     /// Title, length in seconds, ISRC.
-    tracks: &'static [(&'static str, u64, Option<&'static str>)],
+    tracks: &'a [(&'a str, u64, Option<&'a str>)],
 }
 
 /// `(key, name)`.
@@ -59,12 +70,13 @@ const ARTISTS: &[(&str, &str)] = &[
     ("bjork", "Björk"),
 ];
 
-const ALBUMS: &[AlbumData] = &[
+const ALBUMS: &[AlbumData<'static>] = &[
     AlbumData {
         artist: "kino",
         key: "gruppa",
         title: "Группа крови",
         year: 1988,
+        date: "1988-01-05",
         release_type: ReleaseType::Album,
         tracks: &[
             ("Группа крови", 285, Some("ZZFAK8800001")),
@@ -78,6 +90,7 @@ const ALBUMS: &[AlbumData] = &[
         key: "firstlove",
         title: "First Love",
         year: 1999,
+        date: "1999-03-10",
         release_type: ReleaseType::Album,
         tracks: &[
             ("Automatic", 306, Some("ZZFAK9900001")),
@@ -90,6 +103,7 @@ const ALBUMS: &[AlbumData] = &[
         key: "michi",
         title: "道",
         year: 2016,
+        date: "2016-09-28",
         release_type: ReleaseType::Single,
         tracks: &[("道", 240, Some("ZZFAK1600001"))],
     },
@@ -98,6 +112,7 @@ const ALBUMS: &[AlbumData] = &[
         key: "discovery",
         title: "Discovery",
         year: 2001,
+        date: "2001-03-12",
         release_type: ReleaseType::Album,
         tracks: &[
             ("One More Time", 320, Some("ZZFAK0100001")),
@@ -115,6 +130,7 @@ const ALBUMS: &[AlbumData] = &[
         key: "homogenic",
         title: "Homogenic",
         year: 1997,
+        date: "1997-09-22",
         release_type: ReleaseType::Album,
         tracks: &[
             ("Hunter", 255, None),
@@ -123,6 +139,99 @@ const ALBUMS: &[AlbumData] = &[
         ],
     },
 ];
+
+/// Artists only discovery leads to (they are not in [`FakeService::tracks`]
+/// or [`FakeService::albums`], but search, track and ISRC lookups find
+/// them, so their songs resolve and play): `(key, name)`.
+const NEW_ARTISTS: &[(&str, &str)] = &[
+    ("aquarium", "Аквариум"),
+    ("nautilus", "Наутилус Помпилиус"),
+    ("shiina", "椎名林檎"),
+    ("justice", "Justice"),
+    ("sigur", "Sigur Rós"),
+];
+
+/// Their albums (every track with an ISRC, on YouTube too).
+const NEW_ALBUMS: &[AlbumData<'static>] = &[
+    AlbumData {
+        artist: "aquarium",
+        key: "afrika",
+        title: "Радио Африка",
+        year: 1983,
+        date: "1983-06-01",
+        release_type: ReleaseType::Album,
+        tracks: &[
+            ("Рок-н-ролл мёртв", 236, Some("ZZNEW8300001")),
+            ("Капитан Африка", 391, Some("ZZNEW8300002")),
+        ],
+    },
+    AlbumData {
+        artist: "nautilus",
+        key: "razluka",
+        title: "Разлука",
+        year: 1986,
+        date: "1986-11-01",
+        release_type: ReleaseType::Album,
+        tracks: &[
+            ("Скованные одной цепью", 270, Some("ZZNEW8600001")),
+            ("Казанова", 231, Some("ZZNEW8600002")),
+        ],
+    },
+    AlbumData {
+        artist: "shiina",
+        key: "muzai",
+        title: "無罪モラトリアム",
+        year: 1999,
+        date: "1999-02-24",
+        release_type: ReleaseType::Album,
+        tracks: &[
+            ("丸の内サディスティック", 234, Some("ZZNEW9900001")),
+            ("歌舞伎町の女王", 254, Some("ZZNEW9900002")),
+        ],
+    },
+    AlbumData {
+        artist: "justice",
+        key: "cross",
+        title: "Cross",
+        year: 2007,
+        date: "2007-06-11",
+        release_type: ReleaseType::Album,
+        tracks: &[
+            ("Genesis", 234, Some("ZZNEW0700001")),
+            ("D.A.N.C.E.", 242, Some("ZZNEW0700002")),
+        ],
+    },
+    AlbumData {
+        artist: "sigur",
+        key: "agaetis",
+        title: "Ágætis byrjun",
+        year: 1999,
+        date: "1999-06-12",
+        release_type: ReleaseType::Album,
+        tracks: &[
+            ("Svefn-g-englar", 604, Some("ZZNEW9900011")),
+            ("Starálfur", 407, Some("ZZNEW9900012")),
+        ],
+    },
+];
+
+/// Who is like whom, most alike first (`similar_artists`).
+const SIMILAR: &[(&str, &[&str])] = &[
+    ("kino", &["aquarium", "nautilus", "daft"]),
+    ("utada", &["shiina", "bjork"]),
+    ("daft", &["justice", "kino"]),
+    ("bjork", &["sigur", "utada"]),
+    ("aquarium", &["kino", "nautilus"]),
+    ("nautilus", &["kino", "aquarium"]),
+    ("shiina", &["utada"]),
+    ("justice", &["daft"]),
+    ("sigur", &["bjork"]),
+];
+
+/// Tracks in an artist's top, a related list and a radio.
+const TOP_LEN: usize = 10;
+const RELATED_LEN: usize = 10;
+const RADIO_LEN: usize = 25;
 
 /// `(key, name, editable, tracks as album key + number)`.
 type PlaylistData = (
@@ -175,96 +284,228 @@ struct Catalog {
     artists: Vec<StreamArtist>,
     albums: Vec<StreamAlbum>,
     tracks: Vec<StreamTrack>,
+    /// Found only by discovery (and search, track and ISRC lookups): the
+    /// artists of [`NEW_ARTISTS`] with their albums.
+    more_artists: Vec<StreamArtist>,
+    more_albums: Vec<StreamAlbum>,
+    more_tracks: Vec<StreamTrack>,
+}
+
+/// The artist of `key` in either table, as a credit.
+fn artist_ref(service: Service, key: &str) -> ArtistRef {
+    let name = ARTISTS
+        .iter()
+        .chain(NEW_ARTISTS)
+        .find(|(k, _)| *k == key)
+        .map_or("", |(_, n)| n);
+    ArtistRef::new(Some(RemoteId::new(service, format!("{}-art-{key}", prefix(service)))), name)
+}
+
+/// One album and its tracks. YouTube gives no release day and knows ISRCs
+/// only where `isrc_on_youtube`.
+fn build_album(service: Service, a: &AlbumData<'_>, isrc_on_youtube: bool) -> StreamAlbum {
+    let p = prefix(service);
+    let album_id = RemoteId::new(service, format!("{p}-alb-{}", a.key));
+    let cover = Some(format!("https://fake.invalid/{p}/{}.jpg", a.key));
+    let mut album_ref = AlbumRef::new(Some(album_id.clone()), a.title);
+    album_ref.artists = vec![artist_ref(service, a.artist)];
+    album_ref.year = Some(a.year);
+    let mut tracks = Vec::new();
+    for (i, &(title, secs, isrc)) in a.tracks.iter().enumerate() {
+        let n = i as u32 + 1;
+        let mut t = StreamTrack::new(RemoteId::new(service, track_id(service, a.key, n)), title);
+        t.artists = vec![artist_ref(service, a.artist)];
+        t.album = Some(album_ref.clone());
+        t.duration_ms = Some(secs * 1000);
+        t.isrc = isrc
+            .filter(|_| service != Service::Youtube || isrc_on_youtube)
+            .map(str::to_owned);
+        t.disc_no = Some(1);
+        t.track_no = Some(n);
+        t.cover_url = cover.clone();
+        tracks.push(t);
+    }
+    StreamAlbum {
+        id: album_id,
+        title: a.title.to_owned(),
+        artists: vec![artist_ref(service, a.artist)],
+        year: Some(a.year),
+        release_date: (service != Service::Youtube).then(|| a.date.to_owned()),
+        release_type: a.release_type,
+        cover_url: cover,
+        total_tracks: Some(a.tracks.len() as u32),
+        tracks,
+    }
+}
+
+/// The artists of `table` with their discographies (from `albums`, newest
+/// first, without tracks).
+fn build_artists(service: Service, table: &[(&str, &str)], albums: &[StreamAlbum]) -> Vec<StreamArtist> {
+    let p = prefix(service);
+    table
+        .iter()
+        .map(|&(key, name)| {
+            let id = RemoteId::new(service, format!("{p}-art-{key}"));
+            let mut discography: Vec<StreamAlbum> = albums
+                .iter()
+                .filter(|al| al.artists.iter().any(|ar| ar.id.as_ref() == Some(&id)))
+                .map(|al| StreamAlbum {
+                    tracks: Vec::new(),
+                    ..al.clone()
+                })
+                .collect();
+            discography.sort_by_key(|al| std::cmp::Reverse(al.year));
+            StreamArtist {
+                id,
+                name: name.to_owned(),
+                image_url: Some(format!("https://fake.invalid/{p}/artist-{key}.jpg")),
+                albums: discography,
+            }
+        })
+        .collect()
 }
 
 impl Catalog {
     fn build(service: Service) -> Self {
         let p = prefix(service);
-        let artist_ref = |key: &str| {
-            let name = ARTISTS
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map_or("", |(_, n)| n);
-            ArtistRef::new(Some(RemoteId::new(service, format!("{p}-art-{key}"))), name)
-        };
-        let mut albums = Vec::new();
-        let mut tracks = Vec::new();
-        for a in ALBUMS {
-            let album_id = RemoteId::new(service, format!("{p}-alb-{}", a.key));
-            let cover = Some(format!("https://fake.invalid/{p}/{}.jpg", a.key));
-            let mut album_ref = AlbumRef::new(Some(album_id.clone()), a.title);
-            album_ref.artists = vec![artist_ref(a.artist)];
-            album_ref.year = Some(a.year);
-            let mut album_tracks = Vec::new();
-            for (i, &(title, secs, isrc)) in a.tracks.iter().enumerate() {
-                let n = i as u32 + 1;
-                let mut t =
-                    StreamTrack::new(RemoteId::new(service, track_id(service, a.key, n)), title);
-                t.artists = vec![artist_ref(a.artist)];
-                t.album = Some(album_ref.clone());
-                t.duration_ms = Some(secs * 1000);
-                t.isrc = match service {
-                    Service::Spotify | Service::Deezer => isrc,
-                    Service::Youtube => isrc.filter(|_| a.key == "discovery"),
-                }
-                .map(str::to_owned);
-                t.disc_no = Some(1);
-                t.track_no = Some(n);
-                t.cover_url = cover.clone();
-                album_tracks.push(t);
-            }
-            tracks.extend(album_tracks.iter().cloned());
-            albums.push(StreamAlbum {
-                id: album_id,
-                title: a.title.to_owned(),
-                artists: vec![artist_ref(a.artist)],
-                year: Some(a.year),
-                release_type: a.release_type,
-                cover_url: cover,
-                total_tracks: Some(a.tracks.len() as u32),
-                tracks: album_tracks,
-            });
-        }
+        let albums: Vec<StreamAlbum> = ALBUMS
+            .iter()
+            .map(|a| build_album(service, a, a.key == "discovery"))
+            .collect();
+        let mut tracks: Vec<StreamTrack> = albums.iter().flat_map(|a| a.tracks.iter().cloned()).collect();
         if service == Service::Youtube {
             let mut v = StreamTrack::new(
                 RemoteId::new(service, format!("{p}-video-kino")),
                 "Группа крови (клип)",
             );
-            v.artists = vec![artist_ref("kino")];
+            v.artists = vec![artist_ref(service, "kino")];
             v.duration_ms = Some(290_000);
             v.kind = TrackKind::Video;
             tracks.push(v);
         }
-        let artists = ARTISTS
-            .iter()
-            .map(|&(key, name)| {
-                let mut discography: Vec<StreamAlbum> = albums
-                    .iter()
-                    .filter(|al| al.artists.iter().any(|ar| ar.name == name))
-                    .map(|al| StreamAlbum {
-                        tracks: Vec::new(),
-                        ..al.clone()
-                    })
-                    .collect();
-                discography.sort_by_key(|al| std::cmp::Reverse(al.year));
-                StreamArtist {
-                    id: RemoteId::new(service, format!("{p}-art-{key}")),
-                    name: name.to_owned(),
-                    image_url: Some(format!("https://fake.invalid/{p}/artist-{key}.jpg")),
-                    albums: discography,
-                }
-            })
-            .collect();
+        let artists = build_artists(service, ARTISTS, &albums);
+        let more_albums: Vec<StreamAlbum> = NEW_ALBUMS.iter().map(|a| build_album(service, a, true)).collect();
+        let more_tracks = more_albums.iter().flat_map(|a| a.tracks.iter().cloned()).collect();
+        let more_artists = build_artists(service, NEW_ARTISTS, &more_albums);
         Self {
             artists,
             albums,
             tracks,
+            more_artists,
+            more_albums,
+            more_tracks,
         }
     }
 
-    fn track(&self, id: &str) -> Option<&StreamTrack> {
-        self.tracks.iter().find(|t| t.id.id == id)
+    /// Every track, the listed ones first.
+    fn all_tracks(&self) -> impl Iterator<Item = &StreamTrack> {
+        self.tracks.iter().chain(&self.more_tracks)
     }
+
+    fn track(&self, id: &str) -> Option<&StreamTrack> {
+        self.all_tracks().find(|t| t.id.id == id)
+    }
+
+    fn album(&self, id: &str) -> Option<&StreamAlbum> {
+        self.albums.iter().chain(&self.more_albums).find(|a| a.id.id == id)
+    }
+
+    fn artist(&self, id: &str) -> Option<&StreamArtist> {
+        self.artists.iter().chain(&self.more_artists).find(|a| a.id.id == id)
+    }
+
+    /// The songs credited first to `artist_id`, most popular first (a
+    /// stable order derived from the ids), at most [`TOP_LEN`].
+    fn top_of(&self, artist_id: &str) -> Vec<StreamTrack> {
+        let mut out: Vec<StreamTrack> = self
+            .all_tracks()
+            .filter(|t| t.kind == TrackKind::Song)
+            .filter(|t| t.artists.first().and_then(|a| a.id.as_ref()).is_some_and(|i| i.id == artist_id))
+            .cloned()
+            .collect();
+        out.sort_by_key(|t| (popularity(&t.id.id), t.id.id.clone()));
+        out.truncate(TOP_LEN);
+        out
+    }
+
+    /// Ids of the artists like `artist_id`, most alike first: [`SIMILAR`]
+    /// for the fixed artists, two of [`NEW_ARTISTS`] picked by the id for
+    /// any other known one. `None`: no such artist.
+    fn similar_to(&self, service: Service, artist_id: &str) -> Option<Vec<String>> {
+        let p = prefix(service);
+        let key = artist_id.strip_prefix(&format!("{p}-art-"))?;
+        if let Some((_, like)) = SIMILAR.iter().find(|(k, _)| *k == key) {
+            return Some(like.iter().map(|k| format!("{p}-art-{k}")).collect());
+        }
+        let known = self.artist(artist_id).is_some()
+            || self
+                .all_tracks()
+                .any(|t| t.artists.iter().any(|a| a.id.as_ref().is_some_and(|i| i.id == artist_id)));
+        known.then(|| {
+            let h = popularity(artist_id) as usize;
+            (0..2)
+                .map(|i| format!("{p}-art-{}", NEW_ARTISTS[(h + i) % NEW_ARTISTS.len()].0))
+                .collect()
+        })
+    }
+
+    /// Ids of the artists like the artist of `track` (the first credit);
+    /// a track without an artist id gets two of [`NEW_ARTISTS`] picked by
+    /// its own id.
+    fn similar_to_track(&self, service: Service, track: &StreamTrack) -> Vec<String> {
+        let p = prefix(service);
+        track
+            .artists
+            .first()
+            .and_then(|a| a.id.as_ref())
+            .and_then(|a| self.similar_to(service, &a.id))
+            .unwrap_or_else(|| {
+                let h = popularity(&track.id.id) as usize;
+                (0..2)
+                    .map(|i| format!("{p}-art-{}", NEW_ARTISTS[(h + i) % NEW_ARTISTS.len()].0))
+                    .collect()
+            })
+    }
+}
+
+/// A stable pseudo-popularity rank of an id (lower = more popular): FNV-1a.
+fn popularity(id: &str) -> u64 {
+    id.bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// The civil date `(year, month, day)` of a day number since 1970-01-01
+/// (Howard Hinnant's algorithm).
+fn civil(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
+/// The lists taken in turn, one item of each, skipping `seed` and repeats,
+/// up to `max`: how the fake mixes an artist with similar ones.
+fn interleave(lists: &[Vec<StreamTrack>], seed: Option<&str>, max: usize) -> Vec<StreamTrack> {
+    let mut out: Vec<StreamTrack> = Vec::new();
+    let longest = lists.iter().map(Vec::len).max().unwrap_or(0);
+    for i in 0..longest {
+        for l in lists {
+            if let Some(t) = l.get(i)
+                && Some(t.id.id.as_str()) != seed
+                && !out.iter().any(|o| o.id == t.id)
+            {
+                out.push(t.clone());
+            }
+        }
+    }
+    out.truncate(max);
+    out
 }
 
 struct State {
@@ -289,6 +530,9 @@ struct State {
     /// The song of each music video ([`StreamService::song_for_video`]),
     /// by video id.
     songs: HashMap<String, String>,
+    /// Tracks whose whole audio the YouTube flavour has "on disk": those
+    /// opened so far ([`StreamService::cached_audio`]).
+    cached: HashSet<String>,
 }
 
 /// Deterministic fake of a streaming service (feature `fake`).
@@ -358,6 +602,7 @@ impl FakeService {
                 } else {
                     HashMap::new()
                 },
+                cached: HashSet::new(),
             }),
         }
     }
@@ -439,6 +684,51 @@ impl FakeService {
         self.catalog.albums.clone()
     }
 
+    /// The songs only discovery leads to (artists of [`NEW_ARTISTS`]).
+    pub fn discovery_tracks(&self) -> Vec<StreamTrack> {
+        self.catalog.more_tracks.clone()
+    }
+
+    /// Adds a single by one of the fixed artists (`artist`: `kino`,
+    /// `utada`, `daft`, `bjork`) released `days_ago` days before today
+    /// (UTC): an album `{prefix}-alb-{key}` with one song `{prefix}-{key}-1`,
+    /// first in the artist's discography, so new releases have something to
+    /// find. The one thing of the fake that depends on the clock; YouTube
+    /// gives only its year, as the real one does.
+    #[must_use]
+    pub fn with_new_release(mut self, artist: &str, key: &str, title: &str, days_ago: u32) -> Self {
+        let service = self.service;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let day = now_ms.div_euclid(86_400_000) - i64::from(days_ago);
+        let (y, m, d) = civil(day);
+        let date = format!("{y:04}-{m:02}-{d:02}");
+        let data = AlbumData {
+            artist,
+            key,
+            title,
+            year: y as i32,
+            date: &date,
+            release_type: ReleaseType::Single,
+            tracks: &[(title, 215, None)],
+        };
+        let album = build_album(service, &data, false);
+        self.catalog.tracks.extend(album.tracks.iter().cloned());
+        let artist_id = format!("{}-art-{artist}", prefix(service));
+        if let Some(a) = self.catalog.artists.iter_mut().find(|a| a.id.id == artist_id) {
+            a.albums.insert(
+                0,
+                StreamAlbum {
+                    tracks: Vec::new(),
+                    ..album.clone()
+                },
+            );
+        }
+        self.catalog.albums.push(album);
+        self
+    }
+
     /// Ids of the liked tracks, most recent first.
     pub fn liked_ids(&self) -> Vec<String> {
         self.lock().liked.clone()
@@ -491,6 +781,7 @@ impl FakeService {
             title: title.to_owned(),
             artists: vec![artist],
             year: Some(2020),
+            release_date: (service != Service::Youtube).then(|| "2020-01-01".into()),
             release_type: ReleaseType::Album,
             cover_url: None,
             total_tracks: Some(n),
@@ -646,8 +937,7 @@ impl FakeService {
         let hit = |s: &str| s.to_lowercase().contains(&q);
         let tracks = self
             .catalog
-            .tracks
-            .iter()
+            .all_tracks()
             .filter(|t| {
                 let fields: Vec<String> = std::iter::once(t.title.to_lowercase())
                     .chain(t.artists.iter().map(|a| a.name.to_lowercase()))
@@ -664,6 +954,7 @@ impl FakeService {
             .catalog
             .albums
             .iter()
+            .chain(&self.catalog.more_albums)
             .filter(|a| hit(&a.title) || a.artists.iter().any(|ar| hit(&ar.name)))
             .map(|a| StreamAlbum {
                 tracks: Vec::new(),
@@ -674,6 +965,7 @@ impl FakeService {
             .catalog
             .artists
             .iter()
+            .chain(&self.catalog.more_artists)
             .filter(|a| hit(&a.name))
             .map(|a| StreamArtist {
                 albums: Vec::new(),
@@ -767,15 +1059,19 @@ impl FakeService {
         if self.service == Service::Spotify {
             self.need_login()?;
         }
-        let index = self
+        let (index, track) = self
             .catalog
-            .tracks
-            .iter()
-            .position(|t| t.id.id == id)
+            .all_tracks()
+            .enumerate()
+            .find(|(_, t)| t.id.id == id)
             .ok_or(StreamError::Unavailable)?;
         let mut st = self.lock();
         st.opened.push(id.to_owned());
-        let fail = st.unavailable.contains(id) || !self.catalog.tracks[index].playable;
+        let fail = st.unavailable.contains(id) || !track.playable;
+        // A played YouTube track is kept whole "on disk".
+        if self.service == Service::Youtube && !fail {
+            st.cached.insert(id.to_owned());
+        }
         let mut audio = FakeAudio::new(
             220.0 + 20.0 * index as f32,
             st.audio_secs,
@@ -784,6 +1080,100 @@ impl FakeService {
         );
         audio.quality = Some(self.service.nominal_quality());
         Ok(audio)
+    }
+
+    /// Ids of the tracks whose whole audio [`StreamService::cached_audio`]
+    /// gives (YouTube: every track opened and not failing).
+    pub fn cached_ids(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.lock().cached.iter().cloned().collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Discovery as the real service does it: Spotify can do none of it,
+    /// Deezer has no track radio (its "related" is the radio of the track's
+    /// artist). Counts the call and obeys [`Self::rate_limit_next`].
+    fn discover<T>(&self, name: &'static str, f: impl FnOnce() -> Result<T, StreamError>) -> Result<T, StreamError> {
+        let supported = match self.service {
+            Service::Spotify => false,
+            Service::Deezer => name != "radio",
+            Service::Youtube => true,
+        };
+        self.gate(name)?;
+        if supported { f() } else { Err(StreamError::Unsupported) }
+    }
+
+    /// [`Self::listed`] of each.
+    fn listed_all(&self, v: Vec<StreamTrack>) -> Vec<StreamTrack> {
+        v.iter().map(|t| self.listed(t)).collect()
+    }
+
+    /// Tops of the similar artists of `ids`, in that order.
+    fn tops(&self, ids: &[String]) -> Vec<Vec<StreamTrack>> {
+        ids.iter().map(|a| self.catalog.top_of(a)).collect()
+    }
+
+    fn related_now(&self, track_id: &str) -> Result<Vec<StreamTrack>, StreamError> {
+        let seed = self.track_now(track_id)?;
+        if self.service == Service::Deezer {
+            // The radio of the track's artist, without the track.
+            let artist = seed.artists.first().and_then(|a| a.id.clone());
+            let mut out = match artist {
+                Some(a) => self.artist_radio_now(&a.id)?,
+                None => interleave(&self.tops(&self.catalog.similar_to_track(self.service, &seed)), None, RADIO_LEN),
+            };
+            out.retain(|t| t.id != seed.id);
+            out.truncate(RELATED_LEN);
+            return Ok(out);
+        }
+        let similar = self.catalog.similar_to_track(self.service, &seed);
+        Ok(interleave(&self.tops(&similar), Some(track_id), RELATED_LEN))
+    }
+
+    fn radio_now(&self, track_id: &str) -> Result<Vec<StreamTrack>, StreamError> {
+        let seed = self.track_now(track_id)?;
+        let own = seed
+            .artists
+            .first()
+            .and_then(|a| a.id.as_ref())
+            .map(|a| self.catalog.top_of(&a.id))
+            .unwrap_or_default();
+        let mut lists = vec![own];
+        lists.extend(self.tops(&self.catalog.similar_to_track(self.service, &seed)));
+        Ok(interleave(&lists, Some(track_id), RADIO_LEN))
+    }
+
+    fn similar_now(&self, artist_id: &str) -> Result<Vec<StreamArtist>, StreamError> {
+        let ids = self
+            .catalog
+            .similar_to(self.service, artist_id)
+            .ok_or(StreamError::Unavailable)?;
+        Ok(ids
+            .iter()
+            .filter_map(|id| self.catalog.artist(id))
+            .map(|a| StreamArtist {
+                albums: Vec::new(),
+                ..a.clone()
+            })
+            .collect())
+    }
+
+    fn top_now(&self, artist_id: &str) -> Result<Vec<StreamTrack>, StreamError> {
+        let top = self.catalog.top_of(artist_id);
+        if top.is_empty() && self.catalog.artist(artist_id).is_none() {
+            return Err(StreamError::Unavailable);
+        }
+        Ok(top)
+    }
+
+    fn artist_radio_now(&self, artist_id: &str) -> Result<Vec<StreamTrack>, StreamError> {
+        let similar = self
+            .catalog
+            .similar_to(self.service, artist_id)
+            .ok_or(StreamError::Unavailable)?;
+        let mut lists = vec![self.catalog.top_of(artist_id)];
+        lists.extend(self.tops(&similar));
+        Ok(interleave(&lists, None, RADIO_LEN))
     }
 }
 
@@ -879,9 +1269,7 @@ impl StreamService for FakeService {
         self.count("album");
         ready(
             self.catalog
-                .albums
-                .iter()
-                .find(|a| a.id.id == id)
+                .album(id)
                 .map(|a| StreamAlbum {
                     tracks: a.tracks.iter().map(|t| self.listed(t)).collect(),
                     ..a.clone()
@@ -894,9 +1282,7 @@ impl StreamService for FakeService {
         self.count("artist");
         ready(
             self.catalog
-                .artists
-                .iter()
-                .find(|a| a.id.id == id)
+                .artist(id)
                 .cloned()
                 .ok_or(StreamError::Unavailable),
         )
@@ -935,8 +1321,7 @@ impl StreamService for FakeService {
         let isrc = isrc.trim().to_uppercase();
         ready(Ok(self
             .catalog
-            .tracks
-            .iter()
+            .all_tracks()
             .find(|t| t.isrc.as_deref() == Some(isrc.as_str()))
             .cloned()))
     }
@@ -1071,6 +1456,51 @@ impl StreamService for FakeService {
             Ok(path)
         });
         ready(result)
+    }
+
+    /// YouTube: the WAV of a track opened before (kept whole "on disk")
+    /// until [`StreamService::clear_cache`]; the others keep nothing.
+    fn cached_audio(&self, id: &str) -> Option<Box<dyn AudioStream>> {
+        if !self.lock().cached.contains(id) {
+            return None;
+        }
+        let index = self.catalog.all_tracks().position(|t| t.id.id == id)?;
+        let mut audio = FakeAudio::new(220.0 + 20.0 * index as f32, self.lock().audio_secs, false, None);
+        audio.quality = Some(self.service.nominal_quality());
+        Some(Box::new(audio))
+    }
+
+    fn clear_cache(&self) {
+        self.lock().cached.clear();
+    }
+
+    /// Songs of the artists like the track's (a fixed table, two of
+    /// [`NEW_ARTISTS`] by the id for others), taken in turn, at most 10.
+    /// Deezer: the radio of the track's artist without it. Spotify:
+    /// unsupported.
+    fn related(&self, track_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        ready(self.discover("related", || self.related_now(track_id)).map(|v| self.listed_all(v)))
+    }
+
+    /// The track's artist and the artists like it, taken in turn, at most
+    /// 25, without the track. YouTube only.
+    fn radio(&self, track_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        ready(self.discover("radio", || self.radio_now(track_id)).map(|v| self.listed_all(v)))
+    }
+
+    fn similar_artists(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamArtist>, StreamError>> {
+        ready(self.discover("similar_artists", || self.similar_now(artist_id)))
+    }
+
+    /// The artist's songs in a stable "popularity" order, at most 10.
+    fn artist_top(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        ready(self.discover("artist_top", || self.top_now(artist_id)).map(|v| self.listed_all(v)))
+    }
+
+    /// The artist's top and the tops of the artists like it, taken in
+    /// turn, at most 25.
+    fn artist_radio(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        ready(self.discover("artist_radio", || self.artist_radio_now(artist_id)).map(|v| self.listed_all(v)))
     }
 
     fn web_url(&self, kind: EntityKind, id: &str) -> String {
@@ -1379,5 +1809,108 @@ mod tests {
             yt.web_url(EntityKind::Track, "v"),
             "https://music.youtube.com/watch?v=v"
         );
+    }
+
+    #[test]
+    fn discovery_is_stable_and_leads_to_new_artists() {
+        let yt = FakeService::youtube();
+        let similar = now(yt.similar_artists("yt-art-kino")).unwrap();
+        let names: Vec<&str> = similar.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Аквариум", "Наутилус Помпилиус", "Daft Punk"]);
+        assert!(similar.iter().all(|a| a.albums.is_empty()));
+
+        let related = now(yt.related("yt-gruppa-1")).unwrap();
+        assert_eq!(related, now(FakeService::youtube().related("yt-gruppa-1")).unwrap(), "stable");
+        assert!(!related.is_empty() && related.len() <= RELATED_LEN);
+        assert!(related.iter().all(|t| t.id.id != "yt-gruppa-1"));
+        let listed: Vec<String> = yt.tracks().iter().map(|t| t.id.id.clone()).collect();
+        assert!(related.iter().any(|t| !listed.contains(&t.id.id)), "something new");
+        // A track from discovery is a real track: it resolves and plays.
+        let new = related.iter().find(|t| !listed.contains(&t.id.id)).unwrap();
+        assert_eq!(now(yt.track(&new.id.id)).unwrap(), *new);
+        assert!(yt.open_audio(&new.id.id).is_ok());
+        assert!(now(yt.search("аквариум")).unwrap().artists.len() == 1);
+
+        let radio = now(yt.radio("yt-gruppa-1")).unwrap();
+        assert!(radio.len() > related.len());
+        assert!(radio.iter().all(|t| t.id.id != "yt-gruppa-1"));
+        assert_eq!(radio[0].artist_line(), "Кино", "the artist first");
+        let mut ids: Vec<&str> = radio.iter().map(|t| t.id.id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), radio.len(), "no repeats");
+
+        let top = now(yt.artist_top("yt-art-daft")).unwrap();
+        assert_eq!(top.len(), 4);
+        assert!(top.iter().all(|t| t.artist_line() == "Daft Punk"));
+        let radio = now(yt.artist_radio("yt-art-bjork")).unwrap();
+        assert!(radio.iter().any(|t| t.artist_line() == "Sigur Rós"));
+        assert_eq!(now(yt.artist_top("nope")), Err(StreamError::Unavailable));
+        assert_eq!(now(yt.related("nope")), Err(StreamError::Unavailable));
+        assert_eq!(yt.calls("related"), 2);
+
+        // Any other artist still gets two similar ones.
+        let big = FakeService::youtube().with_album("big", "Big", 3);
+        assert_eq!(now(big.similar_artists("yt-art-big")).unwrap().len(), 2);
+        assert_eq!(now(big.artist_top("yt-art-big")).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn discovery_supports_what_the_real_services_do() {
+        let sp = FakeService::spotify();
+        assert_eq!(now(sp.related("sp-gruppa-1")), Err(StreamError::Unsupported));
+        assert_eq!(now(sp.similar_artists("sp-art-kino")), Err(StreamError::Unsupported));
+        let dz = FakeService::deezer();
+        assert_eq!(now(dz.radio("dz-gruppa-1")), Err(StreamError::Unsupported));
+        let related = now(dz.related("dz-gruppa-1")).unwrap();
+        assert!(!related.is_empty() && related.iter().all(|t| t.id.id != "dz-gruppa-1"));
+        assert!(related.iter().all(|t| t.isrc.is_none()), "Deezer listings carry no ISRC");
+        assert!(now(dz.artist_top("dz-art-utada")).unwrap().len() == 4);
+        // Rate limits apply like to any call.
+        dz.rate_limit_next("artist_top", 1, None);
+        assert!(matches!(now(dz.artist_top("dz-art-utada")), Err(StreamError::RateLimited { .. })));
+        assert!(now(dz.artist_top("dz-art-utada")).is_ok());
+    }
+
+    #[test]
+    fn release_days_and_a_new_release() {
+        let dz = FakeService::deezer().with_new_release("utada", "badmode", "BADモード", 12);
+        let artist = now(dz.artist("dz-art-utada")).unwrap();
+        let first = &artist.albums[0];
+        assert_eq!(first.title, "BADモード");
+        let age_days = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - first.released_at_ms().unwrap())
+            / 86_400_000;
+        assert_eq!(age_days, 12);
+        assert_eq!(artist.albums[1].release_date.as_deref(), Some("2016-09-28"));
+        let yt = FakeService::youtube().with_new_release("utada", "badmode", "BADモード", 12);
+        let first = &now(yt.artist("yt-art-utada")).unwrap().albums[0];
+        assert_eq!((first.release_date.as_deref(), first.year.is_some()), (None, true), "YouTube: the year only");
+        assert_eq!(civil(0), (1970, 1, 1));
+        assert_eq!(civil(20_743), (2026, 10, 17));
+    }
+
+    #[test]
+    fn played_youtube_audio_is_cached_whole() {
+        let yt = FakeService::youtube();
+        assert!(yt.cached_audio("yt-gruppa-1").is_none());
+        yt.set_unavailable("yt-gruppa-2", true);
+        let _ = yt.open_audio("yt-gruppa-1").unwrap();
+        let _ = yt.open_audio("yt-gruppa-2").unwrap();
+        let mut a = yt.cached_audio("yt-gruppa-1").expect("played: on disk");
+        assert_eq!(a.format_hint(), format::WAV);
+        let mut bytes = Vec::new();
+        a.read_to_end(&mut bytes).unwrap();
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert!(yt.cached_audio("yt-gruppa-2").is_none(), "a failed one is not kept");
+        assert_eq!(yt.cached_ids(), ["yt-gruppa-1"]);
+        yt.clear_cache();
+        assert!(yt.cached_audio("yt-gruppa-1").is_none());
+        let sp = FakeService::spotify();
+        let _ = sp.open_audio("sp-gruppa-1").unwrap();
+        assert!(sp.cached_audio("sp-gruppa-1").is_none());
     }
 }

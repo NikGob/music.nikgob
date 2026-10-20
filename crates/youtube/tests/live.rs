@@ -330,3 +330,44 @@ fn live_open_search() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Discovery calls and what they give: `cargo test -p nikgob-youtube --test
+/// live live_discovery -- --ignored --nocapture`.
+#[test]
+#[ignore = "network"]
+fn live_discovery() {
+    let _ = env_logger::builder().is_test(true).filter_module("nikgob_youtube", log::LevelFilter::Debug).try_init();
+    let tmp = tempfile::tempdir().unwrap();
+    let yt = Youtube::new(YoutubeConfig::new(tmp.path().join("data"))).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let found = rt.block_on(yt.search("Кино Группа крови")).unwrap();
+    let seed = found.tracks.iter().find(|t| t.kind == TrackKind::Song).expect("a song").clone();
+    let line = |t: &nikgob_core::streaming::StreamTrack| format!("{:?} «{}» — {}", t.kind, t.title, t.artist_line());
+
+    let radio = rt.block_on(yt.radio(&seed.id.id)).unwrap();
+    println!("radio of «{}»: {} tracks", seed.title, radio.len());
+    radio.iter().take(8).for_each(|t| println!("  {}", line(t)));
+    assert!(radio.len() > 10 && radio.iter().all(|t| t.id != seed.id));
+    let related = rt.block_on(yt.related(&seed.id.id)).unwrap();
+    println!("related: {} tracks", related.len());
+    related.iter().take(8).for_each(|t| println!("  {}", line(t)));
+    assert!(related.iter().all(|t| t.id != seed.id));
+
+    let artist = seed.artists[0].id.clone().expect("the artist has an id");
+    let started = Instant::now();
+    let similar = rt.block_on(yt.similar_artists(&artist.id)).unwrap();
+    let top = rt.block_on(yt.artist_top(&artist.id)).unwrap();
+    println!("similar ({} ms): {:?}", started.elapsed().as_millis(), similar.iter().map(|a| &a.name).collect::<Vec<_>>());
+    top.iter().for_each(|t| println!("  top {}", line(t)));
+    assert!(!similar.is_empty() && !top.is_empty());
+    let radio = rt.block_on(yt.artist_radio(&artist.id)).unwrap();
+    println!("artist radio: {} tracks", radio.len());
+    assert!(!radio.is_empty());
+    // Answers are kept: again without waiting for the network.
+    let started = Instant::now();
+    rt.block_on(yt.radio(&seed.id.id)).unwrap();
+    rt.block_on(yt.similar_artists(&artist.id)).unwrap();
+    assert!(started.elapsed() < Duration::from_millis(50));
+    assert!(yt.cached_audio(&seed.id.id).is_none(), "nothing played, nothing cached");
+    drop(yt);
+}

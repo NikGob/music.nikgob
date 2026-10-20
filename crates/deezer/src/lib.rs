@@ -16,8 +16,17 @@
 //!   by one: a track gets its ISRC when it is looked up alone
 //!   ([`StreamService::track`]), which the runtime does when it plays or
 //!   likes one.
+//! * **Discovery** (docs/stage4.md §5): similar artists
+//!   (`/artist/{id}/related`), an artist's top tracks (`/artist/{id}/top`)
+//!   and radio (`/artist/{id}/radio`), one request each. Deezer has no
+//!   radio of a track: [`StreamService::related`] is the radio of the
+//!   track's main artist without the track (the track's own lookup, usually
+//!   cached, and the radio), and [`StreamService::radio`] is
+//!   `Unsupported`. Discographies carry each album's release day
+//!   ([`StreamAlbum::release_date`]) for new releases.
 //! * **Cache**: answers are kept in memory (searches 10 minutes, tracks,
-//!   albums and artists an hour, playlists 10 minutes).
+//!   albums, artists and the discovery answers an hour, playlists 10
+//!   minutes).
 //!
 //! Every future runs on the service's own small tokio runtime (so the pooled
 //! connections and timers belong to one runtime) and is awaited through a
@@ -53,6 +62,12 @@ const ARTIST_ALBUMS: u32 = 100;
 /// Tracks of a playlist read at most (pages of [`PAGE`]).
 const PLAYLIST_MAX: usize = 2_000;
 const PAGE: u32 = 100;
+/// Similar artists asked.
+const RELATED_ARTISTS: u32 = 20;
+/// Top tracks of an artist asked.
+const TOP_TRACKS: u32 = 25;
+/// Tracks of an artist's radio asked.
+const RADIO_TRACKS: u32 = 40;
 const SEARCH_TTL: Duration = Duration::from_secs(10 * 60);
 const ITEM_TTL: Duration = Duration::from_secs(3600);
 const PLAYLIST_TTL: Duration = Duration::from_secs(10 * 60);
@@ -81,6 +96,9 @@ struct Inner {
     albums: TtlCache<StreamAlbum>,
     artists: TtlCache<StreamArtist>,
     playlists: TtlCache<StreamPlaylist>,
+    /// Artists' top tracks and radios, by `top:{id}` / `radio:{id}`.
+    artist_tracks: TtlCache<Vec<StreamTrack>>,
+    similar: TtlCache<Vec<StreamArtist>>,
 }
 
 /// The runtime every future of the service runs on.
@@ -154,6 +172,8 @@ impl Deezer {
                 albums: TtlCache::new(ITEM_TTL, 200),
                 artists: TtlCache::new(ITEM_TTL, 200),
                 playlists: TtlCache::new(PLAYLIST_TTL, 50),
+                artist_tracks: TtlCache::new(ITEM_TTL, 400),
+                similar: TtlCache::new(ITEM_TTL, 200),
             }),
             runtime: Runtime(Some(runtime)),
         }))
@@ -355,8 +375,10 @@ impl Inner {
                 al
             })
             .collect();
-        // Newest first, as the contract says.
-        a.albums.sort_by_key(|al| std::cmp::Reverse(al.year.unwrap_or(i32::MIN)));
+        // Newest first, as the contract says (by the day within a year).
+        a.albums.sort_by(|x, y| {
+            (y.year.unwrap_or(i32::MIN), &y.release_date).cmp(&(x.year.unwrap_or(i32::MIN), &x.release_date))
+        });
         self.artists.put(id, a.clone());
         Ok(a)
     }
@@ -383,6 +405,46 @@ impl Inner {
         }
         self.playlists.put(id, p.clone());
         Ok(p)
+    }
+
+    /// `/artist/{id}/{what}` (`top` or `radio`) as tracks.
+    async fn artist_tracks(&self, what: &str, id: &str) -> Result<Vec<StreamTrack>, StreamError> {
+        let id = path_id(id)?;
+        let key = format!("{what}:{id}");
+        if let Some(hit) = self.artist_tracks.get(&key) {
+            return Ok(hit);
+        }
+        let limit = if what == "top" { TOP_TRACKS } else { RADIO_TRACKS };
+        let l: api::List<api::Track> = self
+            .get(&format!("/artist/{id}/{what}"), &[("limit", limit.to_string())])
+            .await?;
+        let out: Vec<StreamTrack> = l.data.iter().filter(|t| t.id > 0).map(|t| api::track(t, None)).collect();
+        self.artist_tracks.put(&key, out.clone());
+        Ok(out)
+    }
+
+    async fn similar_artists(&self, id: &str) -> Result<Vec<StreamArtist>, StreamError> {
+        let id = path_id(id)?;
+        if let Some(hit) = self.similar.get(id) {
+            return Ok(hit);
+        }
+        let l: api::List<api::Artist> = self
+            .get(&format!("/artist/{id}/related"), &[("limit", RELATED_ARTISTS.to_string())])
+            .await?;
+        let out: Vec<StreamArtist> = l.data.iter().filter(|a| a.id > 0).map(api::artist).collect();
+        self.similar.put(id, out.clone());
+        Ok(out)
+    }
+
+    /// The radio of the track's main artist, without the track.
+    async fn related(&self, id: &str) -> Result<Vec<StreamTrack>, StreamError> {
+        let seed = self.track(id).await?;
+        let Some(artist) = seed.artists.iter().find_map(|a| a.id.clone()) else {
+            return Ok(Vec::new());
+        };
+        let mut out = self.artist_tracks("radio", &artist.id).await?;
+        out.retain(|t| t.id != seed.id && !(t.title == seed.title && t.artists == seed.artists));
+        Ok(out)
     }
 
     async fn find_isrc(&self, isrc: &str) -> Result<Option<StreamTrack>, StreamError> {
@@ -529,7 +591,12 @@ impl StreamService for Deezer {
         match kind {
             EntityKind::Track => self.inner.tracks.remove(id),
             EntityKind::Album => self.inner.albums.remove(id),
-            EntityKind::Artist => self.inner.artists.remove(id),
+            EntityKind::Artist => {
+                self.inner.artists.remove(id);
+                self.inner.similar.remove(id);
+                self.inner.artist_tracks.remove(&format!("top:{id}"));
+                self.inner.artist_tracks.remove(&format!("radio:{id}"));
+            }
             EntityKind::Playlist => self.inner.playlists.remove(id),
         }
     }
@@ -541,6 +608,33 @@ impl StreamService for Deezer {
     fn find_isrc(&self, isrc: &str) -> BoxFuture<'_, Result<Option<StreamTrack>, StreamError>> {
         let isrc = isrc.to_owned();
         self.run(move |inner| async move { inner.find_isrc(&isrc).await })
+    }
+
+    /// The radio of the track's main artist without the track: Deezer
+    /// has no radio of a track. Two requests at most (the track's lookup is
+    /// usually cached already).
+    fn related(&self, track_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        let id = track_id.to_owned();
+        self.run(move |inner| async move { inner.related(&id).await })
+    }
+
+    /// `/artist/{id}/related`: one request.
+    fn similar_artists(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamArtist>, StreamError>> {
+        let id = artist_id.to_owned();
+        self.run(move |inner| async move { inner.similar_artists(&id).await })
+    }
+
+    /// `/artist/{id}/top`: one request, up to 25 tracks.
+    fn artist_top(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        let id = artist_id.to_owned();
+        self.run(move |inner| async move { inner.artist_tracks("top", &id).await })
+    }
+
+    /// `/artist/{id}/radio`: one request, the artist mixed with similar
+    /// ones.
+    fn artist_radio(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        let id = artist_id.to_owned();
+        self.run(move |inner| async move { inner.artist_tracks("radio", &id).await })
     }
 
     fn liked(&self) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {

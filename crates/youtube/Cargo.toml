@@ -23,6 +23,7 @@ time = "0.3"
 [dev-dependencies]
 nikgob-audio = { path = "../audio" }
 env_logger.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true

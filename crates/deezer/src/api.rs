@@ -179,6 +179,17 @@ fn cover_of_md5(md5: Option<&String>) -> Option<String> {
         .then(|| format!("https://cdn-images.dzcdn.net/images/cover/{m}/1000x1000-000000-80-0-0.jpg"))
 }
 
+/// A real `YYYY-MM-DD` day (Deezer writes `0000-00-00` for none).
+pub(crate) fn day(date: Option<&String>) -> Option<String> {
+    let d = date?.trim();
+    let ok = d.len() == 10
+        && d.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() })
+        && year(Some(&d.to_owned())).is_some()
+        && &d[5..7] != "00"
+        && &d[8..] != "00";
+    ok.then(|| d.to_owned())
+}
+
 pub(crate) fn year(date: Option<&String>) -> Option<i32> {
     let y: i32 = date?.get(..4)?.parse().ok()?;
     (y > 1000).then_some(y)
@@ -278,6 +289,7 @@ pub(crate) fn album(a: &Album) -> StreamAlbum {
         title: a.title.trim().to_owned(),
         artists: a.artists(),
         year: year(a.release_date.as_ref()),
+        release_date: day(a.release_date.as_ref()),
         release_type: release_type(a.record_type.as_deref()),
         cover_url: a.cover(),
         total_tracks: a.nb_tracks.or_else(|| u32::try_from(tracks.len()).ok().filter(|n| *n > 0)),
@@ -333,6 +345,9 @@ mod tests {
         );
         assert_eq!(year(Some(&"2001-03-07".to_owned())), Some(2001));
         assert_eq!(year(Some(&"0000-00-00".to_owned())), None);
+        assert_eq!(day(Some(&"2026-09-25".to_owned())).as_deref(), Some("2026-09-25"));
+        assert_eq!(day(Some(&"0000-00-00".to_owned())), None);
+        assert_eq!(day(Some(&"2026".to_owned())), None);
         assert_eq!(release_type(Some("compile")), ReleaseType::Compilation);
         assert_eq!(release_type(Some("ep")), ReleaseType::Ep);
     }

@@ -150,6 +150,101 @@ async fn an_artist_comes_with_its_discography_newest_first() {
     assert!(a.albums.iter().all(|al| al.artists.first().is_some_and(|ar| ar.name == "Daft Punk")));
     assert_eq!(a.albums[1].release_type, ReleaseType::Single);
     assert!(a.albums[0].cover_url.as_deref().is_some_and(|u| u.contains("311bba0fc112d15f72c8b5a65f0456c1")));
+    // The day of release, for new releases.
+    assert_eq!(a.albums[0].release_date.as_deref(), Some("2013-05-17"));
+    assert_eq!(a.albums[2].release_date.as_deref(), Some("2001-03-07"));
+    assert!(a.albums[0].released_at_ms() > a.albums[1].released_at_ms());
+}
+
+#[tokio::test]
+async fn similar_artists_top_tracks_and_radio_are_one_request_each_and_cached() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/artist/27/related"))
+        .and(query_param("limit", "20"))
+        .respond_with(json("artist_related.json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/artist/27/top"))
+        .and(query_param("limit", "25"))
+        .respond_with(json("artist_top.json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    serve(&server, "/artist/13612387/radio", "artist_radio.json", 1).await;
+    let dz = deezer(&server);
+
+    let similar = dz.similar_artists("27").await.unwrap();
+    let names: Vec<_> = similar.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["Justice", "Cassius"], "an empty entry is dropped");
+    assert_eq!(similar[0].id.id, "4050205");
+    assert!(similar[0].image_url.is_some());
+    assert_eq!(similar[1].image_url, None, "Deezer's placeholder is no picture");
+
+    let top = dz.artist_top("27").await.unwrap();
+    assert_eq!(top.len(), 2);
+    assert_eq!(top[0].title, "Harder, Better, Faster, Stronger");
+    assert_eq!(top[0].album.as_ref().map(|a| a.title.as_str()), Some("Discovery"));
+    assert_eq!(top[0].duration_ms, Some(224_000));
+    assert_eq!(top[1].artist_line(), "Daft Punk, Pharrell Williams, Nile Rodgers");
+    assert!(top[1].cover_url.as_deref().is_some_and(|u| u.contains("311bba0fc112d15f72c8b5a65f0456c1")));
+
+    let radio = dz.artist_radio("13612387").await.unwrap();
+    assert_eq!(radio.len(), 3);
+    assert_eq!(radio[2].artist_line(), "Oxxxymiron");
+
+    // Again: from the cache (each mock expects one request).
+    assert_eq!(dz.similar_artists("27").await.unwrap(), similar);
+    assert_eq!(dz.artist_top("27").await.unwrap(), top);
+    assert_eq!(dz.artist_radio("13612387").await.unwrap(), radio);
+    assert_eq!(dz.artist_top("not-an-id").await, Err(StreamError::Unavailable));
+}
+
+#[tokio::test]
+async fn related_tracks_are_the_radio_of_the_artist_and_there_is_no_track_radio() {
+    let server = MockServer::start().await;
+    serve(&server, "/track/1551523502", "track.json", 1).await;
+    serve(&server, "/artist/13612387/radio", "artist_radio.json", 1).await;
+    let dz = deezer(&server);
+    let related = dz.related("1551523502").await.unwrap();
+    let titles: Vec<_> = related.iter().map(|t| t.title.as_str()).collect();
+    assert_eq!(titles, ["Каждый раз", "Где нас нет"], "without the track itself");
+    // The track and the radio are cached now.
+    assert_eq!(dz.related("1551523502").await.unwrap(), related);
+    assert_eq!(dz.artist_radio("13612387").await.unwrap().len(), 3);
+    assert_eq!(dz.radio("1551523502").await, Err(StreamError::Unsupported));
+    assert!(dz.cached_audio("1551523502").is_none());
+}
+
+#[tokio::test]
+async fn discovery_obeys_the_quota_pause() {
+    let server = MockServer::start().await;
+    serve(&server, "/artist/27/related", "quota.json", 1).await;
+    let dz = deezer(&server);
+    assert!(matches!(dz.similar_artists("27").await, Err(StreamError::RateLimited { .. })));
+    // Paused: no request reaches Deezer (the mock expects exactly one).
+    assert!(matches!(dz.artist_top("27").await, Err(StreamError::RateLimited { .. })));
+    assert!(matches!(dz.similar_artists("27").await, Err(StreamError::RateLimited { .. })));
+}
+
+/// The real API, once by hand: `cargo test -p nikgob-deezer -- --ignored`.
+#[tokio::test]
+#[ignore = "network"]
+async fn live_discovery() {
+    let dz = Deezer::new(DeezerConfig::default()).unwrap();
+    // Daft Punk.
+    let similar = dz.similar_artists("27").await.unwrap();
+    assert!(!similar.is_empty(), "{similar:?}");
+    let top = dz.artist_top("27").await.unwrap();
+    assert!(top.iter().any(|t| t.artist_line().contains("Daft Punk")), "{top:?}");
+    let radio = dz.artist_radio("27").await.unwrap();
+    assert!(!radio.is_empty());
+    let related = dz.related(&top[0].id.id).await.unwrap();
+    assert!(related.iter().all(|t| t.id != top[0].id));
+    let artist = dz.artist("27").await.unwrap();
+    assert!(artist.albums.iter().any(|a| a.release_date.is_some()), "{:?}", artist.albums);
 }
 
 #[tokio::test]

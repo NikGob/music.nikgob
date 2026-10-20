@@ -1,0 +1,9 @@
+{ "data": [
+  { "id": 4050205, "name": "Justice", "link": "https://www.deezer.com/artist/4050205",
+    "picture_xl": "https://cdn-images.dzcdn.net/images/artist/9c1d1e0b2a3f4e5d6c7b8a9f0e1d2c3b/1000x1000-000000-80-0-0.jpg",
+    "nb_album": 31, "nb_fan": 1543210, "radio": true, "tracklist": "https://api.deezer.com/artist/4050205/top?limit=50", "type": "artist" },
+  { "id": 1424821, "name": "Cassius", "link": "https://www.deezer.com/artist/1424821",
+    "picture_xl": "https://cdn-images.dzcdn.net/images/artist//1000x1000-000000-80-0-0.jpg",
+    "nb_album": 40, "nb_fan": 98765, "radio": true, "type": "artist" },
+  { "id": 0, "name": "", "type": "artist" }
+], "total": 3 }

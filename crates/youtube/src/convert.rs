@@ -96,6 +96,7 @@ pub(crate) fn album_item(a: &AlbumItem) -> StreamAlbum {
         title: a.name.clone(),
         artists: artist_refs(&a.artists),
         year: a.year.map(i32::from),
+        release_date: None,
         release_type: release_type(a.album_type, a.by_va),
         cover_url: best_image(&a.cover),
         total_tracks: None,
@@ -133,6 +134,7 @@ pub(crate) fn album(a: &MusicAlbum) -> StreamAlbum {
         title: a.name.clone(),
         artists,
         year,
+        release_date: None,
         release_type: release_type(a.album_type, a.by_va),
         cover_url,
         total_tracks: Some(u32::from(a.track_count)),
@@ -159,6 +161,51 @@ pub(crate) fn artist(a: &MusicArtist) -> StreamArtist {
         image_url: best_image(&a.header_image),
         albums,
     }
+}
+
+/// What discovery reads off an artist page (one request): the top songs it
+/// shows, the similar artists and the id of the artist's radio.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ArtistPage {
+    pub(crate) top: Vec<StreamTrack>,
+    pub(crate) similar: Vec<StreamArtist>,
+    pub(crate) radio_id: Option<String>,
+}
+
+/// The discovery part of an artist page. The page lists its top songs and
+/// then its videos as one list: the top is the songs (the videos only for
+/// an artist without songs). A top song without artists is credited to
+/// the artist.
+pub(crate) fn artist_page(a: &MusicArtist) -> ArtistPage {
+    let me = ArtistRef::new(Some(rid(&a.id)), a.name.clone());
+    let any_song = a.tracks.iter().any(|t| t.track_type == TrackType::Track);
+    ArtistPage {
+        top: a
+            .tracks
+            .iter()
+            .filter(|t| !any_song || t.track_type == TrackType::Track)
+            .map(|t| {
+                let mut t = track(t);
+                if t.artists.is_empty() {
+                    t.artists = vec![me.clone()];
+                }
+                t
+            })
+            .collect(),
+        similar: a.similar_artists.iter().filter(|s| s.id != a.id).map(artist_item).collect(),
+        radio_id: a.radio_id.clone().filter(|id| !id.is_empty()),
+    }
+}
+
+/// Tracks of a radio or a related list without `seed` (a radio starts with
+/// its own track) and without repeats, in their order.
+pub(crate) fn tracks_without(items: &[TrackItem], seed: Option<&str>) -> Vec<StreamTrack> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .iter()
+        .filter(|t| Some(t.id.as_str()) != seed && seen.insert(t.id.as_str()))
+        .map(track)
+        .collect()
 }
 
 /// `me`: the logged-in account's name; a playlist whose channel has that
@@ -323,6 +370,54 @@ mod tests {
         assert_eq!(ids, ["single", "mid", "old"]);
         assert_eq!(s.albums[0].release_type, ReleaseType::Single);
         assert!(s.albums.iter().all(|a| a.tracks.is_empty()));
+    }
+
+    #[test]
+    fn an_artist_page_gives_top_songs_similar_artists_and_the_radio() {
+        let mut no_artist = track_json("a2", "track", None);
+        no_artist["artists"] = json!([]);
+        let a: MusicArtist = serde_json::from_value(json!({
+            "id": "UCL9NQ06h7I0CRUcGxPWMtkQ", "name": "Кино", "header_image": [],
+            "description": null, "wikipedia_url": null, "subscriber_count": null,
+            "tracks": [track_json("a1", "track", None), no_artist, track_json("v1", "video", None)],
+            "playlists": [],
+            "similar_artists": [
+                {"id": "UCaquarium", "name": "Аквариум", "avatar": thumbs(120), "subscriber_count": 100},
+                {"id": "UCL9NQ06h7I0CRUcGxPWMtkQ", "name": "Кино", "avatar": [], "subscriber_count": null}
+            ],
+            "albums": [], "tracks_playlist_id": null, "videos_playlist_id": null,
+            "radio_id": "RDEMkino"
+        }))
+        .unwrap();
+        let p = artist_page(&a);
+        assert_eq!(p.top.len(), 2, "songs, not the videos after them");
+        assert_eq!(p.top[0].id.id, "a1");
+        assert_eq!(p.top[1].artist_line(), "Кино", "credited to the artist");
+        assert_eq!(p.top[1].artists[0].id.as_ref().unwrap().id, "UCL9NQ06h7I0CRUcGxPWMtkQ");
+        assert_eq!(p.similar.len(), 1, "not itself");
+        assert_eq!(p.similar[0].name, "Аквариум");
+        assert!(p.similar[0].albums.is_empty());
+        assert_eq!(
+            p.similar[0].image_url.as_deref(),
+            Some("https://lh3.googleusercontent.com/abc=w544-h544-l90-rj")
+        );
+        assert_eq!(p.radio_id.as_deref(), Some("RDEMkino"));
+    }
+
+    #[test]
+    fn a_radio_drops_its_own_track_and_repeats() {
+        let items: Vec<TrackItem> = serde_json::from_value(json!([
+            track_json("seed", "track", None),
+            track_json("b", "track", None),
+            track_json("c", "video", None),
+            track_json("b", "track", None)
+        ]))
+        .unwrap();
+        let out = tracks_without(&items, Some("seed"));
+        let ids: Vec<&str> = out.iter().map(|t| t.id.id.as_str()).collect();
+        assert_eq!(ids, ["b", "c"]);
+        assert_eq!(out[1].kind, TrackKind::Video, "clips stay marked as clips");
+        assert_eq!(tracks_without(&items, None).len(), 3);
     }
 
     #[test]

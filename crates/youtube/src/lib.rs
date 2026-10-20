@@ -15,6 +15,17 @@
 //!   Google» window (the runtime's `WebLogin`) gets the cookies instead and
 //!   logs in with them. Likes, playlist creation and edits
 //!   go through RustyPipe's raw request (see `innertube`).
+//! * **Discovery** (docs/stage4.md §5), each request in the spaced
+//!   catalogue lane and kept an hour in memory (see `memo`): the radio of
+//!   a track ([`StreamService::radio`], one `next` request, ~50 tracks, the
+//!   best source of songs new to the listener), the related tracks
+//!   ([`StreamService::related`], «Вам может понравиться»: the track's
+//!   details, then its related page — two requests), and from the artist
+//!   page (one request, shared): the top songs it shows
+//!   ([`StreamService::artist_top`], about five), the similar artists and
+//!   the id of the artist's radio ([`StreamService::artist_radio`], one
+//!   more request). [`StreamService::cached_audio`] hands out a complete
+//!   file of the audio cache, never the network.
 //!
 //! Every future runs on the service's own small tokio runtime (so the pooled
 //! connections and timers always belong to one runtime) and is awaited
@@ -26,6 +37,7 @@ mod convert;
 mod counterpart;
 mod innertube;
 mod limit;
+mod memo;
 mod player;
 mod range;
 mod remux;
@@ -73,6 +85,8 @@ const URL_MARGIN: Duration = Duration::from_secs(30 * 60);
 const URL_LIFE: Duration = Duration::from_secs(5 * 3600);
 /// Resolved URLs kept.
 const URLS_MAX: usize = 200;
+/// How long discovery answers are kept.
+const DISCOVERY_TTL: Duration = Duration::from_secs(3600);
 
 /// Where and how the service runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +138,11 @@ struct Inner {
     gate: limit::Gate,
     /// Stream URLs resolved lately, by video id, with when they expire.
     urls: Mutex<std::collections::HashMap<String, (std::time::SystemTime, range::Resolved)>>,
+    /// What discovery read off artist pages, by artist id.
+    pages: memo::Memo<convert::ArtistPage>,
+    /// Related tracks and radios, by `related:{video}`, `radio:{video}`,
+    /// `artist_radio:{channel}`.
+    lists: memo::Memo<Vec<StreamTrack>>,
 }
 
 impl Inner {
@@ -180,6 +199,61 @@ impl Inner {
             }
         }
         urls.insert(id.to_owned(), (expires, r.clone()));
+    }
+
+    /// The discovery part of an artist page: one request, or none while
+    /// it is kept.
+    async fn artist_page(&self, id: &str) -> Result<convert::ArtistPage, StreamError> {
+        if let Some(p) = self.pages.get(id) {
+            return Ok(p);
+        }
+        let a = self
+            .gate
+            .run(Lane::Catalog, async { self.rp.query().music_artist(id, false).await.map_err(map_err) })
+            .await?;
+        let p = convert::artist_page(&a);
+        self.pages.put(id, p.clone());
+        Ok(p)
+    }
+
+    /// A radio's first page (about 50 tracks) without `seed`, kept under
+    /// `key`.
+    async fn radio(&self, key: &str, radio_id: &str, seed: Option<&str>) -> Result<Vec<StreamTrack>, StreamError> {
+        if let Some(hit) = self.lists.get(key) {
+            return Ok(hit);
+        }
+        let p = self
+            .gate
+            .run(Lane::Catalog, async { self.rp.query().music_radio(radio_id).await.map_err(map_err) })
+            .await?;
+        let out = convert::tracks_without(&p.items, seed);
+        self.lists.put(key, out.clone());
+        Ok(out)
+    }
+
+    /// «Вам может понравиться» of a track: its details (for the id of the
+    /// related page), then that page.
+    async fn related(&self, id: &str) -> Result<Vec<StreamTrack>, StreamError> {
+        let key = format!("related:{id}");
+        if let Some(hit) = self.lists.get(&key) {
+            return Ok(hit);
+        }
+        let d = self
+            .gate
+            .run(Lane::Catalog, async { self.rp.query().music_details(id).await.map_err(map_err) })
+            .await?;
+        let out = match d.related_id {
+            Some(related) => {
+                let r = self
+                    .gate
+                    .run(Lane::Catalog, async { self.rp.query().music_related(&related).await.map_err(map_err) })
+                    .await?;
+                convert::tracks_without(&r.tracks, Some(id))
+            }
+            None => Vec::new(),
+        };
+        self.lists.put(&key, out.clone());
+        Ok(out)
     }
 
     fn drop_url(&self, id: &str) {
@@ -292,6 +366,8 @@ impl Youtube {
                 refused: Mutex::new(std::collections::HashMap::new()),
                 gate: limit::Gate::new(),
                 urls: Mutex::new(std::collections::HashMap::new()),
+                pages: memo::Memo::new(DISCOVERY_TTL, 300),
+                lists: memo::Memo::new(DISCOVERY_TTL, 300),
             }),
             runtime: Runtime(Some(runtime)),
         }))
@@ -763,6 +839,8 @@ impl StreamService for Youtube {
             i.gate
                 .run(Lane::Catalog, async {
                     let a = i.rp.query().music_artist(&id, true).await.map_err(map_err)?;
+                    // The same page serves discovery.
+                    i.pages.put(&id, convert::artist_page(&a));
                     Ok(convert::artist(&a))
                 })
                 .await
@@ -800,6 +878,21 @@ impl StreamService for Youtube {
 
     fn paused_until(&self) -> Option<std::time::SystemTime> {
         self.inner.gate.paused_until()
+    }
+
+    /// Drops the discovery answers kept for a track or an artist.
+    fn forget(&self, kind: EntityKind, id: &str) {
+        match kind {
+            EntityKind::Track => {
+                self.inner.lists.remove(&format!("related:{id}"));
+                self.inner.lists.remove(&format!("radio:{id}"));
+            }
+            EntityKind::Artist => {
+                self.inner.pages.remove(id);
+                self.inner.lists.remove(&format!("artist_radio:{id}"));
+            }
+            EntityKind::Album | EntityKind::Playlist => {}
+        }
     }
 
     /// YouTube Music finds a quoted ISRC in its song search.
@@ -1088,6 +1181,62 @@ impl StreamService for Youtube {
         self.inner.cache.size()
     }
 
+    /// A complete file of the audio cache (the bytes as YouTube sent them:
+    /// [`format::WEBM`] Opus, or [`format::M4A`] AAC); a partial or missing
+    /// one is `None`.
+    fn cached_audio(&self, id: &str) -> Option<Box<dyn AudioStream>> {
+        self.inner
+            .cache
+            .open(id)
+            .map(|c| Box::new(c) as Box<dyn AudioStream>)
+    }
+
+    /// The «Вам может понравиться» shelf of the track: two requests.
+    fn related(&self, track_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        let id = track_id.to_owned();
+        self.run(move |inner| async move { inner.related(&id).await })
+    }
+
+    /// The track's radio (`RDAMVM{id}`): one request, about 50 tracks
+    /// after the track, songs and clips as YouTube Music queues them.
+    fn radio(&self, track_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        let id = track_id.to_owned();
+        self.run(move |inner| async move {
+            inner
+                .radio(&format!("radio:{id}"), &format!("RDAMVM{id}"), Some(&id))
+                .await
+        })
+    }
+
+    /// From the artist page: one request, shared with [`Self::artist_top`]
+    /// and [`Self::artist_radio`] (and with [`Self::artist`] opened lately).
+    fn similar_artists(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamArtist>, StreamError>> {
+        let id = artist_id.to_owned();
+        self.run(move |inner| async move { Ok(inner.artist_page(&id).await?.similar) })
+    }
+
+    /// The top songs the artist page shows (about five; its videos are
+    /// left out): no request of its own.
+    fn artist_top(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        let id = artist_id.to_owned();
+        self.run(move |inner| async move { Ok(inner.artist_page(&id).await?.top) })
+    }
+
+    /// The artist's radio from the id its page gives: the page (if not
+    /// kept) and the radio. An artist without one is
+    /// [`StreamError::Unavailable`].
+    fn artist_radio(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        let id = artist_id.to_owned();
+        self.run(move |inner| async move {
+            let key = format!("artist_radio:{id}");
+            if let Some(hit) = inner.lists.get(&key) {
+                return Ok(hit);
+            }
+            let radio_id = inner.artist_page(&id).await?.radio_id.ok_or(StreamError::Unavailable)?;
+            inner.radio(&key, &radio_id, None).await
+        })
+    }
+
     fn set_cache_limit(&self, bytes: u64) {
         self.inner.cache.set_limit(bytes);
     }
@@ -1159,6 +1308,35 @@ mod tests {
         assert!(!valid_isrc("\"DEUM716024\""));
         assert_eq!(parse_country("ru"), Some(Country::Ru));
         assert_eq!(parse_country("nope"), None);
+    }
+
+    #[test]
+    fn cached_audio_is_only_a_complete_file_and_never_the_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let yt = Youtube::new(YoutubeConfig::new(dir.join("data")))
+            .unwrap()
+            .with_audio_cache(dir.join("cache"));
+        assert!(yt.cached_audio("abc").is_none(), "not played: no download either");
+        let r = range::Resolved {
+            url: String::new(),
+            len: 4,
+            format: format::WEBM,
+            duration: Some(Duration::from_secs(1)),
+            gain_db: None,
+            itag: 251,
+            bitrate: 160_000,
+        };
+        yt.inner.cache.store("abc", &r, &[1, 2, 3]);
+        assert!(yt.cached_audio("abc").is_none(), "a partial download is not served");
+        yt.inner.cache.store("abc", &r, &[1, 2, 3, 4]);
+        let mut a = yt.cached_audio("abc").expect("complete");
+        assert_eq!((a.format_hint(), a.byte_len()), (format::WEBM, Some(4)));
+        let mut bytes = Vec::new();
+        a.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, [1, 2, 3, 4]);
+        drop(a);
+        drop(yt);
     }
 
     #[test]

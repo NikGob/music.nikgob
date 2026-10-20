@@ -115,6 +115,8 @@ pub fn album(a: &models::Album) -> Option<StreamAlbum> {
         title: a.name.clone(),
         artists: artists(&a.artists),
         year: year(a.release_date.as_deref()),
+        // Only a full date: Spotify also dates albums by year or month.
+        release_date: a.release_date.clone().filter(|d| d.len() == 10),
         release_type: release_type(a.album_type.as_deref(), a.album_group.as_deref()),
         cover_url: cover(&a.images),
         total_tracks: a.total_tracks,
@@ -284,6 +286,7 @@ mod tests {
         let s = album(&a).unwrap();
         assert_eq!(s.release_type, ReleaseType::Single);
         assert_eq!(s.year, Some(2019));
+        assert_eq!(s.release_date, None, "a year only is no day");
         assert_eq!(s.total_tracks, Some(2));
         assert_eq!(s.tracks.len(), 2);
         let t1 = &s.tracks[0];

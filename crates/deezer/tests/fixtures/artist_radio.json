@@ -1,0 +1,17 @@
+{ "data": [
+  { "id": 1551523502, "readable": true, "title": "Лёд", "title_short": "Лёд", "duration": 186, "rank": 512330,
+    "md5_image": "4b2c1f0e0a1b2c3d4e5f60718293a4b5",
+    "artist": { "id": 13612387, "name": "Монеточка", "type": "artist" },
+    "album": { "id": 278000001, "title": "Раскраски для взрослых", "md5_image": "4b2c1f0e0a1b2c3d4e5f60718293a4b5", "type": "album" },
+    "type": "track" },
+  { "id": 2001, "readable": true, "title": "Каждый раз", "title_short": "Каждый раз", "duration": 201, "rank": 400000,
+    "md5_image": "aa11bb22cc33dd44ee55ff6677889900",
+    "artist": { "id": 13612387, "name": "Монеточка", "type": "artist" },
+    "album": { "id": 3001, "title": "Декоративно-прикладное искусство", "md5_image": "aa11bb22cc33dd44ee55ff6677889900", "type": "album" },
+    "type": "track" },
+  { "id": 2002, "readable": true, "title": "Где нас нет", "title_short": "Где нас нет", "duration": 233, "rank": 380000,
+    "md5_image": "bb11bb22cc33dd44ee55ff6677889900",
+    "artist": { "id": 4421, "name": "Oxxxymiron", "type": "artist" },
+    "album": { "id": 3002, "title": "Горгород", "md5_image": "bb11bb22cc33dd44ee55ff6677889900", "type": "album" },
+    "type": "track" }
+] }

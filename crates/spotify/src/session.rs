@@ -300,6 +300,7 @@ fn album(a: &librespot_metadata::Album) -> Option<StreamAlbum> {
             .map(|ar| ArtistRef::new(base62(&ar.id).map(|i| rid(&i)), ar.name.clone()))
             .collect(),
         year: Some(a.date.year()).filter(|y| *y > 1),
+        release_date: None,
         release_type,
         cover_url: a
             .covers
