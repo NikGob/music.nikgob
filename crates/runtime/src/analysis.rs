@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 use nikgob_core::model::{Analysis, AnalysisSource, TrackId};
 use nikgob_import::ImportError;
-use nikgob_import::decode::{PcmSpec, decode_file};
+use nikgob_import::decode::{PcmSpec, decode_bytes, decode_file};
 use nikgob_library::{AnalysisTodo, Library};
 use nikgob_recs::{ANALYZED_WITH, AnalysisError, PcmAnalyzer, Vector, VectorIndex};
 use nikgob_view as v;
@@ -66,6 +66,21 @@ pub(crate) enum FileError {
 
 /// Decodes `path` and analyses its first 8 minutes. `stop` aborts the decode.
 pub(crate) fn analyze_file(path: &Path, stop: &AtomicBool) -> Result<Vector, FileError> {
+    analyze_decoded(|sink| decode_file(path, sink), stop)
+}
+
+/// [`analyze_file`] for encoded audio in memory (a stream's; `ext` is its
+/// container as a file extension, `name` names it in the log).
+pub(crate) fn analyze_bytes(bytes: Vec<u8>, ext: &str, name: &str, stop: &AtomicBool) -> Result<Vector, FileError> {
+    analyze_decoded(|sink| decode_bytes(bytes, ext, name, sink), stop)
+}
+
+type Sink<'a> = &'a mut dyn FnMut(&[f32], PcmSpec) -> ControlFlow<()>;
+
+fn analyze_decoded(
+    decode: impl FnOnce(Sink<'_>) -> Result<PcmSpec, ImportError>,
+    stop: &AtomicBool,
+) -> Result<Vector, FileError> {
     let mut analyzer: Option<PcmAnalyzer> = None;
     let mut format: Option<AnalysisError> = None;
     let mut sink = |chunk: &[f32], spec: PcmSpec| -> ControlFlow<()> {
@@ -84,7 +99,7 @@ pub(crate) fn analyze_file(path: &Path, stop: &AtomicBool) -> Result<Vector, Fil
         };
         a.push(chunk)
     };
-    let decoded = decode_file(path, &mut sink);
+    let decoded = decode(&mut sink);
     if stop.load(Ordering::Relaxed) {
         return Err(FileError::Stopped);
     }
@@ -324,7 +339,7 @@ impl Shared {
     }
 }
 
-fn lower_priority() {
+pub(crate) fn lower_priority() {
     if let Err(e) = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min) {
         log::debug!("analysis: thread priority: {e:?}");
     }

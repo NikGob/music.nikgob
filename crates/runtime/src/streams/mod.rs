@@ -12,8 +12,11 @@
 //! Part B: the cold-start imports from the API and from export files
 //! ([`cold`], [`export`]), the sync of linked playlists ([`sync`]) and the
 //! discography of library artists ([`discography`]).
+//!
+//! Stage 4: the sound analysis of stream-only tracks ([`analysis`]).
 
 mod accounts;
+mod analysis;
 mod clips;
 mod cold;
 mod discography;
@@ -189,6 +192,10 @@ pub(crate) enum Msg {
         youtube_song: Option<Box<StreamTrack>>,
         youtube: bool,
     },
+    /// A job of the stream sound analysis ended (see [`analysis`]).
+    Analysed(analysis::Done),
+    /// Its gap or rate-limit pause is over.
+    AnalysisWake,
 }
 
 /// The worker's streaming state.
@@ -240,6 +247,8 @@ pub(crate) struct Streams {
     cold: cold::ColdState,
     sync: sync::SyncState,
     disco: discography::DiscoState,
+    /// The sound analysis of stream-only tracks.
+    pub(crate) analysis: analysis::StreamAnalysis,
 }
 
 impl Streams {
@@ -284,6 +293,7 @@ impl Streams {
             cold: cold::ColdState::default(),
             sync: sync::SyncState::default(),
             disco: discography::DiscoState::default(),
+            analysis: analysis::StreamAnalysis::default(),
         }
     }
 
@@ -425,9 +435,9 @@ impl Worker {
     }
 
     /// Every 5 s: accounts while logging in, the like checks, playlist
-    /// sync, completing imported tracks (not while idle); the wishlist
-    /// scheduler (it also runs on every event) and the cache size once a
-    /// minute.
+    /// sync, completing imported tracks (not while idle); the stream sound
+    /// analysis; the wishlist scheduler (it also runs on every event) and
+    /// the cache size once a minute.
     pub(crate) fn stream_tick(&mut self) {
         let idle = self.streams_idle();
         self.sync_tick(!idle);
@@ -436,6 +446,7 @@ impl Worker {
             self.likes_tick();
             self.clips_tick();
         }
+        self.stream_analysis_tick();
         self.publish_accounts();
         let every = self.streaming.schedule.wish_every;
         if self.streaming.last_wish_tick.is_none_or(|t| t.elapsed() >= every) {
@@ -582,6 +593,8 @@ impl Worker {
                 youtube_song,
                 youtube,
             } => self.replace_resolved(track, *pick, youtube_song.map(|s| *s), youtube),
+            Msg::Analysed(done) => self.stream_analysed(done),
+            Msg::AnalysisWake => self.stream_analysis_step(),
         }
     }
 

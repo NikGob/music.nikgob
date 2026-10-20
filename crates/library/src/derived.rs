@@ -1,12 +1,12 @@
 //! Derived per-track / per-release data: analysis vectors and palettes, and
 //! the «не рекомендовать» feedback of the recommendations.
 
-use nikgob_core::model::{Analysis, AnalysisSource, Palette, ReleaseId, TrackId};
+use nikgob_core::model::{Analysis, AnalysisSource, Palette, ReleaseId, TrackId, UnixMs};
 use rusqlite::{OptionalExtension, params};
 
 use crate::db::Library;
 use crate::error::{LibraryError, Result};
-use crate::types::{AnalysisCounts, AnalysisTodo, RecFeedback};
+use crate::types::{AnalysisCounts, AnalysisTodo, RecFeedback, StreamAnalysisTodo};
 use crate::util::{get_id, now_ms};
 
 fn encode_vector(v: &[f32]) -> Vec<u8> {
@@ -36,6 +36,12 @@ pub(crate) const STREAM_ANALYSABLE: &str = "t.has_local = 0 AND t.deleted_at IS 
                     AND l.deleted = 0)
          OR EXISTS (SELECT 1 FROM playlist_entry e JOIN playlist p ON p.id = e.playlist_id
                      WHERE e.track_id = t.id AND e.deleted = 0 AND p.deleted = 0))";
+
+/// `analysis_failed.file_key` of a stream-only track whose analysis failed
+/// (no song on YouTube Music, a video that does not play or decode): tried
+/// again after a while ([`Library::streams_needing_analysis`]); a file that
+/// arrives is analysed regardless.
+const STREAM_FAILED: &str = "stream";
 
 fn analysis_from_row(r: &rusqlite::Row<'_>, track: TrackId, at: usize) -> Result<Analysis> {
     let blob: Vec<u8> = r.get(at)?;
@@ -150,8 +156,58 @@ impl Library {
         })
     }
 
+    /// Stream-only tracks that are liked or in a playlist and have no
+    /// analysis with `analyzed_with` (work queue of the background stream
+    /// analysis), newest first; one whose stream analysis failed at or
+    /// after `retry_before` is left out.
+    pub fn streams_needing_analysis(
+        &self,
+        analyzed_with: &str,
+        retry_before: UnixMs,
+        limit: u32,
+    ) -> Result<Vec<StreamAnalysisTodo>> {
+        self.read(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT t.id,
+                        (SELECT y.locator FROM source y WHERE y.track_id = t.id AND y.kind = 'youtube'
+                            AND y.available = 1 AND y.trashed_at IS NULL
+                          ORDER BY y.is_active DESC, y.quality_score DESC LIMIT 1)
+                   FROM track t
+                   LEFT JOIN analysis a ON a.track_id = t.id
+                   LEFT JOIN analysis_failed f ON f.track_id = t.id
+                  WHERE {STREAM_ANALYSABLE}
+                    AND (a.track_id IS NULL OR a.analyzed_with <> ?1)
+                    AND (f.track_id IS NULL OR f.file_key <> '{STREAM_FAILED}' OR f.failed_at < ?2)
+                  ORDER BY t.seq DESC LIMIT ?3"
+            ))?;
+            let rows = stmt.query_map(params![analyzed_with, retry_before, limit], |r| {
+                Ok(StreamAnalysisTodo {
+                    track_id: get_id(r, 0)?,
+                    youtube: r.get(1)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Remembers that the stream analysis of this stream-only track failed:
+    /// it leaves the queue (and the progress) until the mark is older than
+    /// the `retry_before` the queue is asked with, or a file arrives.
+    pub fn mark_stream_analysis_failed(&self, track: TrackId, error: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO analysis_failed(track_id, file_key, error, failed_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(track_id) DO UPDATE SET file_key = excluded.file_key,
+                    error = excluded.error, failed_at = excluded.failed_at",
+                params![track.to_string(), STREAM_FAILED, error, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Progress of the analysis with `analyzed_with`: files, and the
-    /// stream-only tracks that are liked or in a playlist.
+    /// stream-only tracks that are liked or in a playlist (without those
+    /// whose stream analysis failed).
     pub fn analysis_counts(&self, analyzed_with: &str) -> Result<AnalysisCounts> {
         self.read(|c| {
             let (files_total, files_done): (u32, u32) = c.query_row(
@@ -171,7 +227,10 @@ impl Library {
                 &format!(
                     "SELECT count(*), coalesce(sum(a.analyzed_with = ?1), 0)
                        FROM track t LEFT JOIN analysis a ON a.track_id = t.id
-                      WHERE {STREAM_ANALYSABLE}"
+                       LEFT JOIN analysis_failed f ON f.track_id = t.id
+                      WHERE {STREAM_ANALYSABLE}
+                        AND (f.track_id IS NULL OR f.file_key <> '{STREAM_FAILED}'
+                             OR a.analyzed_with IS ?1)"
                 ),
                 [analyzed_with],
                 |r| Ok((r.get(0)?, r.get(1)?)),

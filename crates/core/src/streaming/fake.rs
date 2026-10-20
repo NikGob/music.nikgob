@@ -872,7 +872,7 @@ impl FakeService {
 
     /// The next `n` calls of the trait method `name` (`"search"`,
     /// `"liked"`, `"liked_head"`, `"my_playlists"`, `"playlist"`,
-    /// `"playlist_version"`, `"search_kind"`) answer
+    /// `"playlist_version"`, `"search_kind"`, `"open_audio"`) answer
     /// [`StreamError::RateLimited`] with `retry_after` (they are still
     /// counted as calls). `n = 0` lifts it.
     pub fn rate_limit_next(&self, name: &'static str, n: usize, retry_after: Option<Duration>) {
@@ -1432,9 +1432,15 @@ impl StreamService for FakeService {
         ready(result)
     }
 
+    /// Not counted as a call (the real one asks nothing until the first
+    /// read) unless [`FakeService::rate_limit_next`] for `"open_audio"`
+    /// makes it answer a rate limit.
     fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError> {
         if matches!(self.lock().account, Account::LoggedIn { audio: false, .. }) {
             return Err(StreamError::PremiumRequired);
+        }
+        if self.lock().limited.contains_key("open_audio") {
+            self.gate("open_audio")?;
         }
         self.open_now(id)
             .map(|a| Box::new(a) as Box<dyn AudioStream>)

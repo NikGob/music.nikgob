@@ -445,6 +445,7 @@ impl Worker {
         self.maybe_export(true);
         self.playback.stop();
         self.shutdown_torrents();
+        self.streaming.analysis.shutdown();
         self.analysis.shutdown();
     }
 
@@ -843,6 +844,9 @@ impl Worker {
                 if old.stream_cache_mb != p.stream_cache_mb {
                     self.apply_stream_cache();
                 }
+                if old.stream_analysis != p.stream_analysis {
+                    self.stream_analysis_pref(p.stream_analysis);
+                }
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
@@ -1185,6 +1189,9 @@ impl Worker {
     /// Records how the current track ended: a skip before 90 %, else complete.
     fn record_end(&mut self, by_user: bool) {
         let Some(e) = self.playing else { return };
+        if let Some((source, SourceKind::Youtube)) = self.playing_source {
+            self.analyse_played(e.track, source);
+        }
         let pos = self.position_now();
         let dur = self
             .lib
@@ -1438,6 +1445,7 @@ impl Worker {
     // ---------------------------------------------------------------- loads
 
     fn load_library(&mut self) {
+        self.stream_analysis_changed();
         let sort = self.state.read().library.release_sort;
         let key = match sort {
             nikgob_view::ReleaseSort::Artist => Sort::asc(ReleaseSortKey::Artist),
