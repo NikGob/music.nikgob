@@ -47,7 +47,7 @@ pub use streams::{LikedClip, TrackSnapshot, event_id, is_web_ref};
 pub use types::{
     AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
     PlaylistEntryRow, PlaylistKind, PlaylistRemote, PlaylistSummary, PurgedFile, PurgedTrack,
-    RecFeedback, ReleaseProgress, RemoteLike,
+    RecFeedback, ReleaseProgress, RemoteLike, StreamAnalysisTodo,
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,
     TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };

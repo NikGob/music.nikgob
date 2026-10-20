@@ -1313,6 +1313,48 @@ fn analysis_vectors_and_progress_counts() {
 }
 
 #[test]
+fn the_stream_analysis_queue_skips_failures_until_they_are_old() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let stream = |title: &str, kind: SourceKind, id: &str, n: u32| {
+        let t = track(&lib, &a, None, title, n);
+        lib.add_source(&source(&t, kind, id, Codec::Opus, None)).unwrap();
+        lib.like(t.id).unwrap();
+        t
+    };
+    let older = stream("Older", SourceKind::Youtube, "v1", 1);
+    let spotify = stream("Spotify", SourceKind::Spotify, "s1", 2);
+    let filed = stream("File", SourceKind::Youtube, "v3", 3);
+    local(&lib, &filed, "f.opus", Codec::Opus, Some(160));
+    let unliked = track(&lib, &a, None, "Seen", 4);
+    lib.add_source(&source(&unliked, SourceKind::Youtube, "v4", Codec::Opus, None)).unwrap();
+
+    let due = |before: i64| -> Vec<(TrackId, Option<String>)> {
+        lib.streams_needing_analysis("v2", before, 10)
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.track_id, t.youtube))
+            .collect()
+    };
+    // Newest first; a Spotify-only track has no video yet; not a file's.
+    assert_eq!(due(0), [(spotify.id, None), (older.id, Some("v1".into()))]);
+
+    lib.mark_stream_analysis_failed(spotify.id, "no YouTube Music song").unwrap();
+    assert_eq!(due(0), [(older.id, Some("v1".into()))], "a fresh failure waits");
+    assert_eq!(due(crate::now_ms() + 1).len(), 2, "an old one is tried again");
+    let c = lib.analysis_counts("v2").unwrap();
+    assert_eq!((c.streams_done, c.streams_total), (0, 1), "nor counted meanwhile");
+
+    lib.put_analysis(&analysis(older.id, "v2", AnalysisSource::Youtube, 0.1)).unwrap();
+    assert!(due(0).is_empty());
+    assert_eq!(lib.streams_needing_analysis("v3", 0, 10).unwrap().len(), 1, "another version");
+    let c = lib.analysis_counts("v2").unwrap();
+    assert_eq!((c.streams_done, c.streams_total), (1, 1));
+    // The stream's mark does not keep a file out of the file queue.
+    assert!(lib.tracks_needing_analysis("v2", 10).unwrap().iter().any(|t| t.track_id == filed.id));
+}
+
+#[test]
 fn rec_feedback_is_last_writer_wins() {
     let lib = lib();
     assert!(lib.rec_dislikes().unwrap().is_empty());

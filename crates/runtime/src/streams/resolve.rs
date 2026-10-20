@@ -364,6 +364,7 @@ impl Worker {
 
     pub(crate) fn resolved(&mut self, track: TrackId, found: Lookup, filled: Option<Box<StreamTrack>>) {
         self.streaming.resolving.remove(&track);
+        self.analysis_resolved(track, &found);
         if let Some(full) = &filled {
             self.isrc_filled(track, full);
         }

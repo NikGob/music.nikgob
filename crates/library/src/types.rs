@@ -345,6 +345,16 @@ pub struct AnalysisTodo {
     pub file_key: String,
 }
 
+/// A stream-only track due for sound analysis
+/// ([`crate::Library::streams_needing_analysis`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamAnalysisTodo {
+    pub track_id: TrackId,
+    /// Its YouTube video, if it has one that plays (else its song has to
+    /// be found on YouTube Music first).
+    pub youtube: Option<String>,
+}
+
 /// How far the sound analysis is ([`crate::Library::analysis_counts`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AnalysisCounts {

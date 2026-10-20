@@ -64,8 +64,14 @@ pub struct StreamSchedule {
     /// (playback and the first screens go first)…
     pub analysis_start: Duration,
     /// …and, with nothing to analyse, looks at the library again this often
-    /// (imports wake it at once).
+    /// (imports wake it at once; the stream analysis is woken by changes
+    /// of likes and playlists).
     pub analysis_idle: Duration,
+    /// Stream-only tracks are downloaded for their analysis one at a time,
+    /// this far apart (± 25 %)…
+    pub analysis_gap: Duration,
+    /// …at most this many a day.
+    pub analysis_daily: u32,
     /// The worker's slow tick (toasts, the session file, the jobs above).
     pub tick: Duration,
     /// ± this share of every periodic interval.
@@ -99,6 +105,8 @@ impl Default for StreamSchedule {
             clip_refill: Duration::from_secs(30 * 60),
             analysis_start: Duration::from_secs(15),
             analysis_idle: Duration::from_secs(5 * 60),
+            analysis_gap: Duration::from_secs(20),
+            analysis_daily: 300,
             tick: Duration::from_secs(5),
             jitter: 0.2,
             rate_limit_cap: Duration::from_secs(10 * 60),

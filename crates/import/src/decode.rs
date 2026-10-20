@@ -66,11 +66,39 @@ pub fn decode_file(
     path: &Path,
     sink: &mut dyn FnMut(&[f32], PcmSpec) -> ControlFlow<()>,
 ) -> Result<PcmSpec> {
-    let bad = |m: String| ImportError::decode(path, m);
     let file = File::open(crate::sanitize::long_path(path)).map_err(|e| ImportError::io(path, e))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let ext = path.extension().and_then(|e| e.to_str());
+    decode_source(Box::new(file), ext, path, sink)
+}
+
+/// [`decode_file`] for encoded bytes in memory (a stream's audio); `ext`
+/// is the container as a file extension (`"webm"`, `"m4a"`, `"ogg"`…) and
+/// `name` only names it in errors.
+pub fn decode_bytes(
+    bytes: Vec<u8>,
+    ext: &str,
+    name: &str,
+    sink: &mut dyn FnMut(&[f32], PcmSpec) -> ControlFlow<()>,
+) -> Result<PcmSpec> {
+    let ext = ext.trim_start_matches('.');
+    decode_source(
+        Box::new(std::io::Cursor::new(bytes)),
+        (!ext.is_empty()).then_some(ext),
+        Path::new(name),
+        sink,
+    )
+}
+
+fn decode_source(
+    media: Box<dyn symphonia::core::io::MediaSource>,
+    ext: Option<&str>,
+    path: &Path,
+    sink: &mut dyn FnMut(&[f32], PcmSpec) -> ControlFlow<()>,
+) -> Result<PcmSpec> {
+    let bad = |m: String| ImportError::decode(path, m);
+    let mss = MediaSourceStream::new(media, Default::default());
     let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = ext {
         hint.with_extension(ext);
     }
     let mut format = symphonia::default::get_probe()
