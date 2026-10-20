@@ -399,6 +399,10 @@ impl Worker {
             Ok(n) => log::info!("library: {n} duplicate stream tracks merged"),
             Err(e) => log::warn!("library: merging duplicate stream tracks: {e}"),
         }
+        // Once: tracks imported as one artist "A, B" link to A and to B.
+        if let Err(e) = self.lib.split_combined_credits() {
+            log::warn!("library: splitting combined artist credits: {e}");
+        }
         self.load_torrent_history();
         self.publish_downloads();
         self.resume_torrents();

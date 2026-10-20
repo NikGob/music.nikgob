@@ -61,52 +61,11 @@ pub struct Identity {
     pub identified_by: IdentifiedBy,
 }
 
-const FEAT_MARKERS: &[&str] = &[" feat. ", " feat ", " ft. ", " featuring ", "; "];
-
-/// Splits `"A feat. B; C"` into `[("", "A"), (" feat. ", "B"), ("; ", "C")]`.
+/// Splits `"A feat. B; C"` into `[("", "A"), (" feat. ", "B"), ("; ", "C")]`
+/// and `"A, B"` into `[("", "A"), (", ", "B")]` (see
+/// [`nikgob_core::credit::split_credit`] for the rules).
 pub fn parse_credit(line: &str) -> Vec<(String, String)> {
-    let mut parts: Vec<(String, String)> = Vec::new();
-    let lower = line.to_lowercase();
-    // ASCII-only markers keep byte offsets identical in `line` and `lower`
-    // unless the text holds characters whose lowercase has another length.
-    let aligned = lower.len() == line.len();
-    let mut rest_start = 0usize;
-    let mut join = String::new();
-    if aligned {
-        loop {
-            let hay = &lower[rest_start..];
-            let next = FEAT_MARKERS
-                .iter()
-                .filter_map(|m| hay.find(m).map(|i| (i, *m)))
-                .min_by_key(|(i, _)| *i);
-            match next {
-                Some((i, marker)) => {
-                    let name = line[rest_start..rest_start + i].trim();
-                    if !name.is_empty() {
-                        parts.push((std::mem::take(&mut join), name.to_owned()));
-                    }
-                    join = if marker == "; " {
-                        "; ".to_owned()
-                    } else {
-                        // Keep the author's spelling of the marker.
-                        line[rest_start + i..rest_start + i + marker.len()].to_owned()
-                    };
-                    rest_start += i + marker.len();
-                }
-                None => {
-                    let name = line[rest_start..].trim();
-                    if !name.is_empty() {
-                        parts.push((std::mem::take(&mut join), name.to_owned()));
-                    }
-                    break;
-                }
-            }
-        }
-    }
-    if parts.is_empty() && !line.trim().is_empty() {
-        parts.push((String::new(), line.trim().to_owned()));
-    }
-    parts
+    nikgob_core::credit::split_credit(line)
 }
 
 /// Aligns individual `names` with the credit `line` to recover join phrases.

@@ -138,15 +138,12 @@ pub fn release(
             } else if let Some(b) = widgets::progress_badge(c) {
                 line = format!("{line} · {b} у тебя");
             }
-            let artist = ui.add(
-                egui::Label::new(TypeRole::TitleMedium.style().rich(line, s.on_surface_variant)).sense(Sense::click()),
-            );
-            if artist.clicked()
-                && let Some(a) = c.artist_id
-            {
-                nav = Some(Route::Artist(a));
+            // Each artist of the album is a link to its page.
+            let (links, routes) = crate::screens::artist_links::library_spans(&c.artists, &line);
+            let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
+            if let Some(k) = crate::components::link_paragraph(ui, "rel-artists", &line, &links, format).clicked {
+                nav = routes.get(k).cloned();
             }
-            artist.on_hover_cursor(egui::CursorIcon::PointingHand);
             // The formats, quietly: nothing to press.
             if let Some(q) = &r.quality {
                 ui.label(TypeRole::BodyMedium.style().rich(q, s.on_surface_variant));
@@ -227,7 +224,7 @@ pub fn release(
             .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
             .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
             .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
-            .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(c.artist_id.is_some()))
+            .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!c.artists.linked().is_empty()))
             .item(MenuItem::new("Поделиться").icon(Icon::Share))
             .divider()
             .item(MenuItem::new("Удалить альбом").icon(Icon::Delete))
@@ -240,7 +237,7 @@ pub fn release(
                 pages.pending_add = Some(ids.clone());
                 pages.pending_add_anchor = Some(more.rect);
             }
-            Some(3) => nav = c.artist_id.map(Route::Artist),
+            Some(3) => nav = crate::screens::artist_links::go_to(ui.ctx(), crate::screens::artist_links::library(&c.artists)),
             Some(4) => out.push(Command::Share(nikgob_view::ShareTarget::Release(id))),
             Some(5) => super::request_release_delete(ui.ctx(), id, &c.title, false),
             Some(6) => super::request_release_delete(ui.ctx(), id, &c.title, true),

@@ -164,7 +164,7 @@ impl Chrome {
             Act::Playlist => MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd),
             Act::Artist => MenuItem::new("К исполнителю")
                 .icon(Icon::Person)
-                .enabled(t.artist_id.is_some()),
+                .enabled(!t.artists.linked().is_empty()),
             Act::Album => MenuItem::new("К альбому")
                 .icon(Icon::Album)
                 .enabled(t.release_id.is_some()),
@@ -224,7 +224,12 @@ impl Chrome {
             }
         }
         if let Some(i) = menu.attach(anchor) {
-            self.apply(picks[i], track, anchor.rect, wh, out);
+            if picks[i] == Act::Artist {
+                // Several artists: which one.
+                self.nav = super::artist_links::go_to(&anchor.ctx, super::artist_links::library(&track.artists));
+            } else {
+                self.apply(picks[i], track, anchor.rect, wh, out);
+            }
         }
     }
 
@@ -249,7 +254,7 @@ impl Chrome {
             Act::Playlist => {
                 self.picker = Some(Picker { tracks: vec![t.id], anchor });
             }
-            Act::Artist => self.nav = t.artist_id.map(Route::Artist),
+            Act::Artist => self.nav = t.artist_id().map(Route::Artist),
             Act::Album => self.nav = t.release_id.map(Route::Release),
             Act::Tags => out.push(Command::OpenTagEditor(t.id)),
             Act::Replace if t.has_local => out.push(Command::SearchTorrents(replace_query(t))),

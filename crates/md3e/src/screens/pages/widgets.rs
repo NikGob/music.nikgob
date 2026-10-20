@@ -19,7 +19,7 @@ use crate::{
         Equalizer, IconButton, Leading, ListItem, MediaCard, Menu, MenuItem, Radii, Size, Style,
         anim, paint,
     },
-    screens::common,
+    screens::{artist_links, common},
     tokens::shape,
 };
 
@@ -180,7 +180,7 @@ pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) ->
         .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
         .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
         .item(MenuItem::new("В очередь").icon(Icon::QueueMusic))
-        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(r.artist_id.is_some()))
+        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!r.artists.linked().is_empty()))
         .divider()
         .item(MenuItem::new(album_like_label(r.liked)).icon(Icon::Favorite).selected(r.liked))
         .item(MenuItem::new("Поделиться").icon(Icon::Share))
@@ -192,7 +192,7 @@ pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) ->
         0 => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false }),
         1 => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: true }),
         2 => out.push(Command::EnqueueRelease(r.id)),
-        3 => return r.artist_id.map(Route::Artist),
+        3 => return artist_links::go_to(&resp.ctx, artist_links::library(&r.artists)),
         4 => out.push(Command::Like(LikeTarget::Release(r.id), !r.liked)),
         5 => out.push(Command::Share(nikgob_view::ShareTarget::Release(r.id))),
         6 => super::request_release_delete(&resp.ctx, r.id, &r.title, false),
@@ -551,6 +551,9 @@ pub fn track_list_ext(
     let mut row = |ui: &mut Ui, i: usize, nav: &mut Option<Route>| -> Option<Response> {
         let t = &tracks[i];
         let o = track_row(ui, id, i, t, lead, two_line, opts, &wish, state, out);
+        if let Some(r) = o.artist.clone() {
+            *nav = Some(r);
+        }
         if let Some(h) = &o.handle {
             if h.dragged() {
                 dragging = Some(i);
@@ -570,10 +573,10 @@ pub fn track_list_ext(
             Some(pl) => {
                 if let Some(m) = &o.more {
                     let picked = playlist_track_menu(menu_key, t, pl).attach(m);
-                    *nav = playlist_track_pick(picked, t, pl, Some(m.rect), pages, out).or(nav.take());
+                    *nav = playlist_track_pick(&m.ctx, picked, t, pl, Some(m.rect), pages, out).or(nav.take());
                 }
                 let picked = playlist_track_menu(menu_key.with("ctx"), t, pl).context_menu(&o.response);
-                *nav = playlist_track_pick(picked, t, pl, None, pages, out).or(nav.take());
+                *nav = playlist_track_pick(&o.response.ctx, picked, t, pl, None, pages, out).or(nav.take());
             }
             None => {
                 if let Some(m) = &o.more {
@@ -618,6 +621,8 @@ pub fn track_list_ext(
 /// What a drawn track row reported.
 struct RowOut {
     response: Response,
+    /// An artist name of the supporting line was clicked: its page.
+    artist: Option<Route>,
     handle: Option<Response>,
     more: Option<Response>,
     play_clicked: bool,
@@ -719,8 +724,10 @@ fn track_row(
             });
         })
         .id_salt(("track", id, i, t.id));
+    // Each artist of the line is a link to its page.
+    let (links, artist_routes) = artist_links::library_spans(&t.artists, &supporting);
     if two_line {
-        item = item.supporting(supporting);
+        item = item.supporting(supporting).supporting_links(links);
     }
     if opts.reorder {
         item = item.drag_handle(true);
@@ -741,7 +748,8 @@ fn track_row(
             .playing(playing)
             .paint_at(ui, Rect::from_center_size(center, vec2(24.0, 24.0)));
     }
-    RowOut { response: o.response, handle: o.handle, more: menu_resp, play_clicked: o.play_clicked }
+    let artist = o.link_clicked.and_then(|k| artist_routes.get(k).cloned());
+    RowOut { response: o.response, artist, handle: o.handle, more: menu_resp, play_clicked: o.play_clicked }
 }
 
 /// Lays out `n` rows of `row_h` one under another (the page's item
@@ -853,7 +861,8 @@ fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId) -> Menu 
         .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
         .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
         .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
-        .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()));
+        .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()))
+        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()));
     // A clip: its song by hand; a stream from YouTube: another version.
     if let Some(find) = crate::screens::find_song::label(track) {
         m = m.item(MenuItem::new(find).icon(Icon::MusicNote));
@@ -870,6 +879,7 @@ fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId) -> Menu 
 }
 
 fn playlist_track_pick(
+    ctx: &egui::Context,
     picked: Option<usize>,
     track: &TrackRow,
     playlist: PlaylistId,
@@ -886,8 +896,10 @@ fn playlist_track_pick(
             pages.pending_add_anchor = anchor;
         }
         3 => return track.release_id.map(Route::Release),
-        4 if find => out.push(Command::FindSong { track: track.id, query: None }),
-        4 | 5 => out.push(Command::RemoveFromPlaylist(playlist, track.id)),
+        // Several artists: a chooser.
+        4 => return artist_links::go_to(ctx, artist_links::library(&track.artists)),
+        5 if find => out.push(Command::FindSong { track: track.id, query: None }),
+        5 | 6 => out.push(Command::RemoveFromPlaylist(playlist, track.id)),
         _ => {}
     }
     None

@@ -35,6 +35,8 @@ pub mod chip;
 pub use chip::{AssistChip, FilterChip, InputChip, InputChipOutput};
 pub mod card;
 pub use card::{Card, CardKind, CardOutput, CoverStatus, MediaCard, MediaCardOutput};
+pub mod links;
+pub use links::{LinkLabel, interact_links, link_label, link_paragraph};
 pub mod list;
 pub use list::{Leading, ListItem, ListItemOutput, Position, segmented_list};
 pub mod scrollbars;

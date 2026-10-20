@@ -201,7 +201,27 @@ impl Store {
     /// Credit of the track: the individual names aligned with the display line.
     pub fn track_credit(&mut self, id: &Identity) -> Result<ArtistCredit> {
         let parts = credit_parts(&id.artist_line, &id.artists);
+        let parts = self.split_known_pairs(parts)?;
         self.ensure_credit(&parts, id.artist_mbid.as_deref())
+    }
+
+    /// A lone `A & B` is one name for the line splitter (`Simon &
+    /// Garfunkel`); it is two artists when the library already knows both
+    /// on their own and not the pair.
+    fn split_known_pairs(&mut self, parts: Vec<(String, String)>) -> Result<Vec<(String, String)>> {
+        self.ensure_loaded()?;
+        let mut out = Vec::with_capacity(parts.len());
+        for (join, name) in parts {
+            let known = |n: &str| self.artists.contains_key(&name_key(n));
+            match nikgob_core::credit::split_pair(&name) {
+                Some([(_, a), (j, b)]) if !known(&name) && known(&a) && known(&b) => {
+                    out.push((join, a));
+                    out.push((j, b));
+                }
+                _ => out.push((join, name)),
+            }
+        }
+        Ok(out)
     }
 
     /// Creates or updates the release of this identity.
@@ -223,7 +243,7 @@ impl Store {
                 let parts = if parts.is_empty() {
                     vec![(String::new(), line.clone())]
                 } else {
-                    parts
+                    self.split_known_pairs(parts)?
                 };
                 // The album artist's MBID is unknown here; the track artist's MBID
                 // only fits when both are the same person.
@@ -296,5 +316,32 @@ mod tests {
         // An explicit album artist never falls back to the first name.
         let explicit = identity("Radwimps", Some("Radwimps, Kazuma Jinnouchi"), "Suzume");
         assert_eq!(store.find_release(&explicit).unwrap(), None);
+    }
+
+    #[test]
+    fn a_track_of_two_artists_links_to_both() {
+        use nikgob_core::model::Track;
+        let lib = Library::open_in_memory().unwrap();
+        let mut store = Store::new(lib.clone());
+        let id = identity("Кино, Земфира", None, "Live");
+        let credit = store.track_credit(&id).unwrap();
+        assert_eq!(credit.0.len(), 2);
+        assert_eq!(credit.0[0].name, "Кино");
+        assert_eq!(credit.0[1].name, "Земфира");
+        assert_eq!(credit.display(), "Кино, Земфира", "the line reads as tagged");
+        let ids: Vec<_> = credit.artist_ids().collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        lib.upsert_track(&Track::new("Song", credit)).unwrap();
+        for a in ids {
+            let rows = lib.tracks_of_artist(a, 0, 10).unwrap();
+            assert_eq!(rows.len(), 1, "each artist page has the track");
+            assert_eq!(rows[0].credit.0.len(), 2);
+        }
+        // A lone "A & B" splits once both are known on their own.
+        let pair = store.track_credit(&identity("Кино & Земфира", None, "X")).unwrap();
+        assert_eq!(pair.0.len(), 2);
+        let band = store.track_credit(&identity("Simon & Garfunkel", None, "X")).unwrap();
+        assert_eq!(band.0.len(), 1);
     }
 }

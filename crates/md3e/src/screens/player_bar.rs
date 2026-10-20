@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use egui::{Rect, Sense, Ui, vec2};
-use nikgob_view::{Command, LikeTarget, Repeat, Route, Status, ViewState};
+use nikgob_view::{Command, LikeTarget, Repeat, Status, ViewState};
 
 use super::{
     PaneTab,
@@ -81,19 +81,11 @@ pub fn show(
         match current {
             Some(t) => {
                 common::label(&mut tui, &t.title, TypeRole::TitleSmall, on);
-                // The artist opens their page; the rest of the block opens
+                // Each artist opens their page; the rest of the block opens
                 // Now Playing.
-                let artist = tui.add(
-                    egui::Label::new(TypeRole::BodySmall.style().rich(&t.artist, on.gamma_multiply(0.8)))
-                        .truncate()
-                        .selectable(false)
-                        .sense(Sense::click()),
-                );
-                if let Some(id) = t.artist_id {
-                    let artist = artist.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if artist.clicked() {
-                        chrome.nav = Some(Route::Artist(id));
-                    }
+                let format = TypeRole::BodySmall.style().text_format(on.gamma_multiply(0.8));
+                if let Some(r) = super::artist_links::label(&mut tui, "bar-artists", &t.artist, &t.artists, format) {
+                    chrome.nav = Some(r);
                 }
             }
             None => {

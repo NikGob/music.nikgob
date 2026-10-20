@@ -230,7 +230,7 @@ impl PageState {
             .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
             .divider()
             .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()))
-            .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(track.artist_id.is_some()))
+            .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()))
             .item(MenuItem::new("Источник и качество").icon(Icon::Info))
             .item(MenuItem::new("Поделиться").icon(Icon::Share))
             .item(MenuItem::new(fetch).icon(fetch_icon))
@@ -249,6 +249,7 @@ impl PageState {
 
     fn track_menu_pick(
         &mut self,
+        ctx: &Context,
         picked: Option<usize>,
         track: &TrackRow,
         out: &mut Vec<Command>,
@@ -270,7 +271,8 @@ impl PageState {
                 self.pending_add = Some(vec![track.id]);
             }
             3 => return track.release_id.map(Route::Release),
-            4 => return track.artist_id.map(Route::Artist),
+            // Several artists: a chooser.
+            4 => return crate::screens::artist_links::go_to(ctx, crate::screens::artist_links::library(&track.artists)),
             5 => self.open_pane = Some(PaneTab::Info),
             6 => out.push(Command::Share(nikgob_view::ShareTarget::Track(track.id))),
             7 if track.has_local => out.push(Command::OpenTagEditor(track.id)),
@@ -297,7 +299,7 @@ impl PageState {
         out: &mut Vec<Command>,
     ) -> Option<Route> {
         let picked = Self::track_menu_items(anchor.id, track).attach(anchor);
-        self.track_menu_pick(picked, track, out)
+        self.track_menu_pick(&anchor.ctx, picked, track, out)
     }
 
     /// Right click on a track row.
@@ -309,7 +311,7 @@ impl PageState {
         out: &mut Vec<Command>,
     ) -> Option<Route> {
         let picked = Self::track_menu_items(row.id.with("ctx"), track).context_menu(row);
-        self.track_menu_pick(picked, track, out)
+        self.track_menu_pick(&row.ctx, picked, track, out)
     }
 
     /// The ⋮ menu for the playing track (Now Playing header).
@@ -322,7 +324,7 @@ impl PageState {
     ) {
         if let Some(t) = track {
             let picked = Self::track_menu_items(anchor.id, t).attach(anchor);
-            if let Some(r) = self.track_menu_pick(picked, t, out) {
+            if let Some(r) = self.track_menu_pick(&anchor.ctx, picked, t, out) {
                 self.pending_nav = Some(r);
             }
         }

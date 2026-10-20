@@ -5,6 +5,7 @@
 //! navigation stack, which panes are open, transitions.
 
 mod ambient;
+mod artist_links;
 mod bg_shapes;
 mod chrome;
 mod common;
@@ -365,6 +366,10 @@ impl Md3eUi {
         self.pages.overlays(ctx, state, overlay_area, out);
         self.chrome.overlays(ctx, state, out);
         self.find_song.show(ctx, state, out);
+        // «К исполнителю» of a track with several artists: which one.
+        if let Some(route) = artist_links::chooser(ctx) {
+            self.chrome.nav = Some(route);
+        }
 
         // Now Playing overlay, transformed out of the floating player: the
         // container grows from the pill to the window while the content,
@@ -1265,7 +1270,7 @@ mod tests {
         let mut chrome = chrome::Chrome::default();
         let track = nikgob_view::TrackRow {
             id: nikgob_view::TrackId::new(), title: "Track".into(), artist: "Artist".into(),
-            album: None, release_id: None, artist_id: None, disc_no: 1, track_no: 1,
+            album: None, release_id: None, artists: Default::default(), disc_no: 1, track_no: 1,
             duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
         };
         let mut out = Vec::new();
@@ -1333,7 +1338,7 @@ mod tests {
         let mut state = ViewState::default();
         state.player.current = Some(nikgob_view::TrackRow {
             id: nikgob_view::TrackId::new(), title: "Track".into(), artist: "Artist".into(),
-            album: None, release_id: None, artist_id: None, disc_no: 1, track_no: 1,
+            album: None, release_id: None, artists: Default::default(), disc_no: 1, track_no: 1,
             duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
         });
         for i in 0..3 {

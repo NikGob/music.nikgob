@@ -605,7 +605,10 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         // on hover plays with one click (the row itself still needs two).
         let num_c = pos2((cols.num.0 + cols.num.1) * 0.5, row.center().y);
         let cell = ui.interact(Rect::from_center_size(num_c, vec2(40.0, 40.0)), id.with("num"), Sense::click());
-        let hovered = resp.hovered() || cell.hovered();
+        // The pointer on an artist link is on the row too (last frame's answer).
+        let link_hover_key = id.with("link-hover");
+        let link_hover = ui.ctx().data(|d| d.get_temp::<bool>(link_hover_key)).unwrap_or(false);
+        let hovered = resp.hovered() || cell.hovered() || link_hover;
         let track = i.checked_sub(lib.tracks_offset).and_then(|j| lib.tracks.get(j));
         let is_cur = track.is_some_and(|t| current == Some(t.id));
         let (fg, variant, layer_color) = if is_cur {
@@ -682,6 +685,16 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         ui.painter().galley(pos2(tx, cy - 22.0), g, fg);
         let artist = if t.clip { format!("{} · клип", t.artist) } else { t.artist.clone() };
         let g = line(ui.painter(), &artist, TypeRole::BodyMedium.style(), variant, tw);
+        // Each artist is a link to its page.
+        let (links, routes) = crate::screens::artist_links::library_spans(&t.artists, &artist);
+        let (clicked, over) =
+            crate::components::interact_links(ui, id.with("artists"), &g, pos2(tx, cy + 2.0), &links, variant);
+        if over != link_hover {
+            ui.ctx().data_mut(|d| d.insert_temp(link_hover_key, over));
+        }
+        if let Some(r) = clicked.and_then(|k| routes.get(k).cloned()) {
+            nav = Some(r);
+        }
         ui.painter().galley(pos2(tx, cy + 2.0), g, variant);
         // Альбом.
         if let (Some((x0, x1)), Some(a)) = (cols.album, &t.album) {

@@ -19,7 +19,7 @@ use crate::{
         AssistChip, Button, ButtonRow, CoverStatus, Equalizer, IconButton, Leading, ListItem, LoadingIndicator, MediaCard,
         Member, Menu, MenuItem, Radii, Size, Style, paint,
     },
-    screens::common,
+    screens::{artist_links, common},
     tokens::shape,
 };
 
@@ -157,8 +157,10 @@ fn track_row(
     let dur = t.duration.map(common::fmt_time).unwrap_or_default();
     let mut menu_resp = None;
     let mut item = ListItem::new(&t.title);
+    // Each artist of the line is a link to its page in the service.
+    let (links, artist_routes) = artist_links::stream_spans(&t.artists, &supporting);
     if two_line {
-        item = item.supporting(supporting);
+        item = item.supporting(supporting).supporting_links(links);
     }
     let o = item
         .leading(leading)
@@ -212,10 +214,12 @@ fn track_row(
     let mut nav = None;
     if let Some(m) = &menu_resp {
         let picked = track_menu(egui::Id::new(("st-menu", id, i)), t, wished).attach(m);
-        nav = track_pick(picked, t, Some(m.rect), pages, out);
+        nav = track_pick(&m.ctx, picked, t, Some(m.rect), pages, out);
     }
     let picked = track_menu(egui::Id::new(("st-menu-ctx", id, i)), t, wished).context_menu(&o.response);
-    track_pick(picked, t, None, pages, out).or(nav)
+    let nav = track_pick(&o.response.ctx, picked, t, None, pages, out).or(nav);
+    // An artist name of the line: its page.
+    o.link_clicked.and_then(|k| artist_routes.get(k).cloned()).or(nav)
 }
 
 fn track_menu(key: egui::Id, t: &StreamTrackRow, wished: Option<WishlistStatus>) -> Menu {
@@ -232,19 +236,27 @@ fn track_menu(key: egui::Id, t: &StreamTrackRow, wished: Option<WishlistStatus>)
         .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
         .divider()
         .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(t.album_id.is_some()))
-        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(t.artist_id.is_some()))
+        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!t.artists.linked().is_empty()))
         .item(MenuItem::new("Поделиться").icon(Icon::Share))
         .divider()
         .item(MenuItem::new(download).icon(Icon::Download).enabled(can))
 }
 
-fn track_pick(picked: Option<usize>, t: &StreamTrackRow, anchor: Option<Rect>, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
+fn track_pick(
+    ctx: &egui::Context,
+    picked: Option<usize>,
+    t: &StreamTrackRow,
+    anchor: Option<Rect>,
+    pages: &mut PageState,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
     match picked? {
         0 => out.push(Command::PlayStreamNext(vec![t.remote.clone()])),
         1 => out.push(Command::EnqueueStream(vec![t.remote.clone()])),
         2 => pages.add_stream_to_playlist(vec![t.remote.clone()], anchor),
         3 => return t.album_id.clone().map(|a| Route::Stream(StreamPage::Album(a))),
-        4 => return t.artist_id.clone().map(|a| Route::Stream(StreamPage::Artist(a))),
+        // Several artists: a chooser.
+        4 => return artist_links::go_to(ctx, artist_links::stream(&t.artists)),
         5 => out.push(Command::Share(ShareTarget::StreamTrack(t.remote.clone()))),
         // Download without a like: the like stays the ♡'s.
         6 => out.push(Command::DownloadStream { tracks: vec![t.remote.clone()] }),
@@ -516,7 +528,7 @@ fn album_page(
     let s = Theme::get(ui.ctx()).scheme;
     let mut nav = None;
     let local = v.tracks.iter().filter(|t| t.has_local).count();
-    let artist_id = v.tracks.iter().find_map(|t| t.artist_id.clone());
+    let artists = artist_links::stream(&v.subtitle_artists);
     header(ui, v, false, |ui| {
         let year = v.year.map(|y| y.to_string()).unwrap_or_default();
         overline(ui, &[type_label(v.release_type), &year, service_upper(id.service)]);
@@ -527,13 +539,12 @@ fn album_page(
         if let Some(have) = v.have.files_label() {
             line = format!("{line} · {have}");
         }
-        let artist = ui.add(
-            egui::Label::new(TypeRole::TitleMedium.style().rich(line, s.on_surface_variant)).sense(Sense::click()),
-        );
-        if artist.clicked() && let Some(a) = &artist_id {
-            nav = Some(Route::Stream(StreamPage::Artist(a.clone())));
+        // Each artist of the album is a link to its page.
+        let (links, routes) = artist_links::stream_spans(&v.subtitle_artists, &line);
+        let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
+        if let Some(k) = crate::components::link_paragraph(ui, "st-album-artists", &line, &links, format).clicked {
+            nav = routes.get(k).cloned();
         }
-        artist.on_hover_cursor(egui::CursorIcon::PointingHand);
         if let Some(r) = v.release.filter(|_| v.have.in_library > 0) {
             ui.add_space(8.0);
             if ui.add(AssistChip::new("Открыть в библиотеке").icon(Icon::LibraryMusic).id_salt("st-chip-lib")).clicked() {
@@ -590,7 +601,7 @@ fn album_page(
         .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
         .divider()
         .item(MenuItem::new("Поделиться").icon(Icon::Share))
-        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(artist_id.is_some()))
+        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!artists.is_empty()))
         .item(MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic).enabled(v.release.is_some()))
         .attach(more);
     match picked {
@@ -598,7 +609,7 @@ fn album_page(
         Some(1) => out.push(Command::EnqueueStream(remotes.clone())),
         Some(2) => pages.add_stream_to_playlist(remotes.clone(), Some(more.rect)),
         Some(3) => out.push(Command::Share(ShareTarget::StreamAlbum(id.clone()))),
-        Some(4) => nav = artist_id.clone().map(|a| Route::Stream(StreamPage::Artist(a))),
+        Some(4) => nav = artist_links::go_to(ui.ctx(), artists.clone()),
         Some(5) => nav = v.release.map(Route::Release),
         _ => {}
     }
