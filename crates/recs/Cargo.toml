@@ -1,6 +1,6 @@
 [package]
 name = "nikgob-recs"
-description = "Recommendations: bliss sound analysis from PCM and the library's vector index. Pure logic, no database or network."
+description = "Recommendations: bliss sound analysis from PCM, the library's vector index, the taste model and the engine of mixes, moods, radio and discovery. Pure logic, no database or network."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,12 @@ publish.workspace = true
 bliss-audio = { version = "0.13", default-features = false, features = ["analysis"] }
 rubato = "5.0.1"
 thiserror = "2"
+nikgob-core.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+uuid = "1"
 
 [lints]
 workspace = true

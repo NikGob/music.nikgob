@@ -240,6 +240,18 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
             .collect()
     }
 
+    /// The current statistics frozen into a [`Normalizer`], for passes that
+    /// normalise many vectors (moods, clusters, ordering).
+    pub fn normalizer(&self) -> Normalizer {
+        let mean = self.mean();
+        let scales = self.scales();
+        Normalizer {
+            mean,
+            inv_scale: std::array::from_fn(|i| (1.0 / scales[i]) as f32),
+            sqrt_w: std::array::from_fn(|i| self.weights[i].sqrt()),
+        }
+    }
+
     /// The `k` neighbours of a stored `key` (itself excluded); empty when
     /// `key` has no vector.
     pub fn neighbours(&self, key: K, k: usize, mut keep: impl FnMut(K) -> bool) -> Vec<(K, f32)> {
@@ -250,10 +262,51 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
     }
 }
 
+/// An index's normalisation at one moment: z-scores
+/// ([`Normalizer::z`]) and the weighted space ([`Normalizer::embed`]) in
+/// which plain euclidean distance ([`euclid`]) equals
+/// [`VectorIndex::distance`].
+#[derive(Clone, Debug)]
+pub struct Normalizer {
+    mean: Vector,
+    inv_scale: [f32; DIM],
+    sqrt_w: [f32; DIM],
+}
+
+impl Normalizer {
+    /// Each feature as a z-score over the library.
+    pub fn z(&self, v: &Vector) -> Vector {
+        std::array::from_fn(|i| (v[i] - self.mean[i]) * self.inv_scale[i])
+    }
+
+    /// z-scores scaled by the square roots of the feature weights.
+    pub fn embed(&self, v: &Vector) -> Vector {
+        std::array::from_fn(|i| (v[i] - self.mean[i]) * self.inv_scale[i] * self.sqrt_w[i])
+    }
+}
+
+/// Plain euclidean distance (of two [`Normalizer::embed`]ded vectors).
+pub fn euclid(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::analysis::tests::Rng;
+
+    #[test]
+    fn the_normalizer_agrees_with_the_index() {
+        let mut rng = Rng(9);
+        let mut idx = VectorIndex::new();
+        for k in 0..100u32 {
+            idx.insert(k, random(&mut rng));
+        }
+        let norm = idx.normalizer();
+        let (a, b) = (*idx.get(3).unwrap(), *idx.get(4).unwrap());
+        assert!((euclid(&norm.embed(&a), &norm.embed(&b)) - idx.distance(&a, &b)).abs() < 1e-4);
+        assert!(close(&norm.z(&a), &idx.normalized(&a)));
+    }
 
     fn v(first: &[f32]) -> Vector {
         let mut out = [0.0; DIM];
