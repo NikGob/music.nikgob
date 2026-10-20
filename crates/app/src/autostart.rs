@@ -2,6 +2,11 @@
 //! with [`FLAG`] so that run may stay in the tray. Task Manager's «Автозагрузка»
 //! switches a line off in `StartupApproved` without removing it; such a line
 //! counts as off here, and turning autostart on clears that mark.
+//!
+//! The switch in Settings is the user's wish and is kept in the prefs. A
+//! wished-for line that is gone at start is written again: a cleaner may
+//! have removed it, or it was written by a run inside a sandbox that keeps
+//! its own copy of the registry, where Windows never saw it.
 
 use std::path::Path;
 
@@ -74,13 +79,57 @@ mod sys {
     }
 }
 
+/// What the system has for the app's line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    On,
+    /// Switched off in Task Manager (or Settings → Apps → Startup).
+    Off,
+    /// No line at all.
+    Missing,
+}
+
+fn state_as(name: &str) -> State {
+    match sys::line(name) {
+        None => State::Missing,
+        Some(_) if approved(sys::mark(name).as_deref()) => State::On,
+        Some(_) => State::Off,
+    }
+}
+
 /// Whether Windows starts the app at sign-in.
 pub fn enabled() -> bool {
     enabled_as(NAME)
 }
 
 fn enabled_as(name: &str) -> bool {
-    sys::line(name).is_some() && approved(sys::mark(name).as_deref())
+    state_as(name) == State::On
+}
+
+/// At start: what the switch shows, given what the prefs `wanted`. The
+/// system's own "off" wins; a wished-for line that is missing is written
+/// again for this exe.
+pub fn reconcile(wanted: bool) -> bool {
+    refresh();
+    reconcile_as(NAME, wanted)
+}
+
+fn reconcile_as(name: &str, wanted: bool) -> bool {
+    match state_as(name) {
+        State::On => true,
+        State::Off => false,
+        State::Missing if wanted => match set_as(name, true) {
+            Ok(()) => {
+                log::warn!("autostart was on but its Run line was gone; written again");
+                enabled_as(name)
+            }
+            Err(e) => {
+                log::warn!("cannot write the missing autostart line: {e}");
+                false
+            }
+        },
+        State::Missing => false,
+    }
 }
 
 /// Turns autostart on (for this exe) or off.
@@ -184,6 +233,23 @@ mod tests {
         assert_eq!(sys::line(name), None);
         assert_eq!(sys::mark(name), None);
         assert!(!enabled_as(name));
+    }
+
+    /// The real keys, under a throwaway name.
+    #[cfg(windows)]
+    #[test]
+    fn a_lost_line_comes_back_and_task_managers_off_stays() {
+        let name = "music.nikgob reconcile test";
+        set_as(name, false).unwrap();
+        assert!(!reconcile_as(name, false), "nothing wished, nothing written");
+        assert_eq!(sys::line(name), None);
+        assert!(reconcile_as(name, true), "a wished-for line that is gone comes back");
+        assert_eq!(state_as(name), State::On);
+        sys::set_mark(name, &[3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(!reconcile_as(name, true), "Task Manager's off wins over the prefs");
+        assert_eq!(state_as(name), State::Off);
+        set_as(name, false).unwrap();
+        assert_eq!(state_as(name), State::Missing);
     }
 
     #[test]

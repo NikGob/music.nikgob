@@ -411,11 +411,9 @@ fn main() -> eframe::Result {
     }
     let mut prefs = load_prefs(&paths);
     // The system says whether autostart is on (Task Manager may have turned
-    // it off); demo runs leave it alone.
-    let autostart_system = (!demo).then(|| {
-        autostart::refresh();
-        autostart::enabled()
-    });
+    // it off), and a wished-for line that is gone is written again; demo
+    // runs leave it alone.
+    let autostart_system = (!demo).then(|| autostart::reconcile(prefs.autostart));
     if let Some(on) = autostart_system {
         prefs.autostart = on;
     }
