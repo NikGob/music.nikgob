@@ -27,6 +27,7 @@ mod masters;
 mod migrations;
 mod photos;
 mod playlists;
+mod recs;
 pub mod search;
 mod streams;
 mod trash;
@@ -43,6 +44,7 @@ pub use error::{LibraryError, Result};
 pub use joblog::JOB_LOG_KEEP;
 pub use migrations::SCHEMA_VERSION;
 pub use playlists::LIKED_PLAYLIST_NAME;
+pub use recs::RecTrack;
 pub use streams::{LikedClip, TrackSnapshot, event_id, is_web_ref};
 pub use types::{
     AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
@@ -51,5 +53,5 @@ pub use types::{
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,
     TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };
-pub use userdata::{EVENTS_FILE, LIKES_FILE, PLAYLISTS_FILE, STREAMS_FILE, USERDATA_VERSION};
+pub use userdata::{EVENTS_FILE, LIKES_FILE, PLAYLISTS_FILE, REC_FEEDBACK_FILE, STREAMS_FILE, USERDATA_VERSION};
 pub use util::{fold, now_ms, sort_key};

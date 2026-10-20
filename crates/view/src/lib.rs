@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod credit;
+mod recs;
 mod streams;
 
 pub use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource, LyricsSync};
@@ -16,6 +17,7 @@ pub use nikgob_core::model::{
     ArtistId, LikeTarget, PlaylistId, ReleaseId, ReleaseType, SourceKind, TrackId,
 };
 pub use credit::*;
+pub use recs::*;
 pub use streams::*;
 
 /// A cover image on disk plus the palette seed computed at import.
@@ -363,6 +365,10 @@ pub struct QueueView {
     pub current_entry: Option<u64>,
     /// Upcoming tracks in play order; `entry` ids are stable for drag & drop.
     pub next: Vec<QueueEntry>,
+    /// The queue is a radio or an endless mix: its title («Радио · Кино»)
+    /// and whether it is looking for more right now. Any other playback
+    /// ends it.
+    pub radio: Option<RadioView>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -424,10 +430,30 @@ pub enum ContinueCard {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HomeView {
     pub greeting_hour: u8,
+    /// The library tracks of «Твой микс» (the hero's tracks; it plays with
+    /// [`Command::PlayMix`] [`MixId::Daily`]).
     pub mix: Vec<TrackRow>,
+    /// «Твой микс»: «30 треков · обновлён сегодня» and four covers. `None`
+    /// until the recommendations are built the first time (or with an
+    /// empty library).
+    pub hero: Option<MixCard>,
+    /// «Под настроение»: the six moods, in the order for the part of the
+    /// day (night: Спокойное, Мрачное first). Empty without any sound
+    /// analysis.
+    pub moods: Vec<MixCard>,
+    /// «Твои миксы»: mixes by style, named by their artists («A, B и
+    /// другие»), with a cover collage. Empty while too little is listened.
+    pub style_mixes: Vec<MixCard>,
+    /// «Новое для тебя»: up to 30 songs of the services new to the user
+    /// (they play from the stream; «Слушать всё» is [`MixId::Discover`]).
+    pub discover: Vec<StreamTrackRow>,
+    /// «Новые релизы»: albums of the last 60 days by artists you listen to.
+    pub new_releases: Vec<StreamAlbumCard>,
     /// Albums played lately, most recent first: library albums and streamed
     /// ones.
     pub continue_listening: Vec<ContinueCard>,
+    /// «Миксы исполнителей»: a click plays the artist's radio
+    /// ([`MixId::Artist`]).
     pub artist_mixes: Vec<ArtistCard>,
     pub long_unplayed: Vec<ReleaseCard>,
     pub recently_added: Vec<ReleaseCard>,
@@ -1435,6 +1461,22 @@ pub enum Command {
     /// Takes a replacement back (the toast's «Отменить»), on YouTube Music
     /// too when it went there.
     UndoReplace(u64),
+
+    // Recommendations (stage 4, docs/stage4.md §6)
+    /// Plays a mix card: «Твой микс» as it is today, a mood, a style mix,
+    /// an artist's radio or the discoveries; everything but «Твой микс» is
+    /// endless (the queue becomes a radio, [`QueueView::radio`]).
+    PlayMix { id: MixId },
+    /// «Радио по треку» / «Радио» of an artist: the seed first (a track),
+    /// then a queue that extends itself and learns from skips.
+    StartRadio { seed: RadioSeed },
+    /// «Не рекомендовать трек / исполнителя» (`dislike`), or its undo (the
+    /// toast's «Отменить» sends it with `dislike: false`). Kept out of
+    /// every mix, radio and discovery from now on.
+    RecFeedback { target: RecTarget, dislike: bool },
+    /// «Обновить» in ⋮ of a mix: «Твой микс» is picked again (and kept for
+    /// the rest of the day), «Новое для тебя» is looked for again.
+    RefreshMix { id: MixId },
 }
 
 impl Default for Prefs {
