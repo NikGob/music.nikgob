@@ -1057,10 +1057,8 @@ fn zone_offset(token: &str) -> Option<i32> {
         }
         let (sign, rest) = if let Some(r) = rest.strip_prefix('+') {
             (1, r)
-        } else if let Some(r) = rest.strip_prefix(['-', '\u{2212}']) {
-            (-1, r)
         } else {
-            return None;
+            (-1, rest.strip_prefix(['-', '\u{2212}'])?)
         };
         let (h, m) = match rest.split_once(':') {
             Some((h, m)) => (h.parse::<i32>().ok()?, m.parse::<i32>().ok()?),
