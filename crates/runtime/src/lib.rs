@@ -12,6 +12,7 @@ mod home;
 mod import;
 mod lyrics;
 mod playlist_cover;
+mod recs;
 mod search;
 mod tags;
 mod torrents;
@@ -329,6 +330,8 @@ struct Worker {
     streaming: streams::Streams,
     /// The background sound analysis and the vector index it fills.
     analysis: analysis::FileAnalysis,
+    /// Mixes, radio, discovery (stage 4).
+    recs: recs::RecsState,
 }
 
 impl Worker {
@@ -346,6 +349,7 @@ impl Worker {
             .unwrap_or_default();
         let streaming = streams::Streams::new(internal.clone());
         let analysis = analysis::FileAnalysis::new(internal.clone());
+        let recs = recs::RecsState::new(internal.clone());
         let import = config
             .import
             .and_then(|setup| ImportService::start(setup, config.library.clone(), internal));
@@ -392,6 +396,7 @@ impl Worker {
             qualities: Vec::new(),
             streaming,
             analysis,
+            recs,
         }
     }
 
@@ -438,6 +443,7 @@ impl Worker {
                     self.maybe_export(false);
                     self.save_session();
                     self.stream_tick();
+                    self.recs_tick();
                 }
             }
         }
@@ -913,6 +919,14 @@ impl Worker {
                     log::warn!("unhandled {c:?}");
                 }
             }
+            c @ (Command::PlayMix { .. }
+            | Command::StartRadio { .. }
+            | Command::RecFeedback { .. }
+            | Command::RefreshMix { .. }) => {
+                if let Some(c) = self.recs_command(c) {
+                    log::warn!("unhandled {c:?}");
+                }
+            }
         }
     }
 
@@ -1201,6 +1215,8 @@ impl Worker {
             .and_then(|t| t.duration_ms);
         let complete = !by_user
             || dur.is_some_and(|d| pos.as_millis() as f64 >= f64::from(d) * 0.9);
+        self.radio_feedback(e.track, complete, pos.as_millis() as u32);
+        self.recs_played();
         let _ = self.lib.record_event(
             e.track,
             if complete {
@@ -1319,7 +1335,11 @@ impl Worker {
                     // Repeat-one with no preload (or preload failed): restart.
                     match self.queue.advance_auto() {
                         Some(e) => self.start(e),
-                        None => self.stop(),
+                        None => {
+                            self.stop();
+                            // A radio still picking its next tracks plays on.
+                            self.radio_ran_out();
+                        }
                     }
                 }
             }
@@ -1372,6 +1392,9 @@ impl Worker {
     }
 
     fn publish_player(&mut self) {
+        // A radio picks more when its queue runs low.
+        self.radio_top_up();
+        let radio = self.radio_view();
         let status = self.status;
         let position = self.position_now();
         let (volume, muted) = (self.volume, self.muted);
@@ -1409,6 +1432,7 @@ impl Worker {
             s.queue.next = rows(&upcoming);
             s.queue.prev = rows(&history);
             s.queue.current_entry = current_entry;
+            s.queue.radio = radio;
         });
     }
 
@@ -1446,6 +1470,7 @@ impl Worker {
 
     fn load_library(&mut self) {
         self.stream_analysis_changed();
+        self.recs_library_changed();
         let sort = self.state.read().library.release_sort;
         let key = match sort {
             nikgob_view::ReleaseSort::Artist => Sort::asc(ReleaseSortKey::Artist),
@@ -1588,7 +1613,11 @@ impl Worker {
 
     fn load_home(&mut self) {
         let home = home::build(&self.lib);
-        self.publish(|s, res| s.home = res.home(&home));
+        let parts = self.recs_home_parts();
+        self.publish(|s, res| {
+            s.home = res.home(&home);
+            parts.apply(&mut s.home, res);
+        });
     }
 
     fn search(&mut self, q: String) {

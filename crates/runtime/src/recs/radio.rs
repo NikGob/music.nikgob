@@ -1,0 +1,626 @@
+//! The radio queue (docs/stage4.md §4): «Радио по треку», an artist's
+//! radio and the endless mixes (moods, style mixes, «Новое для тебя») play
+//! as a queue that extends itself.
+//!
+//! * The queue holds the engine's [`Engine`] state. When three tracks or
+//!   fewer are left, the next ten are picked on a thread of their own from
+//!   the current [`super::Snapshot`] (playback goes on meanwhile); what
+//!   ended while they were picked is learnt after.
+//! * How each track ended teaches the session: a complete pulls the next
+//!   picks towards its sound, a skip in the first 30 s pushes them away
+//!   ([`Engine::feedback`]).
+//! * New music by «Новое в радио» ([`v::Prefs::radio_new_share`]): for a
+//!   track, YouTube Music's radio of it and Deezer's radio of its artist;
+//!   for an artist, Deezer's radio of the artist (YouTube Music's without
+//!   Deezer); for a service's track, its own service's radio or related
+//!   list; the mixes take the discoveries. Background calls, one set per
+//!   radio, each answer kept a day in the library's cache, nothing asked
+//!   of a service that is paused by a rate limit. A new pick plays from the
+//!   stream like any search result.
+//! * The radio is saved in `session.json` with the queue, so it goes on
+//!   after a restart. Playing anything else (any command that replaces the
+//!   queue) ends it; adding to the queue does not.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use nikgob_core::model::{ArtistId, EventContext, TrackId};
+use nikgob_core::streaming::{EntityKind, RemoteId, SearchKind, Service, StreamError, StreamService, StreamTrack};
+use nikgob_recs::{Item, NewTrack, Outcome, Pick, RadioParams, RadioSeed, RadioState as Engine, artist_key};
+use nikgob_view as v;
+use serde::{Deserialize, Serialize};
+
+use super::Msg;
+use crate::Worker;
+use crate::import::Internal;
+
+/// The queue extends itself when this many tracks or fewer are left…
+const EXTEND_AT: usize = 3;
+/// …by this many.
+const EXTEND_BY: usize = 10;
+/// New-music answers of the services kept this long.
+const NEW_TTL_MS: i64 = 24 * 3600 * 1000;
+
+/// One radio playing.
+pub(crate) struct RadioRun {
+    id: u64,
+    state: Engine,
+    title: String,
+    ctx: EventContext,
+    /// Seeds the engine's jitter.
+    seed: u64,
+    /// The queue it plays in; `None` while its first tracks are picked.
+    queue_gen: Option<u64>,
+    /// Stream picks by the track they play as.
+    streams: HashMap<TrackId, RemoteId>,
+    /// New-music candidates by id (they play from the stream).
+    pool: HashMap<RemoteId, StreamTrack>,
+    extending: bool,
+    /// An extension waits for the first snapshot.
+    want: bool,
+    /// Learnt while an extension ran: applied to its result.
+    pending: Vec<(Item, Outcome)>,
+    pending_new: Vec<NewTrack>,
+    /// The queue ran out while an extension ran: play on when it comes.
+    resume: bool,
+}
+
+/// What `session.json` keeps of a radio.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RadioSave {
+    state: Engine,
+    title: String,
+    context: EventContext,
+    seed: u64,
+    streams: Vec<(TrackId, RemoteId)>,
+    pool: Vec<StreamTrack>,
+}
+
+#[derive(Default)]
+pub(crate) struct RadioState {
+    run: Option<RadioRun>,
+    seq: u64,
+}
+
+pub(crate) enum RadioMsg {
+    Extended {
+        id: u64,
+        state: Box<Engine>,
+        picks: Vec<Pick>,
+    },
+    NewFound {
+        id: u64,
+        tracks: Vec<StreamTrack>,
+        /// Artists matched in a service on the way.
+        artists: Vec<(ArtistId, RemoteId)>,
+        /// Answers to keep: cache key and tracks.
+        answers: Vec<(String, Vec<StreamTrack>)>,
+    },
+}
+
+/// One new-music call for a radio.
+enum Call {
+    /// YouTube Music's radio of a song.
+    Radio(String),
+    /// A service's related list of a track (Deezer: the radio of its artist).
+    Related(Service, String),
+    /// A service's radio of an artist; without its id there, looked up by
+    /// name first.
+    ArtistRadio {
+        service: Service,
+        artist: ArtistId,
+        id: Option<String>,
+        name: String,
+    },
+}
+
+fn cache_key(service: Service, what: &str, id: &str) -> String {
+    format!("radio_new.{}.{what}.{id}", service.as_str())
+}
+
+/// The queue's context line: «Играет из радио «Кино»» / «… микса «Спокойное»».
+fn context_of(title: &str) -> String {
+    match title.strip_prefix("Радио · ") {
+        Some(rest) => format!("радио «{rest}»"),
+        None => format!("микса «{title}»"),
+    }
+}
+
+async fn fetch(svc: Arc<dyn StreamService>, call: &Call) -> (Result<Vec<StreamTrack>, StreamError>, Option<(ArtistId, RemoteId)>) {
+    match call {
+        Call::Radio(id) => (svc.radio(id).await, None),
+        Call::Related(_, id) => (svc.related(id).await, None),
+        Call::ArtistRadio { artist, id, name, .. } => {
+            let (id, matched) = match id {
+                Some(id) => (id.clone(), None),
+                None => {
+                    let key = artist_key(name);
+                    let hits = match svc.search_kind(name, SearchKind::Artists).await {
+                        Ok(s) => s.artists,
+                        Err(e) => return (Err(e), None),
+                    };
+                    match hits.into_iter().find(|a| artist_key(&a.name) == key) {
+                        Some(a) => (a.id.id.clone(), Some((*artist, a.id))),
+                        None => return (Ok(Vec::new()), None),
+                    }
+                }
+            };
+            (svc.artist_radio(&id).await, matched)
+        }
+    }
+}
+
+impl Worker {
+    /// `Command::StartRadio`.
+    pub(crate) fn start_radio_cmd(&mut self, seed: v::RadioSeed) {
+        match seed {
+            v::RadioSeed::Track(t) => {
+                let title = self.lib.get_track(t).ok().flatten().map_or_else(String::new, |t| t.title);
+                self.start_radio(RadioSeed::Track(t), format!("Радио · {title}"), EventContext::Radio, Some(t));
+            }
+            v::RadioSeed::Artist(a) => {
+                let name = self.lib.get_artist(a).ok().flatten().map_or_else(String::new, |a| a.name);
+                self.start_radio(RadioSeed::Artist(a), format!("Радио · {name}"), EventContext::Radio, None);
+            }
+            v::RadioSeed::Stream(r) => {
+                let Some(t) = self.stream_track(&r) else {
+                    log::warn!("radio of an unknown stream track {r}");
+                    self.toast("Нечего играть", None);
+                    return;
+                };
+                let Some(id) = self.upsert_streams(std::slice::from_ref(&t)).first().copied() else { return };
+                let title = format!("Радио · {}", t.title);
+                // A track of the library (liked, in a playlist) is its own seed.
+                let in_catalog = self.snapshot().is_some_and(|s| s.catalog.get(id).is_some());
+                let seed = if in_catalog {
+                    RadioSeed::Track(id)
+                } else {
+                    let snap = self.snapshot();
+                    let artists = t
+                        .artists
+                        .iter()
+                        .filter_map(|a| snap.as_ref()?.artist_keys.get(&artist_key(&a.name)).copied())
+                        .collect();
+                    let vector = self.analysis.index().read().get(id).copied();
+                    RadioSeed::Stream { id: r, vector, artists }
+                };
+                self.start_radio(seed, title, EventContext::Radio, Some(id));
+            }
+        }
+    }
+
+    /// Starts a radio: `first` plays at once (a track's radio), the rest
+    /// comes as it is picked.
+    pub(crate) fn start_radio(&mut self, seed: RadioSeed, title: String, ctx: EventContext, first: Option<TrackId>) {
+        let r = &mut self.recs.radio;
+        r.seq += 1;
+        let run = RadioRun {
+            id: r.seq,
+            state: Engine::new(seed),
+            title,
+            ctx,
+            seed: fastrand::u64(..),
+            queue_gen: None,
+            streams: HashMap::new(),
+            pool: HashMap::new(),
+            extending: false,
+            want: false,
+            pending: Vec::new(),
+            pending_new: Vec::new(),
+            resume: false,
+        };
+        log::info!("radio «{}» starts ({:?})", run.title, run.state.seed);
+        let context = context_of(&run.title);
+        r.run = Some(run);
+        self.radio_add_discoveries();
+        self.radio_fetch_new();
+        match first {
+            Some(t) => {
+                self.queue.shuffle = false;
+                self.queue.set(&[t], 0, Some(context));
+                self.play_context = ctx;
+                let generation = self.queue.generation();
+                if let Some(run) = self.recs.radio.run.as_mut() {
+                    run.queue_gen = Some(generation);
+                }
+                if let Some(e) = self.queue.current() {
+                    self.start(e);
+                }
+            }
+            None => {
+                self.radio_extend();
+                self.publish_player();
+            }
+        }
+    }
+
+    /// The radio still plays its queue (any other playback ended it).
+    fn radio_alive(&mut self) -> bool {
+        let generation = self.queue.generation();
+        let r = &mut self.recs.radio;
+        match &r.run {
+            Some(run) if run.queue_gen.is_none_or(|g| g == generation) => true,
+            Some(run) => {
+                log::info!("radio «{}» ends: the queue was replaced", run.title);
+                r.run = None;
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// What the queue view says about the radio.
+    pub(crate) fn radio_view(&mut self) -> Option<v::RadioView> {
+        if !self.radio_alive() {
+            return None;
+        }
+        self.recs.radio.run.as_ref().map(|r| v::RadioView {
+            title: r.title.clone(),
+            extending: r.extending || r.want,
+        })
+    }
+
+    /// Three tracks or fewer left: the next ones are picked.
+    pub(crate) fn radio_top_up(&mut self) {
+        if !self.radio_alive() {
+            return;
+        }
+        let left = self.queue.upcoming().len();
+        let Some(run) = &self.recs.radio.run else { return };
+        if run.extending || (run.queue_gen.is_some() && left > EXTEND_AT) {
+            return;
+        }
+        self.radio_extend();
+    }
+
+    /// Picks the next [`EXTEND_BY`] on a thread of its own.
+    fn radio_extend(&mut self) {
+        let new_share = self.state.read().prefs.radio_new_share.fraction();
+        let snap = self.snapshot();
+        let Some(run) = self.recs.radio.run.as_mut() else { return };
+        if run.extending {
+            return;
+        }
+        let Some(snap) = snap else {
+            // The first build is on its way.
+            run.want = true;
+            self.recs_dirty(Duration::ZERO);
+            return;
+        };
+        run.want = false;
+        run.extending = true;
+        let (id, mut state) = (run.id, run.state.clone());
+        let params = RadioParams { new_share, seed: run.seed };
+        let tx = self.recs.tx.clone();
+        let spawned = std::thread::Builder::new().name("nikgob-radio".into()).spawn(move || {
+            let picks = state.extend(&snap.recs(), EXTEND_BY, &params);
+            let msg = super::radio::RadioMsg::Extended {
+                id,
+                state: Box::new(state),
+                picks,
+            };
+            let _ = tx.send(Internal::Recs(Msg::Radio(msg)));
+        });
+        if let Err(e) = spawned {
+            log::warn!("radio: cannot pick: {e}");
+            if let Some(run) = self.recs.radio.run.as_mut() {
+                run.extending = false;
+            }
+        }
+    }
+
+    /// The first snapshot is here: a radio waiting for it goes on.
+    pub(crate) fn radio_snapshot_ready(&mut self) {
+        if self.recs.radio.run.as_ref().is_some_and(|r| r.want) {
+            self.radio_add_discoveries();
+            self.radio_extend();
+        }
+    }
+
+    pub(crate) fn radio_msg(&mut self, m: RadioMsg) {
+        match m {
+            RadioMsg::Extended { id, state, picks } => self.radio_extended(id, *state, picks),
+            RadioMsg::NewFound {
+                id,
+                tracks,
+                artists,
+                answers,
+            } => {
+                let now = nikgob_library::now_ms();
+                for (key, tracks) in answers {
+                    if let Ok(json) = serde_json::to_string(&tracks) {
+                        let _ = self.lib.cache_put(&key, now, &json);
+                    }
+                }
+                for (artist, remote) in artists {
+                    let _ = self.lib.set_external_id(EntityKind::Artist, &remote, *artist.as_uuid());
+                }
+                if self.recs.radio.run.as_ref().is_some_and(|r| r.id == id) {
+                    self.radio_add_new(tracks);
+                }
+            }
+        }
+    }
+
+    fn radio_extended(&mut self, id: u64, mut state: Engine, picks: Vec<Pick>) {
+        let alive = self.radio_alive();
+        let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == id) else { return };
+        run.extending = false;
+        for (item, outcome) in run.pending.drain(..) {
+            state.feedback(item, outcome);
+        }
+        state.add_new(run.pending_new.drain(..));
+        run.state = state;
+        if !alive {
+            return;
+        }
+        // Stream picks play as "seen" tracks of their service.
+        let mut ids = Vec::with_capacity(picks.len());
+        for p in &picks {
+            match &p.item {
+                Item::Track(t) => ids.push(*t),
+                Item::Stream(r) => {
+                    let pooled = self.recs.radio.run.as_ref().and_then(|run| run.pool.get(r).cloned());
+                    let Some(t) = pooled.or_else(|| self.stream_track(r)) else { continue };
+                    self.streaming.learn(std::slice::from_ref(&t));
+                    if let Some(tid) = self.upsert_streams(std::slice::from_ref(&t)).first().copied() {
+                        ids.push(tid);
+                        if let Some(run) = self.recs.radio.run.as_mut() {
+                            run.streams.insert(tid, r.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let Some(run) = self.recs.radio.run.as_mut() else { return };
+        log::info!("radio «{}»: {} more", run.title, ids.len());
+        match run.queue_gen {
+            None if ids.is_empty() => {
+                self.recs.radio.run = None;
+                self.toast("Нечего играть", None);
+                self.publish_player();
+            }
+            None => {
+                let (context, ctx) = (context_of(&run.title), run.ctx);
+                self.queue.shuffle = false;
+                self.queue.set(&ids, 0, Some(context));
+                self.play_context = ctx;
+                let generation = self.queue.generation();
+                if let Some(run) = self.recs.radio.run.as_mut() {
+                    run.queue_gen = Some(generation);
+                }
+                if let Some(e) = self.queue.current() {
+                    self.start(e);
+                }
+            }
+            Some(_) => {
+                let resume = std::mem::take(&mut run.resume);
+                self.queue.enqueue(&ids);
+                if resume && self.playing.is_none() && self.status == v::Status::Stopped {
+                    if let Some(e) = self.queue.current() {
+                        self.start(e);
+                    }
+                } else {
+                    self.preload_next();
+                    self.publish_player();
+                }
+            }
+        }
+    }
+
+    /// The queue ran out: a radio picking more plays on when they come.
+    pub(crate) fn radio_ran_out(&mut self) {
+        if self.radio_alive()
+            && let Some(run) = self.recs.radio.run.as_mut()
+        {
+            run.resume = true;
+            if !run.extending {
+                self.radio_extend();
+            }
+        }
+    }
+
+    /// How a track of the radio ended (see [`Engine::feedback`]).
+    pub(crate) fn radio_feedback(&mut self, track: TrackId, complete: bool, position_ms: u32) {
+        if !self.radio_alive() {
+            return;
+        }
+        let Some(run) = self.recs.radio.run.as_mut() else { return };
+        if run.queue_gen.is_none() {
+            return;
+        }
+        let item = run.streams.get(&track).map_or(Item::Track(track), |r| Item::Stream(r.clone()));
+        let outcome = if complete { Outcome::Complete } else { Outcome::Skip { position_ms } };
+        run.state.feedback(item.clone(), outcome);
+        if run.extending {
+            run.pending.push((item, outcome));
+        }
+    }
+
+    /// New-music candidates for the radio (filtered: not in the library,
+    /// not disliked).
+    fn radio_add_new(&mut self, tracks: Vec<StreamTrack>) {
+        let snap = self.snapshot();
+        let fresh: Vec<StreamTrack> = tracks
+            .into_iter()
+            .filter(|t| snap.as_ref().is_none_or(|s| s.is_new(t)))
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        self.streaming.learn(&fresh);
+        let Some(run) = self.recs.radio.run.as_mut() else { return };
+        let new: Vec<NewTrack> = fresh.iter().map(|t| NewTrack::from_stream(t, None)).collect();
+        for t in fresh {
+            run.pool.insert(t.id.clone(), t);
+        }
+        if run.extending {
+            run.pending_new.extend(new.iter().cloned());
+        }
+        run.state.add_new(new);
+    }
+
+    /// The mixes (and «Новое для тебя») take the discoveries as new music.
+    fn radio_add_discoveries(&mut self) {
+        let Some(run) = &self.recs.radio.run else { return };
+        if !matches!(run.state.seed, RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover) {
+            return;
+        }
+        let found = self.discoveries();
+        self.radio_add_new(found);
+    }
+
+    /// Asks the services for new music around the radio's seed (see the
+    /// module docs); what the cache has is used at once.
+    fn radio_fetch_new(&mut self) {
+        if self.state.read().prefs.radio_new_share.fraction() <= 0.0 {
+            return;
+        }
+        let Some(run) = &self.recs.radio.run else { return };
+        let id = run.id;
+        let mut calls: Vec<Call> = Vec::new();
+        let artist_call = |w: &Worker, a: ArtistId, prefer: &[Service]| -> Option<Call> {
+            let name = w.lib.get_artist(a).ok().flatten()?.name;
+            let known = w.lib.external_ids(EntityKind::Artist, *a.as_uuid()).unwrap_or_default();
+            prefer.iter().find(|s| w.service(**s).is_some()).map(|&service| Call::ArtistRadio {
+                service,
+                artist: a,
+                id: known.iter().find(|r| r.service == service).map(|r| r.id.clone()),
+                name,
+            })
+        };
+        match run.state.seed.clone() {
+            RadioSeed::Track(t) => {
+                let refs = self.lib.stream_refs(t).unwrap_or_default();
+                if let Some(yt) = refs.iter().find(|r| r.id.service == Service::Youtube) {
+                    calls.push(Call::Radio(yt.id.id.clone()));
+                }
+                let main = self
+                    .lib
+                    .get_track(t)
+                    .ok()
+                    .flatten()
+                    .and_then(|t| t.artist_credit.artist_ids().next());
+                if let Some(a) = main {
+                    calls.extend(artist_call(self, a, &[Service::Deezer]));
+                }
+            }
+            RadioSeed::Stream { id: r, .. } => match r.service {
+                Service::Youtube => calls.push(Call::Radio(r.id)),
+                Service::Deezer => calls.push(Call::Related(Service::Deezer, r.id)),
+                Service::Spotify => {}
+            },
+            RadioSeed::Artist(a) => calls.extend(artist_call(self, a, &[Service::Deezer, Service::Youtube])),
+            RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover => {}
+        }
+        // The cache first; the rest from services that can be asked now.
+        let now = nikgob_library::now_ms();
+        let mut cached = Vec::new();
+        let mut asks: Vec<(Arc<dyn StreamService>, Call, String)> = Vec::new();
+        for call in calls {
+            let (service, key) = match &call {
+                Call::Radio(v) => (Service::Youtube, cache_key(Service::Youtube, "radio", v)),
+                Call::Related(s, t) => (*s, cache_key(*s, "related", t)),
+                Call::ArtistRadio { service, artist, .. } => (*service, cache_key(*service, "artist", &artist.to_string())),
+            };
+            let hit: Option<Vec<StreamTrack>> = self
+                .lib
+                .cache_get(&key)
+                .ok()
+                .flatten()
+                .filter(|(at, _)| now - at < NEW_TTL_MS)
+                .and_then(|(_, json)| serde_json::from_str(&json).ok());
+            if let Some(tracks) = hit {
+                cached.extend(tracks);
+                continue;
+            }
+            if self.pause_left(service).is_some() {
+                continue;
+            }
+            if let Some(svc) = self.service(service) {
+                asks.push((svc, call, key));
+            }
+        }
+        if !cached.is_empty() {
+            self.radio_add_new(cached);
+        }
+        if asks.is_empty() {
+            return;
+        }
+        self.streaming.spawn_internal(async move {
+            let mut tracks = Vec::new();
+            let mut artists = Vec::new();
+            let mut answers = Vec::new();
+            for (svc, call, key) in asks {
+                let (result, matched) = fetch(svc, &call).await;
+                artists.extend(matched);
+                match result {
+                    Ok(found) => {
+                        answers.push((key, found.clone()));
+                        tracks.extend(found);
+                    }
+                    Err(e) => log::info!("radio: new music from {key}: {e}"),
+                }
+            }
+            Internal::Recs(Msg::Radio(RadioMsg::NewFound {
+                id,
+                tracks,
+                artists,
+                answers,
+            }))
+        });
+    }
+
+    /// The radio as `session.json` keeps it (while it plays its queue).
+    pub(crate) fn radio_save(&mut self) -> Option<RadioSave> {
+        if !self.radio_alive() {
+            return None;
+        }
+        let run = self.recs.radio.run.as_ref()?;
+        run.queue_gen?;
+        Some(RadioSave {
+            state: run.state.clone(),
+            title: run.title.clone(),
+            context: run.ctx,
+            seed: run.seed,
+            streams: run.streams.iter().map(|(t, r)| (*t, r.clone())).collect(),
+            pool: run.pool.values().cloned().collect(),
+        })
+    }
+
+    /// The radio of the restored queue goes on.
+    pub(crate) fn radio_restore(&mut self, save: RadioSave) {
+        let r = &mut self.recs.radio;
+        r.seq += 1;
+        log::info!("radio «{}» goes on", save.title);
+        self.streaming.learn(&save.pool);
+        r.run = Some(RadioRun {
+            id: r.seq,
+            state: save.state,
+            title: save.title,
+            ctx: save.context,
+            seed: save.seed,
+            queue_gen: Some(self.queue.generation()),
+            streams: save.streams.into_iter().collect(),
+            pool: save.pool.into_iter().map(|t| (t.id.clone(), t)).collect(),
+            extending: false,
+            want: false,
+            pending: Vec::new(),
+            pending_new: Vec::new(),
+            resume: false,
+        });
+        self.play_context = self.recs.radio.run.as_ref().map_or(self.play_context, |r| r.ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contexts_read_as_phrases() {
+        assert_eq!(context_of("Радио · Кино"), "радио «Кино»");
+        assert_eq!(context_of("Спокойное"), "микса «Спокойное»");
+    }
+}

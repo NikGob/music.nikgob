@@ -52,6 +52,7 @@ use crate::import::Internal;
 pub(crate) use cold::{STREAM_JOB, plural};
 pub(crate) use replace::shown_title;
 pub(crate) use wishlist::WISH_ID;
+pub(crate) use schedule::wake_jitter;
 pub use schedule::StreamSchedule;
 pub use web_login::{WINDOW_HINT, WebLogin, WebLoginError};
 
@@ -203,7 +204,7 @@ pub(crate) struct Streams {
     rt: tokio::runtime::Runtime,
     internal: Sender<Internal>,
     /// Stream tracks seen in results and pages, by remote id.
-    known: Known,
+    pub(crate) known: Known,
     /// Albums, artists and playlists fetched, and who waits for a fetch.
     pub(crate) pages: pages::PageCache,
     pub(crate) schedule: StreamSchedule,
@@ -298,7 +299,7 @@ impl Streams {
     }
 
     /// Runs `f` on the streaming runtime; its message goes to the worker.
-    fn spawn<F>(&self, f: F) -> tokio::task::JoinHandle<()>
+    pub(crate) fn spawn<F>(&self, f: F) -> tokio::task::JoinHandle<()>
     where
         F: std::future::Future<Output = Msg> + Send + 'static,
     {
@@ -309,8 +310,20 @@ impl Streams {
         })
     }
 
+    /// Runs `f` on the streaming runtime; its message (of any part of the
+    /// runtime) goes to the worker.
+    pub(crate) fn spawn_internal<F>(&self, f: F) -> tokio::task::JoinHandle<()>
+    where
+        F: std::future::Future<Output = Internal> + Send + 'static,
+    {
+        let tx = self.internal.clone();
+        self.rt.spawn(async move {
+            let _ = tx.send(f.await);
+        })
+    }
+
     /// Remembers stream tracks by remote id.
-    fn learn<'a>(&mut self, tracks: impl IntoIterator<Item = &'a StreamTrack>) {
+    pub(crate) fn learn<'a>(&mut self, tracks: impl IntoIterator<Item = &'a StreamTrack>) {
         for t in tracks {
             self.known.insert(t);
         }

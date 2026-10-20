@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use fastframe_shell::{Closed, Headless, Resident, Shell, Waker};
 use nikgob_md3e::screens::Md3eUi;
-use nikgob_runtime::{NullPlayback, Playback, Runtime, RuntimeConfig};
+use nikgob_runtime::{NullPlayback, Playback, Runtime, RuntimeConfig, StreamSchedule};
 use nikgob_view::{Command, Prefs};
 
 /// Where things live on disk (PLAN §5).
@@ -489,7 +489,17 @@ fn main() -> eframe::Result {
             torrent_offline: demo,
         }
     };
-    let runtime = Runtime::start(
+    // The demo's discovery asks its fake services quickly, so the home's
+    // «Новое для тебя» is there within seconds for screenshots.
+    let schedule = if demo && !streams::real_in_demo() {
+        StreamSchedule {
+            discover_gap: (Duration::from_millis(100), Duration::from_millis(200)),
+            ..StreamSchedule::default()
+        }
+    } else {
+        StreamSchedule::default()
+    };
+    let runtime = Runtime::start_scheduled(
         RuntimeConfig {
             library,
             library_dir: prefs.library_dir.clone(),
@@ -501,6 +511,7 @@ fn main() -> eframe::Result {
         },
         backend,
         Arc::new(wake.clone()),
+        schedule,
     );
     if let Some(l) = &links {
         l.connect(runtime.playback_sender());

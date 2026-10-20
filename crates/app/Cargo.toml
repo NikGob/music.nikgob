@@ -17,6 +17,7 @@ nikgob-md3e.workspace = true
 nikgob-view.workspace = true
 nikgob-runtime = { path = "../runtime" }
 nikgob-library = { path = "../library" }
+nikgob-recs = { path = "../recs" }
 nikgob-audio = { path = "../audio" }
 nikgob-spotify = { path = "../spotify" }
 nikgob-youtube = { path = "../youtube" }

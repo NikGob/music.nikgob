@@ -53,6 +53,8 @@ pub(crate) enum Internal {
     Stream(crate::streams::Msg),
     /// The background sound analysis, see [`crate::analysis`].
     Analysis(crate::analysis::Msg),
+    /// Recommendations (stage 4), see [`crate::recs`].
+    Recs(crate::recs::Msg),
     SeedStopped(Vec<nikgob_torrent::TorrentStatus>),
     MastersMoveProgress {
         job: u64,
@@ -509,6 +511,7 @@ impl Worker {
             Internal::TorrentAdded(r) => self.torrent_added(r),
             Internal::Stream(m) => self.stream_msg(m),
             Internal::Analysis(m) => self.analysis_msg(m),
+            Internal::Recs(m) => self.recs_msg(m),
             Internal::SeedStopped(list) => self.seed_stopped(list),
             Internal::MastersMoveProgress {
                 job,

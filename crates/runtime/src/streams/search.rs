@@ -109,6 +109,14 @@ pub(crate) struct SearchState {
     frozen_tracks: Vec<SongKey>,
 }
 
+impl SearchState {
+    /// A search is being typed or answered: background discovery waits
+    /// (the services' quotas go to the user first).
+    pub(crate) fn active(&self) -> bool {
+        !self.query.is_empty() && self.started.is_some_and(|t| t.elapsed() < Duration::from_secs(30))
+    }
+}
+
 /// A query as the cache knows it: lower case, single spaces. The answers
 /// of the quick «Всё» search and of the full one are kept apart.
 fn cache_key(query: &str, mixed: bool) -> String {

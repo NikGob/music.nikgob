@@ -51,6 +51,8 @@ fn quick() -> StreamSchedule {
         enrich_pause: (Duration::ZERO, Duration::ZERO),
         tick: Duration::from_millis(100),
         jitter: 0.0,
+        // «Новое для тебя» stays out of these counts.
+        discover_gap: (Duration::from_secs(3600), Duration::from_secs(3600)),
         ..StreamSchedule::default()
     }
 }
