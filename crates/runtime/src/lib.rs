@@ -5,6 +5,7 @@
 //! shared [`ViewState`]. The UI reads that state each frame under a short
 //! read lock and never calls the library or the audio engine itself.
 
+mod analysis;
 mod convert;
 mod enrich;
 mod home;
@@ -326,6 +327,8 @@ struct Worker {
     torrents: torrents::Torrents,
     /// Accounts, stream search and pages, likes sync, wishlist, sharing.
     streaming: streams::Streams,
+    /// The background sound analysis and the vector index it fills.
+    analysis: analysis::FileAnalysis,
 }
 
 impl Worker {
@@ -342,6 +345,7 @@ impl Worker {
             .map(|i| (i.torrent_state_dir.clone(), i.torrent_offline))
             .unwrap_or_default();
         let streaming = streams::Streams::new(internal.clone());
+        let analysis = analysis::FileAnalysis::new(internal.clone());
         let import = config
             .import
             .and_then(|setup| ImportService::start(setup, config.library.clone(), internal));
@@ -387,6 +391,7 @@ impl Worker {
             playing_source: None,
             qualities: Vec::new(),
             streaming,
+            analysis,
         }
     }
 
@@ -411,6 +416,7 @@ impl Worker {
         self.offer_editions();
         self.wish_restart();
         self.start_streams();
+        self.start_analysis();
         loop {
             select! {
                 recv(rx) -> m => match m {
@@ -439,6 +445,7 @@ impl Worker {
         self.maybe_export(true);
         self.playback.stop();
         self.shutdown_torrents();
+        self.analysis.shutdown();
     }
 
     fn publish(&mut self, f: impl FnOnce(&mut ViewState, &mut Resolver)) {

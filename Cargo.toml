@@ -52,6 +52,11 @@ opt-level = 2
 [profile.dev.package.nikgob-audio]
 opt-level = 3
 
+# Same for the sound analysis (downmix and resampling loops, the vector
+# index's brute-force passes), which runs in the background of a dev build.
+[profile.dev.package.nikgob-recs]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

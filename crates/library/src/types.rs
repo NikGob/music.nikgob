@@ -330,3 +330,39 @@ pub struct ImportReport {
     /// Unparsable lines in `events.jsonl`.
     pub invalid_lines: usize,
 }
+
+/// A track whose local file is due for sound analysis
+/// ([`crate::Library::tracks_needing_analysis`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnalysisTodo {
+    pub track_id: TrackId,
+    /// The active local source.
+    pub source_id: SourceId,
+    /// Its path (relative to the library root, or absolute).
+    pub locator: String,
+    /// Which file this is (source id, hash, size): a failure is remembered
+    /// for this key ([`crate::Library::mark_analysis_failed`]).
+    pub file_key: String,
+}
+
+/// How far the sound analysis is ([`crate::Library::analysis_counts`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AnalysisCounts {
+    /// Tracks with a file analysed from it with the current analysis.
+    pub files_done: u32,
+    /// Tracks with a file, without those that failed to decode.
+    pub files_total: u32,
+    /// Stream-only tracks that are liked or in a playlist and have a
+    /// current analysis.
+    pub streams_done: u32,
+    pub streams_total: u32,
+}
+
+/// One «Не рекомендовать» mark ([`crate::Library::set_rec_feedback`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecFeedback {
+    pub target_kind: String,
+    pub target_id: String,
+    pub dislike: bool,
+    pub updated_at: UnixMs,
+}

@@ -60,6 +60,12 @@ pub struct StreamSchedule {
     pub clip_gap: Duration,
     /// …and the clips left are looked for in the library at most this often.
     pub clip_refill: Duration,
+    /// The sound analysis of the files starts this long after the start
+    /// (playback and the first screens go first)…
+    pub analysis_start: Duration,
+    /// …and, with nothing to analyse, looks at the library again this often
+    /// (imports wake it at once).
+    pub analysis_idle: Duration,
     /// The worker's slow tick (toasts, the session file, the jobs above).
     pub tick: Duration,
     /// ± this share of every periodic interval.
@@ -91,6 +97,8 @@ impl Default for StreamSchedule {
             enrich_pause: (Duration::from_secs(60), Duration::from_secs(20)),
             clip_gap: Duration::from_secs(4),
             clip_refill: Duration::from_secs(30 * 60),
+            analysis_start: Duration::from_secs(15),
+            analysis_idle: Duration::from_secs(5 * 60),
             tick: Duration::from_secs(5),
             jitter: 0.2,
             rate_limit_cap: Duration::from_secs(10 * 60),

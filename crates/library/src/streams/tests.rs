@@ -649,7 +649,7 @@ fn remote_likes_crud() {
 #[test]
 fn schema_has_the_streaming_tables() {
     let lib = lib();
-    assert_eq!(lib.schema_version().unwrap(), 8);
+    assert_eq!(lib.schema_version().unwrap(), 9);
 }
 
 /// The fake YouTube clip of «Группа крови» (no album, kind video) and its song.

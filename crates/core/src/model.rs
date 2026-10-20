@@ -929,11 +929,28 @@ impl Event {
 // Derived data and tails
 // ---------------------------------------------------------------------------
 
+str_enum!(
+    /// What a track's sound analysis was computed from (docs/stage4.md §2).
+    /// An analysis of the file always wins over one of a stream.
+    pub enum AnalysisSource {
+        /// The track's local file.
+        File = "file",
+        /// The track's song on YouTube (Music), for a track without a file.
+        Youtube = "youtube",
+    }
+);
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Analysis {
     pub track_id: TrackId,
     pub bliss_vector: Vec<f32>,
     pub analyzed_with: String,
+    #[serde(default = "analysis_from_file")]
+    pub source: AnalysisSource,
+}
+
+fn analysis_from_file() -> AnalysisSource {
+    AnalysisSource::File
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
