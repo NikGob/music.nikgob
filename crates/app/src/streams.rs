@@ -8,7 +8,9 @@
 //! switching a service on in the settings works without a restart.
 //!
 //! Demo (`NIKGOB_DEMO=1`): the deterministic fakes (Deezer's is its fixed
-//! catalogue without an account). `NIKGOB_DEMO_ACCOUNTS`
+//! catalogue without an account; YouTube Music and Deezer also have two
+//! singles of the last weeks for new releases, and every fake its
+//! discovery answers). `NIKGOB_DEMO_ACCOUNTS`
 //! sets their account per service for screenshots, e.g.
 //! `spotify=prompt,youtube=out` (`in`, `out` = not connected, `free` =
 //! logged in without sound, `prompt` = a login waiting for the browser —
@@ -88,10 +90,14 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
         Service::Youtube => FakeService::new(service)
             .with_song("aiyou", "AIYOU", "Eve", "AIYOU", 163)
             .with_song("aiyou-inst", "AIYOU (Instrumental)", "Eve", "AIYOU", 163)
-            .with_song("kaikai", "Kaikai Kitan", "Eve", "Kaikai Kitan / Ao No Waltz", 221),
+            .with_song("kaikai", "Kaikai Kitan", "Eve", "Kaikai Kitan / Ao No Waltz", 221)
+            .with_new_release("utada", "kaze", "風の歌", 23)
+            .with_new_release("bjork", "aurora", "Aurora", 9),
         Service::Deezer => FakeService::new(service)
             .with_song("aiyou", "AIYOU", "Eve", "AIYOU", 163)
-            .with_song("aiyou-tv", "AIYOU (TV Size)", "Eve", "AIYOU", 89),
+            .with_song("aiyou-tv", "AIYOU (TV Size)", "Eve", "AIYOU", 89)
+            .with_new_release("utada", "kaze", "風の歌", 23)
+            .with_new_release("bjork", "aurora", "Aurora", 9),
         Service::Spotify => FakeService::new(service),
     };
     // Long enough to watch a track play (lyrics, progress) in screenshots.
@@ -236,6 +242,24 @@ impl StreamService for Shown {
     }
     fn playlist_version(&self, id: &str) -> BoxFuture<'_, Result<Option<String>, StreamError>> {
         self.inner.playlist_version(id)
+    }
+    fn cached_audio(&self, id: &str) -> Option<Box<dyn AudioStream>> {
+        self.inner.cached_audio(id)
+    }
+    fn related(&self, track_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        self.inner.related(track_id)
+    }
+    fn radio(&self, track_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        self.inner.radio(track_id)
+    }
+    fn similar_artists(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamArtist>, StreamError>> {
+        self.inner.similar_artists(artist_id)
+    }
+    fn artist_top(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        self.inner.artist_top(artist_id)
+    }
+    fn artist_radio(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        self.inner.artist_radio(artist_id)
     }
 }
 

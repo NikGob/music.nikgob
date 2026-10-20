@@ -375,6 +375,12 @@ pub struct StreamAlbum {
     pub title: String,
     pub artists: Vec<ArtistRef>,
     pub year: Option<i32>,
+    /// The day of release, `YYYY-MM-DD`, when the service tells the day
+    /// (Deezer, Spotify albums dated to the day); YouTube Music gives only
+    /// [`Self::year`]. Present in discographies ([`StreamArtist::albums`]),
+    /// which is what new releases are found by.
+    #[serde(default)]
+    pub release_date: Option<String>,
     #[serde(default)]
     pub release_type: ReleaseType,
     pub cover_url: Option<String>,
@@ -383,6 +389,34 @@ pub struct StreamAlbum {
     /// [`StreamService::album`].
     #[serde(default)]
     pub tracks: Vec<StreamTrack>,
+}
+
+impl StreamAlbum {
+    /// Midnight UTC of [`Self::release_date`] (unix ms); `None` without a
+    /// full date.
+    pub fn released_at_ms(&self) -> Option<UnixMs> {
+        date_ms(self.release_date.as_deref()?)
+    }
+}
+
+/// Midnight UTC of a `YYYY-MM-DD` date (unix ms).
+pub fn date_ms(date: &str) -> Option<UnixMs> {
+    let mut parts = date.trim().splitn(3, '-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next()?.parse().ok()?;
+    let d: i64 = parts.next()?.get(..2)?.parse().ok()?;
+    if !(1000..=9999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400_000)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -654,6 +688,11 @@ pub fn only_kind(mut s: StreamSearch, kind: SearchKind) -> StreamSearch {
 // The service
 // ---------------------------------------------------------------------------
 
+/// The answer of a call the service cannot do.
+fn unsupported<'a, T: Send + 'a>() -> BoxFuture<'a, Result<T, StreamError>> {
+    Box::pin(std::future::ready(Err(StreamError::Unsupported)))
+}
+
 pub trait StreamService: Send + Sync {
     fn service(&self) -> Service;
 
@@ -855,6 +894,59 @@ pub trait StreamService: Send + Sync {
     /// Empties that cache.
     fn clear_cache(&self) {}
 
+    /// The complete audio of a recently played track, if this service still
+    /// has all of it on disk (YouTube: its audio cache); `None` otherwise.
+    /// Never touches the network and never starts a download: the sound
+    /// analysis of streams reads what already played (docs/stage4.md §2).
+    /// Cheap (opens a file), but call it off the UI thread. The stream's
+    /// [`AudioStream::format_hint`] says the container ([`format::WEBM`]
+    /// for Opus, [`format::M4A`] for AAC).
+    fn cached_audio(&self, id: &str) -> Option<Box<dyn AudioStream>> {
+        let _ = id;
+        None
+    }
+
+    // Discovery (docs/stage4.md §5). Background work: each call goes
+    // through the service's limits in its background lane, answers
+    // [`StreamError::RateLimited`] while the service is paused, and is kept
+    // for an hour in memory where the service keeps answers. Services that
+    // cannot do one answer [`StreamError::Unsupported`] (Spotify: its
+    // recommendation endpoints are closed to personal apps).
+
+    /// Tracks like `track_id` ("you might also like"), best first, without
+    /// the track itself.
+    fn related(&self, track_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        let _ = track_id;
+        unsupported()
+    }
+
+    /// The service's radio of a track: the queue it would play after it,
+    /// in its order, without the track itself. Usually more and newer to
+    /// the listener than [`Self::related`].
+    fn radio(&self, track_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        let _ = track_id;
+        unsupported()
+    }
+
+    /// Artists like `artist_id`, most alike first (without their albums).
+    fn similar_artists(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamArtist>, StreamError>> {
+        let _ = artist_id;
+        unsupported()
+    }
+
+    /// The artist's most popular tracks, most popular first.
+    fn artist_top(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        let _ = artist_id;
+        unsupported()
+    }
+
+    /// The service's radio of an artist: the artist's tracks mixed with
+    /// similar artists'.
+    fn artist_radio(&self, artist_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
+        let _ = artist_id;
+        unsupported()
+    }
+
     /// Link to the item on the service's website (open.spotify.com/…,
     /// music.youtube.com/…). No network.
     fn web_url(&self, kind: EntityKind, id: &str) -> String;
@@ -890,6 +982,22 @@ mod tests {
             assert_eq!(serde_json::to_string(&m).unwrap(), format!("\"{}\"", m.as_str()));
         }
         assert_eq!(PlaylistSyncMode::default(), PlaylistSyncMode::Follow);
+    }
+
+    #[test]
+    fn release_dates_are_days_in_unix_ms() {
+        assert_eq!(date_ms("2026-10-17"), Some(1_792_195_200_000));
+        assert_eq!(date_ms("1970-01-01"), Some(0));
+        assert_eq!(date_ms("2000-02-29"), Some(951_782_400_000));
+        assert_eq!(date_ms("0000-00-00"), None);
+        assert_eq!(date_ms("2019"), None);
+        let album: StreamAlbum = serde_json::from_str(
+            r#"{"id":{"service":"deezer","id":"1"},"title":"A","artists":[],"year":2026,
+                "cover_url":null,"total_tracks":null}"#,
+        )
+        .unwrap();
+        assert_eq!(album.release_date, None, "older JSON reads without the day");
+        assert_eq!(album.released_at_ms(), None);
     }
 
     #[test]

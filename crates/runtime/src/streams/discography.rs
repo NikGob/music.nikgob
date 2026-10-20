@@ -308,6 +308,7 @@ mod tests {
             title: title.into(),
             artists: Vec::new(),
             year: Some(year),
+            release_date: None,
             release_type: t,
             cover_url: None,
             total_tracks: None,
