@@ -9,14 +9,24 @@
 //! | `StreamingHistory*.json` (Spotify Account data; `_podcast_` / `_video_` ones skipped) | plays by artist + title, used only when no extended history is in the same export |
 //! | `YourLibrary.json` (Spotify Account data) | liked tracks (`tracks[]`) |
 //! | `Playlist*.json` (Spotify Account data) | playlists with their tracks |
-//! | any `.json` under a `YouTube…` folder that is a list of `{header: "YouTube Music", titleUrl: …watch?v=…, time}` (`watch-history.json`, `история просмотра.json`) | YouTube Music plays |
-//! | `.csv` in a playlist folder under a `YouTube…` folder (`playlists/`, `плейлисты/`) | playlists by video id; the liked-music one ([`LIKED_NAMES`]) gives likes |
+//! | any `.json` under a `YouTube…` folder (or called `watch-history.json` / `история просмотра.json` anywhere) that is a list of `{header: "YouTube Music", titleUrl: …watch?v=…, time}` | YouTube Music plays |
+//! | any `.html` that is a My Activity page (`watch-history.html`, Takeout's default format): `outer-cell` entries headed «YouTube Music» | YouTube Music plays |
+//! | `.csv` in a playlist folder under a `YouTube…` folder (`playlists/`, `плейлисты/`), or any `.csv` headed `Video ID,Playlist Video Creation Timestamp` | playlists by video id; the liked-music one ([`LIKED_NAMES`]) gives likes, «Watch later» ([`WATCH_LATER_NAMES`]) is left out |
+//! | a `.csv` headed `Playlist ID,…,Playlist Title (Original),…` (`playlists.csv`) | the names and ids of the playlists above |
+//! | a `.csv` headed `Video ID,Song Title,Album Title,Artist Name 1,…` (`music library songs.csv`) | likes, with their titles, albums and artists |
+//!
+//! CSV and HTML files are told by their first line / bytes, so loose files
+//! (no `Takeout/YouTube…` folders around them) work too, and anything else
+//! with those extensions (a game's save, the search history) is skipped.
+//! Entries of plain YouTube (header «YouTube») are not plays, but the
+//! videos are remembered ([`ExportData::plain_watched`]): the import uses
+//! them to tell playlists of music from playlists of videos.
 //!
 //! Everything here is plain parsing, without the library or the network;
 //! the cold-start import ([`super::cold`]) turns the result into tracks,
 //! events, likes and playlists.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 
@@ -49,6 +59,26 @@ pub(crate) const LIKED_NAMES: &[&str] = &[
     "mag ich",
 ];
 
+/// Names (folded) of YouTube's «Watch later» list, which is not music and
+/// is not imported (its id is `WL` where a file names it).
+pub(crate) const WATCH_LATER_NAMES: &[&str] = &[
+    "watch later",
+    "смотреть позже",
+    "посмотреть позже",
+    "переглянути пізніше",
+    "später ansehen",
+    "à regarder plus tard",
+    "ver más tarde",
+    "guarda più tardi",
+    "assistir mais tarde",
+    "do obejrzenia",
+    "あとで見る",
+    "나중에 볼 동영상",
+];
+
+/// Bytes read from a CSV or HTML file to tell what it is.
+const HEAD: u64 = 64 << 10;
+
 /// Prefixes Takeout puts before a watched title ("Watched …"), by language.
 const WATCHED_PREFIXES: &[&str] = &[
     "Watched ",
@@ -79,6 +109,8 @@ pub(crate) struct Item {
     /// Empty when the file does not say (a YouTube playlist lists ids only).
     pub(crate) title: String,
     pub(crate) artist: String,
+    /// The other artists of the credit, when the file lists them apart.
+    pub(crate) featured: Vec<String>,
     pub(crate) album: Option<String>,
 }
 
@@ -89,6 +121,7 @@ impl Item {
             id: id.filter(|i| !i.is_empty()),
             title: title.trim().to_owned(),
             artist: artist.trim().to_owned(),
+            featured: Vec::new(),
             album: album.map(str::trim).filter(|a| !a.is_empty()).map(str::to_owned),
         }
     }
@@ -128,6 +161,8 @@ pub(crate) struct ExportData {
     pub(crate) plays: Vec<Play>,
     pub(crate) likes: Vec<Item>,
     pub(crate) playlists: Vec<ExportPlaylist>,
+    /// YouTube videos watched on plain YouTube (not YouTube Music).
+    pub(crate) plain_watched: HashSet<String>,
     /// The files that were recognised and read (paths inside the export).
     pub(crate) files: Vec<String>,
     /// Recognised files that could not be read, with the reason.
@@ -148,7 +183,15 @@ enum Kind {
     SpotifyPlaylists,
     /// A JSON under a YouTube folder: a watch history if its content says so.
     YoutubeJson,
+    /// An HTML file: a My Activity page if its content says so.
+    YoutubeHtml,
     YoutubePlaylist,
+    /// A CSV elsewhere: what it is depends on its header ([`csv_kind`]).
+    Csv,
+    /// `playlists.csv`: playlist ids and names.
+    PlaylistIndex,
+    /// `music library songs.csv`.
+    MusicLibrary,
 }
 
 /// Lower case, `ё` → `е`, trimmed.
@@ -175,7 +218,7 @@ fn kind_of(path: &str) -> Option<Kind> {
         if stem == "yourlibrary" {
             return Some(Kind::Library);
         }
-        if in_youtube {
+        if in_youtube || stem == "watch-history" || stem == "история просмотра" {
             return Some(Kind::YoutubeJson);
         }
         if stem.starts_with("playlist") {
@@ -183,14 +226,49 @@ fn kind_of(path: &str) -> Option<Kind> {
         }
         return None;
     }
-    if name.ends_with(".csv") && in_youtube {
+    if name.ends_with(".csv") {
         let dir = parts.last().copied().unwrap_or("");
         let playlist_dir = ["playlist", "плейлист", "списки", "wiedergabeliste", "lista", "liste"]
             .iter()
             .any(|w| dir.contains(w));
-        return playlist_dir.then_some(Kind::YoutubePlaylist);
+        return Some(if in_youtube && playlist_dir { Kind::YoutubePlaylist } else { Kind::Csv });
+    }
+    if name.ends_with(".html") || name.ends_with(".htm") {
+        return Some(Kind::YoutubeHtml);
     }
     None
+}
+
+/// What a file of kind `kind` (by its name) is after a look at its first
+/// bytes; `None`: not an export file after all.
+fn sniff(kind: Kind, head: &[u8]) -> Option<Kind> {
+    match kind {
+        Kind::Csv | Kind::YoutubePlaylist => {
+            let text = String::from_utf8_lossy(strip_bom(head));
+            let first = text.lines().next().unwrap_or("");
+            // A playlist folder also holds the old layout, whose header is localised.
+            csv_kind(first).or((kind == Kind::YoutubePlaylist).then_some(kind))
+        }
+        // My Activity pages are styled with Material Design Lite.
+        Kind::YoutubeHtml => head.windows(4).any(|w| w == b"mdl-").then_some(kind),
+        k => Some(k),
+    }
+}
+
+/// What a Takeout CSV is from its header line (the newer files have the
+/// same English headers in every language).
+fn csv_kind(header: &str) -> Option<Kind> {
+    let cols: Vec<String> = header.split(',').map(|c| fold(c.trim_matches('"'))).collect();
+    let col = |i: usize| cols.get(i).map_or("", String::as_str);
+    let has = |name: &str| cols.iter().any(|c| c == name);
+    match col(0) {
+        "video id" if has("song title") => Some(Kind::MusicLibrary),
+        "video id" if col(1).starts_with("playlist video") => Some(Kind::YoutubePlaylist),
+        "playlist id" if cols.iter().any(|c| c.starts_with("playlist title")) => Some(Kind::PlaylistIndex),
+        // The older layout's metadata block.
+        "playlist id" if col(1) == "channel id" => Some(Kind::YoutubePlaylist),
+        _ => None,
+    }
 }
 
 /// Reads every export file in `path` (a folder, a `.zip`, or a folder with
@@ -204,8 +282,11 @@ pub(crate) fn read_export(path: &Path) -> Result<ExportData, String> {
     } else {
         // A single export file.
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let kind = kind_of(&name).ok_or_else(|| format!("«{name}» — не файл выгрузки"))?;
-        files.push((name, kind, read_file(path)?));
+        let not_export = || format!("«{name}» — не файл выгрузки");
+        let kind = kind_of(&name).ok_or_else(not_export)?;
+        let bytes = read_file(path)?;
+        let kind = sniff(kind, &bytes[..bytes.len().min(HEAD as usize)]).ok_or_else(not_export)?;
+        files.push((name, kind, bytes));
     }
     let mut out = ExportData::default();
     let has_extended = files.iter().any(|(_, k, _)| *k == Kind::Extended);
@@ -213,6 +294,7 @@ pub(crate) fn read_export(path: &Path) -> Result<ExportData, String> {
     files.retain(|(_, k, _)| !(has_extended && *k == Kind::OldHistory));
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut yt_playlists = Vec::new();
+    let mut index = Vec::new();
     for (name, kind, bytes) in files {
         let parsed = match kind {
             Kind::YoutubePlaylist => {
@@ -220,6 +302,18 @@ pub(crate) fn read_export(path: &Path) -> Result<ExportData, String> {
                 yt_playlists.push(youtube_playlist(&name, &text));
                 Ok(true)
             }
+            Kind::PlaylistIndex => {
+                index.extend(playlist_index(&String::from_utf8_lossy(&bytes)));
+                Ok(true)
+            }
+            Kind::MusicLibrary => {
+                let songs = library_songs(&String::from_utf8_lossy(&bytes));
+                let found = !songs.is_empty();
+                out.likes.extend(songs);
+                Ok(found)
+            }
+            Kind::YoutubeHtml => Ok(html_history(&String::from_utf8_lossy(&bytes), &mut out)),
+            Kind::Csv => Ok(false),
             _ => match serde_json::from_slice::<Value>(strip_bom(&bytes)) {
                 Ok(json) => Ok(apply_json(kind, &json, &mut out)),
                 Err(e) => Err(e.to_string()),
@@ -234,17 +328,109 @@ pub(crate) fn read_export(path: &Path) -> Result<ExportData, String> {
             }
         }
     }
-    // The liked-music playlist is the likes; empty lists (the playlist
-    // index file, a list of playlist ids) are nothing.
-    for p in yt_playlists.into_iter().flatten() {
-        if LIKED_NAMES.contains(&fold(&p.name).as_str()) {
+    // The liked-music playlist is the likes; «Watch later» is not music;
+    // empty lists (a list of playlist ids) are nothing.
+    for mut p in yt_playlists.into_iter().flatten() {
+        name_from_index(&mut p, &index);
+        let folded = fold(&p.name);
+        if LIKED_NAMES.contains(&folded.as_str()) {
             out.likes.extend(p.items);
+        } else if WATCH_LATER_NAMES.contains(&folded.as_str()) || p.remote.as_deref() == Some("WL") {
+            log::debug!("export: «{}» left out", p.name);
         } else if !p.items.is_empty() {
             out.playlists.push(p);
         }
     }
     fill_youtube_titles(&mut out);
+    // The library and the liked-music playlist name the same songs.
+    let mut seen = HashSet::new();
+    out.likes
+        .retain(|i| i.id.as_ref().is_none_or(|id| seen.insert((i.service, id.clone()))));
     Ok(out)
+}
+
+/// A playlist CSV of the newer layout names neither its id nor (but by its
+/// file name) its title: `playlists.csv` has both. Takeout makes the file
+/// name from the title with the characters a file name cannot hold
+/// replaced by `_`.
+fn name_from_index(p: &mut ExportPlaylist, index: &[(String, String)]) {
+    if p.remote.is_some() {
+        return;
+    }
+    let stem = fold(&p.name);
+    let file_safe = |t: &str| -> String {
+        t.chars()
+            .map(|c| if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+            .collect()
+    };
+    if let Some((id, title)) = index
+        .iter()
+        .find(|(_, t)| fold(t) == stem || fold(&file_safe(t)) == stem)
+    {
+        p.remote = Some(id.clone());
+        p.name.clone_from(title);
+    }
+}
+
+/// `playlists.csv`: (id, original title) of each playlist.
+fn playlist_index(text: &str) -> Vec<(String, String)> {
+    let rows = csv_rows(text);
+    let Some(header) = rows.first() else { return Vec::new() };
+    let header: Vec<String> = header.iter().map(|h| fold(h)).collect();
+    let id_col = header.iter().position(|h| h == "playlist id");
+    let title_col = header
+        .iter()
+        .position(|h| h == "playlist title (original)")
+        .or_else(|| header.iter().position(|h| h.starts_with("playlist title") && !h.contains("language")));
+    let (Some(id_col), Some(title_col)) = (id_col, title_col) else { return Vec::new() };
+    rows[1..]
+        .iter()
+        .filter_map(|r| {
+            let id = r.get(id_col)?.trim();
+            let title = r.get(title_col)?.trim();
+            (!id.is_empty() && !title.is_empty()).then(|| (id.to_owned(), title.to_owned()))
+        })
+        .collect()
+}
+
+/// `music library songs.csv`: the songs of the YouTube Music library (the
+/// liked ones among them) with their titles, albums and up to nine artists.
+/// Some ids come with a leading space.
+fn library_songs(text: &str) -> Vec<Item> {
+    let rows = csv_rows(text);
+    let Some(header) = rows.first() else { return Vec::new() };
+    let header: Vec<String> = header.iter().map(|h| fold(h)).collect();
+    let col = |name: &str| header.iter().position(|h| h == name);
+    let (Some(id_col), Some(title_col)) = (col("video id"), col("song title")) else {
+        return Vec::new();
+    };
+    let album_col = col("album title");
+    let artist_cols: Vec<usize> = (0..header.len()).filter(|&i| header[i].starts_with("artist name")).collect();
+    rows[1..]
+        .iter()
+        .filter_map(|r| {
+            let id = r.get(id_col)?.trim();
+            if !is_video_id(id) {
+                return None;
+            }
+            let mut artists: Vec<&str> = Vec::new();
+            for a in artist_cols.iter().filter_map(|&c| r.get(c)).map(|a| a.trim()) {
+                if !a.is_empty() && !artists.contains(&a) {
+                    artists.push(a);
+                }
+            }
+            let album = album_col.and_then(|c| r.get(c)).map(String::as_str);
+            let mut item = Item::new(
+                Service::Youtube,
+                Some(id.to_owned()),
+                r.get(title_col)?,
+                artists.first().copied().unwrap_or_default(),
+                album,
+            );
+            item.featured = artists.iter().skip(1).map(|a| (*a).to_owned()).collect();
+            Some(item)
+        })
+        .collect()
 }
 
 fn strip_bom(b: &[u8]) -> &[u8] {
@@ -261,6 +447,12 @@ fn read_file(path: &Path) -> Result<Vec<u8>, String> {
         return Err(format!("{}: слишком большой файл", path.display()));
     }
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn read_head(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut head = Vec::new();
+    std::fs::File::open(path)?.take(HEAD).read_to_end(&mut head)?;
+    Ok(head)
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Kind, Vec<u8>)>) -> Result<(), String> {
@@ -286,9 +478,23 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Kind, Vec<u8>)>) -> Resu
                 Some(n) => format!("{}/{rel}", n.to_string_lossy()),
                 None => rel,
             };
-            if let Some(kind) = kind_of(&named) {
-                out.push((named, kind, read_file(&p)?));
-            }
+            let Some(kind) = kind_of(&named) else { continue };
+            let kind = match kind {
+                // Any CSV or HTML may be one: a look at its start first, and
+                // one that cannot be read is not an export file.
+                Kind::Csv | Kind::YoutubeHtml | Kind::YoutubePlaylist => {
+                    match read_head(&p).map(|head| sniff(kind, &head)) {
+                        Ok(Some(k)) => k,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            log::debug!("export: {}: {e}", p.display());
+                            continue;
+                        }
+                    }
+                }
+                k => k,
+            };
+            out.push((named, kind, read_file(&p)?));
         }
     }
     Ok(())
@@ -316,6 +522,7 @@ fn read_zip(path: &Path, out: &mut Vec<(String, Kind, Vec<u8>)>) -> Result<(), S
             log::warn!("{}: {name}: {e}", path.display());
             continue;
         }
+        let Some(kind) = sniff(kind, &bytes[..bytes.len().min(HEAD as usize)]) else { continue };
         out.push((name, kind, bytes));
     }
     Ok(())
@@ -351,12 +558,22 @@ fn apply_json(kind: Kind, json: &Value, out: &mut ExportData) -> bool {
             None => false,
         },
         Kind::YoutubeJson => {
-            let plays: Vec<Play> = json.as_array().into_iter().flatten().filter_map(watched).collect();
-            let found = !plays.is_empty();
-            out.plays.extend(plays);
+            let mut found = false;
+            for v in json.as_array().into_iter().flatten() {
+                if let Some(play) = watched(v) {
+                    out.plays.push(play);
+                    found = true;
+                } else if str_of(v, "header") == Some("YouTube")
+                    && let Some(id) = str_of(v, "titleUrl").and_then(video_id)
+                {
+                    // Plain YouTube: not a play, but a sign of a video.
+                    out.plain_watched.insert(id);
+                    found = true;
+                }
+            }
             found
         }
-        Kind::YoutubePlaylist => false,
+        Kind::YoutubePlaylist | Kind::YoutubeHtml | Kind::Csv | Kind::PlaylistIndex | Kind::MusicLibrary => false,
     }
 }
 
@@ -618,27 +835,323 @@ fn youtube_playlist(path: &str, text: &str) -> Option<ExportPlaylist> {
     })
 }
 
-/// Video ids of likes and playlists have no title in the CSVs: take the one
-/// the watch history knows.
+/// Video ids of playlists (and of the liked-music one) have no title in
+/// the CSVs: take the one the music library or the watch history knows.
 fn fill_youtube_titles(out: &mut ExportData) {
-    let known: HashMap<String, (String, String)> = out
-        .plays
-        .iter()
-        .filter(|p| p.item.service == Service::Youtube && !p.item.title.is_empty())
-        .filter_map(|p| Some((p.item.id.clone()?, (p.item.title.clone(), p.item.artist.clone()))))
-        .collect();
+    let mut known: HashMap<String, Item> = HashMap::new();
+    let titled = |i: &&Item| i.service == Service::Youtube && !i.title.is_empty();
+    for i in out.plays.iter().map(|p| &p.item).filter(titled) {
+        if let Some(id) = &i.id {
+            known.insert(id.clone(), i.clone());
+        }
+    }
+    // The library has albums and every artist: it wins.
+    for i in out.likes.iter().filter(titled) {
+        if let Some(id) = &i.id {
+            known.insert(id.clone(), i.clone());
+        }
+    }
     let fill = |i: &mut Item| {
         if i.title.is_empty()
-            && let Some((t, a)) = i.id.as_ref().and_then(|id| known.get(id))
+            && let Some(k) = i.id.as_ref().and_then(|id| known.get(id))
         {
-            i.title.clone_from(t);
-            i.artist.clone_from(a);
+            i.title.clone_from(&k.title);
+            i.artist.clone_from(&k.artist);
+            i.featured.clone_from(&k.featured);
+            i.album.clone_from(&k.album);
         }
     };
     out.likes.iter_mut().for_each(fill);
     for p in &mut out.playlists {
         p.items.iter_mut().for_each(fill);
     }
+}
+
+// ------------------------------------------------------------ My Activity
+
+/// Takeout's `watch-history.html` (My Activity as a page, its default
+/// format): an `outer-cell` per entry, headed by the product («YouTube
+/// Music» or «YouTube»), then `Watched <a href="…watch?v=ID">Title</a><br>
+/// <a href="…/channel/…">Channel</a><br>Oct 15, 2026, 4:55:46 PM IDT<br>`
+/// (no channel link for a removed video, whose title is its url). Read in
+/// one pass over the text, a cell at a time; `false` when no entry was a
+/// watched video.
+fn html_history(text: &str, out: &mut ExportData) -> bool {
+    let mut found = false;
+    for cell in text.split("class=\"outer-cell").skip(1) {
+        let Some(header) = between(cell, "mdl-typography--title\">", "<") else { continue };
+        let music = match unescape(header).trim() {
+            "YouTube Music" => true,
+            "YouTube" => false,
+            _ => continue,
+        };
+        let Some((_, body)) = cell.split_once("content-cell") else { continue };
+        let Some((_, body)) = body.split_once('>') else { continue };
+        let body = body.split("</div>").next().unwrap_or(body);
+        let mut links = Anchors(body);
+        let Some((href, title)) = links.next() else { continue };
+        let Some(id) = video_id(&unescape(href)) else { continue };
+        found = true;
+        if !music {
+            out.plain_watched.insert(id);
+            continue;
+        }
+        // The date is the last line that is not a link.
+        let Some(start) = body
+            .rsplit("<br>")
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.contains('<'))
+            .and_then(|l| parse_activity_time(&unescape(l)))
+        else {
+            continue;
+        };
+        let title = unescape(title);
+        let title = if title.starts_with("http://") || title.starts_with("https://") { "" } else { title.trim() };
+        let artist = links.next().map(|(_, a)| channel_artist(&unescape(a))).unwrap_or_default();
+        out.plays.push(Play {
+            item: Item::new(Service::Youtube, Some(id), title, &artist, None),
+            start_ms: start,
+            ms_played: None,
+            outcome: Outcome::Unknown,
+        });
+    }
+    found
+}
+
+/// The text between `start` and the next `end`.
+fn between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let rest = &s[s.find(start)? + start.len()..];
+    Some(&rest[..rest.find(end)?])
+}
+
+/// The links of a piece of HTML: (href, text) in order.
+struct Anchors<'a>(&'a str);
+
+impl<'a> Iterator for Anchors<'a> {
+    type Item = (&'a str, &'a str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let tag = &self.0[self.0.find("<a ")?..];
+        let href = between(tag, "href=\"", "\"").unwrap_or("");
+        let open = tag.find('>')? + 1;
+        let close = tag[open..].find("</a>")? + open;
+        self.0 = &tag[close + 4..];
+        Some((href, &tag[open..close]))
+    }
+}
+
+/// HTML character references → text (the named ones Takeout writes, and
+/// numeric ones).
+fn unescape(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('&') {
+        return s.into();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let entity = rest.find(';').filter(|&e| e <= 10).map(|e| &rest[1..e]);
+        let c = entity.and_then(|e| match e {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some('\u{a0}'),
+            "emsp" => Some('\u{2003}'),
+            _ => {
+                let n = e.strip_prefix('#')?;
+                let code = match n.strip_prefix(['x', 'X']) {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                    None => n.parse().ok()?,
+                };
+                char::from_u32(code)
+            }
+        });
+        match (c, entity) {
+            (Some(c), Some(e)) => {
+                out.push(c);
+                rest = &rest[e.len() + 2..];
+            }
+            _ => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out.into()
+}
+
+/// UTC offsets (minutes) of the time zone names My Activity writes. It
+/// writes every date in the zone of the moment of the export; a name not
+/// here is taken as UTC. `IST` is Israel's, the pair of `IDT` (Takeout
+/// writes India's as `GMT+05:30` in English).
+const ZONES: &[(&str, i32)] = &[
+    ("UTC", 0),
+    ("GMT", 0),
+    ("Z", 0),
+    ("WET", 0),
+    ("WEST", 60),
+    ("BST", 60),
+    ("CET", 60),
+    ("CEST", 120),
+    ("MEZ", 60),
+    ("MESZ", 120),
+    ("EET", 120),
+    ("EEST", 180),
+    ("IST", 120),
+    ("IDT", 180),
+    ("MSK", 180),
+    ("МСК", 180),
+    ("SAMT", 240),
+    ("GST", 240),
+    ("YEKT", 300),
+    ("PKT", 300),
+    ("OMST", 360),
+    ("NOVT", 420),
+    ("KRAT", 420),
+    ("ICT", 420),
+    ("IRKT", 480),
+    ("HKT", 480),
+    ("SGT", 480),
+    ("AWST", 480),
+    ("YAKT", 540),
+    ("JST", 540),
+    ("KST", 540),
+    ("ACST", 570),
+    ("VLAT", 600),
+    ("AEST", 600),
+    ("AEDT", 660),
+    ("MAGT", 660),
+    ("PETT", 720),
+    ("NZST", 720),
+    ("NZDT", 780),
+    ("NST", -210),
+    ("NDT", -150),
+    ("BRT", -180),
+    ("ART", -180),
+    ("ADT", -180),
+    ("AST", -240),
+    ("EDT", -240),
+    ("EST", -300),
+    ("CDT", -300),
+    ("CST", -360),
+    ("MDT", -360),
+    ("MST", -420),
+    ("PDT", -420),
+    ("PST", -480),
+    ("AKDT", -480),
+    ("AKST", -540),
+    ("HST", -600),
+];
+
+/// `GMT+03:00`, `UTC-4`, `GMT+0530`, or a name from [`ZONES`]: the offset
+/// in minutes.
+fn zone_offset(token: &str) -> Option<i32> {
+    let upper = token.to_uppercase();
+    if let Some(rest) = upper.strip_prefix("GMT").or_else(|| upper.strip_prefix("UTC")) {
+        if rest.is_empty() {
+            return Some(0);
+        }
+        let (sign, rest) = if let Some(r) = rest.strip_prefix('+') {
+            (1, r)
+        } else if let Some(r) = rest.strip_prefix(['-', '\u{2212}']) {
+            (-1, r)
+        } else {
+            return None;
+        };
+        let (h, m) = match rest.split_once(':') {
+            Some((h, m)) => (h.parse::<i32>().ok()?, m.parse::<i32>().ok()?),
+            None if rest.len() > 2 => (
+                rest[..rest.len() - 2].parse().ok()?,
+                rest[rest.len() - 2..].parse().ok()?,
+            ),
+            None => (rest.parse().ok()?, 0),
+        };
+        return Some(sign * (h * 60 + m));
+    }
+    ZONES.iter().find(|(name, _)| *name == upper).map(|(_, off)| *off)
+}
+
+/// A month by its English or Russian name, abbreviated or not, in any case
+/// (`Oct`, `окт.`, `мая`).
+fn month(token: &str) -> Option<i8> {
+    const NAMES: &[(&str, i8)] = &[
+        ("jan", 1),
+        ("feb", 2),
+        ("mar", 3),
+        ("apr", 4),
+        ("may", 5),
+        ("jun", 6),
+        ("jul", 7),
+        ("aug", 8),
+        ("sep", 9),
+        ("oct", 10),
+        ("nov", 11),
+        ("dec", 12),
+        ("янв", 1),
+        ("фев", 2),
+        ("мар", 3),
+        ("апр", 4),
+        ("ма", 5),
+        ("июн", 6),
+        ("июл", 7),
+        ("авг", 8),
+        ("сен", 9),
+        ("окт", 10),
+        ("ноя", 11),
+        ("дек", 12),
+    ];
+    let t = token.to_lowercase();
+    NAMES.iter().find(|(p, _)| t.starts_with(p)).map(|(_, m)| *m)
+}
+
+/// A My Activity date as unix ms: `Oct 15, 2026, 4:55:46 PM IDT` (with a
+/// narrow no-break space before `PM` at times), `15 окт. 2026 г., 16:55:46
+/// MSK`, `15.10.2026, 16:55:46 GMT+03:00`, or ISO-8601.
+pub(crate) fn parse_activity_time(s: &str) -> Option<UnixMs> {
+    if let Some(t) = parse_time(s) {
+        return Some(t);
+    }
+    let s = s.replace(['\u{202f}', '\u{a0}', ','], " ");
+    let (mut year, mut mon, mut day) = (None, None, None);
+    let mut hms = None;
+    let mut pm = None;
+    let mut offset = 0;
+    for token in s.split_whitespace() {
+        let lower = token.to_lowercase();
+        if token.contains(':') && token.starts_with(|c: char| c.is_ascii_digit()) {
+            let mut parts = token.split(':').map(|p| p.parse::<i8>().ok());
+            hms = Some((parts.next()??, parts.next()??, parts.next().flatten().unwrap_or(0)));
+        } else if matches!(lower.as_str(), "am" | "a.m." | "pm" | "p.m.") {
+            pm = Some(lower.starts_with('p'));
+        } else if token.bytes().all(|b| b.is_ascii_digit()) {
+            match token.len() {
+                4 => year = token.parse::<i16>().ok(),
+                1 | 2 if day.is_none() => day = token.parse::<i8>().ok(),
+                _ => {}
+            }
+        } else if let [d, m, y] = token.split('.').collect::<Vec<_>>()[..]
+            && let (Ok(d), Ok(m), Ok(y)) = (d.parse(), m.parse(), y.parse())
+        {
+            (day, mon, year) = (Some(d), Some(m), Some(y));
+        } else if let Some(m) = month(token) {
+            mon = Some(m);
+        } else if let Some(o) = zone_offset(token) {
+            offset = o;
+        }
+    }
+    let (mut h, mi, sec) = hms?;
+    match pm {
+        Some(true) if h < 12 => h += 12,
+        Some(false) if h == 12 => h = 0,
+        _ => {}
+    }
+    let dt = jiff::civil::DateTime::new(year?, mon?, day?, h, mi, sec, 0).ok()?;
+    let utc = dt.to_zoned(jiff::tz::TimeZone::UTC).ok()?.timestamp().as_millisecond();
+    Some(utc - i64::from(offset) * 60_000)
 }
 
 #[cfg(test)]
@@ -660,10 +1173,208 @@ mod tests {
         assert_eq!(k("Takeout/YouTube и YouTube Music/история/история просмотра.json"), Some(Kind::YoutubeJson));
         assert_eq!(k("Takeout/YouTube и YouTube Music/плейлисты/Вечер-видео.csv"), Some(Kind::YoutubePlaylist));
         assert_eq!(k("Takeout/YouTube and YouTube Music/playlists/Liked music.csv"), Some(Kind::YoutubePlaylist));
-        assert_eq!(k("Takeout/YouTube and YouTube Music/subscriptions/subscriptions.csv"), None);
-        assert_eq!(k("Takeout/YouTube and YouTube Music/music (library and uploads)/music library songs.csv"), None);
+        // Other CSVs and HTML pages are told by what they hold.
+        assert_eq!(k("Takeout/YouTube and YouTube Music/subscriptions/subscriptions.csv"), Some(Kind::Csv));
+        assert_eq!(k("Takeout/YouTube and YouTube Music/music (library and uploads)/music library songs.csv"), Some(Kind::Csv));
+        assert_eq!(k("Temp/Made in Abyss OST 1-videos.csv"), Some(Kind::Csv));
+        assert_eq!(k("Temp/watch-history.html"), Some(Kind::YoutubeHtml));
+        assert_eq!(k("Temp/watch-history.json"), Some(Kind::YoutubeJson));
+        assert_eq!(k("Temp/Clean It_ Restaurant Cleanup"), None);
         assert_eq!(k("notes/readme.txt"), None);
         assert_eq!(k("other/data.json"), None);
+    }
+
+    #[test]
+    fn csv_and_html_are_told_by_their_start() {
+        let s = |kind, head: &str| sniff(kind, head.as_bytes());
+        assert_eq!(s(Kind::Csv, "Video ID,Playlist Video Creation Timestamp\nabc,1\n"), Some(Kind::YoutubePlaylist));
+        assert_eq!(
+            s(Kind::Csv, "\u{feff}Video ID,Song Title,Album Title,Artist Name 1,Artist Name 2\n"),
+            Some(Kind::MusicLibrary)
+        );
+        assert_eq!(
+            s(Kind::YoutubePlaylist, "Playlist ID,Add new videos to top,Playlist Title (Original)\n"),
+            Some(Kind::PlaylistIndex)
+        );
+        assert_eq!(s(Kind::Csv, "Playlist Id,Channel Id,Time Created,Title\n"), Some(Kind::YoutubePlaylist));
+        // The old layout's header is localised: in a playlist folder it still is one.
+        assert_eq!(s(Kind::YoutubePlaylist, "Идентификатор плейлиста,Канал\n"), Some(Kind::YoutubePlaylist));
+        assert_eq!(s(Kind::Csv, "Идентификатор плейлиста,Канал\n"), None);
+        assert_eq!(s(Kind::Csv, "Title,Playable ID,Timestamp\nClean It,Ugkx,2025\n"), None);
+        assert_eq!(s(Kind::Csv, "Channel Id,Channel Url,Channel Title\n"), None);
+        assert_eq!(s(Kind::YoutubeHtml, "<html><style>.mdl-grid{}</style>"), Some(Kind::YoutubeHtml));
+        assert_eq!(s(Kind::YoutubeHtml, "<html><body>hello</body></html>"), None);
+    }
+
+    /// An entry of a My Activity page.
+    fn cell(header: &str, body: &str) -> String {
+        format!(
+            "<div class=\"outer-cell mdl-cell mdl-cell--12-col mdl-shadow--2dp\"><div class=\"mdl-grid\">\
+             <div class=\"header-cell mdl-cell mdl-cell--12-col\"><p class=\"mdl-typography--title\">{header}<br></p></div>\
+             <div class=\"content-cell mdl-cell mdl-cell--6-col mdl-typography--body-1\">{body}</div>\
+             <div class=\"content-cell mdl-cell mdl-cell--6-col mdl-typography--body-1 mdl-typography--text-right\"></div>\
+             <div class=\"content-cell mdl-cell mdl-cell--12-col mdl-typography--caption\"><b>Products:</b><br>&emsp;YouTube<br>\
+             <a href=\"https://myaccount.google.com/activitycontrols\">here</a>.</div></div></div>"
+        )
+    }
+
+    fn page(cells: &[String]) -> String {
+        format!(
+            "<html><head><style>.outer-cell{{}} .mdl-grid{{}}</style></head><body><div class=\"mdl-grid\">{}</div></body></html>",
+            cells.concat()
+        )
+    }
+
+    #[test]
+    fn watch_history_page() {
+        let html = page(&[
+            cell(
+                "YouTube Music",
+                "Watched\u{a0}<a href=\"https://music.youtube.com/watch?v=fm7INtTR5Pk\">lazy cat - Eve (Live ver)</a><br>\
+                 <a href=\"https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx\">Eve - Topic</a><br>\
+                 Oct 15, 2026, 4:55:46\u{202f}PM IDT<br>",
+            ),
+            cell(
+                "YouTube",
+                "Watched\u{a0}<a href=\"https://www.youtube.com/watch?v=plainVideo1\">How to cook</a><br>\
+                 <a href=\"https://www.youtube.com/channel/UCyyyyyyyyyyyyyyyyyyyyyy\">Blogger</a><br>\
+                 Oct 15, 2026, 3:00:00\u{202f}PM IDT<br>",
+            ),
+            // A removed video: its url as the title, no channel.
+            cell(
+                "YouTube Music",
+                "Watched\u{a0}<a href=\"https://music.youtube.com/watch?v=removedVid1\">https://music.youtube.com/watch?v=removedVid1</a><br>\
+                 Jan 6, 2026, 12:46:24\u{202f}AM IDT<br>",
+            ),
+            cell(
+                "YouTube Music",
+                "Вы смотрели <a href=\"https://music.youtube.com/watch?v=gruppaKrovi&amp;t=3\">Rock &amp; Roll &#39;n&#39; &quot;Кино&quot;</a><br>\
+                 <a href=\"https://www.youtube.com/channel/UCzzzzzzzzzzzzzzzzzzzzzz\">Кино</a><br>\
+                 15 окт. 2026 г., 16:55:46 MSK<br>",
+            ),
+            cell("YouTube Music", "Searched for <a href=\"https://music.youtube.com/search?q=eve\">eve</a><br>Oct 15, 2026, 4:00:00 PM IDT<br>"),
+            cell("Google Play", "Used <a href=\"https://play.google.com/watch?v=notyoutube1\">x</a><br>Oct 15, 2026, 4:00:00 PM IDT<br>"),
+        ]);
+        let mut out = ExportData::default();
+        assert!(html_history(&html, &mut out));
+        assert_eq!(out.plays.len(), 3);
+        let p = &out.plays[0];
+        assert_eq!(p.item.id.as_deref(), Some("fm7INtTR5Pk"));
+        assert_eq!(p.item.title, "lazy cat - Eve (Live ver)");
+        assert_eq!(p.item.artist, "Eve");
+        assert_eq!(p.outcome, Outcome::Unknown);
+        assert_eq!(p.start_ms, parse_time("2026-10-15T13:55:46Z").unwrap());
+        assert_eq!(out.plays[1].item.title, "");
+        assert_eq!(out.plays[1].item.artist, "");
+        assert_eq!(out.plays[1].start_ms, parse_time("2026-01-05T21:46:24Z").unwrap());
+        let kino = &out.plays[2];
+        assert_eq!(kino.item.id.as_deref(), Some("gruppaKrovi"));
+        assert_eq!(kino.item.title, "Rock & Roll 'n' \"Кино\"");
+        assert_eq!(kino.start_ms, parse_time("2026-10-15T13:55:46Z").unwrap());
+        assert_eq!(out.plain_watched, HashSet::from(["plainVideo1".to_owned()]));
+
+        let mut out = ExportData::default();
+        assert!(!html_history("<html><style>.mdl-grid{}</style><body>Search history</body></html>", &mut out));
+    }
+
+    #[test]
+    fn activity_dates() {
+        let t = |s: &str| parse_activity_time(s);
+        let at = |s: &str| parse_time(s).unwrap();
+        assert_eq!(t("Oct 15, 2026, 4:55:46\u{202f}PM IDT"), Some(at("2026-10-15T13:55:46Z")));
+        assert_eq!(t("Oct 15, 2026, 4:55:46 PM IDT"), Some(at("2026-10-15T13:55:46Z")));
+        assert_eq!(t("Jan 1, 2026, 12:05:00 AM EST"), Some(at("2026-01-01T05:05:00Z")));
+        assert_eq!(t("Jan 1, 2026, 12:05:00 PM PST"), Some(at("2026-01-01T20:05:00Z")));
+        assert_eq!(t("15 окт. 2026 г., 16:55:46 MSK"), Some(at("2026-10-15T13:55:46Z")));
+        assert_eq!(t("3 мая 2025 г., 09:00:00 CEST"), Some(at("2025-05-03T07:00:00Z")));
+        assert_eq!(t("3 мар. 2025 г., 09:00:00 CET"), Some(at("2025-03-03T08:00:00Z")));
+        assert_eq!(t("15.10.2026, 16:55:46 GMT+03:00"), Some(at("2026-10-15T13:55:46Z")));
+        assert_eq!(t("Oct 15, 2026, 4:55:46 PM GMT-04:30"), Some(at("2026-10-15T21:25:46Z")));
+        assert_eq!(t("Oct 15, 2026, 4:55:46 PM UTC"), Some(at("2026-10-15T16:55:46Z")));
+        // An unknown zone is UTC.
+        assert_eq!(t("Oct 15, 2026, 4:55:46 PM XYZT"), Some(at("2026-10-15T16:55:46Z")));
+        assert_eq!(t("2026-10-15T16:55:46Z"), Some(at("2026-10-15T16:55:46Z")));
+        assert_eq!(t("вчера"), None);
+        assert_eq!(t("Oct 2026"), None);
+    }
+
+    #[test]
+    fn library_songs_are_likes_with_their_artists() {
+        let csv = "Video ID,Song Title,Album Title,Artist Name 1,Artist Name 2,Artist Name 3\n\
+                   abcdefghijk,Song,Album,Main,Guest,\n \
+                   -Jn0EGU5S-g,\"Title, with comma\",,Solo,Solo,\n\
+                   not an id,X,Y,Z,,\n";
+        let songs = library_songs(csv);
+        assert_eq!(songs.len(), 2);
+        assert_eq!(songs[0].id.as_deref(), Some("abcdefghijk"));
+        assert_eq!((songs[0].title.as_str(), songs[0].artist.as_str()), ("Song", "Main"));
+        assert_eq!(songs[0].featured, ["Guest"]);
+        assert_eq!(songs[0].album.as_deref(), Some("Album"));
+        assert_eq!(songs[1].id.as_deref(), Some("-Jn0EGU5S-g"));
+        assert_eq!(songs[1].title, "Title, with comma");
+        assert!(songs[1].featured.is_empty());
+        assert_eq!(songs[1].album, None);
+    }
+
+    #[test]
+    fn loose_takeout_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let put = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
+        put(
+            "playlists.csv",
+            "Playlist ID,Add new videos to top,Playlist Description (Original),Playlist Title (Original),Playlist Title (Original) Language,Playlist Visibility\n\
+             PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,False,,Made in Abyss OST 1,,Unlisted\n\
+             PLbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,False,,Re: Zero / Best,,Private\n\
+             PLcccccccccccccccccccccccccccccccc,False,,Watch later,,Private\n",
+        );
+        put("Made in Abyss OST 1-videos.csv", "Video ID,Playlist Video Creation Timestamp\nsongAAAAAA1,2025-05-11T00:34:07+00:00\nsongBBBBBB2,2025-05-11T00:34:07+00:00\n");
+        put("Re_ Zero _ Best-videos.csv", "Video ID,Playlist Video Creation Timestamp\nsongAAAAAA1,2025-05-11T00:34:07+00:00\n");
+        put("Watch later-videos.csv", "Video ID,Playlist Video Creation Timestamp\nlaterVideo1,2026-04-03T03:58:22+00:00\n");
+        // Takeout's older naming: `<title>.csv`, no index entry.
+        put("Old one.csv", "Video ID,Playlist Video Creation Timestamp\nsongBBBBBB2,2020-01-01T00:00:00+00:00\n");
+        put(
+            "music library songs.csv",
+            "Video ID,Song Title,Album Title,Artist Name 1,Artist Name 2\n songAAAAAA1,Hanezeve Caradhina,Made in Abyss OST,Kevin Penkin,\n",
+        );
+        put(
+            "watch-history.html",
+            &page(&[cell(
+                "YouTube Music",
+                "Watched\u{a0}<a href=\"https://music.youtube.com/watch?v=songBBBBBB2\">Underground River</a><br>\
+                 <a href=\"https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx\">Kevin Penkin - Topic</a><br>\
+                 Oct 15, 2026, 4:55:46\u{202f}PM IDT<br>",
+            )]),
+        );
+        // Not export files: a game's save, a search history, notes.
+        put("saves data.csv", "Title,Playable ID,Timestamp\nClean It: Restaurant Cleanup,Ugkxg96n,2025-11-09T00:16:16+00:00\n");
+        put("Clean It_ Restaurant Cleanup", "{\"wallet\":{\"coins\":0}}");
+        put("search-history.html", &page(&[cell("YouTube", "Searched for <a href=\"https://www.youtube.com/results?search_query=x\">x</a><br>Oct 15, 2026, 4:00:00 PM IDT<br>")]));
+        put("notes.html", "<html><body>hi</body></html>");
+
+        let data = read_export(dir.path()).unwrap();
+        assert!(data.problems.is_empty(), "{:?}", data.problems);
+        assert_eq!(data.plays.len(), 1);
+        assert_eq!(data.likes.len(), 1);
+        assert_eq!(data.likes[0].title, "Hanezeve Caradhina");
+        assert_eq!(data.likes[0].album.as_deref(), Some("Made in Abyss OST"));
+        let names: Vec<(&str, Option<&str>)> =
+            data.playlists.iter().map(|p| (p.name.as_str(), p.remote.as_deref())).collect();
+        assert_eq!(
+            names,
+            [
+                ("Made in Abyss OST 1", Some("PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+                ("Old one", None),
+                ("Re: Zero / Best", Some("PLbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
+            ]
+        );
+        // Titles from the library (it wins) and from the history.
+        let abyss = &data.playlists[0].items;
+        assert_eq!((abyss[0].title.as_str(), abyss[0].artist.as_str()), ("Hanezeve Caradhina", "Kevin Penkin"));
+        assert_eq!((abyss[1].title.as_str(), abyss[1].artist.as_str()), ("Underground River", "Kevin Penkin"));
+        let mut files = data.files.clone();
+        files.sort();
+        assert_eq!(files.len(), 7, "{files:?}");
+        assert!(files.iter().all(|f| !f.contains("saves") && !f.contains("search") && !f.contains("notes")));
     }
 
     #[test]

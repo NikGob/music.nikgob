@@ -276,6 +276,93 @@ fn takeout_youtube_music_history_likes_and_playlists() {
     assert_eq!(snapshot(&lib), before, "idempotent");
 }
 
+/// Takeout files lying loose (no `Takeout/YouTube…` folders): the history
+/// page, the music library, playlists named through `playlists.csv`; a
+/// playlist of plain videos and «Watch later» stay out.
+#[test]
+fn loose_takeout_files_with_the_html_history_and_the_music_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let put = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
+    let cell = |header: &str, body: &str| {
+        format!(
+            "<div class=\"outer-cell mdl-cell mdl-cell--12-col mdl-shadow--2dp\"><div class=\"mdl-grid\">\
+             <div class=\"header-cell mdl-cell mdl-cell--12-col\"><p class=\"mdl-typography--title\">{header}<br></p></div>\
+             <div class=\"content-cell mdl-cell mdl-cell--6-col mdl-typography--body-1\">{body}</div></div></div>"
+        )
+    };
+    let watched = |id: &str, title: &str| {
+        format!(
+            "Watched\u{a0}<a href=\"https://www.youtube.com/watch?v={id}\">{title}</a><br>\
+             <a href=\"https://www.youtube.com/channel/UCyyyyyyyyyyyyyyyyyyyyyy\">Blogger</a><br>Oct 15, 2026, 3:00:00\u{202f}PM IDT<br>"
+        )
+    };
+    let mut cells = vec![cell(
+        "YouTube Music",
+        "Watched\u{a0}<a href=\"https://music.youtube.com/watch?v=yt-gruppa-1\">Группа крови</a><br>\
+         <a href=\"https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx\">Кино - Topic</a><br>Oct 15, 2026, 4:55:46\u{202f}PM IDT<br>",
+    )];
+    for id in ["plainvid-01", "plainvid-02", "plainvid-03"] {
+        cells.push(cell("YouTube", &watched(id, "VR setup")));
+    }
+    put(
+        "watch-history.html",
+        &format!("<html><head><style>.mdl-grid{{}}</style></head><body>{}</body></html>", cells.concat()),
+    );
+    put(
+        "music library songs.csv",
+        "Video ID,Song Title,Album Title,Artist Name 1,Artist Name 2\n yt-homogenic-3,Bachelorette,Homogenic,Björk,\n",
+    );
+    put(
+        "playlists.csv",
+        "Playlist ID,Add new videos to top,Playlist Title (Original),Playlist Visibility\n\
+         PLfakeEveningPlaylist01,False,Вечер,Private\n\
+         PLfakeVrPlaylist0000001,False,vr,Private\n\
+         PLfakeWatchLater0000001,False,Watch later,Private\n",
+    );
+    let list = |ids: &[&str]| {
+        let rows: String = ids.iter().map(|id| format!("{id},2026-01-01T00:00:00+00:00\n")).collect();
+        format!("Video ID,Playlist Video Creation Timestamp\n{rows}")
+    };
+    put("Вечер-videos.csv", &list(&["yt-gruppa-1", "yt-firstlove-3"]));
+    put("vr-videos.csv", &list(&["plainvid-01", "plainvid-02", "plainvid-03"]));
+    put("Watch later-videos.csv", &list(&["yt-discovery-1"]));
+    put("saves data.csv", "Title,Playable ID,Timestamp\nClean It: Restaurant Cleanup,Ugkxg96n,2025-11-09T00:16:16+00:00\n");
+
+    let lib = Library::open_in_memory().unwrap();
+    let youtube = Arc::new(FakeService::youtube().logged_out());
+    let rt = start(&lib, vec![youtube.clone()]);
+    let subtitle = import(&rt, Command::ImportExportFiles(dir.path().to_path_buf()));
+    assert!(subtitle.ends_with(" · пропущен 1 плейлист не с музыкой"), "{subtitle}");
+    assert!(
+        rt.state().toasts.iter().any(|t| t.text == "Импорт: 1 прослушивание, 1 лайк, 1 плейлист · пропущен 1 плейлист не с музыкой"),
+        "{:?}",
+        rt.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+
+    // The YouTube Music play only.
+    assert_eq!(lib.count_events().unwrap(), 1);
+    assert!(track_of(&lib, Service::Youtube, "yt-gruppa-1").is_some());
+    assert!(track_of(&lib, Service::Youtube, "plainvid-01").is_none());
+    // The library song is a like, as the file names it.
+    let liked = track_of(&lib, Service::Youtube, "yt-homogenic-3").unwrap();
+    assert!(lib.is_liked(liked).unwrap());
+    assert_eq!(lib.get_track(liked).unwrap().unwrap().title, "Bachelorette");
+    assert_eq!(lib.liked_track_ids().unwrap().len(), 1);
+    assert!(lib.list_wishlist().unwrap().iter().any(|w| w.youtube_id.as_deref() == Some("yt-homogenic-3")));
+    // «Вечер» named and linked through the index; «vr» and «Watch later» are not here.
+    let evening = playlist_named(&lib, "Вечер").unwrap();
+    assert_eq!(playlist_remotes(&lib, evening, Service::Youtube), ["yt-gruppa-1", "yt-firstlove-3"]);
+    let link = lib.playlist_remote(evening).unwrap().unwrap();
+    assert_eq!(link.remote, RemoteId::new(Service::Youtube, "PLfakeEveningPlaylist01"));
+    assert!(playlist_named(&lib, "vr").is_none());
+    assert!(playlist_named(&lib, "Watch later").is_none());
+    assert!(track_of(&lib, Service::Youtube, "yt-discovery-1").is_none());
+
+    let before = snapshot(&lib);
+    import(&rt, Command::ImportExportFiles(dir.path().to_path_buf()));
+    assert_eq!(snapshot(&lib), before, "idempotent");
+}
+
 #[test]
 fn import_from_the_api_and_again() {
     let lib = Library::open_in_memory().unwrap();

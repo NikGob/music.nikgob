@@ -44,7 +44,7 @@ use nikgob_core::model::{
 };
 use nikgob_core::streaming::{
     AlbumRef, ArtistRef, EntityKind, Played, PlaylistSyncMode, RemoteId, Service, StreamError,
-    StreamPlaylist, StreamService, StreamTrack,
+    StreamPlaylist, StreamService, StreamTrack, TrackKind,
 };
 use nikgob_library::{Library, PlaylistRemote, event_id, sort_key};
 use nikgob_view as v;
@@ -79,6 +79,9 @@ const ENRICH_IDLE: Duration = Duration::from_secs(10 * 60);
 const SAME_PLAY_MS: i64 = 120_000;
 /// Finished jobs kept in the view.
 const HISTORY_KEEP: usize = 20;
+/// A YouTube playlist of an export is imported when at least this share
+/// (%) of its videos are music (see [`music_playlist`]).
+const MUSIC_SHARE: usize = 30;
 
 /// Background results of the cold-start imports.
 pub(crate) enum ColdMsg {
@@ -129,6 +132,8 @@ pub(crate) struct Parsed {
     new_plays: usize,
     likes: Vec<Wanted>,
     playlists: Vec<PendingPlaylist>,
+    /// YouTube playlists left out as not music.
+    skipped_playlists: usize,
     files: usize,
     problems: Vec<String>,
 }
@@ -149,6 +154,8 @@ pub(crate) struct Counts {
     pub(crate) new_likes: usize,
     pub(crate) playlists: usize,
     pub(crate) new_playlists: usize,
+    /// Playlists of an export left out as not music.
+    pub(crate) skipped_playlists: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,21 +231,76 @@ fn count_line(plays: usize, likes: usize, playlists: usize) -> String {
     if parts.is_empty() { "ничего".into() } else { parts.join(", ") }
 }
 
+/// " · пропущено 2 плейлиста не с музыкой", or nothing.
+fn skipped_note(n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    format!(
+        " · {} {} {} не с музыкой",
+        plural(n, "пропущен", "пропущено", "пропущено"),
+        group(n),
+        plural(n, "плейлист", "плейлиста", "плейлистов")
+    )
+}
+
 /// The final toast: what is new ("Импорт: 1 240 прослушиваний, 312 лайков,
-/// 9 плейлистов"), or that nothing was.
+/// 9 плейлистов"), or that nothing was; and the playlists left out as not
+/// music.
 pub(crate) fn summary(c: &Counts) -> String {
-    if c.new_plays + c.new_likes + c.new_playlists == 0 {
+    let mut text = if c.new_plays + c.new_likes + c.new_playlists == 0 {
         if c.plays + c.likes + c.playlists == 0 {
-            return "Импорт: ничего не нашлось".into();
+            "Импорт: ничего не нашлось".to_owned()
+        } else {
+            "Импорт: ничего нового — всё уже было".to_owned()
         }
-        return "Импорт: ничего нового — всё уже было".into();
-    }
-    let mut text = format!("Импорт: {}", count_line(c.new_plays, c.new_likes, c.new_playlists));
-    // The likes came with the login already (its first pull).
-    if c.new_likes == 0 && c.likes > 0 {
-        text.push_str(&format!(" · лайки уже здесь ({})", group(c.likes)));
-    }
+    } else {
+        let mut text = format!("Импорт: {}", count_line(c.new_plays, c.new_likes, c.new_playlists));
+        // The likes came with the login already (its first pull).
+        if c.new_likes == 0 && c.likes > 0 {
+            text.push_str(&format!(" · лайки уже здесь ({})", group(c.likes)));
+        }
+        text
+    };
+    text.push_str(&skipped_note(c.skipped_playlists));
     text
+}
+
+/// Whether a YouTube video of an export is music. Signs in the export
+/// itself come first: played in YouTube Music or liked → music; else
+/// watched on plain YouTube → a plain video. Else what YouTube Music said
+/// when it was looked up for its title: a song or a clip is music (RustyPipe
+/// does not tell an official clip from an upload), a podcast episode is
+/// not. `None`: nothing is known.
+fn is_music(
+    id: &str,
+    music: &HashSet<String>,
+    plain: &HashSet<String>,
+    full: &HashMap<String, StreamTrack>,
+) -> Option<bool> {
+    if music.contains(id) {
+        return Some(true);
+    }
+    if plain.contains(id) {
+        return Some(false);
+    }
+    full.get(id).map(|t| t.kind != TrackKind::Upload)
+}
+
+/// Whether a YouTube playlist of an export is music: at least
+/// [`MUSIC_SHARE`] % of its videos whose kind is known are music (with
+/// none known, it is kept). `optimistic` counts the unknown ones as music:
+/// a playlist that fails even so is dropped before its videos are looked
+/// up.
+fn music_playlist(items: &[Item], is: impl Fn(&str) -> Option<bool>, optimistic: bool) -> bool {
+    let (mut music, mut known) = (0, 0);
+    for id in items.iter().filter_map(|i| i.id.as_deref()) {
+        if let Some(m) = is(id).or(optimistic.then_some(true)) {
+            known += 1;
+            music += usize::from(m);
+        }
+    }
+    known == 0 || music * 100 >= known * MUSIC_SHARE
 }
 
 /// A stream track from what an export file says.
@@ -246,7 +308,10 @@ fn stream_of(i: &Item, id: &str) -> StreamTrack {
     let title = if i.title.is_empty() { id } else { &i.title };
     let mut t = StreamTrack::new(RemoteId::new(i.service, id), title);
     if !i.artist.is_empty() {
-        t.artists = vec![ArtistRef::new(None, i.artist.clone())];
+        t.artists = std::iter::once(&i.artist)
+            .chain(&i.featured)
+            .map(|a| ArtistRef::new(None, a.clone()))
+            .collect();
     }
     t.album = i.album.as_ref().map(|a| AlbumRef::new(None, a.clone()));
     t
@@ -370,7 +435,7 @@ async fn read_export(
     youtube: Option<Arc<dyn StreamService>>,
     tx: Sender<Internal>,
 ) -> Result<Box<Parsed>, String> {
-    let data: ExportData = tokio::task::spawn_blocking(move || export::read_export(&path))
+    let mut data: ExportData = tokio::task::spawn_blocking(move || export::read_export(&path))
         .await
         .map_err(|e| e.to_string())??;
     if data.is_empty() {
@@ -380,6 +445,28 @@ async fn read_export(
             format!("Не получилось прочитать: {}", data.problems.join("; "))
         });
     }
+    // YouTube playlists of plain videos stay out; the ones that cannot be
+    // music whatever their unknown videos are go before the look-ups.
+    let music: HashSet<String> = data
+        .plays
+        .iter()
+        .map(|p| &p.item)
+        .chain(&data.likes)
+        .filter(|i| i.service == Service::Youtube)
+        .filter_map(|i| i.id.clone())
+        .collect();
+    let plain = std::mem::take(&mut data.plain_watched);
+    let mut skipped_playlists = 0;
+    let mut keep = |p: &export::ExportPlaylist, full: &HashMap<String, StreamTrack>, optimistic: bool| {
+        let ok = p.service != Service::Youtube
+            || music_playlist(&p.items, |id| is_music(id, &music, &plain, full), optimistic);
+        if !ok {
+            log::info!("export: playlist «{}» left out: not music", p.name);
+            skipped_playlists += 1;
+        }
+        ok
+    };
+    data.playlists.retain(|p| keep(p, &HashMap::new(), true));
     // YouTube ids without a title (playlist CSVs): ask YouTube Music.
     let mut full = HashMap::new();
     if let Some(yt) = youtube {
@@ -410,6 +497,7 @@ async fn read_export(
             full = youtube_lookups(yt, blank).await;
         }
     }
+    data.playlists.retain(|p| keep(p, &full, false));
     let plays = data.plays.len();
     let likes: Vec<Wanted> = data.likes.iter().map(|i| wanted(i, &full)).collect();
     let playlists: Vec<PendingPlaylist> = data
@@ -444,6 +532,7 @@ async fn read_export(
         new_plays,
         likes,
         playlists,
+        skipped_playlists,
         files,
         problems,
     }))
@@ -589,6 +678,7 @@ impl Worker {
                 let p = *p;
                 j.counts.plays = p.plays;
                 j.counts.new_plays = p.new_plays;
+                j.counts.skipped_playlists = p.skipped_playlists;
                 j.problems = p.problems;
                 j.steps = p.likes.len().div_ceil(LIKES_PER_STEP) + p.playlists.len();
                 j.likes = p.likes.into();
@@ -884,7 +974,7 @@ impl Worker {
                 "Найдено: {} · новых: {}",
                 count_line(j.counts.plays, j.counts.likes, j.counts.playlists),
                 count_line(j.counts.new_plays, j.counts.new_likes, j.counts.new_playlists)
-            )
+            ) + &skipped_note(j.counts.skipped_playlists)
         };
         if !j.problems.is_empty() && error.is_none() {
             subtitle.push_str(&format!(" · не всё: {}", j.problems.join("; ")));
@@ -1058,8 +1148,120 @@ mod tests {
             "Импорт: 1\u{a0}240 прослушиваний, 312 лайков, 9 плейлистов"
         );
         assert_eq!(summary(&Counts { likes: 3, ..Counts::default() }), "Импорт: ничего нового — всё уже было");
-        let after_login = Counts { plays: 3, new_plays: 3, likes: 3, new_likes: 0, playlists: 2, new_playlists: 2 };
+        let after_login = Counts {
+            plays: 3,
+            new_plays: 3,
+            likes: 3,
+            new_likes: 0,
+            playlists: 2,
+            new_playlists: 2,
+            ..Counts::default()
+        };
         assert_eq!(summary(&after_login), "Импорт: 3 прослушивания, 2 плейлиста · лайки уже здесь (3)");
         assert_eq!(count_line(0, 0, 0), "ничего");
+        let skipped = Counts { new_plays: 5, plays: 5, skipped_playlists: 2, ..Counts::default() };
+        assert_eq!(summary(&skipped), "Импорт: 5 прослушиваний · пропущено 2 плейлиста не с музыкой");
+        let one = Counts { plays: 5, skipped_playlists: 1, ..Counts::default() };
+        assert_eq!(summary(&one), "Импорт: ничего нового — всё уже было · пропущен 1 плейлист не с музыкой");
+        let only = Counts { skipped_playlists: 5, ..Counts::default() };
+        assert_eq!(summary(&only), "Импорт: ничего не нашлось · пропущено 5 плейлистов не с музыкой");
+    }
+
+    #[test]
+    fn playlists_of_plain_videos_are_not_music() {
+        let item = |id: &str| Item {
+            service: Service::Youtube,
+            id: Some(id.to_owned()),
+            title: String::new(),
+            artist: String::new(),
+            featured: Vec::new(),
+            album: None,
+        };
+        let set = |ids: &[&str]| ids.iter().map(|s| (*s).to_owned()).collect::<HashSet<String>>();
+        let music = set(&["m1", "m2"]);
+        let plain = set(&["p1", "p2", "p3", "p4", "p5", "p6", "p7", "m2"]);
+        let mut full = HashMap::new();
+        for (id, kind) in [("s1", TrackKind::Song), ("v1", TrackKind::Video), ("e1", TrackKind::Upload), ("p1", TrackKind::Song)] {
+            let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), id);
+            t.kind = kind;
+            full.insert(id.to_owned(), t);
+        }
+        let is = |id: &str| is_music(id, &music, &plain, &full);
+        assert_eq!(is("m1"), Some(true));
+        assert_eq!(is("m2"), Some(true), "played in YouTube Music beats a plain watch");
+        assert_eq!(is("p1"), Some(false), "watched on plain YouTube beats the look-up");
+        assert_eq!(is("s1"), Some(true));
+        assert_eq!(is("v1"), Some(true), "a clip");
+        assert_eq!(is("e1"), Some(false));
+        assert_eq!(is("x1"), None);
+
+        let list = |ids: &[&str]| ids.iter().map(|id| item(id)).collect::<Vec<_>>();
+        let keep = |ids: &[&str], optimistic| music_playlist(&list(ids), is, optimistic);
+        // 3 of 10 known are music: 30% is enough; 2 of 8 is not.
+        assert!(keep(&["m1", "s1", "v1", "p1", "p2", "p3", "p4", "p5", "p6", "p7"], false));
+        assert!(!keep(&["m1", "s1", "p1", "p2", "p3", "p4", "p5", "e1"], false));
+        // Unknown videos do not count, unless optimistic (then as music).
+        assert!(!keep(&["p1", "p2", "p3", "x1", "x2"], false));
+        assert!(keep(&["p1", "p2", "p3", "x1", "x2"], true));
+        assert!(!keep(&["p1", "p2", "p3", "x1"], true));
+        // Nothing known: kept.
+        assert!(keep(&["x1", "x2"], false));
+    }
+
+    /// A look at a real export: `NIKGOB_TAKEOUT=<folder>` (its top-level
+    /// CSV and HTML files are copied to a temporary folder and read there;
+    /// no network, so playlists are judged by the export's own signs).
+    #[test]
+    #[ignore = "needs NIKGOB_TAKEOUT"]
+    fn real_takeout() {
+        let Some(src) = std::env::var_os("NIKGOB_TAKEOUT") else { return };
+        let dir = tempfile::tempdir().unwrap();
+        for e in std::fs::read_dir(&src).unwrap().filter_map(Result::ok) {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let ext = name.rsplit_once('.').map(|(_, x)| x.to_lowercase()).unwrap_or_default();
+            if e.path().is_file() && (ext == "csv" || ext == "html" || !name.contains('.')) {
+                std::fs::copy(e.path(), dir.path().join(&name)).unwrap();
+            }
+        }
+        let t = Instant::now();
+        let data = export::read_export(dir.path()).unwrap();
+        let took = t.elapsed();
+        let (first, last) = data.plays.iter().fold((i64::MAX, i64::MIN), |(a, b), p| {
+            (a.min(p.start_ms), b.max(p.start_ms))
+        });
+        let day = |ms: i64| jiff::Timestamp::from_millisecond(ms).unwrap().to_string();
+        println!("read in {took:?}; files {:?}", data.files);
+        println!(
+            "plays {} ({} .. {}), with no title {}, with no channel {}",
+            data.plays.len(),
+            day(first),
+            day(last),
+            data.plays.iter().filter(|p| p.item.title.is_empty()).count(),
+            data.plays.iter().filter(|p| p.item.artist.is_empty()).count()
+        );
+        println!("plain YouTube videos {}, likes {}", data.plain_watched.len(), data.likes.len());
+        let music: HashSet<String> = data
+            .plays
+            .iter()
+            .map(|p| &p.item)
+            .chain(&data.likes)
+            .filter_map(|i| i.id.clone())
+            .collect();
+        let none = HashMap::new();
+        for p in &data.playlists {
+            let is = |id: &str| is_music(id, &music, &data.plain_watched, &none);
+            let known = p.items.iter().filter_map(|i| i.id.as_deref()).filter_map(is).collect::<Vec<_>>();
+            println!(
+                "playlist «{}» {:?}: {} videos, {} music / {} known, {} titled; before look-ups {}, with none answered {}",
+                p.name,
+                p.remote,
+                p.items.len(),
+                known.iter().filter(|m| **m).count(),
+                known.len(),
+                p.items.iter().filter(|i| !i.title.is_empty()).count(),
+                if music_playlist(&p.items, is, true) { "kept" } else { "skipped" },
+                if music_playlist(&p.items, is, false) { "kept" } else { "skipped" },
+            );
+        }
     }
 }
