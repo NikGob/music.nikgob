@@ -15,6 +15,7 @@ nikgob-import = { path = "../import" }
 nikgob-metadata = { path = "../metadata" }
 nikgob-indexer-prowlarr = { path = "../indexer-prowlarr" }
 nikgob-torrent = { path = "../torrent" }
+nikgob-recs = { path = "../recs" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,6 +26,7 @@ jiff = "0.2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 log.workspace = true
+thread-priority = "3"
 
 [dev-dependencies]
 nikgob-core = { workspace = true, features = ["fake"] }

@@ -653,7 +653,7 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
     tx.execute("UPDATE remote_like SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     tx.execute("UPDATE wishlist SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     dedupe_wishlist_of_track(tx, &t)?;
-    for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "master"] {
+    for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "analysis_failed", "master"] {
         tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&f])?;
     }
     tx.execute("DELETE FROM track WHERE id = ?1", [&f])?;

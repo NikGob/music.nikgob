@@ -45,9 +45,9 @@ pub use migrations::SCHEMA_VERSION;
 pub use playlists::LIKED_PLAYLIST_NAME;
 pub use streams::{LikedClip, TrackSnapshot, event_id, is_web_ref};
 pub use types::{
-    ArtistRow, ArtistSort, ArtistSortKey, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
+    AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
     PlaylistEntryRow, PlaylistKind, PlaylistRemote, PlaylistSummary, PurgedFile, PurgedTrack,
-    ReleaseProgress, RemoteLike,
+    RecFeedback, ReleaseProgress, RemoteLike,
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,
     TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };

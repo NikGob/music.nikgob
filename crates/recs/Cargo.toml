@@ -1,0 +1,17 @@
+[package]
+name = "nikgob-recs"
+description = "Recommendations: bliss sound analysis from PCM and the library's vector index. Pure logic, no database or network."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Pure Rust analysis only (rustfft); decoding is ours (nikgob-import), no ffmpeg.
+bliss-audio = { version = "0.13", default-features = false, features = ["analysis"] }
+rubato = "5.0.1"
+thiserror = "2"
+
+[lints]
+workspace = true

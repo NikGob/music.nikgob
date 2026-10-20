@@ -37,6 +37,11 @@ impl Resolver {
         }
     }
 
+    /// The library root relative locators are under.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// A locator or cover ref as an absolute path.
     pub fn path(&self, locator: &str) -> PathBuf {
         let p = Path::new(locator);

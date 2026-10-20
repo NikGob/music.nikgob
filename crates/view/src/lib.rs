@@ -866,6 +866,37 @@ pub struct Prefs {
     /// «Найти песню…»: the last scope chosen, «И в YouTube Music» (true) or
     /// «Только здесь».
     pub replace_in_youtube: bool,
+
+    // ---- Recommendations (stage 4, docs/stage4.md).
+    /// «Новое в радио»: how much music new to the user radios and mixes mix
+    /// in.
+    pub radio_new_share: RadioNewShare,
+    /// «Анализ звука стримов»: liked and playlist tracks without a file are
+    /// analysed from YouTube Music in the background.
+    pub stream_analysis: bool,
+}
+
+/// «Новое в радио»: the share of new music in radios and mixes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RadioNewShare {
+    /// «Без нового».
+    None,
+    /// «Немного», about a fifth.
+    #[default]
+    Some,
+    /// «Побольше», about two fifths.
+    More,
+}
+
+impl RadioNewShare {
+    /// The share of a queue that is new music.
+    pub const fn fraction(self) -> f32 {
+        match self {
+            Self::None => 0.0,
+            Self::Some => 0.2,
+            Self::More => 0.4,
+        }
+    }
 }
 
 /// Material shapes behind the open track.
@@ -1067,8 +1098,39 @@ pub struct ViewState {
     pub clipboard: Option<ClipboardRequest>,
     /// The open «Найти песню…» dialog ([`Command::FindSong`]).
     pub find_song: Option<FindSongView>,
+    /// How far the background sound analysis is.
+    pub analysis: AnalysisProgress,
     /// Bumped on every change, so a UI can skip work when nothing changed.
     pub revision: u64,
+}
+
+/// How much of the library has its sound analysed (the quiet «Анализирую
+/// звук библиотеки · 40%» lines): files, and stream-only tracks that are
+/// liked or in a playlist, separately.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AnalysisProgress {
+    pub files_done: u32,
+    pub files_total: u32,
+    pub streams_done: u32,
+    pub streams_total: u32,
+}
+
+impl AnalysisProgress {
+    /// Everything analysed (also true for an empty library).
+    pub fn complete(&self) -> bool {
+        self.files_done >= self.files_total && self.streams_done >= self.streams_total
+    }
+
+    /// Done share of files and streams together, 0..=1 (1 when there is
+    /// nothing to analyse).
+    pub fn fraction(&self) -> f32 {
+        let total = self.files_total + self.streams_total;
+        if total == 0 {
+            1.0
+        } else {
+            ((self.files_done + self.streams_done) as f32 / total as f32).min(1.0)
+        }
+    }
 }
 
 impl ViewState {
@@ -1464,6 +1526,8 @@ impl Default for Prefs {
             spotify_personal_app: false,
             youtube_cookies_set: false,
             replace_in_youtube: false,
+            radio_new_share: RadioNewShare::Some,
+            stream_analysis: true,
         }
     }
 }

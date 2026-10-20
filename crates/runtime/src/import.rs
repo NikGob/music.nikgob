@@ -51,6 +51,8 @@ pub(crate) enum Internal {
     TorrentAdded(Result<crate::torrents::Added, String>),
     /// Streaming (stage 3), see [`crate::streams`].
     Stream(crate::streams::Msg),
+    /// The background sound analysis, see [`crate::analysis`].
+    Analysis(crate::analysis::Msg),
     SeedStopped(Vec<nikgob_torrent::TorrentStatus>),
     MastersMoveProgress {
         job: u64,
@@ -506,6 +508,7 @@ impl Worker {
             Internal::TorrentFilesListed(i, r) => self.files_listed(i, r),
             Internal::TorrentAdded(r) => self.torrent_added(r),
             Internal::Stream(m) => self.stream_msg(m),
+            Internal::Analysis(m) => self.analysis_msg(m),
             Internal::SeedStopped(list) => self.seed_stopped(list),
             Internal::MastersMoveProgress {
                 job,
@@ -597,8 +600,14 @@ impl Worker {
     fn import_event(&mut self, ev: ImportEvent) {
         // The wishlist hears about every file that landed (or failed).
         match &ev {
-            ImportEvent::Imported { track_id, path, .. } => self.wish_imported(*track_id, path),
-            ImportEvent::Duplicate { kept, path, .. } => self.wish_imported(*kept, path),
+            ImportEvent::Imported { track_id, path, .. } => {
+                self.wish_imported(*track_id, path);
+                self.analysis.kick();
+            }
+            ImportEvent::Duplicate { kept, path, .. } => {
+                self.wish_imported(*kept, path);
+                self.analysis.kick();
+            }
             ImportEvent::Failed { path, .. } => self.wish_import_failed(path),
             _ => {}
         }
