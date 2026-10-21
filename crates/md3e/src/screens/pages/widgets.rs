@@ -77,6 +77,12 @@ pub fn shuffle_member(ui: &Ui) -> crate::components::Member {
 /// Title-large section header with an optional "Все →" text button.
 /// Returns true when "Все" is clicked.
 pub fn section_header(ui: &mut Ui, title: &str, all: bool) -> bool {
+    section_header_with(ui, title, all.then_some(("Все", Icon::ArrowForward)))
+}
+
+/// [`section_header`] with its own text button on the right («Слушать
+/// всё» with ▶). True when it is clicked.
+pub fn section_header_with(ui: &mut Ui, title: &str, action: Option<(&str, Icon)>) -> bool {
     let s = Theme::get(ui.ctx()).scheme;
     let mut clicked = false;
     // A fixed-height row so the title and the 40 dp button share a centre
@@ -84,13 +90,13 @@ pub fn section_header(ui: &mut Ui, title: &str, all: bool) -> bool {
     let row = egui::vec2(ui.available_width(), 40.0);
     ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.label(TypeRole::TitleLarge.style().rich(title, s.on_surface));
-        if all {
+        if let Some((label, icon)) = action {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 clicked = ui
                     .add(
-                        crate::components::Button::new("Все")
+                        crate::components::Button::new(label)
                             .style(crate::components::Style::Text)
-                            .icon(Icon::ArrowForward)
+                            .icon(icon)
                             .id_salt(("all", title)),
                     )
                     .clicked();
@@ -362,22 +368,24 @@ mod tests {
 }
 
 /// An artist avatar card with a ▶ on hover (plays the mix) and a right-click
-/// menu.
+/// menu. A click opens the artist.
 pub fn artist_avatar(
     ui: &mut Ui,
     a: &ArtistCard,
     size: f32,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
-    artist_impl(ui, a, size, Some(out))
+    artist_impl(ui, a, size, false, out)
 }
 
-fn artist_impl(
-    ui: &mut Ui,
-    a: &ArtistCard,
-    size: f32,
-    out: Option<&mut Vec<Command>>,
-) -> Option<Route> {
+/// «Миксы исполнителей» on Главная: the avatar (and its ▶) starts the
+/// artist's radio; the name under it is a link to the artist's page, and
+/// the right-click menu can open it too.
+pub fn artist_mix(ui: &mut Ui, a: &ArtistCard, size: f32, out: &mut Vec<Command>) -> Option<Route> {
+    artist_impl(ui, a, size, true, out)
+}
+
+fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Vec<Command>) -> Option<Route> {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size + 28.0), Sense::click());
@@ -397,74 +405,112 @@ fn artist_impl(
         // A real photo is a circle; the initials keep their playful shape.
         if a.image.is_some() { MaterialShape::Circle } else { avatar_shape(&a.id) },
     );
-    let text_rect = Rect::from_min_max(pos2(rect.left(), img.bottom() + 6.0), rect.max);
-    let galley = ui.painter().layout(
-        a.name.clone(),
-        TypeRole::TitleSmall.font_id(),
-        s.on_surface,
-        size,
+    // One line, cut with an ellipsis: a long name must not run into the
+    // next row.
+    let mut job = egui::text::LayoutJob::single_section(a.name.clone(), TypeRole::TitleSmall.style().text_format(s.on_surface));
+    job.wrap = egui::text::TextWrapping::truncate_at_width(size.max(1.0));
+    let galley = ui.painter().layout_job(job);
+    let name_rect = Rect::from_center_size(
+        pos2(rect.center().x, img.bottom() + 6.0 + galley.size().y * 0.5),
+        galley.size(),
     );
-    ui.painter().galley(
-        pos2(text_rect.center().x - galley.size().x * 0.5, text_rect.top()),
-        galley,
-        s.on_surface,
-    );
-
-    let mut play = false;
-    if let Some(out) = out {
-        // ▶ over the avatar, fading in with the pointer (fast effects).
-        let k = anim::fraction(
-            ui.ctx(),
-            ui.id().with(("artist-play", a.id)),
-            if hover { 1.0 } else { 0.0 },
-            theme.motion.fast_effects,
-        )
-        .clamp(0.0, 1.0);
-        if k > 0.01 {
-            let slot = Rect::from_center_size(img.center(), vec2(56.0, 56.0));
-            // A child, not a scope: the overlay must not move the row's cursor.
-            let mut child =
-                ui.new_child(UiBuilder::new().max_rect(slot).id_salt(("artist-play-slot", a.id)));
-            child.set_opacity(k);
-            play = child
-                .add_enabled(
-                    k > 0.5,
-                    IconButton::new(Icon::PlayArrow)
-                        .size(Size::M)
-                        .style(Style::Filled)
-                        .filled_icon(true)
-                        .tooltip("Слушать микс")
-                        .id_salt(("artist-play-btn", a.id)),
-                )
-                .clicked();
-        }
-        if play {
-            out.push(Command::PlayArtist { id: a.id, shuffle: false });
-        }
-        artist_menu(&resp, a, out);
+    // On a mix the name is the way to the page: a link under the pointer.
+    let name = radio.then(|| {
+        ui.interact(name_rect.expand2(vec2(4.0, 2.0)), ui.id().with(("artist-name", a.id)), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Открыть исполнителя")
+    });
+    let underline = name.as_ref().is_some_and(Response::hovered);
+    ui.painter().galley(name_rect.min, galley, s.on_surface);
+    if underline {
+        let y = name_rect.bottom() - 1.0;
+        ui.painter().line_segment([pos2(name_rect.left(), y), pos2(name_rect.right(), y)], Stroke::new(1.0, s.on_surface));
     }
+
+    // ▶ over the avatar, fading in with the pointer (fast effects).
+    let k = anim::fraction(
+        ui.ctx(),
+        ui.id().with(("artist-play", a.id)),
+        if hover && !underline { 1.0 } else { 0.0 },
+        theme.motion.fast_effects,
+    )
+    .clamp(0.0, 1.0);
+    let mut play = false;
+    if k > 0.01 {
+        let slot = Rect::from_center_size(img.center(), vec2(56.0, 56.0));
+        // A child, not a scope: the overlay must not move the row's cursor.
+        let mut child = ui.new_child(UiBuilder::new().max_rect(slot).id_salt(("artist-play-slot", a.id)));
+        child.set_opacity(k);
+        play = child
+            .add_enabled(
+                k > 0.5,
+                IconButton::new(Icon::PlayArrow)
+                    .size(Size::M)
+                    .style(Style::Filled)
+                    .filled_icon(true)
+                    .tooltip(if radio { "Радио исполнителя" } else { "Слушать микс" })
+                    .id_salt(("artist-play-btn", a.id)),
+            )
+            .clicked();
+    }
+    let name_clicked = name.as_ref().is_some_and(Response::clicked);
+    let menu = artist_menu_with(&resp, a, radio, out);
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    (resp.clicked() && !play).then_some(Route::Artist(a.id))
+    if radio {
+        if (play || resp.clicked()) && !name_clicked {
+            out.push(Command::PlayMix { id: nikgob_view::MixId::Artist(a.id) });
+        }
+        return name_clicked.then_some(Route::Artist(a.id)).or(menu);
+    }
+    if play {
+        out.push(Command::PlayArtist { id: a.id, shuffle: false });
+    }
+    (resp.clicked() && !play).then_some(Route::Artist(a.id)).or(menu)
 }
 
 /// Right-click menu of an artist (card or row): Слушать микс · Перемешать ·
-/// Подписаться.
+/// Радио исполнителя · Подписаться.
 pub fn artist_menu(resp: &Response, a: &ArtistCard, out: &mut Vec<Command>) {
+    artist_menu_with(resp, a, false, out);
+}
+
+/// [`artist_menu`]; on a mix card (`radio`) the radio comes first and the
+/// artist's page can be opened from it.
+fn artist_menu_with(resp: &Response, a: &ArtistCard, radio: bool, out: &mut Vec<Command>) -> Option<Route> {
+    let follow = MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" }).icon(Icon::Favorite);
+    let radio_cmd = Command::StartRadio { seed: nikgob_view::RadioSeed::Artist(a.id) };
+    if radio {
+        match Menu::new(("artist-menu", resp.id))
+            .item(MenuItem::new("Радио исполнителя").icon(Icon::Radio))
+            .item(MenuItem::new("Перемешать его треки").icon(Icon::Shuffle))
+            .item(MenuItem::new("Открыть исполнителя").icon(Icon::Person))
+            .divider()
+            .item(follow)
+            .context_menu(resp)?
+        {
+            0 => out.push(radio_cmd),
+            1 => out.push(Command::PlayArtist { id: a.id, shuffle: true }),
+            2 => return Some(Route::Artist(a.id)),
+            3 => out.push(Command::Like(LikeTarget::Artist(a.id), !a.liked)),
+            _ => {}
+        }
+        return None;
+    }
     match Menu::new(("artist-menu", resp.id))
         .item(MenuItem::new("Слушать микс").icon(Icon::PlayArrow))
         .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
+        .item(MenuItem::new("Радио исполнителя").icon(Icon::Radio))
         .divider()
-        .item(
-            MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" })
-                .icon(Icon::Favorite),
-        )
-        .context_menu(resp)
+        .item(follow)
+        .context_menu(resp)?
     {
-        Some(0) => out.push(Command::PlayArtist { id: a.id, shuffle: false }),
-        Some(1) => out.push(Command::PlayArtist { id: a.id, shuffle: true }),
-        Some(2) => out.push(Command::Like(LikeTarget::Artist(a.id), !a.liked)),
+        0 => out.push(Command::PlayArtist { id: a.id, shuffle: false }),
+        1 => out.push(Command::PlayArtist { id: a.id, shuffle: true }),
+        2 => out.push(radio_cmd),
+        3 => out.push(Command::Like(LikeTarget::Artist(a.id), !a.liked)),
         _ => {}
     }
+    None
 }
 
 /// Where a track list plays from.
@@ -861,6 +907,7 @@ fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId) -> Menu 
         .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
         .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
         .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
+        .item(MenuItem::new(super::RADIO_BY_TRACK).icon(Icon::Radio))
         .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()))
         .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()));
     // A clip: its song by hand; a stream from YouTube: another version.
@@ -895,11 +942,12 @@ fn playlist_track_pick(
             pages.pending_add = Some(vec![track.id]);
             pages.pending_add_anchor = anchor;
         }
-        3 => return track.release_id.map(Route::Release),
+        3 => out.push(super::radio_by_track(track.id)),
+        4 => return track.release_id.map(Route::Release),
         // Several artists: a chooser.
-        4 => return artist_links::go_to(ctx, artist_links::library(&track.artists)),
-        5 if find => out.push(Command::FindSong { track: track.id, query: None }),
-        5 | 6 => out.push(Command::RemoveFromPlaylist(playlist, track.id)),
+        5 => return artist_links::go_to(ctx, artist_links::library(&track.artists)),
+        6 if find => out.push(Command::FindSong { track: track.id, query: None }),
+        6 | 7 => out.push(Command::RemoveFromPlaylist(playlist, track.id)),
         _ => {}
     }
     None

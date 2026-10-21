@@ -56,6 +56,17 @@ pub(crate) fn request_release_delete(ctx: &Context, id: nikgob_view::ReleaseId, 
     ctx.data_mut(|d| d.insert_temp(egui::Id::new("release-delete-request"), (id, title.to_owned(), forever)));
 }
 
+/// «Радио по треку» in the track menus.
+pub(crate) const RADIO_BY_TRACK: &str = "Радио по треку";
+
+/// Where «Радио по треку» is in the track menu of the lists.
+const RADIO_ITEM: usize = 3;
+
+/// The command of «Радио по треку» for a library track.
+pub(crate) fn radio_by_track(track: TrackId) -> Command {
+    Command::StartRadio { seed: nikgob_view::RadioSeed::Track(track) }
+}
+
 /// Page-level presentation state that outlives a frame.
 #[derive(Default)]
 pub struct PageState {
@@ -79,7 +90,7 @@ pub struct PageState {
     /// Library albums by source: 0 all, 1 with files, 2 stream.
     release_source: usize,
     downloads_tab: usize,
-    home_filter: usize,
+    home_filter: home::Filter,
     ask: Option<Ask>,
     ask_text: String,
     confirm_delete: Option<nikgob_view::PlaylistId>,
@@ -228,6 +239,7 @@ impl PageState {
             .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
             .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
             .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
+            .item(MenuItem::new(RADIO_BY_TRACK).icon(Icon::Radio))
             .divider()
             .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()))
             .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()))
@@ -255,8 +267,17 @@ impl PageState {
         out: &mut Vec<Command>,
     ) -> Option<Route> {
         let find = super::find_song::label(track).is_some();
-        // The deletes come after the optional «Найти песню…».
+        // «Радио по треку» sits after «В плейлист…»; the rest as before it.
         let picked = match picked? {
+            RADIO_ITEM => {
+                out.push(radio_by_track(track.id));
+                return None;
+            }
+            n if n > RADIO_ITEM => n - 1,
+            n => n,
+        };
+        // The deletes come after the optional «Найти песню…».
+        let picked = match picked {
             9 if find => {
                 out.push(Command::FindSong { track: track.id, query: None });
                 return None;

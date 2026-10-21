@@ -16,6 +16,9 @@
 //! playlist (`find_song:Title` for the clip shown so, `find_song:song` «Другая
 //! версия…» for its first stream song); `replace_first` replaces it with the
 //! dialog's first result in the scope the dialog would offer.
+//! `play_mix:daily|discover|mood|style` plays a mix of Главная (the first
+//! mood or style mix); `radio` starts «Радио по треку» from the first
+//! library track (`radio:artist` the first artist's radio).
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 
 use std::collections::VecDeque;
@@ -466,6 +469,31 @@ impl Shot {
                     out.push(Command::SetPrefs(Box::new(p)));
                 }
                 self.wait = 10;
+            }
+            "play_mix" => {
+                let h = &state.home;
+                let id = match arg {
+                    "discover" => Some(nikgob_view::MixId::Discover),
+                    "mood" => h.moods.first().map(|m| m.id),
+                    "style" => h.style_mixes.first().map(|m| m.id),
+                    _ => Some(nikgob_view::MixId::Daily),
+                };
+                if let Some(id) = id {
+                    out.push(Command::PlayMix { id });
+                }
+                self.wait = 60;
+            }
+            "radio" => {
+                let seed = match arg {
+                    "artist" => state.library.artists.first().map(|a| nikgob_view::RadioSeed::Artist(a.id)),
+                    _ => (state.library.tracks.first())
+                        .or(state.home.mix.first())
+                        .map(|t| nikgob_view::RadioSeed::Track(t.id)),
+                };
+                if let Some(seed) = seed {
+                    out.push(Command::StartRadio { seed });
+                }
+                self.wait = 60;
             }
             "light" => out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs {
                 theme: nikgob_view::ThemeMode::Light,

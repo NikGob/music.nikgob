@@ -275,7 +275,7 @@ pub fn show(
             if !acts.is_empty() {
                 acts.push(Act::Sep);
             }
-            acts.extend([Act::Playlist, Act::Artist, Act::Album, Act::Info, Act::Share, Act::FindSong, Act::Sep, Act::Tags, Act::Replace]);
+            acts.extend([Act::Playlist, Act::Radio, Act::Artist, Act::Album, Act::Info, Act::Share, Act::FindSong, Act::Sep, Act::Tags, Act::Replace]);
             chrome.track_menu(&more, "bar-more", &acts, t, state, Where::Bar, out);
         }
     });

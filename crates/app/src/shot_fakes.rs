@@ -27,6 +27,11 @@
 //! - `fake:empty-home` — Главная of an empty library (the first launch).
 //! - `fake:find-song-off` — «Найти песню…» cannot replace on YouTube Music
 //!   (as when signed out).
+//! - `fake:analysis` — the sound analysis is at 40% (the demo's vectors
+//!   are all there).
+//! - `fake:extending` — the radio of the queue is looking for more.
+//! - `fake:no-recs` — Главная before any analysis and history: no moods,
+//!   style mixes or discoveries.
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -49,6 +54,9 @@ pub struct Fakes {
     no_sound: bool,
     empty_home: bool,
     find_song_off: bool,
+    analysis: bool,
+    extending: bool,
+    no_recs: bool,
 }
 
 impl Fakes {
@@ -73,6 +81,9 @@ impl Fakes {
             "no-sound" => self.no_sound = true,
             "empty-home" => self.empty_home = true,
             "find-song-off" => self.find_song_off = true,
+            "analysis" => self.analysis = true,
+            "extending" => self.extending = true,
+            "no-recs" => self.no_recs = true,
             _ => return false,
         }
         true
@@ -92,6 +103,9 @@ impl Fakes {
             || self.no_sound
             || self.empty_home
             || self.find_song_off
+            || self.analysis
+            || self.extending
+            || self.no_recs
     }
 
     /// `state` with the fakes laid over it.
@@ -165,6 +179,20 @@ impl Fakes {
                 ok: true,
                 text: "Prowlarr отвечает · 12 трекеров".into(),
             });
+        }
+        if self.analysis {
+            s.analysis = nikgob_view::AnalysisProgress { files_done: 1240, files_total: 2600, streams_done: 0, streams_total: 500 };
+        }
+        if self.extending
+            && let Some(r) = s.queue.radio.as_mut()
+        {
+            r.extending = true;
+        }
+        if self.no_recs {
+            s.home.moods.clear();
+            s.home.style_mixes.clear();
+            s.home.discover.clear();
+            s.home.new_releases.clear();
         }
         if self.empty_home {
             s.home = nikgob_view::HomeView { greeting_hour: s.home.greeting_hour, ..Default::default() };

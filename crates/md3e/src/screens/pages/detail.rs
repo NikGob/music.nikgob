@@ -292,6 +292,7 @@ pub fn artist(
             vec![
                 Button::new("Микс исполнителя").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
                 IconButton::new(Icon::Shuffle).size(Size::M).style(Style::Tonal).tooltip("Перемешать").into(),
+                Button::new("Радио").icon(Icon::Radio).size(Size::M).style(Style::Tonal).into(),
                 Button::new(if a.liked { "В подписках" } else { "Подписаться" })
                     .icon(Icon::Favorite)
                     .size(Size::M)
@@ -308,14 +309,19 @@ pub fn artist(
         if r[1].clicked() {
             out.push(Command::PlayArtist { id, shuffle: true });
         }
-        if r[2].clicked() {
+        // An endless queue: the artist's tracks you like most, then what
+        // sounds and is listened to like them.
+        if r[2].clone().on_hover_text("Его треки и похожее — очередь дописывается сама").clicked() {
+            out.push(Command::StartRadio { seed: nikgob_view::RadioSeed::Artist(id) });
+        }
+        if r[3].clicked() {
             out.push(Command::Like(LikeTarget::Artist(id), !a.liked));
         }
         // "В очередь всё" queues what the artist page knows: the popular tracks.
         let picked = Menu::new("artist-more")
             .item(MenuItem::new("В очередь всё").icon(Icon::QueueMusic).enabled(!a.top_tracks.is_empty()))
             .item(MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" }).icon(Icon::Favorite))
-            .attach(&r[3]);
+            .attach(&r[4]);
         match picked {
             Some(0) => out.push(Command::EnqueueArtist(a.card.id)),
             Some(1) => out.push(Command::Like(LikeTarget::Artist(id), !a.liked)),

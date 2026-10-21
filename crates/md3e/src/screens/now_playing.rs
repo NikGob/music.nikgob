@@ -808,6 +808,7 @@ pub fn show(
         if let Some(t) = p.current.as_ref() {
             let acts = [
                 Act::Playlist,
+                Act::Radio,
                 Act::Artist,
                 Act::Album,
                 Act::Info,

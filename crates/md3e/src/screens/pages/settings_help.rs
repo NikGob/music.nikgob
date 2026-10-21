@@ -98,6 +98,10 @@ pub enum SettingId {
     FakeFlac,
     MusicBrainz,
     AcoustId,
+    /// «Новое в радио и миксах».
+    RadioNewShare,
+    /// «Анализ звука»: how far it is (no control of its own).
+    SoundAnalysis,
     // Источники.
     SpotifyEnabled,
     SpotifyPlayback,
@@ -113,6 +117,8 @@ pub enum SettingId {
     ImportYouTube,
     ImportFiles,
     StreamCache,
+    /// «Анализ звука стримов».
+    StreamAnalysis,
     Prowlarr,
     NoSeed,
     SeedLimit,
@@ -184,8 +190,8 @@ impl SettingId {
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
             Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
             | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | PlaylistSync | ImportSpotify
-            | ImportYouTube | ImportFiles | StreamCache | Prowlarr | NoSeed | SeedLimit | SeedDays | SeedRatio
-            | DownloadLimit | UploadLimit => TAB_SOURCES,
+            | ImportYouTube | ImportFiles | StreamCache | StreamAnalysis | Prowlarr | NoSeed | SeedLimit | SeedDays
+            | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
             _ => TAB_GENERAL,
         }
     }
@@ -279,6 +285,9 @@ impl SettingId {
             PlaylistSync => "Как новый плейлист, связанный с сервисом, следит за ним. У каждого плейлиста это можно поменять в его меню ⋮.",
             ImportSpotify => "Забирает из Spotify свои плейлисты и недавние прослушивания. Лайки приходят сами сразу после входа. Плейлисты появятся в библиотеке, их треки ждут в «Хочу скачать».",
             ImportYouTube => "То же из YouTube Music: плейлисты и история. Лайки приходят сами после входа.",
+            RadioNewShare => "Радио по треку или исполнителю и бесконечные миксы (настроения, «Твои миксы», «Новое для тебя») подмешивают музыку, которой у тебя ещё нет: похожее из YouTube Music и Deezer. Здесь — сколько. «Твой микс» на главной собирается только из твоего.",
+            SoundAnalysis => "Миксы и радио подбирают треки по звуку: темп, громкость, яркость, ровность. Для этого каждый трек один раз анализируется в фоне — тихо, с пониженным приоритетом. Пока анализ идёт, подборки уже работают, просто чуть менее точно.",
+            StreamAnalysis => "Лайкнутые и плейлистные треки без файла тоже анализируются: их звук по одному тихо скачивается с YouTube Music в память (несколько мегабайт), анализируется и сразу выбрасывается. Не чаще раза в 20 секунд и не больше 300 треков в день; трек, сыгравший из стрима, анализируется из кэша без лишнего скачивания. Выключи — стримы останутся без анализа, а миксы будут подбирать их по исполнителю и истории.",
             StreamCache => "Недавно игравшие треки хранятся на диске, и «Назад» или повтор не качают их заново. YouTube — файлы как есть, Spotify — только в зашифрованном виде, как у официального клиента. Лимит у каждого сервиса свой; старое удаляется само.",
             ImportFiles => "Файлы выгрузки — вся история прослушиваний за годы. Spotify: Аккаунт → Конфиденциальность → «Расширенная история». Google Takeout: YouTube и YouTube Music.",
             Nodes => "Синхронизация и резервная копия на другие устройства — появится позже.",
@@ -389,6 +398,11 @@ impl SettingId {
                 c!("Только слежка", "Плейлист повторяет сервис; свои правки здесь туда не уходят."),
                 c!("Разово", "Снимок: плейлист скопирован один раз и дальше живёт сам по себе."),
             ],
+            Self::RadioNewShare => &[
+                c!("Без нового", "Только твоя музыка: что лайкнуто, в плейлистах и в библиотеке."),
+                c!("Немного", "Примерно каждый пятый трек — новый для тебя, похожий на то, что играет."),
+                c!("Побольше", "Примерно два трека из пяти — новые: чтобы чаще находить незнакомое."),
+            ],
             Self::OpusBitrate => &[
                 c!("128", "Файлы поменьше; на слух почти как оригинал."),
                 c!("160", "Хороший звук при разумном размере файлов."),
@@ -448,6 +462,11 @@ impl SettingId {
             Self::LikeDownload if !p.like_downloads => 2,
             Self::LikeDownload => usize::from(p.like_download_scope == v::WishlistScope::Album),
             Self::PlaylistSync => sync_index(p.playlist_sync_default),
+            Self::RadioNewShare => match p.radio_new_share {
+                v::RadioNewShare::None => 0,
+                v::RadioNewShare::Some => 1,
+                v::RadioNewShare::More => 2,
+            },
             _ => 0,
         }
     }
@@ -502,6 +521,9 @@ impl SettingId {
                 }
             }
             Self::PlaylistSync => p.playlist_sync_default = v::PlaylistSyncMode::ALL[i.min(2)],
+            Self::RadioNewShare => {
+                p.radio_new_share = [v::RadioNewShare::None, v::RadioNewShare::Some, v::RadioNewShare::More][i.min(2)];
+            }
             _ => {}
         }
     }
@@ -1558,6 +1580,12 @@ mod tests {
         assert_eq!(SettingId::NoSeed.tab(), TAB_SOURCES);
         assert_eq!(SettingId::Spotify.tab(), TAB_SOURCES);
         assert_eq!(SettingId::MusicBrainz.tab(), TAB_GENERAL);
+        assert_eq!(SettingId::RadioNewShare.tab(), TAB_GENERAL);
+        assert_eq!(SettingId::SoundAnalysis.tab(), TAB_GENERAL);
+        assert_eq!(SettingId::StreamAnalysis.tab(), TAB_SOURCES);
+        for id in [SettingId::RadioNewShare, SettingId::SoundAnalysis, SettingId::StreamAnalysis] {
+            assert!(!id.help().is_empty());
+        }
         for id in [SettingId::SpotifyPersonal, SettingId::YouTubeCookies, SettingId::ImportFiles, SettingId::AutoDownloads] {
             assert!(!id.help().is_empty());
         }
@@ -1572,7 +1600,7 @@ mod tests {
         for id in [
             S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::RingDir, S::RingStyle, S::Ambient,
             S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
-            S::OpusBitrate, S::NpVolume, S::LikeDownload, S::PlaylistSync,
+            S::OpusBitrate, S::NpVolume, S::LikeDownload, S::PlaylistSync, S::RadioNewShare,
         ] {
             assert!(id.choices().len() >= 2, "{id:?}");
             for i in 0..id.choices().len() {
