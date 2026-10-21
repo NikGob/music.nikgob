@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use nikgob_core::model::{Palette, Source, SourceKind, Track, TrackId, quality_score};
+use nikgob_core::model::{Palette, ReleaseId, Source, SourceKind, Track, TrackId, quality_score};
 use nikgob_library::{Library, ReleaseRow, ReleaseSort};
 use serde::Deserialize;
 
@@ -219,10 +219,13 @@ pub fn merge_split_releases(library: &Library) -> Result<usize> {
 }
 
 /// Editions of one album found in the library (one MusicBrainz release
-/// group: the Japanese release next to the international one, a reissue),
-/// for the user to fold together or keep apart.
+/// group: the Japanese release next to the international one, a reissue;
+/// without MusicBrainz, releases of one artist sharing most songs: the
+/// album and its «Special Edition»), for the user to fold together or keep
+/// apart.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditionGroup {
+    /// The release group MBID, or `songs:` and the fullest release's id.
     pub group: String,
     /// The fullest edition: the others would join it.
     pub keep: ReleaseRow,
@@ -233,12 +236,21 @@ pub struct EditionGroup {
     pub new_songs: u32,
 }
 
+/// Share of the smaller release's songs two releases without a common
+/// release group must have in common to be editions.
+const SHARED_SONGS: f64 = 0.6;
+
+/// Songs two releases without a common release group must have in common
+/// at least (a single shares all its songs with its album).
+const MIN_SHARED_SONGS: usize = 3;
+
 /// Finds releases that are editions of one album. Nothing changes.
 pub fn find_release_editions(library: &Library) -> Result<Vec<EditionGroup>> {
+    let releases = all_releases(library)?;
     let mut groups: HashMap<String, Vec<ReleaseRow>> = HashMap::new();
-    for row in all_releases(library)? {
+    for row in &releases {
         if let Some(g) = row.release.release_group_mbid.clone() {
-            groups.entry(g).or_default().push(row);
+            groups.entry(g).or_default().push(row.clone());
         }
     }
     let mut found = Vec::new();
@@ -272,7 +284,76 @@ pub fn find_release_editions(library: &Library) -> Result<Vec<EditionGroup>> {
             found.push(EditionGroup { group, keep, others, same_songs, new_songs });
         }
     }
+    let grouped: Vec<ReleaseId> = found
+        .iter()
+        .flat_map(|g| std::iter::once(&g.keep).chain(&g.others).map(|r| r.release.id))
+        .collect();
+    let rest = releases.into_iter().filter(|r| !grouped.contains(&r.release.id)).collect();
+    found.extend(editions_by_songs(library, rest)?);
     found.sort_by(|a, b| a.keep.release.title.cmp(&b.keep.release.title));
+    Ok(found)
+}
+
+/// Editions MusicBrainz does not tie together: releases of one artist where
+/// the other shares at least [`SHARED_SONGS`] of the smaller one's songs
+/// (and [`MIN_SHARED_SONGS`]). Two different release groups are two albums
+/// (the volumes of a soundtrack share no songs anyway).
+fn editions_by_songs(library: &Library, releases: Vec<ReleaseRow>) -> Result<Vec<EditionGroup>> {
+    let mut by_artist: HashMap<String, Vec<ReleaseRow>> = HashMap::new();
+    for row in releases {
+        let artist = release_key("", &row.release.artist_credit.display()).1;
+        if !artist.is_empty() {
+            by_artist.entry(artist).or_default().push(row);
+        }
+    }
+    let mut found = Vec::new();
+    for (_, mut rows) in by_artist {
+        if rows.len() < 2 {
+            continue;
+        }
+        rows.sort_by_key(|r| (std::cmp::Reverse(r.known_tracks), r.release.added_at));
+        let mut tracks = Vec::with_capacity(rows.len());
+        for r in &rows {
+            tracks.push(songs(library, r.release.id)?);
+        }
+        let mut taken = vec![false; rows.len()];
+        for k in 0..rows.len() {
+            if taken[k] || tracks[k].is_empty() {
+                continue;
+            }
+            let (mut same_songs, mut new_songs) = (0, 0);
+            let mut others = Vec::new();
+            for o in k + 1..rows.len() {
+                let apart = match (&rows[k].release.release_group_mbid, &rows[o].release.release_group_mbid) {
+                    (Some(a), Some(b)) => a != b,
+                    _ => false,
+                };
+                if taken[o] || apart || tracks[o].is_empty() {
+                    continue;
+                }
+                let fates = plan(&tracks[k], &tracks[o]);
+                let same = fates.iter().filter(|(_, f)| matches!(f, Fate::Same(_))).count();
+                let smaller = tracks[k].len().min(tracks[o].len());
+                if same < MIN_SHARED_SONGS || (same as f64) < SHARED_SONGS * smaller as f64 {
+                    continue;
+                }
+                taken[o] = true;
+                same_songs += same as u32;
+                new_songs += (fates.len() - same) as u32;
+                others.push(rows[o].clone());
+            }
+            if !others.is_empty() {
+                taken[k] = true;
+                found.push(EditionGroup {
+                    group: format!("songs:{}", rows[k].release.id),
+                    keep: rows[k].clone(),
+                    others,
+                    same_songs,
+                    new_songs,
+                });
+            }
+        }
+    }
     Ok(found)
 }
 
@@ -309,7 +390,7 @@ pub fn fold_editions(library: &Library, g: &EditionGroup) -> Result<()> {
     Ok(())
 }
 
-fn songs(library: &Library, release: nikgob_core::model::ReleaseId) -> Result<Vec<Song>> {
+fn songs(library: &Library, release: ReleaseId) -> Result<Vec<Song>> {
     library
         .tracks_of_release(release)?
         .iter()
@@ -351,12 +432,15 @@ enum Fate {
 /// international one has two discs), so the songs both have tell where the
 /// rest go: one 5 places after a shared song sits 5 places after it here
 /// too. A track that lands on a song of the same length is that song under
-/// another title (a translation: "Ningyō x 龍" is "Doll x Dragon").
+/// another title (a translation: "Ningyō x 龍" is "Doll x Dragon"); one of
+/// the same title and length elsewhere is that song moved (a special
+/// edition puts new tracks in between).
 fn plan(album: &[Song], other: &[Song]) -> Vec<(TrackId, Fate)> {
     let mut pairs: Vec<((u32, u32), (u32, u32))> = Vec::new();
     let mut fates: Vec<(TrackId, Option<Fate>)> = Vec::new();
     for o in other {
-        match album.iter().find(|a| a.same_song(o)) {
+        let found = album.iter().find(|a| a.same_song(o)).or_else(|| album.iter().find(|a| a.moved_song(o)));
+        match found {
             Some(a) => {
                 if o.number.1 > 0 && a.number.1 > 0 {
                     pairs.push((o.number, a.number));
@@ -394,10 +478,7 @@ fn plan(album: &[Song], other: &[Song]) -> Vec<(TrackId, Fate)> {
                 return (id, Fate::Join(None));
             };
             match taken(slot) {
-                Some(a) => {
-                    let close = matches!((a.duration_ms, o.duration_ms), (Some(x), Some(y)) if x.abs_diff(y) <= 3_000);
-                    (id, if close { Fate::Same(a.id) } else { Fate::Join(None) })
-                }
+                Some(a) => (id, if a.close(o) { Fate::Same(a.id) } else { Fate::Join(None) }),
                 None => (id, Fate::Join(Some(slot))),
             }
         })
@@ -416,6 +497,16 @@ impl Song {
         self.base == other.base
             && self.variant == other.variant
             && (!numbered || self.number == other.number)
+    }
+
+    /// The same title (and version) and length in another place.
+    fn moved_song(&self, other: &Song) -> bool {
+        !self.base.is_empty() && self.base == other.base && self.variant == other.variant && self.close(other)
+    }
+
+    /// Both lengths known and within 3 s.
+    fn close(&self, other: &Song) -> bool {
+        matches!((self.duration_ms, other.duration_ms), (Some(x), Some(y)) if x.abs_diff(y) <= 3_000)
     }
 }
 
