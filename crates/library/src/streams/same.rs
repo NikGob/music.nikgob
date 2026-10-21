@@ -3,19 +3,24 @@
 //! song liked on Spotify and on YouTube Music is one track with two
 //! sources, not two.
 //!
-//! The same song: the same main artist and title after [`song_key`], both
-//! lengths known and within [`SLACK_MS`], compatible albums when both have
-//! one, no two different ISRCs, and the library track has no live source
-//! of the stream's service yet (a service never gives one song twice; the
-//! ISRC handles its relinks). The folding drops only what services add
-//! without changing the recording ("Remastered 2011", "Album Version",
-//! "feat. X"); "Live", "Remix", "TV Size", "Instrumental", "Radio Edit"
-//! stay in the key, so other versions stay other tracks.
+//! The same song: the same main artist and title after [`song_key`] (or
+//! the title with and without its romanization, «夏子 - Natsuko» and «夏子»:
+//! [`same_dual_title`]), both lengths known and within [`SLACK_MS`],
+//! compatible albums when both have one, no two different ISRCs, and the
+//! library track has no live source of the stream's service yet (a service
+//! never gives one song twice; the ISRC handles its relinks). Lengths within
+//! [`TIGHT_SLACK_MS`] need no album agreement: the album in another
+//! language, the single next to the album, a reworded title. The folding
+//! drops only what services add without changing the recording
+//! ("Remastered 2011", "Album Version", "feat. X"); "Live", "Remix", "TV
+//! Size", "Instrumental", "Radio Edit" stay in the key, so other versions
+//! stay other tracks.
 //!
 //! [`Library::merge_duplicate_stream_tracks`] applies the same rule once to
 //! tracks created before it existed.
 
-use nikgob_core::model::SourceKind;
+use nikgob_core::clip_title::same_dual_title;
+use nikgob_core::model::{SourceKind, score};
 use nikgob_core::streaming::{Service, StreamTrack, TrackKind};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -28,8 +33,13 @@ use crate::util::{meta_get, meta_set, sort_key};
 /// How far two lengths of one song may be apart.
 pub(crate) const SLACK_MS: i64 = 3_000;
 
-/// `meta` key: the repair of [`Library::merge_duplicate_stream_tracks`] ran.
-const REPAIRED_KEY: &str = "stream_duplicates_merged.v1";
+/// Lengths this close (a stream gives whole seconds) make the song without
+/// agreeing albums.
+pub(crate) const TIGHT_SLACK_MS: i64 = 1_500;
+
+/// `meta` key: the repair of [`Library::merge_duplicate_stream_tracks`] ran
+/// with the rule of today (`v1` had no dual titles and no tight slack).
+const REPAIRED_KEY: &str = "stream_duplicates_merged.v2";
 
 /// Words a bracket or " - " tail may consist of and still be release noise.
 const NOISE: &[&str] = &[
@@ -149,6 +159,8 @@ pub(crate) fn main_artist_key(name: &str) -> String {
 #[derive(Clone, Debug)]
 pub(crate) struct Song {
     pub(crate) title: String,
+    /// The title as given, for [`same_dual_title`].
+    pub(crate) raw_title: String,
     pub(crate) artist: String,
     pub(crate) album: Option<String>,
     pub(crate) duration_ms: Option<i64>,
@@ -165,6 +177,7 @@ impl Song {
     ) -> Self {
         Self {
             title: song_key(title),
+            raw_title: title.to_owned(),
             artist: main_artist_key(artist),
             album: album.map(song_key).filter(|a| !a.is_empty()),
             duration_ms,
@@ -196,23 +209,24 @@ impl Song {
         {
             return false;
         }
-        let length = match (self.duration_ms, o.duration_ms) {
-            (Some(a), Some(b)) => (a - b).abs() <= SLACK_MS,
-            _ => false,
+        let Some(apart) = self.duration_ms.zip(o.duration_ms).map(|(a, b)| (a - b).abs()) else {
+            return false;
         };
-        length
-            && self.title == o.title
+        apart <= SLACK_MS
             && self.artist == o.artist
-            && match (&self.album, &o.album) {
-                (Some(a), Some(b)) => albums_agree(a, b),
-                _ => true,
-            }
+            && (self.title == o.title || same_dual_title(&self.raw_title, &o.raw_title, song_key))
+            && (apart <= TIGHT_SLACK_MS
+                || match (&self.album, &o.album) {
+                    (Some(a), Some(b)) => albums_agree(a, b),
+                    _ => true,
+                })
     }
 }
 
 /// The same album title, or one an extension of the other ("Discovery"
 /// and "Discovery Bonus Mix"). A single named after the song is not taken
-/// for its album: it cannot be told from the album named after it.
+/// for its album here (it cannot be told from the album named after it);
+/// only [`TIGHT_SLACK_MS`] joins the two.
 fn albums_agree(a: &str, b: &str) -> bool {
     let starts = |long: &str, short: &str| {
         long == short || long.strip_prefix(short).is_some_and(|r| r.starts_with(' '))
@@ -324,6 +338,8 @@ fn services_of(conn: &Connection, track: &str) -> Result<Vec<Service>> {
 /// Stream-only live tracks: `(id, title, credit, duration, album, isrc, seq)`.
 type StreamOnlyRow = (String, String, String, Option<i64>, Option<String>, Option<String>, i64);
 
+/// Stream-only live tracks that are songs: a music video (its source
+/// scored [`score::STREAM_YOUTUBE_CLIP`]) is never its song by name.
 fn stream_only_rows(conn: &Connection) -> Result<Vec<StreamOnlyRow>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.artist_credit, t.duration_ms, r.title, t.isrc, t.seq
@@ -332,9 +348,11 @@ fn stream_only_rows(conn: &Connection) -> Result<Vec<StreamOnlyRow>> {
             AND NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id AND s.kind = 'local_file')
             AND EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id AND s.kind != 'local_file'
                            AND s.trashed_at IS NULL)
+            AND NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id AND s.kind = 'youtube'
+                               AND s.quality_score = ?1 AND s.trashed_at IS NULL)
           ORDER BY t.seq",
     )?;
-    let rows = stmt.query_map([], |r| {
+    let rows = stmt.query_map([score::STREAM_YOUTUBE_CLIP], |r| {
         Ok((
             r.get(0)?,
             r.get(1)?,
@@ -348,6 +366,17 @@ fn stream_only_rows(conn: &Connection) -> Result<Vec<StreamOnlyRow>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// A music video without a file (see [`stream_only_rows`]).
+fn is_clip(conn: &Connection, track: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM source WHERE track_id = ?1 AND kind = 'local_file')
+            AND EXISTS(SELECT 1 FROM source WHERE track_id = ?1 AND kind = 'youtube'
+                          AND quality_score = ?2 AND trashed_at IS NULL)",
+        params![track, score::STREAM_YOUTUBE_CLIP],
+        |r| r.get(0),
+    )?)
+}
+
 fn track_exists(conn: &Connection, id: &str) -> Result<bool> {
     Ok(conn
         .query_row("SELECT 1 FROM track WHERE id = ?1", [id], |_| Ok(()))
@@ -358,7 +387,7 @@ fn track_exists(conn: &Connection, id: &str) -> Result<bool> {
 impl Library {
     /// Merges stream-only tracks that are one song by the rule of
     /// [`same_song_track`] (made before the rule existed: the song liked on
-    /// both services as two tracks). The track with a file, else the older
+    /// both services as two tracks; music videos stay apart). The track with a file, else the older
     /// one, stays; sources, ids in the services, likes, playlist entries,
     /// history and wishlist items move onto it (one wishlist item per track).
     /// Runs once per library (a `meta` mark); returns how many tracks went.
@@ -379,6 +408,9 @@ impl Library {
                 let mine = services_of(tx, &id)?;
                 let mut other = None;
                 for (cand, local, cseq) in candidates(tx, &song, &sort_key(&artist), Some(&id))? {
+                    if is_clip(tx, &cand)? {
+                        continue;
+                    }
                     let theirs = services_of(tx, &cand)?;
                     if !theirs.iter().any(|s| mine.contains(s)) {
                         other = Some((cand, local || cseq < seq));
@@ -437,10 +469,10 @@ mod tests {
         assert!(!a.same(&far), "4 s apart");
         let unknown = Song { duration_ms: None, ..yt.clone() };
         assert!(!a.same(&unknown), "length unknown");
-        let other_album = Song { album: Some("live in budokan".into()), ..yt.clone() };
-        assert!(!a.same(&other_album));
-        let single = Song { album: Some("automatic".into()), ..yt.clone() };
-        assert!(!a.same(&single), "a single is another release");
+        let other_album = Song { album: Some("live in budokan".into()), duration_ms: Some(304_000), ..yt.clone() };
+        assert!(!a.same(&other_album), "another album 2 s off");
+        let single = Song { album: Some("automatic".into()), duration_ms: Some(304_000), ..yt.clone() };
+        assert!(!a.same(&single), "a single 2 s off is another release");
         let no_album = Song { album: None, ..yt.clone() };
         assert!(a.same(&no_album));
         let isrc = Song { isrc: Some("ZZFAK9900009".into()), ..yt.clone() };
@@ -449,5 +481,23 @@ mod tests {
         assert!(!a.same(&remix));
         let artist = Song::new("Automatic", "Someone Else", Some("First Love"), Some(306_000), None);
         assert!(!a.same(&artist));
+    }
+
+    #[test]
+    fn lengths_within_the_tight_slack_need_no_album() {
+        let local = Song::new("夏子", "FUNKY MONKEY BΛBY'S", Some("夏子"), Some(212_800), None);
+        let yt = Song::new("夏子 - Natsuko", "Funky Monkey Bλby's", Some("Natsuko"), Some(213_000), None);
+        assert!(local.same(&yt), "the dual title on a single in another script");
+        let ost = Song::new("Old Stories", "Kevin Penkin", Some("MADE IN ABYSS ORIGINAL SOUNDTRACK 3"), Some(120_400), None);
+        let jp = Song::new("Old Stories", "Kevin Penkin", Some("TVアニメ「メイドインアビス 烈日の黄金郷」オリジナルサウンドトラック"), Some(121_000), None);
+        assert!(ost.same(&jp));
+        let off = Song { duration_ms: Some(122_000), ..jp.clone() };
+        assert!(!ost.same(&off), "1.6 s off: the albums have to agree again");
+        let isrc = Song { isrc: Some("ZZFAK9900009".into()), ..jp.clone() };
+        assert!(ost.same(&isrc), "one ISRC alone is no veto");
+        let both = Song { isrc: Some("ZZFAK9900001".into()), ..ost.clone() };
+        assert!(!both.same(&isrc), "two different ISRCs");
+        let live = Song::new("夏子 - Live", "Funky Monkey Bλby's", Some("Natsuko"), Some(213_000), None);
+        assert!(!local.same(&live), "a version");
     }
 }

@@ -1,5 +1,6 @@
-//! Editions of one album (one MusicBrainz release group) are offered to
-//! merge, never merged on their own: at start-up and after each import.
+//! Editions of one album (one MusicBrainz release group, or releases of one
+//! artist sharing most songs) are offered to merge, never merged on their
+//! own: at start-up and after each import.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 

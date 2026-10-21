@@ -226,8 +226,9 @@ fn the_same_song_from_both_services_is_one_track_other_versions_are_not() {
     let mut clip = yt_variant("yt-clip", "Группа крови", 285);
     clip.kind = nikgob_core::streaming::TrackKind::Video;
     assert_ne!(lib.upsert_stream_track(&clip).unwrap(), id);
-    // Another album of the artist: another recording.
-    let mut live_album = yt_variant("yt-live", "Группа крови", 285);
+    // Another album of the artist, 2 s off: another recording (as close
+    // as 1.5 s it would be the song whatever the album).
+    let mut live_album = yt_variant("yt-live", "Группа крови", 287);
     live_album.album.as_mut().unwrap().title = "Последний концерт".into();
     assert_ne!(lib.upsert_stream_track(&live_album).unwrap(), id);
 }
@@ -304,6 +305,73 @@ fn duplicates_made_before_are_merged_once_with_their_likes_and_wishlist() {
     let c = separate(&lib, &yt_variant("yt-c", "Группа крови", 285));
     assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 0);
     assert!(lib.get_track(c).unwrap().is_some());
+}
+
+#[test]
+fn the_v2_repair_folds_dual_titles_and_other_albums_into_the_file() {
+    let lib = lib();
+    let fmb = lib.upsert_artist(&Artist::new("FUNKY MONKEY BΛBY'S")).unwrap();
+    let credit = ArtistCredit::single("FUNKY MONKEY BΛBY'S", Some(fmb.id));
+    let release = lib
+        .upsert_release(&Release::new("夏子", credit.clone()))
+        .unwrap();
+    let mut local = Track::new("夏子", credit);
+    local.release_id = Some(release.id);
+    local.duration_ms = Some(212_800);
+    let local = lib.upsert_track(&local).unwrap();
+    lib.add_source(&Source::new(local.id, SourceKind::LocalFile, "Music/n.flac", Codec::Flac))
+        .unwrap();
+    // Made before the rule: the stream copy on its own single, in its own
+    // album card; and a live take that stays.
+    let mut y = yt_variant("yt-natsuko", "夏子 - Natsuko", 213);
+    y.artists[0].name = "Funky Monkey Bλby's".into();
+    let album = y.album.as_mut().unwrap();
+    album.title = "Natsuko".into();
+    album.id = Some(RemoteId::new(Service::Youtube, "yt-alb-natsuko"));
+    album.artists = y.artists.clone();
+    let stream = separate(&lib, &y);
+    let mut live = y.clone();
+    live.id = RemoteId::new(Service::Youtube, "yt-natsuko-live");
+    live.title = "夏子 - Live".into();
+    let live = separate(&lib, &live);
+    // A clip of the song is never the song by name.
+    let mut clip = y.clone();
+    clip.id = RemoteId::new(Service::Youtube, "yt-natsuko-mv");
+    clip.kind = nikgob_core::streaming::TrackKind::Video;
+    let clip = separate(&lib, &clip);
+    for t in [stream, live, clip] {
+        lib.like(t).unwrap();
+    }
+    let titles = |lib: &Library| -> Vec<String> {
+        let mut t: Vec<String> = lib
+            .releases(0, 100, ReleaseSort::asc(ReleaseSortKey::Title))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.release.title)
+            .collect();
+        t.sort();
+        t
+    };
+    assert_eq!(titles(&lib), ["Natsuko", "夏子"]);
+    // A library repaired by v1 is repaired again.
+    lib.write(|tx| meta_set(tx, "stream_duplicates_merged.v1", "1")).unwrap();
+
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 1);
+    assert!(lib.get_track(stream).unwrap().is_none());
+    assert!(lib.get_track(live).unwrap().is_some(), "a version stays");
+    assert!(lib.get_track(clip).unwrap().is_some(), "the clip stays");
+    assert_eq!(lib.track_by_remote(&y.id).unwrap(), Some(local.id));
+    assert!(lib.is_liked(local.id).unwrap());
+    assert_eq!(
+        lib.active_source(local.id).unwrap().unwrap().kind,
+        SourceKind::LocalFile,
+        "the file keeps playing"
+    );
+    assert_eq!(titles(&lib), ["Natsuko", "夏子"], "the live take keeps its card");
+    lib.unlike(live).unwrap();
+    lib.unlike(clip).unwrap();
+    assert_eq!(titles(&lib), ["夏子"], "the stream album is gone");
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 0, "once");
 }
 
 #[test]

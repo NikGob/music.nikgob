@@ -18,6 +18,10 @@
 //! * Noise at the end of a part goes when it says it is a clip («Title MV»,
 //!   «Title Official Video», «Title Lyric Video», «Title Visualizer»), with
 //!   the artist's name right before it («Title Eve Music Video»).
+//!
+//! A track title may be dual the same way («夏子 - Natsuko»): one song with
+//! or without its romanization or translation is still the song
+//! ([`same_dual_title`], docs/stage3.md §7 «Одна песня — один TrackId»).
 
 /// Words a bracket or a tail may consist of and still be what clips add.
 const CLIP_NOISE: &[&str] = &[
@@ -236,6 +240,55 @@ pub fn display_title(title: &str, artist: &str) -> String {
     if fold(&shown).is_empty() { squash(title) } else { shown }
 }
 
+/// Letters outside the Latin script (CJK, kana, Cyrillic, Hangul…).
+fn has_non_latin(s: &str) -> bool {
+    s.chars().any(|c| c.is_alphabetic() && !is_latin(c))
+}
+
+/// Letters, all of them Latin.
+fn all_latin(s: &str) -> bool {
+    s.chars().any(char::is_alphabetic) && s.chars().all(|c| !c.is_alphabetic() || is_latin(c))
+}
+
+fn is_latin(c: char) -> bool {
+    c.is_ascii_alphabetic() || matches!(c, '\u{C0}'..='\u{24F}' | '\u{1E00}'..='\u{1EFF}')
+}
+
+/// The « - » parts of a title, without empty ones.
+fn dash_parts(title: &str) -> Vec<String> {
+    let mut parts = vec![squash(title)];
+    for sep in [" - ", " – ", " — "] {
+        parts = parts.into_iter().flat_map(|p| p.split(sep).map(squash).collect::<Vec<_>>()).collect();
+    }
+    parts.retain(|p| !p.is_empty());
+    parts
+}
+
+/// One song under a single and a dual title: the « - » parts of one are the
+/// leading or the trailing parts of the other (compared by `key`), and what
+/// the other adds is the title in another script — non-Latin letters on one
+/// side, only Latin ones on the other («夏子 - Natsuko» and «夏子»,
+/// «勘冴えて悔しいわ - Kan Saete Kuyashiiwa» and «Kan Saete Kuyashiiwa»).
+/// A version («夏子 - Live») or two Latin halves («Song - Remix», «A - B»)
+/// are other titles. Equal titles are for the caller to compare.
+pub fn same_dual_title<K: PartialEq>(a: &str, b: &str, key: impl Fn(&str) -> K) -> bool {
+    let (pa, pb) = (dash_parts(a), dash_parts(b));
+    let (long, short) = if pa.len() > pb.len() { (pa, pb) } else { (pb, pa) };
+    if short.is_empty() || long.len() == short.len() {
+        return false;
+    }
+    let short_keys: Vec<K> = short.iter().map(|p| key(p)).collect();
+    let n = long.len() - short.len();
+    [(&long[..short.len()], &long[short.len()..]), (&long[n..], &long[..n])]
+        .into_iter()
+        .any(|(kept, dropped)| {
+            let same = kept.iter().zip(&short_keys).all(|(p, k)| key(p) == *k);
+            let (kept, dropped) = (kept.join(" "), dropped.join(" "));
+            same && !is_version(&dropped)
+                && (has_non_latin(&kept) && all_latin(&dropped) || all_latin(&kept) && has_non_latin(&dropped))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +361,32 @@ mod tests {
         assert_eq!(display_title("Song (Live at Budokan) [Official Video]", "X"), "Song (Live at Budokan)");
         assert_eq!(display_title("Ghost Avenue", "Eve"), "Ghost Avenue");
         assert_eq!(display_title("MV", "X"), "MV");
+    }
+
+    #[test]
+    fn a_title_with_its_romanization_is_the_title() {
+        let same = |a, b| same_dual_title(a, b, fold);
+        assert!(same("夏子 - Natsuko", "夏子"));
+        assert!(same("夏子", "夏子 - Natsuko"));
+        assert!(same("勘冴えて悔しいわ - Kan Saete Kuyashiiwa", "Kan Saete Kuyashiiwa"));
+        assert!(same(
+            "けっかおーらい - Kekka Orai - Kekka Orai - My Hero Academia: Vigilantes Opening Theme Song",
+            "Kekka Orai - My Hero Academia: Vigilantes Opening Theme Song"
+        ));
+        assert!(same("Группа крови - Gruppa krovi", "группа крови"));
+        assert!(same("Gruppa krovi - Группа крови", "Gruppa Krovi"));
+        // Versions and two Latin halves are other titles.
+        assert!(!same("Song - Live", "Song"));
+        assert!(!same("Song - Remix", "Song"));
+        assert!(!same("A - B", "A"));
+        assert!(!same("A - B", "B"));
+        assert!(!same("夏子 - Live", "夏子"));
+        assert!(!same("夏子 - Natsuko (Remix)", "夏子"));
+        assert!(!same("夏子 - 冬子", "夏子"));
+        // Not the leading or trailing parts, or nothing added.
+        assert!(!same("夏子 - Natsuko", "Fuyuko"));
+        assert!(!same("夏子 - Natsuko", "夏子 - Natsuko"));
+        assert!(!same("Natsuko - 夏子 - Natsuko", "夏子"));
     }
 
     #[test]

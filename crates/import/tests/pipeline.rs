@@ -776,3 +776,60 @@ fn a_release_group_alone_is_not_enough_to_offer_a_merge() {
     release("Album", "B", "r3", &[("One", "rec-1")]);
     assert!(nikgob_import::find_release_editions(&lib).unwrap().is_empty());
 }
+
+#[test]
+fn editions_without_musicbrainz_are_found_by_the_songs_they_share() {
+    use nikgob_core::model::{ArtistCredit, Release, Track};
+    let lib = Library::open_in_memory().unwrap();
+    let release = |title: &str, group: Option<&str>, songs: &[(&str, u32)]| {
+        let mut r = Release::new(title, ArtistCredit::single("Fujisawa Yoshiaki", None));
+        r.release_group_mbid = group.map(Into::into);
+        let r = lib.upsert_release(&r).unwrap();
+        for (i, (title, secs)) in songs.iter().enumerate() {
+            let mut t = Track::new(*title, ArtistCredit::single("Fujisawa Yoshiaki", None));
+            t.release_id = Some(r.id);
+            t.track_no = i as u32 + 1;
+            t.duration_ms = Some(secs * 1000);
+            lib.upsert_track(&t).unwrap();
+        }
+        r.id
+    };
+    let ost = release(
+        "Original Soundtrack 1",
+        None,
+        &[("魔術の授業", 114), ("詠唱", 103), ("無職転生", 137), ("まだ見ぬ世界", 119), ("友達", 96)],
+    );
+    // New tracks in between: the shared ones sit at other numbers.
+    let special = release(
+        "Original Soundtrack 1 Special Edition",
+        None,
+        &[
+            ("魔術の授業", 114),
+            ("詠唱", 103),
+            ("ロキシーの訓練", 99),
+            ("無職転生", 137),
+            ("5歳のお祝い", 100),
+            ("まだ見ぬ世界", 119),
+            ("友達", 96),
+        ],
+    );
+    // The next volume shares nothing; a single shares one song; two
+    // releases MusicBrainz tells apart (two release groups) stay apart.
+    release("Original Soundtrack 2", None, &[("復活", 136), ("凛として", 142), ("敵襲", 140)]);
+    release("無職転生", None, &[("無職転生", 137)]);
+    let live = [("Opening", 200), ("Theme", 210), ("Ending", 220)];
+    release("Concert", Some("concert"), &live);
+    release("Concert Encore", Some("encore"), &live);
+
+    let found = nikgob_import::find_release_editions(&lib).unwrap();
+    let titles: Vec<_> = found
+        .iter()
+        .map(|g| (g.keep.release.title.as_str(), g.others.iter().map(|r| r.release.title.as_str()).collect::<Vec<_>>()))
+        .collect();
+    assert_eq!(titles, [("Original Soundtrack 1 Special Edition", vec!["Original Soundtrack 1"])]);
+    assert_eq!((found[0].same_songs, found[0].new_songs), (5, 0));
+    nikgob_import::fold_editions(&lib, &found[0]).unwrap();
+    assert!(lib.get_release(ost).unwrap().is_none());
+    assert_eq!(lib.tracks_of_release(special).unwrap().len(), 7, "no song twice");
+    assert!(nikgob_import::find_release_editions(&lib).unwrap().is_empty());
+}

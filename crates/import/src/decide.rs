@@ -11,8 +11,9 @@
 //! 3. one of the job's [`ImportTargets`] (the wishlist item it was downloaded
 //!    for) has this title (or this number and a similar title) and length;
 //! 4. a stream-only track (liked from Spotify / YouTube, no file yet) has the
-//!    same artist and title and a length within [`DURATION_SLACK_MS`]: the
-//!    file attaches to that track id, so playlists, likes and history stay;
+//!    same artist and title (or the title with and without its romanization,
+//!    «夏子 - Natsuko» and «夏子») and a length within [`DURATION_SLACK_MS`]:
+//!    the file attaches to that track id, so playlists, likes and history stay;
 //! 5. inside the same release: the Chromaprint fingerprints are alike, or, when
 //!    a fingerprint is missing on either side, the title and track number agree.
 //!
@@ -22,6 +23,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use nikgob_core::clip_title::same_dual_title;
 use nikgob_core::model::{Source, Track, TrackId};
 use nikgob_library::Library;
 use nikgob_metadata::text::{album_key, artist_key, similarity, title_key};
@@ -148,11 +150,13 @@ fn is_stream_only(lib: &Library, ex: &Existing) -> Result<bool> {
             .any(|s| !s.kind.is_local() && s.trashed_at.is_none()))
 }
 
-/// Same title (also the same variant: a live take is another recording) and
-/// a similar artist.
+/// Same title (also the same variant: a live take is another recording; a
+/// dual title is its halves, see [`same_dual_title`]) and a similar artist.
 fn same_song(track: &Track, id: &Identity) -> bool {
     let (have, want) = (title_key(&track.title), title_key(&id.title));
-    if have.base.is_empty() || have.base != want.base || have.variant != want.variant {
+    let same_title = !have.base.is_empty() && have == want
+        || same_dual_title(&track.title, &id.title, title_key);
+    if !same_title {
         return false;
     }
     let (a, b) = (artist_key(&track.artist_credit.display()), artist_key(&id.artist_line));
@@ -476,6 +480,30 @@ mod tests {
             duration_ms: None,
         };
         assert_eq!(find_existing(&mut store, &inc).unwrap().unwrap().track.id, on_album);
+    }
+
+    #[test]
+    fn a_file_takes_the_stream_track_of_its_song_under_a_dual_title() {
+        let mut store = Store::new(Library::open_in_memory().unwrap());
+        let streamed = add(&mut store, &identity("夏子 - Natsuko", 1, "Natsuko"), Codec::Opus, 0, false);
+        let mut t = store.library().get_track(streamed).unwrap().unwrap();
+        t.duration_ms = Some(213_000);
+        store.library().upsert_track(&t).unwrap();
+        let find = |store: &mut Store, title: &str| {
+            let id = identity(title, 4, "夏子");
+            let inc = Incoming {
+                identity: &id,
+                tag_track_id: None,
+                fingerprint: None,
+                targets: &[],
+                duration_ms: Some(212_800),
+            };
+            find_existing(store, &inc).unwrap().map(|e| e.track.id)
+        };
+        assert_eq!(find(&mut store, "夏子"), Some(streamed), "another album, the title without its romanization");
+        assert_eq!(find(&mut store, "Natsuko"), Some(streamed));
+        assert_eq!(find(&mut store, "夏子 (Live)"), None, "a version");
+        assert_eq!(find(&mut store, "夏子 - Live"), None, "a version");
     }
 
     #[test]
