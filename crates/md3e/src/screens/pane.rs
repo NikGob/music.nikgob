@@ -11,7 +11,7 @@ use super::{
 use crate::{
     Icon, Theme, TypeRole,
     components::{
-        Button, ConnectedGroup, IconButton, Leading, ListItem, LoadingIndicator, Size, Style,
+        Button, ConnectedGroup, IconButton, Leading, ListItem, LoadingIndicator, Menu, MenuItem, Size, Style,
     },
 };
 
@@ -96,18 +96,50 @@ fn queue_item<'a>(t: &'a TrackRow, salt: impl egui::AsId) -> ListItem<'a> {
         .id_salt(salt)
 }
 
-/// A movable queue row (✕ and a drag handle); played ones are dimmed.
-/// Returns its rect and whether its handle is dragged / was released.
+/// The menu of a queue row (its ⋮ and a right click): play it now,
+/// «Радио по треку», and take it out of the queue (not the current track,
+/// `entry` None).
+fn queue_menu(key: impl egui::AsId, entry: Option<u64>) -> Menu {
+    let mut m = Menu::new(key).align_right(true);
+    if entry.is_some() {
+        m = m.item(MenuItem::new("Играть сейчас").icon(Icon::PlayArrow));
+    }
+    m = m.item(MenuItem::new(super::pages::RADIO_BY_TRACK).icon(Icon::Radio));
+    if entry.is_some() {
+        m = m.divider().item(MenuItem::new("Убрать из очереди").icon(Icon::Close));
+    }
+    m
+}
+
+fn queue_pick(picked: Option<usize>, t: &TrackRow, entry: Option<u64>, out: &mut Vec<Command>) {
+    match (picked, entry) {
+        (Some(0), Some(e)) => out.push(Command::PlayQueueEntry(e)),
+        (Some(1), Some(_)) | (Some(0), None) => out.push(super::pages::radio_by_track(t.id)),
+        (Some(2), Some(e)) => out.push(Command::RemoveFromQueue(e)),
+        _ => {}
+    }
+}
+
+/// A movable queue row (a drag handle; ⋮ and ✕ under the pointer, so the
+/// narrow pane keeps the titles whole); played ones are dimmed. Returns its
+/// rect and whether its handle is dragged / was released.
 fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, out: &mut Vec<Command>) -> (Rect, bool, bool) {
     let entry = e.entry;
+    // Hovered last frame, or its ⋮ menu is open (the pointer is on the menu).
+    let key = ui.id().with(("q-actions", entry));
+    let show_actions = ui.ctx().data(|d| d.get_temp::<bool>(key)).unwrap_or(false);
     ui.scope(|ui| {
         if played {
             ui.multiply_opacity(0.6);
         }
+        let mut more = None;
         let o = queue_item(&e.track, ("q", entry))
             .muted(played)
             .drag_handle(true)
             .trailing(|ui| {
+                if !show_actions {
+                    return;
+                }
                 if ui
                     .add(
                         IconButton::new(Icon::Close)
@@ -119,10 +151,22 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, out: &mut Vec<Command>) 
                 {
                     out.push(Command::RemoveFromQueue(entry));
                 }
+                more = Some(ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("q-more", entry))));
             })
             .show(ui);
         if o.response.double_clicked() {
             out.push(Command::PlayQueueEntry(entry));
+        }
+        let mut menu_open = false;
+        if let Some(m) = &more {
+            queue_pick(queue_menu(("q-menu", entry), Some(entry)).attach(m), &e.track, Some(entry), out);
+            menu_open = ui.ctx().data(|d| d.get_temp::<bool>(m.id.with("md3e-menu-open"))).unwrap_or(false);
+        }
+        queue_pick(queue_menu(("q-ctx", entry), Some(entry)).context_menu(&o.response), &e.track, Some(entry), out);
+        let now = o.response.contains_pointer() || menu_open;
+        if now != show_actions {
+            ui.ctx().data_mut(|d| d.insert_temp(key, now));
+            ui.ctx().request_repaint();
         }
         let (drag, drop) = o.handle.as_ref().map_or((false, false), |h| (h.dragged(), h.drag_stopped()));
         (o.rect, drag, drop)
@@ -133,6 +177,11 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, out: &mut Vec<Command>) 
 pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let q = &state.queue;
+    // A radio says so above the list: what it grows from.
+    if let Some(r) = &q.radio {
+        radio_header(ui, &r.title);
+        ui.add_space(8.0);
+    }
     let bottom_h = 56.0;
     let list_h = ui.available_height() - bottom_h;
     egui::ScrollArea::vertical()
@@ -148,6 +197,7 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             // Index into `rows` of the row whose handle is dragged / was released.
             let mut dragging = None;
             let mut dropped = None;
+            let mut current_pick = None;
             let mut row = |ui: &mut Ui, e: &QueueEntry, played: bool, rows: &mut Vec<(u64, Rect)>| {
                 let (rect, drag, drop) = queue_row(ui, e, played, out);
                 if drag {
@@ -173,6 +223,8 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                 common::label(ui, "Сейчас играет", TypeRole::TitleSmall, s.on_surface_variant);
                 ui.add_space(4.0);
                 let o = queue_item(t, "q-current").selected(true).show(ui);
+                // (Sent after the rows: they hold `out` meanwhile.)
+                current_pick = queue_menu("q-ctx-current", None).context_menu(&o.response).map(|p| (p, t));
                 if let Some(entry) = q.current_entry {
                     rows.push((entry, o.rect));
                 }
@@ -188,14 +240,23 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                 }
                 ui.add_space(12.0);
             }
-            if q.next.is_empty() {
+            let extending = q.radio.as_ref().is_some_and(|r| r.extending);
+            if q.next.is_empty() && !extending {
                 common::label(ui, "Дальше ничего нет", TypeRole::BodyMedium, s.on_surface_variant);
-            } else {
+            } else if !q.next.is_empty() {
                 common::label(ui, "Далее", TypeRole::TitleSmall, s.on_surface_variant);
                 ui.add_space(4.0);
                 for e in &q.next {
                     row(ui, e, false, &mut rows);
                 }
+            }
+            // The radio is looking for the next tracks: said where they
+            // will appear.
+            if extending {
+                extending_row(ui);
+            }
+            if let Some((p, t)) = current_pick {
+                queue_pick(Some(p), t, None, out);
             }
             if rows.is_empty() {
                 return;
@@ -246,6 +307,57 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             chrome.ask_save_queue(state.player.context.as_deref().unwrap_or("Очередь"));
         }
     });
+}
+
+/// What a radio queue is called above its list: «Радио · Кино» as the
+/// runtime names it; an endless mix («Спокойное», «Новое для тебя») says
+/// it is a mix.
+pub(super) fn radio_title(title: &str) -> String {
+    if title.starts_with("Радио") {
+        title.to_owned()
+    } else {
+        format!("Микс · {title}")
+    }
+}
+
+/// The radio line above the queue: its title, and that it grows by itself.
+fn radio_header(ui: &mut Ui, title: &str) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let row = Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 48.0));
+    let icon = Rect::from_center_size(egui::pos2(row.left() + 16.0 + 12.0, row.center().y), egui::vec2(24.0, 24.0));
+    Icon::Radio.widget(false, s.on_surface_variant, 24.0).paint_at(ui, icon);
+    let text_x = icon.right() + 16.0;
+    let w = (row.right() - 16.0 - text_x).max(1.0);
+    let line = |text: &str, role: TypeRole, color| {
+        let mut job = egui::text::LayoutJob::single_section(text.to_owned(), role.style().text_format(color));
+        job.wrap = egui::text::TextWrapping::truncate_at_width(w);
+        ui.painter().layout_job(job)
+    };
+    let title = line(&radio_title(title), TypeRole::TitleSmall, s.on_surface);
+    let sub = line("Дописывается сама, пока играет", TypeRole::BodySmall, s.on_surface_variant);
+    let top = row.center().y - (title.size().y + sub.size().y) * 0.5;
+    let sub_y = top + title.size().y;
+    ui.painter().galley(egui::pos2(text_x, top), title, s.on_surface);
+    ui.painter().galley(egui::pos2(text_x, sub_y), sub, s.on_surface_variant);
+    ui.advance_cursor_after_rect(row);
+}
+
+/// «Подбираю ещё…» at the end of a radio queue while it extends, lined up
+/// with the covers of the rows.
+fn extending_row(ui: &mut Ui) {
+    let s = Theme::get(ui.ctx()).scheme;
+    ui.add_space(4.0);
+    let row = Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 56.0));
+    let slot = Rect::from_center_size(egui::pos2(row.left() + 16.0 + 28.0, row.center().y), egui::vec2(32.0, 32.0));
+    ui.put(slot, LoadingIndicator::new().size(32.0));
+    ui.painter().text(
+        egui::pos2(row.left() + 16.0 + 56.0 + 16.0, row.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Подбираю ещё…",
+        TypeRole::BodyMedium.font_id(),
+        s.on_surface_variant,
+    );
+    ui.advance_cursor_after_rect(row);
 }
 
 pub(super) fn lyrics(ui: &mut Ui, state: &ViewState, bass: f32, out: &mut Vec<Command>) -> bool {
@@ -358,5 +470,44 @@ fn reveal(path: &std::path::Path) {
     #[cfg(not(windows))]
     if let Some(dir) = path.parent() {
         let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn radio_queue_is_named_and_its_menu_starts_a_radio() {
+        assert_eq!(radio_title("Радио · Кино"), "Радио · Кино");
+        assert_eq!(radio_title("Спокойное"), "Микс · Спокойное");
+        let t = TrackRow {
+            id: nikgob_view::TrackId::new(),
+            title: "Группа крови".into(),
+            artist: "Кино".into(),
+            album: None,
+            release_id: None,
+            artists: Default::default(),
+            disc_no: 1,
+            track_no: 1,
+            duration: None,
+            quality: None,
+            source: None,
+            has_local: true,
+            liked: false,
+            cover: None,
+            clip: false,
+        };
+        let radio = Command::StartRadio { seed: nikgob_view::RadioSeed::Track(t.id) };
+        // A row of the queue: play now, the radio, take it out.
+        let mut out = Vec::new();
+        for i in 0..3 {
+            queue_pick(Some(i), &t, Some(9), &mut out);
+        }
+        assert_eq!(out, vec![Command::PlayQueueEntry(9), radio.clone(), Command::RemoveFromQueue(9)]);
+        // The current track: only the radio.
+        let mut out = Vec::new();
+        queue_pick(Some(0), &t, None, &mut out);
+        assert_eq!(out, vec![radio]);
     }
 }

@@ -41,6 +41,8 @@ pub enum Act {
     /// «Найти песню…» for a clip, «Другая версия…» for another stream
     /// that plays from YouTube (only shown then).
     FindSong,
+    /// «Радио по треку»: an endless queue grown from the track.
+    Radio,
     /// A divider.
     Sep,
 }
@@ -162,6 +164,7 @@ impl Chrome {
             Act::Volume => MenuItem::new("Громкость…")
                 .icon(Icon::volume(state.player.volume, state.player.muted)),
             Act::Playlist => MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd),
+            Act::Radio => MenuItem::new(super::pages::RADIO_BY_TRACK).icon(Icon::Radio),
             Act::Artist => MenuItem::new("К исполнителю")
                 .icon(Icon::Person)
                 .enabled(!t.artists.linked().is_empty()),
@@ -263,6 +266,7 @@ impl Chrome {
             Act::Trash => self.trash = Some((t.id, t.title.clone())),
             Act::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),
             Act::FindSong => out.push(Command::FindSong { track: t.id, query: None }),
+            Act::Radio => out.push(super::pages::radio_by_track(t.id)),
             Act::Sep => {}
         }
     }

@@ -230,6 +230,10 @@ pub struct MediaCard {
     title: String,
     subtitle: Option<String>,
     cover: Option<String>,
+    /// Four covers drawn 2×2 instead of `cover` (a mix of many albums).
+    collage: Vec<String>,
+    /// The title may take two lines (only without a subtitle).
+    title_two_lines: bool,
     placeholder: Icon,
     badge: Option<String>,
     width: f32,
@@ -248,6 +252,8 @@ impl MediaCard {
             title: title.into(),
             subtitle: None,
             cover: None,
+            collage: Vec::new(),
+            title_two_lines: false,
             placeholder: Icon::Album,
             badge: None,
             width: 160.0,
@@ -274,6 +280,24 @@ impl MediaCard {
 
     pub fn cover_opt(mut self, uri: Option<String>) -> Self {
         self.cover = uri;
+        self
+    }
+
+    /// Covers of a mix: four or more are drawn as a 2×2 collage (the first
+    /// four), fewer as the first alone (the same as [`Self::cover`]).
+    pub fn collage(mut self, uris: Vec<String>) -> Self {
+        if uris.len() < 4 {
+            self.cover = uris.into_iter().next();
+        } else {
+            self.collage = uris;
+        }
+        self
+    }
+
+    /// Lets a long title wrap onto the subtitle's line (a card without a
+    /// subtitle, like a mix named by its artists).
+    pub fn title_two_lines(mut self, on: bool) -> Self {
+        self.title_two_lines = on;
         self
     }
 
@@ -394,7 +418,11 @@ impl MediaCard {
             } else {
                 CornerRadius::same(r)
             };
-            common::paint_image_zoomed(ui, cover, self.cover.as_deref(), corner, self.placeholder, zoom);
+            if self.collage.len() >= 4 {
+                paint_collage(ui, cover, &self.collage[..4], corner, self.placeholder, zoom);
+            } else {
+                common::paint_image_zoomed(ui, cover, self.cover.as_deref(), corner, self.placeholder, zoom);
+            }
             let corner_at = pos2(cover.left() + 8.0, cover.top() + 16.0);
             match (self.status, &self.badge) {
                 (CoverStatus::None, Some(text)) => {
@@ -406,13 +434,18 @@ impl MediaCard {
 
             // Text (shorter while the ⋮ shows at its end).
             let text_w = w - 2.0 * pad - if self.menu_button && hover { 28.0 } else { 0.0 };
-            let title = common::line(
-                &painter,
-                &self.title,
-                TypeRole::TitleSmall.style(),
-                s.on_surface,
-                text_w,
-            );
+            let title = if self.title_two_lines && self.subtitle.is_none() {
+                let mut job = TypeRole::TitleSmall.style().job(&self.title, s.on_surface);
+                job.wrap = egui::text::TextWrapping {
+                    max_width: text_w.max(1.0),
+                    max_rows: 2,
+                    break_anywhere: false,
+                    overflow_character: Some('…'),
+                };
+                painter.layout_job(job)
+            } else {
+                common::line(&painter, &self.title, TypeRole::TitleSmall.style(), s.on_surface, text_w)
+            };
             painter.galley(
                 pos2(rect.left() + pad, cover.bottom() + 8.0),
                 title,
@@ -528,6 +561,23 @@ impl MediaCard {
             menu,
             response,
         }
+    }
+}
+
+/// Four covers in the quarters of `rect`, each keeping the outer corner of
+/// `corner` it sits in.
+fn paint_collage(ui: &Ui, rect: Rect, uris: &[String], corner: CornerRadius, placeholder: Icon, zoom: f32) {
+    let half = rect.size() * 0.5;
+    for (i, uri) in uris.iter().take(4).enumerate() {
+        let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+        let r = Rect::from_min_size(rect.min + vec2(col * half.x, row * half.y), half);
+        let c = CornerRadius {
+            nw: if i == 0 { corner.nw } else { 0 },
+            ne: if i == 1 { corner.ne } else { 0 },
+            sw: if i == 2 { corner.sw } else { 0 },
+            se: if i == 3 { corner.se } else { 0 },
+        };
+        common::paint_image_zoomed(ui, r, Some(uri), c, placeholder, zoom);
     }
 }
 

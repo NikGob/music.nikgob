@@ -234,6 +234,7 @@ fn track_menu(key: egui::Id, t: &StreamTrackRow, wished: Option<WishlistStatus>)
         .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic).enabled(t.playable))
         .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic).enabled(t.playable))
         .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
+        .item(MenuItem::new(super::RADIO_BY_TRACK).icon(Icon::Radio))
         .divider()
         .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(t.album_id.is_some()))
         .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!t.artists.linked().is_empty()))
@@ -254,15 +255,25 @@ fn track_pick(
         0 => out.push(Command::PlayStreamNext(vec![t.remote.clone()])),
         1 => out.push(Command::EnqueueStream(vec![t.remote.clone()])),
         2 => pages.add_stream_to_playlist(vec![t.remote.clone()], anchor),
-        3 => return t.album_id.clone().map(|a| Route::Stream(StreamPage::Album(a))),
+        3 => out.push(radio_by_stream(t)),
+        4 => return t.album_id.clone().map(|a| Route::Stream(StreamPage::Album(a))),
         // Several artists: a chooser.
-        4 => return artist_links::go_to(ctx, artist_links::stream(&t.artists)),
-        5 => out.push(Command::Share(ShareTarget::StreamTrack(t.remote.clone()))),
+        5 => return artist_links::go_to(ctx, artist_links::stream(&t.artists)),
+        6 => out.push(Command::Share(ShareTarget::StreamTrack(t.remote.clone()))),
         // Download without a like: the like stays the ♡'s.
-        6 => out.push(Command::DownloadStream { tracks: vec![t.remote.clone()] }),
+        7 => out.push(Command::DownloadStream { tracks: vec![t.remote.clone()] }),
         _ => {}
     }
     None
+}
+
+/// «Радио по треку» of a service's track: its library track when it has one
+/// (the radio then knows its sound and history), else the service's track.
+pub fn radio_by_stream(t: &StreamTrackRow) -> Command {
+    match t.track {
+        Some(id) => super::radio_by_track(id),
+        None => Command::StartRadio { seed: nikgob_view::RadioSeed::Stream(t.remote.clone()) },
+    }
 }
 
 /// "Артист · 1988".
@@ -712,6 +723,9 @@ fn artist_page(
         Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).enabled(newest.is_some()).into(),
     ];
     if v.artist.is_some() {
+        // The library knows the artist: a radio of its tracks and the
+        // like (an artist only on the service has nothing to grow from).
+        members.push(Button::new("Радио").icon(Icon::Radio).size(Size::M).style(Style::Tonal).into());
         members.push(
             Button::new(if v.liked { "В подписках" } else { "Подписаться" })
                 .icon(Icon::Favorite)
@@ -730,10 +744,13 @@ fn artist_page(
         out.push(Command::PlayStreamAlbum { id: a, start: None, shuffle: false });
     }
     if let Some(a) = v.artist {
-        if r[1].clicked() {
-            out.push(Command::Like(LikeTarget::Artist(a), !v.liked));
+        if r[1].clone().on_hover_text("Его треки и похожее — очередь дописывается сама").clicked() {
+            out.push(Command::StartRadio { seed: nikgob_view::RadioSeed::Artist(a) });
         }
         if r[2].clicked() {
+            out.push(Command::Like(LikeTarget::Artist(a), !v.liked));
+        }
+        if r[3].clicked() {
             nav = Some(Route::Artist(a));
         }
     }

@@ -987,6 +987,8 @@ impl Md3eUi {
             "likes" => S::LikeDownload,
             "import" => S::ImportFiles,
             "torrents" => S::Prowlarr,
+            "recs" => S::RadioNewShare,
+            "stream-analysis" => S::StreamAnalysis,
             "appearance" => S::Design,
             _ => S::CoverClickPause,
         });

@@ -7,7 +7,7 @@ use nikgob_view::{Ambient, BgShapes, Command, CoverShape, Prefs, RingStyle, Rout
 
 use super::settings_help::{self, SettingId as Id};
 use super::{PageState, connected};
-use crate::screens::{bg_shapes, now_playing};
+use crate::screens::{bg_shapes, common::plural, now_playing};
 use crate::{
     Icon, Theme, TypeRole,
     components::{Button, Divider, FilterChip, Menu, MenuItem, Slider, Style, Switch, TextField},
@@ -248,7 +248,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     match pages.settings_tab {
         settings_help::TAB_APPEARANCE => appearance(ui, &mut p),
         settings_help::TAB_SOURCES => super::sources::show(ui, state, &mut p, pages, out),
-        _ => general(ui, &mut p, pages, out),
+        _ => general(ui, state, &mut p, pages, out),
     }
     ui.add(Divider::new());
     settings_help::finish(ui, &mut p);
@@ -562,7 +562,7 @@ fn swatches(ui: &mut Ui, p: &Prefs) -> Option<u8> {
 
 /// Behaviour: controls, lyrics, sound, library, import and quality
 /// (streaming and torrents live on «Источники»).
-fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+fn general(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
     group(ui, "Запуск");
     row(ui, Id::Autostart, "Запускать вместе с Windows", Some("Когда входишь в систему"), |ui| {
         ui.add(Switch::new(&mut p.autostart).id_salt("set-autostart"));
@@ -628,6 +628,17 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
     );
     row(ui, Id::Normalization, "Нормализация громкости", Some("Все треки примерно одинаково громкие"), |ui| {
         ui.add(Switch::new(&mut p.normalization).id_salt("set-norm"));
+    });
+
+    group(ui, "Рекомендации");
+    row(ui, Id::RadioNewShare, "Новое в радио и миксах", Some("Сколько незнакомой музыки подмешивать"), |ui| {
+        choice(ui, Id::RadioNewShare, p);
+    });
+    row(ui, Id::SoundAnalysis, "Анализ звука", Some(&analysis_status(&state.analysis)), |ui| {
+        // Stream-only tracks are analysed (or not) on «Источники».
+        if ui.add(Button::new("Анализ стримов").style(Style::Text).id_salt("set-stream-analysis-link")).clicked() {
+            pages.open_setting(Id::StreamAnalysis);
+        }
     });
 
     group(ui, "Библиотека");
@@ -751,6 +762,30 @@ fn general(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Comm
     row(ui, Id::Nodes, "Raspberry Pi, сервер, телефон", Some("Появится позже"), |_| {});
 }
 
+/// «1 240»: thousands apart with a no-break space, as Russian writes them.
+pub(super) fn fmt_count(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('\u{a0}');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// «1 240 из 3 000 треков · идёт анализ» / «… · готово» (the row is
+/// «Анализ звука»), files and stream-only tracks together.
+pub(super) fn analysis_status(a: &nikgob_view::AnalysisProgress) -> String {
+    let (done, total) = (a.files_done + a.streams_done, a.files_total + a.streams_total);
+    if total == 0 {
+        return "Анализировать пока нечего".to_owned();
+    }
+    let state = if a.complete() { "готово" } else { "идёт анализ" };
+    format!("{} из {} {} · {state}", fmt_count(done.min(total)), fmt_count(total), plural(u64::from(total), "трека", "треков", "треков"))
+}
+
 pub(super) fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
     // A test must never launch a program on the user's desktop.
     if cfg!(test) {
@@ -758,4 +793,23 @@ pub(super) fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
     }
     let _ = std::fs::create_dir_all(path);
     std::process::Command::new("explorer").arg(path).spawn().map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{analysis_status, fmt_count};
+    use nikgob_view::AnalysisProgress;
+
+    #[test]
+    fn counts_and_analysis_read_as_russian() {
+        assert_eq!(fmt_count(7), "7");
+        assert_eq!(fmt_count(1240), "1\u{a0}240");
+        assert_eq!(fmt_count(1_234_567), "1\u{a0}234\u{a0}567");
+        let mut a = AnalysisProgress { files_done: 1000, files_total: 2600, streams_done: 240, streams_total: 400 };
+        assert_eq!(analysis_status(&a), "1\u{a0}240 из 3\u{a0}000 треков · идёт анализ");
+        a.files_done = 2600;
+        a.streams_done = 400;
+        assert_eq!(analysis_status(&a), "3\u{a0}000 из 3\u{a0}000 треков · готово");
+        assert_eq!(analysis_status(&AnalysisProgress::default()), "Анализировать пока нечего");
+    }
 }

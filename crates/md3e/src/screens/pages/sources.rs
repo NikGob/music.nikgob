@@ -61,10 +61,34 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
         |ui| choice(ui, Id::PlaylistSync, p),
     );
 
+    group(ui, "Анализ звука");
+    stream_analysis(ui, state, p);
+
     imports(ui, out);
     group(ui, "Кэш");
     stream_cache(ui, state, p, out);
     torrents(ui, state, p, pages, out);
+}
+
+/// «Анализ звука стримов»: the switch and how far it is.
+fn stream_analysis(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
+    let a = &state.analysis;
+    let youtube = state.account(Service::Youtube).is_none_or(|a| a.enabled);
+    let hint = if !p.stream_analysis {
+        "Выключен: треки без файла подбираются по исполнителю и истории".to_owned()
+    } else if !youtube {
+        "Ждёт YouTube Music: он выключен выше".to_owned()
+    } else if a.streams_total == 0 {
+        "Лайкнутые и плейлистные треки без файла — с YouTube Music".to_owned()
+    } else {
+        let done = super::settings::fmt_count(a.streams_done.min(a.streams_total));
+        let total = super::settings::fmt_count(a.streams_total);
+        let state = if a.streams_done >= a.streams_total { "готово" } else { "до 300 в день" };
+        format!("{done} из {total} без файла · {state}")
+    };
+    row(ui, Id::StreamAnalysis, "Анализ звука стримов", Some(&hint), |ui| {
+        ui.add(Switch::new(&mut p.stream_analysis).id_salt("set-stream-analysis"));
+    });
 }
 
 /// «Кэш стриминга»: its limit, how much it holds, «Очистить».
