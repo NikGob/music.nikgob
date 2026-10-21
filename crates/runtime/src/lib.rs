@@ -298,6 +298,9 @@ struct Worker {
     /// The queue came back from the last run, paused here; nothing is
     /// loaded in the backend until play (see [`session`]).
     resume_at: Option<Duration>,
+    /// The source of the playing entry failed mid-track (entry id, where it
+    /// got to): the next one starts there, not from the top.
+    failover: Option<(u64, Duration)>,
     /// `session.json` (volume and queue between runs) and what was last
     /// written to it.
     session_path: Option<PathBuf>,
@@ -375,6 +378,7 @@ impl Worker {
             volume,
             muted: saved.muted,
             resume_at: None,
+            failover: None,
             session_path,
             session_saved: String::new(),
             editions: Vec::new(),
@@ -1040,9 +1044,22 @@ impl Worker {
         self.position = Duration::ZERO;
         self.position_at = Instant::now();
         self.jumped_at = Instant::now();
+        self.seek_to_failover(e);
         self.preload_next();
         self.publish_player();
         true
+    }
+
+    /// The entry `e` just started on another source after its last one
+    /// failed mid-track: on from where that one stopped.
+    pub(crate) fn seek_to_failover(&mut self, e: Entry) {
+        let Some((_, at)) = self.failover.filter(|(id, _)| *id == e.id) else { return };
+        log::info!("{}: going on at {} s", e.track, at.as_secs());
+        self.playback.seek(at);
+        self.position = at;
+        self.position_at = Instant::now();
+        self.jumped_at = Instant::now();
+        self.publish_player();
     }
 
     fn play_list(
@@ -1079,6 +1096,7 @@ impl Worker {
 
     fn start(&mut self, e: Entry) {
         self.resume_at = None;
+        self.failover = None;
         let mut e = e;
         // Skip forward over unplayable items rather than stall. With repeat on,
         // `skip_forward` wraps around, so the walk is bounded by the queue
@@ -1169,6 +1187,7 @@ impl Worker {
         self.playback.stop();
         self.playing = None;
         self.playing_source = None;
+        self.failover = None;
         self.status = Status::Stopped;
         self.position = Duration::ZERO;
         self.publish_now_playing();
@@ -1240,7 +1259,11 @@ impl Worker {
                     if self.status == Status::Buffering {
                         self.status = Status::Playing;
                     }
-                    self.position = Duration::ZERO;
+                    // A failover starts where the failed source stopped.
+                    self.position = match self.failover.take() {
+                        Some((failed, at)) if failed == id => at,
+                        _ => Duration::ZERO,
+                    };
                     self.position_at = Instant::now();
                     self.publish_player();
                 }
@@ -1355,6 +1378,13 @@ impl Worker {
                     && let Some((source, _)) = self.playing_source
                 {
                     self.stream_failed(e.track, source, &message);
+                }
+                // Where the engine had got to (what it last reported, not
+                // the extrapolation: a stream that runs dry stands still).
+                if let Some(e) = playing
+                    && !self.position.is_zero()
+                {
+                    self.failover = Some((e.id, self.position));
                 }
                 if let Some(e) = playing
                     && self.try_next_source(e)

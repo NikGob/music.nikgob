@@ -1145,7 +1145,8 @@ impl StreamService for Youtube {
             let task = tokio::task::spawn_blocking(move || -> Result<PathBuf, StreamError> {
                 let io = |e: std::io::Error| StreamError::Network(e.to_string());
                 let mut bytes = Vec::new();
-                s.read_to_end(&mut bytes).map_err(io)?;
+                // A stream refused is not a lost connection (see `range`).
+                s.read_to_end(&mut bytes).map_err(|e| range::stream_error(&e))?;
                 let ext = if s.format_hint() == format::WEBM {
                     "opus"
                 } else {

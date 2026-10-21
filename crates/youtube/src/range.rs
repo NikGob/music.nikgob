@@ -14,7 +14,9 @@
 //! running request makes the task drop it and continue at the new position.
 //! Transient failures (network errors, 5xx, a response cut short) are
 //! retried with backoff; a 403/410 (the signed URL expired or was refused)
-//! resolves the stream again and continues at the same offset.
+//! resolves the stream again and continues at the same offset. A final
+//! failure reaches the reader as a [`StreamError`] inside the I/O error, so
+//! a refusal is not taken for a lost connection.
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Range;
@@ -140,7 +142,7 @@ struct State {
     /// Where the reader is (the next byte it wants).
     want: u64,
     /// A final failure; reads of bytes not downloaded return it.
-    error: Option<String>,
+    error: Option<StreamError>,
     closed: bool,
 }
 
@@ -332,7 +334,7 @@ enum Fail {
     /// Worth retrying.
     Transient(String),
     /// Not worth retrying.
-    Fatal(String),
+    Fatal(StreamError),
 }
 
 async fn download(
@@ -344,7 +346,7 @@ async fn download(
     let started = std::time::Instant::now();
     let mut resolved = match resolve().await {
         Ok(r) => r,
-        Err(e) => return fail(&shared, format!("cannot resolve the stream: {e}")),
+        Err(e) => return fail(&shared, "cannot resolve the stream", e),
     };
     log::debug!(
         "youtube: stream resolved in {} ms (itag {}, {} bytes)",
@@ -413,13 +415,23 @@ async fn download(
                     resolves + 1
                 };
                 if resolves > MAX_RESOLVES {
-                    return fail(&shared, "stream URL keeps being refused (HTTP 403)".into());
+                    return fail(
+                        &shared,
+                        "stream URL keeps being refused",
+                        StreamError::Http { status: 403 },
+                    );
                 }
                 log::info!("youtube: stream URL refused, resolving again");
                 match resolve().await {
                     Ok(r) if r.len == resolved.len => resolved = r,
-                    Ok(_) => return fail(&shared, "stream changed size on re-resolve".into()),
-                    Err(e) => return fail(&shared, format!("cannot resolve the stream: {e}")),
+                    Ok(_) => {
+                        return fail(
+                            &shared,
+                            "re-resolved",
+                            StreamError::Parse("stream changed size on re-resolve".into()),
+                        );
+                    }
+                    Err(e) => return fail(&shared, "cannot resolve the stream", e),
                 }
                 continue;
             }
@@ -430,17 +442,26 @@ async fn download(
                     attempts + 1
                 };
                 if attempts >= MAX_ATTEMPTS {
-                    return fail(&shared, e);
+                    return fail(&shared, "giving up", StreamError::Network(e));
                 }
                 log::debug!("youtube: stream request failed ({e}), retrying");
                 tokio::time::sleep(Duration::from_millis(200 << attempts)).await;
                 continue;
             }
-            Err(Fail::Fatal(e)) => return fail(&shared, e),
+            Err(Fail::Fatal(e)) => return fail(&shared, "stream request", e),
         }
         attempts = 0;
         resolves = 0;
     }
+}
+
+/// What a read of an [`HttpStream`] failed of: the stream's own failure,
+/// else the I/O error as a network one.
+pub(crate) fn stream_error(e: &io::Error) -> StreamError {
+    e.get_ref()
+        .and_then(|e| e.downcast_ref::<StreamError>())
+        .cloned()
+        .unwrap_or_else(|| StreamError::Network(e.to_string()))
 }
 
 /// Bytes downloaded so far.
@@ -448,8 +469,8 @@ fn progress(shared: &Shared) -> u64 {
     shared.lock().have.0.iter().map(|r| r.end - r.start).sum()
 }
 
-fn fail(shared: &Shared, e: String) {
-    log::warn!("youtube: stream failed: {e}");
+fn fail(shared: &Shared, what: &str, e: StreamError) {
+    log::warn!("youtube: stream failed: {what}: {e}");
     shared.lock().error = Some(e);
     shared.arrived.notify_all();
 }
@@ -477,7 +498,7 @@ async fn fetch(
         200 => range.start,
         403 | 410 => return Err(Fail::Expired),
         408 | 429 | 500..=599 => return Err(Fail::Transient(format!("HTTP {status}"))),
-        _ => return Err(Fail::Fatal(format!("stream answered HTTP {status}"))),
+        _ => return Err(Fail::Fatal(StreamError::Http { status })),
     };
     let mut resp = resp;
     let mut at = range.start;
@@ -532,6 +553,8 @@ mod tests {
         Truncate,
         /// 403 unless the URL is a re-resolved one.
         RefuseOldUrl,
+        /// 403 whatever the URL.
+        Refuse,
         NotFound,
     }
 
@@ -593,7 +616,7 @@ mod tests {
             }
         }
         log.lock().unwrap().push((path.clone(), start, end));
-        let refuse = answer == Answer::RefuseOldUrl && path == "/v1";
+        let refuse = answer == Answer::Refuse || (answer == Answer::RefuseOldUrl && path == "/v1");
         if refuse || answer == Answer::NotFound {
             let status = if refuse {
                 "403 Forbidden"
@@ -730,7 +753,15 @@ mod tests {
         let server = serve(fixture(1000), |_| Answer::NotFound);
         let mut s = open(&rt, server.port, 1000, &resolves);
         let e = s.read(&mut [0; 4]).unwrap_err();
-        assert!(e.to_string().contains("404"), "{e}");
+        assert_eq!(stream_error(&e), StreamError::Http { status: 404 });
+        // Refused even after resolving again: a refusal, not a lost
+        // connection.
+        let server = serve(fixture(1000), |_| Answer::Refuse);
+        let mut s = open(&rt, server.port, 1000, &resolves);
+        let e = s.read(&mut [0; 4]).unwrap_err();
+        assert_eq!(stream_error(&e), StreamError::Http { status: 403 });
+        let other = io::Error::new(io::ErrorKind::TimedOut, "stream download stalled");
+        assert!(matches!(stream_error(&other), StreamError::Network(_)));
         // Seeking before the start is refused.
         assert!(s.seek(SeekFrom::Current(-1)).is_err());
     }
