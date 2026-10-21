@@ -51,6 +51,9 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
             p.auto_download_limit = v as u32;
         }
     });
+    row(ui, Id::DownloadToasts, "Уведомления о загрузках", Some("Нашлось, не нашлось, скачалось"), |ui| {
+        ui.add(Switch::new(&mut p.download_toasts).id_salt("set-download-toasts"));
+    });
 
     group(ui, "Плейлисты");
     row(
@@ -672,9 +675,10 @@ fn torrents(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
                     api_key: std::mem::take(&mut pages.indexer_key).trim().to_owned(),
                 });
             }
-            // Whether Prowlarr answers with what is saved (no search).
+            // Whether Prowlarr answers with what is typed, or else saved (no search).
             let checking = state.indexer_check.as_ref().is_some_and(|c| c.checking);
-            if p.prowlarr_configured
+            let typed = !pages.indexer_url.trim().is_empty() && !pages.indexer_key.trim().is_empty();
+            if (p.prowlarr_configured || typed)
                 && ui
                     .add(
                         Button::new("Проверить")
@@ -684,7 +688,10 @@ fn torrents(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
                     )
                     .clicked()
             {
-                out.push(Command::CheckIndexer);
+                out.push(Command::CheckIndexer {
+                    url: pages.indexer_url.trim().to_owned(),
+                    api_key: pages.indexer_key.trim().to_owned(),
+                });
             }
         });
         // The answer, in words; a failure in the error colour (it is one).

@@ -882,6 +882,10 @@ pub struct Prefs {
     pub library_only_downloaded: bool,
     /// How many wishlist items search / download at once on their own.
     pub auto_download_limit: u32,
+    /// Toasts about downloads going on by themselves: a release not found, a
+    /// torrent started or finished. Off: that is only in «Загрузки» and «Хочу
+    /// скачать».
+    pub download_toasts: bool,
     /// Size limit of the stream audio cache per service, in MB (0 = off):
     /// recently played YouTube files and Spotify's encrypted files.
     pub stream_cache_mb: u32,
@@ -1326,8 +1330,10 @@ pub enum Command {
     MoveMastersDir(PathBuf),
     /// Prowlarr address and API key (stored in settings.toml, never shown again).
     SetIndexer { url: String, api_key: String },
-    /// Asks Prowlarr whether it answers ([`ViewState::indexer_check`]).
-    CheckIndexer,
+    /// Asks Prowlarr whether it answers ([`ViewState::indexer_check`]) at the
+    /// address and key typed in the settings (not saved yet); an empty address
+    /// checks the saved one, an empty key uses the saved key.
+    CheckIndexer { url: String, api_key: String },
     /// MusicBrainz contact and AcoustID key (stored in settings.toml).
     SetMetadata { contact: String, acoustid_key: Option<String> },
     DismissToast(u64),
@@ -1564,6 +1570,7 @@ impl Default for Prefs {
             push_likes: true,
             library_only_downloaded: false,
             auto_download_limit: 2,
+            download_toasts: false,
             stream_cache_mb: 500,
             spotify_personal_app: false,
             youtube_cookies_set: false,

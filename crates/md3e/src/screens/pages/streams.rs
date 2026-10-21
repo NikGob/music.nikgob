@@ -241,6 +241,7 @@ fn track_menu(key: egui::Id, t: &StreamTrackRow, wished: Option<WishlistStatus>)
         .item(MenuItem::new("Поделиться").icon(Icon::Share))
         .divider()
         .item(MenuItem::new(download).icon(Icon::Download).enabled(can))
+        .item(MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(t.album_id.is_some()))
 }
 
 fn track_pick(
@@ -262,6 +263,12 @@ fn track_pick(
         6 => out.push(Command::Share(ShareTarget::StreamTrack(t.remote.clone()))),
         // Download without a like: the like stays the ♡'s.
         7 => out.push(Command::DownloadStream { tracks: vec![t.remote.clone()] }),
+        // The whole album the track is from, without a like.
+        8 => {
+            if let Some(a) = t.album_id.clone() {
+                out.push(Command::DownloadStreamAlbum(a));
+            }
+        }
         _ => {}
     }
     None

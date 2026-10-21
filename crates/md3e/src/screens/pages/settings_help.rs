@@ -112,6 +112,7 @@ pub enum SettingId {
     LikeDownload,
     PushLikes,
     AutoDownloads,
+    DownloadToasts,
     PlaylistSync,
     ImportSpotify,
     ImportYouTube,
@@ -189,7 +190,7 @@ impl SettingId {
             }
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
             Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
-            | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | PlaylistSync | ImportSpotify
+            | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | DownloadToasts | PlaylistSync | ImportSpotify
             | ImportYouTube | ImportFiles | StreamCache | StreamAnalysis | Prowlarr | NoSeed | SeedLimit | SeedDays
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
             _ => TAB_GENERAL,
@@ -282,6 +283,7 @@ impl SettingId {
             LikeDownload => "Что скачивать, когда лайкаешь трек из стрима: только его (вырезается из раздачи альбома), сразу весь альбом или ничего — тогда лайк остаётся только лайком. Лайк альбома качает весь альбом. «Скачать» у трека или альбома качает всегда, без лайка.",
             PushLikes => "Лайк здесь ставится и в Spotify / YouTube Music, а снятый лайк снимается и там. Только для треков, которые есть в сервисе.",
             AutoDownloads => "Сколько треков из «Хочу скачать» ищутся и качаются одновременно сами. Меньше — тише для сети.",
+            DownloadToasts => "Всплывающие сообщения о загрузках, которые идут сами: раздача не нашлась, начала качаться, скачалась. Выключено — всё это видно только в «Загрузках» и «Хочу скачать».",
             PlaylistSync => "Как новый плейлист, связанный с сервисом, следит за ним. У каждого плейлиста это можно поменять в его меню ⋮.",
             ImportSpotify => "Забирает из Spotify свои плейлисты и недавние прослушивания. Лайки приходят сами сразу после входа. Плейлисты появятся в библиотеке, их треки ждут в «Хочу скачать».",
             ImportYouTube => "То же из YouTube Music: плейлисты и история. Лайки приходят сами после входа.",

@@ -909,7 +909,8 @@ fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId) -> Menu 
         .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
         .item(MenuItem::new(super::RADIO_BY_TRACK).icon(Icon::Radio))
         .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()))
-        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()));
+        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()))
+        .item(MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(track.release_id.is_some()));
     // A clip: its song by hand; a stream from YouTube: another version.
     if let Some(find) = crate::screens::find_song::label(track) {
         m = m.item(MenuItem::new(find).icon(Icon::MusicNote));
@@ -946,8 +947,13 @@ fn playlist_track_pick(
         4 => return track.release_id.map(Route::Release),
         // Several artists: a chooser.
         5 => return artist_links::go_to(ctx, artist_links::library(&track.artists)),
-        6 if find => out.push(Command::FindSong { track: track.id, query: None }),
-        6 | 7 => out.push(Command::RemoveFromPlaylist(playlist, track.id)),
+        6 => {
+            if let Some(r) = track.release_id {
+                out.push(Command::DownloadRelease(r));
+            }
+        }
+        7 if find => out.push(Command::FindSong { track: track.id, query: None }),
+        7 | 8 => out.push(Command::RemoveFromPlaylist(playlist, track.id)),
         _ => {}
     }
     None

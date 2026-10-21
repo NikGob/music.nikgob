@@ -856,7 +856,7 @@ impl Worker {
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
-            Command::CheckIndexer => self.check_indexer(),
+            Command::CheckIndexer { url, api_key } => self.check_indexer(url, api_key),
             Command::DismissToast(id) => {
                 self.publish(|s, _| s.toasts.retain(|t| t.id != id));
             }
@@ -1887,7 +1887,7 @@ impl Worker {
                 );
                 // Whether it answers, right away (the settings show it).
                 if usable {
-                    self.check_indexer();
+                    self.check_indexer(String::new(), String::new());
                 }
             }
             Err(e) => {

@@ -475,7 +475,9 @@ impl Worker {
                 if let Err(e) = self.lib.put_download(&d) {
                     log::warn!("saving download: {e}");
                 }
-                self.toast(format!("Качается: {name}"), None);
+                if self.state.read().prefs.download_toasts {
+                    self.toast(format!("Качается: {name}"), None);
+                }
                 self.poll_torrents();
             }
             Err(e) => {
@@ -647,7 +649,9 @@ impl Worker {
         });
         self.torrents.history.truncate(100);
         self.torrents.last_view = None;
-        self.toast(format!("Скачано: {}", t.name), None);
+        if self.state.read().prefs.download_toasts {
+            self.toast(format!("Скачано: {}", t.name), None);
+        }
         // Downloaded for a wishlist item: its files become the item's tracks.
         let targets = self
             .lib

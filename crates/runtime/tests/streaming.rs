@@ -329,6 +329,8 @@ fn no_torrent_is_reported_and_a_dismissed_item_never_comes_back() {
         payload: None,
         asked: Mutex::new(Vec::new()),
     }));
+    // Download toasts are off by default.
+    r.rt.send(Command::SetPrefs(Box::new(Prefs { download_toasts: true, ..Prefs::default() })));
     r.rt.send(Command::Like(LikeTarget::Track(track), true));
     wait_for(&r.rt, "the toast", |s| s.toasts.iter().any(|t| t.text.starts_with("Не нашёл раздачу")));
     let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();

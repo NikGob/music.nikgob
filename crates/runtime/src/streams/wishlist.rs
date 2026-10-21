@@ -897,7 +897,7 @@ impl Worker {
         }) else {
             return;
         };
-        if tell {
+        if tell && self.state.read().prefs.download_toasts {
             let what = match (&item.artist, &item.title) {
                 (Some(a), Some(t)) => format!("{a} — {t}"),
                 (_, Some(t)) => t.clone(),

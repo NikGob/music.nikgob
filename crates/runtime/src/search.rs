@@ -197,14 +197,22 @@ impl Worker {
         });
     }
 
-    /// `Command::CheckIndexer`: asks Prowlarr whether it answers (no search).
-    pub(crate) fn check_indexer(&mut self) {
-        let Some(indexer) = self.indexer.clone() else {
-            self.publish(|s, _| {
-                s.indexer_check =
-                    Some(v::IndexerCheck { checking: false, ok: false, text: "Prowlarr не настроен".into() });
-            });
-            return;
+    /// `Command::CheckIndexer`: asks Prowlarr whether it answers (no search),
+    /// at the typed address and key when there are any, else at the saved ones.
+    pub(crate) fn check_indexer(&mut self, url: String, api_key: String) {
+        let indexer = if url.trim().is_empty() {
+            self.indexer.clone().ok_or("Prowlarr не настроен")
+        } else {
+            self.typed_indexer(url, api_key)
+        };
+        let indexer = match indexer {
+            Ok(i) => i,
+            Err(text) => {
+                self.publish(|s, _| {
+                    s.indexer_check = Some(v::IndexerCheck { checking: false, ok: false, text: text.into() });
+                });
+                return;
+            }
         };
         let Some(svc) = &self.import else { return };
         let tx = svc.internal();
@@ -217,6 +225,22 @@ impl Worker {
         self.publish(|s, _| {
             s.indexer_check = Some(v::IndexerCheck { checking: true, ok: false, text: "Проверяю…".into() });
         });
+    }
+
+    /// Prowlarr at an address typed in the settings; an empty key is the saved one.
+    fn typed_indexer(&self, url: String, api_key: String) -> Result<Arc<dyn Indexer>, &'static str> {
+        let api_key = if api_key.trim().is_empty() {
+            let saved = self.settings_path.as_deref().and_then(|p| nikgob_core::settings::Settings::load(p).ok());
+            match saved.and_then(|s| s.indexer.prowlarr) {
+                Some(p) => p.api_key,
+                None => return Err("Введи API-ключ Prowlarr"),
+            }
+        } else {
+            api_key
+        };
+        nikgob_indexer_prowlarr::Prowlarr::new(&nikgob_core::settings::ProwlarrSettings { url, api_key })
+            .map(|p| Arc::new(p) as Arc<dyn Indexer>)
+            .map_err(|_| "Адрес Prowlarr не подходит — нужен http:// или https://")
     }
 
     pub(crate) fn indexer_checked(&mut self, r: Result<usize, nikgob_core::indexer::IndexerError>) {

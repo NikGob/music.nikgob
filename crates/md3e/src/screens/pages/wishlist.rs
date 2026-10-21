@@ -466,6 +466,7 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
             .align_right(true)
             .item(MenuItem::new("Скачать сейчас").icon(Icon::Download).enabled(matches!(r.status, St::Waiting | St::NoTorrent | St::Failed)))
             .item(MenuItem::new("Искать снова").icon(Icon::Refresh).enabled(r.status != St::Downloading))
+            .item(MenuItem::new("Скачать весь альбом").icon(Icon::Album).enabled(r.scope == WishlistScope::Track && r.release.is_some()))
             .divider()
             .item(MenuItem::new("Сохранить с YouTube").icon(Icon::Download).enabled(r.can_save_from_youtube))
             .item(MenuItem::new("Свой .torrent…").icon(Icon::AttachFile))
@@ -482,9 +483,15 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
     match picked {
         Some(0) => out.push(Command::WishlistDownload(WishlistSelect::Items(vec![id]))),
         Some(1) => out.push(Command::WishlistRetry(id)),
-        Some(2) => out.push(Command::WishlistSaveFromYoutube(id)),
-        Some(7) => out.push(Command::WishlistDismiss(vec![id])),
-        Some(i) => attach_pick(i, r, pages, out),
+        Some(2) => {
+            if let Some(rel) = r.release {
+                out.push(Command::DownloadRelease(rel));
+            }
+        }
+        Some(3) => out.push(Command::WishlistSaveFromYoutube(id)),
+        Some(8) => out.push(Command::WishlistDismiss(vec![id])),
+        // «Скачать весь альбом» sits before the hand-made ways in.
+        Some(i) => attach_pick(i - 1, r, pages, out),
         None => {}
     }
 }

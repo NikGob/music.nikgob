@@ -246,6 +246,7 @@ impl PageState {
             .item(MenuItem::new("Источник и качество").icon(Icon::Info))
             .item(MenuItem::new("Поделиться").icon(Icon::Share))
             .item(MenuItem::new(fetch).icon(fetch_icon))
+            .item(MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(track.release_id.is_some()))
             .item(MenuItem::new(if track.has_local { "Найти качество лучше…" } else { "Искать раздачу…" }).icon(Icon::Search));
         // A clip: its song by hand; a stream from YouTube: another version.
         if let Some(find) = super::find_song::label(track) {
@@ -278,11 +279,11 @@ impl PageState {
         };
         // The deletes come after the optional «Найти песню…».
         let picked = match picked {
-            9 if find => {
+            10 if find => {
                 out.push(Command::FindSong { track: track.id, query: None });
                 return None;
             }
-            n if find && n > 9 => n - 1,
+            n if find && n > 10 => n - 1,
             n => n,
         };
         match picked {
@@ -298,14 +299,20 @@ impl PageState {
             6 => out.push(Command::Share(nikgob_view::ShareTarget::Track(track.id))),
             7 if track.has_local => out.push(Command::OpenTagEditor(track.id)),
             7 => out.push(Command::DownloadTracks(vec![track.id])),
-            8 => out.push(Command::SearchTorrents(format!(
+            // The whole album the track is from, the files it lacks.
+            8 => {
+                if let Some(r) = track.release_id {
+                    out.push(Command::DownloadRelease(r));
+                }
+            }
+            9 => out.push(Command::SearchTorrents(format!(
                 "{} {}{}",
                 track.artist,
                 track.album.as_deref().unwrap_or(&track.title),
                 if track.has_local { " FLAC" } else { "" }
             ))),
-            9 => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
-            10 => self.confirm_purge = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
+            10 => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
+            11 => self.confirm_purge = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
             _ => {}
         }
         None
