@@ -1,6 +1,7 @@
 //! Tracks with stream sources: the engine is asked for the best registered
 //! source (local > Spotify > YouTube), the player reads Buffering until the
-//! engine starts it, and a source that fails to open falls back to the next.
+//! engine starts it, a source that fails to open falls back to the next,
+//! and one that fails mid-track hands over where it stopped.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,8 +12,8 @@ use nikgob_library::Library;
 use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent, Runtime, RuntimeConfig};
 use nikgob_view::{Command, Prefs, Status};
 
-/// Remembers what the engine was asked to play.
-struct Recorder(Arc<Mutex<Vec<PlayRequest>>>);
+/// Remembers what the engine was asked to play, and the seeks.
+struct Recorder(Arc<Mutex<Vec<PlayRequest>>>, Arc<Mutex<Vec<Duration>>>);
 
 impl Playback for Recorder {
     fn play(&mut self, item: PlayRequest) {
@@ -22,7 +23,9 @@ impl Playback for Recorder {
     fn pause(&mut self) {}
     fn resume(&mut self) {}
     fn stop(&mut self) {}
-    fn seek(&mut self, _: Duration) {}
+    fn seek(&mut self, position: Duration) {
+        self.1.lock().unwrap().push(position);
+    }
     fn set_volume(&mut self, _: f32) {}
     fn position(&self) -> Duration {
         Duration::ZERO
@@ -51,11 +54,13 @@ fn find(service: &FakeService, id: &str) -> StreamTrack {
 struct Rig {
     rt: Runtime,
     asked: Arc<Mutex<Vec<PlayRequest>>>,
+    seeks: Arc<Mutex<Vec<Duration>>>,
 }
 
 impl Rig {
     fn start(lib: Library, streams: Vec<Arc<dyn StreamService>>) -> Self {
         let asked = Arc::new(Mutex::new(Vec::new()));
+        let seeks = Arc::new(Mutex::new(Vec::new()));
         let rt = Runtime::start(
             RuntimeConfig {
                 library: lib,
@@ -66,10 +71,10 @@ impl Rig {
                 settings_path: None,
                 import: None,
             },
-            Box::new(Recorder(asked.clone())),
+            Box::new(Recorder(asked.clone(), seeks.clone())),
             Arc::new(|| {}),
         );
-        Self { rt, asked }
+        Self { rt, asked, seeks }
     }
 
     fn play(&self, track: TrackId) {
@@ -88,6 +93,21 @@ impl Rig {
 
     fn status(&self) -> Status {
         self.rt.state().player.status
+    }
+
+    fn position(&self) -> Duration {
+        self.rt.state().player.position
+    }
+
+    /// The engine started `id` and played it up to `at`.
+    fn played_to(&self, id: u64, at: Duration) {
+        let tx = self.rt.playback_sender();
+        tx.send(PlaybackEvent::Started { id }).unwrap();
+        wait_for("playing", || self.status() == Status::Playing);
+        // A report right after a start is taken for a stale one.
+        std::thread::sleep(Duration::from_millis(600));
+        tx.send(PlaybackEvent::Position { id, position: at }).unwrap();
+        wait_for("the position", || self.position() >= at);
     }
 }
 
@@ -215,4 +235,75 @@ fn without_services_a_stream_only_track_is_not_playable() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(rig.asked.lock().unwrap().is_empty());
     assert_eq!(rig.status(), Status::Stopped);
+}
+
+#[test]
+fn a_stream_cut_mid_track_goes_on_from_there_on_the_next_source() {
+    let (lib, track) = both_services();
+    let rig = Rig::start(lib, fakes());
+    rig.play(track);
+    let first = rig.asked(0);
+    assert_eq!(first.source, stream(Service::Spotify, "sp-discovery-1"));
+    let at = Duration::from_secs(17);
+    rig.played_to(first.id, at);
+
+    // The stream breaks off 17 s in: YouTube takes over there, not at 0.
+    let tx = rig.rt.playback_sender();
+    tx.send(PlaybackEvent::Error {
+        id: first.id,
+        message: "i/o error: stream URL keeps being refused (HTTP 403)".into(),
+    })
+    .unwrap();
+    let second = rig.asked(1);
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.source, stream(Service::Youtube, "yt-discovery-1"));
+    assert_eq!(*rig.seeks.lock().unwrap(), vec![at]);
+    wait_for("buffering again", || rig.status() == Status::Buffering);
+    assert!(rig.position() >= at, "{:?}", rig.position());
+
+    // Its start keeps the position.
+    tx.send(PlaybackEvent::Started { id: second.id }).unwrap();
+    wait_for("playing again", || rig.status() == Status::Playing);
+    let p = rig.position();
+    assert!(p >= at && p < at + Duration::from_secs(2), "{p:?}");
+
+    // A new track starts at the top.
+    rig.play(track);
+    let third = rig.asked(2);
+    assert_ne!(third.id, first.id);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(rig.seeks.lock().unwrap().len(), 1, "no seek for a fresh start");
+}
+
+#[test]
+fn a_copy_cut_mid_track_goes_on_from_there_on_the_copy_found_next() {
+    let lib = Library::open_in_memory().unwrap();
+    // Spotify without sound: the track plays from a YouTube copy it finds,
+    // and YouTube Music has a second one.
+    let track = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-gruppa-1")).unwrap();
+    let youtube = FakeService::youtube()
+        .logged_out()
+        .with_song("gruppa-copy", "Группа крови", "Кино", "Группа крови", 285);
+    let streams: Vec<Arc<dyn StreamService>> =
+        vec![Arc::new(FakeService::spotify().logged_out()), Arc::new(youtube)];
+    let rig = Rig::start(lib, streams);
+    rig.play(track);
+    let first = rig.asked(0);
+    assert!(matches!(&first.source, PlaySource::Stream { service: Service::Youtube, .. }), "{:?}", first.source);
+    let at = Duration::from_secs(17);
+    rig.played_to(first.id, at);
+
+    // That copy breaks off: the next copy found goes on at 17 s.
+    rig.rt
+        .playback_sender()
+        .send(PlaybackEvent::Error {
+            id: first.id,
+            message: "i/o error: stream URL keeps being refused (HTTP 403)".into(),
+        })
+        .unwrap();
+    let second = rig.asked(1);
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.source, stream(Service::Youtube, "yt-x-gruppa-copy"));
+    assert_eq!(*rig.seeks.lock().unwrap(), vec![at]);
+    assert!(rig.position() >= at, "{:?}", rig.position());
 }

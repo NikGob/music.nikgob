@@ -9,6 +9,11 @@
 //! without a PO token. RustyPipe's own player stays as the fallback (it
 //! improves if a `rustypipe-botguard` binary is configured or RustyPipe gets
 //! fixed).
+//!
+//! The player is asked on music.youtube.com, the host everything else of
+//! YouTube Music goes to: a site blocker that turns www.youtube.com away
+//! (a hosts entry) left only the iOS fallback, whose stream stopped after
+//! the first request, ~15 s into the track.
 
 use std::time::Duration;
 
@@ -20,7 +25,7 @@ use serde_json::json;
 use crate::map_err;
 use crate::range::Resolved;
 
-const PLAYER_URL: &str = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+const PLAYER_URL: &str = "https://music.youtube.com/youtubei/v1/player?prettyPrint=false";
 const VISIONOS_NAME: &str = "VISIONOS";
 const VISIONOS_ID: &str = "101";
 const VISIONOS_VERSION: &str = "1.02";

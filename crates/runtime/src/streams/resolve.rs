@@ -356,7 +356,8 @@ impl Worker {
         self.playing_source = None;
         self.restarted = None;
         self.status = nikgob_view::Status::Buffering;
-        self.position = std::time::Duration::ZERO;
+        // A copy that failed mid-track: the one found goes on from there.
+        self.position = self.failover.filter(|(id, _)| *id == e.id).map_or(std::time::Duration::ZERO, |(_, at)| at);
         self.position_at = Instant::now();
         self.publish_now_playing();
         true
@@ -404,6 +405,7 @@ impl Worker {
             match self.request_skipping(e, &skip) {
                 Some((req, source, kind)) => {
                     self.start_with(e, req, source, kind);
+                    self.seek_to_failover(e);
                     if paused {
                         self.playback.pause();
                         self.status = nikgob_view::Status::Paused;
