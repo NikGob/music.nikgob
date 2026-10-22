@@ -45,6 +45,21 @@ use crate::tags::{self, TagSet};
 /// `meta` key: the repair ran.
 pub const TORRENT_IDENTITY_REPAIR: &str = "torrent_identity_repair.v1";
 
+/// `meta` key: the artists `v1` took from tracks of a soundtrack (its rule
+/// counted a composer other than the album artist as a stranger and gave
+/// the track the album artist) are back ([`Importer::repair_torrent_artists`]).
+pub const TORRENT_ARTIST_REPAIR: &str = "torrent_identity_repair.v2";
+
+/// One track whose own artist came back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtistBack {
+    pub track: TrackId,
+    pub title: String,
+    /// The album artist it had been given, and its own artist again.
+    pub was: String,
+    pub now: String,
+}
+
 /// One track the repair put back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Moved {
@@ -78,6 +93,25 @@ struct FolderFile {
     track: TrackRow,
     /// What its tags, else its name, say.
     said: Identity,
+}
+
+/// A track of a torrent folder the library filed under another album than
+/// the folder's `album`, credited (track and release) to nobody of
+/// `artists`.
+fn scattered(lib: &Library, f: &FolderFile, album: &str, artists: &[String]) -> bool {
+    let on = f.track.album.as_deref().map(album_key).unwrap_or_default();
+    let want = album_key(album);
+    if on == want || same_title(&on, &want) {
+        return false;
+    }
+    let release = f.track.release_id.and_then(|r| lib.get_release(r).ok().flatten());
+    let mut lines = credit_lines(&f.track);
+    lines.extend(release.map(|r| r.artist_credit.display()));
+    let mut theirs = artists.to_vec();
+    if f.said.artist_line != "Unknown Artist" {
+        theirs.push(f.said.artist_line.clone());
+    }
+    !shares_artist(&lines, &theirs)
 }
 
 /// The tags of a torrent file still in Downloads, else what its name says.
@@ -158,9 +192,13 @@ impl Importer {
             if ev.compilation {
                 continue;
             }
+            // Scattered: on a release of another album, under artists that
+            // share nothing with the folder's. A track of the folder's own
+            // album by another artist (a soundtrack's composer, a guest) is
+            // where it belongs.
             let strangers: Vec<&FolderFile> = files
                 .iter()
-                .filter(|f| !shares_artist(&credit_lines(&f.track), &ev.artists))
+                .filter(|f| scattered(lib, f, &album, &ev.artists))
                 .collect();
             if strangers.is_empty() {
                 continue;
@@ -211,13 +249,10 @@ impl Importer {
                     }
                     None => {
                         let Some(mut t) = lib.get_track(f.track.id)? else { continue };
-                        let mut who = said.clone();
-                        if !shares_artist(&[who.artist_line.clone()], &ev.artists) {
-                            who.artist_line = artist.clone();
-                            who.artists = vec![artist.clone()];
-                        }
+                        // The file's own artist (the folder's only when
+                        // its tags name none).
                         t.title = said.title.clone();
-                        t.artist_credit = store.track_credit(&who)?;
+                        t.artist_credit = store.track_credit(&said)?;
                         t.release_id = Some(target.id);
                         t.disc_no = said.disc_no.max(1);
                         t.track_no = said.track_no;
@@ -343,6 +378,80 @@ impl Importer {
         Ok(report)
     }
 
+    /// Undoes what the first rule of [`Self::repair_torrent_identities`]
+    /// did to soundtracks and albums with guests: in a torrent folder whose
+    /// tracks all sit on one release, a track credited to that release's
+    /// artist whose original file (the torrent's, still in Downloads) names
+    /// an artist that shares nothing with it gets that artist back, in the
+    /// library and (with `move_files`) in its file's tags. Runs once per
+    /// library (a `meta` mark), whether or not `v1` ran.
+    pub fn repair_torrent_artists(&self, move_files: bool) -> Result<Vec<ArtistBack>> {
+        let lib = self.library().clone();
+        if lib.meta_value(TORRENT_ARTIST_REPAIR)?.is_some() {
+            return Ok(Vec::new());
+        }
+        let back = self.restore_artists(&lib, move_files)?;
+        lib.set_meta_value(TORRENT_ARTIST_REPAIR, &nikgob_library::now_ms().to_string())?;
+        *self.inner.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Store::new(lib);
+        Ok(back)
+    }
+
+    fn restore_artists(&self, lib: &Library, move_files: bool) -> Result<Vec<ArtistBack>> {
+        let cfg = self.config();
+        let mut folders: BTreeMap<(String, PathBuf), Vec<(Source, TrackRow)>> = BTreeMap::new();
+        for source in lib.torrent_sources()? {
+            let SourceOrigin::Torrent { info_hash, path_in_torrent } = &source.origin else { continue };
+            if path_in_torrent.is_empty() {
+                continue;
+            }
+            let Some(track) = lib.get_track_row(source.track_id)? else { continue };
+            let dir = album_group_dir(Path::new(path_in_torrent));
+            folders.entry((info_hash.clone(), dir)).or_default().push((source, track));
+        }
+        let mut back = Vec::new();
+        let mut store = Store::new(lib.clone());
+        for files in folders.values() {
+            let Some(release) = files[0].1.release_id else { continue };
+            if files.iter().any(|(_, t)| t.release_id != Some(release)) {
+                continue;
+            }
+            let Some(r) = lib.get_release(release)? else { continue };
+            let album_artist = r.artist_credit.display();
+            for (source, track) in files {
+                let SourceOrigin::Torrent { path_in_torrent, .. } = &source.origin else { continue };
+                if nikgob_metadata::text::artist_key(&track.artist) != nikgob_metadata::text::artist_key(&album_artist) {
+                    continue;
+                }
+                let file = cfg.downloads_dir.join(path_in_torrent);
+                if !long_path(&file).exists() {
+                    continue;
+                }
+                let Ok((tags, _)) = tags::read_tags(&file) else { continue };
+                let Some(own) = tags.artist.clone().filter(|a| !a.trim().is_empty()) else { continue };
+                if shares_artist(&[own.clone()], &[track.artist.clone()]) {
+                    continue;
+                }
+                if move_files && lib.active_source(track.id)?.is_some_and(|s| s.kind.is_local() && long_path(Path::new(&s.locator)).exists()) {
+                    let changes = TagChanges {
+                        artist: Some(own.clone()),
+                        album_artist: Some(album_artist.clone()),
+                        keep_album_artist: true,
+                        ..TagChanges::default()
+                    };
+                    self.retag(track.id, changes)?;
+                } else {
+                    let Some(mut t) = lib.get_track(track.id)? else { continue };
+                    let mut id = identity_from_tags(&tags, &file);
+                    id.artist_line = own.clone();
+                    t.artist_credit = store.track_credit(&id)?;
+                    lib.upsert_track(&t)?;
+                }
+                back.push(ArtistBack { track: track.id, title: track.title.clone(), was: track.artist.clone(), now: own });
+            }
+        }
+        Ok(back)
+    }
+
     /// Rewrites the tags of a track's file from the library and moves it
     /// where PLAN §5 puts it. Returns whether the file moved.
     fn place_file(&self, lib: &Library, track: TrackId) -> Result<bool> {
@@ -361,6 +470,7 @@ impl Importer {
             track_no: Some((row.track_no > 0).then_some(row.track_no)),
             disc_no: Some(Some(row.disc_no.max(1))),
             release_mbid: release.as_ref().map(|r| r.mbid.clone().unwrap_or_default()),
+            keep_album_artist: true,
             ..TagChanges::default()
         };
         let new = self.retag(track, changes)?;

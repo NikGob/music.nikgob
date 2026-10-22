@@ -38,6 +38,7 @@ fn changes(e: v::TagEdit) -> nikgob_import::TagChanges {
         genre: Some(e.genre),
         recording_mbid: (!e.recording_mbid.is_empty()).then_some(e.recording_mbid),
         release_mbid: (!e.release_mbid.is_empty()).then_some(e.release_mbid),
+        keep_album_artist: false,
     }
 }
 

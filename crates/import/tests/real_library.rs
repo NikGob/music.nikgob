@@ -65,7 +65,12 @@ fn repairs_of_a_real_library() {
     // Torrent folders scattered over strangers: back to their album. The
     // importer's folders point into the temporary directory, so no file of
     // the real library is read or touched: the evidence is the names.
-    let cfg = nikgob_import::ImportConfig::with_root(dir.path().join("root"));
+    let mut cfg = nikgob_import::ImportConfig::with_root(dir.path().join("root"));
+    // With NIKGOB_REAL_DOWNLOADS the torrents' own files are read (their
+    // tags only); without it the evidence is the names.
+    if let Some(d) = std::env::var_os("NIKGOB_REAL_DOWNLOADS") {
+        cfg.downloads_dir = d.into();
+    }
     let importer = nikgob_import::Importer::new(cfg, lib.clone(), None);
     let cards = releases(&lib);
     let artists = lib.count_artists().unwrap();
@@ -124,4 +129,45 @@ fn repairs_of_a_real_library() {
             g.new_songs
         );
     }
+}
+
+/// The artist repair (`torrent_identity_repair.v2`) on a copy of a real
+/// library, reading the tags of the torrents' files (and nothing else) in
+/// `NIKGOB_REAL_DOWNLOADS`: `NIKGOB_REAL_LIBRARY=… NIKGOB_REAL_DOWNLOADS=…
+/// cargo test -p nikgob-import --test real_library artist -- --ignored
+/// --nocapture`. Only the database copy changes.
+#[test]
+#[ignore = "needs NIKGOB_REAL_LIBRARY and NIKGOB_REAL_DOWNLOADS"]
+fn artist_repair_of_a_real_library() {
+    let (Some(src), Some(downloads)) = (std::env::var_os("NIKGOB_REAL_LIBRARY"), std::env::var_os("NIKGOB_REAL_DOWNLOADS")) else {
+        eprintln!("NIKGOB_REAL_LIBRARY or NIKGOB_REAL_DOWNLOADS is not set");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("library.sqlite");
+    std::fs::copy(&src, &db).unwrap();
+    for ext in ["-wal", "-shm"] {
+        let mut side = src.clone();
+        side.push(ext);
+        if std::path::Path::new(&side).exists() {
+            let mut to = db.clone().into_os_string();
+            to.push(ext);
+            std::fs::copy(&side, to).unwrap();
+        }
+    }
+    let lib = Library::open(&db).unwrap();
+    let artists = lib.count_artists().unwrap();
+    let mut cfg = nikgob_import::ImportConfig::with_root(dir.path().join("root"));
+    cfg.downloads_dir = downloads.into();
+    let importer = nikgob_import::Importer::new(cfg, lib.clone(), None);
+    let mut changes: std::collections::BTreeMap<String, usize> = Default::default();
+    let back = importer.repair_torrent_artists(false).unwrap();
+    println!("v2: {} tracks get their own artist back", back.len());
+    for b in &back {
+        println!("  {:?}: {} -> {}", b.title, b.was, b.now);
+        *changes.entry(b.now.clone()).or_default() += 1;
+    }
+    println!("  by artist: {changes:?}");
+    println!("artists: {artists} -> {}", lib.count_artists().unwrap());
+    assert!(importer.repair_torrent_artists(false).unwrap().is_empty(), "once");
 }

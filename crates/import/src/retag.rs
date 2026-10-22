@@ -28,6 +28,10 @@ pub struct TagChanges {
     pub genre: Option<String>,
     pub recording_mbid: Option<String>,
     pub release_mbid: Option<String>,
+    /// The album artist stays as it is even when the artist changes from
+    /// the same name (a repair gives a soundtrack's track its composer
+    /// back; the editor's renamed artist takes the album along).
+    pub keep_album_artist: bool,
 }
 
 fn opt(s: String) -> Option<String> {
@@ -148,10 +152,11 @@ impl Importer {
         let (mut set, _) = tags::read_tags(&path)?;
         let (old_artist, old_aa) = (set.artist.clone(), set.album_artist.clone());
         let before = set.clone();
+        let keep_aa = changes.keep_album_artist;
         changes.apply(&mut set);
         // The album artist follows a renamed artist when it was the same
         // person (or a placeholder) and the editor left it alone.
-        let aa_untouched = set.album_artist == old_aa;
+        let aa_untouched = set.album_artist == old_aa && !keep_aa;
         let aa_follows = old_aa.is_none()
             || old_aa == old_artist
             || old_aa.as_deref().is_some_and(|a| a.eq_ignore_ascii_case("Unknown Artist"));

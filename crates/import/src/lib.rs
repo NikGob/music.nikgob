@@ -33,7 +33,7 @@ pub use error::{ImportError, Result};
 pub use events::{ConfirmItem, ConfirmOption, ImportEvent, ItemId, JobId, Stage};
 pub use importer::{FileOutcome, ImportJob, Importer, RelocateReport, relocate_masters};
 pub use rebuild::{EditionGroup, RebuildReport, find_release_editions, fold_editions, merge_split_releases, rebuild_from_files};
-pub use repair::{IdentityRepair, Moved, TORRENT_IDENTITY_REPAIR, release_files};
+pub use repair::{ArtistBack, IdentityRepair, Moved, TORRENT_ARTIST_REPAIR, TORRENT_IDENTITY_REPAIR, release_files};
 pub use retag::TagChanges;
 pub use spectrum::{SpectrumReport, Verdict};
 pub use trash::{

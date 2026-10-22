@@ -398,3 +398,73 @@ async fn a_torrent_album_scattered_over_strangers_goes_back_together_once() {
     }
     assert!(importer.repair_torrent_identities(true).unwrap().moved.is_empty(), "once");
 }
+
+/// A soundtrack's torrent: album artist OMORI, each track by its composer.
+fn omori(root: &Root) -> std::path::PathBuf {
+    let files = [(1, "Title", 3.0), (2, "By Your Side.", 4.0), (3, "Final Duet", 3.0)];
+    let composers = ["Pedro Silva", "Jami Lynne", "bo en"];
+    torrent_folder(&root, "OMORI OST - Pedro Silva, Jami Lynne, bo en (2020)", &files, |no, title| TagSet {
+        title: Some(title.into()),
+        artist: Some(composers[no as usize - 1].into()),
+        album_artist: Some("OMORI".into()),
+        album: Some("OMORI OST".into()),
+        track_no: Some(no),
+        ..TagSet::default()
+    })
+}
+
+fn artists_of(lib: &Library) -> Vec<String> {
+    let rel = lib.releases(0, 10, nikgob_library::ReleaseSort::asc(Default::default())).unwrap();
+    assert_eq!(rel.len(), 1, "{rel:?}");
+    assert_eq!((rel[0].release.title.as_str(), rel[0].release.artist_credit.display()), ("OMORI OST", "OMORI".to_owned()));
+    lib.tracks_of_release(rel[0].release.id).unwrap().into_iter().map(|t| t.artist).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_soundtrack_keeps_its_composers_and_the_repairs_leave_it_alone() {
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let dir = omori(&root);
+    let events = importer.import_paths(vec![dir], torrent()).wait().await;
+    assert_eq!(imported(&events).len(), 3, "{events:?}");
+    assert_eq!(artists_of(&lib), ["Pedro Silva", "Jami Lynne", "bo en"], "each track keeps its own artist");
+    assert!(importer.repair_torrent_identities(true).unwrap().moved.is_empty(), "nothing is scattered");
+    assert!(importer.repair_torrent_artists(true).unwrap().is_empty());
+    assert_eq!(artists_of(&lib), ["Pedro Silva", "Jami Lynne", "bo en"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_composers_the_first_repair_took_come_back_from_the_torrent_files() {
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let dir = omori(&root);
+    let events = importer.import_paths(vec![dir], torrent()).wait().await;
+    let tracks = imported(&events);
+    assert_eq!(tracks.len(), 3);
+    // What the first rule did: the album artist on two composers' tracks,
+    // in the library and in the files.
+    for t in &tracks {
+        let row = lib.get_track_row(*t).unwrap().unwrap();
+        if row.artist != "Pedro Silva" {
+            let changes = nikgob_import::TagChanges {
+                artist: Some("OMORI".into()),
+                album_artist: Some("OMORI".into()),
+                keep_album_artist: true,
+                ..Default::default()
+            };
+            importer.retag(*t, changes).unwrap();
+        }
+    }
+    assert_eq!(artists_of(&lib), ["Pedro Silva", "OMORI", "OMORI"]);
+
+    let back = importer.repair_torrent_artists(true).unwrap();
+    assert_eq!(back.len(), 2, "{back:?}");
+    assert_eq!(artists_of(&lib), ["Pedro Silva", "Jami Lynne", "bo en"]);
+    for t in &tracks {
+        let src = lib.active_source(*t).unwrap().unwrap();
+        let (tags, _) = tags::read_tags(std::path::Path::new(&src.locator)).unwrap();
+        assert_eq!(tags.album_artist.as_deref(), Some("OMORI"), "the album artist stays");
+        assert_ne!(tags.artist.as_deref(), Some("OMORI"), "the file says its composer again");
+    }
+    assert!(importer.repair_torrent_artists(true).unwrap().is_empty(), "once");
+}

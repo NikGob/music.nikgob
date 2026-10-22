@@ -180,6 +180,13 @@ impl ImportService {
             Ok(_) => {}
             Err(e) => log::warn!("repairing torrent albums: {e}"),
         }
+        // Once: the composers and guests the first rule of that repair
+        // replaced with the album artist get their own names back.
+        match importer.repair_torrent_artists(true) {
+            Ok(b) if !b.is_empty() => log::info!("torrent tracks given their own artist back: {}", b.len()),
+            Ok(_) => {}
+            Err(e) => log::warn!("giving torrent tracks their artists back: {e}"),
+        }
         let mut svc = Self {
             rt,
             importer,
