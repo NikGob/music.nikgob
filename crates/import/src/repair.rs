@@ -364,7 +364,7 @@ impl Importer {
             ..TagChanges::default()
         };
         let new = self.retag(track, changes)?;
-        Ok(new != PathBuf::from(&src.locator))
+        Ok(new.as_path() != Path::new(&src.locator))
     }
 }
 

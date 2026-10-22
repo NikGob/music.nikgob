@@ -103,7 +103,7 @@ impl StoredCandidate {
 pub(crate) enum Choice {
     /// Import with the file's own tags.
     Tags,
-    Candidate(StoredCandidate),
+    Candidate(Box<StoredCandidate>),
     /// Attach the file to this liked stream track (its length is off).
     Stream {
         track: TrackId,
@@ -195,7 +195,7 @@ mod tests {
             origin: SourceOrigin::Torrent { info_hash: "bdc5".into(), path_in_torrent: "A/3.flac".into() },
             targets: ImportTargets::new(vec![TrackId::new()]),
             tags: TagView { title: Some("Cash Machine".into()), ..TagView::default() },
-            choices: vec![Choice::Tags, Choice::Candidate((&cand).into())],
+            choices: vec![Choice::Tags, Choice::Candidate(Box::new((&cand).into()))],
         };
         let back: Payload = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back, p);

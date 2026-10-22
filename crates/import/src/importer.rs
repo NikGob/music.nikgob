@@ -365,7 +365,7 @@ impl Importer {
             let mut read = Vec::new();
             while let Some(res) = set.join_next().await {
                 match res {
-                    Ok(Read::Ready(r)) => read.push(r),
+                    Ok(Read::Ready(r)) => read.push(*r),
                     Ok(Read::Done(o)) => outcomes.push(o),
                     Err(_) => failed += 1,
                 }
@@ -556,7 +556,7 @@ impl Importer {
         &self,
         ctx: &Ctx,
         dir: &Path,
-        mut read: Vec<Box<Pre>>,
+        mut read: Vec<Pre>,
         reference: Option<&Reference>,
     ) -> (Vec<Box<Ready>>, Vec<FileOutcome>, bool) {
         let inner = self.inner.clone();
@@ -596,7 +596,7 @@ impl Importer {
                 settled = true;
             }
         }
-        let open = |ids: &[Option<Identity>], read: &[Box<Pre>]| -> Vec<usize> {
+        let open = |ids: &[Option<Identity>], read: &[Pre]| -> Vec<usize> {
             (0..read.len())
                 .filter(|&i| ids[i].is_none() && !read[i].known && !read[i].fully_tagged)
                 .collect()
@@ -651,13 +651,13 @@ impl Importer {
                 let p = read.remove(i);
                 ids.remove(i);
                 let mut choices = vec![Choice::Tags];
-                choices.extend(options.iter().map(|c| Choice::Candidate(c.into())));
+                choices.extend(options.iter().map(|c| Choice::Candidate(Box::new(c.into()))));
                 parked.push(self.park(ctx, p.analyzed, p.base, choices));
             }
         }
         let mut ready = Vec::with_capacity(read.len());
         for (p, id) in read.into_iter().zip(ids) {
-            let Pre { analyzed, base, known, .. } = *p;
+            let Pre { analyzed, base, known, .. } = p;
             let identity = id.unwrap_or_else(|| base.clone());
             // A liked stream track of another length (TV size, radio edit)
             // is asked about rather than attached silently.

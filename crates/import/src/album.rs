@@ -159,11 +159,11 @@ impl Evidence {
         if base.album_artist.is_none() {
             base.album_artist.clone_from(&self.album_artist);
         }
-        if base.artist_line.trim().is_empty() || base.artist_line == "Unknown Artist" {
-            if let Some(a) = &self.album_artist {
-                base.artist_line = a.clone();
-                base.artists = vec![a.clone()];
-            }
+        if (base.artist_line.trim().is_empty() || base.artist_line == "Unknown Artist")
+            && let Some(a) = &self.album_artist
+        {
+            base.artist_line = a.clone();
+            base.artists = vec![a.clone()];
         }
     }
 
