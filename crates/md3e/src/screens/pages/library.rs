@@ -46,6 +46,10 @@ fn list_view(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(Id::new("lib-list-view"))).unwrap_or(false)
 }
 
+pub(super) fn set_list_view(ctx: &egui::Context, list: bool) {
+    ctx.data_mut(|d| d.insert_temp(Id::new("lib-list-view"), list));
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -140,7 +144,7 @@ fn header(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
                     })
                     .inner;
                 if let Some(i) = picked {
-                    ui.ctx().data_mut(|d| d.insert_temp(Id::new("lib-list-view"), i == 1));
+                    set_list_view(ui.ctx(), i == 1);
                 }
             }
             only_downloaded(ui, state, out);
@@ -541,7 +545,7 @@ fn albums_tab(
     let keys: Vec<String> = shown.iter().map(|r| shelf::group_key(sort, r, now)).collect();
     let groups = shelf::groups(sort, &keys, min);
     let mut nav = None;
-    if groups.len() < 2 {
+    if !shelf::worth_headers(groups.len(), shown.len(), is_list, min) {
         return release_items(ui, &shown, is_list, "grid", out);
     }
     for (n, g) in groups.iter().enumerate() {
@@ -712,7 +716,9 @@ fn meta_badge(ui: &mut Ui, text: &str) {
 /// A fixed-width cell of the list rows' meta, right-aligned so the columns
 /// line up from row to row.
 fn meta_cell(ui: &mut Ui, w: f32, add: impl FnOnce(&mut Ui)) {
-    ui.allocate_ui_with_layout(vec2(w, 40.0), egui::Layout::right_to_left(Align::Center), add);
+    let (rect, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
+    let mut cell = ui.new_child(UiBuilder::new().max_rect(rect).layout(egui::Layout::right_to_left(Align::Center)));
+    add(&mut cell);
 }
 
 /// List view: an album row (cover with ▶ on hover, title, artist; at the

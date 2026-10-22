@@ -124,6 +124,13 @@ pub fn groups(sort: ReleaseSort, keys: &[String], min: usize) -> Vec<Group> {
         .collect()
 }
 
+/// Whether the headers help: a list takes them whenever there are two
+/// groups; a grid only while its groups fill a row on average (a header
+/// over every single card is a column of holes).
+pub fn worth_headers(groups: usize, items: usize, is_list: bool, cols: usize) -> bool {
+    groups >= 2 && (is_list || items >= groups * cols.max(1))
+}
+
 /// The sections of the «Всё» overview, in order; empty ones are left out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overview {
@@ -160,11 +167,10 @@ pub fn overview(c: Counts) -> Vec<Overview> {
     .collect()
 }
 
-/// How many albums the overview's grid shows: two rows, or all when only
-/// a few more would be left behind «Все альбомы».
+/// How many albums the overview's grid shows: two full rows at most (the
+/// rest is behind «Все»).
 pub fn overview_albums(total: usize, cols: usize) -> usize {
-    let first = cols.max(1) * 2;
-    if total <= first + cols.max(1) / 2 { total } else { first }
+    total.min(cols.max(1) * 2)
 }
 
 /// The scheme roles an artist's initials sit in: `(container, on)` pairs
@@ -252,6 +258,16 @@ mod tests {
     }
 
     #[test]
+    fn a_sparse_grid_goes_without_headers() {
+        assert!(!worth_headers(1, 40, true, 6));
+        assert!(worth_headers(5, 13, true, 6));
+        assert!(!worth_headers(5, 13, false, 6));
+        assert!(!worth_headers(5, 13, false, 4));
+        assert!(worth_headers(4, 13, false, 3));
+        assert!(worth_headers(10, 300, false, 6));
+    }
+
+    #[test]
     fn decades_and_dates_never_merge() {
         let now = 400 * DAY_MS;
         let rs = [
@@ -277,7 +293,7 @@ mod tests {
         assert_eq!(overview(small), vec![Overview::Playlists, Overview::Albums, Overview::Artists]);
         assert_eq!(overview(Counts::default()), vec![Overview::Playlists]);
         assert_eq!(overview_albums(40, 6), 12);
-        assert_eq!(overview_albums(14, 6), 14);
+        assert_eq!(overview_albums(13, 6), 12);
         assert_eq!(overview_albums(5, 6), 5);
     }
 

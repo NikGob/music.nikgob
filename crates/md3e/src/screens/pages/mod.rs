@@ -136,7 +136,16 @@ pub struct PageState {
     stream_after_create: Option<(String, Vec<nikgob_view::RemoteId>)>,
 }
 
+/// The library as a list (true) or a grid.
+pub(crate) fn set_library_list(ctx: &Context, list: bool) {
+    library::set_list_view(ctx, list);
+}
+
 impl PageState {
+    pub(crate) fn set_library_filter(&mut self, text: &str) {
+        self.library_filter = text.to_owned();
+    }
+
     /// Opens the "В плейлист" picker for stream tracks.
     pub(crate) fn add_stream_to_playlist(&mut self, tracks: Vec<nikgob_view::RemoteId>, anchor: Option<Rect>) {
         self.pending_add_stream = Some(tracks);
