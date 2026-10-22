@@ -60,43 +60,123 @@ pub enum MixId {
     /// day and named by its sound and time («Тягучий вечер четверга»).
     /// Endless.
     Daylist,
-    /// «На повторе»: what was played most in the last 30 days, as it is.
-    OnRepeat,
-    /// «Год назад»: what was played around this day a year ago, as it is.
-    TimeCapsule,
-    /// «Забытое любимое»: loved songs not played for two months, as they are.
-    Rediscover,
-    /// «Глубже у любимых»: barely played songs of the most played artists,
-    /// as they are.
-    DeepCuts,
-    /// «Свежие лайки»: the songs liked last, newest first, as they are.
-    FreshLikes,
+    /// A smaller tile of the bento: one kind a day, picked anew every day
+    /// ([`TileKind`], docs/stage4.md §12.9); it plays as it is.
+    Tile(TileKind),
 }
 
 impl MixId {
-    /// The mixes of the bento's smaller tiles, in the order they are
-    /// placed ([`crate::HomeView::tiles`]).
-    pub const TILES: [Self; 5] = [Self::OnRepeat, Self::TimeCapsule, Self::Rediscover, Self::DeepCuts, Self::FreshLikes];
-
-    /// The quiet label over a tile's title («НА ПОВТОРЕ»); `None` for the
-    /// cards that are not tiles.
-    pub const fn kicker(self) -> Option<&'static str> {
-        Some(match self {
-            Self::Daylist => "ДЕЙЛИСТ",
-            Self::Daily => "ТВОЙ МИКС",
-            Self::OnRepeat => "НА ПОВТОРЕ",
-            Self::TimeCapsule => "ГОД НАЗАД",
-            Self::Rediscover => "ЗАБЫТОЕ ЛЮБИМОЕ",
-            Self::DeepCuts => "ГЛУБЖЕ У ЛЮБИМЫХ",
-            Self::FreshLikes => "СВЕЖИЕ ЛАЙКИ",
-            Self::Mood(_) | Self::Style(_) | Self::Artist(_) | Self::Discover => return None,
-        })
-    }
-
     /// The mix plays without end (a radio that extends itself); the others
     /// play their tracks as they are.
     pub const fn endless(self) -> bool {
         matches!(self, Self::Mood(_) | Self::Style(_) | Self::Artist(_) | Self::Discover | Self::Daylist)
+    }
+}
+
+/// The kinds of the bento's smaller tiles (docs/stage4.md §12.9), in four
+/// groups: memory, artists, sound, collection. A day shows «На повторе» and
+/// a few others; the kicker and the title come with the card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TileKind {
+    /// «На повторе»: the most completed of the last 30 days.
+    OnRepeat,
+    /// «Год назад»: played around this day a year ago.
+    YearAgo,
+    /// «Лето 2025»: the most played of a past season.
+    Season,
+    /// «Забытое любимое»: loved, not played for two months.
+    Rediscover,
+    /// «С самого начала»: the earliest likes.
+    FirstLikes,
+    /// «Свежие лайки»: liked in the last 30 days, newest first.
+    FreshLikes,
+    /// «Ждут своего часа»: added a week ago or more, never played.
+    Unplayed,
+    /// «Глубже у любимых»: barely played songs of the most played artists.
+    DeepCuts,
+    /// «Исполнитель дня»: the best of one of the top artists.
+    ArtistOfDay,
+    /// «Давно не слышал»: an artist played a lot, then not for 45 days.
+    Comeback,
+    /// «Потому что тебе понравилось»: what sounds like a recent like.
+    BecauseYouLiked,
+    /// «От 7 минут».
+    Long,
+    /// «До 2:30».
+    Short,
+    /// «Со словами»: songs with synced lyrics.
+    SingAlong,
+    /// «Японское», «По-русски»: by the script of the title and artist.
+    Language,
+    /// «Из 2000-х»: by the release year.
+    Decade,
+    /// «Made in Abyss»: the soundtracks of one franchise.
+    Soundtrack,
+    /// «Вечером»: the best of a playlist not opened for a while.
+    Playlist,
+    /// «Дослушай»: albums started and left before half.
+    Unfinished,
+    /// «Ещё не скачано»: liked stream songs without a file (↓ downloads
+    /// them all, [`crate::Command::DownloadMix`]).
+    NotDownloaded,
+    /// «Лотерея»: anything, leaning to the rarely played.
+    Lottery,
+}
+
+impl TileKind {
+    pub const ALL: [Self; 21] = [
+        Self::OnRepeat,
+        Self::YearAgo,
+        Self::Season,
+        Self::Rediscover,
+        Self::FirstLikes,
+        Self::FreshLikes,
+        Self::Unplayed,
+        Self::DeepCuts,
+        Self::ArtistOfDay,
+        Self::Comeback,
+        Self::BecauseYouLiked,
+        Self::Long,
+        Self::Short,
+        Self::SingAlong,
+        Self::Language,
+        Self::Decade,
+        Self::Soundtrack,
+        Self::Playlist,
+        Self::Unfinished,
+        Self::NotDownloaded,
+        Self::Lottery,
+    ];
+
+    /// The kind's name in screenshot steps and logs: `on_repeat`, `year_ago`…
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::OnRepeat => "on_repeat",
+            Self::YearAgo => "year_ago",
+            Self::Season => "season",
+            Self::Rediscover => "rediscover",
+            Self::FirstLikes => "first_likes",
+            Self::FreshLikes => "fresh_likes",
+            Self::Unplayed => "unplayed",
+            Self::DeepCuts => "deep_cuts",
+            Self::ArtistOfDay => "artist_of_day",
+            Self::Comeback => "comeback",
+            Self::BecauseYouLiked => "because_you_liked",
+            Self::Long => "long",
+            Self::Short => "short",
+            Self::SingAlong => "sing_along",
+            Self::Language => "language",
+            Self::Decade => "decade",
+            Self::Soundtrack => "soundtrack",
+            Self::Playlist => "playlist",
+            Self::Unfinished => "unfinished",
+            Self::NotDownloaded => "not_downloaded",
+            Self::Lottery => "lottery",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.key() == key)
     }
 }
 
@@ -106,6 +186,9 @@ pub struct MixCard {
     pub id: MixId,
     /// «Твой микс», «Спокойное», «mzlff, MORGENSHTERN и другие».
     pub title: String,
+    /// The quiet label over a bento tile's title («ДЕЙЛИСТ», «ИСПОЛНИТЕЛЬ
+    /// ДНЯ»); empty for the cards without one (moods, style mixes).
+    pub kicker: String,
     /// A quiet second line: «30 треков · обновлён сегодня»; empty when the
     /// card has nothing to add.
     pub subtitle: String,

@@ -464,6 +464,12 @@ impl Library {
         self.set_like(target.into(), false)
     }
 
+    /// A like set at `at` rather than now (the demo's history of likes).
+    pub fn like_at(&self, target: impl Into<LikeTarget>, at: UnixMs) -> Result<()> {
+        let device = self.device_id();
+        self.write(|tx| set_like_in(tx, target.into(), false, at, &device))
+    }
+
     pub fn unlike(&self, target: impl Into<LikeTarget>) -> Result<()> {
         self.set_like(target.into(), true)
     }

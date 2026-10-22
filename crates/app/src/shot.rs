@@ -17,9 +17,9 @@
 //! playlist (`find_song:Title` for the clip shown so, `find_song:song` «Другая
 //! версия…» for its first stream song); `replace_first` replaces it with the
 //! dialog's first result in the scope the dialog would offer.
-//! `play_mix:daily|discover|mood|style|daylist|on_repeat|time_capsule|
-//! rediscover|deep_cuts|fresh_likes` plays a mix of Главная (the first mood
-//! or style mix, the bento's daylist or a tile); `radio` starts «Радио по треку» from the first
+//! `play_mix:daily|discover|mood|style|daylist|tile` plays a mix of Главная
+//! (the first mood or style mix, the bento's daylist, its first tile;
+//! `play_mix:tile:artist_of_day` the tile of that kind); `radio` starts «Радио по треку» from the first
 //! library track (`radio:artist` the first artist's radio).
 //! `libfilter:text` types into the library's filter, `liblist:1` shows it
 //! as a list, `sort:artist|title|year|added` sorts its albums.
@@ -503,11 +503,8 @@ impl Shot {
                     "mood" => h.moods.first().map(|m| m.id),
                     "style" => h.style_mixes.first().map(|m| m.id),
                     "daylist" => Some(nikgob_view::MixId::Daylist),
-                    "on_repeat" => Some(nikgob_view::MixId::OnRepeat),
-                    "time_capsule" => Some(nikgob_view::MixId::TimeCapsule),
-                    "rediscover" => Some(nikgob_view::MixId::Rediscover),
-                    "deep_cuts" => Some(nikgob_view::MixId::DeepCuts),
-                    "fresh_likes" => Some(nikgob_view::MixId::FreshLikes),
+                    "tile" => h.tiles.first().map(|m| m.id),
+                    a if a.starts_with("tile:") => nikgob_view::TileKind::from_key(&a[5..]).map(nikgob_view::MixId::Tile),
                     _ => Some(nikgob_view::MixId::Daily),
                 };
                 if let Some(id) = id {

@@ -12,7 +12,11 @@
 //! and new releases. For the bento's tiles the history also has a month of
 //! repeats, plays a year ago, two albums loved half a year ago and not
 //! since, the last two songs of every album played only once, and fresh
-//! likes.
+//! likes. Beyond them, for the other kinds of tiles (docs/stage4.md §12.9):
+//! a soundtrack album started and left, an artist not heard for two
+//! months, likes over four months, songs never played, long and short
+//! songs, lyrics on the songs with words, a rested playlist and liked
+//! stream songs without files.
 
 use std::path::Path;
 
@@ -35,11 +39,13 @@ const ALBUMS: &[(&str, &str, i32, ReleaseType, [u8; 3], &[&str])] = &[
     ("Boards of Canada", "Dayvan Cowboy", 2006, ReleaseType::Ep, [240, 120, 60], &["Dayvan Cowboy", "Ataronchronon", "Dayvan Cowboy (Odd Nosdam Remix)"]),
     ("Мумий Тролль", "Морская", 1997, ReleaseType::Album, [60, 180, 200], &["Утекай", "Владивосток 2000", "Девочка", "Кот кота", "Забавы", "Скорость", "Роза Белая", "Сантименты", "Новая луна апреля", "Делай меня точно"]),
     ("The Prodigy", "The Fat of the Land", 1997, ReleaseType::Album, [220, 60, 30], &["Smack My Bitch Up", "Breathe", "Diesel Power", "Funky Shit", "Serial Thrilla", "Mindfields", "Narayan", "Firestarter", "Climbatize", "Fuel My Fire"]),
+    ("Kevin Penkin", "Made in Abyss Original Soundtrack", 2017, ReleaseType::Album, [70, 110, 90], &["Made in Abyss", "Hanezeve Caradhina", "Underground River", "The First Layer", "Belaf", "Pathway", "Tomorrow", "Old Stories", "Deep in Abyss", "Endless Embrace"]),
+    ("Air", "Moon Safari", 1998, ReleaseType::Album, [240, 210, 160], &["La Femme d'Argent", "Sexy Boy", "All I Need", "Kelly Watch the Stars", "Talisman", "Remember", "You Make It Easy", "Ce matin-là", "New Star in the Sky"]),
 ];
 
 /// The style of each album (index in [`ALBUMS`]): 0 Russian rock, 1
 /// electronic, 2 dark and dreamy.
-const STYLES: &[usize] = &[0, 0, 2, 1, 0, 1, 2, 2, 2, 1, 0, 1];
+const STYLES: &[usize] = &[0, 0, 2, 1, 0, 1, 2, 2, 2, 1, 0, 1, 2, 1];
 /// How much each style is listened to (a day's session is skipped above it).
 const STYLE_WEIGHT: [f32; 3] = [1.0, 0.7, 0.55];
 /// Days of history.
@@ -53,6 +59,16 @@ const YEAR_AGO: &[usize] = &[2, 3, 11];
 /// The last this many songs of every album are played once
 /// («Глубже у любимых»).
 const DEEP: usize = 2;
+/// An artist played a lot and not for the last 45 days («Давно не слышал»).
+const COMEBACK: &[usize] = &[2];
+/// Albums started three weeks ago and left after two songs («Дослушай»).
+const UNFINISHED: &[usize] = &[12];
+/// Liked stream songs without files («Ещё не скачано»).
+const STREAM_ONLY: &[usize] = &[13];
+/// Albums without words (no lyrics).
+const NO_LYRICS: &[usize] = &[5, 9, 12];
+/// Added this long before the history starts.
+const ADDED_DAYS_AGO: i64 = 120;
 const DAY_MS: i64 = 24 * 3600 * 1000;
 
 /// A cover: abstract art from the hue (sun over stripes, diagonal bands,
@@ -173,7 +189,7 @@ fn make_photo(path: &Path, rgb: [u8; 3], seed: u32) {
 }
 
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v15";
+pub const VERSION: &str = "seed-v16";
 
 /// The intro, instrumental gap and long line exercise both lyrics layouts.
 const DEMO_LRC: &str = "[00:03.00]Свет из окна ложится на пол
@@ -195,6 +211,25 @@ const DEMO_TTML: &str = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="h
 </div></body></tt>"#;
 
 pub fn seed(lib: &Library, root: &Path) {
+    seed_with(lib, root, true);
+}
+
+/// The length of a song as the library says (the files are 24 s tones):
+/// Aphex Twin and half of Mezzanine are long, Земфира and the first songs
+/// of «Звезда по имени Солнце» short.
+fn duration_of(album: usize, n: usize) -> u32 {
+    match album {
+        5 => 440_000 + n as u32 * 20_000,
+        7 if n % 2 == 0 => 425_000,
+        4 => 130_000 + n as u32 * 2_000,
+        1 if n < 3 => 140_000,
+        _ => 210_000 + n as u32 * 7_000,
+    }
+}
+
+/// The demo library; `files` writes the covers, tones and lyrics files
+/// next to it (tests seed without them).
+fn seed_with(lib: &Library, root: &Path, files: bool) {
     if lib.count_releases().unwrap_or(0) > 0 {
         // Existing demo library: refresh the generated covers only.
         for (i, (artist, album, year, _, rgb, _)) in ALBUMS.iter().enumerate() {
@@ -205,6 +240,7 @@ pub fn seed(lib: &Library, root: &Path) {
         }
         return;
     }
+    let now = nikgob_library::now_ms();
     let mut first_tracks = Vec::new();
     // Every track with its album's index and number, for the history.
     let mut all: Vec<(TrackId, usize, usize)> = Vec::new();
@@ -217,9 +253,11 @@ pub fn seed(lib: &Library, root: &Path) {
             .clone();
         let credit = ArtistCredit::single(*artist, Some(a.id));
         let dir = root.join(artist).join(format!("{year} - {album}"));
-        let _ = std::fs::create_dir_all(&dir);
         let cover = dir.join("cover.jpg");
-        make_cover(&cover, *rgb, i as u32);
+        if files {
+            let _ = std::fs::create_dir_all(&dir);
+            make_cover(&cover, *rgb, i as u32);
+        }
         let mut r = Release::new(*album, credit.clone());
         r.year = Some(*year);
         r.release_type = *kind;
@@ -230,7 +268,7 @@ pub fn seed(lib: &Library, root: &Path) {
         const ADDED_DAYS: [i64; 12] = [300, 200, 120, 90, 45, 40, 20, 12, 5, 3, 0, 0];
         r.added_at = nikgob_library::now_ms() - ADDED_DAYS[i % ADDED_DAYS.len()] * DAY_MS - i as i64 * 60_000;
         let r = lib.upsert_release(&r).expect("release");
-        if let Ok(img) = image::open(&cover) {
+        if let Some(img) = files.then(|| image::open(&cover).ok()).flatten() {
             let rgba = img.to_rgba8();
             if let Some(seed) = nikgob_md3e::seed_from_image(rgba.as_raw(), rgba.width() as usize, rgba.height() as usize) {
                 let _ = lib.put_palette(&nikgob_core::model::Palette::new(r.id, seed));
@@ -253,23 +291,38 @@ pub fn seed(lib: &Library, root: &Path) {
             let mut t = Track::new(title, credit);
             t.release_id = Some(r.id);
             t.track_no = n as u32 + 1;
-            t.duration_ms = Some(24_000);
+            t.duration_ms = Some(duration_of(i, n));
+            t.added_at = now - (ADDED_DAYS_AGO + HISTORY_DAYS) * DAY_MS;
             let t = lib.upsert_track(&t).expect("track");
-            let codec = Codec::Wav;
-            let path = dir.join(format!("{:02} - {title}.wav", n + 1));
-            write_tone(&path, 220.0 * 2f32.powf((i * 3 + n) as f32 / 12.0), 24.0);
-            let mut s = Source::new(t.id, SourceKind::LocalFile, path.display().to_string(), codec);
-            s.bitrate = Some(705);
-            s.sample_rate = Some(44_100);
-            s.bit_depth = Some(16);
-            let _ = lib.add_source(&s);
-            let _ = lib.put_lyrics(t.id, Some(DEMO_LRC), None, false);
-            let _ = std::fs::write(path.with_extension("ttml"), DEMO_TTML);
-            if n == 0 {
-                first_tracks.push(t.id);
-            }
-            if (n + i) % 4 == 0 {
-                let _ = lib.like(t.id);
+            if STREAM_ONLY.contains(&i) {
+                // A liked song of YouTube Music, played from the stream.
+                let s = Source::new(t.id, SourceKind::Youtube, format!("demo-{i}-{n}"), Codec::Opus);
+                let _ = lib.add_source(&s);
+                let _ = lib.like_at(t.id, now - n as i64 * 2 * DAY_MS);
+            } else {
+                let codec = Codec::Wav;
+                let path = dir.join(format!("{:02} - {title}.wav", n + 1));
+                if files {
+                    write_tone(&path, 220.0 * 2f32.powf((i * 3 + n) as f32 / 12.0), 24.0);
+                }
+                let mut s = Source::new(t.id, SourceKind::LocalFile, path.display().to_string(), codec);
+                s.bitrate = Some(705);
+                s.sample_rate = Some(44_100);
+                s.bit_depth = Some(16);
+                let _ = lib.add_source(&s);
+                if !NO_LYRICS.contains(&i) {
+                    let _ = lib.put_lyrics(t.id, Some(DEMO_LRC), None, false);
+                    if files {
+                        let _ = std::fs::write(path.with_extension("ttml"), DEMO_TTML);
+                    }
+                }
+                if n == 0 {
+                    first_tracks.push(t.id);
+                }
+                // Likes over four months: the first ones long ago, some fresh.
+                if (n + i) % 4 == 0 {
+                    let _ = lib.like_at(t.id, now - ((i * 11 + n * 7) % 120) as i64 * DAY_MS);
+                }
             }
             let _ = lib.put_analysis(&Analysis {
                 track_id: t.id,
@@ -280,7 +333,7 @@ pub fn seed(lib: &Library, root: &Path) {
             all.push((t.id, i, n));
         }
     }
-    one_song_of_an_album(lib, root);
+    one_song_of_an_album(lib, root, files);
     history(lib, &all);
     // Photos for some artists; the rest are marked as looked up, so the
     // demo never asks a service for them.
@@ -301,20 +354,26 @@ pub fn seed(lib: &Library, root: &Path) {
     if let Ok(p) = lib.create_playlist("Вечером") {
         let _ = lib.playlist_add_many(p.id, &first_tracks);
     }
-    let _ = lib.create_playlist("В дорогу");
+    // Not opened since the forgotten albums: «Из плейлиста».
+    if let Ok(p) = lib.create_playlist("В дорогу") {
+        let rested: Vec<TrackId> = all.iter().filter(|(_, i, _)| FORGOTTEN.contains(i)).map(|(t, _, _)| *t).collect();
+        let _ = lib.playlist_add_many(p.id, &rested);
+    }
 }
 
 /// «First Love» with one file (no number) and no track count: its page
 /// asks the (fake) YouTube Music for the rest of the album
 /// (docs/stage4.md §12.8).
-fn one_song_of_an_album(lib: &Library, root: &Path) {
+fn one_song_of_an_album(lib: &Library, root: &Path, files: bool) {
     let artist = "宇多田ヒカル";
     let Ok(a) = lib.upsert_artist(&Artist::new(artist)) else { return };
     let credit = ArtistCredit::single(artist, Some(a.id));
     let dir = root.join(artist).join("1999 - First Love");
-    let _ = std::fs::create_dir_all(&dir);
     let cover = dir.join("cover.jpg");
-    make_cover(&cover, [210, 120, 150], 99);
+    if files {
+        let _ = std::fs::create_dir_all(&dir);
+        make_cover(&cover, [210, 120, 150], 99);
+    }
     let mut r = Release::new("First Love", credit.clone());
     r.year = Some(1999);
     r.cover_ref = Some(cover.display().to_string());
@@ -324,7 +383,9 @@ fn one_song_of_an_album(lib: &Library, root: &Path) {
     t.duration_ms = Some(257_000);
     let Ok(t) = lib.upsert_track(&t) else { return };
     let path = dir.join("First Love.wav");
-    write_tone(&path, 196.0, 24.0);
+    if files {
+        write_tone(&path, 196.0, 24.0);
+    }
     let mut s = Source::new(t.id, SourceKind::LocalFile, path.display().to_string(), Codec::Wav);
     s.bitrate = Some(705);
     let _ = lib.add_source(&s);
@@ -368,7 +429,9 @@ fn vector(style: usize, album: usize, n: usize) -> Vec<f32> {
 /// Three months of listening: every track completed once long ago, then
 /// sessions of one style a day (the first style most), mostly in the
 /// evening and at night, with a few early skips; and the tiles' own
-/// history (see [`FORGOTTEN`], [`REPEATED`], [`YEAR_AGO`], [`DEEP`]).
+/// history (see [`FORGOTTEN`], [`REPEATED`], [`YEAR_AGO`], [`DEEP`],
+/// [`COMEBACK`], [`UNFINISHED`]); the last song of every album is never
+/// played, the stream songs neither.
 fn history(lib: &Library, tracks: &[(TrackId, usize, usize)]) {
     let now = nikgob_library::now_ms();
     let today = now - now.rem_euclid(DAY_MS);
@@ -390,11 +453,23 @@ fn history(lib: &Library, tracks: &[(TrackId, usize, usize)]) {
     };
     let deep = |i: usize, n: usize| n + DEEP >= ALBUMS[i].5.len();
     for (k, (t, i, n)) in tracks.iter().enumerate() {
+        if STREAM_ONLY.contains(i) {
+            continue;
+        }
+        if UNFINISHED.contains(i) {
+            if *n < 2 {
+                play(*t, today - 20 * DAY_MS + 21 * 3_600_000 + k as i64 * 60_000, false);
+            }
+            continue;
+        }
         if FORGOTTEN.contains(i) {
             // Loved half a year ago: four completes each.
             for r in 0..4 {
                 play(*t, today - (150 + r * 9) * DAY_MS + 21 * 3_600_000 + k as i64 * 60_000, false);
             }
+            continue;
+        }
+        if *n + 1 == ALBUMS[*i].5.len() {
             continue;
         }
         let day = HISTORY_DAYS - 1 - (noise(*i, *n, 4, 23).abs() * 30.0) as i64;
@@ -423,7 +498,14 @@ fn history(lib: &Library, tracks: &[(TrackId, usize, usize)]) {
         }
         let pool: Vec<&(TrackId, usize, usize)> = tracks
             .iter()
-            .filter(|(_, i, n)| STYLES[*i] == style && !FORGOTTEN.contains(i) && !deep(*i, *n))
+            .filter(|(_, i, n)| {
+                STYLES[*i] == style
+                    && !FORGOTTEN.contains(i)
+                    && !UNFINISHED.contains(i)
+                    && !STREAM_ONLY.contains(i)
+                    && !(COMEBACK.contains(i) && day < 45)
+                    && !deep(*i, *n)
+            })
             .collect();
         let mut ts = today - day * DAY_MS + hour * 3_600_000;
         for p in 0..(6 + (noise(d, 4, 9, 43).abs() * 6.0) as usize) {
@@ -503,6 +585,40 @@ mod tests {
         assert_eq!(styles.len(), 3, "{:?}", styles.iter().map(|s| s.size).collect::<Vec<_>>());
         for m in Mood::ALL {
             assert!(recs.mood_pool(m).len() >= 20, "{m:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tile_tests {
+    use std::collections::HashSet;
+
+    use nikgob_view::TileKind;
+
+    use super::*;
+
+    /// A week of the demo's boards: most kinds of tiles show up, and none
+    /// but «На повторе» three days in a row (docs/stage4.md §12.9).
+    #[test]
+    fn a_week_of_the_demo_shows_most_tiles() {
+        let lib = Library::open_in_memory().unwrap();
+        seed_with(&lib, Path::new("demo"), false);
+        let days = nikgob_runtime::preview_tile_days(&lib, 7).unwrap();
+        let kinds: Vec<Vec<TileKind>> = days.iter().map(|d| d.iter().map(|t| t.0).collect()).collect();
+        for (d, k) in kinds.iter().enumerate() {
+            assert_eq!(k.len(), nikgob_recs::TILES_PER_DAY, "day {d}: {k:?}");
+            assert_eq!(k[0], TileKind::OnRepeat, "day {d}: {k:?}");
+        }
+        let shown: HashSet<TileKind> = kinds.iter().flatten().copied().collect();
+        assert!(shown.len() >= 15, "{} kinds: {kinds:?}", shown.len());
+        for w in kinds.windows(3) {
+            for k in &w[2] {
+                assert!(*k == TileKind::OnRepeat || !(w[0].contains(k) && w[1].contains(k)), "{k:?} three days running: {kinds:?}");
+            }
+        }
+        // The week as picked (with --nocapture).
+        for (d, tiles) in days.iter().enumerate() {
+            eprintln!("day {d}: {:?}", tiles.iter().map(|t| format!("{} «{}» ({})", t.0.key(), t.1, t.3)).collect::<Vec<_>>());
         }
     }
 }

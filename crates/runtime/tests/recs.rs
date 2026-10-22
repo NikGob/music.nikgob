@@ -16,7 +16,7 @@ use nikgob_core::model::{
 use nikgob_core::streaming::{FakeService, StreamService};
 use nikgob_library::{Library, now_ms};
 use nikgob_runtime::{PlayRequest, Playback, PlaybackEvent, Runtime, RuntimeConfig, StreamSchedule};
-use nikgob_view::{Command, MixId, Mood, Prefs, RadioSeed, RecTarget, ViewState};
+use nikgob_view::{Command, MixId, Mood, Prefs, RadioSeed, RecTarget, TileKind, ViewState};
 
 const DAY: i64 = 24 * 3600 * 1000;
 
@@ -379,17 +379,24 @@ fn the_bento_gets_a_daylist_and_tiles_that_play() {
     assert_eq!(daylist.title.split(' ').count(), 3, "«Тягучий вечер четверга»: {}", daylist.title);
     assert!(daylist.subtitle.contains(" и другие · до "), "{}", daylist.subtitle);
     assert!(!daylist.covers.is_empty());
-    // Every track played lately (none a year ago, none forgotten): on
-    // repeat, deeper in favourite artists (the songs played once), the
-    // likes of the first songs.
+    // «На повторе» first, then four kinds of the day, each once, each with
+    // its kicker.
     let tiles: Vec<MixId> = st.tiles.iter().map(|t| t.id).collect();
-    assert_eq!(tiles, vec![MixId::OnRepeat, MixId::DeepCuts, MixId::FreshLikes]);
-    assert_eq!(st.tiles[0].title, "На повторе");
+    assert_eq!(tiles.len(), 5, "{tiles:?}");
+    assert_eq!(tiles[0], MixId::Tile(TileKind::OnRepeat));
+    assert_eq!(tiles.iter().collect::<std::collections::HashSet<_>>().len(), 5);
+    assert_eq!((st.tiles[0].kicker.as_str(), st.tiles[0].title.as_str()), ("НА ПОВТОРЕ", "На повторе"));
     assert_eq!(st.tiles[0].subtitle, "30 треков · за месяц");
-    assert_eq!(st.tiles[2].subtitle, "18 треков · за месяц");
+    assert!(st.tiles.iter().all(|t| !t.kicker.is_empty() && !t.subtitle.is_empty() && !t.covers.is_empty()));
+    assert_eq!(daylist.kicker, "ДЕЙЛИСТ");
+    // The board is kept for the day: a restart shows the same tiles.
+    drop(s);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the tiles again", |st| !st.home.tiles.is_empty());
+    assert_eq!(s.rt.state().home.tiles.iter().map(|t| t.id).collect::<Vec<_>>(), tiles);
 
     // A tile plays as it is.
-    s.rt.send(Command::PlayMix { id: MixId::OnRepeat });
+    s.rt.send(Command::PlayMix { id: MixId::Tile(TileKind::OnRepeat) });
     wait_until("on repeat plays", || !s.asked.lock().unwrap().is_empty());
     wait_for(&s.rt, "its queue", |st| st.queue.next.len() == 29);
     assert!(s.rt.state().queue.radio.is_none(), "a tile is not endless");
