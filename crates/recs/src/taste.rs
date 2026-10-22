@@ -17,6 +17,13 @@
 //!   similarity for tracks without a sound vector.
 //! * **Day parts**: per track, how many plays fell into the morning (6–11),
 //!   the day (11–18), the evening (18–23) and the night (23–6), local time.
+//! * **Service suggestions** (docs/stage4.md §12.3, [`crate::suggest`]): a
+//!   track YouTube Music or Spotify suggests gets up to
+//!   [`crate::suggest::SUGGESTED_CAP`] more affinity, fading out over
+//!   [`crate::suggest::SUGGESTION_FADE_MS`] since it was suggested; a
+//!   suggested artist up to [`crate::suggest::SUGGESTED_ARTIST_CAP`] more
+//!   artist affinity. Suggestions alone are not a history
+//!   ([`Taste::has_history`]).
 //! * **Dislikes** («Не рекомендовать»): tracks, and every track of an
 //!   artist, kept out of everything.
 //! * **Windows** for the home's tiles: per track, the completes of the last
@@ -31,6 +38,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use nikgob_core::model::{ArtistId, Event, EventType, ReleaseId, TrackId, UnixMs};
 use serde::{Deserialize, Serialize};
+
+use crate::suggest;
 
 pub const HOUR_MS: i64 = 60 * 60 * 1000;
 pub const DAY_MS: i64 = 24 * HOUR_MS;
@@ -236,6 +245,12 @@ pub struct TasteInput {
     pub disliked_artists: Vec<ArtistId>,
     /// The local time zone, minutes east of UTC (day parts).
     pub utc_offset_min: i32,
+    /// Catalog tracks the services suggest: the strength of the suggestion
+    /// ([`crate::suggest::strength`]) and when it was made (one entry per
+    /// suggestion; see [`crate::suggest::match_suggestions`]).
+    pub suggested_tracks: Vec<(TrackId, f32, UnixMs)>,
+    /// Library artists the services suggest, the same way.
+    pub suggested_artists: Vec<(ArtistId, f32, UnixMs)>,
 }
 
 /// Per-track and per-artist signals at one moment (`now`).
@@ -250,6 +265,10 @@ pub struct Taste {
     liked: Vec<bool>,
     liked_time: Vec<Option<UnixMs>>,
     daypart: Vec<[u16; 4]>,
+    /// The part of the affinity the services' suggestions gave.
+    suggested: Vec<f32>,
+    /// Anything listened, liked or put in a playlist (suggestions aside).
+    history: bool,
     /// Completes within [`ON_REPEAT_MS`].
     recent_completes: Vec<u16>,
     /// Plays within [`YEAR_AGO_SPAN_MS`] of now − [`YEAR_MS`].
@@ -389,6 +408,17 @@ impl Taste {
                 affinity[i] += W_PLAYLIST * decay(now, *added);
             }
         }
+        let history = affinity.iter().any(|a| *a > 0.0);
+        let mut suggested = vec![0.0f32; n];
+        for (id, strength, at) in &input.suggested_tracks {
+            if let Some(i) = catalog.position(*id) {
+                suggested[i] += suggest::W_SUGGESTED * strength.max(0.0) * suggest::fade(now, *at);
+            }
+        }
+        for (a, s) in affinity.iter_mut().zip(suggested.iter_mut()) {
+            *s = s.min(suggest::SUGGESTED_CAP);
+            *a += *s;
+        }
 
         let mut artist_sum: HashMap<ArtistId, f32> = HashMap::new();
         for (i, t) in catalog.tracks.iter().enumerate() {
@@ -398,10 +428,22 @@ impl Taste {
                 }
             }
         }
-        let artist_affinity = artist_sum
+        let mut artist_affinity: HashMap<ArtistId, f32> = artist_sum
             .into_iter()
             .map(|(a, s)| (a, s / (catalog.of_artist(a).len().max(1) as f32).sqrt()))
             .collect();
+        let mut artist_bonus: HashMap<ArtistId, f32> = HashMap::new();
+        for (a, strength, at) in &input.suggested_artists {
+            if !catalog.of_artist(*a).is_empty() {
+                *artist_bonus.entry(*a).or_default() +=
+                    suggest::W_SUGGESTED_ARTIST * strength.max(0.0) * suggest::fade(now, *at);
+            }
+        }
+        for (a, b) in artist_bonus {
+            if b > 0.0 {
+                *artist_affinity.entry(a).or_default() += b.min(suggest::SUGGESTED_ARTIST_CAP);
+            }
+        }
 
         let mut co: HashMap<ArtistId, Vec<(ArtistId, f32)>> = HashMap::new();
         for (&(a, b), &c) in &co_pairs {
@@ -432,6 +474,8 @@ impl Taste {
             liked,
             liked_time,
             daypart,
+            suggested,
+            history,
             recent_completes,
             year_ago,
             artist_affinity,
@@ -494,9 +538,16 @@ impl Taste {
     }
 
     /// Whether anything was ever liked, played or put in a playlist with
-    /// a positive outcome.
+    /// a positive outcome (the services' suggestions alone are not a
+    /// history).
     pub fn has_history(&self) -> bool {
-        self.affinity.iter().any(|a| *a > 0.0)
+        self.history
+    }
+
+    /// The part of the affinity of the track at `i` that the services'
+    /// suggestions gave (0…[`crate::suggest::SUGGESTED_CAP`]).
+    pub fn suggested_at(&self, i: usize) -> f32 {
+        self.suggested.get(i).copied().unwrap_or(0.0)
     }
 
     pub fn artist_affinity(&self, artist: ArtistId) -> f32 {
@@ -589,6 +640,7 @@ mod tests {
             disliked_tracks: vec![t(5)],
             disliked_artists: vec![aid(1)],
             utc_offset_min: 0,
+            ..Default::default()
         };
         let taste = Taste::build(&cat, &input, now);
         let a = |i| taste.affinity_at(cat.position(t(i)).unwrap());

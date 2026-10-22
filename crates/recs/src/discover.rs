@@ -10,7 +10,9 @@
 //! and services into one candidate ([`song_key`]) and scores it: the sum
 //! over the distinct seeds that found it of the seed's weight (0.75…1 by
 //! its affinity, a little more when the song stood high in the seed's
-//! list), plus [`NEW_ARTIST_BONUS`] for an artist the library does not
+//! list; a service suggesting it itself, [`SeedRef::Service`], weighs
+//! [`crate::suggest::SERVICE_VOTE`]), plus [`NEW_ARTIST_BONUS`] for an
+//! artist the library does not
 //! know, times [`CLIP_FACTOR`] for a music video. Known songs, disliked
 //! songs and artists, and songs shown [`IGNORED_AFTER`] times and never
 //! played are out. The best [`DISCOVERIES`], at most [`PER_ARTIST`] per
@@ -27,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 
 use nikgob_core::clip_title;
 use nikgob_core::model::{ArtistId, ReleaseType, TrackId, UnixMs};
-use nikgob_core::streaming::{RemoteId, StreamAlbum, StreamTrack, TrackKind};
+use nikgob_core::streaming::{RemoteId, Service, StreamAlbum, StreamTrack, TrackKind};
 
 use crate::pick::Recs;
 use crate::taste::DAY_MS;
@@ -175,6 +177,9 @@ pub fn stream_song_key(t: &StreamTrack) -> String {
 pub enum SeedRef {
     Track(TrackId),
     Artist(ArtistId),
+    /// The service suggests the song itself («сервис советует»,
+    /// [`crate::suggest`]).
+    Service(Service),
 }
 
 /// The seeds of a discovery pass with their affinities.
@@ -189,6 +194,7 @@ impl DiscoverySeeds {
         match seed {
             SeedRef::Track(id) => self.tracks.iter().find(|(t, _)| *t == id).map_or(0.0, |x| x.1),
             SeedRef::Artist(id) => self.artists.iter().find(|(a, _)| *a == id).map_or(0.0, |x| x.1),
+            SeedRef::Service(_) => 0.0,
         }
     }
 }
@@ -353,7 +359,10 @@ pub fn rank_discoveries(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter: &Di
     let mut cands: HashMap<String, Cand> = HashMap::new();
     let mut order = 0usize;
     for f in finds {
-        let w_seed = 0.75 + 0.25 * (seeds.affinity(f.seed).max(0.0) / max_aff).min(1.0);
+        let w_seed = match f.seed {
+            SeedRef::Service(_) => crate::suggest::SERVICE_VOTE,
+            seed => 0.75 + 0.25 * (seeds.affinity(seed).max(0.0) / max_aff).min(1.0),
+        };
         let len = f.tracks.len().max(1) as f32;
         for (rank, t) in f.tracks.iter().enumerate() {
             let key = stream_song_key(t);
