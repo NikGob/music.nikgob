@@ -8,8 +8,11 @@
 //!   by a song search first. For a seed artist, the similar artists of
 //!   YouTube Music and of Deezer and the tops of the first two of each
 //!   (an artist the library has not matched in a service yet is looked up
-//!   by name and remembered, as the discography does). About
-//!   [`DISCOVER_BUDGET`] requests a pass.
+//!   by name and remembered, as the discography does). The strongest
+//!   songs the services suggest that the library does not have
+//!   ([`nikgob_recs::suggest::SUGGESTION_SEEDS`], docs/stage4.md §12.3)
+//!   seed the pass the same way as tracks. About [`DISCOVER_BUDGET`]
+//!   requests a pass.
 //! * **New releases**: the discographies of the artists with affinity
 //!   ([`nikgob_recs::Recs::release_artists`], at most 30) from Deezer (it
 //!   dates albums to the day), each artist at most weekly
@@ -24,9 +27,13 @@
 //! * **Results**: [`nikgob_recs::rank_discoveries`] with the library's
 //!   songs, artists and dislikes and the «shown» counts (a discovery counts
 //!   as shown once for each day it is on the home page; shown three times
-//!   and never played, it is left out), and
+//!   and never played, it is left out; the songs the services suggest
+//!   vote as the services' own seeds, [`nikgob_recs::suggestion_finds`]),
+//!   and
 //!   [`nikgob_recs::Recs::new_releases`]; both kept in the cache
-//!   (`discover.found`) until the next pass. With only YouTube Music, only
+//!   (`discover.found`, with the pass's seeds and finds, so new
+//!   suggestions rank them again at once) until the next pass. With only
+//!   YouTube Music, only
 //!   Deezer, or neither, it does what it can (both catalogues answer
 //!   without a login; with neither there is no request at all).
 //!
@@ -39,7 +46,10 @@ use std::time::{Duration, Instant};
 use nikgob_core::model::{ArtistId, TrackId, UnixMs};
 use nikgob_core::streaming::{EntityKind, RemoteId, SearchKind, Service, StreamAlbum, StreamArtist, StreamError, StreamService, StreamTrack};
 use nikgob_library::{Library, now_ms};
-use nikgob_recs::{DiscoverySeeds, SeedFinds, SeedRef, artist_key, rank_discoveries, song_key, stream_song_key};
+use nikgob_recs::suggest::SUGGESTION_SEEDS;
+use nikgob_recs::{
+    DiscoverySeeds, SeedFinds, SeedRef, artist_key, rank_discoveries, song_key, stream_song_key, suggestion_finds,
+};
 use nikgob_view as v;
 use serde::{Deserialize, Serialize};
 
@@ -68,9 +78,11 @@ const DAY_MS: i64 = 24 * 3600 * 1000;
 
 /// A seed as the pass keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-enum Seed {
+pub(crate) enum Seed {
     Track(TrackId),
     Artist(ArtistId),
+    /// A song the service suggests that the library does not have.
+    Service(Service),
 }
 
 impl Seed {
@@ -78,6 +90,7 @@ impl Seed {
         match self {
             Self::Track(t) => SeedRef::Track(t),
             Self::Artist(a) => SeedRef::Artist(a),
+            Self::Service(s) => SeedRef::Service(s),
         }
     }
 }
@@ -92,11 +105,11 @@ pub(crate) enum Then {
 /// One request of a pass.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Step {
-    /// The songs around a seed track: YouTube Music's radio of it, Deezer's
-    /// related list.
-    TrackList { seed: TrackId, service: Service, id: String },
+    /// The songs around a seed track (or a suggested song): YouTube
+    /// Music's radio of it, Deezer's related list.
+    TrackList { seed: Seed, service: Service, id: String },
     /// A seed track without an id in the service: a song search for it.
-    FindTrack { seed: TrackId, service: Service, query: String, key: String },
+    FindTrack { seed: Seed, service: Service, query: String, key: String },
     /// A library artist without an id in the service: an artist search.
     FindArtist { artist: ArtistId, service: Service, name: String, then: Then },
     /// The similar artists of a seed artist.
@@ -147,6 +160,13 @@ pub(crate) struct Found {
     at: UnixMs,
     tracks: Vec<StreamTrack>,
     releases: Vec<(ArtistId, StreamAlbum)>,
+    /// The pass's seeds and finds: new suggestions rank them again.
+    #[serde(default)]
+    seed_tracks: Vec<(TrackId, f32)>,
+    #[serde(default)]
+    seed_artists: Vec<(ArtistId, f32)>,
+    #[serde(default)]
+    finds: Vec<(Seed, Vec<StreamTrack>)>,
 }
 
 /// The discoveries and new releases the last pass left in the library's
@@ -202,6 +222,17 @@ async fn ask(svc: Arc<dyn StreamService>, step: &Step) -> Result<Answer, StreamE
         Step::Top { id, .. } => svc.artist_top(id).await.map(Answer::Tracks),
         Step::Releases { id, .. } => svc.artist(id).await.map(|a| Answer::Albums(a.albums)),
     }
+}
+
+/// The discoveries of a pass's `finds` and of the songs the services
+/// suggest now.
+fn ranked(snap: &super::Snapshot, seeds: &DiscoverySeeds, finds: &[(Seed, Vec<StreamTrack>)], filter: &nikgob_recs::DiscoveryFilter) -> Vec<StreamTrack> {
+    let mut all: Vec<SeedFinds> = finds
+        .iter()
+        .map(|(seed, tracks)| SeedFinds { seed: seed.engine(), tracks: tracks.clone() })
+        .collect();
+    all.extend(suggestion_finds(&snap.suggested_new));
+    rank_discoveries(seeds, &all, filter).into_iter().map(|d| d.track).collect()
 }
 
 fn releases_key(artist: ArtistId) -> String {
@@ -299,13 +330,14 @@ impl Worker {
         for (t, _) in &tracks {
             let refs = self.lib.stream_refs(*t).unwrap_or_default();
             let id_on = |s: Service| refs.iter().find(|r| r.id.service == s).map(|r| r.id.id.clone());
+            let seed = Seed::Track(*t);
             let step = match (id_on(Service::Youtube), id_on(Service::Deezer)) {
-                (Some(id), _) if yt => Some(Step::TrackList { seed: *t, service: Service::Youtube, id }),
-                (_, Some(id)) if dz => Some(Step::TrackList { seed: *t, service: Service::Deezer, id }),
+                (Some(id), _) if yt => Some(Step::TrackList { seed, service: Service::Youtube, id }),
+                (_, Some(id)) if dz => Some(Step::TrackList { seed, service: Service::Deezer, id }),
                 _ => self.lib.get_track(*t).ok().flatten().map(|row| {
                     let artist = row.artist_credit.display();
                     Step::FindTrack {
-                        seed: *t,
+                        seed,
                         service: if yt { Service::Youtube } else { Service::Deezer },
                         query: format!("{artist} {}", row.title),
                         key: song_key(&row.title, &artist),
@@ -314,6 +346,33 @@ impl Worker {
             };
             track_steps.extend(step);
         }
+        // The songs the services suggest that the library lacks: every
+        // other track step, so a short budget still sees them.
+        let suggested: Vec<Step> = snap
+            .suggested_new
+            .iter()
+            .take(SUGGESTION_SEEDS)
+            .filter_map(|(t, _)| {
+                let seed = Seed::Service(t.id.service);
+                match t.id.service {
+                    Service::Youtube if yt => Some(Step::TrackList { seed, service: Service::Youtube, id: t.id.id.clone() }),
+                    Service::Deezer if dz => Some(Step::TrackList { seed, service: Service::Deezer, id: t.id.id.clone() }),
+                    _ if yt || dz => Some(Step::FindTrack {
+                        seed,
+                        service: if yt { Service::Youtube } else { Service::Deezer },
+                        query: format!("{} {}", t.artist_line(), t.title),
+                        key: stream_song_key(t),
+                    }),
+                    _ => None,
+                }
+            })
+            .collect();
+        let mut library_steps = std::mem::take(&mut track_steps).into_iter();
+        for s in suggested {
+            track_steps.push(s);
+            track_steps.extend(library_steps.next());
+        }
+        track_steps.extend(library_steps);
         let mut artist_steps = Vec::new();
         for (a, _) in &artists {
             let Some(name) = self.lib.get_artist(*a).ok().flatten().map(|a| a.name) else { continue };
@@ -494,7 +553,7 @@ impl Worker {
         let mut learnt: Vec<(ArtistId, RemoteId)> = Vec::new();
         let Some(pass) = self.recs.discover.pass.as_mut() else { return };
         match (step, answer) {
-            (Step::TrackList { seed, .. }, Answer::Tracks(t)) => pass.finds.push((Seed::Track(seed), t)),
+            (Step::TrackList { seed, .. }, Answer::Tracks(t)) => pass.finds.push((seed, t)),
             (Step::FindTrack { seed, service, key, .. }, Answer::Tracks(hits)) => {
                 if let Some(hit) = hits.iter().find(|h| stream_song_key(h) == key) {
                     pass.steps.push_front(Step::TrackList { seed, service, id: hit.id.id.clone() });
@@ -561,12 +620,7 @@ impl Worker {
             tracks: pass.seed_tracks.clone(),
             artists: pass.seed_artists.clone(),
         };
-        let finds: Vec<SeedFinds> = pass
-            .finds
-            .iter()
-            .map(|(seed, tracks)| SeedFinds { seed: seed.engine(), tracks: tracks.clone() })
-            .collect();
-        let tracks: Vec<StreamTrack> = rank_discoveries(&seeds, &finds, &filter).into_iter().map(|d| d.track).collect();
+        let tracks = ranked(&snap, &seeds, &pass.finds, &filter);
         let releases = snap
             .recs()
             .new_releases(&pass.releases, &snap.known_albums)
@@ -584,6 +638,9 @@ impl Worker {
             at: now_ms(),
             tracks,
             releases,
+            seed_tracks: pass.seed_tracks,
+            seed_artists: pass.seed_artists,
+            finds: pass.finds,
         };
         self.streaming.learn(&found.tracks);
         if let Ok(json) = serde_json::to_string(&found) {
@@ -594,6 +651,41 @@ impl Worker {
         self.publish_recs_home();
         // The daily mix of a new day takes the new discoveries.
         self.radio_snapshot_ready();
+    }
+
+    /// The services' suggestions changed: the last pass's finds are ranked
+    /// again with their votes (the snapshot has the new ones by now).
+    pub(crate) fn discover_rerank(&mut self) {
+        self.discover_load();
+        let Some(snap) = self.snapshot() else { return };
+        let Some(found) = self.recs.discover.found.as_mut() else { return };
+        if found.finds.is_empty() && snap.suggested_new.is_empty() {
+            return;
+        }
+        let mut filter = snap.filter.clone();
+        filter.shown = self
+            .recs
+            .discover
+            .shown
+            .iter()
+            .map(|(k, (n, _))| (k.clone(), (*n, snap.played_songs.contains(k))))
+            .collect();
+        let seeds = DiscoverySeeds {
+            tracks: found.seed_tracks.clone(),
+            artists: found.seed_artists.clone(),
+        };
+        let tracks = ranked(&snap, &seeds, &found.finds, &filter);
+        if tracks == found.tracks {
+            return;
+        }
+        log::info!("discover: {} discoveries with the services' suggestions", tracks.len());
+        found.tracks = tracks;
+        let found = found.clone();
+        self.streaming.learn(&found.tracks);
+        if let Ok(json) = serde_json::to_string(&found) {
+            let _ = self.lib.cache_put(FOUND_KEY, found.at, &json);
+        }
+        self.publish_recs_home();
     }
 
     /// The home's «Новое для тебя» and «Новые релизы»: the last pass's,

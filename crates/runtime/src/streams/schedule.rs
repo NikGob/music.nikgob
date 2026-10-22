@@ -83,6 +83,12 @@ pub struct StreamSchedule {
     /// …and looks for new music again this long after the last pass (and
     /// on a new day).
     pub discover_every: Duration,
+    /// The services' own suggestions (docs/stage4.md §12.3) are read again
+    /// this long after the last time, per signed-in service…
+    pub suggest_every: Duration,
+    /// …the first time this long after the start (playback and the first
+    /// screens go first).
+    pub suggest_first: Duration,
     /// The worker's slow tick (toasts, the session file, the jobs above).
     pub tick: Duration,
     /// ± this share of every periodic interval.
@@ -122,6 +128,8 @@ impl Default for StreamSchedule {
             recs_every: Duration::from_secs(3 * 3600),
             discover_gap: (Duration::from_secs(2), Duration::from_secs(4)),
             discover_every: Duration::from_secs(24 * 3600),
+            suggest_every: Duration::from_secs(6 * 3600),
+            suggest_first: Duration::from_secs(90),
             tick: Duration::from_secs(5),
             jitter: 0.2,
             rate_limit_cap: Duration::from_secs(10 * 60),

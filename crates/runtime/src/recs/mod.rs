@@ -20,13 +20,17 @@
 //!   their covers and the style mixes (their centres kept in `recs.styles`
 //!   as the next start).
 //! * **Mixes and radio** ([`radio`]), **«Новое для тебя» and new releases**
-//!   ([`discover`]), **«Не рекомендовать»** with its undo (below).
+//!   ([`discover`]), **the services' own suggestions** as a signal of taste
+//!   ([`suggest`]: matched against the library here, a bonus of affinity
+//!   for its tracks and artists, discovery votes for the rest),
+//!   **«Не рекомендовать»** with its undo (below).
 //!
 //! [`StreamSchedule::recs_debounce`]: crate::StreamSchedule::recs_debounce
 //! [`StreamSchedule::recs_every`]: crate::StreamSchedule::recs_every
 
 mod discover;
 mod radio;
+mod suggest;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -39,7 +43,7 @@ use nikgob_library::{Library, now_ms};
 use nikgob_recs::{
     Catalog, DAYLIST_LEN, DailyParams, DayPart, DiscoveryFilter, Item, Mood, NewTrack, Pick, RadioParams,
     RadioState as Engine, Recs, StyleMix, Taste, TasteInput, Tile, TrackInfo, VectorIndex, album_key, artist_key,
-    daylist_title, daylist_until, song_key, stream_song_key,
+    ServiceSuggestions, daylist_title, daylist_until, match_suggestions, song_key, stream_song_key,
 };
 use nikgob_view::{self as v, Command};
 use serde::{Deserialize, Serialize};
@@ -89,6 +93,20 @@ pub(crate) struct Snapshot {
     /// [`song_key`]s of every track ever played (a discovery that played
     /// is not ignored).
     pub played_songs: HashSet<String>,
+    /// Songs the services suggest that the library does not have, new
+    /// indeed ([`Snapshot::is_new`]), strongest first.
+    pub suggested_new: Vec<(StreamTrack, f32)>,
+}
+
+/// A new-music candidate that is new indeed by `f`: not in the library,
+/// not disliked, playable.
+fn is_new(f: &DiscoveryFilter, t: &StreamTrack) -> bool {
+    let key = stream_song_key(t);
+    !f.known_ids.contains(&t.id)
+        && !f.known_songs.contains(&key)
+        && !f.disliked_songs.contains(&key)
+        && !t.artists.iter().any(|a| f.disliked_artists.contains(&artist_key(&a.name)))
+        && t.playable
 }
 
 impl Snapshot {
@@ -99,13 +117,7 @@ impl Snapshot {
     /// A new-music candidate that is new indeed: not in the library, not
     /// disliked.
     pub fn is_new(&self, t: &StreamTrack) -> bool {
-        let f = &self.filter;
-        let key = stream_song_key(t);
-        !f.known_ids.contains(&t.id)
-            && !f.known_songs.contains(&key)
-            && !f.disliked_songs.contains(&key)
-            && !t.artists.iter().any(|a| f.disliked_artists.contains(&artist_key(&a.name)))
-            && t.playable
+        is_new(&self.filter, t)
     }
 }
 
@@ -164,6 +176,8 @@ pub(crate) struct Built {
     snap: Arc<Snapshot>,
     home: RecHome,
     index_len: usize,
+    /// [`BuildInput::rerank`].
+    rerank: bool,
 }
 
 /// From the builder, the radio and the background calls to the worker.
@@ -171,6 +185,7 @@ pub(crate) enum Msg {
     Built(Box<Result<Built, String>>),
     Radio(radio::RadioMsg),
     Discover(discover::DiscoverMsg),
+    Suggest(suggest::SuggestMsg),
 }
 
 /// «Твой микс» of a day as the library's cache keeps it.
@@ -227,6 +242,10 @@ pub(crate) struct RecsState {
     pending_play: Option<v::MixId>,
     pub(crate) radio: radio::RadioState,
     pub(crate) discover: discover::DiscoverState,
+    pub(crate) suggest: suggest::SuggestState,
+    /// The services' suggestions changed: the discoveries are ranked again
+    /// after the next build.
+    discover_rerank: bool,
 }
 
 impl RecsState {
@@ -245,6 +264,8 @@ impl RecsState {
             pending_play: None,
             radio: radio::RadioState::default(),
             discover: discover::DiscoverState::default(),
+            suggest: suggest::SuggestState::default(),
+            discover_rerank: false,
         }
     }
 }
@@ -418,6 +439,10 @@ struct BuildInput {
     new_share: f32,
     /// New music for the daily mix (the discoveries).
     new: Vec<StreamTrack>,
+    /// The services' suggestions, of the services switched on.
+    suggested: Vec<suggest::Kept>,
+    /// They changed: the discoveries are ranked again after this build.
+    rerank: bool,
 }
 
 fn build(input: BuildInput) -> Result<Built, String> {
@@ -490,6 +515,34 @@ fn build(input: BuildInput) -> Result<Built, String> {
         .collect();
     let known_albums = releases.iter().map(|(t, a)| album_key(t, a)).collect();
 
+    // The services' suggestions: a library track by the service's id or
+    // the same song, a library artist by name; the rest is new music.
+    let lists: Vec<ServiceSuggestions<'_>> = input
+        .suggested
+        .iter()
+        .map(|k| ServiceSuggestions {
+            at: k.at,
+            tracks: &k.tracks,
+            artists: &k.artists,
+        })
+        .collect();
+    let mut by_song: HashMap<String, TrackId> = HashMap::new();
+    for r in rows.iter().filter(|r| r.in_library) {
+        by_song.entry(song_key(&r.title, &r.artist)).or_insert(r.id);
+    }
+    let matched = match_suggestions(
+        &lists,
+        |t| {
+            lib.track_by_remote(&t.id)
+                .ok()
+                .flatten()
+                .filter(|id| catalog.position(*id).is_some())
+                .or_else(|| by_song.get(&stream_song_key(t)).copied())
+        },
+        |name| artist_keys.get(&artist_key(name)).copied(),
+    );
+    let suggested_new: Vec<(StreamTrack, f32)> = matched.unmatched.into_iter().filter(|(t, _)| is_new(&filter, t)).collect();
+
     let taste = Taste::build(
         &catalog,
         &TasteInput {
@@ -500,6 +553,8 @@ fn build(input: BuildInput) -> Result<Built, String> {
             disliked_tracks,
             disliked_artists,
             utc_offset_min: input.utc_offset_min,
+            suggested_tracks: matched.tracks,
+            suggested_artists: matched.artists,
         },
         input.now,
     );
@@ -519,6 +574,7 @@ fn build(input: BuildInput) -> Result<Built, String> {
         artist_keys,
         known_albums,
         played_songs,
+        suggested_new,
     };
     let home = build_home(&snap, &input);
     log::info!(
@@ -532,6 +588,7 @@ fn build(input: BuildInput) -> Result<Built, String> {
         snap: Arc::new(snap),
         home,
         index_len,
+        rerank: input.rerank,
     })
 }
 
@@ -926,6 +983,10 @@ pub struct HomePreview {
     /// Discoveries and new releases the last discovery pass left.
     pub discover_cached: usize,
     pub new_releases_cached: usize,
+    /// Library tracks the services' kept suggestions give affinity now,
+    /// and suggested songs new to the library (docs/stage4.md §12.3).
+    pub suggested_library: usize,
+    pub suggested_new: usize,
     pub took: Duration,
 }
 
@@ -950,6 +1011,8 @@ pub fn preview_home(lib: &Library, library_dir: &std::path::Path) -> Result<Home
         refresh_daylist: false,
         new_share: v::Prefs::default().radio_new_share.fraction(),
         new: discoveries.clone(),
+        suggested: suggest::cached(lib),
+        rerank: false,
     };
     let built = build(input)?;
     let h = &built.home;
@@ -966,6 +1029,8 @@ pub fn preview_home(lib: &Library, library_dir: &std::path::Path) -> Result<Home
         tile_tracks: h.tiles.iter().map(|t| (tile_mix(t.tile), t.picks.len())).collect(),
         discover_cached: discoveries.len(),
         new_releases_cached,
+        suggested_library: (0..built.snap.catalog.len()).filter(|&i| built.snap.taste.suggested_at(i) > 0.0).count(),
+        suggested_new: built.snap.suggested_new.len(),
         took: started.elapsed(),
         home,
     })
@@ -1025,6 +1090,7 @@ impl Worker {
             self.recs_build();
         }
         self.discover_tick();
+        self.suggest_tick();
     }
 
     fn recs_build(&mut self) {
@@ -1040,6 +1106,8 @@ impl Worker {
             refresh_daylist: std::mem::take(&mut self.recs.refresh_daylist),
             new_share: prefs.radio_new_share.fraction(),
             new: self.discoveries(),
+            suggested: self.suggestions_kept(),
+            rerank: std::mem::take(&mut self.recs.discover_rerank),
         };
         let tx = self.recs.tx.clone();
         let spawned = std::thread::Builder::new().name("nikgob-recs".into()).spawn(move || {
@@ -1061,28 +1129,34 @@ impl Worker {
             Msg::Built(b) => self.recs_built(*b),
             Msg::Radio(m) => self.radio_msg(m),
             Msg::Discover(m) => self.discover_msg(m),
+            Msg::Suggest(m) => self.suggest_msg(m),
         }
     }
 
     fn recs_built(&mut self, b: Result<Built, String>) {
         self.recs.building = false;
         self.recs.built_at = Some(Instant::now());
-        match b {
+        let rerank = match b {
             Ok(b) => {
+                let rerank = b.rerank;
                 self.recs.built_index_len = b.index_len;
                 self.recs.snap = Some(b.snap);
                 self.recs.home = Some(b.home);
+                rerank
             }
             Err(e) => {
                 log::warn!("recs: {e}");
                 return;
             }
-        }
+        };
         self.publish_recs_home();
         if let Some(id) = self.recs.pending_play.take() {
             self.play_mix(id);
         }
         self.radio_snapshot_ready();
+        if rerank {
+            self.discover_rerank();
+        }
         self.discover_tick();
     }
 

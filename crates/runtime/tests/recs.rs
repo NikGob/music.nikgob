@@ -3,7 +3,9 @@
 //! home's hero, moods and style mixes, the daily mix kept for the day,
 //! mixes and radios that play, extend themselves, learn from skips and
 //! survive a restart, «Не рекомендовать» with its undo, and the discovery
-//! pass (budget, rate limits, known songs, persistence, new releases).
+//! pass (budget, rate limits, known songs, persistence, new releases), and
+//! the services' own suggestions (cadence, budget, cache, the snapshot and
+//! the discoveries they change, signed-out and switched-off services).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -13,7 +15,7 @@ use nikgob_core::model::{
     Analysis, AnalysisSource, Artist, ArtistCredit, ArtistId, Codec, Event, EventContext, EventType, Release, Source,
     SourceKind, Track, TrackId,
 };
-use nikgob_core::streaming::{FakeService, StreamService};
+use nikgob_core::streaming::{FakeService, Service, StreamService};
 use nikgob_library::{Library, now_ms};
 use nikgob_runtime::{PlayRequest, Playback, PlaybackEvent, Runtime, RuntimeConfig, StreamSchedule};
 use nikgob_view::{Command, MixId, Mood, Prefs, RadioSeed, RecTarget, ViewState};
@@ -54,6 +56,16 @@ struct Started {
 }
 
 fn start(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs, prefs_path: Option<&Path>) -> Started {
+    start_with(lib, streams, prefs, prefs_path, schedule())
+}
+
+fn start_with(
+    lib: &Library,
+    streams: Vec<Arc<dyn StreamService>>,
+    prefs: Prefs,
+    prefs_path: Option<&Path>,
+    schedule: StreamSchedule,
+) -> Started {
     let asked = Arc::new(Mutex::new(Vec::new()));
     let rt = Runtime::start_scheduled(
         RuntimeConfig {
@@ -67,7 +79,7 @@ fn start(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs, pref
         },
         Box::new(Recorder(asked.clone())),
         Arc::new(|| {}),
-        schedule(),
+        schedule,
     );
     Started { rt, asked }
 }
@@ -521,6 +533,130 @@ fn discovery_waits_out_a_rate_limit() {
     assert_eq!((yt.total_calls(), dz.total_calls()), at, "nothing while paused");
     wait_for(&s.rt, "discoveries after the pause", |st| !st.home.discover.is_empty());
     assert!(yt.calls("radio") >= 2, "the same request again: {:?}", yt.all_calls());
+}
+
+// ---- The services' own suggestions (docs/stage4.md §12.3) ----------------
+
+/// Suggestions read at once, the discovery quick.
+fn suggest_schedule() -> StreamSchedule {
+    StreamSchedule {
+        suggest_first: Duration::ZERO,
+        ..schedule()
+    }
+}
+
+fn line(st: &ViewState, service: Service) -> Option<String> {
+    st.account(service).and_then(|a| a.suggestions.clone())
+}
+
+fn read(st: &ViewState, service: Service) -> bool {
+    line(st, service).is_some_and(|l| l.starts_with("Подсказки: ") && l.contains("обновлено"))
+}
+
+#[test]
+fn suggestions_are_read_within_their_budget_kept_and_change_the_recommendations() {
+    let l = library(0, 0, 0, KNOWN);
+    let yt = Arc::new(FakeService::youtube());
+    let sp = Arc::new(FakeService::spotify());
+    let dz = Arc::new(FakeService::deezer());
+    let streams: Vec<Arc<dyn StreamService>> = vec![yt.clone(), sp.clone(), dz.clone()];
+    let s = start_with(&l.lib, streams.clone(), Prefs::default(), None, suggest_schedule());
+    wait_for(&s.rt, "both services' suggestions", |st| read(st, Service::Youtube) && read(st, Service::Spotify));
+    let st = s.rt.state();
+    let yt_line = line(&st, Service::Youtube).unwrap();
+    assert!(yt_line.starts_with("Подсказки: 7 треков, 2 исполнителя · обновлено в "), "{yt_line}");
+    assert!(line(&st, Service::Spotify).unwrap().contains("4 исполнителя"), "{:?}", line(&st, Service::Spotify));
+    assert_eq!(st.account(Service::Spotify).unwrap().suggestions_note, None);
+    assert_eq!(line(&st, Service::Deezer), None, "Deezer has none");
+    drop(st);
+    assert_eq!(yt.calls("suggestions"), 2, "{:?}", yt.all_calls());
+    assert_eq!(sp.calls("suggestions"), 5, "{:?}", sp.all_calls());
+    assert!(l.lib.cache_get("suggest.youtube").unwrap().is_some());
+    assert!(l.lib.cache_get("suggest.spotify").unwrap().is_some());
+
+    // The songs only the services suggest (Sigur Rós on YouTube Music,
+    // 椎名林檎 on Spotify: the library's seeds never lead to them) become
+    // discoveries once the recommendations are built again.
+    wait_for(&s.rt, "the suggested songs among the discoveries", |st| {
+        let titles: Vec<&str> = st.home.discover.iter().map(|r| r.title.as_str()).collect();
+        titles.contains(&"Svefn-g-englar") && titles.contains(&"丸の内サディスティック")
+    });
+    drop(s);
+
+    // The snapshot matches the kept suggestions against the library.
+    let preview = nikgob_runtime::preview_home(&l.lib, &std::env::temp_dir()).unwrap();
+    assert!(preview.suggested_library >= 4, "{}", preview.suggested_library);
+    assert!(preview.suggested_new >= 3, "{}", preview.suggested_new);
+
+    // Kept for six hours: a restart asks nothing.
+    yt.reset_calls();
+    sp.reset_calls();
+    let s = start_with(&l.lib, streams, Prefs::default(), None, suggest_schedule());
+    wait_for(&s.rt, "the kept suggestions", |st| read(st, Service::Youtube) && read(st, Service::Spotify));
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(yt.calls("suggestions") + sp.calls("suggestions"), 0, "{:?} {:?}", yt.all_calls(), sp.all_calls());
+}
+
+#[test]
+fn signed_out_or_switched_off_services_are_asked_for_no_suggestions() {
+    let l = library(0, 0, 0, KNOWN);
+    let yt = Arc::new(FakeService::youtube().logged_out());
+    let sp = Arc::new(FakeService::spotify());
+    let prefs = Prefs {
+        spotify_enabled: false,
+        deezer_enabled: false,
+        ..Prefs::default()
+    };
+    let s = start_with(&l.lib, vec![yt.clone(), sp.clone()], prefs, None, suggest_schedule());
+    wait_for(&s.rt, "the quiet line of a signed-out YouTube Music", |st| {
+        line(st, Service::Youtube).as_deref() == Some("Подсказки — после входа в аккаунт")
+    });
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(yt.calls("suggestions") + sp.calls("suggestions"), 0, "{:?} {:?}", yt.all_calls(), sp.all_calls());
+    assert_eq!(line(&s.rt.state(), Service::Spotify), None, "switched off");
+}
+
+#[test]
+fn a_rate_limited_feed_is_asked_again_after_the_pause() {
+    let l = library(0, 0, 0, KNOWN);
+    let yt = Arc::new(FakeService::youtube());
+    yt.rate_limit_next_paused("suggestions", 1, Duration::from_millis(1500));
+    let prefs = Prefs {
+        spotify_enabled: false,
+        deezer_enabled: false,
+        ..Prefs::default()
+    };
+    let s = start_with(&l.lib, vec![yt.clone()], prefs, None, suggest_schedule());
+    wait_until("the limited call", || yt.calls("suggestions") >= 1);
+    let at = yt.calls("suggestions");
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(yt.calls("suggestions"), at, "nothing while paused");
+    wait_for(&s.rt, "the suggestions after the pause", |st| read(st, Service::Youtube));
+    assert_eq!(yt.calls("suggestions"), 3, "the same feed again, then the other: {:?}", yt.all_calls());
+}
+
+#[test]
+fn an_old_spotify_sign_in_asks_quietly_for_a_new_one() {
+    let l = library(0, 0, 0, KNOWN);
+    let sp = Arc::new(FakeService::spotify().without_top_scope());
+    let prefs = Prefs {
+        youtube_enabled: false,
+        deezer_enabled: false,
+        ..Prefs::default()
+    };
+    let s = start_with(&l.lib, vec![sp.clone()], prefs, None, suggest_schedule());
+    wait_for(&s.rt, "the reconnect note", |st| {
+        st.account(Service::Spotify).is_some_and(|a| a.suggestions_note.is_some())
+    });
+    let st = s.rt.state();
+    let a = st.account(Service::Spotify).unwrap();
+    assert_eq!(a.suggestions_note.as_deref(), Some("Переподключи Spotify, чтобы брать твой топ"));
+    assert!(a.suggestions.as_deref().unwrap().starts_with("Подсказки: 3 трека"), "{:?}", a.suggestions);
+    assert!(
+        !st.toasts.iter().any(|t| t.kind == nikgob_view::ToastKind::Error || t.text.contains("топ")),
+        "no error toast: {:?}",
+        st.toasts
+    );
 }
 
 #[test]
