@@ -502,7 +502,8 @@ fn board_tiles(h: &HomeView) -> (bool, Vec<BoardTile>) {
 }
 
 /// The colour roles of the small tiles: secondary, tertiary, the highest
-/// surface (the big tile is primary).
+/// surface (the big tile is primary; a fourth, the high surface, only
+/// when three cannot keep touching tiles apart).
 const ROLES: usize = 3;
 
 /// The role a small tile would like, by its group of kinds.
@@ -525,21 +526,43 @@ fn touching(a: bento::Cell, b: bento::Cell) -> bool {
 }
 
 /// The colour roles of the board's tiles in their cells (`None` for the
-/// big one): each its kind's role unless a tile beside it has it already,
-/// then the next one.
+/// big one): no two touching tiles alike, each as near its kind's role as
+/// that allows (the first such colouring in the order of the
+/// preferences); a board three roles cannot colour takes a fourth.
 fn board_roles(ids: &[MixId], cells: &[bento::Cell], big: bool) -> Vec<Option<usize>> {
-    let mut roles: Vec<Option<usize>> = Vec::with_capacity(ids.len());
-    for (i, (id, cell)) in ids.iter().zip(cells).enumerate() {
-        if big && i == 0 {
-            roles.push(None);
-            continue;
+    fn fill(i: usize, ids: &[MixId], cells: &[bento::Cell], big: bool, roles: usize, out: &mut Vec<Option<usize>>) -> bool {
+        if i == ids.len() {
+            return true;
         }
-        let taken: Vec<usize> = (0..i).filter(|&j| touching(cells[j], *cell)).filter_map(|j| roles[j]).collect();
-        let first = preferred_role(*id);
-        let role = (0..ROLES).map(|k| (first + k) % ROLES).find(|r| !taken.contains(r)).unwrap_or(first);
-        roles.push(Some(role));
+        if big && i == 0 {
+            out.push(None);
+            return fill(1, ids, cells, big, roles, out) || {
+                out.pop();
+                false
+            };
+        }
+        let first = preferred_role(ids[i]);
+        for k in 0..roles {
+            let r = (first + k) % roles;
+            if (0..i).any(|j| out[j] == Some(r) && touching(cells[j], cells[i])) {
+                continue;
+            }
+            out.push(Some(r));
+            if fill(i + 1, ids, cells, big, roles, out) {
+                return true;
+            }
+            out.pop();
+        }
+        false
     }
-    roles
+    let n = ids.len().min(cells.len());
+    for roles in [ROLES, ROLES + 1] {
+        let mut out = Vec::with_capacity(n);
+        if fill(0, &ids[..n], cells, big, roles, &mut out) {
+            return out;
+        }
+    }
+    (0..n).map(|i| (!(big && i == 0)).then_some(i % ROLES)).collect()
 }
 
 /// A board tile's container and content colours (scheme roles).
@@ -548,6 +571,7 @@ fn tile_colors(role: Option<usize>, s: &ColorScheme) -> (Color32, Color32) {
         None => (s.primary_container, s.on_primary_container),
         Some(0) => (s.secondary_container, s.on_secondary_container),
         Some(1) => (s.tertiary_container, s.on_tertiary_container),
+        Some(3) => (s.surface_container_high, s.on_surface),
         Some(_) => (s.surface_container_highest, s.on_surface),
     }
 }

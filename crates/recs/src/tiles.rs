@@ -731,7 +731,7 @@ impl<'r, 'a> Board<'r, 'a> {
         let mut seasons: Vec<((i32, u32), HashMap<usize, u32>)> =
             by_season.into_iter().filter(|(_, t)| t.len() >= TILE_MIN).collect();
         // The latest first.
-        seasons.sort_by(|a, b| b.0.cmp(&a.0));
+        seasons.sort_by_key(|s| std::cmp::Reverse(s.0));
         let options = seasons.into_iter().map(|(s, t)| (format!("{}-{}", s.0, s.1), (s, t))).collect();
         let (param, (s, tracks)) = self.choose(TileKind::Season, options)?;
         let cands = tracks.into_iter().map(|(i, n)| (i, n as f32 + 0.01 * self.aff(i))).collect();
@@ -951,7 +951,9 @@ impl<'r, 'a> Board<'r, 'a> {
     /// The best of a playlist none of whose songs played for two weeks,
     /// shuffled.
     fn playlist(&self) -> Option<TileMix> {
-        let mut options: Vec<(String, (&PlaylistFacts, Vec<usize>, f32))> = Vec::new();
+        // A playlist, its songs and how much they are loved.
+        type Candidate<'p> = (String, (&'p PlaylistFacts, Vec<usize>, f32));
+        let mut options: Vec<Candidate<'_>> = Vec::new();
         for p in &self.input.playlists {
             let mut tracks: Vec<usize> = p.tracks.iter().filter_map(|t| self.recs.catalog.position(*t)).filter(|&i| self.ok(i)).collect();
             tracks.sort_unstable();
