@@ -545,6 +545,9 @@ pub struct TrackListOpts {
     /// A track with a file says «у тебя» (among the services' rows of the
     /// merged search).
     pub mark_local: bool,
+    /// A track without a file is drawn quieter (`on-surface-variant`) and
+    /// one that streams says «стрим» (an album's songs the library lacks).
+    pub mark_missing: bool,
 }
 
 /// Tracks of different artists on one release (a compilation).
@@ -721,7 +724,7 @@ fn track_row(
     let mut item = ListItem::new(&t.title)
         .leading(leading)
         .selected(is_cur)
-        .muted(!has_local && !streams)
+        .muted(!has_local && (!streams || opts.mark_missing))
         .hover_play(!is_cur)
         .enabled(true)
         .trailing(|ui| {
@@ -766,6 +769,8 @@ fn track_row(
                 ui.label(TypeRole::BodyMedium.style().rich(dur, variant));
                 if !has_local && !streams {
                     ui.label(TypeRole::LabelSmall.style().rich("нет файла", variant));
+                } else if !has_local && opts.mark_missing {
+                    ui.label(TypeRole::LabelSmall.style().rich("стрим", variant));
                 }
             });
         })

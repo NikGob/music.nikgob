@@ -137,7 +137,7 @@ fn import_retag_trash_undo() {
     let wav2 = root.join("other.wav");
     write_wav(&wav2, 2.0);
     rt.send(Command::ImportFiles(vec![wav2]));
-    wait_for(&rt, "the second import", |s| s.library.track_count == 1);
+    wait_for(&rt, "the second import", |s| s.library.track_count == 1 && s.library.tracks.len() == 1);
     let second = rt.state().library.tracks[0].id;
     let file = std::path::PathBuf::from(lib.active_source(second).unwrap().unwrap().locator);
     let in_trash = std::fs::read_dir(&cfg.trash_dir).unwrap().count();
@@ -195,7 +195,8 @@ fn torrent_download_imports_and_cleans_up() {
         Arc::new(|| {}),
     );
     rt.send(Command::AddTorrentFile(tfile));
-    wait_for(&rt, "the torrent import", |s| s.library.track_count == 2);
+    // The count and the rows of the list are published apart.
+    wait_for(&rt, "the torrent import", |s| s.library.track_count == 2 && s.library.tracks.len() == 2);
     let track = rt.state().library.tracks[0].id;
     let src = lib.active_source(track).unwrap().unwrap();
     assert!(matches!(src.origin, nikgob_core::model::SourceOrigin::Torrent { .. }), "{src:?}");
@@ -369,7 +370,7 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
     );
 
     rt.send(Command::ImportFiles(vec![wav1]));
-    wait_for(&rt, "first import", |s| s.library.track_count == 1);
+    wait_for(&rt, "first import", |s| s.library.track_count == 1 && s.library.tracks.len() == 1);
     let track1 = rt.state().library.tracks[0].id;
     let opus1 = std::path::PathBuf::from(lib.active_source(track1).unwrap().unwrap().locator);
     assert!(opus1.is_file(), "Opus is in the library");
@@ -485,7 +486,7 @@ fn volume_and_queue_come_back_after_a_restart_paused_in_place() {
 
     let rt = start();
     rt.send(Command::ImportFiles(vec![wav.clone()]));
-    wait_for(&rt, "the import", |s| s.library.track_count == 1);
+    wait_for(&rt, "the import", |s| s.library.track_count == 1 && s.library.tracks.len() == 1);
     let track = rt.state().library.tracks[0].id;
     rt.send(Command::PlayTracks { tracks: vec![track], start: 0, context: "Тест".into() });
     wait_for(&rt, "playing", |s| s.player.current.as_ref().is_some_and(|t| t.id == track));

@@ -30,6 +30,7 @@ mod schedule;
 mod search;
 mod share;
 mod sync;
+mod tracklist;
 mod web_login;
 mod wishlist;
 
@@ -180,6 +181,8 @@ pub(crate) enum Msg {
     Cold(cold::ColdMsg),
     Sync(sync::SyncMsg),
     Disco(discography::DiscoMsg),
+    /// A library album's whole tracklist (see [`tracklist`]).
+    Tracklist(tracklist::TracklistMsg),
     /// Songs for the «Найти песню…» dialog (see [`replace`]).
     SongsFound {
         seq: u64,
@@ -248,6 +251,7 @@ pub(crate) struct Streams {
     cold: cold::ColdState,
     sync: sync::SyncState,
     disco: discography::DiscoState,
+    tracklist: tracklist::TracklistState,
     /// The sound analysis of stream-only tracks.
     pub(crate) analysis: analysis::StreamAnalysis,
 }
@@ -294,6 +298,7 @@ impl Streams {
             cold: cold::ColdState::default(),
             sync: sync::SyncState::default(),
             disco: discography::DiscoState::default(),
+            tracklist: tracklist::TracklistState::default(),
             analysis: analysis::StreamAnalysis::default(),
         }
     }
@@ -455,6 +460,7 @@ impl Worker {
         let idle = self.streams_idle();
         self.sync_tick(!idle);
         if !idle {
+            self.tracklist_tick();
             self.enrich_tick();
             self.likes_tick();
             self.clips_tick();
@@ -599,6 +605,7 @@ impl Worker {
             Msg::Cold(m) => self.cold_msg(m),
             Msg::Sync(m) => self.sync_msg(m),
             Msg::Disco(m) => self.disco_msg(m),
+            Msg::Tracklist(m) => self.tracklist_msg(m),
             Msg::SongsFound { seq, service, result } => self.songs_found(seq, service, result),
             Msg::ReplaceResolved {
                 track,

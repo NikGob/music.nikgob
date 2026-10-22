@@ -23,7 +23,7 @@ use nikgob_core::model::{
     TrackId, UnixMs, Uuid,
 };
 use nikgob_core::streaming::{
-    AlbumRef, ArtistRef, EntityKind, PlaylistSyncMode, RemoteId, Service, StreamTrack, TrackKind,
+    AlbumRef, ArtistRef, EntityKind, PlaylistSyncMode, RemoteId, Service, StreamAlbum, StreamTrack, TrackKind,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -467,6 +467,8 @@ pub(crate) fn upsert_stream_track_in(
         Some(id) if !own || has_local_source(conn, &id.to_string())? => {
             link_known(conn, id, t)?;
             set_stream_cover(conn, id, t, false)?;
+            // A title tagged in Latin letters takes the service's Cyrillic.
+            same::prefer_cyrillic_in(conn, &id.to_string(), &t.title, t.album.as_ref().map(|a| a.title.as_str()))?;
             id
         }
         _ => write_stream_meta(conn, t, existing.or(want), existing.is_none())?,
@@ -693,6 +695,74 @@ impl Library {
                 }
             }
             same::same_song_track(c, t)?.map(|id| parse(&id)).transpose()
+        })
+    }
+
+    /// The whole tracklist of the library album `release`, as a service has
+    /// it (docs/stage4.md, «Библиотечный альбом знает все свои треки»): the
+    /// album's id is linked to the release, its tracks the release has no
+    /// row for become stream tracks of it (outside the library until liked
+    /// or downloaded, like «Хочу скачать» makes them), a track of the
+    /// release that is one of them (its file, a liked stream) gains that
+    /// stream and the album's number when it had none, the release learns
+    /// its track count, and a title in Latin letters takes the album's
+    /// Cyrillic. An album id linked to another release is left alone.
+    /// Returns how many tracks were added.
+    pub fn adopt_stream_album(&self, release: ReleaseId, album: &StreamAlbum) -> Result<usize> {
+        self.write(|tx| {
+            let rid = release.to_string();
+            let Some(title) = tx
+                .query_row("SELECT title FROM release WHERE id = ?1", [&rid], |r| r.get::<_, String>(0))
+                .optional()?
+            else {
+                return Ok(0);
+            };
+            let service = album.id.service;
+            match linked(tx, "release", service, EntityKind::Album, &album.id.id)? {
+                Some(other) if other != rid => return Ok(0),
+                Some(_) => {}
+                None => set_external(tx, service, EntityKind::Album, &album.id.id, &rid)?,
+            }
+            let known = |tx: &Connection| -> Result<i64> {
+                Ok(tx.query_row(
+                    "SELECT count(*) FROM track WHERE release_id = ?1 AND deleted_at IS NULL",
+                    [&rid],
+                    |r| r.get(0),
+                )?)
+            };
+            let before = known(tx)?;
+            let reference = AlbumRef {
+                id: Some(album.id.clone()),
+                title: album.title.clone(),
+                artists: album.artists.clone(),
+                year: album.year,
+            };
+            for (i, t) in album.tracks.iter().enumerate() {
+                let mut t = t.clone();
+                t.album = Some(reference.clone());
+                let no = t.track_no.unwrap_or(i as u32 + 1);
+                t.track_no = Some(no);
+                let id = upsert_stream_track_in(tx, &t, None)?;
+                tx.execute(
+                    "UPDATE track SET track_no = ?2, disc_no = ?3
+                      WHERE id = ?1 AND release_id = ?4 AND track_no = 0",
+                    params![id.to_string(), no, t.disc_no.unwrap_or(1).max(1), rid],
+                )?;
+            }
+            let total = album.total_tracks.unwrap_or(0).max(album.tracks.len() as u32);
+            if total > 0 {
+                tx.execute(
+                    "UPDATE release SET total_tracks = max(coalesce(total_tracks, 0), ?2) WHERE id = ?1",
+                    params![rid, total],
+                )?;
+            }
+            let better = nikgob_core::translit::prefer_cyrillic(&title, &album.title);
+            if better != title {
+                let key = sort_key(better);
+                tx.execute("UPDATE release SET title = ?2, title_key = ?3 WHERE id = ?1", params![rid, better, key])?;
+                tx.execute("UPDATE track SET album_key = ?2 WHERE release_id = ?1", params![rid, key])?;
+            }
+            Ok((known(tx)? - before).max(0) as usize)
         })
     }
 

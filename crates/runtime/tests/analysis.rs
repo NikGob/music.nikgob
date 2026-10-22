@@ -81,7 +81,7 @@ fn imported_files_are_analysed_in_the_background() {
     );
 
     rt.send(Command::ImportFiles(vec![wav]));
-    wait_for(&rt, "the import", |s| s.library.track_count == 1);
+    wait_for(&rt, "the import", |s| s.library.track_count == 1 && s.library.tracks.len() == 1);
     let track = rt.state().library.tracks[0].id;
     wait_for(&rt, "the analysis", |s| {
         s.analysis

@@ -586,8 +586,9 @@ impl Worker {
                 self.publish_player();
             }
             Command::PlayRelease { id, start, shuffle } => {
+                // The whole album, its songs that only stream too.
                 let rows = self
-                    .log_err("альбом", self.lib.tracks_of_release(id))
+                    .log_err("альбом", self.lib.tracks_of_release_all(id))
                     .unwrap_or_default();
                 let title = self
                     .lib
@@ -1565,16 +1566,19 @@ impl Worker {
         });
     }
 
-    fn load_release(&mut self, id: nikgob_core::model::ReleaseId) {
+    pub(crate) fn load_release(&mut self, id: nikgob_core::model::ReleaseId) {
         let Some(release) = self.lib.get_release(id).ok().flatten() else {
             return;
         };
-        let rows = self.lib.tracks_of_release(id).unwrap_or_default();
+        // Its songs outside the library too: the ones a service knows it
+        // has and nothing here plays from a file (▶ stream, ↓ download).
+        let rows = self.lib.tracks_of_release_all(id).unwrap_or_default();
         let progress = self.lib.release_progress(id).ok().flatten();
         let liked = self.lib.release_liked(id).unwrap_or(false);
         self.publish(|s, res| {
             s.release = Some(res.release_detail(&release, &rows, progress, liked));
         });
+        self.complete_tracklist(id);
     }
 
     fn load_artist(&mut self, id: nikgob_core::model::ArtistId) {

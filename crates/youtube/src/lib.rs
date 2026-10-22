@@ -297,6 +297,45 @@ impl Drop for Runtime {
     }
 }
 
+/// `cookies` (a `Cookie:` header or a cookies.txt) with the language and
+/// country of the PREF cookie set to `hl` / `gl`.
+fn prefer_language(cookies: &str, hl: &str, gl: &str) -> String {
+    let pref = |value: &str| -> String {
+        let mut parts: Vec<String> = value
+            .split('&')
+            .filter(|p| !p.is_empty() && !p.starts_with("hl=") && !p.starts_with("gl="))
+            .map(str::to_owned)
+            .collect();
+        parts.push(format!("hl={hl}"));
+        parts.push(format!("gl={gl}"));
+        parts.join("&")
+    };
+    if cookies.lines().any(|l| l.split('\t').count() >= 7) {
+        return cookies
+            .lines()
+            .map(|l| {
+                let mut f: Vec<String> = l.split('\t').map(str::to_owned).collect();
+                if f.len() >= 7 && f[5] == "PREF" {
+                    f[6] = pref(&f[6]);
+                }
+                f.join("\t")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    cookies
+        .split(';')
+        .map(|c| {
+            let lead = &c[..c.len() - c.trim_start().len()];
+            match c.trim_start().strip_prefix("PREF=") {
+                Some(v) => format!("{lead}PREF={}", pref(v)),
+                None => c.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 /// YouTube Music; see the crate docs.
 pub struct Youtube {
     inner: Arc<Inner>,
@@ -585,6 +624,10 @@ impl StreamService for Youtube {
         };
         *self.inner.account() = Account::LoggingIn(None);
         self.run(move |inner| async move {
+            // The browser's PREF cookie carries its interface language
+            // (`hl=en`): YouTube may then answer in it, and Cyrillic titles
+            // come transliterated («LEGENDARNAJa PYL'»). Ours wins.
+            let cookies = prefer_language(&cookies, &inner.hl, &inner.gl);
             let text = cookies.trim();
             let set = if text.lines().any(|l| l.split('\t').count() >= 7) {
                 inner.rp.user_auth_set_cookie_txt(text).await
@@ -1308,6 +1351,20 @@ mod tests {
         assert!(!valid_isrc("DEUM7160245"));
         assert!(!valid_isrc("\"DEUM716024\""));
         assert_eq!(parse_country("ru"), Some(Country::Ru));
+    }
+
+    #[test]
+    fn the_pref_cookie_asks_for_our_language() {
+        assert_eq!(
+            prefer_language("SID=a; PREF=f6=40000000&hl=en&gl=US; HSID=b", "ru", "RU"),
+            "SID=a; PREF=f6=40000000&hl=ru&gl=RU; HSID=b"
+        );
+        assert_eq!(prefer_language("SID=a", "ru", "RU"), "SID=a", "no PREF, nothing to change");
+        let txt = ".youtube.com\tTRUE\t/\tTRUE\t0\tPREF\thl=en\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tx";
+        assert_eq!(
+            prefer_language(txt, "ru", "RU"),
+            ".youtube.com\tTRUE\t/\tTRUE\t0\tPREF\thl=ru&gl=RU\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tx"
+        );
         assert_eq!(parse_country("nope"), None);
     }
 
