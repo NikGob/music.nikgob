@@ -139,7 +139,7 @@ fn add_shelf(s: &Shelf<'_>, kind: SuggestionKind, out: &mut Suggestions) {
         match it {
             Item::Track(track) => {
                 if !out.tracks.iter().any(|t| t.track.id == track.id) {
-                    out.tracks.push(SuggestedTrack { track, kind, weight });
+                    out.tracks.push(SuggestedTrack { track: *track, kind, weight });
                 }
             }
             Item::Artists(artists, share) => {
@@ -197,14 +197,14 @@ pub(crate) fn parse_history(v: &Value) -> Suggestions {
 
 /// What a card of a shelf stands for.
 enum Item {
-    Track(StreamTrack),
+    Track(Box<StreamTrack>),
     /// Artists, with how much the card says about them.
     Artists(Vec<ArtistRef>, f32),
 }
 
 fn item(v: &Value) -> Option<Item> {
     if let Some(r) = v.get("musicResponsiveListItemRenderer") {
-        return row_track(r).map(Item::Track);
+        return row_track(r).map(|t| Item::Track(Box::new(t)));
     }
     let r = v.get("musicTwoRowItemRenderer")?;
     two_row(r)
@@ -355,7 +355,7 @@ fn two_row(r: &Value) -> Option<Item> {
         t.album = album;
         t.kind = kind_of(nav);
         t.cover_url = r.get("thumbnailRenderer").and_then(cover);
-        return Some(Item::Track(t));
+        return Some(Item::Track(Box::new(t)));
     }
     let browse = nav.get("browseEndpoint")?;
     let id = browse.get("browseId").and_then(Value::as_str)?;
