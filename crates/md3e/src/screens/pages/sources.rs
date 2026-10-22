@@ -4,7 +4,8 @@
 //! and the sign-in, Premium only —; cookies), what a like
 //! downloads, playlist sync, the export files, the stream cache, and the
 //! torrents (Prowlarr, seeding) moved here from «Основные». A service that
-//! asked to wait says until when, quietly.
+//! asked to wait says until when, quietly, and so does what its own
+//! suggestions give our mixes (docs/stage4.md §12.3).
 
 use egui::{Sense, Stroke, Ui, Widget as _, vec2};
 use nikgob_core::streaming::SPOTIFY_PREMIUM_REQUIRED;
@@ -205,6 +206,9 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
             }
         });
         import_row(ui, state, Service::Spotify, out);
+        if let Some(a) = acc {
+            suggestions_line(ui, a, !busy, out);
+        }
     });
 }
 
@@ -319,6 +323,37 @@ fn paused_line(ui: &mut Ui, a: &AccountView) {
         });
         ui.add_space(8.0);
     }
+}
+
+/// «Подсказки: 48 треков · обновлено в 14:10»: what the service's own
+/// suggestions give our mixes, or why there are none; a feed that needs a
+/// new sign-in says so with a quiet way to do it.
+fn suggestions_line(ui: &mut Ui, a: &AccountView, can: bool, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let Some(line) = &a.suggestions else { return };
+    ui.horizontal(|ui| {
+        Icon::Info.widget(false, s.on_surface_variant, 18.0).ui(ui);
+        ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich_para(line, s.on_surface_variant)).wrap());
+    });
+    if let Some(note) = &a.suggestions_note {
+        ui.horizontal(|ui| {
+            ui.add_space(26.0);
+            ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich_para(note, s.on_surface_variant)).wrap());
+            if ui
+                .add(
+                    Button::new("Переподключить")
+                        .style(Style::Text)
+                        .size(Size::S)
+                        .enabled(can)
+                        .id_salt(("reconnect", a.service.as_str())),
+                )
+                .clicked()
+            {
+                out.push(Command::StreamLogin { service: a.service, input: LoginInput::Browser });
+            }
+        });
+    }
+    ui.add_space(8.0);
 }
 
 /// «Плейлисты и история» of a signed-in service: its own playlists and
@@ -512,6 +547,9 @@ fn youtube(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
         }
         if logged_in(acc) {
             import_row(ui, state, Service::Youtube, out);
+        }
+        if let Some(a) = acc {
+            suggestions_line(ui, a, !busy, out);
         }
         if !logged_in(acc) && (pages.yt_form || p.youtube_cookies_set) {
             cookies_form(ui, p, pages, registered && !busy, out);
