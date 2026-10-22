@@ -955,7 +955,16 @@ impl FakeService {
             .albums
             .iter()
             .chain(&self.catalog.more_albums)
-            .filter(|a| hit(&a.title) || a.artists.iter().any(|ar| hit(&ar.name)))
+            .filter(|a| {
+                // The query in its title or artist, or its words over both
+                // («кино группа крови»).
+                let fields: Vec<String> = std::iter::once(a.title.to_lowercase())
+                    .chain(a.artists.iter().map(|ar| ar.name.to_lowercase()))
+                    .collect();
+                hit(&a.title)
+                    || a.artists.iter().any(|ar| hit(&ar.name))
+                    || q.split_whitespace().all(|w| fields.iter().any(|f| f.contains(w)))
+            })
             .map(|a| StreamAlbum {
                 tracks: Vec::new(),
                 ..a.clone()

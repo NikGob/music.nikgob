@@ -474,7 +474,7 @@ impl Worker {
     /// item (started at once).
     fn wish_release_now(&mut self, release: ReleaseId) -> Wished {
         let p = self.lib.release_progress(release).ok().flatten();
-        let tracks = self.lib.tracks_of_release(release).unwrap_or_default();
+        let tracks = self.lib.tracks_of_release_all(release).unwrap_or_default();
         let missing = p.is_none_or(|p| p.local < p.total) || tracks.iter().any(|t| !t.has_local);
         if !missing {
             return Wished::Nothing;

@@ -244,7 +244,9 @@ pub fn release(
             _ => {}
         }
         ui.add_space(16.0);
-        widgets::track_list(ui, "release", &r.tracks, Lead::Number, &PlayFrom::Release(id), state, pages, out)
+        // The songs it lacks (from a service's tracklist): quieter, «стрим».
+        let opts = TrackListOpts { mark_missing: true, ..Default::default() };
+        widgets::track_list_ext(ui, "release", &r.tracks, Lead::Number, &PlayFrom::Release(id), opts, state, pages, out)
             .or(nav)
     })
 }
@@ -749,7 +751,7 @@ pub fn playlist(
             );
             return None;
         }
-        let opts = TrackListOpts { playlist: Some(id), reorder: !liked, mark_local: false };
+        let opts = TrackListOpts { playlist: Some(id), reorder: !liked, ..Default::default() };
         widgets::track_list_ext(ui, "playlist", &p.tracks, Lead::Cover, &PlayFrom::Playlist(id), opts, state, pages, out)
     });
     if !liked {

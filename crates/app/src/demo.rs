@@ -96,7 +96,7 @@ fn make_cover(path: &Path, rgb: [u8; 3], seed: u32) {
 }
 
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v10";
+pub const VERSION: &str = "seed-v11";
 
 /// The intro, instrumental gap and long line exercise both lyrics layouts.
 const DEMO_LRC: &str = "[00:03.00]Свет из окна ложится на пол
@@ -199,11 +199,38 @@ pub fn seed(lib: &Library, root: &Path) {
             all.push((t.id, i, n));
         }
     }
+    one_song_of_an_album(lib, root);
     history(lib, &all);
     if let Ok(p) = lib.create_playlist("Вечером") {
         let _ = lib.playlist_add_many(p.id, &first_tracks);
     }
     let _ = lib.create_playlist("В дорогу");
+}
+
+/// «First Love» with one file (no number) and no track count: its page
+/// asks the (fake) YouTube Music for the rest of the album
+/// (docs/stage4.md §12.8).
+fn one_song_of_an_album(lib: &Library, root: &Path) {
+    let artist = "宇多田ヒカル";
+    let Ok(a) = lib.upsert_artist(&Artist::new(artist)) else { return };
+    let credit = ArtistCredit::single(artist, Some(a.id));
+    let dir = root.join(artist).join("1999 - First Love");
+    let _ = std::fs::create_dir_all(&dir);
+    let cover = dir.join("cover.jpg");
+    make_cover(&cover, [210, 120, 150], 99);
+    let mut r = Release::new("First Love", credit.clone());
+    r.year = Some(1999);
+    r.cover_ref = Some(cover.display().to_string());
+    let Ok(r) = lib.upsert_release(&r) else { return };
+    let mut t = Track::new("First Love", credit);
+    t.release_id = Some(r.id);
+    t.duration_ms = Some(257_000);
+    let Ok(t) = lib.upsert_track(&t) else { return };
+    let path = dir.join("First Love.wav");
+    write_tone(&path, 196.0, 24.0);
+    let mut s = Source::new(t.id, SourceKind::LocalFile, path.display().to_string(), Codec::Wav);
+    s.bitrate = Some(705);
+    let _ = lib.add_source(&s);
 }
 
 /// A number in −1..1 from the inputs (the same on every run).

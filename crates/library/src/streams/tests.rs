@@ -1059,3 +1059,42 @@ fn a_new_cyrillic_stream_lands_on_its_transliterated_file() {
     // No Cyrillic album came: the album keeps its spelling.
     assert_eq!(lib.get_track_row(file).unwrap().unwrap().album.as_deref(), Some("LEGENDARNAJa PYL'"));
 }
+
+#[test]
+fn an_album_with_one_file_learns_its_whole_tracklist_from_a_service() {
+    let lib = lib();
+    let file = file_track(&lib, "ChETYRE UKRAINKI", &["MORGENSHTERN"], "LEGENDARNAJa PYL'", 122_760);
+    let release = lib.get_track(file).unwrap().unwrap().release_id.unwrap();
+    let mut album = nikgob_core::streaming::StreamAlbum {
+        id: RemoteId::new(Service::Deezer, "dz-pyl"),
+        title: "ЛЕГЕНДАРНАЯ ПЫЛЬ".into(),
+        artists: vec![nikgob_core::streaming::ArtistRef::new(None, "MORGENSHTERN")],
+        year: Some(2020),
+        release_date: None,
+        release_type: Default::default(),
+        cover_url: None,
+        total_tracks: Some(3),
+        tracks: Vec::new(),
+    };
+    for (no, title, ms) in [(1, "ПРОЛОГ", 90_000), (2, "ЧЕТЫРЕ УКРАИНКИ", 123_000), (3, "ЭПИЛОГ", 100_000)] {
+        let mut t = StreamTrack::new(RemoteId::new(Service::Deezer, format!("dz-{no}")), title);
+        t.artists = album.artists.clone();
+        t.track_no = Some(no);
+        t.duration_ms = Some(ms);
+        album.tracks.push(t);
+    }
+    assert_eq!(lib.adopt_stream_album(release, &album).unwrap(), 2);
+    let rows = lib.tracks_of_release_all(release).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| (r.track_no, r.title.as_str(), r.has_local)).collect::<Vec<_>>(),
+        [(1, "ПРОЛОГ", false), (2, "ЧЕТЫРЕ УКРАИНКИ", true), (3, "ЭПИЛОГ", false)]
+    );
+    assert_eq!(rows[1].id, file, "the file is the album's second song");
+    let r = lib.get_release(release).unwrap().unwrap();
+    assert_eq!((r.title.as_str(), r.total_tracks), ("ЛЕГЕНДАРНАЯ ПЫЛЬ", Some(3)));
+    assert_eq!(lib.release_by_remote(&album.id).unwrap(), Some(release));
+    assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), 1, "the missing songs stay outside the library");
+    let p = lib.release_progress(release).unwrap().unwrap();
+    assert_eq!((p.local, p.total), (1, 3), "«1 из 3»");
+    assert_eq!(lib.adopt_stream_album(release, &album).unwrap(), 0, "nothing twice");
+}

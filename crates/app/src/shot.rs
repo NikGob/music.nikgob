@@ -10,6 +10,7 @@
 //! `frames` frames (like a person; the bar's debounce applies).
 //! `snap:path.png` saves a screenshot there and goes on (a sequence of
 //! pictures in one run).
+//! `album` opens the first album of the library (`album:Title` that one).
 //! `liked` opens «Любимые»; `play_clip` plays the first clip of the open
 //! playlist (`play_clip:song` its first stream song).
 //! `find_song` opens «Найти песню…» for the first clip of the open
@@ -186,8 +187,14 @@ impl Shot {
                 self.wait = 30;
             }
             "album" => {
-                // The first album of the loaded library.
-                if let Some(r) = state.library.releases.first() {
+                // The first album of the loaded library (`album:Title` the
+                // one of that title).
+                let r = if arg.is_empty() {
+                    state.library.releases.first()
+                } else {
+                    state.library.releases.iter().find(|r| r.title == arg)
+                };
+                if let Some(r) = r {
                     ui.navigate(ctx, Route::Release(r.id), out);
                 }
                 self.wait = 30;
