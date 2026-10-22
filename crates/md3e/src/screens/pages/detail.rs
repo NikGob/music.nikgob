@@ -65,14 +65,16 @@ fn header(
     ui: &mut Ui,
     size: f32,
     cover: Option<&Cover>,
-    shape: Option<(&str, nikgob_shapes::MaterialShape)>,
+    artist: Option<&nikgob_view::ArtistCard>,
     add_text: impl FnOnce(&mut Ui),
 ) {
     ui.add_space(8.0);
     ui.horizontal_top(|ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-        match shape {
-            Some((initials, sh)) => widgets::shape_image(ui, cover.map(|c| c.uri()).as_deref(), initials, rect, sh),
+        match artist {
+            // The same picture as in Библиотека: the photo, or the
+            // initials in the artist's own role and shape.
+            Some(a) => widgets::artist_picture(ui, a, rect),
             None => common::cover(ui, cover, rect, shape::EXTRA_LARGE),
         }
         ui.add_space(24.0);
@@ -271,14 +273,7 @@ pub fn artist(
             ui,
             160.0,
             a.card.image.as_ref(),
-            Some((
-                &widgets::initials(&a.card.name),
-                if a.card.image.is_some() {
-                    nikgob_shapes::MaterialShape::Circle
-                } else {
-                    nikgob_shapes::MaterialShape::Cookie12Sided
-                },
-            )),
+            Some(&a.card),
             |ui| {
                 ui.label(TypeRole::LabelLarge.style().rich("ИСПОЛНИТЕЛЬ", s.primary));
                 let n = (a.albums.len() + a.singles_eps.len()) as u64;

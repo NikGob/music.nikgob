@@ -2,9 +2,9 @@
 //! cards with their context menus, track lists, shape-cropped avatars.
 
 use egui::{
-    Color32, Id, Mesh, Rect, Response, Sense, Shape, Stroke, Ui, UiBuilder, pos2, vec2,
+    Color32, Id, Rect, Response, Sense, Stroke, Ui, UiBuilder, pos2, vec2,
 };
-use nikgob_shapes::{MaterialShape, paint as shape_paint};
+use nikgob_shapes::MaterialShape;
 use std::collections::HashMap;
 
 use nikgob_view::{
@@ -305,33 +305,51 @@ pub fn avatar_shape(key: &impl std::hash::Hash) -> MaterialShape {
 /// An image (or initials on a tonal fill) cropped to a Material shape.
 pub fn shape_image(ui: &Ui, uri: Option<&str>, initials: &str, rect: Rect, shape: MaterialShape) {
     let s = Theme::get(ui.ctx()).scheme;
-    let cubics = shape.polygon().cubics();
-    let opts = shape_paint::FillOptions::for_ppp(ui.ctx().pixels_per_point());
-    let tex = uri
-        .and_then(|u| crate::covers::texture(ui.ctx(), u, rect.size(), 1.0))
-        .map(|t| t.id);
-    let mesh: Mesh = match tex {
-        Some(t) => shape_paint::texture_mesh(
-            cubics,
-            rect,
-            0.0,
-            t,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-            &opts,
-        ),
-        None => shape_paint::fill_mesh(cubics, rect, 0.0, s.tertiary_container, &opts),
-    };
-    ui.painter().add(Shape::mesh(mesh));
-    if tex.is_none() {
-        let size = (rect.height() * 0.32).max(12.0);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            initials,
-            egui::FontId::new(size, crate::typography::family(500)),
-            s.on_tertiary_container,
-        );
+    crate::components::paint_shape_avatar(ui, rect, uri, initials, shape, s.tertiary_container, s.on_tertiary_container);
+}
+
+/// The container and content colours of a scheme role.
+pub fn role_colors(role: super::shelf::Role, s: &crate::ColorScheme) -> (Color32, Color32) {
+    use super::shelf::Role;
+    match role {
+        Role::Primary => (s.primary_container, s.on_primary_container),
+        Role::Secondary => (s.secondary_container, s.on_secondary_container),
+        Role::Tertiary => (s.tertiary_container, s.on_tertiary_container),
+        Role::Surface => (s.surface_container_highest, s.on_surface_variant),
+    }
+}
+
+/// An artist's avatar: the photo in a circle, or the initials in the role
+/// and shape the name picks ([`super::shelf::artist_look`]).
+pub fn artist_picture(ui: &Ui, a: &ArtistCard, rect: Rect) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let uri = a.image.as_ref().map(|c| c.uri());
+    let (role, shape) = super::shelf::artist_look(&a.name);
+    let (fill, on) = role_colors(role, &s);
+    let shape = if uri.is_some() { MaterialShape::Circle } else { shape };
+    crate::components::paint_shape_avatar(ui, rect, uri.as_deref(), &initials(&a.name), shape, fill, on);
+}
+
+/// The list row's leading avatar of an artist, as [`artist_picture`].
+pub fn artist_leading(ui: &Ui, a: &ArtistCard) -> Leading {
+    let s = Theme::get(ui.ctx()).scheme;
+    let uri = a.image.as_ref().map(|c| c.uri());
+    let (role, shape) = super::shelf::artist_look(&a.name);
+    let (fill, on) = role_colors(role, &s);
+    Leading::Shape {
+        shape: if uri.is_some() { MaterialShape::Circle } else { shape },
+        uri,
+        initials: initials(&a.name),
+        fill,
+        on,
+    }
+}
+
+/// «12 треков» under an artist; empty when not counted.
+pub fn artist_tracks(a: &ArtistCard) -> String {
+    match a.track_count {
+        0 => String::new(),
+        n => format!("{n} {}", common::plural(u64::from(n), "трек", "трека", "треков")),
     }
 }
 
@@ -388,7 +406,10 @@ pub fn artist_mix(ui: &mut Ui, a: &ArtistCard, size: f32, out: &mut Vec<Command>
 fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Vec<Command>) -> Option<Route> {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
-    let (rect, resp) = ui.allocate_exact_size(vec2(size, size + 28.0), Sense::click());
+    // In the library the name has the track count under it.
+    let caption = if radio { String::new() } else { artist_tracks(a) };
+    let text_h = if caption.is_empty() { 28.0 } else { 48.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size + text_h), Sense::click());
     let img = Rect::from_min_size(rect.min, vec2(size, size));
     let hover = resp.contains_pointer();
     let grow = anim::f32(
@@ -397,14 +418,8 @@ fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Ve
         if hover { 4.0 } else { 0.0 },
         theme.motion.fast_spatial,
     );
-    shape_image(
-        ui,
-        a.image.as_ref().map(|c| c.uri()).as_deref(),
-        &initials(&a.name),
-        img.expand(grow * 0.5),
-        // A real photo is a circle; the initials keep their playful shape.
-        if a.image.is_some() { MaterialShape::Circle } else { avatar_shape(&a.id) },
-    );
+    // A real photo is a circle; the initials keep their playful shape.
+    artist_picture(ui, a, img.expand(grow * 0.5));
     // One line, cut with an ellipsis: a long name must not run into the
     // next row.
     let mut job = egui::text::LayoutJob::single_section(a.name.clone(), TypeRole::TitleSmall.style().text_format(s.on_surface));
@@ -422,6 +437,13 @@ fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Ve
     });
     let underline = name.as_ref().is_some_and(Response::hovered);
     ui.painter().galley(name_rect.min, galley, s.on_surface);
+    if !caption.is_empty() {
+        let mut job = egui::text::LayoutJob::single_section(caption, TypeRole::BodySmall.style().text_format(s.on_surface_variant));
+        job.wrap = egui::text::TextWrapping::truncate_at_width(size.max(1.0));
+        let g = ui.painter().layout_job(job);
+        let at = pos2(rect.center().x - g.size().x * 0.5, name_rect.bottom() + 2.0);
+        ui.painter().galley(at, g, s.on_surface_variant);
+    }
     if underline {
         let y = name_rect.bottom() - 1.0;
         ui.painter().line_segment([pos2(name_rect.left(), y), pos2(name_rect.right(), y)], Stroke::new(1.0, s.on_surface));

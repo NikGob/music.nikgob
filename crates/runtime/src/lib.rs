@@ -807,6 +807,7 @@ impl Worker {
                 limit,
                 sort,
             } => self.load_tracks(offset, limit, sort),
+            Command::FilterTracks(q) => self.filter_tracks(&q),
             Command::SortReleases(sort) => {
                 self.publish(|s, _| s.library.release_sort = sort);
                 self.load_library();
@@ -1537,15 +1538,56 @@ impl Worker {
             .lib
             .count_tracks(track_filter(only_local))
             .unwrap_or(0) as usize;
+        // The overview's rows: the latest albums in and the most played.
+        let tracks = self.lib.rec_tracks().unwrap_or_default();
+        let stats = self.lib.all_track_stats().unwrap_or_default();
+        let per_artist = home::artist_track_counts(&tracks, only_local);
+        let often = home::often_played(&tracks, &stats, 12);
+        let mut recent: Vec<&nikgob_library::ReleaseRow> = releases.iter().collect();
+        recent.sort_by_key(|r| std::cmp::Reverse(r.release.added_at));
+        recent.truncate(12);
+        let by_id: std::collections::HashMap<_, _> = releases.iter().map(|r| (r.release.id, r)).collect();
+        let often: Vec<&nikgob_library::ReleaseRow> = often.iter().filter_map(|id| by_id.get(id).copied()).collect();
         self.publish(|s, res| {
             s.library.releases = releases.iter().map(|r| res.release(r)).collect();
             s.library.playlists = playlists.iter().map(|p| res.playlist(p)).collect();
-            s.library.artists = artists.iter().map(|a| res.artist(a)).collect();
+            s.library.artists = artists
+                .iter()
+                .map(|a| {
+                    let mut card = res.artist(a);
+                    card.track_count = per_artist.get(&a.artist.id).copied().unwrap_or(card.track_count);
+                    card
+                })
+                .collect();
+            s.library.recently_added = recent.iter().map(|r| res.release(r)).collect();
+            s.library.often_played = often.iter().map(|r| res.release(r)).collect();
             s.library.track_count = count;
             s.library.loaded = true;
         });
         let sort = self.state.read().library.track_sort;
         self.load_tracks(0, 200, sort);
+    }
+
+    /// The library filter on «Треки»: what the library search finds,
+    /// without the stream when «только скачанное» is on.
+    fn filter_tracks(&mut self, q: &str) {
+        let q = q.trim();
+        if q.is_empty() {
+            self.publish(|s, _| s.library.track_hits = None);
+            return;
+        }
+        let only_local = self.state.read().prefs.library_only_downloaded;
+        let rows: Vec<_> = self
+            .log_err("фильтр треков", self.lib.search(q, 500))
+            .map(|r| r.tracks)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.has_local || !only_local)
+            .collect();
+        let q = q.to_owned();
+        self.publish(|s, res| {
+            s.library.track_hits = Some((q, rows.iter().map(|t| res.track(t)).collect()));
+        });
     }
 
     fn load_tracks(&mut self, offset: usize, limit: usize, sort: nikgob_view::TrackSort) {

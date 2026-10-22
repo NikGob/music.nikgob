@@ -142,6 +142,9 @@ pub struct ReleaseCard {
     pub local_tracks: u32,
     pub total_tracks: Option<u32>,
     pub liked: bool,
+    /// When it came into the library (Unix ms): «Недавно добавлено» and the
+    /// group headers of that sort.
+    pub added_at: i64,
 }
 
 impl ReleaseCard {
@@ -168,6 +171,9 @@ pub struct ArtistCard {
     pub image: Option<Cover>,
     /// "Подписан" (liked).
     pub liked: bool,
+    /// Their tracks in the library («12 треков» under the avatar); 0 when
+    /// not counted.
+    pub track_count: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -502,6 +508,12 @@ pub struct LibraryView {
     pub loaded: bool,
     /// Deleted tracks ("Корзина"), most recent first; filled by [`Command::LoadTrash`].
     pub trash: Vec<TrashItem>,
+    /// The «Всё» overview's rows: the latest albums in, and the most played.
+    pub recently_added: Vec<ReleaseCard>,
+    pub often_played: Vec<ReleaseCard>,
+    /// The library filter on «Треки» ([`Command::FilterTracks`]): the query
+    /// it answers and its tracks, best first.
+    pub track_hits: Option<(String, Vec<TrackRow>)>,
 }
 
 /// The unified search ([`Command::Search`]): the library, Deezer, YouTube
@@ -1292,6 +1304,9 @@ pub enum Command {
     // Loads
     LoadLibrary,
     LoadTracks { offset: usize, limit: usize, sort: TrackSort },
+    /// The library filter on «Треки»: library tracks matching the words
+    /// into [`LibraryView::track_hits`]; an empty query clears it.
+    FilterTracks(String),
     SortReleases(ReleaseSort),
     LoadRelease(ReleaseId),
     LoadArtist(ArtistId),

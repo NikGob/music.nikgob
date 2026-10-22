@@ -21,6 +21,8 @@
 //! (the first mood or style mix, the bento's daylist, its first tile;
 //! `play_mix:tile:artist_of_day` the tile of that kind); `radio` starts «Радио по треку» from the first
 //! library track (`radio:artist` the first artist's radio).
+//! `libfilter:text` types into the library's filter, `liblist:1` shows it
+//! as a list, `sort:artist|title|year|added` sorts its albums.
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 //! The window opens off the screen, unfocused and without a taskbar button,
 //! so a run never jumps over the user's windows; `NIKGOB_SHOT_VISIBLE=1`
@@ -175,6 +177,8 @@ impl Shot {
                     "library" => Route::Library(LibraryTab::All),
                     "tracks" => Route::Library(LibraryTab::Tracks),
                     "playlists" => Route::Library(LibraryTab::Playlists),
+                    "albums" => Route::Library(LibraryTab::Albums),
+                    "artists" => Route::Library(LibraryTab::Artists),
                     "trash" => Route::Library(LibraryTab::Trash),
                     "downloads" => Route::Downloads(DownloadsTab::Active),
                     "wishlist" => Route::Downloads(DownloadsTab::Wishlist),
@@ -520,6 +524,15 @@ impl Shot {
                 }
                 self.wait = 60;
             }
+            // The library's filter, view and sort.
+            "libfilter" => ui.set_library_filter(arg),
+            "liblist" => Md3eUi::set_library_list(ctx, arg != "0"),
+            "sort" => out.push(Command::SortReleases(match arg {
+                "title" => nikgob_view::ReleaseSort::Title,
+                "year" => nikgob_view::ReleaseSort::Year,
+                "added" => nikgob_view::ReleaseSort::Added,
+                _ => nikgob_view::ReleaseSort::Artist,
+            })),
             "light" => out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs {
                 theme: nikgob_view::ThemeMode::Light,
                 ..state.prefs.clone()
