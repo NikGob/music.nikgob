@@ -1005,7 +1005,7 @@ impl<'r, 'a> Board<'r, 'a> {
         }
         left.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         let order: Vec<usize> = left.into_iter().flat_map(|(_, t)| t).collect();
-        self.as_is(TileKind::Unfinished, String::new(), "Альбомы, начатые и брошенные".into(), order)
+        self.as_is(TileKind::Unfinished, String::new(), "Недослушанное".into(), order)
     }
 }
 
