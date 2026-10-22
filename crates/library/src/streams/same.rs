@@ -3,7 +3,8 @@
 //! song liked on Spotify and on YouTube Music is one track with two
 //! sources, not two.
 //!
-//! The same song: the same main artist and title after [`song_key`] (or
+//! The same song: a shared artist (the main one, or any credited name:
+//! «Raj Ramayya» and «Kevin Penkin & Raj Ramayya») and the same title after [`song_key`] (or
 //! the title with and without its romanization, «夏子 - Natsuko» and «夏子»:
 //! [`same_dual_title`]), both lengths known and within [`SLACK_MS`],
 //! compatible albums when both have one, no two different ISRCs, and the
@@ -16,10 +17,17 @@
 //! Size", "Instrumental", "Radio Edit" stay in the key, so other versions
 //! stay other tracks.
 //!
-//! [`Library::merge_duplicate_stream_tracks`] applies the same rule once to
-//! tracks created before it existed.
+//! A music video is its song's file (docs/stage4.md §12.5): a liked clip
+//! whose title, without what clips add ([`song_titles`]), is the title of a
+//! track with a file, by one of the names the clip credits (its uploader or
+//! a name in its title: [`credited_names`]), and is that long or up to
+//! [`CLIP_EXTRA_MS`] longer (an intro, an outro) lands on that track: the
+//! file plays.
+//!
+//! [`Library::merge_duplicate_stream_tracks`] applies the same rules once to
+//! tracks created before they existed.
 
-use nikgob_core::clip_title::same_dual_title;
+use nikgob_core::clip_title::{credited_names, same_dual_title, song_titles};
 use nikgob_core::model::{SourceKind, score};
 use nikgob_core::streaming::{Service, StreamTrack, TrackKind};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -28,7 +36,7 @@ use super::normal_isrc;
 use crate::catalog::merge_track_in;
 use crate::db::Library;
 use crate::error::Result;
-use crate::util::{meta_get, meta_set, sort_key};
+use crate::util::{meta_get, meta_set};
 
 /// How far two lengths of one song may be apart.
 pub(crate) const SLACK_MS: i64 = 3_000;
@@ -37,9 +45,13 @@ pub(crate) const SLACK_MS: i64 = 3_000;
 /// agreeing albums.
 pub(crate) const TIGHT_SLACK_MS: i64 = 1_500;
 
+/// How much longer than its song a music video may be (an intro, an outro).
+pub(crate) const CLIP_EXTRA_MS: i64 = 30_000;
+
 /// `meta` key: the repair of [`Library::merge_duplicate_stream_tracks`] ran
-/// with the rule of today (`v1` had no dual titles and no tight slack).
-const REPAIRED_KEY: &str = "stream_duplicates_merged.v2";
+/// with the rule of today (`v1` had no dual titles and no tight slack, `v2`
+/// no shared artists and no clips).
+const REPAIRED_KEY: &str = "stream_duplicates_merged.v3";
 
 /// Words a bracket or " - " tail may consist of and still be release noise.
 const NOISE: &[&str] = &[
@@ -162,6 +174,8 @@ pub(crate) struct Song {
     /// The title as given, for [`same_dual_title`].
     pub(crate) raw_title: String,
     pub(crate) artist: String,
+    /// The main artist and every other credited name, folded.
+    pub(crate) artists: Vec<String>,
     pub(crate) album: Option<String>,
     pub(crate) duration_ms: Option<i64>,
     pub(crate) isrc: Option<String>,
@@ -175,14 +189,27 @@ impl Song {
         duration_ms: Option<i64>,
         isrc: Option<&str>,
     ) -> Self {
+        let artist = main_artist_key(artist);
         Self {
             title: song_key(title),
             raw_title: title.to_owned(),
-            artist: main_artist_key(artist),
+            artists: if artist.is_empty() { Vec::new() } else { vec![artist.clone()] },
+            artist,
             album: album.map(song_key).filter(|a| !a.is_empty()),
             duration_ms,
             isrc: normal_isrc(isrc),
         }
+    }
+
+    /// Every credited name counts as an artist of the song, not only the main one.
+    pub(crate) fn with_names<S: AsRef<str>>(mut self, names: &[S]) -> Self {
+        for n in names {
+            let k = main_artist_key(n.as_ref());
+            if !k.is_empty() && !self.artists.contains(&k) {
+                self.artists.push(k);
+            }
+        }
+        self
     }
 
     pub(crate) fn of_stream(t: &StreamTrack) -> Self {
@@ -190,6 +217,7 @@ impl Song {
             .artists
             .first()
             .map_or_else(|| t.artist_line(), |a| a.name.clone());
+        let names: Vec<&str> = t.artists.iter().map(|a| a.name.as_str()).collect();
         Self::new(
             &t.title,
             &artist,
@@ -197,6 +225,12 @@ impl Song {
             t.duration_ms.and_then(|d| i64::try_from(d).ok()),
             t.isrc.as_deref(),
         )
+        .with_names(&names)
+    }
+
+    /// The main artist is the same, or one credited name is on both.
+    fn shares_artist(&self, o: &Self) -> bool {
+        self.artist == o.artist || self.artists.iter().any(|a| o.artists.contains(a))
     }
 
     /// See the module docs.
@@ -213,7 +247,7 @@ impl Song {
             return false;
         };
         apart <= SLACK_MS
-            && self.artist == o.artist
+            && self.shares_artist(o)
             && (self.title == o.title || same_dual_title(&self.raw_title, &o.raw_title, song_key))
             && (apart <= TIGHT_SLACK_MS
                 || match (&self.album, &o.album) {
@@ -235,17 +269,18 @@ fn albums_agree(a: &str, b: &str) -> bool {
 }
 
 /// A library track the song already is, for a stream track whose remote id
-/// and ISRC are unknown here; `None` for videos, unknown lengths and
-/// anything doubtful.
+/// and ISRC are unknown here; `None` for unknown lengths and anything
+/// doubtful. A music video finds only the file of its song ([`Clip`]).
 pub(crate) fn same_song_track(conn: &Connection, t: &StreamTrack) -> Result<Option<String>> {
     if t.kind == TrackKind::Video {
-        return Ok(None);
+        let names: Vec<String> = t.artists.iter().map(|a| a.name.clone()).collect();
+        let Some(d) = t.duration_ms.and_then(|d| i64::try_from(d).ok()) else {
+            return Ok(None);
+        };
+        return clip_song_file(conn, &Clip::new(&t.title, &names, d), None);
     }
     let song = Song::of_stream(t);
-    let Some(prefix) = t.artists.first().map(|a| sort_key(&a.name)) else {
-        return Ok(None);
-    };
-    let found = candidates(conn, &song, &prefix, None)?
+    let found = candidates(conn, &song, None)?
         .into_iter()
         .find(|(id, _, _)| !has_service(conn, id, t.id.service).unwrap_or(true))
         .map(|(id, _, _)| id);
@@ -254,47 +289,38 @@ pub(crate) fn same_song_track(conn: &Connection, t: &StreamTrack) -> Result<Opti
 
 /// Live tracks of the same song: `(id, has_local, seq)`, a track with a file
 /// first, then the oldest; without `exclude`.
-fn candidates(
-    conn: &Connection,
-    song: &Song,
-    artist_prefix: &str,
-    exclude: Option<&str>,
-) -> Result<Vec<(String, bool, i64)>> {
+fn candidates(conn: &Connection, song: &Song, exclude: Option<&str>) -> Result<Vec<(String, bool, i64)>> {
     let Some(d) = song.duration_ms else {
         return Ok(Vec::new());
     };
-    if artist_prefix.is_empty() {
+    if song.artists.is_empty() {
         return Ok(Vec::new());
     }
-    let upper = format!("{artist_prefix}\u{10FFFF}");
     let mut stmt = conn.prepare_cached(
         "SELECT t.id, t.title, t.artist_credit, t.duration_ms, r.title, t.isrc, t.has_local, t.seq
            FROM track t LEFT JOIN release r ON r.id = t.release_id
-          WHERE t.artist_key >= ?1 AND t.artist_key < ?2
-            AND t.duration_ms BETWEEN ?3 AND ?4 AND t.deleted_at IS NULL
-            AND t.id IS NOT ?5
+          WHERE t.duration_ms BETWEEN ?1 AND ?2 AND t.deleted_at IS NULL
+            AND t.id IS NOT ?3
           ORDER BY t.has_local DESC, t.seq",
     )?;
-    let rows = stmt.query_map(
-        params![artist_prefix, upper, d - SLACK_MS, d + SLACK_MS, exclude],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<i64>>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, bool>(6)?,
-                r.get::<_, i64>(7)?,
-            ))
-        },
-    )?;
+    let rows = stmt.query_map(params![d - SLACK_MS, d + SLACK_MS, exclude], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, Option<i64>>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(5)?,
+            r.get::<_, bool>(6)?,
+            r.get::<_, i64>(7)?,
+        ))
+    })?;
     let mut out = Vec::new();
     for row in rows {
         let (id, title, credit, duration, album, isrc, local, seq) = row?;
-        let artist = main_credit_name(&credit);
-        let other = Song::new(&title, &artist, album.as_deref(), duration, isrc.as_deref());
+        let names = credit_names(&credit);
+        let artist = names.first().cloned().unwrap_or_default();
+        let other = Song::new(&title, &artist, album.as_deref(), duration, isrc.as_deref()).with_names(&names);
         if song.same(&other) {
             out.push((id, local, seq));
         }
@@ -302,11 +328,76 @@ fn candidates(
     Ok(out)
 }
 
-/// The first credited name of a stored credit (json).
-fn main_credit_name(credit: &str) -> String {
+/// A music video as the song it shows (see the module docs).
+#[derive(Clone, Debug)]
+pub(crate) struct Clip {
+    /// Its title without what clips add (each reading), folded by [`song_key`].
+    titles: Vec<String>,
+    /// The uploader and the names its title credits, folded.
+    artists: Vec<String>,
+    duration_ms: i64,
+}
+
+impl Clip {
+    pub(crate) fn new(title: &str, uploader: &[String], duration_ms: i64) -> Self {
+        let lead = uploader.first().map(String::as_str).unwrap_or_default();
+        let mut titles = vec![song_key(title)];
+        for t in song_titles(title, lead) {
+            let k = song_key(&t);
+            if !k.is_empty() && !titles.contains(&k) {
+                titles.push(k);
+            }
+        }
+        let mut artists: Vec<String> = Vec::new();
+        for n in uploader.iter().cloned().chain(credited_names(title, lead)) {
+            let k = main_artist_key(&n);
+            if !k.is_empty() && !artists.contains(&k) {
+                artists.push(k);
+            }
+        }
+        titles.retain(|t| !t.is_empty());
+        Self { titles, artists, duration_ms }
+    }
+
+    /// The song `song` (its title, credited names and length) is what the
+    /// clip shows.
+    pub(crate) fn shows(&self, title: &str, names: &[String], duration_ms: i64) -> bool {
+        let extra = self.duration_ms - duration_ms;
+        (-SLACK_MS..=CLIP_EXTRA_MS).contains(&extra)
+            && self.titles.contains(&song_key(title))
+            && names.iter().any(|n| self.artists.contains(&main_artist_key(n)))
+    }
+}
+
+/// The one track with a file the clip shows (none when two would do).
+fn clip_song_file(conn: &Connection, clip: &Clip, exclude: Option<&str>) -> Result<Option<String>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT t.id, t.title, t.artist_credit, t.duration_ms FROM track t
+          WHERE t.duration_ms BETWEEN ?1 AND ?2 AND t.deleted_at IS NULL AND t.has_local = 1
+            AND t.id IS NOT ?3
+          ORDER BY t.seq",
+    )?;
+    let rows = stmt.query_map(
+        params![clip.duration_ms - CLIP_EXTRA_MS, clip.duration_ms + SLACK_MS, exclude],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)),
+    )?;
+    let mut found = Vec::new();
+    for row in rows {
+        let (id, title, credit, duration) = row?;
+        if clip.shows(&title, &credit_names(&credit), duration) {
+            found.push(id);
+        }
+    }
+    Ok(match &found[..] {
+        [one] => Some(one.clone()),
+        _ => None,
+    })
+}
+
+/// Every credited name of a stored credit (json).
+fn credit_names(credit: &str) -> Vec<String> {
     serde_json::from_str::<nikgob_core::model::ArtistCredit>(credit)
-        .ok()
-        .and_then(|c| c.0.first().map(|p| p.name.clone()))
+        .map(|c| c.0.into_iter().map(|p| p.name).collect())
         .unwrap_or_default()
 }
 
@@ -366,6 +457,20 @@ fn stream_only_rows(conn: &Connection) -> Result<Vec<StreamOnlyRow>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Live music videos without a file: `(id, title, credit, duration)`.
+fn clip_rows(conn: &Connection) -> Result<Vec<(String, String, String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.title, t.artist_credit, t.duration_ms FROM track t
+          WHERE t.deleted_at IS NULL AND t.duration_ms IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id AND s.kind = 'local_file')
+            AND EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id AND s.kind = 'youtube'
+                           AND s.quality_score = ?1 AND s.trashed_at IS NULL)
+          ORDER BY t.seq",
+    )?;
+    let rows = stmt.query_map([score::STREAM_YOUTUBE_CLIP], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// A music video without a file (see [`stream_only_rows`]).
 fn is_clip(conn: &Connection, track: &str) -> Result<bool> {
     Ok(conn.query_row(
@@ -387,8 +492,8 @@ fn track_exists(conn: &Connection, id: &str) -> Result<bool> {
 impl Library {
     /// Merges stream-only tracks that are one song by the rule of
     /// [`same_song_track`] (made before the rule existed: the song liked on
-    /// both services as two tracks; music videos stay apart). The track with a file, else the older
-    /// one, stays; sources, ids in the services, likes, playlist entries,
+    /// both services as two tracks), and liked music videos into the file of
+    /// their song ([`Clip`]). The track with a file, else the older one, stays; sources, ids in the services, likes, playlist entries,
     /// history and wishlist items move onto it (one wishlist item per track).
     /// Runs once per library (a `meta` mark); returns how many tracks went.
     pub fn merge_duplicate_stream_tracks(&self) -> Result<usize> {
@@ -403,11 +508,12 @@ impl Library {
                 if !track_exists(tx, &id)? {
                     continue; // folded into an earlier one
                 }
-                let artist = main_credit_name(&credit);
-                let song = Song::new(&title, &artist, album.as_deref(), duration, isrc.as_deref());
+                let names = credit_names(&credit);
+                let artist = names.first().cloned().unwrap_or_default();
+                let song = Song::new(&title, &artist, album.as_deref(), duration, isrc.as_deref()).with_names(&names);
                 let mine = services_of(tx, &id)?;
                 let mut other = None;
-                for (cand, local, cseq) in candidates(tx, &song, &sort_key(&artist), Some(&id))? {
+                for (cand, local, cseq) in candidates(tx, &song, Some(&id))? {
                     if is_clip(tx, &cand)? {
                         continue;
                     }
@@ -421,6 +527,15 @@ impl Library {
                 let (from, into) = if keep_theirs { (&id, &cand) } else { (&cand, &id) };
                 if merge_track_in(tx, super::parse(from)?, super::parse(into)?, device.as_str(), now)? {
                     log::info!("library: stream track {from} is {into}, merged");
+                    merged += 1;
+                }
+            }
+            // Music videos go into the file of their song.
+            for (id, title, credit, duration) in clip_rows(tx)? {
+                let clip = Clip::new(&title, &credit_names(&credit), duration);
+                let Some(file) = clip_song_file(tx, &clip, Some(&id))? else { continue };
+                if merge_track_in(tx, super::parse(&id)?, super::parse(&file)?, device.as_str(), now)? {
+                    log::info!("library: clip {id} is the song {file}, merged");
                     merged += 1;
                 }
             }

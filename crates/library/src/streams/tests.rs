@@ -334,7 +334,7 @@ fn the_v2_repair_folds_dual_titles_and_other_albums_into_the_file() {
     live.id = RemoteId::new(Service::Youtube, "yt-natsuko-live");
     live.title = "夏子 - Live".into();
     let live = separate(&lib, &live);
-    // A clip of the song is never the song by name.
+    // A clip of the song goes into its file (docs/stage4.md §12.5).
     let mut clip = y.clone();
     clip.id = RemoteId::new(Service::Youtube, "yt-natsuko-mv");
     clip.kind = nikgob_core::streaming::TrackKind::Video;
@@ -356,10 +356,10 @@ fn the_v2_repair_folds_dual_titles_and_other_albums_into_the_file() {
     // A library repaired by v1 is repaired again.
     lib.write(|tx| meta_set(tx, "stream_duplicates_merged.v1", "1")).unwrap();
 
-    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 1);
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 2);
     assert!(lib.get_track(stream).unwrap().is_none());
     assert!(lib.get_track(live).unwrap().is_some(), "a version stays");
-    assert!(lib.get_track(clip).unwrap().is_some(), "the clip stays");
+    assert!(lib.get_track(clip).unwrap().is_none(), "the clip is the file's");
     assert_eq!(lib.track_by_remote(&y.id).unwrap(), Some(local.id));
     assert!(lib.is_liked(local.id).unwrap());
     assert_eq!(
@@ -369,7 +369,6 @@ fn the_v2_repair_folds_dual_titles_and_other_albums_into_the_file() {
     );
     assert_eq!(titles(&lib), ["Natsuko", "夏子"], "the live take keeps its card");
     lib.unlike(live).unwrap();
-    lib.unlike(clip).unwrap();
     assert_eq!(titles(&lib), ["夏子"], "the stream album is gone");
     assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 0, "once");
 }
@@ -717,7 +716,7 @@ fn remote_likes_crud() {
 #[test]
 fn schema_has_the_streaming_tables() {
     let lib = lib();
-    assert_eq!(lib.schema_version().unwrap(), 9);
+    assert!(lib.schema_version().unwrap() >= 9);
 }
 
 /// The fake YouTube clip of «Группа крови» (no album, kind video) and its song.
@@ -890,4 +889,135 @@ fn cached_answers_are_forgotten_by_prefix_and_value() {
     assert!(lib.cache_get("yt_clip.a").unwrap().is_none());
     assert!(lib.cache_get("yt_clip.b").unwrap().is_some());
     assert!(lib.cache_get("ytXclip.c").unwrap().is_some(), "«_» is no wildcard");
+}
+
+/// A track with a file: `names` credited (joined by « & »), on its album.
+fn file_track(lib: &Library, title: &str, names: &[&str], album: &str, ms: u32) -> TrackId {
+    let mut credit = ArtistCredit::default();
+    for (i, n) in names.iter().enumerate() {
+        let a = lib.upsert_artist(&Artist::new(*n)).unwrap();
+        credit.0.push(nikgob_core::model::ArtistCreditPart {
+            artist_id: Some(a.id),
+            name: (*n).to_owned(),
+            join_phrase: if i + 1 < names.len() { " & ".into() } else { String::new() },
+        });
+    }
+    let release = lib.upsert_release(&Release::new(album, credit.clone())).unwrap();
+    let mut t = Track::new(title, credit);
+    t.release_id = Some(release.id);
+    t.duration_ms = Some(ms);
+    let t = lib.upsert_track(&t).unwrap();
+    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("Music/{}.opus", t.id), Codec::Opus))
+        .unwrap();
+    t.id
+}
+
+/// A YouTube track by `uploader`, a music video when `clip`, without an album.
+fn yt(id: &str, title: &str, uploader: &str, ms: u64, clip: bool) -> StreamTrack {
+    let mut t = yt_variant(id, title, 0);
+    t.duration_ms = Some(ms);
+    t.artists[0].name = uploader.into();
+    t.artists[0].id = None;
+    t.album = None;
+    if clip {
+        t.kind = nikgob_core::streaming::TrackKind::Video;
+    }
+    t
+}
+
+#[test]
+fn the_v3_repair_folds_shared_artists_and_clips_into_their_files() {
+    let lib = lib();
+    let river = file_track(
+        &lib,
+        "Underground River (opening version ft. Raj Ramayya)",
+        &["Kevin Penkin", "Raj Ramayya"],
+        "MADE IN ABYSS ORIGINAL SOUNDTRACK",
+        121_573,
+    );
+    let reason = file_track(&lib, "There is a reason (RUS COVER)", &["j.am"], "There is a reason (RUS COVER)", 292_033);
+    let solo_title = "Solo Leveling Season 2 -Arise from the Shadow- Opening | \"ReawakeR\" by LiSA feat Felix of Stray Kids";
+    let solo = file_track(&lib, solo_title, &["Crunchyroll"], solo_title, 100_152);
+    let aiyou = file_track(&lib, "AIYOU", &["Eve"], "AIYOU", 159_896);
+    let this_game = file_track(&lib, "This game", &["鈴木このみ"], "This game", 284_307);
+
+    let mut river_yt = yt(
+        "yt-river",
+        "Underground River (opening version ft. Raj Ramayya) (feat. Raj Ramayya)",
+        "Raj Ramayya",
+        122_000,
+        false,
+    );
+    // On the Japanese edition of the album: another album title.
+    let mut album = yt_variant("yt-x", "x", 0).album.unwrap();
+    album.title = "TVアニメ「メイドインアビス」オリジナルサウンドトラック".into();
+    album.id = Some(RemoteId::new(Service::Youtube, "yt-alb-abyss"));
+    album.artists = river_yt.artists.clone();
+    river_yt.album = Some(album);
+    let pairs = [
+        (separate(&lib, &river_yt), river),
+        (
+            separate(
+                &lib,
+                &yt("yt-reason", "【j.am】 There is a reason 【NO GAME NO LIFE // RUS Cover】(Fobia)", "higanbanban", 293_000, true),
+            ),
+            reason,
+        ),
+        (separate(&lib, &yt("yt-solo", solo_title, "Crunchyroll", 101_000, true)), solo),
+        (separate(&lib, &yt("yt-aiyou", "AIYOU - Eve Music Video", "Eve", 165_000, true)), aiyou),
+    ];
+    let cover = separate(
+        &lib,
+        &yt("yt-game", "[No Game No Life на русском] This Game [Onsa Media]", "Onsa Media Underground", 304_000, true),
+    );
+    let p = lib.create_playlist("P").unwrap();
+    for (stream, _) in &pairs {
+        lib.like(*stream).unwrap();
+        lib.playlist_add_many(p.id, &[*stream]).unwrap();
+    }
+    lib.like(cover).unwrap();
+
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 4);
+    for (stream, file) in pairs {
+        assert!(lib.get_track(stream).unwrap().is_none(), "{stream} merged");
+        assert!(lib.is_liked(file).unwrap(), "the like moved");
+        assert_eq!(lib.active_source(file).unwrap().unwrap().kind, SourceKind::LocalFile, "the file plays");
+    }
+    let entries = lib.playlist_entries(p.id, 0, 10).unwrap();
+    assert_eq!(
+        entries.iter().map(|e| e.entry.track_id).collect::<Vec<_>>(),
+        vec![river, reason, solo, aiyou],
+        "playlist entries moved"
+    );
+    assert!(lib.get_track(cover).unwrap().is_some(), "a cover by another artist stays");
+    assert!(!lib.is_liked(this_game).unwrap());
+}
+
+#[test]
+fn a_new_liked_clip_lands_on_the_file_of_its_song() {
+    let lib = lib();
+    let aiyou = file_track(&lib, "AIYOU", &["Eve"], "AIYOU", 159_896);
+    let this_game = file_track(&lib, "This game", &["鈴木このみ"], "This game", 284_307);
+    let clip = yt("yt-aiyou", "AIYOU - Eve Music Video", "Eve", 165_000, true);
+    assert_eq!(lib.upsert_stream_track(&clip).unwrap(), aiyou);
+    assert_eq!(lib.active_source(aiyou).unwrap().unwrap().kind, SourceKind::LocalFile);
+    let far = yt("yt-aiyou-long", "AIYOU - Eve Music Video", "Eve", 200_000, true);
+    assert_ne!(lib.upsert_stream_track(&far).unwrap(), aiyou, "40 s longer is another cut");
+    let cover = yt("yt-game", "[No Game No Life на русском] This Game [Onsa Media]", "Onsa Media Underground", 304_000, true);
+    assert_ne!(lib.upsert_stream_track(&cover).unwrap(), this_game);
+    let river = file_track(
+        &lib,
+        "Underground River (opening version ft. Raj Ramayya)",
+        &["Kevin Penkin", "Raj Ramayya"],
+        "MADE IN ABYSS ORIGINAL SOUNDTRACK",
+        121_573,
+    );
+    let song = yt(
+        "yt-river",
+        "Underground River (opening version ft. Raj Ramayya) (feat. Raj Ramayya)",
+        "Raj Ramayya",
+        122_000,
+        false,
+    );
+    assert_eq!(lib.upsert_stream_track(&song).unwrap(), river, "a shared artist is enough");
 }

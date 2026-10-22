@@ -256,6 +256,18 @@ pub struct PurgedTrack {
     pub release_removed: bool,
 }
 
+/// A file parked in «Подтверди» (see `Library::put_confirm_item`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfirmRow {
+    pub id: i64,
+    pub path: String,
+    /// The «Хочу скачать» item the file was downloaded for.
+    pub wishlist: Option<nikgob_core::model::WishlistId>,
+    /// The importer's own json.
+    pub payload: String,
+    pub created_at: UnixMs,
+}
+
 /// One finished job of "Загрузки → История".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobLogEntry {

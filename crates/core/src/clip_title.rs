@@ -114,6 +114,22 @@ fn closing(open: char) -> char {
     }
 }
 
+/// The version a bracket names, without what it says besides
+/// («NO GAME NO LIFE // RUS Cover» → «RUS Cover»): the pieces between
+/// « // », « / » and « | » that have a version word, the whole bracket when
+/// none (or every piece) has one.
+fn version_of(body: &str) -> String {
+    let mut pieces = vec![body.to_owned()];
+    for sep in ["//", " / ", " | "] {
+        pieces = pieces.into_iter().flat_map(|p| p.split(sep).map(squash).collect::<Vec<_>>()).collect();
+    }
+    let kept: Vec<&String> = pieces.iter().filter(|p| is_version(p)).collect();
+    if kept.is_empty() || kept.len() == pieces.len() {
+        return squash(body);
+    }
+    kept.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(" ")
+}
+
 fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -168,7 +184,7 @@ fn parts(title: &str, artist: &str) -> (Vec<String>, Vec<String>) {
         if is_feat(body) {
             outside.push(' ');
         } else if is_version(body) && !is_noise(body, artist) {
-            outside.push_str(&format!(" ({body}) "));
+            outside.push_str(&format!(" ({}) ", version_of(body)));
         } else if !is_noise(body, artist) && !body.trim().is_empty() {
             inner.push(squash(body));
             outside.push(' ');
@@ -238,6 +254,48 @@ pub fn display_title(title: &str, artist: &str) -> String {
         s
     };
     if fold(&shown).is_empty() { squash(title) } else { shown }
+}
+
+/// Names a clip's title may credit besides its uploader: a bracket that is
+/// neither noise, a version nor a guest («【j.am】 There is a reason» is
+/// sung by j.am, uploaded by someone else) and the name after « by »
+/// («"ReawakeR" by LiSA feat Felix»). Whether one of them really is the
+/// artist is for the caller to check against the song's credit.
+pub fn credited_names(title: &str, uploader: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |name: &str| {
+        let name = squash(name.trim_matches(|c: char| c.is_whitespace() || "\"'«»“”".contains(c)));
+        if !fold(&name).is_empty() && !out.contains(&name) {
+            out.push(name);
+        }
+    };
+    let mut rest = title;
+    while let Some(open) = rest.find(OPEN) {
+        let ch = rest[open..].chars().next().unwrap_or('(');
+        let after = &rest[open + ch.len_utf8()..];
+        let close = closing(ch);
+        let (body, next) = match after.find(close) {
+            Some(c) => (&after[..c], &after[c + close.len_utf8()..]),
+            None => (after, ""),
+        };
+        if !(is_feat(body) || is_version(body) || is_noise(body, uploader)) {
+            push(body);
+        }
+        rest = next;
+    }
+    let lower = title.to_lowercase();
+    if let Some(at) = lower.find(" by ")
+        && let Some(tail) = title.get(at + 4..)
+    {
+        let tail_lower = tail.to_lowercase();
+        let end = [" feat", " ft.", " ft ", " x ", " & ", " - ", " | ", " (", " ["]
+            .iter()
+            .filter_map(|s| tail_lower.find(s))
+            .min()
+            .unwrap_or(tail.len());
+        push(&tail[..end]);
+    }
+    out
 }
 
 /// Letters outside the Latin script (CJK, kana, Cyrillic, Hangul…).
@@ -343,6 +401,25 @@ mod tests {
             assert_eq!(song_titles(title, artist)[0], song, "{title}");
             assert_eq!(display_title(title, artist), song, "{title}");
         }
+    }
+
+    #[test]
+    fn a_cover_named_in_a_bracket_with_its_source_keeps_only_the_version() {
+        let title = "【j.am】 There is a reason 【NO GAME NO LIFE // RUS Cover】(Fobia)";
+        assert!(song_titles(title, "higanbanban").contains(&"There is a reason (RUS Cover)".to_owned()));
+        assert_eq!(credited_names(title, "higanbanban"), ["j.am", "Fobia"]);
+    }
+
+    #[test]
+    fn names_after_by_and_in_brackets_are_credited() {
+        let title = "Solo Leveling Season 2 -Arise from the Shadow- Opening | \"ReawakeR\" by LiSA feat Felix of Stray Kids";
+        assert_eq!(credited_names(title, "Crunchyroll"), ["LiSA"]);
+        assert_eq!(
+            credited_names("[No Game No Life на русском] This Game [Onsa Media]", "Onsa Media Underground"),
+            ["No Game No Life на русском", "Onsa Media"]
+        );
+        assert!(credited_names("AIYOU - Eve Music Video", "Eve").is_empty());
+        assert!(credited_names("【MV】ドラマツルギー / Eve", "Eve").is_empty());
     }
 
     #[test]
