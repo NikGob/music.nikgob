@@ -1,18 +1,22 @@
-//! Библиотека (md3e-player.md §3.2): my playlists first, then releases,
-//! then artists (grid or list); a virtualized track table on "Треки".
+//! Библиотека (md3e-player.md §3.2, docs/stage4.md §12.6): a header with
+//! the instant filter, «только скачанное», the view and the sort; «Всё» as
+//! an overview (rows of playlists, the latest and the most played albums,
+//! the first rows of the album grid, artists), each section leading on to
+//! its tab; albums under headers that follow the sort; a virtualized track
+//! table on «Треки».
 
-use egui::{Id, Rect, Sense, Stroke, Ui, UiBuilder, Widget as _, pos2, vec2};
+use egui::{Align, Frame, Id, Key, Margin, Rect, RichText, Sense, Stroke, TextEdit, Ui, UiBuilder, Widget as _, pos2, vec2};
 use nikgob_view::{
-    ArtistCard, Command, LibraryTab, PlaylistCard, ReleaseCard, ReleaseSort, ReleaseType, Route,
+    ArtistCard, Command, LibraryTab, PlaylistCard, ReleaseCard, ReleaseSort, ReleaseType, Route, TrackRow,
     TrackSort, ViewState,
 };
 
-use super::{PageState, widgets};
+use super::{PageState, shelf, widgets};
 use crate::{
     Icon, Theme, TypeRole,
     components::{
-        Card, ConnectedGroup, Equalizer, FilterChip, IconButton, Leading, ListItem, Menu,
-        MenuItem, Radii, Size, anim, paint,
+        Card, ConnectedGroup, Equalizer, FilterChip, IconButton, Leading, ListItem, LoadingIndicator, Menu,
+        MenuItem, Radii, Size, Style, anim, paint,
     },
     screens::common,
     tokens::{shape, state as state_layer},
@@ -27,89 +31,45 @@ const TABS: [(LibraryTab, &str); 6] = [
     (LibraryTab::Trash, "Корзина"),
 ];
 
+const SORTS: [(ReleaseSort, &str); 4] = [
+    (ReleaseSort::Artist, "По исполнителю"),
+    (ReleaseSort::Title, "По названию"),
+    (ReleaseSort::Year, "По году"),
+    (ReleaseSort::Added, "Недавно добавленные"),
+];
+
+/// Artist avatars in grids and rows.
+const AVATAR: f32 = 136.0;
+
 /// Grid (false) or list (true) for playlists, releases and artists.
 fn list_view(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(Id::new("lib-list-view"))).unwrap_or(false)
 }
 
-pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
-    let s = Theme::get(ui.ctx()).scheme;
-    let lib = &state.library;
-    let mut nav = None;
-    let tab = pages.library_tab;
-    let is_list = list_view(ui.ctx());
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
 
+pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
+    let lib = &state.library;
+    header(ui, state, pages, out);
     ui.add_space(8.0);
-    // Fixed height so the title and the 40 dp controls share a centre.
-    let row = vec2(ui.available_width(), 48.0);
-    ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.label(TypeRole::HeadlineMedium.style().rich("Библиотека", s.on_surface));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Sort applies to the release grid only; the table sorts by header.
-            if matches!(tab, LibraryTab::All | LibraryTab::Albums) {
-                let sort = ui.add(IconButton::new(Icon::Sort).tooltip("Сортировка").id_salt("lib-sort"));
-                let cur = lib.release_sort;
-                let picked = Menu::new("lib-sort-menu")
-                    .align_right(true)
-                    .item(MenuItem::new("По исполнителю").selected(cur == ReleaseSort::Artist))
-                    .item(MenuItem::new("По названию").selected(cur == ReleaseSort::Title))
-                    .item(MenuItem::new("По году").selected(cur == ReleaseSort::Year))
-                    .item(MenuItem::new("Недавно добавленные").selected(cur == ReleaseSort::Added))
-                    .attach(&sort);
-                if let Some(i) = picked {
-                    let sorts = [ReleaseSort::Artist, ReleaseSort::Title, ReleaseSort::Year, ReleaseSort::Added];
-                    out.push(Command::SortReleases(sorts[i]));
-                }
-            }
-            if tab != LibraryTab::Tracks {
-                // The group lays out left to right inside this right-to-left row.
-                let picked = ui
-                    .allocate_ui_with_layout(vec2(82.0, 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ConnectedGroup::new("lib-view", &["Сетка", "Список"])
-                            .icons(&[Icon::GridView, Icon::ViewList])
-                            .show(ui, usize::from(is_list))
-                    })
-                    .inner;
-                if let Some(i) = picked {
-                    ui.ctx().data_mut(|d| d.insert_temp(Id::new("lib-list-view"), i == 1));
-                }
-            }
-        });
-    });
-    ui.add_space(8.0);
-    let labels: Vec<&str> = TABS.iter().map(|t| t.1).collect();
-    let idx = TABS.iter().position(|t| t.0 == pages.library_tab).unwrap_or(0);
-    // The tabs, and at the far end of their row the inconspicuous
-    // «только скачанное» (docs/stage3.md §0): a faint icon, nothing loud.
-    let picked = ui
-        .allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            let w = (ui.available_width() - 36.0).max(0.0);
-            let picked = ui
-                .allocate_ui_with_layout(vec2(w, 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ConnectedGroup::new("lib-tabs", &labels).show(ui, idx)
-                })
-                .inner;
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                only_downloaded(ui, state, out);
-            });
-            picked
-        })
-        .inner;
-    if let Some(i) = picked {
-        pages.library_tab = TABS[i].0;
-        if pages.library_tab == LibraryTab::Tracks {
-            out.push(Command::LoadTracks { offset: 0, limit: 200, sort: lib.track_sort });
-        }
-        if pages.library_tab == LibraryTab::Trash {
-            out.push(Command::LoadTrash);
-        }
-    }
+    tabs(ui, pages, lib.track_sort, out);
     ui.add_space(16.0);
 
-    if pages.library_tab == LibraryTab::Trash {
+    let tab = pages.library_tab;
+    if tab == LibraryTab::Trash {
         return trash(ui, state, pages, out);
     }
-    if lib.loaded && lib.releases.is_empty() && lib.playlists.len() <= 1 {
+    if !lib.loaded {
+        // A short wait (the library is read at start): the indicator alone.
+        ui.add_space(48.0);
+        ui.vertical_centered(|ui| ui.add(LoadingIndicator::new()));
+        return None;
+    }
+    if lib.releases.is_empty() && lib.playlists.len() <= 1 && lib.artists.is_empty() && lib.track_count == 0 {
         if widgets::empty_state(
             ui,
             Icon::LibraryMusic,
@@ -122,64 +82,723 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         }
         return None;
     }
+    if tab == LibraryTab::Tracks {
+        filter_tracks(pages, out);
+        return tracks(ui, state, pages, out);
+    }
+    let words = shelf::words(&pages.library_filter);
+    let is_list = list_view(ui.ctx());
+    match tab {
+        LibraryTab::All if words.is_empty() => overview(ui, state, pages, out, is_list),
+        LibraryTab::All => found(ui, state, pages, out, &words, is_list),
+        LibraryTab::Playlists => playlists_tab(ui, state, pages, out, &words, is_list),
+        LibraryTab::Albums => albums_tab(ui, state, pages, out, &words, is_list),
+        LibraryTab::Artists => artists_tab(ui, state, pages, out, &words, is_list),
+        LibraryTab::Tracks | LibraryTab::Trash => None,
+    }
+}
 
+/// «Треки» asks the runtime for what the filter matches, once per change.
+fn filter_tracks(pages: &mut PageState, out: &mut Vec<Command>) {
+    let q = pages.library_filter.trim();
+    if q != pages.track_filter_sent {
+        pages.track_filter_sent = q.to_owned();
+        out.push(Command::FilterTracks(q.to_owned()));
+    }
+}
+
+/// The title, then at the end of its row the tools of the tab: the
+/// filter, «только скачанное», the view and the sort, close together.
+fn header(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
     let tab = pages.library_tab;
-    if matches!(tab, LibraryTab::All | LibraryTab::Albums) {
-        widgets::edition_offers(ui, state, None, out);
-    }
-    if matches!(tab, LibraryTab::All | LibraryTab::Playlists) {
-        nav = playlists(ui, state, pages, out, tab == LibraryTab::All, is_list).or(nav);
-        ui.add_space(widgets::SECTION_GAP);
-    }
-    if matches!(tab, LibraryTab::All | LibraryTab::Albums) {
-        nav = releases(ui, state, pages, out, is_list).or(nav);
-        ui.add_space(widgets::SECTION_GAP);
-    }
-    if matches!(tab, LibraryTab::All | LibraryTab::Artists) {
-        widgets::section_header(ui, "Исполнители", false);
-        let artists = if tab == LibraryTab::All {
-            &lib.artists[..lib.artists.len().min(24)]
-        } else {
-            &lib.artists[..]
-        };
-        if is_list {
-            for a in artists {
-                nav = artist_row(ui, a, out).or(nav);
+    let lib = &state.library;
+    ui.add_space(8.0);
+    let row = vec2(ui.available_width(), 56.0);
+    let mut filter_below = false;
+    ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(Align::Center), |ui| {
+        ui.label(TypeRole::HeadlineMedium.style().rich("Библиотека", s.on_surface));
+        ui.add_space(24.0);
+        if tab == LibraryTab::Trash {
+            return;
+        }
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let narrow = ui.available_width() < 560.0;
+            // The sort orders the album grid (the table sorts by its header).
+            if matches!(tab, LibraryTab::All | LibraryTab::Albums) {
+                sort_button(ui, lib.release_sort, narrow, out);
             }
-        } else {
-            nav = widgets::grid(ui, artists, 120.0, |ui, a, w| widgets::artist_avatar(ui, a, w, out))
-                .or(nav);
+            if tab != LibraryTab::Tracks {
+                let is_list = list_view(ui.ctx());
+                // The group lays out left to right inside this right-to-left row.
+                let picked = ui
+                    .allocate_ui_with_layout(vec2(82.0, 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
+                        ConnectedGroup::new("lib-view", &["Сетка", "Список"])
+                            .icons(&[Icon::GridView, Icon::ViewList])
+                            .show(ui, usize::from(is_list))
+                    })
+                    .inner;
+                if let Some(i) = picked {
+                    ui.ctx().data_mut(|d| d.insert_temp(Id::new("lib-list-view"), i == 1));
+                }
+            }
+            only_downloaded(ui, state, out);
+            // The filter takes what is left, up to a comfortable width; in
+            // a narrow window it gets a row of its own.
+            let w = ui.available_width().min(480.0);
+            if w >= 200.0 {
+                filter_field(ui, pages, w);
+            } else {
+                filter_below = true;
+            }
+        });
+    });
+    if filter_below {
+        ui.add_space(8.0);
+        let w = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(w, 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
+            filter_field(ui, pages, w);
+        });
+    }
+}
+
+fn sort_button(ui: &mut Ui, cur: ReleaseSort, narrow: bool, out: &mut Vec<Command>) {
+    let label = SORTS.iter().find(|s| s.0 == cur).map_or("Сортировка", |s| s.1);
+    let resp = if narrow {
+        ui.add(IconButton::new(Icon::Sort).tooltip(format!("Сортировка: {}", label.to_lowercase())).id_salt("lib-sort"))
+    } else {
+        ui.add(crate::components::Button::new(label).icon(Icon::Sort).style(Style::Text).id_salt("lib-sort"))
+    };
+    let mut menu = Menu::new("lib-sort-menu").align_right(true);
+    for (sort, label) in SORTS {
+        menu = menu.item(MenuItem::new(label).selected(cur == sort));
+    }
+    if let Some(i) = menu.attach(&resp)
+        && SORTS[i].0 != cur
+    {
+        out.push(Command::SortReleases(SORTS[i].0));
+    }
+}
+
+/// «Только скачанное» (docs/stage3.md §0): a filled toggle icon button,
+/// its tooltip saying what it does in either state.
+fn only_downloaded(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
+    let on = state.prefs.library_only_downloaded;
+    let resp = ui.add(
+        IconButton::new(Icon::DownloadDone)
+            .style(Style::Filled)
+            .selected(on)
+            .tooltip(if on {
+                "Только скачанное: стрим скрыт. Нажми, чтобы показать всё"
+            } else {
+                "Только скачанное: скрыть то, что играет из сервисов"
+            })
+            .id_salt("lib-only-downloaded"),
+    );
+    if resp.clicked() {
+        out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { library_only_downloaded: !on, ..state.prefs.clone() })));
+    }
+}
+
+/// What the filter looks through on each tab.
+fn filter_hint(tab: LibraryTab) -> &'static str {
+    match tab {
+        LibraryTab::Playlists => "Найти плейлист",
+        LibraryTab::Albums => "Найти альбом или исполнителя",
+        LibraryTab::Artists => "Найти исполнителя",
+        LibraryTab::Tracks => "Найти трек, альбом, исполнителя",
+        LibraryTab::All | LibraryTab::Trash => "Найти в библиотеке",
+    }
+}
+
+/// The instant filter: a 40 dp pill (`surface-container-high`, a search
+/// icon, the text, ✕ while there is some). Esc clears it.
+fn filter_field(ui: &mut Ui, pages: &mut PageState, width: f32) {
+    let theme = Theme::get(ui.ctx());
+    let (s, motion) = (theme.scheme, theme.motion);
+    let id = Id::new("lib-filter");
+    let edit_id = id.with("edit");
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+    let bg = ui.interact(rect, id.with("bg"), Sense::click()).on_hover_cursor(egui::CursorIcon::Text);
+    if bg.clicked() {
+        ui.memory_mut(|m| m.request_focus(edit_id));
+    }
+    let radii = Radii::all(shape::FULL);
+    paint::container(ui.painter(), rect, radii, s.surface_container_high, Stroke::NONE);
+    let layer = anim::fraction(
+        ui.ctx(),
+        id.with("layer"),
+        if bg.contains_pointer() { state_layer::HOVER } else { 0.0 },
+        motion.fast_effects,
+    );
+    paint::state_layer(ui.painter(), rect, radii, s.on_surface, layer);
+    Icon::Search
+        .widget(false, s.on_surface_variant, 20.0)
+        .paint_at(ui, Rect::from_center_size(pos2(rect.left() + 22.0, rect.center().y), vec2(20.0, 20.0)));
+
+    let text = &mut pages.library_filter;
+    let has_text = !text.is_empty();
+    let row_h = ui.ctx().fonts_mut(|f| f.row_height(&TypeRole::BodyLarge.font_id()));
+    let text_rect = Rect::from_min_max(
+        pos2(rect.left() + 44.0, rect.center().y - row_h * 0.5),
+        pos2(rect.right() - if has_text { 44.0 } else { 16.0 }, rect.center().y + row_h * 0.5),
+    );
+    let edit = ui
+        .scope_builder(UiBuilder::new().max_rect(text_rect), |ui| {
+            TextEdit::singleline(text)
+                .id(edit_id)
+                .frame(Frame::NONE)
+                .margin(Margin::ZERO)
+                .font(TypeRole::BodyLarge.font_id())
+                .text_color(s.on_surface)
+                .desired_width(text_rect.width())
+                .vertical_align(Align::Center)
+                .hint_text(RichText::new(filter_hint(pages.library_tab)).color(s.on_surface_variant))
+                .show(ui)
+        })
+        .inner
+        .response
+        .response;
+    // Esc takes the focus away from the field; it also empties it.
+    if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+        text.clear();
+    }
+    if has_text {
+        let slot = Rect::from_center_size(pos2(rect.right() - 22.0, rect.center().y), vec2(32.0, 32.0));
+        let mut child = ui.new_child(UiBuilder::new().max_rect(slot).id_salt("lib-filter-clear"));
+        if child
+            .add(IconButton::new(Icon::Close).size(Size::Xs).tooltip("Сбросить фильтр (Esc)").id_salt("lib-filter-x"))
+            .clicked()
+        {
+            text.clear();
+            edit.request_focus();
         }
     }
+}
+
+fn tabs(ui: &mut Ui, pages: &mut PageState, track_sort: TrackSort, out: &mut Vec<Command>) {
+    let labels: Vec<&str> = TABS.iter().map(|t| t.1).collect();
+    let idx = TABS.iter().position(|t| t.0 == pages.library_tab).unwrap_or(0);
+    let picked = ui
+        .allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
+            ConnectedGroup::new("lib-tabs", &labels).show(ui, idx)
+        })
+        .inner;
+    if let Some(i) = picked {
+        open_tab(pages, TABS[i].0, track_sort, out);
+    }
+}
+
+fn open_tab(pages: &mut PageState, tab: LibraryTab, track_sort: TrackSort, out: &mut Vec<Command>) {
+    pages.library_tab = tab;
     if tab == LibraryTab::Tracks {
-        nav = tracks(ui, state, pages, out).or(nav);
+        out.push(Command::LoadTracks { offset: 0, limit: 200, sort: track_sort });
+    }
+    if tab == LibraryTab::Trash {
+        out.push(Command::LoadTrash);
+    }
+}
+
+/// A quiet line at the top of a tab: what is there, and the tab's own
+/// controls at its end.
+fn count_line(ui: &mut Ui, text: &str, add: impl FnOnce(&mut Ui)) {
+    let s = Theme::get(ui.ctx()).scheme;
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
+        ui.label(TypeRole::LabelLarge.style().rich(text, s.on_surface_variant));
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), add);
+    });
+    ui.add_space(8.0);
+}
+
+fn count(n: usize, one: &str, few: &str, many: &str) -> String {
+    format!("{n} {}", common::plural(n as u64, one, few, many))
+}
+
+/// «Ничего не найдено» for the filter, with «Сбросить» (also the chips).
+fn no_results(ui: &mut Ui, pages: &mut PageState) {
+    let q = pages.library_filter.trim().to_owned();
+    let body = if q.is_empty() {
+        "С этими фильтрами здесь пусто.".to_owned()
+    } else {
+        format!("В библиотеке нет «{q}» здесь. Попробуй другие слова или поищи везде — в строке поиска сверху.")
+    };
+    if widgets::empty_state(ui, Icon::Search, "Ничего не найдено", &body, Some("Сбросить")) {
+        pages.library_filter.clear();
+        pages.release_filter = 0;
+        pages.release_source = 0;
+    }
+}
+
+/// «Всё»: the library at a glance, every section leading on to its tab.
+fn overview(
+    ui: &mut Ui,
+    state: &ViewState,
+    pages: &mut PageState,
+    out: &mut Vec<Command>,
+    is_list: bool,
+) -> Option<Route> {
+    let lib = &state.library;
+    let mut nav = None;
+    widgets::edition_offers(ui, state, None, out);
+    let cols = widgets::columns(ui.available_width(), widgets::CARD_W);
+    let sections = shelf::overview(shelf::Counts {
+        recent: lib.recently_added.len(),
+        often: lib.often_played.len(),
+        albums: lib.releases.len(),
+        artists: lib.artists.len(),
+    });
+    for (n, section) in sections.into_iter().enumerate() {
+        if n > 0 {
+            ui.add_space(widgets::SECTION_GAP);
+        }
+        match section {
+            shelf::Overview::Playlists => {
+                if widgets::section_header(ui, "Плейлисты", true) {
+                    open_tab(pages, LibraryTab::Playlists, lib.track_sort, out);
+                }
+                widgets::card_row(ui, "lib-playlists", |ui| {
+                    new_playlist_card(ui, pages, widgets::CARD_W);
+                    for p in &lib.playlists {
+                        nav = widgets::playlist_card_with(ui, p, widgets::CARD_W, "lib", Some(pages), out).or(nav.take());
+                    }
+                });
+            }
+            shelf::Overview::RecentlyAdded => {
+                if widgets::section_header(ui, "Недавно добавлено", true) {
+                    // The whole list in the same order.
+                    if lib.release_sort != ReleaseSort::Added {
+                        out.push(Command::SortReleases(ReleaseSort::Added));
+                    }
+                    open_tab(pages, LibraryTab::Albums, lib.track_sort, out);
+                }
+                widgets::card_row(ui, "lib-recent", |ui| {
+                    for r in &lib.recently_added {
+                        nav = widgets::release_card(ui, r, widgets::CARD_W, "recent", out).or(nav.take());
+                    }
+                });
+            }
+            shelf::Overview::OftenPlayed => {
+                // A top of its own: no tab holds this order.
+                widgets::section_header(ui, "Часто слушаешь", false);
+                widgets::card_row(ui, "lib-often", |ui| {
+                    for r in &lib.often_played {
+                        nav = widgets::release_card(ui, r, widgets::CARD_W, "often", out).or(nav.take());
+                    }
+                });
+            }
+            shelf::Overview::Albums => {
+                let total = lib.releases.len();
+                let shown = shelf::overview_albums(total, if is_list { 4 } else { cols });
+                let all = format!("Все {total}");
+                let action = (shown < total).then_some((all.as_str(), Icon::ArrowForward));
+                if widgets::section_header_with(ui, "Альбомы", action) {
+                    open_tab(pages, LibraryTab::Albums, lib.track_sort, out);
+                }
+                let first: Vec<&ReleaseCard> = lib.releases.iter().take(shown).collect();
+                nav = release_items(ui, &first, is_list, "ov", out).or(nav);
+            }
+            shelf::Overview::Artists => {
+                if widgets::section_header(ui, "Исполнители", true) {
+                    open_tab(pages, LibraryTab::Artists, lib.track_sort, out);
+                }
+                widgets::card_row(ui, "lib-artists", |ui| {
+                    for a in &lib.artists {
+                        nav = widgets::artist_avatar(ui, a, AVATAR, out).or(nav.take());
+                    }
+                });
+            }
+        }
     }
     nav
 }
 
-/// The faint «только скачанное» switch: a small outlined arrow that is
-/// barely there while off and a little firmer while on.
-fn only_downloaded(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
-    let s = Theme::get(ui.ctx()).scheme;
-    let on = state.prefs.library_only_downloaded;
-    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
-    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if on {
-        "Только скачанное: стрим скрыт. Нажми, чтобы показать всё"
+/// «Всё» with the filter: what matches, by kind; the tracks are one click
+/// away on their tab.
+fn found(
+    ui: &mut Ui,
+    state: &ViewState,
+    pages: &mut PageState,
+    out: &mut Vec<Command>,
+    words: &[String],
+    is_list: bool,
+) -> Option<Route> {
+    let lib = &state.library;
+    let playlists: Vec<&PlaylistCard> = lib.playlists.iter().filter(|p| shelf::playlist_matches(words, p)).collect();
+    let releases: Vec<&ReleaseCard> = lib.releases.iter().filter(|r| shelf::release_matches(words, r)).collect();
+    let artists: Vec<&ArtistCard> = lib.artists.iter().filter(|a| shelf::artist_matches(words, a)).collect();
+    let mut nav = None;
+    let nothing = playlists.is_empty() && releases.is_empty() && artists.is_empty();
+    if !nothing {
+        if !artists.is_empty() {
+            widgets::section_header(ui, &format!("Исполнители · {}", artists.len()), false);
+            nav = artist_items(ui, &artists, is_list, out).or(nav);
+            ui.add_space(widgets::SECTION_GAP);
+        }
+        if !releases.is_empty() {
+            widgets::section_header(ui, &format!("Альбомы · {}", releases.len()), false);
+            nav = release_items(ui, &releases, is_list, "found", out).or(nav);
+            ui.add_space(widgets::SECTION_GAP);
+        }
+        if !playlists.is_empty() {
+            widgets::section_header(ui, &format!("Плейлисты · {}", playlists.len()), false);
+            nav = playlist_items(ui, &playlists, pages, is_list, out).or(nav);
+            ui.add_space(widgets::SECTION_GAP);
+        }
     } else {
-        "Только скачанное"
-    });
-    // Not the ⬇ of downloads: a check over a line, what is on disk.
-    if resp.hovered() {
-        ui.painter().circle_filled(rect.center(), 14.0, s.on_surface.gamma_multiply(0.06));
+        no_results(ui, pages);
+        ui.add_space(16.0);
     }
-    let tint = match (on, resp.hovered()) {
-        (true, _) => s.on_surface_variant,
-        (false, true) => s.outline,
-        (false, false) => s.outline_variant,
-    };
-    Icon::DownloadDone.widget(on, tint, 18.0).paint_at(ui, Rect::from_center_size(rect.center(), vec2(18.0, 18.0)));
-    if resp.clicked() {
-        out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { library_only_downloaded: !on, ..state.prefs.clone() })));
+    // Tracks are searched by the runtime: their own tab, the filter kept.
+    let open = ui
+        .vertical_centered(|ui| {
+            ui.add(
+                crate::components::Button::new("Искать среди треков")
+                    .icon(Icon::MusicNote)
+                    .style(Style::Tonal)
+                    .id_salt("lib-found-tracks"),
+            )
+            .clicked()
+        })
+        .inner;
+    if open {
+        open_tab(pages, LibraryTab::Tracks, lib.track_sort, out);
+    }
+    nav
+}
+
+fn playlists_tab(
+    ui: &mut Ui,
+    state: &ViewState,
+    pages: &mut PageState,
+    out: &mut Vec<Command>,
+    words: &[String],
+    is_list: bool,
+) -> Option<Route> {
+    let lib = &state.library;
+    let shown: Vec<&PlaylistCard> = lib.playlists.iter().filter(|p| shelf::playlist_matches(words, p)).collect();
+    if !words.is_empty() && shown.is_empty() {
+        no_results(ui, pages);
+        return None;
+    }
+    count_line(ui, &count(shown.len(), "плейлист", "плейлиста", "плейлистов"), |_| {});
+    // «Новый плейлист» first, unless the list is filtered.
+    if words.is_empty() {
+        if is_list {
+            if ListItem::new("Новый плейлист")
+                .leading_icon(Icon::PlaylistAdd)
+                .id_salt("new-playlist-row")
+                .show(ui)
+                .response
+                .clicked()
+            {
+                pages.open_ask(super::Ask::NewPlaylist { then_add: Vec::new() });
+            }
+        } else {
+            return playlist_grid(ui, &shown, pages, true, out);
+        }
+    }
+    playlist_items(ui, &shown, pages, is_list, out)
+}
+
+fn albums_tab(
+    ui: &mut Ui,
+    state: &ViewState,
+    pages: &mut PageState,
+    out: &mut Vec<Command>,
+    words: &[String],
+    is_list: bool,
+) -> Option<Route> {
+    let lib = &state.library;
+    widgets::edition_offers(ui, state, None, out);
+    let shown: Vec<&ReleaseCard> = lib
+        .releases
+        .iter()
+        .filter(|r| match pages.release_filter {
+            1 => matches!(r.release_type, ReleaseType::Album | ReleaseType::Compilation),
+            2 => r.release_type == ReleaseType::Single,
+            3 => r.release_type == ReleaseType::Ep,
+            _ => true,
+        })
+        .filter(|r| match pages.release_source {
+            _ if state.prefs.library_only_downloaded => true,
+            1 => r.local_tracks > 0,
+            2 => r.total_tracks.map_or(r.local_tracks == 0, |t| r.local_tracks < t),
+            _ => true,
+        })
+        .filter(|r| shelf::release_matches(words, r))
+        .collect();
+    album_chips(ui, state, pages, shown.len());
+    if shown.is_empty() {
+        no_results(ui, pages);
+        return None;
+    }
+    // Headers that follow the sort: letters joined to fill a row, decades,
+    // or how long ago the albums came in.
+    let sort = lib.release_sort;
+    let min = if is_list { 4 } else { widgets::columns(ui.available_width(), widgets::CARD_W) };
+    let now = now_ms();
+    let keys: Vec<String> = shown.iter().map(|r| shelf::group_key(sort, r, now)).collect();
+    let groups = shelf::groups(sort, &keys, min);
+    let mut nav = None;
+    if groups.len() < 2 {
+        return release_items(ui, &shown, is_list, "grid", out);
+    }
+    for (n, g) in groups.iter().enumerate() {
+        group_label(ui, &g.label, n == 0);
+        nav = release_items(ui, &shown[g.range.clone()], is_list, &g.label, out).or(nav);
+    }
+    nav
+}
+
+/// The kind and source chips of «Альбомы», the count at the end.
+fn album_chips(ui: &mut Ui, state: &ViewState, pages: &mut PageState, n: usize) {
+    let s = Theme::get(ui.ctx()).scheme;
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for (idx, label) in ["Всё", "Альбомы", "Синглы", "EP"].iter().enumerate() {
+            if ui.add(FilterChip::new(*label, pages.release_filter == idx).id_salt(("rel-filter", idx))).clicked() {
+                pages.release_filter = idx;
+            }
+        }
+        // Where the albums play from: files, or only a service (no use
+        // while «только скачанное» hides the stream anyway).
+        if !state.prefs.library_only_downloaded {
+            const SOURCES: [&str; 3] = ["Все источники", "Скачанные", "Стрим"];
+            let cur = pages.release_source.min(2);
+            let chip = ui.add(FilterChip::new(SOURCES[cur], cur != 0).trailing_icon(Icon::ExpandMore).id_salt("rel-source"));
+            let mut menu = Menu::new("rel-source-menu");
+            for (i, l) in SOURCES.iter().enumerate() {
+                menu = menu.item(MenuItem::new(*l).selected(i == cur));
+            }
+            if let Some(i) = menu.attach(&chip) {
+                pages.release_source = i;
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            ui.label(TypeRole::LabelLarge.style().rich(count(n, "альбом", "альбома", "альбомов"), s.on_surface_variant));
+        });
+    });
+    ui.add_space(8.0);
+}
+
+/// A header over a run of the album grid («A – D», «1990-е», «За неделю»).
+fn group_label(ui: &mut Ui, label: &str, first: bool) {
+    let s = Theme::get(ui.ctx()).scheme;
+    if !first {
+        ui.add_space(12.0);
+    }
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
+        ui.label(TypeRole::TitleMedium.style().rich(label, s.on_surface));
+    });
+    ui.add_space(4.0);
+}
+
+fn artists_tab(
+    ui: &mut Ui,
+    state: &ViewState,
+    pages: &mut PageState,
+    out: &mut Vec<Command>,
+    words: &[String],
+    is_list: bool,
+) -> Option<Route> {
+    let shown: Vec<&ArtistCard> = state.library.artists.iter().filter(|a| shelf::artist_matches(words, a)).collect();
+    if shown.is_empty() {
+        if words.is_empty() {
+            widgets::empty_state(ui, Icon::Person, "Исполнителей пока нет", "Они появятся вместе с первыми треками.", None);
+        } else {
+            no_results(ui, pages);
+        }
+        return None;
+    }
+    count_line(ui, &count(shown.len(), "исполнитель", "исполнителя", "исполнителей"), |_| {});
+    artist_items(ui, &shown, is_list, out)
+}
+
+/// «+ Новый плейлист»: an outlined card the size of the others.
+fn new_playlist_card(ui: &mut Ui, pages: &mut PageState, w: f32) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let o = Card::outlined()
+        .clickable(true)
+        .width(w)
+        .min_height(w + 56.0)
+        .label("Новый плейлист")
+        .id_salt(("new-playlist-card", w as u32))
+        .show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(w * 0.3);
+                Icon::Add.widget(false, s.primary, 40.0).ui(ui);
+                ui.add_space(8.0);
+                ui.label(TypeRole::TitleSmall.style().rich("Новый плейлист", s.on_surface));
+            });
+        });
+    if o.response.clicked() {
+        pages.open_ask(super::Ask::NewPlaylist { then_add: Vec::new() });
+    }
+}
+
+/// Playlists as a grid (with «Новый плейлист» first when `new`).
+fn playlist_grid(
+    ui: &mut Ui,
+    items: &[&PlaylistCard],
+    pages: &mut PageState,
+    new: bool,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    let width = ui.available_width();
+    let cols = widgets::columns(width, widgets::CARD_W);
+    let w = ((width - widgets::CARD_GAP * (cols - 1) as f32) / cols as f32).floor();
+    let mut nav = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(widgets::CARD_GAP, widgets::CARD_GAP);
+        if new {
+            new_playlist_card(ui, pages, w);
+        }
+        for p in items {
+            nav = widgets::playlist_card_with(ui, p, w, "lib", Some(pages), out).or(nav.take());
+        }
+    });
+    nav
+}
+
+fn playlist_items(
+    ui: &mut Ui,
+    items: &[&PlaylistCard],
+    pages: &mut PageState,
+    is_list: bool,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    if !is_list {
+        return playlist_grid(ui, items, pages, false, out);
+    }
+    let mut nav = None;
+    for p in items {
+        nav = playlist_row(ui, p, pages, out).or(nav);
+    }
+    nav
+}
+
+fn release_items(ui: &mut Ui, items: &[&ReleaseCard], is_list: bool, row: &str, out: &mut Vec<Command>) -> Option<Route> {
+    if is_list {
+        let mut nav = None;
+        for r in items {
+            nav = release_row(ui, r, out).or(nav);
+        }
+        return nav;
+    }
+    widgets::grid(ui, items, widgets::CARD_W, |ui, r, w| widgets::release_card(ui, r, w, row, out))
+}
+
+fn artist_items(ui: &mut Ui, items: &[&ArtistCard], is_list: bool, out: &mut Vec<Command>) -> Option<Route> {
+    if is_list {
+        let mut nav = None;
+        for a in items {
+            nav = artist_row(ui, a, out).or(nav);
+        }
+        return nav;
+    }
+    widgets::grid(ui, items, AVATAR, |ui, a, w| widgets::artist_avatar(ui, a, w, out))
+}
+
+/// A small tonal label for list rows («3 из 12», «стрим»).
+fn meta_badge(ui: &mut Ui, text: &str) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let g = plain(ui.painter(), text, TypeRole::LabelMedium.style(), s.on_secondary_container);
+    let (rect, _) = ui.allocate_exact_size(vec2(g.size().x + 16.0, 24.0), Sense::hover());
+    paint::container(ui.painter(), rect, Radii::all(shape::SMALL), s.secondary_container, Stroke::NONE);
+    ui.painter().galley(rect.center() - g.size() * 0.5, g, s.on_secondary_container);
+}
+
+/// A fixed-width cell of the list rows' meta, right-aligned so the columns
+/// line up from row to row.
+fn meta_cell(ui: &mut Ui, w: f32, add: impl FnOnce(&mut Ui)) {
+    ui.allocate_ui_with_layout(vec2(w, 40.0), egui::Layout::right_to_left(Align::Center), add);
+}
+
+/// List view: an album row (cover with ▶ on hover, title, artist; at the
+/// end the badge, the number of tracks and the year).
+fn release_row(ui: &mut Ui, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<Route> {
+    let s = Theme::get(ui.ctx()).scheme;
+    let badge = widgets::card_badge(r);
+    let wide = ui.available_width() >= 640.0;
+    let tracks = r.total_tracks.unwrap_or(r.local_tracks);
+    let o = ListItem::new(&r.title)
+        .supporting(&r.artist)
+        .leading(Leading::Image(r.cover.as_ref().map(|c| c.uri()), Icon::Album))
+        .hover_play(true)
+        .trailing(|ui| {
+            ui.spacing_mut().item_spacing.x = 16.0;
+            meta_cell(ui, 80.0, |ui| {
+                if let Some(b) = &badge {
+                    meta_badge(ui, b);
+                }
+            });
+            if wide {
+                meta_cell(ui, 88.0, |ui| {
+                    if tracks > 0 {
+                        ui.label(TypeRole::BodyMedium.style().rich(count(tracks as usize, "трек", "трека", "треков"), s.on_surface_variant));
+                    }
+                });
+            }
+            meta_cell(ui, 40.0, |ui| {
+                if let Some(y) = r.year {
+                    ui.label(TypeRole::BodyMedium.style().rich(y.to_string(), s.on_surface_variant));
+                }
+            });
+        })
+        .id_salt(("rel-row", r.id))
+        .show(ui);
+    let menu = widgets::release_menu(&o.response, r, out);
+    if o.play_clicked {
+        out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false });
+        None
+    } else if o.response.clicked() {
+        Some(Route::Release(r.id))
+    } else {
+        menu
+    }
+}
+
+/// List view: a playlist row.
+fn playlist_row(ui: &mut Ui, p: &PlaylistCard, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
+    let mut line = count(p.track_count as usize, "трек", "трека", "треков");
+    if let Some(service) = p.service {
+        line = format!("{} · {line}", service.display_name());
+    }
+    let o = ListItem::new(&p.name)
+        .supporting(line)
+        .leading(Leading::Image(
+            p.cover.as_ref().map(|c| c.uri()),
+            if p.pinned { Icon::Favorite } else { Icon::QueueMusic },
+        ))
+        .hover_play(true)
+        .id_salt(("pl-row", p.id))
+        .show(ui);
+    widgets::playlist_menu_at(&o.response, p, Some(pages), out);
+    if o.play_clicked {
+        out.push(Command::PlayPlaylist { id: p.id, start: None, shuffle: false });
+        None
+    } else if o.response.clicked() {
+        Some(Route::Playlist(p.id))
+    } else {
+        None
+    }
+}
+
+/// List view: an artist row (the avatar as in the grid, ▶ over it).
+fn artist_row(ui: &mut Ui, a: &ArtistCard, out: &mut Vec<Command>) -> Option<Route> {
+    let mut item = ListItem::new(&a.name).leading(widgets::artist_leading(ui, a)).hover_play(true);
+    let tracks = widgets::artist_tracks(a);
+    if !tracks.is_empty() {
+        item = item.supporting(tracks);
+    }
+    let o = item.id_salt(("ar-row", a.id)).show(ui);
+    widgets::artist_menu(&o.response, a, out);
+    if o.play_clicked {
+        out.push(Command::PlayArtist { id: a.id, shuffle: false });
+        None
+    } else {
+        o.response.clicked().then_some(Route::Artist(a.id))
     }
 }
 
@@ -188,28 +807,19 @@ fn only_downloaded(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
 fn trash(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let items = &state.library.trash;
-    let row = vec2(ui.available_width(), 40.0);
-    ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        let n = items.len() as u64;
-        ui.label(TypeRole::TitleLarge.style().rich(
-            format!("{n} {} в корзине", common::plural(n, "трек", "трека", "треков")),
-            s.on_surface,
-        ));
-        if !items.is_empty() {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add(crate::components::Button::new("Очистить корзину").icon(Icon::Delete).style(crate::components::Style::Tonal).id_salt("trash-empty"))
-                    .clicked()
-                {
-                    pages.confirm_empty_trash = true;
-                }
-                if ui
-                    .add(crate::components::Button::new("Восстановить всё").style(crate::components::Style::Text).id_salt("trash-restore-all"))
-                    .clicked()
-                {
-                    out.push(Command::RestoreTracks(items.iter().map(|i| i.track.id).collect()));
-                }
-            });
+    let n = items.len();
+    count_line(ui, &format!("{} в корзине", count(n, "трек", "трека", "треков")), |ui| {
+        if n == 0 {
+            return;
+        }
+        if ui
+            .add(crate::components::Button::new("Очистить корзину").icon(Icon::Delete).style(Style::Tonal).id_salt("trash-empty"))
+            .clicked()
+        {
+            pages.confirm_empty_trash = true;
+        }
+        if ui.add(crate::components::Button::new("Восстановить всё").style(Style::Text).id_salt("trash-restore-all")).clicked() {
+            out.push(Command::RestoreTracks(items.iter().map(|i| i.track.id).collect()));
         }
     });
     ui.label(TypeRole::BodyMedium.style().rich_para(
@@ -242,7 +852,7 @@ fn trash(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Co
                         .add(IconButton::new(Icon::Delete).size(Size::S).tooltip("Удалить навсегда").id_salt(("trash-purge", i)))
                         .clicked();
                     restore = ui
-                        .add(crate::components::Button::new("Восстановить").size(Size::S).style(crate::components::Style::Tonal).id_salt(("trash-restore", i)))
+                        .add(crate::components::Button::new("Восстановить").size(Size::S).style(Style::Tonal).id_salt(("trash-restore", i)))
                         .clicked();
                 });
             })
@@ -266,217 +876,6 @@ fn trash(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Co
         }
     }
     None
-}
-
-fn playlists(
-    ui: &mut Ui,
-    state: &ViewState,
-    pages: &mut PageState,
-    out: &mut Vec<Command>,
-    row: bool,
-    is_list: bool,
-) -> Option<Route> {
-    let s = Theme::get(ui.ctx()).scheme;
-    widgets::section_header(ui, "Мои плейлисты", false);
-    let mut nav = None;
-    let new_playlist = |ui: &mut Ui, pages: &mut PageState, w: f32| {
-        // "+ Новый плейлист": outlined card.
-        let o = Card::outlined()
-            .clickable(true)
-            .width(w)
-            .min_height(w + 56.0)
-            .label("Новый плейлист")
-            .id_salt("new-playlist-card")
-            .show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(w * 0.3);
-                    Icon::Add.widget(false, s.primary, 40.0).ui(ui);
-                    ui.add_space(8.0);
-                    ui.label(TypeRole::TitleSmall.style().rich("Новый плейлист", s.on_surface));
-                });
-            });
-        if o.response.clicked() {
-            pages.open_ask(super::Ask::NewPlaylist { then_add: Vec::new() });
-        }
-    };
-    if is_list {
-        if ListItem::new("Новый плейлист")
-            .leading_icon(Icon::PlaylistAdd)
-            .id_salt("new-playlist-row")
-            .show(ui)
-            .response
-            .clicked()
-        {
-            pages.open_ask(super::Ask::NewPlaylist { then_add: Vec::new() });
-        }
-        for p in &state.library.playlists {
-            nav = playlist_row(ui, p, pages, out).or(nav);
-        }
-        return nav;
-    }
-    if row {
-        widgets::card_row(ui, "lib-playlists", |ui| {
-            new_playlist(ui, pages, widgets::CARD_W);
-            for p in &state.library.playlists {
-                nav = widgets::playlist_card_with(ui, p, widgets::CARD_W, "lib", Some(pages), out).or(nav.take());
-            }
-        });
-    } else {
-        // Grid: rows of the same cards.
-        let width = ui.available_width();
-        let cols = widgets::columns(width, widgets::CARD_W);
-        let w = ((width - widgets::CARD_GAP * (cols - 1) as f32) / cols as f32).floor();
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(widgets::CARD_GAP, widgets::CARD_GAP);
-            new_playlist(ui, pages, w);
-            for p in &state.library.playlists {
-                nav = widgets::playlist_card_with(ui, p, w, "lib", Some(pages), out).or(nav.take());
-            }
-        });
-    }
-    nav
-}
-
-fn releases(
-    ui: &mut Ui,
-    state: &ViewState,
-    pages: &mut PageState,
-    out: &mut Vec<Command>,
-    is_list: bool,
-) -> Option<Route> {
-    ui.horizontal(|ui| {
-        ui.label(TypeRole::TitleLarge.style().rich("Альбомы и релизы", Theme::get(ui.ctx()).scheme.on_surface));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Where the albums play from: files, or only a service (no use
-            // while «только скачанное» hides the stream anyway).
-            if !state.prefs.library_only_downloaded {
-                const SOURCES: [&str; 3] = ["Все источники", "Скачанные", "Стрим"];
-                let cur = pages.release_source.min(2);
-                let chip = ui.add(FilterChip::new(SOURCES[cur], cur != 0).trailing_icon(Icon::ExpandMore).id_salt("rel-source"));
-                let mut menu = Menu::new("rel-source-menu").align_right(true);
-                for (i, l) in SOURCES.iter().enumerate() {
-                    menu = menu.item(MenuItem::new(*l).selected(i == cur));
-                }
-                if let Some(i) = menu.attach(&chip) {
-                    pages.release_source = i;
-                }
-                ui.add_space(8.0);
-            }
-            for (i, label) in ["EP", "Синглы", "Альбомы", "Всё"].iter().enumerate() {
-                let idx = 3 - i;
-                if ui
-                    .add(FilterChip::new(*label, pages.release_filter == idx).id_salt(("rel-filter", idx)))
-                    .clicked()
-                {
-                    pages.release_filter = idx;
-                }
-            }
-        });
-    });
-    ui.add_space(8.0);
-    let filtered: Vec<_> = state
-        .library
-        .releases
-        .iter()
-        .filter(|r| match pages.release_filter {
-            1 => matches!(r.release_type, ReleaseType::Album | ReleaseType::Compilation),
-            2 => r.release_type == ReleaseType::Single,
-            3 => r.release_type == ReleaseType::Ep,
-            _ => true,
-        })
-        .filter(|r| match pages.release_source {
-            _ if state.prefs.library_only_downloaded => true,
-            1 => r.local_tracks > 0,
-            2 => r.total_tracks.map_or(r.local_tracks == 0, |t| r.local_tracks < t),
-            _ => true,
-        })
-        .collect();
-    if is_list {
-        let mut nav = None;
-        for r in filtered {
-            nav = release_row(ui, r, out).or(nav);
-        }
-        return nav;
-    }
-    widgets::grid(ui, &filtered, widgets::CARD_W, |ui, r, w| widgets::release_card(ui, r, w, "grid", out))
-}
-
-/// List view: an album row (cover, title, artist · year, "3/12", ▶).
-fn release_row(ui: &mut Ui, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<Route> {
-    let s = Theme::get(ui.ctx()).scheme;
-    let badge = widgets::card_badge(r);
-    let mut play = false;
-    let o = ListItem::new(&r.title)
-        .supporting(widgets::release_subtitle(r))
-        .leading(Leading::Image(r.cover.as_ref().map(|c| c.uri()), Icon::Album))
-        .trailing(|ui| {
-            play = ui
-                .add(IconButton::new(Icon::PlayArrow).size(Size::Xs).tooltip("Слушать").id_salt(("rel-row-play", r.id)))
-                .clicked();
-            if let Some(b) = badge {
-                ui.label(TypeRole::LabelMedium.style().rich(b, s.on_surface_variant));
-            }
-        })
-        .id_salt(("rel-row", r.id))
-        .show(ui);
-    let menu = widgets::release_menu(&o.response, r, out);
-    if play {
-        out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false });
-        None
-    } else if o.response.clicked() {
-        Some(Route::Release(r.id))
-    } else {
-        menu
-    }
-}
-
-/// List view: a playlist row.
-fn playlist_row(ui: &mut Ui, p: &PlaylistCard, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
-    let n = u64::from(p.track_count);
-    let mut play = false;
-    let o = ListItem::new(&p.name)
-        .supporting(format!("{n} {}", common::plural(n, "трек", "трека", "треков")))
-        .leading(Leading::Image(
-            p.cover.as_ref().map(|c| c.uri()),
-            if p.pinned { Icon::Favorite } else { Icon::QueueMusic },
-        ))
-        .trailing(|ui| {
-            play = ui
-                .add(IconButton::new(Icon::PlayArrow).size(Size::Xs).tooltip("Слушать").id_salt(("pl-row-play", p.id)))
-                .clicked();
-        })
-        .id_salt(("pl-row", p.id))
-        .show(ui);
-    widgets::playlist_menu_at(&o.response, p, Some(pages), out);
-    if play {
-        out.push(Command::PlayPlaylist { id: p.id, start: None, shuffle: false });
-        None
-    } else if o.response.clicked() {
-        Some(Route::Playlist(p.id))
-    } else {
-        None
-    }
-}
-
-/// List view: an artist row.
-fn artist_row(ui: &mut Ui, a: &ArtistCard, out: &mut Vec<Command>) -> Option<Route> {
-    let mut play = false;
-    let o = ListItem::new(&a.name)
-        .leading(Leading::Avatar(a.image.as_ref().map(|c| c.uri()), Icon::Person))
-        .trailing(|ui| {
-            play = ui
-                .add(IconButton::new(Icon::PlayArrow).size(Size::Xs).tooltip("Слушать микс").id_salt(("ar-row-play", a.id)))
-                .clicked();
-        })
-        .id_salt(("ar-row", a.id))
-        .show(ui);
-    widgets::artist_menu(&o.response, a, out);
-    if play {
-        out.push(Command::PlayArtist { id: a.id, shuffle: false });
-        None
-    } else {
-        o.response.clicked().then_some(Route::Artist(a.id))
-    }
 }
 
 /// A single-line galley, truncated with an ellipsis at `max_width`.
@@ -564,14 +963,30 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
     let motion = Theme::get(ui.ctx()).motion;
     let lib = &state.library;
     let mut nav = None;
-    let total = lib.track_count;
-    ui.label(TypeRole::TitleLarge.style().rich(
-        format!("{total} {}", common::plural(total as u64, "трек", "трека", "треков")),
-        s.on_surface,
-    ));
-    ui.add_space(8.0);
-    if lib.loaded && total == 0 {
-        ui.label(TypeRole::BodyMedium.style().rich("Здесь пока нет треков.", s.on_surface_variant));
+    // With the filter on, its hits (best first, no windows to load).
+    let query = pages.library_filter.trim().to_owned();
+    let hits: Option<&[TrackRow]> = (!query.is_empty()).then(|| lib.track_hits.as_ref().map_or(&[][..], |(_, rows)| &rows[..]));
+    let waiting = hits.is_some() && lib.track_hits.as_ref().is_none_or(|(q, _)| *q != query);
+    let (total, offset, rows) = match hits {
+        Some(rows) => (rows.len(), 0, rows),
+        None => (lib.track_count, lib.tracks_offset, &lib.tracks[..]),
+    };
+    if hits.is_some() && total == 0 {
+        if waiting {
+            ui.add_space(48.0);
+            ui.vertical_centered(|ui| ui.add(LoadingIndicator::new()));
+        } else {
+            no_results(ui, pages);
+        }
+        return None;
+    }
+    let summary = match hits {
+        Some(_) => format!("Нашлось: {}", count(total, "трек", "трека", "треков")),
+        None => count(total, "трек", "трека", "треков"),
+    };
+    count_line(ui, &summary, |_| {});
+    if total == 0 {
+        widgets::empty_state(ui, Icon::MusicNote, "Треков пока нет", "Лайкни трек в поиске или добавь папку с музыкой.", None);
         return None;
     }
 
@@ -586,14 +1001,14 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
     let last = ((((clip.bottom() - body_top) / ROW_H).ceil().max(0.0)) as usize).min(total);
 
     // Ask for the window if it is not loaded.
-    let have = lib.tracks_offset..lib.tracks_offset + lib.tracks.len();
-    if first < last && (first < have.start || last > have.end) && pages.track_window != (first, last) {
+    let have = offset..offset + rows.len();
+    if hits.is_none() && first < last && (first < have.start || last > have.end) && pages.track_window != (first, last) {
         pages.track_window = (first, last);
         let offset = first.saturating_sub(50);
         out.push(Command::LoadTracks { offset, limit: (last - offset) + 150, sort: lib.track_sort });
     }
 
-    let ids: Vec<_> = lib.tracks.iter().map(|t| t.id).collect();
+    let ids: Vec<_> = rows.iter().map(|t| t.id).collect();
     let current = state.player.current.as_ref().map(|t| t.id);
     let playing = state.player.status == nikgob_view::Status::Playing;
     for i in first..last.max(first) {
@@ -609,7 +1024,7 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         let link_hover_key = id.with("link-hover");
         let link_hover = ui.ctx().data(|d| d.get_temp::<bool>(link_hover_key)).unwrap_or(false);
         let hovered = resp.hovered() || cell.hovered() || link_hover;
-        let track = i.checked_sub(lib.tracks_offset).and_then(|j| lib.tracks.get(j));
+        let track = i.checked_sub(offset).and_then(|j| rows.get(j));
         let is_cur = track.is_some_and(|t| current == Some(t.id));
         let (fg, variant, layer_color) = if is_cur {
             (s.on_secondary_container, s.on_secondary_container, s.on_secondary_container)
@@ -736,7 +1151,7 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
             } else {
                 Command::PlayTracks {
                     tracks: ids.clone(),
-                    start: i - lib.tracks_offset,
+                    start: i - offset,
                     context: "библиотеки".into(),
                 }
             });
@@ -770,7 +1185,8 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
     }
     cells.push(("Длительность", cols.duration, Some(TrackSort::Duration), true));
     for (label, (x0, x1), by, right) in cells {
-        let active = by == Some(lib.track_sort);
+        let by = by.filter(|_| hits.is_none());
+        let active = by.is_some() && by == Some(lib.track_sort);
         let color = if active { s.on_surface } else { s.on_surface_variant };
         let g = line(ui.painter(), label, TypeRole::LabelLarge.style(), color, x1 - x0);
         let w = g.size().x;

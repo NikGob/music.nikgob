@@ -17,7 +17,7 @@ pub use slider::{Slider, SliderOutput, Wave, wavy_progress};
 pub use toolbar::{ToolbarColor, floating_toolbar};
 
 mod common;
-pub(crate) use common::paint_image;
+pub(crate) use common::{paint_image, paint_shape_avatar};
 
 /// Filtering for photos drawn smaller than their file (covers, avatars):
 /// trilinear mipmaps, so a 1200 px cover at 48 dp does not alias.

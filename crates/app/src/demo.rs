@@ -95,8 +95,70 @@ fn make_cover(path: &Path, rgb: [u8; 3], seed: u32) {
     let _ = small.save(path.with_file_name("ambient.png"));
 }
 
+/// Artists with a photo (the rest show their initials), and the photo's hue.
+const PHOTOS: &[(&str, [u8; 3])] = &[
+    ("Кино", [150, 60, 50]),
+    ("Radiohead", [50, 90, 140]),
+    ("Daft Punk", [120, 70, 160]),
+    ("Земфира", [60, 130, 110]),
+    ("Massive Attack", [110, 110, 120]),
+    ("The Prodigy", [170, 80, 40]),
+];
+
+/// An artist photo: a head and shoulders lit from the left before a soft
+/// studio backdrop in the hue, with a vignette and grain, 400×400 JPEG.
+fn make_photo(path: &Path, rgb: [u8; 3], seed: u32) {
+    let size = 400u32;
+    let base = rgb.map(f32::from);
+    let mix = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] {
+        let t = t.clamp(0.0, 1.0);
+        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    };
+    let smooth = |e0: f32, e1: f32, x: f32| {
+        let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let light = mix(base, [255.0; 3], 0.45);
+    let dark = mix(base, [0.0; 3], 0.75);
+    let skin_lit = [214.0, 172.0, 148.0];
+    let skin_shade = [70.0, 48.0, 44.0];
+    let cloth = mix(base, [20.0; 3], 0.8);
+    // The pose shifts a little per artist.
+    let lean = ((seed % 5) as f32 - 2.0) * 0.025;
+    let img = image::RgbImage::from_fn(size, size, |x, y| {
+        let (u, v) = (x as f32 / size as f32, y as f32 / size as f32);
+        // Backdrop: a lit patch up left fading to the dark hue.
+        let d = ((u - 0.32).powi(2) + (v - 0.28).powi(2)).sqrt();
+        let mut c = mix(light, dark, d * 1.3);
+        // Head (an ellipse), neck and shoulders, edges a pixel or two soft.
+        let hx = 0.5 + lean;
+        let head = ((u - hx) / 0.15).powi(2) + ((v - 0.40) / 0.19).powi(2);
+        let neck = (u - hx * 0.9 - 0.05).abs() < 0.07 && v > 0.5 && v < 0.72;
+        let body = ((u - 0.5) / 0.44).powi(2) + ((v - 1.08) / 0.36).powi(2);
+        let k_head = 1.0 - smooth(0.92, 1.0, head);
+        let k_body = 1.0 - smooth(0.95, 1.0, body);
+        // Light from the left: bright on the left cheek, shade on the right.
+        let lit = (0.85 - (u - hx + 0.12) * 3.2 + (0.35 - v) * 0.6).clamp(0.0, 1.0);
+        if neck {
+            c = mix(skin_shade, skin_lit, lit * 0.7);
+        }
+        c = mix(c, mix(skin_shade, skin_lit, lit), k_head);
+        // Hair: the top of the head, darker.
+        let hair = k_head * (1.0 - smooth(0.30, 0.36, v + ((u - hx) * 4.0).powi(2) * 0.02));
+        c = mix(c, mix([25.0; 3], base, 0.25), hair);
+        c = mix(c, mix(cloth, mix(cloth, light, 0.35), lit), k_body);
+        // Vignette.
+        let vig = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt();
+        c = mix(c, [0.0; 3], smooth(0.45, 0.85, vig) * 0.6);
+        let h = (x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663) ^ seed.wrapping_mul(83_492_791)) % 1000;
+        let n = (h as f32 / 1000.0 - 0.5) * 18.0;
+        image::Rgb(c.map(|ch| (ch + n).clamp(0.0, 255.0) as u8))
+    });
+    let _ = img.save(path);
+}
+
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v10";
+pub const VERSION: &str = "seed-v11";
 
 /// The intro, instrumental gap and long line exercise both lyrics layouts.
 const DEMO_LRC: &str = "[00:03.00]Свет из окна ложится на пол
@@ -148,6 +210,10 @@ pub fn seed(lib: &Library, root: &Path) {
         r.release_type = *kind;
         r.cover_ref = Some(cover.display().to_string());
         r.total_tracks = Some(tracks.len() as u32 + u32::from(i % 3 == 0) * 2);
+        // Added over the last year, the last albums of the list first, so
+        // «Недавно добавлено» and its headers have something to tell.
+        const ADDED_DAYS: [i64; 12] = [300, 200, 120, 90, 45, 40, 20, 12, 5, 3, 0, 0];
+        r.added_at = nikgob_library::now_ms() - ADDED_DAYS[i % ADDED_DAYS.len()] * DAY_MS - i as i64 * 60_000;
         let r = lib.upsert_release(&r).expect("release");
         if let Ok(img) = image::open(&cover) {
             let rgba = img.to_rgba8();
@@ -200,6 +266,22 @@ pub fn seed(lib: &Library, root: &Path) {
         }
     }
     history(lib, &all);
+    // Photos for some artists; the rest are marked as looked up, so the
+    // demo never asks a service for them.
+    let photos = root.join("..").join("photos");
+    let _ = std::fs::create_dir_all(&photos);
+    for (n, (name, a)) in artists.iter().enumerate() {
+        match PHOTOS.iter().find(|(p, _)| p == name) {
+            Some((_, rgb)) => {
+                let path = photos.join(format!("artist-{n}.jpg"));
+                make_photo(&path, *rgb, n as u32);
+                let _ = lib.set_artist_photo(a.id, Some(&path.display().to_string()));
+            }
+            None => {
+                let _ = lib.set_artist_photo(a.id, None);
+            }
+        }
+    }
     if let Ok(p) = lib.create_playlist("Вечером") {
         let _ = lib.playlist_add_many(p.id, &first_tracks);
     }

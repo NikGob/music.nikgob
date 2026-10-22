@@ -742,6 +742,7 @@ mod tests {
             local_tracks: 1,
             total_tracks: None,
             liked: false,
+            added_at: 0,
         };
         HomeView {
             hero: Some(mix(MixId::Daily)),
@@ -750,7 +751,7 @@ mod tests {
             discover: vec![row("a")],
             new_releases: Vec::new(),
             continue_listening: vec![ContinueCard::Release(release.clone())],
-            artist_mixes: vec![ArtistCard { id: ArtistId::new(), name: "Кино".into(), image: None, liked: false }],
+            artist_mixes: vec![ArtistCard { id: ArtistId::new(), name: "Кино".into(), image: None, liked: false, track_count: 0 }],
             long_unplayed: vec![release.clone()],
             recently_added: vec![release],
             ..Default::default()

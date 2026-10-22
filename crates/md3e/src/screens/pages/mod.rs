@@ -6,6 +6,7 @@ mod bento;
 mod home;
 mod library;
 mod search;
+mod shelf;
 mod settings;
 pub(crate) mod settings_help;
 mod sources;
@@ -87,6 +88,10 @@ pub struct PageState {
     /// A page asked for the search bar («Найти музыку» on an empty Home).
     pub focus_search: bool,
     pub(crate) library_tab: LibraryTab,
+    /// The instant filter of Библиотека (the current tab by title and
+    /// artist), and what «Треки» last asked the runtime for.
+    library_filter: String,
+    track_filter_sent: String,
     release_filter: usize,
     /// Library albums by source: 0 all, 1 with files, 2 stream.
     release_source: usize,

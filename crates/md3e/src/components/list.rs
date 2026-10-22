@@ -33,6 +33,15 @@ pub enum Leading {
     Avatar(Option<String>, Icon),
     /// A 56x56 image with radius 8.
     Image(Option<String>, Icon),
+    /// A 40 dp avatar in a Material shape: the photo (URI), or the initials
+    /// on `fill` in `on`.
+    Shape {
+        uri: Option<String>,
+        initials: String,
+        shape: nikgob_shapes::MaterialShape,
+        fill: Color32,
+        on: Color32,
+    },
     /// A fixed-width column with text (track number).
     Number(String),
 }
@@ -42,7 +51,7 @@ impl Leading {
         match self {
             Self::None => 0.0,
             Self::Icon(_) => 24.0,
-            Self::Avatar(..) => 40.0,
+            Self::Avatar(..) | Self::Shape { .. } => 40.0,
             Self::Image(..) => 56.0,
             Self::Number(_) => 28.0,
         }
@@ -297,7 +306,9 @@ impl<'a> ListItem<'a> {
         let lead_rect = match &self.leading {
             Leading::Image(..) => Some(Rect::from_center_size(pos2(lead_x + 28.0, rect.center().y), vec2(56.0, 56.0))),
             Leading::Number(_) => Some(Rect::from_center_size(pos2(lead_x + 14.0, rect.center().y), vec2(40.0, 40.0))),
-            Leading::Avatar(..) => Some(Rect::from_center_size(pos2(lead_x + 20.0, rect.center().y), vec2(40.0, 40.0))),
+            Leading::Avatar(..) | Leading::Shape { .. } => {
+                Some(Rect::from_center_size(pos2(lead_x + 20.0, rect.center().y), vec2(40.0, 40.0)))
+            }
             _ => None,
         };
         let lead = lead_rect
@@ -404,6 +415,18 @@ impl<'a> ListItem<'a> {
                         CornerRadius::same(20),
                         *icon,
                     );
+                }
+                Leading::Shape { uri, initials, shape, fill, on } => {
+                    let r = Rect::from_center_size(pos2(x + 20.0, lead_cy), vec2(40.0, 40.0));
+                    common::paint_shape_avatar(ui, r, uri.as_deref(), initials, *shape, *fill, *on);
+                    if show_play {
+                        let pressed = lead.as_ref().is_some_and(Response::is_pointer_button_down_on);
+                        let d = if pressed { 30.0 } else { 32.0 };
+                        ui.painter().circle_filled(r.center(), d * 0.5, s.primary);
+                        Icon::PlayArrow
+                            .widget(true, s.on_primary, 20.0)
+                            .paint_at(ui, Rect::from_center_size(r.center(), vec2(20.0, 20.0)));
+                    }
                 }
                 Leading::Image(uri, icon) => {
                     let r = Rect::from_center_size(pos2(x + 28.0, rect.center().y), vec2(56.0, 56.0));
