@@ -270,7 +270,10 @@ fn filter_field(ui: &mut Ui, pages: &mut PageState, width: f32) {
                 .text_color(s.on_surface)
                 .desired_width(text_rect.width())
                 .vertical_align(Align::Center)
-                .hint_text(RichText::new(filter_hint(pages.library_tab)).color(s.on_surface_variant))
+                .hint_text(
+                    RichText::new(if width < 300.0 { "Найти" } else { filter_hint(pages.library_tab) })
+                        .color(s.on_surface_variant),
+                )
                 .show(ui)
         })
         .inner
@@ -334,10 +337,17 @@ fn count(n: usize, one: &str, few: &str, many: &str) -> String {
 /// «Ничего не найдено» for the filter, with «Сбросить» (also the chips).
 fn no_results(ui: &mut Ui, pages: &mut PageState) {
     let q = pages.library_filter.trim().to_owned();
+    let among = match pages.library_tab {
+        LibraryTab::Playlists => "Среди плейлистов",
+        LibraryTab::Albums => "Среди альбомов",
+        LibraryTab::Artists => "Среди исполнителей",
+        LibraryTab::Tracks => "Среди треков",
+        LibraryTab::All | LibraryTab::Trash => "В библиотеке",
+    };
     let body = if q.is_empty() {
-        "С этими фильтрами здесь пусто.".to_owned()
+        format!("{among} с этими фильтрами пусто.")
     } else {
-        format!("В библиотеке нет «{q}» здесь. Попробуй другие слова или поищи везде — в строке поиска сверху.")
+        format!("{among} нет «{q}». Проверь, как написано, или поищи везде — в строке поиска сверху.")
     };
     if widgets::empty_state(ui, Icon::Search, "Ничего не найдено", &body, Some("Сбросить")) {
         pages.library_filter.clear();
@@ -552,12 +562,13 @@ fn albums_tab(
     // Headers that follow the sort: letters joined to fill a row, decades,
     // or how long ago the albums came in.
     let sort = lib.release_sort;
-    let min = if is_list { 4 } else { widgets::columns(ui.available_width(), widgets::CARD_W) };
+    let cols = if is_list { 4 } else { widgets::columns(ui.available_width(), widgets::CARD_W) };
     let now = now_ms();
     let keys: Vec<String> = shown.iter().map(|r| shelf::group_key(sort, r, now)).collect();
-    let groups = shelf::groups(sort, &keys, min);
+    // Letters join into spans of two rows or more.
+    let groups = shelf::groups(sort, &keys, cols * 2);
     let mut nav = None;
-    if !shelf::worth_headers(groups.len(), shown.len(), is_list, min) {
+    if !shelf::worth_headers(groups.len(), shown.len(), is_list, cols) {
         return release_items(ui, &shown, is_list, "grid", out);
     }
     for (n, g) in groups.iter().enumerate() {
