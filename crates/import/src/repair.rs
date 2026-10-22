@@ -428,7 +428,7 @@ impl Importer {
                 }
                 let Ok((tags, _)) = tags::read_tags(&file) else { continue };
                 let Some(own) = tags.artist.clone().filter(|a| !a.trim().is_empty()) else { continue };
-                if shares_artist(&[own.clone()], &[track.artist.clone()]) {
+                if shares_artist(std::slice::from_ref(&own), std::slice::from_ref(&track.artist)) {
                     continue;
                 }
                 if move_files && lib.active_source(track.id)?.is_some_and(|s| s.kind.is_local() && long_path(Path::new(&s.locator)).exists()) {

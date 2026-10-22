@@ -403,7 +403,7 @@ async fn a_torrent_album_scattered_over_strangers_goes_back_together_once() {
 fn omori(root: &Root) -> std::path::PathBuf {
     let files = [(1, "Title", 3.0), (2, "By Your Side.", 4.0), (3, "Final Duet", 3.0)];
     let composers = ["Pedro Silva", "Jami Lynne", "bo en"];
-    torrent_folder(&root, "OMORI OST - Pedro Silva, Jami Lynne, bo en (2020)", &files, |no, title| TagSet {
+    torrent_folder(root, "OMORI OST - Pedro Silva, Jami Lynne, bo en (2020)", &files, |no, title| TagSet {
         title: Some(title.into()),
         artist: Some(composers[no as usize - 1].into()),
         album_artist: Some("OMORI".into()),
