@@ -1021,3 +1021,41 @@ fn a_new_liked_clip_lands_on_the_file_of_its_song() {
     );
     assert_eq!(lib.upsert_stream_track(&song).unwrap(), river, "a shared artist is enough");
 }
+
+#[test]
+fn a_transliterated_file_and_its_cyrillic_stream_are_one_track_shown_in_cyrillic() {
+    let lib = lib();
+    let file = file_track(&lib, "ChETYRE UKRAINKI", &["MORGENSHTERN"], "LEGENDARNAJa PYL'", 122_760);
+    // Liked on YouTube Music before the rule: a track of its own.
+    let mut stream = yt("yt-4", "ЧЕТЫРЕ УКРАИНКИ", "MORGENSHTERN", 123_000, false);
+    let mut album = yt_variant("yt-x", "x", 0).album.unwrap();
+    album.title = "ЛЕГЕНДАРНАЯ ПЫЛЬ".into();
+    album.id = Some(RemoteId::new(Service::Youtube, "yt-alb-pyl"));
+    album.artists = stream.artists.clone();
+    stream.album = Some(album);
+    let twin = separate(&lib, &stream);
+    lib.like(twin).unwrap();
+    let other = separate(&lib, &yt("yt-5", "ТРИ УКРАИНКИ", "MORGENSHTERN", 123_000, false));
+    // A library repaired by v3 is repaired again.
+    lib.write(|tx| meta_set(tx, "stream_duplicates_merged.v3", "1")).unwrap();
+
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 1);
+    assert!(lib.get_track(twin).unwrap().is_none());
+    assert!(lib.get_track(other).unwrap().is_some(), "another song stays");
+    assert!(lib.is_liked(file).unwrap());
+    let row = lib.get_track_row(file).unwrap().unwrap();
+    assert_eq!(row.title, "ЧЕТЫРЕ УКРАИНКИ", "the Cyrillic spelling is shown");
+    assert_eq!(row.album.as_deref(), Some("ЛЕГЕНДАРНАЯ ПЫЛЬ"));
+    assert_eq!(lib.active_source(file).unwrap().unwrap().kind, SourceKind::LocalFile);
+}
+
+#[test]
+fn a_new_cyrillic_stream_lands_on_its_transliterated_file() {
+    let lib = lib();
+    let file = file_track(&lib, "ChETYRE UKRAINKI", &["MORGENSHTERN"], "LEGENDARNAJa PYL'", 122_760);
+    let stream = yt("yt-4", "ЧЕТЫРЕ УКРАИНКИ", "Моргенштерн", 123_000, false);
+    assert_eq!(lib.upsert_stream_track(&stream).unwrap(), file);
+    assert_eq!(lib.get_track_row(file).unwrap().unwrap().title, "ЧЕТЫРЕ УКРАИНКИ");
+    // No Cyrillic album came: the album keeps its spelling.
+    assert_eq!(lib.get_track_row(file).unwrap().unwrap().album.as_deref(), Some("LEGENDARNAJa PYL'"));
+}

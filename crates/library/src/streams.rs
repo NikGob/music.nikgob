@@ -467,6 +467,8 @@ pub(crate) fn upsert_stream_track_in(
         Some(id) if !own || has_local_source(conn, &id.to_string())? => {
             link_known(conn, id, t)?;
             set_stream_cover(conn, id, t, false)?;
+            // A title tagged in Latin letters takes the service's Cyrillic.
+            same::prefer_cyrillic_in(conn, &id.to_string(), &t.title, t.album.as_ref().map(|a| a.title.as_str()))?;
             id
         }
         _ => write_stream_meta(conn, t, existing.or(want), existing.is_none())?,
