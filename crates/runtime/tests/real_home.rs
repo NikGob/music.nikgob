@@ -48,7 +48,17 @@ fn the_home_of_a_real_library() {
     println!("tiles: {}", h.tiles.len());
     for (t, (id, n)) in h.tiles.iter().zip(&p.tile_tracks) {
         assert_eq!(t.id, *id);
-        println!("  {}: {} ({n} tracks)", t.id.kicker().unwrap_or("?"), card(t));
+        println!("  {}: {} ({n} tracks)", t.kicker, card(t));
+    }
+    let ready = nikgob_runtime::preview_ready_tiles(&lib).unwrap();
+    println!("kinds that qualify today: {}", ready.len());
+    for (kind, title, n) in &ready {
+        println!("  {}: «{title}» ({n} tracks)", kind.key());
+    }
+    println!("the next seven days:");
+    for (d, tiles) in nikgob_runtime::preview_tile_days(&lib, 7).unwrap().iter().enumerate() {
+        let line: Vec<String> = tiles.iter().map(|(k, title, _, n)| format!("{} «{title}» ({n})", k.key())).collect();
+        println!("  day {d}: {}", line.join(", "));
     }
     println!("moods: {}", h.moods.len());
     for m in &h.moods {

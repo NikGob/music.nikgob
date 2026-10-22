@@ -234,6 +234,22 @@ pub fn preview_tile_days(lib: &Library, days: usize) -> Result<Vec<Vec<PreviewTi
     Ok(out)
 }
 
+/// Every kind that has enough songs today, as the runtime would see it
+/// (its title and song count): what a library can show at all.
+pub fn preview_ready_tiles(lib: &Library) -> Result<Vec<(v::TileKind, String, usize)>, String> {
+    let index = crate::analysis::SoundIndex::default();
+    crate::analysis::load_index(lib, &index);
+    let (_, utc_offset_min) = super::local_day();
+    let (snap, input, _) = super::read_snapshot(lib, &index, super::recs_now(), utc_offset_min)?;
+    let shown: TileHistory = cache_read(lib, SHOWN_KEY).unwrap_or_default();
+    Ok(snap
+        .recs()
+        .ready_tiles(&input, &shown)
+        .into_iter()
+        .map(|t| (view_kind(t.kind), t.title, t.picks.len()))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

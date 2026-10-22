@@ -50,7 +50,7 @@ use crate::analysis::{SoundIndex, lower_priority};
 use crate::import::Internal;
 
 pub(crate) use radio::RadioSave;
-pub use tiles::{PreviewTile, preview_tile_days};
+pub use tiles::{PreviewTile, preview_ready_tiles, preview_tile_days};
 
 /// Plays after which the taste is built again.
 const PLAYS_PER_BUILD: u32 = 20;

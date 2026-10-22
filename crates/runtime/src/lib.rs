@@ -34,7 +34,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 
 pub use convert::Resolver;
 pub use import::ImportSetup;
-pub use recs::{HomePreview, PreviewTile, preview_home, preview_tile_days};
+pub use recs::{HomePreview, PreviewTile, preview_home, preview_ready_tiles, preview_tile_days};
 pub use nikgob_import::ImportConfig;
 pub use nikgob_metadata::MetadataConfig;
 pub use streams::{StreamSchedule, WINDOW_HINT, WebLogin, WebLoginError};
