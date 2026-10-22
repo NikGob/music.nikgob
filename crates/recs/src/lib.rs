@@ -15,8 +15,8 @@
 //!   discoveries, daylist) with session learning; [`discover`]: «Новое для
 //!   тебя» and new releases.
 //! * [`daylist`]: «Дейлист» of each part of the day with its name;
-//!   [`tiles`]: the bento's smaller tiles (on repeat, a year ago, forgotten
-//!   favourites, deeper in favourite artists, fresh likes).
+//!   [`tiles`]: the bento's smaller tiles, 21 kinds and the daily choice
+//!   of them.
 
 pub mod analysis;
 pub mod daily;
@@ -44,7 +44,7 @@ pub use pick::{Item, NewTrack, Pick, Reason, Recs};
 pub use radio::{Outcome, RadioParams, RadioSeed, RadioState};
 pub use style::StyleMix;
 pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo};
-pub use tiles::Tile;
+pub use tiles::{LyricsKind, PlaylistFacts, TILES_PER_DAY, TileGroup, TileHistory, TileKind, TileMix, TilesInput, TrackFacts};
 
 #[cfg(test)]
 pub(crate) mod test_util {

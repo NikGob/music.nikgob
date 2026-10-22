@@ -18,6 +18,7 @@ use crate::discover::{album_key, artist_key};
 use crate::index::{Normalizer, VectorIndex, euclid};
 use crate::mood::Mood;
 use crate::taste::{Catalog, DayPart, Taste, TrackInfo};
+use crate::tiles::TileKind;
 
 /// What a pick plays.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -55,15 +56,8 @@ pub enum Reason {
     Discovered { votes: u32 },
     /// Sounds like what you play in this part of the day (the daylist).
     DayPart(DayPart),
-    /// Completed this many times in the last 30 days («На повторе»).
-    OnRepeat { completes: u32 },
-    /// Played this many times around this day a year ago («Год назад»).
-    YearAgo { plays: u32 },
-    /// Barely played, by one of your most played artists («Глубже у
-    /// любимых»).
-    DeepCut(ArtistId),
-    /// Liked lately («Свежие лайки»).
-    FreshLike,
+    /// Belongs to a tile of the bento («На повторе», «Исполнитель дня»…).
+    Tile(TileKind),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

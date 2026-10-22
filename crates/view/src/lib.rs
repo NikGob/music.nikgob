@@ -442,9 +442,10 @@ pub struct HomeView {
     /// до 23:00», four covers. `None` until the recommendations are built
     /// (or with an empty library).
     pub daylist: Option<MixCard>,
-    /// The bento's smaller tiles in [`MixId::TILES`] order, each only when
-    /// it has enough songs (title «На повторе», subtitle «25 треков · за
-    /// месяц», «октябрь 2025 · 18 треков»).
+    /// The bento's smaller tiles of the day ([`MixId::Tile`]): «На повторе»
+    /// first when it has enough songs, then a few other kinds that change
+    /// every day (kicker «ИСПОЛНИТЕЛЬ ДНЯ», title «Kevin Penkin», subtitle
+    /// «24 трека · лучшее»).
     pub tiles: Vec<MixCard>,
     /// «Под настроение»: the six moods, in the order for the part of the
     /// day (night: Спокойное, Мрачное first). Empty without any sound
@@ -1492,6 +1493,9 @@ pub enum Command {
     /// «Обновить» in ⋮ of a mix: «Твой микс» is picked again (and kept for
     /// the rest of the day), «Новое для тебя» is looked for again.
     RefreshMix { id: MixId },
+    /// «Скачать всё» of a mix whose songs have no file yet («Ещё не
+    /// скачано»): every stream song of it goes to «Хочу скачать».
+    DownloadMix { id: MixId },
 }
 
 impl Default for Prefs {
