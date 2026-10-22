@@ -1,20 +1,19 @@
-//! Главная (md3e-player.md §3.1, docs/stage4.md §4–§5): greeting, filter
-//! chips, the «Твой микс» hero card, then feed rows: moods, the albums to
-//! continue, style and artist mixes, new music from the services and the
-//! library's own rows.
+//! Главная (md3e-player.md §3.1, docs/stage4.md §4–§5, §12.1): greeting,
+//! filter chips, the bento board (the daylist, «Твой микс» and the smaller
+//! mixes), then feed rows: moods, the albums to continue, style and artist
+//! mixes, new music from the services and the library's own rows.
 
-use egui::{Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
-use nikgob_shapes::{MaterialShape, paint as shape_paint};
+use egui::{Color32, Rect, Ui, vec2};
+use nikgob_shapes::MaterialShape;
 use nikgob_view::{
     AnalysisProgress, Command, ContinueCard, HomeView, LibraryTab, MixCard, MixId, Mood, RecTarget, Route, Service,
-    StreamPage, StreamTrackRow, ViewState, WishlistStatus,
+    StreamPage, StreamTrackRow, TrackId, ViewState, WishlistStatus,
 };
 
-use super::{PageState, widgets};
+use super::{PageState, bento, widgets};
 use crate::{
     ColorScheme, Icon, Theme, TypeRole,
-    components::{CoverStatus, FilterChip, IconButton, MediaCard, Menu, MenuItem, Radii, Size, Style, anim, paint},
-    tokens::shape,
+    components::{CoverStatus, FilterChip, MediaCard, Menu, MenuItem, Style},
 };
 
 fn greeting(hour: u8) -> &'static str {
@@ -32,7 +31,7 @@ pub enum Filter {
     /// Everything.
     #[default]
     All,
-    /// What comes from the library: the mix, what to continue, the style
+    /// What comes from the library: the board, what to continue, the style
     /// and artist mixes, the forgotten and the recently added.
     Mine,
     /// What is new: discoveries, new releases, recently added.
@@ -57,7 +56,8 @@ impl Filter {
 /// The rows of Главная, in the order they are drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
-    Hero,
+    /// The bento board: the daylist, «Твой микс» and the smaller mixes.
+    Board,
     Moods,
     Continue,
     StyleMixes,
@@ -70,7 +70,7 @@ enum Section {
 
 impl Section {
     const ORDER: [Self; 9] = [
-        Self::Hero,
+        Self::Board,
         Self::Moods,
         Self::Continue,
         Self::StyleMixes,
@@ -86,7 +86,7 @@ impl Section {
         use Section::*;
         match filter {
             Filter::All => true,
-            Filter::Mine => matches!(self, Hero | Continue | StyleMixes | ArtistMixes | LongUnplayed | RecentlyAdded),
+            Filter::Mine => matches!(self, Board | Continue | StyleMixes | ArtistMixes | LongUnplayed | RecentlyAdded),
             Filter::New => matches!(self, Discover | NewReleases | RecentlyAdded),
             Filter::Mood => matches!(self, Moods | StyleMixes),
         }
@@ -102,7 +102,7 @@ impl Section {
             return false;
         }
         match self {
-            Hero => h.hero.is_some() || !h.mix.is_empty(),
+            Board => h.daylist.is_some() || h.hero.is_some() || !h.mix.is_empty() || !h.tiles.is_empty(),
             Moods => !h.moods.is_empty() || filter == Filter::Mood,
             Continue => !h.continue_listening.is_empty(),
             StyleMixes => !h.style_mixes.is_empty(),
@@ -202,7 +202,12 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     ui.label(TypeRole::HeadlineMedium.style().rich(greeting(h.greeting_hour), s.on_surface));
     ui.add_space(8.0);
 
-    let empty = h.mix.is_empty() && h.hero.is_none() && h.recently_added.is_empty() && h.continue_listening.is_empty();
+    let empty = h.mix.is_empty()
+        && h.hero.is_none()
+        && h.daylist.is_none()
+        && h.tiles.is_empty()
+        && h.recently_added.is_empty()
+        && h.continue_listening.is_empty();
     if empty {
         // Nothing here yet: the search already plays anything from YouTube
         // Music, without a login; own files come in from a folder.
@@ -251,13 +256,13 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     let filter = pages.home_filter;
     let off = discovery_off(state);
     let shown = sections(filter, h, off);
-    // The analysis line sits under the hero; without one, over the feed.
+    // The analysis line sits under the board; without one, over the feed.
     let analysis = analysis_line(&state.analysis);
     let mut analysis_said = false;
     for (n, section) in shown.iter().enumerate() {
         match section {
-            Section::Hero => {
-                hero_mix(ui, h, out);
+            Section::Board => {
+                board(ui, h, out);
                 if let Some(line) = &analysis {
                     ui.add_space(12.0);
                     quiet(ui, line);
@@ -427,105 +432,154 @@ fn connected(state: &ViewState) -> bool {
     state.accounts.iter().any(|a| a.enabled && a.account.is_logged_in())
 }
 
-/// The hero card: covers cropped into Material shapes, title, the quiet
-/// line, play L and ⋮ «Обновить».
-fn hero_mix(ui: &mut Ui, h: &HomeView, out: &mut Vec<Command>) {
-    let theme = Theme::get(ui.ctx());
-    let s = theme.scheme;
+/// One tile of the board: what it plays and shows.
+#[derive(Clone, Debug, PartialEq)]
+struct BoardTile {
+    id: MixId,
+    title: String,
+    subtitle: String,
+    covers: Vec<String>,
+    /// «Твой микс» before the first build: the tracks the home already has
+    /// (played as they are instead of [`Command::PlayMix`]).
+    tracks: Option<Vec<TrackId>>,
+}
+
+impl BoardTile {
+    fn of(m: &MixCard) -> Self {
+        Self {
+            id: m.id,
+            title: m.title.clone(),
+            subtitle: m.subtitle.clone(),
+            covers: m.covers.iter().map(|c| c.uri()).collect(),
+            tracks: None,
+        }
+    }
+
+    fn play(&self) -> Command {
+        match &self.tracks {
+            Some(tracks) => Command::PlayTracks { tracks: tracks.clone(), start: 0, context: "Твой микс".into() },
+            None => Command::PlayMix { id: self.id },
+        }
+    }
+}
+
+/// «Твой микс»: the hero, or before the first build the home's own tracks.
+fn hero_tile(h: &HomeView) -> Option<BoardTile> {
+    if let Some(m) = &h.hero {
+        return Some(BoardTile::of(m));
+    }
+    if h.mix.is_empty() {
+        return None;
+    }
+    let mut covers: Vec<String> = Vec::new();
+    for c in h.mix.iter().filter_map(|t| t.cover.as_ref()) {
+        if covers.len() < 4 && !covers.contains(&c.uri()) {
+            covers.push(c.uri());
+        }
+    }
+    let n = h.mix.len() as u64;
+    Some(BoardTile {
+        id: MixId::Daily,
+        title: "Твой микс".into(),
+        subtitle: format!("{n} {} · любимое и дослушанное", crate::screens::common::plural(n, "трек", "трека", "треков")),
+        covers,
+        tracks: Some(h.mix.iter().map(|t| t.id).collect()),
+    })
+}
+
+/// The board's tiles in their order, and whether the first is the big one:
+/// the daylist, or «Твой микс» without it; then «Твой микс», then the
+/// smaller mixes.
+fn board_tiles(h: &HomeView) -> (bool, Vec<BoardTile>) {
+    let mut tiles: Vec<BoardTile> = h.daylist.iter().map(BoardTile::of).collect();
+    tiles.extend(hero_tile(h));
+    let big = !tiles.is_empty();
+    tiles.extend(h.tiles.iter().map(BoardTile::of));
+    (big, tiles)
+}
+
+/// A board tile's container and content colours (scheme roles): the big
+/// tile primary, the others spread over secondary, tertiary and the
+/// highest surface so neighbours differ.
+fn tile_colors(id: MixId, big: bool, s: &ColorScheme) -> (Color32, Color32) {
+    if big {
+        return (s.primary_container, s.on_primary_container);
+    }
+    match id {
+        MixId::OnRepeat | MixId::DeepCuts => (s.tertiary_container, s.on_tertiary_container),
+        MixId::TimeCapsule | MixId::FreshLikes => (s.surface_container_highest, s.on_surface),
+        _ => (s.secondary_container, s.on_secondary_container),
+    }
+}
+
+/// The shape a board tile's cover is cut into.
+fn tile_shape(id: MixId) -> MaterialShape {
+    match id {
+        MixId::OnRepeat => MaterialShape::Cookie12Sided,
+        MixId::TimeCapsule => MaterialShape::Arch,
+        MixId::Rediscover => MaterialShape::Clover4Leaf,
+        MixId::DeepCuts => MaterialShape::Gem,
+        MixId::FreshLikes => MaterialShape::Heart,
+        MixId::Daylist => MaterialShape::Sunny,
+        _ => MaterialShape::Cookie9Sided,
+    }
+}
+
+/// The bento board (§12.1): the big tile and the smaller ones on a grid of
+/// four columns (two when narrow), entering one after another once.
+fn board(ui: &mut Ui, h: &HomeView, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let (big, tiles) = board_tiles(h);
+    if tiles.is_empty() {
+        return;
+    }
     let width = ui.available_width();
-    let height = 200.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
-    let radii = Radii::all(shape::EXTRA_EXTRA_LARGE);
-    paint::container(ui.painter(), rect, radii, s.surface_container_high, Stroke::NONE);
-    let layer = anim::fraction(
-        ui.ctx(),
-        ui.id().with("hero-layer"),
-        if resp.hovered() { 0.08 } else { 0.0 },
-        theme.motion.fast_effects,
-    );
-    paint::state_layer(ui.painter(), rect, radii, s.on_surface, layer);
-
-    // Entrance: covers spring up from below once.
-    let enter = anim::fraction(ui.ctx(), ui.id().with("hero-enter"), 1.0, theme.motion.slow_spatial);
-    let shapes = [
-        MaterialShape::Cookie9Sided,
-        MaterialShape::Clover4Leaf,
-        MaterialShape::Sunny,
-        MaterialShape::Pill,
-    ];
-    // The mix's own covers; before the first build, those of its tracks.
-    let mut covers: Vec<String> = h.hero.as_ref().map(|c| c.covers.iter().map(|c| c.uri()).collect()).unwrap_or_default();
-    if covers.is_empty() {
-        for t in &h.mix {
-            if let Some(c) = &t.cover
-                && !covers.contains(&c.uri())
-            {
-                covers.push(c.uri());
+    let cols = bento::columns(width);
+    let cells = bento::layout(cols, big, tiles.len());
+    let col_w = ((width - bento::GAP * (cols - 1) as f32) / cols as f32).floor();
+    let row_h = bento::row_height(cols, col_w);
+    let rows = bento::rows(&cells) as f32;
+    let (board, _) = ui.allocate_exact_size(vec2(width, rows * row_h + (rows - 1.0) * bento::GAP), egui::Sense::hover());
+    for (i, (t, cell)) in tiles.iter().zip(&cells).enumerate() {
+        let rect = bento::cell_rect(*cell, board.min, col_w, row_h);
+        let is_big = big && i == 0;
+        let (fill, on) = tile_colors(t.id, is_big, &s);
+        let refresh = t.tracks.is_none() && matches!(t.id, MixId::Daylist | MixId::Daily);
+        let spec = bento::Tile {
+            fill,
+            on,
+            kicker: bento::kicker(t.id.kicker(), &t.title),
+            title: &t.title,
+            title_two_lines: true,
+            subtitle: &t.subtitle,
+            covers: &t.covers,
+            shape: tile_shape(t.id),
+            stack: false,
+            play: format!("Слушать «{}»", t.title),
+        };
+        bento::entering(ui, rect, i, ("home-board", i), |ui, rect| {
+            let id = ui.id().with(("board-tile", format!("{:?}", t.id)));
+            let (play, response, more) = if is_big {
+                let o = bento::big_tile(ui, rect, &spec, id, refresh);
+                (o.play, o.response, o.more)
+            } else {
+                let o = bento::tile(ui, rect, &spec, id);
+                (o.play, o.response, None)
+            };
+            if play {
+                out.push(t.play());
             }
-        }
-    }
-    covers.truncate(4);
-    let narrow = width < 760.0;
-    let art_w = if narrow { (width * 0.34).min(240.0) } else { (width * 0.42).min(360.0) };
-    let size = if narrow { 80.0 } else { 112.0 };
-    for (i, uri) in covers.iter().enumerate() {
-        let x = rect.left() + 24.0 + i as f32 * (art_w - size - 24.0) / 3.0_f32.max(1.0);
-        let y = rect.center().y - size * 0.5 + if i % 2 == 0 { -14.0 } else { 14.0 };
-        let r = Rect::from_min_size(pos2(x, y + (1.0 - enter) * 40.0), vec2(size, size));
-        widgets::shape_image(ui, Some(uri), "", r, shapes[i % shapes.len()]);
-    }
-
-    let text_x = rect.left() + art_w + 48.0;
-    let text_rect = Rect::from_min_max(pos2(text_x, rect.top() + 32.0), pos2(rect.right() - 128.0, rect.bottom() - 16.0));
-    let mut tui = ui.new_child(UiBuilder::new().max_rect(text_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-    tui.label(TypeRole::LabelLarge.style().rich("ДЛЯ ТЕБЯ", s.primary));
-    let title_role = if narrow { TypeRole::HeadlineMedium } else { TypeRole::DisplaySmall };
-    let title = h.hero.as_ref().map_or("Твой микс", |c| c.title.as_str());
-    tui.label(title_role.emphasized().rich(title, s.on_surface));
-    let subtitle = match &h.hero {
-        Some(c) => c.subtitle.clone(),
-        None => {
-            let n = h.mix.len() as u64;
-            format!("{n} {} · любимое и дослушанное", crate::screens::common::plural(n, "трек", "трека", "треков"))
-        }
-    };
-    if !subtitle.is_empty() {
-        tui.label(TypeRole::BodyLarge.style().rich_para(subtitle, s.on_surface_variant));
-    }
-
-    // ⋮ in the corner: «Обновить» picks a new mix for today.
-    let more_rect = Rect::from_min_size(pos2(rect.right() - 16.0 - 40.0, rect.top() + 16.0), vec2(40.0, 40.0));
-    let mut mui = ui.new_child(UiBuilder::new().max_rect(more_rect).id_salt("hero-more"));
-    let more = mui.add(IconButton::new(Icon::MoreVert).size(Size::S).tooltip("Ещё").id_salt("hero-more-btn"));
-    if h.hero.is_some()
-        && Menu::new("hero-menu")
-            .align_right(true)
-            .item(MenuItem::new("Обновить").icon(Icon::Refresh))
-            .attach(&more)
-            == Some(0)
-    {
-        out.push(Command::RefreshMix { id: MixId::Daily });
-    }
-
-    let play_rect = Rect::from_center_size(pos2(rect.right() - 24.0 - 48.0, rect.center().y + 12.0), vec2(96.0, 96.0));
-    let mut pui = ui.new_child(UiBuilder::new().max_rect(play_rect).id_salt("hero-play"));
-    let play = pui.add(
-        IconButton::new(Icon::PlayArrow)
-            .size(Size::L)
-            .style(Style::Filled)
-            .filled_icon(true)
-            .tooltip("Слушать микс")
-            .id_salt("hero-play-btn"),
-    );
-    if (play.clicked() || resp.clicked()) && !more.clicked() {
-        out.push(match &h.hero {
-            Some(_) => Command::PlayMix { id: MixId::Daily },
-            // Before the first build: the tracks the home already has.
-            None => Command::PlayTracks {
-                tracks: h.mix.iter().map(|t| t.id).collect(),
-                start: 0,
-                context: "Твой микс".into(),
-            },
+            // «Обновить» picks the mix anew: from ⋮ and a right click.
+            if refresh {
+                let menu = |key: egui::Id| Menu::new(key).item(MenuItem::new("Обновить").icon(Icon::Refresh));
+                let mut picked = menu(id.with("ctx")).context_menu(&response);
+                if let Some(m) = &more {
+                    picked = picked.or(menu(id.with("more-menu")).align_right(true).attach(m));
+                }
+                if picked == Some(0) {
+                    out.push(Command::RefreshMix { id: t.id });
+                }
+            }
         });
     }
 }
@@ -533,87 +587,52 @@ fn hero_mix(ui: &mut Ui, h: &HomeView, out: &mut Vec<Command>) {
 pub const MOOD_W: f32 = 200.0;
 pub const MOOD_H: f32 = 160.0;
 
-/// A mood: a large filled card in its scheme colour, the cover of what it
-/// plays first cut into its shape, the name and a plain line on how it
-/// sounds; ▶ on hover. A click plays it (an endless mix).
+/// A mood: a tile in its scheme colour, the cover of what it plays first
+/// cut into its shape, the name and a plain line on how it sounds; ▶ on
+/// hover. A click plays it (an endless mix).
 fn mood_card(ui: &mut Ui, m: &MixCard, out: &mut Vec<Command>) {
     let MixId::Mood(mood) = m.id else { return };
-    let theme = Theme::get(ui.ctx());
-    let s = theme.scheme;
-    let (rect, resp) = ui.allocate_exact_size(vec2(MOOD_W, MOOD_H), Sense::click());
-    let id = ui.id().with(("mood", mood));
-    let hover = resp.contains_pointer();
-    let squish = anim::f32(ui.ctx(), id.with("squish"), if resp.is_pointer_button_down_on() { 0.96 } else { 1.0 }, theme.motion.fast_spatial);
-    let card = Rect::from_center_size(rect.center(), rect.size() * squish);
+    let s = Theme::get(ui.ctx()).scheme;
+    let (rect, _) = ui.allocate_exact_size(vec2(MOOD_W, MOOD_H), egui::Sense::hover());
     let (fill, on) = mood_colors(mood, &s);
-    let radii = Radii::all(shape::EXTRA_LARGE);
-    paint::container(ui.painter(), card, radii, fill, Stroke::NONE);
-
-    // The cover in the mood's shape, turning a little under the pointer.
-    let turn = anim::f32(ui.ctx(), id.with("turn"), if hover { 0.12 } else { 0.0 }, theme.motion.default_spatial);
-    let art = Rect::from_min_size(card.min + vec2(16.0, 16.0), vec2(64.0, 64.0));
-    let shape = mood_shape(mood);
-    match m.covers.first() {
-        Some(c) => widgets::shape_image(ui, Some(&c.uri()), "", art, shape),
-        None => shape_paint::fill_shape(ui.painter(), shape.polygon().cubics(), art, turn, on.gamma_multiply(0.16)),
-    }
-
-    let text_w = card.width() - 32.0;
-    let line = |text: &str, role: TypeRole| {
-        let mut job = egui::text::LayoutJob::single_section(text.to_owned(), role.style().text_format(on));
-        job.wrap = egui::text::TextWrapping::truncate_at_width(text_w);
-        ui.painter().layout_job(job)
+    let covers: Vec<String> = m.covers.first().map(|c| c.uri()).into_iter().collect();
+    let t = bento::Tile {
+        fill,
+        on,
+        kicker: None,
+        title: &m.title,
+        title_two_lines: false,
+        subtitle: mood_line(mood),
+        covers: &covers,
+        shape: mood_shape(mood),
+        stack: false,
+        play: format!("Слушать «{}»", m.title),
     };
-    let title = line(&m.title, TypeRole::TitleLarge);
-    let sub = line(mood_line(mood), TypeRole::BodyMedium);
-    let sub_y = card.bottom() - 16.0 - sub.size().y;
-    let title_y = sub_y - 2.0 - title.size().y;
-    ui.painter().galley(pos2(card.left() + 16.0, title_y), title, on);
-    ui.painter().galley(pos2(card.left() + 16.0, sub_y), sub, on);
-
-    let layer = anim::fraction(ui.ctx(), id.with("layer"), if hover { 0.08 } else { 0.0 }, theme.motion.fast_effects);
-    paint::state_layer(ui.painter(), card, radii, on, layer);
-
-    // ▶ in the corner with the pointer (fast effects).
-    let k = anim::fraction(ui.ctx(), id.with("play"), f32::from(u8::from(hover)), theme.motion.fast_effects).clamp(0.0, 1.0);
-    let mut play = false;
-    if k > 0.01 {
-        let size = Size::M.height();
-        let slot = Rect::from_min_size(pos2(card.right() - 16.0 - size, card.top() + 16.0), vec2(size, size));
-        let mut child = ui.new_child(UiBuilder::new().max_rect(slot).id_salt(("mood-play-slot", mood)));
-        child.set_opacity(k);
-        play = child
-            .add_enabled(
-                k > 0.5,
-                IconButton::new(Icon::PlayArrow)
-                    .size(Size::M)
-                    .style(Style::Filled)
-                    .filled_icon(true)
-                    .tooltip(format!("Слушать «{}»", m.title))
-                    .id_salt(("mood-play", mood)),
-            )
-            .clicked();
-    }
-    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    if play || resp.clicked() {
+    if bento::tile(ui, rect, &t, ui.id().with(("mood", mood))).play {
         out.push(Command::PlayMix { id: m.id });
     }
 }
 
-/// A style mix: a collage of its albums and its name («A, B и другие» —
-/// two lines when long). A click or ▶ plays it (an endless mix).
+/// A style mix: a quiet tile with its albums overlapping in shapes and its
+/// name («A, B и другие» — two lines when long). A click or ▶ plays it
+/// (an endless mix).
 fn style_card(ui: &mut Ui, m: &MixCard, out: &mut Vec<Command>) {
-    let mut card = MediaCard::new(&m.title)
-        .collage(m.covers.iter().map(|c| c.uri()).collect())
-        .placeholder_icon(Icon::QueueMusic)
-        .title_two_lines(true)
-        .width(widgets::CARD_W)
-        .id_salt(("style-mix", m.title.as_str()));
-    if !m.subtitle.is_empty() {
-        card = card.subtitle(&m.subtitle);
-    }
-    let o = card.show(ui);
-    if o.play_clicked || o.card_clicked {
+    let s = Theme::get(ui.ctx()).scheme;
+    let (rect, _) = ui.allocate_exact_size(vec2(MOOD_W, MOOD_H), egui::Sense::hover());
+    let covers: Vec<String> = m.covers.iter().map(|c| c.uri()).collect();
+    let t = bento::Tile {
+        fill: s.surface_container_high,
+        on: s.on_surface,
+        kicker: None,
+        title: &m.title,
+        title_two_lines: true,
+        subtitle: &m.subtitle,
+        covers: &covers,
+        shape: MaterialShape::Cookie9Sided,
+        stack: true,
+        play: format!("Слушать «{}»", m.title),
+    };
+    if bento::tile(ui, rect, &t, ui.id().with(("style-mix", m.title.as_str()))).play {
         out.push(Command::PlayMix { id: m.id });
     }
 }
@@ -766,11 +785,11 @@ mod tests {
         use Section::*;
         assert_eq!(
             sections(Filter::All, &h, false),
-            vec![Hero, Moods, Continue, StyleMixes, ArtistMixes, Discover, LongUnplayed, RecentlyAdded]
+            vec![Board, Moods, Continue, StyleMixes, ArtistMixes, Discover, LongUnplayed, RecentlyAdded]
         );
         assert_eq!(
             sections(Filter::Mine, &h, false),
-            vec![Hero, Continue, StyleMixes, ArtistMixes, LongUnplayed, RecentlyAdded]
+            vec![Board, Continue, StyleMixes, ArtistMixes, LongUnplayed, RecentlyAdded]
         );
         assert_eq!(sections(Filter::New, &h, false), vec![Discover, RecentlyAdded]);
         assert_eq!(sections(Filter::Mood, &h, false), vec![Moods, StyleMixes]);
@@ -786,7 +805,7 @@ mod tests {
         assert_eq!(sections(Filter::Mood, &h, false), vec![Section::Moods]);
         // Discovery switched off: «Всё» says how to switch it on.
         assert!(sections(Filter::All, &h, true).contains(&Section::Discover));
-        // The hero before the first build still plays the home's tracks.
+        // «Твой микс» before the first build still plays the home's tracks.
         let track = TrackRow {
             id: TrackId::new(),
             title: "Группа крови".into(),
@@ -805,7 +824,41 @@ mod tests {
             clip: false,
         };
         let h = HomeView { mix: vec![track], ..Default::default() };
-        assert_eq!(sections(Filter::All, &h, false), vec![Section::Hero]);
+        assert_eq!(sections(Filter::All, &h, false), vec![Section::Board]);
+    }
+
+    #[test]
+    fn the_board_is_the_daylist_then_the_mix_then_the_tiles() {
+        let tiles: Vec<MixCard> = MixId::TILES.iter().map(|id| mix(*id)).collect();
+        let ids = |h: &HomeView| {
+            let (big, t) = board_tiles(h);
+            (big, t.iter().map(|t| t.id).collect::<Vec<_>>())
+        };
+        let mut h = HomeView { daylist: Some(mix(MixId::Daylist)), tiles: tiles[..2].to_vec(), ..full_home() };
+        assert_eq!(ids(&h), (true, vec![MixId::Daylist, MixId::Daily, MixId::OnRepeat, MixId::TimeCapsule]));
+        // No daylist: «Твой микс» takes the big spot.
+        h.daylist = None;
+        assert_eq!(ids(&h), (true, vec![MixId::Daily, MixId::OnRepeat, MixId::TimeCapsule]));
+        // Only tiles: rows, nothing big.
+        h.hero = None;
+        assert_eq!(ids(&h), (false, vec![MixId::OnRepeat, MixId::TimeCapsule]));
+        // The board shows with any of them, under «Всё» and «Моё».
+        assert_eq!(sections(Filter::Mine, &h, false)[0], Section::Board);
+        assert!(!sections(Filter::New, &h, false).contains(&Section::Board));
+        h.tiles.clear();
+        assert!(!sections(Filter::All, &h, false).contains(&Section::Board));
+    }
+
+    #[test]
+    fn board_tiles_each_have_their_shape_and_the_big_one_is_primary() {
+        let shapes: std::collections::HashSet<_> =
+            MixId::TILES.iter().chain(&[MixId::Daily, MixId::Daylist]).map(|id| tile_shape(*id)).collect();
+        assert_eq!(shapes.len(), MixId::TILES.len() + 2);
+        let s = ColorScheme::baseline(true);
+        assert_eq!(tile_colors(MixId::Daily, true, &s).0, s.primary_container);
+        // Neighbours on the full board differ: «Твой микс», then the tiles.
+        let order: Vec<_> = std::iter::once(MixId::Daily).chain(MixId::TILES).map(|id| tile_colors(id, false, &s).0).collect();
+        assert!(order.windows(2).all(|w| w[0] != w[1]));
     }
 
     #[test]
