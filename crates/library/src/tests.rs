@@ -2184,3 +2184,36 @@ fn migration_drops_cached_lyricsplus_texts_and_picks_only() {
     assert!(lib.is_liked(one).unwrap());
     assert!(lib.get_track(two).unwrap().is_some());
 }
+
+#[test]
+fn track_facts_and_playlist_tracks_for_the_tiles() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let r = release(&lib, &a, "Made in Abyss OST", Some(2017));
+    let t1 = track(&lib, &a, Some(&r), "One", 1);
+    let t2 = track(&lib, &a, Some(&r), "Two", 2);
+    let t3 = track(&lib, &a, None, "Three", 0);
+    let t4 = track(&lib, &a, None, "Four", 0);
+    local(&lib, &t1, "1.opus", Codec::Opus, Some(160));
+    lib.put_lyrics(t1.id, Some("[00:01.00]la"), None, false).unwrap();
+    lib.put_lyrics(t2.id, None, Some("la la"), false).unwrap();
+    lib.put_lyrics_text(t3.id, "lyricsplus", Some(r#"[{"start":{"secs":1,"nanos":0},"text":"la","words":[{"text":"la"}]}]"#))
+        .unwrap();
+    lib.put_lyrics(t4.id, None, None, true).unwrap();
+    let facts: std::collections::HashMap<TrackId, crate::TrackFactsRow> =
+        lib.track_facts().unwrap().into_iter().map(|f| (f.id, f)).collect();
+    let f1 = &facts[&t1.id];
+    assert_eq!((f1.year, f1.album.as_deref(), f1.track_no, f1.duration_ms), (Some(2017), Some("Made in Abyss OST"), 1, Some(181_000)));
+    assert!(f1.has_local && !facts[&t2.id].has_local);
+    assert_eq!(f1.lyrics, crate::LyricsLevel::Lines);
+    assert_eq!(facts[&t2.id].lyrics, crate::LyricsLevel::Plain);
+    assert_eq!(facts[&t3.id].lyrics, crate::LyricsLevel::Words);
+    assert_eq!(facts[&t4.id].lyrics, crate::LyricsLevel::None, "instrumental");
+    assert!(facts[&t1.id].added_at > 0);
+
+    let p = lib.create_playlist("Вечером").unwrap();
+    lib.playlist_add_many(p.id, &[t2.id, t1.id]).unwrap();
+    let lists = lib.playlist_tracks().unwrap();
+    assert_eq!(lists.len(), 1);
+    assert_eq!((lists[0].name.as_str(), lists[0].tracks.clone()), ("Вечером", vec![t2.id, t1.id]));
+}
