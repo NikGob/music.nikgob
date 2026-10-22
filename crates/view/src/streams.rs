@@ -48,6 +48,13 @@ pub struct AccountView {
     pub paused_until: Option<i64>,
     /// The same as local time, «14:05», for the UI to say.
     pub paused_until_hm: Option<String>,
+    /// What the service's own suggestions give our mixes, a quiet line:
+    /// «Подсказки: 48 треков · обновлено в 14:10», or why there are none
+    /// (docs/stage4.md §12.3). `None`: the service has no suggestions.
+    pub suggestions: Option<String>,
+    /// A feed of suggestions needs a new sign-in: «Переподключи Spotify,
+    /// чтобы брать твой топ».
+    pub suggestions_note: Option<String>,
 }
 
 // ---------------------------------------------------------------- rows

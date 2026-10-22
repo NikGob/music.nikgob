@@ -490,11 +490,13 @@ fn main() -> eframe::Result {
             torrent_offline: demo,
         }
     };
-    // The demo's discovery asks its fake services quickly, so the home's
-    // «Новое для тебя» is there within seconds for screenshots.
+    // The demo's discovery and the services' suggestions ask the fake
+    // services quickly, so the home's «Новое для тебя» and the suggestions
+    // line of «Источники» are there within seconds for screenshots.
     let schedule = if demo && !streams::real_in_demo() {
         StreamSchedule {
             discover_gap: (Duration::from_millis(100), Duration::from_millis(200)),
+            suggest_first: Duration::from_secs(2),
             ..StreamSchedule::default()
         }
     } else {

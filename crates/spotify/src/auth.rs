@@ -56,6 +56,7 @@ pub const WEB_SCOPES: &[&str] = &[
     "user-library-read",
     "user-read-private",
     "user-read-recently-played",
+    "user-top-read",
 ];
 
 pub(crate) const AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";

@@ -25,6 +25,13 @@
 //! radio on Deezer, nothing on Spotify. The YouTube flavour keeps every
 //! track it opened "on disk" for `cached_audio`.
 //! [`FakeService::with_new_release`] adds a fresh single for new releases.
+//!
+//! Suggestions (docs/stage4.md §12.3) come from fixed lists too: the
+//! YouTube flavour's home (quick picks, listen again) and history, the
+//! Spotify flavour's tops and recently played (each a mix of catalog songs
+//! and songs only discovery leads to); Deezer has none.
+//! [`FakeService::without_top_scope`] makes Spotify's tops answer as a
+//! token without `user-top-read` does.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -35,7 +42,8 @@ use std::time::Duration;
 use super::{
     Account, AlbumRef, ArtistRef, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput,
     Played, RemoteId, SearchKind, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist,
-    StreamSearch, StreamService, StreamTrack, TrackKind, format, only_kind,
+    StreamSearch, StreamService, StreamTrack, SuggestedArtist, SuggestedTrack, SuggestionFeed, SuggestionKind,
+    Suggestions, TrackKind, format, only_kind, rank_weight,
 };
 use crate::model::{ReleaseType, UnixMs};
 
@@ -266,6 +274,53 @@ const LIKED: &[(&str, u32)] = &[("gruppa", 1), ("discovery", 1), ("firstlove", 1
 
 /// Listening history, newest first: `(album, number, hours after T0)`.
 const RECENT: &[(&str, u32, i64)] = &[("discovery", 2, 3), ("gruppa", 1, 2), ("homogenic", 2, 1)];
+
+/// One list of a suggestion feed: its kind, tracks as album key + number
+/// (the albums of [`NEW_ALBUMS`] are songs new to a library of the
+/// catalog) and artists by key.
+type SuggestionList = (SuggestionKind, &'static [(&'static str, u32)], &'static [&'static str]);
+
+/// What each feed suggests.
+const SUGGESTIONS: &[(SuggestionFeed, &[SuggestionList])] = &[
+    (
+        SuggestionFeed::Home,
+        &[
+            (
+                SuggestionKind::QuickPicks,
+                &[("gruppa", 4), ("discovery", 3), ("agaetis", 1), ("cross", 2)],
+                &[],
+            ),
+            (SuggestionKind::ListenAgain, &[("homogenic", 2)], &["bjork", "kino"]),
+        ],
+    ),
+    (
+        SuggestionFeed::History,
+        &[(SuggestionKind::Recent, &[("discovery", 2), ("gruppa", 1), ("homogenic", 2)], &[])],
+    ),
+    (
+        SuggestionFeed::TopTracksMonth,
+        &[(SuggestionKind::TopMonth, &[("gruppa", 3), ("discovery", 4), ("muzai", 1)], &[])],
+    ),
+    (
+        SuggestionFeed::TopTracksHalfYear,
+        &[(SuggestionKind::TopHalfYear, &[("firstlove", 1), ("gruppa", 1)], &[])],
+    ),
+    (SuggestionFeed::TopArtistsMonth, &[(SuggestionKind::TopMonth, &[], &["daft", "kino"])]),
+    (SuggestionFeed::TopArtistsHalfYear, &[(SuggestionKind::TopHalfYear, &[], &["utada", "bjork"])]),
+    (
+        SuggestionFeed::RecentlyPlayed,
+        &[(SuggestionKind::Recent, &[("discovery", 2), ("gruppa", 1), ("homogenic", 2)], &[])],
+    ),
+];
+
+const YOUTUBE_FEEDS: &[SuggestionFeed] = &[SuggestionFeed::Home, SuggestionFeed::History];
+const SPOTIFY_FEEDS: &[SuggestionFeed] = &[
+    SuggestionFeed::TopTracksMonth,
+    SuggestionFeed::TopTracksHalfYear,
+    SuggestionFeed::TopArtistsMonth,
+    SuggestionFeed::TopArtistsHalfYear,
+    SuggestionFeed::RecentlyPlayed,
+];
 
 fn prefix(service: Service) -> &'static str {
     match service {
@@ -533,6 +588,9 @@ struct State {
     /// Tracks whose whole audio the YouTube flavour has "on disk": those
     /// opened so far ([`StreamService::cached_audio`]).
     cached: HashSet<String>,
+    /// Spotify's tops answer as a token without `user-top-read`
+    /// ([`FakeService::without_top_scope`]).
+    no_top_scope: bool,
 }
 
 /// Deterministic fake of a streaming service (feature `fake`).
@@ -603,6 +661,7 @@ impl FakeService {
                     HashMap::new()
                 },
                 cached: HashSet::new(),
+                no_top_scope: false,
             }),
         }
     }
@@ -667,6 +726,14 @@ impl FakeService {
             st.account = Account::LoggedOut;
             st.no_premium = true;
         }
+        self
+    }
+
+    /// Spotify signed in with a token from before `user-top-read` was
+    /// asked: its top feeds answer [`Suggestions::needs_reconnect`].
+    #[must_use]
+    pub fn without_top_scope(self) -> Self {
+        self.lock().no_top_scope = true;
         self
     }
 
@@ -1175,6 +1242,47 @@ impl FakeService {
         Ok(top)
     }
 
+    fn suggestions_now(&self, feed: SuggestionFeed) -> Result<Suggestions, StreamError> {
+        if !self.suggestion_feeds().contains(&feed) {
+            return Err(StreamError::Unsupported);
+        }
+        self.need_login()?;
+        let top = matches!(
+            feed,
+            SuggestionFeed::TopTracksMonth
+                | SuggestionFeed::TopTracksHalfYear
+                | SuggestionFeed::TopArtistsMonth
+                | SuggestionFeed::TopArtistsHalfYear
+        );
+        if top && self.lock().no_top_scope {
+            return Ok(Suggestions {
+                needs_reconnect: true,
+                ..Suggestions::default()
+            });
+        }
+        let mut out = Suggestions::default();
+        let lists = SUGGESTIONS.iter().find(|(f, _)| *f == feed).map_or(&[][..], |(_, l)| *l);
+        for &(kind, tracks, artists) in lists {
+            for (rank, &(album, n)) in tracks.iter().enumerate() {
+                if let Some(t) = self.catalog.track(&track_id(self.service, album, n)) {
+                    out.tracks.push(SuggestedTrack {
+                        track: t.clone(),
+                        kind,
+                        weight: rank_weight(rank, tracks.len()),
+                    });
+                }
+            }
+            for (rank, key) in artists.iter().enumerate() {
+                out.artists.push(SuggestedArtist {
+                    artist: artist_ref(self.service, key),
+                    kind,
+                    weight: rank_weight(rank, artists.len()),
+                });
+            }
+        }
+        Ok(out)
+    }
+
     fn artist_radio_now(&self, artist_id: &str) -> Result<Vec<StreamTrack>, StreamError> {
         let similar = self
             .catalog
@@ -1518,6 +1626,22 @@ impl StreamService for FakeService {
         ready(self.discover("artist_radio", || self.artist_radio_now(artist_id)).map(|v| self.listed_all(v)))
     }
 
+    /// YouTube: home and history; Spotify: the tops and recently played;
+    /// Deezer: none.
+    fn suggestion_feeds(&self) -> &'static [SuggestionFeed] {
+        match self.service {
+            Service::Youtube => YOUTUBE_FEEDS,
+            Service::Spotify => SPOTIFY_FEEDS,
+            Service::Deezer => &[],
+        }
+    }
+
+    /// The fixed lists of the feed (counted as `"suggestions"`, obeys
+    /// [`FakeService::rate_limit_next`]); needs a login.
+    fn suggestions(&self, feed: SuggestionFeed) -> BoxFuture<'_, Result<Suggestions, StreamError>> {
+        ready(self.gate("suggestions").and_then(|()| self.suggestions_now(feed)))
+    }
+
     fn web_url(&self, kind: EntityKind, id: &str) -> String {
         match self.service {
             Service::Spotify => {
@@ -1671,6 +1795,30 @@ mod tests {
             Poll::Ready(v) => v,
             Poll::Pending => panic!("fake futures are always ready"),
         }
+    }
+
+    #[test]
+    fn suggestions_follow_the_flavour() {
+        let yt = FakeService::youtube();
+        let home = now(yt.suggestions(SuggestionFeed::Home)).unwrap();
+        assert_eq!(home.tracks[0].track.title, "Спокойная ночь");
+        assert_eq!(home.tracks[0].kind, SuggestionKind::QuickPicks);
+        assert!(home.tracks.iter().any(|t| t.track.artist_line() == "Sigur Rós"), "a song new to the catalog");
+        assert!(home.artists.iter().any(|a| a.artist.name == "Björk" && a.kind == SuggestionKind::ListenAgain));
+        assert_eq!(yt.calls("suggestions"), 1);
+        assert_eq!(now(yt.suggestions(SuggestionFeed::TopTracksMonth)), Err(StreamError::Unsupported));
+        let sp = FakeService::spotify();
+        assert_eq!(sp.suggestion_feeds().len(), 5);
+        let top = now(sp.suggestions(SuggestionFeed::TopTracksMonth)).unwrap();
+        assert_eq!(top.tracks[0].weight, 1.0);
+        assert!(top.tracks.iter().all(|t| t.track.id.service == Service::Spotify));
+        let old = FakeService::spotify().without_top_scope();
+        let top = now(old.suggestions(SuggestionFeed::TopArtistsMonth)).unwrap();
+        assert!(top.needs_reconnect && top.artists.is_empty());
+        assert!(!now(old.suggestions(SuggestionFeed::RecentlyPlayed)).unwrap().needs_reconnect);
+        let out = FakeService::youtube().logged_out();
+        assert_eq!(now(out.suggestions(SuggestionFeed::Home)), Err(StreamError::NotLoggedIn));
+        assert!(FakeService::deezer().suggestion_feeds().is_empty());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::map_err;
 use nikgob_core::streaming::StreamError;
 
-async fn call(rp: &RustyPipe, endpoint: &str, body: Value) -> Result<Value, StreamError> {
+pub(crate) async fn call(rp: &RustyPipe, endpoint: &str, body: Value) -> Result<Value, StreamError> {
     let text = rp
         .query()
         .authenticated()
@@ -173,7 +173,7 @@ fn find_key<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
 }
 
 /// Text of a `{"runs": [{"text": …}]}` or `{"simpleText": …}` value.
-fn text(v: &Value) -> Option<String> {
+pub(crate) fn text(v: &Value) -> Option<String> {
     if let Some(s) = v.get("simpleText").and_then(Value::as_str) {
         return Some(s.to_owned());
     }

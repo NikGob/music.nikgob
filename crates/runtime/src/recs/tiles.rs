@@ -219,7 +219,7 @@ pub fn preview_tile_days(lib: &Library, days: usize) -> Result<Vec<Vec<PreviewTi
     let mut out = Vec::with_capacity(days);
     for d in 0..days {
         let now = super::recs_now() + d as i64 * nikgob_recs::taste::DAY_MS;
-        let (snap, input, _) = super::read_snapshot(lib, &index, now, utc_offset_min)?;
+        let (snap, input, _) = super::read_snapshot(lib, &index, now, utc_offset_min, &[])?;
         let recs = snap.recs();
         let day = recs.local_day();
         let board = recs.tiles_of_day(&input, &shown, TILES_PER_DAY);
@@ -240,7 +240,7 @@ pub fn preview_ready_tiles(lib: &Library) -> Result<Vec<(v::TileKind, String, us
     let index = crate::analysis::SoundIndex::default();
     crate::analysis::load_index(lib, &index);
     let (_, utc_offset_min) = super::local_day();
-    let (snap, input, _) = super::read_snapshot(lib, &index, super::recs_now(), utc_offset_min)?;
+    let (snap, input, _) = super::read_snapshot(lib, &index, super::recs_now(), utc_offset_min, &[])?;
     let shown: TileHistory = cache_read(lib, SHOWN_KEY).unwrap_or_default();
     Ok(snap
         .recs()

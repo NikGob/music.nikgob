@@ -17,6 +17,8 @@
 //! * [`daylist`]: «Дейлист» of each part of the day with its name;
 //!   [`tiles`]: the bento's smaller tiles, 21 kinds and the daily choice
 //!   of them.
+//! * [`suggest`]: the services' own suggestions as a signal of taste and
+//!   as discovery votes.
 
 pub mod analysis;
 pub mod daily;
@@ -28,6 +30,7 @@ pub mod pick;
 pub mod radio;
 pub mod rng;
 pub mod style;
+pub mod suggest;
 pub mod taste;
 pub mod tiles;
 
@@ -43,6 +46,7 @@ pub use mood::{Axes, Mood};
 pub use pick::{Item, NewTrack, Pick, Reason, Recs};
 pub use radio::{Outcome, RadioParams, RadioSeed, RadioState};
 pub use style::StyleMix;
+pub use suggest::{Matched, ServiceSuggestions, match_suggestions, suggestion_finds};
 pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo};
 pub use tiles::{LyricsKind, PlaylistFacts, TILES_PER_DAY, TileGroup, TileHistory, TileKind, TileMix, TilesInput, TrackFacts};
 

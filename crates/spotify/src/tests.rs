@@ -884,6 +884,81 @@ async fn a_login_without_premium_keeps_nothing() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+fn top_track(id: &str, name: &str, artist: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id, "name": name, "duration_ms": 200000, "is_playable": true,
+        "artists": [{"id": format!("ar-{artist}"), "name": artist}],
+        "album": {"id": format!("al-{id}"), "name": "Album", "images": []}
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn suggestions_read_the_tops_and_the_recently_played() {
+    use wiremock::matchers::query_param;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/top/tracks"))
+        .and(query_param("time_range", "short_term"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "items": [top_track("t1", "First", "Band"), null, top_track("t2", "Second", "Other")],
+            "limit": 50, "offset": 0, "total": 2
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/me/top/artists"))
+        .and(query_param("time_range", "medium_term"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "items": [{"id": "ar1", "name": "Band", "images": []}, {"id": "", "name": "No id"}, {"id": "ar2", "name": "Other"}]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/me/player/recently-played"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "items": [
+                {"track": top_track("t9", "Lately", "Band"), "played_at": "2026-10-20T10:00:00Z"},
+                {"track": top_track("t9", "Lately", "Band"), "played_at": "2026-10-20T09:56:00Z"},
+                {"track": top_track("t8", "Before", "Band"), "played_at": "2026-10-20T09:50:00Z"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+    let (s, _dir) = connected("suggest", &server).await;
+    let top = s.suggestions(SuggestionFeed::TopTracksMonth).await.unwrap();
+    let got: Vec<(&str, SuggestionKind, f32)> = top.tracks.iter().map(|t| (t.track.title.as_str(), t.kind, t.weight)).collect();
+    assert_eq!(got, [("First", SuggestionKind::TopMonth, 1.0), ("Second", SuggestionKind::TopMonth, 0.5)]);
+    assert_eq!(top.tracks[0].track.id, nikgob_core::streaming::RemoteId::new(Service::Spotify, "t1"));
+    assert!(!top.needs_reconnect);
+    let artists = s.suggestions(SuggestionFeed::TopArtistsHalfYear).await.unwrap();
+    let names: Vec<&str> = artists.artists.iter().map(|a| a.artist.name.as_str()).collect();
+    assert_eq!(names, ["Band", "Other"]);
+    assert_eq!(artists.artists[0].kind, SuggestionKind::TopHalfYear);
+    assert_eq!(artists.artists[0].artist.id, Some(nikgob_core::streaming::RemoteId::new(Service::Spotify, "ar1")));
+    let recent = s.suggestions(SuggestionFeed::RecentlyPlayed).await.unwrap();
+    let titles: Vec<&str> = recent.tracks.iter().map(|t| t.track.title.as_str()).collect();
+    assert_eq!(titles, ["Lately", "Before"], "a repeat counts once");
+    assert!(recent.tracks.iter().all(|t| t.kind == SuggestionKind::Recent));
+    assert_eq!(s.suggestions(SuggestionFeed::Home).await, Err(StreamError::Unsupported));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_without_the_top_scope_asks_for_a_new_sign_in_quietly() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/top/tracks"))
+        .respond_with(
+            ResponseTemplate::new(403).set_body_string(r#"{"error":{"status":403,"message":"Insufficient client scope"}}"#),
+        )
+        .mount(&server)
+        .await;
+    let (s, _dir) = connected("scope", &server).await;
+    let top = s.suggestions(SuggestionFeed::TopTracksHalfYear).await.unwrap();
+    assert!(top.needs_reconnect);
+    assert!(top.tracks.is_empty());
+    assert!(auth::WEB_SCOPES.contains(&"user-top-read"), "a new sign-in asks for it");
+}
+
 const OWNER_NEEDS_PREMIUM: &str =
     r#"{"error":{"status":403,"message":"Active premium subscription required for the owner of the app."}}"#;
 
@@ -964,6 +1039,9 @@ async fn nothing_is_asked_while_not_connected() {
     assert_eq!(s.create_playlist("x").await.map(drop), nl);
     assert_eq!(s.playlist_edit("pl", &ids, &[]).await.map(drop), nl);
     assert_eq!(s.recent().await.map(drop), nl);
+    for &feed in s.suggestion_feeds() {
+        assert_eq!(s.suggestions(feed).await.map(drop), nl);
+    }
     assert!(matches!(s.open_audio("t1"), Err(StreamError::NotLoggedIn)));
     assert!(s.paused_until().is_none());
     assert!(server.received_requests().await.unwrap().is_empty());

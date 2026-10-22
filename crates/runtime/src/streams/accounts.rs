@@ -29,12 +29,14 @@ pub(crate) fn hm_after(left: std::time::Duration) -> Option<String> {
 impl Worker {
     /// Refreshes [`v::ViewState::accounts`] (published only when changed).
     pub(crate) fn publish_accounts(&mut self) {
+        self.suggest_load();
         let accounts: Vec<v::AccountView> = Service::ALL
             .iter()
             .map(|&service| {
                 let registered = self.streams.iter().find(|s| s.service() == service);
                 let enabled = self.state.read().prefs.service_enabled(service);
                 let account = self.web_account(service, registered.map(|s| s.account()).unwrap_or_default());
+                let (suggestions, suggestions_note) = self.suggest_lines(service);
                 v::AccountView {
                     service,
                     registered: registered.is_some(),
@@ -46,6 +48,8 @@ impl Worker {
                     error: self.streaming.errors.get(&service).cloned(),
                     paused_until: registered.and_then(|s| s.paused_until()).map(minute_up),
                     paused_until_hm: registered.and_then(|s| s.paused_until()).map(minute_up).and_then(local_hm),
+                    suggestions,
+                    suggestions_note,
                 }
             })
             .collect();

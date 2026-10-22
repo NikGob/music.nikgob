@@ -829,6 +829,27 @@ impl ApiClient {
         self.get("/me/player/recently-played", &[("limit", PAGE.to_string())])
             .await
     }
+
+    /// The user's most played tracks over `time_range` (`short_term`:
+    /// about a month, `medium_term`: about half a year). Needs the
+    /// `user-top-read` scope.
+    pub async fn top_tracks(&self, time_range: &str) -> Result<Page<Track>> {
+        self.get(
+            "/me/top/tracks",
+            &[("time_range", time_range.to_owned()), ("limit", PAGE.to_string())],
+        )
+        .await
+    }
+
+    /// The user's most played artists over `time_range`, as
+    /// [`Self::top_tracks`].
+    pub async fn top_artists(&self, time_range: &str) -> Result<Page<Artist>> {
+        self.get(
+            "/me/top/artists",
+            &[("time_range", time_range.to_owned()), ("limit", PAGE.to_string())],
+        )
+        .await
+    }
 }
 
 fn snapshot(value: Option<Value>) -> Option<String> {

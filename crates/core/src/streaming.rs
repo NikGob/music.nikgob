@@ -466,6 +466,90 @@ pub struct Played {
 }
 
 // ---------------------------------------------------------------------------
+// Suggestions
+// ---------------------------------------------------------------------------
+
+/// What a service's suggestion is (docs/stage4.md §12.3). The service's
+/// own mixes and charts are not suggestions: only what says something
+/// about the user's taste.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuggestionKind {
+    /// YouTube Music's «Быстрый выбор» / «Quick picks».
+    QuickPicks,
+    /// YouTube Music's «Слушать снова» / «Listen again».
+    ListenAgain,
+    /// Spotify's top of about the last month (`short_term`).
+    TopMonth,
+    /// Spotify's top of about the last half year (`medium_term`).
+    TopHalfYear,
+    /// Played lately in the service's own apps (YouTube Music's history,
+    /// Spotify's recently played).
+    Recent,
+}
+
+/// One request's worth of suggestions ([`StreamService::suggestions`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuggestionFeed {
+    /// YouTube Music's home (`FEmusic_home`): quick picks and listen again.
+    Home,
+    /// YouTube Music's history (`FEmusic_history`).
+    History,
+    /// Spotify `me/top/tracks?time_range=short_term`.
+    TopTracksMonth,
+    /// Spotify `me/top/tracks?time_range=medium_term`.
+    TopTracksHalfYear,
+    /// Spotify `me/top/artists?time_range=short_term`.
+    TopArtistsMonth,
+    /// Spotify `me/top/artists?time_range=medium_term`.
+    TopArtistsHalfYear,
+    /// Spotify `me/player/recently-played`.
+    RecentlyPlayed,
+}
+
+/// A track the service suggests.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SuggestedTrack {
+    pub track: StreamTrack,
+    pub kind: SuggestionKind,
+    /// How strongly, 0.5…1 by its place in the service's list
+    /// ([`rank_weight`]).
+    pub weight: f32,
+}
+
+/// An artist the service suggests (a top artist, an artist or the album
+/// artist of a «Слушать снова» card).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SuggestedArtist {
+    pub artist: ArtistRef,
+    pub kind: SuggestionKind,
+    /// As [`SuggestedTrack::weight`].
+    pub weight: f32,
+}
+
+/// What one [`SuggestionFeed`] gave.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Suggestions {
+    pub tracks: Vec<SuggestedTrack>,
+    pub artists: Vec<SuggestedArtist>,
+    /// The sign-in lacks the right to read this feed (a Spotify token from
+    /// before `user-top-read` was asked): signing in again gets it. Not an
+    /// error; the rest of the feeds still work.
+    #[serde(default)]
+    pub needs_reconnect: bool,
+}
+
+/// The weight of the `rank`-th of `len` items of a list: 1 for the first,
+/// down to 0.5 for the last.
+pub fn rank_weight(rank: usize, len: usize) -> f32 {
+    if len <= 1 {
+        return 1.0;
+    }
+    1.0 - 0.5 * (rank.min(len - 1) as f32 / (len - 1) as f32)
+}
+
+// ---------------------------------------------------------------------------
 // Account
 // ---------------------------------------------------------------------------
 
@@ -947,6 +1031,24 @@ pub trait StreamService: Send + Sync {
         unsupported()
     }
 
+    // Suggestions (docs/stage4.md §12.3): what the service's own
+    // recommendations say about the user's taste, read as a signal for our
+    // mixes. Background work in the signed-in lane, one request a call.
+
+    /// The feeds [`Self::suggestions`] can read for this service (empty:
+    /// none). Cheap, no network.
+    fn suggestion_feeds(&self) -> &'static [SuggestionFeed] {
+        &[]
+    }
+
+    /// One feed of suggestions, best first in each list. Needs a login;
+    /// a feed the service does not have answers
+    /// [`StreamError::Unsupported`].
+    fn suggestions(&self, feed: SuggestionFeed) -> BoxFuture<'_, Result<Suggestions, StreamError>> {
+        let _ = feed;
+        unsupported()
+    }
+
     /// Link to the item on the service's website (open.spotify.com/…,
     /// music.youtube.com/…). No network.
     fn web_url(&self, kind: EntityKind, id: &str) -> String;
@@ -998,6 +1100,16 @@ mod tests {
         .unwrap();
         assert_eq!(album.release_date, None, "older JSON reads without the day");
         assert_eq!(album.released_at_ms(), None);
+    }
+
+    #[test]
+    fn rank_weights_fall_from_one_to_a_half() {
+        assert_eq!(rank_weight(0, 1), 1.0);
+        assert_eq!(rank_weight(0, 0), 1.0);
+        assert_eq!(rank_weight(0, 5), 1.0);
+        assert_eq!(rank_weight(4, 5), 0.5);
+        assert_eq!(rank_weight(9, 5), 0.5);
+        assert!((rank_weight(2, 5) - 0.75).abs() < 1e-6);
     }
 
     #[test]
