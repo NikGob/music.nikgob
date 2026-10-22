@@ -27,6 +27,7 @@
 
 mod discover;
 mod radio;
+mod tiles;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -38,7 +39,7 @@ use nikgob_core::streaming::{RemoteId, StreamTrack};
 use nikgob_library::{Library, now_ms};
 use nikgob_recs::{
     Catalog, DAYLIST_LEN, DailyParams, DayPart, DiscoveryFilter, Item, Mood, NewTrack, Pick, RadioParams,
-    RadioState as Engine, Recs, StyleMix, Taste, TasteInput, Tile, TrackInfo, VectorIndex, album_key, artist_key,
+    RadioState as Engine, Recs, StyleMix, Taste, TasteInput, TrackInfo, VectorIndex, album_key, artist_key,
     daylist_title, daylist_until, song_key, stream_song_key,
 };
 use nikgob_view::{self as v, Command};
@@ -49,6 +50,7 @@ use crate::analysis::{SoundIndex, lower_priority};
 use crate::import::Internal;
 
 pub(crate) use radio::RadioSave;
+pub use tiles::{PreviewTile, preview_tile_days};
 
 /// Plays after which the taste is built again.
 const PLAYS_PER_BUILD: u32 = 20;
@@ -58,7 +60,6 @@ const NEW_VECTORS: usize = 200;
 /// Library cache keys.
 const DAILY_KEY: &str = "recs.daily";
 const DAYLIST_KEY: &str = "recs.daylist";
-const TILES_KEY: &str = "recs.tiles";
 const STYLES_KEY: &str = "recs.styles";
 /// Covers of a mix card…
 const COVERS: usize = 4;
@@ -135,8 +136,8 @@ pub(crate) struct RecHome {
     pub daylist_key: String,
     /// `None` with an empty library.
     pub daylist: Option<DaylistHome>,
-    /// The tiles that have enough songs, in [`Tile::ALL`] order.
-    pub tiles: Vec<TileHome>,
+    /// The day's tiles in their order (docs/stage4.md §12.9).
+    pub tiles: Vec<tiles::TileHome>,
 }
 
 /// The daylist of the home.
@@ -148,14 +149,6 @@ pub(crate) struct DaylistHome {
     pub state: Engine,
     pub picks: Vec<Pick>,
     pub streams: HashMap<RemoteId, StreamTrack>,
-    pub covers: Vec<CoverRef>,
-}
-
-/// A tile of the home.
-pub(crate) struct TileHome {
-    pub tile: Tile,
-    pub subtitle: String,
-    pub picks: Vec<Pick>,
     pub covers: Vec<CoverRef>,
 }
 
@@ -199,15 +192,6 @@ struct DaylistCache {
     history: bool,
 }
 
-/// The tiles of a day as the library's cache keeps them (a tile that had
-/// too few songs is tried again at the next build).
-#[derive(Serialize, Deserialize)]
-struct TilesCache {
-    day: String,
-    history: bool,
-    tiles: Vec<(Tile, Vec<Pick>)>,
-}
-
 /// The worker's recommendation state.
 pub(crate) struct RecsState {
     tx: Sender<Internal>,
@@ -249,9 +233,27 @@ impl RecsState {
     }
 }
 
+/// `NIKGOB_DEMO_DAYS=n` in the demo: the recommendations live `n` days
+/// ahead (screenshots of another day's board).
+fn day_shift_ms() -> i64 {
+    if std::env::var_os("NIKGOB_DEMO").is_none() {
+        return 0;
+    }
+    std::env::var("NIKGOB_DEMO_DAYS")
+        .ok()
+        .and_then(|d| d.trim().parse::<i64>().ok())
+        .map_or(0, |d| d * 24 * 3600 * 1000)
+}
+
+/// Now, for the recommendations.
+pub(crate) fn recs_now() -> UnixMs {
+    now_ms() + day_shift_ms()
+}
+
 /// The local day and the minutes east of UTC.
 pub(crate) fn local_day() -> (String, i32) {
     let now = jiff::Zoned::now();
+    let now = now.checked_add(jiff::SignedDuration::from_millis(day_shift_ms())).unwrap_or(now);
     (now.date().to_string(), now.offset().seconds() / 60)
 }
 
@@ -298,39 +300,6 @@ fn style_title(names: &[String], artists: usize) -> String {
         [a, b, ..] if artists > 2 => format!("{a}, {b} и другие"),
         [a, b, ..] => format!("{a} и {b}"),
     }
-}
-
-/// The view's mix of a tile.
-pub(crate) const fn tile_mix(t: Tile) -> v::MixId {
-    match t {
-        Tile::OnRepeat => v::MixId::OnRepeat,
-        Tile::TimeCapsule => v::MixId::TimeCapsule,
-        Tile::Rediscover => v::MixId::Rediscover,
-        Tile::DeepCuts => v::MixId::DeepCuts,
-        Tile::FreshLikes => v::MixId::FreshLikes,
-    }
-}
-
-/// A tile's title.
-const fn tile_title(t: Tile) -> &'static str {
-    match t {
-        Tile::OnRepeat => "На повторе",
-        Tile::TimeCapsule => "Год назад",
-        Tile::Rediscover => "Забытое любимое",
-        Tile::DeepCuts => "Глубже у любимых",
-        Tile::FreshLikes => "Свежие лайки",
-    }
-}
-
-const MONTHS: [&str; 12] = [
-    "январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
-];
-
-/// «октябрь 2025»: this month a year before `day` (`YYYY-MM-DD`).
-fn year_ago_month(day: &str) -> String {
-    let year: i32 = day.get(..4).and_then(|y| y.parse().ok()).unwrap_or(0);
-    let month: usize = day.get(5..7).and_then(|m| m.parse().ok()).unwrap_or(1);
-    format!("{} {}", MONTHS[month.clamp(1, 12) - 1], year - 1)
 }
 
 /// «25 треков».
@@ -422,7 +391,25 @@ struct BuildInput {
 
 fn build(input: BuildInput) -> Result<Built, String> {
     let started = Instant::now();
-    let lib = &input.lib;
+    let (snap, tiles_input, index_len) = read_snapshot(&input.lib, &input.index, input.now, input.utc_offset_min)?;
+    let home = build_home(&snap, &input, &tiles_input);
+    log::info!(
+        "recs: {} tracks, {} vectors, {} events in {:?}",
+        snap.catalog.len(),
+        snap.index.len(),
+        tiles_input.events.len(),
+        started.elapsed()
+    );
+    Ok(Built {
+        snap: Arc::new(snap),
+        home,
+        index_len,
+    })
+}
+
+/// The snapshot of the library at `now`, what the tiles read besides it,
+/// and the size of the shared sound index it was cut from.
+fn read_snapshot(lib: &Library, index: &SoundIndex, now: UnixMs, utc_offset_min: i32) -> Result<(Snapshot, nikgob_recs::TilesInput, usize), String> {
     let err = |what: &str, e: nikgob_library::LibraryError| format!("{what}: {e}");
     let rows = lib.rec_tracks().map_err(|e| err("tracks", e))?;
     let events = lib.listening_events().map_err(|e| err("events", e))?;
@@ -499,13 +486,13 @@ fn build(input: BuildInput) -> Result<Built, String> {
             playlist_entries: entries,
             disliked_tracks,
             disliked_artists,
-            utc_offset_min: input.utc_offset_min,
+            utc_offset_min,
         },
-        input.now,
+        now,
     );
     // Vectors of tracks that are gone (or left the library) stay in the
     // shared index until a restart; not in the snapshot.
-    let mut index = input.index.read().clone();
+    let mut index = index.read().clone();
     let index_len = index.len();
     let stale: Vec<TrackId> = index.iter().map(|(id, _)| id).filter(|id| catalog.position(*id).is_none()).collect();
     for id in stale {
@@ -520,22 +507,11 @@ fn build(input: BuildInput) -> Result<Built, String> {
         known_albums,
         played_songs,
     };
-    let home = build_home(&snap, &input);
-    log::info!(
-        "recs: {} tracks, {} vectors, {} events in {:?}",
-        snap.catalog.len(),
-        snap.index.len(),
-        events.len(),
-        started.elapsed()
-    );
-    Ok(Built {
-        snap: Arc::new(snap),
-        home,
-        index_len,
-    })
+    let tiles_input = tiles::input(lib, &rows, &events, names);
+    Ok((snap, tiles_input, index_len))
 }
 
-fn build_home(snap: &Snapshot, input: &BuildInput) -> RecHome {
+fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::TilesInput) -> RecHome {
     let lib = &input.lib;
     let recs = snap.recs();
     let blocked = |p: &Pick| match &p.item {
@@ -596,7 +572,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput) -> RecHome {
         .collect();
     let daily_covers = covers_of(snap, &daily, &daily_streams);
     let (daylist_key, daylist) = build_daylist(snap, input);
-    let tiles = build_tiles(snap, input);
+    let tiles = tiles::build(snap, input, tiles_input);
 
     // Moods: covers of the releases most liked among each mood's top.
     let mut moods = Vec::new();
@@ -721,65 +697,13 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
     (key, Some(home))
 }
 
-/// The tiles of the day: the ones kept for the day, the rest tried again.
-fn build_tiles(snap: &Snapshot, input: &BuildInput) -> Vec<TileHome> {
-    let lib = &input.lib;
-    let recs = snap.recs();
-    let history = snap.taste.has_history();
-    let mut cache = cache_read::<TilesCache>(lib, TILES_KEY)
-        .filter(|c| c.day == input.day && c.history == history)
-        .unwrap_or_else(|| TilesCache {
-            day: input.day.clone(),
-            history,
-            tiles: Vec::new(),
-        });
-    let mut changed = false;
-    let mut out = Vec::new();
-    let no_streams = HashMap::new();
-    for tile in Tile::ALL {
-        let picks = match cache.tiles.iter().find(|(t, _)| *t == tile) {
-            Some((_, picks)) => picks.clone(),
-            None => {
-                let Some(picks) = recs.tile(tile, day_seed(&input.day)) else { continue };
-                cache.tiles.push((tile, picks.clone()));
-                changed = true;
-                picks
-            }
-        };
-        let picks: Vec<Pick> = picks.into_iter().filter(|p| still_fits(snap, p, &no_streams)).collect();
-        if picks.is_empty() {
-            continue;
-        }
-        let n = tracks_count(picks.len());
-        let subtitle = match tile {
-            Tile::OnRepeat | Tile::FreshLikes => format!("{n} · за месяц"),
-            Tile::TimeCapsule => format!("{} · {n}", year_ago_month(&input.day)),
-            Tile::Rediscover => format!("{n} · давно не играли"),
-            Tile::DeepCuts => match artists_line(lib, snap, &picks) {
-                a if a.is_empty() => n,
-                a => a,
-            },
-        };
-        let covers = covers_of(snap, &picks, &no_streams);
-        out.push(TileHome {
-            tile,
-            subtitle,
-            picks,
-            covers,
-        });
-    }
-    if changed {
-        cache_write(lib, TILES_KEY, input.now, &cache);
-    }
-    out
-}
-
 /// The recommendation parts of the home view, ready to be drawn.
 pub(crate) struct HomeParts {
     hero: Option<(String, String, Vec<CoverRef>)>,
     mix: Vec<nikgob_library::TrackRow>,
     daylist: Option<(String, String, Vec<CoverRef>)>,
-    tiles: Vec<(v::MixId, &'static str, String, Vec<CoverRef>)>,
+    /// Id, kicker, title, subtitle, covers.
+    tiles: Vec<(v::MixId, String, String, String, Vec<CoverRef>)>,
     moods: Vec<(v::Mood, Vec<CoverRef>)>,
     styles: Vec<(String, Vec<CoverRef>)>,
     discover: Vec<v::StreamTrackRow>,
@@ -820,7 +744,7 @@ impl HomeParts {
         let tiles = h
             .tiles
             .iter()
-            .map(|t| (tile_mix(t.tile), tile_title(t.tile), t.subtitle.clone(), t.covers.clone()))
+            .map(|t| (t.mix_id(), t.kicker().to_owned(), t.title.clone(), t.subtitle.clone(), t.covers.clone()))
             .collect();
         let moods = h
             .moods
@@ -858,21 +782,24 @@ impl HomeParts {
         home.hero = self.hero.map(|(title, subtitle, c)| v::MixCard {
             id: v::MixId::Daily,
             title,
+            kicker: "ТВОЙ МИКС".to_owned(),
             subtitle,
             covers: covers(c),
         });
         home.daylist = self.daylist.map(|(title, subtitle, c)| v::MixCard {
             id: v::MixId::Daylist,
             title,
+            kicker: "ДЕЙЛИСТ".to_owned(),
             subtitle,
             covers: covers(c),
         });
         home.tiles = self
             .tiles
             .into_iter()
-            .map(|(id, title, subtitle, c)| v::MixCard {
+            .map(|(id, kicker, title, subtitle, c)| v::MixCard {
                 id,
-                title: title.to_owned(),
+                title,
+                kicker,
                 subtitle,
                 covers: covers(c),
             })
@@ -883,6 +810,7 @@ impl HomeParts {
             .map(|(m, c)| v::MixCard {
                 id: v::MixId::Mood(m),
                 title: m.title().to_owned(),
+                kicker: String::new(),
                 subtitle: String::new(),
                 covers: covers(c),
             })
@@ -894,6 +822,7 @@ impl HomeParts {
             .map(|(i, (title, c))| v::MixCard {
                 id: v::MixId::Style(i as u8),
                 title,
+                kicker: String::new(),
                 subtitle: String::new(),
                 covers: covers(c),
             })
@@ -945,7 +874,7 @@ pub fn preview_home(lib: &Library, library_dir: &std::path::Path) -> Result<Home
         index,
         day,
         utc_offset_min,
-        now: now_ms(),
+        now: recs_now(),
         refresh_daily: false,
         refresh_daylist: false,
         new_share: v::Prefs::default().radio_new_share.fraction(),
@@ -963,7 +892,7 @@ pub fn preview_home(lib: &Library, library_dir: &std::path::Path) -> Result<Home
         likes: lib.liked_track_ids().map_or(0, |l| l.len()),
         history: h.history,
         daylist_tracks: h.daylist.as_ref().map_or(0, |d| d.picks.len()),
-        tile_tracks: h.tiles.iter().map(|t| (tile_mix(t.tile), t.picks.len())).collect(),
+        tile_tracks: h.tiles.iter().map(|t| (t.mix_id(), t.picks.len())).collect(),
         discover_cached: discoveries.len(),
         new_releases_cached,
         took: started.elapsed(),
@@ -1012,7 +941,7 @@ impl Worker {
         let now = Instant::now();
         let every = self.streaming.schedule.recs_every;
         let (day, utc_offset_min) = local_day();
-        let (_, _, daylist) = daylist_key(now_ms(), utc_offset_min);
+        let (_, _, daylist) = daylist_key(recs_now(), utc_offset_min);
         let r = &self.recs;
         let grown = {
             let (len, built) = (self.analysis.index().read().len(), r.built_index_len);
@@ -1035,7 +964,7 @@ impl Worker {
             index: self.analysis.index().clone(),
             day,
             utc_offset_min,
-            now: now_ms(),
+            now: recs_now(),
             refresh_daily: std::mem::take(&mut self.recs.refresh_daily),
             refresh_daylist: std::mem::take(&mut self.recs.refresh_daylist),
             new_share: prefs.radio_new_share.fraction(),
@@ -1097,6 +1026,7 @@ impl Worker {
             Command::StartRadio { seed } => self.start_radio_cmd(seed),
             Command::RecFeedback { target, dislike } => self.rec_feedback(target, dislike),
             Command::RefreshMix { id } => self.refresh_mix(id),
+            Command::DownloadMix { id } => self.download_mix(id),
             other => return Some(other),
         }
         None
@@ -1152,23 +1082,36 @@ impl Worker {
                 let streams = d.streams.values().cloned().collect();
                 self.start_radio_picked(state, picks, streams, title, EventContext::HomeSection);
             }
-            v::MixId::OnRepeat
-            | v::MixId::TimeCapsule
-            | v::MixId::Rediscover
-            | v::MixId::DeepCuts
-            | v::MixId::FreshLikes => {
-                let tile = self
-                    .recs
-                    .home
-                    .as_ref()
-                    .and_then(|h| h.tiles.iter().find(|t| tile_mix(t.tile) == id))
-                    .map(|t| (t.picks.clone(), tile_title(t.tile)));
-                match tile {
-                    Some((picks, title)) => self.play_picks(&picks, &HashMap::new(), title),
-                    None => self.toast("Этой подборки уже нет — главная обновилась", None),
-                }
-            }
+            v::MixId::Tile(kind) => match self.home_tile(kind).map(|t| (t.picks.clone(), t.title.clone())) {
+                Some((picks, title)) => self.play_picks(&picks, &HashMap::new(), &title),
+                None => self.toast("Этой подборки уже нет — главная обновилась", None),
+            },
         }
+    }
+
+    /// A tile of today's board.
+    fn home_tile(&self, kind: v::TileKind) -> Option<&tiles::TileHome> {
+        self.recs.home.as_ref()?.tiles.iter().find(|t| t.mix_id() == v::MixId::Tile(kind))
+    }
+
+    /// `Command::DownloadMix`: every song of a tile without a file goes to
+    /// «Хочу скачать».
+    fn download_mix(&mut self, id: v::MixId) {
+        let v::MixId::Tile(kind) = id else { return };
+        let ids: Vec<TrackId> = self.home_tile(kind).map_or_else(Vec::new, |t| {
+            t.picks
+                .iter()
+                .filter_map(|p| match p.item {
+                    Item::Track(id) => Some(id),
+                    Item::Stream(_) => None,
+                })
+                .collect()
+        });
+        if ids.is_empty() {
+            self.toast("Этой подборки уже нет — главная обновилась", None);
+            return;
+        }
+        self.download_tracks(&ids);
     }
 
     /// «Твой микс» as it is today: its tracks, not endless.
@@ -1226,11 +1169,7 @@ impl Worker {
             // Moods, styles and artists are endless: nothing to pick again.
             v::MixId::Mood(_) | v::MixId::Style(_) | v::MixId::Artist(_) => {}
             // The tiles are what the history says today.
-            v::MixId::OnRepeat
-            | v::MixId::TimeCapsule
-            | v::MixId::Rediscover
-            | v::MixId::DeepCuts
-            | v::MixId::FreshLikes => {}
+            v::MixId::Tile(_) => {}
         }
     }
 

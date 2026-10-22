@@ -6,7 +6,7 @@
 use egui::{Color32, Rect, Ui, vec2};
 use nikgob_shapes::MaterialShape;
 use nikgob_view::{
-    AnalysisProgress, Command, ContinueCard, HomeView, LibraryTab, MixCard, MixId, Mood, RecTarget, Route, Service,
+    AnalysisProgress, Command, ContinueCard, HomeView, LibraryTab, MixCard, MixId, Mood, RecTarget, Route, Service, TileKind,
     StreamPage, StreamTrackRow, TrackId, ViewState, WishlistStatus,
 };
 
@@ -436,6 +436,7 @@ fn connected(state: &ViewState) -> bool {
 #[derive(Clone, Debug, PartialEq)]
 struct BoardTile {
     id: MixId,
+    kicker: String,
     title: String,
     subtitle: String,
     covers: Vec<String>,
@@ -448,6 +449,7 @@ impl BoardTile {
     fn of(m: &MixCard) -> Self {
         Self {
             id: m.id,
+            kicker: m.kicker.clone(),
             title: m.title.clone(),
             subtitle: m.subtitle.clone(),
             covers: m.covers.iter().map(|c| c.uri()).collect(),
@@ -480,6 +482,7 @@ fn hero_tile(h: &HomeView) -> Option<BoardTile> {
     let n = h.mix.len() as u64;
     Some(BoardTile {
         id: MixId::Daily,
+        kicker: "ТВОЙ МИКС".into(),
         title: "Твой микс".into(),
         subtitle: format!("{n} {} · любимое и дослушанное", crate::screens::common::plural(n, "трек", "трека", "треков")),
         covers,
@@ -498,29 +501,85 @@ fn board_tiles(h: &HomeView) -> (bool, Vec<BoardTile>) {
     (big, tiles)
 }
 
-/// A board tile's container and content colours (scheme roles): the big
-/// tile primary, the others spread over secondary, tertiary and the
-/// highest surface so neighbours differ.
-fn tile_colors(id: MixId, big: bool, s: &ColorScheme) -> (Color32, Color32) {
-    if big {
-        return (s.primary_container, s.on_primary_container);
-    }
+/// The colour roles of the small tiles: secondary, tertiary, the highest
+/// surface (the big tile is primary).
+const ROLES: usize = 3;
+
+/// The role a small tile would like, by its group of kinds.
+fn preferred_role(id: MixId) -> usize {
+    use TileKind::*;
     match id {
-        MixId::OnRepeat | MixId::DeepCuts => (s.tertiary_container, s.on_tertiary_container),
-        MixId::TimeCapsule | MixId::FreshLikes => (s.surface_container_highest, s.on_surface),
-        _ => (s.secondary_container, s.on_secondary_container),
+        MixId::Tile(OnRepeat | YearAgo | Season | Rediscover | FirstLikes | FreshLikes | Unplayed) => 1,
+        MixId::Tile(DeepCuts | ArtistOfDay | Comeback) => 0,
+        MixId::Tile(_) => 2,
+        _ => 0,
     }
 }
 
-/// The shape a board tile's cover is cut into.
+/// Two cells share an edge.
+fn touching(a: bento::Cell, b: bento::Cell) -> bool {
+    let overlap = |a0: usize, a1: usize, b0: usize, b1: usize| a0 < b1 && b0 < a1;
+    let side = (a.col + a.w == b.col || b.col + b.w == a.col) && overlap(a.row, a.row + a.h, b.row, b.row + b.h);
+    let stacked = (a.row + a.h == b.row || b.row + b.h == a.row) && overlap(a.col, a.col + a.w, b.col, b.col + b.w);
+    side || stacked
+}
+
+/// The colour roles of the board's tiles in their cells (`None` for the
+/// big one): each its kind's role unless a tile beside it has it already,
+/// then the next one.
+fn board_roles(ids: &[MixId], cells: &[bento::Cell], big: bool) -> Vec<Option<usize>> {
+    let mut roles: Vec<Option<usize>> = Vec::with_capacity(ids.len());
+    for (i, (id, cell)) in ids.iter().zip(cells).enumerate() {
+        if big && i == 0 {
+            roles.push(None);
+            continue;
+        }
+        let taken: Vec<usize> = (0..i).filter(|&j| touching(cells[j], *cell)).filter_map(|j| roles[j]).collect();
+        let first = preferred_role(*id);
+        let role = (0..ROLES).map(|k| (first + k) % ROLES).find(|r| !taken.contains(r)).unwrap_or(first);
+        roles.push(Some(role));
+    }
+    roles
+}
+
+/// A board tile's container and content colours (scheme roles).
+fn tile_colors(role: Option<usize>, s: &ColorScheme) -> (Color32, Color32) {
+    match role {
+        None => (s.primary_container, s.on_primary_container),
+        Some(0) => (s.secondary_container, s.on_secondary_container),
+        Some(1) => (s.tertiary_container, s.on_tertiary_container),
+        Some(_) => (s.surface_container_highest, s.on_surface),
+    }
+}
+
+/// The shape a board tile's cover is cut into: each kind its own.
 fn tile_shape(id: MixId) -> MaterialShape {
+    use TileKind::*;
     match id {
-        MixId::OnRepeat => MaterialShape::Cookie12Sided,
-        MixId::TimeCapsule => MaterialShape::Arch,
-        MixId::Rediscover => MaterialShape::Clover4Leaf,
-        MixId::DeepCuts => MaterialShape::Gem,
-        MixId::FreshLikes => MaterialShape::Heart,
         MixId::Daylist => MaterialShape::Sunny,
+        MixId::Tile(kind) => match kind {
+            OnRepeat => MaterialShape::Cookie12Sided,
+            YearAgo => MaterialShape::Arch,
+            Season => MaterialShape::Flower,
+            Rediscover => MaterialShape::Clover4Leaf,
+            FirstLikes => MaterialShape::PuffyDiamond,
+            FreshLikes => MaterialShape::Heart,
+            Unplayed => MaterialShape::Ghostish,
+            DeepCuts => MaterialShape::Gem,
+            ArtistOfDay => MaterialShape::Circle,
+            Comeback => MaterialShape::Boom,
+            BecauseYouLiked => MaterialShape::Clover8Leaf,
+            Long => MaterialShape::Pill,
+            Short => MaterialShape::Bun,
+            SingAlong => MaterialShape::Burst,
+            Language => MaterialShape::Pentagon,
+            Decade => MaterialShape::Cookie6Sided,
+            Soundtrack => MaterialShape::Fan,
+            Playlist => MaterialShape::Cookie4Sided,
+            Unfinished => MaterialShape::SemiCircle,
+            NotDownloaded => MaterialShape::Arrow,
+            Lottery => MaterialShape::PixelCircle,
+        },
         _ => MaterialShape::Cookie9Sided,
     }
 }
@@ -539,16 +598,17 @@ fn board(ui: &mut Ui, h: &HomeView, out: &mut Vec<Command>) {
     let col_w = ((width - bento::GAP * (cols - 1) as f32) / cols as f32).floor();
     let row_h = bento::row_height(cols, col_w);
     let rows = bento::rows(&cells) as f32;
+    let roles = board_roles(&tiles.iter().map(|t| t.id).collect::<Vec<_>>(), &cells, big);
     let (board, _) = ui.allocate_exact_size(vec2(width, rows * row_h + (rows - 1.0) * bento::GAP), egui::Sense::hover());
-    for (i, (t, cell)) in tiles.iter().zip(&cells).enumerate() {
+    for (i, ((t, cell), role)) in tiles.iter().zip(&cells).zip(&roles).enumerate() {
         let rect = bento::cell_rect(*cell, board.min, col_w, row_h);
         let is_big = big && i == 0;
-        let (fill, on) = tile_colors(t.id, is_big, &s);
+        let (fill, on) = tile_colors(*role, &s);
         let refresh = t.tracks.is_none() && matches!(t.id, MixId::Daylist | MixId::Daily);
         let spec = bento::Tile {
             fill,
             on,
-            kicker: bento::kicker(t.id.kicker(), &t.title),
+            kicker: bento::kicker(Some(t.kicker.as_str()).filter(|k| !k.is_empty()), &t.title),
             title: &t.title,
             title_two_lines: true,
             subtitle: &t.subtitle,
@@ -568,6 +628,13 @@ fn board(ui: &mut Ui, h: &HomeView, out: &mut Vec<Command>) {
             };
             if play {
                 out.push(t.play());
+            }
+            // «Ещё не скачано»: «Скачать всё» on a right click.
+            if t.id == MixId::Tile(TileKind::NotDownloaded) {
+                let menu = Menu::new(id.with("download")).item(MenuItem::new("Скачать всё").icon(Icon::Download));
+                if menu.context_menu(&response) == Some(0) {
+                    out.push(Command::DownloadMix { id: t.id });
+                }
             }
             // «Обновить» picks the mix anew: from ⋮ and a right click.
             if refresh {
@@ -727,7 +794,7 @@ mod tests {
     use nikgob_view::{ArtistCard, ArtistId, ReleaseCard, ReleaseId, ReleaseType, RemoteId, TrackId, TrackRow};
 
     fn mix(id: MixId) -> MixCard {
-        MixCard { id, title: "Микс".into(), subtitle: String::new(), covers: Vec::new() }
+        MixCard { id, title: "Микс".into(), kicker: String::new(), subtitle: String::new(), covers: Vec::new() }
     }
 
     fn full_home() -> HomeView {
@@ -829,19 +896,20 @@ mod tests {
 
     #[test]
     fn the_board_is_the_daylist_then_the_mix_then_the_tiles() {
-        let tiles: Vec<MixCard> = MixId::TILES.iter().map(|id| mix(*id)).collect();
+        let (a, b) = (MixId::Tile(TileKind::OnRepeat), MixId::Tile(TileKind::ArtistOfDay));
+        let tiles = vec![mix(a), mix(b)];
         let ids = |h: &HomeView| {
             let (big, t) = board_tiles(h);
             (big, t.iter().map(|t| t.id).collect::<Vec<_>>())
         };
-        let mut h = HomeView { daylist: Some(mix(MixId::Daylist)), tiles: tiles[..2].to_vec(), ..full_home() };
-        assert_eq!(ids(&h), (true, vec![MixId::Daylist, MixId::Daily, MixId::OnRepeat, MixId::TimeCapsule]));
+        let mut h = HomeView { daylist: Some(mix(MixId::Daylist)), tiles, ..full_home() };
+        assert_eq!(ids(&h), (true, vec![MixId::Daylist, MixId::Daily, a, b]));
         // No daylist: «Твой микс» takes the big spot.
         h.daylist = None;
-        assert_eq!(ids(&h), (true, vec![MixId::Daily, MixId::OnRepeat, MixId::TimeCapsule]));
+        assert_eq!(ids(&h), (true, vec![MixId::Daily, a, b]));
         // Only tiles: rows, nothing big.
         h.hero = None;
-        assert_eq!(ids(&h), (false, vec![MixId::OnRepeat, MixId::TimeCapsule]));
+        assert_eq!(ids(&h), (false, vec![a, b]));
         // The board shows with any of them, under «Всё» and «Моё».
         assert_eq!(sections(Filter::Mine, &h, false)[0], Section::Board);
         assert!(!sections(Filter::New, &h, false).contains(&Section::Board));
@@ -850,15 +918,31 @@ mod tests {
     }
 
     #[test]
-    fn board_tiles_each_have_their_shape_and_the_big_one_is_primary() {
-        let shapes: std::collections::HashSet<_> =
-            MixId::TILES.iter().chain(&[MixId::Daily, MixId::Daylist]).map(|id| tile_shape(*id)).collect();
-        assert_eq!(shapes.len(), MixId::TILES.len() + 2);
+    fn board_tiles_each_have_their_shape_and_neighbours_differ() {
+        let ids: Vec<MixId> = TileKind::ALL.iter().map(|k| MixId::Tile(*k)).chain([MixId::Daily, MixId::Daylist]).collect();
+        let shapes: std::collections::HashSet<_> = ids.iter().map(|id| tile_shape(*id)).collect();
+        assert_eq!(shapes.len(), ids.len());
         let s = ColorScheme::baseline(true);
-        assert_eq!(tile_colors(MixId::Daily, true, &s).0, s.primary_container);
-        // Neighbours on the full board differ: «Твой микс», then the tiles.
-        let order: Vec<_> = std::iter::once(MixId::Daily).chain(MixId::TILES).map(|id| tile_colors(id, false, &s).0).collect();
-        assert!(order.windows(2).all(|w| w[0] != w[1]));
+        assert_eq!(tile_colors(None, &s).0, s.primary_container);
+        // Any day's board on four columns and on two: no two tiles that
+        // touch share a colour, whatever their kinds.
+        for start in 0..TileKind::ALL.len() {
+            for n in 1..=8 {
+                let mut board = vec![MixId::Daylist, MixId::Daily];
+                board.extend((0..n).map(|k| MixId::Tile(TileKind::ALL[(start + k * 2) % TileKind::ALL.len()])));
+                for cols in [4, 2] {
+                    let cells = bento::layout(cols, true, board.len());
+                    let roles = board_roles(&board, &cells, true);
+                    for i in 1..board.len() {
+                        for j in 1..i {
+                            if touching(cells[i], cells[j]) {
+                                assert_ne!(roles[i], roles[j], "{board:?} on {cols} columns: {i} and {j}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

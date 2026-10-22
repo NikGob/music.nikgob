@@ -423,21 +423,34 @@ fn wishlist() -> WishlistView {
 /// The board of Главная: the daylist (when `daylist`) and the first `n`
 /// tiles, with covers of the demo library.
 fn bento(s: &mut ViewState, n: usize, daylist: bool) {
-    use nikgob_view::{MixCard, MixId};
+    use nikgob_view::{MixCard, MixId, TileKind};
     let covers: Vec<nikgob_view::Cover> = s.library.releases.iter().filter_map(|r| r.cover.clone()).collect();
     let pick = |from: usize, k: usize| -> Vec<nikgob_view::Cover> {
         (0..k).filter_map(|i| covers.get((from + i) % covers.len().max(1)).cloned()).collect()
     };
-    let card = |id, title: &str, subtitle: &str, covers| MixCard { id, title: title.into(), subtitle: subtitle.into(), covers };
+    let card = |id, kicker: &str, title: &str, subtitle: &str, covers| MixCard {
+        id,
+        kicker: kicker.into(),
+        title: title.into(),
+        subtitle: subtitle.into(),
+        covers,
+    };
     s.home.daylist = daylist.then(|| {
-        card(MixId::Daylist, "Тягучий вечер четверга", "Massive Attack, Кино и другие · до 23:00", pick(0, 4))
+        card(MixId::Daylist, "ДЕЙЛИСТ", "Тягучий вечер четверга", "Massive Attack, Кино и другие · до 23:00", pick(0, 4))
     });
+    let tile = |k: TileKind, title: &str, subtitle: &str, from: usize| card(MixId::Tile(k), "", title, subtitle, pick(from, 1));
     let tiles = [
-        card(MixId::OnRepeat, "На повторе", "25 треков · за месяц", pick(4, 1)),
-        card(MixId::TimeCapsule, "Год назад", "октябрь 2025 · 18 треков", pick(5, 1)),
-        card(MixId::Rediscover, "Забытое любимое", "22 трека · не играли с лета", pick(6, 1)),
-        card(MixId::DeepCuts, "Глубже у любимых", "Кино, Аквариум и другие", pick(7, 1)),
-        card(MixId::FreshLikes, "Свежие лайки", "14 треков · за неделю", pick(8, 1)),
+        tile(TileKind::OnRepeat, "На повторе", "25 треков · за месяц", 4),
+        tile(TileKind::ArtistOfDay, "Massive Attack", "24 трека · лучшее", 5),
+        tile(TileKind::Season, "Лето 2025", "Кино, Земфира и другие", 6),
+        tile(TileKind::SingAlong, "Со словами", "Кино, Аквариум и другие", 7),
+        tile(TileKind::Soundtrack, "Made in Abyss", "Kevin Penkin и другие", 8),
     ];
+    let tiles = tiles.map(|mut t| {
+        if let MixId::Tile(k) = t.id {
+            t.kicker = nikgob_recs::TileKind::ALL[k as usize].kicker().into();
+        }
+        t
+    });
     s.home.tiles = tiles.into_iter().take(n).collect();
 }
