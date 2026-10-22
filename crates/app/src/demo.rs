@@ -602,7 +602,10 @@ mod tile_tests {
     #[test]
     fn a_week_of_the_demo_shows_most_tiles() {
         let lib = Library::open_in_memory().unwrap();
-        seed_with(&lib, Path::new("demo"), false);
+        // The seed writes artist photos next to the library: a temporary
+        // folder, not the crate.
+        let dir = tempfile::tempdir().unwrap();
+        seed_with(&lib, &dir.path().join("demo"), false);
         let days = nikgob_runtime::preview_tile_days(&lib, 7).unwrap();
         let kinds: Vec<Vec<TileKind>> = days.iter().map(|d| d.iter().map(|t| t.0).collect()).collect();
         for (d, k) in kinds.iter().enumerate() {
