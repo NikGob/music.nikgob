@@ -154,6 +154,7 @@ impl Resolver {
             local_tracks: local,
             total_tracks: total,
             liked,
+            added_at: r.added_at,
         }
     }
 
@@ -197,6 +198,7 @@ impl Resolver {
             name: a.artist.name.clone(),
             image: self.photo(a.artist.id).or_else(|| web_image(&a.artist.images)),
             liked: self.lib.is_liked(a.artist.id).unwrap_or(false),
+            track_count: a.local_track_count,
         }
     }
 
@@ -292,6 +294,7 @@ impl Resolver {
                 name: a.name.clone(),
                 image: self.photo(a.id).or_else(|| web_image(&a.images)),
                 liked,
+                track_count: 0,
             },
             top_tracks: top.iter().map(|t| self.track(t)).collect(),
             albums,

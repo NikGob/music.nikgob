@@ -107,8 +107,73 @@ fn make_cover(path: &Path, rgb: [u8; 3], seed: u32) {
     let _ = small.save(path.with_file_name("ambient.png"));
 }
 
+/// Artists with a photo (the rest show their initials), and the photo's hue.
+const PHOTOS: &[(&str, [u8; 3])] = &[
+    ("Кино", [150, 60, 50]),
+    ("Radiohead", [50, 90, 140]),
+    ("Daft Punk", [120, 70, 160]),
+    ("Земфира", [60, 130, 110]),
+    ("Massive Attack", [110, 110, 120]),
+    ("The Prodigy", [170, 80, 40]),
+];
+
+/// An artist photo: a concert from the floor, the stage lights in the hue
+/// as soft bokeh and beams through haze over the crowd's silhouette, a
+/// vignette and grain, 400×400 JPEG.
+fn make_photo(path: &Path, rgb: [u8; 3], seed: u32) {
+    let size = 400u32;
+    let base = rgb.map(f32::from);
+    let mix = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] {
+        let t = t.clamp(0.0, 1.0);
+        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    };
+    let smooth = |e0: f32, e1: f32, x: f32| {
+        let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let glow = mix(base, [255.0, 240.0, 220.0], 0.55);
+    let deep = mix(base, [0.0; 3], 0.85);
+    // Stage lights: a few soft discs, placed by the seed.
+    let lights: Vec<(f32, f32, f32)> = (0..7)
+        .map(|k| {
+            let r = |salt: u32| ((seed.wrapping_mul(2_654_435_761) ^ (k * 40_503 + salt).wrapping_mul(97_531)) % 1000) as f32 / 1000.0;
+            (r(1), r(2) * 0.6, 0.03 + r(3) * 0.06)
+        })
+        .collect();
+    let lean = ((seed % 5) as f32 - 2.0) * 0.03;
+    let img = image::RgbImage::from_fn(size, size, |x, y| {
+        let (u, v) = (x as f32 / size as f32, y as f32 / size as f32);
+        // The stage: dark below, a spot from above, haze in the hue.
+        let spot = (-((u - 0.5 - lean).powi(2)) / 0.06).exp() * (1.0 - v);
+        let mut c = mix(deep, base, 0.35 + spot * 0.9);
+        for (lx, ly, lr) in &lights {
+            let d = ((u - lx).powi(2) + (v - ly).powi(2)).sqrt();
+            c = mix(c, glow, (1.0 - smooth(lr * 0.7, *lr, d)) * 0.55);
+        }
+        // Beams from the rig, fanning down from above.
+        for (bx, tilt) in [(0.2 + lean, 0.35), (0.55 - lean, -0.1), (0.85, -0.4)] {
+            let along = (u - bx - tilt * v).abs() / (0.03 + v * 0.12);
+            c = mix(c, glow, (1.0 - smooth(0.4, 1.0, along)) * 0.28 * (1.0 - v * 0.6));
+        }
+        // The crowd: heads and raised hands against the light.
+        let k = seed as f32;
+        let crowd = 0.8
+            + 0.035 * ((u * 31.0 + k).sin() + 0.6 * (u * 57.0 + k * 1.7).sin())
+            - 0.09 * (1.0 - smooth(0.0, 0.025, ((u * 7.0 + k * 0.3).fract() - 0.5).abs())) * (u * 3.0 + k).sin().max(0.0);
+        let dark = mix([6.0; 3], base, 0.08);
+        c = mix(c, dark, smooth(crowd - 0.004, crowd + 0.004, v));
+        // Vignette and grain.
+        let vig = ((u - 0.5).powi(2) + (v - 0.45).powi(2)).sqrt();
+        c = mix(c, [0.0; 3], smooth(0.4, 0.8, vig) * 0.55);
+        let h = (x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663) ^ seed.wrapping_mul(83_492_791)) % 1000;
+        let n = (h as f32 / 1000.0 - 0.5) * 16.0;
+        image::Rgb(c.map(|ch| (ch + n).clamp(0.0, 255.0) as u8))
+    });
+    let _ = img.save(path);
+}
+
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v11";
+pub const VERSION: &str = "seed-v15";
 
 /// The intro, instrumental gap and long line exercise both lyrics layouts.
 const DEMO_LRC: &str = "[00:03.00]Свет из окна ложится на пол
@@ -160,6 +225,10 @@ pub fn seed(lib: &Library, root: &Path) {
         r.release_type = *kind;
         r.cover_ref = Some(cover.display().to_string());
         r.total_tracks = Some(tracks.len() as u32 + u32::from(i % 3 == 0) * 2);
+        // Added over the last year, the last albums of the list first, so
+        // «Недавно добавлено» and its headers have something to tell.
+        const ADDED_DAYS: [i64; 12] = [300, 200, 120, 90, 45, 40, 20, 12, 5, 3, 0, 0];
+        r.added_at = nikgob_library::now_ms() - ADDED_DAYS[i % ADDED_DAYS.len()] * DAY_MS - i as i64 * 60_000;
         let r = lib.upsert_release(&r).expect("release");
         if let Ok(img) = image::open(&cover) {
             let rgba = img.to_rgba8();
@@ -211,11 +280,54 @@ pub fn seed(lib: &Library, root: &Path) {
             all.push((t.id, i, n));
         }
     }
+    one_song_of_an_album(lib, root);
     history(lib, &all);
+    // Photos for some artists; the rest are marked as looked up, so the
+    // demo never asks a service for them.
+    let photos = root.join("..").join("photos");
+    let _ = std::fs::create_dir_all(&photos);
+    for (n, (name, a)) in artists.iter().enumerate() {
+        match PHOTOS.iter().find(|(p, _)| p == name) {
+            Some((_, rgb)) => {
+                let path = photos.join(format!("artist-{n}.jpg"));
+                make_photo(&path, *rgb, n as u32);
+                let _ = lib.set_artist_photo(a.id, Some(&path.display().to_string()));
+            }
+            None => {
+                let _ = lib.set_artist_photo(a.id, None);
+            }
+        }
+    }
     if let Ok(p) = lib.create_playlist("Вечером") {
         let _ = lib.playlist_add_many(p.id, &first_tracks);
     }
     let _ = lib.create_playlist("В дорогу");
+}
+
+/// «First Love» with one file (no number) and no track count: its page
+/// asks the (fake) YouTube Music for the rest of the album
+/// (docs/stage4.md §12.8).
+fn one_song_of_an_album(lib: &Library, root: &Path) {
+    let artist = "宇多田ヒカル";
+    let Ok(a) = lib.upsert_artist(&Artist::new(artist)) else { return };
+    let credit = ArtistCredit::single(artist, Some(a.id));
+    let dir = root.join(artist).join("1999 - First Love");
+    let _ = std::fs::create_dir_all(&dir);
+    let cover = dir.join("cover.jpg");
+    make_cover(&cover, [210, 120, 150], 99);
+    let mut r = Release::new("First Love", credit.clone());
+    r.year = Some(1999);
+    r.cover_ref = Some(cover.display().to_string());
+    let Ok(r) = lib.upsert_release(&r) else { return };
+    let mut t = Track::new("First Love", credit);
+    t.release_id = Some(r.id);
+    t.duration_ms = Some(257_000);
+    let Ok(t) = lib.upsert_track(&t) else { return };
+    let path = dir.join("First Love.wav");
+    write_tone(&path, 196.0, 24.0);
+    let mut s = Source::new(t.id, SourceKind::LocalFile, path.display().to_string(), Codec::Wav);
+    s.bitrate = Some(705);
+    let _ = lib.add_source(&s);
 }
 
 /// A number in −1..1 from the inputs (the same on every run).

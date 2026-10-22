@@ -974,6 +974,16 @@ impl Md3eUi {
         self.pages.library_tab = tab;
     }
 
+    /// Types into the library's filter (scripted screenshots).
+    pub fn set_library_filter(&mut self, text: &str) {
+        self.pages.set_library_filter(text);
+    }
+
+    /// The library as a list (true) or a grid (scripted screenshots).
+    pub fn set_library_list(ctx: &egui::Context, list: bool) {
+        pages::set_library_list(ctx, list);
+    }
+
     /// Opens Settings on a tab, scrolled to the row named `row` (scripted
     /// screenshots): `sources`, `spotify`, `youtube`, `import`, `torrents`,
     /// `appearance`, anything else = «Основные».

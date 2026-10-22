@@ -747,3 +747,42 @@ fn an_album_is_downloaded_only_when_every_track_has_its_file() {
     });
     assert!(r.rt.state().downloads.confirm.is_empty(), "nothing to confirm");
 }
+
+#[test]
+fn an_album_page_with_one_file_shows_the_whole_album_from_a_service() {
+    use nikgob_core::model::{Artist, ArtistCredit, Release, Track};
+    let lib = Library::open_in_memory().unwrap();
+    // One song of «Группа крови» is here, as a file; nothing says the album
+    // has more.
+    let kino = lib.upsert_artist(&Artist::new("Кино")).unwrap();
+    let credit = ArtistCredit::single("Кино", Some(kino.id));
+    let release = lib.upsert_release(&Release::new("Группа крови", credit.clone())).unwrap();
+    let mut t = Track::new("Группа крови", credit);
+    t.release_id = Some(release.id);
+    t.duration_ms = Some(284_500);
+    let file = lib.upsert_track(&t).unwrap();
+    lib.add_source(&Source::new(file.id, SourceKind::LocalFile, "Music/g.flac", Codec::Flac)).unwrap();
+    // YouTube Music without likes of its own to pull.
+    let yt = FakeService::youtube();
+    for id in yt.liked_ids() {
+        yt.set_liked_remotely(&id, false);
+    }
+    let r = rig(&lib, vec![Arc::new(yt)], false);
+
+    r.rt.send(Command::LoadRelease(release.id));
+    wait_for(&r.rt, "the whole tracklist on the page", |s| {
+        s.release.as_ref().is_some_and(|d| d.card.id == release.id && d.tracks.len() == 4)
+    });
+    let page = r.rt.state().release.clone().unwrap();
+    assert_eq!((page.card.local_tracks, page.card.total_tracks), (1, Some(4)), "«1 из 4 у тебя»");
+    assert_eq!(page.tracks[0].id, file.id, "the file is its first song");
+    assert!(page.tracks[1..].iter().all(|t| !t.has_local && t.source == Some(SourceKind::Youtube)), "the rest stream");
+    assert_eq!(lib.count_tracks(nikgob_library::TrackFilter::All).unwrap(), 1, "they stay outside the library");
+    wait_for(&r.rt, "the card says 1 of 4", |s| {
+        s.library.releases.iter().any(|c| c.id == release.id && c.total_tracks == Some(4) && c.local_tracks == 1)
+    });
+    // Opened again: nothing is asked twice.
+    r.rt.send(Command::LoadRelease(release.id));
+    wait_for(&r.rt, "the page again", |s| s.release.as_ref().is_some_and(|d| d.tracks.len() == 4));
+    assert_eq!(lib.tracks_of_release_all(release.id).unwrap().len(), 4);
+}

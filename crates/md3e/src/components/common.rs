@@ -144,6 +144,48 @@ pub(crate) fn fade(color: Color32, opacity: f32) -> Color32 {
 
 /// Draws the image at `uri` filling `rect` (centre-cropped) with `corner`
 /// radii, or a tonal tile with `fallback` while there is no image yet.
+/// An image cropped to a Material shape, or without one the initials on
+/// `fill` in `on` (artist avatars).
+pub(crate) fn paint_shape_avatar(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    uri: Option<&str>,
+    initials: &str,
+    shape: nikgob_shapes::MaterialShape,
+    fill: Color32,
+    on: Color32,
+) {
+    use nikgob_shapes::paint as shape_paint;
+    let cubics = shape.polygon().cubics();
+    let opts = shape_paint::FillOptions::for_ppp(ui.ctx().pixels_per_point());
+    let tex = uri
+        .and_then(|u| crate::covers::texture(ui.ctx(), u, rect.size(), 1.0))
+        .map(|t| t.id);
+    let mesh = match tex {
+        Some(t) => shape_paint::texture_mesh(
+            cubics,
+            rect,
+            0.0,
+            t,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+            &opts,
+        ),
+        None => shape_paint::fill_mesh(cubics, rect, 0.0, fill, &opts),
+    };
+    ui.painter().add(egui::Shape::mesh(mesh));
+    if tex.is_none() && !initials.is_empty() {
+        let size = (rect.height() * 0.32).max(12.0);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            initials,
+            egui::FontId::new(size, crate::typography::family(500)),
+            on,
+        );
+    }
+}
+
 pub(crate) fn paint_image(
     ui: &egui::Ui,
     rect: egui::Rect,

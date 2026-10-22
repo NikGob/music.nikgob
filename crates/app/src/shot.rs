@@ -10,6 +10,7 @@
 //! `frames` frames (like a person; the bar's debounce applies).
 //! `snap:path.png` saves a screenshot there and goes on (a sequence of
 //! pictures in one run).
+//! `album` opens the first album of the library (`album:Title` that one).
 //! `liked` opens «Любимые»; `play_clip` plays the first clip of the open
 //! playlist (`play_clip:song` its first stream song).
 //! `find_song` opens «Найти песню…» for the first clip of the open
@@ -20,6 +21,8 @@
 //! rediscover|deep_cuts|fresh_likes` plays a mix of Главная (the first mood
 //! or style mix, the bento's daylist or a tile); `radio` starts «Радио по треку» from the first
 //! library track (`radio:artist` the first artist's radio).
+//! `libfilter:text` types into the library's filter, `liblist:1` shows it
+//! as a list, `sort:artist|title|year|added` sorts its albums.
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 //! The window opens off the screen, unfocused and without a taskbar button,
 //! so a run never jumps over the user's windows; `NIKGOB_SHOT_VISIBLE=1`
@@ -174,6 +177,8 @@ impl Shot {
                     "library" => Route::Library(LibraryTab::All),
                     "tracks" => Route::Library(LibraryTab::Tracks),
                     "playlists" => Route::Library(LibraryTab::Playlists),
+                    "albums" => Route::Library(LibraryTab::Albums),
+                    "artists" => Route::Library(LibraryTab::Artists),
                     "trash" => Route::Library(LibraryTab::Trash),
                     "downloads" => Route::Downloads(DownloadsTab::Active),
                     "wishlist" => Route::Downloads(DownloadsTab::Wishlist),
@@ -187,8 +192,14 @@ impl Shot {
                 self.wait = 30;
             }
             "album" => {
-                // The first album of the loaded library.
-                if let Some(r) = state.library.releases.first() {
+                // The first album of the loaded library (`album:Title` the
+                // one of that title).
+                let r = if arg.is_empty() {
+                    state.library.releases.first()
+                } else {
+                    state.library.releases.iter().find(|r| r.title == arg)
+                };
+                if let Some(r) = r {
                     ui.navigate(ctx, Route::Release(r.id), out);
                 }
                 self.wait = 30;
@@ -516,6 +527,15 @@ impl Shot {
                 }
                 self.wait = 60;
             }
+            // The library's filter, view and sort.
+            "libfilter" => ui.set_library_filter(arg),
+            "liblist" => Md3eUi::set_library_list(ctx, arg != "0"),
+            "sort" => out.push(Command::SortReleases(match arg {
+                "title" => nikgob_view::ReleaseSort::Title,
+                "year" => nikgob_view::ReleaseSort::Year,
+                "added" => nikgob_view::ReleaseSort::Added,
+                _ => nikgob_view::ReleaseSort::Artist,
+            })),
             "light" => out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs {
                 theme: nikgob_view::ThemeMode::Light,
                 ..state.prefs.clone()

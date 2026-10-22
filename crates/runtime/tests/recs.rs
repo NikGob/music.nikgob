@@ -255,12 +255,20 @@ fn the_daily_mix_stays_the_same_all_day_until_refreshed() {
     wait_for(&s.rt, "a new daily mix", |st| st.home.mix.len() == 30 && hero_mix(st) != first);
 }
 
-fn last_start(lib: &Library) -> Event {
-    lib.recent_events(50)
-        .unwrap()
-        .into_iter()
-        .find(|e| e.event_type == EventType::Start && e.ts > now_ms() - 60_000)
-        .expect("a start just now")
+/// The start event of the track playing now: the queue is published before
+/// the event is written, so it is waited for.
+fn current_start(lib: &Library, rt: &Runtime) -> Event {
+    let playing = || rt.state().player.current.as_ref().map(|t| t.id);
+    let latest = || {
+        lib.recent_events(50)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.event_type == EventType::Start && e.ts > now_ms() - 60_000)
+    };
+    wait_until("the start of the track playing", || {
+        latest().is_some_and(|e| Some(e.track_id) == playing())
+    });
+    latest().expect("a start just now")
 }
 
 #[test]
@@ -272,7 +280,7 @@ fn play_mix_plays_and_records_the_home_context() {
     s.rt.send(Command::PlayMix { id: MixId::Daily });
     wait_until("the daily mix plays", || !s.asked.lock().unwrap().is_empty());
     wait_for(&s.rt, "its queue", |st| st.queue.next.len() == 29);
-    assert_eq!(last_start(&l.lib).context, EventContext::HomeSection);
+    assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::HomeSection);
     assert!(s.rt.state().queue.radio.is_none(), "the daily mix is not endless");
     let first = hero_mix(&s.rt.state())[0];
     assert_eq!(s.rt.state().player.current.as_ref().map(|t| t.id), Some(first));
@@ -281,7 +289,7 @@ fn play_mix_plays_and_records_the_home_context() {
     wait_for(&s.rt, "the mood's radio", |st| {
         st.queue.radio.as_ref().is_some_and(|r| r.title == "Спокойное") && st.queue.next.len() >= 9
     });
-    assert_eq!(last_start(&l.lib).context, EventContext::HomeSection);
+    assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::HomeSection);
     assert_eq!(s.rt.state().player.context_line(), "Играет из микса «Спокойное»");
 
     s.rt.send(Command::PlayMix { id: MixId::Style(0) });
@@ -323,7 +331,7 @@ fn a_radio_extends_itself_and_survives_a_restart() {
     wait_for(&s.rt, "ten more", |st| st.queue.next.len() == 10);
     let title = s.rt.state().queue.radio.clone().unwrap().title;
     assert!(title.starts_with("Радио · "), "{title}");
-    assert_eq!(last_start(&l.lib).context, EventContext::Radio);
+    assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::Radio);
 
     // Down to three left: ten more come by themselves.
     for _ in 0..7 {
@@ -398,14 +406,14 @@ fn the_bento_gets_a_daylist_and_tiles_that_play() {
     wait_for(&s.rt, "its queue", |st| st.queue.next.len() == 29);
     assert!(s.rt.state().queue.radio.is_none(), "a tile is not endless");
     assert_eq!(s.rt.state().player.context_line(), "Играет из микса «На повторе»");
-    assert_eq!(last_start(&l.lib).context, EventContext::HomeSection);
+    assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::HomeSection);
 
     // The daylist plays the picks shown, then goes on as a radio.
     s.rt.send(Command::PlayMix { id: MixId::Daylist });
     wait_for(&s.rt, "the daylist", |st| {
         st.queue.radio.as_ref().is_some_and(|r| r.title == daylist.title) && st.queue.next.len() == 29
     });
-    assert_eq!(last_start(&l.lib).context, EventContext::HomeSection);
+    assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::HomeSection);
     for _ in 0..27 {
         end_current(&s);
     }

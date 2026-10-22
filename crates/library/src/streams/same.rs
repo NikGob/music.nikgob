@@ -28,6 +28,7 @@
 //! tracks created before they existed.
 
 use nikgob_core::clip_title::{credited_names, same_dual_title, song_titles};
+use nikgob_core::translit::{prefer_cyrillic, same_translit};
 use nikgob_core::model::{SourceKind, score};
 use nikgob_core::streaming::{Service, StreamTrack, TrackKind};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -50,8 +51,8 @@ pub(crate) const CLIP_EXTRA_MS: i64 = 30_000;
 
 /// `meta` key: the repair of [`Library::merge_duplicate_stream_tracks`] ran
 /// with the rule of today (`v1` had no dual titles and no tight slack, `v2`
-/// no shared artists and no clips).
-const REPAIRED_KEY: &str = "stream_duplicates_merged.v3";
+/// no shared artists and no clips, `v3` no transliterations).
+const REPAIRED_KEY: &str = "stream_duplicates_merged.v4";
 
 /// Words a bracket or " - " tail may consist of and still be release noise.
 const NOISE: &[&str] = &[
@@ -228,9 +229,11 @@ impl Song {
         .with_names(&names)
     }
 
-    /// The main artist is the same, or one credited name is on both.
+    /// The main artist is the same, or one credited name is on both (also
+    /// when one side spells it in Latin letters: «MORGENSHTERN»).
     fn shares_artist(&self, o: &Self) -> bool {
-        self.artist == o.artist || self.artists.iter().any(|a| o.artists.contains(a))
+        let same = |a: &String, b: &String| a == b || same_translit(a, b);
+        same(&self.artist, &o.artist) || self.artists.iter().any(|a| o.artists.iter().any(|b| same(a, b)))
     }
 
     /// See the module docs.
@@ -248,7 +251,9 @@ impl Song {
         };
         apart <= SLACK_MS
             && self.shares_artist(o)
-            && (self.title == o.title || same_dual_title(&self.raw_title, &o.raw_title, song_key))
+            && (self.title == o.title
+                || same_dual_title(&self.raw_title, &o.raw_title, song_key)
+                || same_translit(&self.title, &o.title))
             && (apart <= TIGHT_SLACK_MS
                 || match (&self.album, &o.album) {
                     (Some(a), Some(b)) => albums_agree(a, b),
@@ -265,7 +270,40 @@ fn albums_agree(a: &str, b: &str) -> bool {
     let starts = |long: &str, short: &str| {
         long == short || long.strip_prefix(short).is_some_and(|r| r.starts_with(' '))
     };
-    starts(a, b) || starts(b, a)
+    starts(a, b) || starts(b, a) || same_translit(a, b)
+}
+
+/// The track `id` (and its album) takes the Cyrillic spelling of `other`'s
+/// title (album) when its own is that title transliterated («ChETYRE
+/// UKRAINKI» → «ЧЕТЫРЕ УКРАИНКИ»).
+pub(crate) fn prefer_cyrillic_in(conn: &Connection, id: &str, other_title: &str, other_album: Option<&str>) -> Result<()> {
+    let Some((title, release, album)) = conn
+        .query_row(
+            "SELECT t.title, t.release_id, r.title FROM track t LEFT JOIN release r ON r.id = t.release_id
+              WHERE t.id = ?1",
+            [id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let better = prefer_cyrillic(&title, other_title);
+    if better != title {
+        conn.execute(
+            "UPDATE track SET title = ?2, title_key = ?3 WHERE id = ?1",
+            params![id, better, crate::util::sort_key(better)],
+        )?;
+    }
+    if let (Some(release), Some(album), Some(other)) = (release, album, other_album) {
+        let better = prefer_cyrillic(&album, other);
+        if better != album {
+            let key = crate::util::sort_key(better);
+            conn.execute("UPDATE release SET title = ?2, title_key = ?3 WHERE id = ?1", params![release, better, key])?;
+            conn.execute("UPDATE track SET album_key = ?2 WHERE release_id = ?1", params![release, key])?;
+        }
+    }
+    Ok(())
 }
 
 /// A library track the song already is, for a stream track whose remote id
@@ -525,7 +563,13 @@ impl Library {
                 }
                 let Some((cand, keep_theirs)) = other else { continue };
                 let (from, into) = if keep_theirs { (&id, &cand) } else { (&cand, &id) };
+                let (from_title, from_album): (String, Option<String>) = tx.query_row(
+                    "SELECT t.title, r.title FROM track t LEFT JOIN release r ON r.id = t.release_id WHERE t.id = ?1",
+                    [from],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
                 if merge_track_in(tx, super::parse(from)?, super::parse(into)?, device.as_str(), now)? {
+                    prefer_cyrillic_in(tx, into, &from_title, from_album.as_deref())?;
                     log::info!("library: stream track {from} is {into}, merged");
                     merged += 1;
                 }

@@ -6,6 +6,7 @@ mod bento;
 mod home;
 mod library;
 mod search;
+mod shelf;
 mod settings;
 pub(crate) mod settings_help;
 mod sources;
@@ -87,6 +88,10 @@ pub struct PageState {
     /// A page asked for the search bar («Найти музыку» on an empty Home).
     pub focus_search: bool,
     pub(crate) library_tab: LibraryTab,
+    /// The instant filter of Библиотека (the current tab by title and
+    /// artist), and what «Треки» last asked the runtime for.
+    library_filter: String,
+    track_filter_sent: String,
     release_filter: usize,
     /// Library albums by source: 0 all, 1 with files, 2 stream.
     release_source: usize,
@@ -131,7 +136,16 @@ pub struct PageState {
     stream_after_create: Option<(String, Vec<nikgob_view::RemoteId>)>,
 }
 
+/// The library as a list (true) or a grid.
+pub(crate) fn set_library_list(ctx: &Context, list: bool) {
+    library::set_list_view(ctx, list);
+}
+
 impl PageState {
+    pub(crate) fn set_library_filter(&mut self, text: &str) {
+        self.library_filter = text.to_owned();
+    }
+
     /// Opens the "В плейлист" picker for stream tracks.
     pub(crate) fn add_stream_to_playlist(&mut self, tracks: Vec<nikgob_view::RemoteId>, anchor: Option<Rect>) {
         self.pending_add_stream = Some(tracks);
