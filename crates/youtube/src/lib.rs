@@ -26,6 +26,9 @@
 //!   the id of the artist's radio ([`StreamService::artist_radio`], one
 //!   more request). [`StreamService::cached_audio`] hands out a complete
 //!   file of the audio cache, never the network.
+//! * **Suggestions** (docs/stage4.md §12.3, see `suggest`), signed in only,
+//!   one request a feed in the signed-in lane: the home's quick picks and
+//!   listen again, and the history.
 //!
 //! Every future runs on the service's own small tokio runtime (so the pooled
 //! connections and timers always belong to one runtime) and is awaited
@@ -41,6 +44,7 @@ mod memo;
 mod player;
 mod range;
 mod remux;
+mod suggest;
 
 use std::future::Future;
 use std::io::Read;
@@ -54,7 +58,7 @@ use std::time::Duration;
 use nikgob_core::streaming::{
     Account, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput, Played, SearchKind,
     SearchParts, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch,
-    StreamService, StreamTrack, format, join_names,
+    StreamService, StreamTrack, SuggestionFeed, Suggestions, format, join_names,
 };
 use limit::Lane;
 use rustypipe::client::{ClientType, RustyPipe};
@@ -1244,6 +1248,24 @@ impl StreamService for Youtube {
 
     fn clear_cache(&self) {
         self.inner.cache.clear();
+    }
+
+    fn suggestion_feeds(&self) -> &'static [SuggestionFeed] {
+        &[SuggestionFeed::Home, SuggestionFeed::History]
+    }
+
+    /// The home (`FEmusic_home`: quick picks, listen again) or the history
+    /// (`FEmusic_history`), one request with the cookies.
+    fn suggestions(&self, feed: SuggestionFeed) -> BoxFuture<'_, Result<Suggestions, StreamError>> {
+        self.run(move |inner| async move {
+            inner.need_login()?;
+            let i = &inner;
+            match feed {
+                SuggestionFeed::Home => i.gate.run(Lane::SignedIn, suggest::home(&i.rp)).await,
+                SuggestionFeed::History => i.gate.run(Lane::SignedIn, suggest::history(&i.rp)).await,
+                _ => Err(StreamError::Unsupported),
+            }
+        })
     }
 
     fn web_url(&self, kind: EntityKind, id: &str) -> String {
