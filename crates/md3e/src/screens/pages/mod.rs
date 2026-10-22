@@ -2,6 +2,7 @@
 
 mod detail;
 mod downloads;
+mod bento;
 mod home;
 mod library;
 mod search;

@@ -32,6 +32,10 @@
 //! - `fake:extending` — the radio of the queue is looking for more.
 //! - `fake:no-recs` — Главная before any analysis and history: no moods,
 //!   style mixes or discoveries.
+//! - `fake:bento` — the board of Главная full: the daylist and all five
+//!   tiles, with the demo library's covers. `fake:bento:2` — the daylist
+//!   and two tiles; `fake:bento:no-daylist` — no daylist, three tiles
+//!   («Твой микс» takes the big spot).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -57,6 +61,8 @@ pub struct Fakes {
     analysis: bool,
     extending: bool,
     no_recs: bool,
+    /// `fake:bento`: how many tiles, and whether there is a daylist.
+    bento: Option<(usize, bool)>,
 }
 
 impl Fakes {
@@ -84,6 +90,9 @@ impl Fakes {
             "analysis" => self.analysis = true,
             "extending" => self.extending = true,
             "no-recs" => self.no_recs = true,
+            "bento" => self.bento = Some((5, true)),
+            "bento:2" => self.bento = Some((2, true)),
+            "bento:no-daylist" => self.bento = Some((3, false)),
             _ => return false,
         }
         true
@@ -106,6 +115,7 @@ impl Fakes {
             || self.analysis
             || self.extending
             || self.no_recs
+            || self.bento.is_some()
     }
 
     /// `state` with the fakes laid over it.
@@ -193,6 +203,9 @@ impl Fakes {
             s.home.style_mixes.clear();
             s.home.discover.clear();
             s.home.new_releases.clear();
+        }
+        if let Some((n, daylist)) = self.bento {
+            bento(&mut s, n, daylist);
         }
         if self.empty_home {
             s.home = nikgob_view::HomeView { greeting_hour: s.home.greeting_hour, ..Default::default() };
@@ -403,4 +416,26 @@ fn wishlist() -> WishlistView {
         }
     }
     WishlistView { loaded: true, items, by_album, by_artist, counts }
+}
+
+/// The board of Главная: the daylist (when `daylist`) and the first `n`
+/// tiles, with covers of the demo library.
+fn bento(s: &mut ViewState, n: usize, daylist: bool) {
+    use nikgob_view::{MixCard, MixId};
+    let covers: Vec<nikgob_view::Cover> = s.library.releases.iter().filter_map(|r| r.cover.clone()).collect();
+    let pick = |from: usize, k: usize| -> Vec<nikgob_view::Cover> {
+        (0..k).filter_map(|i| covers.get((from + i) % covers.len().max(1)).cloned()).collect()
+    };
+    let card = |id, title: &str, subtitle: &str, covers| MixCard { id, title: title.into(), subtitle: subtitle.into(), covers };
+    s.home.daylist = daylist.then(|| {
+        card(MixId::Daylist, "Тягучий вечер четверга", "Massive Attack, Кино и другие · до 23:00", pick(0, 4))
+    });
+    let tiles = [
+        card(MixId::OnRepeat, "На повторе", "25 треков · за месяц", pick(4, 1)),
+        card(MixId::TimeCapsule, "Год назад", "октябрь 2025 · 18 треков", pick(5, 1)),
+        card(MixId::Rediscover, "Забытое любимое", "22 трека · не играли с лета", pick(6, 1)),
+        card(MixId::DeepCuts, "Глубже у любимых", "Кино, Аквариум и другие", pick(7, 1)),
+        card(MixId::FreshLikes, "Свежие лайки", "14 треков · за неделю", pick(8, 1)),
+    ];
+    s.home.tiles = tiles.into_iter().take(n).collect();
 }
