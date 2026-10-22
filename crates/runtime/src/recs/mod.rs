@@ -351,7 +351,7 @@ fn main_artists(snap: &Snapshot, picks: &[Pick]) -> (Vec<ArtistId>, usize) {
     }
     let artists = count.len();
     // Stable: equal counts keep the order of the picks.
-    count.sort_by(|a, b| b.1.cmp(&a.1));
+    count.sort_by_key(|a| std::cmp::Reverse(a.1));
     (count.into_iter().take(2).map(|(a, _)| a).collect(), artists)
 }
 
