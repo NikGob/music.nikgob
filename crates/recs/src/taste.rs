@@ -19,6 +19,9 @@
 //!   the day (11–18), the evening (18–23) and the night (23–6), local time.
 //! * **Dislikes** («Не рекомендовать»): tracks, and every track of an
 //!   artist, kept out of everything.
+//! * **Windows** for the home's tiles: per track, the completes of the last
+//!   [`ON_REPEAT_MS`], the plays within [`YEAR_AGO_SPAN_MS`] of this day a
+//!   year ago and when it was liked.
 //!
 //! One pass over the events sorted by time, with per-track state in dense
 //! vectors indexed by catalog position: 100 000 events over 50 000 tracks
@@ -51,6 +54,12 @@ pub const SESSION_GAP_MS: i64 = 30 * 60 * 1000;
 pub const CO_WINDOW: usize = 8;
 /// Plays a track needs before its own day-part profile counts.
 const DAYPART_MIN_PLAYS: u16 = 3;
+/// «На повторе» and «Свежие лайки» look this far back.
+pub const ON_REPEAT_MS: i64 = 30 * DAY_MS;
+/// «Год назад»: this long before now…
+pub const YEAR_MS: i64 = 365 * DAY_MS;
+/// …give or take this much.
+pub const YEAR_AGO_SPAN_MS: i64 = 14 * DAY_MS;
 
 /// One track of the catalog: what the engine may pick (library tracks and
 /// liked streams), with its artists (main first) and release.
@@ -167,6 +176,26 @@ impl DayPart {
     pub const fn index(self) -> usize {
         self as usize
     }
+
+    /// The hour the part ends at (local time).
+    pub const fn end_hour(self) -> u32 {
+        match self {
+            Self::Morning => 11,
+            Self::Day => 18,
+            Self::Evening => 23,
+            Self::Night => 6,
+        }
+    }
+
+    /// The local day (days since 1970-01-01) the part of the day at `ts`
+    /// belongs to: a night belongs to the day it started, so 02:00 on a
+    /// Friday is Thursday's night.
+    pub fn day_of(ts: UnixMs, utc_offset_min: i32) -> i64 {
+        let local = ts + i64::from(utc_offset_min) * 60_000;
+        let day = local.div_euclid(DAY_MS);
+        let hour = (local.rem_euclid(DAY_MS) / HOUR_MS) as u32;
+        if hour < Self::Night.end_hour() { day - 1 } else { day }
+    }
 }
 
 /// One event of the listening history, as much of it as the taste needs.
@@ -198,6 +227,8 @@ pub struct TasteInput {
     pub events: Vec<Play>,
     /// Tracks liked now.
     pub likes: Vec<TrackId>,
+    /// When the likes were set (a like missing here is an old one).
+    pub like_times: Vec<(TrackId, UnixMs)>,
     /// Playlist entries: a track and when it was added (one per entry).
     pub playlist_entries: Vec<(TrackId, UnixMs)>,
     /// «Не рекомендовать» tracks and artists.
@@ -217,7 +248,12 @@ pub struct Taste {
     plays: Vec<u32>,
     last_played: Vec<Option<UnixMs>>,
     liked: Vec<bool>,
+    liked_time: Vec<Option<UnixMs>>,
     daypart: Vec<[u16; 4]>,
+    /// Completes within [`ON_REPEAT_MS`].
+    recent_completes: Vec<u16>,
+    /// Plays within [`YEAR_AGO_SPAN_MS`] of now − [`YEAR_MS`].
+    year_ago: Vec<u16>,
     artist_affinity: HashMap<ArtistId, f32>,
     co_pairs: HashMap<(ArtistId, ArtistId), f32>,
     co: HashMap<ArtistId, Vec<(ArtistId, f32)>>,
@@ -245,6 +281,8 @@ impl Taste {
         let mut last_played: Vec<Option<UnixMs>> = vec![None; n];
         let mut liked = vec![false; n];
         let mut daypart = vec![[0u16; 4]; n];
+        let mut recent_completes = vec![0u16; n];
+        let mut year_ago = vec![0u16; n];
         let mut open: Vec<Option<UnixMs>> = vec![None; n];
         let mut last_complete: Vec<Option<UnixMs>> = vec![None; n];
 
@@ -281,6 +319,9 @@ impl Taste {
                     // A complete without its start (some imports) is a play too.
                     counted_play = open[i].take().is_none();
                     affinity[i] += W_COMPLETE * decay(now, ts);
+                    if now - ts < ON_REPEAT_MS {
+                        recent_completes[i] = recent_completes[i].saturating_add(1);
+                    }
                     last_complete[i] = Some(ts);
                     last_played[i] = last_played[i].max(Some(ts));
                 }
@@ -299,6 +340,9 @@ impl Taste {
             last_played[i] = last_played[i].max(Some(ts));
             let part = DayPart::at(ts, input.utc_offset_min).index();
             daypart[i][part] = daypart[i][part].saturating_add(1);
+            if (ts - (now - YEAR_MS)).abs() <= YEAR_AGO_SPAN_MS {
+                year_ago[i] = year_ago[i].saturating_add(1);
+            }
 
             if last_play_ts.is_none_or(|l| ts - l >= SESSION_GAP_MS) {
                 tail.clear();
@@ -330,6 +374,14 @@ impl Taste {
             {
                 liked[i] = true;
                 affinity[i] += W_LIKE;
+            }
+        }
+        let mut liked_time: Vec<Option<UnixMs>> = vec![None; n];
+        for (id, at) in &input.like_times {
+            if let Some(i) = catalog.position(*id)
+                && liked[i]
+            {
+                liked_time[i] = liked_time[i].max(Some(*at));
             }
         }
         for (id, added) in &input.playlist_entries {
@@ -378,7 +430,10 @@ impl Taste {
             plays,
             last_played,
             liked,
+            liked_time,
             daypart,
+            recent_completes,
+            year_ago,
             artist_affinity,
             co_pairs,
             co,
@@ -416,6 +471,26 @@ impl Taste {
 
     pub fn liked_at(&self, i: usize) -> bool {
         self.liked.get(i).copied().unwrap_or(false)
+    }
+
+    /// When the track at `i` was liked (`None`: not liked, or not known).
+    pub fn liked_time_at(&self, i: usize) -> Option<UnixMs> {
+        self.liked_time.get(i).copied().flatten()
+    }
+
+    /// Completes of the track at `i` within [`ON_REPEAT_MS`].
+    pub fn recent_completes_at(&self, i: usize) -> u32 {
+        self.recent_completes.get(i).map_or(0, |c| u32::from(*c))
+    }
+
+    /// Plays of the track at `i` around this day a year ago.
+    pub fn year_ago_plays_at(&self, i: usize) -> u32 {
+        self.year_ago.get(i).map_or(0, |c| u32::from(*c))
+    }
+
+    /// Plays of the track at `i` in each part of the day.
+    pub fn daypart_plays_at(&self, i: usize) -> [u16; 4] {
+        self.daypart.get(i).copied().unwrap_or_default()
     }
 
     /// Whether anything was ever liked, played or put in a playlist with
@@ -509,6 +584,7 @@ mod tests {
                 play(tid(99), now, EventType::Complete, None),
             ],
             likes: vec![t(3), t(3)],
+            like_times: vec![(t(3), now - DAY_MS), (t(4), now)],
             playlist_entries: vec![(t(4), now - 2 * HALF_LIFE_MS)],
             disliked_tracks: vec![t(5)],
             disliked_artists: vec![aid(1)],
@@ -526,6 +602,10 @@ mod tests {
         assert_eq!(taste.plays_at(2), 1, "a complete without a start is a play");
         assert_eq!(taste.last_played_at(0), Some(now - HOUR_MS));
         assert!(taste.liked_at(3));
+        assert_eq!(taste.liked_time_at(3), Some(now - DAY_MS));
+        assert_eq!(taste.liked_time_at(4), None, "a time without a like");
+        assert_eq!(taste.recent_completes_at(0), 1);
+        assert_eq!(taste.recent_completes_at(2), 0, "90 days ago");
         assert!(taste.blocks(&cat.tracks()[5]));
         assert!(taste.blocks(&cat.tracks()[1]), "artist 1 is disliked");
         assert!(!taste.blocks(&cat.tracks()[0]));
@@ -593,6 +673,39 @@ mod tests {
         assert!((taste.daypart_bonus_at(0, DayPart::Evening) - 0.75).abs() < 1e-6);
         assert!((taste.daypart_bonus_at(0, DayPart::Morning) + 0.25).abs() < 1e-6);
         assert_eq!(taste.day_profile()[DayPart::Evening.index()], 1.0);
+    }
+
+    #[test]
+    fn windows_of_the_tiles() {
+        let now = 1_000 * DAY_MS;
+        let cat = Catalog::new((0..3).map(|i| info(i, &[0], None)));
+        let c = |i: u128, ts| play(tid(i), ts, EventType::Complete, None);
+        let events = vec![
+            c(0, now - 10 * DAY_MS),
+            c(0, now - 29 * DAY_MS),
+            c(0, now - 31 * DAY_MS),
+            c(1, now - YEAR_MS + 10 * DAY_MS),
+            c(1, now - YEAR_MS - 13 * DAY_MS),
+            c(1, now - YEAR_MS - 20 * DAY_MS),
+            play(tid(2), now - YEAR_MS, EventType::Start, None),
+        ];
+        let taste = Taste::build(&cat, &TasteInput { events, ..Default::default() }, now);
+        assert_eq!(taste.recent_completes_at(0), 2);
+        assert_eq!(taste.year_ago_plays_at(0), 0);
+        assert_eq!(taste.year_ago_plays_at(1), 2, "±14 days");
+        assert_eq!(taste.year_ago_plays_at(2), 1, "a start is a play");
+    }
+
+    #[test]
+    fn a_night_belongs_to_the_day_it_started() {
+        let day = 3 * DAY_MS;
+        assert_eq!(DayPart::day_of(day + 2 * HOUR_MS, 0), 2);
+        assert_eq!(DayPart::day_of(day + 6 * HOUR_MS, 0), 3);
+        assert_eq!(DayPart::day_of(day + 23 * HOUR_MS, 0), 3);
+        // 21:00 UTC is midnight in Moscow: still the night of that day.
+        assert_eq!(DayPart::day_of(day + 21 * HOUR_MS, 180), 3);
+        assert_eq!(DayPart::day_of(day + 4 * HOUR_MS, 180), 3, "07:00 in Moscow");
+        assert_eq!(DayPart::day_of(day + 2 * HOUR_MS, 180), 2, "05:00 in Moscow");
     }
 
     #[test]

@@ -21,7 +21,9 @@
 //!
 //! An artist's radio is ~70% the artist's own tracks by affinity
 //! ([`ARTIST_OWN_SHARE`]), the rest similar by sound and co-listening; the
-//! artist rule of diversity does not apply to that artist.
+//! artist rule of diversity does not apply to that artist. A daylist
+//! ([`crate::daylist`]) draws from the tracks near its centre on the mood
+//! axes and weighs the bonus of its own part of the day double.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -34,7 +36,8 @@ use crate::index::euclid;
 use crate::mood::Mood;
 use crate::pick::{Diversity, Item, NewTrack, Pick, Placed, Reason, Recs, Slot, arrange, new_count, select_diverse, token_of_artist};
 use crate::rng::Rng;
-use crate::taste::HOUR_MS;
+use crate::mood::Axes;
+use crate::taste::{DayPart, HOUR_MS};
 
 /// Served items remembered (never repeated while remembered).
 const SERVED_CAP: usize = 2_000;
@@ -61,6 +64,8 @@ pub const SKIP_PUSH: f32 = 1.5;
 const W_AFFINITY: f32 = 0.8;
 const W_RELATION: f32 = 0.3;
 const W_DAYPART: f32 = 0.3;
+/// The day part's weight in a daylist.
+const W_DAYLIST_DAYPART: f32 = 0.6;
 const JITTER: f32 = 0.4;
 
 /// What a radio or an endless mix grows from.
@@ -88,6 +93,9 @@ pub enum RadioSeed {
     },
     /// «Открытия»: only new music while the pool lasts, then favourites.
     Discover,
+    /// «Дейлист» of a part of the day, around its centre on the mood axes
+    /// (energy, brightness, steadiness): see [`crate::daylist`].
+    Daylist { part: DayPart, centre: [f32; 3] },
 }
 
 /// How a served track ended (session learning).
@@ -247,6 +255,7 @@ impl RadioState {
                 (w_total > 0.0).then(|| sum.map(|s| s / w_total))
             }
             RadioSeed::Style { centroid, .. } => <[f32; DIM]>::try_from(centroid.as_slice()).ok(),
+            RadioSeed::Daylist { centre, .. } => recs.daylist_point(Axes::from_array(*centre)),
             RadioSeed::Mood(_) | RadioSeed::Discover => None,
         }
     }
@@ -393,6 +402,7 @@ impl RadioState {
             for (i, _) in nearest_embedded(recs, &v, SEED_NEIGHBOURS, &ok) {
                 let reason = match &self.seed {
                     RadioSeed::Style { index, .. } => Reason::Style(*index),
+                    RadioSeed::Daylist { part, .. } => Reason::DayPart(*part),
                     _ => Reason::SoundsLikeSeed,
                 };
                 add(&mut cands, i, reason, 0.0);
@@ -440,6 +450,22 @@ impl RadioState {
                     }
                 }
             }
+            RadioSeed::Daylist { part, centre } => {
+                for (id, closeness) in recs.daylist_pool(Axes::from_array(*centre)) {
+                    if let Some(i) = recs.catalog.position(id).filter(|&i| ok(i)) {
+                        add(&mut cands, i, Reason::DayPart(*part), closeness);
+                    }
+                }
+                // Tracks without a sound join by being played in this part.
+                for i in 0..recs.catalog.len() {
+                    let plays = recs.taste.daypart_plays_at(i);
+                    let here = f32::from(plays[part.index()]);
+                    if here > 0.0 && ok(i) && !recs.index.contains(recs.info(i).id) {
+                        let share = here / plays.iter().map(|p| f32::from(*p)).sum::<f32>();
+                        add(&mut cands, i, Reason::DayPart(*part), share);
+                    }
+                }
+            }
             _ => {}
         }
         // Never dry: favourites, then anything.
@@ -459,7 +485,10 @@ impl RadioState {
             }
         }
 
-        let part = recs.taste.day_part();
+        let (part, w_daypart) = match &self.seed {
+            RadioSeed::Daylist { part, .. } => (*part, W_DAYLIST_DAYPART),
+            _ => (recs.taste.day_part(), W_DAYPART),
+        };
         let mut keys: Vec<usize> = cands.keys().copied().collect();
         keys.sort_unstable();
         let mut slots: Vec<Slot> = keys
@@ -475,7 +504,7 @@ impl RadioState {
                 s.score = snd
                     + W_AFFINITY * aff
                     + W_RELATION * bonus
-                    + W_DAYPART * recs.taste.daypart_bonus_at(i, part)
+                    + w_daypart * recs.taste.daypart_bonus_at(i, part)
                     + rng.f32() * JITTER;
                 s
             })

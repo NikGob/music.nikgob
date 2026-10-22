@@ -82,6 +82,23 @@ impl Axes {
             steadiness: -(z[LOUDNESS_STD] + z[CENTROID_STD]) / 2.0,
         }
     }
+
+    pub const fn to_array(self) -> [f32; 3] {
+        [self.energy, self.brightness, self.steadiness]
+    }
+
+    pub const fn from_array(a: [f32; 3]) -> Self {
+        Self {
+            energy: a[0],
+            brightness: a[1],
+            steadiness: a[2],
+        }
+    }
+
+    pub fn distance(self, other: Self) -> f32 {
+        let (a, b) = (self.to_array(), other.to_array());
+        crate::index::euclid(&a, &b)
+    }
 }
 
 impl Mood {
@@ -108,6 +125,24 @@ impl Mood {
             Self::Bright => a.brightness,
             Self::Focus => a.steadiness - a.energy.max(0.0),
             Self::Drive => (a.energy + a.steadiness) / 2.0,
+        }
+    }
+
+    /// Where the mood lies on the axes, half a standard deviation out
+    /// (the daylist of a part of the day without its own history).
+    pub fn direction(self) -> Axes {
+        let (energy, brightness, steadiness) = match self {
+            Self::Calm => (-0.5, 0.0, 0.0),
+            Self::Energetic => (0.5, 0.0, 0.0),
+            Self::Dark => (0.0, -0.5, 0.0),
+            Self::Bright => (0.0, 0.5, 0.0),
+            Self::Focus => (-0.25, 0.0, 0.5),
+            Self::Drive => (0.35, 0.0, 0.35),
+        };
+        Axes {
+            energy,
+            brightness,
+            steadiness,
         }
     }
 

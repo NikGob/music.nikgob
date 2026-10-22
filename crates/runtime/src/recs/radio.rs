@@ -1,6 +1,7 @@
 //! The radio queue (docs/stage4.md §4): «Радио по треку», an artist's
-//! radio and the endless mixes (moods, style mixes, «Новое для тебя») play
-//! as a queue that extends itself.
+//! radio and the endless mixes (moods, style mixes, «Новое для тебя», the
+//! daylist) play as a queue that extends itself. The daylist starts with
+//! the picks the home shows ([`Worker::start_radio_picked`]).
 //!
 //! * The queue holds the engine's [`Engine`] state. When three tracks or
 //!   fewer are left, the next ten are picked on a thread of their own from
@@ -235,6 +236,44 @@ impl Worker {
         }
     }
 
+    /// Plays a radio picked already (the home's daylist): `picks` first,
+    /// then on from `state`, which served them; `streams` are the stream
+    /// picks' tracks.
+    pub(crate) fn start_radio_picked(
+        &mut self,
+        state: Engine,
+        picks: Vec<Pick>,
+        streams: Vec<StreamTrack>,
+        title: String,
+        ctx: EventContext,
+    ) {
+        let r = &mut self.recs.radio;
+        r.seq += 1;
+        let id = r.seq;
+        self.streaming.learn(&streams);
+        r.run = Some(RadioRun {
+            id,
+            state: state.clone(),
+            title,
+            ctx,
+            seed: fastrand::u64(..),
+            queue_gen: None,
+            streams: HashMap::new(),
+            pool: streams.into_iter().map(|t| (t.id.clone(), t)).collect(),
+            // As if its first picks were on their way: new music found
+            // meanwhile joins the state they come with.
+            extending: true,
+            want: false,
+            pending: Vec::new(),
+            pending_new: Vec::new(),
+            resume: false,
+        });
+        log::info!("radio «{}» starts from its picks ({:?})", self.recs.radio.run.as_ref().map_or("", |r| &r.title), state.seed);
+        self.radio_add_discoveries();
+        self.radio_fetch_new();
+        self.radio_extended(id, state, picks);
+    }
+
     /// The radio still plays its queue (any other playback ended it).
     fn radio_alive(&mut self) -> bool {
         let generation = self.queue.generation();
@@ -464,7 +503,10 @@ impl Worker {
     /// The mixes (and «Новое для тебя») take the discoveries as new music.
     fn radio_add_discoveries(&mut self) {
         let Some(run) = &self.recs.radio.run else { return };
-        if !matches!(run.state.seed, RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover) {
+        if !matches!(
+            run.state.seed,
+            RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover | RadioSeed::Daylist { .. }
+        ) {
             return;
         }
         let found = self.discoveries();
@@ -512,7 +554,7 @@ impl Worker {
                 Service::Spotify => {}
             },
             RadioSeed::Artist(a) => calls.extend(artist_call(self, a, &[Service::Deezer, Service::Youtube])),
-            RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover => {}
+            RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover | RadioSeed::Daylist { .. } => {}
         }
         // The cache first; the rest from services that can be asked now.
         let now = nikgob_library::now_ms();

@@ -16,8 +16,9 @@
 //! playlist (`find_song:Title` for the clip shown so, `find_song:song` «Другая
 //! версия…» for its first stream song); `replace_first` replaces it with the
 //! dialog's first result in the scope the dialog would offer.
-//! `play_mix:daily|discover|mood|style` plays a mix of Главная (the first
-//! mood or style mix); `radio` starts «Радио по треку» from the first
+//! `play_mix:daily|discover|mood|style|daylist|on_repeat|time_capsule|
+//! rediscover|deep_cuts|fresh_likes` plays a mix of Главная (the first mood
+//! or style mix, the bento's daylist or a tile); `radio` starts «Радио по треку» from the first
 //! library track (`radio:artist` the first artist's radio).
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 //! The window opens off the screen, unfocused and without a taskbar button,
@@ -490,6 +491,12 @@ impl Shot {
                     "discover" => Some(nikgob_view::MixId::Discover),
                     "mood" => h.moods.first().map(|m| m.id),
                     "style" => h.style_mixes.first().map(|m| m.id),
+                    "daylist" => Some(nikgob_view::MixId::Daylist),
+                    "on_repeat" => Some(nikgob_view::MixId::OnRepeat),
+                    "time_capsule" => Some(nikgob_view::MixId::TimeCapsule),
+                    "rediscover" => Some(nikgob_view::MixId::Rediscover),
+                    "deep_cuts" => Some(nikgob_view::MixId::DeepCuts),
+                    "fresh_likes" => Some(nikgob_view::MixId::FreshLikes),
                     _ => Some(nikgob_view::MixId::Daily),
                 };
                 if let Some(id) = id {

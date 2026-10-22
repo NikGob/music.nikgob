@@ -7,9 +7,12 @@
 //! albums fall into three styles (Russian rock, electronic, dark and
 //! dreamy), tracks within a style spread over energy and brightness so
 //! every mood has its own, and plays lean to the evening and the night
-//! with a few early skips. The home then shows «Твой микс», six moods,
-//! three style mixes, and (from the fake services) discoveries and new
-//! releases.
+//! with a few early skips. The home then shows «Твой микс», the daylist,
+//! six moods, three style mixes, and (from the fake services) discoveries
+//! and new releases. For the bento's tiles the history also has a month of
+//! repeats, plays a year ago, two albums loved half a year ago and not
+//! since, the last two songs of every album played only once, and fresh
+//! likes.
 
 use std::path::Path;
 
@@ -41,6 +44,15 @@ const STYLES: &[usize] = &[0, 0, 2, 1, 0, 1, 2, 2, 2, 1, 0, 1];
 const STYLE_WEIGHT: [f32; 3] = [1.0, 0.7, 0.55];
 /// Days of history.
 const HISTORY_DAYS: i64 = 90;
+/// Albums loved half a year ago and not played since («Забытое любимое»).
+const FORGOTTEN: &[usize] = &[6, 9];
+/// Albums whose first songs are on repeat this month («На повторе»).
+const REPEATED: &[usize] = &[0, 1, 4, 10];
+/// Albums played around this day a year ago («Год назад»).
+const YEAR_AGO: &[usize] = &[2, 3, 11];
+/// The last this many songs of every album are played once
+/// («Глубже у любимых»).
+const DEEP: usize = 2;
 const DAY_MS: i64 = 24 * 3600 * 1000;
 
 /// A cover: abstract art from the hue (sun over stripes, diagonal bands,
@@ -96,7 +108,7 @@ fn make_cover(path: &Path, rgb: [u8; 3], seed: u32) {
 }
 
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v10";
+pub const VERSION: &str = "seed-v11";
 
 /// The intro, instrumental gap and long line exercise both lyrics layouts.
 const DEMO_LRC: &str = "[00:03.00]Свет из окна ложится на пол
@@ -243,7 +255,8 @@ fn vector(style: usize, album: usize, n: usize) -> Vec<f32> {
 
 /// Three months of listening: every track completed once long ago, then
 /// sessions of one style a day (the first style most), mostly in the
-/// evening and at night, with a few early skips.
+/// evening and at night, with a few early skips; and the tiles' own
+/// history (see [`FORGOTTEN`], [`REPEATED`], [`YEAR_AGO`], [`DEEP`]).
 fn history(lib: &Library, tracks: &[(TrackId, usize, usize)]) {
     let now = nikgob_library::now_ms();
     let today = now - now.rem_euclid(DAY_MS);
@@ -263,9 +276,26 @@ fn history(lib: &Library, tracks: &[(TrackId, usize, usize)]) {
         end.context = EventContext::Album;
         let _ = lib.record_event_raw(&end);
     };
+    let deep = |i: usize, n: usize| n + DEEP >= ALBUMS[i].5.len();
     for (k, (t, i, n)) in tracks.iter().enumerate() {
+        if FORGOTTEN.contains(i) {
+            // Loved half a year ago: four completes each.
+            for r in 0..4 {
+                play(*t, today - (150 + r * 9) * DAY_MS + 21 * 3_600_000 + k as i64 * 60_000, false);
+            }
+            continue;
+        }
         let day = HISTORY_DAYS - 1 - (noise(*i, *n, 4, 23).abs() * 30.0) as i64;
         play(*t, today - day * DAY_MS + 20 * 3_600_000 + k as i64 * 60_000, false);
+        if YEAR_AGO.contains(i) && !deep(*i, *n) {
+            let day = 365 + (noise(*i, *n, 11, 59) * 10.0) as i64;
+            play(*t, today - day * DAY_MS + 19 * 3_600_000 + k as i64 * 60_000, false);
+        }
+        if REPEATED.contains(i) && *n < 3 {
+            for day in (1..28).step_by(3) {
+                play(*t, today - day * DAY_MS + 18 * 3_600_000 + k as i64 * 60_000, false);
+            }
+        }
     }
     // Hours of the sessions (UTC), evening and night first.
     const HOURS: [i64; 8] = [19, 20, 21, 22, 23, 1, 9, 14];
@@ -279,7 +309,10 @@ fn history(lib: &Library, tracks: &[(TrackId, usize, usize)]) {
         if noise(d, 3, 8, 41).abs() > STYLE_WEIGHT[style] {
             continue;
         }
-        let pool: Vec<&(TrackId, usize, usize)> = tracks.iter().filter(|(_, i, _)| STYLES[*i] == style).collect();
+        let pool: Vec<&(TrackId, usize, usize)> = tracks
+            .iter()
+            .filter(|(_, i, n)| STYLES[*i] == style && !FORGOTTEN.contains(i) && !deep(*i, *n))
+            .collect();
         let mut ts = today - day * DAY_MS + hour * 3_600_000;
         for p in 0..(6 + (noise(d, 4, 9, 43).abs() * 6.0) as usize) {
             let (t, i, n) = pool[(noise(d, p, 10, 47).abs() * (pool.len() as f32 - 0.01)) as usize];

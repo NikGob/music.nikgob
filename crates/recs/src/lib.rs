@@ -12,11 +12,15 @@
 //!   diversity and the smooth order shared by every selection.
 //! * [`daily`]: «Твой микс»; [`mood`]: the six moods; [`style`]: «Твои
 //!   миксы»; [`radio`]: endless selections (track, artist, mood, style,
-//!   discoveries) with session learning; [`discover`]: «Новое для тебя» and
-//!   new releases.
+//!   discoveries, daylist) with session learning; [`discover`]: «Новое для
+//!   тебя» and new releases.
+//! * [`daylist`]: «Дейлист» of each part of the day with its name;
+//!   [`tiles`]: the bento's smaller tiles (on repeat, a year ago, forgotten
+//!   favourites, deeper in favourite artists, fresh likes).
 
 pub mod analysis;
 pub mod daily;
+pub mod daylist;
 pub mod discover;
 pub mod index;
 pub mod mood;
@@ -25,9 +29,11 @@ pub mod radio;
 pub mod rng;
 pub mod style;
 pub mod taste;
+pub mod tiles;
 
 pub use analysis::{ANALYZED_WITH, AnalysisError, DIM, MAX_SECONDS, PcmAnalyzer, SAMPLE_RATE, Vector, analyze_pcm};
 pub use daily::DailyParams;
+pub use daylist::{Centre, DAYLIST_LEN, daylist_title, daylist_until};
 pub use discover::{
     Discovery, DiscoveryFilter, DiscoverySeeds, NewRelease, SeedFinds, SeedRef, album_key, artist_key, rank_discoveries,
     song_key, stream_song_key,
@@ -38,6 +44,7 @@ pub use pick::{Item, NewTrack, Pick, Reason, Recs};
 pub use radio::{Outcome, RadioParams, RadioSeed, RadioState};
 pub use style::StyleMix;
 pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo};
+pub use tiles::Tile;
 
 #[cfg(test)]
 pub(crate) mod test_util {

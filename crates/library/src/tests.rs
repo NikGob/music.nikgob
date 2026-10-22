@@ -2000,8 +2000,12 @@ fn liking_an_album_likes_all_its_tracks() {
     // Unliking one track: the album is no longer liked.
     lib.unlike(t2.id).unwrap();
     assert!(!lib.release_liked(r.id).unwrap());
+    assert_eq!(lib.liked_track_times().unwrap().iter().map(|l| l.0).collect::<Vec<_>>(), vec![t1.id]);
     lib.like(t2.id).unwrap();
     assert!(lib.release_liked(r.id).unwrap());
+    let times = lib.liked_track_times().unwrap();
+    assert_eq!(times.len(), 2);
+    assert!(times[0].1 >= times[1].1, "newest first");
 
     // Unliking the album unlikes all its tracks.
     lib.like_release(r.id, false).unwrap();
