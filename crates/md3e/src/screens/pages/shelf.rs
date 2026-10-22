@@ -108,13 +108,13 @@ pub fn groups(sort: ReleaseSort, keys: &[String], min: usize) -> Vec<Group> {
         }
     }
     // A short tail joins the run before it.
-    if out.len() > 1 && out.last().is_some_and(|g| g.2.len() < min) {
-        if let Some((_, last, range)) = out.pop()
-            && let Some(g) = out.last_mut()
-        {
-            g.1 = last;
-            g.2.end = range.end;
-        }
+    if out.len() > 1
+        && out.last().is_some_and(|g| g.2.len() < min)
+        && let Some((_, last, range)) = out.pop()
+        && let Some(g) = out.last_mut()
+    {
+        g.1 = last;
+        g.2.end = range.end;
     }
     out.into_iter()
         .map(|(first, last, range)| Group {
