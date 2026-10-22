@@ -175,7 +175,7 @@ pub fn overview_albums(total: usize, cols: usize) -> usize {
 
 /// The scheme roles an artist's initials sit in: `(container, on)` pairs
 /// picked by [`artist_look`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
     Primary,
     Secondary,
