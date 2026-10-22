@@ -20,6 +20,9 @@
 //! mood or style mix); `radio` starts «Радио по треку» from the first
 //! library track (`radio:artist` the first artist's radio).
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
+//! The window opens off the screen, unfocused and without a taskbar button,
+//! so a run never jumps over the user's windows; `NIKGOB_SHOT_VISIBLE=1`
+//! shows it.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -47,6 +50,17 @@ fn nums(arg: &str) -> Vec<f32> {
 
 fn button(pos: Pos2, button: PointerButton, pressed: bool) -> Event {
     Event::PointerButton { pos, button, pressed, modifiers: Modifiers::NONE }
+}
+
+/// Where a screenshot run's window opens: far off every screen, so it
+/// neither shows up over the user's windows nor takes the focus. (Not
+/// −32000: Windows parks minimized windows there.)
+pub const OFFSCREEN: [f32; 2] = [-16000.0, -16000.0];
+
+/// A screenshot run keeps its window off the screen, unfocused and off the
+/// taskbar (`NIKGOB_SHOT_VISIBLE=1` shows it where a normal start would).
+pub fn offscreen() -> bool {
+    std::env::var_os("NIKGOB_SHOT").is_some() && std::env::var_os("NIKGOB_SHOT_VISIBLE").is_none()
 }
 
 /// `NIKGOB_SHOT_SIZE=w,h`: the window size for a screenshot run.

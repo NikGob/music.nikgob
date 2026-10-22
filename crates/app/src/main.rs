@@ -253,7 +253,8 @@ impl eframe::App for Window {
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        if !std::mem::replace(&mut self.recovery_checked, true) {
+        // A screenshot run stays off the screen on purpose.
+        if !std::mem::replace(&mut self.recovery_checked, true) && !shot::offscreen() {
             fastframe_shell::window::recover_offscreen(ctx, frame);
         }
         if self.motion_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
@@ -546,10 +547,14 @@ fn main() -> eframe::Result {
 
     Shell::new(core, &waker).start_hidden(start_hidden).run(|lease| {
         let covers_dir = covers_dir.clone();
+        let mut viewport = lease.peek(|core| core.geometry.apply(egui::ViewportBuilder::default()));
+        if shot::offscreen() {
+            viewport = viewport.with_position(shot::OFFSCREEN).with_active(false).with_taskbar(false);
+        }
         eframe::run_native(
             "music.nikgob",
             eframe::NativeOptions {
-                viewport: lease.peek(|core| core.geometry.apply(egui::ViewportBuilder::default()))
+                viewport: viewport
                     .with_title("music.nikgob")
                     .with_app_id("music.nikgob")
                     .with_icon(egui::IconData {
