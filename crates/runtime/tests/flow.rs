@@ -370,7 +370,7 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
     );
 
     rt.send(Command::ImportFiles(vec![wav1]));
-    wait_for(&rt, "first import", |s| s.library.track_count == 1);
+    wait_for(&rt, "first import", |s| s.library.track_count == 1 && s.library.tracks.len() == 1);
     let track1 = rt.state().library.tracks[0].id;
     let opus1 = std::path::PathBuf::from(lib.active_source(track1).unwrap().unwrap().locator);
     assert!(opus1.is_file(), "Opus is in the library");
@@ -486,7 +486,7 @@ fn volume_and_queue_come_back_after_a_restart_paused_in_place() {
 
     let rt = start();
     rt.send(Command::ImportFiles(vec![wav.clone()]));
-    wait_for(&rt, "the import", |s| s.library.track_count == 1);
+    wait_for(&rt, "the import", |s| s.library.track_count == 1 && s.library.tracks.len() == 1);
     let track = rt.state().library.tracks[0].id;
     rt.send(Command::PlayTracks { tracks: vec![track], start: 0, context: "Тест".into() });
     wait_for(&rt, "playing", |s| s.player.current.as_ref().is_some_and(|t| t.id == track));

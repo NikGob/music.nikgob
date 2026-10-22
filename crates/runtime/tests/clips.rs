@@ -135,7 +135,8 @@ fn a_new_liked_clip_is_stored_as_its_song_and_its_unlike_goes_to_the_clip() {
     assert_eq!(likes.len(), 1);
     assert_eq!(likes[0].remote.id, "yt-video-kino", "the like is the clip's");
     assert_eq!(yt.calls("song_for_video"), 1);
-    // The wishlist item is the song's.
+    // The wishlist item is the song's (made right after the like).
+    wait_until("the wishlist item", || !lib.wishlist_for_track(track).unwrap().is_empty());
     let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
     assert_eq!(item.title.as_deref(), Some("Группа крови"));
     assert_eq!(item.youtube_id.as_deref(), Some("yt-gruppa-1"));
