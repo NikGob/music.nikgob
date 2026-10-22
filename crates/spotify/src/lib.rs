@@ -61,7 +61,8 @@ use librespot_core::authentication::Credentials;
 use nikgob_core::streaming::{
     Account, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput, LoginPrompt, Played,
     SPOTIFY_PREMIUM_REQUIRED, SearchKind, Service, StreamAlbum, StreamArtist, StreamError,
-    StreamPlaylist, StreamSearch, StreamService, StreamTrack,
+    StreamPlaylist, StreamSearch, StreamService, StreamTrack, SuggestedArtist, SuggestedTrack,
+    SuggestionFeed, SuggestionKind, Suggestions, rank_weight,
 };
 use tokio::runtime::Handle;
 use tokio::sync::watch;
@@ -138,6 +139,20 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// A search text as the cache knows it: lower case, single spaces.
+/// `tracks` as suggestions of `kind`, weighted by their place.
+fn weighted(tracks: Vec<StreamTrack>, kind: SuggestionKind) -> Vec<SuggestedTrack> {
+    let n = tracks.len();
+    tracks
+        .into_iter()
+        .enumerate()
+        .map(|(rank, track)| SuggestedTrack {
+            track,
+            kind,
+            weight: rank_weight(rank, n),
+        })
+        .collect()
+}
+
 fn search_key(query: &str) -> String {
     query
         .split_whitespace()
@@ -1272,6 +1287,75 @@ impl Spotify {
             .collect())
     }
 
+    /// One feed of suggestions (docs/stage4.md §12.3): the user's top
+    /// tracks or artists of about a month or half a year, or the recently
+    /// played. A token from before `user-top-read` was asked gets a 403 on
+    /// the tops: that is [`Suggestions::needs_reconnect`], not an error.
+    async fn suggestions_now(&self, feed: SuggestionFeed) -> Result<Suggestions, StreamError> {
+        let client = self.web()?;
+        let top = |range| async move {
+            match feed {
+                SuggestionFeed::TopArtistsMonth | SuggestionFeed::TopArtistsHalfYear => {
+                    client.top_artists(range).await.map(|p| (Vec::new(), p.items))
+                }
+                _ => client.top_tracks(range).await.map(|p| (p.items, Vec::new())),
+            }
+        };
+        let (kind, answer) = match feed {
+            SuggestionFeed::TopTracksMonth | SuggestionFeed::TopArtistsMonth => {
+                (SuggestionKind::TopMonth, top("short_term").await)
+            }
+            SuggestionFeed::TopTracksHalfYear | SuggestionFeed::TopArtistsHalfYear => {
+                (SuggestionKind::TopHalfYear, top("medium_term").await)
+            }
+            SuggestionFeed::RecentlyPlayed => {
+                let page = client.recently_played().await?;
+                let mut tracks: Vec<StreamTrack> = Vec::new();
+                for t in page.items.iter().filter_map(|h| convert::track(&h.track, None)) {
+                    if !tracks.iter().any(|x| x.id == t.id) {
+                        tracks.push(t);
+                    }
+                }
+                return Ok(Suggestions {
+                    tracks: weighted(tracks, SuggestionKind::Recent),
+                    ..Suggestions::default()
+                });
+            }
+            _ => return Err(StreamError::Unsupported),
+        };
+        let (tracks, artists) = match answer {
+            Ok(x) => x,
+            Err(e) if e.status() == Some(403) && !e.is_premium_refusal() => {
+                log::info!("spotify: {feed:?}: the sign-in lacks user-top-read");
+                return Ok(Suggestions {
+                    needs_reconnect: true,
+                    ..Suggestions::default()
+                });
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let tracks: Vec<StreamTrack> = tracks.iter().filter_map(|t| convert::track(t, None)).collect();
+        let artists: Vec<_> = artists
+            .iter()
+            .filter(|a| !a.id.is_empty() && !a.name.is_empty())
+            .map(|a| nikgob_core::streaming::ArtistRef::new(Some(convert::rid(&a.id)), a.name.clone()))
+            .collect();
+        let n = artists.len();
+        Ok(Suggestions {
+            tracks: weighted(tracks, kind),
+            artists: artists
+                .into_iter()
+                .enumerate()
+                .map(|(rank, artist)| SuggestedArtist {
+                    artist,
+                    kind,
+                    weight: rank_weight(rank, n),
+                })
+                .collect(),
+            needs_reconnect: false,
+        })
+    }
+
     /// The artist's most popular tracks (up to 10), read over the playback
     /// session: the Web API removed this endpoint in February 2026. Needs
     /// the playback login.
@@ -1576,6 +1660,20 @@ impl StreamService for Spotify {
 
     fn recent(&self) -> BoxFuture<'_, Result<Vec<Played>, StreamError>> {
         Box::pin(self.recent_now())
+    }
+
+    fn suggestion_feeds(&self) -> &'static [SuggestionFeed] {
+        &[
+            SuggestionFeed::TopTracksMonth,
+            SuggestionFeed::TopArtistsMonth,
+            SuggestionFeed::TopTracksHalfYear,
+            SuggestionFeed::TopArtistsHalfYear,
+            SuggestionFeed::RecentlyPlayed,
+        ]
+    }
+
+    fn suggestions(&self, feed: SuggestionFeed) -> BoxFuture<'_, Result<Suggestions, StreamError>> {
+        Box::pin(self.suggestions_now(feed))
     }
 
     fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError> {

@@ -287,7 +287,7 @@ const SUGGESTIONS: &[(SuggestionFeed, &[SuggestionList])] = &[
         &[
             (
                 SuggestionKind::QuickPicks,
-                &[("gruppa", 4), ("discovery", 3), ("afrika", 1), ("cross", 2)],
+                &[("gruppa", 4), ("discovery", 3), ("agaetis", 1), ("cross", 2)],
                 &[],
             ),
             (SuggestionKind::ListenAgain, &[("homogenic", 2)], &["bjork", "kino"]),
@@ -299,7 +299,7 @@ const SUGGESTIONS: &[(SuggestionFeed, &[SuggestionList])] = &[
     ),
     (
         SuggestionFeed::TopTracksMonth,
-        &[(SuggestionKind::TopMonth, &[("gruppa", 3), ("discovery", 4), ("razluka", 1)], &[])],
+        &[(SuggestionKind::TopMonth, &[("gruppa", 3), ("discovery", 4), ("muzai", 1)], &[])],
     ),
     (
         SuggestionFeed::TopTracksHalfYear,
@@ -1794,7 +1794,7 @@ mod tests {
         let home = now(yt.suggestions(SuggestionFeed::Home)).unwrap();
         assert_eq!(home.tracks[0].track.title, "Спокойная ночь");
         assert_eq!(home.tracks[0].kind, SuggestionKind::QuickPicks);
-        assert!(home.tracks.iter().any(|t| t.track.artist_line() == "Аквариум"), "a song new to the catalog");
+        assert!(home.tracks.iter().any(|t| t.track.artist_line() == "Sigur Rós"), "a song new to the catalog");
         assert!(home.artists.iter().any(|a| a.artist.name == "Björk" && a.kind == SuggestionKind::ListenAgain));
         assert_eq!(yt.calls("suggestions"), 1);
         assert_eq!(now(yt.suggestions(SuggestionFeed::TopTracksMonth)), Err(StreamError::Unsupported));
