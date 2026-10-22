@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use nikgob_core::model::{ArtistId, TrackId, UnixMs};
 use nikgob_core::streaming::{EntityKind, RemoteId, SearchKind, Service, StreamAlbum, StreamArtist, StreamError, StreamService, StreamTrack};
-use nikgob_library::now_ms;
+use nikgob_library::{Library, now_ms};
 use nikgob_recs::{DiscoverySeeds, SeedFinds, SeedRef, artist_key, rank_discoveries, song_key, stream_song_key};
 use nikgob_view as v;
 use serde::{Deserialize, Serialize};
@@ -147,6 +147,17 @@ pub(crate) struct Found {
     at: UnixMs,
     tracks: Vec<StreamTrack>,
     releases: Vec<(ArtistId, StreamAlbum)>,
+}
+
+/// The discoveries and new releases the last pass left in the library's
+/// cache: how many of each.
+pub(crate) fn cached_found(lib: &Library) -> (Vec<StreamTrack>, usize) {
+    let found: Option<Found> = lib
+        .cache_get(FOUND_KEY)
+        .ok()
+        .flatten()
+        .and_then(|(_, j)| serde_json::from_str(&j).ok());
+    found.map_or((Vec::new(), 0), |f| (f.tracks, f.releases.len()))
 }
 
 /// One answer of a step.

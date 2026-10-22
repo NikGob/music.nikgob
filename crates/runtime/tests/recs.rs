@@ -355,6 +355,59 @@ fn an_early_skip_teaches_the_radio() {
     assert_eq!(lessons[0]["Track"], serde_json::json!(skipped.to_string()), "{lessons}");
 }
 
+fn daylist_picks(lib: &Library) -> serde_json::Value {
+    let (_, json) = lib.cache_get("recs.daylist").unwrap().expect("the daylist is kept");
+    serde_json::from_str::<serde_json::Value>(&json).unwrap()["picks"].clone()
+}
+
+#[test]
+fn the_bento_gets_a_daylist_and_tiles_that_play() {
+    let l = library(3, 6, 5, &[]);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the daylist and the tiles", |st| st.home.daylist.is_some() && !st.home.tiles.is_empty());
+    let st = s.rt.state().home.clone();
+    let daylist = st.daylist.clone().unwrap();
+    assert_eq!(daylist.id, MixId::Daylist);
+    assert_eq!(daylist.title.split(' ').count(), 3, "«Тягучий вечер четверга»: {}", daylist.title);
+    assert!(daylist.subtitle.contains(" и другие · до "), "{}", daylist.subtitle);
+    assert!(!daylist.covers.is_empty());
+    // Every track played lately (none a year ago, none forgotten): on
+    // repeat, deeper in favourite artists (the songs played once), the
+    // likes of the first songs.
+    let tiles: Vec<MixId> = st.tiles.iter().map(|t| t.id).collect();
+    assert_eq!(tiles, vec![MixId::OnRepeat, MixId::DeepCuts, MixId::FreshLikes]);
+    assert_eq!(st.tiles[0].title, "На повторе");
+    assert_eq!(st.tiles[0].subtitle, "30 треков · за месяц");
+    assert_eq!(st.tiles[2].subtitle, "18 треков · за месяц");
+
+    // A tile plays as it is.
+    s.rt.send(Command::PlayMix { id: MixId::OnRepeat });
+    wait_until("on repeat plays", || !s.asked.lock().unwrap().is_empty());
+    wait_for(&s.rt, "its queue", |st| st.queue.next.len() == 29);
+    assert!(s.rt.state().queue.radio.is_none(), "a tile is not endless");
+    assert_eq!(s.rt.state().player.context_line(), "Играет из микса «На повторе»");
+    assert_eq!(last_start(&l.lib).context, EventContext::HomeSection);
+
+    // The daylist plays the picks shown, then goes on as a radio.
+    s.rt.send(Command::PlayMix { id: MixId::Daylist });
+    wait_for(&s.rt, "the daylist", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| r.title == daylist.title) && st.queue.next.len() == 29
+    });
+    assert_eq!(last_start(&l.lib).context, EventContext::HomeSection);
+    for _ in 0..27 {
+        end_current(&s);
+    }
+    wait_for(&s.rt, "the daylist to extend", |st| st.queue.next.len() == 12);
+    let upcoming: Vec<TrackId> = s.rt.state().queue.next.iter().map(|e| e.track.id).collect();
+    let played: Vec<TrackId> = s.rt.state().queue.prev.iter().map(|e| e.track.id).collect();
+    assert!(upcoming.iter().all(|t| !played.contains(t)), "nothing served twice");
+
+    // «Обновить» picks another selection.
+    let before = daylist_picks(&l.lib);
+    s.rt.send(Command::RefreshMix { id: MixId::Daylist });
+    wait_until("another daylist", || daylist_picks(&l.lib) != before);
+}
+
 #[test]
 fn a_dislike_leaves_the_home_and_its_undo_brings_it_back() {
     let l = library(3, 6, 5, &[]);

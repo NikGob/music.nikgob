@@ -78,6 +78,18 @@ impl Library {
         })
     }
 
+    /// Every liked track and when it was liked, newest first.
+    pub fn liked_track_times(&self) -> Result<Vec<(TrackId, UnixMs)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT target_id, updated_at FROM likes WHERE target_kind = 'track' AND deleted = 0
+                  ORDER BY updated_at DESC",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((get_id(r, 0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
     /// Every live entry of a live playlist: its track and when it was added.
     pub fn playlist_entry_times(&self) -> Result<Vec<(TrackId, UnixMs)>> {
         self.read(|c| {

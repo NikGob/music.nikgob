@@ -137,7 +137,7 @@ pub(crate) fn store_vector(
 }
 
 /// Fills `index` with every current vector of the library.
-fn load_index(lib: &Library, index: &SoundIndex) {
+pub(crate) fn load_index(lib: &Library, index: &SoundIndex) {
     let rows = match lib.analysis_vectors(ANALYZED_WITH) {
         Ok(rows) => rows,
         Err(e) => {
