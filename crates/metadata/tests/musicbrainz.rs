@@ -270,3 +270,25 @@ fn musicbrainz_requires_a_contact() {
     let http = Http::new(&MetadataConfig::new("me@example.com")).unwrap();
     assert!(MusicBrainz::new(http).is_ok());
 }
+
+#[tokio::test]
+async fn search_releases_asks_for_artist_and_title_and_reads_track_counts() {
+    let server = MockServer::start().await;
+    let body = r#"{"releases":[{"id":"2f2a1b6c-6d8e-4f53-9a7f-5d5a0f3b9c01","score":100,"title":"Ugly Is Beautiful",
+        "status":"Official","date":"2020-07-17","artist-credit":[{"name":"Oliver Tree","artist":{"id":"8e2a3a4c-8f0b-4a3e-bd0a-0e7a4d1c2f11","name":"Oliver Tree"}}],
+        "release-group":{"id":"7c5d4a3b-1e2f-4a6b-8c9d-0e1f2a3b4c5d","primary-type":"Album"},
+        "media":[{"format":"Digital Media","track-count":14}]}]}"#;
+    Mock::given(method("GET"))
+        .and(path("/ws/2/release"))
+        .and(query_param("query", r#"release:"Ugly Is Beautiful" AND artist:"Oliver Tree""#))
+        .and(query_param("limit", "5"))
+        .respond_with(json(body))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let found = client(&server).search_releases("Oliver Tree", "Ugly Is Beautiful", 5).await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].artist_credit_string(), "Oliver Tree");
+    assert_eq!(found[0].media[0].track_count, 14);
+    assert!(found[0].media[0].tracks.is_empty());
+}

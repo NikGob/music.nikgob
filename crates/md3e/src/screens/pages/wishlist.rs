@@ -79,6 +79,7 @@ fn status_text(r: &WishlistRow, torrents: bool) -> String {
         St::Waiting | St::New | St::Searching if !torrents => "ждёт торренты".into(),
         St::Waiting => "ждёт · скачается по кнопке".into(),
         St::New | St::Searching => "ищу раздачу…".into(),
+        St::Confirm if r.confirm_files => "файлы ждут подтверждения".into(),
         St::Confirm => "нужно выбрать раздачу".into(),
         St::Downloading => match r.progress {
             Some(p) => format!("качается · {p}%"),
@@ -88,6 +89,7 @@ fn status_text(r: &WishlistRow, torrents: bool) -> String {
             Some(next) => format!("не нашёл раздачу · {next}"),
             None => "не нашёл раздачу".into(),
         },
+        St::Done if r.missing > 0 => format!("скачано не всё · без файла {} тр.", r.missing),
         St::Done => "скачано".into(),
         St::Dismissed => "не качаю".into(),
     }

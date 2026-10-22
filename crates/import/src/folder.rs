@@ -43,7 +43,7 @@ pub(crate) struct Anchor {
 }
 
 /// Same album title, or one the other plus more words ("X" and "X Deluxe").
-fn same_title(a: &str, b: &str) -> bool {
+pub(crate) fn same_title(a: &str, b: &str) -> bool {
     let within = |long: &str, short: &str| long.strip_prefix(short).is_some_and(|r| r.starts_with(' '));
     a == b || within(a, b) || within(b, a)
 }

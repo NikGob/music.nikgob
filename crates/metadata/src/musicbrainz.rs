@@ -371,6 +371,24 @@ impl MusicBrainz {
         Ok(raw.recordings)
     }
 
+    /// Releases called `title` by `artist` (an album found as a whole: a
+    /// downloaded folder is matched to one of them by its track count and
+    /// lengths). Search results list media with their track counts only;
+    /// [`Self::lookup_release`] gives the tracks.
+    pub async fn search_releases(&self, artist: &str, title: &str, limit: u32) -> Result<Vec<Release>> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default, deserialize_with = "null_default")]
+            releases: Vec<Release>,
+        }
+        let lucene = format!("release:{} AND artist:{}", phrase(title), phrase(artist));
+        let limit = limit.clamp(1, PAGE_MAX).to_string();
+        let raw: Raw = self
+            .get("release", &[("query", lucene.as_str()), ("limit", limit.as_str())])
+            .await?;
+        Ok(raw.releases)
+    }
+
     /// `inc=recordings+artist-credits+labels+media+release-groups`
     pub async fn lookup_release(&self, mbid: &str) -> Result<Release> {
         check_mbid(mbid)?;

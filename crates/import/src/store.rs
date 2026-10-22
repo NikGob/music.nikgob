@@ -134,6 +134,11 @@ impl Store {
     /// The existing release this identity belongs to, if any (nothing is created).
     pub fn find_release(&mut self, id: &Identity) -> Result<Option<ReleaseId>> {
         self.ensure_loaded()?;
+        if let Some(r) = id.release_id
+            && self.lib.get_release(r)?.is_some()
+        {
+            return Ok(Some(r));
+        }
         if let Some(m) = &id.release_mbid
             && let Some(r) = self.releases_by_mbid.get(m)
         {

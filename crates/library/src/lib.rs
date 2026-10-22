@@ -15,6 +15,7 @@
 mod macros;
 
 mod catalog;
+mod confirm;
 mod credits;
 mod db;
 mod derived;
@@ -28,6 +29,7 @@ mod migrations;
 mod photos;
 mod playlists;
 mod recs;
+mod repairs;
 pub mod search;
 mod streams;
 mod trash;
@@ -47,7 +49,7 @@ pub use playlists::LIKED_PLAYLIST_NAME;
 pub use recs::RecTrack;
 pub use streams::{LikedClip, TrackSnapshot, event_id, is_web_ref};
 pub use types::{
-    AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
+    AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, ConfirmRow, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
     PlaylistEntryRow, PlaylistKind, PlaylistRemote, PlaylistSummary, PurgedFile, PurgedTrack,
     RecFeedback, ReleaseProgress, RemoteLike, StreamAnalysisTodo,
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,

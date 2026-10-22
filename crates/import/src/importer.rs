@@ -20,13 +20,14 @@ use nikgob_core::model::{
 };
 use nikgob_library::Library;
 use nikgob_metadata::Metadata;
-use nikgob_metadata::matcher::MatchCandidate;
 use serde::Serialize;
 use tokio::sync::{Semaphore, broadcast, mpsc};
 
 use crate::analysis::{AudioAnalysis, analyze_file};
 use crate::config::ImportConfig;
 use crate::cover::{ProcessedCover, derive_visuals, process_cover};
+use crate::album::{Evidence, Reference, lookup_album, names_of};
+use crate::confirm::{Choice, Payload, TagView};
 use crate::decide::{Decision, ImportTargets, Incoming, decide, find_existing, stream_doubt};
 use crate::encode::{EncodeOptions, Encoder, RopusEncoder};
 use crate::error::{ImportError, Result};
@@ -34,8 +35,8 @@ use crate::events::{ConfirmItem, ImportEvent, ItemId, JobId, Stage};
 use crate::folder::{Anchor, Member, album_group_dir, plan};
 use crate::fsutil;
 use crate::identity::{
-    Identity, Lookup, apply_candidate, confirm_option, evidence, identity_from_tags,
-    identity_of_track, lookup as online_lookup,
+    Identity, Lookup, apply_candidate, evidence, identity_from_tags, identity_of_track,
+    lookup as online_lookup,
 };
 use crate::layout::LayoutInput;
 use crate::sanitize::long_path;
@@ -126,6 +127,29 @@ struct Analyzed {
     force_track: Option<TrackId>,
 }
 
+/// A file that is read (tags, length, fingerprint) and waits for its folder.
+struct Pre {
+    analyzed: Analyzed,
+    /// What the tags (or the track the job says it is) say.
+    base: Identity,
+    /// The library knows which track it is: its own id, the job says so, or
+    /// it is one of the tracks the job is for.
+    known: bool,
+    /// Its tags carry the recording and release MBIDs already.
+    fully_tagged: bool,
+}
+
+impl Pre {
+    fn duration_ms(&self) -> Option<u32> {
+        (!self.analyzed.info.duration.is_zero()).then(|| self.analyzed.info.duration_ms())
+    }
+}
+
+enum Read {
+    Ready(Box<Pre>),
+    Done(FileOutcome),
+}
+
 /// A file that is read and identified and waits for its folder's other files.
 struct Ready {
     analyzed: Analyzed,
@@ -134,25 +158,18 @@ struct Ready {
     identity: Identity,
 }
 
-enum Step {
-    Ready(Box<Ready>),
-    Done(FileOutcome),
-}
-
-enum Identified {
-    Ready(Box<Ready>),
-    Done(FileOutcome),
-}
-
+/// A file in «Подтверди».
 struct Parked {
-    ctx: Ctx,
-    analyzed: Analyzed,
-    base: Identity,
-    options: Vec<MatchCandidate>,
+    /// The job it came from; `None` for one parked before a restart.
+    ctx: Option<Ctx>,
+    origin: SourceOrigin,
+    targets: Arc<ImportTargets>,
+    /// The file as read and what it was taken for; `None` after a restart
+    /// (it is read again).
+    read: Option<(Analyzed, Identity)>,
+    /// What the options do, in the order of `item.options`.
+    choices: Vec<Choice>,
     item: ConfirmItem,
-    /// The stream track offered as the only option (the file's length is
-    /// off): accepting attaches the file to it.
-    attach: Option<TrackId>,
 }
 
 pub(crate) struct Inner {
@@ -223,7 +240,7 @@ impl Importer {
     ) -> Self {
         let (events, _) = broadcast::channel(1024);
         let permits = Arc::new(Semaphore::new(cfg.max_parallel.max(1)));
-        Self {
+        let this = Self {
             inner: Arc::new(Inner {
                 store: Mutex::new(Store::new(library.clone())),
                 cfg,
@@ -231,13 +248,17 @@ impl Importer {
                 metadata,
                 encoder,
                 next_job: AtomicU64::new(1),
-                next_item: AtomicU64::new(1),
+                // Items not stored in the database (it failed) count from
+                // far above its row ids.
+                next_item: AtomicU64::new(1 << 40),
                 events,
                 pending: Mutex::new(HashMap::new()),
                 active: Mutex::new(HashSet::new()),
                 permits,
             }),
-        }
+        };
+        this.restore_pending();
+        this
     }
 
     pub fn config(&self) -> &ImportConfig {
@@ -310,14 +331,24 @@ impl Importer {
         for t in torrents {
             ctx.emit(ImportEvent::TorrentFound(t));
         }
-        // One album folder at a time: identify all its files, agree on a single
-        // release, then import them.
+        // The «Хочу скачать» release the job is for, if any.
+        let reference = if ctx.targets.tracks.is_empty() && ctx.targets.release.is_none() {
+            None
+        } else {
+            let (lib, targets) = (self.inner.library.clone(), ctx.targets.clone());
+            tokio::task::spawn_blocking(move || Reference::load(&lib, &targets))
+                .await
+                .ok()
+                .flatten()
+        };
+        // One album folder at a time: read all its files, identify them as
+        // one album, agree on a single release, then import them.
         let mut folders: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
         for path in files {
             folders.entry(album_group_dir(&path)).or_default().push(path);
         }
         let (mut imported, mut duplicates, mut failed, mut pending) = (0, 0, 0, 0);
-        for (_, files) in folders {
+        for (dir, files) in folders {
             let mut set = tokio::task::JoinSet::new();
             for path in files {
                 let Ok(permit) = self.inner.permits.clone().acquire_owned().await else {
@@ -325,22 +356,24 @@ impl Importer {
                 };
                 let (this, ctx, origin) = (self.clone(), ctx.clone(), origin.clone());
                 set.spawn(async move {
-                    let identified = this.identify_file(&ctx, path, origin).await;
+                    let read = this.read_file(&ctx, path, origin).await;
                     drop(permit);
-                    identified
+                    read
                 });
             }
             let mut outcomes = Vec::new();
-            let mut ready = Vec::new();
+            let mut read = Vec::new();
             while let Some(res) = set.join_next().await {
                 match res {
-                    Ok(Identified::Ready(r)) => ready.push(r),
-                    Ok(Identified::Done(o)) => outcomes.push(o),
+                    Ok(Read::Ready(r)) => read.push(*r),
+                    Ok(Read::Done(o)) => outcomes.push(o),
                     Err(_) => failed += 1,
                 }
             }
             // Task completion order is arbitrary; the folder's vote must not be.
-            ready.sort_by(|a, b| a.analyzed.path.cmp(&b.analyzed.path));
+            read.sort_by(|a, b| a.analyzed.path.cmp(&b.analyzed.path));
+            let (ready, done, settled) = self.identify_folder(&ctx, &dir, read, reference.as_ref()).await;
+            outcomes.extend(done);
             let members: Vec<_> = ready
                 .iter()
                 .map(|r| Member {
@@ -348,7 +381,9 @@ impl Importer {
                     base: &r.base,
                 })
                 .collect();
-            let anchor = plan(&members).map(Arc::new);
+            // A folder already placed on one release (the wishlist's) needs
+            // no vote.
+            let anchor = if settled { None } else { plan(&members).map(Arc::new) };
             drop(members);
             let mut set = tokio::task::JoinSet::new();
             for r in ready {
@@ -387,22 +422,20 @@ impl Importer {
         });
     }
 
-    /// Reads and identifies one file; never returns an error, failures become events.
-    async fn identify_file(&self, ctx: &Ctx, path: PathBuf, origin: SourceOrigin) -> Identified {
+    /// Reads one file; never returns an error, failures become events.
+    async fn read_file(&self, ctx: &Ctx, path: PathBuf, origin: SourceOrigin) -> Read {
         if !lock(&self.inner.active).insert(path.clone()) {
-            return Identified::Done(FileOutcome::Skipped);
+            return Read::Done(FileOutcome::Skipped);
         }
-        match self.identify(ctx, &path, origin).await {
-            Ok(Step::Ready(r)) => Identified::Ready(r),
-            Ok(Step::Done(o)) => {
-                if !matches!(o, FileOutcome::Parked(_)) {
-                    lock(&self.inner.active).remove(&path);
-                }
-                Identified::Done(o)
+        match self.read(ctx, &path, origin).await {
+            Ok(Read::Done(o)) => {
+                lock(&self.inner.active).remove(&path);
+                Read::Done(o)
             }
+            Ok(r) => r,
             Err(e) => {
                 lock(&self.inner.active).remove(&path);
-                Identified::Done(self.failed(ctx, &path, &e))
+                Read::Done(self.failed(ctx, &path, &e))
             }
         }
     }
@@ -459,8 +492,8 @@ impl Importer {
         }
     }
 
-    /// Steps 1..3: probe, fingerprint, identify.
-    async fn identify(&self, ctx: &Ctx, path: &Path, origin: SourceOrigin) -> Result<Step> {
+    /// Steps 1..2: probe, fingerprint, what the tags say.
+    async fn read(&self, ctx: &Ctx, path: &Path, origin: SourceOrigin) -> Result<Read> {
         let inner = self.inner.clone();
         ctx.stage(path, Stage::Probing);
         let origin = self.file_origin(&origin, path);
@@ -485,7 +518,7 @@ impl Importer {
                         path: path.to_path_buf(),
                         kept: t.id,
                     });
-                    Ok(Step::Done(FileOutcome::Duplicate { kept: t.id }))
+                    Ok(Read::Done(FileOutcome::Duplicate { kept: t.id }))
                 }
                 None => Err(ImportError::Other(
                     "file is inside the library folder; use the library rebuild instead".into(),
@@ -501,159 +534,337 @@ impl Importer {
         {
             base = id;
         }
-        let known_track = analyzed.force_track.is_some()
+        let known = analyzed.force_track.is_some()
             || analyzed
                 .tags
                 .track_id
                 .is_some_and(|t| inner.library.get_track(t).ok().flatten().is_some());
         let fully_tagged = analyzed.tags.recording_mbid.is_some() && analyzed.tags.release_mbid.is_some();
-        let identity = match &inner.metadata {
-            Some(meta) if !known_track && !fully_tagged => {
-                ctx.stage(path, Stage::Identifying);
-                let ev = evidence(&analyzed.tags, &analyzed.info, path);
-                match online_lookup(meta, &inner.cfg, ev, analyzed.audio.fingerprint.as_ref()).await {
-                    Lookup::Sure(best) => apply_candidate(&base, &best),
-                    Lookup::None => base.clone(),
-                    Lookup::Unsure(options) => {
-                        return Ok(Step::Done(self.park(ctx, analyzed, base, options)));
-                    }
-                }
-            }
-            _ => base.clone(),
-        };
-        // A liked stream track of another length (TV size, radio edit) is
-        // asked about rather than attached silently.
-        if analyzed.force_track.is_none() && !known_track {
-            let (i, a, id) = (inner.clone(), analyzed.clone(), identity.clone());
-            let doubt = blocking(move || {
-                let mut store = lock(&i.store);
-                let inc = incoming(&a, &id);
-                match find_existing(&mut store, &inc)? {
-                    Some(_) => Ok(None),
-                    None => stream_doubt(&mut store, &inc),
-                }
-            })
-            .await?;
-            if let Some(track) = doubt {
-                return Ok(Step::Done(self.park_stream(ctx, analyzed, identity, &track)));
-            }
-        }
-        Ok(Step::Ready(Box::new(Ready {
+        Ok(Read::Ready(Box::new(Pre {
             analyzed,
             base,
-            identity,
+            known,
+            fully_tagged,
         })))
     }
 
+    /// Step 3 for a folder (see [`crate::album`]): the tracks the job is
+    /// for, the job's release, the album as a whole, and only then file by
+    /// file. Returns the identified files, the parked ones and whether the
+    /// folder already sits on one release.
+    async fn identify_folder(
+        &self,
+        ctx: &Ctx,
+        dir: &Path,
+        mut read: Vec<Pre>,
+        reference: Option<&Reference>,
+    ) -> (Vec<Box<Ready>>, Vec<FileOutcome>, bool) {
+        let inner = self.inner.clone();
+        let torrent_path = read.iter().find_map(|p| match &p.analyzed.origin {
+            SourceOrigin::Torrent { path_in_torrent, .. } => Some(path_in_torrent.clone()),
+            _ => None,
+        });
+        let names = names_of(dir, torrent_path.as_deref());
+        let ev = {
+            let bases: Vec<&Identity> = read.iter().map(|p| &p.base).collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            Evidence::new(&bases, &names)
+        };
+        let mut ids: Vec<Option<Identity>> = vec![None; read.len()];
+        let mut settled = false;
+        // The tracks the job is for: by number, title and length.
+        if let Some(r) = reference {
+            let mut matched = 0;
+            for (i, p) in read.iter_mut().enumerate() {
+                if p.known {
+                    continue;
+                }
+                if let Some(t) = r.track_of(&p.base, p.duration_ms()) {
+                    p.analyzed.force_track = Some(t);
+                    p.known = true;
+                    ids[i] = identity_of_track(&inner.library, t, &p.base);
+                    matched += 1;
+                }
+            }
+            if r.fits(&ev, matched) {
+                // The rest of the folder is more of the release.
+                for (i, p) in read.iter().enumerate() {
+                    if ids[i].is_none() && !p.known {
+                        ids[i] = Some(r.identity(&p.base));
+                    }
+                }
+                settled = true;
+            }
+        }
+        let open = |ids: &[Option<Identity>], read: &[Pre]| -> Vec<usize> {
+            (0..read.len())
+                .filter(|&i| ids[i].is_none() && !read[i].known && !read[i].fully_tagged)
+                .collect()
+        };
+        let mut parked = Vec::new();
+        if !settled && ev.is_album() {
+            // One album: what the folder says fills what its tags lack, and
+            // MusicBrainz is asked for the release as a whole.
+            for p in &mut read {
+                if !p.known {
+                    ev.fill(&mut p.base);
+                }
+            }
+            if let Some(meta) = &inner.metadata
+                && !open(&ids, &read).is_empty()
+            {
+                for p in &read {
+                    ctx.stage(&p.analyzed.path, Stage::Identifying);
+                }
+                let files: Vec<(&Identity, Option<u32>)> = read.iter().map(|p| (&p.base, p.duration_ms())).collect();
+                if let Some(found) = lookup_album(meta, &inner.cfg, &ev, &files).await {
+                    for i in open(&ids, &read) {
+                        ids[i] = found[i].as_ref().map(|c| apply_candidate(&read[i].base, c));
+                    }
+                }
+            }
+        } else if !settled && let Some(meta) = &inner.metadata {
+            // A compilation or loose files: one by one, strangers vetoed.
+            let mut set = tokio::task::JoinSet::new();
+            for i in open(&ids, &read) {
+                let p = &read[i];
+                ctx.stage(&p.analyzed.path, Stage::Identifying);
+                let evidence = evidence(&p.analyzed.tags, &p.analyzed.info, &p.analyzed.path);
+                let fingerprint = p.analyzed.audio.fingerprint.clone();
+                let artists = ev.artists_for(&p.base);
+                let (meta, cfg) = (meta.clone(), inner.cfg.clone());
+                set.spawn(async move {
+                    (i, online_lookup(&meta, &cfg, evidence, fingerprint.as_ref(), &artists).await)
+                });
+            }
+            let mut asked = Vec::new();
+            while let Some(res) = set.join_next().await {
+                match res {
+                    Ok((i, Lookup::Sure(best))) => ids[i] = Some(apply_candidate(&read[i].base, &best)),
+                    Ok((i, Lookup::Unsure(options))) => asked.push((i, options)),
+                    Ok((_, Lookup::None)) | Err(_) => {}
+                }
+            }
+            asked.sort_by_key(|(i, _)| *i);
+            // Highest index first, so the indexes of the rest stay put.
+            for (i, options) in asked.into_iter().rev() {
+                let p = read.remove(i);
+                ids.remove(i);
+                let mut choices = vec![Choice::Tags];
+                choices.extend(options.iter().map(|c| Choice::Candidate(Box::new(c.into()))));
+                parked.push(self.park(ctx, p.analyzed, p.base, choices));
+            }
+        }
+        let mut ready = Vec::with_capacity(read.len());
+        for (p, id) in read.into_iter().zip(ids) {
+            let Pre { analyzed, base, known, .. } = p;
+            let identity = id.unwrap_or_else(|| base.clone());
+            // A liked stream track of another length (TV size, radio edit)
+            // is asked about rather than attached silently.
+            if analyzed.force_track.is_none() && !known {
+                let (i, a, id) = (inner.clone(), analyzed.clone(), identity.clone());
+                let doubt = blocking(move || {
+                    let mut store = lock(&i.store);
+                    let inc = incoming(&a, &id);
+                    match find_existing(&mut store, &inc)? {
+                        Some(_) => Ok(None),
+                        None => stream_doubt(&mut store, &inc),
+                    }
+                })
+                .await;
+                match doubt {
+                    Ok(Some(track)) => {
+                        parked.push(self.park_stream(ctx, analyzed, identity, &track));
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        let path = analyzed.path.clone();
+                        lock(&inner.active).remove(&path);
+                        parked.push(self.failed(ctx, &path, &e));
+                        continue;
+                    }
+                }
+            }
+            ready.push(Box::new(Ready { analyzed, base, identity }));
+        }
+        (ready, parked, settled)
+    }
+
     /// Parks a file that may be the stream track `track` (its length is
-    /// off): the only option attaches it to that track; skipping imports it
-    /// as a track of its own.
+    /// off): option 1 attaches it to that track; the file's own tags
+    /// import it as a track of its own.
     fn park_stream(&self, ctx: &Ctx, analyzed: Analyzed, identity: Identity, track: &Track) -> FileOutcome {
         let lib = &self.inner.library;
         let album = track
             .release_id
             .and_then(|r| lib.get_release(r).ok().flatten())
             .map(|r| r.title);
-        let option = crate::events::ConfirmOption {
+        let choice = Choice::Stream {
+            track: track.id,
             title: track.title.clone(),
             artist: track.artist_credit.display(),
             album,
-            year: None,
             track_no: (track.track_no > 0).then_some(track.track_no),
-            score: 0.5,
-            source: crate::events::STREAM_OPTION,
+            duration_ms: track.duration_ms,
             recording_mbid: track.recording_mbid.clone(),
-            release_mbid: None,
         };
-        let id = ItemId(self.inner.next_item.fetch_add(1, Ordering::Relaxed));
+        self.park(ctx, analyzed, identity, vec![Choice::Tags, choice])
+    }
+
+    /// Puts a file into «Подтверди», in memory and in the database.
+    fn park(&self, ctx: &Ctx, analyzed: Analyzed, base: Identity, choices: Vec<Choice>) -> FileOutcome {
+        let tags = TagView {
+            title: analyzed.tags.title.clone(),
+            artist: analyzed.tags.artist.clone(),
+            album: analyzed.tags.album.clone(),
+            year: analyzed.tags.year,
+            track_no: analyzed.tags.track_no,
+            duration_ms: Some(analyzed.info.duration_ms()),
+        };
+        let payload = Payload {
+            origin: analyzed.origin.clone(),
+            targets: (*analyzed.targets).clone(),
+            tags,
+            choices,
+        };
+        let path = analyzed.path.clone();
+        let wishlist = analyzed.targets.wishlist;
+        let stored = serde_json::to_string(&payload)
+            .map_err(|e| ImportError::Other(e.to_string()))
+            .and_then(|json| Ok(self.inner.library.put_confirm_item(&path.to_string_lossy(), wishlist, &json)?));
+        let id = match stored {
+            Ok(id) => ItemId(id as u64),
+            Err(e) => {
+                log::warn!("«Подтверди» for {} is not stored: {e}", path.display());
+                ItemId(self.inner.next_item.fetch_add(1, Ordering::Relaxed))
+            }
+        };
         let item = ConfirmItem {
             id,
             job: ctx.job,
-            path: analyzed.path.clone(),
-            tag_title: analyzed.tags.title.clone(),
-            tag_artist: analyzed.tags.artist.clone(),
-            tag_album: analyzed.tags.album.clone(),
-            duration_ms: Some(analyzed.info.duration_ms()),
-            options: vec![option],
+            path: path.clone(),
+            tag_title: payload.tags.title.clone(),
+            tag_artist: payload.tags.artist.clone(),
+            tag_album: payload.tags.album.clone(),
+            duration_ms: payload.tags.duration_ms,
+            options: payload.choices.iter().map(|c| c.option(&payload.tags, &path)).collect(),
+            wishlist,
         };
         lock(&self.inner.pending).insert(
             id,
             Parked {
-                ctx: ctx.clone(),
-                analyzed,
-                base: identity,
-                options: Vec::new(),
+                ctx: Some(ctx.clone()),
+                origin: payload.origin,
+                targets: analyzed.targets.clone(),
+                read: Some((analyzed, base)),
+                choices: payload.choices,
                 item: item.clone(),
-                attach: Some(track.id),
             },
         );
         ctx.emit(ImportEvent::NeedsConfirmation { item });
         FileOutcome::Parked(id)
     }
 
-    fn park(
-        &self,
-        ctx: &Ctx,
-        analyzed: Analyzed,
-        base: Identity,
-        options: Vec<MatchCandidate>,
-    ) -> FileOutcome {
-        let id = ItemId(self.inner.next_item.fetch_add(1, Ordering::Relaxed));
-        let item = ConfirmItem {
-            id,
-            job: ctx.job,
-            path: analyzed.path.clone(),
-            tag_title: analyzed.tags.title.clone(),
-            tag_artist: analyzed.tags.artist.clone(),
-            tag_album: analyzed.tags.album.clone(),
-            duration_ms: Some(analyzed.info.duration_ms()),
-            options: options.iter().map(confirm_option).collect(),
+    /// The «Подтверди» queue of an earlier run, from the database (a file
+    /// that is gone leaves it).
+    fn restore_pending(&self) {
+        let lib = &self.inner.library;
+        let rows = match lib.confirm_items() {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("«Подтверди» not restored: {e}");
+                return;
+            }
         };
-        lock(&self.inner.pending).insert(
-            id,
-            Parked {
-                ctx: ctx.clone(),
-                analyzed,
-                base,
-                options,
-                item: item.clone(),
-                attach: None,
-            },
-        );
-        ctx.emit(ImportEvent::NeedsConfirmation { item });
-        FileOutcome::Parked(id)
+        for row in rows {
+            let path = PathBuf::from(&row.path);
+            let payload = serde_json::from_str::<Payload>(&row.payload).ok();
+            let Some(p) = payload.filter(|_| long_path(&path).exists()) else {
+                let _ = lib.delete_confirm_item(row.id);
+                continue;
+            };
+            let id = ItemId(row.id as u64);
+            let item = ConfirmItem {
+                id,
+                job: JobId(0),
+                path: path.clone(),
+                tag_title: p.tags.title.clone(),
+                tag_artist: p.tags.artist.clone(),
+                tag_album: p.tags.album.clone(),
+                duration_ms: p.tags.duration_ms,
+                options: p.choices.iter().map(|c| c.option(&p.tags, &path)).collect(),
+                wishlist: row.wishlist,
+            };
+            lock(&self.inner.active).insert(path);
+            lock(&self.inner.pending).insert(
+                id,
+                Parked {
+                    ctx: None,
+                    origin: p.origin,
+                    targets: Arc::new(p.targets),
+                    read: None,
+                    choices: p.choices,
+                    item,
+                },
+            );
+        }
     }
 
-    /// Continues a parked import: `Some(i)` takes option `i`, `None` imports with
-    /// the file's own tags. For a file parked against a stream track, option 0
-    /// attaches it to that track.
+    /// Continues a parked import: `Some(i)` takes option `i` (0 is the
+    /// file's own tags), `None` imports with the file's own tags. A file
+    /// parked in an earlier run is read again first.
     pub async fn resolve(&self, item: ItemId, choice: Option<usize>) -> Result<FileOutcome> {
-        let (identity, force) = {
+        let chosen = {
             let pending = lock(&self.inner.pending);
             let parked = pending
                 .get(&item)
                 .ok_or_else(|| ImportError::Other(format!("no pending item {}", item.0)))?;
-            match (choice, parked.attach) {
-                (Some(0), Some(track)) => (parked.base.clone(), Some(track)),
-                (Some(i), _) => {
-                    let cand = parked.options.get(i).ok_or_else(|| {
-                        ImportError::Other(format!("option {i} does not exist"))
-                    })?;
-                    (apply_candidate(&parked.base, cand), None)
-                }
-                (None, _) => (parked.base.clone(), None),
+            match choice {
+                None => Choice::Tags,
+                Some(i) => parked
+                    .choices
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| ImportError::Other(format!("option {i} does not exist")))?,
             }
         };
         let Some(parked) = lock(&self.inner.pending).remove(&item) else {
             return Err(ImportError::Other(format!("item {} was resolved already", item.0)));
         };
-        let path = parked.analyzed.path.clone();
-        let ctx = parked.ctx.clone();
-        let mut analyzed = parked.analyzed;
-        if force.is_some() {
-            analyzed.force_track = force;
+        if let Err(e) = self.inner.library.delete_confirm_item(item.0 as i64) {
+            log::warn!("«Подтверди» row {} stays: {e}", item.0);
         }
-        let result = self.finish_import(&ctx, analyzed, identity).await;
+        let path = parked.item.path.clone();
+        let ctx = parked.ctx.clone().unwrap_or_else(|| self.detached_ctx(parked.targets.clone()));
+        let result = async {
+            let (mut analyzed, base) = match parked.read {
+                Some(r) => r,
+                None => {
+                    let (inner, p, o) = (self.inner.clone(), path.clone(), parked.origin.clone());
+                    let mut a = blocking(move || analyze(&inner.cfg, &p, o)).await?;
+                    a.targets = parked.targets.clone();
+                    a.force_track = parked.targets.forced();
+                    let mut base = identity_from_tags(&a.tags, &path);
+                    if let Some(t) = a.force_track
+                        && let Some(id) = identity_of_track(&self.inner.library, t, &base)
+                    {
+                        base = id;
+                    }
+                    (a, base)
+                }
+            };
+            let identity = match &chosen {
+                Choice::Tags => base,
+                Choice::Candidate(c) => apply_candidate(&base, &c.candidate()),
+                Choice::Stream { track, .. } => {
+                    analyzed.force_track = Some(*track);
+                    base
+                }
+            };
+            self.finish_import(&ctx, analyzed, identity).await
+        }
+        .await;
         lock(&self.inner.active).remove(&path);
         match result {
             Ok(o) => Ok(o),
@@ -665,6 +876,18 @@ impl Importer {
                 });
                 Err(e)
             }
+        }
+    }
+
+    /// Events of a file answered after a restart: no job listens, the
+    /// broadcast does.
+    fn detached_ctx(&self, targets: Arc<ImportTargets>) -> Ctx {
+        let (tx, _) = mpsc::unbounded_channel();
+        Ctx {
+            job: JobId(self.inner.next_job.fetch_add(1, Ordering::Relaxed)),
+            tx,
+            events: self.inner.events.clone(),
+            targets,
         }
     }
 

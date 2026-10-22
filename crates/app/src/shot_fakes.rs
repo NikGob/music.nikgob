@@ -371,6 +371,8 @@ fn row(n: u128, title: &str, artist: &str, album: &str, status: St) -> WishlistR
         can_save_from_youtube: status == St::NoTorrent,
         cover: None,
         progress: (status == St::Downloading).then_some(38),
+        confirm_files: false,
+        missing: 0,
     }
 }
 

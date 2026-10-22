@@ -970,8 +970,19 @@ impl Library {
         self.tracks_of_release_impl(release, true)
     }
 
+    /// [`Self::tracks_of_release`] with the tracks outside the library too
+    /// (stream tracks asked for in «Хочу скачать» without a like: the ones a
+    /// download of the album is for).
+    pub fn tracks_of_release_all(&self, release: ReleaseId) -> Result<Vec<TrackRow>> {
+        self.tracks_of_release_where(release, "AND t.deleted_at IS NULL")
+    }
+
     fn tracks_of_release_impl(&self, release: ReleaseId, deleted: bool) -> Result<Vec<TrackRow>> {
         let live = if deleted { "" } else { "AND t.deleted_at IS NULL AND t.in_library = 1" };
+        self.tracks_of_release_where(release, live)
+    }
+
+    fn tracks_of_release_where(&self, release: ReleaseId, live: &str) -> Result<Vec<TrackRow>> {
         self.read(|c| {
             let mut stmt = c.prepare(&format!(
                 "{TRACK_ROW_SELECT} WHERE t.release_id = ?1 {live}

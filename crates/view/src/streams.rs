@@ -524,6 +524,11 @@ pub struct WishlistRow {
     pub cover: Option<crate::Cover>,
     /// While downloading: how much of its torrent is here, 0..=100.
     pub progress: Option<u8>,
+    /// [`WishlistStatus::Confirm`] because downloaded files wait in
+    /// «Подтверди» (not a torrent to choose).
+    pub confirm_files: bool,
+    /// A downloaded album: its tracks still without a file.
+    pub missing: u32,
 }
 
 /// Items of one album or one artist, for the grouped view and its bulk

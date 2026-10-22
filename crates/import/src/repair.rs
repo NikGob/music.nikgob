@@ -1,0 +1,385 @@
+//! One-time repair of albums a torrent brought in pieces
+//! (`torrent_identity_repair.v1`, docs/stage4.md §12.4).
+//!
+//! Before folders were identified as albums, each file of a torrent was
+//! looked up alone, and the confirm queue offered strangers' recordings of
+//! the same title: «Ugly Is Beautiful» by Oliver Tree ended up as fourteen
+//! singles of fourteen other artists. The repair:
+//! * takes the files of one torrent folder; what their tags (read from the
+//!   payload when it is still in Downloads), else the folder's, torrent's
+//!   and files' names say about them gives the artist X and the album Y
+//!   ([`Evidence`]);
+//! * a track of the folder credited to artists that share nothing with X
+//!   goes back to X / Y: onto the «Хочу скачать» release the torrent was
+//!   fetched for (onto its stream track of the same number / title /
+//!   length when it has one), else onto the release of X / Y; strangers'
+//!   releases and artists it leaves empty go;
+//! * the files of a torrent fetched for an album that landed on another
+//!   release of the same title (a MusicBrainz edition next to the wishlist's
+//!   one) join the wishlist's release, one album, not two;
+//! * a «Хочу скачать» album whose tracks now all have files is «Скачано».
+//!
+//! With `move_files` the files follow their tracks (tags rewritten, moved
+//! where PLAN §5 puts them, through [`Importer::retag`]); without it only
+//! the database changes (a dry run on a copy of a library).
+
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use nikgob_core::model::{
+    ArtistId, ReleaseId, Source, SourceOrigin, TrackId, WishlistScope, WishlistStatus,
+};
+use nikgob_library::{Library, TrackRow};
+use nikgob_metadata::text::album_key;
+
+use crate::album::{Evidence, Slot, file_is_track, names_of};
+use crate::error::Result;
+use crate::folder::{album_group_dir, same_title};
+use crate::identity::{Identity, identity_from_tags, shares_artist};
+use crate::importer::Importer;
+use crate::retag::TagChanges;
+use crate::sanitize::long_path;
+use crate::store::Store;
+use crate::tags::{self, TagSet};
+
+/// `meta` key: the repair ran.
+pub const TORRENT_IDENTITY_REPAIR: &str = "torrent_identity_repair.v1";
+
+/// One track the repair put back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Moved {
+    pub track: TrackId,
+    /// Title, artist and album it had.
+    pub was: (String, String, String),
+    /// Title, artist, album and number it has now.
+    pub now: (String, String, String, u32),
+    /// It became this track of the release (a stream track waiting for it).
+    pub merged_into: Option<TrackId>,
+}
+
+/// What [`Importer::repair_torrent_identities`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IdentityRepair {
+    pub moved: Vec<Moved>,
+    /// Releases of another title folded into the wishlist's release:
+    /// `(from, into)` titles, and how many tracks became its tracks.
+    pub folded: Vec<(String, String, usize)>,
+    pub releases_removed: Vec<String>,
+    pub artists_removed: Vec<String>,
+    /// «Хочу скачать» albums now «Скачано».
+    pub wishlist_done: Vec<String>,
+    /// Files moved on disk.
+    pub files_moved: usize,
+}
+
+/// One file of a torrent folder.
+struct FolderFile {
+    source: Source,
+    track: TrackRow,
+    /// What its tags, else its name, say.
+    said: Identity,
+}
+
+/// The tags of a torrent file still in Downloads, else what its name says.
+fn said_of(downloads: &Path, path_in_torrent: &str) -> Identity {
+    let file = downloads.join(path_in_torrent);
+    if long_path(&file).exists()
+        && let Ok((tags, _)) = tags::read_tags(&file)
+    {
+        return identity_from_tags(&tags, &file);
+    }
+    identity_from_tags(&TagSet::default(), Path::new(path_in_torrent))
+}
+
+/// The credit lines of a track (display and every name).
+fn credit_lines(t: &TrackRow) -> Vec<String> {
+    let mut lines = vec![t.artist.clone()];
+    lines.extend(t.credit.0.iter().map(|p| p.name.clone()));
+    lines
+}
+
+/// Tracks of `release` with a live file, and all of them (outside the
+/// library too): «3 из 12» of a «Хочу скачать» album.
+pub fn release_files(lib: &Library, release: ReleaseId) -> Result<(usize, usize)> {
+    let rows = lib.tracks_of_release_all(release)?;
+    Ok((rows.iter().filter(|r| r.has_local).count(), rows.len()))
+}
+
+impl Importer {
+    /// See the module docs. Runs once per library (a `meta` mark).
+    pub fn repair_torrent_identities(&self, move_files: bool) -> Result<IdentityRepair> {
+        let lib = self.library().clone();
+        if lib.meta_value(TORRENT_IDENTITY_REPAIR)?.is_some() {
+            return Ok(IdentityRepair::default());
+        }
+        let report = self.repair_identities(&lib, move_files)?;
+        lib.set_meta_value(TORRENT_IDENTITY_REPAIR, &nikgob_library::now_ms().to_string())?;
+        // Releases and artists went: the importer's name indexes start over.
+        *self.inner.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Store::new(lib);
+        Ok(report)
+    }
+
+    fn repair_identities(&self, lib: &Library, move_files: bool) -> Result<IdentityRepair> {
+        let cfg = self.config();
+        let mut report = IdentityRepair::default();
+        // Torrent folders: (info hash, folder in the torrent) → files.
+        let mut folders: BTreeMap<(String, PathBuf), Vec<FolderFile>> = BTreeMap::new();
+        for source in lib.torrent_sources()? {
+            let SourceOrigin::Torrent { info_hash, path_in_torrent } = &source.origin else { continue };
+            if info_hash.is_empty() || path_in_torrent.is_empty() {
+                continue;
+            }
+            let Some(track) = lib.get_track_row(source.track_id)? else { continue };
+            let said = said_of(&cfg.downloads_dir, path_in_torrent);
+            let dir = album_group_dir(Path::new(path_in_torrent));
+            folders
+                .entry((info_hash.clone(), dir))
+                .or_default()
+                .push(FolderFile { source, track, said });
+        }
+        let mut touched: Vec<TrackId> = Vec::new();
+        let mut emptied: Vec<ReleaseId> = Vec::new();
+        let mut credited: Vec<ArtistId> = Vec::new();
+        let mut store = Store::new(lib.clone());
+        for ((info_hash, dir), files) in &folders {
+            if files.len() < 2 {
+                continue;
+            }
+            let bases: Vec<&Identity> = files.iter().map(|f| &f.said).collect();
+            let top = files
+                .iter()
+                .find_map(|f| match &f.source.origin {
+                    SourceOrigin::Torrent { path_in_torrent, .. } => Some(path_in_torrent.clone()),
+                    _ => None,
+                });
+            let names = names_of(dir, top.as_deref());
+            let ev = Evidence::new(&bases, &names.iter().map(String::as_str).collect::<Vec<_>>());
+            let (Some(artist), Some(album)) = (ev.album_artist.clone(), ev.album.clone()) else { continue };
+            if ev.compilation {
+                continue;
+            }
+            let strangers: Vec<&FolderFile> = files
+                .iter()
+                .filter(|f| !shares_artist(&credit_lines(&f.track), &ev.artists))
+                .collect();
+            if strangers.is_empty() {
+                continue;
+            }
+            // Where they belong: the wishlist's release, else X / Y.
+            let wished = lib
+                .get_download(info_hash)?
+                .and_then(|d| d.wishlist_id)
+                .and_then(|w| lib.get_wishlist_item(w).ok().flatten())
+                .and_then(|w| w.release_id)
+                .and_then(|r| lib.get_release(r).ok().flatten())
+                .filter(|r| {
+                    let (a, b) = (album_key(&r.title), album_key(&album));
+                    (a == b || same_title(&a, &b)) && shares_artist(&[r.artist_credit.display()], &ev.artists)
+                });
+            let mut folder_id = ev_identity(&ev, &files[0].said, &artist, &album);
+            let target = match wished {
+                Some(r) => r,
+                None => {
+                    folder_id.release_id = None;
+                    store.ensure_release(&folder_id, None)?
+                }
+            };
+            let mut slots = lib.tracks_of_release_all(target.id)?;
+            for f in strangers {
+                let mut said = f.said.clone();
+                ev.fill(&mut said);
+                let was = (
+                    f.track.title.clone(),
+                    f.track.artist.clone(),
+                    f.track.album.clone().unwrap_or_default(),
+                );
+                if let Some(r) = f.track.release_id {
+                    emptied.push(r);
+                }
+                credited.extend(f.track.credit.0.iter().filter_map(|p| p.artist_id));
+                // A track of the release waiting for this file.
+                let slot = slots
+                    .iter()
+                    .filter(|s| s.id != f.track.id && !s.has_local)
+                    .filter_map(|s| Some((file_is_track(&said, f.track.duration_ms, Slot::from(s))?, s.id)))
+                    .max_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, id)| id);
+                let id = match slot {
+                    Some(into) => {
+                        lib.merge_track_into(f.track.id, into)?;
+                        into
+                    }
+                    None => {
+                        let Some(mut t) = lib.get_track(f.track.id)? else { continue };
+                        let mut who = said.clone();
+                        if !shares_artist(&[who.artist_line.clone()], &ev.artists) {
+                            who.artist_line = artist.clone();
+                            who.artists = vec![artist.clone()];
+                        }
+                        t.title = said.title.clone();
+                        t.artist_credit = store.track_credit(&who)?;
+                        t.release_id = Some(target.id);
+                        t.disc_no = said.disc_no.max(1);
+                        t.track_no = said.track_no;
+                        lib.upsert_track(&t)?;
+                        t.id
+                    }
+                };
+                touched.push(id);
+                let row = lib.get_track_row(id)?;
+                let now = row.map_or_else(
+                    || (said.title.clone(), artist.clone(), target.title.clone(), said.track_no),
+                    |r| (r.title, r.artist, r.album.unwrap_or_default(), r.track_no),
+                );
+                report.moved.push(Moved { track: f.track.id, was, now, merged_into: slot });
+                slots = lib.tracks_of_release_all(target.id)?;
+            }
+        }
+        // Albums of the wishlist split from their downloads.
+        for d in lib.list_downloads()? {
+            let Some(item) = d.wishlist_id.and_then(|w| lib.get_wishlist_item(w).ok().flatten()) else { continue };
+            let Some(wished) = item.release_id.and_then(|r| lib.get_release(r).ok().flatten()) else { continue };
+            if item.scope != WishlistScope::Album {
+                continue;
+            }
+            let mut landed: Vec<ReleaseId> = Vec::new();
+            for s in lib.torrent_sources()? {
+                if matches!(&s.origin, SourceOrigin::Torrent { info_hash, .. } if *info_hash == d.info_hash)
+                    && let Some(r) = lib.get_track(s.track_id)?.and_then(|t| t.release_id)
+                    && r != wished.id
+                    && !landed.contains(&r)
+                {
+                    landed.push(r);
+                }
+            }
+            for r in landed {
+                let Some(other) = lib.get_release(r)? else { continue };
+                let same = album_key(&other.title) == album_key(&wished.title)
+                    && shares_artist(&[other.artist_credit.display()], &[wished.artist_credit.display()]);
+                if !same {
+                    continue;
+                }
+                let theirs = lib.tracks_of_release_all(other.id)?;
+                let mut slots = lib.tracks_of_release_all(wished.id)?;
+                let mut merged = 0;
+                for t in &theirs {
+                    let said = identity_from_tags(
+                        &TagSet {
+                            title: Some(t.title.clone()),
+                            track_no: Some(t.track_no),
+                            disc_no: Some(t.disc_no),
+                            ..TagSet::default()
+                        },
+                        Path::new("x"),
+                    );
+                    let slot = slots
+                        .iter()
+                        .filter(|s| !s.has_local)
+                        .filter_map(|s| Some((file_is_track(&said, t.duration_ms, Slot::from(s))?, s.id)))
+                        .max_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|(_, id)| id);
+                    let id = match slot {
+                        Some(into) if lib.merge_track_into(t.id, into)? => {
+                            merged += 1;
+                            into
+                        }
+                        _ => t.id,
+                    };
+                    touched.push(id);
+                    slots = lib.tracks_of_release_all(wished.id)?;
+                }
+                if lib.merge_releases(other.id, wished.id).is_err() {
+                    lib.absorb_edition(other.id, wished.id)?;
+                }
+                report.folded.push((other.title.clone(), wished.title.clone(), merged));
+            }
+        }
+        // Whatever the strangers left empty goes.
+        emptied.sort();
+        emptied.dedup();
+        for r in emptied {
+            let title = lib.get_release(r)?.map(|r| r.title);
+            if lib.drop_empty_release(r)?
+                && let Some(t) = title
+            {
+                report.releases_removed.push(t);
+            }
+        }
+        let mut seen = HashSet::new();
+        for a in credited {
+            if !seen.insert(a) {
+                continue;
+            }
+            let name = lib.get_artist(a)?.map(|a| a.name);
+            if lib.drop_orphan_artist(a)?
+                && let Some(n) = name
+            {
+                report.artists_removed.push(n);
+            }
+        }
+        // «Скачано» once every track of the album has its file.
+        for item in lib.list_wishlist()? {
+            if item.scope != WishlistScope::Album || matches!(item.status, WishlistStatus::Done | WishlistStatus::Dismissed) {
+                continue;
+            }
+            let Some(r) = item.release_id else { continue };
+            let (have, all) = release_files(lib, r)?;
+            if all > 0 && have == all && touched.iter().any(|t| lib.get_track(*t).ok().flatten().and_then(|t| t.release_id) == Some(r)) {
+                lib.set_wishlist_status(item.id, WishlistStatus::Done, Some("Скачано"))?;
+                report.wishlist_done.push(item.title.clone().unwrap_or_default());
+            }
+        }
+        if move_files {
+            touched.sort();
+            touched.dedup();
+            for t in touched {
+                match self.place_file(lib, t) {
+                    Ok(true) => report.files_moved += 1,
+                    Ok(false) => {}
+                    Err(e) => log::warn!("torrent repair: the file of {t} stays where it is: {e}"),
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Rewrites the tags of a track's file from the library and moves it
+    /// where PLAN §5 puts it. Returns whether the file moved.
+    fn place_file(&self, lib: &Library, track: TrackId) -> Result<bool> {
+        let Some(row) = lib.get_track_row(track)? else { return Ok(false) };
+        let Some(src) = lib.active_source(track)?.filter(|s| s.kind.is_local()) else { return Ok(false) };
+        if !long_path(Path::new(&src.locator)).exists() {
+            return Ok(false);
+        }
+        let release = row.release_id.and_then(|r| lib.get_release(r).ok().flatten());
+        let changes = TagChanges {
+            title: Some(row.title.clone()),
+            artist: Some(row.artist.clone()),
+            album: release.as_ref().map(|r| r.title.clone()),
+            album_artist: release.as_ref().map(|r| r.artist_credit.display()),
+            year: release.as_ref().map(|r| r.year),
+            track_no: Some((row.track_no > 0).then_some(row.track_no)),
+            disc_no: Some(Some(row.disc_no.max(1))),
+            release_mbid: release.as_ref().map(|r| r.mbid.clone().unwrap_or_default()),
+            ..TagChanges::default()
+        };
+        let new = self.retag(track, changes)?;
+        Ok(new.as_path() != Path::new(&src.locator))
+    }
+}
+
+/// The identity of the folder's album (X / Y) for finding or making its
+/// release.
+fn ev_identity(ev: &Evidence, first: &Identity, artist: &str, album: &str) -> Identity {
+    let mut id = first.clone();
+    ev.fill(&mut id);
+    id.album = Some(album.to_owned());
+    id.album_artist = Some(artist.to_owned());
+    id.artist_line = artist.to_owned();
+    id.artists = vec![artist.to_owned()];
+    id.release_type = nikgob_core::model::ReleaseType::Album;
+    id.compilation = false;
+    id.release_mbid = None;
+    id.release_group_mbid = None;
+    id
+}
