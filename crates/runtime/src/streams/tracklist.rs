@@ -160,10 +160,12 @@ impl Worker {
         }
     }
 
-    /// The background pass: one incomplete album with a file per [`EVERY`].
+    /// The background pass: one incomplete album with a file per [`EVERY`],
+    /// the first one [`EVERY`] after the start (the start has enough to ask).
     pub(crate) fn tracklist_tick(&mut self) {
         let t = &mut self.streaming.tracklist;
-        if !t.asking.is_empty() || t.last.is_some_and(|l| l.elapsed() < EVERY) {
+        let last = *t.last.get_or_insert_with(Instant::now);
+        if !t.asking.is_empty() || last.elapsed() < EVERY {
             return;
         }
         t.last = Some(Instant::now());
