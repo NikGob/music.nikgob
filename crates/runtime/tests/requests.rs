@@ -202,7 +202,12 @@ fn an_album_opened_twice_and_played_is_fetched_once() {
                 .as_ref()
                 .is_some_and(|p| p.page == page && !p.loading && !p.tracks.is_empty())
         });
-        rig.rt.send(Command::LoadStream(StreamPage::Artist(RemoteId::new(Service::Youtube, "yt-art-kino"))));
+        let artist = StreamPage::Artist(RemoteId::new(Service::Youtube, "yt-art-kino"));
+        rig.rt.send(Command::LoadStream(artist.clone()));
+        // Under load the next command could overtake the artist page.
+        wait_for("the artist page", 10, || {
+            rig.rt.state().stream_page.as_ref().is_some_and(|p| p.page == artist && !p.loading)
+        });
     }
     rig.rt.send(Command::PlayStreamAlbum {
         id: album,
