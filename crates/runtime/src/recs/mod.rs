@@ -765,6 +765,12 @@ impl Worker {
                 let seed = nikgob_recs::RadioSeed::Discover;
                 self.start_radio(seed, "Новое для тебя".to_owned(), EventContext::HomeSection, None);
             }
+            v::MixId::Daylist
+            | v::MixId::OnRepeat
+            | v::MixId::TimeCapsule
+            | v::MixId::Rediscover
+            | v::MixId::DeepCuts
+            | v::MixId::FreshLikes => self.toast("Эта подборка ещё собирается", None),
         }
     }
 
@@ -810,6 +816,12 @@ impl Worker {
             v::MixId::Discover => self.discover_now(),
             // Moods, styles and artists are endless: nothing to pick again.
             v::MixId::Mood(_) | v::MixId::Style(_) | v::MixId::Artist(_) => {}
+            v::MixId::Daylist
+            | v::MixId::OnRepeat
+            | v::MixId::TimeCapsule
+            | v::MixId::Rediscover
+            | v::MixId::DeepCuts
+            | v::MixId::FreshLikes => {}
         }
     }
 

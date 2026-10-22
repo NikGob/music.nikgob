@@ -56,6 +56,48 @@ pub enum MixId {
     /// «Новое для тебя» → «Слушать всё»: the discoveries, then a radio of
     /// new music.
     Discover,
+    /// «Дейлист»: the bento's big tile, picked anew for each part of the
+    /// day and named by its sound and time («Тягучий вечер четверга»).
+    /// Endless.
+    Daylist,
+    /// «На повторе»: what was played most in the last 30 days, as it is.
+    OnRepeat,
+    /// «Год назад»: what was played around this day a year ago, as it is.
+    TimeCapsule,
+    /// «Забытое любимое»: loved songs not played for two months, as they are.
+    Rediscover,
+    /// «Глубже у любимых»: barely played songs of the most played artists,
+    /// as they are.
+    DeepCuts,
+    /// «Свежие лайки»: the songs liked last, newest first, as they are.
+    FreshLikes,
+}
+
+impl MixId {
+    /// The mixes of the bento's smaller tiles, in the order they are
+    /// placed ([`crate::HomeView::tiles`]).
+    pub const TILES: [Self; 5] = [Self::OnRepeat, Self::TimeCapsule, Self::Rediscover, Self::DeepCuts, Self::FreshLikes];
+
+    /// The quiet label over a tile's title («НА ПОВТОРЕ»); `None` for the
+    /// cards that are not tiles.
+    pub const fn kicker(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Daylist => "ДЕЙЛИСТ",
+            Self::Daily => "ТВОЙ МИКС",
+            Self::OnRepeat => "НА ПОВТОРЕ",
+            Self::TimeCapsule => "ГОД НАЗАД",
+            Self::Rediscover => "ЗАБЫТОЕ ЛЮБИМОЕ",
+            Self::DeepCuts => "ГЛУБЖЕ У ЛЮБИМЫХ",
+            Self::FreshLikes => "СВЕЖИЕ ЛАЙКИ",
+            Self::Mood(_) | Self::Style(_) | Self::Artist(_) | Self::Discover => return None,
+        })
+    }
+
+    /// The mix plays without end (a radio that extends itself); the others
+    /// play their tracks as they are.
+    pub const fn endless(self) -> bool {
+        matches!(self, Self::Mood(_) | Self::Style(_) | Self::Artist(_) | Self::Discover | Self::Daylist)
+    }
 }
 
 /// One mix card of the home page.

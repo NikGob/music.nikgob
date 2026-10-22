@@ -437,6 +437,15 @@ pub struct HomeView {
     /// until the recommendations are built the first time (or with an
     /// empty library).
     pub hero: Option<MixCard>,
+    /// «Дейлист» ([`MixId::Daylist`]), the bento's big tile: title «Тягучий
+    /// вечер четверга», subtitle «Massive Attack, Kevin Penkin и другие ·
+    /// до 23:00», four covers. `None` until the recommendations are built
+    /// (or with an empty library).
+    pub daylist: Option<MixCard>,
+    /// The bento's smaller tiles in [`MixId::TILES`] order, each only when
+    /// it has enough songs (title «На повторе», subtitle «25 треков · за
+    /// месяц», «октябрь 2025 · 18 треков»).
+    pub tiles: Vec<MixCard>,
     /// «Под настроение»: the six moods, in the order for the part of the
     /// day (night: Спокойное, Мрачное first). Empty without any sound
     /// analysis.
