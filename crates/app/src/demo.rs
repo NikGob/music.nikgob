@@ -105,8 +105,9 @@ const PHOTOS: &[(&str, [u8; 3])] = &[
     ("The Prodigy", [170, 80, 40]),
 ];
 
-/// An artist photo: a head and shoulders lit from the left before a soft
-/// studio backdrop in the hue, with a vignette and grain, 400×400 JPEG.
+/// An artist photo: a concert from the floor, the stage lights in the hue
+/// as soft bokeh and beams through haze over the crowd's silhouette, a
+/// vignette and grain, 400×400 JPEG.
 fn make_photo(path: &Path, rgb: [u8; 3], seed: u32) {
     let size = 400u32;
     let base = rgb.map(f32::from);
@@ -118,47 +119,49 @@ fn make_photo(path: &Path, rgb: [u8; 3], seed: u32) {
         let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     };
-    let light = mix(base, [255.0; 3], 0.45);
-    let dark = mix(base, [0.0; 3], 0.75);
-    let skin_lit = [214.0, 172.0, 148.0];
-    let skin_shade = [70.0, 48.0, 44.0];
-    let cloth = mix(base, [20.0; 3], 0.8);
-    // The pose shifts a little per artist.
-    let lean = ((seed % 5) as f32 - 2.0) * 0.025;
+    let glow = mix(base, [255.0, 240.0, 220.0], 0.55);
+    let deep = mix(base, [0.0; 3], 0.85);
+    // Stage lights: a few soft discs, placed by the seed.
+    let lights: Vec<(f32, f32, f32)> = (0..7)
+        .map(|k| {
+            let r = |salt: u32| ((seed.wrapping_mul(2_654_435_761) ^ (k * 40_503 + salt).wrapping_mul(97_531)) % 1000) as f32 / 1000.0;
+            (r(1), r(2) * 0.6, 0.03 + r(3) * 0.06)
+        })
+        .collect();
+    let lean = ((seed % 5) as f32 - 2.0) * 0.03;
     let img = image::RgbImage::from_fn(size, size, |x, y| {
         let (u, v) = (x as f32 / size as f32, y as f32 / size as f32);
-        // Backdrop: a lit patch up left fading to the dark hue.
-        let d = ((u - 0.32).powi(2) + (v - 0.28).powi(2)).sqrt();
-        let mut c = mix(light, dark, d * 1.3);
-        // Head (an ellipse), neck and shoulders, edges a pixel or two soft.
-        let hx = 0.5 + lean;
-        let head = ((u - hx) / 0.15).powi(2) + ((v - 0.40) / 0.19).powi(2);
-        let neck = (u - hx * 0.9 - 0.05).abs() < 0.07 && v > 0.5 && v < 0.72;
-        let body = ((u - 0.5) / 0.44).powi(2) + ((v - 1.08) / 0.36).powi(2);
-        let k_head = 1.0 - smooth(0.92, 1.0, head);
-        let k_body = 1.0 - smooth(0.95, 1.0, body);
-        // Light from the left: bright on the left cheek, shade on the right.
-        let lit = (0.85 - (u - hx + 0.12) * 3.2 + (0.35 - v) * 0.6).clamp(0.0, 1.0);
-        if neck {
-            c = mix(skin_shade, skin_lit, lit * 0.7);
+        // The stage: dark below, a spot from above, haze in the hue.
+        let spot = (-((u - 0.5 - lean).powi(2)) / 0.06).exp() * (1.0 - v);
+        let mut c = mix(deep, base, 0.35 + spot * 0.9);
+        for (lx, ly, lr) in &lights {
+            let d = ((u - lx).powi(2) + (v - ly).powi(2)).sqrt();
+            c = mix(c, glow, (1.0 - smooth(lr * 0.7, *lr, d)) * 0.55);
         }
-        c = mix(c, mix(skin_shade, skin_lit, lit), k_head);
-        // Hair: the top of the head, darker.
-        let hair = k_head * (1.0 - smooth(0.30, 0.36, v + ((u - hx) * 4.0).powi(2) * 0.02));
-        c = mix(c, mix([25.0; 3], base, 0.25), hair);
-        c = mix(c, mix(cloth, mix(cloth, light, 0.35), lit), k_body);
-        // Vignette.
-        let vig = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt();
-        c = mix(c, [0.0; 3], smooth(0.45, 0.85, vig) * 0.6);
+        // Beams from the rig, fanning down from above.
+        for (bx, tilt) in [(0.2 + lean, 0.35), (0.55 - lean, -0.1), (0.85, -0.4)] {
+            let along = (u - bx - tilt * v).abs() / (0.03 + v * 0.12);
+            c = mix(c, glow, (1.0 - smooth(0.4, 1.0, along)) * 0.28 * (1.0 - v * 0.6));
+        }
+        // The crowd: heads and raised hands against the light.
+        let k = seed as f32;
+        let crowd = 0.8
+            + 0.035 * ((u * 31.0 + k).sin() + 0.6 * (u * 57.0 + k * 1.7).sin())
+            - 0.09 * (1.0 - smooth(0.0, 0.025, ((u * 7.0 + k * 0.3).fract() - 0.5).abs())) * (u * 3.0 + k).sin().max(0.0);
+        let dark = mix([6.0; 3], base, 0.08);
+        c = mix(c, dark, smooth(crowd - 0.004, crowd + 0.004, v));
+        // Vignette and grain.
+        let vig = ((u - 0.5).powi(2) + (v - 0.45).powi(2)).sqrt();
+        c = mix(c, [0.0; 3], smooth(0.4, 0.8, vig) * 0.55);
         let h = (x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663) ^ seed.wrapping_mul(83_492_791)) % 1000;
-        let n = (h as f32 / 1000.0 - 0.5) * 18.0;
+        let n = (h as f32 / 1000.0 - 0.5) * 16.0;
         image::Rgb(c.map(|ch| (ch + n).clamp(0.0, 255.0) as u8))
     });
     let _ = img.save(path);
 }
 
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v11";
+pub const VERSION: &str = "seed-v14";
 
 /// The intro, instrumental gap and long line exercise both lyrics layouts.
 const DEMO_LRC: &str = "[00:03.00]Свет из окна ложится на пол

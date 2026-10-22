@@ -126,14 +126,34 @@ fn header(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         if tab == LibraryTab::Trash {
             return;
         }
+        // The filter stays where it is from tab to tab, right after the
+        // title; the tools of the tab come and go at the end of the row.
+        let narrow = ui.available_width() < 640.0;
+        let sorts = matches!(tab, LibraryTab::All | LibraryTab::Albums);
+        let views = tab != LibraryTab::Tracks;
+        let sort_w = match (sorts, narrow) {
+            (false, _) => 0.0,
+            (true, true) => 48.0,
+            (true, false) => {
+                let label = SORTS.iter().find(|s| s.0 == lib.release_sort).map_or("", |s| s.1);
+                let text = ui.painter().layout_no_wrap(label.to_owned(), TypeRole::LabelLarge.font_id(), s.primary);
+                text.size().x + 72.0
+            }
+        };
+        let tools = 40.0 + if views { 90.0 } else { 0.0 } + sort_w;
+        let w = (ui.available_width() - tools - 16.0).min(480.0);
+        if w >= 200.0 {
+            filter_field(ui, pages, w);
+        } else {
+            filter_below = true;
+        }
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            let narrow = ui.available_width() < 560.0;
             // The sort orders the album grid (the table sorts by its header).
-            if matches!(tab, LibraryTab::All | LibraryTab::Albums) {
+            if sorts {
                 sort_button(ui, lib.release_sort, narrow, out);
             }
-            if tab != LibraryTab::Tracks {
+            if views {
                 let is_list = list_view(ui.ctx());
                 // The group lays out left to right inside this right-to-left row.
                 let picked = ui
@@ -148,14 +168,6 @@ fn header(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
                 }
             }
             only_downloaded(ui, state, out);
-            // The filter takes what is left, up to a comfortable width; in
-            // a narrow window it gets a row of its own.
-            let w = ui.available_width().min(480.0);
-            if w >= 200.0 {
-                filter_field(ui, pages, w);
-            } else {
-                filter_below = true;
-            }
         });
     });
     if filter_below {
