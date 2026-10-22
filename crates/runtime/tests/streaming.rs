@@ -705,3 +705,45 @@ fn a_followed_playlist_is_linked_in_follow_mode() {
     wait_for(&r.rt, "the second toast", |s| s.toasts.iter().any(|t| t.text == "«Fake Mix» уже в библиотеке"));
     assert_eq!(lib.list_playlists().unwrap().iter().filter(|p| p.name == "Fake Mix").count(), 1);
 }
+
+#[test]
+fn an_album_is_downloaded_only_when_every_track_has_its_file() {
+    use nikgob_core::streaming::{AlbumRef, ArtistRef};
+    let lib = Library::open_in_memory().unwrap();
+    // «Хочу скачать» made the album's tracks: outside the library, no files.
+    let track = |no: u32, title: &str, ms: u64| {
+        let mut t = StreamTrack::new(RemoteId::new(Service::Deezer, format!("dz-{no}")), title);
+        t.artists = vec![ArtistRef::new(None, "Кино")];
+        t.album = Some(AlbumRef::new(Some(RemoteId::new(Service::Deezer, "dz-alb")), "Группа крови"));
+        t.track_no = Some(no);
+        t.duration_ms = Some(ms);
+        lib.upsert_stream_track(&t).unwrap()
+    };
+    let one = track(1, "Группа крови", 3_000);
+    let two = track(2, "Закрой за мной дверь", 2_000);
+    track(3, "Война", 2_500);
+    let release = lib.get_track(one).unwrap().unwrap().release_id.unwrap();
+    let mut item = nikgob_core::model::WishlistItem::new(WishlistStatus::Waiting, 1);
+    item.scope = WishlistScope::Album;
+    item.release_id = Some(release);
+    item.origin = WishlistOrigin::Manual;
+    item.title = Some("Группа крови".into());
+    lib.put_wishlist_item(&item).unwrap();
+    let r = rig(&lib, Vec::new(), true);
+
+    // The user's folder has two of the three songs.
+    let dir = r.cfg.inbox_dir.join("Кино - Группа крови (1988)");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_wav(&dir.join("01 - Группа крови.wav"), 3.0);
+    write_wav(&dir.join("02 - Закрой за мной дверь.wav"), 2.0);
+    r.rt.send(Command::WishlistAttach { item: item.id, what: nikgob_view::WishlistAttach::Folder(dir) });
+    let local = |t| lib.active_source(t).unwrap().is_some_and(|s| s.kind.is_local());
+    wait_until("the files on the album's tracks", || local(one) && local(two));
+    let settled = || lib.get_wishlist_item(item.id).unwrap().unwrap();
+    wait_until("the item settled", || settled().status == WishlistStatus::Done);
+    assert_eq!(settled().note.as_deref(), Some("Скачано 2 из 3"), "not «Скачано»: a song is missing");
+    wait_for(&r.rt, "the row says what is missing", |s| {
+        s.downloads.wishlist.items.iter().any(|row| row.id == item.id && row.missing == 1)
+    });
+    assert!(r.rt.state().downloads.confirm.is_empty(), "nothing to confirm");
+}

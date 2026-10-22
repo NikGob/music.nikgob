@@ -38,6 +38,8 @@ pub(crate) const WISH_ID: u64 = 1 << 47;
 const RETRY_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Releases offered in "Подтверди".
 const CONFIRM_OPTIONS: usize = 3;
+/// The note of an item whose files wait in «Подтверди» (docs/stage4.md §12.4).
+pub(crate) const FILES_WAIT: &str = "Файлы ждут подтверждения";
 /// A release title must name the artist this well (0..=1).
 const ARTIST_MATCH: f64 = 0.85;
 /// A file name must be this close to the track title (0..=1)…
@@ -608,13 +610,14 @@ impl Worker {
         }
     }
 
-    /// The tracks an item's files should become.
+    /// The tracks an item's files should become (an album's tracks outside
+    /// the library too: the ones «Хочу скачать» made for it).
     fn targets_of(&self, item: &WishlistItem) -> Vec<TrackId> {
         let mut out: Vec<TrackId> = item.track_id.into_iter().collect();
         if item.scope == WishlistScope::Album
             && let Some(r) = item.release_id
         {
-            for row in self.lib.tracks_of_release(r).unwrap_or_default() {
+            for row in self.lib.tracks_of_release_all(r).unwrap_or_default() {
                 if !out.contains(&row.id) {
                     out.push(row.id);
                 }
@@ -623,14 +626,24 @@ impl Worker {
         out
     }
 
-    /// The import targets of the item a torrent was downloaded for.
+    /// The import targets of the item a torrent was downloaded for: its
+    /// tracks, its album and the item itself.
     pub(crate) fn wish_targets(&self, item: WishlistId) -> ImportTargets {
         self.lib
             .get_wishlist_item(item)
             .ok()
             .flatten()
-            .map(|i| ImportTargets::new(self.targets_of(&i)))
+            .map(|i| self.item_targets(&i, false))
             .unwrap_or_default()
+    }
+
+    fn item_targets(&self, item: &WishlistItem, force: bool) -> ImportTargets {
+        ImportTargets {
+            tracks: self.targets_of(item),
+            force,
+            release: item.release_id.filter(|_| item.scope == WishlistScope::Album),
+            wishlist: Some(item.id),
+        }
     }
 
     fn want_of(&self, item: &WishlistItem) -> Want {
@@ -1089,6 +1102,7 @@ impl Worker {
                 let targets = ImportTargets {
                     tracks: vec![track],
                     force: true,
+                    ..ImportTargets::default()
                 };
                 if !self.import_for(vec![path], "Сохранение с YouTube".into(), SourceOrigin::Stream, targets) {
                     self.set_item(id, |i| i.status = WishlistStatus::NoTorrent);
@@ -1108,19 +1122,20 @@ impl Worker {
 
     pub(crate) fn wish_attach(&mut self, id: WishlistId, what: v::WishlistAttach) {
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
-        let tracks = self.targets_of(&item);
+        let tracks = self.targets_of(&item).len();
         let note = match &what {
             v::WishlistAttach::TorrentFile(_) | v::WishlistAttach::Magnet(_) => "Своя раздача",
             v::WishlistAttach::Files(_) | v::WishlistAttach::Folder(_) => "Свой файл",
         };
         let started = match what {
             v::WishlistAttach::Files(paths) => {
-                let force = paths.len() == 1 && item.scope == WishlistScope::Track && tracks.len() == 1;
-                let targets = ImportTargets { tracks, force };
+                let force = paths.len() == 1 && item.scope == WishlistScope::Track && tracks == 1;
+                let targets = self.item_targets(&item, force);
                 self.import_for(paths, "Импорт для «Хочу скачать»".into(), SourceOrigin::Inbox, targets)
             }
             v::WishlistAttach::Folder(dir) => {
-                self.import_for(vec![dir], "Импорт для «Хочу скачать»".into(), SourceOrigin::Inbox, ImportTargets::new(tracks))
+                let targets = self.item_targets(&item, false);
+                self.import_for(vec![dir], "Импорт для «Хочу скачать»".into(), SourceOrigin::Inbox, targets)
             }
             v::WishlistAttach::TorrentFile(path) => match std::fs::read(&path) {
                 Ok(bytes) => {
@@ -1182,11 +1197,19 @@ impl Worker {
                     .wishlist_for_release(r)
                     .unwrap_or_default()
                     .into_iter()
-                    .filter(|i| i.scope == WishlistScope::Album && i.status == WishlistStatus::Downloading),
+                    .filter(|i| {
+                        i.scope == WishlistScope::Album
+                            && matches!(i.status, WishlistStatus::Downloading | WishlistStatus::Confirm)
+                    }),
             );
         }
         for i in items {
             if matches!(i.status, WishlistStatus::Done | WishlistStatus::Dismissed) {
+                continue;
+            }
+            // An album is «Скачано» once every one of its tracks has a file
+            // and nothing waits in «Подтверди».
+            if i.scope == WishlistScope::Album && !self.album_complete(&i) {
                 continue;
             }
             self.set_item(i.id, |i| {
@@ -1200,6 +1223,85 @@ impl Worker {
             self.publish_wishlist();
             self.wish_tick();
         }
+    }
+
+    /// Files of `item`'s album that have a file, and all its tracks.
+    fn album_files(&self, item: &WishlistItem) -> (usize, usize) {
+        item.release_id
+            .and_then(|r| nikgob_import::release_files(&self.lib, r).ok())
+            .unwrap_or_default()
+    }
+
+    fn album_complete(&self, item: &WishlistItem) -> bool {
+        let (have, all) = self.album_files(item);
+        all > 0 && have == all && !self.files_wait(item.id)
+    }
+
+    /// Files downloaded for the item wait in «Подтверди».
+    fn files_wait(&self, item: WishlistId) -> bool {
+        self.import
+            .as_ref()
+            .is_some_and(|svc| svc.pending().iter().any(|p| p.wishlist == Some(item)))
+    }
+
+    /// A file downloaded for the item waits in «Подтверди»: the item says
+    /// so and leads there, it is not «Скачано».
+    pub(crate) fn wish_parked(&mut self, item: WishlistId) {
+        let changed = self.set_item(item, |i| {
+            if !matches!(i.status, WishlistStatus::Dismissed) {
+                i.status = WishlistStatus::Confirm;
+                i.note = Some(FILES_WAIT.into());
+            }
+        });
+        if changed.is_some() {
+            self.publish_wishlist();
+        }
+    }
+
+    /// The item's import ended (or a file of it was answered in
+    /// «Подтверди»): «Подтверди» while files wait there, «Скачано» when its
+    /// track (every track of its album) has a file, else what is missing.
+    pub(crate) fn wish_settle(&mut self, id: WishlistId) {
+        let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
+        if matches!(item.status, WishlistStatus::Dismissed) {
+            return;
+        }
+        if self.files_wait(id) {
+            self.wish_parked(id);
+            return;
+        }
+        let (status, note) = match item.scope {
+            WishlistScope::Album => match self.album_files(&item) {
+                (have, all) if all > 0 && have == all => (WishlistStatus::Done, "Скачано".to_owned()),
+                (have, all) if have > 0 => (WishlistStatus::Done, format!("Скачано {have} из {all}")),
+                // Nothing of the album landed: still on its way, or failed.
+                _ if item.status == WishlistStatus::Confirm => (WishlistStatus::Downloading, String::new()),
+                _ => return,
+            },
+            WishlistScope::Track => {
+                let local = item
+                    .track_id
+                    .and_then(|t| self.lib.active_source(t).ok().flatten())
+                    .is_some_and(|s| s.kind.is_local() && s.quality_score > score::SAVED_STREAM);
+                if !local {
+                    if item.status == WishlistStatus::Confirm && item.note.as_deref() == Some(FILES_WAIT) {
+                        self.set_item(id, |i| i.status = WishlistStatus::Downloading);
+                        self.publish_wishlist();
+                    }
+                    return;
+                }
+                (WishlistStatus::Done, "Скачано".to_owned())
+            }
+        };
+        self.set_item(id, |i| {
+            i.status = status;
+            i.next_try_at = None;
+            if !note.is_empty() {
+                i.note = Some(note);
+            }
+        });
+        self.publish_wishlist();
+        self.wish_tick();
     }
 
     /// An import of saved stream audio failed: the item goes back.
@@ -1218,6 +1320,12 @@ impl Worker {
     pub(crate) fn wish_restart(&mut self) {
         for i in self.lib.list_wishlist_by_status(WishlistStatus::Searching).unwrap_or_default() {
             self.set_item(i.id, |i| i.status = WishlistStatus::New);
+        }
+        // Files that waited in «Подтверди» may be gone since.
+        for i in self.lib.list_wishlist_by_status(WishlistStatus::Confirm).unwrap_or_default() {
+            if i.note.as_deref() == Some(FILES_WAIT) && !self.files_wait(i.id) {
+                self.wish_settle(i.id);
+            }
         }
     }
 
@@ -1301,9 +1409,17 @@ impl Worker {
                     }
                 }
             }
-            if item.status == WishlistStatus::Confirm {
+            let files_wait = item.status == WishlistStatus::Confirm && self.files_wait(item.id);
+            if item.status == WishlistStatus::Confirm && !files_wait {
                 confirms.push(self.wish_confirm_view(item));
             }
+            let missing = match (item.scope, item.status) {
+                (WishlistScope::Album, WishlistStatus::Done) => {
+                    let (have, all) = self.album_files(item);
+                    (all - have.min(all)) as u32
+                }
+                _ => 0,
+            };
             let next_try = item
                 .next_try_at
                 .filter(|_| item.status == WishlistStatus::NoTorrent)
@@ -1334,6 +1450,8 @@ impl Worker {
                 progress: (item.status == WishlistStatus::Downloading)
                     .then(|| self.streaming.wish.progress.get(&item.id).copied())
                     .flatten(),
+                confirm_files: files_wait,
+                missing,
             });
             covers.push(release_id);
         }

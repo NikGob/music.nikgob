@@ -62,6 +62,53 @@ fn repairs_of_a_real_library() {
     }
     println!("album cards: {cards} -> {}", releases(&lib));
 
+    // Torrent folders scattered over strangers: back to their album. The
+    // importer's folders point into the temporary directory, so no file of
+    // the real library is read or touched: the evidence is the names.
+    let cfg = nikgob_import::ImportConfig::with_root(dir.path().join("root"));
+    let importer = nikgob_import::Importer::new(cfg, lib.clone(), None);
+    let cards = releases(&lib);
+    let artists = lib.count_artists().unwrap();
+    let repair = importer.repair_torrent_identities(false).unwrap();
+    println!("torrent repair: {} tracks put back", repair.moved.len());
+    for m in &repair.moved {
+        println!(
+            "  {:?} · {} [{}]
+    -> {:?} · {} [{}] #{}{}",
+            m.was.0,
+            m.was.1,
+            m.was.2,
+            m.now.0,
+            m.now.1,
+            m.now.2,
+            m.now.3,
+            if m.merged_into.is_some() { " (its stream track)" } else { "" }
+        );
+    }
+    for (from, into, merged) in &repair.folded {
+        println!("  folded {from:?} into {into:?} ({merged} stream tracks got their files)");
+    }
+    println!("  releases removed: {:?}", repair.releases_removed);
+    println!("  artists removed: {:?}", repair.artists_removed);
+    println!("  wishlist done: {:?}", repair.wishlist_done);
+    println!(
+        "album cards: {cards} -> {}, artists: {artists} -> {}",
+        releases(&lib),
+        lib.count_artists().unwrap()
+    );
+    for row in lib.releases(0, 100_000, ReleaseSort::asc(Default::default())).unwrap() {
+        if row.release.artist_credit.display() == "Oliver Tree" {
+            let (have, all) = nikgob_import::release_files(&lib, row.release.id).unwrap();
+            println!("  Oliver Tree · {:?}: {have} of {all} tracks with files", row.release.title);
+        }
+    }
+    for w in lib.list_wishlist().unwrap() {
+        if w.artist.as_deref() == Some("Oliver Tree") {
+            println!("  wishlist {:?}: {:?} {:?}", w.title, w.status, w.note);
+        }
+    }
+    assert!(importer.repair_torrent_identities(false).unwrap().moved.is_empty(), "once");
+
     let offers = nikgob_import::find_release_editions(&lib).unwrap();
     println!("edition offers: {}", offers.len());
     for g in &offers {

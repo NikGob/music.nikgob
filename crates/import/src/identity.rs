@@ -59,6 +59,9 @@ pub struct Identity {
     pub genre: Option<String>,
     pub cover_url: Option<String>,
     pub identified_by: IdentifiedBy,
+    /// The library release the file is known to belong to (the release a
+    /// wishlist download was for): it lands there whatever the title says.
+    pub release_id: Option<nikgob_core::model::ReleaseId>,
 }
 
 /// Splits `"A feat. B; C"` into `[("", "A"), (" feat. ", "B"), ("; ", "C")]`
@@ -175,6 +178,7 @@ pub fn identity_from_tags(tags: &TagSet, path: &Path) -> Identity {
         genre: tags.genre.clone(),
         cover_url: None,
         identified_by: IdentifiedBy::Tags,
+        release_id: None,
     }
 }
 
@@ -200,8 +204,11 @@ pub fn identity_of_track(
     id.disc_no = t.disc_no.max(1);
     id.isrc = t.isrc.clone().or(id.isrc);
     id.recording_mbid = t.recording_mbid.clone().or(id.recording_mbid);
+    id.release_id = t.release_id;
     match release {
         Some(r) => {
+            id.release_mbid = r.mbid.clone().or(id.release_mbid);
+            id.release_group_mbid = r.release_group_mbid.clone().or(id.release_group_mbid);
             id.album = Some(r.title.clone());
             id.album_artist = Some(r.artist_credit.display()).filter(|a| !a.is_empty());
             id.year = r.year.or(id.year);
@@ -306,6 +313,7 @@ pub fn confirm_option(c: &MatchCandidate) -> ConfirmOption {
         album: c.metadata.album.clone(),
         year: c.metadata.date.as_deref().and_then(year_of),
         track_no: c.metadata.track_no,
+        duration_ms: c.metadata.duration.map(|d| d.as_millis() as u32),
         score: c.score,
         source: match c.source {
             MatchSource::MusicBrainz => "musicbrainz",
@@ -360,12 +368,70 @@ async fn timed<T>(
     }
 }
 
+/// Folded single names of credit lines (`"A feat. B"`, `"A & B"` and
+/// `"A, B"` give `a` and `b`; the line itself counts too, for a band named
+/// `"Simon & Garfunkel"`).
+pub fn artist_names<S: AsRef<str>>(lines: &[S]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in lines {
+        let line = line.as_ref();
+        let mut push = |n: &str| {
+            let k = nikgob_metadata::text::artist_key(n);
+            if !k.is_empty() && !out.contains(&k) && !is_various_artists(n) {
+                out.push(k);
+            }
+        };
+        push(line);
+        for (_, name) in parse_credit(line) {
+            push(&name);
+            if let Some(pair) = nikgob_core::credit::split_pair(&name) {
+                for (_, n) in pair {
+                    push(&n);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether two lists of credit lines name one artist in common (see
+/// [`artist_names`]). Nothing to compare (an empty side) is no veto.
+pub fn shares_artist<A: AsRef<str>, B: AsRef<str>>(a: &[A], b: &[B]) -> bool {
+    let (a, b) = (artist_names(a), artist_names(b));
+    a.is_empty() || b.is_empty() || a.iter().any(|n| b.contains(n))
+}
+
+/// Drops candidates none of whose artists is one the file, its folder or
+/// its torrent names (`artists`): a title alone is no match («Cash
+/// Machine» by Oliver Tree is not DRAM's). A vetoed best candidate takes
+/// the verdict «sure» with it.
+pub fn veto(mut result: MatchResult, artists: &[String]) -> MatchResult {
+    if artist_names(artists).is_empty() {
+        return result;
+    }
+    let fits = |c: &MatchCandidate| {
+        let mut lines = vec![c.metadata.artist.clone()];
+        lines.extend(c.metadata.artists.iter().cloned());
+        lines.extend(c.metadata.album_artist.iter().cloned());
+        shares_artist(&lines, artists)
+    };
+    let best_ok = result.ranked.first().is_some_and(fits);
+    result.ranked.retain(fits);
+    result.options.retain(fits);
+    if !best_ok {
+        result.confidence = Confidence::Unsure;
+    }
+    result
+}
+
 /// AcoustID + MusicBrainz, with Deezer as the fallback. Never errors.
+/// Candidates by other artists than `artists` are vetoed ([`veto`]).
 pub async fn lookup(
     meta: &Metadata,
     cfg: &ImportConfig,
     mut ev: LocalEvidence,
     fingerprint: Option<&Fingerprint>,
+    artists: &[String],
 ) -> Lookup {
     let duration = ev
         .duration
@@ -434,7 +500,7 @@ pub async fn lookup(
             result = match_candidates(&ev, candidates);
         }
     }
-    decide_lookup(result)
+    decide_lookup(veto(result, artists))
 }
 
 /// Sure / worth asking about / nothing.
@@ -552,6 +618,37 @@ mod tests {
         let opt = confirm_option(&cand);
         assert_eq!(opt.year, Some(2019));
         assert_eq!(opt.source, "musicbrainz");
+    }
+
+    fn cand(title: &str, artist: &str, score: f64) -> MatchCandidate {
+        MatchCandidate {
+            score,
+            source: MatchSource::MusicBrainz,
+            ids: CandidateIds::default(),
+            metadata: TrackMetadata {
+                title: title.into(),
+                artist: artist.into(),
+                artists: vec![artist.into()],
+                ..Default::default()
+            },
+            breakdown: Default::default(),
+        }
+    }
+
+    #[test]
+    fn candidates_by_strangers_are_vetoed() {
+        let all = vec![cand("Cash Machine", "DRAM", 0.9), cand("Cash Machine", "Oliver Tree", 0.7)];
+        let result = MatchResult { confidence: Confidence::Sure, ranked: all.clone(), options: all };
+        let kept = veto(result.clone(), &["Oliver Tree".into()]);
+        assert_eq!(kept.ranked.len(), 1);
+        assert_eq!(kept.options[0].metadata.artist, "Oliver Tree");
+        assert_eq!(kept.confidence, Confidence::Unsure, "the sure one was a stranger");
+        let none = veto(result.clone(), &["Oliver Tree feat. Little Ricky ZR3".into(), "Someone".into()]);
+        assert_eq!(none.ranked.len(), 1, "a guest line still names the artist");
+        assert!(matches!(decide_lookup(veto(result.clone(), &["Kino".into()])), Lookup::None));
+        assert_eq!(veto(result, &[]).ranked.len(), 2, "nothing to compare: no veto");
+        assert!(shares_artist(&["Kevin Penkin & Raj Ramayya"], &["Raj Ramayya"]));
+        assert!(!shares_artist(&["Sean Kelly"], &["Oliver Tree"]));
     }
 
     #[test]

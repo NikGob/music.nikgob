@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use nikgob_core::clip_title::same_dual_title;
-use nikgob_core::model::{Source, Track, TrackId};
+use nikgob_core::model::{ReleaseId, Source, Track, TrackId, WishlistId};
 use nikgob_library::Library;
 use nikgob_metadata::text::{album_key, artist_key, similarity, title_key};
 
@@ -91,20 +91,28 @@ const STREAM_ARTIST_SIMILARITY: f64 = 0.8;
 /// The library tracks the files of one import job are meant for: the
 /// wishlist item a torrent was downloaded for, or the item the user attached
 /// a file to. A file that fits one of them (title and length) becomes that
-/// track's local source.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// track's local source; the other files of the item's album land on its
+/// release (see [`crate::album`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImportTargets {
     pub tracks: Vec<TrackId>,
     /// The user said which track the file is: with exactly one target and
     /// one file, the file attaches to it whatever its tags say.
     pub force: bool,
+    /// The album the item asked for (its tracks may be fewer than the
+    /// album has).
+    #[serde(default)]
+    pub release: Option<ReleaseId>,
+    /// The «Хочу скачать» item, for files that wait in «Подтверди».
+    #[serde(default)]
+    pub wishlist: Option<WishlistId>,
 }
 
 impl ImportTargets {
     pub fn new(tracks: Vec<TrackId>) -> Self {
         Self {
             tracks,
-            force: false,
+            ..Self::default()
         }
     }
 

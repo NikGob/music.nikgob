@@ -97,7 +97,7 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
         ui.add_space(4.0);
         ui.label(
             TypeRole::BodyMedium.style().rich_para(
-                "Для этих файлов нашлось несколько похожих релизов, и уверенности нет. Выбери правильный вариант — название, альбом, номер и обложка возьмутся из него. Если ни один не подходит, оставь теги, которые уже записаны в файле.",
+                "Для этих файлов нашлось несколько похожих релизов, и уверенности нет. Выбери правильный вариант — название, альбом, номер и обложка возьмутся из него. Первый вариант — теги, которые уже записаны в файле.",
                 s.on_surface_variant,
             ),
         );
@@ -179,10 +179,12 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
                 {
                     out.push(Command::ConfirmChoice { id: c.id, option: Some(choice) });
                 }
-                if ui
-                    .add(Button::new(c.skip_label.as_str()).style(Style::Text).id_salt(("cf-skip", c.id)))
-                    .on_hover_text("Импортировать как есть, с тегами из самого файла")
-                    .clicked()
+                // No second way out when the file's own tags are an option.
+                if !c.skip_label.is_empty()
+                    && ui
+                        .add(Button::new(c.skip_label.as_str()).style(Style::Text).id_salt(("cf-skip", c.id)))
+                        .on_hover_text("Импортировать как есть, с тегами из самого файла")
+                        .clicked()
                 {
                     out.push(Command::ConfirmChoice { id: c.id, option: None });
                 }

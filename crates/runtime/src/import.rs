@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use nikgob_core::lyrics::LyricsSource;
-use nikgob_core::model::{SourceOrigin, TrackId};
+use nikgob_core::model::{SourceOrigin, TrackId, WishlistId};
 use nikgob_import::{ImportConfig, ImportEvent, Importer, InboxWatcher, ItemId, Stage};
 use nikgob_metadata::{Metadata, MetadataConfig};
 use nikgob_view::{self as v, Command};
@@ -31,7 +31,12 @@ pub struct ImportSetup {
 /// Messages from background tasks to the worker.
 pub(crate) enum Internal {
     Import(ImportEvent),
-    Resolved { item: u64, error: Option<String> },
+    Resolved {
+        item: u64,
+        /// The «Хочу скачать» item the file was for.
+        wishlist: Option<WishlistId>,
+        error: Option<String>,
+    },
     LyricsFetched(TrackId, LyricsSource, Result<Option<crate::lyrics::Text>, String>),
     LyricsEmbedded(TrackId, Result<String, String>),
     Enrich(crate::enrich::Event),
@@ -116,6 +121,8 @@ pub(crate) struct ImportService {
     titles: HashMap<u64, String>,
     /// Jobs started but whose `Started` event has not reached the worker yet.
     launching: HashMap<u64, Instant>,
+    /// Jobs of «Хочу скачать» items: the item settles when its job ends.
+    wish_jobs: HashMap<u64, WishlistId>,
     /// Parked items being imported right now (already out of `pending`).
     resolving: usize,
     history: VecDeque<v::Job>,
@@ -161,6 +168,18 @@ impl ImportService {
             Err(e) => log::warn!("merging split releases: {e}"),
         }
         let importer = Importer::new(setup.config, library.clone(), metadata.clone());
+        // Once: albums a torrent brought in pieces (each file under a
+        // stranger) go back together, files moved with them.
+        match importer.repair_torrent_identities(true) {
+            Ok(r) if !r.moved.is_empty() || !r.folded.is_empty() => log::info!(
+                "torrent albums repaired: {} tracks back, {} releases folded, {} files moved",
+                r.moved.len(),
+                r.folded.len(),
+                r.files_moved
+            ),
+            Ok(_) => {}
+            Err(e) => log::warn!("repairing torrent albums: {e}"),
+        }
         let mut svc = Self {
             rt,
             importer,
@@ -171,6 +190,7 @@ impl ImportService {
             jobs: BTreeMap::new(),
             titles: HashMap::new(),
             launching: HashMap::new(),
+            wish_jobs: HashMap::new(),
             resolving: 0,
             // Finished imports survive a restart ("Загрузки → История").
             history: library
@@ -297,6 +317,11 @@ impl ImportService {
         log::info!("importer reconfigured");
     }
 
+    /// Files waiting in «Подтверди».
+    pub(crate) fn pending(&self) -> Vec<nikgob_import::ConfirmItem> {
+        self.importer.pending()
+    }
+
     fn view(&self) -> (Vec<v::Job>, Vec<v::Confirm>, Vec<v::Job>) {
         let active = self
             .jobs
@@ -338,6 +363,13 @@ impl ImportService {
                 if let Some(ms) = item.duration_ms {
                     origin.push_str(&format!(" · {}", fmt_duration(Duration::from_millis(ms.into()))));
                 }
+                // The file's own tags come first; the best other answer is
+                // the one to take.
+                let recommended = item
+                    .options
+                    .iter()
+                    .position(|o| o.source != nikgob_import::events::TAGS_OPTION)
+                    .unwrap_or(0);
                 v::Confirm {
                     id: IMPORT_ID | item.id.0,
                     title,
@@ -353,27 +385,39 @@ impl ImportService {
                                     Some(y) => format!("{a} ({y})"),
                                     None => a.clone(),
                                 });
+                            } else if let Some(y) = o.year {
+                                detail.push(y.to_string());
                             }
                             if let Some(n) = o.track_no {
                                 detail.push(format!("№{n}"));
                             }
-                            detail.push(format!("совпадение {:.0}%", o.score * 100.0));
-                            detail.push(match o.source {
-                                "musicbrainz" => "MusicBrainz".to_owned(),
-                                "deezer" => "Deezer".to_owned(),
+                            if let Some(ms) = o.duration_ms {
+                                detail.push(fmt_duration(Duration::from_millis(ms.into())));
+                            }
+                            match o.source {
+                                nikgob_import::events::TAGS_OPTION => detail.push("теги файла".to_owned()),
                                 nikgob_import::events::STREAM_OPTION => {
-                                    "лайкнутый стрим-трек, другая длина".to_owned()
+                                    detail.push("лайкнутый стрим-трек, другая длина".to_owned());
                                 }
-                                other => other.to_owned(),
-                            });
+                                source => {
+                                    detail.push(format!("совпадение {:.0}%", o.score * 100.0));
+                                    detail.push(match source {
+                                        "musicbrainz" => "MusicBrainz".to_owned(),
+                                        "deezer" => "Deezer".to_owned(),
+                                        other => other.to_owned(),
+                                    });
+                                }
+                            }
+                            let artist = if o.artist.is_empty() { "исполнитель неизвестен" } else { o.artist.as_str() };
                             v::ConfirmOption {
-                                label: format!("{} — {}", o.title, o.artist),
+                                label: format!("{} — {artist}", o.title),
                                 detail: detail.join(" · "),
-                                recommended: i == 0,
+                                recommended: i == recommended,
                             }
                         })
                         .collect(),
-                    skip_label: "Оставить теги файла".into(),
+                    // The file's own tags are an option of their own.
+                    skip_label: String::new(),
                     accept_label: "Импортировать".into(),
                 }
             })
@@ -456,10 +500,14 @@ impl Worker {
         if paths.is_empty() {
             return false;
         }
+        let wishlist = targets.wishlist;
         let job = {
             let _guard = svc.rt.enter();
             svc.importer.import_paths_for(paths, origin, targets)
         };
+        if let Some(w) = wishlist {
+            svc.wish_jobs.insert(job.id.0, w);
+        }
         svc.titles.insert(job.id.0, title);
         svc.launching.insert(job.id.0, Instant::now());
         // Events arrive through the broadcast subscription; the per-job
@@ -473,6 +521,7 @@ impl Worker {
         let item = id & !IMPORT_ID;
         svc.resolving += 1;
         let importer = svc.importer.clone();
+        let wishlist = importer.pending().into_iter().find(|p| p.id.0 == item).and_then(|p| p.wishlist);
         let tx = svc.internal.clone();
         svc.rt.spawn(async move {
             let error = importer
@@ -480,20 +529,23 @@ impl Worker {
                 .await
                 .err()
                 .map(|e| e.to_string());
-            let _ = tx.send(Internal::Resolved { item, error });
+            let _ = tx.send(Internal::Resolved { item, wishlist, error });
         });
     }
 
     pub(crate) fn internal(&mut self, msg: Internal) {
         match msg {
             Internal::Import(ev) => self.import_event(ev),
-            Internal::Resolved { item, error } => {
+            Internal::Resolved { item, wishlist, error } => {
                 if let Some(svc) = &mut self.import {
                     svc.resolving = svc.resolving.saturating_sub(1);
                 }
                 if let Some(e) = error {
                     log::warn!("resolving item {item}: {e}");
                     self.toast("Не получилось импортировать файл", None);
+                }
+                if let Some(w) = wishlist {
+                    self.wish_settle(w);
                 }
                 self.reload_after_import();
                 self.publish_downloads();
@@ -616,6 +668,7 @@ impl Worker {
         }
         let Some(svc) = &mut self.import else { return };
         let mut finished = None;
+        let mut parked_for = None;
         match ev {
             ImportEvent::Started { job, files } => {
                 svc.launching.remove(&job.0);
@@ -669,6 +722,7 @@ impl Worker {
                     p.done += 1;
                     p.parked += 1;
                 }
+                parked_for = item.wishlist;
             }
             ImportEvent::Finished {
                 job,
@@ -708,7 +762,7 @@ impl Worker {
                     error,
                 });
                 svc.history.truncate(100);
-                finished = Some((summary, pending));
+                finished = Some((summary, pending, svc.wish_jobs.remove(&job.0)));
             }
             ImportEvent::TorrentFound(path) => {
                 self.command(Command::AddTorrentFile(path));
@@ -718,7 +772,13 @@ impl Worker {
                 log::info!("master registered: {} ({} bytes)", m.file_hash, m.size_bytes);
             }
         }
-        if let Some((summary, pending)) = finished {
+        if let Some(w) = parked_for {
+            self.wish_parked(w);
+        }
+        if let Some((summary, pending, wishlist)) = finished {
+            if let Some(w) = wishlist {
+                self.wish_settle(w);
+            }
             self.reload_after_import();
             self.offer_editions();
             let _ = pending;
