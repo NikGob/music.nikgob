@@ -712,7 +712,7 @@ pub fn tile(ui: &mut Ui, rect: Rect, t: &Tile<'_>, id: Id) -> TileOutput {
         if let Art::Bleed(uri) = t.art {
             let r = shape::EXTRA_LARGE as u8;
             crate::components::paint_image(ui, card, Some(uri), CornerRadius::same(r), Icon::Person);
-            scrim(ui, card, l.text_top - 48.0, l.text_top + 8.0, t.fill, 0.92);
+            scrim(ui, card, l.text_top - 56.0, l.text_top, t.fill, 0.94);
         } else {
             paint_art(ui, t, &l, id, lean);
         }
