@@ -120,6 +120,30 @@ pub fn card_row(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
         });
 }
 
+/// [`card_row`] of `items`, each card under its own place in the row, so
+/// two cards of one thing (a release the feed lists twice) never share an
+/// id.
+pub fn card_row_each<T>(ui: &mut Ui, id: &str, items: &[T], mut card: impl FnMut(&mut Ui, usize, &T)) {
+    card_row(ui, id, |ui| {
+        for (i, item) in items.iter().enumerate() {
+            ui.push_id(i, |ui| card(ui, i, item));
+        }
+    });
+}
+
+/// `text` in `role` and `color`, wrapped to `width` in at most `rows` rows
+/// (an ellipsis after the last).
+pub fn wrapped(ui: &Ui, text: &str, role: crate::TypeStyle, color: Color32, width: f32, rows: usize) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::single_section(text.to_owned(), role.text_format(color));
+    job.wrap = egui::text::TextWrapping {
+        max_width: width.max(1.0),
+        max_rows: rows,
+        break_anywhere: false,
+        overflow_character: Some('…'),
+    };
+    ui.painter().layout_job(job)
+}
+
 /// "3 из 12" when a release is incomplete locally.
 pub fn progress_badge(r: &ReleaseCard) -> Option<String> {
     match r.total_tracks {
