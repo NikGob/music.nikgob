@@ -293,12 +293,14 @@ fn a_copy_cut_mid_track_goes_on_from_there_on_the_copy_found_next() {
     let at = Duration::from_secs(17);
     rig.played_to(first.id, at);
 
-    // That copy breaks off: the next copy found goes on at 17 s.
+    // That copy breaks off (the video is gone; a refusal of every client
+    // of the player would be YouTube's and fail the next copy the same
+    // way): the next copy found goes on at 17 s.
     rig.rt
         .playback_sender()
         .send(PlaybackEvent::Error {
             id: first.id,
-            message: "i/o error: stream URL keeps being refused (HTTP 403)".into(),
+            message: "i/o error: not available".into(),
         })
         .unwrap();
     let second = rig.asked(1);
