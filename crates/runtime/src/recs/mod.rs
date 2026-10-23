@@ -44,7 +44,7 @@ use nikgob_library::{Library, now_ms};
 use nikgob_recs::{
     Catalog, DAYLIST_LEN, DailyParams, DayPart, DiscoveryFilter, Item, Mood, NewTrack, Pick, RadioParams,
     RadioState as Engine, Recs, ServiceSuggestions, StyleMix, Taste, TasteInput, TrackInfo, VectorIndex, album_key,
-    artist_key, daylist_title, daylist_until, match_suggestions, song_key, stream_song_key,
+    artist_key, daylist_title, daylist_until, match_suggestions, song_key, stream_song_key, style_words,
 };
 use nikgob_view::{self as v, Command};
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,9 @@ pub(crate) struct Snapshot {
     /// Songs the services suggest that the library does not have, new
     /// indeed ([`Snapshot::is_new`]), strongest first.
     pub suggested_new: Vec<(StreamTrack, f32)>,
+    /// «Миксы только из скачанного» when it was built: the engine picks
+    /// only tracks with a file, and no new music.
+    pub local_only: bool,
 }
 
 /// A new-music candidate that is new indeed by `f`: not in the library,
@@ -112,7 +115,7 @@ fn is_new(f: &DiscoveryFilter, t: &StreamTrack) -> bool {
 
 impl Snapshot {
     pub fn recs(&self) -> Recs<'_> {
-        Recs::new(&self.catalog, &self.taste, &self.index)
+        Recs::new(&self.catalog, &self.taste, &self.index).local_only(self.local_only)
     }
 
     /// A new-music candidate that is new indeed: not in the library, not
@@ -142,8 +145,8 @@ pub(crate) struct RecHome {
     /// The six moods in the order of the day part, with covers (empty
     /// without analysis).
     pub moods: Vec<(Mood, Vec<ReleaseId>)>,
-    /// The style mixes with their titles.
-    pub styles: Vec<(StyleMix, String)>,
+    /// The style mixes with their titles and subtitles.
+    pub styles: Vec<(StyleMix, String, String)>,
     /// The part of the day the daylist is for ([`daylist_key`]).
     pub daylist_key: String,
     /// `None` with an empty library.
@@ -154,8 +157,10 @@ pub(crate) struct RecHome {
 
 /// The daylist of the home.
 pub(crate) struct DaylistHome {
+    /// «НА ВЕЧЕР».
+    pub kicker: &'static str,
     pub title: String,
-    /// «A, B и другие · до 23:00».
+    /// «что ты слушаешь по вечерам · до 23:00».
     pub subtitle: String,
     /// The radio that plays on after the picks.
     pub state: Engine,
@@ -193,6 +198,10 @@ struct DailyCache {
     /// there is one.
     #[serde(default)]
     history: bool,
+    /// Picked under «Миксы только из скачанного»: picked again when it
+    /// changes.
+    #[serde(default)]
+    local_only: bool,
 }
 
 /// The daylist of a part of the day as the library's cache keeps it.
@@ -205,6 +214,9 @@ struct DaylistCache {
     picks: Vec<Pick>,
     streams: Vec<StreamTrack>,
     history: bool,
+    /// [`DailyCache::local_only`].
+    #[serde(default)]
+    local_only: bool,
 }
 
 /// The worker's recommendation state.
@@ -264,6 +276,12 @@ fn day_shift_ms() -> i64 {
         .ok()
         .and_then(|d| d.trim().parse::<i64>().ok())
         .map_or(0, |d| d * 24 * 3600 * 1000)
+}
+
+/// How much new music radios and mixes mix in: «Новое в радио», none under
+/// «Миксы только из скачанного».
+pub(crate) fn new_share(prefs: &v::Prefs) -> f32 {
+    if prefs.mixes_downloaded_only { 0.0 } else { prefs.radio_new_share.fraction() }
 }
 
 /// Now, for the recommendations.
@@ -328,31 +346,50 @@ fn tracks_count(n: usize) -> String {
     format!("{n} {}", crate::streams::plural(n, "трек", "трека", "треков"))
 }
 
-/// The two artists with the most picks, and how many artists there are.
-fn main_artists(snap: &Snapshot, picks: &[Pick]) -> (Vec<ArtistId>, usize) {
-    let mut count: Vec<(ArtistId, usize)> = Vec::new();
-    for p in picks {
-        let Item::Track(id) = &p.item else { continue };
-        let Some(a) = snap.catalog.get(*id).and_then(TrackInfo::main_artist) else { continue };
-        match count.iter_mut().find(|(x, _)| *x == a) {
-            Some((_, c)) => *c += 1,
-            None => count.push((a, 1)),
+/// What binds a style mix, under its artists' names: «по звуку: спокойное и
+/// мрачное», or «12 исполнителей похожего звука» for a style in the middle
+/// of everything.
+fn style_subtitle(m: &StyleMix) -> String {
+    match style_words(m.axes) {
+        Some(words) => format!("по звуку: {words}"),
+        None => {
+            let n = m.artists.len();
+            format!("{n} {} похожего звука", crate::streams::plural(n, "исполнитель", "исполнителя", "исполнителей"))
         }
     }
-    let artists = count.len();
-    // Stable: equal counts keep the order of the picks.
-    count.sort_by_key(|a| std::cmp::Reverse(a.1));
-    (count.into_iter().take(2).map(|(a, _)| a).collect(), artists)
 }
 
-/// «A, B и другие» of the picks' main artists (empty without artists).
-fn artists_line(lib: &Library, snap: &Snapshot, picks: &[Pick]) -> String {
-    let (top, artists) = main_artists(snap, picks);
-    let names: Vec<String> = top
-        .into_iter()
-        .filter_map(|a| lib.get_artist(a).ok().flatten().map(|a| a.name))
-        .collect();
-    if names.is_empty() { String::new() } else { style_title(&names, artists) }
+/// What a mood card plays, in a few words.
+pub(crate) const fn mood_subtitle(m: v::Mood) -> &'static str {
+    match m {
+        v::Mood::Calm => "тихое и неспешное",
+        v::Mood::Energetic => "быстрое и громкое",
+        v::Mood::Dark => "минорное, тёмное по звуку",
+        v::Mood::Bright => "мажорное, светлое по звуку",
+        v::Mood::Focus => "ровное и негромкое",
+        v::Mood::Drive => "громкое и ровное, в дорогу",
+    }
+}
+
+/// The daylist's kicker: the part of the day it is for.
+const fn daylist_kicker(part: DayPart) -> &'static str {
+    match part {
+        DayPart::Morning => "НА УТРО",
+        DayPart::Day => "НА ДЕНЬ",
+        DayPart::Evening => "НА ВЕЧЕР",
+        DayPart::Night => "НА НОЧЬ",
+    }
+}
+
+/// «что ты слушаешь по вечерам · до 23:00»: what the daylist is made of.
+fn daylist_subtitle(part: DayPart) -> String {
+    let when = match part {
+        DayPart::Morning => "по утрам",
+        DayPart::Day => "днём",
+        DayPart::Evening => "по вечерам",
+        DayPart::Night => "по ночам",
+    };
+    format!("что ты слушаешь {when} · {}", daylist_until(part))
 }
 
 /// Covers of the picks' releases (stream picks by their urls).
@@ -375,12 +412,16 @@ fn covers_of(snap: &Snapshot, picks: &[Pick], streams: &HashMap<RemoteId, Stream
     covers
 }
 
-/// A pick still allowed: a catalog track not disliked, or a stream pick
-/// that is still new.
+/// A pick still allowed: a catalog track not disliked (with a file, under
+/// «Миксы только из скачанного»), or a stream pick that is still new
+/// (never under it).
 fn still_fits(snap: &Snapshot, p: &Pick, streams: &HashMap<RemoteId, StreamTrack>) -> bool {
     match &p.item {
-        Item::Track(id) => snap.catalog.get(*id).is_some_and(|t| !snap.taste.blocks(t)),
-        Item::Stream(r) => streams.get(r).is_some_and(|t| snap.is_new(t)),
+        Item::Track(id) => snap
+            .catalog
+            .get(*id)
+            .is_some_and(|t| !snap.taste.blocks(t) && (t.local || !snap.local_only)),
+        Item::Stream(r) => !snap.local_only && streams.get(r).is_some_and(|t| snap.is_new(t)),
     }
 }
 
@@ -406,6 +447,8 @@ struct BuildInput {
     refresh_daily: bool,
     refresh_daylist: bool,
     new_share: f32,
+    /// «Миксы только из скачанного».
+    local_only: bool,
     /// New music for the daily mix (the discoveries).
     new: Vec<StreamTrack>,
     /// The services' suggestions, of the services switched on.
@@ -417,7 +460,7 @@ struct BuildInput {
 fn build(input: BuildInput) -> Result<Built, String> {
     let started = Instant::now();
     let (snap, tiles_input, index_len) =
-        read_snapshot(&input.lib, &input.index, input.now, input.utc_offset_min, &input.suggested)?;
+        read_snapshot(&input.lib, &input.index, input.now, input.utc_offset_min, &input.suggested, input.local_only)?;
     let home = build_home(&snap, &input, &tiles_input);
     log::info!(
         "recs: {} tracks, {} vectors, {} events in {:?}",
@@ -442,6 +485,7 @@ fn read_snapshot(
     now: UnixMs,
     utc_offset_min: i32,
     suggested: &[suggest::Kept],
+    local_only: bool,
 ) -> Result<(Snapshot, nikgob_recs::TilesInput, usize), String> {
     let err = |what: &str, e: nikgob_library::LibraryError| format!("{what}: {e}");
     let rows = lib.rec_tracks().map_err(|e| err("tracks", e))?;
@@ -456,7 +500,7 @@ fn read_snapshot(
     let catalog = Catalog::new(
         rows.iter()
             .filter(|r| r.in_library)
-            .map(|r| TrackInfo::new(r.id, r.artists.clone(), r.release)),
+            .map(|r| TrackInfo::new(r.id, r.artists.clone(), r.release).with_local(r.has_local)),
     );
     let mut artist_keys: HashMap<String, ArtistId> = HashMap::new();
     let mut names: HashMap<ArtistId, String> = HashMap::new();
@@ -569,6 +613,7 @@ fn read_snapshot(
         known_albums,
         played_songs,
         suggested_new,
+        local_only,
     };
     let tiles_input = tiles::input(lib, &rows, &events, names);
     Ok((snap, tiles_input, index_len))
@@ -577,10 +622,6 @@ fn read_snapshot(
 fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::TilesInput) -> RecHome {
     let lib = &input.lib;
     let recs = snap.recs();
-    let blocked = |p: &Pick| match &p.item {
-        Item::Track(id) => snap.catalog.get(*id).is_none_or(|t| snap.taste.blocks(t)),
-        Item::Stream(_) => false,
-    };
 
     // «Твой микс»: the day's, unless it is a new day or «Обновить».
     let cached: Option<DailyCache> = lib
@@ -588,11 +629,16 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
         .ok()
         .flatten()
         .and_then(|(_, json)| serde_json::from_str(&json).ok())
-        .filter(|c: &DailyCache| c.day == input.day && !input.refresh_daily && (c.history || !snap.taste.has_history()));
+        .filter(|c: &DailyCache| {
+            c.day == input.day
+                && !input.refresh_daily
+                && (c.history || !snap.taste.has_history())
+                && c.local_only == input.local_only
+        });
     let (picks, streams) = match cached {
         Some(c) => (c.picks, c.streams),
         None => {
-            let new: Vec<&StreamTrack> = input.new.iter().filter(|t| snap.is_new(t)).collect();
+            let new: Vec<&StreamTrack> = input.new.iter().filter(|t| !input.local_only && snap.is_new(t)).collect();
             let candidates: Vec<NewTrack> = new.iter().map(|t| NewTrack::from_stream(t, None)).collect();
             let seed = if input.refresh_daily { fastrand::u64(..) } else { day_seed(&input.day) };
             let picks = recs.daily_mix(
@@ -613,6 +659,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
                 picks: picks.clone(),
                 streams: streams.clone(),
                 history: snap.taste.has_history(),
+                local_only: input.local_only,
             };
             if let Ok(json) = serde_json::to_string(&cache)
                 && let Err(e) = lib.cache_put(DAILY_KEY, input.now, &json)
@@ -625,14 +672,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
     let daily_streams: HashMap<RemoteId, StreamTrack> = streams.into_iter().map(|t| (t.id.clone(), t)).collect();
     // A pick disliked since (or gone) leaves the day's mix; its undo brings
     // it back.
-    let daily: Vec<Pick> = picks
-        .into_iter()
-        .filter(|p| !blocked(p))
-        .filter(|p| match &p.item {
-            Item::Stream(r) => daily_streams.get(r).is_some_and(|t| snap.is_new(t)),
-            Item::Track(_) => true,
-        })
-        .collect();
+    let daily: Vec<Pick> = picks.into_iter().filter(|p| still_fits(snap, p, &daily_streams)).collect();
     let daily_covers = covers_of(snap, &daily, &daily_streams);
     let (daylist_key, daylist) = build_daylist(snap, input);
     let tiles = tiles::build(snap, input, tiles_input);
@@ -682,7 +722,8 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
                 .filter_map(|a| lib.get_artist(*a).ok().flatten().map(|a| a.name))
                 .collect();
             let title = style_title(&names, m.artists.len());
-            (m, title)
+            let subtitle = style_subtitle(&m);
+            (m, title, subtitle)
         })
         .collect();
 
@@ -707,11 +748,11 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
     let history = snap.taste.has_history();
     let (part, day, key) = daylist_key(input.now, input.utc_offset_min);
     let cached = cache_read::<DaylistCache>(lib, DAYLIST_KEY)
-        .filter(|c| c.key == key && !input.refresh_daylist && (c.history || !history));
+        .filter(|c| c.key == key && !input.refresh_daylist && (c.history || !history) && c.local_only == input.local_only);
     let c = match cached {
         Some(c) => c,
         None => {
-            let new: Vec<&StreamTrack> = input.new.iter().filter(|t| snap.is_new(t)).collect();
+            let new: Vec<&StreamTrack> = input.new.iter().filter(|t| !input.local_only && snap.is_new(t)).collect();
             let candidates: Vec<NewTrack> = new.iter().map(|t| NewTrack::from_stream(t, None)).collect();
             let seed = if input.refresh_daylist { fastrand::u64(..) } else { day_seed(&key) };
             let params = RadioParams {
@@ -731,6 +772,7 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
                 picks,
                 streams,
                 history,
+                local_only: input.local_only,
             };
             cache_write(lib, DAYLIST_KEY, input.now, &c);
             c
@@ -742,14 +784,13 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
         return (key, None);
     }
     let subtitle = if history {
-        let artists = artists_line(lib, snap, &picks);
-        let until = daylist_until(part);
-        if artists.is_empty() { until } else { format!("{artists} · {until}") }
+        daylist_subtitle(part)
     } else {
-        "Слушай — дейлист соберётся из того, что нравится".to_owned()
+        "Слушай — подборка соберётся из того, что нравится".to_owned()
     };
     let covers = covers_of(snap, &picks, &streams);
     let home = DaylistHome {
+        kicker: daylist_kicker(part),
         title: c.title,
         subtitle,
         state: c.state,
@@ -764,11 +805,12 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
 pub(crate) struct HomeParts {
     hero: Option<(String, String, Vec<CoverRef>)>,
     mix: Vec<nikgob_library::TrackRow>,
-    daylist: Option<(String, String, Vec<CoverRef>)>,
+    /// Kicker, title, subtitle, covers.
+    daylist: Option<(String, String, String, Vec<CoverRef>)>,
     /// Id, kicker, title, subtitle, covers.
     tiles: Vec<(v::MixId, String, String, String, Vec<CoverRef>)>,
     moods: Vec<(v::Mood, Vec<CoverRef>)>,
-    styles: Vec<(String, Vec<CoverRef>)>,
+    styles: Vec<(String, String, Vec<CoverRef>)>,
     discover: Vec<v::StreamTrackRow>,
     new_releases: Vec<v::StreamAlbumCard>,
 }
@@ -790,7 +832,7 @@ impl HomeParts {
         };
         let n = h.daily.len();
         let subtitle = if h.history {
-            format!("{} · обновлён сегодня", tracks_count(n))
+            format!("{} · любимое и похожее", tracks_count(n))
         } else {
             "Слушай — микс соберётся из того, что нравится".to_owned()
         };
@@ -803,7 +845,10 @@ impl HomeParts {
                 Item::Stream(_) => None,
             })
             .collect();
-        let daylist = h.daylist.as_ref().map(|d| (d.title.clone(), d.subtitle.clone(), d.covers.clone()));
+        let daylist = h
+            .daylist
+            .as_ref()
+            .map(|d| (d.kicker.to_owned(), d.title.clone(), d.subtitle.clone(), d.covers.clone()));
         let tiles = h
             .tiles
             .iter()
@@ -817,7 +862,7 @@ impl HomeParts {
         let styles = h
             .styles
             .iter()
-            .map(|(m, title)| (title.clone(), m.covers.iter().copied().map(CoverRef::Release).collect()))
+            .map(|(m, title, subtitle)| (title.clone(), subtitle.clone(), m.covers.iter().copied().map(CoverRef::Release).collect()))
             .collect();
         Self {
             hero,
@@ -845,14 +890,14 @@ impl HomeParts {
         home.hero = self.hero.map(|(title, subtitle, c)| v::MixCard {
             id: v::MixId::Daily,
             title,
-            kicker: "ТВОЙ МИКС".to_owned(),
+            kicker: "НА СЕГОДНЯ".to_owned(),
             subtitle,
             covers: covers(c),
         });
-        home.daylist = self.daylist.map(|(title, subtitle, c)| v::MixCard {
+        home.daylist = self.daylist.map(|(kicker, title, subtitle, c)| v::MixCard {
             id: v::MixId::Daylist,
             title,
-            kicker: "ДЕЙЛИСТ".to_owned(),
+            kicker,
             subtitle,
             covers: covers(c),
         });
@@ -874,7 +919,7 @@ impl HomeParts {
                 id: v::MixId::Mood(m),
                 title: m.title().to_owned(),
                 kicker: String::new(),
-                subtitle: String::new(),
+                subtitle: mood_subtitle(m).to_owned(),
                 covers: covers(c),
             })
             .collect();
@@ -882,11 +927,11 @@ impl HomeParts {
             .styles
             .into_iter()
             .enumerate()
-            .map(|(i, (title, c))| v::MixCard {
+            .map(|(i, (title, subtitle, c))| v::MixCard {
                 id: v::MixId::Style(i as u8),
                 title,
                 kicker: String::new(),
-                subtitle: String::new(),
+                subtitle,
                 covers: covers(c),
             })
             .collect();
@@ -895,7 +940,30 @@ impl HomeParts {
         }
         home.discover = self.discover;
         home.new_releases = self.new_releases;
+        dedupe_rows(home);
     }
+}
+
+/// Keeps the first of each item in every row of the home: a row shows an
+/// album, a song, an artist or a mix once (the UI keys its cards by them).
+pub(crate) fn dedupe_rows(home: &mut v::HomeView) {
+    fn keep_first<T, K: std::hash::Hash + Eq>(row: &mut Vec<T>, key: impl Fn(&T) -> K) {
+        let mut seen = HashSet::new();
+        row.retain(|x| seen.insert(key(x)));
+    }
+    keep_first(&mut home.mix, |t| t.id);
+    keep_first(&mut home.tiles, |c| c.id);
+    keep_first(&mut home.moods, |c| c.id);
+    keep_first(&mut home.style_mixes, |c| c.id);
+    keep_first(&mut home.discover, |r| r.remote.clone());
+    keep_first(&mut home.new_releases, |a| a.remote.clone());
+    keep_first(&mut home.continue_listening, |c| match c {
+        v::ContinueCard::Release(r) => (Some(r.id), None),
+        v::ContinueCard::Stream(a) => (None, Some(a.remote.clone())),
+    });
+    keep_first(&mut home.artist_mixes, |a| a.id);
+    keep_first(&mut home.long_unplayed, |r| r.id);
+    keep_first(&mut home.recently_added, |r| r.id);
 }
 
 /// The home of [`preview_home`] and what it was built from.
@@ -930,6 +998,12 @@ pub struct HomePreview {
 /// copy of a real library, docs/stage4.md §12.7). Like a build, it keeps
 /// the day's picks in the library's cache.
 pub fn preview_home(lib: &Library, library_dir: &std::path::Path) -> Result<HomePreview, String> {
+    preview_home_with(lib, library_dir, &v::Prefs::default())
+}
+
+/// [`preview_home`] under `prefs` («Новое в радио», «Миксы только из
+/// скачанного»).
+pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v::Prefs) -> Result<HomePreview, String> {
     let started = Instant::now();
     let index = SoundIndex::default();
     crate::analysis::load_index(lib, &index);
@@ -944,7 +1018,8 @@ pub fn preview_home(lib: &Library, library_dir: &std::path::Path) -> Result<Home
         now: recs_now(),
         refresh_daily: false,
         refresh_daylist: false,
-        new_share: v::Prefs::default().radio_new_share.fraction(),
+        new_share: new_share(prefs),
+        local_only: prefs.mixes_downloaded_only,
         new: discoveries.clone(),
         suggested: suggest::cached(lib),
         rerank: false,
@@ -989,6 +1064,15 @@ impl Worker {
         let at = Instant::now() + after;
         let r = &mut self.recs;
         r.due = Some(r.due.map_or(at, |d| d.min(at)));
+    }
+
+    /// «Миксы только из скачанного» changed: the home is built again now
+    /// (its kept picks are picked again under the new setting).
+    pub(crate) fn recs_prefs_changed(&mut self) {
+        self.recs_dirty(Duration::ZERO);
+        if !self.recs.building {
+            self.recs_build();
+        }
     }
 
     /// The library changed (likes, playlists, imports).
@@ -1039,7 +1123,8 @@ impl Worker {
             now: recs_now(),
             refresh_daily: std::mem::take(&mut self.recs.refresh_daily),
             refresh_daylist: std::mem::take(&mut self.recs.refresh_daylist),
-            new_share: prefs.radio_new_share.fraction(),
+            new_share: new_share(&prefs),
+            local_only: prefs.mixes_downloaded_only,
             new: self.discoveries(),
             suggested: self.suggestions_kept(),
             rerank: std::mem::take(&mut self.recs.discover_rerank),
@@ -1133,7 +1218,7 @@ impl Worker {
                     .home
                     .as_ref()
                     .and_then(|h| h.styles.get(usize::from(i)))
-                    .map(|(m, title)| (m.seed(), title.clone()));
+                    .map(|(m, title, _)| (m.seed(), title.clone()));
                 match style {
                     Some((seed, title)) => self.start_radio(seed, title, EventContext::HomeSection, None),
                     None => self.toast("Этого микса уже нет — главная обновилась", None),
@@ -1162,11 +1247,25 @@ impl Worker {
                 let streams = d.streams.values().cloned().collect();
                 self.start_radio_picked(state, picks, streams, title, EventContext::HomeSection);
             }
+            v::MixId::Tile(v::TileKind::Lottery) => self.play_lottery(),
             v::MixId::Tile(kind) => match self.home_tile(kind).map(|t| (t.picks.clone(), t.title.clone())) {
                 Some((picks, title)) => self.play_picks(&picks, &HashMap::new(), &title),
                 None => self.toast("Этой подборки уже нет — главная обновилась", None),
             },
         }
+    }
+
+    /// «Наугад»: a fresh draw at every click, so what plays (the first song
+    /// too) cannot be seen before.
+    fn play_lottery(&mut self) {
+        let Some(snap) = self.recs.snap.clone() else { return };
+        let picks = snap.recs().lottery(fastrand::u64(..));
+        if picks.is_empty() {
+            self.toast("Нечего играть", None);
+            return;
+        }
+        let title = self.home_tile(v::TileKind::Lottery).map_or_else(|| "Лотерея".to_owned(), |t| t.title.clone());
+        self.play_picks(&picks, &HashMap::new(), &title);
     }
 
     /// A tile of today's board.
@@ -1336,6 +1435,47 @@ mod tests {
         assert_eq!(style_title(&n(&["mzlff", "MORGENSHTERN"]), 7), "mzlff, MORGENSHTERN и другие");
         assert_eq!(style_title(&n(&["A", "B"]), 2), "A и B");
         assert_eq!(style_title(&n(&["A"]), 1), "A");
+    }
+
+    /// «ATM 4» of two artists' discographies, a tile twice: each row keeps
+    /// the first.
+    #[test]
+    fn home_rows_show_each_item_once() {
+        use nikgob_core::streaming::Service;
+        let album = |id: &str, artist: &str| v::StreamAlbumCard {
+            remote: RemoteId::new(Service::Deezer, id),
+            title: "ATM 4".into(),
+            artist: artist.into(),
+            artists: v::StreamArtistLinks::default(),
+            year: Some(2026),
+            release_type: nikgob_core::model::ReleaseType::Album,
+            cover_url: None,
+            total_tracks: None,
+            release: None,
+            have: v::AlbumHave::default(),
+        };
+        let card = |id, title: &str| v::MixCard {
+            id,
+            title: title.into(),
+            kicker: String::new(),
+            subtitle: String::new(),
+            covers: Vec::new(),
+        };
+        let mut home = v::HomeView {
+            new_releases: vec![album("1", "Mzlff"), album("2", "Mzlff"), album("1", "Guest")],
+            tiles: vec![
+                card(v::MixId::Tile(v::TileKind::OnRepeat), "На повторе"),
+                card(v::MixId::Tile(v::TileKind::OnRepeat), "На повторе"),
+                card(v::MixId::Tile(v::TileKind::Lottery), "Лотерея"),
+            ],
+            style_mixes: vec![card(v::MixId::Style(0), "A и B"), card(v::MixId::Style(0), "A и B")],
+            ..v::HomeView::default()
+        };
+        dedupe_rows(&mut home);
+        let ids: Vec<(&str, &str)> = home.new_releases.iter().map(|a| (a.remote.id.as_str(), a.artist.as_str())).collect();
+        assert_eq!(ids, [("1", "Mzlff"), ("2", "Mzlff")]);
+        assert_eq!(home.tiles.len(), 2);
+        assert_eq!(home.style_mixes.len(), 1);
     }
 
     #[test]

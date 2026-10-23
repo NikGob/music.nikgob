@@ -15,7 +15,7 @@ use nikgob_recs::{
 use nikgob_view as v;
 use serde::{Deserialize, Serialize};
 
-use super::{BuildInput, CoverRef, Snapshot, artists_line, cache_read, cache_write, covers_of, still_fits, tracks_count};
+use super::{BuildInput, CoverRef, Snapshot, cache_read, cache_write, covers_of, still_fits, tracks_count};
 
 /// The day's board.
 const DAY_KEY: &str = "recs.tiles";
@@ -55,6 +55,10 @@ struct TilesDay {
     /// there is one.
     history: bool,
     tiles: Vec<TileMix>,
+    /// Picked under «Миксы только из скачанного»: picked again when it
+    /// changes.
+    #[serde(default)]
+    local_only: bool,
 }
 
 /// What the tiles read besides the snapshot: the facts of every track,
@@ -119,7 +123,8 @@ pub(super) fn input(lib: &Library, rows: &[RecTrack], events: &[Event], artist_n
 pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> Vec<TileHome> {
     let lib = &input.lib;
     let history = snap.taste.has_history();
-    let kept = cache_read::<TilesDay>(lib, DAY_KEY).filter(|c| c.day == input.day && (c.history || !history));
+    let kept = cache_read::<TilesDay>(lib, DAY_KEY)
+        .filter(|c| c.day == input.day && (c.history || !history) && c.local_only == snap.local_only);
     let board = match kept {
         Some(c) => c.tiles,
         None => {
@@ -131,67 +136,108 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
                 day: input.day.clone(),
                 history,
                 tiles: board.clone(),
+                local_only: snap.local_only,
             };
             cache_write(lib, DAY_KEY, input.now, &day);
             board
         }
     };
     let today = snap.recs().local_day();
-    board.into_iter().filter_map(|t| home_of(snap, lib, today, t)).collect()
+    board.into_iter().filter_map(|t| home_of(snap, today, t)).collect()
 }
 
+/// «каждый раз другое — жми и узнаешь»: the lottery's line, all it says.
+pub(crate) const LOTTERY_SUBTITLE: &str = "каждый раз другое — жми и узнаешь";
+
 /// A tile as the home shows it: what is still allowed of it, its lines and
-/// covers. `None` when nothing is left.
-fn home_of(snap: &Snapshot, lib: &Library, today: i64, t: TileMix) -> Option<TileHome> {
+/// covers. `None` when nothing is left. The lottery shows no covers: what
+/// it plays is drawn at the click.
+fn home_of(snap: &Snapshot, today: i64, t: TileMix) -> Option<TileHome> {
     let no_streams = HashMap::new();
     let picks: Vec<Pick> = t.picks.into_iter().filter(|p| still_fits(snap, p, &no_streams)).collect();
     if picks.is_empty() {
         return None;
     }
-    let n = tracks_count(picks.len());
-    let artists = || match artists_line(lib, snap, &picks) {
-        a if a.is_empty() => n.clone(),
-        a => a,
+    let albums = || {
+        let albums: std::collections::HashSet<_> = picks
+            .iter()
+            .filter_map(|p| match p.item {
+                Item::Track(id) => snap.catalog.get(id).and_then(|t| t.release),
+                Item::Stream(_) => None,
+            })
+            .collect();
+        albums.len()
     };
-    let subtitle = match t.kind {
-        TileKind::OnRepeat | TileKind::FreshLikes => format!("{n} · за месяц"),
-        TileKind::YearAgo => format!("{} · {n}", month_year(today - 365)),
-        TileKind::Rediscover | TileKind::Comeback => format!("{n} · давно не играли"),
-        TileKind::FirstLikes => format!("{n} · первые лайки"),
-        TileKind::Unplayed => format!("{n} · ни разу не играли"),
-        TileKind::ArtistOfDay => format!("{n} · лучшее"),
-        TileKind::BecauseYouLiked => format!("{n} · похожее по звучанию"),
-        TileKind::Playlist => format!("{n} · вперемешку"),
-        TileKind::Unfinished => {
-            let albums: std::collections::HashSet<_> = picks
-                .iter()
-                .filter_map(|p| match p.item {
-                    Item::Track(id) => snap.catalog.get(id).and_then(|t| t.release),
-                    Item::Stream(_) => None,
-                })
-                .collect();
-            let a = albums.len();
-            format!("{n} · {a} {}", crate::streams::plural(a, "альбом", "альбома", "альбомов"))
-        }
-        TileKind::NotDownloaded => format!("{n} · играют из сервиса"),
-        TileKind::Season
-        | TileKind::DeepCuts
-        | TileKind::Long
-        | TileKind::Short
-        | TileKind::SingAlong
-        | TileKind::Language
-        | TileKind::Decade
-        | TileKind::Soundtrack
-        | TileKind::Lottery => artists(),
-    };
-    let covers = covers_of(snap, &picks, &no_streams);
+    let (title, subtitle) = lines(t.kind, &t.param, t.title, picks.len(), today, albums);
+    let covers = if t.kind == TileKind::Lottery { Vec::new() } else { covers_of(snap, &picks, &no_streams) };
     Some(TileHome {
         kind: t.kind,
-        title: t.title,
+        title,
         subtitle,
         picks,
         covers,
     })
+}
+
+/// A tile's title and subtitle: what it is and why it is here, short
+/// enough for a tile (docs/stage4.md §12.10). `title` is the recipe's
+/// («Kevin Penkin», «Лето 2025»), `param` its parameter, `n` the songs,
+/// `albums` how many albums they come from.
+fn lines(kind: TileKind, param: &str, title: String, n: usize, today: i64, albums: impl Fn() -> usize) -> (String, String) {
+    let n = tracks_count(n);
+    let subtitle = match kind {
+        TileKind::OnRepeat => format!("{n} · что крутил весь месяц"),
+        TileKind::YearAgo => {
+            let mut month = month_year(today - 365);
+            if let Some(first) = month.get(..2) {
+                month = first.to_uppercase() + &month[2..];
+            }
+            return (month, format!("{n} · играло в эти дни год назад"));
+        }
+        TileKind::Season => {
+            let of = match param.rsplit('-').next() {
+                Some("0") => "той зимы",
+                Some("1") => "той весны",
+                Some("2") => "того лета",
+                _ => "той осени",
+            };
+            format!("{n} · любимое {of}")
+        }
+        TileKind::Rediscover => format!("{n} · любимое, не играло 2 месяца"),
+        TileKind::FirstLikes => format!("{n} · что ты лайкнул первым"),
+        TileKind::FreshLikes => format!("{n} · лайкнул за последний месяц"),
+        TileKind::Unplayed => format!("{n} · добавлены, но ещё не играли"),
+        TileKind::DeepCuts => format!("{n} · почти не игранное у любимых"),
+        TileKind::ArtistOfDay => format!("{n} · любимое из библиотеки"),
+        TileKind::Comeback => format!("{n} · слушал часто, а теперь нет"),
+        TileKind::BecauseYouLiked => format!("{n} · по звуку и вкусу"),
+        TileKind::Long => format!("{n} · каждый от 7 минут"),
+        TileKind::Short => format!("{n} · каждый до 2:30"),
+        TileKind::SingAlong => format!("{n} · текст идёт в такт песне"),
+        TileKind::Language => {
+            let lang = match param {
+                "ja" => "на японском",
+                "ko" => "на корейском",
+                "ru" => "на русском",
+                _ => "на иностранном",
+            };
+            format!("{n} · всё {lang}")
+        }
+        TileKind::Decade => match param.parse::<i32>() {
+            Ok(d) if (1900..2000).contains(&d) => format!("{n} · вышли в {}-х", d - 1900),
+            Ok(d) => format!("{n} · вышли в {d}-х"),
+            Err(_) => n,
+        },
+        TileKind::Soundtrack => format!("{n} · музыка из саундтрека"),
+        TileKind::Playlist => format!("{n} · плейлист, давно не слушал"),
+        TileKind::Unfinished => {
+            let a = albums();
+            format!("{n} · что осталось в {a} {}", crate::streams::plural(a, "альбоме", "альбомах", "альбомах"))
+        }
+        TileKind::NotDownloaded => format!("{n} · лайкнул, но нет файла"),
+        TileKind::Lottery => LOTTERY_SUBTITLE.to_owned(),
+    };
+    (title, subtitle)
 }
 
 const MONTHS: [&str; 12] = [
@@ -219,14 +265,14 @@ pub fn preview_tile_days(lib: &Library, days: usize) -> Result<Vec<Vec<PreviewTi
     let mut out = Vec::with_capacity(days);
     for d in 0..days {
         let now = super::recs_now() + d as i64 * nikgob_recs::taste::DAY_MS;
-        let (snap, input, _) = super::read_snapshot(lib, &index, now, utc_offset_min, &[])?;
+        let (snap, input, _) = super::read_snapshot(lib, &index, now, utc_offset_min, &[], false)?;
         let recs = snap.recs();
         let day = recs.local_day();
         let board = recs.tiles_of_day(&input, &shown, TILES_PER_DAY);
         shown.record(day, &board);
         let tiles = board
             .into_iter()
-            .filter_map(|t| home_of(&snap, lib, day, t))
+            .filter_map(|t| home_of(&snap, day, t))
             .map(|t| (view_kind(t.kind), t.title, t.subtitle, t.picks.len()))
             .collect();
         out.push(tiles);
@@ -240,7 +286,7 @@ pub fn preview_ready_tiles(lib: &Library) -> Result<Vec<(v::TileKind, String, us
     let index = crate::analysis::SoundIndex::default();
     crate::analysis::load_index(lib, &index);
     let (_, utc_offset_min) = super::local_day();
-    let (snap, input, _) = super::read_snapshot(lib, &index, super::recs_now(), utc_offset_min, &[])?;
+    let (snap, input, _) = super::read_snapshot(lib, &index, super::recs_now(), utc_offset_min, &[], false)?;
     let shown: TileHistory = cache_read(lib, SHOWN_KEY).unwrap_or_default();
     Ok(snap
         .recs()
@@ -261,5 +307,29 @@ mod tests {
         }
         assert_eq!(TileKind::ALL.len(), v::TileKind::ALL.len());
         assert_eq!(month_year(20_748 - 365), "октябрь 2025");
+    }
+
+    /// Every tile says what it is in a title and a subtitle that fit a
+    /// tile.
+    #[test]
+    fn every_tile_explains_itself() {
+        let params = [("Season", "2025-2"), ("Language", "ja"), ("Decade", "1990"), ("Playlist", "p")];
+        for k in TileKind::ALL {
+            let param = params.iter().find(|(n, _)| *n == format!("{k:?}")).map_or("", |p| p.1);
+            let (title, subtitle) = lines(k, param, "Kevin Penkin".into(), 25, 20_748, || 3);
+            assert!(!title.is_empty() && title.chars().count() <= 24, "{k:?}: {title}");
+            assert!(subtitle.chars().count() <= 40, "{k:?}: {subtitle} ({})", subtitle.chars().count());
+            assert_ne!(k.kicker().to_lowercase(), title.to_lowercase(), "{k:?}: the kicker repeats the title");
+            assert!(k.kicker().chars().count() <= 16, "{k:?}: {}", k.kicker());
+        }
+        let line = |k, p: &str| lines(k, p, String::new(), 13, 20_748, || 3);
+        assert_eq!(line(TileKind::YearAgo, "").0, "Октябрь 2025");
+        assert_eq!(line(TileKind::Season, "2025-2").1, "13 треков · любимое того лета");
+        assert_eq!(line(TileKind::Decade, "1990").1, "13 треков · вышли в 90-х");
+        assert_eq!(line(TileKind::Decade, "2000").1, "13 треков · вышли в 2000-х");
+        assert_eq!(line(TileKind::Language, "ja").1, "13 треков · всё на японском");
+        assert_eq!(line(TileKind::Unfinished, "").1, "13 треков · что осталось в 3 альбомах");
+        assert_eq!(line(TileKind::BecauseYouLiked, "").1, "13 треков · по звуку и вкусу");
+        assert_eq!(line(TileKind::Lottery, "").1, LOTTERY_SUBTITLE);
     }
 }

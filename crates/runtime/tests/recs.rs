@@ -211,7 +211,7 @@ fn the_home_gets_a_hero_moods_and_style_mixes() {
     let hero = st.home.hero.as_ref().unwrap();
     assert_eq!(hero.id, MixId::Daily);
     assert_eq!(hero.title, "Твой микс");
-    assert_eq!(hero.subtitle, "30 треков · обновлён сегодня");
+    assert_eq!((hero.kicker.as_str(), hero.subtitle.as_str()), ("НА СЕГОДНЯ", "30 треков · любимое и похожее"));
     assert!(!hero.covers.is_empty() && hero.covers.len() <= 4);
     assert_eq!(st.home.mix.len(), 30);
     let moods: Vec<Mood> = st
@@ -226,10 +226,12 @@ fn the_home_gets_a_hero_moods_and_style_mixes() {
     let mut sorted = moods.clone();
     sorted.sort();
     assert_eq!(sorted, Mood::ALL.to_vec(), "six moods, each once");
-    assert!(st.home.moods.iter().all(|m| !m.covers.is_empty()));
+    assert!(st.home.moods.iter().all(|m| !m.covers.is_empty() && !m.subtitle.is_empty()));
     for (i, m) in st.home.style_mixes.iter().enumerate() {
         assert_eq!(m.id, MixId::Style(i as u8));
         assert!(m.title.contains(" и другие"), "{}", m.title);
+        // What binds the artists: the sound in words, or that it is alike.
+        assert!(m.subtitle.starts_with("по звуку: ") || m.subtitle.ends_with(" похожего звука"), "{}", m.subtitle);
         assert!(!m.covers.is_empty());
     }
 }
@@ -389,7 +391,7 @@ fn the_bento_gets_a_daylist_and_tiles_that_play() {
     let daylist = st.daylist.clone().unwrap();
     assert_eq!(daylist.id, MixId::Daylist);
     assert_eq!(daylist.title.split(' ').count(), 3, "«Тягучий вечер четверга»: {}", daylist.title);
-    assert!(daylist.subtitle.contains(" и другие · до "), "{}", daylist.subtitle);
+    assert!(daylist.subtitle.starts_with("что ты слушаешь ") && daylist.subtitle.contains(" · до "), "{}", daylist.subtitle);
     assert!(!daylist.covers.is_empty());
     // «На повторе» first, then four kinds of the day, each once, each with
     // its kicker.
@@ -397,10 +399,12 @@ fn the_bento_gets_a_daylist_and_tiles_that_play() {
     assert_eq!(tiles.len(), 5, "{tiles:?}");
     assert_eq!(tiles[0], MixId::Tile(TileKind::OnRepeat));
     assert_eq!(tiles.iter().collect::<std::collections::HashSet<_>>().len(), 5);
-    assert_eq!((st.tiles[0].kicker.as_str(), st.tiles[0].title.as_str()), ("НА ПОВТОРЕ", "На повторе"));
-    assert_eq!(st.tiles[0].subtitle, "30 треков · за месяц");
-    assert!(st.tiles.iter().all(|t| !t.kicker.is_empty() && !t.subtitle.is_empty() && !t.covers.is_empty()));
-    assert_eq!(daylist.kicker, "ДЕЙЛИСТ");
+    assert_eq!((st.tiles[0].kicker.as_str(), st.tiles[0].title.as_str()), ("ЧАЩЕ ВСЕГО", "На повторе"));
+    assert_eq!(st.tiles[0].subtitle, "30 треков · что крутил весь месяц");
+    let lottery = |t: &&nikgob_view::MixCard| t.id == MixId::Tile(TileKind::Lottery);
+    assert!(st.tiles.iter().all(|t| !t.kicker.is_empty() && !t.subtitle.is_empty() && (lottery(&t) || !t.covers.is_empty())));
+    assert!(st.tiles.iter().filter(lottery).all(|t| t.covers.is_empty()), "the lottery shows nothing of what it plays");
+    assert!(daylist.kicker.starts_with("НА "), "{}", daylist.kicker);
     // The board is kept for the day: a restart shows the same tiles.
     drop(s);
     let s = start(&l.lib, Vec::new(), Prefs::default(), None);
@@ -433,6 +437,103 @@ fn the_bento_gets_a_daylist_and_tiles_that_play() {
     let before = daylist_picks(&l.lib);
     s.rt.send(Command::RefreshMix { id: MixId::Daylist });
     wait_until("another daylist", || daylist_picks(&l.lib) != before);
+}
+
+/// Ten liked songs by «Stream Band» that only stream (no file), played as
+/// much as the rest, in the sound of the first style.
+fn add_streams(l: &Lib) -> Vec<TrackId> {
+    let lib = &l.lib;
+    let a = lib.upsert_artist(&Artist::new("Stream Band")).unwrap();
+    let credit = ArtistCredit::single("Stream Band", Some(a.id));
+    let now = now_ms();
+    let mut rng = Lcg(11);
+    (0..10)
+        .map(|n| {
+            let t = lib.upsert_track(&Track::new(format!("Stream song {n}").as_str(), credit.clone())).unwrap();
+            let s = Source::new(t.id, SourceKind::Youtube, format!("yt-{n}"), Codec::Opus);
+            lib.add_source(&s).unwrap();
+            lib.like(t.id).unwrap();
+            let v: Vec<f32> = (0..nikgob_recs::DIM).map(|i| ((i * 3) % 11) as f32 * 0.8 + rng.f32() * 0.3).collect();
+            lib.put_analysis(&Analysis {
+                track_id: t.id,
+                bliss_vector: v,
+                analyzed_with: nikgob_recs::ANALYZED_WITH.to_owned(),
+                source: AnalysisSource::Youtube,
+            })
+            .unwrap();
+            for k in 0..3i64 {
+                let ts = now - (2 + k * 5) * DAY;
+                for kind in [EventType::Start, EventType::Complete] {
+                    let e = Event::new(t.id, kind, ts + i64::from(kind == EventType::Complete) * 200_000, lib.device_id());
+                    lib.record_event_raw(&e).unwrap();
+                }
+            }
+            t.id
+        })
+        .collect()
+}
+
+/// The ids of what plays now and next.
+fn queued(st: &ViewState) -> Vec<TrackId> {
+    st.queue.current.iter().chain(st.queue.next.iter().map(|e| &e.track)).map(|t| t.id).collect()
+}
+
+#[test]
+fn downloaded_only_keeps_every_mix_to_files_at_once() {
+    let l = library(3, 6, 5, &[]);
+    let streams = add_streams(&l);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home's mixes", home_ready);
+    let streamed = |ids: &[TrackId]| ids.iter().filter(|t| streams.contains(t)).count();
+    // A favourite of the day's mix streams, for now.
+    assert!(streamed(&hero_mix(&s.rt.state())) > 0, "the fixture's streams are favourites too");
+
+    let prefs = Prefs { mixes_downloaded_only: true, ..s.rt.state().prefs.clone() };
+    s.rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&s.rt, "the home built again", |st| home_ready(st) && streamed(&hero_mix(st)) == 0 && st.home.mix.len() == 30);
+    let st = s.rt.state().home.clone();
+    assert!(st.mix.iter().all(|t| t.has_local));
+    assert!(!st.tiles.iter().any(|t| t.id == MixId::Tile(TileKind::NotDownloaded)));
+
+    // Moods, style mixes, an artist's radio, the daylist and the lottery.
+    let mixes = [
+        MixId::Mood(Mood::Calm),
+        MixId::Style(0),
+        MixId::Artist(l.artists[0]),
+        MixId::Daylist,
+        MixId::Tile(TileKind::Lottery),
+    ];
+    for id in mixes {
+        let before = queued(&s.rt.state());
+        s.rt.send(Command::PlayMix { id });
+        wait_for(&s.rt, &format!("{id:?} plays"), |st| queued(st).len() >= 8 && queued(st) != before);
+        let q = queued(&s.rt.state());
+        assert_eq!(streamed(&q), 0, "{id:?} plays a stream");
+    }
+    // The radio of a streamed song: the song (it cannot play here without
+    // a service), then only files.
+    s.rt.send(Command::StartRadio { seed: RadioSeed::Track(streams[0]) });
+    let radio = |st: &ViewState| st.queue.radio.as_ref().is_some_and(|r| r.title == "Радио · Stream song 0");
+    wait_for(&s.rt, "the stream's radio", |st| radio(st) && queued(st).len() >= 8);
+    let q: Vec<TrackId> = queued(&s.rt.state()).into_iter().filter(|t| *t != streams[0]).collect();
+    assert_eq!(streamed(&q), 0);
+}
+
+#[test]
+fn the_lottery_draws_again_at_every_click_and_shows_nothing() {
+    let l = library(3, 6, 5, &[]);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home's mixes", home_ready);
+    let mut draws: Vec<Vec<TrackId>> = Vec::new();
+    for _ in 0..4 {
+        s.rt.send(Command::PlayMix { id: MixId::Tile(TileKind::Lottery) });
+        let before = draws.last().cloned();
+        wait_for(&s.rt, "a draw", |st| queued(st).len() == 30 && Some(queued(st)) != before);
+        assert!(s.rt.state().queue.radio.is_none(), "the lottery is not endless");
+        draws.push(queued(&s.rt.state()));
+    }
+    let firsts: std::collections::HashSet<TrackId> = draws.iter().map(|d| d[0]).collect();
+    assert!(firsts.len() >= 3, "the first song is known before: {firsts:?}");
 }
 
 #[test]

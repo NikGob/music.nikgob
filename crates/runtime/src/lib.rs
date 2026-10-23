@@ -34,7 +34,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 
 pub use convert::Resolver;
 pub use import::ImportSetup;
-pub use recs::{HomePreview, PreviewTile, preview_home, preview_ready_tiles, preview_tile_days};
+pub use recs::{HomePreview, PreviewTile, preview_home, preview_home_with, preview_ready_tiles, preview_tile_days};
 pub use nikgob_import::ImportConfig;
 pub use nikgob_metadata::MetadataConfig;
 pub use streams::{StreamSchedule, WINDOW_HINT, WebLogin, WebLoginError};
@@ -859,6 +859,9 @@ impl Worker {
                 }
                 if old.stream_analysis != p.stream_analysis {
                     self.stream_analysis_pref(p.stream_analysis);
+                }
+                if old.mixes_downloaded_only != p.mixes_downloaded_only {
+                    self.recs_prefs_changed();
                 }
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),

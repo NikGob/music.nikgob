@@ -315,7 +315,7 @@ impl Worker {
 
     /// Picks the next [`EXTEND_BY`] on a thread of its own.
     fn radio_extend(&mut self) {
-        let new_share = self.state.read().prefs.radio_new_share.fraction();
+        let new_share = super::new_share(&self.state.read().prefs);
         let snap = self.snapshot();
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         if run.extending {
@@ -516,7 +516,7 @@ impl Worker {
     /// Asks the services for new music around the radio's seed (see the
     /// module docs); what the cache has is used at once.
     fn radio_fetch_new(&mut self) {
-        if self.state.read().prefs.radio_new_share.fraction() <= 0.0 {
+        if super::new_share(&self.state.read().prefs) <= 0.0 {
             return;
         }
         let Some(run) = &self.recs.radio.run else { return };
