@@ -219,11 +219,23 @@ fn artist_for(conn: &Connection, a: &ArtistRef) -> Result<ArtistId> {
     Ok(id)
 }
 
+/// The credit of a service's artists; a name that is several artists
+/// («Kevin Penkin、immi» from YouTube) is each of them, without the
+/// service's id (it stands for the pair).
 fn credit_for(conn: &Connection, artists: &[ArtistRef]) -> Result<ArtistCredit> {
     let mut credit = ArtistCredit::default();
     for a in artists {
-        let id = artist_for(conn, a)?;
-        credit.push(", ", a.name.clone(), Some(id));
+        let parts = nikgob_core::credit::split_credit(&a.name);
+        if parts.len() < 2 {
+            let id = artist_for(conn, a)?;
+            credit.push(", ", a.name.clone(), Some(id));
+            continue;
+        }
+        for (i, (join, name)) in parts.into_iter().enumerate() {
+            let one = ArtistRef::new(None, name.clone());
+            let id = artist_for(conn, &one)?;
+            credit.push(if i == 0 { ", " } else { join.as_str() }, name, Some(id));
+        }
     }
     Ok(credit)
 }
@@ -703,7 +715,8 @@ impl Library {
     /// album's id is linked to the release, its tracks the release has no
     /// row for become stream tracks of it (outside the library until liked
     /// or downloaded, like «Хочу скачать» makes them), a track of the
-    /// release that is one of them (its file, a liked stream) gains that
+    /// release that is one of them (its file, a liked stream; also by its
+    /// place on the album whatever the titles, see [`same`]) gains that
     /// stream and the album's number when it had none, the release learns
     /// its track count, and a title in Latin letters takes the album's
     /// Cyrillic. An album id linked to another release is left alone.
@@ -742,7 +755,14 @@ impl Library {
                 t.album = Some(reference.clone());
                 let no = t.track_no.unwrap_or(i as u32 + 1);
                 t.track_no = Some(no);
-                let id = upsert_stream_track_in(tx, &t, None)?;
+                // The track at its place, whatever its title («滑落亭» of
+                // the service is the file «KATSURAKUTEI»).
+                let place = (rid.clone(), i64::from(t.disc_no.unwrap_or(1).max(1)), i64::from(no));
+                let at_place = match linked(tx, "track", service, EntityKind::Track, &t.id.id)? {
+                    Some(_) => None,
+                    None => same::same_place_track(tx, &t, &place)?.map(|id| parse(&id)).transpose()?,
+                };
+                let id = upsert_stream_track_in(tx, &t, at_place)?;
                 tx.execute(
                     "UPDATE track SET track_no = ?2, disc_no = ?3
                       WHERE id = ?1 AND release_id = ?4 AND track_no = 0",

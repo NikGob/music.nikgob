@@ -1,6 +1,8 @@
 use nikgob_core::model::{Codec, SourceKind, WishlistItem, WishlistStatus, score};
 use nikgob_core::streaming::FakeService;
 
+use super::same::Song;
+
 use super::*;
 use crate::{
     ArtistSort, ArtistSortKey, ReleaseSort, ReleaseSortKey, TrackFilter, TrackSort, TrackSortKey,
@@ -1096,5 +1098,201 @@ fn an_album_with_one_file_learns_its_whole_tracklist_from_a_service() {
     assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), 1, "the missing songs stay outside the library");
     let p = lib.release_progress(release).unwrap().unwrap();
     assert_eq!((p.local, p.total), (1, 3), "«1 из 3»");
+    assert_eq!(lib.adopt_stream_album(release, &album).unwrap(), 0, "nothing twice");
+}
+
+/// «MADE IN ABYSS ORIGINAL SOUNDTRACK 4» (20 songs) as the library had it:
+/// two of its files, and the same two songs as YouTube Music names them,
+/// added as stream tracks of the release at the same places (§12.8):
+/// `(release, [file 4, file 8], [stream 4, stream 8])`.
+fn abyss(lib: &Library) -> (ReleaseId, [TrackId; 2], [TrackId; 2]) {
+    let kevin = lib.upsert_artist(&Artist::new("Kevin Penkin")).unwrap();
+    let immi = lib.upsert_artist(&Artist::new("immi")).unwrap();
+    let mut release = Release::new(
+        "MADE IN ABYSS ORIGINAL SOUNDTRACK 4",
+        ArtistCredit::single("Kevin Penkin", Some(kevin.id)),
+    );
+    release.total_tracks = Some(20);
+    let release = lib.upsert_release(&release).unwrap();
+    let mut pair = ArtistCredit::single("Kevin Penkin", Some(kevin.id));
+    pair.push(" & ", "immi", Some(immi.id));
+    let files = [
+        abyss_file(lib, release.id, "KATSURAKUTEI", ArtistCredit::single("Kevin Penkin", Some(kevin.id)), 4, 124_853),
+        abyss_file(lib, release.id, "RIKO NIKUNABE", pair, 8, 141_669),
+    ];
+    let stream = |id: &str, title: &str, artist: &str, no: u32, ms: u64| {
+        let t = separate(lib, &yt(id, title, artist, ms, false));
+        // The credit as YouTube gave it: one name for the pair.
+        let credit = format!(r#"[{{"artist_id":null,"name":"{artist}","join_phrase":""}}]"#);
+        lib.write(|tx| {
+            tx.execute(
+                "UPDATE track SET release_id = ?2, disc_no = 1, track_no = ?3, artist_credit = ?4 WHERE id = ?1",
+                params![t.to_string(), release.id.to_string(), no, credit],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        t
+    };
+    let streams = [
+        stream("feFFauF1GWk", "滑落亭", "Kevin Penkin", 4, 125_000),
+        stream("aZY3gguR2uM", "Riko肉鍋", "Kevin Penkin、immi", 8, 142_000),
+    ];
+    (release.id, files, streams)
+}
+
+fn abyss_file(lib: &Library, release: ReleaseId, title: &str, credit: ArtistCredit, no: u32, ms: u32) -> TrackId {
+    let mut t = Track::new(title, credit);
+    t.release_id = Some(release);
+    t.disc_no = 1;
+    t.track_no = no;
+    t.duration_ms = Some(ms);
+    let t = lib.upsert_track(&t).unwrap();
+    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("Music/{no:02} {title}.opus"), Codec::Opus))
+        .unwrap();
+    t.id
+}
+
+#[test]
+fn one_place_of_one_release_is_one_song_whatever_the_titles() {
+    let place = Some(("abyss-4".to_owned(), 1, 4));
+    let file = Song::new("KATSURAKUTEI", "Kevin Penkin", None, Some(124_853), None).at(place.clone());
+    let service = Song::new("滑落亭", "Kevin Penkin", None, Some(125_000), None).at(place.clone());
+    assert!(file.same(&service));
+    assert!(!file.same(&Song { place: None, ..service.clone() }), "no place, no rule");
+    let elsewhere = Song { place: Some(("abyss-4".into(), 1, 5)), ..service.clone() };
+    assert!(!file.same(&elsewhere), "another number");
+    let other_album = Song { place: Some(("abyss-3".into(), 1, 4)), ..service.clone() };
+    assert!(!file.same(&other_album), "another release");
+    let far = Song { duration_ms: Some(127_000), ..service.clone() };
+    assert!(!file.same(&far), "2.1 s apart");
+    let stranger = Song::new("滑落亭", "Someone Else", None, Some(125_000), None).at(place.clone());
+    assert!(!file.same(&stranger), "no shared artist");
+    let isrc = Song { isrc: Some("ZZFAK9900009".into()), ..service.clone() };
+    let both = Song { isrc: Some("ZZFAK9900001".into()), ..file.clone() };
+    assert!(!both.same(&isrc), "two different ISRCs");
+    // The credits overlap name by name.
+    let place8 = Some(("abyss-4".to_owned(), 1, 8));
+    let file = Song::new("RIKO NIKUNABE", "Kevin Penkin", None, Some(141_669), None)
+        .with_names(&["Kevin Penkin", "immi"])
+        .at(place8.clone());
+    let service = Song::new("Riko肉鍋", "Kevin Penkin、immi", None, Some(142_000), None)
+        .with_names(&["Kevin Penkin、immi"])
+        .at(place8.clone());
+    assert!(file.same(&service) && service.same(&file));
+    let guest = Song::new("Riko肉鍋", "immi", None, Some(142_000), None).at(place8);
+    assert!(file.same(&guest), "a guest of the file is an artist of it");
+    assert_eq!(same::credit_keys("Kevin Penkin、immi"), ["kevin penkin", "immi"]);
+    assert_eq!(same::credit_keys("A × B feat. C"), ["a", "b", "c"]);
+    assert_eq!(same::main_artist_key("Kevin Penkin、immi"), "kevin penkin");
+}
+
+#[test]
+fn the_v5_repair_folds_the_service_titles_into_the_files_at_their_places() {
+    let lib = lib();
+    let (release, files, streams) = abyss(&lib);
+    // Two files at one place stay two: a wrong tag is no duplicate.
+    let kevin = ArtistCredit::single("Kevin Penkin", None);
+    let lullaby = abyss_file(&lib, release, "Gaburoon Memory Lullaby", kevin.clone(), 9, 83_963);
+    let twin = abyss_file(&lib, release, "Gaburoon Memory Lullaby (Inst.)", kevin, 9, 83_500);
+    lib.like(streams[0]).unwrap();
+    let p = lib.create_playlist("Бездна").unwrap();
+    lib.playlist_add(p.id, streams[1]).unwrap();
+    let count = |lib: &Library| -> i64 {
+        lib.read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM track WHERE release_id = ?1 AND deleted_at IS NULL",
+                [release.to_string()],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+    };
+    assert_eq!(count(&lib), 6, "22 of 20 in small");
+    // A library repaired by v4 is repaired again.
+    lib.write(|tx| meta_set(tx, "stream_duplicates_merged.v4", "1")).unwrap();
+
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 2);
+    assert_eq!(count(&lib), 4);
+    for (file, stream, video) in [(files[0], streams[0], "feFFauF1GWk"), (files[1], streams[1], "aZY3gguR2uM")] {
+        assert!(lib.get_track(stream).unwrap().is_none(), "{video}: merged");
+        let sources = lib.sources_of_track(file).unwrap();
+        assert!(sources.iter().any(|s| s.kind == SourceKind::Youtube && s.locator == video), "{video}: its source moved");
+        assert_eq!(lib.active_source(file).unwrap().unwrap().kind, SourceKind::LocalFile, "the file plays");
+    }
+    assert!(lib.is_liked(files[0]).unwrap(), "the like moved");
+    let entries = lib.playlist_entries(p.id, 0, 10).unwrap();
+    assert_eq!(entries.iter().map(|e| e.track.id).collect::<Vec<_>>(), [files[1]], "the playlist entry moved");
+    assert_eq!(lib.get_track_row(files[0]).unwrap().unwrap().title, "KATSURAKUTEI", "the file keeps its title");
+    assert!(lib.get_track(lullaby).unwrap().is_some() && lib.get_track(twin).unwrap().is_some(), "two files stay two");
+    let rows = lib.tracks_of_release_all(release).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| (r.track_no, r.title.as_str())).collect::<Vec<_>>(),
+        [(4, "KATSURAKUTEI"), (8, "RIKO NIKUNABE"), (9, "Gaburoon Memory Lullaby"), (9, "Gaburoon Memory Lullaby (Inst.)")]
+    );
+    let progress = lib.release_progress(release).unwrap().unwrap();
+    assert_eq!((progress.local, progress.total), (4, 20));
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 0, "once");
+}
+
+#[test]
+fn an_album_page_lists_each_place_once() {
+    let lib = lib();
+    let (release, files, streams) = abyss(&lib);
+    // Before any repair: the service's titles at the places of the files
+    // are not listed (and not counted) twice.
+    let rows = lib.tracks_of_release_all(release).unwrap();
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), files);
+    // A liked one is listed: it is in the library.
+    lib.like(streams[1]).unwrap();
+    assert_eq!(lib.tracks_of_release_all(release).unwrap().len(), 3);
+}
+
+#[test]
+fn a_tracklist_from_a_service_lands_on_the_files_at_their_places() {
+    let lib = lib();
+    let (release, files, streams) = abyss(&lib);
+    // As before §12.8 added them: only the files.
+    for t in streams {
+        lib.write(|tx| {
+            tx.execute("DELETE FROM source WHERE track_id = ?1", [t.to_string()])?;
+            tx.execute("DELETE FROM external_id WHERE local_id = ?1", [t.to_string()])?;
+            tx.execute("DELETE FROM track WHERE id = ?1", [t.to_string()])?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    let artists = vec![nikgob_core::streaming::ArtistRef::new(None, "Kevin Penkin")];
+    let mut album = StreamAlbum {
+        id: RemoteId::new(Service::Youtube, "MPREb_abyss4"),
+        title: "MADE IN ABYSS ORIGINAL SOUNDTRACK 4".into(),
+        artists: artists.clone(),
+        year: Some(2026),
+        release_date: None,
+        release_type: Default::default(),
+        cover_url: None,
+        total_tracks: Some(20),
+        tracks: Vec::new(),
+    };
+    for (no, id, title, artist, ms) in [
+        (3, "yt-3", "Cravagli", "Kevin Penkin", 126_000),
+        (4, "feFFauF1GWk", "滑落亭", "Kevin Penkin", 125_000),
+        (8, "aZY3gguR2uM", "Riko肉鍋", "Kevin Penkin、immi", 142_000),
+    ] {
+        let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), title);
+        t.artists = vec![nikgob_core::streaming::ArtistRef::new(None, artist)];
+        t.track_no = Some(no);
+        t.duration_ms = Some(ms);
+        album.tracks.push(t);
+    }
+    assert_eq!(lib.adopt_stream_album(release, &album).unwrap(), 1, "only «Cravagli» is new");
+    let rows = lib.tracks_of_release_all(release).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| (r.track_no, r.title.as_str(), r.has_local)).collect::<Vec<_>>(),
+        [(3, "Cravagli", false), (4, "KATSURAKUTEI", true), (8, "RIKO NIKUNABE", true)]
+    );
+    for (file, video) in [(files[0], "feFFauF1GWk"), (files[1], "aZY3gguR2uM")] {
+        assert!(lib.sources_of_track(file).unwrap().iter().any(|s| s.locator == video), "{video} is a source of the file");
+    }
     assert_eq!(lib.adopt_stream_album(release, &album).unwrap(), 0, "nothing twice");
 }

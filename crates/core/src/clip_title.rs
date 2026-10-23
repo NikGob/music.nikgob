@@ -288,7 +288,7 @@ pub fn credited_names(title: &str, uploader: &str) -> Vec<String> {
         && let Some(tail) = title.get(at + 4..)
     {
         let tail_lower = tail.to_lowercase();
-        let end = [" feat", " ft.", " ft ", " x ", " & ", " - ", " | ", " (", " ["]
+        let end = [" feat", " ft.", " ft ", " x ", " × ", " & ", "、", " - ", " | ", " (", " ["]
             .iter()
             .filter_map(|s| tail_lower.find(s))
             .min()

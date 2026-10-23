@@ -14,8 +14,9 @@ use crate::db::Library;
 use crate::error::Result;
 use crate::util::{credit_columns, fold, meta_get, meta_set};
 
-/// `meta` key: the repair of [`Library::split_combined_credits`] ran.
-const SPLIT_KEY: &str = "combined_credits_split.v1";
+/// `meta` key: the repair of [`Library::split_combined_credits`] ran (`v1`
+/// did not split at `、` and ` × `).
+const SPLIT_KEY: &str = "combined_credits_split.v2";
 
 /// Artists by folded name, and which of them stand for themselves (have a
 /// MusicBrainz id: "Simon & Garfunkel" from MusicBrainz is one act).
