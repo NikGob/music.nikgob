@@ -136,7 +136,7 @@ pub fn artist_key(name: &str) -> String {
     let lower = fold(name);
     let lower = lower.strip_suffix(" - topic").unwrap_or(&lower);
     let mut end = lower.len();
-    for sep in [", ", " & ", " feat", " ft.", " featuring ", " x "] {
+    for sep in [", ", "、", "，", " & ", " feat", " ft.", " featuring ", " x "] {
         if let Some(at) = lower.find(sep)
             && at > 0
         {
@@ -484,6 +484,7 @@ mod tests {
         assert_eq!(artist_key("Eve - Topic"), "eve");
         assert_eq!(artist_key("A & B"), "a");
         assert_eq!(artist_key("Ёлка feat. X"), "елка");
+        assert_eq!(artist_key("Kevin Penkin、immi"), artist_key("Kevin Penkin"));
         let mut clip = st(Service::Youtube, "v", "AIYOU - Eve Music Video", "Eve");
         clip.kind = TrackKind::Video;
         assert_eq!(stream_song_key(&clip), song_key("AIYOU", "Eve"));
