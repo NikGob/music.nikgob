@@ -20,6 +20,7 @@ use nikgob_core::model::{ArtistId, ReleaseId};
 
 use crate::analysis::{DIM, Vector};
 use crate::index::euclid;
+use crate::mood::Axes;
 use crate::pick::Recs;
 use crate::radio::RadioSeed;
 use crate::rng::Rng;
@@ -32,6 +33,9 @@ pub const MAX_K: usize = 6;
 pub const MERGE_RATIO: f32 = 0.5;
 const ITERATIONS: usize = 30;
 const COVERS: usize = 4;
+/// A style mix's mean leans this far from the library's middle on an axis
+/// (z-score units) to be named by it.
+pub const WORD_LEAN: f32 = 0.2;
 
 /// One style mix.
 #[derive(Clone, Debug, PartialEq)]
@@ -49,6 +53,30 @@ pub struct StyleMix {
     pub artists: Vec<ArtistId>,
     /// Listened tracks in it.
     pub size: usize,
+    /// The mean sound of its tracks on the mood axes (its words,
+    /// [`style_words`]).
+    pub axes: Axes,
+}
+
+/// What a style sounds like in one or two words («спокойное и мрачное»):
+/// the axes it leans on most, at least [`WORD_LEAN`] from the library's
+/// middle. `None` for a style in the middle of everything.
+pub fn style_words(a: Axes) -> Option<String> {
+    let mut words: Vec<(f32, &str)> = [
+        (a.energy, "энергичное", "спокойное"),
+        (a.brightness, "светлое", "мрачное"),
+        (a.steadiness, "ровное", "переменчивое"),
+    ]
+    .into_iter()
+    .filter(|(x, _, _)| x.abs() >= WORD_LEAN)
+    .map(|(x, up, down)| (x.abs(), if x > 0.0 { up } else { down }))
+    .collect();
+    words.sort_by(|x, y| y.0.total_cmp(&x.0));
+    match words.as_slice() {
+        [] => None,
+        [(_, a)] => Some((*a).to_owned()),
+        [(_, a), (_, b), ..] => Some(format!("{a} и {b}")),
+    }
 }
 
 impl StyleMix {
@@ -264,6 +292,17 @@ impl Recs<'_> {
                 artists.sort_by(|a, b| self.taste.artist_affinity(*b).total_cmp(&self.taste.artist_affinity(*a)).then(a.cmp(b)));
                 let mut covers: Vec<(ReleaseId, f32)> = covers.into_iter().collect();
                 covers.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                let sounds: Vec<Axes> = ps
+                    .iter()
+                    .filter_map(|&p| self.index.get(self.info(members[p]).id))
+                    .map(|v| Axes::of(&self.norm.z(v)))
+                    .collect();
+                let k = sounds.len().max(1) as f32;
+                let axes = Axes {
+                    energy: sounds.iter().map(|x| x.energy).sum::<f32>() / k,
+                    brightness: sounds.iter().map(|x| x.brightness).sum::<f32>() / k,
+                    steadiness: sounds.iter().map(|x| x.steadiness).sum::<f32>() / k,
+                };
                 StyleMix {
                     index,
                     centroid: centroids[c].to_vec(),
@@ -271,6 +310,7 @@ impl Recs<'_> {
                     covers: covers.into_iter().take(COVERS).map(|(r, _)| r).collect(),
                     artists,
                     size: ps.len(),
+                    axes,
                 }
             })
             .collect()
@@ -355,6 +395,22 @@ mod tests {
             let artist = cat.get(id).unwrap().artists[0];
             assert!(mixes[0].artists.contains(&artist));
         }
+    }
+
+    #[test]
+    fn a_style_is_named_by_its_sound() {
+        let ax = |energy, brightness, steadiness| Axes { energy, brightness, steadiness };
+        assert_eq!(style_words(ax(0.05, -0.1, 0.0)), None);
+        assert_eq!(style_words(ax(-0.6, -0.3, 0.1)).as_deref(), Some("спокойное и мрачное"));
+        assert_eq!(style_words(ax(0.1, 0.5, 0.0)).as_deref(), Some("светлое"));
+        assert_eq!(style_words(ax(0.3, 0.0, -0.9)).as_deref(), Some("переменчивое и энергичное"));
+        // The two genres of the library sound opposite.
+        let (cat, idx, input) = genres(false);
+        let taste = Taste::build(&cat, &input, 0);
+        let mixes = Recs::new(&cat, &taste, &idx).style_mixes(&[], 1);
+        let words: Vec<Option<String>> = mixes.iter().map(|m| style_words(m.axes)).collect();
+        assert_eq!(words.len(), 2);
+        assert!(words.iter().all(Option::is_some) && words[0] != words[1], "{words:?}");
     }
 
     #[test]

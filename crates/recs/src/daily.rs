@@ -59,7 +59,8 @@ impl Recs<'_> {
         let n_cat = self.catalog.len();
 
         let mut slots: Vec<Slot> = Vec::with_capacity(p.len);
-        let want_new = new_count(p.len, p.new_share).min(new.len());
+        let share = if self.local_only { 0.0 } else { p.new_share };
+        let want_new = new_count(p.len, share).min(new.len());
         let new_slots: Vec<Slot> = new.iter().enumerate().map(|(k, t)| self.new_slot(t, -(k as f32))).collect();
         slots.extend(select_diverse(new_slots, want_new, &rules, &mut taken));
         let rest = p.len - slots.len();

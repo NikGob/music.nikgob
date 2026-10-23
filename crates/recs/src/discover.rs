@@ -242,8 +242,9 @@ impl Recs<'_> {
     pub fn discovery_seeds(&self) -> DiscoverySeeds {
         let now = self.now();
         let mut tracks: Vec<(TrackId, f32)> = (0..self.catalog.len())
+            // Streams without a file are seeds too, whatever the mixes pick.
             .filter(|&i| {
-                !self.blocked(i)
+                !self.taste.blocks(self.info(i))
                     && self.taste.affinity_at(i) > 0.0
                     && self.taste.last_played_at(i).is_some_and(|t| now - t <= SEED_RECENT_MS)
             })
@@ -282,7 +283,10 @@ impl Recs<'_> {
             .map(|(a, _)| self.taste.artist_affinity(*a))
             .fold(0.0f32, f32::max)
             .max(1e-6);
+        // An album twice: by its name, or by its id (a shared album is in
+        // the discography of each of its artists, credited to each).
         let mut seen: HashSet<String> = HashSet::new();
+        let mut seen_ids: HashSet<&RemoteId> = HashSet::new();
         let mut out: Vec<NewRelease> = Vec::new();
         for (artist, albums) in artists {
             if self.taste.is_disliked_artist(*artist) {
@@ -297,7 +301,7 @@ impl Recs<'_> {
                 }
                 let name = album.artists.first().map_or("", |a| a.name.as_str());
                 let key = album_key(&album.title, name);
-                if known_albums.contains(&key) || !seen.insert(key) {
+                if known_albums.contains(&key) || !seen.insert(key) || !seen_ids.insert(&album.id) {
                     continue;
                 }
                 let kind = match album.release_type {
@@ -626,6 +630,15 @@ mod tests {
                 ],
             ),
             (aid(0), vec![album("7", "Other band", Some(10), ReleaseType::Album)]),
+            // «Fresh» is shared: the guest's discography credits it to the
+            // guest, the same album by its id.
+            (
+                aid(1),
+                vec![StreamAlbum {
+                    artists: vec![ArtistRef::new(None, "Guest")],
+                    ..album("1", "Fresh", Some(3), ReleaseType::Album)
+                }],
+            ),
         ];
         let known: HashSet<String> = [album_key("Owned", "Band")].into();
         let rel = recs.new_releases(&artists, &known);

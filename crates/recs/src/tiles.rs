@@ -160,28 +160,29 @@ impl TileKind {
         }
     }
 
-    /// The quiet label over the tile's title.
+    /// The quiet label over the tile's title: why the tile is here, never
+    /// the title again (docs/stage4.md §12.10).
     pub const fn kicker(self) -> &'static str {
         match self {
-            Self::OnRepeat => "НА ПОВТОРЕ",
+            Self::OnRepeat => "ЧАЩЕ ВСЕГО",
             Self::YearAgo => "ГОД НАЗАД",
-            Self::Season => "КАПСУЛА",
-            Self::Rediscover => "ЗАБЫТОЕ ЛЮБИМОЕ",
-            Self::FirstLikes => "ПЕРВЫЕ ЛАЙКИ",
-            Self::FreshLikes => "СВЕЖИЕ ЛАЙКИ",
-            Self::Unplayed => "НЕ СЛУШАЛ",
-            Self::DeepCuts => "ГЛУБЖЕ У ЛЮБИМЫХ",
+            Self::Season => "КАПСУЛА ВРЕМЕНИ",
+            Self::Rediscover => "ДАВНО НЕ ИГРАЛО",
+            Self::FirstLikes => "С САМОГО НАЧАЛА",
+            Self::FreshLikes => "НЕДАВНО",
+            Self::Unplayed => "НЕ ИГРАЛО",
+            Self::DeepCuts => "ТВОИ ИСПОЛНИТЕЛИ",
             Self::ArtistOfDay => "ИСПОЛНИТЕЛЬ ДНЯ",
             Self::Comeback => "ДАВНО НЕ СЛЫШАЛ",
-            Self::BecauseYouLiked => "ПОТОМУ ЧТО ТЕБЕ ПОНРАВИЛОСЬ",
+            Self::BecauseYouLiked => "ТЕБЕ ПОНРАВИЛОСЬ",
             Self::Long => "ДЛИННОЕ",
             Self::Short => "КОРОТКОЕ",
             Self::SingAlong => "ПОДПЕВАЙ",
-            Self::Language => "ЯЗЫК",
-            Self::Decade => "ДЕСЯТИЛЕТИЕ",
+            Self::Language => "ПО ЯЗЫКУ",
+            Self::Decade => "ПО ГОДАМ",
             Self::Soundtrack => "САУНДТРЕК",
             Self::Playlist => "ИЗ ПЛЕЙЛИСТА",
-            Self::Unfinished => "ДОСЛУШАЙ",
+            Self::Unfinished => "НЕ ДОСЛУШАЛ",
             Self::NotDownloaded => "НЕ СКАЧАНО",
             Self::Lottery => "НАУГАД",
         }
@@ -242,6 +243,21 @@ pub struct TilesInput {
     pub events: Vec<Play>,
     pub playlists: Vec<PlaylistFacts>,
     pub artist_names: HashMap<ArtistId, String>,
+}
+
+/// «Похоже на Underground River»: a song's title without what its brackets
+/// add («(Opening Theme)», «[Remastered]»).
+pub fn like_title(song: &str) -> String {
+    let mut short = song.to_owned();
+    for open in ['(', '[', '（', '【'] {
+        if let Some(i) = short.find(open)
+            && i > 0
+        {
+            short.truncate(i);
+        }
+    }
+    let short = short.trim();
+    format!("Похоже на {}", if short.is_empty() { song.trim() } else { short })
 }
 
 /// One tile of a day.
@@ -455,6 +471,19 @@ fn season_title((year, s): (i32, u32)) -> String {
 /// A recipe's candidates: catalog position and score (higher first).
 type Cands = Vec<(usize, f32)>;
 
+/// Up to [`TILE_LEN`] of `cands` (best scored first) under the diversity
+/// rules in the smooth order, from the best scored one.
+fn smooth_picks(recs: &Recs<'_>, kind: TileKind, mut cands: Cands, exempt: Option<ArtistId>) -> Vec<Pick> {
+    cands.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    let slots: Vec<Slot> = cands.into_iter().map(|(i, s)| recs.slot(i, Reason::Tile(kind), s)).collect();
+    let rules = Diversity {
+        exempt: exempt.map(token_of_artist),
+        ..Diversity::default()
+    };
+    let picked = select_diverse(slots, TILE_LEN, &rules, &mut HashSet::new());
+    arrange(recs, picked, &[], None, &rules).into_iter().map(Slot::pick).collect()
+}
+
 /// One day's tiles over one snapshot.
 struct Board<'r, 'a> {
     recs: &'r Recs<'a>,
@@ -545,18 +574,11 @@ impl<'r, 'a> Board<'r, 'a> {
 
     /// The tile of `cands` under the diversity rules in the smooth order
     /// (`exempt`: an artist the artist rule does not apply to).
-    fn smooth(&self, kind: TileKind, param: String, title: String, mut cands: Cands, exempt: Option<ArtistId>) -> Option<TileMix> {
+    fn smooth(&self, kind: TileKind, param: String, title: String, cands: Cands, exempt: Option<ArtistId>) -> Option<TileMix> {
         if cands.len() < kind.min() {
             return None;
         }
-        cands.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        let slots: Vec<Slot> = cands.into_iter().map(|(i, s)| self.recs.slot(i, Reason::Tile(kind), s)).collect();
-        let rules = Diversity {
-            exempt: exempt.map(token_of_artist),
-            ..Diversity::default()
-        };
-        let picked = select_diverse(slots, TILE_LEN, &rules, &mut HashSet::new());
-        let picks = arrange(self.recs, picked, &[], None, &rules).into_iter().map(Slot::pick).collect();
+        let picks = smooth_picks(self.recs, kind, cands, exempt);
         Some(TileMix { kind, param, title, picks })
     }
 
@@ -634,7 +656,7 @@ impl<'r, 'a> Board<'r, 'a> {
                     .filter(|(_, t)| self.now - t >= FIRST_LIKES_AFTER_MS)
                     .collect();
                 liked.sort_by_key(|(i, t)| (*t, *i));
-                self.as_is(kind, none(), "С самого начала".into(), liked.into_iter().map(|(i, _)| i).collect())
+                self.as_is(kind, none(), "Первые лайки".into(), liked.into_iter().map(|(i, _)| i).collect())
             }
             TileKind::FreshLikes => {
                 let mut liked: Vec<(usize, UnixMs)> = self
@@ -665,7 +687,7 @@ impl<'r, 'a> Board<'r, 'a> {
                     _ => (SHORT_FROM_MS..=SHORT_MS).contains(&ms),
                 };
                 let tracks = self.all().filter(|&i| self.fact(i).and_then(|f| f.duration_ms).is_some_and(fits)).collect();
-                let title = if kind == TileKind::Long { "От 7 минут" } else { "До 2:30" };
+                let title = if kind == TileKind::Long { "Длинные треки" } else { "Короткие треки" };
                 self.smooth(kind, none(), title.into(), self.by_love(kind, tracks), None)
             }
             TileKind::SingAlong => {
@@ -688,6 +710,8 @@ impl<'r, 'a> Board<'r, 'a> {
             TileKind::Soundtrack => self.soundtrack(),
             TileKind::Playlist => self.playlist(),
             TileKind::Unfinished => self.unfinished(),
+            // Never while only songs with a file are picked.
+            TileKind::NotDownloaded if self.recs.local_only => None,
             TileKind::NotDownloaded => {
                 let mut liked: Vec<(usize, UnixMs)> = self
                     .all()
@@ -695,15 +719,18 @@ impl<'r, 'a> Board<'r, 'a> {
                     .map(|i| (i, self.recs.taste.liked_time_at(i).unwrap_or(0)))
                     .collect();
                 liked.sort_by_key(|(i, t)| (std::cmp::Reverse(*t), *i));
-                self.as_is(kind, none(), "Лайкнутое без файла".into(), liked.into_iter().map(|(i, _)| i).collect())
+                self.as_is(kind, none(), "Ещё не скачано".into(), liked.into_iter().map(|(i, _)| i).collect())
             }
             TileKind::Lottery => {
-                let pool: Vec<(usize, f64)> =
-                    self.all().map(|i| (i, 1.0 / (1.0 + f64::from(self.recs.taste.plays_at(i))))).collect();
-                let drawn = self.rng(kind, 0).weighted_sample(&pool, TILE_LEN * 2);
-                let n = drawn.len() as f32;
-                let cands = drawn.into_iter().enumerate().map(|(k, i)| (i, n - k as f32)).collect();
-                self.smooth(kind, none(), "Лотерея".into(), cands, None)
+                // The board's draw only says the tile can play; a click
+                // draws again ([`Recs::lottery`]).
+                let picks = self.recs.lottery(self.day as u64 ^ 0x1077);
+                (picks.len() >= kind.min()).then(|| TileMix {
+                    kind,
+                    param: none(),
+                    title: "Лотерея".into(),
+                    picks,
+                })
             }
         }
     }
@@ -868,7 +895,7 @@ impl<'r, 'a> Board<'r, 'a> {
             .map(|(i, c)| (self.recs.info(i).id.to_string(), (i, c)))
             .collect();
         let (param, (seed, cands)) = self.choose(TileKind::BecauseYouLiked, options)?;
-        let title = self.fact(seed).map(|f| f.title.clone()).unwrap_or_default();
+        let title = like_title(&self.fact(seed).map(|f| f.title.clone()).unwrap_or_default());
         self.smooth(TileKind::BecauseYouLiked, param, title, cands, None)
     }
 
@@ -1005,7 +1032,7 @@ impl<'r, 'a> Board<'r, 'a> {
         }
         left.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         let order: Vec<usize> = left.into_iter().flat_map(|(_, t)| t).collect();
-        self.as_is(TileKind::Unfinished, String::new(), "Недослушанное".into(), order)
+        self.as_is(TileKind::Unfinished, String::new(), "Недослушанные альбомы".into(), order)
     }
 }
 
@@ -1013,6 +1040,22 @@ impl Recs<'_> {
     /// The local day number of now (days since 1970-01-01).
     pub fn local_day(&self) -> i64 {
         (self.now() + i64::from(self.taste.utc_offset_min()) * 60_000).div_euclid(DAY_MS)
+    }
+
+    /// «Наугад»: up to [`TILE_LEN`] songs drawn by chance, the rarely played
+    /// likelier (weight 1 / (1 + plays)), under the diversity rules in the
+    /// smooth order from the first one drawn. The runtime passes a fresh
+    /// `seed` at every play, so neither the songs nor the first of them can
+    /// be known before.
+    pub fn lottery(&self, seed: u64) -> Vec<Pick> {
+        let pool: Vec<(usize, f64)> = (0..self.catalog.len())
+            .filter(|&i| !self.blocked(i))
+            .map(|i| (i, 1.0 / (1.0 + f64::from(self.taste.plays_at(i)))))
+            .collect();
+        let drawn = Rng::derive(seed, 0x711E + TileKind::Lottery as u64).weighted_sample(&pool, TILE_LEN * 2);
+        let n = drawn.len() as f32;
+        let cands = drawn.into_iter().enumerate().map(|(k, i)| (i, n - k as f32)).collect();
+        smooth_picks(self, TileKind::Lottery, cands, None)
     }
 
     /// A tile of a kind as it would be today (its parameter chosen against
@@ -1294,7 +1337,9 @@ mod tests {
         let sing = get(TileKind::SingAlong).unwrap();
         assert_eq!(sorted(&sing.picks), (40..50).collect::<Vec<_>>(), "plain lyrics do not count");
         let liked = get(TileKind::BecauseYouLiked).unwrap();
-        assert_eq!(liked.title, "Song 200");
+        assert_eq!(liked.title, "Похоже на Song 200");
+        assert_eq!(like_title("Underground River (Opening Theme)"), "Похоже на Underground River");
+        assert_eq!(like_title("(It's) Here"), "Похоже на (It's) Here");
         assert_eq!(liked.picks.len(), 30);
         assert!(ids(&liked.picks).contains(&200));
     }

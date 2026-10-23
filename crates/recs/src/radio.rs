@@ -277,7 +277,9 @@ impl RadioState {
         let mut rng = Rng::derive(params.seed, self.turns);
         self.turns += 1;
         let share = match self.seed {
+            // «Новое для тебя» is new music whatever the mixes pick.
             RadioSeed::Discover => 1.0,
+            _ if recs.local_only => 0.0,
             RadioSeed::Stream { .. } => params.new_share.max(0.5),
             _ => params.new_share,
         };

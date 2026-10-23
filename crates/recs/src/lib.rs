@@ -45,10 +45,10 @@ pub use index::{Normalizer, VectorIndex};
 pub use mood::{Axes, Mood};
 pub use pick::{Item, NewTrack, Pick, Reason, Recs};
 pub use radio::{Outcome, RadioParams, RadioSeed, RadioState};
-pub use style::StyleMix;
+pub use style::{StyleMix, style_words};
 pub use suggest::{Matched, ServiceSuggestions, match_suggestions, suggestion_finds};
 pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo};
-pub use tiles::{LyricsKind, PlaylistFacts, TILES_PER_DAY, TileGroup, TileHistory, TileKind, TileMix, TilesInput, TrackFacts};
+pub use tiles::{LyricsKind, like_title, PlaylistFacts, TILES_PER_DAY, TileGroup, TileHistory, TileKind, TileMix, TilesInput, TrackFacts};
 
 #[cfg(test)]
 pub(crate) mod test_util {
@@ -149,5 +149,116 @@ mod tests {
         let _ = styles;
         assert!(took < std::time::Duration::from_secs(10), "{took:?}");
         eprintln!("everything over 50k tracks / 100k events: {took:?}");
+    }
+
+    /// 2 000 tracks by 40 artists, the odd ones streams without a file,
+    /// analysed, with two years of plays and likes on both kinds.
+    fn half_streams() -> (Catalog, VectorIndex<nikgob_core::model::TrackId>, TasteInput, nikgob_core::model::UnixMs) {
+        let (cat, input, now) = big_history(2_000, 20_000, 40);
+        let cat = Catalog::new(cat.tracks().iter().map(|t| t.clone().with_local(t.id.0.as_u128() % 2 == 0)));
+        let mut rng = rng::Rng::new(3);
+        let mut idx = VectorIndex::new();
+        for t in cat.tracks() {
+            idx.insert(t.id, std::array::from_fn(|_| rng.f32()));
+        }
+        (cat, idx, input, now)
+    }
+
+    fn new_music() -> Vec<NewTrack> {
+        use nikgob_core::streaming::{RemoteId, Service};
+        (0..20)
+            .map(|k| NewTrack {
+                id: RemoteId::new(Service::Deezer, format!("{k}")),
+                artist: format!("someone {k}"),
+                album: None,
+                vector: None,
+            })
+            .collect()
+    }
+
+    /// «Миксы только из скачанного»: every selection picks only tracks with
+    /// a file and no new music, however much new music there is.
+    #[test]
+    fn local_only_picks_only_files() {
+        let (cat, idx, input, now) = half_streams();
+        let taste = Taste::build(&cat, &input, now);
+        let recs = Recs::new(&cat, &taste, &idx).local_only(true);
+        let local = |p: &Pick| match &p.item {
+            Item::Track(id) => cat.get(*id).is_some_and(|t| t.local),
+            Item::Stream(_) => false,
+        };
+        let check = |what: &str, picks: &[Pick]| {
+            assert!(!picks.is_empty(), "{what}: nothing");
+            assert!(picks.iter().all(local), "{what}: a stream or new music");
+        };
+        let new = new_music();
+        let params = RadioParams { new_share: 0.5, seed: 1 };
+        check("daily", &recs.daily_mix(&new, &DailyParams { new_share: 0.5, ..DailyParams::default() }));
+        check("daylist", &recs.daylist(DayPart::Evening, &new, 20, &params).2);
+        let streamed = cat.tracks().iter().find(|t| !t.local).unwrap();
+        let seeds = [
+            RadioSeed::Mood(Mood::Calm),
+            RadioSeed::Artist(streamed.artists[0]),
+            RadioSeed::Track(streamed.id),
+            RadioSeed::Stream {
+                id: new[0].id.clone(),
+                vector: None,
+                artists: streamed.artists.clone(),
+            },
+        ];
+        for seed in seeds.into_iter().chain(recs.style_mixes(&[], 1).iter().map(StyleMix::seed)) {
+            let mut r = RadioState::new(seed.clone());
+            r.add_new(new.iter().cloned());
+            check(&format!("{seed:?}"), &r.extend(&recs, 20, &params));
+        }
+        let mut facts = std::collections::HashMap::new();
+        for t in cat.tracks() {
+            let fact = TrackFacts {
+                title: format!("Song {}", t.id.0.as_u128()),
+                duration_ms: Some(if t.id.0.as_u128() % 3 == 0 { 8 * 60_000 } else { 120_000 }),
+                has_local: t.local,
+                ..TrackFacts::default()
+            };
+            facts.insert(t.id, fact);
+        }
+        let tiles = TilesInput {
+            facts,
+            events: input.events.clone(),
+            ..TilesInput::default()
+        };
+        let ready = recs.ready_tiles(&tiles, &TileHistory::default());
+        assert!(ready.len() >= 5, "{:?}", ready.iter().map(|t| t.kind).collect::<Vec<_>>());
+        for t in &ready {
+            check(&format!("{:?}", t.kind), &t.picks);
+        }
+        assert!(ready.iter().all(|t| t.kind != TileKind::NotDownloaded));
+        // Without the setting the same library has its streams back.
+        let all = Recs::new(&cat, &taste, &idx);
+        let kinds: Vec<TileKind> = all.ready_tiles(&tiles, &TileHistory::default()).iter().map(|t| t.kind).collect();
+        assert!(kinds.contains(&TileKind::NotDownloaded), "{kinds:?}");
+        let daily = all.daily_mix(&new, &DailyParams { new_share: 0.5, ..DailyParams::default() });
+        assert!(!daily.iter().all(local));
+        // Discovery still grows from everything liked.
+        assert_eq!(recs.discovery_seeds(), all.discovery_seeds());
+    }
+
+    /// «Наугад» draws anew with every seed: other songs, another first.
+    #[test]
+    fn the_lottery_is_a_lottery() {
+        let (cat, idx, input, now) = half_streams();
+        let taste = Taste::build(&cat, &input, now);
+        let recs = Recs::new(&cat, &taste, &idx);
+        let draws: Vec<Vec<Pick>> = (0..20).map(|s| recs.lottery(s)).collect();
+        assert!(draws.iter().all(|d| d.len() == tiles::TILE_LEN));
+        let firsts: HashSet<&Item> = draws.iter().map(|d| &d[0].item).collect();
+        assert!(firsts.len() >= 15, "the first song is known: {firsts:?}");
+        let a: HashSet<&Item> = draws[0].iter().map(|p| &p.item).collect();
+        let b: HashSet<&Item> = draws[1].iter().map(|p| &p.item).collect();
+        assert!(a.intersection(&b).count() < 10, "two draws are alike");
+        for d in &draws {
+            pick::assert_diverse(&recs, d);
+        }
+        let only = Recs::new(&cat, &taste, &idx).local_only(true);
+        assert!(only.lottery(7).iter().all(|p| matches!(p.item, Item::Track(id) if cat.get(id).unwrap().local)));
     }
 }

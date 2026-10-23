@@ -99,6 +99,9 @@ pub struct Recs<'a> {
     pub taste: &'a Taste,
     pub index: &'a VectorIndex<TrackId>,
     pub(crate) norm: Normalizer,
+    /// «Миксы только из скачанного»: only tracks with a file are picked,
+    /// and no new music.
+    pub(crate) local_only: bool,
 }
 
 impl<'a> Recs<'a> {
@@ -108,7 +111,21 @@ impl<'a> Recs<'a> {
             taste,
             index,
             norm: index.normalizer(),
+            local_only: false,
         }
+    }
+
+    /// The engine that picks only tracks with a file and no new music
+    /// (`on`), as «Миксы только из скачанного» asks.
+    #[must_use]
+    pub fn local_only(mut self, on: bool) -> Self {
+        self.local_only = on;
+        self
+    }
+
+    /// Picks only tracks with a file ([`Recs::local_only`]).
+    pub fn is_local_only(&self) -> bool {
+        self.local_only
     }
 
     pub fn now(&self) -> UnixMs {
@@ -119,9 +136,11 @@ impl<'a> Recs<'a> {
         &self.catalog.tracks()[i]
     }
 
-    /// Disliked, or by a disliked artist.
+    /// Disliked, or by a disliked artist, or without a file when only
+    /// tracks with one are picked.
     pub(crate) fn blocked(&self, i: usize) -> bool {
-        self.taste.blocks(self.info(i))
+        let t = self.info(i);
+        self.taste.blocks(t) || (self.local_only && !t.local)
     }
 
     /// The track's vector in the weighted normalised space.

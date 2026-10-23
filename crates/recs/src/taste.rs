@@ -77,11 +77,27 @@ pub struct TrackInfo {
     pub id: TrackId,
     pub artists: Vec<ArtistId>,
     pub release: Option<ReleaseId>,
+    /// Has a file (a liked or playlist stream without one plays from its
+    /// service): «Миксы только из скачанного» picks only these.
+    pub local: bool,
 }
 
 impl TrackInfo {
+    /// A track with a file.
     pub fn new(id: TrackId, artists: Vec<ArtistId>, release: Option<ReleaseId>) -> Self {
-        Self { id, artists, release }
+        Self {
+            id,
+            artists,
+            release,
+            local: true,
+        }
+    }
+
+    /// The same track, with a file or without one.
+    #[must_use]
+    pub fn with_local(mut self, local: bool) -> Self {
+        self.local = local;
+        self
     }
 
     pub fn main_artist(&self) -> Option<ArtistId> {
