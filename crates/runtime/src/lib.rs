@@ -1379,9 +1379,15 @@ impl Worker {
                     return;
                 }
                 if let Some(e) = playing
-                    && let Some((source, _)) = self.playing_source
+                    && let Some((source, kind)) = self.playing_source
+                    && !self.stream_failed(e.track, source, &message)
+                    && kind == SourceKind::Youtube
                 {
-                    self.stream_failed(e.track, source, &message);
+                    // YouTube's failure, not the video's: its other copies
+                    // would hang the same way.
+                    let copies = self.lib.sources_of_track(e.track).unwrap_or_default();
+                    self.tried
+                        .extend(copies.iter().filter(|s| s.kind == SourceKind::Youtube).map(|s| s.id));
                 }
                 // Where the engine had got to (what it last reported, not
                 // the extrapolation: a stream that runs dry stands still).
