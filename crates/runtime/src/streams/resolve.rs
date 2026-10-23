@@ -204,9 +204,24 @@ pub(crate) fn failure_text(
         (format!("{who} просит подождать — включи трек чуть позже"), None)
     } else if m.contains("not available") || m.contains("недоступ") {
         ("трек недоступен".into(), None)
+    } else if service == Some(Service::Youtube) && (m.contains("refused") || m.contains("http 403")) {
+        // Every client of the player was asked (see nikgob_youtube::player):
+        // YouTube's, not the video's.
+        ("YouTube сейчас не отдаёт звук — попробуй чуть позже".into(), None)
+    } else if service == Some(Service::Youtube) && (m.contains("network") || m.contains("stalled")) {
+        ("нет связи с YouTube — проверь интернет".into(), None)
     } else {
         ("не получилось воспроизвести".into(), None)
     }
+}
+
+/// Whether a stream's error text says the video itself does not play
+/// (another copy of the song may).
+pub(crate) fn video_refused(message: &str) -> bool {
+    let m = message.to_lowercase();
+    ["age-restricted", "blocked in this region", "not available"]
+        .iter()
+        .any(|k| m.contains(k))
 }
 
 impl Worker {
@@ -221,21 +236,28 @@ impl Worker {
     /// The playing source of `track` did not open: a YouTube video that
     /// is refused (age gate, region block, gone) is set aside, so the next
     /// lookup picks another copy of the song; the reason is kept for the
-    /// toast if none plays.
-    pub(crate) fn stream_failed(&mut self, track: TrackId, source: nikgob_core::model::SourceId, message: &str) {
-        let Some(src) = self.lib.get_source(source).ok().flatten() else { return };
+    /// toast if none plays. Whether the failure was the video's: anything
+    /// else of YouTube (stream URLs refused by every client of the player,
+    /// no connection) fails the other copies the same way, so they are not
+    /// tried.
+    pub(crate) fn stream_failed(&mut self, track: TrackId, source: nikgob_core::model::SourceId, message: &str) -> bool {
+        let Some(src) = self.lib.get_source(source).ok().flatten() else { return true };
         let signed_in = self
             .service(Service::Youtube)
             .is_some_and(|y| y.account().is_logged_in());
         let why = failure_text(message, signed_in, src.kind.service());
         log::info!("{track}: {} source {} failed: {message}", src.kind.as_str(), src.locator);
         self.streaming.failures.insert(track, why);
+        if src.kind == SourceKind::Youtube && !video_refused(message) {
+            return false;
+        }
         if src.kind == SourceKind::Youtube {
             self.streaming.refused.insert(src.locator.clone(), Instant::now());
             if let Err(e) = self.lib.set_source_available(source, false) {
                 log::warn!("setting aside the YouTube copy of {track}: {e}");
             }
         }
+        true
     }
 
     /// The track can be looked up on YouTube Music: YouTube is on, the
@@ -558,5 +580,21 @@ mod tests {
             ..q
         };
         assert_eq!(pick_youtube(&all, &q).unwrap().id.id, "clip");
+    }
+
+    #[test]
+    fn youtube_failures_say_whose_they_are() {
+        let yt = Some(Service::Youtube);
+        let refused = "i/o error: stream URL keeps being refused (HTTP 403)";
+        assert!(!video_refused(refused));
+        assert_eq!(failure_text(refused, false, yt).0, "YouTube сейчас не отдаёт звук — попробуй чуть позже");
+        let offline = "network error: error sending request: dns error";
+        assert!(!video_refused(offline));
+        assert_eq!(failure_text(offline, false, yt).0, "нет связи с YouTube — проверь интернет");
+        let age = "i/o error: age-restricted";
+        assert!(video_refused(age));
+        assert_eq!(failure_text(age, false, yt).1, Some(nikgob_view::SettingLink::Youtube));
+        assert!(video_refused("not available") && video_refused("blocked in this region"));
+        assert_eq!(failure_text("whatever", false, None).0, "не получилось воспроизвести");
     }
 }

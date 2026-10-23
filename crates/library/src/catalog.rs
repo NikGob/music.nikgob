@@ -972,9 +972,20 @@ impl Library {
 
     /// [`Self::tracks_of_release`] with the tracks outside the library too
     /// (stream tracks asked for in «Хочу скачать» without a like: the ones a
-    /// download of the album is for).
+    /// download of the album is for). A stream track outside the library at
+    /// the place of a track with a file and as long within 2 s is that
+    /// file's song under another title (see `streams::same`) and is left
+    /// out: the album lists each of its places once.
     pub fn tracks_of_release_all(&self, release: ReleaseId) -> Result<Vec<TrackRow>> {
-        self.tracks_of_release_where(release, "AND t.deleted_at IS NULL")
+        self.tracks_of_release_where(
+            release,
+            "AND t.deleted_at IS NULL
+             AND NOT (t.has_local = 0 AND t.in_library = 0 AND t.track_no > 0 AND EXISTS (
+                 SELECT 1 FROM track o WHERE o.release_id = t.release_id AND o.id != t.id
+                    AND o.deleted_at IS NULL AND o.has_local = 1
+                    AND o.disc_no = t.disc_no AND o.track_no = t.track_no
+                    AND abs(o.duration_ms - t.duration_ms) <= 2000))",
+        )
     }
 
     fn tracks_of_release_impl(&self, release: ReleaseId, deleted: bool) -> Result<Vec<TrackRow>> {

@@ -127,7 +127,7 @@ pub(crate) fn primary_credit(line: &str) -> &str {
     let line = line.trim();
     let first = parse_credit(line).first().map_or(line.len(), |(_, n)| n.len());
     let head = line.get(..first).unwrap_or(line);
-    let cut = [", ", " & ", " / "]
+    let cut = [", ", " & ", " / ", "、", "，", " × "]
         .iter()
         .filter_map(|s| head.find(s))
         .min()

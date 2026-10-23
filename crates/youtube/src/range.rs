@@ -14,7 +14,9 @@
 //! running request makes the task drop it and continue at the new position.
 //! Transient failures (network errors, 5xx, a response cut short) are
 //! retried with backoff; a 403/410 (the signed URL expired or was refused)
-//! resolves the stream again and continues at the same offset. A final
+//! resolves the stream again, telling the resolve which URL was refused (so
+//! the player is asked through another client), and continues at the same
+//! offset. A final
 //! failure reaches the reader as a [`StreamError`] inside the I/O error, so
 //! a refusal is not taken for a lost connection.
 
@@ -57,6 +59,8 @@ pub(crate) struct Resolved {
     pub itag: u32,
     /// Peak bitrate in bit/s, as the player says.
     pub bitrate: u32,
+    /// Which of `player::ROUTES` gave the URL (`None`: RustyPipe's player).
+    pub route: Option<usize>,
 }
 
 /// "Opus ~160 кбит/с", "AAC ~128 кбит/с": what an itag plays.
@@ -75,9 +79,10 @@ pub(crate) fn quality_of(itag: u32, opus: bool, bitrate: u32) -> String {
 /// Gets the whole resource once it is downloaded (for the disk cache).
 pub(crate) type CompleteFn = Box<dyn FnOnce(&Resolved, &[u8]) + Send>;
 
-/// Resolves (again) where the bytes are. Called on the download task.
+/// Resolves (again) where the bytes are; with the resolve whose URL was
+/// refused when there was one. Called on the download task.
 pub(crate) type ResolveFn =
-    Arc<dyn Fn() -> BoxFuture<'static, Result<Resolved, StreamError>> + Send + Sync>;
+    Arc<dyn Fn(Option<Resolved>) -> BoxFuture<'static, Result<Resolved, StreamError>> + Send + Sync>;
 
 /// Sorted, disjoint, non-adjacent byte ranges.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -344,7 +349,7 @@ async fn download(
     mut on_complete: Option<CompleteFn>,
 ) {
     let started = std::time::Instant::now();
-    let mut resolved = match resolve().await {
+    let mut resolved = match resolve(None).await {
         Ok(r) => r,
         Err(e) => return fail(&shared, "cannot resolve the stream", e),
     };
@@ -422,7 +427,7 @@ async fn download(
                     );
                 }
                 log::info!("youtube: stream URL refused, resolving again");
-                match resolve().await {
+                match resolve(Some(resolved.clone())).await {
                     Ok(r) if r.len == resolved.len => resolved = r,
                     Ok(_) => {
                         return fail(
@@ -653,11 +658,19 @@ mod tests {
         resolves: &Arc<AtomicU32>,
     ) -> HttpStream {
         let resolves = Arc::clone(resolves);
-        let resolve: ResolveFn = Arc::new(move || {
+        let own = Arc::new(AtomicU32::new(0));
+        let resolve: ResolveFn = Arc::new(move |refused: Option<Resolved>| {
             let n = resolves.fetch_add(1, Ordering::SeqCst) + 1;
+            let first = own.fetch_add(1, Ordering::SeqCst) == 0;
             Box::pin(async move {
                 if port == 0 {
                     return Err(StreamError::Unavailable);
+                }
+                // A resolve again says which URL was refused: the previous
+                // one.
+                let previous = format!("http://127.0.0.1:{port}/v{}", n - 1);
+                if refused.map(|r| r.url) != (!first).then_some(previous) {
+                    return Err(StreamError::Parse("not told the refused URL".into()));
                 }
                 Ok(Resolved {
                     url: format!("http://127.0.0.1:{port}/v{n}"),
@@ -667,6 +680,7 @@ mod tests {
                     gain_db: Some(-1.5),
                     itag: 140,
                     bitrate: 128_000,
+                    route: None,
                 })
             })
         });

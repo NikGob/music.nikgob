@@ -6,8 +6,9 @@
 //! and this one (empty for the first).
 //!
 //! * `feat.`, `ft.`, `featuring` and `; ` always separate artists;
-//! * `, ` and ` / ` separate artists, except where the right side is clearly
-//!   part of one name (`Tyler, The Creator`, `Sammy Davis, Jr.`);
+//! * `, `, ` / `, `、` (the Japanese list comma: `Kevin Penkin、immi`) and
+//!   ` × ` separate artists, except where the right side is clearly part of
+//!   one name (`Tyler, The Creator`, `Sammy Davis, Jr.`);
 //! * ` & ` separates artists only inside a list (`A, B & C`, `A feat. B &
 //!   C`): a lone `Simon & Garfunkel` is one name, unless the caller knows
 //!   both sides as artists ([`split_pair`]);
@@ -17,7 +18,7 @@
 const FEAT_MARKERS: &[&str] = &[" feat. ", " feat ", " ft. ", " featuring ", "; "];
 
 /// List separators: always split (with the exceptions of [`keeps_comma`]).
-const LIST_SEPARATORS: &[&str] = &[", ", " / "];
+const LIST_SEPARATORS: &[&str] = &[", ", " / ", "、", "，", " × "];
 
 /// Names that hold a list separator or an ampersand but are one act.
 const KNOWN_NAMES: &[&str] = &[
@@ -244,6 +245,9 @@ mod tests {
         ]);
         assert_eq!(names("A, B & C"), ["A", "B", "C"]);
         assert_eq!(names("A Ft. B"), ["A", "B"]);
+        assert_eq!(names("Kevin Penkin、immi"), ["Kevin Penkin", "immi"]);
+        assert_eq!(names("A、B & C"), ["A", "B", "C"]);
+        assert_eq!(names("LiSA × Uru"), ["LiSA", "Uru"]);
     }
 
     #[test]
@@ -255,6 +259,8 @@ mod tests {
             "Кино feat. Земфира; Bi-2",
             "A, B & C",
             "Tyler, The Creator, A$AP Rocky",
+            "Kevin Penkin、immi",
+            "LiSA × Uru",
         ] {
             assert_eq!(glue(&split_credit(line)), line, "{line}");
         }

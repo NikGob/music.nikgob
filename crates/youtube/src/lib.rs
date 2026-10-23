@@ -140,6 +140,8 @@ struct Inner {
     refused: Mutex<std::collections::HashMap<String, (std::time::Instant, StreamError)>>,
     /// Turns and the service-wide pause (see `limit`).
     gate: limit::Gate,
+    /// Which player routes answered and failed lately (see `player`).
+    chain: player::Chain,
     /// Stream URLs resolved lately, by video id, with when they expire.
     urls: Mutex<std::collections::HashMap<String, (std::time::SystemTime, range::Resolved)>>,
     /// What discovery read off artist pages, by artist id.
@@ -408,6 +410,7 @@ impl Youtube {
                 cache: cache::AudioCache::new(),
                 refused: Mutex::new(std::collections::HashMap::new()),
                 gate: limit::Gate::new(),
+                chain: player::Chain::default(),
                 urls: Mutex::new(std::collections::HashMap::new()),
                 pages: memo::Memo::new(DISCOVERY_TTL, 300),
                 lists: memo::Memo::new(DISCOVERY_TTL, 300),
@@ -552,20 +555,23 @@ pub(crate) fn map_err(e: RpError) -> StreamError {
 /// `keep`.
 fn stream(inner: &Arc<Inner>, runtime: tokio::runtime::Handle, id: &str, keep: bool) -> HttpStream {
     let (inner2, id2) = (Arc::clone(inner), id.to_owned());
-    // The first resolve may reuse a URL resolved lately; a second one (the
-    // URL was refused) asks the player again.
-    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let resolve: ResolveFn = Arc::new(move || {
+    // The first resolve may reuse a URL resolved lately; one after a
+    // refusal forgets that URL, benches the client that gave it and asks
+    // the player again.
+    let resolve: ResolveFn = Arc::new(move |refused: Option<range::Resolved>| {
         let (inner, id) = (Arc::clone(&inner2), id2.clone());
-        let first = first.swap(false, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
-            if first {
-                if let Some(r) = inner.known_url(&id) {
-                    log::debug!("youtube: {id}: stream URL reused");
-                    return Ok(r);
+            match &refused {
+                None => {
+                    if let Some(r) = inner.known_url(&id) {
+                        log::debug!("youtube: {id}: stream URL reused");
+                        return Ok(r);
+                    }
                 }
-            } else {
-                inner.drop_url(&id);
+                Some(r) => {
+                    inner.drop_url(&id);
+                    inner.chain.refused(r);
+                }
             }
             let known = inner
                 .refused
@@ -579,7 +585,8 @@ fn stream(inner: &Arc<Inner>, runtime: tokio::runtime::Handle, id: &str, keep: b
                 return Err(e);
             }
             inner.gate.check()?;
-            let r = player::resolve(&inner.rp, &inner.http, &id, &inner.hl, &inner.gl).await;
+            let signed_in = inner.account().is_logged_in();
+            let r = player::resolve(&inner.rp, &inner.http, &inner.chain, &id, &inner.gl, signed_in).await;
             inner.gate.note(&r);
             if let Ok(resolved) = &r {
                 inner.keep_url(&id, resolved);
@@ -670,6 +677,8 @@ impl StreamService for Youtube {
                 premium: None,
                 audio: true,
             };
+            // The age gate may open now.
+            inner.refused.lock().unwrap_or_else(PoisonError::into_inner).clear();
             Ok(())
         })
     }
@@ -1406,6 +1415,7 @@ mod tests {
             gain_db: None,
             itag: 251,
             bitrate: 160_000,
+            route: None,
         };
         yt.inner.cache.store("abc", &r, &[1, 2, 3]);
         assert!(yt.cached_audio("abc").is_none(), "a partial download is not served");
