@@ -444,9 +444,24 @@ impl Render for Renderer {
         self.update_control();
 
         let mut w = 0usize;
+        // An item that has not sounded yet waits for a whole block.
+        let mut starting = false;
         while w < frames {
             self.drain_flush_marks();
             if self.awaiting_sync || self.holding {
+                break;
+            }
+            // A new item (a start, a seek) sounds once a whole block is
+            // ready, or its end is: a first chunk followed by silence
+            // stutters, and the decoder was only just told to begin.
+            if w == 0
+                && self.cur.is_some()
+                && self.cur_frames == 0
+                && self.pending.is_none()
+                && self.marks.slots() == 0
+                && self.ring.slots() < frames * ch
+            {
+                starting = true;
                 break;
             }
 
@@ -511,7 +526,11 @@ impl Render for Renderer {
         if w < frames {
             out[w * ch..].fill(0.0);
             self.sh.tap.write_interleaved(&out[w * ch..frames * ch], ch);
-            if self.cur.is_some() && !self.awaiting_sync && !self.holding && self.pending.is_none()
+            if self.cur.is_some()
+                && !self.awaiting_sync
+                && !self.holding
+                && self.pending.is_none()
+                && !starting
             {
                 self.sh.underruns.fetch_add(1, Ordering::Relaxed);
             }
@@ -571,6 +590,22 @@ mod tests {
             ring_tx.push(0.25).unwrap();
         }
         (r, ring_tx, sh)
+    }
+
+    #[test]
+    fn a_new_item_waits_for_a_whole_block_without_an_underrun() {
+        let (mut r, mut ring_tx, sh) = playing();
+        // Half a block of the new item: nothing yet, and no dropout.
+        let mut out = vec![1.0f32; 1024];
+        r.render(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0));
+        assert_eq!(sh.underruns.load(Ordering::Relaxed), 0);
+        for _ in 0..512 {
+            ring_tx.push(0.25).unwrap();
+        }
+        r.render(&mut out);
+        assert!(out[1000..].iter().any(|&s| s != 0.0), "it sounds once a block is there");
+        assert_eq!(sh.underruns.load(Ordering::Relaxed), 0);
     }
 
     #[test]
