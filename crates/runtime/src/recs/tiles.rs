@@ -11,6 +11,7 @@ use nikgob_library::{Library, LyricsLevel, RecTrack};
 use nikgob_recs::tiles::civil;
 use nikgob_recs::{
     Item, LyricsKind, Pick, PlaylistFacts, TILES_PER_DAY, TileHistory, TileKind, TileMix, TilesInput, TrackFacts,
+    like_title,
 };
 use nikgob_view as v;
 use serde::{Deserialize, Serialize};
@@ -184,6 +185,23 @@ fn home_of(snap: &Snapshot, today: i64, t: TileMix) -> Option<TileHome> {
 /// («Kevin Penkin», «Лето 2025»), `param` its parameter, `n` the songs,
 /// `albums` how many albums they come from.
 fn lines(kind: TileKind, param: &str, title: String, n: usize, today: i64, albums: impl Fn() -> usize) -> (String, String) {
+    // A board kept from before the titles changed reads as today's.
+    let title = match kind {
+        TileKind::OnRepeat => "На повторе".to_owned(),
+        TileKind::Rediscover => "Забытое любимое".to_owned(),
+        TileKind::FirstLikes => "Первые лайки".to_owned(),
+        TileKind::FreshLikes => "Свежие лайки".to_owned(),
+        TileKind::Unplayed => "Ждут своего часа".to_owned(),
+        TileKind::DeepCuts => "Глубже у любимых".to_owned(),
+        TileKind::Long => "Длинные треки".to_owned(),
+        TileKind::Short => "Короткие треки".to_owned(),
+        TileKind::SingAlong => "Со словами".to_owned(),
+        TileKind::Unfinished => "Недослушанные альбомы".to_owned(),
+        TileKind::NotDownloaded => "Ещё не скачано".to_owned(),
+        TileKind::Lottery => "Лотерея".to_owned(),
+        TileKind::BecauseYouLiked if !title.starts_with("Похоже на ") => like_title(&title),
+        _ => title,
+    };
     let n = tracks_count(n);
     let subtitle = match kind {
         TileKind::OnRepeat => format!("{n} · что крутил весь месяц"),
@@ -331,5 +349,11 @@ mod tests {
         assert_eq!(line(TileKind::Unfinished, "").1, "13 треков · что осталось в 3 альбомах");
         assert_eq!(line(TileKind::BecauseYouLiked, "").1, "13 треков · по звуку и вкусу");
         assert_eq!(line(TileKind::Lottery, "").1, LOTTERY_SUBTITLE);
+        // A board kept from before the titles changed.
+        let kept = |k, t: &str| lines(k, "", t.into(), 13, 20_748, || 3).0;
+        assert_eq!(kept(TileKind::BecauseYouLiked, "Underground River (opening version)"), "Похоже на Underground River");
+        assert_eq!(kept(TileKind::BecauseYouLiked, "Похоже на Разгром"), "Похоже на Разгром");
+        assert_eq!(kept(TileKind::NotDownloaded, "Лайкнутое без файла"), "Ещё не скачано");
+        assert_eq!(kept(TileKind::ArtistOfDay, "Eve"), "Eve");
     }
 }

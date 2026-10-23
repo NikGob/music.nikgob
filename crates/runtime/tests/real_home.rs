@@ -8,7 +8,8 @@ use nikgob_library::Library;
 use nikgob_view::{ContinueCard, MixCard};
 
 fn card(c: &MixCard) -> String {
-    format!("«{}» · {} · {} covers", c.title, c.subtitle, c.covers.len())
+    let kicker = if c.kicker.is_empty() { String::new() } else { format!("{} / ", c.kicker) };
+    format!("{kicker}«{}» · {} · {} covers", c.title, c.subtitle, c.covers.len())
 }
 
 #[test]
@@ -48,7 +49,7 @@ fn the_home_of_a_real_library() {
     println!("tiles: {}", h.tiles.len());
     for (t, (id, n)) in h.tiles.iter().zip(&p.tile_tracks) {
         assert_eq!(t.id, *id);
-        println!("  {}: {} ({n} tracks)", t.kicker, card(t));
+        println!("  {} ({n} tracks)", card(t));
     }
     let ready = nikgob_runtime::preview_ready_tiles(&lib).unwrap();
     println!("kinds that qualify today: {}", ready.len());
@@ -90,5 +91,31 @@ fn the_home_of_a_real_library() {
     println!("recently added: {}", h.recently_added.len());
     for r in &h.recently_added {
         println!("  {}", r.title);
+    }
+
+    // «Миксы только из скачанного»: the same library, files only.
+    let prefs = nikgob_view::Prefs {
+        mixes_downloaded_only: true,
+        ..nikgob_view::Prefs::default()
+    };
+    let p = nikgob_runtime::preview_home_with(&lib, dir.path(), &prefs).unwrap();
+    let h = &p.home;
+    println!("downloaded only, built in {:?}:", p.took);
+    match &h.hero {
+        Some(c) => {
+            let streams = h.mix.iter().filter(|t| !t.has_local).count();
+            println!("  hero: {} ({} library tracks, {streams} without a file)", card(c), h.mix.len());
+        }
+        None => println!("  hero: none"),
+    }
+    match &h.daylist {
+        Some(c) => println!("  daylist: {} ({} tracks)", card(c), p.daylist_tracks),
+        None => println!("  daylist: none"),
+    }
+    for (t, (_, n)) in h.tiles.iter().zip(&p.tile_tracks) {
+        println!("  tile {} ({n} tracks)", card(t));
+    }
+    for m in &h.style_mixes {
+        println!("  style {}", card(m));
     }
 }
