@@ -259,6 +259,7 @@ mod tests {
             gain_db: Some(-2.0),
             itag: 251,
             bitrate: 160_000,
+            route: None,
         }
     }
 
