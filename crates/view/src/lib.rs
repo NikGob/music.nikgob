@@ -923,6 +923,9 @@ pub struct Prefs {
     /// «Новое в радио»: how much music new to the user radios and mixes mix
     /// in.
     pub radio_new_share: RadioNewShare,
+    /// «Миксы только из скачанного»: mixes, moods, tiles, the daylist and
+    /// radios pick only tracks with a file (no streams, no discoveries).
+    pub mixes_downloaded_only: bool,
     /// «Анализ звука стримов»: liked and playlist tracks without a file are
     /// analysed from YouTube Music in the background.
     pub stream_analysis: bool,
@@ -1604,6 +1607,7 @@ impl Default for Prefs {
             youtube_cookies_set: false,
             replace_in_youtube: false,
             radio_new_share: RadioNewShare::Some,
+            mixes_downloaded_only: false,
             stream_analysis: true,
         }
     }
