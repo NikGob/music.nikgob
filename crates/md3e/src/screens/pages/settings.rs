@@ -631,8 +631,17 @@ fn general(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
     });
 
     group(ui, "Рекомендации");
-    row(ui, Id::RadioNewShare, "Новое в радио и миксах", Some("Сколько незнакомой музыки подмешивать"), |ui| {
-        choice(ui, Id::RadioNewShare, p);
+    // Only the downloaded: no new music to mix in, the choice waits.
+    let new_share_hint = if p.mixes_downloaded_only {
+        "Не действует: миксы только из скачанного"
+    } else {
+        "Сколько незнакомой музыки подмешивать"
+    };
+    row(ui, Id::RadioNewShare, "Новое в радио и миксах", Some(new_share_hint), |ui| {
+        ui.add_enabled_ui(!p.mixes_downloaded_only, |ui| choice(ui, Id::RadioNewShare, p));
+    });
+    row(ui, Id::MixesDownloadedOnly, "Миксы только из скачанного", Some("Только треки с файлом, без стримов"), |ui| {
+        ui.add(Switch::new(&mut p.mixes_downloaded_only).id_salt("set-mixes-downloaded"));
     });
     row(ui, Id::SoundAnalysis, "Анализ звука", Some(&analysis_status(&state.analysis)), |ui| {
         // Stream-only tracks are analysed (or not) on «Источники».
