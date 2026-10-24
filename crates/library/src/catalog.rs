@@ -653,13 +653,40 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
     tx.execute("UPDATE remote_like SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     tx.execute("UPDATE wishlist SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     dedupe_wishlist_of_track(tx, &t)?;
+    // What it leaves behind: its artists and its album, when nothing else
+    // has them (the album's ids go to the album `into` is on, when it is
+    // the same one).
+    let artists: Vec<String> = {
+        let mut stmt = tx.prepare_cached("SELECT artist_id FROM track_artist WHERE track_id = ?1")?;
+        let rows = stmt.query_map([&f], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let (release, into_release): (Option<String>, Option<String>) = (
+        first_string(tx, "SELECT release_id FROM track WHERE id = ?1 AND release_id IS NOT NULL", [&f])?,
+        first_string(tx, "SELECT release_id FROM track WHERE id = ?1 AND release_id IS NOT NULL", [&t])?,
+    );
     for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "analysis_failed", "master"] {
         tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&f])?;
     }
     tx.execute("DELETE FROM track WHERE id = ?1", [&f])?;
     refresh_active(tx, into)?;
     refresh_in_library(tx, &t)?;
+    if let Some(r) = release.filter(|r| into_release.as_ref() != Some(r)) {
+        crate::repairs::drop_empty_release_in(tx, &r, into_release.as_deref(), device, now)?;
+    }
+    for a in artists {
+        crate::repairs::drop_orphan_artist_in(tx, &a)?;
+    }
     Ok(true)
+}
+
+/// What points at the release `from` that goes into `to`: its ids in the
+/// services and its «Хочу скачать» items follow, its tracklist mark goes.
+fn carry_release_links(tx: &Connection, from: &str, to: &str) -> Result<()> {
+    tx.execute("UPDATE external_id SET local_id = ?2 WHERE kind = 'release' AND local_id = ?1", params![from, to])?;
+    tx.execute("UPDATE wishlist SET release_id = ?2 WHERE release_id = ?1", params![from, to])?;
+    tx.execute("DELETE FROM meta WHERE key = ?1", [format!("cache.tracklist.{from}")])?;
+    Ok(())
 }
 
 /// Keeps one track-scope wishlist item of a track: the one furthest along
@@ -761,6 +788,7 @@ impl Library {
                                      WHERE target_kind = 'release' AND target_id = ?2)",
                 params![f, t, now_ms()],
             )?;
+            carry_release_links(tx, &f, &t)?;
             tx.execute("DELETE FROM release_artist WHERE release_id = ?1", [&f])?;
             tx.execute("DELETE FROM palette WHERE release_id = ?1", [&f])?;
             tx.execute("DELETE FROM release WHERE id = ?1", [&f])?;
@@ -790,13 +818,17 @@ impl Library {
     /// Moves the tracks of `from`, another edition of the same album, onto
     /// `to` and removes `from`; `to` keeps its title and MBIDs (unlike
     /// [`Self::merge_releases`], two editions are allowed). Returns how many
-    /// tracks moved.
+    /// tracks moved (none when `from` is gone: merging its last track
+    /// removed it).
     pub fn absorb_edition(&self, from: ReleaseId, to: ReleaseId) -> Result<u32> {
         if from == to {
             return Ok(0);
         }
         self.write(|tx| {
             let (f, t) = (from.to_string(), to.to_string());
+            if first_string(tx, "SELECT id FROM release WHERE id = ?1", [&f])?.is_none() {
+                return Ok(0);
+            }
             for (id, rid) in [(&f, from), (&t, to)] {
                 first_string(tx, "SELECT id FROM release WHERE id = ?1", [id])?
                     .ok_or_else(|| LibraryError::not_found("release", rid))?;
@@ -821,9 +853,18 @@ impl Library {
                                      WHERE target_kind = 'release' AND target_id = ?2)",
                 params![f, t, now_ms()],
             )?;
+            carry_release_links(tx, &f, &t)?;
+            let artists: Vec<String> = {
+                let mut stmt = tx.prepare("SELECT artist_id FROM release_artist WHERE release_id = ?1")?;
+                let rows = stmt.query_map([&f], |r| r.get(0))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
             tx.execute("DELETE FROM release_artist WHERE release_id = ?1", [&f])?;
             tx.execute("DELETE FROM palette WHERE release_id = ?1", [&f])?;
             tx.execute("DELETE FROM release WHERE id = ?1", [&f])?;
+            for a in artists {
+                crate::repairs::drop_orphan_artist_in(tx, &a)?;
+            }
             Ok(moved as u32)
         })
     }

@@ -339,37 +339,17 @@ impl Library {
                   WHERE track_id = ?1 AND deleted = 0",
                 params![tid, now, device.as_str()],
             )?;
+            // Nothing points at it any more: its ids in the services go,
+            // its «Хочу скачать» items forget it.
+            tx.execute("DELETE FROM external_id WHERE kind = 'track' AND local_id = ?1", [&tid])?;
+            tx.execute("UPDATE wishlist SET track_id = NULL WHERE track_id = ?1", [&tid])?;
             tx.execute("DELETE FROM track WHERE id = ?1", [&tid])?;
 
             if let Some(rid) = &release {
-                let empty: bool = tx.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM track WHERE release_id = ?1)",
-                    [rid],
-                    |r| r.get(0),
-                )?;
-                if empty {
-                    tx.execute("DELETE FROM release_artist WHERE release_id = ?1", [rid])?;
-                    tx.execute("DELETE FROM palette WHERE release_id = ?1", [rid])?;
-                    tx.execute(
-                        "UPDATE likes SET deleted = 1, updated_at = ?2, updated_by = ?3
-                          WHERE target_kind = 'release' AND target_id = ?1 AND deleted = 0",
-                        params![rid, now, device.as_str()],
-                    )?;
-                    tx.execute("DELETE FROM release WHERE id = ?1", [rid])?;
-                    out.release_removed = true;
-                }
+                out.release_removed = crate::repairs::drop_empty_release_in(tx, rid, None, device.as_str(), now)?;
             }
             for a in artists {
-                let orphan: bool = tx.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM track_artist WHERE artist_id = ?1)
-                        AND NOT EXISTS(SELECT 1 FROM release_artist WHERE artist_id = ?1)",
-                    [&a],
-                    |r| r.get(0),
-                )?;
-                if orphan {
-                    tx.execute("DELETE FROM artist_photo WHERE artist_id = ?1", [&a])?;
-                    tx.execute("DELETE FROM artist WHERE id = ?1", [&a])?;
-                }
+                crate::repairs::drop_orphan_artist_in(tx, &a)?;
             }
             Ok(out)
         })

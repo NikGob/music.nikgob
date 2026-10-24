@@ -1,11 +1,12 @@
 //! One-time repair of credits imported before "A, B" was split into its
 //! artists: such a track (or album) was linked to one artist called "A, B",
 //! so neither A's nor B's page had it and the track could only lead to the
-//! combined name.
+//! combined name. A voice credit «リコ(CV:富田美憂)» is the character and
+//! the actor (`v3`), and one split before keeps its closing bracket.
 
 use std::collections::HashMap;
 
-use nikgob_core::credit::{split_credit, split_pair};
+use nikgob_core::credit::{closing_tail, split_credit, split_pair};
 use nikgob_core::model::{Artist, ArtistCredit, ArtistCreditPart, ArtistId};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -15,8 +16,8 @@ use crate::error::Result;
 use crate::util::{credit_columns, fold, meta_get, meta_set};
 
 /// `meta` key: the repair of [`Library::split_combined_credits`] ran (`v1`
-/// did not split at `、` and ` × `).
-const SPLIT_KEY: &str = "combined_credits_split.v2";
+/// did not split at `、` and ` × `, `v2` voice credits).
+const SPLIT_KEY: &str = "combined_credits_split.v3";
 
 /// Artists by folded name, and which of them stand for themselves (have a
 /// MusicBrainz id: "Simon & Garfunkel" from MusicBrainz is one act).
@@ -64,8 +65,13 @@ fn pieces(names: &Names, part: &ArtistCreditPart) -> Option<Vec<(String, String)
     if part.artist_id.is_some_and(|id| names.with_mbid.contains(&id)) {
         return None;
     }
-    let split = split_credit(&part.name);
+    let mut split = split_credit(&part.name);
     if split.len() > 1 {
+        // The bracket closing a voice credit goes after the last name.
+        let tail = closing_tail(&part.name, &split[split.len() - 1].1);
+        if !tail.is_empty() {
+            split.push((tail, String::new()));
+        }
         return Some(split);
     }
     // A lone "A & B": two artists when both are known and the pair is
@@ -82,25 +88,44 @@ fn split(names: &mut Names, tx: &Connection, credit: &ArtistCredit) -> Result<Op
         match pieces(names, part) {
             Some(list) => {
                 changed = true;
-                let n = list.len();
                 for (i, (join, name)) in list.into_iter().enumerate() {
-                    let id = names.ensure(tx, &name)?;
                     if i > 0
                         && let Some(last) = out.0.last_mut()
                     {
                         last.join_phrase = join;
                     }
-                    out.0.push(ArtistCreditPart {
-                        artist_id: Some(id),
-                        name,
-                        join_phrase: if i + 1 == n { part.join_phrase.clone() } else { String::new() },
-                    });
+                    // A voice credit's closing bracket: a tail, no name.
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let id = names.ensure(tx, &name)?;
+                    out.0.push(ArtistCreditPart { artist_id: Some(id), name, join_phrase: String::new() });
+                }
+                if let Some(last) = out.0.last_mut() {
+                    last.join_phrase.push_str(&part.join_phrase);
                 }
             }
             None => out.0.push(part.clone()),
         }
     }
+    changed |= close_voice(&mut out);
     Ok(changed.then_some(out))
+}
+
+/// A voice credit split before its closing bracket was kept («リコ(CV:富田美憂»):
+/// the bracket goes back as the credit's tail. Returns whether it did.
+fn close_voice(credit: &mut ArtistCredit) -> bool {
+    let line = credit.display();
+    let open = |c: char| line.chars().filter(|x| *x == c).count();
+    let (half, full) = (open('(') > open(')'), open('（') > open('）'));
+    let voiced = credit.0.iter().any(|p| p.join_phrase.contains("(CV") || p.join_phrase.contains("（CV"));
+    match credit.0.last_mut() {
+        Some(last) if voiced && (half || full) && last.join_phrase.is_empty() => {
+            last.join_phrase = if full && !half { "）" } else { ")" }.to_owned();
+            true
+        }
+        _ => false,
+    }
 }
 
 fn rows(tx: &Connection, table: &str) -> Result<Vec<(String, String)>> {

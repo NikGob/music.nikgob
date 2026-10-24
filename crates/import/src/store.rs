@@ -50,6 +50,14 @@ pub(crate) fn lead_key(title: &str, artist_line: &str) -> (String, String) {
     (album_key(title), name_key(primary_credit(artist_line)))
 }
 
+/// The bracket closing the last voice credit of `line` (`リコ(CV:富田美憂)`)
+/// as the credit's tail.
+fn close_credit(credit: &mut ArtistCredit, line: &str) {
+    if let Some(last) = credit.0.last_mut() {
+        last.join_phrase = nikgob_core::credit::closing_tail(line, &last.name);
+    }
+}
+
 /// The release has a real album artist (not just the track artist standing in).
 fn has_album_artist(id: &Identity) -> bool {
     id.compilation
@@ -207,7 +215,9 @@ impl Store {
     pub fn track_credit(&mut self, id: &Identity) -> Result<ArtistCredit> {
         let parts = credit_parts(&id.artist_line, &id.artists);
         let parts = self.split_known_pairs(parts)?;
-        self.ensure_credit(&parts, id.artist_mbid.as_deref())
+        let mut credit = self.ensure_credit(&parts, id.artist_mbid.as_deref())?;
+        close_credit(&mut credit, &id.artist_line);
+        Ok(credit)
     }
 
     /// A lone `A & B` is one name for the line splitter (`Simon &
@@ -253,10 +263,12 @@ impl Store {
                 // The album artist's MBID is unknown here; the track artist's MBID
                 // only fits when both are the same person.
                 let same_artist = id.album_artist.is_none() || id.album_artist.as_deref() == Some(&id.artist_line);
-                self.ensure_credit(
+                let mut credit = self.ensure_credit(
                     &parts,
                     if same_artist { id.artist_mbid.as_deref() } else { None },
-                )?
+                )?;
+                close_credit(&mut credit, &line);
+                credit
             }
         };
         let mut release = Release::new(Self::release_title(id), credit);
@@ -348,5 +360,24 @@ mod tests {
         assert_eq!(pair.0.len(), 2);
         let band = store.track_credit(&identity("Simon & Garfunkel", None, "X")).unwrap();
         assert_eq!(band.0.len(), 1);
+    }
+
+    #[test]
+    fn credit_parts_keep_the_closing_bracket() {
+        let mut store = Store::new(Library::open_in_memory().unwrap());
+        // The names one by one (the ARTISTS tag) and as one line.
+        let mut tagged = identity("リコ(CV:富田美憂)", None, "Deep in Abyss");
+        tagged.artists = vec!["リコ".into(), "富田美憂".into()];
+        let line = identity("リコ(CV:富田美憂)", None, "Deep in Abyss");
+        let full = identity("リコ（CV：富田美憂）", None, "Deep in Abyss");
+        for id in [&tagged, &line, &full] {
+            let credit = store.track_credit(id).unwrap();
+            let names: Vec<_> = credit.0.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, ["リコ", "富田美憂"], "{}", id.artist_line);
+            assert_eq!(credit.display(), id.artist_line, "the line reads as tagged");
+        }
+        let a = store.track_credit(&tagged).unwrap();
+        let b = store.track_credit(&full).unwrap();
+        assert_eq!(a.artist_ids().collect::<Vec<_>>(), b.artist_ids().collect::<Vec<_>>(), "one character, one actor");
     }
 }

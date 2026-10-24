@@ -213,6 +213,12 @@ impl Library {
         }
     }
 
+    /// Runs `f` on the writer connection outside any transaction (`VACUUM`).
+    pub(crate) fn with_writer<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let conn = lock(&self.inner.writer);
+        f(&conn)
+    }
+
     /// Runs `f` inside one write transaction (committed if `f` succeeds).
     pub(crate) fn write<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let mut conn = lock(&self.inner.writer);

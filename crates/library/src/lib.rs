@@ -14,6 +14,7 @@
 #[macro_use]
 mod macros;
 
+mod aliases;
 mod catalog;
 mod confirm;
 mod credits;

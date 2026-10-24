@@ -12,7 +12,11 @@
 //! * ` & ` separates artists only inside a list (`A, B & C`, `A feat. B &
 //!   C`): a lone `Simon & Garfunkel` is one name, unless the caller knows
 //!   both sides as artists ([`split_pair`]);
-//! * a few well-known names with commas or ampersands are never split.
+//! * a few well-known names with commas or ampersands are never split;
+//! * a voice credit `リコ(CV:富田美憂)` (also `（CV：…）`, `(CV: …)`, several
+//!   glued with `&` or `、`) is the character and the actor; the bracket
+//!   closing the last one is the line's tail ([`closing_tail`]), kept as the
+//!   last part's join phrase so the line reads the same.
 
 /// Markers that always start a guest credit (lowercase, matched without case).
 const FEAT_MARKERS: &[&str] = &[" feat. ", " feat ", " ft. ", " featuring ", "; "];
@@ -187,7 +191,7 @@ pub fn split_credit(line: &str) -> Vec<(String, String)> {
     }
     let parts = tidy(parts);
     // An ampersand splits only inside a list.
-    if parts.len() > 1 {
+    let parts = if parts.len() > 1 {
         let mut out = Vec::new();
         for (join, name) in parts {
             out.extend(split_name(&join, &name, &[" & "], keeps_ampersand));
@@ -195,6 +199,105 @@ pub fn split_credit(line: &str) -> Vec<(String, String)> {
         tidy(out)
     } else {
         parts
+    };
+    split_voices(parts)
+}
+
+/// Every voice credit of `parts` as its character and actor; the bracket
+/// closing one goes before the next part (the last one's is the line's
+/// [`closing_tail`]).
+fn split_voices(parts: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::with_capacity(parts.len());
+    let mut carry = String::new();
+    for (join, name) in parts {
+        let join = if out.is_empty() { String::new() } else { std::mem::take(&mut carry) + &join };
+        match voices(&name) {
+            Some((pieces, tail)) => {
+                for (k, (j, n)) in pieces.into_iter().enumerate() {
+                    out.push((if k == 0 { join.clone() } else { j }, n));
+                }
+                carry = tail;
+            }
+            None => {
+                carry.clear();
+                out.push((join, name));
+            }
+        }
+    }
+    out
+}
+
+/// Where `(CV:` (or `（CV：`, `( CV : `) starts in `s`, and where the
+/// actor's name after it starts.
+fn voice_opener(s: &str) -> Option<(usize, usize)> {
+    for (at, c) in s.char_indices() {
+        if c != '(' && c != '（' {
+            continue;
+        }
+        let after_space = s[at + c.len_utf8()..].trim_start();
+        let Some(cv) = after_space.get(..2).filter(|p| p.eq_ignore_ascii_case("cv")) else { continue };
+        let tail = after_space[cv.len()..].trim_start();
+        let Some(colon) = tail.chars().next().filter(|c| matches!(c, ':' | '：')) else { continue };
+        let inner = tail[colon.len_utf8()..].trim_start();
+        return Some((at, s.len() - inner.len()));
+    }
+    None
+}
+
+/// What glues voice credits together (`白(CV:A)&ジブリール(CV:B)`).
+const VOICE_SEPARATORS: &[&str] = &["&", "＆", "、", ",", "，", "/", "／"];
+
+/// A name made of voice credits: `(join_before, name)` of each character
+/// and actor, and the bracket closing the last actor.
+fn voices(name: &str) -> Option<(Vec<(String, String)>, String)> {
+    let mut out = Vec::new();
+    let mut join = String::new();
+    let mut rest = name;
+    loop {
+        let (open, inner) = voice_opener(rest)?;
+        let who = rest[..open].trim();
+        let after = &rest[inner..];
+        let close = after.find([')', '）'])?;
+        let actor = after[..close].trim();
+        if who.is_empty() || actor.is_empty() || who.contains(['(', '（', ')', '）']) {
+            return None;
+        }
+        let who_end = rest[..open].trim_end().len();
+        out.push((std::mem::take(&mut join), who.to_owned()));
+        out.push((rest[who_end..inner].to_owned(), actor.to_owned()));
+        let close_len = after[close..].chars().next().map_or(1, char::len_utf8);
+        let actor_end = after[..close].trim_end().len();
+        let closer = &after[actor_end..close + close_len];
+        let next = &after[close + close_len..];
+        if next.trim().is_empty() {
+            return Some((out, closer.to_owned()));
+        }
+        let trimmed = next.trim_start();
+        let sep = VOICE_SEPARATORS.iter().find(|s| trimmed.starts_with(**s))?;
+        let after_sep = trimmed[sep.len()..].trim_start();
+        join = format!("{closer}{}", &next[..next.len() - after_sep.len()]);
+        rest = after_sep;
+    }
+}
+
+/// What the credit `line` has after its last name `last`: the bracket that
+/// closes a voice credit (`リコ(CV:富田美憂)` → `)`), else nothing. It is the
+/// last part's join phrase ([`crate::model::ArtistCredit::display`]).
+pub fn closing_tail(line: &str, last: &str) -> String {
+    let line = line.trim_end();
+    if last.is_empty() {
+        return String::new();
+    }
+    match line.rfind(last) {
+        Some(at) => {
+            let tail = &line[at + last.len()..];
+            if !tail.trim().is_empty() && tail.chars().all(|c| matches!(c, ')' | '）' | ' ')) {
+                tail.to_owned()
+            } else {
+                String::new()
+            }
+        }
+        None => String::new(),
     }
 }
 
@@ -280,6 +383,26 @@ mod tests {
         assert_eq!(names("AC/DC"), ["AC/DC"]);
         assert_eq!(names("Sammy Davis, Jr."), ["Sammy Davis, Jr."]);
         assert!(names("  ").is_empty());
+    }
+
+    #[test]
+    fn voice_credits_are_the_character_and_the_actor() {
+        assert_eq!(names("リコ(CV:富田美憂)"), ["リコ", "富田美憂"]);
+        assert_eq!(names("リコ（CV：富田美憂）"), ["リコ", "富田美憂"]);
+        assert_eq!(names("ステファニー・ドーラ（CV : 日笠陽子）"), ["ステファニー・ドーラ", "日笠陽子"]);
+        assert_eq!(names("リコ(CV:富田美憂)、レグ(CV:伊瀬茉莉也)"), ["リコ", "富田美憂", "レグ", "伊瀬茉莉也"]);
+        let glued = "白(CV: 茅野愛衣)&ステファニー・ドーラ(CV: 日笠陽子)&ジブリール(CV: 田村ゆかり)";
+        assert_eq!(names(glued), ["白", "茅野愛衣", "ステファニー・ドーラ", "日笠陽子", "ジブリール", "田村ゆかり"]);
+        for line in ["リコ(CV:富田美憂)", "リコ（CV：富田美憂）", "リコ(CV:富田美憂)、レグ(CV:伊瀬茉莉也)", glued] {
+            let parts = split_credit(line);
+            let tail = closing_tail(line, &parts.last().unwrap().1);
+            assert_eq!(format!("{}{tail}", glue(&parts)), line, "{line}");
+        }
+        assert_eq!(split_credit("リコ(CV:富田美憂)、レグ(CV:伊瀬茉莉也)")[2].0, ")、");
+        // Brackets that are no voice credit stay in the name.
+        assert_eq!(names("Kevin Penkin (composer)"), ["Kevin Penkin (composer)"]);
+        assert_eq!(names("Cover (CVS)"), ["Cover (CVS)"]);
+        assert_eq!(closing_tail("Kevin Penkin、immi", "immi"), "");
     }
 
     #[test]

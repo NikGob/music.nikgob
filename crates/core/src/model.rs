@@ -599,7 +599,8 @@ impl ArtistCredit {
     }
 
     /// `"A feat. B"`: names glued with their join phrases. A missing phrase
-    /// between two parts becomes `", "`; the last part's phrase is ignored.
+    /// between two parts becomes `", "`; the last part's phrase is the
+    /// line's tail (the bracket closing `リコ(CV:富田美憂)`).
     pub fn display(&self) -> String {
         let mut out = String::new();
         let last = self.0.len().saturating_sub(1);
@@ -611,6 +612,8 @@ impl ArtistCredit {
                 } else {
                     out.push_str(&part.join_phrase);
                 }
+            } else if part.join_phrase.chars().all(|c| matches!(c, ')' | '）' | ' ')) {
+                out.push_str(part.join_phrase.trim_end());
             }
         }
         out

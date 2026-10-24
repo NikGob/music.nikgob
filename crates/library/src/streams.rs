@@ -183,8 +183,19 @@ fn normal_isrc(isrc: Option<&str>) -> Option<String> {
 
 /// The library artist for a credited stream artist: the one linked to its
 /// remote id, else the first one with the same name (so a stream track of
-/// "Кино" lands on the library's Кино), else a new one.
-fn artist_for(conn: &Connection, a: &ArtistRef) -> Result<ArtistId> {
+/// "Кино" lands on the library's Кино), else the one it is an alias of
+/// («Ohara Yuiko» is 大原ゆい子), else a new one. With the name to credit
+/// it under: the artist's own when the service spells an alias of it.
+fn artist_for(conn: &Connection, a: &ArtistRef) -> Result<(ArtistId, String)> {
+    let own = |id: &str| -> Result<String> {
+        let name: Option<String> = conn.query_row("SELECT name FROM artist WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        let aliased: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM artist_alias WHERE artist_id = ?1 AND key = ?2)",
+            params![id, nikgob_core::names::name_key(&a.name)],
+            |r| r.get(0),
+        )?;
+        Ok(name.filter(|_| aliased).unwrap_or_else(|| a.name.clone()))
+    };
     if let Some(remote) = &a.id
         && let Some(id) = linked(
             conn,
@@ -194,7 +205,7 @@ fn artist_for(conn: &Connection, a: &ArtistRef) -> Result<ArtistId> {
             &remote.id,
         )?
     {
-        return parse(&id);
+        return Ok((parse(&id)?, own(&id)?));
     }
     let by_name: Option<String> = conn
         .query_row(
@@ -203,9 +214,13 @@ fn artist_for(conn: &Connection, a: &ArtistRef) -> Result<ArtistId> {
             |r| r.get(0),
         )
         .optional()?;
-    let id = match by_name {
-        Some(id) => parse(&id)?,
-        None => upsert_artist_in(conn, &Artist::new(a.name.clone()))?.id,
+    let by_name = match by_name {
+        Some(id) => Some(id),
+        None => crate::aliases::alias_of(conn, &a.name)?,
+    };
+    let (id, name) = match by_name {
+        Some(id) => (parse(&id)?, own(&id)?),
+        None => (upsert_artist_in(conn, &Artist::new(a.name.clone()))?.id, a.name.clone()),
     };
     if let Some(remote) = &a.id {
         set_external(
@@ -216,26 +231,34 @@ fn artist_for(conn: &Connection, a: &ArtistRef) -> Result<ArtistId> {
             &id.to_string(),
         )?;
     }
-    Ok(id)
+    Ok((id, name))
 }
 
 /// The credit of a service's artists; a name that is several artists
-/// («Kevin Penkin、immi» from YouTube) is each of them, without the
-/// service's id (it stands for the pair).
+/// («Kevin Penkin、immi» from YouTube, «リコ(CV:富田美憂)») is each of them,
+/// without the service's id (it stands for the pair).
 fn credit_for(conn: &Connection, artists: &[ArtistRef]) -> Result<ArtistCredit> {
     let mut credit = ArtistCredit::default();
+    // The bracket closing the previous name's voice credit.
+    let mut tail = String::new();
     for a in artists {
         let parts = nikgob_core::credit::split_credit(&a.name);
+        let before = format!("{}, ", std::mem::take(&mut tail));
         if parts.len() < 2 {
-            let id = artist_for(conn, a)?;
-            credit.push(", ", a.name.clone(), Some(id));
+            let (id, name) = artist_for(conn, a)?;
+            credit.push(&before, name, Some(id));
             continue;
         }
+        let last = parts.last().map(|p| p.1.clone()).unwrap_or_default();
         for (i, (join, name)) in parts.into_iter().enumerate() {
             let one = ArtistRef::new(None, name.clone());
-            let id = artist_for(conn, &one)?;
-            credit.push(if i == 0 { ", " } else { join.as_str() }, name, Some(id));
+            let (id, name) = artist_for(conn, &one)?;
+            credit.push(if i == 0 { before.as_str() } else { join.as_str() }, name, Some(id));
         }
+        tail = nikgob_core::credit::closing_tail(&a.name, &last);
+    }
+    if let Some(last) = credit.0.last_mut() {
+        last.join_phrase = tail;
     }
     Ok(credit)
 }
@@ -1272,6 +1295,7 @@ mod same;
 pub use clips::LikedClip;
 pub use replace::TrackSnapshot;
 pub use import::event_id;
+pub(crate) use same::{albums_agree, credit_keys, song_key};
 
 #[cfg(test)]
 mod tests;

@@ -320,7 +320,7 @@ impl Song {
 /// and "Discovery Bonus Mix"). A single named after the song is not taken
 /// for its album here (it cannot be told from the album named after it);
 /// only [`TIGHT_SLACK_MS`] joins the two.
-fn albums_agree(a: &str, b: &str) -> bool {
+pub(crate) fn albums_agree(a: &str, b: &str) -> bool {
     let starts = |long: &str, short: &str| {
         long == short || long.strip_prefix(short).is_some_and(|r| r.starts_with(' '))
     };
