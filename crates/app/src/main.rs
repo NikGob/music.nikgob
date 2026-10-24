@@ -11,6 +11,7 @@ mod autostart;
 mod cover_cache;
 mod demo;
 mod desktop;
+mod frames;
 mod geometry;
 mod logfile;
 mod shot;
@@ -144,6 +145,8 @@ struct Core {
     analyzer: Option<audio::AnalyzerSlot>,
     commands: Vec<Command>,
     shot: Option<shot::Shot>,
+    /// `NIKGOB_FRAMES`: the frame-time log.
+    frames: Option<frames::Frames>,
     quit: bool,
     wants_show: bool,
     last_frame: Instant,
@@ -253,6 +256,9 @@ impl eframe::App for Window {
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(f) = self.core.frames.as_mut() {
+            f.begin();
+        }
         // A screenshot run stays off the screen on purpose.
         if !std::mem::replace(&mut self.recovery_checked, true) && !shot::offscreen() {
             fastframe_shell::window::recover_offscreen(ctx, frame);
@@ -283,6 +289,7 @@ impl eframe::App for Window {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.scrolling.apply(ui.ctx());
         let core = &mut *self.core;
+        let levels = nikgob_md3e::prof::scope("levels");
         if core.ui.wants_levels()
             && let Some(slot) = &core.analyzer
             && let Some(a) = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut()
@@ -291,11 +298,16 @@ impl eframe::App for Window {
             core.ui.set_levels(a.bass_energy());
             core.ui.set_bands(a.bands());
         }
+        drop(levels);
         let fps = {
+            let lock = nikgob_md3e::prof::scope("state-lock");
             let state = core.runtime.state();
+            drop(lock);
             // Screenshot runs may lay states the demo cannot reach over it.
             let faked = core.shot.as_ref().and_then(|s| s.overlay(&state));
+            let draw = nikgob_md3e::prof::scope("frame");
             core.ui.frame(ui, faked.as_ref().unwrap_or(&*state), &mut core.commands);
+            drop(draw);
             // The runtime asks for the clipboard (a share link); copied once.
             if let Some(c) = state.clipboard.as_ref().filter(|c| c.id != core.copied) {
                 core.copied = c.id;
@@ -310,12 +322,18 @@ impl eframe::App for Window {
             state.prefs.fps_limit.max(15)
         };
         core.runtime.send_all(core.commands.drain(..));
+        if let Some(f) = core.frames.as_mut() {
+            f.end(frame.info().cpu_usage, core.shot.as_ref().map_or("live", |s| s.label()));
+        }
 
         // Frame limit: only matters while something animates continuously.
         let budget = Duration::from_secs_f64(1.0 / f64::from(fps));
         let spent = core.last_frame.elapsed();
         if spent < budget && ui.ctx().has_requested_repaint() {
             std::thread::sleep(budget - spent);
+            if let Some(f) = core.frames.as_mut() {
+                f.slept(budget - spent);
+            }
         }
         core.last_frame = Instant::now();
     }
@@ -533,6 +551,7 @@ fn main() -> eframe::Result {
         analyzer: links.map(|l| l.analyzer),
         commands: Vec::new(),
         shot: shot::Shot::from_env(),
+        frames: frames::Frames::from_env(),
         quit: false,
         wants_show: false,
         last_frame: Instant::now(),

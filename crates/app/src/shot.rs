@@ -23,6 +23,8 @@
 //! library track (`radio:artist` the first artist's radio).
 //! `libfilter:text` types into the library's filter, `liblist:1` shows it
 //! as a list, `sort:artist|title|year|added` sorts its albums.
+//! `mark:name` names the frames that follow in `NIKGOB_FRAMES` (until a
+//! run's first mark, each step names them after itself).
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
 //! The window opens off the screen, unfocused and without a taskbar button,
 //! so a run never jumps over the user's windows; `NIKGOB_SHOT_VISIBLE=1`
@@ -46,6 +48,10 @@ pub struct Shot {
     fakes: crate::shot_fakes::Fakes,
     /// Where the screenshot asked by `snap:` goes (None: the final one).
     snap: Option<PathBuf>,
+    /// The step the frames belong to, for `NIKGOB_FRAMES` (`mark:name`
+    /// names them).
+    label: String,
+    marked: bool,
 }
 
 fn nums(arg: &str) -> Vec<f32> {
@@ -93,12 +99,19 @@ impl Shot {
             input: VecDeque::new(),
             fakes: Default::default(),
             snap: None,
+            label: "start".to_owned(),
+            marked: false,
         })
     }
 
     /// The view state with the `fake:` steps so far laid over it, if any.
     pub fn overlay(&self, state: &nikgob_view::ViewState) -> Option<nikgob_view::ViewState> {
         self.fakes.any().then(|| self.fakes.apply(state))
+    }
+
+    /// The step running, for the frame log.
+    pub fn label(&self) -> &str {
+        &self.label
     }
 
     /// Feeds queued synthetic events into this frame's raw input.
@@ -162,8 +175,16 @@ impl Shot {
         let step = self.steps.remove(0);
         self.wait = 2;
         let (verb, arg) = step.split_once(':').unwrap_or((step.as_str(), ""));
+        // Once a step is `mark`ed, only marks rename the frames.
+        if verb == "mark" {
+            self.label = arg.to_owned();
+            self.marked = true;
+        } else if !self.marked && !matches!(verb, "wait" | "snap" | "typed") {
+            self.label = step.clone();
+        }
         match verb {
             "wait" => self.wait = arg.parse().unwrap_or(30),
+            "mark" => self.wait = 0,
             "size" => {
                 if let Some((w, h)) = arg.split_once('x')
                     && let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>())

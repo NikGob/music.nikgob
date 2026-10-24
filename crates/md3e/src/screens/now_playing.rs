@@ -771,7 +771,10 @@ pub fn show(
     {
         closed = true;
     }
-    ambient(ui, rect, state, pages);
+    {
+        let _p = crate::prof::scope("np.ambient");
+        ambient(ui, rect, state, pages);
+    }
     let motion = !theme.reduced_motion;
     let bass = if playing { pages.levels_bass } else { 0.0 };
     let (kick, transients) = if playing && motion {
@@ -779,7 +782,10 @@ pub fn show(
     } else {
         (0.0, Vec::new())
     };
-    super::bg_shapes::paint(ui, rect, &state.prefs, playing, kick, &transients, bass);
+    {
+        let _p = crate::prof::scope("np.bg_shapes");
+        super::bg_shapes::paint(ui, rect, &state.prefs, playing, kick, &transients, bass);
+    }
 
     let class = size_class(rect.width());
     let margin = class.margin();
@@ -938,6 +944,7 @@ pub fn show(
         _ => Outline::new(shape, morph, shaped, angle),
     };
     let mega_outline = Outline::new(shape, morph, mega.cover, 0.0);
+    let ring_scope = crate::prof::scope("np.ring");
     if prefs.ring {
         let period = if prefs.spin_ring && motion { 36.0 } else { 0.0 };
         let angle = turn(ui, "np-ring-angle", playing, bass, period, prefs.ring_ccw);
@@ -963,6 +970,8 @@ pub fn show(
             ring(ui, &mega_outline, &input);
         }
     }
+    drop(ring_scope);
+    let cover_scope = crate::prof::scope("np.cover");
     if theme.reduced_motion {
         let mut normal_ui = ui.new_child(UiBuilder::new().max_rect(body).id_salt("np-cover-fade"));
         normal_ui.multiply_opacity(1.0 - mega_k);
@@ -973,6 +982,7 @@ pub fn show(
     } else {
         outline.paint(ui, uri.as_deref());
     }
+    drop(cover_scope);
     let mut cover_resp = ui.interact(cover_rect, ui.id().with("np-cover"), Sense::click());
     // Only the shape itself is the cover: its square's corners count as
     // the background.
@@ -1053,6 +1063,7 @@ pub fn show(
         Some(Tap::Pause) => out.push(Command::TogglePlay),
         None => {}
     }
+    let info_scope = crate::prof::scope("np.info");
     if mega_k < 0.999 {
         let mut normal_ui = ui.new_child(UiBuilder::new().max_rect(info_rect).id_salt("np-normal-info"));
         normal_ui.multiply_opacity(1.0 - mega_k);
@@ -1083,6 +1094,7 @@ pub fn show(
             if chrome.np_slot != slot { cui.disable(); }
             match slot {
                 NpSlot::Lyrics => {
+                    let _p = crate::prof::scope("np.lyrics");
                     if super::lyrics::show(&mut cui, state, pages.levels_bass, true, out) {
                         pages.open_setting(super::pages::SettingId::LyricsStyle);
                         closed = true;
@@ -1094,6 +1106,7 @@ pub fn show(
             }
         }
     }
+    drop(info_scope);
     if state.prefs.np_volume_pop && !state.prefs.np_volume {
         volume_pop(ui, rect, state, chrome, out);
     }

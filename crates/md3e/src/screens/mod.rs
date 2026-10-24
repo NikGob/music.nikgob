@@ -296,7 +296,9 @@ impl Md3eUi {
     pub fn frame(&mut self, root: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
         let ctx = &root.ctx().clone();
         let first_cmd = out.len();
+        let theme_scope = crate::prof::scope("theme");
         self.update_theme(ctx, state);
+        drop(theme_scope);
         root.spacing_mut().scroll = crate::components::scrollbars::apply(ctx);
         // The current and the next cover stay loaded while off screen.
         let pinned: Vec<String> = (state.player.current.iter())
@@ -346,8 +348,10 @@ impl Md3eUi {
                     now_playing::show(ui, full, state, true, &mut self.pages, &mut self.chrome, out);
                     return;
                 }
+                let _p = crate::prof::scope("layout");
                 self.layout(ui, full, class, state, out);
             });
+        let overlays_scope = crate::prof::scope("overlays");
 
         // Requests pages made this frame.
         if std::mem::take(&mut self.pages.go_back) {
@@ -371,6 +375,8 @@ impl Md3eUi {
             self.chrome.nav = Some(route);
         }
 
+        drop(overlays_scope);
+        let _np_scope = crate::prof::scope("np");
         // Now Playing overlay, transformed out of the floating player: the
         // container grows from the pill to the window while the content,
         // laid out for the full window, scales up from the pill and fades in.
@@ -759,6 +765,7 @@ impl Md3eUi {
         page_ui.multiply_opacity((1.0 - k.abs()).clamp(0.0, 1.0));
         let bottom_inset = 64.0 + 16.0 + 16.0;
         let mut nav = None;
+        let _page_scope = crate::prof::scope("layout.page");
         if self.search.trim().is_empty() {
             nav = pages::page(&mut page_ui, &route, state, bottom_inset, &mut self.pages, out);
         } else {
@@ -768,6 +775,7 @@ impl Md3eUi {
             self.navigate(&ctx, r, out);
         }
 
+        drop(_page_scope);
         // Floating player.
         let bar_w = (content.width() - 32.0).min(960.0);
         let bar = Rect::from_center_size(

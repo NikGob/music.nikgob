@@ -21,6 +21,7 @@ pub mod components;
 pub mod covers;
 pub mod screens;
 pub mod icons;
+pub mod prof;
 pub mod theme;
 pub mod tokens;
 pub mod typography;
