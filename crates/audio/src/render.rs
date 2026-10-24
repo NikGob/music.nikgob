@@ -17,11 +17,12 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use fastframe_audio::Render;
 use rtrb::{Consumer, Producer};
 
-use crate::shared::{CursorSnapshot, PlayClock, Shared, frames_to_ns};
+use crate::shared::{CursorSnapshot, PlayClock, Shared, frames_to_ns, ns_to_frames};
 
 /// Length of the de-click ramps around flushes.
 const DECLICK_MS: u32 = 8;
@@ -32,6 +33,12 @@ const RESUME_FADE_MS: u32 = 10;
 const VOLUME_TAU_MS: f32 = 8.0;
 /// Level above which the soft limiter starts to bend the signal (about -1 dBFS).
 const LIMITER_KNEE: f32 = 0.89;
+/// Ramp out when the ring is about to run dry, and back in when audio
+/// returns, so a dropout is a short gap instead of a click.
+const DROPOUT_FADE_US: u64 = 1500;
+/// A callback this long after the previous one is late: with a 10 ms device
+/// period most of the device buffer has been played meanwhile.
+const LATE_CALLBACK: Duration = Duration::from_millis(25);
 
 /// Which item starts playing, and where in it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,6 +120,15 @@ pub(crate) struct Renderer {
     declick_frames: u64,
     pause_frames: u64,
     resume_frames: u64,
+    dropout_frames: u64,
+    /// The device buffer asked for, in frames (0: unknown).
+    device_buffer_frames: u64,
+    /// The envelope is fading out (or out) because the ring ran short.
+    dropout: bool,
+    /// A flush started the current item and none of it has sounded yet.
+    fresh: bool,
+    /// When the previous callback of steady playback came.
+    last_callback: Option<Instant>,
 }
 
 impl Renderer {
@@ -153,6 +169,11 @@ impl Renderer {
             declick_frames: 1,
             pause_frames: 1,
             resume_frames: 1,
+            dropout_frames: 1,
+            device_buffer_frames: 0,
+            dropout: false,
+            fresh: false,
+            last_callback: None,
         }
     }
 
@@ -191,6 +212,7 @@ impl Renderer {
         let want_pause = self.sh.pause_req.load(Ordering::Acquire);
         if want_pause && !self.pausing {
             self.pausing = true;
+            self.dropout = false;
             self.env_target = 0.0;
             self.env_step = self.env.max(0.001) / self.pause_frames as f32;
             if self.cur.is_none() || self.env <= 0.0 {
@@ -298,6 +320,8 @@ impl Renderer {
         self.announce(mark.ended, mark.start);
         self.cur = mark.start.map(|s| s.id);
         self.base_ns = mark.start.map_or(0, |s| s.pos_ns);
+        self.fresh = mark.start.is_some();
+        self.dropout = false;
         if mark.start.is_some() && !self.pausing && !self.holding {
             self.env = 0.0;
             self.env_target = 1.0;
@@ -386,6 +410,79 @@ impl Renderer {
             }
         }
     }
+
+    /// Counts callbacks of steady playback that came late or found the
+    /// device buffer (nearly) drained: the device played silence meanwhile,
+    /// which no ring counter sees. Also keeps the ring's low-water mark.
+    fn note_timing(&mut self, now: Instant, frames: usize) {
+        let steady = self.cur.is_some()
+            && self.moving
+            && !self.pausing
+            && !self.holding
+            && !self.awaiting_sync
+            && self.pending.is_none();
+        let previous = self.last_callback.take();
+        if !steady {
+            return;
+        }
+        self.last_callback = Some(now);
+        let Some(previous) = previous else { return };
+        let gap = now.saturating_duration_since(previous);
+        let buffer = self.device_buffer_frames;
+        let drained = buffer > 0 && frames as u64 * 10 >= buffer * 9;
+        if gap > LATE_CALLBACK || drained {
+            self.sh.late_callbacks.fetch_add(1, Ordering::Relaxed);
+        }
+        let gap_us = u64::try_from(gap.as_micros()).unwrap_or(u64::MAX);
+        self.sh
+            .worst_callback_gap_us
+            .fetch_max(gap_us, Ordering::Relaxed);
+        // Right after a start or a seek the ring is still filling up.
+        if self.cur_frames >= u64::from(self.rate) {
+            self.sh
+                .ring_low_samples
+                .fetch_min(self.ring.slots() as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// Fades out over the last of the ring when it is about to run dry
+    /// before the next mark, and back in once audio returns. Returns how
+    /// many samples may be copied before the fade has to start.
+    fn dropout_ramp(
+        &mut self,
+        n: usize,
+        limit: u64,
+        available: usize,
+        reserve: usize,
+    ) -> Option<usize> {
+        if self.pausing || self.pending.is_some() || self.cur.is_none() {
+            return None;
+        }
+        let dry = (available as u64) < limit && available < n + reserve;
+        if !dry {
+            if self.dropout {
+                self.dropout = false;
+                self.env_target = 1.0;
+                self.env_step = 1.0 / self.dropout_frames as f32;
+            }
+            return None;
+        }
+        if available > reserve {
+            // Play up to the last moment, then fade over it.
+            return Some(available - reserve);
+        }
+        self.dropout = true;
+        let left = (available / self.ch).max(1);
+        self.env_target = 0.0;
+        self.env_step = self.env.max(0.001) / left as f32;
+        None
+    }
+}
+
+/// Frames of the dropout ramp at `rate`. The ring has to hold this much
+/// beyond a block for the block to play without starting the ramp.
+pub(crate) fn dropout_frames(rate: u32) -> u64 {
+    (u64::from(rate) * DROPOUT_FADE_US / 1_000_000).max(1)
 }
 
 /// Transparent below the knee, smoothly bends towards +-1.0 above it.
@@ -418,9 +515,13 @@ impl Render for Renderer {
         self.declick_frames = u64::from(rate) * u64::from(DECLICK_MS) / 1000;
         self.pause_frames = u64::from(rate) * u64::from(PAUSE_FADE_MS) / 1000;
         self.resume_frames = u64::from(rate) * u64::from(RESUME_FADE_MS) / 1000;
+        self.dropout_frames = dropout_frames(rate);
         self.declick_frames = self.declick_frames.max(1);
         self.pause_frames = self.pause_frames.max(1);
         self.resume_frames = self.resume_frames.max(1);
+        self.last_callback = None;
+        self.device_buffer_frames =
+            ns_to_frames(self.sh.device_buffer_ns.load(Ordering::Relaxed), rate);
         self.vol_k = 1.0 - (-1.0 / (rate as f32 * VOLUME_TAU_MS / 1000.0)).exp();
         self.sh.tap.set_sample_rate(sample_rate);
         if changed || self.cfg_gen == 0 {
@@ -442,7 +543,23 @@ impl Render for Renderer {
         }
         let frames = out.len() / ch;
         self.update_control();
+        self.note_timing(Instant::now(), frames);
+        if let Some(clock) = self.clock.get() {
+            // The visualizer follows what is heard: the newest samples of a
+            // block reach the speakers about the latency and half a block
+            // after this callback, on average.
+            let latency = u64::try_from(clock.latency().as_nanos()).unwrap_or(u64::MAX);
+            let ahead = if latency == 0 {
+                0
+            } else {
+                ns_to_frames(latency, self.rate) + frames as u64 / 2
+            };
+            self.sh
+                .tap
+                .set_delay(u32::try_from(ahead).unwrap_or(u32::MAX));
+        }
 
+        let reserve = self.dropout_frames as usize * ch;
         let mut w = 0usize;
         // An item that has not sounded yet waits for a whole block.
         let mut starting = false;
@@ -453,13 +570,14 @@ impl Render for Renderer {
             }
             // A new item (a start, a seek) sounds once a whole block is
             // ready, or its end is: a first chunk followed by silence
-            // stutters, and the decoder was only just told to begin.
-            if w == 0
+            // stutters, and the decoder was only just told to begin. The
+            // same goes for the rest of a block a flush cut short.
+            if (w == 0 || self.fresh)
                 && self.cur.is_some()
                 && self.cur_frames == 0
                 && self.pending.is_none()
                 && self.marks.slots() == 0
-                && self.ring.slots() < frames * ch
+                && self.ring.slots() < (frames - w) * ch + reserve
             {
                 starting = true;
                 break;
@@ -494,7 +612,11 @@ impl Render for Renderer {
 
             let want = (frames - w) * ch;
             let mut n = want.min(usize::try_from(limit).unwrap_or(usize::MAX));
-            n = n.min(self.ring.slots());
+            let available = self.ring.slots();
+            if let Some(cap) = self.dropout_ramp(n, limit, available, reserve) {
+                n = n.min(cap);
+            }
+            n = n.min(available);
             n -= n % ch;
             if n == 0 {
                 break;
@@ -514,6 +636,7 @@ impl Render for Renderer {
                 self.moving = true;
                 self.publish_cursor(w);
             }
+            self.fresh = false;
             self.shape(&mut out[w * ch..(w + seg_frames) * ch]);
             self.cur_frames += seg_frames as u64;
             w += seg_frames;
@@ -556,8 +679,9 @@ impl Render for Renderer {
 mod tests {
     use super::*;
 
-    /// A renderer at 48 kHz stereo with an item started, and its feeds.
-    fn playing() -> (Renderer, Producer<f32>, Arc<Shared>) {
+    /// A renderer at 48 kHz stereo with an item started, `samples` of its
+    /// audio in the ring, and the feeds.
+    fn playing(samples: usize) -> (Renderer, Producer<f32>, Producer<Mark>, Arc<Shared>) {
         let sh = Arc::new(Shared::new());
         let (mut ring_tx, ring_rx) = rtrb::RingBuffer::new(1 << 14);
         let (mut marks_tx, marks_rx) = rtrb::RingBuffer::new(16);
@@ -570,63 +694,148 @@ mod tests {
             Arc::new(OnceLock::new()),
         );
         r.configure(48_000, 2);
-        let cfg_gen = sh.cfg_gen.load(Ordering::Acquire);
-        marks_tx
-            .push(Mark {
-                at: 0,
-                flush: true,
-                cfg_gen,
-                gen_id: 1,
-                ended: None,
-                start: Some(Start {
-                    id: 7,
-                    pos_ns: 0,
-                    announce: true,
-                }),
-            })
-            .unwrap();
-        // One full block of audio.
-        for _ in 0..512 {
-            ring_tx.push(0.25).unwrap();
+        marks_tx.push(flush_to(&sh, 0, 1, 7)).unwrap();
+        push(&mut ring_tx, samples);
+        (r, ring_tx, marks_tx, sh)
+    }
+
+    /// A flush to item `id` at sample `at`.
+    fn flush_to(sh: &Shared, at: u64, gen_id: u64, id: u64) -> Mark {
+        Mark {
+            at,
+            flush: true,
+            cfg_gen: sh.cfg_gen.load(Ordering::Acquire),
+            gen_id,
+            ended: None,
+            start: Some(Start {
+                id,
+                pos_ns: 0,
+                announce: true,
+            }),
         }
-        (r, ring_tx, sh)
+    }
+
+    fn push(ring: &mut Producer<f32>, samples: usize) {
+        for _ in 0..samples {
+            ring.push(0.25).unwrap();
+        }
+    }
+
+    /// The dropout ramp's length in samples at 48 kHz stereo.
+    const RESERVE: usize = 72 * 2;
+
+    /// The largest step between two samples of the same channel.
+    fn largest_step(samples: &[f32]) -> f32 {
+        samples
+            .windows(3)
+            .map(|w| (w[2] - w[0]).abs())
+            .fold(0.0, f32::max)
     }
 
     #[test]
     fn a_new_item_waits_for_a_whole_block_without_an_underrun() {
-        let (mut r, mut ring_tx, sh) = playing();
+        let (mut r, mut ring_tx, _marks, sh) = playing(512);
         // Half a block of the new item: nothing yet, and no dropout.
         let mut out = vec![1.0f32; 1024];
         r.render(&mut out);
         assert!(out.iter().all(|&s| s == 0.0));
         assert_eq!(sh.underruns.load(Ordering::Relaxed), 0);
-        for _ in 0..512 {
-            ring_tx.push(0.25).unwrap();
-        }
+        push(&mut ring_tx, 512 + RESERVE);
         r.render(&mut out);
-        assert!(out[1000..].iter().any(|&s| s != 0.0), "it sounds once a block is there");
+        assert!(
+            out[1000..].iter().any(|&s| s != 0.0),
+            "it sounds once a block is there"
+        );
         assert_eq!(sh.underruns.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    fn a_block_that_finds_the_ring_short_counts_an_underrun() {
-        let (mut r, mut ring_tx, sh) = playing();
+    fn a_ring_running_dry_fades_out_counts_an_underrun_and_fades_back_in() {
+        let (mut r, mut ring_tx, _marks, sh) = playing(2048);
+        let mut heard = Vec::new();
         let mut out = vec![1.0f32; 512];
-        r.render(&mut out);
-        assert_eq!(sh.underruns.load(Ordering::Relaxed), 0, "a full block");
-
-        // Half a block ready: the rest is silence and one underrun.
-        for _ in 0..256 {
-            ring_tx.push(0.25).unwrap();
+        for _ in 0..4 {
+            r.render(&mut out);
+            heard.extend_from_slice(&out);
         }
-        let mut out = vec![1.0f32; 512];
+        assert_eq!(sh.underruns.load(Ordering::Relaxed), 0, "four full blocks");
+        assert_eq!(heard[1000], 0.25);
+        assert!(
+            heard[heard.len() - 2..].iter().all(|s| s.abs() < 1e-3),
+            "faded out as the ring ended"
+        );
+
+        // Nothing ready at all: silence and an underrun.
+        r.render(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0));
+        assert_eq!(sh.underruns.load(Ordering::Relaxed), 1);
+        heard.extend_from_slice(&out);
+
+        // Audio is back: it ramps in instead of starting at full level.
+        push(&mut ring_tx, 1024);
         r.render(&mut out);
         assert_eq!(sh.underruns.load(Ordering::Relaxed), 1);
-        assert!(out[256..].iter().all(|&s| s == 0.0));
+        assert!(out[0].abs() < 0.01, "{}", out[0]);
+        assert_eq!(out[510], 0.25);
+        heard.extend_from_slice(&out);
+        // The item's own start ramps in over 8 ms; past it, no click.
+        assert!(
+            largest_step(&heard[800..]) < 0.01,
+            "a click: {}",
+            largest_step(&heard[800..])
+        );
+    }
 
-        // Nothing ready at all: another one.
+    #[test]
+    fn a_seek_flushing_in_the_middle_of_a_block_is_not_an_underrun() {
+        // One block plays, then 400 stale frames are left in the ring.
+        let (mut r, mut ring_tx, mut marks_tx, sh) = playing(512 + 800);
+        let mut out = vec![1.0f32; 512];
         r.render(&mut out);
-        assert_eq!(sh.underruns.load(Ordering::Relaxed), 2);
+        assert_eq!(sh.underruns.load(Ordering::Relaxed), 0);
+
+        // A seek: everything up to the end of the ring is stale, and the
+        // decoder has not produced the new position yet.
+        marks_tx.push(flush_to(&sh, 512 + 800, 2, 7)).unwrap();
+        let mut out = vec![1.0f32; 2048];
+        r.render(&mut out);
+        assert_eq!(r.applied_gen, 2, "the flush happened inside the block");
+        assert_eq!(sh.underruns.load(Ordering::Relaxed), 0);
+        assert!(out[1000..].iter().all(|&s| s == 0.0));
+
+        // The new position arrives and plays.
+        push(&mut ring_tx, 2048 + RESERVE);
+        r.render(&mut out);
+        assert!(out[2000..].iter().all(|&s| s != 0.0));
+        assert_eq!(sh.underruns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn callbacks_that_come_late_or_find_the_device_drained_are_counted() {
+        let (mut r, _ring_tx, _marks, sh) = playing(4096);
+        let mut out = vec![0.0f32; 512];
+        r.render(&mut out);
+        let late = || sh.late_callbacks.load(Ordering::Relaxed);
+        let t0 = Instant::now();
+        r.note_timing(t0, 480);
+        r.note_timing(t0 + Duration::from_millis(10), 480);
+        assert_eq!(late(), 0, "on time");
+        r.note_timing(t0 + Duration::from_millis(50), 480);
+        assert_eq!(late(), 1, "40 ms after the previous one");
+        assert_eq!(sh.worst_callback_gap_us.load(Ordering::Relaxed), 40_000);
+
+        // The device asks for (almost) its whole buffer: it had drained.
+        r.device_buffer_frames = 4320;
+        r.note_timing(t0 + Duration::from_millis(60), 4000);
+        assert_eq!(late(), 2);
+        r.note_timing(t0 + Duration::from_millis(70), 480);
+        assert_eq!(late(), 2);
+
+        // A pause in between is no lateness.
+        sh.pause_req.store(true, Ordering::Release);
+        r.update_control();
+        r.note_timing(t0 + Duration::from_millis(500), 480);
+        assert_eq!(late(), 2);
     }
 
     #[test]

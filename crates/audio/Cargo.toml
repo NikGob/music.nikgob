@@ -17,6 +17,14 @@ rubato = "5.0.1"
 realfft = "3.5"
 crossbeam-channel = "0.5"
 thiserror = "2"
+thread-priority = "3"
+
+# Not used directly: turns on cpal's `realtime` for fastframe-audio's cpal
+# (same version, so the features unify). The WASAPI render thread then joins
+# MMCSS's audio class instead of running at normal priority, where a busy
+# CPU (sound analysis, torrent hashing) left gaps in the device buffer.
+[target.'cfg(windows)'.dependencies]
+cpal = { version = "0.18.2", default-features = false, features = ["realtime"] }
 
 [dev-dependencies]
 hound = "3.5"

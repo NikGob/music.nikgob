@@ -28,6 +28,15 @@ impl PlayClock {
     pub(crate) fn played_ns(&self) -> u64 {
         u64::try_from(self.played().as_nanos()).unwrap_or(u64::MAX)
     }
+
+    /// Between rendering a sample and the device playing it, as the device
+    /// last said (zero for the manual clock).
+    pub(crate) fn latency(&self) -> Duration {
+        match self {
+            Self::Device(clock) => clock.latency(),
+            Self::Manual(_) => Duration::ZERO,
+        }
+    }
 }
 
 /// A hand-driven clock for the offline backend.
@@ -132,6 +141,18 @@ pub(crate) struct Shared {
     pub consumed_id: AtomicU64,
     /// Callback blocks that ran out of data while an item was playing.
     pub underruns: AtomicU64,
+    /// Callbacks of steady playback that came late or found the device
+    /// buffer drained: the device itself ran dry.
+    pub late_callbacks: AtomicU64,
+    /// The longest time between two such callbacks since the control thread
+    /// last took it, in microseconds.
+    pub worst_callback_gap_us: AtomicU64,
+    /// The fewest samples the ring held at a callback since the control
+    /// thread last took it (`u64::MAX`: not measured).
+    pub ring_low_samples: AtomicU64,
+    /// The device buffer asked for, in nanoseconds (0: the driver's own,
+    /// or a size in frames, unknown here).
+    pub device_buffer_ns: AtomicU64,
     // --- published by the decoder thread ---
     /// The decoder has nothing to produce (no current item).
     pub decoder_idle: AtomicBool,
@@ -158,6 +179,10 @@ impl Shared {
             consumed_pos_ns: AtomicU64::new(0),
             consumed_id: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
+            late_callbacks: AtomicU64::new(0),
+            worst_callback_gap_us: AtomicU64::new(0),
+            ring_low_samples: AtomicU64::new(u64::MAX),
+            device_buffer_ns: AtomicU64::new(0),
             decoder_idle: AtomicBool::new(true),
             inflight: AtomicU32::new(0),
             end_frame: AtomicU64::new(u64::MAX),

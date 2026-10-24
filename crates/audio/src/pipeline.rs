@@ -505,6 +505,17 @@ impl Decoder {
     }
 
     pub(crate) fn run(mut self) {
+        // Above the background work (sound analysis, torrent hashing) that
+        // could otherwise hold the decoder up until the ring runs dry.
+        if let Err(e) =
+            thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Max)
+        {
+            log::debug!("audio: decoder thread priority: {e:?}");
+        }
+        // How late the thread woke from its last idle wait, and how much
+        // audio was ready before that wait.
+        let mut woke_late = Duration::ZERO;
+        let mut buffered_before = None;
         loop {
             loop {
                 match self.rx.try_recv() {
@@ -518,10 +529,10 @@ impl Decoder {
                 }
             }
             self.check_config();
-            let buffered = self.buffered_ms();
+            let buffered = buffered_before.take().unwrap_or_else(|| self.buffered_ms());
             let began = Instant::now();
             let step = self.pump();
-            self.note_step_time(began, buffered);
+            self.note_step_time(began, std::mem::take(&mut woke_late), buffered);
             self.sh.decoder_idle.store(
                 self.cur.is_none() && self.xfade.is_none(),
                 Ordering::Release,
@@ -534,13 +545,19 @@ impl Decoder {
                 } else {
                     Duration::from_millis(25)
                 };
+                buffered_before = Some(self.buffered_ms());
+                let waited = Instant::now();
                 match self.rx.recv_timeout(wait) {
                     Ok(cmd) => {
                         if !self.handle(cmd) {
                             return;
                         }
                     }
-                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Timeout) => {
+                        // A starved thread wakes long after it asked to:
+                        // that eats the headroom as surely as a slow step.
+                        woke_late = waited.elapsed().saturating_sub(wait);
+                    }
                     Err(RecvTimeoutError::Disconnected) => return,
                 }
             }
@@ -899,19 +916,21 @@ impl Decoder {
         (self.ring_capacity - self.ring.slots()) as u64 / per_ms
     }
 
-    /// Warns (rate-limited) when one production step held the thread up long
-    /// enough to matter: a stream read waiting for the network, a stalled
-    /// disk, a starved CPU. With `buffered` ms ready before it, a step longer
-    /// than that is a dropout.
-    fn note_step_time(&mut self, began: Instant, buffered: u64) {
-        let took = began.elapsed();
+    /// Warns (rate-limited) when one production step, with the time the
+    /// thread woke late before it, held the thread up long enough to
+    /// matter: a stream read waiting for the network, a stalled disk, a
+    /// starved CPU. With `buffered` ms ready before it, a stall longer than
+    /// that is a dropout.
+    fn note_step_time(&mut self, began: Instant, woke_late: Duration, buffered: u64) {
+        let took = began.elapsed() + woke_late;
         if took < SLOW_STEP || self.cur.is_none() {
             return;
         }
         if let Some(n) = self.slow_log.record(1, Instant::now()) {
             log::warn!(
-                "audio: decoding stalled for {} ms with {buffered} ms buffered ({n} slow step(s) since the last warning)",
-                took.as_millis()
+                "audio: decoding stalled for {} ms ({} ms of it waking up late) with {buffered} ms buffered ({n} slow step(s) since the last warning)",
+                took.as_millis(),
+                woke_late.as_millis()
             );
         }
     }

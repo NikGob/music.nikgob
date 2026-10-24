@@ -35,12 +35,22 @@ const POSITION_INTERVAL: Duration = Duration::from_millis(250);
 /// How often the output is checked for failures / default-device changes.
 const MAINTAIN_INTERVAL: Duration = Duration::from_secs(1);
 /// If the callback has not confirmed its pause fade by then, pause anyway.
-const PAUSE_GRACE: Duration = Duration::from_millis(150);
+const PAUSE_GRACE: Duration = Duration::from_millis(300);
 /// After playback ends, keep the device running this long (so its buffer
 /// drains to silence) before pausing it.
 const IDLE_PAUSE_DELAY: Duration = Duration::from_millis(400);
 /// At most one "the output ran dry" warning this often.
 const UNDERRUN_LOG_EVERY: Duration = Duration::from_secs(10);
+/// The output's timing (late callbacks, the ring's low-water mark) is
+/// summed up this often while it runs.
+const TIMING_REPORT_EVERY: Duration = Duration::from_secs(10);
+/// Less decoded audio ahead than this at some callback is worth an info line.
+const RING_LOW_NOTE: Duration = Duration::from_millis(500);
+/// How much the device buffers: the render thread's slack against a busy
+/// CPU. Seeks, track changes, pauses and volume changes are heard this much
+/// later; the played clock (so the position, the lyrics and the visualizer)
+/// accounts for it.
+const DEVICE_BUFFER: Duration = Duration::from_millis(90);
 
 /// A callback for the application's event loop: called (from the engine's
 /// threads) every time an [`Event`] is queued, e.g. to request a repaint.
@@ -59,7 +69,7 @@ impl Default for PlayerOptions {
         Self {
             output: OutputOptions {
                 // Shared-mode WASAPI underruns with the driver's own buffer.
-                buffer: Buffer::FixedOnWindows(BufferSize::Duration(Duration::from_millis(30))),
+                buffer: Buffer::FixedOnWindows(BufferSize::Duration(DEVICE_BUFFER)),
                 ..OutputOptions::default()
             },
             wake: None,
@@ -129,6 +139,17 @@ impl Player {
     pub fn spawn(options: PlayerOptions) -> Result<(Player, Receiver<Event>), SpawnError> {
         let PlayerOptions { output, wake } = options;
         let parts = Parts::new();
+        let buffer = match output.buffer {
+            Buffer::Fixed(BufferSize::Duration(d)) => Some(d),
+            Buffer::FixedOnWindows(BufferSize::Duration(d)) if cfg!(windows) => Some(d),
+            _ => None,
+        };
+        if let Some(d) = buffer {
+            parts.shared.device_buffer_ns.store(
+                u64::try_from(d.as_nanos()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        }
         let backend = DeviceBackend::new(
             output,
             RenderHandle(Arc::clone(&parts.renderer)),
@@ -327,6 +348,13 @@ impl Player {
     pub fn underruns(&self) -> u64 {
         self.inner.sh.underruns.load(Ordering::Relaxed)
     }
+
+    /// Device callbacks that came late or found the device buffer drained
+    /// while playing: the device played silence (diagnostics).
+    #[must_use]
+    pub fn late_callbacks(&self) -> u64 {
+        self.inner.sh.late_callbacks.load(Ordering::Relaxed)
+    }
 }
 
 fn position_of(
@@ -434,6 +462,8 @@ impl Parts {
             last_open_error: None,
             underruns_seen: 0,
             underrun_log: LogLimiter::new(UNDERRUN_LOG_EVERY),
+            late_seen: 0,
+            timing_since: Instant::now(),
         };
         std::thread::Builder::new()
             .name("nikgob-audio-control".into())
@@ -485,6 +515,9 @@ struct Control {
     /// Underruns already reported (or seen) and the rate limit of the report.
     underruns_seen: u64,
     underrun_log: LogLimiter,
+    /// Late callbacks already reported, and when the timing report began.
+    late_seen: u64,
+    timing_since: Instant,
 }
 
 impl Control {
@@ -657,9 +690,17 @@ impl Control {
                 }
                 CbEvent::PauseReady => {
                     if self.is_paused && !self.device_paused {
-                        self.backend.pause();
-                        self.device_paused = true;
-                        self.pause_deadline = None;
+                        // The fade is rendered, not heard: let the device
+                        // play out its buffer first, or pausing cuts the
+                        // music before the fade and resuming plays the rest.
+                        let latency = self.clock.get().map_or(Duration::ZERO, PlayClock::latency);
+                        if latency.is_zero() {
+                            self.backend.pause();
+                            self.device_paused = true;
+                            self.pause_deadline = None;
+                        } else {
+                            self.pause_deadline = Some(Instant::now() + latency);
+                        }
                     }
                 }
             }
@@ -724,6 +765,7 @@ impl Control {
         }
 
         self.report_underruns(now);
+        self.report_timing(now);
 
         let maintain_every = if self.device_paused {
             Duration::from_secs(3)
@@ -745,6 +787,43 @@ impl Control {
         if let Some(n) = self.underrun_log.record(new, now) {
             log::warn!(
                 "audio: the output ran dry {n} time(s) since the last report ({total} in all): the decoder fell behind"
+            );
+        }
+    }
+
+    /// Logs what the callback measured of the output's timing: callbacks
+    /// that came late (the device ran dry, with the ring full), the longest
+    /// gap between two, and the least decoded audio ahead.
+    fn report_timing(&mut self, now: Instant) {
+        if now.duration_since(self.timing_since) < TIMING_REPORT_EVERY {
+            return;
+        }
+        self.timing_since = now;
+        let total = self.sh.late_callbacks.load(Ordering::Relaxed);
+        let late = total.saturating_sub(self.late_seen);
+        self.late_seen = total;
+        let worst_ms = self.sh.worst_callback_gap_us.swap(0, Ordering::Relaxed) / 1000;
+        let low = self.sh.ring_low_samples.swap(u64::MAX, Ordering::Relaxed);
+        let per_ms = u64::from(self.sh.cfg_rate.load(Ordering::Relaxed))
+            * u64::from(self.sh.cfg_channels.load(Ordering::Relaxed))
+            / 1000;
+        let low_ms = (low != u64::MAX && per_ms > 0).then(|| low / per_ms);
+        let low_text = low_ms.map_or_else(|| "not measured".to_owned(), |ms| format!("{ms} ms"));
+        if late > 0 {
+            let buffer_ms = self.sh.device_buffer_ns.load(Ordering::Relaxed) / 1_000_000;
+            log::warn!(
+                "audio: the output callback came late {late} time(s) in the last {} s ({total} in all; longest gap {worst_ms} ms with a {buffer_ms} ms device buffer, least audio ahead {low_text}): the render thread was held up, and past the buffer the device plays silence",
+                TIMING_REPORT_EVERY.as_secs()
+            );
+        } else if low_ms.is_some_and(|ms| ms < RING_LOW_NOTE.as_millis() as u64) {
+            log::info!(
+                "audio: decoded audio ahead fell to {low_text} in the last {} s (longest callback gap {worst_ms} ms)",
+                TIMING_REPORT_EVERY.as_secs()
+            );
+        } else if low_ms.is_some() {
+            log::debug!(
+                "audio: least audio ahead {low_text}, longest callback gap {worst_ms} ms in the last {} s",
+                TIMING_REPORT_EVERY.as_secs()
             );
         }
     }
