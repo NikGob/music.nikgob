@@ -2,8 +2,8 @@
 //! worker threads, downscaled to the size they are drawn at, and an LRU that
 //! forgets the textures of covers that have scrolled away.
 //!
-//! Draw covers through [`texture`]. It picks a size tier (`#128`, `#256`,
-//! `#512` after the URI, or the full file), marks the cover as used in this
+//! Draw covers through [`texture`]. It picks a size tier (`#128` to `#2048`
+//! after the URI, or the full file), marks the cover as used in this
 //! pass and, while the wanted tier decodes, shows a tier of the same file that
 //! is already loaded. At the end of every pass the covers that were not drawn
 //! in this or the previous pass and are not [pinned](pin) are forgotten,
@@ -27,8 +27,13 @@ use egui::{ColorImage, Context, Id, Vec2};
 /// Texture bytes all covers may take before off-screen ones are forgotten.
 pub const DEFAULT_BUDGET: usize = 64 << 20;
 
-/// Longest sides of the downscaled tiers, in pixels; larger draws get the file.
-const TIERS: [u32; 3] = [128, 256, 512];
+/// Longest sides of the downscaled tiers, in pixels; larger draws get the
+/// file (at most [`FULL`]). A big Now Playing cover drawn from a 3000 px
+/// file kept 48 MB of texture for 600 px on screen; 1024 is enough for it.
+const TIERS: [u32; 5] = [128, 256, 512, 1024, 2048];
+
+/// The longest side a cover is decoded at, even drawn larger.
+const FULL: u32 = 4096;
 
 /// Decoding threads at most.
 const WORKERS: usize = 3;
@@ -242,10 +247,8 @@ fn decode(path: &Path, tier: Option<u32>) -> Result<ColorImage, String> {
         .map_err(|e| e.to_string())?
         .decode()
         .map_err(|e| e.to_string())?;
-    let img = match tier {
-        Some(side) if img.width().max(img.height()) > side => img.thumbnail(side, side),
-        _ => img,
-    };
+    let side = tier.unwrap_or(FULL);
+    let img = if img.width().max(img.height()) > side { img.thumbnail(side, side) } else { img };
     let rgba = img.to_rgba8();
     Ok(ColorImage::from_rgba_unmultiplied(
         [rgba.width() as usize, rgba.height() as usize],
