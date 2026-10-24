@@ -6,8 +6,13 @@
 //! the first [`MAX_SECONDS`] (bliss's statistics need no more, and long OST
 //! mixes and disc images do not eat the CPU); [`PcmAnalyzer::finish`] runs
 //! bliss. Only the 22 050 Hz mono copy is held, never the decoded original.
+//!
+//! bliss computes its descriptors on five threads of its own, at normal
+//! priority whatever the caller's is; one feature pass runs at a time in the
+//! process, so analysis never takes more of the CPU than that from playback.
 
 use std::ops::ControlFlow;
+use std::sync::Mutex;
 
 use bliss_audio::{NUMBER_FEATURES, Song};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -34,6 +39,9 @@ pub type Vector = [f32; DIM];
 pub const ANALYZED_WITH: &str = "bliss-0.13:2";
 
 const CHUNK_FRAMES: usize = 1024;
+
+/// Held while bliss computes the features of one track.
+static BLISS: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, thiserror::Error)]
 pub enum AnalysisError {
@@ -225,7 +233,10 @@ impl PcmAnalyzer {
         if self.mono.len() < (MIN_SECONDS * SAMPLE_RATE) as usize {
             return Err(AnalysisError::TooShort);
         }
-        let features = Song::analyze(&self.mono).map_err(|e| AnalysisError::Bliss(e.to_string()))?.as_vec();
+        let features = {
+            let _one_at_a_time = BLISS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            Song::analyze(&self.mono).map_err(|e| AnalysisError::Bliss(e.to_string()))?.as_vec()
+        };
         let vector: Vector = features
             .as_slice()
             .try_into()

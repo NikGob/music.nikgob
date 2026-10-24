@@ -1,7 +1,7 @@
 //! Background sound analysis of the library's files (docs/stage4.md §2).
 //!
-//! One thread (two with 8 or more logical cores) at the lowest priority
-//! takes batches of [`Library::tracks_needing_analysis`]: tracks with a file
+//! One thread (two with 8 or more logical cores, the second only while
+//! nothing plays) at the lowest priority takes batches of [`Library::tracks_needing_analysis`]: tracks with a file
 //! and no current analysis, an analysis of an older bliss, or one of a
 //! stream. Each file is decoded with the importer's decoder straight into
 //! [`PcmAnalyzer`] (only its first 8 minutes, as 22 050 Hz mono), and the
@@ -15,7 +15,10 @@
 //!
 //! bliss computes its descriptors on a few scoped threads of its own, which
 //! run at normal priority for the second or so the features of one track
-//! take; decoding and resampling, the bulk of the time, run on ours.
+//! take; decoding and resampling, the bulk of the time, run on ours. Only
+//! one such feature pass runs at a time (see `nikgob_recs`), and while
+//! music plays only one thread works, so the two never pile up on the CPU
+//! the audio threads need.
 
 use std::collections::{HashSet, VecDeque};
 use std::ops::ControlFlow;
@@ -186,6 +189,8 @@ struct Shared {
     sent: Mutex<(Option<v::AnalysisProgress>, Instant)>,
     /// Without work, the library is looked at again this often.
     idle: Duration,
+    /// Music is playing: the second thread waits.
+    playing: AtomicBool,
 }
 
 impl Shared {
@@ -204,12 +209,17 @@ impl Shared {
         }
     }
 
-    /// The next file to analyse; waits while there is none. `None` = stop.
-    fn next(&self) -> Option<AnalysisTodo> {
+    /// The next file to analyse; waits while there is none (and, for the
+    /// `helper` thread, while music plays). `None` = stop.
+    fn next(&self, helper: bool) -> Option<AnalysisTodo> {
         let mut q = self.queue.lock();
         loop {
             if self.stopped() {
                 return None;
+            }
+            if helper && self.playing.load(Ordering::Relaxed) {
+                self.wake.wait_for(&mut q, self.idle);
+                continue;
             }
             while let Some(t) = q.todo.pop_front() {
                 if q.busy.insert(t.track_id) {
@@ -253,10 +263,16 @@ impl Shared {
     fn work(&self, todo: AnalysisTodo) {
         let path = file_path(&self.root, &todo.locator);
         let started = Instant::now();
+        // At info, so a dropout in the log can be set against the analysis.
+        log::info!(
+            "analysis: starting {}{}",
+            path.display(),
+            if self.playing.load(Ordering::Relaxed) { " (music playing)" } else { "" }
+        );
         let skip = match analyze_file(&path, &self.stop) {
             Ok(vector) => match store_vector(&self.lib, &self.index, todo.track_id, vector, AnalysisSource::File) {
                 Ok(_) => {
-                    log::debug!("analysis: {} in {:?}", path.display(), started.elapsed());
+                    log::info!("analysis: {} done in {:?}", path.display(), started.elapsed());
                     false
                 }
                 Err(e) => {
@@ -332,7 +348,7 @@ impl Shared {
                 }
             }
         }
-        while let Some(todo) = self.next() {
+        while let Some(todo) = self.next(helper) {
             self.work(todo);
         }
         drop(alive);
@@ -388,6 +404,7 @@ impl FileAnalysis {
             wake: Condvar::new(),
             sent: Mutex::new((None, Instant::now())),
             idle,
+            playing: AtomicBool::new(false),
         });
         let (alive, gone) = crossbeam_channel::bounded::<()>(0);
         let s = shared.clone();
@@ -400,6 +417,17 @@ impl FileAnalysis {
                 self.gone = Some(gone);
             }
             Err(e) => log::warn!("analysis: cannot start: {e}"),
+        }
+    }
+
+    /// Whether music plays: while it does, only one thread analyses.
+    pub(crate) fn set_playing(&self, playing: bool) {
+        if let Some(s) = &self.shared
+            && s.playing.swap(playing, Ordering::Relaxed) != playing
+            && !playing
+        {
+            let _q = s.queue.lock();
+            s.wake.notify_all();
         }
     }
 

@@ -451,6 +451,7 @@ impl Worker {
                     self.recs_tick();
                 }
             }
+            self.analysis.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
         }
         self.save_session();
         self.maybe_export(true);
