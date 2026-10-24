@@ -192,7 +192,7 @@ pub(crate) fn merge_artists_in(conn: &Connection, from: &str, into: &str, device
     for t in &tracks {
         refresh_track_search(conn, t)?;
     }
-    log::info!("library: artist «{from_name}» {from} is «{into_name}» {into}, merged");
+    note!("library: artist «{from_name}» {from} is «{into_name}» {into}, merged");
     Ok(true)
 }
 
@@ -427,7 +427,7 @@ impl Library {
     pub fn merge_artist_doubles(&self) -> Result<Vec<(String, String)>> {
         let device = self.device_id();
         let now = self.tick();
-        self.repair(DOUBLES_KEY, |c| Ok(plan_doubles(c)?.len()), |tx| {
+        self.repair(DOUBLES_KEY, |tx| {
             let mut done = Vec::new();
             for (from, into, why) in plan_doubles(tx)? {
                 let names = |id: &str| -> Result<String> {
@@ -435,11 +435,12 @@ impl Library {
                 };
                 let (f, i) = (names(&from)?, names(&into)?);
                 if merge_artists_in(tx, &from, &into, device.as_str(), now)? {
-                    log::info!("library: artist double «{f}» → «{i}» ({why})");
+                    note!("library: artist double «{f}» → «{i}» ({why})");
                     done.push((f, i));
                 }
             }
-            Ok(done)
+            let n = done.len();
+            Ok((done, n))
         })
         .map(Option::unwrap_or_default)
     }

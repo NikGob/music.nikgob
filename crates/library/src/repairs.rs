@@ -3,10 +3,11 @@
 //! the files of torrents, and dropping what a merge emptied.
 //!
 //! A repair ([`Library::repair`]) runs once per library: it counts what it
-//! would change first; with nothing to do it only sets its mark, else the
-//! library is copied to `backup-before-<key>-<date>/library.sqlite` next to
-//! it (`VACUUM INTO`, consistent under WAL), and every change and the mark
-//! go in one transaction, each change logged.
+//! would change first (a trial run, rolled back, quiet); with nothing to do
+//! it only sets its mark, else the library is copied to
+//! `backup-before-<key>-<date>/library.sqlite` next to it (`VACUUM INTO`,
+//! consistent under WAL), and every change and the mark go in one
+//! transaction, each change logged.
 //!
 //! An album that loses its last track ([`drop_empty_release_in`]) hands its
 //! ids in the services, its «Хочу скачать» items and its like to the
@@ -14,6 +15,7 @@
 //! of the same artist: [`same_album_release`]), else the ids go; an artist
 //! left without tracks, albums and like goes ([`drop_orphan_artist_in`]).
 
+use std::cell::Cell;
 use std::path::PathBuf;
 
 use nikgob_core::model::{ArtistId, ReleaseId, Source};
@@ -27,6 +29,15 @@ use crate::util::{meta_get, meta_set, now_ms};
 
 /// `meta` key of [`Library::drop_orphans`].
 pub(crate) const ORPHANS_KEY: &str = "orphans_dropped.v1";
+
+thread_local! {
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A repair is only counting its changes on this thread (see [`note!`]).
+pub(crate) fn counting() -> bool {
+    COUNTING.with(Cell::get)
+}
 
 /// `yyyymmdd` of a unix time (UTC).
 fn ymd(ms: i64) -> String {
@@ -139,7 +150,7 @@ pub(crate) fn drop_orphan_artist_in(conn: &Connection, artist: &str) -> Result<b
     conn.execute("DELETE FROM artist_alias WHERE artist_id = ?1", [artist])?;
     conn.execute("DELETE FROM meta WHERE key = ?1", [format!("cache.discography.{artist}")])?;
     conn.execute("DELETE FROM artist WHERE id = ?1", [artist])?;
-    log::info!("library: artist «{name}» {artist} has nothing left, removed");
+    note!("library: artist «{name}» {artist} has nothing left, removed");
     Ok(true)
 }
 
@@ -202,8 +213,8 @@ pub(crate) fn drop_empty_release_in(conn: &Connection, release: &str, prefer: Op
     conn.execute("DELETE FROM meta WHERE key = ?1", [format!("cache.tracklist.{release}")])?;
     conn.execute("DELETE FROM release WHERE id = ?1", [release])?;
     match &target {
-        Some(t) => log::info!("library: album «{title}» {release} is empty, removed; its ids and items go to {t}"),
-        None => log::info!("library: album «{title}» {release} is empty, removed"),
+        Some(t) => note!("library: album «{title}» {release} is empty, removed; its ids and items go to {t}"),
+        None => note!("library: album «{title}» {release} is empty, removed"),
     }
     for a in artists {
         drop_orphan_artist_in(conn, &a)?;
@@ -227,15 +238,6 @@ struct Orphans {
 }
 
 impl Orphans {
-    fn len(&self) -> usize {
-        self.dangling_ids.len()
-            + self.wish_releases.len()
-            + self.wish_tracks.len()
-            + self.empty_releases.len()
-            + self.artists.len()
-            + self.tracklist_marks.len()
-    }
-
     fn find(conn: &Connection) -> Result<Self> {
         let strings = |sql: &str| -> Result<Vec<String>> {
             let mut stmt = conn.prepare(sql)?;
@@ -342,19 +344,28 @@ impl Library {
         Ok(Some(file))
     }
 
-    /// Runs the one-time repair `key` (see the module docs): `count` says
-    /// how many changes it would make (read only), `apply` makes them.
-    /// `None` when it ran before or had nothing to do.
-    pub(crate) fn repair<T>(
-        &self,
-        key: &str,
-        count: impl FnOnce(&Connection) -> Result<usize>,
-        apply: impl FnOnce(&Transaction<'_>) -> Result<T>,
-    ) -> Result<Option<T>> {
+    /// Runs `f` in a write transaction that is rolled back, with the
+    /// catalog's change notes silent: what a repair would do.
+    pub(crate) fn trial<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+        struct Quiet;
+        impl Drop for Quiet {
+            fn drop(&mut self) {
+                COUNTING.with(|c| c.set(false));
+            }
+        }
+        COUNTING.with(|c| c.set(true));
+        let _quiet = Quiet;
+        self.write_rolled_back(f)
+    }
+
+    /// Runs the one-time repair `key` (see the module docs): `apply` makes
+    /// its changes and says how many it made (run once as a trial to count
+    /// them). `None` when it ran before or had nothing to do.
+    pub(crate) fn repair<T>(&self, key: &str, apply: impl Fn(&Transaction<'_>) -> Result<(T, usize)>) -> Result<Option<T>> {
         if self.read(|c| meta_get(c, key))?.is_some() {
             return Ok(None);
         }
-        let n = self.read(count)?;
+        let (_, n) = self.trial(&apply)?;
         let stamp = now_ms().to_string();
         if n == 0 {
             self.write(|tx| meta_set(tx, key, &stamp))?;
@@ -363,8 +374,9 @@ impl Library {
         log::info!("library: {key}: {n} changes");
         self.backup_before(key)?;
         self.write(|tx| {
-            let out = apply(tx)?;
+            let (out, done) = apply(tx)?;
             meta_set(tx, key, &stamp)?;
+            log::info!("library: {key}: {done} changes made");
             Ok(Some(out))
         })
     }
@@ -414,7 +426,7 @@ impl Library {
         let device = self.device_id();
         let now = self.tick();
         Ok(self
-            .repair(ORPHANS_KEY, |c| Ok(Orphans::find(c)?.len()), |tx| {
+            .repair(ORPHANS_KEY, |tx| {
                 let o = Orphans::find(tx)?;
                 let mut n = 0;
                 // Albums of «Хочу скачать» items found again by name.
@@ -435,9 +447,9 @@ impl Library {
                                 "UPDATE external_id SET local_id = ?2 WHERE kind = 'release' AND local_id = ?1",
                                 params![gone, r],
                             )?;
-                            log::info!("library: «Хочу скачать» {item}: its album {gone} went, it is {r}");
+                            note!("library: «Хочу скачать» {item}: its album {gone} went, it is {r}");
                         }
-                        None => log::info!("library: «Хочу скачать» {item}: its album {gone} went"),
+                        None => note!("library: «Хочу скачать» {item}: its album {gone} went"),
                     }
                     n += 1;
                 }
@@ -451,7 +463,7 @@ impl Library {
                             params![item, t],
                         )?;
                     }
-                    log::info!("library: «Хочу скачать» {item}: its track {gone} went, it is {found:?}");
+                    note!("library: «Хочу скачать» {item}: its track {gone} went, it is {found:?}");
                     n += 1;
                 }
                 // Items whose album found nothing keep no dangling link.
@@ -466,7 +478,7 @@ impl Library {
                         params![service, kind, remote, local],
                     )?;
                     if gone > 0 {
-                        log::info!("library: {service} {kind} {remote} pointed at {local}, gone, removed");
+                        note!("library: {service} {kind} {remote} pointed at {local}, gone, removed");
                     }
                     n += 1;
                 }
@@ -483,7 +495,7 @@ impl Library {
                 for key in &o.tracklist_marks {
                     n += tx.execute("DELETE FROM meta WHERE key = ?1", [key])?;
                 }
-                Ok(n)
+                Ok((n, n))
             })?
             .unwrap_or(0))
     }

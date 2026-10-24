@@ -14,6 +14,7 @@
 #[macro_use]
 mod macros;
 
+mod albums;
 mod aliases;
 mod catalog;
 mod confirm;
@@ -54,7 +55,7 @@ pub use streams::{LikedClip, TrackSnapshot, event_id, is_web_ref};
 pub use types::{
     AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, ConfirmRow, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
     PlaylistEntryRow, PlaylistKind, PlaylistRemote, PlaylistSummary, PurgedFile, PurgedTrack,
-    RecFeedback, ReleaseProgress, RemoteLike, StreamAnalysisTodo,
+    ListingEntry, RecFeedback, ReleaseListing, ReleaseProgress, RemoteLike, StreamAnalysisTodo,
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,
     TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };

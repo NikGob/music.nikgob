@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::db::Library;
 use crate::error::{LibraryError, Result};
 use crate::types::{
-    ArtistRow, ArtistSort, ArtistSortKey, ReleaseProgress, ReleaseRow, ReleaseSort, ReleaseSortKey,
+    ArtistRow, ArtistSort, ArtistSortKey, ReleaseListing, ReleaseProgress, ReleaseRow, ReleaseSort, ReleaseSortKey,
     TrackFilter, TrackRow, TrackSort, TrackSortKey,
 };
 use crate::streams::refresh_in_library;
@@ -1018,15 +1018,20 @@ impl Library {
     /// file's song under another title (see `streams::same`) and is left
     /// out: the album lists each of its places once.
     pub fn tracks_of_release_all(&self, release: ReleaseId) -> Result<Vec<TrackRow>> {
-        self.tracks_of_release_where(
-            release,
-            "AND t.deleted_at IS NULL
-             AND NOT (t.has_local = 0 AND t.in_library = 0 AND t.track_no > 0 AND EXISTS (
-                 SELECT 1 FROM track o WHERE o.release_id = t.release_id AND o.id != t.id
-                    AND o.deleted_at IS NULL AND o.has_local = 1
-                    AND o.disc_no = t.disc_no AND o.track_no = t.track_no
-                    AND abs(o.duration_ms - t.duration_ms) <= 2000))",
-        )
+        self.tracks_of_release_where(release, concat!("AND ", page_row!()))
+    }
+
+    /// The page of an album (docs/stage4.md §12.13): its rows
+    /// ([`Self::tracks_of_release_all`]) and a hole for every place it
+    /// counts that no row has, in order, with the counts every view of the
+    /// album shows (the page's header, its card, «Хочу скачать»):
+    /// `progress.total == entries.len()`, `progress.local` the rows with a
+    /// file. With one disc a hole has its number (the first ones free up to
+    /// the count); with several the holes come last, unnumbered.
+    pub fn release_listing(&self, release: ReleaseId) -> Result<Option<ReleaseListing>> {
+        let Some(r) = self.get_release(release)? else { return Ok(None) };
+        let rows = self.tracks_of_release_all(release)?;
+        Ok(Some(ReleaseListing::new(rows, r.total_tracks)))
     }
 
     fn tracks_of_release_impl(&self, release: ReleaseId, deleted: bool) -> Result<Vec<TrackRow>> {
@@ -1272,7 +1277,11 @@ macro_rules! release_row_cols {
                                                     AND t.deleted_at IS NULL AND t.in_library = 1),
                     (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.deleted_at IS NULL AND t.in_library = 1),
                     ",
-            release_liked_expr!()
+            release_liked_expr!(),
+            ",
+                    (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND ",
+            page_row!(),
+            ")"
         )
     };
 }
@@ -1295,6 +1304,7 @@ pub(crate) fn release_row(row: &Row<'_>) -> rusqlite::Result<ReleaseRow> {
         local_tracks: row.get::<_, i64>(10)? as u32,
         known_tracks: row.get::<_, i64>(11)? as u32,
         liked: row.get(12)?,
+        rows: row.get::<_, i64>(13)? as u32,
     })
 }
 

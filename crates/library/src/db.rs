@@ -227,6 +227,15 @@ impl Library {
         tx.commit()?;
         Ok(out)
     }
+
+    /// [`Self::write`] whose transaction is rolled back whatever `f` returns.
+    pub(crate) fn write_rolled_back<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+        let mut conn = lock(&self.inner.writer);
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let out = f(&tx);
+        tx.rollback()?;
+        out
+    }
 }
 
 impl std::fmt::Debug for Library {

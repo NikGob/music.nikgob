@@ -1,5 +1,15 @@
 //! SQL fragments shared by several modules (macros so they can be `concat!`ed).
 
+/// `log::info!` of a change to the catalog; silent while a one-time repair
+/// only counts what it would change ([`crate::repairs::counting`]).
+macro_rules! note {
+    ($($arg:tt)*) => {
+        if !crate::repairs::counting() {
+            log::info!($($arg)*);
+        }
+    };
+}
+
 /// The 16 columns of a [`crate::TrackRow`]; needs aliases `t` (track) and `r` (release).
 macro_rules! track_row_cols {
     () => {
@@ -8,6 +18,20 @@ macro_rules! track_row_cols {
          t.has_local, \
          EXISTS(SELECT 1 FROM likes lk WHERE lk.target_kind = 'track' \
                 AND lk.target_id = t.id AND lk.deleted = 0),          t.artist_credit,          (SELECT s.locator FROM source s WHERE s.track_id = t.id AND s.is_active = 1                 AND s.kind = 'youtube')"
+    };
+}
+
+/// A row of an album's page (alias `t`): live, and not a stream track
+/// outside the library at the place of a file as long within 2 s (that
+/// file's song under another title, see `streams::same`).
+macro_rules! page_row {
+    () => {
+        "t.deleted_at IS NULL
+         AND NOT (t.has_local = 0 AND t.in_library = 0 AND t.track_no > 0 AND EXISTS (
+             SELECT 1 FROM track o WHERE o.release_id = t.release_id AND o.id != t.id
+                AND o.deleted_at IS NULL AND o.has_local = 1
+                AND o.disc_no = t.disc_no AND o.track_no = t.track_no
+                AND abs(o.duration_ms - t.duration_ms) <= 2000))"
     };
 }
 

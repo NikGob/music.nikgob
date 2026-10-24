@@ -52,7 +52,6 @@ use super::normal_isrc;
 use crate::catalog::merge_track_in;
 use crate::db::Library;
 use crate::error::Result;
-use crate::util::{meta_get, meta_set};
 
 /// How far two lengths of one song may be apart.
 pub(crate) const SLACK_MS: i64 = 3_000;
@@ -747,12 +746,9 @@ impl Library {
     /// history and wishlist items move onto it (one wishlist item per track).
     /// Runs once per library (a `meta` mark); returns how many tracks went.
     pub fn merge_duplicate_stream_tracks(&self) -> Result<usize> {
-        if self.read(|c| meta_get(c, REPAIRED_KEY))?.is_some() {
-            return Ok(0);
-        }
         let device = self.device_id();
         let now = self.tick();
-        self.write(|tx| {
+        Ok(self.repair(REPAIRED_KEY, |tx| {
             let mut merged = 0;
             for (id, title, credit, duration, album, isrc, seq, place) in stream_only_rows(tx)? {
                 if !track_exists(tx, &id)? {
@@ -790,7 +786,7 @@ impl Library {
                 )?;
                 if merge_track_in(tx, super::parse(from)?, super::parse(into)?, device.as_str(), now)? {
                     prefer_cyrillic_in(tx, into, &from_title, from_album.as_deref())?;
-                    log::info!("library: stream track {from} is {into}, merged");
+                    note!("library: stream track {from} is {into}, merged");
                     merged += 1;
                 }
             }
@@ -799,7 +795,7 @@ impl Library {
                 let clip = Clip::new(&title, &credit_names(&credit), duration);
                 let Some(file) = clip_song_file(tx, &clip, Some(&id))? else { continue };
                 if merge_track_in(tx, super::parse(&id)?, super::parse(&file)?, device.as_str(), now)? {
-                    log::info!("library: clip {id} is the song {file}, merged");
+                    note!("library: clip {id} is the song {file}, merged");
                     merged += 1;
                 }
             }
@@ -809,13 +805,13 @@ impl Library {
                     continue;
                 }
                 if merge_track_in(tx, super::parse(&from)?, super::parse(&into)?, device.as_str(), now)? {
-                    log::info!("library: track {from} is {into} under a typo, merged (its file a spare copy)");
+                    note!("library: track {from} is {into} under a typo, merged (its file a spare copy)");
                     merged += 1;
                 }
             }
-            meta_set(tx, REPAIRED_KEY, &now.to_string())?;
-            Ok(merged)
-        })
+            Ok((merged, merged))
+        })?
+        .unwrap_or(0))
     }
 }
 

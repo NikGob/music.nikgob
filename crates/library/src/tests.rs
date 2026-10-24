@@ -2217,3 +2217,72 @@ fn track_facts_and_playlist_tracks_for_the_tiles() {
     assert_eq!(lists.len(), 1);
     assert_eq!((lists[0].name.as_str(), lists[0].tracks.clone()), ("Вечером", vec![t2.id, t1.id]));
 }
+
+// ------------------------------------------------------------------ album pages
+
+/// The lines of an album's page: `#7` a hole, `5` a row.
+fn lines(l: &crate::ReleaseListing) -> Vec<String> {
+    l.entries
+        .iter()
+        .map(|e| match e {
+            crate::ListingEntry::Track(t) => format!("{}-{}", t.disc_no, t.track_no),
+            crate::ListingEntry::Hole { disc, no } => format!("#{disc}-{no}"),
+        })
+        .collect()
+}
+
+#[test]
+fn an_album_page_counts_its_lines_and_shows_its_holes() {
+    let lib = lib();
+    let a = artist(&lib, "Oliver Tree");
+    let mut r = Release::new("Ugly Is Beautiful", credit(&a));
+    r.total_tracks = Some(14);
+    let r = lib.upsert_release(&r).unwrap();
+    for no in (1..=14).filter(|n| *n != 7) {
+        let t = track(&lib, &a, Some(&r), &format!("Song {no}"), no);
+        local(&lib, &t, &format!("M/{no}.opus"), Codec::Opus, Some(160));
+    }
+    let l = lib.release_listing(r.id).unwrap().unwrap();
+    assert_eq!(l.entries.len(), 14);
+    assert_eq!(lines(&l)[6], "#1-7");
+    assert_eq!(l.holes(), 1);
+    assert_eq!((l.progress.local, l.progress.total, l.progress.missing()), (13, 14, 1), "13 of 14, 1 missing");
+    // The card counts the same.
+    assert_eq!(lib.release_progress(r.id).unwrap().unwrap().total, l.progress.total);
+    let card = lib.releases(0, 10, ReleaseSort::asc(ReleaseSortKey::Title)).unwrap();
+    assert_eq!(card[0].progress(), lib.release_progress(r.id).unwrap().unwrap());
+
+    // No count: the rows are the album. A count below the rows: the rows.
+    for total in [None, Some(3)] {
+        let mut r2 = Release::new(format!("B {total:?}"), credit(&a));
+        r2.total_tracks = total;
+        let r2 = lib.upsert_release(&r2).unwrap();
+        for no in 1..=5 {
+            track(&lib, &a, Some(&r2), &format!("B{no}"), no);
+        }
+        let l = lib.release_listing(r2.id).unwrap().unwrap();
+        assert_eq!((l.entries.len(), l.holes(), l.progress.total, l.progress.local), (5, 0, 5, 0));
+    }
+
+    // Two discs: the holes come last, unnumbered; unnumbered rows count.
+    let mut r3 = Release::new("Double", credit(&a));
+    r3.total_tracks = Some(6);
+    let r3 = lib.upsert_release(&r3).unwrap();
+    for (disc, no) in [(1, 1), (1, 2), (2, 1)] {
+        let mut t = Track::new(format!("D{disc}{no}"), credit(&a));
+        t.release_id = Some(r3.id);
+        t.disc_no = disc;
+        t.track_no = no;
+        lib.upsert_track(&t).unwrap();
+    }
+    let l = lib.release_listing(r3.id).unwrap().unwrap();
+    assert_eq!(lines(&l), ["1-1", "1-2", "2-1", "#2-0", "#2-0", "#2-0"]);
+    let mut r4 = Release::new("Loose", credit(&a));
+    r4.total_tracks = Some(3);
+    let r4 = lib.upsert_release(&r4).unwrap();
+    track(&lib, &a, Some(&r4), "No number", 0);
+    track(&lib, &a, Some(&r4), "Second", 2);
+    let l = lib.release_listing(r4.id).unwrap().unwrap();
+    assert_eq!(lines(&l), ["1-0", "#1-1", "1-2"]);
+    assert_eq!(l.progress.total as usize, l.entries.len());
+}

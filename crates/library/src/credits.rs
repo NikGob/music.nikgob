@@ -8,12 +8,12 @@ use std::collections::HashMap;
 
 use nikgob_core::credit::{closing_tail, split_credit, split_pair};
 use nikgob_core::model::{Artist, ArtistCredit, ArtistCreditPart, ArtistId};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
 use crate::catalog::{upsert_artist_in, write_credit_links};
 use crate::db::Library;
 use crate::error::Result;
-use crate::util::{credit_columns, fold, meta_get, meta_set};
+use crate::util::{credit_columns, fold};
 
 /// `meta` key: the repair of [`Library::split_combined_credits`] ran (`v1`
 /// did not split at `、` and ` × `, `v2` voice credits).
@@ -134,28 +134,6 @@ fn rows(tx: &Connection, table: &str) -> Result<Vec<(String, String)>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Drops an artist that the split left without anything: no track, album,
-/// like or id in a service points at it.
-fn drop_if_orphan(tx: &Connection, id: ArtistId) -> Result<()> {
-    let id = id.to_string();
-    let used: Option<i64> = tx
-        .query_row(
-            "SELECT 1 WHERE EXISTS (SELECT 1 FROM track_artist WHERE artist_id = ?1)
-                OR EXISTS (SELECT 1 FROM release_artist WHERE artist_id = ?1)
-                OR EXISTS (SELECT 1 FROM likes WHERE target_kind = 'artist' AND target_id = ?1
-                              AND deleted = 0)
-                OR EXISTS (SELECT 1 FROM external_id WHERE kind = 'artist' AND local_id = ?1)",
-            [&id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if used.is_none() {
-        tx.execute("DELETE FROM artist_photo WHERE artist_id = ?1", [&id])?;
-        tx.execute("DELETE FROM artist WHERE id = ?1", [&id])?;
-    }
-    Ok(())
-}
-
 impl Library {
     /// Splits credits stored as one combined artist ("A, B", "A feat. B &
     /// C") into their artists ([`split_credit`]), on tracks and albums: each
@@ -165,10 +143,7 @@ impl Library {
     /// real act and stays whole. Runs once per library (a `meta` mark);
     /// returns how many tracks and albums changed.
     pub fn split_combined_credits(&self) -> Result<usize> {
-        if self.read(|c| meta_get(c, SPLIT_KEY))?.is_some() {
-            return Ok(0);
-        }
-        self.write(|tx| {
+        Ok(self.repair(SPLIT_KEY, |tx| {
             let mut names = Names::load(tx)?;
             let mut changed = 0;
             let mut replaced: Vec<ArtistId> = Vec::new();
@@ -193,14 +168,14 @@ impl Library {
             replaced.sort_by_key(ToString::to_string);
             replaced.dedup();
             for a in replaced {
-                drop_if_orphan(tx, a)?;
+                crate::repairs::drop_orphan_artist_in(tx, &a.to_string())?;
             }
-            meta_set(tx, SPLIT_KEY, "1")?;
             if changed > 0 {
-                log::info!("library: {changed} combined artist credits split");
+                note!("library: {changed} combined artist credits split");
             }
-            Ok(changed)
-        })
+            Ok((changed, changed))
+        })?
+        .unwrap_or(0))
     }
 }
 

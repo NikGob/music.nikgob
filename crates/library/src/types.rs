@@ -121,16 +121,74 @@ pub struct ReleaseRow {
     pub known_tracks: u32,
     /// Every (local) track of the album is liked; see [`crate::Library::like_release`].
     pub liked: bool,
+    /// Rows of its page ([`crate::Library::tracks_of_release_all`]: outside
+    /// the library too).
+    pub rows: u32,
 }
 
 impl ReleaseRow {
-    /// "3 из 12 у тебя".
+    /// "3 из 12 у тебя", as its page counts ([`ReleaseListing`]).
     pub fn progress(&self) -> ReleaseProgress {
-        ReleaseProgress::new(
-            self.local_tracks,
-            self.known_tracks,
-            self.release.total_tracks,
-        )
+        ReleaseProgress::new(self.local_tracks, self.known_tracks, self.rows, self.release.total_tracks)
+    }
+}
+
+/// One line of an album's page ([`crate::Library::release_listing`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ListingEntry {
+    Track(TrackRow),
+    /// A place the album counts that no row has: `no` 0 when unknown.
+    Hole { disc: u32, no: u32 },
+}
+
+/// An album's page: its rows and holes, and the counts of both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReleaseListing {
+    pub entries: Vec<ListingEntry>,
+    pub progress: ReleaseProgress,
+}
+
+impl ReleaseListing {
+    pub(crate) fn new(rows: Vec<TrackRow>, total_tracks: Option<u32>) -> Self {
+        let local = rows.iter().filter(|r| r.has_local).count() as u32;
+        let progress = ReleaseProgress::new(local, local, rows.len() as u32, total_tracks);
+        let holes = progress.total as usize - rows.len();
+        let discs: std::collections::BTreeSet<u32> = rows.iter().map(|r| r.disc_no.max(1)).collect();
+        let disc = discs.iter().next_back().copied().unwrap_or(1);
+        // Numbered holes on one disc: the free numbers up to the count.
+        let mut numbered: Vec<u32> = Vec::new();
+        if discs.len() <= 1 {
+            let taken: std::collections::HashSet<u32> = rows.iter().map(|r| r.track_no).collect();
+            numbered = (1..=progress.total).filter(|n| !taken.contains(n)).take(holes).collect();
+        }
+        let mut entries = Vec::with_capacity(progress.total as usize);
+        let mut next = numbered.iter().copied().peekable();
+        for r in rows {
+            while let Some(&n) = next.peek() {
+                if r.track_no == 0 || n > r.track_no {
+                    break;
+                }
+                entries.push(ListingEntry::Hole { disc, no: n });
+                next.next();
+            }
+            entries.push(ListingEntry::Track(r));
+        }
+        entries.extend(next.map(|no| ListingEntry::Hole { disc, no }));
+        while entries.len() < progress.total as usize {
+            entries.push(ListingEntry::Hole { disc, no: 0 });
+        }
+        Self { entries, progress }
+    }
+
+    pub fn holes(&self) -> usize {
+        self.entries.iter().filter(|e| matches!(e, ListingEntry::Hole { .. })).count()
+    }
+
+    pub fn tracks(&self) -> impl Iterator<Item = &TrackRow> {
+        self.entries.iter().filter_map(|e| match e {
+            ListingEntry::Track(t) => Some(t),
+            ListingEntry::Hole { .. } => None,
+        })
     }
 }
 
@@ -142,17 +200,23 @@ pub struct ReleaseProgress {
     /// service (stream only, "стрим").
     #[serde(default)]
     pub in_library: u32,
-    /// `total_tracks` of the release, or the number of known tracks if larger/unknown.
+    /// `total_tracks` of the release, or the rows of its page if more or
+    /// unknown: the lines of its page ([`ReleaseListing`]).
     pub total: u32,
 }
 
 impl ReleaseProgress {
-    pub(crate) fn new(local: u32, known: u32, total_tracks: Option<u32>) -> Self {
+    pub(crate) fn new(local: u32, known: u32, rows: u32, total_tracks: Option<u32>) -> Self {
         Self {
             local,
             in_library: known,
-            total: total_tracks.unwrap_or(0).max(known),
+            total: total_tracks.unwrap_or(0).max(rows).max(known),
         }
+    }
+
+    /// Lines of the page without a file: «1 нет».
+    pub fn missing(&self) -> u32 {
+        self.total.saturating_sub(self.local)
     }
 
     pub fn is_complete(&self) -> bool {
