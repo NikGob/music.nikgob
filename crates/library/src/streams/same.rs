@@ -21,7 +21,13 @@
 //! release id, disc and number) with lengths within [`PLACE_SLACK_MS`] and
 //! a shared artist are one song: a service names it in kanji («滑落亭»),
 //! the file in romaji («KATSURAKUTEI»). Credits are compared name by name
-//! («Kevin Penkin、immi» and «Kevin Penkin & immi»: [`credit_keys`]).
+//! («Kevin Penkin、immi» and «Kevin Penkin & immi»: [`credit_keys`]). With
+//! the same title and lengths within [`TIGHT_SLACK_MS`] no shared artist is
+//! needed (the file says «Ohara Yuiko», the service 大原ゆい子), and a
+//! track there that has the stream's service already is that song too: a
+//! service does give one song twice, under the album's id and the
+//! single's (docs/stage4.md §12.13). A track is its place: candidates on
+//! the stream's own release come first.
 //!
 //! A music video is its song's file (docs/stage4.md §12.5): a liked clip
 //! whose title, without what clips add ([`song_titles`]), is the title of a
@@ -31,12 +37,15 @@
 //! file plays.
 //!
 //! [`Library::merge_duplicate_stream_tracks`] applies the same rules once to
-//! tracks created before they existed.
+//! tracks created before they existed, and folds one song filed twice on
+//! one release under titles a sound mark apart («パウロ VS ルディ» and
+//! «バウロ VS ルディ», lengths within [`TYPO_SLACK_MS`]): the second file
+//! stays a spare copy.
 
 use nikgob_core::clip_title::{credited_names, same_dual_title, song_titles};
 use nikgob_core::translit::{prefer_cyrillic, same_translit};
 use nikgob_core::model::{SourceKind, score};
-use nikgob_core::streaming::{Service, StreamTrack, TrackKind};
+use nikgob_core::streaming::{EntityKind, Service, StreamTrack, TrackKind};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::normal_isrc;
@@ -59,11 +68,16 @@ pub(crate) const PLACE_SLACK_MS: i64 = 2_000;
 /// How much longer than its song a music video may be (an intro, an outro).
 pub(crate) const CLIP_EXTRA_MS: i64 = 30_000;
 
+/// Two files of one release this close, titles a sound mark apart, are one
+/// song (one rip of it under two names).
+pub(crate) const TYPO_SLACK_MS: i64 = 50;
+
 /// `meta` key: the repair of [`Library::merge_duplicate_stream_tracks`] ran
 /// with the rule of today (`v1` had no dual titles and no tight slack, `v2`
 /// no shared artists and no clips, `v3` no transliterations, `v4` no places
-/// on a release).
-const REPAIRED_KEY: &str = "stream_duplicates_merged.v5";
+/// on a release, `v5` no twins of one service at a place, no artists in
+/// two scripts at a place, no typos).
+const REPAIRED_KEY: &str = "stream_duplicates_merged.v6";
 
 /// What separates the artists of a credit line (lower case).
 const CREDIT_SEPARATORS: &[&str] = &[
@@ -287,6 +301,20 @@ impl Song {
         same(&self.artist, &o.artist) || self.artists.iter().any(|a| o.artists.iter().any(|b| same(a, b)))
     }
 
+    fn same_title(&self, o: &Self) -> bool {
+        self.title == o.title || same_translit(&self.title, &o.title)
+    }
+
+    /// A twin at one place: the same title, lengths within
+    /// [`TIGHT_SLACK_MS`] (one song, whatever services both have).
+    pub(crate) fn twin(&self, o: &Self) -> bool {
+        self.place.is_some()
+            && self.place == o.place
+            && !self.title.is_empty()
+            && self.same_title(o)
+            && self.duration_ms.zip(o.duration_ms).is_some_and(|(a, b)| (a - b).abs() <= TIGHT_SLACK_MS)
+    }
+
     /// See the module docs.
     pub(crate) fn same(&self, o: &Self) -> bool {
         if self.title.is_empty() || self.artist.is_empty() {
@@ -300,8 +328,13 @@ impl Song {
         let Some(apart) = self.duration_ms.zip(o.duration_ms).map(|(a, b)| (a - b).abs()) else {
             return false;
         };
-        if self.place.is_some() && self.place == o.place && apart <= PLACE_SLACK_MS && self.shares_artist(o) {
-            return true;
+        if self.place.is_some() && self.place == o.place {
+            if apart <= PLACE_SLACK_MS && self.shares_artist(o) {
+                return true;
+            }
+            if apart <= TIGHT_SLACK_MS && self.same_title(o) {
+                return true;
+            }
         }
         apart <= SLACK_MS
             && self.shares_artist(o)
@@ -372,11 +405,34 @@ pub(crate) fn same_song_track(conn: &Connection, t: &StreamTrack) -> Result<Opti
         return clip_song_file(conn, &Clip::new(&t.title, &names, d), None);
     }
     let song = Song::of_stream(t);
-    let found = candidates(conn, &song, None)?
+    let home = match t.album.as_ref().and_then(|a| a.id.as_ref()) {
+        Some(album) => super::linked(conn, "release", album.service, EntityKind::Album, &album.id)?,
+        None => None,
+    };
+    let found = candidates(conn, &song, None, home.as_deref())?
         .into_iter()
-        .find(|(id, _, _)| !has_service(conn, id, t.id.service).unwrap_or(true))
-        .map(|(id, _, _)| id);
+        .find(|c| !has_service(conn, &c.id, t.id.service).unwrap_or(true))
+        .map(|c| c.id);
     Ok(found)
+}
+
+/// The track of `release` (not at a place: another number, no number)
+/// that the stream `t` is by the rule of [`same_song_track`], without a
+/// source of the stream's service yet.
+pub(crate) fn same_song_on_release(conn: &Connection, t: &StreamTrack, release: &str) -> Result<Option<String>> {
+    if t.kind == TrackKind::Video {
+        return Ok(None);
+    }
+    let song = Song::of_stream(t);
+    for c in candidates(conn, &song, None, Some(release))? {
+        if c.release.as_deref() != Some(release) {
+            break; // the release's own come first
+        }
+        if !has_service(conn, &c.id, t.id.service)? {
+            return Ok(Some(c.id));
+        }
+    }
+    Ok(None)
 }
 
 /// The track at `place` of its release that the stream `t` is (see the
@@ -402,16 +458,26 @@ pub(crate) fn same_place_track(conn: &Connection, t: &StreamTrack, place: &Place
         let other = Song::new(&title, &artist, None, duration, None)
             .with_names(&names)
             .at(Some(place.clone()));
-        if song.same(&other) && !has_service(conn, &id, t.id.service)? {
+        if song.same(&other) && (song.twin(&other) || !has_service(conn, &id, t.id.service)?) {
             return Ok(Some(id));
         }
     }
     Ok(None)
 }
 
-/// Live tracks of the same song: `(id, has_local, seq)`, a track with a file
-/// first, then the oldest; without `exclude`.
-fn candidates(conn: &Connection, song: &Song, exclude: Option<&str>) -> Result<Vec<(String, bool, i64)>> {
+/// A live track of the same song (see [`candidates`]).
+struct Candidate {
+    id: String,
+    local: bool,
+    seq: i64,
+    release: Option<String>,
+    /// At the song's place under its title ([`Song::twin`]).
+    twin: bool,
+}
+
+/// Live tracks of the same song: those on `home` (the song's own release)
+/// first, then a track with a file, then the oldest; without `exclude`.
+fn candidates(conn: &Connection, song: &Song, exclude: Option<&str>, home: Option<&str>) -> Result<Vec<Candidate>> {
     let Some(d) = song.duration_ms else {
         return Ok(Vec::new());
     };
@@ -424,9 +490,10 @@ fn candidates(conn: &Connection, song: &Song, exclude: Option<&str>) -> Result<V
            FROM track t LEFT JOIN release r ON r.id = t.release_id
           WHERE t.duration_ms BETWEEN ?1 AND ?2 AND t.deleted_at IS NULL
             AND t.id IS NOT ?3
-          ORDER BY t.has_local DESC, t.seq",
+          ORDER BY (?4 IS NOT NULL AND t.release_id = ?4) DESC, t.has_local DESC, t.seq",
     )?;
-    let rows = stmt.query_map(params![d - SLACK_MS, d + SLACK_MS, exclude], |r| {
+    let home = home.or(song.place.as_ref().map(|p| p.0.as_str()));
+    let rows = stmt.query_map(params![d - SLACK_MS, d + SLACK_MS, exclude, home], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
@@ -444,12 +511,66 @@ fn candidates(conn: &Connection, song: &Song, exclude: Option<&str>) -> Result<V
         let (id, title, credit, duration, album, isrc, local, seq, place) = row?;
         let names = credit_names(&credit);
         let artist = names.first().cloned().unwrap_or_default();
+        let release = place.as_ref().map(|p| p.0.clone());
         let other = Song::new(&title, &artist, album.as_deref(), duration, isrc.as_deref())
             .with_names(&names)
             .at(place);
         if song.same(&other) {
-            out.push((id, local, seq));
+            let release = match release {
+                Some(r) => Some(r),
+                None => conn.query_row("SELECT release_id FROM track WHERE id = ?1", [&id], |r| r.get(0))?,
+            };
+            out.push(Candidate { twin: song.twin(&other), id, local, seq, release });
         }
+    }
+    Ok(out)
+}
+
+/// The release has a track with a file: a library album, whose tracks
+/// are its places (no stream row of it goes into a file elsewhere).
+fn has_files(conn: &Connection, release: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM track WHERE release_id = ?1 AND has_local = 1 AND deleted_at IS NULL)",
+        [release],
+        |r| r.get(0),
+    )?)
+}
+
+/// Pairs `(from, into)` of tracks with files on one release that are one
+/// song under titles a sound mark apart (see the module docs). `into` is
+/// the one alone at its place, else the older one.
+fn typo_twins(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.title, b.id, b.title,
+                (SELECT count(*) FROM track o WHERE o.release_id = a.release_id AND o.disc_no = a.disc_no
+                    AND o.track_no = a.track_no AND o.id != a.id AND o.deleted_at IS NULL AND a.track_no > 0),
+                (SELECT count(*) FROM track o WHERE o.release_id = b.release_id AND o.disc_no = b.disc_no
+                    AND o.track_no = b.track_no AND o.id != b.id AND o.deleted_at IS NULL AND b.track_no > 0)
+           FROM track a JOIN track b ON b.release_id = a.release_id AND b.seq > a.seq
+          WHERE a.has_local = 1 AND b.has_local = 1 AND a.deleted_at IS NULL AND b.deleted_at IS NULL
+            AND abs(a.duration_ms - b.duration_ms) <= ?1
+          ORDER BY a.seq, b.seq",
+    )?;
+    let rows = stmt.query_map([TYPO_SLACK_MS], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, i64>(5)?,
+        ))
+    })?;
+    let key = |t: &str| song_key(&nikgob_core::names::voiceless(t));
+    let mut out = Vec::new();
+    for row in rows {
+        let (a, ta, b, tb, crowd_a, crowd_b) = row?;
+        let k = key(&ta);
+        if k.is_empty() || k != key(&tb) {
+            continue;
+        }
+        // The older one stays, unless it shares its place with another song.
+        out.push(if crowd_a > 0 && crowd_b == 0 { (a, b) } else { (b, a) });
     }
     Ok(out)
 }
@@ -643,14 +764,20 @@ impl Library {
                     .with_names(&names)
                     .at(place);
                 let mine = services_of(tx, &id)?;
+                let home = song.place.as_ref().map(|p| p.0.clone());
+                // A row of a library album stays at its place.
+                let at_home = match &home {
+                    Some(r) => has_files(tx, r)?,
+                    None => false,
+                };
                 let mut other = None;
-                for (cand, local, cseq) in candidates(tx, &song, Some(&id))? {
-                    if is_clip(tx, &cand)? {
+                for c in candidates(tx, &song, Some(&id), None)? {
+                    if is_clip(tx, &c.id)? || (at_home && c.release != home) {
                         continue;
                     }
-                    let theirs = services_of(tx, &cand)?;
-                    if !theirs.iter().any(|s| mine.contains(s)) {
-                        other = Some((cand, local || cseq < seq));
+                    let theirs = services_of(tx, &c.id)?;
+                    if c.twin || !theirs.iter().any(|s| mine.contains(s)) {
+                        other = Some((c.id, c.local || c.seq < seq));
                         break;
                     }
                 }
@@ -673,6 +800,16 @@ impl Library {
                 let Some(file) = clip_song_file(tx, &clip, Some(&id))? else { continue };
                 if merge_track_in(tx, super::parse(&id)?, super::parse(&file)?, device.as_str(), now)? {
                     log::info!("library: clip {id} is the song {file}, merged");
+                    merged += 1;
+                }
+            }
+            // One song filed twice on one release under a typo.
+            for (from, into) in typo_twins(tx)? {
+                if !track_exists(tx, &from)? || !track_exists(tx, &into)? {
+                    continue;
+                }
+                if merge_track_in(tx, super::parse(&from)?, super::parse(&into)?, device.as_str(), now)? {
+                    log::info!("library: track {from} is {into} under a typo, merged (its file a spare copy)");
                     merged += 1;
                 }
             }

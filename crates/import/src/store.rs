@@ -17,6 +17,9 @@ use crate::layout::VARIOUS_ARTISTS;
 
 const PAGE: u32 = 500;
 
+/// MusicBrainz id of «Various Artists».
+pub(crate) const VARIOUS_ARTISTS_MBID: &str = "89ad4ac3-39f7-470e-963a-56509c546377";
+
 pub(crate) struct Store {
     lib: Library,
     loaded: bool,
@@ -99,6 +102,10 @@ impl Store {
                 break;
             }
             offset += PAGE;
+        }
+        // Other spellings of known artists find them («Ohara Yuiko» is 大原ゆい子).
+        for (artist, alias) in self.lib.artist_aliases()? {
+            self.artists.entry(name_key(&alias)).or_insert(artist);
         }
         let mut offset = 0;
         loop {
@@ -183,6 +190,7 @@ impl Store {
         let mut credit = ArtistCredit::default();
         for (i, (join, name)) in parts.iter().enumerate() {
             let key = name_key(name);
+            let various = key == name_key(VARIOUS_ARTISTS);
             let mut artist = match self.artists.get(&key) {
                 Some(id) => self
                     .lib
@@ -190,8 +198,11 @@ impl Store {
                     .unwrap_or_else(|| Artist::new(name.clone())),
                 None => Artist::new(name.clone()),
             };
-            if i == 0
-                && let Some(m) = first_mbid.filter(|m| !m.is_empty())
+            // An alias of an artist is credited under the artist's name.
+            let name = if name_key(&artist.name) == key { name.clone() } else { artist.name.clone() };
+            // «Various Artists» is nobody's MBID but its own.
+            let mbid = if various { Some(VARIOUS_ARTISTS_MBID) } else { first_mbid.filter(|_| i == 0) };
+            if let Some(m) = mbid.filter(|m| !m.is_empty())
                 && artist.mbid.is_none()
             {
                 artist.mbid = Some(m.to_owned());
@@ -200,7 +211,7 @@ impl Store {
             self.artists.insert(key, stored.id);
             credit.0.push(ArtistCreditPart {
                 artist_id: Some(stored.id),
-                name: name.clone(),
+                name,
                 join_phrase: String::new(),
             });
             if i > 0 {
@@ -261,8 +272,9 @@ impl Store {
                     self.split_known_pairs(parts)?
                 };
                 // The album artist's MBID is unknown here; the track artist's MBID
-                // only fits when both are the same person.
-                let same_artist = id.album_artist.is_none() || id.album_artist.as_deref() == Some(&id.artist_line);
+                // only fits when both are the same person (not a compilation's
+                // «Various Artists» standing for the track artist).
+                let same_artist = line == id.artist_line;
                 let mut credit = self.ensure_credit(
                     &parts,
                     if same_artist { id.artist_mbid.as_deref() } else { None },
@@ -360,6 +372,37 @@ mod tests {
         assert_eq!(pair.0.len(), 2);
         let band = store.track_credit(&identity("Simon & Garfunkel", None, "X")).unwrap();
         assert_eq!(band.0.len(), 1);
+    }
+
+    #[test]
+    fn various_artists_does_not_take_the_track_mbid() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut store = Store::new(lib.clone());
+        let mut id = identity("Ado", None, "NO SONG NO LIFE");
+        id.compilation = true;
+        id.artist_mbid = Some("e134b52f-0000-0000-0000-000000000000".into());
+        let release = store.ensure_release(&id, None).unwrap();
+        let track = store.track_credit(&id).unwrap();
+        let va = release.artist_credit.0[0].artist_id.unwrap();
+        let ado = track.0[0].artist_id.unwrap();
+        assert_ne!(va, ado);
+        assert_eq!(lib.get_artist(va).unwrap().unwrap().mbid.as_deref(), Some(VARIOUS_ARTISTS_MBID));
+        assert_eq!(lib.get_artist(ado).unwrap().unwrap().mbid, id.artist_mbid);
+        assert_eq!(lib.get_artist(ado).unwrap().unwrap().name, "Ado");
+    }
+
+    #[test]
+    fn an_alias_is_credited_under_the_artists_name() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut store = Store::new(lib.clone());
+        let ohara = store.track_credit(&identity("大原ゆい子", None, "Clover")).unwrap();
+        let latin = store.track_credit(&identity("Ohara Yuiko", None, "Kimi no Kioku")).unwrap();
+        let (a, b) = (ohara.0[0].artist_id.unwrap(), latin.0[0].artist_id.unwrap());
+        lib.merge_artists(b, a).unwrap();
+        let mut store = Store::new(lib);
+        let again = store.track_credit(&identity("Ohara Yuiko", None, "Musubime")).unwrap();
+        assert_eq!(again.0[0].artist_id, Some(a));
+        assert_eq!(again.display(), "大原ゆい子");
     }
 
     #[test]

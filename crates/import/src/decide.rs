@@ -149,6 +149,12 @@ fn duration_close(a: Option<u32>, b: Option<u32>) -> Option<bool> {
     Some(a?.abs_diff(b?) <= DURATION_SLACK_MS)
 }
 
+/// The track is on another album than `release`, the file's album the
+/// library has.
+fn elsewhere(track: &Track, release: Option<ReleaseId>) -> bool {
+    release.is_some() && track.release_id.is_some() && track.release_id != release
+}
+
 /// A track without a local file that streams (a liked Spotify / YouTube track).
 fn is_stream_only(lib: &Library, ex: &Existing) -> Result<bool> {
     Ok(ex.local.is_none()
@@ -208,10 +214,12 @@ fn target_match(lib: &Library, inc: &Incoming<'_>) -> Result<Option<Track>> {
 }
 
 /// Step 4: a stream-only track with this artist, title and length. Without
-/// a length on either side the album title has to agree instead.
-fn stream_match(lib: &Library, inc: &Incoming<'_>) -> Result<Option<Track>> {
+/// a length on either side the album title has to agree instead. Never one
+/// of another album when the file's own album is in the library: a track
+/// is its place there (docs/stage4.md §12.13).
+fn stream_match(lib: &Library, inc: &Incoming<'_>, release: Option<ReleaseId>) -> Result<Option<Track>> {
     for track in lib.stream_only_tracks()? {
-        if !same_song(&track, inc.identity) {
+        if !same_song(&track, inc.identity) || elsewhere(&track, release) {
             continue;
         }
         let fits = match duration_close(track.duration_ms, inc.duration_ms) {
@@ -293,7 +301,9 @@ pub(crate) fn find_existing(store: &mut Store, inc: &Incoming<'_>) -> Result<Opt
             // Another version of a liked stream track: asked about instead.
             continue;
         }
-        if same_release || ex.track.release_id.is_none() || ex.local.is_none() {
+        // A track without a file takes it, unless it has an album of its
+        // own and the file's album is another one the library has.
+        if same_release || ex.track.release_id.is_none() || (ex.local.is_none() && !elsewhere(&ex.track, release)) {
             return Ok(Some(ex));
         }
     }
@@ -304,7 +314,7 @@ pub(crate) fn find_existing(store: &mut Store, inc: &Incoming<'_>) -> Result<Opt
     }
 
     // 4. A liked stream track, by name and length.
-    if let Some(track) = stream_match(&lib, inc)? {
+    if let Some(track) = stream_match(&lib, inc, release)? {
         return Ok(Some(existing_of(&lib, track)?));
     }
 
@@ -488,6 +498,31 @@ mod tests {
             duration_ms: None,
         };
         assert_eq!(find_existing(&mut store, &inc).unwrap().unwrap().track.id, on_album);
+    }
+
+    #[test]
+    fn a_file_with_its_album_does_not_join_a_fileless_track_of_another_album() {
+        let mut store = Store::new(Library::open_in_memory().unwrap());
+        // The standard edition's row from the service, without a file.
+        let mut standard = identity("Alien Boy", 7, "Ugly Is Beautiful");
+        standard.isrc = Some("USUM72000001".into());
+        let row = add(&mut store, &standard, Codec::Opus, 0, false);
+        let mut t = store.library().get_track(row).unwrap().unwrap();
+        t.duration_ms = Some(160_000);
+        t.isrc = standard.isrc.clone();
+        store.library().upsert_track(&t).unwrap();
+        // The deluxe edition is in the library; its file of the song comes.
+        add(&mut store, &identity("Me, Myself & I", 1, "Ugly Is Beautiful: Shorter, Thicker & Uglier (Deluxe)"), Codec::Opus, 500, true);
+        let mut deluxe = identity("Alien Boy", 14, "Ugly Is Beautiful: Shorter, Thicker & Uglier (Deluxe)");
+        deluxe.isrc = standard.isrc.clone();
+        let inc = Incoming { identity: &deluxe, tag_track_id: None, fingerprint: None, targets: &[], duration_ms: Some(160_000) };
+        assert!(find_existing(&mut store, &inc).unwrap().is_none(), "a track of its own album");
+        // Its own album's row takes it.
+        let inc = Incoming { identity: &standard, tag_track_id: None, fingerprint: None, targets: &[], duration_ms: Some(160_000) };
+        assert_eq!(find_existing(&mut store, &inc).unwrap().map(|e| e.track.id), Some(row));
+        // The job's target takes it wherever it is.
+        let inc = Incoming { identity: &deluxe, tag_track_id: None, fingerprint: None, targets: &[row], duration_ms: Some(160_000) };
+        assert_eq!(find_existing(&mut store, &inc).unwrap().map(|e| e.track.id), Some(row));
     }
 
     #[test]

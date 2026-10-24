@@ -1148,7 +1148,7 @@ fn abyss_file(lib: &Library, release: ReleaseId, title: &str, credit: ArtistCred
     t.track_no = no;
     t.duration_ms = Some(ms);
     let t = lib.upsert_track(&t).unwrap();
-    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("Music/{no:02} {title}.opus"), Codec::Opus))
+    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("Music/{release}/{no:02} {title}.opus"), Codec::Opus))
         .unwrap();
     t.id
 }
@@ -1295,4 +1295,258 @@ fn a_tracklist_from_a_service_lands_on_the_files_at_their_places() {
         assert!(lib.sources_of_track(file).unwrap().iter().any(|s| s.locator == video), "{video} is a source of the file");
     }
     assert_eq!(lib.adopt_stream_album(release, &album).unwrap(), 0, "nothing twice");
+}
+
+/// A stream track of YouTube at a place of `release` (as an adopted
+/// tracklist leaves it), credited as one name.
+fn stream_at(lib: &Library, release: ReleaseId, id: &str, title: &str, artist: &str, no: u32, ms: u64) -> TrackId {
+    let t = separate(lib, &yt(id, title, artist, ms, false));
+    let credit = format!(r#"[{{"artist_id":null,"name":"{artist}","join_phrase":""}}]"#);
+    lib.write(|tx| {
+        tx.execute(
+            "UPDATE track SET release_id = ?2, disc_no = 1, track_no = ?3, artist_credit = ?4 WHERE id = ?1",
+            params![t.to_string(), release.to_string(), no, credit],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    t
+}
+
+fn release_of(lib: &Library, title: &str, artist: &str) -> ReleaseId {
+    let a = lib.upsert_artist(&Artist::new(artist)).unwrap();
+    lib.upsert_release(&Release::new(title, ArtistCredit::single(artist, Some(a.id)))).unwrap().id
+}
+
+#[test]
+fn a_twin_of_one_service_at_the_place_of_a_file_is_merged() {
+    let lib = lib();
+    let release = release_of(&lib, "HMU", "Tobias Dray");
+    let file = abyss_file(&lib, release, "HMU", ArtistCredit::single("Tobias Dray", None), 1, 172_400);
+    // The file already plays from YouTube under the album's video.
+    lib.add_source(&Source::new(file, SourceKind::Youtube, "AFujPyUFepc", Codec::Opus)).unwrap();
+    // The single's video, at the same place.
+    let twin = stream_at(&lib, release, "1jfYg31Q8jw", "HMU", "Tobias Dray", 1, 173_000);
+    // Another title at the place with the same service stays.
+    let file2 = abyss_file(&lib, release, "Intro", ArtistCredit::single("Tobias Dray", None), 2, 60_000);
+    lib.add_source(&Source::new(file2, SourceKind::Youtube, "yt-intro", Codec::Opus)).unwrap();
+    let other = stream_at(&lib, release, "yt-other", "Outro", "Tobias Dray", 2, 60_500);
+
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 1);
+    assert!(lib.get_track(twin).unwrap().is_none());
+    let sources = lib.sources_of_track(file).unwrap();
+    assert!(sources.iter().any(|s| s.locator == "1jfYg31Q8jw") && sources.iter().any(|s| s.locator == "AFujPyUFepc"));
+    assert_eq!(lib.active_source(file).unwrap().unwrap().kind, SourceKind::LocalFile);
+    assert!(lib.get_track(other).unwrap().is_some(), "another title");
+}
+
+#[test]
+fn one_title_at_one_place_needs_no_shared_artist() {
+    let lib = lib();
+    let release = release_of(&lib, "Clover", "大原ゆい子");
+    let file = abyss_file(&lib, release, "Clover", ArtistCredit::single("Ohara Yuiko", None), 1, 260_049);
+    let stream = stream_at(&lib, release, "DisOzS-ZjPQ", "Clover", "大原ゆい子", 1, 260_000);
+    // Not the song: too far apart, another place, another title.
+    let far = abyss_file(&lib, release, "Kimi no Kioku", ArtistCredit::single("Ohara Yuiko", None), 2, 240_000);
+    let far_stream = stream_at(&lib, release, "yt-kioku", "Kimi no Kioku", "大原ゆい子", 2, 242_000);
+    let moved = stream_at(&lib, release, "yt-moved", "Clover", "大原ゆい子", 3, 260_000);
+    let other = stream_at(&lib, release, "yt-other", "Hanabi", "大原ゆい子", 1, 260_000);
+
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 1);
+    assert!(lib.get_track(stream).unwrap().is_none());
+    assert!(lib.sources_of_track(file).unwrap().iter().any(|s| s.locator == "DisOzS-ZjPQ"));
+    for t in [far_stream, moved, other] {
+        assert!(lib.get_track(t).unwrap().is_some(), "{t} stays");
+    }
+    assert!(lib.get_track(far).unwrap().is_some());
+
+    let place = Some(("clover".to_owned(), 1, 1));
+    let a = Song::new("Clover", "Ohara Yuiko", None, Some(260_049), None).at(place.clone());
+    let b = Song::new("Clover", "大原ゆい子", None, Some(260_000), None).at(place.clone());
+    assert!(a.same(&b) && a.twin(&b));
+    assert!(!a.same(&Song { duration_ms: Some(262_000), ..b.clone() }), "2 s apart");
+    assert!(!a.same(&Song { place: Some(("clover".into(), 1, 2)), ..b.clone() }), "another place");
+    let inst = Song::new("Clover (Instrumental)", "大原ゆい子", None, Some(260_000), None).at(place);
+    assert!(!a.same(&inst), "a version");
+}
+
+#[test]
+fn one_song_filed_twice_under_a_sound_mark_typo_is_one_track() {
+    let lib = lib();
+    let release = release_of(&lib, "Mushoku Tensei OST 1 Special Edition", "Fujisawa Yoshiaki");
+    let by = ArtistCredit::single("Fujisawa Yoshiaki", None);
+    let paulo = abyss_file(&lib, release, "パウロ VS ルディ", by.clone(), 19, 135_602);
+    let ghislaine = abyss_file(&lib, release, "ギレーヌと二人きり", by.clone(), 19, 120_000);
+    let baulo = abyss_file(&lib, release, "バウロ VS ルディ", by.clone(), 23, 135_602);
+    // Two songs at one place, a version, a length too far: they stay.
+    let piano = abyss_file(&lib, release, "パウロ VS ルディ (Piano)", by.clone(), 30, 135_602);
+    let late = abyss_file(&lib, release, "ハウロ VS ルディ", by, 31, 135_700);
+
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 1);
+    assert!(lib.get_track(paulo).unwrap().is_none(), "the one sharing its place went");
+    let sources = lib.sources_of_track(baulo).unwrap();
+    assert_eq!(sources.iter().filter(|s| s.kind == SourceKind::LocalFile).count(), 2, "the second file is a spare copy");
+    for t in [ghislaine, piano, late] {
+        assert!(lib.get_track(t).unwrap().is_some());
+    }
+}
+
+#[test]
+fn a_stream_of_a_library_album_does_not_go_into_a_file_of_another_album() {
+    let lib = lib();
+    // A stream at its place on an album with files, the file of the song
+    // on another album.
+    let album = release_of(&lib, "El Camino", "The Black Keys");
+    abyss_file(&lib, album, "Lonely Boy", ArtistCredit::single("The Black Keys", None), 1, 193_000);
+    let stream = stream_at(&lib, album, "yt-dead", "Dead and Gone", "The Black Keys", 2, 221_000);
+    let other = release_of(&lib, "Dead and Gone", "The Black Keys");
+    let file = abyss_file(&lib, other, "Dead and Gone", ArtistCredit::single("The Black Keys", None), 1, 221_400);
+    lib.merge_duplicate_stream_tracks().unwrap();
+    assert!(lib.get_track(stream).unwrap().is_some(), "its place stays");
+    assert!(!lib.sources_of_track(file).unwrap().iter().any(|s| s.locator == "yt-dead"));
+}
+
+/// A YouTube album of `tracks` (`(no, video, title, ms)`) by `artist`.
+fn yt_album(id: &str, title: &str, artist: &str, tracks: &[(u32, &str, &str, u64)]) -> StreamAlbum {
+    let artists = vec![nikgob_core::streaming::ArtistRef::new(None, artist)];
+    StreamAlbum {
+        id: RemoteId::new(Service::Youtube, id),
+        title: title.into(),
+        artists: artists.clone(),
+        year: Some(2020),
+        release_date: None,
+        release_type: Default::default(),
+        cover_url: None,
+        total_tracks: Some(tracks.len() as u32),
+        tracks: tracks
+            .iter()
+            .map(|(no, video, title, ms)| {
+                let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, *video), *title);
+                t.artists = artists.clone();
+                t.track_no = Some(*no);
+                t.duration_ms = Some(*ms);
+                t
+            })
+            .collect(),
+    }
+}
+
+/// `(number, title)` of every live row of `release`.
+fn places(lib: &Library, release: ReleaseId) -> Vec<(u32, String)> {
+    lib.read(|c| {
+        let mut stmt = c.prepare(
+            "SELECT track_no, title FROM track WHERE release_id = ?1 AND deleted_at IS NULL ORDER BY disc_no, track_no, seq",
+        )?;
+        let rows = stmt.query_map([release.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })
+    .unwrap()
+}
+
+#[test]
+fn an_adopted_tracklist_keeps_a_row_for_every_place() {
+    let lib = lib();
+    let by = ArtistCredit::single("Oliver Tree", None);
+    let standard = release_of(&lib, "Ugly Is Beautiful", "Oliver Tree");
+    let deluxe = release_of(&lib, "Ugly Is Beautiful: Shorter, Thicker & Uglier (Deluxe)", "Oliver Tree");
+    let s1 = abyss_file(&lib, standard, "Me, Myself & I", by.clone(), 1, 177_000);
+    let s3 = abyss_file(&lib, standard, "Cash Machine", by.clone(), 3, 159_000);
+    let d1 = abyss_file(&lib, deluxe, "Me, Myself & I", by.clone(), 1, 177_000);
+    let d2 = abyss_file(&lib, deluxe, "Alien Boy", by.clone(), 2, 160_000);
+    let d3 = abyss_file(&lib, deluxe, "Cash Machine", by, 3, 159_000);
+    // The deluxe's #2 already has the standard's video.
+    lib.add_source(&Source::new(d2, SourceKind::Youtube, "yt-alien", Codec::Opus)).unwrap();
+    lib.set_external_id(EntityKind::Track, &RemoteId::new(Service::Youtube, "yt-alien"), d2.0).unwrap();
+    let album = yt_album(
+        "MPREb_ugly",
+        "Ugly Is Beautiful",
+        "Oliver Tree",
+        &[(1, "yt-me", "Me, Myself & I", 177_000), (2, "yt-alien", "Alien Boy", 160_000), (3, "yt-cash", "Cash Machine", 159_000)],
+    );
+
+    assert_eq!(lib.adopt_stream_album(standard, &album).unwrap(), 1, "#2 is new");
+    assert_eq!(places(&lib, standard), [(1, "Me, Myself & I".into()), (2, "Alien Boy".into()), (3, "Cash Machine".into())]);
+    assert_eq!(places(&lib, deluxe).len(), 3);
+    let alien = lib.track_by_remote(&RemoteId::new(Service::Youtube, "yt-alien")).unwrap().unwrap();
+    assert_eq!(lib.get_track(alien).unwrap().unwrap().release_id, Some(standard), "the stream came here");
+    assert_eq!(lib.active_source(d2).unwrap().unwrap().kind, SourceKind::LocalFile, "the deluxe keeps its file");
+    for (file, video) in [(s1, "yt-me"), (s3, "yt-cash")] {
+        assert!(lib.sources_of_track(file).unwrap().iter().any(|s| s.locator == video), "{video} on the standard's file");
+    }
+    for t in [d1, d3] {
+        assert!(!lib.sources_of_track(t).unwrap().iter().any(|s| s.kind == SourceKind::Youtube), "the deluxe gains nothing");
+    }
+    assert_eq!(lib.adopt_stream_album(standard, &album).unwrap(), 0, "nothing twice");
+}
+
+#[test]
+fn an_album_id_of_an_empty_release_is_taken_over() {
+    let lib = lib();
+    let band = "FUNKY MONKEY BΛBY\u{2019}S";
+    let empty = release_of(&lib, "Natsuko", band);
+    lib.set_external_id(EntityKind::Album, &RemoteId::new(Service::Youtube, "MPREb_natsuko"), empty.0).unwrap();
+    let release = release_of(&lib, "夏子", band);
+    abyss_file(&lib, release, "夏子", ArtistCredit::single(band, None), 1, 212_800);
+    let album = yt_album(
+        "MPREb_natsuko",
+        "Natsuko",
+        band,
+        &[(1, "yt-natsuko", "夏子 - Natsuko", 213_000), (2, "yt-inst", "夏子 (Instrumental)", 213_000)],
+    );
+    assert_eq!(lib.adopt_stream_album(release, &album).unwrap(), 1, "the instrumental");
+    assert_eq!(lib.release_by_remote(&album.id).unwrap(), Some(release));
+    assert!(lib.get_release(empty).unwrap().is_none(), "the empty one went");
+}
+
+#[test]
+fn a_song_on_two_albums_is_found_on_the_stream_album_first() {
+    let lib = lib();
+    let by = ArtistCredit::single("藤澤慶昌", None);
+    let ost = release_of(&lib, "Mushoku Tensei II Season 2 OST", "藤澤慶昌");
+    let special = release_of(&lib, "Mushoku Tensei II OST 1 Special Edition", "藤澤慶昌");
+    let a = abyss_file(&lib, ost, "Tabi no Hidarite", by.clone(), 1, 120_000);
+    // (Another number: one file name per number.)
+    let b = abyss_file(&lib, special, "Tabi no Hidarite", by, 2, 120_000);
+    lib.set_external_id(EntityKind::Album, &RemoteId::new(Service::Youtube, "MPREb_special"), special.0).unwrap();
+    let mut t = yt("yt-tabi", "Tabi no Hidarite", "藤澤慶昌", 120_000, false);
+    t.album = Some(nikgob_core::streaming::AlbumRef {
+        id: Some(RemoteId::new(Service::Youtube, "MPREb_special")),
+        title: "Mushoku Tensei II OST 1 Special Edition".into(),
+        artists: Vec::new(),
+        year: None,
+    });
+    assert_eq!(lib.track_for_stream(&t).unwrap(), Some(b));
+    t.album = None;
+    assert_eq!(lib.track_for_stream(&t).unwrap(), Some(a), "without an album: the older file");
+}
+
+#[test]
+fn versions_clips_and_other_artists_never_merge() {
+    let lib = lib();
+    let album = release_of(&lib, "Album", "Artist");
+    let by = ArtistCredit::single("Artist", None);
+    let song = abyss_file(&lib, album, "7 weeks & 3 days", by.clone(), 1, 200_000);
+    let mut kept = Vec::new();
+    for (id, title, ms) in [
+        ("yt-inst", "7 weeks & 3 days (Instrumental)", 200_000),
+        ("yt-live", "7 weeks & 3 days (Live)", 201_000),
+        ("yt-piano", "7 weeks & 3 days (Piano Version)", 200_500),
+    ] {
+        let t = separate(&lib, &yt(id, title, "Artist", ms, false));
+        lib.like(t).unwrap();
+        kept.push(t);
+    }
+    // A clip much longer than its song, «Лёд» by another artist.
+    let her = abyss_file(&lib, album, "her", by.clone(), 3, 200_000);
+    let clip = separate(&lib, &yt("yt-her", "her (Official Video)", "Artist", 276_000, true));
+    lib.like(clip).unwrap();
+    kept.push(clip);
+    let ice = abyss_file(&lib, album, "Лёд", by, 2, 180_000);
+    let other = separate(&lib, &yt("yt-ice", "Лёд", "Другой", 180_000, false));
+    lib.like(other).unwrap();
+    kept.push(other);
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 0);
+    for t in kept.into_iter().chain([song, ice, her]) {
+        assert!(lib.get_track(t).unwrap().is_some(), "{t} stays");
+    }
 }

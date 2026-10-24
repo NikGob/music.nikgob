@@ -76,6 +76,29 @@ pub fn unvoiced(c: char) -> char {
     char::from_u32(if katakana { plain + 0x60 } else { plain }).unwrap_or(c)
 }
 
+/// The disc a folder's name says: `CD2`, `Disc 2`, `disk 3`, `Диск 2`,
+/// `Album [CD2]` → 2.
+pub fn disc_of_folder(name: &str) -> Option<u32> {
+    let lower = width_fold(name).to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    for (i, w) in words.iter().enumerate() {
+        for p in ["cd", "disc", "disk", "диск"] {
+            let Some(rest) = w.strip_prefix(p) else { continue };
+            let digits = if rest.is_empty() { words.get(i + 1).copied().unwrap_or_default() } else { rest };
+            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+                return digits.parse().ok().filter(|n| *n > 0);
+            }
+        }
+    }
+    None
+}
+
+/// A title without its sound marks, widths folded: `パウロ` and `バウロ`
+/// are one (a typo of one mark).
+pub fn voiceless(s: &str) -> String {
+    width_fold(s).chars().filter(|c| !matches!(c, '\u{3099}' | '\u{309A}')).map(unvoiced).collect()
+}
+
 /// Lower case, `ё` → `е`, one width ([`width_fold`]), letters and digits
 /// only: one name however it is cased, spaced and bracketed.
 pub fn name_key(name: &str) -> String {
@@ -324,6 +347,19 @@ mod tests {
         assert_eq!(unvoiced('ヅ'), 'ツ');
         assert_eq!(unvoiced('ア'), 'ア');
         assert_eq!(unvoiced('ロ'), 'ロ');
+    }
+
+    #[test]
+    fn folders_name_their_disc() {
+        assert_eq!(disc_of_folder("CD2"), Some(2));
+        assert_eq!(disc_of_folder("Disc 1"), Some(1));
+        assert_eq!(disc_of_folder("Диск 3"), Some(3));
+        assert_eq!(disc_of_folder("Album [CD2]"), Some(2));
+        assert_eq!(disc_of_folder("ＣＤ２"), Some(2));
+        assert_eq!(disc_of_folder("Discography"), None);
+        assert_eq!(disc_of_folder("'Mushoku Tensei' Original Soundtrack 2"), None);
+        assert_eq!(voiceless("パウロ"), voiceless("バウロ"));
+        assert_ne!(voiceless("パウロ"), voiceless("パオロ"));
     }
 
     #[test]

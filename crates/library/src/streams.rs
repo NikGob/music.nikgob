@@ -152,7 +152,7 @@ fn exists(conn: &Connection, table: &str, id: &str) -> Result<bool> {
 }
 
 /// The local row a remote id is linked to, if that row still exists.
-fn linked(
+pub(crate) fn linked(
     conn: &Connection,
     table: &str,
     service: Service,
@@ -165,7 +165,7 @@ fn linked(
     }
 }
 
-fn parse<T: std::str::FromStr>(s: &str) -> Result<T> {
+pub(crate) fn parse<T: std::str::FromStr>(s: &str) -> Result<T> {
     s.parse().map_err(|_| LibraryError::Invalid(s.to_owned()))
 }
 
@@ -393,6 +393,22 @@ fn better_stream_source(conn: &Connection, track: &str, service: Service) -> Res
         }
     }
     Ok(false)
+}
+
+fn release_of(conn: &Connection, track: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT release_id FROM track WHERE id = ?1", [track], |r| r.get::<_, Option<String>>(0))
+        .optional()?
+        .flatten())
+}
+
+/// The track has a live source other than the stream `locator`.
+fn other_source_of_any(conn: &Connection, track: &str, locator: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM source WHERE track_id = ?1 AND locator != ?2 AND trashed_at IS NULL)",
+        params![track, locator],
+        |r| r.get(0),
+    )?)
 }
 
 fn has_local_source(conn: &Connection, track: &str) -> Result<bool> {
@@ -742,7 +758,11 @@ impl Library {
     /// place on the album whatever the titles, see [`same`]) gains that
     /// stream and the album's number when it had none, the release learns
     /// its track count, and a title in Latin letters takes the album's
-    /// Cyrillic. An album id linked to another release is left alone.
+    /// Cyrillic. Every place gets a row of this release: a song whose
+    /// track is on another album the library has files of (the deluxe
+    /// edition) gets one here, which the stream moves to (docs/stage4.md
+    /// §12.13). An album id linked to another release with tracks is left
+    /// alone; one linked to an empty release is taken over.
     /// Returns how many tracks were added.
     pub fn adopt_stream_album(&self, release: ReleaseId, album: &StreamAlbum) -> Result<usize> {
         self.write(|tx| {
@@ -755,7 +775,19 @@ impl Library {
             };
             let service = album.id.service;
             match linked(tx, "release", service, EntityKind::Album, &album.id.id)? {
-                Some(other) if other != rid => return Ok(0),
+                Some(other) if other != rid => {
+                    let empty: bool = tx.query_row(
+                        "SELECT NOT EXISTS(SELECT 1 FROM track WHERE release_id = ?1 AND deleted_at IS NULL)",
+                        [&other],
+                        |r| r.get(0),
+                    )?;
+                    if !empty {
+                        return Ok(0);
+                    }
+                    log::info!("library: album {} {} was the empty release {other}, now {rid}", service.as_str(), album.id.id);
+                    set_external(tx, service, EntityKind::Album, &album.id.id, &rid)?;
+                    crate::repairs::drop_empty_release_in(tx, &other, Some(&rid), self.device_id().as_str(), self.tick())?;
+                }
                 Some(_) => {}
                 None => set_external(tx, service, EntityKind::Album, &album.id.id, &rid)?,
             }
@@ -781,11 +813,27 @@ impl Library {
                 // The track at its place, whatever its title («滑落亭» of
                 // the service is the file «KATSURAKUTEI»).
                 let place = (rid.clone(), i64::from(t.disc_no.unwrap_or(1).max(1)), i64::from(no));
-                let at_place = match linked(tx, "track", service, EntityKind::Track, &t.id.id)? {
-                    Some(_) => None,
-                    None => same::same_place_track(tx, &t, &place)?.map(|id| parse(&id)).transpose()?,
+                let here = |tx: &Connection| -> Result<Option<TrackId>> {
+                    let found = match same::same_place_track(tx, &t, &place)? {
+                        Some(id) => Some(id),
+                        None => same::same_song_on_release(tx, &t, &rid)?,
+                    };
+                    found.map(|id| parse(&id)).transpose()
                 };
-                let id = upsert_stream_track_in(tx, &t, at_place)?;
+                let target = match linked(tx, "track", service, EntityKind::Track, &t.id.id)? {
+                    Some(l) if release_of(tx, &l)?.as_deref() == Some(rid.as_str()) => None,
+                    // A track of another album: it keeps its file, the
+                    // stream comes here (a stream-only track it is the
+                    // only source of moves here with it).
+                    Some(l) if has_local_source(tx, &l)? || other_source_of_any(tx, &l, &t.id.id)? => {
+                        Some(here(tx)?.unwrap_or_default())
+                    }
+                    Some(_) => None,
+                    // Nothing found by the stream's id: never a track of
+                    // another album (by ISRC or name).
+                    None => Some(here(tx)?.unwrap_or_default()),
+                };
+                let id = upsert_stream_track_in(tx, &t, target)?;
                 tx.execute(
                     "UPDATE track SET track_no = ?2, disc_no = ?3
                       WHERE id = ?1 AND release_id = ?4 AND track_no = 0",

@@ -468,3 +468,80 @@ async fn the_composers_the_first_repair_took_come_back_from_the_torrent_files() 
     }
     assert!(importer.repair_torrent_artists(true).unwrap().is_empty(), "once");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_repair_files_a_track_of_another_edition_at_its_place_and_finds_a_gone_wished_album() {
+    use nikgob_core::model::{Download, DownloadStatus, ReleaseId, SeedPolicy, WishlistItem, WishlistScope, WishlistStatus};
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    // The deluxe edition, imported first.
+    let deluxe_files = [(1, "Me, Myself & I", 3.0), (2, "Alien Boy", 4.0)];
+    let dir = torrent_folder(&root, "Oliver Tree - Ugly Is Beautiful Deluxe", &deluxe_files, |no, title| TagSet {
+        title: Some(title.into()),
+        artist: Some("Oliver Tree".into()),
+        album: Some("Ugly Is Beautiful: Shorter, Thicker & Uglier (Deluxe)".into()),
+        track_no: Some(no),
+        ..TagSet::default()
+    });
+    let events = importer.import_paths(vec![dir], SourceOrigin::Inbox).wait().await;
+    assert_eq!(imported(&events).len(), 2, "{events:?}");
+    // The standard edition's torrent, for a «Хочу скачать» album whose
+    // release went meanwhile.
+    let mut item = WishlistItem::new(WishlistStatus::Downloading, 1);
+    item.scope = WishlistScope::Album;
+    item.release_id = Some(ReleaseId::new());
+    item.title = Some("Ugly Is Beautiful".into());
+    item.artist = Some("Oliver Tree".into());
+    lib.put_wishlist_item(&item).unwrap();
+    let SourceOrigin::Torrent { info_hash, .. } = torrent() else { unreachable!() };
+    lib.put_download(&Download {
+        info_hash,
+        magnet: None,
+        torrent_file: None,
+        selected_files: Vec::new(),
+        status: DownloadStatus::Done,
+        seed_policy: SeedPolicy::Standard,
+        bytes_up: 0,
+        bytes_down: 0,
+        wishlist_id: Some(item.id),
+        created_at: 1,
+        updated_at: 1,
+    })
+    .unwrap();
+    let files = [(1, "Me, Myself & I", 3.5), (7, "Alien Boy", 4.5)];
+    let dir = torrent_folder(&root, "Oliver Tree - Ugly Is Beautiful (2020) [FLAC]", &files, |no, title| TagSet {
+        title: Some(title.into()),
+        artist: Some("Oliver Tree".into()),
+        album: Some("Ugly Is Beautiful".into()),
+        track_no: Some(no),
+        ..TagSet::default()
+    });
+    let events = importer.import_paths(vec![dir], torrent()).wait().await;
+    assert_eq!(imported(&events).len(), 2, "{events:?}");
+    let by_title = |title: &str| {
+        lib.releases(0, 10, nikgob_library::ReleaseSort::asc(Default::default()))
+            .unwrap()
+            .into_iter()
+            .find(|r| r.release.title == title)
+            .unwrap()
+            .release
+            .id
+    };
+    let standard = by_title("Ugly Is Beautiful");
+    let deluxe = by_title("Ugly Is Beautiful: Shorter, Thicker & Uglier (Deluxe)");
+    let place = |release, no| lib.tracks_of_release_all(release).unwrap().into_iter().find(|r| r.track_no == no).unwrap().id;
+    // How an old import left it: the standard's #7 file on the deluxe's #2.
+    lib.merge_track_into(place(standard, 7), place(deluxe, 2)).unwrap();
+    let alien = place(deluxe, 2);
+    assert_eq!(lib.sources_of_track(alien).unwrap().iter().filter(|s| s.kind == SourceKind::LocalFile).count(), 2);
+
+    let report = importer.repair_torrent_identities(false).unwrap();
+    assert_eq!(report.moved.len(), 1, "{report:?}");
+    let rows = lib.tracks_of_release_all(standard).unwrap();
+    assert_eq!(rows.iter().map(|r| (r.track_no, r.title.as_str(), r.has_local)).collect::<Vec<_>>(), [(1, "Me, Myself & I", true), (7, "Alien Boy", true)]);
+    let theirs = lib.sources_of_track(alien).unwrap();
+    assert_eq!(theirs.iter().filter(|s| s.kind == SourceKind::LocalFile).count(), 1, "the deluxe keeps its own file");
+    assert!(theirs.iter().all(|s| !matches!(s.origin, SourceOrigin::Torrent { .. })));
+    assert_eq!(lib.tracks_of_release_all(deluxe).unwrap().len(), 2);
+    assert_eq!(lib.get_wishlist_item(item.id).unwrap().unwrap().release_id, Some(standard), "the item found its album again");
+}

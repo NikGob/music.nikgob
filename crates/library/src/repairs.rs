@@ -382,6 +382,13 @@ impl Library {
         })
     }
 
+    /// The release with tracks an album called `title` by `artist` is (a
+    /// «Хочу скачать» item whose release went): the same title first, then
+    /// one that agrees («Ugly Is Beautiful» and its deluxe), the fuller one.
+    pub fn find_release_named(&self, title: &str, artist: &str) -> Result<Option<ReleaseId>> {
+        self.read(|c| release_like(c, title, artist)?.map(|r| crate::streams::parse(&r)).transpose())
+    }
+
     /// Removes a release without tracks (see the module docs). Returns
     /// whether it was removed.
     pub fn drop_empty_release(&self, release: ReleaseId) -> Result<bool> {
