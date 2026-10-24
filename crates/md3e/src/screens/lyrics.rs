@@ -269,7 +269,12 @@ fn paint(
         };
         let l = &lines[j];
         let size = (sizes.small + (sizes.big - sizes.small) * focus) * scale(l);
-        let g = fixed_layout(&painter, &breaks[j].forced, size);
+        // Between the two resting sizes the size moves every frame.
+        let g = if focus > 0.0 && focus < 1.0 {
+            moving_layout(&painter, &breaks[j].forced, size)
+        } else {
+            fixed_layout(&painter, &breaks[j].forced, size)
+        };
         let line = Rect::from_min_size(pos2(side(g.size().x), y + (slot_h - g.size().y) * 0.5), g.size());
         // Brightness of a line at rest: past lines a bit brighter than the
         // ones to come; focus mode pushes the rest far back.
@@ -466,6 +471,14 @@ fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, bi
 
 fn fixed_layout(painter: &egui::Painter, text: &str, size: f32) -> Arc<Galley> {
     painter.layout_job(LayoutJob::single_section(text.to_owned(), style_at(size).text_format(Color32::WHITE)))
+}
+
+/// [`fixed_layout`] for a size that is animating (see
+/// [`crate::typography::layout_sized`]).
+fn moving_layout(painter: &egui::Painter, text: &str, size: f32) -> Arc<Galley> {
+    crate::typography::layout_sized(painter, style_at(size), |style, _| {
+        LayoutJob::single_section(text.to_owned(), style.text_format(Color32::WHITE))
+    })
 }
 
 /// A looping sample for the settings' hover card: the line being sung
@@ -908,7 +921,11 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
         let ease = 1.0 - (1.0 - (age / 0.22).clamp(0.0, 1.0)).powi(3);
         let pop = if theme.reduced_motion { 1.0 } else { 1.0 + 0.22 * (1.0 - ease) };
         let alpha = edge * fade * reveal * (age / 0.12).clamp(0.0, 1.0);
-        painter.text(c, Align2::CENTER_CENTER, format!("{digit:.0}"), style_at(28.0 * k * pop).font_id(), s.primary.gamma_multiply(alpha));
+        let color = s.primary.gamma_multiply(alpha);
+        let g = crate::typography::layout_sized(painter, style_at(28.0 * k * pop), |style, _| {
+            LayoutJob::simple_singleline(format!("{digit:.0}"), style.font_id(), color)
+        });
+        painter.galley(Align2::CENTER_CENTER.anchor_size(c, g.size()).min, g, color);
     }
     let alpha = edge * fade * (1.0 - reveal);
     if alpha <= 0.01 { return; }

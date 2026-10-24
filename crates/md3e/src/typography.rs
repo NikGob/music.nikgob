@@ -150,6 +150,70 @@ impl TypeStyle {
     }
 }
 
+/// Lays out text whose size animates (a collapsing title, a floating label,
+/// a lyric line coming into focus) at the nearest whole size and scales the
+/// result to the exact one.
+///
+/// egui rasterizes every glyph again for every font size it meets and keeps
+/// them all in the font atlas: a size that moves every frame filled the
+/// atlas with glyphs drawn once (hundreds of megabytes over a session, a
+/// stall each time it doubled) and rasterized the line anew each frame.
+/// Whole sizes are few, so after the first animation nothing is drawn into
+/// the atlas, and the scale (a few percent at most) keeps the motion
+/// continuous.
+///
+/// `job` gets the style to lay out and how much narrower than the real
+/// size it is (for wrap widths); whole sizes are laid out as they are.
+pub fn layout_sized(
+    painter: &egui::Painter,
+    style: TypeStyle,
+    job: impl FnOnce(TypeStyle, f32) -> LayoutJob,
+) -> Arc<egui::Galley> {
+    let base = style.size.round().max(1.0);
+    if (style.size - base).abs() < 1e-3 || !style.size.is_finite() {
+        return painter.layout_job(job(style, 1.0));
+    }
+    let k = base / style.size;
+    let at = TypeStyle {
+        size: base,
+        line_height: style.line_height * k,
+        tracking: style.tracking * k,
+        weight: style.weight,
+    };
+    scale_galley(&painter.layout_job(job(at, k)), 1.0 / k)
+}
+
+/// `g` scaled by `s` around its origin: the glyphs keep their place in the
+/// font atlas and only their quads (and every measure) grow or shrink.
+pub fn scale_galley(g: &egui::Galley, s: f32) -> Arc<egui::Galley> {
+    use egui::{Pos2, Rect};
+    let p = |v: Pos2| Pos2::new(v.x * s, v.y * s);
+    let r = |v: Rect| Rect::from_min_max(p(v.min), p(v.max));
+    let mut out = g.clone();
+    for placed in &mut out.rows {
+        placed.pos = p(placed.pos);
+        let mut row = (*placed.row).clone();
+        row.size *= s;
+        for gl in &mut row.glyphs {
+            gl.pos = p(gl.pos);
+            gl.advance_width *= s;
+            gl.line_height *= s;
+            gl.font_ascent *= s;
+            gl.font_height *= s;
+            gl.font_face_ascent *= s;
+            gl.font_face_height *= s;
+        }
+        for v in &mut row.visuals.mesh.vertices {
+            v.pos = p(v.pos);
+        }
+        row.visuals.mesh_bounds = r(row.visuals.mesh_bounds);
+        placed.row = Arc::new(row);
+    }
+    out.rect = r(out.rect);
+    out.mesh_bounds = r(out.mesh_bounds);
+    Arc::new(out)
+}
+
 /// The 15 baseline styles (tokens.md section 2.1).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum TypeRole {
@@ -276,6 +340,42 @@ mod tests {
         }
         assert_eq!(TypeRole::BodyLarge.emphasized().weight, 500);
         assert_eq!(TypeRole::LabelLarge.emphasized().weight, 600);
+    }
+
+    #[test]
+    fn animated_sizes_use_whole_sizes_scaled_to_the_exact_one() {
+        let ctx = egui::Context::default();
+        let mut defs = FontDefinitions::default();
+        install_fonts(&mut defs);
+        ctx.set_fonts(defs);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter();
+            let layout = |size: f32| {
+                layout_sized(painter, TypeStyle::new(size, size * 1.25, 600, 0.0), |s, _| {
+                    LayoutJob::single_section("Свет из окна".into(), s.text_format(Color32::WHITE))
+                })
+            };
+            let mut sizes = Vec::new();
+            for step in 0..=40 {
+                let size = 32.0 + step as f32 * 0.3;
+                let g = layout(size);
+                let font = g.job.sections[0].format.font_id.size;
+                assert_eq!(font, font.round(), "laid out at {font} for {size}");
+                sizes.push(font as u32);
+                let native = painter.layout_job(LayoutJob::single_section(
+                    "Свет из окна".into(),
+                    TypeStyle::new(size, size * 1.25, 600, 0.0).text_format(Color32::WHITE),
+                ));
+                assert!((g.size().x - native.size().x).abs() <= native.size().x * 0.02, "{size}");
+                assert!((g.size().y - native.size().y).abs() <= 1.0, "{size}: {} {}", g.size().y, native.size().y);
+            }
+            sizes.dedup();
+            assert_eq!(sizes.len(), 13);
+            // A whole size is the plain layout.
+            let g = layout(40.0);
+            assert_eq!(g.job.sections[0].format.font_id.size, 40.0);
+        });
+        output.textures_delta.clear();
     }
 
     #[test]

@@ -122,9 +122,11 @@ pub(crate) fn line(
     color: Color32,
     max_width: f32,
 ) -> Arc<Galley> {
-    let mut job = style.job(text, color);
-    job.wrap = TextWrapping::truncate_at_width(max_width.max(1.0));
-    painter.layout_job(job)
+    crate::typography::layout_sized(painter, style, |style, k| {
+        let mut job = style.job(text, color);
+        job.wrap = TextWrapping::truncate_at_width((max_width * k).max(1.0));
+        job
+    })
 }
 
 /// An unwrapped galley.
@@ -134,7 +136,7 @@ pub(crate) fn plain(
     style: TypeStyle,
     color: Color32,
 ) -> Arc<Galley> {
-    painter.layout_job(style.job(text, color))
+    crate::typography::layout_sized(painter, style, |style, _| style.job(text, color))
 }
 
 /// `color` at `opacity` (for disabled content and fades).
@@ -175,14 +177,14 @@ pub(crate) fn paint_shape_avatar(
     };
     ui.painter().add(egui::Shape::mesh(mesh));
     if tex.is_none() && !initials.is_empty() {
+        // The avatar's size may be moving: laid out at a whole size.
         let size = (rect.height() * 0.32).max(12.0);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            initials,
-            egui::FontId::new(size, crate::typography::family(500)),
-            on,
-        );
+        let style = crate::TypeStyle::new(size, size, 500, 0.0);
+        let g = crate::typography::layout_sized(ui.painter(), style, |style, _| {
+            egui::text::LayoutJob::simple_singleline(initials.to_owned(), style.font_id(), on)
+        });
+        let at = egui::Align2::CENTER_CENTER.anchor_size(rect.center(), g.size());
+        ui.painter().galley(at.min, g, on);
     }
 }
 
