@@ -497,11 +497,18 @@ fn read_snapshot(
     let remote = lib.track_remote_ids().map_err(|e| err("remote ids", e))?;
     let releases = lib.release_names().map_err(|e| err("releases", e))?;
 
-    let catalog = Catalog::new(
-        rows.iter()
-            .filter(|r| r.in_library)
-            .map(|r| TrackInfo::new(r.id, r.artists.clone(), r.release).with_local(r.has_local)),
-    );
+    // One song on two albums: the track with a file (the oldest) stands for it.
+    let mut songs: HashMap<&str, (bool, TrackId)> = HashMap::new();
+    for r in rows.iter().filter(|r| r.in_library) {
+        let e = songs.entry(r.song.as_str()).or_insert((r.has_local, r.id));
+        if r.has_local && !e.0 {
+            *e = (true, r.id);
+        }
+    }
+    let catalog = Catalog::new(rows.iter().filter(|r| r.in_library).map(|r| {
+        let song = songs.get(r.song.as_str()).map_or(r.id, |s| s.1);
+        TrackInfo::new(r.id, r.artists.clone(), r.release).with_local(r.has_local).with_song(song)
+    }));
     let mut artist_keys: HashMap<String, ArtistId> = HashMap::new();
     let mut names: HashMap<ArtistId, String> = HashMap::new();
     for (id, name) in &artists {

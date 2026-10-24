@@ -80,6 +80,9 @@ pub struct TrackInfo {
     /// Has a file (a liked or playlist stream without one plays from its
     /// service): «Миксы только из скачанного» picks only these.
     pub local: bool,
+    /// The track standing for its song when the song has several tracks
+    /// (one per album it is on): a mix takes one of them.
+    pub song: Option<TrackId>,
 }
 
 impl TrackInfo {
@@ -90,7 +93,15 @@ impl TrackInfo {
             artists,
             release,
             local: true,
+            song: None,
         }
+    }
+
+    /// The track standing for the song this one is (see [`Self::song`]).
+    #[must_use]
+    pub fn with_song(mut self, song: TrackId) -> Self {
+        self.song = (song != self.id).then_some(song);
+        self
     }
 
     /// The same track, with a file or without one.

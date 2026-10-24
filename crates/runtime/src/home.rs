@@ -209,6 +209,7 @@ mod tests {
             release,
             in_library,
             has_local,
+            song: String::new(),
         }
     }
 

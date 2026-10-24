@@ -170,7 +170,7 @@ pub(crate) fn parse<T: std::str::FromStr>(s: &str) -> Result<T> {
 }
 
 /// Upper case, without dashes and spaces; `None` when empty.
-fn normal_isrc(isrc: Option<&str>) -> Option<String> {
+pub(crate) fn normal_isrc(isrc: Option<&str>) -> Option<String> {
     let s: String = isrc?
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())

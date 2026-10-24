@@ -158,6 +158,7 @@ impl<'a> Recs<'a> {
         let t = self.info(i);
         Slot {
             item: Item::Track(t.id),
+            song: t.song.map(Item::Track),
             reason,
             artists: t.artists.iter().map(|a| token_of_artist(*a)).collect(),
             album: t.release.map(|r| token(r.as_uuid().as_bytes())),
@@ -171,6 +172,7 @@ impl<'a> Recs<'a> {
     pub(crate) fn new_slot(&self, t: &NewTrack, score: f32) -> Slot {
         Slot {
             item: Item::Stream(t.id.clone()),
+            song: None,
             reason: Reason::New,
             artists: if t.artist.is_empty() { Vec::new() } else { vec![token(t.artist.as_bytes())] },
             album: t.album.as_ref().map(|a| token(a.as_bytes())),
@@ -199,6 +201,9 @@ pub(crate) fn token_of_artist(a: ArtistId) -> u64 {
 #[derive(Clone, Debug)]
 pub(crate) struct Slot {
     pub item: Item,
+    /// The item standing for its song when another track is that song
+    /// too: taken, it takes the song.
+    pub song: Option<Item>,
     pub reason: Reason,
     /// Artist tokens (library artists by id, new tracks by folded name).
     pub artists: Vec<u64>,
@@ -289,7 +294,7 @@ pub(crate) fn select_diverse(cands: Vec<Slot>, n: usize, rules: &Diversity, take
         if out.len() == n {
             break;
         }
-        if taken.contains(&s.item) {
+        if taken.contains(&s.item) || s.song.as_ref().is_some_and(|x| taken.contains(x)) {
             continue;
         }
         let artist_full = s
@@ -307,7 +312,7 @@ pub(crate) fn select_diverse(cands: Vec<Slot>, n: usize, rules: &Diversity, take
         if let Some(b) = s.album {
             *per_album.entry(b).or_default() += 1;
         }
-        taken.insert(s.item.clone());
+        take(taken, &s);
         out.push(s);
     }
     // Too few that fit: the rest by score anyway (a small library).
@@ -315,11 +320,20 @@ pub(crate) fn select_diverse(cands: Vec<Slot>, n: usize, rules: &Diversity, take
         if out.len() == n {
             break;
         }
-        if taken.insert(s.item.clone()) {
+        if !taken.contains(&s.item) && !s.song.as_ref().is_some_and(|x| taken.contains(x)) {
+            take(taken, &s);
             out.push(s);
         }
     }
     out
+}
+
+/// Marks the slot's item and its song taken: one song plays once.
+fn take(taken: &mut HashSet<Item>, s: &Slot) {
+    taken.insert(s.item.clone());
+    if let Some(song) = &s.song {
+        taken.insert(song.clone());
+    }
 }
 
 /// A rough "how far apart" for two slots when one has no vector, in units
@@ -476,6 +490,25 @@ mod tests {
     use super::*;
     use crate::taste::TasteInput;
     use crate::test_util::*;
+
+    #[test]
+    fn a_mix_never_has_one_song_twice() {
+        // Track 1 is track 0's song on another album (an OST and its special
+        // edition); 2 is a song of its own.
+        let tracks = vec![info(0, &[1], Some(10)), info(1, &[1], Some(11)).with_song(tid(0)), info(2, &[2], Some(10))];
+        let cat = Catalog::new(tracks);
+        let idx = VectorIndex::new();
+        let taste = Taste::build(&cat, &TasteInput::default(), 0);
+        let recs = Recs::new(&cat, &taste, &idx);
+        let slots: Vec<Slot> = [1, 0, 2].into_iter().map(|i| recs.slot(i, Reason::Random, 1.0)).collect();
+        let mut taken = HashSet::new();
+        let out = select_diverse(slots, 3, &Diversity::default(), &mut taken);
+        let ids: Vec<Item> = out.into_iter().map(|s| s.item).collect();
+        assert_eq!(ids, [Item::Track(tid(1)), Item::Track(tid(2))], "one of the two tracks of the song");
+        // A later part of the mix does not bring it back either.
+        let again = select_diverse(vec![recs.slot(0, Reason::Random, 1.0)], 1, &Diversity::default(), &mut taken);
+        assert!(again.is_empty());
+    }
 
     #[test]
     fn split_rounds_to_the_total() {

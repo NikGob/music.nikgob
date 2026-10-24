@@ -27,6 +27,10 @@ pub struct RecTrack {
     /// are "seen" stream tracks, kept for their history.
     pub in_library: bool,
     pub has_local: bool,
+    /// Which song it is: its recording's MusicBrainz id, else its ISRC,
+    /// else its folded title with its main artist. One song on two albums
+    /// (an OST and its special edition) is one key: a mix plays it once.
+    pub song: String,
 }
 
 impl Library {
@@ -41,24 +45,37 @@ impl Library {
                 artists.entry(t).or_default().push(a);
             }
             let mut stmt = c.prepare(
-                "SELECT id, title, artist_display, release_id, in_library, has_local FROM track
+                "SELECT id, title, artist_display, release_id, in_library, has_local, recording_mbid, isrc FROM track
                   WHERE deleted_at IS NULL ORDER BY seq",
             )?;
             let rows = stmt.query_map([], |r| {
-                Ok(RecTrack {
-                    id: get_id(r, 0)?,
-                    title: r.get(1)?,
-                    artist: r.get(2)?,
-                    artists: Vec::new(),
-                    release: get_opt_id(r, 3)?,
-                    in_library: r.get(4)?,
-                    has_local: r.get(5)?,
-                })
+                let ids: (Option<String>, Option<String>) = (r.get(6)?, r.get(7)?);
+                Ok((
+                    RecTrack {
+                        id: get_id(r, 0)?,
+                        title: r.get(1)?,
+                        artist: r.get(2)?,
+                        artists: Vec::new(),
+                        release: get_opt_id(r, 3)?,
+                        in_library: r.get(4)?,
+                        has_local: r.get(5)?,
+                        song: String::new(),
+                    },
+                    ids,
+                ))
             })?;
             let mut out = Vec::new();
             for row in rows {
-                let mut t = row?;
+                let (mut t, (recording, isrc)) = row?;
                 t.artists = artists.remove(&t.id).unwrap_or_default();
+                t.song = match (recording.filter(|m| !m.is_empty()), crate::streams::normal_isrc(isrc.as_deref())) {
+                    (Some(m), _) => format!("mb:{m}"),
+                    (None, Some(i)) => format!("isrc:{i}"),
+                    (None, None) => {
+                        let by = t.artists.first().map_or_else(|| crate::streams::credit_keys(&t.artist).join(","), ToString::to_string);
+                        format!("song:{}|{by}", crate::streams::song_key(&t.title))
+                    }
+                };
                 out.push(t);
             }
             Ok(out)
