@@ -158,6 +158,10 @@ pub(crate) fn paint_shape_avatar(
     on: Color32,
 ) {
     use nikgob_shapes::paint as shape_paint;
+    // The shape is flattened and filled anew each frame: not out of sight.
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
     let cubics = shape.polygon().cubics();
     let opts = shape_paint::FillOptions::for_ppp(ui.ctx().pixels_per_point());
     let tex = uri

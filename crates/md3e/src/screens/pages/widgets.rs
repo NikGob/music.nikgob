@@ -434,6 +434,11 @@ fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Ve
     let caption = if radio { String::new() } else { artist_tracks(a) };
     let text_h = if caption.is_empty() { 28.0 } else { 48.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size + text_h), Sense::click());
+    // A row holds every artist of the library: the ones scrolled out of
+    // sight (with room for the hover growth) cost nothing.
+    if !ui.is_rect_visible(rect.expand(4.0)) {
+        return None;
+    }
     let img = Rect::from_min_size(rect.min, vec2(size, size));
     let hover = resp.contains_pointer();
     let grow = anim::f32(
