@@ -162,6 +162,19 @@ pub struct ReleaseDetail {
     /// "FLAC → Opus" style summary chip.
     pub quality: Option<String>,
     pub liked: bool,
+    /// The page's lines in order, one per place the album counts (the
+    /// card's «13 из 14» is their count); empty: just the tracks.
+    pub lines: Vec<ReleaseLine>,
+}
+
+/// One line of an album page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseLine {
+    /// A track of [`ReleaseDetail::tracks`], by index.
+    Track(usize),
+    /// A place the album counts that has no track: «Трек 7 · нет файла»
+    /// (`no` 0 when unknown).
+    Hole { disc: u32, no: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq)]

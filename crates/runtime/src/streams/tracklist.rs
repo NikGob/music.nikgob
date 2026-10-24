@@ -10,10 +10,13 @@
 //! * The album in a service: the id linked to the release first; else a
 //!   search for «artist title» on YouTube Music, then the Deezer catalogue,
 //!   taking an album of the same title (folded, or its Cyrillic for a
-//!   transliterated one) by an artist of the same name.
+//!   transliterated one) by an artist of the same name, else one whose
+//!   title extends the other («Discovery» and «Discovery Bonus Mix»).
 //! * Its tracks the release lacks become stream tracks of it, outside the
 //!   library ([`nikgob_library::Library::adopt_stream_album`]): the page
-//!   shows them muted with ▶ and ↓, the cards say «1 из 15».
+//!   shows them muted with ▶ and ↓, the cards say «1 из 15». Found is
+//!   kept only once every place the album counts has a line; an album
+//!   still short of its count is asked again like a miss.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -58,6 +61,13 @@ pub(crate) fn same_album(a: &str, b: &str) -> bool {
     (!x.is_empty() && x == y) || same_translit(a, b)
 }
 
+/// One title the other with more words after it, folded.
+fn extends_album(a: &str, b: &str) -> bool {
+    let (x, y) = (album_key(a), album_key(b));
+    let starts = |long: &str, short: &str| !short.is_empty() && long.strip_prefix(short).is_some_and(|r| r.starts_with(' '));
+    starts(&x, &y) || starts(&y, &x)
+}
+
 fn same_artist(a: &str, b: &str) -> bool {
     let (x, y) = (artist_key(a), artist_key(b));
     (!x.is_empty() && x == y) || same_translit(a, b)
@@ -74,13 +84,26 @@ async fn find(
         return svc.album(&id).await.map(Some);
     }
     let hits = svc.search_kind(&format!("{artist} {title}"), SearchKind::Albums).await?.albums;
-    for a in hits.into_iter().take(CANDIDATES) {
-        let by = a.artists.iter().any(|x| same_artist(&x.name, &artist));
-        if by && same_album(&a.title, &title) {
-            return svc.album(&a.id.id).await.map(Some);
-        }
+    let by: Vec<_> = hits
+        .into_iter()
+        .take(CANDIDATES)
+        .filter(|a| a.artists.iter().any(|x| same_artist(&x.name, &artist)))
+        .collect();
+    // The same title first; an edition with more words only without one.
+    let hit = by.iter().find(|a| same_album(&a.title, &title)).or_else(|| by.iter().find(|a| extends_album(&a.title, &title)));
+    match hit {
+        Some(a) => svc.album(&a.id.id).await.map(Some),
+        None => Ok(None),
     }
-    Ok(None)
+}
+
+/// What a found tracklist leaves in the cache: found once every place the
+/// album counts has a line, else a miss, asked again later.
+fn found_mark(lib: &nikgob_library::Library, release: ReleaseId) -> &'static str {
+    match lib.release_listing(release) {
+        Ok(Some(l)) if l.holes() > 0 => "miss",
+        _ => "found",
+    }
 }
 
 impl Worker {
@@ -144,7 +167,7 @@ impl Worker {
                     Ok(n) => log::info!("album {}: {n} more tracks from {}", m.release, album.id),
                     Err(e) => log::warn!("album {}: tracklist not stored: {e}", m.release),
                 }
-                let _ = self.lib.cache_put(&key, now, "found");
+                let _ = self.lib.cache_put(&key, now, found_mark(&self.lib, m.release));
                 self.load_library();
                 if self.state.read().release.as_ref().is_some_and(|r| r.card.id == m.release) {
                     self.load_release(m.release);
@@ -192,5 +215,29 @@ mod tests {
         assert!(same_album("Группа крови (Remastered)", "группа крови"));
         assert!(!same_album("Группа крови", "Звезда по имени Солнце"));
         assert!(same_artist("MORGENSHTERN", "Моргенштерн"));
+        assert!(extends_album("Discovery Bonus Mix", "Discovery"));
+        assert!(!extends_album("Discoveryland", "Discovery"));
+        assert!(!extends_album("Mercury – Act 1", "Mercury : Acts 1 & 2"));
+    }
+
+    #[test]
+    fn tracklist_found_is_not_cached_while_places_are_missing() {
+        use nikgob_core::model::{ArtistCredit, Release, Track};
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let mut r = Release::new("Album", ArtistCredit::single("A", None));
+        r.total_tracks = Some(3);
+        let r = lib.upsert_release(&r).unwrap();
+        for no in [1, 2] {
+            let mut t = Track::new(format!("Song {no}"), ArtistCredit::single("A", None));
+            t.release_id = Some(r.id);
+            t.track_no = no;
+            lib.upsert_track(&t).unwrap();
+        }
+        assert_eq!(found_mark(&lib, r.id), "miss");
+        let mut t = Track::new("Song 3", ArtistCredit::single("A", None));
+        t.release_id = Some(r.id);
+        t.track_no = 3;
+        lib.upsert_track(&t).unwrap();
+        assert_eq!(found_mark(&lib, r.id), "found");
     }
 }

@@ -408,16 +408,9 @@ impl Worker {
     fn run(&mut self, rx: Receiver<Msg>, pb: Receiver<PlaybackEvent>, internal: Receiver<Internal>) {
         let ticker = tick(self.streaming.schedule.tick);
         let fast = tick(Duration::from_secs(1));
-        // Once: the song liked on both services as two tracks becomes one.
-        match self.lib.merge_duplicate_stream_tracks() {
-            Ok(0) => {}
-            Ok(n) => log::info!("library: {n} duplicate stream tracks merged"),
-            Err(e) => log::warn!("library: merging duplicate stream tracks: {e}"),
-        }
-        // Once: tracks imported as one artist "A, B" link to A and to B.
-        if let Err(e) = self.lib.split_combined_credits() {
-            log::warn!("library: splitting combined artist credits: {e}");
-        }
+        // Once each, after a backup: doubles of a song, an artist or an
+        // album become one, and every album has a line per place it counts.
+        self.lib.repair_catalog();
         self.load_torrent_history();
         self.publish_downloads();
         self.resume_torrents();
@@ -1625,11 +1618,13 @@ impl Worker {
         };
         // Its songs outside the library too: the ones a service knows it
         // has and nothing here plays from a file (▶ stream, ↓ download).
-        let rows = self.lib.tracks_of_release_all(id).unwrap_or_default();
-        let progress = self.lib.release_progress(id).ok().flatten();
+        // A line per place the album counts: a hole where none has a row.
+        let Some(listing) = self.lib.release_listing(id).ok().flatten() else {
+            return;
+        };
         let liked = self.lib.release_liked(id).unwrap_or(false);
         self.publish(|s, res| {
-            s.release = Some(res.release_detail(&release, &rows, progress, liked));
+            s.release = Some(res.release_detail(&release, &listing, liked));
         });
         self.complete_tracklist(id);
     }

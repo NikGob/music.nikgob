@@ -116,7 +116,7 @@ fn scattered(lib: &Library, f: &FolderFile, album: &str, artists: &[String]) -> 
 
 /// The release of a «Хочу скачать» item; one that went is found again by
 /// the item's album title and artist, and the item points at it again.
-fn wished_release(lib: &Library, item: &WishlistItem) -> Result<Option<Release>> {
+pub fn wished_release(lib: &Library, item: &WishlistItem) -> Result<Option<Release>> {
     if let Some(r) = item.release_id.and_then(|r| lib.get_release(r).ok().flatten()) {
         return Ok(Some(r));
     }
@@ -163,11 +163,13 @@ fn credit_lines(t: &TrackRow) -> Vec<String> {
     lines
 }
 
-/// Tracks of `release` with a live file, and all of them (outside the
-/// library too): «3 из 12» of a «Хочу скачать» album.
+/// Lines of `release` with a live file, and all the lines its page has
+/// (its tracks, outside the library too, and the places none has): «13 из
+/// 14» of a «Хочу скачать» album, as its page and card count.
 pub fn release_files(lib: &Library, release: ReleaseId) -> Result<(usize, usize)> {
-    let rows = lib.tracks_of_release_all(release)?;
-    Ok((rows.iter().filter(|r| r.has_local).count(), rows.len()))
+    Ok(lib
+        .release_listing(release)?
+        .map_or((0, 0), |l| (l.progress.local as usize, l.progress.total as usize)))
 }
 
 impl Importer {
@@ -424,7 +426,7 @@ impl Importer {
             if item.scope != WishlistScope::Album || matches!(item.status, WishlistStatus::Done | WishlistStatus::Dismissed) {
                 continue;
             }
-            let Some(r) = item.release_id else { continue };
+            let Some(r) = wished_release(lib, &item)?.map(|r| r.id) else { continue };
             let (have, all) = release_files(lib, r)?;
             if all > 0 && have == all && touched.iter().any(|t| lib.get_track(*t).ok().flatten().and_then(|t| t.release_id) == Some(r)) {
                 lib.set_wishlist_status(item.id, WishlistStatus::Done, Some("Скачано"))?;

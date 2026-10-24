@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use nikgob_core::model::{ArtistId, Codec, PlaylistId, Release, ReleaseId, Source, SourceKind};
 use nikgob_library::{
-    ArtistRow, Library, PlaylistKind, PlaylistSummary, ReleaseProgress, ReleaseRow, TrackRow,
+    ArtistRow, Library, ListingEntry, PlaylistKind, PlaylistSummary, ReleaseListing, ReleaseProgress, ReleaseRow, TrackRow,
 };
 use nikgob_view as v;
 
@@ -254,12 +254,23 @@ impl Resolver {
     pub fn release_detail(
         &mut self,
         r: &Release,
-        rows: &[TrackRow],
-        progress: Option<ReleaseProgress>,
+        listing: &ReleaseListing,
         liked: bool,
     ) -> v::ReleaseDetail {
-        let (local, total) = progress.map_or((0, None), |p| (p.local, Some(p.total)));
-        let tracks: Vec<v::TrackRow> = rows.iter().map(|t| self.track(t)).collect();
+        let (local, total) = (listing.progress.local, Some(listing.progress.total));
+        let tracks: Vec<v::TrackRow> = listing.tracks().map(|t| self.track(t)).collect();
+        let mut at = 0;
+        let lines = listing
+            .entries
+            .iter()
+            .map(|e| match e {
+                ListingEntry::Track(_) => {
+                    at += 1;
+                    v::ReleaseLine::Track(at - 1)
+                }
+                ListingEntry::Hole { disc, no } => v::ReleaseLine::Hole { disc: *disc, no: *no },
+            })
+            .collect();
         let total_duration = tracks.iter().filter_map(|t| t.duration).sum();
         let quality = summarize_quality(&tracks);
         v::ReleaseDetail {
@@ -268,6 +279,7 @@ impl Resolver {
             total_duration,
             quality,
             liked,
+            lines,
         }
     }
 

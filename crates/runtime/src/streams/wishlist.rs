@@ -1225,10 +1225,14 @@ impl Worker {
         }
     }
 
-    /// Files of `item`'s album that have a file, and all its tracks.
+    /// Lines of `item`'s album that have a file, and all its lines (the
+    /// count its page says). An album that went (folded into its fuller
+    /// edition) is found again by name, and the item follows it.
     fn album_files(&self, item: &WishlistItem) -> (usize, usize) {
-        item.release_id
-            .and_then(|r| nikgob_import::release_files(&self.lib, r).ok())
+        nikgob_import::wished_release(&self.lib, item)
+            .ok()
+            .flatten()
+            .and_then(|r| nikgob_import::release_files(&self.lib, r.id).ok())
             .unwrap_or_default()
     }
 
