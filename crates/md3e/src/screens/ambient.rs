@@ -5,13 +5,13 @@
 
 use std::f32::consts::TAU;
 
-use egui::{Color32, Context, Id, Mesh, Painter, Rect, pos2, vec2};
+use egui::{Color32, ColorImage, Context, Id, Mesh, Painter, Rect, TextureHandle, TextureOptions, pos2, vec2};
 
 use crate::Theme;
 
-/// Segments around each cloud and rings from centre to edge.
-const SEGMENTS: usize = 64;
-const RINGS: usize = 8;
+/// Side of the cloud texture: one texel per few pixels of the largest cloud,
+/// which bilinear filtering blends into a continuous ramp.
+const TEXTURE: usize = 512;
 
 /// One cloud: where it wanders (fractions of the rect), how fast, how big.
 struct Cloud {
@@ -42,13 +42,17 @@ pub fn paint(ctx: &Context, painter: &Painter, rect: Rect, bass: f32, moving: bo
     let strength = (if theme.dark { 0.20 } else { 0.16 } * (1.0 + 0.6 * bass) * strength.clamp(0.25, 2.0)).min(1.0);
     let size = rect.width().max(rect.height());
     let painter = painter.with_clip_rect(painter.clip_rect().intersect(rect));
-    let mut mesh = Mesh::default();
+    let mut mesh = Mesh::with_texture(texture(ctx).id());
     for (cloud, color) in CLOUDS.iter().zip(colors) {
         let x = cloud.home.0 + cloud.reach.0 * (phase * cloud.speed.0 * TAU + cloud.phase.0).sin();
         let y = cloud.home.1 + cloud.reach.1 * (phase * cloud.speed.1 * TAU + cloud.phase.1).cos();
         let center = pos2(rect.left() + rect.width() * x, rect.top() + rect.height() * y);
         let radius = size * cloud.radius * (1.0 + 0.10 * bass);
-        radial(&mut mesh, center, radius, color, strength);
+        mesh.add_rect_with_uv(
+            Rect::from_center_size(center, vec2(radius, radius) * 2.0),
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            color.gamma_multiply(strength),
+        );
     }
     painter.add(egui::Shape::mesh(mesh));
     if moving {
@@ -70,35 +74,33 @@ fn drift(ctx: &Context, moving: bool) -> f32 {
     })
 }
 
-/// A radial gradient disc: `color` at `alpha` in the centre, fading with a
-/// smooth (zero-slope) curve to nothing at `radius`.
-fn radial(mesh: &mut Mesh, center: egui::Pos2, radius: f32, color: Color32, alpha: f32) {
-    let falloff = |k: f32| {
-        let q = 1.0 - k * k;
-        q * q
-    };
-    let base = mesh.vertices.len() as u32;
-    mesh.colored_vertex(center, color.gamma_multiply(alpha));
-    for ring in 1..=RINGS {
-        let k = ring as f32 / RINGS as f32;
-        let c = color.gamma_multiply(alpha * falloff(k));
-        for i in 0..SEGMENTS {
-            let a = i as f32 / SEGMENTS as f32 * TAU;
-            mesh.colored_vertex(center + vec2(a.cos(), a.sin()) * radius * k, c);
-        }
+/// How a cloud fades from its centre (`k` 0) to its edge (`k` 1): a smooth
+/// curve with no slope at either end.
+fn falloff(k: f32) -> f32 {
+    let q = (1.0 - k * k).max(0.0);
+    q * q
+}
+
+/// The cloud's shape as a texture: white, its opacity [`falloff`] from the
+/// centre. Drawn tinted, one quad per cloud. (Rings of vertices joined by
+/// straight ramps left a visible edge at every ring, and the edges moved
+/// outwards as the clouds swelled with the bass.)
+fn texture(ctx: &Context) -> TextureHandle {
+    let id = Id::new("md3e-ambient-cloud");
+    if let Some(t) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
+        return t;
     }
-    let seg = SEGMENTS as u32;
-    for i in 0..seg {
-        let j = (i + 1) % seg;
-        mesh.add_triangle(base, base + 1 + i, base + 1 + j);
-    }
-    for ring in 1..RINGS as u32 {
-        let inner = base + 1 + (ring - 1) * seg;
-        let outer = base + 1 + ring * seg;
-        for i in 0..seg {
-            let j = (i + 1) % seg;
-            mesh.add_triangle(inner + i, outer + i, outer + j);
-            mesh.add_triangle(inner + i, outer + j, inner + j);
-        }
-    }
+    let half = TEXTURE as f32 * 0.5;
+    let pixels = (0..TEXTURE * TEXTURE)
+        .map(|i| {
+            let (x, y) = ((i % TEXTURE) as f32 + 0.5 - half, (i / TEXTURE) as f32 + 0.5 - half);
+            let a = falloff((x * x + y * y).sqrt() / half);
+            let v = (a * 255.0).round() as u8;
+            Color32::from_rgba_premultiplied(v, v, v, v)
+        })
+        .collect();
+    let image = ColorImage::new([TEXTURE, TEXTURE], pixels);
+    let t = ctx.load_texture("md3e-ambient-cloud", image, TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, t.clone()));
+    t
 }
