@@ -141,6 +141,7 @@ impl TypeStyle {
     }
 
     /// For `Label`s that wrap into paragraphs: every row `line_height` tall.
+    /// Paint such a galley [`para_shift`] lower to centre its glyphs.
     pub fn rich_para(&self, text: impl Into<String>, color: Color32) -> RichText {
         RichText::new(text)
             .font(self.font_id())
@@ -148,6 +149,17 @@ impl TypeStyle {
             .line_height(Some(self.line_height))
             .color(color)
     }
+}
+
+/// How much lower to paint a galley laid out with `format` so the glyphs of
+/// each row sit in the middle of its `line_height` box, like a one-line
+/// [`TypeStyle::job`] next to it: egui puts them at the top of every row
+/// and all the extra height below. Every row has the same extra, so one
+/// shift centres them all.
+pub fn para_shift(ctx: &egui::Context, format: &TextFormat) -> f32 {
+    let Some(line_height) = format.line_height else { return 0.0 };
+    let natural = ctx.fonts_mut(|f| f.row_height(&format.font_id));
+    ((line_height - natural) * 0.5).max(0.0).round()
 }
 
 /// Lays out text whose size animates (a collapsing title, a floating label,

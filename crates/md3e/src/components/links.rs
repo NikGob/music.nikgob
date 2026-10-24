@@ -127,6 +127,7 @@ fn link_text(
     max_rows: usize,
 ) -> LinkLabel {
     let color = format.color;
+    let shift = crate::typography::para_shift(ui.ctx(), &format);
     let mut job = LayoutJob::single_section(text.to_owned(), format);
     job.wrap = TextWrapping {
         max_width: ui.available_width().max(8.0),
@@ -136,7 +137,8 @@ fn link_text(
     };
     let galley: Arc<Galley> = ui.painter().layout_job(job);
     let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x, galley.size().y), Sense::hover());
-    let origin = rect.min;
+    // The glyphs in the middle of their line box, as in a label beside it.
+    let origin = rect.min + vec2(0.0, shift);
     let (clicked, _) = interact_links(ui, ui.id().with(("link-label", id_salt)), &galley, origin, links, color);
     ui.painter().galley(origin, galley, color);
     LinkLabel { response, clicked }

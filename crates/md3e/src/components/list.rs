@@ -499,10 +499,10 @@ impl<'a> ListItem<'a> {
             ui.painter().galley(pos2(x, y), head, content);
             y += 24.0;
             if let Some(sup) = &self.supporting {
-                let mut job = LayoutJob::single_section(
-                    sup.clone(),
-                    TypeRole::BodyMedium.style().text_format(variant),
-                );
+                let format = TypeRole::BodyMedium.style().text_format(variant);
+                // Centred in its 20 like the headline in its 24.
+                let y = y + crate::typography::para_shift(ui.ctx(), &format);
+                let mut job = LayoutJob::single_section(sup.clone(), format);
                 job.wrap = TextWrapping {
                     max_width: text_w,
                     max_rows: n_support.max(1),
