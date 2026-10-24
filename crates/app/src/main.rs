@@ -242,6 +242,9 @@ impl Resident for Core {
     }
 }
 
+/// The largest texture side the app asks of egui (the font atlas's width).
+const MAX_TEXTURE_SIDE: usize = 8192;
+
 struct Window {
     core: fastframe_shell::Held<Core>,
     scrolling: fastframe_scroll::Scrolling,
@@ -254,6 +257,11 @@ struct Window {
 impl eframe::App for Window {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         raw_input.time = Some(self.core.started.elapsed().as_secs_f64());
+        // egui makes the font atlas as wide as the largest texture the GPU
+        // takes (16384) and lets it grow as tall before starting over: up to
+        // a gigabyte in memory, and on the GPU again. Nothing here needs
+        // textures that large (covers stop at 4096).
+        raw_input.max_texture_side = Some(raw_input.max_texture_side.unwrap_or(MAX_TEXTURE_SIDE).min(MAX_TEXTURE_SIDE));
         if let Some(s) = self.core.shot.as_mut() {
             s.raw_input(raw_input);
         }
