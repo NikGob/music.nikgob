@@ -549,6 +549,43 @@ fn an_album_says_the_same_count_on_its_card_its_page_and_in_the_library() {
     assert_eq!((p.local, p.in_library, p.total), (1, 2, 4));
 }
 
+#[test]
+fn stream_album_have_counts_its_rows() {
+    let lib = Library::open_in_memory().unwrap();
+    let spotify = FakeService::spotify();
+    // A song of "Discovery" has its file on another library album.
+    let aero = lib.upsert_stream_track(&find(&spotify, "sp-discovery-2")).unwrap();
+    lib.like(aero).unwrap();
+    let omt = lib.upsert_stream_track(&find(&spotify, "sp-discovery-1")).unwrap();
+    lib.add_source(&Source::new(omt, SourceKind::LocalFile, "Music/omt.opus", Codec::Opus))
+        .unwrap();
+    let home = lib.get_track(aero).unwrap().unwrap().release_id.unwrap();
+    let mut other = nikgob_core::model::Release::new("Discovery (Deluxe)", lib.get_track(omt).unwrap().unwrap().artist_credit);
+    other.total_tracks = Some(1);
+    let other = lib.upsert_release(&other).unwrap();
+    let mut t = lib.get_track(omt).unwrap().unwrap();
+    t.release_id = Some(other.id);
+    lib.upsert_track(&t).unwrap();
+    let r = rig(&lib, vec![Arc::new(spotify_without_likes())], false);
+    r.rt.send(Command::Search("daft".into()));
+    wait_for(&r.rt, "the section", |s| s.search.streams.iter().any(|x| !x.searching && !x.albums.is_empty()));
+    let card = r.rt.state().search.streams[0].albums[0].clone();
+    r.rt.send(Command::LoadStream(nikgob_view::StreamPage::Album(card.remote.clone())));
+    wait_for(&r.rt, "the page", |s| s.stream_page.as_ref().is_some_and(|p| !p.loading && !p.tracks.is_empty()));
+    let page = r.rt.state().stream_page.clone().unwrap();
+    assert_eq!(page.release, Some(home));
+    // Its own four rows: the song filed elsewhere is had, and says where.
+    assert_eq!(page.have.total, page.tracks.len() as u32);
+    assert_eq!(page.have.local, 1);
+    let at = page.tracks.iter().find(|t| t.has_local).unwrap();
+    assert_eq!(at.elsewhere.as_deref(), Some("Discovery (Deluxe)"));
+    assert!(page.tracks.iter().filter(|t| !t.has_local).all(|t| t.elsewhere.is_none()));
+    // The library album counts its own lines.
+    let (title, have) = page.library.clone().unwrap();
+    assert_eq!(title, "Discovery");
+    assert_eq!(have.local, 0);
+}
+
 /// The last toast whose text starts with `start`.
 fn toast_starting(rt: &Runtime, start: &str) -> Option<nikgob_view::Toast> {
     rt.state().toasts.iter().rev().find(|t| t.text.starts_with(start)).cloned()

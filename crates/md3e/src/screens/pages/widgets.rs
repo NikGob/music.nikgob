@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use nikgob_view::{
     ArtistCard, Command, LIKED_PLAYLIST, LikeTarget, PlaylistCard, PlaylistId, ReleaseCard, ReleaseId,
-    Route, SourceKind, Status, TrackId, TrackRow, ViewState, WishlistScope, WishlistStatus, WishlistView,
+    ReleaseLine, Route, SourceKind, Status, TrackId, TrackRow, ViewState, WishlistScope, WishlistStatus, WishlistView,
 };
 
 use super::{Ask, PageState};
@@ -588,7 +588,7 @@ pub enum Lead {
 
 /// Extras of [`track_list_ext`].
 #[derive(Clone, Copy, Default)]
-pub struct TrackListOpts {
+pub struct TrackListOpts<'a> {
     /// The list is this playlist: ⋮ gets "Убрать из плейлиста".
     pub playlist: Option<PlaylistId>,
     /// Rows can be reordered by their drag handle (user playlists).
@@ -599,6 +599,9 @@ pub struct TrackListOpts {
     /// A track without a file is drawn quieter (`on-surface-variant`) and
     /// one that streams says «стрим» (an album's songs the library lacks).
     pub mark_missing: bool,
+    /// The lines to draw, in order (an album page: its tracks and the
+    /// places no track has); none: every track.
+    pub lines: Option<&'a [ReleaseLine]>,
 }
 
 /// Tracks of different artists on one release (a compilation).
@@ -635,7 +638,7 @@ pub fn track_list_ext(
     tracks: &[TrackRow],
     lead: Lead,
     from: &PlayFrom,
-    opts: TrackListOpts,
+    opts: TrackListOpts<'_>,
     state: &ViewState,
     pages: &mut PageState,
     out: &mut Vec<Command>,
@@ -644,11 +647,31 @@ pub fn track_list_ext(
     let mut nav = None;
     let two_line = lead == Lead::Cover || is_compilation(tracks);
     let (mut dragging, mut dropped) = (None, None);
+    let every: Vec<ReleaseLine>;
+    let lines = match opts.lines {
+        Some(l) => l,
+        None => {
+            every = (0..tracks.len()).map(ReleaseLine::Track).collect();
+            &every
+        }
+    };
+    let disc_of = |l: &ReleaseLine| match *l {
+        ReleaseLine::Track(i) => tracks[i].disc_no.max(1),
+        ReleaseLine::Hole { disc, .. } => disc.max(1),
+    };
     // An album on several discs numbers each disc from 1: a "Диск N" line
     // above each, or the numbers would read as broken.
-    let discs = lead == Lead::Number && tracks.iter().any(|t| t.disc_no != tracks[0].disc_no);
+    let discs = lead == Lead::Number && lines.iter().any(|l| disc_of(l) != disc_of(&lines[0]));
     let wish = WishIndex::of(ui.ctx(), &state.downloads.wishlist);
-    let mut row = |ui: &mut Ui, i: usize, nav: &mut Option<Route>| -> Option<Response> {
+    let album = match from {
+        PlayFrom::Release(r) => Some(*r),
+        _ => None,
+    };
+    let mut row = |ui: &mut Ui, j: usize, nav: &mut Option<Route>| -> Option<Response> {
+        let i = match lines[j] {
+            ReleaseLine::Track(i) => i,
+            ReleaseLine::Hole { no, .. } => return Some(hole_row(ui, id, j, no, album, &wish, state, out)),
+        };
         let t = &tracks[i];
         let o = track_row(ui, id, i, t, lead, two_line, opts, &wish, state, out);
         if let Some(r) = o.artist.clone() {
@@ -688,26 +711,26 @@ pub fn track_list_ext(
         Some(o.response)
     };
     let rects: Vec<Rect> = if discs {
-        let mut rects = Vec::with_capacity(tracks.len());
-        for i in 0..tracks.len() {
-            let t = &tracks[i];
-            if i == 0 || tracks[i - 1].disc_no != t.disc_no {
-                ui.add_space(if i == 0 { 4.0 } else { 16.0 });
+        let mut rects = Vec::with_capacity(lines.len());
+        for j in 0..lines.len() {
+            let disc = disc_of(&lines[j]);
+            if j == 0 || disc_of(&lines[j - 1]) != disc {
+                ui.add_space(if j == 0 { 4.0 } else { 16.0 });
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
-                    ui.label(TypeRole::TitleSmall.style().rich(format!("Диск {}", t.disc_no.max(1)), s.on_surface_variant));
+                    ui.label(TypeRole::TitleSmall.style().rich(format!("Диск {disc}"), s.on_surface_variant));
                 });
                 ui.add_space(4.0);
             }
-            if let Some(r) = row(ui, i, &mut nav) {
+            if let Some(r) = row(ui, j, &mut nav) {
                 rects.push(r.rect);
             }
         }
         rects
     } else {
         let row_h = if two_line { crate::components::list::TWO_LINE } else { crate::components::list::ONE_LINE };
-        virtual_rows(ui, (id, "rows"), tracks.len(), row_h, |ui, i| {
-            row(ui, i, &mut nav);
+        virtual_rows(ui, (id, "rows"), lines.len(), row_h, |ui, j| {
+            row(ui, j, &mut nav);
         })
     };
     if let Some(pl) = opts.playlist.filter(|_| opts.reorder)
@@ -716,6 +739,57 @@ pub fn track_list_ext(
         reorder(ui, pl, tracks, &rects, i, dragging.is_some(), out);
     }
     nav
+}
+
+/// A place of the album no track has: its number, «Трек 7», quiet, «нет
+/// файла»; ⬇ asks «Хочу скачать» for what the album lacks (or says how far
+/// it is).
+#[allow(clippy::too_many_arguments)]
+fn hole_row(
+    ui: &mut Ui,
+    id: &str,
+    j: usize,
+    no: u32,
+    album: Option<ReleaseId>,
+    wish: &WishIndex,
+    state: &ViewState,
+    out: &mut Vec<Command>,
+) -> Response {
+    let title = if no > 0 { format!("Трек {no}") } else { "Трек без номера".to_owned() };
+    let wished = album.and_then(|r| wish.of_release(r));
+    let leading = Leading::Number(if no > 0 { no.to_string() } else { String::new() });
+    ListItem::new(title)
+        .leading(leading)
+        .muted(true)
+        .enabled(true)
+        .trailing(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Under the ⋮ of the track rows: ⬇ keeps their column.
+                ui.add_space(Size::Xs.height());
+                match (wished, album) {
+                    (Some(st), _) => {
+                        if wish_mark(ui, st, state.prefs.prowlarr_configured, ("hole-wish", id, j)).clicked() {
+                            ui.ctx().data_mut(|d| d.insert_temp(Id::new(OPEN_WISHLIST), true));
+                        }
+                    }
+                    (None, Some(r)) => {
+                        let dl = IconButton::new(Icon::Download)
+                            .size(Size::Xs)
+                            .tooltip("Скачать недостающие — в «Хочу скачать»")
+                            .id_salt(("hole-dl", id, j));
+                        if ui.add(dl).clicked() {
+                            out.push(Command::DownloadRelease(r));
+                        }
+                    }
+                    (None, None) => {}
+                }
+                let variant = Theme::get(ui.ctx()).scheme.on_surface_variant;
+                ui.label(TypeRole::LabelSmall.style().rich("нет файла", variant));
+            });
+        })
+        .id_salt(("hole", id, j))
+        .show(ui)
+        .response
 }
 
 /// What a drawn track row reported.
@@ -737,7 +811,7 @@ fn track_row(
     t: &TrackRow,
     lead: Lead,
     two_line: bool,
-    opts: TrackListOpts,
+    opts: TrackListOpts<'_>,
     wish: &WishIndex,
     state: &ViewState,
     out: &mut Vec<Command>,

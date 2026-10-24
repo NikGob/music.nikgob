@@ -86,6 +86,9 @@ pub struct StreamTrackRow {
     pub in_library: bool,
     /// The library has a file of it.
     pub has_local: bool,
+    /// On an album page: the library album the track is on when it is not
+    /// the page's own («у тебя в «… (Deluxe)»»).
+    pub elsewhere: Option<String>,
     /// The other services the same song was found in (merged into this row).
     pub also_on: Vec<Service>,
 }
@@ -443,8 +446,12 @@ pub struct StreamPageView {
     /// An artist's discography, newest first (empty otherwise).
     pub albums: Vec<StreamAlbumCard>,
     pub total_duration: Duration,
-    /// Album: how much of it the library has (the same count as its card).
+    /// Album: how much of it the library has, counted over the page's own
+    /// rows once they are known (else the same count as its card).
     pub have: AlbumHave,
+    /// Album: the linked library album's title and its own count
+    /// («В библиотеке: … · 13 из 14»).
+    pub library: Option<(String, AlbumHave)>,
     /// Album: every track is liked. Artist: followed (library artist liked).
     pub liked: bool,
     /// The linked library album / artist / playlist.
@@ -471,6 +478,7 @@ impl StreamPageView {
             albums: Vec::new(),
             total_duration: Duration::ZERO,
             have: AlbumHave::default(),
+            library: None,
             liked: false,
             release: None,
             artist: None,

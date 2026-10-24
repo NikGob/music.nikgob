@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use egui::{Context, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
     ArtistId, Command, Cover, LIKED_PLAYLIST, LikeTarget, PlaylistCoverMode, PlaylistDetail, PlaylistId, ReleaseId,
-    ReleaseType, Route, TrackId, ViewState,
+    ReleaseLine, ReleaseType, Route, TrackId, ViewState,
 };
 
 use super::{PageState, widgets};
@@ -117,6 +117,9 @@ pub fn release(
     } else {
         ui.ctx().data_mut(|d| d.remove::<bool>(left));
     }
+    // One line per place the album counts; the counts are theirs.
+    let n = if r.lines.is_empty() { r.tracks.len() } else { r.lines.len() } as u32;
+    let lacking = n.saturating_sub(c.local_tracks);
     with_bar(ui, &c.title, pages, |ui, pages| {
         let mut nav = None;
         let size = cover_size(ui);
@@ -126,19 +129,16 @@ pub fn release(
                 None => type_label(c.release_type).to_owned(),
             };
             ui.label(TypeRole::LabelLarge.style().rich(line, s.primary));
-            let n = r.tracks.len() as u64;
             // How much is here, in the same line as its size: «стрим» (no
-            // files: it plays from a service), «3 из 12 у тебя».
-            let mut line = format!(
-                "{} · {n} {} · {}",
-                c.artist,
-                common::plural(n, "трек", "трека", "треков"),
-                common::fmt_total(r.total_duration)
-            );
+            // files: it plays from a service), «14 треков · 13 скачано · 1
+            // нет» — counted over the lines below.
+            let mut line = format!("{} · {n} {}", c.artist, common::plural(u64::from(n), "трек", "трека", "треков"));
+            if c.local_tracks > 0 && lacking > 0 {
+                line = format!("{line} · {} скачано · {lacking} нет", c.local_tracks);
+            }
+            line = format!("{line} · {}", common::fmt_total(r.total_duration));
             if c.local_tracks == 0 {
                 line.push_str(" · стрим");
-            } else if let Some(b) = widgets::progress_badge(c) {
-                line = format!("{line} · {b} у тебя");
             }
             // Each artist of the album is a link to its page.
             let (links, routes) = crate::screens::artist_links::library_spans(&c.artists, &line);
@@ -154,7 +154,7 @@ pub fn release(
         ui.add_space(16.0);
 
         // Actions: standard button group, "Слушать" is the only filled button.
-        let missing = c.total_tracks.is_some_and(|t| c.local_tracks < t);
+        let missing = lacking > 0;
         let query = format!("{} {}", c.artist, c.title);
         // The album's «Хочу скачать» item, if it is on its way.
         let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist).of_release(id);
@@ -171,13 +171,19 @@ pub fn release(
             _ if ui.available_width() < 640.0 => "Скачать",
             _ => "Скачать недостающие",
         };
+        // «Скачать недостающие · 1»: as many as the list shows without a file.
+        let dl_label = if matches!(dl_label, "Скачать недостающие" | "Скачать") {
+            format!("{dl_label} · {lacking}")
+        } else {
+            dl_label.to_owned()
+        };
         let mut members: Vec<Member> = vec![
             Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
             widgets::shuffle_member(ui),
         ];
         if missing {
             members.push(
-                SplitButton::new("rel-download", dl_label)
+                SplitButton::new("rel-download", &dl_label)
                     .icon(Icon::Download)
                     .size(Size::M)
                     .style(Style::Tonal)
@@ -246,8 +252,39 @@ pub fn release(
             _ => {}
         }
         ui.add_space(16.0);
-        // The songs it lacks (from a service's tracklist): quieter, «стрим».
-        let opts = TrackListOpts { mark_missing: true, ..Default::default() };
+        // «Не скачано · 1»: only the lines without a file (the album has
+        // some files; with none every line is one).
+        let only_key = Id::new(("rel-only-missing", id));
+        let mut only = ui.ctx().data(|d| d.get_temp::<bool>(only_key).unwrap_or(false));
+        if c.local_tracks > 0 && lacking > 0 {
+            let chip = FilterChip::new(format!("Не скачано · {lacking}"), only).id_salt("rel-only-missing");
+            if ui.add(chip).clicked() {
+                only = !only;
+                ui.ctx().data_mut(|d| d.insert_temp(only_key, only));
+            }
+            ui.add_space(8.0);
+        } else {
+            only = false;
+        }
+        let lines: Vec<ReleaseLine> = if r.lines.is_empty() {
+            (0..r.tracks.len()).map(ReleaseLine::Track).collect()
+        } else {
+            r.lines.clone()
+        };
+        let lines: Vec<ReleaseLine> = if only {
+            lines
+                .into_iter()
+                .filter(|l| match *l {
+                    ReleaseLine::Track(i) => !r.tracks[i].has_local,
+                    ReleaseLine::Hole { .. } => true,
+                })
+                .collect()
+        } else {
+            lines
+        };
+        // The songs it lacks (from a service's tracklist): quieter, «стрим»;
+        // a place no track has: «Трек 7 · нет файла».
+        let opts = TrackListOpts { mark_missing: true, lines: Some(&lines), ..Default::default() };
         widgets::track_list_ext(ui, "release", &r.tracks, Lead::Number, &PlayFrom::Release(id), opts, state, pages, out)
             .or(nav)
     })

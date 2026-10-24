@@ -133,15 +133,18 @@ fn track_row(
     if !numbered && let Some(a) = &t.album {
         supporting = format!("{supporting} · {a}");
     }
-    let mut extras = Vec::new();
+    let mut extras: Vec<String> = Vec::new();
     if t.kind == TrackKind::Video {
-        extras.push("клип");
+        extras.push("клип".into());
     }
-    if t.has_local {
-        extras.push("у тебя");
+    // A song filed on another library album says which.
+    match (&t.elsewhere, t.has_local) {
+        (Some(a), true) => extras.push(format!("у тебя в «{a}»")),
+        (None, true) => extras.push("у тебя".into()),
+        _ => {}
     }
     if !t.playable {
-        extras.push("недоступен");
+        extras.push("недоступен".into());
     }
     // Two lines: after the artist; one line (an album page): quiet text by
     // the duration, so every row keeps its height.
@@ -550,9 +553,8 @@ fn album_page(
     header(ui, v, false, |ui| {
         let year = v.year.map(|y| y.to_string()).unwrap_or_default();
         overline(ui, &[type_label(v.release_type), &year, service_upper(id.service)]);
-        // How much of it is here, in the same line as its size.
-        // («8 из 10 у тебя»: counted over the library album, as its card
-        // says.)
+        // How much of it is here, in the same line as its size
+        // («8 из 10 у тебя»: counted over the page's own rows).
         let mut line = count_line(&v.subtitle, v.tracks.len(), v.total_duration);
         if let Some(have) = v.have.files_label() {
             line = format!("{line} · {have}");
@@ -563,9 +565,16 @@ fn album_page(
         if let Some(k) = crate::components::link_paragraph(ui, "st-album-artists", &line, &links, format).clicked {
             nav = routes.get(k).cloned();
         }
-        if let Some(r) = v.release.filter(|_| v.have.in_library > 0) {
+        // The linked library album, with its own count: «В библиотеке:
+        // Ugly Is Beautiful · 13 из 14».
+        if let Some(r) = v.release.filter(|_| v.have.in_library > 0 || v.library.as_ref().is_some_and(|l| l.1.in_library > 0)) {
+            let label = match &v.library {
+                Some((title, h)) if h.local > 0 && !h.complete() => format!("В библиотеке: {title} · {} из {}", h.local, h.total),
+                Some((title, _)) => format!("В библиотеке: {title}"),
+                None => "Открыть в библиотеке".to_owned(),
+            };
             ui.add_space(8.0);
-            if ui.add(AssistChip::new("Открыть в библиотеке").icon(Icon::LibraryMusic).id_salt("st-chip-lib")).clicked() {
+            if ui.add(AssistChip::new(label).icon(Icon::LibraryMusic).id_salt("st-chip-lib")).clicked() {
                 nav = Some(Route::Release(r));
             }
         }

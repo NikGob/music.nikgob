@@ -1128,6 +1128,7 @@ mod tests {
             liked: false,
             in_library: false,
             has_local: false,
+            elsewhere: None,
             also_on: Vec::new(),
         }
     }

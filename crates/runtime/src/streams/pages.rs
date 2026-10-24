@@ -263,6 +263,20 @@ impl Worker {
                 view.release_type = Some(a.release_type);
                 view.tracks = a.tracks.iter().map(|t| self.stream_row_auto(t)).collect();
                 (view.release, view.have) = self.album_have(a);
+                if let Some(r) = view.release {
+                    self.mark_elsewhere(r, &mut view.tracks);
+                    view.library = self.library_have(r);
+                }
+                // The page's own rows: a song of it filed on another album
+                // is had, but the counts never speak of rows it does not show.
+                if !view.tracks.is_empty() {
+                    let rows = &view.tracks;
+                    view.have = v::AlbumHave {
+                        local: rows.iter().filter(|t| t.has_local).count() as u32,
+                        in_library: rows.iter().filter(|t| t.in_library).count() as u32,
+                        total: rows.len() as u32,
+                    };
+                }
                 view.liked = !view.tracks.is_empty() && view.tracks.iter().all(|t| t.liked);
             }
             PageData::Playlist(p) => {
@@ -314,6 +328,7 @@ impl Worker {
                 .unwrap_or(false),
             liked: row.as_ref().is_some_and(|r| r.liked),
             has_local: row.as_ref().is_some_and(|r| r.has_local),
+            elsewhere: None,
             track,
             also_on: Vec::new(),
         }
@@ -336,6 +351,23 @@ impl Worker {
             total: p.map_or(0, |p| p.total).max(theirs),
         };
         (release, have)
+    }
+
+    /// Rows whose library track is on another album than `release` name it.
+    fn mark_elsewhere(&self, release: nikgob_core::model::ReleaseId, rows: &mut [v::StreamTrackRow]) {
+        for t in rows.iter_mut() {
+            let Some(row) = t.track.and_then(|id| self.lib.get_track_row(id).ok().flatten()) else { continue };
+            if let Some(other) = row.release_id.filter(|r| *r != release) {
+                t.elsewhere = self.lib.get_release(other).ok().flatten().map(|r| r.title);
+            }
+        }
+    }
+
+    /// The linked library album's title and count, as its own page says.
+    fn library_have(&self, release: nikgob_core::model::ReleaseId) -> Option<(String, v::AlbumHave)> {
+        let r = self.lib.get_release(release).ok().flatten()?;
+        let p = self.lib.release_progress(release).ok().flatten()?;
+        Some((r.title, v::AlbumHave { local: p.local, in_library: p.in_library, total: p.total }))
     }
 
     /// The linked library album learns the track count and cover.
