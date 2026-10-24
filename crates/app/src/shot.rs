@@ -23,6 +23,7 @@
 //! library track (`radio:artist` the first artist's radio).
 //! `libfilter:text` types into the library's filter, `liblist:1` shows it
 //! as a list, `sort:artist|title|year|added` sorts its albums.
+//! `reopen` closes the window and opens a new one, as the tray does.
 //! `mark:name` names the frames that follow in `NIKGOB_FRAMES` (until a
 //! run's first mark, each step names them after itself).
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
@@ -52,6 +53,8 @@ pub struct Shot {
     /// names them).
     label: String,
     marked: bool,
+    /// `reopen` asked for a new window.
+    reopen: bool,
 }
 
 fn nums(arg: &str) -> Vec<f32> {
@@ -101,12 +104,19 @@ impl Shot {
             snap: None,
             label: "start".to_owned(),
             marked: false,
+            reopen: false,
         })
     }
 
     /// The view state with the `fake:` steps so far laid over it, if any.
     pub fn overlay(&self, state: &nikgob_view::ViewState) -> Option<nikgob_view::ViewState> {
         self.fakes.any().then(|| self.fakes.apply(state))
+    }
+
+    /// True once after `reopen`: the window closes and a new one opens,
+    /// as when it is shown again from the tray.
+    pub fn take_reopen(&mut self) -> bool {
+        std::mem::take(&mut self.reopen)
     }
 
     /// The step running, for the frame log.
@@ -185,6 +195,10 @@ impl Shot {
         match verb {
             "wait" => self.wait = arg.parse().unwrap_or(30),
             "mark" => self.wait = 0,
+            "reopen" => {
+                self.reopen = true;
+                self.wait = 40;
+            }
             "size" => {
                 if let Some((w, h)) = arg.split_once('x')
                     && let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>())
@@ -290,7 +304,13 @@ impl Shot {
                 self.wait = 40;
             }
             "play" => {
-                if let Some(r) = state.library.releases.first() {
+                // `play:Title` plays the album of that title.
+                let r = if arg.is_empty() {
+                    state.library.releases.first()
+                } else {
+                    state.library.releases.iter().find(|r| r.title == arg)
+                };
+                if let Some(r) = r {
                     out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false });
                 }
                 self.wait = 20;

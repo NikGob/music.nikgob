@@ -148,6 +148,8 @@ struct Core {
     /// `NIKGOB_FRAMES`: the frame-time log.
     frames: Option<frames::Frames>,
     quit: bool,
+    /// A screenshot run's `reopen`: the window closes and a new one opens.
+    reopen: bool,
     wants_show: bool,
     last_frame: Instant,
     /// One clock for every window: each new window's egui starts its time
@@ -208,7 +210,9 @@ impl Resident for Core {
     }
 
     fn closed(&self) -> Closed {
-        if !self.quit && self.desktop.can_hide() {
+        if self.reopen {
+            Closed::Reopen
+        } else if !self.quit && self.desktop.can_hide() {
             Closed::Hide
         } else {
             Closed::Quit
@@ -318,12 +322,17 @@ impl eframe::App for Window {
                 if s.frame(ui.ctx(), &mut core.ui, &state, &mut core.commands) {
                     core.quit = true;
                 }
+                if s.take_reopen() {
+                    core.reopen = true;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
             state.prefs.fps_limit.max(15)
         };
         core.runtime.send_all(core.commands.drain(..));
         if let Some(f) = core.frames.as_mut() {
-            f.end(frame.info().cpu_usage, core.shot.as_ref().map_or("live", |s| s.label()));
+            let atlas = ui.ctx().fonts(|f| f.font_image_size());
+            f.end(frame.info().cpu_usage, core.shot.as_ref().map_or("live", |s| s.label()), atlas);
         }
 
         // Frame limit: only matters while something animates continuously.
@@ -553,6 +562,7 @@ fn main() -> eframe::Result {
         shot: shot::Shot::from_env(),
         frames: frames::Frames::from_env(),
         quit: false,
+        reopen: false,
         wants_show: false,
         last_frame: Instant::now(),
         started: Instant::now(),
@@ -597,6 +607,7 @@ fn main() -> eframe::Result {
                 web_images::WebImages::install(&ctx, covers_dir);
                 nikgob_md3e::Theme::new(nikgob_md3e::ColorScheme::baseline(true), true).install(&ctx);
                 let mut core = lease.take(&ctx);
+                core.reopen = false;
                 core.desktop.attach();
                 Ok(Box::new(Window {
                     core,
