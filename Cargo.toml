@@ -57,6 +57,25 @@ opt-level = 3
 [profile.dev.package.nikgob-recs]
 opt-level = 3
 
+# The interface draws every frame in its own crates (springs, shape
+# morphs, lyrics layout, the tessellated paths of covers and glows): at
+# opt-level 0 a Now Playing frame takes about three times as long and the
+# animations miss frames, so the app's crates are optimised in dev as well.
+[profile.dev.package.nikgob]
+opt-level = 2
+
+[profile.dev.package.nikgob-md3e]
+opt-level = 2
+
+[profile.dev.package.nikgob-shapes]
+opt-level = 2
+
+[profile.dev.package.nikgob-motion]
+opt-level = 2
+
+[profile.dev.package.nikgob-view]
+opt-level = 2
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
