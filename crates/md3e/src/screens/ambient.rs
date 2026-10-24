@@ -90,17 +90,22 @@ fn texture(ctx: &Context) -> TextureHandle {
     if let Some(t) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
         return t;
     }
-    let half = TEXTURE as f32 * 0.5;
-    let pixels = (0..TEXTURE * TEXTURE)
-        .map(|i| {
-            let (x, y) = ((i % TEXTURE) as f32 + 0.5 - half, (i / TEXTURE) as f32 + 0.5 - half);
-            let a = falloff((x * x + y * y).sqrt() / half);
-            let v = (a * 255.0).round() as u8;
-            Color32::from_rgba_premultiplied(v, v, v, v)
-        })
-        .collect();
-    let image = ColorImage::new([TEXTURE, TEXTURE], pixels);
-    let t = ctx.load_texture("md3e-ambient-cloud", image, TextureOptions::LINEAR);
+    // Made once: every new window (shown again from the tray) uploads the
+    // same picture.
+    static IMAGE: std::sync::OnceLock<ColorImage> = std::sync::OnceLock::new();
+    let image = IMAGE.get_or_init(|| {
+        let half = TEXTURE as f32 * 0.5;
+        let pixels = (0..TEXTURE * TEXTURE)
+            .map(|i| {
+                let (x, y) = ((i % TEXTURE) as f32 + 0.5 - half, (i / TEXTURE) as f32 + 0.5 - half);
+                let a = falloff((x * x + y * y).sqrt() / half);
+                let v = (a * 255.0).round() as u8;
+                Color32::from_rgba_premultiplied(v, v, v, v)
+            })
+            .collect();
+        ColorImage::new([TEXTURE, TEXTURE], pixels)
+    });
+    let t = ctx.load_texture("md3e-ambient-cloud", image.clone(), TextureOptions::LINEAR);
     ctx.data_mut(|d| d.insert_temp(id, t.clone()));
     t
 }

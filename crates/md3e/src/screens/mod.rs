@@ -317,6 +317,10 @@ impl Md3eUi {
         self.shortcuts(ctx, state, out);
         let theme = Theme::get(ctx);
         let s = theme.scheme;
+        // Now Playing open all the way hides the shell under its opaque
+        // surface: the pages are not laid out for nothing (with the side
+        // pane's lyrics they cost more than Now Playing itself).
+        let covered = self.now_playing && self.np_anim.value(anim::now(ctx)) >= 0.999;
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(s.surface))
@@ -346,6 +350,10 @@ impl Md3eUi {
                     self.chrome.np_covering = true;
                     now_playing::container(ui, full, 1.0);
                     now_playing::show(ui, full, state, true, &mut self.pages, &mut self.chrome, out);
+                    return;
+                }
+                if covered {
+                    self.flush_search(ctx, out);
                     return;
                 }
                 let _p = crate::prof::scope("layout");
