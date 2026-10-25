@@ -585,6 +585,7 @@ mod tests {
                     ts: now - ago,
                     kind: EventType::Complete,
                     position_ms: None,
+                    context: Default::default(),
                 });
             }
         }

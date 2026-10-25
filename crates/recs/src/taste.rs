@@ -2,12 +2,17 @@
 //! likes and the playlists say about every track and artist of the library.
 //!
 //! * **Track affinity**: the sum of event weights, each decayed with a
-//!   90-day half-life from its moment: a complete +1.0, a start that neither
-//!   completed nor was skipped +0.3, a skip in the first 30 s −0.7 and a
-//!   later one −0.1, a repeat (started again within a day of completing)
-//!   +0.5, a playlist entry +1.5 (decayed from when it was added); a like is
-//!   +3, a state without decay. Imported events (Takeout, Spotify) count the
-//!   same.
+//!   45-day half-life from its moment: a complete +1.0, a start that neither
+//!   completed nor was skipped +0.3, a skip in the first 30 s −0.7 (half of
+//!   it from the third early skip running in a playlist or the library: that
+//!   is leafing through, recs-v2 §4.1), a later skip +0.15 times the share
+//!   heard (the song was listened to), a repeat (started again within a day
+//!   of completing) +0.5, a playlist entry +1.5 (decayed from when it was
+//!   added); a like is +3, a state without decay. Imported events (Takeout,
+//!   Spotify) count the same.
+//! * **Hot affinity** ([`Taste::hot_at`]): the same event weights with a
+//!   2-day half-life, what is on repeat now («На повторе», «Слушать
+//!   снова»; [`hot_affinity`] for a history without a catalog).
 //! * **Artist affinity**: the affinities of the artist's tracks summed and
 //!   divided by the square root of the artist's track count in the catalog,
 //!   so a big discography does not win by size alone.
@@ -36,7 +41,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use nikgob_core::model::{ArtistId, Event, EventType, ReleaseId, TrackId, UnixMs};
+use nikgob_core::model::{ArtistId, Event, EventContext, EventType, ReleaseId, TrackId, UnixMs};
 use serde::{Deserialize, Serialize};
 
 use crate::suggest;
@@ -45,11 +50,18 @@ pub const HOUR_MS: i64 = 60 * 60 * 1000;
 pub const DAY_MS: i64 = 24 * HOUR_MS;
 
 /// Affinity halves every this long.
-pub const HALF_LIFE_MS: i64 = 90 * DAY_MS;
+pub const HALF_LIFE_MS: i64 = 45 * DAY_MS;
+/// The hot affinity halves every this long.
+pub const HOT_HALF_LIFE_MS: i64 = 2 * DAY_MS;
 pub const W_COMPLETE: f32 = 1.0;
 pub const W_START_ONLY: f32 = 0.3;
 pub const W_SKIP_EARLY: f32 = -0.7;
-pub const W_SKIP_LATE: f32 = -0.1;
+/// A later skip: this times the share of the track heard.
+pub const W_SKIP_LATE_HEARD: f32 = 0.15;
+/// From this early skip running in a playlist or the library…
+pub const SKIP_STREAK_FROM: u32 = 3;
+/// …an early skip weighs this much of its weight.
+pub const SKIP_STREAK_FACTOR: f32 = 0.5;
 pub const W_REPEAT: f32 = 0.5;
 pub const W_PLAYLIST: f32 = 1.5;
 pub const W_LIKE: f32 = 3.0;
@@ -270,6 +282,21 @@ pub struct Play {
     pub ts: UnixMs,
     pub kind: EventType,
     pub position_ms: Option<u32>,
+    /// Where it played from (a run of early skips in a playlist is leafing).
+    pub context: EventContext,
+}
+
+impl Play {
+    /// An event played from nowhere in particular.
+    pub fn new(track: TrackId, ts: UnixMs, kind: EventType, position_ms: Option<u32>) -> Self {
+        Self {
+            track,
+            ts,
+            kind,
+            position_ms,
+            context: EventContext::Other,
+        }
+    }
 }
 
 impl From<&Event> for Play {
@@ -279,8 +306,127 @@ impl From<&Event> for Play {
             ts: e.ts,
             kind: e.event_type,
             position_ms: e.position_ms,
+            context: e.context,
         }
     }
+}
+
+/// The weight of each event of a history in order of time (see the module
+/// docs): what a start, a complete and a skip add to a track, and from
+/// when it decays.
+struct Weigher {
+    /// A start not ended yet, by track.
+    open: Vec<Option<UnixMs>>,
+    last_complete: Vec<Option<UnixMs>>,
+    /// Early skips running, and when the last event was (a session).
+    streak: u32,
+    last_ts: Option<UnixMs>,
+}
+
+impl Weigher {
+    fn new(n: usize) -> Self {
+        Self {
+            open: vec![None; n],
+            last_complete: vec![None; n],
+            streak: 0,
+            last_ts: None,
+        }
+    }
+
+    /// Weighs one event of track `i` (`duration` its length), handing each
+    /// weight and its moment to `add`; true when the event is a play.
+    #[allow(clippy::too_many_arguments)]
+    fn event(
+        &mut self,
+        i: usize,
+        ts: UnixMs,
+        kind: EventType,
+        pos: Option<u32>,
+        context: EventContext,
+        duration: Option<u32>,
+        add: &mut impl FnMut(usize, UnixMs, f32),
+    ) -> bool {
+        if self.last_ts.is_none_or(|l| ts - l >= SESSION_GAP_MS) {
+            self.streak = 0;
+        }
+        self.last_ts = Some(ts);
+        match kind {
+            EventType::Start => {
+                if let Some(t0) = self.open[i] {
+                    add(i, t0, W_START_ONLY);
+                }
+                if self.last_complete[i].is_some_and(|c| ts - c <= REPEAT_WITHIN_MS) {
+                    add(i, ts, W_REPEAT);
+                }
+                self.open[i] = Some(ts);
+                true
+            }
+            EventType::Complete => {
+                self.streak = 0;
+                // A complete without its start (some imports) is a play too.
+                let counted = self.open[i].take().is_none();
+                add(i, ts, W_COMPLETE);
+                self.last_complete[i] = Some(ts);
+                counted
+            }
+            EventType::Skip => {
+                self.open[i] = None;
+                match pos {
+                    Some(p) if p < EARLY_SKIP_MS => {
+                        self.streak += 1;
+                        let leafing = self.streak >= SKIP_STREAK_FROM && matches!(context, EventContext::Playlist | EventContext::Library);
+                        add(i, ts, if leafing { W_SKIP_EARLY * SKIP_STREAK_FACTOR } else { W_SKIP_EARLY });
+                    }
+                    // A skip without a position counts as a late one; how
+                    // much was heard, when both are known.
+                    _ => {
+                        self.streak = 0;
+                        let heard = match (pos, duration) {
+                            (Some(p), Some(d)) if d > 0 => (p as f32 / d as f32).clamp(0.0, 1.0),
+                            _ => 0.0,
+                        };
+                        add(i, ts, W_SKIP_LATE_HEARD * heard);
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// The starts never ended.
+    fn finish(self, add: &mut impl FnMut(usize, UnixMs, f32)) {
+        for (i, t0) in self.open.iter().enumerate() {
+            if let Some(t0) = t0 {
+                add(i, *t0, W_START_ONLY);
+            }
+        }
+    }
+}
+
+/// The hot affinity ([`Taste::hot_at`]) of every track in `events` at
+/// `now`, `duration` telling a track's length: for a history read without
+/// a catalog (Главная's «Слушать снова»).
+pub fn hot_affinity(events: &[Play], duration: impl Fn(TrackId) -> Option<u32>, now: UnixMs) -> HashMap<TrackId, f32> {
+    let mut sorted: Vec<&Play> = events.iter().filter(|p| matches!(p.kind, EventType::Start | EventType::Complete | EventType::Skip)).collect();
+    sorted.sort_by_key(|p| p.ts);
+    let mut ids: Vec<TrackId> = Vec::new();
+    let mut pos: HashMap<TrackId, usize> = HashMap::new();
+    for p in &sorted {
+        pos.entry(p.track).or_insert_with(|| {
+            ids.push(p.track);
+            ids.len() - 1
+        });
+    }
+    let mut hot = vec![0.0f32; ids.len()];
+    let mut add = |i: usize, ts: UnixMs, w: f32| hot[i] += w * decay(now, ts, HOT_HALF_LIFE_MS);
+    let mut weigher = Weigher::new(ids.len());
+    for p in sorted {
+        let i = pos[&p.track];
+        weigher.event(i, p.ts, p.kind, p.position_ms, p.context, duration(p.track), &mut add);
+    }
+    weigher.finish(&mut add);
+    ids.into_iter().zip(hot).collect()
 }
 
 /// What the runtime reads from the library for [`Taste::build`].
@@ -316,6 +462,8 @@ pub struct Taste {
     utc_offset_min: i32,
     /// By catalog position.
     affinity: Vec<f32>,
+    /// The same weights with [`HOT_HALF_LIFE_MS`].
+    hot: Vec<f32>,
     plays: Vec<u32>,
     last_played: Vec<Option<UnixMs>>,
     liked: Vec<bool>,
@@ -337,9 +485,10 @@ pub struct Taste {
     disliked_artists: HashSet<ArtistId>,
 }
 
-fn decay(now: UnixMs, ts: UnixMs) -> f32 {
+/// What is left of a weight from `ts` at `now` with a half-life of `half`.
+fn decay(now: UnixMs, ts: UnixMs, half: i64) -> f32 {
     let age = (now - ts).max(0) as f64;
-    (-age / HALF_LIFE_MS as f64).exp2() as f32
+    (-age / half as f64).exp2() as f32
 }
 
 fn ordered(a: ArtistId, b: ArtistId) -> (ArtistId, ArtistId) {
@@ -358,16 +507,15 @@ impl Taste {
         let mut daypart = vec![[0u16; 4]; n];
         let mut recent_completes = vec![0u16; n];
         let mut year_ago = vec![0u16; n];
-        let mut open: Vec<Option<UnixMs>> = vec![None; n];
-        let mut last_complete: Vec<Option<UnixMs>> = vec![None; n];
+        let mut hot = vec![0.0f32; n];
 
-        let mut events: Vec<(UnixMs, usize, EventType, Option<u32>)> = input
+        let mut events: Vec<(UnixMs, usize, EventType, Option<u32>, EventContext)> = input
             .events
             .iter()
             .filter(|p| {
                 matches!(p.kind, EventType::Start | EventType::Complete | EventType::Skip)
             })
-            .filter_map(|p| Some((p.ts, catalog.position(p.track)?, p.kind, p.position_ms)))
+            .filter_map(|p| Some((p.ts, catalog.position(p.track)?, p.kind, p.position_ms, p.context)))
             .collect();
         events.sort_by_key(|e| e.0);
 
@@ -376,37 +524,19 @@ impl Taste {
         let mut tail: VecDeque<ArtistId> = VecDeque::with_capacity(CO_WINDOW + 1);
         let mut session_pairs: HashSet<(ArtistId, ArtistId)> = HashSet::new();
         let mut last_play_ts: Option<UnixMs> = None;
+        let mut weigher = Weigher::new(n);
+        let mut add = |i: usize, ts: UnixMs, w: f32| {
+            affinity[i] += w * decay(now, ts, HALF_LIFE_MS);
+            hot[i] += w * decay(now, ts, HOT_HALF_LIFE_MS);
+        };
 
-        for &(ts, i, kind, pos) in &events {
-            let mut counted_play = false;
-            match kind {
-                EventType::Start => {
-                    if let Some(t0) = open[i] {
-                        affinity[i] += W_START_ONLY * decay(now, t0);
-                    }
-                    if last_complete[i].is_some_and(|c| ts - c <= REPEAT_WITHIN_MS) {
-                        affinity[i] += W_REPEAT * decay(now, ts);
-                    }
-                    open[i] = Some(ts);
-                    counted_play = true;
+        for &(ts, i, kind, pos, context) in &events {
+            let counted_play = weigher.event(i, ts, kind, pos, context, catalog.tracks[i].duration_ms, &mut add);
+            if kind == EventType::Complete {
+                if now - ts < ON_REPEAT_MS {
+                    recent_completes[i] = recent_completes[i].saturating_add(1);
                 }
-                EventType::Complete => {
-                    // A complete without its start (some imports) is a play too.
-                    counted_play = open[i].take().is_none();
-                    affinity[i] += W_COMPLETE * decay(now, ts);
-                    if now - ts < ON_REPEAT_MS {
-                        recent_completes[i] = recent_completes[i].saturating_add(1);
-                    }
-                    last_complete[i] = Some(ts);
-                    last_played[i] = last_played[i].max(Some(ts));
-                }
-                EventType::Skip => {
-                    open[i] = None;
-                    // A skip without a position counts as a late one.
-                    let w = if pos.is_some_and(|p| p < EARLY_SKIP_MS) { W_SKIP_EARLY } else { W_SKIP_LATE };
-                    affinity[i] += w * decay(now, ts);
-                }
-                _ => {}
+                last_played[i] = last_played[i].max(Some(ts));
             }
             if !counted_play {
                 continue;
@@ -438,11 +568,7 @@ impl Taste {
                 tail.pop_front();
             }
         }
-        for (i, t0) in open.iter().enumerate() {
-            if let Some(t0) = t0 {
-                affinity[i] += W_START_ONLY * decay(now, *t0);
-            }
-        }
+        weigher.finish(&mut add);
         for id in &input.likes {
             if let Some(i) = catalog.position(*id)
                 && !liked[i]
@@ -461,7 +587,7 @@ impl Taste {
         }
         for (id, added) in &input.playlist_entries {
             if let Some(i) = catalog.position(*id) {
-                affinity[i] += W_PLAYLIST * decay(now, *added);
+                affinity[i] += W_PLAYLIST * decay(now, *added, HALF_LIFE_MS);
             }
         }
         let history = affinity.iter().any(|a| *a > 0.0);
@@ -525,6 +651,7 @@ impl Taste {
             now,
             utc_offset_min: input.utc_offset_min,
             affinity,
+            hot,
             plays,
             last_played,
             liked,
@@ -559,6 +686,12 @@ impl Taste {
     /// Affinity of the track at catalog position `i`.
     pub fn affinity_at(&self, i: usize) -> f32 {
         self.affinity.get(i).copied().unwrap_or(0.0)
+    }
+
+    /// The hot affinity of the track at `i`: the event weights halving in
+    /// two days (likes and playlist entries aside), what plays on repeat now.
+    pub fn hot_at(&self, i: usize) -> f32 {
+        self.hot.get(i).copied().unwrap_or(0.0)
     }
 
     pub fn plays_at(&self, i: usize) -> u32 {
@@ -661,12 +794,7 @@ mod tests {
     use crate::test_util::*;
 
     fn play(track: TrackId, ts: UnixMs, kind: EventType, pos: Option<u32>) -> Play {
-        Play {
-            track,
-            ts,
-            kind,
-            position_ms: pos,
-        }
+        Play::new(track, ts, kind, pos)
     }
 
     #[test]
@@ -680,12 +808,12 @@ mod tests {
                 play(t(0), now - 3 * HOUR_MS, EventType::Start, None),
                 play(t(0), now - 2 * HOUR_MS, EventType::Complete, None),
                 play(t(0), now - HOUR_MS, EventType::Start, None),
-                // 1: early skip −0.7, then a late one −0.1.
+                // 1: early skip −0.7, then a late one of unknown length: 0.
                 play(t(1), now - 10 * HOUR_MS, EventType::Start, None),
                 play(t(1), now - 10 * HOUR_MS, EventType::Skip, Some(5_000)),
                 play(t(1), now - 9 * HOUR_MS, EventType::Start, None),
                 play(t(1), now - 9 * HOUR_MS, EventType::Skip, Some(95_000)),
-                // 2: one complete 90 days ago: half of +1.
+                // 2: one complete a half-life ago: half of +1.
                 play(t(2), now - HALF_LIFE_MS, EventType::Complete, None),
                 // An unknown track is ignored.
                 play(tid(99), now, EventType::Complete, None),
@@ -702,7 +830,7 @@ mod tests {
         let a = |i| taste.affinity_at(cat.position(t(i)).unwrap());
         let close = |x: f32, y: f32| (x - y).abs() < 5e-3;
         assert!(close(a(0), 1.8), "{}", a(0));
-        assert!(close(a(1), -0.8), "{}", a(1));
+        assert!(close(a(1), -0.7), "{}", a(1));
         assert!(close(a(2), 0.5), "{}", a(2));
         assert!(close(a(3), 3.0), "a like counts once, without decay: {}", a(3));
         assert!(close(a(4), 0.375), "{}", a(4));
@@ -713,12 +841,42 @@ mod tests {
         assert_eq!(taste.liked_time_at(3), Some(now - DAY_MS));
         assert_eq!(taste.liked_time_at(4), None, "a time without a like");
         assert_eq!(taste.recent_completes_at(0), 1);
-        assert_eq!(taste.recent_completes_at(2), 0, "90 days ago");
+        assert_eq!(taste.recent_completes_at(2), 0, "45 days ago");
         assert!(taste.blocks(&cat.tracks()[5]));
         assert!(taste.blocks(&cat.tracks()[1]), "artist 1 is disliked");
         assert!(!taste.blocks(&cat.tracks()[0]));
         assert!(taste.has_history());
         assert!(!Taste::build(&cat, &TasteInput::default(), now).has_history());
+    }
+
+    /// A song skipped after three quarters was heard: a little plus, not a
+    /// minus; the third early skip running in a playlist is leafing and
+    /// weighs half; the hot affinity is the same weights over two days.
+    #[test]
+    fn late_skip_is_not_negative() {
+        let now = 1_000 * DAY_MS;
+        let cat = Catalog::new((0..5).map(|i| info(i, &[0], Some(i)).with_duration(Some(200_000))));
+        let t = |i| tid(i);
+        let skip = |i, at, pos, context| Play { context, ..play(t(i), at, EventType::Skip, Some(pos)) };
+        let events = vec![
+            play(t(0), now - HOUR_MS, EventType::Start, None),
+            play(t(0), now - HOUR_MS, EventType::Skip, Some(150_000)),
+            // Three early skips running in a playlist, a minute apart.
+            skip(1, now - 30 * 60_000, 5_000, EventContext::Playlist),
+            skip(2, now - 29 * 60_000, 5_000, EventContext::Playlist),
+            skip(3, now - 28 * 60_000, 5_000, EventContext::Playlist),
+            // A complete two days ago: half of it is hot.
+            play(t(4), now - 2 * DAY_MS, EventType::Complete, None),
+        ];
+        let taste = Taste::build(&cat, &TasteInput { events: events.clone(), ..Default::default() }, now);
+        let a = |i| taste.affinity_at(cat.position(t(i)).unwrap());
+        let close = |x: f32, y: f32| (x - y).abs() < 5e-3;
+        assert!(close(a(0), 0.15 * 0.75), "{}", a(0));
+        assert!(close(a(1), -0.7) && close(a(2), -0.7), "{} {}", a(1), a(2));
+        assert!(close(a(3), -0.35), "leafing: {}", a(3));
+        assert!(close(taste.hot_at(cat.position(t(4)).unwrap()), 0.5));
+        let hot = hot_affinity(&events, |_| Some(200_000), now);
+        assert!(close(hot[&t(4)], 0.5) && close(hot[&t(3)], -0.35), "{hot:?}");
     }
 
     #[test]

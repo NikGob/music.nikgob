@@ -189,6 +189,7 @@ mod tests {
                 ts: now - DAY_MS,
                 kind: EventType::Complete,
                 position_ms: None,
+                context: Default::default(),
             }],
             suggested_tracks: vec![
                 // 0: once, fresh: 0.6.
@@ -312,6 +313,7 @@ mod tests {
                 ts: now - (5 + (i % 40) as i64) * DAY_MS,
                 kind: EventType::Complete,
                 position_ms: None,
+                context: Default::default(),
             })
             .collect();
         let taste = Taste::build(&cat, &TasteInput { events, ..Default::default() }, now);

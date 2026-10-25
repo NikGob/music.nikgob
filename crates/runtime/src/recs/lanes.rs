@@ -467,8 +467,9 @@ fn pick(snap: &Snapshot, tiles: &TilesInput, pool: &[(usize, TrackId)], seed: u6
     snap.recs().mix_of(&cands, n, WORLD_SHARE)
 }
 
-/// «На повторе»: the songs started most over the last two weeks (a month
-/// once the history is that long), at least twice each, most first.
+/// «На повторе»: the songs started at least twice over the last two weeks
+/// (a month once the history is that long), what plays on repeat now first
+/// (the hot affinity, then the count).
 fn on_repeat(snap: &Snapshot, tiles: &TilesInput) -> Option<Vec<TrackId>> {
     let now = snap.taste.now();
     let first = tiles.events.iter().map(|p| p.ts).min()?;
@@ -481,19 +482,19 @@ fn on_repeat(snap: &Snapshot, tiles: &TilesInput) -> Option<Vec<TrackId>> {
             _ => {}
         }
     }
-    let mut top: Vec<(u32, TrackId)> = n
+    let mut top: Vec<(f32, u32, TrackId)> = n
         .into_iter()
         .filter(|(t, c)| {
             *c >= 2
                 && snap.catalog.get(*t).is_some_and(|i| !snap.taste.blocks(i) && (i.local || !snap.local_only))
                 && tiles.facts.get(t).is_none_or(|f| f.duration_ms.is_none_or(|d| d >= INTERLUDE_MS))
         })
-        .map(|(t, c)| (c, t))
+        .map(|(t, c)| (snap.catalog.position(t).map_or(0.0, |i| snap.taste.hot_at(i)), c, t))
         .collect();
-    top.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    top.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
     let mut total = 0u64;
     let mut out = Vec::new();
-    for (_, t) in top {
+    for (_, _, t) in top {
         if total >= MIX_MS {
             break;
         }

@@ -27,6 +27,8 @@ const PER_ARTIST: usize = 2;
 /// once the history is a year long).
 const AGAIN_DAYS: i64 = 3;
 const AGAIN_DAYS_LONG: i64 = 14;
+/// The weight of what was on repeat lately in «Слушать снова».
+const AGAIN_HOT: f32 = 2.0;
 /// «Из твоей библиотеки»: albums kept, with at least this many tracks with
 /// a file, at most half of them ever played.
 const SHELF: usize = 12;
@@ -94,10 +96,12 @@ struct Facts {
     completes: HashMap<TrackId, u32>,
     last_start: HashMap<TrackId, UnixMs>,
     liked: HashSet<TrackId>,
+    /// The hot affinity of the history at the visit ([`nikgob_recs::hot_affinity`]).
+    hot: HashMap<TrackId, f32>,
 }
 
 impl Facts {
-    fn read(lib: &Library) -> Self {
+    fn read(lib: &Library, now: UnixMs) -> Self {
         let mut events = lib.listening_events().unwrap_or_default();
         events.sort_by_key(|e| e.ts);
         let rows: HashMap<TrackId, RecTrack> = lib.rec_tracks().unwrap_or_default().into_iter().map(|r| (r.id, r)).collect();
@@ -117,12 +121,14 @@ impl Facts {
                 _ => {}
             }
         }
-        Self { rows, facts, starts, completes, last_start, liked }
+        let plays: Vec<nikgob_recs::Play> = events.iter().map(nikgob_recs::Play::from).collect();
+        let hot = nikgob_recs::hot_affinity(&plays, |t| facts.get(&t).and_then(|f| f.duration_ms), now);
+        Self { rows, facts, starts, completes, last_start, liked, hot }
     }
 }
 
 pub fn build(lib: &Library, visit: &Visit) -> HomeV2 {
-    let f = Facts::read(lib);
+    let f = Facts::read(lib, visit.now);
     let history = !f.starts.is_empty() || !f.liked.is_empty();
     let releases: Vec<ReleaseRow> = lib.releases(0, 20_000, Sort::desc(ReleaseSortKey::Added)).unwrap_or_default();
     let worlds = worlds(&f, &releases, visit);
@@ -239,7 +245,10 @@ fn listen_again(lib: &Library, f: &Facts, visit: &Visit) -> Vec<TrackRow> {
         if f.last_start.get(&t).is_some_and(|ts| visit.now - ts < days * DAY_MS) {
             continue;
         }
-        let mut s = if loved { 3.0 } else { 0.0 } + (n as f32).sqrt() + 0.5 * done as f32;
+        // What was on repeat lately weighs more (the hot affinity, recs-v2
+        // §4.2: it tells the songs started again the next day better).
+        let hot = (f.hot.get(&t).copied().unwrap_or(0.0) / 2.0).tanh();
+        let mut s = if loved { 3.0 } else { 0.0 } + (n as f32).sqrt() + 0.5 * done as f32 + AGAIN_HOT * hot;
         if night_now && n > 0 {
             s *= 1.0 + night as f32 / n as f32;
         }
@@ -1026,7 +1035,7 @@ pub fn world(lib: &Library, visit: &Visit, key: &str) -> Option<WorldParts> {
     let mut visit = visit.clone();
     // A world taken off the row still has its page.
     visit.hidden_worlds.clear();
-    let f = Facts::read(lib);
+    let f = Facts::read(lib, visit.now);
     let releases: Vec<ReleaseRow> = lib.releases(0, 20_000, Sort::desc(ReleaseSortKey::Added)).unwrap_or_default();
     worlds(&f, &releases, &visit).into_iter().find(|w| w.world.key == key)
 }

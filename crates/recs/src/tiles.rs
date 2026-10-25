@@ -621,8 +621,9 @@ impl<'r, 'a> Board<'r, 'a> {
                 let cands = self
                     .all()
                     .filter_map(|i| {
+                        // What plays on repeat now first (the hot affinity).
                         let c = self.recs.taste.recent_completes_at(i);
-                        (c >= ON_REPEAT_MIN_COMPLETES).then(|| (i, c as f32 + 0.01 * self.aff(i)))
+                        (c >= ON_REPEAT_MIN_COMPLETES).then(|| (i, self.recs.taste.hot_at(i) + 0.01 * c as f32))
                     })
                     .collect();
                 self.smooth(kind, none(), "На повторе".into(), cands, None)
@@ -1121,6 +1122,7 @@ mod tests {
             ts,
             kind: EventType::Complete,
             position_ms: None,
+            context: Default::default(),
         }
     }
 

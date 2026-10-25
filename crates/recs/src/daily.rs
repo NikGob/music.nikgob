@@ -199,6 +199,7 @@ mod tests {
                     ts: NOW - (10 + (i as i64 % 30)) * DAY_MS - k * 2 * DAY_MS,
                     kind: EventType::Complete,
                     position_ms: None,
+                    context: Default::default(),
                 });
             }
         }
@@ -209,6 +210,7 @@ mod tests {
                     ts: NOW - 100 * DAY_MS - k * 2 * DAY_MS,
                     kind: EventType::Complete,
                     position_ms: None,
+                    context: Default::default(),
                 });
             }
         }
@@ -218,6 +220,7 @@ mod tests {
             ts: NOW - DAY_MS,
             kind: EventType::Complete,
             position_ms: None,
+            context: Default::default(),
         });
         let input = TasteInput {
             events,

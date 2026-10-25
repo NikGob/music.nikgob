@@ -47,7 +47,7 @@ pub use pick::{Item, NewTrack, Pick, Reason, Recs};
 pub use radio::{Outcome, RadioParams, RadioSeed, RadioState};
 pub use style::{StyleMix, style_words};
 pub use suggest::{Matched, ServiceSuggestions, match_suggestions, suggestion_finds};
-pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo, world_token};
+pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo, hot_affinity, world_token};
 pub use tiles::{LyricsKind, like_title, PlaylistFacts, TILES_PER_DAY, TileGroup, TileHistory, TileKind, TileMix, TilesInput, TrackFacts};
 
 #[cfg(test)]
@@ -103,6 +103,7 @@ pub(crate) mod test_util {
                 ts: now - (rng.f64() * 730.0 * DAY_MS as f64) as i64,
                 kind: kinds[rng.below(3)],
                 position_ms: Some(rng.below(300_000) as u32),
+                context: Default::default(),
             })
             .collect();
         let likes = (0..2_000).map(|_| tid(rng.below(tracks as usize) as u128)).collect();

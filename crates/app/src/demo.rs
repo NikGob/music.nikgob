@@ -575,6 +575,7 @@ mod tests {
                     ts: 1_000_000,
                     kind: EventType::Complete,
                     position_ms: None,
+                    context: Default::default(),
                 });
             }
         }
