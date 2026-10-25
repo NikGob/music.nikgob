@@ -227,6 +227,9 @@ pub(crate) struct RecsState {
     building: bool,
     /// A build is due then.
     due: Option<Instant>,
+    /// The first change of the library since the last build
+    /// ([`Worker::recs_library_changed`]).
+    changed_since: Option<Instant>,
     built_at: Option<Instant>,
     built_index_len: usize,
     plays: u32,
@@ -252,6 +255,7 @@ impl RecsState {
             home: None,
             building: false,
             due: Some(Instant::now()),
+            changed_since: None,
             built_at: None,
             built_index_len: 0,
             plays: 0,
@@ -1126,10 +1130,19 @@ impl Worker {
         }
     }
 
-    /// The library changed (likes, playlists, imports).
+    /// The library changed (likes, playlists, imports): a build once it has
+    /// been quiet for the debounce, so a run of likes or playlist edits
+    /// builds once, yet at most ten debounces after the first of them.
     pub(crate) fn recs_library_changed(&mut self) {
         let d = self.streaming.schedule.recs_debounce;
-        self.recs_dirty(d);
+        let now = Instant::now();
+        let r = &mut self.recs;
+        let first = *r.changed_since.get_or_insert(now);
+        let at = (now + d).min(first + d * 10);
+        // A build already due (or due before this run began) stays so.
+        if !r.due.is_some_and(|due| due <= now || due < first) {
+            r.due = Some(at);
+        }
     }
 
     /// A track ended: a build after enough of them.
@@ -1190,6 +1203,7 @@ impl Worker {
             Ok(_) => {
                 self.recs.building = true;
                 self.recs.due = None;
+                self.recs.changed_since = None;
             }
             Err(e) => log::warn!("recs: cannot build: {e}"),
         }
