@@ -168,6 +168,7 @@ impl Worker {
                     Err(e) => log::warn!("album {}: tracklist not stored: {e}", m.release),
                 }
                 let _ = self.lib.cache_put(&key, now, found_mark(&self.lib, m.release));
+                self.extend_album_queue(m.release);
                 self.load_library();
                 if self.state.read().release.as_ref().is_some_and(|r| r.card.id == m.release) {
                     self.load_release(m.release);
@@ -181,6 +182,36 @@ impl Worker {
                 let _ = self.lib.cache_put(&key, now, "error");
             }
         }
+    }
+
+    /// The queue still plays `release` (replaced by nothing since): its
+    /// tracks the queue lacks join it in album order, and the first of
+    /// them plays when nothing could.
+    pub(crate) fn extend_album_queue(&mut self, release: ReleaseId) {
+        if self.album_queue != Some((release, self.queue.generation())) {
+            return;
+        }
+        let have: HashSet<_> = self.queue.tracks().into_iter().collect();
+        let more: Vec<_> = self
+            .lib
+            .tracks_of_release_all(release)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.id)
+            .filter(|t| !have.contains(t))
+            .collect();
+        if more.is_empty() {
+            return;
+        }
+        log::info!("album {release}: {} more tracks join the queue", more.len());
+        let idle = self.playing.is_none();
+        self.queue.enqueue(&more);
+        if idle {
+            if let Some(e) = self.queue.skip_forward().filter(|e| e.track == more[0]).or_else(|| self.queue.current()) {
+                self.start(e);
+            }
+        }
+        self.publish_player();
     }
 
     /// The background pass: one incomplete album with a file per [`EVERY`],

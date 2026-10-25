@@ -342,6 +342,9 @@ struct Worker {
     recs: recs::RecsState,
     /// Albums whose larger cover was looked up in this run.
     hd_asked: hd_covers::Asked,
+    /// The album the queue plays (and the queue's generation then): its
+    /// tracks the services add later join the queue.
+    album_queue: Option<(nikgob_core::model::ReleaseId, u64)>,
 }
 
 impl Worker {
@@ -409,6 +412,7 @@ impl Worker {
             streaming,
             analysis,
             hd_asked: Default::default(),
+            album_queue: None,
             recs,
         }
     }
@@ -618,6 +622,10 @@ impl Worker {
                     .map(|r| format!("альбома «{}»", r.title));
                 let ids: Vec<TrackId> = rows.iter().map(|r| r.id).collect();
                 self.play_list(ids, start, shuffle, title, EventContext::Album);
+                // An album known in part plays at once; the rest of its
+                // tracklist joins the queue when the services tell it.
+                self.album_queue = Some((id, self.queue.generation()));
+                self.complete_tracklist(id);
             }
             Command::PlayPlaylist { id, start, shuffle } => {
                 let (ids, name) = self.playlist_tracks(id);
