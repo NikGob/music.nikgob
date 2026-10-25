@@ -1135,6 +1135,10 @@ pub struct Prefs {
     /// with similar tracks by itself (a radio of that track, from where
     /// [`Self::mixes_downloaded_only`] and [`Self::radio_new_share`] say).
     pub autoplay: bool,
+    /// «Продолжать мир после альбома»: after an album, autoplay plays the
+    /// next tracks of its world (a soundtrack franchise, an artist's
+    /// discography) in album order first, then the similar ones.
+    pub autoplay_continue_world: bool,
 }
 
 /// One preference changed on its own ([`Command::SetPref`]): the runtime
@@ -1150,6 +1154,8 @@ pub enum PrefPatch {
     LibraryOnlyDownloaded(bool),
     /// «Автовоспроизведение».
     Autoplay(bool),
+    /// «Продолжать мир после альбома».
+    AutoplayContinueWorld(bool),
     /// Where a radio takes its tracks («Скачанное · Библиотека · С новым»):
     /// both of the fields it sets.
     RadioSource { downloaded_only: bool, new_share: RadioNewShare },
@@ -1173,6 +1179,7 @@ impl PrefPatch {
             Self::MixesDownloadedOnly(on) => p.mixes_downloaded_only = *on,
             Self::LibraryOnlyDownloaded(on) => p.library_only_downloaded = *on,
             Self::Autoplay(on) => p.autoplay = *on,
+            Self::AutoplayContinueWorld(on) => p.autoplay_continue_world = *on,
             Self::RadioSource { downloaded_only, new_share } => {
                 p.mixes_downloaded_only = *downloaded_only;
                 p.radio_new_share = *new_share;
@@ -1892,6 +1899,7 @@ impl Default for Prefs {
             home_hidden_worlds: Vec::new(),
             stream_analysis: true,
             autoplay: true,
+            autoplay_continue_world: true,
         }
     }
 }

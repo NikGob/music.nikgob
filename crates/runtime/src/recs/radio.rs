@@ -23,7 +23,10 @@
 //!   queue) ends it; adding to the queue does not.
 //! * «Автовоспроизведение» ([`v::Prefs::autoplay`]): when the last track of
 //!   any other queue plays, a radio of that track takes the queue over and
-//!   appends to it, never picking what the queue already had.
+//!   appends to it, never picking what the queue already had. After an
+//!   album the album's world goes on first ([`v::Prefs::autoplay_continue_world`],
+//!   [`crate::home_v2::world_next`]): its next album's tracks join the
+//!   queue, album by album, and the radio comes past the world's end.
 //! * Where its tracks come from is a hard rule: under «Миксы только из
 //!   скачанного» nothing without a file is queued, without new music no
 //!   stream pick is; switching either drops the radio's upcoming tracks
@@ -368,6 +371,22 @@ impl Worker {
         let generation = self.queue.generation();
         if self.recs.radio.autoplay_dry == Some(generation) {
             return;
+        }
+        // After an album its world goes on first, album by album.
+        let (continue_world, local_only) = {
+            let p = &self.state.read().prefs;
+            (p.autoplay_continue_world, p.mixes_downloaded_only)
+        };
+        if continue_world && self.play_context == EventContext::Album {
+            let queued: HashSet<TrackId> = self.queue.tracks().into_iter().collect();
+            let next = crate::home_v2::world_next(&self.lib, e.track, &queued, local_only);
+            if !next.is_empty() {
+                log::info!("autoplay: the world goes on with {} tracks of its next album", next.len());
+                self.queue.enqueue(&next);
+                self.preload_next();
+                self.publish_player();
+                return;
+            }
         }
         let title = self.lib.get_track(e.track).ok().flatten().map_or_else(String::new, |t| t.title);
         let mut state = Engine::new(RadioSeed::Track(e.track));

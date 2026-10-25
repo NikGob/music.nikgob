@@ -745,15 +745,8 @@ pub(crate) fn world_start(order: &[TrackId], heard: &HashSet<TrackId>, has_file:
     if unheard.is_empty() { (v::WorldStart::Again, everything) } else { (v::WorldStart::Finish, unheard) }
 }
 
-/// The worlds of the library, by the last play; the unstarted ones last,
-/// the closest by sound to what plays (else to the last started track)
-/// first. Every one: the row pages through them all.
-fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> {
-    let usable: Vec<ReleaseRow> = releases.iter().filter(|r| r.local_tracks > 0 || !visit.local_only).cloned().collect();
-    let mut groups = group_worlds(&usable);
-    groups.retain(|g| g.albums.iter().any(|a| a.local_tracks > 0) && !visit.hidden_worlds.contains(&g.key));
-
-    // The tracks of each album in order.
+/// The tracks of each album of the library in order (disc, then number).
+fn album_tracks(f: &Facts) -> HashMap<ReleaseId, Vec<(u32, TrackId)>> {
     let mut tracks_of: HashMap<ReleaseId, Vec<(u32, TrackId)>> = HashMap::new();
     for (id, fact) in &f.facts {
         if let Some(row) = f.rows.get(id)
@@ -766,6 +759,46 @@ fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> 
     for list in tracks_of.values_mut() {
         list.sort();
     }
+    tracks_of
+}
+
+/// What «Автовоспроизведение» plays after `track` of an album when it
+/// continues the album's world ([`v::Prefs::autoplay_continue_world`]):
+/// the world's tracks after it in album order — the ones never heard with
+/// a file («Дослушать»), else any — of the next album that has some, none
+/// of `queued`. Empty past the world's end (a radio goes on then).
+pub fn world_next(lib: &Library, track: TrackId, queued: &HashSet<TrackId>, local_only: bool) -> Vec<TrackId> {
+    let f = Facts::read(lib, now_ms());
+    let Some(release) = f.rows.get(&track).and_then(|r| r.release) else { return Vec::new() };
+    let releases: Vec<ReleaseRow> = lib.releases(0, 20_000, Sort::desc(ReleaseSortKey::Added)).unwrap_or_default();
+    let usable: Vec<ReleaseRow> = releases.into_iter().filter(|r| r.local_tracks > 0 || !local_only).collect();
+    let Some(g) = group_worlds(&usable).into_iter().find(|g| g.albums.iter().any(|a| a.release.id == release)) else {
+        return Vec::new();
+    };
+    let tracks_of = album_tracks(&f);
+    let order: Vec<(ReleaseId, TrackId)> = g
+        .albums
+        .iter()
+        .flat_map(|a| tracks_of.get(&a.release.id).into_iter().flatten().map(|(_, t)| (a.release.id, *t)))
+        .collect();
+    let Some(at) = order.iter().position(|o| o.1 == track) else { return Vec::new() };
+    let has_file = |t: &TrackId| f.rows.get(t).is_some_and(|r| r.has_local);
+    let after: Vec<(ReleaseId, TrackId)> =
+        order[at + 1..].iter().copied().filter(|(_, t)| !queued.contains(t) && (has_file(t) || !local_only)).collect();
+    let unheard: Vec<(ReleaseId, TrackId)> = after.iter().copied().filter(|(_, t)| !f.last_start.contains_key(t) && has_file(t)).collect();
+    let pool = if unheard.is_empty() { after } else { unheard };
+    let Some(album) = pool.first().map(|o| o.0) else { return Vec::new() };
+    pool.into_iter().filter(|o| o.0 == album).map(|o| o.1).collect()
+}
+
+/// The worlds of the library, by the last play; the unstarted ones last,
+/// the closest by sound to what plays (else to the last started track)
+/// first. Every one: the row pages through them all.
+fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> {
+    let usable: Vec<ReleaseRow> = releases.iter().filter(|r| r.local_tracks > 0 || !visit.local_only).cloned().collect();
+    let mut groups = group_worlds(&usable);
+    groups.retain(|g| g.albums.iter().any(|a| a.local_tracks > 0) && !visit.hidden_worlds.contains(&g.key));
+    let tracks_of = album_tracks(f);
     let titles: HashMap<TrackId, &str> = f.rows.iter().map(|(id, r)| (*id, r.title.as_str())).collect();
     let duration = |t: &TrackId| u64::from(f.facts.get(t).and_then(|x| x.duration_ms).unwrap_or(0));
     let local = |t: &TrackId| f.rows.get(t).is_some_and(|r| r.has_local);
@@ -1182,6 +1215,42 @@ mod tests {
         let mut w = vec![(None, None, 50), (Some(5), None, 10), (None, Some(2.0), 5), (Some(9), None, 1), (None, Some(1.0), 3)];
         w.sort_by(|a, b| world_order(*a, *b));
         assert_eq!(w, [(Some(9), None, 1), (Some(5), None, 10), (None, Some(1.0), 3), (None, Some(2.0), 5), (None, None, 50)]);
+    }
+
+    /// Three albums of one franchise: after the first, autoplay goes on with
+    /// the second, the unheard tracks of it, then the third; past the
+    /// world's end, nothing (the radio comes).
+    #[test]
+    fn autoplay_continues_the_world() {
+        use nikgob_core::model::{Artist, ArtistCredit, Codec, Event, Release, Source, SourceKind, Track};
+        let lib = Library::open_in_memory().unwrap();
+        let a = lib.upsert_artist(&Artist::new("Kevin Penkin")).unwrap();
+        let credit = ArtistCredit::single("Kevin Penkin", Some(a.id));
+        let mut ids: Vec<Vec<TrackId>> = Vec::new();
+        for (k, title) in ["MADE IN ABYSS ORIGINAL SOUNDTRACK", "MADE IN ABYSS ORIGINAL SOUNDTRACK 2", "MADE IN ABYSS ORIGINAL SOUNDTRACK 3"].iter().enumerate() {
+            let mut r = Release::new(*title, credit.clone());
+            r.year = Some(2017 + k as i32);
+            let r = lib.upsert_release(&r).unwrap();
+            let mut album = Vec::new();
+            for n in 0..3 {
+                let mut t = Track::new(format!("{title} {n}"), credit.clone());
+                t.release_id = Some(r.id);
+                t.track_no = n + 1;
+                let t = lib.upsert_track(&t).unwrap();
+                lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("x/{k}/{n}.flac"), Codec::Flac)).unwrap();
+                album.push(t.id);
+            }
+            ids.push(album);
+        }
+        let first: HashSet<TrackId> = ids[0].iter().copied().collect();
+        assert_eq!(world_next(&lib, ids[0][2], &first, false), ids[1], "the next album, in order");
+        // Its first track was heard already: the rest of it.
+        lib.record_event_raw(&Event::new(ids[1][0], EventType::Start, now_ms() - 1000, lib.device_id())).unwrap();
+        assert_eq!(world_next(&lib, ids[0][2], &first, false), ids[1][1..]);
+        // What the queue has does not come again.
+        let queued: HashSet<TrackId> = first.iter().copied().chain(ids[1].iter().copied()).collect();
+        assert_eq!(world_next(&lib, ids[1][2], &queued, false), ids[2]);
+        assert!(world_next(&lib, ids[2][2], &HashSet::new(), false).is_empty(), "the world's end");
     }
 
     #[test]

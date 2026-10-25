@@ -654,6 +654,18 @@ fn general(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
     row(ui, Id::Autoplay, "Автовоспроизведение", Some(&autoplay_hint), |ui| {
         ui.add(Switch::new(&mut p.autoplay).id_salt("set-autoplay"));
     });
+    // After an album: the rest of its world first.
+    let world_hint = if !p.autoplay {
+        "Не действует: автовоспроизведение выключено"
+    } else if p.autoplay_continue_world {
+        "После альбома — следующие альбомы его мира, потом похожее"
+    } else {
+        "После альбома — сразу похожее"
+    };
+    row(ui, Id::AutoplayWorld, "Продолжать мир после альбома", Some(world_hint), |ui| {
+        let on = p.autoplay;
+        ui.add_enabled(on, Switch::new(&mut p.autoplay_continue_world).id_salt("set-autoplay-world"));
+    });
     // Only the downloaded: no new music to mix in, the choice waits.
     let new_share_hint = if p.mixes_downloaded_only {
         "Не действует: миксы только из скачанного"
