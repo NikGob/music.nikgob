@@ -297,6 +297,21 @@ impl Worker {
             && sources.iter().filter(live).any(|s| !s.kind.is_local())
     }
 
+    /// An open item of the same song as `item` under another track (a
+    /// twin not merged yet): the same ISRC, or the same title and artist.
+    fn open_twin(&self, item: &WishlistItem) -> Option<WishlistItem> {
+        let key = |t: &Option<String>, a: &Option<String>| {
+            (title_key(t.as_deref().unwrap_or_default()), artist_key(a.as_deref().unwrap_or_default()))
+        };
+        let mine = key(&item.title, &item.artist);
+        self.lib.list_wishlist().unwrap_or_default().into_iter().find(|i| {
+            i.scope == WishlistScope::Track
+                && i.id != item.id
+                && !matches!(i.status, WishlistStatus::Done | WishlistStatus::Failed)
+                && (item.isrc.is_some() && i.isrc == item.isrc || !mine.0.base.is_empty() && key(&i.title, &i.artist) == mine)
+        })
+    }
+
     /// The fields an item takes from its track.
     fn item_for(&self, track: Option<TrackId>, release: Option<ReleaseId>) -> Option<WishlistItem> {
         let mut item = WishlistItem::new(WishlistStatus::New, Self::now());
@@ -393,6 +408,9 @@ impl Worker {
         } else {
             WishlistStatus::New
         };
+        if item.scope == WishlistScope::Track && self.open_twin(&item).is_some() {
+            return false;
+        }
         log::info!("wishlist: {} ({:?}, {:?})", item.title.as_deref().unwrap_or("?"), item.scope, origin);
         self.put_item(&item);
         true
@@ -466,6 +484,9 @@ impl Worker {
         item.scope = WishlistScope::Track;
         item.origin = WishlistOrigin::Manual;
         item.status = WishlistStatus::New;
+        if let Some(twin) = self.open_twin(&item) {
+            return self.start_again(&twin);
+        }
         self.put_item(&item);
         Wished::Started
     }
@@ -684,17 +705,32 @@ impl Worker {
             return;
         }
         let now = Self::now();
-        let mut due = self
+        // Items whose file came another way are done; track items an album
+        // item covers are searched with it, never apart.
+        match self.lib.settle_downloaded_wishlist() {
+            Ok(0) => {}
+            Ok(n) => {
+                log::info!("wishlist: {n} items have their file already");
+                self.publish_wishlist();
+            }
+            Err(e) => log::warn!("wishlist: settling the downloaded items: {e}"),
+        }
+        let covered = self.lib.wishlist_covered().unwrap_or_default();
+        let ask = (free + covered.len()) as u32;
+        let mut due: Vec<WishlistItem> = self
             .lib
-            .wishlist_due(WishlistStatus::New, now, free as u32)
-            .unwrap_or_default();
+            .wishlist_due(WishlistStatus::New, now, ask)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|i| !covered.contains(&i.id))
+            .collect();
         if due.len() < free {
             due.extend(
                 self.lib
-                    .wishlist_due(WishlistStatus::NoTorrent, now, (free - due.len()) as u32)
+                    .wishlist_due(WishlistStatus::NoTorrent, now, ask)
                     .unwrap_or_default()
                     .into_iter()
-                    .filter(|i| i.next_try_at.is_some()),
+                    .filter(|i| i.next_try_at.is_some() && !covered.contains(&i.id)),
             );
         }
         for item in due {
@@ -1336,7 +1372,11 @@ impl Worker {
     // ------------------------------------------------------------- view
 
     pub(crate) fn publish_wishlist(&mut self) {
+        // Downloaded already, or a track of an album item: not a row of
+        // its own.
+        let covered = self.lib.wishlist_covered().unwrap_or_default();
         let mut items = self.lib.list_wishlist().unwrap_or_default();
+        items.retain(|i| !covered.contains(&i.id));
         items.sort_by(|a, b| {
             status_rank(a.status)
                 .cmp(&status_rank(b.status))

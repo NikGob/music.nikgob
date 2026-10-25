@@ -29,6 +29,8 @@ use crate::util::{meta_get, meta_set, now_ms};
 
 /// `meta` key of [`Library::drop_orphans`].
 pub(crate) const ORPHANS_KEY: &str = "orphans_dropped.v1";
+/// `meta` key of [`Library::settle_downloaded_wishes`].
+pub(crate) const WISHES_KEY: &str = "downloaded_wishes_settled.v1";
 
 thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
@@ -379,6 +381,23 @@ impl Library {
             log::info!("library: {key}: {done} changes made");
             Ok(Some(out))
         })
+    }
+
+    /// Once per library (`downloaded_wishes_settled.v1`): «Хочу скачать»
+    /// items that did not start although their track (every track of their
+    /// album) has a file are «Скачано» (their file came another way, or the
+    /// track they wanted was merged into the one with the file later), and
+    /// an album item takes the history of the track items of its album it
+    /// covers. Nothing goes. Returns how many items changed.
+    pub fn settle_downloaded_wishes(&self) -> Result<usize> {
+        Ok(self
+            .repair(WISHES_KEY, |tx| {
+                let settled = crate::masters::settle_downloaded_in(tx)?;
+                let folded = crate::masters::fold_track_items_in(tx)?;
+                note!("library: «Хочу скачать»: {settled} items downloaded already, {folded} albums took their tracks' items");
+                Ok((settled + folded, settled + folded))
+            })?
+            .unwrap_or(0))
     }
 
     /// Live local files that came from torrents, oldest first.

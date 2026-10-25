@@ -823,3 +823,55 @@ fn an_album_page_with_one_file_shows_the_whole_album_from_a_service() {
     wait_for(&r.rt, "the page again", |s| s.release.as_ref().is_some_and(|d| d.tracks.len() == 4));
     assert_eq!(lib.tracks_of_release_all(release.id).unwrap().len(), 4);
 }
+
+/// «Хочу скачать» shows neither a song that has its file already nor the
+/// tracks of an album wished whole, and the same song asked again under a
+/// twin track is still one item.
+#[test]
+fn the_wishlist_shows_one_row_per_thing_to_download() {
+    use nikgob_core::model::{ArtistCredit, Release, Track, WishlistItem};
+    let lib = Library::open_in_memory().unwrap();
+    let release = lib.upsert_release(&Release::new("Big Walk Theme", ArtistCredit::single("aksfx", None))).unwrap();
+    let mut t = Track::new("Big Walk Theme", ArtistCredit::single("aksfx", None));
+    t.release_id = Some(release.id);
+    let walk = lib.upsert_track(&t).unwrap().id;
+    let ghost = lib.upsert_track(&Track::new("Ghost Avenue", ArtistCredit::single("Eve", None))).unwrap().id;
+    let mut f = Source::new(ghost, SourceKind::LocalFile, "Music/Eve/Ghost Avenue.flac", Codec::Flac);
+    f.quality_score = 900;
+    lib.add_source(&f).unwrap();
+    let put = |track: Option<TrackId>, scope: WishlistScope, title: &str| {
+        let mut w = WishlistItem::new(WishlistStatus::NoTorrent, 1);
+        w.track_id = track;
+        w.release_id = Some(release.id).filter(|_| track != Some(ghost));
+        w.scope = scope;
+        w.title = Some(title.into());
+        lib.put_wishlist_item(&w).unwrap();
+    };
+    // Made after its file came (the import missed it).
+    put(Some(ghost), WishlistScope::Track, "Ghost Avenue");
+    // A one-track album wished as its track and as the album.
+    put(Some(walk), WishlistScope::Track, "Big Walk Theme");
+    put(None, WishlistScope::Album, "Big Walk Theme");
+
+    let a = lib.upsert_track(&Track::new("Twin", ArtistCredit::single("A", None))).unwrap().id;
+    let b = lib.upsert_track(&Track::new("Twin", ArtistCredit::single("A", None))).unwrap().id;
+    assert_ne!(a, b);
+    let r = rig(&lib, Vec::new(), false);
+    r.rt.send(Command::DownloadTracks(vec![a]));
+    wait_for(&r.rt, "the toast", |s| s.toasts.iter().any(|t| t.text.starts_with("В «Хочу скачать»")));
+    r.rt.send(Command::DownloadTracks(vec![b]));
+    wait_for(&r.rt, "the second toast", |s| s.toasts.iter().any(|t| t.text == "Уже в «Хочу скачать»"));
+    assert!(lib.wishlist_for_track(b).unwrap().is_empty(), "no second item for the twin");
+    // The song with its file is «Скачано» (by the start's repair), the
+    // album is one row.
+    wait_for(&r.rt, "the rows", |s| {
+        let mut rows: Vec<(&str, WishlistScope, WishlistStatus)> =
+            s.downloads.wishlist.items.iter().map(|i| (i.title.as_str(), i.scope, i.status)).collect();
+        rows.sort_by_key(|r| r.0);
+        rows == [
+            ("Big Walk Theme", WishlistScope::Album, WishlistStatus::NoTorrent),
+            ("Ghost Avenue", WishlistScope::Track, WishlistStatus::Done),
+            ("Twin", WishlistScope::Track, WishlistStatus::New),
+        ]
+    });
+}

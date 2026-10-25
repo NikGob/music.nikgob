@@ -592,6 +592,10 @@ pub(crate) fn add_source_in(tx: &Connection, source: &Source) -> Result<Source> 
     }
     refresh_active(tx, source.track_id)?;
     refresh_in_library(tx, &track)?;
+    // A file: its «Хочу скачать» items that did not start are done.
+    if source.trashed_at.is_none() && source.kind.is_local() {
+        crate::masters::settle_wishlist_in(tx, &track)?;
+    }
     let sid: SourceId = parse_id(&id)?;
     source_by_id(tx, sid)?.ok_or_else(|| LibraryError::not_found("source", sid))
 }
@@ -641,6 +645,8 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
     tx.execute("UPDATE remote_like SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     tx.execute("UPDATE wishlist SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     dedupe_wishlist_of_track(tx, &t)?;
+    // The item of a stream twin merged into the track with the file.
+    crate::masters::settle_wishlist_in(tx, &t)?;
     // What it leaves behind: its artists and its album, when nothing else
     // has them (the album's ids go to the album `into` is on, when it is
     // the same one).
