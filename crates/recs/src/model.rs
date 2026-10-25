@@ -1011,7 +1011,6 @@ impl UserModel {
             // Seeking or keeping a track is the user's action too (whatever the
             // song is: background-ness is the session's, never its kind's).
             EventType::Seek | EventType::AddToPlaylist => self.passive = 0,
-            _ => {}
         }
     }
 
