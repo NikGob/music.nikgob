@@ -219,7 +219,10 @@ fn pick(snap: &Snapshot, tiles: &TilesInput, pool: &[(usize, TrackId)], seed: u6
         .map(|&(i, t)| {
             let a = snap.model.taste.affinity_at(i);
             // What played lately rests about a day and a half.
-            (a.max(0.0).sqrt() + 0.6 * jitter(seed, t) - nikgob_recs::radio::MIX_REST * snap.model.taste.lately_at(i), i, t)
+            // A dislike near in sound leans it a little lower.
+            let near = snap.model.taste.dislike_near_at(i);
+            (a.max(0.0).sqrt() + 0.6 * jitter(seed, t) - nikgob_recs::radio::MIX_REST * snap.model.taste.lately_at(i) - near, i, t)
+
         })
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)));

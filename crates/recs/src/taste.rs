@@ -475,6 +475,10 @@ pub struct TasteInput {
     pub suggested_tracks: Vec<(TrackId, f32, UnixMs)>,
     /// Library artists the services suggest, the same way.
     pub suggested_artists: Vec<(ArtistId, f32, UnixMs)>,
+    /// A disliked track's nearest sound neighbours stand a little lower
+    /// ([`crate::dislike`]; «Учитывать дизлайки в рекомендациях»). Off, a
+    /// dislike keeps only its own track out.
+    pub dislike_neighbours: bool,
 }
 
 /// Per-track and per-artist signals at one moment (`now`).
@@ -505,6 +509,9 @@ pub struct Taste {
     profile: [f32; 4],
     disliked_tracks: HashSet<TrackId>,
     disliked_artists: HashSet<ArtistId>,
+    /// How much lower each track stands for the dislikes near it in sound
+    /// (by catalog position; empty: nothing), set by the user model.
+    near_dislike: Vec<f32>,
 }
 
 /// What is left of a weight from `ts` at `now` with a half-life of `half`.
@@ -689,7 +696,19 @@ impl Taste {
             profile,
             disliked_tracks: input.disliked_tracks.iter().copied().collect(),
             disliked_artists: input.disliked_artists.iter().copied().collect(),
+            near_dislike: Vec::new(),
         }
+    }
+
+    /// How much lower the track at `i` stands for the dislikes of its
+    /// nearest sound neighbours ([`crate::dislike`]), 0 to
+    /// [`crate::dislike::CAP`].
+    pub fn dislike_near_at(&self, i: usize) -> f32 {
+        self.near_dislike.get(i).copied().unwrap_or(0.0)
+    }
+
+    pub(crate) fn set_near_dislikes(&mut self, near: Vec<f32>) {
+        self.near_dislike = near;
     }
 
     pub fn now(&self) -> UnixMs {

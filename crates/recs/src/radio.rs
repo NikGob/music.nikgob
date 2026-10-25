@@ -15,7 +15,8 @@
 //!    favourites as a fallback so the radio never runs dry;
 //! 3. scores them: closeness to the seed and to completed tracks, minus
 //!    closeness to early-skipped tracks ([`SKIP_PUSH`]), plus affinity, the
-//!    relation to the seed, the day part and a seeded jitter;
+//!    relation to the seed, the day part, minus the dislikes near it
+//!    ([`crate::dislike`]), and a seeded jitter;
 //! 4. selects the best under the diversity caps and orders them smoothly
 //!    from the last track served.
 //!
@@ -31,7 +32,7 @@
 //! time as if the ones before it played, among the candidates of the
 //! session (§5.2), by its value (§5.3) — the model's relevance, plus
 //! `1.5·ln(1 − p_skip)`, plus [`RADIO_REST`] times how rested it is (1.5
-//! days to half), a little seeded chance.
+//! days to half), minus the dislikes near it, a little seeded chance.
 //! «Похоже на X» stays X's: its candidates are within X's sound radius
 //! ([`SEED_RADIUS`] median distances, nearer in a big library) and of a
 //! kind of song that goes with X's, the anchor of the sound is X's for
@@ -660,6 +661,7 @@ impl RadioState {
                 let p_skip = weights.skip.p(&x).min(0.99);
                 let rested = model.tracks[c].last_start.map_or(1.0, |l| 1.0 - (-((m.now - l).max(0) as f64) / REST_HALF_MS as f64).exp2() as f32);
                 let value = relevance + SKIP_VALUE * (1.0 - p_skip).ln() + RADIO_REST * rested
+                    - recs.taste.dislike_near_at(c)
                     + MODEL_JITTER * Rng::derive(jitter, c as u64).f32();
                 let reason = if parts[F_NEXT_ALBUM] > 0.0 && parts[F_NEXT_ALBUM] >= parts[F_COOC] {
                     Reason::NextOnAlbum
@@ -869,7 +871,9 @@ impl RadioState {
                     + W_RELATION * bonus
                     + w_daypart * recs.taste.daypart_bonus_at(i, part)
                     - rest * lately
+                    - recs.taste.dislike_near_at(i)
                     + Rng::derive(jitter, i as u64).f32() * JITTER;
+
                 s
             })
             .collect();
@@ -1096,7 +1100,7 @@ impl Sound {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::index::VectorIndex;
     use crate::pick::assert_diverse;

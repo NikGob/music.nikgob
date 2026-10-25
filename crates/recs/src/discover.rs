@@ -1,9 +1,11 @@
 //! New music (docs/stage4.md §5).
 //!
 //! **«Новое для тебя».** The engine picks the seeds ([`Recs::discovery_seeds`]:
-//! the [`SEED_TRACKS`] tracks with the highest affinity among those played
-//! in the last 30 days and the [`SEED_ARTISTS`] artists with the highest
-//! affinity); the runtime asks the services around each seed (YouTube Music
+//! [`SEEDS_PER_PROFILE`] tracks of every taste profile, the best loved of
+//! it as the profile sees them, those played in the last 30 days first,
+//! [`SEED_TRACKS`] by affinity without profiles; the [`SEED_ARTISTS`]
+//! artists with the highest affinity, spread over the profiles); the
+//! runtime asks the services around each seed (YouTube Music
 //! related / radio for a track, similar artists of YouTube Music and Deezer
 //! and their Deezer top tracks for an artist) and hands the lists back
 //! ([`SeedFinds`]). [`rank_discoveries`] folds one song from several lists
@@ -14,9 +16,19 @@
 //! [`crate::suggest::SERVICE_VOTE`]), plus [`NEW_ARTIST_BONUS`] for an
 //! artist the library does not
 //! know, times [`CLIP_FACTOR`] for a music video. Known songs, disliked
-//! songs and artists, and songs shown [`IGNORED_AFTER`] times and never
-//! played are out. The best [`DISCOVERIES`], at most [`PER_ARTIST`] per
-//! artist, no artist twice in a row of three.
+//! songs and artists, junk ([`crate::junk`], against the canonical
+//! release among the finds) and songs shown [`IGNORED_AFTER`] times and
+//! never played are out; one song by ISRC once. With the user model
+//! ([`NewScoring`], recs-v2 §11.2) the score adds [`W_REGION_FIT`] times
+//! how well its sound fits a taste profile (its analysed preview, else
+//! half its seed's), [`W_KNOWN_ARTIST`] times a known artist's affinity,
+//! minus [`W_SKIP_NEW`] times the chance it is skipped early (the skip
+//! model with «new from a service»), minus the dislikes near it, minus a
+//! week's [`crate::novelty::ARTIST_PENALTY`] after an early skip of its
+//! artist, and leaves an artist skipped twice in a month out. The best
+//! [`DISCOVERIES`], spread over the profiles by their shares
+//! ([`crate::regions::spread`]), at most [`PER_ARTIST`] per artist, no
+//! artist twice in a row of three.
 //!
 //! **«Новые релизы».** For the artists with affinity
 //! ([`Recs::release_artists`]) the runtime fetches discographies; albums
@@ -28,13 +40,24 @@
 use std::collections::{HashMap, HashSet};
 
 use nikgob_core::clip_title;
-use nikgob_core::model::{ArtistId, ReleaseType, TrackId, UnixMs};
+use nikgob_core::model::{ArtistId, EventContext, ReleaseType, TrackId, UnixMs};
 use nikgob_core::streaming::{RemoteId, Service, StreamAlbum, StreamTrack, TrackKind};
 
+use crate::analysis::Vector;
+use crate::model::UserModel;
+use crate::novelty::NewLog;
 use crate::pick::Recs;
 use crate::taste::DAY_MS;
 
 pub const SEED_TRACKS: usize = 10;
+/// Seed tracks of each taste profile…
+pub const SEEDS_PER_PROFILE: usize = 3;
+/// …and of all of them at most.
+pub const SEED_TRACKS_MAX: usize = 30;
+/// The weights of the score with the user model (recs-v2 §11.2).
+pub const W_REGION_FIT: f32 = 1.2;
+pub const W_KNOWN_ARTIST: f32 = 0.6;
+pub const W_SKIP_NEW: f32 = 1.5;
 pub const SEED_ARTISTS: usize = 8;
 /// Seed tracks were played within this long.
 pub const SEED_RECENT_MS: i64 = 30 * DAY_MS;
@@ -187,6 +210,8 @@ pub enum SeedRef {
 pub struct DiscoverySeeds {
     pub tracks: Vec<(TrackId, f32)>,
     pub artists: Vec<(ArtistId, f32)>,
+    /// The taste profile of each seed track that has one.
+    pub profiles: Vec<(TrackId, usize)>,
 }
 
 impl DiscoverySeeds {
@@ -223,6 +248,19 @@ pub struct DiscoveryFilter {
     pub shown: HashMap<String, (u32, bool)>,
 }
 
+/// What scores a discovery beyond its votes (recs-v2 §11.2): the user
+/// model, the analysed previews of candidates (raw bliss, by
+/// [`song_key`]), the log of new music heard, the known artists'
+/// affinities (by [`artist_key`], 0…1).
+#[derive(Clone, Copy)]
+pub struct NewScoring<'a> {
+    pub model: &'a UserModel,
+    pub vectors: &'a HashMap<String, Vector>,
+    pub log: &'a NewLog,
+    pub artist_affinity: &'a HashMap<String, f32>,
+    pub now: UnixMs,
+}
+
 /// One discovery.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Discovery {
@@ -235,11 +273,72 @@ pub struct Discovery {
     /// The strongest of them (for "because you listen to X").
     pub via: SeedRef,
     pub new_artist: bool,
+    /// The taste profile it fits (its preview's, else its seed's).
+    pub profile: Option<usize>,
 }
 
 impl Recs<'_> {
-    /// The seeds of a discovery pass.
+    /// The seeds of a discovery pass (see the module docs).
     pub fn discovery_seeds(&self) -> DiscoverySeeds {
+        let mut s = self.seeds_by_affinity();
+        let Some(m) = self.model.filter(|m| !m.regions.is_empty()) else { return s };
+        let now = self.now();
+        let mut by_profile: Vec<Vec<(f32, usize)>> = vec![Vec::new(); m.regions.len()];
+        for i in 0..self.catalog.len() {
+            let Some(j) = m.profile_at(i) else { continue };
+            if self.taste.blocks(self.info(i)) || m.tracks[i].aff_long(now) <= 0.0 {
+                continue;
+            }
+            let recent = if self.taste.last_played_at(i).is_some_and(|t| now - t <= SEED_RECENT_MS) { 1.0 } else { 0.5 };
+            by_profile[j].push((m.profile_affinity(i) * recent, i));
+        }
+        // The profiles by share: a small one gets its seeds too.
+        let mut order: Vec<usize> = (0..by_profile.len()).collect();
+        order.sort_by(|a, b| m.profile_share[*b].total_cmp(&m.profile_share[*a]).then(a.cmp(b)));
+        let mut tracks: Vec<(TrackId, f32)> = Vec::new();
+        let mut profiles: Vec<(TrackId, usize)> = Vec::new();
+        for j in order {
+            let list = &mut by_profile[j];
+            list.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            for &(_, i) in list.iter().take(SEEDS_PER_PROFILE) {
+                if tracks.len() == SEED_TRACKS_MAX {
+                    break;
+                }
+                let id = self.info(i).id;
+                tracks.push((id, self.taste.affinity_at(i)));
+                profiles.push((id, j));
+            }
+        }
+        // The best loved beyond the profiles (no sound) after them.
+        for (id, a) in std::mem::take(&mut s.tracks) {
+            if tracks.len() >= SEED_TRACKS_MAX.max(SEED_TRACKS) {
+                break;
+            }
+            if !tracks.iter().any(|t| t.0 == id) {
+                tracks.push((id, a));
+            }
+        }
+        // Artists spread over the profiles of their best loved tracks.
+        let mut artists: Vec<(ArtistId, f32)> =
+            self.taste.artist_affinities().filter(|(a, s)| *s > 0.0 && !self.taste.is_disliked_artist(*a)).collect();
+        artists.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        let profile_of_artist = |a: ArtistId| {
+            self.catalog
+                .of_artist(a)
+                .iter()
+                .map(|&i| i as usize)
+                .max_by(|x, y| m.tracks[*x].aff_long(now).total_cmp(&m.tracks[*y].aff_long(now)).then(y.cmp(x)))
+                .and_then(|i| m.profile_at(i))
+        };
+        let items: Vec<((ArtistId, f32), Option<usize>)> = artists.iter().map(|x| (*x, profile_of_artist(x.0))).collect();
+        s.artists = crate::regions::spread(&items, &m.profile_share, SEED_ARTISTS);
+        s.tracks = tracks;
+        s.profiles = profiles;
+        s
+    }
+
+    /// The seeds by affinity alone (no profiles).
+    fn seeds_by_affinity(&self) -> DiscoverySeeds {
         let now = self.now();
         let mut tracks: Vec<(TrackId, f32)> = (0..self.catalog.len())
             // Streams without a file are seeds too, whatever the mixes pick.
@@ -259,7 +358,7 @@ impl Recs<'_> {
             .collect();
         artists.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         artists.truncate(SEED_ARTISTS);
-        DiscoverySeeds { tracks, artists }
+        DiscoverySeeds { tracks, artists, profiles: Vec::new() }
     }
 
     /// The artists whose discographies to check for new releases.
@@ -353,6 +452,48 @@ fn better_version(a: &StreamTrack, b: &StreamTrack) -> bool {
 
 /// The discoveries of a pass (see the module docs), best first.
 pub fn rank_discoveries(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter: &DiscoveryFilter) -> Vec<Discovery> {
+    rank_discoveries_with(seeds, finds, filter, None)
+}
+
+/// What the user model adds to a candidate's score, and its profile.
+fn model_score(t: &StreamTrack, key: &str, via_seeds: &HashMap<SeedRef, f32>, seeds: &DiscoverySeeds, sc: &NewScoring<'_>) -> Option<(f32, Option<usize>)> {
+    let m = sc.model;
+    let artist = t.artists.first().map(|a| artist_key(&a.name)).unwrap_or_default();
+    let penalty = sc.log.artist_penalty(&artist, sc.now);
+    if penalty.is_infinite() {
+        return None;
+    }
+    let v = sc.vectors.get(key).map(|v| m.embed(v));
+    // The profile and the fit: the preview's, else half the seed's.
+    let seed_profile = via_seeds
+        .iter()
+        .filter_map(|(s, w)| match s {
+            SeedRef::Track(id) => seeds.profiles.iter().find(|p| p.0 == *id).map(|p| (p.1, *id, *w)),
+            _ => None,
+        })
+        .max_by(|a, b| a.2.total_cmp(&b.2));
+    let (fit, profile) = match &v {
+        Some(v) => (m.regions.fit(v), m.regions.of(v, None)),
+        None => match seed_profile {
+            Some((j, id, _)) => {
+                let fit = m.position(id).and_then(|p| m.embedded_at(p)).map_or(0.5, |e| m.regions.fit(e));
+                (0.5 * fit, Some(j))
+            }
+            None => (0.25, None),
+        },
+    };
+    let known = sc.artist_affinity.get(&artist).copied().unwrap_or(0.0);
+    let moment = m.moment(&crate::session::Session::default(), sc.now);
+    let duration = t.duration_ms.map(|d| d.min(u64::from(u32::MAX)) as u32);
+    let p_skip = m.p_skip_new(&moment, v.as_ref(), duration, EventContext::HomeSection);
+    let near = v.as_ref().map_or(0.0, |v| m.dislike_near_of(v));
+    Some((W_REGION_FIT * fit + W_KNOWN_ARTIST * known - W_SKIP_NEW * p_skip - near - penalty, profile))
+}
+
+/// [`rank_discoveries`] scored with the user model too (`scoring`).
+pub fn rank_discoveries_with(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter: &DiscoveryFilter, scoring: Option<&NewScoring<'_>>) -> Vec<Discovery> {
+    let all_tracks: Vec<&StreamTrack> = finds.iter().flat_map(|f| f.tracks.iter()).collect();
+    let mut by_isrc: HashMap<String, String> = HashMap::new();
     let max_aff = seeds
         .tracks
         .iter()
@@ -382,6 +523,15 @@ pub fn rank_discoveries(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter: &Di
             if artist.is_empty() {
                 continue;
             }
+            let canonical = crate::junk::canonical_in(t, all_tracks.iter().copied());
+            if crate::junk::junk(t, canonical.as_ref()).is_some() {
+                continue;
+            }
+            // One song under two titles: the same ISRC.
+            let key = match t.isrc.as_ref() {
+                Some(isrc) => by_isrc.entry(isrc.clone()).or_insert(key).clone(),
+                None => key,
+            };
             let w = w_seed * (1.0 + RANK_BONUS * (1.0 - rank as f32 / len));
             let c = cands.entry(key).or_insert_with(|| {
                 order += 1;
@@ -401,12 +551,18 @@ pub fn rank_discoveries(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter: &Di
     let mut out: Vec<(Discovery, usize)> = cands
         .into_iter()
         .filter(|(_, c)| c.track.playable)
-        .map(|(key, c)| {
+        .filter_map(|(key, c)| {
             let artist = c.track.artists.first().map(|a| artist_key(&a.name)).unwrap_or_default();
             let new_artist = !filter.known_artists.contains(&artist);
             let mut score: f32 = c.seeds.values().sum();
             if new_artist {
                 score += NEW_ARTIST_BONUS;
+            }
+            let mut profile = None;
+            if let Some(sc) = scoring {
+                let (extra, p) = model_score(&c.track, &key, &c.seeds, seeds, sc)?;
+                score += extra;
+                profile = p;
             }
             if c.track.kind == TrackKind::Video {
                 score *= CLIP_FACTOR;
@@ -417,7 +573,7 @@ pub fn rank_discoveries(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter: &Di
                 .max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(a.0)))
                 .map(|(s, _)| *s)
                 .expect("a candidate has a seed");
-            (
+            Some((
                 Discovery {
                     votes: c.seeds.len() as u32,
                     track: c.track,
@@ -425,12 +581,22 @@ pub fn rank_discoveries(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter: &Di
                     score,
                     via,
                     new_artist,
+                    profile,
                 },
                 c.first,
-            )
+            ))
         })
         .collect();
     out.sort_by(|a, b| b.0.score.total_cmp(&a.0.score).then(a.1.cmp(&b.1)));
+    // Every profile its share of the discoveries.
+    if let Some(sc) = scoring
+        && !sc.model.profile_share.is_empty()
+    {
+        let items: Vec<((Discovery, usize), Option<usize>)> = out.iter().map(|d| (d.clone(), d.0.profile)).collect();
+        let n = items.len().min(DISCOVERIES * 2);
+        out = crate::regions::spread(&items, &sc.model.profile_share, n);
+    }
+
 
     // At most two per artist; no artist twice within three.
     let mut per: HashMap<String, usize> = HashMap::new();
@@ -494,8 +660,10 @@ mod tests {
         DiscoverySeeds {
             tracks: vec![(tid(1), 10.0), (tid(2), 1.0), (tid(3), 1.0)],
             artists: vec![(aid(1), 2.0)],
+            ..DiscoverySeeds::default()
         }
     }
+
 
     #[test]
     fn votes_beat_single_hits_and_filters_hold() {
@@ -654,7 +822,66 @@ mod tests {
         assert!(pos("Fresh") < pos("Single"), "{titles:?}");
     }
 
+    /// Seeds from every taste profile, not only the one played most: a
+    /// listener of much rap and a few soundtracks, Japanese pop and rock
+    /// gets seeds of each, the soundtracks' too.
+    #[test]
+    fn seeds_cover_regions() {
+        use crate::model::{ModelInput, UserModel};
+        let (cat, idx, input, types) = crate::radio::tests::listener(true);
+        let now = crate::model::tests::T0;
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None }, now);
+        let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
+        let s = recs.discovery_seeds();
+        let kinds: HashSet<u128> = s.tracks.iter().map(|(t, _)| t.0.as_u128() / 1_000).collect();
+        assert_eq!(kinds, [0, 1, 2, 3].into(), "{:?}", s.tracks);
+        assert!(s.tracks.len() <= SEED_TRACKS_MAX);
+        let rap = s.tracks.iter().filter(|(t, _)| t.0.as_u128() < 1_000).count();
+        assert!(rap * 2 <= s.tracks.len() + 2, "rap does not fill the seeds: {rap} of {}", s.tracks.len());
+        // Without the model: the best loved alone, as before.
+        let plain = Recs::new(&cat, &model.taste, &idx).discovery_seeds();
+        assert_eq!(plain.tracks.len(), SEED_TRACKS);
+    }
+
+    /// With the model: a junk upload never comes, an artist skipped twice
+    /// stays out, the small profile's discoveries are among the best.
+    #[test]
+    fn discoveries_with_the_model_spread_and_filter() {
+        use crate::model::{ModelInput, UserModel};
+        use crate::novelty::{Heard, NewEvent, NewLog};
+        let (cat, idx, input, types) = crate::radio::tests::listener(true);
+        let now = crate::model::tests::T0;
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None }, now);
+        let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
+        let seeds = recs.discovery_seeds();
+        // Each seed finds five songs of new artists of its own.
+        let mut finds = Vec::new();
+        for (t, _) in &seeds.tracks {
+            let k = t.0.as_u128();
+            let tracks = (0..5).map(|n| st(Service::Youtube, &format!("{k}-{n}"), &format!("Song {k} {n}"), &format!("Artist {k} {n}"))).collect();
+            finds.push(SeedFinds { seed: SeedRef::Track(*t), tracks });
+        }
+        let seed0 = seeds.tracks[0].0.0.as_u128();
+        let mut nightcore = st(Service::Youtube, "nc", "Song X (Nightcore)", "Nightcore Hub");
+        nightcore.kind = TrackKind::Video;
+        finds[0].tracks.insert(0, nightcore);
+        let mut log = NewLog::default();
+        for at in [now - DAY_MS, now - 2 * DAY_MS] {
+            log.push(NewEvent { song: "x".into(), artist: artist_key(&format!("Artist {seed0} 0")), source: None, vector: None, track: None, at, heard: Heard::Early });
+        }
+        let vectors = HashMap::new();
+        let known = HashMap::new();
+        let sc = NewScoring { model: &model, vectors: &vectors, log: &log, artist_affinity: &known, now };
+        let out = rank_discoveries_with(&seeds, &finds, &DiscoveryFilter::default(), Some(&sc));
+        assert!(!out.iter().any(|d| d.track.title.contains("Nightcore")));
+        assert!(!out.iter().any(|d| d.track.artists[0].name == format!("Artist {seed0} 0")), "skipped twice: out for a month");
+        let ost = out.iter().filter(|d| seeds.tracks.iter().any(|(t, _)| d.track.title.starts_with(&format!("Song {}", t.0.as_u128())) && (1_000..2_000).contains(&t.0.as_u128()))).count();
+        assert!(ost >= 2, "the soundtracks' discoveries come too: {ost} of {}", out.len());
+        assert!(out.iter().all(|d| d.profile.is_some()));
+    }
+
     /// Civil date of days since the epoch (Howard Hinnant).
+
     fn civil(z: i64) -> (i64, i64, i64) {
         let z = z + 719_468;
         let era = z.div_euclid(146_097);

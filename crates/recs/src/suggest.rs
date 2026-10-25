@@ -278,7 +278,9 @@ mod tests {
         let seeds = DiscoverySeeds {
             tracks: vec![(tid(1), 5.0)],
             artists: Vec::new(),
+            ..DiscoverySeeds::default()
         };
+
         let mut finds = vec![SeedFinds {
             seed: SeedRef::Track(tid(1)),
             tracks: vec![

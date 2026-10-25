@@ -80,7 +80,11 @@ impl Recs<'_> {
         let mut favourites: Vec<usize> = (0..n_cat).filter(|&i| aff(i) > 0.0 && !self.blocked(i)).collect();
         favourites.sort_by(|a, b| aff(*b).total_cmp(&aff(*a)).then(a.cmp(b)));
         let part = self.taste.day_part();
-        let weight = |i: usize| f64::from(aff(i)) * f64::from(1.0 + 0.5 * self.taste.daypart_bonus_at(i, part));
+        // A dislike near in sound leans a track a little lower.
+        let weight = |i: usize| {
+            f64::from(aff(i)) * f64::from(1.0 + 0.5 * self.taste.daypart_bonus_at(i, part)) * f64::from(1.0 - self.taste.dislike_near_at(i))
+        };
+
 
         // Rediscoveries: favourites (played or liked) long unplayed.
         let red_pool: Vec<(usize, f64)> = favourites

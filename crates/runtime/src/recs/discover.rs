@@ -144,6 +144,9 @@ struct Pass {
     day: String,
     seed_tracks: Vec<(TrackId, f32)>,
     seed_artists: Vec<(ArtistId, f32)>,
+    /// The taste profile of each seed track.
+    #[serde(default)]
+    seed_profiles: Vec<(TrackId, usize)>,
     steps: VecDeque<Step>,
     finds: Vec<(Seed, Vec<StreamTrack>)>,
     releases: Vec<(ArtistId, Vec<StreamAlbum>)>,
@@ -165,6 +168,8 @@ pub(crate) struct Found {
     seed_tracks: Vec<(TrackId, f32)>,
     #[serde(default)]
     seed_artists: Vec<(ArtistId, f32)>,
+    #[serde(default)]
+    seed_profiles: Vec<(TrackId, usize)>,
     #[serde(default)]
     finds: Vec<(Seed, Vec<StreamTrack>)>,
 }
@@ -318,12 +323,13 @@ impl Worker {
         let (yt, dz) = self.discover_services();
         self.recs.discover.force = false;
         let recs = snap.recs();
-        let DiscoverySeeds { tracks, artists } = recs.discovery_seeds();
+        let DiscoverySeeds { tracks, artists, profiles } = recs.discovery_seeds();
         let release_artists = recs.release_artists();
         let mut pass = Pass {
             day,
             seed_tracks: tracks.clone(),
             seed_artists: artists.clone(),
+            seed_profiles: profiles,
             ..Pass::default()
         };
         let mut track_steps = Vec::new();
@@ -619,6 +625,7 @@ impl Worker {
         let seeds = DiscoverySeeds {
             tracks: pass.seed_tracks.clone(),
             artists: pass.seed_artists.clone(),
+            profiles: pass.seed_profiles.clone(),
         };
         let tracks = ranked(&snap, &seeds, &pass.finds, &filter);
         let releases = snap
@@ -640,6 +647,7 @@ impl Worker {
             releases,
             seed_tracks: pass.seed_tracks,
             seed_artists: pass.seed_artists,
+            seed_profiles: pass.seed_profiles,
             finds: pass.finds,
         };
         self.streaming.learn(&found.tracks);
@@ -673,6 +681,7 @@ impl Worker {
         let seeds = DiscoverySeeds {
             tracks: found.seed_tracks.clone(),
             artists: found.seed_artists.clone(),
+            profiles: found.seed_profiles.clone(),
         };
         let tracks = ranked(&snap, &seeds, &found.finds, &filter);
         if tracks == found.tracks {

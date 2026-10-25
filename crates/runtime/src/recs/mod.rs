@@ -695,6 +695,7 @@ fn read_parts(
         utc_offset_min,
         suggested_tracks: matched.tracks,
         suggested_artists: matched.artists,
+        dislike_neighbours: true,
     };
     let model = UserModel::build(
         &catalog,

@@ -23,6 +23,10 @@
 //!   [`SKIP_FEATURES`], a step on every start that completed or was skipped
 //!   early, whoever chose it.
 //!
+//! * The regions of taste in sound ([`crate::regions`]) of the tracks with
+//!   long affinity, and how much lower each track stands for the dislikes
+//!   near it ([`crate::dislike`]).
+//!
 //! [`UserModel::build`] walks the history in order of time: the stats, and
 //! the weights too unless [`Weights`] of the same [`FEATURE_VERSION`] are
 //! given (the library's cache keeps them between builds, the runtime
@@ -36,7 +40,8 @@ use nikgob_core::model::{ArtistId, EndReason, EventContext, EventOrigin, EventTy
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::Vector;
-use crate::index::{VectorIndex, euclid};
+use crate::index::{Normalizer, VectorIndex, euclid};
+use crate::regions::Regions;
 use crate::session::{Ended, Session, TrackLookup};
 use crate::songtype::{SongLane, SongType, SongTypes, sigmoid};
 use crate::taste::{
@@ -46,7 +51,7 @@ use crate::taste::{
 
 /// Bumped when a feature changes meaning: cached weights of another
 /// version are learnt again from the history.
-pub const FEATURE_VERSION: u32 = 1;
+pub const FEATURE_VERSION: u32 = 2;
 
 pub const H_LONG_MS: i64 = 45 * DAY_MS;
 pub const H_HOT_MS: i64 = 2 * DAY_MS;
@@ -67,6 +72,25 @@ const INTERLUDE_MS: u32 = 75_000;
 const LONG_MS: u32 = 6 * 60_000;
 /// Song lanes ([`lane_index`]).
 const LANES: usize = 5;
+/// What a start weighs in the balance of the taste profiles (recs-v2 §4.5,
+/// [`crate::regions`]): one the user chose…
+pub const ACTIVE_MANUAL: f32 = 1.0;
+/// …one the app chose while the user was about (a few after their last
+/// action)…
+pub const ACTIVE_AUTO: f32 = 0.5;
+/// …and one of a long run the app chose with no action of the user's:
+/// background listening, counted fully inside its profile but little in
+/// the balance (hours of ambient must not make the taste ambient: fifty
+/// such starts weigh as one choice).
+pub const BACKGROUND_WEIGHT: f32 = 0.02;
+/// A like weighs this in the balance.
+pub const ACTIVE_LIKE: f32 = 2.0;
+/// A run of the app's starts is background past this many, or twice the
+/// user's own median run, whichever is longer (people let a queue play on
+/// for different lengths)…
+pub const PASSIVE_AFTER: u32 = 4;
+/// …but never past this many (a history that is all one long run).
+pub const PASSIVE_MAX: u32 = 16;
 /// A radio of one kind of song goes on to another only when the user's
 /// own next choices go there this often (a generic prior: about one in
 /// seven)…
@@ -110,12 +134,14 @@ pub const FULL_STEP_AFTER: u32 = 300;
 /// The expectation of a step is taken over this many best candidates.
 pub const EXPECT_OVER: usize = 100;
 
-/// The features of a start for its early skip, in this order.
-pub const SKIP_FEATURES: [&str; 23] = [
+/// The features of a start for its early skip, in this order
+/// (`new_service`: new music from a service, recs-v2 §11.2).
+pub const SKIP_FEATURES: [&str; 24] = [
     "bias", "aff_today", "aff_long", "aff_hot", "early_rate", "never", "liked", "pos0", "pos_log", "ctx_album",
     "ctx_playlist", "ctx_artist", "ctx_home", "same_album", "same_world", "sound_jump", "night", "ost", "vocal",
-    "long", "interlude", "prev_early", "prev2_early",
+    "long", "interlude", "prev_early", "prev2_early", "new_service",
 ];
+pub const G_NEW_SERVICE: usize = 23;
 pub const G: usize = SKIP_FEATURES.len();
 const SKIP_LR: f32 = 0.08;
 const SKIP_L2: f32 = 0.001;
@@ -138,6 +164,11 @@ pub struct TrackStats {
     /// A start not ended yet, and who chose it.
     open: Option<(UnixMs, Option<EventOrigin>)>,
     liked: Option<UnixMs>,
+    /// The user's active choices of it ([`ACTIVE_MANUAL`] and the rest),
+    /// halving in [`H_LONG_MS`], from `act_ref`: what balances the taste
+    /// profiles.
+    act: f32,
+    act_ref: UnixMs,
 }
 
 fn halve(x: f32, from: UnixMs, to: UnixMs, half: i64) -> f32 {
@@ -187,6 +218,17 @@ impl TrackStats {
 
     pub fn liked(&self, now: UnixMs) -> bool {
         self.liked.is_some_and(|t| t <= now)
+    }
+
+    fn choose(&mut self, ts: UnixMs, w: f32) {
+        let ts = ts.max(self.act_ref);
+        self.act = halve(self.act, self.act_ref, ts, H_LONG_MS) + w;
+        self.act_ref = ts;
+    }
+
+    /// The user's active choices of it at `now`.
+    pub fn active(&self, now: UnixMs) -> f32 {
+        halve(self.act, self.act_ref, now, H_LONG_MS)
     }
 }
 
@@ -390,9 +432,26 @@ pub struct UserModel {
     /// [`lane_index`].
     lane_trans: [[f32; LANES]; LANES],
     pub co: CoOccur,
+    /// The taste profile of each track with a sound (its region, by its
+    /// kind of song), the profiles' shares of the user's active choices and
+    /// the best long affinity in each.
+    pub profile_of: Vec<Option<u16>>,
+    pub profile_share: Vec<f32>,
+    profile_top: Vec<f32>,
+    /// The app's starts running with no action of the user's, and the run
+    /// past which they are background.
+    passive: u32,
+    passive_after: u32,
     pub weights: Weights,
     /// The median distance between tracks.
     scale: f32,
+    norm: Normalizer,
+    /// The regions of taste in sound, by kind of song: the taste profiles.
+    pub regions: Regions,
+
+    /// The embedded vectors of the disliked tracks (a new track near them
+    /// stands lower).
+    disliked: Vec<Vector>,
     /// The walk: its session, the skip features of open starts, the run of
     /// early skips for leafing.
     walk: Session,
@@ -449,12 +508,82 @@ impl UserModel {
                 m.tracks[i].liked = Some(*at);
             }
         }
+        m.passive_after = passive_after(&input.events);
         for p in ordered(&input.events) {
             m.event(p, None);
         }
         m.now = now;
         m.learn = false;
+        m.settle(catalog, input);
         m
+    }
+
+    /// The profile of the track at `i`.
+    pub fn profile_at(&self, i: usize) -> Option<usize> {
+        self.profile_of.get(i).copied().flatten().map(usize::from)
+    }
+
+    /// The long affinity of the track at `i` within its profile: 1 for the
+    /// best loved of it, so a small profile's favourites stand as high as a
+    /// big one's.
+    pub fn profile_affinity(&self, i: usize) -> f32 {
+        let a = self.tracks[i].aff_long(self.now);
+        match self.profile_at(i).and_then(|j| self.profile_top.get(j)) {
+            Some(top) if *top > 1e-6 => a / top,
+            _ => a,
+        }
+    }
+
+    /// The taste profiles and the dislikes' neighbours, once the history
+    /// is walked.
+    fn settle(&mut self, catalog: &Catalog, input: &TasteInput) {
+        let now = self.now;
+        let mut groups: Vec<(SongLane, Vec<&Vector>)> = Vec::new();
+        for i in 0..self.len() {
+            let Some(v) = self.emb[i].as_ref() else { continue };
+            if self.tracks[i].aff_long(now) <= 0.0 || self.taste.blocks(&catalog.tracks()[i]) {
+                continue;
+            }
+            let lane = self.types[i].lane();
+            match groups.iter_mut().find(|g| g.0 == lane) {
+                Some(g) => g.1.push(v),
+                None => groups.push((lane, vec![v])),
+            }
+        }
+        groups.sort_by_key(|g| lane_index(g.0));
+        self.regions = Regions::by_lane(&groups);
+        let k = self.regions.len();
+        self.profile_of = (0..self.len())
+            .map(|i| self.emb[i].as_ref().and_then(|v| self.regions.of(v, Some(self.types[i].lane()))).map(|j| j as u16))
+            .collect();
+        let mut mass = vec![0.0f32; k];
+        let mut top = vec![0.0f32; k];
+        for i in 0..self.len() {
+            if let Some(j) = self.profile_at(i) {
+                mass[j] += self.tracks[i].active(now).max(0.0);
+                top[j] = top[j].max(self.tracks[i].aff_long(now));
+            }
+        }
+        let total: f32 = mass.iter().sum();
+        self.profile_share = if total > 0.0 { mass.iter().map(|m| m / total).collect() } else { vec![1.0 / k.max(1) as f32; k] };
+        self.profile_top = top;
+        let disliked: Vec<usize> = input.disliked_tracks.iter().filter_map(|t| self.pos.get(t).copied()).collect();
+        if input.dislike_neighbours {
+            self.disliked = disliked.iter().filter_map(|&i| self.emb[i]).collect();
+            let near = crate::dislike::near_dislikes(&self.emb, &disliked, self.scale);
+            self.taste.set_near_dislikes(near);
+        }
+    }
+
+    /// A raw bliss vector in the model's space.
+    pub fn embed(&self, v: &Vector) -> Vector {
+        self.norm.embed(v)
+    }
+
+    /// How much lower a new track sounding `v` (embedded) stands for the
+    /// dislikes near it.
+    pub fn dislike_near_of(&self, v: &Vector) -> f32 {
+        crate::dislike::near_dislikes_of(v, &self.disliked, self.scale)
     }
 
     fn empty(catalog: &Catalog, taste: Taste, extra: ModelInput<'_>, utc_offset_min: i32, now: UnixMs) -> Self {
@@ -516,8 +645,16 @@ impl UserModel {
             trans: HashMap::new(),
             lane_trans: [[0.0; LANES]; LANES],
             co: CoOccur::new(n),
+            profile_of: vec![None; n],
+            profile_share: Vec::new(),
+            profile_top: Vec::new(),
+            passive: 0,
+            passive_after: PASSIVE_AFTER,
             weights: Weights::default(),
             scale,
+            norm,
+            regions: Regions::default(),
+            disliked: Vec::new(),
             walk: Session::default(),
             pending: HashMap::new(),
             streak: 0,
@@ -712,6 +849,44 @@ impl UserModel {
         self.weights.skip.p(&self.skip_features(m, c, ctx))
     }
 
+    /// The features of starting a new track of a service now from `ctx`
+    /// ([`SKIP_FEATURES`]): never played, no affinity, its sound `vector`
+    /// (embedded) and length when known.
+    pub fn skip_features_new(&self, m: &Moment, vector: Option<&Vector>, duration_ms: Option<u32>, ctx: EventContext) -> [f32; G] {
+        let mut x = [0.0f32; G];
+        let b = |v: bool| f32::from(u8::from(v));
+        x[0] = 1.0;
+        x[4] = 0.2;
+        x[5] = 1.0;
+        x[7] = b(m.sess.is_empty());
+        x[8] = (m.sess.len() as f32).ln_1p();
+        x[9] = b(ctx == EventContext::Album);
+        x[10] = b(ctx == EventContext::Playlist);
+        x[11] = b(ctx == EventContext::Artist);
+        x[12] = b(matches!(ctx, EventContext::HomeSection | EventContext::Radio));
+        x[15] = match (m.prev.and_then(|p| self.emb[p].as_ref()), vector) {
+            (Some(a), Some(v)) => euclid(a, v) / self.scale,
+            _ => 1.0,
+        };
+        let local = m.now + i64::from(self.utc_offset_min) * 60_000;
+        x[16] = b(local.rem_euclid(DAY_MS) / HOUR_MS < 6);
+        x[19] = b(duration_ms.is_some_and(|d| d > LONG_MS));
+        x[20] = b(duration_ms.is_some_and(|d| d < INTERLUDE_MS));
+        let mut ends = m.sess.iter().rev().map(|(_, e, _)| *e);
+        let (e1, e2) = (ends.next(), ends.next());
+        x[21] = b(e1 == Some(Ended::Early));
+        x[22] = b(e1 == Some(Ended::Early) && e2 == Some(Ended::Early));
+        x[G_NEW_SERVICE] = 1.0;
+        x
+    }
+
+    /// The chance a new track of a service started now is skipped in its
+    /// first 30 s.
+    pub fn p_skip_new(&self, m: &Moment, vector: Option<&Vector>, duration_ms: Option<u32>, ctx: EventContext) -> f32 {
+        self.weights.skip.p(&self.skip_features_new(m, vector, duration_ms, ctx))
+    }
+
+
     /// The candidates of the next start at `m` (§5.2): the nearest to the
     /// anchor, what followed the last three, the next on the album, the
     /// previous track's world, the hot and the long favourites; `ok`
@@ -771,7 +946,11 @@ impl UserModel {
             return;
         };
         match p.kind {
-            EventType::Like => self.tracks[i].liked = Some(p.ts),
+            EventType::Like => {
+                self.tracks[i].liked = Some(p.ts);
+                self.tracks[i].choose(p.ts, ACTIVE_LIKE);
+                self.passive = 0;
+            }
             EventType::Unlike => self.tracks[i].liked = None,
             EventType::Complete => {
                 self.streak = 0;
@@ -792,6 +971,8 @@ impl UserModel {
                     self.pending.remove(&i);
                     return;
                 }
+                // A skip is the user's action.
+                self.passive = 0;
                 let origin = opened.and_then(|(_, o)| o);
                 match p.position_ms {
                     Some(pos) if pos < EARLY_SKIP_MS => {
@@ -874,7 +1055,19 @@ impl UserModel {
             self.lane_trans[lane_index(self.types[prev].lane())][lane_index(self.types[i].lane())] += 1.0;
         }
         let part = self.part_of(ts);
+        let active = match p.origin {
+            Some(EventOrigin::Manual) => {
+                self.passive = 0;
+                ACTIVE_MANUAL
+            }
+            Some(_) => {
+                self.passive += 1;
+                if self.passive > self.passive_after { BACKGROUND_WEIGHT } else { ACTIVE_AUTO }
+            }
+            None => ACTIVE_AUTO,
+        };
         let t = &mut self.tracks[i];
+        t.choose(ts, active);
         if let Some((t0, o)) = t.open.take() {
             // The start before never ended.
             let r = R_OPEN * if o == Some(EventOrigin::Manual) { MANUAL_POSITIVE } else { 1.0 };
@@ -900,7 +1093,34 @@ impl UserModel {
     }
 }
 
+/// The run of the app's starts past which they are background: twice the
+/// user's median run of them, between [`PASSIVE_AFTER`] and [`PASSIVE_MAX`].
+
+fn passive_after(events: &[Play]) -> u32 {
+    let mut runs: Vec<u32> = Vec::new();
+    let mut run = 0u32;
+    for p in ordered(events) {
+        match (p.kind, p.origin) {
+            (EventType::Start, Some(o)) if o.is_auto() => run += 1,
+            (EventType::Start, Some(_)) | (EventType::Skip | EventType::Like, _) => {
+                if run > 0 {
+                    runs.push(run);
+                }
+                run = 0;
+            }
+            _ => {}
+        }
+    }
+    if run > 0 {
+        runs.push(run);
+    }
+    runs.sort_unstable();
+    let median = runs.get(runs.len() / 2).copied().unwrap_or(0);
+    (2 * median).clamp(PASSIVE_AFTER, PASSIVE_MAX)
+}
+
 /// One step of `next` towards `target` over the [`EXPECT_OVER`] best of
+
 /// the other candidates' features.
 fn step(next: &mut Model, target: [f32; F], cands: Vec<[f32; F]>) {
     let mut scored: Vec<(f32, [f32; F])> = cands.into_iter().map(|f| (next.score(&f), f)).collect();
@@ -961,6 +1181,8 @@ pub struct ReplayReport {
     pub skip_auc_history: Option<f32>,
     pub skip_test: usize,
     pub weights: Weights,
+    /// The share of the catalog the learnt model's first ten ever held.
+    pub coverage: f32,
 }
 
 impl ReplayReport {
@@ -980,6 +1202,20 @@ fn rank_of(scores: &[f32], target: usize) -> f32 {
 /// Replays `input`'s history in order of time, prequentially, from the
 /// hand weights (see [`ReplayReport`]).
 pub fn replay(catalog: &Catalog, input: &TasteInput, extra: ModelInput<'_>) -> ReplayReport {
+    replay_with(catalog, input, extra, &[], &HashSet::new())
+}
+
+/// [`replay`] with `dislikes` as the runtime has them (out of every
+/// ranking, their sound neighbours a little lower, [`crate::dislike`]),
+/// and the starts of `unscored` left out of the hits (to compare runs with
+/// and without dislikes on the same starts).
+pub fn replay_with(
+    catalog: &Catalog,
+    input: &TasteInput,
+    extra: ModelInput<'_>,
+    dislikes: &[TrackId],
+    unscored: &HashSet<TrackId>,
+) -> ReplayReport {
     let events = ordered(&input.events);
     let (Some(first), Some(last)) = (events.first().map(|p| p.ts), events.last().map(|p| p.ts)) else {
         return ReplayReport::default();
@@ -1010,6 +1246,9 @@ pub fn replay(catalog: &Catalog, input: &TasteInput, extra: ModelInput<'_>) -> R
     let taste = Taste::build(catalog, &TasteInput::default(), first);
     let mut m = UserModel::empty(catalog, taste, extra, input.utc_offset_min, first);
     m.learn = true;
+    let disliked: Vec<usize> = dislikes.iter().filter_map(|t| m.position(*t)).collect();
+    let near = crate::dislike::near_dislikes(&m.emb, &disliked, m.scale);
+    let mut shown: HashSet<usize> = HashSet::new();
     let mut ranks: HashMap<(&'static str, &'static str), Vec<f32>> = HashMap::new();
     let mut skips: Vec<(f32, f32, f32, bool)> = Vec::new();
     let mut k_of: HashMap<*const Play, usize> = HashMap::new();
@@ -1029,6 +1268,9 @@ pub fn replay(catalog: &Catalog, input: &TasteInput, extra: ModelInput<'_>) -> R
             skips.push((m.weights.skip.p(&x), -x[1], -x[2] + x[4], ended == Ended::Early));
         }
         let mut hook = |model: &UserModel, mo: &Moment, target: usize, _: &Play| {
+            if unscored.contains(&model.id(target)) || disliked.contains(&target) {
+                return;
+            }
             let free = mo.next_album != Some(target);
             let mut splits: Vec<&'static str> = vec!["all", if free { "free" } else { "album_next" }];
             if ended == Ended::Complete {
@@ -1042,9 +1284,27 @@ pub fn replay(catalog: &Catalog, input: &TasteInput, extra: ModelInput<'_>) -> R
             }
             let feats: Vec<[f32; F]> = (0..model.len()).map(|c| model.features(mo, c)).collect();
             let hand = Model::default();
-            let scores = |w: &Model| -> Vec<f32> { feats.iter().map(|f| w.score(f)).collect() };
-            let today: Vec<f32> = (0..model.len()).map(|c| model.tracks[c].aff_today(mo.now) + 1e-6 * (c as f32 / model.len() as f32)).collect();
-            for (name, s) in [("phase1_affinity", today), ("hand", scores(&hand)), ("learned", scores(&model.weights.next))] {
+            // A disliked track is out, its neighbours a little lower.
+            let calibrated = |mut s: Vec<f32>| -> Vec<f32> {
+                for (c, x) in s.iter_mut().enumerate() {
+                    *x -= near[c];
+                }
+                for &d in &disliked {
+                    s[d] = f32::NEG_INFINITY;
+                }
+                s
+            };
+            let scores = |w: &Model| -> Vec<f32> { calibrated(feats.iter().map(|f| w.score(f)).collect()) };
+            let today: Vec<f32> =
+                calibrated((0..model.len()).map(|c| model.tracks[c].aff_today(mo.now) + 1e-6 * (c as f32 / model.len() as f32)).collect());
+            let learned = scores(&model.weights.next);
+            let mut top: Vec<usize> = (0..learned.len()).collect();
+            let k = 10.min(top.len());
+            if k > 0 {
+                top.select_nth_unstable_by(k - 1, |a, b| learned[*b].total_cmp(&learned[*a]));
+                shown.extend(top[..k].iter().copied());
+            }
+            for (name, s) in [("phase1_affinity", today), ("hand", scores(&hand)), ("learned", learned)] {
                 let r = rank_of(&s, target);
                 for split in &splits {
                     ranks.entry((split, name)).or_default().push(r);
@@ -1063,8 +1323,10 @@ pub fn replay(catalog: &Catalog, input: &TasteInput, extra: ModelInput<'_>) -> R
         skip_auc_history: auc(&rows(|r| r.2)),
         skip_test: skips.len(),
         weights: m.weights,
+        coverage: shown.len() as f32 / m.len().max(1) as f32,
     }
 }
+
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -1189,7 +1451,56 @@ pub(crate) mod tests {
         assert!(m.weights.skip.seen > 2_000);
     }
 
+    /// A listener of much rap and a few other kinds: a profile of each
+    /// kind, balanced by the user's own choices; hours of soundtracks the
+    /// app played on in the background raise them inside their profile but
+    /// hardly in the balance; a shelf of favourites shows the small kinds
+    /// at about their shares.
+    #[test]
+    fn profiles_balance_by_active_choices() {
+        use crate::regions::spread;
+        let (cat, idx, mut input, types) = crate::radio::tests::listener(true);
+        let build = |input: &TasteInput| UserModel::build(&cat, input, ModelInput { index: &idx, types: Some(&types), weights: None }, T0);
+        let m = build(&input);
+        assert!(m.regions.len() >= 4, "{:?}", m.regions.lanes);
+        let kind = |i: usize| m.id(i).0.as_u128() / 1_000;
+        let share_of = |m: &UserModel, k: u128| -> f32 {
+            (0..m.regions.len())
+                .filter(|&j| (0..m.len()).any(|i| m.profile_at(i) == Some(j) && kind(i) == k && m.tracks[i].starts > 0))
+                .map(|j| m.profile_share[j])
+                .sum()
+        };
+        let (rap, ost) = (share_of(&m, 0), share_of(&m, 1));
+        assert!(rap > 0.45 && ost > 0.05, "rap {rap}, soundtracks {ost}");
+        // Three hundred soundtracks the app played on, no action between.
+        let mut ts = T0 - 2 * DAY_MS;
+        let ost_ids: Vec<TrackId> = (0..m.len()).filter(|&i| kind(i) == 1).map(|i| m.id(i)).collect();
+        for k in 0..300 {
+            let id = ost_ids[k % ost_ids.len()];
+            input.events.push(Play { origin: Some(EventOrigin::Autoplay), ..Play::new(id, ts, EventType::Start, Some(0)) });
+            ts += 200_000;
+            input.events.push(Play::new(id, ts, EventType::Complete, Some(200_000)));
+        }
+        let bg = build(&input);
+        let (rap2, ost2) = (share_of(&bg, 0), share_of(&bg, 1));
+        assert!(ost2 < ost + 0.15 && rap2 > ost2, "background: rap {rap2} soundtracks {ost2} (before {rap} {ost})");
+        let i = (0..bg.len()).find(|&i| kind(i) == 1).unwrap();
+        assert!(bg.tracks[i].aff_long(T0) > m.tracks[i].aff_long(T0), "counted inside its profile");
+        // A shelf of ten favourites: every kind of the omnivore in it.
+        let mut fav: Vec<usize> = (0..m.len()).filter(|&i| m.tracks[i].aff_long(T0) > 0.0).collect();
+        fav.sort_by(|a, b| m.tracks[*b].aff_long(T0).total_cmp(&m.tracks[*a].aff_long(T0)));
+        let items: Vec<(usize, Option<usize>)> = fav.iter().map(|&i| (i, m.profile_at(i))).collect();
+        let shelf = spread(&items, &m.profile_share, 10);
+        for k in 0..4 {
+            assert!(shelf.iter().any(|&i| kind(i) == k), "kind {k} on the shelf: {:?}", shelf.iter().map(|&i| kind(i)).collect::<Vec<_>>());
+        }
+        // Within a profile its best loved stands at 1.
+        let best = (0..m.len()).filter(|&i| kind(i) == 1).map(|i| m.profile_affinity(i)).fold(0.0f32, f32::max);
+        assert!((best - 1.0).abs() < 1e-4, "{best}");
+    }
+
     /// The outcome weights of §4.1: a late skip is a little plus, the app
+
     /// closing on a track adds nothing, an early skip of the app's pick
     /// weighs more than one of the user's own.
     #[test]
