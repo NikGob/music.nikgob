@@ -2,7 +2,7 @@
 
 mod detail;
 mod downloads;
-mod bento;
+mod cards;
 mod home;
 mod library;
 mod search;
@@ -12,6 +12,7 @@ pub(crate) mod settings_help;
 mod sources;
 mod streams;
 mod wishlist;
+mod worlds;
 pub mod widgets;
 
 pub use search::{restore_search_scroll, search_results, search_scroll};
@@ -76,7 +77,6 @@ pub struct Tabs {
     library: LibraryTab,
     downloads: usize,
     settings: usize,
-    home: home::Filter,
 }
 
 /// A page scrolled to `y` once its content is tall enough (it may still be
@@ -111,6 +111,8 @@ pub struct PageState {
     pub go_back: bool,
     /// A page asked for the search bar («Найти музыку» on an empty Home).
     pub focus_search: bool,
+    /// A page asked for Now Playing («Сейчас играет» on the card of Главная).
+    pub open_now_playing: bool,
     pub(crate) library_tab: LibraryTab,
     /// The instant filter of Библиотека (the current tab by title and
     /// artist), and what «Треки» last asked the runtime for.
@@ -120,7 +122,6 @@ pub struct PageState {
     /// Library albums by source: 0 all, 1 with files, 2 stream.
     release_source: usize,
     downloads_tab: usize,
-    home_filter: home::Filter,
     ask: Option<Ask>,
     ask_text: String,
     confirm_delete: Option<nikgob_view::PlaylistId>,
@@ -187,7 +188,7 @@ impl PageState {
 
     /// The tabs the pages are on.
     pub(crate) fn tabs(&self) -> Tabs {
-        Tabs { library: self.library_tab, downloads: self.downloads_tab, settings: self.settings_tab, home: self.home_filter }
+        Tabs { library: self.library_tab, downloads: self.downloads_tab, settings: self.settings_tab }
     }
 
     /// Back on `tabs` (a step of the history).
@@ -198,7 +199,6 @@ impl PageState {
         self.library_tab = tabs.library;
         self.downloads_tab = tabs.downloads;
         self.settings_tab = tabs.settings;
-        self.home_filter = tabs.home;
     }
 
     /// The page of `route` shows from `y` down once it can.
@@ -813,6 +813,7 @@ impl PageState {
                     nikgob_view::ToastKind::Working => crate::components::SnackbarKind::Working,
                     nikgob_view::ToastKind::Error => crate::components::SnackbarKind::Error,
                 });
+                let i = if t.long { i.longer(crate::components::snackbar::AUTO_DISMISS) } else { i };
                 match (&t.action, &t.open) {
                     (Some((label, _)), _) | (None, Some((label, _))) => i.action(label),
                     (None, None) => i,

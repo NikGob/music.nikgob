@@ -1,0 +1,570 @@
+//! The pieces of Главная (home-v2 spec §3): a shortcut, a mix with its
+//! mosaic, a row of a song, a tile of the day and an album card, each laid
+//! out in the rect the page's grid gives it, plus the motion helpers they
+//! share (a picture moved or scaled after it was painted, a button that
+//! grows in under the pointer).
+
+use std::sync::Arc;
+
+use egui::{Color32, CornerRadius, Galley, Id, Pos2, Rect, Response, Sense, Ui, UiBuilder, Vec2, emath::TSTransform, pos2, vec2};
+use nikgob_view::{Command, LaneCard, MixCard, Route, Shortcut, Status, ViewState};
+
+use crate::{
+    Icon, Theme, TypeRole, TypeStyle,
+    components::{IconButton, Menu, MenuItem, Radii, Shape, Size, Style, anim, button::Colors, paint},
+    tokens::{shape, state},
+};
+
+/// Under a mix's mosaic: 8, the title (24) and two lines (40).
+pub const MIX_TEXT_H: f32 = 8.0 + 24.0 + 40.0;
+/// Under an album's cover: 8, two lines of the title (40) and a line (16).
+pub const ALBUM_TEXT_H: f32 = 8.0 + 40.0 + 16.0;
+
+/// Draws `add`, then moves what it painted by `by`. Input keeps the
+/// layout's rects (an entrance is over in a moment).
+pub fn moved<R>(ui: &mut Ui, by: Vec2, add: impl FnOnce(&mut Ui) -> R) -> R {
+    transformed(ui, TSTransform::from_translation(by), by.length() > 1e-3, add)
+}
+
+/// Draws `add`, then scales what it painted by `k` around `center`.
+pub fn scaled<R>(ui: &mut Ui, center: Pos2, k: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let t = TSTransform::new(center.to_vec2() * (1.0 - k), k);
+    transformed(ui, t, (k - 1.0).abs() > 1e-4, add)
+}
+
+fn transformed<R>(ui: &mut Ui, t: TSTransform, apply: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let layer = ui.layer_id();
+    let start = ui.ctx().graphics(|g| g.get(layer).map_or(egui::layers::ShapeIdx(0), |l| l.next_idx()));
+    let r = add(ui);
+    if apply {
+        ui.ctx().graphics_mut(|g| {
+            let list = g.entry(layer);
+            let end = list.next_idx();
+            list.transform_range(start, end, t);
+        });
+    }
+    r
+}
+
+/// An icon button growing in at `slot` from half its size (fast spatial)
+/// and fading in (fast effects) while `shown`; the response once it is
+/// mostly there.
+#[allow(clippy::too_many_arguments)]
+pub fn grow_button(ui: &mut Ui, id: Id, shown: bool, slot: Rect, button: IconButton) -> Option<Response> {
+    let theme = Theme::get(ui.ctx());
+    let target = f32::from(u8::from(shown));
+    let k = anim::fraction(ui.ctx(), id.with("fade"), target, theme.motion.fast_effects).clamp(0.0, 1.0);
+    if k <= 0.01 {
+        return None;
+    }
+    let grow = anim::f32(ui.ctx(), id.with("grow"), target, theme.motion.fast_spatial);
+    let mut child = ui.new_child(UiBuilder::new().max_rect(slot).id_salt(id.with("slot")));
+    child.set_opacity(k * ui.opacity());
+    let r = scaled(&mut child, slot.center(), 0.5 + 0.5 * grow.max(0.0), |ui| ui.add_enabled(k > 0.5, button));
+    Some(r)
+}
+
+/// ▶ (⏸ in a square while it plays) in primary.
+fn play_button(playing: bool, size: Size, tip: &str, salt: impl egui::AsId) -> IconButton {
+    let s_icon = if playing { Icon::Pause } else { Icon::PlayArrow };
+    let mut b = IconButton::new(s_icon).size(size).style(Style::Filled).filled_icon(true).tooltip(tip).id_salt(salt);
+    if playing {
+        b = b.shape(Shape::Square);
+    }
+    b
+}
+
+/// The press squish, the state layer and the hover of `resp`.
+fn feedback(ui: &Ui, id: Id, resp: &Response, depth: f32) -> (f32, f32, bool) {
+    let theme = Theme::get(ui.ctx());
+    let pressed = resp.is_pointer_button_down_on();
+    let squish = anim::f32(ui.ctx(), id.with("squish"), if pressed { depth } else { 1.0 }, theme.motion.fast_spatial);
+    let hover = resp.contains_pointer() || resp.has_focus();
+    let target = if pressed {
+        state::PRESSED
+    } else if resp.has_focus() {
+        state::FOCUS
+    } else if hover {
+        state::HOVER
+    } else {
+        0.0
+    };
+    let layer = anim::fraction(ui.ctx(), id.with("layer"), target, theme.motion.fast_effects);
+    (squish, layer, hover)
+}
+
+/// `text` in `role`, wrapped to `width` in at most `rows` rows.
+fn text(ui: &Ui, s: &str, role: TypeStyle, color: Color32, width: f32, rows: usize) -> Arc<Galley> {
+    super::widgets::wrapped(ui, s, role, color, width, rows)
+}
+
+fn line_w(ui: &Ui, s: &str, role: TypeStyle) -> f32 {
+    crate::typography::layout(ui.painter(), role.job(s, Color32::WHITE)).size().x
+}
+
+fn corner(nw: f32, ne: f32, se: f32, sw: f32) -> CornerRadius {
+    let c = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+    CornerRadius { nw: c(nw), ne: c(ne), se: c(se), sw: c(sw) }
+}
+
+/// Covers as a 2×2 mosaic (2 apart) in a square of radius `r`; fewer than
+/// four: the first alone. Magnified `zoom` times inside.
+pub fn mosaic(ui: &Ui, rect: Rect, covers: &[String], r: f32, gap: f32, zoom: f32) {
+    if covers.len() < 4 {
+        crate::components::paint_image_zoomed(ui, rect, covers.first().map(String::as_str), corner(r, r, r, r), Icon::QueueMusic, zoom);
+        return;
+    }
+    let half = (rect.size() - vec2(gap, gap)) * 0.5;
+    for (i, uri) in covers.iter().take(4).enumerate() {
+        let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+        let q = Rect::from_min_size(rect.min + vec2(col * (half.x + gap), row * (half.y + gap)), half);
+        let c = match i {
+            0 => corner(r, 0.0, 0.0, 0.0),
+            1 => corner(0.0, r, 0.0, 0.0),
+            2 => corner(0.0, 0.0, 0.0, r),
+            _ => corner(0.0, 0.0, r, 0.0),
+        };
+        crate::components::paint_image_zoomed(ui, q, Some(uri), c, Icon::QueueMusic, zoom);
+    }
+}
+
+/// «Серега Пират, mzlff, MORGENSHTERN и другие»: as many whole names as fit
+/// in `rows` lines of `width`, in their order — a name that does not fit is
+/// skipped for a shorter one after it; «и …» ends the line. With `new`
+/// names: «Серега Пират, mzlff и новое: Пошлая Молли».
+pub fn names_line(fits: &dyn Fn(&str) -> bool, names: &[String], new: &[String]) -> String {
+    let compose = |mine: &[&str], fresh: &[&str], all_mine: bool| -> String {
+        let mut s = String::new();
+        if fresh.is_empty() {
+            match mine {
+                [] => {}
+                [a] if all_mine => s.push_str(a),
+                [a, b] if all_mine => s = format!("{a} и {b}"),
+                _ if all_mine => {
+                    let (last, head) = mine.split_last().unwrap_or((&"", &[]));
+                    s = format!("{} и {last}", head.join(", "));
+                }
+                _ => s = format!("{} и другие", mine.join(", ")),
+            }
+        } else {
+            s = format!("{} и новое: {}", mine.join(", "), fresh.join(", "));
+        }
+        s
+    };
+    let mut mine: Vec<&str> = Vec::new();
+    for (k, n) in names.iter().enumerate() {
+        let mut trial = mine.clone();
+        trial.push(n);
+        let all = k + 1 == names.len() && mine.len() + 1 == names.len();
+        let fresh: Vec<&str> = new.iter().take(1).map(String::as_str).collect();
+        if fits(&compose(&trial, &fresh, all)) {
+            mine = trial;
+        }
+        if new.is_empty() && mine.len() >= 3 {
+            // Enough: the line says «и другие» after three.
+            break;
+        }
+    }
+    let all_mine = mine.len() == names.len();
+    let mut fresh: Vec<&str> = Vec::new();
+    for n in new {
+        let mut trial = fresh.clone();
+        trial.push(n);
+        if fits(&compose(&mine, &trial, all_mine)) {
+            fresh = trial;
+        }
+    }
+    compose(&mine, &fresh, all_mine)
+}
+
+// ---- Shortcut.
+
+/// The track playing now belongs to `sc`.
+fn shortcut_playing(state: &ViewState, sc: &Shortcut) -> bool {
+    if !matches!(state.player.status, Status::Playing | Status::Buffering) {
+        return false;
+    }
+    let Some(cur) = state.player.current.as_ref() else { return false };
+    match sc {
+        Shortcut::Release(r) => cur.release_id == Some(r.id),
+        Shortcut::Artist(a) => cur.artist_id() == Some(a.id),
+        Shortcut::Playlist(p, _) => state.player.context.as_deref().is_some_and(|c| c.contains(&format!("«{}»", p.name))),
+    }
+}
+
+/// A shortcut (§3.2): 72 high, the cover flush with the edge (a playlist:
+/// a 2×2 mosaic; an artist: a circle 56 inset 8), the name in two lines and
+/// a quiet line; the equalizer while it plays. A click opens it, ▶ on the
+/// cover plays it.
+pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize, out: &mut Vec<Command>) -> Option<Route> {
+    let s = Theme::get(ui.ctx()).scheme;
+    let id = ui.id().with(("home-shortcut", i));
+    let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let (squish, layer, hover) = feedback(ui, id, &resp, 0.98);
+    let r = shape::MEDIUM;
+    let playing = shortcut_playing(st, sc);
+    let (title, sub, route, play) = match sc {
+        Shortcut::Release(a) => (
+            a.title.clone(),
+            a.artist.clone(),
+            Route::Release(a.id),
+            Command::PlayRelease { id: a.id, start: None, shuffle: false },
+        ),
+        Shortcut::Playlist(p, _) => {
+            let n = u64::from(p.track_count);
+            (
+                p.name.clone(),
+                format!("Плейлист · {n} {}", crate::screens::common::plural(n, "трек", "трека", "треков")),
+                Route::Playlist(p.id),
+                Command::PlayPlaylist { id: p.id, start: None, shuffle: false },
+            )
+        }
+        Shortcut::Artist(a) => (a.name.clone(), "Исполнитель".to_owned(), Route::Artist(a.id), Command::PlayArtist { id: a.id, shuffle: false }),
+    };
+    let cover = Rect::from_min_size(cell.min, vec2(cell.height(), cell.height()));
+    let clicked_play = scaled(ui, cell.center(), squish, |ui| {
+        paint::container(ui.painter(), cell, Radii::all(r), s.surface_container, egui::Stroke::NONE);
+        match sc {
+            Shortcut::Release(a) => {
+                let uri = a.cover.as_ref().map(|c| c.uri());
+                crate::components::paint_image(ui, cover, uri.as_deref(), corner(r, 0.0, 0.0, r), Icon::Album);
+            }
+            Shortcut::Playlist(p, covers) => {
+                let uris: Vec<String> = covers.iter().map(|c| c.uri()).collect();
+                if uris.len() >= 4 {
+                    // The mosaic keeps the tile's corners at the left.
+                    let half = cover.width() / 2.0;
+                    for (k, u) in uris.iter().take(4).enumerate() {
+                        let q = Rect::from_min_size(cover.min + vec2((k % 2) as f32 * half, (k / 2) as f32 * half), vec2(half, half));
+                        let c = match k {
+                            0 => corner(r, 0.0, 0.0, 0.0),
+                            2 => corner(0.0, 0.0, 0.0, r),
+                            _ => corner(0.0, 0.0, 0.0, 0.0),
+                        };
+                        crate::components::paint_image(ui, q, Some(u), c, Icon::QueueMusic);
+                    }
+                } else {
+                    let uri = p.cover.as_ref().map(|c| c.uri()).or_else(|| uris.first().cloned());
+                    crate::components::paint_image(ui, cover, uri.as_deref(), corner(r, 0.0, 0.0, r), Icon::QueueMusic);
+                }
+            }
+            Shortcut::Artist(a) => {
+                let circle = cover.shrink(8.0);
+                super::widgets::artist_picture(ui, a, circle);
+            }
+        }
+        paint::state_layer(ui.painter(), cell, Radii::all(r), s.on_surface, layer);
+        // The name and the line, centred as a block.
+        let left = cover.right() + 16.0;
+        let trail = if playing { 48.0 } else { 16.0 };
+        let w = (cell.right() - trail - left).max(10.0);
+        let name_c = if playing { s.primary } else { s.on_surface };
+        let name = text(ui, &title, TypeRole::TitleSmall.style(), name_c, w, 2);
+        let line = text(ui, &sub, TypeRole::BodySmall.style(), s.on_surface_variant, w, 1);
+        let h = name.size().y + line.size().y;
+        let y = cell.center().y - h / 2.0;
+        ui.painter().galley(pos2(left, y), name.clone(), name_c);
+        ui.painter().galley(pos2(left, y + name.size().y), line, s.on_surface_variant);
+        if playing {
+            let slot = Rect::from_center_size(pos2(cell.right() - 16.0 - 16.0, cell.center().y), vec2(32.0, 32.0));
+            crate::components::Equalizer::new(id.with("eq"), s.primary).size(20.0).playing(true).paint_at(ui, slot);
+        }
+        let slot = Rect::from_center_size(cover.center(), vec2(40.0, 40.0));
+        grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::S, &format!("Слушать «{title}»"), id.with("play-btn")))
+            .is_some_and(|r| r.clicked())
+    });
+    let menu_route = match sc {
+        Shortcut::Release(a) => super::widgets::release_menu(&resp, a, out),
+        Shortcut::Artist(a) => {
+            super::widgets::artist_menu(&resp, a, out);
+            None
+        }
+        Shortcut::Playlist(..) => None,
+    };
+    if clicked_play {
+        out.push(play);
+        return None;
+    }
+    if resp.clicked() {
+        return Some(route);
+    }
+    menu_route
+}
+
+// ---- Mix.
+
+/// A mix of «Миксы для тебя» (§3.3, §4): the 2×2 mosaic of its covers
+/// (with «С новым» the fourth is a new song's), the name in one line and
+/// its artists in two. A click plays it; under the pointer ⋮ at the top
+/// and ▶ at the bottom grow in and the mosaic comes a little closer; while
+/// it plays the name is primary and ⏸ stays in a square.
+pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, playing: bool, status: Status, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let theme = Theme::get(ui.ctx());
+    let id = ui.id().with(("home-mix", l.lane));
+    let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
+    let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let menu_open = ui.ctx().data(|d| d.get_temp::<bool>(id.with("more-open"))).unwrap_or(false);
+    let (squish, layer, hover) = feedback(ui, id, &resp, 0.96);
+    let hover = hover || menu_open;
+    let zoom = 1.0 + 0.06 * anim::fraction(ui.ctx(), id.with("zoom"), f32::from(u8::from(hover)), theme.motion.default_effects);
+    let mut covers: Vec<String> = l.covers.iter().map(|c| c.uri()).collect();
+    if with_new && let Some(c) = &l.new_cover {
+        covers.truncate(3);
+        if covers.len() == 3 {
+            covers.push(c.uri());
+        }
+    }
+    let r = shape::LARGE;
+    let mut play = false;
+    let mut more: Option<Response> = None;
+    scaled(ui, art.center(), squish, |ui| {
+        mosaic(ui, art, &covers, r, 2.0, zoom);
+        paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
+        let d = Size::M.height();
+        let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
+        let tip = if playing { "Пауза".to_owned() } else { format!("Слушать «{}»", l.lane.title()) };
+        if let Some(b) = grow_button(ui, id.with("play"), hover || playing, slot, play_button(playing, Size::M, &tip, id.with("play-btn"))) {
+            play = b.clicked();
+        }
+        let m = Size::S.height();
+        let slot = Rect::from_min_size(pos2(art.right() - 8.0 - m, art.top() + 8.0), vec2(m, m));
+        let colors = Colors { container: s.surface_container_high, content: s.on_surface, border: Color32::TRANSPARENT };
+        let button = IconButton::new(Icon::MoreVert).size(Size::S).style(Style::Filled).colors(colors).tooltip("Ещё").id_salt(id.with("more-btn"));
+        more = grow_button(ui, id.with("more"), hover, slot, button);
+    });
+    let title_c = if playing { s.primary } else { s.on_surface };
+    let name = text(ui, l.lane.title(), TypeRole::TitleMedium.style(), title_c, cell.width(), 1);
+    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), name, title_c);
+    let role = TypeRole::BodyMedium.style();
+    let fits = |t: &str| {
+        let mut job = egui::text::LayoutJob::single_section(t.to_owned(), role.text_format(s.on_surface_variant));
+        job.wrap.max_width = cell.width();
+        crate::typography::layout(ui.painter(), job).rows.len() <= 2
+    };
+    let new: &[String] = if with_new { &l.new_artists } else { &[] };
+    let line = names_line(&fits, &l.artists, new);
+    let g = text(ui, &line, role, s.on_surface_variant, cell.width(), 2);
+    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0 + 24.0), g, s.on_surface_variant);
+
+    let n = l.tracks.len();
+    let menu = |key: Id| {
+        Menu::new(key)
+            .item(MenuItem::new("Список треков").icon(Icon::QueueMusic).shortcut(n.to_string()))
+            .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
+            .item(MenuItem::new("В очередь").icon(Icon::QueueMusic))
+            .item(MenuItem::new("Сохранить как плейлист").icon(Icon::PlaylistAdd))
+            .divider()
+            .item(MenuItem::new("Собрать заново").icon(Icon::Refresh))
+    };
+    let mut picked = menu(id.with("ctx")).context_menu(&resp);
+    if let Some(m) = &more {
+        picked = picked.or(menu(id.with("more-menu")).align_right(true).attach(m));
+    }
+    let open = Menu::item_rects(ui.ctx(), id.with("more-menu")).is_some();
+    ui.ctx().data_mut(|d| d.insert_temp(id.with("more-open"), open));
+    let tracks: Vec<nikgob_view::TrackId> = l.tracks.iter().map(|t| t.id).collect();
+    let context = format!("микса «{}»", l.lane.title());
+    match picked {
+        Some(0) => super::home::open_lane_list(ui.ctx(), l.lane),
+        Some(1) => {
+            let mut t = tracks.clone();
+            shuffle(&mut t);
+            out.push(Command::PlayTracks { tracks: t, start: 0, context });
+        }
+        Some(2) => out.push(Command::Enqueue(tracks.clone())),
+        Some(3) => out.push(Command::SaveTracksAsPlaylist { name: l.lane.title().to_owned(), tracks: tracks.clone() }),
+        Some(4) => out.push(Command::RefreshMix { id: l.id() }),
+        _ => {}
+    }
+    let clicked = play || (resp.clicked() && more.as_ref().is_none_or(|m| !m.clicked()));
+    if clicked {
+        if playing && status == Status::Playing {
+            out.push(Command::Pause);
+        } else {
+            out.push(Command::PlayMix { id: l.id() });
+        }
+    }
+}
+
+// ---- Song row.
+
+pub struct RowOutput {
+    pub response: Response,
+    pub clicked: bool,
+    /// ♡ was clicked.
+    pub liked: bool,
+}
+
+/// A song row (§3.4, §3.7): 72 high, reaching 8 into the margins so the
+/// covers stand on the grid; the cover 56 r8, the title (primary while it
+/// plays) and the artist; the hover layer r16. With `liked`, ♡ stays at
+/// the right.
+#[allow(clippy::too_many_arguments)]
+pub fn song_row(
+    ui: &mut Ui,
+    cell: Rect,
+    title: &str,
+    artist: &str,
+    cover: Option<String>,
+    playing: bool,
+    liked: Option<bool>,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+) -> RowOutput {
+    let s = Theme::get(ui.ctx()).scheme;
+    let id = ui.id().with(("home-row", salt));
+    let row = cell.expand2(vec2(8.0, 0.0));
+    let resp = ui.interact(row, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let (squish, layer, _) = feedback(ui, id, &resp, 0.98);
+    let mut like = false;
+    scaled(ui, row.center(), squish, |ui| {
+        paint::state_layer(ui.painter(), row, Radii::all(shape::LARGE), s.on_surface, layer);
+        let c = Rect::from_min_size(pos2(cell.left(), cell.top() + 8.0), vec2(56.0, 56.0));
+        crate::components::paint_image(ui, c, cover.as_deref(), corner(8.0, 8.0, 8.0, 8.0), Icon::MusicNote);
+        let left = c.right() + 16.0;
+        let trail = if liked.is_some() { 56.0 } else { 8.0 };
+        let w = (row.right() - trail - left).max(10.0);
+        let tc = if playing { s.primary } else { s.on_surface };
+        let t = text(ui, title, TypeRole::BodyLarge.style(), tc, w, 1);
+        let a = text(ui, artist, TypeRole::BodyMedium.style(), s.on_surface_variant, w, 1);
+        let y = cell.center().y - (t.size().y + a.size().y) / 2.0;
+        let th = t.size().y;
+        ui.painter().galley(pos2(left, y), t, tc);
+        ui.painter().galley(pos2(left, y + th), a, s.on_surface_variant);
+        if let Some(on) = liked {
+            let slot = Rect::from_center_size(pos2(row.right() - 8.0 - 20.0, cell.center().y), vec2(40.0, 40.0));
+            let b = IconButton::new(Icon::Favorite)
+                .size(Size::S)
+                .style(Style::Standard)
+                .filled_icon(on)
+                .selected(on)
+                .tooltip(if on { "Убрать из Любимых" } else { "В Любимые — останется у тебя" })
+                .id_salt(id.with("like"));
+            like = ui.put(slot, b).clicked();
+        }
+    });
+    RowOutput { clicked: resp.clicked() && !like, liked: like, response: resp }
+}
+
+// ---- Tile of the day.
+
+/// A tile of «Подборки дня» (§3.5): 112 high on surface_container, the
+/// cover flush with the edge (an artist: a circle 88 inset 12), the kicker,
+/// the title in up to two lines and the length. A click plays; ▶ 40 grows
+/// in over the cover. True when it should play.
+pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usize) -> bool {
+    let s = Theme::get(ui.ctx()).scheme;
+    let id = ui.id().with(("home-of-day", i));
+    let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let (squish, layer, hover) = feedback(ui, id, &resp, 0.98);
+    let r = shape::LARGE;
+    let cover = Rect::from_min_size(cell.min, vec2(cell.height(), cell.height()));
+    let first = m.covers.first().map(|c| c.uri());
+    let play = scaled(ui, cell.center(), squish, |ui| {
+        paint::container(ui.painter(), cell, Radii::all(r), s.surface_container, egui::Stroke::NONE);
+        if let Some(p) = photo {
+            let circle = cover.shrink(12.0);
+            crate::components::paint_image(ui, circle, Some(p), CornerRadius::same(44), Icon::Person);
+        } else {
+            crate::components::paint_image(ui, cover, first.as_deref(), corner(r, 0.0, 0.0, r), Icon::QueueMusic);
+        }
+        paint::state_layer(ui.painter(), cell, Radii::all(r), s.on_surface, layer);
+        let left = cover.right() + 16.0;
+        let w = (cell.right() - 16.0 - left).max(10.0);
+        let k = text(ui, &m.kicker, TypeRole::LabelMedium.style(), s.on_surface_variant, w, 1);
+        let t = text(ui, &m.title, TypeRole::TitleMedium.style(), s.on_surface, w, 2);
+        let d = text(ui, &m.subtitle, TypeRole::BodyMedium.style(), s.on_surface_variant, w, 1);
+        let h = k.size().y + 4.0 + t.size().y + d.size().y;
+        let mut y = cell.center().y - h / 2.0;
+        let (kh, tth) = (k.size().y, t.size().y);
+        ui.painter().galley(pos2(left, y), k, s.on_surface_variant);
+        y += kh + 4.0;
+        ui.painter().galley(pos2(left, y), t, s.on_surface);
+        y += tth;
+        ui.painter().galley(pos2(left, y), d, s.on_surface_variant);
+        let slot = Rect::from_center_size(cover.center(), vec2(40.0, 40.0));
+        grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::S, &format!("Слушать «{}»", m.title), id.with("play-btn")))
+            .is_some_and(|r| r.clicked())
+    });
+    play || resp.clicked()
+}
+
+// ---- Album.
+
+pub struct AlbumOutput {
+    pub response: Response,
+    pub clicked: bool,
+    pub play: bool,
+}
+
+/// An album card (§3.6, §3.8): the cover r16 without a container, the
+/// title in two lines and «Artist · tail» where the tail («слушал 5 из 52»,
+/// «8 окт.») is never cut. A click opens it; ▶ 56 on the cover plays it.
+pub fn album(ui: &mut Ui, cell: Rect, title: &str, artist: &str, tail: &str, cover: Option<String>, salt: impl std::hash::Hash + std::fmt::Debug) -> AlbumOutput {
+    let s = Theme::get(ui.ctx()).scheme;
+    let id = ui.id().with(("home-album", salt));
+    let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
+    let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let (squish, layer, hover) = feedback(ui, id, &resp, 0.96);
+    let r = shape::LARGE;
+    let play = scaled(ui, art.center(), squish, |ui| {
+        crate::components::paint_image(ui, art, cover.as_deref(), corner(r, r, r, r), Icon::Album);
+        paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
+        let d = Size::M.height();
+        let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
+        grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::M, &format!("Слушать «{title}»"), id.with("play-btn")))
+            .is_some_and(|r| r.clicked())
+    });
+    let w = cell.width();
+    let t = text(ui, title, TypeRole::TitleSmall.style(), s.on_surface, w, 2);
+    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), t, s.on_surface);
+    let role = TypeRole::BodySmall.style();
+    let y = art.bottom() + 8.0 + 40.0;
+    if tail.is_empty() {
+        let a = text(ui, artist, role, s.on_surface_variant, w, 1);
+        ui.painter().galley(pos2(cell.left(), y), a, s.on_surface_variant);
+    } else {
+        let tail = format!(" · {tail}");
+        let tw = line_w(ui, &tail, role);
+        let a = text(ui, artist, role, s.on_surface_variant, (w - tw).max(24.0), 1);
+        let aw = a.size().x;
+        ui.painter().galley(pos2(cell.left(), y), a, s.on_surface_variant);
+        let tg = text(ui, &tail, role, s.on_surface_variant, tw + 1.0, 1);
+        ui.painter().galley(pos2(cell.left() + aw, y), tg, s.on_surface_variant);
+    }
+    AlbumOutput { clicked: resp.clicked() && !play, play, response: resp }
+}
+
+/// Shuffles `items` in place (a xorshift seeded by the clock: a menu's
+/// «Перемешать» needs no more).
+pub fn shuffle<T>(items: &mut [T]) {
+    let mut x = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x9e37_79b9, |d| d.as_nanos() as u64) | 1;
+    for i in (1..items.len()).rev() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        items.swap(i, (x % (i as u64 + 1)) as usize);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_are_whole_and_a_long_one_is_skipped() {
+        let names: Vec<String> = ["Radwimps", "Christopher Larkin", "OMORI", "Kevin Penkin"].iter().map(|s| (*s).to_owned()).collect();
+        // Room for about 45 characters.
+        let fits = |t: &str| t.chars().count() <= 45;
+        assert_eq!(names_line(&fits, &names, &[]), "Radwimps, Christopher Larkin, OMORI и другие");
+        let fits = |t: &str| t.chars().count() <= 30;
+        // «Christopher Larkin» does not fit: the shorter ones after it do.
+        assert_eq!(names_line(&fits, &names, &[]), "Radwimps, OMORI и другие");
+        let two: Vec<String> = vec!["Eve".into(), "Ado".into()];
+        assert_eq!(names_line(&|_| true, &two, &[]), "Eve и Ado");
+        let new: Vec<String> = vec!["Пошлая Молли".into()];
+        let mine: Vec<String> = vec!["Серега Пират".into(), "mzlff".into()];
+        assert_eq!(names_line(&|t| t.chars().count() <= 60, &mine, &new), "Серега Пират, mzlff и новое: Пошлая Молли");
+    }
+}
+

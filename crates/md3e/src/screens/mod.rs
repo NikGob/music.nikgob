@@ -881,7 +881,7 @@ impl Md3eUi {
                 &mut self.chrome,
                 out,
             );
-            if bo.open_now_playing {
+            if bo.open_now_playing || std::mem::take(&mut self.pages.open_now_playing) {
                 self.set_now_playing(&ctx, true);
             }
             if let Some(tab) = bo.toggle_pane {

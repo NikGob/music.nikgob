@@ -120,17 +120,6 @@ pub fn card_row(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
         });
 }
 
-/// [`card_row`] of `items`, each card under its own place in the row, so
-/// two cards of one thing (a release the feed lists twice) never share an
-/// id.
-pub fn card_row_each<T>(ui: &mut Ui, id: &str, items: &[T], mut card: impl FnMut(&mut Ui, usize, &T)) {
-    card_row(ui, id, |ui| {
-        for (i, item) in items.iter().enumerate() {
-            ui.push_id(i, |ui| card(ui, i, item));
-        }
-    });
-}
-
 /// `text` in `role` and `color`, wrapped to `width` in at most `rows` rows
 /// (an ellipsis after the last).
 pub fn wrapped(ui: &Ui, text: &str, role: crate::TypeStyle, color: Color32, width: f32, rows: usize) -> std::sync::Arc<egui::Galley> {
@@ -455,13 +444,6 @@ pub fn artist_avatar(
     out: &mut Vec<Command>,
 ) -> Option<Route> {
     artist_impl(ui, a, size, false, out)
-}
-
-/// «Миксы исполнителей» on Главная: the avatar (and its ▶) starts the
-/// artist's radio; the name under it is a link to the artist's page, and
-/// the right-click menu can open it too.
-pub fn artist_mix(ui: &mut Ui, a: &ArtistCard, size: f32, out: &mut Vec<Command>) -> Option<Route> {
-    artist_impl(ui, a, size, true, out)
 }
 
 /// How tall [`artist_avatar`] is for `a` at `size` (the name, and in the
