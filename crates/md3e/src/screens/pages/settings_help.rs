@@ -72,6 +72,7 @@ pub enum SettingId {
     LyricsGapWaves,
     LyricsCountdown,
     RailCompact,
+    HomeCard,
     NpMotion,
     ReducedMotion,
     FpsLimit,
@@ -204,7 +205,7 @@ impl SettingId {
             | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
             | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
             | LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsCascade | LyricsGlow
-            | LyricsGap | LyricsGapWaves | LyricsCountdown | RailCompact | NpMotion | ReducedMotion | FpsLimit => {
+            | LyricsGap | LyricsGapWaves | LyricsCountdown | RailCompact | HomeCard | NpMotion | ReducedMotion | FpsLimit => {
                 TAB_APPEARANCE
             }
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
@@ -259,6 +260,7 @@ impl SettingId {
             LyricsGapWaves => "Сколько волн на кружке ожидания. Больше — волны мельче и чаще.",
             LyricsCountdown => "За три секунды до новой строки кружок ожидания сменяется отсчётом 3, 2, 1.",
             RailCompact => "Левая панель всегда узкая: только значки разделов, без подписей и кнопки раскрытия.",
+            HomeCard => "Большая карточка вверху Главной: альбом или серия, которую слушаешь, и рядом другие твои миры — что дослушать и что ещё не начато. Без неё Главная начинается сразу с приветствия.",
             NpMotion => "Как экран трека открывается из плеера внизу и закрывается обратно.",
             ReducedMotion => "Убирает подпрыгивания, вращения и волны во всём приложении.",
             FpsLimit => "Как часто перерисовывается экран. Меньше — тише вентилятор и дольше работает батарея.",
