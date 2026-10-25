@@ -391,7 +391,10 @@ fn source_row(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec
     let s = Theme::get(ui.ctx()).scheme;
     let p = &state.prefs;
     let labels: Vec<&str> = SettingId::RadioSource.choices().iter().map(|c| c.label).collect();
-    let chosen = SettingId::RadioSource.chosen(p);
+    // The radio playing (else autoplay, when the queue runs out) keeps its
+    // own share of new music.
+    let kind = state.queue.radio.as_ref().map_or(nikgob_view::RadioKind::Autoplay, |r| r.kind);
+    let chosen = super::pages::settings_help::radio_source_of(p, kind);
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(16.0);
@@ -403,13 +406,10 @@ fn source_row(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec
                 .id_salt("q-source-row"),
         );
         if let Some(i) = ConnectedGroup::new("q-source", &labels).equal_width(w).show(&mut gui, chosen) {
-            let mut prefs = p.clone();
-            SettingId::RadioSource.choose(&mut prefs, i);
-            out.push(Command::SetPref(nikgob_view::PrefPatch::RadioSource {
-                downloaded_only: prefs.mixes_downloaded_only,
-                new_share: prefs.radio_new_share,
-            }));
+            let patches = super::pages::settings_help::radio_source_patches(p, kind, i);
+            out.extend(patches.into_iter().map(Command::SetPref));
         }
+
         ui.add_space(3.0 * w + 4.0 + 8.0);
         if ui
             .add(IconButton::new(Icon::Settings).size(Size::S).tooltip("Настроить автовоспроизведение").id_salt("q-autoplay-settings"))

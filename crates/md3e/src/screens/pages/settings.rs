@@ -3,7 +3,8 @@
 
 use egui::{Sense, Ui};
 use nikgob_shapes::paint as shape_paint;
-use nikgob_view::{Ambient, BgShapes, Command, CoverShape, Prefs, RingStyle, Route, ViewState};
+use nikgob_view::{Ambient, BgShapes, Command, CoverShape, PrefPatch, Prefs, RingStyle, Route, ViewState};
+
 
 use super::settings_help::{self, SettingId as Id};
 use super::{PageState, connected};
@@ -248,15 +249,172 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     match pages.settings_tab {
         settings_help::TAB_APPEARANCE => appearance(ui, &mut p),
         settings_help::TAB_SOURCES => super::sources::show(ui, state, &mut p, pages, out),
+        settings_help::TAB_RECS => recs(ui, state, &mut p, pages, out),
         _ => general(ui, state, &mut p, pages, out),
     }
     ui.add(Divider::new());
     settings_help::finish(ui, &mut p);
 
-    if p != before {
+    // The recommendations' rows change one preference each.
+    let patches = recs_patches(&before, &p);
+    let mut patched = before.clone();
+    for patch in &patches {
+        patch.apply(&mut patched);
+    }
+    out.extend(patches.into_iter().map(Command::SetPref));
+    if p != patched {
         out.push(Command::SetPrefs(Box::new(p)));
     }
     None
+}
+
+/// The recommendations' preferences `p` changed from `before`, as
+/// [`PrefPatch`]es.
+fn recs_patches(before: &Prefs, p: &Prefs) -> Vec<PrefPatch> {
+    let mut out = Vec::new();
+    if p.autoplay != before.autoplay {
+        out.push(PrefPatch::Autoplay(p.autoplay));
+    }
+    if p.autoplay_continue_world != before.autoplay_continue_world {
+        out.push(PrefPatch::AutoplayContinueWorld(p.autoplay_continue_world));
+    }
+    if p.mixes_downloaded_only != before.mixes_downloaded_only {
+        out.push(PrefPatch::MixesDownloadedOnly(p.mixes_downloaded_only));
+    }
+    if p.mixes_with_new != before.mixes_with_new {
+        out.push(PrefPatch::MixesWithNew(p.mixes_with_new));
+    }
+    let cleared = p.radio_new_share_by.is_empty() && !before.radio_new_share_by.is_empty();
+    if p.radio_new_share != before.radio_new_share || cleared {
+        out.push(PrefPatch::RadioNewShare(p.radio_new_share));
+    }
+    for (kind, share) in &p.radio_new_share_by {
+        if before.radio_new_share_by.get(kind) != Some(share) {
+            out.push(PrefPatch::RadioNewShareBy(*kind, *share));
+        }
+    }
+    let flags = [
+        (p.dislike_button, before.dislike_button, PrefPatch::DislikeButton as fn(bool) -> PrefPatch),
+        (p.dislike_skips, before.dislike_skips, PrefPatch::DislikeSkips),
+        (p.dislike_skip_everywhere, before.dislike_skip_everywhere, PrefPatch::DislikeSkipEverywhere),
+        (p.dislike_in_recs, before.dislike_in_recs, PrefPatch::DislikeInRecs),
+    ];
+    for (now, was, patch) in flags {
+        if now != was {
+            out.push(patch(now));
+        }
+    }
+    out
+}
+
+/// «Рекомендации»: new music, autoplay, what the mixes take, dislikes and
+/// the artists not to recommend.
+fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    use nikgob_view::RadioKind;
+    let s = Theme::get(ui.ctx()).scheme;
+
+    group(ui, "Новое");
+    dimmed(ui, p.mixes_downloaded_only, |ui| {
+        row(ui, Id::RadioNewShare, "Везде", None, |ui| {
+            ui.add_enabled_ui(!p.mixes_downloaded_only, |ui| choice(ui, Id::RadioNewShare, p));
+        });
+        for (kind, label) in [
+            (RadioKind::Track, "Радио по треку"),
+            (RadioKind::Artist, "Радио по исполнителю"),
+            (RadioKind::Mix, "Бесконечные миксы"),
+            (RadioKind::Autoplay, "Автовоспроизведение"),
+        ] {
+            let id = Id::NewShareBy(kind);
+            row(ui, id, label, None, |ui| {
+                ui.add_enabled_ui(!p.mixes_downloaded_only, |ui| choice_menu(ui, id, p));
+            });
+        }
+        row(ui, Id::MixesWithNew, "С новым в «Миксах для тебя»", None, |ui| {
+            ui.add_enabled(!p.mixes_downloaded_only, Switch::new(&mut p.mixes_with_new).id_salt("set-mixes-with-new"));
+        });
+    });
+
+    group(ui, "Автовоспроизведение");
+    row(ui, Id::Autoplay, "Автовоспроизведение", None, |ui| {
+        ui.add(Switch::new(&mut p.autoplay).id_salt("set-autoplay"));
+    });
+    dimmed(ui, !p.autoplay, |ui| {
+        row(ui, Id::AutoplayWorld, "Продолжать мир после альбома", None, |ui| {
+            let on = p.autoplay;
+            ui.add_enabled(on, Switch::new(&mut p.autoplay_continue_world).id_salt("set-autoplay-world"));
+        });
+        row(ui, Id::RadioSource, "Откуда", None, |ui| {
+            choice(ui, Id::RadioSource, p);
+        });
+    });
+
+    group(ui, "Подбор");
+    row(ui, Id::MixesDownloadedOnly, "Миксы только из скачанного", None, |ui| {
+        ui.add(Switch::new(&mut p.mixes_downloaded_only).id_salt("set-mixes-downloaded"));
+    });
+    row(ui, Id::SoundAnalysis, "Анализ звука", Some(&analysis_status(&state.analysis)), |ui| {
+        // Stream-only tracks are analysed (or not) on «Источники».
+        if ui.add(Button::new("Анализ стримов").style(Style::Text).id_salt("set-stream-analysis-link")).clicked() {
+            pages.open_setting(Id::StreamAnalysis);
+        }
+    });
+
+    group(ui, "Не нравится");
+    row(ui, Id::DislikeButton, "Кнопка на экране трека", None, |ui| {
+        ui.add(Switch::new(&mut p.dislike_button).id_salt("set-dislike-button"));
+    });
+    row(ui, Id::DislikeSkips, "Пропускать сразу", None, |ui| {
+        ui.add(Switch::new(&mut p.dislike_skips).id_salt("set-dislike-skips"));
+    });
+    row(ui, Id::DislikeSkipEverywhere, "Пропускать и в своих альбомах и плейлистах", None, |ui| {
+        ui.add(Switch::new(&mut p.dislike_skip_everywhere).id_salt("set-dislike-everywhere"));
+    });
+    row(ui, Id::DislikeInRecs, "Учитывать в рекомендациях", None, |ui| {
+        ui.add(Switch::new(&mut p.dislike_in_recs).id_salt("set-dislike-recs"));
+    });
+
+    let d = &state.dislikes;
+    group(ui, "Не рекомендовать исполнителей");
+    settings_help::item(ui, Id::DislikedArtists, "Не рекомендовать исполнителей", |ui| {
+        if d.artists.is_empty() {
+            ui.label(TypeRole::BodyMedium.style().rich("Пусто", s.on_surface_variant));
+        }
+        for (id, name) in &d.artists {
+            mark_row(ui, egui::Id::new(("set-unban", *id)), name, None, || {
+                out.push(Command::RecFeedback { target: nikgob_view::RecTarget::Artist(*id), dislike: false });
+            });
+        }
+    });
+    group(ui, "Треки с «Не нравится»");
+    settings_help::item(ui, Id::DislikedTracks, "Треки с «Не нравится»", |ui| {
+        if d.tracks.is_empty() {
+            ui.label(TypeRole::BodyMedium.style().rich("Пусто", s.on_surface_variant));
+        }
+        for t in &d.tracks {
+            mark_row(ui, egui::Id::new(("set-undislike", t.id)), &t.title, Some(&t.artist), || {
+                out.push(Command::Dislike { track: t.id, dislike: false, sure: true, relike: false });
+            });
+        }
+    });
+}
+
+/// One mark of the lists above: its name and «Снять».
+fn mark_row(ui: &mut Ui, salt: egui::Id, title: &str, sub: Option<&str>, mut take_back: impl FnMut()) {
+    let s = Theme::get(ui.ctx()).scheme;
+    ui.horizontal(|ui| {
+        ui.set_min_height(48.0);
+        ui.vertical(|ui| {
+            ui.label(TypeRole::BodyLarge.style().rich(title, s.on_surface));
+            if let Some(sub) = sub {
+                ui.label(TypeRole::BodyMedium.style().rich(sub, s.on_surface_variant));
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add(Button::new("Снять").style(Style::Text).id_salt(salt)).clicked() {
+                take_back();
+            }
+        });
+    });
 }
 
 /// Everything about looks: theme, the player, the cover and its ring, the
@@ -569,7 +727,7 @@ fn swatches(ui: &mut Ui, p: &Prefs) -> Option<u8> {
 
 /// Behaviour: controls, lyrics, sound, library, import and quality
 /// (streaming and torrents live on «Источники»).
-fn general(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
     group(ui, "Приветствие");
     if !pages.name_synced {
         pages.name_draft = p.user_name.clone();
@@ -665,47 +823,6 @@ fn general(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
     );
     row(ui, Id::Normalization, "Нормализация громкости", Some("Все треки примерно одинаково громкие"), |ui| {
         ui.add(Switch::new(&mut p.normalization).id_salt("set-norm"));
-    });
-
-    group(ui, "Рекомендации");
-    // What the queue does when it runs out, and from where.
-    let autoplay_hint = if p.autoplay {
-        super::settings_help::radio_source_line(p).to_owned()
-    } else {
-        "Очередь просто заканчивается".to_owned()
-    };
-    row(ui, Id::Autoplay, "Автовоспроизведение", Some(&autoplay_hint), |ui| {
-        ui.add(Switch::new(&mut p.autoplay).id_salt("set-autoplay"));
-    });
-    // After an album: the rest of its world first.
-    let world_hint = if !p.autoplay {
-        "Не действует: автовоспроизведение выключено"
-    } else if p.autoplay_continue_world {
-        "После альбома — следующие альбомы его мира, потом похожее"
-    } else {
-        "После альбома — сразу похожее"
-    };
-    row(ui, Id::AutoplayWorld, "Продолжать мир после альбома", Some(world_hint), |ui| {
-        let on = p.autoplay;
-        ui.add_enabled(on, Switch::new(&mut p.autoplay_continue_world).id_salt("set-autoplay-world"));
-    });
-    // Only the downloaded: no new music to mix in, the choice waits.
-    let new_share_hint = if p.mixes_downloaded_only {
-        "Не действует: миксы только из скачанного"
-    } else {
-        "Сколько незнакомой музыки подмешивать"
-    };
-    row(ui, Id::RadioNewShare, "Новое в радио и миксах", Some(new_share_hint), |ui| {
-        ui.add_enabled_ui(!p.mixes_downloaded_only, |ui| choice(ui, Id::RadioNewShare, p));
-    });
-    row(ui, Id::MixesDownloadedOnly, "Миксы только из скачанного", Some("Только треки с файлом, без стримов"), |ui| {
-        ui.add(Switch::new(&mut p.mixes_downloaded_only).id_salt("set-mixes-downloaded"));
-    });
-    row(ui, Id::SoundAnalysis, "Анализ звука", Some(&analysis_status(&state.analysis)), |ui| {
-        // Stream-only tracks are analysed (or not) on «Источники».
-        if ui.add(Button::new("Анализ стримов").style(Style::Text).id_salt("set-stream-analysis-link")).clicked() {
-            pages.open_setting(Id::StreamAnalysis);
-        }
     });
 
     group(ui, "Библиотека");

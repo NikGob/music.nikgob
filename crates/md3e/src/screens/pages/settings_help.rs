@@ -116,6 +116,22 @@ pub enum SettingId {
     RadioSource,
     /// «Анализ звука»: how far it is (no control of its own).
     SoundAnalysis,
+    /// The share of new music of one kind of radio.
+    NewShareBy(v::RadioKind),
+    /// «Миксы для тебя» with «С новым».
+    MixesWithNew,
+    /// «Кнопка «Не нравится»».
+    DislikeButton,
+    /// «Пропускать по дизлайку».
+    DislikeSkips,
+    /// «Пропускать и в своём».
+    DislikeSkipEverywhere,
+    /// «Учитывать в рекомендациях».
+    DislikeInRecs,
+    /// The disliked tracks, with «Снять».
+    DislikedTracks,
+    /// The artists not recommended, with «Снять».
+    DislikedArtists,
     // Источники.
     SpotifyEnabled,
     SpotifyPlayback,
@@ -149,19 +165,53 @@ pub enum SettingId {
 /// Where radios and autoplay take their tracks, in a few words (the
 /// queue's and the settings row's quiet line).
 pub fn radio_source_line(p: &Prefs) -> &'static str {
-    match SettingId::RadioSource.chosen(p) {
+    radio_source_line_of(p, v::RadioKind::Autoplay)
+}
+
+/// [`radio_source_line`] of a radio of `kind`.
+pub fn radio_source_line_of(p: &Prefs, kind: v::RadioKind) -> &'static str {
+    match radio_source_of(p, kind) {
         0 => "Похожее из скачанного",
         1 => "Похожее из твоей библиотеки",
         _ => "Похожее из библиотеки и новое",
     }
 }
 
+/// Which of [`SettingId::RadioSource`]'s choices a radio of `kind` has:
+/// its own share of new music decides between «Библиотека» and «С новым».
+pub fn radio_source_of(p: &Prefs, kind: v::RadioKind) -> usize {
+    if p.mixes_downloaded_only {
+        0
+    } else if p.new_share_of(kind) == v::RadioNewShare::None {
+        1
+    } else {
+        2
+    }
+}
+
+/// The changes choice `i` of [`SettingId::RadioSource`] makes for a radio
+/// of `kind`: «Скачанное» is everyone's, the share of new music is the
+/// kind's own (remembered for the next radio of it).
+pub fn radio_source_patches(p: &Prefs, kind: v::RadioKind, i: usize) -> Vec<v::PrefPatch> {
+    let mut out = vec![v::PrefPatch::MixesDownloadedOnly(i == 0)];
+    match i {
+        1 => out.push(v::PrefPatch::RadioNewShareBy(kind, v::RadioNewShare::None)),
+        2 if p.new_share_of(kind) == v::RadioNewShare::None => {
+            let share = if p.radio_new_share == v::RadioNewShare::None { v::RadioNewShare::Some } else { p.radio_new_share };
+            out.push(v::PrefPatch::RadioNewShareBy(kind, share));
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Settings tabs, in the order of the tab switch.
 pub const TAB_GENERAL: usize = 0;
-pub const TAB_SOURCES: usize = 1;
-pub const TAB_APPEARANCE: usize = 2;
+pub const TAB_RECS: usize = 1;
+pub const TAB_SOURCES: usize = 2;
+pub const TAB_APPEARANCE: usize = 3;
 /// Labels of the tab switch, in [`SettingId::tab`] order.
-pub const TABS: [&str; 3] = ["Основные", "Источники", "Внешний вид"];
+pub const TABS: [&str; 4] = ["Основные", "Рекомендации", "Источники", "Внешний вид"];
 
 /// The live sample a card draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,6 +249,11 @@ macro_rules! c {
 }
 
 const OPUS: [u32; 4] = [128, 160, 192, 256];
+const SHARES: [v::RadioNewShare; 3] = [v::RadioNewShare::None, v::RadioNewShare::Some, v::RadioNewShare::More];
+
+fn share_index(s: v::RadioNewShare) -> usize {
+    SHARES.iter().position(|x| *x == s).unwrap_or(1)
+}
 
 impl SettingId {
     /// The tab the row lives on.
@@ -217,6 +272,11 @@ impl SettingId {
             | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | DownloadToasts | PlaylistSync | ImportSpotify
             | ImportYouTube | ImportFiles | StreamCache | StreamAnalysis | Prowlarr | NoSeed | SeedLimit | SeedDays
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
+            RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | NewShareBy(_)
+            | MixesWithNew
+            | DislikeButton | DislikeSkips | DislikeSkipEverywhere | DislikeInRecs | DislikedTracks | DislikedArtists => {
+                TAB_RECS
+            }
             _ => TAB_GENERAL,
         }
     }
@@ -324,6 +384,18 @@ impl SettingId {
             StreamCache => "Недавно игравшие треки хранятся на диске, и «Назад» или повтор не качают их заново. YouTube — файлы как есть, Spotify — только в зашифрованном виде, как у официального клиента. Лимит у каждого сервиса свой; старое удаляется само.",
             ImportFiles => "Файлы выгрузки — вся история прослушиваний за годы. Spotify: Аккаунт → Конфиденциальность → «Расширенная история». Google Takeout: YouTube и YouTube Music.",
             Nodes => "Синхронизация и резервная копия на другие устройства — появится позже.",
+            NewShareBy(v::RadioKind::Track) => "Сколько нового в радио по треку. Выбор в очереди над радио меняет это же.",
+            NewShareBy(v::RadioKind::Artist) => "Сколько нового в радио по исполнителю.",
+            NewShareBy(v::RadioKind::Mix) => "Сколько нового в бесконечных миксах: настроения, «Твои миксы», «Новое для тебя».",
+            NewShareBy(v::RadioKind::Autoplay) => "Сколько нового в автовоспроизведении, когда очередь кончилась.",
+            MixesWithNew => "«Миксы для тебя» на главной: в каждом миксе немного новой музыки его вкуса. Сколько — по тому, как новое у тебя приживается.",
+            DislikeButton => "Кнопка рядом
+ с ♡ на экране трека. «Не нравится» остаётся и в меню ⋮ любого трека.",
+            DislikeSkips => "Трек, которому поставили «Не нравится», сразу пропускается.",
+            DislikeSkipEverywhere => "Треки с «Не нравится» и исполнители, которых не рекомендовать, пропускаются и в твоих альбомах и плейлистах. Выключено — только в миксах, радио и автовоспроизведении; трек, выбранный тобой, играет всегда.",
+            DislikeInRecs => "«Не нравится» чуть опускает и самые похожие по звуку треки. Выключено — уходит только сам трек. Исполнителя дизлайк не трогает.",
+            DislikedTracks => "Треки с «Не нравится». «Снять» возвращает трек в рекомендации.",
+            DislikedArtists => "Исполнители, которых не рекомендовать: их нет в миксах, радио и новом. «Снять» возвращает.",
         }
     }
 
@@ -436,7 +508,7 @@ impl SettingId {
                 c!("Библиотека", "Вся твоя музыка: скачанное и лайкнутое или из плейлистов, что пока играет из стрима. Без нового."),
                 c!("С новым", "Твоя музыка и похожая новая из YouTube Music и Deezer (сколько — в «Новое в радио и миксах»)."),
             ],
-            Self::RadioNewShare => &[
+            Self::RadioNewShare | Self::NewShareBy(_) => &[
                 c!("Без нового", "Только твоя музыка: что лайкнуто, в плейлистах и в библиотеке."),
                 c!("Немного", "Примерно каждый пятый трек — новый для тебя, похожий на то, что играет."),
                 c!("Побольше", "Примерно два трека из пяти — новые: чтобы чаще находить незнакомое."),
@@ -503,11 +575,8 @@ impl SettingId {
             Self::RadioSource if p.mixes_downloaded_only => 0,
             Self::RadioSource if p.radio_new_share == v::RadioNewShare::None => 1,
             Self::RadioSource => 2,
-            Self::RadioNewShare => match p.radio_new_share {
-                v::RadioNewShare::None => 0,
-                v::RadioNewShare::Some => 1,
-                v::RadioNewShare::More => 2,
-            },
+            Self::RadioNewShare => share_index(p.radio_new_share),
+            Self::NewShareBy(kind) => share_index(p.new_share_of(kind)),
             _ => 0,
         }
     }
@@ -570,8 +639,9 @@ impl SettingId {
                     p.radio_new_share = v::RadioNewShare::Some;
                 }
             }
-            Self::RadioNewShare => {
-                p.radio_new_share = [v::RadioNewShare::None, v::RadioNewShare::Some, v::RadioNewShare::More][i.min(2)];
+            Self::RadioNewShare => v::PrefPatch::RadioNewShare(SHARES[i.min(2)]).apply(p),
+            Self::NewShareBy(kind) => {
+                p.radio_new_share_by.insert(kind, SHARES[i.min(2)]);
             }
             _ => {}
         }
@@ -1629,11 +1699,13 @@ mod tests {
         assert_eq!(SettingId::NoSeed.tab(), TAB_SOURCES);
         assert_eq!(SettingId::Spotify.tab(), TAB_SOURCES);
         assert_eq!(SettingId::MusicBrainz.tab(), TAB_GENERAL);
-        assert_eq!(SettingId::RadioNewShare.tab(), TAB_GENERAL);
-        assert_eq!(SettingId::SoundAnalysis.tab(), TAB_GENERAL);
+        assert_eq!(SettingId::RadioNewShare.tab(), TAB_RECS);
+        assert_eq!(SettingId::SoundAnalysis.tab(), TAB_RECS);
         assert_eq!(SettingId::StreamAnalysis.tab(), TAB_SOURCES);
-        assert_eq!(SettingId::MixesDownloadedOnly.tab(), TAB_GENERAL);
-        assert_eq!(SettingId::Autoplay.tab(), TAB_GENERAL);
+        assert_eq!(SettingId::MixesDownloadedOnly.tab(), TAB_RECS);
+        assert_eq!(SettingId::Autoplay.tab(), TAB_RECS);
+        assert_eq!(SettingId::DislikeInRecs.tab(), TAB_RECS);
+        assert_eq!(SettingId::NewShareBy(v::RadioKind::Mix).tab(), TAB_RECS);
         assert!(!SettingId::Autoplay.help().is_empty() && !SettingId::RadioSource.help().is_empty());
         for id in [SettingId::RadioNewShare, SettingId::MixesDownloadedOnly, SettingId::SoundAnalysis, SettingId::StreamAnalysis] {
             assert!(!id.help().is_empty());
@@ -1653,7 +1725,9 @@ mod tests {
             S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::RingDir, S::RingStyle, S::Ambient,
             S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
+            S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay),
         ] {
+
             assert!(id.choices().len() >= 2, "{id:?}");
             for i in 0..id.choices().len() {
                 let mut p = Prefs::default();

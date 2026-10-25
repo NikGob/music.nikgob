@@ -1220,6 +1220,8 @@ pub enum PrefPatch {
     /// The share of new music of one kind of radio (the source buttons
     /// above the queue).
     RadioNewShareBy(RadioKind, RadioNewShare),
+    /// The share of new music everywhere: each kind of radio takes it.
+    RadioNewShare(RadioNewShare),
     DislikeButton(bool),
     DislikeSkips(bool),
     DislikeSkipEverywhere(bool),
@@ -1256,6 +1258,11 @@ impl PrefPatch {
             Self::RadioNewShareBy(kind, share) => {
                 p.radio_new_share_by.insert(*kind, *share);
             }
+            Self::RadioNewShare(share) => {
+                p.radio_new_share = *share;
+                p.radio_new_share_by.clear();
+            }
+
             Self::DislikeButton(on) => p.dislike_button = *on,
             Self::DislikeSkips(on) => p.dislike_skips = *on,
             Self::DislikeSkipEverywhere(on) => p.dislike_skip_everywhere = *on,
