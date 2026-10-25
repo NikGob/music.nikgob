@@ -137,15 +137,26 @@ fn cache_key(service: Service, what: &str, id: &str) -> String {
     format!("radio_new.{}.{what}.{id}", service.as_str())
 }
 
-/// Whether a radio pick may be queued under `prefs`: no stream pick
-/// without new music, nothing without a file under «Миксы только из
-/// скачанного». (The engine already picks so; this holds while the
-/// snapshot it picked from is older than the prefs.)
-pub(super) fn radio_allows(track: TrackId, stream: bool, prefs: &v::Prefs, snap: Option<&super::Snapshot>) -> bool {
-    if stream && super::new_share(prefs) <= 0.0 {
+/// Whether a radio pick may be queued under `prefs`: nothing without a
+/// file under «Миксы только из скачанного», and no stream pick without new
+/// music, unless the radio is about new music itself (`new_seed`: «Новое
+/// для тебя», a service's song). (The engine already picks so; this holds
+/// while the snapshot it picked from is older than the prefs.)
+pub(super) fn radio_allows(track: TrackId, stream: bool, new_seed: bool, prefs: &v::Prefs, snap: Option<&super::Snapshot>) -> bool {
+    if stream && !streams_allowed(new_seed, prefs) {
         return false;
     }
     !prefs.mixes_downloaded_only || snap.and_then(|s| s.catalog.get(track)).is_some_and(|t| t.local)
+}
+
+/// New music from the services may be queued.
+fn streams_allowed(new_seed: bool, prefs: &v::Prefs) -> bool {
+    !prefs.mixes_downloaded_only && (new_seed || super::new_share(prefs) > 0.0)
+}
+
+/// The radio is about new music whatever «Новое в радио» says.
+fn new_seed(seed: &RadioSeed) -> bool {
+    matches!(seed, RadioSeed::Discover | RadioSeed::Stream { .. })
 }
 
 /// The queue's context line: «Играет из радио «Кино»» / «… микса «Спокойное»».
@@ -410,7 +421,9 @@ impl Worker {
             .upcoming()
             .iter()
             .filter(|e| run.added.contains(&e.id))
-            .filter(|e| !radio_allows(e.track, run.streams.contains_key(&e.track), &prefs, snap.as_deref()))
+            .filter(|e| {
+                !radio_allows(e.track, run.streams.contains_key(&e.track), new_seed(&run.state.seed), &prefs, snap.as_deref())
+            })
             .map(|e| e.id)
             .collect();
         log::info!("radio «{}»: the source changed, {} upcoming go", run.title, drop.len());
@@ -509,16 +522,17 @@ impl Worker {
         // Stream picks play as "seen" tracks of their service.
         let prefs = self.state.read().prefs.clone();
         let snap = self.snapshot();
+        let wants_new = self.recs.radio.run.as_ref().is_some_and(|r| new_seed(&r.state.seed));
         let mut ids = Vec::with_capacity(picks.len());
         for p in &picks {
             match &p.item {
                 Item::Track(t) => {
-                    if radio_allows(*t, false, &prefs, snap.as_deref()) {
+                    if radio_allows(*t, false, wants_new, &prefs, snap.as_deref()) {
                         ids.push(*t);
                     }
                 }
                 // New music (never under «Миксы только из скачанного»).
-                Item::Stream(_) if super::new_share(&prefs) <= 0.0 => {}
+                Item::Stream(_) if !streams_allowed(wants_new, &prefs) => {}
                 Item::Stream(r) => {
                     let pooled = self.recs.radio.run.as_ref().and_then(|run| run.pool.get(r).cloned());
                     let Some(t) = pooled.or_else(|| self.stream_track(r)) else { continue };

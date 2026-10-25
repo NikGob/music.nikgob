@@ -69,7 +69,8 @@ fn start(lib: &Library, streams: &[Arc<FakeService>], schedule: StreamSchedule) 
             library: lib.clone(),
             streams: streams.iter().map(|s| s.clone() as Arc<dyn StreamService>).collect(),
             library_dir: std::env::temp_dir(),
-            prefs: Prefs::default(),
+            // (A lone track would go on by autoplay, with its own requests.)
+            prefs: Prefs { autoplay: false, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: None,

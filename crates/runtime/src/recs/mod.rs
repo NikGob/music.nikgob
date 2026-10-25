@@ -1348,7 +1348,7 @@ impl Worker {
         for p in picks {
             match &p.item {
                 Item::Track(id) => {
-                    if radio::radio_allows(*id, false, &prefs, snap.as_deref()) {
+                    if radio::radio_allows(*id, false, false, &prefs, snap.as_deref()) {
                         ids.push(*id);
                     }
                 }

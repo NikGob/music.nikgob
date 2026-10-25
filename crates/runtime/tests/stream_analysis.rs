@@ -117,7 +117,8 @@ fn a_played_track_is_analysed_from_the_cache_without_a_request() {
     drop(yt.open_audio("yt-gruppa-1").unwrap());
     yt.reset_calls();
     let opened = yt.opened().len();
-    let (rt, asked) = start(&lib, vec![yt.clone()], Prefs::default(), schedule(50, 300));
+    // (Without autoplay, which would ask the service for a radio.)
+    let (rt, asked) = start(&lib, vec![yt.clone()], Prefs { autoplay: false, ..Prefs::default() }, schedule(50, 300));
 
     rt.send(Command::PlayTracks {
         tracks: vec![track, skipped],
