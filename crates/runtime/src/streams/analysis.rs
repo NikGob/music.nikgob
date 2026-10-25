@@ -22,6 +22,11 @@
 //!   the job waits for the pause to end (docs/stage3.md §9). A real failure
 //!   (no song, a video that does not play or decode) is marked and tried
 //!   again after [`StreamSchedule::miss_ttl`].
+//! - **Previews of new music.** When the library's queue is empty, the
+//!   discoveries found for «Новое для тебя» get a preview analysed: the
+//!   first [`PREVIEW_BYTES`] of the song (about two minutes), at most
+//!   [`PREVIEW_DAILY`] a day apart from the library's downloads, so new
+//!   music is placed by its sound (recs-v2 §11.3).
 //!
 //! Both run on one thread of their own at the lowest priority, like the file
 //! job; the worker only hands it jobs and hears back [`Done`]. With
@@ -62,6 +67,12 @@ const BATCH: u32 = 16;
 /// (UTC days since the epoch).
 const DAY_KEY: &str = "stream_analysis.day";
 const DAY_MS: i64 = 86_400_000;
+/// Bytes of a new song's preview (about two minutes of YouTube's Opus).
+const PREVIEW_BYTES: usize = 3 << 20;
+/// Previews of new music analysed a day.
+const PREVIEW_DAILY: u32 = 30;
+/// Library cache key of the previews analysed today: `day:count`.
+const PREVIEW_DAY_KEY: &str = "stream_analysis.preview_day";
 
 /// Where the audio of a job comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +81,8 @@ pub(crate) enum Origin {
     Played,
     /// The background queue: the cache, else a download.
     Background,
+    /// A new song's preview: the cache, else the head of a download.
+    Preview,
 }
 
 /// How a job ended.
@@ -131,6 +144,10 @@ pub(crate) struct StreamAnalysis {
     idle_until: Option<Instant>,
     /// Today (UTC days) and the downloads made for the analysis.
     day: Option<(i64, u32)>,
+    /// Today and the previews of new music analysed.
+    preview_day: Option<(i64, u32)>,
+    /// New songs whose preview was tried in this run.
+    previewed: HashSet<TrackId>,
     /// The progress is counted again on the next tick.
     recount: bool,
 }
@@ -173,13 +190,14 @@ fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool) -> Outco
     let audio = match (job.youtube.cached_audio(&job.video), job.origin) {
         (Some(a), _) => a,
         (None, Origin::Played) => return Outcome::NotCached,
-        (None, Origin::Background) => match job.youtube.open_audio(&job.video) {
+        (None, Origin::Background | Origin::Preview) => match job.youtube.open_audio(&job.video) {
             Ok(a) => a,
             Err(e) => return stream_outcome(e),
         },
     };
     let ext = audio.format_hint();
-    let bytes = match read_all(audio, off) {
+    let max = if job.origin == Origin::Preview { PREVIEW_BYTES } else { MAX_BYTES };
+    let bytes = match read_all(audio, max, off) {
         Ok(b) => b,
         Err(o) => return o,
     };
@@ -194,11 +212,11 @@ fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool) -> Outco
     }
 }
 
-/// The whole stream (up to [`MAX_BYTES`]) in memory.
-fn read_all(mut audio: Box<dyn AudioStream>, off: &AtomicBool) -> Result<Vec<u8>, Outcome> {
-    let mut bytes = Vec::with_capacity(audio.byte_len().map_or(4 << 20, |n| n as usize).min(MAX_BYTES));
+/// The whole stream (up to `max` bytes) in memory.
+fn read_all(mut audio: Box<dyn AudioStream>, max: usize, off: &AtomicBool) -> Result<Vec<u8>, Outcome> {
+    let mut bytes = Vec::with_capacity(audio.byte_len().map_or(4 << 20, |n| n as usize).min(max));
     let mut buf = vec![0u8; CHUNK];
-    while bytes.len() < MAX_BYTES {
+    while bytes.len() < max {
         if off.load(Ordering::Relaxed) {
             return Err(Outcome::Stopped);
         }
@@ -350,25 +368,53 @@ impl Worker {
         {
             return n;
         }
-        let n = self
-            .lib
-            .cache_get(DAY_KEY)
-            .ok()
-            .flatten()
-            .and_then(|(_, v)| {
-                let (day, n) = v.split_once(':')?;
-                (day.parse::<i64>().ok()? == today).then(|| n.parse::<u32>().ok())?
-            })
-            .unwrap_or(0);
+        let n = self.day_count(DAY_KEY);
         self.streaming.analysis.day = Some((today, n));
         n
     }
 
     fn count_download(&mut self) {
         let n = self.analysis_downloads() + 1;
+        self.streaming.analysis.day = Some((now_ms() / DAY_MS, n));
+        self.day_count_put(DAY_KEY, n);
+    }
+
+    /// Previews of new music analysed today.
+    fn previews_today(&mut self) -> u32 {
         let today = now_ms() / DAY_MS;
-        self.streaming.analysis.day = Some((today, n));
-        if let Err(e) = self.lib.cache_put(DAY_KEY, now_ms(), &format!("{today}:{n}")) {
+        if let Some((day, n)) = self.streaming.analysis.preview_day
+            && day == today
+        {
+            return n;
+        }
+        let n = self.day_count(PREVIEW_DAY_KEY);
+        self.streaming.analysis.preview_day = Some((today, n));
+        n
+    }
+
+    fn count_preview(&mut self) {
+        let n = self.previews_today() + 1;
+        self.streaming.analysis.preview_day = Some((now_ms() / DAY_MS, n));
+        self.day_count_put(PREVIEW_DAY_KEY, n);
+    }
+
+    /// Today's count kept under `key`.
+    fn day_count(&self, key: &str) -> u32 {
+        let today = now_ms() / DAY_MS;
+        self.lib
+            .cache_get(key)
+            .ok()
+            .flatten()
+            .and_then(|(_, v)| {
+                let (day, n) = v.split_once(':')?;
+                (day.parse::<i64>().ok()? == today).then(|| n.parse::<u32>().ok())?
+            })
+            .unwrap_or(0)
+    }
+
+    fn day_count_put(&self, key: &str, n: u32) {
+        let today = now_ms() / DAY_MS;
+        if let Err(e) = self.lib.cache_put(key, now_ms(), &format!("{today}:{n}")) {
             log::warn!("stream analysis: keeping the day's count: {e}");
         }
     }
@@ -412,6 +458,7 @@ impl Worker {
         }
         let daily = self.streaming.schedule.analysis_daily;
         if self.analysis_downloads() >= daily {
+            self.preview_step();
             return;
         }
         let retry_before = now_ms() - self.streaming.schedule.miss_ttl.as_millis() as i64;
@@ -445,8 +492,36 @@ impl Worker {
                 }
             }
         }
+        if self.preview_step() {
+            return;
+        }
         let idle = self.streaming.schedule.analysis_idle;
         self.streaming.analysis.idle_until = Some(now + idle);
+    }
+
+    /// The library's queue is done for now: the next new song's preview,
+    /// if today has room for one.
+    fn preview_step(&mut self) -> bool {
+        if self.previews_today() >= PREVIEW_DAILY {
+            return false;
+        }
+        let tried = self.streaming.analysis.previewed.clone();
+        let Some((track, video)) = self.discovery_preview_next(&tried) else { return false };
+        let Some(youtube) = self.service(Service::Youtube) else { return false };
+        log::info!("stream analysis: a preview of new music {track} from YouTube {video}");
+        self.streaming.analysis.previewed.insert(track);
+        let job = Job {
+            track,
+            video,
+            origin: Origin::Preview,
+            youtube,
+        };
+        if !self.analysis_job(job) {
+            return false;
+        }
+        self.count_preview();
+        self.streaming.analysis.busy = Some((track, Step::Analysing));
+        true
     }
 
     /// Downloads and analyses `video` for `track` (one of the day's).
@@ -506,7 +581,7 @@ impl Worker {
         if d.origin == Origin::Played {
             a.played.remove(&d.track);
         }
-        let mine = d.origin == Origin::Background && a.busy.is_some_and(|(t, _)| t == d.track);
+        let mine = d.origin != Origin::Played && a.busy.is_some_and(|(t, _)| t == d.track);
         if mine {
             a.busy = None;
         }
@@ -515,11 +590,16 @@ impl Worker {
             Outcome::Stored(stored) => {
                 log::info!("stream analysis: {} analysed ({:?}, stored: {stored})", d.track, d.origin);
                 self.publish_analysis_counts();
+                // A new song placed by its sound: the next build takes it.
+                if d.origin == Origin::Preview {
+                    self.recs_dirty(gap);
+                }
                 if mine {
                     self.analysis_after(gap);
                 }
             }
-            Outcome::NotCached | Outcome::Stopped => {}
+            Outcome::NotCached
+ | Outcome::Stopped => {}
             Outcome::RateLimited(retry_after) => {
                 if mine {
                     self.analysis_limited(retry_after);
