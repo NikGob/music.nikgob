@@ -29,6 +29,7 @@ pub mod daily;
 pub mod daylist;
 pub mod discover;
 pub mod index;
+pub mod junk;
 pub mod model;
 pub mod mood;
 pub mod pick;
@@ -49,6 +50,7 @@ pub use discover::{
     song_key, stream_song_key,
 };
 pub use index::{Normalizer, VectorIndex};
+pub use junk::{Canonical, Junk, junk};
 pub use model::{FEATURE_VERSION, Model, ModelInput, Moment, SkipModel, UserModel, Weights};
 pub use mood::{Axes, Mood};
 pub use pick::{Item, NewTrack, Pick, Reason, Recs};
