@@ -360,12 +360,18 @@ impl Md3eUi {
         self.update_theme(ctx, state);
         drop(theme_scope);
         root.spacing_mut().scroll = crate::components::scrollbars::apply(ctx);
-        // The current and the next cover stay loaded while off screen.
-        let pinned: Vec<String> = (state.player.current.iter())
-            .chain(state.queue.next.first().map(|e| &e.track))
-            .filter_map(|t| t.cover.as_ref().map(|c| c.uri()))
-            .collect();
-        crate::covers::pin(ctx, pinned.iter().map(String::as_str));
+        // The current and the next cover stay loaded while off screen (set
+        // again only when the state changed; kept in the context, so a new
+        // window's covers are pinned at once).
+        let pinned_id = egui::Id::new("md3e-pinned-revision");
+        if ctx.data(|d| d.get_temp::<u64>(pinned_id)) != Some(state.revision) {
+            ctx.data_mut(|d| d.insert_temp(pinned_id, state.revision));
+            let pinned: Vec<String> = (state.player.current.iter())
+                .chain(state.queue.next.first().map(|e| &e.track))
+                .filter_map(|t| t.cover.as_ref().map(|c| c.uri()))
+                .collect();
+            crate::covers::pin(ctx, pinned.iter().map(String::as_str));
+        }
         // The next one is decoded and uploaded at the sizes the current one
         // is drawn at, while nothing waits for it.
         if let (Some(current), Some(next)) = (state.player.current.as_ref(), state.queue.next.first()) {
