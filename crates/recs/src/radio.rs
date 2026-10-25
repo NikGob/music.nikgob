@@ -151,6 +151,9 @@ pub struct RadioState {
     /// Played twice running: it plays once more first.
     #[serde(default)]
     again: Option<Item>,
+    /// A world it keeps out («После <мир>»: its sound from other worlds).
+    #[serde(default)]
+    not_world: Option<u64>,
     new_pool: Vec<NewTrack>,
     turns: u64,
 }
@@ -174,6 +177,7 @@ impl RadioState {
             skipped: Vec::new(),
             recent: Vec::new(),
             again: None,
+            not_world: None,
             new_pool: Vec::new(),
             turns: 0,
             seed,
@@ -189,6 +193,12 @@ impl RadioState {
             _ => {}
         }
         s
+    }
+
+    /// Keeps the tracks of a world out ([`crate::world_token`]).
+    pub fn without_world(mut self, world: u64) -> Self {
+        self.not_world = Some(world);
+        self
     }
 
     /// Counts `items` as served: a radio that continues a queue
@@ -454,6 +464,7 @@ impl RadioState {
                 && !exclude.contains(&Item::Track(id))
                 && !taken.contains(&Item::Track(id))
                 && self.seed != RadioSeed::Track(id)
+                && (self.not_world.is_none() || recs.info(i).world != self.not_world)
                 && !(strict && resting(i, id))
         };
         // Candidates with the reason and the relation bonus they came by.
@@ -619,6 +630,54 @@ impl RadioState {
         }
         sort_by_score(&mut slots);
         select_diverse(slots, n, rules, taken)
+    }
+}
+
+/// The tracks of a world's core that «После <мир>» starts from: liked or
+/// with this much affinity (a couple of completes).
+const CORE_AFFINITY: f32 = 1.5;
+
+impl Recs<'_> {
+    /// «После <мир>»: `n` songs from other worlds that sound like the core
+    /// of `world` (its liked tracks and the ones played to the end more
+    /// than once, else any it has affinity for, else all of it), at most
+    /// `world_share` of one world, in the smooth order. Empty without
+    /// analysis of the world.
+    pub fn after_world(&self, world: u64, n: usize, world_share: f32, params: &RadioParams) -> Vec<TrackId> {
+        let of_world: Vec<usize> = (0..self.catalog.len()).filter(|&i| self.info(i).world == Some(world)).collect();
+        let core = |keep: &dyn Fn(usize) -> bool| -> Vec<Vector> {
+            of_world.iter().copied().filter(|&i| keep(i)).filter_map(|i| self.embedded(self.info(i).id)).collect()
+        };
+        let mut vs = core(&|i| self.taste.liked_at(i) || self.taste.affinity_at(i) >= CORE_AFFINITY);
+        if vs.is_empty() {
+            vs = core(&|i| self.taste.affinity_at(i) > 0.0);
+        }
+        if vs.is_empty() {
+            vs = core(&|_| true);
+        }
+        if vs.is_empty() {
+            return Vec::new();
+        }
+        let mut centroid = vec![0.0f32; DIM];
+        for v in &vs {
+            for (c, x) in centroid.iter_mut().zip(v) {
+                *c += x / vs.len() as f32;
+            }
+        }
+        let seed = RadioSeed::Style { index: 0, centroid, artists: Vec::new() };
+        let mut radio = RadioState::new(seed).without_world(world);
+        // Twice as many as kept, so the world cap has room to choose.
+        let picks = radio.extend(self, 2 * n, &RadioParams { new_share: 0.0, ..*params });
+        let len = picks.len().max(1) as f32;
+        let cands: Vec<(TrackId, f32)> = picks
+            .iter()
+            .enumerate()
+            .filter_map(|(k, p)| match p.item {
+                Item::Track(id) => Some((id, 1.0 - k as f32 / len)),
+                Item::Stream(_) => None,
+            })
+            .collect();
+        self.mix_of(&cands, n, world_share)
     }
 }
 
@@ -806,6 +865,33 @@ mod tests {
 
         let mut mix = RadioState::new(RadioSeed::Daylist { part: crate::taste::DayPart::Evening, centre: [0.0; 3] });
         assert!(!has(&mix.extend(&recs, 5, &params)), "a mix lets it rest");
+    }
+
+    /// «После A»: the sound of A's liked core (region +x), none of A, and
+    /// no other world over a quarter.
+    #[test]
+    fn after_a_world_comes_its_sound_from_other_worlds() {
+        let (cat, idx) = two_regions();
+        let worlds = ["a", "b", "c", "d"];
+        let world = |i: u128| if i <= 30 { "a" } else if i <= 60 { worlds[1 + (i % 3) as usize] } else { "e" };
+        let cat = Catalog::new(cat.tracks().iter().map(|t| {
+            let i = t.id.0.as_u128();
+            if i == 0 { t.clone() } else { t.clone().with_world(&format!("{}{}", world(i), if i > 60 { i % 8 } else { 0 })) }
+        }));
+        let likes: Vec<TrackId> = (1..=10).map(tid).collect();
+        let taste = Taste::build(&cat, &TasteInput { likes, ..Default::default() }, NOW);
+        let recs = Recs::new(&cat, &taste, &idx);
+        let a = crate::world_token("a0");
+        let mix = recs.after_world(a, 20, 0.25, &RadioParams { new_share: 0.0, seed: 3 });
+        assert_eq!(mix.len(), 20);
+        let ids: Vec<u128> = mix.iter().map(|t| t.0.as_u128()).collect();
+        assert!(ids.iter().all(|&i| i > 30 || i == 0), "none of A: {ids:?}");
+        assert!(ids.iter().filter(|&&i| i <= 60).count() >= 12, "its sound first: {ids:?}");
+        let mut per: HashMap<&str, usize> = HashMap::new();
+        for &i in &ids {
+            *per.entry(world(i)).or_default() += usize::from(i <= 60);
+        }
+        assert!(per.values().all(|&n| n <= 5), "a quarter at most: {per:?}");
     }
 
     #[test]
