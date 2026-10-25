@@ -22,6 +22,9 @@ const FILTER: &str = "info,nikgob_spotify=debug,nikgob_youtube=debug,nikgob_runt
 
 /// Where the log lives: next to the library (the demo's dir in demo mode).
 pub fn dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("NIKGOB_DATA") {
+        return PathBuf::from(dir);
+    }
     if std::env::var_os("NIKGOB_DEMO").is_some() {
         return std::env::temp_dir().join("nikgob-demo");
     }

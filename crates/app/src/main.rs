@@ -461,7 +461,10 @@ fn main() -> eframe::Result {
     });
     let devices = std::thread::spawn(|| nikgob_audio::output_device_names().unwrap_or_default());
     let mut paths = paths();
-    let demo = std::env::var_os("NIKGOB_DEMO").is_some();
+    // `NIKGOB_DATA=dir`: a demo run on a library already in `dir` (a copy
+    // of a real one, say) instead of the generated one.
+    let data_dir_asked = std::env::var_os("NIKGOB_DATA").map(PathBuf::from);
+    let demo = std::env::var_os("NIKGOB_DEMO").is_some() || data_dir_asked.is_some();
     let at_sign_in = std::env::args().any(|a| a == autostart::FLAG);
     // One player per user: a second launch (a click on the shortcut while
     // the first waits in the tray) shows the running one's window and ends.
@@ -488,11 +491,11 @@ fn main() -> eframe::Result {
         }
     };
     if demo {
-        let dir = std::env::temp_dir().join("nikgob-demo");
+        let dir = data_dir_asked.clone().unwrap_or_else(|| std::env::temp_dir().join("nikgob-demo"));
         // A demo library from an older seed (duplicate artists, old covers)
         // is thrown away and seeded again.
         let marker = dir.join(demo::VERSION);
-        if !marker.exists() {
+        if data_dir_asked.is_none() && !marker.exists() {
             let _ = std::fs::remove_dir_all(&dir);
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(&marker, b"");
@@ -520,7 +523,7 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         }
     };
-    if demo {
+    if demo && data_dir_asked.is_none() {
         demo::seed(&library, &paths.root.join("Music"));
     }
     stage("library");

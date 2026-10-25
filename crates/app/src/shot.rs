@@ -29,7 +29,8 @@
 //! back from the tray `ms` later (1000 by default).
 //! `mark:name` names the frames that follow in `NIKGOB_FRAMES` (until a
 //! run's first mark, each step names them after itself).
-//! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
+//! `NIKGOB_SHOT_SIZE=w,h` sets the window size; `NIKGOB_DATA=dir` runs on the
+//! library in `dir` (as the demo does, with its fake services).
 //! The window opens off the screen, unfocused and without a taskbar button,
 //! so a run never jumps over the user's windows; `NIKGOB_SHOT_VISIBLE=1`
 //! shows it.
