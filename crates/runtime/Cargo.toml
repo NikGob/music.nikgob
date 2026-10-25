@@ -27,6 +27,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 log.workspace = true
 thread-priority = "3"
+whatlang = "=0.16.4"
 
 [dev-dependencies]
 nikgob-core = { workspace = true, features = ["fake"] }

@@ -341,7 +341,9 @@ pub fn script_of(text: &str) -> Option<Script> {
     let (mut cjk, mut hangul, mut cyrillic, mut latin) = (0, 0, 0, 0);
     for c in text.chars() {
         match c as u32 {
-            0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F | 0x3400..=0x4DBF | 0x4E00..=0x9FFF => cjk += 1,
+            // Kana, kanji, the Japanese punctuation («〜», «「」») and the
+            // fullwidth forms («！», «～»).
+            0x3000..=0x30FF | 0x31F0..=0x31FF | 0xFF01..=0xFF5E | 0xFF66..=0xFF9F | 0x3400..=0x4DBF | 0x4E00..=0x9FFF => cjk += 1,
             0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF => hangul += 1,
             0x0400..=0x04FF => cyrillic += 1,
             _ if c.is_ascii_alphabetic() || ('\u{C0}'..='\u{24F}').contains(&c) => latin += 1,
@@ -1208,6 +1210,10 @@ mod tests {
         assert_eq!(script_of("Teardrop Massive Attack"), Some(Script::Latin));
         assert_eq!(script_of("Café Tacvba"), Some(Script::Latin));
         assert_eq!(script_of("1999 ..."), None);
+        // Japanese punctuation and fullwidth forms in a Latin title.
+        assert_eq!(script_of("A Horny Money World 〜legendary night〜"), Some(Script::Japanese));
+        assert_eq!(script_of("Idol「Oshi no Ko」"), Some(Script::Japanese));
+        assert_eq!(script_of("Ｂｒａｖｅ！"), Some(Script::Japanese));
     }
 
     #[test]
