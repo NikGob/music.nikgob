@@ -34,6 +34,9 @@ directories = "6"
 blake3 = "1.8"
 fastframe-text.workspace = true
 fastframe-fonts.workspace = true
+# The system fallback faces, chosen as fastframe-fonts does and mapped.
+skrifa = "0.44"
+memmap2 = "0.9"
 fastframe-scroll.workspace = true
 fastframe-shell.workspace = true
 fastframe-tray.workspace = true
@@ -49,7 +52,7 @@ tempfile = "3"
 workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Globalization", "Win32_UI_WindowsAndMessaging"] }
 # The winit eframe runs on (patched to the fork); for the caption colours.
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 # The YouTube Music sign-in window (system WebView2, see ytlogin.rs).

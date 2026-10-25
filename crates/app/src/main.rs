@@ -13,6 +13,7 @@ mod autostart;
 mod cover_cache;
 mod demo;
 mod desktop;
+mod fallback_fonts;
 mod frames;
 mod geometry;
 mod logfile;
@@ -406,8 +407,8 @@ impl eframe::App for Window {
 /// Installed fonts for the scripts Roboto Flex does not draw (CJK, Arabic,
 /// ...), behind every family, so Japanese titles are not boxes.
 fn add_system_fallbacks(fonts: &mut egui::FontDefinitions) {
-    for f in fastframe_fonts::system::fallbacks() {
-        let mut data = egui::FontData::from_static(&f.bytes);
+    for f in fallback_fonts::faces() {
+        let mut data = egui::FontData::from_static(f.bytes);
         data.index = f.index;
         data.tweak.scale = f.scale;
         data.tweak.y_offset_factor = f.y_offset_factor;
