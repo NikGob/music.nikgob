@@ -590,10 +590,20 @@ impl Worker {
                 self.publish_player();
             }
             Command::PlayRelease { id, start, shuffle } => {
-                // The whole album, its songs that only stream too.
-                let rows = self
+                // The whole album, its songs that only stream too; under
+                // «Только скачанное» (of the home or the library) only its
+                // songs with a file, unless it has none or one of the others
+                // was picked to start from.
+                let mut rows = self
                     .log_err("альбом", self.lib.tracks_of_release_all(id))
                     .unwrap_or_default();
+                let only_local = {
+                    let p = &self.state.read().prefs;
+                    p.mixes_downloaded_only || p.library_only_downloaded
+                };
+                if only_local && start.is_none() && rows.iter().any(|r| r.has_local) {
+                    rows.retain(|r| r.has_local);
+                }
                 let title = self
                     .lib
                     .get_release(id)

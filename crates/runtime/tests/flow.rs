@@ -578,3 +578,60 @@ fn likes_and_playlist_edits_update_the_library_in_place() {
     rt.send(Command::Like(LikeTarget::Track(stream.id), true));
     wait_for(&rt, "the stream song in", |s| s.library.track_count == 3);
 }
+
+/// Under «Только скачанное» an album that is only partly downloaded plays
+/// its songs with a file, not the ones that only stream; picked from a song,
+/// or with the filter off, it plays whole.
+#[test]
+fn only_downloaded_plays_the_downloaded_songs_of_an_album() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let release = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    let tracks: Vec<Track> = (0..3)
+        .map(|i| {
+            let mut t = Track::new(format!("t{i}"), credit.clone());
+            t.release_id = Some(release.id);
+            t.track_no = i + 1;
+            let t = lib.upsert_track(&t).unwrap();
+            if i == 1 {
+                lib.add_source(&Source::new(t.id, SourceKind::Spotify, "spotify:track:x", Codec::Vorbis)).unwrap();
+            } else {
+                let file = dir.path().join(format!("t{i}.wav"));
+                write_wav(&file, 2.0);
+                lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav))
+                    .unwrap();
+            }
+            t
+        })
+        .collect();
+    let prefs = Prefs { mixes_downloaded_only: true, ..Prefs::default() };
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs,
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let queued = |s: &ViewState| {
+        let mut ids: Vec<_> = s.queue.current.iter().map(|t| t.id).chain(s.queue.next.iter().map(|e| e.track.id)).collect();
+        ids.extend(s.queue.prev.iter().map(|e| e.track.id));
+        ids
+    };
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the downloaded songs", |s| {
+        let q = queued(s);
+        q.len() == 2 && !q.contains(&tracks[1].id)
+    });
+    rt.send(Command::PlayRelease { id: release.id, start: Some(tracks[0].id), shuffle: false });
+    wait_for(&rt, "the whole album from a song", |s| queued(s).len() == 3);
+}
