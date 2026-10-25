@@ -1008,6 +1008,9 @@ impl UserModel {
                 }
             }
             EventType::Start => self.start(i, p, hook),
+            // Seeking or keeping a track is the user's action too (whatever the
+            // song is: background-ness is the session's, never its kind's).
+            EventType::Seek | EventType::AddToPlaylist => self.passive = 0,
             _ => {}
         }
     }
@@ -1486,6 +1489,21 @@ pub(crate) mod tests {
         assert!(ost2 < ost + 0.15 && rap2 > ost2, "background: rap {rap2} soundtracks {ost2} (before {rap} {ost})");
         let i = (0..bg.len()).find(|&i| kind(i) == 1).unwrap();
         assert!(bg.tracks[i].aff_long(T0) > m.tracks[i].aff_long(T0), "counted inside its profile");
+        // The same soundtracks chosen one by one are listened to, not
+        // background: an instrumental kind is never down-weighted as such.
+        let mut fg_input = input.clone();
+        fg_input.events.truncate(fg_input.events.len() - 600);
+        let mut ts = T0 - 2 * DAY_MS;
+        for k in 0..300 {
+            let id = ost_ids[k % ost_ids.len()];
+            fg_input.events.push(Play { origin: Some(EventOrigin::Manual), ..Play::new(id, ts, EventType::Start, Some(0)) });
+            ts += 200_000;
+            fg_input.events.push(Play::new(id, ts, EventType::Complete, Some(200_000)));
+        }
+        let fg = build(&fg_input);
+        let ost3 = share_of(&fg, 1);
+        assert!(ost3 > ost2 + 0.15, "chosen soundtracks weigh: {ost3} (in the background {ost2})");
+
         // A shelf of ten favourites: every kind of the omnivore in it.
         let mut fav: Vec<usize> = (0..m.len()).filter(|&i| m.tracks[i].aff_long(T0) > 0.0).collect();
         fav.sort_by(|a, b| m.tracks[*b].aff_long(T0).total_cmp(&m.tracks[*a].aff_long(T0)));
