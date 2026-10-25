@@ -363,6 +363,14 @@ impl Md3eUi {
             .filter_map(|t| t.cover.as_ref().map(|c| c.uri()))
             .collect();
         crate::covers::pin(ctx, pinned.iter().map(String::as_str));
+        // The next one is decoded and uploaded at the sizes the current one
+        // is drawn at, while nothing waits for it.
+        if let (Some(current), Some(next)) = (state.player.current.as_ref(), state.queue.next.first()) {
+            let uri = |t: &nikgob_view::TrackRow| t.cover.as_ref().map(nikgob_view::Cover::uri);
+            if let (Some(c), Some(n)) = (uri(current), uri(&next.track)) {
+                crate::covers::prefetch_like(ctx, &c, &n);
+            }
+        }
         self.np_motion = state.prefs.np_motion;
         if !self.chrome.np_loaded {
             self.chrome.np_loaded = true;

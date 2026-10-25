@@ -509,7 +509,7 @@ impl<'a> ListItem<'a> {
                     break_anywhere: n_support <= 1,
                     ..TextWrapping::default()
                 };
-                let g = ui.painter().layout_job(job);
+                let g = crate::typography::layout(ui.painter(), job);
                 if self.enabled {
                     (link_clicked, link_hover_now) =
                         super::links::interact_links(ui, id, &g, pos2(x, y), &self.supporting_links, variant);

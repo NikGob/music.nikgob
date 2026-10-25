@@ -60,6 +60,8 @@ struct Use {
     /// The cover this is a size of: the file URI without its tier, or the
     /// web url before sizing.
     origin: String,
+    /// The tier it is (`None`: the full file, or a web url as it is).
+    tier: Option<u32>,
     /// Pass it was last drawn in.
     last: u64,
     /// Texture bytes; 0 while decoding.
@@ -152,52 +154,91 @@ pub fn pin<'a>(ctx: &Context, uris: impl IntoIterator<Item = &'a str>) {
     }
 }
 
-/// The cover at `uri` for drawing into `size` points, magnified `zoom` times.
-/// `None` until it loads (or if it cannot be).
-pub fn texture(ctx: &Context, uri: &str, size: Vec2, zoom: f32) -> Option<SizedTexture> {
-    let options = crate::components::PHOTO_TEXTURE;
-    let load = |uri: &str| match ctx.try_load_texture(uri, options, SizeHint::default()) {
+fn load(ctx: &Context, uri: &str) -> Result<Option<SizedTexture>, LoadError> {
+    match ctx.try_load_texture(uri, crate::components::PHOTO_TEXTURE, SizeHint::default()) {
         Ok(TexturePoll::Ready { texture }) => Ok(Some(texture)),
         Ok(TexturePoll::Pending { .. }) => Ok(None),
         Err(e) => Err(e),
-    };
-    let web = is_web(uri);
+    }
+}
+
+/// The URI of `uri` at `tier`, and the cover it is a size of.
+fn sized(shared: &Shared, uri: &str, tier: Option<u32>) -> (String, String) {
+    if is_web(uri) {
+        let sizer = *lock(&shared.web_sizer);
+        (sizer.and_then(|f| f(uri, tier)).unwrap_or_else(|| uri.to_owned()), uri.to_owned())
+    } else {
+        let origin = base(uri);
+        let wanted = match tier {
+            Some(t) => format!("{origin}#{t}"),
+            None => origin.to_owned(),
+        };
+        (wanted, origin.to_owned())
+    }
+}
+
+/// The cover at `uri` for drawing into `size` points, magnified `zoom` times.
+/// `None` until it loads (or if it cannot be).
+pub fn texture(ctx: &Context, uri: &str, size: Vec2, zoom: f32) -> Option<SizedTexture> {
     let shared = match shared(ctx) {
-        Some(s) if web || parse(uri).is_some() => s,
-        _ => return load(uri).ok().flatten(),
+        Some(s) if is_web(uri) || parse(uri).is_some() => s,
+        _ => return load(ctx, uri).ok().flatten(),
     };
     let px = size.max_elem() * ctx.pixels_per_point() * zoom.max(1.0);
     let tier = TIERS.iter().find(|t| px <= **t as f32).copied();
-    let origin = if web { uri } else { base(uri) };
-    let wanted = if web {
-        let sizer = *lock(&shared.web_sizer);
-        sizer.and_then(|f| f(uri, tier)).unwrap_or_else(|| uri.to_owned())
-    } else {
-        match tier {
-            Some(t) => format!("{origin}#{t}"),
-            None => origin.to_owned(),
-        }
-    };
+    let (wanted, origin) = sized(&shared, uri, tier);
     let pass = ctx.cumulative_pass_nr();
-    match load(&wanted) {
+    match load(ctx, &wanted) {
         Ok(Some(texture)) => {
-            shared.used(&wanted, origin, pass, texture_bytes(texture.size));
+            shared.used(&wanted, &origin, tier, pass, texture_bytes(texture.size));
             Some(texture)
         }
         Ok(None) => {
-            shared.used(&wanted, origin, pass, 0);
+            shared.used(&wanted, &origin, tier, pass, 0);
             // Another size of the cover meanwhile, so a growing cover does
             // not blink.
-            let other = shared.loaded_tier(origin)?;
-            let texture = load(&other).ok().flatten()?;
-            shared.used(&other, origin, pass, texture_bytes(texture.size));
+            let (other, other_tier) = shared.loaded_tier(&origin)?;
+            let texture = load(ctx, &other).ok().flatten()?;
+            shared.used(&other, &origin, other_tier, pass, texture_bytes(texture.size));
             Some(texture)
         }
         Err(_) => {
             // Kept while drawn so a broken file is not decoded every pass.
-            shared.used(&wanted, origin, pass, 0);
+            shared.used(&wanted, &origin, tier, pass, 0);
             None
         }
+    }
+}
+
+/// Loads `next` at every size `current` is drawn at now (the next track's
+/// cover in the player bar and Now Playing), so it is decoded and on the
+/// GPU before its track starts, not in the frame the cover morph begins.
+pub fn prefetch_like(ctx: &Context, current: &str, next: &str) {
+    let Some(shared) = shared(ctx) else { return };
+    if base(current) == base(next) || !(is_web(next) || parse(next).is_some()) {
+        return;
+    }
+    let pass = ctx.cumulative_pass_nr();
+    let (_, origin) = sized(&shared, current, None);
+    let tiers: Vec<Option<u32>> = {
+        let lru = lock(&shared.lru);
+        let mut tiers: Vec<Option<u32>> = lru
+            .used
+            .values()
+            .filter(|u| u.origin == origin && u.last + 1 >= pass)
+            .map(|u| u.tier)
+            .collect();
+        tiers.sort_unstable();
+        tiers.dedup();
+        tiers
+    };
+    for tier in tiers {
+        let (wanted, origin) = sized(&shared, next, tier);
+        let bytes = match load(ctx, &wanted) {
+            Ok(Some(texture)) => texture_bytes(texture.size),
+            _ => 0,
+        };
+        shared.used(&wanted, &origin, tier, pass, bytes);
     }
 }
 
@@ -257,21 +298,24 @@ fn decode(path: &Path, tier: Option<u32>) -> Result<ColorImage, String> {
 }
 
 impl Shared {
-    fn used(&self, uri: &str, origin: &str, pass: u64, bytes: usize) {
+    fn used(&self, uri: &str, origin: &str, tier: Option<u32>, pass: u64, bytes: usize) {
         let mut lru = lock(&self.lru);
-        let u = lru.used.entry(uri.to_owned()).or_insert_with(|| Use { origin: origin.to_owned(), last: pass, bytes });
+        let u = lru
+            .used
+            .entry(uri.to_owned())
+            .or_insert_with(|| Use { origin: origin.to_owned(), tier, last: pass, bytes });
         u.last = pass;
         u.bytes = bytes;
     }
 
-    /// The largest loaded size of the cover `origin`.
-    fn loaded_tier(&self, origin: &str) -> Option<String> {
+    /// The largest loaded size of the cover `origin`, and its tier.
+    fn loaded_tier(&self, origin: &str) -> Option<(String, Option<u32>)> {
         let lru = lock(&self.lru);
         lru.used
             .iter()
             .filter(|(_, u)| u.bytes > 0 && u.origin == origin)
             .max_by_key(|(_, u)| u.bytes)
-            .map(|(uri, _)| uri.clone())
+            .map(|(uri, u)| (uri.clone(), u.tier))
     }
 
     fn enqueue(self: &Arc<Self>, ctx: &Context, job: Job) {
@@ -517,6 +561,36 @@ mod tests {
         assert_eq!(settled(560.0), vec2(600.0, 600.0));
         // Only textures remain: no file bytes, no decoded copies.
         assert_eq!(decoded(&ctx), 0);
+    }
+
+    #[test]
+    fn the_next_cover_loads_at_the_sizes_the_current_one_is_drawn_at() {
+        let ctx = ctx();
+        let uris = covers("next", 2, 600);
+        let (current, next) = (&uris[0], &uris[1]);
+        // The current cover at two sizes (the bar and Now Playing).
+        for _ in 0..5000 {
+            let mut done = false;
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                let small = texture(ui.ctx(), current, vec2(48.0, 48.0), 1.0);
+                let big = texture(ui.ctx(), current, vec2(400.0, 400.0), 1.0);
+                prefetch_like(ui.ctx(), current, next);
+                let l = loaded(ui.ctx());
+                done = small.is_some_and(|t| t.size == vec2(128.0, 128.0))
+                    && big.is_some_and(|t| t.size == vec2(512.0, 512.0))
+                    && l.contains(&format!("{next}#128"))
+                    && l.contains(&format!("{next}#512"));
+            })
+            .drop_without_applying_deltas();
+            if done {
+                // Drawn at once when its track starts, at either size.
+                let got = pass(&ctx, &[next.clone()], 400.0);
+                assert_eq!(got[0].map(|t| t.size), Some(vec2(512.0, 512.0)));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the next cover was not loaded ahead");
     }
 
     #[test]

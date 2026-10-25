@@ -447,7 +447,7 @@ impl MediaCard {
                     break_anywhere: false,
                     overflow_character: Some('…'),
                 };
-                painter.layout_job(job)
+                crate::typography::layout(&painter, job)
             } else {
                 common::line(&painter, &self.title, TypeRole::TitleSmall.style(), s.on_surface, text_w)
             };

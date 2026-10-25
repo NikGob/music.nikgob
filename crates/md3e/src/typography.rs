@@ -162,6 +162,74 @@ pub fn para_shift(ctx: &egui::Context, format: &TextFormat) -> f32 {
     ((line_height - natural) * 0.5).max(0.0).round()
 }
 
+/// Galleys laid out through [`layout`], kept across frames. egui keeps a
+/// galley only while it is used every pass, so text that leaves the screen
+/// for a moment (the page under Now Playing, the lyrics while the player is
+/// closed) was laid out again, all of it in the frame an animation starts.
+#[derive(Default)]
+struct Kept {
+    galleys: std::collections::HashMap<u64, (Arc<egui::Galley>, f64)>,
+    /// The font atlas's height and fill when they were laid out: egui
+    /// starts a new atlas when one fills up (or the fonts change), and the
+    /// glyphs of these galleys are not in it.
+    atlas: (usize, f32),
+    pass: u64,
+    swept: f64,
+}
+
+/// How long a galley nobody laid out stays kept, and how many are.
+const KEEP_S: f64 = 120.0;
+const KEEP_MAX: usize = 4096;
+
+/// `painter.layout_job(job)`, from the galleys kept across frames when the
+/// same job was laid out lately (the same galley egui would make).
+pub fn layout(painter: &egui::Painter, job: LayoutJob) -> Arc<egui::Galley> {
+    use std::hash::{Hash, Hasher};
+    let ctx = painter.ctx();
+    let kept = ctx.data_mut(|d| {
+        d.get_temp_mut_or_default::<Arc<std::sync::Mutex<Kept>>>(egui::Id::new("md3e-kept-galleys"))
+            .clone()
+    });
+    let (now, pass) = (ctx.input(|i| i.time), ctx.cumulative_pass_nr());
+    let key = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        job.hash(&mut h);
+        painter.pixels_per_point().to_bits().hash(&mut h);
+        h.finish()
+    };
+    {
+        let mut k = kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if k.pass != pass {
+            k.pass = pass;
+            let atlas = ctx.fonts(|f| (f.font_image_size()[1], f.font_atlas_fill_ratio()));
+            if atlas.0 < k.atlas.0 || atlas.1 < k.atlas.1 {
+                k.galleys.clear();
+            }
+            k.atlas = atlas;
+            if now - k.swept > 1.0 {
+                k.swept = now;
+                k.galleys.retain(|_, (_, used)| now - *used < KEEP_S);
+                if k.galleys.len() > KEEP_MAX {
+                    let mut ages: Vec<f64> = k.galleys.values().map(|(_, used)| *used).collect();
+                    ages.sort_by(|a, b| b.total_cmp(a));
+                    let oldest_kept = ages[KEEP_MAX - 1];
+                    k.galleys.retain(|_, (_, used)| *used >= oldest_kept);
+                }
+            }
+        }
+        if let Some((g, used)) = k.galleys.get_mut(&key) {
+            *used = now;
+            return g.clone();
+        }
+    }
+    let g = painter.layout_job(job);
+    kept.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .galleys
+        .insert(key, (g.clone(), now));
+    g
+}
+
 /// Lays out text whose size animates (a collapsing title, a floating label,
 /// a lyric line coming into focus) at the nearest whole size and scales the
 /// result to the exact one.
@@ -183,7 +251,7 @@ pub fn layout_sized(
 ) -> Arc<egui::Galley> {
     let base = style.size.round().max(1.0);
     if (style.size - base).abs() < 1e-3 || !style.size.is_finite() {
-        return painter.layout_job(job(style, 1.0));
+        return layout(painter, job(style, 1.0));
     }
     let k = base / style.size;
     let at = TypeStyle {
@@ -192,7 +260,7 @@ pub fn layout_sized(
         tracking: style.tracking * k,
         weight: style.weight,
     };
-    scale_galley(&painter.layout_job(job(at, k)), 1.0 / k)
+    scale_galley(&layout(painter, job(at, k)), 1.0 / k)
 }
 
 /// `g` scaled by `s` around its origin: the glyphs keep their place in the
@@ -426,6 +494,31 @@ mod tests {
         assert_eq!(f.extra_letter_spacing, 0.5);
         assert_eq!(f.line_height, Some(24.0));
         assert_eq!(f.font_id.size, 16.0);
+    }
+
+    #[test]
+    fn galleys_stay_kept_across_passes_they_are_not_drawn_in() {
+        let ctx = egui::Context::default();
+        let mut defs = FontDefinitions::default();
+        install_fonts(&mut defs);
+        ctx.set_fonts(defs);
+        let job = || LayoutJob::single_section("Группа крови".into(), TypeRole::BodyLarge.style().text_format(Color32::WHITE));
+        let mut kept = Vec::new();
+        for i in 0..4 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                // Laid out in the first and the last pass only.
+                if i == 0 || i == 3 {
+                    kept.push(layout(ui.painter(), job()));
+                }
+            });
+            out.textures_delta.clear();
+        }
+        assert!(Arc::ptr_eq(&kept[0], &kept[1]));
+        // A new font atlas (here for another scale) lays them out again.
+        ctx.set_pixels_per_point(2.0);
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| kept.push(layout(ui.painter(), job())));
+        out.textures_delta.clear();
+        assert!(!Arc::ptr_eq(&kept[1], &kept[2]));
     }
 
     #[test]

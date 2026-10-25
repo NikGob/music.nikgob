@@ -455,7 +455,7 @@ fn radio_header(ui: &mut Ui, r: &nikgob_view::RadioView) -> bool {
     let line = |text: &str, role: TypeRole, color| {
         let mut job = egui::text::LayoutJob::single_section(text.to_owned(), role.style().text_format(color));
         job.wrap = egui::text::TextWrapping::truncate_at_width(w);
-        ui.painter().layout_job(job)
+        crate::typography::layout(ui.painter(), job)
     };
     // Autoplay names what it continues.
     let (title, sub) = if r.autoplay {

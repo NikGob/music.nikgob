@@ -117,7 +117,7 @@ fn paint(
     let sub_layout = |text: &str| -> Arc<Galley> {
         let mut job = LayoutJob::single_section(text.to_owned(), style_at(sizes.sub).text_format(Color32::WHITE));
         job.wrap.max_width = wrap;
-        painter.layout_job(job)
+        crate::typography::layout(&painter, job)
     };
     let scale = |l: &LyricLine| if l.background { BG_SCALE } else { 1.0 };
     let breaks: Vec<_> = lines.iter().enumerate().map(|(i, l)| {
@@ -461,7 +461,7 @@ fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, bi
     }
     let mut job = LayoutJob::single_section(text.to_owned(), style_at(big).text_format(Color32::WHITE));
     job.wrap.max_width = wrap;
-    let g = painter.layout_job(job);
+    let g = crate::typography::layout(painter, job);
     let forced = g.rows.iter().map(|r| r.row.glyphs.iter().map(|gl| gl.chr).collect::<String>()).collect::<Vec<_>>().join("\n");
     let size = fixed_layout(painter, &forced, big).size();
     let b = Breaks { text: text.to_owned(), wrap, big, forced, height: size.y, width: size.x };
@@ -470,7 +470,7 @@ fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, bi
 }
 
 fn fixed_layout(painter: &egui::Painter, text: &str, size: f32) -> Arc<Galley> {
-    painter.layout_job(LayoutJob::single_section(text.to_owned(), style_at(size).text_format(Color32::WHITE)))
+    crate::typography::layout(painter, LayoutJob::single_section(text.to_owned(), style_at(size).text_format(Color32::WHITE)))
 }
 
 /// [`fixed_layout`] for a size that is animating (see

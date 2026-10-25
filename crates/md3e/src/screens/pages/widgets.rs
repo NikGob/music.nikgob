@@ -141,7 +141,7 @@ pub fn wrapped(ui: &Ui, text: &str, role: crate::TypeStyle, color: Color32, widt
         break_anywhere: false,
         overflow_character: Some('…'),
     };
-    ui.painter().layout_job(job)
+    crate::typography::layout(ui.painter(), job)
 }
 
 /// "3 из 12" when a release is incomplete locally.
@@ -496,7 +496,7 @@ fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Ve
     // next row.
     let mut job = egui::text::LayoutJob::single_section(a.name.clone(), TypeRole::TitleSmall.style().text_format(s.on_surface));
     job.wrap = egui::text::TextWrapping::truncate_at_width(size.max(1.0));
-    let galley = ui.painter().layout_job(job);
+    let galley = crate::typography::layout(ui.painter(), job);
     let name_rect = Rect::from_center_size(
         pos2(rect.center().x, img.bottom() + 6.0 + galley.size().y * 0.5),
         galley.size(),
@@ -512,7 +512,7 @@ fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Ve
     if !caption.is_empty() {
         let mut job = egui::text::LayoutJob::single_section(caption, TypeRole::BodySmall.style().text_format(s.on_surface_variant));
         job.wrap = egui::text::TextWrapping::truncate_at_width(size.max(1.0));
-        let g = ui.painter().layout_job(job);
+        let g = crate::typography::layout(ui.painter(), job);
         let at = pos2(rect.center().x - g.size().x * 0.5, name_rect.bottom() + 2.0);
         ui.painter().galley(at, g, s.on_surface_variant);
     }
