@@ -535,6 +535,18 @@ fn read_snapshot(
     suggested: &[suggest::Kept],
     local_only: bool,
 ) -> Result<(Snapshot, nikgob_recs::TilesInput, usize), String> {
+    read_parts(lib, index, now, utc_offset_min, suggested, local_only).map(|(snap, tiles, len, _)| (snap, tiles, len))
+}
+
+/// [`read_snapshot`] and the history its model was built of.
+fn read_parts(
+    lib: &Library,
+    index: &SoundIndex,
+    now: UnixMs,
+    utc_offset_min: i32,
+    suggested: &[suggest::Kept],
+    local_only: bool,
+) -> Result<(Snapshot, nikgob_recs::TilesInput, usize, TasteInput), String> {
     let err = |what: &str, e: nikgob_library::LibraryError| format!("{what}: {e}");
     let rows = lib.rec_tracks().map_err(|e| err("tracks", e))?;
     let events = lib.listening_events().map_err(|e| err("events", e))?;
@@ -572,7 +584,8 @@ fn read_snapshot(
         let mut t = TrackInfo::new(r.id, r.artists.clone(), r.release)
             .with_local(r.has_local)
             .with_song(song)
-            .with_duration(tiles_input.facts.get(&r.id).and_then(|f| f.duration_ms));
+            .with_duration(tiles_input.facts.get(&r.id).and_then(|f| f.duration_ms))
+            .with_position(tiles_input.facts.get(&r.id).map_or(0, |f| f.position));
         let main = r.artists.first().copied();
         if let Some(key) = crate::home_v2::track_world_key(world.map(|w| w.0.as_str()), main) {
             t = t.with_world(&key);
@@ -672,19 +685,20 @@ fn read_snapshot(
         .flatten()
         .and_then(|(_, json)| serde_json::from_str(&json).ok())
         .filter(|w: &Weights| w.version == FEATURE_VERSION);
+    let history = TasteInput {
+        events: events.iter().map(nikgob_recs::Play::from).collect(),
+        likes: like_times.iter().map(|l| l.0).collect(),
+        like_times,
+        playlist_entries: entries,
+        disliked_tracks,
+        disliked_artists,
+        utc_offset_min,
+        suggested_tracks: matched.tracks,
+        suggested_artists: matched.artists,
+    };
     let model = UserModel::build(
         &catalog,
-        &TasteInput {
-            events: events.iter().map(nikgob_recs::Play::from).collect(),
-            likes: like_times.iter().map(|l| l.0).collect(),
-            like_times,
-            playlist_entries: entries,
-            disliked_tracks,
-            disliked_artists,
-            utc_offset_min,
-            suggested_tracks: matched.tracks,
-            suggested_artists: matched.artists,
-        },
+        &history,
         ModelInput { index: &index, types: Some(&types), weights: cached },
         now,
     );
@@ -707,7 +721,7 @@ fn read_snapshot(
         local_only,
         worlds,
     };
-    Ok((snap, tiles_input, index_len))
+    Ok((snap, tiles_input, index_len, history))
 }
 
 /// What `recs.song_types` keeps: the types and what they were told from.
@@ -1394,6 +1408,49 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
         took: started.elapsed(),
         home,
     })
+}
+
+/// The prequential replay of a library's history (recs-v2 §13): every
+/// start predicted by the model learnt from the starts before it, against
+/// the affinity of phase 1 and the hand weights. The build keeps its
+/// caches in `lib`: run it on a copy.
+pub fn preview_replay(lib: &Library) -> Result<nikgob_recs::model::ReplayReport, String> {
+    let preview = ModelPreview::of(lib)?;
+    let snap = &preview.snap;
+    Ok(nikgob_recs::model::replay(&snap.catalog, &preview.history, ModelInput { index: &snap.index, types: Some(&snap.types), weights: None }))
+}
+
+/// A snapshot of a library to try the radio on, as the runtime would
+/// (its caches are kept in the library: a copy).
+pub struct ModelPreview {
+    snap: Snapshot,
+    history: TasteInput,
+}
+
+impl ModelPreview {
+    pub fn of(lib: &Library) -> Result<Self, String> {
+        let index = SoundIndex::default();
+        crate::analysis::load_index(lib, &index);
+        let (_, utc_offset_min) = local_day();
+        let (snap, _, _, history) = read_parts(lib, &index, recs_now(), utc_offset_min, &[], false)?;
+        Ok(Self { snap, history })
+    }
+
+    /// The next `n` of a radio.
+    pub fn extend(&self, radio: &mut Engine, n: usize) -> Vec<Pick> {
+        radio.extend(&self.snap.recs(), n, &RadioParams { new_share: 0.0, seed: 1 })
+    }
+
+    pub fn song_type(&self, id: TrackId) -> Option<nikgob_recs::SongType> {
+        self.snap.types.get(id).copied()
+    }
+
+    /// How far apart two tracks sound, in the model's median distances.
+    pub fn distance(&self, a: TrackId, b: TrackId) -> Option<f32> {
+        let m = &self.snap.model;
+        let (a, b) = (m.embedded_at(m.position(a)?)?, m.embedded_at(m.position(b)?)?);
+        Some(nikgob_recs::index::euclid(a, b) / m.scale())
+    }
 }
 
 impl Worker {
