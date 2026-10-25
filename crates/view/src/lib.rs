@@ -1649,6 +1649,9 @@ pub enum Command {
     PlayNext(Vec<TrackId>),
     Enqueue(Vec<TrackId>),
     /// All tracks of an album / an artist to the end of the queue.
+    /// The whole album right after the current track, in its order (under
+    /// «Только скачанное» as playing it); the queue goes on after it.
+    PlayReleaseNext(ReleaseId),
     EnqueueRelease(ReleaseId),
     EnqueueArtist(ArtistId),
     PlayQueueEntry(u64),

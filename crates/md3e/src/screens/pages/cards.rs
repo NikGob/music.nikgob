@@ -367,6 +367,7 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, playing: bool,
         Menu::new(key)
             .item(MenuItem::new("Список треков").icon(Icon::QueueMusic).shortcut(n.to_string()))
             .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
+            .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
             .item(MenuItem::new("В очередь").icon(Icon::QueueMusic))
             .item(MenuItem::new("Сохранить как плейлист").icon(Icon::PlaylistAdd))
             .divider()
@@ -387,9 +388,11 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, playing: bool,
             shuffle(&mut t);
             out.push(Command::PlayTracks { tracks: t, start: 0, context });
         }
-        Some(2) => out.push(Command::Enqueue(tracks.clone())),
-        Some(3) => out.push(Command::SaveTracksAsPlaylist { name: l.lane.title().to_owned(), tracks: tracks.clone() }),
-        Some(4) => out.push(Command::RefreshMix { id: l.id() }),
+        Some(2) => out.push(Command::PlayNext(tracks.clone())),
+        Some(3) => out.push(Command::Enqueue(tracks.clone())),
+        Some(4) => out.push(Command::SaveTracksAsPlaylist { name: l.lane.title().to_owned(), tracks: tracks.clone() }),
+        Some(5) => out.push(Command::RefreshMix { id: l.id() }),
+
         _ => {}
     }
     let clicked = play || (resp.clicked() && more.as_ref().is_none_or(|m| !m.clicked()));

@@ -239,7 +239,7 @@ pub fn release(
             .item(MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete))
             .attach(more);
         match picked {
-            Some(0) => out.push(Command::PlayNext(ids.clone())),
+            Some(0) => out.push(Command::PlayReleaseNext(id)),
             Some(1) => out.push(Command::Enqueue(ids.clone())),
             Some(2) => {
                 pages.pending_add = Some(ids.clone());

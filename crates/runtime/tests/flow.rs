@@ -646,3 +646,66 @@ fn only_downloaded_plays_the_downloaded_songs_of_an_album() {
     rt.send(Command::PlayRelease { id: release.id, start: Some(tracks[0].id), shuffle: false });
     wait_for(&rt, "the whole album from a song", |s| queued(s).len() == 3);
 }
+
+/// «Сыграть следующим» of an album while a track plays: the whole album in
+/// its order right after the current track, then the rest of the queue;
+/// under «Только скачанное» its songs with a file, as playing it.
+#[test]
+fn an_album_played_next_goes_right_after_the_current_track() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let add = |title: &str, release: Option<&Release>, no: u32, local: bool| {
+        let mut t = Track::new(title, credit.clone());
+        t.release_id = release.map(|r| r.id);
+        t.track_no = no;
+        let t = lib.upsert_track(&t).unwrap();
+        if local {
+            let file = dir.path().join(format!("{title}.wav"));
+            write_wav(&file, 2.0);
+            lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav)).unwrap();
+        } else {
+            lib.add_source(&Source::new(t.id, SourceKind::Spotify, format!("spotify:track:{title}"), Codec::Vorbis)).unwrap();
+        }
+        t
+    };
+    let single = lib.upsert_release(&Release::new("Single", credit.clone())).unwrap();
+    let queue: Vec<Track> = (0..3).map(|i| add(&format!("q{i}"), Some(&single), i + 1, true)).collect();
+    let album = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    // Added out of order: the album plays by its track numbers.
+    let a3 = add("a3", Some(&album), 3, true);
+    let a1 = add("a1", Some(&album), 1, true);
+    let a2 = add("a2", Some(&album), 2, false);
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let order = |s: &ViewState| -> Vec<_> { s.queue.current.iter().map(|t| t.id).chain(s.queue.next.iter().map(|e| e.track.id)).collect() };
+    let ids: Vec<_> = queue.iter().map(|t| t.id).collect();
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "q".into() });
+    wait_for(&rt, "the queue", |s| order(s) == ids);
+    rt.send(Command::PlayReleaseNext(album.id));
+    let want = vec![ids[0], a1.id, a2.id, a3.id, ids[1], ids[2]];
+    wait_for(&rt, "the album after the current track", |s| order(s) == want);
+    assert!(rt.state().toasts.iter().any(|t| t.text == "Следующим: «Album»"));
+    // Only the downloaded: the song that only streams stays out.
+    rt.send(Command::SetPref(nikgob_view::PrefPatch::MixesDownloadedOnly(true)));
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "q".into() });
+    wait_for(&rt, "the queue again", |s| order(s) == ids);
+    rt.send(Command::PlayReleaseNext(album.id));
+    let want = vec![ids[0], a1.id, a3.id, ids[1], ids[2]];
+    wait_for(&rt, "the downloaded songs after the current track", |s| order(s) == want);
+}
+

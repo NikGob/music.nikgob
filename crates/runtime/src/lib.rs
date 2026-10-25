@@ -651,27 +651,13 @@ impl Worker {
                 self.publish_player();
             }
             Command::PlayRelease { id, start, shuffle } => {
-                // The whole album, its songs that only stream too; under
-                // «Только скачанное» (of the home or the library) only its
-                // songs with a file, unless it has none or one of the others
-                // was picked to start from.
-                let mut rows = self
-                    .log_err("альбом", self.lib.tracks_of_release_all(id))
-                    .unwrap_or_default();
-                let only_local = {
-                    let p = &self.state.read().prefs;
-                    p.mixes_downloaded_only || p.library_only_downloaded
-                };
-                if only_local && start.is_none() && rows.iter().any(|r| r.has_local) {
-                    rows.retain(|r| r.has_local);
-                }
+                let ids = self.release_tracks(id, start.is_none());
                 let title = self
                     .lib
                     .get_release(id)
                     .ok()
                     .flatten()
                     .map(|r| format!("альбома «{}»", r.title));
-                let ids: Vec<TrackId> = rows.iter().map(|r| r.id).collect();
                 self.play_context_id = Some(format!("release:{id}"));
                 self.play_list(ids, start, shuffle, title, EventContext::Album);
                 // An album known in part plays at once; the rest of its
@@ -718,6 +704,17 @@ impl Worker {
                 self.preload_next();
                 self.publish_player();
                 self.toast("Добавлено в очередь", None);
+            }
+            Command::PlayReleaseNext(id) => {
+                let ids = self.release_tracks(id, true);
+                if ids.is_empty() {
+                    return;
+                }
+                self.queue.play_next(&ids);
+                self.preload_next();
+                self.publish_player();
+                let title = self.lib.get_release(id).ok().flatten().map(|r| r.title).unwrap_or_default();
+                self.toast(format!("Следующим: «{title}»"), None);
             }
             Command::EnqueueRelease(id) => {
                 let ids: Vec<TrackId> = self
@@ -2192,7 +2189,24 @@ impl Worker {
         Held::Tracks(self.lib.count_tracks(nikgob_library::TrackFilter::All).ok())
     }
 
+    /// The tracks an album plays, in its order: the whole album, its songs
+    /// that only stream too; under «Только скачанное» (of the home or the
+    /// library) only its songs with a file when it has some and `filtered`
+    /// (no song of it was picked to start from).
+    fn release_tracks(&mut self, id: nikgob_core::model::ReleaseId, filtered: bool) -> Vec<TrackId> {
+        let mut rows = self.log_err("альбом", self.lib.tracks_of_release_all(id)).unwrap_or_default();
+        let only_local = {
+            let p = &self.state.read().prefs;
+            p.mixes_downloaded_only || p.library_only_downloaded
+        };
+        if only_local && filtered && rows.iter().any(|r| r.has_local) {
+            rows.retain(|r| r.has_local);
+        }
+        rows.iter().map(|r| r.id).collect()
+    }
+
     /// The releases of `tracks`, once each.
+
     fn releases_of(&self, tracks: &[TrackId]) -> Vec<nikgob_core::model::ReleaseId> {
         let mut ids: Vec<_> =
             tracks.iter().filter_map(|t| self.lib.get_track(*t).ok().flatten()?.release_id).collect();

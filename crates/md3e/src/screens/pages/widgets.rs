@@ -201,6 +201,7 @@ pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) ->
     let picked = Menu::new(("release-menu", resp.id))
         .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
         .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
+        .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
         .item(MenuItem::new("В очередь").icon(Icon::QueueMusic))
         .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!r.artists.linked().is_empty()))
         .divider()
@@ -213,12 +214,14 @@ pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) ->
     match picked? {
         0 => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false }),
         1 => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: true }),
-        2 => out.push(Command::EnqueueRelease(r.id)),
-        3 => return artist_links::go_to(&resp.ctx, artist_links::library(&r.artists)),
-        4 => out.push(Command::Like(LikeTarget::Release(r.id), !r.liked)),
-        5 => out.push(Command::Share(nikgob_view::ShareTarget::Release(r.id))),
-        6 => super::request_release_delete(&resp.ctx, r.id, &r.title, false),
-        7 => super::request_release_delete(&resp.ctx, r.id, &r.title, true),
+        2 => out.push(Command::PlayReleaseNext(r.id)),
+        3 => out.push(Command::EnqueueRelease(r.id)),
+        4 => return artist_links::go_to(&resp.ctx, artist_links::library(&r.artists)),
+        5 => out.push(Command::Like(LikeTarget::Release(r.id), !r.liked)),
+        6 => out.push(Command::Share(nikgob_view::ShareTarget::Release(r.id))),
+        7 => super::request_release_delete(&resp.ctx, r.id, &r.title, false),
+        8 => super::request_release_delete(&resp.ctx, r.id, &r.title, true),
+
         _ => {}
     }
     None
