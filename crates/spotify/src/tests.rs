@@ -16,6 +16,19 @@ fn both_tls_stacks_get_a_crypto_provider() {
     assert!(reqwest::Client::builder().build().is_ok());
 }
 
+#[test]
+fn the_cache_is_measured_again_only_while_songs_stream() {
+    let now = Instant::now();
+    let mut c = CacheSize { measured: Some((10, now)), opened: None };
+    assert_eq!(c.known(), Some(10), "nothing streamed: the size stands");
+    c.opened = Some(now);
+    assert_eq!(c.known(), None, "a song was opened: measured again");
+    c.measured = Some((20, now + CACHE_SETTLE / 2));
+    assert_eq!(c.known(), None, "still settling");
+    c.measured = Some((30, now + CACHE_SETTLE + Duration::from_secs(1)));
+    assert_eq!(c.known(), Some(30));
+}
+
 /// The only Client IDs tests sign in with (never a real app).
 const TEST_CLIENT: &str = "test-client-id";
 

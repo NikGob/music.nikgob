@@ -208,6 +208,9 @@ pub struct Spotify {
     sessions: session::Sessions,
     /// Bumped on logout: work started before it must not write its result.
     epoch: AtomicU64,
+    /// The audio cache's size and when it was measured, and when a song was
+    /// last opened (only that fills the cache): see [`CACHE_SETTLE`].
+    cache_size: Mutex<CacheSize>,
     login_cancel: Mutex<Option<watch::Sender<bool>>>,
     access: Mutex<HashMap<String, Access>>,
     tracks: TtlCache<StreamTrack>,
@@ -238,6 +241,25 @@ fn default_opener() -> auth::Opener {
 pub const DEFAULT_CACHE_LIMIT: u64 = 500 * 1024 * 1024;
 
 /// Bytes in a folder and its subfolders.
+/// The audio cache only changes while songs stream: it is measured again
+/// until this long after the last one was opened (librespot writes a file
+/// in once it is all fetched), then the last size stands.
+const CACHE_SETTLE: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Default)]
+struct CacheSize {
+    measured: Option<(u64, Instant)>,
+    opened: Option<Instant>,
+}
+
+impl CacheSize {
+    /// The size measured last, while it still holds.
+    fn known(&self) -> Option<u64> {
+        let (bytes, at) = self.measured?;
+        self.opened.is_none_or(|o| at > o + CACHE_SETTLE).then_some(bytes)
+    }
+}
+
 fn dir_size(dir: &Path) -> u64 {
     std::fs::read_dir(dir)
         .into_iter()
@@ -320,6 +342,7 @@ impl Spotify {
             }),
             sessions: session::Sessions::new(device_id, config.data_dir.join("tmp")),
             epoch: AtomicU64::new(0),
+            cache_size: Mutex::default(),
             login_cancel: Mutex::new(None),
             access: Mutex::new(HashMap::new()),
             tracks: TtlCache::new(CATALOG_TTL, 5000),
@@ -1409,6 +1432,7 @@ impl Spotify {
                 self.set_session_premium(false);
                 return Err(StreamError::PremiumRequired);
             }
+            lock(&self.cache_size).opened = Some(Instant::now());
             match audio::open(&session, &id, premium).await {
                 Ok(opened) => {
                     if let Some(me) = self.arc() {
@@ -1698,14 +1722,21 @@ impl StreamService for Spotify {
     }
 
     fn cache_size(&self) -> u64 {
-        self.sessions.cache_dir().map_or(0, |d| dir_size(&d))
+        if let Some(bytes) = lock(&self.cache_size).known() {
+            return bytes;
+        }
+        let bytes = self.sessions.cache_dir().map_or(0, |d| dir_size(&d));
+        lock(&self.cache_size).measured = Some((bytes, Instant::now()));
+        bytes
     }
 
     fn set_cache_limit(&self, bytes: u64) {
         self.sessions.set_cache_limit(bytes);
+        lock(&self.cache_size).measured = None;
     }
 
     fn clear_cache(&self) {
+        lock(&self.cache_size).measured = None;
         if let Some(d) = self.sessions.cache_dir() {
             for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
                 let p = e.path();
