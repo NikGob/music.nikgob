@@ -1418,16 +1418,10 @@ fn info(
         match current {
             Some(t) => {
                 tui.add(egui::Label::new(title_role.emphasized().rich(&t.title, s.on_surface)).truncate());
-                tui.horizontal(|ui| {
+                // The artists, « · » and the album are laid out alike, so
+                // they share one baseline.
+                tui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    let link = |ui: &mut Ui, text: &str| {
-                        let r = ui.add(
-                            egui::Label::new(TypeRole::TitleMedium.style().rich(text, s.on_surface_variant))
-                                .truncate()
-                                .sense(Sense::click()),
-                        );
-                        r.on_hover_cursor(egui::CursorIcon::PointingHand)
-                    };
                     // «Artist · Album» in one line: the album gives way
                     // first, the artists keep at least the first one's name.
                     let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
@@ -1455,9 +1449,10 @@ fn info(
                         }
                     });
                     if let (Some(a), Some(w)) = (&t.album, album_w) {
-                        ui.label(TypeRole::TitleMedium.style().rich(" · ", s.on_surface_variant));
+                        crate::components::link_label(ui, "np-sep", " · ", &[], format.clone());
                         ui.allocate_ui(vec2(w - widths.sep, h), |ui| {
-                            if link(ui, a).clicked() {
+                            let album = crate::components::link_label(ui, "np-album", a, &[0..a.len()], format.clone());
+                            if album.clicked.is_some() {
                                 chrome.nav = t.release_id.map(nikgob_view::Route::Release);
                             }
                         });
