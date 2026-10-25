@@ -284,6 +284,35 @@ impl RadioState {
         }
     }
 
+    /// Up to `k` new-music picks now, the nearest to the seed first, served
+    /// at once: new music that came after the queue was picked joins it
+    /// (the runtime puts them among what is queued).
+    pub fn take_new(&mut self, recs: &Recs<'_>, k: usize) -> Vec<Pick> {
+        let served: HashSet<Item> = self.served.iter().cloned().collect();
+        let seed_vec = self.seed_vector(recs);
+        let mut slots: Vec<Slot> = self
+            .new_pool
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !served.contains(&Item::Stream(t.id.clone())))
+            .map(|(order, t)| {
+                let mut s = recs.new_slot(t, 0.0);
+                let near = match (&s.vec, &seed_vec) {
+                    (Some(v), Some(q)) => -euclid(v, q),
+                    _ => -1e3,
+                };
+                s.score = near - order as f32 * 1e-3;
+                s
+            })
+            .collect();
+        sort_by_score(&mut slots);
+        let picked = select_diverse(slots, k, &Diversity::default(), &mut HashSet::new());
+        for s in &picked {
+            self.served.push_back(s.item.clone());
+        }
+        picked.into_iter().map(Slot::pick).collect()
+    }
+
     /// New-music candidates not served yet.
     pub fn new_left(&self) -> usize {
         let served: HashSet<&Item> = self.served.iter().collect();
@@ -1223,8 +1252,42 @@ mod tests {
         assert!(other * 2 >= after.len(), "mostly another world: {picks:?}");
     }
 
+    /// «С новым» with candidates enough: a fifth of a model radio is new,
+    /// never more than five of the library running, for a one-kind
+    /// listener and an omnivore alike.
+    #[test]
+    fn a_radio_with_new_brings_its_share() {
+        use crate::model::{ModelInput, UserModel};
+        for omnivore in [false, true] {
+            let (cat, idx, input, types) = listener(omnivore);
+            let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None }, crate::model::tests::T0);
+            let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
+            let mut radio = RadioState::new(RadioSeed::Track(tid(OST.0 + 3)));
+            radio.add_new((0..60).map(|k| NewTrack {
+                id: RemoteId::new(Service::Youtube, format!("n{k}")),
+                artist: format!("new artist {}", k % 20),
+                album: None,
+                vector: None,
+            }));
+            let mut picks = Vec::new();
+            for _ in 0..4 {
+                picks.extend(radio.extend(&recs, 10, &RadioParams { new_share: 0.2, seed: 2 }));
+            }
+            let new: Vec<bool> = picks.iter().map(|p| matches!(p.item, Item::Stream(_))).collect();
+            let share = new.iter().filter(|n| **n).count() as f32 / new.len() as f32;
+            assert!((0.15..=0.25).contains(&share), "omnivore {omnivore}: {share} {new:?}");
+            let longest = new.split(|n| *n).map(<[bool]>::len).max().unwrap_or(0);
+            assert!(longest <= 5, "{longest} of the library running: {new:?}");
+            // New music that came late joins at once.
+            let late = radio.take_new(&recs, 2);
+            assert_eq!(late.len(), 2);
+            assert!(late.iter().all(|p| !picks.contains(p)));
+        }
+    }
+
     /// A one-kind listener's radio of a rap song stays rap and spreads its
     /// artists.
+
     #[test]
     fn a_one_kind_radio_spreads_its_artists() {
         let l = listener(false);

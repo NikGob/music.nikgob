@@ -14,10 +14,16 @@
 //!   track, YouTube Music's radio of it and Deezer's radio of its artist;
 //!   for an artist, Deezer's radio of the artist (YouTube Music's without
 //!   Deezer); for a service's track, its own service's radio or related
-//!   list; the mixes take the discoveries. Background calls, one set per
-//!   radio, each answer kept a day in the library's cache, nothing asked
-//!   of a service that is paused by a rate limit. A new pick plays from the
-//!   stream like any search result.
+//!   list; the mixes take the discoveries. Background calls, each answer
+//!   kept a day in the library's cache, nothing asked of a service that is
+//!   paused by a rate limit. New music that comes after the queue was
+//!   picked joins the queued tracks at once, its share of them evenly
+//!   between ([`RadioState::take_new`](nikgob_recs::RadioState::take_new));
+//!   with fewer than [`REFILL_AT`] candidates left, more is asked around
+//!   the last tracks the radio played to the end. Each extension logs the
+//!   share of new music queued so far. A new pick plays from the stream
+//!   like any search result.
+
 //! * The radio is saved in `session.json` with the queue, so it goes on
 //!   after a restart. Playing anything else (any command that replaces the
 //!   queue) ends it; adding to the queue does not.
@@ -52,6 +58,11 @@ const EXTEND_AT: usize = 3;
 const EXTEND_BY: usize = 10;
 /// New-music answers of the services kept this long.
 const NEW_TTL_MS: i64 = 24 * 3600 * 1000;
+/// With fewer new candidates left than this the pool is refilled around
+/// what the radio played to the end…
+const REFILL_AT: usize = 6;
+/// …from this many of its last tracks at a time.
+const REFILL_FROM: usize = 2;
 
 /// One radio playing.
 pub(crate) struct RadioRun {
@@ -80,6 +91,13 @@ pub(crate) struct RadioRun {
     /// The queue entries it added (a change of source drops the ones that
     /// no longer fit).
     added: HashSet<u64>,
+    /// Its tracks heard out, the last last (new music is asked around
+    /// them when the pool runs low).
+    heard: Vec<TrackId>,
+    /// The songs new music was asked around already.
+    asked: HashSet<String>,
+    /// Picks queued so far and how many of them new.
+    queued: (usize, usize),
 }
 
 /// What `session.json` keeps of a radio.
@@ -300,6 +318,9 @@ impl Worker {
             resume: false,
             autoplay: false,
             added: HashSet::new(),
+            heard: Vec::new(),
+            asked: HashSet::new(),
+            queued: (0, 0),
         };
         log::info!("radio «{}» starts ({:?})", run.title, run.state.seed);
         let context = context_of(&run.title);
@@ -361,6 +382,9 @@ impl Worker {
             resume: false,
             autoplay: false,
             added: HashSet::new(),
+            heard: Vec::new(),
+            asked: HashSet::new(),
+            queued: (0, 0),
         });
         log::info!("radio «{}» starts from its picks ({:?})", self.recs.radio.run.as_ref().map_or("", |r| &r.title), state.seed);
         self.radio_add_discoveries();
@@ -460,6 +484,9 @@ impl Worker {
             resume: false,
             autoplay: true,
             added: HashSet::new(),
+            heard: Vec::new(),
+            asked: HashSet::new(),
+            queued: (0, 0),
         });
         log::info!("autoplay: the queue goes on with a radio of «{title}»");
         self.radio_fetch_new();
@@ -572,6 +599,7 @@ impl Worker {
                 }
                 if self.recs.radio.run.as_ref().is_some_and(|r| r.id == id) {
                     self.radio_add_new(tracks);
+                    self.radio_splice_new();
                 }
             }
         }
@@ -617,7 +645,18 @@ impl Worker {
             }
         }
         let Some(run) = self.recs.radio.run.as_mut() else { return };
-        log::info!("radio «{}»: {} more", run.title, ids.len());
+        let new_now = ids.iter().filter(|t| run.streams.contains_key(t)).count();
+        run.queued.0 += ids.len();
+        run.queued.1 += new_now;
+        log::info!(
+            "radio «{}»: {} more, {new_now} new; {} of {} new so far ({:.0} %), {} new left",
+            run.title,
+            ids.len(),
+            run.queued.1,
+            run.queued.0,
+            100.0 * run.queued.1 as f32 / run.queued.0.max(1) as f32,
+            run.state.new_left()
+        );
         if run.autoplay && ids.is_empty() {
             // Nothing fits (a small library under «только скачанное»): the
             // queue simply ends, and autoplay waits for another one.
@@ -668,6 +707,114 @@ impl Worker {
                 }
             }
         }
+        self.radio_splice_new();
+        self.radio_refill();
+    }
+
+    /// New music the radio's queue lacks (it came after the queue was
+    /// picked): its share of what is queued joins between the queued
+    /// tracks at once, evenly.
+    fn radio_splice_new(&mut self) {
+        if !self.radio_alive() {
+            return;
+        }
+        let prefs = self.state.read().prefs.clone();
+        let Some(snap) = self.snapshot() else { return };
+        let Some(run) = self.recs.radio.run.as_mut() else { return };
+        let share = super::new_share(&prefs);
+        if run.extending || run.queue_gen.is_none() || !streams_allowed(new_seed(&run.state.seed), &prefs) || share <= 0.0 {
+            return;
+        }
+        let up: Vec<u64> = self.queue.upcoming().iter().filter(|e| run.added.contains(&e.id)).map(|e| e.id).collect();
+        let have = self.queue.upcoming().iter().filter(|e| run.added.contains(&e.id) && run.streams.contains_key(&e.track)).count();
+        let want = ((up.len() as f32) * share).round() as usize;
+        if up.is_empty() || have >= want {
+            return;
+        }
+        let picks = run.state.take_new(&snap.recs().local_only(prefs.mixes_downloaded_only), want - have);
+        let mut ids: Vec<(TrackId, RemoteId)> = Vec::new();
+        for p in picks {
+            let Item::Stream(r) = p.item else { continue };
+            let pooled = self.recs.radio.run.as_ref().and_then(|run| run.pool.get(&r).cloned());
+            let Some(t) = pooled else { continue };
+            self.streaming.learn(std::slice::from_ref(&t));
+            if let Some(tid) = self.upsert_streams(std::slice::from_ref(&t)).first().copied() {
+                ids.push((tid, r));
+            }
+        }
+        if ids.is_empty() {
+            return;
+        }
+        let every = (up.len() / (ids.len() + 1)).max(1);
+        for (k, (tid, r)) in ids.iter().enumerate() {
+            self.queue.enqueue(&[*tid]);
+            let Some(entry) = self.queue.upcoming().last().map(|e| e.id) else { continue };
+            if let Some(&anchor) = up.get(((k + 1) * every).min(up.len()) - 1) {
+                self.queue.move_next_to(entry, anchor, true);
+            }
+            if let Some(run) = self.recs.radio.run.as_mut() {
+                run.added.insert(entry);
+                run.streams.insert(*tid, r.clone());
+                run.queued.1 += 1;
+                run.queued.0 += 1;
+            }
+        }
+        if let Some(run) = self.recs.radio.run.as_ref() {
+            log::info!("radio «{}»: {} new music joined the queue ({} of {} new so far)", run.title, ids.len(), run.queued.1, run.queued.0);
+        }
+        self.preload_next();
+        self.publish_player();
+    }
+
+    /// The new-music pool runs low: more is asked around the last tracks
+    /// the radio played to the end (their service's radio or related list).
+    fn radio_refill(&mut self) {
+        let prefs = self.state.read().prefs.clone();
+        if super::new_share(&prefs) <= 0.0 || prefs.mixes_downloaded_only {
+            return;
+        }
+        let Some(run) = self.recs.radio.run.as_ref() else { return };
+        if run.state.new_left() >= REFILL_AT {
+            return;
+        }
+        let mut calls: Vec<Call> = Vec::new();
+        let mut asked: Vec<String> = Vec::new();
+        for t in run.heard.iter().rev() {
+            if calls.len() == REFILL_FROM {
+                break;
+            }
+            let call = match run.streams.get(t) {
+                Some(r) if r.service == Service::Youtube => Some(Call::Radio(r.id.clone())),
+                Some(r) if r.service == Service::Deezer => Some(Call::Related(Service::Deezer, r.id.clone())),
+                Some(_) => None,
+                None => self
+                    .lib
+                    .stream_refs(*t)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|r| r.id.service == Service::Youtube)
+                    .map(|r| Call::Radio(r.id.id)),
+            };
+            let Some(call) = call else { continue };
+            let key = match &call {
+                Call::Radio(v) | Call::Related(_, v) => v.clone(),
+                Call::ArtistRadio { name, .. } => name.clone(),
+            };
+            if run.asked.contains(&key) {
+                continue;
+            }
+            asked.push(key);
+            calls.push(call);
+        }
+        if calls.is_empty() {
+            return;
+        }
+        let id = run.id;
+        log::info!("radio «{}»: {} new left, asking around {} of its tracks", run.title, run.state.new_left(), calls.len());
+        if let Some(run) = self.recs.radio.run.as_mut() {
+            run.asked.extend(asked);
+        }
+        self.radio_ask(id, calls);
     }
 
     /// The queue ran out: a radio picking more plays on when they come.
@@ -693,6 +840,10 @@ impl Worker {
         }
         let item = run.streams.get(&track).map_or(Item::Track(track), |r| Item::Stream(r.clone()));
         let outcome = if complete { Outcome::Complete } else { Outcome::Skip { position_ms } };
+        if complete {
+            run.heard.retain(|t| *t != track);
+            run.heard.push(track);
+        }
         run.state.feedback(item.clone(), outcome);
         if run.extending {
             run.pending.push((item, outcome));
@@ -778,6 +929,20 @@ impl Worker {
             RadioSeed::Artist(a) => calls.extend(artist_call(self, a, &[Service::Deezer, Service::Youtube])),
             RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover | RadioSeed::Daylist { .. } => {}
         }
+        for c in &calls {
+            if let Call::Radio(v) | Call::Related(_, v) = c
+                && let Some(run) = self.recs.radio.run.as_mut()
+            {
+                run.asked.insert(v.clone());
+            }
+        }
+        self.radio_ask(id, calls);
+    }
+
+    /// Asks `calls` for new music for radio `id`: the cache first, the rest
+    /// from services that can be asked now, in the background.
+    fn radio_ask(&mut self, id: u64, calls: Vec<Call>) {
+
         // The cache first; the rest from services that can be asked now.
         let now = nikgob_library::now_ms();
         let mut cached = Vec::new();
@@ -808,6 +973,7 @@ impl Worker {
         }
         if !cached.is_empty() {
             self.radio_add_new(cached);
+            self.radio_splice_new();
         }
         if asks.is_empty() {
             return;
@@ -876,6 +1042,9 @@ impl Worker {
             resume: false,
             autoplay: save.autoplay,
             added: HashSet::new(),
+            heard: Vec::new(),
+            asked: HashSet::new(),
+            queued: (0, 0),
         });
         self.play_context = self.recs.radio.run.as_ref().map_or(self.play_context, |r| r.ctx);
     }
