@@ -577,9 +577,14 @@ impl RadioState {
         let mut out: Vec<Slot> = Vec::with_capacity(n);
         for _ in 0..n {
             let m = model.moment(&sim, ts);
+            // What the session played lately rests: back once
+            // [`REPEAT_AFTER`] others played since it, at once when it
+            // played twice running.
+            let twice = sim.repeat_one().then(|| sim.last().map(|p| p.track)).flatten();
+            let lately: HashSet<TrackId> = sim.tracks().rev().take(REPEAT_AFTER).map(|p| p.track).filter(|t| Some(*t) != twice).collect();
             let free = |i: usize| {
                 let t = recs.info(i);
-                !taken.contains(&Item::Track(t.id)) && !t.song.is_some_and(|s| taken.contains(&Item::Track(s)))
+                !taken.contains(&Item::Track(t.id)) && !t.song.is_some_and(|s| taken.contains(&Item::Track(s))) && !lately.contains(&t.id)
             };
             let cands = model.candidates(&m, &|i| ok(i) && free(i));
             if cands.is_empty() {
