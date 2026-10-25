@@ -279,6 +279,8 @@ const POSITION_DRIFT: Duration = Duration::from_millis(1500);
 /// sent before it heard about that can still be on its way: such a far-off
 /// report is ignored for this long.
 const POSITION_SETTLE: Duration = Duration::from_millis(500);
+/// A toast no snackbar took away is dropped after this long.
+const TOAST_KEPT: Duration = Duration::from_secs(60);
 
 struct Worker {
     lib: Library,
@@ -511,6 +513,16 @@ impl Worker {
     }
 
     fn push_toast(&mut self, text: String, action: Option<(String, Command)>, open: Option<(String, nikgob_view::Link)>) {
+        // The same message while it is up: its time starts over.
+        let same = self.state.read().toasts.iter().position(|t| t.text == text && t.action == action && t.open == open);
+        if let Some(k) = same {
+            self.publish(|s| {
+                let t = &mut s.toasts[k];
+                t.at = Instant::now();
+                t.again += 1;
+            });
+            return;
+        }
         self.toast_id += 1;
         let t = Toast {
             id: self.toast_id,
@@ -520,17 +532,21 @@ impl Worker {
             open,
             at: Instant::now(),
             long: false,
+            again: 0,
         };
         self.publish(|s| s.toasts.push(t));
     }
 
+    /// Toasts no snackbar host took away (the window was hidden): the UI
+    /// shows one at a time and dismisses each as it ends, a toast waiting
+    /// behind an undo too, so this is only the last resort.
     fn expire_toasts(&mut self) {
         let stale = {
             let s = self.state.read();
-            s.toasts.iter().any(|t| t.at.elapsed() > Duration::from_secs(6))
+            s.toasts.iter().any(|t| t.at.elapsed() > TOAST_KEPT)
         };
         if stale {
-            self.publish(|s| s.toasts.retain(|t| t.at.elapsed() <= Duration::from_secs(6)));
+            self.publish(|s| s.toasts.retain(|t| t.at.elapsed() <= TOAST_KEPT));
         }
     }
 

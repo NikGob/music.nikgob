@@ -871,6 +871,9 @@ pub struct Toast {
     /// It stays twice as long (8 s): it says how to undo a step that
     /// matters («Карточка скрыта…» with «Вернуть»).
     pub long: bool,
+    /// How many times the same message came again while it was up: each
+    /// starts its time over.
+    pub again: u32,
 }
 
 /// A place in the app a message can lead to; the design system navigates.

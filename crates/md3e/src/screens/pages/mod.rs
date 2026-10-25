@@ -815,14 +815,17 @@ impl PageState {
                     nikgob_view::ToastKind::Working => crate::components::SnackbarKind::Working,
                     nikgob_view::ToastKind::Error => crate::components::SnackbarKind::Error,
                 });
-                let i = if t.long { i.longer(crate::components::snackbar::AUTO_DISMISS) } else { i };
+                let i = if t.long { i.longer(crate::components::snackbar::AUTO_DISMISS) } else { i }.again(t.again);
                 match (&t.action, &t.open) {
                     (Some((label, _)), _) | (None, Some((label, _))) => i.action(label),
                     (None, None) => i,
                 }
             })
             .collect();
+        // One at a time (M3): a new one replaces the one up, an undo stays.
         let ev = SnackbarHost::new("toasts")
+            .replacing(true)
+            .max_visible(1)
             .show_close(true)
             .show(ctx, area, 64.0 + 16.0 + 16.0, &items);
         if let Some(id) = ev.action_clicked
