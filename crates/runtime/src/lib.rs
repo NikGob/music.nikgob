@@ -465,6 +465,7 @@ impl Worker {
         self.wish_restart();
         self.start_streams();
         self.start_analysis();
+        self.dislikes_load(false);
         loop {
             select! {
                 recv(rx) -> m => match m {

@@ -374,8 +374,8 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
     });
 
     let d = &state.dislikes;
-    group(ui, "Не рекомендовать исполнителей");
     settings_help::item(ui, Id::DislikedArtists, "Не рекомендовать исполнителей", |ui| {
+        list_title(ui, Id::DislikedArtists, "Не рекомендовать исполнителей");
         if d.artists.is_empty() {
             ui.label(TypeRole::BodyMedium.style().rich("Пусто", s.on_surface_variant));
         }
@@ -385,8 +385,8 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
             });
         }
     });
-    group(ui, "Треки с «Не нравится»");
     settings_help::item(ui, Id::DislikedTracks, "Треки с «Не нравится»", |ui| {
+        list_title(ui, Id::DislikedTracks, "Треки с «Не нравится»");
         if d.tracks.is_empty() {
             ui.label(TypeRole::BodyMedium.style().rich("Пусто", s.on_surface_variant));
         }
@@ -398,24 +398,35 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
     });
 }
 
-/// One mark of the lists above: its name and «Снять».
-fn mark_row(ui: &mut Ui, salt: egui::Id, title: &str, sub: Option<&str>, mut take_back: impl FnMut()) {
+/// A list's title as a group's, with its ⓘ.
+fn list_title(ui: &mut Ui, id: Id, title: &str) {
     let s = Theme::get(ui.ctx()).scheme;
+    ui.add_space(24.0);
     ui.horizontal(|ui| {
-        ui.set_min_height(48.0);
-        ui.vertical(|ui| {
-            ui.label(TypeRole::BodyLarge.style().rich(title, s.on_surface));
-            if let Some(sub) = sub {
-                ui.label(TypeRole::BodyMedium.style().rich(sub, s.on_surface_variant));
-            }
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(Button::new("Снять").style(Style::Text).id_salt(salt)).clicked() {
-                take_back();
-            }
-        });
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(TypeRole::TitleSmall.style().rich(title, s.primary));
+        settings_help::help_button(ui, id);
     });
+    ui.add_space(4.0);
 }
+
+/// One mark of the lists above: its name and «Снять».
+
+fn mark_row(ui: &mut Ui, salt: egui::Id, title: &str, sub: Option<&str>, mut take_back: impl FnMut()) {
+    let mut item = crate::components::ListItem::new(title).id_salt(salt);
+    if let Some(sub) = sub {
+        item = item.supporting(sub);
+    }
+    let mut clicked = false;
+    item.trailing(|ui| {
+        clicked = ui.add(Button::new("Снять").style(Style::Text).id_salt(salt.with("take-back"))).clicked();
+    })
+    .show(ui);
+    if clicked {
+        take_back();
+    }
+}
+
 
 /// Everything about looks: theme, the player, the cover and its ring, the
 /// background and the lyrics' animation.
