@@ -36,7 +36,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nikgob_core::model::{ArtistId, EventContext, TrackId};
+use nikgob_core::model::{ArtistId, EventContext, EventOrigin, TrackId};
 use nikgob_core::streaming::{EntityKind, RemoteId, SearchKind, Service, StreamError, StreamService, StreamTrack};
 use nikgob_recs::{Item, NewTrack, Outcome, Pick, RadioParams, RadioSeed, RadioState as Engine, artist_key};
 use nikgob_view as v;
@@ -162,6 +162,31 @@ fn new_seed(seed: &RadioSeed) -> bool {
     matches!(seed, RadioSeed::Discover | RadioSeed::Stream { .. })
 }
 
+/// What a radio of `seed` plays, as the history's `context_id`.
+fn seed_context_id(seed: &RadioSeed, autoplay: bool) -> String {
+    let what = match seed {
+        RadioSeed::Track(t) => format!("track:{t}"),
+        RadioSeed::Stream { id, .. } => format!("stream:{id}"),
+        RadioSeed::Artist(a) => format!("artist:{a}"),
+        RadioSeed::Mood(m) => format!("mood:{m:?}"),
+        RadioSeed::Style { index, .. } => format!("style:{index}"),
+        RadioSeed::Discover => "discover".to_owned(),
+        RadioSeed::Daylist { part, .. } => format!("daylist:{part:?}"),
+    };
+    format!("{}:{what}", if autoplay { "autoplay" } else { "radio" })
+}
+
+/// Who chose what a radio of `seed` adds: autoplay, a mix or a radio.
+fn origin_of(state: &Engine, autoplay: bool) -> EventOrigin {
+    if autoplay {
+        EventOrigin::Autoplay
+    } else if state.is_mix() {
+        EventOrigin::Mix
+    } else {
+        EventOrigin::Radio
+    }
+}
+
 /// The queue's context line: «Играет из радио «Кино»» / «… микса «Спокойное»».
 fn context_of(title: &str) -> String {
     match title.strip_prefix("Радио · ") {
@@ -195,6 +220,24 @@ async fn fetch(svc: Arc<dyn StreamService>, call: &Call) -> (Result<Vec<StreamTr
 }
 
 impl Worker {
+    /// Who chose the queue entry `entry`, when the playing radio added it.
+    pub(crate) fn radio_origin(&mut self, entry: u64) -> Option<EventOrigin> {
+        if !self.radio_alive() {
+            return None;
+        }
+        let run = self.recs.radio.run.as_ref()?;
+        run.added.contains(&entry).then(|| origin_of(&run.state, run.autoplay))
+    }
+
+    /// What plays the queue entry `entry`, when the playing radio added it.
+    pub(crate) fn radio_context_id(&mut self, entry: u64) -> Option<String> {
+        if !self.radio_alive() {
+            return None;
+        }
+        let run = self.recs.radio.run.as_ref()?;
+        run.added.contains(&entry).then(|| seed_context_id(&run.state.seed, run.autoplay))
+    }
+
     /// `Command::StartRadio`.
     pub(crate) fn start_radio_cmd(&mut self, seed: v::RadioSeed) {
         match seed {
@@ -236,11 +279,14 @@ impl Worker {
     /// Starts a radio: `first` plays at once (a track's radio), the rest
     /// comes as it is picked.
     pub(crate) fn start_radio(&mut self, seed: RadioSeed, title: String, ctx: EventContext, first: Option<TrackId>) {
+        // The seed track is the user's choice; the rest the radio's.
+        let state = Engine::new(seed);
+        self.user_switch(if first.is_some() { EventOrigin::Manual } else { origin_of(&state, false) });
         let r = &mut self.recs.radio;
         r.seq += 1;
         let run = RadioRun {
             id: r.seq,
-            state: Engine::new(seed),
+            state,
             title,
             ctx,
             seed: fastrand::u64(..),
@@ -265,6 +311,7 @@ impl Worker {
                 self.queue.shuffle = false;
                 self.queue.set(&[t], 0, Some(context));
                 self.play_context = ctx;
+                self.play_context_id = self.recs.radio.run.as_ref().map(|r| seed_context_id(&r.state.seed, false));
                 let generation = self.queue.generation();
                 if let Some(run) = self.recs.radio.run.as_mut() {
                     run.queue_gen = Some(generation);
@@ -291,6 +338,7 @@ impl Worker {
         title: String,
         ctx: EventContext,
     ) {
+        self.user_switch(origin_of(&state, false));
         let r = &mut self.recs.radio;
         r.seq += 1;
         let id = r.seq;
@@ -383,6 +431,8 @@ impl Worker {
             if !next.is_empty() {
                 log::info!("autoplay: the world goes on with {} tracks of its next album", next.len());
                 self.queue.enqueue(&next);
+                let up = self.queue.upcoming();
+                self.autoplay_entries.extend(up[up.len().saturating_sub(next.len())..].iter().map(|e| e.id));
                 self.preload_next();
                 self.publish_player();
                 return;
@@ -579,6 +629,7 @@ impl Worker {
         match run.queue_gen {
             None if ids.is_empty() => {
                 self.recs.radio.run = None;
+                self.next_origin = None;
                 self.toast("Нечего играть", None);
                 self.publish_player();
             }
@@ -587,6 +638,7 @@ impl Worker {
                 self.queue.shuffle = false;
                 self.queue.set(&ids, 0, Some(context));
                 self.play_context = ctx;
+                self.play_context_id = None;
                 let generation = self.queue.generation();
                 let entries: Vec<u64> = self.queue.current().into_iter().chain(self.queue.upcoming().iter().copied()).map(|e| e.id).collect();
                 if let Some(run) = self.recs.radio.run.as_mut() {

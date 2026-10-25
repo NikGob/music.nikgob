@@ -1323,6 +1323,12 @@ impl Worker {
     }
 
     /// Every tick: a build when one is due, the discovery job.
+    /// A start, `origin` its chooser: the session goes on.
+    pub(crate) fn recs_started(&mut self, _track: TrackId, _origin: nikgob_core::model::EventOrigin) {}
+
+    /// How a start ended (not by closing the app).
+    pub(crate) fn recs_ended(&mut self, _track: TrackId, _complete: bool, _position_ms: u32) {}
+
     pub(crate) fn recs_tick(&mut self) {
         let now = Instant::now();
         let every = self.streaming.schedule.recs_every;
@@ -1578,9 +1584,11 @@ impl Worker {
             self.toast("Нечего играть", None);
             return;
         }
+        self.user_switch(nikgob_core::model::EventOrigin::Mix);
         self.queue.shuffle = false;
         self.queue.set(&ids, 0, Some(format!("микса «{title}»")));
         self.play_context = EventContext::HomeSection;
+        self.play_context_id = Some(format!("mix:{title}"));
         if let Some(e) = self.queue.current() {
             self.start(e);
         }

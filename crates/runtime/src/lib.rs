@@ -28,7 +28,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select, tick};
-use nikgob_core::model::{EventContext, EventType, LikeTarget, PlaylistId, SourceId, SourceKind, TrackId};
+use nikgob_core::model::{
+    EndReason, EventContext, EventMeta, EventOrigin, EventType, LikeTarget, PlaylistId, SourceId, SourceKind, TrackId,
+};
 use nikgob_core::streaming::{Service as StreamKind, StreamService};
 use nikgob_library::{Library, ReleaseSortKey, Sort, TrackSortKey};
 use nikgob_view::{Command, LIKED_PLAYLIST, Status, Toast, ViewState};
@@ -314,6 +316,18 @@ struct Worker {
     toast_id: u64,
     revision: u64,
     play_context: EventContext,
+    /// What the queue plays (`release:<id>`, `playlist:<id>`, a mix, a
+    /// radio's seed): the history's `context_id`.
+    play_context_id: Option<String>,
+    /// Who chose the next start, when the command that starts it knows.
+    next_origin: Option<EventOrigin>,
+    /// The queue generation of the last start: a start in another queue
+    /// is the user's choice.
+    origin_gen: Option<u64>,
+    /// The playing entry's end is recorded already.
+    ended: bool,
+    /// Entries «Автовоспроизведение» added to continue an album's world.
+    autoplay_entries: std::collections::HashSet<u64>,
     prefs_path: Option<PathBuf>,
     settings_path: Option<PathBuf>,
     exported_rev: u64,
@@ -396,6 +410,11 @@ impl Worker {
             toast_id: 0,
             revision: 0,
             play_context: EventContext::Other,
+            play_context_id: None,
+            next_origin: None,
+            origin_gen: None,
+            ended: true,
+            autoplay_entries: Default::default(),
             prefs_path: config.prefs_path,
             settings_path: config.settings_path.clone(),
             exported_rev: 0,
@@ -443,7 +462,10 @@ impl Worker {
                     }
                     Ok(Msg::OdesliBase(base)) => self.set_odesli_base(&base),
                     Ok(Msg::WebLogin(service, login)) => self.set_web_login(service, login),
-                    Ok(Msg::Shutdown) | Err(_) => break,
+                    Ok(Msg::Shutdown) | Err(_) => {
+                        self.record_closed();
+                        break;
+                    }
                 },
                 recv(pb) -> e => if let Ok(e) = e { self.playback_event(e) },
                 recv(internal) -> m => if let Ok(m) = m { self.internal(m) },
@@ -553,7 +575,7 @@ impl Worker {
             Command::Play => self.resume(),
             Command::Pause => self.pause(),
             Command::Next => {
-                self.record_end(true);
+                self.record_end(true, EndReason::UserNext);
                 match self.queue.skip_forward() {
                     Some(e) => self.start(e),
                     None => self.stop(),
@@ -563,6 +585,7 @@ impl Worker {
                 if self.position_now() > Duration::from_secs(3) || self.queue.current().is_none() {
                     self.seek(Duration::ZERO);
                 } else if let Some(e) = self.queue.previous() {
+                    self.user_switch(EventOrigin::Manual);
                     self.start(e);
                 }
             }
@@ -621,6 +644,7 @@ impl Worker {
                     .flatten()
                     .map(|r| format!("альбома «{}»", r.title));
                 let ids: Vec<TrackId> = rows.iter().map(|r| r.id).collect();
+                self.play_context_id = Some(format!("release:{id}"));
                 self.play_list(ids, start, shuffle, title, EventContext::Album);
                 // An album known in part plays at once; the rest of its
                 // tracklist joins the queue when the services tell it.
@@ -630,6 +654,7 @@ impl Worker {
             Command::PlayPlaylist { id, start, shuffle } => {
                 let (ids, name) = self.playlist_tracks(id);
                 let name = format!("плейлиста «{name}»");
+                self.play_context_id = Some(format!("playlist:{id}"));
                 self.play_list(ids, start, shuffle, Some(name), EventContext::Playlist);
             }
             Command::PlayArtist { id, shuffle } => {
@@ -638,6 +663,7 @@ impl Worker {
                     .unwrap_or_default();
                 let name = self.lib.get_artist(id).ok().flatten().map(|a| a.name);
                 let ids = rows.iter().map(|r| r.id).collect();
+                self.play_context_id = Some(format!("artist:{id}"));
                 self.play_list(ids, None, shuffle, name, EventContext::Artist);
             }
             Command::PlayTracks {
@@ -645,8 +671,10 @@ impl Worker {
                 start,
                 context,
             } => {
+                self.user_switch(EventOrigin::Manual);
                 self.queue.set(&tracks, start, Some(context));
                 self.play_context = EventContext::Library;
+                self.play_context_id = None;
                 if let Some(e) = self.queue.current() {
                     self.start(e);
                 }
@@ -683,6 +711,7 @@ impl Worker {
             }
             Command::PlayQueueEntry(entry) => {
                 if let Some(e) = self.queue.jump(entry) {
+                    self.user_switch(EventOrigin::Manual);
                     self.start(e);
                 }
             }
@@ -1141,6 +1170,7 @@ impl Worker {
                     0
                 }
             });
+        self.user_switch(EventOrigin::Manual);
         self.queue.shuffle = false;
         self.queue.set(&ids, start_idx, context);
         if shuffle {
@@ -1189,13 +1219,7 @@ impl Worker {
         self.position = Duration::ZERO;
         self.position_at = Instant::now();
         self.jumped_at = Instant::now();
-        let _ = self.lib.record_event(
-            e.track,
-            EventType::Start,
-            (!kind.is_local()).then_some(kind),
-            Some(0),
-            self.play_context,
-        );
+        self.record_start(e, (!kind.is_local()).then_some(kind));
         self.preload_next();
         // What only YouTube Music may have is looked up ahead, gapless or not.
         self.resolve_ahead();
@@ -1277,9 +1301,62 @@ impl Worker {
         self.publish_player();
     }
 
-    /// Records how the current track ended: a skip before 90 %, else complete.
-    fn record_end(&mut self, by_user: bool) {
+    /// Who chose `e`, starting now: what the command said, else the user
+    /// when the queue is another one, else the radio or autoplay that
+    /// added it, else the queue going on.
+    fn origin_of(&mut self, e: Entry) -> EventOrigin {
+        let generation = self.queue.generation();
+        let new_queue = self.origin_gen != Some(generation);
+        self.origin_gen = Some(generation);
+        if new_queue {
+            self.autoplay_entries.clear();
+        }
+        if let Some(o) = self.next_origin.take() {
+            return o;
+        }
+        if let Some(o) = self.radio_origin(e.id) {
+            return o;
+        }
+        if self.autoplay_entries.contains(&e.id) {
+            return EventOrigin::Autoplay;
+        }
+        if new_queue { EventOrigin::Manual } else { EventOrigin::Queue }
+    }
+
+    /// Records the start of `e` with who chose it and what plays it.
+    fn record_start(&mut self, e: Entry, kind: Option<SourceKind>) {
+        let origin = self.origin_of(e);
+        let context_id = self.radio_context_id(e.id).or_else(|| self.play_context_id.clone());
+        self.ended = false;
+        let meta = EventMeta { origin: Some(origin), context_id, end_reason: None };
+        let _ = self.lib.record_event_with(e.track, EventType::Start, kind, Some(0), self.play_context, meta);
+        self.recs_started(e.track, origin);
+    }
+
+    /// The user picks something else to play (`origin` of what comes): the
+    /// playing track ends here.
+    pub(crate) fn user_switch(&mut self, origin: EventOrigin) {
+        if !self.ended {
+            self.record_end(true, EndReason::UserPick);
+        }
+        self.next_origin = Some(origin);
+    }
+
+    /// The app closes: the playing (or paused) track ends as it is.
+    fn record_closed(&mut self) {
+        if !self.ended && self.playing.is_some() {
+            self.record_end(true, EndReason::AppClosed);
+        }
+    }
+
+    /// Records how the current track ended (`reason`): a skip before 90 %,
+    /// else complete; once per start.
+    fn record_end(&mut self, by_user: bool, reason: EndReason) {
         let Some(e) = self.playing else { return };
+        if self.ended {
+            return;
+        }
+        self.ended = true;
         if let Some((source, SourceKind::Youtube)) = self.playing_source {
             self.analyse_played(e.track, source);
         }
@@ -1292,9 +1369,14 @@ impl Worker {
             .and_then(|t| t.duration_ms);
         let complete = !by_user
             || dur.is_some_and(|d| pos.as_millis() as f64 >= f64::from(d) * 0.9);
-        self.radio_feedback(e.track, complete, pos.as_millis() as u32);
-        self.recs_played();
-        let _ = self.lib.record_event(
+        let position_ms = pos.as_millis() as u32;
+        if reason != EndReason::AppClosed {
+            self.radio_feedback(e.track, complete, position_ms);
+            self.recs_played();
+            self.recs_ended(e.track, complete, position_ms);
+        }
+        let meta = EventMeta { end_reason: Some(reason), ..EventMeta::default() };
+        let _ = self.lib.record_event_with(
             e.track,
             if complete {
                 EventType::Complete
@@ -1302,8 +1384,9 @@ impl Worker {
                 EventType::Skip
             },
             None,
-            Some(pos.as_millis() as u32),
+            Some(position_ms),
             self.play_context,
+            meta,
         );
     }
 
@@ -1342,7 +1425,7 @@ impl Worker {
                     log::debug!("backend changed to {to}, not the queued next");
                     return;
                 }
-                self.record_end(false);
+                self.record_end(false, EndReason::Ended);
                 if let Some(e) = self.queue.advance_auto() {
                     self.playing = Some(e);
                     self.tried.clear();
@@ -1353,13 +1436,7 @@ impl Worker {
                     self.position = Duration::ZERO;
                     self.position_at = Instant::now();
                     let kind = self.playing_source.map(|(_, k)| k).filter(|k| !k.is_local());
-                    let _ = self.lib.record_event(
-                        e.track,
-                        EventType::Start,
-                        kind,
-                        Some(0),
-                        self.play_context,
-                    );
+                    self.record_start(e, kind);
                     self.preload_next();
                     self.publish_now_playing();
                 }
@@ -1421,7 +1498,7 @@ impl Worker {
             }
             PlaybackEvent::Ended { id } => {
                 if self.playing.map(|e| e.id) == Some(id) {
-                    self.record_end(false);
+                    self.record_end(false, EndReason::Ended);
                     // Repeat-one with no preload (or preload failed): restart.
                     match self.queue.advance_auto() {
                         Some(e) => self.start(e),

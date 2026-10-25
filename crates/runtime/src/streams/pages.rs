@@ -434,9 +434,11 @@ impl Worker {
         let start = start_remote
             .and_then(|r| known.iter().position(|k| *k == r))
             .unwrap_or(0);
+        self.user_switch(nikgob_core::model::EventOrigin::Manual);
         self.queue.shuffle = false;
         self.queue.set(&ids, start, Some(context));
         self.play_context = EventContext::Search;
+        self.play_context_id = None;
         if let Some(e) = self.queue.current() {
             self.start(e);
         }
@@ -470,9 +472,11 @@ impl Worker {
             self.toast("Нечего играть", None);
             return;
         }
+        self.user_switch(nikgob_core::model::EventOrigin::Manual);
         self.queue.shuffle = false;
         self.queue.set(&ids, start_at, Some(context));
         self.play_context = EventContext::Search;
+        self.play_context_id = None;
         if let Some(e) = self.queue.current() {
             self.start(e);
         }

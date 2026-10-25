@@ -411,6 +411,43 @@ fn a_radio_extends_itself_and_survives_a_restart() {
     wait_for(&s.rt, "the restored radio to extend", |st| st.queue.next.len() == 13);
 }
 
+/// Every start says who chose it and what plays it, every end why it
+/// ended, and closing the app ends the track that plays.
+#[test]
+fn plays_record_who_chose_them_and_why_they_ended() {
+    use nikgob_core::model::{EndReason, EventOrigin};
+    let l = library(3, 6, 5, &[]);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    let album = l.lib.get_track(l.tracks[0]).unwrap().unwrap().release_id.unwrap();
+    let last = |kind: EventType| {
+        l.lib.recent_events(100).unwrap().into_iter().find(|e| e.event_type == kind && e.ts > now_ms() - 60_000)
+    };
+    s.rt.send(Command::PlayRelease { id: album, start: None, shuffle: false });
+    let first = current_start(&l.lib, &s.rt);
+    assert_eq!(first.origin, Some(EventOrigin::Manual));
+    assert_eq!(first.context_id, Some(format!("release:{album}")));
+    s.rt.send(Command::Next);
+    wait_until("the second start", || current_start(&l.lib, &s.rt).id != first.id);
+    let skip = last(EventType::Skip).unwrap();
+    assert_eq!((skip.track_id, skip.end_reason), (first.track_id, Some(EndReason::UserNext)));
+    let second = current_start(&l.lib, &s.rt);
+    assert_eq!(second.origin, Some(EventOrigin::Queue));
+    end_current(&s);
+    wait_until("the third start", || current_start(&l.lib, &s.rt).id != second.id);
+    assert_eq!(last(EventType::Complete).unwrap().end_reason, Some(EndReason::Ended));
+    assert_eq!(current_start(&l.lib, &s.rt).origin, Some(EventOrigin::Queue));
+    let third = current_start(&l.lib, &s.rt);
+    s.rt.send(Command::PlayTracks { tracks: vec![l.tracks[7]], start: 0, context: "test".into() });
+    wait_until("the picked track", || current_start(&l.lib, &s.rt).track_id == l.tracks[7]);
+    let skip = last(EventType::Skip).unwrap();
+    assert_eq!((skip.track_id, skip.end_reason), (third.track_id, Some(EndReason::UserPick)));
+    assert_eq!(current_start(&l.lib, &s.rt).origin, Some(EventOrigin::Manual));
+    drop(s);
+    let closed = last(EventType::Skip).unwrap();
+    assert_eq!((closed.track_id, closed.end_reason), (l.tracks[7], Some(EndReason::AppClosed)));
+}
+
 #[test]
 fn an_early_skip_teaches_the_radio() {
     let l = library(3, 6, 5, &[]);
