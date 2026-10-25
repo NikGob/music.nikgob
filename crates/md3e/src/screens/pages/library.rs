@@ -217,7 +217,7 @@ fn only_downloaded(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
             .id_salt("lib-only-downloaded"),
     );
     if resp.clicked() {
-        out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { library_only_downloaded: !on, ..state.prefs.clone() })));
+        out.push(Command::SetPref(nikgob_view::PrefPatch::LibraryOnlyDownloaded(!on)));
     }
 }
 

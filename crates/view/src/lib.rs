@@ -1137,6 +1137,59 @@ pub struct Prefs {
     pub autoplay: bool,
 }
 
+/// One preference changed on its own ([`Command::SetPref`]): the runtime
+/// applies it to the preferences as they are when it comes, so a copy the
+/// view held from before another change cannot undo that change.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PrefPatch {
+    /// «Миксы для тебя»: «С новым» (true) or «Только моё».
+    MixesWithNew(bool),
+    /// «Миксы только из скачанного» («Только скачанное» on Главная).
+    MixesDownloadedOnly(bool),
+    /// The library lists only tracks with a file.
+    LibraryOnlyDownloaded(bool),
+    /// «Автовоспроизведение».
+    Autoplay(bool),
+    /// Where a radio takes its tracks («Скачанное · Библиотека · С новым»):
+    /// both of the fields it sets.
+    RadioSource { downloaded_only: bool, new_share: RadioNewShare },
+    /// A world of the card at the top of Главная taken off its row.
+    HideWorld(String),
+    /// The card at the top of Главная shown or hidden.
+    HomeCard(bool),
+    /// The outline the Now Playing cover takes.
+    CoverShape(CoverShape),
+    /// What stands beside the Now Playing cover.
+    NpSlot(NpSlot),
+    /// Windows starts the app at sign-in (as the system says).
+    Autostart(bool),
+}
+
+impl PrefPatch {
+    /// The change made to `p`.
+    pub fn apply(&self, p: &mut Prefs) {
+        match self {
+            Self::MixesWithNew(on) => p.mixes_with_new = *on,
+            Self::MixesDownloadedOnly(on) => p.mixes_downloaded_only = *on,
+            Self::LibraryOnlyDownloaded(on) => p.library_only_downloaded = *on,
+            Self::Autoplay(on) => p.autoplay = *on,
+            Self::RadioSource { downloaded_only, new_share } => {
+                p.mixes_downloaded_only = *downloaded_only;
+                p.radio_new_share = *new_share;
+            }
+            Self::HideWorld(key) => {
+                if !p.home_hidden_worlds.contains(key) {
+                    p.home_hidden_worlds.push(key.clone());
+                }
+            }
+            Self::HomeCard(on) => p.home_card = *on,
+            Self::CoverShape(s) => p.cover_shape = *s,
+            Self::NpSlot(s) => p.np_slot = *s,
+            Self::Autostart(on) => p.autostart = *on,
+        }
+    }
+}
+
 /// «Новое в радио»: the share of new music in radios and mixes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RadioNewShare {
@@ -1568,7 +1621,10 @@ pub enum Command {
     KeepEditionsApart(u64),
 
     // Settings
+    /// Every preference at once (the Settings page edits its copy).
     SetPrefs(Box<Prefs>),
+    /// One preference, applied to the preferences as they are then.
+    SetPref(PrefPatch),
     /// Move lossless FLAC/WAV masters to another drive or folder (copy -> hash verify -> delete old).
     MoveMastersDir(PathBuf),
     /// Prowlarr address and API key (stored in settings.toml, never shown again).

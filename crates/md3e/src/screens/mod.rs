@@ -642,10 +642,7 @@ impl Md3eUi {
             if let Some(Command::SetPrefs(prefs)) = out[first_cmd..].iter_mut().rev().find(|c| matches!(c, Command::SetPrefs(_))) {
                 prefs.np_slot = self.chrome.np_slot;
             } else {
-                out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs {
-                    np_slot: self.chrome.np_slot,
-                    ..state.prefs.clone()
-                })));
+                out.push(Command::SetPref(nikgob_view::PrefPatch::NpSlot(self.chrome.np_slot)));
             }
         }
     }
@@ -1280,7 +1277,11 @@ mod tests {
         }, |root| ui.frame(root, state, &mut commands));
         output.textures_delta.clear();
         for command in commands {
-            if let Command::SetPrefs(prefs) = command { state.prefs = *prefs; }
+            match command {
+                Command::SetPrefs(prefs) => state.prefs = *prefs,
+                Command::SetPref(patch) => patch.apply(&mut state.prefs),
+                _ => {}
+            }
         }
         output
     }

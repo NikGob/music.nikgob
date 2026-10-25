@@ -213,7 +213,7 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
     // can be switched off right there.
     if let Some(r) = &q.radio {
         if radio_header(ui, r) {
-            out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { autoplay: false, ..state.prefs.clone() })));
+            out.push(Command::SetPref(nikgob_view::PrefPatch::Autoplay(false)));
         }
         source_row(ui, state, chrome, out);
         ui.add_space(12.0);
@@ -375,7 +375,7 @@ fn autoplay_block(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut
         .id_salt("q-autoplay-row")
         .show(ui);
     if on != p.autoplay {
-        out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { autoplay: on, ..p.clone() })));
+        out.push(Command::SetPref(nikgob_view::PrefPatch::Autoplay(on)));
     }
     if p.autoplay {
         source_row(ui, state, chrome, out);
@@ -405,7 +405,10 @@ fn source_row(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec
         if let Some(i) = ConnectedGroup::new("q-source", &labels).equal_width(w).show(&mut gui, chosen) {
             let mut prefs = p.clone();
             SettingId::RadioSource.choose(&mut prefs, i);
-            out.push(Command::SetPrefs(Box::new(prefs)));
+            out.push(Command::SetPref(nikgob_view::PrefPatch::RadioSource {
+                downloaded_only: prefs.mixes_downloaded_only,
+                new_share: prefs.radio_new_share,
+            }));
         }
         ui.add_space(3.0 * w + 4.0 + 8.0);
         if ui

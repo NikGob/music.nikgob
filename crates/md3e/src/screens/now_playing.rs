@@ -708,7 +708,7 @@ fn change_shape(ctx: &egui::Context, prefs: &nikgob_view::Prefs, out: &mut Vec<C
         None => pool[0],
     };
     if next != prefs.cover_shape {
-        out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { cover_shape: next, ..prefs.clone() })));
+        out.push(Command::SetPref(nikgob_view::PrefPatch::CoverShape(next)));
     }
 }
 

@@ -710,16 +710,12 @@ impl Worker {
                 }
             }
             Command::HideHomeCard => {
-                let mut p = self.state.read().prefs.clone();
-                p.home_card = false;
                 self.publish(|s| s.prefs.home_card = false);
                 self.save_prefs();
                 self.load_home();
-                let mut back = p.clone();
-                back.home_card = true;
                 self.toast(
                     "Карточка скрыта. Включить её снова можно в Настройках → Внешний вид → Главная.",
-                    Some(("Вернуть".into(), Command::SetPrefs(Box::new(back)))),
+                    Some(("Вернуть".into(), Command::SetPref(nikgob_view::PrefPatch::HomeCard(true)))),
                 );
                 self.publish(|s| {
                     if let Some(t) = s.toasts.last_mut() {
@@ -883,64 +879,11 @@ impl Worker {
             }
             Command::LoadHome => self.load_home(),
             Command::Search(q) => self.search(q),
-            Command::SetPrefs(mut p) => {
-                let old = self.state.read().prefs.clone();
-                if p.masters_dir.as_os_str().is_empty() && !old.masters_dir.as_os_str().is_empty() {
-                    p.masters_dir = old.masters_dir.clone();
-                }
-                self.playback.configure(crossfade(&p), p.normalization);
-                self.torrent_prefs(&p);
-                self.publish(|s| s.prefs = *p.clone());
-                self.save_prefs();
-                self.import_prefs(&p);
-                let lyrics_track = self.state.read().lyrics.track;
-                if !old.save_found_lyrics && p.save_found_lyrics
-                    && let Some(track) = lyrics_track
-                {
-                    self.embed_lyrics(track);
-                }
-                if old.gapless != p.gapless {
-                    self.preload_next();
-                }
-                if old.output_device != p.output_device {
-                    self.switch_device(p.output_device.clone());
-                }
-                if (old.spotify_enabled, old.youtube_enabled, old.deezer_enabled)
-                    != (p.spotify_enabled, p.youtube_enabled, p.deezer_enabled)
-                {
-                    self.publish_accounts();
-                    self.preload_next();
-                }
-                if old.library_only_downloaded != p.library_only_downloaded {
-                    self.load_library();
-                }
-                if old.auto_download_limit != p.auto_download_limit {
-                    self.wish_tick();
-                }
-                if old.stream_cache_mb != p.stream_cache_mb {
-                    self.apply_stream_cache();
-                }
-                if old.stream_analysis != p.stream_analysis {
-                    self.stream_analysis_pref(p.stream_analysis);
-                }
-                if old.mixes_downloaded_only != p.mixes_downloaded_only {
-                    // The rows it hides go (or come back) at once; the
-                    // mixes follow when they are picked again.
-                    self.load_home();
-                    self.recs_prefs_changed();
-                }
-                if old.home_card != p.home_card || old.home_hidden_worlds != p.home_hidden_worlds {
-                    self.load_home();
-                }
-                if old.mixes_downloaded_only != p.mixes_downloaded_only || old.radio_new_share != p.radio_new_share {
-                    self.radio_source_changed();
-                }
-                if old.autoplay && !p.autoplay {
-                    self.autoplay_off();
-                }
-                if !old.autoplay && p.autoplay {
-                    self.publish_player();
-                }
+            Command::SetPrefs(p) => self.set_prefs(p),
+            Command::SetPref(patch) => {
+                let mut p = self.state.read().prefs.clone();
+                patch.apply(&mut p);
+                self.set_prefs(Box::new(p));
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
@@ -1848,6 +1791,68 @@ impl Worker {
         let mut visit = home_v2::Visit::now(playing, &self.state.read().prefs);
         visit.sound = Some(self.analysis.index().clone());
         visit
+    }
+
+    /// `Command::SetPrefs`: every preference at once, and what each change
+    /// sets going.
+    fn set_prefs(&mut self, mut p: Box<nikgob_view::Prefs>) {
+        let old = self.state.read().prefs.clone();
+        if p.masters_dir.as_os_str().is_empty() && !old.masters_dir.as_os_str().is_empty() {
+            p.masters_dir = old.masters_dir.clone();
+        }
+        self.playback.configure(crossfade(&p), p.normalization);
+        self.torrent_prefs(&p);
+        self.publish(|s| s.prefs = *p.clone());
+        self.save_prefs();
+        self.import_prefs(&p);
+        let lyrics_track = self.state.read().lyrics.track;
+        if !old.save_found_lyrics && p.save_found_lyrics
+            && let Some(track) = lyrics_track
+        {
+            self.embed_lyrics(track);
+        }
+        if old.gapless != p.gapless {
+            self.preload_next();
+        }
+        if old.output_device != p.output_device {
+            self.switch_device(p.output_device.clone());
+        }
+        if (old.spotify_enabled, old.youtube_enabled, old.deezer_enabled)
+            != (p.spotify_enabled, p.youtube_enabled, p.deezer_enabled)
+        {
+            self.publish_accounts();
+            self.preload_next();
+        }
+        if old.library_only_downloaded != p.library_only_downloaded {
+            self.load_library();
+        }
+        if old.auto_download_limit != p.auto_download_limit {
+            self.wish_tick();
+        }
+        if old.stream_cache_mb != p.stream_cache_mb {
+            self.apply_stream_cache();
+        }
+        if old.stream_analysis != p.stream_analysis {
+            self.stream_analysis_pref(p.stream_analysis);
+        }
+        if old.mixes_downloaded_only != p.mixes_downloaded_only {
+            // The rows it hides go (or come back) at once; the
+            // mixes follow when they are picked again.
+            self.load_home();
+            self.recs_prefs_changed();
+        }
+        if old.home_card != p.home_card || old.home_hidden_worlds != p.home_hidden_worlds {
+            self.load_home();
+        }
+        if old.mixes_downloaded_only != p.mixes_downloaded_only || old.radio_new_share != p.radio_new_share {
+            self.radio_source_changed();
+        }
+        if old.autoplay && !p.autoplay {
+            self.autoplay_off();
+        }
+        if !old.autoplay && p.autoplay {
+            self.publish_player();
+        }
     }
 
     fn load_home(&mut self) {

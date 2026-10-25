@@ -286,13 +286,13 @@ fn header(ui: &mut Ui, row: Rect, state: &ViewState, out: &mut Vec<Command>) {
         .md3_tooltip("Миксы, «Слушать снова» и подборки — только из скачанных треков", None)
         .clicked()
     {
-        out.push(downloaded_only(state, !on));
+        out.push(downloaded_only(!on));
     }
 }
 
-/// «Только скачанное» switched to `on`: the prefs with the flag.
-fn downloaded_only(state: &ViewState, on: bool) -> Command {
-    Command::SetPrefs(Box::new(nikgob_view::Prefs { mixes_downloaded_only: on, ..state.prefs.clone() }))
+/// «Только скачанное» switched to `on`.
+fn downloaded_only(on: bool) -> Command {
+    Command::SetPref(nikgob_view::PrefPatch::MixesDownloadedOnly(on))
 }
 
 /// A section header over the grid: the title at the left and, optionally,
@@ -385,7 +385,7 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Com
         let disabled: &[usize] = if local_only { &[0, 1] } else { &[] };
         let (picked, rects) = super::connected(&mut gui, Id::new("home-mixes-new"), &labels, usize::from(with_new), disabled);
         if let Some(p) = picked {
-            out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { mixes_with_new: p == 1, ..state.prefs.clone() })));
+            out.push(Command::SetPref(nikgob_view::PrefPatch::MixesWithNew(p == 1)));
         }
         let share = match state.prefs.radio_new_share {
             nikgob_view::RadioNewShare::More => "Примерно каждый третий трек новый: похожее из YouTube Music и Deezer.",
@@ -593,7 +593,7 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, pages: &mut P
                 "Новое скрыто: включено «Только скачанное», а у новой музыки ещё нет файлов.",
                 Some(("Показать новое", None, Style::Text, "home-new-show")),
             ) {
-                out.push(downloaded_only(state, false));
+                out.push(downloaded_only(false));
             }
         });
         return None;

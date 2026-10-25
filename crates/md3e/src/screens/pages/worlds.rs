@@ -663,13 +663,7 @@ fn text_block(
     match picked {
         Some(0) => return Some(route(w)),
         Some(1) => out.push(Command::Enqueue(w.primary.clone())),
-        Some(2) => {
-            let mut p = state.prefs.clone();
-            if !p.home_hidden_worlds.contains(&w.key) {
-                p.home_hidden_worlds.push(w.key.clone());
-            }
-            out.push(Command::SetPrefs(Box::new(p)));
-        }
+        Some(2) => out.push(Command::SetPref(nikgob_view::PrefPatch::HideWorld(w.key.clone()))),
         Some(3) => out.push(Command::HideHomeCard),
         _ => {}
     }

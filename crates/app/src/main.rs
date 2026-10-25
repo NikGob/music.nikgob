@@ -207,14 +207,12 @@ impl Core {
     /// Puts a changed autostart switch into the system; one it refused
     /// flips back in Settings.
     fn sync_autostart(&mut self) {
-        let prefs = {
+        let system = {
             let state = self.runtime.state();
-            self.autostart
-                .sync(state.prefs.autostart)
-                .map(|system| Prefs { autostart: system, ..state.prefs.clone() })
+            self.autostart.sync(state.prefs.autostart)
         };
-        if let Some(p) = prefs {
-            self.commands.push(Command::SetPrefs(Box::new(p)));
+        if let Some(system) = system {
+            self.commands.push(Command::SetPref(nikgob_view::PrefPatch::Autostart(system)));
         }
     }
 }
