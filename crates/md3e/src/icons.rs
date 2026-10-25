@@ -154,6 +154,8 @@ material_icons! {
     Radio => "radio",
     /// A check over a line: what is on disk already.
     DownloadDone => "download_done",
+    /// «Не нравится».
+    ThumbDown => "thumb_down",
 }
 
 impl Icon {

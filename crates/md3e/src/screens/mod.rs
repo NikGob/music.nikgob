@@ -364,6 +364,7 @@ impl Md3eUi {
         let theme_scope = crate::prof::scope("theme");
         self.update_theme(ctx, state);
         drop(theme_scope);
+        pages::set_marks(ctx, &state.dislikes);
         root.spacing_mut().scroll = crate::components::scrollbars::apply(ctx);
         // The current and the next cover stay loaded while off screen (set
         // again only when the state changed; kept in the context, so a new

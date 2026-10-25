@@ -216,16 +216,16 @@ fn track_row(
     }
     let mut nav = None;
     if let Some(m) = &menu_resp {
-        let picked = track_menu(egui::Id::new(("st-menu", id, i)), t, wished).attach(m);
+        let picked = track_menu(egui::Id::new(("st-menu", id, i)), t, wished, &super::marks(&m.ctx)).attach(m);
         nav = track_pick(&m.ctx, picked, t, Some(m.rect), pages, out);
     }
-    let picked = track_menu(egui::Id::new(("st-menu-ctx", id, i)), t, wished).context_menu(&o.response);
+    let picked = track_menu(egui::Id::new(("st-menu-ctx", id, i)), t, wished, &super::marks(&o.response.ctx)).context_menu(&o.response);
     let nav = track_pick(&o.response.ctx, picked, t, None, pages, out).or(nav);
     // An artist name of the line: its page.
     o.link_clicked.and_then(|k| artist_routes.get(k).cloned()).or(nav)
 }
 
-fn track_menu(key: egui::Id, t: &StreamTrackRow, wished: Option<WishlistStatus>) -> Menu {
+fn track_menu(key: egui::Id, t: &StreamTrackRow, wished: Option<WishlistStatus>, marks: &nikgob_view::DislikesView) -> Menu {
     let (download, can) = match (t.has_local, wished) {
         (true, _) => ("Уже скачан", false),
         (false, Some(WishlistStatus::Waiting | WishlistStatus::NoTorrent | WishlistStatus::Failed)) => ("Скачать сейчас", true),
@@ -245,6 +245,18 @@ fn track_menu(key: egui::Id, t: &StreamTrackRow, wished: Option<WishlistStatus>)
         .divider()
         .item(MenuItem::new(download).icon(Icon::Download).enabled(can))
         .item(MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(t.album_id.is_some()))
+        .divider()
+        .item(super::dislike_item(t.track.is_some_and(|id| marks.track(id))))
+        .item(MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block))
+}
+
+/// «Не нравится» of a service's track: its library track's mark when it
+/// has one, else the song's on every service.
+fn stream_dislike(t: &StreamTrackRow, marks: &nikgob_view::DislikesView) -> Command {
+    match t.track {
+        Some(id) => super::dislike_command(id, marks),
+        None => Command::RecFeedback { target: nikgob_view::RecTarget::StreamTrack(t.remote.clone()), dislike: true },
+    }
 }
 
 fn track_pick(
@@ -272,7 +284,10 @@ fn track_pick(
                 out.push(Command::DownloadStreamAlbum(a));
             }
         }
+        9 => out.push(stream_dislike(t, &super::marks(ctx))),
+        10 => out.push(Command::RecFeedback { target: nikgob_view::RecTarget::StreamArtist(t.artist.clone()), dislike: true }),
         _ => {}
+
     }
     None
 }

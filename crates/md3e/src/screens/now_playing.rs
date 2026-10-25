@@ -824,8 +824,12 @@ pub fn show(
                 Act::Replace,
                 Act::Visualizer,
                 Act::Sep,
+                Act::Dislike,
+                Act::BanArtist,
+                Act::Sep,
                 Act::Trash,
             ];
+
             let wh = Where::Np;
             chrome.track_menu(&more, "np-more", &acts, t, state, wh, out);
         }
@@ -1599,7 +1603,17 @@ fn info(
         {
             out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
         }
+        if state.prefs.dislike_button {
+            let disliked = state.dislikes.track(t.id);
+            if aui
+                .add(IconButton::new(Icon::ThumbDown).selected(disliked).tooltip("Не нравится").id_salt("np-dislike"))
+                .clicked()
+            {
+                out.push(Command::Dislike { track: t.id, dislike: !disliked, sure: false, relike: false });
+            }
+        }
         let add = aui.add(IconButton::new(Icon::PlaylistAdd).tooltip("В плейлист").id_salt("np-add"));
+
         pages.playlist_menu(&mut aui, &add, vec![t.id], state, out);
     }
     aui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

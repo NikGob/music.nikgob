@@ -558,6 +558,8 @@ fn artist_menu_with(resp: &Response, a: &ArtistCard, radio: bool, out: &mut Vec<
     }
     let follow = MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" }).icon(Icon::Favorite);
     let radio_cmd = Command::StartRadio { seed: nikgob_view::RadioSeed::Artist(a.id) };
+    let marks = super::marks(&resp.ctx);
+    let ban = super::ban_item(Some(a.id), &marks);
     if radio {
         match Menu::new(("artist-menu", resp.id))
             .item(MenuItem::new("Радио исполнителя").icon(Icon::Radio))
@@ -565,12 +567,14 @@ fn artist_menu_with(resp: &Response, a: &ArtistCard, radio: bool, out: &mut Vec<
             .item(MenuItem::new("Открыть исполнителя").icon(Icon::Person))
             .divider()
             .item(follow)
+            .item(ban)
             .context_menu(resp)?
         {
             0 => out.push(radio_cmd),
             1 => out.push(Command::PlayArtist { id: a.id, shuffle: true }),
             2 => return Some(Route::Artist(a.id)),
             3 => out.push(Command::Like(LikeTarget::Artist(a.id), !a.liked)),
+            4 => out.push(super::ban_command(a.id, &marks)),
             _ => {}
         }
         return None;
@@ -581,12 +585,14 @@ fn artist_menu_with(resp: &Response, a: &ArtistCard, radio: bool, out: &mut Vec<
         .item(MenuItem::new("Радио исполнителя").icon(Icon::Radio))
         .divider()
         .item(follow)
+        .item(ban)
         .context_menu(resp)?
     {
         0 => out.push(Command::PlayArtist { id: a.id, shuffle: false }),
         1 => out.push(Command::PlayArtist { id: a.id, shuffle: true }),
         2 => out.push(radio_cmd),
         3 => out.push(Command::Like(LikeTarget::Artist(a.id), !a.liked)),
+        4 => out.push(super::ban_command(a.id, &marks)),
         _ => {}
     }
     None
@@ -723,15 +729,16 @@ pub fn track_list_ext(
         match opts.playlist {
             Some(pl) => {
                 if let Some(m) = &o.more {
-                    let picked = playlist_track_menu(menu_key, t, pl).attach(m);
-                    *nav = playlist_track_pick(&m.ctx, picked, t, pl, Some(m.rect), pages, out).or(nav.take());
+                    let picked = playlist_track_menu(menu_key, t, pl, &state.dislikes).attach(m);
+                    *nav = playlist_track_pick(&m.ctx, picked, t, pl, Some(m.rect), pages, &state.dislikes, out).or(nav.take());
                 }
                 let picked = if Menu::context_idle(&o.response, menu_key.with("ctx")) {
                     None
                 } else {
-                    playlist_track_menu(menu_key.with("ctx"), t, pl).context_menu(&o.response)
+                    playlist_track_menu(menu_key.with("ctx"), t, pl, &state.dislikes).context_menu(&o.response)
                 };
-                *nav = playlist_track_pick(&o.response.ctx, picked, t, pl, None, pages, out).or(nav.take());
+                *nav = playlist_track_pick(&o.response.ctx, picked, t, pl, None, pages, &state.dislikes, out).or(nav.take());
+
             }
             None => {
                 if let Some(m) = &o.more {
@@ -1063,7 +1070,7 @@ pub fn wish_mark(ui: &mut Ui, st: WishlistStatus, torrents: bool, salt: impl std
 }
 
 /// ⋮ / right-click menu of a playlist row.
-fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId) -> Menu {
+fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId, marks: &nikgob_view::DislikesView) -> Menu {
     let mut m = Menu::new(key)
         .align_right(true)
         .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
@@ -1086,6 +1093,9 @@ fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId) -> Menu 
             })
             .icon(Icon::Delete),
         )
+        .divider()
+        .item(super::dislike_item(marks.track(track.id)))
+        .item(super::ban_item(track.artist_id(), marks))
 }
 
 fn playlist_track_pick(
@@ -1095,10 +1105,15 @@ fn playlist_track_pick(
     playlist: PlaylistId,
     anchor: Option<Rect>,
     pages: &mut PageState,
+    marks: &nikgob_view::DislikesView,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
     let find = crate::screens::find_song::label(track).is_some();
+    // «Не нравится» and «Не рекомендовать исполнителя» close the menu.
+    let remove = if find { 8 } else { 7 };
     match picked? {
+        n if n == remove + 1 => out.push(super::dislike_command(track.id, marks)),
+        n if n == remove + 2 => out.extend(track.artist_id().map(|a| super::ban_command(a, marks))),
         0 => out.push(Command::PlayNext(vec![track.id])),
         1 => out.push(Command::Enqueue(vec![track.id])),
         2 => {

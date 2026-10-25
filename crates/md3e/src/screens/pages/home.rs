@@ -683,7 +683,7 @@ fn play_discover(rows: &[StreamTrackRow], i: usize) -> Command {
     }
 }
 
-/// «Не рекомендовать трек» / «… исполнителя» of a discovery.
+/// «Не нравится» / «Не рекомендовать исполнителя» of a discovery.
 fn dislike(t: &StreamTrackRow, artist: bool) -> Command {
     let target = if artist {
         RecTarget::StreamArtist(t.artist.clone())
@@ -702,8 +702,8 @@ fn discover_menu(key: impl egui::AsId, t: &StreamTrackRow) -> Menu {
         .item(MenuItem::new(if t.liked { "Убрать из Любимых" } else { "В Любимые" }).icon(Icon::Favorite).selected(t.liked))
         .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!t.artists.linked().is_empty()))
         .divider()
-        .item(MenuItem::new("Не рекомендовать трек").icon(Icon::Block))
-        .item(MenuItem::new("Не рекомендовать артиста").icon(Icon::Block))
+        .item(MenuItem::new("Не нравится").icon(Icon::ThumbDown))
+        .item(MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block))
 }
 
 fn discover_pick(

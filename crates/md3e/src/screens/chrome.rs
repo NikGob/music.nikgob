@@ -43,6 +43,10 @@ pub enum Act {
     FindSong,
     /// «Радио по треку»: an endless queue grown from the track.
     Radio,
+    /// «Не нравится» (or its undo).
+    Dislike,
+    /// «Не рекомендовать исполнителя» (or its undo) of the main artist.
+    BanArtist,
     /// A divider.
     Sep,
 }
@@ -169,6 +173,8 @@ impl Chrome {
                 .icon(Icon::volume(state.player.volume, state.player.muted)),
             Act::Playlist => MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd),
             Act::Radio => MenuItem::new(super::pages::RADIO_BY_TRACK).icon(Icon::Radio),
+            Act::Dislike => super::pages::dislike_item(state.dislikes.track(t.id)),
+            Act::BanArtist => super::pages::ban_item(t.artist_id(), &state.dislikes),
             Act::Artist => MenuItem::new("К исполнителю")
                 .icon(Icon::Person)
                 .enabled(!t.artists.linked().is_empty()),
@@ -234,6 +240,10 @@ impl Chrome {
             if picks[i] == Act::Artist {
                 // Several artists: which one.
                 self.nav = super::artist_links::go_to(&anchor.ctx, super::artist_links::library(&track.artists));
+            } else if picks[i] == Act::Dislike {
+                out.push(super::pages::dislike_command(track.id, &state.dislikes));
+            } else if picks[i] == Act::BanArtist {
+                out.extend(track.artist_id().map(|a| super::pages::ban_command(a, &state.dislikes)));
             } else {
                 self.apply(picks[i], track, anchor.rect, wh, out);
             }
@@ -271,7 +281,9 @@ impl Chrome {
             Act::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),
             Act::FindSong => out.push(Command::FindSong { track: t.id, query: None }),
             Act::Radio => out.push(super::pages::radio_by_track(t.id)),
-            Act::Sep => {}
+            // Handled where the marks are known.
+            Act::Dislike | Act::BanArtist | Act::Sep => {}
+
         }
     }
 

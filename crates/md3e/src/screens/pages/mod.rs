@@ -64,6 +64,46 @@ pub(crate) fn request_release_delete(ctx: &Context, id: nikgob_view::ReleaseId, 
 /// «Радио по треку» in the track menus.
 pub(crate) const RADIO_BY_TRACK: &str = "Радио по треку";
 
+/// «Не нравится» of a track, or its undo when it is disliked.
+pub(crate) fn dislike_item(disliked: bool) -> MenuItem {
+    MenuItem::new(if disliked { "Убрать «Не нравится»" } else { "Не нравится" }).icon(Icon::ThumbDown).selected(disliked)
+}
+
+pub(crate) fn dislike_command(track: nikgob_view::TrackId, marks: &nikgob_view::DislikesView) -> Command {
+    Command::Dislike { track, dislike: !marks.track(track), sure: false, relike: false }
+}
+
+/// «Не рекомендовать исполнителя» of `artist`, or its undo.
+pub(crate) fn ban_item(artist: Option<nikgob_view::ArtistId>, marks: &nikgob_view::DislikesView) -> MenuItem {
+    let banned = artist.is_some_and(|a| marks.artist(a));
+    MenuItem::new(if banned { "Снова рекомендовать исполнителя" } else { "Не рекомендовать исполнителя" })
+        .icon(Icon::Block)
+        .enabled(artist.is_some())
+}
+
+pub(crate) fn ban_command(artist: nikgob_view::ArtistId, marks: &nikgob_view::DislikesView) -> Command {
+    Command::RecFeedback { target: nikgob_view::RecTarget::Artist(artist), dislike: !marks.artist(artist) }
+}
+
+fn marks_key() -> egui::Id {
+    egui::Id::new("md3e-dislike-marks")
+}
+
+/// Keeps the marks for the menus drawn without the view state (cards).
+pub(crate) fn set_marks(ctx: &Context, marks: &nikgob_view::DislikesView) {
+    let same = ctx.data(|d| d.get_temp::<std::sync::Arc<nikgob_view::DislikesView>>(marks_key())).is_some_and(|m| *m == *marks);
+    if !same {
+        ctx.data_mut(|d| d.insert_temp(marks_key(), std::sync::Arc::new(marks.clone())));
+    }
+}
+
+/// The marks [`set_marks`] kept.
+pub(crate) fn marks(ctx: &Context) -> std::sync::Arc<nikgob_view::DislikesView> {
+    ctx.data(|d| d.get_temp(marks_key())).unwrap_or_default()
+}
+
+
+
 /// Where «Радио по треку» is in the track menu of the lists.
 const RADIO_ITEM: usize = 3;
 
@@ -300,7 +340,7 @@ impl PageState {
     /// The track menu, keyed by its anchor: the ⋮ menu and the right-click
     /// menu of one row (or the same track in two lists) must not share an id,
     /// or each closes the other and both draw the same widgets.
-    fn track_menu_items(anchor: egui::Id, track: &TrackRow) -> Menu {
+    fn track_menu_items(anchor: egui::Id, track: &TrackRow, marks: &nikgob_view::DislikesView) -> Menu {
         // A file: its tags and a better copy; no file: download it (no
         // like) or look for a release by hand.
         let (fetch, fetch_icon) = if track.has_local {
@@ -313,6 +353,8 @@ impl PageState {
             .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
             .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
             .item(MenuItem::new(RADIO_BY_TRACK).icon(Icon::Radio))
+            .item(dislike_item(marks.track(track.id)))
+            .item(ban_item(track.artist_id(), marks))
             .divider()
             .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()))
             .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()))
@@ -338,16 +380,26 @@ impl PageState {
         ctx: &Context,
         picked: Option<usize>,
         track: &TrackRow,
+        marks: &nikgob_view::DislikesView,
         out: &mut Vec<Command>,
     ) -> Option<Route> {
         let find = super::find_song::label(track).is_some();
-        // «Радио по треку» sits after «В плейлист…»; the rest as before it.
+        // «Радио по треку», «Не нравится» and «Не рекомендовать
+        // исполнителя» sit after «В плейлист…»; the rest as before them.
         let picked = match picked? {
             RADIO_ITEM => {
                 out.push(radio_by_track(track.id));
                 return None;
             }
-            n if n > RADIO_ITEM => n - 1,
+            n if n == RADIO_ITEM + 1 => {
+                out.push(dislike_command(track.id, marks));
+                return None;
+            }
+            n if n == RADIO_ITEM + 2 => {
+                out.extend(track.artist_id().map(|a| ban_command(a, marks)));
+                return None;
+            }
+            n if n > RADIO_ITEM => n - 3,
             n => n,
         };
         // The deletes come after the optional «Найти песню…».
@@ -396,11 +448,11 @@ impl PageState {
         &mut self,
         anchor: &Response,
         track: &TrackRow,
-        _state: &ViewState,
+        state: &ViewState,
         out: &mut Vec<Command>,
     ) -> Option<Route> {
-        let picked = Self::track_menu_items(anchor.id, track).attach(anchor);
-        self.track_menu_pick(&anchor.ctx, picked, track, out)
+        let picked = Self::track_menu_items(anchor.id, track, &state.dislikes).attach(anchor);
+        self.track_menu_pick(&anchor.ctx, picked, track, &state.dislikes, out)
     }
 
     /// Right click on a track row.
@@ -408,14 +460,14 @@ impl PageState {
         &mut self,
         row: &Response,
         track: &TrackRow,
-        _state: &ViewState,
+        state: &ViewState,
         out: &mut Vec<Command>,
     ) -> Option<Route> {
         if Menu::context_idle(row, row.id.with("ctx")) {
             return None;
         }
-        let picked = Self::track_menu_items(row.id.with("ctx"), track).context_menu(row);
-        self.track_menu_pick(&row.ctx, picked, track, out)
+        let picked = Self::track_menu_items(row.id.with("ctx"), track, &state.dislikes).context_menu(row);
+        self.track_menu_pick(&row.ctx, picked, track, &state.dislikes, out)
     }
 
     /// The ⋮ menu for the playing track (Now Playing header).
@@ -424,11 +476,12 @@ impl PageState {
         _ui: &mut Ui,
         anchor: &Response,
         track: Option<&TrackRow>,
+        marks: &nikgob_view::DislikesView,
         out: &mut Vec<Command>,
     ) {
         if let Some(t) = track {
-            let picked = Self::track_menu_items(anchor.id, t).attach(anchor);
-            if let Some(r) = self.track_menu_pick(&anchor.ctx, picked, t, out) {
+            let picked = Self::track_menu_items(anchor.id, t, marks).attach(anchor);
+            if let Some(r) = self.track_menu_pick(&anchor.ctx, picked, t, marks, out) {
                 self.pending_nav = Some(r);
             }
         }

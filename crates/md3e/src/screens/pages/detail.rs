@@ -355,12 +355,16 @@ pub fn artist(
         let picked = Menu::new("artist-more")
             .item(MenuItem::new("В очередь всё").icon(Icon::QueueMusic).enabled(!a.top_tracks.is_empty()))
             .item(MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" }).icon(Icon::Favorite))
+            .divider()
+            .item(super::ban_item(Some(id), &state.dislikes))
             .attach(&r[4]);
         match picked {
             Some(0) => out.push(Command::EnqueueArtist(a.card.id)),
             Some(1) => out.push(Command::Like(LikeTarget::Artist(id), !a.liked)),
+            Some(2) => out.push(super::ban_command(id, &state.dislikes)),
             _ => {}
         }
+
         ui.add_space(widgets::SECTION_GAP);
         if !a.top_tracks.is_empty() {
             widgets::section_header(ui, "Популярное у тебя", false);
