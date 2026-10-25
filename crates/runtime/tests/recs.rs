@@ -436,7 +436,7 @@ fn daylist_picks(lib: &Library) -> serde_json::Value {
 }
 
 #[test]
-fn the_bento_gets_a_daylist_and_tiles_that_play() {
+fn the_home_gets_a_daylist_and_tiles_that_play() {
     let l = library(3, 6, 5, &[]);
     let s = start(&l.lib, Vec::new(), Prefs::default(), None);
     wait_for(&s.rt, "the daylist and the tiles", |st| st.home.daylist.is_some() && !st.home.tiles.is_empty());
@@ -446,17 +446,21 @@ fn the_bento_gets_a_daylist_and_tiles_that_play() {
     assert_eq!(daylist.title.split(' ').count(), 3, "«Тягучий вечер четверга»: {}", daylist.title);
     assert!(daylist.subtitle.starts_with("что ты слушаешь ") && daylist.subtitle.contains(" · до "), "{}", daylist.subtitle);
     assert!(!daylist.covers.is_empty());
-    // «На повторе» first, then four kinds of the day, each once, each with
-    // its kicker.
+    // Up to four kinds of the day, each once, each with its kicker, its
+    // length and covers; «На повторе», the lottery and the languages are
+    // not among them (they are mixes of the home, home v2 §3.5).
     let tiles: Vec<MixId> = st.tiles.iter().map(|t| t.id).collect();
-    assert_eq!(tiles.len(), 5, "{tiles:?}");
-    assert_eq!(tiles[0], MixId::Tile(TileKind::OnRepeat));
-    assert_eq!(tiles.iter().collect::<std::collections::HashSet<_>>().len(), 5);
-    assert_eq!((st.tiles[0].kicker.as_str(), st.tiles[0].title.as_str()), ("Чаще всего", "На повторе"));
-    assert_eq!(st.tiles[0].subtitle, "30 треков · что крутил весь месяц");
-    let lottery = |t: &&nikgob_view::MixCard| t.id == MixId::Tile(TileKind::Lottery);
-    assert!(st.tiles.iter().all(|t| !t.kicker.is_empty() && !t.subtitle.is_empty() && (lottery(&t) || !t.covers.is_empty())));
-    assert!(st.tiles.iter().filter(lottery).all(|t| t.covers.is_empty()), "the lottery shows nothing of what it plays");
+    assert!((1..=4).contains(&tiles.len()), "{tiles:?}");
+    assert!(
+        tiles.iter().all(|t| !matches!(t, MixId::Tile(TileKind::OnRepeat | TileKind::Lottery | TileKind::Language))),
+        "{tiles:?}"
+    );
+    assert_eq!(tiles.iter().collect::<std::collections::HashSet<_>>().len(), tiles.len());
+    assert!(
+        st.tiles.iter().all(|t| !t.kicker.is_empty() && (t.subtitle.ends_with(" мин") || t.subtitle.ends_with(" ч")) && !t.covers.is_empty()),
+        "{:?}",
+        st.tiles.iter().map(|t| (&t.kicker, &t.subtitle)).collect::<Vec<_>>()
+    );
     assert!(daylist.kicker.starts_with("НА "), "{}", daylist.kicker);
     // The board is kept for the day: a restart shows the same tiles.
     drop(s);
@@ -465,11 +469,12 @@ fn the_bento_gets_a_daylist_and_tiles_that_play() {
     assert_eq!(s.rt.state().home.tiles.iter().map(|t| t.id).collect::<Vec<_>>(), tiles);
 
     // A tile plays as it is.
-    s.rt.send(Command::PlayMix { id: MixId::Tile(TileKind::OnRepeat) });
-    wait_until("on repeat plays", || !s.asked.lock().unwrap().is_empty());
-    wait_for(&s.rt, "its queue", |st| st.queue.next.len() == 29);
+    let first = st.tiles[0].clone();
+    s.rt.send(Command::PlayMix { id: first.id });
+    wait_until("the tile plays", || !s.asked.lock().unwrap().is_empty());
+    wait_for(&s.rt, "its queue", |st| !st.queue.next.is_empty());
     assert!(s.rt.state().queue.radio.is_none(), "a tile is not endless");
-    assert_eq!(s.rt.state().player.context_line(), "Играет из микса «На повторе»");
+    assert_eq!(s.rt.state().player.context_line(), format!("Играет из микса «{}»", first.title));
     assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::HomeSection);
 
     // The daylist plays the picks shown, then goes on as a radio.
