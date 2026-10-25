@@ -508,15 +508,6 @@ pub struct World {
     pub albums: Vec<ReleaseId>,
     /// The three cards under the stage.
     pub cards: Vec<WorldCard>,
-    /// A mix tile of the row ([`WorldKind::Mix`]): what plays it.
-    pub mix: Option<MixId>,
-    /// A mix's picture: the covers of its first four worlds (a 2×2 mosaic).
-    pub covers: Vec<Cover>,
-    /// A mix's line of why, in place of how far: «Из того, что ты слушаешь
-    /// по вечерам: MADE IN ABYSS, OMORI и Suzume».
-    pub reason: String,
-    /// A mix's «Другой» may still pick another set today.
-    pub mix_other: bool,
 }
 
 /// What a world is.
@@ -527,9 +518,6 @@ pub enum WorldKind {
     Soundtrack,
     /// An artist's discography.
     Artist,
-    /// A mix of the row after the world to continue (its songs from many
-    /// worlds).
-    Mix,
 }
 
 impl WorldKind {
@@ -538,7 +526,6 @@ impl WorldKind {
         match self {
             Self::Soundtrack => "Саундтрек",
             Self::Artist => "Исполнитель",
-            Self::Mix => "Микс",
         }
     }
 }
@@ -617,8 +604,6 @@ pub enum WorldGo {
     Release(ReleaseId),
     /// Opens an album of a service.
     Stream(RemoteId),
-    /// Opens a world's page by its key.
-    World(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

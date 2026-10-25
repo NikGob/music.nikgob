@@ -1293,7 +1293,7 @@ impl Worker {
         let complete = !by_user
             || dur.is_some_and(|d| pos.as_millis() as f64 >= f64::from(d) * 0.9);
         self.radio_feedback(e.track, complete, pos.as_millis() as u32);
-        self.recs_played(e.track);
+        self.recs_played();
         let _ = self.lib.record_event(
             e.track,
             if complete {
@@ -1861,7 +1861,7 @@ impl Worker {
         let parts = self.recs_home_parts();
         let mut view = self.res.home(&home);
         parts.apply(&mut view, &mut self.res);
-        let stages: Vec<_> = view.worlds.iter().filter(|w| w.kind != nikgob_view::WorldKind::Mix).filter_map(|w| w.release).collect();
+        let stages: Vec<_> = view.worlds.iter().filter_map(|w| w.release).collect();
         self.publish(|s| {
             s.home = view;
         });

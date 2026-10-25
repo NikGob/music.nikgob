@@ -1,7 +1,9 @@
 //! The mix tiles of the card at the top of Главная (recs-v2 §7): after the
 //! world to continue come the mix of the moment (what the user plays at
 //! this part of the day, by its sound) and «После <мир>» (the sound of the
-//! first world's core, from the other worlds), then the other worlds.
+//! first world's core, from the other worlds), then the other worlds. The
+//! card is out of the app for now ([`nikgob_view::HOME_CARD`]): the mixes are built
+//! here and tested, and wait for its new design to be shown.
 //!
 //! Each is 20 songs, no world over a quarter of them nor thrice running,
 //! in the smooth order. The set is a function of the day, the mix's key
@@ -10,16 +12,15 @@
 //! a dislike only takes its song out. «Другой» draws a new salt, twice a
 //! day.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use nikgob_core::model::{EventType, ReleaseId, TrackId};
 use nikgob_recs::{DayPart, RadioParams, TilesInput, style_words};
-use nikgob_view as v;
 use serde::{Deserialize, Serialize};
 
 use super::{BuildInput, Snapshot, cache_read, cache_write, day_seed, daylist_key};
 
-pub(crate) const TOP_KEY: &str = "recs.top_mixes";
+const TOP_KEY: &str = "recs.top_mixes";
 /// Songs of a mix (45–60 minutes: a night's session is 26 minutes at the
 /// median, three quarters under 53).
 const LEN: usize = 20;
@@ -28,14 +29,29 @@ const MIN_LEN: usize = 8;
 /// One world takes at most this share of a mix.
 const WORLD_SHARE: f32 = 0.25;
 /// «Другой» picks another set this many times a day.
-pub(crate) const PRESSES: u8 = 2;
+const PRESSES: u8 = 2;
 /// Worlds named in the line of why, and covers of the picture.
 const NAMED: usize = 4;
 
+/// The mix tiles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TopMix {
+    /// What the user plays at this part of the day, by its sound.
+    Moment,
+    /// «После <мир>».
+    After,
+}
+
+impl TopMix {
+    const ALL: [Self; 2] = [Self::Moment, Self::After];
+}
+
 /// One mix tile as the build hands it over.
+// What the card would show; read again once it is back.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct TopMixHome {
-    pub mix: v::TopMix,
+    pub mix: TopMix,
     /// «Микс на вечер», «Похоже по звуку».
     pub kicker: String,
     /// «Спокойное и мрачное», «После MADE IN ABYSS».
@@ -68,7 +84,7 @@ struct Set {
     tracks: Vec<TrackId>,
 }
 
-/// The day's mixes as the cache keeps them (by [`v::TopMix`] order).
+/// The day's mixes as the cache keeps them (by [`TopMix`] order).
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct TopCache {
     day: String,
@@ -77,10 +93,10 @@ struct TopCache {
     sets: [Option<Set>; 2],
 }
 
-const fn slot(m: v::TopMix) -> usize {
+const fn slot(m: TopMix) -> usize {
     match m {
-        v::TopMix::Moment => 0,
-        v::TopMix::After => 1,
+        TopMix::Moment => 0,
+        TopMix::After => 1,
     }
 }
 
@@ -114,7 +130,21 @@ fn names(list: &[&str]) -> String {
     }
 }
 
-fn capitalized(s: &str) -> String {
+/// The name of a sound in two short words: «спокойное и мрачное» of
+/// [`style_words`] reads «Тихо и темно».
+fn sound_name(words: &str) -> String {
+    fn short(w: &str) -> &str {
+        match w {
+            "энергичное" => "бодро",
+            "спокойное" => "тихо",
+            "светлое" => "светло",
+            "мрачное" => "темно",
+            "ровное" => "ровно",
+            "переменчивое" => "переменчиво",
+            other => other,
+        }
+    }
+    let s = words.split(" и ").map(short).collect::<Vec<_>>().join(" и ");
     let mut c = s.chars();
     c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
 }
@@ -131,7 +161,7 @@ fn world_of(snap: &Snapshot, id: TrackId) -> Option<u64> {
 }
 
 /// The mix tiles of now, `refresh` one of them picked anew («Другой»).
-pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, refresh: Option<v::TopMix>) -> Vec<TopMixHome> {
+pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, refresh: Option<TopMix>) -> Vec<TopMixHome> {
     if !snap.taste.has_history() {
         return Vec::new();
     }
@@ -160,12 +190,12 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, ref
     let world1 = last_world(snap, tiles);
 
     let mut out = Vec::new();
-    for m in v::TopMix::ALL {
+    for m in TopMix::ALL {
         let k = slot(m);
         let salt = cache.salts[k];
         let key = match m {
-            v::TopMix::Moment => format!("{part_key}|{}|{salt}", snap.local_only),
-            v::TopMix::After => match world1 {
+            TopMix::Moment => format!("{part_key}|{}|{salt}", snap.local_only),
+            TopMix::After => match world1 {
                 Some(w) => format!("{}|{w}|{}|{salt}", input.day, snap.local_only),
                 None => continue,
             },
@@ -176,7 +206,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, ref
             None => {
                 let params = RadioParams { new_share: 0.0, seed: day_seed(&key) };
                 let (title, tracks) = match m {
-                    v::TopMix::Moment => {
+                    TopMix::Moment => {
                         let (centre, _, picks) = recs.daylist(part, &[], 2 * LEN, &params);
                         let len = picks.len().max(1) as f32;
                         let cands: Vec<(TrackId, f32)> = picks
@@ -188,10 +218,10 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, ref
                             })
                             .filter(|(id, _)| !long(id))
                             .collect();
-                        let title = style_words(centre.axes).map_or_else(|| format!("Как обычно {}", when(part)), |w| capitalized(&w));
+                        let title = style_words(centre.axes).map_or_else(|| format!("Как обычно {}", when(part)), |w| sound_name(&w));
                         (title, recs.mix_of(&cands, LEN, WORLD_SHARE))
                     }
-                    v::TopMix::After => {
+                    TopMix::After => {
                         let w = world1.expect("keyed by it");
                         let title = snap.worlds.get(&w).map_or_else(String::new, |x| format!("После {}", x.1));
                         let tracks: Vec<TrackId> = recs.after_world(w, LEN + 4, WORLD_SHARE, &params).into_iter().filter(|id| !long(id)).take(LEN).collect();
@@ -221,7 +251,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, ref
 fn describe(
     snap: &Snapshot,
     tiles: &TilesInput,
-    m: v::TopMix,
+    m: TopMix,
     part: DayPart,
     title: String,
     tracks: Vec<TrackId>,
@@ -251,8 +281,8 @@ fn describe(
     let titles: Vec<&str> = worlds.iter().filter_map(|x| snap.worlds.get(&x.0)).map(|x| x.1.as_str()).filter(|t| !t.is_empty()).collect();
     let named = names(&titles);
     let (kicker, reason, after) = match m {
-        v::TopMix::Moment => (moment_kicker(part).to_owned(), format!("Из того, что ты слушаешь {}: {named}", when(part)), None),
-        v::TopMix::After => {
+        TopMix::Moment => (moment_kicker(part).to_owned(), format!("Из того, что ты слушаешь {}: {named}", when(part)), None),
+        TopMix::After => {
             let w = world1.and_then(|w| snap.worlds.get(&w));
             let name = w.map_or("", |x| x.1.as_str());
             (
@@ -270,7 +300,7 @@ fn describe(
     let n = tracks.len();
     let w = worlds.len();
     let mut facts = vec![
-        v::WorldKind::Mix.label().to_owned(),
+        "Микс".to_owned(),
         format!("{n} {}", plural(n, "трек", "трека", "треков")),
         minutes(duration_ms),
         format!("{w} {}", plural(w, "мир", "мира", "миров")),
@@ -302,83 +332,6 @@ fn minutes(ms: u64) -> String {
     if m < 60 { format!("{m} мин") } else { format!("{} ч {:02} мин", m / 60, m % 60) }
 }
 
-/// The tile of `t` on the row, its picture resolved by the caller: what
-/// it plays and the three cards («Из миров» opens the first of its worlds
-/// that is on the row, `on_row`).
-pub(crate) fn world(t: &TopMixHome, covers: Vec<v::Cover>, release: Option<ReleaseId>, on_row: &[(String, String)]) -> v::World {
-    let mut cards = vec![v::WorldCard {
-        icon: v::WorldIcon::Play,
-        kicker: "Первым будет".into(),
-        title: t.first.clone(),
-        go: v::WorldGo::Play(t.tracks.clone()),
-    }];
-    if let Some((k, title)) = &t.first_new
-        && *k > 0
-    {
-        cards.push(v::WorldCard {
-            icon: v::WorldIcon::Next,
-            kicker: "Ещё не слышал".into(),
-            title: title.clone(),
-            go: v::WorldGo::Play(t.tracks[*k..].to_vec()),
-        });
-    }
-    let row: HashMap<&str, &str> = on_row.iter().map(|(k, title)| (k.as_str(), title.as_str())).collect();
-    let present: Vec<(&str, &str)> = t.worlds.iter().filter_map(|k| row.get_key_value(k.as_str()).map(|(k, v)| (*k, *v))).collect();
-    if let Some((key, _)) = present.first() {
-        let more = t.worlds.len().saturating_sub(2);
-        let first_two: Vec<&str> = present.iter().take(2).map(|x| x.1).collect();
-        let title = if more > 0 { format!("{} +{more}", first_two.join(", ")) } else { first_two.join(", ") };
-        cards.push(v::WorldCard { icon: v::WorldIcon::Album, kicker: "Из миров".into(), title, go: v::WorldGo::World((*key).to_owned()) });
-    }
-    let mut shuffled = t.tracks.clone();
-    fastrand::shuffle(&mut shuffled);
-    let n = t.tracks.len();
-    v::World {
-        key: t.mix.key().to_owned(),
-        title: t.title.clone(),
-        kind: v::WorldKind::Mix,
-        release,
-        cover: covers.first().cloned(),
-        cover_hd: None,
-        kicker: t.kicker.clone(),
-        facts: t.facts.clone(),
-        heard: (n - t.unheard) as u32,
-        total: n as u32,
-        start: v::WorldStart::Begin,
-        playing: false,
-        primary: t.tracks.clone(),
-        primary_tip: format!(
-            "{} {}, {}: по порядку микса",
-            n,
-            crate::streams::plural(n, "трек", "трека", "треков"),
-            minutes(t.duration_ms)
-        ),
-        shuffled,
-        albums: Vec::new(),
-        cards,
-        mix: Some(v::MixId::Top(t.mix)),
-        covers,
-        reason: t.reason.clone(),
-        mix_other: t.other,
-    }
-}
-
-/// Puts the mix tiles on the row after its first world (the one to
-/// continue): «После» only after the world it is about; a tile taken off
-/// the row stays off.
-pub(crate) fn place(worlds: &mut Vec<v::World>, mixes: Vec<v::World>, after: &[Option<String>], hidden: &[String]) {
-    worlds.retain(|w| w.kind != v::WorldKind::Mix);
-    let Some(first) = worlds.first().map(|w| w.key.clone()) else { return };
-    let mut at = 1;
-    for (w, a) in mixes.into_iter().zip(after) {
-        if hidden.contains(&w.key) || a.as_ref().is_some_and(|a| *a != first) {
-            continue;
-        }
-        worlds.insert(at, w);
-        at += 1;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +344,89 @@ mod tests {
         assert_eq!(names(&["A", "B", "C", "D", "E"]), "A, B, C, D и другие");
         assert_eq!(minutes(52 * 60_000), "52 мин");
         assert_eq!(minutes(65 * 60_000), "1 ч 05 мин");
+        assert_eq!(sound_name("спокойное и мрачное"), "Тихо и темно");
+        assert_eq!(sound_name("энергичное"), "Бодро");
+    }
+
+    /// Three soundtracks of 10 songs, MADE IN ABYSS played last: the mix
+    /// of the moment and «После MADE IN ABYSS» (none of it), each kept for
+    /// the day, «Другой» twice and no more.
+    #[test]
+    fn the_moment_and_after_the_world_are_mixes_of_the_day() {
+        use nikgob_core::model::{Artist, ArtistCredit, Codec, Event, Release, Source, SourceKind, Track};
+        use nikgob_library::{Library, now_ms};
+        let lib = Library::open_in_memory().unwrap();
+        let index: crate::analysis::SoundIndex = Default::default();
+        let now = now_ms();
+        let mut rng = fastrand::Rng::with_seed(5);
+        let mut mia = HashSet::new();
+        let mut last = None;
+        for (w, (franchise, composer)) in [("MADE IN ABYSS", "Kevin Penkin"), ("OMORI", "pedro silva"), ("Hollow Knight", "Christopher Larkin")].iter().enumerate() {
+            let a = lib.upsert_artist(&Artist::new(*composer)).unwrap();
+            let credit = ArtistCredit::single(*composer, Some(a.id));
+            for (k, title) in [format!("{franchise} ORIGINAL SOUNDTRACK"), format!("{franchise} ORIGINAL SOUNDTRACK 2")].iter().enumerate() {
+                let r = lib.upsert_release(&Release::new(title.clone(), credit.clone())).unwrap();
+                for n in 0..5 {
+                    let mut t = Track::new(format!("{title} {n}"), credit.clone());
+                    t.release_id = Some(r.id);
+                    t.track_no = n + 1;
+                    t.duration_ms = Some(180_000);
+                    let t = lib.upsert_track(&t).unwrap();
+                    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("x/{w}/{k}/{n}.flac"), Codec::Flac)).unwrap();
+                    let mut v = [0.0f32; nikgob_recs::DIM];
+                    for x in &mut v {
+                        *x = rng.f32() + w as f32 * 0.3;
+                    }
+                    index.write().insert(t.id, v);
+                    // Every world heard a little, days ago; MADE IN ABYSS last.
+                    let ts = now - 86_400_000 * (4 - w as i64) + i64::from(n) * 1000 + k as i64 * 10_000;
+                    if n < 3 {
+                        lib.record_event_raw(&Event::new(t.id, EventType::Start, ts, lib.device_id())).unwrap();
+                        lib.record_event_raw(&Event::new(t.id, EventType::Complete, ts + 500, lib.device_id())).unwrap();
+                    }
+                    if w == 0 {
+                        mia.insert(t.id);
+                        last = Some(t.id);
+                    }
+                }
+            }
+        }
+        lib.record_event_raw(&Event::new(last.unwrap(), EventType::Start, now - 60_000, lib.device_id())).unwrap();
+        let (snap, tiles, _) = super::super::read_snapshot(&lib, &index, now, 0, &[], false).unwrap();
+        let input = BuildInput {
+            lib: lib.clone(),
+            index: index.clone(),
+            day: "2026-10-25".into(),
+            utc_offset_min: 0,
+            now,
+            refresh_daily: false,
+            refresh_daylist: false,
+            new_share: 0.0,
+            local_only: false,
+            new: Vec::new(),
+            suggested: Vec::new(),
+            rerank: false,
+            lanes_salt: 0,
+        };
+        let mixes = build(&snap, &input, &tiles, None);
+        let moment = mixes.iter().find(|m| m.mix == TopMix::Moment).expect("the moment");
+        assert!(moment.tracks.len() >= MIN_LEN, "{}", moment.tracks.len());
+        assert!(moment.facts.starts_with("Микс · "), "{}", moment.facts);
+        assert!(moment.reason.starts_with("Из того, что ты слушаешь"), "{}", moment.reason);
+        let after = mixes.iter().find(|m| m.mix == TopMix::After).expect("«После»");
+        assert_eq!(after.title, "После MADE IN ABYSS");
+        assert_eq!(after.after.as_deref(), Some("made in abyss"));
+        assert!(after.tracks.iter().all(|t| !mia.contains(t)), "none of the world itself");
+        assert!(after.tracks.len() >= MIN_LEN);
+        // Kept for the day.
+        let again = build(&snap, &input, &tiles, None);
+        assert_eq!(again.iter().map(|m| m.tracks.clone()).collect::<Vec<_>>(), mixes.iter().map(|m| m.tracks.clone()).collect::<Vec<_>>());
+        // «Другой»: twice, then no more today.
+        let one = build(&snap, &input, &tiles, Some(TopMix::Moment));
+        assert!(one[0].other);
+        let two = build(&snap, &input, &tiles, Some(TopMix::Moment));
+        assert!(!two[0].other);
+        let three = build(&snap, &input, &tiles, Some(TopMix::Moment));
+        assert_eq!(three[0].tracks, two[0].tracks, "the third press changes nothing");
     }
 }

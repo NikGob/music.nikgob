@@ -51,10 +51,6 @@ fn world(key: &str) -> World {
         shuffled: tracks.clone(),
         albums: Vec::new(),
         cards: vec![WorldCard { icon: WorldIcon::Play, kicker: "Продолжить".into(), title: "OST 4, трек 20".into(), go: WorldGo::Play(tracks) }],
-        mix: None,
-        covers: Vec::new(),
-        reason: String::new(),
-        mix_other: false,
     }
 }
 
