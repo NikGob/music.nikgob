@@ -179,12 +179,6 @@ pub fn analysis_line(a: &AnalysisProgress) -> Option<String> {
     })
 }
 
-/// «Сменятся в 06:00» at night (the day turns at 06:00), «Сменятся завтра в
-/// 06:00» by day.
-pub fn of_day_until(hour: u8) -> &'static str {
-    if hour < 6 { "Сменятся в 06:00" } else { "Сменятся завтра в 06:00" }
-}
-
 /// The section's entrance, once per run: `n` from the top, 30 ms after the
 /// one above (up to four), rising 24 on the default spatial spring and
 /// fading in; reduced motion: a fade only.
@@ -296,18 +290,13 @@ fn downloaded_only(on: bool) -> Command {
 }
 
 /// A section header over the grid: the title at the left and, optionally,
-/// a text button or a quiet label whose text ends on the right edge (the
-/// button by its label, not its container). True when the button was
-/// clicked.
-fn section_header(ui: &mut Ui, grid: Grid, rect: Rect, title: &str, action: Option<(&str, Option<Icon>)>, label: Option<&str>) -> bool {
+/// a text button whose text ends on the right edge (by its label, not its
+/// container). True when the button was clicked.
+fn section_header(ui: &mut Ui, grid: Grid, rect: Rect, title: &str, action: Option<(&str, Option<Icon>)>) -> bool {
     let s = Theme::get(ui.ctx()).scheme;
     let row = Rect::from_min_size(pos2(grid.left, rect.top()), vec2(grid.width, HEADER_H));
     let g = crate::typography::layout(ui.painter(), TypeRole::TitleLarge.style().job(title, s.on_surface));
     ui.painter().galley(pos2(row.left(), row.center().y - g.size().y / 2.0), g, s.on_surface);
-    if let Some(text) = label {
-        let g = crate::typography::layout(ui.painter(), TypeRole::LabelLarge.style().job(text, s.on_surface_variant));
-        ui.painter().galley(pos2(row.right() - g.size().x, row.center().y - g.size().y / 2.0), g, s.on_surface_variant);
-    }
     let Some((text, icon)) = action else { return false };
     let mut b = Button::new(text).style(Style::Text).id_salt(("home-header", title));
     if let Some(i) = icon {
@@ -466,7 +455,7 @@ fn listen_again(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, pages: &mu
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + body), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "again", |ui| {
-        if section_header(ui, grid, rect, "Слушать снова", Some(("Слушать всё", Some(Icon::PlayArrow))), None) {
+        if section_header(ui, grid, rect, "Слушать снова", Some(("Слушать всё", Some(Icon::PlayArrow)))) {
             out.push(Command::PlayTracks { tracks: rows.iter().map(|t| t.id).collect(), start: 0, context: "Слушать снова".into() });
         }
         let top = rect.top() + HEADER_H + HEADER_GAP;
@@ -501,7 +490,7 @@ fn of_day(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Co
     let body = lines(tiles.len(), per) as f32 * (OF_DAY_H + 16.0) - 16.0;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + body), Sense::hover());
     entering(ui, rect, n, "of-day", |ui| {
-        section_header(ui, grid, rect, "Подборки дня", None, Some(of_day_until(state.home.greeting_hour)));
+        section_header(ui, grid, rect, "Подборки дня", None);
         let top = rect.top() + HEADER_H + HEADER_GAP;
         for (i, m) in tiles.iter().enumerate() {
             let cell = grid.cell(i, per, top, OF_DAY_H, 16.0);
@@ -553,7 +542,7 @@ fn from_library(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut 
     let mut nav = None;
     let title = if h.history { "Из твоей библиотеки" } else { "С чего начать" };
     entering(ui, rect, n, "shelf", |ui| {
-        section_header(ui, grid, rect, title, None, None);
+        section_header(ui, grid, rect, title, None);
         let top = rect.top() + HEADER_H + HEADER_GAP;
         for (i, a) in albums.iter().enumerate() {
             let cell = grid.cell(i, per, top, card_h, 24.0);
@@ -585,7 +574,7 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, pages: &mut P
     if state.prefs.mixes_downloaded_only {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + 40.0), Sense::hover());
         entering(ui, rect, n, "new-off", |ui| {
-            section_header(ui, grid, rect, "Новое для тебя", None, None);
+            section_header(ui, grid, rect, "Новое для тебя", None);
             let line = Rect::from_min_size(pos2(grid.left, rect.top() + HEADER_H + HEADER_GAP), vec2(grid.width, 40.0));
             let mut lui = ui.new_child(UiBuilder::new().max_rect(line).id_salt("home-new-off-line"));
             if widgets::quiet_line(
@@ -609,7 +598,7 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, pages: &mut P
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + body), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "new", |ui| {
-        if section_header(ui, grid, rect, "Новое для тебя", Some(("Слушать всё", Some(Icon::PlayArrow))), None) {
+        if section_header(ui, grid, rect, "Новое для тебя", Some(("Слушать всё", Some(Icon::PlayArrow)))) {
             out.push(Command::PlayMix { id: MixId::Discover });
         }
         let top = rect.top() + HEADER_H + HEADER_GAP;
@@ -698,7 +687,7 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + card_h), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "releases", |ui| {
-        if section_header(ui, grid, rect, "Новые релизы", Some(("Все", Some(Icon::ArrowForward))), None) {
+        if section_header(ui, grid, rect, "Новые релизы", Some(("Все", Some(Icon::ArrowForward)))) {
             nav = albums.first().and_then(|a| a.artist_id().cloned()).map(|a| Route::Stream(StreamPage::Artist(a)));
         }
         let top = rect.top() + HEADER_H + HEADER_GAP;
