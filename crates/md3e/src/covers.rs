@@ -1,6 +1,6 @@
-//! Album covers: a loader that decodes `file://` JPEG/PNG covers on a few
-//! worker threads, downscaled to the size they are drawn at, and an LRU that
-//! forgets the textures of covers that have scrolled away.
+//! Album covers: a loader that decodes `file://` JPEG/PNG covers and web
+//! covers on a few worker threads, downscaled to the size they are drawn at,
+//! and an LRU that forgets the textures of covers that have scrolled away.
 //!
 //! Draw covers through [`texture`]. It picks a size tier (`#128` to `#2048`
 //! after the URI, or the full file), marks the cover as used in this
@@ -11,16 +11,19 @@
 //! loader hands every decoded image to egui's texture loader and keeps no
 //! copy, and it reads files itself, so a cover costs only its texture.
 //!
-//! Web covers (`https://`) are loaded by the app's loader; with a
-//! [web sizer](set_web_sizer) the url is asked at the size it is drawn at
-//! (the same tiers), and they are forgotten off screen like files.
+//! Web covers (`https://`) are fetched by the app's bytes loader; with a
+//! [web sizer](set_web_sizer) the url is asked at the size it is drawn at.
+//! Their bytes are decoded here like files, at the same tiers (a 640 px
+//! Spotify cover drawn on a card becomes a 128 or 256 px texture), and are
+//! dropped from the bytes loader once decoded, so a web cover too costs only
+//! its texture; they are forgotten off screen like files.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use egui::load::{
-    ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint, SizedTexture, TexturePoll,
+    BytesPoll, ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint, SizedTexture, TexturePoll,
 };
 use egui::{ColorImage, Context, Id, Vec2};
 
@@ -44,9 +47,16 @@ enum Slot {
     Failed(String),
 }
 
+/// Where a cover's bytes come from.
+enum Source {
+    File(PathBuf),
+    /// A web cover's url (its bytes loader's key) and the fetched bytes.
+    Web(String, egui::load::Bytes),
+}
+
 struct Job {
     uri: String,
-    path: PathBuf,
+    source: Source,
     tier: Option<u32>,
 }
 
@@ -162,11 +172,17 @@ fn load(ctx: &Context, uri: &str) -> Result<Option<SizedTexture>, LoadError> {
     }
 }
 
-/// The URI of `uri` at `tier`, and the cover it is a size of.
+/// The URI of `uri` at `tier`, and the cover it is a size of. A web cover's
+/// is its (sized) url with the tier after it, like a file's.
 fn sized(shared: &Shared, uri: &str, tier: Option<u32>) -> (String, String) {
     if is_web(uri) {
         let sizer = *lock(&shared.web_sizer);
-        (sizer.and_then(|f| f(uri, tier)).unwrap_or_else(|| uri.to_owned()), uri.to_owned())
+        let url = sizer.and_then(|f| f(uri, tier)).unwrap_or_else(|| uri.to_owned());
+        let wanted = match tier {
+            Some(t) => format!("{url}#{t}"),
+            None => url,
+        };
+        (wanted, uri.to_owned())
     } else {
         let origin = base(uri);
         let wanted = match tier {
@@ -181,7 +197,7 @@ fn sized(shared: &Shared, uri: &str, tier: Option<u32>) -> (String, String) {
 /// `None` until it loads (or if it cannot be).
 pub fn texture(ctx: &Context, uri: &str, size: Vec2, zoom: f32) -> Option<SizedTexture> {
     let shared = match shared(ctx) {
-        Some(s) if is_web(uri) || parse(uri).is_some() => s,
+        Some(s) if parse(uri).is_some() => s,
         _ => return load(ctx, uri).ok().flatten(),
     };
     let px = size.max_elem() * ctx.pixels_per_point() * zoom.max(1.0);
@@ -215,7 +231,7 @@ pub fn texture(ctx: &Context, uri: &str, size: Vec2, zoom: f32) -> Option<SizedT
 /// GPU before its track starts, not in the frame the cover morph begins.
 pub fn prefetch_like(ctx: &Context, current: &str, next: &str) {
     let Some(shared) = shared(ctx) else { return };
-    if base(current) == base(next) || !(is_web(next) || parse(next).is_some()) {
+    if base(current) == base(next) || parse(next).is_none() {
         return;
     }
     let pass = ctx.cumulative_pass_nr();
@@ -259,11 +275,20 @@ fn texture_bytes(size: Vec2) -> usize {
     (size.x.max(1.0) * size.y.max(1.0) * 4.0 * 4.0 / 3.0) as usize
 }
 
-/// File path and tier of a cover URI; `None` for URIs this loader leaves to
+/// What a cover URI is: a file or a web url.
+enum Parsed {
+    File(PathBuf),
+    Web(String),
+}
+
+/// What a cover URI is and its tier; `None` for URIs this loader leaves to
 /// others.
-fn parse(uri: &str) -> Option<(PathBuf, Option<u32>)> {
+fn parse(uri: &str) -> Option<(Parsed, Option<u32>)> {
     let b = base(uri);
     let tier = if b.len() < uri.len() { uri[b.len() + 1..].parse().ok() } else { None };
+    if is_web(b) {
+        return Some((Parsed::Web(b.to_owned()), tier));
+    }
     let path = b.strip_prefix("file://")?;
     let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
     if !matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
@@ -278,16 +303,22 @@ fn parse(uri: &str) -> Option<(PathBuf, Option<u32>)> {
     } else {
         PathBuf::from(path)
     };
-    Some((path, tier))
+    Some((Parsed::File(path), tier))
 }
 
-fn decode(path: &Path, tier: Option<u32>) -> Result<ColorImage, String> {
-    let img = image::ImageReader::open(path)
-        .map_err(|e| e.to_string())?
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?
-        .decode()
-        .map_err(|e| e.to_string())?;
+fn decode(source: &Source, tier: Option<u32>) -> Result<ColorImage, String> {
+    let img = match source {
+        Source::File(path) => image::ImageReader::open(path)
+            .map_err(|e| e.to_string())?
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?
+            .decode(),
+        Source::Web(_, bytes) => image::ImageReader::new(std::io::Cursor::new(&bytes[..]))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?
+            .decode(),
+    }
+    .map_err(|e| e.to_string())?;
     let side = tier.unwrap_or(FULL);
     let img = if img.width().max(img.height()) > side { img.thumbnail(side, side) } else { img };
     let rgba = img.to_rgba8();
@@ -351,10 +382,17 @@ impl Shared {
             if !matches!(lock(&self.slots).get(&job.uri), Some(Slot::Pending)) {
                 continue;
             }
-            let slot = match decode(&job.path, job.tier) {
+            let slot = match decode(&job.source, job.tier) {
                 Ok(img) => Slot::Ready(Arc::new(img)),
                 Err(e) => Slot::Failed(e),
             };
+            // The texture is all a web cover needs from now on; another
+            // tier reads it again from the disk cache.
+            if let Source::Web(url, _) = &job.source {
+                for l in ctx.loaders().bytes.lock().iter() {
+                    l.forget(url);
+                }
+            }
             let mut slots = lock(&self.slots);
             if let Some(s @ Slot::Pending) = slots.get_mut(&job.uri) {
                 *s = slot;
@@ -398,8 +436,25 @@ impl Shared {
                 }
             }
         }
-        for uri in forget {
-            ctx.forget_image(&uri);
+        // A web cover none of whose tiers is kept any more also leaves the
+        // bytes loader (and its download queue if it still waits there).
+        let mut urls: Vec<&str> =
+            forget.iter().filter(|u| is_web(u) && base(u) != u.as_str()).map(|u| base(u)).collect();
+        if !urls.is_empty() {
+            let lru = lock(&self.lru);
+            urls.retain(|url| !lru.used.keys().any(|k| base(k) == *url));
+            urls.sort_unstable();
+            urls.dedup();
+        }
+        for uri in &forget {
+            ctx.forget_image(uri);
+        }
+        if !urls.is_empty() {
+            for l in ctx.loaders().bytes.lock().iter() {
+                for url in &urls {
+                    l.forget(url);
+                }
+            }
         }
     }
 }
@@ -410,7 +465,7 @@ impl ImageLoader for CoverLoader {
     }
 
     fn load(&self, ctx: &Context, uri: &str, _: SizeHint) -> ImageLoadResult {
-        let Some((path, tier)) = parse(uri) else {
+        let Some((parsed, tier)) = parse(uri) else {
             return Err(LoadError::NotSupported);
         };
         let mut slots = lock(&self.0.slots);
@@ -426,9 +481,26 @@ impl ImageLoader for CoverLoader {
                 r
             }
             None => {
+                let source = match parsed {
+                    Parsed::File(path) => Source::File(path),
+                    // Polled until the bytes are in; nothing is kept here
+                    // meanwhile (the bytes loader remembers a failure).
+                    Parsed::Web(url) => {
+                        drop(slots);
+                        let bytes = match ctx.try_load_bytes(&url)? {
+                            BytesPoll::Ready { bytes, .. } => bytes,
+                            BytesPoll::Pending { size } => return Ok(ImagePoll::Pending { size }),
+                        };
+                        slots = lock(&self.0.slots);
+                        if slots.contains_key(uri) {
+                            return Ok(ImagePoll::Pending { size: None });
+                        }
+                        Source::Web(url, bytes)
+                    }
+                };
                 slots.insert(uri.to_owned(), Slot::Pending);
                 drop(slots);
-                self.0.enqueue(ctx, Job { uri: uri.to_owned(), path, tier });
+                self.0.enqueue(ctx, Job { uri: uri.to_owned(), source, tier });
                 Ok(ImagePoll::Pending { size: None })
             }
         }
@@ -528,11 +600,14 @@ mod tests {
     #[test]
     fn uris_parse_with_and_without_a_tier() {
         let (p, t) = parse("file:///x/a/cover.jpg#256").unwrap();
-        assert!(p.ends_with("x/a/cover.jpg"));
+        assert!(matches!(p, Parsed::File(p) if p.ends_with("x/a/cover.jpg")));
         assert_eq!(t, Some(256));
         assert_eq!(parse("file:///x/a/cover.PNG").unwrap().1, None);
         assert!(parse("file:///x/a/icon.svg").is_none());
         assert!(parse("bytes://cover.jpg").is_none());
+        let (w, t) = parse("https://i.scdn.co/image/ab67#128").unwrap();
+        assert!(matches!(w, Parsed::Web(u) if u == "https://i.scdn.co/image/ab67"));
+        assert_eq!(t, Some(128));
         assert_eq!(base("file:///x/a#b/cover.jpg"), "file:///x/a#b/cover.jpg");
         assert_eq!(base("file:///x/cover.jpg#512"), "file:///x/cover.jpg");
     }
@@ -602,42 +677,52 @@ mod tests {
         assert_eq!(first[0].map(|t| t.size), Some(vec2(128.0, 128.0)));
     }
 
-    /// Web "covers" of the size their url says (`https://x/a=w226`), ready
-    /// at once unless the url ends in `slow`; counts what was forgotten.
+    /// The bytes of web "covers": PNGs of the size their url says
+    /// (`https://x/a=w226`, 640 px without one), ready at once unless the url
+    /// ends in `slow`. Keeps what it handed out until it is forgotten, and
+    /// counts what was forgotten.
     #[derive(Default)]
     struct WebStub {
+        held: Mutex<HashMap<String, usize>>,
         forgotten: Mutex<Vec<String>>,
     }
 
-    impl ImageLoader for WebStub {
+    impl egui::load::BytesLoader for WebStub {
         fn id(&self) -> &str {
             "web-stub"
         }
-        fn load(&self, _: &Context, uri: &str, _: SizeHint) -> ImageLoadResult {
+        fn load(&self, _: &Context, uri: &str) -> egui::load::BytesLoadResult {
             if !is_web(uri) {
                 return Err(LoadError::NotSupported);
             }
             if uri.ends_with("slow") {
-                return Ok(ImagePoll::Pending { size: None });
+                return Ok(BytesPoll::Pending { size: None });
             }
-            let side: usize = uri.rsplit_once("=w").and_then(|(_, n)| n.parse().ok()).unwrap_or(640);
-            Ok(ImagePoll::Ready { image: Arc::new(ColorImage::filled([side, side], egui::Color32::RED)) })
+            let side: u32 = uri.rsplit_once("=w").and_then(|(_, n)| n.parse().ok()).unwrap_or(640);
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::RgbImage::from_pixel(side, side, image::Rgb([200, 0, 0]))
+                .write_to(&mut png, image::ImageFormat::Png)
+                .unwrap();
+            let png = png.into_inner();
+            lock(&self.held).insert(uri.to_owned(), png.len());
+            Ok(BytesPoll::Ready { size: None, bytes: egui::load::Bytes::Shared(png.into()), mime: None })
         }
         fn forget(&self, uri: &str) {
+            lock(&self.held).remove(uri);
             lock(&self.forgotten).push(uri.to_owned());
         }
         fn forget_all(&self) {}
         fn byte_size(&self) -> usize {
-            0
+            lock(&self.held).values().sum()
         }
     }
 
     #[test]
-    fn web_covers_are_asked_at_the_drawn_size_and_forgotten_off_screen() {
+    fn web_covers_decode_at_the_drawn_size_and_are_forgotten_off_screen() {
         let ctx = ctx();
         let stub = Arc::new(WebStub::default());
-        ctx.add_image_loader(stub.clone());
-        // Resizable urls end in `=w…`; `big` stands for "full size".
+        ctx.add_bytes_loader(stub.clone());
+        // Resizable urls end in `=w…`; `slow` ones never arrive.
         set_web_sizer(&ctx, |url, tier| {
             let (b, _) = url.rsplit_once("=w")?;
             Some(match tier {
@@ -646,18 +731,29 @@ mod tests {
             })
         });
         let yt = vec!["https://g/a=w544".to_owned()];
-        let got = pass(&ctx, &yt, 48.0);
-        assert_eq!(got[0].map(|t| t.size), Some(vec2(226.0, 226.0)));
+        // Asked at 226 px, decoded down to the 128 px tier.
+        assert_eq!(show(&ctx, &yt, 48.0)[0].size, vec2(128.0, 128.0));
         // Bigger: the full size is pending, the small one stands in.
         let got = pass(&ctx, &yt, 700.0);
-        assert_eq!(got[0].map(|t| t.size), Some(vec2(226.0, 226.0)));
-        // A url the sizer leaves alone is drawn as it is.
+        assert_eq!(got[0].map(|t| t.size), Some(vec2(128.0, 128.0)));
+        // A url the sizer leaves alone is asked as it is and decoded at the
+        // tier too: a 640 px cover on a card is not a 640 px texture.
         let sp = vec!["https://spotify/abc".to_owned()];
-        assert_eq!(pass(&ctx, &sp, 48.0)[0].map(|t| t.size), Some(vec2(640.0, 640.0)));
-        // The pending full size scrolled away: forgotten (it leaves the
-        // download queue).
-        pass(&ctx, &sp, 48.0);
-        pass(&ctx, &sp, 48.0);
+        assert_eq!(show(&ctx, &sp, 48.0)[0].size, vec2(128.0, 128.0));
+        let mut big = None;
+        for _ in 0..5000 {
+            big = pass(&ctx, &sp, 200.0)[0].map(|t| t.size);
+            if big == Some(vec2(256.0, 256.0)) && lock(&shared(&ctx).unwrap().slots).is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(big, Some(vec2(256.0, 256.0)));
+        // Once decoded, no copy of a cover is left: no bytes, no image.
+        assert_eq!(decoded(&ctx), 0);
+        assert!(lock(&stub.forgotten).iter().any(|u| u == "https://spotify/abc"));
+        // The pending full size scrolled away meanwhile: its url is
+        // forgotten too (it leaves the download queue).
         assert!(lock(&stub.forgotten).iter().any(|u| u == "https://g/a=w1200slow"));
     }
 

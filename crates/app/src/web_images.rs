@@ -1,7 +1,8 @@
 //! Covers of streaming services (`https://` urls) for egui's image loaders.
 //!
-//! A bytes loader: the image loader egui_extras installs decodes what it
-//! returns. A cover is looked up in memory, then on disk
+//! A bytes loader: md3e's cover loader decodes what it returns at the size
+//! the cover is drawn at and then forgets it here, so the bytes stay in
+//! memory only until then (the disk keeps them). A cover is looked up in memory, then on disk
 //! ([`DiskCache`], `data/cache/covers`), then downloaded, at most
 //! [`PARALLEL`] at a time, the most recently drawn first; covers that are no
 //! longer drawn before their turn are dropped from the queue (md3e's cover
@@ -23,9 +24,9 @@ use egui::load::{Bytes, BytesLoadResult, BytesLoader, BytesPoll, LoadError};
 
 use crate::cover_cache::DiskCache;
 
-/// Bytes kept in memory at most; the oldest images are dropped past it
-/// (egui keeps their decoded textures as long as they are drawn).
-const BUDGET: usize = 48 << 20;
+/// Bytes kept in memory at most; the oldest images are dropped past it.
+/// Covers leave once decoded, so this only bounds the ones not decoded yet.
+const BUDGET: usize = 8 << 20;
 /// An image larger than this is not a cover.
 const MAX_BYTES: usize = 8 << 20;
 /// Downloads at once.
