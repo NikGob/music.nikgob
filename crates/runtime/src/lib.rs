@@ -679,14 +679,16 @@ impl Worker {
             }
             Command::SaveQueueAsPlaylist(name) => {
                 let tracks = self.queue.tracks();
+                let before = self.library_tracks();
                 if let Some(p) = self.log_err("плейлист", self.lib.create_playlist(&name)) {
                     let _ = self.log_err("плейлист", self.lib.playlist_add_many(p.id, &tracks));
                     self.toast(format!("Плейлист «{name}» сохранён"), None);
-                    self.load_library();
+                    self.library_edited(before, Vec::new());
                 }
             }
             Command::Like(LikeTarget::Release(id), on) => self.like_release(id, on),
             Command::Like(target, on) => {
+                let before = self.library_tracks();
                 let r = if on {
                     self.lib.like(target)
                 } else {
@@ -713,27 +715,29 @@ impl Worker {
                         (false, _) => "Убрано из Любимых",
                     };
                     self.toast(text, Some(("Отменить".into(), Command::Like(target, !on))));
-                    self.refresh_liked(target, on);
+                    self.refresh_liked(target, on, before);
                 }
             }
             Command::CreatePlaylist(name) => {
                 if self.log_err("плейлист", self.lib.create_playlist(&name)).is_some() {
-                    self.load_library();
+                    self.library_edited(Held::Same, Vec::new());
                 }
             }
             Command::RenamePlaylist(id, name) => {
                 if self.log_err("плейлист", self.lib.rename_playlist(id, &name)).is_some() {
-                    self.load_library();
+                    self.library_edited(Held::Same, Vec::new());
                     self.load_playlist(id);
                 }
             }
             Command::DeletePlaylist(id) => {
+                let before = self.library_tracks();
                 if self.log_err("плейлист", self.lib.delete_playlist(id)).is_some() {
                     self.toast("Плейлист удалён", None);
-                    self.load_library();
+                    self.library_edited(before, Vec::new());
                 }
             }
             Command::AddToPlaylist(id, tracks) => {
+                let before = self.library_tracks();
                 if id == LIKED_PLAYLIST {
                     for t in &tracks {
                         if self.lib.like(*t).is_ok() {
@@ -753,10 +757,12 @@ impl Worker {
                         .map_or_else(String::new, |p| p.name)
                 };
                 self.toast(format!("Добавлено в «{name}»"), None);
-                self.load_library();
+                let releases = if id == LIKED_PLAYLIST { self.releases_of(&tracks) } else { Vec::new() };
+                self.library_edited(before, releases);
                 self.playlist_edited(id);
             }
             Command::RemoveFromPlaylist(id, track) => {
+                let before = self.library_tracks();
                 if id == LIKED_PLAYLIST {
                     let _ = self.lib.unlike(track);
                 } else if let Ok(entries) = self.lib.playlist_entries(id, 0, u32::MAX)
@@ -765,7 +771,8 @@ impl Worker {
                         let _ = self.log_err("плейлист", self.lib.playlist_remove(e.entry.id));
                 }
                 self.load_playlist(id);
-                self.load_library();
+                let releases = if id == LIKED_PLAYLIST { self.releases_of(&[track]) } else { Vec::new() };
+                self.library_edited(before, releases);
                 self.playlist_edited(id);
             }
             Command::MoveInPlaylist {
@@ -1809,6 +1816,7 @@ impl Worker {
 
     /// Liking an album = liking all its tracks; unliking unlikes them all.
     fn like_release(&mut self, id: nikgob_core::model::ReleaseId, on: bool) {
+        let before = self.library_tracks();
         let Some(tracks) = self.log_err("лайк", self.lib.like_release(id, on)) else { return };
         for &t in &tracks {
             let _ = self.lib.record_event(
@@ -1871,13 +1879,13 @@ impl Worker {
                 }
             }
         });
-        self.after_like_change();
+        self.after_like_change(before, vec![id]);
     }
 
     /// Track likes changed: album hearts and "Любимые" follow.
-    fn after_like_change(&mut self) {
+    fn after_like_change(&mut self, before: Held, releases: Vec<nikgob_core::model::ReleaseId>) {
         self.refresh_stream_page();
-        self.load_library();
+        self.library_edited(before, releases);
         let (release, playlist) = {
             let s = self.state.read();
             (s.release.as_ref().map(|r| r.card.id), s.playlist.as_ref().map(|p| p.card.id))
@@ -1917,13 +1925,76 @@ impl Worker {
                     let _ = std::fs::remove_file(&old);
                 }
             }
-            self.load_library();
+            self.library_edited(Held::Same, Vec::new());
             self.load_playlist(id);
         }
     }
 
+    /// How many tracks the library holds now, to tell whether an edit of
+    /// likes or playlists changed what is in it ([`Self::library_edited`]).
+    fn library_tracks(&self) -> Held {
+        Held::Tracks(self.lib.count_tracks(nikgob_library::TrackFilter::All).ok())
+    }
+
+    /// The releases of `tracks`, once each.
+    fn releases_of(&self, tracks: &[TrackId]) -> Vec<nikgob_core::model::ReleaseId> {
+        let mut ids: Vec<_> =
+            tracks.iter().filter_map(|t| self.lib.get_track(*t).ok().flatten()?.release_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Likes or playlists were edited. When the library holds the same
+    /// tracks as `before` (a local song liked, a playlist renamed…), only
+    /// what such an edit changes there is read again and published: the
+    /// playlist cards, the cards of `releases` and the page of «Треки»
+    /// (their hearts). When it
+    /// does not (a stream song liked or added to a playlist joins the
+    /// library, one unliked leaves it), or the library was never loaded,
+    /// all of it is read again.
+    fn library_edited(&mut self, before: Held, releases: Vec<nikgob_core::model::ReleaseId>) {
+        let same = match before {
+            Held::Same => true,
+            Held::Tracks(Some(n)) => self.library_tracks() == Held::Tracks(Some(n)),
+            Held::Tracks(None) => false,
+        };
+        if !same || !self.state.read().library.loaded {
+            self.load_library();
+            return;
+        }
+        self.stream_analysis_changed();
+        self.recs_library_changed();
+        let playlists = self.log_err("плейлисты", self.lib.list_playlists()).unwrap_or_default();
+        let rows: Vec<_> =
+            releases.iter().filter_map(|id| self.lib.get_release_row(*id).ok().flatten()).collect();
+        let res = &mut self.res;
+        let playlists: Vec<_> = playlists.iter().map(|p| res.playlist(p)).collect();
+        let cards: Vec<_> = rows.iter().map(|r| res.release(r)).collect();
+        let liked = !cards.is_empty();
+        self.publish(|s| {
+            s.library.playlists = playlists;
+            let l = &mut s.library;
+            for list in [&mut l.releases, &mut l.recently_added, &mut l.often_played] {
+                for c in list.iter_mut() {
+                    if let Some(new) = cards.iter().find(|n| n.id == c.id) {
+                        *c = new.clone();
+                    }
+                }
+            }
+        });
+        // Likes: the hearts of «Треки» too.
+        if liked {
+            let (offset, sort) = {
+                let s = self.state.read();
+                (s.library.tracks_offset, s.library.track_sort)
+            };
+            self.load_tracks(offset, 200, sort);
+        }
+    }
+
     /// Updates `liked` flags already shown without reloading everything.
-    fn refresh_liked(&mut self, target: LikeTarget, on: bool) {
+    fn refresh_liked(&mut self, target: LikeTarget, on: bool, before: Held) {
         self.publish(|s| {
             let fix = |t: &mut nikgob_view::TrackRow| {
                 if LikeTarget::Track(t.id) == target {
@@ -1982,8 +2053,9 @@ impl Worker {
             s.search.artists.iter_mut().for_each(fix_artist);
             s.home.artist_mixes.iter_mut().for_each(fix_artist);
         });
-        if let LikeTarget::Track(_) = target {
-            self.after_like_change();
+        if let LikeTarget::Track(t) = target {
+            let releases = self.releases_of(&[t]);
+            self.after_like_change(before, releases);
         }
     }
 }
@@ -2144,6 +2216,17 @@ fn track_filter(only_local: bool) -> nikgob_library::TrackFilter {
     } else {
         nikgob_library::TrackFilter::All
     }
+}
+
+/// What the library held before an edit of likes or playlists
+/// ([`Worker::library_edited`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Held {
+    /// How many tracks (`None`: unknown).
+    Tracks(Option<u32>),
+    /// The edit cannot move a track in or out (a playlist created or
+    /// renamed, its cover).
+    Same,
 }
 
 /// Crossfade length from prefs; `None` means gapless back-to-back.

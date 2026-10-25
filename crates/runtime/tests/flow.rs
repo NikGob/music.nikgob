@@ -512,3 +512,69 @@ fn volume_and_queue_come_back_after_a_restart_paused_in_place() {
         s.player.status == nikgob_view::Status::Playing && s.player.position >= Duration::from_millis(1500)
     });
 }
+
+/// A like of a song with a file and a playlist edit publish what changed in
+/// the library (the album's heart, the songs' hearts, the playlist cards)
+/// without reading it all again; a stream song liked joins the library.
+#[test]
+fn likes_and_playlist_edits_update_the_library_in_place() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, LikeTarget, Release, Source, SourceKind, Track};
+
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let release = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    let tracks: Vec<Track> = (0..2)
+        .map(|i| {
+            let mut t = Track::new(format!("t{i}"), credit.clone());
+            t.release_id = Some(release.id);
+            t.track_no = i + 1;
+            let t = lib.upsert_track(&t).unwrap();
+            lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("Music/t{i}.opus"), Codec::Opus))
+                .unwrap();
+            t
+        })
+        .collect();
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: Vec::new(),
+            library_dir: std::env::temp_dir(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt.send(Command::LoadLibrary);
+    wait_for(&rt, "the library", |s| s.library.loaded && s.library.tracks.len() == 2);
+    let album = |s: &ViewState| s.library.releases.iter().find(|r| r.id == release.id).map(|r| r.liked);
+    let row = |s: &ViewState, i: usize| s.library.tracks.iter().find(|t| t.id == tracks[i].id).map(|t| t.liked);
+    assert_eq!(album(&rt.state()), Some(false));
+
+    rt.send(Command::Like(LikeTarget::Track(tracks[0].id), true));
+    wait_for(&rt, "the first heart", |s| row(s, 0) == Some(true));
+    assert_eq!(album(&rt.state()), Some(false), "one of two");
+    rt.send(Command::AddToPlaylist(nikgob_view::LIKED_PLAYLIST, vec![tracks[1].id]));
+    wait_for(&rt, "the album's heart", |s| album(s) == Some(true) && row(s, 1) == Some(true));
+    rt.send(Command::Like(LikeTarget::Track(tracks[1].id), false));
+    wait_for(&rt, "the album's heart gone", |s| album(s) == Some(false) && row(s, 1) == Some(false));
+
+    rt.send(Command::CreatePlaylist("Дорога".into()));
+    wait_for(&rt, "the playlist", |s| s.library.playlists.iter().any(|p| p.name == "Дорога"));
+    let id = rt.state().library.playlists.iter().find(|p| p.name == "Дорога").unwrap().id;
+    rt.send(Command::RenamePlaylist(id, "Путь".into()));
+    wait_for(&rt, "the new name", |s| s.library.playlists.iter().any(|p| p.id == id && p.name == "Путь"));
+    rt.send(Command::DeletePlaylist(id));
+    wait_for(&rt, "the playlist gone", |s| !s.library.playlists.iter().any(|p| p.id == id));
+
+    // A song without a file joins the library with its like.
+    let stream = lib.upsert_track(&Track::new("stream", credit)).unwrap();
+    lib.add_source(&Source::new(stream.id, SourceKind::Spotify, "spotify:track:x", Codec::Vorbis))
+        .unwrap();
+    assert_eq!(rt.state().library.track_count, 2);
+    rt.send(Command::Like(LikeTarget::Track(stream.id), true));
+    wait_for(&rt, "the stream song in", |s| s.library.track_count == 3);
+}

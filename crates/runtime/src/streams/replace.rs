@@ -409,7 +409,7 @@ impl Worker {
         }
         self.wish_track_changed(track);
         self.streaming.search.forget_links();
-        self.after_like_change();
+        self.after_like_change(crate::Held::Tracks(None), Vec::new());
         let open = self.state.read().playlist.as_ref().map(|p| p.card.id);
         if let Some(p) = open.filter(|p| *p != nikgob_view::LIKED_PLAYLIST) {
             self.load_playlist(p);

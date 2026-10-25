@@ -372,7 +372,7 @@ impl Worker {
             if partial { " (new ones)" } else { "" }
         );
         if changed > 0 {
-            self.after_like_change();
+            self.after_like_change(crate::Held::Tracks(None), Vec::new());
             self.publish_wishlist();
             self.wish_tick();
         }

@@ -1185,6 +1185,14 @@ impl Library {
         })
     }
 
+    /// One release as [`Self::releases`] lists it (`None`: not listed).
+    pub fn get_release_row(&self, id: ReleaseId) -> Result<Option<ReleaseRow>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(&format!("{RELEASE_ROW_SELECT} WHERE r.id = ?1"))?;
+            Ok(stmt.query_row([id.to_string()], release_row).optional()?)
+        })
+    }
+
     /// Releases credited to an artist, newest first.
     pub fn releases_of_artist(&self, artist: ArtistId) -> Result<Vec<ReleaseRow>> {
         self.read(|c| {

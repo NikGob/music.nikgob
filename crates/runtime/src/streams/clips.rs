@@ -185,7 +185,7 @@ impl Worker {
     /// its turn has come.
     pub(crate) fn clips_tick(&mut self) {
         if std::mem::take(&mut self.streaming.clips.dirty) {
-            self.after_like_change();
+            self.after_like_change(crate::Held::Tracks(None), Vec::new());
         }
         let c = &self.streaming.clips;
         if c.busy || c.next_at.is_some_and(|t| Instant::now() < t) {

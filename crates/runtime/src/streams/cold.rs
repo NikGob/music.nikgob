@@ -995,7 +995,7 @@ impl Worker {
         cold.history.truncate(HISTORY_KEEP);
         self.publish_cold_jobs();
         self.toast(text, None);
-        self.after_like_change();
+        self.after_like_change(crate::Held::Tracks(None), Vec::new());
         self.publish_wishlist();
         self.wish_tick();
         self.enrich_tick();
