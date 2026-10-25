@@ -348,10 +348,7 @@ impl RadioState {
         let out = arrange(recs, all, &self.tail, start.as_ref(), &rules);
         for s in &out {
             self.served.push_back(s.item.clone());
-            self.tail.push(Placed {
-                artists: s.artists.clone(),
-                album: s.album,
-            });
+            self.tail.push(Placed::of(s));
         }
         while self.served.len() > SERVED_CAP {
             self.served.pop_front();

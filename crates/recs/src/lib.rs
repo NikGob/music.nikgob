@@ -47,7 +47,7 @@ pub use pick::{Item, NewTrack, Pick, Reason, Recs};
 pub use radio::{Outcome, RadioParams, RadioSeed, RadioState};
 pub use style::{StyleMix, style_words};
 pub use suggest::{Matched, ServiceSuggestions, match_suggestions, suggestion_finds};
-pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo};
+pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo, world_token};
 pub use tiles::{LyricsKind, like_title, PlaylistFacts, TILES_PER_DAY, TileGroup, TileHistory, TileKind, TileMix, TilesInput, TrackFacts};
 
 #[cfg(test)]

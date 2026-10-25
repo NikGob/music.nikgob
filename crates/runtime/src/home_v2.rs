@@ -705,6 +705,25 @@ pub(crate) fn group_worlds(releases: &[ReleaseRow]) -> Vec<Group> {
     groups
 }
 
+/// The world of each of `releases` that is in one ([`group_worlds`]): its
+/// key and title. The recommendations keep one world from filling a mix
+/// by it.
+pub(crate) fn worlds_of_releases(releases: &[ReleaseRow]) -> HashMap<ReleaseId, (String, String)> {
+    let mut out = HashMap::new();
+    for g in group_worlds(releases) {
+        for a in &g.albums {
+            out.insert(a.release.id, (g.key.clone(), g.title.clone()));
+        }
+    }
+    out
+}
+
+/// The world key of a track: its album's world, else its main artist's
+/// (the same key as the artist's own world).
+pub(crate) fn track_world_key(album_world: Option<&str>, main_artist: Option<ArtistId>) -> Option<String> {
+    album_world.map(str::to_owned).or_else(|| main_artist.map(|a| format!("artist:{a}")))
+}
+
 /// What the main button of a world plays, from its tracks in album order:
 /// «Дослушать» the unheard ones with a file, «Начать» everything when
 /// nothing was heard, «С начала» everything when all with a file were.

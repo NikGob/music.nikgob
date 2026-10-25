@@ -514,6 +514,16 @@ fn read_snapshot(
     let artists = lib.artist_names().map_err(|e| err("artists", e))?;
     let remote = lib.track_remote_ids().map_err(|e| err("remote ids", e))?;
     let releases = lib.release_names().map_err(|e| err("releases", e))?;
+    let release_rows = lib
+        .releases(0, 20_000, nikgob_library::Sort::desc(nikgob_library::ReleaseSortKey::Added))
+        .map_err(|e| err("albums", e))?;
+    let mut artist_keys: HashMap<String, ArtistId> = HashMap::new();
+    let mut names: HashMap<ArtistId, String> = HashMap::new();
+    for (id, name) in &artists {
+        artist_keys.entry(artist_key(name)).or_insert(*id);
+        names.insert(*id, name.clone());
+    }
+    let tiles_input = tiles::input(lib, &rows, &events, names.clone());
 
     // One song on two albums: the track with a file (the oldest) stands for it.
     let mut songs: HashMap<&str, (bool, TrackId)> = HashMap::new();
@@ -523,16 +533,20 @@ fn read_snapshot(
             *e = (true, r.id);
         }
     }
+    // The worlds of Главная: one of them does not fill a mix.
+    let album_worlds = crate::home_v2::worlds_of_releases(&release_rows);
     let catalog = Catalog::new(rows.iter().filter(|r| r.in_library).map(|r| {
         let song = songs.get(r.song.as_str()).map_or(r.id, |s| s.1);
-        TrackInfo::new(r.id, r.artists.clone(), r.release).with_local(r.has_local).with_song(song)
+        let world = r.release.and_then(|a| album_worlds.get(&a)).map(|w| w.0.as_str());
+        let mut t = TrackInfo::new(r.id, r.artists.clone(), r.release)
+            .with_local(r.has_local)
+            .with_song(song)
+            .with_duration(tiles_input.facts.get(&r.id).and_then(|f| f.duration_ms));
+        if let Some(key) = crate::home_v2::track_world_key(world, r.artists.first().copied()) {
+            t = t.with_world(&key);
+        }
+        t
     }));
-    let mut artist_keys: HashMap<String, ArtistId> = HashMap::new();
-    let mut names: HashMap<ArtistId, String> = HashMap::new();
-    for (id, name) in &artists {
-        artist_keys.entry(artist_key(name)).or_insert(*id);
-        names.insert(*id, name.clone());
-    }
 
     // «Не рекомендовать»: library tracks and artists, songs and artists of
     // the services (an artist disliked by name is the library's too).
@@ -640,7 +654,6 @@ fn read_snapshot(
         suggested_new,
         local_only,
     };
-    let tiles_input = tiles::input(lib, &rows, &events, names);
     Ok((snap, tiles_input, index_len))
 }
 

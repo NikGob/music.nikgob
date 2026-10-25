@@ -2,7 +2,9 @@
 //! engine context [`Recs`], picks with their reasons, the exclusion of
 //! disliked tracks and artists, the diversity rules (at most one track of
 //! an artist in any window of three, at most two of an album in any window
-//! of ten) and the smooth order: a greedy nearest-neighbour path through
+//! of ten, at most two of a world — a soundtrack franchise or an artist's
+//! discography — in any window of three and a quarter of the whole, recs-v2
+//! §1.5) and the smooth order: a greedy nearest-neighbour path through
 //! the picks in the normalised, weighted bliss space, where a track without
 //! a vector stands as close to another as their shared artist, album or
 //! co-listening says.
@@ -162,6 +164,7 @@ impl<'a> Recs<'a> {
             reason,
             artists: t.artists.iter().map(|a| token_of_artist(*a)).collect(),
             album: t.release.map(|r| token(r.as_uuid().as_bytes())),
+            world: t.world,
             lib_artists: t.artists.clone(),
             vec: self.embedded(t.id),
             score,
@@ -176,6 +179,7 @@ impl<'a> Recs<'a> {
             reason: Reason::New,
             artists: if t.artist.is_empty() { Vec::new() } else { vec![token(t.artist.as_bytes())] },
             album: t.album.as_ref().map(|a| token(a.as_bytes())),
+            world: None,
             lib_artists: Vec::new(),
             vec: t.vector.map(|v| self.norm.embed(&v)),
             score,
@@ -208,6 +212,8 @@ pub(crate) struct Slot {
     /// Artist tokens (library artists by id, new tracks by folded name).
     pub artists: Vec<u64>,
     pub album: Option<u64>,
+    /// [`TrackInfo::world`].
+    pub world: Option<u64>,
     pub lib_artists: Vec<ArtistId>,
     /// Embedded vector.
     pub vec: Option<Vector>,
@@ -228,7 +234,22 @@ impl Slot {
 pub struct Placed {
     pub artists: Vec<u64>,
     pub album: Option<u64>,
+    #[serde(default)]
+    pub world: Option<u64>,
 }
+
+impl Placed {
+    pub(crate) fn of(s: &Slot) -> Self {
+        Self {
+            artists: s.artists.clone(),
+            album: s.album,
+            world: s.world,
+        }
+    }
+}
+
+/// A placed track as the rules see it: artists, album, world.
+type Seen<'a> = (&'a [u64], Option<u64>, Option<u64>);
 
 /// The diversity rules.
 #[derive(Clone, Copy, Debug)]
@@ -238,7 +259,14 @@ pub(crate) struct Diversity {
     /// At most `album_max` of one album within `album_window` tracks.
     pub album_window: usize,
     pub album_max: usize,
-    /// An artist the artist rule does not apply to (an artist's radio).
+    /// At most `world_max` of one world within `world_window` tracks…
+    pub world_window: usize,
+    pub world_max: usize,
+    /// …and at most this share of a selection (`world_max` at least).
+    pub world_share: f32,
+    /// An artist the artist rule does not apply to (an artist's radio);
+    /// the world rules do not apply to such a selection either (an
+    /// artist's tracks are their discography's world).
     pub exempt: Option<u64>,
 }
 
@@ -248,26 +276,40 @@ impl Default for Diversity {
             artist_window: 3,
             album_window: 10,
             album_max: 2,
+            world_window: 3,
+            world_max: 2,
+            world_share: 0.25,
             exempt: None,
         }
     }
 }
 
 impl Diversity {
+    fn worlds(&self) -> bool {
+        self.exempt.is_none()
+    }
+
     /// How many rules `s` breaks after `seq` (a sequence of placed tracks).
-    fn violations(&self, seq: &[(&[u64], Option<u64>)], s: (&[u64], Option<u64>)) -> usize {
+    fn violations(&self, seq: &[Seen<'_>], s: Seen<'_>) -> usize {
         let mut v = 0;
         let n = seq.len();
         let from = n.saturating_sub(self.artist_window - 1);
-        for (artists, _) in &seq[from..] {
+        for (artists, _, _) in &seq[from..] {
             if s.0.iter().any(|a| Some(*a) != self.exempt && artists.contains(a)) {
                 v += 1;
             }
         }
         if let Some(album) = s.1 {
             let from = n.saturating_sub(self.album_window - 1);
-            let same = seq[from..].iter().filter(|(_, b)| *b == Some(album)).count();
+            let same = seq[from..].iter().filter(|(_, b, _)| *b == Some(album)).count();
             if same >= self.album_max {
+                v += 1;
+            }
+        }
+        if let Some(world) = s.2.filter(|_| self.worlds()) {
+            let from = n.saturating_sub(self.world_window - 1);
+            let same = seq[from..].iter().filter(|(_, _, w)| *w == Some(world)).count();
+            if same >= self.world_max {
                 v += 1;
             }
         }
@@ -276,18 +318,36 @@ impl Diversity {
 
     /// Caps on whole counts that keep an order of `n` tracks possible:
     /// per artist `ceil(n / artist_window)`, per album
-    /// `album_max * ceil(n / album_window)`.
-    pub fn caps(&self, n: usize) -> (usize, usize) {
-        (n.div_ceil(self.artist_window).max(1), self.album_max * n.div_ceil(self.album_window).max(1))
+    /// `album_max * ceil(n / album_window)`, per world
+    /// `world_max * ceil(n / world_window)`.
+    pub fn caps(&self, n: usize) -> (usize, usize, usize) {
+        (
+            n.div_ceil(self.artist_window).max(1),
+            self.album_max * n.div_ceil(self.album_window).max(1),
+            if self.worlds() { self.world_max * n.div_ceil(self.world_window).max(1) } else { usize::MAX },
+        )
+    }
+
+    /// How many of `n` one world may have: its share, `world_max` at least.
+    pub fn world_cap(&self, n: usize) -> usize {
+        if !self.worlds() {
+            return usize::MAX;
+        }
+        ((n as f32 * self.world_share).ceil() as usize).max(self.world_max)
     }
 }
 
 /// The best `n` of `cands` (sorted by score, best first) whose artist and
-/// album counts let them be ordered under `rules`. Short when `cands` are.
+/// album counts let them be ordered under `rules`, no world over its
+/// share. Short when `cands` are; when too few fit, the rest by score
+/// anyway, so a library of a single world gives as many as there are.
 pub(crate) fn select_diverse(cands: Vec<Slot>, n: usize, rules: &Diversity, taken: &mut HashSet<Item>) -> Vec<Slot> {
-    let (artist_cap, album_cap) = rules.caps(n);
+    let (artist_cap, album_cap, _) = rules.caps(n);
+    let worlds: HashSet<u64> = cands.iter().filter_map(|s| s.world).collect();
+    let world_cap = if worlds.len() > 1 { rules.world_cap(n) } else { usize::MAX };
     let mut per_artist: HashMap<u64, usize> = HashMap::new();
     let mut per_album: HashMap<u64, usize> = HashMap::new();
+    let mut per_world: HashMap<u64, usize> = HashMap::new();
     let mut out = Vec::with_capacity(n);
     let mut spare = Vec::new();
     for s in cands {
@@ -302,7 +362,8 @@ pub(crate) fn select_diverse(cands: Vec<Slot>, n: usize, rules: &Diversity, take
             .iter()
             .any(|a| Some(*a) != rules.exempt && per_artist.get(a).is_some_and(|c| *c >= artist_cap));
         let album_full = s.album.is_some_and(|b| per_album.get(&b).is_some_and(|c| *c >= album_cap));
-        if artist_full || album_full {
+        let world_full = s.world.is_some_and(|w| per_world.get(&w).is_some_and(|c| *c >= world_cap));
+        if artist_full || album_full || world_full {
             spare.push(s);
             continue;
         }
@@ -311,6 +372,9 @@ pub(crate) fn select_diverse(cands: Vec<Slot>, n: usize, rules: &Diversity, take
         }
         if let Some(b) = s.album {
             *per_album.entry(b).or_default() += 1;
+        }
+        if let Some(w) = s.world {
+            *per_world.entry(w).or_default() += 1;
         }
         take(taken, &s);
         out.push(s);
@@ -383,14 +447,15 @@ pub(crate) fn arrange(recs: &Recs<'_>, mut slots: Vec<Slot>, before: &[Placed], 
     let mut out: Vec<Slot> = Vec::with_capacity(slots.len());
     let mut prev: Option<Slot> = start.cloned();
     while !slots.is_empty() {
-        let seq: Vec<(&[u64], Option<u64>)> = before
+        let seq: Vec<Seen<'_>> = before
             .iter()
-            .map(|p| (p.artists.as_slice(), p.album))
-            .chain(out.iter().map(|s| (s.artists.as_slice(), s.album)))
+            .map(|p| (p.artists.as_slice(), p.album, p.world))
+            .chain(out.iter().map(|s| (s.artists.as_slice(), s.album, s.world)))
             .collect();
         // Counts left, so an artist with many slots is not cornered at the end.
         let mut artist_left: HashMap<u64, usize> = HashMap::new();
         let mut album_left: HashMap<u64, usize> = HashMap::new();
+        let mut world_left: HashMap<u64, usize> = HashMap::new();
         for s in &slots {
             for a in &s.artists {
                 if Some(*a) != rules.exempt {
@@ -400,16 +465,20 @@ pub(crate) fn arrange(recs: &Recs<'_>, mut slots: Vec<Slot>, before: &[Placed], 
             if let Some(b) = s.album {
                 *album_left.entry(b).or_default() += 1;
             }
+            if let Some(w) = s.world {
+                *world_left.entry(w).or_default() += 1;
+            }
         }
-        let (artist_cap, album_cap) = rules.caps(slots.len() - 1);
+        let (artist_cap, album_cap, world_cap) = rules.caps(slots.len() - 1);
         let crowded = |s: &Slot| {
             let over_artist = artist_left.iter().any(|(a, c)| c - usize::from(s.artists.contains(a)) > artist_cap);
             let over_album = album_left.iter().any(|(b, c)| c - usize::from(s.album == Some(*b)) > album_cap);
-            usize::from(over_artist || over_album)
+            let over_world = world_left.iter().any(|(w, c)| c - usize::from(s.world == Some(*w)) > world_cap);
+            usize::from(over_artist || over_album || over_world)
         };
         let mut best: Option<((usize, usize), f32, usize)> = None;
         for (i, s) in slots.iter().enumerate() {
-            let v = (rules.violations(&seq, (&s.artists, s.album)), crowded(s));
+            let v = (rules.violations(&seq, (&s.artists, s.album, s.world)), crowded(s));
             let d = match &prev {
                 Some(p) => distance(recs, p, s, m),
                 // The first one: the best score.
@@ -461,25 +530,28 @@ pub(crate) fn new_count(n: usize, share: f32) -> usize {
 /// Every window of the picks keeps the rules (tests).
 #[cfg(test)]
 pub(crate) fn assert_diverse(recs: &Recs<'_>, picks: &[Pick]) {
-    let mut seq: Vec<(Vec<ArtistId>, Option<nikgob_core::model::ReleaseId>)> = Vec::new();
+    let mut seq: Vec<(Vec<ArtistId>, Option<nikgob_core::model::ReleaseId>, Option<u64>)> = Vec::new();
     for p in picks {
         // A new track holds its place (its artists are not the library's).
         let Item::Track(id) = &p.item else {
-            seq.push((Vec::new(), None));
+            seq.push((Vec::new(), None, None));
             continue;
         };
         let t = recs.catalog.get(*id).unwrap();
-        seq.push((t.artists.clone(), t.release));
+        seq.push((t.artists.clone(), t.release, t.world));
     }
-    for (i, (artists, _)) in seq.iter().enumerate() {
+    for (i, (artists, _, world)) in seq.iter().enumerate() {
         for prev in seq[i.saturating_sub(2)..i].iter() {
             assert!(!artists.iter().any(|a| prev.0.contains(a)), "an artist twice within three at {i}");
         }
+        if i >= 2 && world.is_some() {
+            assert!(!(seq[i - 1].2 == *world && seq[i - 2].2 == *world), "a world thrice running at {i}");
+        }
     }
     for w in seq.windows(10.min(seq.len()).max(1)) {
-        for (_, album) in w {
+        for (_, album, _) in w {
             if let Some(album) = album {
-                assert!(w.iter().filter(|(_, b)| b.as_ref() == Some(album)).count() <= 2, "an album thrice within ten");
+                assert!(w.iter().filter(|(_, b, _)| b.as_ref() == Some(album)).count() <= 2, "an album thrice within ten");
             }
         }
     }
@@ -508,6 +580,43 @@ mod tests {
         // A later part of the mix does not bring it back either.
         let again = select_diverse(vec![recs.slot(0, Reason::Random, 1.0)], 1, &Diversity::default(), &mut taken);
         assert!(again.is_empty());
+    }
+
+    /// 30 tracks of one world by 30 artists (a franchise's OSTs, each by
+    /// its own credit) and 30 of others, the world's scored best: a quarter
+    /// of a mix at most, never three of it running; a library of the world
+    /// alone gives as many as there are.
+    #[test]
+    fn world_cap_holds() {
+        let mut tracks: Vec<TrackInfo> = (0..30u128).map(|i| info(i, &[i as u32], Some(100 + i)).with_world("made in abyss")).collect();
+        tracks.extend((30..60u128).map(|i| info(i, &[i as u32], Some(100 + i)).with_world(&format!("other {}", i % 6))));
+        let cat = Catalog::new(tracks);
+        let mut idx = VectorIndex::with_weights([1.0; crate::DIM]);
+        for i in 0..60u128 {
+            idx.insert(tid(i), line((i % 30) as f32));
+        }
+        let taste = Taste::build(&cat, &TasteInput::default(), 0);
+        let recs = Recs::new(&cat, &taste, &idx);
+        let mia = cat.tracks()[0].world;
+        let slots = |range: std::ops::Range<usize>| -> Vec<Slot> {
+            let mut v: Vec<Slot> = range.map(|i| recs.slot(i, Reason::Random, if i < 30 { 100.0 - i as f32 } else { 10.0 - i as f32 / 10.0 })).collect();
+            v.sort_by(|a, b| b.score.total_cmp(&a.score));
+            v
+        };
+        let rules = Diversity::default();
+        let picked = select_diverse(slots(0..60), 20, &rules, &mut HashSet::new());
+        assert_eq!(picked.len(), 20);
+        let out = arrange(&recs, picked, &[], None, &rules);
+        let worlds: Vec<Option<u64>> = out.iter().map(|s| s.world).collect();
+        assert!(worlds.iter().filter(|w| **w == mia).count() <= 5, "a quarter of 20");
+        for w in worlds.windows(3) {
+            assert!(!(w[0] == mia && w[1] == mia && w[2] == mia), "{worlds:?}");
+        }
+        let picks: Vec<Pick> = out.into_iter().map(Slot::pick).collect();
+        assert_diverse(&recs, &picks);
+        // One world only: no cap.
+        let alone = select_diverse(slots(0..30), 20, &rules, &mut HashSet::new());
+        assert_eq!(alone.len(), 20);
     }
 
     #[test]

@@ -83,6 +83,13 @@ pub struct TrackInfo {
     /// The track standing for its song when the song has several tracks
     /// (one per album it is on): a mix takes one of them.
     pub song: Option<TrackId>,
+    /// The world it belongs to ([`world_token`] of the key of Главная's
+    /// world: a soundtrack franchise, else its main artist): the diversity
+    /// rules keep one world from filling a mix.
+    pub world: Option<u64>,
+    /// How long it plays (a late skip counts by how much was heard; mixes
+    /// leave out the longest).
+    pub duration_ms: Option<u32>,
 }
 
 impl TrackInfo {
@@ -94,6 +101,8 @@ impl TrackInfo {
             release,
             local: true,
             song: None,
+            world: None,
+            duration_ms: None,
         }
     }
 
@@ -111,9 +120,29 @@ impl TrackInfo {
         self
     }
 
+    /// The same track in the world of `key` ([`world_token`]).
+    #[must_use]
+    pub fn with_world(mut self, key: &str) -> Self {
+        self.world = Some(world_token(key));
+        self
+    }
+
+    /// The same track, `ms` long.
+    #[must_use]
+    pub fn with_duration(mut self, ms: Option<u32>) -> Self {
+        self.duration_ms = ms;
+        self
+    }
+
     pub fn main_artist(&self) -> Option<ArtistId> {
         self.artists.first().copied()
     }
+}
+
+/// The token of a world's key (`made in abyss`, `artist:<id>`): stable
+/// across builds.
+pub fn world_token(key: &str) -> u64 {
+    crate::pick::token(key.as_bytes())
 }
 
 /// The tracks the engine knows, with lookups by id and by artist.
