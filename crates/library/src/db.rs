@@ -83,7 +83,12 @@ fn configure(conn: &Connection, writer: bool) -> Result<()> {
     // Hot reads (queue rows, cards, likes) keep their statements prepared.
     conn.set_prepared_statement_cache_capacity(64);
     conn.pragma_update(None, "temp_store", "MEMORY")?;
-    conn.pragma_update(None, "cache_size", -16_000)?;
+    // 16 MB of pages for the writer, 2 MB for each reader: their full-table
+    // reads (recs, stats, export) would otherwise each keep a copy of most of
+    // the database, which the system's file cache already holds once. Reads
+    // go through one shared mapping of the file instead.
+    conn.pragma_update(None, "cache_size", if writer { -16_000 } else { -2_000 })?;
+    conn.pragma_update(None, "mmap_size", 64 * 1024 * 1024)?;
     if writer {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
