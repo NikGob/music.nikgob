@@ -14,8 +14,9 @@
 //! * **Channels**: Deezer and Spotify are canonical, and so is a YouTube
 //!   Music album track (a «- Topic» channel). A video is kept only from the
 //!   artist's own channel: a «Name - Song» title naming someone else than
-//!   the channel is a reupload, a channel named after nightcore or lyrics
-//!   is one too, and a user's upload is never a release.
+//!   the channel is a reupload (unless the title names the channel, or is
+//!   a title and its translation in another script), a channel named after
+//!   nightcore or lyrics is one too, and a user's upload is never a release.
 //! * **Length**: more than [`DURATION_SLACK`] off the canonical length
 //!   (Deezer's, by ISRC or the song) is a re-cut or a speed-up; longer than
 //!   [`LOOP_MS`] is a loop.
@@ -186,6 +187,41 @@ fn official(t: &StreamTrack) -> bool {
     }
 }
 
+/// `title` names `channel` as a whole word or words («AIYOU - Eve Music
+/// Video» of Eve).
+fn mentions(title: &str, channel: &str) -> bool {
+    let ch = spaced(channel);
+    let ch = ch.trim();
+    !ch.is_empty() && has_phrase(&spaced(title), ch)
+}
+
+/// The writing system most letters of `s` are in: Latin, Cyrillic, Greek,
+/// the Japanese, Chinese and Korean scripts as one, or another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Script {
+    Latin,
+    Cyrillic,
+    Greek,
+    Cjk,
+    Other,
+}
+
+fn script(s: &str) -> Option<Script> {
+    let mut n = [0usize; 5];
+    for c in s.chars().filter(|c| c.is_alphabetic()) {
+        let k = match c as u32 {
+            0x41..=0x24F => Script::Latin,
+            0x370..=0x3FF => Script::Greek,
+            0x400..=0x52F => Script::Cyrillic,
+            0x3040..=0x30FF | 0x3400..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF66..=0xFF9F => Script::Cjk,
+            _ => Script::Other,
+        };
+        n[k as usize] += 1;
+    }
+    let (i, top) = n.iter().enumerate().max_by_key(|x| *x.1)?;
+    (*top > 0).then(|| [Script::Latin, Script::Cyrillic, Script::Greek, Script::Cjk, Script::Other][i])
+}
+
 /// The channel of a YouTube upload, as the services give it (its first
 /// artist).
 fn channel(t: &StreamTrack) -> &str {
@@ -236,11 +272,15 @@ pub fn junk(t: &StreamTrack, canonical: Option<&Canonical>) -> Option<Junk> {
                 {
                     return Some(Junk::Channel);
                 }
-                // «Someone - Song» on another channel: a reupload.
+                // «Someone - Song» on another channel: a reupload. Not when
+                // the title names the channel («Song - Eve MV», «A, Eve –
+                // Song»), nor a title with its own translation in another
+                // script («暴徒 - Bouto»).
                 for dash in [" - ", " – ", " — "] {
                     if let Some(at) = t.title.find(dash) {
-                        let head = &t.title[..at];
-                        if !named(head) && !head.chars().any(|c| matches!(c, '(' | '[' | '「' | '【')) {
+                        let (head, tail) = (&t.title[..at], &t.title[at + dash.len()..]);
+                        let own = mentions(&t.title, ch) || script(head) != script(tail);
+                        if !own && !named(head) && !head.chars().any(|c| matches!(c, '(' | '[' | '「' | '【')) {
                             return Some(Junk::Channel);
                         }
                         break;
@@ -361,7 +401,20 @@ mod tests {
         for t in &kept {
             assert_eq!(junk(t, None), None, "{} by {}", t.title, t.artists[0].name);
         }
+        // The artist's own clips with their song named after a dash, or a
+        // title with its translation in another script.
+        for (title, channel) in [
+            ("AIYOU - Eve Music Video", "Eve"),
+            ("トーキョーゲットー - Eve MV", "Eve"),
+            ("暴徒 - Bouto", "Eve"),
+            ("SLAVA MARLOW, MellSher – СКУЧНО", "MellSher"),
+            ("ラブソング feat. Eve / キタニタツヤ - Love Song feat. Eve / Tatsuya Kitani", "Tatsuya Kitani"),
+        ] {
+            assert_eq!(junk(&yt(title, channel, TrackKind::Video, 200), None), None, "{title} by {channel}");
+        }
+        assert_eq!(junk(&yt("Кино - Группа крови", "Rock Archive", TrackKind::Video, 286), None), Some(Junk::Channel));
         // A user's upload or a reupload of someone else's song is not.
+
         assert_eq!(junk(&yt("Kick Back", "anime fan 2004", TrackKind::Upload, 193), None), Some(Junk::Channel));
         assert_eq!(junk(&yt("Kenshi Yonezu - Kick Back", "Anime Vibes", TrackKind::Video, 193), None), Some(Junk::Channel));
         assert_eq!(junk(&yt("Kick Back", "Kick Back Lyrics", TrackKind::Video, 193), None), Some(Junk::Channel));
