@@ -307,25 +307,55 @@ fn parse(uri: &str) -> Option<(Parsed, Option<u32>)> {
 }
 
 fn decode(source: &Source, tier: Option<u32>) -> Result<ColorImage, String> {
-    let img = match source {
-        Source::File(path) => image::ImageReader::open(path)
-            .map_err(|e| e.to_string())?
-            .with_guessed_format()
-            .map_err(|e| e.to_string())?
-            .decode(),
-        Source::Web(_, bytes) => image::ImageReader::new(std::io::Cursor::new(&bytes[..]))
-            .with_guessed_format()
-            .map_err(|e| e.to_string())?
-            .decode(),
-    }
-    .map_err(|e| e.to_string())?;
+    let file;
+    let bytes: &[u8] = match source {
+        Source::File(path) => {
+            file = std::fs::read(path).map_err(|e| e.to_string())?;
+            &file
+        }
+        Source::Web(_, bytes) => bytes,
+    };
     let side = tier.unwrap_or(FULL);
+    let img = match scaled_jpeg(bytes, side) {
+        Some(img) => img,
+        None => image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?
+            .decode()
+            .map_err(|e| e.to_string())?,
+    };
     let img = if img.width().max(img.height()) > side { img.thumbnail(side, side) } else { img };
     let rgba = img.to_rgba8();
     Ok(ColorImage::from_rgba_unmultiplied(
         [rgba.width() as usize, rgba.height() as usize],
         rgba.as_raw(),
     ))
+}
+
+/// A JPEG at least twice as large as `side` decoded at 1/2, 1/4 or 1/8 of its
+/// size, the smallest that is still at least `side` on its long side (the
+/// scaling happens in the DCT, so a 3000 px cover for a 128 px tile never
+/// takes 36 MB of pixels). `None`: not such a JPEG, or one this decoder
+/// cannot scale (CMYK, 12-bit, anything it rejects); it is decoded whole.
+fn scaled_jpeg(bytes: &[u8], side: u32) -> Option<image::DynamicImage> {
+    if !bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return None;
+    }
+    let mut d = jpeg_decoder::Decoder::new(bytes);
+    d.read_info().ok()?;
+    let info = d.info()?;
+    let long = u32::from(info.width.max(info.height));
+    if long < side * 2 || !matches!(info.pixel_format, jpeg_decoder::PixelFormat::RGB24 | jpeg_decoder::PixelFormat::L8) {
+        return None;
+    }
+    let req = u16::try_from(side).ok()?;
+    let (w, h) = d.scale(req, req).ok()?;
+    let pixels = d.decode().ok()?;
+    let (w, h) = (u32::from(w), u32::from(h));
+    match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => image::RgbImage::from_raw(w, h, pixels).map(Into::into),
+        _ => image::GrayImage::from_raw(w, h, pixels).map(Into::into),
+    }
 }
 
 impl Shared {
@@ -636,6 +666,33 @@ mod tests {
         assert_eq!(settled(560.0), vec2(600.0, 600.0));
         // Only textures remain: no file bytes, no decoded copies.
         assert_eq!(decoded(&ctx), 0);
+    }
+
+    #[test]
+    fn large_jpegs_decode_scaled_to_the_same_picture() {
+        let dir = std::env::temp_dir().join(format!("md3e-covers-jpeg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.jpg");
+        let img = image::RgbImage::from_fn(3000, 2400, |x, y| {
+            image::Rgb([(x * 255 / 3000) as u8, (y * 255 / 2400) as u8, ((x + y) % 256) as u8 / 4 + 100])
+        });
+        img.save(&path).unwrap();
+        let source = Source::File(path.clone());
+        for side in [128, 256, 512, 1024] {
+            let got = decode(&source, Some(side)).unwrap();
+            let full = image::open(&path).unwrap().thumbnail(side, side).to_rgba8();
+            assert_eq!(got.size, [full.width() as usize, full.height() as usize]);
+            let diff: u64 = got
+                .pixels
+                .iter()
+                .zip(full.pixels())
+                .map(|(a, b)| (0..3).map(|i| u64::from(a.to_array()[i].abs_diff(b.0[i]))).sum::<u64>())
+                .sum();
+            let mean = diff as f64 / (got.pixels.len() * 3) as f64;
+            assert!(mean < 2.0, "{side}: mean difference {mean}");
+        }
+        // Not twice the tier: decoded whole as before.
+        assert!(scaled_jpeg(&std::fs::read(&path).unwrap(), 2048).is_none());
     }
 
     #[test]

@@ -19,6 +19,7 @@ material-colors.workspace = true
 fastframe-icons.workspace = true
 log.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+jpeg-decoder = { version = "0.3", default-features = false }
 rfd = { version = "0.15", default-features = false }
 
 [lints]
