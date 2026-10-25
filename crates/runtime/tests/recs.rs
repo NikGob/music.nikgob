@@ -452,7 +452,7 @@ fn the_bento_gets_a_daylist_and_tiles_that_play() {
     assert_eq!(tiles.len(), 5, "{tiles:?}");
     assert_eq!(tiles[0], MixId::Tile(TileKind::OnRepeat));
     assert_eq!(tiles.iter().collect::<std::collections::HashSet<_>>().len(), 5);
-    assert_eq!((st.tiles[0].kicker.as_str(), st.tiles[0].title.as_str()), ("ЧАЩЕ ВСЕГО", "На повторе"));
+    assert_eq!((st.tiles[0].kicker.as_str(), st.tiles[0].title.as_str()), ("Чаще всего", "На повторе"));
     assert_eq!(st.tiles[0].subtitle, "30 треков · что крутил весь месяц");
     let lottery = |t: &&nikgob_view::MixCard| t.id == MixId::Tile(TileKind::Lottery);
     assert!(st.tiles.iter().all(|t| !t.kicker.is_empty() && !t.subtitle.is_empty() && (lottery(&t) || !t.covers.is_empty())));

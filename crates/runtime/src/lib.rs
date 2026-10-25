@@ -9,6 +9,7 @@ mod analysis;
 mod convert;
 mod enrich;
 mod home;
+mod home_v2;
 mod import;
 mod lyrics;
 mod playlist_cover;
@@ -687,6 +688,27 @@ impl Worker {
                 self.preload_next();
                 self.publish_player();
             }
+            Command::SaveTracksAsPlaylist { name, tracks } => {
+                let before = self.library_tracks();
+                if let Some(p) = self.log_err("плейлист", self.lib.create_playlist(&name)) {
+                    let _ = self.log_err("плейлист", self.lib.playlist_add_many(p.id, &tracks));
+                    self.toast(format!("Плейлист «{name}» сохранён"), None);
+                    self.library_edited(before, Vec::new());
+                }
+            }
+            Command::HideHomeCard => {
+                let mut p = self.state.read().prefs.clone();
+                p.home_card = false;
+                self.publish(|s| s.prefs.home_card = false);
+                self.save_prefs();
+                self.load_home();
+                let mut back = p.clone();
+                back.home_card = true;
+                self.toast(
+                    "Карточка скрыта. Включить её снова можно в Настройках → Внешний вид → Главная.",
+                    Some(("Вернуть".into(), Command::SetPrefs(Box::new(back)))),
+                );
+            }
             Command::SaveQueueAsPlaylist(name) => {
                 let tracks = self.queue.tracks();
                 let before = self.library_tracks();
@@ -887,6 +909,9 @@ impl Worker {
                     // mixes follow when they are picked again.
                     self.load_home();
                     self.recs_prefs_changed();
+                }
+                if old.home_card != p.home_card || old.home_hidden_worlds != p.home_hidden_worlds {
+                    self.load_home();
                 }
                 if old.mixes_downloaded_only != p.mixes_downloaded_only || old.radio_new_share != p.radio_new_share {
                     self.radio_source_changed();
@@ -1760,7 +1785,11 @@ impl Worker {
     }
 
     fn load_home(&mut self) {
-        let home = home::build(&self.lib);
+        let visit = {
+            let playing = self.queue.current().map(|e| e.track);
+            home_v2::Visit::now(playing, &self.state.read().prefs)
+        };
+        let home = home::build_with(&self.lib, &visit);
         let parts = self.recs_home_parts();
         let mut view = self.res.home(&home);
         parts.apply(&mut view, &mut self.res);

@@ -49,7 +49,7 @@ pub use error::{LibraryError, Result};
 pub use joblog::JOB_LOG_KEEP;
 pub use migrations::SCHEMA_VERSION;
 pub use playlists::LIKED_PLAYLIST_NAME;
-pub use rec_facts::{LyricsLevel, PlaylistTracks, TrackFactsRow};
+pub use rec_facts::{LyricsLevel, LyricsSample, PlaylistTracks, TrackFactsRow};
 pub use recs::RecTrack;
 pub use streams::{LikedClip, TrackSnapshot, event_id, is_web_ref};
 pub use types::{

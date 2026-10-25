@@ -403,6 +403,45 @@ impl Resolver {
             artist_mixes: h.artists.iter().map(|a| self.artist(a)).collect(),
             long_unplayed: h.long_unplayed.iter().map(|r| self.release(r)).collect(),
             recently_added: h.recently_added.iter().map(|r| self.release(r)).collect(),
+            history: h.v2.history,
+            shortcuts: h
+                .v2
+                .shortcuts
+                .iter()
+                .map(|s| match s {
+                    crate::home_v2::ShortcutRef::Release(r) => v::Shortcut::Release(self.release(r)),
+                    crate::home_v2::ShortcutRef::Artist(a) => v::Shortcut::Artist(self.artist(a)),
+                    crate::home_v2::ShortcutRef::Playlist(p) => {
+                        let mut covers = Vec::new();
+                        if let Some(id) = p.id {
+                            for (r, _) in self.lib.playlist_cover_refs(id).unwrap_or_default() {
+                                if covers.len() == 4 {
+                                    break;
+                                }
+                                if let Some(c) = self.release_cover(r)
+                                    && !covers.contains(&c)
+                                {
+                                    covers.push(c);
+                                }
+                            }
+                        }
+                        v::Shortcut::Playlist(self.playlist(p), covers)
+                    }
+                })
+                .collect(),
+            listen_again: h.v2.listen_again.iter().map(|t| self.track(t)).collect(),
+            from_library: h
+                .v2
+                .from_library
+                .iter()
+                .map(|(r, heard, total)| v::ShelfAlbum { card: self.release(r), heard: *heard, total: *total })
+                .collect(),
+            worlds: h
+                .v2
+                .worlds
+                .iter()
+                .map(|w| v::World { cover: w.release.and_then(|r| self.release_cover(r)), ..w.clone() })
+                .collect(),
             // The recommendations' parts come from `recs`.
             ..v::HomeView::default()
         }

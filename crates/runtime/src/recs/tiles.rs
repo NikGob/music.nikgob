@@ -23,10 +23,15 @@ const DAY_KEY: &str = "recs.tiles";
 /// What the last days showed.
 const SHOWN_KEY: &str = "recs.tiles.shown";
 
+/// «Подборки дня» shows this many tiles a day.
+pub(crate) const HOME_TILES: usize = 4;
+
 /// A tile of the home.
 pub(crate) struct TileHome {
     pub kind: TileKind,
     pub title: String,
+    /// «1 ч 4 мин»: how long its songs play.
+    pub duration: String,
     /// «25 треков · за месяц», «Kevin Penkin, Pedro Silva и другие».
     pub subtitle: String,
     pub picks: Vec<Pick>,
@@ -144,7 +149,25 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         }
     };
     let today = snap.recs().local_day();
-    board.into_iter().filter_map(|t| home_of(snap, today, t)).collect()
+    // «На повторе» and the languages are mixes of their own now and
+    // «Наугад» is gone from the home (home v2 §1): the day shows the
+    // others, at most four.
+    board
+        .into_iter()
+        .filter(|t| !matches!(t.kind, TileKind::OnRepeat | TileKind::Lottery | TileKind::Language))
+        .filter_map(|t| home_of(snap, tiles, today, t))
+        .take(HOME_TILES)
+        .collect()
+}
+
+/// «1 ч 4 мин», «2 ч», «45 мин» of `ms`.
+pub(crate) fn hours_minutes(ms: u64) -> String {
+    let m = ((ms + 30_000) / 60_000).max(1);
+    match (m / 60, m % 60) {
+        (0, m) => format!("{m} мин"),
+        (h, 0) => format!("{h} ч"),
+        (h, m) => format!("{h} ч {m} мин"),
+    }
 }
 
 /// «каждый раз другое — жми и узнаешь»: the lottery's line, all it says.
@@ -153,7 +176,7 @@ pub(crate) const LOTTERY_SUBTITLE: &str = "каждый раз другое — 
 /// A tile as the home shows it: what is still allowed of it, its lines and
 /// covers. `None` when nothing is left. The lottery shows no covers: what
 /// it plays is drawn at the click.
-fn home_of(snap: &Snapshot, today: i64, t: TileMix) -> Option<TileHome> {
+fn home_of(snap: &Snapshot, facts: &TilesInput, today: i64, t: TileMix) -> Option<TileHome> {
     let no_streams = HashMap::new();
     let picks: Vec<Pick> = t.picks.into_iter().filter(|p| still_fits(snap, p, &no_streams)).collect();
     if picks.is_empty() {
@@ -171,8 +194,16 @@ fn home_of(snap: &Snapshot, today: i64, t: TileMix) -> Option<TileHome> {
     };
     let (title, subtitle) = lines(t.kind, &t.param, t.title, picks.len(), today, albums);
     let covers = if t.kind == TileKind::Lottery { Vec::new() } else { covers_of(snap, &picks, &no_streams) };
+    let ms: u64 = picks
+        .iter()
+        .map(|p| match &p.item {
+            Item::Track(id) => u64::from(facts.facts.get(id).and_then(|f| f.duration_ms).unwrap_or(210_000)),
+            Item::Stream(_) => 210_000,
+        })
+        .sum();
     Some(TileHome {
         kind: t.kind,
+        duration: hours_minutes(ms),
         title,
         subtitle,
         picks,
@@ -195,7 +226,7 @@ fn lines(kind: TileKind, param: &str, title: String, n: usize, today: i64, album
         TileKind::DeepCuts => "Глубже у любимых".to_owned(),
         TileKind::Long => "Длинные треки".to_owned(),
         TileKind::Short => "Короткие треки".to_owned(),
-        TileKind::SingAlong => "Со словами".to_owned(),
+        TileKind::SingAlong => "Песни с текстом".to_owned(),
         TileKind::Unfinished => "Недослушанные альбомы".to_owned(),
         TileKind::NotDownloaded => "Ещё не скачано".to_owned(),
         TileKind::Lottery => "Лотерея".to_owned(),
@@ -290,7 +321,7 @@ pub fn preview_tile_days(lib: &Library, days: usize) -> Result<Vec<Vec<PreviewTi
         shown.record(day, &board);
         let tiles = board
             .into_iter()
-            .filter_map(|t| home_of(&snap, day, t))
+            .filter_map(|t| home_of(&snap, &input, day, t))
             .map(|t| (view_kind(t.kind), t.title, t.subtitle, t.picks.len()))
             .collect();
         out.push(tiles);

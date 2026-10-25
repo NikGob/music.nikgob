@@ -34,6 +34,17 @@ pub struct TrackFactsRow {
     pub has_local: bool,
 }
 
+/// The start of a track's lyrics, to tell the language they are sung in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LyricsSample {
+    pub id: TrackId,
+    /// Marked instrumental.
+    pub instrumental: bool,
+    /// The start of the text as kept (LRC, plain, or an online source's
+    /// raw body: JSON lines or TTML); empty without any.
+    pub text: String,
+}
+
 /// A live playlist of the user's with its live tracks, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlaylistTracks {
@@ -86,6 +97,31 @@ impl Library {
                     track_no: r.get(6)?,
                     lyrics,
                     has_local: r.get(7)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Every track with a lyrics row: the instrumental mark and the start
+    /// of the text (the language of «Миксы для тебя»).
+    pub fn lyrics_samples(&self) -> Result<Vec<LyricsSample>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT t.id, COALESCE(l.instrumental, 0),
+                        COALESCE(substr(NULLIF(l.synced, ''), 1, 1500), substr(NULLIF(l.plain, ''), 1, 1500),
+                                 (SELECT substr(x.body, 1, 6000) FROM lyrics_text x
+                                   WHERE x.track_id = t.id AND x.body IS NOT NULL AND x.body != '[]' LIMIT 1), '')
+                   FROM track t
+                   LEFT JOIN lyrics l ON l.track_id = t.id
+                  WHERE t.deleted_at IS NULL
+                    AND (l.track_id IS NOT NULL OR EXISTS (SELECT 1 FROM lyrics_text x WHERE x.track_id = t.id))",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(LyricsSample {
+                    id: get_id(r, 0)?,
+                    instrumental: r.get(1)?,
+                    text: r.get(2)?,
                 })
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

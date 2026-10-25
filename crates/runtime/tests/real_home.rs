@@ -61,6 +61,34 @@ fn the_home_of_a_real_library() {
         let line: Vec<String> = tiles.iter().map(|(k, title, _, n)| format!("{} «{title}» ({n})", k.key())).collect();
         println!("  day {d}: {}", line.join(", "));
     }
+    println!("history: {}; shortcuts: {}", h.history, h.shortcuts.len());
+    for s in &h.shortcuts {
+        match s {
+            nikgob_view::Shortcut::Release(r) => println!("  album {} · {}", r.title, r.artist),
+            nikgob_view::Shortcut::Playlist(p, c) => println!("  playlist {} · {} covers", p.name, c.len()),
+            nikgob_view::Shortcut::Artist(a) => println!("  artist {}", a.name),
+        }
+    }
+    println!("lanes: {}", h.lanes.len());
+    for l in &h.lanes {
+        let mins: u64 = l.tracks.iter().filter_map(|t| t.duration).map(|d| d.as_secs()).sum::<u64>() / 60;
+        println!("  {} · {} tracks, {mins} min · {} covers · {}", l.lane.title(), l.tracks.len(), l.covers.len(), l.artists.join(", "));
+    }
+    println!("listen again: {}", h.listen_again.len());
+    for t in &h.listen_again {
+        println!("  {} · {}", t.title, t.artist);
+    }
+    println!("from library: {}", h.from_library.len());
+    for a in &h.from_library {
+        println!("  {} · {} · {} of {}", a.card.title, a.card.artist, a.heard, a.total);
+    }
+    println!("worlds: {}", h.worlds.len());
+    for w in &h.worlds {
+        println!("  {} [{}] {} | {} | {} | cover {}", w.title, w.key, w.kicker, w.facts, w.primary_tip, w.cover.is_some());
+        for c in &w.cards {
+            println!("    {} · {}", c.kicker, c.title);
+        }
+    }
     println!("moods: {}", h.moods.len());
     for m in &h.moods {
         println!("  {}", card(m));

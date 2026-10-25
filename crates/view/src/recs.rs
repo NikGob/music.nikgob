@@ -63,6 +63,9 @@ pub enum MixId {
     /// A smaller tile of the bento: one kind a day, picked anew every day
     /// ([`TileKind`], docs/stage4.md §12.9); it plays as it is.
     Tile(TileKind),
+    /// «Миксы для тебя»: the songs of one lane, about two hours, picked
+    /// anew at 06:00 (or with «Собрать заново»); it plays as it is.
+    Lane(Lane),
 }
 
 impl MixId {
@@ -70,6 +73,92 @@ impl MixId {
     /// play their tracks as they are.
     pub const fn endless(self) -> bool {
         matches!(self, Self::Mood(_) | Self::Style(_) | Self::Artist(_) | Self::Discover | Self::Daylist)
+    }
+}
+
+/// The lanes of «Миксы для тебя»: how the user listens, by the language
+/// of the songs and by soundtracks quiet or loud. The set and its order are
+/// stable; only the songs change at 06:00.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum Lane {
+    /// «Песни на русском».
+    Russian,
+    /// «Тихие саундтреки».
+    CalmSoundtracks,
+    /// «Бодрые саундтреки».
+    DriveSoundtracks,
+    /// «Песни на английском».
+    English,
+    /// «Песни на японском» (a lane of its own with enough of them).
+    Japanese,
+    /// «Песни не на русском»: English and Japanese together, when Japanese
+    /// is too little for a lane.
+    NotRussian,
+    /// «На повторе»: what played most lately.
+    OnRepeat,
+}
+
+impl Lane {
+    pub const ALL: [Self; 7] = [
+        Self::Russian,
+        Self::CalmSoundtracks,
+        Self::DriveSoundtracks,
+        Self::English,
+        Self::Japanese,
+        Self::NotRussian,
+        Self::OnRepeat,
+    ];
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Russian => "Песни на русском",
+            Self::CalmSoundtracks => "Тихие саундтреки",
+            Self::DriveSoundtracks => "Бодрые саундтреки",
+            Self::English => "Песни на английском",
+            Self::Japanese => "Песни на японском",
+            Self::NotRussian => "Песни не на русском",
+            Self::OnRepeat => "На повторе",
+        }
+    }
+
+    /// The lane's name in screenshot steps and logs.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Russian => "ru",
+            Self::CalmSoundtracks => "calm",
+            Self::DriveSoundtracks => "drive",
+            Self::English => "en",
+            Self::Japanese => "ja",
+            Self::NotRussian => "foreign",
+            Self::OnRepeat => "repeat",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|l| l.key() == key)
+    }
+}
+
+/// A mix of «Миксы для тебя».
+#[derive(Clone, Debug, PartialEq)]
+pub struct LaneCard {
+    pub lane: Lane,
+    /// Its artists, most heard first, as the library writes them (the card
+    /// says as many whole names as fit: «Серега Пират, mzlff и другие»).
+    pub artists: Vec<String>,
+    /// «С новым»: the artists of the new songs it mixes in.
+    pub new_artists: Vec<String>,
+    /// Four covers for the mosaic.
+    pub covers: Vec<Cover>,
+    /// «С новым»: the cover of a new song in the fourth place.
+    pub new_cover: Option<Cover>,
+    /// What it plays, in order.
+    pub tracks: Vec<crate::TrackRow>,
+}
+
+impl LaneCard {
+    pub const fn id(&self) -> MixId {
+        MixId::Lane(self.lane)
     }
 }
 

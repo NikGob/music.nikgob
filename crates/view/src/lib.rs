@@ -446,9 +446,110 @@ pub enum ContinueCard {
     Stream(StreamAlbumCard),
 }
 
+/// A shortcut at the top of Главная: what the user is into now (an album,
+/// a playlist or an artist), by plays that fade with a half-life of three
+/// days. A click opens it, ▶ plays it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Shortcut {
+    Release(ReleaseCard),
+    /// The playlist and up to four covers of its albums (a 2×2 mosaic).
+    Playlist(PlaylistCard, Vec<Cover>),
+    Artist(ArtistCard),
+}
+
+/// An album of «Из твоей библиотеки» (or «С чего начать» without a
+/// history): how many of its tracks were ever played.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShelfAlbum {
+    pub card: ReleaseCard,
+    pub heard: u32,
+    pub total: u32,
+}
+
+/// A world of the card at the top of Главная («Миры»): a series of
+/// soundtracks (one franchise, `recs::tiles::franchise`) with what of it
+/// is still unheard.
+#[derive(Clone, Debug, PartialEq)]
+pub struct World {
+    /// The franchise key (stable across builds).
+    pub key: String,
+    /// «MADE IN ABYSS».
+    pub title: String,
+    /// The album on the stage and on its tile: the one playing, else the
+    /// last played, else the first.
+    pub release: Option<ReleaseId>,
+    pub cover: Option<Cover>,
+    /// «Слушаешь сейчас», «Слушал вчера», «Ещё не начинал».
+    pub kicker: String,
+    /// «Kevin Penkin · 4 альбома · 134 трека · ты слышал 36 · 8 ч за 2 недели».
+    pub facts: String,
+    /// Nothing of it was played: «Начать» instead of «Дослушать».
+    pub fresh: bool,
+    /// One of its tracks plays now.
+    pub playing: bool,
+    /// «Дослушать» (the unheard tracks with a file, in album order) or
+    /// «Начать» (everything from the first track).
+    pub primary: Vec<TrackId>,
+    /// «98 треков, 4 ч 35 мин: по порядку альбомов».
+    pub primary_tip: String,
+    /// «Вперемешку»: all its tracks, shuffled.
+    pub shuffled: Vec<TrackId>,
+    /// Its albums in the library.
+    pub albums: Vec<ReleaseId>,
+    /// The three cards under the stage.
+    pub cards: Vec<WorldCard>,
+}
+
+/// One of the three cards under a world's stage: one click each.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorldCard {
+    pub icon: WorldIcon,
+    /// «Продолжить», «По порядку», «Новый альбом».
+    pub kicker: String,
+    /// «OST 1, трек 4».
+    pub title: String,
+    pub go: WorldGo,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldIcon {
+    NowPlaying,
+    Play,
+    Next,
+    Album,
+    Favorite,
+    Sound,
+}
+
+/// What a world's card does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorldGo {
+    /// The player (what plays now).
+    Player,
+    /// Plays these tracks from the first.
+    Play(Vec<TrackId>),
+    /// Opens a library album.
+    Release(ReleaseId),
+    /// Opens an album of a service.
+    Stream(RemoteId),
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HomeView {
     pub greeting_hour: u8,
+    /// Something was ever played, liked or put in a playlist.
+    pub history: bool,
+    /// The shortcuts at the top (six, eight on a wide window), or the
+    /// recently added albums without a history.
+    pub shortcuts: Vec<Shortcut>,
+    /// «Миксы для тебя» in their stable order.
+    pub lanes: Vec<LaneCard>,
+    /// «Слушать снова»: loved songs not played for a few days.
+    pub listen_again: Vec<TrackRow>,
+    /// «Из твоей библиотеки»: albums mostly unheard, other ones each day.
+    pub from_library: Vec<ShelfAlbum>,
+    /// The worlds of the card at the top, the one to open on first.
+    pub worlds: Vec<World>,
     /// The library tracks of «Твой микс» (the hero's tracks; it plays with
     /// [`Command::PlayMix`] [`MixId::Daily`]).
     pub mix: Vec<TrackRow>,
@@ -944,6 +1045,14 @@ pub struct Prefs {
     /// «Миксы только из скачанного»: mixes, moods, tiles, the daylist and
     /// radios pick only tracks with a file (no streams, no discoveries).
     pub mixes_downloaded_only: bool,
+    /// «Миксы для тебя» → «С новым»: about every fifth song of a mix is new
+    /// (from the services); «Только моё» (false) plays only the library.
+    pub mixes_with_new: bool,
+    /// «Карточка наверху главной» («Миры»): off, Главная starts with the
+    /// greeting.
+    pub home_card: bool,
+    /// The worlds taken off the card's row («Убрать из ряда»), by key.
+    pub home_hidden_worlds: Vec<String>,
     /// «Анализ звука стримов»: liked and playlist tracks without a file are
     /// analysed from YouTube Music in the background.
     pub stream_analysis: bool,
@@ -1297,6 +1406,9 @@ pub enum Command {
     MoveInQueue { entry: u64, anchor: u64, after: bool },
     ClearQueue,
     SaveQueueAsPlaylist(String),
+    /// A new playlist named so with these tracks («Сохранить как плейлист»
+    /// of a mix).
+    SaveTracksAsPlaylist { name: String, tracks: Vec<TrackId> },
 
     // Library
     Like(LikeTarget, bool),
@@ -1537,6 +1649,9 @@ pub enum Command {
     /// «Обновить» in ⋮ of a mix: «Твой микс» is picked again (and kept for
     /// the rest of the day), «Новое для тебя» is looked for again.
     RefreshMix { id: MixId },
+    /// «Скрыть карточку»: switches «Карточка наверху главной» off and says
+    /// how to bring it back (the snackbar's «Вернуть»).
+    HideHomeCard,
     /// «Скачать всё» of a mix whose songs have no file yet («Ещё не
     /// скачано»): every stream song of it goes to «Хочу скачать».
     DownloadMix { id: MixId },
@@ -1635,6 +1750,9 @@ impl Default for Prefs {
             replace_in_youtube: false,
             radio_new_share: RadioNewShare::Some,
             mixes_downloaded_only: false,
+            mixes_with_new: false,
+            home_card: true,
+            home_hidden_worlds: Vec::new(),
             stream_analysis: true,
             autoplay: true,
         }

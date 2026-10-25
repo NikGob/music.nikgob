@@ -24,6 +24,8 @@ pub enum Continue {
 
 pub struct Home {
     pub hour: u8,
+    /// Главная v2's parts read at the visit.
+    pub v2: crate::home_v2::HomeV2,
     pub mix: Vec<TrackRow>,
     pub continue_listening: Vec<Continue>,
     pub artists: Vec<ArtistRow>,
@@ -34,7 +36,13 @@ pub struct Home {
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 pub fn build(lib: &Library) -> Home {
+    build_with(lib, &crate::home_v2::Visit::now(None, &nikgob_view::Prefs::default()))
+}
+
+/// The home of a visit: what plays now and the prefs it is under.
+pub fn build_with(lib: &Library, visit: &crate::home_v2::Visit) -> Home {
     let hour = local_hour();
+    let v2 = crate::home_v2::build(lib, visit);
     let releases = lib
         .releases(0, 20_000, Sort::desc(ReleaseSortKey::Added))
         .unwrap_or_default();
@@ -156,6 +164,7 @@ pub fn build(lib: &Library) -> Home {
 
     Home {
         hour,
+        v2,
         mix,
         continue_listening,
         artists,
