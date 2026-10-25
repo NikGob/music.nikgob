@@ -1346,6 +1346,39 @@ fn thumbnail_info(ui: &mut Ui, cover: Rect, state: &ViewState, chrome: &mut Chro
     }
 }
 
+/// The natural widths of «Artist · Album»: all the artists, the first
+/// one's name, « · » and the album (0 without one).
+#[derive(Clone, Copy)]
+struct LineWidths {
+    artist: f32,
+    first: f32,
+    sep: f32,
+    album: f32,
+}
+
+/// The least of the album worth showing after « · »: a few letters and «…».
+const ALBUM_MIN: f32 = 48.0;
+
+/// How `width` is shared by the artists and « · album»: both whole when
+/// they fit; else the album truncates down to [`ALBUM_MIN`], then the
+/// artists down to the first one's name, then the album goes.
+fn split_line(width: f32, w: LineWidths) -> (f32, Option<f32>) {
+    if w.album <= 0.0 {
+        return (w.artist.min(width), None);
+    }
+    let album = w.sep + w.album;
+    if w.artist + album <= width {
+        return (w.artist, Some(album));
+    }
+    let least = w.sep + ALBUM_MIN.min(w.album);
+    if w.artist + least <= width {
+        return (w.artist, Some(width - w.artist));
+    }
+    let artist = (width - least).max(w.first.min(w.artist)).min(width);
+    let rest = width - artist;
+    (artist, (rest >= least).then_some(rest))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InfoMode {
     Normal,
@@ -1395,16 +1428,39 @@ fn info(
                         );
                         r.on_hover_cursor(egui::CursorIcon::PointingHand)
                     };
-                    // Each artist is a link of its own.
+                    // «Artist · Album» in one line: the album gives way
+                    // first, the artists keep at least the first one's name.
                     let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
-                    if let Some(r) = super::artist_links::label(ui, "np-artists", &t.artist, &t.artists, format) {
-                        chrome.nav = Some(r);
-                    }
-                    if !compact && let Some(a) = &t.album {
-                        ui.label(TypeRole::TitleMedium.style().rich(" · ", s.on_surface_variant));
-                        if link(ui, a).clicked() {
-                            chrome.nav = t.release_id.map(nikgob_view::Route::Release);
+                    let width_of = |text: &str| {
+                        ui.painter()
+                            .layout_job(egui::text::LayoutJob::single_section(text.to_owned(), format.clone()))
+                            .size()
+                            .x
+                            .ceil()
+                            + 1.0
+                    };
+                    let first = t.artists.0.first().map_or(t.artist.as_str(), |c| c.name.as_str());
+                    let widths = LineWidths {
+                        artist: width_of(&t.artist),
+                        first: width_of(first),
+                        sep: width_of(" · "),
+                        album: t.album.as_deref().map_or(0.0, width_of),
+                    };
+                    let (artist_w, album_w) = split_line(ui.available_width(), widths);
+                    let h = ui.available_height();
+                    // Each artist is a link of its own.
+                    ui.allocate_ui(vec2(artist_w, h), |ui| {
+                        if let Some(r) = super::artist_links::label(ui, "np-artists", &t.artist, &t.artists, format.clone()) {
+                            chrome.nav = Some(r);
                         }
+                    });
+                    if let (Some(a), Some(w)) = (&t.album, album_w) {
+                        ui.label(TypeRole::TitleMedium.style().rich(" · ", s.on_surface_variant));
+                        ui.allocate_ui(vec2(w - widths.sep, h), |ui| {
+                            if link(ui, a).clicked() {
+                                chrome.nav = t.release_id.map(nikgob_view::Route::Release);
+                            }
+                        });
                     }
                 });
             }
@@ -1598,6 +1654,18 @@ fn ambient(ui: &Ui, rect: Rect, state: &ViewState, pages: &PageState) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_album_gives_way_before_the_artists() {
+        let w = super::LineWidths { artist: 120.0, first: 60.0, sep: 12.0, album: 200.0 };
+        assert_eq!(super::split_line(400.0, w), (120.0, Some(212.0)), "both whole");
+        assert_eq!(super::split_line(200.0, w), (120.0, Some(80.0)), "the album truncates");
+        assert_eq!(super::split_line(150.0, w), (90.0, Some(60.0)), "then the artists");
+        assert_eq!(super::split_line(80.0, w), (60.0, None), "the first artist stays, the album goes");
+        assert_eq!(super::split_line(40.0, w), (40.0, None));
+        let alone = super::LineWidths { album: 0.0, ..w };
+        assert_eq!(super::split_line(100.0, alone), (100.0, None));
+    }
     use super::*;
 
     #[test]
