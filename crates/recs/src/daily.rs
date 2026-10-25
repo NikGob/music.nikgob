@@ -200,6 +200,8 @@ mod tests {
                     kind: EventType::Complete,
                     position_ms: None,
                     context: Default::default(),
+                    origin: None,
+                    end_reason: None,
                 });
             }
         }
@@ -211,6 +213,8 @@ mod tests {
                     kind: EventType::Complete,
                     position_ms: None,
                     context: Default::default(),
+                    origin: None,
+                    end_reason: None,
                 });
             }
         }
@@ -221,6 +225,8 @@ mod tests {
             kind: EventType::Complete,
             position_ms: None,
             context: Default::default(),
+            origin: None,
+            end_reason: None,
         });
         let input = TasteInput {
             events,

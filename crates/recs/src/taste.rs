@@ -41,7 +41,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use nikgob_core::model::{ArtistId, Event, EventContext, EventType, ReleaseId, TrackId, UnixMs};
+use nikgob_core::model::{ArtistId, EndReason, Event, EventContext, EventOrigin, EventType, ReleaseId, TrackId, UnixMs};
 use serde::{Deserialize, Serialize};
 
 use crate::suggest;
@@ -105,6 +105,9 @@ pub struct TrackInfo {
     /// How long it plays (a late skip counts by how much was heard; mixes
     /// leave out the longest).
     pub duration_ms: Option<u32>,
+    /// Its place on its release: disc × 1000 + number (the next on the
+    /// album).
+    pub position: u32,
 }
 
 impl TrackInfo {
@@ -118,6 +121,7 @@ impl TrackInfo {
             song: None,
             world: None,
             duration_ms: None,
+            position: 0,
         }
     }
 
@@ -146,6 +150,13 @@ impl TrackInfo {
     #[must_use]
     pub fn with_duration(mut self, ms: Option<u32>) -> Self {
         self.duration_ms = ms;
+        self
+    }
+
+    /// The same track at `position` of its release.
+    #[must_use]
+    pub fn with_position(mut self, position: u32) -> Self {
+        self.position = position;
         self
     }
 
@@ -287,6 +298,10 @@ pub struct Play {
     pub position_ms: Option<u32>,
     /// Where it played from (a run of early skips in a playlist is leafing).
     pub context: EventContext,
+    /// Who chose it (a start).
+    pub origin: Option<EventOrigin>,
+    /// Why it ended (an end).
+    pub end_reason: Option<EndReason>,
 }
 
 impl Play {
@@ -298,6 +313,8 @@ impl Play {
             kind,
             position_ms,
             context: EventContext::Other,
+            origin: None,
+            end_reason: None,
         }
     }
 }
@@ -310,6 +327,8 @@ impl From<&Event> for Play {
             kind: e.event_type,
             position_ms: e.position_ms,
             context: e.context,
+            origin: e.origin,
+            end_reason: e.end_reason,
         }
     }
 }

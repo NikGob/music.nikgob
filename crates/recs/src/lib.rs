@@ -19,16 +19,23 @@
 //!   of them.
 //! * [`suggest`]: the services' own suggestions as a signal of taste and
 //!   as discovery votes.
+//! * [`model`]: the user model of recs-v2 — the history's stats of tracks,
+//!   worlds and track pairs, the online models of the next start and of
+//!   the early skip; [`session`]: the session they score in;
+//!   [`songtype`]: sung or instrumental, the language, a soundtrack's song.
 
 pub mod analysis;
 pub mod daily;
 pub mod daylist;
 pub mod discover;
 pub mod index;
+pub mod model;
 pub mod mood;
 pub mod pick;
 pub mod radio;
 pub mod rng;
+pub mod session;
+pub mod songtype;
 pub mod style;
 pub mod suggest;
 pub mod taste;
@@ -42,9 +49,12 @@ pub use discover::{
     song_key, stream_song_key,
 };
 pub use index::{Normalizer, VectorIndex};
+pub use model::{FEATURE_VERSION, Model, ModelInput, Moment, SkipModel, UserModel, Weights};
 pub use mood::{Axes, Mood};
 pub use pick::{Item, NewTrack, Pick, Reason, Recs};
 pub use radio::{Outcome, RadioParams, RadioSeed, RadioState};
+pub use session::{Ended, Session};
+pub use songtype::{Lang, SONGTYPE_RULES, SongInput, SongLane, SongType, SongTypes, Voice, song_types};
 pub use style::{StyleMix, style_words};
 pub use suggest::{Matched, ServiceSuggestions, match_suggestions, suggestion_finds};
 pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo, hot_affinity, world_token};
@@ -104,6 +114,8 @@ pub(crate) mod test_util {
                 kind: kinds[rng.below(3)],
                 position_ms: Some(rng.below(300_000) as u32),
                 context: Default::default(),
+                origin: None,
+                end_reason: None,
             })
             .collect();
         let likes = (0..2_000).map(|_| tid(rng.below(tracks as usize) as u128)).collect();
