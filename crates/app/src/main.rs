@@ -2,7 +2,9 @@
 //!
 //! Opens the library, starts the audio engine and the runtime, and draws
 //! the MD3E interface. Closing the window hides the app to the tray while
-//! music keeps playing; the window (and its textures) is made again on show.
+//! music keeps playing: the window only hides and comes back at once
+//! («Быстрое открытие из трея»), or, with that off, it is destroyed and
+//! made again (with its textures) on show.
 
 #![windows_subsystem = "windows"]
 
@@ -151,6 +153,11 @@ struct Core {
     /// A screenshot run's `reopen`: the window closes and a new one opens.
     reopen: bool,
     wants_show: bool,
+    /// The window is kept but hidden in the tray (it draws nothing).
+    hidden: bool,
+    /// When the window was asked for from the tray: its first frame logs
+    /// how long it took to show.
+    show_at: Option<Instant>,
     last_frame: Instant,
     /// One clock for every window: each new window's egui starts its time
     /// at zero, and animations started in the old one would sit in the
@@ -230,6 +237,7 @@ impl Resident for Core {
         if self.quit {
             Headless::Quit
         } else if self.wants_show {
+            self.show_at = Some(Instant::now());
             Headless::Show
         } else {
             Headless::Wait
@@ -280,18 +288,36 @@ impl eframe::App for Window {
             self.core.ui.set_system_reduced_motion(sysmotion::reduced());
         }
         let core = &mut *self.core;
-        core.geometry.observe(ctx);
-        let (minimized, focused) = ctx.input(|i| {
+        if !core.hidden {
+            core.geometry.observe(ctx);
+        }
+        let (minimized, focused, close) = ctx.input(|i| {
             let v = i.viewport();
-            (v.minimized.unwrap_or(false), v.focused.unwrap_or(true))
+            (v.minimized.unwrap_or(false), v.focused.unwrap_or(true), v.close_requested())
         });
-        core.report_window(!minimized, focused && !minimized);
+        // «Быстрое открытие из трея»: the window hides instead of closing.
+        // Hidden, eframe runs only this logic (no drawing, no animation),
+        // and only when something wakes it: the tray, the runtime.
+        if close && !core.quit && !core.reopen && core.desktop.can_hide() && core.runtime.state().prefs.tray_keep_window {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            core.hidden = true;
+            core.geometry.flush();
+            log::info!("window hidden to the tray (kept)");
+        }
+        let shown = !minimized && !core.hidden;
+        core.report_window(shown, focused && shown);
         core.poll_desktop();
         if core.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if std::mem::take(&mut core.wants_show) {
             // Tray "show/hide" while the window exists: bring it forward.
+            if std::mem::take(&mut core.hidden) {
+                core.show_at = Some(Instant::now());
+                // Drawn at once with what it had: no rebuild.
+                ctx.request_repaint();
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -299,6 +325,12 @@ impl eframe::App for Window {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Kept in the tray: eframe still calls this for a hidden window
+        // (about ten times a second while something asks for frames), so
+        // nothing is drawn and nothing animates until it is shown again.
+        if self.core.hidden {
+            return;
+        }
         self.scrolling.apply(ui.ctx());
         let core = &mut *self.core;
         let levels = nikgob_md3e::prof::scope("levels");
@@ -334,10 +366,23 @@ impl eframe::App for Window {
                     core.reopen = true;
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
+                if let Some(after) = s.take_hide() {
+                    // As the window's ✕, then the tray's click a moment later.
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    let (asked, ctx) = (Arc::clone(&core.show_asked), ui.ctx().clone());
+                    std::thread::spawn(move || {
+                        std::thread::sleep(after);
+                        asked.store(true, Ordering::Relaxed);
+                        ctx.request_repaint();
+                    });
+                }
             }
             state.prefs.fps_limit.max(15)
         };
         core.runtime.send_all(core.commands.drain(..));
+        if let Some(t) = core.show_at.take() {
+            log::info!("window: shown from the tray, first frame drawn in {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+        }
         if let Some(f) = core.frames.as_mut() {
             let atlas = ui.ctx().fonts(|f| f.font_image_size());
             f.end(frame.info().cpu_usage, core.shot.as_ref().map_or("live", |s| s.label()), atlas);
@@ -572,6 +617,8 @@ fn main() -> eframe::Result {
         quit: false,
         reopen: false,
         wants_show: false,
+        hidden: false,
+        show_at: None,
         last_frame: Instant::now(),
         started: Instant::now(),
         // Screenshot runs get their own size and leave the real one alone.

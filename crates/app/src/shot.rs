@@ -25,6 +25,8 @@
 //! `libfilter:text` types into the library's filter, `liblist:1` shows it
 //! as a list, `sort:artist|title|year|added` sorts its albums.
 //! `reopen` closes the window and opens a new one, as the tray does.
+//! `hide:ms` closes the window as its ✕ does (to the tray) and asks for it
+//! back from the tray `ms` later (1000 by default).
 //! `mark:name` names the frames that follow in `NIKGOB_FRAMES` (until a
 //! run's first mark, each step names them after itself).
 //! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
@@ -56,6 +58,8 @@ pub struct Shot {
     marked: bool,
     /// `reopen` asked for a new window.
     reopen: bool,
+    /// `hide` asked to go to the tray and come back after this long.
+    hide: Option<std::time::Duration>,
 }
 
 fn nums(arg: &str) -> Vec<f32> {
@@ -106,6 +110,7 @@ impl Shot {
             label: "start".to_owned(),
             marked: false,
             reopen: false,
+            hide: None,
         })
     }
 
@@ -118,6 +123,11 @@ impl Shot {
     /// as when it is shown again from the tray.
     pub fn take_reopen(&mut self) -> bool {
         std::mem::take(&mut self.reopen)
+    }
+
+    /// Once after `hide`: how long the window stays in the tray.
+    pub fn take_hide(&mut self) -> Option<std::time::Duration> {
+        self.hide.take()
     }
 
     /// The step running, for the frame log.
@@ -198,6 +208,10 @@ impl Shot {
             "mark" => self.wait = 0,
             "reopen" => {
                 self.reopen = true;
+                self.wait = 40;
+            }
+            "hide" => {
+                self.hide = Some(std::time::Duration::from_millis(arg.parse().unwrap_or(1000)));
                 self.wait = 40;
             }
             "size" => {

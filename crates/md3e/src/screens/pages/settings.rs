@@ -573,6 +573,15 @@ fn general(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
         });
     });
 
+    let keep_hint = if p.tray_keep_window {
+        "Окно прячется и открывается мгновенно"
+    } else {
+        "Окно закрывается: меньше памяти, открывается дольше"
+    };
+    row(ui, Id::TrayKeepWindow, "Быстрое открытие из трея", Some(keep_hint), |ui| {
+        ui.add(Switch::new(&mut p.tray_keep_window).id_salt("set-tray-keep"));
+    });
+
     group(ui, "Управление");
     row(ui, Id::CoverClickPause, "Клик по обложке — пауза", Some("В открытом треке"), |ui| {
         ui.add(Switch::new(&mut p.cover_click_pause).id_salt("set-cover-click"));

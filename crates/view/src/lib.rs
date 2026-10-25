@@ -857,6 +857,10 @@ pub struct Prefs {
     pub autostart: bool,
     /// A start at sign-in stays in the tray, with no window.
     pub autostart_hidden: bool,
+    /// «Быстрое открытие из трея»: closing the window only hides it, so it
+    /// comes back at once (off: it is destroyed and made again, which saves
+    /// memory while it waits in the tray).
+    pub tray_keep_window: bool,
     /// A click on the Now Playing cover toggles play / pause.
     pub cover_click_pause: bool,
     /// A double click in Now Playing changes the cover outline: 0 never,
@@ -1594,6 +1598,7 @@ impl Default for Prefs {
             random_shapes: Vec::new(),
             autostart: false,
             autostart_hidden: true,
+            tray_keep_window: true,
             cover_click_pause: true,
             dbl_click_shape: 1,
             np_tap_wait: 0.22,
