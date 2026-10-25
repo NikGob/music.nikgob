@@ -466,38 +466,110 @@ pub struct ShelfAlbum {
     pub total: u32,
 }
 
-/// A world of the card at the top of Главная («Миры»): a series of
-/// soundtracks (one franchise, `recs::tiles::franchise`) with what of it
-/// is still unheard.
+/// A world of the card at the top of Главная («Миры»): a big body of
+/// music to travel through and finish — a soundtrack franchise across all
+/// its albums, or an artist's whole discography in the library — with how
+/// far the user got.
 #[derive(Clone, Debug, PartialEq)]
 pub struct World {
-    /// The franchise key (stable across builds).
+    /// Stable across builds: the franchise's key, or `artist:` and its id.
     pub key: String,
-    /// «MADE IN ABYSS».
+    /// «MADE IN ABYSS», «Серега Пират».
     pub title: String,
+    pub kind: WorldKind,
     /// The album on the stage and on its tile: the one playing, else the
     /// last played, else the first.
     pub release: Option<ReleaseId>,
     pub cover: Option<Cover>,
+    /// A larger copy of the stage cover from a service when the album's own
+    /// is small for the stage (it replaces it once loaded).
+    pub cover_hd: Option<Cover>,
     /// «Слушаешь сейчас», «Слушал вчера», «Ещё не начинал».
     pub kicker: String,
-    /// «Kevin Penkin · 4 альбома · 134 трека · ты слышал 36 · 8 ч за 2 недели».
+    /// «Саундтрек · Kevin Penkin · 4 альбома · 134 трека» / «Исполнитель ·
+    /// 7 релизов · 96 треков».
     pub facts: String,
-    /// Nothing of it was played: «Начать» instead of «Дослушать».
-    pub fresh: bool,
+    /// Tracks of it ever started, of all its tracks: «Ты слышал 36 из 134».
+    pub heard: u32,
+    pub total: u32,
+    /// What its main button does.
+    pub start: WorldStart,
     /// One of its tracks plays now.
     pub playing: bool,
-    /// «Дослушать» (the unheard tracks with a file, in album order) or
-    /// «Начать» (everything from the first track).
+    /// The tracks of the main button: «Дослушать» the unheard ones with a
+    /// file in album order, «Начать» / «С начала» all from the first track
+    /// of the first album.
     pub primary: Vec<TrackId>,
-    /// «98 треков, 4 ч 35 мин: по порядку альбомов».
+    /// «98 треков, 4 ч 35 мин: что ещё не слышал, по порядку альбомов».
     pub primary_tip: String,
     /// «Вперемешку»: all its tracks, shuffled.
     pub shuffled: Vec<TrackId>,
-    /// Its albums in the library.
+    /// Its albums in the library, in order.
     pub albums: Vec<ReleaseId>,
     /// The three cards under the stage.
     pub cards: Vec<WorldCard>,
+}
+
+/// What a world is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorldKind {
+    /// A game's or an anime's music across its albums.
+    #[default]
+    Soundtrack,
+    /// An artist's discography.
+    Artist,
+}
+
+impl WorldKind {
+    /// «Саундтрек», «Исполнитель».
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Soundtrack => "Саундтрек",
+            Self::Artist => "Исполнитель",
+        }
+    }
+}
+
+/// The main button of a world.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorldStart {
+    /// «Дослушать»: something of it was heard, something is left.
+    #[default]
+    Finish,
+    /// «Начать»: nothing of it was played.
+    Begin,
+    /// «С начала»: everything with a file was heard.
+    Again,
+}
+
+impl WorldStart {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Finish => "Дослушать",
+            Self::Begin => "Начать",
+            Self::Again => "С начала",
+        }
+    }
+}
+
+/// An album of a world's page with how much of it was heard.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorldAlbum {
+    pub card: ReleaseCard,
+    pub heard: u32,
+    pub total: u32,
+}
+
+/// A world's page ([`Route::World`], [`Command::LoadWorld`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorldView {
+    pub world: World,
+    /// Its albums in order.
+    pub albums: Vec<WorldAlbum>,
+    /// «Новое»: its new album of the services, not in the library.
+    pub new_album: Option<StreamAlbumCard>,
+    /// «Любимое»: its liked tracks (shown from three).
+    pub liked: Vec<TrackRow>,
 }
 
 /// One of the three cards under a world's stage: one click each.
@@ -1275,6 +1347,8 @@ pub struct ViewState {
     pub accounts: Vec<AccountView>,
     /// The open album / playlist / artist of a service ([`Route::Stream`]).
     pub stream_page: Option<StreamPageView>,
+    /// The open world of Главная ([`Route::World`]).
+    pub world: Option<WorldView>,
     /// The last [`Command::Share`].
     pub share: Option<ShareView>,
     /// What the last check of Prowlarr found ([`Command::CheckIndexer`],
@@ -1350,6 +1424,8 @@ pub enum Route {
     /// An album, playlist or artist of a service (load it with
     /// [`Command::LoadStream`]; shown from [`ViewState::stream_page`]).
     Stream(StreamPage),
+    /// A world of Главная's card by its key ([`Command::LoadWorld`]).
+    World(String),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -1450,6 +1526,8 @@ pub enum Command {
     SortReleases(ReleaseSort),
     LoadRelease(ReleaseId),
     LoadArtist(ArtistId),
+    /// Fills [`ViewState::world`] with the world of this key.
+    LoadWorld(String),
     LoadPlaylist(PlaylistId),
     LoadHome,
     Search(String),

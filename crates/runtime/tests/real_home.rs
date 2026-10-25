@@ -84,7 +84,18 @@ fn the_home_of_a_real_library() {
     }
     println!("worlds: {}", h.worlds.len());
     for w in &h.worlds {
-        println!("  {} [{}] {} | {} | {} | cover {}", w.title, w.key, w.kicker, w.facts, w.primary_tip, w.cover.is_some());
+        println!(
+            "  {} [{}] {} | {} | heard {} of {} | {} {} | cover {}",
+            w.title,
+            w.key,
+            w.kicker,
+            w.facts,
+            w.heard,
+            w.total,
+            w.start.label(),
+            w.primary_tip,
+            w.cover.is_some()
+        );
         for c in &w.cards {
             println!("    {} · {}", c.kicker, c.title);
         }

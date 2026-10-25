@@ -35,10 +35,6 @@ pub struct Home {
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
-pub fn build(lib: &Library) -> Home {
-    build_with(lib, &crate::home_v2::Visit::now(None, &nikgob_view::Prefs::default()))
-}
-
 /// The home of a visit: what plays now and the prefs it is under.
 pub fn build_with(lib: &Library, visit: &crate::home_v2::Visit) -> Home {
     let hour = local_hour();

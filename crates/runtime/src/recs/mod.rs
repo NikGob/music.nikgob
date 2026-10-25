@@ -1195,7 +1195,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
     let (discoveries, new_releases_cached) = discover::cached_found(lib);
     let input = BuildInput {
         lib: lib.clone(),
-        index,
+        index: index.clone(),
         day,
         utc_offset_min,
         now: recs_now(),
@@ -1211,7 +1211,9 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
     let built = build(input)?;
     let h = &built.home;
     let mut res = crate::Resolver::new(lib.clone(), library_dir.to_owned());
-    let mut home = res.home(&crate::home::build(lib));
+    let mut visit = crate::home_v2::Visit::now(None, prefs);
+    visit.sound = Some(index.clone());
+    let mut home = res.home(&crate::home::build_with(lib, &visit));
     HomeParts::of(lib, Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only, prefs.home_card).apply(&mut home, &mut res);
     Ok(HomePreview {
         catalog: built.snap.catalog.len(),

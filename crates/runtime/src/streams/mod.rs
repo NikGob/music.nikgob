@@ -327,6 +327,15 @@ impl Streams {
         })
     }
 
+    /// Runs `f` on the streaming runtime with a sender to the worker, for a
+    /// job that reports more than once.
+    pub(crate) fn spawn_reporting<F>(&self, f: impl FnOnce(Sender<Internal>) -> F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.rt.spawn(f(self.internal.clone()));
+    }
+
     /// Remembers stream tracks by remote id.
     pub(crate) fn learn<'a>(&mut self, tracks: impl IntoIterator<Item = &'a StreamTrack>) {
         for t in tracks {

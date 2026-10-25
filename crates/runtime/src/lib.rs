@@ -8,6 +8,7 @@
 mod analysis;
 mod convert;
 mod enrich;
+mod hd_covers;
 mod home;
 mod home_v2;
 mod import;
@@ -339,6 +340,8 @@ struct Worker {
     analysis: analysis::FileAnalysis,
     /// Mixes, radio, discovery (stage 4).
     recs: recs::RecsState,
+    /// Albums whose larger cover was looked up in this run.
+    hd_asked: hd_covers::Asked,
 }
 
 impl Worker {
@@ -405,6 +408,7 @@ impl Worker {
             qualities: Vec::new(),
             streaming,
             analysis,
+            hd_asked: Default::default(),
             recs,
         }
     }
@@ -864,6 +868,7 @@ impl Worker {
             }
             Command::LoadRelease(id) => self.load_release(id),
             Command::LoadArtist(id) => self.load_artist(id),
+            Command::LoadWorld(key) => self.load_world(&key),
             Command::LoadPlaylist(id) => {
                 self.load_playlist(id);
                 self.sync_on_open(id);
@@ -1790,18 +1795,40 @@ impl Worker {
         });
     }
 
+    /// What the home and a world's page are built for now.
+    fn visit(&self) -> home_v2::Visit {
+        let playing = self.queue.current().map(|e| e.track);
+        let mut visit = home_v2::Visit::now(playing, &self.state.read().prefs);
+        visit.sound = Some(self.analysis.index().clone());
+        visit
+    }
+
     fn load_home(&mut self) {
-        let visit = {
-            let playing = self.queue.current().map(|e| e.track);
-            home_v2::Visit::now(playing, &self.state.read().prefs)
-        };
+        let visit = self.visit();
         let home = home::build_with(&self.lib, &visit);
         let parts = self.recs_home_parts();
         let mut view = self.res.home(&home);
         parts.apply(&mut view, &mut self.res);
+        let stages: Vec<_> = view.worlds.iter().filter_map(|w| w.release).collect();
         self.publish(|s| {
             s.home = view;
         });
+        self.kick_hd_covers(stages);
+    }
+
+    /// A world's page ([`Command::LoadWorld`]).
+    fn load_world(&mut self, key: &str) {
+        let visit = self.visit();
+        let Some(w) = home_v2::world(&self.lib, &visit, key) else {
+            self.publish(|s| s.world = None);
+            return;
+        };
+        let (_, releases) = if visit.local_only { (Vec::new(), Vec::new()) } else { self.discover_rows() };
+        let new_album = home_v2::world_release(&w.world, &releases).map(|i| releases[i].clone());
+        let view = self.res.world_view(&w, new_album);
+        let stage = view.world.release;
+        self.publish(|s| s.world = Some(view));
+        self.kick_hd_covers(stage);
     }
 
     fn search(&mut self, q: String) {

@@ -31,10 +31,6 @@ const AGAIN_DAYS_LONG: i64 = 14;
 /// a file, at most half of them ever played.
 const SHELF: usize = 12;
 const SHELF_MIN: u32 = 5;
-/// The card's row has at most this many worlds.
-pub const WORLDS: usize = 6;
-/// «8 ч за 2 недели».
-const LISTENED_WINDOW_MS: i64 = 14 * DAY_MS;
 
 /// A shortcut before it is drawn.
 pub enum ShortcutRef {
@@ -51,11 +47,11 @@ pub struct HomeV2 {
     pub listen_again: Vec<TrackRow>,
     pub from_library: Vec<(ReleaseRow, u32, u32)>,
     /// Without covers (the resolver adds them).
-    pub worlds: Vec<v::World>,
+    pub worlds: Vec<WorldParts>,
 }
 
 /// What the parts depend on besides the library.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Visit {
     /// The track the player has now.
     pub playing: Option<TrackId>,
@@ -66,6 +62,9 @@ pub struct Visit {
     /// Minutes east of UTC.
     pub utc_offset_min: i32,
     pub now: UnixMs,
+    /// The library's sound vectors: the unstarted worlds go by how close
+    /// they sound to what plays.
+    pub sound: Option<crate::analysis::SoundIndex>,
 }
 
 impl Visit {
@@ -76,6 +75,7 @@ impl Visit {
             hidden_worlds: prefs.home_hidden_worlds.clone(),
             utc_offset_min: jiff::Zoned::now().offset().seconds() / 60,
             now: now_ms(),
+            sound: None,
         }
     }
 
@@ -96,31 +96,36 @@ struct Facts {
     liked: HashSet<TrackId>,
 }
 
-pub fn build(lib: &Library, visit: &Visit) -> HomeV2 {
-    let mut events = lib.listening_events().unwrap_or_default();
-    events.sort_by_key(|e| e.ts);
-    let rows: HashMap<TrackId, RecTrack> = lib.rec_tracks().unwrap_or_default().into_iter().map(|r| (r.id, r)).collect();
-    let facts: HashMap<TrackId, TrackFactsRow> =
-        lib.track_facts().unwrap_or_default().into_iter().map(|f| (f.id, f)).collect();
-    let liked: HashSet<TrackId> = lib.liked_track_ids().unwrap_or_default().into_iter().collect();
-    let mut starts = Vec::new();
-    let mut completes: HashMap<TrackId, u32> = HashMap::new();
-    let mut last_start = HashMap::new();
-    for e in &events {
-        match e.event_type {
-            EventType::Start => {
-                starts.push((e.ts, e.track_id, e.context));
-                last_start.insert(e.track_id, e.ts);
+impl Facts {
+    fn read(lib: &Library) -> Self {
+        let mut events = lib.listening_events().unwrap_or_default();
+        events.sort_by_key(|e| e.ts);
+        let rows: HashMap<TrackId, RecTrack> = lib.rec_tracks().unwrap_or_default().into_iter().map(|r| (r.id, r)).collect();
+        let facts: HashMap<TrackId, TrackFactsRow> =
+            lib.track_facts().unwrap_or_default().into_iter().map(|f| (f.id, f)).collect();
+        let liked: HashSet<TrackId> = lib.liked_track_ids().unwrap_or_default().into_iter().collect();
+        let mut starts = Vec::new();
+        let mut completes: HashMap<TrackId, u32> = HashMap::new();
+        let mut last_start = HashMap::new();
+        for e in &events {
+            match e.event_type {
+                EventType::Start => {
+                    starts.push((e.ts, e.track_id, e.context));
+                    last_start.insert(e.track_id, e.ts);
+                }
+                EventType::Complete => *completes.entry(e.track_id).or_default() += 1,
+                _ => {}
             }
-            EventType::Complete => *completes.entry(e.track_id).or_default() += 1,
-            _ => {}
         }
+        Self { rows, facts, starts, completes, last_start, liked }
     }
-    let f = Facts { rows, facts, starts, completes, last_start, liked };
-    let history = !f.starts.is_empty() || !f.liked.is_empty();
+}
 
+pub fn build(lib: &Library, visit: &Visit) -> HomeV2 {
+    let f = Facts::read(lib);
+    let history = !f.starts.is_empty() || !f.liked.is_empty();
     let releases: Vec<ReleaseRow> = lib.releases(0, 20_000, Sort::desc(ReleaseSortKey::Added)).unwrap_or_default();
-    let worlds = worlds(lib, &f, &releases, visit);
+    let worlds = worlds(&f, &releases, visit);
     HomeV2 {
         history,
         shortcuts: shortcuts(lib, &f, &releases, visit, history),
@@ -316,6 +321,16 @@ pub fn short_album(album: &str, world: &str) -> String {
     let w = world.to_lowercase();
     if lower.starts_with(&w) {
         s = s.chars().skip(world.chars().count()).collect();
+    } else if let Some(i) = lower.find(&format!("\"{w}")).or_else(|| lower.find(&format!(" {w}")))
+        && lower.len() == s.len()
+    {
+        // Named inside: «TV Anime "Mushoku Tensei ~…~" Theme Song Collection».
+        s.replace_range(i + 1..i + 1 + w.len(), "");
+    }
+    for prefix in ["TV Anime ", "TVアニメ"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.to_owned();
+        }
     }
     // «~Isekai Ittara Honki Dasu~»: a subtitle between tildes.
     for (open, close) in [('~', '~'), ('〜', '〜')] {
@@ -339,8 +354,13 @@ pub fn short_album(album: &str, world: &str) -> String {
             break;
         }
     }
-    // «(OST)» after a name is noise, and so is «Special Edition».
-    let mut s = s.replace("(OST)", "").replace("[OST]", "").replace(" Special Edition", "");
+    // «(OST)» after a name is noise, and so is «Special Edition», and so are
+    // the quotes the name was taken out of.
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut s = s.replace("(OST)", "").replace("[OST]", "").replace(" Special Edition", "").replace("\"\"", "").replace("\" \"", "");
+    if s.matches('"').count() == 1 {
+        s = s.replace('"', "");
+    }
     // «II: Jobless Reincarnation OST 1» → «II · OST 1».
     if let (Some(colon), Some(ost)) = (s.find(':'), s.find("OST"))
         && colon < ost
@@ -395,44 +415,314 @@ fn count(n: usize, one: &'static str, few: &'static str, many: &'static str) -> 
     format!("{n} {}", plural(n, one, few, many))
 }
 
-/// The worlds: soundtrack series of the library (one franchise, by
-/// `recs::tiles::franchise`; an album without a soundtrack mark that
-/// starts with a franchise's name joins it), with at least one album with
-/// files; by the last play, the unstarted ones last; at most [`WORLDS`].
-fn worlds(lib: &Library, f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<v::World> {
-    struct W {
-        key: String,
-        title: String,
-        albums: Vec<ReleaseRow>,
-    }
-    let mut groups: Vec<W> = Vec::new();
-    let mut index: HashMap<String, usize> = HashMap::new();
-    let mut rest: Vec<&ReleaseRow> = Vec::new();
-    let mut sorted: Vec<&ReleaseRow> = releases.iter().filter(|r| r.local_tracks > 0 || !visit.local_only).collect();
-    sorted.sort_by(|a, b| a.release.year.cmp(&b.release.year).then_with(|| a.release.title.cmp(&b.release.title)));
-    for r in sorted {
-        match franchise(&r.release.title).map(|(_, t)| series_name(&t)) {
-            Some(title) => {
-                let key = title.to_lowercase();
-                let i = *index.entry(key.clone()).or_insert_with(|| {
-                    groups.push(W { key, title, albums: Vec::new() });
-                    groups.len() - 1
-                });
-                groups[i].albums.push(r.clone());
+/// A world before it is drawn: the view (without covers) and what its page
+/// lists.
+#[derive(Clone, Debug)]
+pub struct WorldParts {
+    pub world: v::World,
+    /// Its albums in order, with the tracks of each ever started and all.
+    pub albums: Vec<(ReleaseRow, u32, u32)>,
+    /// Its liked tracks, in album order.
+    pub liked: Vec<TrackId>,
+}
+
+/// A world's albums before their tracks are read: a franchise of
+/// soundtracks or an artist's discography.
+#[derive(Clone, Debug)]
+pub(crate) struct Group {
+    pub key: String,
+    pub title: String,
+    pub kind: v::WorldKind,
+    /// The keys of the names it goes by («no game no life», «ノーゲーム
+    /// ノーライフ»).
+    names: Vec<String>,
+    /// The names as written, its albums are named inside of.
+    pub titles: Vec<String>,
+    pub albums: Vec<ReleaseRow>,
+}
+
+/// An artist's releases make a world from this many with files (singles, and
+/// albums of which a track or two are here, are not a discography) …
+const ARTIST_RELEASES: usize = 2;
+/// … counting a release with this many tracks with files …
+const RELEASE_MIN: u32 = 3;
+/// … or from this many tracks with files.
+const ARTIST_TRACKS: u32 = 15;
+/// A franchise with fewer tracks with files is not a world to travel.
+const FRANCHISE_MIN: u32 = 5;
+
+/// A name as compared: lower case, words of letters and digits only.
+fn name_key(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A world's albums in order: by year (an album without one last), then
+/// by title.
+fn by_year(albums: &mut [ReleaseRow]) {
+    albums.sort_by(|a, b| {
+        let y = |r: &ReleaseRow| r.release.year.unwrap_or(i32::MAX);
+        y(a).cmp(&y(b)).then_with(|| a.release.title.cmp(&b.release.title))
+    });
+}
+
+fn various(r: &ReleaseRow) -> bool {
+    r.release.release_type == nikgob_core::model::ReleaseType::Compilation
+        || r.release.artist_credit.0.first().is_none_or(|p| p.name.trim().eq_ignore_ascii_case("various artists"))
+}
+
+/// The consonants of a name as it sounds, so a katakana name and the English
+/// one it spells meet: «メイドインアビス» and «made in abyss» are both
+/// «mdnbs». `None` for a name in another script.
+fn sound_skeleton(name: &str) -> Option<String> {
+    let mut out = String::new();
+    let push = |c: char, out: &mut String| {
+        if !out.ends_with(c) {
+            out.push(c);
+        }
+    };
+    let kana = name.chars().any(|c| matches!(c, '\u{3041}'..='\u{30ff}'));
+    if kana {
+        for c in name.chars() {
+            // Hiragana as katakana.
+            let k = match c {
+                '\u{3041}'..='\u{3096}' => char::from_u32(c as u32 + 0x60).unwrap_or(c),
+                _ => c,
+            };
+            let consonant = match k {
+                'カ' | 'キ' | 'ク' | 'ケ' | 'コ' => 'k',
+                'ガ' | 'ギ' | 'グ' | 'ゲ' | 'ゴ' => 'g',
+                'サ' | 'シ' | 'ス' | 'セ' | 'ソ' => 's',
+                'ザ' | 'ジ' | 'ズ' | 'ゼ' | 'ゾ' => 'z',
+                'タ' | 'チ' | 'ツ' | 'テ' | 'ト' => 't',
+                'ダ' | 'ヂ' | 'ヅ' | 'デ' | 'ド' => 'd',
+                'ナ' | 'ニ' | 'ヌ' | 'ネ' | 'ノ' | 'ン' => 'n',
+                'フ' => 'f',
+                'バ' | 'ビ' | 'ブ' | 'ベ' | 'ボ' | 'ヴ' => 'b',
+                'パ' | 'ピ' | 'プ' | 'ペ' | 'ポ' => 'p',
+                'マ' | 'ミ' | 'ム' | 'メ' | 'モ' => 'm',
+                'ラ' | 'リ' | 'ル' | 'レ' | 'ロ' => 'r',
+                // Vowels, ハ-row h, ヤ/ワ glides, small kana, ー.
+                '\u{30a1}'..='\u{30fc}' => continue,
+                c if c.is_whitespace() || !c.is_alphanumeric() => continue,
+                // Kanji or Latin among the kana: not one spelling.
+                _ => return None,
+            };
+            push(consonant, &mut out);
+        }
+    } else {
+        let lower = name.to_lowercase();
+        if !lower.chars().all(|c| c.is_ascii() || !c.is_alphanumeric()) {
+            return None;
+        }
+        let b: Vec<char> = lower.chars().filter(char::is_ascii_alphabetic).collect();
+        let mut i = 0;
+        while i < b.len() {
+            let next = b.get(i + 1).copied();
+            let (c, skip) = match (b[i], next) {
+                ('p', Some('h')) => (Some('f'), 2),
+                ('c', Some('h')) => (Some('t'), 2),
+                ('s' | 't', Some('h')) => (Some('s'), 2),
+                ('c', Some('k')) | ('q', Some('u')) => (Some('k'), 2),
+                ('g', Some('h')) => (None, 2),
+                ('k', Some('n')) => (Some('n'), 2),
+                ('c', Some('e' | 'i' | 'y')) => (Some('s'), 1),
+                ('c' | 'q', _) => (Some('k'), 1),
+                ('x', _) => {
+                    push('k', &mut out);
+                    (Some('s'), 1)
+                }
+                ('l', _) => (Some('r'), 1),
+                ('v', _) => (Some('b'), 1),
+                ('j', _) => (Some('z'), 1),
+                ('a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'h' | 'w', _) => (None, 1),
+                (c, _) => (Some(c), 1),
+            };
+            if let Some(c) = c {
+                push(c, &mut out);
             }
-            None => rest.push(r),
+            i += skip;
         }
     }
-    for r in rest {
-        let lower = r.release.title.to_lowercase();
-        if let Some(g) = groups.iter_mut().find(|g| {
-            lower.strip_prefix(&g.key).is_some_and(|tail| tail.starts_with([':', ' ', '-', '(']))
-                && g.albums.iter().any(|a| a.release.artist_credit.artist_ids().next() == r.release.artist_credit.artist_ids().next())
-        }) {
-            g.albums.push(r.clone());
-            g.albums.sort_by(|a, b| a.release.year.cmp(&b.release.year).then_with(|| a.release.title.cmp(&b.release.title)));
+    Some(out)
+}
+
+/// The one name two franchise names share, if they are one franchise: the
+/// same name, one a sequel of the other («NO GAME NO LIFE ZERO» of «NO GAME
+/// NO LIFE»), or a katakana name and the English one it spells. The Latin
+/// one is shown.
+fn same_franchise(a: &str, b: &str) -> Option<String> {
+    let (ka, kb) = (name_key(a), name_key(b));
+    if ka == kb {
+        return Some(a.to_owned());
+    }
+    if ka.starts_with(&format!("{kb} ")) {
+        return Some(b.to_owned());
+    }
+    if kb.starts_with(&format!("{ka} ")) {
+        return Some(a.to_owned());
+    }
+    // Word-prefixes of each against the other whole.
+    let prefixes = |n: &str| -> Vec<String> {
+        let words: Vec<&str> = n.split(|c: char| c.is_whitespace() || c == '・' || c == '･').filter(|w| !w.is_empty()).collect();
+        (1..=words.len()).rev().map(|k| words[..k].join(" ")).collect()
+    };
+    for (x, y) in [(a, b), (b, a)] {
+        let Some(whole) = sound_skeleton(y).filter(|s| s.len() >= 4) else { continue };
+        for p in prefixes(x) {
+            if sound_skeleton(&p).is_some_and(|s| s == whole) {
+                let latin = |n: &str| n.chars().all(|c| c.is_ascii() || !c.is_alphanumeric());
+                return Some(if latin(&p) || !latin(y) { p } else { y.to_owned() });
+            }
         }
     }
+    None
+}
+
+/// Whether an album without a soundtrack's marker belongs to franchise `g`:
+/// its title begins with a name of it, or names it in two words or more
+/// («"No Game No Life" Complete Songs», «TV Anime "Mushoku Tensei ~…~"
+/// Theme Song Collection»). A one-word name («OMORI») only takes an album of
+/// the same artist.
+fn names_franchise(r: &ReleaseRow, g: &Group) -> bool {
+    let title = name_key(&r.release.title);
+    let words: Vec<&str> = title.split(' ').collect();
+    let artist = r.release.artist_credit.artist_ids().next();
+    g.names.iter().any(|n| {
+        let nw: Vec<&str> = n.split(' ').collect();
+        let begins = words.len() > nw.len() && words.starts_with(&nw);
+        let inside = nw.len() >= 2 && words.windows(nw.len()).any(|w| w == nw.as_slice());
+        let same_artist = g.albums.iter().any(|a| a.release.artist_credit.artist_ids().next() == artist && artist.is_some());
+        (begins || inside) && (nw.len() >= 2 || same_artist)
+    })
+}
+
+/// The worlds of `releases`: soundtrack franchises (by
+/// `recs::tiles::franchise`; one franchise under two names is one world, and
+/// albums without a soundtrack's marker that name it join it), then the
+/// artists with a real discography in what is left — a franchise wins over
+/// its composer. Compilations and «Various Artists» make no artist world.
+pub(crate) fn group_worlds(releases: &[ReleaseRow]) -> Vec<Group> {
+    let mut sorted: Vec<&ReleaseRow> = releases.iter().collect();
+    sorted.sort_by(|a, b| a.release.year.cmp(&b.release.year).then_with(|| a.release.title.cmp(&b.release.title)));
+    let mut groups: Vec<Group> = Vec::new();
+    let mut taken: HashSet<ReleaseId> = HashSet::new();
+    for r in &sorted {
+        let Some((_, t)) = franchise(&r.release.title) else { continue };
+        let title = series_name(&t);
+        let key = name_key(&title);
+        if key.is_empty() {
+            continue;
+        }
+        match groups.iter_mut().find(|g| g.key == key) {
+            Some(g) => g.albums.push((*r).clone()),
+            None => groups.push(Group {
+                key: key.clone(),
+                titles: vec![title.clone()],
+                title,
+                kind: v::WorldKind::Soundtrack,
+                names: vec![key],
+                albums: vec![(*r).clone()],
+            }),
+        }
+        taken.insert(r.release.id);
+    }
+    // One franchise under two names.
+    let mut i = 0;
+    while i < groups.len() {
+        let mut j = i + 1;
+        while j < groups.len() {
+            if let Some(name) = same_franchise(&groups[i].title, &groups[j].title) {
+                let g = groups.remove(j);
+                let w = &mut groups[i];
+                w.albums.extend(g.albums);
+                w.names.extend(g.names);
+                w.titles.extend(g.titles);
+                w.title = name;
+                w.key = name_key(&w.title);
+                if !w.names.contains(&w.key) {
+                    w.names.push(w.key.clone());
+                }
+                j = i + 1;
+            } else {
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    for r in &sorted {
+        if taken.contains(&r.release.id) {
+            continue;
+        }
+        if let Some(g) = groups.iter_mut().find(|g| names_franchise(r, g)) {
+            g.albums.push((*r).clone());
+            taken.insert(r.release.id);
+        }
+    }
+    // Artists, by the main credited one.
+    let mut artists: Vec<(ArtistId, Vec<ReleaseRow>)> = Vec::new();
+    for r in &sorted {
+        if taken.contains(&r.release.id) || various(r) {
+            continue;
+        }
+        let Some(a) = r.release.artist_credit.artist_ids().next() else { continue };
+        match artists.iter_mut().find(|x| x.0 == a) {
+            Some(x) => x.1.push((*r).clone()),
+            None => artists.push((a, vec![(*r).clone()])),
+        }
+    }
+    for (a, albums) in artists {
+        let releases = albums
+            .iter()
+            .filter(|r| r.local_tracks >= RELEASE_MIN && r.release.release_type != nikgob_core::model::ReleaseType::Single)
+            .count();
+        let tracks: u32 = albums.iter().map(|r| r.local_tracks).sum();
+        if releases < ARTIST_RELEASES && tracks < ARTIST_TRACKS {
+            continue;
+        }
+        // The name it is credited by most.
+        let mut names: Vec<(String, usize)> = Vec::new();
+        for r in &albums {
+            if let Some(p) = r.release.artist_credit.0.iter().find(|p| p.artist_id == Some(a)) {
+                match names.iter_mut().find(|n| n.0 == p.name) {
+                    Some(n) => n.1 += 1,
+                    None => names.push((p.name.clone(), 1)),
+                }
+            }
+        }
+        let title = names.iter().max_by_key(|n| n.1).map(|n| n.0.clone()).unwrap_or_default();
+        groups.push(Group { key: format!("artist:{a}"), title, kind: v::WorldKind::Artist, names: Vec::new(), titles: Vec::new(), albums });
+    }
+    groups.retain(|g| g.kind == v::WorldKind::Artist || g.albums.iter().map(|a| a.local_tracks).sum::<u32>() >= FRANCHISE_MIN);
+    for g in &mut groups {
+        by_year(&mut g.albums);
+    }
+    groups
+}
+
+/// What the main button of a world plays, from its tracks in album order:
+/// «Дослушать» the unheard ones with a file, «Начать» everything when
+/// nothing was heard, «С начала» everything when all with a file were.
+pub(crate) fn world_start(order: &[TrackId], heard: &HashSet<TrackId>, has_file: impl Fn(&TrackId) -> bool, local_only: bool) -> (v::WorldStart, Vec<TrackId>) {
+    let everything: Vec<TrackId> = order.iter().copied().filter(|t| has_file(t) || !local_only).collect();
+    if heard.is_empty() {
+        return (v::WorldStart::Begin, everything);
+    }
+    let unheard: Vec<TrackId> = order.iter().copied().filter(|t| !heard.contains(t) && has_file(t)).collect();
+    if unheard.is_empty() { (v::WorldStart::Again, everything) } else { (v::WorldStart::Finish, unheard) }
+}
+
+/// The worlds of the library, by the last play; the unstarted ones last,
+/// the closest by sound to what plays (else to the last started track)
+/// first. Every one: the row pages through them all.
+fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> {
+    let usable: Vec<ReleaseRow> = releases.iter().filter(|r| r.local_tracks > 0 || !visit.local_only).cloned().collect();
+    let mut groups = group_worlds(&usable);
     groups.retain(|g| g.albums.iter().any(|a| a.local_tracks > 0) && !visit.hidden_worlds.contains(&g.key));
 
     // The tracks of each album in order.
@@ -451,18 +741,15 @@ fn worlds(lib: &Library, f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> V
     let titles: HashMap<TrackId, &str> = f.rows.iter().map(|(id, r)| (*id, r.title.as_str())).collect();
     let duration = |t: &TrackId| u64::from(f.facts.get(t).and_then(|x| x.duration_ms).unwrap_or(0));
     let local = |t: &TrackId| f.rows.get(t).is_some_and(|r| r.has_local);
-    // Listened time: each start until the next one, at most the track.
-    let mut listened: HashMap<TrackId, u64> = HashMap::new();
-    for (k, (ts, t, _)) in f.starts.iter().enumerate() {
-        if visit.now - ts > LISTENED_WINDOW_MS {
-            continue;
-        }
-        let gap = f.starts.get(k + 1).map_or(u64::MAX, |n| (n.0 - ts).max(0) as u64);
-        *listened.entry(*t).or_default() += gap.min(duration(t));
-    }
     let playing_release = visit.playing.and_then(|t| f.rows.get(&t)).and_then(|r| r.release);
+    // What the unstarted worlds are compared with by sound.
+    let sound = visit.sound.as_ref().map(|s| s.read());
+    let reference = sound.as_ref().and_then(|idx| {
+        let t = visit.playing.or_else(|| f.starts.last().map(|s| s.1))?;
+        idx.get(t).copied()
+    });
 
-    let mut out: Vec<(Option<UnixMs>, usize, v::World)> = Vec::new();
+    let mut out: Vec<(Option<UnixMs>, Option<f32>, usize, WorldParts)> = Vec::new();
     for g in groups {
         let order: Vec<(ReleaseId, usize, TrackId)> = g
             .albums
@@ -475,15 +762,24 @@ fn worlds(lib: &Library, f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> V
         if order.is_empty() {
             continue;
         }
-        let heard: HashSet<TrackId> = order.iter().map(|o| o.2).filter(|t| f.last_start.contains_key(t)).collect();
-        let last = order.iter().filter_map(|o| f.last_start.get(&o.2)).max().copied();
+        let ids: Vec<TrackId> = order.iter().map(|o| o.2).collect();
+        let heard: HashSet<TrackId> = ids.iter().copied().filter(|t| f.last_start.contains_key(t)).collect();
+        let last = ids.iter().filter_map(|t| f.last_start.get(t)).max().copied();
         let n = order.len();
-        let numbered = g.albums.iter().any(|a| {
-            let s = short_album(&a.release.title, &g.title);
-            s.starts_with("OST ") && s[4..].starts_with(|c: char| c.is_ascii_digit())
-        });
-        let short = |r: ReleaseId| {
-            let s = g.albums.iter().find(|a| a.release.id == r).map_or_else(String::new, |a| short_album(&a.release.title, &g.title));
+        let short = |r: ReleaseId| -> String {
+            let Some(a) = g.albums.iter().find(|a| a.release.id == r) else { return String::new() };
+            if g.kind == v::WorldKind::Artist {
+                return a.release.title.clone();
+            }
+            // Inside the name it is written with («VOLUME.02» of «ノーゲーム・ノーライフ»).
+            let inside = |title: &str| {
+                g.titles.iter().chain([&g.title]).map(|n| short_album(title, n)).min_by_key(|s| s.chars().count()).unwrap_or_default()
+            };
+            let numbered = g.albums.iter().any(|a| {
+                let s = inside(&a.release.title);
+                s.starts_with("OST ") && s[4..].starts_with(|c: char| c.is_ascii_digit())
+            });
+            let s = inside(&a.release.title);
             if numbered && s == "OST" { "OST 1".to_owned() } else { s }
         };
         // The stage: the album playing, else the last played, else the first.
@@ -495,50 +791,57 @@ fn worlds(lib: &Library, f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> V
         let playing = playing_release.is_some_and(|p| g.albums.iter().any(|a| a.release.id == p));
         let stage = if playing { playing_release } else { last_album.or_else(|| g.albums.first().map(|a| a.release.id)) };
 
-        let mut artists: Vec<String> = Vec::new();
-        for a in &g.albums {
-            let name = a.release.artist_credit.display();
-            let words = |n: &str| {
-                let mut w: Vec<String> = n.to_lowercase().split_whitespace().map(str::to_owned).collect();
-                w.sort();
-                w
-            };
-            if !name.is_empty() && !artists.iter().any(|a| words(a) == words(&name)) && name != "Various Artists" {
-                artists.push(name);
+        let k = g.albums.len();
+        let mut facts = vec![g.kind.label().to_owned()];
+        match g.kind {
+            v::WorldKind::Soundtrack => {
+                // Its artists, the one with the most tracks first.
+                let mut artists: Vec<(String, u32)> = Vec::new();
+                for a in &g.albums {
+                    let name = a.release.artist_credit.display();
+                    let words = |n: &str| {
+                        let mut w: Vec<String> = n.to_lowercase().split_whitespace().map(str::to_owned).collect();
+                        w.sort();
+                        w
+                    };
+                    if name.is_empty() || various(a) {
+                        continue;
+                    }
+                    match artists.iter_mut().find(|x| words(&x.0) == words(&name)) {
+                        Some(x) => x.1 += a.local_tracks.max(1),
+                        None => artists.push((name, a.local_tracks.max(1))),
+                    }
+                }
+                artists.sort_by(|a, b| b.1.cmp(&a.1));
+                facts.push(artists.iter().take(2).map(|a| a.0.as_str()).collect::<Vec<_>>().join(", "));
+                if k > 1 {
+                    facts.push(count(k, "альбом", "альбома", "альбомов"));
+                }
+            }
+            v::WorldKind::Artist => {
+                if k > 1 {
+                    facts.push(count(k, "релиз", "релиза", "релизов"));
+                }
             }
         }
-        artists.truncate(2);
-        let mut facts = vec![artists.join(", ")];
-        let k = g.albums.len();
-        if k > 1 {
-            facts.push(count(k, "альбом", "альбома", "альбомов"));
-        }
         facts.push(count(n, "трек", "трека", "треков"));
-        let all_ms: u64 = order.iter().map(|o| duration(&o.2)).sum();
-        if heard.is_empty() {
-            facts.push(hours_minutes(all_ms));
-        } else {
-            facts.push(format!("ты слышал {}", heard.len()));
-        }
-        let hours = order.iter().filter_map(|o| listened.get(&o.2)).sum::<u64>() as f64 / 3_600_000.0;
-        if hours >= 1.0 {
-            facts.push(format!("{} ч за 2 недели", hours.round() as u64));
-        }
         facts.retain(|x| !x.is_empty());
 
-        let fresh = heard.is_empty();
-        let unheard: Vec<TrackId> = order.iter().map(|o| o.2).filter(|t| !heard.contains(t) && local(t)).collect();
-        let everything: Vec<TrackId> = order.iter().map(|o| o.2).filter(|t| local(t) || !visit.local_only).collect();
-        let primary = if fresh { everything.clone() } else { unheard.clone() };
+        let (start, primary) = world_start(&ids, &heard, local, visit.local_only);
         let primary_ms: u64 = primary.iter().map(duration).sum();
         let primary_tip = format!(
             "{}, {}: {}",
             count(primary.len(), "трек", "трека", "треков"),
             hours_minutes(primary_ms),
-            if fresh { "с первого альбома" } else { "по порядку альбомов" }
+            match start {
+                v::WorldStart::Finish => "что ещё не слышал, по порядку альбомов",
+                v::WorldStart::Begin => "с первого трека первого альбома",
+                v::WorldStart::Again => "всё с первого трека",
+            }
         );
-        let mut shuffled = everything.clone();
+        let mut shuffled: Vec<TrackId> = ids.iter().copied().filter(|t| local(t) || !visit.local_only).collect();
         fastrand::shuffle(&mut shuffled);
+        let fresh = heard.is_empty();
 
         // The three cards: never what the stage's buttons do.
         let mut cards: Vec<v::WorldCard> = Vec::new();
@@ -577,18 +880,16 @@ fn worlds(lib: &Library, f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> V
             });
         }
         if !fresh && let Some(o) = order.iter().find(|o| !heard.contains(&o.2) && local(&o.2)) {
-            cards.push(v::WorldCard {
-                icon: v::WorldIcon::Next,
-                kicker: "По порядку".into(),
-                title: format!("{}, трек {}", short(o.0), o.1 + 1),
-                go: v::WorldGo::Play(from(o.0, o.1)),
-            });
+            let title = format!("{}, трек {}", short(o.0), o.1 + 1);
+            if !cards.iter().any(|c| c.title == title) {
+                cards.push(v::WorldCard { icon: v::WorldIcon::Next, kicker: "По порядку".into(), title, go: v::WorldGo::Play(from(o.0, o.1)) });
+            }
         }
         let untouched = g
             .albums
             .iter()
             .find(|a| a.local_tracks > 0 && tracks_of.get(&a.release.id).is_none_or(|l| l.iter().all(|x| !heard.contains(&x.1))));
-        let liked: Vec<TrackId> = order.iter().map(|o| o.2).filter(|t| f.liked.contains(t)).collect();
+        let liked: Vec<TrackId> = ids.iter().copied().filter(|t| f.liked.contains(t)).collect();
         let newest = g.albums.iter().max_by_key(|a| (a.release.year, a.release.added_at));
         let mut third: Vec<v::WorldCard> = Vec::new();
         if !fresh && let Some(a) = untouched {
@@ -624,47 +925,107 @@ fn worlds(lib: &Library, f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> V
             }
         }
 
+        // How close it sounds: its centre against the reference.
+        let closeness = match (&sound, reference) {
+            (Some(idx), Some(r)) if last.is_none() => {
+                let vs: Vec<&nikgob_recs::Vector> = ids.iter().filter_map(|t| idx.get(*t)).collect();
+                (!vs.is_empty()).then(|| {
+                    let mut c = [0.0_f32; nikgob_recs::DIM];
+                    for v in &vs {
+                        for (x, y) in c.iter_mut().zip(v.iter()) {
+                            *x += y / vs.len() as f32;
+                        }
+                    }
+                    idx.distance(&c, &r)
+                })
+            }
+            _ => None,
+        };
+        let albums = g
+            .albums
+            .iter()
+            .map(|a| {
+                let list = tracks_of.get(&a.release.id).map(Vec::as_slice).unwrap_or(&[]);
+                let h = list.iter().filter(|x| heard.contains(&x.1)).count() as u32;
+                (a.clone(), h, list.len() as u32)
+            })
+            .collect();
         let kicker = if playing { "Слушаешь сейчас".to_owned() } else { heard_when(visit, last) };
         out.push((
             last,
+            closeness,
             n,
-            v::World {
-                key: g.key,
-                title: g.title,
-                release: stage,
-                cover: None,
-                kicker,
-                facts: facts.join(" · "),
-                fresh,
-                playing,
-                primary,
-                primary_tip,
-                shuffled,
-                albums: g.albums.iter().map(|a| a.release.id).collect(),
-                cards,
+            WorldParts {
+                world: v::World {
+                    key: g.key,
+                    title: g.title,
+                    kind: g.kind,
+                    release: stage,
+                    cover: None,
+                    cover_hd: None,
+                    kicker,
+                    facts: facts.join(" · "),
+                    heard: heard.len() as u32,
+                    total: n as u32,
+                    start,
+                    playing,
+                    primary,
+                    primary_tip,
+                    shuffled,
+                    albums: g.albums.iter().map(|a| a.release.id).collect(),
+                    cards,
+                },
+                albums,
+                liked,
             },
         ));
     }
-    // By the last play; the unstarted last, the largest of them first.
-    out.sort_by(|a, b| match (a.0, b.0) {
+    out.sort_by(|a, b| world_order((a.0, a.1, a.2), (b.0, b.1, b.2)));
+    out.into_iter().map(|x| x.3).collect()
+}
+
+/// The order of the worlds by (last play, closeness by sound, tracks): the
+/// last played first; the unstarted after them, the closest first, the ones
+/// without a sound after those, the largest first.
+fn world_order(a: (Option<UnixMs>, Option<f32>, usize), b: (Option<UnixMs>, Option<f32>, usize)) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a.0, b.0) {
         (Some(x), Some(y)) => y.cmp(&x),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => b.1.cmp(&a.1),
-    });
-    let _ = lib;
-    out.into_iter().take(WORLDS).map(|x| x.2).collect()
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => match (a.1, b.1) {
+            (Some(x), Some(y)) => x.total_cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => b.2.cmp(&a.2),
+        },
+    }
+}
+
+/// One world of the library for its page.
+pub fn world(lib: &Library, visit: &Visit, key: &str) -> Option<WorldParts> {
+    let mut visit = visit.clone();
+    // A world taken off the row still has its page.
+    visit.hidden_worlds.clear();
+    let f = Facts::read(lib);
+    let releases: Vec<ReleaseRow> = lib.releases(0, 20_000, Sort::desc(ReleaseSortKey::Added)).unwrap_or_default();
+    worlds(&f, &releases, &visit).into_iter().find(|w| w.world.key == key)
 }
 
 /// A new album of the world among the services' new releases: «Новый
 /// альбом» for its third card (the release then leaves «Новые релизы» while
 /// the card shows it).
 pub fn world_release(world: &v::World, releases: &[v::StreamAlbumCard]) -> Option<usize> {
+    if world.kind == v::WorldKind::Artist {
+        // An artist's new album: by the artist's name.
+        let name = name_key(&world.title);
+        return releases.iter().position(|a| a.artist.split(", ").any(|n| name_key(n) == name));
+    }
     // A release without a soundtrack's marker («MADE IN ABYSS FILM CONCERT
     // LIVE RECORDING CD») is the world's when it begins with its name.
     let name = world.title.to_lowercase();
     releases.iter().position(|a| {
-        franchise(&a.title).is_some_and(|(k, _)| k == world.key)
+        franchise(&a.title).is_some_and(|(_, t)| name_key(&series_name(&t)) == world.key)
             || (name.chars().count() >= 4 && a.title.to_lowercase().strip_prefix(&name).is_some_and(|rest| rest.starts_with(' ')))
     })
 }
@@ -704,5 +1065,145 @@ mod tests {
         assert_eq!(heard_when(&visit, None), "Ещё не начинал");
         assert_eq!(hours_minutes(64 * 60_000), "1 ч 4 мин");
         assert_eq!(hours_minutes(120 * 60_000), "2 ч");
+    }
+
+    fn rel(title: &str, artist: &str, id: ArtistId, local: u32, kind: nikgob_core::model::ReleaseType) -> ReleaseRow {
+        let mut r = nikgob_core::model::Release::new(title, nikgob_core::model::ArtistCredit::single(artist, Some(id)));
+        r.release_type = kind;
+        ReleaseRow { release: r, local_tracks: local, known_tracks: local, liked: false, rows: local }
+    }
+
+    fn album(title: &str, artist: &str, id: ArtistId, local: u32) -> ReleaseRow {
+        rel(title, artist, id, local, nikgob_core::model::ReleaseType::Album)
+    }
+
+    fn worlds_of(releases: &[ReleaseRow]) -> Vec<(String, v::WorldKind, usize)> {
+        group_worlds(releases).into_iter().map(|g| (g.title, g.kind, g.albums.len())).collect()
+    }
+
+    #[test]
+    fn a_franchise_wins_over_its_composer_and_an_artist_needs_a_discography() {
+        let (penkin, pirate, mell, va) = (ArtistId::new(), ArtistId::new(), ArtistId::new(), ArtistId::new());
+        let mut releases = vec![
+            album("MADE IN ABYSS ORIGINAL SOUNDTRACK", "Kevin Penkin", penkin, 52),
+            album("MADE IN ABYSS ORIGINAL SOUNDTRACK 2", "Kevin Penkin", penkin, 30),
+            album("MADE IN ABYSS ORIGINAL SOUNDTRACK 3", "Kevin Penkin", penkin, 32),
+            album("Прости малышка", "Серега Пират", pirate, 5),
+            album("Вот мой альбом, сори", "Серега Пират", pirate, 6),
+            album("Разгром", "MellSher", mell, 1),
+            rel("Хвост", "MellSher", mell, 1, nikgob_core::model::ReleaseType::Single),
+            rel("Best of", "Various Artists", va, 30, nikgob_core::model::ReleaseType::Compilation),
+        ];
+        let w = worlds_of(&releases);
+        assert_eq!(
+            w,
+            [("MADE IN ABYSS".to_owned(), v::WorldKind::Soundtrack, 3), ("Серега Пират".to_owned(), v::WorldKind::Artist, 2)],
+            "Kevin Penkin's albums are all MADE IN ABYSS; one-track releases and a compilation make no world"
+        );
+        // His album outside the franchise, large enough, is his own world.
+        releases.push(album("The Rising of the Shield Hero Theme", "Kevin Penkin", penkin, 20));
+        let w = worlds_of(&releases);
+        assert!(w.contains(&("Kevin Penkin".to_owned(), v::WorldKind::Artist, 1)), "{w:?}");
+        assert!(w.contains(&("MADE IN ABYSS".to_owned(), v::WorldKind::Soundtrack, 3)), "{w:?}");
+    }
+
+    #[test]
+    fn one_franchise_under_its_japanese_and_english_names_is_one_world() {
+        let (sweep, fujisawa, va, other) = (ArtistId::new(), ArtistId::new(), ArtistId::new(), ArtistId::new());
+        let releases = vec![
+            album("ノーゲーム・ノーライフ VOLUME.02 スペシャルCD サウンドトラック Vol.1", "Super sweep", sweep, 19),
+            album("ノーゲーム・ノーライフ VOLUME.04 スペシャルCD サウンドトラック Vol.2", "Super sweep", sweep, 16),
+            album("NO GAME NO LIFE ZERO Original Soundtrack", "藤澤慶昌", fujisawa, 34),
+            rel("\"No Game No Life\" Complete Songs \"NO SONG NO LIFE\"", "Various Artists", va, 10, nikgob_core::model::ReleaseType::Compilation),
+            album("Mushoku Tensei ~Isekai Ittara Honki Dasu~ Original Soundtrack 1 Special Edition", "藤澤慶昌", fujisawa, 40),
+            album("TV Anime \"Mushoku Tensei ~Isekai Ittara Honki Dasu~\" Theme Song Collection", "大原ゆい子", other, 8),
+        ];
+        let w = worlds_of(&releases);
+        assert_eq!(
+            w,
+            [
+                ("Mushoku Tensei".to_owned(), v::WorldKind::Soundtrack, 2),
+                ("NO GAME NO LIFE".to_owned(), v::WorldKind::Soundtrack, 4),
+            ],
+            "the composer of both makes no world of his own either"
+        );
+        assert_eq!(same_franchise("メイドインアビス", "MADE IN ABYSS").as_deref(), Some("MADE IN ABYSS"));
+        assert_eq!(same_franchise("Mushoku Tensei", "NO GAME NO LIFE"), None);
+        assert_eq!(
+            short_album("TV Anime \"Mushoku Tensei ~Isekai Ittara Honki Dasu~\" Theme Song Collection", "Mushoku Tensei"),
+            "Theme Song Collection"
+        );
+    }
+
+    #[test]
+    fn the_main_button_finishes_begins_or_starts_again() {
+        let t: Vec<TrackId> = (0..5).map(|_| TrackId::new()).collect();
+        let file = |x: &TrackId| *x != t[4];
+        let (start, list) = world_start(&t, &HashSet::new(), file, false);
+        assert_eq!((start, list), (v::WorldStart::Begin, t.clone()), "«Начать»: everything from the first track");
+        let (_, list) = world_start(&t, &HashSet::new(), file, true);
+        assert_eq!(list, t[..4], "only the files with «Только скачанное»");
+        let heard: HashSet<TrackId> = [t[0], t[2]].into();
+        assert_eq!(world_start(&t, &heard, file, false), (v::WorldStart::Finish, vec![t[1], t[3]]), "«Дослушать»: the unheard files in order");
+        let heard: HashSet<TrackId> = t[..4].iter().copied().collect();
+        assert_eq!(world_start(&t, &heard, file, false), (v::WorldStart::Again, t.clone()), "all files heard: «С начала»");
+    }
+
+    #[test]
+    fn unstarted_worlds_go_last_the_closest_by_sound_first() {
+        let mut w = vec![(None, None, 50), (Some(5), None, 10), (None, Some(2.0), 5), (Some(9), None, 1), (None, Some(1.0), 3)];
+        w.sort_by(|a, b| world_order(*a, *b));
+        assert_eq!(w, [(Some(9), None, 1), (Some(5), None, 10), (None, Some(1.0), 3), (None, Some(2.0), 5), (None, None, 50)]);
+    }
+
+    #[test]
+    fn a_world_page_has_its_albums_with_what_was_heard_and_its_likes() {
+        use nikgob_core::model::{Artist, ArtistCredit, Codec, Event, Release, Source, SourceKind, Track};
+        let lib = Library::open_in_memory().unwrap();
+        let a = lib.upsert_artist(&Artist::new("Kevin Penkin")).unwrap();
+        let credit = ArtistCredit::single("Kevin Penkin", Some(a.id));
+        let now = now_ms();
+        let mut ids = Vec::new();
+        for (k, title) in ["MADE IN ABYSS ORIGINAL SOUNDTRACK", "MADE IN ABYSS ORIGINAL SOUNDTRACK 2"].iter().enumerate() {
+            let mut r = Release::new(*title, credit.clone());
+            r.year = Some(2017 + k as i32 * 3);
+            let r = lib.upsert_release(&r).unwrap();
+            for n in 0..3 {
+                let mut t = Track::new(format!("{title} {n}"), credit.clone());
+                t.release_id = Some(r.id);
+                t.track_no = n + 1;
+                t.duration_ms = Some(60_000);
+                let t = lib.upsert_track(&t).unwrap();
+                lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("x/{k}/{n}.flac"), Codec::Flac)).unwrap();
+                ids.push(t.id);
+            }
+        }
+        // Heard: the first track of each album; liked: three.
+        for (i, t) in [ids[0], ids[3]].iter().enumerate() {
+            lib.record_event_raw(&Event::new(*t, EventType::Start, now - 1000 + i as i64, lib.device_id())).unwrap();
+        }
+        for t in [ids[1], ids[2], ids[5]] {
+            lib.like(t).unwrap();
+        }
+        let visit = Visit { now, ..Visit::default() };
+        let w = world(&lib, &visit, "made in abyss").expect("the world");
+        assert_eq!(w.world.title, "MADE IN ABYSS");
+        assert_eq!(w.world.kind, v::WorldKind::Soundtrack);
+        assert_eq!(w.world.facts, "Саундтрек · Kevin Penkin · 2 альбома · 6 треков");
+        assert_eq!((w.world.heard, w.world.total), (2, 6));
+        assert_eq!(w.world.start, v::WorldStart::Finish);
+        assert_eq!(w.world.primary, [ids[1], ids[2], ids[4], ids[5]]);
+        let albums: Vec<(&str, u32, u32)> = w.albums.iter().map(|(r, h, t)| (r.release.title.as_str(), *h, *t)).collect();
+        assert_eq!(albums, [("MADE IN ABYSS ORIGINAL SOUNDTRACK", 1, 3), ("MADE IN ABYSS ORIGINAL SOUNDTRACK 2", 1, 3)]);
+        assert_eq!(w.liked, [ids[1], ids[2], ids[5]]);
+        let mut shuffled = w.world.shuffled.clone();
+        shuffled.sort();
+        let mut all = ids.clone();
+        all.sort();
+        assert_eq!(shuffled, all, "«Вперемешку» is every track");
+        // Taken off the row, it still has its page.
+        let hidden = Visit { hidden_worlds: vec!["made in abyss".into()], ..visit };
+        assert!(build(&lib, &hidden).worlds.is_empty());
+        assert!(world(&lib, &hidden, "made in abyss").is_some());
     }
 }

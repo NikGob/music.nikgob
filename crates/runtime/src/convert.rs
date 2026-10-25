@@ -125,6 +125,28 @@ impl Resolver {
         self.cover_for(Some(id), None)
     }
 
+    /// A world with its stage cover (and the larger one, if one was found).
+    pub fn world(&mut self, w: &v::World) -> v::World {
+        v::World {
+            cover: w.release.and_then(|r| self.release_cover(r)),
+            cover_hd: w.release.and_then(|r| crate::hd_covers::cached(&self.lib, r)).map(v::Cover::web),
+            ..w.clone()
+        }
+    }
+
+    /// A world's page: its albums with how much of each was heard, its new
+    /// album of the services and its liked tracks.
+    pub fn world_view(&mut self, w: &crate::home_v2::WorldParts, new_album: Option<v::StreamAlbumCard>) -> v::WorldView {
+        let albums = w
+            .albums
+            .iter()
+            .map(|(r, heard, total)| v::WorldAlbum { card: self.release(r), heard: *heard, total: *total })
+            .collect();
+        let rows: Vec<TrackRow> = w.liked.iter().filter_map(|t| self.lib.get_track_row(*t).ok().flatten()).collect();
+        let liked = rows.iter().map(|t| self.track(t)).collect();
+        v::WorldView { world: self.world(&w.world), albums, new_album, liked }
+    }
+
     pub fn track(&mut self, r: &TrackRow) -> v::TrackRow {
         v::TrackRow {
             id: r.id,
@@ -440,7 +462,7 @@ impl Resolver {
                 .v2
                 .worlds
                 .iter()
-                .map(|w| v::World { cover: w.release.and_then(|r| self.release_cover(r)), ..w.clone() })
+                .map(|w| self.world(&w.world))
                 .collect(),
             // The recommendations' parts come from `recs`.
             ..v::HomeView::default()
