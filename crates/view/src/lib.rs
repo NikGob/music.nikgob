@@ -796,6 +796,9 @@ pub struct Toast {
     pub at: Instant,
     /// What the message is about, for its icon and accent.
     pub kind: ToastKind,
+    /// It stays twice as long (8 s): it says how to undo a step that
+    /// matters («Карточка скрыта…» with «Вернуть»).
+    pub long: bool,
 }
 
 /// A place in the app a message can lead to; the design system navigates.

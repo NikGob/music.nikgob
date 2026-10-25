@@ -489,6 +489,7 @@ impl Worker {
             action,
             open,
             at: Instant::now(),
+            long: false,
         };
         self.publish(|s| s.toasts.push(t));
     }
@@ -708,6 +709,11 @@ impl Worker {
                     "Карточка скрыта. Включить её снова можно в Настройках → Внешний вид → Главная.",
                     Some(("Вернуть".into(), Command::SetPrefs(Box::new(back)))),
                 );
+                self.publish(|s| {
+                    if let Some(t) = s.toasts.last_mut() {
+                        t.long = true;
+                    }
+                });
             }
             Command::SaveQueueAsPlaylist(name) => {
                 let tracks = self.queue.tracks();

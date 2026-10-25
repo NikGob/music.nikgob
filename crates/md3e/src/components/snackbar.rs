@@ -54,6 +54,8 @@ pub struct SnackbarItem<'a> {
     pub text: &'a str,
     pub action: Option<&'a str>,
     pub kind: SnackbarKind,
+    /// Seconds it stays beyond the host's duration.
+    pub longer: f64,
 }
 
 impl<'a> SnackbarItem<'a> {
@@ -63,7 +65,14 @@ impl<'a> SnackbarItem<'a> {
             text,
             action: None,
             kind: SnackbarKind::Info,
+            longer: 0.0,
         }
+    }
+
+    /// Stays `seconds` longer than the host's duration.
+    pub fn longer(mut self, seconds: f64) -> Self {
+        self.longer = seconds.max(0.0);
+        self
     }
 
     pub fn action(mut self, label: &'a str) -> Self {
@@ -84,6 +93,7 @@ impl<'a> From<(u64, &'a str, Option<&'a str>)> for SnackbarItem<'a> {
             text,
             action,
             kind: SnackbarKind::Info,
+            longer: 0.0,
         }
     }
 }
@@ -157,7 +167,8 @@ impl Queue {
                 text: item.text.to_owned(),
                 action: item.action.map(str::to_owned),
                 kind: item.kind,
-                shown_at: now,
+                // The countdown of a longer one starts later.
+                shown_at: now + item.longer,
                 leaving_at: None,
             });
         }
