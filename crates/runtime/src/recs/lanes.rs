@@ -45,7 +45,9 @@ const SHARE_DAYS: i64 = 28;
 /// «На повторе» looks this far back (30 once the history is longer).
 const REPEAT_DAYS_SHORT: i64 = 14;
 const REPEAT_DAYS_LONG: i64 = 30;
-/// About every fifth song of a mix is new «С новым».
+/// About every fifth song of a mix is new «С новым» before anything was
+/// heard; then the share its taste profile's appetite draws
+/// ([`nikgob_recs::NewLog::share`]).
 const NEW_EVERY: usize = 5;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -62,19 +64,18 @@ pub(crate) struct LaneHome {
 }
 
 impl LaneHome {
-    /// What it plays: its songs, with «С новым» a new one after every
-    /// fourth.
+    /// What it plays: its songs, with «С новым» its new ones spread evenly
+    /// between them.
     pub fn picks(&self, with_new: bool) -> Vec<nikgob_recs::Pick> {
         use nikgob_recs::{Item, Pick, Reason};
         let mut out = Vec::with_capacity(self.tracks.len() + self.new.len());
-        let mut new = self.new.iter();
+        let (len, n) = (self.tracks.len(), if with_new { self.new.len() } else { 0 });
+        let mut placed = 0;
         for (i, t) in self.tracks.iter().enumerate() {
             out.push(Pick { item: Item::Track(*t), reason: Reason::Favourite });
-            if with_new
-                && (i + 1) % (NEW_EVERY - 1) == 0
-                && let Some(n) = new.next()
-            {
-                out.push(Pick { item: Item::Stream(n.id.clone()), reason: Reason::New });
+            while placed < n && placed < (i + 1) * n / len {
+                out.push(Pick { item: Item::Stream(self.new[placed].id.clone()), reason: Reason::New });
+                placed += 1;
             }
         }
         out
@@ -197,13 +198,34 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     let mut used_new: HashSet<String> = HashSet::new();
     lanes
         .into_iter()
-        .map(|(lane, tracks)| {
+        .enumerate()
+        .map(|(k, (lane, tracks))| {
             let artists = artists_of(snap, tiles, &tracks);
             let covers = covers(snap, &tracks);
-            let new = if snap.local_only { Vec::new() } else { new_for(snap, input, lane, tracks.len(), &mut used_new) };
+            let new = if snap.local_only {
+                Vec::new()
+            } else {
+                new_for(snap, input, lane, &tracks, seed.wrapping_add(k as u64), &mut used_new)
+            };
             LaneHome { lane, tracks, artists, covers, new }
         })
         .collect()
+}
+
+/// The taste profile most of `tracks` are of.
+fn profile_of(snap: &Snapshot, tracks: &[TrackId]) -> Option<usize> {
+    let mut n: HashMap<usize, usize> = HashMap::new();
+    for t in tracks {
+        if let Some(&j) = snap.profiles.of.get(t) {
+            *n.entry(j).or_default() += 1;
+        }
+    }
+    n.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|x| x.0)
+}
+
+/// How many new songs a mix of `songs` gets at `share` (one at least).
+fn new_count(songs: usize, share: f32) -> usize {
+    ((songs as f32 * share / (1.0 - share)).round() as usize).max(1)
 }
 
 /// About two hours of a lane: the best liked first (with a little chance
@@ -318,9 +340,29 @@ fn covers(snap: &Snapshot, tracks: &[TrackId]) -> Vec<CoverRef> {
 }
 
 /// «С новым»: new songs the services found, in the lane's language (any
-/// for the soundtracks and «На повторе»), each in one mix only.
-fn new_for(snap: &Snapshot, input: &BuildInput, lane: v::Lane, songs: usize, used: &mut HashSet<String>) -> Vec<StreamTrack> {
-    let want = (songs / (NEW_EVERY - 1)).max(1);
+/// for the soundtracks and «На повторе»), each in one mix only; as many as
+/// the share of the mix's taste profile asks, those whose preview sounds
+/// of the profile first.
+fn new_for(
+    snap: &Snapshot,
+    input: &BuildInput,
+    lane: v::Lane,
+    tracks: &[TrackId],
+    seed: u64,
+    used: &mut HashSet<String>,
+) -> Vec<StreamTrack> {
+    let regions = &snap.model.regions;
+    let profile = profile_of(snap, tracks);
+    let want = if input.new_log.events.is_empty() || regions.is_empty() {
+        (tracks.len() / (NEW_EVERY - 1)).max(1)
+    } else {
+        let share = input.new_log.share(regions, profile, &mut nikgob_recs::rng::Rng::new(seed));
+        new_count(tracks.len(), share)
+    };
+    let in_profile = |t: &StreamTrack| {
+        let v = snap.new_track(t).vector.map(|v| snap.model.embed(&v));
+        profile.is_some() && v.and_then(|v| regions.of(&v, None)) == profile
+    };
     let fits = |t: &StreamTrack| {
         let artists: Vec<&str> = t.artists.iter().map(|a| a.name.as_str()).collect();
         let lang = snap.types.lang_of_new(&t.title, &artists);
@@ -335,17 +377,20 @@ fn new_for(snap: &Snapshot, input: &BuildInput, lane: v::Lane, songs: usize, use
             v::Lane::OnRepeat => true,
         }
     };
+    let mut candidates: Vec<&StreamTrack> = input.new.iter().filter(|t| snap.is_new(t) && fits(t)).collect();
+    candidates.sort_by_key(|t| !in_profile(t));
     let mut out = Vec::new();
-    for t in &input.new {
+    for t in candidates {
         if out.len() >= want {
             break;
         }
-        if snap.is_new(t) && fits(t) && used.insert(t.id.to_string()) {
+        if used.insert(t.id.to_string()) {
             out.push(t.clone());
         }
     }
     out
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -390,6 +435,9 @@ mod tests {
             suggested_new: Vec::new(),
             local_only: false,
             worlds: HashMap::new(),
+            new_vectors: HashMap::new(),
+            artist_affinity: HashMap::new(),
+            profiles: Default::default(),
         };
         let mut tiles = TilesInput::default();
         for (k, id) in ids.iter().enumerate() {
@@ -455,6 +503,9 @@ mod tests {
             suggested_new: Vec::new(),
             local_only: false,
             worlds: HashMap::new(),
+            new_vectors: HashMap::new(),
+            artist_affinity: HashMap::new(),
+            profiles: Default::default(),
         };
         let mut tiles = TilesInput::default();
         for id in &ids {
@@ -467,4 +518,33 @@ mod tests {
         let picked = pick(&snap, &tiles, &lanes[&v::Lane::Russian], 7);
         assert!(!picked.is_empty() && picked.iter().all(|t| russian.contains(t)), "{picked:?}");
     }
+
+    /// «С новым» takes as many new songs as its share asks and spreads them
+    /// evenly, never two running.
+    #[test]
+    fn new_songs_are_spread_by_the_share() {
+        use nikgob_core::streaming::{RemoteId, Service};
+        use nikgob_recs::Item;
+        assert_eq!(new_count(36, 0.1), 4);
+        assert_eq!(new_count(36, 0.2), 9);
+        assert_eq!(new_count(3, 0.05), 1);
+        let new: Vec<StreamTrack> = (0..4)
+            .map(|k| StreamTrack::new(RemoteId { service: Service::Youtube, id: format!("v{k}") }, format!("New {k}")))
+            .collect();
+        let lane = LaneHome {
+            lane: v::Lane::English,
+            tracks: (0..36).map(|_| TrackId::new()).collect(),
+            artists: Vec::new(),
+            covers: Vec::new(),
+            new,
+        };
+        let picks = lane.picks(true);
+        let at: Vec<usize> = picks.iter().enumerate().filter(|(_, p)| matches!(p.item, Item::Stream(_))).map(|(i, _)| i).collect();
+        assert_eq!(at.len(), 4);
+        for w in at.windows(2) {
+            assert!((8..=11).contains(&(w[1] - w[0])), "evenly: {at:?}");
+        }
+        assert_eq!(lane.picks(false).len(), 36);
+    }
 }
+

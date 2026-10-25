@@ -163,16 +163,32 @@ fn cache_key(service: Service, what: &str, id: &str) -> String {
 /// music, unless the radio is about new music itself (`new_seed`: «Новое
 /// для тебя», a service's song). (The engine already picks so; this holds
 /// while the snapshot it picked from is older than the prefs.)
-pub(super) fn radio_allows(track: TrackId, stream: bool, new_seed: bool, prefs: &v::Prefs, snap: Option<&super::Snapshot>) -> bool {
-    if stream && !streams_allowed(new_seed, prefs) {
+pub(super) fn radio_allows(track: TrackId, stream: bool, new_seed: bool, prefs: &v::Prefs, snap: Option<&super::Snapshot>, kind: v::RadioKind) -> bool {
+    if stream && !streams_allowed(new_seed, prefs, kind) {
         return false;
     }
     !prefs.mixes_downloaded_only || snap.and_then(|s| s.catalog.get(track)).is_some_and(|t| t.local)
 }
 
 /// New music from the services may be queued.
-fn streams_allowed(new_seed: bool, prefs: &v::Prefs) -> bool {
-    !prefs.mixes_downloaded_only && (new_seed || super::new_share(prefs) > 0.0)
+fn streams_allowed(new_seed: bool, prefs: &v::Prefs, kind: v::RadioKind) -> bool {
+    !prefs.mixes_downloaded_only && (new_seed || super::new_share(prefs, kind) > 0.0)
+}
+
+/// The kind of a radio of `seed` (the share of new music it remembers).
+pub(super) fn kind_of(seed: &RadioSeed, autoplay: bool) -> v::RadioKind {
+    match seed {
+        _ if autoplay => v::RadioKind::Autoplay,
+        RadioSeed::Track(_) | RadioSeed::Stream { .. } => v::RadioKind::Track,
+        RadioSeed::Artist(_) => v::RadioKind::Artist,
+        _ => v::RadioKind::Mix,
+    }
+}
+
+impl RadioRun {
+    fn kind(&self) -> v::RadioKind {
+        kind_of(&self.state.seed, self.autoplay)
+    }
 }
 
 /// The radio is about new music whatever «Новое в радио» says.
@@ -416,6 +432,7 @@ impl Worker {
             title: r.title.clone(),
             extending: r.extending || r.want,
             autoplay: r.autoplay,
+            kind: r.kind(),
         })
     }
 
@@ -518,7 +535,7 @@ impl Worker {
             .iter()
             .filter(|e| run.added.contains(&e.id))
             .filter(|e| {
-                !radio_allows(e.track, run.streams.contains_key(&e.track), new_seed(&run.state.seed), &prefs, snap.as_deref())
+                !radio_allows(e.track, run.streams.contains_key(&e.track), new_seed(&run.state.seed), &prefs, snap.as_deref(), run.kind())
             })
             .map(|e| e.id)
             .collect();
@@ -534,7 +551,8 @@ impl Worker {
     /// Picks the next [`EXTEND_BY`] on a thread of its own.
     fn radio_extend(&mut self) {
         let prefs = self.state.read().prefs.clone();
-        let new_share = super::new_share(&prefs);
+        let Some(kind) = self.recs.radio.run.as_ref().map(RadioRun::kind) else { return };
+        let new_share = super::new_share(&prefs, kind);
         let local_only = prefs.mixes_downloaded_only;
         let snap = self.snapshot();
         let Some(run) = self.recs.radio.run.as_mut() else { return };
@@ -621,16 +639,17 @@ impl Worker {
         let prefs = self.state.read().prefs.clone();
         let snap = self.snapshot();
         let wants_new = self.recs.radio.run.as_ref().is_some_and(|r| new_seed(&r.state.seed));
+        let kind = self.recs.radio.run.as_ref().map_or(v::RadioKind::Track, RadioRun::kind);
         let mut ids = Vec::with_capacity(picks.len());
         for p in &picks {
             match &p.item {
                 Item::Track(t) => {
-                    if radio_allows(*t, false, wants_new, &prefs, snap.as_deref()) {
+                    if radio_allows(*t, false, wants_new, &prefs, snap.as_deref(), kind) {
                         ids.push(*t);
                     }
                 }
                 // New music (never under «Миксы только из скачанного»).
-                Item::Stream(_) if !streams_allowed(wants_new, &prefs) => {}
+                Item::Stream(_) if !streams_allowed(wants_new, &prefs, kind) => {}
                 Item::Stream(r) => {
                     let pooled = self.recs.radio.run.as_ref().and_then(|run| run.pool.get(r).cloned());
                     let Some(t) = pooled.or_else(|| self.stream_track(r)) else { continue };
@@ -721,8 +740,8 @@ impl Worker {
         let prefs = self.state.read().prefs.clone();
         let Some(snap) = self.snapshot() else { return };
         let Some(run) = self.recs.radio.run.as_mut() else { return };
-        let share = super::new_share(&prefs);
-        if run.extending || run.queue_gen.is_none() || !streams_allowed(new_seed(&run.state.seed), &prefs) || share <= 0.0 {
+        let share = super::new_share(&prefs, run.kind());
+        if run.extending || run.queue_gen.is_none() || !streams_allowed(new_seed(&run.state.seed), &prefs, run.kind()) || share <= 0.0 {
             return;
         }
         let up: Vec<u64> = self.queue.upcoming().iter().filter(|e| run.added.contains(&e.id)).map(|e| e.id).collect();
@@ -770,10 +789,10 @@ impl Worker {
     /// the radio played to the end (their service's radio or related list).
     fn radio_refill(&mut self) {
         let prefs = self.state.read().prefs.clone();
-        if super::new_share(&prefs) <= 0.0 || prefs.mixes_downloaded_only {
+        let Some(run) = self.recs.radio.run.as_ref() else { return };
+        if super::new_share(&prefs, run.kind()) <= 0.0 || prefs.mixes_downloaded_only {
             return;
         }
-        let Some(run) = self.recs.radio.run.as_ref() else { return };
         if run.state.new_left() >= REFILL_AT {
             return;
         }
@@ -863,7 +882,10 @@ impl Worker {
         }
         self.streaming.learn(&fresh);
         let Some(run) = self.recs.radio.run.as_mut() else { return };
-        let new: Vec<NewTrack> = fresh.iter().map(|t| NewTrack::from_stream(t, None)).collect();
+        let new: Vec<NewTrack> = fresh
+            .iter()
+            .map(|t| snap.as_ref().map_or_else(|| NewTrack::from_stream(t, None), |s| s.new_track(t)))
+            .collect();
         for t in fresh {
             run.pool.insert(t.id.clone(), t);
         }
@@ -889,10 +911,10 @@ impl Worker {
     /// Asks the services for new music around the radio's seed (see the
     /// module docs); what the cache has is used at once.
     fn radio_fetch_new(&mut self) {
-        if super::new_share(&self.state.read().prefs) <= 0.0 {
+        let Some(run) = &self.recs.radio.run else { return };
+        if super::new_share(&self.state.read().prefs, run.kind()) <= 0.0 {
             return;
         }
-        let Some(run) = &self.recs.radio.run else { return };
         let id = run.id;
         let mut calls: Vec<Call> = Vec::new();
         let artist_call = |w: &Worker, a: ArtistId, prefer: &[Service]| -> Option<Call> {

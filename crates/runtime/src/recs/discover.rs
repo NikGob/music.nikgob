@@ -47,9 +47,8 @@ use nikgob_core::model::{ArtistId, TrackId, UnixMs};
 use nikgob_core::streaming::{EntityKind, RemoteId, SearchKind, Service, StreamAlbum, StreamArtist, StreamError, StreamService, StreamTrack};
 use nikgob_library::{Library, now_ms};
 use nikgob_recs::suggest::SUGGESTION_SEEDS;
-use nikgob_recs::{
-    DiscoverySeeds, SeedFinds, SeedRef, artist_key, rank_discoveries, song_key, stream_song_key, suggestion_finds,
-};
+use nikgob_recs::discover::{NewScoring, rank_discoveries_with};
+use nikgob_recs::{DiscoverySeeds, NewLog, SeedFinds, SeedRef, Source, artist_key, song_key, stream_song_key, suggestion_finds};
 use nikgob_view as v;
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +65,9 @@ pub(crate) const RELEASE_BUDGET: u32 = 40;
 pub(crate) const RELEASES_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
 /// Similar artists whose tops are read, per list.
 const TOPS_PER_LIST: usize = 2;
+/// New songs heard out lately that seed a pass.
+const HEARD_SEEDS: usize = 5;
+
 /// Library cache keys.
 const PASS_KEY: &str = "discover.pass";
 const FOUND_KEY: &str = "discover.found";
@@ -170,6 +172,9 @@ pub(crate) struct Found {
     seed_artists: Vec<(ArtistId, f32)>,
     #[serde(default)]
     seed_profiles: Vec<(TrackId, usize)>,
+    /// Where each song found came from (by [`stream_song_key`]).
+    #[serde(default)]
+    sources: Vec<(String, Source)>,
     #[serde(default)]
     finds: Vec<(Seed, Vec<StreamTrack>)>,
 }
@@ -231,13 +236,86 @@ async fn ask(svc: Arc<dyn StreamService>, step: &Step) -> Result<Answer, StreamE
 
 /// The discoveries of a pass's `finds` and of the songs the services
 /// suggest now.
-fn ranked(snap: &super::Snapshot, seeds: &DiscoverySeeds, finds: &[(Seed, Vec<StreamTrack>)], filter: &nikgob_recs::DiscoveryFilter) -> Vec<StreamTrack> {
+fn ranked(
+    snap: &super::Snapshot,
+    seeds: &DiscoverySeeds,
+    finds: &[(Seed, Vec<StreamTrack>)],
+    filter: &nikgob_recs::DiscoveryFilter,
+    log: &NewLog,
+) -> Vec<StreamTrack> {
     let mut all: Vec<SeedFinds> = finds
         .iter()
         .map(|(seed, tracks)| SeedFinds { seed: seed.engine(), tracks: tracks.clone() })
         .collect();
     all.extend(suggestion_finds(&snap.suggested_new));
-    rank_discoveries(seeds, &all, filter).into_iter().map(|d| d.track).collect()
+    let scoring = NewScoring {
+        model: &snap.model,
+        vectors: &snap.new_vectors,
+        log,
+        artist_affinity: &snap.artist_affinity,
+        now: super::recs_now(),
+    };
+    rank_discoveries_with(seeds, &all, filter, Some(&scoring)).into_iter().map(|d| d.track).collect()
+}
+
+/// Where the songs of `finds` came from (by [`stream_song_key`]): a seed
+/// track's YouTube Music radio, the similar artists and related lists, a
+/// service's own suggestion.
+fn sources_of(finds: &[(Seed, Vec<StreamTrack>)]) -> Vec<(String, Source)> {
+    let mut out: Vec<(String, Source)> = Vec::new();
+    for (seed, tracks) in finds {
+        for t in tracks {
+            let source = match seed {
+                Seed::Service(_) => Source::Service,
+                Seed::Track(_) if t.id.service == Service::Youtube => Source::YoutubeRadio,
+                _ => Source::Similar,
+            };
+            let key = stream_song_key(t);
+            if !out.iter().any(|(k, _)| *k == key) {
+                out.push((key, source));
+            }
+        }
+    }
+    out
+}
+
+/// The source a step asks.
+fn source_of(step: &Step) -> Source {
+    match step {
+        Step::TrackList { seed: Seed::Service(_), .. } | Step::FindTrack { seed: Seed::Service(_), .. } => Source::Service,
+        Step::TrackList { service: Service::Youtube, .. } | Step::FindTrack { service: Service::Youtube, .. } => Source::YoutubeRadio,
+        _ => Source::Similar,
+    }
+}
+
+/// `steps` in the order a pass asks them: each source in turn by the share
+/// of the requests its draw gives it ([`NewLog::source_shares`]), so a short
+/// budget goes mostly where new music was heard out.
+fn by_shares(steps: Vec<Step>, shares: &std::collections::BTreeMap<Source, f32>) -> Vec<Step> {
+    let mut queues: Vec<(Source, VecDeque<Step>)> = Vec::new();
+    for s in steps {
+        let src = source_of(&s);
+        match queues.iter_mut().find(|q| q.0 == src) {
+            Some(q) => q.1.push_back(s),
+            None => queues.push((src, VecDeque::from([s]))),
+        }
+    }
+    let mut asked: std::collections::BTreeMap<Source, f32> = std::collections::BTreeMap::new();
+    let mut out = Vec::new();
+    loop {
+        let total: f32 = asked.values().sum::<f32>() + 1.0;
+        let next = queues
+            .iter_mut()
+            .filter(|q| !q.1.is_empty())
+            .max_by(|a, b| {
+                let gap = |s: Source| shares.get(&s).copied().unwrap_or(0.1) - asked.get(&s).copied().unwrap_or(0.0) / total;
+                gap(a.0).total_cmp(&gap(b.0)).then(b.0.cmp(&a.0))
+            });
+        let Some(q) = next else { break };
+        *asked.entry(q.0).or_default() += 1.0;
+        out.extend(q.1.pop_front());
+    }
+    out
 }
 
 fn releases_key(artist: ArtistId) -> String {
@@ -269,6 +347,28 @@ impl Worker {
     /// The discoveries as found (the home filters out the disliked).
     pub(crate) fn discoveries(&self) -> Vec<StreamTrack> {
         self.recs.discover.found.as_ref().map(|f| f.tracks.clone()).unwrap_or_default()
+    }
+
+    /// Where the discovery of song `key` came from.
+    pub(crate) fn discovery_source(&self, key: &str) -> Option<Source> {
+        self.recs.discover.found.as_ref()?.sources.iter().find(|(k, _)| k == key).map(|(_, s)| *s)
+    }
+
+    /// The next discovery to analyse a preview of (YouTube Music's, the
+    /// best first, none analysed or tried yet), as its track and video.
+    pub(crate) fn discovery_preview_next(&mut self, tried: &HashSet<TrackId>) -> Option<(TrackId, String)> {
+        let found = self.recs.discover.found.clone()?;
+        for t in found.tracks.iter().filter(|t| t.id.service == Service::Youtube) {
+            let id = match self.lib.track_by_remote(&t.id).ok().flatten() {
+                Some(id) => id,
+                None => *self.upsert_streams(std::slice::from_ref(t)).first()?,
+            };
+            if tried.contains(&id) || self.analysis.index().read().contains(id) {
+                continue;
+            }
+            return Some((id, t.id.id.clone()));
+        }
+        None
     }
 
     /// YouTube Music and Deezer, the ones that can be asked now.
@@ -394,16 +494,29 @@ impl Worker {
                 });
             }
         }
-        // Tracks and artists in turn, so a short budget still sees both.
+        // New songs heard out lately seed the pass too.
+        for t in self.recs.newlog.log.heard_out(HEARD_SEEDS) {
+            if yt
+                && let Some(r) = self.lib.stream_refs(t).unwrap_or_default().into_iter().find(|r| r.id.service == Service::Youtube)
+            {
+                track_steps.push(Step::TrackList { seed: Seed::Track(t), service: Service::Youtube, id: r.id.id });
+            }
+        }
+        // Tracks and artists in turn, so a short budget still sees both…
         let (mut ti, mut ai) = (track_steps.into_iter(), artist_steps.into_iter());
+        let mut steps = Vec::new();
         loop {
             let (t, a) = (ti.next(), ai.next());
             if t.is_none() && a.is_none() {
                 break;
             }
-            pass.steps.extend(t);
-            pass.steps.extend(a);
+            steps.extend(t);
+            steps.extend(a);
         }
+        // …and every source by the share its draw gives it.
+        let shares = self.recs.newlog.log.source_shares(&mut nikgob_recs::rng::Rng::new(fastrand::u64(..)));
+        log::info!("discover: the sources' shares {shares:?}");
+        pass.steps.extend(by_shares(steps, &shares));
         // New releases: Deezer dates albums to the day.
         if dz {
             let now = now_ms();
@@ -627,7 +740,8 @@ impl Worker {
             artists: pass.seed_artists.clone(),
             profiles: pass.seed_profiles.clone(),
         };
-        let tracks = ranked(&snap, &seeds, &pass.finds, &filter);
+        self.new_log_load();
+        let tracks = ranked(&snap, &seeds, &pass.finds, &filter, &self.recs.newlog.log);
         let releases = snap
             .recs()
             .new_releases(&pass.releases, &snap.known_albums)
@@ -648,6 +762,7 @@ impl Worker {
             seed_tracks: pass.seed_tracks,
             seed_artists: pass.seed_artists,
             seed_profiles: pass.seed_profiles,
+            sources: sources_of(&pass.finds),
             finds: pass.finds,
         };
         self.streaming.learn(&found.tracks);
@@ -683,7 +798,7 @@ impl Worker {
             artists: found.seed_artists.clone(),
             profiles: found.seed_profiles.clone(),
         };
-        let tracks = ranked(&snap, &seeds, &found.finds, &filter);
+        let tracks = ranked(&snap, &seeds, &found.finds, &filter, &self.recs.newlog.log);
         if tracks == found.tracks {
             return;
         }

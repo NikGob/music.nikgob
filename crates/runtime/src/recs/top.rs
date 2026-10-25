@@ -407,6 +407,8 @@ mod tests {
             suggested: Vec::new(),
             rerank: false,
             lanes_salt: 0,
+            extra: Default::default(),
+            new_log: Default::default(),
         };
         let mixes = build(&snap, &input, &tiles, None);
         let moment = mixes.iter().find(|m| m.mix == TopMix::Moment).expect("the moment");

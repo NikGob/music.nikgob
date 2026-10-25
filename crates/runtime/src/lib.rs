@@ -800,6 +800,10 @@ impl Worker {
                 if self.log_err("лайк", r).is_some() {
                     let mut wished = false;
                     if let LikeTarget::Track(t) = target {
+                        if on {
+                            self.liked_undislikes(t);
+                            self.new_liked(t);
+                        }
                         let _ = self.lib.record_event(
                             t,
                             if on { EventType::Like } else { EventType::Unlike },
@@ -1016,6 +1020,7 @@ impl Worker {
             c @ (Command::PlayMix { .. }
             | Command::StartRadio { .. }
             | Command::RecFeedback { .. }
+            | Command::Dislike { .. }
             | Command::RefreshMix { .. }
             | Command::DownloadMix { .. }) => {
                 if let Some(c) = self.recs_command(c) {
@@ -1226,6 +1231,17 @@ impl Worker {
         // until the stack overflows).
         for attempt in 0..=self.queue.len() {
             self.tried.clear();
+            // Disliked, where the app picked it: the next one.
+            if self.skips_disliked(e) {
+                log::info!("skipping the disliked {}", e.track);
+                match self.queue.skip_forward() {
+                    Some(n) if n.id != e.id => {
+                        e = n;
+                        continue;
+                    }
+                    _ => break,
+                }
+            }
             if let Some((req, source, kind)) = self.request_skipping(e, &[]) {
                 self.start_with(e, req, source, kind);
                 return;
@@ -1901,6 +1917,8 @@ impl Worker {
         let playing = self.queue.current().map(|e| e.track);
         let mut visit = home_v2::Visit::now(playing, &self.state.read().prefs);
         visit.sound = Some(self.analysis.index().clone());
+        visit.profiles = self.snapshot().map(|s| s.profiles.clone());
+
         visit
     }
 
@@ -1955,7 +1973,7 @@ impl Worker {
         if old.home_card != p.home_card || old.home_hidden_worlds != p.home_hidden_worlds {
             self.load_home();
         }
-        if old.mixes_downloaded_only != p.mixes_downloaded_only || old.radio_new_share != p.radio_new_share {
+        if old.mixes_downloaded_only != p.mixes_downloaded_only || old.radio_new_share != p.radio_new_share || old.radio_new_share_by != p.radio_new_share_by {
             self.radio_source_changed();
         }
         if old.autoplay && !p.autoplay {

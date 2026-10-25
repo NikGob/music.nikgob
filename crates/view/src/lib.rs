@@ -1148,6 +1148,40 @@ pub struct Prefs {
     /// next tracks of its world (a soundtrack franchise, an artist's
     /// discography) in album order first, then the similar ones.
     pub autoplay_continue_world: bool,
+    /// The share of new music by the kind of radio (a track's, an
+    /// artist's, a mix, autoplay): what was chosen for it last; a kind not
+    /// here takes [`Self::radio_new_share`].
+    pub radio_new_share_by: std::collections::BTreeMap<RadioKind, RadioNewShare>,
+
+    // ---- Dislikes (docs/TODO.md §10).
+    /// «Кнопка «Не нравится»» next to ♡ in Now Playing.
+    pub dislike_button: bool,
+    /// «Пропускать по дизлайку»: a dislike of the playing track skips it.
+    pub dislike_skips: bool,
+    /// «Пропускать и в своём»: disliked tracks and artists not recommended
+    /// are skipped in the user's own albums and playlists too (off: only in
+    /// mixes, radios and autoplay).
+    pub dislike_skip_everywhere: bool,
+    /// «Учитывать в рекомендациях»: a dislike lowers its nearest sound
+    /// neighbours a little too (off: only the track itself is left out).
+    pub dislike_in_recs: bool,
+}
+
+impl Prefs {
+    /// The share of new music of a radio of `kind`.
+    pub fn new_share_of(&self, kind: RadioKind) -> RadioNewShare {
+        self.radio_new_share_by.get(&kind).copied().unwrap_or(self.radio_new_share)
+    }
+}
+
+/// What a radio grows from, for the share of new music it remembers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub enum RadioKind {
+    #[default]
+    Track,
+    Artist,
+    Mix,
+    Autoplay,
 }
 
 /// One preference changed on its own ([`Command::SetPref`]): the runtime
@@ -1183,6 +1217,13 @@ pub enum PrefPatch {
     UserName(String),
     /// Главная's question of the name: `false` («Пропустить») asks no more.
     NamePrompt(bool),
+    /// The share of new music of one kind of radio (the source buttons
+    /// above the queue).
+    RadioNewShareBy(RadioKind, RadioNewShare),
+    DislikeButton(bool),
+    DislikeSkips(bool),
+    DislikeSkipEverywhere(bool),
+    DislikeInRecs(bool),
 }
 
 impl PrefPatch {
@@ -1212,6 +1253,13 @@ impl PrefPatch {
                 p.name_prompt = false;
             }
             Self::NamePrompt(on) => p.name_prompt = *on,
+            Self::RadioNewShareBy(kind, share) => {
+                p.radio_new_share_by.insert(*kind, *share);
+            }
+            Self::DislikeButton(on) => p.dislike_button = *on,
+            Self::DislikeSkips(on) => p.dislike_skips = *on,
+            Self::DislikeSkipEverywhere(on) => p.dislike_skip_everywhere = *on,
+            Self::DislikeInRecs(on) => p.dislike_in_recs = *on,
         }
     }
 }
@@ -1452,8 +1500,36 @@ pub struct ViewState {
     pub find_song: Option<FindSongView>,
     /// How far the background sound analysis is.
     pub analysis: AnalysisProgress,
+    /// Disliked tracks and artists not to recommend («Не нравится»,
+    /// «Не рекомендовать исполнителя»).
+    pub dislikes: DislikesView,
     /// Bumped on every change, so a UI can skip work when nothing changed.
     pub revision: u64,
+}
+
+/// What the user does not want: tracks disliked and artists not to
+/// recommend, newest first, with what the list in Settings shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DislikesView {
+    pub tracks: Vec<DislikedTrack>,
+    pub artists: Vec<(ArtistId, String)>,
+}
+
+impl DislikesView {
+    pub fn track(&self, id: TrackId) -> bool {
+        self.tracks.iter().any(|t| t.id == id)
+    }
+
+    pub fn artist(&self, id: ArtistId) -> bool {
+        self.artists.iter().any(|a| a.0 == id)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DislikedTrack {
+    pub id: TrackId,
+    pub title: String,
+    pub artist: String,
 }
 
 /// How much of the library has its sound analysed (the quiet «Анализирую
@@ -1721,7 +1797,14 @@ pub enum Command {
     /// Stream tracks after the current one / at the end of the queue.
     PlayStreamNext(Vec<RemoteId>),
     EnqueueStream(Vec<RemoteId>),
+    /// «Не нравится» (`dislike`) or its undo for a track: out of every
+    /// recommendation, skipped now when it plays ([`Prefs::dislike_skips`]),
+    /// its like gone. A track liked or played to the end often is asked
+    /// about first, unless `sure`; `relike` gives the like back with an
+    /// undo.
+    Dislike { track: TrackId, dislike: bool, sure: bool, relike: bool },
     /// Like a stream track: it joins the library (marked "стрим"), the like
+
     /// goes to the services ([`Prefs::push_likes`]) and, without a file, a
     /// wishlist item downloads it ([`Prefs::like_download_scope`]).
     LikeStream { track: RemoteId, on: bool },
@@ -1931,6 +2014,11 @@ impl Default for Prefs {
             stream_analysis: true,
             autoplay: true,
             autoplay_continue_world: true,
+            radio_new_share_by: std::collections::BTreeMap::new(),
+            dislike_button: true,
+            dislike_skips: true,
+            dislike_skip_everywhere: false,
+            dislike_in_recs: true,
         }
     }
 }

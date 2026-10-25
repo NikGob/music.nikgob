@@ -74,7 +74,8 @@ pub struct NewEvent {
     pub song: String,
     pub artist: String,
     pub source: Option<Source>,
-    /// Its sound (an analysed preview), for its region.
+    /// Its sound (an analysed preview, embedded in the model's space), for
+    /// its region.
     pub vector: Option<Vector>,
     /// The track it played as (a seed of the next pass when heard out).
     pub track: Option<TrackId>,

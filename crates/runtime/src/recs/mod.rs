@@ -37,7 +37,9 @@
 //! [`StreamSchedule::recs_every`]: crate::StreamSchedule::recs_every
 
 mod discover;
+mod dislikes;
 mod lanes;
+mod novelty;
 mod radio;
 mod suggest;
 mod tiles;
@@ -117,7 +119,32 @@ pub(crate) struct Snapshot {
     pub local_only: bool,
     /// The worlds of the catalog's tracks by their token: key and title.
     pub worlds: HashMap<u64, (String, String)>,
+    /// The analysed previews of the new music found, by [`song_key`].
+    pub new_vectors: HashMap<String, nikgob_recs::Vector>,
+    /// The library artists' affinities by [`artist_key`], 0…1 (a known
+    /// artist of new music).
+    pub artist_affinity: HashMap<String, f32>,
+    /// The taste profile of each track and the profiles' shares (the home's
+    /// shelves draw from each).
+    pub profiles: Arc<TrackProfiles>,
 }
+
+/// The taste profiles as the home reads them.
+#[derive(Debug, Default)]
+pub struct TrackProfiles {
+    pub of: HashMap<TrackId, usize>,
+    pub shares: Vec<f32>,
+}
+
+impl TrackProfiles {
+    fn from_model(model: &UserModel) -> Self {
+        Self {
+            of: (0..model.len()).filter_map(|i| Some((model.id(i), model.profile_at(i)?))).collect(),
+            shares: model.profile_share.clone(),
+        }
+    }
+}
+
 
 /// A new-music candidate that is new indeed by `f`: not in the library,
 /// not disliked, playable.
@@ -136,9 +163,14 @@ impl Snapshot {
     }
 
     /// A new-music candidate that is new indeed: not in the library, not
-    /// disliked.
+    /// disliked, not junk ([`nikgob_recs::junk`]).
     pub fn is_new(&self, t: &StreamTrack) -> bool {
-        is_new(&self.filter, t)
+        is_new(&self.filter, t) && nikgob_recs::junk(t, None).is_none()
+    }
+
+    /// A new track as the engine places it: with its analysed preview.
+    pub fn new_track(&self, t: &StreamTrack) -> NewTrack {
+        NewTrack::from_stream(t, self.new_vectors.get(&stream_song_key(t)).copied())
     }
 }
 
@@ -269,6 +301,8 @@ pub(crate) struct RecsState {
     pub(crate) radio: radio::RadioState,
     pub(crate) discover: discover::DiscoverState,
     pub(crate) suggest: suggest::SuggestState,
+    pub(crate) dislikes: dislikes::Dislikes,
+    pub(crate) newlog: novelty::NewState,
     /// The services' suggestions changed: the discoveries are ranked again
     /// after the next build.
     discover_rerank: bool,
@@ -299,6 +333,8 @@ impl RecsState {
             radio: radio::RadioState::default(),
             discover: discover::DiscoverState::default(),
             suggest: suggest::SuggestState::default(),
+            dislikes: dislikes::Dislikes::default(),
+            newlog: novelty::NewState::default(),
             discover_rerank: false,
             session: Session::default(),
             weights: None,
@@ -319,10 +355,10 @@ fn day_shift_ms() -> i64 {
         .map_or(0, |d| d * 24 * 3600 * 1000)
 }
 
-/// How much new music radios and mixes mix in: «Новое в радио», none under
-/// «Миксы только из скачанного».
-pub(crate) fn new_share(prefs: &v::Prefs) -> f32 {
-    if prefs.mixes_downloaded_only { 0.0 } else { prefs.radio_new_share.fraction() }
+/// How much new music a radio of `kind` mixes in: what was chosen for that
+/// kind, else «Новое в радио»; none under «Миксы только из скачанного».
+pub(crate) fn new_share(prefs: &v::Prefs, kind: v::RadioKind) -> f32 {
+    if prefs.mixes_downloaded_only { 0.0 } else { prefs.new_share_of(kind).fraction() }
 }
 
 /// Now, for the recommendations.
@@ -503,12 +539,16 @@ struct BuildInput {
     rerank: bool,
     /// [`RecsState::lanes_salt`].
     lanes_salt: u64,
+    extra: ReadExtra,
+    /// How new music was received: «С новым» takes its share by it.
+    new_log: nikgob_recs::NewLog,
 }
 
 fn build(input: BuildInput) -> Result<Built, String> {
     let started = Instant::now();
     let (snap, tiles_input, index_len) =
-        read_snapshot(&input.lib, &input.index, input.now, input.utc_offset_min, &input.suggested, input.local_only)?;
+        read_parts(&input.lib, &input.index, input.now, input.utc_offset_min, &input.suggested, input.local_only, &input.extra)
+            .map(|(snap, tiles, len, _)| (snap, tiles, len))?;
     let home = build_home(&snap, &input, &tiles_input);
     log::info!(
         "recs: {} tracks, {} vectors, {} events in {:?}",
@@ -535,7 +575,16 @@ fn read_snapshot(
     suggested: &[suggest::Kept],
     local_only: bool,
 ) -> Result<(Snapshot, nikgob_recs::TilesInput, usize), String> {
-    read_parts(lib, index, now, utc_offset_min, suggested, local_only).map(|(snap, tiles, len, _)| (snap, tiles, len))
+    read_parts(lib, index, now, utc_offset_min, suggested, local_only, &ReadExtra::default()).map(|(snap, tiles, len, _)| (snap, tiles, len))
+}
+
+/// What a snapshot reads besides the library: the new music found (the
+/// analysed previews of it are kept with the snapshot) and «Учитывать
+/// дизлайки в рекомендациях».
+#[derive(Clone, Default)]
+pub(crate) struct ReadExtra {
+    pub new: Vec<StreamTrack>,
+    pub dislike_neighbours: bool,
 }
 
 /// [`read_snapshot`] and the history its model was built of.
@@ -546,6 +595,7 @@ fn read_parts(
     utc_offset_min: i32,
     suggested: &[suggest::Kept],
     local_only: bool,
+    extra: &ReadExtra,
 ) -> Result<(Snapshot, nikgob_recs::TilesInput, usize, TasteInput), String> {
     let err = |what: &str, e: nikgob_library::LibraryError| format!("{what}: {e}");
     let rows = lib.rec_tracks().map_err(|e| err("tracks", e))?;
@@ -670,6 +720,19 @@ fn read_parts(
     );
     let suggested_new: Vec<(StreamTrack, f32)> = matched.unmatched.into_iter().filter(|(t, _)| is_new(&filter, t)).collect();
 
+    // The analysed previews of the new music found (their tracks are not
+    // the catalog's).
+    let new_vectors: HashMap<String, nikgob_recs::Vector> = {
+        let shared = index.read();
+        extra
+            .new
+            .iter()
+            .filter_map(|t| {
+                let id = lib.track_by_remote(&t.id).ok().flatten()?;
+                Some((stream_song_key(t), *shared.get(id)?))
+            })
+            .collect()
+    };
     // Vectors of tracks that are gone (or left the library) stay in the
     // shared index until a restart; not in the snapshot.
     let mut index = index.read().clone();
@@ -695,7 +758,7 @@ fn read_parts(
         utc_offset_min,
         suggested_tracks: matched.tracks,
         suggested_artists: matched.artists,
-        dislike_neighbours: true,
+        dislike_neighbours: extra.dislike_neighbours,
     };
     let model = UserModel::build(
         &catalog,
@@ -709,7 +772,16 @@ fn read_parts(
     {
         log::warn!("recs: cannot keep the model: {e}");
     }
+    log_profiles(&model, &tiles_input, &names);
+    let artist_affinity: HashMap<String, f32> = model
+        .taste
+        .artist_affinities()
+        .filter_map(|(a, s)| Some((artist_key(names.get(&a)?), (s.max(0.0) / 3.0).tanh())))
+        .collect();
     let snap = Snapshot {
+        profiles: Arc::new(TrackProfiles::from_model(&model)),
+        new_vectors,
+        artist_affinity,
         catalog,
         model,
         types,
@@ -723,6 +795,51 @@ fn read_parts(
         worlds,
     };
     Ok((snap, tiles_input, index_len, history))
+}
+
+/// The taste profiles of a build in the log, the largest share first: the
+/// kind of song, the share of the user's active choices, the main artists
+/// and three of the best loved songs.
+fn log_profiles(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &HashMap<ArtistId, String>) {
+    for line in profile_lines(model, tiles, names) {
+        log::info!("recs: profile {line}");
+    }
+}
+
+/// [`log_profiles`]' lines.
+pub(crate) fn profile_lines(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &HashMap<ArtistId, String>) -> Vec<String> {
+    let now = model.now();
+    let k = model.regions.len();
+    let mut order: Vec<usize> = (0..k).collect();
+    order.sort_by(|a, b| model.profile_share[*b].total_cmp(&model.profile_share[*a]).then(a.cmp(b)));
+    let mut out = Vec::new();
+    for j in order {
+        let mut members: Vec<usize> = (0..model.len()).filter(|&i| model.profile_at(i) == Some(j) && model.tracks[i].aff_long(now) > 0.0).collect();
+        members.sort_by(|a, b| model.tracks[*b].aff_long(now).total_cmp(&model.tracks[*a].aff_long(now)).then(a.cmp(b)));
+        let mut artists: HashMap<ArtistId, usize> = HashMap::new();
+        for &i in &members {
+            if let Some(a) = model.main_artist_at(i) {
+                *artists.entry(a).or_default() += 1;
+            }
+        }
+        let mut artists: Vec<(ArtistId, usize)> = artists.into_iter().collect();
+        artists.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let artists: Vec<&str> = artists.iter().take(3).filter_map(|(a, _)| names.get(a).map(String::as_str)).collect();
+        let songs: Vec<String> = members
+            .iter()
+            .take(3)
+            .filter_map(|&i| tiles.facts.get(&model.id(i)).map(|f| format!("«{}» {}", f.title, f.artist)))
+            .collect();
+        let lane = model.regions.lanes.get(j).copied().flatten().map_or_else(|| "mixed".to_owned(), |l| format!("{l:?}"));
+        out.push(format!(
+            "{j}: {lane}, {:.0} % of the choices, {} songs loved; {} · {}",
+            100.0 * model.profile_share.get(j).copied().unwrap_or(0.0),
+            members.len(),
+            artists.join(", "),
+            songs.join(", ")
+        ));
+    }
+    out
 }
 
 /// What `recs.song_types` keeps: the types and what they were told from.
@@ -841,7 +958,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
         Some(c) => (c.picks, c.streams),
         None => {
             let new: Vec<&StreamTrack> = input.new.iter().filter(|t| !input.local_only && snap.is_new(t)).collect();
-            let candidates: Vec<NewTrack> = new.iter().map(|t| NewTrack::from_stream(t, None)).collect();
+            let candidates: Vec<NewTrack> = new.iter().map(|t| snap.new_track(t)).collect();
             let seed = if input.refresh_daily { fastrand::u64(..) } else { day_seed(&input.day) };
             let picks = recs.daily_mix(
                 &candidates,
@@ -959,7 +1076,7 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
         Some(c) => c,
         None => {
             let new: Vec<&StreamTrack> = input.new.iter().filter(|t| !input.local_only && snap.is_new(t)).collect();
-            let candidates: Vec<NewTrack> = new.iter().map(|t| NewTrack::from_stream(t, None)).collect();
+            let candidates: Vec<NewTrack> = new.iter().map(|t| snap.new_track(t)).collect();
             let seed = if input.refresh_daylist { fastrand::u64(..) } else { day_seed(&key) };
             let params = RadioParams {
                 new_share: input.new_share,
@@ -1380,18 +1497,22 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
         now: recs_now(),
         refresh_daily: false,
         refresh_daylist: false,
-        new_share: new_share(prefs),
+        new_share: new_share(prefs, v::RadioKind::Mix),
         local_only: prefs.mixes_downloaded_only,
         new: discoveries.clone(),
         suggested: suggest::cached(lib),
         rerank: false,
         lanes_salt: 0,
+        extra: ReadExtra { new: discoveries.clone(), dislike_neighbours: prefs.dislike_in_recs },
+        new_log: novelty::log_of(lib),
     };
     let built = build(input)?;
     let h = &built.home;
     let mut res = crate::Resolver::new(lib.clone(), library_dir.to_owned());
     let mut visit = crate::home_v2::Visit::now(None, prefs);
     visit.sound = Some(index.clone());
+    visit.profiles = Some(built.snap.profiles.clone());
+
     let mut home = res.home(&crate::home::build_with(lib, &visit));
     HomeParts::of(lib, Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only, prefs.home_card_shown()).apply(&mut home, &mut res);
     Ok(HomePreview {
@@ -1433,7 +1554,7 @@ impl ModelPreview {
         let index = SoundIndex::default();
         crate::analysis::load_index(lib, &index);
         let (_, utc_offset_min) = local_day();
-        let (snap, _, _, history) = read_parts(lib, &index, recs_now(), utc_offset_min, &[], false)?;
+        let (snap, _, _, history) = read_parts(lib, &index, recs_now(), utc_offset_min, &[], false, &ReadExtra { new: Vec::new(), dislike_neighbours: true })?;
         Ok(Self { snap, history })
     }
 
@@ -1465,7 +1586,17 @@ impl ModelPreview {
     }
 
 
+    /// The taste profiles, the largest share first (as the log has them).
+    pub fn profiles(&self, lib: &Library) -> Vec<String> {
+        let names: HashMap<ArtistId, String> = lib.artist_names().unwrap_or_default().into_iter().collect();
+        let rows = lib.rec_tracks().unwrap_or_default();
+        let events = lib.listening_events().unwrap_or_default();
+        let tiles = tiles::input(lib, &rows, &events, names.clone());
+        profile_lines(&self.snap.model, &tiles, &names)
+    }
+
     pub fn song_type(&self, id: TrackId) -> Option<nikgob_recs::SongType> {
+
         self.snap.types.get(id).copied()
     }
 
@@ -1558,6 +1689,11 @@ impl Worker {
                 self.recs_keep_weights();
             }
         }
+        if self.recs.skip_x.is_none()
+            && let Some(x) = self.new_started(track, origin)
+        {
+            self.recs.skip_x = Some((track, x));
+        }
         self.recs.session.start(track, now, ctx, Some(origin));
     }
 
@@ -1571,6 +1707,7 @@ impl Worker {
         } else {
             Ended::Late
         };
+        self.new_ended(track, ended);
         let r = &mut self.recs;
         r.session.end(track, ended);
         let Some((t, x)) = r.skip_x.take() else { return };
@@ -1624,13 +1761,19 @@ impl Worker {
             now: recs_now(),
             refresh_daily: std::mem::take(&mut self.recs.refresh_daily),
             refresh_daylist: std::mem::take(&mut self.recs.refresh_daylist),
-            new_share: new_share(&prefs),
+            new_share: new_share(&prefs, v::RadioKind::Mix),
             local_only: prefs.mixes_downloaded_only,
             new: self.discoveries(),
             suggested: self.suggestions_kept(),
             rerank: std::mem::take(&mut self.recs.discover_rerank),
             lanes_salt: self.recs.lanes_salt,
+            extra: ReadExtra { new: self.discoveries(), dislike_neighbours: prefs.dislike_in_recs },
+            new_log: {
+                self.new_log_load();
+                self.recs.newlog.log.clone()
+            },
         };
+
         let tx = self.recs.tx.clone();
         let spawned = std::thread::Builder::new().name("nikgob-recs".into()).spawn(move || {
             lower_priority();
@@ -1697,6 +1840,7 @@ impl Worker {
             Command::PlayMix { id } => self.play_mix(id),
             Command::StartRadio { seed } => self.start_radio_cmd(seed),
             Command::RecFeedback { target, dislike } => self.rec_feedback(target, dislike),
+            Command::Dislike { track, dislike, sure, relike } => self.dislike(track, dislike, sure, relike),
             Command::RefreshMix { id } => self.refresh_mix(id),
             Command::DownloadMix { id } => self.download_mix(id),
             other => return Some(other),
@@ -1835,7 +1979,7 @@ impl Worker {
         for p in picks {
             match &p.item {
                 Item::Track(id) => {
-                    if radio::radio_allows(*id, false, false, &prefs, snap.as_deref()) {
+                    if radio::radio_allows(*id, false, false, &prefs, snap.as_deref(), v::RadioKind::Mix) {
                         ids.push(*id);
                     }
                 }
@@ -1947,6 +2091,7 @@ impl Worker {
             self.toast(format!("«{name}» снова в рекомендациях"), None);
         }
         // Discoveries follow at once; the mixes after the next build.
+        self.dislikes_load(true);
         self.publish_recs_home();
         self.recs_dirty(Duration::ZERO);
     }

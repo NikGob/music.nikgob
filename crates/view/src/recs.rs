@@ -321,4 +321,7 @@ pub struct RadioView {
     /// Started by «Автовоспроизведение» when the queue ran out (the title
     /// is then «Похожее на «…»»).
     pub autoplay: bool,
+    /// What it grows from (the share of new music it remembers).
+    pub kind: crate::RadioKind,
 }
+

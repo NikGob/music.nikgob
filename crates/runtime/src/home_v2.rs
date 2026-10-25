@@ -67,6 +67,8 @@ pub struct Visit {
     /// The library's sound vectors: the unstarted worlds go by how close
     /// they sound to what plays.
     pub sound: Option<crate::analysis::SoundIndex>,
+    /// The listener's taste profiles: «Слушать снова» draws from each.
+    pub profiles: Option<std::sync::Arc<crate::recs::TrackProfiles>>,
 }
 
 impl Visit {
@@ -78,6 +80,7 @@ impl Visit {
             utc_offset_min: jiff::Zoned::now().offset().seconds() / 60,
             now: now_ms(),
             sound: None,
+            profiles: None,
         }
     }
 
@@ -216,7 +219,8 @@ fn shortcuts(lib: &Library, f: &Facts, releases: &[ReleaseRow], visit: &Visit, h
 
 /// «Слушать снова»: liked or replayed songs not played for a few days, the
 /// most loved first (at night what is played at night weighs more), two
-/// of one artist at most.
+/// of one artist at most, spread over the listener's taste profiles by
+/// their shares (each active one at least once, [`nikgob_recs::regions::spread`]).
 fn listen_again(lib: &Library, f: &Facts, visit: &Visit) -> Vec<TrackRow> {
     let first = f.starts.first().map_or(visit.now, |s| s.0);
     let days = if visit.now - first >= 365 * DAY_MS { AGAIN_DAYS_LONG } else { AGAIN_DAYS };
@@ -257,9 +261,9 @@ fn listen_again(lib: &Library, f: &Facts, visit: &Visit) -> Vec<TrackRow> {
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
     let mut per_artist: HashMap<Option<ArtistId>, usize> = HashMap::new();
     let mut songs = HashSet::new();
-    let mut out = Vec::new();
+    let mut eligible: Vec<(TrackId, Option<usize>)> = Vec::new();
     for (_, t) in scored {
-        if out.len() == LISTEN_AGAIN {
+        if eligible.len() == LISTEN_AGAIN * 4 {
             break;
         }
         let Some(row) = f.rows.get(&t) else { continue };
@@ -267,13 +271,16 @@ fn listen_again(lib: &Library, f: &Facts, visit: &Visit) -> Vec<TrackRow> {
         if per_artist.get(&a).copied().unwrap_or(0) >= PER_ARTIST || !songs.insert(row.song.clone()) {
             continue;
         }
-        if let Ok(Some(r)) = lib.get_track_row(t) {
-            *per_artist.entry(a).or_default() += 1;
-            out.push(r);
-        }
+        *per_artist.entry(a).or_default() += 1;
+        eligible.push((t, visit.profiles.as_ref().and_then(|p| p.of.get(&t).copied())));
     }
-    out
+    let picked: Vec<TrackId> = match &visit.profiles {
+        Some(p) => nikgob_recs::regions::spread(&eligible, &p.shares, LISTEN_AGAIN),
+        None => eligible.into_iter().take(LISTEN_AGAIN).map(|e| e.0).collect(),
+    };
+    picked.into_iter().filter_map(|t| lib.get_track_row(t).ok().flatten()).collect()
 }
+
 
 /// 22:00–05:59 local.
 fn is_night(ts: UnixMs, utc_offset_min: i32) -> bool {
