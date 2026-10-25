@@ -42,13 +42,32 @@ pub enum PaneTab {
     Info,
 }
 
+/// A step of the history: the whole stack, the tabs and chips the page was
+/// on, and how far it was scrolled.
+#[derive(Clone, Debug)]
+struct Place {
+    stack: Vec<Route>,
+    tabs: pages::Tabs,
+    scroll: f32,
+}
+
+impl Place {
+    /// The same page on the same tabs (the scroll aside).
+    fn same(&self, other: &Self) -> bool {
+        self.stack == other.stack && self.tabs == other.tabs
+    }
+}
+
 /// Presentation state of the MD3E window.
 pub struct Md3eUi {
     stack: Vec<Route>,
-    /// Browser-like history of whole stacks, for the mouse's back and
-    /// forward buttons (and Alt+← / Alt+→).
-    past: Vec<Vec<Route>>,
-    future: Vec<Vec<Route>>,
+    /// Browser-like history, for the mouse's back and forward buttons (and
+    /// Alt+← / Alt+→): a page comes back on its tab, scrolled where it was.
+    past: Vec<Place>,
+    future: Vec<Place>,
+    /// The stack and tabs drawn last frame, and how far it was scrolled: a
+    /// tab or chip switched on the same page is a step of the history too.
+    seen: Option<Place>,
     /// +1 forward, -1 back, 0 fade-through (top-level switch).
     nav_dir: f32,
     nav_anim: Animated<f32>,
@@ -100,6 +119,7 @@ impl Md3eUi {
             stack: vec![Route::Home],
             past: Vec::new(),
             future: Vec::new(),
+            seen: None,
             nav_dir: 0.0,
             nav_anim: Animated::new(0.0, crate::tokens::Motion::expressive().slow_effects),
             rail_expanded: true,
@@ -158,8 +178,13 @@ impl Md3eUi {
             self.pages.set_downloads_tab(tab);
         }
         load_for(&route, out);
+        // A page opened anew starts at its top (not where it was last time).
+        if !top_level {
+            self.pages.scroll_to(route.clone(), 0.0);
+        }
         self.stack.push(route);
         self.search.clear();
+        self.seen = Some(self.place());
         self.restart_nav(ctx);
     }
 
@@ -197,7 +222,7 @@ impl Md3eUi {
             return false;
         }
         let parent = &self.stack[..self.stack.len() - 1];
-        if self.past.last().is_some_and(|p| p == parent) {
+        if self.past.last().is_some_and(|p| p.stack == parent) {
             return self.history_back(ctx, out);
         }
         self.remember();
@@ -205,6 +230,7 @@ impl Md3eUi {
         self.nav_dir = -1.0;
         load_for(self.route(), out);
         self.restore_search(ctx);
+        self.seen = Some(self.place());
         self.restart_nav(ctx);
         true
     }
@@ -212,24 +238,34 @@ impl Md3eUi {
     /// Where the user was before (the mouse's back button).
     pub fn history_back(&mut self, ctx: &Context, out: &mut Vec<Command>) -> bool {
         let Some(prev) = self.past.pop() else { return false };
-        self.future.push(std::mem::replace(&mut self.stack, prev));
-        self.arrive(ctx, -1.0, out);
+        self.future.push(self.place());
+        self.arrive(ctx, prev, -1.0, out);
         true
     }
 
     /// Back again to where history-back came from.
     pub fn history_forward(&mut self, ctx: &Context, out: &mut Vec<Command>) -> bool {
         let Some(next) = self.future.pop() else { return false };
-        self.past.push(std::mem::replace(&mut self.stack, next));
-        self.arrive(ctx, 1.0, out);
+        self.past.push(self.place());
+        self.arrive(ctx, next, 1.0, out);
         true
+    }
+
+    /// Where the user is now.
+    fn place(&self) -> Place {
+        Place { stack: self.stack.clone(), tabs: self.pages.tabs(), scroll: self.pages.scroll_now }
     }
 
     /// Notes the current page before going somewhere new.
     fn remember(&mut self) {
+        let here = self.place();
+        self.remember_place(here);
+    }
+
+    fn remember_place(&mut self, here: Place) {
         const KEEP: usize = 50;
-        if self.past.last() != Some(&self.stack) {
-            self.past.push(self.stack.clone());
+        if !self.past.last().is_some_and(|p| p.same(&here)) {
+            self.past.push(here);
             if self.past.len() > KEEP {
                 self.past.remove(0);
             }
@@ -237,13 +273,34 @@ impl Md3eUi {
         self.future.clear();
     }
 
-    fn arrive(&mut self, ctx: &Context, dir: f32, out: &mut Vec<Command>) {
+    /// A tab or chip switched on the page since last frame: where it was
+    /// is a step back (and the new tab starts at the top).
+    fn note_tab_switch(&mut self) {
+        let now = self.place();
+        // (Settings turning to the tab of a row a link asked for is part
+        // of that one step.)
+        if let Some(seen) = self.seen.take()
+            && seen.stack == now.stack
+            && seen.tabs != now.tabs
+            && self.pages.focus_setting.is_none()
+        {
+            self.remember_place(seen);
+            self.pages.scroll_to(self.route().clone(), 0.0);
+        }
+        self.seen = Some(now);
+    }
+
+    fn arrive(&mut self, ctx: &Context, place: Place, dir: f32, out: &mut Vec<Command>) {
+        self.stack = place.stack;
         if self.stack.is_empty() {
             self.stack.push(Route::Home);
         }
+        self.pages.set_tabs(place.tabs);
+        self.pages.scroll_to(self.route().clone(), place.scroll);
         self.nav_dir = dir;
         load_for(self.route(), out);
         self.restore_search(ctx);
+        self.seen = Some(Place { scroll: place.scroll, ..self.place() });
         self.restart_nav(ctx);
     }
 
@@ -362,6 +419,7 @@ impl Md3eUi {
         let overlays_scope = crate::prof::scope("overlays");
 
         // Requests pages made this frame.
+        self.note_tab_switch();
         if std::mem::take(&mut self.pages.go_back) {
             self.back(ctx, out);
         }
@@ -652,8 +710,8 @@ impl Md3eUi {
         // browser; back first closes Now Playing.
         let (mouse_back, mouse_forward) = ctx.input_mut(|i| {
             (
-                i.pointer.button_clicked(egui::PointerButton::Extra1) || i.consume_key(Modifiers::ALT, Key::ArrowLeft),
-                i.pointer.button_clicked(egui::PointerButton::Extra2) || i.consume_key(Modifiers::ALT, Key::ArrowRight),
+                i.pointer.button_released(egui::PointerButton::Extra1) || i.consume_key(Modifiers::ALT, Key::ArrowLeft),
+                i.pointer.button_released(egui::PointerButton::Extra2) || i.consume_key(Modifiers::ALT, Key::ArrowRight),
             )
         });
         if !self.chrome.visualizer {
@@ -1255,6 +1313,42 @@ mod tests {
         assert!(!ui.history_forward(&ctx, &mut out));
         assert!(ui.history_back(&ctx, &mut out));
         assert_eq!(ui.route(), &album);
+    }
+
+    #[test]
+    fn history_brings_a_page_back_on_its_tab_and_where_it_was_scrolled() {
+        use nikgob_view::LibraryTab;
+        let ctx = context();
+        let mut ui = Md3eUi::new();
+        let mut out = Vec::new();
+        ui.navigate(&ctx, Route::Library(LibraryTab::All), &mut out);
+        ui.note_tab_switch();
+        // «Альбомы», scrolled down, then an album from there.
+        ui.pages.library_tab = LibraryTab::Albums;
+        ui.note_tab_switch();
+        assert_eq!(ui.pages.scroll_target(), Some(0.0), "a new tab starts at the top");
+        ui.pages.scroll_now = 640.0;
+        ui.note_tab_switch();
+        let album = Route::Release(nikgob_view::ReleaseId::new());
+        ui.navigate(&ctx, album.clone(), &mut out);
+        assert_eq!(ui.pages.scroll_target(), Some(0.0), "an album opens at its top");
+        ui.pages.scroll_now = 200.0;
+
+        // Back: the albums tab, scrolled where it was.
+        assert!(ui.history_back(&ctx, &mut out));
+        assert_eq!(ui.route(), &Route::Library(LibraryTab::All));
+        assert_eq!(ui.pages.library_tab, LibraryTab::Albums);
+        assert_eq!(ui.pages.scroll_target(), Some(640.0));
+        ui.note_tab_switch();
+        // Back again: the tab before it; forward twice: the album as it was.
+        assert!(ui.history_back(&ctx, &mut out));
+        assert_eq!(ui.pages.library_tab, LibraryTab::All);
+        ui.note_tab_switch();
+        assert!(ui.history_forward(&ctx, &mut out));
+        assert_eq!(ui.pages.library_tab, LibraryTab::Albums);
+        assert!(ui.history_forward(&ctx, &mut out));
+        assert_eq!(ui.route(), &album);
+        assert_eq!(ui.pages.scroll_target(), Some(200.0));
     }
 
     #[test]

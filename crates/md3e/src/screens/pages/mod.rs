@@ -69,9 +69,33 @@ pub(crate) fn radio_by_track(track: TrackId) -> Command {
     Command::StartRadio { seed: nikgob_view::RadioSeed::Track(track) }
 }
 
+/// The tabs and chips a page is on, beyond its route: what a step of the
+/// history brings back with the page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tabs {
+    library: LibraryTab,
+    downloads: usize,
+    settings: usize,
+    home: home::Filter,
+}
+
+/// A page scrolled to `y` once its content is tall enough (it may still be
+/// loading), for at most `frames` frames.
+#[derive(Clone, Debug, PartialEq)]
+struct ScrollRestore {
+    route: Route,
+    y: f32,
+    frames: u32,
+}
+
 /// Page-level presentation state that outlives a frame.
 #[derive(Default)]
 pub struct PageState {
+    /// How far the page on screen is scrolled (last frame).
+    pub(crate) scroll_now: f32,
+    scroll_restore: Option<ScrollRestore>,
+    /// The library tab came back from the history: it loads what it shows.
+    reopen_library_tab: bool,
     /// A navigation requested from inside an overlay or menu.
     pub pending_nav: Option<Route>,
     /// A settings row a "настроить" link asked for: Settings opens on its
@@ -159,6 +183,34 @@ impl PageState {
 
     pub(crate) fn unfold_sources(&mut self) {
         self.yt_form = true;
+    }
+
+    /// The tabs the pages are on.
+    pub(crate) fn tabs(&self) -> Tabs {
+        Tabs { library: self.library_tab, downloads: self.downloads_tab, settings: self.settings_tab, home: self.home_filter }
+    }
+
+    /// Back on `tabs` (a step of the history).
+    pub(crate) fn set_tabs(&mut self, tabs: Tabs) {
+        if tabs.library != self.library_tab {
+            self.reopen_library_tab = true;
+        }
+        self.library_tab = tabs.library;
+        self.downloads_tab = tabs.downloads;
+        self.settings_tab = tabs.settings;
+        self.home_filter = tabs.home;
+    }
+
+    /// The page of `route` shows from `y` down once it can.
+    pub(crate) fn scroll_to(&mut self, route: Route, y: f32) {
+        // About two seconds for its content to arrive.
+        self.scroll_restore = Some(ScrollRestore { route, y, frames: 120 });
+    }
+
+    /// Where the page waits to be scrolled to (tests).
+    #[cfg(test)]
+    pub(crate) fn scroll_target(&self) -> Option<f32> {
+        self.scroll_restore.as_ref().map(|r| r.y)
     }
 
     /// Opens Settings at row `id` (its tab, scrolled into view, glowing).
@@ -822,9 +874,14 @@ pub fn page(
 ) -> Option<Route> {
     let mut nav = None;
     let id = format!("{route:?}");
-    egui::ScrollArea::vertical()
-        .id_salt(("page-scroll", id))
-        .auto_shrink([false, false])
+    // Back where it was: the offset is held until the page is tall enough
+    // for it (a page that loads is short at first).
+    let restore = pages.scroll_restore.as_ref().filter(|r| r.route == *route).map(|r| r.y);
+    let mut area = egui::ScrollArea::vertical().id_salt(("page-scroll", id)).auto_shrink([false, false]);
+    if let Some(y) = restore {
+        area = area.vertical_scroll_offset(y);
+    }
+    let o = area
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
             let r = match route {
@@ -840,6 +897,16 @@ pub fn page(
             nav = r.or(nav.take());
             ui.add_space(bottom_inset);
         });
+    pages.scroll_now = o.state.offset.y;
+    if let (Some(y), Some(r)) = (restore, pages.scroll_restore.as_mut()) {
+        let reachable = (o.content_size.y - o.inner_rect.height()).max(0.0) + 0.5 >= y;
+        r.frames = r.frames.saturating_sub(1);
+        if reachable || r.frames == 0 {
+            pages.scroll_restore = None;
+        } else {
+            ui.ctx().request_repaint();
+        }
+    }
     nav
 }
 

@@ -61,6 +61,10 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     header(ui, state, pages, out);
     ui.add_space(8.0);
     tabs(ui, pages, lib.track_sort, out);
+    if std::mem::take(&mut pages.reopen_library_tab) {
+        let tab = pages.library_tab;
+        open_tab(pages, tab, lib.track_sort, out);
+    }
     ui.add_space(16.0);
 
     let tab = pages.library_tab;

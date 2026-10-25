@@ -3,7 +3,8 @@
 //! look at screens without a human at the keyboard.
 //!
 //! Synthetic input (logical points): `move:x,y`, `click:x,y`, `rclick:x,y`,
-//! `dblclick:x,y` (`click:x,y,frames` sets the wait after it), `drag:x1,y1,x2,y2`, `wheel:x,y,dy`,
+//! `dblclick:x,y` (`click:x,y,frames` sets the wait after it), `xback:x,y` /
+//! `xforward:x,y` (the mouse's side buttons), `drag:x1,y1,x2,y2`, `wheel:x,y,dy`,
 //! `key:space|escape|l|q|f11|f12` (`key:ctrl+2` and other egui key names too), `toasts` (a few snackbars).
 //! `prefs:{json}` merges into the prefs.
 //! `type:text,frames` types into the search bar one character every
@@ -346,7 +347,7 @@ impl Shot {
                     }
                 }
             }
-            "click" | "rclick" | "dblclick" => {
+            "click" | "rclick" | "dblclick" | "xback" | "xforward" => {
                 // `click:x,y,frames`: how long to wait after it (default 20;
                 // 0 = the next step right after the release, for rapid clicks).
                 let n = nums(arg);
@@ -355,6 +356,8 @@ impl Shot {
                     let (b, times) = match verb {
                         "rclick" => (PointerButton::Secondary, 1),
                         "dblclick" => (PointerButton::Primary, 2),
+                        "xback" => (PointerButton::Extra1, 1),
+                        "xforward" => (PointerButton::Extra2, 1),
                         _ => (PointerButton::Primary, 1),
                     };
                     self.press(pos2(x, y), b, times);
