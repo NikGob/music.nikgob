@@ -1919,7 +1919,18 @@ impl Default for Prefs {
     }
 }
 
+/// The card at the top of Главная («Миры») is in the app at all: off,
+/// nobody sees it nor its row in Settings, whatever the prefs say, and
+/// Главная starts with the greeting. Its code stays for its return.
+pub const HOME_CARD: bool = false;
+
 impl Prefs {
+    /// The card at the top of Главная shows: the app has it
+    /// ([`HOME_CARD`]) and «Карточка наверху главной» is on.
+    pub const fn home_card_shown(&self) -> bool {
+        HOME_CARD && self.home_card
+    }
+
     /// The service is switched on.
     pub const fn service_enabled(&self, s: Service) -> bool {
         match s {

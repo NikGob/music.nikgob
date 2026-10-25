@@ -1291,7 +1291,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
     let mut visit = crate::home_v2::Visit::now(None, prefs);
     visit.sound = Some(index.clone());
     let mut home = res.home(&crate::home::build_with(lib, &visit));
-    HomeParts::of(lib, Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only, prefs.home_card, prefs.home_hidden_worlds.clone())
+    HomeParts::of(lib, Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only, prefs.home_card_shown(), prefs.home_hidden_worlds.clone())
         .apply(&mut home, &mut res);
     Ok(HomePreview {
         catalog: built.snap.catalog.len(),
@@ -1316,7 +1316,7 @@ impl Worker {
         let (discover, new_releases) = self.discover_rows();
         let (local_only, card, hidden) = {
             let p = &self.state.read().prefs;
-            (p.mixes_downloaded_only, p.home_card, p.home_hidden_worlds.clone())
+            (p.mixes_downloaded_only, p.home_card_shown(), p.home_hidden_worlds.clone())
         };
         HomeParts::of(&self.lib, self.recs.home.as_ref(), discover, new_releases, local_only, card, hidden)
     }

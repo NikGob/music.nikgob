@@ -430,10 +430,12 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         },
     );
 
-    group(ui, "Главная");
-    row(ui, Id::HomeCard, "Карточка наверху главной", Some("Твои миры: что слушаешь и что ещё нет"), |ui| {
-        ui.add(Switch::new(&mut p.home_card).id_salt("set-home-card"));
-    });
+    if nikgob_view::HOME_CARD {
+        group(ui, "Главная");
+        row(ui, Id::HomeCard, "Карточка наверху главной", Some("Твои миры: что слушаешь и что ещё нет"), |ui| {
+            ui.add(Switch::new(&mut p.home_card).id_salt("set-home-card"));
+        });
+    }
 
     group(ui, "Движение");
     row(ui, Id::NpMotion, "Открытие экрана", Some("Как экран трека открывается и закрывается"), |ui| {

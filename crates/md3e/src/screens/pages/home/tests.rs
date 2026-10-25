@@ -106,15 +106,24 @@ fn without_the_card_the_page_is_the_page_without_worlds() {
         let (off, off_card) = picture(&state(vec![world("mia"), world("omori")], false), width);
         assert!(!base_card && !off_card);
         assert_eq!(base, off, "the setting off must leave the saved base page at {width}");
-        // And on, the card is there and the page under it moves down.
+        // And on, the card is there and the page under it moves down; with
+        // the card out of the app, the setting on changes nothing.
         let (on, on_card) = picture(&state(vec![world("mia"), world("omori")], true), width);
-        assert!(on_card);
-        assert_ne!(base, on);
+        if nikgob_view::HOME_CARD {
+            assert!(on_card);
+            assert_ne!(base, on);
+        } else {
+            assert!(!on_card);
+            assert_eq!(base, on, "the card is out of the app at {width}");
+        }
     }
 }
 
 #[test]
 fn one_world_is_the_card_without_its_row() {
+    if !nikgob_view::HOME_CARD {
+        return;
+    }
     let (one, shown) = picture(&state(vec![world("mia")], true), 1440.0);
     assert!(shown);
     let (two, _) = picture(&state(vec![world("mia"), world("omori")], true), 1440.0);
