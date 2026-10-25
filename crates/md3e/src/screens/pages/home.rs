@@ -496,7 +496,8 @@ fn play_again(rows: &[TrackRow], i: usize) -> Command {
 
 fn of_day(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
     let tiles: Vec<&MixCard> = state.home.tiles.iter().take(4).collect();
-    let per = grid.of_day_per_line();
+    // Three tiles of a day share the row in thirds rather than leave a hole.
+    let per = grid.of_day_per_line().min(tiles.len().max(1));
     let body = lines(tiles.len(), per) as f32 * (OF_DAY_H + 16.0) - 16.0;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + body), Sense::hover());
     entering(ui, rect, n, "of-day", |ui| {

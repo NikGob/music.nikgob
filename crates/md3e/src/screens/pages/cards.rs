@@ -517,9 +517,11 @@ pub fn album(ui: &mut Ui, cell: Rect, title: &str, artist: &str, tail: &str, cov
     });
     let w = cell.width();
     let t = text(ui, title, TypeRole::TitleSmall.style(), s.on_surface, w, 2);
+    // The line under the title follows it: right under a one-line title.
+    let th = t.size().y.clamp(20.0, 40.0);
     ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), t, s.on_surface);
     let role = TypeRole::BodySmall.style();
-    let y = art.bottom() + 8.0 + 40.0;
+    let y = art.bottom() + 8.0 + th;
     if tail.is_empty() {
         let a = text(ui, artist, role, s.on_surface_variant, w, 1);
         ui.painter().galley(pos2(cell.left(), y), a, s.on_surface_variant);
