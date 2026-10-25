@@ -32,7 +32,7 @@ const MIN_SONGS: usize = 12;
 pub(crate) const MAX_LANES: usize = 6;
 /// A song longer than this is left out (they are skipped early a third of
 /// the time, recs-v2 §2).
-const LONG_MS: u32 = 9 * 60 * 1000;
+pub(super) const LONG_MS: u32 = 9 * 60 * 1000;
 /// One world takes at most this share of a lane.
 const WORLD_SHARE: f32 = 0.25;
 /// Japanese is a lane of its own with this many songs and this share of
@@ -611,6 +611,7 @@ mod tests {
             played_songs: HashSet::new(),
             suggested_new: Vec::new(),
             local_only: false,
+            worlds: HashMap::new(),
         };
         let mut tiles = TilesInput::default();
         for (k, id) in ids.iter().enumerate() {

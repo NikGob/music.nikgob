@@ -33,6 +33,7 @@ mod lanes;
 mod radio;
 mod suggest;
 mod tiles;
+pub(crate) mod top;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -101,6 +102,8 @@ pub(crate) struct Snapshot {
     /// «Миксы только из скачанного» when it was built: the engine picks
     /// only tracks with a file, and no new music.
     pub local_only: bool,
+    /// The worlds of the catalog's tracks by their token: key and title.
+    pub worlds: HashMap<u64, (String, String)>,
 }
 
 /// A new-music candidate that is new indeed by `f`: not in the library,
@@ -156,6 +159,11 @@ pub(crate) struct RecHome {
     pub tiles: Vec<tiles::TileHome>,
     /// «Миксы для тебя».
     pub lanes: Vec<lanes::LaneHome>,
+    /// The mix tiles of the card at the top.
+    pub top: Vec<top::TopMixHome>,
+    /// The world of the last track started when it was built (by token):
+    /// «После» follows it.
+    pub top_world: Option<u64>,
 }
 
 /// The daylist of the home.
@@ -240,6 +248,8 @@ pub(crate) struct RecsState {
     refresh_daily: bool,
     /// The next build picks the daylist again.
     refresh_daylist: bool,
+    /// The next build picks this mix tile of the card anew («Другой»).
+    refresh_top: Option<v::TopMix>,
     /// A mix asked for before the first build.
     pending_play: Option<v::MixId>,
     /// «Собрать заново»: the day's lanes are picked with this salt (0: as
@@ -267,6 +277,7 @@ impl RecsState {
             plays: 0,
             refresh_daily: false,
             refresh_daylist: false,
+            refresh_top: None,
             pending_play: None,
             lanes_salt: 0,
             radio: radio::RadioState::default(),
@@ -473,6 +484,8 @@ struct BuildInput {
     rerank: bool,
     /// [`RecsState::lanes_salt`].
     lanes_salt: u64,
+    /// [`RecsState::refresh_top`].
+    refresh_top: Option<v::TopMix>,
 }
 
 fn build(input: BuildInput) -> Result<Built, String> {
@@ -535,15 +548,22 @@ fn read_snapshot(
     }
     // The worlds of Главная: one of them does not fill a mix.
     let album_worlds = crate::home_v2::worlds_of_releases(&release_rows);
+    let mut worlds: HashMap<u64, (String, String)> = HashMap::new();
     let catalog = Catalog::new(rows.iter().filter(|r| r.in_library).map(|r| {
         let song = songs.get(r.song.as_str()).map_or(r.id, |s| s.1);
-        let world = r.release.and_then(|a| album_worlds.get(&a)).map(|w| w.0.as_str());
+        let world = r.release.and_then(|a| album_worlds.get(&a));
         let mut t = TrackInfo::new(r.id, r.artists.clone(), r.release)
             .with_local(r.has_local)
             .with_song(song)
             .with_duration(tiles_input.facts.get(&r.id).and_then(|f| f.duration_ms));
-        if let Some(key) = crate::home_v2::track_world_key(world, r.artists.first().copied()) {
+        let main = r.artists.first().copied();
+        if let Some(key) = crate::home_v2::track_world_key(world.map(|w| w.0.as_str()), main) {
             t = t.with_world(&key);
+            let token = nikgob_recs::world_token(&key);
+            worlds.entry(token).or_insert_with(|| {
+                let title = world.map_or_else(|| main.and_then(|a| names.get(&a)).cloned().unwrap_or_default(), |w| w.1.clone());
+                (key, title)
+            });
         }
         t
     }));
@@ -653,6 +673,7 @@ fn read_snapshot(
         played_songs,
         suggested_new,
         local_only,
+        worlds,
     };
     Ok((snap, tiles_input, index_len))
 }
@@ -715,6 +736,14 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
     let (daylist_key, daylist) = build_daylist(snap, input);
     let tiles = tiles::build(snap, input, tiles_input);
     let lanes = lanes::build(snap, input, tiles_input);
+    let top = top::build(snap, input, tiles_input, input.refresh_top);
+    let top_world = tiles_input
+        .events
+        .iter()
+        .filter(|e| e.kind == nikgob_core::model::EventType::Start)
+        .max_by_key(|e| e.ts)
+        .and_then(|e| snap.catalog.get(e.track))
+        .and_then(|t| t.world);
 
     // Moods: covers of the releases most liked among each mood's top.
     let mut moods = Vec::new();
@@ -778,6 +807,8 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
         daylist,
         tiles,
         lanes,
+        top,
+        top_world,
     }
 }
 
@@ -859,6 +890,10 @@ pub(crate) struct HomeParts {
     new_releases: Vec<v::StreamAlbumCard>,
     /// Lane, artists, new artists, covers, the new cover, the tracks.
     lanes: Vec<LaneParts>,
+    /// The mix tiles of the card and their pictures.
+    top: Vec<(top::TopMixHome, Vec<CoverRef>)>,
+    /// Keys taken off the card's row.
+    hidden: Vec<String>,
     history: bool,
     /// «Только скачанное»: nothing on the home may play without a file.
     local_only: bool,
@@ -876,6 +911,7 @@ impl HomeParts {
         new_releases: Vec<v::StreamAlbumCard>,
         local_only: bool,
         card: bool,
+        hidden: Vec<String>,
     ) -> Self {
         let Some(h) = home else {
             return Self {
@@ -888,6 +924,8 @@ impl HomeParts {
                 discover,
                 new_releases,
                 lanes: Vec::new(),
+                top: Vec::new(),
+                hidden,
                 history: false,
                 local_only,
                 card,
@@ -944,6 +982,11 @@ impl HomeParts {
             .iter()
             .map(|(m, title, subtitle)| (title.clone(), subtitle.clone(), m.covers.iter().copied().map(CoverRef::Release).collect()))
             .collect();
+        let top = h
+            .top
+            .iter()
+            .map(|t| (t.clone(), t.covers.iter().copied().map(CoverRef::Release).collect()))
+            .collect();
         Self {
             hero,
             mix,
@@ -954,6 +997,8 @@ impl HomeParts {
             discover,
             new_releases,
             lanes,
+            top,
+            hidden,
             history: h.history,
             local_only,
             card,
@@ -1028,6 +1073,7 @@ impl HomeParts {
                 covers: covers(c),
             })
             .collect();
+        let top: Vec<(top::TopMixHome, Vec<v::Cover>)> = self.top.into_iter().map(|(t, c)| (t, covers(c))).collect();
         let lane_covers: Vec<Vec<v::Cover>> = self.lanes.iter().map(|l| covers(l.3.clone())).collect();
         let lanes: Vec<v::LaneCard> = self
             .lanes
@@ -1042,6 +1088,7 @@ impl HomeParts {
                 tracks: rows.iter().map(|t| res.track(t)).collect(),
             })
             .collect();
+        let hidden = self.hidden;
         let history = self.history;
         let mix: Option<Vec<_>> = (!self.mix.is_empty()).then(|| self.mix.iter().map(|t| res.track(t)).collect());
         let (discover, new_releases) = (self.discover, self.new_releases);
@@ -1065,6 +1112,22 @@ impl HomeParts {
             if card {
                 card_first(home);
             }
+            // The mix tiles of the card, after the world to continue.
+            let row: Vec<(String, String)> = home
+                .worlds
+                .iter()
+                .filter(|w| w.kind != v::WorldKind::Mix)
+                .map(|w| (w.key.clone(), w.title.clone()))
+                .collect();
+            let after: Vec<Option<String>> = top.iter().map(|t| t.0.after.clone()).collect();
+            let mixes = top
+                .into_iter()
+                .map(|(t, c)| {
+                    let release = t.covers.first().copied();
+                    top::world(&t, c, release, &row)
+                })
+                .collect();
+            top::place(&mut home.worlds, mixes, &after, &hidden);
         }
     }
 }
@@ -1102,7 +1165,7 @@ pub(crate) fn card_first(home: &mut v::HomeView) {
     }
     if !home.new_releases.is_empty() {
         for k in 0..home.worlds.len() {
-            if home.worlds[k].cards.iter().any(|c| matches!(c.go, v::WorldGo::Stream(_))) {
+            if home.worlds[k].kind == v::WorldKind::Mix || home.worlds[k].cards.iter().any(|c| matches!(c.go, v::WorldGo::Stream(_))) {
                 continue;
             }
             if let Some(i) = crate::home_v2::world_release(&home.worlds[k], &home.new_releases) {
@@ -1127,7 +1190,7 @@ pub(crate) fn card_first(home: &mut v::HomeView) {
         }
     }
     let first = &home.worlds[0];
-    let mut shown: HashSet<v::ReleaseId> = home.worlds.iter().filter_map(|w| w.release).collect();
+    let mut shown: HashSet<v::ReleaseId> = home.worlds.iter().filter(|w| w.kind != v::WorldKind::Mix).filter_map(|w| w.release).collect();
     shown.extend(first.release);
     let stream: Option<v::RemoteId> = first.cards.iter().find_map(|c| match &c.go {
         v::WorldGo::Stream(r) => Some(r.clone()),
@@ -1220,6 +1283,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
         suggested: suggest::cached(lib),
         rerank: false,
         lanes_salt: 0,
+        refresh_top: None,
     };
     let built = build(input)?;
     let h = &built.home;
@@ -1227,7 +1291,8 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
     let mut visit = crate::home_v2::Visit::now(None, prefs);
     visit.sound = Some(index.clone());
     let mut home = res.home(&crate::home::build_with(lib, &visit));
-    HomeParts::of(lib, Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only, prefs.home_card).apply(&mut home, &mut res);
+    HomeParts::of(lib, Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only, prefs.home_card, prefs.home_hidden_worlds.clone())
+        .apply(&mut home, &mut res);
     Ok(HomePreview {
         catalog: built.snap.catalog.len(),
         vectors,
@@ -1249,11 +1314,11 @@ impl Worker {
     /// The recommendation parts of the home page as they stand.
     pub(crate) fn recs_home_parts(&mut self) -> HomeParts {
         let (discover, new_releases) = self.discover_rows();
-        let (local_only, card) = {
+        let (local_only, card, hidden) = {
             let p = &self.state.read().prefs;
-            (p.mixes_downloaded_only, p.home_card)
+            (p.mixes_downloaded_only, p.home_card, p.home_hidden_worlds.clone())
         };
-        HomeParts::of(&self.lib, self.recs.home.as_ref(), discover, new_releases, local_only, card)
+        HomeParts::of(&self.lib, self.recs.home.as_ref(), discover, new_releases, local_only, card, hidden)
     }
 
     /// Draws the recommendation parts of the home page again.
@@ -1294,8 +1359,14 @@ impl Worker {
         }
     }
 
-    /// A track ended: a build after enough of them.
-    pub(crate) fn recs_played(&mut self) {
+    /// A track ended: a build after enough of them, or soon when it is of
+    /// another world than the card's «После» follows.
+    pub(crate) fn recs_played(&mut self, track: TrackId) {
+        let world = self.recs.snap.as_ref().and_then(|s| s.catalog.get(track)).and_then(|t| t.world);
+        if world.is_some() && self.recs.home.as_ref().is_some_and(|h| h.top_world != world) {
+            let d = self.streaming.schedule.recs_debounce;
+            self.recs_dirty(d);
+        }
         self.recs.plays += 1;
         if self.recs.plays >= PLAYS_PER_BUILD {
             self.recs.plays = 0;
@@ -1342,6 +1413,7 @@ impl Worker {
             suggested: self.suggestions_kept(),
             rerank: std::mem::take(&mut self.recs.discover_rerank),
             lanes_salt: self.recs.lanes_salt,
+            refresh_top: self.recs.refresh_top.take(),
         };
         let tx = self.recs.tx.clone();
         let spawned = std::thread::Builder::new().name("nikgob-recs".into()).spawn(move || {
@@ -1480,6 +1552,16 @@ impl Worker {
                     None => self.toast("Этого микса уже нет — главная обновилась", None),
                 }
             }
+            v::MixId::Top(m) => {
+                let mix = self.recs.home.as_ref().and_then(|h| h.top.iter().find(|t| t.mix == m));
+                match mix.map(|t| (t.tracks.clone(), t.title.clone())) {
+                    Some((tracks, title)) => {
+                        let picks: Vec<Pick> = tracks.into_iter().map(|id| Pick { item: Item::Track(id), reason: nikgob_recs::Reason::Favourite }).collect();
+                        self.play_picks(&picks, &HashMap::new(), &title);
+                    }
+                    None => self.toast("Этого микса уже нет — главная обновилась", None),
+                }
+            }
             v::MixId::Tile(v::TileKind::Lottery) => self.play_lottery(),
             v::MixId::Tile(kind) => match self.home_tile(kind).map(|t| (t.picks.clone(), t.title.clone())) {
                 Some((picks, title)) => self.play_picks(&picks, &HashMap::new(), &title),
@@ -1581,6 +1663,13 @@ impl Worker {
             v::MixId::Discover => self.discover_now(),
             v::MixId::Daylist => {
                 self.recs.refresh_daylist = true;
+                self.recs_dirty(Duration::ZERO);
+                if !self.recs.building {
+                    self.recs_build();
+                }
+            }
+            v::MixId::Top(m) => {
+                self.recs.refresh_top = Some(m);
                 self.recs_dirty(Duration::ZERO);
                 if !self.recs.building {
                     self.recs_build();

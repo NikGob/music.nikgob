@@ -66,6 +66,30 @@ pub enum MixId {
     /// «Миксы для тебя»: the songs of one lane, about two hours, picked
     /// anew at 06:00 (or with «Собрать заново»); it plays as it is.
     Lane(Lane),
+    /// A mix tile of the card at the top (after the world to continue): 20
+    /// songs kept for the day (or until «Другой»); it plays as it is.
+    Top(TopMix),
+}
+
+/// The mix tiles of the card at the top of Главная.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum TopMix {
+    /// What the user plays at this part of the day, by its sound.
+    Moment,
+    /// «После <мир>»: the sound of the first world's core, from other worlds.
+    After,
+}
+
+impl TopMix {
+    pub const ALL: [Self; 2] = [Self::Moment, Self::After];
+
+    /// Its key on the row («mix:moment»), as a world's.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Moment => "mix:moment",
+            Self::After => "mix:after",
+        }
+    }
 }
 
 impl MixId {

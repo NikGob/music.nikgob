@@ -884,6 +884,7 @@ fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> 
                     facts.push(count(k, "релиз", "релиза", "релизов"));
                 }
             }
+            v::WorldKind::Mix => {}
         }
         facts.push(count(n, "трек", "трека", "треков"));
         facts.retain(|x| !x.is_empty());
@@ -1035,6 +1036,10 @@ fn worlds(f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> Vec<WorldParts> 
                     shuffled,
                     albums: g.albums.iter().map(|a| a.release.id).collect(),
                     cards,
+                    mix: None,
+                    covers: Vec::new(),
+                    reason: String::new(),
+                    mix_other: false,
                 },
                 albums,
                 liked,
@@ -1251,6 +1256,66 @@ mod tests {
         let queued: HashSet<TrackId> = first.iter().copied().chain(ids[1].iter().copied()).collect();
         assert_eq!(world_next(&lib, ids[1][2], &queued, false), ids[2]);
         assert!(world_next(&lib, ids[2][2], &HashSet::new(), false).is_empty(), "the world's end");
+    }
+
+    /// The world last played first, then the mix of the moment, then the
+    /// other worlds; «После» only after the world it is about, a tile taken
+    /// off the row stays off, and placing again does not repeat them.
+    #[test]
+    fn continue_world_is_first_and_mixes_follow() {
+        use nikgob_core::model::{Artist, ArtistCredit, Codec, Event, Release, Source, SourceKind, Track};
+        let lib = Library::open_in_memory().unwrap();
+        let now = now_ms();
+        let mut first = None;
+        for (w, (franchise, composer)) in [("MADE IN ABYSS", "Kevin Penkin"), ("OMORI", "pedro silva"), ("Hollow Knight", "Christopher Larkin")].iter().enumerate() {
+            let a = lib.upsert_artist(&Artist::new(*composer)).unwrap();
+            let credit = ArtistCredit::single(*composer, Some(a.id));
+            for (k, title) in [format!("{franchise} ORIGINAL SOUNDTRACK"), format!("{franchise} ORIGINAL SOUNDTRACK 2")].iter().enumerate() {
+                let r = lib.upsert_release(&Release::new(title.clone(), credit.clone())).unwrap();
+                for n in 0..5 {
+                    let mut t = Track::new(format!("{title} {n}"), credit.clone());
+                    t.release_id = Some(r.id);
+                    t.track_no = n + 1;
+                    t.duration_ms = Some(180_000);
+                    let t = lib.upsert_track(&t).unwrap();
+                    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("x/{w}/{k}/{n}.flac"), Codec::Flac)).unwrap();
+                    // Every world was heard a little; MADE IN ABYSS last.
+                    if n < 2 {
+                        let ts = now - 3_600_000 * (3 - w as i64) * 24 + i64::from(n) * 1000;
+                        lib.record_event_raw(&Event::new(t.id, EventType::Start, ts, lib.device_id())).unwrap();
+                        lib.record_event_raw(&Event::new(t.id, EventType::Complete, ts + 500, lib.device_id())).unwrap();
+                    }
+                    if w == 0 && first.is_none() {
+                        first = Some(t.id);
+                    }
+                }
+            }
+        }
+        let t = first.unwrap();
+        lib.record_event_raw(&Event::new(t, EventType::Start, now - 60_000, lib.device_id())).unwrap();
+        let dir = std::env::temp_dir();
+        let home = crate::recs::preview_home(&lib, &dir).unwrap().home;
+        let row: Vec<(&str, v::WorldKind)> = home.worlds.iter().map(|w| (w.key.as_str(), w.kind)).collect();
+        assert_eq!(row[0].0, "made in abyss", "{row:?}");
+        assert_eq!(row[1], ("mix:moment", v::WorldKind::Mix), "{row:?}");
+        assert!(row[2..].iter().all(|w| w.1 != v::WorldKind::Mix), "{row:?}");
+        assert_eq!(row.len(), 4, "{row:?}");
+        let moment = &home.worlds[1];
+        assert!(moment.primary.len() >= 8 && moment.mix == Some(v::MixId::Top(v::TopMix::Moment)));
+        assert!(moment.facts.starts_with("Микс · "), "{}", moment.facts);
+        assert!(moment.reason.starts_with("Из того, что ты слушаешь"), "{}", moment.reason);
+
+        // «После»: only after its world; hidden stays hidden; no repeats.
+        let mix = |key: &str| v::World { key: key.into(), kind: v::WorldKind::Mix, ..moment.clone() };
+        let mut worlds = home.worlds.clone();
+        let mixes = || vec![mix("mix:moment"), mix("mix:after")];
+        crate::recs::top::place(&mut worlds, mixes(), &[None, Some("made in abyss".into())], &[]);
+        let keys = |w: &[v::World]| w.iter().map(|w| w.key.clone()).collect::<Vec<_>>();
+        assert_eq!(keys(&worlds)[..3], ["made in abyss", "mix:moment", "mix:after"]);
+        assert_eq!(worlds.len(), 5);
+        crate::recs::top::place(&mut worlds, mixes(), &[None, Some("omori".into())], &["mix:moment".into()]);
+        assert_eq!(keys(&worlds).iter().filter(|k| k.starts_with("mix:")).count(), 0);
+        assert_eq!(worlds.len(), 3);
     }
 
     #[test]

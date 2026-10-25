@@ -21,6 +21,11 @@
 //! settling from wght 300 / wdth 116 onto its axes, the cards rising one
 //! after another. The stage cover drifts slowly and stops under the
 //! pointer. Reduced motion: the switch is instant and nothing drifts.
+//!
+//! After the world to continue the row has mix tiles (recs-v2 §7): the
+//! same tile and stage, the picture a 2×2 mosaic of the covers of its
+//! first worlds, the name not a link, the line of why in place of how far,
+//! and [▶ Слушать] [↻ Другой] ⋮ for buttons.
 
 use std::collections::HashMap;
 
@@ -28,7 +33,7 @@ use egui::{
     Color32, Context, CornerRadius, Id, Key, Rect, Sense, Ui, UiBuilder, epaint::text::VariationCoords, pos2,
     text::LayoutJob, vec2,
 };
-use nikgob_view::{Command, Route, Status, ViewState, World, WorldCard, WorldGo, WorldIcon};
+use nikgob_view::{Command, PrefPatch, Route, Status, ViewState, World, WorldCard, WorldGo, WorldIcon, WorldKind};
 
 use super::{PageState, cards, home::Grid};
 use crate::{
@@ -347,7 +352,7 @@ fn stage(ui: &mut Ui, card: Rect, state: &ViewState, world: &World, s: &ColorSch
     match (flying, old) {
         (Some(w), Some(o)) => {
             let fade = 1.0 - progress(theme.motion.default_effects, t);
-            paint_drift(ui, cover, o.cover.as_ref().map(|c| c.uri()).as_deref(), corners, 1.0, (0.0, 0.0), fade);
+            paint_picture(ui, cover, o, corners, 1.0, (0.0, 0.0), fade);
             let p = progress(theme.motion.default_spatial, t);
             let rect = lerp_rect(w.tile, cover, p);
             let lerp = |a: f32, b: f32| a + (b - a) * p.clamp(0.0, 1.2);
@@ -357,11 +362,15 @@ fn stage(ui: &mut Ui, card: Rect, state: &ViewState, world: &World, s: &ColorSch
                 se: lerp(16.0, r).clamp(0.0, 255.0) as u8,
                 sw: lerp(16.0, 0.0).clamp(0.0, 255.0) as u8,
             };
-            paint_drift(ui, rect, world.cover.as_ref().map(|c| c.uri()).as_deref(), fly, 1.0, (0.0, 0.0), 1.0);
+            paint_picture(ui, rect, world, fly, 1.0, (0.0, 0.0), 1.0);
         }
         _ => {
             let (zoom, shift) = drift(&ctx, cover_hover && !theme.reduced_motion, theme.reduced_motion);
-            paint_sharp(ui, cover, world, corners, zoom, shift);
+            if world.kind == WorldKind::Mix {
+                paint_picture(ui, cover, world, corners, zoom, shift, 1.0);
+            } else {
+                paint_sharp(ui, cover, world, corners, zoom, shift);
+            }
         }
     }
     let cover_resp = ui.interact(cover, Id::new("home-world-cover"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -463,7 +472,12 @@ fn tile(ui: &mut Ui, rect: Rect, radius: f32, w: &World, s: &ColorScheme, i: usi
     );
     let c = CornerRadius::same(radius.round().clamp(0.0, 255.0) as u8);
     cards::scaled(ui, rect.center(), squish, |ui| {
-        crate::components::paint_image_zoomed(ui, rect, w.cover.as_ref().map(|c| c.uri()).as_deref(), c, Icon::Album, zoom);
+        if w.kind == WorldKind::Mix {
+            let uris: Vec<String> = w.covers.iter().map(|c| c.uri()).collect();
+            cards::mosaic(ui, rect, &uris, radius, 2.0, zoom);
+        } else {
+            crate::components::paint_image_zoomed(ui, rect, w.cover.as_ref().map(|c| c.uri()).as_deref(), c, Icon::Album, zoom);
+        }
         paint::state_layer(ui.painter(), rect, Radii::all(radius), s.on_secondary_container, layer);
         if resp.has_focus() {
             paint::focus_ring(ui.painter(), rect, Radii::all(radius), s.secondary);
@@ -530,6 +544,30 @@ fn paint_drift(ui: &Ui, rect: Rect, uri: Option<&str>, corners: CornerRadius, zo
     crate::components::paint_image_zoomed(ui, rect, None, corners, Icon::Album, 1.0);
 }
 
+/// A world's cover, or a mix's picture: a 2×2 mosaic of its covers (2
+/// apart; with fewer than four, the first), each quarter drifting as a
+/// cover does and keeping the corners of its own corner.
+fn paint_picture(ui: &Ui, rect: Rect, w: &World, corners: CornerRadius, zoom: f32, shift: (f32, f32), alpha: f32) {
+    if w.kind != WorldKind::Mix || w.covers.len() < 4 {
+        let first = if w.kind == WorldKind::Mix { w.covers.first() } else { w.cover.as_ref() };
+        paint_drift(ui, rect, first.map(|c| c.uri()).as_deref(), corners, zoom, shift, alpha);
+        return;
+    }
+    let gap = 2.0;
+    let half = (rect.size() - vec2(gap, gap)) * 0.5;
+    for (i, c) in w.covers.iter().take(4).enumerate() {
+        let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+        let q = Rect::from_min_size(rect.min + vec2(col * (half.x + gap), row * (half.y + gap)), half);
+        let k = match i {
+            0 => CornerRadius { nw: corners.nw, ..CornerRadius::ZERO },
+            1 => CornerRadius { ne: corners.ne, ..CornerRadius::ZERO },
+            2 => CornerRadius { sw: corners.sw, ..CornerRadius::ZERO },
+            _ => CornerRadius { se: corners.se, ..CornerRadius::ZERO },
+        };
+        paint_drift(ui, q, Some(c.uri().as_str()), k, zoom, shift, alpha);
+    }
+}
+
 /// The stage cover: the album's own at once, and the larger copy of a
 /// service over it once that has loaded, fading in (default effects).
 pub(super) fn paint_sharp(ui: &Ui, rect: Rect, w: &World, corners: CornerRadius, zoom: f32, shift: (f32, f32)) {
@@ -553,7 +591,10 @@ fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
 
 /// «Дослушать» / «Начать» / «С начала».
 pub fn play_primary(w: &World) -> Command {
-    Command::PlayTracks { tracks: w.primary.clone(), start: 0, context: format!("мира «{}»", w.title) }
+    match w.mix {
+        Some(id) => Command::PlayMix { id },
+        None => Command::PlayTracks { tracks: w.primary.clone(), start: 0, context: format!("мира «{}»", w.title) },
+    }
 }
 
 /// The world's name in DisplayLarge 57/64 at `axes` (wght, wdth); a name
@@ -607,15 +648,15 @@ fn text_block(
     ui.painter().galley(pos2(stage.left(), top), k, on);
     let mut y = top + 20.0;
     let mut nav = None;
-    // The name opens the world's page.
+    // The name opens the world's page (a mix's is only its name).
+    let mix = w.kind == WorldKind::Mix;
+    let link = live && !mix;
     let name = name_galley(ui, &w.title, on, stage.width(), axes);
     let name_rect = Rect::from_min_size(pos2(stage.left(), y), name.size());
-    let name_resp = ui
-        .interact(name_rect, Id::new(("home-world-name", &w.key)), if live { Sense::click() } else { Sense::hover() })
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
-    let name_resp = if live { name_resp.md3_tooltip("Открыть мир", None) } else { name_resp };
+    let name_resp = ui.interact(name_rect, Id::new(("home-world-name", &w.key)), if link { Sense::click() } else { Sense::hover() });
+    let name_resp = if link { name_resp.on_hover_cursor(egui::CursorIcon::PointingHand).md3_tooltip("Открыть мир", None) } else { name_resp };
     ui.painter().galley(name_rect.min, name, on);
-    if name_resp.hovered() || name_resp.has_focus() {
+    if !mix && (name_resp.hovered() || name_resp.has_focus()) {
         // A link: underlined under the pointer.
         let base_y = name_rect.bottom() - 6.0;
         ui.painter().line_segment([pos2(name_rect.left(), base_y), pos2(name_rect.right(), base_y)], egui::Stroke::new(2.0, on));
@@ -631,8 +672,15 @@ fn text_block(
     let fh = facts.size().y;
     ui.painter().galley(pos2(stage.left(), y), facts, on);
     y += fh.max(24.0) + 8.0;
-    // How far: «Ты слышал 36 из 134» after the player's wavy progress.
-    progress_line(ui, pos2(stage.left(), y), stage.width(), w, s, live);
+    if mix {
+        // Why these songs, in a line.
+        let why = super::widgets::wrapped(ui, &w.reason, TypeRole::BodyMedium.style(), on, stage.width(), 1);
+        let ty = y + (24.0 - why.size().y) / 2.0;
+        ui.painter().galley(pos2(stage.left(), ty), why, on);
+    } else {
+        // How far: «Ты слышал 36 из 134» after the player's wavy progress.
+        progress_line(ui, pos2(stage.left(), y), stage.width(), w, s, live);
+    }
     y += 24.0 + if tight { 16.0 } else { 24.0 };
     // [▶ Дослушать] [⤨ Вперемешку] ⋮
     let row = Rect::from_min_size(pos2(stage.left(), y), vec2(stage.width(), Size::M.height()));
@@ -640,6 +688,10 @@ fn text_block(
     b.spacing_mut().item_spacing.x = 8.0;
     if !live {
         b.disable();
+    }
+    if let Some(id) = w.mix {
+        mix_buttons(&mut b, w, id, state, out);
+        return nav;
     }
     let label = w.start.label();
     let primary = b
@@ -663,11 +715,44 @@ fn text_block(
     match picked {
         Some(0) => return Some(route(w)),
         Some(1) => out.push(Command::Enqueue(w.primary.clone())),
-        Some(2) => out.push(Command::SetPref(nikgob_view::PrefPatch::HideWorld(w.key.clone()))),
+        Some(2) => out.push(Command::SetPref(PrefPatch::HideWorld(w.key.clone()))),
         Some(3) => out.push(Command::HideHomeCard),
         _ => {}
     }
     nav
+}
+
+/// [▶ Слушать] [↻ Другой] ⋮ of a mix tile.
+fn mix_buttons(b: &mut Ui, w: &World, id: nikgob_view::MixId, state: &ViewState, out: &mut Vec<Command>) {
+    let play = b
+        .add(Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).id_salt(("home-world-primary", &w.key)))
+        .md3_tooltip(&w.primary_tip, None);
+    if play.clicked() {
+        out.push(Command::PlayMix { id });
+    }
+    let other = b
+        .add_enabled(w.mix_other, Button::new("Другой").icon(Icon::Refresh).size(Size::M).style(Style::Outlined).id_salt(("home-world-other", &w.key)))
+        .on_disabled_hover_text("Составов на сегодня хватит — завтра будет новый");
+    let other = if w.mix_other { other.md3_tooltip("Собрать другой состав", None) } else { other };
+    if other.clicked() {
+        out.push(Command::RefreshMix { id });
+    }
+    let more = b.add(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Standard).tooltip("Ещё").id_salt(("home-world-more", &w.key)));
+    let picked = Menu::new(("home-world-menu", &w.key))
+        .item(MenuItem::new("В очередь").icon(Icon::QueueMusic))
+        .item(MenuItem::new("Сохранить как плейлист").icon(Icon::PlaylistAdd))
+        .item(MenuItem::new("Убрать из ряда").icon(Icon::Block).enabled(state.home.worlds.len() > 1))
+        .divider()
+        .item(MenuItem::new("Скрыть карточку").icon(Icon::Close))
+        .align_right(false)
+        .attach(&more);
+    match picked {
+        Some(0) => out.push(Command::Enqueue(w.primary.clone())),
+        Some(1) => out.push(Command::SaveTracksAsPlaylist { name: w.title.clone(), tracks: w.primary.clone() }),
+        Some(2) => out.push(Command::SetPref(PrefPatch::HideWorld(w.key.clone()))),
+        Some(3) => out.push(Command::HideHomeCard),
+        _ => {}
+    }
 }
 
 /// «Ты слышал 36 из 134», «Ты слышал все 134», «Ты ещё не слышал ни одного
@@ -753,7 +838,11 @@ fn cards_row(
         if clicked && live {
             match &c.go {
                 WorldGo::Player => go = Some(Go::Player),
-                WorldGo::Play(t) => out.push(Command::PlayTracks { tracks: t.clone(), start: 0, context: format!("мира «{}»", w.title) }),
+                WorldGo::Play(t) => {
+                    let of = if w.kind == WorldKind::Mix { "микса" } else { "мира" };
+                    out.push(Command::PlayTracks { tracks: t.clone(), start: 0, context: format!("{of} «{}»", w.title) });
+                }
+                WorldGo::World(k) => go = Some(Go::Route(Route::World(k.clone()))),
                 WorldGo::Release(r) => go = Some(Go::Route(Route::Release(*r))),
                 WorldGo::Stream(r) => go = Some(Go::Route(Route::Stream(nikgob_view::StreamPage::Album(r.clone())))),
             }
