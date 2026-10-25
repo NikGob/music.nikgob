@@ -125,3 +125,39 @@ fn one_world_is_the_card_without_its_row() {
     let (two, _) = picture(&state(vec![world("mia"), world("omori")], true), 1440.0);
     assert!(two.len() > one.len(), "two worlds draw their row of tiles");
 }
+
+#[test]
+fn the_greeting_names_the_user_when_it_knows_the_name() {
+    assert_eq!(greeting_line(19, ""), "Добрый вечер");
+    assert_eq!(greeting_line(19, "   "), "Добрый вечер", "no name, no comma");
+    assert_eq!(greeting_line(19, "  Ник  "), "Добрый вечер, Ник");
+    assert_eq!(greeting_line(8, "Ник"), "Доброе утро, Ник");
+    assert_eq!(greeting_line(13, "Ник"), "Добрый день, Ник");
+    assert_eq!(greeting_line(2, "Ник"), "Доброй ночи, Ник");
+    let long = "Николай Константинович Рерих-Младший Третий";
+    let line = greeting_line(19, long);
+    assert_eq!(line.chars().count(), "Добрый вечер, ".chars().count() + nikgob_view::USER_NAME_MAX);
+}
+
+/// The text of every galley the page paints.
+fn texts(state: &ViewState, width: f32) -> String {
+    picture(state, width).0.join("\n")
+}
+
+#[test]
+fn the_name_is_asked_once_on_the_first_start() {
+    let mut first = state(Vec::new(), false);
+    first.prefs.name_prompt = true;
+    assert!(texts(&first, 1200.0).contains("Как к тебе обращаться?"));
+    // «Пропустить» or a name: asked no more.
+    let mut skipped = first.clone();
+    nikgob_view::PrefPatch::NamePrompt(false).apply(&mut skipped.prefs);
+    assert!(!texts(&skipped, 1200.0).contains("Как к тебе обращаться?"));
+    let mut named = first.clone();
+    nikgob_view::PrefPatch::UserName("Ник".into()).apply(&mut named.prefs);
+    let page = texts(&named, 1200.0);
+    assert!(!page.contains("Как к тебе обращаться?"));
+    assert!(page.contains(", Ник"), "the greeting names the user");
+    // Not asked of a library from before (its prefs file had no question).
+    assert!(!texts(&state(Vec::new(), false), 1200.0).contains("Как к тебе обращаться?"));
+}

@@ -146,6 +146,10 @@ pub struct PageState {
     acoustid_key: String,
     metadata_contact: String,
     metadata_synced: bool,
+    /// What is typed into «Как к тебе обращаться» (Главная's question and
+    /// the settings row) before it is kept.
+    name_draft: String,
+    name_synced: bool,
     /// «Источники»: what is typed into the Spotify Client ID and the
     /// YouTube cookies fields, and which folds are open.
     sp_client_id: String,

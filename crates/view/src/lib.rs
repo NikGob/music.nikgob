@@ -1129,6 +1129,12 @@ pub struct Prefs {
     /// «Карточка наверху главной» («Миры»): off, Главная starts with the
     /// greeting.
     pub home_card: bool,
+    /// «Как к тебе обращаться»: the name in the greeting of Главная («Добрый
+    /// вечер, Ник»); empty, the greeting alone ([`user_name`]).
+    pub user_name: String,
+    /// Главная asks for the name once: set on the first start (no prefs
+    /// file before), gone with «Готово» or «Пропустить».
+    pub name_prompt: bool,
     /// The worlds taken off the card's row («Убрать из ряда»), by key.
     pub home_hidden_worlds: Vec<String>,
     /// «Анализ звука стримов»: liked and playlist tracks without a file are
@@ -1172,6 +1178,11 @@ pub enum PrefPatch {
     NpSlot(NpSlot),
     /// Windows starts the app at sign-in (as the system says).
     Autostart(bool),
+    /// «Как к тебе обращаться» ([`user_name`] keeps it tidy); Главная asks
+    /// no more.
+    UserName(String),
+    /// Главная's question of the name: `false` («Пропустить») asks no more.
+    NamePrompt(bool),
 }
 
 impl PrefPatch {
@@ -1196,8 +1207,23 @@ impl PrefPatch {
             Self::CoverShape(s) => p.cover_shape = *s,
             Self::NpSlot(s) => p.np_slot = *s,
             Self::Autostart(on) => p.autostart = *on,
+            Self::UserName(name) => {
+                p.user_name = user_name(name);
+                p.name_prompt = false;
+            }
+            Self::NamePrompt(on) => p.name_prompt = *on,
         }
     }
+}
+
+/// The longest name the greeting takes.
+pub const USER_NAME_MAX: usize = 32;
+
+/// A name as the greeting keeps it: trimmed, its spaces single, at most
+/// [`USER_NAME_MAX`] characters.
+pub fn user_name(text: &str) -> String {
+    let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    one.chars().take(USER_NAME_MAX).collect::<String>().trim_end().to_owned()
 }
 
 /// «Новое в радио»: the share of new music in radios and mixes.
@@ -1899,6 +1925,8 @@ impl Default for Prefs {
             mixes_downloaded_only: false,
             mixes_with_new: false,
             home_card: true,
+            user_name: String::new(),
+            name_prompt: false,
             home_hidden_worlds: Vec::new(),
             stream_analysis: true,
             autoplay: true,

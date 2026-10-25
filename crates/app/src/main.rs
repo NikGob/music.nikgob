@@ -91,6 +91,15 @@ fn log_panics(dir: PathBuf) {
     }));
 }
 
+/// The prefs of a prefs file's bytes; without a file (the first start)
+/// the defaults, and Главная asks for the name.
+fn prefs_of(bytes: Option<&[u8]>) -> Prefs {
+    match bytes {
+        Some(b) => parse_prefs(b).unwrap_or_default(),
+        None => Prefs { name_prompt: true, ..Prefs::default() },
+    }
+}
+
 fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
     let slot = if value.get("lyrics_mega").and_then(|v| v.as_bool()) == Some(true) {
@@ -114,10 +123,7 @@ fn load_prefs(
     settings: Option<&nikgob_core::settings::Settings>,
     devices: std::thread::JoinHandle<Vec<String>>,
 ) -> Prefs {
-    let mut p: Prefs = std::fs::read(&paths.prefs)
-        .ok()
-        .and_then(|b| parse_prefs(&b).ok())
-        .unwrap_or_default();
+    let mut p = prefs_of(std::fs::read(&paths.prefs).ok().as_deref());
     if p.library_dir.as_os_str().is_empty() {
         p.library_dir = paths.root.join("Music");
     }
@@ -739,5 +745,22 @@ mod prefs_tests {
             assert!(value.get("lyrics_mega").is_none());
             assert!(value.get("np_pane").is_none());
         }
+    }
+
+    /// Главная asks for the name on the first start only: not with a prefs
+    /// file from before, not once «Готово» or «Пропустить» was said.
+    #[test]
+    fn the_name_is_asked_on_the_first_start_only() {
+        use nikgob_view::PrefPatch;
+        let mut first = prefs_of(None);
+        assert!(first.name_prompt && first.user_name.is_empty());
+        assert!(!prefs_of(Some(br#"{"theme":"Dark"}"#)).name_prompt, "a prefs file from before");
+        let mut skipped = first.clone();
+        PrefPatch::NamePrompt(false).apply(&mut skipped);
+        let kept = serde_json::to_vec(&skipped).unwrap();
+        assert!(!prefs_of(Some(&kept)).name_prompt, "skipped: never again");
+        PrefPatch::UserName("  Ник  ".into()).apply(&mut first);
+        let kept = prefs_of(Some(&serde_json::to_vec(&first).unwrap()));
+        assert_eq!((kept.user_name.as_str(), kept.name_prompt), ("Ник", false));
     }
 }

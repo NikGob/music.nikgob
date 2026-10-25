@@ -570,6 +570,27 @@ fn swatches(ui: &mut Ui, p: &Prefs) -> Option<u8> {
 /// Behaviour: controls, lyrics, sound, library, import and quality
 /// (streaming and torrents live on «Источники»).
 fn general(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    group(ui, "Приветствие");
+    if !pages.name_synced {
+        pages.name_draft = p.user_name.clone();
+        pages.name_synced = true;
+    }
+    settings_help::item(ui, Id::UserName, "Как к тебе обращаться", |ui| {
+        let field = TextField::new(&mut pages.name_draft, "Как к тебе обращаться")
+            .placeholder("Имя")
+            .supporting("В приветствии на главной: «Добрый вечер, …». Пусто — без имени.")
+            .leading_icon(Icon::Person)
+            .width(480.0)
+            .id_salt("set-user-name")
+            .show(ui);
+        // Kept when the field is left or Enter is pressed.
+        let name = nikgob_view::user_name(&pages.name_draft);
+        if (field.submitted || field.response.lost_focus()) && name != p.user_name {
+            out.push(Command::SetPref(nikgob_view::PrefPatch::UserName(name.clone())));
+            pages.name_draft = name;
+        }
+    });
+
     group(ui, "Запуск");
     row(ui, Id::Autostart, "Запускать вместе с Windows", Some("Когда входишь в систему"), |ui| {
         ui.add(Switch::new(&mut p.autostart).id_salt("set-autostart"));

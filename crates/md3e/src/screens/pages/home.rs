@@ -30,6 +30,17 @@ pub(super) fn greeting(hour: u8) -> &'static str {
     }
 }
 
+/// «Добрый вечер, Ник», or the greeting alone without a name.
+pub(super) fn greeting_line(hour: u8, name: &str) -> String {
+    let name = nikgob_view::user_name(name);
+    if name.is_empty() { greeting(hour).to_owned() } else { format!("{}, {name}", greeting(hour)) }
+}
+
+/// Главная asks for the name: the first start, no name yet.
+pub(super) fn asks_name(p: &nikgob_view::Prefs) -> bool {
+    p.name_prompt && p.user_name.trim().is_empty()
+}
+
 /// The widest the page gets; wider windows centre it.
 pub const MAX_W: f32 = 1600.0;
 /// The space between columns.
@@ -220,6 +231,9 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
 
     ui.add_space(8.0);
     if is_empty(h) {
+        if asks_name(&state.prefs) {
+            name_prompt(ui, grid, pages, out);
+        }
         empty(ui, grid, pages, out);
         return None;
     }
@@ -238,6 +252,10 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     let row = Rect::from_min_size(pos2(grid.left, row.top()), vec2(grid.width, HEADER_H));
     entering(ui, row, n, "greeting", |ui| header(ui, row, state, out));
     n += 1;
+    if asks_name(&state.prefs) {
+        ui.add_space(8.0);
+        name_prompt(ui, grid, pages, out);
+    }
 
     let shown = sections(h, local_only);
     for (k, section) in shown.iter().enumerate() {
@@ -258,15 +276,10 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     nav
 }
 
-/// The header of the page: «Доброй ночи» and at the right «Только
-/// скачанное».
+/// The header of the page: «Доброй ночи, Ник» and at the right «Только
+/// скачанное»; a long name ends in «…» before the chip.
 fn header(ui: &mut Ui, row: Rect, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
-    let g = crate::typography::layout(
-        ui.painter(),
-        TypeRole::HeadlineMedium.style().job(greeting(state.home.greeting_hour), s.on_surface),
-    );
-    ui.painter().galley(pos2(row.left(), row.center().y - g.size().y / 2.0), g, s.on_surface);
     let on = state.prefs.mixes_downloaded_only;
     let chip = FilterChip::new("Только скачанное", on).icon(Icon::DownloadDone).id_salt("home-downloaded-only");
     let mut right = ui.new_child(
@@ -275,13 +288,55 @@ fn header(ui: &mut Ui, row: Rect, state: &ViewState, out: &mut Vec<Command>) {
             .layout(egui::Layout::right_to_left(egui::Align::Center))
             .id_salt("home-header-right"),
     );
-    if right
-        .add(chip)
-        .md3_tooltip("Миксы, «Слушать снова» и подборки — только из скачанных треков", None)
-        .clicked()
-    {
+    let chip = right.add(chip);
+    let mut job = TypeRole::HeadlineMedium
+        .style()
+        .job(greeting_line(state.home.greeting_hour, &state.prefs.user_name), s.on_surface);
+    job.wrap = egui::text::TextWrapping::truncate_at_width((chip.rect.left() - row.left() - 16.0).max(48.0));
+    let g = crate::typography::layout(ui.painter(), job);
+    ui.painter().galley(pos2(row.left(), row.center().y - g.size().y / 2.0), g, s.on_surface);
+    if chip.md3_tooltip("Миксы, «Слушать снова» и подборки — только из скачанных треков", None).clicked() {
         out.push(downloaded_only(!on));
     }
+}
+
+/// The first start's question under the greeting: how to call the user,
+/// «Готово» or «Пропустить» (asked no more either way).
+fn name_prompt(ui: &mut Ui, grid: Grid, pages: &mut PageState, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let w = grid.width.min(560.0);
+    let h = 164.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
+    let card = Rect::from_min_size(pos2(grid.left, rect.top()), vec2(w, h));
+    crate::components::paint::container(
+        ui.painter(),
+        card,
+        crate::components::Radii::all(crate::tokens::shape::LARGE),
+        s.surface_container_high,
+        egui::Stroke::NONE,
+    );
+    let mut c = ui.new_child(UiBuilder::new().max_rect(card.shrink2(vec2(20.0, 16.0))).id_salt("home-name-prompt"));
+    c.spacing_mut().item_spacing.y = 4.0;
+    c.label(TypeRole::TitleMedium.style().rich("Как к тебе обращаться?", s.on_surface));
+    c.label(TypeRole::BodyMedium.style().rich("Имя будет в приветствии на главной. Сменить можно в Настройках.", s.on_surface_variant));
+    c.add_space(12.0);
+    c.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let buttons = Button::new("Пропустить").natural_width(ui) + Button::new("Готово").natural_width(ui) + 16.0;
+        let field = crate::components::TextField::new(&mut pages.name_draft, "Имя")
+            .width((ui.available_width() - buttons).max(120.0))
+            .id_salt("home-name-field")
+            .show(ui);
+        let name = nikgob_view::user_name(&pages.name_draft);
+        if ui.add(Button::new("Пропустить").style(Style::Text).id_salt("home-name-skip")).clicked() {
+            out.push(Command::SetPref(nikgob_view::PrefPatch::NamePrompt(false)));
+        }
+        let done = ui.add(Button::new("Готово").style(Style::Filled).enabled(!name.is_empty()).id_salt("home-name-done")).clicked();
+        if (done || field.submitted) && !name.is_empty() {
+            out.push(Command::SetPref(nikgob_view::PrefPatch::UserName(name)));
+            pages.name_synced = false;
+        }
+    });
 }
 
 /// «Только скачанное» switched to `on`.
