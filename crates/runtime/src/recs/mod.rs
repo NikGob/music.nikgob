@@ -2,9 +2,12 @@
 //! `nikgob-recs` over the library, kept off the worker thread.
 //!
 //! * **Snapshot.** The [`Catalog`] (library tracks and liked or playlist
-//!   stream tracks), the [`Taste`] of the event log, likes, playlists and
-//!   «Не рекомендовать», and a copy of the sound index without vectors of
-//!   tracks that are gone, plus what the discovery filter needs. Built on a
+//!   stream tracks), the [`UserModel`] of the event log, likes, playlists
+//!   and «Не рекомендовать» (its [`Taste`] and what the next start is
+//!   scored by), the [`SongTypes`] of the tracks (kept in
+//!   `recs.song_types` while the lyrics, the sound and the rules are the
+//!   same), and a copy of the sound index without vectors of tracks that
+//!   are gone, plus what the discovery filter needs. Built on a
 //!   low-priority thread of its own (about half a second for 50 000
 //!   tracks): at start, a little after the library changes (likes,
 //!   playlists, imports, feedback: [`StreamSchedule::recs_debounce`]),
@@ -24,6 +27,11 @@
 //!   ([`suggest`]: matched against the library here, a bonus of affinity
 //!   for its tracks and artists, discovery votes for the rest),
 //!   **«Не рекомендовать»** with its undo (below).
+//! * **The session and the model online.** Every start and its end go on
+//!   in the [`Session`] of the moment (what a track's radio reads); a start
+//!   the user chose teaches the model of the next start, and every one the
+//!   skip model, between builds; their weights are kept in `recs.model`
+//!   (learnt from the whole history again when the features change).
 //!
 //! [`StreamSchedule::recs_debounce`]: crate::StreamSchedule::recs_debounce
 //! [`StreamSchedule::recs_every`]: crate::StreamSchedule::recs_every
@@ -44,9 +52,10 @@ use nikgob_core::model::{ArtistId, EventContext, ReleaseId, TrackId, UnixMs};
 use nikgob_core::streaming::{RemoteId, StreamTrack};
 use nikgob_library::{Library, now_ms};
 use nikgob_recs::{
-    Catalog, DAYLIST_LEN, DailyParams, DayPart, DiscoveryFilter, Item, Mood, NewTrack, Pick, RadioParams,
-    RadioState as Engine, Recs, ServiceSuggestions, StyleMix, Taste, TasteInput, TrackInfo, VectorIndex, album_key,
-    artist_key, daylist_title, daylist_until, match_suggestions, song_key, stream_song_key, style_words,
+    Catalog, DAYLIST_LEN, DailyParams, DayPart, DiscoveryFilter, Ended, FEATURE_VERSION, Item, ModelInput, Mood,
+    NewTrack, Pick, RadioParams, RadioState as Engine, Recs, SONGTYPE_RULES, ServiceSuggestions, Session, SongInput,
+    SongTypes, StyleMix, TasteInput, TrackInfo, UserModel, VectorIndex, Weights, album_key, artist_key, daylist_title,
+    daylist_until, match_suggestions, song_key, song_types, stream_song_key, style_words,
 };
 use nikgob_view::{self as v, Command};
 use serde::{Deserialize, Serialize};
@@ -67,6 +76,8 @@ const NEW_VECTORS: usize = 200;
 const DAILY_KEY: &str = "recs.daily";
 const DAYLIST_KEY: &str = "recs.daylist";
 const STYLES_KEY: &str = "recs.styles";
+const MODEL_KEY: &str = "recs.model";
+const SONG_TYPES_KEY: &str = "recs.song_types";
 /// Covers of a mix card…
 const COVERS: usize = 4;
 /// …from this many releases (some have no cover).
@@ -83,7 +94,9 @@ pub(crate) const ARTIST_NAME: &str = "artist_name";
 /// The engine's inputs at one moment.
 pub(crate) struct Snapshot {
     pub catalog: Catalog,
-    pub taste: Taste,
+    /// The model of the listener, its taste among it.
+    pub model: UserModel,
+    pub types: SongTypes,
     /// The sound vectors of catalog tracks only.
     pub index: VectorIndex<TrackId>,
     /// Known songs and artists of the library and the dislikes (discovery
@@ -119,7 +132,7 @@ fn is_new(f: &DiscoveryFilter, t: &StreamTrack) -> bool {
 
 impl Snapshot {
     pub fn recs(&self) -> Recs<'_> {
-        Recs::new(&self.catalog, &self.taste, &self.index).local_only(self.local_only)
+        Recs::new(&self.catalog, &self.model.taste, &self.index).local_only(self.local_only).with_model(&self.model)
     }
 
     /// A new-music candidate that is new indeed: not in the library, not
@@ -259,6 +272,12 @@ pub(crate) struct RecsState {
     /// The services' suggestions changed: the discoveries are ranked again
     /// after the next build.
     discover_rerank: bool,
+    /// The session of the moment, its starts and how they ended.
+    pub(crate) session: Session,
+    /// The weights learnt since the snapshot's (`None`: the snapshot's).
+    pub(crate) weights: Option<Weights>,
+    /// The skip model's features of the playing track at its start.
+    skip_x: Option<(TrackId, [f32; nikgob_recs::model::G])>,
 }
 
 impl RecsState {
@@ -281,6 +300,9 @@ impl RecsState {
             discover: discover::DiscoverState::default(),
             suggest: suggest::SuggestState::default(),
             discover_rerank: false,
+            session: Session::default(),
+            weights: None,
+            skip_x: None,
         }
     }
 }
@@ -444,7 +466,7 @@ fn still_fits(snap: &Snapshot, p: &Pick, streams: &HashMap<RemoteId, StreamTrack
         Item::Track(id) => snap
             .catalog
             .get(*id)
-            .is_some_and(|t| !snap.taste.blocks(t) && (t.local || !snap.local_only)),
+            .is_some_and(|t| !snap.model.taste.blocks(t) && (t.local || !snap.local_only)),
         Item::Stream(r) => !snap.local_only && streams.get(r).is_some_and(|t| snap.is_new(t)),
     }
 }
@@ -635,7 +657,22 @@ fn read_snapshot(
     );
     let suggested_new: Vec<(StreamTrack, f32)> = matched.unmatched.into_iter().filter(|(t, _)| is_new(&filter, t)).collect();
 
-    let taste = Taste::build(
+    // Vectors of tracks that are gone (or left the library) stay in the
+    // shared index until a restart; not in the snapshot.
+    let mut index = index.read().clone();
+    let index_len = index.len();
+    let stale: Vec<TrackId> = index.iter().map(|(id, _)| id).filter(|id| catalog.position(*id).is_none()).collect();
+    for id in stale {
+        index.remove(id);
+    }
+    let types = read_song_types(lib, &catalog, &index, &tiles_input, &names);
+    let cached: Option<Weights> = lib
+        .cache_get(MODEL_KEY)
+        .ok()
+        .flatten()
+        .and_then(|(_, json)| serde_json::from_str(&json).ok())
+        .filter(|w: &Weights| w.version == FEATURE_VERSION);
+    let model = UserModel::build(
         &catalog,
         &TasteInput {
             events: events.iter().map(nikgob_recs::Play::from).collect(),
@@ -648,19 +685,19 @@ fn read_snapshot(
             suggested_tracks: matched.tracks,
             suggested_artists: matched.artists,
         },
+        ModelInput { index: &index, types: Some(&types), weights: cached },
         now,
     );
-    // Vectors of tracks that are gone (or left the library) stay in the
-    // shared index until a restart; not in the snapshot.
-    let mut index = index.read().clone();
-    let index_len = index.len();
-    let stale: Vec<TrackId> = index.iter().map(|(id, _)| id).filter(|id| catalog.position(*id).is_none()).collect();
-    for id in stale {
-        index.remove(id);
+    if cached.is_none()
+        && let Ok(json) = serde_json::to_string(&model.weights)
+        && let Err(e) = lib.cache_put(MODEL_KEY, now, &json)
+    {
+        log::warn!("recs: cannot keep the model: {e}");
     }
     let snap = Snapshot {
         catalog,
-        taste,
+        model,
+        types,
         index,
         filter,
         artist_keys,
@@ -671,6 +708,102 @@ fn read_snapshot(
         worlds,
     };
     Ok((snap, tiles_input, index_len))
+}
+
+/// What `recs.song_types` keeps: the types and what they were told from.
+#[derive(Serialize, Deserialize)]
+struct SongTypesCache {
+    rules: u32,
+    /// [`fingerprint`] of the inputs.
+    of: u64,
+    types: SongTypes,
+}
+
+/// A stable hash of everything the song types are told from.
+fn fingerprint(inputs: &[SongInput]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h = (h ^ u64::from(*b)).wrapping_mul(0x100_0000_01b3);
+        }
+        h = (h ^ 0xff).wrapping_mul(0x100_0000_01b3);
+    };
+    for t in inputs {
+        eat(t.id.as_uuid().as_bytes());
+        eat(t.main_artist.map(|a| *a.as_uuid().as_bytes()).unwrap_or_default().as_slice());
+        eat(t.artist_name.as_bytes());
+        eat(t.title.as_bytes());
+        eat(t.credit.as_bytes());
+        eat(t.album.as_deref().unwrap_or_default().as_bytes());
+        eat(&[u8::from(t.ost), u8::from(t.synced_lyrics)]);
+        match &t.lyrics {
+            Some((flag, text)) => eat(format!("{flag}{text}").as_bytes()),
+            None => eat(b"-"),
+        }
+        if let Some(z) = &t.z {
+            for x in z {
+                eat(&x.to_le_bytes());
+            }
+        }
+    }
+    h
+}
+
+/// The types of the catalog's tracks: kept in `recs.song_types` while
+/// their lyrics, sound, names and the rules are the same.
+fn read_song_types(
+    lib: &Library,
+    catalog: &Catalog,
+    index: &VectorIndex<TrackId>,
+    tiles: &nikgob_recs::TilesInput,
+    names: &HashMap<ArtistId, String>,
+) -> SongTypes {
+    let samples = lib.lyrics_samples().unwrap_or_else(|e| {
+        log::warn!("recs: lyrics for the song types: {e}");
+        Vec::new()
+    });
+    let lyrics: HashMap<TrackId, (bool, String)> = samples.into_iter().map(|s| (s.id, (s.instrumental, s.text))).collect();
+    let norm = index.normalizer();
+    let mut inputs: Vec<SongInput> = catalog
+        .tracks()
+        .iter()
+        .map(|t| {
+            let f = tiles.facts.get(&t.id);
+            let main = t.artists.first().copied();
+            let album = f.and_then(|f| f.album.clone());
+            SongInput {
+                id: t.id,
+                main_artist: main,
+                artist_name: main.and_then(|a| names.get(&a)).cloned().unwrap_or_default(),
+                title: f.map(|f| f.title.clone()).unwrap_or_default(),
+                credit: f.map(|f| f.artist.clone()).unwrap_or_default(),
+                ost: album.as_deref().and_then(nikgob_recs::tiles::franchise).is_some(),
+                album,
+                lyrics: lyrics.get(&t.id).cloned(),
+                synced_lyrics: f.is_some_and(|f| matches!(f.lyrics, nikgob_recs::LyricsKind::Synced | nikgob_recs::LyricsKind::Words)),
+                z: index.get(t.id).map(|v| norm.z(v)),
+            }
+        })
+        .collect();
+    inputs.sort_by_key(|t| t.id);
+    let of = fingerprint(&inputs);
+    let cached: Option<SongTypesCache> = lib
+        .cache_get(SONG_TYPES_KEY)
+        .ok()
+        .flatten()
+        .and_then(|(_, json)| serde_json::from_str(&json).ok())
+        .filter(|c: &SongTypesCache| c.rules == SONGTYPE_RULES && c.of == of);
+    if let Some(c) = cached {
+        return c.types;
+    }
+    let types = song_types(&inputs);
+    let cache = SongTypesCache { rules: SONGTYPE_RULES, of, types };
+    if let Ok(json) = serde_json::to_string(&cache)
+        && let Err(e) = lib.cache_put(SONG_TYPES_KEY, now_ms(), &json)
+    {
+        log::warn!("recs: cannot keep the song types: {e}");
+    }
+    cache.types
 }
 
 fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::TilesInput) -> RecHome {
@@ -686,7 +819,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
         .filter(|c: &DailyCache| {
             c.day == input.day
                 && !input.refresh_daily
-                && (c.history || !snap.taste.has_history())
+                && (c.history || !snap.model.taste.has_history())
                 && c.local_only == input.local_only
         });
     let (picks, streams) = match cached {
@@ -712,7 +845,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
                 day: input.day.clone(),
                 picks: picks.clone(),
                 streams: streams.clone(),
-                history: snap.taste.has_history(),
+                history: snap.model.taste.has_history(),
                 local_only: input.local_only,
             };
             if let Ok(json) = serde_json::to_string(&cache)
@@ -738,7 +871,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
     if !snap.index.is_empty() {
         for m in recs.mood_order() {
             let mut top: Vec<(TrackId, f32)> = recs.mood_pool(m).into_iter().take(MOOD_COVER_POOL).collect();
-            let aff = |id: TrackId| snap.catalog.position(id).map_or(0.0, |i| snap.taste.affinity_at(i));
+            let aff = |id: TrackId| snap.catalog.position(id).map_or(0.0, |i| snap.model.taste.affinity_at(i));
             top.sort_by(|a, b| aff(b.0).total_cmp(&aff(a.0)));
             let mut covers: Vec<ReleaseId> = Vec::new();
             for (id, _) in top {
@@ -788,7 +921,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
         daily,
         daily_streams,
         daily_covers,
-        history: snap.taste.has_history(),
+        history: snap.model.taste.has_history(),
         moods,
         styles,
         daylist_key,
@@ -803,7 +936,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
 /// unless «Обновить» or a history appeared since.
 fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<DaylistHome>) {
     let lib = &input.lib;
-    let history = snap.taste.has_history();
+    let history = snap.model.taste.has_history();
     let (part, day, key) = daylist_key(input.now, input.utc_offset_min);
     let cached = cache_read::<DaylistCache>(lib, DAYLIST_KEY)
         .filter(|c| c.key == key && !input.refresh_daylist && (c.history || !history) && c.local_only == input.local_only);
@@ -1256,7 +1389,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
         tile_tracks: h.tiles.iter().map(|t| (t.mix_id(), t.picks.len())).collect(),
         discover_cached: discoveries.len(),
         new_releases_cached,
-        suggested_library: (0..built.snap.catalog.len()).filter(|&i| built.snap.taste.suggested_at(i) > 0.0).count(),
+        suggested_library: (0..built.snap.catalog.len()).filter(|&i| built.snap.model.taste.suggested_at(i) > 0.0).count(),
         suggested_new: built.snap.suggested_new.len(),
         took: started.elapsed(),
         home,
@@ -1322,13 +1455,63 @@ impl Worker {
         }
     }
 
+    /// A start, `origin` its chooser: the session goes on, and a start the
+    /// user chose teaches the model of the next start.
+    pub(crate) fn recs_started(&mut self, track: TrackId, origin: nikgob_core::model::EventOrigin) {
+        let now = recs_now();
+        let ctx = self.play_context;
+        let r = &mut self.recs;
+        if r.session.last_ts().is_none_or(|l| now - l >= nikgob_recs::taste::SESSION_GAP_MS) {
+            r.session = Session::default();
+        }
+        r.skip_x = None;
+        if let Some(snap) = r.snap.clone()
+            && let Some(i) = snap.model.position(track)
+        {
+            let model = &snap.model;
+            let m = model.moment(&r.session, now);
+            r.skip_x = Some((track, model.skip_features(&m, i, ctx)));
+            if m.prev.is_some() && nikgob_recs::model::teaches(Some(origin), ctx) {
+                let w = r.weights.get_or_insert(model.weights);
+                model.teach_next(&mut w.next, &m, i);
+                self.recs_keep_weights();
+            }
+        }
+        self.recs.session.start(track, now, ctx, Some(origin));
+    }
+
+    /// How a start ended (not by closing the app): the session and the
+    /// skip model learn it.
+    pub(crate) fn recs_ended(&mut self, track: TrackId, complete: bool, position_ms: u32) {
+        let ended = if complete {
+            Ended::Complete
+        } else if position_ms < nikgob_recs::taste::EARLY_SKIP_MS {
+            Ended::Early
+        } else {
+            Ended::Late
+        };
+        let r = &mut self.recs;
+        r.session.end(track, ended);
+        let Some((t, x)) = r.skip_x.take() else { return };
+        if t != track || ended == Ended::Late {
+            return;
+        }
+        let Some(snap) = r.snap.clone() else { return };
+        r.weights.get_or_insert(snap.model.weights).skip.observe(&x, ended == Ended::Early);
+        self.recs_keep_weights();
+    }
+
+    /// The weights learnt online, into `recs.model`.
+    fn recs_keep_weights(&self) {
+        if let Some(w) = &self.recs.weights
+            && let Ok(json) = serde_json::to_string(w)
+            && let Err(e) = self.lib.cache_put(MODEL_KEY, now_ms(), &json)
+        {
+            log::warn!("recs: cannot keep the model: {e}");
+        }
+    }
+
     /// Every tick: a build when one is due, the discovery job.
-    /// A start, `origin` its chooser: the session goes on.
-    pub(crate) fn recs_started(&mut self, _track: TrackId, _origin: nikgob_core::model::EventOrigin) {}
-
-    /// How a start ended (not by closing the app).
-    pub(crate) fn recs_ended(&mut self, _track: TrackId, _complete: bool, _position_ms: u32) {}
-
     pub(crate) fn recs_tick(&mut self) {
         let now = Instant::now();
         let every = self.streaming.schedule.recs_every;
@@ -1399,6 +1582,10 @@ impl Worker {
             Ok(b) => {
                 let rerank = b.rerank;
                 self.recs.built_index_len = b.index_len;
+                let built = b.snap.model.weights;
+                if self.recs.weights.is_none_or(|w| w.version != built.version || w.next.seen + w.skip.seen <= built.next.seen + built.skip.seen) {
+                    self.recs.weights = None;
+                }
                 self.recs.snap = Some(b.snap);
                 self.recs.home = Some(b.home);
                 rerank

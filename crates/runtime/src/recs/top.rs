@@ -162,7 +162,7 @@ fn world_of(snap: &Snapshot, id: TrackId) -> Option<u64> {
 
 /// The mix tiles of now, `refresh` one of them picked anew («Другой»).
 pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, refresh: Option<TopMix>) -> Vec<TopMixHome> {
-    if !snap.taste.has_history() {
+    if !snap.model.taste.has_history() {
         return Vec::new();
     }
     let lib = &input.lib;
@@ -183,7 +183,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, ref
     let fits = |id: &TrackId| {
         snap.catalog
             .get(*id)
-            .is_some_and(|t| !snap.taste.blocks(t) && (t.local || !snap.local_only))
+            .is_some_and(|t| !snap.model.taste.blocks(t) && (t.local || !snap.local_only))
     };
     let long = |id: &TrackId| tiles.facts.get(id).and_then(|f| f.duration_ms).is_some_and(|d| d > super::lanes::LONG_MS);
     let (part, _, part_key) = daylist_key(input.now, input.utc_offset_min);

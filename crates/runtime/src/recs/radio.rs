@@ -523,6 +523,7 @@ impl Worker {
         run.want = false;
         run.extending = true;
         let (id, mut state) = (run.id, run.state.clone());
+        state.attune(self.recs.session.clone(), self.recs.weights);
         let params = RadioParams { new_share, seed: run.seed };
         let tx = self.recs.tx.clone();
         let spawned = std::thread::Builder::new().name("nikgob-radio".into()).spawn(move || {

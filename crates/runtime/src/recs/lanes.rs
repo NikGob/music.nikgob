@@ -332,7 +332,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     let mut soundtracks: Vec<(usize, TrackId, Option<f32>)> = Vec::new();
     let mut other: Vec<(usize, TrackId)> = Vec::new();
     for (i, t) in snap.catalog.tracks().iter().enumerate() {
-        if snap.taste.blocks(t) || (snap.local_only && !t.local) {
+        if snap.model.taste.blocks(t) || (snap.local_only && !t.local) {
             continue;
         }
         let Some(f) = tiles.facts.get(&t.id) else { continue };
@@ -370,7 +370,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     }
 
     // The starts of four weeks by lane.
-    let now = snap.taste.now();
+    let now = snap.model.taste.now();
     let lane_of: HashMap<TrackId, v::Lane> =
         by_lane.iter().flat_map(|(l, ts)| ts.iter().map(move |(_, t)| (*t, *l))).collect();
     let mut starts: HashMap<v::Lane, u32> = HashMap::new();
@@ -387,7 +387,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     } else {
         starts.get(&v::Lane::Japanese).copied().unwrap_or(0) as f32 / total_starts as f32
     };
-    if ja < JAPANESE_SONGS || (snap.taste.has_history() && ja_share < JAPANESE_SHARE) {
+    if ja < JAPANESE_SONGS || (snap.model.taste.has_history() && ja_share < JAPANESE_SHARE) {
         let mut merged = by_lane.remove(&v::Lane::English).unwrap_or_default();
         merged.extend(by_lane.remove(&v::Lane::Japanese).unwrap_or_default());
         merged.extend(other);
@@ -411,10 +411,10 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     lanes.sort_by(|a, b| {
         let key = |l: v::Lane| (starts.get(&l).copied().unwrap_or(0), by_lane.get(&l).map_or(0, Vec::len));
         let (ka, kb) = (key(a.0), key(b.0));
-        if snap.taste.has_history() { kb.cmp(&ka) } else { kb.1.cmp(&ka.1) }.then(a.0.cmp(&b.0))
+        if snap.model.taste.has_history() { kb.cmp(&ka) } else { kb.1.cmp(&ka.1) }.then(a.0.cmp(&b.0))
     });
-    lanes.truncate(MAX_LANES - usize::from(snap.taste.has_history()));
-    if snap.taste.has_history()
+    lanes.truncate(MAX_LANES - usize::from(snap.model.taste.has_history()));
+    if snap.model.taste.has_history()
         && let Some(repeat) = on_repeat(snap, tiles)
     {
         lanes.push((v::Lane::OnRepeat, repeat));
@@ -444,9 +444,9 @@ fn pick(snap: &Snapshot, tiles: &TilesInput, pool: &[(usize, TrackId)], seed: u6
         .iter()
         .filter(|(_, t)| duration(t).is_none_or(|d| d <= LONG_MS))
         .map(|&(i, t)| {
-            let a = snap.taste.affinity_at(i);
+            let a = snap.model.taste.affinity_at(i);
             // What played lately rests about a day and a half.
-            (a.max(0.0).sqrt() + 0.6 * jitter(seed, t) - nikgob_recs::radio::MIX_REST * snap.taste.lately_at(i), i, t)
+            (a.max(0.0).sqrt() + 0.6 * jitter(seed, t) - nikgob_recs::radio::MIX_REST * snap.model.taste.lately_at(i), i, t)
         })
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)));
@@ -472,7 +472,7 @@ fn pick(snap: &Snapshot, tiles: &TilesInput, pool: &[(usize, TrackId)], seed: u6
 /// (a month once the history is that long), what plays on repeat now first
 /// (the hot affinity, then the count).
 fn on_repeat(snap: &Snapshot, tiles: &TilesInput) -> Option<Vec<TrackId>> {
-    let now = snap.taste.now();
+    let now = snap.model.taste.now();
     let first = tiles.events.iter().map(|p| p.ts).min()?;
     let days = if now - first >= 30 * DAY_MS { REPEAT_DAYS_LONG } else { REPEAT_DAYS_SHORT };
     let mut n: HashMap<TrackId, u32> = HashMap::new();
@@ -487,10 +487,10 @@ fn on_repeat(snap: &Snapshot, tiles: &TilesInput) -> Option<Vec<TrackId>> {
         .into_iter()
         .filter(|(t, c)| {
             *c >= 2
-                && snap.catalog.get(*t).is_some_and(|i| !snap.taste.blocks(i) && (i.local || !snap.local_only))
+                && snap.catalog.get(*t).is_some_and(|i| !snap.model.taste.blocks(i) && (i.local || !snap.local_only))
                 && tiles.facts.get(t).is_none_or(|f| f.duration_ms.is_none_or(|d| d >= INTERLUDE_MS))
         })
-        .map(|(t, c)| (snap.catalog.position(t).map_or(0.0, |i| snap.taste.hot_at(i)), c, t))
+        .map(|(t, c)| (snap.catalog.position(t).map_or(0.0, |i| snap.model.taste.hot_at(i)), c, t))
         .collect();
     top.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
     let mut total = 0u64;
@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn a_lane_has_no_run_of_one_world() {
         use nikgob_core::model::{ArtistId, ReleaseId};
-        use nikgob_recs::{Catalog, DiscoveryFilter, Taste, TasteInput, TrackFacts, TrackInfo, VectorIndex};
+        use nikgob_recs::{Catalog, DiscoveryFilter, ModelInput, SongTypes, TasteInput, TrackFacts, TrackInfo, UserModel, VectorIndex};
         let ids: Vec<TrackId> = (0..80).map(|_| TrackId::new()).collect();
         let albums: Vec<ReleaseId> = (0..12).map(|_| ReleaseId::new()).collect();
         let tracks: Vec<TrackInfo> = ids
@@ -600,9 +600,10 @@ mod tests {
             index.insert(*id, v);
         }
         let input = TasteInput { likes: ids[..40].to_vec(), ..TasteInput::default() };
-        let taste = Taste::build(&catalog, &input, 1_000 * DAY_MS);
+        let model = UserModel::build(&catalog, &input, ModelInput { index: &index, types: None, weights: None }, 1_000 * DAY_MS);
         let snap = Snapshot {
-            taste,
+            model,
+            types: SongTypes::default(),
             catalog,
             index,
             filter: DiscoveryFilter::default(),

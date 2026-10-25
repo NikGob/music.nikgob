@@ -128,7 +128,7 @@ pub(super) fn input(lib: &Library, rows: &[RecTrack], events: &[Event], artist_n
 /// the day recorded in the history).
 pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> Vec<TileHome> {
     let lib = &input.lib;
-    let history = snap.taste.has_history();
+    let history = snap.model.taste.has_history();
     let kept = cache_read::<TilesDay>(lib, DAY_KEY)
         .filter(|c| c.day == input.day && (c.history || !history) && c.local_only == snap.local_only);
     let board = match kept {

@@ -419,6 +419,11 @@ fn plays_record_who_chose_them_and_why_they_ended() {
     let l = library(3, 6, 5, &[]);
     let s = start(&l.lib, Vec::new(), Prefs::default(), None);
     wait_for(&s.rt, "the home", home_ready);
+    // The model is kept as the first build learnt it, and learns online.
+    let kept = || -> serde_json::Value {
+        serde_json::from_str(&l.lib.cache_get("recs.model").unwrap().expect("the model is kept").1).unwrap()
+    };
+    let before = kept();
     let album = l.lib.get_track(l.tracks[0]).unwrap().unwrap().release_id.unwrap();
     let last = |kind: EventType| {
         l.lib.recent_events(100).unwrap().into_iter().find(|e| e.event_type == kind && e.ts > now_ms() - 60_000)
@@ -446,6 +451,12 @@ fn plays_record_who_chose_them_and_why_they_ended() {
     drop(s);
     let closed = last(EventType::Skip).unwrap();
     assert_eq!((closed.track_id, closed.end_reason), (l.tracks[7], Some(EndReason::AppClosed)));
+    // An early skip and a complete taught the skip model; the track the
+    // user picked after the album's, the model of the next start.
+    let after = kept();
+    let seen = |w: &serde_json::Value, m: &str| w[m]["seen"].as_u64().unwrap();
+    assert!(seen(&after, "skip") >= seen(&before, "skip") + 2, "{before} {after}");
+    assert_eq!(seen(&after, "next"), seen(&before, "next") + 1, "{before} {after}");
 }
 
 #[test]
