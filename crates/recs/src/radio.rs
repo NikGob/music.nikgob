@@ -31,12 +31,18 @@
 //! time as if the ones before it played, among the candidates of the
 //! session (§5.2), by its value (§5.3) — the model's relevance, plus
 //! `1.5·ln(1 − p_skip)`, plus [`RADIO_REST`] times how rested it is (1.5
-//! days to half), a little seeded chance. The diversity rules hold, but
-//! for the next one on the album while an album plays and the world's
-//! tracks while a world does; after two early skips running the model
-//! weighs the skipped sounds' push and the session's lane twice
-//! ([`SKIP_SHIFT`]). The session is the runtime's own, handed to the radio
-//! before it picks ([`RadioState::attune`]), else the radio's tracks.
+//! days to half), a little seeded chance.
+//! «Похоже на X» stays X's: its candidates are within X's sound radius
+//! ([`SEED_RADIUS`] median distances, nearer in a big library) and of a
+//! kind of song that goes with X's, the anchor of the sound is X's for
+//! [`SEED_HOLD`] and the session's for the rest, so affinity only orders
+//! what is near. The diversity rules always hold (artist, album, world);
+//! the next one on the album goes on only right after the user's own start
+//! from an album. After two early skips running the model weighs the
+//! skipped sounds' push and the session's lane twice ([`SKIP_SHIFT`]):
+//! the radio turns to another part of X's neighbourhood, never out of it.
+//! The session is the runtime's own, handed to the radio before it picks
+//! ([`RadioState::attune`]), else the radio's tracks.
 //!
 //! An artist's radio is ~70% the artist's own tracks by affinity
 //! ([`ARTIST_OWN_SHARE`]), the rest similar by sound and co-listening; the
@@ -58,6 +64,8 @@ use crate::pick::{Diversity, Item, NewTrack, Pick, Placed, Reason, Recs, Seen, S
 use crate::rng::Rng;
 use crate::mood::Axes;
 use crate::session::{Ended, Session};
+use crate::songtype::SongLane;
+
 use crate::taste::{DayPart, HOUR_MS};
 
 /// Served items remembered (never repeated while remembered).
@@ -570,13 +578,24 @@ impl RadioState {
                 && !recent.contains(&item)
                 && !recs.played_within(i, REPEAT_AFTER_MS)
         };
+        // «Похоже на X» stays near X: within its sound radius and of a
+        // kind of song that goes with it; the session only leans it.
+        let anchor = SeedAnchor::of(model, seed);
+        let near = |i: usize| anchor.holds(model, i);
+        // The album goes on only from the user's own album, in its order
+        // while each pick is the next on it; a world never over the rules.
+        let mut continuing =
+            self.session.last().is_some_and(|p| p.context == nikgob_core::model::EventContext::Album) && self.session.album_session(model);
         let mut tail: Vec<Placed> = self.tail.clone();
         let mut per_world: HashMap<u64, usize> = HashMap::new();
         let world_cap = rules.world_cap(n);
         let jitter = rng.next_u64();
         let mut out: Vec<Slot> = Vec::with_capacity(n);
         for _ in 0..n {
-            let m = model.moment(&sim, ts);
+            let mut m = model.moment(&sim, ts);
+            m.album_session &= continuing;
+            m.world_session = None;
+            m.anchor = anchor.lean(m.anchor);
             // What the session played lately rests: back once
             // [`REPEAT_AFTER`] others played since it, at once when it
             // played twice running.
@@ -586,11 +605,17 @@ impl RadioState {
                 let t = recs.info(i);
                 !taken.contains(&Item::Track(t.id)) && !t.song.is_some_and(|s| taken.contains(&Item::Track(s))) && !lately.contains(&t.id)
             };
-            let cands = model.candidates(&m, &|i| ok(i) && free(i));
+            let mut cands = model.candidates(&m, &|i| ok(i) && free(i) && near(i));
+            if cands.is_empty() {
+                cands = model.candidates(&m, &|i| ok(i) && free(i));
+            }
             if cands.is_empty() {
                 break;
             }
             let mut w = weights.next;
+            if !continuing {
+                w.w[F_NEXT_ALBUM] = 0.0;
+            }
             if shifted || m.skip_streak >= SKIP_SHIFT {
                 w.w[F_SKIP_PUSH] = 2.0 * w.w[F_SKIP_PUSH].max(HAND[F_SKIP_PUSH]);
                 w.w[F_SAME_LANE] = 2.0 * w.w[F_SAME_LANE].max(HAND[F_SAME_LANE]);
@@ -629,6 +654,8 @@ impl RadioState {
             }
             let Some((_, slot)) = best else { break };
             let Item::Track(id) = slot.item else { break };
+            continuing &= m.next_album.is_some_and(|c| model.id(c) == id);
+
             take(taken, &slot);
             tail.push(Placed::of(&slot));
             if let Some(w) = slot.world {
@@ -842,7 +869,77 @@ impl RadioState {
     }
 }
 
+/// The share of a model radio's anchor that is its seed: the session's
+/// sound leans it, never leads it away.
+const SEED_HOLD: f32 = 0.6;
+/// A track of a radio is at most this many median distances from the seed…
+const SEED_RADIUS: f32 = 1.0;
+/// …or as far as the seed's nearest eighth of the library, if nearer…
+const SEED_SHARE: usize = 8;
+/// …but always as far as its nearest this many.
+const SEED_AT_LEAST: usize = 30;
+
+/// Where «Похоже на X» may go: near X in sound, songs of a kind the user
+/// goes on to from X's ([`UserModel::lanes_go`]: no rap after a
+/// soundtrack unless the user does so), a track without a vector only of
+/// X's world or artist.
+
+struct SeedAnchor {
+    point: Option<Vector>,
+    radius: f32,
+    lane: Option<SongLane>,
+    world: Option<u64>,
+    artist: Option<ArtistId>,
+}
+
+impl SeedAnchor {
+    fn of(model: &UserModel, seed: Option<TrackId>) -> Self {
+        let pos = seed.and_then(|t| model.position(t));
+        let point = pos.and_then(|p| model.embedded_at(p).copied());
+        let radius = point.map_or(f32::INFINITY, |sv| {
+            let mut d: Vec<f32> = (0..model.len()).filter_map(|i| model.embedded_at(i)).map(|v| euclid(v, &sv)).collect();
+            d.sort_by(f32::total_cmp);
+            let last = d.len().saturating_sub(1);
+            let share = d.get((d.len() / SEED_SHARE).min(last)).copied().unwrap_or(f32::INFINITY);
+            let floor = d.get(SEED_AT_LEAST.min(last)).copied().unwrap_or(f32::INFINITY);
+            share.min(SEED_RADIUS * model.scale()).max(floor)
+        });
+        Self {
+            point,
+            radius,
+            lane: pos.map(|p| model.song_type_at(p).lane()),
+            world: pos.and_then(|p| model.world_at(p)),
+            artist: pos.and_then(|p| model.main_artist_at(p)),
+        }
+    }
+
+    /// Track `i` may follow.
+    fn holds(&self, model: &UserModel, i: usize) -> bool {
+        if self.lane.is_some_and(|a| !model.lanes_go(a, model.song_type_at(i).lane())) {
+            return false;
+        }
+        match (&self.point, model.embedded_at(i)) {
+            (Some(p), Some(v)) => euclid(p, v) <= self.radius,
+            (Some(_), None) => {
+                (self.world.is_some() && model.world_at(i) == self.world) || (self.artist.is_some() && model.main_artist_at(i) == self.artist)
+            }
+            (None, _) => true,
+        }
+    }
+
+    /// The anchor of the moment, held to the seed.
+    fn lean(&self, session: Option<Vector>) -> Option<Vector> {
+        match (self.point, session) {
+            (Some(p), Some(s)) => Some(std::array::from_fn(|k| SEED_HOLD * p[k] + (1.0 - SEED_HOLD) * s[k])),
+            (Some(p), None) => Some(p),
+            (None, s) => s,
+        }
+    }
+}
+
+
 /// The tracks of a world's core that «После <мир>» starts from: liked or
+
 /// with this much affinity (a couple of completes).
 const CORE_AFFINITY: f32 = 1.5;
 
@@ -1001,6 +1098,145 @@ mod tests {
     fn in_a(p: &Pick) -> bool {
         matches!(&p.item, Item::Track(id) if (1..=60).contains(&id.0.as_u128()))
     }
+
+    /// The kinds of songs of [`listener`]: first id, count, x of the sound.
+    const RAP: (u128, u128, f32) = (0, 120, 20.0);
+    const OST: (u128, u128, f32) = (1_000, 60, 0.0);
+    const JPOP: (u128, u128, f32) = (2_000, 60, 10.0);
+    const ROCK: (u128, u128, f32) = (3_000, 60, -10.0);
+
+    fn kind_of(id: u128) -> u128 {
+        [RAP, OST, JPOP, ROCK].into_iter().find(|k| (k.0..k.0 + k.1).contains(&id)).expect("a kind").0
+    }
+
+    type Listener = (Catalog, VectorIndex<TrackId>, TasteInput, crate::songtype::SongTypes);
+
+    /// A synthetic listener: a big rap region played most (twenty artists),
+    /// a small region of soundtracks (three worlds, one composer each)
+    /// played a little, and for an omnivore Japanese pop and rock too, in
+    /// sessions of one kind each (the user's own choices).
+    pub(crate) fn listener(omnivore: bool) -> Listener {
+        use crate::songtype::{Lang, SongType, SongTypes, Voice};
+        let mut kinds = vec![(RAP, Some(Lang::Russian), 40usize), (OST, None, 8)];
+        if omnivore {
+            kinds.push((JPOP, Some(Lang::Japanese), 10));
+            kinds.push((ROCK, Some(Lang::English), 10));
+        }
+        let mut rng = Rng::new(17);
+        let mut tracks = Vec::new();
+        let mut idx = VectorIndex::with_weights([1.0; DIM]);
+        let mut types = SongTypes::default();
+        for ((first, n, x), lang, _) in &kinds {
+            for k in 0..*n {
+                let id = first + k;
+                let world = k / 20;
+                let artist = if *first == OST.0 { (id / 20) as u32 } else { (id / 6) as u32 };
+                tracks.push(info(id, &[artist], Some(id / 10)).with_world(&format!("w{first}.{world}")).with_duration(Some(200_000)));
+                // Each world a little apart inside its kind.
+                idx.insert(tid(id), point(x + world as f32 * 1.2 + rng.f32() * 0.6, rng.f32() * 0.6));
+                let ty = match lang {
+                    Some(l) => SongType { voice: Voice::Sung, lang: Some(*l), ..SongType::default() },
+                    None => SongType { voice: Voice::Instrumental, ost: true, ..SongType::default() },
+                };
+                types.by_track.insert(tid(id), ty);
+            }
+        }
+        let mut events = Vec::new();
+        let mut ts = crate::model::tests::T0 - 20 * crate::taste::DAY_MS;
+        for ((first, n, _), _, sessions) in &kinds {
+            for _ in 0..*sessions {
+                for _ in 0..6 {
+                    let id = tid(first + rng.below(*n as usize) as u128);
+                    events.push(Play { context: nikgob_core::model::EventContext::Library, ..Play::new(id, ts, EventType::Start, Some(0)) });
+                    ts += 200_000;
+                    events.push(Play::new(id, ts, EventType::Complete, Some(200_000)));
+                }
+                ts += 4 * crate::taste::HOUR_MS;
+            }
+        }
+        events.sort_by_key(|p| p.ts);
+        (Catalog::new(tracks), idx, TasteInput { events, ..TasteInput::default() }, types)
+    }
+
+    /// Plays a model radio of `seed` for `batches` of ten, every pick heard
+    /// out (the first `skip` of the first batch skipped early): the picks.
+    fn play_model_radio(l: &Listener, seed: u128, batches: usize, skip: usize) -> Vec<u128> {
+        use crate::model::{ModelInput, UserModel};
+        let (cat, idx, input, types) = l;
+        let now = crate::model::tests::T0;
+        let model = UserModel::build(cat, input, ModelInput { index: idx, types: Some(types), weights: None }, now);
+        let recs = Recs::new(cat, &model.taste, idx).with_model(&model);
+        let mut session = Session::default();
+        let mut ts = now;
+        session.start(tid(seed), ts, nikgob_core::model::EventContext::Radio, None);
+        session.end(tid(seed), Ended::Complete);
+        let mut radio = RadioState::new(RadioSeed::Track(tid(seed)));
+        let mut out = Vec::new();
+        let mut skipped = 0;
+        for b in 0..batches {
+            radio.attune(session.clone(), None);
+            for p in radio.extend(&recs, 10, &RadioParams { new_share: 0.0, seed: 5 }) {
+                let Item::Track(t) = p.item else { continue };
+                ts += 200_000;
+                session.start(t, ts, nikgob_core::model::EventContext::Radio, None);
+                let early = b == 0 && skipped < skip;
+                session.end(t, if early { Ended::Early } else { Ended::Complete });
+                radio.feedback(p.item.clone(), if early { Outcome::Skip { position_ms: 5_000 } } else { Outcome::Complete });
+                skipped += usize::from(early);
+                out.push(t.0.as_u128());
+                if early && skipped == skip {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// «Похоже на» a soundtrack, for a listener of mostly rap and for an
+    /// omnivore: thirty songs, all soundtracks near the seed, never three of
+    /// one world running, never a rap song however much rap is played.
+    #[test]
+    fn a_soundtrack_radio_stays_a_soundtrack() {
+        for omnivore in [false, true] {
+            let l = listener(omnivore);
+            let picks = play_model_radio(&l, OST.0 + 3, 3, 0);
+            assert!(picks.len() >= 25, "{picks:?}");
+            assert!(picks.iter().all(|t| kind_of(*t) == OST.0), "omnivore {omnivore}: {picks:?}");
+            let worlds: Vec<u128> = picks.iter().map(|t| (t - OST.0) / 20).collect();
+            for w in worlds.windows(3) {
+                assert!(!(w[0] == w[1] && w[1] == w[2]), "a world thrice running: {worlds:?}");
+            }
+        }
+    }
+
+    /// Two early skips in a soundtrack radio turn it to the soundtracks of
+    /// another world, not to the rap played most.
+    #[test]
+    fn skips_turn_a_radio_to_a_neighbouring_sound() {
+        let l = listener(true);
+        let picks = play_model_radio(&l, OST.0 + 3, 2, 2);
+        let skipped_world = (picks[0] - OST.0) / 20;
+        let after = &picks[2..];
+        assert!(!after.is_empty());
+        assert!(after.iter().all(|t| kind_of(*t) == OST.0), "{picks:?}");
+        let other = after.iter().filter(|t| (**t - OST.0) / 20 != skipped_world).count();
+        assert!(other * 2 >= after.len(), "mostly another world: {picks:?}");
+    }
+
+    /// A one-kind listener's radio of a rap song stays rap and spreads its
+    /// artists.
+    #[test]
+    fn a_one_kind_radio_spreads_its_artists() {
+        let l = listener(false);
+        let picks = play_model_radio(&l, RAP.0 + 7, 3, 0);
+        assert!(picks.len() >= 25);
+        assert!(picks.iter().all(|t| kind_of(*t) == RAP.0), "{picks:?}");
+        let artists: Vec<u128> = picks.iter().map(|t| t / 6).collect();
+        for w in artists.windows(2) {
+            assert_ne!(w[0], w[1], "an artist twice running: {artists:?}");
+        }
+    }
+
 
     #[test]
     fn early_skips_push_away_and_completes_pull() {

@@ -1441,6 +1441,29 @@ impl ModelPreview {
         radio.extend(&self.snap.recs(), n, &RadioParams { new_share: 0.0, seed: 1 })
     }
 
+    /// The next `n` of a radio with `new_share` of new music.
+    pub fn extend_new(&self, radio: &mut Engine, n: usize, new_share: f32) -> Vec<Pick> {
+        radio.extend(&self.snap.recs(), n, &RadioParams { new_share, seed: 1 })
+    }
+
+    /// The new music a service's answer kept in the library's cache under
+    /// `key` (`radio_new.youtube.radio.<id>`) holds, new indeed.
+    pub fn cached_new(&self, lib: &Library, key: &str) -> Vec<StreamTrack> {
+        let tracks: Vec<StreamTrack> = cache_read(lib, key).unwrap_or_default();
+        tracks.into_iter().filter(|t| self.snap.is_new(t)).collect()
+    }
+
+    /// The world of a catalog track.
+    pub fn world(&self, id: TrackId) -> Option<u64> {
+        self.snap.catalog.get(id).and_then(|t| t.world)
+    }
+
+    /// The world's title.
+    pub fn world_title(&self, world: u64) -> Option<String> {
+        self.snap.worlds.get(&world).map(|w| w.1.clone())
+    }
+
+
     pub fn song_type(&self, id: TrackId) -> Option<nikgob_recs::SongType> {
         self.snap.types.get(id).copied()
     }

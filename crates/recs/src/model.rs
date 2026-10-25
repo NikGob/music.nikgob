@@ -31,7 +31,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nikgob_core::model::{EndReason, EventContext, EventOrigin, EventType, TrackId, UnixMs};
+use nikgob_core::model::{ArtistId, EndReason, EventContext, EventOrigin, EventType, TrackId, UnixMs};
+
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::Vector;
@@ -64,6 +65,25 @@ pub const CO_TOP: usize = 50;
 const INTERLUDE_MS: u32 = 75_000;
 /// A track longer than this is long (the skip model).
 const LONG_MS: u32 = 6 * 60_000;
+/// Song lanes ([`lane_index`]).
+const LANES: usize = 5;
+/// A radio of one kind of song goes on to another only when the user's
+/// own next choices go there this often (a generic prior: about one in
+/// seven)…
+pub const LANE_FOLLOWS: f32 = 0.15;
+/// …over at least this many choices from the first kind.
+pub const LANE_EVIDENCE: f32 = 10.0;
+
+pub fn lane_index(l: SongLane) -> usize {
+    match l {
+        SongLane::Instrumental => 0,
+        SongLane::Russian => 1,
+        SongLane::Japanese => 2,
+        SongLane::Western => 3,
+        SongLane::Unknown => 4,
+    }
+}
+
 
 /// The features of a candidate for the next start, in this order.
 pub const FEATURES: [&str; 16] = [
@@ -359,12 +379,16 @@ pub struct UserModel {
     release: Vec<Option<u64>>,
     album_pos: Vec<u32>,
     world: Vec<Option<u64>>,
+    artist: Vec<Option<ArtistId>>,
     duration: Vec<Option<u32>>,
     types: Vec<SongType>,
     next_in_album: Vec<Option<u32>>,
     pub worlds: HashMap<u64, WorldStats>,
     part_total: [u32; 4],
     trans: HashMap<u64, HashMap<u64, f32>>,
+    /// Song lane → song lane of the starts the user chose, by
+    /// [`lane_index`].
+    lane_trans: [[f32; LANES]; LANES],
     pub co: CoOccur,
     pub weights: Weights,
     /// The median distance between tracks.
@@ -483,12 +507,14 @@ impl UserModel {
             release,
             album_pos,
             world: catalog.tracks().iter().map(|t| t.world).collect(),
+            artist: catalog.tracks().iter().map(|t| t.main_artist()).collect(),
             duration: catalog.tracks().iter().map(|t| t.duration_ms).collect(),
             types,
             next_in_album,
             worlds: HashMap::new(),
             part_total: [0; 4],
             trans: HashMap::new(),
+            lane_trans: [[0.0; LANES]; LANES],
             co: CoOccur::new(n),
             weights: Weights::default(),
             scale,
@@ -530,6 +556,23 @@ impl UserModel {
 
     pub fn world_at(&self, i: usize) -> Option<u64> {
         self.world[i]
+    }
+
+    pub fn main_artist_at(&self, i: usize) -> Option<ArtistId> {
+        self.artist[i]
+    }
+
+    /// Songs of lane `b` may follow songs of lane `a` in a radio of `a`:
+    /// the same kind, anything unknown, or a kind this user goes on to
+    /// from `a` in at least [`LANE_FOLLOWS`] of their own choices (once
+    /// they made [`LANE_EVIDENCE`] of them).
+    pub fn lanes_go(&self, a: SongLane, b: SongLane) -> bool {
+        if a == b || a == SongLane::Unknown || b == SongLane::Unknown {
+            return true;
+        }
+        let row = &self.lane_trans[lane_index(a)];
+        let total: f32 = row.iter().sum();
+        total >= LANE_EVIDENCE && row[lane_index(b)] / total >= LANE_FOLLOWS
     }
 
     pub fn release_at(&self, i: usize) -> Option<u64> {
@@ -824,6 +867,11 @@ impl UserModel {
             && let (Some(wp), Some(wc)) = (self.world[prev], self.world[i])
         {
             *self.trans.entry(wp).or_default().entry(wc).or_default() += 1.0;
+        }
+        if let Some(prev) = m.prev
+            && teaches(p.origin, p.context)
+        {
+            self.lane_trans[lane_index(self.types[prev].lane())][lane_index(self.types[i].lane())] += 1.0;
         }
         let part = self.part_of(ts);
         let t = &mut self.tracks[i];
