@@ -17,6 +17,7 @@ mod fallback_fonts;
 mod frames;
 mod geometry;
 mod logfile;
+mod pacing;
 mod shot;
 mod shot_fakes;
 mod streams;
@@ -160,6 +161,8 @@ struct Core {
     /// how long it took to show.
     show_at: Option<Instant>,
     last_frame: Instant,
+    /// The frame limit, kept to whole vblanks ([`pacing`]).
+    pacer: pacing::Pacer,
     /// One clock for every window: each new window's egui starts its time
     /// at zero, and animations started in the old one would sit in the
     /// future (the page stayed blank until enough clicks repainted it).
@@ -279,6 +282,7 @@ impl eframe::App for Window {
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.core.pacer.begin();
         if let Some(f) = self.core.frames.as_mut() {
             f.begin();
         }
@@ -392,12 +396,13 @@ impl eframe::App for Window {
         }
 
         // Frame limit: only matters while something animates continuously.
-        let budget = Duration::from_secs_f64(1.0 / f64::from(fps));
-        let spent = core.last_frame.elapsed();
-        if spent < budget && ui.ctx().has_requested_repaint() {
-            std::thread::sleep(budget - spent);
+        let wait = core.pacer.wait(frame, fps, core.last_frame.elapsed());
+        if !ui.ctx().has_requested_repaint() {
+            core.pacer.idle();
+        } else if !wait.is_zero() {
+            std::thread::sleep(wait);
             if let Some(f) = core.frames.as_mut() {
-                f.slept(budget - spent);
+                f.slept(wait);
             }
         }
         core.last_frame = Instant::now();
@@ -623,6 +628,7 @@ fn main() -> eframe::Result {
         hidden: false,
         show_at: None,
         last_frame: Instant::now(),
+        pacer: pacing::Pacer::default(),
         started: Instant::now(),
         // Screenshot runs get their own size and leave the real one alone.
         copied: 0,
