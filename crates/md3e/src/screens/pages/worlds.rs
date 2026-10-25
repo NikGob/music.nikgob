@@ -1,9 +1,17 @@
 //! The card at the top of Главная: «Миры» (home-v2 spec §15.3, placement
-//! and hiding §14). A row of the user's soundtrack worlds; the one chosen
-//! stands on a stage in the colours of its own cover — its name, what is
-//! left of it and one button that plays it, three one-click cards under
-//! them and the cover itself flush with the card's right end. With one
-//! world there is no row (it is «Серия», A).
+//! and hiding §14). A world is a big body of music to travel through and
+//! finish: a soundtrack franchise or an artist's discography. A row of
+//! them, paged by its chevrons; the one chosen stands on a stage in the
+//! colours of its own cover — what it is, its name (a link to its page),
+//! how far the user got and the buttons that always mean the same
+//! («Дослушать» / «Начать», «Вперемешку»), three one-click cards under them
+//! and the cover itself flush with the card's right end. With one world
+//! there is no row (it is «Серия», A).
+//!
+//! Paging: the row shows as many tiles as fit; ‹ › slide it by a page on
+//! the default spatial spring without changing the choice, and ←/→ walk
+//! through every world, paging at the ends. The wheel always scrolls the
+//! page.
 //!
 //! Choosing a world (a tile, ←/→): the tiles resize on the fast spatial
 //! spring, the colours flow to the new cover's scheme (slow effects), the
@@ -56,6 +64,44 @@ fn key_id() -> Id {
     Id::new("home-world-focus")
 }
 
+fn page_id() -> Id {
+    Id::new("home-world-page")
+}
+
+/// The tiles a page of the row holds in `width` (one of them chosen, 32
+/// larger), at least one.
+pub fn per_page(width: f32, base: f32) -> usize {
+    (((width - 32.0 + 12.0) / (base + 12.0)).floor().max(1.0)) as usize
+}
+
+/// ←/→ (`dir` −1 or 1) from tile `i` of `n`: the tile it moves to and the
+/// page that one is on, `per` to a page; the ends stay.
+pub fn step(i: usize, n: usize, dir: i32, per: usize) -> (usize, usize) {
+    let j = (i as i64 + i64::from(dir)).clamp(0, n.saturating_sub(1) as i64) as usize;
+    (j, j / per.max(1))
+}
+
+/// Where the strip of tiles starts page `page` (tiles `base` + 12 apart;
+/// the chosen one, at `chosen`, is 32 wider).
+fn page_x(page: usize, per: usize, base: f32, chosen: usize) -> f32 {
+    let k = page * per;
+    k as f32 * (base + 12.0) + if chosen < k { 32.0 } else { 0.0 }
+}
+
+/// Chooses the world of `key` on the card, its page of the row shown (as
+/// a click on its tile does, without the flight).
+pub fn choose(ctx: &Context, key: &str) {
+    ctx.data_mut(|d| {
+        d.insert_temp::<Option<String>>(key_id(), Some(key.to_owned()));
+        d.remove::<usize>(page_id());
+    });
+}
+
+/// The world's page.
+pub fn route(w: &World) -> Route {
+    Route::World(w.key.clone())
+}
+
 /// The card takes room on the page now (shown, or still folding away).
 pub fn shown(ctx: &Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(Id::new("home-card-shown"))).unwrap_or(false)
@@ -77,7 +123,7 @@ fn progress(spring: nikgob_motion::Spring, t: f32) -> f32 {
 }
 
 /// The scheme of a world's cover in the user's variant and mode.
-fn scheme_of(ctx: &Context, state: &ViewState, w: &World) -> ColorScheme {
+pub(super) fn scheme_of(ctx: &Context, state: &ViewState, w: &World) -> ColorScheme {
     let seed = w.cover.as_ref().and_then(|c| c.seed).unwrap_or(state.prefs.fallback_seed);
     let (dark, variant, contrast) = crate::screens::theme_key(ctx, &state.prefs);
     ctx.data_mut(|d| {
@@ -204,39 +250,91 @@ fn stage(ui: &mut Ui, card: Rect, state: &ViewState, world: &World, s: &ColorSch
     let t = sw.as_ref().map_or(10.0, |w| (now - w.at) as f32);
     let old = sw.as_ref().and_then(|w| worlds.iter().find(|x| x.key == w.from));
 
-    // Row of worlds.
+    // Row of worlds, paged.
     let mut top = stage.top();
     let mut pick: Option<(String, Rect)> = None;
     if worlds.len() > 1 {
         let row_h = base + 32.0;
-        let mut x = stage.left();
+        let chosen = worlds.iter().position(|w| w.key == world.key).unwrap_or(0);
+        // The chevrons take the row's right end when the worlds do not fit.
+        let fits = per_page(stage.width(), base) >= worlds.len();
+        let controls = if fits { 0.0 } else { 2.0 * Size::S.height() + 4.0 + 16.0 };
+        let per = per_page(stage.width() - controls, base);
+        // Exactly a page wide, so no tile of the next one peeks in.
+        let page_w = if fits { stage.width() } else { per as f32 * (base + 12.0) - 12.0 + 32.0 };
+        let area = Rect::from_min_size(pos2(stage.left(), top), vec2(page_w, row_h));
+        let pages = worlds.len().div_ceil(per);
+        let mut page = ctx.data(|d| d.get_temp::<usize>(page_id())).unwrap_or(chosen / per).min(pages - 1);
         let focused_any = ui.memory(|m| m.focused()).is_some_and(|f| worlds.iter().any(|w| f == tile_id(ui, &w.key)));
-        for (i, w) in worlds.iter().enumerate() {
-            let chosen = w.key == world.key;
-            let size = anim::f32(&ctx, Id::new(("home-world-tile", &w.key)), if chosen { base + 32.0 } else { base }, theme.motion.fast_spatial);
-            let radius = anim::f32(&ctx, Id::new(("home-world-tile-r", &w.key)), if chosen { shape::EXTRA_LARGE } else { shape::LARGE }, theme.motion.fast_spatial);
-            let rect = Rect::from_min_size(pos2(x, top), vec2(size, size));
-            if rect.right() > stage.right() + 1.0 {
-                break;
-            }
-            if tile(ui, rect, radius.max(0.0), w, s, i) {
-                pick = Some((w.key.clone(), rect));
-            }
-            x += size + 12.0;
-        }
+        let mut keyed: Option<usize> = None;
         if focused_any {
-            let step = ctx.input(|i| i32::from(i.key_pressed(Key::ArrowRight)) - i32::from(i.key_pressed(Key::ArrowLeft)));
-            if step != 0
-                && let Some(i) = worlds.iter().position(|w| w.key == world.key)
-            {
-                let j = (i as i32 + step).clamp(0, worlds.len() as i32 - 1) as usize;
-                if j != i {
-                    let next = &worlds[j];
-                    let r = Rect::from_min_size(pos2(stage.left() + j as f32 * (base + 12.0), top), vec2(base, base));
-                    pick = Some((next.key.clone(), r));
-                    ui.memory_mut(|m| m.request_focus(tile_id(ui, &next.key)));
+            let dir = ctx.input(|i| i32::from(i.key_pressed(Key::ArrowRight)) - i32::from(i.key_pressed(Key::ArrowLeft)));
+            if dir != 0 {
+                let (j, p) = step(chosen, worlds.len(), dir, per);
+                if j != chosen {
+                    keyed = Some(j);
+                    page = p;
+                    ui.memory_mut(|m| m.request_focus(tile_id(ui, &worlds[j].key)));
                 }
             }
+        }
+        // The chevrons: a page at a time, the choice stays.
+        if !fits {
+            let d = Size::S.height();
+            let y = top + (base - d) / 2.0;
+            let next = Rect::from_min_size(pos2(stage.right() - d, y), vec2(d, d));
+            let prev = Rect::from_min_size(pos2(next.left() - 4.0 - d, y), vec2(d, d));
+            let mut c = ui.new_child(UiBuilder::new().max_rect(prev.union(next)).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("home-world-pager"));
+            c.spacing_mut().item_spacing.x = 4.0;
+            // ‹ shows once there is a page before; its place stays.
+            let back = anim::fraction(&ctx, Id::new("home-world-prev-shown"), f32::from(u8::from(page > 0)), theme.motion.fast_effects);
+            let mut pc = c.new_child(UiBuilder::new().max_rect(prev).id_salt("home-world-prev"));
+            if back < 1.0 {
+                pc.set_opacity(back);
+            }
+            if back > 0.01
+                && cards::scaled(&mut pc, prev.center(), 0.5 + 0.5 * back, |ui| {
+                    ui.add_enabled(page > 0, IconButton::new(Icon::ChevronLeft).size(Size::S).style(Style::Standard).tooltip("Предыдущие миры").id_salt("home-world-prev-btn"))
+                })
+                .clicked()
+            {
+                page -= 1;
+            }
+            let mut nc = c.new_child(UiBuilder::new().max_rect(next).id_salt("home-world-next"));
+            let more = page + 1 < pages;
+            if nc
+                .add_enabled(more, IconButton::new(Icon::ChevronRight).size(Size::S).style(Style::Standard).tooltip("Следующие миры").id_salt("home-world-next-btn"))
+                .clicked()
+            {
+                page += 1;
+            }
+        }
+        ctx.data_mut(|d| d.insert_temp(page_id(), page));
+        // The strip slides to its page (default spatial).
+        let off = anim::f32(&ctx, Id::new("home-world-strip"), page_x(page, per, base, chosen), theme.motion.default_spatial);
+        let mut strip = ui.new_child(UiBuilder::new().max_rect(area).id_salt("home-world-row"));
+        // The focus ring and the hover zoom keep a few points round the tiles.
+        strip.set_clip_rect(area.expand2(vec2(0.0, 4.0)).intersect(ui.clip_rect()));
+        let mut x = 0.0;
+        for (i, w) in worlds.iter().enumerate() {
+            let is_chosen = w.key == world.key;
+            let size = anim::f32(&ctx, Id::new(("home-world-tile", &w.key)), if is_chosen { base + 32.0 } else { base }, theme.motion.fast_spatial);
+            let radius = anim::f32(&ctx, Id::new(("home-world-tile-r", &w.key)), if is_chosen { shape::EXTRA_LARGE } else { shape::LARGE }, theme.motion.fast_spatial);
+            let rect = Rect::from_min_size(pos2(area.left() + x - off, top), vec2(size, size));
+            x += size + 12.0;
+            if rect.right() < area.left() - 1.0 || rect.left() > area.right() + 1.0 {
+                continue;
+            }
+            if tile(&mut strip, rect, radius.max(0.0), w, s, i) {
+                pick = Some((w.key.clone(), rect));
+            }
+        }
+        if let Some(j) = keyed {
+            // The copy flies from where its tile will stand.
+            let x = page_x(page, per, base, chosen);
+            let at = j as f32 * (base + 12.0) + if chosen < j { 32.0 } else { 0.0 } - x;
+            let r = Rect::from_min_size(pos2(area.left() + at, top), vec2(base, base));
+            pick = Some((worlds[j].key.clone(), r));
         }
         top += row_h + 28.0;
     }
@@ -263,7 +361,7 @@ fn stage(ui: &mut Ui, card: Rect, state: &ViewState, world: &World, s: &ColorSch
         }
         _ => {
             let (zoom, shift) = drift(&ctx, cover_hover && !theme.reduced_motion, theme.reduced_motion);
-            paint_drift(ui, cover, world.cover.as_ref().map(|c| c.uri()).as_deref(), corners, zoom, shift, 1.0);
+            paint_sharp(ui, cover, world, corners, zoom, shift);
         }
     }
     let cover_resp = ui.interact(cover, Id::new("home-world-cover"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -281,12 +379,13 @@ fn stage(ui: &mut Ui, card: Rect, state: &ViewState, world: &World, s: &ColorSch
     if cover_play || cover_resp.clicked() {
         out.push(play_primary(world));
     }
+    // Enter on a tile opens its world.
+    let mut nav = None;
     if ui.memory(|m| m.focused()).is_some_and(|f| worlds.iter().any(|w| f == tile_id(ui, &w.key))) && ctx.input(|i| i.key_pressed(Key::Enter)) {
-        out.push(play_primary(world));
+        nav = Some(route(world));
     }
 
     // The text and the cards: the old ones leaving, the new ones coming in.
-    let mut nav = None;
     if let (Some(_), Some(o)) = (sw.as_ref(), old) {
         let p = progress(theme.motion.fast_effects, t);
         if p < 0.999 {
@@ -313,7 +412,9 @@ fn stage(ui: &mut Ui, card: Rect, state: &ViewState, world: &World, s: &ColorSch
             c.set_opacity(a_in);
         }
         let live = a_in > 0.5;
-        nav = cards::moved(&mut c, vec2(dx, 0.0), |ui| text_block(ui, stage, top, world, state, s, axes, out, live));
+        if let Some(r) = cards::moved(&mut c, vec2(dx, 0.0), |ui| text_block(ui, stage, top, world, state, s, axes, out, live)) {
+            nav = Some(r);
+        }
         let rise = sw.as_ref().filter(|_| old.is_some()).map(|_| t);
         let mut c = ui.new_child(UiBuilder::new().max_rect(stage).id_salt(("home-world-cards", &world.key)));
         if let Some(r) = cards_row(&mut c, stage, world, state, s, rise, out, true) {
@@ -429,13 +530,29 @@ fn paint_drift(ui: &Ui, rect: Rect, uri: Option<&str>, corners: CornerRadius, zo
     crate::components::paint_image_zoomed(ui, rect, None, corners, Icon::Album, 1.0);
 }
 
+/// The stage cover: the album's own at once, and the larger copy of a
+/// service over it once that has loaded, fading in (default effects).
+pub(super) fn paint_sharp(ui: &Ui, rect: Rect, w: &World, corners: CornerRadius, zoom: f32, shift: (f32, f32)) {
+    let own = w.cover.as_ref().map(|c| c.uri());
+    let hd = w.cover_hd.as_ref().map(|c| c.uri());
+    let ready = hd.as_deref().is_some_and(|u| crate::covers::texture(ui.ctx(), u, rect.size(), zoom).is_some());
+    let theme = Theme::get(ui.ctx());
+    let k = anim::fraction(ui.ctx(), Id::new(("home-world-sharp", hd.as_deref().unwrap_or(""))), f32::from(u8::from(ready)), theme.motion.default_effects);
+    if k < 0.999 {
+        paint_drift(ui, rect, own.as_deref(), corners, zoom, shift, 1.0);
+    }
+    if ready {
+        paint_drift(ui, rect, hd.as_deref(), corners, zoom, shift, k);
+    }
+}
+
 fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
     let l = |x: f32, y: f32| x + (y - x) * t;
     Rect::from_min_max(pos2(l(a.left(), b.left()), l(a.top(), b.top())), pos2(l(a.right(), b.right()), l(a.bottom(), b.bottom())))
 }
 
-/// «Дослушать» / «Начать».
-fn play_primary(w: &World) -> Command {
+/// «Дослушать» / «Начать» / «С начала».
+pub fn play_primary(w: &World) -> Command {
     Command::PlayTracks { tracks: w.primary.clone(), start: 0, context: format!("мира «{}»", w.title) }
 }
 
@@ -489,13 +606,34 @@ fn text_block(
     let k = crate::typography::layout(ui.painter(), TypeRole::LabelLarge.style().job(kicker, on));
     ui.painter().galley(pos2(stage.left(), top), k, on);
     let mut y = top + 20.0;
+    let mut nav = None;
+    // The name opens the world's page.
     let name = name_galley(ui, &w.title, on, stage.width(), axes);
-    ui.painter().galley(pos2(stage.left(), y), name, on);
+    let name_rect = Rect::from_min_size(pos2(stage.left(), y), name.size());
+    let name_resp = ui
+        .interact(name_rect, Id::new(("home-world-name", &w.key)), if live { Sense::click() } else { Sense::hover() })
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let name_resp = if live { name_resp.md3_tooltip("Открыть мир", None) } else { name_resp };
+    ui.painter().galley(name_rect.min, name, on);
+    if name_resp.hovered() || name_resp.has_focus() {
+        // A link: underlined under the pointer.
+        let base_y = name_rect.bottom() - 6.0;
+        ui.painter().line_segment([pos2(name_rect.left(), base_y), pos2(name_rect.right(), base_y)], egui::Stroke::new(2.0, on));
+    }
+    if name_resp.clicked() {
+        nav = Some(route(w));
+    }
     y += 72.0;
-    let facts = super::widgets::wrapped(ui, &w.facts, TypeRole::BodyLarge.style(), on, stage.width(), 2);
+    // The room down to the cards decides whether the facts take two lines.
+    let cards_top = stage.bottom() - 72.0;
+    let tight = cards_top - y < 24.0 * 2.0 + 8.0 + 24.0 + 24.0 + Size::M.height() + 16.0;
+    let facts = super::widgets::wrapped(ui, &w.facts, TypeRole::BodyLarge.style(), on, stage.width(), if tight { 1 } else { 2 });
     let fh = facts.size().y;
     ui.painter().galley(pos2(stage.left(), y), facts, on);
-    y += fh.max(24.0) + 24.0;
+    y += fh.max(24.0) + 8.0;
+    // How far: «Ты слышал 36 из 134» after the player's wavy progress.
+    progress_line(ui, pos2(stage.left(), y), stage.width(), w, s, live);
+    y += 24.0 + if tight { 16.0 } else { 24.0 };
     // [▶ Дослушать] [⤨ Вперемешку] ⋮
     let row = Rect::from_min_size(pos2(stage.left(), y), vec2(stage.width(), Size::M.height()));
     let mut b = ui.new_child(UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt(("home-world-buttons", &w.key)));
@@ -503,7 +641,7 @@ fn text_block(
     if !live {
         b.disable();
     }
-    let label = if w.fresh { "Начать" } else { "Дослушать" };
+    let label = w.start.label();
     let primary = b
         .add(Button::new(label).icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).id_salt(("home-world-primary", &w.key)))
         .md3_tooltip(&w.primary_tip, None);
@@ -523,7 +661,7 @@ fn text_block(
         .align_right(false)
         .attach(&more);
     match picked {
-        Some(0) => return w.release.map(Route::Release),
+        Some(0) => return Some(route(w)),
         Some(1) => out.push(Command::Enqueue(w.primary.clone())),
         Some(2) => {
             let mut p = state.prefs.clone();
@@ -535,7 +673,34 @@ fn text_block(
         Some(3) => out.push(Command::HideHomeCard),
         _ => {}
     }
-    None
+    nav
+}
+
+/// «Ты слышал 36 из 134», «Ты слышал все 134», «Ты ещё не слышал ни одного
+/// из 160».
+pub fn heard_line(heard: u32, total: u32) -> String {
+    if heard == 0 {
+        format!("Ты ещё не слышал ни одного из {total}")
+    } else if heard >= total {
+        format!("Ты слышал все {total}")
+    } else {
+        format!("Ты слышал {heard} из {total}")
+    }
+}
+
+/// The progress line of a world at `at`: the wavy progress of the player
+/// (its track in the card's colours) and how many of its tracks were heard.
+pub fn progress_line(ui: &mut Ui, at: egui::Pos2, width: f32, w: &World, s: &ColorScheme, live: bool) {
+    let on = s.on_secondary_container;
+    let text = super::widgets::wrapped(ui, &heard_line(w.heard, w.total), TypeRole::BodyMedium.style(), on, width, 1);
+    let bar_w = (width - text.size().x - 16.0).clamp(80.0, 240.0);
+    let row = Rect::from_min_size(at, vec2(bar_w, 24.0));
+    let mut c = ui.new_child(UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt(("home-world-progress", &w.key)));
+    let f = if w.total == 0 { 0.0 } else { w.heard as f32 / w.total as f32 };
+    // Before the text comes in, the bar starts empty and fills (as A's do).
+    crate::components::wavy_progress_on(&mut c, ("world-progress", &w.key), if live { f } else { 0.0 }, bar_w, on.gamma_multiply(0.24));
+    let ty = at.y + (24.0 - text.size().y) / 2.0;
+    ui.painter().galley(pos2(at.x + bar_w + 16.0, ty), text, on);
 }
 
 enum Go {
@@ -657,5 +822,26 @@ mod tests {
         assert_eq!(tile_side(1296.0), 88.0);
         assert_eq!(tile_side(1136.0), 80.0);
         assert_eq!(tile_side(1552.0), 104.0);
+    }
+
+    #[test]
+    fn the_row_pages_through_every_world() {
+        // 88 tiles 12 apart, one 32 larger: six in 664, one at least.
+        assert_eq!(per_page(664.0, 88.0), 6);
+        assert_eq!(per_page(100.0, 88.0), 1);
+        // ←/→ walk all nine, paging at the ends of a page, stopping at the ends.
+        let walk: Vec<(usize, usize)> = (0..9).scan(0, |i, _| {
+            let next = step(*i, 9, 1, 6);
+            *i = next.0;
+            Some(next)
+        })
+        .collect();
+        assert_eq!(walk, [(1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 1), (7, 1), (8, 1), (8, 1)]);
+        assert_eq!(step(6, 9, -1, 6), (5, 0));
+        assert_eq!(step(0, 9, -1, 6), (0, 0));
+        // A page starts where its first tile stands, past the chosen one's 32.
+        assert_eq!(page_x(0, 6, 88.0, 0), 0.0);
+        assert_eq!(page_x(1, 6, 88.0, 0), 6.0 * 100.0 + 32.0);
+        assert_eq!(page_x(1, 6, 88.0, 7), 600.0);
     }
 }

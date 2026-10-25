@@ -1,6 +1,6 @@
 use super::*;
 use egui::{Context, RawInput};
-use nikgob_view::{ReleaseId, TrackId, TrackRow, World, WorldCard, WorldGo, WorldIcon};
+use nikgob_view::{ReleaseId, TrackId, TrackRow, World, WorldCard, WorldGo, WorldIcon, WorldKind, WorldStart};
 
 fn context() -> Context {
     let ctx = Context::default();
@@ -37,10 +37,14 @@ fn world(key: &str) -> World {
         key: key.into(),
         title: key.to_uppercase(),
         release: Some(ReleaseId::new()),
+        kind: WorldKind::Soundtrack,
         cover: None,
+        cover_hd: None,
         kicker: "Слушал вчера".into(),
-        facts: "Kevin Penkin · 4 альбома · 134 трека · ты слышал 36".into(),
-        fresh: false,
+        facts: "Саундтрек · Kevin Penkin · 4 альбома · 134 трека".into(),
+        heard: 36,
+        total: 134,
+        start: WorldStart::Finish,
         playing: false,
         primary: tracks.clone(),
         primary_tip: "98 треков, 4 ч 35 мин: по порядку альбомов".into(),

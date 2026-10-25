@@ -13,7 +13,7 @@ pub use button::{Button, IconButton, IconWidth, Shape, Size, Style};
 pub use group::{ButtonGroup, ConnectedGroup, Item};
 pub use paint::Radii;
 pub use rail::{NavRail, RailItem};
-pub use slider::{Slider, SliderOutput, Wave, wavy_progress};
+pub use slider::{Slider, SliderOutput, Wave, wavy_progress, wavy_progress_on};
 pub use toolbar::{ToolbarColor, floating_toolbar};
 
 mod common;

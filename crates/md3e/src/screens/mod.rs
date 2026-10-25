@@ -155,6 +155,11 @@ impl Md3eUi {
         self.stack.last().unwrap_or(&Route::Home)
     }
 
+    /// Chooses a world on the card at the top of Главная (screenshots).
+    pub fn choose_world(&self, ctx: &Context, key: &str) {
+        pages::choose_world(ctx, key);
+    }
+
     /// Opens a route. Top-level routes replace the stack (fade through);
     /// detail routes push (forward).
     pub fn navigate(&mut self, ctx: &Context, route: Route, out: &mut Vec<Command>) {
@@ -970,6 +975,7 @@ fn load_for(route: &Route, out: &mut Vec<Command>) {
         Route::Artist(id) => out.push(Command::LoadArtist(*id)),
         Route::Playlist(id) => out.push(Command::LoadPlaylist(*id)),
         Route::Stream(page) => out.push(Command::LoadStream(page.clone())),
+        Route::World(key) => out.push(Command::LoadWorld(key.clone())),
         Route::Downloads(_) => out.push(Command::LoadWishlist),
         Route::Settings => {}
     }
@@ -1182,7 +1188,7 @@ impl Md3eUi {
     fn rail(&mut self, ui: &mut Ui, rail_rect: Rect, expansion: f32, state: &ViewState, out: &mut Vec<Command>) -> bool {
         let ctx = ui.ctx().clone();
         let of = |r: &Route| match r {
-            Route::Home => Some(0),
+            Route::Home | Route::World(_) => Some(0),
             Route::Library(_) | Route::Release(_) | Route::Artist(_) | Route::Playlist(_) => {
                 Some(1)
             }

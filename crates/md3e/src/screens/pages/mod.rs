@@ -12,11 +12,13 @@ pub(crate) mod settings_help;
 mod sources;
 mod streams;
 mod wishlist;
+mod world;
 mod worlds;
 pub mod widgets;
 
 pub use search::{restore_search_scroll, search_results, search_scroll};
 pub use settings_help::SettingId;
+pub(crate) use worlds::choose as choose_world;
 
 use egui::{Context, Rect, Response, Ui, UiBuilder, vec2};
 use nikgob_view::{
@@ -897,6 +899,7 @@ pub fn page(
                 Route::Downloads(_) => downloads::show(ui, state, pages, out),
                 Route::Settings => settings::show(ui, state, pages, out),
                 Route::Stream(page) => streams::page(ui, page, state, pages, out),
+                Route::World(key) => world::show(ui, key, state, pages, out),
             };
             nav = r.or(nav.take());
             ui.add_space(bottom_inset);

@@ -12,6 +12,8 @@
 //! `snap:path.png` saves a screenshot there and goes on (a sequence of
 //! pictures in one run).
 //! `album` opens the first album of the library (`album:Title` that one).
+//! `world:Title` chooses that world on the card of Главная,
+//! `world_page:Title` opens its page.
 //! `liked` opens «Любимые»; `play_clip` plays the first clip of the open
 //! playlist (`play_clip:song` its first stream song).
 //! `find_song` opens «Найти песню…» for the first clip of the open
@@ -240,6 +242,18 @@ impl Shot {
                     ui.set_library_tab(tab);
                 }
                 ui.navigate(ctx, r, out);
+                self.wait = 30;
+            }
+            "world" | "world_page" => {
+                // A world of the card by its title: chosen on the card, or
+                // its page opened (`world_page:Title`).
+                if let Some(w) = state.home.worlds.iter().find(|w| w.title == arg) {
+                    if verb == "world" {
+                        ui.choose_world(ctx, &w.key);
+                    } else {
+                        ui.navigate(ctx, Route::World(w.key.clone()), out);
+                    }
+                }
                 self.wait = 30;
             }
             "album" => {
