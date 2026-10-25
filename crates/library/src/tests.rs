@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use nikgob_core::model::{
-    Analysis, AnalysisSource, Artist, ArtistCredit, Codec, EventContext, EventType, LikeTarget, Palette,
+    Analysis, AnalysisSource, Artist, ArtistCredit, Codec, Event, EventContext, EventId, EventType, LikeTarget, Palette,
     PlaylistId, Release, ReleaseType, Source, SourceKind, SourceOrigin, Track, TrackId,
 };
 use serde_json::Value;
@@ -1535,17 +1535,81 @@ fn export_import_roundtrip_rebuilds_user_data() {
     assert_eq!(again.events_added, 0);
     assert_eq!(b.count_events().unwrap(), 2);
 
-    // New events appended later are exported (count changed -> rewritten).
-    a.record_event(
-        tracks[2].id,
-        EventType::Skip,
-        None,
-        None,
-        EventContext::Radio,
-    )
-    .unwrap();
+    // New events are appended: the lines already there stay as they are.
+    let before = fs::read_to_string(out.join("events.jsonl")).unwrap();
+    let skip = a
+        .record_event(
+            tracks[2].id,
+            EventType::Skip,
+            None,
+            None,
+            EventContext::Radio,
+        )
+        .unwrap();
     assert_eq!(a.export_userdata(&out).unwrap().files_written, 1);
+    let after = fs::read_to_string(out.join("events.jsonl")).unwrap();
+    assert!(after.starts_with(&before));
+    assert_eq!(after.lines().count(), 3);
+    assert_eq!(a.export_userdata(&out).unwrap().files_written, 0);
     assert_eq!(b.import_userdata(&out).unwrap().events_added, 1);
+
+    // An event older than the last one written (an imported history): the
+    // file is written anew, still oldest first.
+    let old = Event {
+        id: EventId::new(),
+        ts: 1,
+        ..skip.clone()
+    };
+    a.record_event_raw(&old).unwrap();
+    assert_eq!(a.export_userdata(&out).unwrap().files_written, 1);
+    let lines: Vec<String> = fs::read_to_string(out.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(lines.len(), 4);
+    assert!(lines[0].contains(&old.id.to_string()));
+    assert!(lines[3].contains(&skip.id.to_string()));
+
+    // A file changed by someone else is written anew too.
+    fs::write(out.join("events.jsonl"), "").unwrap();
+    assert_eq!(a.export_userdata(&out).unwrap().files_written, 1);
+    assert_eq!(
+        fs::read_to_string(out.join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        4
+    );
+    assert_eq!(b.import_userdata(&out).unwrap().events_added, 1);
+}
+
+#[test]
+fn the_userdata_fingerprint_moves_with_every_change_the_export_writes() {
+    let Pair { a, tracks, .. } = pair();
+    let mut seen = vec![a.userdata_fingerprint().unwrap()];
+    let mut changed = |a: &Library, what: &str| {
+        let fp = a.userdata_fingerprint().unwrap();
+        assert!(!seen.contains(&fp), "{what} left the fingerprint as it was");
+        seen.push(fp);
+    };
+    a.like(tracks[0].id).unwrap();
+    changed(&a, "a like");
+    a.unlike(tracks[0].id).unwrap();
+    changed(&a, "an unlike");
+    let p = a.create_playlist("Дорога").unwrap();
+    changed(&a, "a playlist");
+    let e = a.playlist_add(p.id, tracks[1].id).unwrap();
+    changed(&a, "an entry");
+    a.rename_playlist(p.id, "Путь").unwrap();
+    changed(&a, "a rename");
+    a.playlist_remove(e.id).unwrap();
+    changed(&a, "a removed entry");
+    a.record_event(tracks[2].id, EventType::Complete, None, None, EventContext::Radio)
+        .unwrap();
+    changed(&a, "an event");
+    // Nothing changed: the same.
+    assert_eq!(&a.userdata_fingerprint().unwrap(), seen.last().unwrap());
 }
 
 #[test]

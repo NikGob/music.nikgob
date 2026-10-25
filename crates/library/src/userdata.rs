@@ -137,10 +137,69 @@ fn events_marker_key(dir: &Path) -> String {
     format!("events_export_count:{}", dir.display())
 }
 
+/// Where the last export of `events.jsonl` ended: how many events it held,
+/// the last one written (by `ts, id`) and the file's length then.
+struct EventsMark {
+    count: u64,
+    last: (i64, String),
+    len: u64,
+}
+
+impl EventsMark {
+    fn parse(s: &str) -> Option<Self> {
+        let mut it = s.splitn(4, '|');
+        let count = it.next()?.parse().ok()?;
+        let ts = it.next()?.parse().ok()?;
+        let id = it.next()?.to_owned();
+        let len = it.next()?.parse().ok()?;
+        Some(Self { count, last: (ts, id), len })
+    }
+
+    fn encode(&self) -> String {
+        format!("{}|{}|{}|{}", self.count, self.last.0, self.last.1, self.len)
+    }
+}
+
+/// `events.jsonl` brought up to date with the database: left alone when the
+/// last export holds every event, the newer events appended when only newer
+/// ones came (the usual case: plays since the last export), else written
+/// anew (events older than the last one written, removed ones, a file
+/// changed by someone else). The new mark, when the file changed.
+fn export_events(
+    c: &Connection,
+    path: &Path,
+    mark: Option<EventsMark>,
+    count: u64,
+) -> Result<Option<EventsMark>> {
+    let len = fs::metadata(path).ok().map(|m| m.len());
+    if let Some(m) = mark.filter(|m| len == Some(m.len) && m.count <= count) {
+        if m.count == count {
+            return Ok(None);
+        }
+        let mut newer = Vec::new();
+        let (n, last) = write_events(c, &mut newer, Some((m.last.0, &m.last.1)))?;
+        if m.count + n == count {
+            let mut f = fs::OpenOptions::new().append(true).open(path)?;
+            f.write_all(&newer)?;
+            f.sync_all()?;
+            let last = last.unwrap_or(m.last);
+            return Ok(Some(EventsMark { count, last, len: m.len + newer.len() as u64 }));
+        }
+    }
+    let mut last = None;
+    atomic_with(path, |w| {
+        last = write_events(c, w, None)?.1;
+        Ok(())
+    })?;
+    let len = fs::metadata(path)?.len();
+    Ok(Some(EventsMark { count, last: last.unwrap_or((i64::MIN, String::new())), len }))
+}
+
 impl Library {
     /// Writes `playlists.json`, `likes.json` and `events.jsonl` into `dir`
     /// (created if missing). Files whose content did not change are left
-    /// untouched; events are only rewritten when the event count changed.
+    /// untouched; new events are appended to `events.jsonl` (see
+    /// [`export_events`]).
     pub fn export_userdata(&self, dir: impl AsRef<Path>) -> Result<ExportReport> {
         let dir = dir.as_ref();
         fs::create_dir_all(dir)?;
@@ -148,20 +207,16 @@ impl Library {
         let events_path = dir.join(EVENTS_FILE);
 
         // One snapshot for everything.
-        let (playlists, likes, streams, feedback, events_done, event_count) = self.read(|c| {
+        let (playlists, likes, streams, feedback, events_mark, event_count) = self.read(|c| {
             let playlists = read_playlists(c)?;
             let likes = read_likes(c)?;
             let streams = read_streams(c)?;
             let feedback = read_feedback(c)?;
             let event_count: u64 =
                 c.query_row("SELECT COUNT(*) FROM event", [], |r| r.get::<_, i64>(0))? as u64;
-            let up_to_date = events_path.exists()
-                && meta_get(c, &marker_key)?.and_then(|v| v.parse::<u64>().ok())
-                    == Some(event_count);
-            if !up_to_date {
-                atomic_with(&events_path, |w| write_events(c, w))?;
-            }
-            Ok((playlists, likes, streams, feedback, up_to_date, event_count))
+            let mark = meta_get(c, &marker_key)?.as_deref().and_then(EventsMark::parse);
+            let mark = export_events(c, &events_path, mark, event_count)?;
+            Ok((playlists, likes, streams, feedback, mark, event_count))
         })?;
 
         let mut report = ExportReport {
@@ -171,7 +226,7 @@ impl Library {
             events: event_count as usize,
             stream_tracks: streams.len(),
             rec_feedback: feedback.len(),
-            files_written: usize::from(!events_done),
+            files_written: usize::from(events_mark.is_some()),
         };
         let feedback_path = dir.join(REC_FEEDBACK_FILE);
         if !feedback.is_empty() || feedback_path.exists() {
@@ -202,10 +257,31 @@ impl Library {
             usize::from(write_atomic(&dir.join(PLAYLISTS_FILE), &playlists_json)?);
         report.files_written += usize::from(write_atomic(&dir.join(LIKES_FILE), &likes_json)?);
 
-        if !events_done {
-            self.write(|tx| meta_set(tx, &marker_key, &event_count.to_string()))?;
+        if let Some(mark) = events_mark {
+            self.write(|tx| meta_set(tx, &marker_key, &mark.encode()))?;
         }
         Ok(report)
+    }
+
+    /// A cheap fingerprint of what [`Library::export_userdata`] writes: the
+    /// same as at the last export means there is nothing new to write
+    /// (playlists, entries, likes and feedback are stamped on every change,
+    /// a tombstone included; events only come; stream tracks come with
+    /// their sources).
+    pub fn userdata_fingerprint(&self) -> Result<Vec<i64>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT (SELECT COUNT(*) FROM playlist), (SELECT COALESCE(SUM(updated_at), 0) FROM playlist),
+                        (SELECT COUNT(*) FROM playlist_entry),
+                        (SELECT COALESCE(SUM(updated_at), 0) FROM playlist_entry),
+                        (SELECT COUNT(*) FROM likes), (SELECT COALESCE(SUM(updated_at), 0) FROM likes),
+                        (SELECT COUNT(*) FROM rec_feedback),
+                        (SELECT COALESCE(SUM(updated_at + dislike), 0) FROM rec_feedback),
+                        (SELECT COUNT(*) FROM event), (SELECT COALESCE(MAX(ts), 0) FROM event),
+                        (SELECT COUNT(*) FROM track), (SELECT COUNT(*) FROM source)",
+            )?;
+            Ok(stmt.query_row([], |r| (0..12).map(|i| r.get(i)).collect())?)
+        })
     }
 
     /// Merges the files found in `dir` into the database (missing files are
@@ -400,23 +476,33 @@ fn merge_feedback(conn: &Connection, f: &RecFeedback, report: &mut ImportReport)
     Ok(())
 }
 
-fn write_events(conn: &Connection, w: &mut BufWriter<File>) -> io::Result<()> {
+/// Writes the events (all, or those after `after` by `ts, id`) one per line,
+/// oldest first; how many, and the last one's `ts, id`.
+fn write_events(
+    conn: &Connection,
+    w: &mut impl Write,
+    after: Option<(i64, &str)>,
+) -> io::Result<(u64, Option<(i64, String)>)> {
     let to_io = |e: rusqlite::Error| io::Error::other(e);
     let mut stmt = conn
         .prepare_cached(
             "SELECT id, ts, track_id, source_kind, type, position_ms, context, device
-               FROM event ORDER BY ts, id",
+               FROM event WHERE ?1 IS NULL OR ts > ?1 OR (ts = ?1 AND id > ?2)
+              ORDER BY ts, id",
         )
         .map_err(to_io)?;
     let rows = stmt
-        .query_map([], crate::events::event_from_row)
+        .query_map(params![after.map(|a| a.0), after.map_or("", |a| a.1)], crate::events::event_from_row)
         .map_err(to_io)?;
+    let (mut n, mut last) = (0, None);
     for row in rows {
-        let event = row.map_err(to_io)?;
+        let event: Event = row.map_err(to_io)?;
         serde_json::to_writer(&mut *w, &event).map_err(io::Error::other)?;
         w.write_all(b"\n")?;
+        n += 1;
+        last = Some((event.ts, event.id.to_string()));
     }
-    Ok(())
+    Ok((n, last))
 }
 
 fn merge_playlist(conn: &Connection, p: &Playlist, report: &mut ImportReport) -> Result<()> {

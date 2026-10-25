@@ -316,6 +316,8 @@ struct Worker {
     settings_path: Option<PathBuf>,
     exported_rev: u64,
     last_export: Instant,
+    /// Where the last export went and [`Library::userdata_fingerprint`] then.
+    exported_fp: Option<(PathBuf, Vec<i64>)>,
     import: Option<ImportService>,
     /// Registered streaming services (see [`RuntimeConfig::streams`]).
     streams: Vec<Arc<dyn StreamService>>,
@@ -391,6 +393,7 @@ impl Worker {
             settings_path: config.settings_path.clone(),
             exported_rev: 0,
             last_export: Instant::now(),
+            exported_fp: None,
             indexer: search::indexer_from(config.settings_path.as_deref()),
             candidates: Vec::new(),
             torrents: torrents::Torrents::new(torrent_state, torrent_offline),
@@ -2163,7 +2166,9 @@ impl Worker {
 
     /// Writes playlists, likes and history next to the library (PLAN §4:
     /// the DB can be rebuilt from files + this export). At most once a
-    /// minute while things change, and once more on shutdown.
+    /// minute while things change, and once more on shutdown; only when the
+    /// user data itself changed (most publishes are playback, downloads and
+    /// pages, which leave it alone).
     fn maybe_export(&mut self, force: bool) {
         if self.revision == self.exported_rev {
             return;
@@ -2172,10 +2177,17 @@ impl Worker {
             return;
         }
         let dir = self.res.path(".musiclib/userdata");
+        let fp = self.lib.userdata_fingerprint().ok().map(|fp| (dir.clone(), fp));
+        if fp.is_some() && fp == self.exported_fp {
+            self.exported_rev = self.revision;
+            self.last_export = Instant::now();
+            return;
+        }
         match self.lib.export_userdata(&dir) {
             Ok(_) => {
                 self.exported_rev = self.revision;
                 self.last_export = Instant::now();
+                self.exported_fp = fp;
             }
             Err(e) => log::warn!("userdata export to {}: {e}", dir.display()),
         }
