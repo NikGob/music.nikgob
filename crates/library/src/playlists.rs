@@ -193,6 +193,18 @@ fn insert_entry(
     now: UnixMs,
     device: &DeviceId,
 ) -> Result<PlaylistEntry> {
+    insert_new_entry(conn, playlist, track, index, now, device).map(|(e, _)| e)
+}
+
+/// [`insert_entry`], and whether the entry is new.
+fn insert_new_entry(
+    conn: &Connection,
+    playlist: PlaylistId,
+    track: TrackId,
+    index: usize,
+    now: UnixMs,
+    device: &DeviceId,
+) -> Result<(PlaylistEntry, bool)> {
     live_playlist(conn, playlist)?;
     let pid = playlist.to_string();
     // A track lives in a playlist at most once: re-adding returns the existing entry.
@@ -207,7 +219,7 @@ fn insert_entry(
         )
         .optional()?;
     if let Some(entry) = existing {
-        return Ok(entry);
+        return Ok((entry, false));
     }
     let position = position_for(conn, &pid, None, index, now, device)?;
     let entry = PlaylistEntry {
@@ -234,7 +246,7 @@ fn insert_entry(
         ],
     )?;
     refresh_in_library(conn, &track.to_string())?;
-    Ok(entry)
+    Ok((entry, true))
 }
 
 impl Library {
@@ -420,6 +432,28 @@ impl Library {
                 .iter()
                 .map(|t| insert_entry(tx, playlist, *t, usize::MAX, now, &device))
                 .collect()
+        })
+    }
+
+    /// Appends the tracks the playlist does not have yet, each once, in one
+    /// transaction: how many were added and how many it had already.
+    pub fn playlist_add_missing(&self, playlist: PlaylistId, tracks: &[TrackId]) -> Result<(usize, usize)> {
+        let device = self.device_id();
+        let now = self.tick();
+        self.write(|tx| {
+            let (mut added, mut already) = (0, 0);
+            let mut seen = std::collections::HashSet::new();
+            for t in tracks {
+                if !seen.insert(*t) {
+                    continue;
+                }
+                if insert_new_entry(tx, playlist, *t, usize::MAX, now, &device)?.1 {
+                    added += 1;
+                } else {
+                    already += 1;
+                }
+            }
+            Ok((added, already))
         })
     }
 

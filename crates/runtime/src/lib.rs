@@ -272,6 +272,18 @@ impl Drop for Runtime {
     }
 }
 
+/// The toast of «Добавить в плейлист»: what was added and what the
+/// playlist had already.
+fn added_to_playlist(name: &str, added: usize, already: usize) -> String {
+    match (added, already) {
+        (0, 0) => format!("Добавлено в «{name}»"),
+        (0, _) => format!("Уже есть в «{name}»"),
+        (_, 0) => format!("Добавлено в «{name}»"),
+        (_, 1) => format!("Добавлено {added}, 1 уже был в «{name}»"),
+        _ => format!("Добавлено {added}, {already} уже были в «{name}»"),
+    }
+}
+
 /// How far the engine's position may differ from our extrapolation before
 /// the view is told (normal jitter is a few tens of milliseconds).
 const POSITION_DRIFT: Duration = Duration::from_millis(1500);
@@ -829,14 +841,20 @@ impl Worker {
             }
             Command::AddToPlaylist(id, tracks) => {
                 let before = self.library_tracks();
+                // Only what it does not have yet: never a track twice.
+                let (mut added, mut already) = (0, 0);
                 if id == LIKED_PLAYLIST {
-                    for t in &tracks {
-                        if self.lib.like(*t).is_ok() {
+                    let mut seen = std::collections::HashSet::new();
+                    for t in tracks.iter().filter(|t| seen.insert(**t)) {
+                        if self.lib.is_liked(*t).unwrap_or(false) {
+                            already += 1;
+                        } else if self.lib.like(*t).is_ok() {
+                            added += 1;
                             self.track_liked(*t, true);
                         }
                     }
-                } else {
-                    let _ = self.log_err("плейлист", self.lib.playlist_add_many(id, &tracks));
+                } else if let Some(n) = self.log_err("плейлист", self.lib.playlist_add_missing(id, &tracks)) {
+                    (added, already) = n;
                 }
                 let name = if id == LIKED_PLAYLIST {
                     "Любимые".to_owned()
@@ -847,7 +865,7 @@ impl Worker {
                         .flatten()
                         .map_or_else(String::new, |p| p.name)
                 };
-                self.toast(format!("Добавлено в «{name}»"), None);
+                self.toast(added_to_playlist(&name, added, already), None);
                 let releases = if id == LIKED_PLAYLIST { self.releases_of(&tracks) } else { Vec::new() };
                 self.library_edited(before, releases);
                 self.playlist_edited(id);

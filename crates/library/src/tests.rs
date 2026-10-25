@@ -534,6 +534,22 @@ fn move_and_remove_entries() {
 }
 
 #[test]
+fn adding_to_a_playlist_skips_what_it_has() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let p = lib.create_playlist("Ночь").unwrap();
+    let ts: Vec<TrackId> = (0..5).map(|k| track(&lib, &a, None, &format!("t{k}"), k).id).collect();
+    assert_eq!(lib.playlist_add_missing(p.id, &ts[..2]).unwrap(), (2, 0));
+    // Two it has, three new (one of them twice in the list).
+    let more = [ts[0], ts[2], ts[1], ts[3], ts[4], ts[3]];
+    assert_eq!(lib.playlist_add_missing(p.id, &more).unwrap(), (3, 2));
+    assert_eq!(lib.playlist_len(p.id).unwrap(), 5);
+    assert_eq!(lib.playlist_add_missing(p.id, &ts[4..]).unwrap(), (0, 1));
+    let order: Vec<TrackId> = lib.playlist_entries(p.id, 0, u32::MAX).unwrap().iter().map(|e| e.track.id).collect();
+    assert_eq!(order, ts);
+}
+
+#[test]
 fn equal_positions_get_rebalanced() {
     // Two devices inserting into the same gap produce equal positions; a later
     // insert between them must still work and keep the order.

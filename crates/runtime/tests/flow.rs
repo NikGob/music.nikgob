@@ -565,6 +565,17 @@ fn likes_and_playlist_edits_update_the_library_in_place() {
     rt.send(Command::CreatePlaylist("Дорога".into()));
     wait_for(&rt, "the playlist", |s| s.library.playlists.iter().any(|p| p.name == "Дорога"));
     let id = rt.state().library.playlists.iter().find(|p| p.name == "Дорога").unwrap().id;
+    // Never a track twice: what it has is told, the rest added.
+    let toast = |text: &'static str| move |s: &ViewState| s.toasts.iter().any(|t| t.text == text);
+    rt.send(Command::AddToPlaylist(id, vec![tracks[0].id]));
+    wait_for(&rt, "the first added", toast("Добавлено в «Дорога»"));
+    rt.send(Command::AddToPlaylist(id, vec![tracks[0].id]));
+    wait_for(&rt, "the one it has", toast("Уже есть в «Дорога»"));
+    rt.send(Command::AddToPlaylist(id, vec![tracks[0].id, tracks[1].id]));
+    wait_for(&rt, "the other added", toast("Добавлено 1, 1 уже был в «Дорога»"));
+    assert_eq!(lib.playlist_len(id).unwrap(), 2);
+    rt.send(Command::AddToPlaylist(nikgob_view::LIKED_PLAYLIST, vec![tracks[0].id]));
+    wait_for(&rt, "a like it has", toast("Уже есть в «Любимые»"));
     rt.send(Command::RenamePlaylist(id, "Путь".into()));
     wait_for(&rt, "the new name", |s| s.library.playlists.iter().any(|p| p.id == id && p.name == "Путь"));
     rt.send(Command::DeletePlaylist(id));
