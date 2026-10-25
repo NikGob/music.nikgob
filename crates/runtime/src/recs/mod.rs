@@ -718,7 +718,8 @@ fn read_parts(
         },
         |name| artist_keys.get(&artist_key(name)).copied(),
     );
-    let suggested_new: Vec<(StreamTrack, f32)> = matched.unmatched.into_iter().filter(|(t, _)| is_new(&filter, t)).collect();
+    let suggested_new: Vec<(StreamTrack, f32)> =
+        matched.unmatched.into_iter().filter(|(t, _)| is_new(&filter, t) && nikgob_recs::junk(t, None).is_none()).collect();
 
     // The analysed previews of the new music found (their tracks are not
     // the catalog's).
