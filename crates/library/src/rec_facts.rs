@@ -48,7 +48,7 @@ impl Library {
     /// or any online source's lines; an instrumental mark is none.
     pub fn track_facts(&self) -> Result<Vec<TrackFactsRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT t.id, t.duration_ms, t.added_at, r.year, r.title, t.disc_no, t.track_no, t.has_local,
                         COALESCE(l.instrumental, 0),
                         COALESCE(l.synced, '') != '',
@@ -95,7 +95,7 @@ impl Library {
     /// The user's live playlists with their live tracks, in playlist order.
     pub fn playlist_tracks(&self) -> Result<Vec<PlaylistTracks>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT p.id, p.name, e.track_id FROM playlist p
                    JOIN playlist_entry e ON e.playlist_id = p.id AND e.deleted = 0
                   WHERE p.deleted = 0

@@ -39,7 +39,7 @@ impl Library {
     /// [`Self::clip_to_song`] may turn into songs. Newest likes first.
     pub fn liked_youtube_clips(&self) -> Result<Vec<LikedClip>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT rl.track_id, rl.remote_id, t.title, t.artist_credit, t.duration_ms
                    FROM remote_like rl
                    JOIN track t ON t.id = rl.track_id
@@ -149,7 +149,7 @@ impl Library {
     pub fn mark_clip(&self, video: &RemoteId) -> Result<bool> {
         self.write(|tx| {
             let tracks: Vec<String> = {
-                let mut stmt = tx.prepare(
+                let mut stmt = tx.prepare_cached(
                     "SELECT DISTINCT track_id FROM source
                       WHERE kind = ?1 AND locator = ?2 AND quality_score != ?3",
                 )?;

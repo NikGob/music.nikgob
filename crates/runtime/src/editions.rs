@@ -41,7 +41,7 @@ impl Worker {
                 new_songs: g.new_songs,
             })
             .collect();
-        self.publish(|s, _| s.editions = offers);
+        self.publish(|s| s.editions = offers);
         if fresh {
             self.toast("Похоже, некоторые альбомы повторяются — посмотри в Библиотеке", None);
         }
@@ -69,7 +69,7 @@ impl Worker {
             return;
         };
         let group = g.group.clone();
-        self.publish(|s, _| s.prefs.kept_editions.push(group));
+        self.publish(|s| s.prefs.kept_editions.push(group));
         self.save_prefs();
         self.offer_editions();
     }

@@ -38,13 +38,13 @@ impl Library {
     pub fn rec_tracks(&self) -> Result<Vec<RecTrack>> {
         self.read(|c| {
             let mut artists: HashMap<TrackId, Vec<ArtistId>> = HashMap::new();
-            let mut stmt = c.prepare("SELECT track_id, artist_id FROM track_artist ORDER BY track_id, position")?;
+            let mut stmt = c.prepare_cached("SELECT track_id, artist_id FROM track_artist ORDER BY track_id, position")?;
             let rows = stmt.query_map([], |r| Ok((get_id::<TrackId>(r, 0)?, get_id::<ArtistId>(r, 1)?)))?;
             for row in rows {
                 let (t, a) = row?;
                 artists.entry(t).or_default().push(a);
             }
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT id, title, artist_display, release_id, in_library, has_local, recording_mbid, isrc FROM track
                   WHERE deleted_at IS NULL ORDER BY seq",
             )?;
@@ -86,7 +86,7 @@ impl Library {
     /// history; likes and the rest are read as state).
     pub fn listening_events(&self) -> Result<Vec<Event>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT id, ts, track_id, source_kind, type, position_ms, context, device FROM event
                   WHERE type IN ('start', 'complete', 'skip') ORDER BY ts, id",
             )?;
@@ -98,7 +98,7 @@ impl Library {
     /// Every liked track and when it was liked, newest first.
     pub fn liked_track_times(&self) -> Result<Vec<(TrackId, UnixMs)>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT target_id, updated_at FROM likes WHERE target_kind = 'track' AND deleted = 0
                   ORDER BY updated_at DESC",
             )?;
@@ -110,7 +110,7 @@ impl Library {
     /// Every live entry of a live playlist: its track and when it was added.
     pub fn playlist_entry_times(&self) -> Result<Vec<(TrackId, UnixMs)>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT e.track_id, e.added_at FROM playlist_entry e
                    JOIN playlist p ON p.id = e.playlist_id
                   WHERE e.deleted = 0 AND p.deleted = 0",
@@ -125,7 +125,7 @@ impl Library {
     pub fn track_remote_ids(&self) -> Result<Vec<RemoteId>> {
         self.read(|c| {
             let mut out = Vec::new();
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT s.kind, s.locator FROM source s JOIN track t ON t.id = s.track_id
                   WHERE s.kind != 'local_file' AND s.trashed_at IS NULL
                     AND t.in_library = 1 AND t.deleted_at IS NULL
@@ -147,7 +147,7 @@ impl Library {
     /// Title and credit of every release that has a track in the library.
     pub fn release_names(&self) -> Result<Vec<(String, String)>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT r.title, r.artist_display FROM release r
                   WHERE EXISTS (SELECT 1 FROM track t WHERE t.release_id = r.id
                                    AND t.deleted_at IS NULL AND t.in_library = 1)",
@@ -160,7 +160,7 @@ impl Library {
     /// Every artist with a track in the library: id and name.
     pub fn artist_names(&self) -> Result<Vec<(ArtistId, String)>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT a.id, a.name FROM artist a
                   WHERE EXISTS (SELECT 1 FROM track_artist ta JOIN track t ON t.id = ta.track_id
                                  WHERE ta.artist_id = a.id AND t.deleted_at IS NULL AND t.in_library = 1)",

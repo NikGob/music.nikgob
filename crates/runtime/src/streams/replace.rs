@@ -144,7 +144,7 @@ impl Worker {
             youtube_off,
             busy: false,
         };
-        self.publish(|s, _| s.find_song = Some(view));
+        self.publish(|s| s.find_song = Some(view));
     }
 
     /// Why the like cannot move to YouTube Music for `track`, if it cannot.
@@ -230,7 +230,7 @@ impl Worker {
             .collect();
         let error = (!loading && results.is_empty() && !failed.is_empty() && failed.len() == r.asked.len())
             .then(|| super::error_text(failed[0]));
-        self.publish(|s, _| {
+        self.publish(|s| {
             if let Some(f) = s.find_song.as_mut().filter(|f| f.track == view.track) {
                 f.results = results;
                 f.loading = loading;
@@ -242,7 +242,7 @@ impl Worker {
     /// `Command::ReplaceTrack`.
     pub(crate) fn replace_track(&mut self, track: TrackId, with: RemoteId, youtube: bool) {
         if self.state.read().prefs.replace_in_youtube != youtube {
-            self.publish(|s, _| s.prefs.replace_in_youtube = youtube);
+            self.publish(|s| s.prefs.replace_in_youtube = youtube);
             self.save_prefs();
         }
         let Some(pick) = self.streaming.known.get(&with).cloned() else {
@@ -259,7 +259,7 @@ impl Worker {
             return;
         };
         let dz = self.service(Service::Deezer);
-        self.publish(|s, _| {
+        self.publish(|s| {
             if let Some(f) = s.find_song.as_mut() {
                 f.busy = true;
             }
@@ -323,7 +323,7 @@ impl Worker {
         let mut songs = vec![pick.clone()];
         songs.extend(youtube_song.clone());
         let Some(snapshot) = self.log_err("замена трека", self.lib.replace_with_song(track, &songs)) else {
-            self.publish(|s, _| {
+            self.publish(|s| {
                 if let Some(f) = s.find_song.as_mut() {
                     f.busy = false;
                 }
@@ -353,7 +353,7 @@ impl Worker {
         self.streaming.replace.undo_seq += 1;
         let id = self.streaming.replace.undo_seq;
         self.streaming.replace.undo.insert(id, Undo { snapshot, remote });
-        self.publish(|s, _| s.find_song = None);
+        self.publish(|s| s.find_song = None);
         self.track_replaced(track);
         self.toast(text, Some(("Отменить".into(), Command::UndoReplace(id))));
     }

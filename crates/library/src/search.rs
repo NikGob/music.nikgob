@@ -49,7 +49,7 @@ impl Library {
         };
         self.read(|c| {
             let tracks = {
-                let mut stmt = c.prepare(&format!(
+                let mut stmt = c.prepare_cached(&format!(
                     "{TRACK_ROW_SELECT} JOIN track_fts ON track_fts.rowid = t.seq
                       WHERE track_fts MATCH ?1 AND t.deleted_at IS NULL AND t.in_library = 1
                       ORDER BY bm25(track_fts, 8.0, 4.0, 2.0), t.has_local DESC, t.seq LIMIT ?2"
@@ -58,7 +58,7 @@ impl Library {
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             let releases = {
-                let mut stmt = c.prepare(&format!(
+                let mut stmt = c.prepare_cached(&format!(
                     "{RELEASE_ROW_SELECT} JOIN release_fts ON release_fts.rowid = r.seq
                       WHERE release_fts MATCH ?1
                       ORDER BY bm25(release_fts, 8.0, 4.0), r.seq LIMIT ?2"
@@ -67,7 +67,7 @@ impl Library {
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             let artists = {
-                let mut stmt = c.prepare(&format!(
+                let mut stmt = c.prepare_cached(&format!(
                     "{ARTIST_ROW_SELECT} JOIN artist_fts ON artist_fts.rowid = a.seq
                       WHERE artist_fts MATCH ?1
                       ORDER BY bm25(artist_fts, 8.0, 2.0), a.seq LIMIT ?2"
@@ -76,7 +76,7 @@ impl Library {
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             let playlists = {
-                let mut stmt = c.prepare(&format!(
+                let mut stmt = c.prepare_cached(&format!(
                     "{PLAYLIST_SUMMARY_SELECT} JOIN playlist_fts ON playlist_fts.rowid = p.seq
                       WHERE playlist_fts MATCH ?1 AND p.deleted = 0
                       ORDER BY bm25(playlist_fts), p.seq LIMIT ?2"

@@ -149,41 +149,29 @@ pub(crate) fn origin_columns(origin: &SourceOrigin) -> (&'static str, Option<&st
 
 fn artist_by_id(conn: &Connection, id: ArtistId) -> Result<Option<Artist>> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {ARTIST_COLS} FROM artist WHERE id = ?1"),
-            [id.to_string()],
-            artist_from_row,
-        )
+        .prepare_cached(&format!("SELECT {ARTIST_COLS} FROM artist WHERE id = ?1"))?
+        .query_row([id.to_string()], artist_from_row)
         .optional()?)
 }
 
 fn release_by_id(conn: &Connection, id: ReleaseId) -> Result<Option<Release>> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {RELEASE_COLS} FROM release WHERE id = ?1"),
-            [id.to_string()],
-            release_from_row,
-        )
+        .prepare_cached(&format!("SELECT {RELEASE_COLS} FROM release WHERE id = ?1"))?
+        .query_row([id.to_string()], release_from_row)
         .optional()?)
 }
 
 fn track_by_id(conn: &Connection, id: TrackId) -> Result<Option<Track>> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {TRACK_COLS} FROM track WHERE id = ?1"),
-            [id.to_string()],
-            track_from_row,
-        )
+        .prepare_cached(&format!("SELECT {TRACK_COLS} FROM track WHERE id = ?1"))?
+        .query_row([id.to_string()], track_from_row)
         .optional()?)
 }
 
 pub(crate) fn source_by_id(conn: &Connection, id: SourceId) -> Result<Option<Source>> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {SOURCE_COLS} FROM source WHERE id = ?1"),
-            [id.to_string()],
-            source_from_row,
-        )
+        .prepare_cached(&format!("SELECT {SOURCE_COLS} FROM source WHERE id = ?1"))?
+        .query_row([id.to_string()], source_from_row)
         .optional()?)
 }
 
@@ -855,7 +843,7 @@ impl Library {
             )?;
             carry_release_links(tx, &f, &t)?;
             let artists: Vec<String> = {
-                let mut stmt = tx.prepare("SELECT artist_id FROM release_artist WHERE release_id = ?1")?;
+                let mut stmt = tx.prepare_cached("SELECT artist_id FROM release_artist WHERE release_id = ?1")?;
                 let rows = stmt.query_map([&f], |r| r.get(0))?;
                 rows.collect::<rusqlite::Result<_>>()?
             };
@@ -919,7 +907,7 @@ impl Library {
     /// Non-trashed sources of a track, the active one first.
     pub fn sources_of_track(&self, track: TrackId) -> Result<Vec<Source>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {SOURCE_COLS} FROM source WHERE track_id = ?1 AND trashed_at IS NULL
                   ORDER BY is_active DESC, quality_score DESC, added_at, id"
             ))?;
@@ -942,7 +930,7 @@ impl Library {
     /// Non-trashed sources with this content hash (duplicate detection).
     pub fn sources_by_hash(&self, file_hash: &str) -> Result<Vec<Source>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {SOURCE_COLS} FROM source WHERE file_hash = ?1 AND trashed_at IS NULL"
             ))?;
             let rows = stmt.query_map([file_hash], source_from_row)?;
@@ -958,12 +946,28 @@ impl Library {
 
     pub fn get_track_row(&self, id: TrackId) -> Result<Option<TrackRow>> {
         self.read(|c| {
-            Ok(c.query_row(
-                &format!("{TRACK_ROW_SELECT} WHERE t.id = ?1"),
-                [id.to_string()],
-                track_row,
-            )
+            Ok(c.prepare_cached(concat!(
+                "SELECT ", track_row_cols!(), " ", track_row_from!(), " WHERE t.id = ?1"
+            ))?
+            .query_row([id.to_string()], track_row)
             .optional()?)
+        })
+    }
+
+    /// The rows of `ids` in one query, by id (a missing id has none).
+    pub fn get_track_rows(&self, ids: &[TrackId]) -> Result<std::collections::HashMap<TrackId, TrackRow>> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let list = serde_json::to_string(&ids.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .unwrap_or_else(|_| "[]".into());
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(concat!(
+                "SELECT ", track_row_cols!(), " ", track_row_from!(),
+                " WHERE t.id IN (SELECT value FROM json_each(?1))"
+            ))?;
+            let rows = stmt.query_map([list], track_row)?;
+            Ok(rows.map(|r| r.map(|r| (r.id, r))).collect::<rusqlite::Result<_>>()?)
         })
     }
 
@@ -990,7 +994,7 @@ impl Library {
 
     fn tracks_where(&self, column: &'static str, value: &str) -> Result<Vec<Track>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {TRACK_COLS} FROM track WHERE {column} = ?1 ORDER BY added_at, id"
             ))?;
             let rows = stmt.query_map([value], track_from_row)?;
@@ -1041,7 +1045,7 @@ impl Library {
 
     fn tracks_of_release_where(&self, release: ReleaseId, live: &str) -> Result<Vec<TrackRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{TRACK_ROW_SELECT} WHERE t.release_id = ?1 {live}
                   ORDER BY t.disc_no, t.track_no, t.seq"
             ))?;
@@ -1058,7 +1062,7 @@ impl Library {
         limit: u32,
     ) -> Result<Vec<TrackRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{TRACK_ROW_SELECT}
                   WHERE t.id IN (SELECT track_id FROM track_artist WHERE artist_id = ?1)
                     AND t.deleted_at IS NULL AND t.in_library = 1
@@ -1100,7 +1104,7 @@ impl Library {
             TrackFilter::NoLocalFile => "WHERE t.deleted_at IS NULL AND t.in_library = 1 AND t.has_local = 0",
         };
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{TRACK_ROW_SELECT} {where_} ORDER BY {order} LIMIT ?1 OFFSET ?2"
             ))?;
             let rows = stmt.query_map(params![limit, offset], track_row)?;
@@ -1175,7 +1179,7 @@ impl Library {
             ReleaseSortKey::Added => format!("r.added_at {d}, r.seq {d}"),
         };
         self.read(|c| {
-            let mut stmt = c.prepare(&format!("{select} ORDER BY {order} LIMIT ?1 OFFSET ?2"))?;
+            let mut stmt = c.prepare_cached(&format!("{select} ORDER BY {order} LIMIT ?1 OFFSET ?2"))?;
             let rows = stmt.query_map(params![limit, offset], release_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
@@ -1184,7 +1188,7 @@ impl Library {
     /// Releases credited to an artist, newest first.
     pub fn releases_of_artist(&self, artist: ArtistId) -> Result<Vec<ReleaseRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{RELEASE_ROW_SELECT}
                   WHERE r.id IN (SELECT release_id FROM release_artist WHERE artist_id = ?1)
                   ORDER BY r.year IS NULL, r.year DESC, r.title_key, r.seq"
@@ -1234,7 +1238,7 @@ impl Library {
             ArtistSortKey::Added => format!("a.added_at {d}, a.seq {d}"),
         };
         self.read(|c| {
-            let mut stmt = c.prepare(&format!("{select} ORDER BY {order} LIMIT ?1 OFFSET ?2"))?;
+            let mut stmt = c.prepare_cached(&format!("{select} ORDER BY {order} LIMIT ?1 OFFSET ?2"))?;
             let rows = stmt.query_map(params![limit, offset], artist_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
@@ -1318,7 +1322,9 @@ macro_rules! artist_row_cols {
             release_visible!(),
             "),
                     (SELECT COUNT(*) FROM track_artist ta JOIN track t ON t.id = ta.track_id
-                      WHERE ta.artist_id = a.id AND t.has_local = 1 AND t.deleted_at IS NULL AND t.in_library = 1)"
+                      WHERE ta.artist_id = a.id AND t.has_local = 1 AND t.deleted_at IS NULL AND t.in_library = 1),
+                    EXISTS(SELECT 1 FROM likes lk WHERE lk.target_kind = 'artist'
+                            AND lk.target_id = a.id AND lk.deleted = 0)"
         )
     };
 }
@@ -1339,5 +1345,6 @@ pub(crate) fn artist_row(row: &Row<'_>) -> rusqlite::Result<ArtistRow> {
         artist: artist_from_row(row)?,
         release_count: row.get::<_, i64>(6)? as u32,
         local_track_count: row.get::<_, i64>(7)? as u32,
+        liked: row.get(8)?,
     })
 }

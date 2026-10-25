@@ -42,7 +42,7 @@ fn master_from_row(row: &Row<'_>) -> rusqlite::Result<Master> {
 }
 
 fn replicas_of(conn: &Connection, file_hash: &str) -> Result<Vec<Replica>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT file_hash, node_id, verified_at FROM replica WHERE file_hash = ?1 ORDER BY node_id",
     )?;
     let rows = stmt.query_map([file_hash], |r| {
@@ -172,7 +172,7 @@ impl Library {
     /// All masters that came out of the torrent `info_hash`.
     pub fn masters_of_torrent(&self, info_hash: &str) -> Result<Vec<Master>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {MASTER_COLS} FROM master
                   WHERE origin_kind = 'torrent' AND origin_info_hash = ?1
                   ORDER BY origin_path, track_id"
@@ -187,7 +187,7 @@ impl Library {
     /// Masters no node has a replica of yet (waiting for backup), up to `limit`.
     pub fn masters_without_replicas(&self, limit: usize) -> Result<Vec<Master>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {MASTER_COLS} FROM master m
                   WHERE NOT EXISTS (SELECT 1 FROM replica r WHERE r.file_hash = m.file_hash)
                   ORDER BY track_id LIMIT ?1"
@@ -235,7 +235,7 @@ impl Library {
     ) -> Result<usize> {
         self.write(|tx| {
             let rows: Vec<(String, String)> = {
-                let mut stmt = tx.prepare(
+                let mut stmt = tx.prepare_cached(
                     "SELECT track_id, origin_path FROM master WHERE origin_path IS NOT NULL",
                 )?;
                 let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -339,7 +339,7 @@ impl Library {
     /// All downloads, newest first.
     pub fn list_downloads(&self) -> Result<Vec<Download>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {DOWNLOAD_COLS} FROM download ORDER BY created_at DESC, info_hash"
             ))?;
             let rows = stmt
@@ -443,7 +443,7 @@ impl Library {
     /// Wishlist items in one status, oldest first.
     pub fn list_wishlist_by_status(&self, status: WishlistStatus) -> Result<Vec<WishlistItem>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {WISHLIST_COLS} FROM wishlist WHERE status = ?1 ORDER BY created_at, id"
             ))?;
             let rows = stmt
@@ -490,7 +490,7 @@ impl Library {
     ) -> Result<Vec<WishlistItem>> {
         self.read(|c| {
             let mut stmt =
-                c.prepare(&format!("SELECT {WISHLIST_COLS} FROM wishlist WHERE {filter}"))?;
+                c.prepare_cached(&format!("SELECT {WISHLIST_COLS} FROM wishlist WHERE {filter}"))?;
             let rows = stmt
                 .query_map(params, wishlist_from_row)?
                 .collect::<rusqlite::Result<_>>()?;

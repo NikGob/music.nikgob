@@ -64,7 +64,7 @@ fn various_artist(conn: &Connection) -> Result<String> {
 
 fn unbind_various(tx: &Transaction<'_>) -> Result<((), usize)> {
     let names: HashMap<String, String> = {
-        let mut stmt = tx.prepare("SELECT id, name FROM artist")?;
+        let mut stmt = tx.prepare_cached("SELECT id, name FROM artist")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
@@ -73,7 +73,7 @@ fn unbind_various(tx: &Transaction<'_>) -> Result<((), usize)> {
     let mut left = Vec::new();
     for (table, links, owner) in [("release", "release_artist", "release_id"), ("track", "track_artist", "track_id")] {
         let rows: Vec<(String, String, String)> = {
-            let mut stmt = tx.prepare(&format!("SELECT id, title, artist_credit FROM {table} WHERE artist_credit LIKE '%arious%'"))?;
+            let mut stmt = tx.prepare_cached(&format!("SELECT id, title, artist_credit FROM {table} WHERE artist_credit LIKE '%arious%'"))?;
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
@@ -134,7 +134,7 @@ fn place_moves(conn: &Connection, release: &str) -> Result<Vec<(String, String, 
     let album: String = conn.query_row("SELECT title FROM release WHERE id = ?1", [release], |r| r.get(0))?;
     let mut tracks: Vec<Placed> = Vec::new();
     {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT t.id, t.title, t.disc_no, t.track_no, s.locator FROM track t
                JOIN source s ON s.track_id = t.id AND s.kind = 'local_file' AND s.trashed_at IS NULL
               WHERE t.release_id = ?1 AND t.deleted_at IS NULL AND t.has_local = 1
@@ -213,7 +213,7 @@ fn place_moves(conn: &Connection, release: &str) -> Result<Vec<(String, String, 
 
 fn fix_places(tx: &Transaction<'_>) -> Result<((), usize)> {
     let releases: Vec<(String, String)> = {
-        let mut stmt = tx.prepare(
+        let mut stmt = tx.prepare_cached(
             "SELECT DISTINCT t.release_id, r.title FROM track t JOIN release r ON r.id = t.release_id
               WHERE t.deleted_at IS NULL AND t.has_local = 1 AND t.track_no > 0
               GROUP BY t.release_id, max(t.disc_no, 1), t.track_no HAVING count(*) > 1",
@@ -266,7 +266,7 @@ struct Album {
 /// docs).
 fn plan_editions(conn: &Connection) -> Result<Vec<(String, String, Vec<(String, String)>)>> {
     let mut albums: Vec<Album> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT r.id, r.title, coalesce(r.total_tracks, 0), r.seq,
                     (SELECT group_concat(artist_id) FROM release_artist WHERE release_id = r.id)
                FROM release r
@@ -288,7 +288,7 @@ fn plan_editions(conn: &Connection) -> Result<Vec<(String, String, Vec<(String, 
         })?;
         rows.collect::<rusqlite::Result<_>>()?
     };
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, title, duration_ms, isrc, recording_mbid FROM track
           WHERE release_id = ?1 AND deleted_at IS NULL ORDER BY disc_no, track_no, seq",
     )?;
@@ -360,7 +360,7 @@ fn fold_editions(tx: &Transaction<'_>, device: &str, now: i64) -> Result<((), us
 
 fn reidentify(tx: &Transaction<'_>) -> Result<((), usize)> {
     let short: Vec<(String, String, i64, i64, i64, Option<String>, bool)> = {
-        let mut stmt = tx.prepare(
+        let mut stmt = tx.prepare_cached(
             "SELECT r.id, r.title, r.total_tracks,
                     (SELECT count(*) FROM track t WHERE t.release_id = r.id AND t.deleted_at IS NULL) n,
                     (SELECT count(*) FROM track t WHERE t.release_id = r.id AND t.deleted_at IS NULL
@@ -478,7 +478,7 @@ mod tests {
     fn places(lib: &Library, release: ReleaseId) -> Vec<(u32, u32, String)> {
         lib.read(|c| {
             let mut stmt =
-                c.prepare("SELECT disc_no, track_no, title FROM track WHERE release_id = ?1 AND deleted_at IS NULL ORDER BY disc_no, track_no")?;
+                c.prepare_cached("SELECT disc_no, track_no, title FROM track WHERE release_id = ?1 AND deleted_at IS NULL ORDER BY disc_no, track_no")?;
             let rows = stmt.query_map([release.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })

@@ -92,6 +92,8 @@ struct Volume {
     dragging: bool,
     /// The value we just sent, shown until the runtime state catches up.
     shadow: Option<(f32, f64)>,
+    /// What a held slider sent last and the state revision it saw then.
+    pushed: Option<(f32, u64)>,
     /// Wheel zones and the rects inside them that scroll instead, as drawn
     /// last frame (`zones`) and this frame (`next_*`).
     zones: Vec<(Rect, WheelZone)>,
@@ -399,6 +401,18 @@ impl Chrome {
     fn send_volume(&mut self, ctx: &Context, v: f32, out: &mut Vec<Command>) {
         let v = v.clamp(0.0, 1.0);
         self.vol.shadow = Some((v, anim::now(ctx)));
+        out.push(Command::SetVolume(v));
+    }
+
+    /// Sends the volume of a held slider, which reports its value every
+    /// frame: only a value the runtime does not have or was not just sent.
+    pub fn push_volume(&mut self, state: &ViewState, v: f32, out: &mut Vec<Command>) {
+        let p = &state.player;
+        let known = v == p.volume || self.vol.pushed == Some((v, state.revision));
+        if known && !p.muted {
+            return;
+        }
+        self.vol.pushed = Some((v, state.revision));
         out.push(Command::SetVolume(v));
     }
 

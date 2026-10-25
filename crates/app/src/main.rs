@@ -186,7 +186,9 @@ impl Core {
 
     fn poll_desktop(&mut self) {
         let req = {
+            let lock = nikgob_md3e::prof::scope("state-lock");
             let state = self.runtime.state();
+            drop(lock);
             self.desktop.poll(&state, &mut self.commands)
         };
         self.quit |= req.quit;

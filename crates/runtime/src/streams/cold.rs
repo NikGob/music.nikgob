@@ -1022,7 +1022,7 @@ impl Worker {
             })
             .collect();
         let history: Vec<v::Job> = self.streaming.cold.history.iter().cloned().collect();
-        self.publish(|s, _| {
+        self.publish(|s| {
             s.downloads.active.retain(|j| j.id & STREAM_JOB == 0);
             s.downloads.active.extend(active);
             s.downloads.history.retain(|j| j.id & STREAM_JOB == 0);

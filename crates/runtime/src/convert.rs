@@ -23,6 +23,9 @@ pub struct Resolver {
     lib: Library,
     root: PathBuf,
     covers: HashMap<ReleaseId, Option<v::Cover>>,
+    /// Palette seeds of every release, read in one query on the first cover
+    /// miss and dropped with `covers`.
+    seeds: Option<HashMap<ReleaseId, u32>>,
     /// Artist photos on disk; loaded on first use.
     photos: Option<HashMap<ArtistId, v::Cover>>,
 }
@@ -33,6 +36,7 @@ impl Resolver {
             lib,
             root,
             covers: HashMap::new(),
+            seeds: None,
             photos: None,
         }
     }
@@ -71,12 +75,15 @@ impl Resolver {
             }
             let path = self.path(&r);
             let ambient = path.with_file_name("ambient.png");
-            let seed = self
-                .lib
-                .get_palette(id)
-                .ok()
-                .flatten()
-                .map(|p| p.seed_argb);
+            let seeds = self
+                .seeds
+                .get_or_insert_with(|| self.lib.palette_seeds().unwrap_or_default());
+            // One stored after the seeds were read is looked up on its own.
+            let seed = seeds.get(&id).copied().or_else(|| {
+                let seed = self.lib.get_palette(id).ok().flatten().map(|p| p.seed_argb)?;
+                seeds.insert(id, seed);
+                Some(seed)
+            });
             v::Cover {
                 ambient: ambient.exists().then_some(ambient),
                 path,
@@ -110,6 +117,7 @@ impl Resolver {
     /// Forget cached covers (after an import changed them).
     pub fn invalidate(&mut self) {
         self.covers.clear();
+        self.seeds = None;
     }
 
     /// The cover of a release (its file, or a service's https url).
@@ -197,7 +205,7 @@ impl Resolver {
             id: a.artist.id,
             name: a.artist.name.clone(),
             image: self.photo(a.artist.id).or_else(|| web_image(&a.artist.images)),
-            liked: self.lib.is_liked(a.artist.id).unwrap_or(false),
+            liked: a.liked,
             track_count: a.local_track_count,
         }
     }
@@ -446,7 +454,7 @@ mod tests {
 
         let mut res = Resolver::new(lib.clone(), dir.path().to_owned());
         let card = |res: &mut Resolver, a: &nikgob_core::model::Artist| {
-            let row = ArtistRow { artist: a.clone(), release_count: 0, local_track_count: 0 };
+            let row = ArtistRow { artist: a.clone(), release_count: 0, local_track_count: 0, liked: false };
             res.artist(&row)
         };
         assert_eq!(
@@ -496,7 +504,7 @@ mod tests {
         assert!(!lib.set_stream_artist_image(a.id, "C:/kino.jpg").unwrap());
         let a = lib.get_artist(a.id).unwrap().unwrap();
         let mut res = Resolver::new(lib.clone(), std::env::temp_dir());
-        let row = ArtistRow { artist: a, release_count: 0, local_track_count: 0 };
+        let row = ArtistRow { artist: a, release_count: 0, local_track_count: 0, liked: false };
         let image = res.artist(&row).image.unwrap();
         assert_eq!(image.web_url(), Some("https://fake.invalid/kino.jpg"));
     }

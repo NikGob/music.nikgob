@@ -631,7 +631,7 @@ pub(crate) fn stream_refs_in(conn: &Connection, track: TrackId) -> Result<Vec<St
         None => None,
     };
     let sources: Vec<(String, String, bool, i32)> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT kind, locator, available, quality_score FROM source
               WHERE track_id = ?1 AND kind != 'local_file' AND trashed_at IS NULL
               ORDER BY kind, added_at, id",
@@ -982,7 +982,7 @@ impl Library {
     /// downloaded file may turn out to be (the importer's Decide stage).
     pub fn stream_only_tracks(&self) -> Result<Vec<Track>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {TRACK_COLS} FROM track
                   WHERE deleted_at IS NULL
                     AND NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id
@@ -1001,7 +1001,7 @@ impl Library {
     /// The service's liked tracks as the last pull saw them.
     pub fn remote_likes(&self, service: Service) -> Result<Vec<RemoteLike>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT remote_id, track_id, pulled, seen_at FROM remote_like
                   WHERE service = ?1 ORDER BY seen_at, remote_id",
             )?;
@@ -1020,7 +1020,7 @@ impl Library {
     /// The remote likes of a track, in every service.
     pub fn remote_likes_of(&self, track: TrackId) -> Result<Vec<RemoteLike>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT service, remote_id, pulled, seen_at FROM remote_like
                   WHERE track_id = ?1 ORDER BY service, remote_id",
             )?;
@@ -1295,7 +1295,7 @@ impl Library {
     /// Every playlist link, by playlist id.
     pub fn playlist_remotes(&self) -> Result<Vec<PlaylistRemote>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {REMOTE_COLS} FROM playlist_remote ORDER BY playlist_id"
             ))?;
             let rows = stmt.query_map([], remote_from_row)?;

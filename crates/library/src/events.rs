@@ -90,7 +90,7 @@ impl Library {
     /// Latest events, newest first.
     pub fn recent_events(&self, limit: u32) -> Result<Vec<Event>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {EVENT_COLS} FROM event ORDER BY ts DESC, id DESC LIMIT ?1"
             ))?;
             let rows = stmt.query_map([limit], event_from_row)?;
@@ -101,7 +101,7 @@ impl Library {
     /// Latest events of one track, newest first.
     pub fn events_of_track(&self, track: TrackId, limit: u32) -> Result<Vec<Event>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {EVENT_COLS} FROM event WHERE track_id = ?1
                   ORDER BY ts DESC, id DESC LIMIT ?2"
             ))?;
@@ -112,18 +112,16 @@ impl Library {
 
     pub fn track_stats(&self, track: TrackId) -> Result<TrackStats> {
         self.read(|c| {
-            Ok(c.query_row(
-                &format!("SELECT {STATS_COLS} FROM event WHERE track_id = ?1"),
-                [track.to_string()],
-                |r| stats_from_row_at(r, 0),
-            )?)
+            Ok(c
+                .prepare_cached(&format!("SELECT {STATS_COLS} FROM event WHERE track_id = ?1"))?
+                .query_row([track.to_string()], |r| stats_from_row_at(r, 0))?)
         })
     }
 
     /// Stats of every track that has at least one event (input for recommendations).
     pub fn all_track_stats(&self) -> Result<Vec<(TrackId, TrackStats)>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT track_id, {STATS_COLS} FROM event GROUP BY track_id"
             ))?;
             let rows = stmt.query_map([], |r| Ok((get_id(r, 0)?, stats_from_row_at(r, 1)?)))?;

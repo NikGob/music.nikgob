@@ -395,8 +395,8 @@ impl Worker {
         match ev {
             Event::ArtistPhoto(id) => {
                 self.res.invalidate_photos();
-                self.publish(|s, res| {
-                    let image = res.photo(id);
+                let image = self.res.photo(id);
+                self.publish(|s| {
                     let fix = |a: &mut v::ArtistCard| {
                         if a.id == id {
                             a.image = image.clone();

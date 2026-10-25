@@ -398,7 +398,7 @@ impl Worker {
         if svc.lyrics_cache.get(&track).is_some_and(|t| !t.pending.is_empty() || t.embedding) { return }
         let view = tl.view(track);
         self.cache_lyrics(track, tl);
-        self.publish(|s, _| {
+        self.publish(|s| {
             if s.lyrics.track == Some(track) { s.lyrics = view; }
         });
         self.embed_lyrics(track);
@@ -415,7 +415,7 @@ impl Worker {
             && (!tl.failed || !tl.pending.is_empty())
         {
             let view = tl.view(track);
-            self.publish(|s, _| s.lyrics = view);
+            self.publish(|s| s.lyrics = view);
             self.embed_lyrics(track);
             return;
         }
@@ -430,7 +430,7 @@ impl Worker {
         }
         self.start_lyrics_lookups(track);
         let view = self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)).unwrap_or(&tl).view(track);
-        self.publish(|s, _| s.lyrics = view);
+        self.publish(|s| s.lyrics = view);
         self.embed_lyrics(track);
     }
 
@@ -494,7 +494,7 @@ impl Worker {
                 tl.last_embed = None;
             }
             let view = tl.view(track);
-            self.publish(|s, _| {
+            self.publish(|s| {
                 if s.lyrics.track == Some(track) { s.lyrics = view; }
             });
         }
@@ -516,7 +516,7 @@ impl Worker {
         self.start_lyrics_lookups(track);
         let view = self.import.as_ref().unwrap().lyrics_cache[&track].view(track);
         self.embed_lyrics(track);
-        self.publish(|s, _| {
+        self.publish(|s| {
             if s.lyrics.track == Some(track) {
                 s.lyrics = view;
             }
@@ -533,7 +533,7 @@ impl Worker {
         tl.pick = source;
         let view = tl.view(track);
         self.embed_lyrics(track);
-        self.publish(|s, _| {
+        self.publish(|s| {
             if s.lyrics.track == Some(track) {
                 s.lyrics = view;
             }

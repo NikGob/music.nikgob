@@ -1467,11 +1467,11 @@ impl Worker {
             by_artist,
             counts,
         };
-        self.publish(|s, res| {
-            let mut view = view;
-            for (row, release) in view.items.iter_mut().zip(covers) {
-                row.cover = release.and_then(|r| res.release_cover(r));
-            }
+        let mut view = view;
+        for (row, release) in view.items.iter_mut().zip(covers) {
+            row.cover = release.and_then(|r| self.res.release_cover(r));
+        }
+        self.publish(|s| {
             s.downloads.wishlist = view;
             s.downloads.confirm.retain(|c| c.id & WISH_ID == 0);
             s.downloads.confirm.extend(confirms);

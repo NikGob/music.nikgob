@@ -213,7 +213,7 @@ impl Worker {
         match c {
             Command::DownloadTorrent { result, files } => self.download_result(result, files),
             Command::ListTorrentFiles(result) => self.list_files(result),
-            Command::CloseTorrentFiles => self.publish(|s, _| s.downloads.files = None),
+            Command::CloseTorrentFiles => self.publish(|s| s.downloads.files = None),
             Command::AddTorrentFile(path) => match std::fs::read(&path) {
                 Ok(bytes) => {
                     self.add_payload(TorrentPayload::TorrentFile(bytes), None, None);
@@ -332,7 +332,7 @@ impl Worker {
             Err(e) => {
                 log::warn!("fetching torrent: {e}");
                 self.toast(format!("Не скачать .torrent: {e}"), None);
-                self.publish(|s, _| {
+                self.publish(|s| {
                     if let Some(f) = s.downloads.files.as_mut().filter(|f| f.result == Some(result)) {
                         f.loading = false;
                         f.error = Some(e);
@@ -343,7 +343,7 @@ impl Worker {
     }
 
     fn download_result(&mut self, result: usize, files: Option<Vec<usize>>) {
-        self.publish(|s, _| s.downloads.files = None);
+        self.publish(|s| s.downloads.files = None);
         self.toast("Добавляю раздачу…", None);
         self.fetch_payload(result, move |w, p| {
             let magnet = match &p {
@@ -360,7 +360,7 @@ impl Worker {
             .get(result)
             .map(|c| c.title.clone())
             .unwrap_or_default();
-        self.publish(|s, _| {
+        self.publish(|s| {
             s.downloads.files = Some(v::TorrentFiles {
                 result: Some(result),
                 name,
@@ -381,7 +381,7 @@ impl Worker {
     }
 
     pub(crate) fn files_listed(&mut self, result: usize, r: Result<TorrentMeta, String>) {
-        self.publish(|s, _| {
+        self.publish(|s| {
             let Some(f) = s.downloads.files.as_mut().filter(|f| f.result == Some(result)) else {
                 return;
             };
@@ -557,7 +557,7 @@ impl Worker {
             .collect();
         if wish != self.streaming.wish.progress {
             self.streaming.wish.progress = wish.clone();
-            self.publish(|s, _| {
+            self.publish(|s| {
                 for r in &mut s.downloads.wishlist.items {
                     r.progress = wish.get(&r.id).copied().filter(|_| r.status == nikgob_view::WishlistStatus::Downloading);
                 }
@@ -592,7 +592,7 @@ impl Worker {
         if self.torrents.last_view.as_ref() != Some(&view) {
             self.torrents.last_view = Some(view);
             let history: Vec<v::Job> = self.torrents.history.iter().cloned().collect();
-            self.publish(|s, _| {
+            self.publish(|s| {
                 s.downloads.active.retain(|j| j.id & crate::IMPORT_ID != 0);
                 s.downloads.active.splice(0..0, active);
                 s.downloads.seeding = seeding;
@@ -627,7 +627,7 @@ impl Worker {
             .map(|e| crate::import::logged_job(e, 0))
             .collect();
         self.torrents.history.extend(logged.iter().cloned());
-        self.publish(|s, _| s.downloads.history.extend(logged));
+        self.publish(|s| s.downloads.history.extend(logged));
     }
 
     fn import_torrent(&mut self, t: &TorrentStatus) {

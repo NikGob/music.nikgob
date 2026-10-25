@@ -31,7 +31,7 @@ impl Library {
     /// The latest `limit` entries of one kind (`None` = all), newest first.
     pub fn job_log(&self, kind: Option<&str>, limit: u32) -> Result<Vec<JobLogEntry>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT seq, kind, title, subtitle, error, at FROM job_log
                   WHERE ?1 IS NULL OR kind = ?1 ORDER BY seq DESC LIMIT ?2",
             )?;

@@ -40,7 +40,7 @@ impl Library {
     pub fn artist_photos(&self) -> Result<HashMap<ArtistId, String>> {
         self.read(|c| {
             let mut stmt =
-                c.prepare("SELECT artist_id, path FROM artist_photo WHERE path IS NOT NULL")?;
+                c.prepare_cached("SELECT artist_id, path FROM artist_photo WHERE path IS NOT NULL")?;
             let rows = stmt.query_map([], |r| {
                 Ok((get_id::<ArtistId>(r, 0)?, r.get::<_, String>(1)?))
             })?;
@@ -139,7 +139,7 @@ impl Library {
         limit: u32,
     ) -> Result<Vec<(ArtistId, String)>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT a.id, a.name FROM artist a LEFT JOIN artist_photo p ON p.artist_id = a.id
                   WHERE EXISTS (SELECT 1 FROM track_artist ta JOIN track t ON t.id = ta.track_id
                                  WHERE ta.artist_id = a.id AND t.has_local = 1)
@@ -246,7 +246,7 @@ mod tests {
         .unwrap();
         crate::migrations::migrate(&mut conn).unwrap();
         let rows: Vec<(String, Option<String>, i64, bool)> = conn
-            .prepare("SELECT artist_id, path, fetched_at, photo_locked FROM artist_photo ORDER BY artist_id")
+            .prepare_cached("SELECT artist_id, path, fetched_at, photo_locked FROM artist_photo ORDER BY artist_id")
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .unwrap()

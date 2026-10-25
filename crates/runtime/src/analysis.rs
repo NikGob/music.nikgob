@@ -473,7 +473,7 @@ impl Worker {
         match m {
             Msg::Progress(p) => {
                 if self.state.read().analysis != p {
-                    self.publish(|s, _| s.analysis = p);
+                    self.publish(|s| s.analysis = p);
                 }
             }
         }

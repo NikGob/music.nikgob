@@ -28,7 +28,7 @@ impl Library {
     /// Every parked file, oldest first.
     pub fn confirm_items(&self) -> Result<Vec<ConfirmRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT id, path, wishlist_id, payload, created_at FROM confirm_item ORDER BY id",
             )?;
             let rows = stmt.query_map([], |r| {

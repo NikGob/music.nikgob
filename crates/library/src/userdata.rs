@@ -294,11 +294,11 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 }
 
 fn read_playlists(conn: &Connection) -> Result<Vec<PlaylistDoc>> {
-    let mut stmt = conn.prepare(&format!("SELECT {PLAYLIST_COLS} FROM playlist ORDER BY id"))?;
+    let mut stmt = conn.prepare_cached(&format!("SELECT {PLAYLIST_COLS} FROM playlist ORDER BY id"))?;
     let playlists = stmt
         .query_map([], playlist_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut entries_stmt = conn.prepare(&format!(
+    let mut entries_stmt = conn.prepare_cached(&format!(
         "SELECT {ENTRY_COLS} FROM playlist_entry WHERE playlist_id = ?1 ORDER BY position, id"
     ))?;
     playlists
@@ -316,7 +316,7 @@ fn read_playlists(conn: &Connection) -> Result<Vec<PlaylistDoc>> {
 /// playlist entry points at.
 fn read_streams(conn: &Connection) -> Result<Vec<StreamDoc>> {
     let ids: Vec<TrackId> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT t.id FROM track t
               WHERE NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id
                                    AND s.kind = 'local_file')
@@ -342,7 +342,7 @@ fn read_streams(conn: &Connection) -> Result<Vec<StreamDoc>> {
 }
 
 fn read_likes(conn: &Connection) -> Result<Vec<Like>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT target_kind, target_id, updated_at, updated_by, deleted FROM likes
           ORDER BY target_kind, target_id",
     )?;
@@ -368,7 +368,7 @@ fn read_likes(conn: &Connection) -> Result<Vec<Like>> {
 }
 
 fn read_feedback(conn: &Connection) -> Result<Vec<RecFeedback>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT target_kind, target_id, dislike, updated_at FROM rec_feedback
           ORDER BY target_kind, target_id",
     )?;
@@ -403,7 +403,7 @@ fn merge_feedback(conn: &Connection, f: &RecFeedback, report: &mut ImportReport)
 fn write_events(conn: &Connection, w: &mut BufWriter<File>) -> io::Result<()> {
     let to_io = |e: rusqlite::Error| io::Error::other(e);
     let mut stmt = conn
-        .prepare(
+        .prepare_cached(
             "SELECT id, ts, track_id, source_kind, type, position_ms, context, device
                FROM event ORDER BY ts, id",
         )

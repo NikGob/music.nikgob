@@ -454,10 +454,13 @@ impl Worker {
         self.analysis.shutdown();
     }
 
-    fn publish(&mut self, f: impl FnOnce(&mut ViewState, &mut Resolver)) {
+    /// Applies `f` under the state's write lock. The UI waits for this lock
+    /// every frame, so view values are built before it (the library, the
+    /// resolver and files are never touched inside `f`).
+    fn publish(&mut self, f: impl FnOnce(&mut ViewState)) {
         {
             let mut st = self.state.write();
-            f(&mut st, &mut self.res);
+            f(&mut st);
             self.revision += 1;
             st.revision = self.revision;
         }
@@ -483,7 +486,7 @@ impl Worker {
             open,
             at: Instant::now(),
         };
-        self.publish(|s, _| s.toasts.push(t));
+        self.publish(|s| s.toasts.push(t));
     }
 
     fn expire_toasts(&mut self) {
@@ -492,7 +495,7 @@ impl Worker {
             s.toasts.iter().any(|t| t.at.elapsed() > Duration::from_secs(6))
         };
         if stale {
-            self.publish(|s, _| s.toasts.retain(|t| t.at.elapsed() <= Duration::from_secs(6)));
+            self.publish(|s| s.toasts.retain(|t| t.at.elapsed() <= Duration::from_secs(6)));
         }
     }
 
@@ -557,16 +560,20 @@ impl Worker {
                 self.seek(Duration::from_millis(p.max(0) as u64));
             }
             Command::SetVolume(v) => {
-                self.volume = v.clamp(0.0, 1.0);
+                let v = v.clamp(0.0, 1.0);
+                if v == self.volume && !self.muted {
+                    return;
+                }
+                self.volume = v;
                 self.muted = false;
                 self.playback.set_volume(self.volume);
-                self.publish_player();
+                self.publish_volume();
             }
             Command::ToggleMute => {
                 self.muted = !self.muted;
                 self.playback
                     .set_volume(if self.muted { 0.0 } else { self.volume });
-                self.publish_player();
+                self.publish_volume();
             }
             Command::ToggleShuffle => {
                 let on = !self.queue.shuffle;
@@ -803,7 +810,7 @@ impl Worker {
             } => self.load_tracks(offset, limit, sort),
             Command::FilterTracks(q) => self.filter_tracks(&q),
             Command::SortReleases(sort) => {
-                self.publish(|s, _| s.library.release_sort = sort);
+                self.publish(|s| s.library.release_sort = sort);
                 self.load_library();
             }
             Command::LoadRelease(id) => self.load_release(id),
@@ -821,7 +828,7 @@ impl Worker {
                 }
                 self.playback.configure(crossfade(&p), p.normalization);
                 self.torrent_prefs(&p);
-                self.publish(|s, _| s.prefs = *p.clone());
+                self.publish(|s| s.prefs = *p.clone());
                 self.save_prefs();
                 self.import_prefs(&p);
                 let lyrics_track = self.state.read().lyrics.track;
@@ -874,12 +881,12 @@ impl Worker {
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
             Command::CheckIndexer { url, api_key } => self.check_indexer(url, api_key),
             Command::DismissToast(id) => {
-                self.publish(|s, _| s.toasts.retain(|t| t.id != id));
+                self.publish(|s| s.toasts.retain(|t| t.id != id));
             }
             Command::OpenTagEditor(t) => self.open_tag_editor(t),
             Command::LookupTags { track, query } => self.lookup_tags(track, query),
             Command::SaveTags { track, tags } => self.save_tags(track, tags),
-            Command::CloseTagEditor => self.publish(|s, _| s.tag_editor = Default::default()),
+            Command::CloseTagEditor => self.publish(|s| s.tag_editor = Default::default()),
             Command::SetPlaylistCover(id, path) => self.set_playlist_cover(id, path),
             Command::SetMetadata { contact, acoustid_key } => self.set_metadata(contact, acoustid_key),
             Command::SearchTorrents(q) => self.search_torrents(q),
@@ -1455,8 +1462,23 @@ impl Worker {
         let current_entry = self.queue.current().map(|e| e.id);
         let audio_service = self.playing_source.and_then(|(_, k)| k.service());
         let audio_quality = self.audio_quality();
-        let lib = self.lib.clone();
-        self.publish(|s, res| {
+        // The rows of both lists in one query, before the lock.
+        let ids: Vec<TrackId> = upcoming.iter().chain(&history).map(|e| e.track).collect();
+        let found = self.lib.get_track_rows(&ids).unwrap_or_default();
+        let res = &mut self.res;
+        let mut rows = |list: &[Entry]| -> Vec<nikgob_view::QueueEntry> {
+            list.iter()
+                .filter_map(|e| {
+                    found.get(&e.track).map(|r| nikgob_view::QueueEntry {
+                        entry: e.id,
+                        track: res.track(r),
+                    })
+                })
+                .collect()
+        };
+        let next = rows(&upcoming);
+        let prev = rows(&history);
+        self.publish(|s| {
             let p = &mut s.player;
             p.status = status;
             p.audio_service = audio_service;
@@ -1468,20 +1490,19 @@ impl Worker {
             p.shuffle = shuffle;
             p.repeat = repeat;
             p.context = context;
-            let mut rows = |list: &[Entry]| -> Vec<nikgob_view::QueueEntry> {
-                list.iter()
-                    .filter_map(|e| {
-                        lib.get_track_row(e.track).ok().flatten().map(|r| nikgob_view::QueueEntry {
-                            entry: e.id,
-                            track: res.track(&r),
-                        })
-                    })
-                    .collect()
-            };
-            s.queue.next = rows(&upcoming);
-            s.queue.prev = rows(&history);
+            s.queue.next = next;
+            s.queue.prev = prev;
             s.queue.current_entry = current_entry;
             s.queue.radio = radio;
+        });
+    }
+
+    /// Volume and mute only: nothing else of the player or the queue changes.
+    fn publish_volume(&mut self) {
+        let (volume, muted) = (self.volume, self.muted);
+        self.publish(|s| {
+            s.player.volume = volume;
+            s.player.muted = muted;
         });
     }
 
@@ -1499,15 +1520,16 @@ impl Worker {
         let audio_quality = self.audio_quality();
         let changed = self.state.read().player.current.as_ref().map(|r| r.id)
             != current.as_ref().map(|r| r.id);
-        self.publish(|s, res| {
-            let row = current.as_ref().map(|r| res.track(r));
+        let row = current.as_ref().map(|r| self.res.track(r));
+        let mut info = self.res.info(current.as_ref(), src.as_ref());
+        if audio_quality.is_some() {
+            info.quality = audio_quality;
+        }
+        self.publish(|s| {
             s.player.duration = row.as_ref().and_then(|r| r.duration);
             s.player.current = row.clone();
             s.queue.current = row;
-            s.info = res.info(current.as_ref(), src.as_ref());
-            if audio_quality.is_some() {
-                s.info.quality = audio_quality;
-            }
+            s.info = info;
         });
         if changed && let Some(t) = current.as_ref().map(|r| r.id) {
             self.track_details(t);
@@ -1563,19 +1585,25 @@ impl Worker {
         recent.truncate(12);
         let by_id: std::collections::HashMap<_, _> = releases.iter().map(|r| (r.release.id, r)).collect();
         let often: Vec<&nikgob_library::ReleaseRow> = often.iter().filter_map(|id| by_id.get(id).copied()).collect();
-        self.publish(|s, res| {
-            s.library.releases = releases.iter().map(|r| res.release(r)).collect();
-            s.library.playlists = playlists.iter().map(|p| res.playlist(p)).collect();
-            s.library.artists = artists
-                .iter()
-                .map(|a| {
-                    let mut card = res.artist(a);
-                    card.track_count = per_artist.get(&a.artist.id).copied().unwrap_or(card.track_count);
-                    card
-                })
-                .collect();
-            s.library.recently_added = recent.iter().map(|r| res.release(r)).collect();
-            s.library.often_played = often.iter().map(|r| res.release(r)).collect();
+        let res = &mut self.res;
+        let releases: Vec<_> = releases.iter().map(|r| res.release(r)).collect();
+        let playlists: Vec<_> = playlists.iter().map(|p| res.playlist(p)).collect();
+        let artists: Vec<_> = artists
+            .iter()
+            .map(|a| {
+                let mut card = res.artist(a);
+                card.track_count = per_artist.get(&a.artist.id).copied().unwrap_or(card.track_count);
+                card
+            })
+            .collect();
+        let recent: Vec<_> = recent.iter().map(|r| res.release(r)).collect();
+        let often: Vec<_> = often.iter().map(|r| res.release(r)).collect();
+        self.publish(|s| {
+            s.library.releases = releases;
+            s.library.playlists = playlists;
+            s.library.artists = artists;
+            s.library.recently_added = recent;
+            s.library.often_played = often;
             s.library.track_count = count;
             s.library.loaded = true;
         });
@@ -1588,7 +1616,7 @@ impl Worker {
     fn filter_tracks(&mut self, q: &str) {
         let q = q.trim();
         if q.is_empty() {
-            self.publish(|s, _| s.library.track_hits = None);
+            self.publish(|s| s.library.track_hits = None);
             return;
         }
         let only_local = self.state.read().prefs.library_only_downloaded;
@@ -1600,8 +1628,9 @@ impl Worker {
             .filter(|t| t.has_local || !only_local)
             .collect();
         let q = q.to_owned();
-        self.publish(|s, res| {
-            s.library.track_hits = Some((q, rows.iter().map(|t| res.track(t)).collect()));
+        let hits = rows.iter().map(|t| self.res.track(t)).collect();
+        self.publish(|s| {
+            s.library.track_hits = Some((q, hits));
         });
     }
 
@@ -1617,9 +1646,10 @@ impl Worker {
         let rows = self
             .log_err("треки", self.lib.tracks_filtered(offset as u32, limit as u32, key, filter))
             .unwrap_or_default();
-        self.publish(|s, res| {
+        let rows = rows.iter().map(|r| self.res.track(r)).collect();
+        self.publish(|s| {
             s.library.tracks_offset = offset;
-            s.library.tracks = rows.iter().map(|r| res.track(r)).collect();
+            s.library.tracks = rows;
             s.library.track_sort = sort;
         });
     }
@@ -1635,8 +1665,9 @@ impl Worker {
             return;
         };
         let liked = self.lib.release_liked(id).unwrap_or(false);
-        self.publish(|s, res| {
-            s.release = Some(res.release_detail(&release, &listing, liked));
+        let detail = self.res.release_detail(&release, &listing, liked);
+        self.publish(|s| {
+            s.release = Some(detail);
         });
         self.complete_tracklist(id);
     }
@@ -1657,8 +1688,9 @@ impl Worker {
         let top: Vec<_> = plays.iter().take(5).map(|&(_, i)| tracks[i].clone()).collect();
         tracks.clear();
         let liked = self.lib.is_liked(id).unwrap_or(false);
-        self.publish(|s, res| {
-            s.artist = Some(res.artist_detail(&artist, &top, &releases, liked));
+        let detail = self.res.artist_detail(&artist, &top, &releases, liked);
+        self.publish(|s| {
+            s.artist = Some(detail);
         });
         self.kick_photos(Some(id));
         // "Нет в библиотеке": from the cache, or looked up once a day.
@@ -1699,9 +1731,9 @@ impl Worker {
             .find(|p| p.id.unwrap_or(LIKED_PLAYLIST) == id);
         let Some(summary) = summary else { return };
         let sync = self.playlist_sync_view(id);
-        self.publish(|s, res| {
-            let mut detail = res.playlist_detail(&summary, &rows);
-            detail.sync = sync;
+        let mut detail = self.res.playlist_detail(&summary, &rows);
+        detail.sync = sync;
+        self.publish(|s| {
             s.playlist = Some(detail);
         });
     }
@@ -1709,9 +1741,10 @@ impl Worker {
     fn load_home(&mut self) {
         let home = home::build(&self.lib);
         let parts = self.recs_home_parts();
-        self.publish(|s, res| {
-            s.home = res.home(&home);
-            parts.apply(&mut s.home, res);
+        let mut view = self.res.home(&home);
+        parts.apply(&mut view, &mut self.res);
+        self.publish(|s| {
+            s.home = view;
         });
     }
 
@@ -1720,7 +1753,7 @@ impl Worker {
         let sources = self.streaming.search.sources;
         if trimmed.is_empty() {
             self.search_streams("", Vec::new());
-            self.publish(|s, _| {
+            self.publish(|s| {
                 s.search = nikgob_view::SearchView {
                     sources,
                     ..Default::default()
@@ -1743,13 +1776,18 @@ impl Worker {
             started.elapsed().as_millis()
         );
         let lib_tracks = r.tracks.clone();
-        self.publish(|s, res| {
+        let res = &mut self.res;
+        let tracks = r.tracks.iter().map(|t| res.track(t)).collect();
+        let releases = r.releases.iter().map(|x| res.release(x)).collect();
+        let artists = r.artists.iter().map(|a| res.artist(a)).collect();
+        let playlists = r.playlists.iter().map(|p| res.playlist(p)).collect();
+        self.publish(|s| {
             s.search = nikgob_view::SearchView {
                 query: q,
-                tracks: r.tracks.iter().map(|t| res.track(t)).collect(),
-                releases: r.releases.iter().map(|x| res.release(x)).collect(),
-                artists: r.artists.iter().map(|a| res.artist(a)).collect(),
-                playlists: r.playlists.iter().map(|p| res.playlist(p)).collect(),
+                tracks,
+                releases,
+                artists,
+                playlists,
                 searching: false,
                 sources,
                 // The services' sections and the merged answer stay until
@@ -1803,7 +1841,7 @@ impl Worker {
             (false, _) => format!("Альбом убран из Любимых · {what}"),
         };
         self.toast(text, Some(("Отменить".into(), Command::Like(LikeTarget::Release(id), !on))));
-        self.publish(|s, _| {
+        self.publish(|s| {
             let fix = |t: &mut nikgob_view::TrackRow| {
                 if tracks.contains(&t.id) {
                     t.liked = on;
@@ -1882,7 +1920,7 @@ impl Worker {
 
     /// Updates `liked` flags already shown without reloading everything.
     fn refresh_liked(&mut self, target: LikeTarget, on: bool) {
-        self.publish(|s, _| {
+        self.publish(|s| {
             let fix = |t: &mut nikgob_view::TrackRow| {
                 if LikeTarget::Track(t.id) == target {
                     t.liked = on;
@@ -1972,7 +2010,7 @@ impl Worker {
             Ok(()) => {
                 self.indexer = search::indexer_from(Some(&path));
                 let usable = self.indexer.is_some();
-                self.publish(|s, _| {
+                self.publish(|s| {
                     s.prefs.prowlarr_url = url;
                     s.prefs.prowlarr_configured = usable;
                 });
@@ -2087,7 +2125,7 @@ impl Worker {
         }
         self.set_metadata_config(&cfg);
         let configured = settings.metadata.acoustid_key.is_some();
-        self.publish(|s, _| {
+        self.publish(|s| {
             s.prefs.metadata_contact = settings.metadata.contact;
             s.prefs.acoustid_configured = configured;
         });

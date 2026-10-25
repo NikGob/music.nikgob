@@ -49,7 +49,7 @@ pub struct TrackSnapshot {
 }
 
 fn capture(c: &Connection, table: &'static str, filter: &str, args: Vec<String>) -> Result<Rows> {
-    let mut stmt = c.prepare(&format!("SELECT * FROM {table} WHERE {filter}"))?;
+    let mut stmt = c.prepare_cached(&format!("SELECT * FROM {table} WHERE {filter}"))?;
     let columns: Vec<String> = stmt.column_names().iter().map(|s| (*s).to_owned()).collect();
     let n = columns.len();
     let rows = stmt

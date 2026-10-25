@@ -125,7 +125,7 @@ impl Library {
     /// "not found" markers older than `retry_before` (unix ms). Untried first.
     pub fn tracks_needing_lyrics(&self, retry_before: UnixMs, limit: u32) -> Result<Vec<TrackId>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT t.id FROM track t LEFT JOIN lyrics l ON l.track_id = t.id
                   WHERE t.has_local = 1
                     AND (l.track_id IS NULL

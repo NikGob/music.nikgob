@@ -290,7 +290,7 @@ impl Worker {
 
     fn publish_discography(&mut self, artist: ArtistId, view: v::DiscographyView) {
         let loading = self.streaming.disco.loading.contains(&artist);
-        self.publish(|s, _| {
+        self.publish(|s| {
             if let Some(a) = s.artist.as_mut().filter(|a| a.card.id == artist) {
                 a.discography = v::DiscographyView { loading: loading || view.loading, ..view };
             }

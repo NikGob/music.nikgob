@@ -338,7 +338,7 @@ impl Worker {
             streams_total: c.streams_total,
         };
         if self.state.read().analysis != p {
-            self.publish(|s, _| s.analysis = p);
+            self.publish(|s| s.analysis = p);
         }
     }
 

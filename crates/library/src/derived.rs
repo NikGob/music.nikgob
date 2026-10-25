@@ -89,7 +89,7 @@ impl Library {
     pub fn get_analysis(&self, track: TrackId) -> Result<Option<Analysis>> {
         self.read(|c| {
             let mut stmt =
-                c.prepare("SELECT bliss_vector, analyzed_with, source FROM analysis WHERE track_id = ?1")?;
+                c.prepare_cached("SELECT bliss_vector, analyzed_with, source FROM analysis WHERE track_id = ?1")?;
             let mut rows = stmt.query([track.to_string()])?;
             rows.next()?.map(|r| analysis_from_row(r, track, 0)).transpose()
         })
@@ -100,7 +100,7 @@ impl Library {
     /// in-memory index starts from.
     pub fn analysis_vectors(&self, analyzed_with: &str) -> Result<Vec<Analysis>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT a.track_id, a.bliss_vector, a.analyzed_with, a.source FROM analysis a
                    JOIN track t ON t.id = a.track_id
                   WHERE a.analyzed_with = ?1 AND t.deleted_at IS NULL",
@@ -120,7 +120,7 @@ impl Library {
     /// decode is left out until it changes.
     pub fn tracks_needing_analysis(&self, analyzed_with: &str, limit: u32) -> Result<Vec<AnalysisTodo>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT t.id, s.id, s.locator, {FILE_KEY} FROM track t
                    JOIN source s ON s.track_id = t.id AND s.is_active = 1 AND s.kind = 'local_file'
                    LEFT JOIN analysis a ON a.track_id = t.id
@@ -167,7 +167,7 @@ impl Library {
         limit: u32,
     ) -> Result<Vec<StreamAnalysisTodo>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT t.id,
                         (SELECT y.locator FROM source y WHERE y.track_id = t.id AND y.kind = 'youtube'
                             AND y.available = 1 AND y.trashed_at IS NULL
@@ -277,7 +277,7 @@ impl Library {
     /// Everything marked «не рекомендовать», newest first.
     pub fn rec_dislikes(&self) -> Result<Vec<RecFeedback>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT target_kind, target_id, dislike, updated_at FROM rec_feedback
                   WHERE dislike = 1 ORDER BY updated_at DESC",
             )?;
@@ -313,21 +313,28 @@ impl Library {
         })
     }
 
+    /// The palette seeds of every release that has one (cards in bulk).
+    pub fn palette_seeds(&self) -> Result<std::collections::HashMap<ReleaseId, u32>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached("SELECT release_id, seed_argb FROM palette")?;
+            let rows = stmt.query_map([], |r| Ok((get_id(r, 0)?, r.get::<_, i64>(1)? as u32)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+
     pub fn get_palette(&self, release: ReleaseId) -> Result<Option<Palette>> {
         self.read(|c| {
-            Ok(c.query_row(
-                "SELECT seed_argb, scheme_blob, ambient_blur FROM palette WHERE release_id = ?1",
-                [release.to_string()],
-                |r| {
+            Ok(c
+                .prepare_cached("SELECT seed_argb, scheme_blob, ambient_blur FROM palette WHERE release_id = ?1")?
+                .query_row([release.to_string()], |r| {
                     Ok(Palette {
                         release_id: release,
                         seed_argb: r.get::<_, i64>(0)? as u32,
                         scheme_blob: r.get(1)?,
                         ambient_blur: r.get(2)?,
                     })
-                },
-            )
-            .optional()?)
+                })
+                .optional()?)
         })
     }
 
@@ -335,7 +342,7 @@ impl Library {
     /// cover url is not read).
     pub fn releases_needing_palette(&self, limit: u32) -> Result<Vec<ReleaseId>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT r.id FROM release r LEFT JOIN palette p ON p.release_id = r.id
                   WHERE p.release_id IS NULL AND r.cover_ref IS NOT NULL
                     AND r.cover_ref NOT LIKE 'https://%' AND r.cover_ref NOT LIKE 'http://%'

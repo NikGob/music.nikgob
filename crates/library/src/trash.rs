@@ -78,7 +78,7 @@ impl Library {
                 .map(|c| format!("s.{}", c.trim()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {cols}, s.trash_path, t.title, t.artist_display
                    FROM source s JOIN track t ON t.id = s.track_id
                   WHERE s.trashed_at IS NOT NULL ORDER BY s.trashed_at DESC, s.id"
@@ -108,7 +108,7 @@ impl Library {
     pub fn purge_trash_before(&self, cutoff: UnixMs) -> Result<Vec<PurgedFile>> {
         self.write(|tx| {
             let purged = {
-                let mut stmt = tx.prepare(&format!(
+                let mut stmt = tx.prepare_cached(&format!(
                     "SELECT {SOURCE_COLS}, trash_path FROM source
                       WHERE trashed_at IS NOT NULL AND trashed_at < ?1 AND {NOT_OF_DELETED}
                       ORDER BY trashed_at, id"
@@ -227,7 +227,7 @@ impl Library {
     /// Deleted tracks, most recently deleted first.
     pub fn deleted_tracks(&self) -> Result<Vec<DeletedTrack>> {
         self.read(|c| {
-            let mut stmt = c.prepare(concat!(
+            let mut stmt = c.prepare_cached(concat!(
                 "SELECT t.deleted_at, ",
                 track_row_cols!(),
                 " ",
@@ -248,7 +248,7 @@ impl Library {
     /// Tracks deleted strictly before `cutoff` (the 30-day auto-purge).
     pub fn deleted_tracks_before(&self, cutoff: UnixMs) -> Result<Vec<TrackId>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT id FROM track WHERE deleted_at IS NOT NULL AND deleted_at < ?1
                   ORDER BY deleted_at, seq",
             )?;
@@ -274,7 +274,7 @@ impl Library {
                 .ok_or_else(|| LibraryError::not_found("track", track))?;
             let mut out = PurgedTrack::default();
             let files: Vec<(String, String, bool, Option<String>)> = {
-                let mut stmt = tx.prepare(
+                let mut stmt = tx.prepare_cached(
                     "SELECT kind, locator, trashed_at IS NOT NULL, trash_path FROM source
                       WHERE track_id = ?1 ORDER BY added_at, id",
                 )?;
@@ -310,7 +310,7 @@ impl Library {
                 .query_row("SELECT file_hash FROM master WHERE track_id = ?1", [&tid], |r| r.get(0))
                 .optional()?;
             let artists: Vec<String> = {
-                let mut stmt = tx.prepare(
+                let mut stmt = tx.prepare_cached(
                     "SELECT artist_id FROM track_artist WHERE track_id = ?1
                      UNION SELECT artist_id FROM release_artist WHERE release_id = ?2",
                 )?;

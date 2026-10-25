@@ -462,7 +462,7 @@ impl Worker {
     pub(crate) fn publish_downloads(&mut self) {
         let Some(svc) = &self.import else { return };
         let (active, confirm, history) = svc.view();
-        self.publish(|s, _| {
+        self.publish(|s| {
             // Cold-start jobs of the streaming part share the id space.
             let others = |id: u64| id & IMPORT_ID == 0 || id & crate::streams::STREAM_JOB != 0;
             s.downloads.active.retain(|j| others(j.id));
@@ -646,7 +646,7 @@ impl Worker {
                             svc.reconfigure = Some(cfg);
                             svc.apply_reconfigure();
                         }
-                        self.publish(|s, _| s.prefs.masters_dir = old_dir);
+                        self.publish(|s| s.prefs.masters_dir = old_dir);
                         self.save_prefs();
                         self.publish_downloads();
                         self.toast(format!("Не удалось перенести FLAC: {err}"), None);
@@ -939,8 +939,8 @@ impl Worker {
         const DAY_MS: i64 = 24 * 60 * 60 * 1000;
         let now = nikgob_library::now_ms();
         let rows = self.lib.deleted_tracks().unwrap_or_default();
-        self.publish(|s, res| {
-            s.library.trash = rows
+        let res = &mut self.res;
+        let trash = rows
                 .iter()
                 .map(|d| {
                     let ago = ((now - d.deleted_at).max(0) / DAY_MS) as u32;
@@ -955,7 +955,7 @@ impl Worker {
                     }
                 })
                 .collect();
-        });
+        self.publish(|s| s.library.trash = trash);
     }
 
     fn after_delete(&mut self) {
@@ -1031,7 +1031,7 @@ impl Worker {
         }
 
         if old_dir == new_dir {
-            self.publish(|s, _| s.prefs.masters_dir = new_dir);
+            self.publish(|s| s.prefs.masters_dir = new_dir);
             self.save_prefs();
             self.toast("Эта папка FLAC уже используется", None);
             return;
@@ -1081,7 +1081,7 @@ impl Worker {
             });
         });
 
-        self.publish(|s, _| s.prefs.masters_dir = new_dir);
+        self.publish(|s| s.prefs.masters_dir = new_dir);
         self.save_prefs();
         self.publish_downloads();
     }
@@ -1141,7 +1141,7 @@ impl Worker {
                     .map(|q| format!("R128 {:+.1} dB", f32::from(q) / 256.0))
                     .or_else(|| t.replaygain_track_gain_db.map(|g| format!("ReplayGain {g:+.1} dB"))),
             );
-            self.publish(|s, _| {
+            self.publish(|s| {
                 if s.info.track == Some(track) {
                     s.info.tags.extend(extra);
                 }

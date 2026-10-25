@@ -28,7 +28,7 @@ struct Names {
 
 impl Names {
     fn load(conn: &Connection) -> Result<Self> {
-        let mut stmt = conn.prepare("SELECT id, name, mbid FROM artist ORDER BY seq")?;
+        let mut stmt = conn.prepare_cached("SELECT id, name, mbid FROM artist ORDER BY seq")?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
         })?;
@@ -129,7 +129,7 @@ fn close_voice(credit: &mut ArtistCredit) -> bool {
 }
 
 fn rows(tx: &Connection, table: &str) -> Result<Vec<(String, String)>> {
-    let mut stmt = tx.prepare(&format!("SELECT id, artist_credit FROM {table}"))?;
+    let mut stmt = tx.prepare_cached(&format!("SELECT id, artist_credit FROM {table}"))?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }

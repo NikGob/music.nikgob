@@ -230,6 +230,9 @@ pub struct ArtistRow {
     pub release_count: u32,
     /// Credited tracks that have a local file.
     pub local_track_count: u32,
+    /// The artist itself is liked.
+    #[serde(default)]
+    pub liked: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

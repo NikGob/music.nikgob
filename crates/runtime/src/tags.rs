@@ -97,7 +97,7 @@ impl Worker {
                     current: tag_edit(&t),
                     ..Default::default()
                 };
-                self.publish(|s, _| s.tag_editor = editor);
+                self.publish(|s| s.tag_editor = editor);
             }
             Err(e) => {
                 log::warn!("tags of {track}: {e}");
@@ -109,7 +109,7 @@ impl Worker {
     pub(crate) fn lookup_tags(&mut self, track: TrackId, q: v::TagEdit) {
         let Some(svc) = &self.import else { return };
         let Some(meta) = svc.metadata() else {
-            self.publish(|s, _| s.tag_editor.error = Some("Онлайн-поиск выключен".into()));
+            self.publish(|s| s.tag_editor.error = Some("Онлайн-поиск выключен".into()));
             return;
         };
         let duration = self
@@ -135,7 +135,7 @@ impl Worker {
             .map(|recs| suggestions(&recs, &q.genre));
             let _ = tx.send(Internal::TagSuggestions(track, result));
         });
-        self.publish(|s, _| {
+        self.publish(|s| {
             s.tag_editor.looking_up = true;
             s.tag_editor.error = None;
         });
@@ -152,12 +152,12 @@ impl Worker {
                 .map_err(|e| e.to_string());
             let _ = tx.send(Internal::Retagged(track, r));
         });
-        self.publish(|s, _| s.tag_editor.loading = true);
+        self.publish(|s| s.tag_editor.loading = true);
     }
 
     pub(crate) fn tag_result(&mut self, msg: Internal) {
         match msg {
-            Internal::TagSuggestions(track, r) => self.publish(|s, _| {
+            Internal::TagSuggestions(track, r) => self.publish(|s| {
                 if s.tag_editor.track != Some(track) {
                     return;
                 }
@@ -171,7 +171,7 @@ impl Worker {
                 }
             }),
             Internal::Retagged(track, Ok(())) => {
-                self.publish(|s, _| {
+                self.publish(|s| {
                     if s.tag_editor.track == Some(track) {
                         s.tag_editor = v::TagEditor::default();
                     }
@@ -181,18 +181,19 @@ impl Worker {
                 if self.playing.map(|e| e.track) == Some(track) {
                     let current = self.lib.get_track_row(track).ok().flatten();
                     let src = self.lib.active_source(track).ok().flatten();
-                    self.publish(|s, res| {
-                        let row = current.as_ref().map(|r| res.track(r));
+                    let row = current.as_ref().map(|r| self.res.track(r));
+                    let info = self.res.info(current.as_ref(), src.as_ref());
+                    self.publish(|s| {
                         s.player.current = row.clone();
                         s.queue.current = row;
-                        s.info = res.info(current.as_ref(), src.as_ref());
+                        s.info = info;
                     });
                     self.track_details(track);
                 }
             }
             Internal::Retagged(_, Err(e)) => {
                 log::warn!("retag: {e}");
-                self.publish(|s, _| {
+                self.publish(|s| {
                     s.tag_editor.loading = false;
                     s.tag_editor.error = Some(format!("Не удалось сохранить: {e}"));
                 });

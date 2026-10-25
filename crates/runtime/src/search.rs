@@ -167,7 +167,7 @@ impl Worker {
             return;
         }
         let Some(indexer) = self.indexer.clone() else {
-            self.publish(|s, _| {
+            self.publish(|s| {
                 s.search.torrents = v::TorrentSearch {
                     query: q,
                     error: Some("Prowlarr не настроен — адрес и ключ в Настройках → Источники → Торренты".into()),
@@ -188,7 +188,7 @@ impl Worker {
                 .and_then(|r| r.map_err(|e| e.to_string()));
             let _ = tx.send(Internal::TorrentResults(q2, r));
         });
-        self.publish(|s, _| {
+        self.publish(|s| {
             s.search.torrents = v::TorrentSearch {
                 query: q,
                 searching: true,
@@ -208,7 +208,7 @@ impl Worker {
         let indexer = match indexer {
             Ok(i) => i,
             Err(text) => {
-                self.publish(|s, _| {
+                self.publish(|s| {
                     s.indexer_check = Some(v::IndexerCheck { checking: false, ok: false, text: text.into() });
                 });
                 return;
@@ -222,7 +222,7 @@ impl Worker {
                 .unwrap_or_else(|_| Err(nikgob_core::indexer::IndexerError::Unreachable("timeout".into())));
             let _ = tx.send(Internal::IndexerChecked(r));
         });
-        self.publish(|s, _| {
+        self.publish(|s| {
             s.indexer_check = Some(v::IndexerCheck { checking: true, ok: false, text: "Проверяю…".into() });
         });
     }
@@ -248,7 +248,7 @@ impl Worker {
             log::warn!("prowlarr check: {e}");
         }
         let check = check_view(&r);
-        self.publish(|s, _| s.indexer_check = Some(check));
+        self.publish(|s| s.indexer_check = Some(check));
     }
 
     pub(crate) fn torrent_results(&mut self, query: String, r: Result<Vec<Candidate>, String>) {
@@ -260,7 +260,7 @@ impl Worker {
                 cands.sort_by(|a, b| b.seeders.unwrap_or(0).cmp(&a.seeders.unwrap_or(0)));
                 let results = results_view(&cands, &query);
                 self.candidates = cands;
-                self.publish(|s, _| {
+                self.publish(|s| {
                     s.search.torrents.searching = false;
                     s.search.torrents.error = results.is_empty().then(|| "Раздач не нашлось".to_owned());
                     s.search.torrents.results = results;
@@ -268,7 +268,7 @@ impl Worker {
             }
             Err(e) => {
                 log::warn!("torrent search: {e}");
-                self.publish(|s, _| {
+                self.publish(|s| {
                     s.search.torrents.searching = false;
                     s.search.torrents.error = Some(e);
                 });

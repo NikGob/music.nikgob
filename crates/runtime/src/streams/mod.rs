@@ -431,7 +431,7 @@ impl Worker {
     pub(crate) fn publish_stream_cache(&mut self) {
         let bytes: u64 = self.streams.iter().map(|s| s.cache_size()).sum();
         if self.state.read().stream_cache_bytes != bytes {
-            self.publish(|s, _| s.stream_cache_bytes = bytes);
+            self.publish(|s| s.stream_cache_bytes = bytes);
         }
     }
 
@@ -555,7 +555,7 @@ impl Worker {
             Command::SetPlaylistSync { playlist, mode } => self.set_playlist_sync(playlist, mode),
             Command::LoadDiscography(artist) => self.load_discography(artist, true),
             Command::FindSong { track, query } => self.find_song(track, query),
-            Command::CloseFindSong => self.publish(|s, _| s.find_song = None),
+            Command::CloseFindSong => self.publish(|s| s.find_song = None),
             Command::ReplaceTrack { track, with, youtube } => self.replace_track(track, with, youtube),
             Command::UndoReplace(id) => self.undo_replace(id),
             other => return Some(other),

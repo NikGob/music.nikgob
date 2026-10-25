@@ -48,12 +48,12 @@ pub(crate) fn set_like_in(
 }
 
 pub(crate) fn is_liked_in(c: &Connection, target: LikeTarget) -> Result<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM likes
-                        WHERE target_kind = ?1 AND target_id = ?2 AND deleted = 0)",
-        params![target.kind_str(), target.id_string()],
-        |r| r.get(0),
-    )?)
+    Ok(c
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM likes
+                            WHERE target_kind = ?1 AND target_id = ?2 AND deleted = 0)",
+        )?
+        .query_row(params![target.kind_str(), target.id_string()], |r| r.get(0))?)
 }
 
 /// Name of the pinned virtual playlist of liked tracks.
@@ -339,7 +339,7 @@ impl Library {
             })?,
         }];
         out.extend(self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{PLAYLIST_SUMMARY_SELECT} WHERE p.deleted = 0 ORDER BY 4 DESC, p.seq DESC"
             ))?;
             let rows = stmt.query_map([], playlist_summary)?;
@@ -359,7 +359,7 @@ impl Library {
         limit: u32,
     ) -> Result<Vec<PlaylistEntryRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(concat!(
+            let mut stmt = c.prepare_cached(concat!(
                 "SELECT e.id, e.playlist_id, e.track_id, e.position, e.added_at, e.updated_at, \
                         e.updated_by, e.deleted, ",
                 track_row_cols!(),
@@ -488,7 +488,7 @@ impl Library {
     /// Liked tracks, most recently liked first (the content of "Любимые").
     pub fn liked_tracks(&self, offset: u32, limit: u32) -> Result<Vec<TrackRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(concat!(
+            let mut stmt = c.prepare_cached(concat!(
                 "SELECT ",
                 track_row_cols!(),
                 " FROM likes l JOIN track t ON t.id = l.target_id \
@@ -514,7 +514,7 @@ impl Library {
 
     pub fn liked_releases(&self, offset: u32, limit: u32) -> Result<Vec<ReleaseRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{RELEASE_ROW_SELECT}
                   JOIN likes l ON l.target_kind = 'release' AND l.target_id = r.id
                  WHERE l.deleted = 0 ORDER BY l.updated_at DESC, r.seq DESC LIMIT ?1 OFFSET ?2"
@@ -526,7 +526,7 @@ impl Library {
 
     pub fn liked_artists(&self, offset: u32, limit: u32) -> Result<Vec<ArtistRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{ARTIST_ROW_SELECT}
                   JOIN likes l ON l.target_kind = 'artist' AND l.target_id = a.id
                  WHERE l.deleted = 0 ORDER BY l.updated_at DESC, a.seq DESC LIMIT ?1 OFFSET ?2"
@@ -546,7 +546,7 @@ impl Library {
         self.write(|tx| {
             let rid = release.to_string();
             let ids: Vec<String> = {
-                let mut stmt = tx.prepare(
+                let mut stmt = tx.prepare_cached(
                     "SELECT t.id FROM track t
                       WHERE t.release_id = ?1 AND t.deleted_at IS NULL
                         AND (t.has_local = 1 OR NOT EXISTS (
@@ -597,7 +597,7 @@ impl Library {
     /// album cover, in playlist order (one item per track, for counting).
     pub fn playlist_cover_refs(&self, playlist: PlaylistId) -> Result<Vec<(ReleaseId, String)>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT r.id, r.cover_ref FROM playlist_entry e
                    JOIN track t ON t.id = e.track_id
                    JOIN release r ON r.id = t.release_id
@@ -613,7 +613,7 @@ impl Library {
     /// Ids of all liked tracks, whether or not the catalog knows them yet.
     pub fn liked_track_ids(&self) -> Result<Vec<TrackId>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT target_id FROM likes WHERE target_kind = 'track' AND deleted = 0
                   ORDER BY updated_at DESC",
             )?;

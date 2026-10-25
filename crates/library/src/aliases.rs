@@ -71,7 +71,7 @@ fn move_credits(conn: &Connection, from: &str, into: &str, name: &str) -> Result
     let mut tracks = Vec::new();
     for (table, links, owner) in [("track", "track_artist", "track_id"), ("release", "release_artist", "release_id")] {
         let ids: Vec<(String, String)> = {
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare_cached(&format!(
                 "SELECT id, artist_credit FROM {table} WHERE id IN (SELECT {owner} FROM {links} WHERE artist_id = ?1)
                     OR artist_credit LIKE '%' || ?1 || '%'"
             ))?;
@@ -260,13 +260,13 @@ fn evidence(conn: &Connection, who: &[Who]) -> Result<Vec<(usize, usize, &'stati
     }
     // An album credited to a kanji name whose songs are credited to one
     // Latin name (at least half of them, none to the kanji one).
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT r.id, (SELECT group_concat(artist_id) FROM release_artist WHERE release_id = r.id)
            FROM release r WHERE EXISTS (SELECT 1 FROM track t WHERE t.release_id = r.id AND t.deleted_at IS NULL)",
     )?;
     let releases: Vec<(String, Option<String>)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
     drop(stmt);
-    let mut credited = conn.prepare(
+    let mut credited = conn.prepare_cached(
         "SELECT t.id, (SELECT group_concat(artist_id) FROM (SELECT artist_id FROM track_artist ta
                                                               WHERE ta.track_id = t.id ORDER BY position))
            FROM track t WHERE t.release_id = ?1 AND t.deleted_at IS NULL",
@@ -306,7 +306,7 @@ fn evidence(conn: &Connection, who: &[Who]) -> Result<Vec<(usize, usize, &'stati
     }
     drop(credited);
     // One song at one place of an album under a kanji and a Latin name.
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT a.title, b.title, (SELECT artist_id FROM track_artist WHERE track_id = a.id ORDER BY position LIMIT 1),
                 (SELECT artist_id FROM track_artist WHERE track_id = b.id ORDER BY position LIMIT 1)
            FROM track a JOIN track b ON b.release_id = a.release_id AND b.disc_no = a.disc_no
@@ -349,7 +349,7 @@ fn apart(conn: &Connection, a: &Who, b: &Who) -> Result<bool> {
 /// The doubles to merge: `(from, into, why)` by artist id.
 pub(crate) fn plan_doubles(conn: &Connection) -> Result<Vec<(String, String, String)>> {
     let who: Vec<Who> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT a.id, a.name, a.mbid, (SELECT count(*) FROM track_artist ta WHERE ta.artist_id = a.id), a.seq
                FROM artist a ORDER BY a.seq",
         )?;
@@ -411,7 +411,7 @@ impl Library {
     /// Every alias: `(artist, name)`.
     pub fn artist_aliases(&self) -> Result<Vec<(ArtistId, String)>> {
         self.read(|c| {
-            let mut stmt = c.prepare("SELECT artist_id, name FROM artist_alias ORDER BY artist_id, name")?;
+            let mut stmt = c.prepare_cached("SELECT artist_id, name FROM artist_alias ORDER BY artist_id, name")?;
             let rows = stmt.query_map([], |r| Ok((crate::util::get_id(r, 0)?, r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
@@ -483,7 +483,7 @@ mod tests {
     fn names(lib: &Library) -> Vec<String> {
         let mut out: Vec<String> = lib
             .read(|c| {
-                let mut stmt = c.prepare("SELECT name FROM artist")?;
+                let mut stmt = c.prepare_cached("SELECT name FROM artist")?;
                 let rows = stmt.query_map([], |r| r.get(0))?;
                 Ok(rows.collect::<rusqlite::Result<_>>()?)
             })

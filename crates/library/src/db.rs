@@ -80,6 +80,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn configure(conn: &Connection, writer: bool) -> Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
+    // Hot reads (queue rows, cards, likes) keep their statements prepared.
+    conn.set_prepared_statement_cache_capacity(64);
     conn.pragma_update(None, "temp_store", "MEMORY")?;
     conn.pragma_update(None, "cache_size", -16_000)?;
     if writer {

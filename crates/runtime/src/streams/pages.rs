@@ -134,7 +134,7 @@ impl Worker {
             let mut view = v::StreamPageView::loading(page);
             view.loading = false;
             view.error = Some(self.off_text(remote.service));
-            self.publish(|s, _| s.stream_page = Some(view));
+            self.publish(|s| s.stream_page = Some(view));
             return;
         };
         self.streaming.page_seq += 1;
@@ -145,7 +145,7 @@ impl Worker {
         if let Some(data) = self.streaming.pages.fresh(&key, ttl).cloned() {
             log::debug!("{:?} {}: from the page cache", key.0, key.1);
             let view = self.page_view(&page, &data);
-            self.publish(|s, _| s.stream_page = Some(view));
+            self.publish(|s| s.stream_page = Some(view));
             return;
         }
         // Fetched long ago: shown while it is fetched again.
@@ -157,7 +157,7 @@ impl Worker {
             }
             None => v::StreamPageView::loading(page.clone()),
         };
-        self.publish(|s, _| s.stream_page = Some(view));
+        self.publish(|s| s.stream_page = Some(view));
         self.fetch_page(key, Waiter::Page { seq, page }, svc);
     }
 
@@ -235,7 +235,7 @@ impl Worker {
                 view
             }
         };
-        self.publish(|s, _| s.stream_page = Some(view));
+        self.publish(|s| s.stream_page = Some(view));
     }
 
     /// Refreshes the open page's library marks (likes, files) after a change.
@@ -246,7 +246,7 @@ impl Worker {
         let data = self.streaming.pages.get(&key_of(&page)).cloned();
         if let Some(data) = data {
             let view = self.page_view(&page, &data);
-            self.publish(|s, _| s.stream_page = Some(view));
+            self.publish(|s| s.stream_page = Some(view));
         }
     }
 

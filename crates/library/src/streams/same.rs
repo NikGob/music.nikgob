@@ -539,7 +539,7 @@ fn has_files(conn: &Connection, release: &str) -> Result<bool> {
 /// song under titles a sound mark apart (see the module docs). `into` is
 /// the one alone at its place, else the older one.
 fn typo_twins(conn: &Connection) -> Result<Vec<(String, String)>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT a.id, a.title, b.id, b.title,
                 (SELECT count(*) FROM track o WHERE o.release_id = a.release_id AND o.disc_no = a.disc_no
                     AND o.track_no = a.track_no AND o.id != a.id AND o.deleted_at IS NULL AND a.track_no > 0),
@@ -679,7 +679,7 @@ type StreamOnlyRow = (String, String, String, Option<i64>, Option<String>, Optio
 /// Stream-only live tracks that are songs: a music video (its source
 /// scored [`score::STREAM_YOUTUBE_CLIP`]) is never its song by name.
 fn stream_only_rows(conn: &Connection) -> Result<Vec<StreamOnlyRow>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT t.id, t.title, t.artist_credit, t.duration_ms, r.title, t.isrc, t.seq,
                 t.release_id, t.disc_no, t.track_no
            FROM track t LEFT JOIN release r ON r.id = t.release_id
@@ -708,7 +708,7 @@ fn stream_only_rows(conn: &Connection) -> Result<Vec<StreamOnlyRow>> {
 
 /// Live music videos without a file: `(id, title, credit, duration)`.
 fn clip_rows(conn: &Connection) -> Result<Vec<(String, String, String, i64)>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT t.id, t.title, t.artist_credit, t.duration_ms FROM track t
           WHERE t.deleted_at IS NULL AND t.duration_ms IS NOT NULL
             AND NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id AND s.kind = 'local_file')

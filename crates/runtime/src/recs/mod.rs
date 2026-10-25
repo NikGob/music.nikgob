@@ -895,6 +895,13 @@ impl HomeParts {
 
     /// Fills the recommendation fields of `home`.
     pub(crate) fn apply(self, home: &mut v::HomeView, res: &mut crate::Resolver) {
+        self.resolve(res)(home);
+    }
+
+    /// Resolves covers and rows now and returns what fills `home` with them
+    /// (it touches neither the library nor the resolver, so it can run
+    /// under the state lock).
+    pub(crate) fn resolve(self, res: &mut crate::Resolver) -> impl FnOnce(&mut v::HomeView) + use<> {
         let local_only = self.local_only;
         let mut covers = |c: Vec<CoverRef>| -> Vec<v::Cover> {
             c.into_iter()
@@ -905,21 +912,21 @@ impl HomeParts {
                 .take(COVERS)
                 .collect()
         };
-        home.hero = self.hero.map(|(title, subtitle, c)| v::MixCard {
+        let hero = self.hero.map(|(title, subtitle, c)| v::MixCard {
             id: v::MixId::Daily,
             title,
             kicker: "НА СЕГОДНЯ".to_owned(),
             subtitle,
             covers: covers(c),
         });
-        home.daylist = self.daylist.map(|(kicker, title, subtitle, c)| v::MixCard {
+        let daylist = self.daylist.map(|(kicker, title, subtitle, c)| v::MixCard {
             id: v::MixId::Daylist,
             title,
             kicker,
             subtitle,
             covers: covers(c),
         });
-        home.tiles = self
+        let tiles: Vec<_> = self
             .tiles
             .into_iter()
             .map(|(id, kicker, title, subtitle, c)| v::MixCard {
@@ -930,7 +937,7 @@ impl HomeParts {
                 covers: covers(c),
             })
             .collect();
-        home.moods = self
+        let moods: Vec<_> = self
             .moods
             .into_iter()
             .map(|(m, c)| v::MixCard {
@@ -941,7 +948,7 @@ impl HomeParts {
                 covers: covers(c),
             })
             .collect();
-        home.style_mixes = self
+        let style_mixes: Vec<_> = self
             .styles
             .into_iter()
             .enumerate()
@@ -953,15 +960,24 @@ impl HomeParts {
                 covers: covers(c),
             })
             .collect();
-        if !self.mix.is_empty() {
-            home.mix = self.mix.iter().map(|t| res.track(t)).collect();
+        let mix: Option<Vec<_>> = (!self.mix.is_empty()).then(|| self.mix.iter().map(|t| res.track(t)).collect());
+        let (discover, new_releases) = (self.discover, self.new_releases);
+        move |home: &mut v::HomeView| {
+            home.hero = hero;
+            home.daylist = daylist;
+            home.tiles = tiles;
+            home.moods = moods;
+            home.style_mixes = style_mixes;
+            if let Some(mix) = mix {
+                home.mix = mix;
+            }
+            home.discover = discover;
+            home.new_releases = new_releases;
+            if local_only {
+                only_downloaded(home);
+            }
+            dedupe_rows(home);
         }
-        home.discover = self.discover;
-        home.new_releases = self.new_releases;
-        if local_only {
-            only_downloaded(home);
-        }
-        dedupe_rows(home);
     }
 }
 
@@ -1090,7 +1106,8 @@ impl Worker {
     /// Draws the recommendation parts of the home page again.
     pub(crate) fn publish_recs_home(&mut self) {
         let parts = self.recs_home_parts();
-        self.publish(|s, res| parts.apply(&mut s.home, res));
+        let fill = parts.resolve(&mut self.res);
+        self.publish(|s| fill(&mut s.home));
     }
 
     /// A build is due after `after` (sooner if one is due already).

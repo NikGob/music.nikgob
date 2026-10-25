@@ -153,7 +153,7 @@ impl Worker {
                 )
             }
         };
-        self.publish(|s, _| {
+        self.publish(|s| {
             s.share = Some(v::ShareView {
                 target: target.clone(),
                 busy: true,
@@ -207,7 +207,7 @@ impl Worker {
     /// Takes away the «Ищу ссылку…» toast, if it is still there.
     fn drop_share_toast(&mut self) {
         if let Some(id) = self.streaming.share_toast.take() {
-            self.publish(|s, _| s.toasts.retain(|t| t.id != id));
+            self.publish(|s| s.toasts.retain(|t| t.id != id));
         }
     }
 
@@ -218,7 +218,7 @@ impl Worker {
         self.drop_share_toast();
         let copied = result.link.clone().unwrap_or_else(|| result.text.clone());
         if copied.is_empty() {
-            self.publish(|s, _| s.share = None);
+            self.publish(|s| s.share = None);
             self.toast("Нечем поделиться", None);
             return;
         }
@@ -228,7 +228,7 @@ impl Worker {
             text: copied.clone(),
         };
         let found = result.link.is_some();
-        self.publish(|s, _| {
+        self.publish(|s| {
             s.share = Some(v::ShareView {
                 target,
                 busy: false,

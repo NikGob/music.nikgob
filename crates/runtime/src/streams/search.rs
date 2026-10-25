@@ -295,7 +295,7 @@ impl Worker {
         let sources = st.sources;
         if query.is_empty() {
             self.streaming.search.raw.clear();
-            self.publish(|s, _| {
+            self.publish(|s| {
                 s.search.streams.clear();
                 s.search.answer = v::SearchAnswer::default();
             });
@@ -517,7 +517,7 @@ impl Worker {
     pub(crate) fn set_search_sources(&mut self, sources: v::SearchSources) {
         self.streaming.search.sources = sources;
         let q = self.state.read().search.query.clone();
-        self.publish(|s, _| s.search.sources = sources);
+        self.publish(|s| s.search.sources = sources);
         if !q.trim().is_empty() {
             self.search(q);
         }
@@ -692,13 +692,14 @@ impl Worker {
             log::debug!("search: merging the sections took {} ms", merged.as_millis());
         }
         let answer = self.rebuild_answer(&sections);
-        self.publish(|s, res| {
+        let extra: Vec<v::TrackRow> = extra_lib.iter().map(|r| self.res.track(r)).collect();
+        self.publish(|s| {
             if s.search.query.trim() != query {
                 return;
             }
-            for row in &extra_lib {
+            for row in extra {
                 if !s.search.tracks.iter().any(|t| t.id == row.id) {
-                    s.search.tracks.push(res.track(row));
+                    s.search.tracks.push(row);
                 }
             }
             s.search.streams = sections;

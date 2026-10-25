@@ -55,7 +55,7 @@ impl Worker {
             .collect();
         if accounts != self.streaming.last_accounts {
             self.streaming.last_accounts = accounts.clone();
-            self.publish(|s, _| s.accounts = accounts);
+            self.publish(|s| s.accounts = accounts);
         }
     }
 
@@ -194,7 +194,7 @@ impl Worker {
             settings.streaming.spotify_client_id.is_some(),
             settings.streaming.youtube_cookies.is_some(),
         );
-        self.publish(|s, _| {
+        self.publish(|s| {
             s.prefs.spotify_personal_app = personal;
             s.prefs.youtube_cookies_set = cookies;
         });

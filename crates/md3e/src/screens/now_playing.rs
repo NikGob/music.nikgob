@@ -1169,7 +1169,7 @@ fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, o
         let w = (row.available_width() - label_w - 8.0).max(64.0);
         let vo = Slider::new("np-vol-pop-slider", volume).track(12.0).width(w).show(&mut row);
         if let Some(v) = vo.dragging.or(vo.committed) {
-            out.push(Command::SetVolume(v));
+            chrome.push_volume(state, v, out);
         }
         common::label(&mut row, &format!("{:.0}%", volume * 100.0), TypeRole::LabelLarge, s.on_surface);
         hovered = back.contains_pointer() || vo.dragging.is_some();
@@ -1562,7 +1562,7 @@ fn info(
                 .value_label(|v| format!("{:.0}%", v * 100.0))
                 .show(ui);
             if let Some(v) = vo.dragging.or(vo.committed) {
-                out.push(Command::SetVolume(v));
+                chrome.push_volume(state, v, out);
             }
         }
         if ui
