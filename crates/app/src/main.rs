@@ -106,7 +106,14 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     Ok(prefs)
 }
 
-fn load_prefs(paths: &Paths) -> Prefs {
+/// The prefs file with what the settings file and the system add: `settings`
+/// as read once at the start, `devices` the audio outputs (enumerated on
+/// their own thread meanwhile).
+fn load_prefs(
+    paths: &Paths,
+    settings: Option<&nikgob_core::settings::Settings>,
+    devices: std::thread::JoinHandle<Vec<String>>,
+) -> Prefs {
     let mut p: Prefs = std::fs::read(&paths.prefs)
         .ok()
         .and_then(|b| parse_prefs(&b).ok())
@@ -120,21 +127,17 @@ fn load_prefs(paths: &Paths) -> Prefs {
     if p.masters_dir.as_os_str().is_empty() {
         p.masters_dir = p.library_dir.join(".musiclib").join("masters");
     }
-    if let Some(s) = paths
-        .settings
-        .as_ref()
-        .and_then(|s| nikgob_core::settings::Settings::load(s).ok())
-    {
-        if let Some(pr) = s.indexer.prowlarr {
-            p.prowlarr_url = pr.url;
+    if let Some(s) = settings {
+        if let Some(pr) = &s.indexer.prowlarr {
+            p.prowlarr_url = pr.url.clone();
             p.prowlarr_configured = !pr.api_key.is_empty();
         }
-        p.metadata_contact = s.metadata.contact;
-        p.acoustid_configured = s.metadata.acoustid_key.is_some_and(|k| !k.trim().is_empty());
+        p.metadata_contact = s.metadata.contact.clone();
+        p.acoustid_configured = s.metadata.acoustid_key.as_ref().is_some_and(|k| !k.trim().is_empty());
         p.spotify_personal_app = s.streaming.spotify_client_id.is_some();
         p.youtube_cookies_set = s.streaming.youtube_cookies.is_some();
     }
-    p.output_devices = nikgob_audio::output_device_names().unwrap_or_default();
+    p.output_devices = devices.join().unwrap_or_default();
     if p.output_device.as_ref().is_some_and(|d| !p.output_devices.contains(d)) {
         log::warn!("audio device {:?} is gone, using the default", p.output_device);
     }
@@ -387,6 +390,10 @@ impl eframe::App for Window {
             state.prefs.fps_limit.max(15)
         };
         core.runtime.send_all(core.commands.drain(..));
+        static FIRST: AtomicBool = AtomicBool::new(true);
+        if FIRST.swap(false, Ordering::Relaxed) {
+            stage("first frame");
+        }
         if let Some(t) = core.show_at.take() {
             log::info!("window: shown from the tray, first frame drawn in {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
         }
@@ -424,7 +431,17 @@ fn add_system_fallbacks(fonts: &mut egui::FontDefinitions) {
     }
 }
 
+/// When the process started, for the startup stages in the log.
+static LAUNCHED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Logs how long after the start a stage of the startup ended.
+fn stage(name: &str) {
+    let ms = LAUNCHED.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0;
+    log::info!("startup: {name} at {ms:.0} ms");
+}
+
 fn main() -> eframe::Result {
+    LAUNCHED.get_or_init(Instant::now);
     // `--youtube-login`: this run is only the Google sign-in window. It logs to
     // stderr, which the app copies into its own log; it must not write the
     // app's log file itself.
@@ -435,6 +452,14 @@ fn main() -> eframe::Result {
         }
     }
     logfile::init();
+    stage("log");
+    // Meanwhile, while the library opens and the window is made: the
+    // fallback faces (the window's creator waits for them if need be) and
+    // the audio outputs (the prefs wait for them).
+    let _ = std::thread::Builder::new().name("fallback-fonts".into()).spawn(|| {
+        fallback_fonts::faces();
+    });
+    let devices = std::thread::spawn(|| nikgob_audio::output_device_names().unwrap_or_default());
     let mut paths = paths();
     let demo = std::env::var_os("NIKGOB_DEMO").is_some();
     let at_sign_in = std::env::args().any(|a| a == autostart::FLAG);
@@ -498,7 +523,10 @@ fn main() -> eframe::Result {
     if demo {
         demo::seed(&library, &paths.root.join("Music"));
     }
-    let mut prefs = load_prefs(&paths);
+    stage("library");
+    let settings = paths.settings.as_ref().and_then(|s| nikgob_core::settings::Settings::load(s).ok());
+    let mut prefs = load_prefs(&paths, settings.as_ref(), devices);
+    stage("prefs");
     // The system says whether autostart is on (Task Manager may have turned
     // it off), and a wished-for line that is gone is written again; demo
     // runs leave it alone.
@@ -510,12 +538,8 @@ fn main() -> eframe::Result {
 
     // Streaming services: each keeps its state in its own folder of the
     // data dir (the demo's own, in demo mode).
-    let secrets = paths
-        .settings
-        .as_ref()
-        .and_then(|s| nikgob_core::settings::Settings::load(s).ok())
-        .unwrap_or_default()
-        .streaming;
+    let settings = settings.unwrap_or_default();
+    let secrets = settings.streaming.clone();
     let data_dir = paths.db.parent().map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
     let streams = if demo {
         streams::demo(&data_dir, &secrets)
@@ -523,6 +547,7 @@ fn main() -> eframe::Result {
         streams::real(&data_dir, &secrets)
     };
     let relogin = streams::relogin(&streams, &secrets);
+    stage("streams");
     // Covers of the services, kept on disk between starts.
     let covers_dir = data_dir.join("cache").join("covers");
 
@@ -542,6 +567,7 @@ fn main() -> eframe::Result {
             }
         }
     };
+    stage("audio");
 
     let wake = {
         let w = waker.clone();
@@ -558,11 +584,6 @@ fn main() -> eframe::Result {
         cfg.opus_bitrate_kbps = prefs.opus_bitrate;
         cfg.check_fake_lossless = prefs.check_fake_lossless;
         cfg.fallback_seed_argb = prefs.fallback_seed;
-        let settings = paths
-            .settings
-            .as_ref()
-            .and_then(|s| nikgob_core::settings::Settings::load(s).ok())
-            .unwrap_or_default();
         let offline = demo || std::env::var_os("NIKGOB_OFFLINE").is_some();
         cfg.fetch_lyrics = !offline;
         cfg.fetch_cover_online = !offline;
@@ -614,6 +635,7 @@ fn main() -> eframe::Result {
     if let Some(c) = relogin {
         runtime.send(c);
     }
+    stage("runtime");
     let core = Core {
         ui: Md3eUi::new(),
         runtime,
@@ -640,12 +662,14 @@ fn main() -> eframe::Result {
         ),
     };
 
+    stage("desktop");
     Shell::new(core, &waker).start_hidden(start_hidden).run(|lease| {
         let covers_dir = covers_dir.clone();
         let mut viewport = lease.peek(|core| core.geometry.apply(egui::ViewportBuilder::default()));
         if shot::offscreen() {
             viewport = viewport.with_position(shot::OFFSCREEN).with_active(false).with_taskbar(false);
         }
+        stage("shell");
         eframe::run_native(
             "music.nikgob",
             eframe::NativeOptions {
@@ -661,14 +685,17 @@ fn main() -> eframe::Result {
                 ..Default::default()
             },
             Box::new(move |cc| {
+                stage("window");
                 let ctx = cc.egui_ctx.clone();
                 let mut fonts = egui::FontDefinitions::default();
                 nikgob_md3e::typography::install_fonts(&mut fonts);
                 add_system_fallbacks(&mut fonts);
                 fastframe_text::detect().apply_to(&mut fonts);
                 ctx.set_fonts(fonts);
+                stage("fonts");
                 nikgob_md3e::icons::install(&ctx);
                 web_images::WebImages::install(&ctx, covers_dir);
+                stage("web covers");
                 nikgob_md3e::Theme::new(nikgob_md3e::ColorScheme::baseline(true), true).install(&ctx);
                 let mut core = lease.take(&ctx);
                 core.reopen = false;

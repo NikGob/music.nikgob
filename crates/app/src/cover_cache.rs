@@ -33,11 +33,27 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 impl DiskCache {
     /// Opens (creates) the cache in `dir`: leftovers of interrupted writes
     /// are removed and the size is counted.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn open(dir: impl Into<PathBuf>, limit: u64) -> io::Result<Self> {
+        let cache = Self::open_uncounted(dir, limit)?;
+        cache.count();
+        Ok(cache)
+    }
+
+    /// Opens (creates) the cache in `dir` without looking inside: it works
+    /// at once, and [`Self::count`] (off the UI thread) cleans it up and
+    /// counts it.
+    pub fn open_uncounted(dir: impl Into<PathBuf>, limit: u64) -> io::Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
+        Ok(Self { dir, limit, size: Mutex::new(0) })
+    }
+
+    /// Removes the leftovers of interrupted writes, counts the size and
+    /// makes room if it is over the limit.
+    pub fn count(&self) {
         let mut size = 0;
-        for e in fs::read_dir(&dir)?.flatten() {
+        for e in fs::read_dir(&self.dir).into_iter().flatten().flatten() {
             let path = e.path();
             match path.extension().and_then(|x| x.to_str()) {
                 Some(EXT) => size += e.metadata().map_or(0, |m| m.len()),
@@ -47,11 +63,10 @@ impl DiskCache {
                 _ => {}
             }
         }
-        let cache = Self { dir, limit, size: Mutex::new(size) };
-        if size > limit {
-            cache.evict();
+        *self.size.lock().unwrap_or_else(PoisonError::into_inner) = size;
+        if size > self.limit {
+            self.evict();
         }
-        Ok(cache)
     }
 
     pub fn dir(&self) -> &Path {

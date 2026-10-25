@@ -114,11 +114,8 @@ impl WebImages {
                 return;
             }
         };
-        let disk = match DiskCache::open(&cache_dir, crate::cover_cache::DEFAULT_LIMIT) {
-            Ok(d) => {
-                log::info!("web covers: disk cache {} ({} KB)", d.dir().display(), d.size() >> 10);
-                Some(d)
-            }
+        let disk = match DiskCache::open_uncounted(&cache_dir, crate::cover_cache::DEFAULT_LIMIT) {
+            Ok(d) => Some(d),
             Err(e) => {
                 log::warn!("web covers: no disk cache at {}: {e}", cache_dir.display());
                 None
@@ -130,6 +127,14 @@ impl WebImages {
             disk,
             ctx: ctx.clone(),
             repaint_asked: AtomicBool::new(false),
+        });
+        // The folder is counted (and cleaned up) off the UI thread.
+        let me = Arc::clone(&inner);
+        rt.spawn_blocking(move || {
+            if let Some(d) = &me.disk {
+                d.count();
+                log::info!("web covers: disk cache {} ({} KB)", d.dir().display(), d.size() >> 10);
+            }
         });
         let me = Arc::clone(&inner);
         ctx.on_begin_pass("web-images", Arc::new(move |_| me.repaint_asked.store(false, Ordering::Relaxed)));
