@@ -42,7 +42,7 @@ pub(crate) fn counting() -> bool {
 }
 
 /// `yyyymmdd` of a unix time (UTC).
-fn ymd(ms: i64) -> String {
+pub(crate) fn ymd(ms: i64) -> String {
     // Days to the civil date (H. Hinnant's algorithm).
     let z = ms.div_euclid(86_400_000) + 719_468;
     let era = z.div_euclid(146_097);

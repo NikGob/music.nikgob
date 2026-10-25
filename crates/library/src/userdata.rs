@@ -485,11 +485,10 @@ fn write_events(
 ) -> io::Result<(u64, Option<(i64, String)>)> {
     let to_io = |e: rusqlite::Error| io::Error::other(e);
     let mut stmt = conn
-        .prepare_cached(
-            "SELECT id, ts, track_id, source_kind, type, position_ms, context, device
-               FROM event WHERE ?1 IS NULL OR ts > ?1 OR (ts = ?1 AND id > ?2)
-              ORDER BY ts, id",
-        )
+        .prepare_cached(&format!(
+            "SELECT {} FROM event WHERE ?1 IS NULL OR ts > ?1 OR (ts = ?1 AND id > ?2) ORDER BY ts, id",
+            crate::events::EVENT_COLS
+        ))
         .map_err(to_io)?;
     let rows = stmt
         .query_map(params![after.map(|a| a.0), after.map_or("", |a| a.1)], crate::events::event_from_row)

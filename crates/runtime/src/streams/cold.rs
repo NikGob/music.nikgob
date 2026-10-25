@@ -403,6 +403,9 @@ fn store_history(
                     position_ms: if t == EventType::Start { Some(0) } else { position },
                     context: EventContext::Other,
                     device: device.clone(),
+                    origin: None,
+                    context_id: None,
+                    end_reason: None,
                 });
             };
             push(p.start_ms, EventType::Start);
@@ -772,6 +775,9 @@ impl Worker {
                     position_ms: pos,
                     context: EventContext::Other,
                     device: device.clone(),
+                    origin: None,
+                    context_id: None,
+                    end_reason: None,
                 });
             }
         }

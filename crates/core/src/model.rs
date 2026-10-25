@@ -263,6 +263,44 @@ str_enum!(
     }
 );
 
+str_enum!(
+    /// Who chose what a start plays (recs-v2 §4.1): the user, or the app
+    /// going on by itself.
+    pub enum EventOrigin {
+        /// A click on a track, an album, an artist, a search result.
+        Manual = "manual",
+        /// The next one of the queue (after the one before ended, or «Дальше»).
+        Queue = "queue",
+        /// «Автовоспроизведение» going on after the queue.
+        Autoplay = "autoplay",
+        /// A radio's pick.
+        Radio = "radio",
+        /// A mix's song.
+        Mix = "mix",
+    }
+);
+
+impl EventOrigin {
+    /// Not the user's own choice: a recommendation, or the queue going on.
+    pub const fn is_auto(self) -> bool {
+        !matches!(self, Self::Manual)
+    }
+}
+
+str_enum!(
+    /// Why a play ended (recs-v2 §15, phase 2).
+    pub enum EndReason {
+        /// «Дальше».
+        UserNext = "user_next",
+        /// Something else was picked to play.
+        UserPick = "user_pick",
+        /// The app was closed while it played.
+        AppClosed = "app_closed",
+        /// It played to its end.
+        Ended = "ended",
+    }
+);
+
 #[allow(clippy::derivable_impls)]
 impl Default for EventContext {
     fn default() -> Self {
@@ -911,6 +949,23 @@ pub struct Event {
     #[serde(default)]
     pub context: EventContext,
     pub device: DeviceId,
+    /// Who chose it (a start); `None` in a history older than the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EventOrigin>,
+    /// What played it: a release, a playlist, a mix, a radio's seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
+    /// Why it ended (a skip or a complete).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<EndReason>,
+}
+
+/// What a recorded play says beyond its kind and position.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EventMeta {
+    pub origin: Option<EventOrigin>,
+    pub context_id: Option<String>,
+    pub end_reason: Option<EndReason>,
 }
 
 impl Event {
@@ -924,6 +979,9 @@ impl Event {
             position_ms: None,
             context: EventContext::Other,
             device,
+            origin: None,
+            context_id: None,
+            end_reason: None,
         }
     }
 }

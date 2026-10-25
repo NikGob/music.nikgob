@@ -1446,6 +1446,42 @@ fn pair() -> Pair {
     Pair { a, b, tracks }
 }
 
+/// A play's origin, what played it and why it ended go out with the
+/// history and come back; a history written before them still imports.
+#[test]
+fn events_carry_their_outcome_through_export_and_import() {
+    use nikgob_core::model::{EndReason, EventMeta, EventOrigin};
+    let Pair { a, b, tracks } = pair();
+    let meta = |origin, end_reason| EventMeta { origin, context_id: Some("release:x".into()), end_reason };
+    a.record_event_with(tracks[0].id, EventType::Start, None, Some(0), EventContext::Album, meta(Some(EventOrigin::Manual), None))
+        .unwrap();
+    a.record_event_with(tracks[0].id, EventType::Skip, None, Some(4_000), EventContext::Album, meta(None, Some(EndReason::AppClosed)))
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("userdata");
+    a.export_userdata(&out).unwrap();
+    let mut text = fs::read_to_string(out.join("events.jsonl")).unwrap();
+    assert!(text.contains("\"origin\":\"manual\"") && text.contains("\"end_reason\":\"app_closed\""), "{text}");
+    // A line of an older export: no such fields.
+    let old = format!(
+        "{{\"id\":\"{}\",\"ts\":5,\"track_id\":\"{}\",\"source_kind\":null,\"type\":\"start\",\"position_ms\":0,\"context\":\"album\",\"device\":\"old\"}}
+",
+        EventId::new(),
+        tracks[1].id
+    );
+    text.insert_str(0, &old);
+    fs::write(out.join("events.jsonl"), text).unwrap();
+    let report = b.import_userdata(&out).unwrap();
+    assert_eq!((report.events_added, report.invalid_lines), (3, 0));
+    let events = b.recent_events(10).unwrap();
+    let start = events.iter().find(|e| e.track_id == tracks[0].id && e.event_type == EventType::Start).unwrap();
+    assert_eq!((start.origin, start.context_id.as_deref()), (Some(EventOrigin::Manual), Some("release:x")));
+    let skip = events.iter().find(|e| e.event_type == EventType::Skip).unwrap();
+    assert_eq!(skip.end_reason, Some(EndReason::AppClosed));
+    let older = events.iter().find(|e| e.track_id == tracks[1].id).unwrap();
+    assert_eq!((older.origin, older.context_id.clone(), older.end_reason), (None, None, None));
+}
+
 #[test]
 fn export_import_roundtrip_rebuilds_user_data() {
     let Pair { a, b, tracks } = pair();

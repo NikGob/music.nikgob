@@ -10,7 +10,7 @@ use nikgob_core::streaming::{RemoteId, Service};
 
 use crate::db::Library;
 use crate::error::Result;
-use crate::events::event_from_row;
+use crate::events::{EVENT_COLS, event_from_row};
 use crate::util::{get_id, get_opt_id};
 
 /// One track as the recommendations see it.
@@ -87,8 +87,9 @@ impl Library {
     pub fn listening_events(&self) -> Result<Vec<Event>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(
-                "SELECT id, ts, track_id, source_kind, type, position_ms, context, device FROM event
-                  WHERE type IN ('start', 'complete', 'skip') ORDER BY ts, id",
+                &format!(
+                    "SELECT {EVENT_COLS} FROM event WHERE type IN ('start', 'complete', 'skip') ORDER BY ts, id"
+                ),
             )?;
             let rows = stmt.query_map([], event_from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

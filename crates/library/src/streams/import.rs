@@ -284,6 +284,9 @@ mod tests {
             position_ms: Some(1000),
             context: EventContext::Other,
             device: DeviceId::from("import"),
+            origin: None,
+            context_id: None,
+            end_reason: None,
         }
     }
 
