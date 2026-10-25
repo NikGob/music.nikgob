@@ -19,6 +19,13 @@
 //! 4. selects the best under the diversity caps and orders them smoothly
 //!    from the last track served.
 //!
+//! Repeats (recs-v2 §17, decision 3): a radio never serves a pick twice,
+//! but a track played today comes back once [`REPEAT_AFTER`] others played
+//! since it ([`REPEAT_AFTER_MS`] for what played before the radio), and one
+//! played twice running plays once more first; a mix leaves what played in
+//! the last three hours out. Both score what played lately less, a mix
+//! enough to let it rest about a day and a half ([`MIX_REST`]).
+//!
 //! An artist's radio is ~70% the artist's own tracks by affinity
 //! ([`ARTIST_OWN_SHARE`]), the rest similar by sound and co-listening; the
 //! artist rule of diversity does not apply to that artist. A daylist
@@ -43,8 +50,21 @@ use crate::taste::{DayPart, HOUR_MS};
 const SERVED_CAP: usize = 2_000;
 /// When the library runs dry, only this many last served stay excluded.
 const RELAXED_SERVED: usize = 50;
-/// Tracks played this recently are left for later (unless the pool is dry).
+/// A mix leaves tracks played this recently for later (unless the pool is
+/// dry).
 const RECENT_MS: i64 = 3 * HOUR_MS;
+/// A radio may bring back a track played today (recs-v2 §17, decision 3):
+/// once this many others played since it…
+const REPEAT_AFTER: usize = 5;
+/// …or, for what played before the radio, this long ago (about five
+/// tracks); one played twice running comes back at once.
+const REPEAT_AFTER_MS: i64 = 20 * 60 * 1000;
+/// What played lately scores less by this much times
+/// [`crate::Taste::lately_at`]: a mix lets a track rest about a day and a
+/// half…
+pub const MIX_REST: f32 = 0.8;
+/// …a radio less so.
+const RADIO_REST: f32 = 0.3;
 /// Session lessons remembered.
 const LESSONS: usize = 12;
 /// New-music candidates kept.
@@ -125,6 +145,12 @@ pub struct RadioState {
     liked: Vec<Item>,
     /// Skipped early in this session (push).
     skipped: Vec<Item>,
+    /// The last [`REPEAT_AFTER`] that played, oldest first.
+    #[serde(default)]
+    recent: Vec<Item>,
+    /// Played twice running: it plays once more first.
+    #[serde(default)]
+    again: Option<Item>,
     new_pool: Vec<NewTrack>,
     turns: u64,
 }
@@ -146,6 +172,8 @@ impl RadioState {
             last: None,
             liked: Vec::new(),
             skipped: Vec::new(),
+            recent: Vec::new(),
+            again: None,
             new_pool: Vec::new(),
             turns: 0,
             seed,
@@ -208,10 +236,23 @@ impl RadioState {
         self.served.iter()
     }
 
+    /// Whether the seed is a mix (a mood, a style, a daylist, «Новое для
+    /// тебя»): a mix lets what played rest; a radio may bring it back.
+    pub fn is_mix(&self) -> bool {
+        matches!(self.seed, RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover | RadioSeed::Daylist { .. })
+    }
+
     /// How a served track ended: an early skip (< 30 s) pushes later picks
     /// away from its sound, a complete pulls them towards it; a late skip
-    /// teaches nothing.
+    /// teaches nothing. A radio's track played twice running plays once
+    /// more next.
     pub fn feedback(&mut self, item: Item, outcome: Outcome) {
+        if !self.is_mix() && self.recent.last() == Some(&item) && outcome == Outcome::Complete {
+            self.again = Some(item.clone());
+        }
+        self.recent.push(item.clone());
+        let over = self.recent.len().saturating_sub(REPEAT_AFTER);
+        self.recent.drain(..over);
         match outcome {
             Outcome::Complete => {
                 self.skipped.retain(|x| *x != item);
@@ -311,6 +352,16 @@ impl RadioState {
         let mut taken: HashSet<Item> = HashSet::new();
         let sound = Sound::new(seed_vec, liked, skipped, library_scale(recs));
 
+        // 0. Played twice running: once more, first.
+        let again: Option<Slot> = self.again.take().and_then(|item| match item {
+            Item::Track(id) => recs.catalog.position(id).filter(|&i| !recs.blocked(i)).map(|i| recs.slot(i, Reason::SoundsLikeSeed, 0.0)),
+            Item::Stream(_) => None,
+        });
+        if let Some(s) = &again {
+            taken.insert(s.item.clone());
+        }
+        let n = n - usize::from(again.is_some());
+
         // 1. New music.
         let want_new = new_count(n, share);
         let mut new_slots: Vec<Slot> = self
@@ -344,8 +395,17 @@ impl RadioState {
 
         let mut all = new_slots;
         all.extend(lib);
-        let start = self.last.as_ref().and_then(|x| self.slot_of(recs, x));
-        let out = arrange(recs, all, &self.tail, start.as_ref(), &rules);
+        let mut tail = self.tail.clone();
+        let mut out: Vec<Slot> = Vec::with_capacity(n + 1);
+        let start = match again {
+            Some(s) => {
+                tail.push(Placed::of(&s));
+                out.push(s.clone());
+                Some(s)
+            }
+            None => self.last.as_ref().and_then(|x| self.slot_of(recs, x)),
+        };
+        out.extend(arrange(recs, all, &tail, start.as_ref(), &rules));
         for s in &out {
             self.served.push_back(s.item.clone());
             self.tail.push(Placed::of(s));
@@ -377,13 +437,24 @@ impl RadioState {
         if n == 0 {
             return Vec::new();
         }
+        // A mix leaves what played lately for later; a radio only what
+        // played among the last few.
+        let mix = self.is_mix();
+        let recent: HashSet<&Item> = self.recent.iter().collect();
+        let resting = |i: usize, id: TrackId| {
+            if mix {
+                recs.played_within(i, RECENT_MS)
+            } else {
+                recent.contains(&Item::Track(id)) || recs.played_within(i, REPEAT_AFTER_MS)
+            }
+        };
         let ok = |i: usize| {
             let id = recs.info(i).id;
             !recs.blocked(i)
                 && !exclude.contains(&Item::Track(id))
                 && !taken.contains(&Item::Track(id))
                 && self.seed != RadioSeed::Track(id)
-                && !(strict && recs.played_within(i, RECENT_MS))
+                && !(strict && resting(i, id))
         };
         // Candidates with the reason and the relation bonus they came by.
         let mut cands: HashMap<usize, (Reason, f32)> = HashMap::new();
@@ -501,6 +572,9 @@ impl RadioState {
             RadioSeed::Daylist { part, .. } => (*part, W_DAYLIST_DAYPART),
             _ => (recs.taste.day_part(), W_DAYPART),
         };
+        let rest = if mix { MIX_REST } else { RADIO_REST };
+        // Each track its own draw, whatever else is a candidate.
+        let jitter = rng.next_u64();
         let mut keys: Vec<usize> = cands.keys().copied().collect();
         keys.sort_unstable();
         let mut slots: Vec<Slot> = keys
@@ -513,11 +587,13 @@ impl RadioState {
                     None => -1.0,
                 };
                 let aff = (recs.taste.affinity_at(i) / 3.0).tanh();
+                let lately = recs.taste.lately_at(i);
                 s.score = snd
                     + W_AFFINITY * aff
                     + W_RELATION * bonus
                     + w_daypart * recs.taste.daypart_bonus_at(i, part)
-                    + rng.f32() * JITTER;
+                    - rest * lately
+                    + Rng::derive(jitter, i as u64).f32() * JITTER;
                 s
             })
             .collect();
@@ -630,7 +706,8 @@ mod tests {
     use super::*;
     use crate::index::VectorIndex;
     use crate::pick::assert_diverse;
-    use crate::taste::{Catalog, Taste, TasteInput, TrackInfo};
+    use crate::taste::{Catalog, Play, Taste, TasteInput, TrackInfo};
+    use nikgob_core::model::EventType;
     use crate::test_util::*;
     use nikgob_core::streaming::Service;
 
@@ -681,10 +758,54 @@ mod tests {
         let a = picks.iter().filter(|p| in_a(p)).count();
         assert!(a >= 8, "a complete in A pulls to A: {a}");
 
-        // A late skip teaches nothing.
+        // A late skip teaches nothing (it only counts as played).
         let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
         radio.feedback(Item::Track(tid(5)), Outcome::Skip { position_ms: 120_000 });
-        assert_eq!(radio, RadioState::new(RadioSeed::Track(tid(0))));
+        let mut fresh = RadioState::new(RadioSeed::Track(tid(0)));
+        fresh.recent.push(Item::Track(tid(5)));
+        assert_eq!(radio, fresh);
+    }
+
+    /// Decision 3 of recs-v2: a radio brings back a favourite played an
+    /// hour ago, but not one of the last five; twice running, it plays
+    /// first. A mix lets the hour-old one rest.
+    #[test]
+    fn a_radio_repeats_after_five_and_a_mix_rests() {
+        let now = NOW;
+        let cat = Catalog::new((0..30u128).map(|i| info(i, &[i as u32], None)));
+        let idx = VectorIndex::new();
+        let fav = tid(3);
+        let input = TasteInput {
+            events: vec![
+                Play::new(fav, now - 2 * HOUR_MS, EventType::Start, None),
+                Play::new(fav, now - HOUR_MS, EventType::Complete, None),
+            ],
+            likes: vec![fav],
+            ..TasteInput::default()
+        };
+        let taste = Taste::build(&cat, &input, now);
+        let recs = Recs::new(&cat, &taste, &idx);
+        let params = RadioParams { new_share: 0.0, seed: 1 };
+        let has = |picks: &[Pick]| picks.iter().any(|p| p.item == Item::Track(fav));
+
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        assert!(has(&radio.extend(&recs, 5, &params)), "played an hour ago: it may come back");
+
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        radio.feedback(Item::Track(fav), Outcome::Complete);
+        assert!(!has(&radio.extend(&recs, 5, &params)), "one of the last five");
+        for k in 20..25 {
+            radio.feedback(Item::Track(tid(k)), Outcome::Complete);
+        }
+        assert!(has(&radio.extend(&recs, 5, &params)), "five others played since");
+
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        radio.feedback(Item::Track(fav), Outcome::Complete);
+        radio.feedback(Item::Track(fav), Outcome::Complete);
+        assert_eq!(radio.extend(&recs, 5, &params)[0].item, Item::Track(fav), "twice running: once more, first");
+
+        let mut mix = RadioState::new(RadioSeed::Daylist { part: crate::taste::DayPart::Evening, centre: [0.0; 3] });
+        assert!(!has(&mix.extend(&recs, 5, &params)), "a mix lets it rest");
     }
 
     #[test]

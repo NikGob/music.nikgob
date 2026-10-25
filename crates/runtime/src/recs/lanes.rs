@@ -445,7 +445,8 @@ fn pick(snap: &Snapshot, tiles: &TilesInput, pool: &[(usize, TrackId)], seed: u6
         .filter(|(_, t)| duration(t).is_none_or(|d| d <= LONG_MS))
         .map(|&(i, t)| {
             let a = snap.taste.affinity_at(i);
-            (a.max(0.0).sqrt() + 0.6 * jitter(seed, t), i, t)
+            // What played lately rests about a day and a half.
+            (a.max(0.0).sqrt() + 0.6 * jitter(seed, t) - nikgob_recs::radio::MIX_REST * snap.taste.lately_at(i), i, t)
         })
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)));

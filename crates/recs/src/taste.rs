@@ -53,6 +53,9 @@ pub const DAY_MS: i64 = 24 * HOUR_MS;
 pub const HALF_LIFE_MS: i64 = 45 * DAY_MS;
 /// The hot affinity halves every this long.
 pub const HOT_HALF_LIFE_MS: i64 = 2 * DAY_MS;
+/// A mix lets a played track rest about this long ([`Taste::lately_at`]
+/// halves in it, recs-v2 §5.3).
+pub const REST_MS: i64 = 36 * HOUR_MS;
 pub const W_COMPLETE: f32 = 1.0;
 pub const W_START_ONLY: f32 = 0.3;
 pub const W_SKIP_EARLY: f32 = -0.7;
@@ -700,6 +703,12 @@ impl Taste {
 
     pub fn last_played_at(&self, i: usize) -> Option<UnixMs> {
         self.last_played.get(i).copied().flatten()
+    }
+
+    /// How lately the track at `i` played: 1 now, halving every
+    /// [`REST_MS`], 0 never (what a mix lets rest).
+    pub fn lately_at(&self, i: usize) -> f32 {
+        self.last_played_at(i).map_or(0.0, |t| decay(self.now, t, REST_MS))
     }
 
     pub fn liked_at(&self, i: usize) -> bool {
