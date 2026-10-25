@@ -85,10 +85,11 @@ fn configure(conn: &Connection, writer: bool) -> Result<()> {
     conn.pragma_update(None, "temp_store", "MEMORY")?;
     // 16 MB of pages for the writer, 2 MB for each reader: their full-table
     // reads (recs, stats, export) would otherwise each keep a copy of most of
-    // the database, which the system's file cache already holds once. Reads
-    // go through one shared mapping of the file instead.
+    // the database, which the system's file cache already holds once. No
+    // memory mapping: on Windows a file mapped by the readers cannot be
+    // truncated by the writer's checkpoint, and an I/O error in a mapping
+    // ends the process instead of failing the query.
     conn.pragma_update(None, "cache_size", if writer { -16_000 } else { -2_000 })?;
-    conn.pragma_update(None, "mmap_size", 64 * 1024 * 1024)?;
     if writer {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
