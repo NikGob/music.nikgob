@@ -14,6 +14,7 @@ nikgob-shapes.workspace = true
 nikgob-view.workspace = true
 egui.workspace = true
 egui_extras.workspace = true
+egui_glow = { version = "0.36.1", default-features = false }
 material-colors.workspace = true
 fastframe-icons.workspace = true
 log.workspace = true
