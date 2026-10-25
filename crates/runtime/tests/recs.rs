@@ -299,13 +299,66 @@ fn play_mix_plays_and_records_the_home_context() {
         st.queue.radio.as_ref().is_some_and(|r| r.title.contains(" и другие")) && st.queue.next.len() >= 9
     });
 
-    // Playing anything else ends the radio.
+    // Playing anything else ends the radio (a lone track goes on by
+    // autoplay, with a radio of its own).
     s.rt.send(Command::PlayTracks {
         tracks: vec![l.tracks[0]],
         start: 0,
         context: "test".into(),
     });
-    wait_for(&s.rt, "the radio to end", |st| st.queue.radio.is_none());
+    wait_for(&s.rt, "the radio to end", |st| st.queue.radio.as_ref().is_none_or(|r| r.autoplay));
+}
+
+#[test]
+fn autoplay_goes_on_after_the_last_track_with_nothing_the_queue_had() {
+    let l = library(3, 6, 5, &[]);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    let album = vec![l.tracks[0], l.tracks[1], l.tracks[2]];
+    s.rt.send(Command::PlayTracks { tracks: album.clone(), start: 0, context: "Альбом".into() });
+    wait_until("the first plays", || !s.asked.lock().unwrap().is_empty());
+    wait_for(&s.rt, "the queue", |st| st.queue.next.len() == 2);
+    assert!(s.rt.state().queue.radio.is_none(), "no radio before the last track");
+    let context = s.rt.state().player.context_line();
+    end_current(&s);
+    end_current(&s);
+    // The last track plays: similar ones join the queue behind it.
+    wait_for(&s.rt, "autoplay", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() == 10
+    });
+    let st = s.rt.state();
+    assert_eq!(st.queue.radio.as_ref().unwrap().title, format!("Похожее на «{}»", st.player.current.as_ref().unwrap().title));
+    assert_eq!(st.player.current.as_ref().map(|t| t.id), Some(album[2]));
+    assert!(st.queue.next.iter().all(|e| !album.contains(&e.track.id)), "nothing the queue had");
+    assert_eq!(st.player.context_line(), context, "the queue keeps its name");
+    drop(st);
+
+    // Off: a queue simply ends, and the radio it had stops picking.
+    let prefs = Prefs { autoplay: false, ..s.rt.state().prefs.clone() };
+    s.rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&s.rt, "autoplay off", |st| st.queue.radio.is_none());
+    s.rt.send(Command::PlayTracks { tracks: vec![l.tracks[4]], start: 0, context: "test".into() });
+    wait_for(&s.rt, "the lone track", |st| st.player.current.as_ref().is_some_and(|t| t.id == l.tracks[4]));
+    std::thread::sleep(Duration::from_millis(300));
+    let st = s.rt.state();
+    assert!(st.queue.radio.is_none() && st.queue.next.is_empty(), "{:?}", st.queue.radio);
+}
+
+#[test]
+fn a_radio_switched_to_downloaded_only_drops_what_streams_and_picks_again() {
+    let l = library(3, 6, 5, &[]);
+    let streams = add_streams(&l);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::StartRadio { seed: RadioSeed::Track(streams[1]) });
+    wait_for(&s.rt, "the stream's radio", |st| st.queue.radio.is_some() && st.queue.next.len() >= 8);
+    let streamed = |st: &ViewState| st.queue.next.iter().filter(|e| streams.contains(&e.track.id)).count();
+    assert!(streamed(&s.rt.state()) > 0, "the radio of a streamed song plays its neighbours");
+
+    let prefs = Prefs { mixes_downloaded_only: true, ..s.rt.state().prefs.clone() };
+    s.rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&s.rt, "only files ahead", |st| streamed(st) == 0 && st.queue.next.len() >= 4);
+    assert!(s.rt.state().queue.next.iter().all(|e| e.track.has_local));
 }
 
 /// Ends the playing item; returns once the next one was asked for.
@@ -494,6 +547,10 @@ fn downloaded_only_keeps_every_mix_to_files_at_once() {
     let st = s.rt.state().home.clone();
     assert!(st.mix.iter().all(|t| t.has_local));
     assert!(!st.tiles.iter().any(|t| t.id == MixId::Tile(TileKind::NotDownloaded)));
+    // Nothing else on the home plays without a file either.
+    assert!(st.discover.is_empty() && st.new_releases.is_empty());
+    assert!(st.continue_listening.iter().all(|c| matches!(c, nikgob_view::ContinueCard::Release(r) if r.local_tracks > 0)));
+    assert!(st.long_unplayed.iter().chain(&st.recently_added).all(|r| r.local_tracks > 0));
 
     // Moods, style mixes, an artist's radio, the daylist and the lottery.
     let mixes = [
@@ -635,6 +692,28 @@ fn discovery_finds_new_songs_within_its_budget_and_keeps_them() {
     wait_for(&s.rt, "the kept discoveries", |st| st.home.discover.len() == shown);
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(discovery_calls(&yt) + discovery_calls(&dz), 0, "{:?} {:?}", yt.all_calls(), dz.all_calls());
+}
+
+#[test]
+fn downloaded_only_hides_new_music_on_the_home_and_plays_none() {
+    let l = library(0, 0, 0, KNOWN);
+    let (yt, dz) = fakes();
+    let s = start(&l.lib, vec![yt.clone(), dz.clone()], Prefs::default(), None);
+    wait_for(&s.rt, "discoveries", |st| !st.home.discover.is_empty() && !st.home.new_releases.is_empty());
+    let prefs = Prefs { mixes_downloaded_only: true, ..s.rt.state().prefs.clone() };
+    s.rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&s.rt, "the new rows gone", |st| st.home.discover.is_empty() && st.home.new_releases.is_empty());
+    // «Слушать всё» of the discoveries plays nothing new.
+    s.rt.send(Command::PlayMix { id: MixId::Discover });
+    std::thread::sleep(Duration::from_millis(300));
+    let st = s.rt.state();
+    assert!(st.queue.radio.is_none() && st.player.current.is_none(), "{:?}", st.queue.radio);
+    assert!(st.toasts.iter().any(|t| t.text.contains("Только скачанное")), "{:?}", st.toasts);
+    drop(st);
+    // Off again: they are back at once.
+    let prefs = Prefs { mixes_downloaded_only: false, ..s.rt.state().prefs.clone() };
+    s.rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&s.rt, "the new rows back", |st| !st.home.discover.is_empty());
 }
 
 #[test]

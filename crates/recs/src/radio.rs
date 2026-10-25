@@ -163,6 +163,19 @@ impl RadioState {
         s
     }
 
+    /// Counts `items` as served: a radio that continues a queue
+    /// («Автовоспроизведение») does not pick what the queue already had.
+    pub fn mark_served(&mut self, items: impl IntoIterator<Item = Item>) {
+        for item in items {
+            if !self.served.contains(&item) {
+                self.served.push_back(item);
+            }
+        }
+        while self.served.len() > SERVED_CAP {
+            self.served.pop_front();
+        }
+    }
+
     /// New-music candidates for later extensions (repeats are ignored).
     pub fn add_new(&mut self, tracks: impl IntoIterator<Item = NewTrack>) {
         for t in tracks {

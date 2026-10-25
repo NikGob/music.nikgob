@@ -942,6 +942,10 @@ pub struct Prefs {
     /// «Анализ звука стримов»: liked and playlist tracks without a file are
     /// analysed from YouTube Music in the background.
     pub stream_analysis: bool,
+    /// «Автовоспроизведение»: when the queue's last track plays, it goes on
+    /// with similar tracks by itself (a radio of that track, from where
+    /// [`Self::mixes_downloaded_only`] and [`Self::radio_new_share`] say).
+    pub autoplay: bool,
 }
 
 /// «Новое в радио»: the share of new music in radios and mixes.
@@ -1622,6 +1626,7 @@ impl Default for Prefs {
             radio_new_share: RadioNewShare::Some,
             mixes_downloaded_only: false,
             stream_analysis: true,
+            autoplay: true,
         }
     }
 }

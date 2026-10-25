@@ -11,7 +11,7 @@ use super::{
 use crate::{
     Icon, Theme, TypeRole,
     components::{
-        Button, ConnectedGroup, IconButton, Leading, ListItem, LoadingIndicator, Menu, MenuItem, Size, Style,
+        Button, ConnectedGroup, IconButton, Leading, ListItem, LoadingIndicator, Menu, MenuItem, Size, Style, Switch,
     },
 };
 
@@ -177,10 +177,14 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, out: &mut Vec<Command>) 
 pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let q = &state.queue;
-    // A radio says so above the list: what it grows from.
+    // A radio says so above the list, and where it picks from; autoplay
+    // can be switched off right there.
     if let Some(r) = &q.radio {
-        radio_header(ui, &r.title);
-        ui.add_space(8.0);
+        if radio_header(ui, r) {
+            out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { autoplay: false, ..state.prefs.clone() })));
+        }
+        source_row(ui, state, chrome, out);
+        ui.add_space(12.0);
     }
     let bottom_h = 56.0;
     let list_h = ui.available_height() - bottom_h;
@@ -255,6 +259,10 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             if extending {
                 extending_row(ui);
             }
+            // What comes after a queue that ends: autoplay.
+            if q.radio.is_none() {
+                autoplay_block(ui, state, chrome, out);
+            }
             if let Some((p, t)) = current_pick {
                 queue_pick(Some(p), t, None, out);
             }
@@ -309,6 +317,74 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
     });
 }
 
+/// The end of a queue that is no radio: «Автовоспроизведение» with its
+/// switch, and while it is on, where its tracks will come from.
+fn autoplay_block(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
+    let p = &state.prefs;
+    ui.add_space(16.0);
+    let mut on = p.autoplay;
+    let line = if on {
+        format!("{} — когда очередь кончится", super::pages::settings_help::radio_source_line(p))
+    } else {
+        "Очередь закончится на последнем треке".to_owned()
+    };
+    ListItem::new("Автовоспроизведение")
+        .supporting(line)
+        .leading_icon(Icon::Radio)
+        .trailing(|ui| {
+            ui.add(Switch::new(&mut on).id_salt("q-autoplay"));
+        })
+        .id_salt("q-autoplay-row")
+        .show(ui);
+    if on != p.autoplay {
+        out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { autoplay: on, ..p.clone() })));
+    }
+    if p.autoplay {
+        source_row(ui, state, chrome, out);
+    }
+    ui.add_space(8.0);
+}
+
+/// Where a radio (or autoplay) takes its tracks: «Скачанное · Библиотека ·
+/// С новым» as a connected group bound to the same prefs as Settings, ⚙
+/// opening the row there, and a quiet line on what the choice means.
+fn source_row(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
+    use super::pages::SettingId;
+    let s = Theme::get(ui.ctx()).scheme;
+    let p = &state.prefs;
+    let labels: Vec<&str> = SettingId::RadioSource.choices().iter().map(|c| c.label).collect();
+    let chosen = SettingId::RadioSource.chosen(p);
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        let settings_w = Size::S.height() + 8.0;
+        let w = ((ui.available_width() - 16.0 - settings_w - 4.0) / 3.0).floor().min(140.0);
+        let mut gui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_size(ui.cursor().min, egui::vec2(3.0 * w + 4.0, Size::S.height())))
+                .id_salt("q-source-row"),
+        );
+        if let Some(i) = ConnectedGroup::new("q-source", &labels).equal_width(w).show(&mut gui, chosen) {
+            let mut prefs = p.clone();
+            SettingId::RadioSource.choose(&mut prefs, i);
+            out.push(Command::SetPrefs(Box::new(prefs)));
+        }
+        ui.add_space(3.0 * w + 4.0 + 8.0);
+        if ui
+            .add(IconButton::new(Icon::Settings).size(Size::S).tooltip("Настроить автовоспроизведение").id_salt("q-autoplay-settings"))
+            .clicked()
+        {
+            chrome.setting = Some(SettingId::Autoplay);
+        }
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        let help = SettingId::RadioSource.choices()[chosen].help;
+        ui.add(egui::Label::new(TypeRole::BodySmall.style().rich_para(help, s.on_surface_variant)).wrap());
+    });
+}
+
 /// What a radio queue is called above its list: «Радио · Кино» as the
 /// runtime names it; an endless mix («Спокойное», «Новое для тебя») says
 /// it is a mix.
@@ -321,25 +397,42 @@ pub(super) fn radio_title(title: &str) -> String {
 }
 
 /// The radio line above the queue: its title, and that it grows by itself.
-fn radio_header(ui: &mut Ui, title: &str) {
+/// Autoplay's carries its switch; returns whether it was switched off.
+fn radio_header(ui: &mut Ui, r: &nikgob_view::RadioView) -> bool {
     let s = Theme::get(ui.ctx()).scheme;
     let row = Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 48.0));
     let icon = Rect::from_center_size(egui::pos2(row.left() + 16.0 + 12.0, row.center().y), egui::vec2(24.0, 24.0));
     Icon::Radio.widget(false, s.on_surface_variant, 24.0).paint_at(ui, icon);
     let text_x = icon.right() + 16.0;
-    let w = (row.right() - 16.0 - text_x).max(1.0);
+    let mut off = false;
+    let mut right = row.right() - 16.0;
+    if r.autoplay {
+        let slot = Rect::from_min_max(egui::pos2(row.right() - 16.0 - 52.0, row.top()), egui::pos2(row.right() - 16.0, row.bottom()));
+        let mut on = true;
+        ui.put(slot, Switch::new(&mut on).id_salt("q-radio-autoplay"));
+        off = !on;
+        right = slot.left() - 16.0;
+    }
+    let w = (right - text_x).max(1.0);
     let line = |text: &str, role: TypeRole, color| {
         let mut job = egui::text::LayoutJob::single_section(text.to_owned(), role.style().text_format(color));
         job.wrap = egui::text::TextWrapping::truncate_at_width(w);
         ui.painter().layout_job(job)
     };
-    let title = line(&radio_title(title), TypeRole::TitleSmall, s.on_surface);
-    let sub = line("Дописывается сама, пока играет", TypeRole::BodySmall, s.on_surface_variant);
+    // Autoplay names what it continues.
+    let (title, sub) = if r.autoplay {
+        (r.title.clone(), "Автовоспроизведение: дописывается, пока играет")
+    } else {
+        (radio_title(&r.title), "Дописывается сама, пока играет")
+    };
+    let title = line(&title, TypeRole::TitleSmall, s.on_surface);
+    let sub = line(sub, TypeRole::BodySmall, s.on_surface_variant);
     let top = row.center().y - (title.size().y + sub.size().y) * 0.5;
     let sub_y = top + title.size().y;
     ui.painter().galley(egui::pos2(text_x, top), title, s.on_surface);
     ui.painter().galley(egui::pos2(text_x, sub_y), sub, s.on_surface_variant);
     ui.advance_cursor_after_rect(row);
+    off
 }
 
 /// «Подбираю ещё…» at the end of a radio queue while it extends, lined up

@@ -102,6 +102,11 @@ pub enum SettingId {
     RadioNewShare,
     /// «Миксы только из скачанного».
     MixesDownloadedOnly,
+    /// «Автовоспроизведение».
+    Autoplay,
+    /// Where radios pick from: «Миксы только из скачанного» and «Новое в
+    /// радио» as one choice (the queue shows it; Settings has both rows).
+    RadioSource,
     /// «Анализ звука»: how far it is (no control of its own).
     SoundAnalysis,
     // Источники.
@@ -132,6 +137,16 @@ pub enum SettingId {
     Spotify,
     YouTube,
     Nodes,
+}
+
+/// Where radios and autoplay take their tracks, in a few words (the
+/// queue's and the settings row's quiet line).
+pub fn radio_source_line(p: &Prefs) -> &'static str {
+    match SettingId::RadioSource.chosen(p) {
+        0 => "Похожее из скачанного",
+        1 => "Похожее из твоей библиотеки",
+        _ => "Похожее из библиотеки и новое",
+    }
 }
 
 /// Settings tabs, in the order of the tab switch.
@@ -290,6 +305,8 @@ impl SettingId {
             ImportSpotify => "Забирает из Spotify свои плейлисты и недавние прослушивания. Лайки приходят сами сразу после входа. Плейлисты появятся в библиотеке, их треки ждут в «Хочу скачать».",
             ImportYouTube => "То же из YouTube Music: плейлисты и история. Лайки приходят сами после входа.",
             RadioNewShare => "Радио по треку или исполнителю и бесконечные миксы (настроения, «Твои миксы», «Новое для тебя») подмешивают музыку, которой у тебя ещё нет: похожее из YouTube Music и Deezer. Здесь — сколько. «Твой микс» на главной собирается только из твоего. Пока включены «Миксы только из скачанного», не действует: нового нет нигде.",
+            Autoplay => "Когда в очереди играет последний трек, она не кончается: следом сами добавляются похожие треки, как в радио по этому треку, и дальше дописываются по мере игры. Повтор не мешает: при включённом повторе очередь просто начинается заново. Откуда берутся треки — как у радио: только скачанное, вся библиотека или с новым из сервисов (это же переключается прямо в очереди).",
+            RadioSource => "Откуда радио, бесконечные миксы и автовоспроизведение берут треки. Это те же две настройки, что ниже в «Рекомендациях»: «Миксы только из скачанного» и «Новое в радио и миксах».",
             MixesDownloadedOnly => "Всё, что подбирается для тебя — «Твой микс», дейлист, плитки главной, настроения, «Твои миксы», миксы исполнителей и радио, — берёт только треки, у которых есть файл: ни стримов, ни новой музыки из сервисов. Плитки, которым не хватило таких треков, пропадают, «Ещё не скачано» не показывается. Главная пересобирается сразу. «Новое для тебя» остаётся: это отдельная полка новинок.",
             SoundAnalysis => "Миксы и радио подбирают треки по звуку: темп, громкость, яркость, ровность. Для этого каждый трек один раз анализируется в фоне — тихо, с пониженным приоритетом. Пока анализ идёт, подборки уже работают, просто чуть менее точно.",
             StreamAnalysis => "Лайкнутые и плейлистные треки без файла тоже анализируются: их звук по одному тихо скачивается с YouTube Music в память (несколько мегабайт), анализируется и сразу выбрасывается. Не чаще раза в 20 секунд и не больше 300 треков в день; трек, сыгравший из стрима, анализируется из кэша без лишнего скачивания. Выключи — стримы останутся без анализа, а миксы будут подбирать их по исполнителю и истории.",
@@ -403,6 +420,11 @@ impl SettingId {
                 c!("Только слежка", "Плейлист повторяет сервис; свои правки здесь туда не уходят."),
                 c!("Разово", "Снимок: плейлист скопирован один раз и дальше живёт сам по себе."),
             ],
+            Self::RadioSource => &[
+                c!("Скачанное", "Только треки с файлом: без стримов и без новой музыки. Это же включает «Миксы только из скачанного» на главной."),
+                c!("Библиотека", "Вся твоя музыка: скачанное и лайкнутое или из плейлистов, что пока играет из стрима. Без нового."),
+                c!("С новым", "Твоя музыка и похожая новая из YouTube Music и Deezer (сколько — в «Новое в радио и миксах»)."),
+            ],
             Self::RadioNewShare => &[
                 c!("Без нового", "Только твоя музыка: что лайкнуто, в плейлистах и в библиотеке."),
                 c!("Немного", "Примерно каждый пятый трек — новый для тебя, похожий на то, что играет."),
@@ -467,6 +489,9 @@ impl SettingId {
             Self::LikeDownload if !p.like_downloads => 2,
             Self::LikeDownload => usize::from(p.like_download_scope == v::WishlistScope::Album),
             Self::PlaylistSync => sync_index(p.playlist_sync_default),
+            Self::RadioSource if p.mixes_downloaded_only => 0,
+            Self::RadioSource if p.radio_new_share == v::RadioNewShare::None => 1,
+            Self::RadioSource => 2,
             Self::RadioNewShare => match p.radio_new_share {
                 v::RadioNewShare::None => 0,
                 v::RadioNewShare::Some => 1,
@@ -526,6 +551,14 @@ impl SettingId {
                 }
             }
             Self::PlaylistSync => p.playlist_sync_default = v::PlaylistSyncMode::ALL[i.min(2)],
+            Self::RadioSource => {
+                p.mixes_downloaded_only = i == 0;
+                if i == 1 {
+                    p.radio_new_share = v::RadioNewShare::None;
+                } else if i == 2 && p.radio_new_share == v::RadioNewShare::None {
+                    p.radio_new_share = v::RadioNewShare::Some;
+                }
+            }
             Self::RadioNewShare => {
                 p.radio_new_share = [v::RadioNewShare::None, v::RadioNewShare::Some, v::RadioNewShare::More][i.min(2)];
             }
@@ -1589,6 +1622,8 @@ mod tests {
         assert_eq!(SettingId::SoundAnalysis.tab(), TAB_GENERAL);
         assert_eq!(SettingId::StreamAnalysis.tab(), TAB_SOURCES);
         assert_eq!(SettingId::MixesDownloadedOnly.tab(), TAB_GENERAL);
+        assert_eq!(SettingId::Autoplay.tab(), TAB_GENERAL);
+        assert!(!SettingId::Autoplay.help().is_empty() && !SettingId::RadioSource.help().is_empty());
         for id in [SettingId::RadioNewShare, SettingId::MixesDownloadedOnly, SettingId::SoundAnalysis, SettingId::StreamAnalysis] {
             assert!(!id.help().is_empty());
         }
@@ -1606,7 +1641,7 @@ mod tests {
         for id in [
             S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::RingDir, S::RingStyle, S::Ambient,
             S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
-            S::OpusBitrate, S::NpVolume, S::LikeDownload, S::PlaylistSync, S::RadioNewShare,
+            S::OpusBitrate, S::NpVolume, S::LikeDownload, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
         ] {
             assert!(id.choices().len() >= 2, "{id:?}");
             for i in 0..id.choices().len() {

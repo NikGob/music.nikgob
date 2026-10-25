@@ -485,6 +485,9 @@ impl Md3eUi {
             }
         }
 
+        if let Some(id) = self.chrome.setting.take() {
+            self.pages.open_setting(id);
+        }
         if let Some(route) = self.pages.pending_nav.take() {
             if self.pages.focus_setting.is_some() && route == Route::Settings {
                 self.pane = None;
@@ -1014,6 +1017,7 @@ impl Md3eUi {
             "import" => S::ImportFiles,
             "torrents" => S::Prowlarr,
             "recs" => S::RadioNewShare,
+            "autoplay" => S::Autoplay,
             "stream-analysis" => S::StreamAnalysis,
             "appearance" => S::Design,
             _ => S::CoverClickPause,

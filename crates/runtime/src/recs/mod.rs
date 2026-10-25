@@ -820,11 +820,19 @@ pub(crate) struct HomeParts {
     styles: Vec<(String, String, Vec<CoverRef>)>,
     discover: Vec<v::StreamTrackRow>,
     new_releases: Vec<v::StreamAlbumCard>,
+    /// «Только скачанное»: nothing on the home may play without a file.
+    local_only: bool,
 }
 
 impl HomeParts {
     /// The parts of `home` (none before the first build).
-    fn of(lib: &Library, home: Option<&RecHome>, discover: Vec<v::StreamTrackRow>, new_releases: Vec<v::StreamAlbumCard>) -> Self {
+    fn of(
+        lib: &Library,
+        home: Option<&RecHome>,
+        discover: Vec<v::StreamTrackRow>,
+        new_releases: Vec<v::StreamAlbumCard>,
+        local_only: bool,
+    ) -> Self {
         let Some(h) = home else {
             return Self {
                 hero: None,
@@ -835,6 +843,7 @@ impl HomeParts {
                 styles: Vec::new(),
                 discover,
                 new_releases,
+                local_only,
             };
         };
         let n = h.daily.len();
@@ -880,11 +889,13 @@ impl HomeParts {
             styles,
             discover,
             new_releases,
+            local_only,
         }
     }
 
     /// Fills the recommendation fields of `home`.
     pub(crate) fn apply(self, home: &mut v::HomeView, res: &mut crate::Resolver) {
+        let local_only = self.local_only;
         let mut covers = |c: Vec<CoverRef>| -> Vec<v::Cover> {
             c.into_iter()
                 .filter_map(|c| match c {
@@ -947,8 +958,23 @@ impl HomeParts {
         }
         home.discover = self.discover;
         home.new_releases = self.new_releases;
+        if local_only {
+            only_downloaded(home);
+        }
         dedupe_rows(home);
     }
+}
+
+/// «Только скачанное» on the home: whatever would play without a file
+/// goes, the rows of new music («Новое для тебя», «Новые релизы») and
+/// albums streamed without one; the mixes are picked so already.
+pub(crate) fn only_downloaded(home: &mut v::HomeView) {
+    home.discover.clear();
+    home.new_releases.clear();
+    home.mix.retain(|t| t.has_local);
+    home.continue_listening.retain(|c| matches!(c, v::ContinueCard::Release(r) if r.local_tracks > 0));
+    home.long_unplayed.retain(|r| r.local_tracks > 0);
+    home.recently_added.retain(|r| r.local_tracks > 0);
 }
 
 /// Keeps the first of each item in every row of the home: a row shows an
@@ -1035,7 +1061,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
     let h = &built.home;
     let mut res = crate::Resolver::new(lib.clone(), library_dir.to_owned());
     let mut home = res.home(&crate::home::build(lib));
-    HomeParts::of(lib, Some(h), Vec::new(), Vec::new()).apply(&mut home, &mut res);
+    HomeParts::of(lib, Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only).apply(&mut home, &mut res);
     Ok(HomePreview {
         catalog: built.snap.catalog.len(),
         vectors,
@@ -1057,7 +1083,8 @@ impl Worker {
     /// The recommendation parts of the home page as they stand.
     pub(crate) fn recs_home_parts(&mut self) -> HomeParts {
         let (discover, new_releases) = self.discover_rows();
-        HomeParts::of(&self.lib, self.recs.home.as_ref(), discover, new_releases)
+        let local_only = self.state.read().prefs.mixes_downloaded_only;
+        HomeParts::of(&self.lib, self.recs.home.as_ref(), discover, new_releases, local_only)
     }
 
     /// Draws the recommendation parts of the home page again.
@@ -1237,6 +1264,10 @@ impl Worker {
                 self.start_radio(seed, format!("Радио · {name}"), EventContext::HomeSection, None);
             }
             v::MixId::Discover => {
+                if self.state.read().prefs.mixes_downloaded_only {
+                    self.toast("Включено «Только скачанное» — нового сейчас нет", None);
+                    return;
+                }
                 if self.discoveries().is_empty() {
                     self.toast("Новое ещё ищется — загляни чуть позже", None);
                     return;
@@ -1310,10 +1341,18 @@ impl Worker {
 
     /// A mix of the home as it is (not endless), from its first track.
     fn play_picks(&mut self, picks: &[Pick], streams: &HashMap<RemoteId, StreamTrack>, title: &str) {
+        // «Только скачанное» holds even for a mix picked before it was on.
+        let prefs = self.state.read().prefs.clone();
+        let snap = self.snapshot();
         let mut ids = Vec::with_capacity(picks.len());
         for p in picks {
             match &p.item {
-                Item::Track(id) => ids.push(*id),
+                Item::Track(id) => {
+                    if radio::radio_allows(*id, false, &prefs, snap.as_deref()) {
+                        ids.push(*id);
+                    }
+                }
+                Item::Stream(_) if prefs.mixes_downloaded_only => {}
                 Item::Stream(r) => {
                     if let Some(t) = streams.get(r) {
                         self.streaming.learn(std::slice::from_ref(t));

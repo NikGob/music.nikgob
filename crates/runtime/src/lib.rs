@@ -855,7 +855,19 @@ impl Worker {
                     self.stream_analysis_pref(p.stream_analysis);
                 }
                 if old.mixes_downloaded_only != p.mixes_downloaded_only {
+                    // The rows it hides go (or come back) at once; the
+                    // mixes follow when they are picked again.
+                    self.load_home();
                     self.recs_prefs_changed();
+                }
+                if old.mixes_downloaded_only != p.mixes_downloaded_only || old.radio_new_share != p.radio_new_share {
+                    self.radio_source_changed();
+                }
+                if old.autoplay && !p.autoplay {
+                    self.autoplay_off();
+                }
+                if !old.autoplay && p.autoplay {
+                    self.publish_player();
                 }
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),

@@ -21,8 +21,15 @@
 //! * The radio is saved in `session.json` with the queue, so it goes on
 //!   after a restart. Playing anything else (any command that replaces the
 //!   queue) ends it; adding to the queue does not.
+//! * «Автовоспроизведение» ([`v::Prefs::autoplay`]): when the last track of
+//!   any other queue plays, a radio of that track takes the queue over and
+//!   appends to it, never picking what the queue already had.
+//! * Where its tracks come from is a hard rule: under «Миксы только из
+//!   скачанного» nothing without a file is queued, without new music no
+//!   stream pick is; switching either drops the radio's upcoming tracks
+//!   that no longer fit and picks again.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -65,6 +72,11 @@ pub(crate) struct RadioRun {
     pending_new: Vec<NewTrack>,
     /// The queue ran out while an extension ran: play on when it comes.
     resume: bool,
+    /// Started by «Автовоспроизведение» to continue another queue.
+    autoplay: bool,
+    /// The queue entries it added (a change of source drops the ones that
+    /// no longer fit).
+    added: HashSet<u64>,
 }
 
 /// What `session.json` keeps of a radio.
@@ -76,12 +88,17 @@ pub(crate) struct RadioSave {
     seed: u64,
     streams: Vec<(TrackId, RemoteId)>,
     pool: Vec<StreamTrack>,
+    #[serde(default)]
+    autoplay: bool,
 }
 
 #[derive(Default)]
 pub(crate) struct RadioState {
     run: Option<RadioRun>,
     seq: u64,
+    /// The queue generation autoplay found nothing for: not tried again
+    /// until the queue is replaced.
+    autoplay_dry: Option<u64>,
 }
 
 pub(crate) enum RadioMsg {
@@ -118,6 +135,17 @@ enum Call {
 
 fn cache_key(service: Service, what: &str, id: &str) -> String {
     format!("radio_new.{}.{what}.{id}", service.as_str())
+}
+
+/// Whether a radio pick may be queued under `prefs`: no stream pick
+/// without new music, nothing without a file under «Миксы только из
+/// скачанного». (The engine already picks so; this holds while the
+/// snapshot it picked from is older than the prefs.)
+pub(super) fn radio_allows(track: TrackId, stream: bool, prefs: &v::Prefs, snap: Option<&super::Snapshot>) -> bool {
+    if stream && super::new_share(prefs) <= 0.0 {
+        return false;
+    }
+    !prefs.mixes_downloaded_only || snap.and_then(|s| s.catalog.get(track)).is_some_and(|t| t.local)
 }
 
 /// The queue's context line: «Играет из радио «Кино»» / «… микса «Спокойное»».
@@ -210,6 +238,8 @@ impl Worker {
             pending: Vec::new(),
             pending_new: Vec::new(),
             resume: false,
+            autoplay: false,
+            added: HashSet::new(),
         };
         log::info!("radio «{}» starts ({:?})", run.title, run.state.seed);
         let context = context_of(&run.title);
@@ -267,6 +297,8 @@ impl Worker {
             pending: Vec::new(),
             pending_new: Vec::new(),
             resume: false,
+            autoplay: false,
+            added: HashSet::new(),
         });
         log::info!("radio «{}» starts from its picks ({:?})", self.recs.radio.run.as_ref().map_or("", |r| &r.title), state.seed);
         self.radio_add_discoveries();
@@ -297,12 +329,14 @@ impl Worker {
         self.recs.radio.run.as_ref().map(|r| v::RadioView {
             title: r.title.clone(),
             extending: r.extending || r.want,
+            autoplay: r.autoplay,
         })
     }
 
     /// Three tracks or fewer left: the next ones are picked.
     pub(crate) fn radio_top_up(&mut self) {
         if !self.radio_alive() {
+            self.autoplay_start();
             return;
         }
         let left = self.queue.upcoming().len();
@@ -313,9 +347,86 @@ impl Worker {
         self.radio_extend();
     }
 
+    /// «Автовоспроизведение»: the last track of a queue that is no radio
+    /// plays (repeat off), so a radio of it continues the queue.
+    fn autoplay_start(&mut self) {
+        if !self.state.read().prefs.autoplay || self.queue.repeat != v::Repeat::Off || !self.queue.upcoming().is_empty() {
+            return;
+        }
+        let Some(e) = self.playing else { return };
+        let generation = self.queue.generation();
+        if self.recs.radio.autoplay_dry == Some(generation) {
+            return;
+        }
+        let title = self.lib.get_track(e.track).ok().flatten().map_or_else(String::new, |t| t.title);
+        let mut state = Engine::new(RadioSeed::Track(e.track));
+        // Nothing the queue had comes back.
+        state.mark_served(self.queue.tracks().into_iter().map(Item::Track));
+        let r = &mut self.recs.radio;
+        r.seq += 1;
+        r.run = Some(RadioRun {
+            id: r.seq,
+            state,
+            title: format!("Похожее на «{title}»"),
+            ctx: EventContext::Radio,
+            seed: fastrand::u64(..),
+            queue_gen: Some(generation),
+            streams: HashMap::new(),
+            pool: HashMap::new(),
+            extending: false,
+            want: false,
+            pending: Vec::new(),
+            pending_new: Vec::new(),
+            resume: false,
+            autoplay: true,
+            added: HashSet::new(),
+        });
+        log::info!("autoplay: the queue goes on with a radio of «{title}»");
+        self.radio_fetch_new();
+        self.radio_extend();
+    }
+
+    /// «Автовоспроизведение» was switched off: its radio stops picking (what
+    /// it queued stays).
+    pub(crate) fn autoplay_off(&mut self) {
+        if self.recs.radio.run.as_ref().is_some_and(|r| r.autoplay) {
+            log::info!("autoplay switched off: its radio ends");
+            self.recs.radio.run = None;
+            self.publish_player();
+        }
+    }
+
+    /// «Новое в радио» or «Миксы только из скачанного» changed: the radio's
+    /// upcoming tracks that no longer fit go, and it picks again.
+    pub(crate) fn radio_source_changed(&mut self) {
+        if !self.radio_alive() {
+            return;
+        }
+        let prefs = self.state.read().prefs.clone();
+        let snap = self.snapshot();
+        let Some(run) = self.recs.radio.run.as_ref() else { return };
+        let drop: Vec<u64> = self
+            .queue
+            .upcoming()
+            .iter()
+            .filter(|e| run.added.contains(&e.id))
+            .filter(|e| !radio_allows(e.track, run.streams.contains_key(&e.track), &prefs, snap.as_deref()))
+            .map(|e| e.id)
+            .collect();
+        log::info!("radio «{}»: the source changed, {} upcoming go", run.title, drop.len());
+        for id in drop {
+            self.queue.remove(id);
+        }
+        self.radio_fetch_new();
+        self.preload_next();
+        self.publish_player();
+    }
+
     /// Picks the next [`EXTEND_BY`] on a thread of its own.
     fn radio_extend(&mut self) {
-        let new_share = super::new_share(&self.state.read().prefs);
+        let prefs = self.state.read().prefs.clone();
+        let new_share = super::new_share(&prefs);
+        let local_only = prefs.mixes_downloaded_only;
         let snap = self.snapshot();
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         if run.extending {
@@ -333,7 +444,8 @@ impl Worker {
         let params = RadioParams { new_share, seed: run.seed };
         let tx = self.recs.tx.clone();
         let spawned = std::thread::Builder::new().name("nikgob-radio".into()).spawn(move || {
-            let picks = state.extend(&snap.recs(), EXTEND_BY, &params);
+            // The prefs as they are now, even before the snapshot follows.
+            let picks = state.extend(&snap.recs().local_only(local_only), EXTEND_BY, &params);
             let msg = super::radio::RadioMsg::Extended {
                 id,
                 state: Box::new(state),
@@ -395,10 +507,18 @@ impl Worker {
             return;
         }
         // Stream picks play as "seen" tracks of their service.
+        let prefs = self.state.read().prefs.clone();
+        let snap = self.snapshot();
         let mut ids = Vec::with_capacity(picks.len());
         for p in &picks {
             match &p.item {
-                Item::Track(t) => ids.push(*t),
+                Item::Track(t) => {
+                    if radio_allows(*t, false, &prefs, snap.as_deref()) {
+                        ids.push(*t);
+                    }
+                }
+                // New music (never under «Миксы только из скачанного»).
+                Item::Stream(_) if super::new_share(&prefs) <= 0.0 => {}
                 Item::Stream(r) => {
                     let pooled = self.recs.radio.run.as_ref().and_then(|run| run.pool.get(r).cloned());
                     let Some(t) = pooled.or_else(|| self.stream_track(r)) else { continue };
@@ -414,6 +534,15 @@ impl Worker {
         }
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         log::info!("radio «{}»: {} more", run.title, ids.len());
+        if run.autoplay && ids.is_empty() {
+            // Nothing fits (a small library under «только скачанное»): the
+            // queue simply ends, and autoplay waits for another one.
+            log::info!("autoplay: nothing to go on with");
+            self.recs.radio.autoplay_dry = run.queue_gen;
+            self.recs.radio.run = None;
+            self.publish_player();
+            return;
+        }
         match run.queue_gen {
             None if ids.is_empty() => {
                 self.recs.radio.run = None;
@@ -426,8 +555,10 @@ impl Worker {
                 self.queue.set(&ids, 0, Some(context));
                 self.play_context = ctx;
                 let generation = self.queue.generation();
+                let entries: Vec<u64> = self.queue.current().into_iter().chain(self.queue.upcoming().iter().copied()).map(|e| e.id).collect();
                 if let Some(run) = self.recs.radio.run.as_mut() {
                     run.queue_gen = Some(generation);
+                    run.added.extend(entries);
                 }
                 if let Some(e) = self.queue.current() {
                     self.start(e);
@@ -436,6 +567,11 @@ impl Worker {
             Some(_) => {
                 let resume = std::mem::take(&mut run.resume);
                 self.queue.enqueue(&ids);
+                let up = self.queue.upcoming();
+                let entries: Vec<u64> = up[up.len().saturating_sub(ids.len())..].iter().map(|e| e.id).collect();
+                if let Some(run) = self.recs.radio.run.as_mut() {
+                    run.added.extend(entries);
+                }
                 if resume && self.playing.is_none() && self.status == v::Status::Stopped {
                     if let Some(e) = self.queue.current() {
                         self.start(e);
@@ -628,6 +764,7 @@ impl Worker {
             seed: run.seed,
             streams: run.streams.iter().map(|(t, r)| (*t, r.clone())).collect(),
             pool: run.pool.values().cloned().collect(),
+            autoplay: run.autoplay,
         })
     }
 
@@ -651,6 +788,8 @@ impl Worker {
             pending: Vec::new(),
             pending_new: Vec::new(),
             resume: false,
+            autoplay: save.autoplay,
+            added: HashSet::new(),
         });
         self.play_context = self.recs.radio.run.as_ref().map_or(self.play_context, |r| r.ctx);
     }

@@ -229,4 +229,7 @@ pub struct RadioView {
     pub title: String,
     /// Looking for the next tracks right now.
     pub extending: bool,
+    /// Started by «Автовоспроизведение» when the queue ran out (the title
+    /// is then «Похожее на «…»»).
+    pub autoplay: bool,
 }

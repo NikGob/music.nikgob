@@ -631,6 +631,15 @@ fn general(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
     });
 
     group(ui, "Рекомендации");
+    // What the queue does when it runs out, and from where.
+    let autoplay_hint = if p.autoplay {
+        super::settings_help::radio_source_line(p).to_owned()
+    } else {
+        "Очередь просто заканчивается".to_owned()
+    };
+    row(ui, Id::Autoplay, "Автовоспроизведение", Some(&autoplay_hint), |ui| {
+        ui.add(Switch::new(&mut p.autoplay).id_salt("set-autoplay"));
+    });
     // Only the downloaded: no new music to mix in, the choice waits.
     let new_share_hint = if p.mixes_downloaded_only {
         "Не действует: миксы только из скачанного"

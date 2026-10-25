@@ -124,6 +124,8 @@ pub struct Chrome {
     pub nav: Option<Route>,
     /// Show this tab in the shell's pane.
     pub open_pane: Option<PaneTab>,
+    /// Open Settings at this row (it also closes Now Playing).
+    pub setting: Option<super::pages::SettingId>,
     pub tag: TagEditorUi,
     picker: Option<Picker>,
     ask: Option<Ask>,

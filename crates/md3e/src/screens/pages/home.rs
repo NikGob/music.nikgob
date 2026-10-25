@@ -96,7 +96,7 @@ impl Section {
     /// chip) a quiet line on why it is empty and what to do. «Все» shows
     /// an empty «Новое для тебя» only when there is something to do about
     /// it (the services that look for new music are off).
-    fn shown(self, filter: Filter, h: &HomeView, discovery_off: bool) -> bool {
+    fn shown(self, filter: Filter, h: &HomeView, discovery_off: bool, local_only: bool) -> bool {
         use Section::*;
         if !self.in_filter(filter) {
             return false;
@@ -107,6 +107,9 @@ impl Section {
             Continue => !h.continue_listening.is_empty(),
             StyleMixes => !h.style_mixes.is_empty(),
             ArtistMixes => !h.artist_mixes.is_empty(),
+            // Under «Только скачанное» there is no new music: «Новое» says
+            // so, «Всё» does not show the row.
+            Discover if local_only => filter == Filter::New,
             Discover => !h.discover.is_empty() || filter == Filter::New || discovery_off,
             NewReleases => !h.new_releases.is_empty(),
             LongUnplayed => !h.long_unplayed.is_empty(),
@@ -116,8 +119,8 @@ impl Section {
 }
 
 /// The sections `filter` shows for `h`, top to bottom.
-fn sections(filter: Filter, h: &HomeView, discovery_off: bool) -> Vec<Section> {
-    Section::ORDER.into_iter().filter(|s| s.shown(filter, h, discovery_off)).collect()
+fn sections(filter: Filter, h: &HomeView, discovery_off: bool, local_only: bool) -> Vec<Section> {
+    Section::ORDER.into_iter().filter(|s| s.shown(filter, h, discovery_off, local_only)).collect()
 }
 
 /// A short plain line under a mood's name: what it sounds like.
@@ -248,7 +251,8 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
 
     let filter = pages.home_filter;
     let off = discovery_off(state);
-    let shown = sections(filter, h, off);
+    let local_only = state.prefs.mixes_downloaded_only;
+    let shown = sections(filter, h, off, local_only);
     // The analysis line sits under the board; without one, over the feed.
     let analysis = analysis_line(&state.analysis);
     let mut analysis_said = false;
@@ -305,11 +309,19 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
                 });
             }
             Section::Discover => {
-                let all = (!h.discover.is_empty()).then_some(("Слушать всё", Icon::PlayArrow));
+                let all = (!h.discover.is_empty() && !local_only).then_some(("Слушать всё", Icon::PlayArrow));
                 if widgets::section_header_with(ui, "Новое для тебя", all) {
                     out.push(Command::PlayMix { id: MixId::Discover });
                 }
-                if h.discover.is_empty() {
+                if local_only {
+                    if widgets::quiet_line(
+                        ui,
+                        "Новое скрыто: включено «Только скачанное», а у новой музыки ещё нет файлов.",
+                        Some(("Показать новое", None, Style::Tonal, "home-new-show")),
+                    ) {
+                        out.push(downloaded_only(state, false));
+                    }
+                } else if h.discover.is_empty() {
                     discover_empty(ui, h, off, pages);
                 } else {
                     let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
@@ -365,7 +377,7 @@ fn chips(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Co
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let on = state.prefs.mixes_downloaded_only;
             let chip = FilterChip::new("Только скачанное", on).icon(Icon::DownloadDone).id_salt("home-downloaded-only");
-            if ui.add(chip).md3_tooltip("Миксы и радио — только из скачанных треков", None).clicked() {
+            if ui.add(chip).md3_tooltip("Всё на главной, миксы и радио — только из скачанных треков", None).clicked() {
                 out.push(downloaded_only(state, !on));
             }
         });
@@ -1138,27 +1150,30 @@ mod tests {
         let h = full_home();
         use Section::*;
         assert_eq!(
-            sections(Filter::All, &h, false),
+            sections(Filter::All, &h, false, false),
             vec![Board, Moods, Continue, StyleMixes, ArtistMixes, Discover, LongUnplayed, RecentlyAdded]
         );
         assert_eq!(
-            sections(Filter::Mine, &h, false),
+            sections(Filter::Mine, &h, false, false),
             vec![Board, Continue, StyleMixes, ArtistMixes, LongUnplayed, RecentlyAdded]
         );
-        assert_eq!(sections(Filter::New, &h, false), vec![Discover, RecentlyAdded]);
-        assert_eq!(sections(Filter::Mood, &h, false), vec![Moods, StyleMixes]);
+        assert_eq!(sections(Filter::New, &h, false, false), vec![Discover, RecentlyAdded]);
+        assert_eq!(sections(Filter::Mood, &h, false, false), vec![Moods, StyleMixes]);
+        // «Только скачанное»: no new music in «Всё», «Новое» says why.
+        assert!(!sections(Filter::All, &h, true, true).contains(&Discover));
+        assert_eq!(sections(Filter::New, &h, false, true), vec![Discover, RecentlyAdded]);
     }
 
     #[test]
     fn empty_sections_hide_unless_their_chip_explains_them() {
         let h = HomeView { recently_added: full_home().recently_added, ..Default::default() };
         // «Всё»: only what has cards.
-        assert_eq!(sections(Filter::All, &h, false), vec![Section::RecentlyAdded]);
+        assert_eq!(sections(Filter::All, &h, false, false), vec![Section::RecentlyAdded]);
         // Its own chip says why «Новое для тебя» and the moods are empty.
-        assert_eq!(sections(Filter::New, &h, false), vec![Section::Discover, Section::RecentlyAdded]);
-        assert_eq!(sections(Filter::Mood, &h, false), vec![Section::Moods]);
+        assert_eq!(sections(Filter::New, &h, false, false), vec![Section::Discover, Section::RecentlyAdded]);
+        assert_eq!(sections(Filter::Mood, &h, false, false), vec![Section::Moods]);
         // Discovery switched off: «Всё» says how to switch it on.
-        assert!(sections(Filter::All, &h, true).contains(&Section::Discover));
+        assert!(sections(Filter::All, &h, true, false).contains(&Section::Discover));
         // «Твой микс» before the first build still plays the home's tracks.
         let track = TrackRow {
             id: TrackId::new(),
@@ -1178,7 +1193,7 @@ mod tests {
             clip: false,
         };
         let h = HomeView { mix: vec![track], ..Default::default() };
-        assert_eq!(sections(Filter::All, &h, false), vec![Section::Board]);
+        assert_eq!(sections(Filter::All, &h, false, false), vec![Section::Board]);
     }
 
     #[test]
@@ -1198,10 +1213,10 @@ mod tests {
         h.hero = None;
         assert_eq!(ids(&h), (false, vec![a, b]));
         // The board shows with any of them, under «Всё» and «Моё».
-        assert_eq!(sections(Filter::Mine, &h, false)[0], Section::Board);
-        assert!(!sections(Filter::New, &h, false).contains(&Section::Board));
+        assert_eq!(sections(Filter::Mine, &h, false, false)[0], Section::Board);
+        assert!(!sections(Filter::New, &h, false, false).contains(&Section::Board));
         h.tiles.clear();
-        assert!(!sections(Filter::All, &h, false).contains(&Section::Board));
+        assert!(!sections(Filter::All, &h, false, false).contains(&Section::Board));
     }
 
     #[test]
