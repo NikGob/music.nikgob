@@ -30,8 +30,11 @@ const GUESS_MS: u32 = 210_000;
 const MIN_SONGS: usize = 12;
 /// At most this many mixes.
 pub(crate) const MAX_LANES: usize = 6;
-/// Of one album at most.
-const PER_ALBUM: usize = 8;
+/// A song longer than this is left out (they are skipped early a third of
+/// the time, recs-v2 §2).
+const LONG_MS: u32 = 9 * 60 * 1000;
+/// One world takes at most this share of a lane.
+const WORLD_SHARE: f32 = 0.25;
 /// Japanese is a lane of its own with this many songs and this share of
 /// the starts; else it joins English as «Песни не на русском».
 const JAPANESE_SONGS: usize = 40;
@@ -431,58 +434,37 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
 }
 
 /// About two hours of a lane: the best liked first (with a little chance
-/// mixed in by the day), no more than a fifth by one artist and
-/// [`PER_ALBUM`] of one album, then put in an order where one artist does
-/// not play twice running.
+/// mixed in by the day), nothing over [`LONG_MS`], under the diversity
+/// rules of every mix — an artist once in three, an album twice in ten, a
+/// world twice in three and [`WORLD_SHARE`] of the lane — in the smooth
+/// order by sound.
 fn pick(snap: &Snapshot, tiles: &TilesInput, pool: &[(usize, TrackId)], seed: u64) -> Vec<TrackId> {
+    let duration = |t: &TrackId| tiles.facts.get(t).and_then(|f| f.duration_ms);
     let mut scored: Vec<(f32, usize, TrackId)> = pool
         .iter()
+        .filter(|(_, t)| duration(t).is_none_or(|d| d <= LONG_MS))
         .map(|&(i, t)| {
             let a = snap.taste.affinity_at(i);
             (a.max(0.0).sqrt() + 0.6 * jitter(seed, t), i, t)
         })
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)));
-    let mut per_artist: HashMap<Option<nikgob_core::model::ArtistId>, usize> = HashMap::new();
-    let mut per_album: HashMap<nikgob_core::model::ReleaseId, usize> = HashMap::new();
-    let artist_cap = (pool.len() / 5).clamp(4, 10);
+    // How many songs make the two hours, the best first.
     let mut total: u64 = 0;
-    let mut out: Vec<(Option<nikgob_core::model::ArtistId>, TrackId)> = Vec::new();
+    let mut n = 0;
     let mut songs = HashSet::new();
-    for (_, i, t) in scored {
+    for (_, i, t) in &scored {
         if total >= MIX_MS {
             break;
         }
-        let info = &snap.catalog.tracks()[i];
-        if !songs.insert(info.song.unwrap_or(info.id)) {
-            continue;
+        let info = &snap.catalog.tracks()[*i];
+        if songs.insert(info.song.unwrap_or(info.id)) {
+            total += u64::from(duration(t).unwrap_or(GUESS_MS));
+            n += 1;
         }
-        let artist = info.artists.first().copied();
-        if per_artist.get(&artist).copied().unwrap_or(0) >= artist_cap {
-            continue;
-        }
-        if let Some(r) = info.release
-            && per_album.get(&r).copied().unwrap_or(0) >= PER_ALBUM
-        {
-            continue;
-        }
-        *per_artist.entry(artist).or_default() += 1;
-        if let Some(r) = info.release {
-            *per_album.entry(r).or_default() += 1;
-        }
-        total += u64::from(tiles.facts.get(&t).and_then(|f| f.duration_ms).unwrap_or(GUESS_MS));
-        out.push((artist, t));
     }
-    // One artist not twice running where another can come between.
-    let mut ordered: Vec<TrackId> = Vec::with_capacity(out.len());
-    let mut last = None;
-    while !out.is_empty() {
-        let k = out.iter().position(|(a, _)| Some(*a) != last).unwrap_or(0);
-        let (a, t) = out.remove(k);
-        last = Some(a);
-        ordered.push(t);
-    }
-    ordered
+    let cands: Vec<(TrackId, f32)> = scored.iter().map(|(s, _, t)| (*t, *s)).collect();
+    snap.recs().mix_of(&cands, n, WORLD_SHARE)
 }
 
 /// «На повторе»: the songs started most over the last two weeks (a month
@@ -589,6 +571,61 @@ fn new_for(snap: &Snapshot, input: &BuildInput, langs: &Langs, lane: v::Lane, so
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lane where one franchise is the most loved (as MADE IN ABYSS in
+    /// «Тихие саундтреки»): never more than two of it running, a quarter of
+    /// the lane at most, and no song over nine minutes.
+    #[test]
+    fn a_lane_has_no_run_of_one_world() {
+        use nikgob_core::model::{ArtistId, ReleaseId};
+        use nikgob_recs::{Catalog, DiscoveryFilter, Taste, TasteInput, TrackFacts, TrackInfo, VectorIndex};
+        let ids: Vec<TrackId> = (0..80).map(|_| TrackId::new()).collect();
+        let albums: Vec<ReleaseId> = (0..12).map(|_| ReleaseId::new()).collect();
+        let tracks: Vec<TrackInfo> = ids
+            .iter()
+            .enumerate()
+            .map(|(k, id)| {
+                let (world, album) = if k < 40 { ("made in abyss".to_owned(), albums[k % 4]) } else { (format!("world {}", k % 8), albums[4 + k % 8]) };
+                TrackInfo::new(*id, vec![ArtistId::new()], Some(album)).with_world(&world)
+            })
+            .collect();
+        let catalog = Catalog::new(tracks);
+        let mut index = VectorIndex::new();
+        for (k, id) in ids.iter().enumerate() {
+            let mut v = [0.0f32; nikgob_recs::DIM];
+            v[0] = (k % 40) as f32;
+            v[1] = (k / 40) as f32;
+            index.insert(*id, v);
+        }
+        let input = TasteInput { likes: ids[..40].to_vec(), ..TasteInput::default() };
+        let taste = Taste::build(&catalog, &input, 1_000 * DAY_MS);
+        let snap = Snapshot {
+            taste,
+            catalog,
+            index,
+            filter: DiscoveryFilter::default(),
+            artist_keys: HashMap::new(),
+            known_albums: HashSet::new(),
+            played_songs: HashSet::new(),
+            suggested_new: Vec::new(),
+            local_only: false,
+        };
+        let mut tiles = TilesInput::default();
+        for (k, id) in ids.iter().enumerate() {
+            let ms = if k == 0 { 10 * 60_000 } else { 180_000 };
+            tiles.facts.insert(*id, TrackFacts { duration_ms: Some(ms), ..TrackFacts::default() });
+        }
+        let pool: Vec<(usize, TrackId)> = ids.iter().enumerate().map(|(k, id)| (k, *id)).collect();
+        let picked = pick(&snap, &tiles, &pool, 7);
+        assert!(picked.len() >= 30, "two hours: {}", picked.len());
+        assert!(!picked.contains(&ids[0]), "ten minutes is too long");
+        let mia: Vec<bool> = picked.iter().map(|t| ids[..40].contains(t)).collect();
+        assert!(mia.iter().filter(|m| **m).count() * 4 <= picked.len() + 3, "a quarter: {mia:?}");
+        let worlds: Vec<Option<u64>> = picked.iter().map(|t| snap.catalog.get(*t).and_then(|i| i.world)).collect();
+        for w in worlds.windows(3) {
+            assert!(!(w[0] == w[1] && w[1] == w[2]), "a world thrice running: {worlds:?}");
+        }
+    }
 
     #[test]
     fn lyrics_tell_the_language_whatever_the_format() {

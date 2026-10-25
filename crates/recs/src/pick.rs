@@ -171,6 +171,27 @@ impl<'a> Recs<'a> {
         }
     }
 
+    /// `n` of `cands` (catalog tracks and their scores, any order) under
+    /// the diversity rules with at most `world_share` of one world, in the
+    /// smooth order from the best scored: a mix of fixed songs («Миксы для
+    /// тебя»). Disliked tracks are the caller's to leave out.
+    pub fn mix_of(&self, cands: &[(TrackId, f32)], n: usize, world_share: f32) -> Vec<TrackId> {
+        let mut slots: Vec<Slot> = cands
+            .iter()
+            .filter_map(|&(id, score)| Some(self.slot(self.catalog.position(id)?, Reason::Favourite, score)))
+            .collect();
+        slots.sort_by(|a, b| b.score.total_cmp(&a.score));
+        let rules = Diversity { world_share, ..Diversity::default() };
+        let picked = select_diverse(slots, n, &rules, &mut HashSet::new());
+        arrange(self, picked, &[], None, &rules)
+            .into_iter()
+            .filter_map(|s| match s.item {
+                Item::Track(id) => Some(id),
+                Item::Stream(_) => None,
+            })
+            .collect()
+    }
+
     /// A slot for a new track.
     pub(crate) fn new_slot(&self, t: &NewTrack, score: f32) -> Slot {
         Slot {
@@ -318,13 +339,14 @@ impl Diversity {
 
     /// Caps on whole counts that keep an order of `n` tracks possible:
     /// per artist `ceil(n / artist_window)`, per album
-    /// `album_max * ceil(n / album_window)`, per world
-    /// `world_max * ceil(n / world_window)`.
+    /// `album_max * ceil(n / album_window)`, per world exactly as many as
+    /// `n` places hold (`world_max` of every window and of the part left).
     pub fn caps(&self, n: usize) -> (usize, usize, usize) {
+        let world = self.world_max * (n / self.world_window) + self.world_max.min(n % self.world_window);
         (
             n.div_ceil(self.artist_window).max(1),
             self.album_max * n.div_ceil(self.album_window).max(1),
-            if self.worlds() { self.world_max * n.div_ceil(self.world_window).max(1) } else { usize::MAX },
+            if self.worlds() { world.max(1) } else { usize::MAX },
         )
     }
 
@@ -470,11 +492,14 @@ pub(crate) fn arrange(recs: &Recs<'_>, mut slots: Vec<Slot>, before: &[Placed], 
             }
         }
         let (artist_cap, album_cap, world_cap) = rules.caps(slots.len() - 1);
+        // How far over what the places left hold the counts would be: the
+        // fewer, the better (one crowded album does not hide a crowded
+        // world).
         let crowded = |s: &Slot| {
-            let over_artist = artist_left.iter().any(|(a, c)| c - usize::from(s.artists.contains(a)) > artist_cap);
-            let over_album = album_left.iter().any(|(b, c)| c - usize::from(s.album == Some(*b)) > album_cap);
-            let over_world = world_left.iter().any(|(w, c)| c - usize::from(s.world == Some(*w)) > world_cap);
-            usize::from(over_artist || over_album || over_world)
+            let over = |c: usize, mine: bool, cap: usize| (c - usize::from(mine)).saturating_sub(cap);
+            artist_left.iter().map(|(a, c)| over(*c, s.artists.contains(a), artist_cap)).sum::<usize>()
+                + album_left.iter().map(|(b, c)| over(*c, s.album == Some(*b), album_cap)).sum::<usize>()
+                + world_left.iter().map(|(w, c)| over(*c, s.world == Some(*w), world_cap)).sum::<usize>()
         };
         let mut best: Option<((usize, usize), f32, usize)> = None;
         for (i, s) in slots.iter().enumerate() {
