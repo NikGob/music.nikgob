@@ -453,7 +453,7 @@ pub fn song_row(
                 .style(Style::Standard)
                 .filled_icon(on)
                 .selected(on)
-                .tooltip(if on { "Убрать из Любимых" } else { "В Любимые — останется у тебя" })
+                .tooltip(if on { "Убрать из любимого" } else { "В любимое" })
                 .id_salt(id.with("like"));
             like = ui.put(slot, b).clicked();
         }

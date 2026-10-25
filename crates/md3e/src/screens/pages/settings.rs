@@ -125,7 +125,7 @@ fn dropdown(ui: &mut Ui, id: &str, current: &str, options: &[(String, bool)]) ->
     let resp = ui.add(FilterChip::new(ellipsize(current, 30), false).trailing_icon(Icon::ExpandMore).id_salt(id));
     let mut menu = Menu::new((id, "menu"));
     for (label, selected) in options {
-        menu = menu.item(MenuItem::new(ellipsize(label, 34)).selected(*selected));
+        menu = menu.item(MenuItem::new(label.as_str()).selected(*selected));
     }
     menu.attach(&resp)
 }

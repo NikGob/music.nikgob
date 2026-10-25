@@ -190,7 +190,7 @@ pub fn release_card(
 
 /// What liking an album does: all its tracks go into (or out of) "Любимые".
 pub fn album_like_label(liked: bool) -> &'static str {
-    if liked { "Убрать альбом из Любимых" } else { "Добавить альбом в Любимые" }
+    if liked { "Убрать из любимого" } else { "В любимое" }
 }
 
 /// Right-click menu of an album (card or row).
@@ -922,7 +922,7 @@ fn track_row(
                         IconButton::new(Icon::Favorite)
                             .size(Size::Xs)
                             .selected(liked)
-                            .tooltip(if liked { "Убрать из Любимых" } else { "В Любимые" })
+                            .tooltip(if liked { "Убрать из любимого" } else { "В любимое" })
                             .id_salt(("track-like", id, i)),
                     )
                     .clicked()
@@ -1087,7 +1087,7 @@ fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId, marks: &
     m.divider()
         .item(
             MenuItem::new(if playlist == LIKED_PLAYLIST {
-                "Убрать из Любимых"
+                "Убрать из любимого"
             } else {
                 "Убрать из плейлиста"
             })

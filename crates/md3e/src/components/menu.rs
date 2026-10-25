@@ -19,7 +19,9 @@ pub const ITEM_HEIGHT: f32 = 48.0;
 /// The pass a menu was last on screen in (see [`Menu::shown_lately`]).
 const SHOWN_KEY: &str = "md3e-menu-shown";
 pub const MIN_WIDTH: f32 = 112.0;
-pub const MAX_WIDTH: f32 = 280.0;
+/// Wide enough for every label the app has: a menu grows to its longest
+/// item, so no label is cut.
+pub const MAX_WIDTH: f32 = 400.0;
 const PAD: f32 = 4.0;
 const DIVIDER_HEIGHT: f32 = 9.0;
 
@@ -257,7 +259,7 @@ impl Menu {
             }
             content_w = content_w.max(w);
         }
-        let menu_w = (content_w + 2.0 * PAD).clamp(MIN_WIDTH, MAX_WIDTH);
+        let menu_w = menu_width(content_w);
         let height: f32 = 2.0 * PAD
             + self
                 .entries
@@ -491,6 +493,12 @@ fn paint_item(ui: &egui::Ui, row: Rect, item: &MenuItem, r: &Response, highlight
     r.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, sel, &label));
 }
 
+/// The width of a menu whose longest item is `content_w` wide: a point to
+/// spare, so the label measured is never cut when it is laid out again.
+pub fn menu_width(content_w: f32) -> f32 {
+    (content_w.ceil() + 1.0 + 2.0 * PAD).clamp(MIN_WIDTH, MAX_WIDTH)
+}
+
 /// Moves a menu highlight over the enabled items, wrapping around. `None`
 /// starts from the top (`dir > 0`) or the bottom (`dir < 0`). Returns `None`
 /// when nothing is enabled.
@@ -521,6 +529,14 @@ pub fn step_index(current: Option<usize>, enabled: &[bool], dir: i32) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_menu_fits_its_longest_item() {
+        // «Не рекомендовать исполнителя» with its icon is about 330 points.
+        assert!(menu_width(330.4) - 2.0 * PAD >= 330.4 + 0.5);
+        assert_eq!(menu_width(10.0), MIN_WIDTH);
+        assert_eq!(menu_width(900.0), MAX_WIDTH);
+    }
 
     #[test]
     fn highlight_wraps_and_skips_disabled() {

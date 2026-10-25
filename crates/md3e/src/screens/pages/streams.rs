@@ -184,7 +184,7 @@ fn track_row(
                         IconButton::new(Icon::Favorite)
                             .size(Size::Xs)
                             .selected(t.liked)
-                            .tooltip(if t.liked { "Убрать из Любимых" } else { "В Любимые" })
+                            .tooltip(if t.liked { "Убрать из любимого" } else { "В любимое" })
                             .id_salt(("st-like", id, i)),
                     )
                     .clicked()
@@ -382,7 +382,7 @@ fn album_menu(key: impl egui::AsId, a: &StreamAlbumCard, can_download: bool) -> 
     Menu::new(key)
         .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
         .item(MenuItem::new("Скачать").icon(Icon::Download).enabled(can_download))
-        .item(MenuItem::new("В Любимые").icon(Icon::Favorite).enabled(!a.have.complete()))
+        .item(MenuItem::new("В любимое").icon(Icon::Favorite).enabled(!a.have.complete()))
         .divider()
         .item(MenuItem::new("Поделиться").icon(Icon::Share))
         .item(MenuItem::new("Открыть").icon(Icon::Album))
@@ -607,7 +607,7 @@ fn album_page(
             .size(Size::M)
             .style(Style::Tonal)
             .selected(v.liked)
-            .tooltip(if v.liked { "Убрать альбом из Любимых" } else { "Альбом в Любимые" })
+            .tooltip(if v.liked { "Убрать из любимого" } else { "В любимое" })
             .into(),
         IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into(),
     ];

@@ -699,7 +699,7 @@ fn discover_menu(key: impl egui::AsId, t: &StreamTrackRow) -> Menu {
         .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic).enabled(t.playable))
         .item(MenuItem::new(super::RADIO_BY_TRACK).icon(Icon::Radio))
         .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
-        .item(MenuItem::new(if t.liked { "Убрать из Любимых" } else { "В Любимые" }).icon(Icon::Favorite).selected(t.liked))
+        .item(MenuItem::new(if t.liked { "Убрать из любимого" } else { "В любимое" }).icon(Icon::Favorite).selected(t.liked))
         .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!t.artists.linked().is_empty()))
         .divider()
         .item(MenuItem::new("Не нравится").icon(Icon::ThumbDown))

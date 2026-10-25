@@ -165,7 +165,7 @@ impl Chrome {
 
     fn item(act: Act, t: &TrackRow, state: &ViewState) -> MenuItem {
         match act {
-            Act::Like => MenuItem::new(if t.liked { "Убрать из Любимых" } else { "В Любимые" })
+            Act::Like => MenuItem::new(if t.liked { "Убрать из любимого" } else { "В любимое" })
                 .icon(Icon::Favorite)
                 .shortcut("Ctrl+L"),
             Act::Lyrics => MenuItem::new("Текст песни").icon(Icon::Lyrics),
