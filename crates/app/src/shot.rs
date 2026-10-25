@@ -172,8 +172,13 @@ impl Shot {
             let [w, h] = img.size;
             let raw: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
             let to = self.snap.take();
-            if let Some(buf) = image::RgbaImage::from_raw(w as u32, h as u32, raw) {
-                let _ = buf.save(to.as_ref().unwrap_or(&self.path));
+            match image::RgbaImage::from_raw(w as u32, h as u32, raw) {
+                Some(buf) => {
+                    if let Err(e) = buf.save(to.as_ref().unwrap_or(&self.path)) {
+                        log::warn!("shot: cannot save the screenshot to {}: {e}", to.as_ref().unwrap_or(&self.path).display());
+                    }
+                }
+                None => log::warn!("shot: the screenshot is not {w}×{h}"),
             }
             if to.is_some() {
                 self.requested = false;

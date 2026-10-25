@@ -1110,6 +1110,8 @@ impl Md3eUi {
             "torrents" => S::Prowlarr,
             "recs" => S::RadioNewShare,
             "autoplay" => S::Autoplay,
+            "dislikes" => S::DislikeButton,
+            "blacklist" => S::DislikedArtists,
             "stream-analysis" => S::StreamAnalysis,
             "appearance" => S::Design,
             _ => S::CoverClickPause,

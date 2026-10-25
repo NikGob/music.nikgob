@@ -36,6 +36,8 @@
 //!   tiles, with the demo library's covers. `fake:bento:2` — the daylist
 //!   and two tiles; `fake:bento:no-daylist` — no daylist, three tiles
 //!   («Твой микс» takes the big spot).
+//! - `fake:keep` — the playing song is offered to be kept, as a new song
+//!   heard out twice is («Оставить у себя «…»?»).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -63,6 +65,7 @@ pub struct Fakes {
     no_recs: bool,
     /// `fake:bento`: how many tiles, and whether there is a daylist.
     bento: Option<(usize, bool)>,
+    keep: bool,
 }
 
 impl Fakes {
@@ -93,6 +96,7 @@ impl Fakes {
             "bento" => self.bento = Some((5, true)),
             "bento:2" => self.bento = Some((2, true)),
             "bento:no-daylist" => self.bento = Some((3, false)),
+            "keep" => self.keep = true,
             _ => return false,
         }
         true
@@ -116,6 +120,7 @@ impl Fakes {
             || self.extending
             || self.no_recs
             || self.bento.is_some()
+            || self.keep
     }
 
     /// `state` with the fakes laid over it.
@@ -129,6 +134,26 @@ impl Fakes {
         if self.wishlist {
             s.downloads.wishlist = wishlist();
         }
+        if self.keep
+            && let Some(t) = s.player.current.clone()
+            && !s.toasts.iter().any(|x| x.id == u64::MAX)
+        {
+            let text = format!("Оставить у себя «{}»?", t.title);
+            s.toasts.push(nikgob_view::Toast {
+                id: u64::MAX,
+                kind: nikgob_view::ToastKind::guess(&text),
+                text,
+                action: Some((
+                    "♡ Оставить".into(),
+                    nikgob_view::Command::Like(nikgob_core::model::LikeTarget::Track(t.id), true),
+                )),
+                open: None,
+                at: std::time::Instant::now(),
+                long: true,
+                again: 0,
+            });
+        }
+
         if self.album_status {
             let mut rows = Vec::new();
             if let Some(a) = s.artist.as_mut() {
