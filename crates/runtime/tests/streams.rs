@@ -309,3 +309,25 @@ fn a_copy_cut_mid_track_goes_on_from_there_on_the_copy_found_next() {
     assert_eq!(*rig.seeks.lock().unwrap(), vec![at]);
     assert!(rig.position() >= at, "{:?}", rig.position());
 }
+
+/// The only copy of a song was set aside once (YouTube Music had no
+/// details of it): ▶ tries it again rather than saying there is no file,
+/// and once it plays it counts again.
+#[test]
+fn a_copy_set_aside_is_tried_again_and_counts_once_it_plays() {
+    let lib = Library::open_in_memory().unwrap();
+    let track = lib
+        .upsert_stream_track(&find(&FakeService::youtube(), "yt-discovery-1"))
+        .unwrap();
+    let source = lib.sources_of_track(track).unwrap()[0].id;
+    lib.set_source_available(source, false).unwrap();
+    let rig = Rig::start(lib.clone(), vec![Arc::new(FakeService::youtube())]);
+    rig.play(track);
+    let first = rig.asked(0);
+    assert_eq!(first.source, stream(Service::Youtube, "yt-discovery-1"));
+    assert!(!rig.rt.state().toasts.iter().any(|t| t.text.contains("Нет файла")));
+    let tx = rig.rt.playback_sender();
+    tx.send(PlaybackEvent::Started { id: first.id }).unwrap();
+    tx.send(PlaybackEvent::Quality { id: first.id, label: "Opus".into() }).unwrap();
+    wait_for("the copy to count again", || lib.get_source(source).unwrap().unwrap().available);
+}

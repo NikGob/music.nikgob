@@ -1100,11 +1100,20 @@ impl Worker {
                         done += 1;
                     }
                 }
+                // YouTube Music has no song details for many videos that
+                // play (an upload of a soundtrack, a cover): the video is
+                // set aside only when it fails to play.
+                Err(StreamError::Unavailable) if service == Service::Youtube => {
+                    log::debug!("{service}: no details of {id}; it stays playable");
+                }
                 Err(StreamError::Unavailable) => {
                     let kind = service.source_kind();
                     for s in self.lib.sources_of_track(track).unwrap_or_default() {
                         if s.kind == kind && s.locator == id {
-                            let _ = self.lib.set_source_available(s.id, false);
+                            log::info!("{track}: {service} no longer has {id}");
+                            if let Err(e) = self.lib.set_source_available(s.id, false) {
+                                log::warn!("{track}: setting aside {id}: {e}");
+                            }
                         }
                     }
                 }

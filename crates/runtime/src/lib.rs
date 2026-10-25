@@ -1040,22 +1040,52 @@ impl Worker {
 
     /// What to hand the engine for `e`: its best source that is usable and
     /// not in `skip` (local > Spotify > YouTube, then quality). A stream
-    /// source needs its service registered. Returns the source too.
+    /// source needs its service registered. A stream copy set aside earlier
+    /// (its details or its video refused once) is tried again when nothing
+    /// else plays, unless it was refused in the last hours (`REFUSED_TTL`).
+    /// Returns the source too; says in the log why nothing plays.
     fn request_skipping(
         &mut self,
         e: Entry,
         skip: &[SourceId],
     ) -> Option<(PlayRequest, SourceId, SourceKind)> {
-        let mut sources = self.lib.sources_of_track(e.track).ok()?;
-        sources.retain(|s| s.available && !skip.contains(&s.id));
-        sources.sort_by_key(|s| (s.kind.priority(), std::cmp::Reverse(s.quality_score)));
+        let mut sources = match self.lib.sources_of_track(e.track) {
+            Ok(s) => s,
+            Err(err) => {
+                log::warn!("{}: its sources could not be read: {err}", e.track);
+                return None;
+            }
+        };
+        let all = sources.len();
+        sources.retain(|s| s.trashed_at.is_none() && !skip.contains(&s.id));
+        sources.sort_by_key(|s| (!s.available, s.kind.priority(), std::cmp::Reverse(s.quality_score)));
+        let refused = self.refused_videos();
         // A stream needs its service on and able to play sound for this
         // account (Spotify not connected, or before its playback login:
         // the library's Spotify tracks play from YouTube Music).
-        let src = sources.into_iter().find(|s| match s.kind.service() {
-            None => true,
-            Some(service) => self.has_audio(service),
-        })?;
+        let usable = |w: &mut Self, s: &nikgob_core::model::Source| match s.kind.service() {
+            None => s.available,
+            Some(service) => {
+                (s.available || (s.kind == SourceKind::Youtube && !refused.contains(&s.locator))) && w.has_audio(service)
+            }
+        };
+        let Some(src) = sources.iter().find(|s| usable(self, s)).cloned() else {
+            let why = if all == 0 {
+                "it has no source".to_owned()
+            } else if sources.is_empty() {
+                format!("all its {all} sources were tried or trashed")
+            } else if sources.iter().all(|s| !s.available && s.kind.service().is_none()) {
+                "its files are missing".to_owned()
+            } else {
+                let services: Vec<&str> = sources.iter().filter_map(|s| s.kind.service()).map(|s| s.as_str()).collect();
+                format!("no audio from {} now ({} sources set aside)", services.join(", "), sources.iter().filter(|s| !s.available).count())
+            };
+            log::warn!("{}: nothing to play: {why}", e.track);
+            return None;
+        };
+        if !src.available {
+            log::info!("{}: trying its {} copy {} set aside earlier", e.track, src.kind.as_str(), src.locator);
+        }
         let duration = self
             .lib
             .get_track(e.track)
@@ -1426,6 +1456,15 @@ impl Worker {
                 }
                 self.qualities.push((id, label));
                 if self.playing.map(|e| e.id) == Some(id) {
+                    // A copy set aside earlier plays after all: it counts again.
+                    if let Some((source, kind)) = self.playing_source.filter(|(_, k)| !k.is_local())
+                        && self.lib.get_source(source).ok().flatten().is_some_and(|s| !s.available)
+                    {
+                        log::info!("{kind} copy {source} plays again");
+                        if let Err(e) = self.lib.set_source_available(source, true) {
+                            log::warn!("{source}: {e}");
+                        }
+                    }
                     self.publish_now_playing();
                 }
             }
