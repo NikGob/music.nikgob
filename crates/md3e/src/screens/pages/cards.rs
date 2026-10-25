@@ -151,19 +151,34 @@ pub fn names_line(fits: &dyn Fn(&str) -> bool, names: &[String], new: &[String])
         }
         s
     };
-    let mut mine: Vec<&str> = Vec::new();
-    for (k, n) in names.iter().enumerate() {
-        let mut trial = mine.clone();
-        trial.push(n);
-        let all = k + 1 == names.len() && mine.len() + 1 == names.len();
-        let fresh: Vec<&str> = new.iter().take(1).map(String::as_str).collect();
-        if fits(&compose(&trial, &fresh, all)) {
-            mine = trial;
+    // The user's own names, with room for the first new one (when even one
+    // name and it do not fit, the new one gives way).
+    let own = |fresh: &[&str]| -> Vec<&str> {
+        let mut mine: Vec<&str> = Vec::new();
+        for (k, n) in names.iter().enumerate() {
+            let mut trial = mine.clone();
+            trial.push(n);
+            let all = k + 1 == names.len() && mine.len() + 1 == names.len();
+            if fits(&compose(&trial, fresh, all)) {
+                mine = trial;
+            }
+            if fresh.is_empty() && mine.len() >= 3 {
+                // Enough: the line says «и другие» after three.
+                break;
+            }
         }
-        if new.is_empty() && mine.len() >= 3 {
-            // Enough: the line says «и другие» after three.
-            break;
-        }
+        mine
+    };
+    let first_new: Vec<&str> = new.iter().take(1).map(String::as_str).collect();
+    let mut mine = own(&first_new);
+    if mine.is_empty() && !first_new.is_empty() {
+        mine = own(&[]);
+    }
+    // Not one whole name fits: the first, cut where the line ends.
+    if mine.is_empty()
+        && let Some(n) = names.first()
+    {
+        mine.push(n);
     }
     let all_mine = mine.len() == names.len();
     let mut fresh: Vec<&str> = Vec::new();
@@ -567,6 +582,19 @@ mod tests {
         let new: Vec<String> = vec!["Пошлая Молли".into()];
         let mine: Vec<String> = vec!["Серега Пират".into(), "mzlff".into()];
         assert_eq!(names_line(&|t| t.chars().count() <= 60, &mine, &new), "Серега Пират, mzlff и новое: Пошлая Молли");
+    }
+
+    /// A new name too long for the line («Песни на японском» with «С
+    /// новым») no longer takes the user's own names with it.
+    #[test]
+    fn a_long_new_name_leaves_the_own_names() {
+        let mine: Vec<String> = ["Eve", "ammo", "大原ゆい子", "Ado"].iter().map(|s| (*s).to_owned()).collect();
+        let new: Vec<String> = vec!["ヨルシカ / n-buna Official Channel and Friends".into()];
+        let fits = |t: &str| t.chars().count() <= 40;
+        assert_eq!(names_line(&fits, &mine, &new), "Eve, ammo, 大原ゆい子 и другие");
+        // Not even one whole name: the first, for the line to cut.
+        let long: Vec<String> = vec!["A name longer than any line could ever hold".into()];
+        assert_eq!(names_line(&|t| t.chars().count() <= 10, &long, &[]), "A name longer than any line could ever hold");
     }
 }
 

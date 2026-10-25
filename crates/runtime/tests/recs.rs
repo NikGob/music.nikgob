@@ -878,3 +878,32 @@ fn nothing_goes_to_the_network_without_a_usable_service() {
     assert_eq!(yt.total_calls() + dz.total_calls() + sp.total_calls(), 0);
     assert!(s.rt.state().home.discover.is_empty());
 }
+
+/// Every mix of «Миксы для тебя» names its artists, the language lanes
+/// (Russian, Japanese) as much as the soundtracks and «На повторе».
+#[test]
+fn every_lane_names_its_artists() {
+    let ru = ["снова страшно", "пустой вокзал", "красный флаг", "апельсин", "дом"];
+    let ja = ["よるのうた", "あいのうた", "ひかりのなか", "さくらのみち", "なつのおわり"];
+    let mut named: Vec<(String, Vec<String>)> = Vec::new();
+    for a in ["Серега Пират", "mzlff", "nyan.mp3", "MORGENSHTERN"] {
+        named.push((a.to_owned(), ru.iter().map(|t| format!("{t} {a}")).collect()));
+    }
+    for a in ["Eve", "ammo", "大原ゆい子", "リコ", "Ado", "Yorushika", "sakanaction", "ヒトリエ", "9Lana"] {
+        named.push((a.to_owned(), ja.iter().map(|t| format!("{t}・{a}")).collect()));
+    }
+    let named_ref: Vec<(&str, Vec<&str>)> = named.iter().map(|(a, t)| (a.as_str(), t.iter().map(String::as_str).collect())).collect();
+    let named_ref: Vec<(&str, &[&str])> = named_ref.iter().map(|(a, t)| (*a, t.as_slice())).collect();
+    let l = library(2, 4, 5, &named_ref);
+    let preview = nikgob_runtime::preview_home(&l.lib, &std::env::temp_dir()).unwrap();
+    let lanes = &preview.home.lanes;
+    assert!(lanes.iter().any(|c| c.lane == nikgob_view::Lane::Russian), "{:?}", lanes.iter().map(|c| c.lane).collect::<Vec<_>>());
+    assert!(
+        lanes.iter().any(|c| matches!(c.lane, nikgob_view::Lane::Japanese | nikgob_view::Lane::NotRussian)),
+        "{:?}",
+        lanes.iter().map(|c| c.lane).collect::<Vec<_>>()
+    );
+    for c in lanes {
+        assert!(!c.artists.is_empty(), "«{}» names no artist", c.lane.title());
+    }
+}
