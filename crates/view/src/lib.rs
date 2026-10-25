@@ -762,7 +762,8 @@ pub struct Prefs {
     pub design: Design,
     pub theme: ThemeMode,
     pub contrast: u8,
-    /// Index into the design system's scheme variants (MD3E: Content first).
+    /// Index into the design system's scheme variants (MD3E: Content first,
+    /// TonalSpot «Спокойная» by default).
     pub scheme_variant: u8,
     pub ambient: Ambient,
     pub fps_limit: u32,
@@ -1547,7 +1548,7 @@ impl Default for Prefs {
             design: Design::Md3e,
             theme: ThemeMode::Dark,
             contrast: 0,
-            scheme_variant: 0,
+            scheme_variant: 1,
             ambient: Ambient::Reactive,
             fps_limit: 60,
             reduced_motion: false,
