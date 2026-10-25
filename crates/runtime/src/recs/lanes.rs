@@ -1,10 +1,10 @@
 //! «Миксы для тебя» (home v2 §3, §8): the lanes the user listens in. Songs
-//! by the language their lyrics are sung in (the title is a poor guess for
-//! this library: Japanese artists write in Latin), else the language their
-//! artist's lyrics are in, else what the title says plainly («RUS COVER»,
-//! kana, Cyrillic) — a Latin title alone says nothing, and a song of an
-//! unknown language goes in no lane by language; soundtracks apart and
-//! split by energy into «Тихие» and «Бодрые», and «На повторе». The set and
+//! by the language of their [`SongType`](nikgob_recs::SongType) (their
+//! lyrics', else their artist's, else what the title says plainly; a song
+//! of an unknown language goes in no lane by language, and a lane holds
+//! only songs of its own: the diversity rules may make it shorter, never
+//! fill it from another); soundtracks apart and split by energy into
+//! «Тихие» and «Бодрые», and «На повторе». The set and
 //! its order follow the lanes' share of starts over four weeks; the songs
 //! are picked anew each day (at 06:00, `local_day`) or with «Собрать
 //! заново».
@@ -13,8 +13,9 @@ use std::collections::{HashMap, HashSet};
 
 use nikgob_core::model::{EventType, TrackId};
 use nikgob_core::streaming::StreamTrack;
-use nikgob_recs::tiles::{Script, franchise, script_of};
-use nikgob_recs::{Axes, TilesInput};
+use nikgob_recs::songtype::VoiceSource;
+use nikgob_recs::tiles::franchise;
+use nikgob_recs::{Axes, Lang, TilesInput};
 use nikgob_view as v;
 
 use super::{BuildInput, CoverRef, Snapshot, day_seed};
@@ -80,225 +81,6 @@ impl LaneHome {
     }
 }
 
-/// What a song is sung in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Lang {
-    Russian,
-    English,
-    Japanese,
-    /// German, Spanish, Korean…: never «Песни на английском», maybe «Песни
-    /// не на русском».
-    Other,
-}
-
-/// Lyrics in Latin letters need this many words to tell their language …
-const LATIN_WORDS: usize = 6;
-/// … and the detector this much confidence.
-const LATIN_CONFIDENCE: f64 = 0.5;
-
-/// Uploaders whose name stands where the artist's should (a channel of
-/// anime openings): they cast no vote for a language.
-const UPLOADERS: &[&str] = &["crunchyroll", "funimation", "aniplex", "muse asia", "ani-one asia", "various artists"];
-
-/// Whether a word is spelt like romanised Japanese: syllables of an
-/// optional onset and a vowel, «n», or a doubled consonant.
-fn romaji_word(w: &str) -> bool {
-    const ONSETS: [&str; 30] = [
-        "ky", "gy", "sh", "ch", "ts", "ny", "hy", "by", "py", "my", "ry", "j", "k", "g", "s", "z", "t", "d", "n", "h",
-        "b", "p", "m", "y", "r", "w", "f", "", "", "",
-    ];
-    let b = w.as_bytes();
-    let mut i = 0;
-    if b.is_empty() {
-        return false;
-    }
-    'next: while i < b.len() {
-        // A doubled consonant («kk», «tt»): the first is a pause.
-        if i + 1 < b.len() && b[i] == b[i + 1] && b"kstpgdbcmz".contains(&b[i]) {
-            i += 1;
-            continue;
-        }
-        for o in ONSETS {
-            let o = o.as_bytes();
-            if b[i..].starts_with(o) && b.get(i + o.len()).is_some_and(|c| b"aiueo".contains(c)) {
-                i += o.len() + 1;
-                continue 'next;
-            }
-        }
-        if b[i] == b'n' {
-            i += 1;
-            continue;
-        }
-        return false;
-    }
-    true
-}
-
-/// Whether Latin lyrics are romanised Japanese: nearly every word spelt
-/// so, and its particles among them.
-fn romaji(words: &[String]) -> bool {
-    const PARTICLES: [&str; 11] = ["wa", "no", "ga", "wo", "ni", "de", "to", "mo", "yo", "ne", "ka"];
-    let shaped = words.iter().filter(|w| romaji_word(w)).count();
-    let particles = words.iter().filter(|w| PARTICLES.contains(&w.as_str())).count();
-    shaped * 100 >= words.len() * 85 && particles >= 2
-}
-
-/// The language of lyrics in Latin letters, when they say it clearly.
-fn latin_lang(text: &str) -> Option<Lang> {
-    let words: Vec<String> = text
-        .split(|c: char| !c.is_alphabetic() && c != '\'')
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect();
-    if words.len() < LATIN_WORDS {
-        return None;
-    }
-    if romaji(&words) {
-        return Some(Lang::Japanese);
-    }
-    match whatlang::detect(text) {
-        Some(info) if info.is_reliable() || info.confidence() >= LATIN_CONFIDENCE => Some(match info.lang() {
-            whatlang::Lang::Eng => Lang::English,
-            whatlang::Lang::Rus => Lang::Russian,
-            whatlang::Lang::Jpn => Lang::Japanese,
-            _ => Lang::Other,
-        }),
-        // A line or two the detector is unsure of: English by its little
-        // words («my», «the», «in»).
-        _ => english_words(&words).then_some(Lang::English),
-    }
-}
-
-/// Whether a quarter of the words, two at least, are English little words.
-fn english_words(words: &[String]) -> bool {
-    const LITTLE: [&str; 40] = [
-        "the", "i", "you", "my", "in", "and", "to", "of", "is", "it", "me", "we", "on", "for", "that", "your", "be",
-        "all", "with", "what", "this", "but", "are", "was", "can", "just", "don't", "i'm", "it's", "know", "when",
-        "never", "they", "our", "his", "her", "from", "at", "will", "have",
-    ];
-    let hits = words.iter().filter(|w| LITTLE.contains(&w.as_str())).count();
-    hits >= 2 && hits * 4 >= words.len()
-}
-
-/// What a title says of its song's language plainly: a marker («RUS
-/// COVER», «Japanese ver.»), else its script — Cyrillic, kana, kanji or
-/// Japanese punctuation, hangul. A Latin title says nothing.
-fn title_lang(text: &str) -> Option<Lang> {
-    const RUSSIAN: [&str; 12] = [
-        "rus cover", "ru cover", "russian cover", "(russian)", "[russian]", "на русском", "rus ver", "rus.ver",
-        "russian ver", "(rus)", "[rus]", "кавер на русском",
-    ];
-    const JAPANESE: [&str; 7] = ["japanese ver", "jp ver", "jpn ver", "jp.ver", "japanese version", "(japanese)", "[japanese]"];
-    let lower = text.to_lowercase();
-    if RUSSIAN.iter().any(|m| lower.contains(m)) {
-        return Some(Lang::Russian);
-    }
-    if JAPANESE.iter().any(|m| lower.contains(m)) {
-        return Some(Lang::Japanese);
-    }
-    match script_of(text)? {
-        Script::Cyrillic => Some(Lang::Russian),
-        Script::Japanese => Some(Lang::Japanese),
-        Script::Korean => Some(Lang::Other),
-        Script::Latin => None,
-    }
-}
-
-/// The words of a lyrics text as kept: LRC without its time tags, an
-/// online source's JSON lines by their `"text"` values, TTML without tags.
-fn lyric_words(raw: &str) -> String {
-    let raw = raw.trim_start();
-    let mut out = String::new();
-    if raw.starts_with('[') && raw.contains("\"text\":\"") {
-        for part in raw.split("\"text\":\"").skip(1) {
-            if let Some(end) = part.find('"') {
-                out.push_str(&part[..end]);
-                out.push(' ');
-            }
-        }
-        return out;
-    }
-    let mut depth_sq = 0;
-    let mut depth_angle = 0;
-    for c in raw.chars() {
-        match c {
-            '[' => depth_sq += 1,
-            ']' => depth_sq = (depth_sq - 1).max(0),
-            '<' => depth_angle += 1,
-            '>' => depth_angle = (depth_angle - 1).max(0),
-            _ if depth_sq == 0 && depth_angle == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
-}
-
-/// The language of a lyrics text, if it has enough words: by its script,
-/// and Latin letters by the words themselves.
-fn lyrics_lang(raw: &str) -> Option<Lang> {
-    let words = lyric_words(raw);
-    if words.chars().filter(|c| c.is_alphabetic()).count() < 12 {
-        return None;
-    }
-    match script_of(&words)? {
-        Script::Cyrillic => Some(Lang::Russian),
-        Script::Japanese => Some(Lang::Japanese),
-        Script::Korean => Some(Lang::Other),
-        Script::Latin => latin_lang(&words),
-    }
-}
-
-/// What the lanes know of the songs' languages.
-struct Langs {
-    /// By the song's own lyrics.
-    sung: HashMap<TrackId, Lang>,
-    /// The language most of an artist's lyrics are in.
-    artist: HashMap<nikgob_core::model::ArtistId, Lang>,
-    /// … and by the artist's name, for new songs of the services.
-    named: HashMap<String, Lang>,
-}
-
-impl Langs {
-    /// A song's language: its lyrics, else its artist's, else what its
-    /// title and artist say plainly; `None` when nothing tells.
-    fn of(&self, id: TrackId, artist: Option<&nikgob_core::model::ArtistId>, title: &str, credit: &str) -> Option<Lang> {
-        self.sung
-            .get(&id)
-            .copied()
-            .or_else(|| artist.and_then(|a| self.artist.get(a)).copied())
-            .or_else(|| title_lang(&format!("{title} {credit}")))
-    }
-
-    /// A new song of a service: its artist's language, else its title's.
-    fn of_new(&self, t: &StreamTrack) -> Option<Lang> {
-        t.artists
-            .iter()
-            .find_map(|a| self.named.get(&a.name.to_lowercase()).copied())
-            .or_else(|| title_lang(&format!("{} {}", t.title, t.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(" "))))
-    }
-}
-
-/// The languages known from `sung` lyrics: an artist sings in the language
-/// most of their lyrics are in (an uploader's channel votes for none; a
-/// title guess never votes).
-fn langs(snap: &Snapshot, tiles: &TilesInput, sung: HashMap<TrackId, Lang>) -> Langs {
-    let name = |a: &nikgob_core::model::ArtistId| tiles.artist_names.get(a).map(|n| n.to_lowercase());
-    let mut votes: HashMap<nikgob_core::model::ArtistId, HashMap<Lang, u32>> = HashMap::new();
-    for t in snap.catalog.tracks() {
-        let (Some(a), Some(l)) = (t.artists.first(), sung.get(&t.id)) else { continue };
-        if name(a).is_some_and(|n| UPLOADERS.contains(&n.as_str())) {
-            continue;
-        }
-        *votes.entry(*a).or_default().entry(*l).or_default() += 1;
-    }
-    let artist: HashMap<_, Lang> = votes
-        .into_iter()
-        .filter_map(|(a, v)| v.into_iter().max_by_key(|(l, n)| (*n, *l as u8)).map(|(l, _)| (a, l)))
-        .collect();
-    let named = artist.iter().filter_map(|(a, l)| Some((name(a)?, *l))).collect();
-    Langs { sung, artist, named }
-}
-
 /// A number in 0..1 of `seed` and a track (a stable shuffle).
 fn jitter(seed: u64, t: TrackId) -> f32 {
     let mut h = seed ^ 0x9e37_79b9_7f4a_7c15;
@@ -309,24 +91,9 @@ fn jitter(seed: u64, t: TrackId) -> f32 {
     (h % 10_000) as f32 / 10_000.0
 }
 
-/// The lanes of today.
-pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> Vec<LaneHome> {
-    let lib = &input.lib;
-    let samples = lib.lyrics_samples().unwrap_or_else(|e| {
-        log::warn!("recs: lyrics for the lanes: {e}");
-        Vec::new()
-    });
-    let mut instrumental: HashSet<TrackId> = HashSet::new();
-    let mut sung: HashMap<TrackId, Lang> = HashMap::new();
-    for s in &samples {
-        if s.instrumental {
-            instrumental.insert(s.id);
-        } else if let Some(l) = lyrics_lang(&s.text) {
-            sung.insert(s.id, l);
-        }
-    }
-    let langs = langs(snap, tiles, sung);
-
+/// The songs of each lane by their type, and those of other languages
+/// than the lanes' («Песни не на русском» may take them).
+fn pools(snap: &Snapshot, tiles: &TilesInput) -> (HashMap<v::Lane, Vec<(usize, TrackId)>>, Vec<(usize, TrackId)>) {
     let norm = snap.index.normalizer();
     let mut by_lane: HashMap<v::Lane, Vec<(usize, TrackId)>> = HashMap::new();
     let mut soundtracks: Vec<(usize, TrackId, Option<f32>)> = Vec::new();
@@ -339,18 +106,18 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         if f.duration_ms.is_some_and(|d| d < INTERLUDE_MS) {
             continue;
         }
-        let soundtrack = f.album.as_deref().and_then(franchise).is_some() || instrumental.contains(&t.id);
-        if soundtrack {
+        let ty = snap.types.get(t.id).copied().unwrap_or_default();
+        if ty.ost || ty.voice_by == VoiceSource::LrclibFlag {
             let energy = snap.index.get(t.id).map(|v| Axes::of(&norm.z(v)).energy);
             soundtracks.push((i, t.id, energy));
             continue;
         }
-        let lane = match langs.of(t.id, t.artists.first(), &f.title, &f.artist) {
+        let lane = match ty.lang {
             Some(Lang::Russian) => v::Lane::Russian,
             Some(Lang::Japanese) => v::Lane::Japanese,
             Some(Lang::English) => v::Lane::English,
             // Not English: only «Песни не на русском» takes it.
-            Some(Lang::Other) => {
+            Some(_) => {
                 other.push((i, t.id));
                 continue;
             }
@@ -368,6 +135,12 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         let lane = if e.is_some_and(|e| e >= median) { v::Lane::DriveSoundtracks } else { v::Lane::CalmSoundtracks };
         by_lane.entry(lane).or_default().push((i, id));
     }
+    (by_lane, other)
+}
+
+/// The lanes of today.
+pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> Vec<LaneHome> {
+    let (mut by_lane, other) = pools(snap, tiles);
 
     // The starts of four weeks by lane.
     let now = snap.model.taste.now();
@@ -427,7 +200,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         .map(|(lane, tracks)| {
             let artists = artists_of(snap, tiles, &tracks);
             let covers = covers(snap, &tracks);
-            let new = if snap.local_only { Vec::new() } else { new_for(snap, input, &langs, lane, tracks.len(), &mut used_new) };
+            let new = if snap.local_only { Vec::new() } else { new_for(snap, input, lane, tracks.len(), &mut used_new) };
             LaneHome { lane, tracks, artists, covers, new }
         })
         .collect()
@@ -543,15 +316,16 @@ fn covers(snap: &Snapshot, tracks: &[TrackId]) -> Vec<CoverRef> {
 
 /// «С новым»: new songs the services found, in the lane's language (any
 /// for the soundtracks and «На повторе»), each in one mix only.
-fn new_for(snap: &Snapshot, input: &BuildInput, langs: &Langs, lane: v::Lane, songs: usize, used: &mut HashSet<String>) -> Vec<StreamTrack> {
+fn new_for(snap: &Snapshot, input: &BuildInput, lane: v::Lane, songs: usize, used: &mut HashSet<String>) -> Vec<StreamTrack> {
     let want = (songs / (NEW_EVERY - 1)).max(1);
     let fits = |t: &StreamTrack| {
-        let lang = langs.of_new(t);
+        let artists: Vec<&str> = t.artists.iter().map(|a| a.name.as_str()).collect();
+        let lang = snap.types.lang_of_new(&t.title, &artists);
         match lane {
             v::Lane::Russian => lang == Some(Lang::Russian),
             v::Lane::English => lang == Some(Lang::English),
             v::Lane::Japanese => lang == Some(Lang::Japanese),
-            v::Lane::NotRussian => matches!(lang, Some(Lang::English | Lang::Japanese | Lang::Other)),
+            v::Lane::NotRussian => lang.is_some_and(|l| l != Lang::Russian),
             v::Lane::CalmSoundtracks | v::Lane::DriveSoundtracks => {
                 t.album.as_ref().is_some_and(|a| franchise(&a.title).is_some())
             }
@@ -631,56 +405,63 @@ mod tests {
         }
     }
 
+    /// A short «Песни на русском» among many English songs, one of them
+    /// with a Cyrillic «е» in its English lyrics (AJR's «World's Smallest
+    /// Violin» on LRCLIB): the lane holds its Russian songs only, two
+    /// artists' as they are, never filled from another language.
     #[test]
-    fn lyrics_tell_the_language_whatever_the_format() {
-        let lrc = "[00:12.34]Город в огне, и мы идём домой\n[00:15.00]По ночным дворам";
-        assert_eq!(lyrics_lang(lrc), Some(Lang::Russian));
-        let json = r#"[{"start":{"secs":0,"nanos":5},"text":"My grandpa fought in World War II","words":[]}]"#;
-        assert_eq!(lyrics_lang(json), Some(Lang::English));
-        let ja = "[00:01.00]君の名前を呼んでいた 夜の向こうで";
-        assert_eq!(lyrics_lang(ja), Some(Lang::Japanese));
-        // The JSON's own keys are no words.
-        assert_eq!(lyric_words(r#"[{"text":"Да","words":[]}]"#).trim(), "Да");
-        assert_eq!(lyrics_lang("[00:01.00]"), None);
-    }
-
-    fn langs_of(lyrics: &[(TrackId, &str)]) -> Langs {
-        let sung = lyrics.iter().filter_map(|(t, l)| Some((*t, lyrics_lang(l)?))).collect();
-        Langs { sung, artist: HashMap::new(), named: HashMap::new() }
-    }
-
-    #[test]
-    fn a_latin_title_alone_is_no_english() {
-        let ids: Vec<TrackId> = (0..5).map(|_| TrackId::new()).collect();
-        let uzumaki = "[00:10.00]I keep on walking in the circles that I made\n[00:14.00]And every time I turn around the road is gone again\n[00:18.00]I can hear the noise inside my head";
-        let langs = langs_of(&[(ids[4], uzumaki)]);
-        // No lyrics: the title decides only when it says so.
-        assert_eq!(langs.of(ids[0], None, "Meine Freundin ist kaputt", "Con Fetti Pesto"), None);
-        assert_eq!(langs.of(ids[1], None, "There is a reason (RUS COVER)", "j.am"), Some(Lang::Russian));
-        assert_eq!(langs.of(ids[2], None, "A Horny Money World 〜legendary night〜", "Houshou Marine"), Some(Lang::Japanese));
-        assert_eq!(
-            langs.of(ids[3], None, "Solo Leveling Season 2 -Arise from the Shadow- Opening | \"ReawakeR\" by LiSA feat Felix of Stray Kids", "Crunchyroll"),
-            None
-        );
-        // The lyrics win over a Japanese title.
-        assert_eq!(langs.of(ids[4], None, "うずまき", "Machine Girl"), Some(Lang::English));
-        assert_eq!(title_lang("Gurenge ～Japanese ver.～"), Some(Lang::Japanese));
-        assert_eq!(title_lang("Blinding Lights (на русском)"), Some(Lang::Russian));
-    }
-
-    #[test]
-    fn lyrics_in_latin_letters_are_told_apart() {
-        let de = "[00:01.00]Ich gehe durch die Straßen und denke nur an dich\n[00:05.00]Die Nacht ist kalt und meine Freundin ist nicht hier\n[00:09.00]Und alles was ich habe ist ein Lied für dich";
-        let es = "[00:01.00]Camino por las calles y solo pienso en ti\n[00:05.00]La noche es fría y mi corazón no está aquí\n[00:09.00]Y todo lo que tengo es una canción para ti";
-        let romaji = "[00:01.00]kimi no na wo yonde ita yoru no mukou de\n[00:05.00]boku wa mada koko ni iru yo kimi ga inakute mo\n[00:09.00]sora ga naite iru kara namida wo misenai";
-        let en = "[00:01.00]I walk along the streets and only think of you\n[00:05.00]The night is cold and my heart is not here with you\n[00:09.00]And everything I have is just a song for you";
-        assert_eq!(lyrics_lang(de), Some(Lang::Other));
-        assert_eq!(lyrics_lang(es), Some(Lang::Other));
-        assert_eq!(lyrics_lang(romaji), Some(Lang::Japanese));
-        assert_eq!(lyrics_lang(en), Some(Lang::English));
-        // Too few words to tell.
-        assert_eq!(latin_lang("hello there my friend"), None);
-        assert!(romaji_word("kimi") && romaji_word("shinjitsu") && romaji_word("kitto") && romaji_word("n"));
-        assert!(!romaji_word("the") && !romaji_word("love") && !romaji_word("street"));
+    fn a_short_russian_lane_stays_pure() {
+        use nikgob_core::model::ArtistId;
+        use nikgob_recs::{Catalog, DiscoveryFilter, ModelInput, SongInput, TasteInput, TrackFacts, TrackInfo, UserModel, VectorIndex, song_types};
+        let ru = "[00:01.00]Город в огне, и мы идём домой\n[00:05.00]По ночным дворам до самого утра";
+        let en = "[00:01.00]We left the lights on in the kitchen\n[00:05.00]And the radio was playing low";
+        let homoglyph = "[00:01.00]We left the lights on in the kitchen\n[00:05.00]Is it over y\u{0435}t, the radio playing low";
+        let ids: Vec<TrackId> = (0..60).map(|_| TrackId::new()).collect();
+        // Fourteen Russian songs of two artists, 46 English of many.
+        let ru_artists = [ArtistId::new(), ArtistId::new()];
+        let artists: Vec<ArtistId> = (0..60).map(|k| if k < 14 { ru_artists[k % 2] } else { ArtistId::new() }).collect();
+        let catalog = Catalog::new(ids.iter().zip(&artists).map(|(id, a)| TrackInfo::new(*id, vec![*a], None)));
+        let mut index = VectorIndex::new();
+        for (k, id) in ids.iter().enumerate() {
+            let mut v = [0.0f32; nikgob_recs::DIM];
+            v[0] = k as f32;
+            index.insert(*id, v);
+        }
+        let inputs: Vec<SongInput> = ids
+            .iter()
+            .enumerate()
+            .map(|(k, id)| SongInput {
+                id: *id,
+                main_artist: Some(artists[k]),
+                title: format!("Song {k}"),
+                lyrics: Some((false, (if k < 14 { ru } else if k == 14 { homoglyph } else { en }).to_owned())),
+                ..SongInput::default()
+            })
+            .collect();
+        let types = song_types(&inputs);
+        let model = UserModel::build(&catalog, &TasteInput::default(), ModelInput { index: &index, types: Some(&types), weights: None }, 1_000 * DAY_MS);
+        let snap = Snapshot {
+            model,
+            types,
+            catalog,
+            index,
+            filter: DiscoveryFilter::default(),
+            artist_keys: HashMap::new(),
+            known_albums: HashSet::new(),
+            played_songs: HashSet::new(),
+            suggested_new: Vec::new(),
+            local_only: false,
+            worlds: HashMap::new(),
+        };
+        let mut tiles = TilesInput::default();
+        for id in &ids {
+            tiles.facts.insert(*id, TrackFacts { duration_ms: Some(180_000), ..TrackFacts::default() });
+        }
+        let (lanes, _) = pools(&snap, &tiles);
+        let russian: Vec<TrackId> = lanes[&v::Lane::Russian].iter().map(|(_, t)| *t).collect();
+        assert_eq!(russian, ids[..14].to_vec(), "the Russian songs only, not the English one with a Cyrillic letter");
+        assert!(lanes[&v::Lane::English].iter().any(|(_, t)| *t == ids[14]));
+        let picked = pick(&snap, &tiles, &lanes[&v::Lane::Russian], 7);
+        assert!(!picked.is_empty() && picked.iter().all(|t| russian.contains(t)), "{picked:?}");
     }
 }

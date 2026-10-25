@@ -568,7 +568,7 @@ mod tests {
     fn lyrics_tell_the_language_whatever_the_format() {
         let lrc = "[00:12.34]Город в огне, и мы идём домой\n[00:15.00]По ночным дворам";
         assert_eq!(lyrics_language(lrc), Some(Lang::Russian));
-        let json = r#"[{"start":{"secs":0,"nanos":5},"text":"My grandpa fought in World War II","words":[]}]"#;
+        let json = r#"[{"start":{"secs":0,"nanos":5},"text":"We walked along the river in the rain","words":[]}]"#;
         assert_eq!(lyrics_language(json), Some(Lang::English));
         let ja = "[00:01.00]君の名前を呼んでいた 夜の向こうで";
         assert_eq!(lyrics_language(ja), Some(Lang::Japanese));
@@ -580,9 +580,9 @@ mod tests {
     /// Cyrillic «е»: the lyrics are English all the same.
     #[test]
     fn one_cyrillic_letter_makes_no_russian_song() {
-        let lrc = "[00:04.35] My grandpa fought in World War II\n[00:07.51] He was such a noble dude\n\
-                   [00:09.45] I can't even finish school\n[00:11.20] Have you heard this one y\u{0435}t?\n\
-                   [01:28.35] (Oh, my God) that's so insane";
+        let lrc = "[00:04.35] We left the lights on in the kitchen\n[00:07.51] And the radio was playing low\n\
+                   [00:09.45] Nobody wanted to go home\n[00:11.20] Is it over y\u{0435}t?\n\
+                   [01:28.35] (Oh) we stayed until the morning";
         assert_eq!(lyrics_language(lrc), Some(Lang::English));
         // Japanese lyrics with English lines are Japanese.
         let mixed = "[00:01]君の名前を呼んでいた夜の向こうで\n[00:05]I will be there for you\n[00:09]ずっとここにいるよ";
