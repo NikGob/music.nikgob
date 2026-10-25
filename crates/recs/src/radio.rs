@@ -26,6 +26,18 @@
 //! the last three hours out. Both score what played lately less, a mix
 //! enough to let it rest about a day and a half ([`MIX_REST`]).
 //!
+//! A track's radio (and autoplay, which is one) picks by the user model
+//! when the engine has it ([`crate::model`], recs-v2 §5): one track at a
+//! time as if the ones before it played, among the candidates of the
+//! session (§5.2), by its value (§5.3) — the model's relevance, plus
+//! `1.5·ln(1 − p_skip)`, plus [`RADIO_REST`] times how rested it is (1.5
+//! days to half), a little seeded chance. The diversity rules hold, but
+//! for the next one on the album while an album plays and the world's
+//! tracks while a world does; after two early skips running the model
+//! weighs the skipped sounds' push and the session's lane twice
+//! ([`SKIP_SHIFT`]). The session is the runtime's own, handed to the radio
+//! before it picks ([`RadioState::attune`]), else the radio's tracks.
+//!
 //! An artist's radio is ~70% the artist's own tracks by affinity
 //! ([`ARTIST_OWN_SHARE`]), the rest similar by sound and co-listening; the
 //! artist rule of diversity does not apply to that artist. A daylist
@@ -40,10 +52,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::{DIM, Vector};
 use crate::index::euclid;
+use crate::model::{F_COOC, F_NEXT_ALBUM, F_SAME_LANE, F_SKIP_PUSH, F_SOUND, HAND, UserModel, Weights};
 use crate::mood::Mood;
-use crate::pick::{Diversity, Item, NewTrack, Pick, Placed, Reason, Recs, Slot, arrange, new_count, select_diverse, token_of_artist};
+use crate::pick::{Diversity, Item, NewTrack, Pick, Placed, Reason, Recs, Seen, Slot, arrange, new_count, select_diverse, take, token_of_artist};
 use crate::rng::Rng;
 use crate::mood::Axes;
+use crate::session::{Ended, Session};
 use crate::taste::{DayPart, HOUR_MS};
 
 /// Served items remembered (never repeated while remembered).
@@ -59,6 +73,18 @@ const REPEAT_AFTER: usize = 5;
 /// …or, for what played before the radio, this long ago (about five
 /// tracks); one played twice running comes back at once.
 const REPEAT_AFTER_MS: i64 = 20 * 60 * 1000;
+/// A model pick's value: the early skip's chance weighs this much…
+const SKIP_VALUE: f32 = 1.5;
+/// …a rest this long halves the bonus of being rested…
+const REST_HALF_MS: i64 = 36 * HOUR_MS;
+/// …and chance this much.
+const MODEL_JITTER: f32 = 0.15;
+/// After this many early skips running the radio leaves their sound: the
+/// push of skipped sounds and the session's lane weigh twice.
+pub const SKIP_SHIFT: u8 = 2;
+/// A simulated track of the session lasts this long.
+const SIM_MS: i64 = 200_000;
+
 /// What played lately scores less by this much times
 /// [`crate::Taste::lately_at`]: a mix lets a track rest about a day and a
 /// half…
@@ -156,6 +182,12 @@ pub struct RadioState {
     not_world: Option<u64>,
     new_pool: Vec<NewTrack>,
     turns: u64,
+    /// The listening session it continues ([`Self::attune`]).
+    #[serde(default)]
+    session: Session,
+    /// The weights learnt since the engine's model was built.
+    #[serde(skip)]
+    learned: Option<Weights>,
 }
 
 fn push_capped<T: PartialEq>(v: &mut Vec<T>, x: T, cap: usize) {
@@ -180,6 +212,8 @@ impl RadioState {
             not_world: None,
             new_pool: Vec::new(),
             turns: 0,
+            session: Session::default(),
+            learned: None,
             seed,
         };
         match &s.seed {
@@ -193,6 +227,13 @@ impl RadioState {
             _ => {}
         }
         s
+    }
+
+    /// The listening session to continue and the weights learnt since the
+    /// engine's model was built (the runtime's, before each extension).
+    pub fn attune(&mut self, session: Session, learned: Option<Weights>) {
+        self.session = session;
+        self.learned = learned;
     }
 
     /// Keeps the tracks of a world out ([`crate::world_token`]).
@@ -259,6 +300,19 @@ impl RadioState {
     pub fn feedback(&mut self, item: Item, outcome: Outcome) {
         if !self.is_mix() && self.recent.last() == Some(&item) && outcome == Outcome::Complete {
             self.again = Some(item.clone());
+        }
+        if let Item::Track(t) = &item {
+            let open = self.session.tracks().rev().any(|p| p.track == *t && p.ended == Ended::Open);
+            if !open {
+                let ts = self.session.last_ts().map_or(0, |l| l + SIM_MS);
+                self.session.start(*t, ts, nikgob_core::model::EventContext::Radio, None);
+            }
+            let ended = match outcome {
+                Outcome::Complete => Ended::Complete,
+                Outcome::Skip { position_ms } if position_ms < crate::taste::EARLY_SKIP_MS => Ended::Early,
+                Outcome::Skip { .. } => Ended::Late,
+            };
+            self.session.end(*t, ended);
         }
         self.recent.push(item.clone());
         let over = self.recent.len().saturating_sub(REPEAT_AFTER);
@@ -393,8 +447,27 @@ impl RadioState {
         sort_by_score(&mut new_slots);
         let new_slots = select_diverse(new_slots, want_new, &rules, &mut taken);
 
-        // 2-4. The library.
+        // 2-4. The library: a track's radio by the user model, in its order.
         let want_lib = n - new_slots.len();
+        if let (RadioSeed::Track(_), Some(model)) = (&self.seed, recs.model) {
+            let mut lib = self.by_model(recs, model, want_lib, &served, &rules, &mut rng, &mut taken, again.as_ref());
+            if lib.len() < want_lib {
+                let more = self.library(recs, want_lib - lib.len(), &sound, &served, false, &rules, &mut rng, &mut taken);
+                lib.extend(more);
+            }
+            // New music between, evenly.
+            let mut out: Vec<Slot> = again.into_iter().collect();
+            let every = (lib.len() + new_slots.len()) / (new_slots.len() + 1);
+            let mut new = new_slots.into_iter();
+            for (k, s) in lib.into_iter().enumerate() {
+                out.push(s);
+                if every > 0 && (k + 1) % every == 0 {
+                    out.extend(new.next());
+                }
+            }
+            out.extend(new);
+            return self.serve(out);
+        }
         let mut lib = self.library(recs, want_lib, &sound, &served, true, &rules, &mut rng, &mut taken);
         if lib.len() < want_lib {
             let keep_out = RELAXED_SERVED.min(recs.catalog.len() / 3);
@@ -416,6 +489,11 @@ impl RadioState {
             None => self.last.as_ref().and_then(|x| self.slot_of(recs, x)),
         };
         out.extend(arrange(recs, all, &tail, start.as_ref(), &rules));
+        self.serve(out)
+    }
+
+    /// `out` is served: the state moves on.
+    fn serve(&mut self, out: Vec<Slot>) -> Vec<Pick> {
         for s in &out {
             self.served.push_back(s.item.clone());
             self.tail.push(Placed::of(s));
@@ -429,6 +507,132 @@ impl RadioState {
             self.last = Some(s.item.clone());
         }
         out.into_iter().map(Slot::pick).collect()
+    }
+
+    /// Up to `n` picks of a track's radio by the user model, in order (see
+    /// the module docs): each the best by value among the candidates of
+    /// the session as if the picks before it played to the end.
+    #[allow(clippy::too_many_arguments)]
+    fn by_model(
+        &self,
+        recs: &Recs<'_>,
+        model: &UserModel,
+        n: usize,
+        served: &HashSet<Item>,
+        rules: &Diversity,
+        rng: &mut Rng,
+        taken: &mut HashSet<Item>,
+        again: Option<&Slot>,
+    ) -> Vec<Slot> {
+        let weights = self.learned.unwrap_or(model.weights);
+        let mut sim = self.session.clone();
+        // A run of early skips turns the whole batch away (the simulated
+        // plays after it would end the run at once).
+        let shifted = sim.skip_streak() >= SKIP_SHIFT;
+        // The session goes on from its last start (a session of the radio's
+        // own tracks has no clock: it starts from 0).
+        let mut ts = sim.last_ts().unwrap_or(recs.now());
+        let play = |sim: &mut Session, ts: &mut i64, t: TrackId| {
+            *ts += SIM_MS;
+            sim.start(t, *ts, nikgob_core::model::EventContext::Radio, None);
+            sim.end(t, Ended::Complete);
+        };
+        // What is queued after the track playing plays first.
+        let order: Vec<TrackId> = self.served.iter().filter_map(|x| match x {
+            Item::Track(t) => Some(*t),
+            Item::Stream(_) => None,
+        }).collect();
+        let queued: Vec<TrackId> = match sim.last().and_then(|p| order.iter().rposition(|t| *t == p.track)) {
+            Some(k) => order[k + 1..].to_vec(),
+            None => match &self.last {
+                Some(Item::Track(t)) => vec![*t],
+                _ => Vec::new(),
+            },
+        };
+        for t in queued.into_iter().chain(again.and_then(|s| match s.item {
+            Item::Track(t) => Some(t),
+            Item::Stream(_) => None,
+        })) {
+            play(&mut sim, &mut ts, t);
+        }
+        let recent: HashSet<&Item> = self.recent.iter().collect();
+        let seed = match &self.seed {
+            RadioSeed::Track(t) => Some(*t),
+            _ => None,
+        };
+        let ok = |i: usize| {
+            let t = recs.info(i);
+            let item = Item::Track(t.id);
+            !recs.blocked(i)
+                && !served.contains(&item)
+                && seed != Some(t.id)
+                && (self.not_world.is_none() || t.world != self.not_world)
+                && !recent.contains(&item)
+                && !recs.played_within(i, REPEAT_AFTER_MS)
+        };
+        let mut tail: Vec<Placed> = self.tail.clone();
+        let mut per_world: HashMap<u64, usize> = HashMap::new();
+        let world_cap = rules.world_cap(n);
+        let jitter = rng.next_u64();
+        let mut out: Vec<Slot> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let m = model.moment(&sim, ts);
+            let free = |i: usize| {
+                let t = recs.info(i);
+                !taken.contains(&Item::Track(t.id)) && !t.song.is_some_and(|s| taken.contains(&Item::Track(s)))
+            };
+            let cands = model.candidates(&m, &|i| ok(i) && free(i));
+            if cands.is_empty() {
+                break;
+            }
+            let mut w = weights.next;
+            if shifted || m.skip_streak >= SKIP_SHIFT {
+                w.w[F_SKIP_PUSH] = 2.0 * w.w[F_SKIP_PUSH].max(HAND[F_SKIP_PUSH]);
+                w.w[F_SAME_LANE] = 2.0 * w.w[F_SAME_LANE].max(HAND[F_SAME_LANE]);
+            }
+            let seq: Vec<Seen<'_>> = tail.iter().map(|p| (p.artists.as_slice(), p.album, p.world)).collect();
+            let mut best: Option<((usize, f32), Slot)> = None;
+            for c in cands {
+                let f = model.features(&m, c);
+                let parts: Vec<f32> = w.w.iter().zip(&f).map(|(a, b)| a * b).collect();
+                let relevance: f32 = parts.iter().sum();
+                let mut x = model.skip_features(&m, c, nikgob_core::model::EventContext::Radio);
+                x[0] = 1.0;
+                let p_skip = weights.skip.p(&x).min(0.99);
+                let rested = model.tracks[c].last_start.map_or(1.0, |l| 1.0 - (-((m.now - l).max(0) as f64) / REST_HALF_MS as f64).exp2() as f32);
+                let value = relevance + SKIP_VALUE * (1.0 - p_skip).ln() + RADIO_REST * rested
+                    + MODEL_JITTER * Rng::derive(jitter, c as u64).f32();
+                let reason = if parts[F_NEXT_ALBUM] > 0.0 && parts[F_NEXT_ALBUM] >= parts[F_COOC] {
+                    Reason::NextOnAlbum
+                } else if parts[F_COOC] > 0.5 && parts[F_COOC] >= parts[F_SOUND] + 1.0 {
+                    m.prev.map_or(Reason::SoundsLikeSeed, |p| Reason::FollowsOften(model.id(p)))
+                } else {
+                    seed.map_or(Reason::SoundsLikeSeed, Reason::SimilarTo)
+                };
+                let slot = recs.slot(c, reason, value);
+                let free = (m.album_session && m.next_album == Some(c)) || (m.world_session.is_some() && slot.world == m.world_session);
+                let violations = if free {
+                    0
+                } else {
+                    rules.violations(&seq, (&slot.artists, slot.album, slot.world))
+                        + usize::from(slot.world.is_some_and(|w| per_world.get(&w).is_some_and(|k| *k >= world_cap)))
+                };
+                let key = (violations, -value);
+                if best.as_ref().is_none_or(|(b, _)| key.0 < b.0 || (key.0 == b.0 && key.1 < b.1)) {
+                    best = Some((key, slot));
+                }
+            }
+            let Some((_, slot)) = best else { break };
+            let Item::Track(id) = slot.item else { break };
+            take(taken, &slot);
+            tail.push(Placed::of(&slot));
+            if let Some(w) = slot.world {
+                *per_world.entry(w).or_default() += 1;
+            }
+            play(&mut sim, &mut ts, id);
+            out.push(slot);
+        }
+        out
     }
 
     /// Up to `n` library slots, selected under the diversity caps.
@@ -822,6 +1026,7 @@ mod tests {
         radio.feedback(Item::Track(tid(5)), Outcome::Skip { position_ms: 120_000 });
         let mut fresh = RadioState::new(RadioSeed::Track(tid(0)));
         fresh.recent.push(Item::Track(tid(5)));
+        fresh.session = radio.session.clone();
         assert_eq!(radio, fresh);
     }
 
@@ -892,6 +1097,56 @@ mod tests {
             *per.entry(world(i)).or_default() += usize::from(i <= 60);
         }
         assert!(per.values().all(|&n| n <= 5), "a quarter at most: {per:?}");
+    }
+
+    /// A track's radio by the user model, on the listener of albums: the
+    /// album being played goes on in its order first.
+    #[test]
+    fn a_model_radio_continues_the_album() {
+        use crate::model::{ModelInput, UserModel};
+        use nikgob_core::model::EventContext;
+        let (cat, idx, history) = crate::model::tests::album_listener(15, 4);
+        let now = crate::model::tests::T0 + crate::taste::DAY_MS;
+        let model = UserModel::build(&cat, &history, ModelInput { index: &idx, types: None, weights: None }, now);
+        let taste = Taste::build(&cat, &history, now);
+        let recs = Recs::new(&cat, &taste, &idx).with_model(&model);
+        let mut session = crate::session::Session::default();
+        session.start(tid(42), now - 400_000, EventContext::Album, None);
+        session.end(tid(42), crate::session::Ended::Complete);
+        session.start(tid(43), now - 200_000, EventContext::Album, None);
+        let mut radio = RadioState::new(RadioSeed::Track(tid(43)));
+        radio.attune(session, None);
+        let picks = radio.extend(&recs, 10, &RadioParams { new_share: 0.0, seed: 1 });
+        let ids: Vec<u128> = picks.iter().map(|p| match p.item { Item::Track(t) => t.0.as_u128(), Item::Stream(_) => 0 }).collect();
+        assert_eq!(&ids[..3], &[44, 45, 46], "{ids:?}");
+        assert_eq!(picks[0].reason, Reason::NextOnAlbum);
+        assert_eq!(picks.len(), 10);
+        let unique: HashSet<u128> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), 10);
+    }
+
+    /// Two early skips running in one sound: the model radio leaves it.
+    #[test]
+    fn two_early_skips_move_a_model_radio() {
+        use crate::model::{ModelInput, UserModel};
+        let (cat, idx) = two_regions();
+        let input = TasteInput::default();
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None }, NOW);
+        let taste = Taste::build(&cat, &input, NOW);
+        let recs = Recs::new(&cat, &taste, &idx).with_model(&model);
+        let params = RadioParams { new_share: 0.0, seed: 3 };
+        // A complete in A before the seed: the radio goes on in A…
+        let mut liked = RadioState::new(RadioSeed::Track(tid(0)));
+        liked.feedback(Item::Track(tid(9)), Outcome::Complete);
+        let a = liked.extend(&recs, 10, &params).iter().filter(|p| in_a(p)).count();
+        assert!(a >= 8, "a complete in A: {a}");
+        // …unless two of A were skipped early since.
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        radio.feedback(Item::Track(tid(9)), Outcome::Complete);
+        radio.feedback(Item::Track(tid(5)), Outcome::Skip { position_ms: 8_000 });
+        radio.feedback(Item::Track(tid(7)), Outcome::Skip { position_ms: 6_000 });
+        let a = radio.extend(&recs, 10, &params).iter().filter(|p| in_a(p)).count();
+        assert!(a <= 2, "two skips in A move away from A: {a}");
     }
 
     #[test]

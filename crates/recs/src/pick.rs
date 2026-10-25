@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::analysis::Vector;
 use crate::discover::{album_key, artist_key};
 use crate::index::{Normalizer, VectorIndex, euclid};
+use crate::model::UserModel;
 use crate::mood::Mood;
 use crate::taste::{Catalog, DayPart, Taste, TrackInfo};
 use crate::tiles::TileKind;
@@ -60,6 +61,10 @@ pub enum Reason {
     DayPart(DayPart),
     /// Belongs to a tile of the bento («На повторе», «Исполнитель дня»…).
     Tile(TileKind),
+    /// The next one on the album of the track before.
+    NextOnAlbum,
+    /// Often follows this track in your sessions.
+    FollowsOften(TrackId),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -104,6 +109,8 @@ pub struct Recs<'a> {
     /// «Миксы только из скачанного»: only tracks with a file are picked,
     /// and no new music.
     pub(crate) local_only: bool,
+    /// The user model: a track's radio picks by it ([`crate::radio`]).
+    pub model: Option<&'a UserModel>,
 }
 
 impl<'a> Recs<'a> {
@@ -114,7 +121,16 @@ impl<'a> Recs<'a> {
             index,
             norm: index.normalizer(),
             local_only: false,
+            model: None,
         }
+    }
+
+    /// The engine whose radios of a track pick by `model` (built over the
+    /// same catalog).
+    #[must_use]
+    pub fn with_model(mut self, model: &'a UserModel) -> Self {
+        self.model = (model.len() == self.catalog.len()).then_some(model);
+        self
     }
 
     /// The engine that picks only tracks with a file and no new music
@@ -270,7 +286,7 @@ impl Placed {
 }
 
 /// A placed track as the rules see it: artists, album, world.
-type Seen<'a> = (&'a [u64], Option<u64>, Option<u64>);
+pub(crate) type Seen<'a> = (&'a [u64], Option<u64>, Option<u64>);
 
 /// The diversity rules.
 #[derive(Clone, Copy, Debug)]
@@ -311,7 +327,7 @@ impl Diversity {
     }
 
     /// How many rules `s` breaks after `seq` (a sequence of placed tracks).
-    fn violations(&self, seq: &[Seen<'_>], s: Seen<'_>) -> usize {
+    pub(crate) fn violations(&self, seq: &[Seen<'_>], s: Seen<'_>) -> usize {
         let mut v = 0;
         let n = seq.len();
         let from = n.saturating_sub(self.artist_window - 1);
@@ -415,7 +431,7 @@ pub(crate) fn select_diverse(cands: Vec<Slot>, n: usize, rules: &Diversity, take
 }
 
 /// Marks the slot's item and its song taken: one song plays once.
-fn take(taken: &mut HashSet<Item>, s: &Slot) {
+pub(crate) fn take(taken: &mut HashSet<Item>, s: &Slot) {
     taken.insert(s.item.clone());
     if let Some(song) = &s.song {
         taken.insert(song.clone());
