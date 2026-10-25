@@ -1094,7 +1094,13 @@ pub(crate) fn card_first(home: &mut v::HomeView) {
             }
             if let Some(i) = crate::home_v2::world_release(&home.worlds[k], &home.new_releases) {
                 let a = &home.new_releases[i];
-                let name = crate::home_v2::short_album(&a.title, &home.worlds[k].title);
+                let mut name = crate::home_v2::short_album(&a.title, &home.worlds[k].title);
+                // «FILM CONCERT LIVE RECORDING CD» reads «FILM CONCERT».
+                for tail in [" LIVE RECORDING CD", " LIVE RECORDING", " CD"] {
+                    if name.len() > tail.len() && name.get(name.len() - tail.len()..).is_some_and(|t| t.eq_ignore_ascii_case(tail)) {
+                        name.truncate(name.len() - tail.len());
+                    }
+                }
                 let card = v::WorldCard {
                     icon: v::WorldIcon::Album,
                     kicker: "Новый альбом".into(),

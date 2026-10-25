@@ -660,7 +660,13 @@ fn worlds(lib: &Library, f: &Facts, releases: &[ReleaseRow], visit: &Visit) -> V
 /// альбом» for its third card (the release then leaves «Новые релизы» while
 /// the card shows it).
 pub fn world_release(world: &v::World, releases: &[v::StreamAlbumCard]) -> Option<usize> {
-    releases.iter().position(|a| franchise(&a.title).is_some_and(|(k, _)| k == world.key))
+    // A release without a soundtrack's marker («MADE IN ABYSS FILM CONCERT
+    // LIVE RECORDING CD») is the world's when it begins with its name.
+    let name = world.title.to_lowercase();
+    releases.iter().position(|a| {
+        franchise(&a.title).is_some_and(|(k, _)| k == world.key)
+            || (name.chars().count() >= 4 && a.title.to_lowercase().strip_prefix(&name).is_some_and(|rest| rest.starts_with(' ')))
+    })
 }
 
 #[cfg(test)]
