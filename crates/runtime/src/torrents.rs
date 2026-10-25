@@ -45,6 +45,11 @@ pub(crate) struct Torrents {
     history: VecDeque<v::Job>,
     last_policy: Instant,
     last_view: Option<(Vec<v::Job>, Vec<v::SeedRow>)>,
+    /// `last_view` without what changes every second (bytes, rates,
+    /// progress, ETAs).
+    last_shape: Option<(Vec<v::Job>, Vec<v::SeedRow>)>,
+    /// «Загрузки» is shown ([`Command::DownloadsShown`](nikgob_view::Command::DownloadsShown)).
+    pub(crate) shown: bool,
 }
 
 impl Torrents {
@@ -61,8 +66,26 @@ impl Torrents {
             history: VecDeque::new(),
             last_policy: Instant::now(),
             last_view: None,
+            last_shape: None,
+            shown: false,
         }
     }
+}
+
+/// A torrent view without the numbers that move every second.
+fn shape(active: &[v::Job], seeding: &[v::SeedRow]) -> (Vec<v::Job>, Vec<v::SeedRow>) {
+    let active = active
+        .iter()
+        .map(|j| v::Job {
+            subtitle: String::new(),
+            progress: j.progress.map(|_| 0.0),
+            rate: None,
+            eta: None,
+            ..j.clone()
+        })
+        .collect();
+    let seeding = seeding.iter().map(|r| v::SeedRow { uploaded_bytes: 0, downloaded_bytes: 0, ..r.clone() }).collect();
+    (active, seeding)
 }
 
 fn config(p: &v::Prefs, downloads: &Path, state: &Path) -> TorrentConfig {
@@ -589,7 +612,17 @@ impl Worker {
             .collect();
         let seeded: u64 = list.iter().map(|t| t.uploaded).sum();
         let view = (active.clone(), seeding.clone());
-        if self.torrents.last_view.as_ref() != Some(&view) {
+        // Off «Загрузки» (or with the window hidden) only a change of what
+        // is there is published: a torrent added, finished, paused or gone;
+        // its numbers catch up once the page is shown.
+        let live = self.torrents.shown && self.window_visible();
+        let moved = self.torrents.last_view.as_ref() != Some(&view);
+        let changed = moved && (live || {
+            let shape = shape(&active, &seeding);
+            self.torrents.last_shape.as_ref() != Some(&shape)
+        });
+        if changed {
+            self.torrents.last_shape = Some(shape(&active, &seeding));
             self.torrents.last_view = Some(view);
             let history: Vec<v::Job> = self.torrents.history.iter().cloned().collect();
             self.publish(|s| {

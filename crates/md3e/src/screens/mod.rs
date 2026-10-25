@@ -70,6 +70,8 @@ pub struct Md3eUi {
     seen: Option<Place>,
     /// +1 forward, -1 back, 0 fade-through (top-level switch).
     nav_dir: f32,
+    /// «Загрузки» is the route, as the runtime was last told.
+    downloads_shown: bool,
     nav_anim: Animated<f32>,
     rail_expanded: bool,
     pane: Option<PaneTab>,
@@ -121,6 +123,7 @@ impl Md3eUi {
             future: Vec::new(),
             seen: None,
             nav_dir: 0.0,
+            downloads_shown: false,
             nav_anim: Animated::new(0.0, crate::tokens::Motion::expressive().slow_effects),
             rail_expanded: true,
             // The pane opens on demand (queue / lyrics buttons), not always.
@@ -177,7 +180,7 @@ impl Md3eUi {
         {
             self.pages.set_downloads_tab(tab);
         }
-        load_for(&route, out);
+        self.load_for(&route, out);
         // A page opened anew starts at its top (not where it was last time).
         if !top_level {
             self.pages.scroll_to(route.clone(), 0.0);
@@ -228,7 +231,7 @@ impl Md3eUi {
         self.remember();
         self.stack.pop();
         self.nav_dir = -1.0;
-        load_for(self.route(), out);
+        self.load_for(&self.route().clone(), out);
         self.restore_search(ctx);
         self.seen = Some(self.place());
         self.restart_nav(ctx);
@@ -298,7 +301,7 @@ impl Md3eUi {
         self.pages.set_tabs(place.tabs);
         self.pages.scroll_to(self.route().clone(), place.scroll);
         self.nav_dir = dir;
-        load_for(self.route(), out);
+        self.load_for(&self.route().clone(), out);
         self.restore_search(ctx);
         self.seen = Some(Place { scroll: place.scroll, ..self.place() });
         self.restart_nav(ctx);
@@ -935,6 +938,19 @@ impl Md3eUi {
         if configure_lyrics {
             self.pages.open_setting(pages::SettingId::LyricsStyle);
         }
+    }
+}
+
+impl Md3eUi {
+    /// The load request a route needs, and whether «Загрузки» is shown
+    /// (when that changes).
+    fn load_for(&mut self, route: &Route, out: &mut Vec<Command>) {
+        let downloads = matches!(route, Route::Downloads(_));
+        if downloads != self.downloads_shown {
+            self.downloads_shown = downloads;
+            out.push(Command::DownloadsShown(downloads));
+        }
+        load_for(route, out);
     }
 }
 

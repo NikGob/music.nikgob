@@ -1494,6 +1494,10 @@ pub enum Command {
     /// work (like pulls, playlist checks, completing imports) waits; on
     /// focus a like pull older than 10 minutes runs.
     WindowState { visible: bool, focused: bool },
+    /// «Загрузки» is (not) the page shown. Off it, the runtime publishes a
+    /// torrent's changes but not its bytes, rates and progress, so seeding
+    /// does not wake the window every second.
+    DownloadsShown(bool),
     /// How a library playlist linked to a service follows it.
     SetPlaylistSync { playlist: PlaylistId, mode: PlaylistSyncMode },
     /// A playlist of a service into the library: a library playlist that

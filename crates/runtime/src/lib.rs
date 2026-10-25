@@ -803,6 +803,7 @@ impl Worker {
                 self.confirm_choice(id, option);
             }
             Command::LoadLibrary => self.load_library(),
+            Command::DownloadsShown(shown) => self.torrents.shown = shown,
             Command::LoadTracks {
                 offset,
                 limit,

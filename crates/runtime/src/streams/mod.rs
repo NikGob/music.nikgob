@@ -475,6 +475,11 @@ impl Worker {
         }
     }
 
+    /// The window is shown (not in the tray, not minimized).
+    pub(crate) fn window_visible(&self) -> bool {
+        self.streaming.window_visible
+    }
+
     /// `Command::WindowState`: a focus after a while checks the likes.
     fn window_state(&mut self, visible: bool, focused: bool) {
         let gained = focused && !self.streaming.window_focused;
