@@ -206,6 +206,9 @@ pub fn album_like_label(liked: bool) -> &'static str {
 
 /// Right-click menu of an album (card or row).
 pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<Route> {
+    if Menu::context_idle(resp, ("release-menu", resp.id)) {
+        return None;
+    }
     let picked = Menu::new(("release-menu", resp.id))
         .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
         .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
@@ -281,6 +284,9 @@ pub fn playlist_menu_at(
     pages: Option<&mut PageState>,
     out: &mut Vec<Command>,
 ) {
+    if Menu::context_idle(resp, ("playlist-menu", resp.id)) {
+        return;
+    }
     let editable = pages.is_some() && !p.pinned && p.id != LIKED_PLAYLIST;
     let mut menu = Menu::new(("playlist-menu", resp.id))
         .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
@@ -398,6 +404,37 @@ pub fn initials(name: &str) -> String {
 mod tests {
     use super::initials;
 
+    /// The grid takes the same room whether its rows are laid out or not.
+    #[test]
+    fn grid_rows_out_of_sight_keep_their_room() {
+        let height_with = |screen_h: f32| {
+            let ctx = egui::Context::default();
+            let mut h = 0.0;
+            for i in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, screen_h))),
+                    time: Some(f64::from(i) * 0.05),
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| {
+                    let items: Vec<u32> = (0..203).collect();
+                    let top = ui.cursor().top();
+                    let mut drawn = 0;
+                    super::grid(ui, &items, 160.0, |_, w| w + 56.0, |ui, _, w| {
+                        drawn += 1;
+                        ui.allocate_exact_size(egui::vec2(w, w + 56.0), egui::Sense::hover());
+                        None
+                    });
+                    h = ui.cursor().top() - top;
+                    let _ = drawn;
+                });
+                out.textures_delta.clear();
+            }
+            h
+        };
+        assert_eq!(height_with(400.0), height_with(100_000.0));
+    }
+
     #[test]
     fn initials_skip_particles() {
         assert_eq!(initials("Boards of Canada"), "BC");
@@ -425,6 +462,12 @@ pub fn artist_avatar(
 /// the right-click menu can open it too.
 pub fn artist_mix(ui: &mut Ui, a: &ArtistCard, size: f32, out: &mut Vec<Command>) -> Option<Route> {
     artist_impl(ui, a, size, true, out)
+}
+
+/// How tall [`artist_avatar`] is for `a` at `size` (the name, and in the
+/// library the track count under it).
+pub fn artist_avatar_height(a: &ArtistCard, size: f32) -> f32 {
+    size + if a.track_count == 0 { 28.0 } else { 48.0 }
 }
 
 fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Vec<Command>) -> Option<Route> {
@@ -528,6 +571,9 @@ pub fn artist_menu(resp: &Response, a: &ArtistCard, out: &mut Vec<Command>) {
 /// [`artist_menu`]; on a mix card (`radio`) the radio comes first and the
 /// artist's page can be opened from it.
 fn artist_menu_with(resp: &Response, a: &ArtistCard, radio: bool, out: &mut Vec<Command>) -> Option<Route> {
+    if Menu::context_idle(resp, ("artist-menu", resp.id)) {
+        return None;
+    }
     let follow = MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" }).icon(Icon::Favorite);
     let radio_cmd = Command::StartRadio { seed: nikgob_view::RadioSeed::Artist(a.id) };
     if radio {
@@ -698,7 +744,11 @@ pub fn track_list_ext(
                     let picked = playlist_track_menu(menu_key, t, pl).attach(m);
                     *nav = playlist_track_pick(&m.ctx, picked, t, pl, Some(m.rect), pages, out).or(nav.take());
                 }
-                let picked = playlist_track_menu(menu_key.with("ctx"), t, pl).context_menu(&o.response);
+                let picked = if Menu::context_idle(&o.response, menu_key.with("ctx")) {
+                    None
+                } else {
+                    playlist_track_menu(menu_key.with("ctx"), t, pl).context_menu(&o.response)
+                };
                 *nav = playlist_track_pick(&o.response.ctx, picked, t, pl, None, pages, out).or(nav.take());
             }
             None => {
@@ -1188,27 +1238,120 @@ pub fn columns(width: f32, card: f32) -> usize {
     (((width + CARD_GAP) / (card + CARD_GAP)).floor() as usize).max(1)
 }
 
+/// Which items of a long list are laid out this frame: those that meet
+/// the viewport and one more on each side (`now`), and those laid out last
+/// frame, so one that leaves the view still settles its hover and press as
+/// it always did. The others only take their room. While a menu is up
+/// every item is laid out (the one it belongs to stays under it).
+pub struct Shown {
+    now: std::ops::Range<usize>,
+    last: std::ops::Range<usize>,
+    all: bool,
+}
+
+impl Shown {
+    pub fn of(ctx: &egui::Context, key: Id, now: std::ops::Range<usize>) -> Self {
+        let last = ctx.data_mut(|d| {
+            let last = d.get_temp::<std::ops::Range<usize>>(key);
+            d.insert_temp(key, now.clone());
+            last.unwrap_or_default()
+        });
+        Self { now, last, all: Menu::shown_lately(ctx) }
+    }
+
+    pub fn contains(&self, i: usize) -> bool {
+        self.all || self.now.contains(&i) || self.last.contains(&i)
+    }
+}
+
+/// The items `0..n` whose spans `start + i * step .. + size` meet `lo..hi`,
+/// one more on each side.
+pub fn span_range(n: usize, start: f32, step: f32, size: f32, lo: f32, hi: f32) -> std::ops::Range<usize> {
+    if n == 0 || step <= 0.0 {
+        return 0..0;
+    }
+    let first = ((lo - start - size) / step).ceil().max(0.0) as usize;
+    let last = (((hi - start) / step).floor().max(-1.0) + 1.0) as usize;
+    first.saturating_sub(1)..(last + 1).min(n)
+}
+
 /// Lays cards in a wrapping grid; cards get stretched to fill the row.
+/// `height` is how tall an item's card is at a width: rows out of sight
+/// take that room without being laid out.
 pub fn grid<T>(
     ui: &mut Ui,
     items: &[T],
     min_card: f32,
+    height: impl Fn(&T, f32) -> f32,
     mut draw: impl FnMut(&mut Ui, &T, f32) -> Option<Route>,
 ) -> Option<Route> {
     let width = ui.available_width();
     let cols = columns(width, min_card);
     let card = ((width - CARD_GAP * (cols - 1) as f32) / cols as f32).floor();
+    let key = ui.next_auto_id().with(("md3e-grid", items.len()));
+    let rows: Vec<&[T]> = items.chunks(cols).collect();
+    let heights: Vec<f32> = rows
+        .iter()
+        .map(|row| row.iter().map(|it| height(it, card)).fold(0.0, f32::max))
+        .collect();
+    // Where each row would be, and which ones meet the viewport.
+    let gap = ui.spacing().item_spacing.y + CARD_GAP;
+    let clip = ui.clip_rect();
+    let mut y = ui.cursor().top();
+    let (mut first, mut last) = (usize::MAX, 0);
+    for (i, h) in heights.iter().enumerate() {
+        if y + h >= clip.top() && y <= clip.bottom() {
+            first = first.min(i);
+            last = i + 1;
+        }
+        y += h + gap;
+    }
+    let now = if first < last { first.saturating_sub(1)..(last + 1).min(rows.len()) } else { 0..0 };
+    let shown = Shown::of(ui.ctx(), key, now);
     let mut nav = None;
-    for row in items.chunks(cols) {
+    for (i, row) in rows.into_iter().enumerate() {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = CARD_GAP;
-            for it in row {
-                nav = draw(ui, it, card).or(nav.take());
+            if shown.contains(i) {
+                for it in row {
+                    nav = draw(ui, it, card).or(nav.take());
+                }
+            } else {
+                let n = row.len() as f32;
+                ui.allocate_space(vec2(n * card + (n - 1.0) * CARD_GAP, heights[i]));
             }
         });
         ui.add_space(CARD_GAP);
     }
     nav
+}
+
+/// [`card_row`] of `n` items `item_w` wide, of which only those in sight
+/// (see [`Shown`]) are laid out by `draw`.
+pub fn card_row_virtual(ui: &mut Ui, id: &str, n: usize, item_w: f32, mut draw: impl FnMut(&mut Ui, usize)) {
+    card_row(ui, id, |ui| {
+        let start = ui.cursor().left();
+        let clip = ui.clip_rect();
+        let now = span_range(n, start, item_w + CARD_GAP, item_w, clip.left(), clip.right());
+        let shown = Shown::of(ui.ctx(), ui.id().with(("md3e-row", id)), now);
+        let mut skipped = 0usize;
+        for i in 0..n {
+            if shown.contains(i) {
+                if skipped > 0 {
+                    let k = skipped as f32;
+                    ui.allocate_space(vec2(k * item_w + (k - 1.0) * CARD_GAP, 0.0));
+                    skipped = 0;
+                }
+                draw(ui, i);
+            } else {
+                skipped += 1;
+            }
+        }
+        if skipped > 0 {
+            let k = skipped as f32;
+            ui.allocate_space(vec2(k * item_w + (k - 1.0) * CARD_GAP, 0.0));
+        }
+    });
 }
 
 /// "Похоже, это один альбом": editions of one album the runtime found,

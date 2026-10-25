@@ -16,6 +16,8 @@ use crate::{
 };
 
 pub const ITEM_HEIGHT: f32 = 48.0;
+/// The pass a menu was last on screen in (see [`Menu::shown_lately`]).
+const SHOWN_KEY: &str = "md3e-menu-shown";
 pub const MIN_WIDTH: f32 = 112.0;
 pub const MAX_WIDTH: f32 = 280.0;
 const PAD: f32 = 4.0;
@@ -169,6 +171,32 @@ impl Menu {
         )
     }
 
+    /// A menu was on screen this pass or the one before (long lists then
+    /// lay out every row, so the row a menu belongs to never goes away
+    /// under it).
+    pub fn shown_lately(ctx: &Context) -> bool {
+        let pass = ctx.cumulative_pass_nr();
+        ctx.data(|d| d.get_temp::<u64>(Id::new(SHOWN_KEY))).is_some_and(|at| at + 1 >= pass)
+    }
+
+    /// Whether the context menu `id_salt` of `response` has nothing to show
+    /// this frame: closed, not opened by this click, its exit done. Its
+    /// items need not be built then (lists build one menu per row).
+    pub fn context_idle(response: &Response, id_salt: impl egui::AsId) -> bool {
+        if response.secondary_clicked() {
+            return false;
+        }
+        let id = Id::new(id_salt);
+        response.ctx.data(|d| {
+            let open = d
+                .get_temp::<(bool, Pos2)>(response.id.with("md3e-context-menu"))
+                .is_some_and(|(open, _)| open);
+            !open
+                && d.get_temp::<nikgob_motion::Animated<f32>>(id.with("p-spatial")).is_none()
+                && d.get_temp::<nikgob_motion::Animated<f32>>(id.with("p-effects")).is_none()
+        })
+    }
+
     /// Opens at the pointer on a right click on `response`.
     pub fn context_menu(self, response: &Response) -> Option<usize> {
         let ctx = response.ctx.clone();
@@ -205,6 +233,8 @@ impl Menu {
             ctx.data_mut(|d| d.remove::<Option<usize>>(self.id.with("hl")));
             return None;
         }
+        let pass = ctx.cumulative_pass_nr();
+        ctx.data_mut(|d| d.insert_temp(Id::new(SHOWN_KEY), pass));
 
         // Measure.
         let painter = ctx.layer_painter(layer);

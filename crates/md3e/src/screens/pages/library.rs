@@ -387,10 +387,12 @@ fn overview(
                 if widgets::section_header(ui, "Плейлисты", true) {
                     open_tab(pages, LibraryTab::Playlists, lib.track_sort, out);
                 }
-                widgets::card_row(ui, "lib-playlists", |ui| {
-                    new_playlist_card(ui, pages, widgets::CARD_W);
-                    for p in &lib.playlists {
-                        nav = widgets::playlist_card_with(ui, p, widgets::CARD_W, "lib", Some(pages), out).or(nav.take());
+                // «Новый плейлист» first, then every playlist.
+                widgets::card_row_virtual(ui, "lib-playlists", lib.playlists.len() + 1, widgets::CARD_W, |ui, i| match i {
+                    0 => new_playlist_card(ui, pages, widgets::CARD_W),
+                    i => {
+                        let p = &lib.playlists[i - 1];
+                        nav = widgets::playlist_card_with(ui, p, widgets::CARD_W, "lib", Some(&mut *pages), out).or(nav.take());
                     }
                 });
             }
@@ -432,10 +434,8 @@ fn overview(
                 if widgets::section_header(ui, "Исполнители", true) {
                     open_tab(pages, LibraryTab::Artists, lib.track_sort, out);
                 }
-                widgets::card_row(ui, "lib-artists", |ui| {
-                    for a in &lib.artists {
-                        nav = widgets::artist_avatar(ui, a, AVATAR, out).or(nav.take());
-                    }
+                widgets::card_row_virtual(ui, "lib-artists", lib.artists.len(), AVATAR, |ui, i| {
+                    nav = widgets::artist_avatar(ui, &lib.artists[i], AVATAR, out).or(nav.take());
                 });
             }
         }
@@ -717,7 +717,7 @@ fn release_items(ui: &mut Ui, items: &[&ReleaseCard], is_list: bool, row: &str, 
         }
         return nav;
     }
-    widgets::grid(ui, items, widgets::CARD_W, |ui, r, w| widgets::release_card(ui, r, w, row, out))
+    widgets::grid(ui, items, widgets::CARD_W, |_, w| crate::components::MediaCard::height(w), |ui, r, w| widgets::release_card(ui, r, w, row, out))
 }
 
 fn artist_items(ui: &mut Ui, items: &[&ArtistCard], is_list: bool, out: &mut Vec<Command>) -> Option<Route> {
@@ -728,7 +728,7 @@ fn artist_items(ui: &mut Ui, items: &[&ArtistCard], is_list: bool, out: &mut Vec
         }
         return nav;
     }
-    widgets::grid(ui, items, AVATAR, |ui, a, w| widgets::artist_avatar(ui, a, w, out))
+    widgets::grid(ui, items, AVATAR, |a, w| widgets::artist_avatar_height(a, w), |ui, a, w| widgets::artist_avatar(ui, a, w, out))
 }
 
 /// A small tonal label for list rows («3 из 12», «стрим»).

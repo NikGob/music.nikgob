@@ -438,7 +438,7 @@ fn discography(
             ui.label(TypeRole::TitleSmall.style().rich(title, s.on_surface_variant));
             ui.add_space(4.0);
         }
-        nav = widgets::grid(ui, &list, widgets::CARD_W, |ui, a, w| {
+        nav = widgets::grid(ui, &list, widgets::CARD_W, |_, w| crate::components::MediaCard::height(w), |ui, a, w| {
             super::streams::album_card(ui, a, w, "discography", wishlist, out)
         })
         .or(nav);

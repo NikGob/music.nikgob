@@ -405,6 +405,9 @@ impl PageState {
         _state: &ViewState,
         out: &mut Vec<Command>,
     ) -> Option<Route> {
+        if Menu::context_idle(row, row.id.with("ctx")) {
+            return None;
+        }
         let picked = Self::track_menu_items(row.id.with("ctx"), track).context_menu(row);
         self.track_menu_pick(&row.ctx, picked, track, out)
     }

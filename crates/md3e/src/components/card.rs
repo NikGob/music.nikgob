@@ -364,6 +364,11 @@ impl MediaCard {
         self
     }
 
+    /// How tall a card `width` wide is (its cover and two lines under it).
+    pub fn height(width: f32) -> f32 {
+        width + 56.0
+    }
+
     pub fn show(self, ui: &mut Ui) -> MediaCardOutput {
         let ctx = ui.ctx().clone();
         let theme = Theme::get(&ctx);
@@ -372,7 +377,7 @@ impl MediaCard {
             .id_salt
             .map_or_else(|| ui.next_auto_id(), |salt| ui.id().with(salt));
         let w = self.width;
-        let (rect, _) = ui.allocate_exact_size(vec2(w, w + 56.0), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(vec2(w, Self::height(w)), Sense::hover());
         let response = ui.interact(rect, id, Sense::click());
         let radii = Radii::all(shape::MEDIUM);
         let hover = response.contains_pointer() || common::focused(&response);

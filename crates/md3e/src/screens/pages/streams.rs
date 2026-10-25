@@ -778,7 +778,8 @@ fn artist_page(
             continue;
         }
         widgets::section_header(ui, title, false);
-        nav = widgets::grid(ui, &list, widgets::CARD_W, |ui, a, w| album_card(ui, a, w, title, wishlist, out)).or(nav);
+        nav = widgets::grid(ui, &list, widgets::CARD_W, |_, w| MediaCard::height(w), |ui, a, w| album_card(ui, a, w, title, wishlist, out))
+            .or(nav);
         ui.add_space(widgets::SECTION_GAP);
     }
     if v.albums.is_empty() {

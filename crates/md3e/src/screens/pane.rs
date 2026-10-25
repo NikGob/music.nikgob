@@ -162,7 +162,9 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, out: &mut Vec<Command>) 
             queue_pick(queue_menu(("q-menu", entry), Some(entry)).attach(m), &e.track, Some(entry), out);
             menu_open = ui.ctx().data(|d| d.get_temp::<bool>(m.id.with("md3e-menu-open"))).unwrap_or(false);
         }
-        queue_pick(queue_menu(("q-ctx", entry), Some(entry)).context_menu(&o.response), &e.track, Some(entry), out);
+        if !Menu::context_idle(&o.response, ("q-ctx", entry)) {
+            queue_pick(queue_menu(("q-ctx", entry), Some(entry)).context_menu(&o.response), &e.track, Some(entry), out);
+        }
         let now = o.response.contains_pointer() || menu_open;
         if now != show_actions {
             ui.ctx().data_mut(|d| d.insert_temp(key, now));
@@ -172,6 +174,36 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, out: &mut Vec<Command>) 
         (o.rect, drag, drop)
     })
     .inner
+}
+
+/// How tall a queue row is (two lines beside a cover).
+const QUEUE_ROW_H: f32 = crate::components::list::TWO_LINE;
+
+/// The rows of `entries`, one under another: those in sight (see
+/// [`Shown`](super::pages::widgets::Shown)) and the one dragged (`held`)
+/// are laid out by `row`, the others only take their room. Every row's
+/// rect goes into `rows`, for the drag and drop.
+fn queue_rows(
+    ui: &mut Ui,
+    key: &str,
+    entries: &[QueueEntry],
+    held: Option<u64>,
+    rows: &mut Vec<(u64, Rect)>,
+    mut row: impl FnMut(&mut Ui, &QueueEntry, &mut Vec<(u64, Rect)>),
+) {
+    use super::pages::widgets::{Shown, span_range};
+    let step = QUEUE_ROW_H + ui.spacing().item_spacing.y;
+    let clip = ui.clip_rect();
+    let now = span_range(entries.len(), ui.cursor().top(), step, QUEUE_ROW_H, clip.top(), clip.bottom());
+    let shown = Shown::of(ui.ctx(), ui.id().with(("q-rows", key)), now);
+    for (i, e) in entries.iter().enumerate() {
+        if shown.contains(i) || held == Some(e.entry) {
+            row(ui, e, rows);
+        } else {
+            let (_, rect) = ui.allocate_space(egui::vec2(ui.available_width(), QUEUE_ROW_H));
+            rows.push((e.entry, rect));
+        }
+    }
 }
 
 pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
@@ -202,8 +234,12 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             let mut dragging = None;
             let mut dropped = None;
             let mut current_pick = None;
+            // The row dragged last frame stays laid out wherever it is.
+            let drag_key = ui.id().with("q-dragged");
+            let held = ui.ctx().data(|d| d.get_temp::<u64>(drag_key));
             let mut row = |ui: &mut Ui, e: &QueueEntry, played: bool, rows: &mut Vec<(u64, Rect)>| {
                 let (rect, drag, drop) = queue_row(ui, e, played, out);
+                debug_assert_eq!(rect.height(), QUEUE_ROW_H, "queue rows are of one height");
                 if drag {
                     dragging = Some(rows.len());
                 }
@@ -217,9 +253,7 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             if !q.prev.is_empty() {
                 common::label(ui, "Ранее", TypeRole::TitleSmall, s.on_surface_variant);
                 ui.add_space(4.0);
-                for e in &q.prev {
-                    row(ui, e, true, &mut rows);
-                }
+                queue_rows(ui, "prev", &q.prev, held, &mut rows, |ui, e, rows| row(ui, e, true, rows));
                 ui.add_space(12.0);
             }
             if let Some(t) = &q.current {
@@ -250,9 +284,7 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             } else if !q.next.is_empty() {
                 common::label(ui, "Далее", TypeRole::TitleSmall, s.on_surface_variant);
                 ui.add_space(4.0);
-                for e in &q.next {
-                    row(ui, e, false, &mut rows);
-                }
+                queue_rows(ui, "next", &q.next, held, &mut rows, |ui, e, rows| row(ui, e, false, rows));
             }
             // The radio is looking for the next tracks: said where they
             // will appear.
@@ -288,6 +320,12 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                         s.primary,
                     );
                 }
+            }
+            match dragging {
+                Some(from) => {
+                    ui.ctx().data_mut(|d| d.insert_temp(drag_key, rows[from].0));
+                }
+                None => ui.ctx().data_mut(|d| d.remove::<u64>(drag_key)),
             }
             if let (Some(from), Some(p)) = (dropped, pointer) {
                 let to = target_at(p.y);
