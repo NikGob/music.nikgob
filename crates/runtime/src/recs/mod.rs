@@ -1601,7 +1601,64 @@ impl ModelPreview {
         self.snap.types.get(id).copied()
     }
 
+    /// The replay before and after `n` tracks with plays are disliked
+    /// (drawn by `seed`): the same starts scored both times, the disliked
+    /// tracks' own left out of the scoring.
+    pub fn replay_dislikes(&self, n: usize, seed: u64) -> (nikgob_recs::model::ReplayReport, nikgob_recs::model::ReplayReport, Vec<TrackId>) {
+        let m = &self.snap.model;
+        let mut played: Vec<TrackId> = (0..m.len()).filter(|&i| m.tracks[i].starts > 0).map(|i| m.id(i)).collect();
+        let mut rng = nikgob_recs::rng::Rng::new(seed);
+        let mut dislikes = Vec::new();
+        while dislikes.len() < n && !played.is_empty() {
+            let k = (rng.next_u64() % played.len() as u64) as usize;
+            dislikes.push(played.swap_remove(k));
+        }
+        let unscored: HashSet<TrackId> = dislikes.iter().copied().collect();
+        let input = || ModelInput { index: &self.snap.index, types: Some(&self.snap.types), weights: None };
+        let before = nikgob_recs::model::replay_with(&self.snap.catalog, &self.history, input(), &[], &unscored);
+        let after = nikgob_recs::model::replay_with(&self.snap.catalog, &self.history, input(), &dislikes, &unscored);
+        (before, after, dislikes)
+    }
+
+    /// What a dislike of `track` does: how much lower each track stands
+    /// (its nearest sound neighbours), and its artist's other tracks with
+    /// theirs (0 unless one is a neighbour).
+    pub fn dislike_effect(&self, track: TrackId) -> (Vec<(TrackId, f32)>, Vec<(TrackId, f32)>) {
+        let m = &self.snap.model;
+        let Some(d) = m.position(track) else { return (Vec::new(), Vec::new()) };
+        let emb: Vec<Option<nikgob_recs::Vector>> = (0..m.len()).map(|i| m.embedded_at(i).copied()).collect();
+        let near = nikgob_recs::dislike::near_dislikes(&emb, &[d], m.scale());
+        let mut lower: Vec<(TrackId, f32)> = near.iter().enumerate().filter(|(_, w)| **w > 0.0).map(|(i, w)| (m.id(i), *w)).collect();
+        lower.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let artist = m.main_artist_at(d);
+        let same: Vec<(TrackId, f32)> =
+            (0..m.len()).filter(|&i| i != d && artist.is_some() && m.main_artist_at(i) == artist).map(|i| (m.id(i), near[i])).collect();
+        (lower, same)
+    }
+
+    /// The finds of the last discovery pass and the new music the services'
+    /// answers under `keys` keep, that the junk filter leaves out, with why.
+    pub fn junk_found(&self, lib: &Library, keys: &[&str]) -> Vec<(StreamTrack, nikgob_recs::Junk)> {
+        let mut pool = discover::cached_finds(lib);
+        for k in keys {
+            pool.extend(cache_read::<Vec<StreamTrack>>(lib, k).unwrap_or_default());
+        }
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for t in &pool {
+            if !seen.insert(t.id.clone()) {
+                continue;
+            }
+            let canonical = nikgob_recs::junk::canonical_in(t, &pool);
+            if let Some(j) = nikgob_recs::junk(t, canonical.as_ref()) {
+                out.push((t.clone(), j));
+            }
+        }
+        out
+    }
+
     /// How far apart two tracks sound, in the model's median distances.
+
     pub fn distance(&self, a: TrackId, b: TrackId) -> Option<f32> {
         let m = &self.snap.model;
         let (a, b) = (m.embedded_at(m.position(a)?)?, m.embedded_at(m.position(b)?)?);

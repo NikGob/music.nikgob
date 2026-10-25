@@ -190,6 +190,12 @@ pub(crate) fn cached_found(lib: &Library) -> (Vec<StreamTrack>, usize) {
     found.map_or((Vec::new(), 0), |f| (f.tracks, f.releases.len()))
 }
 
+/// Every song the last pass found, before ranking (the preview tools).
+pub(crate) fn cached_finds(lib: &Library) -> Vec<StreamTrack> {
+    let found: Option<Found> = lib.cache_get(FOUND_KEY).ok().flatten().and_then(|(_, j)| serde_json::from_str(&j).ok());
+    found.map(|f| f.finds.into_iter().flat_map(|(_, t)| t).collect()).unwrap_or_default()
+}
+
 /// One answer of a step.
 pub(crate) enum Answer {
     Tracks(Vec<StreamTrack>),
