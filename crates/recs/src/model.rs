@@ -50,7 +50,10 @@ use serde::{Deserialize, Serialize};
 use crate::analysis::Vector;
 use crate::index::{Normalizer, VectorIndex, euclid};
 use crate::listening::{Heard, Listening, W_BG};
-use crate::profiles::{ALIVE_DAYS, Input as ProfilesInput, Params, Profiles, SHARE_HALF_DAYS, SharePlay, background_shares, shares};
+use crate::profiles::{
+    ALIVE_DAYS, Input as ProfilesInput, Params, Profiles, SHARE_HALF_DAYS, SharePlay, background_cards, background_shares, quota,
+    shares,
+};
 use crate::regions::Regions;
 use crate::session::{Ended, Session, TrackLookup};
 use crate::songtype::{SongLane, SongType, SongTypes, sigmoid};
@@ -416,6 +419,15 @@ struct Started {
     import: bool,
 }
 
+/// The home's cards of the taste profiles ([`UserModel::home_profiles`]):
+/// how many each one takes, and a background profile's cards as its tracks
+/// (catalog positions), the calm first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HomeProfiles {
+    pub cards: Vec<usize>,
+    pub background: Vec<Vec<Vec<usize>>>,
+}
+
 /// The user model (see the module docs).
 #[derive(Clone, Debug)]
 pub struct UserModel {
@@ -543,6 +555,47 @@ impl UserModel {
             Some(top) if *top > 1e-6 => a / top,
             _ => a,
         }
+    }
+
+    /// Whether profile `j` is a background profile: most of its plays
+    /// background, of a user who has background sessions at all.
+    pub fn is_background_profile(&self, j: usize) -> bool {
+        self.listening.has_background && self.profile_bg.get(j).is_some_and(|b| *b >= 0.5)
+    }
+
+    /// The home's cards of the profiles out of `slots` (profiles-v1 §5.3,
+    /// the user's decision 1). A background profile whose tracks suit the
+    /// background (`suits`, see [`crate::background`]) takes up to
+    /// `bg_cards` cards by its share, of those tracks only, split by
+    /// energy; one with too few (its background is its ordinary songs)
+    /// counts as any other. Every active profile keeps a card.
+    pub fn home_profiles(&self, slots: usize, bg_cards: usize, suits: impl Fn(usize) -> bool) -> HomeProfiles {
+        let k = self.profiles.len();
+        let mut suited: Vec<Vec<(usize, f32)>> = vec![Vec::new(); k];
+        for i in 0..self.len() {
+            if let Some(j) = self.profile_at(i).filter(|&j| self.is_background_profile(j))
+                && suits(i)
+            {
+                let energy = self.emb[i].map_or(0.0, |e| crate::mood::Axes::of(&self.norm.z_of_embedded(&e)).energy);
+                suited[j].push((i, energy));
+            }
+        }
+        let room: Vec<usize> = suited.iter().map(|s| background_cards(s, bg_cards).len()).collect();
+        let background: Vec<bool> = room.iter().map(|r| *r > 0).collect();
+        let cap = room.iter().copied().max().unwrap_or(0).max(1);
+        let mut cards = quota(&self.profile_share, slots, &background, cap);
+        // Each background profile's own cap.
+        for j in 0..k {
+            if background[j] && cards[j] > room[j] {
+                let spare = cards[j] - room[j];
+                cards[j] = room[j];
+                if let Some(o) = (0..k).filter(|&o| !background[o] && cards[o] > 0).max_by(|a, b| self.profile_share[*a].total_cmp(&self.profile_share[*b])) {
+                    cards[o] += spare;
+                }
+            }
+        }
+        let background = (0..k).map(|j| if background[j] { background_cards(&suited[j], cards[j]) } else { Vec::new() }).collect();
+        HomeProfiles { cards, background }
     }
 
     /// Every start of the history and how it ended, its seeks and the likes

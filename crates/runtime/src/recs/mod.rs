@@ -852,8 +852,21 @@ pub(crate) fn play_of(e: &nikgob_core::model::Event) -> nikgob_recs::Play {
 /// its share of the recent plays, how much of it is background, three of
 /// its best loved songs; and how the user listens.
 fn log_profiles(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &HashMap<ArtistId, String>, style: v::ProfileNames) {
+    log::info!("{}", listening_line(model));
+    let lines = profile_lines(model, tiles, names, style);
+    let short: Vec<String> = profile_order(model).into_iter().map(|j| format!("{} {:.2}", profile_name(model, names, style, j).0, model.profile_share.get(j).copied().unwrap_or(0.0))).collect();
+    let born = model.profiles.list.iter().filter(|p| !p.visible).count();
+    log::info!("profiles: {} ({}), not shown yet {born}", model.profiles.len(), short.join(", "));
+    for line in lines {
+        log::info!("recs: profile {line}");
+    }
+}
+
+/// How the user listens, in a line: the sessions, the background ones and
+/// the threshold that told them.
+fn listening_line(model: &UserModel) -> String {
     let l = &model.listening;
-    log::info!(
+    format!(
         "listening: {} sessions, {} background{}",
         l.sessions.len(),
         l.background_sessions(),
@@ -862,14 +875,7 @@ fn log_profiles(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &Hash
             (true, Some(t)) => format!(" (threshold {t:.2}, separation {:.2})", l.eta),
             (true, None) => format!(" (the fixed band, separation {:.2})", l.eta),
         }
-    );
-    let lines = profile_lines(model, tiles, names, style);
-    let short: Vec<String> = profile_order(model).into_iter().map(|j| format!("{} {:.2}", profile_name(model, names, style, j).0, model.profile_share.get(j).copied().unwrap_or(0.0))).collect();
-    let born = model.profiles.list.iter().filter(|p| !p.visible).count();
-    log::info!("profiles: {} ({}), not shown yet {born}", model.profiles.len(), short.join(", "));
-    for line in lines {
-        log::info!("recs: profile {line}");
-    }
+    )
 }
 
 /// The profiles, the largest share first.
@@ -1667,6 +1673,37 @@ impl ModelPreview {
         let events = lib.listening_events().unwrap_or_default();
         let tiles = tiles::input(lib, &rows, &events, names.clone());
         profile_lines(&self.snap.model, &tiles, &names, v::ProfileNames::Kind)
+    }
+
+    /// How the user listens ([`Listening`](nikgob_recs::listening::Listening)), in a line.
+    pub fn listening(&self) -> String {
+        listening_line(&self.snap.model)
+    }
+
+    /// The home's cards of each profile out of `slots`, the largest share
+    /// first: its name, its cards and, for a background profile, the sizes
+    /// of its «Фон» cards (the basic background rule).
+    pub fn home_profiles(&self, lib: &Library, slots: usize) -> Vec<String> {
+        use nikgob_recs::background::{BackgroundScore, BackgroundTrack, Basic};
+        let names: HashMap<ArtistId, String> = lib.artist_names().unwrap_or_default().into_iter().collect();
+        let rows = lib.rec_tracks().unwrap_or_default();
+        let events = lib.listening_events().unwrap_or_default();
+        let tiles = tiles::input(lib, &rows, &events, names.clone());
+        let model = &self.snap.model;
+        let catalog = self.snap.catalog.tracks();
+        let home = model.home_profiles(slots, nikgob_recs::profiles::BG_CARDS, |i| {
+            let id = catalog[i].id;
+            let (Some(song), Some(f)) = (self.snap.types.get(id), tiles.facts.get(&id)) else { return false };
+            Basic.suits(&BackgroundTrack { song, title: &f.title, album: f.album.as_deref(), artist: &f.artist })
+        });
+        profile_order(model)
+            .into_iter()
+            .map(|j| {
+                let (name, _) = profile_name(model, &names, v::ProfileNames::Kind, j);
+                let bg: Vec<usize> = home.background[j].iter().map(Vec::len).collect();
+                format!("{name}: {} cards{}", home.cards[j], if bg.is_empty() { String::new() } else { format!(", «Фон» of {bg:?} tracks") })
+            })
+            .collect()
     }
 
     pub fn song_type(&self, id: TrackId) -> Option<nikgob_recs::SongType> {

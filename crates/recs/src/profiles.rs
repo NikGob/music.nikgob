@@ -36,8 +36,11 @@
 //!   a hysteresis of 5 %), a word of loudness against the user's other
 //!   profiles of that kind, the main artists in the subtitle; or by the
 //!   artists alone ([`NameStyle`]).
-//! * **Balance** ([`shares`]): the profiles' shares of the recent plays, a
-//!   background play counting [`crate::listening::W_BG`].
+//! * **Balance** ([`shares`], [`quota`]): the profiles' shares of the
+//!   recent plays, a background play counting [`crate::listening::W_BG`];
+//!   the home's cards by share with a floor of one for each active profile,
+//!   a background profile at most [`BG_CARDS`] of them, split by energy
+//!   ([`background_cards`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -81,6 +84,10 @@ const KEPT_MEMBERS: usize = 200;
 const NAME_SHARE: f32 = 0.6;
 /// …and stays its name down to this one.
 const NAME_KEEP: f32 = 0.55;
+/// A profile is active on the home with this share.
+pub const ACTIVE_SHARE: f32 = 0.02;
+/// Cards of a background profile on the home at most (the user's choice).
+pub const BG_CARDS: usize = 3;
 /// The shares' half-life.
 pub const SHARE_HALF_DAYS: i64 = 30;
 /// The version of [`ProfileHistory`]: another one starts over.
@@ -1110,6 +1117,50 @@ pub fn background_shares(plays: &[SharePlay], k: usize) -> Vec<f32> {
     sum.into_iter().map(|(s, n)| if n > 0.0 { s / n } else { 0.0 }).collect()
 }
 
+/// The home's cards of each profile (profiles-v1 §5.3 with the user's
+/// decision 1), a calibrated allocation with a floor: each active profile
+/// (`shares ≥` [`ACTIVE_SHARE`]) one card while the `slots` allow, the
+/// largest shares first; the rest by share, largest remainders, a
+/// background profile (`background`) at most `bg_slots`.
+pub fn quota(shares: &[f32], slots: usize, background: &[bool], bg_slots: usize) -> Vec<usize> {
+    let mut out = vec![0usize; shares.len()];
+    let mut active: Vec<usize> = (0..shares.len()).filter(|&j| shares[j] >= ACTIVE_SHARE).collect();
+    active.sort_by(|a, b| shares[*b].total_cmp(&shares[*a]).then(a.cmp(b)));
+    if active.is_empty() {
+        return out;
+    }
+    for &j in active.iter().take(slots) {
+        out[j] = 1;
+    }
+    let cap = |j: usize| if background.get(j).copied().unwrap_or(false) { bg_slots.max(1) } else { usize::MAX };
+    let mut left = slots.saturating_sub(out.iter().sum());
+    while left > 0 {
+        // The cards of the capped are theirs; the others share the rest.
+        let open: Vec<usize> = active.iter().copied().filter(|&j| out[j] < cap(j)).collect();
+        let tot: f32 = open.iter().map(|&j| shares[j]).sum();
+        let room = slots - active.iter().filter(|&&j| out[j] >= cap(j)).map(|&j| out[j]).sum::<usize>();
+        let want = |j: usize| shares[j] / tot.max(1e-9) * room as f32 - out[j] as f32;
+        let Some(j) = open.into_iter().max_by(|&a, &b| want(a).total_cmp(&want(b)).then(b.cmp(&a))) else { break };
+        out[j] += 1;
+        left -= 1;
+    }
+    out
+}
+
+/// A background profile's suitable tracks (`tracks` with their energy, see
+/// [`crate::background`]) as up to `cards` cards of [`MIN_TRACKS`] at
+/// least, split by energy: the calm ones, the middle, the livelier.
+pub fn background_cards(tracks: &[(usize, f32)], cards: usize) -> Vec<Vec<usize>> {
+    let k = cards.min(tracks.len() / MIN_TRACKS);
+    if k == 0 {
+        return Vec::new();
+    }
+    let mut by: Vec<(usize, f32)> = tracks.to_vec();
+    by.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    let n = by.len();
+    (0..k).map(|c| by[c * n / k..(c + 1) * n / k].iter().map(|x| x.0).collect()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1332,5 +1383,35 @@ mod tests {
         assert!((naive[0] - 0.7).abs() < 1e-4);
         assert!(balanced[0] < 0.45 && balanced[1] > 0.55, "{balanced:?}");
         assert_eq!(background_shares(&plays, 2), vec![1.0, 0.0]);
+    }
+
+    /// Ambient played in the background up to 70 %: at most three cards,
+    /// every other active profile keeps one.
+    #[test]
+    fn background_profile_capped() {
+        let s = [0.70, 0.20, 0.05, 0.05];
+        assert_eq!(quota(&s, 6, &[false; 4], BG_CARDS), vec![3, 1, 1, 1], "by share");
+        let s = [0.85, 0.09, 0.03, 0.03];
+        assert_eq!(quota(&s, 6, &[true, false, false, false], BG_CARDS), vec![3, 1, 1, 1]);
+        assert_eq!(quota(&s, 6, &[true, false, false, false], 1), vec![1, 3, 1, 1], "one card of background");
+        assert_eq!(quota(&s, 6, &[false; 4], BG_CARDS), vec![3, 1, 1, 1]);
+        let cards = background_cards(&(0..30).map(|i| (i, i as f32 / 30.0)).collect::<Vec<_>>(), BG_CARDS);
+        assert_eq!(cards.len(), 3);
+        assert!(cards[0].iter().all(|i| *i < 10) && cards[2].iter().all(|i| *i >= 20));
+        assert_eq!(background_cards(&[(0, 0.1); 12], 3).len(), 1);
+    }
+
+    /// Each active profile gets a card while they last, the largest first;
+    /// one under the active share gets none.
+    #[test]
+    fn floor_for_each_active() {
+        let s = [0.9, 0.04, 0.03, 0.02, 0.01];
+        assert_eq!(quota(&s, 6, &[false; 5], BG_CARDS), vec![3, 1, 1, 1, 0]);
+        let many = [0.3, 0.2, 0.1, 0.1, 0.1, 0.1, 0.05, 0.05];
+        let q = quota(&many, 6, &[false; 8], BG_CARDS);
+        assert_eq!(q.iter().sum::<usize>(), 6);
+        assert_eq!(q, vec![1, 1, 1, 1, 1, 1, 0, 0], "the largest first, the rest by days");
+        assert_eq!(quota(&[1.0], 6, &[false], BG_CARDS), vec![6]);
+        assert!(quota(&[], 6, &[], BG_CARDS).is_empty());
     }
 }

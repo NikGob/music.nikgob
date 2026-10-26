@@ -47,8 +47,13 @@ fn new_music_and_dislikes_of_a_real_library() {
     let lib = copy_of(&src, dir.path());
     let preview = ModelPreview::of(&lib).unwrap();
 
+    println!("{}", preview.listening());
     println!("taste profiles:");
     for l in preview.profiles(&lib) {
+        println!("    {l}");
+    }
+    println!("the home's six cards:");
+    for l in preview.home_profiles(&lib, 6) {
         println!("    {l}");
     }
 

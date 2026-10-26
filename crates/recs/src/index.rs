@@ -283,6 +283,12 @@ impl Normalizer {
     pub fn embed(&self, v: &Vector) -> Vector {
         std::array::from_fn(|i| (v[i] - self.mean[i]) * self.inv_scale[i] * self.sqrt_w[i])
     }
+
+    /// The z-scores of an [`Self::embed`]ded vector (a feature weighed 0
+    /// comes back 0).
+    pub fn z_of_embedded(&self, e: &Vector) -> Vector {
+        std::array::from_fn(|i| if self.sqrt_w[i] > 0.0 { e[i] / self.sqrt_w[i] } else { 0.0 })
+    }
 }
 
 /// Plain euclidean distance (of two [`Normalizer::embed`]ded vectors).

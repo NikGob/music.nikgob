@@ -59,7 +59,7 @@ pub use index::{Normalizer, VectorIndex};
 pub use junk::{Canonical, Junk, junk};
 pub use novelty::{Heard, NewEvent, NewLog, Source};
 pub use regions::Regions;
-pub use model::{FEATURE_VERSION, Model, ModelInput, Moment, SkipModel, UserModel, Weights};
+pub use model::{FEATURE_VERSION, HomeProfiles, Model, ModelInput, Moment, SkipModel, UserModel, Weights};
 pub use mood::{Axes, Mood};
 pub use pick::{Item, NewTrack, Pick, Reason, Recs};
 pub use radio::{Outcome, RadioParams, RadioSeed, RadioState};
