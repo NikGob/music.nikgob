@@ -837,6 +837,28 @@ fn read_parts(
     Ok((snap, tiles_input, index_len, history))
 }
 
+/// Whether each catalog track suits the background
+/// ([`nikgob_recs::background::Basic`]): by its type and names, and the
+/// names of the user's playlists it is in.
+pub(crate) fn background_fit(snap: &Snapshot, tiles: &nikgob_recs::TilesInput) -> Vec<bool> {
+    use nikgob_recs::background::{BackgroundScore, BackgroundTrack, Basic};
+    let mut lists: HashMap<TrackId, Vec<&str>> = HashMap::new();
+    for p in &tiles.playlists {
+        for t in &p.tracks {
+            lists.entry(*t).or_default().push(p.name.as_str());
+        }
+    }
+    snap.catalog
+        .tracks()
+        .iter()
+        .map(|t| {
+            let (Some(song), Some(f)) = (snap.types.get(t.id), tiles.facts.get(&t.id)) else { return false };
+            let playlists = lists.get(&t.id).map_or(&[][..], Vec::as_slice);
+            Basic.suits(&BackgroundTrack { song, title: &f.title, album: f.album.as_deref(), artist: &f.artist, playlists })
+        })
+        .collect()
+}
+
 /// An event as the recommendations read it: a play imported before
 /// imports had their origin (the import's device) is an import.
 pub(crate) fn play_of(e: &nikgob_core::model::Event) -> nikgob_recs::Play {
@@ -1684,18 +1706,13 @@ impl ModelPreview {
     /// first: its name, its cards and, for a background profile, the sizes
     /// of its «Фон» cards (the basic background rule).
     pub fn home_profiles(&self, lib: &Library, slots: usize) -> Vec<String> {
-        use nikgob_recs::background::{BackgroundScore, BackgroundTrack, Basic};
         let names: HashMap<ArtistId, String> = lib.artist_names().unwrap_or_default().into_iter().collect();
         let rows = lib.rec_tracks().unwrap_or_default();
         let events = lib.listening_events().unwrap_or_default();
         let tiles = tiles::input(lib, &rows, &events, names.clone());
         let model = &self.snap.model;
-        let catalog = self.snap.catalog.tracks();
-        let home = model.home_profiles(slots, nikgob_recs::profiles::BG_CARDS, |i| {
-            let id = catalog[i].id;
-            let (Some(song), Some(f)) = (self.snap.types.get(id), tiles.facts.get(&id)) else { return false };
-            Basic.suits(&BackgroundTrack { song, title: &f.title, album: f.album.as_deref(), artist: &f.artist })
-        });
+        let fit = background_fit(&self.snap, &tiles);
+        let home = model.home_profiles(slots, nikgob_recs::profiles::BG_CARDS, |i| fit[i]);
         profile_order(model)
             .into_iter()
             .map(|j| {

@@ -268,7 +268,7 @@ fn run(l: &Listener) -> Found {
 fn home(l: &Listener, found: &Found) -> nikgob_recs::HomeProfiles {
     found.model.home_profiles(6, nikgob_recs::profiles::BG_CARDS, |i| {
         let song = l.types.get(l.catalog.tracks()[i].id).copied().unwrap_or_default();
-        Basic.suits(&BackgroundTrack { song: &song, title: "Track", album: Some(l.albums[i]), artist: "Artist" })
+        Basic.suits(&BackgroundTrack { song: &song, title: "Track", album: Some(l.albums[i]), artist: "Artist", playlists: &[] })
     })
 }
 
