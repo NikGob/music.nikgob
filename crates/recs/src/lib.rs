@@ -25,6 +25,7 @@
 //!   [`songtype`]: sung or instrumental, the language, a soundtrack's song.
 
 pub mod analysis;
+pub mod background;
 pub mod daily;
 pub mod daylist;
 pub mod discover;
