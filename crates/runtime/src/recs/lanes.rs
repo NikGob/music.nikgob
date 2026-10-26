@@ -45,6 +45,8 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 pub(crate) struct LaneHome {
     pub key: v::MixKey,
     pub title: String,
+    /// Shorter forms of the title for a narrow card.
+    pub short: Vec<String>,
     pub tracks: Vec<TrackId>,
     /// Familiar and loved: a new song of «С новым» stands between two.
     pub anchors: Vec<bool>,
@@ -251,6 +253,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         out.push(LaneHome {
             key: v::MixKey::OnRepeat,
             title: "На повторе".into(),
+            short: Vec::new(),
             artists: artists_of(snap, tiles, &tracks),
             covers: covers(snap, &tracks),
             anchors,
@@ -278,6 +281,7 @@ pub(crate) fn blend_now(snap: &Snapshot, prefs: &MixPrefs, profiles: &[u32], nam
     Some(LaneHome {
         key: view_key(mix.key),
         title: mix.title,
+        short: mix.short,
         covers: covers(snap, &tracks),
         anchors: mix.anchors,
         tracks,
@@ -331,6 +335,7 @@ fn lane_of(snap: &Snapshot, tiles: &TilesInput, m: &Mix) -> LaneHome {
     LaneHome {
         key: view_key(m.key),
         title: m.title.clone(),
+        short: m.short.clone(),
         covers: covers(snap, &tracks),
         anchors: m.anchors.clone(),
         tracks,
@@ -688,6 +693,7 @@ mod tests {
         let lane = LaneHome {
             key: v::MixKey::Calm,
             title: "Спокойное".into(),
+            short: Vec::new(),
             tracks: (0..28).map(|_| TrackId::new()).collect(),
             anchors: anchors.clone(),
             artists: Vec::new(),

@@ -11,7 +11,7 @@ use nikgob_view::{Command, LaneCard, MixCard, Route, Shortcut, Status, ViewState
 
 use crate::{
     Icon, Theme, TypeRole, TypeStyle,
-    components::{IconButton, Menu, MenuItem, Radii, Shape, Size, Style, anim, button::Colors, paint},
+    components::{IconButton, Menu, MenuItem, Radii, Shape, Size, Style, TooltipExt, anim, button::Colors, paint},
     tokens::{shape, state},
 };
 
@@ -358,9 +358,21 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, can_blend: boo
         job.wrap.max_width = cell.width();
         crate::typography::layout(ui.painter(), job).rows.len()
     };
-    let title_lines = if rows(&l.title, TypeRole::TitleMedium.style()) > 1 { 2 } else { 1 };
-    let name = text(ui, &l.title, TypeRole::TitleMedium.style(), title_c, cell.width(), title_lines);
-    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), name, title_c);
+    // A blend's name too long for two lines says a shorter form of it, the
+    // whole in the title's tooltip.
+    let title_role = TypeRole::TitleMedium.style();
+    let title = std::iter::once(&l.title)
+        .chain(&l.short_titles)
+        .find(|t| rows(t, title_role) <= 2)
+        .or(l.short_titles.last())
+        .unwrap_or(&l.title);
+    let title_lines = if rows(title, title_role) > 1 { 2 } else { 1 };
+    let name = text(ui, title, title_role, title_c, cell.width(), title_lines);
+    let title_rect = Rect::from_min_size(pos2(cell.left(), art.bottom() + 8.0), name.size());
+    ui.painter().galley(title_rect.min, name, title_c);
+    if *title != l.title && resp.hover_pos().is_some_and(|p| title_rect.contains(p)) {
+        resp.clone().md3_tooltip(&l.title, None);
+    }
     let role = TypeRole::BodyMedium.style();
     let artist_lines = 3 - title_lines;
     let fits = |t: &str| rows(t, role) <= artist_lines;

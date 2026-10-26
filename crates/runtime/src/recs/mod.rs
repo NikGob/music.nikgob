@@ -1280,6 +1280,7 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
 struct LaneParts {
     key: v::MixKey,
     title: String,
+    short: Vec<String>,
     artists: Vec<String>,
     /// The new songs' artists.
     new_artists: Vec<String>,
@@ -1379,6 +1380,7 @@ impl HomeParts {
                 LaneParts {
                     key: l.key,
                     title: l.title.clone(),
+                    short: l.short.clone(),
                     artists: l.artists.clone(),
                     new_artists,
                     covers: l.covers.clone(),
@@ -1491,6 +1493,7 @@ impl HomeParts {
             .map(|(l, covers)| v::LaneCard {
                 key: l.key,
                 title: l.title,
+                short_titles: l.short,
                 artists: l.artists,
                 new_artists: l.new_artists,
                 covers,

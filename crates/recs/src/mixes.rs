@@ -329,6 +329,9 @@ impl Kept {
 pub struct Mix {
     pub key: MixKey,
     pub title: String,
+    /// Shorter forms of the title, the longest first (a blend's: a card
+    /// too narrow for the whole name says one of these).
+    pub short: Vec<String>,
     /// Catalog positions, in the order they play.
     pub tracks: Vec<usize>,
     /// Familiar and loved: a new song of «С новым» may stand between two
@@ -610,8 +613,9 @@ impl<'a> Builder<'a> {
         profiles.sort_unstable();
         profiles.dedup();
         let anchors = self.anchors(&tracks);
-        let mut mix = Mix { key, title: String::new(), artists: self.artists(&tracks), anchors, tracks, profiles, score: 0.0 };
+        let mut mix = Mix { key, title: String::new(), short: Vec::new(), artists: self.artists(&tracks), anchors, tracks, profiles, score: 0.0 };
         mix.title = self.title(key, &mix.tracks);
+        mix.short = self.short_titles(key);
         mix.score = self.context(&mix);
         Some(mix)
     }
@@ -1223,6 +1227,17 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Shorter forms of a blend's name by its profiles' kinds (see
+    /// [`blend_short`]); none for the others, or by the artists.
+    pub fn short_titles(&self, key: MixKey) -> Vec<String> {
+        let MixKey::Blend(keys) = key else { return Vec::new() };
+        if self.settings.names != NameStyle::Kind {
+            return Vec::new();
+        }
+        let kinds: Option<Vec<Kind>> = keys.iter().filter(|k| **k != 0).map(|k| Some(self.model.profiles.list[self.profile_index(*k)?].kind)).collect();
+        kinds.map_or_else(Vec::new, |k| blend_short(&k))
+    }
+
     /// The names that need the artists' (`artist` names one): a profile's
     /// by its artists, a blend's of them; then two cards of one name tell
     /// themselves apart by their main artist.
@@ -1325,6 +1340,65 @@ fn blend_title(names: Vec<String>) -> String {
         }
     }
     parts.join(" + ")
+}
+
+/// Shorter forms of a blend's name, the longest first, by its profiles'
+/// kinds: «Русские и японские песни + без слов», then «Русские и японские
+/// + без слов». None when two of its profiles are of one kind (their names
+/// tell them apart by more than the kind).
+fn blend_short(kinds: &[Kind]) -> Vec<String> {
+    let mut seen: Vec<Kind> = Vec::new();
+    for k in kinds {
+        if seen.contains(k) {
+            return Vec::new();
+        }
+        seen.push(*k);
+    }
+    let sung: Vec<&str> = kinds
+        .iter()
+        .filter_map(|k| match k {
+            Kind::Sung(l) => lang_adjective(*l),
+            _ => None,
+        })
+        .collect();
+    let rest: Vec<&str> = kinds
+        .iter()
+        .filter_map(|k| match k {
+            Kind::Sung(l) if lang_adjective(*l).is_some() => None,
+            Kind::Instrumental | Kind::InstrumentalSoundtracks => Some("без слов"),
+            Kind::Soundtracks => Some("саундтреки"),
+            Kind::Songs | Kind::Sung(_) => Some("песни"),
+            Kind::Calm => Some("спокойное"),
+            Kind::Lively => Some("бодрое"),
+        })
+        .collect();
+    let adjectives = |sung: &[&str]| -> String {
+        let mut out = sung[0].to_owned();
+        for (k, a) in sung.iter().enumerate().skip(1) {
+            out.push_str(if k + 1 == sung.len() { " и " } else { ", " });
+            out.push_str(&a.to_lowercase());
+        }
+        out
+    };
+    let join = |head: String| -> String {
+        let mut parts = vec![head];
+        parts.extend(rest.iter().map(|r| (*r).to_owned()));
+        parts.join(" + ")
+    };
+    let mut out = Vec::new();
+    if sung.is_empty() {
+        let mut first = rest.first().map(|r| (*r).to_owned()).unwrap_or_default();
+        if let Some(c) = first.chars().next() {
+            first = c.to_uppercase().collect::<String>() + &first[c.len_utf8()..];
+        }
+        out.push(std::iter::once(first).chain(rest.iter().skip(1).map(|r| (*r).to_owned())).collect::<Vec<_>>().join(" + "));
+    } else {
+        out.push(join(format!("{} песни", adjectives(&sung))));
+        if !rest.is_empty() {
+            out.push(join(adjectives(&sung)));
+        }
+    }
+    out
 }
 
 /// The name of a side by what it holds: of one language at
@@ -1763,6 +1837,16 @@ mod tests {
         let names = |n: &[&str]| n.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
         assert_eq!(blend_title(names(&["Русские песни", "Саундтреки без слов", "Японские песни"])), "Русские и японские песни + Саундтреки без слов");
         assert_eq!(blend_title(names(&["Японские песни", "Саундтреки без слов"])), "Японские песни + Саундтреки без слов");
+        // Shorter forms for a narrow card, of the kinds alone.
+        let (ru, ja) = (Kind::Sung(Lang::Russian), Kind::Sung(Lang::Japanese));
+        assert_eq!(
+            blend_short(&[ru, Kind::InstrumentalSoundtracks, ja]),
+            ["Русские и японские песни + без слов", "Русские и японские + без слов"]
+        );
+        assert_eq!(blend_short(&[ja, Kind::InstrumentalSoundtracks]), ["Японские песни + без слов", "Японские + без слов"]);
+        assert_eq!(blend_short(&[ru, ja]), ["Русские и японские песни"]);
+        assert_eq!(blend_short(&[Kind::Instrumental, Kind::Soundtracks]), ["Без слов + саундтреки"]);
+        assert!(blend_short(&[ru, ru]).is_empty(), "two of one kind: their names tell them apart");
         assert_eq!(MixKey::blend(&[3]), None);
         assert_ne!(MixKey::Calm.token(), MixKey::Lively.token());
         for l in [LaneKey::Instrumental, LaneKey::Unknown, LaneKey::Sung(Lang::Korean), LaneKey::Sung(Lang::Other)] {

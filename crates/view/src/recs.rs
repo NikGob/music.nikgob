@@ -99,6 +99,10 @@ pub struct LaneCard {
     pub key: MixKey,
     /// «Русские песни», «Всё вперемешку», «Спокойное», «Фон».
     pub title: String,
+    /// Shorter forms of the title, the longest first: a card too narrow
+    /// for a blend's whole name says one of these («Русские и японские +
+    /// без слов»), the whole in its tooltip.
+    pub short_titles: Vec<String>,
     /// Its artists, most heard first, as the library writes them (the card
     /// says as many whole names as fit: «Серега Пират, mzlff и другие»).
     pub artists: Vec<String>,
