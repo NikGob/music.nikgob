@@ -13,7 +13,9 @@
 //! pictures in one run).
 //! `album` opens the first album of the library (`album:Title` that one).
 //! `world:Title` chooses that world on the card of Главная,
-//! `world_page:Title` opens its page.
+//! `world_page:Title` opens its page (`world_page` the first world's).
+//! `mix_page` opens the page of the first mix of Главная (`mix_page:Title`
+//! that one, or the open world page's).
 //! `liked` opens «Любимые»; `play_clip` plays the first clip of the open
 //! playlist (`play_clip:song` its first stream song).
 //! `find_song` opens «Найти песню…» for the first clip of the open
@@ -252,12 +254,27 @@ impl Shot {
             "world" | "world_page" => {
                 // A world of the card by its title: chosen on the card, or
                 // its page opened (`world_page:Title`).
-                if let Some(w) = state.home.worlds.iter().find(|w| w.title == arg) {
+                if let Some(w) = state.home.worlds.iter().find(|w| arg.is_empty() || w.title == arg) {
                     if verb == "world" {
                         ui.choose_world(ctx, &w.key);
                     } else {
                         ui.navigate(ctx, Route::World(w.key.clone()), out);
                     }
+                }
+                self.wait = 30;
+            }
+            "mix_page" => {
+                // The page of the first mix of Главная (`mix_page:Title` the
+                // one of that title, of the open world's page if it has it).
+                let home = state.home.lanes.iter().find(|l| arg.is_empty() || l.title == arg);
+                let world = state.world.as_ref().and_then(|v| v.mixes.iter().find(|l| l.title == arg).map(|l| (l, &v.world.key)));
+                let route = match (home, world) {
+                    (Some(l), _) => Some(Route::Mix { key: l.key, world: None }),
+                    (None, Some((l, w))) => Some(Route::Mix { key: l.key, world: Some(w.clone()) }),
+                    _ => None,
+                };
+                if let Some(r) = route {
+                    ui.navigate(ctx, r, out);
                 }
                 self.wait = 30;
             }

@@ -387,7 +387,7 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
     row(ui, Id::BackgroundCards, "Фон", None, |ui| {
         choice_menu(ui, Id::BackgroundCards, p);
     });
-    row(ui, Id::MixClickOpensList, "Нажатие на микс открывает список", None, |ui| {
+    row(ui, Id::MixClickOpensList, "Нажатие на микс открывает его страницу", None, |ui| {
         ui.add(Switch::new(&mut p.mix_click_opens_list).id_salt("set-mix-click-list"));
     });
     if !p.home_hidden_mixes.is_empty() {

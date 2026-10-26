@@ -998,6 +998,9 @@ fn load_for(route: &Route, out: &mut Vec<Command>) {
         Route::Playlist(id) => out.push(Command::LoadPlaylist(*id)),
         Route::Stream(page) => out.push(Command::LoadStream(page.clone())),
         Route::World(key) => out.push(Command::LoadWorld(key.clone())),
+        // Of what is on screen already (Главная, the world's page); a world
+        // left meanwhile is loaded by the page itself.
+        Route::Mix { .. } => {}
         Route::Downloads(_) => out.push(Command::LoadWishlist),
         Route::Settings => {}
     }
@@ -1214,7 +1217,7 @@ impl Md3eUi {
     fn rail(&mut self, ui: &mut Ui, rail_rect: Rect, expansion: f32, state: &ViewState, out: &mut Vec<Command>) -> bool {
         let ctx = ui.ctx().clone();
         let of = |r: &Route| match r {
-            Route::Home | Route::World(_) => Some(0),
+            Route::Home | Route::World(_) | Route::Mix { .. } => Some(0),
             Route::Library(_) | Route::Release(_) | Route::Artist(_) | Route::Playlist(_) => {
                 Some(1)
             }

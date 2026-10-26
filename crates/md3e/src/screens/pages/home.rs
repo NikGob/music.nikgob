@@ -272,7 +272,6 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         };
         nav = r.or(nav);
     }
-    lane_list(ui.ctx(), &state.home.lanes, out);
     blend_sheet(ui.ctx(), state, out);
     nav
 }
@@ -416,6 +415,7 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Com
     let body = lines(h.lanes.len(), per) as f32 * (card_h + 24.0) - 24.0;
     let total = HEADER_H + note_h + HEADER_GAP + body;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), Sense::hover());
+    let mut nav = None;
     entering(ui, rect, n, "mixes", |ui| {
         let s = Theme::get(ui.ctx()).scheme;
         let g = crate::typography::layout(ui.painter(), TypeRole::TitleLarge.style().job("Миксы для тебя", s.on_surface));
@@ -449,59 +449,11 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Com
             let cell = grid.cell(i, per, top, card_h, 24.0);
             // «Смешать с…»: another profile to mix it with.
             let can_blend = l.blend_base.is_some_and(|b| h.blend_profiles.iter().any(|p| p.key != b));
-            cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, state.prefs.mix_click_opens_list, out);
+            let opens = state.prefs.mix_click_opens_list;
+            nav = cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, opens, None, out).or(nav.take());
         }
     });
-    None
-}
-
-/// «Список треков» of a mix of `lanes` (Главная's, a world page's): its
-/// songs in a dialog.
-pub(super) fn lane_list(ctx: &egui::Context, lanes: &[LaneCard], out: &mut Vec<Command>) {
-    let key = Id::new("home-lane-list");
-    let Some(lane) = ctx.data(|d| d.get_temp::<nikgob_view::MixKey>(key)) else { return };
-    let Some(l) = lanes.iter().find(|l| l.key == lane) else {
-        ctx.data_mut(|d| d.remove::<nikgob_view::MixKey>(key));
-        return;
-    };
-    let mut open = true;
-    let n = l.tracks.len();
-    let o = crate::components::Dialog::new("home-lane-list-dialog", &l.title)
-        .supporting(format!("{n} {}", crate::screens::common::plural(n as u64, "трек", "трека", "треков")))
-        .action("Закрыть")
-        .action("Слушать")
-        .max_width(560.0)
-        .show_with(ctx, &mut open, |ui| {
-            let s = Theme::get(ui.ctx()).scheme;
-            egui::ScrollArea::vertical().max_height(420.0).id_salt("home-lane-list-scroll").show(ui, |ui| {
-                for (i, t) in l.tracks.iter().enumerate() {
-                    let line = format!("{}. {} · {}", i + 1, t.title, t.artist);
-                    let r = ui.add(
-                        egui::Label::new(TypeRole::BodyMedium.style().rich(line, s.on_surface))
-                            .truncate()
-                            .sense(Sense::click()),
-                    );
-                    if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        out.push(Command::PlayTracks {
-                            tracks: l.tracks.iter().map(|t| t.id).collect(),
-                            start: i,
-                            context: l.context(),
-                        });
-                    }
-                }
-            });
-        });
-    if o.action == Some(1) {
-        out.push(Command::PlayMix { id: l.id() });
-    }
-    if !open || o.action.is_some() {
-        ctx.data_mut(|d| d.remove::<nikgob_view::MixKey>(key));
-    }
-}
-
-/// Opens «Список треков» of `lane`.
-pub(super) fn open_lane_list(ctx: &egui::Context, lane: nikgob_view::MixKey) {
-    ctx.data_mut(|d| d.insert_temp(Id::new("home-lane-list"), lane));
+    nav
 }
 
 /// The profiles picked in «Смешать с…»: the card's first, then up to two.
@@ -517,7 +469,7 @@ const BLEND_WITH: usize = 2;
 
 /// «Смешать с…» of a mix: the bottom sheet of the other taste profiles,
 /// one or two of them picked, then «Слушать».
-fn blend_sheet(ctx: &egui::Context, state: &ViewState, out: &mut Vec<Command>) {
+pub(super) fn blend_sheet(ctx: &egui::Context, state: &ViewState, out: &mut Vec<Command>) {
     let key = Id::new("home-blend");
     let Some(mut b) = ctx.data(|d| d.get_temp::<Blend>(key)) else { return };
     let profiles = &state.home.blend_profiles;

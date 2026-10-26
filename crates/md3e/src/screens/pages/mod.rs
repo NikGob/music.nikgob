@@ -969,6 +969,7 @@ pub fn page(
                 Route::Settings => settings::show(ui, state, pages, out),
                 Route::Stream(page) => streams::page(ui, page, state, pages, out),
                 Route::World(key) => world::show(ui, key, state, pages, out),
+                Route::Mix { key, world } => detail::mix(ui, *key, world.as_deref(), state, pages, out),
             };
             nav = r.or(nav.take());
             ui.add_space(bottom_inset);

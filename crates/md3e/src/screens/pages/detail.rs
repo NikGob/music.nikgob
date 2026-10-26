@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use egui::{Context, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
-    ArtistId, Command, Cover, LIKED_PLAYLIST, LikeTarget, PlaylistCoverMode, PlaylistDetail, PlaylistId, ReleaseId,
+    ArtistId, Command, Cover, LIKED_PLAYLIST, LikeTarget, MixKey, PlaylistCoverMode, PlaylistDetail, PlaylistId, ReleaseId,
     ReleaseLine, ReleaseType, Route, TrackId, ViewState,
 };
 
@@ -68,15 +68,25 @@ fn header(
     artist: Option<&nikgob_view::ArtistCard>,
     add_text: impl FnOnce(&mut Ui),
 ) {
-    ui.add_space(8.0);
-    ui.horizontal_top(|ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-        match artist {
+    header_with(
+        ui,
+        size,
+        |ui, rect| match artist {
             // The same picture as in Библиотека: the photo, or the
             // initials in the artist's own role and shape.
             Some(a) => widgets::artist_picture(ui, a, rect),
             None => common::cover(ui, cover, rect, shape::EXTRA_LARGE),
-        }
+        },
+        add_text,
+    );
+}
+
+/// [`header`] with the picture `paint` draws in its square.
+fn header_with(ui: &mut Ui, size: f32, paint: impl FnOnce(&mut Ui, Rect), add_text: impl FnOnce(&mut Ui)) {
+    ui.add_space(8.0);
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+        paint(ui, rect);
         ui.add_space(24.0);
         ui.vertical(|ui| {
             ui.set_min_height(size);
@@ -795,4 +805,146 @@ pub fn playlist(
         add_dialog(&ctx, p, state, out);
     }
     nav
+}
+
+/// A mix's page ([`Route::Mix`]), laid out like a playlist's: the mosaic
+/// of the card, «МИКС», its artists, how many songs and how long, then
+/// «Слушать», «Перемешать» and the card's ⋮, and its songs, a click on one
+/// playing the mix from it. A mix no longer offered (the day's lineup
+/// changed, it was left out) says so.
+pub fn mix(
+    ui: &mut Ui,
+    key: MixKey,
+    world: Option<&str>,
+    state: &ViewState,
+    pages: &mut PageState,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    let s = Theme::get(ui.ctx()).scheme;
+    // A world's mix is of the world on its page: one left since (through
+    // the history) is loaded again.
+    let asked = Id::new(("mix-world-asked", world));
+    let lanes = match world {
+        None => Some(state.home.lanes.as_slice()),
+        Some(w) => state.world.as_ref().filter(|v| v.world.key == w).map(|v| v.mixes.as_slice()),
+    };
+    let Some(lanes) = lanes else {
+        let was_asked = ui.ctx().data(|d| d.get_temp::<bool>(asked).unwrap_or(false));
+        if !was_asked && let Some(w) = world {
+            ui.ctx().data_mut(|d| d.insert_temp(asked, true));
+            out.push(Command::LoadWorld(w.to_owned()));
+        }
+        // Asked, and the world is gone.
+        if !(was_asked && state.world.is_none()) {
+            return with_bar(ui, "", pages, |ui, _| {
+                ui.add(LoadingIndicator::new());
+                None
+            });
+        }
+        return mix_gone(ui, key, world, state, pages);
+    };
+    ui.ctx().data_mut(|d| d.remove::<bool>(asked));
+    let Some(l) = lanes.iter().find(|l| l.key == key) else {
+        return mix_gone(ui, key, world, state, pages);
+    };
+    let local_only = state.prefs.mixes_downloaded_only;
+    let with_new = world.is_none() && state.prefs.mixes_with_new && !local_only;
+    let can_blend = world.is_none() && l.blend_base.is_some_and(|b| state.home.blend_profiles.iter().any(|p| p.key != b));
+    let nav = with_bar(ui, &l.title, pages, |ui, pages| {
+        let mut nav = None;
+        let size = cover_size(ui);
+        // The card's mosaic, «С новым» with a new song's cover fourth.
+        let mut covers: Vec<String> = l.covers.iter().map(Cover::uri).collect();
+        if with_new && let Some(c) = &l.new_cover {
+            covers.truncate(3);
+            if covers.len() == 3 {
+                covers.push(c.uri());
+            }
+        }
+        let n = l.tracks.len() as u64;
+        let total: std::time::Duration = l.tracks.iter().filter_map(|t| t.duration).sum();
+        header_with(
+            ui,
+            size,
+            |ui, rect| super::cards::mosaic(ui, rect, &covers, shape::EXTRA_LARGE, 2.0, 1.0),
+            |ui| {
+                ui.label(TypeRole::LabelLarge.style().rich("МИКС", s.primary));
+                // A name too long for the bar's one line is said whole here.
+                let bar = TypeRole::DisplaySmall.style().job(&l.title, s.on_surface);
+                let bar_w = crate::typography::layout(ui.painter(), bar).size().x;
+                if bar_w > ui.ctx().content_rect().width() - size - 160.0 {
+                    ui.label(TypeRole::HeadlineSmall.style().rich(&l.title, s.on_surface));
+                }
+                let tail = format!("{n} {} · {}", common::plural(n, "трек", "трека", "треков"), common::fmt_total(total));
+                let width = ui.available_width();
+                let role = TypeRole::TitleMedium.style();
+                let fits = |t: &str| {
+                    let mut job = egui::text::LayoutJob::single_section(format!("{t} · {tail}"), role.text_format(s.on_surface));
+                    job.wrap.max_width = width;
+                    crate::typography::layout(ui.painter(), job).rows.len() <= 2
+                };
+                let new: &[String] = if with_new { &l.new_artists } else { &[] };
+                let artists = super::cards::names_line(&fits, &l.artists, new);
+                let line = if artists.is_empty() { tail } else { format!("{artists} · {tail}") };
+                ui.label(role.rich(line, s.on_surface_variant));
+            },
+        );
+        ui.add_space(16.0);
+        let members: Vec<Member> = vec![
+            Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
+            widgets::shuffle_member(ui),
+            IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into(),
+        ];
+        let row = ButtonRow::new("mix-actions", Size::M).show(ui, members);
+        let r = &row.responses;
+        if r[0].clicked() {
+            out.push(Command::PlayMix { id: l.id() });
+        }
+        if r[1].clicked() {
+            super::cards::mix_do(ui.ctx(), l, super::cards::MixItem::Shuffle, world, out);
+        }
+        let items = super::cards::mix_items(l, can_blend, false);
+        if let Some(k) = super::cards::mix_menu(Id::new("mix-more"), l, &items).attach(&r[2]) {
+            nav = super::cards::mix_do(ui.ctx(), l, items[k], world, out);
+            // Left out: back to where it was offered.
+            if items[k] == super::cards::MixItem::Hide {
+                pages.go_back = true;
+            }
+        }
+        ui.add_space(16.0);
+        if l.tracks.is_empty() {
+            let body = if local_only {
+                "Включено «Только скачанное», а скачанных треков для него нет."
+            } else {
+                "Его песни ещё не нашлись."
+            };
+            widgets::empty_state(ui, Icon::QueueMusic, "В миксе нет треков", body, None);
+            return nav;
+        }
+        let ids = l.tracks.iter().map(|t| t.id).collect();
+        let from = PlayFrom::Tracks(ids, l.context());
+        widgets::track_list_ext(ui, "mix", &l.tracks, Lead::Cover, &from, TrackListOpts::default(), state, pages, out).or(nav)
+    });
+    if world.is_none() {
+        super::home::blend_sheet(ui.ctx(), state, out);
+    }
+    nav
+}
+
+/// The page of a mix no longer offered: why, and the way to the mixes.
+fn mix_gone(ui: &mut Ui, key: MixKey, world: Option<&str>, state: &ViewState, pages: &mut PageState) -> Option<Route> {
+    let hidden = state.prefs.home_hidden_mixes.iter().find(|h| h.key == key);
+    let title = hidden.map_or("", |h| h.title.as_str());
+    with_bar(ui, title, pages, |ui, _| {
+        let (body, action, to) = match (world, hidden) {
+            (Some(w), _) => ("На странице мира теперь другие миксы.", "К миру", Route::World(w.to_owned())),
+            (None, Some(_)) => (
+                "Ты попросил его не предлагать. Вернуть можно в Настройках → «Рекомендации».",
+                "На главную",
+                Route::Home,
+            ),
+            (None, None) => ("Миксы на главной обновились.", "На главную", Route::Home),
+        };
+        widgets::empty_state(ui, Icon::QueueMusic, "Этого микса больше нет", body, Some(action)).then_some(to)
+    })
 }

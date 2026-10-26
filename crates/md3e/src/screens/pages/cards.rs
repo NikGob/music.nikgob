@@ -310,8 +310,8 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
 
 /// A mix of «Миксы для тебя» (§3.3, §4): the 2×2 mosaic of its covers
 /// (with «С новым» the fourth is a new song's), the name in one line and
-/// its artists in two. A click opens its list of songs (`opens_list`) or
-/// plays it; under the pointer ⋮ at the top
+/// its artists in two. A click opens its page (`opens_list`; of the world
+/// `world`'s page for its mixes) or plays it; under the pointer ⋮ at the top
 /// and ▶ at the bottom grow in and the mosaic comes a little closer; while
 /// it plays the name is primary and ⏸ stays in a square. With `can_blend`
 /// ⋮ offers «Смешать с…» (the sheet of the other profiles).
@@ -325,8 +325,9 @@ pub fn mix(
     playing: bool,
     status: Status,
     opens_list: bool,
+    world: Option<&str>,
     out: &mut Vec<Command>,
-) {
+) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let theme = Theme::get(ui.ctx());
     let id = ui.id().with(("home-mix", l.key));
@@ -396,74 +397,17 @@ pub fn mix(
     let g = text(ui, &line, role, s.on_surface_variant, cell.width(), artist_lines);
     ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0 + 24.0 * title_lines as f32), g, s.on_surface_variant);
 
-    let n = l.tracks.len();
-    // «На повторе» is what played: no other draw of it, and its switch is
-    // in Settings; a blend is the user's own for the day; a world's mix is
-    // of its page, the world's own.
-    let world = matches!(l.key, nikgob_view::MixKey::World(_));
-    let redraw = l.key != nikgob_view::MixKey::OnRepeat && !world;
-    let blend = can_blend && l.blend_base.is_some();
-    let hide = !matches!(l.key, nikgob_view::MixKey::OnRepeat | nikgob_view::MixKey::Blend(_)) && !world;
-    // A click on the card opens the list already: no item for it then.
-    let menu = |key: Id| {
-        let mut m = Menu::new(key);
-        if !opens_list {
-            m = m.item(MenuItem::new("Список треков").icon(Icon::QueueMusic).shortcut(n.to_string()));
-        }
-        m = m
-            .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
-            .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
-            .item(MenuItem::new("В очередь").icon(Icon::QueueMusic))
-            .item(MenuItem::new("Сохранить как плейлист").icon(Icon::PlaylistAdd));
-        if redraw || blend {
-            m = m.divider();
-        }
-        if redraw {
-            m = m.item(MenuItem::new("Другой состав").icon(Icon::Refresh));
-        }
-        if blend {
-            m = m.item(MenuItem::new("Смешать с…").icon(Icon::Add));
-        }
-        if hide {
-            m = m.divider().item(MenuItem::new("Не предлагать этот микс").icon(Icon::Block));
-        }
-        m
-    };
-    // The items after the five: what each does.
-    let tail: Vec<u8> = [(redraw, 0u8), (blend, 1), (hide, 2)].into_iter().filter(|x| x.0).map(|x| x.1).collect();
-    let mut picked = menu(id.with("ctx")).context_menu(&resp);
+    let items = mix_items(l, can_blend, !opens_list);
+    let mut picked = mix_menu(id.with("ctx"), l, &items).context_menu(&resp);
     if let Some(m) = &more {
-        picked = picked.or(menu(id.with("more-menu")).align_right(true).attach(m));
+        picked = picked.or(mix_menu(id.with("more-menu"), l, &items).align_right(true).attach(m));
     }
     let open = Menu::item_rects(ui.ctx(), id.with("more-menu")).is_some();
     ui.ctx().data_mut(|d| d.insert_temp(id.with("more-open"), open));
-    let tracks: Vec<nikgob_view::TrackId> = l.tracks.iter().map(|t| t.id).collect();
-    let context = l.context();
-    match picked.map(|k| k + usize::from(opens_list)) {
-        Some(0) => super::home::open_lane_list(ui.ctx(), l.key),
-        Some(1) => {
-            let mut t = tracks.clone();
-            shuffle(&mut t);
-            out.push(Command::PlayTracks { tracks: t, start: 0, context });
-        }
-        Some(2) => out.push(Command::PlayNext(tracks.clone())),
-        Some(3) => out.push(Command::Enqueue(tracks.clone())),
-        Some(4) => out.push(Command::SaveTracksAsPlaylist { name: l.title.clone(), tracks: tracks.clone() }),
-        Some(k) => match tail.get(k - 5) {
-            Some(0) => out.push(Command::RefreshMix { id: l.id() }),
-            Some(1) => {
-                if let Some(base) = l.blend_base {
-                    super::home::open_blend(ui.ctx(), base);
-                }
-            }
-            Some(2) => out.push(Command::SetPref(nikgob_view::PrefPatch::HideMix(nikgob_view::HiddenMix { key: l.key, title: l.title.clone() }))),
-            _ => {}
-        },
-        None => {}
-    }
+    let mut nav = picked.and_then(|k| mix_do(ui.ctx(), l, items[k], world, out));
     let card = resp.clicked() && more.as_ref().is_none_or(|m| !m.clicked());
     if card && opens_list && !play {
-        super::home::open_lane_list(ui.ctx(), l.key);
+        nav = Some(mix_route(l, world));
     } else if play || card {
         if playing && status == Status::Playing {
             out.push(Command::Pause);
@@ -471,6 +415,98 @@ pub fn mix(
             out.push(Command::PlayMix { id: l.id() });
         }
     }
+    nav
+}
+
+/// The page of mix `l` (of the world `world`'s page, if any).
+pub fn mix_route(l: &LaneCard, world: Option<&str>) -> Route {
+    Route::Mix { key: l.key, world: world.map(str::to_owned) }
+}
+
+/// An item of a mix's ⋮.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MixItem {
+    List,
+    Shuffle,
+    PlayNext,
+    Enqueue,
+    Save,
+    Redraw,
+    Blend,
+    Hide,
+}
+
+/// The items of mix `l`'s ⋮ in order, «Список треков» first with `list`.
+/// «На повторе» is what played: no other draw of it, and its switch is in
+/// Settings; a blend is the user's own for the day; a world's mix is of
+/// its page, the world's own. With `can_blend` it offers «Смешать с…».
+pub fn mix_items(l: &LaneCard, can_blend: bool, list: bool) -> Vec<MixItem> {
+    let world = matches!(l.key, nikgob_view::MixKey::World(_));
+    let redraw = l.key != nikgob_view::MixKey::OnRepeat && !world;
+    let blend = can_blend && l.blend_base.is_some();
+    let hide = !matches!(l.key, nikgob_view::MixKey::OnRepeat | nikgob_view::MixKey::Blend(_)) && !world;
+    let mut items = Vec::new();
+    if list {
+        items.push(MixItem::List);
+    }
+    items.extend([MixItem::Shuffle, MixItem::PlayNext, MixItem::Enqueue, MixItem::Save]);
+    if redraw {
+        items.push(MixItem::Redraw);
+    }
+    if blend {
+        items.push(MixItem::Blend);
+    }
+    if hide {
+        items.push(MixItem::Hide);
+    }
+    items
+}
+
+/// The menu of `items` (of [`mix_items`]).
+pub fn mix_menu(key: Id, l: &LaneCard, items: &[MixItem]) -> Menu {
+    let mut m = Menu::new(key);
+    for (k, item) in items.iter().enumerate() {
+        let prev = k.checked_sub(1).map(|p| items[p]);
+        let group = |i: MixItem| matches!(i, MixItem::Redraw | MixItem::Blend);
+        if (group(*item) && prev.is_some_and(|p| !group(p))) || (*item == MixItem::Hide && k > 0) {
+            m = m.divider();
+        }
+        m = m.item(match item {
+            MixItem::List => MenuItem::new("Список треков").icon(Icon::QueueMusic).shortcut(l.tracks.len().to_string()),
+            MixItem::Shuffle => MenuItem::new("Перемешать").icon(Icon::Shuffle),
+            MixItem::PlayNext => MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic),
+            MixItem::Enqueue => MenuItem::new("В очередь").icon(Icon::QueueMusic),
+            MixItem::Save => MenuItem::new("Сохранить как плейлист").icon(Icon::PlaylistAdd),
+            MixItem::Redraw => MenuItem::new("Другой состав").icon(Icon::Refresh),
+            MixItem::Blend => MenuItem::new("Смешать с…").icon(Icon::Add),
+            MixItem::Hide => MenuItem::new("Не предлагать этот микс").icon(Icon::Block),
+        });
+    }
+    m
+}
+
+/// Does what `item` of mix `l`'s ⋮ says; «Список треков» opens its page.
+pub fn mix_do(ctx: &egui::Context, l: &LaneCard, item: MixItem, world: Option<&str>, out: &mut Vec<Command>) -> Option<Route> {
+    let tracks = || l.tracks.iter().map(|t| t.id).collect::<Vec<nikgob_view::TrackId>>();
+    match item {
+        MixItem::List => return Some(mix_route(l, world)),
+        MixItem::Shuffle => {
+            let mut t = tracks();
+            shuffle(&mut t);
+            out.push(Command::PlayTracks { tracks: t, start: 0, context: l.context() });
+        }
+        MixItem::PlayNext => out.push(Command::PlayNext(tracks())),
+        MixItem::Enqueue => out.push(Command::Enqueue(tracks())),
+        MixItem::Save => out.push(Command::SaveTracksAsPlaylist { name: l.title.clone(), tracks: tracks() }),
+        MixItem::Redraw => out.push(Command::RefreshMix { id: l.id() }),
+        MixItem::Blend => {
+            if let Some(base) = l.blend_base {
+                super::home::open_blend(ctx, base);
+            }
+        }
+        MixItem::Hide => out.push(Command::SetPref(nikgob_view::PrefPatch::HideMix(nikgob_view::HiddenMix { key: l.key, title: l.title.clone() }))),
+    }
+    None
 }
 
 // ---- Song row.

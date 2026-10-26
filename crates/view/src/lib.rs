@@ -1203,8 +1203,8 @@ pub struct Prefs {
     pub mixes_moods: bool,
     /// «На повторе».
     pub mixes_on_repeat: bool,
-    /// A click on a mix's card opens its list of songs (its ▶ plays it);
-    /// off: the click plays it.
+    /// A click on a mix's card opens its page ([`Route::Mix`]; its ▶ plays
+    /// it); off: the click plays it.
     pub mix_click_opens_list: bool,
     /// «Фон» cards at most (0: none), for a user who listens in the
     /// background.
@@ -1688,6 +1688,9 @@ pub enum Route {
     Stream(StreamPage),
     /// A world of Главная's card by its key ([`Command::LoadWorld`]).
     World(String),
+    /// A mix's page: one of «Миксы для тебя» ([`HomeView::lanes`]) or,
+    /// with `world`, of that world's page ([`WorldView::mixes`]).
+    Mix { key: MixKey, world: Option<String> },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
