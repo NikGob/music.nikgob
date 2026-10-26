@@ -2322,11 +2322,16 @@ impl Worker {
             if rows.is_empty() {
                 continue;
             }
-            let mut artists: Vec<String> = Vec::new();
+            // Each credited artist once, the most frequent first (as a mix of
+            // Главная says them).
+            let mut count: Vec<(String, usize)> = Vec::new();
             let mut releases: Vec<ReleaseId> = Vec::new();
             for t in &rows {
-                if !t.artist.is_empty() && !artists.contains(&t.artist) {
-                    artists.push(t.artist.clone());
+                for part in t.credit.0.iter().filter(|p| !p.name.is_empty()) {
+                    match count.iter_mut().find(|c| c.0 == part.name) {
+                        Some(c) => c.1 += 1,
+                        None => count.push((part.name.clone(), 1)),
+                    }
                 }
                 if let Some(r) = t.release_id
                     && !releases.contains(&r)
@@ -2334,6 +2339,8 @@ impl Worker {
                     releases.push(r);
                 }
             }
+            count.sort_by(|a, b| b.1.cmp(&a.1));
+            let artists: Vec<String> = count.into_iter().map(|c| c.0).collect();
             let covers = releases.into_iter().filter_map(|r| self.res.release_cover(r)).take(COVERS).collect();
             let name = kind.title();
             let mut rest = name.chars();
