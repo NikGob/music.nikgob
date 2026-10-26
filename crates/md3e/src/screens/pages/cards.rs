@@ -310,12 +310,23 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
 
 /// A mix of «Миксы для тебя» (§3.3, §4): the 2×2 mosaic of its covers
 /// (with «С новым» the fourth is a new song's), the name in one line and
-/// its artists in two. A click plays it; under the pointer ⋮ at the top
+/// its artists in two. A click opens its list of songs (`opens_list`) or
+/// plays it; under the pointer ⋮ at the top
 /// and ▶ at the bottom grow in and the mosaic comes a little closer; while
 /// it plays the name is primary and ⏸ stays in a square. With `can_blend`
 /// ⋮ offers «Смешать с…» (the sheet of the other profiles).
 #[allow(clippy::too_many_arguments)]
-pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, can_blend: bool, playing: bool, status: Status, out: &mut Vec<Command>) {
+pub fn mix(
+    ui: &mut Ui,
+    cell: Rect,
+    l: &LaneCard,
+    with_new: bool,
+    can_blend: bool,
+    playing: bool,
+    status: Status,
+    opens_list: bool,
+    out: &mut Vec<Command>,
+) {
     let s = Theme::get(ui.ctx()).scheme;
     let theme = Theme::get(ui.ctx());
     let id = ui.id().with(("home-mix", l.key));
@@ -393,9 +404,13 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, can_blend: boo
     let redraw = l.key != nikgob_view::MixKey::OnRepeat && !world;
     let blend = can_blend && l.blend_base.is_some();
     let hide = !matches!(l.key, nikgob_view::MixKey::OnRepeat | nikgob_view::MixKey::Blend(_)) && !world;
+    // A click on the card opens the list already: no item for it then.
     let menu = |key: Id| {
-        let mut m = Menu::new(key)
-            .item(MenuItem::new("Список треков").icon(Icon::QueueMusic).shortcut(n.to_string()))
+        let mut m = Menu::new(key);
+        if !opens_list {
+            m = m.item(MenuItem::new("Список треков").icon(Icon::QueueMusic).shortcut(n.to_string()));
+        }
+        m = m
             .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
             .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
             .item(MenuItem::new("В очередь").icon(Icon::QueueMusic))
@@ -424,7 +439,7 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, can_blend: boo
     ui.ctx().data_mut(|d| d.insert_temp(id.with("more-open"), open));
     let tracks: Vec<nikgob_view::TrackId> = l.tracks.iter().map(|t| t.id).collect();
     let context = l.context();
-    match picked {
+    match picked.map(|k| k + usize::from(opens_list)) {
         Some(0) => super::home::open_lane_list(ui.ctx(), l.key),
         Some(1) => {
             let mut t = tracks.clone();
@@ -446,8 +461,10 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, can_blend: boo
         },
         None => {}
     }
-    let clicked = play || (resp.clicked() && more.as_ref().is_none_or(|m| !m.clicked()));
-    if clicked {
+    let card = resp.clicked() && more.as_ref().is_none_or(|m| !m.clicked());
+    if card && opens_list && !play {
+        super::home::open_lane_list(ui.ctx(), l.key);
+    } else if play || card {
         if playing && status == Status::Playing {
             out.push(Command::Pause);
         } else {

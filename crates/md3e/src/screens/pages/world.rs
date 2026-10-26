@@ -100,7 +100,7 @@ fn mixes(ui: &mut Ui, grid: Grid, v: &WorldView, state: &ViewState, out: &mut Ve
     let (block, _) = ui.allocate_exact_size(vec2(ui.available_width(), lines as f32 * (h + 24.0) - 24.0), Sense::hover());
     for (i, l) in v.mixes.iter().enumerate() {
         let cell = grid.cell(i, per, block.top(), h, 24.0);
-        cards::mix(ui, cell, l, false, false, super::home::lane_playing(state, l), state.player.status, out);
+        cards::mix(ui, cell, l, false, false, super::home::lane_playing(state, l), state.player.status, state.prefs.mix_click_opens_list, out);
     }
 }
 

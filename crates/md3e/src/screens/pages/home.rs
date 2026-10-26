@@ -449,7 +449,7 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Com
             let cell = grid.cell(i, per, top, card_h, 24.0);
             // «Смешать с…»: another profile to mix it with.
             let can_blend = l.blend_base.is_some_and(|b| h.blend_profiles.iter().any(|p| p.key != b));
-            cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, out);
+            cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, state.prefs.mix_click_opens_list, out);
         }
     });
     None

@@ -141,6 +141,8 @@ pub enum SettingId {
     MixesOnRepeat,
     /// «Фон».
     BackgroundCards,
+    /// «Нажатие на микс открывает список».
+    MixClickOpensList,
     /// «Кнопка «Не нравится»».
     DislikeButton,
     /// «Пропускать по дизлайку».
@@ -298,7 +300,7 @@ impl SettingId {
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
             RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | NewShareBy(_)
             | MixesWithNew | BackgroundCountsLess | ProfilesSplit | ProfileNames
-            | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | HiddenMixes
+            | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | MixClickOpensList | HiddenMixes
             | DislikeButton | DislikeSkips | DislikeSkipEverywhere | DislikeInRecs | DislikedTracks | DislikedArtists => {
                 TAB_RECS
             }
@@ -424,6 +426,7 @@ impl SettingId {
             MixesEverything => "Все твои профили в одном миксе, каждый своей долей, с плавными переходами.",
             MixesMoods => "Самое спокойное и самое громкое из того, что ты любишь, на любом языке.",
             MixesOnRepeat => "Что ты включал чаще всего за последние недели.",
+            MixClickOpensList => "Нажатие на карточку микса показывает его песни, а играет он по кнопке ▶. Выключи — микс будет играть сразу по нажатию на карточку.",
             BackgroundCards => "Ровная музыка без слов для фона. Появляется, только если ты так слушаешь.",
             DislikeButton => "Кнопка рядом
  с ♡ на экране трека. «Не нравится» остаётся и в меню ⋮ любого трека.",

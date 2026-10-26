@@ -1203,6 +1203,9 @@ pub struct Prefs {
     pub mixes_moods: bool,
     /// «На повторе».
     pub mixes_on_repeat: bool,
+    /// A click on a mix's card opens its list of songs (its ▶ plays it);
+    /// off: the click plays it.
+    pub mix_click_opens_list: bool,
     /// «Фон» cards at most (0: none), for a user who listens in the
     /// background.
     pub background_cards: u8,
@@ -2132,6 +2135,7 @@ impl Default for Prefs {
             mixes_everything: true,
             mixes_moods: true,
             mixes_on_repeat: true,
+            mix_click_opens_list: true,
             background_cards: 3,
         }
     }
