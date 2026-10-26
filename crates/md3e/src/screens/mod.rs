@@ -42,6 +42,20 @@ pub enum PaneTab {
     Info,
 }
 
+impl PaneTab {
+    /// The pane's parts in the order of its tabs.
+    pub const ALL: [Self; 3] = [Self::Queue, Self::Lyrics, Self::Info];
+
+    /// The part is turned on in Settings (none is by default).
+    pub fn on(self, prefs: &nikgob_view::Prefs) -> bool {
+        match self {
+            Self::Queue => prefs.pane_queue,
+            Self::Lyrics => prefs.pane_lyrics,
+            Self::Info => prefs.pane_info,
+        }
+    }
+}
+
 /// A step of the history: the whole stack, the tabs and chips the page was
 /// on, and how far it was scrolled.
 #[derive(Clone, Debug)]
@@ -672,7 +686,7 @@ impl Md3eUi {
             if i.consume_key(Modifiers::COMMAND, Key::K) || i.consume_key(Modifiers::COMMAND, Key::F) {
                 self.search_focus = true;
             }
-            if !now_playing_open && i.consume_key(Modifiers::COMMAND, Key::Q) {
+            if !now_playing_open && PaneTab::Queue.on(&state.prefs) && i.consume_key(Modifiers::COMMAND, Key::Q) {
                 self.pane = if self.pane == Some(PaneTab::Queue) {
                     None
                 } else {
@@ -775,7 +789,16 @@ impl Md3eUi {
         let rail_slot = rail_w;
         let rail_rect = Rect::from_min_size(full.min, vec2(rail_w, full.height()));
 
-        // Supporting pane (inline on Large/XL).
+        // Supporting pane (inline on Large/XL). A part turned off in
+        // Settings closes, and the pane comes back on a part that is on.
+        if self.pane.is_some_and(|t| !t.on(&state.prefs)) {
+            self.pane = None;
+        }
+        if let Some(t) = PaneTab::ALL.into_iter().find(|t| t.on(&state.prefs))
+            && !self.last_pane.on(&state.prefs)
+        {
+            self.last_pane = t;
+        }
         let inline_pane = class >= SizeClass::Large;
         // Dropping below Large turns the inline pane into a modal sheet: do
         // not pop it open over the content just because it was visible.
@@ -1115,6 +1138,7 @@ impl Md3eUi {
             "blacklist" => S::DislikedArtists,
             "stream-analysis" => S::StreamAnalysis,
             "appearance" => S::Design,
+            "pane" => S::PaneQueue,
             _ => S::CoverClickPause,
         });
     }

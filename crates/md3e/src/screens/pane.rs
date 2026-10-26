@@ -33,32 +33,41 @@ pub fn show(
     bass: f32,
     out: &mut Vec<Command>,
 ) -> PaneOutput {
-    let tabs = ["Очередь", "Текст", "Инфо"];
-    let idx = match tab {
-        PaneTab::Queue => 0,
-        PaneTab::Lyrics => 1,
-        PaneTab::Info => 2,
-    };
+    // Only the parts turned on in Settings have a tab.
+    let parts: Vec<PaneTab> = PaneTab::ALL.into_iter().filter(|t| t.on(&state.prefs)).collect();
+    let tabs: Vec<&str> = parts
+        .iter()
+        .map(|t| match t {
+            PaneTab::Queue => "Очередь",
+            PaneTab::Lyrics => "Текст",
+            PaneTab::Info => "Инфо",
+        })
+        .collect();
+    let idx = parts.iter().position(|t| t == tab).unwrap_or(0);
     ui.add_space(8.0);
     // Tabs on the left, ✕ on the right.
     let close_w = Size::S.height();
     let row = Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), close_w));
-    let w = ((row.width() - 4.0 - close_w - 8.0) / 3.0).floor();
+    let n = tabs.len().max(1) as f32;
+    let gaps = 2.0 * (n - 1.0);
+    let w = ((row.width() - gaps - close_w - 8.0) / n).floor();
     let mut gui = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(Rect::from_min_size(row.min, egui::vec2(3.0 * w + 4.0, close_w)))
+            .max_rect(Rect::from_min_size(row.min, egui::vec2(n * w + gaps, close_w)))
             .id_salt("pane-tabs-row"),
     );
     let mut closed = false;
-    if let Some(i) = ConnectedGroup::new("pane-tabs", &tabs)
-        .equal_width(w)
-        .reselect(true)
-        .show(&mut gui, idx)
+    // No tabs while it closes after its last part was turned off.
+    if !tabs.is_empty()
+        && let Some(i) = ConnectedGroup::new("pane-tabs", &tabs)
+            .equal_width(w)
+            .reselect(true)
+            .show(&mut gui, idx)
     {
         if i == idx {
             closed = true;
         } else {
-            *tab = [PaneTab::Queue, PaneTab::Lyrics, PaneTab::Info][i];
+            *tab = parts[i];
         }
     }
     let mut cui = ui.new_child(

@@ -163,9 +163,15 @@ pub fn show(
         }
         ui.add_space(8.0);
 
+        // The pane's buttons only for its parts turned on in Settings; the
+        // room of those that are off goes to the slider.
+        let (queue_on, lyrics_on) = (PaneTab::Queue.on(&state.prefs), PaneTab::Lyrics.on(&state.prefs));
+        let (show_like, show_lyrics, show_volume) = (!compact, wide && lyrics_on, wide);
+        let trailing = [show_like, queue_on, show_lyrics, show_volume, true].into_iter().filter(|b| *b).count();
+
         // Progress: label, slider, label; a bare slider when narrower; a
         // line under the title when there is no room at all.
-        let trailing_w = if wide { 5.0 * 44.0 } else if compact { 2.0 * 44.0 } else { 3.0 * 44.0 };
+        let trailing_w = trailing as f32 * 44.0;
         let avail = ui.available_width() - trailing_w - 8.0;
         if compact && avail >= 112.0 {
             let dur = p.duration.unwrap_or_default();
@@ -202,7 +208,6 @@ pub fn show(
             ui.add_space(avail.max(0.0));
         }
 
-        let (show_like, show_lyrics, show_volume) = (!compact, wide, wide);
         if show_like {
             let liked = current.is_some_and(|t| t.liked);
             if ui
@@ -219,15 +224,16 @@ pub fn show(
                 out.push(Command::Like(LikeTarget::Track(t.id), !liked));
             }
         }
-        if ui
-            .add(
-                IconButton::new(Icon::QueueMusic)
-                    .selected(pane == Some(PaneTab::Queue))
-                    .colors(item)
-                    .tooltip("Очередь (Ctrl+Q)")
-                    .id_salt("bar-queue"),
-            )
-            .clicked()
+        if queue_on
+            && ui
+                .add(
+                    IconButton::new(Icon::QueueMusic)
+                        .selected(pane == Some(PaneTab::Queue))
+                        .colors(item)
+                        .tooltip("Очередь (Ctrl+Q)")
+                        .id_salt("bar-queue"),
+                )
+                .clicked()
         {
             result.toggle_pane = Some(PaneTab::Queue);
         }
@@ -270,17 +276,14 @@ pub fn show(
             // What does not fit in the pill lives in the menu.
             let mut acts = Vec::new();
             acts.extend((!show_like).then_some(Act::Like));
-            acts.extend((!show_lyrics).then_some(Act::Lyrics));
+            acts.extend((lyrics_on && !show_lyrics).then_some(Act::Lyrics));
             acts.extend((!show_volume).then_some(Act::Volume));
             if !acts.is_empty() {
                 acts.push(Act::Sep);
             }
+            acts.extend([Act::Playlist, Act::Radio, Act::Artist, Act::Album]);
+            acts.extend(PaneTab::Info.on(&state.prefs).then_some(Act::Info));
             acts.extend([
-                Act::Playlist,
-                Act::Radio,
-                Act::Artist,
-                Act::Album,
-                Act::Info,
                 Act::Share,
                 Act::FindSong,
                 Act::Sep,

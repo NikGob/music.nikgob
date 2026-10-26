@@ -649,6 +649,17 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         },
     );
 
+    group(ui, "Панель справа");
+    row(ui, Id::PaneQueue, "Очередь", None, |ui| {
+        ui.add(Switch::new(&mut p.pane_queue).id_salt("set-pane-queue"));
+    });
+    row(ui, Id::PaneLyrics, "Текст песни", None, |ui| {
+        ui.add(Switch::new(&mut p.pane_lyrics).id_salt("set-pane-lyrics"));
+    });
+    row(ui, Id::PaneInfo, "Источник и качество", None, |ui| {
+        ui.add(Switch::new(&mut p.pane_info).id_salt("set-pane-info"));
+    });
+
     if nikgob_view::HOME_CARD {
         group(ui, "Главная");
         row(ui, Id::HomeCard, "Карточка наверху главной", Some("Твои миры: что слушаешь и что ещё нет"), |ui| {

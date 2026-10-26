@@ -340,7 +340,7 @@ impl PageState {
     /// The track menu, keyed by its anchor: the ⋮ menu and the right-click
     /// menu of one row (or the same track in two lists) must not share an id,
     /// or each closes the other and both draw the same widgets.
-    fn track_menu_items(anchor: egui::Id, track: &TrackRow, marks: &nikgob_view::DislikesView) -> Menu {
+    fn track_menu_items(anchor: egui::Id, track: &TrackRow, marks: &nikgob_view::DislikesView, info: bool) -> Menu {
         // A file: its tags and a better copy; no file: download it (no
         // like) or look for a release by hand.
         let (fetch, fetch_icon) = if track.has_local {
@@ -357,8 +357,12 @@ impl PageState {
             .item(ban_item(track.artist_id(), marks))
             .divider()
             .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()))
-            .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()))
-            .item(MenuItem::new("Источник и качество").icon(Icon::Info))
+            .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()));
+        // «Источник и качество» opens a part of the side pane, off by default.
+        if info {
+            m = m.item(MenuItem::new("Источник и качество").icon(Icon::Info));
+        }
+        m = m
             .item(MenuItem::new("Поделиться").icon(Icon::Share))
             .item(MenuItem::new(fetch).icon(fetch_icon))
             .item(MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(track.release_id.is_some()))
@@ -381,6 +385,7 @@ impl PageState {
         picked: Option<usize>,
         track: &TrackRow,
         marks: &nikgob_view::DislikesView,
+        info: bool,
         out: &mut Vec<Command>,
     ) -> Option<Route> {
         let find = super::find_song::label(track).is_some();
@@ -402,6 +407,8 @@ impl PageState {
             n if n > RADIO_ITEM => n - 3,
             n => n,
         };
+        // Without «Источник и качество» the items after it move up one.
+        let picked = if !info && picked >= 5 { picked + 1 } else { picked };
         // The deletes come after the optional «Найти песню…».
         let picked = match picked {
             10 if find => {
@@ -451,8 +458,9 @@ impl PageState {
         state: &ViewState,
         out: &mut Vec<Command>,
     ) -> Option<Route> {
-        let picked = Self::track_menu_items(anchor.id, track, &state.dislikes).attach(anchor);
-        self.track_menu_pick(&anchor.ctx, picked, track, &state.dislikes, out)
+        let info = state.prefs.pane_info;
+        let picked = Self::track_menu_items(anchor.id, track, &state.dislikes, info).attach(anchor);
+        self.track_menu_pick(&anchor.ctx, picked, track, &state.dislikes, info, out)
     }
 
     /// Right click on a track row.
@@ -466,8 +474,9 @@ impl PageState {
         if Menu::context_idle(row, row.id.with("ctx")) {
             return None;
         }
-        let picked = Self::track_menu_items(row.id.with("ctx"), track, &state.dislikes).context_menu(row);
-        self.track_menu_pick(&row.ctx, picked, track, &state.dislikes, out)
+        let info = state.prefs.pane_info;
+        let picked = Self::track_menu_items(row.id.with("ctx"), track, &state.dislikes, info).context_menu(row);
+        self.track_menu_pick(&row.ctx, picked, track, &state.dislikes, info, out)
     }
 
     /// The ⋮ menu for the playing track (Now Playing header).
@@ -480,8 +489,8 @@ impl PageState {
         out: &mut Vec<Command>,
     ) {
         if let Some(t) = track {
-            let picked = Self::track_menu_items(anchor.id, t, marks).attach(anchor);
-            if let Some(r) = self.track_menu_pick(&anchor.ctx, picked, t, marks, out) {
+            let picked = Self::track_menu_items(anchor.id, t, marks, true).attach(anchor);
+            if let Some(r) = self.track_menu_pick(&anchor.ctx, picked, t, marks, true, out) {
                 self.pending_nav = Some(r);
             }
         }

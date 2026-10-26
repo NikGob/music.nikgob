@@ -1083,6 +1083,11 @@ pub struct Prefs {
     /// The navigation rail always stays narrow (icons only) and its expand
     /// button is gone.
     pub rail_compact: bool,
+    /// The parts of the side pane by the content, each on its own: none by
+    /// default, and a part that is off has no button, menu item or key.
+    pub pane_queue: bool,
+    pub pane_lyrics: bool,
+    pub pane_info: bool,
     /// Deleting moves tracks into the Trash for 30 days; off: they are
     /// deleted for good at once (after a confirmation).
     pub use_trash: bool,
@@ -2085,6 +2090,9 @@ impl Default for Prefs {
             bg_shapes_hue: 5,
             ambient_strength: 1.0,
             rail_compact: false,
+            pane_queue: false,
+            pane_lyrics: false,
+            pane_info: false,
             use_trash: true,
             kept_editions: Vec::new(),
             spotify_enabled: true,

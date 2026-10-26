@@ -72,6 +72,11 @@ pub enum SettingId {
     LyricsGapWaves,
     LyricsCountdown,
     RailCompact,
+    /// The parts of the side pane: «Очередь», «Текст песни», «Источник и
+    /// качество».
+    PaneQueue,
+    PaneLyrics,
+    PaneInfo,
     HomeCard,
     NpMotion,
     ReducedMotion,
@@ -282,7 +287,8 @@ impl SettingId {
             | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
             | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
             | LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsCascade | LyricsGlow
-            | LyricsGap | LyricsGapWaves | LyricsCountdown | RailCompact | HomeCard | NpMotion | ReducedMotion | FpsLimit => {
+            | LyricsGap | LyricsGapWaves | LyricsCountdown | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
+            | ReducedMotion | FpsLimit => {
                 TAB_APPEARANCE
             }
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
@@ -343,6 +349,9 @@ impl SettingId {
             LyricsGapWaves => "Сколько волн на кружке ожидания. Больше — волны мельче и чаще.",
             LyricsCountdown => "За три секунды до новой строки кружок ожидания сменяется отсчётом 3, 2, 1.",
             RailCompact => "Левая панель всегда узкая: только значки разделов, без подписей и кнопки раскрытия.",
+            PaneQueue => "Справа от страницы открывается очередь: кнопка в плеере внизу и Ctrl+Q. Выключено — у плеера больше места под полосу перемотки.",
+            PaneLyrics => "Справа от страницы открывается текст песни: кнопка в плеере внизу и пункт в меню трека. На экране трека текст есть всегда.",
+            PaneInfo => "Справа от страницы открываются источник и качество трека: пункт «Источник и качество» в меню трека. На экране трека они есть всегда.",
             HomeCard => "Большая карточка вверху Главной: альбом или серия, которую слушаешь, и рядом другие твои миры — что дослушать и что ещё не начато. Без неё Главная начинается сразу с приветствия.",
             NpMotion => "Как экран трека открывается из плеера внизу и закрывается обратно.",
             ReducedMotion => "Убирает подпрыгивания, вращения и волны во всём приложении.",
