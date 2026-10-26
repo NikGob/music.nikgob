@@ -406,6 +406,8 @@ fn store_history(
                     origin: None,
                     context_id: None,
                     end_reason: None,
+                    attention: None,
+                    volume: None,
                 });
             };
             push(p.start_ms, EventType::Start);
@@ -778,6 +780,8 @@ impl Worker {
                     origin: None,
                     context_id: None,
                     end_reason: None,
+                    attention: None,
+                    volume: None,
                 });
             }
         }

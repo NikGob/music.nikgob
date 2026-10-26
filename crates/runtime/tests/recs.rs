@@ -459,6 +459,41 @@ fn plays_record_who_chose_them_and_why_they_ended() {
     assert_eq!(seen(&after, "next"), seen(&before, "next") + 1, "{before} {after}");
 }
 
+/// The end of a play says how far the window was while it played (hidden
+/// 1, in view behind another 0.5) and the player's volume; before the
+/// window said anything, the attention is unknown.
+#[test]
+fn a_play_records_how_far_the_window_was() {
+    let l = library(3, 6, 5, &[]);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    let album = l.lib.get_track(l.tracks[0]).unwrap().unwrap().release_id.unwrap();
+    let complete = || {
+        l.lib.recent_events(100).unwrap().into_iter().find(|e| e.event_type == EventType::Complete && e.ts > now_ms() - 60_000)
+    };
+    let play_out = |s: &Started| {
+        let id = s.asked.lock().unwrap().last().unwrap().id;
+        s.rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        end_current(s);
+    };
+    s.rt.send(Command::PlayRelease { id: album, start: None, shuffle: false });
+    let first = current_start(&l.lib, &s.rt);
+    play_out(&s);
+    wait_until("the first complete", || complete().is_some_and(|e| e.track_id == first.track_id));
+    let e = complete().unwrap();
+    assert_eq!(e.attention, None, "the window said nothing yet");
+    assert!(e.volume.is_some_and(|v| (v - 0.8).abs() < 1e-3), "{:?}", e.volume);
+    for (visible, want) in [(false, 1.0), (true, 0.5)] {
+        s.rt.send(Command::WindowState { visible, focused: false });
+        let playing = current_start(&l.lib, &s.rt);
+        play_out(&s);
+        wait_until("its complete", || complete().is_some_and(|e| e.track_id == playing.track_id));
+        let e = complete().unwrap();
+        assert!(e.attention.is_some_and(|a| (a - want).abs() < 0.1), "visible {visible}: {:?}", e.attention);
+    }
+}
+
 #[test]
 fn an_early_skip_teaches_the_radio() {
     let l = library(3, 6, 5, &[]);

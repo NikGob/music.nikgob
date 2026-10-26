@@ -1462,22 +1462,24 @@ fn pair() -> Pair {
     Pair { a, b, tracks }
 }
 
-/// A play's origin, what played it and why it ended go out with the
-/// history and come back; a history written before them still imports.
+/// A play's origin, what played it, why it ended and how it was heard go
+/// out with the history and come back; a history written before them
+/// still imports.
 #[test]
 fn events_carry_their_outcome_through_export_and_import() {
     use nikgob_core::model::{EndReason, EventMeta, EventOrigin};
     let Pair { a, b, tracks } = pair();
-    let meta = |origin, end_reason| EventMeta { origin, context_id: Some("release:x".into()), end_reason };
+    let meta = |origin, end_reason| EventMeta { origin, context_id: Some("release:x".into()), end_reason, ..EventMeta::default() };
     a.record_event_with(tracks[0].id, EventType::Start, None, Some(0), EventContext::Album, meta(Some(EventOrigin::Manual), None))
         .unwrap();
-    a.record_event_with(tracks[0].id, EventType::Skip, None, Some(4_000), EventContext::Album, meta(None, Some(EndReason::AppClosed)))
-        .unwrap();
+    let heard = EventMeta { attention: Some(0.75), volume: Some(0.5), ..meta(None, Some(EndReason::AppClosed)) };
+    a.record_event_with(tracks[0].id, EventType::Skip, None, Some(4_000), EventContext::Album, heard).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("userdata");
     a.export_userdata(&out).unwrap();
     let mut text = fs::read_to_string(out.join("events.jsonl")).unwrap();
     assert!(text.contains("\"origin\":\"manual\"") && text.contains("\"end_reason\":\"app_closed\""), "{text}");
+    assert!(text.contains("\"attention\":0.75") && text.contains("\"volume\":0.5"), "{text}");
     // A line of an older export: no such fields.
     let old = format!(
         "{{\"id\":\"{}\",\"ts\":5,\"track_id\":\"{}\",\"source_kind\":null,\"type\":\"start\",\"position_ms\":0,\"context\":\"album\",\"device\":\"old\"}}
@@ -1494,6 +1496,7 @@ fn events_carry_their_outcome_through_export_and_import() {
     assert_eq!((start.origin, start.context_id.as_deref()), (Some(EventOrigin::Manual), Some("release:x")));
     let skip = events.iter().find(|e| e.event_type == EventType::Skip).unwrap();
     assert_eq!(skip.end_reason, Some(EndReason::AppClosed));
+    assert_eq!((skip.attention, skip.volume, start.attention), (Some(0.75), Some(0.5), None));
     let older = events.iter().find(|e| e.track_id == tracks[1].id).unwrap();
     assert_eq!((older.origin, older.context_id.clone(), older.end_reason), (None, None, None));
 }

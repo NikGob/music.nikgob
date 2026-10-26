@@ -214,6 +214,9 @@ pub(crate) struct Streams {
     /// The app window is shown / has the focus ([`Command::WindowState`]).
     window_visible: bool,
     window_focused: bool,
+    /// The window reported its state at least once (else how far it is
+    /// from the user is not known).
+    window_known: bool,
     last_wish_tick: Option<Instant>,
     /// Logins running, last login errors.
     busy: HashSet<Service>,
@@ -272,6 +275,7 @@ impl Streams {
             schedule: StreamSchedule::default(),
             window_visible: true,
             window_focused: true,
+            window_known: false,
             last_wish_tick: None,
             busy: HashSet::new(),
             errors: HashMap::new(),
@@ -489,11 +493,28 @@ impl Worker {
         self.streaming.window_visible
     }
 
-    /// `Command::WindowState`: a focus after a while checks the likes.
+    /// How far the window is from the user, as a play's attention counts
+    /// it: 0 focused, 0.5 in view behind another window, 1 hidden or
+    /// minimised; `None` before the window said.
+    pub(crate) fn window_away(&self) -> Option<f32> {
+        let s = &self.streaming;
+        s.window_known.then_some(if s.window_focused {
+            0.0
+        } else if s.window_visible {
+            0.5
+        } else {
+            1.0
+        })
+    }
+
+    /// `Command::WindowState`: a focus after a while checks the likes; the
+    /// playing track's attention counts the state that ends here.
     fn window_state(&mut self, visible: bool, focused: bool) {
+        self.heard_tick();
         let gained = focused && !self.streaming.window_focused;
         self.streaming.window_visible = visible;
         self.streaming.window_focused = focused;
+        self.streaming.window_known = true;
         log::debug!("window: visible {visible}, focused {focused}");
         if visible && gained {
             self.likes_if_stale();

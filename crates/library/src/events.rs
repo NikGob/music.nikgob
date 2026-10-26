@@ -9,7 +9,7 @@ use crate::types::TrackStats;
 use crate::util::{get_enum, get_id, get_opt_enum, opt_u32};
 
 pub(crate) const EVENT_COLS: &str =
-    "id, ts, track_id, source_kind, type, position_ms, context, device, origin, context_id, end_reason";
+    "id, ts, track_id, source_kind, type, position_ms, context, device, origin, context_id, end_reason, attention, volume";
 
 pub(crate) fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
@@ -24,6 +24,8 @@ pub(crate) fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
         origin: get_opt_enum(row, 8)?,
         context_id: row.get(9)?,
         end_reason: get_opt_enum(row, 10)?,
+        attention: row.get(11)?,
+        volume: row.get(12)?,
     })
 }
 
@@ -45,8 +47,8 @@ fn stats_from_row_at(row: &Row<'_>, base: usize) -> rusqlite::Result<TrackStats>
 pub(crate) fn insert_event(conn: &Connection, event: &Event) -> Result<bool> {
     let n = conn.execute(
         "INSERT OR IGNORE INTO event(id, ts, track_id, source_kind, type, position_ms, context,
-                                     device, origin, context_id, end_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                     device, origin, context_id, end_reason, attention, volume)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             event.id.to_string(),
             event.ts,
@@ -58,7 +60,9 @@ pub(crate) fn insert_event(conn: &Connection, event: &Event) -> Result<bool> {
             event.device.as_str(),
             event.origin.map(|o| o.as_str()),
             event.context_id.as_deref(),
-            event.end_reason.map(|r| r.as_str())
+            event.end_reason.map(|r| r.as_str()),
+            event.attention,
+            event.volume
         ],
     )?;
     Ok(n > 0)
@@ -77,8 +81,8 @@ impl Library {
         self.record_event_with(track, event_type, source_kind, position_ms, context, EventMeta::default())
     }
 
-    /// [`Self::record_event`] with who chose the play, what played it and
-    /// why it ended.
+    /// [`Self::record_event`] with who chose the play, what played it, why
+    /// it ended and how it was heard.
     pub fn record_event_with(
         &self,
         track: TrackId,
@@ -100,6 +104,8 @@ impl Library {
             origin: meta.origin,
             context_id: meta.context_id,
             end_reason: meta.end_reason,
+            attention: meta.attention,
+            volume: meta.volume,
         };
         self.record_event_raw(&event)?;
         Ok(event)

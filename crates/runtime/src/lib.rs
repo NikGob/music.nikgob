@@ -294,6 +294,56 @@ const POSITION_SETTLE: Duration = Duration::from_millis(500);
 /// A toast no snackbar took away is dropped after this long.
 const TOAST_KEPT: Duration = Duration::from_secs(60);
 
+/// How the playing track is heard (profiles-v1 §11): the time it played,
+/// that time weighted by how far the window was from the user (0 focused,
+/// 0.5 in view behind another window, 1 hidden) where that is known, and
+/// by the volume. Counted between the moments anything of it changes.
+#[derive(Default)]
+struct Heard {
+    since: Option<Instant>,
+    played_ms: f64,
+    known_ms: f64,
+    away_ms: f64,
+    volume_ms: f64,
+}
+
+impl Heard {
+    /// Counting starts over (a new track starts).
+    fn reset(&mut self) {
+        *self = Self { since: Some(Instant::now()), ..Self::default() };
+    }
+
+    /// The time since the last tick played (or not) in this state.
+    fn tick(&mut self, playing: bool, away: Option<f32>, volume: f32) {
+        let now = Instant::now();
+        let ms = self.since.map_or(0.0, |s| now.duration_since(s).as_secs_f64() * 1000.0);
+        self.since = Some(now);
+        self.add(ms, playing, away, volume);
+    }
+
+    fn add(&mut self, ms: f64, playing: bool, away: Option<f32>, volume: f32) {
+        if !playing {
+            return;
+        }
+        self.played_ms += ms;
+        self.volume_ms += ms * f64::from(volume);
+        if let Some(a) = away {
+            self.known_ms += ms;
+            self.away_ms += ms * f64::from(a);
+        }
+    }
+
+    /// The attention (when the window's state covers half the time played
+    /// at least) and the mean volume.
+    fn take(&self) -> (Option<f32>, Option<f32>) {
+        if self.played_ms < 1.0 {
+            return (None, None);
+        }
+        let attention = (self.known_ms >= 0.5 * self.played_ms).then(|| (self.away_ms / self.known_ms) as f32);
+        (attention, Some((self.volume_ms / self.played_ms) as f32))
+    }
+}
+
 struct Worker {
     lib: Library,
     res: Resolver,
@@ -340,6 +390,9 @@ struct Worker {
     origin_gen: Option<u64>,
     /// The playing entry's end is recorded already.
     ended: bool,
+    /// How the playing entry is heard so far (its end's attention and
+    /// volume).
+    heard: Heard,
     /// Entries «Автовоспроизведение» added to continue an album's world.
     autoplay_entries: std::collections::HashSet<u64>,
     prefs_path: Option<PathBuf>,
@@ -428,6 +481,7 @@ impl Worker {
             next_origin: None,
             origin_gen: None,
             ended: true,
+            heard: Heard::default(),
             autoplay_entries: Default::default(),
             prefs_path: config.prefs_path,
             settings_path: config.settings_path.clone(),
@@ -629,12 +683,14 @@ impl Worker {
                 if v == self.volume && !self.muted {
                     return;
                 }
+                self.heard_tick();
                 self.volume = v;
                 self.muted = false;
                 self.playback.set_volume(self.volume);
                 self.publish_volume();
             }
             Command::ToggleMute => {
+                self.heard_tick();
                 self.muted = !self.muted;
                 self.playback
                     .set_volume(if self.muted { 0.0 } else { self.volume });
@@ -1288,6 +1344,7 @@ impl Worker {
 
     fn pause(&mut self) {
         if matches!(self.status, Status::Playing | Status::Buffering) {
+            self.heard_tick();
             self.position = self.position_now();
             self.status = Status::Paused;
             self.playback.pause();
@@ -1299,6 +1356,7 @@ impl Worker {
         match self.status {
             Status::Paused if self.playing.is_none() => self.start_restored(),
             Status::Paused => {
+                self.heard_tick();
                 self.position_at = Instant::now();
                 self.status = Status::Playing;
                 self.playback.resume();
@@ -1376,9 +1434,19 @@ impl Worker {
         let origin = self.origin_of(e);
         let context_id = self.radio_context_id(e.id).or_else(|| self.play_context_id.clone());
         self.ended = false;
-        let meta = EventMeta { origin: Some(origin), context_id, end_reason: None };
+        self.heard.reset();
+        let meta = EventMeta { origin: Some(origin), context_id, ..EventMeta::default() };
         let _ = self.lib.record_event_with(e.track, EventType::Start, kind, Some(0), self.play_context, meta);
         self.recs_started(e.track, origin);
+    }
+
+    /// The playing track's [`Heard`] counts the time since its last tick,
+    /// in the state the player and the window are in.
+    pub(crate) fn heard_tick(&mut self) {
+        let playing = self.status == Status::Playing;
+        let away = self.window_away();
+        let volume = if self.muted { 0.0 } else { self.volume };
+        self.heard.tick(playing, away, volume);
     }
 
     /// The user picks something else to play (`origin` of what comes): the
@@ -1423,7 +1491,9 @@ impl Worker {
             self.recs_played();
             self.recs_ended(e.track, complete, position_ms);
         }
-        let meta = EventMeta { end_reason: Some(reason), ..EventMeta::default() };
+        self.heard_tick();
+        let (attention, volume) = self.heard.take();
+        let meta = EventMeta { end_reason: Some(reason), attention, volume, ..EventMeta::default() };
         let _ = self.lib.record_event_with(
             e.track,
             if complete {
@@ -1446,6 +1516,7 @@ impl Worker {
                 }
                 if self.playing.map(|e| e.id) == Some(id) {
                     if self.status == Status::Buffering {
+                        self.heard_tick();
                         self.status = Status::Playing;
                     }
                     // A failover starts where the failed source stopped.
@@ -1464,6 +1535,7 @@ impl Worker {
                 // like any auto-advance, so the position starts over.
                 if self.restarted.take() == Some(to) {
                     if self.status == Status::Buffering {
+                        self.heard_tick();
                         self.status = Status::Playing;
                         self.publish_player();
                     }
@@ -1500,6 +1572,7 @@ impl Worker {
                 {
                     log::info!("item {id} plays without a start report; playing now");
                     self.restarted = None;
+                    self.heard_tick();
                     self.status = Status::Playing;
                     self.position = position;
                     self.position_at = Instant::now();

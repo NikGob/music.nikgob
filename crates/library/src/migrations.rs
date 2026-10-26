@@ -24,6 +24,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0010_confirm_queue.sql"),
     include_str!("../migrations/0011_artist_aliases.sql"),
     include_str!("../migrations/0012_event_outcome.sql"),
+    include_str!("../migrations/0013_event_attention.sql"),
 ];
 
 /// Number of migrations known to this build (= the schema version it produces).
@@ -120,6 +121,58 @@ mod tests {
         assert_eq!(row, (1, None, None, None));
         migrate(&mut c).unwrap();
         assert_eq!(user_version(&c).unwrap(), SCHEMA_VERSION);
+        drop((c, copy));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A library of schema v12 (outcomes, no attention) is copied to
+    /// `backup-before-schema-v13-*` first, keeps its plays as they were and
+    /// gets the attention and volume columns empty.
+    #[test]
+    fn the_attention_columns_come_empty_after_a_backup() {
+        let dir = std::env::temp_dir().join(format!("nikgob-migrate-v13-{}", nikgob_core::model::EventId::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("library.sqlite");
+        {
+            let mut c = Connection::open(&db).unwrap();
+            let tx = c.transaction().unwrap();
+            for sql in &MIGRATIONS[..12] {
+                tx.execute_batch(sql).unwrap();
+            }
+            tx.pragma_update(None, "user_version", 12).unwrap();
+            tx.execute(
+                "INSERT INTO event(id, ts, track_id, type, position_ms, context, device, origin, context_id, end_reason)
+                 VALUES ('e1', 1, 't1', 'start', 0, 'album', 'd', 'manual', 'release:r', NULL),
+                        ('e2', 2, 't1', 'skip', 5000, 'album', 'd', NULL, NULL, 'user_next')",
+                [],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        let mut c = Connection::open(&db).unwrap();
+        migrate(&mut c).unwrap();
+        assert_eq!(user_version(&c).unwrap(), SCHEMA_VERSION);
+        let backups: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0].starts_with(&format!("backup-before-schema-v{SCHEMA_VERSION}-")), "{backups:?}");
+        let copy = Connection::open(dir.join(&backups[0]).join("library.sqlite")).unwrap();
+        assert_eq!(user_version(&copy).unwrap(), 12);
+        let rows: Vec<(String, Option<String>, Option<String>, Option<String>, Option<f64>, Option<f64>)> = c
+            .prepare("SELECT id, origin, context_id, end_reason, attention, volume FROM event ORDER BY ts")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, vec![
+            ("e1".to_owned(), Some("manual".to_owned()), Some("release:r".to_owned()), None, None, None),
+            ("e2".to_owned(), None, None, Some("user_next".to_owned()), None, None),
+        ]);
         drop((c, copy));
         let _ = std::fs::remove_dir_all(&dir);
     }

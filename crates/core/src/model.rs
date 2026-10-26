@@ -277,6 +277,9 @@ str_enum!(
         Radio = "radio",
         /// A mix's song.
         Mix = "mix",
+        /// A play of another service's history brought in (Takeout,
+        /// Spotify): long-term taste, never a session of this app.
+        Import = "import",
     }
 );
 
@@ -937,7 +940,7 @@ pub struct Like {
 }
 
 /// Append-only listening history record.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub id: EventId,
     pub ts: UnixMs,
@@ -958,14 +961,24 @@ pub struct Event {
     /// Why it ended (a skip or a complete).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<EndReason>,
+    /// How far the app was from the user while it played (an end): 0 the
+    /// window focused, 0.5 in view behind another, 1 hidden or minimised,
+    /// averaged over the time it played.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<f32>,
+    /// The player's mean volume while it played (an end), 0…1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f32>,
 }
 
 /// What a recorded play says beyond its kind and position.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct EventMeta {
     pub origin: Option<EventOrigin>,
     pub context_id: Option<String>,
     pub end_reason: Option<EndReason>,
+    pub attention: Option<f32>,
+    pub volume: Option<f32>,
 }
 
 impl Event {
@@ -982,6 +995,8 @@ impl Event {
             origin: None,
             context_id: None,
             end_reason: None,
+            attention: None,
+            volume: None,
         }
     }
 }

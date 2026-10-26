@@ -287,6 +287,8 @@ mod tests {
             origin: None,
             context_id: None,
             end_reason: None,
+            attention: None,
+            volume: None,
         }
     }
 
