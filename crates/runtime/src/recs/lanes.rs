@@ -35,7 +35,7 @@ const REPEAT_DAYS_SHORT: i64 = 14;
 const REPEAT_DAYS_LONG: i64 = 30;
 /// About every fifth song of a mix is new «С новым» before anything was
 /// heard; then the share its taste profile's appetite draws
-/// ([`nikgob_recs::NewLog::share`]).
+/// ([`nikgob_recs::NewLog::share`], by the profile's key).
 const NEW_EVERY: usize = 5;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -230,6 +230,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     log_lineup(snap, tiles, &mixes);
 
     let seed = super::day_seed(&input.day);
+    let log = super::novelty::keyed(input.new_log.clone(), snap);
     let mut used_new: HashSet<String> = HashSet::new();
     let mut out: Vec<LaneHome> = mixes
         .drain(..)
@@ -237,7 +238,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         .map(|(k, m)| {
             let mut lane = lane_of(snap, tiles, &m);
             if !snap.local_only && !matches!(m.key, MixKey::Background { .. }) {
-                lane.new = new_for(snap, input, &m, seed.wrapping_add(k as u64), &mut used_new);
+                lane.new = new_for(snap, input, &log, &m, seed.wrapping_add(k as u64), &mut used_new);
             }
             lane
         })
@@ -463,14 +464,16 @@ fn kinds_of(snap: &Snapshot, m: &Mix) -> (HashSet<Lang>, bool) {
 /// each in one mix only; as many as the share of the mix's taste profile
 /// asks, those whose preview sounds of the profile first. «Фон» takes
 /// none.
-fn new_for(snap: &Snapshot, input: &BuildInput, m: &Mix, seed: u64, used: &mut HashSet<String>) -> Vec<StreamTrack> {
+fn new_for(snap: &Snapshot, input: &BuildInput, log: &nikgob_recs::NewLog, m: &Mix, seed: u64, used: &mut HashSet<String>) -> Vec<StreamTrack> {
     let regions = &snap.model.regions;
     let tracks: Vec<TrackId> = m.tracks.iter().map(|&i| snap.model.id(i)).collect();
     let profile = profile_of(snap, &tracks);
-    let want = if input.new_log.events.is_empty() || regions.is_empty() {
+    let want = if log.events.is_empty() || snap.model.profiles.is_empty() {
         (tracks.len() / (NEW_EVERY - 1)).max(1)
     } else {
-        let share = input.new_log.share(regions, profile, &mut nikgob_recs::rng::Rng::new(seed));
+        let key = profile.and_then(|j| snap.model.profiles.list.get(j)).map(|p| p.key);
+        let background = profile.is_some_and(|j| snap.model.is_background_profile(j));
+        let share = log.share(key, background, &mut nikgob_recs::rng::Rng::new(seed));
         new_count(tracks.len(), share)
     };
     let in_profile = |t: &StreamTrack| {

@@ -3,12 +3,16 @@
 //! how it ended, kept as a short log ([`NewLog`], the library's cache keeps
 //! it) and read four ways.
 //!
-//! * **Regions.** A complete is `α + 1` of the region its sound falls in,
-//!   an early skip `β + 1`, from `Beta(2, 14)` (about an eighth new). The
-//!   share of new music of a mix is drawn from it (Thompson), between
-//!   [`MIN_SHARE`] and [`MAX_SHARE`] (every fifth at most, as «С новым»
-//!   always said): it grows where the new is heard out and shrinks where
-//!   it is skipped.
+//! * **Taste profiles** (profiles-v1 §8). Each event keeps the key of the
+//!   profile it was heard for ([`NewEvent::profile`]; a log of an older
+//!   [`NOVELTY_VERSION`] has them told again from its sounds,
+//!   [`NewLog::upgrade`]). A complete is `α + 1` of its profile, an early
+//!   skip `β + 1`, from `Beta(2, 14)` (about an eighth new); a background
+//!   profile starts from `Beta(2, 18)` and a song heard out in the
+//!   background counts half (heard out, not listened to). The share of new
+//!   music of a mix is drawn from it (Thompson), between [`MIN_SHARE`] and
+//!   [`MAX_SHARE`] (every fifth at most, as «С новым» always said): it
+//!   grows where the new is heard out and shrinks where it is skipped.
 //! * **Sources.** The same counts per source of discovery, `Beta(completes
 //!   + 1, early skips + 1)`; a pass gives each source the share of its
 //!   requests its draw says ([`NewLog::source_shares`]).
@@ -24,12 +28,17 @@ use nikgob_core::model::{TrackId, UnixMs};
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::Vector;
-use crate::regions::Regions;
 use crate::rng::Rng;
 use crate::taste::DAY_MS;
 
-/// The prior of a region's appetite: about an eighth new.
+/// The prior of a profile's appetite: about an eighth new…
 pub const PRIOR: (f32, f32) = (2.0, 14.0);
+/// …of a background profile's, about a tenth; a song heard out in the
+/// background counts this much.
+pub const BG_PRIOR: (f32, f32) = (2.0, 18.0);
+pub const BG_COMPLETE: f32 = 0.5;
+/// The log keyed by the taste profiles.
+pub const NOVELTY_VERSION: u32 = 1;
 pub const MIN_SHARE: f32 = 0.05;
 pub const MAX_SHARE: f32 = 0.2;
 /// An early skip of a new song: its artist this much lower…
@@ -81,6 +90,13 @@ pub struct NewEvent {
     pub track: Option<TrackId>,
     pub at: UnixMs,
     pub heard: Heard,
+    /// The key of the taste profile it was heard for
+    /// ([`crate::profiles::Profile::key`]).
+    #[serde(default)]
+    pub profile: Option<u32>,
+    /// It ended in a background session.
+    #[serde(default)]
+    pub background: bool,
 }
 
 /// The log of new music heard (see the module docs).
@@ -90,6 +106,9 @@ pub struct NewLog {
     /// Songs offered to keep (never twice).
     #[serde(default)]
     pub offered: HashSet<String>,
+    /// [`NOVELTY_VERSION`] of its keys.
+    #[serde(default)]
+    pub version: u32,
 }
 
 /// A draw of `Beta(a, b)` (two gammas, Marsaglia and Tsang).
@@ -134,36 +153,41 @@ impl NewLog {
         }
     }
 
-    /// The appetite `Beta(α, β)` of each of `regions`.
-    pub fn appetite(&self, regions: &Regions) -> Vec<(f32, f32)> {
-        let mut out = vec![PRIOR; regions.len()];
-        for e in &self.events {
-            let Some((j, _)) = e.vector.as_ref().and_then(|v| regions.best(v)) else { continue };
-            match e.heard {
-                Heard::Complete | Heard::Liked => out[j].0 += 1.0,
-                Heard::Early => out[j].1 += 1.0,
+    /// Keys a log of an older [`NOVELTY_VERSION`] by the taste profiles:
+    /// each event without a profile gets the one `key_of` tells from its
+    /// sound or track. Returns whether it changed.
+    pub fn upgrade(&mut self, key_of: impl Fn(&NewEvent) -> Option<u32>) -> bool {
+        if self.version >= NOVELTY_VERSION {
+            return false;
+        }
+        for e in &mut self.events {
+            if e.profile.is_none() {
+                e.profile = key_of(e);
             }
         }
-        out
+        self.version = NOVELTY_VERSION;
+        true
     }
 
-    /// The share of new music of a mix in `region` (`None`: the whole
-    /// taste), drawn by Thompson from its appetite.
-    pub fn share(&self, regions: &Regions, region: Option<usize>, rng: &mut Rng) -> f32 {
-        let all = self.appetite(regions);
-        let (a, b) = match region.and_then(|j| all.get(j)) {
-            Some(ab) => *ab,
-            None => {
-                let mut ab = PRIOR;
-                for e in &self.events {
-                    match e.heard {
-                        Heard::Complete | Heard::Liked => ab.0 += 1.0,
-                        Heard::Early => ab.1 += 1.0,
-                    }
-                }
-                ab
+    /// The appetite `Beta(α, β)` of the profile keyed `profile` (`None`:
+    /// the whole taste), a background one's (`background`) from its own
+    /// prior.
+    pub fn appetite(&self, profile: Option<u32>, background: bool) -> (f32, f32) {
+        let mut ab = if background { BG_PRIOR } else { PRIOR };
+        for e in self.events.iter().filter(|e| profile.is_none() || e.profile == profile) {
+            match e.heard {
+                Heard::Complete => ab.0 += if e.background { BG_COMPLETE } else { 1.0 },
+                Heard::Liked => ab.0 += 1.0,
+                Heard::Early => ab.1 += 1.0,
             }
-        };
+        }
+        ab
+    }
+
+    /// The share of new music of a mix of the profile keyed `profile`
+    /// (`None`: the whole taste), drawn by Thompson from its appetite.
+    pub fn share(&self, profile: Option<u32>, background: bool, rng: &mut Rng) -> f32 {
+        let (a, b) = self.appetite(profile, background);
         beta(rng, a, b).clamp(MIN_SHARE, MAX_SHARE)
     }
 
@@ -244,7 +268,7 @@ mod tests {
     use crate::test_util::point;
 
     fn ev(song: &str, artist: &str, source: Option<Source>, v: Option<Vector>, at: UnixMs, heard: Heard) -> NewEvent {
-        NewEvent { song: song.into(), artist: artist.into(), source, vector: v, track: None, at, heard }
+        NewEvent { song: song.into(), artist: artist.into(), source, vector: v, track: None, at, heard, profile: None, background: false }
     }
 
     /// Thompson over the sources: the one heard out wins most passes'
@@ -269,29 +293,37 @@ mod tests {
         assert!(wins > 190, "{wins}");
     }
 
-    /// A region heard out takes more new music than one skipped, both
-    /// within the bounds; a skipping artist rests a week, two skips keep it
-    /// out a month.
+    /// A profile heard out takes more new music than one skipped, both
+    /// within the bounds; a background profile starts lower and counts a
+    /// song heard out in the background half; an old log is keyed from its
+    /// sounds once; a skipping artist rests a week, two skips keep it out a
+    /// month.
     #[test]
     fn appetite_and_artists_follow_reactions() {
-        let pts: Vec<Vector> = (0..40).map(|k| if k < 20 { point(k as f32 * 0.01, 0.0) } else { point(10.0 + k as f32 * 0.01, 0.0) }).collect();
-        let refs: Vec<&Vector> = pts.iter().collect();
-        let regions = Regions::build(&refs);
-        assert_eq!(regions.len(), 2);
-        let (ra, rb) = (regions.best(&point(0.0, 0.0)).unwrap().0, regions.best(&point(10.0, 0.0)).unwrap().0);
         let mut log = NewLog::default();
         for k in 0..10 {
             log.push(ev(&format!("a{k}"), "a", None, Some(point(0.1, 0.0)), 0, Heard::Complete));
             log.push(ev(&format!("b{k}"), "b", None, Some(point(10.1, 0.0)), 0, Heard::Early));
         }
+        // An old log: its events keyed by their sound, once.
+        assert!(log.upgrade(|e| e.vector.map(|v| if v[0] < 5.0 { 1 } else { 2 })));
+        assert!(!log.upgrade(|_| Some(9)));
+        assert_eq!(log.events.iter().filter(|e| e.profile == Some(1)).count(), 10);
         let mut rng = Rng::new(1);
-        let mean = |r: usize, rng: &mut Rng| (0..300).map(|_| log.share(&regions, Some(r), rng)).sum::<f32>() / 300.0;
-        let (a, b) = (mean(ra, &mut rng), mean(rb, &mut rng));
+        let mean = |p: u32, bg: bool, rng: &mut Rng| (0..300).map(|_| log.share(Some(p), bg, rng)).sum::<f32>() / 300.0;
+        let (a, b) = (mean(1, false, &mut rng), mean(2, false, &mut rng));
         assert!(a > b + 0.05, "{a} {b}");
         assert!(a <= MAX_SHARE + 1e-4 && b >= MIN_SHARE - 1e-4, "{a} {b}");
         let fresh = NewLog::default();
-        let start = (0..500).map(|_| fresh.share(&regions, Some(ra), &mut rng)).sum::<f32>() / 500.0;
+        let start = (0..500).map(|_| fresh.share(Some(1), false, &mut rng)).sum::<f32>() / 500.0;
         assert!((0.1..=0.15).contains(&start), "about 10–15 % at first: {start}");
+        let calm = (0..500).map(|_| fresh.share(Some(1), true, &mut rng)).sum::<f32>() / 500.0;
+        assert!(calm < start, "a background profile takes less: {calm} {start}");
+        let mut bg = NewLog::default();
+        for k in 0..6 {
+            bg.push(NewEvent { profile: Some(3), background: true, ..ev(&format!("c{k}"), "c", None, None, 0, Heard::Complete) });
+        }
+        assert_eq!(bg.appetite(Some(3), true), (BG_PRIOR.0 + 3.0, BG_PRIOR.1), "heard out in the background: half");
 
         let mut log = NewLog::default();
         log.push(ev("s1", "artist", None, None, 0, Heard::Early));

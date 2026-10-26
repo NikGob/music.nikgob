@@ -6,11 +6,15 @@
 //! offered once to be kept: ♡ «Оставить у себя», a like, which downloads
 //! it. Its like is the «рекомендованный лайк» the log keeps too. The skip
 //! model learns from the starts of new songs as of the library's, with its
-//! «new from a service» feature.
+//! «new from a service» feature. Each start is kept with the taste profile
+//! it was heard for (its preview's of its kind of song) and whether the
+//! session was background; a log of before the profiles is keyed once from
+//! its previews ([`keyed`]).
 
 use nikgob_core::model::{EventContext, EventOrigin, LikeTarget, TrackId};
 use nikgob_library::now_ms;
 use nikgob_recs::{Ended, Heard, NewEvent, NewLog, Source, Vector, song_key};
+use nikgob_recs::songtype::{SongType, Voice};
 use nikgob_view::Command;
 
 use super::recs_now;
@@ -23,6 +27,24 @@ pub(super) fn log_of(lib: &nikgob_library::Library) -> NewLog {
     super::cache_read::<NewLog>(lib, LOG_KEY).unwrap_or_default()
 }
 
+/// The key of the taste profile a new song sounding `v` (embedded) of
+/// `lang` falls in, its best membership.
+fn profile_key(snap: &super::Snapshot, v: Option<&Vector>, lang: Option<nikgob_recs::Lang>) -> Option<u32> {
+    let kind = match lang {
+        Some(l) => SongType { voice: Voice::Sung, lang: Some(l), ..SongType::default() },
+        None => SongType::default(),
+    };
+    let m = snap.model.profiles.membership(v?, &kind);
+    let j = (0..m.len()).max_by(|a, b| m[*a].total_cmp(&m[*b]).then(b.cmp(a)))?;
+    snap.model.profiles.list.get(j).map(|p| p.key)
+}
+
+/// `log` keyed by the taste profiles of `snap` (see the module docs).
+pub(super) fn keyed(mut log: NewLog, snap: &super::Snapshot) -> NewLog {
+    log.upgrade(|e| profile_key(snap, e.vector.as_ref(), None));
+    log
+}
+
 /// A new song playing.
 #[derive(Clone)]
 struct Playing {
@@ -32,6 +54,7 @@ struct Playing {
     title: String,
     source: Option<Source>,
     vector: Option<Vector>,
+    profile: Option<u32>,
 }
 
 #[derive(Default)]
@@ -48,7 +71,12 @@ impl Worker {
         }
         self.recs.newlog.loaded = true;
         self.recs.newlog.log = log_of(&self.lib);
-
+        if let Some(snap) = self.snapshot()
+            && self.recs.newlog.log.version < nikgob_recs::novelty::NOVELTY_VERSION
+        {
+            self.recs.newlog.log = keyed(std::mem::take(&mut self.recs.newlog.log), &snap);
+            self.new_log_save();
+        }
     }
 
     fn new_log_save(&self) {
@@ -67,12 +95,15 @@ impl Worker {
         if snap.filter.known_songs.contains(&song) || !(origin.is_auto() || self.play_context == EventContext::HomeSection) {
             return None;
         }
+        let vector = self.analysis.index().read().get(track).map(|v| snap.model.embed(v));
+        let lang = snap.types.lang_of_new(&row.title, &[row.artist.as_str()]);
         Some(Playing {
             track,
             artist: nikgob_recs::artist_key(&row.artist),
             title: row.title.clone(),
             source: self.discovery_source(&song),
-            vector: self.analysis.index().read().get(track).map(|v| snap.model.embed(v)),
+            profile: profile_key(&snap, vector.as_ref(), lang),
+            vector,
             song,
         })
     }
@@ -137,6 +168,8 @@ impl Worker {
             track: Some(p.track),
             at: recs_now(),
             heard,
+            profile: p.profile,
+            background: self.snapshot().is_some_and(|s| s.model.live(&self.recs.session).p_bg >= 0.5),
         });
         self.new_log_save();
     }

@@ -260,6 +260,7 @@ fn ranked(
         log,
         artist_affinity: &snap.artist_affinity,
         now: super::recs_now(),
+        types: Some(&snap.types),
     };
     rank_discoveries_with(seeds, &all, filter, Some(&scoring)).into_iter().map(|d| d.track).collect()
 }

@@ -1,9 +1,11 @@
 //! New music (docs/stage4.md §5).
 //!
 //! **«Новое для тебя».** The engine picks the seeds ([`Recs::discovery_seeds`]:
-//! [`SEEDS_PER_PROFILE`] tracks of every taste profile, the best loved of
-//! it as the profile sees them, those played in the last 30 days first,
-//! [`SEED_TRACKS`] by affinity without profiles; the [`SEED_ARTISTS`]
+//! [`SEED_TRACKS_MAX`] tracks shared among the taste profiles by their
+//! shares, [`SEEDS_PER_PROFILE`] at least for each active one — new
+//! Japanese songs are looked for while ambient fills the days — the best
+//! loved of each as the profile sees them, those played in the last 30
+//! days first; [`SEED_TRACKS`] by affinity without profiles; the [`SEED_ARTISTS`]
 //! artists with the highest affinity, spread over the profiles); the
 //! runtime asks the services around each seed (YouTube Music
 //! related / radio for a track, similar artists of YouTube Music and Deezer
@@ -21,7 +23,12 @@
 //! never played are out; one song by ISRC once. With the user model
 //! ([`NewScoring`], recs-v2 §11.2) the score adds [`W_REGION_FIT`] times
 //! how well its sound fits a taste profile (its analysed preview, else
-//! half its seed's), [`W_KNOWN_ARTIST`] times a known artist's affinity,
+//! half its seed's). A find is a profile's (profiles-v1 §8) when its
+//! preview has [`PROFILE_MEMBER`] of it and its kind of song — the
+//! language its artist or title tells — is the profile's; one of a
+//! background profile also must not get in the way: no words told, a
+//! preview in the middle of the profile's energy, two minutes or more.
+//! Then [`W_KNOWN_ARTIST`] times a known artist's affinity,
 //! minus [`W_SKIP_NEW`] times the chance it is skipped early (the skip
 //! model with «new from a service»), minus the dislikes near it, minus a
 //! week's [`crate::novelty::ARTIST_PENALTY`] after an early skip of its
@@ -50,10 +57,16 @@ use crate::pick::Recs;
 use crate::taste::DAY_MS;
 
 pub const SEED_TRACKS: usize = 10;
-/// Seed tracks of each taste profile…
-pub const SEEDS_PER_PROFILE: usize = 3;
-/// …and of all of them at most.
+/// Seed tracks of each active taste profile at least…
+pub const SEEDS_PER_PROFILE: usize = 2;
+/// …and of all of them, shared by the profiles' shares.
 pub const SEED_TRACKS_MAX: usize = 30;
+/// A find is a profile's with this membership in it…
+pub const PROFILE_MEMBER: f32 = 0.35;
+/// …and, for a background profile, in this band of its energy and this
+/// long at least.
+const QUIET_BAND: (f32, f32) = (0.15, 0.7);
+const QUIET_MS: u64 = 120_000;
 /// The weights of the score with the user model (recs-v2 §11.2).
 pub const W_REGION_FIT: f32 = 1.2;
 pub const W_KNOWN_ARTIST: f32 = 0.6;
@@ -259,6 +272,8 @@ pub struct NewScoring<'a> {
     pub log: &'a NewLog,
     pub artist_affinity: &'a HashMap<String, f32>,
     pub now: UnixMs,
+    /// The languages the library knows of artists (a find's kind of song).
+    pub types: Option<&'a crate::SongTypes>,
 }
 
 /// One discovery.
@@ -292,15 +307,16 @@ impl Recs<'_> {
             let recent = if self.taste.last_played_at(i).is_some_and(|t| now - t <= SEED_RECENT_MS) { 1.0 } else { 0.5 };
             by_profile[j].push((m.profile_affinity(i) * recent, i));
         }
-        // The profiles by share: a small one gets its seeds too.
-        let mut order: Vec<usize> = (0..by_profile.len()).collect();
+        // The profiles by share, a small one its seeds too.
+        let mut order: Vec<usize> = (0..by_profile.len()).filter(|&j| !by_profile[j].is_empty()).collect();
         order.sort_by(|a, b| m.profile_share[*b].total_cmp(&m.profile_share[*a]).then(a.cmp(b)));
+        let quota = seed_quota(&order, &m.profile_share);
         let mut tracks: Vec<(TrackId, f32)> = Vec::new();
         let mut profiles: Vec<(TrackId, usize)> = Vec::new();
-        for j in order {
+        for (j, q) in order.into_iter().zip(quota) {
             let list = &mut by_profile[j];
             list.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-            for &(_, i) in list.iter().take(SEEDS_PER_PROFILE) {
+            for &(_, i) in list.iter().take(q) {
                 if tracks.len() == SEED_TRACKS_MAX {
                     break;
                 }
@@ -459,6 +475,62 @@ pub fn rank_discoveries(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter: &Di
     rank_discoveries_with(seeds, finds, filter, None)
 }
 
+/// The seed tracks of each profile of `order` (the largest share first):
+/// [`SEEDS_PER_PROFILE`] each that has a share, the rest of
+/// [`SEED_TRACKS_MAX`] by the shares, the largest remainders first.
+fn seed_quota(order: &[usize], shares: &[f32]) -> Vec<usize> {
+    let share = |j: usize| shares.get(j).copied().unwrap_or(0.0);
+    let active: Vec<bool> = order.iter().map(|&j| share(j) >= crate::profiles::ACTIVE_SHARE).collect();
+    let mut q: Vec<usize> = active.iter().map(|a| if *a { SEEDS_PER_PROFILE } else { 0 }).collect();
+    let left = SEED_TRACKS_MAX.saturating_sub(q.iter().sum());
+    let total: f32 = order.iter().zip(&active).filter(|(_, a)| **a).map(|(&j, _)| share(j)).sum::<f32>().max(1e-6);
+    let exact: Vec<f32> = order.iter().zip(&active).map(|(&j, a)| if *a { left as f32 * share(j) / total } else { 0.0 }).collect();
+    for (k, e) in exact.iter().enumerate() {
+        q[k] += e.floor() as usize;
+    }
+    let mut rest: Vec<(f32, usize)> = exact.iter().enumerate().map(|(k, e)| (e - e.floor(), k)).collect();
+    rest.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let short = SEED_TRACKS_MAX.saturating_sub(q.iter().sum());
+    for (_, k) in rest.into_iter().filter(|(_, k)| active[*k]).take(short) {
+        q[k] += 1;
+    }
+    q
+}
+
+/// The profile a find of `t` with its preview `v` (embedded) is of (see
+/// the module docs): the best of its kind of song by its preview, else its
+/// seed's (`seed`) of that kind.
+fn find_profile(sc: &NewScoring<'_>, t: &StreamTrack, v: Option<&Vector>, seed: Option<usize>) -> Option<usize> {
+    use crate::profiles::LaneKey;
+    use crate::songtype::{SongType, Voice};
+    let m = sc.model;
+    let artists: Vec<&str> = t.artists.iter().map(|a| a.name.as_str()).collect();
+    let lang = sc.types.and_then(|ty| ty.lang_of_new(&t.title, &artists));
+    let kind = match lang {
+        Some(l) => SongType { voice: Voice::Sung, lang: Some(l), ..SongType::default() },
+        None => SongType::default(),
+    };
+    let fits = |j: usize| m.profiles.list.get(j).is_some_and(|p| lang.is_none_or(|l| p.lane == LaneKey::Sung(l)));
+    let quiet = |j: usize| {
+        if !m.is_background_profile(j) {
+            return true;
+        }
+        let Some(v) = v else { return false };
+        let mut e: Vec<f32> = (0..m.len()).filter(|&i| m.profile_at(i) == Some(j)).filter_map(|i| m.energy_at(i)).collect();
+        e.sort_by(f32::total_cmp);
+        let band = (!e.is_empty()).then(|| {
+            let at = |q: f32| e[((e.len() - 1) as f32 * q) as usize];
+            (at(QUIET_BAND.0), at(QUIET_BAND.1))
+        });
+        lang.is_none() && t.duration_ms.is_none_or(|d| d >= QUIET_MS) && band.is_none_or(|(lo, hi)| (lo..=hi).contains(&m.energy_of(v)))
+    };
+    let by_sound = v.and_then(|v| {
+        let mem = m.profiles.membership(v, &kind);
+        (0..mem.len()).filter(|&j| mem[j] >= PROFILE_MEMBER && fits(j)).max_by(|a, b| mem[*a].total_cmp(&mem[*b]).then(b.cmp(a)))
+    });
+    by_sound.or(if v.is_none() { seed.filter(|&j| fits(j)) } else { None }).filter(|&j| quiet(j))
+}
+
 /// What the user model adds to a candidate's score, and its profile.
 fn model_score(t: &StreamTrack, key: &str, via_seeds: &HashMap<SeedRef, f32>, seeds: &DiscoverySeeds, sc: &NewScoring<'_>) -> Option<(f32, Option<usize>)> {
     let m = sc.model;
@@ -476,14 +548,15 @@ fn model_score(t: &StreamTrack, key: &str, via_seeds: &HashMap<SeedRef, f32>, se
             _ => None,
         })
         .max_by(|a, b| a.2.total_cmp(&b.2));
-    let (fit, profile) = match &v {
-        Some(v) => (m.regions.fit(v), m.regions.of(v, None)),
+    let profile = find_profile(sc, t, v.as_ref(), seed_profile.map(|s| s.0));
+    // A find of no profile (another kind of song, in the way of the
+    // background) fits half.
+    let lost = if profile.is_some() { 1.0 } else { 0.5 };
+    let fit = match &v {
+        Some(v) => lost * m.regions.fit(v),
         None => match seed_profile {
-            Some((j, id, _)) => {
-                let fit = m.position(id).and_then(|p| m.embedded_at(p)).map_or(0.5, |e| m.regions.fit(e));
-                (0.5 * fit, Some(j))
-            }
-            None => (0.25, None),
+            Some((_, id, _)) => lost * 0.5 * m.position(id).and_then(|p| m.embedded_at(p)).map_or(0.5, |e| m.regions.fit(e)),
+            None => 0.25,
         },
     };
     let known = sc.artist_affinity.get(&artist).copied().unwrap_or(0.0);
@@ -848,6 +921,36 @@ mod tests {
         assert_eq!(plain.tracks.len(), SEED_TRACKS);
     }
 
+    /// The seeds go by the profiles' shares, two at least for each active
+    /// one, thirty in all.
+    #[test]
+    fn seeds_follow_shares_with_a_floor() {
+        let q = seed_quota(&[0, 1, 2, 3], &[0.7, 0.2, 0.08, 0.02]);
+        assert_eq!(q.iter().sum::<usize>(), SEED_TRACKS_MAX);
+        assert!(q.iter().all(|n| *n >= SEEDS_PER_PROFILE), "{q:?}");
+        assert!(q[0] > q[1] && q[1] > q[2], "{q:?}");
+        assert_eq!(seed_quota(&[0, 1], &[1.0, 0.0])[1], 0, "no share, no seeds");
+    }
+
+    /// A find is the profile's of its kind of song: a Japanese song that
+    /// sounds like the rap is no rap find, a Russian one is.
+    #[test]
+    fn a_find_is_of_its_kind_of_songs_profile() {
+        use crate::model::{ModelInput, UserModel};
+        let (cat, idx, input, types) = crate::radio::tests::listener(true);
+        let now = crate::model::tests::T0;
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None }, now);
+        let (vectors, known, log) = (HashMap::new(), HashMap::new(), NewLog::default());
+        let sc = NewScoring { model: &model, vectors: &vectors, log: &log, artist_affinity: &known, now, types: Some(&types) };
+        let rap = model.profile_at(cat.position(tid(5)).unwrap()).unwrap();
+        let near_rap = *model.embedded_at(cat.position(tid(5)).unwrap()).unwrap();
+        let ja = st(Service::Youtube, "ja", "東京の夜に歌う", "誰か");
+        let ru = st(Service::Youtube, "ru", "Ночной город", "Кто-то");
+        assert_ne!(find_profile(&sc, &ja, Some(&near_rap), Some(rap)), Some(rap));
+        assert_eq!(find_profile(&sc, &ru, Some(&near_rap), None), Some(rap));
+        assert_eq!(find_profile(&sc, &ja, None, Some(rap)), None, "the seed's profile only of its kind");
+    }
+
     /// With the model: a junk upload never comes, an artist skipped twice
     /// stays out, the small profile's discoveries are among the best.
     #[test]
@@ -872,11 +975,21 @@ mod tests {
         finds[0].tracks.insert(0, nightcore);
         let mut log = NewLog::default();
         for at in [now - DAY_MS, now - 2 * DAY_MS] {
-            log.push(NewEvent { song: "x".into(), artist: artist_key(&format!("Artist {seed0} 0")), source: None, vector: None, track: None, at, heard: Heard::Early });
+            log.push(NewEvent {
+                song: "x".into(),
+                artist: artist_key(&format!("Artist {seed0} 0")),
+                source: None,
+                vector: None,
+                track: None,
+                at,
+                heard: Heard::Early,
+                profile: None,
+                background: false,
+            });
         }
         let vectors = HashMap::new();
         let known = HashMap::new();
-        let sc = NewScoring { model: &model, vectors: &vectors, log: &log, artist_affinity: &known, now };
+        let sc = NewScoring { model: &model, vectors: &vectors, log: &log, artist_affinity: &known, now, types: Some(&types) };
         let out = rank_discoveries_with(&seeds, &finds, &DiscoveryFilter::default(), Some(&sc));
         assert!(!out.iter().any(|d| d.track.title.contains("Nightcore")));
         assert!(!out.iter().any(|d| d.track.artists[0].name == format!("Artist {seed0} 0")), "skipped twice: out for a month");
