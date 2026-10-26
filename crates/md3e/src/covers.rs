@@ -16,7 +16,9 @@
 //! Their bytes are decoded here like files, at the same tiers (a 640 px
 //! Spotify cover drawn on a card becomes a 128 or 256 px texture), and are
 //! dropped from the bytes loader once decoded, so a web cover too costs only
-//! its texture; they are forgotten off screen like files.
+//! its texture; they are forgotten off screen like files. A web cover has no
+//! palette seed from an import, so its seed is taken from the pixels it is
+//! decoded to ([`web_seed`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -91,6 +93,9 @@ pub type WebSizer = fn(&str, Option<u32>) -> Option<String>;
 
 struct Shared {
     slots: Mutex<HashMap<String, Slot>>,
+    /// The colour-scheme seed of each web cover decoded so far, by its url
+    /// (`None`: too grey for one).
+    web_seeds: Mutex<HashMap<String, Option<u32>>>,
     web_sizer: Mutex<Option<WebSizer>>,
     jobs: Mutex<Jobs>,
     lru: Mutex<Lru>,
@@ -123,6 +128,7 @@ pub fn install(ctx: &Context) {
     }
     let shared = Arc::new(Shared {
         slots: Mutex::default(),
+        web_seeds: Mutex::default(),
         web_sizer: Mutex::default(),
         jobs: Mutex::default(),
         lru: Mutex::new(Lru {
@@ -162,6 +168,13 @@ pub fn pin<'a>(ctx: &Context, uris: impl IntoIterator<Item = &'a str>) {
     if let Some(s) = shared(ctx) {
         lock(&s.lru).pinned = uris.into_iter().map(|u| base(u).to_owned()).collect();
     }
+}
+
+/// The colour-scheme seed of the web cover at `url`, once a size of it has
+/// been decoded; `None` before, or for a cover too grey for one.
+pub fn web_seed(ctx: &Context, url: &str) -> Option<u32> {
+    let shared = shared(ctx)?;
+    lock(&shared.web_seeds).get(url).copied().flatten()
 }
 
 fn load(ctx: &Context, uri: &str) -> Result<Option<SizedTexture>, LoadError> {
@@ -416,6 +429,9 @@ impl Shared {
                 Ok(img) => Slot::Ready(Arc::new(img)),
                 Err(e) => Slot::Failed(e),
             };
+            if let (Source::Web(..), Slot::Ready(img)) = (&job.source, &slot) {
+                self.seed_web(&job.uri, img);
+            }
             // The texture is all a web cover needs from now on; another
             // tier reads it again from the disk cache.
             if let Source::Web(url, _) = &job.source {
@@ -429,6 +445,17 @@ impl Shared {
                 drop(slots);
                 ctx.request_repaint();
             }
+        }
+    }
+
+    /// Keeps the seed of the web cover a decoded size `uri` is of: its first
+    /// size decoded is enough, the seed is taken from 128 px anyway.
+    fn seed_web(&self, uri: &str, img: &ColorImage) {
+        let origin = lock(&self.lru).used.get(uri).map_or_else(|| base(uri).to_owned(), |u| u.origin.clone());
+        let mut seeds = lock(&self.web_seeds);
+        if !seeds.contains_key(&origin) {
+            let seed = crate::color::seed_from_image(img.as_raw(), img.width(), img.height());
+            seeds.insert(origin, seed);
         }
     }
 
@@ -572,6 +599,15 @@ mod tests {
         let ctx = Context::default();
         install(&ctx);
         ctx
+    }
+
+    #[test]
+    fn a_web_cover_is_seeded_by_its_pixels() {
+        let ctx = ctx();
+        let red = ColorImage::new([64, 64], vec![egui::Color32::from_rgb(200, 30, 30); 64 * 64]);
+        shared(&ctx).expect("installed").seed_web("https://x.invalid/c.jpg#128", &red);
+        assert!(web_seed(&ctx, "https://x.invalid/c.jpg").is_some());
+        assert_eq!(web_seed(&ctx, "https://x.invalid/other.jpg"), None);
     }
 
     /// `n` solid PNG covers of `side` pixels in a fresh temp folder.

@@ -355,7 +355,8 @@ impl Md3eUi {
             .current
             .as_ref()
             .and_then(|t| t.cover.as_ref())
-            .and_then(|c| c.seed)
+            // A stream's cover is seeded once it is decoded for drawing.
+            .and_then(|c| c.seed.or_else(|| c.web_url().and_then(|u| crate::covers::web_seed(ctx, u))))
             .unwrap_or(prefs.fallback_seed);
         // The settings' samples paint other variants of the same seed.
         ctx.data_mut(|d| d.insert_temp(scheme_seed_id(), seed));
