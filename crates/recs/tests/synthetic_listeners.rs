@@ -562,7 +562,8 @@ mod mixes {
             assert!(longest_run(m, &mix.tracks) <= 3, "{runs:?}");
             let runs = mix.tracks.windows(2).filter(|w| m.profile_at(w[0]) != m.profile_at(w[1])).count();
             assert!(runs + 1 >= mix.tracks.len() / 3, "blocks of two take turns: {runs} changes in {}", mix.tracks.len());
-            assert!(mix.title.contains(" + "), "{}", mix.title);
+            // Named by both: «Русские и японские песни».
+            assert!(mix.title.contains(" + ") || mix.title.contains(" и "), "{}", mix.title);
         });
     }
 

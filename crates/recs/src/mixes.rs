@@ -70,6 +70,8 @@ use crate::taste::DayPart;
 
 /// Moments of «Миксы для тебя».
 pub const MOMENTS: usize = 5;
+/// The blends made today shown at most (the latest).
+pub const BLENDS_SHOWN: usize = 2;
 /// Songs of a mix (about 90–100 minutes)…
 pub const MIX_LEN: usize = 28;
 const MIX_MS: u64 = 105 * 60_000;
@@ -467,7 +469,8 @@ impl<'a> Builder<'a> {
     }
 
     /// Today's moments, the order of the cards by now (see the module
-    /// docs), the blends made today first; and the lineup to keep.
+    /// docs), the blends made today first in the places of the moments
+    /// that fit now least; and the lineup to keep.
     pub fn lineup(&self, kept: &Kept) -> (Vec<Mix>, Vec<MixKey>) {
         let mut chosen: Vec<Mix> = Vec::new();
         let mut keys: Vec<MixKey> = Vec::new();
@@ -494,7 +497,10 @@ impl<'a> Builder<'a> {
             chosen.push(mix);
         }
         chosen.sort_by(|a, b| b.score.total_cmp(&a.score));
-        let mut blends: Vec<Mix> = kept.blends.iter().rev().filter_map(|k| self.mix(*k, kept)).collect();
+        // The blends stand in the places of the moments that fit now least
+        // (the two latest; those stay in the day's lineup).
+        let mut blends: Vec<Mix> = kept.blends.iter().rev().filter_map(|k| self.mix(*k, kept)).take(BLENDS_SHOWN).collect();
+        chosen.truncate(MOMENTS.saturating_sub(blends.len()));
         blends.extend(chosen);
         (blends, keys)
     }
@@ -1187,7 +1193,10 @@ impl<'a> Builder<'a> {
                 (2, _) | (3, 2) => "Фон поживее".into(),
                 _ => "Фон".into(),
             },
-            MixKey::Blend(keys) => keys.iter().filter(|k| **k != 0).filter_map(|k| name(*k)).collect::<Vec<_>>().join(" + "),
+            MixKey::Blend(keys) => {
+                let names: Vec<String> = keys.iter().filter(|k| **k != 0).filter_map(|k| name(*k)).collect();
+                if self.settings.names == NameStyle::Kind { blend_title(names) } else { names.join(" + ") }
+            }
             MixKey::Kind(c) => kind_title(lane_of_code(c)),
         }
     }
@@ -1215,7 +1224,7 @@ impl<'a> Builder<'a> {
                             }
                         })
                         .collect();
-                    m.title = parts.join(" + ");
+                    m.title = if self.settings.names == NameStyle::Kind { blend_title(parts) } else { parts.join(" + ") };
                 }
                 _ => {}
             }
@@ -1260,6 +1269,40 @@ impl<'a> Builder<'a> {
         }
         s
     }
+}
+
+/// A blend's name: its profiles' names joined by «+», the songs of one word
+/// said once («Русские и японские песни + Саундтреки без слов»).
+fn blend_title(names: Vec<String>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut kinds: Vec<(String, Vec<String>)> = Vec::new();
+    for n in &names {
+        // «Русские песни»: one word before the last.
+        let words: Vec<&str> = n.split(' ').collect();
+        if words.len() == 2 && n.chars().next().is_some_and(char::is_uppercase) {
+            match kinds.iter_mut().find(|k| k.0 == words[1]) {
+                Some(k) => k.1.push(words[0].to_owned()),
+                None => kinds.push((words[1].to_owned(), vec![words[0].to_owned()])),
+            }
+        }
+    }
+    let mut said: Vec<&str> = Vec::new();
+    for n in &names {
+        let words: Vec<&str> = n.split(' ').collect();
+        let kind = kinds.iter().find(|k| words.len() == 2 && k.0 == words[1] && k.1.len() > 1);
+        match kind {
+            Some((noun, adjectives)) if !said.contains(&noun.as_str()) => {
+                said.push(noun);
+                let mut first = adjectives[0].clone();
+                let rest: Vec<String> = adjectives[1..].iter().map(|a| a.to_lowercase()).collect();
+                first.push_str(&format!(" и {}", rest.join(" и ")));
+                parts.push(format!("{first} {noun}"));
+            }
+            Some(_) => {}
+            None => parts.push(n.clone()),
+        }
+    }
+    parts.join(" + ")
 }
 
 /// The name of a side by what it holds: of one language at
@@ -1695,6 +1738,9 @@ mod tests {
     #[test]
     fn keys_and_names() {
         assert_eq!(MixKey::blend(&[3, 3, 5]), Some(MixKey::Blend([3, 5, 0])));
+        let names = |n: &[&str]| n.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+        assert_eq!(blend_title(names(&["Русские песни", "Саундтреки без слов", "Японские песни"])), "Русские и японские песни + Саундтреки без слов");
+        assert_eq!(blend_title(names(&["Японские песни", "Саундтреки без слов"])), "Японские песни + Саундтреки без слов");
         assert_eq!(MixKey::blend(&[3]), None);
         assert_ne!(MixKey::Calm.token(), MixKey::Lively.token());
         for l in [LaneKey::Instrumental, LaneKey::Unknown, LaneKey::Sung(Lang::Korean), LaneKey::Sung(Lang::Other)] {
