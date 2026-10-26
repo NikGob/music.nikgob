@@ -2094,7 +2094,8 @@ impl Worker {
         };
         let (_, releases) = if visit.local_only { (Vec::new(), Vec::new()) } else { self.discover_rows() };
         let new_album = home_v2::world_release(&w.world, &releases).map(|i| releases[i].clone());
-        let view = self.res.world_view(&w, new_album);
+        let mut view = self.res.world_view(&w, new_album);
+        view.mixes = self.world_mix_cards(&view.world);
         let stage = view.world.release;
         self.publish(|s| s.world = Some(view));
         self.kick_hd_covers(stage);

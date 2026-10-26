@@ -55,7 +55,7 @@ use nikgob_core::streaming::{RemoteId, StreamTrack};
 use nikgob_library::{Library, now_ms};
 use nikgob_recs::{
     Catalog, DAYLIST_LEN, DailyParams, DayPart, DiscoveryFilter, Ended, FEATURE_VERSION, Item, ModelInput, Mood,
-    NewTrack, Pick, RadioParams, RadioState as Engine, Recs, SONGTYPE_RULES, ServiceSuggestions, Session, SongInput,
+    NewTrack, Pick, RadioParams, RadioState as Engine, Reason, Recs, SONGTYPE_RULES, ServiceSuggestions, Session, SongInput,
     SongTypes, StyleMix, TasteInput, TrackInfo, UserModel, VectorIndex, Weights, album_key, artist_key, daylist_title,
     daylist_until, match_suggestions, song_key, song_types, stream_song_key, style_words,
 };
@@ -324,7 +324,13 @@ pub(crate) struct RecsState {
     pub(crate) weights: Option<Weights>,
     /// The skip model's features of the playing track at its start.
     skip_x: Option<(TrackId, [f32; nikgob_recs::model::G])>,
+    /// The mixes of the world's page open.
+    world: Option<WorldMixes>,
 }
+
+/// The mixes of a world's page: its key, and each mix with the name the
+/// queue says and its tracks.
+type WorldMixes = (String, Vec<(v::WorldMix, String, Vec<TrackId>)>);
 
 impl RecsState {
     pub(crate) fn new(tx: Sender<Internal>) -> Self {
@@ -352,6 +358,7 @@ impl RecsState {
             session: Session::default(),
             weights: None,
             skip_x: None,
+            world: None,
         }
     }
 }
@@ -1500,6 +1507,7 @@ impl HomeParts {
                 new_cover: l.new_cover.map(v::Cover::web),
                 tracks: l.rows.iter().map(|t| res.track(t)).collect(),
                 blend_base: l.blend_base,
+                queue: None,
             })
             .collect();
         let blend_profiles = self.blend_profiles;
@@ -1748,6 +1756,18 @@ impl ModelPreview {
         let tiles = tiles::input(lib, &rows, &events, names);
         let (kept, _) = played_in_background(&self.snap, &tiles, &events);
         kept.into_iter().filter_map(|k| tiles.playlists.get(k)).map(|p| p.name.clone()).collect()
+    }
+
+    /// The worlds by title (their tokens).
+    pub fn world_named(&self, title: &str) -> Option<u64> {
+        self.snap.worlds.iter().find(|(_, (_, t))| t.eq_ignore_ascii_case(title)).map(|(w, _)| *w)
+    }
+
+    /// The mixes of a world's page now, with their tracks.
+    pub fn world_mixes(&self, world: u64) -> Vec<(nikgob_recs::WorldMixKind, Vec<TrackId>)> {
+        let (part, _, _) = daylist_key(recs_now(), local_day().1);
+        let recs = self.snap.recs();
+        recs.world_mixes(world, part).into_iter().map(|m| (m.kind, m.tracks.iter().map(|&i| self.snap.model.id(i)).collect())).collect()
     }
 
     /// The track suits the background ([`background_fit`]).
@@ -2119,6 +2139,7 @@ impl Worker {
             }
         };
         self.publish_recs_home();
+        self.world_mixes_again();
         if let Some(id) = self.recs.pending_play.take() {
             self.play_mix(id);
         }
@@ -2202,6 +2223,13 @@ impl Worker {
                 let streams = d.streams.values().cloned().collect();
                 self.start_radio_picked(state, picks, streams, title, EventContext::HomeSection);
             }
+            v::MixId::Lane(v::MixKey::World(kind)) => {
+                let mix = self.recs.world.as_ref().and_then(|(_, m)| m.iter().find(|m| m.0 == kind));
+                match mix.map(|m| (m.1.clone(), m.2.iter().map(|&id| Pick { item: Item::Track(id), reason: Reason::Random }).collect::<Vec<_>>())) {
+                    Some((title, picks)) => self.play_picks(&picks, &HashMap::new(), &title),
+                    None => self.toast("Этого микса уже нет — страница мира обновилась", None),
+                }
+            }
             v::MixId::Lane(key) => {
                 let with_new = {
                     let p = &self.state.read().prefs;
@@ -2222,6 +2250,90 @@ impl Worker {
                 None => self.toast("Этой подборки уже нет — главная обновилась", None),
             },
         }
+    }
+
+    /// The mixes of the page of `world` (recs-v2 §8.5): «Лучшее», «Ещё не
+    /// слышал», «В дорогу», then its calm and its lively side, those it has;
+    /// none before the first build. Kept for [`v::MixKey::World`] to play.
+    pub(crate) fn world_mix_cards(&mut self, world: &v::World) -> Vec<v::LaneCard> {
+        let Some(snap) = self.recs.snap.clone() else {
+            self.recs.world = None;
+            return Vec::new();
+        };
+        let (part, _, _) = daylist_key(recs_now(), local_day().1);
+        let token = nikgob_recs::world_token(&world.key);
+        let local_only = self.state.read().prefs.mixes_downloaded_only;
+        let started = Instant::now();
+        let mut mixes: Vec<(v::WorldMix, Vec<TrackId>)> = snap
+            .recs()
+            .world_mixes(token, part)
+            .into_iter()
+            .map(|m| {
+                let kind = match m.kind {
+                    nikgob_recs::WorldMixKind::Best => v::WorldMix::Best,
+                    nikgob_recs::WorldMixKind::Unheard => v::WorldMix::Unheard,
+                    nikgob_recs::WorldMixKind::Road => v::WorldMix::Road,
+                    nikgob_recs::WorldMixKind::Calm => v::WorldMix::Calm,
+                    nikgob_recs::WorldMixKind::Moving => v::WorldMix::Moving,
+                };
+                (kind, m.tracks.iter().map(|&i| snap.model.id(i)).collect())
+            })
+            .collect();
+        mixes.sort_by_key(|m| m.0);
+        log::debug!("world mixes of «{}» in {:?}", world.title, started.elapsed());
+        let mut kept = Vec::new();
+        let mut cards = Vec::new();
+        for (kind, ids) in mixes {
+            let rows: Vec<nikgob_library::TrackRow> =
+                ids.iter().filter_map(|id| self.lib.get_track_row(*id).ok().flatten()).filter(|t| t.has_local || !local_only).collect();
+            if rows.is_empty() {
+                continue;
+            }
+            let mut artists: Vec<String> = Vec::new();
+            let mut releases: Vec<ReleaseId> = Vec::new();
+            for t in &rows {
+                if !t.artist.is_empty() && !artists.contains(&t.artist) {
+                    artists.push(t.artist.clone());
+                }
+                if let Some(r) = t.release_id
+                    && !releases.contains(&r)
+                {
+                    releases.push(r);
+                }
+            }
+            let covers = releases.into_iter().filter_map(|r| self.res.release_cover(r)).take(COVERS).collect();
+            let name = kind.title();
+            let mut rest = name.chars();
+            let lower: String = rest.next().map(|c| c.to_lowercase().chain(rest).collect()).unwrap_or_default();
+            let queue = format!("{}: {lower}", world.title);
+            kept.push((kind, queue.clone(), rows.iter().map(|t| t.id).collect()));
+            cards.push(v::LaneCard {
+                key: v::MixKey::World(kind),
+                title: name.to_owned(),
+                short_titles: Vec::new(),
+                artists,
+                new_artists: Vec::new(),
+                covers,
+                new_cover: None,
+                tracks: rows.iter().map(|t| self.res.track(t)).collect(),
+                blend_base: None,
+                queue: Some(queue),
+            });
+        }
+        self.recs.world = Some((world.key.clone(), kept));
+        cards
+    }
+
+    /// The page of a world open gets its mixes again (a build is done).
+    fn world_mixes_again(&mut self) {
+        let world = self.state.read().world.as_ref().map(|w| w.world.clone());
+        let Some(world) = world else { return };
+        let cards = self.world_mix_cards(&world);
+        self.publish(|s| {
+            if let Some(w) = s.world.as_mut().filter(|w| w.world.key == world.key) {
+                w.mixes = cards;
+            }
+        });
     }
 
     /// «Наугад»: a fresh draw at every click, so what plays (the first song

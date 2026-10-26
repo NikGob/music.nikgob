@@ -80,7 +80,7 @@ impl MixId {
 /// for the view): a taste profile's mix by the profile's key, «Всё
 /// вперемешку», the calm and the lively side of everything loved, a card of
 /// «Фон», a blend of two or three profiles, a kind of song before there are
-/// profiles, «На повторе».
+/// profiles, «На повторе»; a mix of the world's page open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum MixKey {
     Profile(u32),
@@ -91,6 +91,31 @@ pub enum MixKey {
     Blend([u32; 3]),
     Kind(u8),
     OnRepeat,
+    World(WorldMix),
+}
+
+/// A mix of a world's page (recs-v2 §8): «Лучшее», «Ещё не слышал», «В
+/// дорогу» (to other worlds), its calm and its lively side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum WorldMix {
+    Best,
+    Unheard,
+    Road,
+    Calm,
+    Moving,
+}
+
+impl WorldMix {
+    /// Its name on the world's page (the world's own is the page's title).
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Best => "Лучшее",
+            Self::Unheard => "Ещё не слышал",
+            Self::Road => "В дорогу",
+            Self::Calm => "Тихое",
+            Self::Moving => "В движении",
+        }
+    }
 }
 
 /// A mix of «Миксы для тебя».
@@ -116,6 +141,9 @@ pub struct LaneCard {
     pub tracks: Vec<crate::TrackRow>,
     /// The taste profile «Смешать с…» starts from (a profile's mix, «Фон»).
     pub blend_base: Option<u32>,
+    /// The name the queue says when the title alone is not enough (a
+    /// world's mix: «MADE IN ABYSS: лучшее»).
+    pub queue: Option<String>,
 }
 
 impl LaneCard {
@@ -125,7 +153,7 @@ impl LaneCard {
 
     /// The name of what the queue plays from it.
     pub fn context(&self) -> String {
-        format!("микса «{}»", self.title)
+        format!("микса «{}»", self.queue.as_deref().unwrap_or(&self.title))
     }
 }
 

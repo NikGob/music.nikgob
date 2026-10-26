@@ -570,6 +570,9 @@ pub struct WorldView {
     pub new_album: Option<StreamAlbumCard>,
     /// «Любимое»: its liked tracks (shown from three).
     pub liked: Vec<TrackRow>,
+    /// «Миксы»: its mixes (recs-v2 §8.5), none before the recommendations
+    /// are built.
+    pub mixes: Vec<LaneCard>,
 }
 
 /// One of the three cards under a world's stage: one click each.

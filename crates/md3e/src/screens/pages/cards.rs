@@ -383,10 +383,12 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, can_blend: boo
 
     let n = l.tracks.len();
     // «На повторе» is what played: no other draw of it, and its switch is
-    // in Settings; a blend is the user's own for the day.
-    let redraw = l.key != nikgob_view::MixKey::OnRepeat;
+    // in Settings; a blend is the user's own for the day; a world's mix is
+    // of its page, the world's own.
+    let world = matches!(l.key, nikgob_view::MixKey::World(_));
+    let redraw = l.key != nikgob_view::MixKey::OnRepeat && !world;
     let blend = can_blend && l.blend_base.is_some();
-    let hide = !matches!(l.key, nikgob_view::MixKey::OnRepeat | nikgob_view::MixKey::Blend(_));
+    let hide = !matches!(l.key, nikgob_view::MixKey::OnRepeat | nikgob_view::MixKey::Blend(_)) && !world;
     let menu = |key: Id| {
         let mut m = Menu::new(key)
             .item(MenuItem::new("Список треков").icon(Icon::QueueMusic).shortcut(n.to_string()))

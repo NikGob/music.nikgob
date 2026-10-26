@@ -105,3 +105,30 @@ fn radios_keep_to_their_profiles() {
     println!("\nout of the seed's profile: {out_of_profile}; a world thrice running: {runs}");
     assert_eq!(runs, 0, "a world thrice running");
 }
+
+/// The mixes of a world's page for MADE IN ABYSS and the world played most
+/// after it, with their tracks.
+#[test]
+#[ignore = "needs NIKGOB_REAL_LIBRARY"]
+fn world_mixes() {
+    let Some(src) = std::env::var_os("NIKGOB_REAL_LIBRARY") else {
+        eprintln!("NIKGOB_REAL_LIBRARY is not set");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let lib = copy_of(&src, dir.path());
+    let preview = ModelPreview::of(&lib).unwrap();
+    for title in ["MADE IN ABYSS", "Hollow Knight", "Серега Пират"] {
+        let Some(w) = preview.world_named(title) else {
+            println!("no world «{title}»");
+            continue;
+        };
+        println!("\n{title}:");
+        for (kind, tracks) in preview.world_mixes(w) {
+            println!("  {kind:?} ({}):", tracks.len());
+            for t in tracks.iter().take(8) {
+                println!("    {}", line(&lib, &preview, *t));
+            }
+        }
+    }
+}

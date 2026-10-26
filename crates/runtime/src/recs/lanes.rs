@@ -106,7 +106,8 @@ struct MixesCache {
     hidden: Vec<MixKey>,
 }
 
-/// The engine's key of a view's key («На повторе» is the runtime's).
+/// The engine's key of a view's key («На повторе» and a world's mixes are the
+/// runtime's).
 pub(crate) fn engine_key(k: v::MixKey) -> Option<MixKey> {
     Some(match k {
         v::MixKey::Profile(p) => MixKey::Profile(p),
@@ -116,7 +117,7 @@ pub(crate) fn engine_key(k: v::MixKey) -> Option<MixKey> {
         v::MixKey::Background { profile, card, cards } => MixKey::Background { profile, card, cards },
         v::MixKey::Blend(p) => MixKey::Blend(p),
         v::MixKey::Kind(c) => MixKey::Kind(c),
-        v::MixKey::OnRepeat => return None,
+        v::MixKey::OnRepeat | v::MixKey::World(_) => return None,
     })
 }
 

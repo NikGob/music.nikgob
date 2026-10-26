@@ -1,11 +1,12 @@
 //! A world's page (home-v2 §15.3, «Открыть мир»): its name in the large
 //! app bar, the header in the colours of the world's cover — the cover,
 //! when it was heard, its facts, how far the user got and «Дослушать» / «Вперемешку» — then
-//! its albums in order with how much of each was heard, its new album of
-//! the services («Новое») and its liked tracks («Любимое», from three).
-//! The album cards and the track list are the ones of Главная and the
-//! album pages; ← and the mouse's back button return to Главная where it
-//! was scrolled.
+//! its mixes («Миксы»: «Лучшее», «Ещё не слышал», «В дорогу», its calm and
+//! its lively side), its albums in order with how much of each was heard,
+//! its new album of the services («Новое») and its liked tracks
+//! («Любимое», from three). The mix and album cards and the track list are
+//! the ones of Главная and the album pages; ← and the mouse's back button
+//! return to Главная where it was scrolled.
 
 use egui::{CornerRadius, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{Command, Route, StreamPage, ViewState, WorldView};
@@ -45,6 +46,10 @@ pub fn show(ui: &mut Ui, key: &str, state: &ViewState, pages: &mut PageState, ou
         let grid = Grid::new(ui.cursor().left(), ui.available_width());
         ui.add_space(8.0);
         header(ui, grid, v, state, out);
+        if !v.mixes.is_empty() {
+            ui.add_space(widgets::SECTION_GAP);
+            mixes(ui, grid, v, state, out);
+        }
         ui.add_space(widgets::SECTION_GAP);
         let mut nav = albums(ui, grid, v, out);
         if let Some(a) = &v.new_album {
@@ -79,8 +84,24 @@ pub fn show(ui: &mut Ui, key: &str, state: &ViewState, pages: &mut PageState, ou
             nav = r.or(nav);
         }
         ui.add_space(widgets::SECTION_GAP);
+        super::home::lane_list(ui.ctx(), &v.mixes, out);
         nav
     })
+}
+
+/// «Миксы»: the mix cards of Главная, six to a line (three on a narrow
+/// page), their menus without what only Главная's have.
+fn mixes(ui: &mut Ui, grid: Grid, v: &WorldView, state: &ViewState, out: &mut Vec<Command>) {
+    section(ui, grid, "Миксы");
+    let per = grid.cards_per_line();
+    let cw = grid.span(12 / per);
+    let h = cw + cards::MIX_TEXT_H;
+    let lines = v.mixes.len().div_ceil(per.max(1));
+    let (block, _) = ui.allocate_exact_size(vec2(ui.available_width(), lines as f32 * (h + 24.0) - 24.0), Sense::hover());
+    for (i, l) in v.mixes.iter().enumerate() {
+        let cell = grid.cell(i, per, block.top(), h, 24.0);
+        cards::mix(ui, cell, l, false, false, super::home::lane_playing(state, l), state.player.status, out);
+    }
 }
 
 fn section(ui: &mut Ui, grid: Grid, title: &str) {

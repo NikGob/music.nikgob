@@ -144,7 +144,7 @@ impl Resolver {
             .collect();
         let rows: Vec<TrackRow> = w.liked.iter().filter_map(|t| self.lib.get_track_row(*t).ok().flatten()).collect();
         let liked = rows.iter().map(|t| self.track(t)).collect();
-        v::WorldView { world: self.world(&w.world), albums, new_album, liked }
+        v::WorldView { world: self.world(&w.world), albums, new_album, liked, mixes: Vec::new() }
     }
 
     pub fn track(&mut self, r: &TrackRow) -> v::TrackRow {

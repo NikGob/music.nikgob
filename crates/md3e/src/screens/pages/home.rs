@@ -272,7 +272,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         };
         nav = r.or(nav);
     }
-    lane_list(ui.ctx(), state, out);
+    lane_list(ui.ctx(), &state.home.lanes, out);
     blend_sheet(ui.ctx(), state, out);
     nav
 }
@@ -395,7 +395,7 @@ fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec
 // ---- «Миксы для тебя».
 
 /// The lane playing now: its queue was started from it and plays.
-fn lane_playing(state: &ViewState, l: &LaneCard) -> bool {
+pub(super) fn lane_playing(state: &ViewState, l: &LaneCard) -> bool {
     state.player.status == Status::Playing && state.player.context.as_deref() == Some(l.context().as_str())
 }
 
@@ -455,11 +455,12 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Com
     None
 }
 
-/// «Список треков» of a mix: its songs in a dialog.
-fn lane_list(ctx: &egui::Context, state: &ViewState, out: &mut Vec<Command>) {
+/// «Список треков» of a mix of `lanes` (Главная's, a world page's): its
+/// songs in a dialog.
+pub(super) fn lane_list(ctx: &egui::Context, lanes: &[LaneCard], out: &mut Vec<Command>) {
     let key = Id::new("home-lane-list");
     let Some(lane) = ctx.data(|d| d.get_temp::<nikgob_view::MixKey>(key)) else { return };
-    let Some(l) = state.home.lanes.iter().find(|l| l.key == lane) else {
+    let Some(l) = lanes.iter().find(|l| l.key == lane) else {
         ctx.data_mut(|d| d.remove::<nikgob_view::MixKey>(key));
         return;
     };

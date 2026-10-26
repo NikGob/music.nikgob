@@ -23,6 +23,7 @@
 //!   worlds and track pairs, the online models of the next start and of
 //!   the early skip; [`session`]: the session they score in;
 //!   [`songtype`]: sung or instrumental, the language, a soundtrack's song.
+//! * [`world_mixes`]: the mixes of a world's page.
 
 pub mod analysis;
 pub mod background;
@@ -48,6 +49,7 @@ pub mod style;
 pub mod suggest;
 pub mod taste;
 pub mod tiles;
+pub mod world_mixes;
 
 pub use analysis::{ANALYZED_WITH, AnalysisError, DIM, MAX_SECONDS, PcmAnalyzer, SAMPLE_RATE, Vector, analyze_pcm};
 pub use daily::DailyParams;
@@ -69,6 +71,7 @@ pub use songtype::{Lang, SONGTYPE_RULES, SongInput, SongLane, SongType, SongType
 pub use style::{StyleMix, style_words};
 pub use suggest::{Matched, ServiceSuggestions, match_suggestions, suggestion_finds};
 pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo, hot_affinity, world_token};
+pub use world_mixes::{WorldMix, WorldMixKind};
 pub use tiles::{LyricsKind, like_title, PlaylistFacts, TILES_PER_DAY, TileGroup, TileHistory, TileKind, TileMix, TilesInput, TrackFacts};
 
 #[cfg(test)]
