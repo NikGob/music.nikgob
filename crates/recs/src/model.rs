@@ -411,11 +411,13 @@ pub struct Moment {
 }
 
 /// What a live session is ([`UserModel::live`]): one profile or many,
-/// how much of it is background, and the profile of its last start.
+/// how much of it is background, whether it is focused, and the profile of
+/// its last start.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Live {
     pub mode: Option<crate::listening::Mode>,
     pub p_bg: f32,
+    pub focus: bool,
     pub profile: Option<usize>,
 }
 
@@ -563,9 +565,11 @@ impl UserModel {
     /// sessions, the profile of its last start.
     pub fn live(&self, session: &Session) -> Live {
         let profile = |t: TrackId| self.position(t).and_then(|i| self.profile_at(i));
+        let signals = SessionSignals::of_session(session, |t| self.position(t).and_then(|i| self.duration[i]));
         Live {
             mode: session.mode(profile),
             p_bg: self.moment(session, session.last_ts().unwrap_or(self.now)).p_bg,
+            focus: self.listening.focused(&signals),
             profile: session.last().and_then(|p| profile(p.track)),
         }
     }
@@ -573,6 +577,21 @@ impl UserModel {
     /// The profile of the track at `i`.
     pub fn profile_at(&self, i: usize) -> Option<usize> {
         self.profile_of.get(i).copied().flatten().map(usize::from)
+    }
+
+    /// The soft membership of the track at `i` in each profile
+    /// ([`Profiles::membership`]); a track without a sound is wholly of
+    /// its own profile.
+    pub fn membership_at(&self, i: usize) -> Vec<f32> {
+        match &self.emb[i] {
+            Some(e) => self.profiles.membership(e, &self.types[i]),
+            None => (0..self.profiles.len()).map(|j| if self.profile_at(i) == Some(j) { 1.0 } else { 0.0 }).collect(),
+        }
+    }
+
+    /// The length of the track at `i`.
+    pub fn duration_at(&self, i: usize) -> Option<u32> {
+        self.duration[i]
     }
 
     /// The long affinity of the track at `i` within its profile: 1 for the
@@ -967,7 +986,12 @@ impl UserModel {
     /// The energy of the track at `i` on the mood axes ([`crate::mood::Axes`]),
     /// when it has a sound.
     pub fn energy_at(&self, i: usize) -> Option<f32> {
-        self.emb[i].map(|e| crate::mood::Axes::of(&self.norm.z_of_embedded(&e)).energy)
+        self.emb[i].map(|e| self.energy_of(&e))
+    }
+
+    /// The energy of an embedded sound `v` on the mood axes.
+    pub fn energy_of(&self, v: &Vector) -> f32 {
+        crate::mood::Axes::of(&self.norm.z_of_embedded(v)).energy
     }
 
     /// The share of the user's starts in `part` of the day ([`DayPart::index`]);

@@ -1026,6 +1026,14 @@ impl Profiles {
         e.into_iter().map(|x| x / z).collect()
     }
 
+    /// How far apart the centres of profiles `a` and `b` are.
+    pub fn distance(&self, a: usize, b: usize) -> f32 {
+        match (self.centres.get(a), self.centres.get(b)) {
+            (Some(x), Some(y)) => d2(x, y).sqrt(),
+            _ => f32::INFINITY,
+        }
+    }
+
     /// The regions of sound of the profiles ([`crate::regions`]): their
     /// sounds, the coarse lanes and the temperature of the sound alone.
     pub fn regions(&self, sound: &[Option<Vector>]) -> crate::regions::Regions {

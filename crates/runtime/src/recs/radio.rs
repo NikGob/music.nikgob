@@ -32,7 +32,9 @@
 //!   appends to it, never picking what the queue already had. After an
 //!   album the album's world goes on first ([`v::Prefs::autoplay_continue_world`],
 //!   [`crate::home_v2::world_next`]): its next album's tracks join the
-//!   queue, album by album, and the radio comes past the world's end.
+//!   queue, album by album, and the radio comes past the world's end: a
+//!   radio of the taste profile the session was pure in (any profile after
+//!   a mixed one, [`Engine::continuing`]).
 //! * Where its tracks come from is a hard rule: under «Миксы только из
 //!   скачанного» nothing without a file is queued, without new music no
 //!   stream pick is; switching either drops the radio's upcoming tracks
@@ -480,7 +482,9 @@ impl Worker {
             }
         }
         let title = self.lib.get_track(e.track).ok().flatten().map_or_else(String::new, |t| t.title);
-        let mut state = Engine::new(RadioSeed::Track(e.track));
+        // It keeps to the profile the session is pure in (the album's,
+        // after its world), or to none after a mixed queue.
+        let mut state = Engine::new(RadioSeed::Track(e.track)).continuing();
         // Nothing the queue had comes back.
         state.mark_served(self.queue.tracks().into_iter().map(Item::Track));
         let r = &mut self.recs.radio;

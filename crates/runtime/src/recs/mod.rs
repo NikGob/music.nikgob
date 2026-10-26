@@ -129,6 +129,8 @@ pub(crate) struct Snapshot {
     /// The taste profile of each track and the profiles' shares (the home's
     /// shelves draw from each).
     pub profiles: Arc<TrackProfiles>,
+    /// Whether each catalog track suits the background ([`background_fit`]).
+    pub background: Vec<bool>,
 }
 
 /// The taste profiles as the home reads them.
@@ -161,7 +163,10 @@ fn is_new(f: &DiscoveryFilter, t: &StreamTrack) -> bool {
 
 impl Snapshot {
     pub fn recs(&self) -> Recs<'_> {
-        Recs::new(&self.catalog, &self.model.taste, &self.index).local_only(self.local_only).with_model(&self.model)
+        Recs::new(&self.catalog, &self.model.taste, &self.index)
+            .local_only(self.local_only)
+            .with_model(&self.model)
+            .with_background(&self.background)
     }
 
     /// A new-music candidate that is new indeed: not in the library, not
@@ -830,7 +835,8 @@ fn read_parts(
         .artist_affinities()
         .filter_map(|(a, s)| Some((artist_key(names.get(&a)?), (s.max(0.0) / 3.0).tanh())))
         .collect();
-    let snap = Snapshot {
+    let mut snap = Snapshot {
+        background: Vec::new(),
         profiles: Arc::new(TrackProfiles::from_model(&model)),
         new_vectors,
         artist_affinity,
@@ -846,6 +852,7 @@ fn read_parts(
         local_only,
         worlds,
     };
+    snap.background = background_fit(&snap, &tiles_input);
     Ok((snap, tiles_input, index_len, history))
 }
 
@@ -1747,11 +1754,8 @@ impl ModelPreview {
     /// of its «Фон» cards (the basic background rule).
     pub fn home_profiles(&self, lib: &Library, slots: usize) -> Vec<String> {
         let names: HashMap<ArtistId, String> = lib.artist_names().unwrap_or_default().into_iter().collect();
-        let rows = lib.rec_tracks().unwrap_or_default();
-        let events = lib.listening_events().unwrap_or_default();
-        let tiles = tiles::input(lib, &rows, &events, names.clone());
         let model = &self.snap.model;
-        let fit = background_fit(&self.snap, &tiles);
+        let fit = &self.snap.background;
         let home = model.home_profiles(slots, nikgob_recs::profiles::BG_CARDS, |i| fit[i]);
         profile_order(model)
             .into_iter()

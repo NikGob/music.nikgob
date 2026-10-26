@@ -213,14 +213,13 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
             cache.kept.blends.push(b);
         }
     }
-    let fit = super::background_fit(snap, tiles);
     // A mix takes what the tiles know (their length), what is not junk.
     let ok = |i: usize| {
         let t = &snap.catalog.tracks()[i];
         tiles.facts.contains_key(&t.id) && (t.local || !snap.local_only)
     };
     let names = |a: ArtistId| tiles.artist_names.get(&a).cloned();
-    let (mut mixes, lineup, blendable) = with_builder(snap, prefs, &fit, &ok, &input.session, input.now, input.utc_offset_min, |b| {
+    let (mut mixes, lineup, blendable) = with_builder(snap, prefs, &snap.background, &ok, &input.session, input.now, input.utc_offset_min, |b| {
         let (mut mixes, lineup) = b.lineup(&cache.kept);
         b.named(&mut mixes, &names);
         (mixes, lineup, blend_profiles(snap, b, &names))
@@ -548,6 +547,7 @@ mod tests {
             new_vectors: HashMap::new(),
             artist_affinity: HashMap::new(),
             profiles: Default::default(),
+            background: Vec::new(),
         };
         let mut tiles = TilesInput::default();
         for (k, id) in ids.iter().enumerate() {
@@ -598,8 +598,7 @@ mod tests {
         let now = super::super::recs_now();
         let (snap, tiles, _) = super::super::read_snapshot(&lib, &index, now, 180, &[], false).unwrap();
         let recs = snap.recs();
-        let fit = super::super::background_fit(&snap, &tiles);
-        let suits = |i: usize| fit.get(i).copied().unwrap_or(false);
+        let suits = |i: usize| snap.background.get(i).copied().unwrap_or(false);
         let ok = |i: usize| tiles.facts.contains_key(&snap.catalog.tracks()[i].id);
         let names = |a: ArtistId| tiles.artist_names.get(&a).cloned();
         let day = day_number(now, 180);

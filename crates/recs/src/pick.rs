@@ -112,6 +112,9 @@ pub struct Recs<'a> {
     pub(crate) local_only: bool,
     /// The user model: a track's radio picks by it ([`crate::radio`]).
     pub model: Option<&'a UserModel>,
+    /// Which catalog tracks suit the background
+    /// ([`crate::background::BackgroundScore`], the runtime's).
+    pub(crate) background: Option<&'a [bool]>,
 }
 
 impl<'a> Recs<'a> {
@@ -123,7 +126,22 @@ impl<'a> Recs<'a> {
             norm: index.normalizer(),
             local_only: false,
             model: None,
+            background: None,
         }
+    }
+
+    /// The engine that knows which tracks suit the background (`suits`, by
+    /// catalog position, from [`crate::background::BackgroundScore`]).
+    #[must_use]
+    pub fn with_background(mut self, suits: &'a [bool]) -> Self {
+        self.background = (suits.len() == self.catalog.len()).then_some(suits);
+        self
+    }
+
+    /// The track at `i` suits the background (all do when the runtime said
+    /// nothing).
+    pub(crate) fn suits_background(&self, i: usize) -> bool {
+        self.background.is_none_or(|b| b.get(i).copied().unwrap_or(false))
     }
 
     /// The engine whose radios of a track pick by `model` (built over the

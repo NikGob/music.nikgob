@@ -62,6 +62,8 @@ pub const W_BG: f32 = 0.25;
 pub const EXPLICIT_STARTS: usize = 8;
 /// …and a user listens in the background with this many such sessions.
 pub const EXPLICIT_SESSIONS: usize = 2;
+/// A focused session's `p_bg` is under this.
+pub const FOCUS_P_BG: f32 = 0.2;
 /// A session is pure with this share of its starts in one profile.
 pub const PURE_SHARE: f32 = 0.8;
 /// The last track of a session is taken this long when its end is unknown.
@@ -361,6 +363,13 @@ impl Listening {
         let score = score_of(1.0 - rank_in(&self.ia, s.ia), rank_in(&self.minutes, s.minutes), rank_in(&self.auto, s.auto), s.hidden);
         let passive = (1.0 - s.ia / (2.0 * PASSIVE_IA)).clamp(0.0, 1.0);
         p_of(score, self.threshold) * passive
+    }
+
+    /// A live session with `s` is focused (profiles-v1 §4.1): hardly
+    /// background (`p_bg` under [`FOCUS_P_BG`]) and touched more than the
+    /// user's median session. Never before [`MIN_STARTS`].
+    pub fn focused(&self, s: &SessionSignals) -> bool {
+        (s.starts as usize) >= MIN_STARTS && !self.ia.is_empty() && rank_in(&self.ia, s.ia) > 0.5 && self.p_now(s) < FOCUS_P_BG
     }
 
     /// How many of the sessions are background (`p_bg` ≥ ½).

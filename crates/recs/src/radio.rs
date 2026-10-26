@@ -45,6 +45,21 @@
 //! The session is the runtime's own, handed to the radio before it picks
 //! ([`RadioState::attune`]), else the radio's tracks.
 //!
+//! It keeps to a taste profile (profiles-v1 §4.3, §7): «Похоже на X» to
+//! X's, autoplay ([`RadioState::continuing`]) to the one its session is
+//! pure in, to none after a mixed session (then in blocks of three or four
+//! of a profile). A track of the profile is one with [`MEMBER`] of its
+//! soft membership; the radio stays in it until fewer than
+//! [`UNHEARD_MIN`] are left to play or two early skips run, then the
+//! neighbouring profile (the nearest of a kind the user goes on to) joins.
+//! In a background session it never widens, takes only what suits the
+//! background ([`crate::background`]) from a profile without words, keeps
+//! to the middle of the profile's energy, steps softly, brings new music
+//! only after 20 minutes and one in six at most, of the profile's sound;
+//! played through, what rested a day and a half comes back. Focused, it
+//! steps more freely, brings half again as much new music and a world a
+//! fifth at most.
+//!
 //! An artist's radio is ~70% the artist's own tracks by affinity
 //! ([`ARTIST_OWN_SHARE`]), the rest similar by sound and co-listening; the
 //! artist rule of diversity does not apply to that artist. A daylist
@@ -64,8 +79,10 @@ use crate::mood::Mood;
 use crate::pick::{Diversity, Item, NewTrack, Pick, Placed, Reason, Recs, Seen, Slot, arrange, new_count, select_diverse, take, token_of_artist};
 use crate::rng::Rng;
 use crate::mood::Axes;
+use crate::listening::Mode;
+use crate::profiles::LaneKey;
 use crate::session::{Ended, Session};
-use crate::songtype::SongLane;
+use crate::songtype::{SongLane, SongType, Voice};
 
 use crate::taste::{DayPart, HOUR_MS};
 
@@ -194,6 +211,14 @@ pub struct RadioState {
     /// The listening session it continues ([`Self::attune`]).
     #[serde(default)]
     session: Session,
+    /// «Автовоспроизведение»: the profile it keeps to is the session's
+    /// ([`Self::continuing`]), not its seed's.
+    #[serde(default)]
+    follow: bool,
+    /// It left its profile for the neighbouring one: two early skips ran,
+    /// or its own ran out (profiles-v1 §7).
+    #[serde(default)]
+    wide: bool,
     /// The weights learnt since the engine's model was built.
     #[serde(skip)]
     learned: Option<Weights>,
@@ -222,6 +247,8 @@ impl RadioState {
             new_pool: Vec::new(),
             turns: 0,
             session: Session::default(),
+            follow: false,
+            wide: false,
             learned: None,
             seed,
         };
@@ -243,6 +270,22 @@ impl RadioState {
     pub fn attune(&mut self, session: Session, learned: Option<Weights>) {
         self.session = session;
         self.learned = learned;
+    }
+
+    /// The radio continues a queue («Автовоспроизведение»): it keeps to the
+    /// profile the session is pure in, or to none in a mixed one.
+    #[must_use]
+    pub fn continuing(mut self) -> Self {
+        self.follow = true;
+        self
+    }
+
+    /// How long the session it continues has played.
+    fn session_ms(&self) -> i64 {
+        match (self.session.tracks().next(), self.session.last_ts()) {
+            (Some(first), Some(last)) => last - first.ts,
+            _ => 0,
+        }
     }
 
     /// Keeps the tracks of a world out ([`crate::world_token`]).
@@ -439,6 +482,20 @@ impl RadioState {
             RadioSeed::Stream { .. } => params.new_share.max(0.5),
             _ => params.new_share,
         };
+        // A track's radio by the model keeps to a profile in the mode of
+        // its session: in the background new music comes late and seldom,
+        // focused more of it.
+        let plan = match (&self.seed, recs.model) {
+            (RadioSeed::Track(_), Some(m)) => Some(self.plan(m)),
+            _ => None,
+        };
+        let share = match &plan {
+            Some(p) if p.background => {
+                if self.session_ms() >= BG_NEW_AFTER_MS { share.min(BG_NEW_SHARE) } else { 0.0 }
+            }
+            Some(p) if p.focus => (share * FOCUS_NEW).min(1.0),
+            _ => share,
+        };
         let seed_vec = self.seed_vector(recs);
         let liked: Vec<Vector> = self.liked.iter().filter_map(|x| self.vector_of(recs, x)).collect();
         let skipped: Vec<Vector> = self.skipped.iter().filter_map(|x| self.vector_of(recs, x)).collect();
@@ -471,6 +528,10 @@ impl RadioState {
             .iter()
             .enumerate()
             .filter(|(_, t)| !served.contains(&Item::Stream(t.id.clone())))
+            .filter(|(_, t)| match (&plan, recs.model) {
+                (Some(p), Some(m)) if p.background => p.quiet_new(m, t.vector.map(|v| recs.norm.embed(&v)).as_ref()),
+                _ => true,
+            })
             .map(|(k, t)| {
                 let mut s = recs.new_slot(t, 0.0);
                 // Nearest to the seed first, then in the order fed.
@@ -487,8 +548,9 @@ impl RadioState {
 
         // 2-4. The library: a track's radio by the user model, in its order.
         let want_lib = n - new_slots.len();
-        if let (RadioSeed::Track(_), Some(model)) = (&self.seed, recs.model) {
-            let mut lib = self.by_model(recs, model, want_lib, &served, &rules, &mut rng, &mut taken, again.as_ref());
+        if let (Some(plan), Some(model)) = (&plan, recs.model) {
+            let (mut lib, wide) = self.by_model(recs, model, plan, want_lib, &served, &rules, &mut rng, &mut taken, again.as_ref());
+            self.wide |= wide;
             if lib.len() < want_lib {
                 let more = self.library(recs, want_lib - lib.len(), &sound, &served, false, &rules, &mut rng, &mut taken);
                 lib.extend(more);
@@ -555,14 +617,17 @@ impl RadioState {
         &self,
         recs: &Recs<'_>,
         model: &UserModel,
+        plan: &Plan,
         n: usize,
         served: &HashSet<Item>,
         rules: &Diversity,
         rng: &mut Rng,
         taken: &mut HashSet<Item>,
         again: Option<&Slot>,
-    ) -> Vec<Slot> {
+    ) -> (Vec<Slot>, bool) {
         let weights = self.learned.unwrap_or(model.weights);
+        // A focused session's radio: a world a fifth at most.
+        let rules = &if plan.focus { Diversity { world_share: FOCUS_WORLD_SHARE, ..*rules } } else { *rules };
         let mut sim = self.session.clone();
         // A run of early skips turns the whole batch away (the simulated
         // plays after it would end the run at once).
@@ -612,6 +677,33 @@ impl RadioState {
         // kind of song that goes with it; the session only leans it.
         let anchor = SeedAnchor::of(model, seed);
         let near = |i: usize| anchor.holds(model, i);
+        // The profile it keeps to (profiles-v1 §7): its own tracks, and the
+        // neighbouring profile's once two early skips ran or fewer than
+        // [`UNHEARD_MIN`] of its own are left; a background radio never
+        // widens, takes only what suits the background from a profile
+        // without words, and keeps to its band of energy.
+        let neighbour = plan.profile.filter(|_| !plan.background).and_then(|j| neighbour(model, j));
+        let (m_own, m_next): (Vec<f32>, Vec<f32>) = match plan.profile {
+            Some(j) => (0..model.len())
+                .map(|i| {
+                    let m = model.membership_at(i);
+                    (m.get(j).copied().unwrap_or(0.0), neighbour.and_then(|o| m.get(o).copied()).unwrap_or(0.0))
+                })
+                .unzip(),
+            None => (Vec::new(), Vec::new()),
+        };
+        let own = |i: usize| plan.profile.is_none() || m_own[i] >= MEMBER;
+        let fresh = || (0..model.len()).filter(|&i| m_own[i] >= MEMBER && ok(i) && anchor.goes(model, i)).count();
+        let wide = neighbour.is_some() && (self.wide || shifted || fresh() < UNHEARD_MIN);
+        // Widened, the profile beyond the seed's neighbourhood joins too.
+        let next = |i: usize| wide && (m_next[i] >= MEMBER || m_own[i] >= MEMBER) && anchor.goes(model, i);
+        let quiet = |i: usize| {
+            !plan.background
+                || ((!plan.wordless || recs.suits_background(i))
+                    && plan.band.is_none_or(|(lo, hi)| model.energy_at(i).is_none_or(|e| (lo..=hi).contains(&e))))
+        };
+        // A mixed session's radio goes in blocks of a profile.
+        let blocks = plan.profile.is_none() && !plan.background;
         // The album goes on only from the user's own album, in its order
         // while each pick is the next on it; a world never over the rules.
         let mut continuing =
@@ -635,7 +727,21 @@ impl RadioState {
                 let t = recs.info(i);
                 !taken.contains(&Item::Track(t.id)) && !t.song.is_some_and(|s| taken.contains(&Item::Track(s))) && !lately.contains(&t.id)
             };
-            let mut cands = model.candidates(&m, &|i| ok(i) && free(i) && near(i));
+            let mut cands = model.candidates(&m, &|i| ok(i) && free(i) && quiet(i) && ((own(i) && near(i)) || next(i)));
+            if cands.is_empty() && plan.profile.is_some() {
+                // The profile beyond the seed's neighbourhood.
+                cands = model.candidates(&m, &|i| ok(i) && free(i) && quiet(i) && own(i) && anchor.goes(model, i));
+            }
+            if cands.is_empty() && plan.background {
+                // A background profile played through: what rested a day
+                // and a half comes back.
+                cands = model.candidates(&m, &|i| {
+                    own(i) && quiet(i) && free(i) && !recs.blocked(i) && seed != Some(recs.info(i).id) && !recs.played_within(i, BG_REPEAT_MS)
+                });
+            }
+            if cands.is_empty() {
+                cands = model.candidates(&m, &|i| ok(i) && free(i) && near(i));
+            }
             if cands.is_empty() {
                 cands = model.candidates(&m, &|i| ok(i) && free(i));
             }
@@ -650,6 +756,21 @@ impl RadioState {
                 w.w[F_SKIP_PUSH] = 2.0 * w.w[F_SKIP_PUSH].max(HAND[F_SKIP_PUSH]);
                 w.w[F_SAME_LANE] = 2.0 * w.w[F_SAME_LANE].max(HAND[F_SAME_LANE]);
             }
+            // A jump in sound costs twice in the background, half focused.
+            if plan.background {
+                w.w[F_SOUND] *= JUMP_BG;
+            } else if plan.focus {
+                w.w[F_SOUND] *= JUMP_FOCUS;
+            }
+            // The block going on: its profile and how long it ran.
+            let (block, run) = if blocks {
+                let ps: Vec<Option<usize>> =
+                    sim.tracks().rev().filter(|p| p.ended != Ended::Early).map(|p| model.position(p.track).and_then(|i| model.profile_at(i))).collect();
+                let first = ps.first().copied().flatten();
+                (first, ps.iter().take_while(|p| first.is_some() && **p == first).count())
+            } else {
+                (None, 0)
+            };
             let seq: Vec<Seen<'_>> = tail.iter().map(|p| (p.artists.as_slice(), p.album, p.world)).collect();
             let best_of = |cands: Vec<usize>| -> Option<((usize, f32), Slot, bool)> {
                 let mut best: Option<((usize, f32), Slot, bool)> = None;
@@ -661,7 +782,16 @@ impl RadioState {
                     x[0] = 1.0;
                     let p_skip = weights.skip.p(&x).min(0.99);
                     let rested = model.tracks[c].last_start.map_or(1.0, |l| 1.0 - (-((m.now - l).max(0) as f64) / REST_HALF_MS as f64).exp2() as f32);
-                    let value = relevance + SKIP_VALUE * (1.0 - p_skip).ln() + RADIO_REST * rested
+                    let joins = match (block, model.profile_at(c)) {
+                        (Some(b), Some(p)) if b == p => match run {
+                            r if r < BLOCK_LEN.0 => BLOCK,
+                            r if r >= BLOCK_LEN.1 => -BLOCK,
+                            _ => 0.0,
+                        },
+                        (Some(_), Some(_)) if run < BLOCK_LEN.0 => -BLOCK,
+                        _ => 0.0,
+                    };
+                    let value = relevance + SKIP_VALUE * (1.0 - p_skip).ln() + RADIO_REST * rested + joins
                         - recs.taste.dislike_near_at(c)
                         + MODEL_JITTER * Rng::derive(jitter, c as u64).f32();
                     let reason = if parts[F_NEXT_ALBUM] > 0.0 && parts[F_NEXT_ALBUM] >= parts[F_COOC] {
@@ -692,7 +822,7 @@ impl RadioState {
             // little farther, of a kind that goes with the seed, before a
             // world thrice running (the user's rule; the radius is ours).
             if best.as_ref().is_some_and(|b| b.2) {
-                let wider = model.candidates(&m, &|i| ok(i) && free(i) && !near(i) && anchor.goes(model, i));
+                let wider = model.candidates(&m, &|i| ok(i) && free(i) && quiet(i) && !near(i) && anchor.goes(model, i) && (own(i) || next(i)));
                 if let Some(b) = best_of(wider).filter(|b| best.as_ref().is_some_and(|a| b.0.0 < a.0.0)) {
                     best = Some(b);
                 }
@@ -710,7 +840,45 @@ impl RadioState {
             play(&mut sim, &mut ts, id);
             out.push(slot);
         }
-        out
+        (out, wide)
+    }
+
+    /// The profile and the mode a track's radio keeps to (profiles-v1 §4.3,
+    /// §7): «Похоже на X» is pure in X's profile, autoplay in the profile
+    /// its session is pure in (none in a mixed one); a background session
+    /// keeps to its profile in the background, a focused one wanders more.
+    fn plan(&self, model: &UserModel) -> Plan {
+        let seed = match &self.seed {
+            RadioSeed::Track(t) => model.position(*t),
+            _ => None,
+        };
+        let own = seed.and_then(|i| model.profile_at(i));
+        let live = model.live(&self.session);
+        let mut profile = if self.follow {
+            match live.mode {
+                Some(Mode::Pure(j)) => Some(j),
+                Some(Mode::Mixed) => None,
+                None => own,
+            }
+        } else {
+            own
+        };
+        let background = live.p_bg >= 0.5;
+        if background {
+            profile = profile.or(live.profile);
+        }
+        let mut plan = Plan { profile, background, focus: !background && live.focus, ..Plan::default() };
+        if background && let Some((j, p)) = profile.and_then(|j| Some((j, model.profiles.list.get(j)?))) {
+            plan.wordless = p.stats.instrumental >= WORDLESS;
+            plan.lane = Some(p.lane);
+            let mut e: Vec<f32> = (0..model.len()).filter(|&i| model.profile_at(i) == Some(j)).filter_map(|i| model.energy_at(i)).collect();
+            e.sort_by(f32::total_cmp);
+            if e.len() >= BAND_FROM {
+                let at = |q: f32| e[((e.len() - 1) as f32 * q) as usize];
+                plan.band = Some((at(BG_BAND.0), at(BG_BAND.1)));
+            }
+        }
+        plan
     }
 
     /// Up to `n` library slots, selected under the diversity caps.
@@ -915,6 +1083,77 @@ impl RadioState {
         sort_by_score(&mut slots);
         select_diverse(slots, n, rules, taken)
     }
+}
+
+/// A track is of a radio's profile with this membership in it
+/// (profiles-v1 §7)…
+const MEMBER: f32 = 0.35;
+/// …and the radio widens to the neighbouring profile with fewer than this
+/// many of its own left to play.
+const UNHEARD_MIN: usize = 30;
+/// A background profile this much without words: its radio takes only what
+/// suits the background ([`crate::background`])…
+const WORDLESS: f32 = 0.8;
+/// …and only the middle of its energy (percentiles of the profile's own),
+/// once it has this many tracks with a sound.
+const BG_BAND: (f32, f32) = (0.15, 0.7);
+const BAND_FROM: usize = 12;
+/// A jump in sound costs this many times the model's own in the
+/// background, and in a focused session.
+const JUMP_BG: f32 = 2.0;
+const JUMP_FOCUS: f32 = 0.5;
+/// A focused session's radio: this many times the new music, a world a
+/// fifth at most.
+const FOCUS_NEW: f32 = 1.5;
+const FOCUS_WORLD_SHARE: f32 = 0.2;
+/// New music in the background: after this much of the session, one in
+/// six at most…
+const BG_NEW_AFTER_MS: i64 = 20 * 60_000;
+const BG_NEW_SHARE: f32 = 1.0 / 6.0;
+/// …and a background profile played through plays what rested this long.
+const BG_REPEAT_MS: i64 = 36 * HOUR_MS;
+/// A mixed session's radio keeps a profile for a block of three or four:
+/// this much for the block going on before three, against it from four.
+const BLOCK: f32 = 0.3;
+const BLOCK_LEN: (usize, usize) = (3, 4);
+
+/// What a track's radio keeps to ([`RadioState::plan`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Plan {
+    /// The profile (none: a mixed session's radio takes all).
+    profile: Option<usize>,
+    background: bool,
+    focus: bool,
+    /// Background: the profile is mostly without words, and its kind.
+    wordless: bool,
+    lane: Option<LaneKey>,
+    /// Background: the profile's band of energy.
+    band: Option<(f32, f32)>,
+}
+
+impl Plan {
+    /// New music sounding `v` (embedded) does not get in the way of a
+    /// background radio (profiles-v1 §8): of its profile by its sound, in
+    /// its band of energy.
+    fn quiet_new(&self, model: &UserModel, v: Option<&Vector>) -> bool {
+        let (Some(v), Some(j)) = (v, self.profile) else { return false };
+        let kind = match self.lane {
+            Some(LaneKey::Sung(l)) => SongType { voice: Voice::Sung, lang: Some(l), ..SongType::default() },
+            Some(LaneKey::Instrumental) => SongType { voice: Voice::Instrumental, ..SongType::default() },
+            _ => SongType::default(),
+        };
+        model.profiles.membership(v, &kind).get(j).is_some_and(|m| *m >= MEMBER)
+            && self.band.is_none_or(|(lo, hi)| (lo..=hi).contains(&model.energy_of(v)))
+    }
+}
+
+/// The profile nearest `j` of a kind of song the user goes on to from its
+/// kind ([`UserModel::lanes_go`]).
+fn neighbour(model: &UserModel, j: usize) -> Option<usize> {
+    let lane = model.profiles.list.get(j)?.lane.song_lane();
+    (0..model.profiles.len())
+        .filter(|&o| o != j && model.lanes_go(lane, model.profiles.list[o].lane.song_lane()))
+        .min_by(|a, b| model.profiles.distance(j, *a).total_cmp(&model.profiles.distance(j, *b)).then(a.cmp(b)))
 }
 
 /// The share of a model radio's anchor that is its seed: the session's
@@ -1274,6 +1513,138 @@ pub(crate) mod tests {
         assert!(after.iter().all(|t| kind_of(*t) == OST.0), "{picks:?}");
         let other = after.iter().filter(|t| (**t - OST.0) / 20 != skipped_world).count();
         assert!(other * 2 >= after.len(), "mostly another world: {picks:?}");
+    }
+
+    /// Rap and rock of one language that sound apart (two profiles), and
+    /// soundtracks without words, each played in sessions of its own: the
+    /// first id, how many, x of the sound.
+    const RU_RAP: (u128, u128, f32) = (0, 60, 20.0);
+    const RU_ROCK: (u128, u128, f32) = (1_000, 120, -10.0);
+    const QUIET: (u128, u128, f32) = (2_000, 60, 45.0);
+
+    fn of_kind(id: u128) -> u128 {
+        [RU_RAP, RU_ROCK, QUIET].into_iter().find(|k| (k.0..k.0 + k.1).contains(&id)).expect("a kind").0
+    }
+
+    fn one_language_two_sounds() -> Listener {
+        use crate::songtype::{Lang, SongType, SongTypes, Voice};
+        let kinds = [(RU_RAP, true, 15usize), (RU_ROCK, true, 20), (QUIET, false, 10)];
+        let mut rng = Rng::new(23);
+        let mut tracks = Vec::new();
+        let mut idx = VectorIndex::with_weights([1.0; DIM]);
+        let mut types = SongTypes::default();
+        for ((first, n, x), sung, _) in kinds {
+            for k in 0..n {
+                let id = first + k;
+                // An artist (and their world) every six tracks.
+                let artist = (id / 6) as u32;
+                tracks.push(info(id, &[artist], Some(id / 6)).with_world(&format!("w{artist}")).with_duration(Some(200_000)));
+                // Apart on the first feature only (each is normalised).
+                idx.insert(tid(id), point(x + rng.f32() * 2.0, 0.0));
+                let ty = if sung {
+                    SongType { voice: Voice::Sung, lang: Some(Lang::Russian), ..SongType::default() }
+                } else {
+                    SongType { voice: Voice::Instrumental, ost: true, ..SongType::default() }
+                };
+                types.by_track.insert(tid(id), ty);
+            }
+        }
+        let mut events = Vec::new();
+        let mut ts = crate::model::tests::T0 - 20 * crate::taste::DAY_MS;
+        for ((first, n, _), _, sessions) in kinds {
+            for _ in 0..sessions {
+                for _ in 0..6 {
+                    let id = tid(first + rng.below(n as usize) as u128);
+                    events.push(Play { context: nikgob_core::model::EventContext::Library, ..Play::new(id, ts, EventType::Start, Some(0)) });
+                    ts += 200_000;
+                    events.push(Play::new(id, ts, EventType::Complete, Some(200_000)));
+                }
+                ts += 4 * crate::taste::HOUR_MS;
+            }
+        }
+        events.sort_by_key(|p| p.ts);
+        (Catalog::new(tracks), idx, TasteInput { events, ..TasteInput::default() }, types)
+    }
+
+    /// The fixture makes the profiles it is about: rap and rock of one
+    /// language apart, soundtracks a third.
+    fn profiles_of(l: &Listener) -> Vec<u128> {
+        use crate::model::{ModelInput, UserModel};
+        let (cat, idx, input, types) = l;
+        let model = UserModel::build(cat, input, ModelInput { index: idx, types: Some(types), weights: None }, crate::model::tests::T0);
+        let mut kinds: Vec<u128> = (0..model.profiles.len())
+            .map(|j| {
+                let i = (0..model.len()).find(|&i| model.profile_at(i) == Some(j)).expect("a member");
+                of_kind(model.id(i).0.as_u128())
+            })
+            .collect();
+        kinds.sort_unstable();
+        kinds
+    }
+
+    /// «Похоже на» a rap song stays rap while the rap profile has songs to
+    /// play, then goes on with the rock of the same language (the
+    /// neighbouring profile), never with the soundtracks it never follows.
+    #[test]
+    fn stays_in_profile_until_exhausted() {
+        let l = one_language_two_sounds();
+        assert_eq!(profiles_of(&l), [RU_RAP.0, RU_ROCK.0, QUIET.0]);
+        let picks = play_model_radio(&l, RU_RAP.0 + 3, 9, 0);
+        assert!(picks.len() >= 80, "it keeps playing: {}", picks.len());
+        let kinds: Vec<u128> = picks.iter().map(|t| of_kind(*t)).collect();
+        let first_other = kinds.iter().position(|k| *k != RU_RAP.0).expect("it goes on past the rap");
+        assert!(first_other >= RU_RAP.1 as usize - 10, "rap first while it lasts: {first_other} {kinds:?}");
+        let rap = kinds.iter().filter(|k| **k == RU_RAP.0).count();
+        assert!(rap >= RU_RAP.1 as usize - 5, "the rap played through: {rap}");
+        assert!(kinds[first_other..].iter().all(|k| *k == RU_ROCK.0), "then the rock: {kinds:?}");
+        let worlds: Vec<u128> = picks.iter().map(|t| t / 6).collect();
+        for w in worlds.windows(3) {
+            assert!(!(w[0] == w[1] && w[1] == w[2]), "a world thrice running: {worlds:?}");
+        }
+    }
+
+    /// Two early skips running take a rap radio out of the rap to the rock
+    /// of its language; without them it stays.
+    #[test]
+    fn widens_after_two_skips() {
+        let l = one_language_two_sounds();
+        let calm = play_model_radio(&l, RU_RAP.0 + 3, 2, 0);
+        assert!(calm.iter().all(|t| of_kind(*t) == RU_RAP.0), "{calm:?}");
+        let picks = play_model_radio(&l, RU_RAP.0 + 3, 2, 2);
+        let after = &picks[2..];
+        assert!(after.len() >= 8, "{picks:?}");
+        let rock = after.iter().filter(|t| of_kind(**t) == RU_ROCK.0).count();
+        assert!(rock * 2 >= after.len(), "mostly the neighbouring profile: {picks:?}");
+        assert!(after.iter().all(|t| of_kind(*t) != QUIET.0), "{picks:?}");
+    }
+
+    /// A background session's radio of soundtracks without words keeps to
+    /// what suits the background and to the middle of the profile's energy.
+    #[test]
+    fn a_background_radio_stays_quiet() {
+        use crate::model::{ModelInput, UserModel};
+        let (cat, idx, input, types) = one_language_two_sounds();
+        let now = crate::model::tests::T0;
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None }, now);
+        // Half of the soundtracks suit the background.
+        let suits: Vec<bool> = cat.tracks().iter().map(|t| of_kind(t.id.0.as_u128()) == QUIET.0 && t.id.0.as_u128() % 2 == 0).collect();
+        let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model).with_background(&suits);
+        let mut radio = RadioState::new(RadioSeed::Track(tid(QUIET.0 + 2)));
+        let plain = radio.plan(&model);
+        assert!(!plain.background);
+        let picks = radio.extend(&recs, 10, &RadioParams { new_share: 0.0, seed: 4 });
+        assert!(picks.iter().any(|p| matches!(p.item, Item::Track(t) if t.0.as_u128() % 2 == 1)), "not background: anything of the profile");
+        let mut bg = plain;
+        bg.background = true;
+        bg.wordless = true;
+        let mut taken = HashSet::new();
+        let (picks, wide) = radio.by_model(&recs, &model, &bg, 10, &HashSet::new(), &Diversity::default(), &mut Rng::new(1), &mut taken, None);
+        assert!(!wide, "a background radio never widens");
+        assert_eq!(picks.len(), 10);
+        for p in &picks {
+            let Item::Track(t) = p.item else { panic!() };
+            assert!(suits[cat.position(t).unwrap()], "{t:?} does not suit the background");
+        }
     }
 
     /// «С новым» with candidates enough: a fifth of a model radio is new,
