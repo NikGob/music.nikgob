@@ -14,9 +14,14 @@
 //!   is the folded artist and title. The marker keeps it out of the library
 //!   (see the module docs above) and finds it again on the next import.
 //! * Import keys (`external_id` rows of the pseudo service `import`) remember
-//!   what an export file created (a playlist by its name), for the same
-//!   reason. Neither pseudo service is ever returned by
-//!   [`Library::external_ids`]: unknown services are skipped there.
+//!   what an export file created (a playlist by its name) or which track a
+//!   video of it turned out to be (`youtube:<id>`), for the same reason.
+//! * A song saved in a service's own library (YouTube Music's «music
+//!   library songs») is no like: a row of the pseudo service
+//!   [`SAVED_SERVICE`] marks its track, which teaches the recommendations
+//!   and stays where it was (outside the library, if a stream). No pseudo
+//!   service is ever returned by [`Library::external_ids`]: unknown
+//!   services are skipped there.
 
 use nikgob_core::model::{
     Event, EventId, EventType, LikeTarget, ReleaseId, Track, TrackId, UnixMs, Uuid,
@@ -35,6 +40,20 @@ use crate::util::{meta_get, meta_set, sort_key};
 pub(crate) const SEEN_SERVICE: &str = "seen";
 /// Pseudo service of the import keys.
 const IMPORT_SERVICE: &str = "import";
+/// Pseudo service of the marks of songs saved in a service's library.
+const SAVED_SERVICE: &str = "saved";
+
+/// A library track as an import compares the songs of an export with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchRow {
+    pub id: TrackId,
+    pub title: String,
+    /// The credit line, then each credited artist and its aliases.
+    pub artists: Vec<String>,
+    pub album: Option<String>,
+    pub has_local: bool,
+    pub duration_ms: Option<u32>,
+}
 /// Prefix of the cache keys in `meta`.
 const CACHE_PREFIX: &str = "cache.";
 
@@ -205,6 +224,93 @@ impl Library {
         self.write(|tx| set_key(tx, IMPORT_SERVICE, kind, key, &local.to_string()))
     }
 
+    /// [`Self::set_import_key`] for many keys in one transaction.
+    pub fn set_import_keys(&self, kind: EntityKind, keys: &[(String, Uuid)]) -> Result<()> {
+        self.write(|tx| {
+            for (key, local) in keys {
+                set_key(tx, IMPORT_SERVICE, kind, key, &local.to_string())?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Every live track of the library (the oldest first), for an import to
+    /// find the songs of an export among them.
+    pub fn match_rows(&self) -> Result<Vec<MatchRow>> {
+        self.read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT t.id, t.title, t.artist_display, r.title, t.has_local, t.duration_ms,
+                        (SELECT group_concat(a.name, char(31)) FROM track_artist ta
+                           JOIN artist a ON a.id = ta.artist_id WHERE ta.track_id = t.id),
+                        (SELECT group_concat(al.name, char(31)) FROM track_artist ta
+                           JOIN artist_alias al ON al.artist_id = ta.artist_id WHERE ta.track_id = t.id)
+                   FROM track t LEFT JOIN release r ON r.id = t.release_id
+                  WHERE t.deleted_at IS NULL AND t.in_library = 1
+                  ORDER BY t.seq",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, bool>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (id, title, credit, album, has_local, duration, names, aliases) = row?;
+                let mut artists = vec![credit];
+                for n in names.iter().chain(&aliases).flat_map(|s| s.split('\u{1f}')) {
+                    if !n.is_empty() && !artists.iter().any(|a| a == n) {
+                        artists.push(n.to_owned());
+                    }
+                }
+                out.push(MatchRow {
+                    id: parse(&id)?,
+                    title,
+                    artists,
+                    album,
+                    has_local,
+                    duration_ms: duration.and_then(|d| u32::try_from(d).ok()),
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    /// Marks each track as the song (its id in `service`) saved in that
+    /// service's library (see the module docs).
+    pub fn mark_saved(&self, service: Service, songs: &[(String, TrackId)]) -> Result<()> {
+        self.write(|tx| {
+            for (remote, track) in songs {
+                let key = format!("{}:{remote}", service.as_str());
+                set_key(tx, SAVED_SERVICE, EntityKind::Track, &key, &track.to_string())?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The live tracks saved in a service's library, each once.
+    pub fn saved_tracks(&self) -> Result<Vec<TrackId>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT DISTINCT x.local_id FROM external_id x JOIN track t ON t.id = x.local_id
+                  WHERE x.service = ?1 AND x.kind = 'track' AND t.deleted_at IS NULL
+                  ORDER BY x.local_id",
+            )?;
+            let rows = stmt.query_map([SAVED_SERVICE], |r| r.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(parse(&row?)?);
+            }
+            Ok(out)
+        })
+    }
+
     /// Stream-only tracks of `service` that still lack what the service
     /// knows (an import made them from an export file: no length), as
     /// `(track, remote id)`, oldest first. Unavailable sources are left out.
@@ -368,6 +474,9 @@ mod tests {
         lib.unlike(t).unwrap();
         assert_eq!(lib.like_state(t).unwrap(), Some(false));
 
+        lib.set_import_keys(EntityKind::Track, &[("youtube:upload00001".to_owned(), *t.as_uuid())]).unwrap();
+        assert_eq!(lib.import_key(EntityKind::Track, "youtube:upload00001").unwrap(), Some(*t.as_uuid()));
+        assert!(lib.external_ids(EntityKind::Track, *t.as_uuid()).unwrap().iter().all(|r| r.id != "upload00001"));
         let p = lib.create_playlist("Mix").unwrap();
         assert_eq!(lib.import_key(EntityKind::Playlist, "spotify:mix").unwrap(), None);
         lib.set_import_key(EntityKind::Playlist, "spotify:mix", *p.id.as_uuid()).unwrap();
@@ -380,5 +489,30 @@ mod tests {
         assert_eq!(lib.cache_get("disco.x").unwrap(), None);
         lib.cache_put("disco.x", 42, "[1|2]").unwrap();
         assert_eq!(lib.cache_get("disco.x").unwrap(), Some((42, "[1|2]".to_owned())));
+    }
+
+    #[test]
+    fn saved_songs_are_marked_apart_from_likes_and_the_library() {
+        let lib = lib();
+        let mut song = StreamTrack::new(RemoteId::new(Service::Youtube, "savedsong01"), "Song");
+        song.artists = vec![ArtistRef::new(None, "Artist")];
+        let t = lib.ensure_stream_tracks(&[song]).unwrap()[0];
+        let songs = [("savedsong01".to_owned(), t)];
+        lib.mark_saved(Service::Youtube, &songs).unwrap();
+        lib.mark_saved(Service::Youtube, &songs).unwrap();
+        assert_eq!(lib.saved_tracks().unwrap(), vec![t]);
+        assert_eq!(lib.track_in_library(t).unwrap(), Some(false), "a saved song is not the library");
+        assert_eq!(lib.like_state(t).unwrap(), None);
+        assert_eq!(
+            lib.external_ids(EntityKind::Track, *t.as_uuid()).unwrap(),
+            vec![RemoteId::new(Service::Youtube, "savedsong01")],
+            "the mark is no id in a service"
+        );
+        assert!(lib.match_rows().unwrap().is_empty(), "only the library's tracks are matched");
+        lib.like(t).unwrap();
+        let rows = lib.match_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].id, rows[0].title.as_str()), (t, "Song"));
+        assert_eq!(rows[0].artists, ["Artist"]);
     }
 }

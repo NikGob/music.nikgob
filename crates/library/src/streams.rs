@@ -1342,7 +1342,7 @@ mod same;
 
 pub use clips::LikedClip;
 pub use replace::TrackSnapshot;
-pub use import::event_id;
+pub use import::{MatchRow, event_id};
 pub(crate) use same::{SLACK_MS, albums_agree, credit_keys, song_key};
 
 #[cfg(test)]
