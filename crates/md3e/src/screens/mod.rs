@@ -1257,6 +1257,11 @@ impl Md3eUi {
             .or(rail_out.bottom_clicked.map(|_| 3))
             .map(|i| Self::destinations()[i].clone());
         if let Some(r) = picked.clone() {
+            // The page the search was typed over: its destination leaves the
+            // results for it too.
+            if self.route() == &r {
+                self.search.clear();
+            }
             self.navigate(&ctx, r, out);
         }
         if let Some(fab) = &rail_out.fab {
