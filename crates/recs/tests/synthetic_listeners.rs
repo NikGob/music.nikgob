@@ -3,7 +3,8 @@
 //! about as many taste profiles as there are kinds of songs played, tells
 //! the background sessions apart, and keeps the four ways of listening in
 //! the background apart without one rule breaking another: never in the
-//! background, the background of one's ordinary songs, of lo-fi, and both.
+//! background, the background of one's ordinary songs, of lo-fi, and both;
+//! and their «Миксы для тебя» make sense for each.
 
 use std::collections::{HashMap, HashSet};
 
@@ -133,7 +134,8 @@ fn listener(seed: u64, styles: &[Style], h: &Habits) -> Listener {
             let i = tracks.len();
             let dur = (rng.f32() * 210.0 + 120.0) as u32 * 1000;
             let release = ReleaseId(Uuid::from_u128(((si as u128) << 32) | (k as u128 / 10) | (1 << 100)));
-            tracks.push(TrackInfo::new(tid(i), vec![artists[rng.below(6)]], Some(release)).with_duration(Some(dur)));
+            let world = format!("style {si} world {}", k / 25);
+            tracks.push(TrackInfo::new(tid(i), vec![artists[rng.below(6)]], Some(release)).with_duration(Some(dur)).with_world(&world));
             index.insert(tid(i), std::array::from_fn(|d| rng.gauss(centres[si][d], 0.7)));
             let ty = if h.lang_known {
                 SongType { voice: s.voice, lang: s.lang, ost: s.ost, ..SongType::default() }
@@ -391,6 +393,9 @@ fn background_of_ordinary_songs() {
     assert!(f.auc.is_some_and(|a| a >= 0.9), "{:?}", f.auc);
     let en = profile_of_style(&l, &f.model, 0).unwrap();
     assert!(f.model.is_background_profile(en), "{:?}", f.model.profile_bg);
+    // The skip model learnt that a song on in the background is no early
+    // skip, the sound aside (these are songs either way).
+    assert!(f.model.weights.skip.w[nikgob_recs::model::G_BACKGROUND] < -0.2, "{:?}", f.model.weights.skip.w);
     let h = home(&l, &f);
     assert!(h.background.iter().all(Vec::is_empty), "no «Фон» of songs");
     assert!(h.cards[en] >= 1, "{:?}", h.cards);
@@ -445,3 +450,189 @@ fn background_mixed() {
     assert!(h.cards[ru] >= 1);
     assert!(h.background.iter().flatten().flatten().all(|&i| l.style_of[i] == 0));
 }
+
+/// «Миксы для тебя» of the same synthetic listeners (profiles-v1 §15 P5,
+/// recs-v2 §15 phase 3): sensible for each kind of user.
+mod mixes {
+    use std::collections::{HashMap, HashSet};
+
+    use nikgob_recs::background::{BackgroundScore, BackgroundTrack, Basic};
+    use nikgob_recs::mixes::{Builder, Kept, MIN_SONGS, MOMENTS, Mix, MixKey, Settings};
+    use nikgob_recs::{DayPart, Lang, Live, Recs, UserModel};
+
+    use super::*;
+
+    /// The lineup of `l` (the basic background rule) and its builder's
+    /// other mixes by `f`.
+    fn lineup<T>(l: &Listener, m: &UserModel, f: impl FnOnce(&Builder<'_>, Vec<Mix>) -> T) -> T {
+        let recs = Recs::new(&l.catalog, &m.taste, &l.index).with_model(m);
+        let suits = |i: usize| {
+            let song = l.types.get(l.catalog.tracks()[i].id).copied().unwrap_or_default();
+            Basic.suits(&BackgroundTrack { song: &song, title: "Track", album: Some(l.albums[i]), artist: "Artist", playlists: &[] })
+        };
+        let day = m.now().div_euclid(DAY);
+        let b = Builder::new(&recs, m, &|_| true, &suits, day, DayPart::Day, Live::default(), Settings::default());
+        let (mixes, _) = b.lineup(&Kept::default());
+        f(&b, mixes)
+    }
+
+    /// Nothing empty, no two alike, none of one world, no song twice.
+    fn sensible(name: &str, l: &Listener, mixes: &[Mix]) {
+        assert!(!mixes.is_empty(), "{name}: no mixes");
+        assert!(mixes.len() <= MOMENTS, "{name}: {}", mixes.len());
+        let titles: HashSet<&str> = mixes.iter().map(|m| m.title.as_str()).collect();
+        assert_eq!(titles.len(), mixes.len(), "{name}: {:?}", mixes.iter().map(|m| &m.title).collect::<Vec<_>>());
+        for m in mixes {
+            assert!(m.tracks.len() >= MIN_SONGS && !m.title.is_empty(), "{name}: «{}» of {}", m.title, m.tracks.len());
+            let set: HashSet<usize> = m.tracks.iter().copied().collect();
+            assert_eq!(set.len(), m.tracks.len(), "{name}: «{}» has a song twice", m.title);
+            let worlds: HashSet<u64> = m.tracks.iter().filter_map(|&i| l.catalog.tracks()[i].world).collect();
+            assert!(worlds.len() >= 3, "{name}: «{}» of {} worlds", m.title, worlds.len());
+        }
+        println!("{name}: {}", mixes.iter().map(|m| format!("«{}» {}", m.title, m.tracks.len())).collect::<Vec<_>>().join(", "));
+    }
+
+    fn sd(x: &[f32]) -> f32 {
+        let mean = x.iter().sum::<f32>() / x.len() as f32;
+        (x.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
+    /// The longest run of one profile in `mix`.
+    fn longest_run(m: &UserModel, mix: &[usize]) -> usize {
+        let (mut best, mut run) = (1, 1);
+        for w in mix.windows(2) {
+            run = if m.profile_at(w[0]) == m.profile_at(w[1]) { run + 1 } else { 1 };
+            best = best.max(run);
+        }
+        best
+    }
+
+    fn omnivore() -> Listener {
+        use Lang::*;
+        let styles = vec![
+            style(80, Some(Russian), 1.0),
+            style(70, Some(Japanese), 0.8),
+            style(50, Some(English), 0.7),
+            style(40, Some(Korean), 0.4),
+            ost(120, 0.6),
+            style(80, None, 0.4),
+        ];
+        listener(21, &styles, &Habits { p_bg: 0.15, bg_styles: vec![4], ..Habits::default() })
+    }
+
+    /// «Фон» stays steady: its energy spreads less than half as much as an
+    /// ordinary mix of the same profile's.
+    #[test]
+    fn background_is_steady() {
+        let styles = [lofi(200, 0.05), style(60, Some(Lang::English), 1.0), style(50, Some(Lang::Japanese), 0.6)];
+        let l = listener(7, &styles, &Habits { p_bg: 0.7, bg_styles: vec![0], per_day: 2.2, ..Habits::default() });
+        let f = run(&l);
+        let m = &f.model;
+        lineup(&l, m, |b, mixes| {
+            sensible("heavy_background", &l, &mixes);
+            let bg: Vec<&Mix> = mixes.iter().filter(|x| matches!(x.key, MixKey::Background { .. })).collect();
+            assert!((1..=3).contains(&bg.len()), "{:?}", mixes.iter().map(|x| &x.title).collect::<Vec<_>>());
+            let MixKey::Background { profile, .. } = bg[0].key else { unreachable!() };
+            let active = b.mix(MixKey::Profile(profile), &Kept::default()).expect("the profile's own mix");
+            let energy = |t: &[usize]| t.iter().map(|&i| m.energy_at(i).unwrap()).collect::<Vec<f32>>();
+            for x in &bg {
+                assert!(x.tracks.iter().all(|&i| l.style_of[i] == 0), "lo-fi only");
+                let (calm, all) = (sd(&energy(&x.tracks)), sd(&energy(&active.tracks)));
+                assert!(calm < 0.5 * all, "«{}» {calm} against {all}", x.title);
+                let steps: Vec<f32> = x.tracks.windows(2).map(|w| (m.energy_at(w[0]).unwrap() - m.energy_at(w[1]).unwrap()).abs()).collect();
+                let active_steps: Vec<f32> = active.tracks.windows(2).map(|w| (m.energy_at(w[0]).unwrap() - m.energy_at(w[1]).unwrap()).abs()).collect();
+                assert!(steps.iter().sum::<f32>() / (steps.len() as f32) < active_steps.iter().sum::<f32>() / active_steps.len() as f32);
+            }
+        });
+    }
+
+    /// A blend of two profiles takes turns in pairs, half each.
+    #[test]
+    fn blend_alternates_blocks() {
+        let l = omnivore();
+        let f = run(&l);
+        let m = &f.model;
+        let key = |s: usize| m.profiles.list[profile_of_style(&l, m, s).unwrap()].key;
+        let blend = MixKey::blend(&[key(0), key(1)]).unwrap();
+        lineup(&l, m, |b, _| {
+            let mix = b.mix(blend, &Kept::default()).expect("a blend");
+            let of = |s: usize| mix.tracks.iter().filter(|&&i| m.profile_at(i) == profile_of_style(&l, m, s)).count();
+            assert!(of(0) * 10 >= mix.tracks.len() * 4 && of(1) * 10 >= mix.tracks.len() * 4, "{} and {} of {}", of(0), of(1), mix.tracks.len());
+            let runs: Vec<Option<usize>> = mix.tracks.iter().map(|&i| m.profile_at(i)).collect();
+            assert!(longest_run(m, &mix.tracks) <= 3, "{runs:?}");
+            let runs = mix.tracks.windows(2).filter(|w| m.profile_at(w[0]) != m.profile_at(w[1])).count();
+            assert!(runs + 1 >= mix.tracks.len() / 3, "blocks of two take turns: {runs} changes in {}", mix.tracks.len());
+            assert!(mix.title.contains(" + "), "{}", mix.title);
+        });
+    }
+
+    /// «Всё вперемешку» gives each active profile its share with a floor,
+    /// in blocks of three or four.
+    #[test]
+    fn everything_follows_shares() {
+        let l = omnivore();
+        let f = run(&l);
+        let m = &f.model;
+        lineup(&l, m, |b, mixes| {
+            sensible("omnivore", &l, &mixes);
+            let mix = b.mix(MixKey::Everything, &Kept::default()).expect("everything");
+            let mut count: HashMap<usize, usize> = HashMap::new();
+            for &i in &mix.tracks {
+                *count.entry(m.profile_at(i).unwrap()).or_default() += 1;
+            }
+            let active: Vec<usize> = (0..m.profiles.len()).filter(|&j| m.profile_share[j] >= nikgob_recs::profiles::ACTIVE_SHARE).collect();
+            let shares: Vec<f32> = active.iter().map(|&j| m.profile_share[j]).collect();
+            let want = nikgob_recs::profiles::quota(&shares, nikgob_recs::mixes::MIX_LEN, &vec![false; active.len()], nikgob_recs::mixes::MIX_LEN);
+            for (k, &j) in active.iter().enumerate() {
+                let got = count.get(&j).copied().unwrap_or(0);
+                assert!(got.abs_diff(want[k]) <= 1, "profile {j}: {got} for {} ({count:?})", want[k]);
+            }
+            assert!(longest_run(m, &mix.tracks) <= 4, "{}", longest_run(m, &mix.tracks));
+        });
+    }
+
+    /// One kind of song only: its own mix and its two sides, no «Всё
+    /// вперемешку» of one profile.
+    #[test]
+    fn one_genre() {
+        let l = listener(31, &[style(160, Some(Lang::Russian), 1.0)], &Habits::default());
+        let f = run(&l);
+        lineup(&l, &f.model, |_, mixes| {
+            sensible("one_genre", &l, &mixes);
+            assert!(mixes.iter().all(|m| m.key != MixKey::Everything));
+            assert!(mixes.iter().any(|m| matches!(m.key, MixKey::Profile(_))));
+            assert!(mixes.iter().any(|m| m.key == MixKey::Calm) && mixes.iter().any(|m| m.key == MixKey::Lively));
+        });
+    }
+
+    /// Never in the background: no «Фон», whatever is calm.
+    #[test]
+    fn never_background_has_no_background_mix() {
+        let styles = [style(120, Some(Lang::Russian), 1.0), ost(100, 0.5), style(60, Some(Lang::Japanese), 0.5)];
+        let l = listener(33, &styles, &Habits::default());
+        let f = run(&l);
+        assert!(!f.model.listening.has_background);
+        lineup(&l, &f.model, |_, mixes| {
+            sensible("never_background", &l, &mixes);
+            assert!(mixes.iter().all(|m| !matches!(m.key, MixKey::Background { .. })));
+            assert_eq!(mixes.len(), MOMENTS);
+        });
+    }
+
+    /// Nothing heard yet: the library's kinds and its two sides, something
+    /// to start from.
+    #[test]
+    fn cold_start() {
+        let styles = [style(90, Some(Lang::Russian), 1.0), ost(90, 0.5), style(60, Some(Lang::English), 0.5)];
+        let mut l = listener(35, &styles, &Habits::default());
+        l.input.events.clear();
+        let f = run(&l);
+        assert_eq!(f.model.profiles.len(), 0);
+        lineup(&l, &f.model, |_, mixes| {
+            sensible("cold_start", &l, &mixes);
+            assert!(mixes.len() >= 3, "{}", mixes.len());
+            assert!(mixes.iter().any(|m| matches!(m.key, MixKey::Kind(_))));
+        });
+    }
+}
+

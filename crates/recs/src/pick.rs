@@ -355,7 +355,7 @@ impl Diversity {
 
     /// The artists placed too near, and whether the album rule and the
     /// world rule break, for `s` after `seq`.
-    fn broken(&self, seq: &[Seen<'_>], s: Seen<'_>) -> (usize, bool, bool) {
+    pub(crate) fn broken(&self, seq: &[Seen<'_>], s: Seen<'_>) -> (usize, bool, bool) {
         let n = seq.len();
         let from = n.saturating_sub(self.artist_window - 1);
         let artist = seq[from..].iter().filter(|(artists, _, _)| s.0.iter().any(|a| Some(*a) != self.exempt && artists.contains(a))).count();
@@ -573,6 +573,20 @@ pub(crate) fn arrange(recs: &Recs<'_>, mut slots: Vec<Slot>, before: &[Placed], 
 /// path), until none lowers it. What already plays (`before`) stays; `m`
 /// is the typical distance of [`relation_distance`].
 pub(crate) fn repair(recs: &Recs<'_>, out: &mut [Slot], before: &[Placed], start: Option<&Slot>, rules: &Diversity, m: f32) {
+    repair_within(recs, out, before, start, rules, m, &|_, _| true);
+}
+
+/// [`repair`] by swaps of the places `swappable` allows only (in a mix of
+/// blocks: inside one profile's songs).
+pub(crate) fn repair_within(
+    recs: &Recs<'_>,
+    out: &mut [Slot],
+    before: &[Placed],
+    start: Option<&Slot>,
+    rules: &Diversity,
+    m: f32,
+    swappable: &dyn Fn(&Slot, &Slot) -> bool,
+) {
     let weight_of = |out: &[Slot]| -> usize {
         let seq: Vec<Seen<'_>> = before
             .iter()
@@ -596,6 +610,9 @@ pub(crate) fn repair(recs: &Recs<'_>, out: &mut [Slot], before: &[Placed], start
         let mut best: Option<(usize, f32, usize, usize)> = None;
         for i in 0..out.len() {
             for j in i + 1..out.len() {
+                if !swappable(&out[i], &out[j]) {
+                    continue;
+                }
                 out.swap(i, j);
                 let w = weight_of(out);
                 if w < weight {
