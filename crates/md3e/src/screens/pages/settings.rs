@@ -387,6 +387,16 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
     row(ui, Id::BackgroundCards, "Фон", None, |ui| {
         choice_menu(ui, Id::BackgroundCards, p);
     });
+    if !p.home_hidden_mixes.is_empty() {
+        settings_help::item(ui, Id::HiddenMixes, "Скрытые миксы", |ui| {
+            list_title(ui, Id::HiddenMixes, "Скрытые миксы");
+            for m in &p.home_hidden_mixes {
+                mark_row(ui, egui::Id::new(("set-unhide-mix", m.key)), &m.title, None, "Вернуть", || {
+                    out.push(Command::SetPref(PrefPatch::ShowMix(m.key)));
+                });
+            }
+        });
+    }
 
     group(ui, "Профили вкуса");
     row(ui, Id::BackgroundCountsLess, "Фон меньше влияет на рекомендации", None, |ui| {
@@ -420,7 +430,7 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
             ui.label(TypeRole::BodyMedium.style().rich("Пусто", s.on_surface_variant));
         }
         for (id, name) in &d.artists {
-            mark_row(ui, egui::Id::new(("set-unban", *id)), name, None, || {
+            mark_row(ui, egui::Id::new(("set-unban", *id)), name, None, "Снять", || {
                 out.push(Command::RecFeedback { target: nikgob_view::RecTarget::Artist(*id), dislike: false });
             });
         }
@@ -431,7 +441,7 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
             ui.label(TypeRole::BodyMedium.style().rich("Пусто", s.on_surface_variant));
         }
         for t in &d.tracks {
-            mark_row(ui, egui::Id::new(("set-undislike", t.id)), &t.title, Some(&t.artist), || {
+            mark_row(ui, egui::Id::new(("set-undislike", t.id)), &t.title, Some(&t.artist), "Снять", || {
                 out.push(Command::Dislike { track: t.id, dislike: false, sure: true, relike: false });
             });
         }
@@ -450,16 +460,16 @@ fn list_title(ui: &mut Ui, id: Id, title: &str) {
     ui.add_space(4.0);
 }
 
-/// One mark of the lists above: its name and «Снять».
-
-fn mark_row(ui: &mut Ui, salt: egui::Id, title: &str, sub: Option<&str>, mut take_back: impl FnMut()) {
+/// One mark of the lists above: its name and what takes it back («Снять»,
+/// «Вернуть»).
+fn mark_row(ui: &mut Ui, salt: egui::Id, title: &str, sub: Option<&str>, label: &str, mut take_back: impl FnMut()) {
     let mut item = crate::components::ListItem::new(title).id_salt(salt);
     if let Some(sub) = sub {
         item = item.supporting(sub);
     }
     let mut clicked = false;
     item.trailing(|ui| {
-        clicked = ui.add(Button::new("Снять").style(Style::Text).id_salt(salt.with("take-back"))).clicked();
+        clicked = ui.add(Button::new(label).style(Style::Text).id_salt(salt.with("take-back"))).clicked();
     })
     .show(ui);
     if clicked {

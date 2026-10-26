@@ -1910,6 +1910,16 @@ impl Worker {
         self.publish(|s| fill(&mut s.home));
     }
 
+    /// «Не предлагать этот микс»: its card goes at once (another takes its
+    /// place with the build), «Отменить» brings it back.
+    pub(crate) fn mix_hidden(&mut self, m: v::HiddenMix) {
+        if let Some(h) = self.recs.home.as_mut() {
+            h.lanes.retain(|l| l.key != m.key);
+        }
+        self.publish(|s| s.home.lanes.retain(|l| l.key != m.key));
+        self.toast(format!("Не буду предлагать «{}»", m.title), Some(("Отменить".into(), Command::SetPref(v::PrefPatch::ShowMix(m.key)))));
+    }
+
     /// A build is due after `after` (sooner if one is due already).
     pub(crate) fn recs_dirty(&mut self, after: Duration) {
         let at = Instant::now() + after;

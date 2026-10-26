@@ -100,6 +100,10 @@ struct MixesCache {
     day: String,
     settings: u64,
     kept: Kept,
+    /// The mixes left out when it was chosen: one back takes its place in
+    /// the lineup again.
+    #[serde(default)]
+    hidden: Vec<MixKey>,
 }
 
 /// The engine's key of a view's key («На повторе» is the runtime's).
@@ -139,11 +143,12 @@ pub(crate) fn settings(prefs: &MixPrefs) -> Settings {
             v::ProfileNames::Kind => NameStyle::Kind,
             v::ProfileNames::Artists => NameStyle::Artists,
         },
+        hidden: prefs.hidden.clone(),
     }
 }
 
 /// The prefs of «Миксы для тебя» a build reads.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MixPrefs {
     pub profiles: bool,
     pub everything: bool,
@@ -151,6 +156,8 @@ pub(crate) struct MixPrefs {
     pub on_repeat: bool,
     pub background_cards: u8,
     pub names: v::ProfileNames,
+    /// «Не предлагать этот микс».
+    pub hidden: Vec<MixKey>,
 }
 
 impl MixPrefs {
@@ -162,10 +169,12 @@ impl MixPrefs {
             on_repeat: p.mixes_on_repeat,
             background_cards: p.background_cards,
             names: p.profile_names,
+            hidden: p.home_hidden_mixes.iter().filter_map(|h| engine_key(h.key)).collect(),
         }
     }
 
-    /// What tells a lineup chosen under other settings.
+    /// What tells a lineup chosen under other settings (a mix left out
+    /// leaves the rest of the day's lineup as it is).
     fn fingerprint(&self) -> u64 {
         u64::from(self.profiles)
             | u64::from(self.everything) << 1
@@ -197,12 +206,13 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     let prefs = &input.mix_prefs;
     let mut cache: MixesCache = cache_read(lib, MIXES_KEY).unwrap_or_default();
     if cache.day != input.day {
-        cache = MixesCache { day: input.day.clone(), settings: prefs.fingerprint(), kept: std::mem::take(&mut cache.kept).next_day() };
+        cache = MixesCache { day: input.day.clone(), settings: prefs.fingerprint(), kept: std::mem::take(&mut cache.kept).next_day(), hidden: Vec::new() };
     }
-    if cache.settings != prefs.fingerprint() {
+    if cache.settings != prefs.fingerprint() || cache.hidden.iter().any(|k| !prefs.hidden.contains(k)) {
         cache.settings = prefs.fingerprint();
         cache.kept.lineup.clear();
     }
+    cache.hidden.clone_from(&prefs.hidden);
     if let Some(key) = input.refresh_mix.and_then(engine_key) {
         let salt = fastrand::u64(1..);
         match cache.kept.salts.iter_mut().find(|s| s.0 == key) {
@@ -297,7 +307,7 @@ pub(crate) fn remember_blend(lib: &nikgob_library::Library, prefs: &MixPrefs, da
     let Some(key) = engine_key(key) else { return };
     let mut cache: MixesCache = cache_read(lib, MIXES_KEY).unwrap_or_default();
     if cache.day != day {
-        cache = MixesCache { day: day.to_owned(), settings: prefs.fingerprint(), kept: std::mem::take(&mut cache.kept).next_day() };
+        cache = MixesCache { day: day.to_owned(), settings: prefs.fingerprint(), kept: std::mem::take(&mut cache.kept).next_day(), hidden: Vec::new() };
     }
     cache.kept.blends.retain(|b| *b != key);
     cache.kept.blends.push(key);

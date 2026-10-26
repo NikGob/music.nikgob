@@ -148,6 +148,8 @@ pub enum SettingId {
     DislikedTracks,
     /// The artists not recommended, with «Снять».
     DislikedArtists,
+    /// The mixes of «Миксы для тебя» left out, with «Вернуть».
+    HiddenMixes,
     // Источники.
     SpotifyEnabled,
     SpotifyPlayback,
@@ -290,7 +292,7 @@ impl SettingId {
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
             RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | NewShareBy(_)
             | MixesWithNew | BackgroundCountsLess | ProfilesSplit | ProfileNames
-            | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards
+            | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | HiddenMixes
             | DislikeButton | DislikeSkips | DislikeSkipEverywhere | DislikeInRecs | DislikedTracks | DislikedArtists => {
                 TAB_RECS
             }
@@ -421,6 +423,7 @@ impl SettingId {
             DislikeInRecs => "«Не нравится» чуть опускает и самые похожие по звуку треки. Выключено — уходит только сам трек. Исполнителя дизлайк не трогает.",
             DislikedTracks => "Треки с «Не нравится». «Снять» возвращает трек в рекомендации.",
             DislikedArtists => "Исполнители, которых не рекомендовать: их нет в миксах, радио и новом. «Снять» возвращает.",
+            HiddenMixes => "Миксы, убранные с главной через ⋮ → «Не предлагать этот микс». «Вернуть» снова показывает микс.",
         }
     }
 

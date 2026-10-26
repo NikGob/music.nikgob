@@ -1005,6 +1005,9 @@ impl Worker {
                 let mut p = self.state.read().prefs.clone();
                 patch.apply(&mut p);
                 self.set_prefs(Box::new(p));
+                if let nikgob_view::PrefPatch::HideMix(m) = patch {
+                    self.mix_hidden(m);
+                }
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
@@ -2057,6 +2060,7 @@ impl Worker {
             || old.mixes_moods != p.mixes_moods
             || old.mixes_on_repeat != p.mixes_on_repeat
             || old.background_cards != p.background_cards
+            || old.home_hidden_mixes != p.home_hidden_mixes
         {
             self.recs_prefs_changed();
         }

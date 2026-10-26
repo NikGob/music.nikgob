@@ -19,7 +19,8 @@
 //!   other profiles in an order the day draws by their shares: a language
 //!   is a limit inside a moment, not the axis of the cards. A moment that
 //!   shares [`OVERLAP`] of its songs with one before it is left out; each
-//!   kind can be switched off ([`Settings`]). The lineup of a day stays the
+//!   kind can be switched off ([`Settings`]), each moment left out
+//!   («Не предлагать этот микс», [`Settings::hidden`]). The lineup of a day stays the
 //!   day's ([`Kept`]).
 //! * **The songs** ([`Builder::compose`]): by value — the long affinity
 //!   (with no plays, the likes' and playlists'), a little of what plays on
@@ -261,7 +262,7 @@ impl Arc {
 }
 
 /// Which moments the user wants (Settings → «Рекомендации»).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     /// The profiles' own mixes.
     pub profiles: bool,
@@ -272,11 +273,13 @@ pub struct Settings {
     /// «Фон» cards at most (0: none).
     pub background_cards: usize,
     pub names: NameStyle,
+    /// «Не предлагать этот микс»: the moments left out.
+    pub hidden: Vec<MixKey>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { profiles: true, everything: true, moods: true, background_cards: crate::profiles::BG_CARDS, names: NameStyle::Kind }
+        Self { profiles: true, everything: true, moods: true, background_cards: crate::profiles::BG_CARDS, names: NameStyle::Kind, hidden: Vec::new() }
     }
 }
 
@@ -485,7 +488,9 @@ impl<'a> Builder<'a> {
         // The day's lineup first, as it was; new moments only for what of
         // it is gone.
         let fresh = self.candidates().into_iter().filter(|k| !kept.lineup.contains(k));
-        for (n, key) in kept.lineup.iter().copied().chain(fresh).enumerate() {
+        let hidden = |k: &MixKey| self.settings.hidden.contains(k);
+        let before: Vec<MixKey> = kept.lineup.iter().copied().filter(|k| !hidden(k)).collect();
+        for (n, key) in before.iter().copied().chain(fresh.filter(|k| !hidden(k))).enumerate() {
             if keys.len() >= MOMENTS {
                 break;
             }
@@ -498,7 +503,7 @@ impl<'a> Builder<'a> {
                     let shared = c.tracks.iter().filter(|i| set.contains(i)).count();
                     shared as f32 >= OVERLAP * set.len().min(c.tracks.len()) as f32
                 });
-            if n >= kept.lineup.len() && same {
+            if n >= before.len() && same {
                 continue;
             }
             keys.push(key);
@@ -1829,6 +1834,16 @@ mod tests {
             let cap = (mix.tracks.len() as f32 * WORLD_SHARE).ceil() as usize;
             assert!(worlds.len() >= 4 && worlds.values().all(|c| *c <= cap), "{}: {worlds:?}", mix.title);
         }
+        // «Не предлагать этот микс»: the day's lineup goes on without it,
+        // another in its place.
+        let kept = Kept { lineup: keys.clone(), ..Kept::default() };
+        let recs = Recs::new(&l.catalog, &m.taste, &l.index).with_model(&m);
+        let no = |_: usize| false;
+        let settings = Settings { hidden: vec![MixKey::Calm], ..Settings::default() };
+        let b = Builder::new(&recs, &m, &|_| true, &no, m.now().div_euclid(DAY_MS), DayPart::Day, Live::default(), settings);
+        let (after, after_keys) = b.lineup(&kept);
+        assert!(!after_keys.contains(&MixKey::Calm) && after.iter().all(|x| x.key != MixKey::Calm), "{after_keys:?}");
+        assert_eq!(after.len(), mixes.len(), "{after_keys:?}");
     }
 
     #[test]

@@ -382,9 +382,11 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, can_blend: boo
     ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0 + 24.0 * title_lines as f32), g, s.on_surface_variant);
 
     let n = l.tracks.len();
-    // «На повторе» is what played: no other draw of it.
+    // «На повторе» is what played: no other draw of it, and its switch is
+    // in Settings; a blend is the user's own for the day.
     let redraw = l.key != nikgob_view::MixKey::OnRepeat;
     let blend = can_blend && l.blend_base.is_some();
+    let hide = !matches!(l.key, nikgob_view::MixKey::OnRepeat | nikgob_view::MixKey::Blend(_));
     let menu = |key: Id| {
         let mut m = Menu::new(key)
             .item(MenuItem::new("Список треков").icon(Icon::QueueMusic).shortcut(n.to_string()))
@@ -401,8 +403,13 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, can_blend: boo
         if blend {
             m = m.item(MenuItem::new("Смешать с…").icon(Icon::Add));
         }
+        if hide {
+            m = m.divider().item(MenuItem::new("Не предлагать этот микс").icon(Icon::Block));
+        }
         m
     };
+    // The items after the five: what each does.
+    let tail: Vec<u8> = [(redraw, 0u8), (blend, 1), (hide, 2)].into_iter().filter(|x| x.0).map(|x| x.1).collect();
     let mut picked = menu(id.with("ctx")).context_menu(&resp);
     if let Some(m) = &more {
         picked = picked.or(menu(id.with("more-menu")).align_right(true).attach(m));
@@ -421,14 +428,17 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, can_blend: boo
         Some(2) => out.push(Command::PlayNext(tracks.clone())),
         Some(3) => out.push(Command::Enqueue(tracks.clone())),
         Some(4) => out.push(Command::SaveTracksAsPlaylist { name: l.title.clone(), tracks: tracks.clone() }),
-        Some(5) if redraw => out.push(Command::RefreshMix { id: l.id() }),
-        Some(5 | 6) => {
-            if let Some(base) = l.blend_base {
-                super::home::open_blend(ui.ctx(), base);
+        Some(k) => match tail.get(k - 5) {
+            Some(0) => out.push(Command::RefreshMix { id: l.id() }),
+            Some(1) => {
+                if let Some(base) = l.blend_base {
+                    super::home::open_blend(ui.ctx(), base);
+                }
             }
-        }
-
-        _ => {}
+            Some(2) => out.push(Command::SetPref(nikgob_view::PrefPatch::HideMix(nikgob_view::HiddenMix { key: l.key, title: l.title.clone() }))),
+            _ => {}
+        },
+        None => {}
     }
     let clicked = play || (resp.clicked() && more.as_ref().is_none_or(|m| !m.clicked()));
     if clicked {

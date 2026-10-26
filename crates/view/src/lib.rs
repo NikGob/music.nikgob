@@ -1192,6 +1192,16 @@ pub struct Prefs {
     /// «Фон» cards at most (0: none), for a user who listens in the
     /// background.
     pub background_cards: u8,
+    /// «Не предлагать этот микс»: the mixes of «Миксы для тебя» left out,
+    /// with the name they had (Settings → «Рекомендации» returns them).
+    pub home_hidden_mixes: Vec<HiddenMix>,
+}
+
+/// A mix of «Миксы для тебя» left out ([`Prefs::home_hidden_mixes`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HiddenMix {
+    pub key: MixKey,
+    pub title: String,
 }
 
 /// What the taste profiles are called by.
@@ -1271,6 +1281,10 @@ pub enum PrefPatch {
     MixesMoods(bool),
     MixesOnRepeat(bool),
     BackgroundCards(u8),
+    /// «Не предлагать этот микс».
+    HideMix(HiddenMix),
+    /// A mix left out comes back.
+    ShowMix(MixKey),
 }
 
 impl PrefPatch {
@@ -1320,6 +1334,12 @@ impl PrefPatch {
             Self::MixesMoods(on) => p.mixes_moods = *on,
             Self::MixesOnRepeat(on) => p.mixes_on_repeat = *on,
             Self::BackgroundCards(n) => p.background_cards = (*n).min(3),
+            Self::HideMix(m) => {
+                if !p.home_hidden_mixes.iter().any(|h| h.key == m.key) {
+                    p.home_hidden_mixes.push(m.clone());
+                }
+            }
+            Self::ShowMix(key) => p.home_hidden_mixes.retain(|h| h.key != *key),
         }
     }
 }
@@ -2079,6 +2099,7 @@ impl Default for Prefs {
             user_name: String::new(),
             name_prompt: false,
             home_hidden_worlds: Vec::new(),
+            home_hidden_mixes: Vec::new(),
             stream_analysis: true,
             autoplay: true,
             autoplay_continue_world: true,
