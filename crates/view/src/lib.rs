@@ -382,6 +382,9 @@ pub struct QueueView {
     pub current: Option<TrackRow>,
     /// The current track's queue entry id (a drop target in the queue).
     pub current_entry: Option<u64>,
+    /// Why the current track was picked, in its row's tooltip (see
+    /// [`QueueEntry::why`]).
+    pub current_why: Option<String>,
     /// Upcoming tracks in play order; `entry` ids are stable for drag & drop.
     pub next: Vec<QueueEntry>,
     /// The queue is a radio or an endless mix: its title («Радио · Кино»)
@@ -394,6 +397,9 @@ pub struct QueueView {
 pub struct QueueEntry {
     pub entry: u64,
     pub track: TrackRow,
+    /// Why a radio or a mix picked it, in its row's tooltip (recs-v2 §12):
+    /// the first pick of a radio and the new ones only.
+    pub why: Option<String>,
 }
 
 /// Synced lyrics for the current track.

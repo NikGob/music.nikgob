@@ -356,6 +356,30 @@ impl Worker {
         self.recs.discover.found.as_ref().map(|f| f.tracks.clone()).unwrap_or_default()
     }
 
+    /// Why discovery `t` is offered: the seed of the pass that found it
+    /// (the most loved of them) and its service, «Новое: нашлось по Ghost
+    /// Avenue в YouTube Music».
+    pub(crate) fn discovery_why(&self, t: &StreamTrack) -> Option<String> {
+        let found = self.recs.discover.found.as_ref()?;
+        let key = stream_song_key(t);
+        let weight = |s: &Seed| match s {
+            Seed::Track(id) => found.seed_tracks.iter().find(|x| x.0 == *id).map_or(0.0, |x| x.1),
+            Seed::Artist(a) => found.seed_artists.iter().find(|x| x.0 == *a).map_or(0.0, |x| x.1),
+            Seed::Service(_) => -1.0,
+        };
+        let (seed, _) = found
+            .finds
+            .iter()
+            .filter(|(_, tracks)| tracks.iter().any(|x| x.id == t.id || stream_song_key(x) == key))
+            .max_by(|a, b| weight(&a.0).total_cmp(&weight(&b.0)))?;
+        let service = t.id.service.display_name();
+        Some(match seed {
+            Seed::Track(id) => nikgob_recs::explain::new_found(&self.lib.get_track(*id).ok().flatten()?.title, service),
+            Seed::Artist(a) => nikgob_recs::explain::new_found(&self.lib.get_artist(*a).ok().flatten()?.name, service),
+            Seed::Service(s) => nikgob_recs::explain::suggested(s.display_name()),
+        })
+    }
+
     /// Where the discovery of song `key` came from.
     pub(crate) fn discovery_source(&self, key: &str) -> Option<Source> {
         self.recs.discover.found.as_ref()?.sources.iter().find(|(k, _)| k == key).map(|(_, s)| *s)

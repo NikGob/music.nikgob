@@ -100,6 +100,8 @@ pub(crate) struct RadioRun {
     asked: HashSet<String>,
     /// Picks queued so far and how many of them new.
     queued: (usize, usize),
+    /// Why each new candidate is offered: where it was found.
+    via: HashMap<RemoteId, String>,
 }
 
 /// What `session.json` keeps of a radio.
@@ -137,6 +139,8 @@ pub(crate) enum RadioMsg {
         artists: Vec<(ArtistId, RemoteId)>,
         /// Answers to keep: cache key and tracks.
         answers: Vec<(String, Vec<StreamTrack>)>,
+        /// Where each was found ([`nikgob_recs::explain::new_found`]).
+        via: Vec<(RemoteId, String)>,
     },
 }
 
@@ -339,6 +343,7 @@ impl Worker {
             heard: Vec::new(),
             asked: HashSet::new(),
             queued: (0, 0),
+            via: HashMap::new(),
         };
         log::info!("radio «{}» starts ({:?})", run.title, run.state.seed);
         let context = context_of(&run.title);
@@ -403,6 +408,7 @@ impl Worker {
             heard: Vec::new(),
             asked: HashSet::new(),
             queued: (0, 0),
+            via: HashMap::new(),
         });
         log::info!("radio «{}» starts from its picks ({:?})", self.recs.radio.run.as_ref().map_or("", |r| &r.title), state.seed);
         self.radio_add_discoveries();
@@ -508,6 +514,7 @@ impl Worker {
             heard: Vec::new(),
             asked: HashSet::new(),
             queued: (0, 0),
+            via: HashMap::new(),
         });
         log::info!("autoplay: the queue goes on with a radio of «{title}»");
         self.radio_fetch_new();
@@ -609,6 +616,7 @@ impl Worker {
                 tracks,
                 artists,
                 answers,
+                via,
             } => {
                 let now = nikgob_library::now_ms();
                 for (key, tracks) in answers {
@@ -619,7 +627,8 @@ impl Worker {
                 for (artist, remote) in artists {
                     let _ = self.lib.set_external_id(EntityKind::Artist, &remote, *artist.as_uuid());
                 }
-                if self.recs.radio.run.as_ref().is_some_and(|r| r.id == id) {
+                if let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == id) {
+                    run.via.extend(via);
                     self.radio_add_new(tracks);
                     self.radio_splice_new();
                 }
@@ -644,12 +653,29 @@ impl Worker {
         let snap = self.snapshot();
         let wants_new = self.recs.radio.run.as_ref().is_some_and(|r| new_seed(&r.state.seed));
         let kind = self.recs.radio.run.as_ref().map_or(v::RadioKind::Track, RadioRun::kind);
+        // Only the first pick of a radio is explained (besides new music):
+        // the first that is not its seed.
+        let (first_batch, seed_track) = self.recs.radio.run.as_ref().map_or((false, None), |r| {
+            (r.queued.0 == 0, if let RadioSeed::Track(t) = r.state.seed { Some(t) } else { None })
+        });
+        let mut explained = !first_batch;
         let mut ids = Vec::with_capacity(picks.len());
+        let mut whys: Vec<Option<String>> = Vec::with_capacity(picks.len());
         for p in &picks {
             match &p.item {
                 Item::Track(t) => {
                     if radio_allows(*t, false, wants_new, &prefs, snap.as_deref(), kind) {
+                        let why = if explained || Some(*t) == seed_track {
+                            None
+                        } else {
+                            explained = true;
+                            let before = ids.last().copied().or(seed_track);
+                            let lib = &self.lib;
+                            let title = |t: TrackId| lib.get_track(t).ok().flatten().map(|t| t.title);
+                            snap.as_ref().and_then(|s| s.recs().why_pick(p, before, &title))
+                        };
                         ids.push(*t);
+                        whys.push(why);
                     }
                 }
                 // New music (never under «Миксы только из скачанного»).
@@ -659,7 +685,10 @@ impl Worker {
                     let Some(t) = pooled.or_else(|| self.stream_track(r)) else { continue };
                     self.streaming.learn(std::slice::from_ref(&t));
                     if let Some(tid) = self.upsert_streams(std::slice::from_ref(&t)).first().copied() {
+                        explained |= first_batch;
+                        let found = self.recs.radio.run.as_ref().and_then(|run| run.via.get(r).cloned());
                         ids.push(tid);
+                        whys.push(found.or_else(|| self.discovery_why(&t)));
                         if let Some(run) = self.recs.radio.run.as_mut() {
                             run.streams.insert(tid, r.clone());
                         }
@@ -704,6 +733,8 @@ impl Worker {
                 self.play_context_id = None;
                 let generation = self.queue.generation();
                 let entries: Vec<u64> = self.queue.current().into_iter().chain(self.queue.upcoming().iter().copied()).map(|e| e.id).collect();
+                self.recs.why.clear();
+                self.explain_entries(&entries, whys);
                 if let Some(run) = self.recs.radio.run.as_mut() {
                     run.queue_gen = Some(generation);
                     run.added.extend(entries);
@@ -717,6 +748,7 @@ impl Worker {
                 self.queue.enqueue(&ids);
                 let up = self.queue.upcoming();
                 let entries: Vec<u64> = up[up.len().saturating_sub(ids.len())..].iter().map(|e| e.id).collect();
+                self.explain_entries(&entries, whys);
                 if let Some(run) = self.recs.radio.run.as_mut() {
                     run.added.extend(entries);
                 }
@@ -780,6 +812,9 @@ impl Worker {
                 run.streams.insert(*tid, r.clone());
                 run.queued.1 += 1;
                 run.queued.0 += 1;
+                if let Some(why) = run.via.get(r) {
+                    self.recs.why.insert(entry, why.clone());
+                }
             }
         }
         if let Some(run) = self.recs.radio.run.as_ref() {
@@ -800,7 +835,7 @@ impl Worker {
         if run.state.new_left() >= REFILL_AT {
             return;
         }
-        let mut calls: Vec<Call> = Vec::new();
+        let mut calls: Vec<(Call, String)> = Vec::new();
         let mut asked: Vec<String> = Vec::new();
         for t in run.heard.iter().rev() {
             if calls.len() == REFILL_FROM {
@@ -827,7 +862,8 @@ impl Worker {
                 continue;
             }
             asked.push(key);
-            calls.push(call);
+            let title = self.lib.get_track(*t).ok().flatten().map(|t| t.title).unwrap_or_default();
+            calls.push((call, title));
         }
         if calls.is_empty() {
             return;
@@ -920,22 +956,27 @@ impl Worker {
             return;
         }
         let id = run.id;
-        let mut calls: Vec<Call> = Vec::new();
-        let artist_call = |w: &Worker, a: ArtistId, prefer: &[Service]| -> Option<Call> {
+        let seed_name = run.title.strip_prefix("Радио · ").unwrap_or(&run.title).to_owned();
+        let mut calls: Vec<(Call, String)> = Vec::new();
+        let artist_call = |w: &Worker, a: ArtistId, prefer: &[Service]| -> Option<(Call, String)> {
             let name = w.lib.get_artist(a).ok().flatten()?.name;
             let known = w.lib.external_ids(EntityKind::Artist, *a.as_uuid()).unwrap_or_default();
-            prefer.iter().find(|s| w.service(**s).is_some()).map(|&service| Call::ArtistRadio {
-                service,
-                artist: a,
-                id: known.iter().find(|r| r.service == service).map(|r| r.id.clone()),
-                name,
+            prefer.iter().find(|s| w.service(**s).is_some()).map(|&service| {
+                let call = Call::ArtistRadio {
+                    service,
+                    artist: a,
+                    id: known.iter().find(|r| r.service == service).map(|r| r.id.clone()),
+                    name: name.clone(),
+                };
+                (call, name.clone())
             })
         };
         match run.state.seed.clone() {
             RadioSeed::Track(t) => {
                 let refs = self.lib.stream_refs(t).unwrap_or_default();
                 if let Some(yt) = refs.iter().find(|r| r.id.service == Service::Youtube) {
-                    calls.push(Call::Radio(yt.id.id.clone()));
+                    let title = self.lib.get_track(t).ok().flatten().map(|t| t.title).unwrap_or_default();
+                    calls.push((Call::Radio(yt.id.id.clone()), title));
                 }
                 let main = self
                     .lib
@@ -948,14 +989,14 @@ impl Worker {
                 }
             }
             RadioSeed::Stream { id: r, .. } => match r.service {
-                Service::Youtube => calls.push(Call::Radio(r.id)),
-                Service::Deezer => calls.push(Call::Related(Service::Deezer, r.id)),
+                Service::Youtube => calls.push((Call::Radio(r.id), seed_name)),
+                Service::Deezer => calls.push((Call::Related(Service::Deezer, r.id), seed_name)),
                 Service::Spotify => {}
             },
             RadioSeed::Artist(a) => calls.extend(artist_call(self, a, &[Service::Deezer, Service::Youtube])),
             RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover | RadioSeed::Daylist { .. } => {}
         }
-        for c in &calls {
+        for (c, _) in &calls {
             if let Call::Radio(v) | Call::Related(_, v) = c
                 && let Some(run) = self.recs.radio.run.as_mut()
             {
@@ -967,13 +1008,15 @@ impl Worker {
 
     /// Asks `calls` for new music for radio `id`: the cache first, the rest
     /// from services that can be asked now, in the background.
-    fn radio_ask(&mut self, id: u64, calls: Vec<Call>) {
-
+    /// Each call goes with the name of what it asks around (why its finds
+    /// are offered).
+    fn radio_ask(&mut self, id: u64, calls: Vec<(Call, String)>) {
         // The cache first; the rest from services that can be asked now.
         let now = nikgob_library::now_ms();
         let mut cached = Vec::new();
-        let mut asks: Vec<(Arc<dyn StreamService>, Call, String)> = Vec::new();
-        for call in calls {
+        let mut via: Vec<(RemoteId, String)> = Vec::new();
+        let mut asks: Vec<(Arc<dyn StreamService>, Call, String, String)> = Vec::new();
+        for (call, seed) in calls {
             let (service, key) = match &call {
                 Call::Radio(v) => (Service::Youtube, cache_key(Service::Youtube, "radio", v)),
                 Call::Related(s, t) => (*s, cache_key(*s, "related", t)),
@@ -986,7 +1029,9 @@ impl Worker {
                 .flatten()
                 .filter(|(at, _)| now - at < NEW_TTL_MS)
                 .and_then(|(_, json)| serde_json::from_str(&json).ok());
+            let why = nikgob_recs::explain::new_found(&seed, service.display_name());
             if let Some(tracks) = hit {
+                via.extend(tracks.iter().map(|t| (t.id.clone(), why.clone())));
                 cached.extend(tracks);
                 continue;
             }
@@ -994,10 +1039,13 @@ impl Worker {
                 continue;
             }
             if let Some(svc) = self.service(service) {
-                asks.push((svc, call, key));
+                asks.push((svc, call, key, why));
             }
         }
         if !cached.is_empty() {
+            if let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == id) {
+                run.via.extend(via);
+            }
             self.radio_add_new(cached);
             self.radio_splice_new();
         }
@@ -1008,12 +1056,14 @@ impl Worker {
             let mut tracks = Vec::new();
             let mut artists = Vec::new();
             let mut answers = Vec::new();
-            for (svc, call, key) in asks {
+            let mut via = Vec::new();
+            for (svc, call, key, why) in asks {
                 let (result, matched) = fetch(svc, &call).await;
                 artists.extend(matched);
                 match result {
                     Ok(found) => {
                         answers.push((key, found.clone()));
+                        via.extend(found.iter().map(|t| (t.id.clone(), why.clone())));
                         tracks.extend(found);
                     }
                     Err(e) => log::info!("radio: new music from {key}: {e}"),
@@ -1024,6 +1074,7 @@ impl Worker {
                 tracks,
                 artists,
                 answers,
+                via,
             }))
         });
     }
@@ -1071,6 +1122,7 @@ impl Worker {
             heard: Vec::new(),
             asked: HashSet::new(),
             queued: (0, 0),
+            via: HashMap::new(),
         });
         self.play_context = self.recs.radio.run.as_ref().map_or(self.play_context, |r| r.ctx);
     }

@@ -57,6 +57,8 @@ pub(crate) struct LaneHome {
     pub new: Vec<StreamTrack>,
     /// The profile «Смешать с…» starts from.
     pub blend_base: Option<u32>,
+    /// Why it is offered ([`nikgob_recs::explain`]).
+    pub why: Option<String>,
 }
 
 impl LaneHome {
@@ -261,6 +263,8 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         && let Some(tracks) = on_repeat(snap, tiles)
     {
         let anchors = vec![true; tracks.len()];
+        let week = snap.model.taste.now() - 7 * DAY_MS;
+        let starts = tiles.events.iter().filter(|p| p.ts >= week && p.kind == EventType::Start && tracks.contains(&p.track)).count();
         out.push(LaneHome {
             key: v::MixKey::OnRepeat,
             title: "На повторе".into(),
@@ -271,6 +275,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
             tracks,
             new: Vec::new(),
             blend_base: None,
+            why: nikgob_recs::explain::on_repeat(starts as u32),
         });
     }
     (out, blendable)
@@ -298,6 +303,7 @@ pub(crate) fn blend_now(snap: &Snapshot, prefs: &MixPrefs, profiles: &[u32], nam
         tracks,
         artists: dedupe(artists),
         new: Vec::new(),
+        why: None,
         blend_base: None,
     })
 }
@@ -353,6 +359,8 @@ fn lane_of(snap: &Snapshot, tiles: &TilesInput, m: &Mix) -> LaneHome {
         artists,
         new: Vec::new(),
         blend_base: m.key.blend_base(),
+        // A blend is the user's own.
+        why: if matches!(m.key, MixKey::Blend(_)) { None } else { snap.recs().why_moment(&m.tracks, &m.title) },
     }
 }
 
@@ -711,6 +719,7 @@ mod tests {
             covers: Vec::new(),
             new,
             blend_base: None,
+            why: None,
         };
         let picks = lane.picks(true);
         let at: Vec<usize> = picks.iter().enumerate().filter(|(_, p)| matches!(p.item, Item::Stream(_))).map(|(i, _)| i).collect();

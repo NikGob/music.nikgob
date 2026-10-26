@@ -370,8 +370,12 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, can_blend: boo
     let name = text(ui, title, title_role, title_c, cell.width(), title_lines);
     let title_rect = Rect::from_min_size(pos2(cell.left(), art.bottom() + 8.0), name.size());
     ui.painter().galley(title_rect.min, name, title_c);
+    // Over the title: the whole name when it is shortened; elsewhere why the
+    // mix is offered.
     if *title != l.title && resp.hover_pos().is_some_and(|p| title_rect.contains(p)) {
         resp.clone().md3_tooltip(&l.title, None);
+    } else if let Some(why) = &l.why {
+        resp.clone().md3_tooltip(why, None);
     }
     let role = TypeRole::BodyMedium.style();
     let artist_lines = 3 - title_lines;

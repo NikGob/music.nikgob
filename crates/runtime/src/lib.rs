@@ -1714,6 +1714,8 @@ impl Worker {
         // The rows of both lists in one query, before the lock.
         let ids: Vec<TrackId> = upcoming.iter().chain(&history).map(|e| e.track).collect();
         let found = self.lib.get_track_rows(&ids).unwrap_or_default();
+        let why = &self.recs.why;
+        let current_why = current_entry.and_then(|e| why.get(&e).cloned());
         let res = &mut self.res;
         let mut rows = |list: &[Entry]| -> Vec<nikgob_view::QueueEntry> {
             list.iter()
@@ -1721,6 +1723,7 @@ impl Worker {
                     found.get(&e.track).map(|r| nikgob_view::QueueEntry {
                         entry: e.id,
                         track: res.track(r),
+                        why: why.get(&e.id).cloned(),
                     })
                 })
                 .collect()
@@ -1742,6 +1745,7 @@ impl Worker {
             s.queue.next = next;
             s.queue.prev = prev;
             s.queue.current_entry = current_entry;
+            s.queue.current_why = current_why;
             s.queue.radio = radio;
         });
     }

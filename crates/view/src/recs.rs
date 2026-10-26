@@ -144,6 +144,9 @@ pub struct LaneCard {
     /// The name the queue says when the title alone is not enough (a
     /// world's mix: «MADE IN ABYSS: лучшее»).
     pub queue: Option<String>,
+    /// Why it is offered, in its tooltip (recs-v2 §12): «Из того, что ты
+    /// дослушиваешь вечером».
+    pub why: Option<String>,
 }
 
 impl LaneCard {

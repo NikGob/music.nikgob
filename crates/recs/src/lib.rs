@@ -23,7 +23,8 @@
 //!   worlds and track pairs, the online models of the next start and of
 //!   the early skip; [`session`]: the session they score in;
 //!   [`songtype`]: sung or instrumental, the language, a soundtrack's song.
-//! * [`world_mixes`]: the mixes of a world's page.
+//! * [`world_mixes`]: the mixes of a world's page; [`explain`]: why a mix
+//!   or a pick, in one line.
 
 pub mod analysis;
 pub mod background;
@@ -31,6 +32,7 @@ pub mod daily;
 pub mod daylist;
 pub mod discover;
 pub mod dislike;
+pub mod explain;
 pub mod index;
 pub mod junk;
 pub mod listening;

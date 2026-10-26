@@ -12,6 +12,7 @@ use crate::{
     Icon, Theme, TypeRole,
     components::{
         Button, ConnectedGroup, IconButton, Leading, ListItem, LoadingIndicator, Menu, MenuItem, Size, Style, Switch,
+        TooltipExt,
     },
 };
 
@@ -157,6 +158,10 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, out: &mut Vec<Command>) 
         if o.response.double_clicked() {
             out.push(Command::PlayQueueEntry(entry));
         }
+        // Why a radio or a mix picked it: its first pick and new music.
+        if let Some(why) = &e.why {
+            o.response.clone().md3_tooltip(why, None);
+        }
         let mut menu_open = false;
         if let Some(m) = &more {
             queue_pick(queue_menu(("q-menu", entry), Some(entry)).attach(m), &e.track, Some(entry), out);
@@ -261,6 +266,9 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                 common::label(ui, "Сейчас играет", TypeRole::TitleSmall, s.on_surface_variant);
                 ui.add_space(4.0);
                 let o = queue_item(t, "q-current").selected(true).show(ui);
+                if let Some(why) = &q.current_why {
+                    o.response.clone().md3_tooltip(why, None);
+                }
                 // (Sent after the rows: they hold `out` meanwhile.)
                 current_pick = queue_menu("q-ctx-current", None).context_menu(&o.response).map(|p| (p, t));
                 if let Some(entry) = q.current_entry {

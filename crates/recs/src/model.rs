@@ -170,6 +170,8 @@ pub struct TrackStats {
     pub last_start: Option<UnixMs>,
     pub last_complete: Option<UnixMs>,
     pub part: [u16; 4],
+    /// Its completes by the part of the day ([`DayPart::index`]).
+    pub done: [u16; 4],
     /// A start not ended yet, and who chose it.
     open: Option<(UnixMs, Option<EventOrigin>)>,
     liked: Option<UnixMs>,
@@ -1279,12 +1281,14 @@ impl UserModel {
             }
             EventType::Unlike => self.tracks[i].liked = None,
             EventType::Complete => {
+                let part = self.part_of(p.ts);
                 self.streak = 0;
                 let manual = self.tracks[i].open.take().is_some_and(|(_, o)| o == Some(EventOrigin::Manual));
                 let r = R_COMPLETE * if manual { MANUAL_POSITIVE } else { 1.0 };
                 let t = &mut self.tracks[i];
                 t.add(p.ts, r, W_COMPLETE);
                 t.completes += 1;
+                t.done[part] = t.done[part].saturating_add(1);
                 t.last_complete = Some(p.ts);
                 self.walk.end(p.track, Ended::Complete);
                 if let Some(x) = self.pending.remove(&i).filter(|_| self.learn) {

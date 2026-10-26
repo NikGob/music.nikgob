@@ -85,11 +85,16 @@ fn radios_keep_to_their_profiles() {
         let mut worlds = vec![preview.world(seed)];
         let own = preview.profile_name(&lib, seed);
         let mut n = 0;
+        let mut before = seed;
         for _ in 0..2 {
             radio.attune(session.clone(), None);
             for p in preview.extend(&mut radio, 10) {
                 let Item::Track(t) = p.item else { continue };
                 n += 1;
+                if n == 1 {
+                    println!("  why: {:?}", preview.why_pick(&lib, &p, Some(before)));
+                }
+                before = t;
                 if n <= 15 {
                     println!("  {n:2} {}", line(&lib, &preview, t));
                 }
@@ -124,8 +129,8 @@ fn world_mixes() {
             continue;
         };
         println!("\n{title}:");
-        for (kind, tracks) in preview.world_mixes(w) {
-            println!("  {kind:?} ({}):", tracks.len());
+        for (kind, tracks, why) in preview.world_mixes(&lib, w) {
+            println!("  {kind:?} ({}): {why:?}", tracks.len());
             for t in tracks.iter().take(8) {
                 println!("    {}", line(&lib, &preview, *t));
             }
