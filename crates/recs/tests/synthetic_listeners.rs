@@ -568,7 +568,7 @@ mod mixes {
     }
 
     /// «Всё вперемешку» gives each active profile its share with a floor,
-    /// in blocks of three or four.
+    /// in blocks of three or four, all its length.
     #[test]
     fn everything_follows_shares() {
         let l = omnivore();
@@ -577,6 +577,7 @@ mod mixes {
         lineup(&l, m, |b, mixes| {
             sensible("omnivore", &l, &mixes);
             let mix = b.mix(MixKey::Everything, &Kept::default()).expect("everything");
+            assert_eq!(mix.tracks.len(), nikgob_recs::mixes::MIX_LEN, "its whole length");
             let mut count: HashMap<usize, usize> = HashMap::new();
             for &i in &mix.tracks {
                 *count.entry(m.profile_at(i).unwrap()).or_default() += 1;

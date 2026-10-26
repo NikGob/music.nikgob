@@ -38,7 +38,8 @@
 //!   night settles from 0.65 to 0.1, «Фон» keeps 0.4 with small steps; a
 //!   loved familiar song first, a calm one often heard out last, a song
 //!   never played only between two loved familiar ones and never in the
-//!   first two places; each next the nearest in sound on the arc, not of
+//!   first two places (one that finds no such place makes room for
+//!   another drawn, so a mix keeps its length); each next the nearest in sound on the arc, not of
 //!   the world before, of the language before in a mix of many; the rules
 //!   mended where the path cornered itself ([`crate::pick::repair`]).
 //!   Blocks of a profile join by sound and the arc, never the same profile
@@ -82,6 +83,9 @@ const BG_MS: u64 = 120 * 60_000;
 pub const BLEND_LEN: usize = 24;
 /// A mix needs this many songs.
 pub const MIN_SONGS: usize = 12;
+/// A mix is drawn again at most this many times in place of the songs
+/// never played that find no place in its order.
+const REDRAWS: usize = 3;
 /// No song shorter (an interlude)…
 const INTERLUDE_MS: u32 = 75_000;
 /// …or longer (skipped early a third of the time, recs-v2 §2).
@@ -339,6 +343,7 @@ pub struct Mix {
 }
 
 /// The pool of a moment and how it is made.
+#[derive(Clone)]
 struct Pool {
     tracks: Vec<usize>,
     len: usize,
@@ -572,12 +577,29 @@ impl<'a> Builder<'a> {
             Some(t) => t,
             None => {
                 let before = kept.today(key).map_or(&[][..], |t| t.1);
-                let drawn = self.compose(key, &pool, salt, kept, before);
                 // The songs are the day's whatever its part: what never
                 // played and finds no place between loved ones in the
-                // order of the day leaves now, not by the part.
+                // order of the day leaves now, not by the part, and others
+                // are drawn in its place (the second time no more songs
+                // never played than found a place).
                 let arc = if pool.arc == Arc::Focus { Arc::Focus } else { Arc::Day };
-                self.order(&drawn, &pool, arc, steady, true)
+                let mut left = pool.clone();
+                let mut order = Vec::new();
+                for round in 0..REDRAWS {
+                    let drawn = self.compose(key, &left, salt, kept, before);
+                    order = self.order(&drawn, &left, arc, steady, true);
+                    let placed: HashSet<usize> = order.iter().copied().collect();
+                    let dropped: Vec<usize> = drawn.iter().copied().filter(|i| !placed.contains(i)).collect();
+                    if dropped.is_empty() || order.len() >= pool.len {
+                        break;
+                    }
+                    left.tracks.retain(|i| !dropped.contains(i));
+                    if round > 0 {
+                        let fit = order.iter().filter(|&&i| self.unheard(i)).count();
+                        left.unheard = fit as f32 / pool.len.max(1) as f32;
+                    }
+                }
+                order
             }
         };
         if tracks.len() < MIN_SONGS {
