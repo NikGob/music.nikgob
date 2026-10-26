@@ -31,6 +31,7 @@ pub mod discover;
 pub mod dislike;
 pub mod index;
 pub mod junk;
+pub mod listening;
 pub mod model;
 pub mod mood;
 pub mod novelty;
