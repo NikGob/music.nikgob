@@ -206,6 +206,13 @@ impl Regions {
         Self { centres, lanes, tau }
     }
 
+    /// Regions of these centres, kinds and temperature (the taste
+    /// profiles', [`crate::profiles::Profiles::regions`]).
+    pub fn from_parts(centres: Vec<Vector>, lanes: Vec<Option<SongLane>>, tau: f32) -> Self {
+        debug_assert_eq!(centres.len(), lanes.len());
+        Self { centres, lanes, tau: if tau > 1e-4 { tau } else { 1.0 } }
+    }
+
     /// The regions of each kind of song apart: `groups` are the points of
     /// each lane; a lane with too few points joins the others' leftovers,
     /// built together at the end (of no lane).

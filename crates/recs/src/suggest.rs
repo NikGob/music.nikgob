@@ -192,6 +192,7 @@ mod tests {
                 context: Default::default(),
                 origin: None,
                 end_reason: None,
+                attention: None,
             }],
             suggested_tracks: vec![
                 // 0: once, fresh: 0.6.
@@ -320,6 +321,7 @@ mod tests {
                 context: Default::default(),
                 origin: None,
                 end_reason: None,
+                attention: None,
             })
             .collect();
         let taste = Taste::build(&cat, &TasteInput { events, ..Default::default() }, now);

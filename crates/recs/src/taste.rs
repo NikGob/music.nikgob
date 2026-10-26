@@ -292,7 +292,7 @@ impl DayPart {
 }
 
 /// One event of the listening history, as much of it as the taste needs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Play {
     pub track: TrackId,
     pub ts: UnixMs,
@@ -304,6 +304,9 @@ pub struct Play {
     pub origin: Option<EventOrigin>,
     /// Why it ended (an end).
     pub end_reason: Option<EndReason>,
+    /// How far the window was while it played (an end): 0 focused, 0.5 in
+    /// view behind another window, 1 hidden.
+    pub attention: Option<f32>,
 }
 
 impl Play {
@@ -317,6 +320,7 @@ impl Play {
             context: EventContext::Other,
             origin: None,
             end_reason: None,
+            attention: None,
         }
     }
 }
@@ -331,6 +335,7 @@ impl From<&Event> for Play {
             context: e.context,
             origin: e.origin,
             end_reason: e.end_reason,
+            attention: e.attention,
         }
     }
 }
@@ -485,6 +490,10 @@ pub struct TasteInput {
     /// ([`crate::dislike`]; «Учитывать дизлайки в рекомендациях»). Off, a
     /// dislike keeps only its own track out.
     pub dislike_neighbours: bool,
+    /// The tracks of each playlist (hints of the taste profiles).
+    pub playlists: Vec<Vec<TrackId>>,
+    /// How the taste profiles are built ([`crate::profiles`]).
+    pub profiles: crate::profiles::Settings,
 }
 
 /// Per-track and per-artist signals at one moment (`now`).

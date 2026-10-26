@@ -1125,6 +1125,7 @@ mod tests {
             context: Default::default(),
             origin: None,
             end_reason: None,
+            attention: None,
         }
     }
 

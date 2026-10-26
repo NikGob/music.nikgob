@@ -37,6 +37,7 @@ pub mod model;
 pub mod mood;
 pub mod novelty;
 pub mod pick;
+pub mod profiles;
 pub mod radio;
 pub mod regions;
 pub mod rng;
@@ -125,6 +126,7 @@ pub(crate) mod test_util {
                 context: Default::default(),
                 origin: None,
                 end_reason: None,
+                attention: None,
             })
             .collect();
         let likes = (0..2_000).map(|_| tid(rng.below(tracks as usize) as u128)).collect();

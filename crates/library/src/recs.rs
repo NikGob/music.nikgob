@@ -96,6 +96,16 @@ impl Library {
         })
     }
 
+    /// Every seek, oldest first (a touch of the play it fell in: how the
+    /// user listens).
+    pub fn seek_events(&self) -> Result<Vec<Event>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(&format!("SELECT {EVENT_COLS} FROM event WHERE type = 'seek' ORDER BY ts, id"))?;
+            let rows = stmt.query_map([], event_from_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
     /// Every liked track and when it was liked, newest first.
     pub fn liked_track_times(&self) -> Result<Vec<(TrackId, UnixMs)>> {
         self.read(|c| {

@@ -1165,6 +1165,26 @@ pub struct Prefs {
     /// «Учитывать в рекомендациях»: a dislike lowers its nearest sound
     /// neighbours a little too (off: only the track itself is left out).
     pub dislike_in_recs: bool,
+
+    // ---- Taste profiles (profiles-v1).
+    /// «Фон меньше влияет на рекомендации»: a play of a background session
+    /// counts a quarter in the taste profiles' balance (off: fully).
+    pub background_counts_less: bool,
+    /// «Делить профили по звуку»: a kind of song is two profiles when its
+    /// sounds part (off: one profile a kind).
+    pub profiles_split: bool,
+    /// «Названия профилей»: by the kind of song, or by the artists.
+    pub profile_names: ProfileNames,
+}
+
+/// What the taste profiles are called by.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ProfileNames {
+    /// «Японские песни», the artists below.
+    #[default]
+    Kind,
+    /// «Eve, Radwimps и другие».
+    Artists,
 }
 
 impl Prefs {
@@ -1226,6 +1246,9 @@ pub enum PrefPatch {
     DislikeSkips(bool),
     DislikeSkipEverywhere(bool),
     DislikeInRecs(bool),
+    BackgroundCountsLess(bool),
+    ProfilesSplit(bool),
+    ProfileNames(ProfileNames),
 }
 
 impl PrefPatch {
@@ -1267,6 +1290,9 @@ impl PrefPatch {
             Self::DislikeSkips(on) => p.dislike_skips = *on,
             Self::DislikeSkipEverywhere(on) => p.dislike_skip_everywhere = *on,
             Self::DislikeInRecs(on) => p.dislike_in_recs = *on,
+            Self::BackgroundCountsLess(on) => p.background_counts_less = *on,
+            Self::ProfilesSplit(on) => p.profiles_split = *on,
+            Self::ProfileNames(n) => p.profile_names = *n,
         }
     }
 }
@@ -2029,6 +2055,9 @@ impl Default for Prefs {
             dislike_skips: true,
             dislike_skip_everywhere: false,
             dislike_in_recs: true,
+            background_counts_less: true,
+            profiles_split: true,
+            profile_names: ProfileNames::Kind,
         }
     }
 }

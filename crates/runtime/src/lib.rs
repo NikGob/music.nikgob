@@ -2047,7 +2047,11 @@ impl Worker {
         if old.mixes_downloaded_only != p.mixes_downloaded_only || old.radio_new_share != p.radio_new_share || old.radio_new_share_by != p.radio_new_share_by {
             self.radio_source_changed();
         }
-        if old.dislike_in_recs != p.dislike_in_recs {
+        if old.dislike_in_recs != p.dislike_in_recs
+            || old.background_counts_less != p.background_counts_less
+            || old.profiles_split != p.profiles_split
+            || old.profile_names != p.profile_names
+        {
             self.recs_prefs_changed();
         }
         if old.autoplay && !p.autoplay {

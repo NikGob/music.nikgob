@@ -309,13 +309,17 @@ impl Recs<'_> {
                 profiles.push((id, j));
             }
         }
-        // The best loved beyond the profiles (no sound) after them.
+        // The best loved beyond the profiles' seeds after them (with their
+        // profile, when they have one).
         for (id, a) in std::mem::take(&mut s.tracks) {
             if tracks.len() >= SEED_TRACKS_MAX.max(SEED_TRACKS) {
                 break;
             }
             if !tracks.iter().any(|t| t.0 == id) {
                 tracks.push((id, a));
+                if let Some(j) = self.catalog.position(id).and_then(|i| m.profile_at(i)) {
+                    profiles.push((id, j));
+                }
             }
         }
         // Artists spread over the profiles of their best loved tracks.
@@ -756,6 +760,7 @@ mod tests {
                     context: Default::default(),
                     origin: None,
                     end_reason: None,
+                    attention: None,
                 });
             }
         }

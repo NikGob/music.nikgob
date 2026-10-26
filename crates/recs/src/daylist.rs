@@ -315,10 +315,10 @@ mod tests {
         let at = |day: i64, hour: i64| NOW - day * DAY_MS - NOW.rem_euclid(DAY_MS) + hour * HOUR_MS;
         for d in 1..4 {
             for i in (60..90u128).chain([95]) {
-                events.push(Play { track: tid(i), ts: at(d, 20), kind: EventType::Complete, position_ms: None, context: Default::default(), origin: None, end_reason: None });
+                events.push(Play { track: tid(i), ts: at(d, 20), kind: EventType::Complete, position_ms: None, context: Default::default(), origin: None, end_reason: None, attention: None });
             }
             for i in 0..30u128 {
-                events.push(Play { track: tid(i), ts: at(d, 8), kind: EventType::Complete, position_ms: None, context: Default::default(), origin: None, end_reason: None });
+                events.push(Play { track: tid(i), ts: at(d, 8), kind: EventType::Complete, position_ms: None, context: Default::default(), origin: None, end_reason: None, attention: None });
             }
         }
         let input = TasteInput {

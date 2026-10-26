@@ -206,6 +206,7 @@ mod tests {
                     context: Default::default(),
                     origin: None,
                     end_reason: None,
+                    attention: None,
                 });
             }
         }
@@ -219,6 +220,7 @@ mod tests {
                     context: Default::default(),
                     origin: None,
                     end_reason: None,
+                    attention: None,
                 });
             }
         }
@@ -231,6 +233,7 @@ mod tests {
             context: Default::default(),
             origin: None,
             end_reason: None,
+            attention: None,
         });
         let input = TasteInput {
             events,

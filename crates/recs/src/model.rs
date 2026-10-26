@@ -23,9 +23,13 @@
 //!   [`SKIP_FEATURES`], a step on every start that completed or was skipped
 //!   early, whoever chose it.
 //!
-//! * The regions of taste in sound ([`crate::regions`]) of the tracks with
-//!   long affinity, and how much lower each track stands for the dislikes
-//!   near it ([`crate::dislike`]).
+//! * Once the history is walked ([`UserModel::settle`]): how the user
+//!   listens ([`crate::listening`]: the background sessions, if any), the
+//!   taste profiles ([`crate::profiles`]) by the plays' outcomes, a
+//!   background play counting [`crate::listening::W_BG`], their shares of
+//!   the recent plays, the regions of sound they make ([`crate::regions`])
+//!   and how much lower each track stands for the dislikes near it
+//!   ([`crate::dislike`]).
 //! * Imported plays ([`EventOrigin::Import`], another service's history)
 //!   teach the long taste alone: the long affinity of their tracks (and
 //!   the profiles' mass). Never the session, the pairs, the transitions,
@@ -45,6 +49,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::Vector;
 use crate::index::{Normalizer, VectorIndex, euclid};
+use crate::listening::{Heard, Listening, W_BG};
+use crate::profiles::{ALIVE_DAYS, Input as ProfilesInput, Params, Profiles, SHARE_HALF_DAYS, SharePlay, background_shares, shares};
 use crate::regions::Regions;
 use crate::session::{Ended, Session, TrackLookup};
 use crate::songtype::{SongLane, SongType, SongTypes, sigmoid};
@@ -76,25 +82,18 @@ const INTERLUDE_MS: u32 = 75_000;
 const LONG_MS: u32 = 6 * 60_000;
 /// Song lanes ([`lane_index`]).
 const LANES: usize = 5;
-/// What a start weighs in the balance of the taste profiles (recs-v2 §4.5,
-/// [`crate::regions`]): one the user chose…
-pub const ACTIVE_MANUAL: f32 = 1.0;
-/// …one the app chose while the user was about (a few after their last
-/// action)…
-pub const ACTIVE_AUTO: f32 = 0.5;
-/// …and one of a long run the app chose with no action of the user's:
-/// background listening, counted fully inside its profile but little in
-/// the balance (hours of ambient must not make the taste ambient: fifty
-/// such starts weigh as one choice).
-pub const BACKGROUND_WEIGHT: f32 = 0.02;
-/// A like weighs this in the balance.
-pub const ACTIVE_LIKE: f32 = 2.0;
-/// A run of the app's starts is background past this many, or twice the
-/// user's own median run, whichever is longer (people let a queue play on
-/// for different lengths)…
-pub const PASSIVE_AFTER: u32 = 4;
-/// …but never past this many (a history that is all one long run).
-pub const PASSIVE_MAX: u32 = 16;
+/// The mass of the taste profiles (profiles-v1 §3.1): a play's outcome
+/// weighs this, halving in [`H_MASS_MS`]…
+const MASS_COMPLETE: f32 = 1.0;
+const MASS_LATE: f32 = 0.5;
+const MASS_OPEN: f32 = 0.3;
+const MASS_EARLY: f32 = -0.5;
+pub const H_MASS_MS: i64 = 90 * DAY_MS;
+/// …a like and a playlist entry this.
+const MASS_LIKE: f32 = 2.0;
+const MASS_PLAYLIST: f32 = 1.5;
+/// A like counts as a touch of the play it fell in within this.
+const LIKE_IN_PLAY_MS: i64 = 20 * 60_000;
 /// A radio of one kind of song goes on to another only when the user's
 /// own next choices go there this often (a generic prior: about one in
 /// seven)…
@@ -168,11 +167,6 @@ pub struct TrackStats {
     /// A start not ended yet, and who chose it.
     open: Option<(UnixMs, Option<EventOrigin>)>,
     liked: Option<UnixMs>,
-    /// The user's active choices of it ([`ACTIVE_MANUAL`] and the rest),
-    /// halving in [`H_LONG_MS`], from `act_ref`: what balances the taste
-    /// profiles.
-    act: f32,
-    act_ref: UnixMs,
 }
 
 fn halve(x: f32, from: UnixMs, to: UnixMs, half: i64) -> f32 {
@@ -228,17 +222,6 @@ impl TrackStats {
 
     pub fn liked(&self, now: UnixMs) -> bool {
         self.liked.is_some_and(|t| t <= now)
-    }
-
-    fn choose(&mut self, ts: UnixMs, w: f32) {
-        let ts = ts.max(self.act_ref);
-        self.act = halve(self.act, self.act_ref, ts, H_LONG_MS) + w;
-        self.act_ref = ts;
-    }
-
-    /// The user's active choices of it at `now`.
-    pub fn active(&self, now: UnixMs) -> f32 {
-        halve(self.act, self.act_ref, now, H_LONG_MS)
     }
 }
 
@@ -419,6 +402,20 @@ pub struct Moment {
     pub repeat_one: bool,
 }
 
+/// A start of the history as [`UserModel::settle`] reads it.
+struct Started {
+    ts: UnixMs,
+    track: TrackId,
+    pos: Option<usize>,
+    ended: Ended,
+    end: Option<UnixMs>,
+    origin: Option<EventOrigin>,
+    context: EventContext,
+    touches: u32,
+    attention: Option<f32>,
+    import: bool,
+}
+
 /// The user model (see the module docs).
 #[derive(Clone, Debug)]
 pub struct UserModel {
@@ -443,21 +440,22 @@ pub struct UserModel {
     /// [`lane_index`].
     lane_trans: [[f32; LANES]; LANES],
     pub co: CoOccur,
-    /// The taste profile of each track with a sound (its region, by its
-    /// kind of song), the profiles' shares of the user's active choices and
-    /// the best long affinity in each.
+    /// The taste profiles ([`crate::profiles`]), the profile of each track,
+    /// the profiles' shares of the recent plays (a background play counting
+    /// little), the mean `p_bg` of each one's plays and the best long
+    /// affinity in each.
+    pub profiles: Profiles,
     pub profile_of: Vec<Option<u16>>,
     pub profile_share: Vec<f32>,
+    pub profile_bg: Vec<f32>,
     profile_top: Vec<f32>,
-    /// The app's starts running with no action of the user's, and the run
-    /// past which they are background.
-    passive: u32,
-    passive_after: u32,
+    /// How the user listens: the background sessions, if any.
+    pub listening: Listening,
     pub weights: Weights,
     /// The median distance between tracks.
     scale: f32,
     norm: Normalizer,
-    /// The regions of taste in sound, by kind of song: the taste profiles.
+    /// The regions of sound of the taste profiles.
     pub regions: Regions,
 
     /// The embedded vectors of the disliked tracks (a new track near them
@@ -521,7 +519,6 @@ impl UserModel {
                 m.tracks[i].liked = Some(*at);
             }
         }
-        m.passive_after = passive_after(&input.events);
         for p in ordered(&input.events) {
             m.event(p, None);
         }
@@ -548,38 +545,177 @@ impl UserModel {
         }
     }
 
-    /// The taste profiles and the dislikes' neighbours, once the history
-    /// is walked.
-    fn settle(&mut self, catalog: &Catalog, input: &TasteInput) {
-        let now = self.now;
-        let mut groups: Vec<(SongLane, Vec<&Vector>)> = Vec::new();
-        for i in 0..self.len() {
-            let Some(v) = self.emb[i].as_ref() else { continue };
-            if self.tracks[i].aff_long(now) <= 0.0 || self.taste.blocks(&catalog.tracks()[i]) {
-                continue;
-            }
-            let lane = self.types[i].lane();
-            match groups.iter_mut().find(|g| g.0 == lane) {
-                Some(g) => g.1.push(v),
-                None => groups.push((lane, vec![v])),
+    /// Every start of the history and how it ended, its seeks and the likes
+    /// set while it played as its touches, in order of time.
+    fn starts_of(&self, input: &TasteInput) -> Vec<Started> {
+        let mut out: Vec<Started> = Vec::new();
+        let mut open: HashMap<TrackId, usize> = HashMap::new();
+        for p in ordered(&input.events) {
+            match p.kind {
+                EventType::Start => {
+                    open.insert(p.track, out.len());
+                    out.push(Started {
+                        ts: p.ts,
+                        pos: self.pos.get(&p.track).copied(),
+                        track: p.track,
+                        ended: Ended::Open,
+                        end: None,
+                        origin: p.origin,
+                        context: p.context,
+                        touches: 0,
+                        attention: None,
+                        import: p.origin == Some(EventOrigin::Import),
+                    });
+                }
+                EventType::Complete | EventType::Skip => {
+                    let Some(k) = open.remove(&p.track) else { continue };
+                    let s = &mut out[k];
+                    s.end = Some(p.ts);
+                    s.attention = p.attention;
+                    s.ended = match p.kind {
+                        EventType::Complete => Ended::Complete,
+                        _ if p.end_reason == Some(EndReason::AppClosed) => Ended::Open,
+                        _ if p.position_ms.is_some_and(|x| x < EARLY_SKIP_MS) => Ended::Early,
+                        _ => Ended::Late,
+                    };
+                }
+                EventType::Seek => {
+                    if let Some(&k) = open.get(&p.track) {
+                        out[k].touches += 1;
+                    }
+                }
+                _ => {}
             }
         }
-        groups.sort_by_key(|g| lane_index(g.0));
-        self.regions = Regions::by_lane(&groups);
-        let k = self.regions.len();
-        self.profile_of = (0..self.len())
-            .map(|i| self.emb[i].as_ref().and_then(|v| self.regions.of(v, Some(self.types[i].lane()))).map(|j| j as u16))
+        let mut by_track: HashMap<TrackId, Vec<usize>> = HashMap::new();
+        for (k, s) in out.iter().enumerate().filter(|(_, s)| !s.import) {
+            by_track.entry(s.track).or_default().push(k);
+        }
+        for (t, at) in &input.like_times {
+            let Some(list) = by_track.get(t) else { continue };
+            let k = list.partition_point(|&k| out[k].ts <= *at);
+            if let Some(&k) = k.checked_sub(1).map(|x| &list[x])
+                && *at - out[k].ts <= LIKE_IN_PLAY_MS
+            {
+                out[k].touches += 1;
+            }
+        }
+        out
+    }
+
+    /// How the user listens, the taste profiles, their shares and the
+    /// dislikes' neighbours, once the history is walked.
+    fn settle(&mut self, catalog: &Catalog, input: &TasteInput) {
+        let now = self.now;
+        let n = self.len();
+        let set = &input.profiles;
+        let w_bg = if set.background_less { W_BG } else { 1.0 };
+        // The listening modes, of the user's own starts.
+        let starts = self.starts_of(input);
+        let own: Vec<usize> = (0..starts.len()).filter(|&k| !starts[k].import).collect();
+        let heard: Vec<Heard> = own
+            .iter()
+            .enumerate()
+            .map(|(x, &k)| {
+                let s = &starts[k];
+                // A history older than origins: a start right after one not
+                // heard out, not of a radio, is the user's pick.
+                let manual = match s.origin {
+                    Some(o) => o == EventOrigin::Manual,
+                    None => x > 0 && {
+                        let prev = &starts[own[x - 1]];
+                        s.ts - prev.ts < SESSION_GAP_MS && prev.ended != Ended::Complete && s.context != EventContext::Radio
+                    },
+                };
+                Heard {
+                    ts: s.ts,
+                    end: s.end,
+                    ended: s.ended,
+                    manual,
+                    touches: s.touches,
+                    attention: s.attention,
+                    duration_ms: s.pos.and_then(|i| self.duration[i]),
+                }
+            })
             .collect();
-        let mut mass = vec![0.0f32; k];
+        let (listening, p_own) = Listening::of(&heard);
+        let mut p_bg = vec![0.0f32; starts.len()];
+        for (x, &k) in own.iter().enumerate() {
+            p_bg[k] = p_own[x];
+        }
+        // The profiles' mass: the outcomes, a background play counting
+        // little; likes and playlists. And their life: the active plays of
+        // the last two months.
+        let mut mass = vec![0.0f32; n];
+        let mut alive = vec![0.0f32; n];
+        let mut plays: Vec<(UnixMs, usize)> = Vec::new();
+        for (k, s) in starts.iter().enumerate() {
+            let Some(i) = s.pos else { continue };
+            let r = match s.ended {
+                Ended::Complete => MASS_COMPLETE,
+                Ended::Late => MASS_LATE,
+                Ended::Open => MASS_OPEN,
+                Ended::Early => MASS_EARLY,
+            };
+            mass[i] += r * halve(1.0, s.ts, now, H_MASS_MS) * (1.0 - (1.0 - w_bg) * p_bg[k]);
+            if p_bg[k] < 0.5 && s.ended != Ended::Early && now - s.ts <= ALIVE_DAYS * DAY_MS {
+                alive[i] += 1.0;
+            }
+            plays.push((s.ts, i));
+        }
+        for (i, m) in mass.iter_mut().enumerate() {
+            if self.tracks[i].liked(now) {
+                *m += MASS_LIKE;
+            }
+        }
+        for (t, added) in &input.playlist_entries {
+            if let Some(&i) = self.pos.get(t) {
+                mass[i] += MASS_PLAYLIST * halve(1.0, *added, now, H_MASS_MS);
+            }
+        }
+        for (i, m) in mass.iter_mut().enumerate() {
+            if self.taste.blocks(&catalog.tracks()[i]) {
+                *m = 0.0;
+            }
+        }
+        let playlists: Vec<Vec<usize>> = input.playlists.iter().map(|l| l.iter().filter_map(|t| self.pos.get(t).copied()).collect()).collect();
+        let day = (now + i64::from(self.utc_offset_min) * 60_000).div_euclid(DAY_MS);
+        self.profiles = Profiles::build(&ProfilesInput {
+            ids: &self.ids,
+            sound: &self.emb,
+            types: &self.types,
+            artists: &self.artist,
+            mass: &mass,
+            alive: &alive,
+            plays: &plays,
+            playlists: &playlists,
+            scale: self.scale,
+            params: Params { split: set.split_by_sound, ..Params::default() },
+            history: set.history.as_ref(),
+            day,
+        });
+        self.regions = self.profiles.regions(&self.emb);
+        self.profile_of = self.profiles.all_of().to_vec();
+        let k = self.profiles.len();
+        // Their shares of the recent plays (an early skip is no choice of it)
+        // and how much of each one's plays is background.
+        let share_play = |x: usize| {
+            let s = &starts[x];
+            let i = s.pos?;
+            Some(SharePlay { ts: s.ts, profile: self.profile_at(i), p_bg: p_bg[x], weight: if s.ended == Ended::Early { 0.0 } else { 1.0 } })
+        };
+        let all: Vec<SharePlay> = (0..starts.len()).filter_map(share_play).collect();
+        let own_plays: Vec<SharePlay> = own.iter().filter_map(|&x| share_play(x)).collect();
+        let sh = shares(&all, k, w_bg, Some(SHARE_HALF_DAYS), now);
+        self.profile_share = if sh.iter().sum::<f32>() > 0.0 { sh } else { vec![1.0 / k.max(1) as f32; k] };
+        self.profile_bg = background_shares(&own_plays, k);
+        self.listening = listening;
         let mut top = vec![0.0f32; k];
-        for i in 0..self.len() {
+        for i in 0..n {
             if let Some(j) = self.profile_at(i) {
-                mass[j] += self.tracks[i].active(now).max(0.0);
                 top[j] = top[j].max(self.tracks[i].aff_long(now));
             }
         }
-        let total: f32 = mass.iter().sum();
-        self.profile_share = if total > 0.0 { mass.iter().map(|m| m / total).collect() } else { vec![1.0 / k.max(1) as f32; k] };
         self.profile_top = top;
         let disliked: Vec<usize> = input.disliked_tracks.iter().filter_map(|t| self.pos.get(t).copied()).collect();
         if input.dislike_neighbours {
@@ -659,11 +795,12 @@ impl UserModel {
             trans: HashMap::new(),
             lane_trans: [[0.0; LANES]; LANES],
             co: CoOccur::new(n),
+            profiles: Profiles::default(),
             profile_of: vec![None; n],
             profile_share: Vec::new(),
+            profile_bg: Vec::new(),
             profile_top: Vec::new(),
-            passive: 0,
-            passive_after: PASSIVE_AFTER,
+            listening: Listening::default(),
             weights: Weights::default(),
             scale,
             norm,
@@ -1011,8 +1148,6 @@ impl UserModel {
         match p.kind {
             EventType::Like => {
                 self.tracks[i].liked = Some(p.ts);
-                self.tracks[i].choose(p.ts, ACTIVE_LIKE);
-                self.passive = 0;
             }
             EventType::Unlike => self.tracks[i].liked = None,
             EventType::Complete => {
@@ -1034,8 +1169,6 @@ impl UserModel {
                     self.pending.remove(&i);
                     return;
                 }
-                // A skip is the user's action.
-                self.passive = 0;
                 let origin = opened.and_then(|(_, o)| o);
                 match p.position_ms {
                     Some(pos) if pos < EARLY_SKIP_MS => {
@@ -1071,9 +1204,7 @@ impl UserModel {
                 }
             }
             EventType::Start => self.start(i, p, hook),
-            // Seeking or keeping a track is the user's action too (whatever the
-            // song is: background-ness is the session's, never its kind's).
-            EventType::Seek | EventType::AddToPlaylist => self.passive = 0,
+            EventType::Seek | EventType::AddToPlaylist => {}
         }
     }
 
@@ -1120,19 +1251,7 @@ impl UserModel {
             self.lane_trans[lane_index(self.types[prev].lane())][lane_index(self.types[i].lane())] += 1.0;
         }
         let part = self.part_of(ts);
-        let active = match p.origin {
-            Some(EventOrigin::Manual) => {
-                self.passive = 0;
-                ACTIVE_MANUAL
-            }
-            Some(_) => {
-                self.passive += 1;
-                if self.passive > self.passive_after { BACKGROUND_WEIGHT } else { ACTIVE_AUTO }
-            }
-            None => ACTIVE_AUTO,
-        };
         let t = &mut self.tracks[i];
-        t.choose(ts, active);
         if let Some((t0, o)) = t.open.take() {
             // The start before never ended.
             let r = R_OPEN * if o == Some(EventOrigin::Manual) { MANUAL_POSITIVE } else { 1.0 };
@@ -1156,32 +1275,6 @@ impl UserModel {
         self.part_total[part] += 1;
         self.walk.start(p.track, ts, p.context, p.origin);
     }
-}
-
-/// The run of the app's starts past which they are background: twice the
-/// user's median run of them, between [`PASSIVE_AFTER`] and [`PASSIVE_MAX`].
-
-fn passive_after(events: &[Play]) -> u32 {
-    let mut runs: Vec<u32> = Vec::new();
-    let mut run = 0u32;
-    for p in ordered(events).into_iter().filter(|p| p.origin != Some(EventOrigin::Import)) {
-        match (p.kind, p.origin) {
-            (EventType::Start, Some(o)) if o.is_auto() => run += 1,
-            (EventType::Start, Some(_)) | (EventType::Skip | EventType::Like, _) => {
-                if run > 0 {
-                    runs.push(run);
-                }
-                run = 0;
-            }
-            _ => {}
-        }
-    }
-    if run > 0 {
-        runs.push(run);
-    }
-    runs.sort_unstable();
-    let median = runs.get(runs.len() / 2).copied().unwrap_or(0);
-    (2 * median).clamp(PASSIVE_AFTER, PASSIVE_MAX)
 }
 
 /// One step of `next` towards `target` over the [`EXPECT_OVER`] best of
@@ -1542,32 +1635,42 @@ pub(crate) mod tests {
         };
         let (rap, ost) = (share_of(&m, 0), share_of(&m, 1));
         assert!(rap > 0.45 && ost > 0.05, "rap {rap}, soundtracks {ost}");
-        // Three hundred soundtracks the app played on, no action between.
-        let mut ts = T0 - 2 * DAY_MS;
+        assert!(!m.listening.has_background, "sessions all alike: no background");
+        // Three runs of a hundred soundtracks the app played on, on three
+        // days, no action between.
         let ost_ids: Vec<TrackId> = (0..m.len()).filter(|&i| kind(i) == 1).map(|i| m.id(i)).collect();
-        for k in 0..300 {
-            let id = ost_ids[k % ost_ids.len()];
-            input.events.push(Play { origin: Some(EventOrigin::Autoplay), ..Play::new(id, ts, EventType::Start, Some(0)) });
-            ts += 200_000;
-            input.events.push(Play::new(id, ts, EventType::Complete, Some(200_000)));
-        }
-        let bg = build(&input);
+        let runs = |origin: EventOrigin| {
+            let mut out = Vec::new();
+            for day in 1..=3 {
+                let mut ts = T0 - day * DAY_MS;
+                for k in 0..100 {
+                    let id = ost_ids[k % ost_ids.len()];
+                    out.push(Play { origin: Some(origin), ..Play::new(id, ts, EventType::Start, Some(0)) });
+                    ts += 200_000;
+                    out.push(Play::new(id, ts, EventType::Complete, Some(200_000)));
+                }
+            }
+            out
+        };
+        let mut bg_input = input.clone();
+        bg_input.events.extend(runs(EventOrigin::Autoplay));
+        let bg = build(&bg_input);
+        assert!(bg.listening.has_background && bg.listening.background_sessions() == 3, "{:?}", bg.listening.sessions.len());
         let (rap2, ost2) = (share_of(&bg, 0), share_of(&bg, 1));
-        assert!(ost2 < ost + 0.15 && rap2 > ost2, "background: rap {rap2} soundtracks {ost2} (before {rap} {ost})");
+        assert!(rap2 > ost2, "background: rap {rap2} soundtracks {ost2} (before {rap} {ost})");
+        let j = bg.profile_at((0..bg.len()).find(|&i| kind(i) == 1).unwrap()).unwrap();
+        assert!(bg.profile_bg[j] > 0.5, "a background profile: {:?}", bg.profile_bg);
         let i = (0..bg.len()).find(|&i| kind(i) == 1).unwrap();
         assert!(bg.tracks[i].aff_long(T0) > m.tracks[i].aff_long(T0), "counted inside its profile");
+        // «Фон меньше влияет» off: the same runs count fully.
+        bg_input.profiles.background_less = false;
+        let full = share_of(&build(&bg_input), 1);
+        assert!(full > ost2 + 0.15, "counted fully: {full} (down-weighted {ost2})");
         // The same soundtracks chosen one by one are listened to, not
         // background: an instrumental kind is never down-weighted as such.
-        let mut fg_input = input.clone();
-        fg_input.events.truncate(fg_input.events.len() - 600);
-        let mut ts = T0 - 2 * DAY_MS;
-        for k in 0..300 {
-            let id = ost_ids[k % ost_ids.len()];
-            fg_input.events.push(Play { origin: Some(EventOrigin::Manual), ..Play::new(id, ts, EventType::Start, Some(0)) });
-            ts += 200_000;
-            fg_input.events.push(Play::new(id, ts, EventType::Complete, Some(200_000)));
-        }
-        let fg = build(&fg_input);
+        input.events.extend(runs(EventOrigin::Manual));
+        let fg = build(&input);
+        assert!(!fg.listening.has_background);
         let ost3 = share_of(&fg, 1);
         assert!(ost3 > ost2 + 0.15, "chosen soundtracks weigh: {ost3} (in the background {ost2})");
 

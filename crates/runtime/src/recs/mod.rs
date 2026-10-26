@@ -80,6 +80,8 @@ const DAYLIST_KEY: &str = "recs.daylist";
 const STYLES_KEY: &str = "recs.styles";
 const MODEL_KEY: &str = "recs.model";
 const SONG_TYPES_KEY: &str = "recs.song_types";
+/// The taste profiles of the builds before ([`nikgob_recs::profiles::ProfileHistory`]).
+const PROFILES_KEY: &str = "recs.profiles";
 /// Covers of a mix card…
 const COVERS: usize = 4;
 /// …from this many releases (some have no cover).
@@ -579,12 +581,33 @@ fn read_snapshot(
 }
 
 /// What a snapshot reads besides the library: the new music found (the
-/// analysed previews of it are kept with the snapshot) and «Учитывать
-/// дизлайки в рекомендациях».
-#[derive(Clone, Default)]
+/// analysed previews of it are kept with the snapshot), «Учитывать
+/// дизлайки в рекомендациях» and the settings of the taste profiles.
+#[derive(Clone)]
 pub(crate) struct ReadExtra {
     pub new: Vec<StreamTrack>,
     pub dislike_neighbours: bool,
+    pub background_less: bool,
+    pub split_by_sound: bool,
+    pub names: v::ProfileNames,
+}
+
+impl Default for ReadExtra {
+    fn default() -> Self {
+        Self::of(Vec::new(), &v::Prefs::default())
+    }
+}
+
+impl ReadExtra {
+    pub(crate) fn of(new: Vec<StreamTrack>, prefs: &v::Prefs) -> Self {
+        Self {
+            new,
+            dislike_neighbours: prefs.dislike_in_recs,
+            background_less: prefs.background_counts_less,
+            split_by_sound: prefs.profiles_split,
+            names: prefs.profile_names,
+        }
+    }
 }
 
 /// [`read_snapshot`] and the history its model was built of.
@@ -749,8 +772,18 @@ fn read_parts(
         .flatten()
         .and_then(|(_, json)| serde_json::from_str(&json).ok())
         .filter(|w: &Weights| w.version == FEATURE_VERSION);
+    // The seeks are touches of the plays (how the user listens).
+    let seeks = lib.seek_events().unwrap_or_default();
+    let kept: Option<nikgob_recs::profiles::ProfileHistory> =
+        lib.cache_get(PROFILES_KEY).ok().flatten().and_then(|(_, json)| serde_json::from_str(&json).ok());
     let history = TasteInput {
-        events: events.iter().map(play_of).collect(),
+        events: events.iter().chain(&seeks).map(play_of).collect(),
+        playlists: tiles_input.playlists.iter().map(|p| p.tracks.clone()).collect(),
+        profiles: nikgob_recs::profiles::Settings {
+            background_less: extra.background_less,
+            split_by_sound: extra.split_by_sound,
+            history: kept.clone(),
+        },
         likes: like_times.iter().map(|l| l.0).collect(),
         like_times,
         playlist_entries: entries,
@@ -773,7 +806,13 @@ fn read_parts(
     {
         log::warn!("recs: cannot keep the model: {e}");
     }
-    log_profiles(&model, &tiles_input, &names);
+    if kept.as_ref() != Some(&model.profiles.history)
+        && let Ok(json) = serde_json::to_string(&model.profiles.history)
+        && let Err(e) = lib.cache_put(PROFILES_KEY, now, &json)
+    {
+        log::warn!("recs: cannot keep the profiles: {e}");
+    }
+    log_profiles(&model, &tiles_input, &names, extra.names);
     let artist_affinity: HashMap<String, f32> = model
         .taste
         .artist_affinities()
@@ -808,45 +847,69 @@ pub(crate) fn play_of(e: &nikgob_core::model::Event) -> nikgob_recs::Play {
     p
 }
 
-/// The taste profiles of a build in the log, the largest share first: the
-/// kind of song, the share of the user's active choices, the main artists
-/// and three of the best loved songs.
-fn log_profiles(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &HashMap<ArtistId, String>) {
-    for line in profile_lines(model, tiles, names) {
+/// The taste profiles of a build in the log (profiles-v1 §11.4): a line
+/// of them all, then each, the largest share first — its name and artists,
+/// its share of the recent plays, how much of it is background, three of
+/// its best loved songs; and how the user listens.
+fn log_profiles(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &HashMap<ArtistId, String>, style: v::ProfileNames) {
+    let l = &model.listening;
+    log::info!(
+        "listening: {} sessions, {} background{}",
+        l.sessions.len(),
+        l.background_sessions(),
+        match (l.has_background, l.threshold) {
+            (false, _) => " (no background listening)".to_owned(),
+            (true, Some(t)) => format!(" (threshold {t:.2}, separation {:.2})", l.eta),
+            (true, None) => format!(" (the fixed band, separation {:.2})", l.eta),
+        }
+    );
+    let lines = profile_lines(model, tiles, names, style);
+    let short: Vec<String> = profile_order(model).into_iter().map(|j| format!("{} {:.2}", profile_name(model, names, style, j).0, model.profile_share.get(j).copied().unwrap_or(0.0))).collect();
+    let born = model.profiles.list.iter().filter(|p| !p.visible).count();
+    log::info!("profiles: {} ({}), not shown yet {born}", model.profiles.len(), short.join(", "));
+    for line in lines {
         log::info!("recs: profile {line}");
     }
 }
 
-/// [`log_profiles`]' lines.
-pub(crate) fn profile_lines(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &HashMap<ArtistId, String>) -> Vec<String> {
-    let now = model.now();
-    let k = model.regions.len();
-    let mut order: Vec<usize> = (0..k).collect();
+/// The profiles, the largest share first.
+fn profile_order(model: &UserModel) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..model.profiles.len()).collect();
     order.sort_by(|a, b| model.profile_share[*b].total_cmp(&model.profile_share[*a]).then(a.cmp(b)));
+    order
+}
+
+/// The name and the subtitle of profile `j`.
+fn profile_name(model: &UserModel, names: &HashMap<ArtistId, String>, style: v::ProfileNames, j: usize) -> (String, String) {
+    let style = match style {
+        v::ProfileNames::Kind => nikgob_recs::profiles::NameStyle::Kind,
+        v::ProfileNames::Artists => nikgob_recs::profiles::NameStyle::Artists,
+    };
+    model.profiles.name(j, style, &|a| names.get(&a).cloned())
+}
+
+/// [`log_profiles`]' lines of each profile.
+pub(crate) fn profile_lines(model: &UserModel, tiles: &nikgob_recs::TilesInput, names: &HashMap<ArtistId, String>, style: v::ProfileNames) -> Vec<String> {
+    let now = model.now();
     let mut out = Vec::new();
-    for j in order {
+    for j in profile_order(model) {
+        let p = &model.profiles.list[j];
         let mut members: Vec<usize> = (0..model.len()).filter(|&i| model.profile_at(i) == Some(j) && model.tracks[i].aff_long(now) > 0.0).collect();
         members.sort_by(|a, b| model.tracks[*b].aff_long(now).total_cmp(&model.tracks[*a].aff_long(now)).then(a.cmp(b)));
-        let mut artists: HashMap<ArtistId, usize> = HashMap::new();
-        for &i in &members {
-            if let Some(a) = model.main_artist_at(i) {
-                *artists.entry(a).or_default() += 1;
-            }
-        }
-        let mut artists: Vec<(ArtistId, usize)> = artists.into_iter().collect();
-        artists.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        let artists: Vec<&str> = artists.iter().take(3).filter_map(|(a, _)| names.get(a).map(String::as_str)).collect();
         let songs: Vec<String> = members
             .iter()
             .take(3)
             .filter_map(|&i| tiles.facts.get(&model.id(i)).map(|f| format!("«{}» {}", f.title, f.artist)))
             .collect();
-        let lane = model.regions.lanes.get(j).copied().flatten().map_or_else(|| "mixed".to_owned(), |l| format!("{l:?}"));
+        let (name, sub) = profile_name(model, names, style, j);
         out.push(format!(
-            "{j}: {lane}, {:.0} % of the choices, {} songs loved; {} · {}",
+            "{name} ({sub}): {:?}, key {}{}, {:.0} % of the plays, background {:.2}, {} members; {}",
+            p.lane,
+            p.key,
+            if p.visible { "" } else { ", not shown yet" },
             100.0 * model.profile_share.get(j).copied().unwrap_or(0.0),
-            members.len(),
-            artists.join(", "),
+            model.profile_bg.get(j).copied().unwrap_or(0.0),
+            p.members,
             songs.join(", ")
         ));
     }
@@ -1514,7 +1577,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
         suggested: suggest::cached(lib),
         rerank: false,
         lanes_salt: 0,
-        extra: ReadExtra { new: discoveries.clone(), dislike_neighbours: prefs.dislike_in_recs },
+        extra: ReadExtra::of(discoveries.clone(), prefs),
         new_log: novelty::log_of(lib),
     };
     let built = build(input)?;
@@ -1565,7 +1628,7 @@ impl ModelPreview {
         let index = SoundIndex::default();
         crate::analysis::load_index(lib, &index);
         let (_, utc_offset_min) = local_day();
-        let (snap, _, _, history) = read_parts(lib, &index, recs_now(), utc_offset_min, &[], false, &ReadExtra { new: Vec::new(), dislike_neighbours: true })?;
+        let (snap, _, _, history) = read_parts(lib, &index, recs_now(), utc_offset_min, &[], false, &ReadExtra::default())?;
         Ok(Self { snap, history })
     }
 
@@ -1603,7 +1666,7 @@ impl ModelPreview {
         let rows = lib.rec_tracks().unwrap_or_default();
         let events = lib.listening_events().unwrap_or_default();
         let tiles = tiles::input(lib, &rows, &events, names.clone());
-        profile_lines(&self.snap.model, &tiles, &names)
+        profile_lines(&self.snap.model, &tiles, &names, v::ProfileNames::Kind)
     }
 
     pub fn song_type(&self, id: TrackId) -> Option<nikgob_recs::SongType> {
@@ -1835,7 +1898,7 @@ impl Worker {
             suggested: self.suggestions_kept(),
             rerank: std::mem::take(&mut self.recs.discover_rerank),
             lanes_salt: self.recs.lanes_salt,
-            extra: ReadExtra { new: self.discoveries(), dislike_neighbours: prefs.dislike_in_recs },
+            extra: ReadExtra::of(self.discoveries(), &prefs),
             new_log: {
                 self.new_log_load();
                 self.recs.newlog.log.clone()
