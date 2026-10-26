@@ -546,14 +546,19 @@ impl Library {
         })
     }
 
-    pub fn liked_releases(&self, offset: u32, limit: u32) -> Result<Vec<ReleaseRow>> {
+    /// The albums liked as a whole ([`Self::like_release`]), each with when,
+    /// the latest first; those whose tracks were unliked since say so in
+    /// [`ReleaseRow::liked`].
+    pub fn liked_releases(&self, offset: u32, limit: u32) -> Result<Vec<(ReleaseRow, UnixMs)>> {
         self.read(|c| {
+            // The like's time after the row's own columns.
+            let select = RELEASE_ROW_SELECT.replacen(" FROM (SELECT * FROM release rv", ", l.updated_at FROM (SELECT * FROM release rv", 1);
             let mut stmt = c.prepare_cached(&format!(
-                "{RELEASE_ROW_SELECT}
+                "{select}
                   JOIN likes l ON l.target_kind = 'release' AND l.target_id = r.id
                  WHERE l.deleted = 0 ORDER BY l.updated_at DESC, r.seq DESC LIMIT ?1 OFFSET ?2"
             ))?;
-            let rows = stmt.query_map(params![limit, offset], release_row)?;
+            let rows = stmt.query_map(params![limit, offset], |r| Ok((release_row(r)?, r.get(14)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }

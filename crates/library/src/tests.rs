@@ -2115,6 +2115,10 @@ fn liking_an_album_likes_all_its_tracks() {
     assert!(liked(&lib) && lib.release_liked(r.id).unwrap());
     assert_eq!(titles(&lib.liked_tracks(0, 10).unwrap()), vec!["One", "Two"], "album order");
     assert!(!lib.is_liked(stream_only.id).unwrap());
+    let albums = lib.liked_releases(0, 10).unwrap();
+    assert_eq!(albums.iter().map(|a| a.0.release.id).collect::<Vec<_>>(), vec![r.id]);
+    let first_at = albums[0].1;
+    assert!(albums[0].0.liked && first_at > 0);
 
     // Unliking one track: the album is no longer liked.
     lib.unlike(t2.id).unwrap();
@@ -2130,12 +2134,16 @@ fn liking_an_album_likes_all_its_tracks() {
     lib.like_release(r.id, false).unwrap();
     assert_eq!(lib.liked_count().unwrap(), 0);
     assert!(!liked(&lib));
+    assert!(lib.liked_releases(0, 10).unwrap().is_empty());
 
     // An album without local files: all its tracks count.
     let r2 = release(&lib, &a, "Streams", None);
     let s1 = track(&lib, &a, Some(&r2), "S1", 1);
     assert_eq!(lib.like_release(r2.id, true).unwrap(), vec![s1.id]);
     assert!(lib.release_liked(r2.id).unwrap());
+    let albums = lib.liked_releases(0, 10).unwrap();
+    assert_eq!(albums.iter().map(|a| a.0.release.id).collect::<Vec<_>>(), vec![r2.id]);
+    assert!(albums[0].0.liked && albums[0].1 > first_at);
 }
 
 /// Regression guard for "the history went to zero after an import": every

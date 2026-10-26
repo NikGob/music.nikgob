@@ -387,13 +387,11 @@ fn overview(
                 if widgets::section_header(ui, "Плейлисты", true) {
                     open_tab(pages, LibraryTab::Playlists, lib.track_sort, out);
                 }
-                // «Новый плейлист» first, then every playlist.
-                widgets::card_row_virtual(ui, "lib-playlists", lib.playlists.len() + 1, widgets::CARD_W, |ui, i| match i {
+                // «Новый плейлист» first, then every playlist and liked album.
+                let items = shelf_items(lib, &[]);
+                widgets::card_row_virtual(ui, "lib-playlists", items.len() + 1, widgets::CARD_W, |ui, i| match i {
                     0 => new_playlist_card(ui, pages, widgets::CARD_W),
-                    i => {
-                        let p = &lib.playlists[i - 1];
-                        nav = widgets::playlist_card_with(ui, p, widgets::CARD_W, "lib", Some(&mut *pages), out).or(nav.take());
-                    }
+                    i => nav = shelf_card(ui, items[i - 1], widgets::CARD_W, pages, out).or(nav.take()),
                 });
             }
             shelf::Overview::RecentlyAdded => {
@@ -472,7 +470,8 @@ fn found(
         }
         if !playlists.is_empty() {
             widgets::section_header(ui, &format!("Плейлисты · {}", playlists.len()), false);
-            nav = playlist_items(ui, &playlists, pages, is_list, out).or(nav);
+            let items: Vec<ShelfItem<'_>> = playlists.iter().map(|p| ShelfItem::Playlist(p)).collect();
+            nav = playlist_items(ui, &items, pages, is_list, out).or(nav);
             ui.add_space(widgets::SECTION_GAP);
         }
     } else {
@@ -506,12 +505,17 @@ fn playlists_tab(
     is_list: bool,
 ) -> Option<Route> {
     let lib = &state.library;
-    let shown: Vec<&PlaylistCard> = lib.playlists.iter().filter(|p| shelf::playlist_matches(words, p)).collect();
+    let shown = shelf_items(lib, words);
     if !words.is_empty() && shown.is_empty() {
         no_results(ui, pages);
         return None;
     }
-    count_line(ui, &count(shown.len(), "плейлист", "плейлиста", "плейлистов"), |_| {});
+    let albums = shown.iter().filter(|i| matches!(i, ShelfItem::Album(_))).count();
+    let mut line = count(shown.len() - albums, "плейлист", "плейлиста", "плейлистов");
+    if albums > 0 {
+        line = format!("{line} · {}", count(albums, "альбом", "альбома", "альбомов"));
+    }
+    count_line(ui, &line, |_| {});
     // «Новый плейлист» first, unless the list is filtered.
     if words.is_empty() {
         if is_list {
@@ -669,9 +673,48 @@ fn new_playlist_card(ui: &mut Ui, pages: &mut PageState, w: f32) {
 }
 
 /// Playlists as a grid (with «Новый плейлист» first when `new`).
+/// A card of «Плейлисты»: a playlist, or an album liked as a whole.
+#[derive(Clone, Copy)]
+enum ShelfItem<'a> {
+    Playlist(&'a PlaylistCard),
+    Album(&'a ReleaseCard),
+}
+
+/// The playlists and liked albums matching `words`, in the library's order
+/// (latest first, «Любимые» first of all).
+fn shelf_items<'a>(lib: &'a nikgob_view::LibraryView, words: &[String]) -> Vec<ShelfItem<'a>> {
+    let mut albums = lib.liked_albums.iter().peekable();
+    let mut items = Vec::new();
+    let album = |r: &'a ReleaseCard, items: &mut Vec<ShelfItem<'a>>| {
+        if shelf::release_matches(words, r) {
+            items.push(ShelfItem::Album(r));
+        }
+    };
+    for (i, p) in lib.playlists.iter().enumerate() {
+        while let Some((_, r)) = albums.next_if(|a| a.0 <= i) {
+            album(r, &mut items);
+        }
+        if shelf::playlist_matches(words, p) {
+            items.push(ShelfItem::Playlist(p));
+        }
+    }
+    for (_, r) in albums {
+        album(r, &mut items);
+    }
+    items
+}
+
+/// The card of `item` in the grid or a row of cards.
+fn shelf_card(ui: &mut Ui, item: ShelfItem<'_>, w: f32, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
+    match item {
+        ShelfItem::Playlist(p) => widgets::playlist_card_with(ui, p, w, "lib", Some(pages), out),
+        ShelfItem::Album(r) => widgets::release_card(ui, r, w, "lib-liked", out),
+    }
+}
+
 fn playlist_grid(
     ui: &mut Ui,
-    items: &[&PlaylistCard],
+    items: &[ShelfItem<'_>],
     pages: &mut PageState,
     new: bool,
     out: &mut Vec<Command>,
@@ -685,8 +728,8 @@ fn playlist_grid(
         if new {
             new_playlist_card(ui, pages, w);
         }
-        for p in items {
-            nav = widgets::playlist_card_with(ui, p, w, "lib", Some(pages), out).or(nav.take());
+        for item in items {
+            nav = shelf_card(ui, *item, w, pages, out).or(nav.take());
         }
     });
     nav
@@ -694,7 +737,7 @@ fn playlist_grid(
 
 fn playlist_items(
     ui: &mut Ui,
-    items: &[&PlaylistCard],
+    items: &[ShelfItem<'_>],
     pages: &mut PageState,
     is_list: bool,
     out: &mut Vec<Command>,
@@ -703,8 +746,12 @@ fn playlist_items(
         return playlist_grid(ui, items, pages, false, out);
     }
     let mut nav = None;
-    for p in items {
-        nav = playlist_row(ui, p, pages, out).or(nav);
+    for item in items {
+        nav = match item {
+            ShelfItem::Playlist(p) => playlist_row(ui, p, pages, out),
+            ShelfItem::Album(r) => release_row(ui, r, out),
+        }
+        .or(nav);
     }
     nav
 }

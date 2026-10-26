@@ -1792,6 +1792,28 @@ impl Worker {
 
     // ---------------------------------------------------------------- loads
 
+    /// The library's playlists and the albums liked as a whole among them
+    /// ([`nikgob_view::LibraryView::liked_albums`]), both latest first,
+    /// «Любимые» staying first; under «только скачанное» the albums with a
+    /// file.
+    fn shelf(&mut self) -> (Vec<nikgob_view::PlaylistCard>, Vec<(usize, nikgob_view::ReleaseCard)>) {
+        let playlists = self.log_err("плейлисты", self.lib.list_playlists()).unwrap_or_default();
+        let albums = self.log_err("альбомы", self.lib.liked_releases(0, 10_000)).unwrap_or_default();
+        let only_local = self.state.read().prefs.library_only_downloaded;
+        let pinned = playlists.iter().take_while(|p| p.id.is_none()).count();
+        let res = &mut self.res;
+        let albums = albums
+            .iter()
+            .filter(|(r, _)| r.liked && (!only_local || r.local_tracks > 0))
+            .map(|(r, at)| {
+                let before = playlists.iter().skip(pinned).position(|p| p.updated_at < *at);
+                (before.map_or(playlists.len(), |i| i + pinned), res.release(r))
+            })
+            .collect();
+        let playlists = playlists.iter().map(|p| res.playlist(p)).collect();
+        (playlists, albums)
+    }
+
     fn load_library(&mut self) {
         self.stream_analysis_changed();
         self.recs_library_changed();
@@ -1805,9 +1827,7 @@ impl Worker {
         let releases = self
             .log_err("библиотека", self.lib.releases(0, 20_000, key))
             .unwrap_or_default();
-        let playlists = self
-            .log_err("плейлисты", self.lib.list_playlists())
-            .unwrap_or_default();
+        let (playlists, liked_albums) = self.shelf();
         let artists = self
             .log_err(
                 "исполнители",
@@ -1840,7 +1860,6 @@ impl Worker {
         let often: Vec<&nikgob_library::ReleaseRow> = often.iter().filter_map(|id| by_id.get(id).copied()).collect();
         let res = &mut self.res;
         let releases: Vec<_> = releases.iter().map(|r| res.release(r)).collect();
-        let playlists: Vec<_> = playlists.iter().map(|p| res.playlist(p)).collect();
         let artists: Vec<_> = artists
             .iter()
             .map(|a| {
@@ -1854,6 +1873,7 @@ impl Worker {
         self.publish(|s| {
             s.library.releases = releases;
             s.library.playlists = playlists;
+            s.library.liked_albums = liked_albums;
             s.library.artists = artists;
             s.library.recently_added = recent;
             s.library.often_played = often;
@@ -2328,15 +2348,15 @@ impl Worker {
         }
         self.stream_analysis_changed();
         self.recs_library_changed();
-        let playlists = self.log_err("плейлисты", self.lib.list_playlists()).unwrap_or_default();
+        let (playlists, liked_albums) = self.shelf();
         let rows: Vec<_> =
             releases.iter().filter_map(|id| self.lib.get_release_row(*id).ok().flatten()).collect();
         let res = &mut self.res;
-        let playlists: Vec<_> = playlists.iter().map(|p| res.playlist(p)).collect();
         let cards: Vec<_> = rows.iter().map(|r| res.release(r)).collect();
         let liked = !cards.is_empty();
         self.publish(|s| {
             s.library.playlists = playlists;
+            s.library.liked_albums = liked_albums;
             let l = &mut s.library;
             for list in [&mut l.releases, &mut l.recently_added, &mut l.often_played] {
                 for c in list.iter_mut() {

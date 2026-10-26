@@ -695,6 +695,10 @@ pub enum TrackSort {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LibraryView {
     pub playlists: Vec<PlaylistCard>,
+    /// The albums liked as a whole, shown among the playlists: each with
+    /// the index in [`Self::playlists`] it goes before (its length: after
+    /// them all), so both read latest first.
+    pub liked_albums: Vec<(usize, ReleaseCard)>,
     pub releases: Vec<ReleaseCard>,
     pub artists: Vec<ArtistCard>,
     pub release_sort: ReleaseSort,
