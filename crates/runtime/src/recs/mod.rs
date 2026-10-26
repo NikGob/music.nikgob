@@ -750,7 +750,7 @@ fn read_parts(
         .and_then(|(_, json)| serde_json::from_str(&json).ok())
         .filter(|w: &Weights| w.version == FEATURE_VERSION);
     let history = TasteInput {
-        events: events.iter().map(nikgob_recs::Play::from).collect(),
+        events: events.iter().map(play_of).collect(),
         likes: like_times.iter().map(|l| l.0).collect(),
         like_times,
         playlist_entries: entries,
@@ -796,6 +796,16 @@ fn read_parts(
         worlds,
     };
     Ok((snap, tiles_input, index_len, history))
+}
+
+/// An event as the recommendations read it: a play imported before
+/// imports had their origin (the import's device) is an import.
+pub(crate) fn play_of(e: &nikgob_core::model::Event) -> nikgob_recs::Play {
+    let mut p = nikgob_recs::Play::from(e);
+    if p.origin.is_none() && e.device.as_str() == crate::streams::IMPORT_DEVICE {
+        p.origin = Some(nikgob_core::model::EventOrigin::Import);
+    }
+    p
 }
 
 /// The taste profiles of a build in the log, the largest share first: the

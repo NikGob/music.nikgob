@@ -9,7 +9,9 @@
 //!   heard (the song was listened to), a repeat (started again within a day
 //!   of completing) +0.5, a playlist entry +1.5 (decayed from when it was
 //!   added); a like is +3, a state without decay. Imported events (Takeout,
-//!   Spotify) count the same.
+//!   Spotify; [`EventOrigin::Import`]) count the same here, but never in
+//!   the hot affinity, the completes of «На повторе» or the co-listening:
+//!   those are this app's own sessions.
 //! * **Hot affinity** ([`Taste::hot_at`]): the same event weights with a
 //!   2-day half-life, what is on repeat now («На повторе», «Слушать
 //!   снова»; [`hot_affinity`] for a history without a catalog).
@@ -428,9 +430,13 @@ impl Weigher {
 
 /// The hot affinity ([`Taste::hot_at`]) of every track in `events` at
 /// `now`, `duration` telling a track's length: for a history read without
-/// a catalog (Главная's «Слушать снова»).
+/// a catalog (Главная's «Слушать снова»). Imported plays are not this
+/// app's listening: they are left out.
 pub fn hot_affinity(events: &[Play], duration: impl Fn(TrackId) -> Option<u32>, now: UnixMs) -> HashMap<TrackId, f32> {
-    let mut sorted: Vec<&Play> = events.iter().filter(|p| matches!(p.kind, EventType::Start | EventType::Complete | EventType::Skip)).collect();
+    let mut sorted: Vec<&Play> = events
+        .iter()
+        .filter(|p| matches!(p.kind, EventType::Start | EventType::Complete | EventType::Skip) && p.origin != Some(EventOrigin::Import))
+        .collect();
     sorted.sort_by_key(|p| p.ts);
     let mut ids: Vec<TrackId> = Vec::new();
     let mut pos: HashMap<TrackId, usize> = HashMap::new();
@@ -538,15 +544,32 @@ impl Taste {
         let mut year_ago = vec![0u16; n];
         let mut hot = vec![0.0f32; n];
 
-        let mut events: Vec<(UnixMs, usize, EventType, Option<u32>, EventContext)> = input
-            .events
-            .iter()
-            .filter(|p| {
-                matches!(p.kind, EventType::Start | EventType::Complete | EventType::Skip)
-            })
-            .filter_map(|p| Some((p.ts, catalog.position(p.track)?, p.kind, p.position_ms, p.context)))
-            .collect();
+        let mut events: Vec<(UnixMs, usize, EventType, Option<u32>, EventContext)> = Vec::new();
+        let mut imported: Vec<(UnixMs, usize, EventType, Option<u32>, EventContext)> = Vec::new();
+        for p in &input.events {
+            if !matches!(p.kind, EventType::Start | EventType::Complete | EventType::Skip) {
+                continue;
+            }
+            let Some(i) = catalog.position(p.track) else { continue };
+            let e = (p.ts, i, p.kind, p.position_ms, p.context);
+            if p.origin == Some(EventOrigin::Import) { imported.push(e) } else { events.push(e) }
+        }
         events.sort_by_key(|e| e.0);
+        imported.sort_by_key(|e| e.0);
+        // A play (or a complete) of either kind: when it was last played, a
+        // play counted, by part of the day and a year ago.
+        let mut count = |i: usize, ts: UnixMs, play: bool| {
+            last_played[i] = last_played[i].max(Some(ts));
+            if !play {
+                return;
+            }
+            plays[i] += 1;
+            let part = DayPart::at(ts, input.utc_offset_min).index();
+            daypart[i][part] = daypart[i][part].saturating_add(1);
+            if (ts - (now - YEAR_MS)).abs() <= YEAR_AGO_SPAN_MS {
+                year_ago[i] = year_ago[i].saturating_add(1);
+            }
+        };
 
         // Sessions and co-listening.
         let mut co_pairs: HashMap<(ArtistId, ArtistId), f32> = HashMap::new();
@@ -565,18 +588,12 @@ impl Taste {
                 if now - ts < ON_REPEAT_MS {
                     recent_completes[i] = recent_completes[i].saturating_add(1);
                 }
-                last_played[i] = last_played[i].max(Some(ts));
+                count(i, ts, false);
             }
             if !counted_play {
                 continue;
             }
-            plays[i] += 1;
-            last_played[i] = last_played[i].max(Some(ts));
-            let part = DayPart::at(ts, input.utc_offset_min).index();
-            daypart[i][part] = daypart[i][part].saturating_add(1);
-            if (ts - (now - YEAR_MS)).abs() <= YEAR_AGO_SPAN_MS {
-                year_ago[i] = year_ago[i].saturating_add(1);
-            }
+            count(i, ts, true);
 
             if last_play_ts.is_none_or(|l| ts - l >= SESSION_GAP_MS) {
                 tail.clear();
@@ -598,6 +615,17 @@ impl Taste {
             }
         }
         weigher.finish(&mut add);
+        // Imported plays: the long affinity alone, weighed apart (another
+        // service's sessions and skips are not this app's).
+        let mut weigher = Weigher::new(n);
+        let mut add_long = |i: usize, ts: UnixMs, w: f32| affinity[i] += w * decay(now, ts, HALF_LIFE_MS);
+        for &(ts, i, kind, pos, context) in &imported {
+            let play = weigher.event(i, ts, kind, pos, context, catalog.tracks[i].duration_ms, &mut add_long);
+            if play || kind == EventType::Complete {
+                count(i, ts, play);
+            }
+        }
+        weigher.finish(&mut add_long);
         for id in &input.likes {
             if let Some(i) = catalog.position(*id)
                 && !liked[i]

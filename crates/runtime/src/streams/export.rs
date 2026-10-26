@@ -18,9 +18,12 @@
 //! CSV and HTML files are told by their first line / bytes, so loose files
 //! (no `Takeout/YouTube…` folders around them) work too, and anything else
 //! with those extensions (a game's save, the search history) is skipped.
-//! Entries of plain YouTube (header «YouTube») are not plays, but the
-//! videos are remembered ([`ExportData::plain_watched`]): the import uses
-//! them to tell playlists of music from playlists of videos.
+//! Entries of plain YouTube (header «YouTube») are read as plays too, and
+//! their videos remembered ([`ExportData::plain_watched`]): the import
+//! keeps of either kind only what is music ([`is_music_play`],
+//! profiles-v1 §12.3) and tells playlists of music from playlists of
+//! videos by them. A history that does not say how a play ended (YouTube's)
+//! gets the end its gap to the next entry tells ([`infer_outcomes`]).
 //!
 //! Everything here is plain parsing, without the library or the network;
 //! the cold-start import ([`super::cold`]) turns the result into tracks,
@@ -144,6 +147,17 @@ pub(crate) struct Play {
     /// How long it played, when the file says.
     pub(crate) ms_played: Option<u64>,
     pub(crate) outcome: Outcome,
+    /// An entry of a watch history: where it was watched and by whom.
+    pub(crate) watched: Option<Watched>,
+}
+
+/// What a watch history's entry says beyond the video.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Watched {
+    /// Headed «YouTube Music» (else plain «YouTube»).
+    pub(crate) music_app: bool,
+    /// The channel is an artist's auto-generated «- Topic» one.
+    pub(crate) topic: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -561,13 +575,13 @@ fn apply_json(kind: Kind, json: &Value, out: &mut ExportData) -> bool {
             let mut found = false;
             for v in json.as_array().into_iter().flatten() {
                 if let Some(play) = watched(v) {
+                    if play.watched.is_some_and(|w| !w.music_app)
+                        && let Some(id) = &play.item.id
+                    {
+                        // Plain YouTube: a sign of a video, music only if it says so.
+                        out.plain_watched.insert(id.clone());
+                    }
                     out.plays.push(play);
-                    found = true;
-                } else if str_of(v, "header") == Some("YouTube")
-                    && let Some(id) = str_of(v, "titleUrl").and_then(video_id)
-                {
-                    // Plain YouTube: not a play, but a sign of a video.
-                    out.plain_watched.insert(id);
                     found = true;
                 }
             }
@@ -619,6 +633,7 @@ fn extended_play(v: &Value) -> Option<Play> {
         start_ms: end - ms as i64,
         ms_played: Some(ms),
         outcome,
+        watched: None,
     })
 }
 
@@ -635,6 +650,7 @@ fn old_play(v: &Value) -> Option<Play> {
         start_ms: end - ms as i64,
         ms_played: Some(ms),
         outcome: if ms >= SKIP_BELOW_MS { Outcome::Complete } else { Outcome::Skip },
+        watched: None,
     })
 }
 
@@ -703,10 +719,19 @@ fn is_playlist_id(s: &str) -> bool {
         && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The endings of an artist's auto-generated channel's name.
+const TOPIC_SUFFIXES: [&str; 6] = [" - Topic", " – Topic", " - тема", " – тема", " - Тема", " – Тема"];
+
+/// "Artist - Topic": YouTube's own channel of an artist's songs.
+pub(crate) fn is_topic(name: &str) -> bool {
+    let n = name.trim();
+    TOPIC_SUFFIXES.iter().any(|s| n.ends_with(s))
+}
+
 /// "Artist - Topic" (the auto-generated channel) → "Artist"; "ArtistVEVO" → "Artist".
 pub(crate) fn channel_artist(name: &str) -> String {
     let n = name.trim();
-    for suffix in [" - Topic", " – Topic", " - тема", " – тема", " - Тема", " – Тема"] {
+    for suffix in TOPIC_SUFFIXES {
         if let Some(a) = n.strip_suffix(suffix) {
             return a.trim().to_owned();
         }
@@ -738,25 +763,100 @@ fn watched_title(title: &str) -> String {
 }
 
 fn watched(v: &Value) -> Option<Play> {
-    if str_of(v, "header") != Some("YouTube Music") {
-        return None;
-    }
+    let music_app = match str_of(v, "header")? {
+        "YouTube Music" => true,
+        "YouTube" => false,
+        _ => return None,
+    };
     let id = video_id(str_of(v, "titleUrl")?)?;
     let start = parse_time(str_of(v, "time")?)?;
-    let artist = v
-        .get("subtitles")
-        .and_then(Value::as_array)
-        .and_then(|s| s.first())
-        .and_then(|s| str_of(s, "name"))
-        .map(channel_artist)
-        .unwrap_or_default();
+    let channel = v.get("subtitles").and_then(Value::as_array).and_then(|s| s.first()).and_then(|s| str_of(s, "name"));
+    let artist = channel.map(channel_artist).unwrap_or_default();
     let title = watched_title(str_of(v, "title").unwrap_or_default());
     Some(Play {
         item: Item::new(Service::Youtube, Some(id), &title, &artist, None),
         start_ms: start,
         ms_played: None,
         outcome: Outcome::Unknown,
+        watched: Some(Watched { music_app, topic: channel.is_some_and(is_topic) }),
     })
+}
+
+/// An entry of a watch history that does not say how it ended is skipped
+/// there when the next entry came within this (early under the 30 s of
+/// [`SKIP_BELOW_MS`])…
+pub(crate) const GAP_LATE_MS: i64 = 90_000;
+/// …and played to its end within this (a longer gap: the app was left,
+/// nothing is known).
+pub(crate) const GAP_HEARD_MS: i64 = 30 * 60_000;
+
+/// The ends of the plays of a watch history, which does not say them
+/// (profiles-v1 §12.3), by the gap to the next entry of the history
+/// (music or not): under [`GAP_LATE_MS`] a skip there (an early one under
+/// 30 s), under [`GAP_HEARD_MS`] a complete, later none. When `length` knows the track's length, a gap of 90 % of it is a
+/// complete and a shorter one a skip there.
+pub(crate) fn infer_outcomes(plays: &mut [Play], length: impl Fn(&Item) -> Option<u64>) {
+    let mut order: Vec<usize> = (0..plays.len()).filter(|&i| plays[i].watched.is_some()).collect();
+    order.sort_by_key(|&i| (plays[i].start_ms, i));
+    for k in 0..order.len() {
+        let i = order[k];
+        if plays[i].outcome != Outcome::Unknown || plays[i].ms_played.is_some() {
+            continue;
+        }
+        let Some(&next) = order.get(k + 1) else { break };
+        let gap = plays[next].start_ms - plays[i].start_ms;
+        if gap <= 0 || gap >= GAP_HEARD_MS {
+            continue;
+        }
+        let len = length(&plays[i].item).map(|l| l as i64).filter(|l| *l > 0);
+        let heard = match len {
+            Some(l) => gap * 10 >= l * 9,
+            None => gap >= GAP_LATE_MS,
+        };
+        let p = &mut plays[i];
+        p.outcome = if heard { Outcome::Complete } else { Outcome::Skip };
+        p.ms_played = Some(len.map_or(gap, |l| l.min(gap)) as u64);
+    }
+}
+
+/// Words of a title that make a video YouTube Music played a song (a
+/// clip, an opening): any of them as words of the title.
+const MUSIC_TITLE_WORDS: &[&str] = &[
+    "ost", "soundtrack", "official video", "official music video", "official audio", "lyric video", "mv", "opening",
+    "ending", "op theme", "ed theme", "feat", "ft", "клип",
+];
+
+/// The title says it is music ([`MUSIC_TITLE_WORDS`]).
+fn music_title(title: &str) -> bool {
+    let words: String = fold(title).chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
+    let t = format!(" {} ", words.split_whitespace().collect::<Vec<_>>().join(" "));
+    MUSIC_TITLE_WORDS.iter().any(|w| t.contains(&format!(" {w} ")))
+}
+
+/// An artist's name as [`is_music_play`] compares channels with it.
+pub(crate) fn artist_key(name: &str) -> String {
+    fold(&channel_artist(name))
+}
+
+/// Whether a play of an export is music (profiles-v1 §12.3, the same for
+/// any export, no names of folders or playlists): a service's own history
+/// always; an entry of a watch history when its channel is an artist's
+/// «- Topic» one (under either header), when its video is one the music
+/// side knows (`known`: liked songs, the library's songs, music playlists,
+/// the library's own YouTube ids), when its channel is an artist the user
+/// has (`artists`, by [`artist_key`]), or when YouTube Music played it and
+/// its title says it is a song ([`MUSIC_TITLE_WORDS`]). Anything else of
+/// YouTube Music (a podcast, a vlog) is no play, nor is plain YouTube.
+pub(crate) fn is_music_play(p: &Play, known: &HashSet<String>, artists: &HashSet<String>) -> bool {
+    let Some(w) = p.watched else { return true };
+    if w.topic || p.item.id.as_ref().is_some_and(|id| known.contains(id)) {
+        return true;
+    }
+    let artist = artist_key(&p.item.artist);
+    if artist.chars().count() >= 3 && artists.contains(&artist) {
+        return true;
+    }
+    w.music_app && music_title(&p.item.title)
 }
 
 /// Splits CSV text into rows (quotes, doubled quotes and newlines in quotes).
@@ -893,8 +993,7 @@ fn html_history(text: &str, out: &mut ExportData) -> bool {
         let Some(id) = video_id(&unescape(href)) else { continue };
         found = true;
         if !music {
-            out.plain_watched.insert(id);
-            continue;
+            out.plain_watched.insert(id.clone());
         }
         // The date is the last line that is not a link.
         let Some(start) = body
@@ -907,12 +1006,14 @@ fn html_history(text: &str, out: &mut ExportData) -> bool {
         };
         let title = unescape(title);
         let title = if title.starts_with("http://") || title.starts_with("https://") { "" } else { title.trim() };
-        let artist = links.next().map(|(_, a)| channel_artist(&unescape(a))).unwrap_or_default();
+        let channel = links.next().map(|(_, a)| unescape(a).into_owned());
+        let artist = channel.as_deref().map(channel_artist).unwrap_or_default();
         out.plays.push(Play {
             item: Item::new(Service::Youtube, Some(id), title, &artist, None),
             start_ms: start,
             ms_played: None,
             outcome: Outcome::Unknown,
+            watched: Some(Watched { music_app: music, topic: channel.as_deref().is_some_and(is_topic) }),
         });
     }
     found
@@ -1255,17 +1356,21 @@ mod tests {
         ]);
         let mut out = ExportData::default();
         assert!(html_history(&html, &mut out));
-        assert_eq!(out.plays.len(), 3);
+        assert_eq!(out.plays.len(), 4);
         let p = &out.plays[0];
         assert_eq!(p.item.id.as_deref(), Some("fm7INtTR5Pk"));
         assert_eq!(p.item.title, "lazy cat - Eve (Live ver)");
         assert_eq!(p.item.artist, "Eve");
         assert_eq!(p.outcome, Outcome::Unknown);
+        assert_eq!(p.watched, Some(Watched { music_app: true, topic: true }));
         assert_eq!(p.start_ms, parse_time("2026-10-15T13:55:46Z").unwrap());
-        assert_eq!(out.plays[1].item.title, "");
-        assert_eq!(out.plays[1].item.artist, "");
-        assert_eq!(out.plays[1].start_ms, parse_time("2026-01-05T21:46:24Z").unwrap());
-        let kino = &out.plays[2];
+        let plain = &out.plays[1];
+        assert_eq!((plain.item.id.as_deref(), plain.item.artist.as_str()), (Some("plainVideo1"), "Blogger"));
+        assert_eq!(plain.watched, Some(Watched { music_app: false, topic: false }));
+        assert_eq!(out.plays[2].item.title, "");
+        assert_eq!(out.plays[2].item.artist, "");
+        assert_eq!(out.plays[2].start_ms, parse_time("2026-01-05T21:46:24Z").unwrap());
+        let kino = &out.plays[3];
         assert_eq!(kino.item.id.as_deref(), Some("gruppaKrovi"));
         assert_eq!(kino.item.title, "Rock & Roll 'n' \"Кино\"");
         assert_eq!(kino.start_ms, parse_time("2026-10-15T13:55:46Z").unwrap());
@@ -1273,6 +1378,90 @@ mod tests {
 
         let mut out = ExportData::default();
         assert!(!html_history("<html><style>.mdl-grid{}</style><body>Search history</body></html>", &mut out));
+    }
+
+    /// A watched entry `at_s` seconds into the history.
+    fn entry(id: &str, at_s: i64, music_app: bool, topic: bool, title: &str, artist: &str) -> Play {
+        Play {
+            item: Item::new(Service::Youtube, Some(id.to_owned()), title, artist, None),
+            start_ms: 1_000_000_000_000 + at_s * 1000,
+            ms_played: None,
+            outcome: Outcome::Unknown,
+            watched: Some(Watched { music_app, topic }),
+        }
+    }
+
+    /// A watch history's plays end as the gap to the next entry says: an
+    /// early skip under 30 s, a late one under 90 s, heard out under half
+    /// an hour, unknown after that and at the end; a known length decides
+    /// between a complete and a skip; a service's own outcome stays.
+    #[test]
+    fn outcome_by_gap() {
+        let mut plays = vec![
+            entry("a0000000001", 0, true, true, "A", "X"),
+            entry("a0000000002", 20, true, true, "B", "X"),
+            entry("a0000000003", 80, false, false, "C", "Y"),
+            entry("a0000000004", 300, true, true, "D", "X"),
+            entry("a0000000005", 300 + 3_600, true, true, "E", "X"),
+            entry("a0000000006", 300 + 3_600 + 100, true, true, "F", "X"),
+            entry("a0000000007", 300 + 3_600 + 200, true, true, "G", "X"),
+        ];
+        let mut spotify = entry("s1", 10, false, false, "S", "Z");
+        (spotify.watched, spotify.ms_played, spotify.outcome) = (None, Some(5_000), Outcome::Skip);
+        plays.push(spotify);
+        // E is 200 s long: 100 s of it is a skip; F 100 s long, heard out.
+        let length = |i: &Item| match i.title.as_str() {
+            "E" => Some(200_000),
+            "F" => Some(100_000),
+            _ => None,
+        };
+        infer_outcomes(&mut plays, length);
+        let got: Vec<(Outcome, Option<u64>)> = plays.iter().map(|p| (p.outcome, p.ms_played)).collect();
+        assert_eq!(got, vec![
+            (Outcome::Skip, Some(20_000)),
+            (Outcome::Skip, Some(60_000)),
+            (Outcome::Complete, Some(220_000)),
+            (Outcome::Unknown, None),
+            (Outcome::Skip, Some(100_000)),
+            (Outcome::Complete, Some(100_000)),
+            (Outcome::Unknown, None),
+            (Outcome::Skip, Some(5_000)),
+        ]);
+    }
+
+    /// A «- Topic» channel's video is music under plain «YouTube» too, as
+    /// is a video the music side knows or a channel of an artist the user
+    /// has; any other plain video is not.
+    #[test]
+    fn topic_under_youtube_is_music() {
+        let known = HashSet::from(["likedSong01".to_owned()]);
+        let artists = HashSet::from([artist_key("Kevin Penkin")]);
+        let is = |p: &Play| is_music_play(p, &known, &artists);
+        assert!(is(&entry("v0000000001", 0, false, true, "Hanezeve Caradhina", "Kevin Penkin")));
+        assert!(is(&entry("likedSong01", 0, false, false, "anything", "a channel")));
+        assert!(is(&entry("v0000000002", 0, false, false, "Tears of Suzume", "kevin penkin")));
+        assert!(is(&entry("v0000000003", 0, false, false, "Kevin Penkin - Live", "Kevin PenkinVEVO")));
+        assert!(!is(&entry("v0000000004", 0, false, false, "How to cook rice", "Blogger")));
+        assert!(!is(&entry("v0000000005", 0, false, false, "Some song (Official Video)", "Someone")), "plain YouTube needs more than a title");
+        let mut spotify = entry("s1", 0, false, false, "Song", "Anyone");
+        spotify.watched = None;
+        assert!(is(&spotify), "a service's own history is music");
+    }
+
+    /// Under «YouTube Music» a video is music only when its channel, its
+    /// id or its title says so: a podcast or a vlog it played is no play.
+    #[test]
+    fn non_music_under_ytm_skipped() {
+        let (known, artists) = (HashSet::new(), HashSet::new());
+        let is = |p: &Play| is_music_play(p, &known, &artists);
+        assert!(is(&entry("v0000000001", 0, true, true, "Song", "Eve")));
+        assert!(is(&entry("v0000000002", 0, true, false, "Eve - Kaikai Kitan (Official Video)", "Eve")));
+        assert!(is(&entry("v0000000003", 0, true, false, "Made in Abyss OST - Hanezeve", "Uploader")));
+        assert!(is(&entry("v0000000004", 0, true, false, "Song feat. Someone", "Uploader")));
+        assert!(is(&entry("v0000000005", 0, true, false, "Группа — Песня (клип)", "Uploader")));
+        assert!(!is(&entry("v0000000006", 0, true, false, "Podcast #42: how we work", "Talk show")));
+        assert!(!is(&entry("v0000000007", 0, true, false, "Software engineering vlog", "Someone")));
+        assert!(!is(&entry("v0000000008", 0, true, false, "Mvideo unboxing", "Shop")), "a word, not a part of one");
     }
 
     #[test]

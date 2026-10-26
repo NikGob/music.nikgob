@@ -50,7 +50,7 @@ use nikgob_view::{self as v, Command};
 use crate::Worker;
 use crate::import::Internal;
 
-pub(crate) use cold::{STREAM_JOB, plural};
+pub(crate) use cold::{IMPORT_DEVICE, STREAM_JOB, plural};
 pub(crate) use replace::shown_title;
 pub(crate) use wishlist::WISH_ID;
 pub(crate) use schedule::wake_jitter;

@@ -26,6 +26,10 @@
 //! * The regions of taste in sound ([`crate::regions`]) of the tracks with
 //!   long affinity, and how much lower each track stands for the dislikes
 //!   near it ([`crate::dislike`]).
+//! * Imported plays ([`EventOrigin::Import`], another service's history)
+//!   teach the long taste alone: the long affinity of their tracks (and
+//!   the profiles' mass). Never the session, the pairs, the transitions,
+//!   the models or the hot affinity: those are this app's own listening.
 //!
 //! [`UserModel::build`] walks the history in order of time: the stats, and
 //! the weights too unless [`Weights`] of the same [`FEATURE_VERSION`] are
@@ -180,9 +184,15 @@ fn halve(x: f32, from: UnixMs, to: UnixMs, half: i64) -> f32 {
 
 impl TrackStats {
     fn add(&mut self, ts: UnixMs, r: f32, today: f32) {
+        self.add_as(ts, r, today, true);
+    }
+
+    /// [`Self::add`], the hot affinity left out unless `hot` (an imported
+    /// play is long taste only).
+    fn add_as(&mut self, ts: UnixMs, r: f32, today: f32, hot: bool) {
         let ts = ts.max(self.t_ref);
         self.a_long = halve(self.a_long, self.t_ref, ts, H_LONG_MS) + r;
-        self.a_hot = halve(self.a_hot, self.t_ref, ts, H_HOT_MS) + r;
+        self.a_hot = halve(self.a_hot, self.t_ref, ts, H_HOT_MS) + if hot { r } else { 0.0 };
         self.a_today = halve(self.a_today, self.t_ref, ts, crate::taste::HALF_LIFE_MS) + today;
         self.t_ref = ts;
     }
@@ -250,7 +260,7 @@ impl WorldStats {
 }
 
 /// Track → track inside sessions (by catalog position).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CoOccur {
     next: Vec<Vec<(u32, f32)>>,
 }
@@ -372,7 +382,8 @@ impl Default for Weights {
 }
 
 /// Whether a start teaches the model of the next start: the user chose
-/// it (a history older than origins: anything but a radio's).
+/// it (a history older than origins: anything but a radio's). An imported
+/// play never does.
 pub fn teaches(origin: Option<EventOrigin>, context: EventContext) -> bool {
     match origin {
         Some(o) => !o.is_auto(),
@@ -459,6 +470,8 @@ pub struct UserModel {
     streak: u32,
     last_event: Option<UnixMs>,
     learn: bool,
+    /// Imported starts not ended yet, by catalog position.
+    import_open: HashMap<usize, UnixMs>,
 }
 
 impl TrackLookup for UserModel {
@@ -512,6 +525,7 @@ impl UserModel {
         for p in ordered(&input.events) {
             m.event(p, None);
         }
+        m.close_imported();
         m.now = now;
         m.learn = false;
         m.settle(catalog, input);
@@ -660,6 +674,7 @@ impl UserModel {
             streak: 0,
             last_event: None,
             learn: false,
+            import_open: HashMap::new(),
         }
     }
 
@@ -932,9 +947,57 @@ impl UserModel {
         step(next, self.features(m, target), scored);
     }
 
+    /// One imported play's event (another service's history): its outcome
+    /// teaches the long affinity of its track, nothing else.
+    fn imported(&mut self, p: &Play) {
+        let Some(&i) = self.pos.get(&p.track) else { return };
+        match p.kind {
+            EventType::Start => {
+                if let Some(t0) = self.import_open.insert(i, p.ts) {
+                    self.tracks[i].add_as(t0, R_OPEN, W_START_ONLY, false);
+                }
+            }
+            EventType::Complete => {
+                if self.import_open.remove(&i).is_some() {
+                    self.tracks[i].add_as(p.ts, R_COMPLETE, W_COMPLETE, false);
+                }
+            }
+            EventType::Skip => {
+                if self.import_open.remove(&i).is_none() {
+                    return;
+                }
+                let (r, today) = match p.position_ms {
+                    Some(pos) if pos < EARLY_SKIP_MS => (R_EARLY, W_SKIP_EARLY),
+                    pos => {
+                        let heard = match (pos, self.duration[i]) {
+                            (Some(pos), Some(d)) if d > 0 => (pos as f32 / d as f32).clamp(0.0, 1.0),
+                            _ => 0.0,
+                        };
+                        (R_LATE * heard, W_SKIP_LATE_HEARD * heard)
+                    }
+                };
+                self.tracks[i].add_as(p.ts, r, today, false);
+            }
+            _ => {}
+        }
+    }
+
+    /// Imported starts that never ended count as such.
+    fn close_imported(&mut self) {
+        let mut open: Vec<(usize, UnixMs)> = self.import_open.drain().collect();
+        open.sort_unstable();
+        for (i, t0) in open {
+            self.tracks[i].add_as(t0, R_OPEN, W_START_ONLY, false);
+        }
+    }
+
     /// One event of the history, in order of time. `hook` sees every start
     /// that follows another of its session, before anything learns from it.
     fn event(&mut self, p: &Play, hook: Option<&mut dyn FnMut(&Self, &Moment, usize, &Play)>) {
+        if p.origin == Some(EventOrigin::Import) {
+            self.imported(p);
+            return;
+        }
         if self.last_event.is_none_or(|l| p.ts - l >= SESSION_GAP_MS) {
             self.streak = 0;
         }
@@ -1101,7 +1164,7 @@ impl UserModel {
 fn passive_after(events: &[Play]) -> u32 {
     let mut runs: Vec<u32> = Vec::new();
     let mut run = 0u32;
-    for p in ordered(events) {
+    for p in ordered(events).into_iter().filter(|p| p.origin != Some(EventOrigin::Import)) {
         match (p.kind, p.origin) {
             (EventType::Start, Some(o)) if o.is_auto() => run += 1,
             (EventType::Start, Some(_)) | (EventType::Skip | EventType::Like, _) => {
@@ -1219,7 +1282,9 @@ pub fn replay_with(
     unscored: &HashSet<TrackId>,
 ) -> ReplayReport {
     let events = ordered(&input.events);
-    let (Some(first), Some(last)) = (events.first().map(|p| p.ts), events.last().map(|p| p.ts)) else {
+    // The user's own history: imported plays are walked, never scored.
+    let own: Vec<UnixMs> = events.iter().filter(|p| p.origin != Some(EventOrigin::Import)).map(|p| p.ts).collect();
+    let (Some(&first), Some(&last)) = (own.first(), own.last()) else {
         return ReplayReport::default();
     };
     let mid = first + (last - first) / 2;
@@ -1261,7 +1326,10 @@ pub fn replay_with(
         let k = k_of[&(*p as *const Play)];
         let ended = outcome.get(&k).copied().unwrap_or(Ended::Open);
         // The skip model's prediction before it learns from this start.
-        if p.kind == EventType::Start && p.ts >= mid && matches!(ended, Ended::Complete | Ended::Early)
+        if p.kind == EventType::Start
+            && p.origin != Some(EventOrigin::Import)
+            && p.ts >= mid
+            && matches!(ended, Ended::Complete | Ended::Early)
             && let Some(i) = m.position(p.track)
         {
             let walk = if m.walk.last_ts().is_none_or(|l| p.ts - l >= SESSION_GAP_MS) { Session::default() } else { m.walk.clone() };
@@ -1514,6 +1582,58 @@ pub(crate) mod tests {
         // Within a profile its best loved stands at 1.
         let best = (0..m.len()).filter(|&i| kind(i) == 1).map(|i| m.profile_affinity(i)).fold(0.0f32, f32::max);
         assert!((best - 1.0).abs() < 1e-4, "{best}");
+    }
+
+    /// A thousand imported plays (another service's history) teach the
+    /// long affinity of their tracks and nothing else: no step of either
+    /// model, no pair, no world's presence, no transition, no hot
+    /// affinity, whether they are years old or amid the user's own; and a
+    /// replay scores the same starts. Years old, the weights come out about
+    /// the same (the affinity they gave has faded; their tracks only join
+    /// the candidates of a step).
+    #[test]
+    fn import_does_not_teach() {
+        let (cat, idx, history) = album_listener(20, 4);
+        let own = UserModel::build(&cat, &history, input(&idx), T0);
+        let first = history.events.iter().map(|p| p.ts).min().unwrap();
+        let with_imports = |from: UnixMs, step: i64| {
+            let mut rng = Rng::new(9);
+            let mut with = history.clone();
+            for k in 0..1_000i64 {
+                let id = tid(rng.below(300) as u128);
+                let ts = from + k * step + rng.below(1000) as i64;
+                let import = |kind, at, pos| Play { origin: Some(EventOrigin::Import), ..Play::new(id, at, kind, pos) };
+                with.events.push(import(EventType::Start, ts, Some(0)));
+                with.events.push(if k % 5 == 0 {
+                    import(EventType::Skip, ts + 10_000, Some(10_000))
+                } else {
+                    import(EventType::Complete, ts + 200_000, Some(200_000))
+                });
+            }
+            with
+        };
+        for (what, with) in [
+            ("years old", with_imports(first - 3_000 * DAY_MS, 9 * HOUR_MS)),
+            ("amid", with_imports(first, (T0 - first) / 1_000)),
+        ] {
+            let m = UserModel::build(&cat, &with, input(&idx), T0);
+            assert_eq!((m.weights.next.seen, m.weights.skip.seen), (own.weights.next.seen, own.weights.skip.seen), "{what}");
+            assert_eq!(m.co, own.co, "{what}: no pair");
+            assert_eq!(m.worlds, own.worlds, "{what}: no world's presence");
+            assert_eq!((m.lane_trans, &m.trans), (own.lane_trans, &own.trans), "{what}");
+            let longer = (0..m.len()).filter(|&i| m.tracks[i].a_long > own.tracks[i].a_long + 1e-6).count();
+            assert!(longer > 50, "{what}: the long affinity learnt ({longer})");
+            for i in 0..m.len() {
+                assert!((m.tracks[i].aff_hot(T0) - own.tracks[i].aff_hot(T0)).abs() < 1e-5, "{what}: hot {i}");
+                assert_eq!((m.tracks[i].starts, m.tracks[i].early), (own.tracks[i].starts, own.tracks[i].early), "{what}");
+            }
+            let (a, b) = (replay(&cat, &history, input(&idx)), replay(&cat, &with, input(&idx)));
+            assert_eq!((a.get("all", "learned").n, a.skip_test), (b.get("all", "learned").n, b.skip_test), "{what}");
+            if what == "years old" {
+                let close = |x: &[f32], y: &[f32]| x.iter().zip(y).all(|(a, b)| (a - b).abs() < 0.01);
+                assert!(close(&m.weights.next.w, &own.weights.next.w) && close(&m.weights.skip.w, &own.weights.skip.w), "{:?}", m.weights);
+            }
+        }
     }
 
     /// The outcome weights of §4.1: a late skip is a little plus, the app

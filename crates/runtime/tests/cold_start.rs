@@ -247,11 +247,19 @@ fn takeout_youtube_music_history_likes_and_playlists() {
     let rt = start(&lib, vec![youtube.clone()]);
     import(&rt, Command::ImportExportFiles(fixtures().join("takeout")));
 
-    // Three YouTube Music plays (the YouTube video and the search are not).
+    // Two plays of «- Topic» channels, the first heard out by the gap to
+    // the next entry (the plain video, a search, a removed video are no
+    // plays), as imported plays of the history.
     assert_eq!(lib.count_events().unwrap(), 3);
     let gruppa = track_of(&lib, Service::Youtube, "yt-gruppa-1").unwrap();
     let row = lib.get_track_row(gruppa).unwrap().unwrap();
     assert_eq!(row.title, "Группа крови");
+    let ev = lib.events_of_track(gruppa, 10).unwrap();
+    assert_eq!(ev.len(), 2);
+    assert!(ev.iter().any(|e| e.event_type == nikgob_core::model::EventType::Complete));
+    assert!(ev.iter().all(|e| e.origin == Some(nikgob_core::model::EventOrigin::Import)
+        && e.context_id.as_deref() == Some("import:youtube_history")));
+    assert!(track_of(&lib, Service::Youtube, "removedvid1").is_none());
     let digital = track_of(&lib, Service::Youtube, "yt-discovery-3").unwrap();
     assert_eq!(lib.events_of_track(digital, 10).unwrap().len(), 1, "a start, nothing else known");
 

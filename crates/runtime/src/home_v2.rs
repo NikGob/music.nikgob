@@ -124,7 +124,7 @@ impl Facts {
                 _ => {}
             }
         }
-        let plays: Vec<nikgob_recs::Play> = events.iter().map(nikgob_recs::Play::from).collect();
+        let plays: Vec<nikgob_recs::Play> = events.iter().map(crate::recs::play_of).collect();
         let hot = nikgob_recs::hot_affinity(&plays, |t| facts.get(&t).and_then(|f| f.duration_ms), now);
         Self { rows, facts, starts, completes, last_start, liked, hot }
     }

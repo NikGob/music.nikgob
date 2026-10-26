@@ -6,8 +6,11 @@
 //! line and ends with a summary toast.
 //!
 //! * History → events only (`start`, then `complete` or `skip` where the
-//!   source tells), on stream tracks that stay outside the library ("seen").
-//!   Never likes, never the wishlist.
+//!   source tells, or the gap to the next entry of a watch history), on
+//!   stream tracks that stay outside the library ("seen"), of origin
+//!   [`EventOrigin::Import`]: the recommendations learn the long taste from
+//!   them and nothing of this app's sessions. Of a watch history only the
+//!   music ([`export::is_music_play`]). Never likes, never the wishlist.
 //! * Likes → library likes of stream tracks plus wishlist items that wait
 //!   ("ждёт", origin `import`) for the user's "скачать". From the API they go
 //!   through the like pull ([`Worker::apply_remote_likes`]), so the first
@@ -39,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use nikgob_core::model::{
-    DeviceId, Event, EventContext, EventType, LikeTarget, PlaylistId, TrackId, UnixMs,
+    DeviceId, Event, EventContext, EventOrigin, EventType, LikeTarget, PlaylistId, TrackId, UnixMs,
     WishlistOrigin,
 };
 use nikgob_core::streaming::{
@@ -393,6 +396,7 @@ fn store_history(
             };
             let kind = Some(p.item.service.source_kind());
             let position = p.ms_played.map(|ms| u32::try_from(ms).unwrap_or(u32::MAX));
+            let context_id = Some(format!("import:{}_history", p.item.service.as_str()));
             let mut push = |ts: UnixMs, t: EventType| {
                 events.push(Event {
                     id: event_id(ts, track, t),
@@ -403,8 +407,8 @@ fn store_history(
                     position_ms: if t == EventType::Start { Some(0) } else { position },
                     context: EventContext::Other,
                     device: device.clone(),
-                    origin: None,
-                    context_id: None,
+                    origin: Some(EventOrigin::Import),
+                    context_id: context_id.clone(),
                     end_reason: None,
                     attention: None,
                     volume: None,
@@ -450,11 +454,36 @@ async fn read_export(
             format!("Не получилось прочитать: {}", data.problems.join("; "))
         });
     }
+    // How a watch history's plays ended: by the gaps between its entries,
+    // music or not.
+    export::infer_outcomes(&mut data.plays, |_| None);
+    // Its music (profiles-v1 §12.3): what a «- Topic» channel, a known
+    // video or an artist the user has says is a song.
+    let mut known: HashSet<String> = data
+        .likes
+        .iter()
+        .filter(|i| i.service == Service::Youtube)
+        .filter_map(|i| i.id.clone())
+        .collect();
+    known.extend(
+        lib.track_remote_ids()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.service == Service::Youtube)
+            .map(|r| r.id),
+    );
+    let mut artists: HashSet<String> = lib.artist_names().unwrap_or_default().iter().map(|(_, n)| export::artist_key(n)).collect();
+    artists.extend(data.likes.iter().flat_map(|i| std::iter::once(&i.artist).chain(&i.featured)).map(|a| export::artist_key(a)));
+    artists.extend(
+        data.plays.iter().filter(|p| p.watched.is_some_and(|w| w.topic)).map(|p| export::artist_key(&p.item.artist)),
+    );
+    artists.retain(|a| a.chars().count() >= 3);
     // YouTube playlists of plain videos stay out; the ones that cannot be
     // music whatever their unknown videos are go before the look-ups.
     let music: HashSet<String> = data
         .plays
         .iter()
+        .filter(|p| export::is_music_play(p, &known, &artists))
         .map(|p| &p.item)
         .chain(&data.likes)
         .filter(|i| i.service == Service::Youtube)
@@ -480,7 +509,7 @@ async fn read_export(
             .likes
             .iter()
             .chain(data.playlists.iter().flat_map(|p| &p.items))
-            .chain(data.plays.iter().map(|p| &p.item))
+            .chain(data.plays.iter().filter(|p| export::is_music_play(p, &known, &artists)).map(|p| &p.item))
             .filter(|i| i.service == Service::Youtube && i.title.is_empty())
             .filter_map(|i| i.id.clone())
             .filter(|id| seen.insert(id.clone()))
@@ -503,6 +532,20 @@ async fn read_export(
         }
     }
     data.playlists.retain(|p| keep(p, &full, false));
+    // The videos of the music playlists are known songs too; the rest of a
+    // watch history is no play.
+    known.extend(
+        data.playlists
+            .iter()
+            .filter(|p| p.service == Service::Youtube)
+            .flat_map(|p| &p.items)
+            .filter_map(|i| i.id.clone()),
+    );
+    let read = data.plays.len();
+    data.plays.retain(|p| export::is_music_play(p, &known, &artists));
+    if data.plays.len() < read {
+        log::info!("export: {} of {read} history entries are music", data.plays.len());
+    }
     let plays = data.plays.len();
     let likes: Vec<Wanted> = data.likes.iter().map(|i| wanted(i, &full)).collect();
     let playlists: Vec<PendingPlaylist> = data
@@ -777,8 +820,8 @@ impl Worker {
                     position_ms: pos,
                     context: EventContext::Other,
                     device: device.clone(),
-                    origin: None,
-                    context_id: None,
+                    origin: Some(EventOrigin::Import),
+                    context_id: Some(format!("import:{}_recent", p.track.id.service.as_str())),
                     end_reason: None,
                     attention: None,
                     volume: None,
