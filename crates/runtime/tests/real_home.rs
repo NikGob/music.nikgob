@@ -72,7 +72,10 @@ fn the_home_of_a_real_library() {
     println!("lanes: {}", h.lanes.len());
     for l in &h.lanes {
         let mins: u64 = l.tracks.iter().filter_map(|t| t.duration).map(|d| d.as_secs()).sum::<u64>() / 60;
-        println!("  {} · {} tracks, {mins} min · {} covers · {}", l.lane.title(), l.tracks.len(), l.covers.len(), l.artists.join(", "));
+        println!("  «{}» · {} tracks, {mins} min · {} covers · {}", l.title, l.tracks.len(), l.covers.len(), l.artists.join(", "));
+        for t in l.tracks.iter().take(10) {
+            println!("      {} — {}", t.artist, t.title);
+        }
     }
     println!("listen again: {}", h.listen_again.len());
     for t in &h.listen_again {

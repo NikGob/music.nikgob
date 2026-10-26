@@ -406,7 +406,10 @@ mod tests {
             new: Vec::new(),
             suggested: Vec::new(),
             rerank: false,
-            lanes_salt: 0,
+            refresh_mix: None,
+            blends: Vec::new(),
+            session: nikgob_recs::Session::default(),
+            mix_prefs: super::super::lanes::MixPrefs::of(&nikgob_view::Prefs::default()),
             extra: Default::default(),
             new_log: Default::default(),
         };

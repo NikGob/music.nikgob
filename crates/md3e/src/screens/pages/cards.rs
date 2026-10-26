@@ -312,11 +312,13 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
 /// (with «С новым» the fourth is a new song's), the name in one line and
 /// its artists in two. A click plays it; under the pointer ⋮ at the top
 /// and ▶ at the bottom grow in and the mosaic comes a little closer; while
-/// it plays the name is primary and ⏸ stays in a square.
-pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, playing: bool, status: Status, out: &mut Vec<Command>) {
+/// it plays the name is primary and ⏸ stays in a square. With `can_blend`
+/// ⋮ offers «Смешать с…» (the sheet of the other profiles).
+#[allow(clippy::too_many_arguments)]
+pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, can_blend: bool, playing: bool, status: Status, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let theme = Theme::get(ui.ctx());
-    let id = ui.id().with(("home-mix", l.lane));
+    let id = ui.id().with(("home-mix", l.key));
     let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     let menu_open = ui.ctx().data(|d| d.get_temp::<bool>(id.with("more-open"))).unwrap_or(false);
@@ -338,7 +340,7 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, playing: bool,
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
-        let tip = if playing { "Пауза".to_owned() } else { format!("Слушать «{}»", l.lane.title()) };
+        let tip = if playing { "Пауза".to_owned() } else { format!("Слушать «{}»", l.title) };
         if let Some(b) = grow_button(ui, id.with("play"), hover || playing, slot, play_button(playing, Size::M, &tip, id.with("play-btn"))) {
             play = b.clicked();
         }
@@ -349,29 +351,45 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, playing: bool,
         more = grow_button(ui, id.with("more"), hover, slot, button);
     });
     let title_c = if playing { s.primary } else { s.on_surface };
-    let name = text(ui, l.lane.title(), TypeRole::TitleMedium.style(), title_c, cell.width(), 1);
+    // A long name («Русские песни + Саундтреки без слов») takes two lines,
+    // the artists then one.
+    let rows = |t: &str, role: TypeStyle| {
+        let mut job = egui::text::LayoutJob::single_section(t.to_owned(), role.text_format(s.on_surface));
+        job.wrap.max_width = cell.width();
+        crate::typography::layout(ui.painter(), job).rows.len()
+    };
+    let title_lines = if rows(&l.title, TypeRole::TitleMedium.style()) > 1 { 2 } else { 1 };
+    let name = text(ui, &l.title, TypeRole::TitleMedium.style(), title_c, cell.width(), title_lines);
     ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), name, title_c);
     let role = TypeRole::BodyMedium.style();
-    let fits = |t: &str| {
-        let mut job = egui::text::LayoutJob::single_section(t.to_owned(), role.text_format(s.on_surface_variant));
-        job.wrap.max_width = cell.width();
-        crate::typography::layout(ui.painter(), job).rows.len() <= 2
-    };
+    let artist_lines = 3 - title_lines;
+    let fits = |t: &str| rows(t, role) <= artist_lines;
     let new: &[String] = if with_new { &l.new_artists } else { &[] };
     let line = names_line(&fits, &l.artists, new);
-    let g = text(ui, &line, role, s.on_surface_variant, cell.width(), 2);
-    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0 + 24.0), g, s.on_surface_variant);
+    let g = text(ui, &line, role, s.on_surface_variant, cell.width(), artist_lines);
+    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0 + 24.0 * title_lines as f32), g, s.on_surface_variant);
 
     let n = l.tracks.len();
+    // «На повторе» is what played: no other draw of it.
+    let redraw = l.key != nikgob_view::MixKey::OnRepeat;
+    let blend = can_blend && l.blend_base.is_some();
     let menu = |key: Id| {
-        Menu::new(key)
+        let mut m = Menu::new(key)
             .item(MenuItem::new("Список треков").icon(Icon::QueueMusic).shortcut(n.to_string()))
             .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
             .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
             .item(MenuItem::new("В очередь").icon(Icon::QueueMusic))
-            .item(MenuItem::new("Сохранить как плейлист").icon(Icon::PlaylistAdd))
-            .divider()
-            .item(MenuItem::new("Собрать заново").icon(Icon::Refresh))
+            .item(MenuItem::new("Сохранить как плейлист").icon(Icon::PlaylistAdd));
+        if redraw || blend {
+            m = m.divider();
+        }
+        if redraw {
+            m = m.item(MenuItem::new("Другой состав").icon(Icon::Refresh));
+        }
+        if blend {
+            m = m.item(MenuItem::new("Смешать с…").icon(Icon::Add));
+        }
+        m
     };
     let mut picked = menu(id.with("ctx")).context_menu(&resp);
     if let Some(m) = &more {
@@ -380,9 +398,9 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, playing: bool,
     let open = Menu::item_rects(ui.ctx(), id.with("more-menu")).is_some();
     ui.ctx().data_mut(|d| d.insert_temp(id.with("more-open"), open));
     let tracks: Vec<nikgob_view::TrackId> = l.tracks.iter().map(|t| t.id).collect();
-    let context = format!("микса «{}»", l.lane.title());
+    let context = l.context();
     match picked {
-        Some(0) => super::home::open_lane_list(ui.ctx(), l.lane),
+        Some(0) => super::home::open_lane_list(ui.ctx(), l.key),
         Some(1) => {
             let mut t = tracks.clone();
             shuffle(&mut t);
@@ -390,8 +408,13 @@ pub fn mix(ui: &mut Ui, cell: Rect, l: &LaneCard, with_new: bool, playing: bool,
         }
         Some(2) => out.push(Command::PlayNext(tracks.clone())),
         Some(3) => out.push(Command::Enqueue(tracks.clone())),
-        Some(4) => out.push(Command::SaveTracksAsPlaylist { name: l.lane.title().to_owned(), tracks: tracks.clone() }),
-        Some(5) => out.push(Command::RefreshMix { id: l.id() }),
+        Some(4) => out.push(Command::SaveTracksAsPlaylist { name: l.title.clone(), tracks: tracks.clone() }),
+        Some(5) if redraw => out.push(Command::RefreshMix { id: l.id() }),
+        Some(5 | 6) => {
+            if let Some(base) = l.blend_base {
+                super::home::open_blend(ui.ctx(), base);
+            }
+        }
 
         _ => {}
     }

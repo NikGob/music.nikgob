@@ -1,47 +1,35 @@
-//! «Миксы для тебя» (home v2 §3, §8): the lanes the user listens in. Songs
-//! by the language of their [`SongType`](nikgob_recs::SongType) (their
-//! lyrics', else their artist's, else what the title says plainly; a song
-//! of an unknown language goes in no lane by language, and a lane holds
-//! only songs of its own: the diversity rules may make it shorter, never
-//! fill it from another); soundtracks apart and split by energy into
-//! «Тихие» and «Бодрые», and «На повторе». The set and
-//! its order follow the lanes' share of starts over four weeks; the songs
-//! are picked anew each day (at 06:00, `local_day`) or with «Собрать
-//! заново».
+//! «Миксы для тебя» (recs-v2 §6, profiles-v1 §6): the five moments of
+//! [`nikgob_recs::mixes`] — the profiles' own mixes, «Всё вперемешку», the
+//! calm and the lively side of everything loved, «Фон» for whoever
+//! listens so, the blends the user made today first — and «На повторе».
+//! What a day picked stays the day's (`recs.mixes` in the library's cache:
+//! the lineup, each mix's songs, yesterday's, the salts of «Другой
+//! состав» and the blends), from 06:00 (`local_day`) to 06:00; only the
+//! order of the cards and of the songs follows the part of the day.
 
 use std::collections::{HashMap, HashSet};
 
-use nikgob_core::model::{EventType, TrackId};
+use nikgob_core::model::{ArtistId, EventType, TrackId};
 use nikgob_core::streaming::StreamTrack;
-use nikgob_recs::songtype::VoiceSource;
+use nikgob_recs::mixes::{Builder, Kept, MIN_SONGS, Mix, MixKey, Settings};
+use nikgob_recs::profiles::{LaneKey, NameStyle};
 use nikgob_recs::tiles::franchise;
-use nikgob_recs::{Axes, Lang, TilesInput};
+use nikgob_recs::{Lang, Live, Session, TilesInput};
 use nikgob_view as v;
+use serde::{Deserialize, Serialize};
 
-use super::{BuildInput, CoverRef, Snapshot, day_seed};
+use super::{BuildInput, CoverRef, Snapshot, cache_read, cache_write};
 
-/// A song shorter than this is an interlude: no mix picks it (OMORI has
-/// 67 of 179 under a minute).
+const MIXES_KEY: &str = "recs.mixes";
+/// A song shorter than this is an interlude: no mix picks it.
 const INTERLUDE_MS: u32 = 75_000;
-/// About two hours a mix.
+/// About two hours of «На повторе».
 const MIX_MS: u64 = 2 * 60 * 60 * 1000;
 /// A song of unknown length counts so.
 const GUESS_MS: u32 = 210_000;
-/// A lane needs this many songs to be a mix.
-const MIN_SONGS: usize = 12;
-/// At most this many mixes.
-pub(crate) const MAX_LANES: usize = 6;
 /// A song longer than this is left out (they are skipped early a third of
 /// the time, recs-v2 §2).
-pub(super) const LONG_MS: u32 = 9 * 60 * 1000;
-/// One world takes at most this share of a lane.
-const WORLD_SHARE: f32 = 0.25;
-/// Japanese is a lane of its own with this many songs and this share of
-/// the starts; else it joins English as «Песни не на русском».
-const JAPANESE_SONGS: usize = 40;
-const JAPANESE_SHARE: f32 = 0.05;
-/// The window of the lanes' shares.
-const SHARE_DAYS: i64 = 28;
+pub(super) const LONG_MS: u32 = nikgob_recs::mixes::LONG_MS;
 /// «На повторе» looks this far back (30 once the history is longer).
 const REPEAT_DAYS_SHORT: i64 = 14;
 const REPEAT_DAYS_LONG: i64 = 30;
@@ -51,165 +39,320 @@ const REPEAT_DAYS_LONG: i64 = 30;
 const NEW_EVERY: usize = 5;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+const HOUR_MS: i64 = 60 * 60 * 1000;
 
 /// One mix of «Миксы для тебя».
 pub(crate) struct LaneHome {
-    pub lane: v::Lane,
+    pub key: v::MixKey,
+    pub title: String,
     pub tracks: Vec<TrackId>,
+    /// Familiar and loved: a new song of «С новым» stands between two.
+    pub anchors: Vec<bool>,
     /// Its artists, most played first.
     pub artists: Vec<String>,
     pub covers: Vec<CoverRef>,
-    /// «С новым»: new songs of the services in the lane's language.
+    /// «С новым»: new songs of the services that fit it.
     pub new: Vec<StreamTrack>,
+    /// The profile «Смешать с…» starts from.
+    pub blend_base: Option<u32>,
 }
 
 impl LaneHome {
-    /// What it plays: its songs, with «С новым» its new ones spread evenly
-    /// between them.
+    /// What it plays: its songs, with «С новым» its new ones each between
+    /// two loved familiar songs (recs-v2 §5.4), never in the first two
+    /// places nor two running, spread as evenly as such places allow.
     pub fn picks(&self, with_new: bool) -> Vec<nikgob_recs::Pick> {
         use nikgob_recs::{Item, Pick, Reason};
-        let mut out = Vec::with_capacity(self.tracks.len() + self.new.len());
-        let (len, n) = (self.tracks.len(), if with_new { self.new.len() } else { 0 });
+        let n = if with_new { self.new.len() } else { 0 };
+        let len = self.tracks.len();
+        // The gaps after place k (k ≥ 1): between two anchors.
+        let gaps: Vec<usize> = (1..len.saturating_sub(1)).filter(|&k| self.anchors.get(k) == Some(&true) && self.anchors.get(k + 1) == Some(&true)).collect();
+        let mut after: HashSet<usize> = HashSet::new();
         let mut placed = 0;
-        for (i, t) in self.tracks.iter().enumerate() {
-            out.push(Pick { item: Item::Track(*t), reason: Reason::Favourite });
-            while placed < n && placed < (i + 1) * n / len {
-                out.push(Pick { item: Item::Stream(self.new[placed].id.clone()), reason: Reason::New });
+        for j in 0..n.min(gaps.len()) {
+            // The gap nearest the even spot of the j-th new song, free.
+            let spot = (j + 1) * len / (n + 1);
+            if let Some(&g) = gaps.iter().filter(|g| !after.contains(g) && !after.contains(&(*g - 1)) && !after.contains(&(*g + 1))).min_by_key(|g| g.abs_diff(spot)) {
+                after.insert(g);
                 placed += 1;
+            }
+        }
+        let mut out = Vec::with_capacity(len + placed);
+        let mut new = self.new.iter();
+        for (k, t) in self.tracks.iter().enumerate() {
+            out.push(Pick { item: Item::Track(*t), reason: Reason::Favourite });
+            if after.contains(&k)
+                && let Some(s) = new.next()
+            {
+                out.push(Pick { item: Item::Stream(s.id.clone()), reason: Reason::New });
             }
         }
         out
     }
 }
 
-/// A number in 0..1 of `seed` and a track (a stable shuffle).
-fn jitter(seed: u64, t: TrackId) -> f32 {
-    let mut h = seed ^ 0x9e37_79b9_7f4a_7c15;
-    for b in t.to_string().bytes() {
-        h = (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
-    }
-    h ^= h >> 33;
-    (h % 10_000) as f32 / 10_000.0
+/// What the cache keeps: the day it is for, the settings it was chosen
+/// under and the day's mixes.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct MixesCache {
+    day: String,
+    settings: u64,
+    kept: Kept,
 }
 
-/// The songs of each lane by their type, and those of other languages
-/// than the lanes' («Песни не на русском» may take them).
-fn pools(snap: &Snapshot, tiles: &TilesInput) -> (HashMap<v::Lane, Vec<(usize, TrackId)>>, Vec<(usize, TrackId)>) {
-    let norm = snap.index.normalizer();
-    let mut by_lane: HashMap<v::Lane, Vec<(usize, TrackId)>> = HashMap::new();
-    let mut soundtracks: Vec<(usize, TrackId, Option<f32>)> = Vec::new();
-    let mut other: Vec<(usize, TrackId)> = Vec::new();
-    for (i, t) in snap.catalog.tracks().iter().enumerate() {
-        if snap.model.taste.blocks(t) || (snap.local_only && !t.local) {
-            continue;
-        }
-        let Some(f) = tiles.facts.get(&t.id) else { continue };
-        if f.duration_ms.is_some_and(|d| d < INTERLUDE_MS) {
-            continue;
-        }
-        let ty = snap.types.get(t.id).copied().unwrap_or_default();
-        if ty.ost || ty.voice_by == VoiceSource::LrclibFlag {
-            let energy = snap.index.get(t.id).map(|v| Axes::of(&norm.z(v)).energy);
-            soundtracks.push((i, t.id, energy));
-            continue;
-        }
-        let lane = match ty.lang {
-            Some(Lang::Russian) => v::Lane::Russian,
-            Some(Lang::Japanese) => v::Lane::Japanese,
-            Some(Lang::English) => v::Lane::English,
-            // Not English: only «Песни не на русском» takes it.
-            Some(_) => {
-                other.push((i, t.id));
-                continue;
-            }
-            // Unknown: no lane by language («На повторе» still may).
-            None => continue,
-        };
-        by_lane.entry(lane).or_default().push((i, t.id));
-    }
-    // Soundtracks: below the median energy calm, above it loud; without
-    // a vector, the side of their album's analysed songs, else calm.
-    let mut energies: Vec<f32> = soundtracks.iter().filter_map(|s| s.2).collect();
-    energies.sort_by(f32::total_cmp);
-    let median = energies.get(energies.len() / 2).copied().unwrap_or(0.0);
-    for (i, id, e) in soundtracks {
-        let lane = if e.is_some_and(|e| e >= median) { v::Lane::DriveSoundtracks } else { v::Lane::CalmSoundtracks };
-        by_lane.entry(lane).or_default().push((i, id));
-    }
-    (by_lane, other)
+/// The engine's key of a view's key («На повторе» is the runtime's).
+pub(crate) fn engine_key(k: v::MixKey) -> Option<MixKey> {
+    Some(match k {
+        v::MixKey::Profile(p) => MixKey::Profile(p),
+        v::MixKey::Everything => MixKey::Everything,
+        v::MixKey::Calm => MixKey::Calm,
+        v::MixKey::Lively => MixKey::Lively,
+        v::MixKey::Background { profile, card, cards } => MixKey::Background { profile, card, cards },
+        v::MixKey::Blend(p) => MixKey::Blend(p),
+        v::MixKey::Kind(c) => MixKey::Kind(c),
+        v::MixKey::OnRepeat => return None,
+    })
 }
 
-/// The lanes of today.
-pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> Vec<LaneHome> {
-    let (mut by_lane, other) = pools(snap, tiles);
+fn view_key(k: MixKey) -> v::MixKey {
+    match k {
+        MixKey::Profile(p) => v::MixKey::Profile(p),
+        MixKey::Everything => v::MixKey::Everything,
+        MixKey::Calm => v::MixKey::Calm,
+        MixKey::Lively => v::MixKey::Lively,
+        MixKey::Background { profile, card, cards } => v::MixKey::Background { profile, card, cards },
+        MixKey::Blend(p) => v::MixKey::Blend(p),
+        MixKey::Kind(c) => v::MixKey::Kind(c),
+    }
+}
 
-    // The starts of four weeks by lane.
-    let now = snap.model.taste.now();
-    let lane_of: HashMap<TrackId, v::Lane> =
-        by_lane.iter().flat_map(|(l, ts)| ts.iter().map(move |(_, t)| (*t, *l))).collect();
-    let mut starts: HashMap<v::Lane, u32> = HashMap::new();
-    let mut total_starts = 0u32;
-    for p in tiles.events.iter().filter(|p| p.kind == EventType::Start && p.ts >= now - SHARE_DAYS * DAY_MS) {
-        total_starts += 1;
-        if let Some(l) = lane_of.get(&p.track) {
-            *starts.entry(*l).or_default() += 1;
+/// The moments the prefs ask for.
+pub(crate) fn settings(prefs: &MixPrefs) -> Settings {
+    Settings {
+        profiles: prefs.profiles,
+        everything: prefs.everything,
+        moods: prefs.moods,
+        background_cards: usize::from(prefs.background_cards),
+        names: match prefs.names {
+            v::ProfileNames::Kind => NameStyle::Kind,
+            v::ProfileNames::Artists => NameStyle::Artists,
+        },
+    }
+}
+
+/// The prefs of «Миксы для тебя» a build reads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MixPrefs {
+    pub profiles: bool,
+    pub everything: bool,
+    pub moods: bool,
+    pub on_repeat: bool,
+    pub background_cards: u8,
+    pub names: v::ProfileNames,
+}
+
+impl MixPrefs {
+    pub fn of(p: &v::Prefs) -> Self {
+        Self {
+            profiles: p.mixes_profiles,
+            everything: p.mixes_everything,
+            moods: p.mixes_moods,
+            on_repeat: p.mixes_on_repeat,
+            background_cards: p.background_cards,
+            names: p.profile_names,
         }
     }
-    let ja = by_lane.get(&v::Lane::Japanese).map_or(0, Vec::len);
-    let ja_share = if total_starts == 0 {
-        0.0
-    } else {
-        starts.get(&v::Lane::Japanese).copied().unwrap_or(0) as f32 / total_starts as f32
+
+    /// What tells a lineup chosen under other settings.
+    fn fingerprint(&self) -> u64 {
+        u64::from(self.profiles)
+            | u64::from(self.everything) << 1
+            | u64::from(self.moods) << 2
+            | u64::from(self.background_cards) << 3
+            | u64::from(self.names == v::ProfileNames::Artists) << 6
+    }
+}
+
+/// The local day number the mixes are drawn by: days start at 06:00.
+pub(crate) fn day_number(now: nikgob_core::model::UnixMs, utc_offset_min: i32) -> i64 {
+    (now + i64::from(utc_offset_min) * 60_000 - super::DAY_STARTS_HOUR * HOUR_MS).div_euclid(DAY_MS)
+}
+
+/// The engine over `snap` for `session` at `now`.
+#[allow(clippy::too_many_arguments)]
+fn with_builder<T>(snap: &Snapshot, prefs: &MixPrefs, fit: &[bool], ok: &dyn Fn(usize) -> bool, session: &Session, now: nikgob_core::model::UnixMs, utc_offset_min: i32, f: impl FnOnce(&Builder<'_>) -> T) -> T {
+    let recs = snap.recs();
+    let live: Live = snap.model.live(session);
+    let suits = |i: usize| fit.get(i).copied().unwrap_or(false);
+    let (part, _, _) = super::daylist_key(now, utc_offset_min);
+    let b = Builder::new(&recs, &snap.model, ok, &suits, day_number(now, utc_offset_min), part, live, settings(prefs));
+    f(&b)
+}
+
+/// Today's «Миксы для тебя» and the profiles «Смешать с…» offers.
+pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> (Vec<LaneHome>, Vec<v::BlendProfile>) {
+    let lib = &input.lib;
+    let prefs = &input.mix_prefs;
+    let mut cache: MixesCache = cache_read(lib, MIXES_KEY).unwrap_or_default();
+    if cache.day != input.day {
+        cache = MixesCache { day: input.day.clone(), settings: prefs.fingerprint(), kept: std::mem::take(&mut cache.kept).next_day() };
+    }
+    if cache.settings != prefs.fingerprint() {
+        cache.settings = prefs.fingerprint();
+        cache.kept.lineup.clear();
+    }
+    if let Some(key) = input.refresh_mix.and_then(engine_key) {
+        let salt = fastrand::u64(1..);
+        match cache.kept.salts.iter_mut().find(|s| s.0 == key) {
+            Some(s) => s.1 = salt,
+            None => cache.kept.salts.push((key, salt)),
+        }
+    }
+    for b in input.blends.iter().filter_map(|b| engine_key(*b)) {
+        if !cache.kept.blends.contains(&b) {
+            cache.kept.blends.push(b);
+        }
+    }
+    let fit = super::background_fit(snap, tiles);
+    // A mix takes what the tiles know (their length), what is not junk.
+    let ok = |i: usize| {
+        let t = &snap.catalog.tracks()[i];
+        tiles.facts.contains_key(&t.id) && (t.local || !snap.local_only)
     };
-    if ja < JAPANESE_SONGS || (snap.model.taste.has_history() && ja_share < JAPANESE_SHARE) {
-        let mut merged = by_lane.remove(&v::Lane::English).unwrap_or_default();
-        merged.extend(by_lane.remove(&v::Lane::Japanese).unwrap_or_default());
-        merged.extend(other);
-        let s = starts.remove(&v::Lane::English).unwrap_or(0) + starts.remove(&v::Lane::Japanese).unwrap_or(0);
-        if !merged.is_empty() {
-            by_lane.insert(v::Lane::NotRussian, merged);
-            starts.insert(v::Lane::NotRussian, s);
-        }
-    }
-
-    let seed = day_seed(&input.day) ^ input.lanes_salt;
-    let mut lanes: Vec<(v::Lane, Vec<TrackId>)> = Vec::new();
-    for (lane, pool) in &by_lane {
-        let picked = pick(snap, tiles, pool, seed ^ (*lane as u64).wrapping_mul(0x2545_f491_4f6c_dd1d));
-        if picked.len() >= MIN_SONGS {
-            lanes.push((*lane, picked));
-        }
-    }
-    // The order of the lanes: by their share of the starts (by size without
-    // a history); stable among equals.
-    lanes.sort_by(|a, b| {
-        let key = |l: v::Lane| (starts.get(&l).copied().unwrap_or(0), by_lane.get(&l).map_or(0, Vec::len));
-        let (ka, kb) = (key(a.0), key(b.0));
-        if snap.model.taste.has_history() { kb.cmp(&ka) } else { kb.1.cmp(&ka.1) }.then(a.0.cmp(&b.0))
+    let names = |a: ArtistId| tiles.artist_names.get(&a).cloned();
+    let (mut mixes, lineup, blendable) = with_builder(snap, prefs, &fit, &ok, &input.session, input.now, input.utc_offset_min, |b| {
+        let (mut mixes, lineup) = b.lineup(&cache.kept);
+        b.named(&mut mixes, &names);
+        (mixes, lineup, blend_profiles(snap, b, &names))
     });
-    lanes.truncate(MAX_LANES - usize::from(snap.model.taste.has_history()));
-    if snap.model.taste.has_history()
-        && let Some(repeat) = on_repeat(snap, tiles)
-    {
-        lanes.push((v::Lane::OnRepeat, repeat));
-    }
-    lanes.truncate(MAX_LANES);
+    cache.kept.lineup = lineup;
+    cache.kept.keep(&mixes, &snap.model);
+    cache_write(lib, MIXES_KEY, input.now, &cache);
+    log_lineup(snap, tiles, &mixes);
 
+    let seed = super::day_seed(&input.day);
     let mut used_new: HashSet<String> = HashSet::new();
-    lanes
-        .into_iter()
+    let mut out: Vec<LaneHome> = mixes
+        .drain(..)
         .enumerate()
-        .map(|(k, (lane, tracks))| {
-            let artists = artists_of(snap, tiles, &tracks);
-            let covers = covers(snap, &tracks);
-            let new = if snap.local_only {
-                Vec::new()
-            } else {
-                new_for(snap, input, lane, &tracks, seed.wrapping_add(k as u64), &mut used_new)
-            };
-            LaneHome { lane, tracks, artists, covers, new }
+        .map(|(k, m)| {
+            let mut lane = lane_of(snap, tiles, &m);
+            if !snap.local_only && !matches!(m.key, MixKey::Background { .. }) {
+                lane.new = new_for(snap, input, &m, seed.wrapping_add(k as u64), &mut used_new);
+            }
+            lane
         })
-        .collect()
+        .collect();
+    if prefs.on_repeat
+        && snap.model.taste.has_history()
+        && let Some(tracks) = on_repeat(snap, tiles)
+    {
+        let anchors = vec![true; tracks.len()];
+        out.push(LaneHome {
+            key: v::MixKey::OnRepeat,
+            title: "На повторе".into(),
+            artists: artists_of(snap, tiles, &tracks),
+            covers: covers(snap, &tracks),
+            anchors,
+            tracks,
+            new: Vec::new(),
+            blend_base: None,
+        });
+    }
+    (out, blendable)
+}
+
+/// A blend of `profiles` (the card's first), now, from the snapshot: it
+/// plays at once and stands first until the day's end.
+pub(crate) fn blend_now(snap: &Snapshot, prefs: &MixPrefs, profiles: &[u32], names: &dyn Fn(ArtistId) -> Option<String>, session: &Session) -> Option<LaneHome> {
+    let key = MixKey::blend(profiles)?;
+    let (now, utc_offset_min) = (super::recs_now(), super::local_day().1);
+    let ok = |i: usize| snap.catalog.tracks()[i].local || !snap.local_only;
+    let mix = with_builder(snap, prefs, &[], &ok, session, now, utc_offset_min, |b| {
+        let mut m = vec![b.mix(key, &Kept::default())?];
+        b.named(&mut m, names);
+        m.pop()
+    })?;
+    let artists: Vec<String> = mix.artists.iter().filter_map(|a| names(*a)).collect();
+    let tracks: Vec<TrackId> = mix.tracks.iter().map(|&i| snap.model.id(i)).collect();
+    Some(LaneHome {
+        key: view_key(mix.key),
+        title: mix.title,
+        covers: covers(snap, &tracks),
+        anchors: mix.anchors,
+        tracks,
+        artists: dedupe(artists),
+        new: Vec::new(),
+        blend_base: None,
+    })
+}
+
+/// Keeps the blend of `key` among the day's mixes at once (a restart
+/// before the next build keeps it too).
+pub(crate) fn remember_blend(lib: &nikgob_library::Library, prefs: &MixPrefs, day: &str, now: nikgob_core::model::UnixMs, key: v::MixKey) {
+    let Some(key) = engine_key(key) else { return };
+    let mut cache: MixesCache = cache_read(lib, MIXES_KEY).unwrap_or_default();
+    if cache.day != day {
+        cache = MixesCache { day: day.to_owned(), settings: prefs.fingerprint(), kept: std::mem::take(&mut cache.kept).next_day() };
+    }
+    cache.kept.blends.retain(|b| *b != key);
+    cache.kept.blends.push(key);
+    cache_write(lib, MIXES_KEY, now, &cache);
+}
+
+/// The visible profiles with songs enough, by their names (the largest
+/// share first).
+fn blend_profiles(snap: &Snapshot, b: &Builder<'_>, names: &dyn Fn(ArtistId) -> Option<String>) -> Vec<v::BlendProfile> {
+    let model = &snap.model;
+    let mut order: Vec<usize> = (0..model.profiles.len()).filter(|&j| model.profiles.list[j].visible).collect();
+    order.sort_by(|a, b| model.profile_share[*b].total_cmp(&model.profile_share[*a]).then(a.cmp(b)));
+    let mut out = Vec::new();
+    for j in order {
+        let key = model.profiles.list[j].key;
+        let Some(mut m) = b.mix(MixKey::Profile(key), &Kept::default()) else { continue };
+        if m.tracks.len() < MIN_SONGS {
+            continue;
+        }
+        b.named(std::slice::from_mut(&mut m), names);
+        out.push(v::BlendProfile { key, title: m.title });
+    }
+    out
+}
+
+fn dedupe(names: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    names.into_iter().filter(|n| seen.insert(n.to_lowercase())).take(12).collect()
+}
+
+/// The home's card of a mix.
+fn lane_of(snap: &Snapshot, tiles: &TilesInput, m: &Mix) -> LaneHome {
+    let tracks: Vec<TrackId> = m.tracks.iter().map(|&i| snap.model.id(i)).collect();
+    let artists = dedupe(m.artists.iter().filter_map(|a| tiles.artist_names.get(a).cloned()).collect());
+    LaneHome {
+        key: view_key(m.key),
+        title: m.title.clone(),
+        covers: covers(snap, &tracks),
+        anchors: m.anchors.clone(),
+        tracks,
+        artists,
+        new: Vec::new(),
+        blend_base: m.key.blend_base(),
+    }
+}
+
+/// The lineup in the log: each card, its first songs.
+fn log_lineup(snap: &Snapshot, tiles: &TilesInput, mixes: &[Mix]) {
+    let line: Vec<String> = mixes.iter().map(|m| format!("«{}» {}", m.title, m.tracks.len())).collect();
+    log::info!("recs: mixes for you: {}", line.join(", "));
+    for m in mixes {
+        let first: Vec<String> = m
+            .tracks
+            .iter()
+            .take(5)
+            .filter_map(|&i| tiles.facts.get(&snap.model.id(i)).map(|f| format!("{} — {}", f.artist, f.title)))
+            .collect();
+        log::debug!("recs: mix «{}»: {}", m.title, first.join(" · "));
+    }
 }
 
 /// The taste profile most of `tracks` are of.
@@ -226,44 +369,6 @@ fn profile_of(snap: &Snapshot, tracks: &[TrackId]) -> Option<usize> {
 /// How many new songs a mix of `songs` gets at `share` (one at least).
 fn new_count(songs: usize, share: f32) -> usize {
     ((songs as f32 * share / (1.0 - share)).round() as usize).max(1)
-}
-
-/// About two hours of a lane: the best liked first (with a little chance
-/// mixed in by the day), nothing over [`LONG_MS`], under the diversity
-/// rules of every mix — an artist once in three, an album twice in ten, a
-/// world twice in three and [`WORLD_SHARE`] of the lane — in the smooth
-/// order by sound.
-fn pick(snap: &Snapshot, tiles: &TilesInput, pool: &[(usize, TrackId)], seed: u64) -> Vec<TrackId> {
-    let duration = |t: &TrackId| tiles.facts.get(t).and_then(|f| f.duration_ms);
-    let mut scored: Vec<(f32, usize, TrackId)> = pool
-        .iter()
-        .filter(|(_, t)| duration(t).is_none_or(|d| d <= LONG_MS))
-        .map(|&(i, t)| {
-            let a = snap.model.taste.affinity_at(i);
-            // What played lately rests about a day and a half.
-            // A dislike near in sound leans it a little lower.
-            let near = snap.model.taste.dislike_near_at(i);
-            (a.max(0.0).sqrt() + 0.6 * jitter(seed, t) - nikgob_recs::radio::MIX_REST * snap.model.taste.lately_at(i) - near, i, t)
-
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)));
-    // How many songs make the two hours, the best first.
-    let mut total: u64 = 0;
-    let mut n = 0;
-    let mut songs = HashSet::new();
-    for (_, i, t) in &scored {
-        if total >= MIX_MS {
-            break;
-        }
-        let info = &snap.catalog.tracks()[*i];
-        if songs.insert(info.song.unwrap_or(info.id)) {
-            total += u64::from(duration(t).unwrap_or(GUESS_MS));
-            n += 1;
-        }
-    }
-    let cands: Vec<(TrackId, f32)> = scored.iter().map(|(s, _, t)| (*t, *s)).collect();
-    snap.recs().mix_of(&cands, n, WORLD_SHARE)
 }
 
 /// «На повторе»: the songs started at least twice over the last two weeks
@@ -306,7 +411,7 @@ fn on_repeat(snap: &Snapshot, tiles: &TilesInput) -> Option<Vec<TrackId>> {
 /// The main artists of `tracks`, by how many of them they have (then by
 /// their first place), as the library writes them.
 fn artists_of(snap: &Snapshot, tiles: &TilesInput, tracks: &[TrackId]) -> Vec<String> {
-    let mut count: HashMap<nikgob_core::model::ArtistId, (usize, usize)> = HashMap::new();
+    let mut count: HashMap<ArtistId, (usize, usize)> = HashMap::new();
     for (k, t) in tracks.iter().enumerate() {
         if let Some(a) = snap.catalog.get(*t).and_then(|i| i.artists.first()) {
             let e = count.entry(*a).or_insert((0, k));
@@ -315,13 +420,7 @@ fn artists_of(snap: &Snapshot, tiles: &TilesInput, tracks: &[TrackId]) -> Vec<St
     }
     let mut ranked: Vec<_> = count.into_iter().collect();
     ranked.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.1.1.cmp(&b.1.1)));
-    let mut seen = HashSet::new();
-    ranked
-        .into_iter()
-        .filter_map(|(a, _)| tiles.artist_names.get(&a).cloned())
-        .filter(|n| seen.insert(n.to_lowercase()))
-        .take(12)
-        .collect()
+    dedupe(ranked.into_iter().filter_map(|(a, _)| tiles.artist_names.get(&a).cloned()).collect())
 }
 
 /// Covers of the mix's first albums, each once.
@@ -339,20 +438,36 @@ fn covers(snap: &Snapshot, tracks: &[TrackId]) -> Vec<CoverRef> {
     out
 }
 
-/// «С новым»: new songs the services found, in the lane's language (any
-/// for the soundtracks and «На повторе»), each in one mix only; as many as
-/// the share of the mix's taste profile asks, those whose preview sounds
-/// of the profile first.
-fn new_for(
-    snap: &Snapshot,
-    input: &BuildInput,
-    lane: v::Lane,
-    tracks: &[TrackId],
-    seed: u64,
-    used: &mut HashSet<String>,
-) -> Vec<StreamTrack> {
+/// The kinds of song of a mix: the sung languages of its profiles and
+/// whether soundtracks without words are among them.
+fn kinds_of(snap: &Snapshot, m: &Mix) -> (HashSet<Lang>, bool) {
+    let mut langs = HashSet::new();
+    let mut inst = false;
+    let lanes: Vec<LaneKey> = match m.key {
+        MixKey::Kind(_) => m.tracks.iter().map(|&i| LaneKey::of(snap.model.song_type_at(i))).collect(),
+        _ => m.profiles.iter().filter_map(|&j| snap.model.profiles.list.get(j)).map(|p| p.lane).collect(),
+    };
+    for l in lanes {
+        match l {
+            LaneKey::Sung(x) => {
+                langs.insert(x);
+            }
+            LaneKey::Instrumental => inst = true,
+            LaneKey::Unknown => {}
+        }
+    }
+    (langs, inst)
+}
+
+/// «С новым»: new songs the services found that fit the mix — of the
+/// languages of its profiles, a soundtrack's where it has soundtracks —
+/// each in one mix only; as many as the share of the mix's taste profile
+/// asks, those whose preview sounds of the profile first. «Фон» takes
+/// none.
+fn new_for(snap: &Snapshot, input: &BuildInput, m: &Mix, seed: u64, used: &mut HashSet<String>) -> Vec<StreamTrack> {
     let regions = &snap.model.regions;
-    let profile = profile_of(snap, tracks);
+    let tracks: Vec<TrackId> = m.tracks.iter().map(|&i| snap.model.id(i)).collect();
+    let profile = profile_of(snap, &tracks);
     let want = if input.new_log.events.is_empty() || regions.is_empty() {
         (tracks.len() / (NEW_EVERY - 1)).max(1)
     } else {
@@ -361,20 +476,15 @@ fn new_for(
     };
     let in_profile = |t: &StreamTrack| {
         let v = snap.new_track(t).vector.map(|v| snap.model.embed(&v));
-        profile.is_some() && v.and_then(|v| regions.of(&v, None)) == profile
+        let of = v.and_then(|v| regions.of(&v, None));
+        of.is_some_and(|j| m.profiles.contains(&j))
     };
+    let (langs, inst) = kinds_of(snap, m);
     let fits = |t: &StreamTrack| {
         let artists: Vec<&str> = t.artists.iter().map(|a| a.name.as_str()).collect();
-        let lang = snap.types.lang_of_new(&t.title, &artists);
-        match lane {
-            v::Lane::Russian => lang == Some(Lang::Russian),
-            v::Lane::English => lang == Some(Lang::English),
-            v::Lane::Japanese => lang == Some(Lang::Japanese),
-            v::Lane::NotRussian => lang.is_some_and(|l| l != Lang::Russian),
-            v::Lane::CalmSoundtracks | v::Lane::DriveSoundtracks => {
-                t.album.as_ref().is_some_and(|a| franchise(&a.title).is_some())
-            }
-            v::Lane::OnRepeat => true,
+        match snap.types.lang_of_new(&t.title, &artists) {
+            Some(l) => langs.contains(&l),
+            None => inst && t.album.as_ref().is_some_and(|a| franchise(&a.title).is_some()),
         }
     };
     let mut candidates: Vec<&StreamTrack> = input.new.iter().filter(|t| snap.is_new(t) && fits(t)).collect();
@@ -391,14 +501,13 @@ fn new_for(
     out
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A lane where one franchise is the most loved (as MADE IN ABYSS in
-    /// «Тихие саундтреки»): never more than two of it running, a quarter of
-    /// the lane at most, and no song over nine minutes.
+    /// A library where one franchise is the most loved (as MADE IN ABYSS
+    /// among soundtracks): no mix plays it more than twice running nor
+    /// over a quarter, and none takes a song over nine minutes.
     #[test]
     fn a_lane_has_no_run_of_one_world() {
         use nikgob_core::model::{ArtistId, ReleaseId};
@@ -410,7 +519,8 @@ mod tests {
             .enumerate()
             .map(|(k, id)| {
                 let (world, album) = if k < 40 { ("made in abyss".to_owned(), albums[k % 4]) } else { (format!("world {}", k % 8), albums[4 + k % 8]) };
-                TrackInfo::new(*id, vec![ArtistId::new()], Some(album)).with_world(&world)
+                let ms = if k == 0 { 10 * 60_000 } else { 180_000 };
+                TrackInfo::new(*id, vec![ArtistId::new()], Some(album)).with_world(&world).with_duration(Some(ms))
             })
             .collect();
         let catalog = Catalog::new(tracks);
@@ -444,85 +554,126 @@ mod tests {
             let ms = if k == 0 { 10 * 60_000 } else { 180_000 };
             tiles.facts.insert(*id, TrackFacts { duration_ms: Some(ms), ..TrackFacts::default() });
         }
-        let pool: Vec<(usize, TrackId)> = ids.iter().enumerate().map(|(k, id)| (k, *id)).collect();
-        let picked = pick(&snap, &tiles, &pool, 7);
-        assert!(picked.len() >= 30, "two hours: {}", picked.len());
-        assert!(!picked.contains(&ids[0]), "ten minutes is too long");
-        let mia: Vec<bool> = picked.iter().map(|t| ids[..40].contains(t)).collect();
-        assert!(mia.iter().filter(|m| **m).count() * 4 <= picked.len() + 3, "a quarter: {mia:?}");
-        let worlds: Vec<Option<u64>> = picked.iter().map(|t| snap.catalog.get(*t).and_then(|i| i.world)).collect();
-        for w in worlds.windows(3) {
-            assert!(!(w[0] == w[1] && w[1] == w[2]), "a world thrice running: {worlds:?}");
+        let prefs = MixPrefs::of(&v::Prefs::default());
+        let ok = |i: usize| tiles.facts.contains_key(&snap.catalog.tracks()[i].id);
+        let mixes = with_builder(&snap, &prefs, &[], &ok, &Session::default(), 1_000 * DAY_MS, 0, |b| b.lineup(&Kept::default()).0);
+        assert!(!mixes.is_empty());
+        for m in &mixes {
+            let picked: Vec<TrackId> = m.tracks.iter().map(|&i| snap.model.id(i)).collect();
+            assert!(picked.len() >= MIN_SONGS, "«{}»: {}", m.title, picked.len());
+            assert!(!picked.contains(&ids[0]), "ten minutes is too long");
+            let mia: Vec<bool> = picked.iter().map(|t| ids[..40].contains(t)).collect();
+            assert!(mia.iter().filter(|m| **m).count() * 4 <= picked.len() + 3, "«{}», a quarter: {mia:?}", m.title);
+            let worlds: Vec<Option<u64>> = picked.iter().map(|t| snap.catalog.get(*t).and_then(|i| i.world)).collect();
+            for w in worlds.windows(3) {
+                assert!(!(w[0] == w[1] && w[1] == w[2]), "«{}», a world thrice running: {worlds:?}", m.title);
+            }
         }
     }
 
-    /// A short «Песни на русском» among many English songs, one of them
-    /// with a Cyrillic «е» in its English lyrics (AJR's «World's Smallest
-    /// Violin» on LRCLIB): the lane holds its Russian songs only, two
-    /// artists' as they are, never filled from another language.
+    /// «Миксы для тебя» of a real library (`NIKGOB_REAL_LIBRARY`, a copy of
+    /// it is read): the lineup of each part of the day with its first
+    /// songs, the rules of diversity each mix keeps, its energy by quarters,
+    /// and what of it the next day keeps.
     #[test]
-    fn a_short_russian_lane_stays_pure() {
-        use nikgob_core::model::ArtistId;
-        use nikgob_recs::{Catalog, DiscoveryFilter, ModelInput, SongInput, TasteInput, TrackFacts, TrackInfo, UserModel, VectorIndex, song_types};
-        let ru = "[00:01.00]Город в огне, и мы идём домой\n[00:05.00]По ночным дворам до самого утра";
-        let en = "[00:01.00]We left the lights on in the kitchen\n[00:05.00]And the radio was playing low";
-        let homoglyph = "[00:01.00]We left the lights on in the kitchen\n[00:05.00]Is it over y\u{0435}t, the radio playing low";
-        let ids: Vec<TrackId> = (0..60).map(|_| TrackId::new()).collect();
-        // Fourteen Russian songs of two artists, 46 English of many.
-        let ru_artists = [ArtistId::new(), ArtistId::new()];
-        let artists: Vec<ArtistId> = (0..60).map(|k| if k < 14 { ru_artists[k % 2] } else { ArtistId::new() }).collect();
-        let catalog = Catalog::new(ids.iter().zip(&artists).map(|(id, a)| TrackInfo::new(*id, vec![*a], None)));
-        let mut index = VectorIndex::new();
-        for (k, id) in ids.iter().enumerate() {
-            let mut v = [0.0f32; nikgob_recs::DIM];
-            v[0] = k as f32;
-            index.insert(*id, v);
+    #[ignore = "needs NIKGOB_REAL_LIBRARY"]
+    fn the_mixes_of_a_real_library() {
+        use nikgob_recs::DayPart;
+        let Some(src) = std::env::var_os("NIKGOB_REAL_LIBRARY") else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("library.sqlite");
+        std::fs::copy(&src, &db).unwrap();
+        for ext in ["-wal", "-shm"] {
+            let mut side = src.clone();
+            side.push(ext);
+            if std::path::Path::new(&side).exists() {
+                let mut to = db.clone().into_os_string();
+                to.push(ext);
+                std::fs::copy(&side, to).unwrap();
+            }
         }
-        let inputs: Vec<SongInput> = ids
-            .iter()
-            .enumerate()
-            .map(|(k, id)| SongInput {
-                id: *id,
-                main_artist: Some(artists[k]),
-                title: format!("Song {k}"),
-                lyrics: Some((false, (if k < 14 { ru } else if k == 14 { homoglyph } else { en }).to_owned())),
-                ..SongInput::default()
-            })
-            .collect();
-        let types = song_types(&inputs);
-        let model = UserModel::build(&catalog, &TasteInput::default(), ModelInput { index: &index, types: Some(&types), weights: None }, 1_000 * DAY_MS);
-        let snap = Snapshot {
-            model,
-            types,
-            catalog,
-            index,
-            filter: DiscoveryFilter::default(),
-            artist_keys: HashMap::new(),
-            known_albums: HashSet::new(),
-            played_songs: HashSet::new(),
-            suggested_new: Vec::new(),
-            local_only: false,
-            worlds: HashMap::new(),
-            new_vectors: HashMap::new(),
-            artist_affinity: HashMap::new(),
-            profiles: Default::default(),
-        };
-        let mut tiles = TilesInput::default();
-        for id in &ids {
-            tiles.facts.insert(*id, TrackFacts { duration_ms: Some(180_000), ..TrackFacts::default() });
+        let lib = nikgob_library::Library::open(&db).unwrap();
+        let index = crate::analysis::SoundIndex::default();
+        crate::analysis::load_index(&lib, &index);
+        let now = super::super::recs_now();
+        let (snap, tiles, _) = super::super::read_snapshot(&lib, &index, now, 180, &[], false).unwrap();
+        let recs = snap.recs();
+        let fit = super::super::background_fit(&snap, &tiles);
+        let suits = |i: usize| fit.get(i).copied().unwrap_or(false);
+        let ok = |i: usize| tiles.facts.contains_key(&snap.catalog.tracks()[i].id);
+        let names = |a: ArtistId| tiles.artist_names.get(&a).cloned();
+        let day = day_number(now, 180);
+        let song = |i: usize| tiles.facts.get(&snap.model.id(i)).map_or_else(String::new, |f| format!("{} — {}", f.artist, f.title));
+        let shares: Vec<String> = snap.model.profiles.list.iter().zip(&snap.model.profile_share).map(|(p, s)| format!("{:?} {:.2}", p.lane, s)).collect();
+        println!("background listener: {}; profiles: {}", snap.model.listening.has_background, shares.join(", "));
+        let mut broken = 0;
+        let mut kept_day = Kept::default();
+        for part in DayPart::ALL {
+            let b = Builder::new(&recs, &snap.model, &ok, &suits, day, part, snap.model.live(&Session::default()), Settings::default());
+            let (mut mixes, lineup) = b.lineup(&Kept::default());
+            b.named(&mut mixes, &names);
+            println!("{part:?}: {}", mixes.iter().map(|m| format!("«{}»", m.title)).collect::<Vec<_>>().join(", "));
+            for m in &mixes {
+                let info = |i: usize| &snap.catalog.tracks()[i];
+                let world_runs = m.tracks.windows(3).filter(|w| info(w[0]).world.is_some() && info(w[0]).world == info(w[1]).world && info(w[1]).world == info(w[2]).world).count();
+                let artist_near = (0..m.tracks.len())
+                    .filter(|&k| {
+                        let a = info(m.tracks[k]).artists.first();
+                        (k.saturating_sub(2)..k).any(|j| info(m.tracks[j]).artists.first() == a)
+                    })
+                    .count();
+                for k in 0..m.tracks.len() {
+                    let a = info(m.tracks[k]).artists.first();
+                    if let Some(j) = (k.saturating_sub(2)..k).find(|&j| info(m.tracks[j]).artists.first() == a) {
+                        println!("    «{}» {j}: {} / {k}: {}", m.title, song(m.tracks[j]), song(m.tracks[k]));
+                    }
+                }
+                let mut worlds: HashMap<u64, usize> = HashMap::new();
+                for &i in &m.tracks {
+                    if let Some(w) = info(i).world {
+                        *worlds.entry(w).or_default() += 1;
+                    }
+                }
+                let top = worlds.values().copied().max().unwrap_or(0) as f32 / m.tracks.len() as f32;
+                let e: Vec<f32> = m.tracks.iter().filter_map(|&i| snap.model.energy_at(i)).collect();
+                let mut sorted = e.clone();
+                sorted.sort_by(f32::total_cmp);
+                let pct = |x: f32| sorted.iter().filter(|y| **y < x).count() as f32 / sorted.len().max(1) as f32;
+                let quarters: Vec<String> = e.chunks(e.len().div_ceil(4).max(1)).map(|c| format!("{:.2}", c.iter().map(|x| pct(*x)).sum::<f32>() / c.len() as f32)).collect();
+                broken += world_runs + artist_near + usize::from(top > 0.25 + 1.0 / m.tracks.len() as f32);
+                if part == DayPart::Day {
+                    let artists: Vec<String> = m.artists.iter().take(4).filter_map(|a| names(*a)).collect();
+                    println!("  «{}» · {} · {} songs · worlds {} (top {:.0}%) · world thrice {world_runs} · artist within 3 {artist_near} · energy {}", m.title, artists.join(", "), m.tracks.len(), worlds.len(), top * 100.0, quarters.join(" "));
+                    for &i in m.tracks.iter().take(10) {
+                        println!("      {}", song(i));
+                    }
+                } else {
+                    println!("  «{}» energy {} · world thrice {world_runs} · artist within 3 {artist_near}", m.title, quarters.join(" "));
+                }
+            }
+            if part == DayPart::Day {
+                kept_day.lineup = lineup;
+                kept_day.keep(&mixes, &snap.model);
+            }
         }
-        let (lanes, _) = pools(&snap, &tiles);
-        let russian: Vec<TrackId> = lanes[&v::Lane::Russian].iter().map(|(_, t)| *t).collect();
-        assert_eq!(russian, ids[..14].to_vec(), "the Russian songs only, not the English one with a Cyrillic letter");
-        assert!(lanes[&v::Lane::English].iter().any(|(_, t)| *t == ids[14]));
-        let picked = pick(&snap, &tiles, &lanes[&v::Lane::Russian], 7);
-        assert!(!picked.is_empty() && picked.iter().all(|t| russian.contains(t)), "{picked:?}");
+        // The next day: what of each mix stays.
+        let next = kept_day.clone().next_day();
+        let b = Builder::new(&recs, &snap.model, &ok, &suits, day + 1, DayPart::Day, Live::default(), Settings::default());
+        let (mut mixes, _) = b.lineup(&next);
+        b.named(&mut mixes, &names);
+        for m in &mixes {
+            let before: HashSet<TrackId> = kept_day.today.iter().find(|t| t.0 == m.key).map(|t| t.2.iter().copied().collect()).unwrap_or_default();
+            let same = m.tracks.iter().filter(|&&i| before.contains(&snap.model.id(i))).count();
+            println!("next day «{}»: {same} of {} kept", m.title, m.tracks.len());
+        }
+        assert_eq!(broken, 0, "rules broken");
     }
 
-    /// «С новым» takes as many new songs as its share asks and spreads them
-    /// evenly, never two running.
+    /// «С новым» takes as many new songs as its share asks, each between
+    /// two loved familiar songs, never in the first two places nor two
+    /// running.
     #[test]
-    fn new_songs_are_spread_by_the_share() {
+    fn new_songs_stand_between_loved_ones() {
         use nikgob_core::streaming::{RemoteId, Service};
         use nikgob_recs::Item;
         assert_eq!(new_count(36, 0.1), 4);
@@ -531,20 +682,29 @@ mod tests {
         let new: Vec<StreamTrack> = (0..4)
             .map(|k| StreamTrack::new(RemoteId { service: Service::Youtube, id: format!("v{k}") }, format!("New {k}")))
             .collect();
+        let anchors: Vec<bool> = (0..28).map(|k| k % 5 != 3).collect();
         let lane = LaneHome {
-            lane: v::Lane::English,
-            tracks: (0..36).map(|_| TrackId::new()).collect(),
+            key: v::MixKey::Calm,
+            title: "Спокойное".into(),
+            tracks: (0..28).map(|_| TrackId::new()).collect(),
+            anchors: anchors.clone(),
             artists: Vec::new(),
             covers: Vec::new(),
             new,
+            blend_base: None,
         };
         let picks = lane.picks(true);
         let at: Vec<usize> = picks.iter().enumerate().filter(|(_, p)| matches!(p.item, Item::Stream(_))).map(|(i, _)| i).collect();
-        assert_eq!(at.len(), 4);
-        for w in at.windows(2) {
-            assert!((8..=11).contains(&(w[1] - w[0])), "evenly: {at:?}");
+        assert_eq!(at.len(), 4, "{at:?}");
+        for (k, &i) in at.iter().enumerate() {
+            assert!(i >= 2, "{at:?}");
+            // The songs around it: before it k new ones stand.
+            let before = i - 1 - k;
+            assert!(anchors[before] && anchors[before + 1], "{at:?}");
         }
-        assert_eq!(lane.picks(false).len(), 36);
+        for w in at.windows(2) {
+            assert!(w[1] - w[0] >= 4, "spread: {at:?}");
+        }
+        assert_eq!(lane.picks(false).len(), 28);
     }
 }
-

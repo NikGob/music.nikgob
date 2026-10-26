@@ -300,6 +300,10 @@ fn recs_patches(before: &Prefs, p: &Prefs) -> Vec<PrefPatch> {
         (p.dislike_in_recs, before.dislike_in_recs, PrefPatch::DislikeInRecs),
         (p.background_counts_less, before.background_counts_less, PrefPatch::BackgroundCountsLess),
         (p.profiles_split, before.profiles_split, PrefPatch::ProfilesSplit),
+        (p.mixes_profiles, before.mixes_profiles, PrefPatch::MixesProfiles),
+        (p.mixes_everything, before.mixes_everything, PrefPatch::MixesEverything),
+        (p.mixes_moods, before.mixes_moods, PrefPatch::MixesMoods),
+        (p.mixes_on_repeat, before.mixes_on_repeat, PrefPatch::MixesOnRepeat),
     ];
     for (now, was, patch) in flags {
         if now != was {
@@ -308,6 +312,9 @@ fn recs_patches(before: &Prefs, p: &Prefs) -> Vec<PrefPatch> {
     }
     if p.profile_names != before.profile_names {
         out.push(PrefPatch::ProfileNames(p.profile_names));
+    }
+    if p.background_cards != before.background_cards {
+        out.push(PrefPatch::BackgroundCards(p.background_cards));
     }
     out
 }
@@ -362,6 +369,23 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
         if ui.add(Button::new("Анализ стримов").style(Style::Text).id_salt("set-stream-analysis-link")).clicked() {
             pages.open_setting(Id::StreamAnalysis);
         }
+    });
+
+    group(ui, "Миксы для тебя");
+    row(ui, Id::MixesProfiles, "Миксы профилей", None, |ui| {
+        ui.add(Switch::new(&mut p.mixes_profiles).id_salt("set-mixes-profiles"));
+    });
+    row(ui, Id::MixesEverything, "Всё вперемешку", None, |ui| {
+        ui.add(Switch::new(&mut p.mixes_everything).id_salt("set-mixes-everything"));
+    });
+    row(ui, Id::MixesMoods, "Спокойное и погромче", None, |ui| {
+        ui.add(Switch::new(&mut p.mixes_moods).id_salt("set-mixes-moods"));
+    });
+    row(ui, Id::MixesOnRepeat, "На повторе", None, |ui| {
+        ui.add(Switch::new(&mut p.mixes_on_repeat).id_salt("set-mixes-on-repeat"));
+    });
+    row(ui, Id::BackgroundCards, "Фон", None, |ui| {
+        choice_menu(ui, Id::BackgroundCards, p);
     });
 
     group(ui, "Профили вкуса");

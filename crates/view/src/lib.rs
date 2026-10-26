@@ -614,8 +614,11 @@ pub struct HomeView {
     /// The shortcuts at the top (six, eight on a wide window), or the
     /// recently added albums without a history.
     pub shortcuts: Vec<Shortcut>,
-    /// «Миксы для тебя» in their stable order.
+    /// «Миксы для тебя»: the moments of the day in the order of now, then
+    /// «На повторе».
     pub lanes: Vec<LaneCard>,
+    /// The taste profiles «Смешать с…» offers.
+    pub blend_profiles: Vec<BlendProfile>,
     /// «Слушать снова»: loved songs not played for a few days.
     pub listen_again: Vec<TrackRow>,
     /// «Из твоей библиотеки»: albums mostly unheard, other ones each day.
@@ -1175,6 +1178,20 @@ pub struct Prefs {
     pub profiles_split: bool,
     /// «Названия профилей»: by the kind of song, or by the artists.
     pub profile_names: ProfileNames,
+
+    // ---- «Миксы для тебя» (phase 3).
+    /// The profiles' own mixes («Русские песни»).
+    pub mixes_profiles: bool,
+    /// «Всё вперемешку».
+    pub mixes_everything: bool,
+    /// The calm and the lively side of everything loved («Спокойное»,
+    /// «Погромче»).
+    pub mixes_moods: bool,
+    /// «На повторе».
+    pub mixes_on_repeat: bool,
+    /// «Фон» cards at most (0: none), for a user who listens in the
+    /// background.
+    pub background_cards: u8,
 }
 
 /// What the taste profiles are called by.
@@ -1249,6 +1266,11 @@ pub enum PrefPatch {
     BackgroundCountsLess(bool),
     ProfilesSplit(bool),
     ProfileNames(ProfileNames),
+    MixesProfiles(bool),
+    MixesEverything(bool),
+    MixesMoods(bool),
+    MixesOnRepeat(bool),
+    BackgroundCards(u8),
 }
 
 impl PrefPatch {
@@ -1293,6 +1315,11 @@ impl PrefPatch {
             Self::BackgroundCountsLess(on) => p.background_counts_less = *on,
             Self::ProfilesSplit(on) => p.profiles_split = *on,
             Self::ProfileNames(n) => p.profile_names = *n,
+            Self::MixesProfiles(on) => p.mixes_profiles = *on,
+            Self::MixesEverything(on) => p.mixes_everything = *on,
+            Self::MixesMoods(on) => p.mixes_moods = *on,
+            Self::MixesOnRepeat(on) => p.mixes_on_repeat = *on,
+            Self::BackgroundCards(n) => p.background_cards = (*n).min(3),
         }
     }
 }
@@ -1939,8 +1966,13 @@ pub enum Command {
     /// every mix, radio and discovery from now on.
     RecFeedback { target: RecTarget, dislike: bool },
     /// «Обновить» in ⋮ of a mix: «Твой микс» is picked again (and kept for
-    /// the rest of the day), «Новое для тебя» is looked for again.
+    /// the rest of the day), «Новое для тебя» is looked for again, a mix of
+    /// «Миксы для тебя» gets «Другой состав».
     RefreshMix { id: MixId },
+    /// «Смешать с…»: a blend of these taste profiles (two or three, the
+    /// card's first) plays and stands first in «Миксы для тебя» until
+    /// 06:00.
+    PlayBlend { profiles: Vec<u32> },
     /// «Скрыть карточку»: switches «Карточка наверху главной» off and says
     /// how to bring it back (the snackbar's «Вернуть»).
     HideHomeCard,
@@ -2058,6 +2090,11 @@ impl Default for Prefs {
             background_counts_less: true,
             profiles_split: true,
             profile_names: ProfileNames::Kind,
+            mixes_profiles: true,
+            mixes_everything: true,
+            mixes_moods: true,
+            mixes_on_repeat: true,
+            background_cards: 3,
         }
     }
 }

@@ -126,6 +126,16 @@ pub enum SettingId {
     ProfilesSplit,
     /// «Названия профилей».
     ProfileNames,
+    /// «Миксы профилей».
+    MixesProfiles,
+    /// «Всё вперемешку».
+    MixesEverything,
+    /// «Спокойное и погромче».
+    MixesMoods,
+    /// «На повторе».
+    MixesOnRepeat,
+    /// «Фон».
+    BackgroundCards,
     /// «Кнопка «Не нравится»».
     DislikeButton,
     /// «Пропускать по дизлайку».
@@ -280,6 +290,7 @@ impl SettingId {
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
             RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | NewShareBy(_)
             | MixesWithNew | BackgroundCountsLess | ProfilesSplit | ProfileNames
+            | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards
             | DislikeButton | DislikeSkips | DislikeSkipEverywhere | DislikeInRecs | DislikedTracks | DislikedArtists => {
                 TAB_RECS
             }
@@ -398,6 +409,11 @@ impl SettingId {
             BackgroundCountsLess => "Музыка, что играла фоном — ты не переключал треки, а окно было свёрнуто или закрыто другим, — меньше меняет баланс твоих вкусов на главной. Выключи — фон считается наравне со всем.",
             ProfilesSplit => "Песни одного вида, но очень разные по звуку — например, спокойные и громкие японские — становятся двумя профилями вкуса. Выключи — один профиль на вид песен.",
             ProfileNames => "Как называются профили твоего вкуса.",
+            MixesProfiles => "Микс каждого профиля твоего вкуса: «Русские песни», «Саундтреки без слов».",
+            MixesEverything => "Все твои профили в одном миксе, каждый своей долей, с плавными переходами.",
+            MixesMoods => "Самое спокойное и самое громкое из того, что ты любишь, на любом языке.",
+            MixesOnRepeat => "Что ты включал чаще всего за последние недели.",
+            BackgroundCards => "Ровная музыка без слов для фона. Появляется, только если ты так слушаешь.",
             DislikeButton => "Кнопка рядом
  с ♡ на экране трека. «Не нравится» остаётся и в меню ⋮ любого трека.",
             DislikeSkips => "Трек, которому поставили «Не нравится», сразу пропускается.",
@@ -522,6 +538,12 @@ impl SettingId {
                 c!("Немного", "Примерно каждый пятый трек — новый для тебя, похожий на то, что играет."),
                 c!("Побольше", "Примерно два трека из пяти — новые: чтобы чаще находить незнакомое."),
             ],
+            Self::BackgroundCards => &[
+                c!("Не показывать", "Миксов «Фон» на главной нет."),
+                c!("Один", "Один микс «Фон»."),
+                c!("Два", "До двух: потише и поживее."),
+                c!("До трёх", "Сколько подходит тому, как ты слушаешь фоном, но не больше трёх."),
+            ],
             Self::ProfileNames => &[
                 c!("Тип и язык", "«Японские песни», «Саундтреки без слов»; исполнители — под названием."),
                 c!("Исполнители", "Названия из главных исполнителей профиля."),
@@ -591,6 +613,7 @@ impl SettingId {
             Self::RadioNewShare => share_index(p.radio_new_share),
             Self::NewShareBy(kind) => share_index(p.new_share_of(kind)),
             Self::ProfileNames => usize::from(p.profile_names == v::ProfileNames::Artists),
+            Self::BackgroundCards => usize::from(p.background_cards.min(3)),
             _ => 0,
         }
     }
@@ -658,6 +681,7 @@ impl SettingId {
                 p.radio_new_share_by.insert(kind, SHARES[i.min(2)]);
             }
             Self::ProfileNames => p.profile_names = if i == 1 { v::ProfileNames::Artists } else { v::ProfileNames::Kind },
+            Self::BackgroundCards => p.background_cards = i.min(3) as u8,
             _ => {}
         }
     }
@@ -1724,6 +1748,8 @@ mod tests {
         assert_eq!(SettingId::BackgroundCountsLess.tab(), TAB_RECS);
         assert_eq!(SettingId::ProfilesSplit.tab(), TAB_RECS);
         assert_eq!(SettingId::ProfileNames.tab(), TAB_RECS);
+        assert_eq!(SettingId::BackgroundCards.tab(), TAB_RECS);
+        assert_eq!(SettingId::MixesEverything.tab(), TAB_RECS);
         assert!(!SettingId::Autoplay.help().is_empty() && !SettingId::RadioSource.help().is_empty());
         for id in [SettingId::RadioNewShare, SettingId::MixesDownloadedOnly, SettingId::SoundAnalysis, SettingId::StreamAnalysis] {
             assert!(!id.help().is_empty());
@@ -1743,7 +1769,7 @@ mod tests {
             S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::RingDir, S::RingStyle, S::Ambient,
             S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
-            S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames,
+            S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
         ] {
 
             assert!(id.choices().len() >= 2, "{id:?}");

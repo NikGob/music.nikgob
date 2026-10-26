@@ -206,6 +206,8 @@ pub(crate) struct RecHome {
     pub tiles: Vec<tiles::TileHome>,
     /// «Миксы для тебя».
     pub lanes: Vec<lanes::LaneHome>,
+    /// The taste profiles «Смешать с…» offers.
+    pub blend_profiles: Vec<v::BlendProfile>,
     /// The mix tiles of the card at the top (recs-v2 §7), picked only
     /// while the app has the card ([`v::HOME_CARD`]); not on the page until
     /// the card comes back redesigned.
@@ -297,9 +299,12 @@ pub(crate) struct RecsState {
     refresh_daylist: bool,
     /// A mix asked for before the first build.
     pending_play: Option<v::MixId>,
-    /// «Собрать заново»: the day's lanes are picked with this salt (0: as
-    /// the day says).
-    lanes_salt: u64,
+    /// «Другой состав»: the next build draws this mix of «Миксы для тебя»
+    /// again.
+    refresh_mix: Option<v::MixKey>,
+    /// The blends made, with the day they are for: they stand first in
+    /// «Миксы для тебя» until its end.
+    blends: Vec<(String, v::MixKey)>,
     pub(crate) radio: radio::RadioState,
     pub(crate) discover: discover::DiscoverState,
     pub(crate) suggest: suggest::SuggestState,
@@ -331,7 +336,8 @@ impl RecsState {
             refresh_daily: false,
             refresh_daylist: false,
             pending_play: None,
-            lanes_salt: 0,
+            refresh_mix: None,
+            blends: Vec::new(),
             radio: radio::RadioState::default(),
             discover: discover::DiscoverState::default(),
             suggest: suggest::SuggestState::default(),
@@ -539,8 +545,14 @@ struct BuildInput {
     suggested: Vec<suggest::Kept>,
     /// They changed: the discoveries are ranked again after this build.
     rerank: bool,
-    /// [`RecsState::lanes_salt`].
-    lanes_salt: u64,
+    /// [`RecsState::refresh_mix`].
+    refresh_mix: Option<v::MixKey>,
+    /// The blends made today.
+    blends: Vec<v::MixKey>,
+    /// The session of the moment: the order of the mixes follows it.
+    session: Session,
+    /// The settings of «Миксы для тебя».
+    mix_prefs: lanes::MixPrefs,
     extra: ReadExtra,
     /// How new music was received: «С новым» takes its share by it.
     new_log: nikgob_recs::NewLog,
@@ -1097,7 +1109,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
     let daily_covers = covers_of(snap, &daily, &daily_streams);
     let (daylist_key, daylist) = build_daylist(snap, input);
     let tiles = tiles::build(snap, input, tiles_input);
-    let lanes = lanes::build(snap, input, tiles_input);
+    let (lanes, blend_profiles) = lanes::build(snap, input, tiles_input);
     let top = if v::HOME_CARD { top::build(snap, input, tiles_input, None) } else { Vec::new() };
 
     // Moods: covers of the releases most liked among each mood's top.
@@ -1162,6 +1174,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
         daylist,
         tiles,
         lanes,
+        blend_profiles,
         top,
     }
 }
@@ -1226,9 +1239,18 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
     (key, Some(home))
 }
 
-/// A lane as [`HomeParts`] keeps it: the lane, its artists, the new
-/// songs' artists, covers, the new cover and the tracks.
-type LaneParts = (v::Lane, Vec<String>, Vec<String>, Vec<CoverRef>, Option<String>, Vec<nikgob_library::TrackRow>);
+/// A mix of «Миксы для тебя» as [`HomeParts`] keeps it.
+struct LaneParts {
+    key: v::MixKey,
+    title: String,
+    artists: Vec<String>,
+    /// The new songs' artists.
+    new_artists: Vec<String>,
+    covers: Vec<CoverRef>,
+    new_cover: Option<String>,
+    rows: Vec<nikgob_library::TrackRow>,
+    blend_base: Option<u32>,
+}
 
 /// The recommendation parts of the home view, ready to be drawn.
 pub(crate) struct HomeParts {
@@ -1242,8 +1264,8 @@ pub(crate) struct HomeParts {
     styles: Vec<(String, String, Vec<CoverRef>)>,
     discover: Vec<v::StreamTrackRow>,
     new_releases: Vec<v::StreamAlbumCard>,
-    /// Lane, artists, new artists, covers, the new cover, the tracks.
     lanes: Vec<LaneParts>,
+    blend_profiles: Vec<v::BlendProfile>,
     history: bool,
     /// «Только скачанное»: nothing on the home may play without a file.
     local_only: bool,
@@ -1273,6 +1295,7 @@ impl HomeParts {
                 discover,
                 new_releases,
                 lanes: Vec::new(),
+                blend_profiles: Vec::new(),
                 history: false,
                 local_only,
                 card,
@@ -1316,7 +1339,16 @@ impl HomeParts {
                 }
                 let new_cover = l.new.iter().find_map(|t| t.cover_url.clone());
                 let rows = l.tracks.iter().filter_map(|id| lib.get_track_row(*id).ok().flatten()).collect();
-                (l.lane, l.artists.clone(), new_artists, l.covers.clone(), new_cover, rows)
+                LaneParts {
+                    key: l.key,
+                    title: l.title.clone(),
+                    artists: l.artists.clone(),
+                    new_artists,
+                    covers: l.covers.clone(),
+                    new_cover,
+                    rows,
+                    blend_base: l.blend_base,
+                }
             })
             .collect();
         let moods = h
@@ -1339,6 +1371,7 @@ impl HomeParts {
             discover,
             new_releases,
             lanes,
+            blend_profiles: h.blend_profiles.clone(),
             history: h.history,
             local_only,
             card,
@@ -1413,20 +1446,23 @@ impl HomeParts {
                 covers: covers(c),
             })
             .collect();
-        let lane_covers: Vec<Vec<v::Cover>> = self.lanes.iter().map(|l| covers(l.3.clone())).collect();
+        let lane_covers: Vec<Vec<v::Cover>> = self.lanes.iter().map(|l| covers(l.covers.clone())).collect();
         let lanes: Vec<v::LaneCard> = self
             .lanes
             .into_iter()
             .zip(lane_covers)
-            .map(|((lane, artists, new_artists, _, new_cover, rows), covers)| v::LaneCard {
-                lane,
-                artists,
-                new_artists,
+            .map(|(l, covers)| v::LaneCard {
+                key: l.key,
+                title: l.title,
+                artists: l.artists,
+                new_artists: l.new_artists,
                 covers,
-                new_cover: new_cover.map(v::Cover::web),
-                tracks: rows.iter().map(|t| res.track(t)).collect(),
+                new_cover: l.new_cover.map(v::Cover::web),
+                tracks: l.rows.iter().map(|t| res.track(t)).collect(),
+                blend_base: l.blend_base,
             })
             .collect();
+        let blend_profiles = self.blend_profiles;
         let history = self.history;
         let mix: Option<Vec<_>> = (!self.mix.is_empty()).then(|| self.mix.iter().map(|t| res.track(t)).collect());
         let (discover, new_releases) = (self.discover, self.new_releases);
@@ -1442,6 +1478,7 @@ impl HomeParts {
             home.discover = discover;
             home.new_releases = new_releases;
             home.lanes = lanes;
+            home.blend_profiles = blend_profiles;
             home.history |= history;
             if local_only {
                 only_downloaded(home);
@@ -1604,7 +1641,10 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
         new: discoveries.clone(),
         suggested: suggest::cached(lib),
         rerank: false,
-        lanes_salt: 0,
+        refresh_mix: None,
+        blends: Vec::new(),
+        session: Session::default(),
+        mix_prefs: lanes::MixPrefs::of(prefs),
         extra: ReadExtra::of(discoveries.clone(), prefs),
         new_log: novelty::log_of(lib),
     };
@@ -1938,6 +1978,8 @@ impl Worker {
     fn recs_build(&mut self) {
         let (day, utc_offset_min) = local_day();
         let prefs = self.state.read().prefs.clone();
+        self.recs.blends.retain(|b| b.0 == day);
+        let blends = self.recs.blends.iter().map(|b| b.1).collect();
         let input = BuildInput {
             lib: self.lib.clone(),
             index: self.analysis.index().clone(),
@@ -1951,7 +1993,10 @@ impl Worker {
             new: self.discoveries(),
             suggested: self.suggestions_kept(),
             rerank: std::mem::take(&mut self.recs.discover_rerank),
-            lanes_salt: self.recs.lanes_salt,
+            refresh_mix: self.recs.refresh_mix.take(),
+            blends,
+            session: self.recs.session.clone(),
+            mix_prefs: lanes::MixPrefs::of(&prefs),
             extra: ReadExtra::of(self.discoveries(), &prefs),
             new_log: {
                 self.new_log_load();
@@ -2027,6 +2072,7 @@ impl Worker {
             Command::RecFeedback { target, dislike } => self.rec_feedback(target, dislike),
             Command::Dislike { track, dislike, sure, relike } => self.dislike(track, dislike, sure, relike),
             Command::RefreshMix { id } => self.refresh_mix(id),
+            Command::PlayBlend { profiles } => self.play_blend(&profiles),
             Command::DownloadMix { id } => self.download_mix(id),
             other => return Some(other),
         }
@@ -2087,16 +2133,16 @@ impl Worker {
                 let streams = d.streams.values().cloned().collect();
                 self.start_radio_picked(state, picks, streams, title, EventContext::HomeSection);
             }
-            v::MixId::Lane(lane) => {
+            v::MixId::Lane(key) => {
                 let with_new = {
                     let p = &self.state.read().prefs;
                     p.mixes_with_new && !p.mixes_downloaded_only
                 };
-                let lane = self.recs.home.as_ref().and_then(|h| h.lanes.iter().find(|l| l.lane == lane));
-                match lane.map(|l| (l.picks(with_new), l.new.clone(), l.lane.title())) {
+                let lane = self.recs.home.as_ref().and_then(|h| h.lanes.iter().find(|l| l.key == key));
+                match lane.map(|l| (l.picks(with_new), l.new.clone(), l.title.clone())) {
                     Some((picks, new, title)) => {
                         let streams = new.into_iter().map(|t| (t.id.clone(), t)).collect();
-                        self.play_picks(&picks, &streams, title);
+                        self.play_picks(&picks, &streams, &title);
                     }
                     None => self.toast("Этого микса уже нет — главная обновилась", None),
                 }
@@ -2191,6 +2237,49 @@ impl Worker {
         }
     }
 
+    /// `Command::PlayBlend`: «Смешать с…». The blend is drawn now from the
+    /// snapshot, plays, and stands first in «Миксы для тебя» until the
+    /// day's end (the next builds draw it again the same).
+    fn play_blend(&mut self, profiles: &[u32]) {
+        let Some(snap) = self.recs.snap.clone() else {
+            self.toast("Рекомендации ещё собираются — попробуй чуть позже", None);
+            return;
+        };
+        let prefs = lanes::MixPrefs::of(&self.state.read().prefs);
+        let lib = self.lib.clone();
+        let names = |a: nikgob_core::model::ArtistId| lib.get_artist(a).ok().flatten().map(|a| a.name);
+        let Some(lane) = lanes::blend_now(&snap, &prefs, profiles, &names, &self.recs.session) else {
+            self.toast("Из этих профилей микса не собрать", None);
+            return;
+        };
+        let (day, _) = local_day();
+        lanes::remember_blend(&self.lib, &prefs, &day, recs_now(), lane.key);
+        self.recs.blends.retain(|b| b.0 == day && b.1 != lane.key);
+        self.recs.blends.push((day, lane.key));
+        let (picks, title) = (lane.picks(false), lane.title.clone());
+        if let Some(h) = self.recs.home.as_mut() {
+            h.lanes.retain(|l| l.key != lane.key);
+            h.lanes.insert(0, lane);
+            // As the next build has it: the latest blends in the places of
+            // the moments that fit now least.
+            let blend = |l: &lanes::LaneHome| matches!(l.key, v::MixKey::Blend(_));
+            while h.lanes.iter().filter(|l| blend(l)).count() > nikgob_recs::mixes::BLENDS_SHOWN {
+                if let Some(k) = h.lanes.iter().rposition(|l| blend(l)) {
+                    h.lanes.remove(k);
+                }
+            }
+            while h.lanes.iter().filter(|l| l.key != v::MixKey::OnRepeat).count() > nikgob_recs::mixes::MOMENTS {
+                if let Some(k) = h.lanes.iter().rposition(|l| l.key != v::MixKey::OnRepeat && !blend(l)) {
+                    h.lanes.remove(k);
+                } else {
+                    break;
+                }
+            }
+        }
+        self.publish_recs_home();
+        self.play_picks(&picks, &HashMap::new(), &title);
+    }
+
     /// `Command::RefreshMix`.
     fn refresh_mix(&mut self, id: v::MixId) {
         match id {
@@ -2209,8 +2298,10 @@ impl Worker {
                     self.recs_build();
                 }
             }
-            v::MixId::Lane(_) => {
-                self.recs.lanes_salt = fastrand::u64(1..);
+            // «На повторе» is what played: nothing to draw again.
+            v::MixId::Lane(v::MixKey::OnRepeat) => {}
+            v::MixId::Lane(key) => {
+                self.recs.refresh_mix = Some(key);
                 self.recs_dirty(Duration::ZERO);
                 if !self.recs.building {
                     self.recs_build();

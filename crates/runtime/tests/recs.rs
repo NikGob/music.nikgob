@@ -962,8 +962,9 @@ fn nothing_goes_to_the_network_without_a_usable_service() {
     assert!(s.rt.state().home.discover.is_empty());
 }
 
-/// Every mix of «Миксы для тебя» names its artists, the language lanes
-/// (Russian, Japanese) as much as the soundtracks and «На повторе».
+/// Every mix of «Миксы для тебя» names its artists, no two are called
+/// alike, and a library of Russian and Japanese songs gets the Russian
+/// ones' mix and the Japanese ones in a mix.
 #[test]
 fn every_lane_names_its_artists() {
     let ru = ["снова страшно", "пустой вокзал", "красный флаг", "апельсин", "дом"];
@@ -980,13 +981,14 @@ fn every_lane_names_its_artists() {
     let l = library(2, 4, 5, &named_ref);
     let preview = nikgob_runtime::preview_home(&l.lib, &std::env::temp_dir()).unwrap();
     let lanes = &preview.home.lanes;
-    assert!(lanes.iter().any(|c| c.lane == nikgob_view::Lane::Russian), "{:?}", lanes.iter().map(|c| c.lane).collect::<Vec<_>>());
-    assert!(
-        lanes.iter().any(|c| matches!(c.lane, nikgob_view::Lane::Japanese | nikgob_view::Lane::NotRussian)),
-        "{:?}",
-        lanes.iter().map(|c| c.lane).collect::<Vec<_>>()
-    );
+    let titles: Vec<&str> = lanes.iter().map(|c| c.title.as_str()).collect();
+    assert!(titles.iter().any(|t| t.contains("Русские")), "{titles:?}");
+    // The Japanese songs: their own mix or the cross ones.
+    let ja = |c: &nikgob_view::LaneCard| c.artists.iter().any(|a| ["Eve", "Ado", "Yorushika", "ヒトリエ"].contains(&a.as_str()));
+    assert!(lanes.iter().any(|c| c.key != nikgob_view::MixKey::OnRepeat && ja(c)), "{titles:?}");
+    let unique: std::collections::HashSet<&str> = titles.iter().copied().collect();
+    assert_eq!(unique.len(), titles.len(), "{titles:?}");
     for c in lanes {
-        assert!(!c.artists.is_empty(), "«{}» names no artist", c.lane.title());
+        assert!(!c.artists.is_empty(), "«{}» names no artist", c.title);
     }
 }

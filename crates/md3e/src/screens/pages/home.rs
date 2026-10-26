@@ -273,6 +273,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         nav = r.or(nav);
     }
     lane_list(ui.ctx(), state, out);
+    blend_sheet(ui.ctx(), state, out);
     nav
 }
 
@@ -395,8 +396,7 @@ fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec
 
 /// The lane playing now: its queue was started from it and plays.
 fn lane_playing(state: &ViewState, l: &LaneCard) -> bool {
-    state.player.status == Status::Playing
-        && state.player.context.as_deref() == Some(format!("микса «{}»", l.lane.title()).as_str())
+    state.player.status == Status::Playing && state.player.context.as_deref() == Some(l.context().as_str())
 }
 
 fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
@@ -447,7 +447,9 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Com
         top += HEADER_GAP;
         for (i, l) in h.lanes.iter().enumerate() {
             let cell = grid.cell(i, per, top, card_h, 24.0);
-            cards::mix(ui, cell, l, with_new, lane_playing(state, l), state.player.status, out);
+            // «Смешать с…»: another profile to mix it with.
+            let can_blend = l.blend_base.is_some_and(|b| h.blend_profiles.iter().any(|p| p.key != b));
+            cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, out);
         }
     });
     None
@@ -456,14 +458,14 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Com
 /// «Список треков» of a mix: its songs in a dialog.
 fn lane_list(ctx: &egui::Context, state: &ViewState, out: &mut Vec<Command>) {
     let key = Id::new("home-lane-list");
-    let Some(lane) = ctx.data(|d| d.get_temp::<nikgob_view::Lane>(key)) else { return };
-    let Some(l) = state.home.lanes.iter().find(|l| l.lane == lane) else {
-        ctx.data_mut(|d| d.remove::<nikgob_view::Lane>(key));
+    let Some(lane) = ctx.data(|d| d.get_temp::<nikgob_view::MixKey>(key)) else { return };
+    let Some(l) = state.home.lanes.iter().find(|l| l.key == lane) else {
+        ctx.data_mut(|d| d.remove::<nikgob_view::MixKey>(key));
         return;
     };
     let mut open = true;
     let n = l.tracks.len();
-    let o = crate::components::Dialog::new("home-lane-list-dialog", l.lane.title())
+    let o = crate::components::Dialog::new("home-lane-list-dialog", &l.title)
         .supporting(format!("{n} {}", crate::screens::common::plural(n as u64, "трек", "трека", "треков")))
         .action("Закрыть")
         .action("Слушать")
@@ -482,7 +484,7 @@ fn lane_list(ctx: &egui::Context, state: &ViewState, out: &mut Vec<Command>) {
                         out.push(Command::PlayTracks {
                             tracks: l.tracks.iter().map(|t| t.id).collect(),
                             start: i,
-                            context: format!("микса «{}»", l.lane.title()),
+                            context: l.context(),
                         });
                     }
                 }
@@ -492,13 +494,83 @@ fn lane_list(ctx: &egui::Context, state: &ViewState, out: &mut Vec<Command>) {
         out.push(Command::PlayMix { id: l.id() });
     }
     if !open || o.action.is_some() {
-        ctx.data_mut(|d| d.remove::<nikgob_view::Lane>(key));
+        ctx.data_mut(|d| d.remove::<nikgob_view::MixKey>(key));
     }
 }
 
 /// Opens «Список треков» of `lane`.
-pub(super) fn open_lane_list(ctx: &egui::Context, lane: nikgob_view::Lane) {
+pub(super) fn open_lane_list(ctx: &egui::Context, lane: nikgob_view::MixKey) {
     ctx.data_mut(|d| d.insert_temp(Id::new("home-lane-list"), lane));
+}
+
+/// The profiles picked in «Смешать с…»: the card's first, then up to two.
+#[derive(Clone, Debug, Default)]
+struct Blend {
+    base: u32,
+    with: Vec<u32>,
+    open: bool,
+}
+
+/// At most this many profiles join the card's in a blend.
+const BLEND_WITH: usize = 2;
+
+/// «Смешать с…» of a mix: the bottom sheet of the other taste profiles,
+/// one or two of them picked, then «Слушать».
+fn blend_sheet(ctx: &egui::Context, state: &ViewState, out: &mut Vec<Command>) {
+    let key = Id::new("home-blend");
+    let Some(mut b) = ctx.data(|d| d.get_temp::<Blend>(key)) else { return };
+    let profiles = &state.home.blend_profiles;
+    let base_title = profiles.iter().find(|p| p.key == b.base).map(|p| p.title.clone());
+    let others: Vec<&nikgob_view::BlendProfile> = profiles.iter().filter(|p| p.key != b.base).collect();
+    if base_title.is_none() || others.is_empty() {
+        b.open = false;
+    }
+    b.with.retain(|k| others.iter().any(|p| p.key == *k));
+    let mut open = b.open;
+    let mut play = false;
+    // Its height: the title, the chips in rows of what fits, the button.
+    let rows = others.len().div_ceil(3).max(1) as f32;
+    let height = 36.0 + 48.0 + rows * 40.0 + 24.0 + 40.0 + 24.0;
+    crate::components::BottomSheet::new("home-blend-sheet").height(height).max_width(640.0).show(ctx, &mut open, |ui| {
+        let s = Theme::get(ui.ctx()).scheme;
+        let title = format!("Смешать «{}» с", base_title.as_deref().unwrap_or_default());
+        ui.add(egui::Label::new(TypeRole::TitleLarge.style().rich(title, s.on_surface)).truncate());
+        ui.add_space(16.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            for p in &others {
+                let on = b.with.contains(&p.key);
+                let full = b.with.len() >= BLEND_WITH;
+                let chip = FilterChip::new(p.title.as_str(), on).enabled(on || !full).id_salt(("home-blend-chip", p.key));
+                if ui.add(chip).clicked() {
+                    if on {
+                        b.with.retain(|k| *k != p.key);
+                    } else if !full {
+                        b.with.push(p.key);
+                    }
+                }
+            }
+        });
+        ui.add_space(24.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let listen = Button::new("Слушать").icon(Icon::PlayArrow).style(Style::Filled).enabled(!b.with.is_empty()).id_salt("home-blend-play");
+            play = ui.add(listen).clicked();
+        });
+    });
+    if play {
+        let mut profiles = vec![b.base];
+        profiles.extend(b.with.iter().copied());
+        out.push(Command::PlayBlend { profiles });
+        open = false;
+    }
+    // Closed, it stays drawn while it slides away.
+    b.open = open;
+    ctx.data_mut(|d| d.insert_temp(key, b));
+}
+
+/// Opens «Смешать с…» of the profile `base`.
+pub(super) fn open_blend(ctx: &egui::Context, base: u32) {
+    ctx.data_mut(|d| d.insert_temp(Id::new("home-blend"), Blend { base, with: Vec::new(), open: true }));
 }
 
 // ---- «Слушать снова».

@@ -1076,6 +1076,7 @@ impl Worker {
             | Command::RecFeedback { .. }
             | Command::Dislike { .. }
             | Command::RefreshMix { .. }
+            | Command::PlayBlend { .. }
             | Command::DownloadMix { .. }) => {
                 if let Some(c) = self.recs_command(c) {
                     log::warn!("unhandled {c:?}");
@@ -2051,6 +2052,11 @@ impl Worker {
             || old.background_counts_less != p.background_counts_less
             || old.profiles_split != p.profiles_split
             || old.profile_names != p.profile_names
+            || old.mixes_profiles != p.mixes_profiles
+            || old.mixes_everything != p.mixes_everything
+            || old.mixes_moods != p.mixes_moods
+            || old.mixes_on_repeat != p.mixes_on_repeat
+            || old.background_cards != p.background_cards
         {
             self.recs_prefs_changed();
         }
