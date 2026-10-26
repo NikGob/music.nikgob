@@ -187,6 +187,16 @@ impl Session {
     pub fn count(&self, track: TrackId) -> usize {
         self.tracks.iter().filter(|p| p.track == track).count()
     }
+
+    /// What the session is (profiles-v1 §4.2): pure in one taste profile
+    /// or mixed, by the profiles (`profile` tells a track's) of what was
+    /// not skipped early; `None` before a start of a known profile. A
+    /// track of another profile picked by hand makes it mixed; two early
+    /// skips take nothing in.
+    pub fn mode(&self, profile: impl Fn(TrackId) -> Option<usize>) -> Option<crate::listening::Mode> {
+        let profiles: Vec<Option<usize>> = self.tracks.iter().filter(|p| p.ended != Ended::Early).map(|p| profile(p.track)).collect();
+        crate::listening::infer_mode(&profiles)
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +250,25 @@ mod tests {
         assert_eq!(s.anchor(&Look), Some(line(3.0)), "skips are no anchor");
         assert!(s.start(tid(4), T + 20_000 + SESSION_GAP_MS, EventContext::Album, None));
         assert_eq!(s.len(), 1);
+    }
+
+    /// Three of one profile: pure; one of another picked: mixed; an early
+    /// skip of a third counts for nothing.
+    #[test]
+    fn the_mode_of_a_session() {
+        let profile = |t: TrackId| Some((t.0.as_u128() / 100) as usize);
+        let mut s = Session::default();
+        assert_eq!(s.mode(profile), None);
+        for k in 0..3 {
+            s.start(tid(10 + k), T + k as i64 * 200_000, EventContext::Library, None);
+            s.end(tid(10 + k), Ended::Complete);
+        }
+        assert_eq!(s.mode(profile), Some(crate::listening::Mode::Pure(0)));
+        s.start(tid(250), T + 700_000, EventContext::Library, None);
+        s.end(tid(250), Ended::Early);
+        assert_eq!(s.mode(profile), Some(crate::listening::Mode::Pure(0)), "skipped early");
+        s.start(tid(120), T + 800_000, EventContext::Library, None);
+        assert_eq!(s.mode(profile), Some(crate::listening::Mode::Mixed));
     }
 
     #[test]

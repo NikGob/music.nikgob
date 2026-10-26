@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::Vector;
 use crate::index::{Normalizer, VectorIndex, euclid};
-use crate::listening::{Heard, Listening, W_BG};
+use crate::listening::{Heard, Listening, SessionSignals, W_BG};
 use crate::profiles::{
     ALIVE_DAYS, Input as ProfilesInput, Params, Profiles, SHARE_HALF_DAYS, SharePlay, background_cards, background_shares, quota,
     shares,
@@ -64,7 +64,7 @@ use crate::taste::{
 
 /// Bumped when a feature changes meaning: cached weights of another
 /// version are learnt again from the history.
-pub const FEATURE_VERSION: u32 = 2;
+pub const FEATURE_VERSION: u32 = 3;
 
 pub const H_LONG_MS: i64 = 45 * DAY_MS;
 pub const H_HOT_MS: i64 = 2 * DAY_MS;
@@ -141,13 +141,16 @@ pub const FULL_STEP_AFTER: u32 = 300;
 pub const EXPECT_OVER: usize = 100;
 
 /// The features of a start for its early skip, in this order
-/// (`new_service`: new music from a service, recs-v2 §11.2).
-pub const SKIP_FEATURES: [&str; 24] = [
+/// (`new_service`: new music from a service, recs-v2 §11.2; `background`:
+/// the session's `p_bg` so far, profiles-v1 §5.1 — not skipped because not
+/// listened to).
+pub const SKIP_FEATURES: [&str; 25] = [
     "bias", "aff_today", "aff_long", "aff_hot", "early_rate", "never", "liked", "pos0", "pos_log", "ctx_album",
     "ctx_playlist", "ctx_artist", "ctx_home", "same_album", "same_world", "sound_jump", "night", "ost", "vocal",
-    "long", "interlude", "prev_early", "prev2_early", "new_service",
+    "long", "interlude", "prev_early", "prev2_early", "new_service", "background",
 ];
 pub const G_NEW_SERVICE: usize = 23;
+pub const G_BACKGROUND: usize = 24;
 pub const G: usize = SKIP_FEATURES.len();
 const SKIP_LR: f32 = 0.08;
 const SKIP_L2: f32 = 0.001;
@@ -403,6 +406,17 @@ pub struct Moment {
     pub album_session: bool,
     pub world_session: Option<u64>,
     pub repeat_one: bool,
+    /// How much the session so far is background ([`Listening::p_now`]).
+    pub p_bg: f32,
+}
+
+/// What a live session is ([`UserModel::live`]): one profile or many,
+/// how much of it is background, and the profile of its last start.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Live {
+    pub mode: Option<crate::listening::Mode>,
+    pub p_bg: f32,
+    pub profile: Option<usize>,
 }
 
 /// A start of the history as [`UserModel::settle`] reads it.
@@ -531,14 +545,29 @@ impl UserModel {
                 m.tracks[i].liked = Some(*at);
             }
         }
+        // How the user listens, before the walk: the skip model reads the
+        // background of each moment.
+        let (starts, p_bg) = m.listen(input);
         for p in ordered(&input.events) {
             m.event(p, None);
         }
         m.close_imported();
         m.now = now;
         m.learn = false;
-        m.settle(catalog, input);
+        m.settle(catalog, input, &starts, &p_bg);
         m
+    }
+
+    /// What a live `session` is (profiles-v1 §4): pure or mixed by the
+    /// profiles of its starts, its `p_bg` ranked among the user's own
+    /// sessions, the profile of its last start.
+    pub fn live(&self, session: &Session) -> Live {
+        let profile = |t: TrackId| self.position(t).and_then(|i| self.profile_at(i));
+        Live {
+            mode: session.mode(profile),
+            p_bg: self.moment(session, session.last_ts().unwrap_or(self.now)).p_bg,
+            profile: session.last().and_then(|p| profile(p.track)),
+        }
     }
 
     /// The profile of the track at `i`.
@@ -656,14 +685,9 @@ impl UserModel {
         out
     }
 
-    /// How the user listens, the taste profiles, their shares and the
-    /// dislikes' neighbours, once the history is walked.
-    fn settle(&mut self, catalog: &Catalog, input: &TasteInput) {
-        let now = self.now;
-        let n = self.len();
-        let set = &input.profiles;
-        let w_bg = if set.background_less { W_BG } else { 1.0 };
-        // The listening modes, of the user's own starts.
+    /// How the user listens ([`Listening`]): of the user's own starts of
+    /// `input`; the starts and the `p_bg` of each.
+    fn listen(&mut self, input: &TasteInput) -> (Vec<Started>, Vec<f32>) {
         let starts = self.starts_of(input);
         let own: Vec<usize> = (0..starts.len()).filter(|&k| !starts[k].import).collect();
         let heard: Vec<Heard> = own
@@ -696,6 +720,18 @@ impl UserModel {
         for (x, &k) in own.iter().enumerate() {
             p_bg[k] = p_own[x];
         }
+        self.listening = listening;
+        (starts, p_bg)
+    }
+
+    /// The taste profiles, their shares and the dislikes' neighbours, once
+    /// the history is walked (`starts` and their `p_bg` of [`Self::listen`]).
+    fn settle(&mut self, catalog: &Catalog, input: &TasteInput, starts: &[Started], p_bg: &[f32]) {
+        let now = self.now;
+        let n = self.len();
+        let set = &input.profiles;
+        let w_bg = if set.background_less { W_BG } else { 1.0 };
+        let own: Vec<usize> = (0..starts.len()).filter(|&k| !starts[k].import).collect();
         // The profiles' mass: the outcomes, a background play counting
         // little; likes and playlists. And their life: the active plays of
         // the last two months.
@@ -762,7 +798,6 @@ impl UserModel {
         let sh = shares(&all, k, w_bg, Some(SHARE_HALF_DAYS), now);
         self.profile_share = if sh.iter().sum::<f32>() > 0.0 { sh } else { vec![1.0 / k.max(1) as f32; k] };
         self.profile_bg = background_shares(&own_plays, k);
-        self.listening = listening;
         let mut top = vec![0.0f32; k];
         for i in 0..n {
             if let Some(j) = self.profile_at(i) {
@@ -929,6 +964,19 @@ impl UserModel {
         self.scale
     }
 
+    /// The energy of the track at `i` on the mood axes ([`crate::mood::Axes`]),
+    /// when it has a sound.
+    pub fn energy_at(&self, i: usize) -> Option<f32> {
+        self.emb[i].map(|e| crate::mood::Axes::of(&self.norm.z_of_embedded(&e)).energy)
+    }
+
+    /// The share of the user's starts in `part` of the day ([`DayPart::index`]);
+    /// a quarter without a history.
+    pub fn part_share(&self, part: usize) -> f32 {
+        let all: u32 = self.part_total.iter().sum();
+        if all == 0 { 0.25 } else { self.part_total[part] as f32 / all as f32 }
+    }
+
     fn part_of(&self, ts: UnixMs) -> usize {
         DayPart::at(ts, self.utc_offset_min).index()
     }
@@ -952,6 +1000,7 @@ impl UserModel {
             album_session: session.album_session(self),
             world_session: session.world_session(self),
             repeat_one: session.repeat_one(),
+            p_bg: self.listening.p_now(&SessionSignals::of_session(session, |t| self.position(t).and_then(|i| self.duration[i]))),
         }
     }
 
@@ -1046,6 +1095,7 @@ impl UserModel {
         let (e1, e2) = (ends.next(), ends.next());
         x[21] = b(e1 == Some(Ended::Early));
         x[22] = b(e1 == Some(Ended::Early) && e2 == Some(Ended::Early));
+        x[G_BACKGROUND] = m.p_bg;
         x
     }
 
@@ -1082,6 +1132,7 @@ impl UserModel {
         x[21] = b(e1 == Some(Ended::Early));
         x[22] = b(e1 == Some(Ended::Early) && e2 == Some(Ended::Early));
         x[G_NEW_SERVICE] = 1.0;
+        x[G_BACKGROUND] = m.p_bg;
         x
     }
 
@@ -1459,6 +1510,7 @@ pub fn replay_with(
     let taste = Taste::build(catalog, &TasteInput::default(), first);
     let mut m = UserModel::empty(catalog, taste, extra, input.utc_offset_min, first);
     m.learn = true;
+    m.listen(input);
     let disliked: Vec<usize> = dislikes.iter().filter_map(|t| m.position(*t)).collect();
     let near = crate::dislike::near_dislikes(&m.emb, &disliked, m.scale);
     let mut shown: HashSet<usize> = HashSet::new();
