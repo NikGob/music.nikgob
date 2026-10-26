@@ -365,6 +365,13 @@ impl Listening {
         p_of(score, self.threshold) * passive
     }
 
+    /// `p_bg` of the session that played at `ts` (0 outside the sessions of
+    /// [`MIN_STARTS`]).
+    pub fn p_at(&self, ts: UnixMs) -> f32 {
+        let k = self.sessions.partition_point(|s| s.start <= ts);
+        k.checked_sub(1).map(|k| &self.sessions[k]).filter(|s| ts <= s.end).map_or(0.0, |s| s.p_bg)
+    }
+
     /// A live session with `s` is focused (profiles-v1 §4.1): hardly
     /// background (`p_bg` under [`FOCUS_P_BG`]) and touched more than the
     /// user's median session. Never before [`MIN_STARTS`].

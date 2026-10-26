@@ -852,30 +852,60 @@ fn read_parts(
         local_only,
         worlds,
     };
-    snap.background = background_fit(&snap, &tiles_input);
+    snap.background = background_fit(&snap, &tiles_input, &events);
     Ok((snap, tiles_input, index_len, history))
 }
 
 /// Whether each catalog track suits the background
-/// ([`nikgob_recs::background::Basic`]): by its type and names, and the
-/// names of the user's playlists it is in.
-pub(crate) fn background_fit(snap: &Snapshot, tiles: &nikgob_recs::TilesInput) -> Vec<bool> {
+/// ([`nikgob_recs::background::Basic`]): by its type and names, and
+/// whether it is in a playlist the user plays in their background sessions
+/// ([`nikgob_recs::background::background_playlists`]: the plays from it,
+/// by the history's `context_id`, else every playlist of the track played
+/// from a playlist before the history had one).
+pub(crate) fn background_fit(snap: &Snapshot, tiles: &nikgob_recs::TilesInput, events: &[nikgob_core::model::Event]) -> Vec<bool> {
     use nikgob_recs::background::{BackgroundScore, BackgroundTrack, Basic};
-    let mut lists: HashMap<TrackId, Vec<&str>> = HashMap::new();
-    for p in &tiles.playlists {
-        for t in &p.tracks {
-            lists.entry(*t).or_default().push(p.name.as_str());
-        }
+    let (kept, holding) = played_in_background(snap, tiles, events);
+    if !kept.is_empty() {
+        let names: Vec<&str> = kept.iter().filter_map(|&k| tiles.playlists.get(k)).map(|p| p.name.as_str()).collect();
+        log::info!("recs: played in the background: {}", names.join(", "));
     }
     snap.catalog
         .tracks()
         .iter()
         .map(|t| {
             let (Some(song), Some(f)) = (snap.types.get(t.id), tiles.facts.get(&t.id)) else { return false };
-            let playlists = lists.get(&t.id).map_or(&[][..], Vec::as_slice);
-            Basic.suits(&BackgroundTrack { song, title: &f.title, album: f.album.as_deref(), artist: &f.artist, playlists })
+            let background_playlist = holding.get(&t.id).is_some_and(|l| l.iter().any(|k| kept.contains(k)));
+            Basic.suits(&BackgroundTrack { song, title: &f.title, album: f.album.as_deref(), artist: &f.artist, background_playlist })
         })
         .collect()
+}
+
+/// The playlists of `tiles` the user plays in the background (their
+/// places), and the playlists of each track.
+fn played_in_background(
+    snap: &Snapshot,
+    tiles: &nikgob_recs::TilesInput,
+    events: &[nikgob_core::model::Event],
+) -> (HashSet<usize>, HashMap<TrackId, Vec<usize>>) {
+    use nikgob_core::model::EventType;
+    let by_key: HashMap<&str, usize> = tiles.playlists.iter().enumerate().map(|(k, p)| (p.key.as_str(), k)).collect();
+    let mut holding: HashMap<TrackId, Vec<usize>> = HashMap::new();
+    for (k, p) in tiles.playlists.iter().enumerate() {
+        for t in &p.tracks {
+            holding.entry(*t).or_default().push(k);
+        }
+    }
+    let mut plays: Vec<(usize, UnixMs)> = Vec::new();
+    for e in events.iter().filter(|e| e.event_type == EventType::Start) {
+        match e.context_id.as_deref().and_then(|c| c.strip_prefix("playlist:")) {
+            Some(id) => plays.extend(by_key.get(id).map(|&k| (k, e.ts))),
+            None if e.context == EventContext::Playlist && e.context_id.is_none() => {
+                plays.extend(holding.get(&e.track_id).into_iter().flatten().map(|&k| (k, e.ts)));
+            }
+            None => {}
+        }
+    }
+    (nikgob_recs::background::background_playlists(&plays, &snap.model.listening), holding)
 }
 
 /// An event as the recommendations read it: a play imported before
@@ -1705,6 +1735,28 @@ impl ModelPreview {
         let (_, utc_offset_min) = local_day();
         let (snap, _, _, history) = read_parts(lib, &index, recs_now(), utc_offset_min, &[], false, &ReadExtra::default())?;
         Ok(Self { snap, history })
+    }
+
+    /// The playlists the user plays in the background, by name.
+    pub fn background_playlists(&self, lib: &Library) -> Vec<String> {
+        let names: HashMap<ArtistId, String> = lib.artist_names().unwrap_or_default().into_iter().collect();
+        let rows = lib.rec_tracks().unwrap_or_default();
+        let events = lib.listening_events().unwrap_or_default();
+        let tiles = tiles::input(lib, &rows, &events, names);
+        let (kept, _) = played_in_background(&self.snap, &tiles, &events);
+        kept.into_iter().filter_map(|k| tiles.playlists.get(k)).map(|p| p.name.clone()).collect()
+    }
+
+    /// The track suits the background ([`background_fit`]).
+    pub fn suits_background(&self, id: TrackId) -> bool {
+        self.snap.catalog.position(id).is_some_and(|i| self.snap.background.get(i).copied().unwrap_or(false))
+    }
+
+    /// The name of the taste profile of a track.
+    pub fn profile_name(&self, lib: &Library, id: TrackId) -> Option<String> {
+        let names: HashMap<ArtistId, String> = lib.artist_names().unwrap_or_default().into_iter().collect();
+        let j = self.snap.catalog.position(id).and_then(|i| self.snap.model.profile_at(i))?;
+        Some(profile_name(&self.snap.model, &names, v::ProfileNames::Kind, j).0)
     }
 
     /// The next `n` of a radio.

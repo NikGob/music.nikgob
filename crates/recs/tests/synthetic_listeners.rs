@@ -270,7 +270,7 @@ fn run(l: &Listener) -> Found {
 fn home(l: &Listener, found: &Found) -> nikgob_recs::HomeProfiles {
     found.model.home_profiles(6, nikgob_recs::profiles::BG_CARDS, |i| {
         let song = l.types.get(l.catalog.tracks()[i].id).copied().unwrap_or_default();
-        Basic.suits(&BackgroundTrack { song: &song, title: "Track", album: Some(l.albums[i]), artist: "Artist", playlists: &[] })
+        Basic.suits(&BackgroundTrack { song: &song, title: "Track", album: Some(l.albums[i]), artist: "Artist", background_playlist: false })
     })
 }
 
@@ -468,7 +468,7 @@ mod mixes {
         let recs = Recs::new(&l.catalog, &m.taste, &l.index).with_model(m);
         let suits = |i: usize| {
             let song = l.types.get(l.catalog.tracks()[i].id).copied().unwrap_or_default();
-            Basic.suits(&BackgroundTrack { song: &song, title: "Track", album: Some(l.albums[i]), artist: "Artist", playlists: &[] })
+            Basic.suits(&BackgroundTrack { song: &song, title: "Track", album: Some(l.albums[i]), artist: "Artist", background_playlist: false })
         };
         let day = m.now().div_euclid(DAY);
         let b = Builder::new(&recs, m, &|_| true, &suits, day, DayPart::Day, Live::default(), Settings::default());
