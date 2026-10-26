@@ -7,7 +7,8 @@
 //! §1.5) and the smooth order: a greedy nearest-neighbour path through
 //! the picks in the normalised, weighted bliss space, where a track without
 //! a vector stands as close to another as their shared artist, album or
-//! co-listening says.
+//! co-listening says, mended by swaps wherever the path cornered itself
+//! into breaking a rule ([`repair`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -288,6 +289,17 @@ impl Placed {
 /// A placed track as the rules see it: artists, album, world.
 pub(crate) type Seen<'a> = (&'a [u64], Option<u64>, Option<u64>);
 
+/// What breaking the world rule weighs against an album's 1
+/// ([`Diversity::weighted`])…
+const W_WORLD: usize = 4;
+/// …the artist rule…
+const W_ARTIST: usize = 2;
+/// …and a world over its share of a radio's batch (a run of three is
+/// worse).
+pub(crate) const W_SHARE: usize = 2;
+/// [`repair`] swaps at most this many times.
+const REPAIR_STEPS: usize = 64;
+
 /// The diversity rules.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Diversity {
@@ -326,31 +338,42 @@ impl Diversity {
         self.exempt.is_none()
     }
 
-    /// How many rules `s` breaks after `seq` (a sequence of placed tracks).
-    pub(crate) fn violations(&self, seq: &[Seen<'_>], s: Seen<'_>) -> usize {
-        let mut v = 0;
+    /// The rules `s` breaks after `seq` (a sequence of placed tracks), each
+    /// by what it weighs: a world
+    /// thrice running is the user's own rule and weighs most ([`W_WORLD`]),
+    /// an artist again within three [`W_ARTIST`], an album a third time
+    /// within ten 1. When something must give, the album does.
+    pub(crate) fn weighted(&self, seq: &[Seen<'_>], s: Seen<'_>) -> usize {
+        let (artist, album, world) = self.broken(seq, s);
+        W_ARTIST * artist + usize::from(album) + W_WORLD * usize::from(world)
+    }
+
+    /// `s` after `seq` makes one world thrice running.
+    pub(crate) fn world_run(&self, seq: &[Seen<'_>], s: Seen<'_>) -> bool {
+        self.broken(seq, s).2
+    }
+
+    /// The artists placed too near, and whether the album rule and the
+    /// world rule break, for `s` after `seq`.
+    fn broken(&self, seq: &[Seen<'_>], s: Seen<'_>) -> (usize, bool, bool) {
         let n = seq.len();
         let from = n.saturating_sub(self.artist_window - 1);
-        for (artists, _, _) in &seq[from..] {
-            if s.0.iter().any(|a| Some(*a) != self.exempt && artists.contains(a)) {
-                v += 1;
-            }
-        }
-        if let Some(album) = s.1 {
+        let artist = seq[from..].iter().filter(|(artists, _, _)| s.0.iter().any(|a| Some(*a) != self.exempt && artists.contains(a))).count();
+        let album = s.1.is_some_and(|album| {
             let from = n.saturating_sub(self.album_window - 1);
-            let same = seq[from..].iter().filter(|(_, b, _)| *b == Some(album)).count();
-            if same >= self.album_max {
-                v += 1;
-            }
-        }
-        if let Some(world) = s.2.filter(|_| self.worlds()) {
+            seq[from..].iter().filter(|(_, b, _)| *b == Some(album)).count() >= self.album_max
+        });
+        let world = s.2.filter(|_| self.worlds()).is_some_and(|world| {
             let from = n.saturating_sub(self.world_window - 1);
-            let same = seq[from..].iter().filter(|(_, _, w)| *w == Some(world)).count();
-            if same >= self.world_max {
-                v += 1;
-            }
-        }
-        v
+            seq[from..].iter().filter(|(_, _, w)| *w == Some(world)).count() >= self.world_max
+        });
+        (artist, album, world)
+    }
+
+    /// The weight of every rule broken along `seq` from place `from` on
+    /// (the places before it are what already plays).
+    pub(crate) fn weight_of(&self, seq: &[Seen<'_>], from: usize) -> usize {
+        (from..seq.len()).map(|k| self.weighted(&seq[..k], seq[k])).sum()
     }
 
     /// Caps on whole counts that keep an order of `n` tracks possible:
@@ -519,7 +542,7 @@ pub(crate) fn arrange(recs: &Recs<'_>, mut slots: Vec<Slot>, before: &[Placed], 
         };
         let mut best: Option<((usize, usize), f32, usize)> = None;
         for (i, s) in slots.iter().enumerate() {
-            let v = (rules.violations(&seq, (&s.artists, s.album, s.world)), crowded(s));
+            let v = (rules.weighted(&seq, (&s.artists, s.album, s.world)), crowded(s));
             let d = match &prev {
                 Some(p) => distance(recs, p, s, m),
                 // The first one: the best score.
@@ -538,7 +561,56 @@ pub(crate) fn arrange(recs: &Recs<'_>, mut slots: Vec<Slot>, before: &[Placed], 
         prev = Some(s.clone());
         out.push(s);
     }
+    repair(recs, &mut out, before, start, rules, m);
     out
+}
+
+/// What a greedy order cannot see coming: near its end the places left
+/// may hold only tracks of one world, or of an album twice in the last
+/// ten already, so a rule breaks there. The order is mended by swapping
+/// two of its places, each time the swap that lowers the weight of the
+/// rules broken most ([`Diversity::weighted`]; of equal ones the smoother
+/// path), until none lowers it. What already plays (`before`) stays; `m`
+/// is the typical distance of [`relation_distance`].
+pub(crate) fn repair(recs: &Recs<'_>, out: &mut [Slot], before: &[Placed], start: Option<&Slot>, rules: &Diversity, m: f32) {
+    let weight_of = |out: &[Slot]| -> usize {
+        let seq: Vec<Seen<'_>> = before
+            .iter()
+            .map(|p| (p.artists.as_slice(), p.album, p.world))
+            .chain(out.iter().map(|s| (s.artists.as_slice(), s.album, s.world)))
+            .collect();
+        rules.weight_of(&seq, before.len())
+    };
+    let path = |out: &[Slot]| -> f32 {
+        let first = match (start, out.first()) {
+            (Some(p), Some(s)) => distance(recs, p, s, m),
+            _ => 0.0,
+        };
+        first + out.windows(2).map(|w| distance(recs, &w[0], &w[1], m)).sum::<f32>()
+    };
+    let mut weight = weight_of(out);
+    for _ in 0..REPAIR_STEPS {
+        if weight == 0 {
+            return;
+        }
+        let mut best: Option<(usize, f32, usize, usize)> = None;
+        for i in 0..out.len() {
+            for j in i + 1..out.len() {
+                out.swap(i, j);
+                let w = weight_of(out);
+                if w < weight {
+                    let d = path(out);
+                    if best.is_none_or(|b| w < b.0 || (w == b.0 && d < b.1)) {
+                        best = Some((w, d, i, j));
+                    }
+                }
+                out.swap(i, j);
+            }
+        }
+        let Some((w, _, i, j)) = best else { return };
+        out.swap(i, j);
+        weight = w;
+    }
 }
 
 /// Fills `(count)` slots for parts in proportion: how many of `n` each

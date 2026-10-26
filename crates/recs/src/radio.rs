@@ -651,38 +651,53 @@ impl RadioState {
                 w.w[F_SAME_LANE] = 2.0 * w.w[F_SAME_LANE].max(HAND[F_SAME_LANE]);
             }
             let seq: Vec<Seen<'_>> = tail.iter().map(|p| (p.artists.as_slice(), p.album, p.world)).collect();
-            let mut best: Option<((usize, f32), Slot)> = None;
-            for c in cands {
-                let f = model.features(&m, c);
-                let parts: Vec<f32> = w.w.iter().zip(&f).map(|(a, b)| a * b).collect();
-                let relevance: f32 = parts.iter().sum();
-                let mut x = model.skip_features(&m, c, nikgob_core::model::EventContext::Radio);
-                x[0] = 1.0;
-                let p_skip = weights.skip.p(&x).min(0.99);
-                let rested = model.tracks[c].last_start.map_or(1.0, |l| 1.0 - (-((m.now - l).max(0) as f64) / REST_HALF_MS as f64).exp2() as f32);
-                let value = relevance + SKIP_VALUE * (1.0 - p_skip).ln() + RADIO_REST * rested
-                    - recs.taste.dislike_near_at(c)
-                    + MODEL_JITTER * Rng::derive(jitter, c as u64).f32();
-                let reason = if parts[F_NEXT_ALBUM] > 0.0 && parts[F_NEXT_ALBUM] >= parts[F_COOC] {
-                    Reason::NextOnAlbum
-                } else if parts[F_COOC] > 0.5 && parts[F_COOC] >= parts[F_SOUND] + 1.0 {
-                    m.prev.map_or(Reason::SoundsLikeSeed, |p| Reason::FollowsOften(model.id(p)))
-                } else {
-                    seed.map_or(Reason::SoundsLikeSeed, Reason::SimilarTo)
-                };
-                let slot = recs.slot(c, reason, value);
-                let free = (m.album_session && m.next_album == Some(c)) || (m.world_session.is_some() && slot.world == m.world_session);
-                let violations = if free {
-                    0
-                } else {
-                    rules.violations(&seq, (&slot.artists, slot.album, slot.world))
-                        + usize::from(slot.world.is_some_and(|w| per_world.get(&w).is_some_and(|k| *k >= world_cap)))
-                };
-                let key = (violations, -value);
-                if best.as_ref().is_none_or(|(b, _)| key.0 < b.0 || (key.0 == b.0 && key.1 < b.1)) {
-                    best = Some((key, slot));
+            let best_of = |cands: Vec<usize>| -> Option<((usize, f32), Slot, bool)> {
+                let mut best: Option<((usize, f32), Slot, bool)> = None;
+                for c in cands {
+                    let f = model.features(&m, c);
+                    let parts: Vec<f32> = w.w.iter().zip(&f).map(|(a, b)| a * b).collect();
+                    let relevance: f32 = parts.iter().sum();
+                    let mut x = model.skip_features(&m, c, nikgob_core::model::EventContext::Radio);
+                    x[0] = 1.0;
+                    let p_skip = weights.skip.p(&x).min(0.99);
+                    let rested = model.tracks[c].last_start.map_or(1.0, |l| 1.0 - (-((m.now - l).max(0) as f64) / REST_HALF_MS as f64).exp2() as f32);
+                    let value = relevance + SKIP_VALUE * (1.0 - p_skip).ln() + RADIO_REST * rested
+                        - recs.taste.dislike_near_at(c)
+                        + MODEL_JITTER * Rng::derive(jitter, c as u64).f32();
+                    let reason = if parts[F_NEXT_ALBUM] > 0.0 && parts[F_NEXT_ALBUM] >= parts[F_COOC] {
+                        Reason::NextOnAlbum
+                    } else if parts[F_COOC] > 0.5 && parts[F_COOC] >= parts[F_SOUND] + 1.0 {
+                        m.prev.map_or(Reason::SoundsLikeSeed, |p| Reason::FollowsOften(model.id(p)))
+                    } else {
+                        seed.map_or(Reason::SoundsLikeSeed, Reason::SimilarTo)
+                    };
+                    let slot = recs.slot(c, reason, value);
+                    let free = (m.album_session && m.next_album == Some(c)) || (m.world_session.is_some() && slot.world == m.world_session);
+                    let seen = (slot.artists.as_slice(), slot.album, slot.world);
+                    let (violations, run) = if free {
+                        (0, false)
+                    } else {
+                        let over = slot.world.is_some_and(|w| per_world.get(&w).is_some_and(|k| *k >= world_cap));
+                        (rules.weighted(&seq, seen) + crate::pick::W_SHARE * usize::from(over), rules.world_run(&seq, seen))
+                    };
+                    let key = (violations, -value);
+                    if best.as_ref().is_none_or(|(b, _, _)| key.0 < b.0 || (key.0 == b.0 && key.1 < b.1)) {
+                        best = Some((key, slot, run));
+                    }
+                }
+                best
+            };
+            let mut best = best_of(cands);
+            // Only one world left near the seed, and it ran twice: a track a
+            // little farther, of a kind that goes with the seed, before a
+            // world thrice running (the user's rule; the radius is ours).
+            if best.as_ref().is_some_and(|b| b.2) {
+                let wider = model.candidates(&m, &|i| ok(i) && free(i) && !near(i) && anchor.goes(model, i));
+                if let Some(b) = best_of(wider).filter(|b| best.as_ref().is_some_and(|a| b.0.0 < a.0.0)) {
+                    best = Some(b);
                 }
             }
+            let best = best.map(|(k, s, _)| (k, s));
             let Some((_, slot)) = best else { break };
             let Item::Track(id) = slot.item else { break };
             continuing &= m.next_album.is_some_and(|c| model.id(c) == id);
@@ -946,9 +961,14 @@ impl SeedAnchor {
         }
     }
 
+    /// Track `i` is of a kind of song that goes with the seed's.
+    fn goes(&self, model: &UserModel, i: usize) -> bool {
+        self.lane.is_none_or(|a| model.lanes_go(a, model.song_type_at(i).lane()))
+    }
+
     /// Track `i` may follow.
     fn holds(&self, model: &UserModel, i: usize) -> bool {
-        if self.lane.is_some_and(|a| !model.lanes_go(a, model.song_type_at(i).lane())) {
+        if !self.goes(model, i) {
             return false;
         }
         match (&self.point, model.embedded_at(i)) {
