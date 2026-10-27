@@ -68,7 +68,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     group(ui, "Анализ звука");
     stream_analysis(ui, state, p);
 
-    imports(ui, out);
+    imports(ui, p, out);
     group(ui, "Кэш");
     stream_cache(ui, state, p, out);
     torrents(ui, state, p, pages, out);
@@ -637,7 +637,7 @@ fn cookies_form(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &
 
 /// «Импорт истории»: the export files (years of listening; the services'
 /// own imports sit in their blocks above).
-fn imports(ui: &mut Ui, out: &mut Vec<Command>) {
+fn imports(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
     group(ui, "Импорт истории");
     row(
         ui,
@@ -663,6 +663,9 @@ fn imports(ui: &mut Ui, out: &mut Vec<Command>) {
             });
         },
     );
+    row(ui, Id::ImportSavedSongs, "Песни медиатеки YouTube Music", Some("Учат рекомендации, без лайков и загрузок"), |ui| {
+        ui.add(Switch::new(&mut p.import_saved_songs).id_salt("set-import-saved"));
+    });
     let s = Theme::get(ui.ctx()).scheme;
     ui.label(TypeRole::BodySmall.style().rich_para(
         "Где взять: Spotify — Аккаунт → Конфиденциальность → «Расширенная история стриминга» (готовится до 30 дней); Google — takeout.google.com → YouTube и YouTube Music.",
