@@ -288,10 +288,11 @@ impl Worker {
         }
     }
 
-    /// Brings the service's liked list in (see the module docs). With
-    /// `import` (the API import of part B), new likes wait in the wishlist
-    /// like on the first pull. With `partial`, `liked` is only the news
-    /// (nothing is gone). Returns how many likes are new here.
+    /// Brings the service's liked list in (see the module docs). New likes
+    /// wait in the wishlist on the first pull; with `import` (the API
+    /// import of part B, which never touches the wishlist) they are likes
+    /// alone. With `partial`, `liked` is only the news (nothing is gone).
+    /// Returns how many likes are new here.
     pub(crate) fn apply_remote_likes(
         &mut self,
         service: Service,
@@ -316,7 +317,7 @@ impl Worker {
         let known = self.lib.remote_likes(service).unwrap_or_default();
         let known_ids: HashSet<&str> = known.iter().map(|k| k.remote.id.as_str()).collect();
         let now = nikgob_library::now_ms();
-        let origin = if first || import {
+        let origin = if first {
             WishlistOrigin::Import
         } else {
             WishlistOrigin::Sync
@@ -351,7 +352,7 @@ impl Worker {
             self.log_err("лайки", self.lib.take_remote_likes_with(&adds, songs, &gone, now))
                 .unwrap_or_default()
         };
-        for &t in &new {
+        for &t in new.iter().filter(|_| !import) {
             self.wish_for_like(t, origin);
         }
         for &t in &unliked {

@@ -13,11 +13,12 @@
 //! | any `.html` that is a My Activity page (`watch-history.html`, Takeout's default format): `outer-cell` entries headed «YouTube Music» | YouTube Music plays |
 //! | `.csv` in a playlist folder under a `YouTube…` folder (`playlists/`, `плейлисты/`), or any `.csv` headed `Video ID,Playlist Video Creation Timestamp` | playlists by video id; the liked-music one ([`LIKED_NAMES`]) gives likes, «Watch later» ([`WATCH_LATER_NAMES`]) is left out |
 //! | a `.csv` headed `Playlist ID,…,Playlist Title (Original),…` (`playlists.csv`) | the names and ids of the playlists above |
-//! | a `.csv` headed `Video ID,Song Title,Album Title,Artist Name 1,…` (`music library songs.csv`) | likes, with their titles, albums and artists |
+//! | a `.csv` headed `Video ID,Song Title,Album Title,Artist Name 1,…` (`music library songs.csv`) | the songs saved in the library, with their titles, albums and artists: no likes ([`ExportData::saved`]) |
 //!
 //! CSV and HTML files are told by their first line / bytes, so loose files
-//! (no `Takeout/YouTube…` folders around them) work too, and anything else
-//! with those extensions (a game's save, the search history) is skipped.
+//! (no `Takeout/YouTube…` folders around them, the « (1)» a browser adds to
+//! a name downloaded twice) work too, and anything else with those
+//! extensions (a game's save, the search history) is skipped.
 //! Entries of plain YouTube (header «YouTube») are read as plays too, and
 //! their videos remembered ([`ExportData::plain_watched`]): the import
 //! keeps of either kind only what is music ([`is_music_play`],
@@ -174,6 +175,10 @@ pub(crate) struct ExportPlaylist {
 pub(crate) struct ExportData {
     pub(crate) plays: Vec<Play>,
     pub(crate) likes: Vec<Item>,
+    /// Songs saved in the service's library (YouTube Music's «music library
+    /// songs»): no likes, what the user keeps there teaches the taste only.
+    /// Liked ones are in [`Self::likes`] alone.
+    pub(crate) saved: Vec<Item>,
     pub(crate) playlists: Vec<ExportPlaylist>,
     /// YouTube videos watched on plain YouTube (not YouTube Music).
     pub(crate) plain_watched: HashSet<String>,
@@ -185,7 +190,7 @@ pub(crate) struct ExportData {
 
 impl ExportData {
     pub(crate) fn is_empty(&self) -> bool {
-        self.plays.is_empty() && self.likes.is_empty() && self.playlists.is_empty()
+        self.plays.is_empty() && self.likes.is_empty() && self.saved.is_empty() && self.playlists.is_empty()
     }
 }
 
@@ -286,8 +291,9 @@ fn csv_kind(header: &str) -> Option<Kind> {
 }
 
 /// Reads every export file in `path` (a folder, a `.zip`, or a folder with
-/// `.zip`s in it). Files it does not recognise are ignored.
-pub(crate) fn read_export(path: &Path) -> Result<ExportData, String> {
+/// `.zip`s in it). Files it does not recognise are ignored, and so is the
+/// music library's songs file unless `saved`.
+pub(crate) fn read_export(path: &Path, saved: bool) -> Result<ExportData, String> {
     let mut files: Vec<(String, Kind, Vec<u8>)> = Vec::new();
     if path.is_dir() {
         walk(path, path, &mut files)?;
@@ -320,10 +326,11 @@ pub(crate) fn read_export(path: &Path) -> Result<ExportData, String> {
                 index.extend(playlist_index(&String::from_utf8_lossy(&bytes)));
                 Ok(true)
             }
+            Kind::MusicLibrary if !saved => Ok(false),
             Kind::MusicLibrary => {
                 let songs = library_songs(&String::from_utf8_lossy(&bytes));
                 let found = !songs.is_empty();
-                out.likes.extend(songs);
+                out.saved.extend(songs);
                 Ok(found)
             }
             Kind::YoutubeHtml => Ok(html_history(&String::from_utf8_lossy(&bytes), &mut out)),
@@ -356,9 +363,11 @@ pub(crate) fn read_export(path: &Path) -> Result<ExportData, String> {
         }
     }
     fill_youtube_titles(&mut out);
-    // The library and the liked-music playlist name the same songs.
+    // A song is liked or saved once; a liked one is not saved besides.
     let mut seen = HashSet::new();
     out.likes
+        .retain(|i| i.id.as_ref().is_none_or(|id| seen.insert((i.service, id.clone()))));
+    out.saved
         .retain(|i| i.id.as_ref().is_none_or(|id| seen.insert((i.service, id.clone()))));
     Ok(out)
 }
@@ -408,8 +417,8 @@ fn playlist_index(text: &str) -> Vec<(String, String)> {
 }
 
 /// `music library songs.csv`: the songs of the YouTube Music library (the
-/// liked ones among them) with their titles, albums and up to nine artists.
-/// Some ids come with a leading space.
+/// liked ones among them, which the file does not tell) with their titles,
+/// albums and up to nine artists. Some ids come with a leading space.
 fn library_songs(text: &str) -> Vec<Item> {
     let rows = csv_rows(text);
     let Some(header) = rows.first() else { return Vec::new() };
@@ -923,6 +932,7 @@ fn youtube_playlist(path: &str, text: &str) -> Option<ExportPlaylist> {
     }
     let file = path.rsplit('/').next().unwrap_or(path);
     let stem = file.strip_suffix(".csv").or_else(|| file.strip_suffix(".CSV")).unwrap_or(file);
+    let stem = without_copy_number(stem);
     let stem = ["-videos", "-видео", " - videos", "-vidéos", "-vídeos"]
         .iter()
         .find_map(|s| stem.strip_suffix(s))
@@ -933,6 +943,16 @@ fn youtube_playlist(path: &str, text: &str) -> Option<ExportPlaylist> {
         remote,
         items,
     })
+}
+
+/// `name (1)` → `name`: the number a browser adds to a file downloaded
+/// again.
+fn without_copy_number(stem: &str) -> &str {
+    let Some(rest) = stem.strip_suffix(')') else { return stem };
+    match rest.rsplit_once(" (") {
+        Some((name, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && !name.trim().is_empty() => name,
+        _ => stem,
+    }
 }
 
 /// Video ids of playlists (and of the liked-music one) have no title in
@@ -946,7 +966,7 @@ fn fill_youtube_titles(out: &mut ExportData) {
         }
     }
     // The library has albums and every artist: it wins.
-    for i in out.likes.iter().filter(titled) {
+    for i in out.saved.iter().chain(&out.likes).filter(titled) {
         if let Some(id) = &i.id {
             known.insert(id.clone(), i.clone());
         }
@@ -962,6 +982,7 @@ fn fill_youtube_titles(out: &mut ExportData) {
         }
     };
     out.likes.iter_mut().for_each(fill);
+    out.saved.iter_mut().for_each(fill);
     for p in &mut out.playlists {
         p.items.iter_mut().for_each(fill);
     }
@@ -1514,7 +1535,8 @@ mod tests {
              PLbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,False,,Re: Zero / Best,,Private\n\
              PLcccccccccccccccccccccccccccccccc,False,,Watch later,,Private\n",
         );
-        put("Made in Abyss OST 1-videos.csv", "Video ID,Playlist Video Creation Timestamp\nsongAAAAAA1,2025-05-11T00:34:07+00:00\nsongBBBBBB2,2025-05-11T00:34:07+00:00\n");
+        // Downloaded twice: the browser's « (1)».
+        put("Made in Abyss OST 1-videos (1).csv", "Video ID,Playlist Video Creation Timestamp\nsongAAAAAA1,2025-05-11T00:34:07+00:00\nsongBBBBBB2,2025-05-11T00:34:07+00:00\n");
         put("Re_ Zero _ Best-videos.csv", "Video ID,Playlist Video Creation Timestamp\nsongAAAAAA1,2025-05-11T00:34:07+00:00\n");
         put("Watch later-videos.csv", "Video ID,Playlist Video Creation Timestamp\nlaterVideo1,2026-04-03T03:58:22+00:00\n");
         // Takeout's older naming: `<title>.csv`, no index entry.
@@ -1538,12 +1560,13 @@ mod tests {
         put("search-history.html", &page(&[cell("YouTube", "Searched for <a href=\"https://www.youtube.com/results?search_query=x\">x</a><br>Oct 15, 2026, 4:00:00 PM IDT<br>")]));
         put("notes.html", "<html><body>hi</body></html>");
 
-        let data = read_export(dir.path()).unwrap();
+        let data = read_export(dir.path(), true).unwrap();
         assert!(data.problems.is_empty(), "{:?}", data.problems);
         assert_eq!(data.plays.len(), 1);
-        assert_eq!(data.likes.len(), 1);
-        assert_eq!(data.likes[0].title, "Hanezeve Caradhina");
-        assert_eq!(data.likes[0].album.as_deref(), Some("Made in Abyss OST"));
+        assert!(data.likes.is_empty(), "a song of the music library is no like");
+        assert_eq!(data.saved.len(), 1);
+        assert_eq!(data.saved[0].title, "Hanezeve Caradhina");
+        assert_eq!(data.saved[0].album.as_deref(), Some("Made in Abyss OST"));
         let names: Vec<(&str, Option<&str>)> =
             data.playlists.iter().map(|p| (p.name.as_str(), p.remote.as_deref())).collect();
         assert_eq!(
@@ -1562,6 +1585,14 @@ mod tests {
         files.sort();
         assert_eq!(files.len(), 7, "{files:?}");
         assert!(files.iter().all(|f| !f.contains("saves") && !f.contains("search") && !f.contains("notes")));
+
+        // Without the music library: its file is not read at all.
+        let data = read_export(dir.path(), false).unwrap();
+        assert!(data.saved.is_empty() && data.likes.is_empty());
+        assert_eq!(data.files.len(), 6);
+        let abyss = &data.playlists[0].items;
+        assert_eq!(abyss[0].title, "", "no title from the file left out");
+        assert_eq!(abyss[1].title, "Underground River");
     }
 
     #[test]

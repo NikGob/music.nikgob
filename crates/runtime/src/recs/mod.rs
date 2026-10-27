@@ -651,6 +651,7 @@ fn read_parts(
     let rows = lib.rec_tracks().map_err(|e| err("tracks", e))?;
     let events = lib.listening_events().map_err(|e| err("events", e))?;
     let like_times = lib.liked_track_times().map_err(|e| err("likes", e))?;
+    let saved = lib.saved_tracks().map_err(|e| err("saved songs", e))?;
     let entries = lib.playlist_entry_times().map_err(|e| err("playlists", e))?;
     let feedback = lib.rec_dislikes().map_err(|e| err("feedback", e))?;
     let artists = lib.artist_names().map_err(|e| err("artists", e))?;
@@ -812,6 +813,7 @@ fn read_parts(
             history: kept.clone(),
         },
         likes: like_times.iter().map(|l| l.0).collect(),
+        saved,
         like_times,
         playlist_entries: entries,
         disliked_tracks,

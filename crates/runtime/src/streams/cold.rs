@@ -5,25 +5,37 @@
 //! [`super::export`]). Each import is a job in "Загрузки" with a progress
 //! line and ends with a summary toast.
 //!
+//! An import never touches the wishlist: nothing it brings is downloaded
+//! unless the user asks.
+//!
 //! * History → events only (`start`, then `complete` or `skip` where the
-//!   source tells, or the gap to the next entry of a watch history), on
-//!   stream tracks that stay outside the library ("seen"), of origin
-//!   [`EventOrigin::Import`]: the recommendations learn the long taste from
-//!   them and nothing of this app's sessions. Of a watch history only the
-//!   music ([`export::is_music_play`]). Never likes, never the wishlist.
-//! * Likes → library likes of stream tracks plus wishlist items that wait
-//!   ("ждёт", origin `import`) for the user's "скачать". From the API they go
-//!   through the like pull ([`Worker::apply_remote_likes`]), so the first
-//!   pull and the import never both take them. A like the user took back
-//!   is not liked again, and a dismissed wishlist item never comes back.
-//! * Playlists → local playlists. From the API they are linked to the
-//!   service (`playlist_remote`, mode [`Prefs::playlist_sync_default`]); a
-//!   playlist from a file is a snapshot ("разово"), linked when the file
+//!   source tells, or the gap to the next entry of a watch history), of
+//!   origin [`EventOrigin::Import`]: the recommendations learn the long
+//!   taste from them and nothing of this app's sessions. Of a watch history
+//!   only the music ([`export::is_music_play`]). A play of a song the
+//!   library has lands on the library's track ([`super::songs`]); the others on
+//!   stream tracks that stay outside the library ("seen"), so the history
+//!   adds no track and no album to what the library shows. Never likes.
+//! * Likes → library likes. From the API they go through the like pull
+//!   ([`Worker::apply_remote_likes`]), so the first pull and the import
+//!   never both take them. A like the user took back is not liked again.
+//! * Songs saved in a service's library (YouTube Music's «music library
+//!   songs», read unless [`Prefs::import_saved_songs`] is off) → marks that
+//!   teach the taste ([`Library::mark_saved`]): no likes, nothing in the
+//!   library that was not there.
+//! * Playlists → local playlists of the songs the export's videos are: the
+//!   library's own track, else the song YouTube Music or Deezer lists with
+//!   its title, artists, album and cover, the upload itself only when no
+//!   song agrees ([`super::songs`]; the services are asked once per video, the
+//!   answer kept in the library's cache). From the API they are linked to
+//!   the service (`playlist_remote`, mode [`Prefs::playlist_sync_default`]);
+//!   a playlist from a file is a snapshot ("разово"), linked when the file
 //!   names its id, otherwise remembered by an import key.
 //!
 //! Running an import again adds nothing twice: events are deduplicated by
-//! `(ts, track, type)`, tracks are found by their ids in the services,
-//! playlists by their link or import key.
+//! `(ts, track, type)`, tracks are found by their ids in the services or
+//! the import key of the video they were found for, playlists by their link
+//! or import key.
 //!
 //! Parsing and the history (the bulk: tens of thousands of plays) run on a
 //! blocking task that writes the library itself; likes and playlists need
@@ -34,6 +46,8 @@
 //! the public app.
 //!
 //! [`Prefs::playlist_sync_default`]: nikgob_view::Prefs::playlist_sync_default
+//! [`Prefs::import_saved_songs`]: nikgob_view::Prefs::import_saved_songs
+//! [`Library::mark_saved`]: nikgob_library::Library::mark_saved
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -42,17 +56,17 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use nikgob_core::model::{
-    DeviceId, Event, EventContext, EventOrigin, EventType, LikeTarget, PlaylistId, TrackId, UnixMs,
-    WishlistOrigin,
+    DeviceId, Event, EventContext, EventOrigin, EventType, LikeTarget, PlaylistId, TrackId, UnixMs, Uuid,
 };
 use nikgob_core::streaming::{
-    AlbumRef, ArtistRef, EntityKind, Played, PlaylistSyncMode, RemoteId, Service, StreamError,
+    AlbumRef, ArtistRef, EntityKind, Played, PlaylistSyncMode, RemoteId, SearchKind, Service, StreamError,
     StreamPlaylist, StreamService, StreamTrack, TrackKind,
 };
 use nikgob_library::{Library, PlaylistRemote, event_id, sort_key};
 use nikgob_view as v;
 
 use super::export::{self, ExportData, Item, Outcome, Play};
+use super::songs::{Probe, Shelf};
 use super::{Msg, error_text};
 use crate::Worker;
 use crate::import::{IMPORT_ID, Internal};
@@ -85,6 +99,19 @@ const HISTORY_KEEP: usize = 20;
 /// A YouTube playlist of an export is imported when at least this share
 /// (%) of its videos are music (see [`music_playlist`]).
 const MUSIC_SHARE: usize = 30;
+/// Songs looked up in the services' catalogues for the videos of an
+/// export's playlists and likes, one request per [`YT_LOOKUP_EVERY`].
+const SONG_LOOKUPS: usize = 2_000;
+/// A video no service had a song for is asked again after this.
+const SONG_MISS_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// Library cache key of the song found for a video (`-`: none).
+fn song_key(remote: &RemoteId) -> String {
+    format!("import.song.{}:{}", remote.service.as_str(), remote.id)
+}
+/// Import key of the track a video of an export turned out to be.
+fn video_key(remote: &RemoteId) -> String {
+    format!("{}:{}", remote.service.as_str(), remote.id)
+}
 
 /// Background results of the cold-start imports.
 pub(crate) enum ColdMsg {
@@ -115,6 +142,8 @@ pub(crate) enum ColdMsg {
 /// A track an import wants in the library.
 #[derive(Clone, Debug)]
 pub(crate) enum Wanted {
+    /// A track the library has: the same song.
+    Known(TrackId),
     Stream(Box<StreamTrack>),
     /// No id in the file: only a known track of that name will do.
     Named { artist: String, title: String },
@@ -133,6 +162,11 @@ pub(crate) struct PendingPlaylist {
 pub(crate) struct Parsed {
     plays: usize,
     new_plays: usize,
+    /// Songs saved in the service's library, and how many were not marked yet.
+    saved: usize,
+    new_saved: usize,
+    /// The services' songs found for the export's videos.
+    found: Vec<StreamTrack>,
     likes: Vec<Wanted>,
     playlists: Vec<PendingPlaylist>,
     /// YouTube playlists left out as not music.
@@ -155,6 +189,9 @@ pub(crate) struct Counts {
     pub(crate) new_plays: usize,
     pub(crate) likes: usize,
     pub(crate) new_likes: usize,
+    /// Songs saved in a service's library (taste only).
+    pub(crate) saved: usize,
+    pub(crate) new_saved: usize,
     pub(crate) playlists: usize,
     pub(crate) new_playlists: usize,
     /// Playlists of an export left out as not music.
@@ -221,10 +258,11 @@ pub(crate) fn plural(n: usize, one: &'static str, few: &'static str, many: &'sta
 }
 
 /// "3 прослушивания, 2 плейлиста": the counts that are not zero.
-fn count_line(plays: usize, likes: usize, playlists: usize) -> String {
+fn count_line(plays: usize, likes: usize, saved: usize, playlists: usize) -> String {
     let parts: Vec<String> = [
         (plays, ["прослушивание", "прослушивания", "прослушиваний"]),
         (likes, ["лайк", "лайка", "лайков"]),
+        (saved, ["песня медиатеки", "песни медиатеки", "песен медиатеки"]),
         (playlists, ["плейлист", "плейлиста", "плейлистов"]),
     ]
     .into_iter()
@@ -251,14 +289,14 @@ fn skipped_note(n: usize) -> String {
 /// 9 плейлистов"), or that nothing was; and the playlists left out as not
 /// music.
 pub(crate) fn summary(c: &Counts) -> String {
-    let mut text = if c.new_plays + c.new_likes + c.new_playlists == 0 {
-        if c.plays + c.likes + c.playlists == 0 {
+    let mut text = if c.new_plays + c.new_likes + c.new_saved + c.new_playlists == 0 {
+        if c.plays + c.likes + c.saved + c.playlists == 0 {
             "Импорт: ничего не нашлось".to_owned()
         } else {
             "Импорт: ничего нового — всё уже было".to_owned()
         }
     } else {
-        let mut text = format!("Импорт: {}", count_line(c.new_plays, c.new_likes, c.new_playlists));
+        let mut text = format!("Импорт: {}", count_line(c.new_plays, c.new_likes, c.new_saved, c.new_playlists));
         // The likes came with the login already (its first pull).
         if c.new_likes == 0 && c.likes > 0 {
             text.push_str(&format!(" · лайки уже здесь ({})", group(c.likes)));
@@ -316,7 +354,13 @@ fn stream_of(i: &Item, id: &str) -> StreamTrack {
             .map(|a| ArtistRef::new(None, a.clone()))
             .collect();
     }
-    t.album = i.album.as_ref().map(|a| AlbumRef::new(None, a.clone()));
+    // The album is the main artist's: «Ado's Best Adobum» is one album,
+    // not one per credit of its songs.
+    t.album = i.album.as_ref().map(|a| {
+        let mut album = AlbumRef::new(None, a.clone());
+        album.artists = t.artists.iter().take(1).cloned().collect();
+        album
+    });
     t
 }
 
@@ -354,33 +398,82 @@ async fn youtube_lookups(svc: Arc<dyn StreamService>, ids: Vec<String>) -> HashM
     out
 }
 
-/// Stores the plays of an export as events; returns how many were new.
+/// What a video of an export is said to be: the service's own answer when
+/// it was looked up, else what the export says (`credited`: its artist is
+/// the song's, see [`Probe::of`]).
+fn probe_of(i: &Item, full: &HashMap<String, StreamTrack>, credited: bool) -> Probe {
+    match i.id.as_ref().and_then(|id| full.get(id)) {
+        Some(t) => Probe::of_track(t),
+        None => Probe::of(i, None, credited),
+    }
+}
+
+/// The library's track of a video of an export, if it has one: the
+/// library track of its id, the track an earlier import found for it, else
+/// the library's track of its song ([`Shelf::find`]; `true`: found now, to
+/// be remembered by the video's import key).
+fn known_song(lib: &Library, shelf: &Shelf, remote: &RemoteId, probe: &Probe) -> Option<(TrackId, bool)> {
+    if let Some(t) = lib.track_by_remote(remote).ok().flatten()
+        && shelf.contains(t)
+    {
+        return Some((t, false));
+    }
+    if let Some(u) = lib.import_key(EntityKind::Track, &video_key(remote)).ok().flatten() {
+        let t = TrackId::from_uuid(u);
+        if lib.track_in_library(t).ok().flatten().is_some() {
+            return Some((t, false));
+        }
+    }
+    shelf.find(probe).map(|t| (t, true))
+}
+
+/// Stores the plays of an export as events; returns how many were new. A
+/// video's plays land on the library's track of its song ([`known_song`]),
+/// else on a stream track of the video outside the library.
 fn store_history(
     lib: &Library,
     plays: &[Play],
     full: &HashMap<String, StreamTrack>,
+    shelf: &Shelf,
     progress: &dyn Fn(usize),
 ) -> Result<usize, nikgob_library::LibraryError> {
     let device = DeviceId::from(IMPORT_DEVICE);
+    let mut tracks: HashMap<RemoteId, TrackId> = HashMap::new();
+    let mut raw: Vec<(RemoteId, StreamTrack)> = Vec::new();
+    let mut keys: Vec<(String, Uuid)> = Vec::new();
+    let mut seen = HashSet::new();
+    for p in plays {
+        let Some(id) = &p.item.id else { continue };
+        let remote = RemoteId::new(p.item.service, id.clone());
+        if !seen.insert(remote.clone()) {
+            continue;
+        }
+        // A «- Topic» channel is the artist; another one may be anyone.
+        let credited = p.watched.is_none_or(|w| w.topic);
+        match known_song(lib, shelf, &remote, &probe_of(&p.item, full, credited)) {
+            Some((t, fresh)) => {
+                if fresh {
+                    keys.push((video_key(&remote), *t.as_uuid()));
+                }
+                tracks.insert(remote, t);
+            }
+            None => raw.push((remote, full.get(id).cloned().unwrap_or_else(|| stream_of(&p.item, id)))),
+        }
+    }
+    lib.set_import_keys(EntityKind::Track, &keys)?;
+    for chunk in raw.chunks(HISTORY_BATCH) {
+        let streams: Vec<StreamTrack> = chunk.iter().map(|(_, t)| t.clone()).collect();
+        for ((remote, _), t) in chunk.iter().zip(lib.ensure_stream_tracks(&streams)?) {
+            tracks.insert(remote.clone(), t);
+        }
+    }
     let mut named: HashMap<(Service, String, String), TrackId> = HashMap::new();
     let mut new = 0;
     for (n, chunk) in plays.chunks(HISTORY_BATCH).enumerate() {
-        let mut streams: Vec<StreamTrack> = Vec::new();
-        let mut index: HashMap<RemoteId, usize> = HashMap::new();
-        for p in chunk {
-            if let Some(id) = &p.item.id {
-                let remote = RemoteId::new(p.item.service, id.clone());
-                if let std::collections::hash_map::Entry::Vacant(e) = index.entry(remote) {
-                    e.insert(streams.len());
-                    streams.push(full.get(id).cloned().unwrap_or_else(|| stream_of(&p.item, id)));
-                }
-            }
-        }
-        let ids = lib.ensure_stream_tracks(&streams)?;
         let mut events = Vec::with_capacity(chunk.len() * 2);
         for p in chunk {
             let track = match &p.item.id {
-                Some(id) => ids[index[&RemoteId::new(p.item.service, id.clone())]],
+                Some(id) => tracks[&RemoteId::new(p.item.service, id.clone())],
                 None => {
                     let key = (p.item.service, sort_key(&p.item.artist), sort_key(&p.item.title));
                     match named.get(&key) {
@@ -432,19 +525,137 @@ fn store_history(
     Ok(new)
 }
 
+/// Marks the songs saved in the service's library (taste only, see the
+/// module docs): on the library's track of the song, else on a stream
+/// track outside the library. Returns how many tracks were not marked yet.
+fn store_saved(
+    lib: &Library,
+    saved: &[Item],
+    songs: &HashMap<RemoteId, TrackId>,
+    shelf: &Shelf,
+) -> Result<usize, nikgob_library::LibraryError> {
+    let before = lib.saved_tracks()?.len();
+    let mut marks: HashMap<Service, Vec<(String, TrackId)>> = HashMap::new();
+    let mut raw: Vec<(RemoteId, StreamTrack)> = Vec::new();
+    let mut keys: Vec<(String, Uuid)> = Vec::new();
+    for i in saved {
+        let Some(id) = &i.id else { continue };
+        let remote = RemoteId::new(i.service, id.clone());
+        let known = songs.get(&remote).map(|t| (*t, false)).or_else(|| known_song(lib, shelf, &remote, &Probe::of(i, None, true)));
+        match known {
+            Some((t, fresh)) => {
+                if fresh {
+                    keys.push((video_key(&remote), *t.as_uuid()));
+                }
+                marks.entry(i.service).or_default().push((id.clone(), t));
+            }
+            None => raw.push((remote, stream_of(i, id))),
+        }
+    }
+    lib.set_import_keys(EntityKind::Track, &keys)?;
+    let streams: Vec<StreamTrack> = raw.iter().map(|(_, t)| t.clone()).collect();
+    for ((remote, _), t) in raw.iter().zip(lib.ensure_stream_tracks(&streams)?) {
+        marks.entry(remote.service).or_default().push((remote.id.clone(), t));
+    }
+    for (service, list) in &marks {
+        lib.mark_saved(*service, list)?;
+    }
+    Ok(lib.saved_tracks()?.len().saturating_sub(before))
+}
+
+/// The songs of the videos `ask` (a probe each) that the services list:
+/// YouTube Music first, then Deezer; one request at a time, every answer
+/// (a miss too) kept in the library's cache, and a service that asks to
+/// wait is not asked again this time.
+async fn catalogue_songs(
+    job: u64,
+    lib: &Library,
+    services: &[Arc<dyn StreamService>],
+    ask: &[(RemoteId, Probe)],
+    tx: &Sender<Internal>,
+) -> Vec<(RemoteId, StreamTrack)> {
+    let mut out = Vec::new();
+    let mut waiting = vec![false; services.len()];
+    let mut asked = 0;
+    let now = nikgob_library::now_ms();
+    for (k, (remote, probe)) in ask.iter().enumerate() {
+        let cached = lib.cache_get(&song_key(remote)).ok().flatten();
+        let mut hit: Option<StreamTrack> = None;
+        let known = match &cached {
+            Some((_, v)) if v != "-" => {
+                hit = serde_json::from_str(v).ok();
+                hit.is_some()
+            }
+            Some((at, _)) => now - at < SONG_MISS_MS,
+            None => false,
+        };
+        if !known && asked < SONG_LOOKUPS && waiting.iter().any(|w| !w) {
+            if k % 10 == 0 {
+                send(tx, ColdMsg::Progress {
+                    job,
+                    subtitle: format!("Ищу песни плейлистов: {} из {}", group(k + 1), group(ask.len())),
+                    progress: Some(k as f32 / ask.len().max(1) as f32),
+                });
+            }
+            let mut whole = true;
+            for (s, svc) in services.iter().enumerate() {
+                if waiting[s] {
+                    whole = false;
+                    continue;
+                }
+                if asked > 0 {
+                    tokio::time::sleep(YT_LOOKUP_EVERY).await;
+                }
+                asked += 1;
+                match svc.search_kind(&probe.query, SearchKind::Songs).await {
+                    Ok(found) => {
+                        hit = probe.pick(&found.tracks);
+                        if hit.is_some() {
+                            break;
+                        }
+                    }
+                    Err(e @ StreamError::RateLimited { .. }) => {
+                        log::warn!("{}: song look-ups for an export stopped: {e}", svc.service());
+                        waiting[s] = true;
+                        whole = false;
+                    }
+                    Err(e) => {
+                        log::debug!("{}: «{}»: {e}", svc.service(), probe.query);
+                        whole = false;
+                    }
+                }
+            }
+            let value = match &hit {
+                Some(t) => serde_json::to_string(t).ok(),
+                None => whole.then(|| "-".to_owned()),
+            };
+            if let Some(v) = value {
+                let _ = lib.cache_put(&song_key(remote), now, &v);
+            }
+        }
+        if let Some(t) = hit {
+            out.push((remote.clone(), t));
+        }
+    }
+    out
+}
+
 fn send(tx: &Sender<Internal>, m: ColdMsg) {
     let _ = tx.send(Internal::Stream(Msg::Cold(m)));
 }
 
-/// The whole background part of an export import.
+/// The whole background part of an export import (`saved`: the songs of
+/// the music library are read).
 async fn read_export(
     job: u64,
     path: PathBuf,
     lib: Library,
     youtube: Option<Arc<dyn StreamService>>,
+    deezer: Option<Arc<dyn StreamService>>,
+    saved: bool,
     tx: Sender<Internal>,
 ) -> Result<Box<Parsed>, String> {
-    let mut data: ExportData = tokio::task::spawn_blocking(move || export::read_export(&path))
+    let mut data: ExportData = tokio::task::spawn_blocking(move || export::read_export(&path, saved))
         .await
         .map_err(|e| e.to_string())??;
     if data.is_empty() {
@@ -462,6 +673,7 @@ async fn read_export(
     let mut known: HashSet<String> = data
         .likes
         .iter()
+        .chain(&data.saved)
         .filter(|i| i.service == Service::Youtube)
         .filter_map(|i| i.id.clone())
         .collect();
@@ -473,7 +685,13 @@ async fn read_export(
             .map(|r| r.id),
     );
     let mut artists: HashSet<String> = lib.artist_names().unwrap_or_default().iter().map(|(_, n)| export::artist_key(n)).collect();
-    artists.extend(data.likes.iter().flat_map(|i| std::iter::once(&i.artist).chain(&i.featured)).map(|a| export::artist_key(a)));
+    artists.extend(
+        data.likes
+            .iter()
+            .chain(&data.saved)
+            .flat_map(|i| std::iter::once(&i.artist).chain(&i.featured))
+            .map(|a| export::artist_key(a)),
+    );
     artists.extend(
         data.plays.iter().filter(|p| p.watched.is_some_and(|w| w.topic)).map(|p| export::artist_key(&p.item.artist)),
     );
@@ -486,6 +704,7 @@ async fn read_export(
         .filter(|p| export::is_music_play(p, &known, &artists))
         .map(|p| &p.item)
         .chain(&data.likes)
+        .chain(&data.saved)
         .filter(|i| i.service == Service::Youtube)
         .filter_map(|i| i.id.clone())
         .collect();
@@ -503,7 +722,7 @@ async fn read_export(
     data.playlists.retain(|p| keep(p, &HashMap::new(), true));
     // YouTube ids without a title (playlist CSVs): ask YouTube Music.
     let mut full = HashMap::new();
-    if let Some(yt) = youtube {
+    if let Some(yt) = youtube.clone() {
         let mut seen = HashSet::new();
         let blank: Vec<String> = data
             .likes
@@ -546,8 +765,71 @@ async fn read_export(
     if data.plays.len() < read {
         log::info!("export: {} of {read} history entries are music", data.plays.len());
     }
+    // The songs of the playlists and likes: the library's, else the
+    // services' (see the module docs).
+    let shelf = Arc::new(Shelf::new(lib.match_rows().map_err(|e| e.to_string())?));
+    let topic: HashSet<String> = data
+        .plays
+        .iter()
+        .filter(|p| p.watched.is_some_and(|w| w.topic))
+        .filter_map(|p| p.item.id.clone())
+        .collect();
+    let mut songs: HashMap<RemoteId, TrackId> = HashMap::new();
+    let mut keys: Vec<(String, Uuid)> = Vec::new();
+    let mut ask: Vec<(RemoteId, Probe)> = Vec::new();
+    let mut seen = HashSet::new();
+    // A playlist's name may name the work its songs are from.
+    let listed = data.likes.iter().map(|i| (i, "")).chain(data.playlists.iter().flat_map(|p| p.items.iter().map(|i| (i, p.name.as_str()))));
+    for (i, list) in listed {
+        let Some(id) = &i.id else { continue };
+        let remote = RemoteId::new(i.service, id.clone());
+        if !seen.insert(remote.clone()) {
+            continue;
+        }
+        let probe = probe_of(i, &full, i.service != Service::Youtube || topic.contains(id)).with_hint(list);
+        match known_song(&lib, &shelf, &remote, &probe) {
+            Some((t, fresh)) => {
+                if fresh {
+                    keys.push((video_key(&remote), *t.as_uuid()));
+                }
+                songs.insert(remote, t);
+            }
+            // Spotify's ids are its songs already; a video's song is asked.
+            None if i.service == Service::Youtube && !probe.is_empty() => ask.push((remote, probe)),
+            None => {}
+        }
+    }
+    let services: Vec<Arc<dyn StreamService>> = [youtube, deezer].into_iter().flatten().collect();
+    let hits = if ask.is_empty() || services.is_empty() {
+        Vec::new()
+    } else {
+        catalogue_songs(job, &lib, &services, &ask, &tx).await
+    };
+    let mut found = Vec::new();
+    for (remote, hit) in hits {
+        let t = match shelf.find(&Probe::of_track(&hit)) {
+            Some(t) => t,
+            None => match lib.ensure_stream_tracks(std::slice::from_ref(&hit)) {
+                Ok(ids) => ids[0],
+                Err(e) => {
+                    log::warn!("export: {}: {e}", hit.id);
+                    continue;
+                }
+            },
+        };
+        keys.push((video_key(&remote), *t.as_uuid()));
+        songs.insert(remote, t);
+        found.push(hit);
+    }
+    if let Err(e) = lib.set_import_keys(EntityKind::Track, &keys) {
+        log::warn!("export: import keys: {e}");
+    }
+    let wanted_of = |i: &Item| match i.id.as_ref().and_then(|id| songs.get(&RemoteId::new(i.service, id.clone()))) {
+        Some(t) => Wanted::Known(*t),
+        None => wanted(i, &full),
+    };
     let plays = data.plays.len();
-    let likes: Vec<Wanted> = data.likes.iter().map(|i| wanted(i, &full)).collect();
+    let likes: Vec<Wanted> = data.likes.iter().map(wanted_of).collect();
     let playlists: Vec<PendingPlaylist> = data
         .playlists
         .iter()
@@ -555,14 +837,16 @@ async fn read_export(
             service: p.service,
             name: p.name.clone(),
             remote: p.remote.clone().map(|id| RemoteId::new(p.service, id)),
-            tracks: p.items.iter().map(|i| wanted(i, &full)).collect(),
+            tracks: p.items.iter().map(wanted_of).collect(),
             fetched: None,
         })
         .collect();
     let files = data.files.len();
     let problems = data.problems.clone();
+    let saved = data.saved.len();
     let progress_tx = tx.clone();
-    let new_plays = tokio::task::spawn_blocking(move || {
+    let (new_plays, new_saved) = tokio::task::spawn_blocking(move || {
+        let new_saved = store_saved(&lib, &data.saved, &songs, &shelf).map_err(|e| e.to_string())?;
         let progress = |done: usize| {
             let done = done.min(plays);
             send(&progress_tx, ColdMsg::Progress {
@@ -571,13 +855,17 @@ async fn read_export(
                 progress: Some(done as f32 / plays.max(1) as f32),
             });
         };
-        store_history(&lib, &data.plays, &full, &progress).map_err(|e| e.to_string())
+        let new_plays = store_history(&lib, &data.plays, &full, &shelf, &progress).map_err(|e| e.to_string())?;
+        Ok::<_, String>((new_plays, new_saved))
     })
     .await
     .map_err(|e| e.to_string())??;
     Ok(Box::new(Parsed {
         plays,
         new_plays,
+        saved,
+        new_saved,
+        found,
         likes,
         playlists,
         skipped_playlists,
@@ -688,9 +976,11 @@ impl Worker {
         };
         let lib = self.lib.clone();
         let youtube = self.service(Service::Youtube);
+        let deezer = self.service(Service::Deezer);
+        let saved = self.state.read().prefs.import_saved_songs;
         let tx = self.streaming.internal.clone();
         self.streaming.spawn(async move {
-            let result = read_export(job, path, lib, youtube, tx).await;
+            let result = read_export(job, path, lib, youtube, deezer, saved, tx).await;
             Msg::Cold(ColdMsg::Parsed { job, result })
         });
     }
@@ -726,11 +1016,14 @@ impl Worker {
                 let p = *p;
                 j.counts.plays = p.plays;
                 j.counts.new_plays = p.new_plays;
+                j.counts.saved = p.saved;
+                j.counts.new_saved = p.new_saved;
                 j.counts.skipped_playlists = p.skipped_playlists;
                 j.problems = p.problems;
                 j.steps = p.likes.len().div_ceil(LIKES_PER_STEP) + p.playlists.len();
                 j.likes = p.likes.into();
                 j.playlists = p.playlists.into();
+                self.streaming.learn(&p.found);
                 self.cold_step(job);
             }
             Err(e) => self.cold_finish(job, Some(e)),
@@ -858,7 +1151,7 @@ impl Worker {
         let left = j.likes.len().div_ceil(LIKES_PER_STEP) + j.playlists.len();
         j.subtitle = format!(
             "Импорт: {}",
-            count_line(j.counts.plays, j.counts.likes, j.counts.playlists)
+            count_line(j.counts.plays, j.counts.likes, j.counts.saved, j.counts.playlists)
         );
         j.progress = Some(1.0 - left as f32 / j.steps.max(1) as f32);
         self.publish_cold_jobs();
@@ -875,7 +1168,7 @@ impl Worker {
             .iter()
             .filter_map(|w| match w {
                 Wanted::Stream(t) => Some((**t).clone()),
-                Wanted::Named { .. } => None,
+                Wanted::Known(_) | Wanted::Named { .. } => None,
             })
             .collect();
         self.streaming.learn(&streams);
@@ -886,6 +1179,7 @@ impl Worker {
         wanted
             .iter()
             .map(|w| match w {
+                Wanted::Known(t) => Some(*t),
                 Wanted::Stream(_) => ids.next(),
                 Wanted::Named { artist, title } => self.lib.track_by_name(artist, title).ok().flatten(),
             })
@@ -893,7 +1187,7 @@ impl Worker {
     }
 
     /// Likes from an export file; returns (found, new). The likes are not
-    /// pushed back: they came from the service.
+    /// pushed back: they came from the service. Nothing is downloaded.
     fn import_likes(&mut self, batch: &[Wanted]) -> (usize, usize) {
         let mut found = 0;
         let mut new = 0;
@@ -909,7 +1203,6 @@ impl Worker {
                     new += 1;
                 }
             }
-            self.wish_for_like(track, WishlistOrigin::Import);
         }
         (found, new)
     }
@@ -965,9 +1258,6 @@ impl Worker {
         let pid = created.id;
         let tracks: Vec<TrackId> = self.resolve_wanted(&p.tracks).into_iter().flatten().collect();
         let _ = self.log_err("плейлист", self.lib.playlist_add_many(pid, &tracks));
-        for &t in &tracks {
-            self.wish_for_like(t, WishlistOrigin::Import);
-        }
         let now = self.sync_stamp(pid);
         match (&p.remote, &p.fetched) {
             (Some(remote), Some(fetched)) => {
@@ -987,7 +1277,7 @@ impl Worker {
                     .iter()
                     .filter_map(|w| match w {
                         Wanted::Stream(t) => Some(t.id.id.clone()),
-                        Wanted::Named { .. } => None,
+                        Wanted::Known(_) | Wanted::Named { .. } => None,
                     })
                     .collect();
                 let _ = self.lib.put_playlist_remote(&PlaylistRemote {
@@ -1025,8 +1315,8 @@ impl Worker {
         } else {
             format!(
                 "Найдено: {} · новых: {}",
-                count_line(j.counts.plays, j.counts.likes, j.counts.playlists),
-                count_line(j.counts.new_plays, j.counts.new_likes, j.counts.new_playlists)
+                count_line(j.counts.plays, j.counts.likes, j.counts.saved, j.counts.playlists),
+                count_line(j.counts.new_plays, j.counts.new_likes, j.counts.new_saved, j.counts.new_playlists)
             ) + &skipped_note(j.counts.skipped_playlists)
         };
         if !j.problems.is_empty() && error.is_none() {
@@ -1220,7 +1510,9 @@ mod tests {
             ..Counts::default()
         };
         assert_eq!(summary(&after_login), "Импорт: 3 прослушивания, 2 плейлиста · лайки уже здесь (3)");
-        assert_eq!(count_line(0, 0, 0), "ничего");
+        assert_eq!(count_line(0, 0, 0, 0), "ничего");
+        let saved = Counts { plays: 9, new_plays: 9, saved: 21, new_saved: 21, ..Counts::default() };
+        assert_eq!(summary(&saved), "Импорт: 9 прослушиваний, 21 песня медиатеки");
         let skipped = Counts { new_plays: 5, plays: 5, skipped_playlists: 2, ..Counts::default() };
         assert_eq!(summary(&skipped), "Импорт: 5 прослушиваний · пропущено 2 плейлиста не с музыкой");
         let one = Counts { plays: 5, skipped_playlists: 1, ..Counts::default() };
@@ -1286,7 +1578,7 @@ mod tests {
             }
         }
         let t = Instant::now();
-        let data = export::read_export(dir.path()).unwrap();
+        let data = export::read_export(dir.path(), true).unwrap();
         let took = t.elapsed();
         let (first, last) = data.plays.iter().fold((i64::MAX, i64::MIN), |(a, b), p| {
             (a.min(p.start_ms), b.max(p.start_ms))

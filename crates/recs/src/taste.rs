@@ -8,7 +8,9 @@
 //!   is leafing through, recs-v2 §4.1), a later skip +0.15 times the share
 //!   heard (the song was listened to), a repeat (started again within a day
 //!   of completing) +0.5, a playlist entry +1.5 (decayed from when it was
-//!   added); a like is +3, a state without decay. Imported events (Takeout,
+//!   added); a like is +3, a state without decay, and a song saved in a
+//!   service's library (an import's «music library songs», not liked) +1.5
+//!   the same way. Imported events (Takeout,
 //!   Spotify; [`EventOrigin::Import`]) count the same here, but never in
 //!   the hot affinity, the completes of «На повторе» or the co-listening:
 //!   those are this app's own sessions.
@@ -70,6 +72,8 @@ pub const SKIP_STREAK_FACTOR: f32 = 0.5;
 pub const W_REPEAT: f32 = 0.5;
 pub const W_PLAYLIST: f32 = 1.5;
 pub const W_LIKE: f32 = 3.0;
+/// A song saved in a service's library: a state like a like, lighter.
+pub const W_SAVED: f32 = 1.5;
 /// A skip before this position is an early one.
 pub const EARLY_SKIP_MS: u32 = 30_000;
 /// A start this soon after a complete of the same track is a repeat.
@@ -471,6 +475,9 @@ pub struct TasteInput {
     pub events: Vec<Play>,
     /// Tracks liked now.
     pub likes: Vec<TrackId>,
+    /// Songs saved in a service's library (an import's «music library
+    /// songs»): long taste and the profiles' mass, never a like.
+    pub saved: Vec<TrackId>,
     /// When the likes were set (a like missing here is an old one).
     pub like_times: Vec<(TrackId, UnixMs)>,
     /// Playlist entries: a track and when it was added (one per entry).
@@ -641,6 +648,16 @@ impl Taste {
             {
                 liked[i] = true;
                 affinity[i] += W_LIKE;
+            }
+        }
+        let mut saved = vec![false; n];
+        for id in &input.saved {
+            if let Some(i) = catalog.position(*id)
+                && !liked[i]
+                && !saved[i]
+            {
+                saved[i] = true;
+                affinity[i] += W_SAVED;
             }
         }
         let mut liked_time: Vec<Option<UnixMs>> = vec![None; n];
@@ -931,6 +948,23 @@ mod tests {
         assert!(!taste.blocks(&cat.tracks()[0]));
         assert!(taste.has_history());
         assert!(!Taste::build(&cat, &TasteInput::default(), now).has_history());
+    }
+
+    /// A song saved in a service's library is long taste without decay,
+    /// lighter than a like and no like; liked as well, it is the like alone.
+    #[test]
+    fn saved_songs_are_taste_not_likes() {
+        let now = 1_000 * DAY_MS;
+        let cat = Catalog::new((0..3).map(|i| info(i, &[0], Some(i))));
+        let input = TasteInput { likes: vec![tid(1)], saved: vec![tid(0), tid(0), tid(1)], ..Default::default() };
+        let taste = Taste::build(&cat, &input, now);
+        let a = |i| taste.affinity_at(cat.position(tid(i)).unwrap());
+        assert!((a(0) - W_SAVED).abs() < 1e-6, "{}", a(0));
+        assert!((a(1) - W_LIKE).abs() < 1e-6, "{}", a(1));
+        assert_eq!(a(2), 0.0);
+        assert!(!taste.liked_at(0));
+        assert_eq!(taste.hot_at(0), 0.0, "nothing on repeat");
+        assert!(taste.has_history());
     }
 
     /// A song skipped after three quarters was heard: a little plus, not a

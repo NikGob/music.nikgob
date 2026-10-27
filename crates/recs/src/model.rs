@@ -34,6 +34,9 @@
 //!   teach the long taste alone: the long affinity of their tracks (and
 //!   the profiles' mass). Never the session, the pairs, the transitions,
 //!   the models or the hot affinity: those are this app's own listening.
+//! * A song saved in a service's library and not liked here (an import's
+//!   «music library songs») is long taste too: [`R_SAVED`] on its long
+//!   affinity and [`MASS_SAVED`] on the profiles' mass, a state like a like.
 //!
 //! [`UserModel::build`] walks the history in order of time: the stats, and
 //! the weights too unless [`Weights`] of the same [`FEATURE_VERSION`] are
@@ -74,6 +77,9 @@ const R_EARLY: f32 = -0.8;
 const R_OPEN: f32 = 0.1;
 const R_REPEAT: f32 = 0.7;
 const R_LIKE: f32 = 2.0;
+/// A song saved in a service's library, not liked (an import's «music
+/// library songs»): long taste without decay.
+const R_SAVED: f32 = 1.0;
 const MANUAL_POSITIVE: f32 = 1.2;
 const MANUAL_EARLY: f32 = 0.6;
 const AUTO_EARLY: f32 = 1.3;
@@ -95,6 +101,7 @@ pub const H_MASS_MS: i64 = 90 * DAY_MS;
 /// …a like and a playlist entry this.
 const MASS_LIKE: f32 = 2.0;
 const MASS_PLAYLIST: f32 = 1.5;
+const MASS_SAVED: f32 = 1.0;
 /// A like counts as a touch of the play it fell in within this.
 const LIKE_IN_PLAY_MS: i64 = 20 * 60_000;
 /// A radio of one kind of song goes on to another only when the user's
@@ -175,6 +182,8 @@ pub struct TrackStats {
     /// A start not ended yet, and who chose it.
     open: Option<(UnixMs, Option<EventOrigin>)>,
     liked: Option<UnixMs>,
+    /// Saved in a service's library (see [`R_SAVED`]).
+    saved: bool,
 }
 
 fn halve(x: f32, from: UnixMs, to: UnixMs, half: i64) -> f32 {
@@ -207,6 +216,8 @@ impl TrackStats {
         }
         if self.liked.is_some_and(|t| t <= now) {
             a += R_LIKE;
+        } else if self.saved {
+            a += R_SAVED;
         }
         (a / 3.0).tanh()
     }
@@ -224,6 +235,8 @@ impl TrackStats {
         }
         if self.liked.is_some_and(|t| t <= now) {
             a += W_LIKE;
+        } else if self.saved {
+            a += crate::taste::W_SAVED;
         }
         (a / 3.0).tanh()
     }
@@ -549,6 +562,11 @@ impl UserModel {
                 m.tracks[i].liked = Some(*at);
             }
         }
+        for id in &input.saved {
+            if let Some(&i) = m.pos.get(id) {
+                m.tracks[i].saved = true;
+            }
+        }
         // How the user listens, before the walk: the skip model reads the
         // background of each moment.
         let (starts, p_bg) = m.listen(input);
@@ -776,6 +794,8 @@ impl UserModel {
         for (i, m) in mass.iter_mut().enumerate() {
             if self.tracks[i].liked(now) {
                 *m += MASS_LIKE;
+            } else if self.tracks[i].saved {
+                *m += MASS_SAVED;
             }
         }
         for (t, added) in &input.playlist_entries {

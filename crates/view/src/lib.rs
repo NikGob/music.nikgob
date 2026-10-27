@@ -1118,6 +1118,10 @@ pub struct Prefs {
     pub playlist_sync_default: PlaylistSyncMode,
     /// Likes and unlikes here go to the services the track is in.
     pub push_likes: bool,
+    /// An import of export files reads the songs saved in the music library
+    /// (Takeout's «music library songs»): they teach the taste only, no
+    /// likes, no downloads, not in the library. Off: that file is skipped.
+    pub import_saved_songs: bool,
     /// The library lists only tracks with a file (the inconspicuous switch).
     pub library_only_downloaded: bool,
     /// How many wishlist items search / download at once on their own.
@@ -2114,6 +2118,7 @@ impl Default for Prefs {
             like_downloads: true,
             playlist_sync_default: PlaylistSyncMode::Follow,
             push_likes: true,
+            import_saved_songs: true,
             library_only_downloaded: false,
             auto_download_limit: 2,
             download_toasts: false,

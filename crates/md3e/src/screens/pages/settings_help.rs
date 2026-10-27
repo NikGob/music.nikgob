@@ -172,6 +172,8 @@ pub enum SettingId {
     ImportSpotify,
     ImportYouTube,
     ImportFiles,
+    /// «Песни медиатеки YouTube Music» of an export.
+    ImportSavedSongs,
     StreamCache,
     /// «Анализ звука стримов».
     StreamAnalysis,
@@ -296,7 +298,7 @@ impl SettingId {
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
             Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
             | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | DownloadToasts | PlaylistSync | ImportSpotify
-            | ImportYouTube | ImportFiles | StreamCache | StreamAnalysis | Prowlarr | NoSeed | SeedLimit | SeedDays
+            | ImportYouTube | ImportFiles | ImportSavedSongs | StreamCache | StreamAnalysis | Prowlarr | NoSeed | SeedLimit | SeedDays
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
             RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | NewShareBy(_)
             | MixesWithNew | BackgroundCountsLess | ProfilesSplit | ProfileNames
@@ -402,7 +404,7 @@ impl SettingId {
             AutoDownloads => "Сколько треков из «Хочу скачать» ищутся и качаются одновременно сами. Меньше — тише для сети.",
             DownloadToasts => "Всплывающие сообщения о загрузках, которые идут сами: раздача не нашлась, начала качаться, скачалась. Выключено — всё это видно только в «Загрузках» и «Хочу скачать».",
             PlaylistSync => "Как новый плейлист, связанный с сервисом, следит за ним. У каждого плейлиста это можно поменять в его меню ⋮.",
-            ImportSpotify => "Забирает из Spotify свои плейлисты и недавние прослушивания. Лайки приходят сами сразу после входа. Плейлисты появятся в библиотеке, их треки ждут в «Хочу скачать».",
+            ImportSpotify => "Забирает из Spotify свои плейлисты и недавние прослушивания. Лайки приходят сами сразу после входа. Плейлисты появятся в библиотеке; скачивается только то, что скачаешь сам.",
             ImportYouTube => "То же из YouTube Music: плейлисты и история. Лайки приходят сами после входа.",
             RadioNewShare => "Радио по треку или исполнителю и бесконечные миксы (настроения, «Твои миксы», «Новое для тебя») подмешивают музыку, которой у тебя ещё нет: похожее из YouTube Music и Deezer. Здесь — сколько. «Твой микс» на главной собирается только из твоего. Пока включены «Миксы только из скачанного», не действует: нового нет нигде.",
             Autoplay => "Когда в очереди играет последний трек, она не кончается: следом сами добавляются похожие треки, как в радио по этому треку, и дальше дописываются по мере игры. Повтор не мешает: при включённом повторе очередь просто начинается заново. Откуда берутся треки — как у радио: только скачанное, вся библиотека или с новым из сервисов (это же переключается прямо в очереди).",
@@ -412,7 +414,8 @@ impl SettingId {
             SoundAnalysis => "Миксы и радио подбирают треки по звуку: темп, громкость, яркость, ровность. Для этого каждый трек один раз анализируется в фоне — тихо, с пониженным приоритетом. Пока анализ идёт, подборки уже работают, просто чуть менее точно.",
             StreamAnalysis => "Лайкнутые и плейлистные треки без файла тоже анализируются: их звук по одному тихо скачивается с YouTube Music в память (несколько мегабайт), анализируется и сразу выбрасывается. Не чаще раза в 20 секунд и не больше 300 треков в день; трек, сыгравший из стрима, анализируется из кэша без лишнего скачивания. Выключи — стримы останутся без анализа, а миксы будут подбирать их по исполнителю и истории.",
             StreamCache => "Недавно игравшие треки хранятся на диске, и «Назад» или повтор не качают их заново. YouTube — файлы как есть, Spotify — только в зашифрованном виде, как у официального клиента. Лимит у каждого сервиса свой; старое удаляется само.",
-            ImportFiles => "Файлы выгрузки — вся история прослушиваний за годы. Spotify: Аккаунт → Конфиденциальность → «Расширенная история». Google Takeout: YouTube и YouTube Music.",
+            ImportFiles => "Файлы выгрузки — вся история прослушиваний за годы. Spotify: Аккаунт → Конфиденциальность → «Расширенная история». Google Takeout: YouTube и YouTube Music. История учит рекомендации и не добавляет в библиотеку ни треков, ни альбомов; само ничего не скачивается.",
+            ImportSavedSongs => "Песни, сохранённые в медиатеке YouTube Music (в Takeout — файл «music library songs»), учат рекомендации, что тебе нравится: без лайков, без загрузок, в «Библиотеке» и «Любимых» их не будет. Выключи — этот файл при импорте пропускается.",
             Nodes => "Синхронизация и резервная копия на другие устройства — появится позже.",
             NewShareBy(v::RadioKind::Track) => "Сколько нового в радио по треку. Выбор в очереди над радио меняет это же.",
             NewShareBy(v::RadioKind::Artist) => "Сколько нового в радио по исполнителю.",
@@ -1769,7 +1772,7 @@ mod tests {
         for id in [SettingId::RadioNewShare, SettingId::MixesDownloadedOnly, SettingId::SoundAnalysis, SettingId::StreamAnalysis] {
             assert!(!id.help().is_empty());
         }
-        for id in [SettingId::SpotifyPersonal, SettingId::YouTubeCookies, SettingId::ImportFiles, SettingId::AutoDownloads] {
+        for id in [SettingId::SpotifyPersonal, SettingId::YouTubeCookies, SettingId::ImportFiles, SettingId::ImportSavedSongs, SettingId::AutoDownloads] {
             assert!(!id.help().is_empty());
         }
         for id in [SettingId::Design, SettingId::FpsLimit, SettingId::Nodes, SettingId::RingBeat] {

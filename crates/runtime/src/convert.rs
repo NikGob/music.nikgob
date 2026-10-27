@@ -259,25 +259,34 @@ impl Resolver {
         }
     }
 
-    /// A collage / smart cover from the playlist's album covers.
+    /// A collage / smart cover from the playlist's album covers: of their
+    /// files, else (a playlist of stream songs) the stream cover of its most
+    /// common album, a gradient only when no album has a cover.
     fn auto_cover(&mut self, id: PlaylistId, mode: v::PlaylistCoverMode) -> Option<v::Cover> {
+        let all = self.lib.playlist_cover_refs(id).unwrap_or_default();
         // Covers whose file is gone count as none (checked once per album).
         let mut exists: HashMap<ReleaseId, bool> = HashMap::new();
-        let refs: Vec<(ReleaseId, PathBuf)> = self
-            .lib
-            .playlist_cover_refs(id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(r, c)| (r, self.path(&c)))
+        let refs: Vec<(ReleaseId, PathBuf)> = all
+            .iter()
+            .filter(|(_, c)| !nikgob_library::is_web_ref(c))
+            .map(|(r, c)| (*r, self.path(c)))
             .filter(|(r, p)| *exists.entry(*r).or_insert_with(|| p.exists()))
             .collect();
         let plain = |path: PathBuf| v::Cover { path, seed: None, ambient: None };
+        let web: Vec<(ReleaseId, PathBuf)> = all
+            .iter()
+            .filter(|(_, c)| nikgob_library::is_web_ref(c))
+            .map(|(r, c)| (*r, PathBuf::from(c)))
+            .collect();
         match playlist_cover::pick(&refs, mode) {
             playlist_cover::Pick::Single(r) => self.cover_for(Some(r), None),
             playlist_cover::Pick::Collage(files) => playlist_cover::collage(&self.root, &files).map(plain),
-            playlist_cover::Pick::Placeholder => {
-                playlist_cover::placeholder(&self.root, &id.to_string()).map(plain)
-            }
+            // A web cover is drawn as it is, never in a collage: the most
+            // common album's (what `pick` gives outside smart and collage).
+            playlist_cover::Pick::Placeholder => match playlist_cover::pick(&web, v::PlaylistCoverMode::Custom) {
+                playlist_cover::Pick::Single(r) => self.cover_for(Some(r), None),
+                _ => playlist_cover::placeholder(&self.root, &id.to_string()).map(plain),
+            },
         }
     }
 
@@ -531,6 +540,36 @@ mod tests {
         assert!(card(&mut res, &none).image.is_none());
         res.invalidate_photos();
         assert!(card(&mut res, &none).image.is_some());
+    }
+
+    /// A playlist of stream songs shows their album's cover, not a gradient
+    /// (an imported playlist of songs the library has no file of).
+    #[test]
+    fn a_playlist_of_streams_takes_their_cover() {
+        use nikgob_core::model::{ArtistCredit, Release, Track};
+        let lib = Library::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut ids = Vec::new();
+        for (album, cover) in [("A", Some("https://i.ytimg.com/a.jpg")), ("A", Some("https://i.ytimg.com/a.jpg")), ("B", Some("https://i.ytimg.com/b.jpg")), ("C", None)] {
+            let mut r = Release::new(album, ArtistCredit::single("X", None));
+            r.cover_ref = cover.map(str::to_owned);
+            let r = lib.upsert_release(&r).unwrap();
+            let mut t = Track::new(album, ArtistCredit::single("X", None));
+            t.release_id = Some(r.id);
+            ids.push(lib.upsert_track(&t).unwrap().id);
+        }
+        let p = lib.create_playlist("Streams").unwrap();
+        lib.playlist_add_many(p.id, &ids).unwrap();
+        let summary = lib.list_playlists().unwrap().into_iter().find(|s| s.id == Some(p.id)).unwrap();
+        let mut res = Resolver::new(lib.clone(), dir.path().to_owned());
+        let cover = res.playlist(&summary).cover.unwrap();
+        assert_eq!(cover.web_url(), Some("https://i.ytimg.com/a.jpg"), "the most common album's");
+
+        let empty = lib.create_playlist("Bare").unwrap();
+        lib.playlist_add_many(empty.id, &ids[3..]).unwrap();
+        let summary = lib.list_playlists().unwrap().into_iter().find(|s| s.id == Some(empty.id)).unwrap();
+        let cover = res.playlist(&summary).cover.unwrap();
+        assert!(cover.web_url().is_none(), "no cover anywhere: the gradient");
     }
 
     #[test]

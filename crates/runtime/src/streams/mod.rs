@@ -29,6 +29,7 @@ mod resolve;
 mod schedule;
 mod search;
 mod share;
+mod songs;
 mod sync;
 mod tracklist;
 mod web_login;
