@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use nikgob_core::indexer::BoxFuture;
 use nikgob_core::model::{
-    Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track, TrackId, WishlistOrigin,
+    Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track, TrackId,
     WishlistStatus,
 };
 use nikgob_core::streaming::{
@@ -149,40 +149,31 @@ fn spotify_export_imports_history_likes_and_playlists_once() {
     let local = lib.track_by_name("Local Artist", "Local Song").unwrap().expect("seen by name");
     assert_eq!(lib.track_in_library(local).unwrap(), Some(false));
 
-    // Likes: stream tracks in the library, waiting in the wishlist.
+    // Likes: stream tracks in the library; nothing to download.
     let joga = track_of(&lib, Service::Spotify, "sp-homogenic-2").unwrap();
     let michi = track_of(&lib, Service::Spotify, "sp-michi-1").unwrap();
     for t in [joga, michi] {
         assert!(lib.is_liked(t).unwrap());
         assert_eq!(lib.track_in_library(t).unwrap(), Some(true));
-        let w = lib.wishlist_for_track(t).unwrap();
-        assert_eq!(w.len(), 1);
-        assert_eq!((w[0].status, w[0].origin), (WishlistStatus::Waiting, WishlistOrigin::Import));
     }
     assert_eq!(lib.liked_track_ids().unwrap().len(), 2, "the local file of YourLibrary is unknown");
 
-    // The playlist, its tracks in the library and waiting too.
+    // The playlist, its tracks in the library.
     let road = playlist_named(&lib, "Дорога").expect("the playlist");
     assert_eq!(playlist_remotes(&lib, road, Service::Spotify), ["sp-gruppa-2", "sp-firstlove-3"]);
-    let door = track_of(&lib, Service::Spotify, "sp-gruppa-2").unwrap();
-    assert_eq!(lib.wishlist_for_track(door).unwrap()[0].status, WishlistStatus::Waiting);
     assert!(lib.playlist_remote(road).unwrap().is_none(), "no remote id in the file");
+    assert!(lib.list_wishlist().unwrap().is_empty(), "an import never touches the wishlist");
 
-    // Again: nothing twice. An unlike and a dismissal are respected.
+    // Again: nothing twice. An unlike is respected.
     let before = snapshot(&lib);
     let sub = import(&rt, Command::ImportExportFiles(fixtures().join("spotify")));
     assert!(sub.contains("новых: ничего"), "{sub}");
     assert_eq!(snapshot(&lib), before);
     rt.send(Command::Like(nikgob_core::model::LikeTarget::Track(michi), false));
     wait_until("the unlike", || !lib.is_liked(michi).unwrap());
-    let w = lib.wishlist_for_track(joga).unwrap()[0].id;
-    rt.send(Command::WishlistDismiss(vec![w]));
-    wait_until("the dismissal", || lib.wishlist_for_track(joga).unwrap()[0].status == WishlistStatus::Dismissed);
     import(&rt, Command::ImportExportFiles(fixtures().join("spotify")));
     assert!(!lib.is_liked(michi).unwrap(), "unliked stays unliked");
-    let w = lib.wishlist_for_track(joga).unwrap();
-    assert_eq!(w.len(), 1);
-    assert_eq!(w[0].status, WishlistStatus::Dismissed, "dismissed never comes back");
+    assert!(lib.list_wishlist().unwrap().is_empty());
 }
 
 #[test]
@@ -342,7 +333,7 @@ fn loose_takeout_files_with_the_html_history_and_the_music_library() {
     let subtitle = import(&rt, Command::ImportExportFiles(dir.path().to_path_buf()));
     assert!(subtitle.ends_with(" · пропущен 1 плейлист не с музыкой"), "{subtitle}");
     assert!(
-        rt.state().toasts.iter().any(|t| t.text == "Импорт: 1 прослушивание, 1 лайк, 1 плейлист · пропущен 1 плейлист не с музыкой"),
+        rt.state().toasts.iter().any(|t| t.text == "Импорт: 1 прослушивание, 1 песня медиатеки, 1 плейлист · пропущен 1 плейлист не с музыкой"),
         "{:?}",
         rt.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
     );
@@ -351,12 +342,15 @@ fn loose_takeout_files_with_the_html_history_and_the_music_library() {
     assert_eq!(lib.count_events().unwrap(), 1);
     assert!(track_of(&lib, Service::Youtube, "yt-gruppa-1").is_some());
     assert!(track_of(&lib, Service::Youtube, "plainvid-01").is_none());
-    // The library song is a like, as the file names it.
-    let liked = track_of(&lib, Service::Youtube, "yt-homogenic-3").unwrap();
-    assert!(lib.is_liked(liked).unwrap());
-    assert_eq!(lib.get_track(liked).unwrap().unwrap().title, "Bachelorette");
-    assert_eq!(lib.liked_track_ids().unwrap().len(), 1);
-    assert!(lib.list_wishlist().unwrap().iter().any(|w| w.youtube_id.as_deref() == Some("yt-homogenic-3")));
+    // The library song is taste only: no like, not in the library, nothing
+    // to download.
+    let saved = track_of(&lib, Service::Youtube, "yt-homogenic-3").unwrap();
+    assert!(!lib.is_liked(saved).unwrap());
+    assert_eq!(lib.track_in_library(saved).unwrap(), Some(false));
+    assert_eq!(lib.get_track(saved).unwrap().unwrap().title, "Bachelorette");
+    assert_eq!(lib.saved_tracks().unwrap(), vec![saved]);
+    assert!(lib.liked_track_ids().unwrap().is_empty());
+    assert!(lib.list_wishlist().unwrap().is_empty());
     // «Вечер» named and linked through the index; «vr» and «Watch later» are not here.
     let evening = playlist_named(&lib, "Вечер").unwrap();
     assert_eq!(playlist_remotes(&lib, evening, Service::Youtube), ["yt-gruppa-1", "yt-firstlove-3"]);
@@ -377,13 +371,20 @@ fn import_from_the_api_and_again() {
     let spotify = Arc::new(FakeService::spotify());
     let rt = start(&lib, vec![spotify.clone()]);
     import(&rt, Command::ImportFromService(Service::Spotify));
-    // Likes: whichever of the first pull and the import came first.
+    // Likes: whichever of the first pull (which waits in the wishlist) and
+    // the import (which does not) came first.
     assert_eq!(lib.liked_track_ids().unwrap().len(), 3);
     for id in spotify.liked_ids() {
         let t = track_of(&lib, Service::Spotify, &id).unwrap();
         let w = lib.wishlist_for_track(t).unwrap();
-        assert_eq!(w.len(), 1, "{id}");
-        assert_eq!(w[0].status, WishlistStatus::Waiting);
+        assert!(w.len() <= 1, "{id}");
+        assert!(w.iter().all(|w| w.status == WishlistStatus::Waiting));
+    }
+    // The playlists' tracks wait for nothing.
+    for e in lib.playlist_entries(playlist_named(&lib, "Вечер").unwrap(), 0, 100).unwrap() {
+        if !lib.is_liked(e.track.id).unwrap() {
+            assert!(lib.wishlist_for_track(e.track.id).unwrap().is_empty());
+        }
     }
     // Playlists, linked with the default mode (someone else's one is followed).
     let evening = playlist_named(&lib, "Вечер").unwrap();
@@ -527,4 +528,182 @@ fn discography_shows_the_albums_the_library_lacks() {
     assert!(ids.contains(&RemoteId::new(Service::Spotify, "sp-art-utada")), "{ids:?}");
     assert!(ids.contains(&RemoteId::new(Service::Youtube, "yt-art-utada")), "{ids:?}");
     assert!(lib.cache_get(&format!("discography.{}", artist.id)).unwrap().is_some());
+}
+
+/// A library track with a file, on its album.
+fn local_track(lib: &Library, title: &str, artist: &str, album: &str, file: &str) -> TrackId {
+    let credit = ArtistCredit::single(artist, None);
+    let release = lib.upsert_release(&Release::new(album, credit.clone())).unwrap();
+    let mut t = Track::new(title, credit);
+    t.release_id = Some(release.id);
+    let t = lib.upsert_track(&t).unwrap();
+    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file, Codec::Opus)).unwrap();
+    t.id
+}
+
+fn start_with(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs) -> Runtime {
+    Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams,
+            library_dir: std::env::temp_dir(),
+            prefs,
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    )
+}
+
+/// A Takeout of a user whose library has the songs its playlists and
+/// history name by uploads of them: the playlist gets the library's tracks,
+/// the song the catalogue lists for an upload the library lacks, the raw
+/// upload only when no song agrees; the history lands on the library's
+/// tracks and adds nothing to the library; the music library's songs teach
+/// the taste and are neither likes nor library tracks; nothing waits in the
+/// wishlist.
+#[test]
+fn takeout_videos_become_the_library_songs_and_nothing_else_comes_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let put = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
+    let cell = |header: &str, id: &str, title: &str, channel: &str, time: &str| {
+        format!(
+            "<div class=\"outer-cell mdl-cell mdl-cell--12-col mdl-shadow--2dp\"><div class=\"mdl-grid\">\
+             <div class=\"header-cell mdl-cell mdl-cell--12-col\"><p class=\"mdl-typography--title\">{header}<br></p></div>\
+             <div class=\"content-cell mdl-cell mdl-cell--6-col mdl-typography--body-1\">\
+             Watched\u{a0}<a href=\"https://music.youtube.com/watch?v={id}\">{title}</a><br>\
+             <a href=\"https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx\">{channel}</a><br>Oct 15, 2026, {time}\u{202f}PM IDT<br>\
+             </div></div></div>"
+        )
+    };
+    let cells = [
+        cell("YouTube Music", "upload-hk-01", "Hollow Knight OST - Enter Hallownest", "Amellifera", "4:00:00"),
+        cell("YouTube Music", "riko-topic-1", "Riko&#39;s Theme", "Kevin Penkin - Topic", "4:03:00"),
+        cell("YouTube Music", "riko-topic-1", "Riko&#39;s Theme", "Kevin Penkin - Topic", "4:07:00"),
+        cell("YouTube Music", "podcast-0001", "Episode 12: our week", "Some Podcast", "4:40:00"),
+        cell("YouTube", "vlog-000001", "My trip", "Blogger", "5:30:00"),
+    ];
+    put(
+        "watch-history (1).html",
+        &format!("<html><head><style>.mdl-grid{{}}</style></head><body>{}</body></html>", cells.concat()),
+    );
+    put(
+        "music library songs (1).csv",
+        "Video ID,Song Title,Album Title,Artist Name 1,Artist Name 2\n\
+         riko-topic-1,Riko's Theme,MADE IN ABYSS ORIGINAL SOUNDTRACK,Kevin Penkin,\n\
+         yt-x-kept,Kept Song,Kept Album,Kept Band,Guest\n",
+    );
+    put(
+        "playlists (1).csv",
+        "Playlist ID,Add new videos to top,Playlist Title (Original),Playlist Visibility\n\
+         PLfakeHollowKnight00001,False,Hollow Knight OST,Private\n",
+    );
+    put(
+        "Hollow Knight OST-videos (1).csv",
+        "Video ID,Playlist Video Creation Timestamp\n\
+         upload-hk-01,2026-01-01T00:00:00+00:00\n\
+         yt-video-greenpath,2026-01-01T00:00:00+00:00\n\
+         yt-video-trip,2026-01-01T00:00:00+00:00\n",
+    );
+
+    let lib = Library::open_in_memory().unwrap();
+    let hallownest = local_track(&lib, "Enter Hallownest", "Christopher Larkin", "Hollow Knight: Original Soundtrack", "Music/a.opus");
+    let riko = local_track(&lib, "Riko's Theme", "Kevin Penkin", "MADE IN ABYSS ORIGINAL SOUNDTRACK", "Music/b.opus");
+    let tracks = lib.count_tracks(TrackFilter::All).unwrap();
+    let albums = |lib: &Library| {
+        let mut a: Vec<String> = lib
+            .releases(0, 100, nikgob_library::Sort::desc(nikgob_library::ReleaseSortKey::Added))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.release.title)
+            .collect();
+        a.sort();
+        a
+    };
+    // An upload the library lacks, whose song YouTube Music lists; an
+    // upload of no song.
+    let youtube = Arc::new(
+        FakeService::youtube()
+            .logged_out()
+            .with_video("greenpath", "Hollow Knight - Greenpath [HD]", "Amellifera", 181, None)
+            .with_song("greenpath", "Greenpath", "Christopher Larkin", "Hollow Knight (Original Soundtrack)", 180)
+            .with_video("trip", "My trip to Hallownest", "Traveler", 600, None)
+            .with_song("kept", "Kept Song", "Kept Band", "Kept Album", 200),
+    );
+    let rt = start(&lib, vec![youtube.clone()]);
+    import(&rt, Command::ImportExportFiles(dir.path().to_path_buf()));
+
+    // The playlist: the library's track, the catalogue's song (with its
+    // album and cover), the upload of no song as it is.
+    let p = playlist_named(&lib, "Hollow Knight OST").expect("named through the index despite the « (1)»");
+    let entries = lib.playlist_entries(p, 0, 10).unwrap();
+    let ids: Vec<TrackId> = entries.iter().map(|e| e.track.id).collect();
+    let greenpath = track_of(&lib, Service::Youtube, "yt-x-greenpath").expect("the song of the upload");
+    let trip = track_of(&lib, Service::Youtube, "yt-video-trip").expect("the raw upload");
+    assert_eq!(ids, [hallownest, greenpath, trip]);
+    let g = lib.get_track_row(greenpath).unwrap().unwrap();
+    assert_eq!((g.title.as_str(), g.artist.as_str()), ("Greenpath", "Christopher Larkin"));
+    assert!(g.cover_ref.is_some(), "with its cover");
+    assert_eq!(g.album.as_deref(), Some("Hollow Knight (Original Soundtrack)"));
+    // The upload ids find their song again (history and the next import).
+    assert_eq!(lib.import_key(nikgob_core::streaming::EntityKind::Track, "youtube:yt-video-greenpath").unwrap(), Some(*greenpath.as_uuid()));
+
+    // History: the music only, on the library's tracks; no duplicate.
+    assert_eq!(lib.events_of_track(hallownest, 10).unwrap().len(), 2, "a start and its end by the gap");
+    let riko_events = lib.events_of_track(riko, 10).unwrap();
+    assert_eq!(riko_events.iter().filter(|e| e.event_type == nikgob_core::model::EventType::Start).count(), 2);
+    assert!(riko_events.iter().all(|e| e.origin == Some(nikgob_core::model::EventOrigin::Import)));
+    assert!(track_of(&lib, Service::Youtube, "riko-topic-1").is_none(), "no second Riko's Theme");
+    assert!(track_of(&lib, Service::Youtube, "podcast-0001").is_none());
+    assert!(track_of(&lib, Service::Youtube, "vlog-000001").is_none());
+
+    // The music library: taste only.
+    let kept = track_of(&lib, Service::Youtube, "yt-x-kept").unwrap();
+    let mut saved = lib.saved_tracks().unwrap();
+    saved.sort();
+    let mut want = vec![riko, kept];
+    want.sort();
+    assert_eq!(saved, want);
+    assert_eq!(lib.track_in_library(kept).unwrap(), Some(false));
+    assert!(lib.liked_track_ids().unwrap().is_empty(), "«Любимые» stays as it was");
+    assert!(lib.list_wishlist().unwrap().is_empty(), "nothing to download");
+
+    // The library gained the playlist's two new tracks and its song's
+    // album, nothing of the history or the music library.
+    assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), tracks + 2);
+    assert_eq!(
+        albums(&lib),
+        ["Hollow Knight (Original Soundtrack)", "Hollow Knight: Original Soundtrack", "MADE IN ABYSS ORIGINAL SOUNDTRACK"]
+    );
+
+    // Again: nothing twice, and the services are not asked again.
+    let before = snapshot(&lib);
+    youtube.reset_calls();
+    import(&rt, Command::ImportExportFiles(dir.path().to_path_buf()));
+    assert_eq!(snapshot(&lib), before, "idempotent");
+    assert_eq!(youtube.calls("search_kind"), 0, "the answers are kept");
+}
+
+/// «Песни медиатеки YouTube Music» off: that file is not read.
+#[test]
+fn the_music_library_songs_can_be_left_out() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("music library songs.csv"),
+        "Video ID,Song Title,Album Title,Artist Name 1\nyt-x-kept,Kept Song,Kept Album,Kept Band\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("Mix-videos.csv"),
+        "Video ID,Playlist Video Creation Timestamp\nyt-x-kept,2026-01-01T00:00:00+00:00\n",
+    )
+    .unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let prefs = Prefs { import_saved_songs: false, ..Prefs::default() };
+    let rt = start_with(&lib, vec![Arc::new(FakeService::youtube().logged_out().with_song("kept", "Kept Song", "Kept Band", "Kept Album", 200))], prefs);
+    import(&rt, Command::ImportExportFiles(dir.path().to_path_buf()));
+    assert!(lib.saved_tracks().unwrap().is_empty());
+    assert!(playlist_named(&lib, "Mix").is_some(), "the rest is imported");
 }
