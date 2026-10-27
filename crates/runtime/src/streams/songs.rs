@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 
 use nikgob_core::clip_title::song_titles;
 use nikgob_core::model::TrackId;
-use nikgob_core::names::same_name;
+use nikgob_core::names::{latin_key, same_name};
 use nikgob_core::streaming::{StreamTrack, TrackKind};
 use nikgob_core::translit::same_translit;
 use nikgob_library::MatchRow;
@@ -44,7 +44,8 @@ const TAKES: &[&str] = &[
     "cover", "covered", "кавер", "nightcore", "slowed", "reverb", "sped", "speed", "8d", "karaoke", "караоке",
     "piano", "orchestral", "orchestra", "acoustic", "instrumental", "inst", "remix", "ремикс", "live", "лайв",
     "lofi", "hour", "hours", "час", "reaction", "реакция", "tutorial", "минус", "mashup", "loop", "extended",
-    "tiktok", "guitar", "violin", "music box",
+    "tiktok", "guitar", "violin", "music box", "english", "russian", "japanese", "korean", "chinese", "spanish",
+    "german", "french", "русская", "русский", "rus", "eng",
 ];
 
 /// Words a work's name carries besides itself («Hollow Knight OST»,
@@ -139,7 +140,7 @@ fn same_work(a: &str, b: &str) -> bool {
 fn own_keys(title: &str) -> Vec<(String, Variant)> {
     let whole = title_key(title);
     let mut out = vec![(whole.base.clone(), whole.variant)];
-    for part in song_titles(title, "") {
+    for part in song_titles(title, "").into_iter().filter(|p| !aside(title, p)) {
         let k = title_key(&part);
         let v = if k.variant.is_empty() { whole.variant } else { k.variant };
         if !k.base.is_empty() && !out.iter().any(|(b, _)| *b == k.base) {
@@ -149,18 +150,92 @@ fn own_keys(title: &str) -> Vec<(String, Variant)> {
     out
 }
 
+/// A part of `title` in round or square brackets: what the title says
+/// besides the song («Wasteland (from the series Arcane)», «Lass es sein
+/// (Don't Just Don't)»), never its title. A title in 「」 is one.
+fn aside(title: &str, part: &str) -> bool {
+    let t = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    ["()", "[]", "（）", "［］"].iter().any(|b| {
+        let mut cs = b.chars();
+        let (open, close) = (cs.next().unwrap_or('('), cs.next().unwrap_or(')'));
+        t.contains(&format!("{open}{part}{close}")) || t.contains(&format!("{open} {part} {close}"))
+    })
+}
+
+/// How a name in Latin letters ([`latin_key`]) sounds, spellings evened
+/// out: «Christopher» and «Кристофер» (kristofer) are one name.
+fn sound(latin: &str) -> String {
+    let mut w = latin.to_owned();
+    for (from, to) in [("ph", "f"), ("th", "t"), ("ch", "k"), ("ck", "k"), ("c", "k"), ("q", "k"), ("x", "ks"), ("w", "v")] {
+        w = w.replace(from, to);
+    }
+    let mut out = String::with_capacity(w.len());
+    for c in w.chars() {
+        if !out.ends_with(c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Two names of one artist: the same key, the same name in another script
-/// or order ([`same_name`], [`same_translit`]), or keys a letter or two
-/// apart.
+/// or order ([`same_name`], [`same_translit`], the same sound in Latin
+/// letters), or keys a letter or two apart.
 pub(crate) fn same_artist(a: &str, b: &str) -> bool {
     let (ka, kb) = (artist_key(a), artist_key(b));
     if ka.chars().count() < 2 || kb.chars().count() < 2 {
         return false;
     }
-    ka == kb
-        || same_name(a, b)
-        || same_translit(a, b)
-        || (ka.chars().count() >= 6 && similarity(&ka, &kb) >= 0.92)
+    if ka == kb || same_name(a, b) || same_translit(a, b) || (ka.chars().count() >= 6 && similarity(&ka, &kb) >= 0.92) {
+        return true;
+    }
+    match (latin_key(a), latin_key(b)) {
+        (Some(la), Some(lb)) => {
+            let (sa, sb) = (sound(&la), sound(&lb));
+            sa.len() >= 4 && (sa == sb || (sa.len() >= 6 && similarity(&sa, &sb) >= 0.92))
+        }
+        _ => false,
+    }
+}
+
+/// The guests a title credits («Song (ft.Takeshi Saito)», «Song feat. A & B»).
+fn guests(title: &str) -> Vec<String> {
+    let lower = title.to_lowercase();
+    // Offsets of the lower case text hold in the title only when no letter
+    // changed its length.
+    let title = if lower.len() == title.len() { title } else { lower.as_str() };
+    let mut out = Vec::new();
+    for mark in ["feat.", "ft.", "feat ", "ft ", "featuring "] {
+        let mut from = 0;
+        while let Some(at) = lower[from..].find(mark).map(|i| i + from) {
+            from = at + mark.len();
+            let starts_word = at == 0 || !lower[..at].chars().next_back().is_some_and(char::is_alphanumeric);
+            if !starts_word {
+                continue;
+            }
+            let rest = &title[from..];
+            let end = rest.find([')', ']', '】', '」', '|']).unwrap_or(rest.len());
+            for name in rest[..end].split([',', '&', '、', '/']).flat_map(|n| n.split(" x ")).flat_map(|n| n.split(" and ")) {
+                let name = name.trim();
+                if !name.is_empty() && !out.iter().any(|o: &String| o == name) {
+                    out.push(name.to_owned());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `13 Haunted Foes` → `Haunted Foes` whatever the number: a title that
+/// really begins with one («7 weeks») only gains a key to try.
+fn without_any_number(title: &str) -> Option<&str> {
+    let t = title.trim_start();
+    let digits = t.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 || digits > 3 {
+        return None;
+    }
+    let rest = t[digits..].trim_start_matches(['.', ')', '-', '–', '—', ' ']);
+    (rest.len() < t.len() - digits && rest.chars().next().is_some_and(char::is_alphabetic)).then_some(rest)
 }
 
 impl Probe {
@@ -178,13 +253,20 @@ impl Probe {
         if bare != raw {
             titles.push(bare.to_owned());
         }
+        if let Some(loose) = without_any_number(raw).filter(|l| *l != bare) {
+            for t in std::iter::once(loose.to_owned()).chain(song_titles(loose, &item.artist)) {
+                if !aside(raw, &t) && !titles.contains(&t) {
+                    titles.push(t);
+                }
+            }
+        }
         let parts = song_titles(bare, &item.artist);
         // The hints are the parts alone: a whole title (or the halves
         // joined, which come first) holds the title itself and would agree
         // with any album named like it.
         let joined = parts.len() > 1 && parts[0].len() > parts[1].len() && parts[0].starts_with(parts[1].as_str());
         for t in &parts {
-            if !titles.contains(t) {
+            if !aside(raw, t) && !titles.contains(t) {
                 titles.push(t.clone());
             }
         }
@@ -199,6 +281,7 @@ impl Probe {
         }
         p.hints = parts.iter().skip(usize::from(joined)).cloned().collect();
         p.hints.extend(std::iter::once(&item.artist).chain(&item.featured).chain(&item.album).filter(|s| !s.trim().is_empty()).cloned());
+        p.hints.extend(guests(raw));
         p.takes = takes_of(raw);
         let main = song_titles(bare, &item.artist).into_iter().next().unwrap_or_else(|| bare.to_owned());
         p.query = if credited && !item.artist.is_empty() && !nikgob_core::clip_title::fold(&main).contains(&nikgob_core::clip_title::fold(&item.artist)) {
@@ -227,6 +310,15 @@ impl Probe {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.titles.is_empty()
+    }
+
+    /// One more name the song may be credited or filed under: the
+    /// playlist a video is in («Made in Abyss OST 1»).
+    pub(crate) fn with_hint(mut self, hint: &str) -> Self {
+        if !hint.trim().is_empty() {
+            self.hints.push(hint.to_owned());
+        }
+        self
     }
 
     /// How well a track (`title` by `artists` on `album`, `length` long)
@@ -362,6 +454,13 @@ mod tests {
         assert!(same_artist("Christopher Larkin", "christopher larkin"));
         assert!(same_artist("Татьяна Буланова", "Tatiana Bulanova"));
         assert!(!same_artist("Amellifera", "Christopher Larkin"));
+        assert!(same_artist("Кристофер Ларкин", "Christopher Larkin"));
+        assert!(!same_artist("Кристофер Ларкин", "Kevin Penkin"));
+        assert_eq!(guests("Hanezeve Caradhina (ft.Takeshi Saito)"), ["Takeshi Saito"]);
+        assert_eq!(guests("Song feat. A & B"), ["A", "B"]);
+        assert!(guests("Left Behind").is_empty() && guests("Draft").is_empty());
+        assert_eq!(without_any_number("13 Haunted Foes (Hollow Knight: Gods & Nightmares)"), Some("Haunted Foes (Hollow Knight: Gods & Nightmares)"));
+        assert_eq!(without_any_number("1212"), None);
     }
 
     #[test]
@@ -379,6 +478,15 @@ mod tests {
         assert_eq!(find("Hollow Knight OST - Enter Hallownest", "Amellifera"), Some(id(1)));
         assert_eq!(find("Hollow Knight OST - Queen's Gardens", "Amellifera"), Some(id(5)));
         assert_eq!(find("01 Hive Knight (Hollow Knight: Gods & Nightmares)", "Кристофер Ларкин"), Some(id(2)));
+        assert_eq!(find("12 Hive Knight (Hollow Knight: Hidden Dreams)", "Кристофер Ларкин"), Some(id(2)), "the artist in another script");
+        // A «- Topic» channel of no artist, the guest and the playlist agree.
+        let shelf2 = Shelf::new(vec![MatchRow {
+            artists: vec!["Kevin Penkin & Takeshi Saito".into(), "Kevin Penkin".into(), "Takeshi Saito".into()],
+            ..row(9, "Hanezeve Caradhina (ft. Takeshi Saito)", "", "MADE IN ABYSS ORIGINAL SOUNDTRACK", true)
+        }]);
+        assert_eq!(shelf2.find(&Probe::of(&item("Hanezeve Caradhina (ft.Takeshi Saito)", "Release", None), None, true)), Some(id(9)));
+        let in_list = Probe::of(&item("Hanezeve Caradhina", "Release", None), None, true).with_hint("Made in Abyss OST 1");
+        assert_eq!(shelf2.find(&in_list), Some(id(9)));
         assert_eq!(find("Riko's Theme", "Kevin Penkin"), Some(id(3)), "a «- Topic» play");
         assert_eq!(find("Artist - Song (Official Video)", "ArtistOfficial"), Some(id(7)));
         assert_eq!(find("Artist - Song [HD]", "someone"), Some(id(7)));
@@ -388,6 +496,17 @@ mod tests {
         assert_eq!(find("Riko's Theme (Piano Cover) - Made in Abyss", "Pianist"), None);
         assert_eq!(find("Artist - Song (Live)", "someone"), None);
         assert_eq!(find("Восхождение Героя Щита опенинг 2 [FAITH] (Русский кавер от Jackie-O)", "Jackie-O"), None);
+        // What a bracket says besides the song is no title of it.
+        let arcane = Shelf::new(vec![
+            row(20, "Wasteland (from the series Arcane League of Legends)", "Royal & the Serpent", "Arcane League of Legends: Season 2", true),
+            row(21, "Don't Just Don't", "Con Fetti Pesto", "Supraland", true),
+        ]);
+        let find2 = |title: &str, channel: &str| arcane.find(&Probe::of(&item(title, channel, None), None, true));
+        assert_eq!(find2("To Ashes and Blood (from the series Arcane League of Legends)", "Woodkid"), None);
+        assert_eq!(find2("Spin The Wheel (from the series Arcane League of Legends)", "Arcane"), None);
+        assert_eq!(find2("Lass es sein (Don't Just Don't)", "Con Fetti Pesto"), None);
+        assert_eq!(find2("Wasteland (from the series Arcane League of Legends)", "Royal & the Serpent"), Some(id(20)));
+        assert_eq!(find2("Don't Just Don't (English Version)", "Con Fetti Pesto"), None, "another language is another take");
         // A length far off is another recording.
         let long = Probe::of(&item("Artist - Song", "x", None), Some(600_000), false);
         let shelf = Shelf::new(vec![MatchRow { duration_ms: Some(200_000), ..row(7, "Song", "Artist", "Album", true) }]);

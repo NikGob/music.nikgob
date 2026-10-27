@@ -778,13 +778,15 @@ async fn read_export(
     let mut keys: Vec<(String, Uuid)> = Vec::new();
     let mut ask: Vec<(RemoteId, Probe)> = Vec::new();
     let mut seen = HashSet::new();
-    for i in data.likes.iter().chain(data.playlists.iter().flat_map(|p| &p.items)) {
+    // A playlist's name may name the work its songs are from.
+    let listed = data.likes.iter().map(|i| (i, "")).chain(data.playlists.iter().flat_map(|p| p.items.iter().map(|i| (i, p.name.as_str()))));
+    for (i, list) in listed {
         let Some(id) = &i.id else { continue };
         let remote = RemoteId::new(i.service, id.clone());
         if !seen.insert(remote.clone()) {
             continue;
         }
-        let probe = probe_of(i, &full, i.service != Service::Youtube || topic.contains(id));
+        let probe = probe_of(i, &full, i.service != Service::Youtube || topic.contains(id)).with_hint(list);
         match known_song(&lib, &shelf, &remote, &probe) {
             Some((t, fresh)) => {
                 if fresh {
