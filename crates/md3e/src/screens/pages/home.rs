@@ -768,7 +768,7 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<
     let mut nav = None;
     entering(ui, rect, n, "releases", |ui| {
         if section_header(ui, grid, rect, "Новые релизы", Some(("Все", Some(Icon::ArrowForward)))) {
-            nav = albums.first().and_then(|a| a.artist_id().cloned()).map(|a| Route::Stream(StreamPage::Artist(a)));
+            nav = Some(Route::NewReleases);
         }
         let top = rect.top() + HEADER_H + HEADER_GAP;
         for (i, a) in albums.iter().enumerate() {
@@ -783,6 +783,43 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<
         }
     });
     nav
+}
+
+/// «Новые релизы» → «Все» ([`Route::NewReleases`]): every new album the
+/// row has, in its order, as cards of the same grid; a click opens one, ▶
+/// plays it.
+pub fn new_releases(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
+    super::detail::with_bar(ui, "Новые релизы", pages, |ui, _| {
+        let albums = &state.home.new_releases;
+        if albums.is_empty() {
+            let body = if state.prefs.mixes_downloaded_only {
+                "Включено «Только скачанное», а новые альбомы пока только в стриме."
+            } else {
+                "Здесь будут альбомы твоих исполнителей за последние два месяца."
+            };
+            widgets::empty_state(ui, Icon::Album, "Новых релизов пока нет", body, None);
+            return None;
+        }
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let grid = Grid::new(ui.cursor().left(), ui.available_width());
+        ui.add_space(8.0);
+        let per = grid.cards_per_line();
+        let card_h = grid.span(12 / per) + cards::ALBUM_TEXT_H;
+        let (block, _) = ui.allocate_exact_size(vec2(ui.available_width(), lines(albums.len(), per) as f32 * (card_h + 24.0) - 24.0), Sense::hover());
+        let mut nav = None;
+        for (i, a) in albums.iter().enumerate() {
+            let cell = grid.cell(i, per, block.top(), card_h, 24.0);
+            let (artist, tail) = release_line(a);
+            let o = cards::album(ui, cell, &a.title, &artist, &tail, a.cover_url.clone(), ("new-releases", i));
+            if o.play {
+                out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: false });
+            } else if o.clicked {
+                nav = Some(Route::Stream(StreamPage::Album(a.remote.clone())));
+            }
+        }
+        ui.add_space(widgets::SECTION_GAP);
+        nav
+    })
 }
 
 // ---- Empty.

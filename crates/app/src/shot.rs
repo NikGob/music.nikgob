@@ -243,6 +243,7 @@ impl Shot {
                     "downloads" => Route::Downloads(DownloadsTab::Active),
                     "wishlist" => Route::Downloads(DownloadsTab::Wishlist),
                     "settings" => Route::Settings,
+                    "new_releases" => Route::NewReleases,
                     _ => Route::Home,
                 };
                 if let Route::Library(tab) = r {

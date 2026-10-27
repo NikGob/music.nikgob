@@ -1695,6 +1695,8 @@ pub enum Route {
     /// A mix's page: one of «Миксы для тебя» ([`HomeView::lanes`]) or,
     /// with `world`, of that world's page ([`WorldView::mixes`]).
     Mix { key: MixKey, world: Option<String> },
+    /// «Новые релизы» of Главная, all of them ([`HomeView::new_releases`]).
+    NewReleases,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
