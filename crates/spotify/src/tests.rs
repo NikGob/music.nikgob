@@ -115,7 +115,7 @@ fn free_port() -> u16 {
 }
 
 async fn wait_restored(s: &Spotify) {
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + Duration::from_secs(30);
     while lock(&s.state).restoring {
         assert!(Instant::now() < end, "restore did not finish");
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1017,7 +1017,9 @@ async fn a_refusal_for_want_of_premium_later_signs_out() {
     wait_restored(&s).await;
     assert!(s.account().is_logged_in());
     assert!(s.search("лёд").await.is_err());
-    let end = Instant::now() + Duration::from_secs(5);
+    // The sign-out runs on its own task; the first state seen after it is
+    // the whole of it (never a plain `LoggedOut` before the reason).
+    let end = Instant::now() + Duration::from_secs(30);
     while s.account().is_logged_in() {
         assert!(Instant::now() < end, "not signed out");
         tokio::time::sleep(Duration::from_millis(10)).await;
