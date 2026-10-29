@@ -46,6 +46,16 @@
 //! source of the stream's service yet. The file's title stays, the other
 //! one is the track's alias ([`Library::merge_other_script_titles`]).
 //!
+//! A playlist that follows an album's order tells the rest
+//! ([`Library::fold_playlist_gaps`]): streams without a file between two
+//! files of one disc of an album, as many as the places between them,
+//! whose files the playlist lacks, are those files in turn — each as long
+//! as its file within [`PLACE_SLACK_MS`], or, of unknown length, under a
+//! title in another script than the file's («ベラフの子守歌» between
+//! «Capital of the Unreturned» 2-13 and «Doll x Dragon» 2-15 is «Belaf's
+//! Lullaby» 2-14). A run that does not fill its gap exactly, or of which
+//! one stream does not fit, stays as it is.
+//!
 //! [`Library::merge_duplicate_stream_tracks`] applies the same rules once to
 //! tracks created before they existed, and folds one song filed twice on
 //! one release under titles a sound mark apart («パウロ VS ルディ» and
@@ -54,7 +64,7 @@
 
 use nikgob_core::clip_title::{credited_names, same_dual_title, song_titles};
 use nikgob_core::translit::{prefer_cyrillic, same_translit};
-use nikgob_core::model::{SourceKind, score};
+use nikgob_core::model::{PlaylistId, SourceKind, score};
 use nikgob_core::streaming::{EntityKind, Service, StreamTrack, TrackKind};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -838,12 +848,117 @@ fn track_exists(conn: &Connection, id: &str) -> Result<bool> {
         .is_some())
 }
 
+/// One live entry of a playlist as [`playlist_gaps`] reads it: its track,
+/// title, length, whether it has a file, its place.
+struct GapEntry {
+    track: String,
+    title: String,
+    duration: Option<i64>,
+    local: bool,
+    place: Option<Place>,
+}
+
+/// The pairs `(stream, file)` of a playlist that are one song by the
+/// order of the playlist (see the module docs).
+fn playlist_gaps(conn: &Connection, playlist: &str) -> Result<Vec<(String, String)>> {
+    let entries: Vec<GapEntry> = {
+        let mut stmt = conn.prepare_cached(
+            "SELECT t.id, t.title, t.duration_ms, t.has_local, t.release_id, t.disc_no, t.track_no
+               FROM playlist_entry e JOIN track t ON t.id = e.track_id
+              WHERE e.playlist_id = ?1 AND e.deleted = 0 AND t.deleted_at IS NULL
+              ORDER BY e.position, e.id",
+        )?;
+        let rows = stmt.query_map([playlist], |r| {
+            Ok(GapEntry {
+                track: r.get(0)?,
+                title: r.get(1)?,
+                duration: r.get(2)?,
+                local: r.get(3)?,
+                place: place_of(r.get(4)?, r.get(5)?, r.get(6)?),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let in_list: std::collections::HashSet<&str> = entries.iter().map(|e| e.track.as_str()).collect();
+    let file_place = |e: &GapEntry| e.place.clone().filter(|_| e.local);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < entries.len() {
+        let Some(from) = file_place(&entries[i]) else {
+            i += 1;
+            continue;
+        };
+        let mut j = i + 1;
+        while j < entries.len() && !entries[j].local {
+            j += 1;
+        }
+        let run = &entries[i + 1..j.min(entries.len())];
+        let to = entries.get(j).and_then(file_place);
+        if let Some(to) = to.filter(|t| t.0 == from.0 && t.1 == from.1 && !run.is_empty())
+            && to.2 - from.2 - 1 == run.len() as i64
+        {
+            let mut pairs = Vec::new();
+            for (k, s) in run.iter().enumerate() {
+                let file: Option<(String, String, Option<i64>)> = conn
+                    .query_row(
+                        "SELECT id, title, duration_ms FROM track WHERE release_id = ?1 AND disc_no = ?2 AND track_no = ?3
+                            AND has_local = 1 AND deleted_at IS NULL",
+                        params![from.0, from.1, from.2 + 1 + k as i64],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .optional()?;
+                let Some((f, title, duration)) = file.filter(|f| !in_list.contains(f.0.as_str())) else { break };
+                let fits = match (s.duration, duration) {
+                    (Some(a), Some(b)) => (a - b).abs() <= PLACE_SLACK_MS,
+                    (None, _) => other_scripts(&s.title, &title),
+                    (Some(_), None) => false,
+                };
+                let taken = services_of(conn, &s.track)?.into_iter().map(|sv| has_service(conn, &f, sv)).collect::<Result<Vec<_>>>()?;
+                if !fits || taken.into_iter().any(|t| t) {
+                    break;
+                }
+                pairs.push((s.track.clone(), f));
+            }
+            if pairs.len() == run.len() {
+                out.extend(pairs);
+            }
+        }
+        i = j.max(i + 1);
+    }
+    Ok(out)
+}
+
+/// [`playlist_gaps`] of `playlist` merged: each stream goes into its file,
+/// its title an alias of it when another. Returns how many went.
+fn fold_playlist_gaps_in(conn: &Connection, playlist: &str, device: &str, now: i64) -> Result<usize> {
+    let mut merged = 0;
+    for (stream, file) in playlist_gaps(conn, playlist)? {
+        let title: String = conn.query_row("SELECT title FROM track WHERE id = ?1", [&stream], |r| r.get(0))?;
+        if merge_track_in(conn, super::parse(&stream)?, super::parse(&file)?, device, now)? {
+            crate::aliases::add_track_alias_in(conn, &file, &title, "merged")?;
+            note!("library: stream track {stream} «{title}» is the file {file} at its place in playlist {playlist}, merged");
+            merged += 1;
+        }
+    }
+    Ok(merged)
+}
+
 impl Library {
+    /// The streams of a playlist that are files of the library by the
+    /// order of the playlist (see the module docs) go into those files.
+    /// Returns how many went.
+    pub fn fold_playlist_gaps(&self, playlist: PlaylistId) -> Result<usize> {
+        let device = self.device_id();
+        let now = self.tick();
+        self.write(|tx| fold_playlist_gaps_in(tx, &playlist.to_string(), device.as_str(), now))
+    }
+
     /// Once per library (`other_script_titles_merged.v1`): a stream-only
     /// track that is a file of the library under a title in another script
     /// (see the module docs: «ベラフの子守歌» and «Belaf's Lullaby») goes
-    /// into it; the file's title stays, the stream's is its alias. Returns
-    /// how many tracks went.
+    /// into it, and so do the streams of every playlist that are files by
+    /// its order ([`Self::fold_playlist_gaps`]); the file's title stays,
+    /// the stream's is its alias. Returns how many tracks went.
     pub fn merge_other_script_titles(&self) -> Result<usize> {
         let device = self.device_id();
         let now = self.tick();
@@ -866,6 +981,14 @@ impl Library {
                     note!("library: stream track {id} «{title}» is the file {file} under another title, merged");
                     merged += 1;
                 }
+            }
+            let playlists: Vec<String> = {
+                let mut stmt = tx.prepare("SELECT id FROM playlist WHERE deleted = 0 ORDER BY seq")?;
+                let rows = stmt.query_map([], |r| r.get(0))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            for p in playlists {
+                merged += fold_playlist_gaps_in(tx, &p, device.as_str(), now)?;
             }
             Ok((merged, merged))
         })?

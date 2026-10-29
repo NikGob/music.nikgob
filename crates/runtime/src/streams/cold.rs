@@ -31,7 +31,9 @@
 //!   enough of it is music ([`music_playlist`]); of one that is, a video
 //!   that is no music stays out ([`no_music_video`]). A song the library
 //!   has under a title in another script gets that title as an alias
-//!   ([`super::songs::Shelf::other_title`]). From the API they are linked to
+//!   ([`super::songs::Shelf::other_title`]); the streams of a playlist that
+//!   follows an album's order are the album's files at their places
+//!   ([`Library::fold_playlist_gaps`]). From the API they are linked to
 //!   the service (`playlist_remote`, mode [`Prefs::playlist_sync_default`]);
 //!   a playlist from a file is a snapshot ("разово"), linked when the file
 //!   names its id, otherwise remembered by an import key.
@@ -52,6 +54,7 @@
 //! [`Prefs::playlist_sync_default`]: nikgob_view::Prefs::playlist_sync_default
 //! [`Prefs::import_saved_songs`]: nikgob_view::Prefs::import_saved_songs
 //! [`Library::mark_saved`]: nikgob_library::Library::mark_saved
+//! [`Library::fold_playlist_gaps`]: nikgob_library::Library::fold_playlist_gaps
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -1298,6 +1301,9 @@ impl Worker {
         let pid = created.id;
         let tracks: Vec<TrackId> = self.resolve_wanted(&p.tracks).into_iter().flatten().collect();
         let _ = self.log_err("плейлист", self.lib.playlist_add_many(pid, &tracks));
+        // A playlist of an album's songs in its order: its streams between
+        // two files are the files between them.
+        let _ = self.log_err("плейлист", self.lib.fold_playlist_gaps(pid));
         let now = self.sync_stamp(pid);
         match (&p.remote, &p.fetched) {
             (Some(remote), Some(fetched)) => {

@@ -1028,6 +1028,80 @@ fn a_stream_titled_in_another_script_goes_into_its_file_once() {
     assert_eq!(lib.track_aliases(gravity).unwrap(), ["ベラフの子守歌"]);
 }
 
+/// A playlist in an album's order: the streams between two files of a disc,
+/// as many as the places between, are those files — by their lengths, or,
+/// of unknown length, by a title in another script. A run that does not
+/// fill its gap, a stream of another length, a title of unknown length in
+/// the same script, or a file the playlist has already stays as it is.
+#[test]
+fn streams_between_two_files_of_an_album_in_a_playlist_are_its_files() {
+    let lib = lib();
+    let ost = "MADE IN ABYSS ORIGINAL SOUNDTRACK 3";
+    let artist = lib.upsert_artist(&Artist::new("Kevin Penkin")).unwrap();
+    let credit = ArtistCredit::single("Kevin Penkin", Some(artist.id));
+    let release = lib.upsert_release(&Release::new(ost, credit.clone())).unwrap();
+    let file = |no: u32, title: &str, ms: u32| {
+        let mut t = Track::new(title, credit.clone());
+        t.release_id = Some(release.id);
+        t.disc_no = 2;
+        t.track_no = no;
+        t.duration_ms = Some(ms);
+        let t = lib.upsert_track(&t).unwrap();
+        lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("Music/{no}.opus"), Codec::Opus)).unwrap();
+        t.id
+    };
+    let f: Vec<TrackId> = [
+        (1, "Capital of the Unreturned", 156_957),
+        (2, "Belaf's Lullaby", 199_950),
+        (3, "Doll x Dragon", 162_911),
+        (4, "Counterpoint of Abyss", 259_197),
+        (5, "VOH", 459_782),
+        (6, "Ouni", 202_299),
+        (7, "I. AM. BURNING. MAN", 149_385),
+        (8, "Bird x Sound", 202_017),
+        (9, "Vueko", 216_310),
+    ]
+    .into_iter()
+    .map(|(n, t, ms)| file(n, t, ms))
+    .collect();
+    let stream = |id: &str, title: &str, artist: &str, secs: Option<u64>| {
+        let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), title);
+        t.artists = vec![ArtistRef::new(None, artist)];
+        t.duration_ms = secs.map(|s| s * 1000);
+        lib.ensure_stream_tracks(&[t]).unwrap()[0]
+    };
+    let belaf = stream("ytbelaf0001", "ベラフの子守歌", "Release", None);
+    let doll = stream("ytdoll00001", "Ningyō x 龍", "Kevin Penkin", Some(163));
+    let bird = stream("ytbird00001", "Tori x Onkyō", "Kevin Penkin", Some(203));
+    let p = lib.create_playlist("Made in Abyss OST 3").unwrap();
+    lib.playlist_add_many(p.id, &[f[0], belaf, doll, f[3], f[5], bird, f[8]]).unwrap();
+    assert_eq!(lib.fold_playlist_gaps(p.id).unwrap(), 2);
+    let ids: Vec<TrackId> = lib.playlist_entries(p.id, 0, 10).unwrap().iter().map(|e| e.track.id).collect();
+    assert_eq!(ids, [f[0], f[1], f[2], f[3], f[5], bird, f[8]], "a gap of two places with one stream stays");
+    assert_eq!(lib.track_aliases(f[1]).unwrap(), ["ベラフの子守歌"]);
+    assert_eq!(lib.track_aliases(f[2]).unwrap(), ["Ningyō x 龍"]);
+    assert_eq!(lib.track_by_remote(&RemoteId::new(Service::Youtube, "ytdoll00001")).unwrap(), Some(f[2]));
+    assert_eq!(lib.get_track(f[1]).unwrap().unwrap().title, "Belaf's Lullaby");
+
+    // What stays.
+    let long = stream("ytlong00001", "ベラフの子守歌 (Extended)", "Kevin Penkin", Some(300));
+    let latin = stream("ytlatin0001", "Lullaby", "Someone", None);
+    let again = stream("ytagain0001", "ベラフの子守歌", "Release", None);
+    for (name, list, why) in [
+        ("Long", vec![f[0], long, f[2]], "another length"),
+        ("Latin", vec![f[2], latin, f[4]], "a title to compare"),
+        ("Back", vec![f[3], again, f[1]], "the other way round"),
+        ("Has it", vec![f[0], again, f[2], f[1]], "the file is in the playlist already"),
+    ] {
+        let q = lib.create_playlist(name).unwrap();
+        lib.playlist_add_many(q.id, &list).unwrap();
+        assert_eq!(lib.fold_playlist_gaps(q.id).unwrap(), 0, "{why}");
+    }
+    for t in [long, latin, again] {
+        assert!(lib.get_track(t).unwrap().is_some());
+    }
+}
+
 /// A file that has the stream's service already is no file of another
 /// stream of it under another title.
 #[test]
