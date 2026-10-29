@@ -647,6 +647,69 @@ fn stream_tracks_survive_a_userdata_round_trip() {
     );
 }
 
+/// The «медиатека» marks go out with the user data, with the stream tracks
+/// they mark (outside the library), and come back as marks, not likes.
+#[test]
+fn saved_marks_survive_a_userdata_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = lib();
+    let outside = a.ensure_stream_tracks(&[sp(1)]).unwrap()[0];
+    let liked = a.upsert_stream_track(&sp(0)).unwrap();
+    a.like(liked).unwrap();
+    a.mark_saved(Service::Spotify, &[(sp(1).id.id.clone(), outside), (sp(0).id.id.clone(), liked)]).unwrap();
+    let rep = a.export_userdata(dir.path()).unwrap();
+    assert_eq!((rep.saved, rep.stream_tracks), (2, 2));
+    assert!(dir.path().join(crate::SAVED_FILE).exists());
+
+    let b = lib();
+    let rep = b.import_userdata(dir.path()).unwrap();
+    assert_eq!(rep.saved, 2);
+    let mut saved = b.saved_tracks().unwrap();
+    saved.sort();
+    let mut want = vec![outside, liked];
+    want.sort();
+    assert_eq!(saved, want);
+    assert_eq!(b.track_in_library(outside).unwrap(), Some(false), "a mark brings nothing into the library");
+    assert_eq!(b.like_state(outside).unwrap(), None);
+    assert_eq!(b.track_by_remote(&sp(1).id).unwrap(), Some(outside));
+    // Again: nothing twice, and the export of the import is the same file.
+    b.import_userdata(dir.path()).unwrap();
+    assert_eq!(b.saved_tracks().unwrap().len(), 2);
+    let dir2 = tempfile::tempdir().unwrap();
+    b.export_userdata(dir2.path()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(crate::SAVED_FILE)).unwrap(),
+        std::fs::read_to_string(dir2.path().join(crate::SAVED_FILE)).unwrap()
+    );
+}
+
+/// An export that the database no longer matches (a backup of the
+/// database put back after it) is stale; written again, it is not.
+#[test]
+fn an_export_of_another_state_is_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = lib();
+    assert!(!a.userdata_export_stale(dir.path()).unwrap(), "nothing exported here yet");
+    let backup = lib();
+    let t = a.upsert_stream_track(&sp(0)).unwrap();
+    a.like(t).unwrap();
+    a.export_userdata(dir.path()).unwrap();
+    assert!(!a.userdata_export_stale(dir.path()).unwrap());
+    // The database of before the like, put back.
+    assert!(backup.userdata_export_stale(dir.path()).unwrap());
+    backup.export_userdata(dir.path()).unwrap();
+    assert!(!backup.userdata_export_stale(dir.path()).unwrap());
+    assert!(std::fs::read_to_string(dir.path().join(crate::LIKES_FILE)).unwrap().contains("\"likes\": []"));
+    // A mark changes what the export holds.
+    let s = backup.ensure_stream_tracks(&[sp(1)]).unwrap()[0];
+    backup.mark_saved(Service::Spotify, &[(sp(1).id.id.clone(), s)]).unwrap();
+    assert!(backup.userdata_export_stale(dir.path()).unwrap());
+    // An export of an older build (no fingerprint) is stale.
+    backup.export_userdata(dir.path()).unwrap();
+    std::fs::remove_file(dir.path().join(crate::FINGERPRINT_FILE)).unwrap();
+    assert!(backup.userdata_export_stale(dir.path()).unwrap());
+}
+
 #[test]
 fn a_stream_found_by_name_attaches_to_the_same_track() {
     let lib = lib();

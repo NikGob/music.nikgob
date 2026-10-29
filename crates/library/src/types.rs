@@ -369,6 +369,8 @@ pub struct ExportReport {
     pub stream_tracks: usize,
     /// «Не рекомендовать» marks written to `rec_feedback.json`.
     pub rec_feedback: usize,
+    /// Marks of songs saved in a service's library written to `saved.json`.
+    pub saved: usize,
     /// Files whose content actually changed on disk.
     pub files_written: usize,
 }
@@ -408,6 +410,8 @@ pub struct ImportReport {
     pub events_added: usize,
     /// Stream tracks recreated (or re-linked) from `streams.json`.
     pub stream_tracks: usize,
+    /// Marks of songs saved in a service's library taken from `saved.json`.
+    pub saved: usize,
     /// Unparsable lines in `events.jsonl`.
     pub invalid_lines: usize,
 }

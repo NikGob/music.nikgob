@@ -59,5 +59,7 @@ pub use types::{
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,
     TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };
-pub use userdata::{EVENTS_FILE, LIKES_FILE, PLAYLISTS_FILE, REC_FEEDBACK_FILE, STREAMS_FILE, USERDATA_VERSION};
+pub use userdata::{
+    EVENTS_FILE, FINGERPRINT_FILE, LIKES_FILE, PLAYLISTS_FILE, REC_FEEDBACK_FILE, SAVED_FILE, STREAMS_FILE, USERDATA_VERSION,
+};
 pub use util::{fold, now_ms, sort_key};

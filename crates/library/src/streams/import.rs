@@ -41,7 +41,34 @@ pub(crate) const SEEN_SERVICE: &str = "seen";
 /// Pseudo service of the import keys.
 const IMPORT_SERVICE: &str = "import";
 /// Pseudo service of the marks of songs saved in a service's library.
-const SAVED_SERVICE: &str = "saved";
+pub(crate) const SAVED_SERVICE: &str = "saved";
+
+/// Every mark of a song saved in a service's library: the service, the
+/// song's id there and its track (the user-data export).
+pub(crate) fn saved_marks_in(conn: &rusqlite::Connection) -> Result<Vec<(String, String, String)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT remote_id, local_id FROM external_id WHERE service = ?1 AND kind = 'track' ORDER BY remote_id, local_id",
+    )?;
+    let rows = stmt.query_map([SAVED_SERVICE], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (key, track) = row?;
+        if let Some((service, id)) = key.split_once(':') {
+            out.push((service.to_owned(), id.to_owned(), track));
+        }
+    }
+    Ok(out)
+}
+
+/// Marks `track` as the song `id` saved in `service`'s library (nothing for
+/// a track the library lacks).
+pub(crate) fn put_saved_mark_in(conn: &rusqlite::Connection, service: &str, id: &str, track: &str) -> Result<bool> {
+    if !super::exists(conn, "track", track)? {
+        return Ok(false);
+    }
+    set_key(conn, SAVED_SERVICE, EntityKind::Track, &format!("{service}:{id}"), track)?;
+    Ok(true)
+}
 
 /// A library track as an import compares the songs of an export with it.
 #[derive(Clone, Debug, PartialEq, Eq)]
