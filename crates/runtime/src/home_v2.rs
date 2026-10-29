@@ -1735,9 +1735,11 @@ mod tests {
     /// An omnivore with a history: twelve artists of two albums; four of
     /// them played these days, six played much two months ago, some songs
     /// liked. In one epoch the home is the same at every visit, after a
-    /// play too; ten epochs draw ten compositions, each with what plays
-    /// now, a forgotten favourite and what the library offers, and every
-    /// album played now or long ago comes at least once.
+    /// play too; thirty epochs draw other compositions, each with what
+    /// plays now, a forgotten favourite and what the library offers, and
+    /// every album played now or long ago comes at least once (the ids, and
+    /// so the lots, are new at each run of the test: ten epochs left an
+    /// album out now and then).
     #[test]
     fn the_home_keeps_its_epoch_and_draws_again_in_the_next() {
         let lib = Library::open_in_memory().unwrap();
@@ -1781,7 +1783,8 @@ mod tests {
         let mut songs: HashSet<TrackId> = HashSet::new();
         let mut lineups: HashSet<Vec<String>> = HashSet::new();
         let mut before: Option<Vec<TrackId>> = None;
-        for run in 2..12 {
+        let mut shared = Vec::new();
+        for run in 2..32 {
             let h = build(&lib, &visit(run));
             let (sc, again) = picks(&h);
             println!("{run}: {sc:?}");
@@ -1796,14 +1799,19 @@ mod tests {
             }
             if let Some(b) = &before {
                 let same = again.iter().filter(|t| b.contains(t)).count();
-                assert!(same <= LISTEN_AGAIN / 2, "«Слушать снова» shares {same} with the epoch before");
+                assert!(same <= LISTEN_AGAIN * 2 / 3, "«Слушать снова» shares {same} with the epoch before");
+                shared.push(same);
             }
             songs.extend(again.iter().copied());
             before = Some(again);
             lineups.insert(sc);
         }
         assert!(lineups.len() >= 8, "{lineups:?}");
-        for a in now_albums.iter().chain(&old_albums) {
+        assert!(shared.iter().sum::<usize>() * 3 <= shared.len() * LISTEN_AGAIN, "«Слушать снова» shares {shared:?} with the epochs before");
+        // The album of the song played above plays now and is no longer
+        // forgotten: it may come or not.
+        let replayed = (0..10).find(|a| ids[*a][0].contains(&first.listen_again[0].id)).map(|a| format!("r Album {a}.0"));
+        for a in now_albums.iter().chain(&old_albums).filter(|a| replayed.as_ref() != Some(*a)) {
             assert!(seen.contains_key(a), "{a} never came: {seen:?}");
         }
         // Every song liked or played much long ago (four of six of each
@@ -1869,7 +1877,9 @@ mod tests {
         }
         let profiles = one_profile(&lib);
         let mut offered: HashSet<String> = HashSet::new();
-        for run in 0..10 {
+        // Twenty-five: the ids, and so the lots, are new at each run of the
+        // test, and ten epochs left an artist out now and then.
+        for run in 0..25 {
             let visit = Visit { now, epoch: Epoch::of(run, now, 0), profiles: Some(profiles.clone()), ..Visit::default() };
             let (sc, _) = picks(&build(&lib, &visit));
             assert_eq!(sc.iter().collect::<HashSet<_>>().len(), sc.len(), "{sc:?}");
