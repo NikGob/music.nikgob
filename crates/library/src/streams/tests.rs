@@ -647,6 +647,69 @@ fn stream_tracks_survive_a_userdata_round_trip() {
     );
 }
 
+/// The «медиатека» marks go out with the user data, with the stream tracks
+/// they mark (outside the library), and come back as marks, not likes.
+#[test]
+fn saved_marks_survive_a_userdata_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = lib();
+    let outside = a.ensure_stream_tracks(&[sp(1)]).unwrap()[0];
+    let liked = a.upsert_stream_track(&sp(0)).unwrap();
+    a.like(liked).unwrap();
+    a.mark_saved(Service::Spotify, &[(sp(1).id.id.clone(), outside), (sp(0).id.id.clone(), liked)]).unwrap();
+    let rep = a.export_userdata(dir.path()).unwrap();
+    assert_eq!((rep.saved, rep.stream_tracks), (2, 2));
+    assert!(dir.path().join(crate::SAVED_FILE).exists());
+
+    let b = lib();
+    let rep = b.import_userdata(dir.path()).unwrap();
+    assert_eq!(rep.saved, 2);
+    let mut saved = b.saved_tracks().unwrap();
+    saved.sort();
+    let mut want = vec![outside, liked];
+    want.sort();
+    assert_eq!(saved, want);
+    assert_eq!(b.track_in_library(outside).unwrap(), Some(false), "a mark brings nothing into the library");
+    assert_eq!(b.like_state(outside).unwrap(), None);
+    assert_eq!(b.track_by_remote(&sp(1).id).unwrap(), Some(outside));
+    // Again: nothing twice, and the export of the import is the same file.
+    b.import_userdata(dir.path()).unwrap();
+    assert_eq!(b.saved_tracks().unwrap().len(), 2);
+    let dir2 = tempfile::tempdir().unwrap();
+    b.export_userdata(dir2.path()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(crate::SAVED_FILE)).unwrap(),
+        std::fs::read_to_string(dir2.path().join(crate::SAVED_FILE)).unwrap()
+    );
+}
+
+/// An export that the database no longer matches (a backup of the
+/// database put back after it) is stale; written again, it is not.
+#[test]
+fn an_export_of_another_state_is_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = lib();
+    assert!(!a.userdata_export_stale(dir.path()).unwrap(), "nothing exported here yet");
+    let backup = lib();
+    let t = a.upsert_stream_track(&sp(0)).unwrap();
+    a.like(t).unwrap();
+    a.export_userdata(dir.path()).unwrap();
+    assert!(!a.userdata_export_stale(dir.path()).unwrap());
+    // The database of before the like, put back.
+    assert!(backup.userdata_export_stale(dir.path()).unwrap());
+    backup.export_userdata(dir.path()).unwrap();
+    assert!(!backup.userdata_export_stale(dir.path()).unwrap());
+    assert!(std::fs::read_to_string(dir.path().join(crate::LIKES_FILE)).unwrap().contains("\"likes\": []"));
+    // A mark changes what the export holds.
+    let s = backup.ensure_stream_tracks(&[sp(1)]).unwrap()[0];
+    backup.mark_saved(Service::Spotify, &[(sp(1).id.id.clone(), s)]).unwrap();
+    assert!(backup.userdata_export_stale(dir.path()).unwrap());
+    // An export of an older build (no fingerprint) is stale.
+    backup.export_userdata(dir.path()).unwrap();
+    std::fs::remove_file(dir.path().join(crate::FINGERPRINT_FILE)).unwrap();
+    assert!(backup.userdata_export_stale(dir.path()).unwrap());
+}
+
 #[test]
 fn a_stream_found_by_name_attaches_to_the_same_track() {
     let lib = lib();
@@ -912,6 +975,152 @@ fn file_track(lib: &Library, title: &str, names: &[&str], album: &str, ms: u32) 
     lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("Music/{}.opus", t.id), Codec::Opus))
         .unwrap();
     t.id
+}
+
+/// Once: a stream that is a file of its album under a title in another
+/// script goes into the file, its title an alias the search finds; a
+/// stream of another album, another artist, another length or a crowded
+/// length stays, and so does one whose file has the service already.
+#[test]
+fn a_stream_titled_in_another_script_goes_into_its_file_once() {
+    let lib = lib();
+    let ost = "MADE IN ABYSS ORIGINAL SOUNDTRACK 3";
+    let belaf = file_track(&lib, "Belaf's Lullaby", &["Kevin Penkin"], ost, 199_950);
+    let gravity = file_track(&lib, "Gravity", &["Kevin Penkin"], ost, 240_000);
+    file_track(&lib, "Hanezeve", &["Kevin Penkin"], ost, 241_200);
+    let faith = file_track(&lib, "Faith", &["Kevin Penkin"], "MADE IN ABYSS ORIGINAL SOUNDTRACK 2", 150_000);
+    let song = |id: &str, title: &str, artist: &str, album: &str, secs: u64| {
+        let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), title);
+        t.artists = vec![ArtistRef::new(None, artist)];
+        t.album = Some(AlbumRef::new(None, album));
+        t.duration_ms = Some(secs * 1000);
+        let id = lib.ensure_stream_tracks(&[t]).unwrap()[0];
+        let p = lib.create_playlist(&format!("p {id}")).unwrap();
+        lib.playlist_add(p.id, id).unwrap();
+        id
+    };
+    let jp = song("ytbelaf0001", "ベラフの子守歌", "Kevin Penkin", ost, 200);
+    let other_album = song("ytfaith0001", "信仰", "Kevin Penkin", "MADE IN ABYSS ORIGINAL SOUNDTRACK", 150);
+    let other_artist = song("ytstrange01", "知らない歌", "Someone Else", ost, 200);
+    let crowded = song("ytcrowd0001", "重力", "Kevin Penkin", ost, 241);
+    let latin = song("ytlatin0001", "Belafs Lullaby Remake", "Kevin Penkin", ost, 200);
+    let tracks = lib.count_tracks(TrackFilter::All).unwrap();
+
+    assert_eq!(lib.merge_other_script_titles().unwrap(), 1);
+    assert!(lib.get_track(jp).unwrap().is_none());
+    assert_eq!(lib.track_by_remote(&RemoteId::new(Service::Youtube, "ytbelaf0001")).unwrap(), Some(belaf));
+    assert_eq!(lib.get_track(belaf).unwrap().unwrap().title, "Belaf's Lullaby", "the file's title stays");
+    assert_eq!(lib.track_aliases(belaf).unwrap(), ["ベラフの子守歌"]);
+    assert_eq!(lib.search("ベラフの子守歌", 5).unwrap().tracks.iter().map(|t| t.id).collect::<Vec<_>>(), [belaf]);
+    assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), tracks - 1);
+    for t in [other_album, other_artist, crowded, latin] {
+        assert!(lib.get_track(t).unwrap().is_some(), "{t} stays");
+    }
+    assert!(lib.track_aliases(gravity).unwrap().is_empty() && lib.track_aliases(faith).unwrap().is_empty());
+    lib.rebuild_search_index().unwrap();
+    assert_eq!(lib.search("ベラフの子守歌", 5).unwrap().tracks.iter().map(|t| t.id).collect::<Vec<_>>(), [belaf], "the rebuilt index knows the alias");
+    // Once: a twin made now stays.
+    let again = song("ytbelaf0002", "ベラフの子守歌", "Kevin Penkin", ost, 200);
+    assert_eq!(lib.merge_other_script_titles().unwrap(), 0);
+    assert!(lib.get_track(again).unwrap().is_some());
+    // The alias goes with its track into another one.
+    lib.merge_track_into(belaf, gravity).unwrap();
+    assert_eq!(lib.track_aliases(gravity).unwrap(), ["ベラフの子守歌"]);
+}
+
+/// A playlist in an album's order: the streams between two files of a disc,
+/// as many as the places between, are those files — by their lengths, or,
+/// of unknown length, by a title in another script. A run that does not
+/// fill its gap, a stream of another length, a title of unknown length in
+/// the same script, or a file the playlist has already stays as it is.
+#[test]
+fn streams_between_two_files_of_an_album_in_a_playlist_are_its_files() {
+    let lib = lib();
+    let ost = "MADE IN ABYSS ORIGINAL SOUNDTRACK 3";
+    let artist = lib.upsert_artist(&Artist::new("Kevin Penkin")).unwrap();
+    let credit = ArtistCredit::single("Kevin Penkin", Some(artist.id));
+    let release = lib.upsert_release(&Release::new(ost, credit.clone())).unwrap();
+    let file = |no: u32, title: &str, ms: u32| {
+        let mut t = Track::new(title, credit.clone());
+        t.release_id = Some(release.id);
+        t.disc_no = 2;
+        t.track_no = no;
+        t.duration_ms = Some(ms);
+        let t = lib.upsert_track(&t).unwrap();
+        lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("Music/{no}.opus"), Codec::Opus)).unwrap();
+        t.id
+    };
+    let f: Vec<TrackId> = [
+        (1, "Capital of the Unreturned", 156_957),
+        (2, "Belaf's Lullaby", 199_950),
+        (3, "Doll x Dragon", 162_911),
+        (4, "Counterpoint of Abyss", 259_197),
+        (5, "VOH", 459_782),
+        (6, "Ouni", 202_299),
+        (7, "I. AM. BURNING. MAN", 149_385),
+        (8, "Bird x Sound", 202_017),
+        (9, "Vueko", 216_310),
+    ]
+    .into_iter()
+    .map(|(n, t, ms)| file(n, t, ms))
+    .collect();
+    let stream = |id: &str, title: &str, artist: &str, secs: Option<u64>| {
+        let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), title);
+        t.artists = vec![ArtistRef::new(None, artist)];
+        t.duration_ms = secs.map(|s| s * 1000);
+        lib.ensure_stream_tracks(&[t]).unwrap()[0]
+    };
+    let belaf = stream("ytbelaf0001", "ベラフの子守歌", "Release", None);
+    let doll = stream("ytdoll00001", "Ningyō x 龍", "Kevin Penkin", Some(163));
+    let bird = stream("ytbird00001", "Tori x Onkyō", "Kevin Penkin", Some(203));
+    let p = lib.create_playlist("Made in Abyss OST 3").unwrap();
+    lib.playlist_add_many(p.id, &[f[0], belaf, doll, f[3], f[5], bird, f[8]]).unwrap();
+    assert_eq!(lib.fold_playlist_gaps(p.id).unwrap(), 2);
+    let ids: Vec<TrackId> = lib.playlist_entries(p.id, 0, 10).unwrap().iter().map(|e| e.track.id).collect();
+    assert_eq!(ids, [f[0], f[1], f[2], f[3], f[5], bird, f[8]], "a gap of two places with one stream stays");
+    assert_eq!(lib.track_aliases(f[1]).unwrap(), ["ベラフの子守歌"]);
+    assert_eq!(lib.track_aliases(f[2]).unwrap(), ["Ningyō x 龍"]);
+    assert_eq!(lib.track_by_remote(&RemoteId::new(Service::Youtube, "ytdoll00001")).unwrap(), Some(f[2]));
+    assert_eq!(lib.get_track(f[1]).unwrap().unwrap().title, "Belaf's Lullaby");
+
+    // What stays.
+    let long = stream("ytlong00001", "ベラフの子守歌 (Extended)", "Kevin Penkin", Some(300));
+    let latin = stream("ytlatin0001", "Lullaby", "Someone", None);
+    let again = stream("ytagain0001", "ベラフの子守歌", "Release", None);
+    for (name, list, why) in [
+        ("Long", vec![f[0], long, f[2]], "another length"),
+        ("Latin", vec![f[2], latin, f[4]], "a title to compare"),
+        ("Back", vec![f[3], again, f[1]], "the other way round"),
+        ("Has it", vec![f[0], again, f[2], f[1]], "the file is in the playlist already"),
+    ] {
+        let q = lib.create_playlist(name).unwrap();
+        lib.playlist_add_many(q.id, &list).unwrap();
+        assert_eq!(lib.fold_playlist_gaps(q.id).unwrap(), 0, "{why}");
+    }
+    for t in [long, latin, again] {
+        assert!(lib.get_track(t).unwrap().is_some());
+    }
+}
+
+/// A file that has the stream's service already is no file of another
+/// stream of it under another title.
+#[test]
+fn a_file_with_the_service_already_takes_no_stream_in_another_script() {
+    let lib = lib();
+    let ost = "MADE IN ABYSS ORIGINAL SOUNDTRACK 3";
+    let belaf = file_track(&lib, "Belaf's Lullaby", &["Kevin Penkin"], ost, 199_950);
+    let mut own = StreamTrack::new(RemoteId::new(Service::Youtube, "ytownbelaf1"), "Belaf's Lullaby");
+    own.artists = vec![ArtistRef::new(None, "Kevin Penkin")];
+    own.duration_ms = Some(200_000);
+    lib.attach_stream_source(belaf, &own).unwrap();
+    let mut jp = StreamTrack::new(RemoteId::new(Service::Youtube, "ytbelaf0001"), "ベラフの子守歌");
+    jp.artists = vec![ArtistRef::new(None, "Kevin Penkin")];
+    jp.album = Some(AlbumRef::new(None, ost));
+    jp.duration_ms = Some(200_000);
+    let jp = lib.ensure_stream_tracks(&[jp]).unwrap()[0];
+    lib.like(jp).unwrap();
+    assert_eq!(lib.merge_other_script_titles().unwrap(), 0);
+    assert!(lib.get_track(jp).unwrap().is_some());
 }
 
 /// A YouTube track by `uploader`, a music video when `clip`, without an album.

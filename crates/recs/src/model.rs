@@ -37,6 +37,9 @@
 //! * A song saved in a service's library and not liked here (an import's
 //!   «music library songs») is long taste too: [`R_SAVED`] on its long
 //!   affinity and [`MASS_SAVED`] on the profiles' mass, a state like a like.
+//!   One the catalog lacks gives its [`MASS_SAVED`] to the catalog's tracks
+//!   of its artist, shared among them: the profile of that artist's sound
+//!   weighs more.
 //!
 //! [`UserModel::build`] walks the history in order of time: the stats, and
 //! the weights too unless [`Weights`] of the same [`FEATURE_VERSION`] are
@@ -801,6 +804,12 @@ impl UserModel {
         for (t, added) in &input.playlist_entries {
             if let Some(&i) = self.pos.get(t) {
                 mass[i] += MASS_PLAYLIST * halve(1.0, *added, now, H_MASS_MS);
+            }
+        }
+        for (_, artists) in self.taste.saved_elsewhere() {
+            let Some(of) = artists.iter().map(|a| catalog.of_artist(*a)).find(|of| !of.is_empty()) else { continue };
+            for &i in of {
+                mass[i as usize] += MASS_SAVED / of.len() as f32;
             }
         }
         for (i, m) in mass.iter_mut().enumerate() {

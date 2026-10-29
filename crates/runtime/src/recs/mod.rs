@@ -667,6 +667,18 @@ fn read_parts(
         names.insert(*id, name.clone());
     }
     let tiles_input = tiles::input(lib, &rows, &events, names.clone());
+    // The songs saved in a service's library that the library lacks: the
+    // taste of their artists and seeds of the new music, no catalog track.
+    let saved_set: HashSet<TrackId> = saved.iter().copied().collect();
+    let elsewhere: Vec<&nikgob_library::RecTrack> = rows.iter().filter(|r| !r.in_library && saved_set.contains(&r.id)).collect();
+    let mut elsewhere_names: HashMap<ArtistId, String> = HashMap::new();
+    for a in elsewhere.iter().flat_map(|r| &r.artists) {
+        if !names.contains_key(a) && !elsewhere_names.contains_key(a)
+            && let Some(artist) = lib.get_artist(*a).ok().flatten()
+        {
+            elsewhere_names.insert(*a, artist.name);
+        }
+    }
 
     // One song on two albums: the track with a file (the oldest) stands for it.
     let mut songs: HashMap<&str, (bool, TrackId)> = HashMap::new();
@@ -736,6 +748,12 @@ fn read_parts(
         .map(|r| song_key(&r.title, &r.artist))
         .collect();
     filter.known_artists = artist_keys.keys().cloned().collect();
+    // A song the user keeps elsewhere is no new music, nor its artist.
+    for r in &elsewhere {
+        filter.known_songs.insert(song_key(&r.title, &r.artist));
+        filter.known_ids.extend(lib.external_ids(nikgob_core::streaming::EntityKind::Track, *r.id.as_uuid()).unwrap_or_default());
+    }
+    filter.known_artists.extend(elsewhere_names.values().map(|n| artist_key(n)));
     let played: HashSet<TrackId> = events.iter().map(|e| e.track_id).collect();
     let played_songs = played
         .iter()
@@ -814,6 +832,7 @@ fn read_parts(
         },
         likes: like_times.iter().map(|l| l.0).collect(),
         saved,
+        saved_elsewhere: elsewhere.iter().map(|r| (r.id, r.artists.clone())).collect(),
         like_times,
         playlist_entries: entries,
         disliked_tracks,
@@ -844,8 +863,8 @@ fn read_parts(
     log_profiles(&model, &tiles_input, &names, extra.names);
     let artist_affinity: HashMap<String, f32> = model
         .taste
-        .artist_affinities()
-        .filter_map(|(a, s)| Some((artist_key(names.get(&a)?), (s.max(0.0) / 3.0).tanh())))
+        .all_artist_affinities()
+        .filter_map(|(a, s)| Some((artist_key(names.get(&a).or_else(|| elsewhere_names.get(&a))?), (s.max(0.0) / 3.0).tanh())))
         .collect();
     let mut snap = Snapshot {
         background: Vec::new(),
@@ -1754,6 +1773,23 @@ impl ModelPreview {
         let (_, utc_offset_min) = local_day();
         let (snap, _, _, history) = read_parts(lib, &index, recs_now(), utc_offset_min, &[], false, &ReadExtra::default())?;
         Ok(Self { snap, history })
+    }
+
+    /// The seeds of a pass of «Новое» now: the tracks, then the artists,
+    /// a line each, and the artists whose new releases are looked for.
+    pub fn new_music_seeds(&self, lib: &Library) -> (Vec<String>, Vec<String>) {
+        let recs = self.snap.recs();
+        let seeds = recs.discovery_seeds();
+        let track = |t: TrackId| lib.get_track(t).ok().flatten().map_or_else(|| t.to_string(), |t| format!("«{}» {}", t.title, t.artist_credit.display()));
+        let artist = |a: ArtistId| lib.get_artist(a).ok().flatten().map_or_else(|| a.to_string(), |a| a.name);
+        let elsewhere: HashSet<TrackId> = self.snap.model.taste.saved_elsewhere().iter().map(|s| s.0).collect();
+        let mut lines: Vec<String> = seeds
+            .tracks
+            .iter()
+            .map(|(t, a)| format!("{} {a:.2}{}", track(*t), if elsewhere.contains(t) { " (saved elsewhere)" } else { "" }))
+            .collect();
+        lines.extend(seeds.artists.iter().map(|(a, s)| format!("artist {} {s:.2}", artist(*a))));
+        (lines, recs.release_artists().into_iter().map(artist).collect())
     }
 
     /// The playlists the user plays in the background, by name.

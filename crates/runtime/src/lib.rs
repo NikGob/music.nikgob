@@ -510,6 +510,7 @@ impl Worker {
         // Once each, after a backup: doubles of a song, an artist or an
         // album become one, and every album has a line per place it counts.
         self.lib.repair_catalog();
+        self.export_if_stale();
         self.load_torrent_history();
         self.publish_downloads();
         self.resume_torrents();
@@ -1848,6 +1849,8 @@ impl Worker {
         let often = home::often_played(&tracks, &stats, 12);
         let mut recent: Vec<&nikgob_library::ReleaseRow> = releases.iter().collect();
         recent.sort_by_key(|r| std::cmp::Reverse(r.release.added_at));
+        let brought = self.lib.releases_of_imported_playlists().unwrap_or_default();
+        recent.retain(|r| !brought.contains(&r.release.id));
         recent.truncate(12);
         let by_id: std::collections::HashMap<_, _> = releases.iter().map(|r| (r.release.id, r)).collect();
         let often: Vec<&nikgob_library::ReleaseRow> = often.iter().filter_map(|id| by_id.get(id).copied()).collect();
@@ -2633,6 +2636,25 @@ impl Worker {
                     let _ = std::fs::rename(&tmp, path);
                 }
             }
+        }
+    }
+
+    /// At the start: an export next to the library that this database no
+    /// longer matches (a backup of the database put back since) is written
+    /// again at once, not at the next change.
+    fn export_if_stale(&mut self) {
+        let dir = self.res.path(".musiclib/userdata");
+        match self.lib.userdata_export_stale(&dir) {
+            Ok(false) => {}
+            Ok(true) => {
+                log::info!("userdata export in {} is not this library's, writing it again", dir.display());
+                let fp = self.lib.userdata_fingerprint().ok().map(|fp| (dir.clone(), fp));
+                match self.lib.export_userdata(&dir) {
+                    Ok(_) => self.exported_fp = fp,
+                    Err(e) => log::warn!("userdata export to {}: {e}", dir.display()),
+                }
+            }
+            Err(e) => log::warn!("userdata export in {}: {e}", dir.display()),
         }
     }
 

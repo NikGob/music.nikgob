@@ -51,7 +51,7 @@ pub use migrations::SCHEMA_VERSION;
 pub use playlists::LIKED_PLAYLIST_NAME;
 pub use rec_facts::{LyricsLevel, LyricsSample, PlaylistTracks, TrackFactsRow};
 pub use recs::RecTrack;
-pub use streams::{LikedClip, MatchRow, TrackSnapshot, event_id, is_web_ref};
+pub use streams::{LikedClip, MatchRow, TrackSnapshot, event_id, is_web_ref, other_scripts};
 pub use types::{
     AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, ConfirmRow, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
     PlaylistEntryRow, PlaylistKind, PlaylistRemote, PlaylistSummary, PurgedFile, PurgedTrack,
@@ -59,5 +59,7 @@ pub use types::{
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,
     TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };
-pub use userdata::{EVENTS_FILE, LIKES_FILE, PLAYLISTS_FILE, REC_FEEDBACK_FILE, STREAMS_FILE, USERDATA_VERSION};
+pub use userdata::{
+    EVENTS_FILE, FINGERPRINT_FILE, LIKES_FILE, PLAYLISTS_FILE, REC_FEEDBACK_FILE, SAVED_FILE, STREAMS_FILE, USERDATA_VERSION,
+};
 pub use util::{fold, now_ms, sort_key};

@@ -1343,7 +1343,9 @@ mod same;
 pub use clips::LikedClip;
 pub use replace::TrackSnapshot;
 pub use import::{MatchRow, event_id};
+pub(crate) use import::{put_saved_mark_in, saved_marks_in};
 pub(crate) use same::{SLACK_MS, albums_agree, credit_keys, song_key};
+pub use same::other_scripts;
 
 #[cfg(test)]
 mod tests;

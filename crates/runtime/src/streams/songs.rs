@@ -21,6 +21,14 @@
 //! A title alone is never enough: «Dream» by an uploader is no song of the
 //! library. Of several tracks the one with a file wins, then the one both
 //! the artist and the album agree with, then the oldest.
+//!
+//! A title in another script than the file's («ベラフの子守歌» of YouTube
+//! Music, «Belaf's Lullaby» of the file: [`other_scripts`]) cannot be
+//! compared: the song is the file of the same album by one of its artists
+//! with lengths within [`OTHER_SCRIPT_SLACK_MS`], when it is the one such
+//! file and no other track of that album is within [`LENGTH_CROWD_MS`] of
+//! its length ([`Shelf::find`]). The other title is the track's alias
+//! ([`Shelf::other_title`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -29,7 +37,7 @@ use nikgob_core::model::TrackId;
 use nikgob_core::names::{latin_key, same_name};
 use nikgob_core::streaming::{StreamTrack, TrackKind};
 use nikgob_core::translit::same_translit;
-use nikgob_library::MatchRow;
+use nikgob_library::{MatchRow, other_scripts};
 use nikgob_metadata::text::{Variant, artist_key, similarity, title_key};
 
 use super::export::Item;
@@ -37,6 +45,10 @@ use super::export::Item;
 /// Lengths further apart than this are another recording (an upload may
 /// have a short intro or outro).
 pub(crate) const LENGTH_SLACK_MS: u64 = 15_000;
+/// A title in another script: the lengths this close…
+pub(crate) const OTHER_SCRIPT_SLACK_MS: u64 = 1_500;
+/// …and no other track of the album this close.
+pub(crate) const LENGTH_CROWD_MS: u64 = 3_000;
 
 /// Words of a video's title that make it another take of the song: a track
 /// is that take only when its own title or album says so too.
@@ -67,6 +79,9 @@ pub(crate) struct Probe {
     /// Take words of its title ([`TAKES`]).
     takes: Vec<&'static str>,
     length: Option<u64>,
+    /// The title as written, and the album it says.
+    raw: String,
+    album: Option<String>,
     /// What to ask a service for it.
     pub(crate) query: String,
 }
@@ -244,7 +259,8 @@ impl Probe {
     /// library, a service's song), else it may be anyone's upload.
     pub(crate) fn of(item: &Item, length: Option<u64>, credited: bool) -> Self {
         let raw = item.title.trim();
-        let mut p = Self { length, ..Self::default() };
+        let album = item.album.clone().filter(|a| !a.trim().is_empty());
+        let mut p = Self { length, raw: raw.to_owned(), album, ..Self::default() };
         if raw.is_empty() {
             return p;
         }
@@ -402,7 +418,40 @@ impl Shelf {
                 }
             }
         }
-        best.map(|(_, id)| id)
+        best.map(|(_, id)| id).or_else(|| self.other_script(p))
+    }
+
+    /// The file of the probe's song under a title in another script (see
+    /// the module docs).
+    fn other_script(&self, p: &Probe) -> Option<TrackId> {
+        let (length, album) = (p.length?, title_key(p.album.as_deref()?).base);
+        if p.raw.is_empty() || album.is_empty() || !p.takes.is_empty() {
+            return None;
+        }
+        let near = |r: &MatchRow, slack: u64| r.duration_ms.is_some_and(|d| u64::from(d).abs_diff(length) <= slack);
+        let on_album = |r: &MatchRow| r.album.as_deref().is_some_and(|a| title_key(a).base == album);
+        let mut found = None;
+        for r in &self.rows {
+            if !r.has_local || !near(r, OTHER_SCRIPT_SLACK_MS) || !on_album(r) || !other_scripts(&p.raw, &r.title) {
+                continue;
+            }
+            if !p.hints.iter().any(|h| r.artists.iter().any(|a| same_artist(a, h))) {
+                continue;
+            }
+            if found.replace(r.id).is_some() {
+                return None;
+            }
+        }
+        let id = found?;
+        let crowd = self.rows.iter().filter(|r| r.id != id && on_album(r) && near(r, LENGTH_CROWD_MS)).count();
+        (crowd == 0).then_some(id)
+    }
+
+    /// The probe's title when the library's track `id` it is goes by a
+    /// title in another script: the track's alias.
+    pub(crate) fn other_title<'p>(&self, p: &'p Probe, id: TrackId) -> Option<&'p str> {
+        let r = self.rows.iter().find(|r| r.id == id)?;
+        other_scripts(&p.raw, &r.title).then_some(p.raw.as_str())
     }
 }
 
@@ -511,6 +560,40 @@ mod tests {
         let long = Probe::of(&item("Artist - Song", "x", None), Some(600_000), false);
         let shelf = Shelf::new(vec![MatchRow { duration_ms: Some(200_000), ..row(7, "Song", "Artist", "Album", true) }]);
         assert_eq!(shelf.find(&long), None);
+    }
+
+    /// A song in another script is the file of the same album by its
+    /// artist that is as long, when nothing else of the album is: never a
+    /// file of another album, another artist, another length, nor one of
+    /// two songs of the album that are nearly as long.
+    #[test]
+    fn a_title_in_another_script_finds_the_file_of_its_album() {
+        let ost = "MADE IN ABYSS ORIGINAL SOUNDTRACK 3";
+        let mut rows = vec![
+            MatchRow { duration_ms: Some(199_950), ..row(1, "Belaf's Lullaby", "Kevin Penkin", ost, true) },
+            MatchRow { duration_ms: Some(120_400), ..row(2, "Old Stories", "Kevin Penkin", ost, true) },
+            MatchRow { duration_ms: Some(150_000), ..row(3, "Faith", "Kevin Penkin", "MADE IN ABYSS ORIGINAL SOUNDTRACK 2", true) },
+            MatchRow { duration_ms: Some(240_000), ..row(4, "Hanezeve", "Kevin Penkin", ost, true) },
+            MatchRow { duration_ms: Some(241_500), ..row(5, "Gravity", "Kevin Penkin", ost, true) },
+        ];
+        let probe = |title: &str, artist: &str, album: &str, ms: u64| {
+            Probe::of(&Item { album: Some(album.into()), ..item(title, artist, None) }, Some(ms), true)
+        };
+        let shelf = Shelf::new(rows.clone());
+        let belaf = probe("ベラフの子守歌", "Kevin Penkin", ost, 200_000);
+        assert_eq!(shelf.find(&belaf), Some(id(1)));
+        assert_eq!(shelf.other_title(&belaf, id(1)), Some("ベラフの子守歌"));
+        assert_eq!(shelf.other_title(&Probe::of(&item("Belaf's Lullaby", "Kevin Penkin", None), None, true), id(1)), None);
+        assert_eq!(shelf.find(&probe("ベラフの子守歌", "Kevin Penkin", ost, 203_500)), None, "another length");
+        assert_eq!(shelf.find(&probe("ベラフの子守歌", "Someone Else", ost, 200_000)), None, "another artist");
+        assert_eq!(shelf.find(&probe("ベラフの子守歌", "Kevin Penkin", "MADE IN ABYSS ORIGINAL SOUNDTRACK 2", 200_000)), None, "another album");
+        assert_eq!(shelf.find(&probe("Some Song", "Kevin Penkin", ost, 200_000)), None, "a title in the same script is compared");
+        assert_eq!(shelf.find(&probe("重力", "Kevin Penkin", ost, 241_000)), None, "two songs of the album that long");
+        assert_eq!(shelf.find(&probe("ベラフの子守歌 (Piano)", "Kevin Penkin", ost, 200_000)), None, "another take");
+        assert_eq!(shelf.find(&Probe::of(&item("ベラフの子守歌", "Kevin Penkin", None), Some(200_000), true)), None, "no album");
+        // A stream of the same title in the library is no file to go into.
+        rows[0].has_local = false;
+        assert_eq!(Shelf::new(rows).find(&belaf), None);
     }
 
     #[test]

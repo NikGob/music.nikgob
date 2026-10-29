@@ -638,6 +638,12 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
         )?;
     }
     tx.execute("UPDATE event SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+    tx.execute(
+        "INSERT OR IGNORE INTO track_alias(track_id, title, key, source)
+         SELECT ?2, title, key, source FROM track_alias WHERE track_id = ?1
+            AND key != (SELECT title_key FROM track WHERE id = ?2)",
+        params![f, t],
+    )?;
     // Ids in the services and their likes follow; a "seen" marker would
     // hide `into` from the library, so it goes.
     tx.execute("DELETE FROM external_id WHERE kind = 'track' AND local_id = ?1 AND service = 'seen'", [&f])?;

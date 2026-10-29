@@ -101,8 +101,11 @@ impl Library {
                  DELETE FROM artist_fts; DELETE FROM playlist_fts;
                  INSERT INTO track_fts(rowid, title, artist, album)
                    SELECT t.seq,
-                          replace(replace(t.title, 'ё', 'е'), 'Ё', 'Е'),
-                          replace(replace(t.artist_display, 'ё', 'е'), 'Ё', 'Е'),
+                          replace(replace(t.title || coalesce(' ' || (SELECT group_concat(title, ' ')
+                                      FROM track_alias WHERE track_id = t.id), ''), 'ё', 'е'), 'Ё', 'Е'),
+                          replace(replace(t.artist_display || coalesce(' ' || (SELECT group_concat(al.name, ' ')
+                                      FROM track_artist ta JOIN artist_alias al ON al.artist_id = ta.artist_id
+                                     WHERE ta.track_id = t.id), ''), 'ё', 'е'), 'Ё', 'Е'),
                           replace(replace(coalesce(r.title, ''), 'ё', 'е'), 'Ё', 'Е')
                      FROM track t LEFT JOIN release r ON r.id = t.release_id;
                  INSERT INTO release_fts(rowid, title, artist)

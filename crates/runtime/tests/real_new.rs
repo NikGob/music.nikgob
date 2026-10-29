@@ -56,6 +56,12 @@ fn new_music_and_dislikes_of_a_real_library() {
     for l in preview.home_profiles(&lib, 6) {
         println!("    {l}");
     }
+    let (seeds, releases) = preview.new_music_seeds(&lib);
+    println!("the seeds of «Новое»:");
+    for l in seeds {
+        println!("    {l}");
+    }
+    println!("new releases of: {}", releases.join(", "));
 
     let key = format!("radio_new.youtube.radio.{HAIL_HEX_VIDEO}");
     let junk = preview.junk_found(&lib, &[key.as_str()]);

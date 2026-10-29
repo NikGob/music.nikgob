@@ -165,8 +165,16 @@ pub fn build_with(lib: &Library, visit: &crate::home_v2::Visit) -> Home {
         continue_listening,
         artists,
         long_unplayed: long_unplayed.into_iter().take(12).map(|(_, r)| r).collect(),
-        recently_added: releases.into_iter().take(12).collect(),
+        recently_added: recently_added(lib, releases, 12),
     }
+}
+
+/// «Недавно добавлено»: the latest albums of `releases` (newest first)
+/// that someone added, not those only an import's playlists brought
+/// ([`Library::releases_of_imported_playlists`]).
+pub fn recently_added(lib: &Library, releases: impl IntoIterator<Item = ReleaseRow>, n: usize) -> Vec<ReleaseRow> {
+    let brought = lib.releases_of_imported_playlists().unwrap_or_default();
+    releases.into_iter().filter(|r| !brought.contains(&r.release.id)).take(n).collect()
 }
 
 /// «Часто слушаешь» of Библиотека: releases by the plays of their tracks

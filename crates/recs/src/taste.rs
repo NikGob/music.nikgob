@@ -19,7 +19,12 @@
 //!   снова»; [`hot_affinity`] for a history without a catalog).
 //! * **Artist affinity**: the affinities of the artist's tracks summed and
 //!   divided by the square root of the artist's track count in the catalog,
-//!   so a big discography does not win by size alone.
+//!   so a big discography does not win by size alone. A song saved in a
+//!   service's library that the catalog lacks ([`TasteInput::saved_elsewhere`])
+//!   counts as one more track of each of its artists with [`W_SAVED`]; an
+//!   artist the catalog has nothing of gets the affinity of those songs
+//!   alone ([`Taste::elsewhere_artists`]), for the new music and the new
+//!   releases only.
 //! * **Co-listening**: plays of one session (gaps under 30 minutes) link
 //!   each play's main artist with the main artists of the
 //!   [`CO_WINDOW`] plays before it, a pair once per session: the fallback
@@ -478,6 +483,10 @@ pub struct TasteInput {
     /// Songs saved in a service's library (an import's «music library
     /// songs»): long taste and the profiles' mass, never a like.
     pub saved: Vec<TrackId>,
+    /// Those of them the catalog lacks (not in the library), with their
+    /// artists: the long taste of the artists and seeds of the new music,
+    /// never a track to pick.
+    pub saved_elsewhere: Vec<(TrackId, Vec<ArtistId>)>,
     /// When the likes were set (a like missing here is an old one).
     pub like_times: Vec<(TrackId, UnixMs)>,
     /// Playlist entries: a track and when it was added (one per entry).
@@ -526,6 +535,10 @@ pub struct Taste {
     /// Plays within [`YEAR_AGO_SPAN_MS`] of now − [`YEAR_MS`].
     year_ago: Vec<u16>,
     artist_affinity: HashMap<ArtistId, f32>,
+    /// Artists the catalog has nothing of, by the songs saved elsewhere.
+    elsewhere_artists: HashMap<ArtistId, f32>,
+    /// [`TasteInput::saved_elsewhere`], each song once, none disliked.
+    saved_elsewhere: Vec<(TrackId, Vec<ArtistId>)>,
     co_pairs: HashMap<(ArtistId, ArtistId), f32>,
     co: HashMap<ArtistId, Vec<(ArtistId, f32)>>,
     profile: [f32; 4],
@@ -693,10 +706,33 @@ impl Taste {
                 }
             }
         }
-        let mut artist_affinity: HashMap<ArtistId, f32> = artist_sum
-            .into_iter()
-            .map(|(a, s)| (a, s / (catalog.of_artist(a).len().max(1) as f32).sqrt()))
-            .collect();
+        // The songs saved elsewhere: more tracks of their artists.
+        let disliked_tracks: HashSet<TrackId> = input.disliked_tracks.iter().copied().collect();
+        let disliked_artists: HashSet<ArtistId> = input.disliked_artists.iter().copied().collect();
+        let mut saved_elsewhere: Vec<(TrackId, Vec<ArtistId>)> = Vec::new();
+        let mut elsewhere_count: HashMap<ArtistId, usize> = HashMap::new();
+        for (id, artists) in &input.saved_elsewhere {
+            if catalog.position(*id).is_some()
+                || disliked_tracks.contains(id)
+                || artists.iter().any(|a| disliked_artists.contains(a))
+                || saved_elsewhere.iter().any(|s| s.0 == *id)
+            {
+                continue;
+            }
+            for a in artists {
+                *artist_sum.entry(*a).or_default() += W_SAVED;
+                *elsewhere_count.entry(*a).or_default() += 1;
+            }
+            saved_elsewhere.push((*id, artists.clone()));
+        }
+        let mut elsewhere_artists: HashMap<ArtistId, f32> = HashMap::new();
+        let mut artist_affinity: HashMap<ArtistId, f32> = HashMap::new();
+        for (a, s) in artist_sum {
+            let own = catalog.of_artist(a).len();
+            let n = own + elsewhere_count.get(&a).copied().unwrap_or(0);
+            let s = s / (n.max(1) as f32).sqrt();
+            if own == 0 { elsewhere_artists.insert(a, s) } else { artist_affinity.insert(a, s) };
+        }
         let mut artist_bonus: HashMap<ArtistId, f32> = HashMap::new();
         for (a, strength, at) in &input.suggested_artists {
             if !catalog.of_artist(*a).is_empty() {
@@ -745,11 +781,13 @@ impl Taste {
             recent_completes,
             year_ago,
             artist_affinity,
+            elsewhere_artists,
+            saved_elsewhere,
             co_pairs,
             co,
             profile,
-            disliked_tracks: input.disliked_tracks.iter().copied().collect(),
-            disliked_artists: input.disliked_artists.iter().copied().collect(),
+            disliked_tracks,
+            disliked_artists,
             near_dislike: Vec::new(),
         }
     }
@@ -840,13 +878,33 @@ impl Taste {
         self.suggested.get(i).copied().unwrap_or(0.0)
     }
 
+    /// The artist's affinity: of the catalog, else of the songs saved
+    /// elsewhere ([`Self::elsewhere_artists`]).
     pub fn artist_affinity(&self, artist: ArtistId) -> f32 {
-        self.artist_affinity.get(&artist).copied().unwrap_or(0.0)
+        self.artist_affinity.get(&artist).or_else(|| self.elsewhere_artists.get(&artist)).copied().unwrap_or(0.0)
     }
 
-    /// Every artist with a non-zero affinity.
+    /// Every artist of the catalog with a non-zero affinity.
     pub fn artist_affinities(&self) -> impl Iterator<Item = (ArtistId, f32)> + '_ {
         self.artist_affinity.iter().map(|(a, s)| (*a, *s))
+    }
+
+    /// Artists the catalog has nothing of, with the affinity of their songs
+    /// saved in a service's library ([`TasteInput::saved_elsewhere`]).
+    pub fn elsewhere_artists(&self) -> impl Iterator<Item = (ArtistId, f32)> + '_ {
+        self.elsewhere_artists.iter().map(|(a, s)| (*a, *s))
+    }
+
+    /// [`Self::artist_affinities`] and [`Self::elsewhere_artists`]: every
+    /// artist the user's taste knows.
+    pub fn all_artist_affinities(&self) -> impl Iterator<Item = (ArtistId, f32)> + '_ {
+        self.artist_affinities().chain(self.elsewhere_artists())
+    }
+
+    /// The songs saved in a service's library that the catalog lacks, with
+    /// their artists (none disliked), in the order given.
+    pub fn saved_elsewhere(&self) -> &[(TrackId, Vec<ArtistId>)] {
+        &self.saved_elsewhere
     }
 
     /// Artists played in the same sessions as `artist`, most often first.
@@ -965,6 +1023,37 @@ mod tests {
         assert!(!taste.liked_at(0));
         assert_eq!(taste.hot_at(0), 0.0, "nothing on repeat");
         assert!(taste.has_history());
+    }
+
+    /// A song saved in a service's library that the catalog lacks is one
+    /// more song of its artists: the long taste of a library artist grows,
+    /// an artist the catalog lacks gets its own (apart from the catalog's
+    /// artists); no track of the catalog changes, and nothing of it is a
+    /// history. A disliked one teaches nothing.
+    #[test]
+    fn songs_saved_elsewhere_teach_their_artists() {
+        let now = 1_000 * DAY_MS;
+        let cat = Catalog::new((0..2).map(|i| info(i, &[0], Some(i))));
+        let before = Taste::build(&cat, &TasteInput { likes: vec![tid(0)], ..Default::default() }, now);
+        let elsewhere = vec![(tid(10), vec![aid(0)]), (tid(11), vec![aid(5)]), (tid(11), vec![aid(5)]), (tid(12), vec![aid(6)])];
+        let input = TasteInput {
+            likes: vec![tid(0)],
+            saved_elsewhere: elsewhere.clone(),
+            disliked_artists: vec![aid(6)],
+            ..Default::default()
+        };
+        let taste = Taste::build(&cat, &input, now);
+        let close = |x: f32, y: f32| (x - y).abs() < 1e-5;
+        assert!(close(before.artist_affinity(aid(0)), W_LIKE / 2f32.sqrt()));
+        assert!(close(taste.artist_affinity(aid(0)), (W_LIKE + W_SAVED) / 3f32.sqrt()), "{}", taste.artist_affinity(aid(0)));
+        assert!(close(taste.artist_affinity(aid(5)), W_SAVED), "once: {}", taste.artist_affinity(aid(5)));
+        assert!(taste.artist_affinities().all(|(a, _)| a == aid(0)), "the catalog's artists apart");
+        assert_eq!(taste.elsewhere_artists().map(|x| x.0).collect::<Vec<_>>(), [aid(5)]);
+        assert_eq!(taste.all_artist_affinities().count(), 2);
+        assert_eq!(taste.saved_elsewhere().iter().map(|s| s.0).collect::<Vec<_>>(), [tid(10), tid(11)]);
+        assert_eq!(taste.affinity_at(1), before.affinity_at(1));
+        let only = Taste::build(&cat, &TasteInput { saved_elsewhere: elsewhere, ..Default::default() }, now);
+        assert!(!only.has_history(), "the catalog has no history of them");
     }
 
     /// A song skipped after three quarters was heard: a little plus, not a

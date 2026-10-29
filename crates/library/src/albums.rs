@@ -420,12 +420,13 @@ impl Library {
     /// then credits and artists, then duplicates, places and editions.
     /// A repair that fails is logged and the next one runs.
     pub fn repair_catalog(&self) {
-        let steps: [(&str, &dyn Fn() -> Result<usize>); 9] = [
+        let steps: [(&str, &dyn Fn() -> Result<usize>); 10] = [
             ("orphans", &|| self.drop_orphans()),
             ("combined credits", &|| self.split_combined_credits()),
             ("various artists", &|| self.unbind_various_artists().map(usize::from)),
             ("artist doubles", &|| self.merge_artist_doubles().map(|m| m.len())),
             ("duplicate tracks", &|| self.merge_duplicate_stream_tracks()),
+            ("titles in other scripts", &|| self.merge_other_script_titles()),
             ("edition places", &|| self.fix_edition_places().map(usize::from)),
             ("album editions", &|| self.fold_album_editions().map(usize::from)),
             ("tracklists", &|| self.reidentify_tracklists().map(usize::from)),

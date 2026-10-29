@@ -151,7 +151,8 @@ fn shortcuts(lib: &Library, f: &Facts, releases: &[ReleaseRow], visit: &Visit, h
     let by_id: HashMap<ReleaseId, &ReleaseRow> = releases.iter().map(|r| (r.release.id, r)).collect();
     let fits = |r: &ReleaseRow| r.local_tracks > 0 || (!visit.local_only && r.known_tracks > 0);
     if !history {
-        return releases.iter().filter(|r| fits(r)).take(SHORTCUTS).cloned().map(ShortcutRef::Release).collect();
+        let recent = crate::home::recently_added(lib, releases.iter().filter(|r| fits(r)).cloned(), SHORTCUTS);
+        return recent.into_iter().map(ShortcutRef::Release).collect();
     }
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     enum Key {

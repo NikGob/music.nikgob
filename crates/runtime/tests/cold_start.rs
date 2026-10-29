@@ -686,6 +686,91 @@ fn takeout_videos_become_the_library_songs_and_nothing_else_comes_in() {
     assert_eq!(youtube.calls("search_kind"), 0, "the answers are kept");
 }
 
+/// Of a playlist of music, a video watched on plain YouTube that nothing
+/// says is music (no song found for it, no music in its title) stays out;
+/// a fan's clip of a song, a clip of an artist the library has and a video
+/// never watched stay. A song of the library's file under a title in
+/// another script is the file, with that title as its alias. The albums
+/// the playlist brought are not «Недавно добавлено».
+#[test]
+fn a_music_playlist_drops_its_videos_of_no_music_and_finds_songs_in_another_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let put = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
+    let cell = |id: &str, title: &str, channel: &str, time: &str| {
+        format!(
+            "<div class=\"outer-cell mdl-cell mdl-cell--12-col mdl-shadow--2dp\"><div class=\"mdl-grid\">\
+             <div class=\"header-cell mdl-cell mdl-cell--12-col\"><p class=\"mdl-typography--title\">YouTube<br></p></div>\
+             <div class=\"content-cell mdl-cell mdl-cell--6-col mdl-typography--body-1\">\
+             Watched\u{a0}<a href=\"https://www.youtube.com/watch?v={id}\">{title}</a><br>\
+             <a href=\"https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx\">{channel}</a><br>Oct 15, 2026, {time}\u{202f}PM IDT<br>\
+             </div></div></div>"
+        )
+    };
+    let cells = [
+        cell("yt-video-story", "DRONES - THE WHOLE STORY OF THE CARTOON", "Animation Channel", "4:00:00"),
+        cell("yt-video-mad", "【ショー MAD】SHOW × A REASON Full (フル歌詞付き)", "Fan Editor", "4:10:00"),
+        cell("yt-video-clip", "Underdog - Eve Music Video", "Eve", "4:20:00"),
+    ];
+    put(
+        "watch-history.html",
+        &format!("<html><head><style>.mdl-grid{{}}</style></head><body>{}</body></html>", cells.concat()),
+    );
+    put(
+        "Save-videos.csv",
+        "Video ID,Playlist Video Creation Timestamp\n\
+         yt-video-story,2026-01-01T00:00:00+00:00\n\
+         yt-video-mad,2026-01-01T00:00:00+00:00\n\
+         yt-video-clip,2026-01-01T00:00:00+00:00\n\
+         yt-video-never,2026-01-01T00:00:00+00:00\n\
+         yt-x-belaf,2026-01-01T00:00:00+00:00\n\
+         yt-x-her,2026-01-01T00:00:00+00:00\n",
+    );
+    let lib = Library::open_in_memory().unwrap();
+    local_track(&lib, "Kaikai Kitan", "Eve", "Kaikai Kitan", "Music/eve.opus");
+    let belaf = {
+        let credit = ArtistCredit::single("Kevin Penkin", None);
+        let release = lib.upsert_release(&Release::new("MADE IN ABYSS ORIGINAL SOUNDTRACK 3", credit.clone())).unwrap();
+        let mut t = Track::new("Belaf's Lullaby", credit);
+        t.release_id = Some(release.id);
+        t.duration_ms = Some(199_950);
+        let t = lib.upsert_track(&t).unwrap();
+        lib.add_source(&Source::new(t.id, SourceKind::LocalFile, "Music/belaf.opus", Codec::Opus)).unwrap();
+        t.id
+    };
+    let youtube = Arc::new(
+        FakeService::youtube()
+            .logged_out()
+            .with_video("story", "DRONES - THE WHOLE STORY OF THE CARTOON", "Animation Channel", 900, None)
+            .with_video("mad", "【ショー MAD】SHOW × A REASON Full (フル歌詞付き)", "Fan Editor", 250, None)
+            .with_video("clip", "Underdog - Eve Music Video", "Eve", 200, None)
+            .with_video("never", "A Video Never Watched", "Somebody", 200, None)
+            .with_song("belaf", "ベラフの子守歌", "Kevin Penkin", "MADE IN ABYSS ORIGINAL SOUNDTRACK 3", 200)
+            .with_song("her", "her", "JVKE", "this is what ____ feels like", 185),
+    );
+    let rt = start(&lib, vec![youtube]);
+    import(&rt, Command::ImportExportFiles(dir.path().to_path_buf()));
+
+    let p = playlist_named(&lib, "Save").expect("a playlist of music");
+    let titles: Vec<String> = lib.playlist_entries(p, 0, 10).unwrap().iter().map(|e| e.track.title.clone()).collect();
+    assert_eq!(
+        titles,
+        ["【ショー MAD】SHOW × A REASON Full (フル歌詞付き)", "Underdog - Eve Music Video", "A Video Never Watched", "Belaf's Lullaby", "her"]
+    );
+    let story = track_of(&lib, Service::Youtube, "yt-video-story");
+    assert!(story.is_none_or(|t| lib.track_in_library(t).unwrap() == Some(false)), "the cartoon is not in the library");
+    assert_eq!(lib.playlist_entries(p, 0, 10).unwrap()[3].track.id, belaf, "the file, not a second song");
+    assert!(track_of(&lib, Service::Youtube, "yt-x-belaf").is_none());
+    assert_eq!(lib.track_aliases(belaf).unwrap(), ["ベラフの子守歌"]);
+    assert_eq!(lib.get_track(belaf).unwrap().unwrap().title, "Belaf's Lullaby", "the file's title stays");
+    assert!(lib.search("ベラフの子守歌", 5).unwrap().tracks.iter().any(|t| t.id == belaf), "found by its other title");
+    // The streams the playlist brought are in the library, not «Недавно добавлено».
+    let mad = track_of(&lib, Service::Youtube, "yt-video-mad").unwrap();
+    assert_eq!(lib.track_in_library(mad).unwrap(), Some(true));
+    let brought: Vec<String> =
+        lib.releases_of_imported_playlists().unwrap().iter().map(|r| lib.get_release(*r).unwrap().unwrap().title).collect();
+    assert_eq!(brought, ["this is what ____ feels like"]);
+}
+
 /// «Песни медиатеки YouTube Music» off: that file is not read.
 #[test]
 fn the_music_library_songs_can_be_left_out() {
