@@ -8,10 +8,19 @@
 //! cache hits. `RUST_LOG` overrides the filter. At [`MAX_BYTES`] the file is
 //! renamed to `nikgob.log.1` (one old file is kept) and a new one starts.
 //! Secrets never reach the log: tokens, cookies and keys are not logged.
+//!
+//! The certificate checker's records ([`ONCE`]) are written once per run
+//! each, as warnings: it logs an ERROR for every certificate it refuses,
+//! without the host, and a torrent tracker with a broken certificate (such
+//! as opentracker.xyz, whose certificate is for another name) is asked by
+//! librqbit again every few minutes while its torrent seeds. librqbit
+//! itself says which tracker failed, at `debug`.
 
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 pub const FILE: &str = "nikgob.log";
 /// Size at which the log starts over (the old one becomes `nikgob.log.1`).
@@ -19,6 +28,8 @@ const MAX_BYTES: u64 = 5 * 1024 * 1024;
 // RustyPipe's own records are its tracing spans at level ERROR (noise that
 // reads like failures); the youtube crate logs every request and failure.
 const FILTER: &str = "info,nikgob_spotify=debug,nikgob_youtube=debug,nikgob_runtime::streams=debug,nikgob::streams=debug,nikgob::audio=debug,rustypipe=off";
+/// Targets whose records repeat without telling more: each message once.
+const ONCE: &[&str] = &["rustls_platform_verifier"];
 
 /// Where the log lives: next to the library (the demo's dir in demo mode).
 pub fn dir() -> PathBuf {
@@ -40,12 +51,62 @@ pub fn init() {
     if let Some(w) = Rotating::open(&dir()) {
         builder.target(env_logger::Target::Pipe(Box::new(w)));
     }
-    builder.init();
+    let logger = Quiet::new(builder.build());
+    let max = logger.inner.filter();
+    if log::set_boxed_logger(Box::new(logger)).is_ok() {
+        log::set_max_level(max);
+    }
     log::info!(
         "music.nikgob {} started, log at {}",
         env!("CARGO_PKG_VERSION"),
         dir().join(FILE).display()
     );
+}
+
+/// The logger, writing the records of [`ONCE`] once per message.
+struct Quiet {
+    inner: env_logger::Logger,
+    seen: Mutex<HashSet<String>>,
+}
+
+impl Quiet {
+    fn new(inner: env_logger::Logger) -> Self {
+        Self { inner, seen: Mutex::new(HashSet::new()) }
+    }
+}
+
+impl log::Log for Quiet {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        self.inner.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !ONCE.iter().any(|t| record.target().starts_with(t)) {
+            self.inner.log(record);
+            return;
+        }
+        if !self.inner.matches(record) {
+            return;
+        }
+        let text = record.args().to_string();
+        if !self.seen.lock().unwrap_or_else(PoisonError::into_inner).insert(text.clone()) {
+            return;
+        }
+        self.inner.log(
+            &log::Record::builder()
+                .args(format_args!("{text} (once; repeats are not logged)"))
+                .level(record.level().max(log::Level::Warn))
+                .target(record.target())
+                .module_path(record.module_path())
+                .file(record.file())
+                .line(record.line())
+                .build(),
+        );
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
 }
 
 /// A log file that starts over at [`MAX_BYTES`], keeping one old file.
@@ -113,5 +174,50 @@ mod tests {
         assert_eq!(old, MAX_BYTES);
         assert_eq!(new, 1024 * 1024);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A writer the test reads back.
+    #[derive(Clone, Default)]
+    struct Shared(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_refused_certificate_is_logged_once_as_a_warning() {
+        use log::Log;
+        let out = Shared::default();
+        let logger = Quiet::new(
+            env_logger::Builder::new()
+                .parse_filters(FILTER)
+                .target(env_logger::Target::Pipe(Box::new(out.clone())))
+                .build(),
+        );
+        let say = |level: log::Level, target: &str, msg: &str| {
+            logger.log(&log::Record::builder().args(format_args!("{msg}")).level(level).target(target).build());
+        };
+        let verifier = "rustls_platform_verifier::verification::windows";
+        for _ in 0..3 {
+            say(log::Level::Error, verifier, "failed to verify TLS certificate: invalid peer certificate: NotValidForName");
+        }
+        say(log::Level::Error, verifier, "failed to verify TLS certificate: invalid peer certificate: UnknownIssuer");
+        for _ in 0..2 {
+            say(log::Level::Warn, "nikgob_runtime::search", "prowlarr check: indexer is unreachable");
+        }
+        let text = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "{text}");
+        assert!(lines[0].contains("WARN") && lines[0].contains("NotValidForName (once; repeats are not logged)"), "{text}");
+        assert!(lines[1].contains("WARN") && lines[1].contains("UnknownIssuer"), "{text}");
+        assert!(!text.contains("ERROR"), "{text}");
+        assert!(lines[2..].iter().all(|l| l.ends_with("indexer is unreachable")), "the app's own records stay as they are");
     }
 }
