@@ -2019,7 +2019,7 @@ impl Worker {
         let mut visit = home_v2::Visit::now(playing, &self.state.read().prefs);
         visit.sound = Some(self.analysis.index().clone());
         visit.profiles = self.snapshot().map(|s| s.profiles.clone());
-
+        visit.epoch = self.home_epoch();
         visit
     }
 

@@ -2,10 +2,11 @@
 //! [`nikgob_recs::mixes`] — the profiles' own mixes, «Всё вперемешку», the
 //! calm and the lively side of everything loved, «Фон» for whoever
 //! listens so, the blends the user made today first — and «На повторе».
-//! What a day picked stays the day's (`recs.mixes` in the library's cache:
-//! the lineup, each mix's songs, yesterday's, the salts of «Другой
-//! состав» and the blends), from 06:00 (`local_day`) to 06:00; only the
-//! order of the cards and of the songs follows the part of the day.
+//! What an epoch of the home picked stays the epoch's (`recs.mixes` in the
+//! library's cache: the lineup in its order, each mix's songs in theirs,
+//! the epoch before's, the lineups shown before, the salts of «Другой
+//! состав» and the blends of the day): a start of the app or the next
+//! part of the day draws them again ([`crate::home_v2::Epoch`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -39,7 +40,6 @@ const REPEAT_DAYS_LONG: i64 = 30;
 const NEW_EVERY: usize = 5;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
-const HOUR_MS: i64 = 60 * 60 * 1000;
 
 /// One mix of «Миксы для тебя».
 pub(crate) struct LaneHome {
@@ -95,11 +95,13 @@ impl LaneHome {
     }
 }
 
-/// What the cache keeps: the day it is for, the settings it was chosen
-/// under and the day's mixes.
+/// What the cache keeps: the day and the epoch it is for, the settings it
+/// was chosen under and the epoch's mixes.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct MixesCache {
     day: String,
+    #[serde(default)]
+    epoch: String,
     settings: u64,
     kept: Kept,
     /// The mixes left out when it was chosen: one back takes its place in
@@ -187,30 +189,33 @@ impl MixPrefs {
     }
 }
 
-/// The local day number the mixes are drawn by: days start at 06:00.
-pub(crate) fn day_number(now: nikgob_core::model::UnixMs, utc_offset_min: i32) -> i64 {
-    (now + i64::from(utc_offset_min) * 60_000 - super::DAY_STARTS_HOUR * HOUR_MS).div_euclid(DAY_MS)
-}
-
-/// The engine over `snap` for `session` at `now`.
+/// The engine over `snap` for `session` at `now`, in the epoch of `seed`.
 #[allow(clippy::too_many_arguments)]
-fn with_builder<T>(snap: &Snapshot, prefs: &MixPrefs, fit: &[bool], ok: &dyn Fn(usize) -> bool, session: &Session, now: nikgob_core::model::UnixMs, utc_offset_min: i32, f: impl FnOnce(&Builder<'_>) -> T) -> T {
+fn with_builder<T>(snap: &Snapshot, prefs: &MixPrefs, fit: &[bool], ok: &dyn Fn(usize) -> bool, session: &Session, now: nikgob_core::model::UnixMs, utc_offset_min: i32, seed: u64, f: impl FnOnce(&Builder<'_>) -> T) -> T {
     let recs = snap.recs();
     let live: Live = snap.model.live(session);
     let suits = |i: usize| fit.get(i).copied().unwrap_or(false);
     let (part, _, _) = super::daylist_key(now, utc_offset_min);
-    let b = Builder::new(&recs, &snap.model, ok, &suits, day_number(now, utc_offset_min), part, live, settings(prefs));
+    let b = Builder::new(&recs, &snap.model, ok, &suits, seed, part, live, settings(prefs));
     f(&b)
+}
+
+/// The cache for the epoch `epoch` of `day`: another epoch's moves on.
+fn cache_for(lib: &nikgob_library::Library, prefs: &MixPrefs, day: &str, epoch: &str) -> MixesCache {
+    let mut cache: MixesCache = cache_read(lib, MIXES_KEY).unwrap_or_default();
+    if cache.epoch != epoch || cache.day != day {
+        let same_day = cache.day == day;
+        let kept = std::mem::take(&mut cache.kept).next_epoch(same_day);
+        cache = MixesCache { day: day.to_owned(), epoch: epoch.to_owned(), settings: prefs.fingerprint(), kept, hidden: Vec::new() };
+    }
+    cache
 }
 
 /// Today's «Миксы для тебя» and the profiles «Смешать с…» offers.
 pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> (Vec<LaneHome>, Vec<v::BlendProfile>) {
     let lib = &input.lib;
     let prefs = &input.mix_prefs;
-    let mut cache: MixesCache = cache_read(lib, MIXES_KEY).unwrap_or_default();
-    if cache.day != input.day {
-        cache = MixesCache { day: input.day.clone(), settings: prefs.fingerprint(), kept: std::mem::take(&mut cache.kept).next_day(), hidden: Vec::new() };
-    }
+    let mut cache = cache_for(lib, prefs, &input.day, &input.epoch.key);
     if cache.settings != prefs.fingerprint() || cache.hidden.iter().any(|k| !prefs.hidden.contains(k)) {
         cache.settings = prefs.fingerprint();
         cache.kept.lineup.clear();
@@ -234,7 +239,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         tiles.facts.contains_key(&t.id) && (t.local || !snap.local_only)
     };
     let names = |a: ArtistId| tiles.artist_names.get(&a).cloned();
-    let (mut mixes, lineup, blendable) = with_builder(snap, prefs, &snap.background, &ok, &input.session, input.now, input.utc_offset_min, |b| {
+    let (mut mixes, lineup, blendable) = with_builder(snap, prefs, &snap.background, &ok, &input.session, input.now, input.utc_offset_min, input.epoch.seed, |b| {
         let (mut mixes, lineup) = b.lineup(&cache.kept);
         b.named(&mut mixes, &names);
         (mixes, lineup, blend_profiles(snap, b, &names))
@@ -244,7 +249,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     cache_write(lib, MIXES_KEY, input.now, &cache);
     log_lineup(snap, tiles, &mixes);
 
-    let seed = super::day_seed(&input.day);
+    let seed = input.epoch.seed;
     let log = super::novelty::keyed(input.new_log.clone(), snap);
     let mut used_new: HashSet<String> = HashSet::new();
     let mut out: Vec<LaneHome> = mixes
@@ -283,11 +288,11 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
 
 /// A blend of `profiles` (the card's first), now, from the snapshot: it
 /// plays at once and stands first until the day's end.
-pub(crate) fn blend_now(snap: &Snapshot, prefs: &MixPrefs, profiles: &[u32], names: &dyn Fn(ArtistId) -> Option<String>, session: &Session) -> Option<LaneHome> {
+pub(crate) fn blend_now(snap: &Snapshot, prefs: &MixPrefs, profiles: &[u32], names: &dyn Fn(ArtistId) -> Option<String>, session: &Session, seed: u64) -> Option<LaneHome> {
     let key = MixKey::blend(profiles)?;
     let (now, utc_offset_min) = (super::recs_now(), super::local_day().1);
     let ok = |i: usize| snap.catalog.tracks()[i].local || !snap.local_only;
-    let mix = with_builder(snap, prefs, &[], &ok, session, now, utc_offset_min, |b| {
+    let mix = with_builder(snap, prefs, &[], &ok, session, now, utc_offset_min, seed, |b| {
         let mut m = vec![b.mix(key, &Kept::default())?];
         b.named(&mut m, names);
         m.pop()
@@ -310,12 +315,9 @@ pub(crate) fn blend_now(snap: &Snapshot, prefs: &MixPrefs, profiles: &[u32], nam
 
 /// Keeps the blend of `key` among the day's mixes at once (a restart
 /// before the next build keeps it too).
-pub(crate) fn remember_blend(lib: &nikgob_library::Library, prefs: &MixPrefs, day: &str, now: nikgob_core::model::UnixMs, key: v::MixKey) {
+pub(crate) fn remember_blend(lib: &nikgob_library::Library, prefs: &MixPrefs, day: &str, epoch: &str, now: nikgob_core::model::UnixMs, key: v::MixKey) {
     let Some(key) = engine_key(key) else { return };
-    let mut cache: MixesCache = cache_read(lib, MIXES_KEY).unwrap_or_default();
-    if cache.day != day {
-        cache = MixesCache { day: day.to_owned(), settings: prefs.fingerprint(), kept: std::mem::take(&mut cache.kept).next_day(), hidden: Vec::new() };
-    }
+    let mut cache = cache_for(lib, prefs, day, epoch);
     cache.kept.blends.retain(|b| *b != key);
     cache.kept.blends.push(key);
     cache_write(lib, MIXES_KEY, now, &cache);
@@ -583,7 +585,7 @@ mod tests {
         }
         let prefs = MixPrefs::of(&v::Prefs::default());
         let ok = |i: usize| tiles.facts.contains_key(&snap.catalog.tracks()[i].id);
-        let mixes = with_builder(&snap, &prefs, &[], &ok, &Session::default(), 1_000 * DAY_MS, 0, |b| b.lineup(&Kept::default()).0);
+        let mixes = with_builder(&snap, &prefs, &[], &ok, &Session::default(), 1_000 * DAY_MS, 0, 1, |b| b.lineup(&Kept::default()).0);
         assert!(!mixes.is_empty());
         for m in &mixes {
             let picked: Vec<TrackId> = m.tracks.iter().map(|&i| snap.model.id(i)).collect();
@@ -628,14 +630,14 @@ mod tests {
         let suits = |i: usize| snap.background.get(i).copied().unwrap_or(false);
         let ok = |i: usize| tiles.facts.contains_key(&snap.catalog.tracks()[i].id);
         let names = |a: ArtistId| tiles.artist_names.get(&a).cloned();
-        let day = day_number(now, 180);
+        let epoch = crate::home_v2::Epoch::of(7, now, 180).seed;
         let song = |i: usize| tiles.facts.get(&snap.model.id(i)).map_or_else(String::new, |f| format!("{} — {}", f.artist, f.title));
         let shares: Vec<String> = snap.model.profiles.list.iter().zip(&snap.model.profile_share).map(|(p, s)| format!("{:?} {:.2}", p.lane, s)).collect();
         println!("background listener: {}; profiles: {}", snap.model.listening.has_background, shares.join(", "));
         let mut broken = 0;
         let mut kept_day = Kept::default();
         for part in DayPart::ALL {
-            let b = Builder::new(&recs, &snap.model, &ok, &suits, day, part, snap.model.live(&Session::default()), Settings::default());
+            let b = Builder::new(&recs, &snap.model, &ok, &suits, epoch, part, snap.model.live(&Session::default()), Settings::default());
             let (mut mixes, lineup) = b.lineup(&Kept::default());
             b.named(&mut mixes, &names);
             println!("{part:?}: {}", mixes.iter().map(|m| format!("«{}»", m.title)).collect::<Vec<_>>().join(", "));
@@ -682,15 +684,15 @@ mod tests {
                 kept_day.keep(&mixes, &snap.model);
             }
         }
-        // The next day: what of each mix stays.
-        let next = kept_day.clone().next_day();
-        let b = Builder::new(&recs, &snap.model, &ok, &suits, day + 1, DayPart::Day, Live::default(), Settings::default());
+        // The next epoch: what of each mix stays.
+        let next = kept_day.clone().next_epoch(true);
+        let b = Builder::new(&recs, &snap.model, &ok, &suits, epoch ^ 1, DayPart::Day, Live::default(), Settings::default());
         let (mut mixes, _) = b.lineup(&next);
         b.named(&mut mixes, &names);
         for m in &mixes {
-            let before: HashSet<TrackId> = kept_day.today.iter().find(|t| t.0 == m.key).map(|t| t.2.iter().copied().collect()).unwrap_or_default();
+            let before: HashSet<TrackId> = kept_day.songs.iter().find(|t| t.0 == m.key).map(|t| t.2.iter().copied().collect()).unwrap_or_default();
             let same = m.tracks.iter().filter(|&&i| before.contains(&snap.model.id(i))).count();
-            println!("next day «{}»: {same} of {} kept", m.title, m.tracks.len());
+            println!("next epoch «{}»: {same} of {} kept", m.title, m.tracks.len());
         }
         assert_eq!(broken, 0, "rules broken");
     }

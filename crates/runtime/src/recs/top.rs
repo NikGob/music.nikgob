@@ -397,6 +397,7 @@ mod tests {
             lib: lib.clone(),
             index: index.clone(),
             day: "2026-10-25".into(),
+            epoch: crate::home_v2::Epoch::default(),
             utc_offset_min: 0,
             now,
             refresh_daily: false,

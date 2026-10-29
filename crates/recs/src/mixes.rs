@@ -1,6 +1,9 @@
 //! «Миксы для тебя» (recs-v2 §5.4, §6; profiles-v1 §6 and the user's
-//! decisions of 2026-10-26): five moments of the user's taste, each a mix
-//! of about 28 songs fixed for the day («На повторе» beside them is the
+//! decisions of 2026-10-26 and 2026-10-29): five moments of the user's
+//! taste, each a mix of about 28 songs fixed for the home's epoch — a run
+//! of the app within one part of the day (the runtime's seed): a start of
+//! the app or a new part of the day draws another lineup and other songs,
+//! a build within the epoch keeps them («На повторе» beside them is the
 //! runtime's).
 //!
 //! * **What a moment is** ([`MixKey`]): a taste profile's own mix; «Всё
@@ -13,27 +16,30 @@
 //!   three profiles the user chose, in pairs taking turns. With no profiles
 //!   yet (nothing heard, liked or kept) the library's kinds of songs and
 //!   its two sides stand in.
-//! * **The lineup** ([`Builder::lineup`]): «Фон» cards by the balance of
-//!   the profiles (profiles-v1 §5.3), «Всё вперемешку» with two active
-//!   profiles, the largest profile, the lively and the calm side, then the
-//!   other profiles in an order the day draws by their shares: a language
-//!   is a limit inside a moment, not the axis of the cards. A moment that
-//!   shares [`OVERLAP`] of its songs with one before it is left out; each
-//!   kind can be switched off ([`Settings`]), each moment left out
-//!   («Не предлагать этот микс», [`Settings::hidden`]). The lineup of a day stays the
-//!   day's ([`Kept`]).
+//! * **The lineup** ([`Builder::lineup`]): every moment there is — «Фон»
+//!   cards by the balance of the profiles (profiles-v1 §5.3), «Всё
+//!   вперемешку» with two active profiles, each active profile, the lively
+//!   and the calm side — drawn by the epoch's lottery
+//!   ([`Builder::drawn`]): by how well the moment fits now, a profile by
+//!   its share too, a moment of the epoch before far less likely and one of
+//!   the epoch before it less likely; a language is a limit inside a
+//!   moment, not the axis of the cards. A moment that shares [`OVERLAP`] of
+//!   its songs with one before it is left out; each kind can be switched
+//!   off ([`Settings`]), each moment left out («Не предлагать этот микс»,
+//!   [`Settings::hidden`]). The lineup of an epoch stays the epoch's, in
+//!   its order ([`Kept`]).
 //! * **The songs** ([`Builder::compose`]): by value — the long affinity
 //!   (with no plays, the likes' and playlists'), a little of what plays on
 //!   repeat, a rest of about a day and a half after a play
 //!   ([`crate::radio::MIX_REST`]), `1.2·ln(1 − p_skip)`, the dislikes near;
 //!   songs never played, near the loved, [`UNHEARD_SHARE`] at most. Half of
-//!   a mix is its core, the best by value; the other half rotates by the
-//!   day (seeded chance, yesterday's songs of the mix left out), so two
-//!   days share about half; «Другой состав» draws the core too. No
-//!   interludes, nothing over nine minutes, a song once, an artist once in
-//!   three, an album twice in ten, a world twice in three and a quarter of
-//!   the mix. The songs stay all day; only their order follows the part of
-//!   the day.
+//!   a mix is its core, drawn by value from the best [`CORE_POOL`] times as
+//!   many (the epoch before's less likely); the other half rotates by the
+//!   epoch (seeded chance, the epoch before's songs of the mix left out),
+//!   so two epochs share a third or so; «Другой состав» draws both again.
+//!   No interludes, nothing over nine minutes, a song once, an artist once
+//!   in three, an album twice in ten, a world twice in three and a quarter
+//!   of the mix. The songs and their order stay the epoch's.
 //! * **The order** ([`Builder::sequence`]): an arc of energy in the mix's
 //!   own percentiles — the day rises to 0.9 at 70 % and eases to 0.6, the
 //!   night settles from 0.65 to 0.1, «Фон» keeps 0.4 with small steps; a
@@ -113,9 +119,20 @@ pub const OVERLAP: f32 = 0.65;
 const W_HOT: f32 = 0.4;
 const W_SKIP: f32 = 1.2;
 const W_EXPLORE: f32 = 0.9;
-/// The chance of the rotating half, and of the core after «Другой состав».
+/// The chance of the rotating half.
 const ROTATE: f32 = 0.6;
-const REDRAW: f32 = 0.35;
+/// The core is drawn from the best this many times its size, by value over
+/// a third of their spread (the best of them some twenty times likelier
+/// than the last); a song of the epoch before is `e` times less likely.
+pub const CORE_POOL: usize = 3;
+const CORE_SPREAD: f32 = 3.0;
+const CORE_BEFORE: f32 = 1.0;
+/// The lottery of the lineup: how much the fit to now weighs (its log
+/// odds), the least weight of a profile by its share against the largest,
+/// and a moment shown in the epoch before (and the one before it).
+const LOT_FIT: f32 = 0.8;
+const LOT_SHARE: f32 = 0.3;
+const LOT_SHOWN: [f32; 2] = [0.12, 0.45];
 /// The order's costs: off the arc, the world before, the one before it,
 /// another language, a jump in «Фон», the same profile's block again, a
 /// block off the arc.
@@ -283,14 +300,20 @@ impl Default for Settings {
     }
 }
 
-/// What the day keeps between builds (the runtime's cache): the lineup,
-/// each mix's songs with the salt they were drawn with, yesterday's songs
-/// of each, the salts of «Другой состав» and the blends made today.
+/// What an epoch keeps between builds (the runtime's cache): the lineup in
+/// its order, each mix's songs in theirs with the salt they were drawn
+/// with, the songs of each in the epoch before, the lineups of the two
+/// epochs before, the salts of «Другой состав» and the blends made today.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Kept {
     pub lineup: Vec<MixKey>,
-    pub today: Vec<(MixKey, u64, Vec<TrackId>)>,
-    pub yesterday: Vec<(MixKey, Vec<TrackId>)>,
+    #[serde(alias = "today")]
+    pub songs: Vec<(MixKey, u64, Vec<TrackId>)>,
+    #[serde(alias = "yesterday")]
+    pub before: Vec<(MixKey, Vec<TrackId>)>,
+    /// The latest first.
+    #[serde(default)]
+    pub shown: Vec<Vec<MixKey>>,
     pub salts: Vec<(MixKey, u64)>,
     pub blends: Vec<MixKey>,
 }
@@ -300,28 +323,39 @@ impl Kept {
         self.salts.iter().find(|s| s.0 == key).map_or(0, |s| s.1)
     }
 
-    fn today(&self, key: MixKey) -> Option<(u64, &[TrackId])> {
-        self.today.iter().find(|s| s.0 == key).map(|s| (s.1, s.2.as_slice()))
+    fn songs(&self, key: MixKey) -> Option<(u64, &[TrackId])> {
+        self.songs.iter().find(|s| s.0 == key).map(|s| (s.1, s.2.as_slice()))
     }
 
-    fn yesterday(&self, key: MixKey) -> &[TrackId] {
-        self.yesterday.iter().find(|s| s.0 == key).map_or(&[], |s| s.1.as_slice())
+    fn before(&self, key: MixKey) -> &[TrackId] {
+        self.before.iter().find(|s| s.0 == key).map_or(&[], |s| s.1.as_slice())
     }
 
-    /// The day after: today's songs become yesterday's; the lineup, the
-    /// salts and the blends start over.
-    pub fn next_day(self) -> Self {
-        Self { yesterday: self.today.into_iter().map(|(k, _, t)| (k, t)).collect(), ..Self::default() }
+    /// The next epoch: this one's songs become the songs before, its
+    /// lineup the latest shown; the lineup and the salts start over, the
+    /// blends too on another day.
+    pub fn next_epoch(self, same_day: bool) -> Self {
+        let mut shown = self.shown;
+        if !self.lineup.is_empty() {
+            shown.insert(0, self.lineup);
+        }
+        shown.truncate(LOT_SHOWN.len());
+        Self {
+            before: self.songs.into_iter().map(|(k, _, t)| (k, t)).collect(),
+            shown,
+            blends: if same_day { self.blends } else { Vec::new() },
+            ..Self::default()
+        }
     }
 
-    /// The songs of every mix of `mixes` with their salts, for the day.
+    /// The songs of every mix of `mixes` with their salts, for the epoch.
     pub fn keep(&mut self, mixes: &[Mix], model: &UserModel) {
         for m in mixes {
             let ids: Vec<TrackId> = m.tracks.iter().map(|&i| model.id(i)).collect();
             let salt = self.salt(m.key);
-            match self.today.iter_mut().find(|s| s.0 == m.key) {
+            match self.songs.iter_mut().find(|s| s.0 == m.key) {
                 Some(s) => *s = (m.key, salt, ids),
-                None => self.today.push((m.key, salt, ids)),
+                None => self.songs.push((m.key, salt, ids)),
             }
         }
     }
@@ -370,7 +404,8 @@ pub struct Builder<'a> {
     recs: &'a Recs<'a>,
     model: &'a UserModel,
     suits: &'a dyn Fn(usize) -> bool,
-    day: i64,
+    /// The home's epoch: the seed of the lineup's lottery and the songs.
+    epoch: u64,
     part: DayPart,
     live: Live,
     settings: Settings,
@@ -394,15 +429,15 @@ struct Caps {
 impl<'a> Builder<'a> {
     /// The engine over `recs` (whose model is `model`): `ok` the tracks the
     /// runtime lets a mix take, `suits` those that suit the background,
-    /// `day` the local day of the build and `part` its part, `live` the
-    /// session going on.
+    /// `epoch` the seed of the home's epoch and `part` the part of the day,
+    /// `live` the session going on.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         recs: &'a Recs<'a>,
         model: &'a UserModel,
         ok: &dyn Fn(usize) -> bool,
         suits: &'a dyn Fn(usize) -> bool,
-        day: i64,
+        epoch: u64,
         part: DayPart,
         live: Live,
         settings: Settings,
@@ -425,7 +460,7 @@ impl<'a> Builder<'a> {
                     - recs.taste.dislike_near_at(i),
             );
         }
-        Self { recs, model, suits, day, part, live, settings, history: model.tracks.iter().any(|t| t.starts > 0), a, value }
+        Self { recs, model, suits, epoch, part, live, settings, history: model.tracks.iter().any(|t| t.starts > 0), a, value }
     }
 
     fn pickable(&self, i: usize) -> bool {
@@ -479,19 +514,19 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Today's moments, the order of the cards by now (see the module
-    /// docs), the blends made today first in the places of the moments
-    /// that fit now least; and the lineup to keep.
+    /// The epoch's moments: the lineup kept for it in its order, else those
+    /// the lottery draws ([`Self::drawn`]) in the order of how they fit now;
+    /// the blends made today first, in the places of the moments that fit
+    /// now least. And the lineup to keep.
     pub fn lineup(&self, kept: &Kept) -> (Vec<Mix>, Vec<MixKey>) {
         let mut chosen: Vec<Mix> = Vec::new();
-        let mut keys: Vec<MixKey> = Vec::new();
-        // The day's lineup first, as it was; new moments only for what of
-        // it is gone.
-        let fresh = self.candidates().into_iter().filter(|k| !kept.lineup.contains(k));
+        // The epoch's lineup first, as it was; new moments only for what
+        // of it is gone.
         let hidden = |k: &MixKey| self.settings.hidden.contains(k);
         let before: Vec<MixKey> = kept.lineup.iter().copied().filter(|k| !hidden(k)).collect();
-        for (n, key) in before.iter().copied().chain(fresh.filter(|k| !hidden(k))).enumerate() {
-            if keys.len() >= MOMENTS {
+        let fresh = self.drawn(kept).into_iter().filter(|k| !kept.lineup.contains(k) && !hidden(k));
+        for (n, key) in before.iter().copied().chain(fresh).enumerate() {
+            if chosen.len() >= MOMENTS {
                 break;
             }
             let Some(mix) = self.mix(key, kept) else { continue };
@@ -506,10 +541,12 @@ impl<'a> Builder<'a> {
             if n >= before.len() && same {
                 continue;
             }
-            keys.push(key);
             chosen.push(mix);
         }
-        chosen.sort_by(|a, b| b.score.total_cmp(&a.score));
+        if before.is_empty() {
+            chosen.sort_by(|a, b| b.score.total_cmp(&a.score));
+        }
+        let keys: Vec<MixKey> = chosen.iter().map(|m| m.key).collect();
         // The blends stand in the places of the moments that fit now least
         // (the two latest; those stay in the day's lineup).
         let mut blends: Vec<Mix> = kept.blends.iter().rev().filter_map(|k| self.mix(*k, kept)).take(BLENDS_SHOWN).collect();
@@ -518,62 +555,85 @@ impl<'a> Builder<'a> {
         (blends, keys)
     }
 
-    /// The moments to choose from, in the order they are taken.
+    /// Every moment there is, in the order the epoch's lottery draws them
+    /// (Efraimidis–Spirakis): each by how well its songs fit now
+    /// ([`Self::context`]), a profile's own by its share too (at least
+    /// [`LOT_SHARE`] of the largest's chances), one shown in the epochs
+    /// before far less ([`LOT_SHOWN`]); every moment has its chances.
+    pub fn drawn(&self, kept: &Kept) -> Vec<MixKey> {
+        let all = self.candidates();
+        let top = self.model.profile_share.iter().copied().fold(0.0f32, f32::max).max(1e-6);
+        let mut lots: Vec<(f32, MixKey)> = all
+            .into_iter()
+            .filter_map(|key| {
+                let pool = self.pool(key)?;
+                let profiles: Vec<usize> = {
+                    let mut p: Vec<usize> = pool.tracks.iter().filter_map(|&i| self.model.profile_at(i)).collect();
+                    p.sort_unstable();
+                    p.dedup();
+                    p
+                };
+                let probe = Mix { key, title: String::new(), short: Vec::new(), tracks: pool.tracks, anchors: Vec::new(), artists: Vec::new(), profiles, score: 0.0 };
+                let mut w = (LOT_FIT * self.context(&probe).clamp(-2.0, 2.0)).exp();
+                if let MixKey::Profile(k) = key
+                    && let Some(j) = self.profile_index(k)
+                {
+                    w *= (self.model.profile_share.get(j).copied().unwrap_or(0.0) / top).sqrt().max(LOT_SHARE);
+                }
+                for (shown, f) in kept.shown.iter().zip(LOT_SHOWN) {
+                    if shown.contains(&key) {
+                        w *= f;
+                    }
+                }
+                let u = Rng::derive(self.epoch ^ 0x6d69_7865, key.token()).f32().max(1e-6);
+                Some((-u.ln() / w.max(1e-6), key))
+            })
+            .collect();
+        lots.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        lots.into_iter().map(|(_, k)| k).collect()
+    }
+
+    /// The moments to choose from.
     fn candidates(&self) -> Vec<MixKey> {
         let s = &self.settings;
         let active = self.active();
         if active.is_empty() {
-            // Nothing heard yet: the library's kinds, the largest first.
+            // Nothing heard yet: the library's kinds.
             let mut kinds: HashMap<LaneKey, usize> = HashMap::new();
             for i in (0..self.value.len()).filter(|&i| self.pickable(i)) {
                 *kinds.entry(LaneKey::of(self.model.song_type_at(i))).or_default() += 1;
             }
             let mut kinds: Vec<(LaneKey, usize)> = kinds.into_iter().filter(|k| k.1 >= MIN_SONGS).collect();
             kinds.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-            let mut out: Vec<MixKey> = Vec::new();
+            let mut out: Vec<MixKey> = kinds.into_iter().map(|k| MixKey::Kind(lane_code(k.0))).collect();
             if s.moods {
                 out.extend([MixKey::Lively, MixKey::Calm]);
             }
-            out.splice(0..0, kinds.into_iter().take(3).map(|k| MixKey::Kind(lane_code(k.0))));
             return out;
         }
         let bg = self.background_keys();
         let with_bg: HashSet<u32> = bg.iter().filter_map(|k| k.blend_base()).collect();
-        let plain: Vec<usize> = active.iter().copied().filter(|&j| !with_bg.contains(&self.model.profiles.list[j].key)).collect();
         let mut out = bg;
         if s.everything && active.len() >= 2 {
             out.push(MixKey::Everything);
         }
-        let mut rest = plain.clone();
-        if s.profiles && let Some(&first) = plain.first() {
-            out.push(MixKey::Profile(self.model.profiles.list[first].key));
-            rest.remove(0);
+        if s.profiles {
+            let plain = active.iter().map(|&j| self.model.profiles.list[j].key).filter(|k| !with_bg.contains(k));
+            out.extend(plain.map(MixKey::Profile));
         }
         if s.moods {
             out.extend([MixKey::Lively, MixKey::Calm]);
         }
-        if s.profiles {
-            // The others in an order the day draws by their shares.
-            let mut drawn: Vec<(f32, usize)> = rest
-                .into_iter()
-                .map(|j| {
-                    let u = Rng::derive(self.day as u64 ^ 0x6d69_7865, u64::from(self.model.profiles.list[j].key)).f32().max(1e-6);
-                    (-u.ln() / self.model.profile_share[j].max(1e-6), j)
-                })
-                .collect();
-            drawn.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-            out.extend(drawn.into_iter().map(|(_, j)| MixKey::Profile(self.model.profiles.list[j].key)));
-        }
         out
     }
 
-    /// The mix of `key` today: its songs kept for the day, else drawn
-    /// (`None` when it has too few).
+    /// The mix of `key` in the epoch: its songs kept for it in their order,
+    /// else drawn (`None` when it has too few).
     pub fn mix(&self, key: MixKey, kept: &Kept) -> Option<Mix> {
         let pool = self.pool(key)?;
         let salt = kept.salt(key);
         let steady = matches!(key, MixKey::Background { .. });
-        let kept_songs = match kept.today(key) {
+        let kept_songs = match kept.songs(key) {
             Some((s, ids)) if s == salt => {
                 let have: HashSet<usize> = pool.tracks.iter().copied().collect();
                 let t: Vec<usize> = ids.iter().filter_map(|id| self.model.position(*id)).filter(|i| have.contains(i)).collect();
@@ -584,12 +644,11 @@ impl<'a> Builder<'a> {
         let tracks = match kept_songs {
             Some(t) => t,
             None => {
-                let before = kept.today(key).map_or(&[][..], |t| t.1);
-                // The songs are the day's whatever its part: what never
-                // played and finds no place between loved ones in the
-                // order of the day leaves now, not by the part, and others
-                // are drawn in its place (the second time no more songs
-                // never played than found a place).
+                let before = kept.songs(key).map_or(&[][..], |t| t.1);
+                // What never played and finds no place between loved ones
+                // in the order of the day leaves whatever the part, and
+                // others are drawn in its place (the second time no more
+                // songs never played than found a place).
                 let arc = if pool.arc == Arc::Focus { Arc::Focus } else { Arc::Day };
                 let mut left = pool.clone();
                 let mut order = Vec::new();
@@ -607,13 +666,15 @@ impl<'a> Builder<'a> {
                         left.unheard = fit as f32 / pool.len.max(1) as f32;
                     }
                 }
-                order
+                if order.len() < MIN_SONGS {
+                    return None;
+                }
+                self.order(&order, &pool, pool.arc, steady, false)
             }
         };
         if tracks.len() < MIN_SONGS {
             return None;
         }
-        let tracks = self.order(&tracks, &pool, pool.arc, steady, false);
         let mut profiles: Vec<usize> = tracks.iter().filter_map(|&i| self.model.profile_at(i)).collect();
         profiles.sort_unstable();
         profiles.dedup();
@@ -722,13 +783,14 @@ impl<'a> Builder<'a> {
         side
     }
 
-    /// The songs of `key` from `pool` (see the module docs): the core by
-    /// value, the rest by the day's chance; `before` the songs it had
-    /// before «Другой состав» (left out of the rotation, as yesterday's).
+    /// The songs of `key` from `pool` (see the module docs): the core drawn
+    /// by value, the rest by the epoch's chance; `before` the songs it had
+    /// before «Другой состав» (left out of the rotation, as the epoch
+    /// before's).
     fn compose(&self, key: MixKey, pool: &Pool, salt: u64, kept: &Kept, before: &[TrackId]) -> Vec<usize> {
-        let seed = (self.day as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ key.token() ^ salt.wrapping_mul(0x2545_f491_4f6c_dd1d);
+        let seed = self.epoch.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ key.token() ^ salt.wrapping_mul(0x2545_f491_4f6c_dd1d);
         let chance = |i: usize| Rng::derive(seed, i as u64).f32();
-        let mut away: HashSet<usize> = kept.yesterday(key).iter().filter_map(|t| self.model.position(*t)).collect();
+        let mut away: HashSet<usize> = kept.before(key).iter().filter_map(|t| self.model.position(*t)).collect();
         if salt != 0 {
             away.extend(before.iter().filter_map(|t| self.model.position(*t)));
         }
@@ -757,16 +819,32 @@ impl<'a> Builder<'a> {
             unheard: if self.history { ((n as f32 * pool.unheard).ceil() as usize).max(1) } else { usize::MAX },
         };
         let mut pick = Picking::new(self, caps, pool.quota.clone(), pool.max_ms);
-        // The core: the best by value («Другой состав»: with some chance).
-        let mut core: Vec<(f32, usize)> = pool.tracks.iter().map(|&i| (value(i) + if salt != 0 { REDRAW * chance(i) } else { 0.0 }, i)).collect();
+        // The core: drawn from the best by value (Gumbel keys over a third
+        // of their spread), the epoch before's less likely; then the rest of
+        // the pool by value, for what the rules held back.
+        let half = n.div_ceil(2);
+        let mut core: Vec<(f32, usize)> = pool.tracks.iter().map(|&i| (value(i), i)).collect();
         core.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let k = (CORE_POOL * half).min(core.len());
+        if k > 0 {
+            let tau = ((core[0].0 - core[k - 1].0) / CORE_SPREAD).max(0.05);
+            let gumbel = |i: usize| {
+                let u = Rng::derive(seed ^ 0x636f_7265, i as u64).f64().clamp(1e-12, 1.0 - 1e-12);
+                -(-u.ln()).ln() as f32
+            };
+            let mut top: Vec<(f32, usize)> =
+                core[..k].iter().map(|&(v, i)| (v / tau + gumbel(i) - if away.contains(&i) { CORE_BEFORE } else { 0.0 }, i)).collect();
+            top.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            core.splice(..k, top);
+        }
         for &(_, i) in &core {
-            if pick.len() >= n.div_ceil(2) || pick.full(n) {
+            if pick.len() >= half || pick.full(n) {
                 break;
             }
             pick.take(i);
         }
-        // The rest by the day's chance, yesterday's left out while others last.
+        // The rest by the epoch's chance, the epoch before's left out while
+        // others last.
         let mut rest: Vec<(f32, usize)> = pool.tracks.iter().map(|&i| (value(i) + ROTATE * chance(i), i)).collect();
         rest.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
         for strict in [true, false] {
@@ -1686,9 +1764,13 @@ mod tests {
     }
 
     fn with<T>(l: &Lib, m: &UserModel, part: DayPart, f: impl FnOnce(&Builder<'_>) -> T) -> T {
+        in_epoch(l, m, part, m.now().div_euclid(DAY_MS) as u64, f)
+    }
+
+    fn in_epoch<T>(l: &Lib, m: &UserModel, part: DayPart, epoch: u64, f: impl FnOnce(&Builder<'_>) -> T) -> T {
         let recs = Recs::new(&l.catalog, &m.taste, &l.index).with_model(m);
         let no = |_: usize| false;
-        let b = Builder::new(&recs, m, &|_| true, &no, m.now().div_euclid(DAY_MS), part, Live::default(), Settings::default());
+        let b = Builder::new(&recs, m, &|_| true, &no, epoch, part, Live::default(), Settings::default());
         f(&b)
     }
 
@@ -1746,47 +1828,54 @@ mod tests {
         assert!(seen > 0, "the mixes bring something never played");
     }
 
-    /// Later the same day, after more plays, the lineup and the songs of
-    /// each mix are the same.
+    /// Later in the epoch, after more plays, the lineup, its order and the
+    /// songs of each mix in theirs are the same.
     #[test]
-    fn stable_within_day() {
+    fn stable_within_epoch() {
         let l = lib(40, &[]);
         let m = model(&l, T0 + 7 * HOUR_MS);
-        let (first, lineup) = with(&l, &m, DayPart::Morning, |b| b.lineup(&Kept::default()));
+        let (first, lineup) = in_epoch(&l, &m, DayPart::Morning, 5, |b| b.lineup(&Kept::default()));
         let mut kept = Kept { lineup, ..Kept::default() };
         kept.keep(&first, &m);
-        // Ten more songs in the afternoon.
+        // Ten more songs, another session.
         let plays: Vec<(UnixMs, usize)> = (0..10).map(|k| (T0 + 9 * HOUR_MS + k * 200_000, 3 * k as usize)).collect();
         let l2 = lib(40, &plays);
-        let m2 = model(&l2, T0 + 12 * HOUR_MS);
-        let (again, keys) = with(&l2, &m2, DayPart::Day, |b| b.lineup(&kept));
+        let m2 = model(&l2, T0 + 10 * HOUR_MS);
+        let (again, keys) = in_epoch(&l2, &m2, DayPart::Morning, 5, |b| b.lineup(&kept));
         assert_eq!(keys, kept.lineup);
-        let set = |m: &Mix| m.tracks.iter().copied().collect::<HashSet<usize>>();
-        for a in &first {
-            let b = again.iter().find(|b| b.key == a.key).expect("still there");
-            assert_eq!(set(a), set(b), "{}", a.title);
+        let order = |x: &[Mix]| x.iter().map(|m| m.key).collect::<Vec<_>>();
+        assert_eq!(order(&again), order(&first), "the cards in their order");
+        for (a, b) in first.iter().zip(&again) {
+            assert_eq!(a.tracks, b.tracks, "{}", a.title);
         }
     }
 
-    /// The next day about half of each mix is new to it.
+    /// The next epoch (a start of the app, another part of the day) draws
+    /// another lineup and other songs: a mix that stays shares a third or
+    /// so of its songs and shows other covers first.
     #[test]
-    fn half_rotates_next_day() {
+    fn the_next_epoch_rotates() {
         let l = lib(40, &[]);
         let m = model(&l, T0 + 7 * HOUR_MS);
-        let (today, lineup) = with(&l, &m, DayPart::Morning, |b| b.lineup(&Kept::default()));
-        let mut kept = Kept { lineup, ..Kept::default() };
-        kept.keep(&today, &m);
-        let m2 = model(&l, T0 + DAY_MS + 7 * HOUR_MS);
-        let (tomorrow, _) = with(&l, &m2, DayPart::Morning, |b| b.lineup(&kept.clone().next_day()));
+        let (now, lineup) = in_epoch(&l, &m, DayPart::Morning, 11, |b| b.lineup(&Kept::default()));
+        let mut kept = Kept { lineup: lineup.clone(), ..Kept::default() };
+        kept.keep(&now, &m);
+        let next = kept.clone().next_epoch(true);
+        assert_eq!(next.shown, [lineup.clone()]);
+        let (then, keys) = in_epoch(&l, &m, DayPart::Morning, 12, |b| b.lineup(&next));
+        assert_ne!(keys, lineup, "another lineup");
         let mut compared = 0;
-        for a in &today {
-            let Some(b) = tomorrow.iter().find(|b| b.key == a.key) else { continue };
+        for a in &now {
+            let b = in_epoch(&l, &m, DayPart::Morning, 12, |b| b.mix(a.key, &next)).unwrap();
             let set: HashSet<usize> = a.tracks.iter().copied().collect();
             let shared = b.tracks.iter().filter(|i| set.contains(i)).count() as f32 / a.tracks.len().max(b.tracks.len()) as f32;
-            assert!((0.3..=0.75).contains(&shared), "{}: {shared}", a.title);
+            assert!((0.05..=0.55).contains(&shared), "{}: {shared}", a.title);
+            let firsts = |t: &[usize]| t.iter().take(6).copied().collect::<HashSet<usize>>();
+            assert!(firsts(&a.tracks) != firsts(&b.tracks), "{}", a.title);
             compared += 1;
         }
         assert!(compared >= 3, "{compared}");
+        let _ = then;
     }
 
     /// «Другой состав» draws another mix: much of it new, the same kind.
@@ -1806,9 +1895,9 @@ mod tests {
         assert!(b.tracks.iter().all(|&i| m.profile_at(i) == a.tracks.first().and_then(|&f| m.profile_at(f))));
     }
 
-    /// Five moments of three profiles: «Всё вперемешку», the largest
-    /// profile, both sides and another profile; no two alike, none of one
-    /// world, every rule kept, nothing too long or too short.
+    /// Five moments of three profiles, drawn from «Всё вперемешку», the
+    /// profiles and both sides; no two alike, none of one world, every rule
+    /// kept, nothing too long or too short.
     #[test]
     fn the_lineup_of_three_profiles() {
         let l = lib(40, &[]);
@@ -1818,8 +1907,6 @@ mod tests {
         let shares: Vec<(LaneKey, f32, bool)> = m.profiles.list.iter().zip(&m.profile_share).map(|(p, s)| (p.lane, *s, p.visible)).collect();
         assert_eq!(mixes.len(), MOMENTS, "{titles:?} {shares:?}");
         assert_eq!(keys.len(), MOMENTS);
-        assert!(keys.contains(&MixKey::Everything) && keys.contains(&MixKey::Calm) && keys.contains(&MixKey::Lively), "{keys:?}");
-        assert!(titles.contains(&"Всё вперемешку") && titles.contains(&"Русские песни"), "{titles:?} {shares:?}");
         let unique: HashSet<&str> = titles.iter().copied().collect();
         assert_eq!(unique.len(), titles.len(), "{titles:?}");
         let recs = Recs::new(&l.catalog, &m.taste, &l.index);
@@ -1834,16 +1921,18 @@ mod tests {
             let cap = (mix.tracks.len() as f32 * WORLD_SHARE).ceil() as usize;
             assert!(worlds.len() >= 4 && worlds.values().all(|c| *c <= cap), "{}: {worlds:?}", mix.title);
         }
-        // «Не предлагать этот микс»: the day's lineup goes on without it,
+        // «Не предлагать этот микс»: the epoch's lineup goes on without it,
         // another in its place.
+        let gone = keys[1];
         let kept = Kept { lineup: keys.clone(), ..Kept::default() };
         let recs = Recs::new(&l.catalog, &m.taste, &l.index).with_model(&m);
         let no = |_: usize| false;
-        let settings = Settings { hidden: vec![MixKey::Calm], ..Settings::default() };
-        let b = Builder::new(&recs, &m, &|_| true, &no, m.now().div_euclid(DAY_MS), DayPart::Day, Live::default(), settings);
+        let settings = Settings { hidden: vec![gone], ..Settings::default() };
+        let b = Builder::new(&recs, &m, &|_| true, &no, m.now().div_euclid(DAY_MS) as u64, DayPart::Day, Live::default(), settings);
         let (after, after_keys) = b.lineup(&kept);
-        assert!(!after_keys.contains(&MixKey::Calm) && after.iter().all(|x| x.key != MixKey::Calm), "{after_keys:?}");
+        assert!(!after_keys.contains(&gone) && after.iter().all(|x| x.key != gone), "{after_keys:?}");
         assert_eq!(after.len(), mixes.len(), "{after_keys:?}");
+        assert_eq!(after_keys[..3], [keys[0], keys[2], keys[3]], "the rest in their places");
     }
 
     #[test]

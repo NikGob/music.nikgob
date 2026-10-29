@@ -192,6 +192,8 @@ pub(crate) enum CoverRef {
 pub(crate) struct RecHome {
     /// The local day they are for (`YYYY-MM-DD`).
     pub day: String,
+    /// The home's epoch they are for.
+    pub epoch: String,
     pub daily: Vec<Pick>,
     /// Stream picks of the daily mix, by remote id.
     pub daily_streams: HashMap<RemoteId, StreamTrack>,
@@ -328,6 +330,9 @@ pub(crate) struct RecsState {
     world: Option<WorldMixes>,
     /// Why a queue entry was picked (recs-v2 §12), in its row's tooltip.
     pub(crate) why: HashMap<u64, String>,
+    /// The number of this run of the app: the home's epochs are its
+    /// ([`crate::home_v2::Epoch`]).
+    run: u64,
 }
 
 /// The mixes of a world's page: its key, and each mix with the name the
@@ -362,6 +367,7 @@ impl RecsState {
             skip_x: None,
             world: None,
             why: HashMap::new(),
+            run: crate::home_v2::Epoch::run(),
         }
     }
 }
@@ -547,6 +553,8 @@ struct BuildInput {
     lib: Library,
     index: SoundIndex,
     day: String,
+    /// The home's epoch: «Миксы для тебя» are its.
+    epoch: crate::home_v2::Epoch,
     utc_offset_min: i32,
     now: UnixMs,
     refresh_daily: bool,
@@ -1232,6 +1240,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
 
     RecHome {
         day: input.day.clone(),
+        epoch: input.epoch.key.clone(),
         daily,
         daily_streams,
         daily_covers,
@@ -1703,10 +1712,12 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
     let vectors = index.read().len();
     let (day, utc_offset_min) = local_day();
     let (discoveries, new_releases_cached) = discover::cached_found(lib);
+    let epoch = crate::home_v2::Epoch::of(crate::home_v2::Epoch::run(), recs_now(), utc_offset_min);
     let input = BuildInput {
         lib: lib.clone(),
         index: index.clone(),
         day,
+        epoch: epoch.clone(),
         utc_offset_min,
         now: recs_now(),
         refresh_daily: false,
@@ -1729,6 +1740,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
     let mut visit = crate::home_v2::Visit::now(None, prefs);
     visit.sound = Some(index.clone());
     visit.profiles = Some(built.snap.profiles.clone());
+    visit.epoch = epoch;
 
     let mut home = res.home(&crate::home::build_with(lib, &visit));
     HomeParts::of(lib, Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only, prefs.home_card_shown()).apply(&mut home, &mut res);
@@ -1972,6 +1984,11 @@ impl ModelPreview {
 }
 
 impl Worker {
+    /// The home's epoch now: this run's, of this part of the day.
+    pub(crate) fn home_epoch(&self) -> crate::home_v2::Epoch {
+        crate::home_v2::Epoch::of(self.recs.run, recs_now(), local_day().1)
+    }
+
     /// The recommendation parts of the home page as they stand.
     pub(crate) fn recs_home_parts(&mut self) -> HomeParts {
         let (discover, new_releases) = self.discover_rows();
@@ -2132,6 +2149,7 @@ impl Worker {
             lib: self.lib.clone(),
             index: self.analysis.index().clone(),
             day,
+            epoch: self.home_epoch(),
             utc_offset_min,
             now: recs_now(),
             refresh_daily: std::mem::take(&mut self.recs.refresh_daily),
@@ -2188,8 +2206,15 @@ impl Worker {
                 if self.recs.weights.is_none_or(|w| w.version != built.version || w.next.seen + w.skip.seen <= built.next.seen + built.skip.seen) {
                     self.recs.weights = None;
                 }
+                // The run's first, or a new epoch's: the home's shortcuts
+                // and «Слушать снова» come with its mixes (the first drawn
+                // again with the taste profiles they were drawn without).
+                let fresh = self.recs.home.as_ref().is_none_or(|h| h.epoch != b.home.epoch);
                 self.recs.snap = Some(b.snap);
                 self.recs.home = Some(b.home);
+                if fresh {
+                    self.load_home();
+                }
                 rerank
             }
             Err(e) => {
@@ -2517,12 +2542,13 @@ impl Worker {
         let prefs = lanes::MixPrefs::of(&self.state.read().prefs);
         let lib = self.lib.clone();
         let names = |a: nikgob_core::model::ArtistId| lib.get_artist(a).ok().flatten().map(|a| a.name);
-        let Some(lane) = lanes::blend_now(&snap, &prefs, profiles, &names, &self.recs.session) else {
+        let epoch = self.home_epoch();
+        let Some(lane) = lanes::blend_now(&snap, &prefs, profiles, &names, &self.recs.session, epoch.seed) else {
             self.toast("Из этих профилей микса не собрать", None);
             return;
         };
         let (day, _) = local_day();
-        lanes::remember_blend(&self.lib, &prefs, &day, recs_now(), lane.key);
+        lanes::remember_blend(&self.lib, &prefs, &day, &epoch.key, recs_now(), lane.key);
         self.recs.blends.retain(|b| b.0 == day && b.1 != lane.key);
         self.recs.blends.push((day, lane.key));
         let (picks, title) = (lane.picks(false), lane.title.clone());
