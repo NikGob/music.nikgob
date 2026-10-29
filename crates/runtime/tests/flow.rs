@@ -591,8 +591,10 @@ fn likes_and_playlist_edits_update_the_library_in_place() {
 }
 
 /// Under «Только скачанное» an album that is only partly downloaded plays
-/// its songs with a file, not the ones that only stream; picked from a song,
-/// or with the filter off, it plays whole.
+/// its songs with a file, not the ones that only stream: played whole,
+/// from one of its songs, after the queue, or with its artist's songs or a
+/// playlist; a song that only streams plays when it is the one picked.
+/// With the filter off it plays whole.
 #[test]
 fn only_downloaded_plays_the_downloaded_songs_of_an_album() {
     use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
@@ -619,6 +621,11 @@ fn only_downloaded_plays_the_downloaded_songs_of_an_album() {
             t
         })
         .collect();
+    let ids: Vec<_> = tracks.iter().map(|t| t.id).collect();
+    let playlist = lib.create_playlist("P").unwrap();
+    for t in [ids[1], ids[2], ids[0]] {
+        lib.playlist_add(playlist.id, t).unwrap();
+    }
     let prefs = Prefs { mixes_downloaded_only: true, ..Prefs::default() };
     let rt = Runtime::start(
         RuntimeConfig {
@@ -638,13 +645,35 @@ fn only_downloaded_plays_the_downloaded_songs_of_an_album() {
         ids.extend(s.queue.prev.iter().map(|e| e.track.id));
         ids
     };
-    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
-    wait_for(&rt, "the downloaded songs", |s| {
+    // Each step plays another song first, so a state of the step before
+    // never passes for it.
+    let playing = |s: &ViewState, t: usize, n: usize| {
         let q = queued(s);
-        q.len() == 2 && !q.contains(&tracks[1].id)
+        s.queue.current.as_ref().is_some_and(|c| c.id == ids[t]) && q.len() == n && !q.contains(&ids[1])
+    };
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the downloaded songs", |s| playing(s, 0, 2));
+    // Picked, the song that only streams joins the downloaded ones (it
+    // cannot play here: no service).
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[1]), shuffle: false });
+    wait_for(&rt, "the picked stream song", |s| queued(s).len() == 3);
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[2]), shuffle: false });
+    wait_for(&rt, "the downloaded songs from a song", |s| playing(s, 2, 2));
+    rt.send(Command::PlayArtist { id: artist.id, shuffle: false });
+    wait_for(&rt, "the artist's downloaded songs", |s| playing(s, 0, 2));
+    rt.send(Command::EnqueueRelease(release.id));
+    wait_for(&rt, "the album's downloaded songs after them", |s| {
+        let q = queued(s);
+        q.len() == 4 && !q.contains(&ids[1])
     });
-    rt.send(Command::PlayRelease { id: release.id, start: Some(tracks[0].id), shuffle: false });
-    wait_for(&rt, "the whole album from a song", |s| queued(s).len() == 3);
+    rt.send(Command::PlayPlaylist { id: playlist.id, start: None, shuffle: false });
+    wait_for(&rt, "the playlist's downloaded songs", |s| playing(s, 2, 2));
+    // Off: the album plays whole.
+    rt.send(Command::SetPref(nikgob_view::PrefPatch::MixesDownloadedOnly(false)));
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[0]), shuffle: false });
+    wait_for(&rt, "the whole album", |s| {
+        s.queue.current.as_ref().is_some_and(|c| c.id == ids[0]) && queued(s).len() == 3
+    });
 }
 
 /// «Сыграть следующим» of an album while a track plays: the whole album in

@@ -541,8 +541,37 @@ impl Spotify {
     /// the user's app), and the account says why.
     fn premium_required(&self) {
         log::info!("spotify: the account has no Premium; signed out");
-        self.logout();
-        lock(&self.state).failure = Some(SPOTIFY_PREMIUM_REQUIRED.into());
+        self.sign_out(Some(SPOTIFY_PREMIUM_REQUIRED.into()));
+    }
+
+    /// Signs out of everything (the Client ID stays); `failure` is what the
+    /// account says after. The grants go under the state lock together
+    /// with the reset, so [`Account`] never shows a half-done sign-out (a
+    /// plain `LoggedOut` before the reason, or a profile still kept).
+    fn sign_out(&self, failure: Option<String>) {
+        {
+            let mut st = lock(&self.state);
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+            self.web.clear();
+            for slot in Slot::ALL {
+                self.store.clear(slot);
+            }
+            let personal_client_id = st.saved.personal_client_id.take();
+            *st = AccountState {
+                saved: credentials::State {
+                    personal_client_id,
+                    ..Default::default()
+                },
+                failure,
+                ..Default::default()
+            };
+            self.persist(&st);
+        }
+        if let Some(cancel) = lock(&self.login_cancel).take() {
+            let _ = cancel.send(true);
+        }
+        self.sessions.close();
+        self.clear_caches();
     }
 
     /// Records the account type a session reports.
@@ -1537,26 +1566,7 @@ impl StreamService for Spotify {
     }
 
     fn logout(&self) {
-        self.epoch.fetch_add(1, Ordering::SeqCst);
-        if let Some(cancel) = lock(&self.login_cancel).take() {
-            let _ = cancel.send(true);
-        }
-        self.web.clear();
-        for slot in Slot::ALL {
-            self.store.clear(slot);
-        }
-        self.sessions.close();
-        self.clear_caches();
-        let mut st = lock(&self.state);
-        let personal_client_id = st.saved.personal_client_id.take();
-        *st = AccountState {
-            saved: credentials::State {
-                personal_client_id,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        self.persist(&st);
+        self.sign_out(None);
     }
 
     fn search(&self, query: &str) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {

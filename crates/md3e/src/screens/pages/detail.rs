@@ -250,7 +250,7 @@ pub fn release(
             .attach(more);
         match picked {
             Some(0) => out.push(Command::PlayReleaseNext(id)),
-            Some(1) => out.push(Command::Enqueue(ids.clone())),
+            Some(1) => out.push(Command::EnqueueRelease(id)),
             Some(2) => {
                 pages.pending_add = Some(ids.clone());
                 pages.pending_add_anchor = Some(more.rect);
