@@ -1855,6 +1855,8 @@ impl Worker {
         let often = home::often_played(&tracks, &stats, 12);
         let mut recent: Vec<&nikgob_library::ReleaseRow> = releases.iter().collect();
         recent.sort_by_key(|r| std::cmp::Reverse(r.release.added_at));
+        let brought = self.lib.releases_of_imported_playlists().unwrap_or_default();
+        recent.retain(|r| !brought.contains(&r.release.id));
         recent.truncate(12);
         let by_id: std::collections::HashMap<_, _> = releases.iter().map(|r| (r.release.id, r)).collect();
         let often: Vec<&nikgob_library::ReleaseRow> = often.iter().filter_map(|id| by_id.get(id).copied()).collect();

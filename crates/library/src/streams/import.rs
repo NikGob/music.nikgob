@@ -311,6 +311,44 @@ impl Library {
         })
     }
 
+    /// The albums in the library only for the playlists an import brought
+    /// (each playlist an import created or synced in, by its import key):
+    /// every track of it in the library is a stream without a file and
+    /// without a like, in no other playlist, and the album is not liked.
+    /// They are in the library and say «стрим», but nobody added them:
+    /// «Недавно добавлено» leaves them out.
+    pub fn releases_of_imported_playlists(&self) -> Result<std::collections::HashSet<ReleaseId>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "WITH imported(id) AS (
+                     SELECT local_id FROM external_id WHERE service = ?1 AND kind = 'playlist'),
+                 brought(id, release_id) AS (
+                     SELECT t.id, t.release_id FROM track t
+                      WHERE t.in_library = 1 AND t.deleted_at IS NULL AND t.release_id IS NOT NULL
+                        AND NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id AND s.kind = 'local_file')
+                        AND NOT EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track' AND l.target_id = t.id
+                                           AND l.deleted = 0)
+                        AND EXISTS (SELECT 1 FROM playlist_entry e JOIN playlist p ON p.id = e.playlist_id
+                                     WHERE e.track_id = t.id AND e.deleted = 0 AND p.deleted = 0
+                                       AND p.id IN imported)
+                        AND NOT EXISTS (SELECT 1 FROM playlist_entry e JOIN playlist p ON p.id = e.playlist_id
+                                         WHERE e.track_id = t.id AND e.deleted = 0 AND p.deleted = 0
+                                           AND p.id NOT IN imported))
+                 SELECT DISTINCT b.release_id FROM brought b
+                  WHERE NOT EXISTS (SELECT 1 FROM track o WHERE o.release_id = b.release_id AND o.in_library = 1
+                                       AND o.deleted_at IS NULL AND o.id NOT IN (SELECT id FROM brought))
+                    AND NOT EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release'
+                                       AND l.target_id = b.release_id AND l.deleted = 0)",
+            )?;
+            let rows = stmt.query_map([IMPORT_SERVICE], |r| r.get::<_, String>(0))?;
+            let mut out = std::collections::HashSet::new();
+            for row in rows {
+                out.insert(parse(&row?)?);
+            }
+            Ok(out)
+        })
+    }
+
     /// Stream-only tracks of `service` that still lack what the service
     /// knows (an import made them from an export file: no length), as
     /// `(track, remote id)`, oldest first. Unavailable sources are left out.
@@ -489,6 +527,45 @@ mod tests {
         assert_eq!(lib.cache_get("disco.x").unwrap(), None);
         lib.cache_put("disco.x", 42, "[1|2]").unwrap();
         assert_eq!(lib.cache_get("disco.x").unwrap(), Some((42, "[1|2]".to_owned())));
+    }
+
+    /// The albums only an import's playlists brought; one the user liked,
+    /// put a song of in a playlist of their own, or has a file of is the
+    /// user's.
+    #[test]
+    fn albums_brought_by_imported_playlists_are_told_apart() {
+        let lib = lib();
+        let song = |id: &str, title: &str, album: &str| {
+            let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), title);
+            t.artists = vec![ArtistRef::new(None, "Artist")];
+            t.album = Some(AlbumRef::new(None, album));
+            lib.ensure_stream_tracks(&[t]).unwrap()[0]
+        };
+        let release = |t: TrackId| lib.get_track(t).unwrap().unwrap().release_id.unwrap();
+        let (a, b, c, d, e) = (
+            song("song0000001", "One", "Brought"),
+            song("song0000002", "Two", "Liked Song"),
+            song("song0000003", "Three", "Own List"),
+            song("song0000004", "Four", "Liked Album"),
+            song("song0000005", "Five", "Mine"),
+        );
+        let imported = lib.create_playlist("Save").unwrap();
+        lib.set_import_key(EntityKind::Playlist, "youtube:save", *imported.id.as_uuid()).unwrap();
+        lib.playlist_add_many(imported.id, &[a, b, c, d]).unwrap();
+        lib.like(b).unwrap();
+        let own = lib.create_playlist("Мой").unwrap();
+        lib.playlist_add(own.id, c).unwrap();
+        lib.like(LikeTarget::Release(release(d))).unwrap();
+        lib.playlist_add(own.id, e).unwrap();
+        assert_eq!(lib.releases_of_imported_playlists().unwrap(), [release(a)].into_iter().collect());
+        // A playlist of no import is the user's own.
+        let plain = lib.create_playlist("Ещё").unwrap();
+        let f = song("song0000006", "Six", "Other");
+        lib.playlist_add(plain.id, f).unwrap();
+        assert!(!lib.releases_of_imported_playlists().unwrap().contains(&release(f)));
+        // The playlist gone: its songs leave the library, nothing to tell.
+        lib.delete_playlist(imported.id).unwrap();
+        assert!(lib.releases_of_imported_playlists().unwrap().is_empty());
     }
 
     #[test]
