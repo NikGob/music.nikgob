@@ -27,7 +27,11 @@
 //!   library's own track, else the song YouTube Music or Deezer lists with
 //!   its title, artists, album and cover, the upload itself only when no
 //!   song agrees ([`super::songs`]; the services are asked once per video, the
-//!   answer kept in the library's cache). From the API they are linked to
+//!   answer kept in the library's cache). A YouTube playlist is imported when
+//!   enough of it is music ([`music_playlist`]); of one that is, a video
+//!   that is no music stays out ([`no_music_video`]). A song the library
+//!   has under a title in another script gets that title as an alias
+//!   ([`super::songs::Shelf::other_title`]). From the API they are linked to
 //!   the service (`playlist_remote`, mode [`Prefs::playlist_sync_default`]);
 //!   a playlist from a file is a snapshot ("разово"), linked when the file
 //!   names its id, otherwise remembered by an import key.
@@ -328,6 +332,15 @@ fn is_music(
     full.get(id).map(|t| t.kind != TrackKind::Upload)
 }
 
+/// A video of a music playlist that stays out: nothing says it is music —
+/// watched on plain YouTube and no music by [`is_music`], no song of the
+/// library or the services found for it (`song`), and its title, when
+/// known, says nothing of music ([`export::music_video_title`]). A video
+/// of unknown kind or title stays in.
+fn no_music_video(kind: Option<bool>, song: bool, title: &str) -> bool {
+    kind == Some(false) && !song && !title.trim().is_empty() && !export::music_video_title(title)
+}
+
 /// Whether a YouTube playlist of an export is music: at least
 /// [`MUSIC_SHARE`] % of its videos whose kind is known are music (with
 /// none known, it is kept). `optimistic` counts the unknown ones as music:
@@ -424,7 +437,19 @@ fn known_song(lib: &Library, shelf: &Shelf, remote: &RemoteId, probe: &Probe) ->
             return Some((t, false));
         }
     }
-    shelf.find(probe).map(|t| (t, true))
+    let t = shelf.find(probe)?;
+    alias(lib, shelf, probe, t);
+    Some((t, true))
+}
+
+/// The probe's title as an alias of the library's track `t` it is, when
+/// that goes by a title in another script ([`Shelf::other_title`]).
+fn alias(lib: &Library, shelf: &Shelf, probe: &Probe, t: TrackId) {
+    if let Some(title) = shelf.other_title(probe, t)
+        && let Err(e) = lib.add_track_alias(t, title, "import")
+    {
+        log::warn!("export: an alias of {t}: {e}");
+    }
 }
 
 /// Stores the plays of an export as events; returns how many were new. A
@@ -807,8 +832,12 @@ async fn read_export(
     };
     let mut found = Vec::new();
     for (remote, hit) in hits {
-        let t = match shelf.find(&Probe::of_track(&hit)) {
-            Some(t) => t,
+        let probe = Probe::of_track(&hit);
+        let t = match shelf.find(&probe) {
+            Some(t) => {
+                alias(&lib, &shelf, &probe, t);
+                t
+            }
             None => match lib.ensure_stream_tracks(std::slice::from_ref(&hit)) {
                 Ok(ids) => ids[0],
                 Err(e) => {
@@ -830,6 +859,17 @@ async fn read_export(
     };
     let plays = data.plays.len();
     let likes: Vec<Wanted> = data.likes.iter().map(wanted_of).collect();
+    // Of a music playlist, the videos that are no music stay out.
+    let keep_video = |i: &Item, list: &str| {
+        let Some(id) = i.id.as_ref().filter(|_| i.service == Service::Youtube) else { return true };
+        let title = full.get(id).map_or(i.title.as_str(), |t| t.title.as_str());
+        let song = songs.contains_key(&RemoteId::new(i.service, id.clone()));
+        if no_music_video(is_music(id, &music, &plain, &full), song, title) {
+            log::info!("export: «{title}» of «{list}» left out: not music");
+            return false;
+        }
+        true
+    };
     let playlists: Vec<PendingPlaylist> = data
         .playlists
         .iter()
@@ -837,7 +877,7 @@ async fn read_export(
             service: p.service,
             name: p.name.clone(),
             remote: p.remote.clone().map(|id| RemoteId::new(p.service, id)),
-            tracks: p.items.iter().map(wanted_of).collect(),
+            tracks: p.items.iter().filter(|i| keep_video(i, &p.name)).map(wanted_of).collect(),
             fetched: None,
         })
         .collect();

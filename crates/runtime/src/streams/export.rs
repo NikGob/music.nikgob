@@ -835,6 +835,29 @@ const MUSIC_TITLE_WORDS: &[&str] = &[
     "ending", "op theme", "ed theme", "feat", "ft", "клип",
 ];
 
+/// Words of a video's title that say it is music besides
+/// [`MUSIC_TITLE_WORDS`]: a fan's upload of a song, a clip edited to one.
+const MUSIC_VIDEO_WORDS: &[&str] = &[
+    "music", "song", "songs", "lyrics", "lyric", "amv", "mad", "cover", "remix", "nightcore", "instrumental", "piano",
+    "theme", "песня", "музыка", "кавер", "ремикс",
+];
+
+/// The same in scripts without spaces between words, found anywhere.
+const MUSIC_VIDEO_MARKS: &[&str] = &[
+    "歌詞", "主題歌", "挿入歌", "歌ってみた", "弾いてみた", "演奏", "サウンドトラック", "オープニング", "エンディング", "劇伴",
+];
+
+/// A video's title says it is music: [`music_title`], or a word of
+/// [`MUSIC_VIDEO_WORDS`] or [`MUSIC_VIDEO_MARKS`].
+pub(crate) fn music_video_title(title: &str) -> bool {
+    let folded = fold(title);
+    let words: String = folded.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
+    let t = format!(" {} ", words.split_whitespace().collect::<Vec<_>>().join(" "));
+    music_title(title)
+        || MUSIC_VIDEO_WORDS.iter().any(|w| t.contains(&format!(" {w} ")))
+        || MUSIC_VIDEO_MARKS.iter().any(|m| folded.contains(m))
+}
+
 /// The title says it is music ([`MUSIC_TITLE_WORDS`]).
 fn music_title(title: &str) -> bool {
     let words: String = fold(title).chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
