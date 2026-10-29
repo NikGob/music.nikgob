@@ -5,8 +5,13 @@
 //! shares, [`SEEDS_PER_PROFILE`] at least for each active one — new
 //! Japanese songs are looked for while ambient fills the days — the best
 //! loved of each as the profile sees them, those played in the last 30
-//! days first; [`SEED_TRACKS`] by affinity without profiles; the [`SEED_ARTISTS`]
-//! artists with the highest affinity, spread over the profiles); the
+//! days first; [`SEED_TRACKS`] by affinity without profiles; and
+//! [`ELSEWHERE_SEEDS`] songs saved in a service's library that the library
+//! lacks, others each day, every other one among the first, so the taste
+//! a user keeps elsewhere looks for new music too, a user with nothing
+//! else as well; the [`SEED_ARTISTS`] artists with the highest affinity,
+//! those of the songs saved elsewhere among them, spread over the
+//! profiles); the
 //! runtime asks the services around each seed (YouTube Music
 //! related / radio for a track, similar artists of YouTube Music and Deezer
 //! and their Deezer top tracks for an artist) and hands the lists back
@@ -72,6 +77,9 @@ pub const W_REGION_FIT: f32 = 1.2;
 pub const W_KNOWN_ARTIST: f32 = 0.6;
 pub const W_SKIP_NEW: f32 = 1.5;
 pub const SEED_ARTISTS: usize = 8;
+/// Songs saved in a service's library that the library lacks seed this
+/// many tracks of a pass besides the others, in turn day by day.
+pub const ELSEWHERE_SEEDS: usize = 4;
 /// Seed tracks were played within this long.
 pub const SEED_RECENT_MS: i64 = 30 * DAY_MS;
 pub const DISCOVERIES: usize = 30;
@@ -295,6 +303,54 @@ pub struct Discovery {
 impl Recs<'_> {
     /// The seeds of a discovery pass (see the module docs).
     pub fn discovery_seeds(&self) -> DiscoverySeeds {
+        let mut s = self.library_seeds();
+        self.add_elsewhere_seeds(&mut s);
+        s
+    }
+
+    /// Today's [`ELSEWHERE_SEEDS`] of the songs saved elsewhere, every
+    /// other one among the first seed tracks, with the profile of their
+    /// artist's sound when the catalog has it.
+    fn add_elsewhere_seeds(&self, s: &mut DiscoverySeeds) {
+        let all = self.taste.saved_elsewhere();
+        if all.is_empty() {
+            return;
+        }
+        let mut order: Vec<&(TrackId, Vec<ArtistId>)> = all.iter().collect();
+        order.sort_by_key(|x| x.0);
+        let n = order.len();
+        let day = self.now().div_euclid(DAY_MS).max(0) as usize;
+        let start = day.wrapping_mul(ELSEWHERE_SEEDS) % n;
+        let mut picks = (0..ELSEWHERE_SEEDS.min(n)).map(|k| order[(start + k) % n]);
+        let mut tracks = Vec::with_capacity(s.tracks.len() + ELSEWHERE_SEEDS);
+        for t in std::mem::take(&mut s.tracks) {
+            tracks.push(t);
+            if let Some((id, artists)) = picks.next() {
+                tracks.push((*id, crate::taste::W_SAVED));
+                s.profiles.extend(artists.iter().find_map(|a| self.artist_profile(*a)).map(|j| (*id, j)));
+            }
+        }
+        for (id, artists) in picks {
+            tracks.push((*id, crate::taste::W_SAVED));
+            s.profiles.extend(artists.iter().find_map(|a| self.artist_profile(*a)).map(|j| (*id, j)));
+        }
+        s.tracks = tracks;
+    }
+
+    /// The profile of the artist's best loved track of the catalog.
+    fn artist_profile(&self, a: ArtistId) -> Option<usize> {
+        let m = self.model.filter(|m| !m.regions.is_empty())?;
+        let now = self.now();
+        self.catalog
+            .of_artist(a)
+            .iter()
+            .map(|&i| i as usize)
+            .max_by(|x, y| m.tracks[*x].aff_long(now).total_cmp(&m.tracks[*y].aff_long(now)).then(y.cmp(x)))
+            .and_then(|i| m.profile_at(i))
+    }
+
+    /// The seeds of the library's tracks and the artists.
+    fn library_seeds(&self) -> DiscoverySeeds {
         let mut s = self.seeds_by_affinity();
         let Some(m) = self.model.filter(|m| !m.regions.is_empty()) else { return s };
         let now = self.now();
@@ -340,17 +396,9 @@ impl Recs<'_> {
         }
         // Artists spread over the profiles of their best loved tracks.
         let mut artists: Vec<(ArtistId, f32)> =
-            self.taste.artist_affinities().filter(|(a, s)| *s > 0.0 && !self.taste.is_disliked_artist(*a)).collect();
+            self.taste.all_artist_affinities().filter(|(a, s)| *s > 0.0 && !self.taste.is_disliked_artist(*a)).collect();
         artists.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        let profile_of_artist = |a: ArtistId| {
-            self.catalog
-                .of_artist(a)
-                .iter()
-                .map(|&i| i as usize)
-                .max_by(|x, y| m.tracks[*x].aff_long(now).total_cmp(&m.tracks[*y].aff_long(now)).then(y.cmp(x)))
-                .and_then(|i| m.profile_at(i))
-        };
-        let items: Vec<((ArtistId, f32), Option<usize>)> = artists.iter().map(|x| (*x, profile_of_artist(x.0))).collect();
+        let items: Vec<((ArtistId, f32), Option<usize>)> = artists.iter().map(|x| (*x, self.artist_profile(x.0))).collect();
         s.artists = crate::regions::spread(&items, &m.profile_share, SEED_ARTISTS);
         s.tracks = tracks;
         s.profiles = profiles;
@@ -373,7 +421,7 @@ impl Recs<'_> {
         tracks.truncate(SEED_TRACKS);
         let mut artists: Vec<(ArtistId, f32)> = self
             .taste
-            .artist_affinities()
+            .all_artist_affinities()
             .filter(|(a, s)| *s > 0.0 && !self.taste.is_disliked_artist(*a))
             .collect();
         artists.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -381,11 +429,12 @@ impl Recs<'_> {
         DiscoverySeeds { tracks, artists, profiles: Vec::new() }
     }
 
-    /// The artists whose discographies to check for new releases.
+    /// The artists whose discographies to check for new releases (those of
+    /// the songs saved elsewhere too).
     pub fn release_artists(&self) -> Vec<ArtistId> {
         let mut artists: Vec<(ArtistId, f32)> = self
             .taste
-            .artist_affinities()
+            .all_artist_affinities()
             .filter(|(a, s)| *s > 0.0 && !self.taste.is_disliked_artist(*a))
             .collect();
         artists.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -919,6 +968,54 @@ mod tests {
         // Without the model: the best loved alone, as before.
         let plain = Recs::new(&cat, &model.taste, &idx).discovery_seeds();
         assert_eq!(plain.tracks.len(), SEED_TRACKS);
+    }
+
+    /// A user whose library is empty but who saved songs in a service's
+    /// library: those songs (some each day, all in turn) and their artists
+    /// seed the new music and the new releases. A user without them has
+    /// the seeds of the library alone.
+    #[test]
+    fn songs_saved_elsewhere_seed_the_new_music() {
+        let now = 1_000 * DAY_MS;
+        let cat = Catalog::new(std::iter::empty());
+        let idx = VectorIndex::new();
+        let elsewhere: Vec<(TrackId, Vec<ArtistId>)> = (0..10).map(|i| (tid(100 + i), vec![aid(50 + (i % 3) as u32)])).collect();
+        let input = TasteInput { saved_elsewhere: elsewhere.clone(), ..Default::default() };
+        let mut seen: HashSet<TrackId> = HashSet::new();
+        for day in 0..3 {
+            let taste = Taste::build(&cat, &input, now + day * DAY_MS);
+            let s = Recs::new(&cat, &taste, &idx).discovery_seeds();
+            assert_eq!(s.tracks.len(), ELSEWHERE_SEEDS);
+            assert!(s.tracks.iter().all(|(t, a)| elsewhere.iter().any(|e| e.0 == *t) && *a > 0.0));
+            let mut artists: Vec<ArtistId> = s.artists.iter().map(|a| a.0).collect();
+            artists.sort();
+            assert_eq!(artists, [aid(50), aid(51), aid(52)]);
+            seen.extend(s.tracks.iter().map(|t| t.0));
+            let mut releases = Recs::new(&cat, &taste, &idx).release_artists();
+            releases.sort();
+            assert_eq!(releases, [aid(50), aid(51), aid(52)]);
+        }
+        assert_eq!(seen.len(), 10, "every song in turn over three days");
+
+        // With a library: every other one among the first seeds.
+        let cat = Catalog::new((0..5).map(|i| info(i, &[0], Some(i))));
+        let events = (0..5)
+            .map(|i| Play::new(tid(i), now - DAY_MS, EventType::Complete, None))
+            .collect::<Vec<_>>();
+        let with = TasteInput { events: events.clone(), saved_elsewhere: elsewhere, ..Default::default() };
+        let taste = Taste::build(&cat, &with, now);
+        let s = Recs::new(&cat, &taste, &idx).discovery_seeds();
+        let ids: Vec<u128> = s.tracks.iter().map(|(t, _)| t.0.as_u128()).collect();
+        assert_eq!(ids.len(), 5 + ELSEWHERE_SEEDS);
+        assert!(ids[1] >= 100 && ids[3] >= 100 && ids[0] < 100 && ids[2] < 100, "{ids:?}");
+        // Without: the library's seeds as they were.
+        let taste = Taste::build(&cat, &TasteInput { events, ..Default::default() }, now);
+        let s = Recs::new(&cat, &taste, &idx).discovery_seeds();
+        assert_eq!(s.tracks.len(), 5);
+        assert!(s.tracks.iter().all(|(t, _)| t.0.as_u128() < 100));
+        assert_eq!(s.artists.iter().map(|a| a.0).collect::<Vec<_>>(), [aid(0)]);
+        let empty = Taste::build(&Catalog::new(std::iter::empty()), &TasteInput::default(), now);
+        assert_eq!(Recs::new(&Catalog::new(std::iter::empty()), &empty, &idx).discovery_seeds(), DiscoverySeeds::default());
     }
 
     /// The seeds go by the profiles' shares, two at least for each active
