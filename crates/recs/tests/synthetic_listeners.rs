@@ -470,8 +470,8 @@ mod mixes {
             let song = l.types.get(l.catalog.tracks()[i].id).copied().unwrap_or_default();
             Basic.suits(&BackgroundTrack { song: &song, title: "Track", album: Some(l.albums[i]), artist: "Artist", background_playlist: false })
         };
-        let day = m.now().div_euclid(DAY);
-        let b = Builder::new(&recs, m, &|_| true, &suits, day, DayPart::Day, Live::default(), Settings::default());
+        let epoch = m.now().div_euclid(DAY) as u64;
+        let b = Builder::new(&recs, m, &|_| true, &suits, epoch, DayPart::Day, Live::default(), Settings::default());
         let (mixes, _) = b.lineup(&Kept::default());
         f(&b, mixes)
     }
@@ -619,6 +619,109 @@ mod mixes {
             assert!(mixes.iter().all(|m| !matches!(m.key, MixKey::Background { .. })));
             assert_eq!(mixes.len(), MOMENTS);
         });
+    }
+
+    /// `n` epochs one after another of `l` (each a start of the app or
+    /// another part of the day), each built twice — the second time as a
+    /// build within the epoch, which must keep it as it is — and the
+    /// moments the lottery could draw in the first.
+    fn epochs(l: &Listener, m: &UserModel, n: usize) -> (Vec<Vec<Mix>>, Vec<MixKey>) {
+        let recs = Recs::new(&l.catalog, &m.taste, &l.index).with_model(m);
+        let suits = |i: usize| {
+            let song = l.types.get(l.catalog.tracks()[i].id).copied().unwrap_or_default();
+            Basic.suits(&BackgroundTrack { song: &song, title: "Track", album: Some(l.albums[i]), artist: "Artist", background_playlist: false })
+        };
+        let mut kept = Kept::default();
+        let (mut out, mut eligible) = (Vec::new(), Vec::new());
+        for e in 0..n {
+            let b = Builder::new(&recs, m, &|_| true, &suits, 0x5eed + e as u64 * 7919, DayPart::Day, Live::default(), Settings::default());
+            if e == 0 {
+                eligible = b.drawn(&Kept::default()).into_iter().filter(|k| b.mix(*k, &Kept::default()).is_some()).collect();
+            }
+            let (mixes, lineup) = b.lineup(&kept);
+            kept.lineup = lineup;
+            kept.keep(&mixes, m);
+            let (again, _) = b.lineup(&kept);
+            let same = |x: &[Mix]| x.iter().map(|m| (m.key, m.tracks.clone())).collect::<Vec<_>>();
+            assert_eq!(same(&again), same(&mixes), "a build within the epoch keeps it");
+            kept = kept.clone().next_epoch(true);
+            out.push(mixes);
+        }
+        (out, eligible)
+    }
+
+    /// Over ten epochs: the lineups are not all one, every moment comes at
+    /// least once, a mix shown in two epochs running has mostly other
+    /// songs, and each epoch's mixes are sensible.
+    fn rotates(name: &str, l: &Listener) {
+        let f = run(l);
+        let (all, eligible) = epochs(l, &f.model, 10);
+        let lineups: HashSet<Vec<MixKey>> = all.iter().map(|x| x.iter().map(|m| m.key).collect()).collect();
+        for x in &all {
+            sensible(name, l, x);
+        }
+        if eligible.len() > MOMENTS {
+            assert!(lineups.len() >= 5, "{name}: {lineups:?}");
+        }
+        for k in &eligible {
+            assert!(all.iter().any(|x| x.iter().any(|m| m.key == *k)), "{name}: {k:?} never came in {lineups:?}");
+        }
+        let mut shared_sum = 0.0;
+        let mut pairs = 0;
+        for w in all.windows(2) {
+            for a in &w[0] {
+                let Some(b) = w[1].iter().find(|b| b.key == a.key) else { continue };
+                let set: HashSet<usize> = a.tracks.iter().copied().collect();
+                shared_sum += b.tracks.iter().filter(|i| set.contains(i)).count() as f32 / a.tracks.len().max(b.tracks.len()) as f32;
+                pairs += 1;
+            }
+        }
+        if pairs > 0 {
+            let shared = shared_sum / pairs as f32;
+            println!("{name}: {} lineups of {} moments, a mix kept shares {shared:.2}", lineups.len(), eligible.len());
+            assert!(shared < 0.6, "{name}: {shared}");
+        }
+    }
+
+    #[test]
+    fn epochs_rotate_for_every_kind_of_listener() {
+        rotates("omnivore", &omnivore());
+        rotates("one_genre", &listener(31, &[style(160, Some(Lang::Russian), 1.0)], &Habits::default()));
+        let styles = [lofi(200, 0.05), style(60, Some(Lang::English), 1.0), style(50, Some(Lang::Japanese), 0.6)];
+        rotates("heavy_background", &listener(7, &styles, &Habits { p_bg: 0.7, bg_styles: vec![0], per_day: 2.2, ..Habits::default() }));
+        let styles = [style(90, Some(Lang::Russian), 1.0), ost(90, 0.5), style(60, Some(Lang::English), 0.5)];
+        let mut cold = listener(35, &styles, &Habits::default());
+        cold.input.events.clear();
+        rotates("cold_start", &cold);
+    }
+
+    /// A heavy repeat listener of a tiny library (forty songs of no
+    /// franchise, played many times a day): what there is, every epoch,
+    /// nothing broken.
+    #[test]
+    fn a_tiny_library_on_repeat() {
+        let l = listener(41, &[style(40, Some(Lang::English), 1.0)], &Habits { per_day: 6.0, days: 60, ..Habits::default() });
+        // Songs of no franchise (two worlds could make no mix).
+        let mut l = l;
+        let tracks: Vec<TrackInfo> = l.catalog.tracks().iter().cloned().map(|mut t| {
+            t.world = None;
+            t
+        }).collect();
+        l.catalog = Catalog::new(tracks);
+        let f = run(&l);
+        let (all, eligible) = epochs(&l, &f.model, 6);
+        for x in &all {
+            assert!(x.len() <= MOMENTS);
+            for m in x {
+                let set: HashSet<usize> = m.tracks.iter().copied().collect();
+                assert!(m.tracks.len() >= MIN_SONGS && set.len() == m.tracks.len(), "«{}» {}", m.title, m.tracks.len());
+            }
+        }
+        assert!(all.iter().all(|x| !x.is_empty()), "no mixes");
+        println!("tiny: {:?}", all.iter().map(|x| x.iter().map(|m| m.title.clone()).collect::<Vec<_>>()).collect::<Vec<_>>());
+        for k in &eligible {
+            assert!(all.iter().any(|x| x.iter().any(|m| m.key == *k)), "{k:?}");
+        }
     }
 
     /// Nothing heard yet: the library's kinds and its two sides, something

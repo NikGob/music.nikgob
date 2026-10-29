@@ -10,16 +10,45 @@ use nikgob_library::{
     ArtistRow, ArtistSortKey, Library, PlaylistSummary, RecTrack, ReleaseRow, ReleaseSortKey, Sort, TrackFactsRow,
     TrackRow, now_ms,
 };
+use nikgob_recs::rng::Rng;
 use nikgob_recs::tiles::franchise;
 use nikgob_view as v;
+use serde::{Deserialize, Serialize};
 
 use crate::streams::plural;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
-/// The shortcuts' plays fade by half in this time.
+/// The shortcuts' plays of now fade by half in this time…
 const HALF_LIFE_MS: f64 = 3.0 * DAY_MS as f64;
+/// …and a place is played now from this score on (one play six days ago).
+const NOW_MIN: f64 = 0.25;
 /// Shortcuts kept (the page shows six, or eight on a wide window).
 pub const SHORTCUTS: usize = 8;
+/// What each place of the shortcuts is drawn from: two of what plays now,
+/// two forgotten favourites, two the library offers by the taste, then one
+/// more of the first two kinds for a wide window.
+const SHORTCUT_SLOTS: [Draw; SHORTCUTS] = [Draw::Now, Draw::Now, Draw::Forgotten, Draw::Forgotten, Draw::Offered, Draw::Offered, Draw::Now, Draw::Forgotten];
+/// The narrow page's shortcuts (shuffled among themselves).
+const SHORTCUTS_NARROW: usize = 6;
+/// A forgotten favourite: this many plays (a like counts two) and no play
+/// for a quarter of the history, three days to three weeks.
+const FORGOTTEN_MIN: f64 = 3.0;
+const FORGOTTEN_DAYS: (i64, i64) = (3, 21);
+/// What the library offers: an artist with this many tracks there or an
+/// album with this many, at most a third of it heard; neither played much.
+const OFFER_ARTIST_TRACKS: u32 = 3;
+const OFFER_ALBUM_TRACKS: u32 = 4;
+const OFFER_PLAYS: u32 = 5;
+/// One artist's places among the shortcuts at most.
+const SHORTCUT_PER_ARTIST: usize = 2;
+/// What an epoch showed weighs this much in the next ones (the epoch
+/// before first); a place played now keeps more of its weight.
+const SHOWN: [f64; 3] = [0.2, 0.5, 0.8];
+const SHOWN_NOW: [f64; 3] = [0.6, 0.85, 1.0];
+/// «Слушать снова» draws by its score to this power.
+const AGAIN_POWER: f64 = 1.5;
+/// What the epochs showed, in the library's cache.
+const SHOWN_KEY: &str = "home.shown";
 /// «Слушать снова»: songs kept, at most this many of one artist.
 const LISTEN_AGAIN: usize = 12;
 const PER_ARTIST: usize = 2;
@@ -33,6 +62,99 @@ const AGAIN_HOT: f32 = 2.0;
 /// a file, at most half of them ever played.
 const SHELF: usize = 12;
 const SHELF_MIN: u32 = 5;
+
+/// Where a shortcut leads, as the epochs keep it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+enum Key {
+    Release(ReleaseId),
+    Playlist(PlaylistId),
+    Artist(ArtistId),
+}
+
+impl Key {
+    fn token(self) -> u64 {
+        let (k, id) = match self {
+            Self::Release(r) => (1u64, r.0.as_u128()),
+            Self::Playlist(p) => (2, p.0.as_u128()),
+            Self::Artist(a) => (3, a.0.as_u128()),
+        };
+        token(id) ^ k.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    }
+}
+
+/// A number of an id for the lotteries.
+fn token(id: u128) -> u64 {
+    (id as u64) ^ ((id >> 64) as u64).rotate_left(17)
+}
+
+/// The kinds of the shortcuts' places ([`SHORTCUT_SLOTS`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Draw {
+    /// What plays now (without a history: the recently added).
+    Now,
+    /// Loved or played much, not lately.
+    Forgotten,
+    /// The library by the taste: an artist and an album hardly played.
+    Offered,
+}
+
+/// What an epoch showed.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct Shown {
+    epoch: String,
+    shortcuts: Vec<Key>,
+    again: Vec<TrackId>,
+    /// Drawn before the taste profiles were read (the first build of a
+    /// run): drawn again once they are.
+    #[serde(default)]
+    provisional: bool,
+}
+
+/// How much less what the epochs before showed weighs now.
+#[derive(Default)]
+struct Exposure {
+    shortcuts: HashMap<Key, (f64, f64)>,
+    again: HashMap<TrackId, f64>,
+}
+
+impl Exposure {
+    /// Of `before` (the latest first).
+    fn of(before: &[Shown]) -> Self {
+        let mut e = Self::default();
+        for (k, s) in before.iter().take(SHOWN.len()).enumerate() {
+            for key in &s.shortcuts {
+                let w = e.shortcuts.entry(*key).or_insert((1.0, 1.0));
+                w.0 *= SHOWN[k];
+                w.1 *= SHOWN_NOW[k];
+            }
+            for t in &s.again {
+                *e.again.entry(*t).or_insert(1.0) *= SHOWN[k];
+            }
+        }
+        e
+    }
+
+    fn shortcut(&self, key: Key, draw: Draw) -> f64 {
+        self.shortcuts.get(&key).map_or(1.0, |w| if draw == Draw::Now { w.1 } else { w.0 })
+    }
+}
+
+/// `items` in the order a weighted lottery of `seed` draws them
+/// (Efraimidis–Spirakis: each its own chance by its token, so one item's
+/// lot does not hang on the others); a weight not positive never comes.
+fn lottery<T: Copy>(items: impl IntoIterator<Item = (T, f64)>, seed: u64, tok: impl Fn(T) -> u64) -> Vec<T> {
+    let mut keyed: Vec<(f64, u64, T)> = items
+        .into_iter()
+        .filter(|(_, w)| *w > 0.0 && w.is_finite())
+        .map(|(x, w)| {
+            let t = tok(x);
+            let u = Rng::derive(seed, t).f64().max(f64::MIN_POSITIVE);
+            (-u.ln() / w, t, x)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    keyed.into_iter().map(|k| k.2).collect()
+}
 
 /// A shortcut before it is drawn.
 pub enum ShortcutRef {
@@ -52,6 +174,39 @@ pub struct HomeV2 {
     pub worlds: Vec<WorldParts>,
 }
 
+/// The home's epoch (the user's decisions of 2026-10-29): a run of the app
+/// within one part of the day. Its shortcuts, «Слушать снова» and «Миксы
+/// для тебя» stay while it lasts, whatever the visits and the builds; a
+/// start of the app or the next part of the day draws them again. Only
+/// what is shown is kept between runs (what each epoch showed, so the next
+/// shows other things), never the run's number: a start is a new epoch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Epoch {
+    /// The run's number and the part of the day («…​.20390.Evening»).
+    pub key: String,
+    pub seed: u64,
+}
+
+impl Epoch {
+    /// The epoch of the run `run` at `now`.
+    pub fn of(run: u64, now: UnixMs, utc_offset_min: i32) -> Self {
+        let (_, _, part) = crate::recs::daylist_key(now, utc_offset_min);
+        let key = format!("{run:016x}.{part}");
+        let seed = key.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, c| (h ^ u64::from(c)).wrapping_mul(0x100_0000_01b3));
+        Self { key, seed }
+    }
+
+    /// The number of this run: `NIKGOB_HOME_EPOCH=n` in a screenshot run or
+    /// the demo (the same home on each), else a new one at each start.
+    pub fn run() -> u64 {
+        let pinned = std::env::var_os("NIKGOB_SHOT").is_some() || std::env::var_os("NIKGOB_DEMO").is_some();
+        pinned
+            .then(|| std::env::var("NIKGOB_HOME_EPOCH").ok()?.trim().parse::<u64>().ok())
+            .flatten()
+            .unwrap_or_else(|| fastrand::u64(..))
+    }
+}
+
 /// What the parts depend on besides the library.
 #[derive(Clone, Default)]
 pub struct Visit {
@@ -67,8 +222,11 @@ pub struct Visit {
     /// The library's sound vectors: the unstarted worlds go by how close
     /// they sound to what plays.
     pub sound: Option<crate::analysis::SoundIndex>,
-    /// The listener's taste profiles: «Слушать снова» draws from each.
+    /// The listener's taste profiles: «Слушать снова» draws from each,
+    /// the shortcuts offer what is close to them.
     pub profiles: Option<std::sync::Arc<crate::recs::TrackProfiles>>,
+    /// The home's epoch (none: nothing kept, the seed 0).
+    pub epoch: Epoch,
 }
 
 impl Visit {
@@ -81,6 +239,7 @@ impl Visit {
             now: now_ms(),
             sound: None,
             profiles: None,
+            epoch: Epoch::default(),
         }
     }
 
@@ -135,39 +294,130 @@ pub fn build(lib: &Library, visit: &Visit) -> HomeV2 {
     let history = !f.starts.is_empty() || !f.liked.is_empty();
     let releases: Vec<ReleaseRow> = lib.releases(0, 20_000, Sort::desc(ReleaseSortKey::Added)).unwrap_or_default();
     let worlds = worlds(&f, &releases, visit);
-    HomeV2 {
-        history,
-        shortcuts: shortcuts(lib, &f, &releases, visit, history),
-        listen_again: listen_again(lib, &f, visit),
-        from_library: shelf(&f, &releases, visit, history),
-        worlds,
+    let from_library = shelf(&f, &releases, visit, history);
+    let places = Places::read(lib, &releases, visit.local_only);
+    // The epoch's shortcuts and «Слушать снова», kept; drawn at its first
+    // visit (again once the taste profiles are read), by what the epochs
+    // before showed.
+    let keyed = !visit.epoch.key.is_empty();
+    let mut shown: Vec<Shown> =
+        if keyed { lib.cache_get(SHOWN_KEY).ok().flatten().and_then(|(_, json)| serde_json::from_str(&json).ok()).unwrap_or_default() } else { Vec::new() };
+    let ours = keyed && shown.first().is_some_and(|s| s.epoch == visit.epoch.key);
+    let provisional = visit.profiles.is_none();
+    let kept = shown.first().filter(|s| ours && (provisional || !s.provisional)).cloned();
+    let exposure = Exposure::of(if ours { &shown[1..] } else { &shown[..] });
+    let shelved: HashSet<ReleaseId> = from_library.iter().take(SHORTCUTS_NARROW).map(|a| a.0.release.id).collect();
+    let draw = |exposure: &Exposure| shortcuts(lib, &f, &releases, &places, visit, history, &shelved, exposure);
+    let (shortcuts, listen_again) = match &kept {
+        Some(k) => {
+            let mut sc: Vec<(Key, ShortcutRef)> = k.shortcuts.iter().filter_map(|key| Some((*key, places.get(*key)?))).collect();
+            if sc.len() < k.shortcuts.len() {
+                // Something of it gone: the epoch's draw fills its place.
+                let taken: HashSet<Key> = sc.iter().map(|x| x.0).collect();
+                let more: Vec<(Key, ShortcutRef)> = draw(&exposure).into_iter().filter(|x| !taken.contains(&x.0)).collect();
+                sc.extend(more.into_iter().take(k.shortcuts.len() - sc.len()));
+            }
+            let fits = |t: &TrackId| f.rows.get(t).is_some_and(|r| r.in_library && (r.has_local || !visit.local_only));
+            let again = k.again.iter().filter(|t| fits(t)).filter_map(|t| lib.get_track_row(*t).ok().flatten()).collect();
+            (sc, again)
+        }
+        None => (draw(&exposure), listen_again(lib, &f, visit, &exposure)),
+    };
+    if keyed && kept.is_none() {
+        let now = Shown {
+            epoch: visit.epoch.key.clone(),
+            shortcuts: shortcuts.iter().map(|x| x.0).collect(),
+            again: listen_again.iter().map(|t: &TrackRow| t.id).collect(),
+            provisional,
+        };
+        if ours {
+            shown[0] = now;
+        } else {
+            shown.insert(0, now);
+        }
+        shown.truncate(SHOWN.len() + 1);
+        if let Ok(json) = serde_json::to_string(&shown)
+            && let Err(e) = lib.cache_put(SHOWN_KEY, visit.now, &json)
+        {
+            log::warn!("home: keeping what it shows: {e}");
+        }
+    }
+    HomeV2 { history, shortcuts: shortcuts.into_iter().map(|x| x.1).collect(), listen_again, from_library, worlds }
+}
+
+/// The places a shortcut can lead to, as the page shows them.
+struct Places<'a> {
+    releases: HashMap<ReleaseId, &'a ReleaseRow>,
+    playlists: HashMap<PlaylistId, PlaylistSummary>,
+    artists: HashMap<ArtistId, ArtistRow>,
+    local_only: bool,
+}
+
+impl<'a> Places<'a> {
+    fn read(lib: &Library, releases: &'a [ReleaseRow], local_only: bool) -> Self {
+        Self {
+            releases: releases.iter().map(|r| (r.release.id, r)).collect(),
+            playlists: lib.list_playlists().unwrap_or_default().into_iter().filter_map(|p| Some((p.id?, p))).collect(),
+            artists: lib.artists(0, 20_000, Sort::asc(ArtistSortKey::Name)).unwrap_or_default().into_iter().map(|a| (a.artist.id, a)).collect(),
+            local_only,
+        }
+    }
+
+    /// The shortcut of `key`, if it has something to play.
+    fn get(&self, key: Key) -> Option<ShortcutRef> {
+        match key {
+            Key::Release(r) => {
+                let r = self.releases.get(&r).filter(|r| r.local_tracks > 0 || (!self.local_only && r.known_tracks > 0))?;
+                Some(ShortcutRef::Release((*r).clone()))
+            }
+            Key::Playlist(p) => Some(ShortcutRef::Playlist(self.playlists.get(&p).filter(|p| p.track_count > 0)?.clone())),
+            Key::Artist(a) => Some(ShortcutRef::Artist(self.artists.get(&a).filter(|a| a.local_track_count > 0 || !self.local_only)?.clone())),
+        }
+    }
+
+    /// The artist a shortcut is of (a playlist's: none).
+    fn artist(&self, key: Key) -> Option<ArtistId> {
+        match key {
+            Key::Release(r) => self.releases.get(&r).and_then(|r| r.release.artist_credit.artist_ids().next()),
+            Key::Artist(a) => Some(a),
+            Key::Playlist(_) => None,
+        }
     }
 }
 
-/// The shortcuts: what the plays of the last days come from — the playlist
-/// they started in, the artist page, else the album — by plays that fade
-/// with a half-life of three days. Without a history: the recently added.
-fn shortcuts(lib: &Library, f: &Facts, releases: &[ReleaseRow], visit: &Visit, history: bool) -> Vec<ShortcutRef> {
-    let by_id: HashMap<ReleaseId, &ReleaseRow> = releases.iter().map(|r| (r.release.id, r)).collect();
-    let fits = |r: &ReleaseRow| r.local_tracks > 0 || (!visit.local_only && r.known_tracks > 0);
-    if !history {
-        let recent = crate::home::recently_added(lib, releases.iter().filter(|r| fits(r)).cloned(), SHORTCUTS);
-        return recent.into_iter().map(ShortcutRef::Release).collect();
-    }
-    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-    enum Key {
-        Release(ReleaseId),
-        Playlist(PlaylistId),
-        Artist(ArtistId),
-    }
-    let playlists = lib.playlist_tracks().unwrap_or_default();
+/// The shortcuts of an epoch (the user's decisions of 2026-10-29), each
+/// place of [`SHORTCUT_SLOTS`] by its own lottery of the epoch's seed: what
+/// plays now — the playlist the plays of the last days started in, the
+/// artist page, else the album, by plays fading with a half-life of three
+/// days, not always the strict top; forgotten favourites — played much or
+/// loved, not for a quarter of the history; what the library offers by the
+/// taste ([`offered`]). A kind with nothing left gives its place to the
+/// others, then to the library's albums by their likes; what the epochs
+/// before showed is less likely, one artist two places at most. Without a
+/// history: the recently added, the library by the taste and the rest.
+/// The six of a narrow page are shuffled among themselves, so are the two
+/// more.
+#[allow(clippy::too_many_arguments)]
+fn shortcuts(
+    lib: &Library,
+    f: &Facts,
+    releases: &[ReleaseRow],
+    places: &Places<'_>,
+    visit: &Visit,
+    history: bool,
+    shelved: &HashSet<ReleaseId>,
+    exposure: &Exposure,
+) -> Vec<(Key, ShortcutRef)> {
+    let seed = visit.epoch.seed;
+    let mut now: HashMap<Key, f64> = HashMap::new();
+    let mut long: HashMap<Key, f64> = HashMap::new();
+    let mut last: HashMap<Key, UnixMs> = HashMap::new();
     let mut in_playlist: HashMap<TrackId, PlaylistId> = HashMap::new();
-    for p in &playlists {
+    for p in &lib.playlist_tracks().unwrap_or_default() {
         for t in &p.tracks {
             in_playlist.entry(*t).or_insert(p.id);
         }
     }
-    let mut score: HashMap<Key, f64> = HashMap::new();
     for (ts, t, ctx) in &f.starts {
         let Some(row) = f.rows.get(t) else { continue };
         let key = match ctx {
@@ -178,51 +428,165 @@ fn shortcuts(lib: &Library, f: &Facts, releases: &[ReleaseRow], visit: &Visit, h
         .or_else(|| row.release.map(Key::Release));
         let Some(key) = key else { continue };
         let age = (visit.now - ts).max(0) as f64;
-        *score.entry(key).or_default() += 0.5_f64.powf(age / HALF_LIFE_MS);
+        *now.entry(key).or_default() += 0.5_f64.powf(age / HALF_LIFE_MS);
+        *long.entry(key).or_default() += 1.0;
+        last.insert(key, *ts);
     }
-    let mut ranked: Vec<(Key, f64)> = score.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let summaries: HashMap<PlaylistId, PlaylistSummary> =
-        lib.list_playlists().unwrap_or_default().into_iter().filter_map(|p| Some((p.id?, p))).collect();
-    let mut artists: Option<HashMap<ArtistId, ArtistRow>> = None;
+    for t in &f.liked {
+        let Some(row) = f.rows.get(t).filter(|r| r.in_library) else { continue };
+        if let Some(key) = row.release.map(Key::Release).or_else(|| row.artists.first().copied().map(Key::Artist)) {
+            *long.entry(key).or_default() += 2.0;
+        }
+    }
+    let ok = |k: Key| places.get(k).is_some() && !matches!(k, Key::Release(r) if shelved.contains(&r));
+    let tok = |k: Key| k.token();
+    let playing = |k: &Key| now.get(k).is_some_and(|s| *s >= NOW_MIN);
+    let first = f.starts.first().map_or(visit.now, |s| s.0);
+    let forget = ((visit.now - first) / 4).clamp(FORGOTTEN_DAYS.0 * DAY_MS, FORGOTTEN_DAYS.1 * DAY_MS);
+    let now_drawn: Vec<Key> = if history {
+        let playing_now = now.iter().filter(|(k, _)| playing(k) && ok(**k));
+        lottery(playing_now.map(|(k, s)| (*k, s * exposure.shortcut(*k, Draw::Now))), seed ^ 0x006e_6f77, tok)
+    } else {
+        let recent = crate::home::recently_added(lib, releases.iter().filter(|r| ok(Key::Release(r.release.id))).cloned(), SHORTCUTS * 2);
+        let recent = recent.iter().enumerate().map(|(n, r)| {
+            let k = Key::Release(r.release.id);
+            (k, exposure.shortcut(k, Draw::Now) / (1.0 + n as f64))
+        });
+        lottery(recent, seed ^ 0x006e_6f77, tok)
+    };
+    let forgotten = long.iter().filter(|(k, l)| **l >= FORGOTTEN_MIN && ok(**k) && !playing(k) && last.get(*k).is_none_or(|ts| visit.now - ts >= forget));
+    let forgotten = lottery(forgotten.map(|(k, l)| (*k, l * exposure.shortcut(*k, Draw::Forgotten))), seed ^ 0x006f_6c64, tok);
+    let offered = offered(f, places, visit, shelved, exposure, &|k: &Key| playing(k));
+    // The rest: the library's albums by their likes and their size.
+    let mut liked_in: HashMap<ReleaseId, f64> = HashMap::new();
+    for t in &f.liked {
+        if let Some(r) = f.rows.get(t).and_then(|r| r.release) {
+            *liked_in.entry(r).or_default() += 1.0;
+        }
+    }
+    let rest = releases.iter().filter(|r| ok(Key::Release(r.release.id))).map(|r| {
+        let k = Key::Release(r.release.id);
+        let size = f64::from(r.local_tracks.max(r.known_tracks).max(1)).sqrt();
+        (k, (1.0 + liked_in.get(&r.release.id).copied().unwrap_or(0.0)) * size * exposure.shortcut(k, Draw::Forgotten))
+    });
+    let rest = lottery(rest, seed ^ 0x7265_7374, tok);
+    let mut lists = [now_drawn.into_iter(), forgotten.into_iter(), offered.into_iter(), rest.into_iter()];
+    let mut out: Vec<(Key, ShortcutRef)> = Vec::new();
+    let mut taken: HashSet<Key> = HashSet::new();
+    let mut per_artist: HashMap<ArtistId, usize> = HashMap::new();
+    for slot in SHORTCUT_SLOTS {
+        let order = match slot {
+            Draw::Now => [0, 1, 2, 3],
+            Draw::Forgotten => [1, 0, 2, 3],
+            Draw::Offered => [2, 1, 0, 3],
+        };
+        'slot: for g in order {
+            for key in lists[g].by_ref() {
+                let artist = places.artist(key);
+                if taken.contains(&key) || artist.is_some_and(|a| per_artist.get(&a).copied().unwrap_or(0) >= SHORTCUT_PER_ARTIST) {
+                    continue;
+                }
+                let Some(sc) = places.get(key) else { continue };
+                taken.insert(key);
+                if let Some(a) = artist {
+                    *per_artist.entry(a).or_default() += 1;
+                }
+                out.push((key, sc));
+                break 'slot;
+            }
+        }
+    }
+    let mut rng = Rng::derive(seed, 0x7368_7566);
+    let narrow = out.len().min(SHORTCUTS_NARROW);
+    rng.shuffle(&mut out[..narrow]);
+    rng.shuffle(&mut out[narrow..]);
+    out
+}
+
+/// What the library offers by the taste: artists with a few tracks there
+/// and albums of which at most a third was heard, neither played much, by
+/// how close their songs are to the listener's taste profiles (by the
+/// profiles' shares; without profiles, all alike) and their likes; an
+/// artist and an album by turns. `playing` tells what plays now (left to
+/// the shortcuts of now).
+fn offered(f: &Facts, places: &Places<'_>, visit: &Visit, shelved: &HashSet<ReleaseId>, exposure: &Exposure, playing: &dyn Fn(&Key) -> bool) -> Vec<Key> {
+    #[derive(Default)]
+    struct Tally {
+        n: u32,
+        fit: f64,
+        liked: u32,
+        plays: u32,
+        heard: u32,
+    }
+    let profiles = visit.profiles.as_deref().filter(|p| !p.of.is_empty());
+    let top = profiles.map_or(1.0, |p| p.shares.iter().copied().fold(0.0f32, f32::max).max(1e-6));
+    let fit = |t: &TrackId| -> f64 {
+        match profiles {
+            Some(p) => p.of.get(t).and_then(|j| p.shares.get(*j)).filter(|s| **s >= nikgob_recs::regions::ACTIVE_SHARE).map_or(0.0, |s| f64::from(s / top)),
+            None => 0.5,
+        }
+    };
+    let mut plays: HashMap<TrackId, u32> = HashMap::new();
+    for (_, t, _) in &f.starts {
+        *plays.entry(*t).or_default() += 1;
+    }
+    let mut artists: HashMap<ArtistId, Tally> = HashMap::new();
+    let mut albums: HashMap<ReleaseId, Tally> = HashMap::new();
+    for (t, row) in &f.rows {
+        if !row.in_library || (visit.local_only && !row.has_local) {
+            continue;
+        }
+        let (x, p, l) = (fit(t), plays.get(t).copied().unwrap_or(0), u32::from(f.liked.contains(t)));
+        let add = |tally: &mut Tally| {
+            tally.n += 1;
+            tally.fit += x;
+            tally.liked += l;
+            tally.plays += p;
+            tally.heard += u32::from(p > 0);
+        };
+        if let Some(a) = row.artists.first() {
+            add(artists.entry(*a).or_default());
+        }
+        if let Some(r) = row.release {
+            add(albums.entry(r).or_default());
+        }
+    }
+    let worth = |t: &Tally| t.fit / f64::from(t.n.max(1)) * (1.0 + 0.5 * f64::from(t.liked.min(4)));
+    let near = |t: &Tally| t.fit / f64::from(t.n.max(1)) >= 0.2;
+    let various = |a: &ArtistId| places.artists.get(a).is_some_and(|a| a.artist.name.trim().eq_ignore_ascii_case("various artists"));
+    let artists = artists.iter().filter(|(a, t)| t.n >= OFFER_ARTIST_TRACKS && t.plays <= OFFER_PLAYS && near(t) && !various(a)).map(|(a, t)| {
+        let k = Key::Artist(*a);
+        (k, worth(t) * f64::from(t.n).ln_1p() * exposure.shortcut(k, Draw::Offered))
+    });
+    let artists: Vec<Key> = lottery(artists.filter(|(k, _)| places.get(*k).is_some() && !playing(k)), visit.epoch.seed ^ 0x0061_7274, Key::token);
+    let albums = albums.iter().filter(|(r, t)| t.n >= OFFER_ALBUM_TRACKS && t.heard * 3 <= t.n && t.plays <= OFFER_PLAYS && near(t) && !shelved.contains(r)).map(|(r, t)| {
+        let k = Key::Release(*r);
+        (k, worth(t) * exposure.shortcut(k, Draw::Offered))
+    });
+    let albums: Vec<Key> = lottery(albums.filter(|(k, _)| places.get(*k).is_some() && !playing(k)), visit.epoch.seed ^ 0x0061_6c62, Key::token);
+    let (mut a, mut b) = (artists.into_iter(), albums.into_iter());
+    if visit.epoch.seed & 1 == 1 {
+        std::mem::swap(&mut a, &mut b);
+    }
     let mut out = Vec::new();
-    for (key, _) in ranked {
-        if out.len() == SHORTCUTS {
+    loop {
+        let (x, y) = (a.next(), b.next());
+        if x.is_none() && y.is_none() {
             break;
         }
-        match key {
-            Key::Release(r) => {
-                if let Some(r) = by_id.get(&r).filter(|r| fits(r)) {
-                    out.push(ShortcutRef::Release((*r).clone()));
-                }
-            }
-            Key::Playlist(p) => {
-                if let Some(p) = summaries.get(&p).filter(|p| p.track_count > 0) {
-                    out.push(ShortcutRef::Playlist(p.clone()));
-                }
-            }
-            Key::Artist(a) => {
-                let all = artists.get_or_insert_with(|| {
-                    lib.artists(0, 20_000, Sort::asc(ArtistSortKey::Name))
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|a| (a.artist.id, a))
-                        .collect()
-                });
-                if let Some(a) = all.get(&a).filter(|a| a.local_track_count > 0 || !visit.local_only) {
-                    out.push(ShortcutRef::Artist(a.clone()));
-                }
-            }
-        }
+        out.extend(x);
+        out.extend(y);
     }
     out
 }
 
-/// «Слушать снова»: liked or replayed songs not played for a few days, the
-/// most loved first (at night what is played at night weighs more), two
-/// of one artist at most, spread over the listener's taste profiles by
-/// their shares (each active one at least once, [`nikgob_recs::regions::spread`]).
-fn listen_again(lib: &Library, f: &Facts, visit: &Visit) -> Vec<TrackRow> {
+/// «Слушать снова»: liked or replayed songs not played for a few days, drawn
+/// by the epoch's lottery by how loved they are (at night what is played at
+/// night weighs more) to the power [`AGAIN_POWER`], what the epochs before
+/// showed less likely ([`SHOWN`]); two of one artist at most, spread over
+/// the listener's taste profiles by their shares (each active one at least
+/// once, [`nikgob_recs::regions::spread`]).
+fn listen_again(lib: &Library, f: &Facts, visit: &Visit, exposure: &Exposure) -> Vec<TrackRow> {
     let first = f.starts.first().map_or(visit.now, |s| s.0);
     let days = if visit.now - first >= 365 * DAY_MS { AGAIN_DAYS_LONG } else { AGAIN_DAYS };
     let night_now = is_night(visit.now, visit.utc_offset_min);
@@ -259,11 +623,12 @@ fn listen_again(lib: &Library, f: &Facts, visit: &Visit) -> Vec<TrackRow> {
         }
         scored.push((s, t));
     }
-    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let weighed = scored.into_iter().map(|(s, t)| (t, f64::from(s.max(0.05)).powf(AGAIN_POWER) * exposure.again.get(&t).copied().unwrap_or(1.0)));
+    let drawn = lottery(weighed, visit.epoch.seed ^ 0x0061_676e, |t: TrackId| token(t.0.as_u128()));
     let mut per_artist: HashMap<Option<ArtistId>, usize> = HashMap::new();
     let mut songs = HashSet::new();
     let mut eligible: Vec<(TrackId, Option<usize>)> = Vec::new();
-    for (_, t) in scored {
+    for t in drawn {
         if eligible.len() == LISTEN_AGAIN * 4 {
             break;
         }
@@ -1310,5 +1675,209 @@ mod tests {
         let hidden = Visit { hidden_worlds: vec!["made in abyss".into()], ..visit };
         assert!(build(&lib, &hidden).worlds.is_empty());
         assert!(world(&lib, &hidden, "made in abyss").is_some());
+    }
+
+    /// A synthetic library: `artists` artists of `albums` albums of
+    /// `tracks` tracks, each with a file; the ids by artist, album, track.
+    fn synth(lib: &Library, artists: usize, albums: usize, tracks: usize) -> Vec<Vec<Vec<TrackId>>> {
+        use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+        let mut out = Vec::new();
+        for a in 0..artists {
+            let name = format!("Artist {a}");
+            let artist = lib.upsert_artist(&Artist::new(&name)).unwrap();
+            let credit = ArtistCredit::single(&name, Some(artist.id));
+            let mut of_artist = Vec::new();
+            for b in 0..albums {
+                let mut r = Release::new(format!("Album {a}.{b}"), credit.clone());
+                r.year = Some(2000 + b as i32);
+                let r = lib.upsert_release(&r).unwrap();
+                let mut album = Vec::new();
+                for n in 0..tracks {
+                    let mut t = Track::new(format!("Song {a}.{b}.{n}"), credit.clone());
+                    t.release_id = Some(r.id);
+                    t.track_no = n as u32 + 1;
+                    t.duration_ms = Some(200_000);
+                    let t = lib.upsert_track(&t).unwrap();
+                    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("x/{a}/{b}/{n}.flac"), Codec::Flac)).unwrap();
+                    album.push(t.id);
+                }
+                of_artist.push(album);
+            }
+            out.push(of_artist);
+        }
+        out
+    }
+
+    fn play(lib: &Library, t: TrackId, ts: UnixMs) {
+        use nikgob_core::model::Event;
+        lib.record_event_raw(&Event::new(t, EventType::Start, ts, lib.device_id())).unwrap();
+        lib.record_event_raw(&Event::new(t, EventType::Complete, ts + 200_000, lib.device_id())).unwrap();
+    }
+
+    /// Every track of the library in one taste profile.
+    fn one_profile(lib: &Library) -> std::sync::Arc<crate::recs::TrackProfiles> {
+        let of = lib.rec_tracks().unwrap().into_iter().map(|t| (t.id, 0)).collect();
+        std::sync::Arc::new(crate::recs::TrackProfiles { of, shares: vec![1.0] })
+    }
+
+    fn sc_key(s: &ShortcutRef) -> String {
+        match s {
+            ShortcutRef::Release(r) => format!("r {}", r.release.title),
+            ShortcutRef::Playlist(p) => format!("p {}", p.name),
+            ShortcutRef::Artist(a) => format!("a {}", a.artist.name),
+        }
+    }
+
+    fn picks(h: &HomeV2) -> (Vec<String>, Vec<TrackId>) {
+        (h.shortcuts.iter().map(sc_key).collect(), h.listen_again.iter().map(|t| t.id).collect())
+    }
+
+    /// An omnivore with a history: twelve artists of two albums; four of
+    /// them played these days, six played much two months ago, some songs
+    /// liked. In one epoch the home is the same at every visit, after a
+    /// play too; ten epochs draw ten compositions, each with what plays
+    /// now, a forgotten favourite and what the library offers, and every
+    /// album played now or long ago comes at least once.
+    #[test]
+    fn the_home_keeps_its_epoch_and_draws_again_in_the_next() {
+        let lib = Library::open_in_memory().unwrap();
+        let ids = synth(&lib, 12, 2, 6);
+        let now = 400 * DAY_MS + 13 * 3_600_000;
+        let mut k = 0i64;
+        for artist in &ids[..4] {
+            for day in 0..6 {
+                for t in &artist[0][..4] {
+                    k += 1;
+                    play(&lib, *t, now - (day + 1) * DAY_MS / 2 - k * 1000);
+                }
+            }
+        }
+        for artist in &ids[4..10] {
+            for round in 0..4 {
+                for t in &artist[0] {
+                    k += 1;
+                    play(&lib, *t, now - 60 * DAY_MS + round * DAY_MS - k * 1000);
+                }
+            }
+        }
+        for artist in &ids[..10] {
+            lib.like(artist[0][5]).unwrap();
+        }
+        let profiles = one_profile(&lib);
+        let visit = |run: u64| Visit { now, utc_offset_min: 0, epoch: Epoch::of(run, now, 0), profiles: Some(profiles.clone()), ..Visit::default() };
+        let first = build(&lib, &visit(1));
+        let (sc, again) = picks(&first);
+        assert_eq!(sc.len(), SHORTCUTS, "{sc:?}");
+        assert_eq!(again.len(), LISTEN_AGAIN, "{again:?}");
+        assert_eq!(picks(&build(&lib, &visit(1))), (sc.clone(), again.clone()), "the next visit of the epoch");
+        // A song played from «Слушать снова»: it stays for the epoch.
+        play(&lib, again[0], now + 60_000);
+        let later = Visit { now: now + 120_000, ..visit(1) };
+        assert_eq!(picks(&build(&lib, &later)), (sc.clone(), again.clone()), "after a play");
+
+        let now_albums: Vec<String> = (0..4).map(|a| format!("r Album {a}.0")).collect();
+        let old_albums: Vec<String> = (4..10).map(|a| format!("r Album {a}.0")).collect();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut songs: HashSet<TrackId> = HashSet::new();
+        let mut lineups: HashSet<Vec<String>> = HashSet::new();
+        let mut before: Option<Vec<TrackId>> = None;
+        for run in 2..12 {
+            let h = build(&lib, &visit(run));
+            let (sc, again) = picks(&h);
+            println!("{run}: {sc:?}");
+            assert_eq!(sc.len(), SHORTCUTS);
+            assert_eq!(sc.iter().collect::<HashSet<_>>().len(), sc.len(), "no shortcut twice: {sc:?}");
+            let narrow = &sc[..SHORTCUTS_NARROW];
+            assert!(narrow.iter().any(|s| now_albums.contains(s)), "what plays now: {sc:?}");
+            assert!(narrow.iter().any(|s| old_albums.contains(s)), "a forgotten favourite: {sc:?}");
+            assert!(narrow.iter().any(|s| !now_albums.contains(s) && !old_albums.contains(s)), "what the library offers: {sc:?}");
+            for s in &sc {
+                *seen.entry(s.clone()).or_default() += 1;
+            }
+            if let Some(b) = &before {
+                let same = again.iter().filter(|t| b.contains(t)).count();
+                assert!(same <= LISTEN_AGAIN / 2, "«Слушать снова» shares {same} with the epoch before");
+            }
+            songs.extend(again.iter().copied());
+            before = Some(again);
+            lineups.insert(sc);
+        }
+        assert!(lineups.len() >= 8, "{lineups:?}");
+        for a in now_albums.iter().chain(&old_albums) {
+            assert!(seen.contains_key(a), "{a} never came: {seen:?}");
+        }
+        // Every song liked or played much long ago (four of six of each
+        // forgotten album, the liked of all) comes at least once.
+        let mut pool: HashSet<TrackId> = (4..10).flat_map(|a| ids[a][0].iter().copied()).chain((0..4).map(|a| ids[a][0][5])).collect();
+        pool.remove(&again[0]);
+        let missing: Vec<&TrackId> = pool.iter().filter(|t| !songs.contains(t)).collect();
+        assert!(missing.is_empty(), "{} of {} never came", missing.len(), pool.len());
+    }
+
+    /// Nothing heard, nothing liked: the shortcuts are the recently added
+    /// and the library, other ones in each epoch; nothing to hear again.
+    #[test]
+    fn a_cold_start_has_shortcuts_of_the_library() {
+        let lib = Library::open_in_memory().unwrap();
+        synth(&lib, 6, 3, 5);
+        let now = 400 * DAY_MS;
+        let mut lineups = HashSet::new();
+        for run in 0..6 {
+            let visit = Visit { now, epoch: Epoch::of(run, now, 0), ..Visit::default() };
+            let h = build(&lib, &visit);
+            let (sc, again) = picks(&h);
+            assert!(!h.history && again.is_empty());
+            assert_eq!(sc.len(), SHORTCUTS, "{sc:?}");
+            assert_eq!(sc.iter().collect::<HashSet<_>>().len(), sc.len(), "{sc:?}");
+            lineups.insert(sc);
+        }
+        assert!(lineups.len() >= 4, "{lineups:?}");
+    }
+
+    /// One artist on repeat, two albums: the few places there are, each
+    /// once, nothing breaks; whatever was played these days does not come
+    /// to «Слушать снова».
+    #[test]
+    fn a_tiny_library_on_repeat() {
+        let lib = Library::open_in_memory().unwrap();
+        let ids = synth(&lib, 1, 2, 5);
+        let now = 400 * DAY_MS;
+        for k in 0..300 {
+            play(&lib, ids[0][(k / 5) % 2][k % 5], now - DAY_MS + k as i64 * 60_000);
+        }
+        let profiles = one_profile(&lib);
+        for run in 0..5 {
+            let visit = Visit { now: now + DAY_MS / 2, epoch: Epoch::of(run, now, 0), profiles: Some(profiles.clone()), ..Visit::default() };
+            let h = build(&lib, &visit);
+            let (sc, again) = picks(&h);
+            assert!((1..=3).contains(&sc.len()), "{sc:?}");
+            assert_eq!(sc.iter().collect::<HashSet<_>>().len(), sc.len(), "{sc:?}");
+            assert!(again.is_empty(), "{again:?}");
+        }
+    }
+
+    /// One genre, one profile, one album on repeat lately, the rest of the
+    /// library never touched: what the library offers changes with the
+    /// epochs and every artist of it comes in time, as itself or its album.
+    #[test]
+    fn one_genre_is_offered_the_rest_of_its_library() {
+        let lib = Library::open_in_memory().unwrap();
+        let ids = synth(&lib, 16, 1, 6);
+        let now = 400 * DAY_MS;
+        for k in 0..40 {
+            play(&lib, ids[0][0][k % 6], now - DAY_MS - k as i64 * 3_600_000);
+        }
+        let profiles = one_profile(&lib);
+        let mut offered: HashSet<String> = HashSet::new();
+        for run in 0..10 {
+            let visit = Visit { now, epoch: Epoch::of(run, now, 0), profiles: Some(profiles.clone()), ..Visit::default() };
+            let (sc, _) = picks(&build(&lib, &visit));
+            assert_eq!(sc.iter().collect::<HashSet<_>>().len(), sc.len(), "{sc:?}");
+            assert!(sc.contains(&"r Album 0.0".to_owned()), "what plays now: {sc:?}");
+            offered.extend(sc);
+        }
+        for a in 1..16 {
+            assert!(offered.contains(&format!("a Artist {a}")) || offered.contains(&format!("r Album {a}.0")), "Artist {a}: {offered:?}");
+        }
     }
 }
