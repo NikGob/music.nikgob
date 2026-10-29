@@ -1775,6 +1775,23 @@ impl ModelPreview {
         Ok(Self { snap, history })
     }
 
+    /// The seeds of a pass of «Новое» now: the tracks, then the artists,
+    /// a line each, and the artists whose new releases are looked for.
+    pub fn new_music_seeds(&self, lib: &Library) -> (Vec<String>, Vec<String>) {
+        let recs = self.snap.recs();
+        let seeds = recs.discovery_seeds();
+        let track = |t: TrackId| lib.get_track(t).ok().flatten().map_or_else(|| t.to_string(), |t| format!("«{}» {}", t.title, t.artist_credit.display()));
+        let artist = |a: ArtistId| lib.get_artist(a).ok().flatten().map_or_else(|| a.to_string(), |a| a.name);
+        let elsewhere: HashSet<TrackId> = self.snap.model.taste.saved_elsewhere().iter().map(|s| s.0).collect();
+        let mut lines: Vec<String> = seeds
+            .tracks
+            .iter()
+            .map(|(t, a)| format!("{} {a:.2}{}", track(*t), if elsewhere.contains(t) { " (saved elsewhere)" } else { "" }))
+            .collect();
+        lines.extend(seeds.artists.iter().map(|(a, s)| format!("artist {} {s:.2}", artist(*a))));
+        (lines, recs.release_artists().into_iter().map(artist).collect())
+    }
+
     /// The playlists the user plays in the background, by name.
     pub fn background_playlists(&self, lib: &Library) -> Vec<String> {
         let names: HashMap<ArtistId, String> = lib.artist_names().unwrap_or_default().into_iter().collect();
