@@ -824,6 +824,48 @@ fn an_album_page_with_one_file_shows_the_whole_album_from_a_service() {
     assert_eq!(lib.tracks_of_release_all(release.id).unwrap().len(), 4);
 }
 
+/// Under «Только скачанное» an album with one file plays that file alone:
+/// the rest of its tracklist, found on a service after it started, does not
+/// join the queue.
+#[test]
+fn only_downloaded_keeps_an_albums_tracklist_found_later_out_of_the_queue() {
+    use nikgob_core::model::{Artist, ArtistCredit, Release, Track};
+    let lib = Library::open_in_memory().unwrap();
+    let kino = lib.upsert_artist(&Artist::new("Кино")).unwrap();
+    let credit = ArtistCredit::single("Кино", Some(kino.id));
+    let release = lib.upsert_release(&Release::new("Группа крови", credit.clone())).unwrap();
+    let mut t = Track::new("Группа крови", credit);
+    t.release_id = Some(release.id);
+    t.duration_ms = Some(284_500);
+    let file = lib.upsert_track(&t).unwrap();
+    lib.add_source(&Source::new(file.id, SourceKind::LocalFile, "Music/g.flac", Codec::Flac)).unwrap();
+    let yt = FakeService::youtube();
+    for id in yt.liked_ids() {
+        yt.set_liked_remotely(&id, false);
+    }
+    let r = rig(&lib, vec![Arc::new(yt)], false);
+    r.rt.send(Command::SetPref(nikgob_view::PrefPatch::MixesDownloadedOnly(true)));
+    wait_for(&r.rt, "the filter on", |s| s.prefs.mixes_downloaded_only);
+
+    r.rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    // The card says 1 of 4 once the tracklist is in (and the queue was
+    // offered the rest).
+    wait_for(&r.rt, "the whole tracklist", |s| {
+        s.library.releases.iter().any(|c| c.id == release.id && c.total_tracks == Some(4))
+    });
+    assert_eq!(lib.tracks_of_release_all(release.id).unwrap().len(), 4);
+    let st = r.rt.state();
+    let queued: Vec<TrackId> = st
+        .queue
+        .prev
+        .iter()
+        .map(|e| e.track.id)
+        .chain(st.queue.current.iter().map(|t| t.id))
+        .chain(st.queue.next.iter().map(|e| e.track.id))
+        .collect();
+    assert_eq!(queued, [file.id], "only the file");
+}
+
 /// «Хочу скачать» shows neither a song that has its file already nor the
 /// tracks of an album wished whole, and the same song asked again under a
 /// twin track is still one item.

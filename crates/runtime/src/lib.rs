@@ -708,7 +708,7 @@ impl Worker {
                 self.publish_player();
             }
             Command::PlayRelease { id, start, shuffle } => {
-                let ids = self.release_tracks(id, start.is_none());
+                let ids = self.release_tracks(id, start);
                 let title = self
                     .lib
                     .get_release(id)
@@ -723,7 +723,7 @@ impl Worker {
                 self.complete_tracklist(id);
             }
             Command::PlayPlaylist { id, start, shuffle } => {
-                let (ids, name) = self.playlist_tracks(id);
+                let (ids, name) = self.playlist_tracks(id, start);
                 let name = format!("плейлиста «{name}»");
                 self.play_context_id = Some(format!("playlist:{id}"));
                 self.play_list(ids, start, shuffle, Some(name), EventContext::Playlist);
@@ -733,7 +733,7 @@ impl Worker {
                     .log_err("исполнитель", self.lib.tracks_of_artist(id, 0, 500))
                     .unwrap_or_default();
                 let name = self.lib.get_artist(id).ok().flatten().map(|a| a.name);
-                let ids = rows.iter().map(|r| r.id).collect();
+                let ids = self.playable(&rows, None);
                 self.play_context_id = Some(format!("artist:{id}"));
                 self.play_list(ids, None, shuffle, name, EventContext::Artist);
             }
@@ -763,7 +763,7 @@ impl Worker {
                 self.toast("Добавлено в очередь", None);
             }
             Command::PlayReleaseNext(id) => {
-                let ids = self.release_tracks(id, true);
+                let ids = self.release_tracks(id, None);
                 if ids.is_empty() {
                     return;
                 }
@@ -774,21 +774,14 @@ impl Worker {
                 self.toast(format!("Следующим: «{title}»"), None);
             }
             Command::EnqueueRelease(id) => {
-                let ids: Vec<TrackId> = self
-                    .log_err("альбом", self.lib.tracks_of_release(id))
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|r| r.id)
-                    .collect();
+                let ids = self.release_tracks(id, None);
                 self.command(Command::Enqueue(ids));
             }
             Command::EnqueueArtist(id) => {
-                let ids: Vec<TrackId> = self
+                let rows = self
                     .log_err("исполнитель", self.lib.tracks_of_artist(id, 0, 2000))
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|r| r.id)
-                    .collect();
+                    .unwrap_or_default();
+                let ids = self.playable(&rows, None);
                 self.command(Command::Enqueue(ids));
             }
             Command::PlayQueueEntry(entry) => {
@@ -1970,10 +1963,15 @@ impl Worker {
         self.load_discography(id, false);
     }
 
-    fn playlist_tracks(&mut self, id: PlaylistId) -> (Vec<TrackId>, String) {
+    /// What a playlist plays from `start` (see [`Self::playable`]).
+    fn playlist_tracks(&mut self, id: PlaylistId, start: Option<TrackId>) -> (Vec<TrackId>, String) {
         if id == LIKED_PLAYLIST {
-            let ids = self.lib.liked_track_ids().unwrap_or_default();
-            return (ids, "Любимые".into());
+            if !self.only_downloaded() {
+                let ids = self.lib.liked_track_ids().unwrap_or_default();
+                return (ids, "Любимые".into());
+            }
+            let rows = self.lib.liked_tracks(0, u32::MAX).unwrap_or_default();
+            return (self.playable(&rows, start), "Любимые".into());
         }
         let entries = self.lib.playlist_entries(id, 0, u32::MAX).unwrap_or_default();
         let name = self
@@ -1982,7 +1980,8 @@ impl Worker {
             .ok()
             .flatten()
             .map_or_else(String::new, |p| p.name);
-        (entries.iter().map(|e| e.track.id).collect(), name)
+        let rows: Vec<nikgob_library::TrackRow> = entries.into_iter().map(|e| e.track).collect();
+        (self.playable(&rows, start), name)
     }
 
     fn load_playlist(&mut self, id: PlaylistId) {
@@ -2302,20 +2301,27 @@ impl Worker {
         Held::Tracks(self.lib.count_tracks(nikgob_library::TrackFilter::All).ok())
     }
 
-    /// The tracks an album plays, in its order: the whole album, its songs
-    /// that only stream too; under «Только скачанное» (of the home or the
-    /// library) only its songs with a file when it has some and `filtered`
-    /// (no song of it was picked to start from).
-    fn release_tracks(&mut self, id: nikgob_core::model::ReleaseId, filtered: bool) -> Vec<TrackId> {
-        let mut rows = self.log_err("альбом", self.lib.tracks_of_release_all(id)).unwrap_or_default();
-        let only_local = {
-            let p = &self.state.read().prefs;
-            p.mixes_downloaded_only || p.library_only_downloaded
-        };
-        if only_local && filtered && rows.iter().any(|r| r.has_local) {
-            rows.retain(|r| r.has_local);
-        }
-        rows.iter().map(|r| r.id).collect()
+    /// The tracks an album plays from `start`, in its order: the whole
+    /// album, its songs that only stream too, as [`Self::playable`] leaves
+    /// them.
+    fn release_tracks(&mut self, id: nikgob_core::model::ReleaseId, start: Option<TrackId>) -> Vec<TrackId> {
+        let rows = self.log_err("альбом", self.lib.tracks_of_release_all(id)).unwrap_or_default();
+        self.playable(&rows, start)
+    }
+
+    /// «Только скачанное» is on, of the home or of the library.
+    fn only_downloaded(&self) -> bool {
+        let p = &self.state.read().prefs;
+        p.mixes_downloaded_only || p.library_only_downloaded
+    }
+
+    /// What a list of tracks (an album, a playlist, an artist's songs)
+    /// plays: all of it; under «Только скачанное» only its songs with a
+    /// file and `start`, the song picked to start from (played even when it
+    /// only streams). A list without a single file plays whole.
+    fn playable(&self, rows: &[nikgob_library::TrackRow], start: Option<TrackId>) -> Vec<TrackId> {
+        let only_local = self.only_downloaded() && rows.iter().any(|r| r.has_local);
+        rows.iter().filter(|r| !only_local || r.has_local || Some(r.id) == start).map(|r| r.id).collect()
     }
 
     /// The releases of `tracks`, once each.
