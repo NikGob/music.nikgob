@@ -977,6 +977,78 @@ fn file_track(lib: &Library, title: &str, names: &[&str], album: &str, ms: u32) 
     t.id
 }
 
+/// Once: a stream that is a file of its album under a title in another
+/// script goes into the file, its title an alias the search finds; a
+/// stream of another album, another artist, another length or a crowded
+/// length stays, and so does one whose file has the service already.
+#[test]
+fn a_stream_titled_in_another_script_goes_into_its_file_once() {
+    let lib = lib();
+    let ost = "MADE IN ABYSS ORIGINAL SOUNDTRACK 3";
+    let belaf = file_track(&lib, "Belaf's Lullaby", &["Kevin Penkin"], ost, 199_950);
+    let gravity = file_track(&lib, "Gravity", &["Kevin Penkin"], ost, 240_000);
+    file_track(&lib, "Hanezeve", &["Kevin Penkin"], ost, 241_200);
+    let faith = file_track(&lib, "Faith", &["Kevin Penkin"], "MADE IN ABYSS ORIGINAL SOUNDTRACK 2", 150_000);
+    let song = |id: &str, title: &str, artist: &str, album: &str, secs: u64| {
+        let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), title);
+        t.artists = vec![ArtistRef::new(None, artist)];
+        t.album = Some(AlbumRef::new(None, album));
+        t.duration_ms = Some(secs * 1000);
+        let id = lib.ensure_stream_tracks(&[t]).unwrap()[0];
+        let p = lib.create_playlist(&format!("p {id}")).unwrap();
+        lib.playlist_add(p.id, id).unwrap();
+        id
+    };
+    let jp = song("ytbelaf0001", "ベラフの子守歌", "Kevin Penkin", ost, 200);
+    let other_album = song("ytfaith0001", "信仰", "Kevin Penkin", "MADE IN ABYSS ORIGINAL SOUNDTRACK", 150);
+    let other_artist = song("ytstrange01", "知らない歌", "Someone Else", ost, 200);
+    let crowded = song("ytcrowd0001", "重力", "Kevin Penkin", ost, 241);
+    let latin = song("ytlatin0001", "Belafs Lullaby Remake", "Kevin Penkin", ost, 200);
+    let tracks = lib.count_tracks(TrackFilter::All).unwrap();
+
+    assert_eq!(lib.merge_other_script_titles().unwrap(), 1);
+    assert!(lib.get_track(jp).unwrap().is_none());
+    assert_eq!(lib.track_by_remote(&RemoteId::new(Service::Youtube, "ytbelaf0001")).unwrap(), Some(belaf));
+    assert_eq!(lib.get_track(belaf).unwrap().unwrap().title, "Belaf's Lullaby", "the file's title stays");
+    assert_eq!(lib.track_aliases(belaf).unwrap(), ["ベラフの子守歌"]);
+    assert_eq!(lib.search("ベラフの子守歌", 5).unwrap().tracks.iter().map(|t| t.id).collect::<Vec<_>>(), [belaf]);
+    assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), tracks - 1);
+    for t in [other_album, other_artist, crowded, latin] {
+        assert!(lib.get_track(t).unwrap().is_some(), "{t} stays");
+    }
+    assert!(lib.track_aliases(gravity).unwrap().is_empty() && lib.track_aliases(faith).unwrap().is_empty());
+    lib.rebuild_search_index().unwrap();
+    assert_eq!(lib.search("ベラフの子守歌", 5).unwrap().tracks.iter().map(|t| t.id).collect::<Vec<_>>(), [belaf], "the rebuilt index knows the alias");
+    // Once: a twin made now stays.
+    let again = song("ytbelaf0002", "ベラフの子守歌", "Kevin Penkin", ost, 200);
+    assert_eq!(lib.merge_other_script_titles().unwrap(), 0);
+    assert!(lib.get_track(again).unwrap().is_some());
+    // The alias goes with its track into another one.
+    lib.merge_track_into(belaf, gravity).unwrap();
+    assert_eq!(lib.track_aliases(gravity).unwrap(), ["ベラフの子守歌"]);
+}
+
+/// A file that has the stream's service already is no file of another
+/// stream of it under another title.
+#[test]
+fn a_file_with_the_service_already_takes_no_stream_in_another_script() {
+    let lib = lib();
+    let ost = "MADE IN ABYSS ORIGINAL SOUNDTRACK 3";
+    let belaf = file_track(&lib, "Belaf's Lullaby", &["Kevin Penkin"], ost, 199_950);
+    let mut own = StreamTrack::new(RemoteId::new(Service::Youtube, "ytownbelaf1"), "Belaf's Lullaby");
+    own.artists = vec![ArtistRef::new(None, "Kevin Penkin")];
+    own.duration_ms = Some(200_000);
+    lib.attach_stream_source(belaf, &own).unwrap();
+    let mut jp = StreamTrack::new(RemoteId::new(Service::Youtube, "ytbelaf0001"), "ベラフの子守歌");
+    jp.artists = vec![ArtistRef::new(None, "Kevin Penkin")];
+    jp.album = Some(AlbumRef::new(None, ost));
+    jp.duration_ms = Some(200_000);
+    let jp = lib.ensure_stream_tracks(&[jp]).unwrap()[0];
+    lib.like(jp).unwrap();
+    assert_eq!(lib.merge_other_script_titles().unwrap(), 0);
+    assert!(lib.get_track(jp).unwrap().is_some());
+}
+
 /// A YouTube track by `uploader`, a music video when `clip`, without an album.
 fn yt(id: &str, title: &str, uploader: &str, ms: u64, clip: bool) -> StreamTrack {
     let mut t = yt_variant(id, title, 0);

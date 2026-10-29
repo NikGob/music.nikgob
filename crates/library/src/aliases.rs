@@ -1,6 +1,9 @@
 //! One artist, several spellings (table `artist_alias`, docs/stage4.md
 //! §12.13): «Ohara Yuiko» from the files is 大原ゆい子 of the services,
-//! «Fujisawa Yoshiaki» and «Yoshiaki Fujisawa» are 藤澤慶昌.
+//! «Fujisawa Yoshiaki» and «Yoshiaki Fujisawa» are 藤澤慶昌. One track,
+//! two titles (table `track_alias`): «ベラフの子守歌» of a service is the
+//! file's «Belaf's Lullaby»; the title of the file stays, the other one
+//! is searched too ([`add_track_alias_in`]).
 //!
 //! * [`merge_artists_in`] folds one artist row into another: every track
 //!   and album credit, the ids in the services, the photo, the like and
@@ -19,7 +22,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use nikgob_core::model::{ArtistCredit, ArtistId};
+use nikgob_core::model::{ArtistCredit, ArtistId, TrackId};
 use nikgob_core::names::{is_latin, is_native, latin_key, name_key, same_name, swapped};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -111,7 +114,9 @@ pub(crate) fn refresh_track_search(conn: &Connection, track: &str) -> Result<()>
     conn.execute("DELETE FROM track_fts WHERE rowid = (SELECT seq FROM track WHERE id = ?1)", [track])?;
     conn.execute(
         "INSERT INTO track_fts(rowid, title, artist, album)
-         SELECT t.seq, replace(replace(t.title, 'ё', 'е'), 'Ё', 'Е'),
+         SELECT t.seq,
+                replace(replace(t.title || coalesce(' ' || (SELECT group_concat(title, ' ') FROM track_alias
+                                                             WHERE track_id = t.id), ''), 'ё', 'е'), 'Ё', 'Е'),
                 replace(replace(t.artist_display || coalesce(' ' || (SELECT group_concat(al.name, ' ')
                             FROM track_artist ta JOIN artist_alias al ON al.artist_id = ta.artist_id
                            WHERE ta.track_id = t.id), ''), 'ё', 'е'), 'Ё', 'Е'),
@@ -120,6 +125,23 @@ pub(crate) fn refresh_track_search(conn: &Connection, track: &str) -> Result<()>
         [track],
     )?;
     Ok(())
+}
+
+/// Records `title` as another title of `track` (nothing for its own title
+/// or one it has). Returns whether it is new.
+pub(crate) fn add_track_alias_in(conn: &Connection, track: &str, title: &str, source: &str) -> Result<bool> {
+    let key = crate::util::sort_key(title);
+    if key.is_empty() {
+        return Ok(false);
+    }
+    let own: Option<String> = conn.query_row("SELECT title_key FROM track WHERE id = ?1", [track], |r| r.get(0)).optional()?;
+    if own.as_ref().is_none_or(|k| *k == key) {
+        return Ok(false);
+    }
+    Ok(conn.execute(
+        "INSERT OR IGNORE INTO track_alias(track_id, title, key, source) VALUES (?1, ?2, ?3, ?4)",
+        params![track, title.trim(), key, source],
+    )? > 0)
 }
 
 /// Folds the artist `from` into `into` (see the module docs). Returns
@@ -401,6 +423,22 @@ pub(crate) fn plan_doubles(conn: &Connection) -> Result<Vec<(String, String, Str
 }
 
 impl Library {
+    /// Records `title` as another title of `track` that search finds it by
+    /// (see the module docs); `source` says where it came from (`import`,
+    /// `merged`). Returns whether it is new.
+    pub fn add_track_alias(&self, track: TrackId, title: &str, source: &str) -> Result<bool> {
+        self.write(|tx| add_track_alias_in(tx, &track.to_string(), title, source))
+    }
+
+    /// The other titles of a track.
+    pub fn track_aliases(&self, track: TrackId) -> Result<Vec<String>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached("SELECT title FROM track_alias WHERE track_id = ?1 ORDER BY key")?;
+            let rows = stmt.query_map([track.to_string()], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
     /// Folds the artist `from` into `into` (see the module docs).
     pub fn merge_artists(&self, from: ArtistId, into: ArtistId) -> Result<bool> {
         let device = self.device_id();

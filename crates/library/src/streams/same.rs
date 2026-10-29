@@ -36,6 +36,16 @@
 //! [`CLIP_EXTRA_MS`] longer (an intro, an outro) lands on that track: the
 //! file plays.
 //!
+//! Titles in two scripts that cannot be compared («ベラフの子守歌» of a
+//! service, «Belaf's Lullaby» of the file: [`other_scripts`]) make one song
+//! only on the evidence of the rest: a stream without a file is the file of
+//! its album (the same release, or the same album title: «… SOUNDTRACK 2»
+//! is not «… SOUNDTRACK») by a shared
+//! artist with lengths within [`TIGHT_SLACK_MS`], when no other track of
+//! that album is within [`SLACK_MS`] of its length and the file has no
+//! source of the stream's service yet. The file's title stays, the other
+//! one is the track's alias ([`Library::merge_other_script_titles`]).
+//!
 //! [`Library::merge_duplicate_stream_tracks`] applies the same rules once to
 //! tracks created before they existed, and folds one song filed twice on
 //! one release under titles a sound mark apart («パウロ VS ルディ» and
@@ -70,6 +80,9 @@ pub(crate) const CLIP_EXTRA_MS: i64 = 30_000;
 /// Two files of one release this close, titles a sound mark apart, are one
 /// song (one rip of it under two names).
 pub(crate) const TYPO_SLACK_MS: i64 = 50;
+
+/// `meta` key of [`Library::merge_other_script_titles`].
+const OTHER_SCRIPTS_KEY: &str = "other_script_titles_merged.v1";
 
 /// `meta` key: the repair of [`Library::merge_duplicate_stream_tracks`] ran
 /// with the rule of today (`v1` had no dual titles and no tight slack, `v2`
@@ -346,6 +359,93 @@ impl Song {
                     _ => true,
                 })
     }
+}
+
+/// Two titles in scripts that cannot be compared: one in Latin letters,
+/// the other without a Latin or Cyrillic letter (kana, kanji, Hangul…).
+/// Cyrillic and Latin are compared by their transliteration instead.
+pub fn other_scripts(a: &str, b: &str) -> bool {
+    let latin = |s: &str| nikgob_core::names::is_latin(s);
+    let none = |s: &str| {
+        s.chars().any(char::is_alphabetic)
+            && !s.chars().any(|c| c.is_ascii_alphabetic() || ('\u{400}'..='\u{52f}').contains(&c))
+    };
+    (latin(a) && none(b)) || (latin(b) && none(a))
+}
+
+/// The track with a file that the stream-only track `id` (`title`, by the
+/// names of `credit`, `duration` long, on `release` called `album`) is
+/// under a title in another script (see the module docs), if one alone is.
+#[allow(clippy::too_many_arguments)]
+fn other_script_file(
+    conn: &Connection,
+    id: &str,
+    title: &str,
+    credit: &str,
+    duration: i64,
+    release: Option<&str>,
+    album: Option<&str>,
+) -> Result<Option<String>> {
+    let names = credit_names(credit);
+    let artist = names.first().cloned().unwrap_or_default();
+    let song = Song::new(title, &artist, album, Some(duration), None).with_names(&names);
+    if song.artists.is_empty() {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT t.id, t.title, t.artist_credit, t.duration_ms, t.release_id, r.title FROM track t
+           LEFT JOIN release r ON r.id = t.release_id
+          WHERE t.has_local = 1 AND t.deleted_at IS NULL AND t.id != ?1
+            AND t.duration_ms BETWEEN ?2 AND ?3",
+    )?;
+    let rows = stmt.query_map(params![id, duration - TIGHT_SLACK_MS, duration + TIGHT_SLACK_MS], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+    let mut found: Vec<(String, String)> = Vec::new();
+    for row in rows {
+        let (file, file_title, file_credit, file_duration, file_release, file_album) = row?;
+        if !other_scripts(title, &file_title) {
+            continue;
+        }
+        let same_release = release.is_some() && release == file_release.as_deref();
+        let albums = match (&song.album, file_album.as_deref().map(song_key)) {
+            (Some(a), Some(b)) => !b.is_empty() && *a == b,
+            _ => false,
+        };
+        let file_names = credit_names(&file_credit);
+        let other = Song::new(&file_title, file_names.first().map_or("", String::as_str), file_album.as_deref(), Some(file_duration), None)
+            .with_names(&file_names);
+        if (same_release || albums) && song.shares_artist(&other) {
+            if let Some(r) = file_release {
+                found.push((file, r));
+            }
+        }
+    }
+    let [(file, file_release)] = &found[..] else { return Ok(None) };
+    // Alone within the slack among the album's places (its files and
+    // numbered tracks), and no source of the stream's services yet.
+    let crowd: i64 = conn.query_row(
+        "SELECT count(*) FROM track WHERE release_id = ?1 AND deleted_at IS NULL AND id NOT IN (?2, ?5)
+            AND (has_local = 1 OR track_no > 0) AND duration_ms BETWEEN ?3 AND ?4",
+        params![file_release, file, duration - SLACK_MS, duration + SLACK_MS, id],
+        |r| r.get(0),
+    )?;
+    if crowd > 0 {
+        return Ok(None);
+    }
+    for s in services_of(conn, id)? {
+        if has_service(conn, file, s)? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(file.clone()))
 }
 
 /// The same album title, or one an extension of the other ("Discovery"
@@ -739,6 +839,39 @@ fn track_exists(conn: &Connection, id: &str) -> Result<bool> {
 }
 
 impl Library {
+    /// Once per library (`other_script_titles_merged.v1`): a stream-only
+    /// track that is a file of the library under a title in another script
+    /// (see the module docs: «ベラフの子守歌» and «Belaf's Lullaby») goes
+    /// into it; the file's title stays, the stream's is its alias. Returns
+    /// how many tracks went.
+    pub fn merge_other_script_titles(&self) -> Result<usize> {
+        let device = self.device_id();
+        let now = self.tick();
+        Ok(self.repair(OTHER_SCRIPTS_KEY, |tx| {
+            let mut merged = 0;
+            for (id, title, credit, duration, album, _, _, place) in stream_only_rows(tx)? {
+                let Some(duration) = duration else { continue };
+                if !track_exists(tx, &id)? {
+                    continue;
+                }
+                let release = match place {
+                    Some(p) => Some(p.0),
+                    None => tx.query_row("SELECT release_id FROM track WHERE id = ?1", [&id], |r| r.get(0))?,
+                };
+                let Some(file) = other_script_file(tx, &id, &title, &credit, duration, release.as_deref(), album.as_deref())? else {
+                    continue;
+                };
+                if merge_track_in(tx, super::parse(&id)?, super::parse(&file)?, device.as_str(), now)? {
+                    crate::aliases::add_track_alias_in(tx, &file, &title, "merged")?;
+                    note!("library: stream track {id} «{title}» is the file {file} under another title, merged");
+                    merged += 1;
+                }
+            }
+            Ok((merged, merged))
+        })?
+        .unwrap_or(0))
+    }
+
     /// Merges stream-only tracks that are one song by the rule of
     /// [`same_song_track`] (made before the rule existed: the song liked on
     /// both services as two tracks), and liked music videos into the file of
