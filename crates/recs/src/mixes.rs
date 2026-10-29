@@ -1861,7 +1861,7 @@ mod tests {
         let mut kept = Kept { lineup: lineup.clone(), ..Kept::default() };
         kept.keep(&now, &m);
         let next = kept.clone().next_epoch(true);
-        assert_eq!(next.shown, [lineup.clone()]);
+        assert_eq!(next.shown, std::slice::from_ref(&lineup));
         let (then, keys) = in_epoch(&l, &m, DayPart::Morning, 12, |b| b.lineup(&next));
         assert_ne!(keys, lineup, "another lineup");
         let mut compared = 0;

@@ -445,17 +445,17 @@ fn shortcuts(
     let forget = ((visit.now - first) / 4).clamp(FORGOTTEN_DAYS.0 * DAY_MS, FORGOTTEN_DAYS.1 * DAY_MS);
     let now_drawn: Vec<Key> = if history {
         let playing_now = now.iter().filter(|(k, _)| playing(k) && ok(**k));
-        lottery(playing_now.map(|(k, s)| (*k, s * exposure.shortcut(*k, Draw::Now))), seed ^ 0x6e6f_77, tok)
+        lottery(playing_now.map(|(k, s)| (*k, s * exposure.shortcut(*k, Draw::Now))), seed ^ 0x006e_6f77, tok)
     } else {
         let recent = crate::home::recently_added(lib, releases.iter().filter(|r| ok(Key::Release(r.release.id))).cloned(), SHORTCUTS * 2);
         let recent = recent.iter().enumerate().map(|(n, r)| {
             let k = Key::Release(r.release.id);
             (k, exposure.shortcut(k, Draw::Now) / (1.0 + n as f64))
         });
-        lottery(recent, seed ^ 0x6e6f_77, tok)
+        lottery(recent, seed ^ 0x006e_6f77, tok)
     };
     let forgotten = long.iter().filter(|(k, l)| **l >= FORGOTTEN_MIN && ok(**k) && !playing(k) && last.get(*k).is_none_or(|ts| visit.now - ts >= forget));
-    let forgotten = lottery(forgotten.map(|(k, l)| (*k, l * exposure.shortcut(*k, Draw::Forgotten))), seed ^ 0x6f6c_64, tok);
+    let forgotten = lottery(forgotten.map(|(k, l)| (*k, l * exposure.shortcut(*k, Draw::Forgotten))), seed ^ 0x006f_6c64, tok);
     let offered = offered(f, places, visit, shelved, exposure, &|k: &Key| playing(k));
     // The rest: the library's albums by their likes and their size.
     let mut liked_in: HashMap<ReleaseId, f64> = HashMap::new();
@@ -558,12 +558,12 @@ fn offered(f: &Facts, places: &Places<'_>, visit: &Visit, shelved: &HashSet<Rele
         let k = Key::Artist(*a);
         (k, worth(t) * f64::from(t.n).ln_1p() * exposure.shortcut(k, Draw::Offered))
     });
-    let artists: Vec<Key> = lottery(artists.filter(|(k, _)| places.get(*k).is_some() && !playing(k)), visit.epoch.seed ^ 0x6172_74, Key::token);
+    let artists: Vec<Key> = lottery(artists.filter(|(k, _)| places.get(*k).is_some() && !playing(k)), visit.epoch.seed ^ 0x0061_7274, Key::token);
     let albums = albums.iter().filter(|(r, t)| t.n >= OFFER_ALBUM_TRACKS && t.heard * 3 <= t.n && t.plays <= OFFER_PLAYS && near(t) && !shelved.contains(r)).map(|(r, t)| {
         let k = Key::Release(*r);
         (k, worth(t) * exposure.shortcut(k, Draw::Offered))
     });
-    let albums: Vec<Key> = lottery(albums.filter(|(k, _)| places.get(*k).is_some() && !playing(k)), visit.epoch.seed ^ 0x616c_62, Key::token);
+    let albums: Vec<Key> = lottery(albums.filter(|(k, _)| places.get(*k).is_some() && !playing(k)), visit.epoch.seed ^ 0x0061_6c62, Key::token);
     let (mut a, mut b) = (artists.into_iter(), albums.into_iter());
     if visit.epoch.seed & 1 == 1 {
         std::mem::swap(&mut a, &mut b);
@@ -624,7 +624,7 @@ fn listen_again(lib: &Library, f: &Facts, visit: &Visit, exposure: &Exposure) ->
         scored.push((s, t));
     }
     let weighed = scored.into_iter().map(|(s, t)| (t, f64::from(s.max(0.05)).powf(AGAIN_POWER) * exposure.again.get(&t).copied().unwrap_or(1.0)));
-    let drawn = lottery(weighed, visit.epoch.seed ^ 0x6167_6e, |t: TrackId| token(t.0.as_u128()));
+    let drawn = lottery(weighed, visit.epoch.seed ^ 0x0061_676e, |t: TrackId| token(t.0.as_u128()));
     let mut per_artist: HashMap<Option<ArtistId>, usize> = HashMap::new();
     let mut songs = HashSet::new();
     let mut eligible: Vec<(TrackId, Option<usize>)> = Vec::new();
@@ -1744,24 +1744,24 @@ mod tests {
         let ids = synth(&lib, 12, 2, 6);
         let now = 400 * DAY_MS + 13 * 3_600_000;
         let mut k = 0i64;
-        for a in 0..4 {
+        for artist in &ids[..4] {
             for day in 0..6 {
-                for t in &ids[a][0][..4] {
+                for t in &artist[0][..4] {
                     k += 1;
                     play(&lib, *t, now - (day + 1) * DAY_MS / 2 - k * 1000);
                 }
             }
         }
-        for a in 4..10 {
+        for artist in &ids[4..10] {
             for round in 0..4 {
-                for t in &ids[a][0] {
+                for t in &artist[0] {
                     k += 1;
                     play(&lib, *t, now - 60 * DAY_MS + round * DAY_MS - k * 1000);
                 }
             }
         }
-        for a in 0..10 {
-            lib.like(ids[a][0][5]).unwrap();
+        for artist in &ids[..10] {
+            lib.like(artist[0][5]).unwrap();
         }
         let profiles = one_profile(&lib);
         let visit = |run: u64| Visit { now, utc_offset_min: 0, epoch: Epoch::of(run, now, 0), profiles: Some(profiles.clone()), ..Visit::default() };
