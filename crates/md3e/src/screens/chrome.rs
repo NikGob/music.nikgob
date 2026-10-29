@@ -563,12 +563,16 @@ impl Chrome {
             return;
         };
 
+        // Over the bar's own sound button the pill needs no mute button of
+        // its own: that one right below already mutes.
+        let own_mute = self.vol.pinned.is_some() || anchor != self.vol.button;
+        let size = if own_mute { POPOVER } else { POPOVER - vec2(0.0, 36.0) };
         let screen = ctx.content_rect().shrink(8.0);
-        let x = (a.center().x - POPOVER.x * 0.5)
-            .clamp(screen.left(), (screen.right() - POPOVER.x).max(screen.left()));
-        let above = a.top() - 8.0 - POPOVER.y;
+        let x = (a.center().x - size.x * 0.5)
+            .clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
+        let above = a.top() - 8.0 - size.y;
         let y = if above >= screen.top() { above } else { a.bottom() + 8.0 };
-        let rect = Rect::from_min_size(pos2(x, y + (1.0 - alpha) * 8.0), POPOVER);
+        let rect = Rect::from_min_size(pos2(x, y + (1.0 - alpha) * 8.0), size);
         self.vol.popover = Some(rect);
 
         let volume = if state.player.muted { 0.0 } else { self.volume_now(ctx, state) };
@@ -583,7 +587,7 @@ impl Chrome {
             .interactable(true)
             .show(ctx, |ui| {
                 ui.set_opacity(alpha);
-                let (r, _) = ui.allocate_exact_size(POPOVER, Sense::hover());
+                let (r, _) = ui.allocate_exact_size(size, Sense::hover());
                 let radii = Radii::all(shape::EXTRA_LARGE);
                 paint::shadow(ui.painter(), r, radii, Elevation::Level2);
                 paint::container(ui.painter(), r, radii, s.surface_container_high, Stroke::NONE);
@@ -603,7 +607,7 @@ impl Chrome {
 
                 let track = Rect::from_min_max(
                     pos2(r.center().x - 18.0, r.top() + 34.0),
-                    pos2(r.center().x + 18.0, r.bottom() - 50.0),
+                    pos2(r.center().x + 18.0, r.bottom() - if own_mute { 50.0 } else { 14.0 }),
                 );
                 let resp = ui.interact(track, Id::new("md3e-volume-slider"), Sense::click_and_drag());
                 dragging = resp.dragged();
@@ -614,6 +618,9 @@ impl Chrome {
                 }
                 paint_vslider(ui, track, new_value.unwrap_or(volume), dragging);
 
+                if !own_mute {
+                    return;
+                }
                 let btn = Rect::from_center_size(pos2(r.center().x, r.bottom() - 25.0), vec2(40.0, 40.0));
                 let mute = ui
                     .scope_builder(UiBuilder::new().max_rect(btn), |ui| {
