@@ -674,7 +674,7 @@ pub(crate) fn subjects(plan: &[Ask]) -> std::collections::HashSet<(&'static str,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
+    use nikgob_core::model::Uuid;
 
     fn row(kind: &str, id: &str, source: &str, rank: u32, entry: GraphEntry) -> GraphRow {
         GraphRow { subject_kind: kind.into(), subject_id: id.into(), source: source.into(), rank, total: 10, entry }
