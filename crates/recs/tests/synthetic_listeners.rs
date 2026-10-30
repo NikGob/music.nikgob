@@ -238,7 +238,7 @@ struct Found {
 }
 
 fn run(l: &Listener) -> Found {
-    let model = UserModel::build(&l.catalog, &l.input, ModelInput { index: &l.index, types: Some(&l.types), weights: None }, l.now);
+    let model = UserModel::build(&l.catalog, &l.input, ModelInput { index: &l.index, types: Some(&l.types), weights: None, graph: None }, l.now);
     let played: HashSet<usize> = l.input.events.iter().filter_map(|p| l.catalog.position(p.track)).collect();
     let mut count: HashMap<usize, HashMap<usize, usize>> = HashMap::new();
     for &i in &played {
@@ -426,7 +426,7 @@ fn background_of_lofi() {
     let off = {
         let mut input = l.input.clone();
         input.profiles.background_less = false;
-        UserModel::build(&l.catalog, &input, ModelInput { index: &l.index, types: Some(&l.types), weights: None }, l.now)
+        UserModel::build(&l.catalog, &input, ModelInput { index: &l.index, types: Some(&l.types), weights: None, graph: None }, l.now)
     };
     let j = profile_of_style(&l, &off, 0).unwrap();
     assert!(f.model.profile_share[bg] + 0.1 < off.profile_share[j], "{} vs {}", f.model.profile_share[bg], off.profile_share[j]);

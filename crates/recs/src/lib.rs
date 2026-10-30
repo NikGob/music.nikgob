@@ -25,6 +25,10 @@
 //!   [`songtype`]: sung or instrumental, the language, a soundtrack's song.
 //! * [`world_mixes`]: the mixes of a world's page; [`explain`]: why a mix
 //!   or a pick, in one line.
+//! * [`graph`]: the graph of similar music other listeners know (the
+//!   services' radios and similar artists, ListenBrainz, Last.fm, the tags
+//!   of MusicBrainz) and the user's own (an imported history, the
+//!   playlists), and the prior of each track of the library.
 
 pub mod analysis;
 pub mod background;
@@ -33,6 +37,7 @@ pub mod daylist;
 pub mod discover;
 pub mod dislike;
 pub mod explain;
+pub mod graph;
 pub mod index;
 pub mod junk;
 pub mod listening;
@@ -60,6 +65,7 @@ pub use discover::{
     Discovery, DiscoveryFilter, DiscoverySeeds, NewRelease, SeedFinds, SeedRef, album_key, artist_key, rank_discoveries,
     song_key, stream_song_key,
 };
+pub use graph::{Edge, GraphInput, GraphSource, SimGraph};
 pub use index::{Normalizer, VectorIndex};
 pub use junk::{Canonical, Junk, junk};
 pub use novelty::{Heard, NewEvent, NewLog, Source};

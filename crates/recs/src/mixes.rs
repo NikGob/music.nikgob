@@ -453,7 +453,7 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let s = &model.tracks[i];
-            a[i] = s.aff_long(now).max(0.0).max((recs.taste.affinity_at(i).max(0.0) / 3.0).tanh());
+            a[i] = s.aff_long(now).max(0.0).max((recs.taste.affinity_at(i).max(0.0) / 3.0).tanh()).max(model.prior_mass(i));
             let p = model.p_skip(&m0, i, EventContext::HomeSection).min(0.95);
             value[i] = Some(
                 a[i] + W_HOT * s.aff_hot(now).max(0.0) - MIX_REST * recs.taste.lately_at(i) + W_SKIP * (1.0 - p).ln()
@@ -798,13 +798,22 @@ impl<'a> Builder<'a> {
         let loved: Vec<&crate::analysis::Vector> =
             pool.tracks.iter().filter(|&&i| self.a[i] >= 0.5).filter_map(|&i| self.model.embedded_at(i)).collect();
         let scale = self.model.scale().max(1e-3);
+        // …or beside the loved in the graphs (docs/recs-graph.md).
+        let mut linked: HashMap<usize, f32> = HashMap::new();
+        for &l in pool.tracks.iter().filter(|&&i| self.a[i] >= 0.5) {
+            for &(c, w) in self.model.graph.near(l).iter().chain(self.model.personal_near(l)) {
+                let e = linked.entry(c as usize).or_default();
+                *e = e.max(w);
+            }
+        }
         let value = |i: usize| {
             let mut v = self.value[i].unwrap_or(f32::NEG_INFINITY);
-            if self.unheard(i)
-                && let Some(e) = self.model.embedded_at(i)
-            {
-                let near = loved.iter().map(|l| euclid(e, *l)).fold(f32::INFINITY, f32::min);
-                v += W_EXPLORE * (1.0 - near / scale).max(0.0);
+            if self.unheard(i) {
+                let sound = self.model.embedded_at(i).map_or(0.0, |e| {
+                    let near = loved.iter().map(|l| euclid(e, *l)).fold(f32::INFINITY, f32::min);
+                    (1.0 - near / scale).max(0.0)
+                });
+                v += W_EXPLORE * sound.max(linked.get(&i).copied().unwrap_or(0.0));
             }
             v
         };
@@ -1760,7 +1769,7 @@ mod tests {
     }
 
     fn model(l: &Lib, now: UnixMs) -> UserModel {
-        UserModel::build(&l.catalog, &l.input, ModelInput { index: &l.index, types: Some(&l.types), weights: None }, now)
+        UserModel::build(&l.catalog, &l.input, ModelInput { index: &l.index, types: Some(&l.types), weights: None, graph: None }, now)
     }
 
     fn with<T>(l: &Lib, m: &UserModel, part: DayPart, f: impl FnOnce(&Builder<'_>) -> T) -> T {

@@ -853,7 +853,7 @@ fn read_parts(
     let model = UserModel::build(
         &catalog,
         &history,
-        ModelInput { index: &index, types: Some(&types), weights: cached },
+        ModelInput { index: &index, types: Some(&types), weights: cached, graph: None },
         now,
     );
     if cached.is_none()
@@ -1768,7 +1768,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
 pub fn preview_replay(lib: &Library) -> Result<nikgob_recs::model::ReplayReport, String> {
     let preview = ModelPreview::of(lib)?;
     let snap = &preview.snap;
-    Ok(nikgob_recs::model::replay(&snap.catalog, &preview.history, ModelInput { index: &snap.index, types: Some(&snap.types), weights: None }))
+    Ok(nikgob_recs::model::replay(&snap.catalog, &preview.history, ModelInput { index: &snap.index, types: Some(&snap.types), weights: None, graph: None }))
 }
 
 /// A snapshot of a library to try the radio on, as the runtime would
@@ -1931,7 +1931,7 @@ impl ModelPreview {
             dislikes.push(played.swap_remove(k));
         }
         let unscored: HashSet<TrackId> = dislikes.iter().copied().collect();
-        let input = || ModelInput { index: &self.snap.index, types: Some(&self.snap.types), weights: None };
+        let input = || ModelInput { index: &self.snap.index, types: Some(&self.snap.types), weights: None, graph: None };
         let before = nikgob_recs::model::replay_with(&self.snap.catalog, &self.history, input(), &[], &unscored);
         let after = nikgob_recs::model::replay_with(&self.snap.catalog, &self.history, input(), &dislikes, &unscored);
         (before, after, dislikes)

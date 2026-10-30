@@ -74,7 +74,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::{DIM, Vector};
 use crate::index::euclid;
-use crate::model::{F_COOC, F_NEXT_ALBUM, F_SAME_LANE, F_SKIP_PUSH, F_SOUND, HAND, UserModel, Weights};
+use crate::model::{F_COOC, F_GRAPH, F_NEXT_ALBUM, F_PGRAPH, F_SAME_LANE, F_SKIP_PUSH, F_SOUND, HAND, UserModel, Weights};
 use crate::mood::Mood;
 use crate::pick::{Diversity, Item, NewTrack, Pick, Placed, Reason, Recs, Seen, Slot, arrange, new_count, select_diverse, take, token_of_artist};
 use crate::rng::Rng;
@@ -676,7 +676,10 @@ impl RadioState {
         // «Похоже на X» stays near X: within its sound radius and of a
         // kind of song that goes with it; the session only leans it.
         let anchor = SeedAnchor::of(model, seed);
-        let near = |i: usize| anchor.holds(model, i);
+        // What the collective graph links to the seed goes too, beyond the
+        // radius of its sound (a kind of song that goes with it).
+        let linked = seed_links(model, seed);
+        let near = |i: usize| anchor.holds(model, i) || (linked.get(&i).is_some_and(|w| *w >= LINKED) && anchor.goes(model, i));
         // The profile it keeps to (profiles-v1 §7): its own tracks, and the
         // neighbouring profile's once two early skips ran or fewer than
         // [`UNHEARD_MIN`] of its own are left; a background radio never
@@ -796,8 +799,10 @@ impl RadioState {
                         + MODEL_JITTER * Rng::derive(jitter, c as u64).f32();
                     let reason = if parts[F_NEXT_ALBUM] > 0.0 && parts[F_NEXT_ALBUM] >= parts[F_COOC] {
                         Reason::NextOnAlbum
-                    } else if parts[F_COOC] > 0.5 && parts[F_COOC] >= parts[F_SOUND] + 1.0 {
+                    } else if parts[F_COOC].max(parts[F_PGRAPH]) > 0.5 && parts[F_COOC].max(parts[F_PGRAPH]) >= parts[F_SOUND] + 1.0 {
                         m.prev.map_or(Reason::SoundsLikeSeed, |p| Reason::FollowsOften(model.id(p)))
+                    } else if parts[F_GRAPH] > 0.5 && parts[F_GRAPH] >= parts[F_SOUND] + 0.5 {
+                        m.prev.or(seed.and_then(|t| model.position(t))).map_or(Reason::SoundsLikeSeed, |p| Reason::ListenedTogether(model.id(p)))
                     } else {
                         seed.map_or(Reason::SoundsLikeSeed, Reason::SimilarTo)
                     };
@@ -971,6 +976,18 @@ impl RadioState {
                 theirs.sort_by(|x, y| recs.taste.affinity_at(*y).total_cmp(&recs.taste.affinity_at(*x)).then(x.cmp(y)));
                 for i in theirs.into_iter().take(CO_TRACKS) {
                     add(&mut cands, i, Reason::CoListened(a), (count / 3.0).min(1.0) * 0.7);
+                }
+            }
+            // The artists other listeners hear with it (the collective
+            // graph), their best known first.
+            if let Some(m) = recs.model {
+                for &(b, w) in m.graph.similar_artists(a).iter().take(CO_ARTISTS) {
+                    let key = |i: usize| recs.taste.affinity_at(i) + m.graph.prior(i);
+                    let mut theirs: Vec<usize> = recs.catalog.of_artist(b).iter().map(|&i| i as usize).filter(|&i| ok(i)).collect();
+                    theirs.sort_by(|x, y| key(*y).total_cmp(&key(*x)).then(x.cmp(y)));
+                    for i in theirs.into_iter().take(CO_TRACKS) {
+                        add(&mut cands, i, Reason::CoListened(a), w * 0.7);
+                    }
                 }
             }
         }
@@ -1154,6 +1171,30 @@ fn neighbour(model: &UserModel, j: usize) -> Option<usize> {
     (0..model.profiles.len())
         .filter(|&o| o != j && model.lanes_go(lane, model.profiles.list[o].lane.song_lane()))
         .min_by(|a, b| model.profiles.distance(j, *a).total_cmp(&model.profiles.distance(j, *b)).then(a.cmp(b)))
+}
+
+/// A track the collective graph links to the seed this much goes in its
+/// radio beyond the seed's sound radius.
+const LINKED: f32 = 0.3;
+
+/// What the collective graph links to the track `seed`: its neighbours,
+/// and the tracks of the artists like its at [`crate::model`]'s weight of
+/// an artist, by catalog position.
+fn seed_links(model: &UserModel, seed: Option<TrackId>) -> HashMap<usize, f32> {
+    let mut out: HashMap<usize, f32> = HashMap::new();
+    let Some(s) = seed.and_then(|t| model.position(t)) else { return out };
+    for &(c, w) in model.graph.near(s) {
+        out.insert(c as usize, w);
+    }
+    if let Some(a) = model.main_artist_at(s) {
+        for &(b, w) in model.graph.similar_artists(a) {
+            for &i in model.of_artist(b) {
+                let e = out.entry(i as usize).or_default();
+                *e = e.max(0.5 * w);
+            }
+        }
+    }
+    out
 }
 
 /// The share of a model radio's anchor that is its seed: the session's
@@ -1456,7 +1497,7 @@ pub(crate) mod tests {
         use crate::model::{ModelInput, UserModel};
         let (cat, idx, input, types) = l;
         let now = crate::model::tests::T0;
-        let model = UserModel::build(cat, input, ModelInput { index: idx, types: Some(types), weights: None }, now);
+        let model = UserModel::build(cat, input, ModelInput { index: idx, types: Some(types), weights: None, graph: None }, now);
         let recs = Recs::new(cat, &model.taste, idx).with_model(&model);
         let mut session = Session::default();
         let mut ts = now;
@@ -1571,7 +1612,7 @@ pub(crate) mod tests {
     fn profiles_of(l: &Listener) -> Vec<u128> {
         use crate::model::{ModelInput, UserModel};
         let (cat, idx, input, types) = l;
-        let model = UserModel::build(cat, input, ModelInput { index: idx, types: Some(types), weights: None }, crate::model::tests::T0);
+        let model = UserModel::build(cat, input, ModelInput { index: idx, types: Some(types), weights: None, graph: None }, crate::model::tests::T0);
         let mut kinds: Vec<u128> = (0..model.profiles.len())
             .map(|j| {
                 let i = (0..model.len()).find(|&i| model.profile_at(i) == Some(j)).expect("a member");
@@ -1625,7 +1666,7 @@ pub(crate) mod tests {
         use crate::model::{ModelInput, UserModel};
         let (cat, idx, input, types) = one_language_two_sounds();
         let now = crate::model::tests::T0;
-        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None }, now);
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None, graph: None }, now);
         // Half of the soundtracks suit the background.
         let suits: Vec<bool> = cat.tracks().iter().map(|t| of_kind(t.id.0.as_u128()) == QUIET.0 && t.id.0.as_u128() % 2 == 0).collect();
         let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model).with_background(&suits);
@@ -1655,7 +1696,7 @@ pub(crate) mod tests {
         use crate::model::{ModelInput, UserModel};
         for omnivore in [false, true] {
             let (cat, idx, input, types) = listener(omnivore);
-            let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None }, crate::model::tests::T0);
+            let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None, graph: None }, crate::model::tests::T0);
             let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
             let mut radio = RadioState::new(RadioSeed::Track(tid(OST.0 + 3)));
             radio.add_new((0..60).map(|k| NewTrack {
@@ -1806,7 +1847,7 @@ pub(crate) mod tests {
         use nikgob_core::model::EventContext;
         let (cat, idx, history) = crate::model::tests::album_listener(15, 4);
         let now = crate::model::tests::T0 + crate::taste::DAY_MS;
-        let model = UserModel::build(&cat, &history, ModelInput { index: &idx, types: None, weights: None }, now);
+        let model = UserModel::build(&cat, &history, ModelInput { index: &idx, types: None, weights: None, graph: None }, now);
         let taste = Taste::build(&cat, &history, now);
         let recs = Recs::new(&cat, &taste, &idx).with_model(&model);
         let mut session = crate::session::Session::default();
@@ -1830,7 +1871,7 @@ pub(crate) mod tests {
         use crate::model::{ModelInput, UserModel};
         let (cat, idx) = two_regions();
         let input = TasteInput::default();
-        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None }, NOW);
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None, graph: None }, NOW);
         let taste = Taste::build(&cat, &input, NOW);
         let recs = Recs::new(&cat, &taste, &idx).with_model(&model);
         let params = RadioParams { new_share: 0.0, seed: 3 };

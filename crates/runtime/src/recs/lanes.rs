@@ -560,7 +560,7 @@ mod tests {
             index.insert(*id, v);
         }
         let input = TasteInput { likes: ids[..40].to_vec(), ..TasteInput::default() };
-        let model = UserModel::build(&catalog, &input, ModelInput { index: &index, types: None, weights: None }, 1_000 * DAY_MS);
+        let model = UserModel::build(&catalog, &input, ModelInput { index: &index, types: None, weights: None, graph: None }, 1_000 * DAY_MS);
         let snap = Snapshot {
             model,
             types: SongTypes::default(),
