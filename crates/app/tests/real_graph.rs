@@ -7,15 +7,19 @@
 //! most played songs (its artists, its largest world, how much of it is
 //! known), the taste profiles and «Миксы для тебя» (their largest world).
 //!
-//! `NIKGOB_GRAPH_DB=<copy>/library.sqlite [NIKGOB_GRAPH_FETCH=40]
-//! [NIKGOB_GRAPH_OUT=<dir>] cargo test -p nikgob --test real_graph --
-//! --ignored --nocapture`
+//! `NIKGOB_GRAPH_DB=<a library>/library.sqlite [NIKGOB_GRAPH_WORK=<dir>]
+//! [NIKGOB_GRAPH_FETCH=40] [NIKGOB_GRAPH_OUT=<dir>] cargo test -p nikgob
+//! --test real_graph -- --ignored --nocapture`
 //!
-//! Never point it at the library in use: it writes to the database it is
-//! given.
+//! The library given is never opened: it is copied (with its journal) into
+//! the work folder (by default `nikgob-real-graph` in the temp folder) the
+//! first time, and every run after measures and fetches into that copy, so
+//! what a fetch kept is there for the next run. A work folder inside the
+//! app's own data is refused. Without `NIKGOB_GRAPH_FETCH` nothing is asked
+//! of the network.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,10 +32,11 @@ use nikgob_runtime::{Metadata, MetadataConfig, ModelPreview, NullPlayback, Runti
 use nikgob_view::Prefs;
 use serde_json::{Value, json};
 
-fn fetch(lib: &Library, dir: &std::path::Path, minutes: u64) {
-    let mut streams: Vec<Arc<dyn StreamService>> = Vec::new();
-    streams.push(nikgob_youtube::Youtube::new(nikgob_youtube::YoutubeConfig::new(dir.join("youtube"))).unwrap());
-    streams.push(nikgob_deezer::Deezer::new(nikgob_deezer::DeezerConfig::default()).unwrap());
+fn fetch(lib: &Library, dir: &Path, minutes: u64) {
+    let streams: Vec<Arc<dyn StreamService>> = vec![
+        nikgob_youtube::Youtube::new(nikgob_youtube::YoutubeConfig::new(dir.join("youtube"))).unwrap(),
+        nikgob_deezer::Deezer::new(nikgob_deezer::DeezerConfig::default()).unwrap(),
+    ];
     let empty = dir.join("root");
     std::fs::create_dir_all(&empty).unwrap();
     let rt = Runtime::start(
@@ -62,6 +67,29 @@ fn fetch(lib: &Library, dir: &std::path::Path, minutes: u64) {
         }
     }
     drop(rt);
+}
+
+/// The copy of `source` in `dir`, made the first time (the database and
+/// its journal, the source left as it is).
+fn work_copy(source: &Path, dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    if let Some(data) = directories::ProjectDirs::from("dev", "nikgob", "music.nikgob").and_then(|d| d.data_dir().canonicalize().ok()) {
+        assert!(!dir.starts_with(&data), "{} is the app's own data: give another NIKGOB_GRAPH_WORK", dir.display());
+    }
+    let db = dir.join("library.sqlite");
+    let source = source.canonicalize().unwrap();
+    assert_ne!(source, db, "NIKGOB_GRAPH_DB is the work copy itself");
+    if !db.exists() {
+        for ext in ["", "-wal", "-shm"] {
+            let from = PathBuf::from(format!("{}{ext}", source.display()));
+            if from.exists() {
+                std::fs::copy(&from, dir.join(format!("library.sqlite{ext}"))).unwrap();
+            }
+        }
+        println!("copied {} to {}", source.display(), db.display());
+    }
+    db
 }
 
 fn round(x: f32) -> f32 {
@@ -149,11 +177,11 @@ fn mixes(p: &ModelPreview) -> Value {
 }
 
 #[test]
-#[ignore = "needs NIKGOB_GRAPH_DB (a copy), and the network with NIKGOB_GRAPH_FETCH"]
+#[ignore = "needs NIKGOB_GRAPH_DB, and the network with NIKGOB_GRAPH_FETCH"]
 fn the_graph_on_a_copy_of_a_real_library() {
-    let Some(db) = std::env::var_os("NIKGOB_GRAPH_DB") else { return };
-    let db = PathBuf::from(db);
-    let dir = db.parent().unwrap().to_owned();
+    let Some(source) = std::env::var_os("NIKGOB_GRAPH_DB") else { return };
+    let dir = std::env::var_os("NIKGOB_GRAPH_WORK").map_or_else(|| std::env::temp_dir().join("nikgob-real-graph"), PathBuf::from);
+    let db = work_copy(&PathBuf::from(source), &dir);
     let _ = env_logger::builder().is_test(true).filter_level(log::LevelFilter::Info).try_init();
     let lib = Library::open(&db).unwrap();
     if let Some(minutes) = std::env::var("NIKGOB_GRAPH_FETCH").ok().and_then(|m| m.parse().ok()) {
