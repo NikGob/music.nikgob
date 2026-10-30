@@ -43,7 +43,7 @@ pub use recs::{
     preview_tile_days,
 };
 pub use nikgob_import::ImportConfig;
-pub use nikgob_metadata::MetadataConfig;
+pub use nikgob_metadata::{Metadata, MetadataConfig};
 pub use streams::{StreamSchedule, WINDOW_HINT, WebLogin, WebLoginError};
 use import::{IMPORT_ID, ImportService, Internal};
 use queue::{Entry, Queue};

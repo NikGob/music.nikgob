@@ -161,6 +161,9 @@ const GRAPH_ARTIST_TRACKS: usize = 4;
 /// history is short: this much at most, fading as `1 / (1 + starts / COLD_STARTS)`.
 const COLD_MASS: f32 = 0.3;
 const COLD_STARTS: f32 = 30.0;
+/// From this many starts the history alone is the taste (the prior would
+/// only blur the profiles of the tracks it gathers).
+const COLD_UNTIL: usize = 300;
 const LR: f32 = 0.05;
 const L2: f32 = 0.01;
 /// The step is halved until this many starts taught the model.
@@ -520,7 +523,8 @@ pub struct UserModel {
     /// The collective graph and the personal one ([`crate::graph`]).
     pub graph: SimGraph,
     personal: Vec<Vec<(u32, f32)>>,
-    /// How cold the history is: 1 with none, `1 / (1 + starts / COLD_STARTS)`.
+    /// How cold the history is: 1 with none, `1 / (1 + starts / COLD_STARTS)`,
+    /// 0 from [`COLD_UNTIL`] starts.
     cold: f32,
     /// «Без истории — по самой библиотеке».
     library_prior: bool,
@@ -855,7 +859,7 @@ impl UserModel {
         }
         // The library is a taste too while the history is short: every
         // track a little, the ones the graph gathers around more.
-        self.cold = 1.0 / (1.0 + starts.len() as f32 / COLD_STARTS);
+        self.cold = if starts.len() >= COLD_UNTIL { 0.0 } else { 1.0 / (1.0 + starts.len() as f32 / COLD_STARTS) };
         self.library_prior = input.library_prior;
         for (i, m) in mass.iter_mut().enumerate() {
             *m += self.prior_mass(i);
