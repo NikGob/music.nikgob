@@ -2075,4 +2075,34 @@ pub(crate) mod tests {
         assert!(a(3) > 0.0, "a late skip is a little plus: {}", a(3));
         assert!(m.tracks[2].open.is_none());
     }
+
+    /// The library is a taste while the history is short: all of it
+    /// without one, fading with the starts, none from [`COLD_UNTIL`] on or
+    /// with «Без истории — по самой библиотеке» off.
+    #[test]
+    fn the_library_prior_fades_with_the_history() {
+        let cat = Catalog::new((0..20u128).map(|i| info(i, &[i as u32 % 4], None).with_duration(Some(200_000))));
+        let idx = VectorIndex::new();
+        let built = |n: usize, prior: bool| {
+            let mut events = Vec::new();
+            for k in 0..n {
+                let ts = T0 - (n - k) as i64 * 300_000;
+                events.push(Play::new(tid(k as u128 % 20), ts, EventType::Start, Some(0)));
+                events.push(Play::new(tid(k as u128 % 20), ts + 200_000, EventType::Complete, Some(200_000)));
+            }
+            UserModel::build(&cat, &TasteInput { events, library_prior: prior, ..TasteInput::default() }, input(&idx), T0)
+        };
+        let none = built(0, true);
+        assert_eq!(none.cold(), 1.0);
+        assert!(none.prior_mass(0) > 0.0);
+        let some = built(30, true);
+        assert!((some.cold() - 0.5).abs() < 1e-6, "{}", some.cold());
+        assert!(some.prior_mass(0) < none.prior_mass(0) && some.prior_mass(0) > 0.0);
+        let last = built(COLD_UNTIL - 1, true);
+        assert!(last.cold() > 0.0);
+        let warm = built(COLD_UNTIL, true);
+        assert_eq!(warm.cold(), 0.0);
+        assert_eq!(warm.prior_mass(0), 0.0);
+        assert_eq!(built(0, false).prior_mass(0), 0.0);
+    }
 }
