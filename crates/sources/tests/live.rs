@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use nikgob_core::source::{Fetched, Source, Want};
-use nikgob_sources::select::rank;
+use nikgob_sources::select::{pick, rank};
+
+mod common;
 
 fn eve() -> Want {
     Want {
@@ -63,4 +65,52 @@ async fn tidal_answers() {
         }
         Err(e) => println!("tidal: {e}"),
     }
+}
+
+/// The wishes the torrents had nothing for, asked of the web sources as
+/// they are today: what each gives, what the policy would take.
+///
+/// `cargo test -p nikgob-sources --test live failing_wishes_now -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "asks khinsider, Qobuz-DL and hifi-api for 42 wishes (several minutes)"]
+async fn failing_wishes_now() {
+    let sources: Vec<Arc<dyn Source>> = vec![
+        Arc::new(nikgob_sources::khinsider::Khinsider::new("")),
+        Arc::new(nikgob_sources::qobuz::Qobuz::new(&[])),
+        Arc::new(nikgob_sources::tidal::Tidal::new(&[])),
+    ];
+    let mut found = 0;
+    for w in common::WISHES {
+        // The runtime asks with the credit's names apart.
+        let mut want = common::want_of(w);
+        want.artists = w.1.split(", ").filter(|a| !a.starts_with("и ещё")).map(str::to_owned).collect();
+        let asks = sources.iter().map(|s| {
+            let (s, want) = (s.clone(), &want);
+            async move { (s.name().to_owned(), s.search(want).await) }
+        });
+        let mut offers = Vec::new();
+        let mut line = Vec::new();
+        for (name, r) in futures_util::future::join_all(asks).await {
+            match r {
+                Ok(o) => {
+                    line.push(format!("{name} {}", o.len()));
+                    offers.extend(o);
+                }
+                Err(e) => line.push(format!("{name}: {e}")),
+            }
+        }
+        let ranked = rank(offers, &want, &[]);
+        let verdict = match pick(&ranked, None) {
+            Some(i) => {
+                found += 1;
+                format!("TAKE {} · {}", ranked[i].offer.detail(), ranked[i].offer.title)
+            }
+            None => match ranked.first() {
+                Some(r) => format!("ASK {} · {}", r.offer.detail(), r.offer.title),
+                None => "NOTHING".to_owned(),
+            },
+        };
+        println!("{} — {} | {} | {verdict}", w.1, w.2, line.join(", "));
+    }
+    println!("taken by itself: {found} of {}", common::WISHES.len());
 }

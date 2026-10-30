@@ -170,7 +170,8 @@ fn format(bits: Option<u8>, khz: Option<f64>) -> Format {
 
 fn with_version(title: &str, version: Option<&str>) -> String {
     match version.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(v) => format!("{title} ({v})"),
+        Some(v) if !title.to_lowercase().contains(&v.to_lowercase()) => format!("{title} ({v})"),
+        Some(_) => title.to_owned(),
         None => title.to_owned(),
     }
 }

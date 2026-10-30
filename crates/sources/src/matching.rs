@@ -84,6 +84,11 @@ pub fn same_artist(name: &str, want: &Want) -> bool {
         })
 }
 
+/// A compilation's artist line ("Various Artists", «Разные исполнители»).
+fn various(name: &str) -> bool {
+    !name.trim().is_empty() && crate::text::main_artist(name).is_empty()
+}
+
 fn best_title(got: &str, want: &[String]) -> f64 {
     let got_keys = title_keys(got);
     got_keys
@@ -101,12 +106,36 @@ pub fn judge(offer: &Offer, want: &Want) -> Option<Verdict> {
     }
 }
 
+/// The performer and the song of an upload titled "Performer - Song" by
+/// someone else («Gg2» uploading «Комсомольск - Мозги & деньги»).
+fn performer_in_title(title: &str) -> Option<(&str, &str)> {
+    let (head, tail) = title.split_once(" - ")?;
+    (!head.trim().is_empty() && !tail.trim().is_empty()).then(|| (head.trim(), tail.trim()))
+}
+
+/// A wish for a sped-up or slowed upload: the release is the song at its
+/// own length.
+fn altered(title: &str) -> bool {
+    ["speed up", "sped up", "speedup", "slowed", "nightcore"].iter().any(|w| has_word(&title.to_lowercase(), w))
+}
+
 /// A catalogue entry: artist, title, album and length said apart.
 fn judge_catalogue(offer: &Offer, want: &Want) -> Option<Verdict> {
     let artist = offer.artist.as_deref().unwrap_or_default();
     let soundtrack = want.album.as_deref().is_some_and(is_soundtrack);
     let artist_ok = same_artist(artist, want);
-    if !artist_ok && !soundtrack {
+    // The song's performer named in the wish's title: never sure, the
+    // user confirms it.
+    let performer = (!artist_ok)
+        .then(|| want.title.as_deref().and_then(performer_in_title))
+        .flatten()
+        .filter(|(head, _)| {
+            let (a, b) = (artist_key(head), artist_key(artist));
+            !a.is_empty() && !b.is_empty() && similarity(&a, &b) >= ARTIST
+        });
+    // A compilation of nobody in particular ("Various Artists").
+    let nobody = artist_keys(want).is_empty();
+    if !artist_ok && !soundtrack && performer.is_none() && !nobody {
         return None;
     }
     let want_text = format!("{} {}", want.title.as_deref().unwrap_or_default(), want.album.as_deref().unwrap_or_default());
@@ -118,12 +147,12 @@ fn judge_catalogue(offer: &Offer, want: &Want) -> Option<Verdict> {
                 return None;
             }
             let isrc = matches!((&offer.isrc, &want.isrc), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b));
-            let sim = best_title(got, &title_keys(title));
+            let sim = best_title(got, &title_keys(performer.map_or(title, |(_, song)| song)));
             if sim < TITLE && !isrc {
                 return None;
             }
             let length = match (offer.duration_ms, want.duration_ms) {
-                (Some(a), Some(b)) if a.abs_diff(b) > OTHER_MS && !isrc => return None,
+                (Some(a), Some(b)) if a.abs_diff(b) > OTHER_MS && !isrc && !altered(title) => return None,
                 (Some(a), Some(b)) => a.abs_diff(b) <= SLACK_MS,
                 _ => false,
             };
@@ -134,7 +163,7 @@ fn judge_catalogue(offer: &Offer, want: &Want) -> Option<Verdict> {
             let score = sim * 0.6 + if length { 0.25 } else { 0.0 } + if album { 0.15 } else { 0.0 };
             Some(Verdict {
                 score,
-                sure: artist_ok && (isrc || length),
+                sure: artist_ok && (isrc || length) && !altered(title),
             })
         }
         (WantScope::Album, OfferScope::Album | OfferScope::Collection) | (WantScope::Track, OfferScope::Album) => {
@@ -152,7 +181,9 @@ fn judge_catalogue(offer: &Offer, want: &Want) -> Option<Verdict> {
             }
             Some(Verdict {
                 score: sim * 0.8,
-                sure: artist_ok && sim >= 0.95 && want.scope == WantScope::Album,
+                sure: (artist_ok || (nobody && offer.artist.as_deref().is_some_and(various)))
+                    && sim >= 0.95
+                    && want.scope == WantScope::Album,
             })
         }
         _ => None,

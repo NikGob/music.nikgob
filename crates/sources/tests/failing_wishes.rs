@@ -10,70 +10,13 @@ use std::sync::{Arc, Mutex};
 
 use nikgob_core::indexer::{BoxFuture, Candidate, CandidateHandle, Indexer, IndexerError, SearchQuery, TorrentPayload};
 use nikgob_core::model::Codec;
-use nikgob_core::source::{Format, Offer, OfferScope, Source, SourceKey, Want, WantScope};
+use nikgob_core::source::{Format, Offer, OfferScope, Source, SourceKey, Want};
 use nikgob_sources::select::{pick, rank};
 use nikgob_sources::text::{catalogue_queries, is_soundtrack, torrent_queries};
 use nikgob_sources::torrent::{IndexerSource, pick_files};
 
-/// (scope, artist as the wish shows it, title, album, seconds)
-const WISHES: &[(&str, &str, &str, &str, u32)] = &[
-    ("track", "9Lana", "ヨフケノパレエド - Midnight Parade", "Midnight Parade", 194),
-    ("track", "Con Fetti Pesto, David Münnich, Alexx Grimm", "Meine Freundin ist kaputt", "Das Nennt Ihr Himmel (Supraland Six Inches Under Credits Song)", 188),
-    ("track", "Dominic Fike", "Babydoll", "Don't Forget About Me, Demos", 98),
-    ("track", "Ellie Minibot", "I Don't Want to Be an Engineer", "I Don't Want to Be an Engineer", 269),
-    ("track", "Eve", "Underdog", "Underdog", 194),
-    ("track", "Eve", "Wind's Anthem (feat. suis From Yorushika)", "Wind's Anthem", 223),
-    ("track", "Eve", "Avant", "Kaizin", 205),
-    ("track", "Gg2", "Комсомольск - Мозги & деньги //speed up//", "", 122),
-    ("track", "IcyBeast", "7 Weeks & 3 Days", "7 Weeks & 3 Days", 169),
-    ("track", "JVKE", "her", "her", 172),
-    ("track", "LAZZY2WICE", "Summer 15/16", "Summer 15/16", 161),
-    ("track", "MORGENSHTERN", "Turn It on! (feat. Palc)", "Turn It on!", 208),
-    ("track", "MORGENSHTERN", "Цветок", "Цветок", 156),
-    ("album", "MORGENSHTERN", "ЛЕГЕНДАРНАЯ ПЫЛЬ", "ЛЕГЕНДАРНАЯ ПЫЛЬ", 0),
-    ("track", "MORGENSHTERN, ЛСП", "Зеленоглазые деффки!", "Улыбнись, дурак!", 205),
-    ("track", "MellSher", "X", "X", 151),
-    ("track", "MellSher, и ещё 1 исполнитель", "Разгром", "Разгром", 143),
-    ("track", "Nakimushi", "Shake It Now. (feat. Ado)", "rendez-vous", 197),
-    ("track", "RAT BOY, IBDY", "Who's Ready for Tomorrow", "Cyberpunk 2077: Radio, Vol. 2 (Original Soundtrack)", 117),
-    ("track", "Rosa Walton, Hallie Coggins", "I Really Want to Stay at Your House", "Cyberpunk 2077: Radio, Vol. 2 (Original Soundtrack)", 247),
-    ("track", "SLAVA MARLOW", "Каблуки", "ТУЗИК", 102),
-    ("track", "SLAVA MARLOW", "О2", "ТУЗИК", 117),
-    ("track", "SLAVA MARLOW", "Детские травмы (feat. Платина и Лера Маяк)", "ТУЗИК", 161),
-    ("track", "SLAVA MARLOW", "Я в деле", "ТУЗИК", 94),
-    ("track", "Yorushika", "火星人 - Martian", "second person", 233),
-    ("track", "Yoshihisa Kato", "沈黙の魔女 - Chinmoku no Majo", "Secrets of the Silent Witch Original Soundtrack", 184),
-    ("track", "aksfx", "Big Walk Theme (Jumping Voices)", "Big Walk Theme (Jumping Voices)", 226),
-    ("album", "aksfx", "Big Walk Theme (Jumping Voices)", "Big Walk Theme (Jumping Voices)", 0),
-    ("track", "emptiness", "7 weeks & 3 days (out of tune piano)", "7 weeks & 3 days (out of tune piano)", 61),
-    ("track", "frutiger pm", "cloud city", "dreamcore", 139),
-    ("track", "gotlibgotlibgotlib", "все хотят меня", "все хотят меня", 119),
-    ("track", "gotlibgotlibgotlib, SABU", "агентство насилия™", "агентство насилия™", 135),
-    ("track", "madk1d", "так похуй", "sexyswag", 108),
-    ("track", "my head is empty", "personal space", "ambient vol. 12", 101),
-    ("album", "mzlff", "не забытое старое", "не забытое старое", 0),
-    ("track", "nyan.mp3", "Я не интроверт", "Я не интроверт", 100),
-    ("album", "nyan.mp3", "nyan.pop", "nyan.pop", 0),
-    ("track", "s0rrow", "stalk ur socials", "very sorrow days", 79),
-    ("track", "sakanaction", "怪獣", "怪獣", 253),
-    ("track", "Дайте танк (!)", "Маленький", "Маленький", 245),
-    ("track", "Пошлая Молли", "Контракт", "Контракт", 205),
-    ("album", "Разные исполнители", "Spider-Man: Into the Spider-Verse (Deluxe Edition / Soundtrack From & Inspired By The Motion Picture)", "Spider-Man: Into the Spider-Verse (Deluxe Edition / Soundtrack From & Inspired By The Motion Picture)", 0),
-];
-
-fn want_of(w: &(&str, &str, &str, &str, u32)) -> Want {
-    let (scope, artist, title, album, secs) = *w;
-    // The runtime takes the credit's names apart; the wish's display line
-    // ("MellSher, и ещё 1 исполнитель") is what the old search sent.
-    Want {
-        artists: vec![artist.to_owned()],
-        title: (scope == "track").then(|| title.to_owned()),
-        album: (!album.is_empty()).then(|| album.to_owned()),
-        scope: if scope == "album" { WantScope::Album } else { WantScope::Track },
-        duration_ms: (secs > 0).then_some(secs * 1000),
-        ..Want::default()
-    }
-}
+mod common;
+use common::{WISHES, want_of};
 
 #[test]
 fn every_failing_wish_gets_queries_without_credit_noise() {
@@ -203,4 +146,74 @@ fn a_catalogue_has_the_russian_and_japanese_singles_torrents_lack() {
         assert_eq!(ranked.len(), 1, "{title}: the cover band is out");
         assert_eq!(pick(&ranked, None), Some(0), "{title}");
     }
+}
+
+/// A Tidal track as the hifi-api answered on 2026-10-31.
+fn tidal(artist: &str, title: &str, album: &str, secs: Option<u32>, scope: OfferScope) -> Offer {
+    Offer {
+        source: SourceKey::Tidal,
+        provider: "Tidal".into(),
+        id: title.into(),
+        title: format!("{artist} — {}", if scope == OfferScope::Track { title } else { album }),
+        artist: Some(artist.into()),
+        track_title: (scope == OfferScope::Track).then(|| title.into()),
+        album: Some(album.into()),
+        duration_ms: secs.map(|s| s * 1000),
+        isrc: None,
+        scope,
+        format: Some(Format { bit_depth: Some(16), sample_rate: Some(44_100), ..Format::new(Codec::Flac) }),
+        size_bytes: None,
+        seeders: None,
+        info_url: None,
+        handle: String::new(),
+    }
+}
+
+#[test]
+fn a_sped_up_upload_offers_the_performers_song_to_confirm() {
+    // «Gg2» uploaded «Комсомольск - Мозги & деньги //speed up//»: the
+    // release is Комсомольск's, at its own length.
+    let want = want_of(&WISHES[7]);
+    let ranked = rank(vec![tidal("Комсомольск", "Мозги & деньги", "Комсомольск-1", Some(149), OfferScope::Track)], &want, &[]);
+    assert_eq!(ranked.len(), 1);
+    assert!(!ranked[0].verdict.sure);
+    assert_eq!(pick(&ranked, None), None, "asked in «Подтверди», not taken");
+    // Another performer's song of that name is still not it.
+    let ranked = rank(vec![tidal("Кто-то", "Мозги & деньги", "X", Some(149), OfferScope::Track)], &want, &[]);
+    assert!(ranked.is_empty());
+}
+
+#[test]
+fn a_compilation_of_various_artists_is_taken_by_its_name() {
+    let want = want_of(&WISHES[41]);
+    let album = "Spider-Man: Into the Spider-Verse (Deluxe Edition / Soundtrack From & Inspired By The Motion Picture)";
+    let ranked = rank(
+        vec![
+            tidal("Daddyphatsnaps", "", "Spider-Man Into the Spiderverse Rap", None, OfferScope::Album),
+            tidal("Various Artists", "", album, None, OfferScope::Album),
+        ],
+        &want,
+        &[],
+    );
+    let first = pick(&ranked, None).map(|i| &ranked[i].offer);
+    assert_eq!(first.and_then(|o| o.album.as_deref()), Some(album));
+}
+
+#[test]
+fn what_the_catalogue_lacks_stays_not_found() {
+    // LAZZY2WICE «Summer 15/16»: Tidal answers audiobook chapters.
+    let want = want_of(&WISHES[10]);
+    let got = vec![
+        tidal("Lia Bergman", "Kapitel 15.10 & Kapitel 16.1 - Hot Swedish Summer", "Hot Swedish Summer", Some(185), OfferScope::Track),
+        tidal("Minna Howard", "Chapter 15.6 & Chapter 16.1 - That Long Lost Summer", "That Long Lost Summer", Some(126), OfferScope::Track),
+    ];
+    assert!(rank(got, &want, &[]).is_empty());
+    // sakanaction «怪獣»: other songs of the band, and other bands' «怪獣».
+    let want = want_of(&WISHES[38]);
+    let got = vec![
+        tidal("Sakanaction", "Shin Takara Jima", "834.194", Some(305), OfferScope::Track),
+        tidal("G.E.L.O.", "怪獣", "怪獣", Some(148), OfferScope::Track),
+        tidal("夢見クジラ", "怪獣", "TVアニメ『リアデイルの大地にて』Original Soundtrack", Some(98), OfferScope::Track),
+    ];
+    assert!(rank(got, &want, &[]).is_empty());
 }

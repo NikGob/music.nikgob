@@ -102,7 +102,8 @@ fn artist_of(v: &Value) -> Option<String> {
 fn title_of(v: &Value) -> Option<String> {
     let t = s(v, "title")?;
     Some(match s(v, "version").filter(|x| !x.trim().is_empty()) {
-        Some(ver) => format!("{t} ({ver})"),
+        Some(ver) if !t.to_lowercase().contains(&ver.to_lowercase()) => format!("{t} ({ver})"),
+        Some(_) => t,
         None => t,
     })
 }
@@ -296,5 +297,18 @@ impl Source for Tidal {
             }
             Ok(Fetched::Files(files))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_version_the_title_has_is_not_said_twice() {
+        let v = serde_json::json!({"title": "Spider-Man (Deluxe Edition)", "version": "Deluxe Edition"});
+        assert_eq!(title_of(&v).as_deref(), Some("Spider-Man (Deluxe Edition)"));
+        let v = serde_json::json!({"title": "Avant", "version": "Remastered"});
+        assert_eq!(title_of(&v).as_deref(), Some("Avant (Remastered)"));
     }
 }
