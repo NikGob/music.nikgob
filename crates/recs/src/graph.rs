@@ -334,7 +334,7 @@ fn tag_likeness(tags: &[(ArtistId, String, f32)], held: &dyn Fn(ArtistId) -> boo
             }
         }
     }
-    out.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
+    out.sort_by_key(|x| (x.0, x.1));
     out
 }
 

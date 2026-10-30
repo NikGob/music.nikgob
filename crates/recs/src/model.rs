@@ -1707,6 +1707,9 @@ pub fn replay_with(
     }
     let taste = Taste::build(catalog, &TasteInput::default(), first);
     let mut m = UserModel::empty(catalog, taste, extra, input.utc_offset_min, first);
+    if input.personal_graph {
+        m.personal = crate::graph::personal(catalog, &input.events, &input.playlists);
+    }
     m.learn = true;
     m.listen(input);
     let disliked: Vec<usize> = dislikes.iter().filter_map(|t| m.position(*t)).collect();

@@ -121,6 +121,9 @@ const W_SKIP: f32 = 1.2;
 const W_EXPLORE: f32 = 0.9;
 /// The chance of the rotating half.
 const ROTATE: f32 = 0.6;
+/// What the graph links to the songs taken stands this much higher in a
+/// mix of one kind (times the tanh of the links).
+const W_COHERE: f32 = 0.8;
 /// The core is drawn from the best this many times its size, by value over
 /// a third of their spread (the best of them some twenty times likelier
 /// than the last); a song of the epoch before is `e` times less likely.
@@ -835,8 +838,9 @@ impl<'a> Builder<'a> {
         let mut core: Vec<(f32, usize)> = pool.tracks.iter().map(|&i| (value(i), i)).collect();
         core.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
         let k = (CORE_POOL * half).min(core.len());
+        let mut tau = 1.0;
         if k > 0 {
-            let tau = ((core[0].0 - core[k - 1].0) / CORE_SPREAD).max(0.05);
+            tau = ((core[0].0 - core[k - 1].0) / CORE_SPREAD).max(0.05);
             let gumbel = |i: usize| {
                 let u = Rng::derive(seed ^ 0x636f_7265, i as u64).f64().clamp(1e-12, 1.0 - 1e-12);
                 -(-u.ln()).ln() as f32
@@ -846,7 +850,15 @@ impl<'a> Builder<'a> {
             top.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
             core.splice(..k, top);
         }
-        for &(_, i) in &core {
+        // A mix of one kind keeps to the scene its first songs are of: what
+        // the graph links to the songs taken stands higher
+        // (docs/recs-graph.md); without a graph nothing changes.
+        let cohere = matches!(key, MixKey::Profile(_) | MixKey::Kind(_)) && !self.model.graph.is_empty();
+        if cohere {
+            let mut top: Vec<(f32, usize)> = core[..k].to_vec();
+            self.take_cohering(&mut pick, &mut top, 1.0 / tau, &|p: &Picking<'_, '_>| p.len() >= half || p.full(n), &|_| false);
+        }
+        for &(_, i) in &core[if cohere { k } else { 0 }..] {
             if pick.len() >= half || pick.full(n) {
                 break;
             }
@@ -856,6 +868,10 @@ impl<'a> Builder<'a> {
         // others last.
         let mut rest: Vec<(f32, usize)> = pool.tracks.iter().map(|&i| (value(i) + ROTATE * chance(i), i)).collect();
         rest.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        if cohere {
+            let mut left = rest.clone();
+            self.take_cohering(&mut pick, &mut left, 1.0, &|p: &Picking<'_, '_>| p.full(n), &|i| away.contains(&i));
+        }
         for strict in [true, false] {
             for &(_, i) in &rest {
                 if pick.full(n) {
@@ -905,6 +921,53 @@ impl<'a> Builder<'a> {
             out.remove(k);
         }
         out
+    }
+
+    /// Takes from `list` (keys, the best first) while `done` says no, each
+    /// time the best by its key plus [`W_COHERE`] (× `unit`) of how much the
+    /// graph links it to what was taken, `skip` left for later.
+    fn take_cohering(
+        &self,
+        pick: &mut Picking<'_, '_>,
+        list: &mut Vec<(f32, usize)>,
+        unit: f32,
+        done: &dyn Fn(&Picking<'_, '_>) -> bool,
+        skip: &dyn Fn(usize) -> bool,
+    ) {
+        let g = &self.model.graph;
+        let mut link: HashMap<usize, f32> = HashMap::new();
+        for &i in &pick.out {
+            self.linked(&mut link, i, g);
+        }
+        while !done(pick) {
+            let best = list
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, i))| !skip(*i))
+                .map(|(k, (key, i))| (k, key + unit * W_COHERE * link.get(i).copied().unwrap_or(0.0).tanh()))
+                .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)));
+            let Some((k, _)) = best else { break };
+            let (_, i) = list.remove(k);
+            let before = pick.len();
+            pick.take(i);
+            if pick.len() > before {
+                self.linked(&mut link, i, g);
+            }
+        }
+    }
+
+    /// Adds what the graph links to the track at `i` to `link`.
+    fn linked(&self, link: &mut HashMap<usize, f32>, i: usize, g: &crate::graph::SimGraph) {
+        for &(c, w) in g.near(i) {
+            *link.entry(c as usize).or_default() += w;
+        }
+        if let Some(a) = self.model.main_artist_at(i) {
+            for &(b, w) in g.similar_artists(a) {
+                for &j in self.model.of_artist(b) {
+                    *link.entry(j as usize).or_default() += 0.5 * w;
+                }
+            }
+        }
     }
 
     /// Familiar and loved: above the lowest quarter of the mix's familiar
