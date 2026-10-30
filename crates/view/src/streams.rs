@@ -595,6 +595,41 @@ pub struct SourceView {
     pub status: Option<String>,
 }
 
+/// `[soulseek]` as «Источники» shows it: never the password or the token,
+/// only whether they are saved.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SoulseekView {
+    /// On a server or a small device (`nikgob-slsk`), not in the player.
+    pub remote: bool,
+    pub username: String,
+    pub password_saved: bool,
+    pub remote_url: String,
+    pub token_saved: bool,
+    pub share: bool,
+    pub upload_limit_kbps: u32,
+    /// The client (or the link to the service) runs.
+    pub running: bool,
+}
+
+impl SoulseekView {
+    /// Enough is saved to start it.
+    pub fn configured(&self) -> bool {
+        if self.remote { !self.remote_url.is_empty() } else { !self.username.is_empty() && self.password_saved }
+    }
+}
+
+/// What «Сохранить» under Soulseek sends.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SoulseekForm {
+    pub remote: bool,
+    pub username: String,
+    /// Empty: keep the saved one.
+    pub password: String,
+    pub remote_url: String,
+    /// Empty: keep the saved one.
+    pub remote_token: String,
+}
+
 impl WishlistView {
     pub fn count(&self, status: WishlistStatus) -> u32 {
         self.counts

@@ -183,6 +183,13 @@ pub(super) fn fmt_speed(kbps: u32) -> String {
 }
 
 pub(super) fn speed_slider(ui: &mut Ui, id: &str, kbps: u32) -> Option<u32> {
+    let (dragging, committed) = speed_slider_parts(ui, id, kbps);
+    committed.or(dragging)
+}
+
+/// [`speed_slider`] with the value under the pointer and the released one
+/// apart (a setting that is written to a file only on release).
+pub(super) fn speed_slider_parts(ui: &mut Ui, id: &str, kbps: u32) -> (Option<u32>, Option<u32>) {
     let frac = (kbps as f32 / SPEED_MAX).sqrt().clamp(0.0, 1.0);
     let at = |v: f32| {
         let raw = v * v * SPEED_MAX;
@@ -193,7 +200,7 @@ pub(super) fn speed_slider(ui: &mut Ui, id: &str, kbps: u32) -> Option<u32> {
         .track(8.0)
         .value_label(move |v| fmt_speed(at(v)))
         .show(ui);
-    o.committed.or(o.dragging).map(at)
+    (o.dragging.map(at), o.committed.map(at))
 }
 
 /// Tiles with every cover shape drawn, for picking one or a set. The

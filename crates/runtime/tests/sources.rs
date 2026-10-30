@@ -353,3 +353,43 @@ fn the_weekly_search_of_a_youtube_copy_replaces_it_by_itself() {
     wait_until("the item done", || wish_status(&lib, track) == Some(WishlistStatus::Done));
     assert_eq!(*tidal.fetched.lock().unwrap(), 1);
 }
+
+#[test]
+fn soulseek_is_off_by_default_and_its_account_goes_to_the_settings_file() {
+    let lib = Library::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("settings.toml");
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: dir.path().join("lib"),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: Some(settings.clone()),
+            import: None,
+        },
+        Box::new(Silent),
+        Arc::new(|| {}),
+    );
+    assert!(!Prefs::default().source_on(SourceKey::Soulseek), "off until the user turns it on");
+    rt.send(Command::SetSoulseek(nikgob_view::SoulseekForm {
+        username: "me".into(),
+        password: "secret".into(),
+        ..Default::default()
+    }));
+    wait_for(&rt, "the saved account", |s| s.downloads.soulseek.configured());
+    let view = rt.state().downloads.soulseek.clone();
+    assert!(!view.running, "its switch is off: not started");
+    assert_eq!(view.username, "me");
+    let saved = nikgob_core::settings::Settings::load(&settings).unwrap().soulseek;
+    assert!(saved.enabled);
+    assert_eq!((saved.username.as_str(), saved.password.as_str()), ("me", "secret"));
+    // An empty password keeps the saved one; sharing changes on its own.
+    rt.send(Command::SetSoulseek(nikgob_view::SoulseekForm { username: "me2".into(), ..Default::default() }));
+    rt.send(Command::SetSoulseekShare { share: false, upload_limit_kbps: 256 });
+    wait_for(&rt, "the new settings", |s| s.downloads.soulseek.username == "me2" && !s.downloads.soulseek.share);
+    let saved = nikgob_core::settings::Settings::load(&settings).unwrap().soulseek;
+    assert_eq!((saved.password.as_str(), saved.share, saved.upload_limit_kbps), ("secret", false, 256));
+    assert!(!format!("{:?}", rt.state().downloads.soulseek).contains("secret"));
+}

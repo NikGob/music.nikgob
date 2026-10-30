@@ -12,7 +12,7 @@ use nikgob_core::streaming::SPOTIFY_PREMIUM_REQUIRED;
 use nikgob_view::{self as v, Account, AccountView, Command, LoginInput, LoginPrompt, Prefs, Service, ViewState};
 
 use super::PageState;
-use super::settings::{choice, dimmed, fmt_speed, group, range_slider, row, speed_slider};
+use super::settings::{choice, dimmed, fmt_speed, group, range_slider, row, speed_slider, speed_slider_parts};
 use super::settings_help::{self, SettingId as Id};
 use crate::{
     Icon, Theme, TypeRole,
@@ -72,13 +72,15 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     imports(ui, p, out);
     group(ui, "Кэш");
     stream_cache(ui, state, p, out);
+    soulseek(ui, state, pages, out);
     torrents(ui, state, p, pages, out);
 }
 
 /// «Источники скачивания» (docs/stage4.5.md): where «Хочу скачать» looks,
 /// in the order it prefers them at one quality, each with its switch and
 /// «Выше» / «Ниже». Lossless comes first whichever source has it; a source
-/// the app does not have (Soulseek before its client is in) is left out.
+/// the app does not have is left out (torrents and Soulseek stay: they say
+/// what they need).
 fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
     let s = Theme::get(ui.ctx()).scheme;
     group(ui, "Источники скачивания");
@@ -90,7 +92,10 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
     let shown: Vec<v::SourceKey> = order
         .iter()
         .map(|o| o.key)
-        .filter(|k| state.downloads.sources.iter().any(|v| v.key == *k && (v.available || *k == v::SourceKey::Torrents)))
+        .filter(|k| {
+            let needs_setup = matches!(k, v::SourceKey::Torrents | v::SourceKey::Soulseek);
+            state.downloads.sources.iter().any(|v| v.key == *k && (v.available || needs_setup))
+        })
         .collect();
     let mut moved: Option<(usize, usize)> = None;
     for (n, key) in shown.iter().enumerate() {
@@ -98,6 +103,8 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
         let view = state.downloads.sources.iter().find(|v| v.key == *key);
         let hint = match (key, view) {
             (v::SourceKey::Torrents, Some(v)) if !v.available => "Нужен Prowlarr — ниже, в «Торренты»".to_owned(),
+            (v::SourceKey::Soulseek, _) if !state.downloads.soulseek.configured() => "Нужен аккаунт — ниже, в «Soulseek»".to_owned(),
+            (v::SourceKey::Soulseek, Some(v)) if order[at].on && !v.available => "Не подключился — проверь аккаунт ниже".to_owned(),
             (_, Some(v)) if v.status.is_some() => v.status.clone().unwrap_or_default(),
             (v::SourceKey::Torrents, _) => "Через Prowlarr".to_owned(),
             (v::SourceKey::Khinsider, _) => "Саундтреки игр".to_owned(),
@@ -740,6 +747,97 @@ fn imports(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
         "Где взять: Spotify — Аккаунт → Конфиденциальность → «Расширенная история стриминга» (готовится до 30 дней); Google — takeout.google.com → YouTube и YouTube Music.",
         s.on_surface_variant,
     ));
+}
+
+/// «Soulseek»: where it runs (in the player, or `nikgob-slsk` on a server),
+/// the account or the service's address, and the sharing. Its switch is
+/// the row in «Источники скачивания».
+fn soulseek(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
+    let saved = &state.downloads.soulseek;
+    // The saved account fills the fields until something is typed (it may
+    // come a moment after the page opens).
+    if !pages.slsk_synced && saved.configured() {
+        pages.slsk_remote = saved.remote;
+        pages.slsk_user = saved.username.clone();
+        pages.slsk_url = saved.remote_url.clone();
+        pages.slsk_synced = true;
+    }
+    group(ui, "Soulseek");
+    ui.add_space(4.0);
+    settings_help::item(ui, Id::Soulseek, "Soulseek", |ui| {
+        let (pick, _) = super::connected(
+            ui,
+            egui::Id::new("set-slsk-where"),
+            &["В плеере", "На сервере"],
+            usize::from(pages.slsk_remote),
+            &[],
+        );
+        if let Some(n) = pick {
+            pages.slsk_remote = n == 1;
+            pages.slsk_synced = true;
+        }
+        ui.add_space(12.0);
+        let ready = if pages.slsk_remote {
+            TextField::new(&mut pages.slsk_url, "Адрес утилиты")
+                .placeholder("http://…:5031")
+                .leading_icon(Icon::Link)
+                .width(480.0)
+                .id_salt("set-slsk-url")
+                .show(ui);
+            ui.add_space(8.0);
+            TextField::new(&mut pages.slsk_token, "Токен")
+                .password(true)
+                .supporting(if saved.token_saved { "Токен сохранён. Введи новый, чтобы заменить." } else { "Хранится в settings.toml." })
+                .width(480.0)
+                .id_salt("set-slsk-token")
+                .show(ui);
+            !pages.slsk_url.trim().is_empty()
+        } else {
+            TextField::new(&mut pages.slsk_user, "Ник")
+                .leading_icon(Icon::Person)
+                .width(480.0)
+                .id_salt("set-slsk-user")
+                .show(ui);
+            ui.add_space(8.0);
+            TextField::new(&mut pages.slsk_pass, "Пароль")
+                .password(true)
+                .supporting(if saved.password_saved {
+                    "Пароль сохранён. Введи новый, чтобы заменить."
+                } else {
+                    "Новый ник заведётся сам при первом входе. Хранится в settings.toml."
+                })
+                .width(480.0)
+                .id_salt("set-slsk-pass")
+                .show(ui);
+            !pages.slsk_user.trim().is_empty() && (saved.password_saved || !pages.slsk_pass.is_empty())
+        };
+        ui.add_space(8.0);
+        if ui.add(Button::new("Сохранить").style(Style::Tonal).enabled(ready).id_salt("set-slsk-save")).clicked() {
+            out.push(Command::SetSoulseek(v::SoulseekForm {
+                remote: pages.slsk_remote,
+                username: pages.slsk_user.trim().to_owned(),
+                password: std::mem::take(&mut pages.slsk_pass),
+                remote_url: pages.slsk_url.trim().to_owned(),
+                remote_token: std::mem::take(&mut pages.slsk_token),
+            }));
+        }
+    });
+    let mut share = saved.share;
+    row(ui, Id::SoulseekShare, "Раздавать библиотеку", Some("Другие могут скачивать у тебя, только чтение"), |ui| {
+        ui.add(Switch::new(&mut share).id_salt("set-slsk-share"));
+    });
+    if share != saved.share {
+        out.push(Command::SetSoulseekShare { share, upload_limit_kbps: saved.upload_limit_kbps });
+    }
+    dimmed(ui, !saved.share, |ui| {
+        row(ui, Id::SoulseekUpload, "Скорость отдачи", Some(&fmt_speed(saved.upload_limit_kbps)), |ui| {
+            if let (_, Some(v)) = speed_slider_parts(ui, "set-slsk-ul", saved.upload_limit_kbps)
+                && v != saved.upload_limit_kbps
+            {
+                out.push(Command::SetSoulseekShare { share: saved.share, upload_limit_kbps: v });
+            }
+        });
+    });
 }
 
 /// «Торренты»: Prowlarr and the seeding policy (moved from «Основные»).

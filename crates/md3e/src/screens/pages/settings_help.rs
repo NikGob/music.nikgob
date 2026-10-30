@@ -180,6 +180,10 @@ pub enum SettingId {
     /// «Анализ звука стримов».
     StreamAnalysis,
     Prowlarr,
+    /// «Soulseek»: where it runs and the account.
+    Soulseek,
+    SoulseekShare,
+    SoulseekUpload,
     NoSeed,
     SeedLimit,
     SeedDays,
@@ -300,7 +304,7 @@ impl SettingId {
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
             Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
             | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | DownloadToasts | DownloadSource(_) | PlaylistSync | ImportSpotify
-            | ImportYouTube | ImportFiles | ImportSavedSongs | StreamCache | StreamAnalysis | Prowlarr | NoSeed | SeedLimit | SeedDays
+            | ImportYouTube | ImportFiles | ImportSavedSongs | StreamCache | StreamAnalysis | Prowlarr | Soulseek | SoulseekShare | SoulseekUpload | NoSeed | SeedLimit | SeedDays
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
             RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | NewShareBy(_)
             | MixesWithNew | BackgroundCountsLess | ProfilesSplit | ProfileNames
@@ -387,6 +391,9 @@ impl SettingId {
             AcoustId => "Ключ сервиса AcoustID: он узнаёт трек по звуку, если у файла нет названий.",
             UserName => "Имя в приветствии на главной: «Добрый вечер, Ник». Пустое поле — приветствие без имени.",
             Prowlarr => "Адрес и ключ программы Prowlarr — через неё ищутся раздачи с музыкой.",
+            Soulseek => "Свой аккаунт в сети Soulseek: новый ник и пароль заводятся сами при первом входе. «В плеере» — клиент работает внутри плеера в фоне; «На сервере» — утилита nikgob-slsk на сервере или Raspberry Pi, плеер забирает у неё скачанное. Хранится в settings.toml.",
+            SoulseekShare => "Другие люди в Soulseek могут скачивать у тебя треки из папки библиотеки (только чтение). Сеть держится на обмене: кто раздаёт, тому охотнее отдают.",
+            SoulseekUpload => "Максимальная скорость, с которой Soulseek отдаёт треки другим.",
             NoSeed => "Скачанные треки сразу перестают раздаваться другим.",
             SeedLimit => "Сколько всего можно отдать другим, после чего раздача остановится.",
             SeedDays => "Сколько дней раздавать скачанное, потом раздача удаляется.",

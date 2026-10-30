@@ -872,6 +872,8 @@ pub struct DownloadsView {
     pub wishlist: WishlistView,
     /// The download sources, in the user's order (Settings → «Источники»).
     pub sources: Vec<SourceView>,
+    /// `[soulseek]` of settings.toml as «Источники» shows it.
+    pub soulseek: SoulseekView,
 }
 
 /// A transient message ("Добавлено в Любимые · Отменить").
@@ -1237,7 +1239,7 @@ pub struct SourceSwitch {
 
 impl Prefs {
     /// Every source in the user's order, the ones not listed yet in their
-    /// default places (on).
+    /// default places (on, Soulseek off).
     pub fn source_order(&self) -> Vec<SourceSwitch> {
         let mut out: Vec<SourceSwitch> = Vec::new();
         for s in &self.download_sources {
@@ -1255,7 +1257,8 @@ impl Prefs {
                 .filter_map(|prev| out.iter().position(|o| o.key == *prev))
                 .max()
                 .map_or(0, |p| p + 1);
-            out.insert(at, SourceSwitch { key: *k, on: true });
+            // Soulseek needs the user's own account: off until switched on.
+            out.insert(at, SourceSwitch { key: *k, on: *k != SourceKey::Soulseek });
         }
         out
     }
@@ -1898,6 +1901,12 @@ pub enum Command {
     MoveMastersDir(PathBuf),
     /// Prowlarr address and API key (stored in settings.toml, never shown again).
     SetIndexer { url: String, api_key: String },
+    /// The Soulseek account and where it runs (stored in `[soulseek]` of
+    /// settings.toml); an empty password or token keeps the saved one.
+    SetSoulseek(SoulseekForm),
+    /// Soulseek's sharing, applied at once: share the library, and the
+    /// upload limit in KiB/s (0 = none).
+    SetSoulseekShare { share: bool, upload_limit_kbps: u32 },
     /// Asks Prowlarr whether it answers ([`ViewState::indexer_check`]) at the
     /// address and key typed in the settings (not saved yet); an empty address
     /// checks the saved one, an empty key uses the saved key.

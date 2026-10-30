@@ -1041,6 +1041,8 @@ impl Worker {
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
+            Command::SetSoulseek(form) => self.set_soulseek(form),
+            Command::SetSoulseekShare { share, upload_limit_kbps } => self.set_soulseek_share(share, upload_limit_kbps),
             Command::CheckIndexer { url, api_key } => self.check_indexer(url, api_key),
             Command::DismissToast(id) => {
                 self.publish(|s| s.toasts.retain(|t| t.id != id));
@@ -2114,6 +2116,9 @@ impl Worker {
         }
         if old.auto_download_limit != p.auto_download_limit {
             self.wish_tick();
+        }
+        if old.source_on(nikgob_view::SourceKey::Soulseek) != p.source_on(nikgob_view::SourceKey::Soulseek) {
+            self.soulseek_apply();
         }
         if old.source_order() != p.source_order() {
             self.publish_sources();
