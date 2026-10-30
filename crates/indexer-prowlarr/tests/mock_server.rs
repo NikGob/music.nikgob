@@ -60,7 +60,7 @@ async fn search_maps_results_and_sends_expected_request() {
         .and(header("X-Api-Key", KEY))
         .and(query_param("query", "Artist Album"))
         .and(query_param("type", "search"))
-        .and(Repeated("categories", vec!["3000", "3040"]))
+        .and(Repeated("categories", vec!["3000", "3010", "3040", "3050", "3060"]))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([release(&server), usenet])))
         .expect(1)
         .mount(&server)
@@ -211,7 +211,9 @@ async fn fetch_redirect_loop_is_bounded() {
         .respond_with(ResponseTemplate::new(302).insert_header("Location", "/7/download"))
         .mount(&server)
         .await;
-    let c = first_candidate(&server, release(&server)).await;
+    let mut r = release(&server);
+    r["infoHash"] = json!(null);
+    let c = first_candidate(&server, r).await;
     let err = client(&server).fetch_torrent(&c).await.unwrap_err();
     assert!(matches!(err, IndexerError::Parse(_)), "{err:?}");
 }
@@ -223,9 +225,49 @@ async fn fetch_rejects_html_masquerading_as_torrent() {
         .respond_with(ResponseTemplate::new(200).set_body_string("<html>login</html>"))
         .mount(&server)
         .await;
-    let c = first_candidate(&server, release(&server)).await;
+    let mut r = release(&server);
+    r["infoHash"] = json!(null);
+    let c = first_candidate(&server, r).await;
     let err = client(&server).fetch_torrent(&c).await.unwrap_err();
     assert!(matches!(err, IndexerError::Parse(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_tracker_error_falls_back_to_the_magnet_of_the_hash() {
+    // The live log: "fetching Eve Kaizin (2022) Mp3 320kbps: indexer answered with HTTP 500".
+    let server = MockServer::start().await;
+    Mock::given(path("/7/download"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let c = first_candidate(&server, release(&server)).await;
+    let payload = client(&server).fetch_torrent(&c).await.unwrap();
+    assert_eq!(
+        payload,
+        TorrentPayload::Magnet(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Artist+-+Album+%282019%29+%5BFLAC%5D".into()
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_magnet_url_that_is_a_prowlarr_link_is_followed() {
+    // The live log: "magnetUrl is not a magnet link" for a nyaa release.
+    let server = MockServer::start().await;
+    let magnet = "magnet:?xt=urn:btih:feedfacefeedfacefeedfacefeedfacefeedface";
+    Mock::given(path("/9/download"))
+        .and(header("X-Api-Key", KEY))
+        .respond_with(ResponseTemplate::new(301).insert_header("Location", magnet))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut r = release(&server);
+    r["downloadUrl"] = json!(null);
+    r["infoHash"] = json!(null);
+    r["magnetUrl"] = json!(format!("{}/9/download?apikey=SECRET&link=abc", server.uri()));
+    let c = first_candidate(&server, r).await;
+    let payload = client(&server).fetch_torrent(&c).await.unwrap();
+    assert_eq!(payload, TorrentPayload::Magnet(magnet.into()));
 }
 
 #[tokio::test]
@@ -257,6 +299,7 @@ async fn fetch_with_nothing_is_nothing_to_fetch() {
     let server = MockServer::start().await;
     let mut r = release(&server);
     r["downloadUrl"] = json!(null);
+    r["infoHash"] = json!(null);
     let c = first_candidate(&server, r).await;
     let err = client(&server).fetch_torrent(&c).await.unwrap_err();
     assert!(matches!(err, IndexerError::NothingToFetch), "{err:?}");

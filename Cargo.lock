@@ -4991,6 +4991,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nikgob-sources"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures-util",
+ "log",
+ "nikgob-core",
+ "nikgob-metadata",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "nikgob-spotify"
 version = "0.1.0"
 dependencies = [

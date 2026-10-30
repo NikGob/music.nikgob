@@ -33,6 +33,21 @@ pub struct Settings {
     pub indexer: IndexerSettings,
     pub metadata: MetadataSettings,
     pub streaming: StreamingSettings,
+    pub sources: SourcesSettings,
+}
+
+/// Where the download sources other than the indexer live
+/// (docs/stage4.5.md). Public instances, no accounts: empty lists take the
+/// built-in ones, a list of the user's own replaces them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourcesSettings {
+    /// Qobuz-DL instances (`https://host`, the API under `/api/`).
+    pub qobuz_instances: Vec<String>,
+    /// hifi-api instances for Tidal (`https://host`).
+    pub tidal_instances: Vec<String>,
+    /// khinsider's address (empty: downloads.khinsider.com).
+    pub khinsider_url: String,
 }
 
 /// Secrets of the streaming services (docs/stage3.md §0). Tokens and
@@ -174,6 +189,10 @@ mod tests {
             streaming: StreamingSettings {
                 spotify_client_id: Some("my-client-id".into()),
                 youtube_cookies: Some("SID=cookie-secret".into()),
+            },
+            sources: SourcesSettings {
+                qobuz_instances: vec!["https://qobuz.example".into()],
+                ..SourcesSettings::default()
             },
         }
     }
