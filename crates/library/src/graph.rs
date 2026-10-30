@@ -153,6 +153,18 @@ impl Library {
         })
     }
 
+    /// The ids the services know the library's tracks and artists by:
+    /// `(service, kind, remote id, local id)`.
+    pub fn graph_remote_ids(&self) -> Result<Vec<(String, String, String, String)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT service, kind, remote_id, local_id FROM external_id WHERE kind IN ('track', 'artist')",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
     /// The MusicBrainz ids of the library's artists and tracks (recordings)
     /// that have one: `(kind, id, mbid)`.
     pub fn graph_mbids(&self) -> Result<Vec<(String, String, String)>> {

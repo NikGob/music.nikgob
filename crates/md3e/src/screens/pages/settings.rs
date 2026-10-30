@@ -304,6 +304,11 @@ fn recs_patches(before: &Prefs, p: &Prefs) -> Vec<PrefPatch> {
         (p.mixes_everything, before.mixes_everything, PrefPatch::MixesEverything),
         (p.mixes_moods, before.mixes_moods, PrefPatch::MixesMoods),
         (p.mixes_on_repeat, before.mixes_on_repeat, PrefPatch::MixesOnRepeat),
+        (p.graph_use, before.graph_use, PrefPatch::GraphUse),
+        (p.graph_services, before.graph_services, PrefPatch::GraphServices),
+        (p.graph_open_data, before.graph_open_data, PrefPatch::GraphOpenData),
+        (p.graph_personal, before.graph_personal, PrefPatch::GraphPersonal),
+        (p.library_as_taste, before.library_as_taste, PrefPatch::LibraryAsTaste),
     ];
     for (now, was, patch) in flags {
         if now != was {
@@ -410,6 +415,48 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
     });
     row(ui, Id::ProfileNames, "Названия профилей", None, |ui| {
         choice(ui, Id::ProfileNames, p);
+    });
+
+    group(ui, "Похожая музыка");
+    row(ui, Id::GraphUse, "Похожее по слушателям", None, |ui| {
+        ui.add(Switch::new(&mut p.graph_use).id_salt("set-graph-use"));
+    });
+    dimmed(ui, !p.graph_use, |ui| {
+        row(ui, Id::GraphServices, "Спрашивать YouTube Music и Deezer", None, |ui| {
+            ui.add(Switch::new(&mut p.graph_services).id_salt("set-graph-services"));
+        });
+        row(ui, Id::GraphOpenData, "Спрашивать ListenBrainz и MusicBrainz", None, |ui| {
+            ui.add(Switch::new(&mut p.graph_open_data).id_salt("set-graph-open"));
+        });
+    });
+    row(ui, Id::GraphPersonal, "Мои плейлисты и импорт истории", None, |ui| {
+        ui.add(Switch::new(&mut p.graph_personal).id_salt("set-graph-personal"));
+    });
+    row(ui, Id::LibraryAsTaste, "Без истории — по самой библиотеке", None, |ui| {
+        ui.add(Switch::new(&mut p.library_as_taste).id_salt("set-library-taste"));
+    });
+    ui.add_space(8.0);
+    settings_help::item(ui, Id::LastfmKey, "Ключ Last.fm", |ui| {
+        TextField::new(&mut pages.lastfm_key, "Ключ Last.fm")
+            .password(true)
+            .supporting(if p.lastfm_configured { "Ключ задан. Введи новый, чтобы заменить." } else { "Необязательно. Хранится в settings.toml." })
+            .width(480.0)
+            .id_salt("set-lastfm")
+            .show(ui);
+    });
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if ui
+            .add(Button::new("Сохранить").style(Style::Tonal).enabled(!pages.lastfm_key.trim().is_empty()).id_salt("set-lastfm-save"))
+            .clicked()
+        {
+            out.push(Command::SetLastfmKey(std::mem::take(&mut pages.lastfm_key).trim().to_owned()));
+        }
+        if p.lastfm_configured && ui.add(Button::new("Убрать ключ").style(Style::Text).id_salt("set-lastfm-clear")).clicked() {
+            pages.lastfm_key.clear();
+            out.push(Command::SetLastfmKey(String::new()));
+        }
     });
 
     group(ui, "Не нравится");

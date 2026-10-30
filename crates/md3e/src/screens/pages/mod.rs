@@ -184,6 +184,8 @@ pub struct PageState {
     indexer_url: String,
     indexer_key: String,
     acoustid_key: String,
+    /// What is typed into «Ключ Last.fm» before «Сохранить».
+    lastfm_key: String,
     metadata_contact: String,
     metadata_synced: bool,
     /// What is typed into «Как к тебе обращаться» (Главная's question and

@@ -38,6 +38,7 @@
 
 mod discover;
 mod dislikes;
+mod graph;
 mod lanes;
 mod novelty;
 mod radio;
@@ -251,6 +252,7 @@ pub(crate) enum Msg {
     Radio(radio::RadioMsg),
     Discover(discover::DiscoverMsg),
     Suggest(suggest::SuggestMsg),
+    Graph(graph::GraphMsg),
 }
 
 /// «Твой микс» of a day as the library's cache keeps it.
@@ -314,6 +316,8 @@ pub(crate) struct RecsState {
     blends: Vec<(String, v::MixKey)>,
     pub(crate) radio: radio::RadioState,
     pub(crate) discover: discover::DiscoverState,
+    /// The background pass of the graph of similar music.
+    pub(crate) graph: graph::GraphState,
     pub(crate) suggest: suggest::SuggestState,
     pub(crate) dislikes: dislikes::Dislikes,
     pub(crate) newlog: novelty::NewState,
@@ -340,6 +344,11 @@ pub(crate) struct RecsState {
 type WorldMixes = (String, Vec<(v::WorldMix, String, Vec<TrackId>)>);
 
 impl RecsState {
+    /// A discovery request is on its way.
+    pub(crate) fn discover_busy(&self) -> bool {
+        self.discover.is_busy()
+    }
+
     pub(crate) fn new(tx: Sender<Internal>) -> Self {
         Self {
             tx,
@@ -358,6 +367,7 @@ impl RecsState {
             blends: Vec::new(),
             radio: radio::RadioState::default(),
             discover: discover::DiscoverState::default(),
+            graph: graph::GraphState::default(),
             suggest: suggest::SuggestState::default(),
             dislikes: dislikes::Dislikes::default(),
             newlog: novelty::NewState::default(),
@@ -625,6 +635,11 @@ pub(crate) struct ReadExtra {
     pub background_less: bool,
     pub split_by_sound: bool,
     pub names: v::ProfileNames,
+    /// The graph of similar music: used at all, the personal graph, the
+    /// library as the taste while the history is short.
+    pub graph: bool,
+    pub personal_graph: bool,
+    pub library_prior: bool,
 }
 
 impl Default for ReadExtra {
@@ -641,6 +656,9 @@ impl ReadExtra {
             background_less: prefs.background_counts_less,
             split_by_sound: prefs.profiles_split,
             names: prefs.profile_names,
+            graph: prefs.graph_use,
+            personal_graph: prefs.graph_personal,
+            library_prior: prefs.library_as_taste,
         }
     }
 }
@@ -849,11 +867,15 @@ fn read_parts(
         suggested_tracks: matched.tracks,
         suggested_artists: matched.artists,
         dislike_neighbours: extra.dislike_neighbours,
+        personal_graph: extra.personal_graph,
+        library_prior: extra.library_prior,
     };
+    // The graph of similar music the library keeps, resolved to it now.
+    let similar = if extra.graph { graph::read(lib, &rows, &artist_keys) } else { graph::Resolved::default() };
     let model = UserModel::build(
         &catalog,
         &history,
-        ModelInput { index: &index, types: Some(&types), weights: cached, graph: None },
+        ModelInput { index: &index, types: Some(&types), weights: cached, graph: (!similar.input.is_empty()).then_some(&similar.input) },
         now,
     );
     if cached.is_none()
@@ -874,6 +896,9 @@ fn read_parts(
         .all_artist_affinities()
         .filter_map(|(a, s)| Some((artist_key(names.get(&a).or_else(|| elsewhere_names.get(&a))?), (s.max(0.0) / 3.0).tanh())))
         .collect();
+    // The artists beyond the library the graph links to the loved ones:
+    // their new music counts as a little known.
+    let artist_affinity = graph::with_votes(artist_affinity, &similar.votes, &|a| (model.taste.artist_affinity(a).max(0.0) / 3.0).tanh());
     let mut snap = Snapshot {
         background: Vec::new(),
         profiles: Arc::new(TrackProfiles::from_model(&model)),
@@ -1771,20 +1796,59 @@ pub fn preview_replay(lib: &Library) -> Result<nikgob_recs::model::ReplayReport,
     Ok(nikgob_recs::model::replay(&snap.catalog, &preview.history, ModelInput { index: &snap.index, types: Some(&snap.types), weights: None, graph: None }))
 }
 
+/// [`preview_replay`] with the recommendations' settings of `prefs`: the
+/// graph of similar music the library keeps, the personal graph.
+pub fn preview_replay_with(lib: &Library, prefs: &v::Prefs) -> Result<nikgob_recs::model::ReplayReport, String> {
+    let preview = ModelPreview::of_with(lib, prefs)?;
+    let snap = &preview.snap;
+    let graph = (!preview.graph.is_empty()).then_some(&preview.graph);
+    Ok(nikgob_recs::model::replay(&snap.catalog, &preview.history, ModelInput { index: &snap.index, types: Some(&snap.types), weights: None, graph }))
+}
+
 /// A snapshot of a library to try the radio on, as the runtime would
 /// (its caches are kept in the library: a copy).
 pub struct ModelPreview {
     snap: Snapshot,
     history: TasteInput,
+    /// The graph of similar music it was built with.
+    graph: nikgob_recs::GraphInput,
 }
 
 impl ModelPreview {
     pub fn of(lib: &Library) -> Result<Self, String> {
+        Self::of_with(lib, &v::Prefs::default())
+    }
+
+    /// The snapshot with the recommendations' settings of `prefs`.
+    pub fn of_with(lib: &Library, prefs: &v::Prefs) -> Result<Self, String> {
         let index = SoundIndex::default();
         crate::analysis::load_index(lib, &index);
         let (_, utc_offset_min) = local_day();
-        let (snap, _, _, history) = read_parts(lib, &index, recs_now(), utc_offset_min, &[], false, &ReadExtra::default())?;
-        Ok(Self { snap, history })
+        let extra = ReadExtra::of(Vec::new(), prefs);
+        let (snap, _, _, history) = read_parts(lib, &index, recs_now(), utc_offset_min, &[], false, &extra)?;
+        let graph = if extra.graph {
+            let rows = lib.rec_tracks().map_err(|e| e.to_string())?;
+            graph::read(lib, &rows, &snap.artist_keys).input
+        } else {
+            nikgob_recs::GraphInput::default()
+        };
+        Ok(Self { snap, history, graph })
+    }
+
+    /// The edges of tracks and of artists of the graph of similar music in
+    /// the model.
+    pub fn graph_size(&self) -> (usize, usize) {
+        self.snap.model.graph.len()
+    }
+
+    /// The model the snapshot scores by.
+    pub fn model(&self) -> &UserModel {
+        &self.snap.model
+    }
+
+    /// The catalog and the sound index of the snapshot.
+    pub fn catalog(&self) -> (&Catalog, &VectorIndex<TrackId>) {
+        (&self.snap.catalog, &self.snap.index)
     }
 
     /// The seeds of a pass of «Новое» now: the tracks, then the artists,
@@ -2138,6 +2202,7 @@ impl Worker {
         }
         self.discover_tick();
         self.suggest_tick();
+        self.graph_tick();
     }
 
     fn recs_build(&mut self) {
@@ -2192,6 +2257,7 @@ impl Worker {
             Msg::Radio(m) => self.radio_msg(m),
             Msg::Discover(m) => self.discover_msg(m),
             Msg::Suggest(m) => self.suggest_msg(m),
+            Msg::Graph(m) => self.graph_msg(m),
         }
     }
 
@@ -2232,6 +2298,12 @@ impl Worker {
             self.discover_rerank();
         }
         self.discover_tick();
+    }
+
+    /// Test hook: the online metadata the graph's pass asks.
+    pub(crate) fn set_graph_metadata(&mut self, m: nikgob_metadata::Metadata) {
+        self.recs.graph.metadata = Some(m);
+        self.graph_now();
     }
 
     pub(crate) fn snapshot(&self) -> Option<Arc<Snapshot>> {

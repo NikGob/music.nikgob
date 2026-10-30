@@ -59,6 +59,10 @@ pub struct Metadata {
     pub lyricsplus: LyricsPlus,
     pub lrcred: LrcRed,
     pub betterlyrics: BetterLyrics,
+    /// Similar artists and recordings (no key).
+    pub listenbrainz: ListenBrainz,
+    /// `None` without the user's Last.fm key.
+    pub lastfm: Option<LastFm>,
 }
 
 impl Metadata {
@@ -74,7 +78,9 @@ impl Metadata {
             lrclib: Lrclib::new(http.clone()),
             lyricsplus: LyricsPlus::new(http.clone()),
             lrcred: LrcRed::new(http.clone()),
-            betterlyrics: BetterLyrics::new(http),
+            betterlyrics: BetterLyrics::new(http.clone()),
+            listenbrainz: ListenBrainz::new(http.clone()),
+            lastfm: config.lastfm_key.as_deref().and_then(|k| LastFm::new(http, k)),
         })
     }
 }
