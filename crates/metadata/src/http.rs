@@ -78,6 +78,10 @@ pub struct RateLimits {
     pub betterlyrics: Duration,
     /// Odesli (song.link): 10 requests a minute without an API key.
     pub odesli: Duration,
+    /// ListenBrainz (its labs too): about one a second is polite.
+    pub listenbrainz: Duration,
+    /// Last.fm: five a second averaged, one a second here.
+    pub lastfm: Duration,
 }
 
 impl Default for RateLimits {
@@ -95,6 +99,8 @@ impl Default for RateLimits {
             lrcred: Duration::from_millis(500),
             betterlyrics: Duration::from_millis(500),
             odesli: Duration::from_secs(6),
+            listenbrainz: Duration::from_millis(1000),
+            lastfm: Duration::from_millis(1000),
         }
     }
 }
@@ -111,6 +117,8 @@ impl RateLimits {
             lrcred: Duration::ZERO,
             betterlyrics: Duration::ZERO,
             odesli: Duration::ZERO,
+            listenbrainz: Duration::ZERO,
+            lastfm: Duration::ZERO,
         }
     }
 }
@@ -152,6 +160,8 @@ pub(crate) enum Service {
     LrcRed,
     BetterLyrics,
     Odesli,
+    ListenBrainz,
+    LastFm,
 }
 
 #[derive(Debug)]
@@ -165,6 +175,8 @@ struct Limiters {
     lrcred: RateLimiter,
     betterlyrics: RateLimiter,
     odesli: RateLimiter,
+    listenbrainz: RateLimiter,
+    lastfm: RateLimiter,
 }
 
 impl Limiters {
@@ -179,6 +191,8 @@ impl Limiters {
             lrcred: RateLimiter::new(l.lrcred),
             betterlyrics: RateLimiter::new(l.betterlyrics),
             odesli: RateLimiter::new(l.odesli),
+            listenbrainz: RateLimiter::new(l.listenbrainz),
+            lastfm: RateLimiter::new(l.lastfm),
         }
     }
 
@@ -193,6 +207,8 @@ impl Limiters {
             Service::LrcRed => &self.lrcred,
             Service::BetterLyrics => &self.betterlyrics,
             Service::Odesli => &self.odesli,
+            Service::ListenBrainz => &self.listenbrainz,
+            Service::LastFm => &self.lastfm,
         }
     }
 }

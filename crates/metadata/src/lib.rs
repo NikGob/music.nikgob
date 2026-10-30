@@ -1,5 +1,5 @@
 //! Online metadata for the player: MusicBrainz, AcoustID, Cover Art Archive,
-//! Deezer, LyricsPlus, lrc.red, Better Lyrics and LRCLIB clients, LRC and TTML lyrics parsers, and the pure [`matcher`] that decides
+//! Deezer, ListenBrainz and Last.fm (similar music), LyricsPlus, lrc.red, Better Lyrics and LRCLIB clients, LRC and TTML lyrics parsers, and the pure [`matcher`] that decides
 //! whether a local file has been identified for sure.
 //!
 //! All clients share one [`Http`] (User-Agent `music.nikgob/<version> ( <contact> )`,
@@ -12,6 +12,8 @@ pub mod coverart;
 pub mod deezer;
 mod error;
 mod http;
+pub mod lastfm;
+pub mod listenbrainz;
 pub mod lrc;
 pub mod lrclib;
 pub mod matcher;
@@ -29,6 +31,8 @@ pub use coverart::{CoverArtArchive, CoverImage, CoverTarget, FetchedCover};
 pub use deezer::{Deezer, DeezerAlbum, DeezerArtistHit, DeezerTrack};
 pub use error::{MetadataError, Result};
 pub use http::{Http, RateLimiter, RateLimits, RetryPolicy};
+pub use lastfm::{LastFm, LastFmSimilar};
+pub use listenbrainz::{ListenBrainz, Similar};
 pub use lrc::{parse_lrc, parse_lrc_lines};
 pub use lrclib::{Lrclib, Lyrics};
 pub use matcher::{
@@ -36,7 +40,7 @@ pub use matcher::{
     TrackMetadata, candidate_from_deezer, candidates_from_recording, candidates_from_release,
     match_candidates,
 };
-pub use musicbrainz::{MusicBrainz, RecordingQuery};
+pub use musicbrainz::{ArtistTags, MusicBrainz, RecordingQuery};
 pub use odesli::{Odesli, OdesliPage};
 pub use lyricsplus::{LyricsPlus, LyricsPlusText};
 pub use lrcred::LrcRed;
