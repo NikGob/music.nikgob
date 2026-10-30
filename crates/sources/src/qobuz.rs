@@ -300,7 +300,7 @@ impl Source for Qobuz {
                         let disc = t.media_number.unwrap_or(1);
                         let no = t.track_number.unwrap_or(0);
                         let name = with_version(&t.title, t.version.as_deref());
-                        (id_text(&t.id), crate::http::track_file_name(disc as u32, no as u32, &name))
+                        (id_text(&t.id), crate::http::track_file_name(disc, no, &name))
                     })
                     .collect(),
                 None => vec![(offer.handle.clone(), safe_name(offer.track_title.as_deref().unwrap_or(&offer.title)))],

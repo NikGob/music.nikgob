@@ -443,9 +443,11 @@ mod tests {
         assert_eq!(pick_files(&files, &w), Some(vec![4]));
     }
 
+    type Answer = Box<dyn Fn(&str) -> Result<Vec<Candidate>, IndexerError> + Send + Sync>;
+
     struct Fake {
         asked: Mutex<Vec<String>>,
-        answer: Box<dyn Fn(&str) -> Result<Vec<Candidate>, IndexerError> + Send + Sync>,
+        answer: Answer,
     }
 
     impl Indexer for Fake {
