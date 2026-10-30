@@ -378,6 +378,9 @@ struct Worker {
     /// The source of the playing entry failed mid-track (entry id, where it
     /// got to): the next one starts there, not from the top.
     failover: Option<(u64, Duration)>,
+    /// The entry whose YouTube stream was opened once more after its URLs
+    /// kept being refused mid-track (once per entry).
+    stream_retried: Option<u64>,
     /// `session.json` (volume and queue between runs) and what was last
     /// written to it.
     session_path: Option<PathBuf>,
@@ -481,6 +484,7 @@ impl Worker {
             muted: saved.muted,
             resume_at: None,
             failover: None,
+            stream_retried: None,
             session_path,
             session_saved: String::new(),
             editions: Vec::new(),
@@ -1663,6 +1667,26 @@ impl Worker {
                 }
                 if let Some(e) = playing
                     && let Some((source, kind)) = self.playing_source
+                    && kind == SourceKind::Youtube
+                    && youtube_refused_midway(&message)
+                    && !self.position.is_zero()
+                    && self.stream_retried != Some(e.id)
+                {
+                    // YouTube refused the stream's URLs after it played a
+                    // while (the ~15 s 403): a new stream asks the player
+                    // afresh and goes on from here, once.
+                    self.stream_retried = Some(e.id);
+                    self.failover = Some((e.id, self.position));
+                    let skip = self.tried.clone();
+                    if let Some((req, again, kind)) = self.request_skipping(e, &skip).filter(|(_, s, _)| *s == source) {
+                        log::info!("{}: YouTube refused the stream midway, opening it again", e.track);
+                        self.play_request(e, req, again, kind);
+                        self.seek_to_failover(e);
+                        return;
+                    }
+                }
+                if let Some(e) = playing
+                    && let Some((source, kind)) = self.playing_source
                     && !self.stream_failed(e.track, source, &message)
                     && kind == SourceKind::Youtube
                 {
@@ -2716,4 +2740,11 @@ impl Worker {
             Err(e) => log::warn!("userdata export to {}: {e}", dir.display()),
         }
     }
+}
+
+/// A playback error that is YouTube refusing a stream's URLs (every client
+/// asked, HTTP 403), not the video's own refusal or a lost connection.
+fn youtube_refused_midway(message: &str) -> bool {
+    let m = message.to_lowercase();
+    (m.contains("refused") || m.contains("http 403")) && !streams::resolve::video_refused(message)
 }
