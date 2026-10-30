@@ -286,3 +286,70 @@ fn a_youtube_copy_keeps_looking_and_a_better_file_replaces_it() {
     wait_until("the item done", || wish_status(&lib, track) == Some(WishlistStatus::Done));
     assert_eq!(*qobuz.fetched.lock().unwrap(), 1);
 }
+
+#[test]
+fn the_users_own_file_replaces_a_youtube_copy() {
+    let lib = Library::open_in_memory().unwrap();
+    let yt = FakeService::youtube().logged_out();
+    let t = yt.tracks().into_iter().find(|t| t.id.id == "yt-gruppa-2").unwrap();
+    let track = lib.upsert_stream_track(&t).unwrap();
+    let r = rig(&lib, vec![Arc::new(yt)], Prefs::default());
+    r.rt.send(Command::Like(LikeTarget::Track(track), true));
+    wait_until("the item", || wish_status(&lib, track).is_some());
+    let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
+    r.rt.send(Command::WishlistSaveFromYoutube(item.id));
+    wait_until("the copy", || lib.active_source(track).unwrap().is_some_and(|s| s.kind.is_local()));
+    let copy = lib.active_source(track).unwrap().unwrap();
+    assert_eq!(copy.quality_score, score::SAVED_STREAM);
+    wait_until("the item keeps looking", || wish_status(&lib, track) == Some(WishlistStatus::NoTorrent));
+
+    // «Свой файл…» on the row: a lossless file of the user's.
+    let own = r._dir.path().join("own.wav");
+    let secs = lib.get_track(track).unwrap().unwrap().duration_ms.unwrap_or(3_000) as f32 / 1000.0;
+    write_wav(&own, secs);
+    r.rt.send(Command::WishlistAttach {
+        item: item.id,
+        what: nikgob_view::WishlistAttach::Files(vec![own]),
+    });
+    wait_for(&r.rt, "the own file", |_| {
+        lib.active_source(track).unwrap().is_some_and(|s| s.kind.is_local() && s.quality_score > score::SAVED_STREAM)
+    });
+    wait_until("the item done", || wish_status(&lib, track) == Some(WishlistStatus::Done));
+    // The copy is no longer what plays, and its file left the library.
+    let now = lib.active_source(track).unwrap().unwrap();
+    assert_ne!(now.id, copy.id);
+    assert!(!Path::new(&copy.locator).starts_with(&r.cfg.library_dir) || !Path::new(&copy.locator).exists(), "{}", copy.locator);
+}
+
+#[test]
+fn the_weekly_search_of_a_youtube_copy_replaces_it_by_itself() {
+    let lib = Library::open_in_memory().unwrap();
+    let yt = FakeService::youtube().logged_out();
+    let t = yt.tracks().into_iter().find(|t| t.id.id == "yt-gruppa-2").unwrap();
+    let track = lib.upsert_stream_track(&t).unwrap();
+    let row = lib.get_track(track).unwrap().unwrap();
+    let r = rig(&lib, vec![Arc::new(yt)], Prefs::default());
+    r.rt.send(Command::Like(LikeTarget::Track(track), true));
+    wait_until("the item", || wish_status(&lib, track).is_some());
+    let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
+    r.rt.send(Command::WishlistSaveFromYoutube(item.id));
+    wait_until("the copy", || lib.active_source(track).unwrap().is_some_and(|s| s.kind.is_local()));
+    wait_until("the item keeps looking", || {
+        lib.get_wishlist_item(item.id).unwrap().is_some_and(|i| i.status == WishlistStatus::NoTorrent && i.next_try_at.is_some())
+    });
+    // A week went by: the item is due, and a source has a FLAC now. No
+    // click: the scheduler finds it.
+    let mut due = lib.get_wishlist_item(item.id).unwrap().unwrap();
+    due.next_try_at = Some(nikgob_library::now_ms() - 1);
+    lib.put_wishlist_item(&due).unwrap();
+    let tidal = FakeSource::new(SourceKey::Tidal);
+    // As long as the track is now (the copy's length).
+    let ms = lib.get_track(track).unwrap().unwrap().duration_ms.unwrap_or(3_000);
+    tidal.offers(&row.artist_credit.display(), &row.title, ms, flac());
+    r.rt.add_source(tidal.clone());
+    wait_for(&r.rt, "the FLAC", |_| {
+        lib.active_source(track).unwrap().is_some_and(|s| s.kind.is_local() && s.quality_score > score::SAVED_STREAM)
+    });
+    wait_until("the item done", || wish_status(&lib, track) == Some(WishlistStatus::Done));
+    assert_eq!(*tidal.fetched.lock().unwrap(), 1);
+}

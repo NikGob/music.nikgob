@@ -23,11 +23,13 @@ use crate::http::{client, download, get_json, safe_name};
 use crate::instances::Instances;
 use crate::text::catalogue_queries;
 
+/// The one that answered on 2026-10-31 first; the monochrome.tf names had
+/// no DNS records that day, they stay for when they come back.
 pub const DEFAULT_INSTANCES: &[&str] = &[
+    "https://monochrome-api.samidy.com",
     "https://api.monochrome.tf",
     "https://eu-central.monochrome.tf",
     "https://us-west.monochrome.tf",
-    "https://monochrome-api.samidy.com",
 ];
 
 pub struct Tidal {
