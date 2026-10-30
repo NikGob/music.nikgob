@@ -391,3 +391,27 @@ fn snapshot(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u64, std::time::S
     out.sort();
     out
 }
+
+#[tokio::test]
+async fn a_queued_download_can_be_cancelled() {
+    let server = MockServer::start().await;
+    // A sharer that takes the request and never gets to it.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let SocketAddr::V4(addr) = listener.local_addr().unwrap() else { unreachable!() };
+    server.add_static_peer("slow", addr);
+    tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut sink = Vec::new();
+        let _ = s.read_to_end(&mut sink).await;
+    });
+    let b = client(config(&server, "bob", None)).await;
+    let out = tempfile::tempdir().unwrap();
+    let r = nikgob_soulseek::SearchResult { user: "slow".into(), path: r"X\Y\z.flac".into(), size: 10, ..Default::default() };
+    let mut d = b.download(&r, out.path());
+    assert!(matches!(d.state(), DownloadState::Queued { .. }));
+    assert_eq!(b.downloads().len(), 1);
+    d.cancel();
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(5), d.wait()).await.unwrap(), Err(Error::Cancelled)));
+    assert!(b.downloads()[0].state.is_finished());
+    b.shutdown();
+}

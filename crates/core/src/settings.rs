@@ -33,6 +33,78 @@ pub struct Settings {
     pub indexer: IndexerSettings,
     pub metadata: MetadataSettings,
     pub streaming: StreamingSettings,
+    pub soulseek: SoulseekSettings,
+}
+
+/// Where Soulseek runs (docs/stage4.5.md, poll answer 3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SoulseekMode {
+    /// The client inside the player.
+    #[default]
+    Embedded,
+    /// A `nikgob-slsk` service on a server or a small device.
+    Remote,
+}
+
+/// The Soulseek source. The account is the user's own; nothing is filled in
+/// by default, and the password and the service token never reach the
+/// prefs JSON or logs.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SoulseekSettings {
+    pub enabled: bool,
+    pub mode: SoulseekMode,
+    pub username: String,
+    pub password: String,
+    /// `host:port` of the Soulseek server.
+    pub server: String,
+    /// The port peers connect to.
+    pub listen_port: u16,
+    /// Share the library back (read-only), answer searches and browse.
+    pub share: bool,
+    /// KiB/s for all uploads together; 0 = no limit.
+    pub upload_limit_kbps: u32,
+    pub upload_slots: u32,
+    /// The service's address in remote mode, like `http://pi.local:5031`.
+    pub remote_url: String,
+    pub remote_token: String,
+}
+
+impl Default for SoulseekSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: SoulseekMode::Embedded,
+            username: String::new(),
+            password: String::new(),
+            server: "server.slsknet.org:2242".into(),
+            listen_port: 2234,
+            share: true,
+            upload_limit_kbps: 0,
+            upload_slots: 2,
+            remote_url: String::new(),
+            remote_token: String::new(),
+        }
+    }
+}
+
+impl fmt::Debug for SoulseekSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SoulseekSettings")
+            .field("enabled", &self.enabled)
+            .field("mode", &self.mode)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("server", &self.server)
+            .field("listen_port", &self.listen_port)
+            .field("share", &self.share)
+            .field("upload_limit_kbps", &self.upload_limit_kbps)
+            .field("upload_slots", &self.upload_slots)
+            .field("remote_url", &self.remote_url)
+            .field("remote_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Secrets of the streaming services (docs/stage3.md §0). Tokens and
@@ -175,6 +247,13 @@ mod tests {
                 spotify_client_id: Some("my-client-id".into()),
                 youtube_cookies: Some("SID=cookie-secret".into()),
             },
+            soulseek: SoulseekSettings {
+                enabled: true,
+                username: "slsk-user".into(),
+                password: "slsk-pass".into(),
+                remote_token: "slsk-token".into(),
+                ..SoulseekSettings::default()
+            },
         }
     }
 
@@ -201,6 +280,17 @@ mod tests {
     }
 
     #[test]
+    fn soulseek_is_off_and_empty_by_default() {
+        let s: Settings = toml::from_str("[soulseek]
+username = \"me\"
+").unwrap();
+        assert_eq!(s.soulseek.username, "me");
+        assert!(!s.soulseek.enabled);
+        assert!(s.soulseek.password.is_empty());
+        assert_eq!(Settings::default().soulseek.username, "");
+    }
+
+    #[test]
     fn partial_file_fills_defaults() {
         let s: Settings = toml::from_str("[indexer]\n").unwrap();
         assert_eq!(s, Settings::default());
@@ -212,6 +302,8 @@ mod tests {
         assert!(!dbg.contains("s3cret-key"));
         assert!(!dbg.contains("cookie-secret"));
         assert!(!dbg.contains("my-client-id"));
+        assert!(!dbg.contains("slsk-pass"));
+        assert!(!dbg.contains("slsk-token"));
         assert!(dbg.contains("localhost:9696"));
     }
 }

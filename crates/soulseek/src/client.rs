@@ -39,6 +39,8 @@ const ANSWER_LIMIT: usize = 100;
 const ANSWERS_AT_ONCE: usize = 4;
 const SERVER_PING: Duration = Duration::from_secs(120);
 
+type Waiters<T> = Mutex<HashMap<(String, u32), oneshot::Sender<T>>>;
+
 /// A connection to a peer for peer messages.
 pub(crate) struct PeerHandle {
     id: u64,
@@ -89,8 +91,9 @@ pub(crate) struct Inner {
     peers: Mutex<HashMap<String, Arc<PeerHandle>>>,
     connect_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     searches: Mutex<HashMap<u32, Arc<SearchSink>>>,
-    folder_waiters: Mutex<HashMap<(String, u32), oneshot::Sender<Vec<DirEntry>>>>,
-    pub(crate) transfer_responses: Mutex<HashMap<(String, u32), oneshot::Sender<(bool, Option<String>)>>>,
+    folder_waiters: Waiters<Vec<DirEntry>>,
+    /// Answers to our transfer requests, by (user, token).
+    pub(crate) transfer_responses: Waiters<(bool, Option<String>)>,
     pub(crate) downloads: Mutex<Downloads>,
     pub(crate) uploads: Mutex<Uploads>,
     pub(crate) share: RwLock<Arc<ShareIndex>>,

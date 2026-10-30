@@ -222,10 +222,22 @@ pub(crate) fn start_download(inner: &Arc<Inner>, r: &SearchResult, dir: &Path) -
     tokio::spawn(async move {
         let watch = e.clone();
         let inner = me.clone();
+        let mut rx = watch.state.subscribe();
         tokio::spawn(async move {
-            watch.cancel.cancelled().await;
-            watch.set(DownloadState::Failed { reason: "Cancelled".into() });
-            inner.downloads.lock().ready.retain(|_, v| !Arc::ptr_eq(v, &watch));
+            let finished = async {
+                while !rx.borrow_and_update().is_finished() {
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            };
+            tokio::select! {
+                _ = watch.cancel.cancelled() => {
+                    watch.set(DownloadState::Failed { reason: "Cancelled".into() });
+                    inner.downloads.lock().ready.retain(|_, v| !Arc::ptr_eq(v, &watch));
+                }
+                _ = finished => {}
+            }
         });
         request(&me, &e).await;
     });

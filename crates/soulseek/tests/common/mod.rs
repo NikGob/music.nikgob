@@ -199,13 +199,11 @@ async fn session(st: Arc<Mutex<State>>, s: TcpStream, peer: SocketAddr, dead_por
                     let _ = o.tx.send(FromServer::CantConnectToPeer { token }.encode());
                 }
             }
-            ToServer::FileSearch { token, query } => {
-                if g.embed {
-                    let body = DistribMsg::search_body(&username, token, &query);
-                    for (u, o) in &g.online {
-                        if *u != username {
-                            let _ = o.tx.send(FromServer::EmbeddedMessage { code: 3, body: body.clone() }.encode());
-                        }
+            ToServer::FileSearch { token, query } if g.embed => {
+                let body = DistribMsg::search_body(&username, token, &query);
+                for (u, o) in &g.online {
+                    if *u != username {
+                        let _ = o.tx.send(FromServer::EmbeddedMessage { code: 3, body: body.clone() }.encode());
                     }
                 }
             }

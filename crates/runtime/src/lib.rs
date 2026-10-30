@@ -16,6 +16,7 @@ mod lyrics;
 mod playlist_cover;
 mod recs;
 mod search;
+mod soulseek;
 mod tags;
 mod torrents;
 pub mod queue;
@@ -426,6 +427,8 @@ struct Worker {
     /// The album the queue plays (and the queue's generation then): its
     /// tracks the services add later join the queue.
     album_queue: Option<(nikgob_core::model::ReleaseId, u64)>,
+    /// The Soulseek source (settings.toml `[soulseek]`).
+    soulseek: soulseek::SoulseekService,
 }
 
 impl Worker {
@@ -441,6 +444,8 @@ impl Worker {
             .as_ref()
             .map(|i| (i.torrent_state_dir.clone(), i.torrent_offline))
             .unwrap_or_default();
+        let slsk_state = config.import.as_ref().map(|i| i.torrent_state_dir.with_file_name("soulseek"));
+        let soulseek = soulseek::SoulseekService::new(config.library_dir.clone(), slsk_state);
         let streaming = streams::Streams::new(internal.clone());
         let analysis = analysis::FileAnalysis::new(internal.clone());
         let recs = recs::RecsState::new(internal.clone());
@@ -501,6 +506,7 @@ impl Worker {
             hd_asked: Default::default(),
             album_queue: None,
             recs,
+            soulseek,
         }
     }
 
@@ -514,6 +520,7 @@ impl Worker {
         self.load_torrent_history();
         self.publish_downloads();
         self.resume_torrents();
+        self.soulseek_apply();
         self.start_enrich();
         self.restore_session();
         self.offer_editions();
@@ -554,6 +561,7 @@ impl Worker {
         self.maybe_export(true);
         self.playback.stop();
         self.shutdown_torrents();
+        self.soulseek.shutdown();
         self.streaming.analysis.shutdown();
         self.analysis.shutdown();
     }

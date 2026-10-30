@@ -144,7 +144,7 @@ pub fn group_albums(results: &[SearchResult]) -> Vec<AlbumResult> {
                 None => counts.push((&f.format, 1)),
             }
         }
-        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        counts.sort_by_key(|c| std::cmp::Reverse(c.1));
         a.format = counts.first().map(|(k, _)| (*k).to_owned()).unwrap_or_default();
         a.lossless = a.files.iter().any(|f| f.lossless && f.format == a.format);
         a.files.sort_by(|x, y| x.path.cmp(&y.path));
