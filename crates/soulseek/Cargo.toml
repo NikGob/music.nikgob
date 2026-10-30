@@ -1,0 +1,38 @@
+[package]
+name = "nikgob-soulseek"
+description = "Soulseek client written for the player: server, peers, distributed search, transfers and sharing; embedded or as a headless service with an HTTP API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nikgob-slsk"
+path = "src/bin/nikgob-slsk.rs"
+
+[dependencies]
+log.workspace = true
+env_logger.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs", "signal"] }
+tokio-util = { version = "0.7", features = ["io"] }
+socket2 = "0.6"
+flate2 = "1"
+md-5 = "0.10"
+lofty = "0.25"
+parking_lot = "0.12"
+thread-priority = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "1.1"
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+sysinfo = { version = "0.36", default-features = false, features = ["system"] }
+
+[lints]
+workspace = true
