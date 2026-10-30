@@ -273,6 +273,16 @@ pub fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The name of an album's track file as the library lays it out ("03 -
+/// Title", "2-03 - Title" on a later disc), for the import to read.
+pub fn track_file_name(disc: u32, no: u32, title: &str) -> String {
+    if disc > 1 {
+        format!("{disc}-{no:02} - {}", safe_name(title))
+    } else {
+        format!("{no:02} - {}", safe_name(title))
+    }
+}
+
 /// A file name of `s` that Windows takes: no `<>:"/\|?*` or control
 /// characters, no dot or space at the end, not too long.
 pub fn safe_name(s: &str) -> String {

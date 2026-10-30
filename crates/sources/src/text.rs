@@ -206,23 +206,24 @@ pub fn torrent_queries(w: &Want, max: usize) -> Vec<String> {
             out.push(q);
         }
     };
-    let ost = w.album.as_deref().is_some_and(is_soundtrack)
-        || w.title.as_deref().is_some_and(|t| franchise_of(t).is_some());
+    // The game or the show a song was made for, named by its title or
+    // its album ("… (Supraland Six Inches Under Credits Song)").
+    let franchise = w.title.as_deref().and_then(franchise_of).or_else(|| w.album.as_deref().and_then(franchise_of));
+    let ost = w.album.as_deref().is_some_and(is_soundtrack) || franchise.is_some();
     let with_artist = |s: &str| if artist.is_empty() { s.to_owned() } else { format!("{artist} {s}") };
     if let Some(album) = w.album.as_deref().filter(|_| !w.is_single()) {
         push(with_artist(&album_core(album)));
         if ost {
-            push(album_core(album));
+            push(franchise.clone().unwrap_or_else(|| album_core(album)));
         }
+    } else if let Some(f) = &franchise {
+        push(f.clone());
     }
     if w.scope == WantScope::Track
         && let Some(t) = &w.title
     {
         for f in title_forms(t).into_iter().take(3) {
             push(with_artist(&f));
-        }
-        if let Some(f) = franchise_of(t) {
-            push(f);
         }
     } else if w.scope == WantScope::Album && w.album.is_none() && w.title.is_some() {
         push(with_artist(&album_core(w.title.as_deref().unwrap_or_default())));

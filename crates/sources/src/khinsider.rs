@@ -129,7 +129,8 @@ pub struct Song {
     pub duration_ms: Option<u32>,
     /// Size of the FLAC, when the album has one.
     pub flac_bytes: Option<u64>,
-    pub mp3_bytes: Option<u64>,
+    /// Size of the lossy file and its codec (MP3, else OGG or M4A).
+    pub lossy: Option<(Codec, u64)>,
 }
 
 /// The album page: its name and songs.
@@ -162,27 +163,49 @@ fn duration_of(s: &str) -> Option<u32> {
     Some(secs * 1000)
 }
 
-/// The album page's name and songs. Columns are found by their headers
-/// (the CD column is there only for albums of several discs).
+/// The column each cell of a row starts at (cells span columns).
+fn columns(row: &[Cell]) -> Vec<usize> {
+    let mut at = 0;
+    row.iter()
+        .map(|c| {
+            let start = at;
+            at += c.span;
+            start
+        })
+        .collect()
+}
+
+/// The album page's name and songs. Columns are found by their headers,
+/// spans counted («Song Name» covers two columns: the name and the
+/// length); the CD column is there only for albums of several discs, the
+/// formats are whatever the album has (MP3, FLAC, OGG, M4A).
 pub fn album_page(html: &str) -> AlbumPage {
     let name = html
         .find("<h2>")
         .and_then(|a| html[a + 4..].find("</h2>").map(|b| text_of(&html[a + 4..a + 4 + b])))
         .unwrap_or_default();
     let rows = table(html, "songlist");
-    let header: Vec<String> = rows
+    let header: Vec<(usize, String)> = rows
         .iter()
         .find(|r| r.iter().any(|c| c.head))
-        .map(|r| r.iter().map(|c| c.text.to_lowercase()).collect())
+        .map(|r| columns(r).into_iter().zip(r.iter().map(|c| c.text.to_lowercase())).collect())
         .unwrap_or_default();
-    let col = |name: &str| header.iter().position(|h| h == name);
-    let (cd, num, title, mp3, flac) = (col("cd"), col("#"), col("song name"), col("mp3"), col("flac"));
+    let col = |name: &str| header.iter().find(|(_, h)| h == name).map(|(at, _)| *at);
+    let (cd, num, title, flac) = (col("cd"), col("#"), col("song name"), col("flac"));
+    let lossy: Vec<(Codec, usize)> = [("mp3", Codec::Mp3), ("ogg", Codec::Vorbis), ("m4a", Codec::Aac), ("aac", Codec::Aac)]
+        .into_iter()
+        .filter_map(|(h, c)| col(h).map(|at| (c, at)))
+        .collect();
     let mut songs = Vec::new();
     for row in rows.iter().filter(|r| !r.iter().any(|c| c.head)) {
-        let cell = |i: Option<usize>| -> Option<&Cell> { i.and_then(|i| row.get(i)) };
+        let starts = columns(row);
+        let cell = |i: Option<usize>| -> Option<&Cell> {
+            let i = i?;
+            starts.iter().position(|s| *s == i).and_then(|k| row.get(k))
+        };
         // The song's name: its column, else the longest linked text that
         // is not a number, a length or a size.
-        let name_cell = cell(title).or_else(|| {
+        let name_cell = cell(title).filter(|c| !c.text.is_empty()).or_else(|| {
             row.iter()
                 .filter(|c| c.href.is_some() && duration_of(&c.text).is_none() && size_of(&c.text).is_none())
                 .filter(|c| !c.text.trim_end_matches('.').chars().all(|ch| ch.is_ascii_digit()))
@@ -194,6 +217,9 @@ pub fn album_page(html: &str) -> AlbumPage {
             continue;
         }
         let number = |c: Option<&Cell>| c.and_then(|c| c.text.trim_end_matches('.').trim().parse::<u32>().ok());
+        let lossy_file = lossy
+            .iter()
+            .find_map(|(codec, at)| cell(Some(*at)).and_then(|c| size_of(&c.text)).map(|b| (codec.clone(), b)));
         songs.push(Song {
             href,
             name: name_cell.text.clone(),
@@ -201,27 +227,33 @@ pub fn album_page(html: &str) -> AlbumPage {
             number: number(cell(num)).unwrap_or(0),
             duration_ms: row.iter().find_map(|c| duration_of(&c.text)),
             flac_bytes: cell(flac).and_then(|c| size_of(&c.text)),
-            mp3_bytes: cell(mp3).and_then(|c| size_of(&c.text)),
+            lossy: lossy_file,
         });
     }
     AlbumPage { name, songs }
 }
 
-/// The files a song's page links: (url, is FLAC), FLAC first.
+/// The files a song's page links: (url, is FLAC), FLAC first, then MP3,
+/// then the other lossy ones.
 pub fn song_files(html: &str) -> Vec<(String, bool)> {
-    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut out: Vec<(String, bool, u8)> = Vec::new();
     for (h, _) in links(html) {
         let path = h.split('?').next().unwrap_or(&h).to_lowercase();
-        let flac = path.ends_with(".flac");
-        if (flac || path.ends_with(".mp3") || path.ends_with(".m4a") || path.ends_with(".ogg"))
-            && !h.contains("/game-soundtracks/album/")
-            && !out.iter().any(|(u, _)| *u == h)
-        {
-            out.push((h, flac));
+        let rank = if path.ends_with(".flac") {
+            0
+        } else if path.ends_with(".mp3") {
+            1
+        } else if path.ends_with(".m4a") || path.ends_with(".ogg") {
+            2
+        } else {
+            continue;
+        };
+        if !h.contains("/game-soundtracks/album/") && !out.iter().any(|(u, ..)| *u == h) {
+            out.push((h, rank == 0, rank));
         }
     }
-    out.sort_by_key(|(_, flac)| !*flac);
-    out
+    out.sort_by_key(|(.., r)| *r);
+    out.into_iter().map(|(u, f, _)| (u, f)).collect()
 }
 
 /// A file name from a file's URL ("01.%20Title.flac" → "01. Title.flac").
@@ -266,10 +298,15 @@ impl Source for Khinsider {
                 let page = album_page(&self.page(&page_url).await?);
                 let name = if page.name.is_empty() { a.name.clone() } else { page.name.clone() };
                 let has_flac = page.songs.iter().any(|s| s.flac_bytes.is_some());
-                let format = |flac: bool| Some(Format::new(if flac { Codec::Flac } else { Codec::Mp3 }));
+                let lossy_codec = page.songs.iter().find_map(|s| s.lossy.as_ref().map(|(c, _)| c.clone())).unwrap_or(Codec::Mp3);
+                let format = |flac: bool| Some(Format::new(if flac { Codec::Flac } else { lossy_codec.clone() }));
                 match want.scope {
                     WantScope::Album => {
-                        let size: u64 = page.songs.iter().map(|s| if has_flac { s.flac_bytes } else { s.mp3_bytes }.unwrap_or(0)).sum();
+                        let size: u64 = page
+                            .songs
+                            .iter()
+                            .map(|s| if has_flac { s.flac_bytes } else { s.lossy.as_ref().map(|(_, b)| *b) }.unwrap_or(0))
+                            .sum();
                         out.push(Offer {
                             source: SourceKey::Khinsider,
                             provider: "khinsider".into(),
@@ -313,7 +350,7 @@ impl Source for Khinsider {
                                 isrc: None,
                                 scope: OfferScope::Track,
                                 format: format(s.flac_bytes.is_some()),
-                                size_bytes: s.flac_bytes.or(s.mp3_bytes),
+                                size_bytes: s.flac_bytes.or(s.lossy.as_ref().map(|(_, b)| *b)),
                                 seeders: None,
                                 info_url: Some(song_url.clone()),
                                 handle: serde_json::to_string(&Handle { song: Some(song_url), album: None }).unwrap_or_default(),

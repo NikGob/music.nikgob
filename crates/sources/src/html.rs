@@ -10,6 +10,8 @@ pub struct Cell {
     pub href: Option<String>,
     /// A header cell (`<th>`).
     pub head: bool,
+    /// The columns it covers (`colspan`, 1 without one).
+    pub span: usize,
 }
 
 /// The table opened by the first tag containing `marker` (`id="songlist"`),
@@ -35,6 +37,10 @@ pub fn table(html: &str, marker: &str) -> Vec<Vec<Cell>> {
             };
             let after = &rest[pos + 3..];
             let Some(open_end) = after.find('>') else { break };
+            let span = attr(&format!(" {}", &after[..open_end]), "colspan")
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(1)
+                .max(1);
             let inner_all = &after[open_end + 1..];
             let close = ["</td", "</th", "<td", "<th"]
                 .iter()
@@ -46,6 +52,7 @@ pub fn table(html: &str, marker: &str) -> Vec<Vec<Cell>> {
                 text: text_of(inner),
                 href: first_href(inner),
                 head,
+                span,
             });
             rest = &inner_all[close..];
         }
@@ -170,12 +177,13 @@ mod tests {
 
     #[test]
     fn rows_cells_links_and_entities() {
-        let html = r#"<p>x</p><table id="songlist"><tr id="h"><th>CD</th><th>Song Name</th><th>FLAC</th></tr>
+        let html = r#"<p>x</p><table id="songlist"><tr id="h"><th>CD</th><th colspan="2">Song Name</th><th>FLAC</th></tr>
             <tr><td align="center">1</td><td class="clickable-row"><a href="/a/01.%2520Rock &amp; Roll.mp3">Rock &amp; Roll&#39;s</a></td><td>22 MB</td></tr>
             <tr><td>2<td><a href='/b'>B</a></tr></table><table><tr><td>other</td></tr></table>"#;
         let rows = table(html, r#"id="songlist""#);
         assert_eq!(rows.len(), 3);
         assert!(rows[0][0].head);
+        assert_eq!(rows[0][1].span, 2);
         assert_eq!(rows[1][1].text, "Rock & Roll's");
         assert_eq!(rows[1][1].href.as_deref(), Some("/a/01.%2520Rock & Roll.mp3"));
         assert_eq!(rows[2][1].href.as_deref(), Some("/b"), "unclosed cells");

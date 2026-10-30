@@ -273,7 +273,7 @@ impl Source for Tidal {
                             let id = s(t, "id")?;
                             let disc = t.get("volumeNumber").and_then(Value::as_u64).unwrap_or(1);
                             let no = t.get("trackNumber").and_then(Value::as_u64).unwrap_or(0);
-                            Some((id, format!("{disc}-{no:02} - {}", safe_name(&title_of(t)?))))
+                            Some((id, crate::http::track_file_name(disc as u32, no as u32, &title_of(t)?)))
                         })
                         .collect()
                 }

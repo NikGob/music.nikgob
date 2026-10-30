@@ -227,7 +227,7 @@ async fn qobuz_albums_come_track_by_track() {
     let dir = tempfile::tempdir().unwrap();
     let Fetched::Files(files) = q.fetch(&ranked[0].offer, &want, dir.path(), quiet()).await.unwrap() else { panic!() };
     let names: Vec<String> = files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect();
-    assert_eq!(names, ["1-01 - Я не интроверт.flac", "1-01 - Второй.flac"]);
+    assert_eq!(names, ["01 - Я не интроверт.flac", "01 - Второй.flac"]);
 }
 
 #[tokio::test]
@@ -314,4 +314,21 @@ fn khinsider_search_page_as_saved_from_the_site() {
     let names: Vec<&str> = albums.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(names, ["Supraland", "Supraland", "Supraland Six Inches Under"]);
     assert!(albums[2].href.starts_with("/game-soundtracks/album/supraland-six-inches-under-"));
+}
+
+#[test]
+fn khinsider_album_and_song_pages_as_saved_from_the_site() {
+    use nikgob_core::model::Codec;
+    let album = nikgob_sources::khinsider::album_page(&page("khinsider_album_saved.html", ""));
+    assert_eq!(album.name, "Supraland Six Inches Under");
+    assert_eq!(album.songs.len(), 3);
+    let first = &album.songs[0];
+    assert_eq!((first.name.as_str(), first.number, first.disc, first.duration_ms), ("Area1-Action", 1, 1, Some(64_000)));
+    assert_eq!(first.flac_bytes, None, "this album has MP3 and OGG only");
+    assert_eq!(first.lossy.as_ref().map(|(c, _)| c.clone()), Some(Codec::Mp3));
+    assert!(first.href.ends_with("/01.%2520Area1-Action.mp3"));
+    let files = nikgob_sources::khinsider::song_files(&page("khinsider_song_saved.html", ""));
+    assert_eq!(files.len(), 2);
+    assert!(files[0].0.ends_with("01.%20Area1-Action.mp3") && !files[0].1, "MP3 before OGG");
+    assert!(files[1].0.ends_with(".ogg"));
 }
