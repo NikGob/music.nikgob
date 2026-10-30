@@ -332,7 +332,7 @@ fn no_torrent_is_reported_and_a_dismissed_item_never_comes_back() {
     // Download toasts are off by default.
     r.rt.send(Command::SetPrefs(Box::new(Prefs { download_toasts: true, ..Prefs::default() })));
     r.rt.send(Command::Like(LikeTarget::Track(track), true));
-    wait_for(&r.rt, "the toast", |s| s.toasts.iter().any(|t| t.text.starts_with("Не нашёл раздачу")));
+    wait_for(&r.rt, "the toast", |s| s.toasts.iter().any(|t| t.text.starts_with("Не нашёл, где скачать")));
     let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
     assert_eq!(item.status, WishlistStatus::NoTorrent);
     assert!(item.next_try_at.unwrap() > nikgob_library::now_ms() + 6 * 86_400_000, "a week later");
@@ -613,9 +613,9 @@ fn download_without_a_like_waits_for_torrents_and_leaves_the_likes_alone() {
     );
     assert!(!lib.is_liked(track).unwrap(), "no like");
     assert_eq!(lib.track_in_library(track).unwrap(), Some(false), "in the library once its file is here");
-    // No torrents: the toast says so and leads to their settings.
+    // No download source: the toast says so and leads to the settings.
     let toast = toast_starting(&r.rt, "В «Хочу скачать»").unwrap();
-    assert!(toast.text.ends_with("скачается, когда подключишь торренты"), "{}", toast.text);
+    assert!(toast.text.ends_with("скачается, когда включишь источник скачивания"), "{}", toast.text);
     assert_eq!(toast.open, Some(("Настроить".to_owned(), Link::Setting(SettingLink::Torrents))));
 
     // Asked again: it is on its way already, still one item.

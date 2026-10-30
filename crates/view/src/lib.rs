@@ -870,6 +870,8 @@ pub struct DownloadsView {
     pub files: Option<TorrentFiles>,
     /// Liked stream tracks waiting for (or on their way to) a file.
     pub wishlist: WishlistView,
+    /// The download sources, in the user's order (Settings → «Источники»).
+    pub sources: Vec<SourceView>,
 }
 
 /// A transient message ("Добавлено в Любимые · Отменить").
@@ -1126,6 +1128,10 @@ pub struct Prefs {
     pub library_only_downloaded: bool,
     /// How many wishlist items search / download at once on their own.
     pub auto_download_limit: u32,
+    /// The download sources in the order the wishlist prefers them at one
+    /// quality, each on or off («Источники скачивания», docs/stage4.5.md).
+    /// A source missing here takes its default place, on.
+    pub download_sources: Vec<SourceSwitch>,
     /// Toasts about downloads going on by themselves: a release not found, a
     /// torrent started or finished. Off: that is only in «Загрузки» and «Хочу
     /// скачать».
@@ -1220,6 +1226,44 @@ pub struct Prefs {
     /// «Не предлагать этот микс»: the mixes of «Миксы для тебя» left out,
     /// with the name they had (Settings → «Рекомендации» returns them).
     pub home_hidden_mixes: Vec<HiddenMix>,
+}
+
+/// One line of [`Prefs::download_sources`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SourceSwitch {
+    pub key: SourceKey,
+    pub on: bool,
+}
+
+impl Prefs {
+    /// Every source in the user's order, the ones not listed yet in their
+    /// default places (on).
+    pub fn source_order(&self) -> Vec<SourceSwitch> {
+        let mut out: Vec<SourceSwitch> = Vec::new();
+        for s in &self.download_sources {
+            if !out.iter().any(|o| o.key == s.key) {
+                out.push(*s);
+            }
+        }
+        for (i, k) in SourceKey::ALL.iter().enumerate() {
+            if out.iter().any(|o| o.key == *k) {
+                continue;
+            }
+            // After the default sources that come before it.
+            let at = SourceKey::ALL[..i]
+                .iter()
+                .filter_map(|prev| out.iter().position(|o| o.key == *prev))
+                .max()
+                .map_or(0, |p| p + 1);
+            out.insert(at, SourceSwitch { key: *k, on: true });
+        }
+        out
+    }
+
+    /// Whether `key` is switched on.
+    pub fn source_on(&self, key: SourceKey) -> bool {
+        self.source_order().iter().find(|s| s.key == key).is_none_or(|s| s.on)
+    }
 }
 
 /// A mix of «Миксы для тебя» left out ([`Prefs::home_hidden_mixes`]).
@@ -2121,6 +2165,7 @@ impl Default for Prefs {
             import_saved_songs: true,
             library_only_downloaded: false,
             auto_download_limit: 2,
+            download_sources: Vec::new(),
             download_toasts: false,
             stream_cache_mb: 500,
             spotify_personal_app: false,

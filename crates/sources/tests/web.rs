@@ -306,3 +306,12 @@ fn tidal_refuses_dash_and_drm_manifests() {
     let old = json!([{"id": 1}, {"manifest": "x"}, {"OriginalTrackUrl": "https://cdn/x.flac"}]);
     assert_eq!(nikgob_sources::tidal::file_url(&old).unwrap(), "https://cdn/x.flac");
 }
+
+#[test]
+fn khinsider_search_page_as_saved_from_the_site() {
+    let html = page("khinsider_search_saved.html", "");
+    let albums = nikgob_sources::khinsider::search_results(&html);
+    let names: Vec<&str> = albums.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["Supraland", "Supraland", "Supraland Six Inches Under"]);
+    assert!(albums[2].href.starts_with("/game-soundtracks/album/supraland-six-inches-under-"));
+}

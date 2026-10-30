@@ -4960,6 +4960,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "fastrand",
+ "futures-util",
  "hound",
  "image",
  "jiff",
@@ -4971,6 +4972,7 @@ dependencies = [
  "nikgob-library",
  "nikgob-metadata",
  "nikgob-recs",
+ "nikgob-sources",
  "nikgob-torrent",
  "nikgob-view",
  "parking_lot",

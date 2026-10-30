@@ -38,8 +38,13 @@ pub(crate) const MAX_REQUEST: u64 = 8 * 1024 * 1024;
 const SEEK_RESTART: u64 = 1024 * 1024;
 /// Attempts without any progress before a transient error is final.
 const MAX_ATTEMPTS: u32 = 5;
-/// Re-resolves without any progress before a 403 is final.
-const MAX_RESOLVES: u32 = 3;
+/// Re-resolves without any progress before a 403 is final. A fresh URL is
+/// often refused once or twice right after the first chunk and then
+/// serves the rest (the live log of 2026-10-28): one more try than that,
+/// each a little later.
+const MAX_RESOLVES: u32 = 4;
+/// The pause before the n-th re-resolve in a row: n times this.
+const RESOLVE_PAUSE: Duration = Duration::from_millis(400);
 /// Longest wait of a read for its bytes (a stalled connection is cut by the
 /// HTTP client's read timeout well before).
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
@@ -427,6 +432,9 @@ async fn download(
                     );
                 }
                 log::info!("youtube: stream URL refused, resolving again");
+                if resolves > 1 {
+                    tokio::time::sleep(RESOLVE_PAUSE * (resolves - 1)).await;
+                }
                 match resolve(Some(resolved.clone())).await {
                     Ok(r) if r.len == resolved.len => resolved = r,
                     Ok(_) => {

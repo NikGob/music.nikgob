@@ -151,6 +151,7 @@ enum Msg {
     Cmd(Command),
     Service(Box<dyn Service>),
     Indexer(Arc<dyn nikgob_core::indexer::Indexer>),
+    Source(Arc<dyn nikgob_core::source::Source>),
     OdesliBase(String),
     WebLogin(StreamKind, Arc<dyn WebLogin>),
     Shutdown,
@@ -247,6 +248,13 @@ impl Runtime {
     /// (another backend, or a fake one in tests).
     pub fn set_indexer(&self, indexer: Arc<dyn nikgob_core::indexer::Indexer>) {
         let _ = self.tx.send(Msg::Indexer(indexer));
+    }
+
+    /// One more download source (Soulseek, or a fake one in tests); it
+    /// replaces a source of the same kind. Whether it is used is its switch
+    /// on «Источники».
+    pub fn add_source(&self, source: Arc<dyn nikgob_core::source::Source>) {
+        let _ = self.tx.send(Msg::Source(source));
     }
 
     /// Logs `service` in through this sign-in window of the app for a
@@ -412,6 +420,9 @@ struct Worker {
     /// [`PlaybackEvent::Quality`]; the preloaded next one opens early).
     qualities: Vec<(u64, String)>,
     indexer: Option<Arc<dyn nikgob_core::indexer::Indexer>>,
+    /// Download sources other than the indexer's torrents (khinsider, the
+    /// free services, Soulseek), whether on or not (docs/stage4.5.md).
+    sources: Vec<Arc<dyn nikgob_core::source::Source>>,
     /// Last torrent search, indexed like `SearchView::torrents.results`.
     candidates: Vec<nikgob_core::indexer::Candidate>,
     torrents: torrents::Torrents,
@@ -489,6 +500,7 @@ impl Worker {
             last_export: Instant::now(),
             exported_fp: None,
             indexer: search::indexer_from(config.settings_path.as_deref()),
+            sources: search::web_sources_from(config.settings_path.as_deref()),
             candidates: Vec::new(),
             torrents: torrents::Torrents::new(torrent_state, torrent_offline),
             import,
@@ -518,6 +530,7 @@ impl Worker {
         self.restore_session();
         self.offer_editions();
         self.wish_restart();
+        self.publish_sources();
         self.start_streams();
         self.start_analysis();
         self.dislikes_load(false);
@@ -528,6 +541,14 @@ impl Worker {
                     Ok(Msg::Service(s)) => self.services.push(s),
                     Ok(Msg::Indexer(i)) => {
                         self.indexer = Some(i);
+                        self.publish_sources();
+                        self.wish_tick();
+                    }
+                    Ok(Msg::Source(s)) => {
+                        // One per kind: a new one of a kind replaces the old.
+                        self.sources.retain(|x| x.key() != s.key());
+                        self.sources.push(s);
+                        self.publish_sources();
                         self.wish_tick();
                     }
                     Ok(Msg::OdesliBase(base)) => self.set_odesli_base(&base),
@@ -539,7 +560,10 @@ impl Worker {
                 },
                 recv(pb) -> e => if let Ok(e) = e { self.playback_event(e) },
                 recv(internal) -> m => if let Ok(m) = m { self.internal(m) },
-                recv(fast) -> _ => self.poll_torrents(),
+                recv(fast) -> _ => {
+                    self.poll_torrents();
+                    self.wish_poll_direct();
+                }
                 recv(ticker) -> _ => {
                     self.expire_toasts();
                     self.maybe_export(false);
@@ -864,7 +888,7 @@ impl Worker {
                     // A like that downloads says so (a like of a track
                     // without a file puts it into «Хочу скачать»).
                     let text = match (on, wished) {
-                        (true, true) if self.indexer.is_some() => "В Любимых · скачаю в фоне",
+                        (true, true) if self.can_download() => "В Любимых · скачаю в фоне",
                         (true, true) => "В Любимых · скачается, когда подключишь торренты",
                         (true, false) => "Добавлено в Любимые",
                         (false, _) => "Убрано из Любимых",
@@ -2059,6 +2083,11 @@ impl Worker {
         if old.auto_download_limit != p.auto_download_limit {
             self.wish_tick();
         }
+        if old.source_order() != p.source_order() {
+            self.publish_sources();
+            self.publish_wishlist();
+            self.wish_tick();
+        }
         if old.stream_cache_mb != p.stream_cache_mb {
             self.apply_stream_cache();
         }
@@ -2215,7 +2244,7 @@ impl Worker {
             "треков"
         });
         let text = match (on, wished) {
-            (true, true) if self.indexer.is_some() => format!("Альбом в Любимых · {what} · скачаю в фоне"),
+            (true, true) if self.can_download() => format!("Альбом в Любимых · {what} · скачаю в фоне"),
             (true, true) => format!("Альбом в Любимых · {what} · скачается, когда подключишь торренты"),
             (true, false) => format!("Альбом в Любимых · {what}"),
             (false, _) => format!("Альбом убран из Любимых · {what}"),
@@ -2482,6 +2511,7 @@ impl Worker {
                     s.prefs.prowlarr_url = url;
                     s.prefs.prowlarr_configured = usable;
                 });
+                self.publish_sources();
                 self.toast(
                     if usable { "Prowlarr сохранён" } else { "Адрес или ключ Prowlarr не подходят" },
                     None,

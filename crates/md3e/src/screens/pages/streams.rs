@@ -547,7 +547,7 @@ fn album_download(v: &StreamPageView, wish: &widgets::WishIndex, all_local: bool
     match v.release.and_then(|r| wish.of_release(r)) {
         None | Some(WishlistStatus::Waiting | WishlistStatus::Dismissed | WishlistStatus::Done) => ("Скачать", true),
         Some(WishlistStatus::Downloading) => ("Качается", false),
-        Some(WishlistStatus::NoTorrent | WishlistStatus::Failed) => ("Нет раздачи", false),
+        Some(WishlistStatus::NoTorrent | WishlistStatus::Failed) => ("Не нашлось", false),
         Some(_) if !torrents => ("Ждёт торренты", false),
         Some(_) => ("В очереди", false),
     }

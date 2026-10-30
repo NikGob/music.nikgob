@@ -12,6 +12,7 @@ use std::time::Duration;
 pub use nikgob_core::model::{
     WishlistId, WishlistOrigin, WishlistScope, WishlistStatus,
 };
+pub use nikgob_core::source::SourceKey;
 pub use nikgob_core::streaming::{
     Account, EntityKind, LoginInput, LoginPrompt, PlaylistSyncMode, RemoteId, Service, TrackKind,
 };
@@ -544,6 +545,12 @@ pub struct WishlistRow {
     pub confirm_files: bool,
     /// A downloaded album: its tracks still without a file.
     pub missing: u32,
+    /// The track has a copy saved from YouTube (low quality): the item
+    /// stays to find a better one, it is not «Скачано» (docs/stage4.5.md).
+    pub has_copy: bool,
+    /// Where the file comes from while it downloads («Qobuz», «khinsider»,
+    /// the tracker of a torrent).
+    pub source: Option<String>,
 }
 
 /// Items of one album or one artist, for the grouped view and its bulk
@@ -571,6 +578,21 @@ pub struct WishlistView {
     pub by_artist: Vec<WishlistGroup>,
     /// How many items are in each status (statuses with none are left out).
     pub counts: Vec<(WishlistStatus, u32)>,
+    /// Some download source is on and set up: items search by themselves.
+    pub can_search: bool,
+}
+
+/// One download source as «Источники» lists it (docs/stage4.5.md).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceView {
+    pub key: SourceKey,
+    pub name: String,
+    /// The app has it (Soulseek only once its client is in the build;
+    /// torrents once Prowlarr is set up).
+    pub available: bool,
+    /// How it went lately, in words («Не отвечает», «Просит подождать до
+    /// 14:20»); `None` when all is well.
+    pub status: Option<String>,
 }
 
 impl WishlistView {

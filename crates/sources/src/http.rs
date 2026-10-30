@@ -125,17 +125,52 @@ fn retry_after(resp: &Response) -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
+/// The cookies a site sets, sent back on the next requests as a browser
+/// does: a bot guard (Cloudflare's `__cf_bm`) turns away a client that
+/// comes back without the cookie it gave.
+#[derive(Default)]
+pub struct Cookies(Mutex<Vec<(String, String)>>);
+
+impl Cookies {
+    fn header(&self) -> Option<String> {
+        let jar = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        (!jar.is_empty()).then(|| jar.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; "))
+    }
+
+    fn keep(&self, resp: &Response) {
+        let mut jar = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for v in resp.headers().get_all(reqwest::header::SET_COOKIE) {
+            let Some((pair, _)) = v.to_str().ok().map(|s| s.split_once(';').unwrap_or((s, ""))) else { continue };
+            let Some((k, val)) = pair.split_once('=') else { continue };
+            let (k, val) = (k.trim().to_owned(), val.trim().to_owned());
+            jar.retain(|(name, _)| *name != k);
+            if !val.is_empty() {
+                jar.push((k, val));
+            }
+        }
+    }
+}
+
 /// The body of a page or an API answer; a bot check is `Blocked`, a 429
 /// `RateLimited`, any other failure `Http`.
 pub async fn get_text(http: &Client, url: &str) -> Result<String, SourceError> {
-    let resp = http
+    get_page(http, url, None).await
+}
+
+/// [`get_text`] with the site's cookies kept and sent back.
+pub async fn get_page(http: &Client, url: &str, cookies: Option<&Cookies>) -> Result<String, SourceError> {
+    let mut req = http
         .get(url)
         .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8")
         .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-        .timeout(PAGE_TIMEOUT)
-        .send()
-        .await
-        .map_err(unreachable)?;
+        .timeout(PAGE_TIMEOUT);
+    if let Some(c) = cookies.and_then(Cookies::header) {
+        req = req.header(reqwest::header::COOKIE, c);
+    }
+    let resp = req.send().await.map_err(unreachable)?;
+    if let Some(c) = cookies {
+        c.keep(&resp);
+    }
     let status = resp.status();
     let wait = retry_after(&resp);
     let body = resp.text().await.map_err(unreachable)?;
@@ -305,6 +340,25 @@ mod tests {
         let err = download(&http, &format!("{}/err.flac", server.uri()), &dir.path().join("x.flac"), &progress).await;
         assert!(matches!(err, Err(SourceError::Parse(_))));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing left of the failed one");
+    }
+
+    #[tokio::test]
+    async fn cookies_a_site_sets_go_back_to_it() {
+        use wiremock::matchers::header;
+        let server = MockServer::start().await;
+        Mock::given(path("/a"))
+            .respond_with(ResponseTemplate::new(200).insert_header("set-cookie", "__cf_bm=abc; path=/; HttpOnly").set_body_string("a"))
+            .mount(&server)
+            .await;
+        Mock::given(path("/b"))
+            .and(header("cookie", "__cf_bm=abc"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("b"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (http, jar) = (client(), Cookies::default());
+        assert_eq!(get_page(&http, &format!("{}/a", server.uri()), Some(&jar)).await.unwrap(), "a");
+        assert_eq!(get_page(&http, &format!("{}/b", server.uri()), Some(&jar)).await.unwrap(), "b");
     }
 
     #[test]

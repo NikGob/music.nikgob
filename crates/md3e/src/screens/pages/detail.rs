@@ -176,7 +176,7 @@ pub fn release(
                 "Ждёт торренты"
             }
             Some(nikgob_view::WishlistStatus::New | nikgob_view::WishlistStatus::Searching | nikgob_view::WishlistStatus::Confirm) => "В очереди",
-            Some(nikgob_view::WishlistStatus::NoTorrent | nikgob_view::WishlistStatus::Failed) => "Нет раздачи",
+            Some(nikgob_view::WishlistStatus::NoTorrent | nikgob_view::WishlistStatus::Failed) => "Не нашлось",
             // A narrow page keeps the row on one line (the menu says more).
             _ if ui.available_width() < 640.0 => "Скачать",
             _ => "Скачать недостающие",

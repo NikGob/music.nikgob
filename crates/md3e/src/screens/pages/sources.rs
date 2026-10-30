@@ -9,14 +9,14 @@
 
 use egui::{Sense, Stroke, Ui, Widget as _, vec2};
 use nikgob_core::streaming::SPOTIFY_PREMIUM_REQUIRED;
-use nikgob_view::{Account, AccountView, Command, LoginInput, LoginPrompt, Prefs, Service, ViewState};
+use nikgob_view::{self as v, Account, AccountView, Command, LoginInput, LoginPrompt, Prefs, Service, ViewState};
 
 use super::PageState;
 use super::settings::{choice, dimmed, fmt_speed, group, range_slider, row, speed_slider};
 use super::settings_help::{self, SettingId as Id};
 use crate::{
     Icon, Theme, TypeRole,
-    components::{Button, Card, LoadingIndicator, Size, Style, Switch, TextField},
+    components::{Button, Card, IconButton, LoadingIndicator, Size, Style, Switch, TextField},
 };
 
 /// Where the user's own Spotify app is made and what it must allow.
@@ -33,6 +33,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     spotify(ui, state, p, pages, out);
     youtube(ui, state, p, pages, out);
     deezer(ui, state, p);
+    download_sources(ui, state, p);
 
     group(ui, "Лайки и загрузки");
     let scope_hint = if p.like_downloads {
@@ -72,6 +73,74 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     group(ui, "Кэш");
     stream_cache(ui, state, p, out);
     torrents(ui, state, p, pages, out);
+}
+
+/// «Источники скачивания» (docs/stage4.5.md): where «Хочу скачать» looks,
+/// in the order it prefers them at one quality, each with its switch and
+/// «Выше» / «Ниже». Lossless comes first whichever source has it; a source
+/// the app does not have (Soulseek before its client is in) is left out.
+fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
+    let s = Theme::get(ui.ctx()).scheme;
+    group(ui, "Источники скачивания");
+    ui.label(TypeRole::BodyMedium.style().rich_para(
+        "Сначала ищется FLAC, где бы он ни был; при равном качестве — в этом порядке. Копия с YouTube — только когда нигде нет.",
+        s.on_surface_variant,
+    ));
+    let mut order = p.source_order();
+    let shown: Vec<v::SourceKey> = order
+        .iter()
+        .map(|o| o.key)
+        .filter(|k| state.downloads.sources.iter().any(|v| v.key == *k && (v.available || *k == v::SourceKey::Torrents)))
+        .collect();
+    let mut moved: Option<(usize, usize)> = None;
+    for (n, key) in shown.iter().enumerate() {
+        let Some(at) = order.iter().position(|o| o.key == *key) else { continue };
+        let view = state.downloads.sources.iter().find(|v| v.key == *key);
+        let hint = match (key, view) {
+            (v::SourceKey::Torrents, Some(v)) if !v.available => "Нужен Prowlarr — ниже, в «Торренты»".to_owned(),
+            (_, Some(v)) if v.status.is_some() => v.status.clone().unwrap_or_default(),
+            (v::SourceKey::Torrents, _) => "Через Prowlarr".to_owned(),
+            (v::SourceKey::Khinsider, _) => "Саундтреки игр".to_owned(),
+            (v::SourceKey::Soulseek, _) => "Отдельные треки от людей".to_owned(),
+            (v::SourceKey::Qobuz | v::SourceKey::Tidal, _) => "Бесплатно, через открытые сервисы".to_owned(),
+        };
+        let mut on = order[at].on;
+        row(ui, Id::DownloadSource(*key), key.display_name(), Some(&hint), |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let up = ui.add(
+                    IconButton::new(Icon::ExpandLess)
+                        .size(Size::Xs)
+                        .enabled(n > 0)
+                        .tooltip("Выше")
+                        .id_salt(("src-up", key.as_str())),
+                );
+                if up.clicked() && n > 0 {
+                    moved = order.iter().position(|o| o.key == shown[n - 1]).map(|to| (at, to));
+                }
+                let down = ui.add(
+                    IconButton::new(Icon::ExpandMore)
+                        .size(Size::Xs)
+                        .enabled(n + 1 < shown.len())
+                        .tooltip("Ниже")
+                        .id_salt(("src-down", key.as_str())),
+                );
+                if down.clicked() && n + 1 < shown.len() {
+                    moved = order.iter().position(|o| o.key == shown[n + 1]).map(|to| (at, to));
+                }
+                ui.add_space(8.0);
+                ui.add(Switch::new(&mut on).id_salt(("src-on", key.as_str())));
+            });
+        });
+        if on != order[at].on {
+            order[at].on = on;
+            p.download_sources = order.clone();
+        }
+    }
+    if let Some((a, b)) = moved {
+        order.swap(a, b);
+        p.download_sources = order;
+    }
 }
 
 /// «Анализ звука стримов»: the switch and how far it is.

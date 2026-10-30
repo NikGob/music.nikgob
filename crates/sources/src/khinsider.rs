@@ -5,7 +5,8 @@
 //! length and sizes per format, and a song's page links the files.
 //!
 //! The site sits behind a bot check that turns away clients asking too
-//! fast: one request every two seconds, and a pause when it does
+//! fast or coming back without the cookie it set: one request every two
+//! seconds with the site's cookies, and a pause when it does turn us away
 //! ([`crate::http::Breaker`]).
 
 use std::path::Path;
@@ -18,7 +19,7 @@ use nikgob_metadata::text::{similarity, title_key};
 use serde::{Deserialize, Serialize};
 
 use crate::html::{Cell, links, table, text_of};
-use crate::http::{Breaker, Pace, client, download, get_text, safe_name};
+use crate::http::{Breaker, Cookies, Pace, client, download, get_page, safe_name};
 use crate::matching::contains_words;
 use crate::text::{album_core, album_keys, franchise_of, is_soundtrack, title_keys};
 
@@ -33,6 +34,7 @@ pub struct Khinsider {
     http: reqwest::Client,
     pace: Pace,
     breaker: Breaker,
+    cookies: Cookies,
 }
 
 impl Khinsider {
@@ -49,6 +51,7 @@ impl Khinsider {
             http: client(),
             pace: Pace::new(every),
             breaker: Breaker::default(),
+            cookies: Cookies::default(),
         }
     }
 
@@ -63,7 +66,7 @@ impl Khinsider {
     async fn page(&self, url: &str) -> Result<String, SourceError> {
         self.breaker.check()?;
         self.pace.wait().await;
-        let r = get_text(&self.http, url).await;
+        let r = get_page(&self.http, url, Some(&self.cookies)).await;
         self.breaker.note(&r);
         r
     }

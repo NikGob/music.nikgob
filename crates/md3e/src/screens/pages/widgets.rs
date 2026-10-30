@@ -1063,10 +1063,10 @@ pub fn wish_mark(ui: &mut Ui, st: WishlistStatus, torrents: bool, salt: impl std
     let (icon, tip) = match st {
         St::Waiting | St::New | St::Searching if !torrents => (Icon::HourglassEmpty, "Ждёт торренты — «Хочу скачать»"),
         St::Waiting => (Icon::HourglassEmpty, "Ждёт в «Хочу скачать»"),
-        St::New | St::Searching => (Icon::Search, "Ищу раздачу"),
-        St::Confirm => (Icon::Info, "Нужно выбрать раздачу — «Хочу скачать»"),
+        St::New | St::Searching => (Icon::Search, "Ищу, где скачать"),
+        St::Confirm => (Icon::Info, "Нужно выбрать, что скачать — «Хочу скачать»"),
         St::Downloading => (Icon::CloudDownload, "Качается"),
-        St::NoTorrent | St::Failed => (Icon::Error, "Не нашёл раздачу — «Хочу скачать»"),
+        St::NoTorrent | St::Failed => (Icon::Error, "Не нашёл, где скачать — «Хочу скачать»"),
         St::Done | St::Dismissed => (Icon::Check, "Скачано"),
     };
     ui.add(IconButton::new(icon).size(Size::Xs).tooltip(tip).id_salt(Id::new(salt)))

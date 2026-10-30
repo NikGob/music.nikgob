@@ -4,7 +4,10 @@
 //! background — ISRC first, then "artist title" with the official song
 //! preferred over a clip over an upload, a length within 3 s and the best
 //! title match — and the hit is attached to the same track id as one more
-//! source. Misses are not asked again for days (kept in the library's
+//! source. A hit must be the same song of the same artist (any spelling
+//! of its name): never a cover, a karaoke, a remix or another performer's
+//! version (docs/stage4.5.md, «Известные проблемы стриминга YouTube»); no
+//! such hit is an honest «не нашёл» with «Найти песню…», not a cover. Misses are not asked again for days (kept in the library's
 //! cache, so a restart does not ask either). The lookups ask one category
 //! at a time: songs, videos only when no song fits (2 requests instead of
 //! up to 11). The next one or two tracks of the queue are looked up ahead,
@@ -26,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use nikgob_core::model::{SourceKind, TrackId};
 use nikgob_core::streaming::{SearchKind, Service, StreamTrack, TrackKind};
-use nikgob_metadata::text::{artist_key, search_artist, search_title, similarity, title_key};
+use nikgob_metadata::text::{artist_key, search_artist, search_title, similarity};
 
 use super::Msg;
 use crate::Worker;
@@ -35,9 +38,9 @@ use crate::queue::Entry;
 /// Lengths this far apart (ms) are another recording.
 const SLACK_MS: u64 = 3_000;
 /// A hit needs at least this title similarity (0..=1).
-const MIN_TITLE: f64 = 0.6;
-/// A hit found by its title alone needs this artist similarity (0..=1).
-const MIN_ARTIST: f64 = 0.7;
+const MIN_TITLE: f64 = 0.7;
+/// A hit needs this artist similarity (0..=1).
+const MIN_ARTIST: f64 = 0.8;
 
 /// What is looked up on YouTube Music for a track.
 #[derive(Clone, Debug)]
@@ -49,6 +52,8 @@ pub(crate) struct ResolveQuery {
     /// Videos that did not play (age gate, region block): another
     /// candidate is picked instead.
     pub(crate) exclude: Vec<String>,
+    /// Other names of the artist (its aliases, the credit's other names).
+    pub(crate) aliases: Vec<String>,
 }
 
 impl ResolveQuery {
@@ -66,21 +71,51 @@ fn kind_rank(k: TrackKind) -> u8 {
     }
 }
 
-/// Title similarity of a hit; a clip titled "Artist - Title (…)" is also
-/// compared without its "Artist - " part.
-fn title_score(hit: &StreamTrack, want: &str) -> f64 {
-    let base = |s: &str| title_key(s).base;
-    let mut best = similarity(&base(&hit.title), want);
+/// Title similarity of a hit to the wished title, over the forms each goes
+/// by (a title in two scripts, "火星人 - Martian", matches either); a clip
+/// titled "Artist - Title (…)" is also compared without its "Artist - ".
+fn title_score(hit: &StreamTrack, want: &[String]) -> f64 {
+    let mut got = nikgob_sources::text::title_keys(&hit.title);
     if let Some((_, rest)) = hit.title.split_once(" - ") {
-        best = best.max(similarity(&base(rest), want));
+        got.extend(nikgob_sources::text::title_keys(rest));
     }
-    best
+    got.iter()
+        .flat_map(|g| want.iter().map(move |w| similarity(g, w)))
+        .fold(0.0, f64::max)
 }
 
-/// The best YouTube hit for `q`, if any is good enough.
+/// How much a hit is by the wished artist (0..=1): a credited artist alike
+/// any of its names, or a clip titled "Artist - Title" by an uploader.
+fn artist_score(hit: &StreamTrack, q: &ResolveQuery) -> f64 {
+    let names: Vec<&str> = std::iter::once(q.artist.as_str())
+        .chain(q.artist.split([',', '&']).map(str::trim))
+        .chain(q.aliases.iter().map(String::as_str))
+        .filter(|n| !n.is_empty())
+        .collect();
+    let keys: Vec<String> = names.iter().map(|n| artist_key(n)).filter(|k| !k.is_empty()).collect();
+    let alike = |name: &str| -> f64 {
+        if names.iter().any(|n| nikgob_core::names::same_name(n, name)) {
+            return 1.0;
+        }
+        let k = artist_key(name);
+        keys.iter().map(|w| similarity(&k, w)).fold(0.0, f64::max)
+    };
+    let credited = hit.artists.iter().map(|a| alike(&a.name)).fold(0.0, f64::max);
+    let in_title = hit.title.split_once(" - ").map_or(0.0, |(head, _)| alike(head.trim()));
+    credited.max(in_title)
+}
+
+/// A hit is another version of the song (a cover, a karaoke, a remix, a
+/// sped-up upload) that the wish does not name.
+fn other_version(hit: &StreamTrack, q: &ResolveQuery) -> bool {
+    nikgob_sources::matching::other_version(&hit.title, &q.title).is_some()
+}
+
+/// The best YouTube hit for `q`, if any is the song: playable, not refused,
+/// the length within 3 s, the title alike, by the artist, not another
+/// version.
 pub(crate) fn pick_youtube(hits: &[StreamTrack], q: &ResolveQuery) -> Option<StreamTrack> {
-    let want = title_key(&q.title).base;
-    let want_artist = artist_key(&q.artist);
+    let want = nikgob_sources::text::title_keys(&q.title);
     let mut ranked: Vec<(u8, f64, &StreamTrack)> = hits
         .iter()
         .filter(|h| h.playable && !q.exclude.contains(&h.id.id))
@@ -88,21 +123,34 @@ pub(crate) fn pick_youtube(hits: &[StreamTrack], q: &ResolveQuery) -> Option<Str
             (Some(a), Some(b)) => a.abs_diff(b) <= SLACK_MS,
             _ => true,
         })
+        .filter(|h| !other_version(h, q))
         .filter_map(|h| {
             let title = title_score(h, &want);
             if title < MIN_TITLE {
                 return None;
             }
-            let artist = h
-                .artists
-                .iter()
-                .map(|a| similarity(&artist_key(&a.name), &want_artist))
-                .fold(0.0, f64::max);
+            let artist = artist_score(h, q);
+            if artist < MIN_ARTIST {
+                return None;
+            }
             Some((kind_rank(h.kind), title + 0.3 * artist, h))
         })
         .collect();
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
     ranked.first().map(|(.., h)| (*h).clone())
+}
+
+/// The hit of an ISRC lookup: the recording itself, whoever YouTube
+/// credits it to (an artist in another script), if its length fits and it
+/// is not another version.
+fn pick_isrc(hit: &StreamTrack, q: &ResolveQuery) -> bool {
+    hit.playable
+        && !q.exclude.contains(&hit.id.id)
+        && !other_version(hit, q)
+        && match (hit.duration_ms, q.duration_ms) {
+            (Some(a), Some(b)) => a.abs_diff(b) <= SLACK_MS,
+            _ => title_score(hit, &nikgob_sources::text::title_keys(&q.title)) >= MIN_TITLE,
+        }
 }
 
 /// Tracks to look up ahead in the queue.
@@ -155,8 +203,8 @@ async fn songs_then_videos(
     Ok(None)
 }
 
-/// "artist title" first; when that finds nothing, the title alone with the
-/// artist checked on the hits. A rate limit is `None` too.
+/// "artist title" first; when that finds nothing, the title alone (the
+/// artist is checked on every hit). A rate limit is `None` too.
 pub(crate) async fn search_youtube(
     yt: &dyn nikgob_core::streaming::StreamService,
     q: &ResolveQuery,
@@ -169,13 +217,7 @@ async fn lookup_youtube(yt: &dyn nikgob_core::streaming::StreamService, q: &Reso
     if let Some(hit) = songs_then_videos(yt, &q.text(), &|_| true, q).await? {
         return Ok(Some(hit));
     }
-    let artist = artist_key(&q.artist);
-    let by_artist = move |h: &StreamTrack| {
-        h.artists
-            .iter()
-            .any(|a| similarity(&artist_key(&a.name), &artist) >= MIN_ARTIST)
-    };
-    songs_then_videos(yt, &search_title(&q.title), &by_artist, q).await
+    songs_then_videos(yt, &search_title(&q.title), &|_| true, q).await
 }
 
 /// Why a stream did not play, from the engine's error text, as the user
@@ -293,6 +335,28 @@ impl Worker {
         !has_youtube && self.lib.get_track(track).ok().flatten().is_some()
     }
 
+    /// Every name of the track's artists the library knows: the credited
+    /// names, the artists' own names and their aliases.
+    pub(crate) fn artist_names(&self, t: &nikgob_core::model::Track) -> Vec<String> {
+        let ids: Vec<nikgob_core::model::ArtistId> = t.artist_credit.0.iter().filter_map(|p| p.artist_id).collect();
+        let mut out: Vec<String> = t.artist_credit.0.iter().map(|p| p.name.clone()).collect();
+        for id in &ids {
+            if let Some(a) = self.lib.get_artist(*id).ok().flatten() {
+                out.push(a.name);
+            }
+        }
+        if !ids.is_empty() {
+            for (who, name) in self.lib.artist_aliases().unwrap_or_default() {
+                if ids.contains(&who) {
+                    out.push(name);
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// The Deezer id of a track that has no ISRC yet, and the catalogue to
     /// ask it of (see the module docs).
     pub(crate) fn isrc_source(&self, track: TrackId) -> Option<(std::sync::Arc<dyn nikgob_core::streaming::StreamService>, String)> {
@@ -320,6 +384,7 @@ impl Worker {
             duration_ms: t.duration_ms.map(u64::from),
             isrc: t.isrc.clone(),
             exclude: self.refused_videos(),
+            aliases: self.artist_names(&t),
         };
         let deezer = if q.isrc.is_none() { self.isrc_source(track) } else { None };
         self.streaming.resolving.insert(track);
@@ -338,7 +403,7 @@ impl Worker {
             }
             if let Some(isrc) = &q.isrc
                 && let Ok(Some(hit)) = yt.find_isrc(isrc).await
-                && pick_youtube(std::slice::from_ref(&hit), &q).is_some()
+                && pick_isrc(&hit, &q)
             {
                 return Msg::Resolved {
                     track,
@@ -436,13 +501,16 @@ impl Worker {
                 }
                 None => {
                     let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
+                    // Better an honest «не нашёл» than someone else's
+                    // version: the song can be picked by hand.
+                    let find = Some(("Найти песню…".to_owned(), nikgob_view::Command::FindSong { track, query: None }));
                     match why {
                         // The only copies did not play: say why.
                         Some((why, Some(link))) => {
                             self.toast_open(format!("{title}: {why}"), "Войти", nikgob_view::Link::Setting(link));
                         }
-                        Some((why, None)) => self.toast(format!("{title}: {why}"), None),
-                        None => self.toast(format!("{title}: не нашёл на YouTube Music"), None),
+                        Some((why, None)) => self.toast(format!("{title}: {why}"), find),
+                        None => self.toast(format!("{title}: не нашёл эту песню на YouTube Music"), find),
                     }
                     match self.queue.skip_forward() {
                         Some(n) if n.id != e.id => self.start(n),
@@ -560,6 +628,7 @@ mod tests {
             duration_ms: Some(285_000),
             isrc: None,
             exclude: Vec::new(),
+            aliases: Vec::new(),
         };
         assert_eq!(q.text(), "Кино Группа крови");
         let clip = hit("clip", "Кино - Группа крови (клип)", 286, TrackKind::Video);
@@ -580,6 +649,40 @@ mod tests {
             ..q
         };
         assert_eq!(pick_youtube(&all, &q).unwrap().id.id, "clip");
+    }
+
+    #[test]
+    fn covers_and_other_performers_are_never_picked() {
+        // The live log: after a 403 the lookup played guitar covers and
+        // another singer's version of a ZUTOMAYO song.
+        let q = ResolveQuery {
+            title: "勘冴えて悔しいわ - Kan Saete Kuyashiiwa".into(),
+            artist: "ZUTOMAYO".into(),
+            duration_ms: Some(228_000),
+            isrc: None,
+            exclude: Vec::new(),
+            aliases: vec!["ずっと真夜中でいいのに。".into()],
+        };
+        let by = |id: &str, title: &str, artist: &str, secs: u64, kind: TrackKind| {
+            let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), title);
+            t.artists = vec![ArtistRef::new(None, artist)];
+            t.duration_ms = Some(secs * 1000);
+            t.kind = kind;
+            t
+        };
+        let guitar = by("g", "勘冴えて悔しいわ - Kan Saete Kuyashiiwa (Guitar Cover)", "Some Guitarist", 228, TrackKind::Video);
+        let singer = by("s", "勘冴えて悔しいわ - Kan Saete Kuyashiiwa", "Another Singer", 228, TrackKind::Video);
+        let karaoke = by("k", "勘冴えて悔しいわ (Karaoke)", "ZUTOMAYO", 228, TrackKind::Video);
+        let mine = by("z", "勘冴えて悔しいわ", "ずっと真夜中でいいのに。", 229, TrackKind::Song);
+        assert!(pick_youtube(&[guitar.clone(), singer.clone(), karaoke.clone()], &q).is_none(), "an honest miss");
+        assert_eq!(pick_youtube(&[guitar, singer, karaoke, mine], &q).unwrap().id.id, "z", "the artist under its other name");
+        // An uploader's clip titled "Artist - Title" is the artist's.
+        let clip = by("c", "ZUTOMAYO - Kan Saete Kuyashiiwa", "ZUTOMAYO Topic Fan", 228, TrackKind::Video);
+        assert_eq!(pick_youtube(&[clip], &q).unwrap().id.id, "c");
+        // The ISRC's hit is the recording, credited in any script.
+        let isrc = by("i", "Kan Saete Kuyashiiwa", "ZTMY", 228, TrackKind::Song);
+        assert!(pick_isrc(&isrc, &q));
+        assert!(!pick_isrc(&by("i2", "Kan Saete Kuyashiiwa (Remix)", "ZTMY", 228, TrackKind::Song), &q));
     }
 
     #[test]

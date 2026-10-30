@@ -168,6 +168,8 @@ pub enum SettingId {
     PushLikes,
     AutoDownloads,
     DownloadToasts,
+    /// One line of «Источники скачивания»: its switch and place.
+    DownloadSource(v::SourceKey),
     PlaylistSync,
     ImportSpotify,
     ImportYouTube,
@@ -297,7 +299,7 @@ impl SettingId {
             }
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
             Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
-            | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | DownloadToasts | PlaylistSync | ImportSpotify
+            | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | DownloadToasts | DownloadSource(_) | PlaylistSync | ImportSpotify
             | ImportYouTube | ImportFiles | ImportSavedSongs | StreamCache | StreamAnalysis | Prowlarr | NoSeed | SeedLimit | SeedDays
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
             RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | NewShareBy(_)
@@ -403,6 +405,11 @@ impl SettingId {
             PushLikes => "Лайк здесь ставится и в Spotify / YouTube Music, а снятый лайк снимается и там. Только для треков, которые есть в сервисе.",
             AutoDownloads => "Сколько треков из «Хочу скачать» ищутся и качаются одновременно сами. Меньше — тише для сети.",
             DownloadToasts => "Всплывающие сообщения о загрузках, которые идут сами: раздача не нашлась, начала качаться, скачалась. Выключено — всё это видно только в «Загрузках» и «Хочу скачать».",
+            DownloadSource(v::SourceKey::Torrents) => "Раздачи, которые находит Prowlarr (адрес и ключ — ниже, в «Торренты»). Из альбома или дискографии берётся только нужный трек.",
+            DownloadSource(v::SourceKey::Khinsider) => "Саундтреки игр с downloads.khinsider.com, часто во FLAC. Спрашивается только для саундтреков: альбом так и называется или песня написана для игры.",
+            DownloadSource(v::SourceKey::Soulseek) => "Отдельные треки от других людей в сети Soulseek, часто во FLAC.",
+            DownloadSource(v::SourceKey::Qobuz) => "Каталог Qobuz во FLAC (до Hi-Res) через открытый сервис-посредник, без своего аккаунта. Такие сервисы то работают, то нет: если не отвечает, плеер просто попробует позже.",
+            DownloadSource(v::SourceKey::Tidal) => "Каталог Tidal во FLAC через открытые сервисы-посредники, без своего аккаунта. Их часто блокируют: если не отвечают, плеер попробует позже.",
             PlaylistSync => "Как новый плейлист, связанный с сервисом, следит за ним. У каждого плейлиста это можно поменять в его меню ⋮.",
             ImportSpotify => "Забирает из Spotify свои плейлисты и недавние прослушивания. Лайки приходят сами сразу после входа. Плейлисты появятся в библиотеке; скачивается только то, что скачаешь сам.",
             ImportYouTube => "То же из YouTube Music: плейлисты и история. Лайки приходят сами после входа.",

@@ -25,6 +25,11 @@ pub fn main_artist(raw: &str) -> String {
     if let Some((first, _)) = s.split_once(", ") {
         s = first.to_owned();
     }
+    // A compilation's "Various Artists" names nobody.
+    let key = nikgob_core::names::name_key(&s);
+    if ["variousartists", "various", "va", "разныеисполнители", "сборник", "verschiedeneinterpreten"].contains(&key.as_str()) {
+        return String::new();
+    }
     s.trim().to_owned()
 }
 
@@ -302,6 +307,7 @@ mod tests {
         assert_eq!(main_artist("Con Fetti Pesto, David Münnich, Alexx Grimm"), "Con Fetti Pesto");
         assert_eq!(main_artist("MORGENSHTERN feat. Palc"), "MORGENSHTERN");
         assert_eq!(main_artist("Simon & Garfunkel"), "Simon & Garfunkel");
+        assert_eq!(main_artist("Разные исполнители"), "");
     }
 
     #[test]
