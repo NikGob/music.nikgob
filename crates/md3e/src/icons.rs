@@ -220,6 +220,7 @@ mod tests {
             Icon::PlayArrow,
             Icon::Settings,
             Icon::Folder,
+            Icon::ThumbDown,
         ] {
             assert!(icon.has_filled_form(), "{icon:?}");
         }
@@ -240,10 +241,10 @@ mod tests {
         let ctx = Context::default();
         install(&ctx);
         install(&ctx);
-        for filled in [false, true] {
+        for (icon, filled) in [Icon::PlayArrow, Icon::ThumbDown].into_iter().flat_map(|i| [(i, false), (i, true)]) {
             let poll = ctx
                 .try_load_texture(
-                    Icon::PlayArrow.uri(filled),
+                    icon.uri(filled),
                     TextureOptions::LINEAR,
                     SizeHint::Size {
                         width: 48,

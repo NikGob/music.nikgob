@@ -1391,7 +1391,7 @@ enum InfoMode {
 }
 
 /// Title, artist · album, progress, transport and the action row (like,
-/// add to playlist, volume).
+/// add to playlist, volume, dislike).
 #[allow(clippy::too_many_arguments)]
 fn info(
     ui: &mut Ui,
@@ -1583,7 +1583,8 @@ fn info(
     }
     y += CONTROLS_H + 16.0;
 
-    // Actions: like and add on the left, volume on the right.
+    // Actions: like and add on the left; volume and dislike on the right,
+    // so like and dislike sit at opposite ends of the row.
     let row = snap(ui, Rect::from_min_size(pos2(col.left(), y), vec2(col.width(), 48.0)));
     let mut aui = ui.new_child(
         UiBuilder::new()
@@ -1603,24 +1604,17 @@ fn info(
         {
             out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
         }
-        if state.prefs.dislike_button {
-            let disliked = state.dislikes.track(t.id);
-            if aui
-                .add(IconButton::new(Icon::ThumbDown).selected(disliked).tooltip("Не нравится").id_salt("np-dislike"))
-                .clicked()
-            {
-                out.push(Command::Dislike { track: t.id, dislike: !disliked, sure: false, relike: false });
-            }
-        }
         let add = aui.add(IconButton::new(Icon::PlaylistAdd).tooltip("В плейлист").id_salt("np-add"));
 
         pages.playlist_menu(&mut aui, &add, vec![t.id], state, out);
     }
+    let dislike = current.filter(|_| state.prefs.dislike_button).map(|t| (t.id, state.dislikes.track(t.id)));
     aui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let volume = if p.muted { 0.0 } else { chrome.volume_now(&ctx, state) };
         // The slider is optional; the wheel sets the volume either way.
         if state.prefs.np_volume {
-            let w = (ui.available_width() - 48.0).clamp(96.0, 220.0);
+            let buttons = if dislike.is_some() { 96.0 } else { 48.0 };
+            let w = (ui.available_width() - buttons).clamp(96.0, 220.0);
             let vo = Slider::new("np-vol", volume)
                 .track(8.0)
                 .width(w)
@@ -1639,6 +1633,13 @@ fn info(
             .clicked()
         {
             out.push(Command::ToggleMute);
+        }
+        if let Some((track, disliked)) = dislike
+            && ui
+                .add(IconButton::new(Icon::ThumbDown).selected(disliked).tooltip("Не нравится").id_salt("np-dislike"))
+                .clicked()
+        {
+            out.push(Command::Dislike { track, dislike: !disliked, sure: false, relike: false });
         }
     });
 }
