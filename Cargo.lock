@@ -558,6 +558,8 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
+ "serde_path_to_error",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -4972,6 +4974,7 @@ dependencies = [
  "nikgob-library",
  "nikgob-metadata",
  "nikgob-recs",
+ "nikgob-soulseek",
  "nikgob-sources",
  "nikgob-torrent",
  "nikgob-view",
@@ -4990,6 +4993,30 @@ name = "nikgob-shapes"
 version = "0.1.0"
 dependencies = [
  "egui",
+]
+
+[[package]]
+name = "nikgob-soulseek"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "env_logger",
+ "flate2",
+ "lofty",
+ "log",
+ "md-5",
+ "parking_lot",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "socket2",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.21",
+ "thread-priority",
+ "tokio",
+ "tokio-util",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
