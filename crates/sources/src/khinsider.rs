@@ -230,10 +230,8 @@ fn file_name(url: &str) -> String {
 /// What the wish is a soundtrack of, as a search: the album's own name,
 /// or the game the song was made for.
 fn query_of(want: &Want) -> Option<String> {
-    if let Some(a) = want.album.as_deref().filter(|a| is_soundtrack(a)) {
-        return Some(album_core(a));
-    }
-    want.title.as_deref().and_then(franchise_of)
+    let franchise = want.title.as_deref().and_then(franchise_of).or_else(|| want.album.as_deref().and_then(franchise_of));
+    franchise.or_else(|| want.album.as_deref().filter(|a| is_soundtrack(a)).map(album_core))
 }
 
 fn names_like(name: &str, keys: &[String]) -> bool {

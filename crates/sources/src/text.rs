@@ -93,6 +93,11 @@ pub fn title_forms(raw: &str) -> Vec<String> {
             if native(&inner) != native(&outer) && !inner.is_empty() {
                 parts.push(outer.trim().to_owned());
                 parts.push(inner);
+            } else if outer.trim().chars().any(char::is_alphanumeric) {
+                // "Das Nennt Ihr Himmel (Supraland … Credits Song)": the
+                // song's own name too (a version in brackets is told
+                // apart by the matching's version words).
+                push(&mut out, search_title(outer.trim()));
             }
         }
     }
@@ -310,6 +315,10 @@ mod tests {
         assert!(kan.contains(&"勘冴えて悔しいわ".to_owned()), "{kan:?}");
         assert!(kan.contains(&"Kan Saete Kuyashiiwa".to_owned()), "{kan:?}");
         assert_eq!(title_forms("Wind's Anthem (feat. suis From Yorushika)"), ["Wind's Anthem"]);
+        assert_eq!(
+            title_forms("Das Nennt Ihr Himmel (Supraland Six Inches Under Credits Song)"),
+            ["Das Nennt Ihr Himmel Supraland Six Inches Under Credits Song", "Das Nennt Ihr Himmel"]
+        );
         assert_eq!(title_forms("Комсомольск - Мозги & деньги //speed up//")[0], "Комсомольск Мозги & деньги");
         // One script: no split into halves.
         assert_eq!(title_forms("Зеленоглазые деффки!"), ["Зеленоглазые деффки!"]);
