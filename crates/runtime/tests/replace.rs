@@ -201,8 +201,10 @@ fn in_youtube_music_the_like_moves_to_the_song_stays_put_and_comes_back() {
     let dir = tempfile::tempdir().unwrap();
     let prefs = dir.path().join("prefs.json");
     // The like waits a while in the queue: a check meanwhile still sees
-    // the clip liked there and the song not.
-    let schedule = StreamSchedule { like_delay: Duration::from_millis(600), ..quick() };
+    // the clip liked there and the song not. Long enough for the steps
+    // before that check under a loaded machine (the whole workspace's
+    // tests at once), which 600 ms was not.
+    let schedule = StreamSchedule { like_delay: Duration::from_secs(4), ..quick() };
     let rt = start_with(&lib, vec![yt.clone()], schedule, Some(prefs.clone()));
     assert!(!rt.state().prefs.replace_in_youtube, "«Только здесь» at first");
     search(&rt, track, "Кино");
@@ -267,7 +269,8 @@ fn an_undo_before_the_flush_sends_nothing() {
     let yt = Arc::new(lonely());
     liked_before(&lib, &yt, &["yt-video-live"]);
     let track = clip_track(&lib);
-    let schedule = StreamSchedule { like_delay: Duration::from_millis(400), ..quick() };
+    // The undo must come within the delay, also on a loaded machine.
+    let schedule = StreamSchedule { like_delay: Duration::from_secs(2), ..quick() };
     let rt = start_with(&lib, vec![yt.clone()], schedule, None);
     search(&rt, track, "Кино");
     rt.send(Command::ReplaceTrack {
@@ -278,7 +281,7 @@ fn an_undo_before_the_flush_sends_nothing() {
     wait_until("the replacement", || !lib.get_track_row(track).unwrap().unwrap().is_clip());
     rt.send(undo_of_last_toast(&rt));
     wait_until("the clip back", || lib.get_track_row(track).unwrap().unwrap().is_clip());
-    std::thread::sleep(Duration::from_millis(700));
+    std::thread::sleep(Duration::from_millis(2_500));
     assert_eq!(yt.calls("set_liked_many"), 0, "the like and its undo cancel out");
     assert_eq!(yt.liked_ids(), ["yt-video-live"]);
 }
