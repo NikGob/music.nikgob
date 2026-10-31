@@ -19,7 +19,7 @@ use std::time::Duration;
 use nikgob_core::model::ReleaseId;
 use nikgob_core::streaming::{EntityKind, Service, StreamService};
 use nikgob_library::{Library, now_ms};
-use nikgob_metadata::{CoverTarget, Metadata, MetadataError};
+use nikgob_metadata::{CoverTarget, Metadata};
 
 use crate::Worker;
 use crate::enrich::Event;
@@ -132,8 +132,8 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
         {
             match meta.cover_art.front_cover(&target).await {
                 Ok(Some(c)) if c.thumbnails.contains_key("1200") => return Ok(Some(c.url_for(1200).to_owned())),
-                Ok(_) | Err(MetadataError::NotFound) => {}
-                Err(e) => return Err(e.to_string()),
+                Err(e) if crate::better_covers::meta_trouble(&e) => return Err(e.to_string()),
+                Ok(_) | Err(_) => {}
             }
         }
         if let Some(id) = w.deezer {
@@ -143,18 +143,23 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
                         return Ok(Some(url));
                     }
                 }
-                Err(MetadataError::NotFound) => {}
-                Err(e) => return Err(e.to_string()),
+                Err(e) if crate::better_covers::meta_trouble(&e) => return Err(e.to_string()),
+                Err(_) => {}
             }
         }
     }
-    // By its title on the services, the first that has it.
+    // By its title on the services, the first that has it. A service that
+    // could not answer makes it no miss: it is asked again.
     let query = search_query(&w.title);
+    let mut trouble = None;
     for s in services {
         let found = match s.search(&query).await {
             Ok(r) => r.albums,
             Err(e) => {
                 log::debug!("a larger cover of «{}» on {}: {e}", w.title, s.service());
+                if crate::better_covers::stream_trouble(&e) {
+                    trouble.get_or_insert(format!("{}: {e}", s.service()));
+                }
                 continue;
             }
         };
@@ -162,7 +167,7 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
             return Ok(Some(url));
         }
     }
-    Ok(None)
+    trouble.map_or(Ok(None), Err)
 }
 
 /// An album title as a search query: without a «~subtitle~» and «Special

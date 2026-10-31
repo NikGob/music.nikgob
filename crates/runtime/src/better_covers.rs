@@ -10,7 +10,18 @@
 //! services' songs (YouTube Music's square album art). A hit counts only
 //! when its title is the song's (or its album the album) and its artist is
 //! the track's, or is named in the clip's title («ヨルシカ「火星人」» uploaded
-//! by a TV channel).
+//! by a TV channel). An album takes only the art of an album of its title:
+//! its song found on a single is the single's art, not the album's.
+//!
+//! Before the lookup the names are widened with what the library knows:
+//! every spelling of the artist (its aliases, «ヨルシカ» read as
+//! «Yorushika»), the tracks' other titles, and the library's songs of that
+//! artist that carry the title beside another one («火星人 - Martian»): the
+//! services often know a song only by its Latin title.
+//!
+//! A sweep goes through the whole library at the services' rate limits; a
+//! miss is normal and the sweep goes on. A service that cannot answer (no
+//! network, a refusal) stops it, and the next start takes it up again.
 //!
 //! What is found is kept as a url in the library's cache
 //! (`cover_better.<release>` / `cover_better.track.<track>`, a miss too,
@@ -19,17 +30,18 @@
 //! again. The picture goes through the web cover cache, never into the
 //! music folders. Requests are spaced by the metadata clients' rate limits.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use nikgob_core::cover_frame;
-use nikgob_core::model::{ReleaseId, TrackId};
-use nikgob_core::streaming::{EntityKind, Service, StreamService, TrackKind};
+use nikgob_core::model::{ArtistId, ReleaseId, TrackId};
+use nikgob_core::streaming::{EntityKind, Service, StreamError, StreamService, TrackKind};
+use nikgob_core::{cover_frame, names};
 use nikgob_library::{Library, TrackRow, is_web_ref, now_ms};
-use nikgob_metadata::Metadata;
 use nikgob_metadata::text::{artist_key, similarity, title_key};
+use nikgob_metadata::{Metadata, MetadataError};
 
 use crate::Worker;
 use crate::enrich::Event;
@@ -40,8 +52,13 @@ use crate::import::Internal;
 const RETRY_MS: i64 = 14 * 86_400_000;
 /// A file cover smaller than this on its long side is poor.
 pub(crate) const MIN_SIDE: u32 = 400;
-/// Lookups per sweep of the library.
-const BATCH: usize = 40;
+/// One lookup (every query of it, waiting for the rate limits) takes at
+/// most this long; longer, and the network is in trouble.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(180);
+/// Queries of one lookup, at most.
+const MAX_QUERIES: usize = 6;
+/// Covers on screen take what a sweep found at most this often.
+const SHOW_EVERY: Duration = Duration::from_secs(30);
 /// Before the first lookup of a sweep: playback and the first screens go
 /// first.
 const START: Duration = Duration::from_secs(30);
@@ -116,6 +133,9 @@ pub(crate) struct Want {
     pub titles: Vec<String>,
     /// The clip's or the file's own title: an artist named in it counts.
     pub context: String,
+    /// A song's match counts: a clip, a single. An album takes only the
+    /// art of an album of its title.
+    pub song_ok: bool,
 }
 
 fn folded(s: &str) -> String {
@@ -131,11 +151,9 @@ pub(crate) fn accepts(w: &Want, artist: &str, title: &str, album: Option<&str>) 
     }
     let named = w.artists.iter().any(|n| {
         let k = artist_key(n);
-        !k.is_empty() && (similarity(&k, &a) >= 0.85 || nikgob_core::translit::same_translit(&k, &a))
+        !k.is_empty() && (similarity(&k, &a) >= 0.85 || nikgob_core::translit::same_translit(&k, &a) || names::same_name(n, artist))
     });
-    let fa = folded(artist);
-    let in_context = fa.chars().count() >= 2 && folded(&w.context).contains(&fa);
-    if !(named || in_context) {
+    if !(named || named_in(&w.context, artist)) {
         return false;
     }
     let t = title_key(title).base;
@@ -145,18 +163,97 @@ pub(crate) fn accepts(w: &Want, artist: &str, title: &str, album: Option<&str>) 
             k == t || similarity(&k, &t) >= 0.92
         });
     let same_album = match (&w.album, album) {
-        (Some(want), Some(theirs)) => hd_covers::same_album(&want.title, theirs),
+        (Some(want), Some(theirs)) => album_titles(&want.title).iter().any(|t| hd_covers::same_album(t, theirs)),
         _ => false,
     };
-    song || same_album
+    same_album || (song && (w.song_ok || w.album.is_none()))
 }
 
-/// The art for `w`, if a source has it.
+/// An album's titles: the whole and each part of a title in two scripts
+/// («第二回演奏会 メイドインアビス / THE SECOND CONCERT MADE IN ABYSS»).
+fn album_titles(title: &str) -> Vec<String> {
+    let mut out = vec![title.to_owned()];
+    for p in title_parts(title) {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// The parts of a title split by « - », « / » and alike, without empty
+/// ones; a title of one part gives none.
+fn title_parts(title: &str) -> Vec<String> {
+    let mut parts = vec![title.to_owned()];
+    for sep in [" - ", " – ", " — ", " / ", "／", " | "] {
+        parts = parts.into_iter().flat_map(|p| p.split(sep).map(|x| x.trim().to_owned()).collect::<Vec<_>>()).collect();
+    }
+    parts.retain(|p| p.chars().any(char::is_alphanumeric));
+    if parts.len() < 2 { Vec::new() } else { parts }
+}
+
+/// The runs of kana in `s` («ヨルシカ» of «TVアニメ…｜ヨルシカ「火星人」»).
+fn kana_runs(s: &str) -> Vec<String> {
+    let kana = |c: char| matches!(c as u32, 0x3041..=0x3096 | 0x30A1..=0x30FC);
+    let mut out = Vec::new();
+    let mut run = String::new();
+    for c in s.chars() {
+        if kana(c) {
+            run.push(c);
+        } else if !run.is_empty() {
+            out.push(std::mem::take(&mut run));
+        }
+    }
+    if !run.is_empty() {
+        out.push(run);
+    }
+    out
+}
+
+/// Whether `context` (a clip's title) names the artist `name`: as written
+/// (a whole word, for a name in Latin letters), or in kana that read as it
+/// («ヨルシカ» names «Yorushika»).
+fn named_in(context: &str, name: &str) -> bool {
+    let key = artist_key(name);
+    if key.chars().count() < 2 || context.is_empty() {
+        return false;
+    }
+    if !names::is_latin(name) {
+        return folded(context).contains(&folded(name));
+    }
+    (key.chars().count() >= 3 && format!(" {} ", artist_key(context)).contains(&format!(" {key} ")))
+        || kana_runs(context).iter().any(|k| names::same_name(k, name))
+}
+
+/// A metadata service that could not answer (as opposed to having
+/// nothing): no network, a refusal, a rate limit that did not pass.
+pub(crate) fn meta_trouble(e: &MetadataError) -> bool {
+    match e {
+        MetadataError::Network(_) | MetadataError::RateLimited(_) | MetadataError::Service(_) => true,
+        MetadataError::Status { status, .. } => matches!(status, 401 | 403) || *status >= 500,
+        _ => false,
+    }
+}
+
+/// [`meta_trouble`] of a streaming service.
+pub(crate) fn stream_trouble(e: &StreamError) -> bool {
+    match e {
+        StreamError::Network(_) | StreamError::RateLimited { .. } => true,
+        StreamError::Http { status } => matches!(status, 401 | 403) || *status >= 500,
+        _ => false,
+    }
+}
+
+/// The art for `w`, if a source has it. Err when nothing was found and a
+/// service could not answer: that is no miss, it is asked again.
 pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamService>], w: &Want) -> Result<Option<String>, String> {
-    if let Some(album) = &w.album
-        && let Some(url) = hd_covers::find(meta, services, album).await?
-    {
-        return Ok(Some(url));
+    let mut trouble: Option<String> = None;
+    if let Some(album) = &w.album {
+        match hd_covers::find(meta, services, album).await {
+            Ok(Some(url)) => return Ok(Some(url)),
+            Ok(None) => {}
+            Err(e) => trouble = Some(e),
+        }
     }
     let queries = queries(w);
     if let Some(meta) = meta {
@@ -169,6 +266,10 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
                     if let Some(url) = found.and_then(|h| h.album.as_ref()).and_then(|a| a.best_cover()) {
                         return Ok(Some(url.to_owned()));
                     }
+                }
+                Err(e) if meta_trouble(&e) => {
+                    trouble.get_or_insert(format!("Deezer: {e}"));
+                    break;
                 }
                 Err(e) => log::debug!("art of «{q}» on Deezer: {e}"),
             }
@@ -184,6 +285,10 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
                         return Ok(Some(url));
                     }
                 }
+                Err(e) if meta_trouble(&e) => {
+                    trouble.get_or_insert(format!("iTunes: {e}"));
+                    break;
+                }
                 Err(e) => log::debug!("art of «{q}» on iTunes: {e}"),
             }
         }
@@ -191,7 +296,14 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
     // YouTube Music's songs carry their album's square art.
     for s in services {
         for q in queries.iter().take(2) {
-            let Ok(found) = s.search(q).await else { continue };
+            let found = match s.search(q).await {
+                Ok(f) => f,
+                Err(e) if stream_trouble(&e) => {
+                    trouble.get_or_insert(format!("{}: {e}", s.service()));
+                    break;
+                }
+                Err(_) => continue,
+            };
             let hit = found.tracks.iter().find(|t| {
                 t.kind == TrackKind::Song
                     && accepts(w, t.artists.first().map_or("", |a| a.name.as_str()), &t.title, t.album.as_ref().map(|a| a.title.as_str()))
@@ -201,21 +313,124 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
             }
         }
     }
-    Ok(None)
+    match trouble {
+        Some(e) => Err(e),
+        None => Ok(None),
+    }
 }
 
-/// What to search for `w`, at most three: its first artist with its first
-/// title, then the titles alone.
+/// What to search for `w`, at most [`MAX_QUERIES`]: its artists with its
+/// titles, a Latin spelling with a Latin title first (what the services
+/// know best), then the titles alone.
 fn queries(w: &Want) -> Vec<String> {
-    let main = w.artists.first().map(String::as_str).unwrap_or("");
+    let latin = |s: &str| names::is_latin(s);
+    let mut artists: Vec<&str> = w.artists.first().map(String::as_str).into_iter().collect();
+    if let Some(a) = w.artists.iter().find(|a| latin(a) && !artists.contains(&a.as_str())) {
+        artists.push(a);
+    }
+    let mut titles: Vec<&str> = w.titles.iter().take(3).map(String::as_str).collect();
+    for t in w.titles.iter().filter(|t| latin(t)).take(2) {
+        if !titles.contains(&t.as_str()) {
+            titles.push(t);
+        }
+    }
+    let mut pairs: Vec<(bool, String)> = Vec::new();
+    for t in &titles {
+        for a in &artists {
+            pairs.push((latin(a) && latin(t), format!("{a} {t}").trim().to_owned()));
+        }
+    }
+    // Stable: each kind keeps its order.
+    pairs.sort_by_key(|(both, _)| !*both);
     let mut out: Vec<String> = Vec::new();
-    let first = w.titles.first().map(|t| format!("{main} {t}").trim().to_owned());
-    for q in first.into_iter().chain(w.titles.iter().take(2).cloned()) {
-        if !q.trim().is_empty() && !out.contains(&q) && out.len() < 3 {
+    for q in pairs.into_iter().map(|(_, q)| q).chain(titles.iter().take(2).map(|t| (*t).to_owned())) {
+        if !q.trim().is_empty() && !out.contains(&q) && out.len() < MAX_QUERIES {
             out.push(q);
         }
     }
     out
+}
+
+/// Every artist's spellings the library knows: its name and its aliases.
+pub(crate) struct Spellings(Vec<Vec<String>>);
+
+impl Spellings {
+    pub(crate) fn of(lib: &Library) -> Self {
+        let mut by: HashMap<ArtistId, Vec<String>> = HashMap::new();
+        for (id, name) in lib.artist_names().unwrap_or_default() {
+            by.entry(id).or_default().push(name);
+        }
+        for (id, name) in lib.artist_aliases().unwrap_or_default() {
+            by.entry(id).or_default().push(name);
+        }
+        Self(by.into_values().collect())
+    }
+}
+
+fn push_new(list: &mut Vec<String>, s: &str) {
+    let s = s.trim();
+    if !s.is_empty() && !list.iter().any(|x| x == s) {
+        list.push(s.to_owned());
+    }
+}
+
+/// Widens `w` with what the library knows (see the module docs): every
+/// spelling of the artists it names or its title names, the other titles
+/// of its own tracks (`own`), and the titles of the library's songs by
+/// those artists that carry one of its titles beside another. A kana name
+/// with no Latin spelling known is read in romaji.
+pub(crate) fn widen(lib: &Library, spellings: &Spellings, w: &mut Want, own: &[TrackId]) {
+    let mut artists = w.artists.clone();
+    for group in &spellings.0 {
+        let hit = group.iter().any(|g| w.artists.iter().any(|a| names::same_name(a, g)) || named_in(&w.context, g));
+        if hit {
+            for g in group {
+                push_new(&mut artists, g);
+            }
+        }
+    }
+    let mut titles = w.titles.clone();
+    for id in own {
+        for t in lib.track_aliases(*id).unwrap_or_default() {
+            push_new(&mut titles, &t);
+        }
+    }
+    let mut found_titles = Vec::new();
+    let mut found_artists = Vec::new();
+    for t in w.titles.iter().take(3) {
+        let key = title_key(t).base;
+        if key.is_empty() {
+            continue;
+        }
+        for row in lib.search(t, 20).map(|r| r.tracks).unwrap_or_default() {
+            let by_them = artists.iter().any(|a| names::same_name(a, &row.artist) || artist_key(a) == artist_key(&row.artist));
+            if own.contains(&row.id) || !by_them {
+                continue;
+            }
+            let mut parts = title_parts(&row.title);
+            parts.extend(lib.track_aliases(row.id).unwrap_or_default());
+            if parts.iter().any(|p| title_key(p).base == key) {
+                found_titles.extend(parts);
+                found_artists.push(row.artist.clone());
+            }
+        }
+    }
+    for t in &found_titles {
+        push_new(&mut titles, t);
+    }
+    for a in &found_artists {
+        push_new(&mut artists, a);
+    }
+    for a in artists.clone() {
+        let known = artists.iter().any(|x| names::is_latin(x) && names::same_name(x, &a));
+        if let Some(r) = names::kana_romaji(&a).filter(|_| !known) {
+            let mut c = r.chars();
+            let r: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
+            push_new(&mut artists, &r);
+        }
+    }
+    w.artists = artists;
+    w.titles = titles;
 }
 
 /// A clip title's song titles, the most specific first: a quoted title
@@ -256,6 +471,7 @@ pub(crate) fn clip_want(row: &TrackRow) -> Want {
         titles: clip_titles(&row.title, channel),
         artists,
         context: format!("{} {}", row.title, row.album.as_deref().unwrap_or("")),
+        song_ok: true,
         ..Want::default()
     }
 }
@@ -285,7 +501,7 @@ impl Asked {
 
 /// The lookup of release `id` (of `row`, one of its tracks; cover files
 /// under `root`) when its cover is poor and it is due.
-fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: i64) -> Option<Want> {
+fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: i64, spellings: &mut Option<Spellings>) -> Option<Want> {
     let target = Target::Release(id);
     let r = lib.get_release(id).ok().flatten()?;
     let current = r.cover_ref.clone();
@@ -317,6 +533,8 @@ fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: 
             artists: vec![r.artist_credit.display()],
             titles: tracks.iter().take(2).map(|t| t.title.clone()).collect(),
             context: r.title.clone(),
+            // A single's song is the single.
+            song_ok: tracks.len() <= 1,
             album: Some(hd_covers::Want {
                 id,
                 mbid: r.mbid.clone(),
@@ -329,22 +547,23 @@ fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: 
     };
     want.target = Some(target);
     want.current = current;
+    let mut own = vec![row.id];
+    own.extend(tracks.iter().take(2).map(|t| t.id).filter(|t| *t != row.id));
+    widen(lib, spellings.get_or_insert_with(|| Spellings::of(lib)), &mut want, &own);
     Some(want)
 }
 
 /// The lookups `rows` (tracks of the library, or the one that started)
-/// need, at most [`BATCH`], skipping what `asked` looked at already.
+/// need, skipping what `asked` looked at already.
 fn wants(lib: &Library, root: &Path, rows: &[TrackRow], asked: &Asked) -> Vec<Want> {
     let now = now_ms();
+    let mut spellings = None;
     let mut out = Vec::new();
     for row in rows {
-        if out.len() == BATCH {
-            break;
-        }
         match row.release_id {
             Some(id) => {
                 if asked.first(Target::Release(id))
-                    && let Some(w) = release_want(lib, root, id, row, now)
+                    && let Some(w) = release_want(lib, root, id, row, now, &mut spellings)
                 {
                     out.push(w);
                 }
@@ -352,13 +571,61 @@ fn wants(lib: &Library, root: &Path, rows: &[TrackRow], asked: &Asked) -> Vec<Wa
             None if row.is_clip() => {
                 let target = Target::Track(row.id);
                 if asked.first(target) && due(lib, target, None, now) {
-                    out.push(Want { target: Some(target), ..clip_want(row) });
+                    let mut w = Want { target: Some(target), ..clip_want(row) };
+                    widen(lib, spellings.get_or_insert_with(|| Spellings::of(lib)), &mut w, &[row.id]);
+                    out.push(w);
                 }
             }
             None => {}
         }
     }
     out
+}
+
+/// How a run of lookups ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Swept {
+    pub asked: usize,
+    pub found: usize,
+    /// Why it stopped before the end: a service could not answer.
+    pub stopped: Option<String>,
+}
+
+/// Looks `wants` up one after another with `look` (each within
+/// [`LOOKUP_TIMEOUT`]) and keeps what each found, a miss too. A lookup a
+/// service could not answer stops the run: it and the rest are not kept,
+/// so the next run asks them. `shown` is told of each art found.
+pub(crate) async fn sweep<F, Fut>(lib: &Library, wants: Vec<Want>, look: F, mut shown: impl FnMut()) -> Swept
+where
+    F: Fn(Want) -> Fut,
+    Fut: Future<Output = Result<Option<String>, String>>,
+{
+    let mut done = Swept { asked: 0, found: 0, stopped: None };
+    for w in wants {
+        let Some(target) = w.target else { continue };
+        let (current, title) = (w.current.clone(), w.titles.first().cloned());
+        let url = match tokio::time::timeout(LOOKUP_TIMEOUT, look(w)).await {
+            Ok(Ok(url)) => url.unwrap_or_default(),
+            Ok(Err(e)) => {
+                done.stopped = Some(e);
+                break;
+            }
+            Err(_) => {
+                done.stopped = Some("a lookup took too long".into());
+                break;
+            }
+        };
+        done.asked += 1;
+        let _ = lib.cache_put(&target.key(), now_ms(), &format!("{}{SEP}{url}", current.as_deref().unwrap_or("")));
+        if url.is_empty() {
+            log::debug!("no art for {target:?} ({title:?})");
+        } else {
+            log::info!("art for {target:?} ({title:?}): {url}");
+            done.found += 1;
+            shown();
+        }
+    }
+    done
 }
 
 impl Worker {
@@ -382,19 +649,19 @@ impl Worker {
                 Vec::new()
             }
         };
-        let sweep = current.is_none();
+        let sweep_run = current.is_none();
         let services: Vec<Arc<dyn StreamService>> =
             [Service::Deezer, Service::Youtube].into_iter().filter_map(|k| self.service(k)).collect();
         let lib = self.lib.clone();
         let root = self.res.root().to_owned();
         self.streaming.spawn_reporting(move |tx| async move {
-            if sweep {
+            if sweep_run {
                 tokio::time::sleep(START).await;
             }
             let wants = {
                 let (lib, root, asked) = (lib.clone(), root.clone(), asked.clone());
                 tokio::task::spawn_blocking(move || {
-                    let rows = if sweep {
+                    let rows = if sweep_run {
                         lib.tracks(0, 50_000, nikgob_library::Sort::asc(nikgob_library::TrackSortKey::Album)).unwrap_or_default()
                     } else {
                         rows
@@ -404,36 +671,32 @@ impl Worker {
                 .await
                 .unwrap_or_default()
             };
-            let (mut found, mut failures) = (0, 0);
-            for w in wants {
-                let Some(target) = w.target else { continue };
-                match tokio::time::timeout(Duration::from_secs(60), find(Some(&meta), &services, &w)).await {
-                    Ok(Ok(url)) => {
-                        failures = 0;
-                        let url = url.unwrap_or_default();
-                        let value = format!("{}{SEP}{url}", w.current.as_deref().unwrap_or(""));
-                        let _ = lib.cache_put(&target.key(), now_ms(), &value);
-                        if url.is_empty() {
-                            log::debug!("no art for {target:?} ({:?})", w.titles.first());
-                        } else {
-                            log::info!("art for {target:?} ({:?}): {url}", w.titles.first());
-                            found += 1;
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        log::debug!("art for {target:?}: {e}");
-                        failures += 1;
-                    }
-                    Err(_) => failures += 1,
+            let n = wants.len();
+            // Covers on screen take the art as it comes, not at every hit.
+            let mut last: Option<Instant> = None;
+            let mut pending = false;
+            let look = |w: Want| {
+                let (meta, services) = (meta.clone(), services.clone());
+                async move { find(Some(&meta), &services, &w).await }
+            };
+            let done = sweep(&lib, wants, look, || {
+                pending = true;
+                if last.is_none_or(|t| t.elapsed() >= SHOW_EVERY) {
+                    last = Some(Instant::now());
+                    pending = false;
+                    let _ = tx.send(Internal::Enrich(Event::BetterCovers));
                 }
-                if failures >= 3 {
-                    break;
-                }
+            })
+            .await;
+            match &done.stopped {
+                Some(why) => log::info!("covers: stopped after {} of {n} lookups ({why}); the rest is asked at the next start", done.asked),
+                None if sweep_run && n > 0 => log::info!("covers: {} lookups, {} found", done.asked, done.found),
+                None => {}
             }
-            if sweep {
+            if sweep_run {
                 asked.lock().1 = false;
             }
-            if found > 0 {
+            if pending {
                 let _ = tx.send(Internal::Enrich(Event::BetterCovers));
             }
         });
@@ -522,7 +785,7 @@ mod tests {
             ..Want::default()
         };
         assert_eq!(queries(&w).first().map(String::as_str), Some("LiSA ReawakeR"));
-        assert!(queries(&w).len() <= 3);
+        assert!(queries(&w).len() <= MAX_QUERIES);
         assert!(accepts(&w, "LiSA feat. Felix of Stray Kids", "ReawakeR (feat. Felix of Stray Kids)", Some("ReawakeR - Single")));
         assert!(!accepts(&w, "Dima Lancaster", "ReawakeR (from \"Solo Leveling\")", None), "a cover of the song");
     }
@@ -600,5 +863,139 @@ mod tests {
         lib.cache_put(&c.key(), now_ms() - RETRY_MS - 1, &format!("{SEP}")).unwrap();
         assert_eq!(cached(&lib, c, None), None);
         assert!(due(&lib, c, None, now_ms()));
+    }
+
+    fn album_want(artist: &str, tracks: &[&str], title: &str, song_ok: bool) -> Want {
+        let mut w = want(&[artist], tracks, title);
+        w.song_ok = song_ok;
+        w.album = Some(hd_covers::Want { id: ReleaseId::new(), mbid: None, group_mbid: None, deezer: None, title: title.into() });
+        w
+    }
+
+    /// The Theme Song Collection's song found on its single gave the album
+    /// the single's art: an album takes only an album of its title.
+    #[test]
+    fn an_album_never_takes_the_art_of_another_release_with_its_song() {
+        let w = album_want("大原ゆい子", &["旅人の唄"], "TV Anime \"Mushoku Tensei ~Isekai Ittara Honki Dasu~\" Theme Song Collection", false);
+        assert!(!accepts(&w, "大原ゆい子", "旅人の唄", Some("旅人の唄")), "the single");
+        assert!(!accepts(&w, "大原ゆい子", "旅人の唄", None), "a song without its album");
+        assert!(accepts(&w, "大原ゆい子", "旅人の唄", Some("Mushoku Tensei: Jobless Reincarnation Theme Song Collection")));
+        // A single's song is the single; a clip's song is the clip's.
+        let single = album_want("大原ゆい子", &["旅人の唄"], "旅人の唄", true);
+        assert!(accepts(&single, "大原ゆい子", "旅人の唄", Some("旅人の唄 - Single")));
+        let mut clip = want(&["LiSA"], &["ReawakeR"], "");
+        clip.song_ok = true;
+        assert!(accepts(&clip, "LiSA", "ReawakeR", Some("ReawakeR - Single")));
+        // A title in two scripts matches by either part.
+        let concert = album_want("Ensemble G.A.P. TOKYO", &["x"], "第二回演奏会 メイドインアビス / THE SECOND CONCERT MADE IN ABYSS", false);
+        assert!(accepts(&concert, "Ensemble G.A.P. TOKYO", "y", Some("The Second Concert: Made in Abyss")));
+    }
+
+    fn row_of(lib: &Library, title: &str, artist: &str) -> TrackRow {
+        use nikgob_core::model::{Artist, ArtistCredit, Track};
+        let known = lib.artist_names().unwrap().into_iter().find(|a| a.1 == artist).map(|a| a.0);
+        let id = known.unwrap_or_else(|| lib.upsert_artist(&Artist::new(artist)).unwrap().id);
+        let t = lib.upsert_track(&Track::new(title, ArtistCredit::single(artist, Some(id)))).unwrap();
+        lib.get_track_row(t.id).unwrap().unwrap()
+    }
+
+    /// 火星人 is known to the services only as Yorushika's «Martian»: the
+    /// library's own «火星人 - Martian» by Yorushika, whose name the clip's
+    /// title writes in kana, gives the Latin title and spelling to search.
+    #[test]
+    fn a_native_title_searches_with_the_spellings_the_library_knows() {
+        let lib = Library::open_in_memory().unwrap();
+        row_of(&lib, "火星人 - Martian", "Yorushika");
+        row_of(&lib, "晴る - Sunny", "Yorushika");
+        row_of(&lib, "火星人", "Someone Else");
+        let clip = row_of(&lib, "TVアニメ『小市民シリーズ』第2期オープニング映像｜ヨルシカ「火星人」", "tv asahi animation YouTubeチャンネル");
+        let mut w = clip_want(&clip);
+        widen(&lib, &Spellings::of(&lib), &mut w, &[clip.id]);
+        assert!(w.titles.iter().any(|t| t == "Martian"), "{:?}", w.titles);
+        assert!(!w.titles.iter().any(|t| t == "Sunny"), "another song: {:?}", w.titles);
+        assert!(w.artists.iter().any(|a| a == "Yorushika"), "{:?}", w.artists);
+        assert!(!w.artists.iter().any(|a| a == "Someone Else"), "{:?}", w.artists);
+        assert_eq!(queries(&w).first().map(String::as_str), Some("Yorushika Martian"), "{:?}", queries(&w));
+        assert!(queries(&w).len() <= MAX_QUERIES);
+        assert!(accepts(&w, "Yorushika", "Martian", Some("Martian")));
+        assert!(!accepts(&w, "Karaoke Manekineko", "Martian (Karaoke) [Yorushika]", None), "a karaoke version");
+    }
+
+    /// An alias of the artist (a merged double) and a track's other title
+    /// are searched too; a kana name nobody spelled in Latin is read in
+    /// romaji.
+    #[test]
+    fn aliases_and_other_titles_widen_a_lookup() {
+        let lib = Library::open_in_memory().unwrap();
+        let native = row_of(&lib, "旅人の唄", "大原ゆい子");
+        row_of(&lib, "Tabibito no Uta", "Ohara Yuiko");
+        let id = |name: &str| lib.artist_names().unwrap().into_iter().find(|a| a.1 == name).unwrap().0;
+        lib.merge_artists(id("Ohara Yuiko"), id("大原ゆい子")).unwrap();
+        lib.add_track_alias(native.id, "Tabibito no Uta", "merged").unwrap();
+        let mut w = want(&["大原ゆい子"], &["旅人の唄"], "");
+        widen(&lib, &Spellings::of(&lib), &mut w, &[native.id]);
+        assert!(w.artists.iter().any(|a| a == "Ohara Yuiko"), "{:?}", w.artists);
+        assert!(w.titles.iter().any(|t| t == "Tabibito no Uta"), "{:?}", w.titles);
+        assert_eq!(queries(&w).first().map(String::as_str), Some("Ohara Yuiko Tabibito no Uta"));
+        assert!(accepts(&w, "Yuiko Ohara", "Tabibito no Uta", None), "the name in the other order");
+        let mut kana = want(&["ナナホシ"], &["x"], "");
+        widen(&lib, &Spellings::of(&lib), &mut kana, &[]);
+        assert!(kana.artists.iter().any(|a| a == "Nanahoshi"), "{:?}", kana.artists);
+    }
+
+    fn targets(n: usize) -> Vec<Want> {
+        (0..n).map(|_| Want { target: Some(Target::Track(TrackId::new())), song_ok: true, ..Want::default() }).collect()
+    }
+
+    /// Misses are normal: a sweep goes through all of them. A lookup a
+    /// service could not answer stops it, and what it did not ask stays
+    /// due for the next start.
+    #[tokio::test]
+    async fn a_sweep_goes_past_misses_and_stops_only_when_a_service_cannot_answer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let lib = Library::open_in_memory().unwrap();
+        let wants = targets(8);
+        let ids: Vec<Target> = wants.iter().filter_map(|w| w.target).collect();
+        let done = sweep(&lib, wants, |_| async { Ok(None) }, || {}).await;
+        assert_eq!(done, Swept { asked: 8, found: 0, stopped: None });
+        assert!(ids.iter().all(|t| !due(&lib, *t, None, now_ms())), "every miss kept for the re-ask");
+
+        let wants = targets(7);
+        let ids: Vec<Target> = wants.iter().filter_map(|w| w.target).collect();
+        let n = AtomicUsize::new(0);
+        let mut shown = 0;
+        let look = |_| {
+            let i = n.fetch_add(1, Ordering::SeqCst);
+            async move {
+                match i {
+                    4 => Ok(Some("https://x/art.jpg".to_owned())),
+                    5 => Err("Deezer: network error".to_owned()),
+                    _ => Ok(None),
+                }
+            }
+        };
+        let done = sweep(&lib, wants, look, || shown += 1).await;
+        assert_eq!(done, Swept { asked: 5, found: 1, stopped: Some("Deezer: network error".into()) });
+        assert_eq!(shown, 1);
+        assert_eq!(n.load(Ordering::SeqCst), 6, "nothing asked after the refusal");
+        assert_eq!(cached(&lib, ids[4], None).as_deref(), Some("https://x/art.jpg"));
+        assert!(ids[..5].iter().all(|t| !due(&lib, *t, None, now_ms())));
+        assert!(ids[5..].iter().all(|t| due(&lib, *t, None, now_ms())), "asked again at the next start");
+    }
+
+    #[tokio::test]
+    async fn a_service_that_cannot_answer_is_no_miss() {
+        use nikgob_core::streaming::FakeService;
+        let mut w = want(&["Yorushika"], &["Martian"], "");
+        w.song_ok = true;
+        let yt = Arc::new(FakeService::youtube().with_song("m", "Martian", "Yorushika", "Martian", 235));
+        let services: Vec<Arc<dyn StreamService>> = vec![yt.clone()];
+        let found = find(None, &services, &w).await.unwrap();
+        assert!(found.is_some_and(|u| u.ends_with("/m.jpg")));
+        let mut other = want(&["Yorushika"], &["Sunny"], "");
+        other.song_ok = true;
+        assert_eq!(find(None, &services, &other).await, Ok(None), "a miss");
+        yt.rate_limit_next("search", 5, None);
+        assert!(find(None, &services, &w).await.is_err(), "a refusal");
     }
 }
