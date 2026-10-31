@@ -1138,6 +1138,7 @@ impl Md3eUi {
             "download-sources" => S::DownloadSource(nikgob_view::SourceKey::Torrents),
             "soulseek" => S::Soulseek,
             "graph" => S::GraphUse,
+            "no-repeat" => S::RadioNoRepeat,
             "recs" => S::RadioNewShare,
             "autoplay" => S::Autoplay,
             "mixes" => S::MixesProfiles,

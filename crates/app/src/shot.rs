@@ -22,6 +22,7 @@
 //! playlist (`find_song:Title` for the clip shown so, `find_song:song` «Другая
 //! версия…» for its first stream song); `replace_first` replaces it with the
 //! dialog's first result in the scope the dialog would offer.
+//! `play_track:<id>` plays one track of the library by its id.
 //! `play_mix:daily|discover|mood|style|daylist|tile` plays a mix of Главная
 //! (the first mood or style mix, the bento's daylist, its first tile;
 //! `play_mix:tile:artist_of_day` the tile of that kind); `radio` starts «Радио по треку» from the first
@@ -357,6 +358,14 @@ impl Shot {
                     });
                 }
                 self.wait = 40;
+            }
+            "play_track" => {
+                // `play_track:<id>` plays that one track of the library (a
+                // stream one too) as a queue of its own.
+                if let Ok(id) = arg.parse::<nikgob_core::model::TrackId>() {
+                    out.push(Command::PlayTracks { tracks: vec![id], start: 0, context: "Скриншот".into() });
+                }
+                self.wait = 30;
             }
             "play" => {
                 // `play:Title` plays the album of that title.
