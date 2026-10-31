@@ -811,7 +811,9 @@ fn discovery_waits_out_a_rate_limit() {
     let l = library(0, 0, 0, KNOWN);
     let (yt, dz) = fakes();
     yt.rate_limit_next_paused("radio", 1, Duration::from_millis(1500));
-    let s = start(&l.lib, vec![yt.clone(), dz.clone()], Prefs::default(), None);
+    // The graph's pass asks Deezer in a lane of its own meanwhile (tests/graph.rs).
+    let prefs = Prefs { graph_services: false, graph_open_data: false, ..Prefs::default() };
+    let s = start(&l.lib, vec![yt.clone(), dz.clone()], prefs, None);
     wait_until("the limited radio call", || yt.calls("radio") >= 1);
     let at = (yt.total_calls(), dz.total_calls());
     std::thread::sleep(Duration::from_millis(1000));
