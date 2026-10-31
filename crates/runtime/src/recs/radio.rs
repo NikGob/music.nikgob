@@ -491,6 +491,11 @@ impl Worker {
         // It keeps to the profile the session is pure in (the album's,
         // after its world), or to none after a mixed queue.
         let mut state = Engine::new(RadioSeed::Track(e.track)).continuing();
+        // A stream the catalog lacks (played from its album's page) is
+        // known by its artists, sound and title.
+        if let Some(facts) = self.seed_facts(e.track) {
+            state = state.with_seed_facts(facts);
+        }
         // Nothing the queue had comes back.
         state.mark_served(self.queue.tracks().into_iter().map(Item::Track));
         let r = &mut self.recs.radio;
@@ -519,6 +524,51 @@ impl Worker {
         log::info!("autoplay: the queue goes on with a radio of «{title}»");
         self.radio_fetch_new();
         self.radio_extend();
+    }
+
+    /// What a track the snapshot's catalog lacks is to a radio of it: its
+    /// library artists, its sound if analysed, the language its title
+    /// shows. None for a track of the catalog.
+    fn seed_facts(&self, track: TrackId) -> Option<nikgob_recs::SeedFacts> {
+        let snap = self.snapshot()?;
+        if snap.catalog.get(track).is_some() {
+            return None;
+        }
+        let t = self.lib.get_track(track).ok().flatten()?;
+        let mut artists: Vec<ArtistId> = t.artist_credit.artist_ids().collect();
+        for a in &t.artist_credit.0 {
+            if let Some(id) = snap.artist_keys.get(&artist_key(&a.name)).copied()
+                && !artists.contains(&id)
+            {
+                artists.push(id);
+            }
+        }
+        let vector = self.analysis.index().read().get(track).copied();
+        let lane = nikgob_recs::songtype::title_language(&t.title).map(|l| match l {
+            nikgob_recs::Lang::Russian => nikgob_recs::SongLane::Russian,
+            nikgob_recs::Lang::Japanese => nikgob_recs::SongLane::Japanese,
+            nikgob_recs::Lang::English | nikgob_recs::Lang::Spanish | nikgob_recs::Lang::French | nikgob_recs::Lang::German => {
+                nikgob_recs::SongLane::Western
+            }
+            _ => nikgob_recs::SongLane::Unknown,
+        });
+        Some(nikgob_recs::SeedFacts { artists, vector, lane })
+    }
+
+    /// What the radio must not bring back as new music: the tracks of the
+    /// queue, of the session, and what started within «Не повторять
+    /// сыгранное».
+    fn played_lately(&self) -> HashSet<TrackId> {
+        let hours = i64::from(self.state.read().prefs.radio_no_repeat_hours);
+        let since = nikgob_library::now_ms() - hours * 3_600_000;
+        let mut out: HashSet<TrackId> = self.queue.tracks().into_iter().collect();
+        out.extend(self.recs.session.tracks().map(|p| p.track));
+        for e in self.lib.recent_events(500).unwrap_or_default() {
+            if e.ts >= since && e.event_type == nikgob_core::model::EventType::Start {
+                out.insert(e.track_id);
+            }
+        }
+        out
     }
 
     /// «Автовоспроизведение» was switched off: its radio stops picking (what
@@ -580,6 +630,7 @@ impl Worker {
         run.extending = true;
         let (id, mut state) = (run.id, run.state.clone());
         state.attune(self.recs.session.clone(), self.recs.weights);
+        state.set_no_repeat_ms(i64::from(prefs.radio_no_repeat_hours) * 3_600_000);
         let params = RadioParams { new_share, seed: run.seed };
         let tx = self.recs.tx.clone();
         let spawned = std::thread::Builder::new().name("nikgob-radio".into()).spawn(move || {
@@ -659,6 +710,7 @@ impl Worker {
             (r.queued.0 == 0, if let RadioSeed::Track(t) = r.state.seed { Some(t) } else { None })
         });
         let mut explained = !first_batch;
+        let lately = self.played_lately();
         let mut ids = Vec::with_capacity(picks.len());
         let mut whys: Vec<Option<String>> = Vec::with_capacity(picks.len());
         for p in &picks {
@@ -685,6 +737,10 @@ impl Worker {
                     let Some(t) = pooled.or_else(|| self.stream_track(r)) else { continue };
                     self.streaming.learn(std::slice::from_ref(&t));
                     if let Some(tid) = self.upsert_streams(std::slice::from_ref(&t)).first().copied() {
+                        // New music that is a track played lately or queued.
+                        if lately.contains(&tid) || ids.contains(&tid) {
+                            continue;
+                        }
                         explained |= first_batch;
                         let found = self.recs.radio.run.as_ref().and_then(|run| run.via.get(r).cloned());
                         ids.push(tid);
@@ -787,13 +843,17 @@ impl Worker {
             return;
         }
         let picks = run.state.take_new(&snap.recs().local_only(prefs.mixes_downloaded_only), want - have);
+        let lately = self.played_lately();
         let mut ids: Vec<(TrackId, RemoteId)> = Vec::new();
         for p in picks {
             let Item::Stream(r) = p.item else { continue };
             let pooled = self.recs.radio.run.as_ref().and_then(|run| run.pool.get(&r).cloned());
             let Some(t) = pooled else { continue };
             self.streaming.learn(std::slice::from_ref(&t));
-            if let Some(tid) = self.upsert_streams(std::slice::from_ref(&t)).first().copied() {
+            if let Some(tid) = self.upsert_streams(std::slice::from_ref(&t)).first().copied()
+                && !lately.contains(&tid)
+                && !ids.iter().any(|(x, _)| *x == tid)
+            {
                 ids.push((tid, r));
             }
         }

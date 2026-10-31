@@ -1240,6 +1240,10 @@ pub struct Prefs {
     pub library_as_taste: bool,
     /// settings.toml has a Last.fm API key (the key is not here).
     pub lastfm_configured: bool,
+    /// «Не повторять сыгранное»: the radio and autoplay leave out what
+    /// played this many hours ago or less (and in the session) while
+    /// anything else is left.
+    pub radio_no_repeat_hours: u8,
 }
 
 /// A mix of «Миксы для тебя» left out ([`Prefs::home_hidden_mixes`]).
@@ -1335,6 +1339,7 @@ pub enum PrefPatch {
     GraphOpenData(bool),
     GraphPersonal(bool),
     LibraryAsTaste(bool),
+    RadioNoRepeat(u8),
 }
 
 impl PrefPatch {
@@ -1395,6 +1400,7 @@ impl PrefPatch {
             Self::GraphOpenData(on) => p.graph_open_data = *on,
             Self::GraphPersonal(on) => p.graph_personal = *on,
             Self::LibraryAsTaste(on) => p.library_as_taste = *on,
+            Self::RadioNoRepeat(h) => p.radio_no_repeat_hours = *h,
         }
     }
 }
@@ -2190,6 +2196,7 @@ impl Default for Prefs {
             graph_personal: true,
             library_as_taste: true,
             lastfm_configured: false,
+            radio_no_repeat_hours: 3,
         }
     }
 }
