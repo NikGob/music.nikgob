@@ -1,4 +1,4 @@
-//! The graph of similar music (docs/recs-graph.md, migration 0016): what a
+//! The graph of similar music (docs/recs-graph.md, migration 0015): what a
 //! source said about a library track or artist — its list of similar songs
 //! or artists as the source named them, an artist's tags — and when it was
 //! asked. The runtime resolves the names to the library at every build.

@@ -26,8 +26,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0012_event_outcome.sql"),
     include_str!("../migrations/0013_event_attention.sql"),
     include_str!("../migrations/0014_track_aliases.sql"),
-    // 0015 is another branch's; the number keeps them apart when they meet.
-    include_str!("../migrations/0016_recs_graph.sql"),
+    include_str!("../migrations/0015_recs_graph.sql"),
 ];
 
 /// Number of migrations known to this build (= the schema version it produces).
