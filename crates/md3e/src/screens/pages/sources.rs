@@ -99,6 +99,12 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
     let step_key = egui::Id::new("src-row-step");
     let step = ui.ctx().data(|d| d.get_temp::<f32>(step_key)).unwrap_or(64.0);
     let spring = Theme::get(ui.ctx()).motion.default_spatial;
+    // The row whose arrow was pressed is lifted while it moves: a dragged
+    // list item's surface and shadow over the row it passes, which slides
+    // under it.
+    let lifted_key = egui::Id::new("src-lifted");
+    let lifted = ui.ctx().data(|d| d.get_temp::<v::SourceKey>(lifted_key));
+    let mut lift_next: Option<v::SourceKey> = None;
     let top = ui.cursor().top();
     for (n, key) in shown.iter().enumerate() {
         let Some(at) = order.iter().position(|o| o.key == *key) else { continue };
@@ -121,7 +127,9 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
         let mut on = order[at].on;
         let slot = anim::f32(ui.ctx(), egui::Id::new(("src-slot", key.as_str())), n as f32, spring);
         let shift = TSTransform::from_translation(vec2(0.0, (slot - n as f32) * step));
-        ui.with_visual_transform(shift, |ui| dimmed(ui, needs_setup, |ui| row(ui, Id::DownloadSource(*key), key.display_name(), Some(&hint), |ui| {
+        // Full while it travels, settling back down over its last quarter slot.
+        let lift = if lifted == Some(*key) { ((slot - n as f32).abs() / 0.25).clamp(0.0, 1.0) } else { 0.0 };
+        let draw = |ui: &mut Ui| dimmed(ui, needs_setup, |ui| row(ui, Id::DownloadSource(*key), key.display_name(), Some(&hint), |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let up = ui.add(
@@ -133,6 +141,7 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
                 );
                 if up.clicked() && n > 0 {
                     moved = order.iter().position(|o| o.key == shown[n - 1]).map(|to| (at, to));
+                    lift_next = Some(*key);
                 }
                 let down = ui.add(
                     IconButton::new(Icon::ExpandMore)
@@ -143,11 +152,17 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
                 );
                 if down.clicked() && n + 1 < shown.len() {
                     moved = order.iter().position(|o| o.key == shown[n + 1]).map(|to| (at, to));
+                    lift_next = Some(*key);
                 }
                 ui.add_space(8.0);
                 ui.add(Switch::new(&mut on).enabled(!needs_setup).id_salt(("src-on", key.as_str())));
             });
-        })));
+        }));
+        if lift > 0.0 {
+            lifted_row(ui, shift, lift, draw);
+        } else {
+            ui.with_visual_transform(shift, draw);
+        }
         if on != order[at].on {
             order[at].on = on;
             p.download_sources = order.clone();
@@ -159,10 +174,44 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
             ui.ctx().data_mut(|d| d.insert_temp(step_key, h));
         }
     }
+    if let Some(k) = lift_next {
+        ui.ctx().data_mut(|d| d.insert_temp(lifted_key, k));
+    }
     if let Some((a, b)) = moved {
         order.swap(a, b);
         p.download_sources = order;
     }
+}
+
+/// A row drawn as a lifted surface (`lift` 0..1): on a layer just above the
+/// page's, on a dragged list item's container with its shadow, moved by
+/// `shift`. The page keeps its place for it as for any row.
+fn lifted_row(ui: &mut Ui, shift: TSTransform, lift: f32, draw: impl FnOnce(&mut Ui)) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let layer = egui::LayerId::new(ui.layer_id().order, egui::Id::new("src-lifted-layer"));
+    ui.ctx().set_sublayer(ui.layer_id(), layer);
+    ui.scope_builder(egui::UiBuilder::new().layer_id(layer), |ui| {
+        ui.with_visual_transform(shift, |ui| {
+            let (shadow, surface) = (ui.painter().add(egui::Shape::Noop), ui.painter().add(egui::Shape::Noop));
+            let rect = ui.scope(draw).response.rect;
+            // The whole row of the column, with the room the settings'
+            // highlight gives a row.
+            let r = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), rect.y_range()).expand2(vec2(12.0, 7.0));
+            // It reaches past the column's edges as the highlight does: only
+            // the scroll area's vertical clip applies (its shadow too).
+            let mut painter = ui.painter().clone();
+            painter.set_clip_rect(egui::Rect::from_x_y_ranges(r.expand(24.0).x_range(), ui.clip_rect().y_range()));
+            let mut sh = crate::Elevation::Level4.shadow();
+            sh.color = sh.color.gamma_multiply(lift);
+            painter.set(shadow, sh.as_shape(r, crate::tokens::shape::LARGE));
+            let fill = s.surface_container_high.gamma_multiply(lift);
+            let layer = s.on_surface.gamma_multiply(0.16 * lift);
+            painter.set(surface, egui::Shape::Vec(vec![
+                egui::Shape::rect_filled(r, crate::tokens::shape::LARGE, fill),
+                egui::Shape::rect_filled(r, crate::tokens::shape::LARGE, layer),
+            ]));
+        });
+    });
 }
 
 /// «Анализ звука стримов»: the switch and how far it is.
