@@ -421,7 +421,8 @@ fn header(ui: &mut Ui, h: Header<'_>, state: &ViewState, chrome: &mut Chrome, ou
     let cover_x = row.left() + 16.0 + 28.0;
     let icon = Rect::from_center_size(egui::pos2(cover_x, row.center().y), egui::vec2(24.0, 24.0));
     Icon::Radio.widget(false, s.on_surface_variant, 24.0).paint_at(ui, icon);
-    let text_x = row.left() + 16.0 + 56.0 + 16.0;
+    // The rows' title column: side 16, cover 56, gap 12 (ListItem).
+    let text_x = row.left() + 16.0 + 56.0 + 12.0;
     let mut right = row.right() - 16.0;
     let mut switched = h.switch;
     if let Some(on) = &mut switched {
@@ -552,7 +553,7 @@ fn extending_row(ui: &mut Ui) {
     let slot = Rect::from_center_size(egui::pos2(row.left() + 16.0 + 28.0, row.center().y), egui::vec2(32.0, 32.0));
     ui.put(slot, LoadingIndicator::new().size(32.0));
     ui.painter().text(
-        egui::pos2(row.left() + 16.0 + 56.0 + 16.0, row.center().y),
+        egui::pos2(row.left() + 16.0 + 56.0 + 12.0, row.center().y),
         egui::Align2::LEFT_CENTER,
         "Подбираю ещё…",
         TypeRole::BodyMedium.font_id(),
