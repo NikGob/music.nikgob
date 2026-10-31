@@ -123,6 +123,9 @@ pub(crate) enum Answer {
 pub(crate) enum Failed {
     /// Ask again after the pause.
     RateLimited(Option<Duration>),
+    /// The source wants an account or a key now (401, 403): it is not
+    /// asked again this run.
+    Closed(String),
     Other(String),
 }
 
@@ -139,6 +142,7 @@ impl From<MetadataError> for Failed {
     fn from(e: MetadataError) -> Self {
         match e {
             MetadataError::RateLimited(d) => Self::RateLimited(d),
+            e @ MetadataError::Status { status: 401 | 403, .. } => Self::Closed(e.to_string()),
             e => Self::Other(e.to_string()),
         }
     }
@@ -162,6 +166,8 @@ pub(crate) struct GraphState {
     warmed: bool,
     /// Entries kept since the last build asked for.
     fresh: usize,
+    /// Sources that wanted an account or a key this run ([`Failed::Closed`]).
+    closed: Vec<&'static str>,
     /// The online metadata to ask (tests set it; else the import's).
     pub(crate) metadata: Option<Metadata>,
 }
@@ -476,6 +482,7 @@ impl Worker {
                 plan.push(Ask::FmTrack { track: t, artist: artist.clone(), title: row.title.clone() });
             }
         }
+        plan.retain(|a| !self.recs.graph.closed.contains(&a.subject().2));
         if plan.is_empty() {
             self.recs.graph.last_pass = Some(Instant::now());
             return false;
@@ -531,6 +538,9 @@ impl Worker {
                 self.graph_done();
                 return;
             };
+            if self.recs.graph.closed.contains(&next.subject().2) {
+                continue;
+            }
             let svc = next.service().and_then(|s| self.service(s));
             if next.service().is_some() && svc.is_none() {
                 continue;
@@ -573,6 +583,12 @@ impl Worker {
                 self.recs.graph.plan.push_front(ask);
                 self.graph_wait(wait + crate::streams::wake_jitter());
                 return;
+            }
+            Err(Failed::Closed(e)) => {
+                let source = ask.subject().2;
+                log::info!("graph: {source} is closed this run: {e}");
+                self.recs.graph.closed.push(source);
+                self.graph_keep(&ask, "error", None, &[], &[]);
             }
             Err(Failed::Other(e)) => {
                 log::info!("graph: {ask:?}: {e}");

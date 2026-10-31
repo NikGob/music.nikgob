@@ -204,3 +204,58 @@ fn open_data_finds_the_artist_then_its_neighbours() {
 fn path_regex_any() -> wiremock::matchers::PathRegexMatcher {
     wiremock::matchers::path_regex(".*")
 }
+
+/// A source that wants an account now (ListenBrainz's popular recordings
+/// answer 401 without a token) is asked once a run, not once an artist;
+/// the rest of the open data goes on.
+#[test]
+fn a_source_that_wants_an_account_is_asked_once() {
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = tokio::runtime::Runtime::new().unwrap();
+    let (mock, uri) = server.block_on(async {
+        let mock = MockServer::start().await;
+        let json = |body: String| ResponseTemplate::new(200).set_body_raw(body.into_bytes(), "application/json");
+        // Every artist is found, each with an id of its own.
+        for (k, (name, _)) in SONGS.iter().enumerate() {
+            let id = format!("{k:08}-1111-1111-1111-111111111111");
+            Mock::given(method("GET"))
+                .and(path("/ws/2/artist"))
+                .and(wiremock::matchers::query_param("query", format!("artist:\"{name}\"")))
+                .respond_with(json(format!(r#"{{"artists":[{{"id":"{id}","name":"{name}","score":100,"tags":[{{"name":"rock","count":3}}]}}]}}"#)))
+                .mount(&mock)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/labs/similar-artists/json"))
+            .respond_with(json(r#"[{"artist_mbid":"33333333-3333-3333-3333-333333333333","name":"ДДТ","score":500}]"#.to_owned()))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex("^/api/popularity/"))
+            .respond_with(ResponseTemplate::new(401).set_body_raw(br#"{"code":401,"error":"provide an Auth token"}"#.to_vec(), "application/json"))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET")).and(path_regex_any()).respond_with(json("[]".to_owned())).mount(&mock).await;
+        let uri = mock.uri();
+        (mock, uri)
+    });
+    let (lib, _) = library();
+    let rt = start(&lib, Vec::new(), Prefs::default());
+    let http = Http::new(&MetadataConfig::new("tests@example.invalid")).unwrap().with_rate_limits(RateLimits::unlimited());
+    let mut meta = Metadata::new(&MetadataConfig::new("tests@example.invalid")).unwrap();
+    meta.musicbrainz = MusicBrainz::with_base_url(http.clone(), &format!("{uri}/ws/2/")).unwrap();
+    meta.listenbrainz = ListenBrainz::with_base_urls(http, &format!("{uri}/labs/"), &format!("{uri}/api/")).unwrap();
+    rt.set_graph_metadata(meta);
+    let similar = || lib.graph_fetches().unwrap().iter().filter(|f| f.source == "listenbrainz").count();
+    wait_until("ListenBrainz's similar artists of every artist", || similar() == SONGS.len());
+    std::thread::sleep(Duration::from_millis(300));
+    let asked = server.block_on(mock.received_requests()).unwrap();
+    let popular = asked.iter().filter(|r| r.url.path().starts_with("/api/popularity/")).count();
+    assert_eq!(popular, 1, "{:?}", asked.iter().map(|r| r.url.path().to_owned()).collect::<Vec<_>>());
+    let closed = lib.graph_fetches().unwrap().into_iter().filter(|f| f.source == "popularity").collect::<Vec<_>>();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].status, "error");
+    drop(mock);
+}
