@@ -527,12 +527,12 @@ impl Worker {
             self.follow_playlist(p);
             return;
         }
-        let (tracks, title, ctx, album) = match &data {
+        let (tracks, title, ctx, album, playlist) = match &data {
             PageData::Album(a) => {
-                (a.tracks.clone(), format!("альбома «{}»", a.title), EventContext::Album, Some(a.id.clone()))
+                (a.tracks.clone(), format!("альбома «{}»", a.title), EventContext::Album, Some(a.id.clone()), None)
             }
             PageData::Playlist(p) => {
-                (p.tracks.clone(), format!("плейлиста «{}»", p.name), EventContext::Playlist, None)
+                (p.tracks.clone(), format!("плейлиста «{}»", p.name), EventContext::Playlist, None, Some(p.id.clone()))
             }
             PageData::Artist(_) => return,
         };
@@ -543,7 +543,13 @@ impl Worker {
                 let start = start
                     .and_then(|r| playable.iter().position(|t| t.id == r))
                     .and_then(|i| ids.get(i).copied());
-                self.play_list(ids, start, shuffle, Some(title), ctx);
+                // The album or playlist of the library the page is, if any.
+                let context_id = match (&album, &playlist) {
+                    (Some(a), _) => self.lib.release_by_remote(a).ok().flatten().map(|r| format!("release:{r}")),
+                    (_, Some(p)) => self.lib.playlist_by_remote(p).ok().flatten().map(|l| format!("playlist:{}", l.playlist_id)),
+                    _ => None,
+                };
+                self.play_list(ids, start, shuffle, Some(title), ctx, context_id);
                 self.after_stream_play();
             }
             Then::Download => {

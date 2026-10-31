@@ -767,8 +767,7 @@ impl Worker {
                     .ok()
                     .flatten()
                     .map(|r| format!("альбома «{}»", r.title));
-                self.play_context_id = Some(format!("release:{id}"));
-                self.play_list(ids, start, shuffle, title, EventContext::Album);
+                self.play_list(ids, start, shuffle, title, EventContext::Album, Some(format!("release:{id}")));
                 // An album known in part plays at once; the rest of its
                 // tracklist joins the queue when the services tell it.
                 self.album_queue = Some((id, self.queue.generation()));
@@ -777,8 +776,7 @@ impl Worker {
             Command::PlayPlaylist { id, start, shuffle } => {
                 let (ids, name) = self.playlist_tracks(id, start);
                 let name = format!("плейлиста «{name}»");
-                self.play_context_id = Some(format!("playlist:{id}"));
-                self.play_list(ids, start, shuffle, Some(name), EventContext::Playlist);
+                self.play_list(ids, start, shuffle, Some(name), EventContext::Playlist, Some(format!("playlist:{id}")));
             }
             Command::PlayArtist { id, shuffle } => {
                 let rows = self
@@ -786,8 +784,7 @@ impl Worker {
                     .unwrap_or_default();
                 let name = self.lib.get_artist(id).ok().flatten().map(|a| a.name);
                 let ids = self.playable(&rows, None);
-                self.play_context_id = Some(format!("artist:{id}"));
-                self.play_list(ids, None, shuffle, name, EventContext::Artist);
+                self.play_list(ids, None, shuffle, name, EventContext::Artist, Some(format!("artist:{id}")));
             }
             Command::PlayTracks {
                 tracks,
@@ -1301,6 +1298,7 @@ impl Worker {
         shuffle: bool,
         context: Option<String>,
         ctx: EventContext,
+        context_id: Option<String>,
     ) {
         if ids.is_empty() {
             self.toast("Нечего играть", None);
@@ -1321,7 +1319,10 @@ impl Worker {
         if shuffle {
             self.queue.set_shuffle(true);
         }
+        // The new queue's own context, never the one before it (a mix's,
+        // a playlist's) carried over.
         self.play_context = ctx;
+        self.play_context_id = context_id;
         if let Some(e) = self.queue.current() {
             self.start(e);
         }
@@ -1484,11 +1485,16 @@ impl Worker {
     /// Records the start of `e` with who chose it and what plays it.
     fn record_start(&mut self, e: Entry, kind: Option<SourceKind>) {
         let origin = self.origin_of(e);
-        let context_id = self.radio_context_id(e.id).or_else(|| self.play_context_id.clone());
+        // What the radio or autoplay added plays in it, even in the queue
+        // of an album it went on after.
+        let (context, context_id) = match self.radio_context(e.id) {
+            Some((ctx, id)) => (ctx, Some(id)),
+            None => (self.play_context, self.play_context_id.clone()),
+        };
         self.ended = false;
         self.heard.reset();
         let meta = EventMeta { origin: Some(origin), context_id, ..EventMeta::default() };
-        let _ = self.lib.record_event_with(e.track, EventType::Start, kind, Some(0), self.play_context, meta);
+        let _ = self.lib.record_event_with(e.track, EventType::Start, kind, Some(0), context, meta);
         self.recs_started(e.track, origin);
     }
 

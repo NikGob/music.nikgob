@@ -269,13 +269,14 @@ impl Worker {
         run.added.contains(&entry).then(|| origin_of(&run.state, run.autoplay))
     }
 
-    /// What plays the queue entry `entry`, when the playing radio added it.
-    pub(crate) fn radio_context_id(&mut self, entry: u64) -> Option<String> {
+    /// Where the queue entry `entry` plays and what plays it, when the
+    /// playing radio (or autoplay) added it.
+    pub(crate) fn radio_context(&mut self, entry: u64) -> Option<(EventContext, String)> {
         if !self.radio_alive() {
             return None;
         }
         let run = self.recs.radio.run.as_ref()?;
-        run.added.contains(&entry).then(|| seed_context_id(&run.state.seed, run.autoplay))
+        run.added.contains(&entry).then(|| (run.ctx, seed_context_id(&run.state.seed, run.autoplay)))
     }
 
     /// `Command::StartRadio`.

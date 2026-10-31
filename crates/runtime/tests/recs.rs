@@ -459,6 +459,45 @@ fn plays_record_who_chose_them_and_why_they_ended() {
     assert_eq!(seen(&after, "next"), seen(&before, "next") + 1, "{before} {after}");
 }
 
+/// Each start records the context it plays in: an album started from a
+/// service's page after a mix is the album's, not the mix's, and what
+/// autoplay adds after the album plays in autoplay, not in the album.
+#[test]
+fn plays_record_the_context_they_play_in() {
+    use nikgob_core::model::EventOrigin;
+    use nikgob_core::streaming::RemoteId;
+    let l = library(3, 6, 5, &[]);
+    let yt: Arc<dyn StreamService> = Arc::new(FakeService::new(Service::Youtube).with_album("hm3", "Heavy Metal 3", 2));
+    let s = start(&l.lib, vec![yt], Prefs::default(), None);
+    wait_for(&s.rt, "the home's mixes", home_ready);
+
+    s.rt.send(Command::PlayMix { id: MixId::Daily });
+    wait_until("the daily mix plays", || !s.asked.lock().unwrap().is_empty());
+    let mix = current_start(&l.lib, &s.rt);
+    assert_eq!(mix.context, EventContext::HomeSection);
+    assert!(mix.context_id.as_deref().is_some_and(|c| c.starts_with("mix:")), "{:?}", mix.context_id);
+
+    let album = RemoteId::new(Service::Youtube, "yt-alb-hm3");
+    s.rt.send(Command::PlayStreamAlbum { id: album.clone(), start: None, shuffle: false });
+    wait_until("the album plays", || current_start(&l.lib, &s.rt).id != mix.id);
+    let first = current_start(&l.lib, &s.rt);
+    assert_eq!(first.context, EventContext::Album);
+    let release = l.lib.release_by_remote(&album).unwrap().expect("the album is known now");
+    assert_eq!(first.context_id, Some(format!("release:{release}")), "not the mix's");
+
+    // The album's last track: autoplay joins behind it.
+    end_current(&s);
+    wait_for(&s.rt, "autoplay", |st| st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && !st.queue.next.is_empty());
+    let last = current_start(&l.lib, &s.rt);
+    assert_eq!((last.context, last.context_id.clone()), (EventContext::Album, Some(format!("release:{release}"))));
+    end_current(&s);
+    wait_until("autoplay's first pick", || current_start(&l.lib, &s.rt).id != last.id);
+    let picked = current_start(&l.lib, &s.rt);
+    assert_eq!(picked.origin, Some(EventOrigin::Autoplay));
+    assert_eq!(picked.context, EventContext::Radio, "autoplay, not the album");
+    assert!(picked.context_id.as_deref().is_some_and(|c| c.starts_with("autoplay:")), "{:?}", picked.context_id);
+}
+
 /// The end of a play says how far the window was while it played (hidden
 /// 1, in view behind another 0.5) and the player's volume; before the
 /// window said anything, the attention is unknown.
