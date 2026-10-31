@@ -506,6 +506,14 @@ pub struct TasteInput {
     /// ([`crate::dislike`]; «Учитывать дизлайки в рекомендациях»). Off, a
     /// dislike keeps only its own track out.
     pub dislike_neighbours: bool,
+    /// The personal graph of similar music ([`crate::graph::personal`]: an
+    /// imported history's sessions, the order of the playlists) is a
+    /// feature of the next start («Мои плейлисты и импорт истории»).
+    pub personal_graph: bool,
+    /// While the history is short the library itself is the taste
+    /// profiles' mass, its tracks by their prior in the graph («Без
+    /// истории — по самой библиотеке»).
+    pub library_prior: bool,
     /// The tracks of each playlist (hints of the taste profiles).
     pub playlists: Vec<Vec<TrackId>>,
     /// How the taste profiles are built ([`crate::profiles`]).

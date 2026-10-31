@@ -40,9 +40,12 @@ use parking_lot::{RwLock, RwLockReadGuard};
 
 pub use convert::Resolver;
 pub use import::ImportSetup;
-pub use recs::{HomePreview, ModelPreview, PreviewTile, preview_home, preview_home_with, preview_ready_tiles, preview_replay, preview_tile_days};
+pub use recs::{
+    HomePreview, ModelPreview, PreviewTile, preview_home, preview_home_with, preview_ready_tiles, preview_replay, preview_replay_with,
+    preview_tile_days,
+};
 pub use nikgob_import::ImportConfig;
-pub use nikgob_metadata::MetadataConfig;
+pub use nikgob_metadata::{Metadata, MetadataConfig};
 pub use streams::{StreamSchedule, WINDOW_HINT, WebLogin, WebLoginError};
 use import::{IMPORT_ID, ImportService, Internal};
 use queue::{Entry, Queue};
@@ -155,6 +158,7 @@ enum Msg {
     Indexer(Arc<dyn nikgob_core::indexer::Indexer>),
     Source(Arc<dyn nikgob_core::source::Source>),
     OdesliBase(String),
+    GraphMetadata(Box<nikgob_metadata::Metadata>),
     WebLogin(StreamKind, Arc<dyn WebLogin>),
     Shutdown,
 }
@@ -270,6 +274,12 @@ impl Runtime {
     /// api.song.link (tests).
     pub fn set_odesli_base(&self, base: impl Into<String>) {
         let _ = self.tx.send(Msg::OdesliBase(base.into()));
+    }
+
+    /// The graph of similar music asks this online metadata (tests: its
+    /// clients pointed at a mock server) instead of the import's.
+    pub fn set_graph_metadata(&self, m: nikgob_metadata::Metadata) {
+        let _ = self.tx.send(Msg::GraphMetadata(Box::new(m)));
     }
 }
 
@@ -567,6 +577,7 @@ impl Worker {
                         self.wish_tick();
                     }
                     Ok(Msg::OdesliBase(base)) => self.set_odesli_base(&base),
+                    Ok(Msg::GraphMetadata(m)) => self.set_graph_metadata(*m),
                     Ok(Msg::WebLogin(service, login)) => self.set_web_login(service, login),
                     Ok(Msg::Shutdown) | Err(_) => {
                         self.record_closed();
@@ -1057,6 +1068,7 @@ impl Worker {
             Command::CloseTagEditor => self.publish(|s| s.tag_editor = Default::default()),
             Command::SetPlaylistCover(id, path) => self.set_playlist_cover(id, path),
             Command::SetMetadata { contact, acoustid_key } => self.set_metadata(contact, acoustid_key),
+            Command::SetLastfmKey(key) => self.set_lastfm_key(&key),
             Command::SearchTorrents(q) => self.search_torrents(q),
             c @ (Command::DownloadTorrent { .. }
             | Command::ListTorrentFiles(_)
@@ -2158,8 +2170,14 @@ impl Worker {
             || old.mixes_on_repeat != p.mixes_on_repeat
             || old.background_cards != p.background_cards
             || old.home_hidden_mixes != p.home_hidden_mixes
+            || old.graph_use != p.graph_use
+            || old.graph_personal != p.graph_personal
+            || old.library_as_taste != p.library_as_taste
         {
             self.recs_prefs_changed();
+        }
+        if (!old.graph_services && p.graph_services) || (!old.graph_open_data && p.graph_open_data) {
+            self.graph_now();
         }
         if old.autoplay && !p.autoplay {
             self.autoplay_off();
@@ -2659,11 +2677,7 @@ impl Worker {
             self.toast("Не удалось сохранить настройки", None);
             return;
         }
-        let mut cfg = MetadataConfig::new(settings.metadata.contact.clone());
-        if let Some(k) = &settings.metadata.acoustid_key {
-            cfg = cfg.with_acoustid_key(k.clone());
-        }
-        self.set_metadata_config(&cfg);
+        self.set_metadata_config(&metadata_config(&settings.metadata));
         let configured = settings.metadata.acoustid_key.is_some();
         self.publish(|s| {
             s.prefs.metadata_contact = settings.metadata.contact;
@@ -2671,6 +2685,45 @@ impl Worker {
         });
         self.toast("Сохранено", None);
     }
+
+    /// The Last.fm key of the graph of similar music → settings.toml
+    /// (empty: none), applied live.
+    fn set_lastfm_key(&mut self, key: &str) {
+        let Some(path) = self.settings_path.clone() else {
+            self.toast("Некуда сохранить настройки", None);
+            return;
+        };
+        let mut settings = match nikgob_core::settings::Settings::load(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("loading settings: {e}");
+                self.toast("settings.toml не читается — поправь файл вручную", None);
+                return;
+            }
+        };
+        settings.metadata.lastfm_key = Some(key.trim().to_owned()).filter(|k| !k.is_empty());
+        if let Err(e) = settings.save(&path) {
+            log::error!("saving settings: {e}");
+            self.toast("Не удалось сохранить настройки", None);
+            return;
+        }
+        self.set_metadata_config(&metadata_config(&settings.metadata));
+        let configured = settings.metadata.lastfm_key.is_some();
+        self.publish(|s| s.prefs.lastfm_configured = configured);
+        self.toast(if configured { "Сохранено" } else { "Ключ убран" }, None);
+    }
+}
+
+/// The online metadata's config of settings.toml's.
+fn metadata_config(m: &nikgob_core::settings::MetadataSettings) -> MetadataConfig {
+    let mut cfg = MetadataConfig::new(m.contact.clone());
+    if let Some(k) = &m.acoustid_key {
+        cfg = cfg.with_acoustid_key(k.clone());
+    }
+    if let Some(k) = &m.lastfm_key {
+        cfg = cfg.with_lastfm_key(k.clone());
+    }
+    cfg
 }
 
 /// Which tracks the library lists ([`nikgob_view::Prefs::library_only_downloaded`]).

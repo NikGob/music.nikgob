@@ -140,6 +140,7 @@ fn load_prefs(
         }
         p.metadata_contact = s.metadata.contact.clone();
         p.acoustid_configured = s.metadata.acoustid_key.as_ref().is_some_and(|k| !k.trim().is_empty());
+        p.lastfm_configured = s.metadata.lastfm_key.as_ref().is_some_and(|k| !k.trim().is_empty());
         p.spotify_personal_app = s.streaming.spotify_client_id.is_some();
         p.youtube_cookies_set = s.streaming.youtube_cookies.is_some();
     }
@@ -597,6 +598,9 @@ fn main() -> eframe::Result {
         let mut meta = nikgob_runtime::MetadataConfig::new(settings.metadata.contact);
         if let Some(k) = settings.metadata.acoustid_key.filter(|k| !k.trim().is_empty()) {
             meta = meta.with_acoustid_key(k);
+        }
+        if let Some(k) = settings.metadata.lastfm_key {
+            meta = meta.with_lastfm_key(k);
         }
         nikgob_runtime::ImportSetup {
             config: cfg,

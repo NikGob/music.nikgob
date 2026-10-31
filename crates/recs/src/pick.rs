@@ -66,6 +66,8 @@ pub enum Reason {
     NextOnAlbum,
     /// Often follows this track in your sessions.
     FollowsOften(TrackId),
+    /// Other listeners often hear it with this track (the collective graph).
+    ListenedTogether(TrackId),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

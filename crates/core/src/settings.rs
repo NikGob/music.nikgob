@@ -156,6 +156,9 @@ pub struct MetadataSettings {
     /// AcoustID application key (https://acoustid.org/new-application);
     /// without it identification uses tags and names only.
     pub acoustid_key: Option<String>,
+    /// The user's own Last.fm API key (https://www.last.fm/api/account/create):
+    /// the graph of similar music asks Last.fm only with it.
+    pub lastfm_key: Option<String>,
 }
 
 impl Default for MetadataSettings {
@@ -163,6 +166,7 @@ impl Default for MetadataSettings {
         Self {
             contact: "music.nikgob personal player".into(),
             acoustid_key: None,
+            lastfm_key: None,
         }
     }
 }
@@ -172,6 +176,7 @@ impl fmt::Debug for MetadataSettings {
         f.debug_struct("MetadataSettings")
             .field("contact", &self.contact)
             .field("acoustid_key", &self.acoustid_key.as_ref().map(|_| "<redacted>"))
+            .field("lastfm_key", &self.lastfm_key.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }

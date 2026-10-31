@@ -164,6 +164,7 @@ impl Recs<'_> {
         match p.reason {
             Reason::NextOnAlbum => Some("Следующий на альбоме".to_owned()),
             Reason::FollowsOften(t) => title(t).map(|t| format!("После {t}: часто идёт следом")),
+            Reason::ListenedTogether(t) => title(t).map(|t| format!("Часто слушают вместе с {t}")),
             Reason::SimilarTo(t) => self.near(*id, Some(t)).then(|| "Похоже по звуку".to_owned()),
             Reason::SoundsLikeSeed => self.near(*id, before).then(|| "Похоже по звуку".to_owned()),
             _ => None,
@@ -222,7 +223,7 @@ mod tests {
     #[test]
     fn a_moment_says_when_it_is_heard_out() {
         let (cat, idx, input) = library();
-        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None }, T0);
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None, graph: None }, T0);
         let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
         let at = |r: std::ops::Range<u128>| -> Vec<usize> { r.filter_map(|i| model.position(tid(i))).collect() };
         assert_eq!(recs.why_moment(&at(0..10), "Песни").as_deref(), Some("Из того, что ты дослушиваешь вечером"));
@@ -235,7 +236,7 @@ mod tests {
     #[test]
     fn a_world_mix_says_its_anchor() {
         let (cat, idx, input) = library();
-        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None }, T0);
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None, graph: None }, T0);
         let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
         let mixes = recs.world_mixes(crate::world_token("the world"), DayPart::Day);
         let name = |i: usize| Some(format!("T{}", model.id(i).0.as_u128()));

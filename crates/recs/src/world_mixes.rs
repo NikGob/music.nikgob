@@ -54,6 +54,10 @@ const ROAD_WORLD_SHARE: f32 = 0.34;
 const CORE_AFFINITY: f32 = 1.5;
 /// Shorter than this is an interlude.
 const INTERLUDE_MS: u32 = 75_000;
+/// «Ещё не слышал»: a neighbour of the loved by the graphs counts this
+/// much times its edge, a track without a sound stands this far.
+const W_LINKED: f32 = 1.0;
+const FAR: f32 = 1.5;
 /// The order: an album at most this many running.
 const ALBUM_RUN: usize = 3;
 
@@ -126,11 +130,28 @@ impl Recs<'_> {
         let core: Vec<Vector> = own.iter().copied().filter(|&i| loved(i)).filter_map(|i| m.embedded_at(i).copied()).collect();
         if let Some(centre) = mean(&core) {
             let scale = m.scale().max(1e-3);
+            // The graphs' neighbours of the loved (docs/recs-graph.md): what
+            // other listeners and the user's playlists put beside them.
+            let mut linked: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
+            for i in own.iter().copied().filter(|&i| loved(i)) {
+                for &(c, w) in m.graph.near(i).iter().chain(m.personal_near(i)) {
+                    let e = linked.entry(c as usize).or_default();
+                    *e = e.max(w);
+                }
+            }
             let mut fresh: Vec<(f32, usize)> = own
                 .iter()
                 .copied()
                 .filter(|&i| m.tracks[i].starts == 0)
-                .filter_map(|i| Some((-euclid(m.embedded_at(i)?, &centre) / scale - p_skip(i), i)))
+                .filter_map(|i| {
+                    let graph = W_LINKED * linked.get(&i).copied().unwrap_or(0.0);
+                    let sound = match m.embedded_at(i) {
+                        Some(e) => -euclid(e, &centre) / scale,
+                        None if graph > 0.0 => -FAR,
+                        None => return None,
+                    };
+                    Some((sound + graph - p_skip(i), i))
+                })
                 .collect();
             fresh.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
             let tracks: Vec<usize> = fresh.into_iter().take(UNHEARD_LEN).map(|x| x.1).collect();
@@ -321,7 +342,7 @@ mod tests {
     #[test]
     fn unheard_close_to_liked() {
         let (cat, idx, input) = world();
-        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None }, T0);
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None, graph: None }, T0);
         let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
         let w = crate::world_token("the world");
         let mixes = recs.world_mixes(w, DayPart::Day);

@@ -31,6 +31,7 @@ mod migrations;
 mod photos;
 mod playlists;
 mod rec_facts;
+mod graph;
 mod recs;
 mod repairs;
 pub mod search;
@@ -50,6 +51,7 @@ pub use joblog::JOB_LOG_KEEP;
 pub use migrations::SCHEMA_VERSION;
 pub use playlists::LIKED_PLAYLIST_NAME;
 pub use rec_facts::{LyricsLevel, LyricsSample, PlaylistTracks, TrackFactsRow};
+pub use graph::{GraphEntry, GraphFetch, GraphRow, GraphTag};
 pub use recs::RecTrack;
 pub use streams::{LikedClip, MatchRow, TrackSnapshot, event_id, is_web_ref, other_scripts};
 pub use types::{

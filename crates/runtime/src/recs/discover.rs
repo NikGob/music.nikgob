@@ -225,6 +225,13 @@ pub(crate) struct DiscoverState {
     warmed: bool,
 }
 
+impl DiscoverState {
+    /// A request is on its way (the graph's pass waits for it).
+    pub(crate) fn is_busy(&self) -> bool {
+        self.busy
+    }
+}
+
 /// What a step asks.
 async fn ask(svc: Arc<dyn StreamService>, step: &Step) -> Result<Answer, StreamError> {
     match step {
@@ -700,6 +707,12 @@ impl Worker {
     }
 
     fn discover_answer(&mut self, step: Step, answer: Answer) {
+        // YouTube Music's radio of a library track is the graph's too.
+        if let (Step::TrackList { seed: Seed::Track(t), service: Service::Youtube, id }, Answer::Tracks(tracks)) = (&step, &answer)
+            && self.state.read().prefs.graph_services
+        {
+            self.graph_from_discovery(*t, id, tracks);
+        }
         let mut learnt: Vec<(ArtistId, RemoteId)> = Vec::new();
         let Some(pass) = self.recs.discover.pass.as_mut() else { return };
         match (step, answer) {

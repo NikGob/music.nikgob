@@ -54,6 +54,7 @@ use nikgob_core::model::{ArtistId, EndReason, EventContext, EventOrigin, EventTy
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::Vector;
+use crate::graph::{GraphInput, SimGraph};
 use crate::index::{Normalizer, VectorIndex, euclid};
 use crate::listening::{Heard, Listening, SessionSignals, W_BG};
 use crate::profiles::{
@@ -70,7 +71,7 @@ use crate::taste::{
 
 /// Bumped when a feature changes meaning: cached weights of another
 /// version are learnt again from the history.
-pub const FEATURE_VERSION: u32 = 3;
+pub const FEATURE_VERSION: u32 = 4;
 
 pub const H_LONG_MS: i64 = 45 * DAY_MS;
 pub const H_HOT_MS: i64 = 2 * DAY_MS;
@@ -126,9 +127,9 @@ pub fn lane_index(l: SongLane) -> usize {
 
 
 /// The features of a candidate for the next start, in this order.
-pub const FEATURES: [&str; 16] = [
+pub const FEATURES: [&str; 19] = [
     "aff_long", "aff_hot", "liked", "sound", "skip_push", "next_album", "same_album", "same_world", "world_trans",
-    "cooc", "in_session", "recent3h", "daypart_world", "same_lane", "never", "interlude",
+    "cooc", "in_session", "recent3h", "daypart_world", "same_lane", "never", "interlude", "graph", "pgraph", "prior",
 ];
 pub const F: usize = FEATURES.len();
 pub const F_SOUND: usize = 3;
@@ -138,11 +139,31 @@ pub const F_SAME_ALBUM: usize = 6;
 pub const F_SAME_WORLD: usize = 7;
 pub const F_COOC: usize = 9;
 pub const F_SAME_LANE: usize = 13;
-/// The hand weights (`scripts/replay.py`, `HAND`): the prior and the start.
-pub const HAND: [f32; F] = [1.0, 1.2, 0.3, 0.8, 1.0, 3.0, 1.0, 0.8, 1.5, 1.5, -2.0, 0.3, 1.0, 0.8, -0.3, -0.5];
+/// The collective graph from the session ([`crate::graph`]), the personal
+/// graph, the prior of the library.
+pub const F_GRAPH: usize = 16;
+pub const F_PGRAPH: usize = 17;
+pub const F_PRIOR: usize = 18;
+/// The hand weights (`scripts/replay.py`, `HAND`; the graph's from the
+/// synthetic listeners, docs/recs-graph.md): the prior and the start.
+pub const HAND: [f32; F] = [1.0, 1.2, 0.3, 0.8, 1.0, 3.0, 1.0, 0.8, 1.5, 1.5, -2.0, 0.3, 1.0, 0.8, -0.3, -0.5, 1.5, 1.0, 0.5];
 /// What the replay of 15 days learnt from them (`out/replay.json`), for
-/// reference and tests.
-pub const LEARNED: [f32; F] = [0.68, -0.1, 0.94, 1.15, 0.0, 3.62, 0.52, 0.65, 1.64, 1.77, -0.1, 0.7, 0.77, 0.66, -1.1, -0.03];
+/// reference and tests (the graph's were not there then: the hand ones).
+pub const LEARNED: [f32; F] = [0.68, -0.1, 0.94, 1.15, 0.0, 3.62, 0.52, 0.65, 1.64, 1.77, -0.1, 0.7, 0.77, 0.66, -1.1, -0.03, 1.5, 1.0, 0.5];
+/// An artist like the session's counts this much of a track like it.
+const GRAPH_ARTIST: f32 = 0.5;
+/// Candidates by the graphs: the neighbours of the session…
+const GRAPH_CANDIDATES: usize = 50;
+/// …and the best known tracks of this many artists like it, so many each.
+const GRAPH_ARTISTS: usize = 6;
+const GRAPH_ARTIST_TRACKS: usize = 4;
+/// The library's prior as the profiles' mass ([`crate::graph`]), while the
+/// history is short: this much at most, fading as `1 / (1 + starts / COLD_STARTS)`.
+const COLD_MASS: f32 = 0.3;
+const COLD_STARTS: f32 = 30.0;
+/// From this many starts the history alone is the taste (the prior would
+/// only blur the profiles of the tracks it gathers).
+const COLD_UNTIL: usize = 300;
 const LR: f32 = 0.05;
 const L2: f32 = 0.01;
 /// The step is halved until this many starts taught the model.
@@ -405,6 +426,10 @@ pub struct ModelInput<'a> {
     pub types: Option<&'a SongTypes>,
     /// The weights to go on with (else learnt again from the history).
     pub weights: Option<Weights>,
+    /// The collective graph of similar music ([`crate::graph`]), resolved
+    /// to the catalog; none: «Похожее по слушателям» is off or nothing is
+    /// known yet.
+    pub graph: Option<&'a GraphInput>,
 }
 
 /// One moment of a session, as the features see it.
@@ -426,6 +451,13 @@ pub struct Moment {
     pub repeat_one: bool,
     /// How much the session so far is background ([`Listening::p_now`]).
     pub p_bg: f32,
+    /// The collective graph's neighbours of the session's last tracks (not
+    /// skipped early), by catalog position, and the artists like theirs
+    /// (not theirs), each by `0.6^k` of the k-th from the end…
+    pub graph_near: HashMap<usize, f32>,
+    pub graph_artists: HashMap<ArtistId, f32>,
+    /// …and the personal graph's.
+    pub pgraph_near: HashMap<usize, f32>,
 }
 
 /// What a live session is ([`UserModel::live`]): one profile or many,
@@ -476,6 +508,8 @@ pub struct UserModel {
     album_pos: Vec<u32>,
     world: Vec<Option<u64>>,
     artist: Vec<Option<ArtistId>>,
+    /// The catalog positions of each main artist.
+    by_artist: HashMap<ArtistId, Vec<u32>>,
     duration: Vec<Option<u32>>,
     types: Vec<SongType>,
     next_in_album: Vec<Option<u32>>,
@@ -486,6 +520,14 @@ pub struct UserModel {
     /// [`lane_index`].
     lane_trans: [[f32; LANES]; LANES],
     pub co: CoOccur,
+    /// The collective graph and the personal one ([`crate::graph`]).
+    pub graph: SimGraph,
+    personal: Vec<Vec<(u32, f32)>>,
+    /// How cold the history is: 1 with none, `1 / (1 + starts / COLD_STARTS)`,
+    /// 0 from [`COLD_UNTIL`] starts.
+    cold: f32,
+    /// «Без истории — по самой библиотеке».
+    library_prior: bool,
     /// The taste profiles ([`crate::profiles`]), the profile of each track,
     /// the profiles' shares of the recent plays (a background play counting
     /// little), the mean `p_bg` of each one's plays and the best long
@@ -569,6 +611,9 @@ impl UserModel {
             if let Some(&i) = m.pos.get(id) {
                 m.tracks[i].saved = true;
             }
+        }
+        if input.personal_graph {
+            m.personal = crate::graph::personal(catalog, &input.events, &input.playlists);
         }
         // How the user listens, before the walk: the skip model reads the
         // background of each moment.
@@ -812,6 +857,13 @@ impl UserModel {
                 mass[i as usize] += MASS_SAVED / of.len() as f32;
             }
         }
+        // The library is a taste too while the history is short: every
+        // track a little, the ones the graph gathers around more.
+        self.cold = if starts.len() >= COLD_UNTIL { 0.0 } else { 1.0 / (1.0 + starts.len() as f32 / COLD_STARTS) };
+        self.library_prior = input.library_prior;
+        for (i, m) in mass.iter_mut().enumerate() {
+            *m += self.prior_mass(i);
+        }
         for (i, m) in mass.iter_mut().enumerate() {
             if self.taste.blocks(&catalog.tracks()[i]) {
                 *m = 0.0;
@@ -846,7 +898,22 @@ impl UserModel {
         let all: Vec<SharePlay> = (0..starts.len()).filter_map(share_play).collect();
         let own_plays: Vec<SharePlay> = own.iter().filter_map(|&x| share_play(x)).collect();
         let sh = shares(&all, k, w_bg, Some(SHARE_HALF_DAYS), now);
-        self.profile_share = if sh.iter().sum::<f32>() > 0.0 { sh } else { vec![1.0 / k.max(1) as f32; k] };
+        // No plays yet: the profiles' shares of the mass (the likes, the
+        // playlists, the library's prior).
+        let mut by_mass = vec![0.0f32; k];
+        for (i, m) in mass.iter().enumerate() {
+            if let Some(j) = self.profile_at(i) {
+                by_mass[j] += m.max(0.0);
+            }
+        }
+        let total_mass: f32 = by_mass.iter().sum();
+        self.profile_share = if sh.iter().sum::<f32>() > 0.0 {
+            sh
+        } else if total_mass > 0.0 {
+            by_mass.iter().map(|m| m / total_mass).collect()
+        } else {
+            vec![1.0 / k.max(1) as f32; k]
+        };
         self.profile_bg = background_shares(&own_plays, k);
         let mut top = vec![0.0f32; k];
         for i in 0..n {
@@ -925,6 +992,12 @@ impl UserModel {
             album_pos,
             world: catalog.tracks().iter().map(|t| t.world).collect(),
             artist: catalog.tracks().iter().map(|t| t.main_artist()).collect(),
+            by_artist: catalog.tracks().iter().enumerate().fold(HashMap::new(), |mut m: HashMap<ArtistId, Vec<u32>>, (i, t)| {
+                if let Some(a) = t.main_artist() {
+                    m.entry(a).or_default().push(i as u32);
+                }
+                m
+            }),
             duration: catalog.tracks().iter().map(|t| t.duration_ms).collect(),
             types,
             next_in_album,
@@ -933,6 +1006,10 @@ impl UserModel {
             trans: HashMap::new(),
             lane_trans: [[0.0; LANES]; LANES],
             co: CoOccur::new(n),
+            graph: extra.graph.filter(|g| !g.is_empty()).map(|g| SimGraph::build(catalog, g)).unwrap_or_default(),
+            personal: Vec::new(),
+            cold: 1.0,
+            library_prior: false,
             profiles: Profiles::default(),
             profile_of: vec![None; n],
             profile_share: Vec::new(),
@@ -955,6 +1032,28 @@ impl UserModel {
 
     pub fn now(&self) -> UnixMs {
         self.now
+    }
+
+    /// How cold the history is: 1 with none, towards 0 as it grows.
+    pub fn cold(&self) -> f32 {
+        self.cold
+    }
+
+    /// What the library's prior gives the track at `i` while the history
+    /// is short (the taste profiles' mass, a mix's love of it): up to
+    /// [`COLD_MASS`], fading with the history; 0 when it is off.
+    pub fn prior_mass(&self, i: usize) -> f32 {
+        if self.library_prior { COLD_MASS * self.cold * (0.3 + 0.7 * self.graph.prior(i)) } else { 0.0 }
+    }
+
+    /// The personal graph's neighbours of the track at `i`.
+    pub fn personal_near(&self, i: usize) -> &[(u32, f32)] {
+        self.personal.get(i).map_or(&[], Vec::as_slice)
+    }
+
+    /// The tracks of artist `a` (main artist), by catalog position.
+    pub fn of_artist(&self, a: ArtistId) -> &[u32] {
+        self.by_artist.get(&a).map_or(&[], Vec::as_slice)
     }
 
     pub fn position(&self, id: TrackId) -> Option<usize> {
@@ -1042,7 +1141,32 @@ impl UserModel {
         let sess: Vec<(usize, Ended, EventContext)> =
             session.tracks().filter_map(|p| Some((self.position(p.track)?, p.ended, p.context))).collect();
         let prev = session.last().and_then(|p| self.position(p.track));
+        // The graphs around the last three not skipped early.
+        let mut graph_near: HashMap<usize, f32> = HashMap::new();
+        let mut graph_artists: HashMap<ArtistId, f32> = HashMap::new();
+        let mut pgraph_near: HashMap<usize, f32> = HashMap::new();
+        let recent: Vec<usize> = sess.iter().rev().filter(|(_, e, _)| *e != Ended::Early).take(3).map(|x| x.0).collect();
+        let own: HashSet<ArtistId> = recent.iter().filter_map(|&s| self.artist[s]).collect();
+        for (k, &s) in recent.iter().enumerate() {
+            let f = 0.6f32.powi(k as i32);
+            for &(c, w) in self.graph.near(s) {
+                *graph_near.entry(c as usize).or_default() += f * w;
+            }
+            if let Some(a) = self.artist[s] {
+                for &(b, w) in self.graph.similar_artists(a) {
+                    if !own.contains(&b) {
+                        *graph_artists.entry(b).or_default() += f * w;
+                    }
+                }
+            }
+            for &(c, w) in self.personal.get(s).map_or(&[][..], Vec::as_slice) {
+                *pgraph_near.entry(c as usize).or_default() += f * w;
+            }
+        }
         Moment {
+            graph_near,
+            graph_artists,
+            pgraph_near,
             now,
             next_album: prev.and_then(|i| self.next_in_album(i)),
             prev,
@@ -1104,6 +1228,10 @@ impl UserModel {
         f[F_SAME_LANE] = f32::from(u8::from(m.lane.is_some_and(|l| l == self.types[c].lane())));
         f[14] = f32::from(u8::from(t.starts == 0));
         f[15] = f32::from(u8::from(self.duration[c].is_some_and(|d| d < INTERLUDE_MS)));
+        let like_artist = self.artist[c].and_then(|a| m.graph_artists.get(&a)).copied().unwrap_or(0.0);
+        f[F_GRAPH] = (m.graph_near.get(&c).copied().unwrap_or(0.0) + GRAPH_ARTIST * like_artist).tanh();
+        f[F_PGRAPH] = m.pgraph_near.get(&c).copied().unwrap_or(0.0).tanh();
+        f[F_PRIOR] = self.graph.prior(c);
         f
     }
 
@@ -1218,6 +1346,23 @@ impl UserModel {
         let mut co: Vec<(usize, f32)> = co.into_iter().filter(|(c, _)| ok(*c)).collect();
         co.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
         out.extend(co.into_iter().take(50).map(|(c, _)| c));
+        // The graphs: the neighbours of the session, the best known tracks
+        // of the artists like its.
+        let strongest = |map: &HashMap<usize, f32>| {
+            let mut v: Vec<(usize, f32)> = map.iter().map(|(c, w)| (*c, *w)).filter(|(c, _)| ok(*c)).collect();
+            v.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
+            v.into_iter().take(GRAPH_CANDIDATES).map(|(c, _)| c).collect::<Vec<usize>>()
+        };
+        out.extend(strongest(&m.graph_near));
+        out.extend(strongest(&m.pgraph_near));
+        let mut artists: Vec<(ArtistId, f32)> = m.graph_artists.iter().map(|(a, w)| (*a, *w)).collect();
+        artists.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
+        for (a, _) in artists.into_iter().take(GRAPH_ARTISTS) {
+            let mut theirs: Vec<usize> = self.by_artist.get(&a).map_or(&[][..], Vec::as_slice).iter().map(|&i| i as usize).filter(|&i| ok(i)).collect();
+            let key = |i: usize| self.tracks[i].aff_long(m.now) + self.graph.prior(i);
+            theirs.sort_by(|x, y| key(*y).total_cmp(&key(*x)).then(x.cmp(y)));
+            out.extend(theirs.into_iter().take(GRAPH_ARTIST_TRACKS));
+        }
         out.extend(m.next_album.filter(|&c| ok(c)));
         if let Some(w) = m.prev.and_then(|p| self.world[p]) {
             out.extend((0..self.len()).filter(|&i| self.world[i] == Some(w) && ok(i)));
@@ -1566,6 +1711,9 @@ pub fn replay_with(
     }
     let taste = Taste::build(catalog, &TasteInput::default(), first);
     let mut m = UserModel::empty(catalog, taste, extra, input.utc_offset_min, first);
+    if input.personal_graph {
+        m.personal = crate::graph::personal(catalog, &input.events, &input.playlists);
+    }
     m.learn = true;
     m.listen(input);
     let disliked: Vec<usize> = dislikes.iter().filter_map(|t| m.position(*t)).collect();
@@ -1710,7 +1858,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn input(idx: &VectorIndex<TrackId>) -> ModelInput<'_> {
-        ModelInput { index: idx, types: None, weights: None }
+        ModelInput { index: idx, types: None, weights: None, graph: None }
     }
 
     #[test]
@@ -1785,7 +1933,7 @@ pub(crate) mod tests {
     fn profiles_balance_by_active_choices() {
         use crate::regions::spread;
         let (cat, idx, mut input, types) = crate::radio::tests::listener(true);
-        let build = |input: &TasteInput| UserModel::build(&cat, input, ModelInput { index: &idx, types: Some(&types), weights: None }, T0);
+        let build = |input: &TasteInput| UserModel::build(&cat, input, ModelInput { index: &idx, types: Some(&types), weights: None, graph: None }, T0);
         let m = build(&input);
         assert!(m.regions.len() >= 4, "{:?}", m.regions.lanes);
         let kind = |i: usize| m.id(i).0.as_u128() / 1_000;
@@ -1926,5 +2074,35 @@ pub(crate) mod tests {
         assert!(a(2).abs() < 1e-6, "closing the app says nothing: {}", a(2));
         assert!(a(3) > 0.0, "a late skip is a little plus: {}", a(3));
         assert!(m.tracks[2].open.is_none());
+    }
+
+    /// The library is a taste while the history is short: all of it
+    /// without one, fading with the starts, none from [`COLD_UNTIL`] on or
+    /// with «Без истории — по самой библиотеке» off.
+    #[test]
+    fn the_library_prior_fades_with_the_history() {
+        let cat = Catalog::new((0..20u128).map(|i| info(i, &[i as u32 % 4], None).with_duration(Some(200_000))));
+        let idx = VectorIndex::new();
+        let built = |n: usize, prior: bool| {
+            let mut events = Vec::new();
+            for k in 0..n {
+                let ts = T0 - (n - k) as i64 * 300_000;
+                events.push(Play::new(tid(k as u128 % 20), ts, EventType::Start, Some(0)));
+                events.push(Play::new(tid(k as u128 % 20), ts + 200_000, EventType::Complete, Some(200_000)));
+            }
+            UserModel::build(&cat, &TasteInput { events, library_prior: prior, ..TasteInput::default() }, input(&idx), T0)
+        };
+        let none = built(0, true);
+        assert_eq!(none.cold(), 1.0);
+        assert!(none.prior_mass(0) > 0.0);
+        let some = built(30, true);
+        assert!((some.cold() - 0.5).abs() < 1e-6, "{}", some.cold());
+        assert!(some.prior_mass(0) < none.prior_mass(0) && some.prior_mass(0) > 0.0);
+        let last = built(COLD_UNTIL - 1, true);
+        assert!(last.cold() > 0.0);
+        let warm = built(COLD_UNTIL, true);
+        assert_eq!(warm.cold(), 0.0);
+        assert_eq!(warm.prior_mass(0), 0.0);
+        assert_eq!(built(0, false).prior_mass(0), 0.0);
     }
 }

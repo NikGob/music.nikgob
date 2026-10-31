@@ -1228,6 +1228,26 @@ pub struct Prefs {
     /// «Не предлагать этот микс»: the mixes of «Миксы для тебя» left out,
     /// with the name they had (Settings → «Рекомендации» returns them).
     pub home_hidden_mixes: Vec<HiddenMix>,
+
+    // ---- The graph of similar music (docs/recs-graph.md).
+    /// «Похожее по слушателям»: what other listeners hear together (the
+    /// graph kept in the library) scores the radio, the mixes and the new
+    /// music; off, the graph is kept but not used.
+    pub graph_use: bool,
+    /// «Спрашивать YouTube Music и Deezer»: the graph asks their radios
+    /// and similar artists in the background.
+    pub graph_services: bool,
+    /// «Спрашивать ListenBrainz и MusicBrainz»: the graph asks their open
+    /// data in the background.
+    pub graph_open_data: bool,
+    /// «Мои плейлисты и импорт истории»: the personal graph (the order of
+    /// the playlists, the sessions of an imported history).
+    pub graph_personal: bool,
+    /// «Без истории — по самой библиотеке»: while the history is short the
+    /// library itself is the taste.
+    pub library_as_taste: bool,
+    /// settings.toml has a Last.fm API key (the key is not here).
+    pub lastfm_configured: bool,
 }
 
 /// One line of [`Prefs::download_sources`].
@@ -1357,6 +1377,11 @@ pub enum PrefPatch {
     HideMix(HiddenMix),
     /// A mix left out comes back.
     ShowMix(MixKey),
+    GraphUse(bool),
+    GraphServices(bool),
+    GraphOpenData(bool),
+    GraphPersonal(bool),
+    LibraryAsTaste(bool),
 }
 
 impl PrefPatch {
@@ -1412,6 +1437,11 @@ impl PrefPatch {
                 }
             }
             Self::ShowMix(key) => p.home_hidden_mixes.retain(|h| h.key != *key),
+            Self::GraphUse(on) => p.graph_use = *on,
+            Self::GraphServices(on) => p.graph_services = *on,
+            Self::GraphOpenData(on) => p.graph_open_data = *on,
+            Self::GraphPersonal(on) => p.graph_personal = *on,
+            Self::LibraryAsTaste(on) => p.library_as_taste = *on,
         }
     }
 }
@@ -1913,6 +1943,9 @@ pub enum Command {
     CheckIndexer { url: String, api_key: String },
     /// MusicBrainz contact and AcoustID key (stored in settings.toml).
     SetMetadata { contact: String, acoustid_key: Option<String> },
+    /// The Last.fm API key of the graph of similar music → settings.toml
+    /// (never into prefs); empty clears it.
+    SetLastfmKey(String),
     DismissToast(u64),
 
     // Streaming: accounts (stage 3). Every network call runs in the
@@ -2205,6 +2238,12 @@ impl Default for Prefs {
             mixes_on_repeat: true,
             mix_click_opens_list: true,
             background_cards: 3,
+            graph_use: true,
+            graph_services: true,
+            graph_open_data: true,
+            graph_personal: true,
+            library_as_taste: true,
+            lastfm_configured: false,
         }
     }
 }

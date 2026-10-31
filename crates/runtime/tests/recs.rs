@@ -734,7 +734,9 @@ fn discovery_calls(f: &FakeService) -> usize {
 fn discovery_finds_new_songs_within_its_budget_and_keeps_them() {
     let l = library(0, 0, 0, KNOWN);
     let (yt, dz) = fakes();
-    let s = start(&l.lib, vec![yt.clone(), dz.clone()], Prefs::default(), None);
+    // The graph's pass asks the same services for itself (tests/graph.rs).
+    let prefs = || Prefs { graph_services: false, graph_open_data: false, ..Prefs::default() };
+    let s = start(&l.lib, vec![yt.clone(), dz.clone()], prefs(), None);
     wait_for(&s.rt, "discoveries", |st| !st.home.discover.is_empty() && !st.home.new_releases.is_empty());
     let st = s.rt.state();
     let artists: Vec<&str> = st.home.discover.iter().map(|r| r.artist.as_str()).collect();
@@ -776,7 +778,7 @@ fn discovery_finds_new_songs_within_its_budget_and_keeps_them() {
     // Kept for the day: a restart shows them without asking again.
     yt.reset_calls();
     dz.reset_calls();
-    let s = start(&l.lib, vec![yt.clone(), dz.clone()], Prefs::default(), None);
+    let s = start(&l.lib, vec![yt.clone(), dz.clone()], prefs(), None);
     wait_for(&s.rt, "the kept discoveries", |st| st.home.discover.len() == shown);
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(discovery_calls(&yt) + discovery_calls(&dz), 0, "{:?} {:?}", yt.all_calls(), dz.all_calls());

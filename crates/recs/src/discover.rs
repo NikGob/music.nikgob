@@ -957,7 +957,7 @@ mod tests {
         use crate::model::{ModelInput, UserModel};
         let (cat, idx, input, types) = crate::radio::tests::listener(true);
         let now = crate::model::tests::T0;
-        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None }, now);
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None, graph: None }, now);
         let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
         let s = recs.discovery_seeds();
         let kinds: HashSet<u128> = s.tracks.iter().map(|(t, _)| t.0.as_u128() / 1_000).collect();
@@ -1036,7 +1036,7 @@ mod tests {
         use crate::model::{ModelInput, UserModel};
         let (cat, idx, input, types) = crate::radio::tests::listener(true);
         let now = crate::model::tests::T0;
-        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None }, now);
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None, graph: None }, now);
         let (vectors, known, log) = (HashMap::new(), HashMap::new(), NewLog::default());
         let sc = NewScoring { model: &model, vectors: &vectors, log: &log, artist_affinity: &known, now, types: Some(&types) };
         let rap = model.profile_at(cat.position(tid(5)).unwrap()).unwrap();
@@ -1056,7 +1056,7 @@ mod tests {
         use crate::novelty::{Heard, NewEvent, NewLog};
         let (cat, idx, input, types) = crate::radio::tests::listener(true);
         let now = crate::model::tests::T0;
-        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None }, now);
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None, graph: None }, now);
         let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
         let seeds = recs.discovery_seeds();
         // Each seed finds five songs of new artists of its own.

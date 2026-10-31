@@ -157,6 +157,18 @@ pub enum SettingId {
     DislikedArtists,
     /// The mixes of «Миксы для тебя» left out, with «Вернуть».
     HiddenMixes,
+    /// «Похожее по слушателям» (the graph of similar music).
+    GraphUse,
+    /// «Спрашивать YouTube Music и Deezer».
+    GraphServices,
+    /// «Спрашивать ListenBrainz и MusicBrainz».
+    GraphOpenData,
+    /// «Мои плейлисты и импорт истории».
+    GraphPersonal,
+    /// «Без истории — по самой библиотеке».
+    LibraryAsTaste,
+    /// «Ключ Last.fm».
+    LastfmKey,
     // Источники.
     SpotifyEnabled,
     SpotifyPlayback,
@@ -304,6 +316,7 @@ impl SettingId {
             RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | NewShareBy(_)
             | MixesWithNew | BackgroundCountsLess | ProfilesSplit | ProfileNames
             | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | MixClickOpensList | HiddenMixes
+            | GraphUse | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste | LastfmKey
             | DislikeButton | DislikeSkips | DislikeSkipEverywhere | DislikeInRecs | DislikedTracks | DislikedArtists => {
                 TAB_RECS
             }
@@ -448,6 +461,12 @@ impl SettingId {
             DislikedTracks => "Треки с «Не нравится». «Снять» возвращает трек в рекомендации.",
             DislikedArtists => "Исполнители, которых не рекомендовать: их нет в миксах, радио и новом. «Снять» возвращает.",
             HiddenMixes => "Миксы, убранные с главной через ⋮ → «Не предлагать этот микс». «Вернуть» снова показывает микс.",
+            GraphUse => "Радио, миксы и новое учитывают, что другие люди слушают вместе: радио YouTube Music, похожих исполнителей Deezer, ListenBrainz и Last.fm. Так рекомендации работают и без истории, по одним твоим файлам. Выключи — остаются звук, твоя история и тип песни.",
+            GraphServices => "Понемногу и в фоне спрашивать у YouTube Music радио твоих треков, а у YouTube Music и Deezer — похожих исполнителей. Ответы хранятся у тебя и работают без сети.",
+            GraphOpenData => "Понемногу и в фоне спрашивать открытые данные: похожих исполнителей и треки в ListenBrainz, жанры исполнителей в MusicBrainz. Без ключей и аккаунтов.",
+            GraphPersonal => "Треки, которые стоят рядом в твоих плейлистах или шли подряд в загруженной истории YouTube Music или Spotify, считаются похожими.",
+            LibraryAsTaste => "Пока истории мало, вкус берётся из самой библиотеки: профили и миксы есть с первого запуска, а треки, вокруг которых собрана коллекция, стоят выше. Чем больше ты слушаешь, тем меньше это значит.",
+            LastfmKey => "Свой бесплатный ключ Last.fm API: с ним похожие треки и исполнители спрашиваются и у Last.fm. Хранится в settings.toml. Пусто — Last.fm не спрашивается.",
         }
     }
 
@@ -1777,6 +1796,10 @@ mod tests {
         assert_eq!(SettingId::ProfileNames.tab(), TAB_RECS);
         assert_eq!(SettingId::BackgroundCards.tab(), TAB_RECS);
         assert_eq!(SettingId::MixesEverything.tab(), TAB_RECS);
+        for id in [SettingId::GraphUse, SettingId::GraphServices, SettingId::GraphOpenData, SettingId::GraphPersonal, SettingId::LibraryAsTaste, SettingId::LastfmKey] {
+            assert_eq!(id.tab(), TAB_RECS);
+            assert!(!id.help().is_empty());
+        }
         assert!(!SettingId::Autoplay.help().is_empty() && !SettingId::RadioSource.help().is_empty());
         for id in [SettingId::RadioNewShare, SettingId::MixesDownloadedOnly, SettingId::SoundAnalysis, SettingId::StreamAnalysis] {
             assert!(!id.help().is_empty());
