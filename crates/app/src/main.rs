@@ -592,7 +592,9 @@ fn main() -> eframe::Result {
         cfg.opus_bitrate_kbps = prefs.opus_bitrate;
         cfg.check_fake_lossless = prefs.check_fake_lossless;
         cfg.fallback_seed_argb = prefs.fallback_seed;
-        let offline = demo || std::env::var_os("NIKGOB_OFFLINE").is_some();
+        // A demo with the real services asks the real online metadata too
+        // (covers, lyrics, the graph of similar music).
+        let offline = (demo && !streams::real_in_demo()) || std::env::var_os("NIKGOB_OFFLINE").is_some();
         cfg.fetch_lyrics = !offline;
         cfg.fetch_cover_online = !offline;
         let mut meta = nikgob_runtime::MetadataConfig::new(settings.metadata.contact);

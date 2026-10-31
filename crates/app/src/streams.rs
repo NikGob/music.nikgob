@@ -20,8 +20,9 @@
 //! likes made as music videos, one of them with its song, and «AIYOU - Eve
 //! Music Video» whose song is only found by hand: «Найти песню…»).
 //! `NIKGOB_DEMO_REAL_STREAMS=1` registers the real services instead, with
-//! their folders inside the demo dir, so real results can be looked at
-//! without touching the user's library or accounts.
+//! their folders inside the demo dir, and turns the online metadata on
+//! (the contact from the demo dir's `settings.toml`), so real results can be
+//! looked at without touching the user's library or accounts.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
