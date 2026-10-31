@@ -1,31 +1,41 @@
-//! The wishlist pipeline (docs/stage3.md §3.5, §3.7): a new like of a
-//! stream-only track becomes an item; items are searched on the indexer
-//! (artist + album, then artist + title; ranked like the torrent search:
-//! FLAC first, release match, seeders, sane size), the track's file (or the
-//! whole album) is picked from the best release and downloaded by the
-//! torrent client, and the importer attaches the file to the item's track
-//! (the job's [`ImportTargets`]). A doubtful release waits in "Подтверди";
-//! nothing found → "нет торрента", a toast, and a search again a week later
-//! until the user dismisses it. Items from an import wait for the user's
-//! "скачать". At most [`nikgob_view::Prefs::auto_download_limit`] items search
-//! or download at once.
+//! The wishlist pipeline (docs/stage3.md §3.5, §3.7, docs/stage4.5.md): a
+//! new like of a stream-only track becomes an item; items are searched in
+//! every download source that is on (torrents through the indexer,
+//! khinsider, the free FLAC services, Soulseek), the offers that are the
+//! wished track or album are ranked by one quality policy (lossless first,
+//! then the user's order of the sources; see [`nikgob_sources::select`]),
+//! and the best sure one is downloaded: a torrent's file (or the whole
+//! album) picked from its list by the torrent client, the files of any
+//! other source written into `Downloads/.sources/<item>`. The importer
+//! attaches them to the item's track (the job's [`ImportTargets`]). A
+//! doubtful offer waits in "Подтверди"; nothing anywhere → «не нашёл», a
+//! toast, and a search again a week later until the user dismisses it.
+//! Items from an import wait for the user's "скачать". At most
+//! [`nikgob_view::Prefs::auto_download_limit`] items search or download at
+//! once.
 //!
-//! The way out without a torrent: the audio saved from YouTube Music as it
-//! is (a low-quality local source a later torrent upgrades), or a .torrent,
-//! magnet, file or folder of the user's own, linked to the item's track.
+//! The way out without any source: the audio saved from YouTube Music as
+//! it is (a low-quality local copy), or a .torrent, magnet, file or folder
+//! of the user's own, linked to the item's track. A copy does not close the
+//! item: it keeps looking once a week in every source, and what is better
+//! than the copy downloads at once and replaces it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
-use nikgob_core::indexer::{Candidate, SearchQuery, TorrentPayload};
+use nikgob_core::indexer::{Candidate, TorrentPayload};
 use nikgob_core::model::{
     ReleaseId, SourceKind, SourceOrigin, TrackId, WishlistId, WishlistItem, WishlistOrigin,
     WishlistScope, WishlistStatus, score,
 };
+use nikgob_core::source::{Fetched, Offer, Source, SourceError, SourceKey, Want, WantScope};
 use nikgob_core::streaming::{EntityKind, Service, StreamError};
 use nikgob_import::ImportTargets;
-use nikgob_metadata::text::{album_key, artist_key, parse_filename, search_artist, search_title, similarity, title_key};
+use nikgob_metadata::text::{artist_key, title_key};
+use nikgob_sources::select::{pick, rank};
+use nikgob_sources::torrent::{candidate_of, offer_of, pick_files};
 use nikgob_view::{self as v, Command};
 
 use super::Msg;
@@ -36,35 +46,38 @@ use crate::Worker;
 pub(crate) const WISH_ID: u64 = 1 << 47;
 /// An item without a torrent is searched again after this.
 const RETRY_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
-/// Releases offered in "Подтверди".
+/// Offers shown in "Подтверди".
 const CONFIRM_OPTIONS: usize = 3;
 /// The note of an item whose files wait in «Подтверди» (docs/stage4.md §12.4).
 pub(crate) const FILES_WAIT: &str = "Файлы ждут подтверждения";
-/// A release title must name the artist this well (0..=1).
-const ARTIST_MATCH: f64 = 0.85;
-/// A file name must be this close to the track title (0..=1)…
-const FILE_TITLE: f64 = 0.85;
-/// …or this close when its number is the track's.
-const FILE_NUMBERED: f64 = 0.4;
-
-const AUDIO_EXT: &[&str] = &[
-    "flac", "mp3", "m4a", "ogg", "opus", "wav", "ape", "wv", "aac", "alac", "aiff", "aif",
-];
+/// The note of an item nothing was found for.
+const NOT_FOUND: &str = "Не нашёл, где скачать — поищу снова через неделю";
+/// The note of an item that has a copy saved from YouTube.
+const HAS_COPY: &str = "Есть копия с YouTube — раз в неделю ищу качество лучше";
+/// A source's search at most (the indexer's variants take a minute each).
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(300);
+/// A download of a source other than torrents at most.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Where the files of sources other than torrents land, under Downloads/.
+const SOURCES_DIR: &str = ".sources";
 
 /// Messages of the pipeline's background steps.
 pub(crate) enum WishMsg {
     Searched {
         item: WishlistId,
-        result: Result<Vec<Candidate>, String>,
+        result: Result<Vec<Offer>, String>,
+        /// The sources that answered, and the ones that could not (why).
+        answered: Vec<SourceKey>,
+        down: Vec<(SourceKey, SourceError)>,
     },
     Fetched {
         item: WishlistId,
-        cand: Box<Candidate>,
-        result: Result<TorrentPayload, String>,
+        offer: Box<Offer>,
+        result: Result<Fetched, String>,
     },
     Inspected {
         item: WishlistId,
-        cand: Box<Candidate>,
+        offer: Box<Offer>,
         payload: TorrentPayload,
         result: Result<nikgob_torrent::TorrentMeta, String>,
     },
@@ -77,15 +90,33 @@ pub(crate) enum WishMsg {
 
 #[derive(Default)]
 pub(crate) struct WishState {
-    /// Ranked releases of items being handled, best first.
-    cands: HashMap<WishlistId, Vec<Candidate>>,
+    /// Sure offers of items being handled, the one tried first.
+    cands: HashMap<WishlistId, Vec<Offer>>,
+    /// Doubtful offers of those items: «Подтверди» when the sure ones fail.
+    doubtful: HashMap<WishlistId, Vec<Offer>>,
     /// Stable "Подтверди" ids.
     confirm_ids: HashMap<WishlistId, u64>,
     next_confirm: u64,
     /// Audio saved from YouTube that the importer is taking, by file.
     saving: HashMap<PathBuf, WishlistId>,
-    /// How much of an item's torrent is here (0..=100), while it downloads.
+    /// How much of an item's download is here (0..=100), while it downloads.
     pub(crate) progress: HashMap<WishlistId, u8>,
+    /// Folders of the downloads of sources other than torrents, by item;
+    /// they go once the import took the files.
+    direct: HashMap<WishlistId, PathBuf>,
+    /// How far those downloads are, as their tasks write it.
+    live: Arc<parking_lot::Mutex<HashMap<WishlistId, u8>>>,
+    /// Sources that could not answer their last search, and why.
+    pub(crate) down: HashMap<SourceKey, String>,
+    /// Who an item's file comes from, while it downloads.
+    from: HashMap<WishlistId, String>,
+}
+
+impl WishState {
+    /// The direct downloads' progress, for the rows.
+    pub(crate) fn direct_progress(&self) -> HashMap<WishlistId, u8> {
+        self.live.lock().clone()
+    }
 }
 
 /// What asking for a download did.
@@ -99,159 +130,22 @@ pub(crate) enum Wished {
     Nothing,
 }
 
-/// What an item wants, for building queries and picking files.
-#[derive(Clone, Debug)]
-pub(crate) struct Want {
-    pub(crate) artist: String,
-    pub(crate) album: Option<String>,
-    pub(crate) title: Option<String>,
-    pub(crate) track_no: u32,
-    pub(crate) disc_no: u32,
-    pub(crate) scope: WishlistScope,
-}
-
-/// Indexer queries, most specific first.
-pub(crate) fn queries(w: &Want) -> Vec<String> {
-    let artist = search_artist(&w.artist);
-    let mut out = Vec::new();
-    if let Some(a) = &w.album {
-        out.push(format!("{artist} {}", search_title(a)));
+/// A source that could not answer, in words for «Источники».
+fn down_text(e: &SourceError) -> String {
+    match e {
+        SourceError::Blocked(_) => "Не пускает — попробую позже".into(),
+        SourceError::RateLimited { .. } => "Просит подождать — попробую позже".into(),
+        SourceError::Http { status } => format!("Отвечает ошибкой {status}"),
+        _ => "Не отвечает".into(),
     }
-    if w.scope == WishlistScope::Track
-        && let Some(t) = &w.title
-    {
-        out.push(format!("{artist} {}", search_title(t)));
-    }
-    out.dedup();
-    out
 }
 
-/// The folded words of `needle` all occur in `hay` (both folded keys).
-fn contains_words(hay: &str, needle: &str) -> bool {
-    !needle.is_empty() && needle.split(' ').all(|w| hay.split(' ').any(|h| h == w))
-}
-
-/// Ranks releases for `w`: those naming the artist, by the torrent search's
-/// score; `true` = sure enough to download without asking (lossless, names
-/// the album or the title, has seeders).
-pub(crate) fn rank(cands: Vec<Candidate>, w: &Want) -> Vec<(Candidate, bool)> {
-    let artist = artist_key(&w.artist);
-    let album = w.album.as_deref().map(album_key);
-    let title = w.title.as_deref().map(|t| title_key(t).base);
-    let query = queries(w).into_iter().next().unwrap_or_default();
-    let mut scored: Vec<(f64, Candidate, bool)> = cands
-        .into_iter()
-        .filter_map(|c| {
-            let hay = title_key(&c.title).base;
-            let names_artist = contains_words(&hay, &artist)
-                || hay
-                    .split(" - ")
-                    .next()
-                    .is_some_and(|head| similarity(head.trim(), &artist) >= ARTIST_MATCH);
-            if !names_artist {
-                return None;
-            }
-            let names_it = album.as_deref().is_some_and(|a| contains_words(&hay, a))
-                || (w.scope == WishlistScope::Track
-                    && title.as_deref().is_some_and(|t| contains_words(&hay, t)));
-            let lossless = crate::search::guess_format(&c.title)
-                .is_some_and(|f| ["FLAC", "ALAC", "WAV", "APE"].iter().any(|l| f.starts_with(l)));
-            let seeded = c.seeders.is_some_and(|s| s > 0);
-            let s = crate::search::score(&c, &query);
-            Some((s, c, names_it && lossless && seeded))
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-    scored.into_iter().map(|(_, c, sure)| (c, sure)).collect()
-}
-
-fn ext_of(path: &str) -> String {
-    Path::new(path)
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
+/// Offers saved in an item before stage 4.5 were the indexer's candidates.
+fn offers_of_json(json: &str) -> Vec<Offer> {
+    serde_json::from_str::<Vec<Offer>>(json)
+        .ok()
+        .or_else(|| serde_json::from_str::<Vec<Candidate>>(json).ok().map(|c| c.into_iter().map(offer_of).collect()))
         .unwrap_or_default()
-}
-
-/// The disc a path is on, from a "CD2" / "Disc 2" / "Disk 2" folder.
-fn disc_of(path: &str) -> Option<u32> {
-    let lower = path.to_lowercase();
-    for part in lower.split('/').rev().skip(1) {
-        let p = part.trim();
-        for prefix in ["cd", "disc", "disk", "диск"] {
-            if let Some(rest) = p.strip_prefix(prefix) {
-                let digits: String = rest
-                    .trim_start_matches([' ', '_', '-', '.'])
-                    .chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect();
-                if let Ok(n) = digits.parse() {
-                    return Some(n);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// The files to download for `w`: the track's file (fuzzy title, or its
-/// number with a similar title, on its disc), or every audio file of the
-/// album. `None` when the torrent does not have it.
-pub(crate) fn pick_files(files: &[(usize, String, u64)], w: &Want) -> Option<Vec<usize>> {
-    let audio: Vec<&(usize, String, u64)> = files
-        .iter()
-        .filter(|(_, p, _)| AUDIO_EXT.contains(&ext_of(p).as_str()))
-        .collect();
-    if audio.is_empty() {
-        return None;
-    }
-    match (w.scope, &w.title) {
-        (WishlistScope::Track, Some(title)) => {
-            let want = title_key(title).base;
-            let mut best: Option<(f64, usize)> = None;
-            for (index, path, _) in &audio {
-                if let Some(d) = disc_of(path)
-                    && d != w.disc_no.max(1)
-                {
-                    continue;
-                }
-                let name = path.rsplit('/').next().unwrap_or(path);
-                let parsed = parse_filename(name);
-                let stem = Path::new(name)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let got = title_key(parsed.title.as_deref().unwrap_or(&stem)).base;
-                let sim = similarity(&got, &want).max(similarity(&title_key(&stem).base, &want));
-                let numbered = w.track_no > 0 && parsed.track_no == Some(w.track_no);
-                if sim >= FILE_TITLE || (numbered && sim >= FILE_NUMBERED) {
-                    let rank = sim + if numbered { 0.5 } else { 0.0 };
-                    if best.is_none_or(|(r, _)| rank > r) {
-                        best = Some((rank, *index));
-                    }
-                }
-            }
-            best.map(|(_, i)| vec![i])
-        }
-        _ => {
-            // A torrent of several albums: the folder named like the album.
-            let album = w.album.as_deref().map(album_key);
-            let in_album: Vec<usize> = audio
-                .iter()
-                .filter(|(_, p, _)| {
-                    album.as_deref().is_some_and(|a| {
-                        let dirs = p.rsplit_once('/').map_or("", |(d, _)| d);
-                        contains_words(&title_key(dirs).base, a)
-                    })
-                })
-                .map(|(i, ..)| *i)
-                .collect();
-            Some(if in_album.is_empty() {
-                audio.iter().map(|(i, ..)| *i).collect()
-            } else {
-                in_album
-            })
-        }
-    }
 }
 
 fn status_rank(s: WishlistStatus) -> u8 {
@@ -266,10 +160,6 @@ fn status_rank(s: WishlistStatus) -> u8 {
         WishlistStatus::Done => 7,
         WishlistStatus::Dismissed => 8,
     }
-}
-
-fn human_size(b: Option<u64>) -> Option<String> {
-    b.map(crate::torrents::human_bytes)
 }
 
 impl Worker {
@@ -540,11 +430,11 @@ impl Worker {
                 }
             ),
         };
-        if self.indexer.is_some() {
+        if self.can_download() {
             self.toast_open(text, "Открыть", wishlist);
         } else {
             self.toast_open(
-                format!("{text} · скачается, когда подключишь торренты"),
+                format!("{text} · скачается, когда включишь источник скачивания"),
                 "Настроить",
                 v::Link::Setting(v::SettingLink::Torrents),
             );
@@ -667,34 +557,124 @@ impl Worker {
         }
     }
 
-    fn want_of(&self, item: &WishlistItem) -> Want {
+    pub(crate) fn want_of(&self, item: &WishlistItem) -> Want {
         let track = item.track_id.and_then(|t| self.lib.get_track(t).ok().flatten());
         let release = item
             .release_id
             .or(track.as_ref().and_then(|t| t.release_id))
             .and_then(|r| self.lib.get_release(r).ok().flatten());
+        // The credited names, the album's artist first (a soundtrack's
+        // songs are credited to their singers).
+        let mut artists: Vec<String> = Vec::new();
+        let credits = release
+            .iter()
+            .flat_map(|r| r.artist_credit.0.iter())
+            .chain(track.iter().flat_map(|t| t.artist_credit.0.iter()));
+        let mut main = None;
+        for part in credits {
+            let name = part.name.trim();
+            if name.is_empty() || artists.iter().any(|a| a == name) {
+                continue;
+            }
+            main = main.or(part.artist_id);
+            artists.push(name.to_owned());
+        }
+        if artists.is_empty()
+            && let Some(a) = item.artist.as_deref().filter(|a| !a.trim().is_empty())
+        {
+            artists.push(a.trim().to_owned());
+        }
+        // Other spellings of the main artist: its own name and its aliases.
+        let mut aliases: Vec<String> = Vec::new();
+        if let Some(id) = main {
+            if let Some(a) = self.lib.get_artist(id).ok().flatten()
+                && Some(&a.name) != artists.first()
+            {
+                aliases.push(a.name);
+            }
+            for (who, name) in self.lib.artist_aliases().unwrap_or_default() {
+                if who == id && !aliases.contains(&name) && Some(&name) != artists.first() {
+                    aliases.push(name);
+                }
+            }
+        }
         Want {
-            artist: release
-                .as_ref()
-                .map(|r| r.artist_credit.display())
-                .filter(|a| !a.is_empty())
-                .or_else(|| item.artist.clone())
-                .unwrap_or_default(),
+            artists,
+            aliases,
             album: release.as_ref().map(|r| r.title.clone()),
-            title: track.as_ref().map(|t| t.title.clone()).or_else(|| item.title.clone()),
+            title: match item.scope {
+                WishlistScope::Track => track.as_ref().map(|t| t.title.clone()).or_else(|| item.title.clone()),
+                WishlistScope::Album => None,
+            },
+            scope: match item.scope {
+                WishlistScope::Track => WantScope::Track,
+                WishlistScope::Album => WantScope::Album,
+            },
             track_no: track.as_ref().map_or(0, |t| t.track_no),
             disc_no: track.as_ref().map_or(1, |t| t.disc_no),
-            scope: item.scope,
+            duration_ms: track.as_ref().and_then(|t| t.duration_ms),
+            isrc: track.as_ref().and_then(|t| t.isrc.clone()).or_else(|| item.isrc.clone()),
+            album_tracks: release.as_ref().and_then(|r| r.total_tracks).unwrap_or(0),
         }
+    }
+
+    /// The download sources that are on, in the user's order: the indexer's
+    /// torrents (once Prowlarr is set up) and the sources the app has.
+    pub(crate) fn download_sources(&self) -> Vec<Arc<dyn Source>> {
+        let order = self.state.read().prefs.source_order();
+        let mut all: Vec<Arc<dyn Source>> = self.sources.clone();
+        if let Some(i) = &self.indexer {
+            all.push(Arc::new(nikgob_sources::torrent::IndexerSource::new(i.clone())));
+        }
+        order
+            .iter()
+            .filter(|s| s.on)
+            .filter_map(|s| all.iter().find(|x| x.key() == s.key).cloned())
+            .collect()
+    }
+
+    /// Something can search for the items by itself.
+    pub(crate) fn can_download(&self) -> bool {
+        !self.download_sources().is_empty()
+    }
+
+    /// The quality of the copy `item`'s track has (saved from YouTube),
+    /// if that is all it has.
+    fn copy_quality(&self, item: &WishlistItem) -> Option<i32> {
+        let src = self.lib.active_source(item.track_id?).ok().flatten()?;
+        (src.kind.is_local() && src.quality_score <= score::SAVED_STREAM).then_some(src.quality_score)
+    }
+
+    /// «Источники»: every source in the user's order, what the app has,
+    /// and how the last search of each went.
+    pub(crate) fn publish_sources(&mut self) {
+        let order = self.state.read().prefs.source_order();
+        let down = self.streaming.wish.down.clone();
+        let have: Vec<SourceKey> = self.sources.iter().map(|s| s.key()).collect();
+        let indexer = self.indexer.is_some();
+        let rows: Vec<v::SourceView> = order
+            .iter()
+            .map(|s| v::SourceView {
+                key: s.key,
+                name: s.key.display_name().to_owned(),
+                available: if s.key == SourceKey::Torrents { indexer } else { have.contains(&s.key) },
+                status: down.get(&s.key).cloned(),
+            })
+            .collect();
+        let can = self.can_download();
+        self.publish(|st| {
+            st.downloads.sources = rows;
+            st.downloads.wishlist.can_search = can;
+        });
     }
 
     // ------------------------------------------------------------- scheduler
 
     /// Starts searches while there are free slots.
     pub(crate) fn wish_tick(&mut self) {
-        let (Some(_), Some(_)) = (self.indexer.as_ref(), self.import.as_ref()) else {
+        if self.import.is_none() || !self.can_download() {
             return;
-        };
+        }
         let limit = self.state.read().prefs.auto_download_limit.max(1) as usize;
         let busy = [WishlistStatus::Searching, WishlistStatus::Downloading]
             .iter()
@@ -725,6 +705,8 @@ impl Worker {
             .filter(|i| !covered.contains(&i.id))
             .collect();
         if due.len() < free {
+            // The weekly search of what was not found, or has only the
+            // YouTube copy.
             due.extend(
                 self.lib
                     .wishlist_due(WishlistStatus::NoTorrent, now, ask)
@@ -743,10 +725,12 @@ impl Worker {
     }
 
     fn wish_search(&mut self, item: WishlistItem) {
-        let Some(indexer) = self.indexer.clone() else { return };
+        let sources = self.download_sources();
+        if sources.is_empty() {
+            return;
+        }
         let want = self.want_of(&item);
-        let qs = queries(&want);
-        if qs.is_empty() {
+        if want.artists.is_empty() || (want.title.is_none() && want.album.is_none()) {
             self.no_torrent(item.id, false);
             return;
         }
@@ -754,26 +738,53 @@ impl Worker {
         self.set_item(id, |i| {
             i.status = WishlistStatus::Searching;
             i.attempts += 1;
-            i.note = Some("Ищу раздачу…".into());
+            i.note = Some("Ищу…".into());
         });
-        log::info!("wishlist: searching {qs:?}");
+        let names: Vec<&str> = sources.iter().map(|s| s.name()).collect();
+        log::info!(
+            "wishlist: searching {} — {} in {names:?}",
+            want.artist(),
+            want.title.as_deref().or(want.album.as_deref()).unwrap_or("?")
+        );
         self.streaming.spawn(async move {
-            let mut last_err = None;
-            for q in qs {
-                let mut query = SearchQuery::new(q);
-                query.limit = Some(100);
-                match tokio::time::timeout(Duration::from_secs(90), indexer.search(&query)).await {
-                    Ok(Ok(c)) if !c.is_empty() => {
-                        return Msg::Wish(WishMsg::Searched { item: id, result: Ok(c) });
+            let asks = sources.iter().map(|s| {
+                let s = s.clone();
+                let want = &want;
+                async move {
+                    let r = match tokio::time::timeout(SEARCH_TIMEOUT, s.search(want)).await {
+                        Ok(r) => r,
+                        Err(_) => Err(SourceError::Unreachable("no answer in time".into())),
+                    };
+                    (s.key(), r)
+                }
+            });
+            let mut offers = Vec::new();
+            let (mut answered, mut down) = (Vec::new(), Vec::new());
+            for (key, r) in futures_util::future::join_all(asks).await {
+                match r {
+                    Ok(o) => {
+                        log::info!("wishlist: {} offers from {key:?}", o.len());
+                        offers.extend(o);
+                        answered.push(key);
                     }
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => last_err = Some(e.to_string()),
-                    Err(_) => last_err = Some("индексатор не ответил".into()),
+                    Err(SourceError::NotConfigured) => {}
+                    Err(e) => {
+                        log::warn!("wishlist: {key:?}: {e}");
+                        down.push((key, e));
+                    }
                 }
             }
+            // Nobody could answer: not "not found", just later.
+            let result = if answered.is_empty() && !down.is_empty() {
+                Err(down.iter().map(|(k, e)| format!("{}: {e}", k.display_name())).collect::<Vec<_>>().join("; "))
+            } else {
+                Ok(offers)
+            };
             Msg::Wish(WishMsg::Searched {
                 item: id,
-                result: last_err.map_or(Ok(Vec::new()), Err),
+                result,
+                answered,
+                down,
             })
         });
         self.publish_wishlist();
@@ -781,83 +792,223 @@ impl Worker {
 
     pub(crate) fn wish_msg(&mut self, m: WishMsg) {
         match m {
-            WishMsg::Searched { item, result } => self.wish_searched(item, result),
-            WishMsg::Fetched { item, cand, result } => match result {
-                Ok(p) => self.wish_inspect(item, *cand, p),
+            WishMsg::Searched {
+                item,
+                result,
+                answered,
+                down,
+            } => {
+                for k in answered {
+                    self.streaming.wish.down.remove(&k);
+                }
+                for (k, e) in &down {
+                    self.streaming.wish.down.insert(*k, down_text(e));
+                }
+                self.publish_sources();
+                self.wish_searched(item, result);
+            }
+            WishMsg::Fetched { item, offer, result } => match result {
+                Ok(Fetched::Torrent(p)) => self.wish_inspect(item, *offer, p),
+                Ok(Fetched::Files(files)) => self.wish_files(item, *offer, files),
                 Err(e) => {
-                    log::warn!("wishlist: fetching {}: {e}", cand.title);
+                    log::warn!("wishlist: fetching {} from {:?}: {e}", offer.title, offer.source);
+                    self.streaming.wish.live.lock().remove(&item);
+                    self.drop_direct(item);
                     self.wish_next_candidate(item);
                 }
             },
             WishMsg::Inspected {
                 item,
-                cand,
+                offer,
                 payload,
                 result,
-            } => self.wish_inspected(item, *cand, payload, result),
+            } => self.wish_inspected(item, *offer, payload, result),
             WishMsg::Saved { item, track, result } => self.wish_saved(item, track, result),
         }
     }
 
-    fn wish_searched(&mut self, id: WishlistId, result: Result<Vec<Candidate>, String>) {
+    fn wish_searched(&mut self, id: WishlistId, result: Result<Vec<Offer>, String>) {
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
         if item.status != WishlistStatus::Searching {
             return; // dismissed meanwhile
         }
-        let cands = match result {
+        let offers = match result {
             Ok(c) => c,
             Err(e) => {
-                // The indexer is down: not "no torrent", just later.
+                // The sources are down: not "not found", just later.
                 log::warn!("wishlist search: {e}");
                 self.set_item(id, |i| {
                     i.status = WishlistStatus::New;
                     i.next_try_at = Some(Self::now() + 3_600_000);
-                    i.note = Some(format!("Поиск не удался: {e}"));
+                    i.note = Some("Источники не ответили — попробую через час".into());
                 });
                 self.publish_wishlist();
                 return;
             }
         };
         let want = self.want_of(&item);
-        let ranked = rank(cands, &want);
-        let Some((best, sure)) = ranked.first().cloned() else {
+        let order: Vec<SourceKey> = self.state.read().prefs.source_order().iter().map(|s| s.key).collect();
+        let copy = self.copy_quality(&item);
+        let ranked: Vec<_> = rank(offers, &want, &order)
+            .into_iter()
+            // With a copy, only what is better than it.
+            .filter(|r| copy.is_none_or(|q| r.offer.quality() > q))
+            .collect();
+        if ranked.is_empty() {
             self.no_torrent(id, true);
             return;
-        };
-        let list: Vec<Candidate> = ranked.into_iter().map(|(c, _)| c).collect();
-        if sure {
-            self.streaming.wish.cands.insert(id, list);
-            self.wish_fetch(id, best);
-        } else {
-            // Doubtful: the user picks among the best few.
-            let shown: Vec<Candidate> = list.into_iter().take(CONFIRM_OPTIONS).collect();
-            let json = serde_json::to_string(&shown).ok();
-            self.set_item(id, |i| {
-                i.status = WishlistStatus::Confirm;
-                i.candidates_json = json;
-                i.note = Some("Не уверен в раздаче — выбери".into());
-            });
-            self.publish_wishlist();
+        }
+        match pick(&ranked, copy) {
+            Some(first) => {
+                // The sure ones of the same quality or better, the picked first.
+                let floor = ranked[first].offer.quality();
+                let mut sure: Vec<Offer> = vec![ranked[first].offer.clone()];
+                sure.extend(
+                    ranked
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, r)| *i != first && r.verdict.sure && r.offer.quality() >= floor)
+                        .map(|(_, r)| r.offer.clone()),
+                );
+                let doubtful: Vec<Offer> = ranked.iter().filter(|r| !r.verdict.sure).map(|r| r.offer.clone()).collect();
+                let best = sure[0].clone();
+                self.streaming.wish.cands.insert(id, sure);
+                self.streaming.wish.doubtful.insert(id, doubtful);
+                self.wish_fetch(id, best);
+            }
+            None => {
+                let shown: Vec<Offer> = ranked.into_iter().take(CONFIRM_OPTIONS).map(|r| r.offer).collect();
+                self.ask_confirm(id, &shown);
+            }
         }
     }
 
-    fn wish_fetch(&mut self, id: WishlistId, cand: Candidate) {
-        let Some(indexer) = self.indexer.clone() else { return };
-        self.set_item(id, |i| i.note = Some(format!("Раздача: {}", cand.title)));
+    /// The user picks among `shown` in «Подтверди».
+    fn ask_confirm(&mut self, id: WishlistId, shown: &[Offer]) {
+        let json = serde_json::to_string(shown).ok();
+        self.set_item(id, |i| {
+            i.status = WishlistStatus::Confirm;
+            i.candidates_json = json;
+            i.note = Some("Не уверен, что это оно — выбери".into());
+        });
+        self.publish_wishlist();
+    }
+
+    /// The source of an offer, on or not (a pick in «Подтверди» from a
+    /// source switched off since still downloads).
+    fn source_of(&self, key: SourceKey) -> Option<Arc<dyn Source>> {
+        if key == SourceKey::Torrents {
+            return self
+                .indexer
+                .as_ref()
+                .map(|i| Arc::new(nikgob_sources::torrent::IndexerSource::new(i.clone())) as Arc<dyn Source>);
+        }
+        self.sources.iter().find(|s| s.key() == key).cloned()
+    }
+
+    /// The folder a direct download of `item` writes into.
+    fn direct_dir(&self, item: WishlistId) -> PathBuf {
+        let root = match &self.import {
+            Some(svc) => svc.config().downloads_dir.join(SOURCES_DIR),
+            None => std::env::temp_dir().join("nikgob-sources"),
+        };
+        root.join(item.to_string())
+    }
+
+    /// The folder of `item`'s direct download goes (the import took it, or
+    /// it failed).
+    fn drop_direct(&mut self, item: WishlistId) {
+        if let Some(dir) = self.streaming.wish.direct.remove(&item)
+            && dir.exists()
+            && let Err(e) = std::fs::remove_dir_all(&dir)
+        {
+            log::warn!("removing {}: {e}", dir.display());
+        }
+    }
+
+    fn wish_fetch(&mut self, id: WishlistId, offer: Offer) {
+        let Some(source) = self.source_of(offer.source) else {
+            self.wish_next_candidate(id);
+            return;
+        };
+        let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
+        let want = self.want_of(&item);
+        let torrent = offer.source == SourceKey::Torrents;
+        let dest = self.direct_dir(id);
+        let from = if offer.provider.is_empty() { offer.source.display_name().to_owned() } else { offer.provider.clone() };
+        self.streaming.wish.from.insert(id, from);
+        if torrent {
+            self.set_item(id, |i| i.note = Some(format!("Раздача: {}", offer.title)));
+        } else {
+            let _ = std::fs::remove_dir_all(&dest);
+            if let Err(e) = std::fs::create_dir_all(&dest) {
+                log::warn!("{}: {e}", dest.display());
+                self.toast("Не получилось создать папку для загрузки", None);
+                return;
+            }
+            self.streaming.wish.direct.insert(id, dest.clone());
+            self.streaming.wish.live.lock().insert(id, 0);
+            let note = format!("{} · {}", offer.detail(), offer.title);
+            self.set_item(id, |i| {
+                i.status = WishlistStatus::Downloading;
+                i.note = Some(note);
+            });
+        }
+        let live = self.streaming.wish.live.clone();
+        let size = offer.size_bytes;
+        let progress: nikgob_core::source::Progress = Arc::new(move |done, total| {
+            if let Some(t) = total.or(size).filter(|t| *t > 0) {
+                let pct = (done.saturating_mul(100) / t).min(99) as u8;
+                live.lock().insert(id, pct);
+            }
+        });
         self.streaming.spawn(async move {
-            let result = tokio::time::timeout(Duration::from_secs(60), indexer.fetch_torrent(&cand))
-                .await
-                .map_err(|_| "индексатор не отдал торрент".to_owned())
-                .and_then(|r| r.map_err(|e| e.to_string()));
+            let limit = if torrent { Duration::from_secs(120) } else { FETCH_TIMEOUT };
+            let result = match tokio::time::timeout(limit, source.fetch(&offer, &want, &dest, progress)).await {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(_) => Err("не скачалось за отведённое время".to_owned()),
+            };
             Msg::Wish(WishMsg::Fetched {
                 item: id,
-                cand: Box::new(cand),
+                offer: Box::new(offer),
                 result,
             })
         });
+        self.publish_wishlist();
     }
 
-    fn wish_inspect(&mut self, id: WishlistId, cand: Candidate, payload: TorrentPayload) {
+    /// A source other than torrents brought its files: the import takes
+    /// them for the item, as a file the user handed in would be.
+    fn wish_files(&mut self, id: WishlistId, offer: Offer, files: Vec<PathBuf>) {
+        self.streaming.wish.live.lock().remove(&id);
+        let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else {
+            self.drop_direct(id);
+            return;
+        };
+        if matches!(item.status, WishlistStatus::Dismissed | WishlistStatus::Done) || files.is_empty() {
+            self.drop_direct(id);
+            if files.is_empty() {
+                self.wish_next_candidate(id);
+            }
+            return;
+        }
+        let one = files.len() == 1 && item.scope == WishlistScope::Track && self.targets_of(&item).len() == 1;
+        let targets = self.item_targets(&item, one);
+        let title = format!("{}: {}", offer.provider, item.title.clone().unwrap_or_default());
+        let note = format!("{} · {}", offer.detail(), offer.title);
+        if self.import_for(files, title, SourceOrigin::Inbox, targets) {
+            self.set_item(id, |i| {
+                i.status = WishlistStatus::Downloading;
+                i.note = Some(note);
+            });
+        } else {
+            self.drop_direct(id);
+            self.wish_next_candidate(id);
+        }
+        self.publish_wishlist();
+    }
+
+    fn wish_inspect(&mut self, id: WishlistId, offer: Offer, payload: TorrentPayload) {
         let tx = self.streaming.internal.clone();
         self.with_client(Box::new(move |w, c| {
             let Some(svc) = &w.import else { return };
@@ -865,7 +1016,7 @@ impl Worker {
                 let result = c.inspect(payload.clone()).await.map_err(|e| e.to_string());
                 let _ = tx.send(crate::import::Internal::Stream(Msg::Wish(WishMsg::Inspected {
                     item: id,
-                    cand: Box::new(cand),
+                    offer: Box::new(offer),
                     payload,
                     result,
                 })));
@@ -876,7 +1027,7 @@ impl Worker {
     fn wish_inspected(
         &mut self,
         id: WishlistId,
-        cand: Candidate,
+        offer: Offer,
         payload: TorrentPayload,
         result: Result<nikgob_torrent::TorrentMeta, String>,
     ) {
@@ -887,7 +1038,7 @@ impl Worker {
         let meta = match result {
             Ok(m) => m,
             Err(e) => {
-                log::warn!("wishlist: listing {}: {e}", cand.title);
+                log::warn!("wishlist: listing {}: {e}", offer.title);
                 self.wish_next_candidate(id);
                 return;
             }
@@ -895,23 +1046,24 @@ impl Worker {
         let files: Vec<(usize, String, u64)> = meta.files.iter().map(|f| (f.index, f.path.clone(), f.size)).collect();
         let want = self.want_of(&item);
         let Some(picked) = pick_files(&files, &want) else {
-            log::info!("wishlist: {} has no file of {:?}", cand.title, want.title);
+            log::info!("wishlist: {} has no file of {:?}", offer.title, want.title);
             self.wish_next_candidate(id);
             return;
         };
         let size: u64 = files.iter().filter(|(i, ..)| picked.contains(i)).map(|(.., s)| s).sum();
-        let format = crate::search::guess_format(&cand.title).unwrap_or_else(|| "?".into());
+        let format = offer.format.as_ref().map_or_else(|| "?".to_owned(), |f| f.label());
+        let seeders = candidate_of(&offer).and_then(|c| c.seeders).unwrap_or(0);
         let note = format!(
-            "{format} · {} · {} сид. · {}",
+            "{format} · {} · {seeders} сид. · {}",
             crate::torrents::human_bytes(size),
-            cand.seeders.unwrap_or(0),
-            cand.title
+            offer.title
         );
         self.set_item(id, |i| {
             i.status = WishlistStatus::Downloading;
             i.note = Some(note);
         });
         self.streaming.wish.cands.remove(&id);
+        self.streaming.wish.doubtful.remove(&id);
         let magnet = match &payload {
             TorrentPayload::Magnet(m) => Some(m.clone()),
             TorrentPayload::TorrentFile(_) => None,
@@ -920,7 +1072,8 @@ impl Worker {
         self.publish_wishlist();
     }
 
-    /// The release did not work out: the next ranked one, else no torrent.
+    /// The offer did not work out: the next sure one, else the doubtful
+    /// ones in «Подтверди», else not found.
     fn wish_next_candidate(&mut self, id: WishlistId) {
         let next = match self.streaming.wish.cands.get_mut(&id) {
             Some(list) if !list.is_empty() => {
@@ -933,20 +1086,27 @@ impl Worker {
             Some(c) => self.wish_fetch(id, c),
             None => {
                 self.streaming.wish.cands.remove(&id);
-                self.no_torrent(id, true);
+                let doubtful = self.streaming.wish.doubtful.remove(&id).unwrap_or_default();
+                if doubtful.is_empty() {
+                    self.no_torrent(id, true);
+                } else {
+                    let shown: Vec<Offer> = doubtful.into_iter().take(CONFIRM_OPTIONS).collect();
+                    self.ask_confirm(id, &shown);
+                }
             }
         }
     }
 
     fn no_torrent(&mut self, id: WishlistId, tell: bool) {
+        let copy = self.lib.get_wishlist_item(id).ok().flatten().is_some_and(|i| self.copy_quality(&i).is_some());
         let Some(item) = self.set_item(id, |i| {
             i.status = WishlistStatus::NoTorrent;
             i.next_try_at = Some(Self::now() + RETRY_AFTER.as_millis() as i64);
-            i.note = Some("Не нашёл раздачу — поищу снова через неделю".into());
+            i.note = Some(if copy { HAS_COPY } else { NOT_FOUND }.into());
         }) else {
             return;
         };
-        if tell && self.state.read().prefs.download_toasts {
+        if tell && !copy && self.state.read().prefs.download_toasts {
             let what = match (&item.artist, &item.title) {
                 (Some(a), Some(t)) => format!("{a} — {t}"),
                 (_, Some(t)) => t.clone(),
@@ -954,7 +1114,7 @@ impl Worker {
             };
             let action = (item.track_id.is_some() && self.service(Service::Youtube).is_some())
                 .then(|| ("Сохранить с YouTube".to_owned(), Command::WishlistSaveFromYoutube(id)));
-            self.toast(format!("Не нашёл раздачу: {what}"), action);
+            self.toast(format!("Не нашёл, где скачать: {what}"), action);
         }
         self.publish_wishlist();
     }
@@ -1076,15 +1236,12 @@ impl Worker {
             return;
         };
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
-        let cands: Vec<Candidate> = item
-            .candidates_json
-            .as_deref()
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default();
-        match option.and_then(|i| cands.get(i).cloned()) {
+        let offers = item.candidates_json.as_deref().map(offers_of_json).unwrap_or_default();
+        match option.and_then(|i| offers.get(i).cloned()) {
             Some(c) => {
                 self.set_item(id, |i| i.status = WishlistStatus::Searching);
                 self.streaming.wish.cands.insert(id, vec![c.clone()]);
+                self.streaming.wish.doubtful.remove(&id);
                 self.wish_fetch(id, c);
             }
             None => self.no_torrent(id, false),
@@ -1215,7 +1372,7 @@ impl Worker {
             self.set_item(item, |i| {
                 i.status = WishlistStatus::NoTorrent;
                 i.next_try_at = Some(Self::now() + RETRY_AFTER.as_millis() as i64);
-                i.note = Some("Есть копия с YouTube (низкое качество) — ищу раздачу".into());
+                i.note = Some(HAS_COPY.into());
             });
             self.publish_wishlist();
             return;
@@ -1303,11 +1460,15 @@ impl Worker {
     /// track (every track of its album) has a file, else what is missing.
     pub(crate) fn wish_settle(&mut self, id: WishlistId) {
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
-        if matches!(item.status, WishlistStatus::Dismissed) {
+        if self.files_wait(id) {
+            if !matches!(item.status, WishlistStatus::Dismissed) {
+                self.wish_parked(id);
+            }
             return;
         }
-        if self.files_wait(id) {
-            self.wish_parked(id);
+        // A direct download was imported (or turned down): its copy goes.
+        self.drop_direct(id);
+        if matches!(item.status, WishlistStatus::Dismissed) {
             return;
         }
         let (status, note) = match item.scope {
@@ -1328,11 +1489,25 @@ impl Worker {
                         self.set_item(id, |i| i.status = WishlistStatus::Downloading);
                         self.publish_wishlist();
                     }
+                    // A direct download that did not become the track's
+                    // file (another song, a fake): the next offer.
+                    if item.status == WishlistStatus::Downloading
+                        && !self.torrent_of(id)
+                        && self.streaming.wish.from.remove(&id).is_some()
+                    {
+                        self.wish_next_candidate(id);
+                    }
                     return;
                 }
                 (WishlistStatus::Done, "Скачано".to_owned())
             }
         };
+        if status == WishlistStatus::Done {
+            let w = &mut self.streaming.wish;
+            w.cands.remove(&id);
+            w.doubtful.remove(&id);
+            w.from.remove(&id);
+        }
         self.set_item(id, |i| {
             i.status = status;
             i.next_try_at = None;
@@ -1356,10 +1531,53 @@ impl Worker {
         }
     }
 
-    /// After a restart: searches that were running start over.
+    /// How far the downloads of sources other than torrents are, on their
+    /// rows (each second; the torrents' come with theirs).
+    pub(crate) fn wish_poll_direct(&mut self) {
+        let live = self.streaming.wish.direct_progress();
+        let mut next = self.streaming.wish.progress.clone();
+        next.retain(|k, _| !self.streaming.wish.direct.contains_key(k) || live.contains_key(k));
+        next.extend(live);
+        if next == self.streaming.wish.progress {
+            return;
+        }
+        self.streaming.wish.progress = next.clone();
+        self.publish(|s| {
+            for r in &mut s.downloads.wishlist.items {
+                r.progress = next.get(&r.id).copied().filter(|_| r.status == WishlistStatus::Downloading);
+            }
+        });
+    }
+
+    /// The item downloads through a torrent of the torrent client.
+    fn torrent_of(&self, id: WishlistId) -> bool {
+        self.lib.list_downloads().unwrap_or_default().iter().any(|d| d.wishlist_id == Some(id))
+    }
+
+    /// After a restart: searches that were running start over, and so do
+    /// downloads of sources other than torrents (they do not go on), whose
+    /// folders go unless files of them wait in «Подтверди».
     pub(crate) fn wish_restart(&mut self) {
         for i in self.lib.list_wishlist_by_status(WishlistStatus::Searching).unwrap_or_default() {
             self.set_item(i.id, |i| i.status = WishlistStatus::New);
+        }
+        for i in self.lib.list_wishlist_by_status(WishlistStatus::Downloading).unwrap_or_default() {
+            if !self.torrent_of(i.id) && !self.files_wait(i.id) {
+                self.set_item(i.id, |i| {
+                    i.status = WishlistStatus::New;
+                    i.next_try_at = None;
+                });
+            }
+        }
+        if let Some(svc) = &self.import {
+            let root = svc.config().downloads_dir.join(SOURCES_DIR);
+            let waiting: Vec<String> = svc.pending().iter().filter_map(|p| p.wishlist.map(|w| w.to_string())).collect();
+            for dir in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+                let name = dir.file_name().to_string_lossy().into_owned();
+                if !waiting.contains(&name) {
+                    let _ = std::fs::remove_dir_all(dir.path());
+                }
+            }
         }
         // Files that waited in «Подтверди» may be gone since.
         for i in self.lib.list_wishlist_by_status(WishlistStatus::Confirm).unwrap_or_default() {
@@ -1454,6 +1672,12 @@ impl Worker {
                 }
             }
             let files_wait = item.status == WishlistStatus::Confirm && self.files_wait(item.id);
+            let copy = item.scope == WishlistScope::Track
+                && !matches!(item.status, WishlistStatus::Done | WishlistStatus::Dismissed)
+                && self.copy_quality(item).is_some();
+            let source = (item.status == WishlistStatus::Downloading)
+                .then(|| self.streaming.wish.from.get(&item.id).cloned())
+                .flatten();
             if item.status == WishlistStatus::Confirm && !files_wait {
                 confirms.push(self.wish_confirm_view(item));
             }
@@ -1492,10 +1716,19 @@ impl Worker {
                     && !matches!(item.status, WishlistStatus::Done | WishlistStatus::Dismissed),
                 cover: None,
                 progress: (item.status == WishlistStatus::Downloading)
-                    .then(|| self.streaming.wish.progress.get(&item.id).copied())
+                    .then(|| {
+                        self.streaming
+                            .wish
+                            .progress
+                            .get(&item.id)
+                            .copied()
+                            .or_else(|| self.streaming.wish.live.lock().get(&item.id).copied())
+                    })
                     .flatten(),
                 confirm_files: files_wait,
                 missing,
+                has_copy: copy,
+                source,
             });
             covers.push(release_id);
         }
@@ -1506,6 +1739,7 @@ impl Worker {
             by_album,
             by_artist,
             counts,
+            can_search: self.can_download(),
         };
         let mut view = view;
         for (row, release) in view.items.iter_mut().zip(covers) {
@@ -1528,11 +1762,7 @@ impl Worker {
                 n
             }
         };
-        let cands: Vec<Candidate> = item
-            .candidates_json
-            .as_deref()
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default();
+        let offers = item.candidates_json.as_deref().map(offers_of_json).unwrap_or_default();
         let what = match (&item.artist, &item.title) {
             (Some(a), Some(t)) => format!("{t} — {a}"),
             (_, Some(t)) => t.clone(),
@@ -1545,22 +1775,13 @@ impl Worker {
                 WishlistScope::Track => "Хочу скачать · трек".into(),
                 WishlistScope::Album => "Хочу скачать · альбом".into(),
             },
-            options: cands
+            options: offers
                 .iter()
                 .enumerate()
-                .map(|(i, c)| {
-                    let mut detail = Vec::new();
-                    detail.extend(crate::search::guess_format(&c.title));
-                    detail.extend(human_size(c.size_bytes));
-                    if let Some(s) = c.seeders {
-                        detail.push(format!("{s} сид."));
-                    }
-                    detail.push(c.indexer_name.clone());
-                    v::ConfirmOption {
-                        label: c.title.clone(),
-                        detail: detail.join(" · "),
-                        recommended: i == 0,
-                    }
+                .map(|(i, o)| v::ConfirmOption {
+                    label: o.title.clone(),
+                    detail: o.detail(),
+                    recommended: i == 0,
                 })
                 .collect(),
             skip_label: "Не то — поищу позже".into(),
@@ -1574,85 +1795,27 @@ mod tests {
     use super::*;
     use nikgob_core::indexer::CandidateHandle;
 
-    fn cand(title: &str, seeders: u32) -> Candidate {
-        Candidate {
-            id: title.into(),
-            title: title.into(),
-            indexer_name: "t".into(),
-            size_bytes: Some(400_000_000),
-            seeders: Some(seeders),
+    #[test]
+    fn offers_saved_before_the_sources_still_read() {
+        let old = vec![Candidate {
+            id: "1".into(),
+            title: "Кино - Группа крови (1988) [FLAC]".into(),
+            indexer_name: "RuTracker".into(),
+            size_bytes: Some(400 << 20),
+            seeders: Some(9),
             leechers: None,
             published: None,
-            categories: vec![],
+            categories: vec![3040],
             info_url: None,
             info_hash: None,
-            handle: CandidateHandle::default(),
-        }
-    }
-
-    fn want(scope: WishlistScope) -> Want {
-        Want {
-            artist: "Кино".into(),
-            album: Some("Группа крови".into()),
-            title: Some("Война".into()),
-            track_no: 3,
-            disc_no: 1,
-            scope,
-        }
-    }
-
-    #[test]
-    fn queries_name_the_album_then_the_track() {
-        assert_eq!(queries(&want(WishlistScope::Track)), ["Кино Группа крови", "Кино Война"]);
-        assert_eq!(queries(&want(WishlistScope::Album)), ["Кино Группа крови"]);
-    }
-
-    #[test]
-    fn releases_of_the_artist_ranked_flac_first_and_sure_only_when_lossless() {
-        let ranked = rank(
-            vec![
-                cand("Ария - Группа крови (cover) FLAC", 50),
-                cand("Кино - Группа крови (1988) MP3 320", 90),
-                cand("Кино - Группа крови (1988) [FLAC]", 20),
-                cand("Кино - Дискография FLAC", 300),
-            ],
-            &want(WishlistScope::Track),
-        );
-        let titles: Vec<&str> = ranked.iter().map(|(c, _)| c.title.as_str()).collect();
-        assert_eq!(titles[0], "Кино - Группа крови (1988) [FLAC]");
-        assert!(!titles.iter().any(|t| t.starts_with("Ария")), "another artist");
-        assert!(ranked[0].1, "lossless, names the album, seeded");
-        let mp3 = ranked.iter().find(|(c, _)| c.title.contains("MP3")).unwrap();
-        assert!(!mp3.1, "lossy: asked about");
-    }
-
-    #[test]
-    fn picks_the_track_file_on_its_disc_or_the_whole_album() {
-        let files = vec![
-            (0, "Кино - Группа крови/01 - Группа крови.flac".into(), 30),
-            (1, "Кино - Группа крови/02 - Закрой за мной дверь.flac".into(), 30),
-            (2, "Кино - Группа крови/03 - Война.flac".into(), 30),
-            (3, "Кино - Группа крови/cover.jpg".into(), 1),
-        ];
-        assert_eq!(pick_files(&files, &want(WishlistScope::Track)), Some(vec![2]));
-        assert_eq!(pick_files(&files, &want(WishlistScope::Album)), Some(vec![0, 1, 2]));
-        // By number when the name is spelled differently.
-        let mut w = want(WishlistScope::Track);
-        w.title = Some("Voyna (War)".into());
-        assert_eq!(pick_files(&files, &w), Some(vec![2]));
-        let mut w = want(WishlistScope::Track);
-        w.title = Some("Звезда".into());
-        w.track_no = 9;
-        assert_eq!(pick_files(&files, &w), None);
-        // Disc folders.
-        let discs = vec![
-            (0, "Album/CD1/03 - Война.flac".into(), 30),
-            (1, "Album/CD2/03 - Война.flac".into(), 30),
-        ];
-        let mut w = want(WishlistScope::Track);
-        w.disc_no = 2;
-        assert_eq!(pick_files(&discs, &w), Some(vec![1]));
-        assert_eq!(disc_of("A/Disc 2/01.flac"), Some(2));
-        assert_eq!(disc_of("A/01.flac"), None);
+            handle: CandidateHandle("{}".into()),
+        }];
+        let offers = offers_of_json(&serde_json::to_string(&old).unwrap());
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].source, SourceKey::Torrents);
+        assert_eq!(offers[0].detail(), "FLAC · 400 МБ · 9 сид. · RuTracker");
+        assert_eq!(candidate_of(&offers[0]).unwrap(), old[0]);
+        let new = offers_of_json(&serde_json::to_string(&offers).unwrap());
+        assert_eq!(new, offers);
     }
 }

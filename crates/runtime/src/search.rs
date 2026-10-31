@@ -19,6 +19,15 @@ pub(crate) fn indexer_from(path: Option<&std::path::Path>) -> Option<Arc<dyn Ind
         .ok()
 }
 
+/// The download sources that need no setup (khinsider, the free FLAC
+/// services) at the addresses settings.toml gives; none without a settings
+/// file (tests, demos).
+pub(crate) fn web_sources_from(path: Option<&std::path::Path>) -> Vec<Arc<dyn nikgob_core::source::Source>> {
+    let Some(path) = path else { return Vec::new() };
+    let settings = nikgob_core::settings::Settings::load(path).unwrap_or_default();
+    nikgob_sources::web_sources(&settings)
+}
+
 /// `needle` occurs in `hay` not glued to letters on either side ("wav" is not
 /// in "new wave", "ape" not in "tape", "live" not in "alive"). `hay` and
 /// `needle` are lowercase.

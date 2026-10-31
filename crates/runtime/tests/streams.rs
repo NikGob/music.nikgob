@@ -348,3 +348,40 @@ fn an_album_known_in_part_plays_at_once_and_its_tracklist_joins_the_queue() {
     wait_for("the album's other songs in the queue", || rig.rt.state().queue.next.len() == 3);
     assert_eq!(rig.asked.lock().unwrap().len(), 1, "the playing song goes on");
 }
+
+/// YouTube refuses a stream's URLs some 15 s in (every client asked): the
+/// same video is opened once more and goes on from there; refused again,
+/// it gives up.
+#[test]
+fn a_youtube_stream_refused_midway_opens_again_once_where_it_stopped() {
+    let lib = Library::open_in_memory().unwrap();
+    let track = lib
+        .upsert_stream_track(&find(&FakeService::youtube(), "yt-discovery-1"))
+        .unwrap();
+    let rig = Rig::start(lib, vec![Arc::new(FakeService::youtube())]);
+    rig.play(track);
+    let first = rig.asked(0);
+    assert_eq!(first.source, stream(Service::Youtube, "yt-discovery-1"));
+    let at = Duration::from_secs(15);
+    rig.played_to(first.id, at);
+    let tx = rig.rt.playback_sender();
+    tx.send(PlaybackEvent::Error {
+        id: first.id,
+        message: "i/o error: stream URL keeps being refused (HTTP 403)".into(),
+    })
+    .unwrap();
+    let second = rig.asked(1);
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.source, stream(Service::Youtube, "yt-discovery-1"));
+    assert_eq!(*rig.seeks.lock().unwrap(), vec![at]);
+
+    // Refused again: not a loop.
+    rig.played_to(second.id, at + Duration::from_secs(5));
+    tx.send(PlaybackEvent::Error {
+        id: second.id,
+        message: "i/o error: stream URL keeps being refused (HTTP 403)".into(),
+    })
+    .unwrap();
+    wait_for("stopped", || rig.status() == Status::Stopped);
+    assert_eq!(rig.asked.lock().unwrap().len(), 2);
+}

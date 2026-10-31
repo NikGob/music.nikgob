@@ -214,6 +214,19 @@ impl Fakes {
                 ok: true,
                 text: "Prowlarr отвечает · 12 трекеров".into(),
             });
+            // «Источники скачивания»: the sources a build has, one of
+            // them down lately.
+            s.downloads.sources = s
+                .prefs
+                .source_order()
+                .iter()
+                .map(|o| nikgob_view::SourceView {
+                    key: o.key,
+                    name: o.key.display_name().into(),
+                    available: o.key != nikgob_view::SourceKey::Soulseek,
+                    status: (o.key == nikgob_view::SourceKey::Tidal).then(|| "Не пускает — попробую позже".into()),
+                })
+                .collect();
         }
         if self.analysis {
             s.analysis = nikgob_view::AnalysisProgress { files_done: 1240, files_total: 2600, streams_done: 0, streams_total: 500 };
@@ -386,7 +399,7 @@ fn row(n: u128, title: &str, artist: &str, album: &str, status: St) -> WishlistR
         scope: WishlistScope::Track,
         origin: WishlistOrigin::Like,
         note: match status {
-            St::NoTorrent => Some("Не нашёл раздачу".into()),
+            St::NoTorrent => Some("Не нашёл, где скачать".into()),
             St::Downloading => Some("FLAC · 14 сидов · 38%".into()),
             St::Confirm => Some("Длительность расходится на 40 с".into()),
             _ => None,
@@ -398,6 +411,8 @@ fn row(n: u128, title: &str, artist: &str, album: &str, status: St) -> WishlistR
         progress: (status == St::Downloading).then_some(38),
         confirm_files: false,
         missing: 0,
+        has_copy: false,
+        source: (status == St::Downloading).then(|| "RuTracker".into()),
     }
 }
 
@@ -442,7 +457,7 @@ fn wishlist() -> WishlistView {
             None => counts.push((r.status, 1)),
         }
     }
-    WishlistView { loaded: true, items, by_album, by_artist, counts }
+    WishlistView { loaded: true, items, by_album, by_artist, counts, can_search: true }
 }
 
 /// The board of Главная: the daylist (when `daylist`) and the first `n`

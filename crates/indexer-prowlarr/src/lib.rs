@@ -1,5 +1,11 @@
 //! [`Indexer`] implementation on top of Prowlarr's native API
-//! (`GET /api/v1/search`, audio categories 3000 / 3040, `X-Api-Key` header).
+//! (`GET /api/v1/search`, the audio categories, `X-Api-Key` header).
+//!
+//! A release is fetched from its `downloadUrl`; when that fails (the
+//! tracker answers 5xx through Prowlarr, an HTML page instead of a
+//! .torrent) its magnet is used: `magnetUrl`, which some indexers (nyaa
+//! and other public ones) give as a Prowlarr link that redirects to the
+//! magnet, else one made from the info hash.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +22,11 @@ use url::Url;
 
 const AUDIO: u32 = 3000;
 const AUDIO_LOSSLESS: u32 = 3040;
+/// Every audio category of the Newznab standard but audiobooks and video:
+/// indexers map their own categories onto these (nyaa's "Audio - Lossy"
+/// onto 3010, RuTracker's soundtracks onto 3000 or 3050), and an indexer
+/// that maps only onto a child is not found by the parent alone.
+const AUDIO_ANY: [u32; 5] = [AUDIO, 3010, AUDIO_LOSSLESS, 3050, 3060];
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Prowlarr fans out to every tracker and answers only when the slowest is done.
@@ -155,6 +166,11 @@ struct Handle {
     download_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     magnet_url: Option<String>,
+    /// For a magnet when neither link works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    info_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
 }
 
 fn non_empty(s: Option<String>) -> Option<String> {
@@ -180,6 +196,8 @@ impl Release {
         let handle = serde_json::to_string(&Handle {
             download_url,
             magnet_url,
+            info_hash: non_empty(self.info_hash.clone()),
+            title: non_empty(self.title.clone()),
         })
         .ok()?;
         Some(Candidate {
@@ -247,8 +265,9 @@ impl Inner {
                     q.append_pair("categories", &AUDIO_LOSSLESS.to_string());
                 }
                 SearchKind::Any => {
-                    q.append_pair("categories", &AUDIO.to_string());
-                    q.append_pair("categories", &AUDIO_LOSSLESS.to_string());
+                    for c in AUDIO_ANY {
+                        q.append_pair("categories", &c.to_string());
+                    }
                 }
             }
             if let Some(limit) = query.limit {
@@ -276,16 +295,38 @@ impl Inner {
     async fn fetch(&self, handle: &CandidateHandle) -> Result<TorrentPayload, IndexerError> {
         let handle: Handle = serde_json::from_str(&handle.0)
             .map_err(|e| IndexerError::Parse(format!("bad candidate handle: {e}")))?;
+        let mut last = None;
         if let Some(download_url) = non_empty(handle.download_url) {
             let url = Url::parse(&download_url)
                 .map_err(|e| IndexerError::Parse(format!("bad download URL: {e}")))?;
-            return self.download(url).await;
+            match self.download(url).await {
+                Ok(p) => return Ok(p),
+                // A wrong key is wrong for the magnet link too.
+                Err(e @ IndexerError::Unauthorized) => return Err(e),
+                Err(e) => {
+                    log::info!("prowlarr: the .torrent did not come ({e}), trying the magnet");
+                    last = Some(e);
+                }
+            }
         }
         match non_empty(handle.magnet_url) {
-            Some(magnet) if is_magnet(&magnet) => Ok(TorrentPayload::Magnet(magnet)),
-            Some(_) => Err(IndexerError::Parse("magnetUrl is not a magnet link".into())),
-            None => Err(IndexerError::NothingToFetch),
+            Some(magnet) if is_magnet(&magnet) => return Ok(TorrentPayload::Magnet(magnet)),
+            // A Prowlarr link that answers with the magnet (or the file).
+            Some(link) if link.starts_with("http://") || link.starts_with("https://") => {
+                let url = Url::parse(&link).map_err(|e| IndexerError::Parse(format!("bad magnet link: {e}")))?;
+                match self.download(url).await {
+                    Ok(p) => return Ok(p),
+                    Err(e @ IndexerError::Unauthorized) => return Err(e),
+                    Err(e) => last = Some(e),
+                }
+            }
+            Some(_) => last = Some(IndexerError::Parse("magnetUrl is not a magnet link".into())),
+            None => {}
         }
+        if let Some(magnet) = handle.info_hash.as_deref().and_then(|h| magnet_of(h, handle.title.as_deref())) {
+            return Ok(TorrentPayload::Magnet(magnet));
+        }
+        Err(last.unwrap_or(IndexerError::NothingToFetch))
     }
 
     async fn download(&self, mut url: Url) -> Result<TorrentPayload, IndexerError> {
@@ -332,6 +373,22 @@ impl Inner {
     }
 }
 
+/// A magnet link of a v1 info hash (40 hex digits or 32 base32 letters).
+fn magnet_of(hash: &str, title: Option<&str>) -> Option<String> {
+    let hash = hash.trim();
+    let ok = (hash.len() == 40 && hash.chars().all(|c| c.is_ascii_hexdigit()))
+        || (hash.len() == 32 && hash.chars().all(|c| c.is_ascii_alphanumeric()));
+    if !ok {
+        return None;
+    }
+    let mut out = format!("magnet:?xt=urn:btih:{}", hash.to_lowercase());
+    if let Some(t) = title.filter(|t| !t.is_empty()) {
+        out.push_str("&dn=");
+        out.extend(url::form_urlencoded::byte_serialize(t.as_bytes()));
+    }
+    Some(out)
+}
+
 fn is_magnet(s: &str) -> bool {
     s.len() >= 7 && s[..7].eq_ignore_ascii_case("magnet:")
 }
@@ -372,6 +429,16 @@ fn redact(url: &Url) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn magnets_are_made_of_hashes_only() {
+        let h = "0123456789ABCDEF0123456789abcdef01234567";
+        assert_eq!(
+            magnet_of(h, Some("A & B")).unwrap(),
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=A+%26+B"
+        );
+        assert!(magnet_of("not-a-hash", None).is_none());
+    }
 
     #[test]
     fn redact_masks_apikey_only() {

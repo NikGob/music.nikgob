@@ -17,6 +17,7 @@ mod lyrics;
 mod playlist_cover;
 mod recs;
 mod search;
+mod soulseek;
 mod tags;
 mod torrents;
 pub mod queue;
@@ -152,6 +153,7 @@ enum Msg {
     Cmd(Command),
     Service(Box<dyn Service>),
     Indexer(Arc<dyn nikgob_core::indexer::Indexer>),
+    Source(Arc<dyn nikgob_core::source::Source>),
     OdesliBase(String),
     WebLogin(StreamKind, Arc<dyn WebLogin>),
     Shutdown,
@@ -248,6 +250,13 @@ impl Runtime {
     /// (another backend, or a fake one in tests).
     pub fn set_indexer(&self, indexer: Arc<dyn nikgob_core::indexer::Indexer>) {
         let _ = self.tx.send(Msg::Indexer(indexer));
+    }
+
+    /// One more download source (Soulseek, or a fake one in tests); it
+    /// replaces a source of the same kind. Whether it is used is its switch
+    /// on «Источники».
+    pub fn add_source(&self, source: Arc<dyn nikgob_core::source::Source>) {
+        let _ = self.tx.send(Msg::Source(source));
     }
 
     /// Logs `service` in through this sign-in window of the app for a
@@ -371,6 +380,9 @@ struct Worker {
     /// The source of the playing entry failed mid-track (entry id, where it
     /// got to): the next one starts there, not from the top.
     failover: Option<(u64, Duration)>,
+    /// The entry whose YouTube stream was opened once more after its URLs
+    /// kept being refused mid-track (once per entry).
+    stream_retried: Option<u64>,
     /// `session.json` (volume and queue between runs) and what was last
     /// written to it.
     session_path: Option<PathBuf>,
@@ -413,6 +425,9 @@ struct Worker {
     /// [`PlaybackEvent::Quality`]; the preloaded next one opens early).
     qualities: Vec<(u64, String)>,
     indexer: Option<Arc<dyn nikgob_core::indexer::Indexer>>,
+    /// Download sources other than the indexer's torrents (khinsider, the
+    /// free services, Soulseek), whether on or not (docs/stage4.5.md).
+    sources: Vec<Arc<dyn nikgob_core::source::Source>>,
     /// Last torrent search, indexed like `SearchView::torrents.results`.
     candidates: Vec<nikgob_core::indexer::Candidate>,
     torrents: torrents::Torrents,
@@ -429,6 +444,8 @@ struct Worker {
     /// The album the queue plays (and the queue's generation then): its
     /// tracks the services add later join the queue.
     album_queue: Option<(nikgob_core::model::ReleaseId, u64)>,
+    /// The Soulseek source (settings.toml `[soulseek]`).
+    soulseek: soulseek::SoulseekService,
 }
 
 impl Worker {
@@ -444,6 +461,8 @@ impl Worker {
             .as_ref()
             .map(|i| (i.torrent_state_dir.clone(), i.torrent_offline))
             .unwrap_or_default();
+        let slsk_state = config.import.as_ref().map(|i| i.torrent_state_dir.with_file_name("soulseek"));
+        let soulseek = soulseek::SoulseekService::new(config.library_dir.clone(), slsk_state);
         let streaming = streams::Streams::new(internal.clone());
         let analysis = analysis::FileAnalysis::new(internal.clone());
         let recs = recs::RecsState::new(internal.clone());
@@ -473,6 +492,7 @@ impl Worker {
             muted: saved.muted,
             resume_at: None,
             failover: None,
+            stream_retried: None,
             session_path,
             session_saved: String::new(),
             editions: Vec::new(),
@@ -492,6 +512,7 @@ impl Worker {
             last_export: Instant::now(),
             exported_fp: None,
             indexer: search::indexer_from(config.settings_path.as_deref()),
+            sources: search::web_sources_from(config.settings_path.as_deref()),
             candidates: Vec::new(),
             torrents: torrents::Torrents::new(torrent_state, torrent_offline),
             import,
@@ -505,6 +526,7 @@ impl Worker {
             better_asked: Default::default(),
             album_queue: None,
             recs,
+            soulseek,
         }
     }
 
@@ -518,10 +540,12 @@ impl Worker {
         self.load_torrent_history();
         self.publish_downloads();
         self.resume_torrents();
+        self.soulseek_apply();
         self.start_enrich();
         self.restore_session();
         self.offer_editions();
         self.wish_restart();
+        self.publish_sources();
         self.start_streams();
         self.start_analysis();
         self.dislikes_load(false);
@@ -532,6 +556,14 @@ impl Worker {
                     Ok(Msg::Service(s)) => self.services.push(s),
                     Ok(Msg::Indexer(i)) => {
                         self.indexer = Some(i);
+                        self.publish_sources();
+                        self.wish_tick();
+                    }
+                    Ok(Msg::Source(s)) => {
+                        // One per kind: a new one of a kind replaces the old.
+                        self.sources.retain(|x| x.key() != s.key());
+                        self.sources.push(s);
+                        self.publish_sources();
                         self.wish_tick();
                     }
                     Ok(Msg::OdesliBase(base)) => self.set_odesli_base(&base),
@@ -543,7 +575,10 @@ impl Worker {
                 },
                 recv(pb) -> e => if let Ok(e) = e { self.playback_event(e) },
                 recv(internal) -> m => if let Ok(m) = m { self.internal(m) },
-                recv(fast) -> _ => self.poll_torrents(),
+                recv(fast) -> _ => {
+                    self.poll_torrents();
+                    self.wish_poll_direct();
+                }
                 recv(ticker) -> _ => {
                     self.expire_toasts();
                     self.maybe_export(false);
@@ -558,6 +593,7 @@ impl Worker {
         self.maybe_export(true);
         self.playback.stop();
         self.shutdown_torrents();
+        self.soulseek.shutdown();
         self.streaming.analysis.shutdown();
         self.analysis.shutdown();
     }
@@ -868,7 +904,7 @@ impl Worker {
                     // A like that downloads says so (a like of a track
                     // without a file puts it into «Хочу скачать»).
                     let text = match (on, wished) {
-                        (true, true) if self.indexer.is_some() => "В Любимых · скачаю в фоне",
+                        (true, true) if self.can_download() => "В Любимых · скачаю в фоне",
                         (true, true) => "В Любимых · скачается, когда подключишь торренты",
                         (true, false) => "Добавлено в Любимые",
                         (false, _) => "Убрано из Любимых",
@@ -1009,6 +1045,8 @@ impl Worker {
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
+            Command::SetSoulseek(form) => self.set_soulseek(form),
+            Command::SetSoulseekShare { share, upload_limit_kbps } => self.set_soulseek_share(share, upload_limit_kbps),
             Command::CheckIndexer { url, api_key } => self.check_indexer(url, api_key),
             Command::DismissToast(id) => {
                 self.publish(|s| s.toasts.retain(|t| t.id != id));
@@ -1643,6 +1681,26 @@ impl Worker {
                 }
                 if let Some(e) = playing
                     && let Some((source, kind)) = self.playing_source
+                    && kind == SourceKind::Youtube
+                    && youtube_refused_midway(&message)
+                    && !self.position.is_zero()
+                    && self.stream_retried != Some(e.id)
+                {
+                    // YouTube refused the stream's URLs after it played a
+                    // while (the ~15 s 403): a new stream asks the player
+                    // afresh and goes on from here, once.
+                    self.stream_retried = Some(e.id);
+                    self.failover = Some((e.id, self.position));
+                    let skip = self.tried.clone();
+                    if let Some((req, again, kind)) = self.request_skipping(e, &skip).filter(|(_, s, _)| *s == source) {
+                        log::info!("{}: YouTube refused the stream midway, opening it again", e.track);
+                        self.play_request(e, req, again, kind);
+                        self.seek_to_failover(e);
+                        return;
+                    }
+                }
+                if let Some(e) = playing
+                    && let Some((source, kind)) = self.playing_source
                     && !self.stream_failed(e.track, source, &message)
                     && kind == SourceKind::Youtube
                 {
@@ -2064,6 +2122,14 @@ impl Worker {
         if old.auto_download_limit != p.auto_download_limit {
             self.wish_tick();
         }
+        if old.source_on(nikgob_view::SourceKey::Soulseek) != p.source_on(nikgob_view::SourceKey::Soulseek) {
+            self.soulseek_apply();
+        }
+        if old.source_order() != p.source_order() {
+            self.publish_sources();
+            self.publish_wishlist();
+            self.wish_tick();
+        }
         if old.stream_cache_mb != p.stream_cache_mb {
             self.apply_stream_cache();
         }
@@ -2220,7 +2286,7 @@ impl Worker {
             "треков"
         });
         let text = match (on, wished) {
-            (true, true) if self.indexer.is_some() => format!("Альбом в Любимых · {what} · скачаю в фоне"),
+            (true, true) if self.can_download() => format!("Альбом в Любимых · {what} · скачаю в фоне"),
             (true, true) => format!("Альбом в Любимых · {what} · скачается, когда подключишь торренты"),
             (true, false) => format!("Альбом в Любимых · {what}"),
             (false, _) => format!("Альбом убран из Любимых · {what}"),
@@ -2487,6 +2553,7 @@ impl Worker {
                     s.prefs.prowlarr_url = url;
                     s.prefs.prowlarr_configured = usable;
                 });
+                self.publish_sources();
                 self.toast(
                     if usable { "Prowlarr сохранён" } else { "Адрес или ключ Prowlarr не подходят" },
                     None,
@@ -2691,4 +2758,11 @@ impl Worker {
             Err(e) => log::warn!("userdata export to {}: {e}", dir.display()),
         }
     }
+}
+
+/// A playback error that is YouTube refusing a stream's URLs (every client
+/// asked, HTTP 403), not the video's own refusal or a lost connection.
+fn youtube_refused_midway(message: &str) -> bool {
+    let m = message.to_lowercase();
+    (m.contains("refused") || m.contains("http 403")) && !streams::resolve::video_refused(message)
 }

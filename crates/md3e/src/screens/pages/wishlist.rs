@@ -48,13 +48,13 @@ impl Filter {
         (Self::Searching, "Ищу"),
         (Self::Downloading, "Качаются"),
         (Self::Confirm, "Проверить"),
-        (Self::NoTorrent, "Нет раздачи"),
+        (Self::NoTorrent, "Не нашлось"),
         (Self::Done, "Готово"),
         (Self::Dismissed, "Не качать"),
     ];
 
-    /// Without torrents nothing searches: what is queued waits with the
-    /// rest («Ждут»), and «Ищу» stays away.
+    /// Without a download source nothing searches: what is queued waits
+    /// with the rest («Ждут»), and «Ищу» stays away.
     fn takes(self, st: St, torrents: bool) -> bool {
         match self {
             Self::All => !matches!(st, St::Done | St::Dismissed),
@@ -76,18 +76,24 @@ impl Filter {
 /// The status of an item in words, for its supporting line.
 fn status_text(r: &WishlistRow, torrents: bool) -> String {
     match r.status {
-        St::Waiting | St::New | St::Searching if !torrents => "ждёт торренты".into(),
+        St::Waiting | St::New | St::Searching if !torrents => "ждёт источник скачивания".into(),
         St::Waiting => "ждёт · скачается по кнопке".into(),
-        St::New | St::Searching => "ищу раздачу…".into(),
+        St::New | St::Searching => "ищу…".into(),
         St::Confirm if r.confirm_files => "файлы ждут подтверждения".into(),
-        St::Confirm => "нужно выбрать раздачу".into(),
-        St::Downloading => match r.progress {
-            Some(p) => format!("качается · {p}%"),
-            None => "качается".into(),
+        St::Confirm => "нужно выбрать, что скачать".into(),
+        St::Downloading => match (r.progress, &r.source) {
+            (Some(p), Some(from)) => format!("качается · {from} · {p}%"),
+            (Some(p), None) => format!("качается · {p}%"),
+            (None, Some(from)) => format!("качается · {from}"),
+            (None, None) => "качается".into(),
+        },
+        St::NoTorrent | St::Failed if r.has_copy => match &r.next_try {
+            Some(next) => format!("есть копия с YouTube · ищу лучше, {next}"),
+            None => "есть копия с YouTube · ищу лучше".into(),
         },
         St::NoTorrent | St::Failed => match &r.next_try {
-            Some(next) => format!("не нашёл раздачу · {next}"),
-            None => "не нашёл раздачу".into(),
+            Some(next) => format!("не нашёл · {next}"),
+            None => "не нашёл".into(),
         },
         St::Done if r.missing > 0 => format!("скачано не всё · без файла {} тр.", r.missing),
         St::Done => "скачано".into(),
@@ -119,7 +125,7 @@ impl Line<'_> {
 pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let w = &state.downloads.wishlist;
-    let torrents = state.prefs.prowlarr_configured;
+    let torrents = w.can_search;
     if !w.loaded {
         ui.add(LoadingIndicator::new());
         return None;
@@ -135,18 +141,18 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         return None;
     }
 
-    // Without Prowlarr nothing downloads by itself: say it first.
+    // Without any download source nothing downloads by itself: say it first.
     if !torrents {
         Card::filled().id_salt("wish-no-torrents").show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(TypeRole::TitleSmall.style().rich("Торренты не настроены", s.on_surface));
+            ui.label(TypeRole::TitleSmall.style().rich("Источники скачивания выключены", s.on_surface));
             ui.label(TypeRole::BodyMedium.style().rich_para(
-                "Всё отсюда скачается, когда подключишь Prowlarr. А пока трек можно сохранить с YouTube — качество пониже, торрент потом заменит его.",
+                "Всё отсюда скачается, когда включишь источник: торренты через Prowlarr, khinsider или бесплатные FLAC-сервисы. А пока трек можно сохранить с YouTube — качество пониже, найденное потом заменит его.",
                 s.on_surface_variant,
             ));
             ui.add_space(8.0);
-            if ui.add(Button::new("Настроить торренты").icon(Icon::Settings).style(Style::Tonal).id_salt("wish-setup")).clicked() {
-                pages.open_setting(super::SettingId::Prowlarr);
+            if ui.add(Button::new("Источники").icon(Icon::Settings).style(Style::Tonal).id_salt("wish-setup")).clicked() {
+                pages.open_setting(super::SettingId::DownloadSource(nikgob_view::SourceKey::Torrents));
             }
         });
         ui.add_space(12.0);
@@ -414,7 +420,9 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
                     St::NoTorrent | St::Failed => {
                         // The way out without a torrent: YouTube's audio, or
                         // the user's own .torrent / magnet / file.
-                        let main = if r.can_save_from_youtube { "Сохранить с YouTube" } else { "Искать снова" };
+                        // With a copy: look for a better one now.
+                        let save = r.can_save_from_youtube && !r.has_copy;
+                        let main = if save { "Сохранить с YouTube" } else { "Искать снова" };
                         let o = SplitButton::new(("wish-split", id), main)
                             .size(Size::S)
                             .style(Style::Tonal)
@@ -427,7 +435,7 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
                             .trigger_tooltip("Другие способы")
                             .show(ui);
                         if o.main.clicked() {
-                            out.push(if r.can_save_from_youtube {
+                            out.push(if save {
                                 Command::WishlistSaveFromYoutube(id)
                             } else {
                                 Command::WishlistRetry(id)
@@ -534,7 +542,7 @@ fn attach_pick(i: usize, r: &WishlistRow, pages: &mut PageState, out: &mut Vec<C
 fn save_button(ui: &mut Ui, id: WishlistId, out: &mut Vec<Command>) {
     if ui
         .add(Button::new("Сохранить с YouTube").style(Style::Tonal).size(Size::S).id_salt(("wish-yt", id)))
-        .on_hover_text("Аудио как есть (Opus ~160 кбит/с, качество пониже); торрент потом заменит его")
+        .on_hover_text("Аудио как есть (Opus ~160 кбит/с, качество пониже); найденное потом заменит его")
         .clicked()
     {
         out.push(Command::WishlistSaveFromYoutube(id));

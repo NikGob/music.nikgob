@@ -577,6 +577,7 @@ impl Worker {
                 let item = downloads.get(&t.info_hash)?.wishlist_id?;
                 Some((item, (t.progress.clamp(0.0, 1.0) * 100.0) as u8))
             })
+            .chain(self.streaming.wish.direct_progress())
             .collect();
         if wish != self.streaming.wish.progress {
             self.streaming.wish.progress = wish.clone();

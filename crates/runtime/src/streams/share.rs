@@ -135,6 +135,7 @@ impl Worker {
                     duration_ms: t.duration_ms.map(u64::from),
                     isrc: t.isrc.clone(),
                     exclude: Vec::new(),
+                    aliases: Vec::new(),
                 };
                 (text, page, Some(Lookup::Track(q)))
             }

@@ -25,7 +25,7 @@ mod likes;
 mod pages;
 mod rank;
 mod replace;
-mod resolve;
+pub(crate) mod resolve;
 mod schedule;
 mod search;
 mod share;

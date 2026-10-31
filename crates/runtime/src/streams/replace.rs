@@ -271,6 +271,7 @@ impl Worker {
                 duration_ms: pick.duration_ms,
                 isrc: pick.isrc.clone(),
                 exclude: Vec::new(),
+                aliases: Vec::new(),
             };
             if q.isrc.is_none()
                 && let Some(dz) = dz

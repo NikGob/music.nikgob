@@ -183,6 +183,15 @@ pub struct PageState {
     files_done: bool,
     indexer_url: String,
     indexer_key: String,
+    /// «Soulseek» on «Источники»: what is typed (the password and the
+    /// token are never shown back), and whether the fields were filled from
+    /// the saved settings.
+    slsk_remote: bool,
+    slsk_user: String,
+    slsk_pass: String,
+    slsk_url: String,
+    slsk_token: String,
+    slsk_synced: bool,
     acoustid_key: String,
     metadata_contact: String,
     metadata_synced: bool,
