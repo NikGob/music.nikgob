@@ -765,13 +765,18 @@ fn soulseek(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     group(ui, "Soulseek");
     ui.add_space(4.0);
     settings_help::item(ui, Id::Soulseek, "Soulseek", |ui| {
-        let (pick, _) = super::connected(
+        let (pick, rects) = super::connected(
             ui,
             egui::Id::new("set-slsk-where"),
             &["В плеере", "На сервере"],
             usize::from(pages.slsk_remote),
             &[],
         );
+        // The group fills its row: the ⓘ goes right after it, not beside
+        // the fields' column further down.
+        if let Some(last) = rects.last() {
+            settings_help::help_button_beside(ui, Id::Soulseek, *last);
+        }
         if let Some(n) = pick {
             pages.slsk_remote = n == 1;
             pages.slsk_synced = true;

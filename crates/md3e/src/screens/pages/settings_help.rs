@@ -978,6 +978,14 @@ pub fn help_button(ui: &mut Ui, id: SettingId) {
     ui.ctx().data_mut(|d| d.get_temp_mut_or_default::<Parts>(parts_key()).button = Some(rect));
 }
 
+/// The ⓘ button of the item being drawn, just after `beside` (a control
+/// that fills its row, such as a connected group) and on its centre line.
+pub fn help_button_beside(ui: &mut Ui, id: SettingId, beside: Rect) {
+    let rect = Rect::from_min_size(pos2(beside.right() + 8.0, beside.center().y - BTN * 0.5), Vec2::splat(BTN));
+    help_button_at(ui, id, rect);
+    ui.ctx().data_mut(|d| d.get_temp_mut_or_default::<Parts>(parts_key()).button = Some(rect));
+}
+
 /// The rects of the item's open menu, in [`SettingId::choices`] order.
 pub fn report_menu(ctx: &egui::Context, rects: Vec<Rect>) {
     ctx.data_mut(|d| d.get_temp_mut_or_default::<Parts>(parts_key()).menu = rects);
