@@ -189,13 +189,8 @@ pub enum SettingId {
     Nodes,
 }
 
-/// Where radios and autoplay take their tracks, in a few words (the
-/// queue's and the settings row's quiet line).
-pub fn radio_source_line(p: &Prefs) -> &'static str {
-    radio_source_line_of(p, v::RadioKind::Autoplay)
-}
-
-/// [`radio_source_line`] of a radio of `kind`.
+/// Where a radio of `kind` takes its tracks, in a few words (the line under
+/// the queue's radio header, which opens the choices).
 pub fn radio_source_line_of(p: &Prefs, kind: v::RadioKind) -> &'static str {
     match radio_source_of(p, kind) {
         0 => "Похожее из скачанного",

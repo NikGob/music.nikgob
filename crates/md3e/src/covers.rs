@@ -19,6 +19,9 @@
 //! its texture; they are forgotten off screen like files. A web cover has no
 //! palette seed from an import, so its seed is taken from the pixels it is
 //! decoded to ([`web_seed`]).
+//!
+//! A cover inside black bars (a video's picture of a song uploaded with its
+//! art) is decoded without them (`nikgob_core::cover_frame`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -338,7 +341,12 @@ fn decode(source: &Source, tier: Option<u32>) -> Result<ColorImage, String> {
             .map_err(|e| e.to_string())?,
     };
     let img = if img.width().max(img.height()) > side { img.thumbnail(side, side) } else { img };
-    let rgba = img.to_rgba8();
+    let mut rgba = img.to_rgba8();
+    // The art inside a video's black bars (a song uploaded with its cover,
+    // a letterboxed thumbnail): the bars are not the cover.
+    if let Some((x, y, w, h)) = nikgob_core::cover_frame::content(rgba.width(), rgba.height(), rgba.as_raw()) {
+        rgba = image::imageops::crop_imm(&rgba, x, y, w, h).to_image();
+    }
     Ok(ColorImage::from_rgba_unmultiplied(
         [rgba.width() as usize, rgba.height() as usize],
         rgba.as_raw(),
@@ -702,6 +710,18 @@ mod tests {
         assert_eq!(settled(560.0), vec2(600.0, 600.0));
         // Only textures remain: no file bytes, no decoded copies.
         assert_eq!(decoded(&ctx), 0);
+    }
+
+    #[test]
+    fn the_art_in_a_pillarboxed_frame_decodes_without_its_bars() {
+        let dir = std::env::temp_dir().join(format!("md3e-covers-bars-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("frame.png");
+        let img = image::RgbImage::from_fn(640, 360, |x, _| if (140..500).contains(&x) { image::Rgb([200, 40, 40]) } else { image::Rgb([0, 0, 0]) });
+        img.save(&path).unwrap();
+        let decoded = decode(&Source::File(path), Some(512)).unwrap();
+        assert_eq!(decoded.size, [288, 288], "640 × 360 drawn at 512 is 512 × 288 with its bars");
+        assert!(decoded.pixels.iter().all(|p| p.r() > 150));
     }
 
     #[test]

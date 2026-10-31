@@ -68,6 +68,12 @@ impl Resolver {
                 .flatten()
                 .and_then(|r| r.cover_ref)
         });
+        // Real art found for a poor cover (a clip's frame, a tiny file).
+        if let Some(url) = crate::better_covers::cached(&self.lib, crate::better_covers::Target::Release(id), cover_ref.as_deref()) {
+            let cover = Some(v::Cover::web(url));
+            self.covers.insert(id, cover.clone());
+            return cover;
+        }
         let cover = cover_ref.map(|r| {
             // A stream album's cover until a file brings one.
             if nikgob_library::is_web_ref(&r) {
@@ -163,10 +169,12 @@ impl Resolver {
             source: r.active_kind,
             has_local: r.has_local,
             liked: r.liked,
-            // A clip has no album: the video's own picture.
+            // A clip has no album: its song's art when it was found, else
+            // the video's own picture.
             cover: self.cover_for(r.release_id, r.cover_ref.as_deref()).or_else(|| {
                 let video = r.youtube_id.as_deref().filter(|_| r.is_clip())?;
-                Some(v::Cover::web(format!("https://i.ytimg.com/vi/{video}/hqdefault.jpg")))
+                let art = crate::better_covers::cached(&self.lib, crate::better_covers::Target::Track(r.id), None);
+                Some(v::Cover::web(art.unwrap_or_else(|| format!("https://i.ytimg.com/vi/{video}/hqdefault.jpg"))))
             }),
             clip: r.is_clip(),
         }

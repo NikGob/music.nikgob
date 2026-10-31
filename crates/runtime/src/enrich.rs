@@ -55,6 +55,8 @@ pub(crate) enum Event {
     LyricsReady(nikgob_core::model::TrackId, crate::lyrics::TrackLyrics),
     /// A larger cover of this album was found ([`crate::hd_covers`]).
     HdCover(nikgob_core::model::ReleaseId),
+    /// Real art was found for poor covers ([`crate::better_covers`]).
+    BetterCovers,
 }
 
 #[derive(Default)]
@@ -329,6 +331,7 @@ impl Worker {
     pub(crate) fn start_enrich(&mut self) {
         self.kick_lyrics_backfill();
         self.kick_photos(None);
+        self.kick_better_covers(None);
     }
 
     pub(crate) fn kick_lyrics_backfill(&mut self) {
@@ -419,6 +422,7 @@ impl Worker {
             }
             Event::LyricsReady(track, tl) => self.lyrics_backfilled(track, tl),
             Event::HdCover(id) => self.hd_cover_found(id),
+            Event::BetterCovers => self.better_covers_found(),
             Event::BackfillDone => {
                 if let Some(svc) = &mut self.import {
                     svc.enrich.backfill_running = false;

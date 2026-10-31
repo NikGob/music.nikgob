@@ -13,10 +13,14 @@
 //!   track) may well be «(Piano Version)» or a cover album.
 //! * **Channels**: Deezer and Spotify are canonical, and so is a YouTube
 //!   Music album track (a «- Topic» channel). A video is kept only from the
-//!   artist's own channel: a «Name - Song» title naming someone else than
-//!   the channel is a reupload (unless the title names the channel, or is
-//!   a title and its translation in another script), a channel named after
-//!   nightcore or lyrics is one too, and a user's upload is never a release.
+//!   artist's own channel or a label's: a «Name - Song» title naming someone
+//!   else than the channel is a reupload (unless the title names the
+//!   channel, is a title and its translation, or a title and what music it
+//!   is, «Kallipolian Dance - Ancient Greek Music»), a
+//!   channel named after nightcore or lyrics is one too, and a user's upload
+//!   is never a release. Names match in either script («Борислав Славов» is
+//!   «Borislav Slavov») and without a channel's «VEVO», «Official» or
+//!   «Music»; a channel of the canonical artist is the artist's own.
 //! * **Length**: more than [`DURATION_SLACK`] off the canonical length
 //!   (Deezer's, by ISRC or the song) is a re-cut or a speed-up; longer than
 //!   [`LOOP_MS`] is a loop.
@@ -117,6 +121,26 @@ const UNOFFICIAL: &[&str] = &[
 
 /// A channel named so uploads others' songs.
 const CHANNEL_WORDS: &[&str] = &["nightcore", "lyrics", "lyric", "slowed", "sped", "8d", "bass boosted", "karaoke", "reverb"];
+
+/// What a label's channel is called by: it uploads its artists' songs.
+const LABEL_WORDS: &[&str] = &[
+    "records",
+    "recordings",
+    "entertainment",
+    "music group",
+    "label",
+    "рекордс",
+    "лейбл",
+    "звукозапись",
+];
+
+/// What a channel adds to the artist's name («TheWeekndVEVO», «Eve
+/// Official», «Farya Faraji Music»).
+const CHANNEL_SUFFIXES: &[&str] = &["vevo", "official", "officialchannel", "music", "tv", "channel", "официальный"];
+
+/// What a title's tail says when it names the music, not the artist
+/// («Ancient Greek Music»).
+const MUSIC_WORDS: &[&str] = &["music", "musik", "musique", "музыка", "музика"];
 
 /// Lower case, `ё` → `е`, words split by anything but letters and digits,
 /// joined by single spaces with a space at both ends («(Slowed + Reverb)» →
@@ -222,6 +246,71 @@ fn script(s: &str) -> Option<Script> {
     (*top > 0).then(|| [Script::Latin, Script::Cyrillic, Script::Greek, Script::Cjk, Script::Other][i])
 }
 
+/// `a` and `b` are one artist's name: the same [`artist_key`] with no
+/// spaces, or the same name in Cyrillic and in Latin letters.
+fn same_name(a: &str, b: &str) -> bool {
+    let (ka, kb) = (artist_key(a), artist_key(b));
+    if ka.is_empty() || kb.is_empty() {
+        return false;
+    }
+    ka.replace(' ', "") == kb.replace(' ', "") || nikgob_core::translit::same_translit(&ka, &kb)
+}
+
+/// The names a channel may stand for: its own, and without what channels
+/// add to the artist's name (see [`CHANNEL_SUFFIXES`]).
+fn channel_names(channel: &str) -> Vec<String> {
+    let key = artist_key(channel);
+    let mut out = vec![key.clone()];
+    let mut rest = key.as_str();
+    loop {
+        let before = rest;
+        for suffix in CHANNEL_SUFFIXES {
+            if let Some(r) = rest.strip_suffix(suffix) {
+                let r = r.trim_end();
+                if !r.is_empty() {
+                    rest = r;
+                }
+            }
+        }
+        if rest == before {
+            break;
+        }
+        out.push(rest.to_owned());
+    }
+    out
+}
+
+/// `name` is the artist the channel is named after.
+fn names_channel(name: &str, channel: &str) -> bool {
+    channel_names(channel).iter().any(|c| same_name(name, c))
+}
+
+/// A label's channel (see [`LABEL_WORDS`]).
+fn label(channel: &str) -> bool {
+    let ch = spaced(channel);
+    LABEL_WORDS.iter().any(|w| has_phrase(&ch, w))
+}
+
+/// A tail that says what music it is rather than naming a song: two words
+/// or more, the last of them «music».
+fn names_the_music(tail: &str) -> bool {
+    let bare = tail.split(['(', '[']).next().unwrap_or(tail);
+    let words: Vec<&str> = bare.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    words.len() >= 2 && words.last().is_some_and(|w| MUSIC_WORDS.contains(&w.to_lowercase().as_str()))
+}
+
+/// `head` and `tail` are one title twice, in two languages or spellings
+/// («A Horny Money World ～伝説の夜～ - A Horny Money World 〜legendary
+/// night〜»): they share at least two words and half the words of the
+/// shorter one.
+fn one_title_twice(head: &str, tail: &str) -> bool {
+    let (h, t) = (spaced(head), spaced(tail));
+    let hw: Vec<&str> = h.split_whitespace().collect();
+    let tw: Vec<&str> = t.split_whitespace().collect();
+    let shared = tw.iter().filter(|w| hw.contains(w)).count();
+    shared >= 2 && 2 * shared >= hw.len().min(tw.len())
+}
+
 /// The channel of a YouTube upload, as the services give it (its first
 /// artist).
 fn channel(t: &StreamTrack) -> &str {
@@ -260,26 +349,27 @@ pub fn junk(t: &StreamTrack, canonical: Option<&Canonical>) -> Option<Junk> {
                 if CHANNEL_WORDS.iter().any(|w| has_phrase(&ch_spaced, w)) {
                     return Some(Junk::Channel);
                 }
-                let ch_key = artist_key(ch);
-                let folded_ch = ch_key.replace(' ', "");
-                let vevo = folded_ch.ends_with("vevo");
-                let named = |name: &str| {
-                    let k = artist_key(name).replace(' ', "");
-                    !k.is_empty() && (k == folded_ch || (vevo && folded_ch.strip_suffix("vevo") == Some(k.as_str())))
-                };
-                if let Some(c) = canonical.filter(|c| !c.artist.is_empty())
-                    && !named(&c.artist)
-                {
-                    return Some(Junk::Channel);
+                // A label uploads its artists' songs.
+                if label(ch) {
+                    return duration_junk(t, canonical);
+                }
+                let named = |name: &str| names_channel(name, ch);
+                match canonical.filter(|c| !c.artist.is_empty()) {
+                    // The song's artist's own channel: whatever the title.
+                    Some(c) if named(&c.artist) => return duration_junk(t, canonical),
+                    Some(_) => return Some(Junk::Channel),
+                    None => {}
                 }
                 // «Someone - Song» on another channel: a reupload. Not when
                 // the title names the channel («Song - Eve MV», «A, Eve –
-                // Song»), nor a title with its own translation in another
-                // script («暴徒 - Bouto»).
+                // Song»), a title with its own translation in another script
+                // («暴徒 - Bouto»), nor a title and what music it is
+                // («Kallipolian Dance - Ancient Greek Music»).
                 for dash in [" - ", " – ", " — "] {
                     if let Some(at) = t.title.find(dash) {
                         let (head, tail) = (&t.title[..at], &t.title[at + dash.len()..]);
-                        let own = mentions(&t.title, ch) || script(head) != script(tail);
+                        let own = mentions(&t.title, ch) || script(head) != script(tail) || names_the_music(tail)
+                            || one_title_twice(head, tail);
                         if !own && !named(head) && !head.chars().any(|c| matches!(c, '(' | '[' | '「' | '【')) {
                             return Some(Junk::Channel);
                         }
@@ -289,18 +379,18 @@ pub fn junk(t: &StreamTrack, canonical: Option<&Canonical>) -> Option<Junk> {
             }
         }
     }
-    if let Some(d) = t.duration_ms {
-        if d > LOOP_MS {
-            return Some(Junk::Loop);
-        }
-        if let Some(c) = canonical.and_then(|c| c.duration_ms).filter(|c| *c > 0) {
-            let off = (d as f64 - c as f64).abs() / c as f64;
-            if off > DURATION_SLACK {
-                return Some(Junk::Duration);
-            }
-        }
+    duration_junk(t, canonical)
+}
+
+/// A loop, or off the canonical length.
+fn duration_junk(t: &StreamTrack, canonical: Option<&Canonical>) -> Option<Junk> {
+    let d = t.duration_ms?;
+    if d > LOOP_MS {
+        return Some(Junk::Loop);
     }
-    None
+    let c = canonical.and_then(|c| c.duration_ms).filter(|c| *c > 0)?;
+    let off = (d as f64 - c as f64).abs() / c as f64;
+    (off > DURATION_SLACK).then_some(Junk::Duration)
 }
 
 /// One song across uploads: the same [`stream_song_key`] or the same ISRC.
@@ -421,6 +511,76 @@ mod tests {
         let canon = Canonical { artist: artist_key("Kenshi Yonezu"), duration_ms: Some(193_000), isrc: None };
         assert_eq!(junk(&yt("KICK BACK", "Music Lab", TrackKind::Video, 193), Some(&canon)), Some(Junk::Channel));
         assert_eq!(junk(&yt("KICK BACK", "Kenshi Yonezu", TrackKind::Video, 193), Some(&canon)), None);
+    }
+
+    /// The artists' own channels the reupload rule cut (Farya Faraji's
+    /// «Kallipolian Dance - Ancient Greek Music», as YouTube Music's
+    /// discovery gave it; Борислав Славов's channel and Deezer's «Borislav
+    /// Slavov»), their «- Topic» channels and labels stay; reuploads of the
+    /// same songs by others still go.
+    #[test]
+    fn own_channels_in_any_script_and_labels_kept() {
+        let v = TrackKind::Video;
+        let kept = [
+            yt("Kallipolian Dance - Ancient Greek Music", "Farya Faraji", v, 165),
+            yt("Hymn to Apollo - Ancient Greek Music", "Farya Faraji", v, 240),
+            yt("Gothic Song - Ancient Germanic Music", "Farya Faraji", v, 200),
+            yt("Borislav Slavov - Down by the River", "Борислав Славов", v, 230),
+            yt("Борислав Славов - I Want to Live", "Borislav Slavov", v, 260),
+            yt("Борислав Славов - Down by the River", "Борислав Славов Official", v, 230),
+            yt("Борислав Славов - Down by the River", "Борислав Славов - Topic", v, 230),
+            yt("Kenshi Yonezu - Kick Back", "Kenshi Yonezu Official", v, 193),
+            yt("Linkin Park - Numb", "Warner Records", v, 187),
+            yt("Кино - Группа крови", "Мелодия Звукозапись", v, 286),
+            yt("Lindemann - Steh auf", "Universal Music Group", v, 230),
+            yt("A Horny Money World ～伝説の夜～ - A Horny Money World 〜legendary night〜", "Houshou Marine", v, 230),
+        ];
+        for t in &kept {
+            assert_eq!(junk(t, None), None, "{} by {}", t.title, t.artists[0].name);
+        }
+        // The canonical artist's own channel, in another script, keeps even
+        // a title the rule alone would cut.
+        let canon = Canonical { artist: artist_key("Borislav Slavov"), duration_ms: Some(230_000), isrc: None };
+        assert_eq!(junk(&yt("Baldur's Gate 3 - Down by the River", "Борислав Славов", v, 230), Some(&canon)), None);
+        let canon = Canonical { artist: artist_key("Farya Faraji"), duration_ms: Some(165_000), isrc: None };
+        assert_eq!(junk(&yt("Kallipolian Dance - Ancient Greek Music", "Farya Faraji", v, 165), Some(&canon)), None);
+        // Still a speed-up on the own channel.
+        assert_eq!(junk(&yt("Kallipolian Dance - Ancient Greek Music", "Farya Faraji", v, 140), Some(&canon)), Some(Junk::Duration));
+
+        let cut = [
+            yt("Farya Faraji - Kallipolian Dance", "Epic Music World", v, 165),
+            yt("Борислав Славов - Вниз по реке", "Game OST Archive", v, 230),
+            yt("Borislav Slavov - I Want to Live", "BG3 Fan", v, 260),
+            yt("Madonna - Music", "80s Hits", v, 225),
+            yt("Bob Marley - Redemption Song", "Reggae Classics", v, 227),
+            yt("Kallipolian Dance (Nightcore)", "Farya Faraji", v, 140),
+            // Real ones of the discovery cache.
+            yt("Zankyou No Terror OST - nc17", "Gracious Raigeki", v, 200),
+            yt("Fox Sailor - Lord of Fire", "My Soul Your Beats", v, 200),
+            yt("Daft Punk - One More Time", "Daft Punk Fan Music", v, 320),
+        ];
+        for t in &cut {
+            assert!(junk(t, None).is_some(), "{} by {}", t.title, t.artists[0].name);
+        }
+        let canon = Canonical { artist: artist_key("Borislav Slavov"), duration_ms: Some(230_000), isrc: None };
+        assert_eq!(junk(&yt("Down by the River", "Game OST Archive", v, 230), Some(&canon)), Some(Junk::Channel));
+        assert_eq!(junk(&yt("Down by the River", "Борислав Славов", v, 230), Some(&canon)), None);
+    }
+
+    #[test]
+    fn channel_names_without_what_channels_add() {
+        assert!(names_channel("The Weeknd", "TheWeekndVEVO"));
+        assert!(names_channel("Eve", "Eve Official"));
+        assert!(names_channel("Farya Faraji", "Farya Faraji Music"));
+        assert!(names_channel("Borislav Slavov", "Борислав Славов"));
+        assert!(names_channel("Кино", "КИНО - Topic"));
+        assert!(!names_channel("Kino", "Rock Archive"));
+        // A channel that is only a word channels add is no artist's.
+        assert!(!names_channel("Music", "Rock Music"));
+        assert!(names_the_music("Ancient Greek Music"));
+        assert!(names_the_music("Древняя греческая музыка (live)"));
+        assert!(!names_the_music("Music"));
+        assert!(!names_the_music("Redemption Song"));
     }
 
     /// A speed-up or a re-cut is off the canonical length; an hour is a loop.

@@ -309,7 +309,8 @@ impl Query {
                     // the title or the query.
                     a.split(' ').any(|w| words.contains(&w) || self.words.iter().any(|q| q == w))
                 } else {
-                    a.contains(left.as_str()) || left.contains(a.as_str())
+                    // In either script: «Borislav Slavov - …» by «Борислав Славов».
+                    a.contains(left.as_str()) || left.contains(a.as_str()) || nikgob_core::translit::same_translit(a, &left)
                 }
             };
             if !artist_norms.iter().any(theirs) {
@@ -572,6 +573,14 @@ mod tests {
         let remix = q.track("ARISTOCRAT (ROCK REMIX)", &["MORGENSHTERN"], None, TrackKind::Song);
         assert!(remix >= TOP_MIN && remix > q.track("ARISTOCRAT", &["MORGENSHTERN"], None, TrackKind::Song));
         assert_eq!(clip_parts("MORGENSHTERN - ARISTOCRAT (Клип)"), (Some("morgenshtern".into()), "aristocrat".into()));
+    }
+
+    #[test]
+    fn the_artists_own_clip_in_another_script_is_theirs() {
+        let q = Query::new("down by the river");
+        let own = q.track("Borislav Slavov - Down by the River", &["Борислав Славов"], None, TrackKind::Video);
+        let other = q.track("Borislav Slavov - Down by the River", &["Game OST Archive"], None, TrackKind::Video);
+        assert!(own > other, "{own} > {other}");
     }
 
     #[test]

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use nikgob_core::cover_frame;
 use nikgob_core::model::{
     Codec, Master, Palette, Source, SourceKind, SourceOrigin, Track, TrackId, quality_score,
 };
@@ -970,6 +971,11 @@ impl Importer {
 
     /// Embedded cover, a picture next to the file, the album folder's cover, then
     /// the Cover Art Archive / Deezer. `None` is fine.
+    ///
+    /// A picture that is a frame of a video (a file saved from YouTube
+    /// embeds the clip's thumbnail) gives way to the album art online and to
+    /// the art the target track's album already shows (the stream's); only
+    /// when there is none it is kept, without its black bars.
     async fn prepare_cover(
         &self,
         a: &Analyzed,
@@ -991,14 +997,34 @@ impl Importer {
             if let Ok(b) = std::fs::read(long_path(&album_dir.join(COVER_FILE))) {
                 sources.push(b);
             }
-            Ok(sources.into_iter().find_map(|b| process_cover(&b, max).ok()))
+            let mut frame = None;
+            for b in sources {
+                let Ok(c) = process_cover(&b, max) else { continue };
+                if !cover_frame::is_frame(c.width, c.height) {
+                    return Ok((Some(c), None));
+                }
+                frame = frame.or(Some(c));
+            }
+            Ok((None, frame))
         })
         .await
-        .ok()
-        .flatten();
+        .unwrap_or((None, None));
+        let (local, frame) = local;
         if local.is_some() {
             return local;
         }
+        let online = self.online_cover(a, id).await;
+        match (online, frame) {
+            (Some(c), _) => Some(c),
+            (None, Some(f)) => blocking(move || Ok(cut_bars(f))).await.ok(),
+            (None, None) => None,
+        }
+    }
+
+    /// The album art online (the Cover Art Archive, the identity's cover
+    /// url), else the web art the target track's album has.
+    async fn online_cover(&self, a: &Analyzed, id: &Identity) -> Option<ProcessedCover> {
+        let max = self.inner.cfg.cover_max_edge;
         let meta = self.inner.metadata.as_ref()?;
         if !self.inner.cfg.fetch_cover_online {
             return None;
@@ -1018,15 +1044,23 @@ impl Importer {
         } else {
             None
         };
-        let bytes = match (bytes, &id.cover_url) {
-            (Some(b), _) => Some(b),
-            (None, Some(url)) => tokio::time::timeout(timeout, meta.cover_art.download(url))
+        let target_art = {
+            let (lib, targets) = (self.inner.library.clone(), a.targets.clone());
+            blocking(move || Ok(target_web_cover(&lib, &targets))).await.ok().flatten()
+        };
+        let mut bytes = bytes;
+        for url in [id.cover_url.clone(), target_art].into_iter().flatten() {
+            if bytes.is_some() {
+                break;
+            }
+            bytes = tokio::time::timeout(timeout, meta.cover_art.download(&large_web_cover(&url)))
                 .await
                 .ok()
-                .and_then(|r| r.ok()),
-            _ => None,
-        }?;
-        blocking(move || process_cover(&bytes, max)).await.ok()
+                .and_then(|r| r.ok());
+        }
+        let bytes = bytes?;
+        let c = blocking(move || process_cover(&bytes, max)).await.ok()?;
+        (!cover_frame::is_frame(c.width, c.height)).then_some(c)
     }
 
 
@@ -1440,6 +1474,39 @@ where
     Ok(report)
 }
 
+/// The web cover (a stream's album art) of the first target track's album.
+fn target_web_cover(lib: &Library, targets: &ImportTargets) -> Option<String> {
+    targets.tracks.iter().find_map(|t| {
+        let release = lib.get_track(*t).ok().flatten()?.release_id?;
+        lib.get_release(release).ok().flatten()?.cover_ref.filter(|c| nikgob_library::is_web_ref(c))
+    })
+}
+
+/// A YouTube Music cover url (`…=w544-h544-l90-rj`) asked at 1200 px; any
+/// other url as it is.
+fn large_web_cover(url: &str) -> String {
+    match url.rsplit_once('=') {
+        Some((base, size)) if url.contains("googleusercontent.com") && size.starts_with('w') => {
+            format!("{base}=w1200-h1200-l90-rj")
+        }
+        _ => url.to_owned(),
+    }
+}
+
+/// A frame of a video without its black bars (the art of a song uploaded
+/// with it), re-encoded; as it is when it has none or does not decode.
+fn cut_bars(c: ProcessedCover) -> ProcessedCover {
+    let Ok(img) = image::load_from_memory(&c.jpeg) else { return c };
+    let rgba = img.to_rgba8();
+    let Some((x, y, w, h)) = cover_frame::content(rgba.width(), rgba.height(), rgba.as_raw()) else { return c };
+    let cut = image::DynamicImage::ImageRgba8(rgba).crop_imm(x, y, w, h);
+    let mut png = Vec::new();
+    if cut.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).is_err() {
+        return c;
+    }
+    process_cover(&png, w.max(h)).unwrap_or(c)
+}
+
 /// Writes `cover.jpg` and `ambient.png` when the album folder has none or a
 /// smaller cover. Returns whether the cover changed.
 fn write_cover_files(dir: &Path, cover: &ProcessedCover) -> Result<bool> {
@@ -1696,5 +1763,34 @@ impl Replaced {
         {
             log::warn!("cannot restore the replaced source: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::*;
+
+    #[test]
+    fn a_youtube_music_cover_is_asked_large_and_others_as_they_are() {
+        assert_eq!(
+            large_web_cover("https://yt3.googleusercontent.com/abc=w544-h544-l90-rj"),
+            "https://yt3.googleusercontent.com/abc=w1200-h1200-l90-rj"
+        );
+        let deezer = "https://cdn-images.dzcdn.net/images/cover/x/1000x1000-000000-80-0-0.jpg";
+        assert_eq!(large_web_cover(deezer), deezer);
+    }
+
+    #[test]
+    fn a_pillarboxed_frame_keeps_only_its_art() {
+        let frame = image::RgbImage::from_fn(640, 360, |x, _| if (140..500).contains(&x) { image::Rgb([30, 90, 200]) } else { image::Rgb([0, 0, 0]) });
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(frame).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let c = process_cover(&png, 1200).unwrap();
+        assert!(cover_frame::is_frame(c.width, c.height));
+        let cut = cut_bars(c);
+        assert_eq!((cut.width, cut.height), (360, 360));
+        // A frame without bars stays as it is.
+        let still = process_cover(&crate::cover::testimg::solid_jpeg([90, 90, 90], 640, 360), 1200).unwrap();
+        assert_eq!((cut_bars(still.clone()).width, still.height), (640, 360));
     }
 }

@@ -1,5 +1,5 @@
 //! Online metadata for the player: MusicBrainz, AcoustID, Cover Art Archive,
-//! Deezer, LyricsPlus, lrc.red, Better Lyrics and LRCLIB clients, LRC and TTML lyrics parsers, and the pure [`matcher`] that decides
+//! Deezer, the iTunes Search API, LyricsPlus, lrc.red, Better Lyrics and LRCLIB clients, LRC and TTML lyrics parsers, and the pure [`matcher`] that decides
 //! whether a local file has been identified for sure.
 //!
 //! All clients share one [`Http`] (User-Agent `music.nikgob/<version> ( <contact> )`,
@@ -10,6 +10,7 @@ pub mod acoustid;
 mod config;
 pub mod coverart;
 pub mod deezer;
+pub mod itunes;
 mod error;
 mod http;
 pub mod lrc;
@@ -27,6 +28,7 @@ pub use acoustid::{AcoustId, AcoustIdRecording, AcoustIdResult};
 pub use config::MetadataConfig;
 pub use coverart::{CoverArtArchive, CoverImage, CoverTarget, FetchedCover};
 pub use deezer::{Deezer, DeezerAlbum, DeezerArtistHit, DeezerTrack};
+pub use itunes::{Itunes, ItunesSong};
 pub use error::{MetadataError, Result};
 pub use http::{Http, RateLimiter, RateLimits, RetryPolicy};
 pub use lrc::{parse_lrc, parse_lrc_lines};
@@ -55,6 +57,7 @@ pub struct Metadata {
     pub lyricsplus: LyricsPlus,
     pub lrcred: LrcRed,
     pub betterlyrics: BetterLyrics,
+    pub itunes: Itunes,
 }
 
 impl Metadata {
@@ -70,7 +73,8 @@ impl Metadata {
             lrclib: Lrclib::new(http.clone()),
             lyricsplus: LyricsPlus::new(http.clone()),
             lrcred: LrcRed::new(http.clone()),
-            betterlyrics: BetterLyrics::new(http),
+            betterlyrics: BetterLyrics::new(http.clone()),
+            itunes: Itunes::new(http),
         })
     }
 }

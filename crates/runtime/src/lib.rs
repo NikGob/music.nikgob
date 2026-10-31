@@ -6,6 +6,7 @@
 //! read lock and never calls the library or the audio engine itself.
 
 mod analysis;
+mod better_covers;
 mod convert;
 mod enrich;
 mod hd_covers;
@@ -423,6 +424,8 @@ struct Worker {
     recs: recs::RecsState,
     /// Albums whose larger cover was looked up in this run.
     hd_asked: hd_covers::Asked,
+    /// Albums and clips whose real art was looked up in this run.
+    better_asked: better_covers::Asked,
     /// The album the queue plays (and the queue's generation then): its
     /// tracks the services add later join the queue.
     album_queue: Option<(nikgob_core::model::ReleaseId, u64)>,
@@ -499,6 +502,7 @@ impl Worker {
             streaming,
             analysis,
             hd_asked: Default::default(),
+            better_asked: Default::default(),
             album_queue: None,
             recs,
         }
@@ -1780,6 +1784,7 @@ impl Worker {
         });
         if changed && let Some(t) = current.as_ref().map(|r| r.id) {
             self.track_details(t);
+            self.kick_better_covers(Some(t));
         }
         self.publish_player();
     }
