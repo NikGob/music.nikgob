@@ -7,7 +7,7 @@
 //! asked to wait says until when, quietly, and so does what its own
 //! suggestions give our mixes (docs/stage4.md §12.3).
 
-use egui::{Sense, Stroke, Ui, Widget as _, vec2};
+use egui::{Sense, Stroke, Ui, Widget as _, emath::TSTransform, vec2};
 use nikgob_core::streaming::SPOTIFY_PREMIUM_REQUIRED;
 use nikgob_view::{self as v, Account, AccountView, Command, LoginInput, LoginPrompt, Prefs, Service, ViewState};
 
@@ -16,7 +16,7 @@ use super::settings::{choice, dimmed, fmt_speed, group, range_slider, row, speed
 use super::settings_help::{self, SettingId as Id};
 use crate::{
     Icon, Theme, TypeRole,
-    components::{Button, Card, IconButton, LoadingIndicator, Size, Style, Switch, TextField},
+    components::{Button, Card, IconButton, LoadingIndicator, Size, Style, Switch, TextField, anim},
 };
 
 /// Where the user's own Spotify app is made and what it must allow.
@@ -80,14 +80,10 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
 /// in the order it prefers them at one quality, each with its switch and
 /// «Выше» / «Ниже». Lossless comes first whichever source has it; a source
 /// the app does not have is left out (torrents and Soulseek stay: they say
-/// what they need).
+/// what they need; a source that needs setting up is dimmed until it is).
+/// A move slides the rows to their new places.
 fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
-    let s = Theme::get(ui.ctx()).scheme;
     group(ui, "Источники скачивания");
-    ui.label(TypeRole::BodyMedium.style().rich_para(
-        "Сначала ищется FLAC, где бы он ни был; при равном качестве — в этом порядке. Копия с YouTube — только когда нигде нет.",
-        s.on_surface_variant,
-    ));
     let mut order = p.source_order();
     let shown: Vec<v::SourceKey> = order
         .iter()
@@ -98,9 +94,20 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
         })
         .collect();
     let mut moved: Option<(usize, usize)> = None;
+    // Each row springs from the slot it had to the one it has; the step
+    // between slots is last frame's.
+    let step_key = egui::Id::new("src-row-step");
+    let step = ui.ctx().data(|d| d.get_temp::<f32>(step_key)).unwrap_or(64.0);
+    let spring = Theme::get(ui.ctx()).motion.default_spatial;
+    let top = ui.cursor().top();
     for (n, key) in shown.iter().enumerate() {
         let Some(at) = order.iter().position(|o| o.key == *key) else { continue };
         let view = state.downloads.sources.iter().find(|v| v.key == *key);
+        let needs_setup = match key {
+            v::SourceKey::Torrents => view.is_some_and(|v| !v.available),
+            v::SourceKey::Soulseek => !state.downloads.soulseek.configured(),
+            _ => false,
+        };
         let hint = match (key, view) {
             (v::SourceKey::Torrents, Some(v)) if !v.available => "Нужен Prowlarr — ниже, в «Торренты»".to_owned(),
             (v::SourceKey::Soulseek, _) if !state.downloads.soulseek.configured() => "Нужен аккаунт — ниже, в «Soulseek»".to_owned(),
@@ -112,7 +119,9 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
             (v::SourceKey::Qobuz | v::SourceKey::Tidal, _) => "Бесплатно, через открытые сервисы".to_owned(),
         };
         let mut on = order[at].on;
-        row(ui, Id::DownloadSource(*key), key.display_name(), Some(&hint), |ui| {
+        let slot = anim::f32(ui.ctx(), egui::Id::new(("src-slot", key.as_str())), n as f32, spring);
+        let shift = TSTransform::from_translation(vec2(0.0, (slot - n as f32) * step));
+        ui.with_visual_transform(shift, |ui| dimmed(ui, needs_setup, |ui| row(ui, Id::DownloadSource(*key), key.display_name(), Some(&hint), |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let up = ui.add(
@@ -136,12 +145,18 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
                     moved = order.iter().position(|o| o.key == shown[n + 1]).map(|to| (at, to));
                 }
                 ui.add_space(8.0);
-                ui.add(Switch::new(&mut on).id_salt(("src-on", key.as_str())));
+                ui.add(Switch::new(&mut on).enabled(!needs_setup).id_salt(("src-on", key.as_str())));
             });
-        });
+        })));
         if on != order[at].on {
             order[at].on = on;
             p.download_sources = order.clone();
+        }
+    }
+    if !shown.is_empty() {
+        let h = (ui.cursor().top() - top) / shown.len() as f32;
+        if h > 1.0 && (h - step).abs() > 0.5 {
+            ui.ctx().data_mut(|d| d.insert_temp(step_key, h));
         }
     }
     if let Some((a, b)) = moved {
@@ -322,16 +337,11 @@ fn setup_steps(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &m
         numbered(ui, 3, 20.0, |ui| {
             ui.label(TypeRole::BodyMedium.style().rich_para("Скопируй Client ID из Settings приложения:", s.on_surface));
             ui.add_space(4.0);
-            TextField::new(&mut pages.sp_client_id, "Client ID")
-                .placeholder("32 символа")
-                .supporting(if p.spotify_personal_app {
-                    "Сохранён в settings.toml; введи новый, чтобы заменить"
-                } else {
-                    "Хранится в settings.toml"
-                })
-                .width(ui.available_width().min(420.0))
-                .id_salt("sp-client-id")
-                .show(ui);
+            let mut field = TextField::new(&mut pages.sp_client_id, "Client ID").placeholder("32 символа");
+            if p.spotify_personal_app {
+                field = field.supporting("Сохранён. Введи новый, чтобы заменить.");
+            }
+            field.width(ui.available_width().min(420.0)).id_salt("sp-client-id").show(ui);
         });
         let id = pages.sp_client_id.trim().to_owned();
         let typed = id.len() >= 16;
@@ -790,12 +800,11 @@ fn soulseek(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
                 .id_salt("set-slsk-url")
                 .show(ui);
             ui.add_space(8.0);
-            TextField::new(&mut pages.slsk_token, "Токен")
-                .password(true)
-                .supporting(if saved.token_saved { "Токен сохранён. Введи новый, чтобы заменить." } else { "Хранится в settings.toml." })
-                .width(480.0)
-                .id_salt("set-slsk-token")
-                .show(ui);
+            let mut token = TextField::new(&mut pages.slsk_token, "Токен").password(true);
+            if saved.token_saved {
+                token = token.supporting("Токен сохранён. Введи новый, чтобы заменить.");
+            }
+            token.width(480.0).id_salt("set-slsk-token").show(ui);
             !pages.slsk_url.trim().is_empty()
         } else {
             TextField::new(&mut pages.slsk_user, "Ник")
@@ -804,16 +813,11 @@ fn soulseek(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
                 .id_salt("set-slsk-user")
                 .show(ui);
             ui.add_space(8.0);
-            TextField::new(&mut pages.slsk_pass, "Пароль")
-                .password(true)
-                .supporting(if saved.password_saved {
-                    "Пароль сохранён. Введи новый, чтобы заменить."
-                } else {
-                    "Новый ник заведётся сам при первом входе. Хранится в settings.toml."
-                })
-                .width(480.0)
-                .id_salt("set-slsk-pass")
-                .show(ui);
+            let mut pass = TextField::new(&mut pages.slsk_pass, "Пароль").password(true);
+            if saved.password_saved {
+                pass = pass.supporting("Пароль сохранён. Введи новый, чтобы заменить.");
+            }
+            pass.width(480.0).id_salt("set-slsk-pass").show(ui);
             !pages.slsk_user.trim().is_empty() && (saved.password_saved || !pages.slsk_pass.is_empty())
         };
         ui.add_space(8.0);
@@ -827,16 +831,32 @@ fn soulseek(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             }));
         }
     });
+    // Without an account there is nothing to share: the rows wait for it.
+    let account = saved.configured();
     let mut share = saved.share;
-    row(ui, Id::SoulseekShare, "Раздавать библиотеку", Some("Другие могут скачивать у тебя, только чтение"), |ui| {
-        ui.add(Switch::new(&mut share).id_salt("set-slsk-share"));
+    dimmed(ui, !account, |ui| {
+        row(ui, Id::SoulseekShare, "Раздавать библиотеку", Some("Другие могут скачивать у тебя, только чтение"), |ui| {
+            ui.add(Switch::new(&mut share).enabled(account).id_salt("set-slsk-share"));
+        });
     });
     if share != saved.share {
         out.push(Command::SetSoulseekShare { share, upload_limit_kbps: saved.upload_limit_kbps });
     }
-    dimmed(ui, !saved.share, |ui| {
-        row(ui, Id::SoulseekUpload, "Скорость отдачи", Some(&fmt_speed(saved.upload_limit_kbps)), |ui| {
-            if let (_, Some(v)) = speed_slider_parts(ui, "set-slsk-ul", saved.upload_limit_kbps)
+    // The limit is written when the slider is let go; the row says the
+    // value under the pointer meanwhile, and the one let go until it is saved.
+    let held_key = egui::Id::new("set-slsk-ul-held");
+    let held = ui.ctx().data(|d| d.get_temp::<u32>(held_key)).filter(|v| *v != saved.upload_limit_kbps);
+    dimmed(ui, !account || !saved.share, |ui| {
+        row(ui, Id::SoulseekUpload, "Скорость отдачи", Some(&fmt_speed(held.unwrap_or(saved.upload_limit_kbps))), |ui| {
+            let (dragging, released) = ui.add_enabled_ui(account, |ui| speed_slider_parts(ui, "set-slsk-ul", saved.upload_limit_kbps)).inner;
+            match released.or(dragging) {
+                Some(v) => ui.ctx().data_mut(|d| {
+                    d.insert_temp(held_key, v);
+                }),
+                None if held.is_none() => ui.ctx().data_mut(|d| d.remove::<u32>(held_key)),
+                None => {}
+            }
+            if let Some(v) = released
                 && v != saved.upload_limit_kbps
             {
                 out.push(Command::SetSoulseekShare { share: saved.share, upload_limit_kbps: v });
@@ -861,16 +881,11 @@ fn torrents(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
             .id_salt("set-prowlarr-url")
             .show(ui);
         ui.add_space(8.0);
-        TextField::new(&mut pages.indexer_key, "API-ключ")
-            .password(true)
-            .supporting(if p.prowlarr_configured {
-                "Ключ сохранён. Введи новый, чтобы заменить."
-            } else {
-                "Хранится в settings.toml, в коде его нет."
-            })
-            .width(480.0)
-            .id_salt("set-prowlarr-key")
-            .show(ui);
+        let mut key = TextField::new(&mut pages.indexer_key, "API-ключ").password(true);
+        if p.prowlarr_configured {
+            key = key.supporting("Ключ сохранён. Введи новый, чтобы заменить.");
+        }
+        key.width(480.0).id_salt("set-prowlarr-key").show(ui);
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -986,5 +1001,81 @@ pub(super) fn copy_button(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::De
     if ui.add(b).clicked() {
         ui.ctx().copy_text(text.to_owned());
         ui.ctx().data_mut(|d| d.insert_temp(key, now));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Context, Rect, pos2, vec2};
+    use nikgob_view::{Command, SoulseekView, ViewState};
+
+    use super::super::PageState;
+    use crate::{Theme, typography};
+
+    fn context() -> Context {
+        let ctx = Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        typography::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+        crate::icons::install(&ctx);
+        Theme::default().install(&ctx);
+        ctx
+    }
+
+    /// Every control of «Soulseek» that takes a click is clicked: without
+    /// an account the sharing and its limit do nothing, with one they work.
+    #[test]
+    fn soulseek_sharing_waits_for_an_account() {
+        for account in [false, true] {
+            let ctx = context();
+            let mut state = ViewState::default();
+            state.downloads.soulseek = SoulseekView {
+                username: if account { "me".into() } else { String::new() },
+                password_saved: account,
+                share: true,
+                ..SoulseekView::default()
+            };
+            let mut pages = PageState::default();
+            let mut frame = 0u32;
+            let mut run = |events: Vec<egui::Event>, pages: &mut PageState| {
+                let mut out = Vec::new();
+                frame += 1;
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 900.0))),
+                    time: Some(f64::from(frame) * 0.05),
+                    events,
+                    ..Default::default()
+                };
+                let mut done = ctx.run_ui(input, |ui| super::soulseek(ui, &state, pages, &mut out));
+                done.textures_delta.clear();
+                out
+            };
+            run(Vec::new(), &mut pages);
+            let clickable: Vec<Rect> = ctx.viewport(|v| {
+                v.prev_pass
+                    .widgets
+                    .layers()
+                    .flat_map(|(_, w)| w.iter())
+                    .filter(|w| w.enabled && w.sense.senses_click())
+                    .map(|w| w.interact_rect)
+                    .collect()
+            });
+            assert!(!clickable.is_empty());
+            let mut sent = Vec::new();
+            for r in clickable {
+                pages.slsk_remote = false;
+                let at = r.center();
+                let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+                sent.extend(run(vec![egui::Event::PointerMoved(at), button(true)], &mut pages));
+                sent.extend(run(vec![button(false)], &mut pages));
+                sent.extend(run(vec![egui::Event::PointerGone], &mut pages));
+            }
+            let sharing = sent.iter().filter(|c| matches!(c, Command::SetSoulseekShare { .. })).count();
+            if account {
+                assert!(sharing >= 2, "the switch and the limit: {sent:?}");
+            } else {
+                assert_eq!(sharing, 0, "{sent:?}");
+            }
+        }
     }
 }

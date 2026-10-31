@@ -161,8 +161,28 @@ fn snap(v: f32, step: f32) -> f32 {
     (v / step).round() * step
 }
 
-/// KiB/s slider mapping: quadratic, so the low end is fine-grained.
+/// KiB/s slider mapping: quadratic, so the low end is fine-grained; the
+/// far right end is no limit (the most there is).
 const SPEED_MAX: f32 = 50_000.0;
+/// The part of the track for limits; the rest, at the right, is no limit.
+const SPEED_SPAN: f32 = 0.95;
+/// The lowest limit: the left end is a limit too, never «no limit».
+const SPEED_MIN: u32 = 50;
+
+/// Where `kbps` sits on the slider (0 = no limit: the right end).
+fn speed_frac(kbps: u32) -> f32 {
+    if kbps == 0 { 1.0 } else { (kbps as f32 / SPEED_MAX).sqrt().clamp(0.0, 1.0) * SPEED_SPAN }
+}
+
+/// The limit at `v` on the slider (0 = no limit).
+fn speed_at(v: f32) -> u32 {
+    if v >= (1.0 + SPEED_SPAN) / 2.0 {
+        return 0;
+    }
+    let f = (v / SPEED_SPAN).clamp(0.0, 1.0);
+    let raw = f * f * SPEED_MAX;
+    (snap(raw, speed_step(raw)) as u32).max(SPEED_MIN)
+}
 
 fn speed_step(raw: f32) -> f32 {
     if raw < 1_000.0 {
@@ -190,17 +210,12 @@ pub(super) fn speed_slider(ui: &mut Ui, id: &str, kbps: u32) -> Option<u32> {
 /// [`speed_slider`] with the value under the pointer and the released one
 /// apart (a setting that is written to a file only on release).
 pub(super) fn speed_slider_parts(ui: &mut Ui, id: &str, kbps: u32) -> (Option<u32>, Option<u32>) {
-    let frac = (kbps as f32 / SPEED_MAX).sqrt().clamp(0.0, 1.0);
-    let at = |v: f32| {
-        let raw = v * v * SPEED_MAX;
-        snap(raw, speed_step(raw)) as u32
-    };
-    let o = Slider::new(id, frac)
+    let o = Slider::new(id, speed_frac(kbps))
         .width(240.0)
         .track(8.0)
-        .value_label(move |v| fmt_speed(at(v)))
+        .value_label(move |v| fmt_speed(speed_at(v)))
         .show(ui);
-    (o.dragging.map(at), o.committed.map(at))
+    (o.dragging.map(speed_at), o.committed.map(speed_at))
 }
 
 /// Tiles with every cover shape drawn, for picking one or a set. The
@@ -443,27 +458,28 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
         ui.add(Switch::new(&mut p.library_as_taste).id_salt("set-library-taste"));
     });
     ui.add_space(8.0);
-    settings_help::item(ui, Id::LastfmKey, "Ключ Last.fm", |ui| {
-        TextField::new(&mut pages.lastfm_key, "Ключ Last.fm")
-            .password(true)
-            .supporting(if p.lastfm_configured { "Ключ задан. Введи новый, чтобы заменить." } else { "Необязательно. Хранится в settings.toml." })
-            .width(480.0)
-            .id_salt("set-lastfm")
-            .show(ui);
-    });
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        if ui
-            .add(Button::new("Сохранить").style(Style::Tonal).enabled(!pages.lastfm_key.trim().is_empty()).id_salt("set-lastfm-save"))
-            .clicked()
-        {
-            out.push(Command::SetLastfmKey(std::mem::take(&mut pages.lastfm_key).trim().to_owned()));
-        }
-        if p.lastfm_configured && ui.add(Button::new("Убрать ключ").style(Style::Text).id_salt("set-lastfm-clear")).clicked() {
-            pages.lastfm_key.clear();
-            out.push(Command::SetLastfmKey(String::new()));
-        }
+    dimmed(ui, !p.graph_use, |ui| {
+        settings_help::item(ui, Id::LastfmKey, "Ключ Last.fm", |ui| {
+            let mut field = TextField::new(&mut pages.lastfm_key, "Ключ Last.fm").password(true);
+            if p.lastfm_configured {
+                field = field.supporting("Ключ задан. Введи новый, чтобы заменить.");
+            }
+            field.width(480.0).id_salt("set-lastfm").show(ui);
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if ui
+                .add(Button::new("Сохранить").style(Style::Tonal).enabled(!pages.lastfm_key.trim().is_empty()).id_salt("set-lastfm-save"))
+                .clicked()
+            {
+                out.push(Command::SetLastfmKey(std::mem::take(&mut pages.lastfm_key).trim().to_owned()));
+            }
+            if p.lastfm_configured && ui.add(Button::new("Убрать ключ").style(Style::Text).id_salt("set-lastfm-clear")).clicked() {
+                pages.lastfm_key.clear();
+                out.push(Command::SetLastfmKey(String::new()));
+            }
+        });
     });
 
     group(ui, "Не нравится");
@@ -1044,11 +1060,7 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
     settings_help::item(ui, Id::AcoustId, "Ключ AcoustID", |ui| {
         TextField::new(&mut pages.acoustid_key, "Ключ AcoustID")
             .password(true)
-            .supporting(if p.acoustid_configured {
-                "Ключ задан. Введи новый, чтобы заменить."
-            } else {
-                "Нужен для опознания треков по звуку. Хранится в settings.toml."
-            })
+            .supporting(if p.acoustid_configured { "Ключ задан. Введи новый, чтобы заменить." } else { "Нужен для опознания треков по звуку." })
             .width(480.0)
             .id_salt("set-acoustid")
             .show(ui);
@@ -1110,8 +1122,28 @@ pub(super) fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{analysis_status, fmt_count};
+    use super::{SPEED_MIN, analysis_status, fmt_count, fmt_speed, speed_at, speed_frac};
     use nikgob_view::AnalysisProgress;
+
+    /// «Без лимита» is the far right end, the most there is; the left end
+    /// is the lowest limit, and a limit stays where it was set.
+    #[test]
+    fn no_limit_is_the_right_end_of_a_speed_slider() {
+        assert_eq!(speed_frac(0), 1.0);
+        assert_eq!(speed_at(1.0), 0);
+        assert_eq!(fmt_speed(speed_at(1.0)), "без лимита");
+        assert_eq!(speed_at(0.0), SPEED_MIN, "the left end is a limit");
+        let mut last = 0;
+        for i in 0..=90 {
+            let v = speed_at(i as f32 / 100.0);
+            assert!(v > 0 && v >= last, "rising to the right: {v} after {last}");
+            last = v;
+        }
+        for kbps in [50, 500, 2_000, 10_000, 50_000] {
+            assert_eq!(speed_at(speed_frac(kbps)), kbps, "{kbps} stays");
+            assert!(speed_frac(kbps) < speed_frac(0));
+        }
+    }
 
     #[test]
     fn counts_and_analysis_read_as_russian() {
