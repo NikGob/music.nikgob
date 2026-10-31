@@ -35,13 +35,15 @@ impl Instances {
 
     /// `op` on each instance in turn until one answers. All failing: the
     /// first refusal (a block, a rate limit) if there was one, else the
-    /// last error.
+    /// first error of an instance that answered (a 403 says more than the
+    /// next one being gone), else the last error.
     pub async fn call<T, F, Fut>(&self, op: F) -> Result<T, SourceError>
     where
         F: Fn(String) -> Fut,
         Fut: Future<Output = Result<T, SourceError>>,
     {
         let mut refused: Option<SourceError> = None;
+        let mut answered: Option<SourceError> = None;
         let mut last = SourceError::NotConfigured;
         for (base, breaker) in &self.list {
             if let Err(e) = breaker.check() {
@@ -57,12 +59,14 @@ impl Instances {
                     log::info!("{base}: {e}");
                     if matches!(e, SourceError::Blocked(_) | SourceError::RateLimited { .. }) {
                         refused.get_or_insert(e.clone());
+                    } else if !matches!(e, SourceError::Unreachable(_)) {
+                        answered.get_or_insert(e.clone());
                     }
                     last = e;
                 }
             }
         }
-        Err(refused.unwrap_or(last))
+        Err(refused.or(answered).unwrap_or(last))
     }
 }
 
@@ -85,5 +89,25 @@ mod tests {
         // It sits out now: refused without a request.
         let again = mine.call(|_| async { Ok(()) }).await;
         assert!(matches!(again, Err(SourceError::RateLimited { .. })));
+    }
+
+    /// The one live instance said 403 and the others had no DNS: the 403
+    /// is what went wrong, not the last one being gone.
+    #[tokio::test]
+    async fn the_error_of_an_instance_that_answered_is_told() {
+        let i = Instances::new(&[], &["https://live", "https://gone-1", "https://gone-2"], Duration::ZERO);
+        let got = i
+            .call(|base| async move {
+                if base == "https://live" {
+                    Err::<(), _>(SourceError::Http { status: 403 })
+                } else {
+                    Err(SourceError::Unreachable("dns error".into()))
+                }
+            })
+            .await;
+        assert!(matches!(got, Err(SourceError::Http { status: 403 })), "{got:?}");
+        let all_gone = Instances::new(&[], &["https://a", "https://b"], Duration::ZERO);
+        let got = all_gone.call(|_| async { Err::<(), _>(SourceError::Unreachable("dns error".into())) }).await;
+        assert!(matches!(got, Err(SourceError::Unreachable(_))));
     }
 }

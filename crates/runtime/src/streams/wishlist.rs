@@ -73,7 +73,7 @@ pub(crate) enum WishMsg {
     Fetched {
         item: WishlistId,
         offer: Box<Offer>,
-        result: Result<Fetched, String>,
+        result: Result<Fetched, SourceError>,
     },
     Inspected {
         item: WishlistId,
@@ -108,6 +108,8 @@ pub(crate) struct WishState {
     live: Arc<parking_lot::Mutex<HashMap<WishlistId, u8>>>,
     /// Sources that could not answer their last search, and why.
     pub(crate) down: HashMap<SourceKey, String>,
+    /// Sources whose last download failed though they found it, and why.
+    pub(crate) fetch_down: HashMap<SourceKey, String>,
     /// Who an item's file comes from, while it downloads.
     from: HashMap<WishlistId, String>,
 }
@@ -137,6 +139,16 @@ fn down_text(e: &SourceError) -> String {
         SourceError::RateLimited { .. } => "Просит подождать — попробую позже".into(),
         SourceError::Http { status } => format!("Отвечает ошибкой {status}"),
         _ => "Не отвечает".into(),
+    }
+}
+
+/// A source whose download failed, in words for «Источники»; `None` when
+/// the failure says nothing of the source (the disk, an empty offer).
+fn fetch_down_text(e: &SourceError) -> Option<String> {
+    match e {
+        SourceError::Io(_) | SourceError::NothingToFetch | SourceError::NotConfigured => None,
+        SourceError::Blocked(_) | SourceError::RateLimited { .. } => Some(down_text(e)),
+        _ => Some("Находит, но не скачивает".into()),
     }
 }
 
@@ -649,7 +661,9 @@ impl Worker {
     /// and how the last search of each went.
     pub(crate) fn publish_sources(&mut self) {
         let order = self.state.read().prefs.source_order();
-        let down = self.streaming.wish.down.clone();
+        let mut down = self.streaming.wish.fetch_down.clone();
+        // A search that failed says more: the source is not there at all.
+        down.extend(self.streaming.wish.down.clone());
         let have: Vec<SourceKey> = self.sources.iter().map(|s| s.key()).collect();
         let indexer = self.indexer.is_some();
         let rows: Vec<v::SourceView> = order
@@ -809,9 +823,20 @@ impl Worker {
             }
             WishMsg::Fetched { item, offer, result } => match result {
                 Ok(Fetched::Torrent(p)) => self.wish_inspect(item, *offer, p),
-                Ok(Fetched::Files(files)) => self.wish_files(item, *offer, files),
+                Ok(Fetched::Files(files)) => {
+                    if self.streaming.wish.fetch_down.remove(&offer.source).is_some() {
+                        self.publish_sources();
+                    }
+                    self.wish_files(item, *offer, files)
+                }
                 Err(e) => {
                     log::warn!("wishlist: fetching {} from {:?}: {e}", offer.title, offer.source);
+                    if offer.source != SourceKey::Torrents
+                        && let Some(text) = fetch_down_text(&e)
+                    {
+                        self.streaming.wish.fetch_down.insert(offer.source, text);
+                        self.publish_sources();
+                    }
                     self.streaming.wish.live.lock().remove(&item);
                     self.drop_direct(item);
                     self.wish_next_candidate(item);
@@ -965,8 +990,8 @@ impl Worker {
         self.streaming.spawn(async move {
             let limit = if torrent { Duration::from_secs(120) } else { FETCH_TIMEOUT };
             let result = match tokio::time::timeout(limit, source.fetch(&offer, &want, &dest, progress)).await {
-                Ok(r) => r.map_err(|e| e.to_string()),
-                Err(_) => Err("не скачалось за отведённое время".to_owned()),
+                Ok(r) => r,
+                Err(_) => Err(SourceError::Unreachable("the download took too long".into())),
             };
             Msg::Wish(WishMsg::Fetched {
                 item: id,

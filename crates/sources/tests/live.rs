@@ -48,6 +48,15 @@ async fn qobuz_answers() {
         Ok(offers) => {
             let ranked = rank(offers.clone(), &eve(), &[]);
             println!("qobuz: {} offers, {} match: {:?}", offers.len(), ranked.len(), ranked.first().map(|r| r.offer.detail()));
+            // The file too: a search can work while downloads are refused.
+            if let Some(best) = ranked.first() {
+                let dir = tempfile::tempdir().unwrap();
+                match q.fetch(&best.offer, &eve(), dir.path(), Arc::new(|_, _| {})).await {
+                    Ok(Fetched::Files(files)) => println!("qobuz: fetched {:?}, {} bytes", files[0].file_name(), std::fs::metadata(&files[0]).unwrap().len()),
+                    Ok(_) => println!("qobuz: not a file"),
+                    Err(e) => println!("qobuz: fetching: {e}"),
+                }
+            }
         }
         Err(e) => println!("qobuz: {e}"),
     }
@@ -62,6 +71,15 @@ async fn tidal_answers() {
         Ok(offers) => {
             let ranked = rank(offers.clone(), &eve(), &[]);
             println!("tidal: {} offers, {} match: {:?}", offers.len(), ranked.len(), ranked.first().map(|r| r.offer.detail()));
+            // The file too: a search can work while downloads are refused.
+            if let Some(best) = ranked.first() {
+                let dir = tempfile::tempdir().unwrap();
+                match t.fetch(&best.offer, &eve(), dir.path(), Arc::new(|_, _| {})).await {
+                    Ok(Fetched::Files(files)) => println!("tidal: fetched {:?}, {} bytes", files[0].file_name(), std::fs::metadata(&files[0]).unwrap().len()),
+                    Ok(_) => println!("tidal: not a file"),
+                    Err(e) => println!("tidal: fetching: {e}"),
+                }
+            }
         }
         Err(e) => println!("tidal: {e}"),
     }

@@ -59,6 +59,8 @@ struct FakeSource {
     offer: Mutex<Option<Offer>>,
     searched: Mutex<u32>,
     fetched: Mutex<u32>,
+    /// What its downloads answer instead of a file.
+    refuse: Mutex<Option<SourceError>>,
 }
 
 impl FakeSource {
@@ -68,6 +70,7 @@ impl FakeSource {
             offer: Mutex::new(None),
             searched: Mutex::new(0),
             fetched: Mutex::new(0),
+            refuse: Mutex::new(None),
         })
     }
 
@@ -106,7 +109,11 @@ impl Source for FakeSource {
     }
     fn fetch<'a>(&'a self, _: &'a Offer, _: &'a Want, dest: &'a Path, progress: Progress) -> BoxFuture<'a, Result<Fetched, SourceError>> {
         *self.fetched.lock().unwrap() += 1;
+        let refused = self.refuse.lock().unwrap().clone();
         Box::pin(async move {
+            if let Some(e) = refused {
+                return Err(e);
+            }
             let path = dest.join(format!("{}.wav", self.key.as_str()));
             write_wav(&path, 3.0);
             progress(10, Some(10));
@@ -217,6 +224,33 @@ fn a_wish_found_in_a_catalogue_lands_on_the_same_track() {
     let sources = r.cfg.downloads_dir.join(".sources");
     wait_until("the folder gone", || std::fs::read_dir(&sources).map_or(true, |d| d.count() == 0));
     assert!(r.rt.state().downloads.wishlist.can_search);
+}
+
+/// Tidal found the song but its only instance refused the file: «Источники»
+/// says so on its row, and a download that works again clears it.
+#[test]
+fn a_source_whose_downloads_fail_says_so_on_its_row() {
+    let lib = Library::open_in_memory().unwrap();
+    let (track, artist, title) = gruppa(&lib);
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], Prefs::default());
+    let tidal = FakeSource::new(SourceKey::Tidal);
+    tidal.offers(&artist, &title, 3_000, flac());
+    *tidal.refuse.lock().unwrap() = Some(SourceError::Http { status: 403 });
+    r.rt.add_source(tidal.clone());
+    let status = |s: &ViewState| s.downloads.sources.iter().find(|v| v.key == SourceKey::Tidal).and_then(|v| v.status.clone());
+    wait_for(&r.rt, "the source", |s| s.downloads.sources.iter().any(|v| v.key == SourceKey::Tidal && v.available));
+    assert_eq!(status(&r.rt.state()), None);
+
+    r.rt.send(Command::Like(LikeTarget::Track(track), true));
+    wait_for(&r.rt, "the row says it", |s| status(s).as_deref() == Some("Находит, но не скачивает"));
+    assert!(*tidal.fetched.lock().unwrap() >= 1);
+
+    // It gives files again: the row is quiet once one comes.
+    *tidal.refuse.lock().unwrap() = None;
+    let item = lib.wishlist_for_track(track).unwrap().last().unwrap().id;
+    r.rt.send(Command::WishlistRetry(item));
+    wait_for(&r.rt, "the row quiet", |s| status(s).is_none());
+    wait_until("the item done", || wish_status(&lib, track) == Some(WishlistStatus::Done));
 }
 
 #[test]

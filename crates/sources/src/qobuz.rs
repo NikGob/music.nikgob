@@ -22,7 +22,9 @@ use crate::http::{client, download, get_json, safe_name};
 use crate::instances::Instances;
 use crate::text::catalogue_queries;
 
-pub const DEFAULT_INSTANCES: &[&str] = &["https://qobuz.squid.wtf"];
+/// The one that searched and gave a file on 2026-10-31; `qobuz.squid.wtf`
+/// had no DNS records that day, it stays for when it comes back.
+pub const DEFAULT_INSTANCES: &[&str] = &["https://qobuz-dll.foreyou.workers.dev", "https://qobuz.squid.wtf"];
 /// The best format there is.
 const QUALITY: &str = "27";
 
