@@ -284,7 +284,8 @@ impl Http {
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.trim().parse::<u64>().ok())
                         .map(Duration::from_secs)
-                        .map(|d| d.min(self.retry.max_delay));
+                        // `Retry-After: 0` (MusicBrainz's 503) still waits a second.
+                        .map(|d| d.max(Duration::from_secs(1)).min(self.retry.max_delay));
                     let delay = hinted.unwrap_or_else(|| self.retry.backoff(attempt));
                     // Shared schedule: other tasks hitting the same service back off
                     // too, also when this caller gives up (the server is still angry).
