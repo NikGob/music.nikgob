@@ -628,6 +628,16 @@ where
     done
 }
 
+/// A sweep of this many lookups under way: dropped before it ends (the app
+/// closes), it says so in the log.
+struct Unfinished(usize);
+
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        log::info!("covers: the sweep of {} lookups ended with the app; the rest is asked at the next start", self.0);
+    }
+}
+
 impl Worker {
     /// Looks up real art in the background for the library's albums and
     /// clips whose picture is poor (a sweep, one at a time), or for
@@ -672,6 +682,8 @@ impl Worker {
                 .unwrap_or_default()
             };
             let n = wants.len();
+            // A sweep cut short by the app closing says so too.
+            let mut cut = (sweep_run && n > 0).then(|| Unfinished(n));
             // Covers on screen take the art as it comes, not at every hit.
             let mut last: Option<Instant> = None;
             let mut pending = false;
@@ -688,6 +700,9 @@ impl Worker {
                 }
             })
             .await;
+            if let Some(c) = cut.take() {
+                std::mem::forget(c);
+            }
             match &done.stopped {
                 Some(why) => log::info!("covers: stopped after {} of {n} lookups ({why}); the rest is asked at the next start", done.asked),
                 None if sweep_run && n > 0 => log::info!("covers: {} lookups, {} found", done.asked, done.found),

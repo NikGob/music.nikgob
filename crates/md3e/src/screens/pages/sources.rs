@@ -124,7 +124,8 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
             (v::SourceKey::Soulseek, _) => "Отдельные треки от людей".to_owned(),
             (v::SourceKey::Qobuz | v::SourceKey::Tidal, _) => "Бесплатно, через открытые сервисы".to_owned(),
         };
-        let mut on = order[at].on;
+        // A source that is not set up shows off (its saved choice stays).
+        let mut on = order[at].on && !needs_setup;
         let slot = anim::f32(ui.ctx(), egui::Id::new(("src-slot", key.as_str())), n as f32, spring);
         let shift = TSTransform::from_translation(vec2(0.0, (slot - n as f32) * step));
         // Full while it travels, settling back down over its last quarter slot.
@@ -163,7 +164,7 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
         } else {
             ui.with_visual_transform(shift, draw);
         }
-        if on != order[at].on {
+        if !needs_setup && on != order[at].on {
             order[at].on = on;
             p.download_sources = order.clone();
         }
@@ -882,13 +883,14 @@ fn soulseek(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     });
     // Without an account there is nothing to share: the rows wait for it.
     let account = saved.configured();
-    let mut share = saved.share;
+    // Off while there is no account (the saved choice stays).
+    let mut share = saved.share && account;
     dimmed(ui, !account, |ui| {
         row(ui, Id::SoulseekShare, "Раздавать библиотеку", Some("Другие могут скачивать у тебя, только чтение"), |ui| {
             ui.add(Switch::new(&mut share).enabled(account).id_salt("set-slsk-share"));
         });
     });
-    if share != saved.share {
+    if account && share != saved.share {
         out.push(Command::SetSoulseekShare { share, upload_limit_kbps: saved.upload_limit_kbps });
     }
     // The limit is written when the slider is let go; the row says the
