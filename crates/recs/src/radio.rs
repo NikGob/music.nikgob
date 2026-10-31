@@ -321,6 +321,17 @@ impl RadioState {
         self
     }
 
+    /// What the runtime knows of a track seed the catalog lacks, told once
+    /// it can (autoplay may start before the first snapshot).
+    pub fn set_seed_facts(&mut self, facts: SeedFacts) {
+        self.seed_facts = Some(facts);
+    }
+
+    /// The runtime has told what it knows of the seed.
+    pub fn has_seed_facts(&self) -> bool {
+        self.seed_facts.is_some()
+    }
+
     /// «Не повторять сыгранное»: what played this long ago or less (or in
     /// the session) is not picked again while anything else is left.
     pub fn set_no_repeat_ms(&mut self, ms: i64) {

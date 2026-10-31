@@ -118,3 +118,68 @@ fn autoplay_from_a_seed_of_a_real_library() {
         std::fs::write(o, serde_json::to_string_pretty(&v).unwrap()).unwrap();
     }
 }
+
+/// The same seed through the runtime, as the app plays it: the track alone
+/// by `Command::PlayTracks` right after the start (the snapshot may not be
+/// built yet), autoplay as the runtime starts it. Prints the queue it fills
+/// and fails if fewer than `NIKGOB_AUTOPLAY_MIN` (default 8) of its first
+/// nine are of the language most of the seed's artists' tracks are in.
+#[test]
+#[ignore = "needs NIKGOB_AUTOPLAY_DB and NIKGOB_AUTOPLAY_SEED"]
+fn autoplay_of_a_lone_track_through_the_runtime() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let (Some(source), Some(seed)) = (std::env::var_os("NIKGOB_AUTOPLAY_DB"), std::env::var("NIKGOB_AUTOPLAY_SEED").ok()) else { return };
+    let dir = std::env::var_os("NIKGOB_AUTOPLAY_WORK").map_or_else(|| std::env::temp_dir().join("nikgob-real-autoplay"), PathBuf::from);
+    let db = work_copy(&PathBuf::from(source), &dir);
+    let seed: TrackId = seed.parse().expect("a track id");
+    let lib = Library::open(&db).unwrap();
+    let empty = dir.join("root");
+    std::fs::create_dir_all(&empty).unwrap();
+    let rt = nikgob_runtime::Runtime::start(
+        nikgob_runtime::RuntimeConfig {
+            library: lib.clone(),
+            // The seed is a stream: it plays from its service.
+            streams: vec![nikgob_youtube::Youtube::new(nikgob_youtube::YoutubeConfig::new(dir.join("youtube"))).unwrap()],
+            library_dir: empty,
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(nikgob_runtime::NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt.send(nikgob_view::Command::PlayTracks { tracks: vec![seed], start: 0, context: "Трек".into() });
+    let t = Instant::now();
+    loop {
+        {
+            let st = rt.state();
+            if st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() >= 9 {
+                break;
+            }
+        }
+        assert!(t.elapsed() < Duration::from_secs(120), "no autoplay: {:?}", rt.state().queue.radio);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let p = ModelPreview::of(&lib).unwrap();
+    let m = p.model();
+    let row = lib.get_track(seed).unwrap().unwrap();
+    let mut lanes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for a in row.artist_credit.artist_ids() {
+        for &i in m.of_artist(a) {
+            *lanes.entry(format!("{:?}", m.song_type_at(i as usize).lane())).or_default() += 1;
+        }
+    }
+    let lane = lanes.into_iter().max_by_key(|(_, n)| *n).map(|(l, _)| l);
+    let st = rt.state();
+    let mut same = 0;
+    for e in st.queue.next.iter().take(9) {
+        let l = m.position(e.track.id).map(|i| format!("{:?}", m.song_type_at(i).lane()));
+        same += usize::from(l.is_some() && l == lane);
+        println!("{} | {} | {:?}", e.track.title, e.track.artist, l);
+    }
+    let min: usize = std::env::var("NIKGOB_AUTOPLAY_MIN").ok().and_then(|m| m.parse().ok()).unwrap_or(8);
+    assert!(same >= min, "{same} of 9 of {lane:?}");
+}

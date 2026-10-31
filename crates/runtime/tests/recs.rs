@@ -1061,3 +1061,33 @@ fn autoplay_brings_back_nothing_the_queue_played_as_new_music() {
     let st = s.rt.state();
     assert!(st.queue.next.iter().all(|e| !ids.contains(&e.track.id)), "{:?}", st.queue.next.iter().map(|e| &e.track.title).collect::<Vec<_>>());
 }
+
+/// A lone stream the library does not hold (played from its album's page),
+/// started before the first build of the recommendations: autoplay still
+/// knows it by its artist and keeps to that artist's sound, not to the
+/// library's favourites of every sound.
+#[test]
+fn autoplay_of_a_lone_stream_before_the_first_build_keeps_to_its_artist() {
+    let l = library(3, 6, 5, &[]);
+    let yt = Arc::new(FakeService::youtube().logged_out());
+    let mut t = tokio::runtime::Runtime::new().unwrap().block_on(yt.album("yt-alb-firstlove")).unwrap().tracks.remove(0);
+    let style = 1;
+    t.artists = vec![nikgob_core::streaming::ArtistRef::new(None, format!("Artist {style}-0"))];
+    let seed = l.lib.upsert_stream_tracks(&[t]).unwrap()[0];
+    let prefs = Prefs {
+        radio_new_share: nikgob_view::RadioNewShare::None,
+        // Its album going on first is another rule.
+        autoplay_continue_world: false,
+        graph_services: false,
+        graph_open_data: false,
+        ..Prefs::default()
+    };
+    let s = start(&l.lib, vec![yt.clone()], prefs, None);
+    s.rt.send(Command::PlayTracks { tracks: vec![seed], start: 0, context: "Трек".into() });
+    wait_for(&s.rt, "autoplay", |st| st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() >= 10);
+    let st = s.rt.state();
+    // Titles are `Artist {style}-{a} song {n}` (the stream's album may lend
+    // the artist its own name).
+    let of_style = st.queue.next.iter().take(10).filter(|e| e.track.title.starts_with(&format!("Artist {style}-"))).count();
+    assert!(of_style >= 8, "{:?}", st.queue.next.iter().map(|e| &e.track.title).collect::<Vec<_>>());
+}

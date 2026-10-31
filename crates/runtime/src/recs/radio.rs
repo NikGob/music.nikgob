@@ -531,7 +531,10 @@ impl Worker {
     /// library artists, its sound if analysed, the language its title
     /// shows. None for a track of the catalog.
     fn seed_facts(&self, track: TrackId) -> Option<nikgob_recs::SeedFacts> {
-        let snap = self.snapshot()?;
+        self.seed_facts_in(&*self.snapshot()?, track)
+    }
+
+    fn seed_facts_in(&self, snap: &super::Snapshot, track: TrackId) -> Option<nikgob_recs::SeedFacts> {
         if snap.catalog.get(track).is_some() {
             return None;
         }
@@ -544,7 +547,11 @@ impl Worker {
                 artists.push(id);
             }
         }
-        let vector = self.analysis.index().read().get(track).copied();
+        // The index of the sound may not have it yet: the library has.
+        let vector = self.analysis.index().read().get(track).copied().or_else(|| {
+            let a = self.lib.get_analysis(track).ok().flatten()?;
+            (a.analyzed_with == nikgob_recs::ANALYZED_WITH).then(|| <[f32; nikgob_recs::DIM]>::try_from(a.bliss_vector.as_slice()).ok()).flatten()
+        });
         let lane = nikgob_recs::songtype::title_language(&t.title).map(|l| match l {
             nikgob_recs::Lang::Russian => nikgob_recs::SongLane::Russian,
             nikgob_recs::Lang::Japanese => nikgob_recs::SongLane::Japanese,
@@ -617,6 +624,15 @@ impl Worker {
         let new_share = super::new_share(&prefs, kind);
         let local_only = prefs.mixes_downloaded_only;
         let snap = self.snapshot();
+        // What is known of a seed the catalog lacks, once there is a
+        // snapshot to tell it by (autoplay may start before the first one).
+        let facts = match (&snap, self.recs.radio.run.as_ref()) {
+            (Some(s), Some(r)) if !r.state.has_seed_facts() => match r.state.seed {
+                RadioSeed::Track(t) => self.seed_facts_in(s, t),
+                _ => None,
+            },
+            _ => None,
+        };
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         if run.extending {
             return;
@@ -627,6 +643,10 @@ impl Worker {
             self.recs_dirty(Duration::ZERO);
             return;
         };
+        if let Some(f) = facts {
+            log::info!("radio «{}»: its seed is beyond the catalog, by its {} artists", run.title, f.artists.len());
+            run.state.set_seed_facts(f);
+        }
         run.want = false;
         run.extending = true;
         let (id, mut state) = (run.id, run.state.clone());
