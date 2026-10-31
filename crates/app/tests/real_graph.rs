@@ -52,19 +52,16 @@ fn fetch(lib: &Library, dir: &Path, minutes: u64) {
         Box::new(NullPlayback),
         Arc::new(|| {}),
     );
-    let meta = || Metadata::new(&MetadataConfig::new("music.nikgob graph check")).unwrap();
-    rt.set_graph_metadata(meta());
+    rt.set_graph_metadata(Metadata::new(&MetadataConfig::new("music.nikgob graph check")).unwrap());
     let start = Instant::now();
-    let mut last = Instant::now();
     while start.elapsed() < Duration::from_secs(60 * minutes) {
         std::thread::sleep(Duration::from_secs(20));
-        let asked = lib.graph_fetches().unwrap().len();
-        println!("graph: {asked} answers after {} s", start.elapsed().as_secs());
-        // A pass is over: the next one now.
-        if last.elapsed() > Duration::from_secs(300) {
-            rt.set_graph_metadata(meta());
-            last = Instant::now();
+        let asked = lib.graph_fetches().unwrap();
+        let mut by: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for f in &asked {
+            *by.entry(f.source.clone()).or_default() += 1;
         }
+        println!("graph: {} answers after {} s: {by:?}", asked.len(), start.elapsed().as_secs());
     }
     drop(rt);
 }

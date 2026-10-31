@@ -618,6 +618,8 @@ fn main() -> eframe::Result {
     let schedule = if demo && !streams::real_in_demo() {
         StreamSchedule {
             discover_gap: (Duration::from_millis(100), Duration::from_millis(200)),
+            graph_gap_youtube: (Duration::from_millis(100), Duration::from_millis(200)),
+            graph_gap_deezer: (Duration::from_millis(100), Duration::from_millis(200)),
             suggest_first: Duration::from_secs(2),
             ..StreamSchedule::default()
         }

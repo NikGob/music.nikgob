@@ -6,6 +6,8 @@
 //! similar artists and popular recordings, on a mock server), keeps the
 //! answers in the library, and the next build resolves them to the library
 //! and scores with them; the switches of «Рекомендации» keep it off.
+//! Deezer's top tracks give the popularity without ListenBrainz, and the
+//! pass goes through the whole library without waiting for the next one.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,11 +26,18 @@ fn schedule() -> StreamSchedule {
         analysis_idle: Duration::from_secs(60),
         recs_debounce: Duration::from_millis(20),
         discover_gap: (Duration::from_millis(1), Duration::from_millis(5)),
+        graph_gap_youtube: (Duration::from_millis(1), Duration::from_millis(3)),
+        graph_gap_deezer: (Duration::from_millis(1), Duration::from_millis(3)),
+        graph_gap_open: (Duration::ZERO, Duration::from_millis(2)),
         ..StreamSchedule::default()
     }
 }
 
 fn start(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs) -> Runtime {
+    start_with(lib, streams, prefs, schedule())
+}
+
+fn start_with(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs, schedule: StreamSchedule) -> Runtime {
     Runtime::start_scheduled(
         RuntimeConfig {
             library: lib.clone(),
@@ -41,7 +50,7 @@ fn start(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs) -> R
         },
         Box::new(NullPlayback),
         Arc::new(|| {}),
-        schedule(),
+        schedule,
     )
 }
 
@@ -258,4 +267,59 @@ fn a_source_that_wants_an_account_is_asked_once() {
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].status, "error");
     drop(mock);
+}
+
+/// Deezer's top tracks of each artist (no key, no account) are the
+/// popularity of the library's prior: of two songs of one artist the one
+/// its top puts first weighs more, with no ListenBrainz at all.
+#[test]
+fn deezer_top_tracks_give_the_popularity() {
+    let (lib, artists) = library();
+    let dz = Arc::new(FakeService::deezer());
+    let _rt = start(&lib, vec![dz.clone()], Prefs::default());
+    let kino = of(&artists, "Кино").to_string();
+    let tracks = lib.rec_tracks().unwrap();
+    // The library's songs of Кино in the order of Deezer's top.
+    let top = || {
+        lib.graph_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.source == "deezer_top" && r.subject_id == kino)
+            .filter_map(|r| tracks.iter().find(|t| t.title == r.entry.name).map(|t| t.id))
+            .collect::<Vec<_>>()
+    };
+    wait_until("Deezer's top of Кино", || top().len() == 2);
+    let (first, second) = (top()[0], top()[1]);
+    // One request an artist Deezer knows, after the artist search found it.
+    let asked = |source: &str| lib.graph_fetches().unwrap().iter().filter(|f| f.source == source).count();
+    wait_until("every artist searched", || asked("deezer_artists") == SONGS.len());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(dz.calls("artist_top"), asked("deezer_top"), "{:?}", dz.all_calls());
+    wait_until("the popularity in the prior", || {
+        let p = ModelPreview::of(&lib).unwrap();
+        let m = p.model();
+        let prior = |t| m.graph.prior(m.position(t).unwrap());
+        prior(first) > prior(second)
+    });
+}
+
+/// A library larger than what a lane plans at once is asked through
+/// without the pause between passes: the next requests are planned as soon
+/// as the ones before are asked, until nothing is due.
+#[test]
+fn the_pass_goes_through_the_whole_library_at_once() {
+    let (lib, artists) = library();
+    let yt = Arc::new(FakeService::youtube().logged_out());
+    let dz = Arc::new(FakeService::deezer());
+    let schedule = StreamSchedule { graph_chunk: 2, ..schedule() };
+    let _rt = start_with(&lib, vec![yt.clone(), dz.clone()], Prefs::default(), schedule);
+    let tracks = SONGS.iter().map(|(_, t)| t.len()).sum::<usize>();
+    let asked = |source: &str| lib.graph_fetches().unwrap().iter().filter(|f| f.source == source).count();
+    wait_until("every artist and track", || {
+        asked("youtube_artists") == artists.len() && asked("deezer_artists") == artists.len() && asked("youtube_radio") == tracks
+    });
+    // Each asked once: what a source said stands for a month.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(yt.calls("similar_artists"), artists.len(), "{:?}", yt.all_calls());
+    assert_eq!(dz.calls("similar_artists"), artists.len(), "{:?}", dz.all_calls());
 }

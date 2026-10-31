@@ -83,6 +83,23 @@ pub struct StreamSchedule {
     /// …and looks for new music again this long after the last pass (and
     /// on a new day).
     pub discover_every: Duration,
+    /// The graph of similar music (docs/recs-graph.md §1) asks each source
+    /// one request at a time, every source at once: YouTube Music somewhere
+    /// between these apart…
+    pub graph_gap_youtube: (Duration, Duration),
+    /// …Deezer between these…
+    pub graph_gap_deezer: (Duration, Duration),
+    /// …and the open data (MusicBrainz, ListenBrainz, Last.fm) between these
+    /// on top of their clients' own limits (MusicBrainz one a second).
+    pub graph_gap_open: (Duration, Duration),
+    /// It plans this many requests of a source at a time, the next ones as
+    /// soon as they are asked, until the library is covered…
+    pub graph_chunk: usize,
+    /// …then looks for what went stale this often.
+    pub graph_every: Duration,
+    /// What it keeps is built in at most this often while it goes on (and
+    /// once when it is over).
+    pub graph_build_every: Duration,
     /// The services' own suggestions (docs/stage4.md §12.3) are read again
     /// this long after the last time, per signed-in service…
     pub suggest_every: Duration,
@@ -128,6 +145,12 @@ impl Default for StreamSchedule {
             recs_every: Duration::from_secs(3 * 3600),
             discover_gap: (Duration::from_secs(2), Duration::from_secs(4)),
             discover_every: Duration::from_secs(24 * 3600),
+            graph_gap_youtube: (Duration::from_millis(750), Duration::from_millis(1500)),
+            graph_gap_deezer: (Duration::from_millis(250), Duration::from_millis(500)),
+            graph_gap_open: (Duration::ZERO, Duration::from_millis(250)),
+            graph_chunk: 240,
+            graph_every: Duration::from_secs(2 * 3600),
+            graph_build_every: Duration::from_secs(2 * 60),
             suggest_every: Duration::from_secs(6 * 3600),
             suggest_first: Duration::from_secs(90),
             tick: Duration::from_secs(5),

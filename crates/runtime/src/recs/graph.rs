@@ -3,29 +3,38 @@
 //! tracks and keeps their answers in the library, and the resolution of
 //! what was kept to the catalog at every build.
 //!
-//! * **The pass**: one request at a time, [`StreamSchedule::discover_gap`]
-//!   apart, never while a search is typed or answered, while the window is
-//!   idle, or while a discovery request is on its way; a rate limit waits
-//!   its pause and asks the same again. At most [`GRAPH_BUDGET`] requests,
-//!   a new pass [`GRAPH_EVERY`] after the last while anything is due.
+//! * **The pass**: every source in a lane of its own ([`Lane`]), all lanes
+//!   at once, one request at a time in each, its gap apart
+//!   ([`StreamSchedule::graph_gap_youtube`] and the rest) on top of the
+//!   clients' own limits; never while a search is typed or answered or
+//!   while the window is idle, and the services' lanes not while a
+//!   discovery request is on its way. A lane plans
+//!   [`StreamSchedule::graph_chunk`] requests at a time and the next ones as
+//!   soon as those are asked, so the pass goes through the whole library;
+//!   once nothing is due it looks again [`StreamSchedule::graph_every`]
+//!   later. A rate limit waits its pause (at least a second, doubled while
+//!   it goes on) and asks the same again.
 //!   Artists first (one answer covers all their tracks: the most of a cold
 //!   start), the loved and played first, then the tracks the same way.
 //!   What each source said is kept for [`TTL_MS`] (MusicBrainz's tags
 //!   [`TAGS_TTL_MS`]), an error is asked again after [`RETRY_MS`].
 //! * **The sources**: YouTube Music's radio of a track (a song search first
 //!   when the track has no id there) and its similar artists, Deezer's
-//!   similar artists («Спрашивать YouTube Music и Deezer»); MusicBrainz's
-//!   artist with its tags (the id ListenBrainz needs), ListenBrainz's
-//!   similar artists, recordings and an artist's popular recordings
-//!   («Спрашивать ListenBrainz и MusicBrainz», with the online metadata of
-//!   the import); Last.fm's similar tracks and artists with the user's key.
+//!   similar artists and an artist's top tracks («Спрашивать YouTube Music
+//!   и Deezer»); MusicBrainz's artist with its tags (the id ListenBrainz
+//!   needs), ListenBrainz's similar artists, recordings and an artist's
+//!   popular recordings («Спрашивать ListenBrainz и MusicBrainz», with the
+//!   online metadata of the import); Last.fm's similar tracks and artists
+//!   with the user's key.
 //! * **Resolution** ([`resolve`]): an entry is the library's track or artist
 //!   by the service's id, by its MusicBrainz id, else by its song or artist
 //!   key; what the library lacks is left out of the graph, and the similar
 //!   artists it lacks vote for the new music of their artists
 //!   ([`Resolved::votes`]).
 //!
-//! [`StreamSchedule::discover_gap`]: crate::StreamSchedule::discover_gap
+//! [`StreamSchedule::graph_gap_youtube`]: crate::StreamSchedule::graph_gap_youtube
+//! [`StreamSchedule::graph_chunk`]: crate::StreamSchedule::graph_chunk
+//! [`StreamSchedule::graph_every`]: crate::StreamSchedule::graph_every
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -43,10 +52,6 @@ use crate::Worker;
 use crate::import::Internal;
 use crate::streams::StreamSchedule;
 
-/// Requests of a pass.
-pub(crate) const GRAPH_BUDGET: u32 = 120;
-/// A pass this long after the last.
-pub(crate) const GRAPH_EVERY: Duration = Duration::from_secs(2 * 3600);
 /// What a source said stands this long…
 pub(crate) const TTL_MS: i64 = 30 * 86_400_000;
 /// …MusicBrainz's tags this long…
@@ -56,9 +61,16 @@ pub(crate) const RETRY_MS: i64 = 86_400_000;
 /// Entries kept since the last build that make a build due.
 const FRESH_BUILD: usize = 60;
 
+/// A rate limit that says to ask again at once waits this long at least.
+const MIN_PAUSE: Duration = Duration::from_secs(1);
+
 /// The sources as the library keeps them.
 const S_MUSICBRAINZ: &str = "musicbrainz";
+/// ListenBrainz's popular recordings of an artist…
 const S_POPULARITY: &str = "popularity";
+/// …and Deezer's top tracks of an artist (no key): both are the popularity
+/// of the library's prior.
+const S_DEEZER_TOP: &str = "deezer_top";
 
 /// One request of the pass.
 #[derive(Clone, Debug, PartialEq)]
@@ -71,6 +83,8 @@ pub(crate) enum Ask {
     Artists { artist: ArtistId, service: Service, id: String },
     /// An artist without an id in the service: an artist search first.
     FindArtist { artist: ArtistId, service: Service, name: String },
+    /// Deezer's top tracks of an artist by its id there.
+    DzTop { artist: ArtistId, id: String },
     /// MusicBrainz's artist and its tags (by its id, else by name).
     Tags { artist: ArtistId, name: String, mbid: Option<String> },
     LbArtists { artist: ArtistId, mbid: String },
@@ -90,6 +104,7 @@ impl Ask {
             Self::Artists { artist, service, .. } | Self::FindArtist { artist, service, .. } => {
                 ("artist", a(artist), if *service == Service::Youtube { GraphSource::YoutubeArtists.as_str() } else { GraphSource::DeezerArtists.as_str() })
             }
+            Self::DzTop { artist, .. } => ("artist", a(artist), S_DEEZER_TOP),
             Self::Tags { artist, .. } => ("artist", a(artist), S_MUSICBRAINZ),
             Self::LbArtists { artist, .. } => ("artist", a(artist), GraphSource::ListenBrainz.as_str()),
             Self::LbTop { artist, .. } => ("artist", a(artist), S_POPULARITY),
@@ -104,9 +119,54 @@ impl Ask {
         match self {
             Self::Radio { .. } | Self::FindSong { .. } => Some(Service::Youtube),
             Self::Artists { service, .. } | Self::FindArtist { service, .. } => Some(*service),
+            Self::DzTop { .. } => Some(Service::Deezer),
             _ => None,
         }
     }
+
+    /// The lane it waits in.
+    pub(crate) fn lane(&self) -> Lane {
+        match self {
+            Self::Tags { .. } => Lane::MusicBrainz,
+            Self::LbArtists { .. } | Self::LbTop { .. } | Self::LbRecordings { .. } => Lane::ListenBrainz,
+            Self::FmTrack { .. } | Self::FmArtist { .. } => Lane::LastFm,
+            _ if self.service() == Some(Service::Deezer) => Lane::Deezer,
+            _ => Lane::Youtube,
+        }
+    }
+}
+
+/// A source of the pass with its own pace: each asks one request at a
+/// time, all of them at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lane {
+    Youtube,
+    Deezer,
+    MusicBrainz,
+    ListenBrainz,
+    LastFm,
+}
+
+impl Lane {
+    pub(crate) const ALL: [Lane; 5] = [Lane::Youtube, Lane::Deezer, Lane::MusicBrainz, Lane::ListenBrainz, Lane::LastFm];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    /// One of the streaming services (they also answer discovery).
+    fn is_service(self) -> bool {
+        matches!(self, Lane::Youtube | Lane::Deezer)
+    }
+}
+
+/// How long a lane waits after its `n`-th rate limit in a row: what the
+/// source said (else `unknown`), at least [`MIN_PAUSE`], doubled at each
+/// one after the first and at most `cap` (unless the source itself said
+/// longer).
+pub(crate) fn backoff(said: Option<Duration>, unknown: Duration, cap: Duration, n: u32) -> Duration {
+    let base = said.unwrap_or(unknown).max(MIN_PAUSE);
+    base.saturating_mul(1 << n.saturating_sub(1).min(10)).min(cap.max(base))
 }
 
 /// An answer of a request.
@@ -154,22 +214,41 @@ pub(crate) enum GraphMsg {
     Wake,
 }
 
+/// A lane of the pass.
 #[derive(Default)]
-pub(crate) struct GraphState {
-    plan: VecDeque<Ask>,
-    requests: u32,
+struct LaneState {
+    queue: VecDeque<Ask>,
     busy: bool,
     next_at: Option<Instant>,
-    /// When the last pass ended (none this run yet).
-    last_pass: Option<Instant>,
+    /// When it last found nothing due (none this run yet).
+    covered_at: Option<Instant>,
+    /// Rate limits in a row.
+    limited: u32,
+}
+
+#[derive(Default)]
+pub(crate) struct GraphState {
+    lanes: [LaneState; 5],
+    /// Requests sent this run.
+    requests: u32,
+    /// A pass is under way (for its log line and its last build).
+    running: bool,
     /// The first request of this run waited its gap.
     warmed: bool,
-    /// Entries kept since the last build asked for.
+    /// Entries kept since the last build asked for…
     fresh: usize,
+    /// …and when that was.
+    built_at: Option<Instant>,
     /// Sources that wanted an account or a key this run ([`Failed::Closed`]).
     closed: Vec<&'static str>,
     /// The online metadata to ask (tests set it; else the import's).
     pub(crate) metadata: Option<Metadata>,
+}
+
+impl GraphState {
+    fn lane(&mut self, l: Lane) -> &mut LaneState {
+        &mut self.lanes[l.index()]
+    }
 }
 
 /// One entry of a stream track.
@@ -194,6 +273,7 @@ async fn ask(svc: Option<Arc<dyn StreamService>>, meta: Option<Metadata>, a: Ask
     };
     Ok(match a {
         Ask::Radio { id, .. } => Answer::Tracks(svc()?.radio(&id).await?),
+        Ask::DzTop { id, .. } => Answer::Tracks(svc()?.artist_top(&id).await?),
         Ask::FindSong { query, .. } => Answer::Tracks(svc()?.search_kind(&query, SearchKind::Songs).await?.tracks),
         Ask::Artists { id, .. } => Answer::Artists(svc()?.similar_artists(&id).await?),
         Ask::FindArtist { name, .. } => Answer::Artists(svc()?.search_kind(&name, SearchKind::Artists).await?.artists),
@@ -262,6 +342,7 @@ impl Names {
         let id = match source {
             "youtube_radio" => by_remote("youtube"),
             "listenbrainz" | "lastfm" | S_POPULARITY => by_mbid(),
+            S_DEEZER_TOP => by_remote("deezer"),
             _ => None,
         };
         id.and_then(|s| s.parse().ok()).or_else(|| self.songs.get(&song_key(&e.name, &e.artist)).copied())
@@ -299,7 +380,7 @@ pub(crate) fn resolve(rows: &[GraphRow], tags: &[GraphTag], names: &Names) -> Re
                     None => out.votes.entry(artist_key(&r.entry.name)).or_default().push((from, rank_weight(r.rank, r.total) * source.trust())),
                 }
             }
-            ("artist", "track") if r.source == S_POPULARITY => {
+            ("artist", "track") if r.source == S_POPULARITY || r.source == S_DEEZER_TOP => {
                 if let Some(t) = names.track(&r.source, &r.entry) {
                     out.input.popular.push((t, r.rank, r.total));
                 }
@@ -362,30 +443,56 @@ impl Worker {
 
     /// A pass now (a source was switched on).
     pub(crate) fn graph_now(&mut self) {
-        self.recs.graph.last_pass = None;
+        for l in &mut self.recs.graph.lanes {
+            l.covered_at = None;
+        }
         self.graph_tick();
     }
 
-    /// Every tick: a pass when one is due, its next request when it is time.
-    pub(crate) fn graph_tick(&mut self) {
-        let prefs = self.state.read().prefs.clone();
-        if !prefs.graph_use || !(prefs.graph_services || prefs.graph_open_data) {
-            self.recs.graph.plan.clear();
-            return;
+    /// Whether `lane` may ask at all under `prefs`.
+    fn graph_lane_on(&self, lane: Lane, prefs: &nikgob_view::Prefs, meta: Option<&Metadata>) -> bool {
+        match lane {
+            Lane::Youtube => prefs.graph_services && self.service(Service::Youtube).is_some(),
+            Lane::Deezer => prefs.graph_services && self.service(Service::Deezer).is_some(),
+            Lane::MusicBrainz | Lane::ListenBrainz => prefs.graph_open_data && meta.is_some(),
+            Lane::LastFm => meta.is_some_and(|m| m.lastfm.is_some()),
         }
-        if self.recs.graph.plan.is_empty() {
-            let due = self.recs.graph.last_pass.is_none_or(|t| t.elapsed() >= GRAPH_EVERY);
-            if !due || self.recs.graph.busy || !self.graph_plan(&prefs) {
-                return;
-            }
-        }
-        self.graph_step();
     }
 
-    /// Plans a pass from the snapshot: false when there is none or nothing
-    /// is due.
-    fn graph_plan(&mut self, prefs: &nikgob_view::Prefs) -> bool {
-        let Some(snap) = self.snapshot() else { return false };
+    /// Every tick: the next requests of the lanes that ran dry, the next
+    /// request of each lane when it is time.
+    pub(crate) fn graph_tick(&mut self) {
+        let prefs = self.state.read().prefs.clone();
+        let off = !prefs.graph_use || !(prefs.graph_services || prefs.graph_open_data);
+        let meta = self.graph_metadata();
+        let every = self.streaming.schedule.graph_every;
+        let mut want = [false; 5];
+        for lane in Lane::ALL {
+            let on = !off && self.graph_lane_on(lane, &prefs, meta.as_ref());
+            let l = self.recs.graph.lane(lane);
+            if !on {
+                l.queue.clear();
+                continue;
+            }
+            want[lane.index()] = l.queue.is_empty() && !l.busy && l.covered_at.is_none_or(|t| t.elapsed() >= every);
+        }
+        if want.contains(&true) {
+            self.graph_plan(want);
+        }
+        let g = &self.recs.graph;
+        if g.running && g.lanes.iter().all(|l| l.queue.is_empty() && !l.busy) {
+            self.graph_done();
+            return;
+        }
+        if !off {
+            self.graph_step(meta.as_ref());
+        }
+    }
+
+    /// Plans the next requests of the lanes `want` names from the snapshot;
+    /// a lane with nothing due is covered.
+    fn graph_plan(&mut self, want: [bool; 5]) {
+        let Some(snap) = self.snapshot() else { return };
         let now = now_ms();
         let fetches: HashMap<(String, String, String), GraphFetch> = self
             .lib
@@ -405,64 +512,83 @@ impl Worker {
                 mbids.entry(format!("artist:{}", f.subject_id)).or_insert_with(|| m.clone());
             }
         }
-        let yt = prefs.graph_services && self.service(Service::Youtube).is_some();
-        let dz = prefs.graph_services && self.service(Service::Deezer).is_some();
-        let meta = if prefs.graph_open_data { self.graph_metadata() } else { None };
-        let open = meta.is_some();
-        let fm = self.graph_metadata().is_some_and(|m| m.lastfm.is_some());
+        let chunk = self.streaming.schedule.graph_chunk.max(1);
+        let closed = self.recs.graph.closed.clone();
         let model = &snap.model;
         let cat = &snap.catalog;
-        let due = |kind: &str, id: &str, source: &str| !fresh(&fetches, kind, id, source, now);
+        let stands = |kind: &str, id: &str, source: &str| fresh(&fetches, kind, id, source, now);
+        let due = |kind: &str, id: &str, source: &'static str| !closed.contains(&source) && !stands(kind, id, source);
+        let mut plans: [Vec<Ask>; 5] = Default::default();
+        let room = |plans: &[Vec<Ask>; 5], l: Lane| want[l.index()] && plans[l.index()].len() < chunk;
+        let full = |plans: &[Vec<Ask>; 5]| Lane::ALL.iter().all(|l| !room(plans, *l));
         // Artists: the loved first, then the ones with most tracks.
         let mut artists: Vec<(ArtistId, f32, usize)> =
             cat.artists().map(|a| (a, model.taste.artist_affinity(a), cat.of_artist(a).len())).collect();
         artists.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
-        let mut plan: Vec<Ask> = Vec::new();
-        let room = (2 * GRAPH_BUDGET) as usize;
         for (a, _, _) in artists {
-            if plan.len() >= room {
+            if full(&plans) {
                 break;
             }
             let sid = a.to_string();
+            let yt = room(&plans, Lane::Youtube) && due("artist", &sid, GraphSource::YoutubeArtists.as_str());
+            let dz = room(&plans, Lane::Deezer) && due("artist", &sid, GraphSource::DeezerArtists.as_str());
+            let dz_top = room(&plans, Lane::Deezer) && due("artist", &sid, S_DEEZER_TOP);
+            let mb = room(&plans, Lane::MusicBrainz) && due("artist", &sid, S_MUSICBRAINZ);
+            // ListenBrainz knows the artist by the id MusicBrainz gave.
+            let mbid = mbids.get(&format!("artist:{sid}")).filter(|_| room(&plans, Lane::ListenBrainz) && stands("artist", &sid, S_MUSICBRAINZ));
+            let lb = mbid.is_some() && due("artist", &sid, GraphSource::ListenBrainz.as_str());
+            let lb_top = mbid.is_some() && due("artist", &sid, S_POPULARITY);
+            let fm = room(&plans, Lane::LastFm) && due("artist", &sid, GraphSource::LastFm.as_str());
+            if !(yt || dz || dz_top || mb || lb || lb_top || fm) {
+                continue;
+            }
             let Some(name) = self.lib.get_artist(a).ok().flatten().map(|x| x.name) else { continue };
-            let known = self.lib.external_ids(EntityKind::Artist, *a.as_uuid()).unwrap_or_default();
-            for (on, service, source) in [(yt, Service::Youtube, GraphSource::YoutubeArtists), (dz, Service::Deezer, GraphSource::DeezerArtists)] {
-                if on && due("artist", &sid, source.as_str()) {
-                    plan.push(match known.iter().find(|r| r.service == service) {
-                        Some(r) => Ask::Artists { artist: a, service, id: r.id.clone() },
+            let known = if yt || dz || dz_top { self.lib.external_ids(EntityKind::Artist, *a.as_uuid()).unwrap_or_default() } else { Vec::new() };
+            let id_in = |service: Service| known.iter().find(|r| r.service == service).map(|r| r.id.clone());
+            for (on, service, lane) in [(yt, Service::Youtube, Lane::Youtube), (dz, Service::Deezer, Lane::Deezer)] {
+                if on {
+                    plans[lane.index()].push(match id_in(service) {
+                        Some(id) => Ask::Artists { artist: a, service, id },
                         None => Ask::FindArtist { artist: a, service, name: name.clone() },
                     });
                 }
             }
-            if open {
-                let mbid = mbids.get(&format!("artist:{sid}")).cloned();
-                if due("artist", &sid, S_MUSICBRAINZ) {
-                    plan.push(Ask::Tags { artist: a, name: name.clone(), mbid: mbid.clone() });
-                } else if let Some(m) = mbid {
-                    if due("artist", &sid, GraphSource::ListenBrainz.as_str()) {
-                        plan.push(Ask::LbArtists { artist: a, mbid: m.clone() });
-                    }
-                    if due("artist", &sid, S_POPULARITY) {
-                        plan.push(Ask::LbTop { artist: a, mbid: m });
-                    }
+            // Without the id yet, the artist search asks the top after it.
+            if dz_top
+                && let Some(id) = id_in(Service::Deezer)
+            {
+                plans[Lane::Deezer.index()].push(Ask::DzTop { artist: a, id });
+            }
+            if mb {
+                plans[Lane::MusicBrainz.index()].push(Ask::Tags { artist: a, name: name.clone(), mbid: mbids.get(&format!("artist:{sid}")).cloned() });
+            }
+            if let Some(m) = mbid {
+                if lb {
+                    plans[Lane::ListenBrainz.index()].push(Ask::LbArtists { artist: a, mbid: m.clone() });
+                }
+                if lb_top {
+                    plans[Lane::ListenBrainz.index()].push(Ask::LbTop { artist: a, mbid: m.clone() });
                 }
             }
-            if fm && due("artist", &sid, GraphSource::LastFm.as_str()) {
-                plan.push(Ask::FmArtist { artist: a, name: name.clone() });
+            if fm {
+                plans[Lane::LastFm.index()].push(Ask::FmArtist { artist: a, name: name.clone() });
             }
         }
         // Tracks: the loved first, then the played, then the rest.
         let mut tracks: Vec<(usize, f32, u32)> = (0..model.len()).map(|i| (i, model.tracks[i].aff_long(model.now()), model.tracks[i].starts)).collect();
         tracks.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
         for (i, _, _) in tracks {
-            if plan.len() >= 2 * room {
+            if full(&plans) {
                 break;
             }
             let t = model.id(i);
             let sid = t.to_string();
-            let need_yt = yt && due("track", &sid, GraphSource::YoutubeRadio.as_str());
-            let mbid = mbids.get(&format!("track:{sid}")).cloned().filter(|_| open && due("track", &sid, GraphSource::ListenBrainz.as_str()));
-            let need_fm = fm && due("track", &sid, GraphSource::LastFm.as_str());
+            let need_yt = room(&plans, Lane::Youtube) && due("track", &sid, GraphSource::YoutubeRadio.as_str());
+            let mbid = mbids
+                .get(&format!("track:{sid}"))
+                .cloned()
+                .filter(|_| room(&plans, Lane::ListenBrainz) && due("track", &sid, GraphSource::ListenBrainz.as_str()));
+            let need_fm = room(&plans, Lane::LastFm) && due("track", &sid, GraphSource::LastFm.as_str());
             if !need_yt && mbid.is_none() && !need_fm {
                 continue;
             }
@@ -470,74 +596,93 @@ impl Worker {
             let artist = row.artist_credit.display();
             if need_yt {
                 let refs = self.lib.stream_refs(t).unwrap_or_default();
-                plan.push(match refs.iter().find(|r| r.id.service == Service::Youtube) {
+                plans[Lane::Youtube.index()].push(match refs.iter().find(|r| r.id.service == Service::Youtube) {
                     Some(r) => Ask::Radio { track: t, id: r.id.id.clone() },
                     None => Ask::FindSong { track: t, query: format!("{artist} {}", row.title), key: song_key(&row.title, &artist) },
                 });
             }
             if let Some(m) = mbid {
-                plan.push(Ask::LbRecordings { track: t, mbid: m });
+                plans[Lane::ListenBrainz.index()].push(Ask::LbRecordings { track: t, mbid: m });
             }
             if need_fm {
-                plan.push(Ask::FmTrack { track: t, artist: artist.clone(), title: row.title.clone() });
+                plans[Lane::LastFm.index()].push(Ask::FmTrack { track: t, artist: artist.clone(), title: row.title.clone() });
             }
         }
-        plan.retain(|a| !self.recs.graph.closed.contains(&a.subject().2));
-        if plan.is_empty() {
-            self.recs.graph.last_pass = Some(Instant::now());
-            return false;
+        for lane in Lane::ALL {
+            if !want[lane.index()] {
+                continue;
+            }
+            let plan = std::mem::take(&mut plans[lane.index()]);
+            let l = self.recs.graph.lane(lane);
+            if plan.is_empty() {
+                l.covered_at = Some(Instant::now());
+                continue;
+            }
+            log::info!("graph: {lane:?} plans {} requests", plan.len());
+            l.queue = plan.into();
         }
-        log::info!("graph: a pass with {} requests planned", plan.len());
-        let g = &mut self.recs.graph;
-        g.plan = plan.into();
-        g.requests = 0;
-        true
     }
 
-    fn graph_wait(&mut self, d: Duration) {
-        self.recs.graph.next_at = Some(Instant::now() + d);
+    /// Wakes the pass after `d`.
+    fn graph_wake(&mut self, d: Duration) {
         self.streaming.spawn_internal(async move {
             tokio::time::sleep(d).await;
             Internal::Recs(Msg::Graph(GraphMsg::Wake))
         });
     }
 
-    /// The pass ended: what it kept is built in.
+    /// `lane` asks again after `d`.
+    fn graph_wait(&mut self, lane: Lane, d: Duration) {
+        self.recs.graph.lane(lane).next_at = Some(Instant::now() + d);
+        self.graph_wake(d);
+    }
+
+    /// Asks `a` next in its lane.
+    fn graph_push(&mut self, a: Ask) {
+        self.recs.graph.lane(a.lane()).queue.push_front(a);
+    }
+
+    /// The pass ended (nothing is due in any lane): what it kept is built
+    /// in.
     fn graph_done(&mut self) {
         let g = &mut self.recs.graph;
-        g.plan.clear();
-        g.last_pass = Some(Instant::now());
-        log::info!("graph: the pass is over after {} requests", g.requests);
+        g.running = false;
+        log::info!("graph: the pass is over, {} requests this run", g.requests);
         if std::mem::take(&mut g.fresh) > 0 {
+            g.built_at = Some(Instant::now());
             let after = self.streaming.schedule.recs_debounce;
             self.recs_dirty(after);
         }
     }
 
-    /// Sends the next request when everything allows it.
-    fn graph_step(&mut self) {
-        let g = &self.recs.graph;
-        if g.busy || g.next_at.is_some_and(|t| Instant::now() < t) || self.recs.discover_busy() {
-            return;
-        }
+    /// Sends the next request of every lane that may ask now.
+    fn graph_step(&mut self, meta: Option<&Metadata>) {
         if self.streaming.search.active() || self.streams_idle() {
             return;
         }
         if !std::mem::replace(&mut self.recs.graph.warmed, true) {
             let gap = StreamSchedule::between(self.streaming.schedule.discover_gap);
-            self.graph_wait(gap);
+            for lane in Lane::ALL {
+                self.recs.graph.lane(lane).next_at = Some(Instant::now() + gap);
+            }
+            self.graph_wake(gap);
             return;
         }
-        let meta = self.graph_metadata();
+        for lane in Lane::ALL {
+            self.graph_lane_step(lane, meta);
+        }
+    }
+
+    fn graph_lane_step(&mut self, lane: Lane, meta: Option<&Metadata>) {
+        let l = &self.recs.graph.lanes[lane.index()];
+        if l.busy || l.next_at.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+        if lane.is_service() && self.recs.discover_busy() {
+            return;
+        }
         loop {
-            if self.recs.graph.requests >= GRAPH_BUDGET {
-                self.graph_done();
-                return;
-            }
-            let Some(next) = self.recs.graph.plan.pop_front() else {
-                self.graph_done();
-                return;
-            };
+            let Some(next) = self.recs.graph.lane(lane).queue.pop_front() else { return };
             if self.recs.graph.closed.contains(&next.subject().2) {
                 continue;
             }
@@ -546,8 +691,8 @@ impl Worker {
                 continue;
             }
             if let Some(left) = next.service().and_then(|s| self.pause_left(s)) {
-                self.recs.graph.plan.push_front(next);
-                self.graph_wait(left + crate::streams::wake_jitter());
+                self.recs.graph.lane(lane).queue.push_front(next);
+                self.graph_wait(lane, left + crate::streams::wake_jitter());
                 return;
             }
             if next.service().is_none() && meta.is_none() {
@@ -555,8 +700,9 @@ impl Worker {
             }
             let g = &mut self.recs.graph;
             g.requests += 1;
-            g.busy = true;
-            let meta = meta.clone();
+            g.running = true;
+            g.lane(lane).busy = true;
+            let meta = meta.cloned();
             self.streaming.spawn_internal(async move {
                 let result = ask(svc, meta, next.clone()).await;
                 Internal::Recs(Msg::Graph(GraphMsg::Answered { ask: next, result }))
@@ -573,15 +719,25 @@ impl Worker {
                 return;
             }
         };
-        self.recs.graph.busy = false;
-        let gap = StreamSchedule::between(self.streaming.schedule.discover_gap);
+        let lane = ask.lane();
+        let s = &self.streaming.schedule;
+        let gap = StreamSchedule::between(match lane {
+            Lane::Youtube => s.graph_gap_youtube,
+            Lane::Deezer => s.graph_gap_deezer,
+            _ => s.graph_gap_open,
+        });
+        let (unknown, cap, debounce, build_every) = (s.rate_limit_unknown, s.rate_limit_cap, s.recs_debounce, s.graph_build_every);
+        self.recs.graph.lane(lane).busy = false;
         match result {
             Err(Failed::RateLimited(after)) => {
-                self.recs.graph.requests = self.recs.graph.requests.saturating_sub(1);
-                let wait = after.or_else(|| ask.service().and_then(|s| self.pause_left(s))).unwrap_or(self.streaming.schedule.rate_limit_unknown);
-                log::info!("graph: rate limited, again in {} s", wait.as_secs());
-                self.recs.graph.plan.push_front(ask);
-                self.graph_wait(wait + crate::streams::wake_jitter());
+                let l = self.recs.graph.lane(lane);
+                l.limited += 1;
+                let n = l.limited;
+                let said = after.or_else(|| ask.service().and_then(|s| self.pause_left(s)));
+                let wait = backoff(said, unknown, cap, n);
+                log::info!("graph: {lane:?} rate limited, again in {} s", wait.as_secs());
+                self.graph_push(ask);
+                self.graph_wait(lane, wait + crate::streams::wake_jitter());
                 return;
             }
             Err(Failed::Closed(e)) => {
@@ -596,12 +752,14 @@ impl Worker {
             }
             Ok(answer) => self.graph_answer(ask, answer),
         }
-        if self.recs.graph.fresh >= FRESH_BUILD {
-            self.recs.graph.fresh = 0;
-            let after = self.streaming.schedule.recs_debounce;
-            self.recs_dirty(after);
+        let g = &mut self.recs.graph;
+        g.lane(lane).limited = 0;
+        if g.fresh >= FRESH_BUILD && g.built_at.is_none_or(|t| t.elapsed() >= build_every) {
+            g.fresh = 0;
+            g.built_at = Some(Instant::now());
+            self.recs_dirty(debounce);
         }
-        self.graph_wait(gap);
+        self.graph_wait(lane, gap);
     }
 
     fn graph_keep(&mut self, ask: &Ask, status: &str, remote: Option<&str>, entries: &[GraphEntry], tags: &[(String, f32)]) {
@@ -616,12 +774,12 @@ impl Worker {
     fn graph_answer(&mut self, ask: Ask, answer: Answer) {
         let status = |n: usize| if n > 0 { "ok" } else { "none" };
         match (&ask, answer) {
-            (Ask::Radio { id, .. }, Answer::Tracks(t)) => {
+            (Ask::Radio { id, .. } | Ask::DzTop { id, .. }, Answer::Tracks(t)) => {
                 let entries: Vec<GraphEntry> = t.iter().filter(|x| x.id.id != *id).map(track_entry).collect();
                 self.graph_keep(&ask, status(entries.len()), Some(id), &entries, &[]);
             }
             (Ask::FindSong { track, key, .. }, Answer::Tracks(hits)) => match hits.iter().find(|h| stream_song_key(h) == *key) {
-                Some(hit) => self.recs.graph.plan.push_front(Ask::Radio { track: *track, id: hit.id.id.clone() }),
+                Some(hit) => self.graph_push(Ask::Radio { track: *track, id: hit.id.id.clone() }),
                 None => self.graph_keep(&ask, "none", None, &[], &[]),
             },
             (Ask::Artists { id, .. }, Answer::Artists(a)) => {
@@ -634,7 +792,10 @@ impl Worker {
                     Some(hit) => {
                         log::info!("artist {artist} is {}", hit.id);
                         let _ = self.lib.set_external_id(EntityKind::Artist, &hit.id, *artist.as_uuid());
-                        self.recs.graph.plan.push_front(Ask::Artists { artist: *artist, service: *service, id: hit.id.id.clone() });
+                        if *service == Service::Deezer {
+                            self.graph_push(Ask::DzTop { artist: *artist, id: hit.id.id.clone() });
+                        }
+                        self.graph_push(Ask::Artists { artist: *artist, service: *service, id: hit.id.id.clone() });
                     }
                     None => self.graph_keep(&ask, "none", None, &[], &[]),
                 }
@@ -643,8 +804,8 @@ impl Worker {
                 Some((mbid, tags)) => {
                     self.graph_keep(&ask, "ok", Some(&mbid), &[], &tags);
                     // ListenBrainz knows the artist by this id.
-                    self.recs.graph.plan.push_front(Ask::LbTop { artist: *artist, mbid: mbid.clone() });
-                    self.recs.graph.plan.push_front(Ask::LbArtists { artist: *artist, mbid });
+                    self.graph_push(Ask::LbTop { artist: *artist, mbid: mbid.clone() });
+                    self.graph_push(Ask::LbArtists { artist: *artist, mbid });
                 }
                 None => self.graph_keep(&ask, "none", None, &[], &[]),
             },
@@ -709,6 +870,7 @@ mod tests {
         names.songs.insert(song_key("Four", "Band"), t(4));
         names.artists.insert(artist_key("Other Band"), a(2));
         names.remote.insert(("deezer".into(), "artist".into(), "dz3".into()), a(3).to_string());
+        names.remote.insert(("deezer".into(), "track".into(), "dz-t5".into()), t(5).to_string());
         let track = |name: &str, remote: Option<&str>| GraphEntry { kind: "track".into(), name: name.into(), artist: "Band".into(), remote_id: remote.map(Into::into) };
         let artist = |name: &str, remote: Option<&str>| GraphEntry { kind: "artist".into(), name: name.into(), artist: String::new(), remote_id: remote.map(Into::into) };
         let s1 = t(1).to_string();
@@ -722,6 +884,9 @@ mod tests {
             row("artist", &a1, "listenbrainz", 0, artist("Other Band", Some("mb-x"))),
             row("artist", &a1, "lastfm", 3, artist("New Band", None)),
             row("artist", &a1, "popularity", 0, track("Four", None)),
+            row("artist", &a1, "deezer_top", 0, track("Five", Some("dz-t5"))),
+            row("artist", &a1, "deezer_top", 1, track("Four", Some("dz-unknown"))),
+            row("artist", &a1, "deezer_top", 2, track("Elsewhere", Some("dz-t9"))),
         ];
         let tags = vec![GraphTag { subject_kind: "artist".into(), subject_id: a1.clone(), tag: "rock".into(), weight: 3.0 }];
         let r = resolve(&rows, &tags, &names);
@@ -729,7 +894,8 @@ mod tests {
         assert_eq!(to, vec![t(2), t(4), t(3)]);
         let to: Vec<ArtistId> = r.input.artists.iter().map(|e| e.to).collect();
         assert_eq!(to, vec![a(3), a(2)]);
-        assert_eq!(r.input.popular, vec![(t(4), 0, 10)]);
+        // Deezer's top resolves by its track ids, else by the song's key.
+        assert_eq!(r.input.popular, vec![(t(4), 0, 10), (t(5), 0, 10), (t(4), 1, 10)]);
         assert_eq!(r.input.tags.len(), 1);
         assert_eq!(r.votes.keys().collect::<Vec<_>>(), vec![&artist_key("New Band")]);
         // The new band counts as known by its loved neighbour, capped.
@@ -748,10 +914,28 @@ mod tests {
             Ask::FindArtist { artist: a, service: Service::Deezer, name: String::new() },
             Ask::Tags { artist: a, name: String::new(), mbid: None },
             Ask::LbTop { artist: a, mbid: String::new() },
+            Ask::DzTop { artist: a, id: "dz".into() },
         ];
         let s = subjects(&plan);
-        assert_eq!(s.len(), 4);
+        assert_eq!(s.len(), 5);
+        assert!(s.contains(&("artist", a.to_string(), "deezer_top")));
+        let lanes: Vec<Lane> = plan.iter().map(Ask::lane).collect();
+        assert_eq!(lanes, vec![Lane::Youtube, Lane::Youtube, Lane::Deezer, Lane::MusicBrainz, Lane::ListenBrainz, Lane::Deezer]);
         assert!(s.contains(&("artist", a.to_string(), "deezer_artists")));
         assert!(s.contains(&("artist", a.to_string(), "popularity")));
+    }
+
+    /// MusicBrainz's 503 says `Retry-After: 0`: the lane waits a second,
+    /// then twice as long each time, at most the cap; a longer pause the
+    /// source names is waited out whole.
+    #[test]
+    fn a_rate_limit_backs_off_from_a_second() {
+        let (unknown, cap) = (Duration::from_secs(30), Duration::from_secs(600));
+        let secs = |said: Option<u64>, n| backoff(said.map(Duration::from_secs), unknown, cap, n).as_secs();
+        assert_eq!((1..=5).map(|n| secs(Some(0), n)).collect::<Vec<_>>(), vec![1, 2, 4, 8, 16]);
+        assert_eq!(secs(Some(0), 12), 600);
+        assert_eq!(secs(Some(0), 40), 600);
+        assert_eq!(secs(None, 1), 30);
+        assert_eq!(secs(Some(3600), 1), 3600);
     }
 }

@@ -3,7 +3,7 @@ mod common;
 use std::time::Duration;
 
 use nikgob_metadata::musicbrainz::{MusicBrainz, RecordingQuery, artist_credit_string};
-use nikgob_metadata::{Http, MetadataConfig, MetadataError};
+use nikgob_metadata::{Http, MetadataConfig, MetadataError, RetryPolicy};
 use wiremock::matchers::{header_regex, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -234,6 +234,31 @@ async fn retries_on_503_then_succeeds() {
         .await;
     let artist = client(&server).lookup_artist(ARTIST).await.unwrap();
     assert_eq!(artist.name, "Кино");
+}
+
+#[tokio::test]
+async fn a_503_that_says_retry_at_once_waits_a_second() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "0"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(json(fixture!("mb_artist.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let http = common::http().with_retry_policy(RetryPolicy {
+        max_attempts: 3,
+        base_delay: Duration::from_millis(1),
+        max_delay: Duration::from_secs(30),
+    });
+    let mb = MusicBrainz::with_base_url(http, &format!("{}/ws/2/", server.uri())).unwrap();
+    let t = std::time::Instant::now();
+    mb.lookup_artist(ARTIST).await.unwrap();
+    assert!(t.elapsed() >= Duration::from_secs(1), "{:?}", t.elapsed());
 }
 
 #[tokio::test]

@@ -343,6 +343,9 @@ fn recs_patches(before: &Prefs, p: &Prefs) -> Vec<PrefPatch> {
     if p.background_cards != before.background_cards {
         out.push(PrefPatch::BackgroundCards(p.background_cards));
     }
+    if p.radio_no_repeat_hours != before.radio_no_repeat_hours {
+        out.push(PrefPatch::RadioNoRepeat(p.radio_no_repeat_hours));
+    }
     out
 }
 
@@ -390,6 +393,9 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
     group(ui, "Подбор");
     row(ui, Id::MixesDownloadedOnly, "Миксы только из скачанного", None, |ui| {
         ui.add(Switch::new(&mut p.mixes_downloaded_only).id_salt("set-mixes-downloaded"));
+    });
+    row(ui, Id::RadioNoRepeat, "Не повторять сыгранное", None, |ui| {
+        choice_menu(ui, Id::RadioNoRepeat, p);
     });
     row(ui, Id::SoundAnalysis, "Анализ звука", Some(&analysis_status(&state.analysis)), |ui| {
         // Stream-only tracks are analysed (or not) on «Источники».

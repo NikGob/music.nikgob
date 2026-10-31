@@ -811,7 +811,9 @@ fn discovery_waits_out_a_rate_limit() {
     let l = library(0, 0, 0, KNOWN);
     let (yt, dz) = fakes();
     yt.rate_limit_next_paused("radio", 1, Duration::from_millis(1500));
-    let s = start(&l.lib, vec![yt.clone(), dz.clone()], Prefs::default(), None);
+    // The graph's pass asks Deezer in a lane of its own meanwhile (tests/graph.rs).
+    let prefs = Prefs { graph_services: false, graph_open_data: false, ..Prefs::default() };
+    let s = start(&l.lib, vec![yt.clone(), dz.clone()], prefs, None);
     wait_until("the limited radio call", || yt.calls("radio") >= 1);
     let at = (yt.total_calls(), dz.total_calls());
     std::thread::sleep(Duration::from_millis(1000));
@@ -993,4 +995,30 @@ fn every_lane_names_its_artists() {
     for c in lanes {
         assert!(!c.artists.is_empty(), "«{}» names no artist", c.title);
     }
+}
+
+/// Autoplay after an album played from its page as streams (tracks the
+/// library does not hold): the service's radio of its last track brings the
+/// album's other tracks first, and none of them joins the queue as new
+/// music, since they just played.
+#[test]
+fn autoplay_brings_back_nothing_the_queue_played_as_new_music() {
+    let l = library(0, 0, 0, KNOWN);
+    let (yt, dz) = fakes();
+    let prefs = Prefs { graph_services: false, graph_open_data: false, ..Prefs::default() };
+    let album = tokio::runtime::Runtime::new().unwrap().block_on(yt.album("yt-alb-firstlove")).unwrap();
+    let ids = l.lib.upsert_stream_tracks(&album.tracks).unwrap();
+    assert!(ids.len() >= 3);
+    let s = start(&l.lib, vec![yt.clone(), dz.clone()], prefs, None);
+    wait_for(&s.rt, "the hero", |st| st.home.hero.is_some());
+    s.rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "Альбом".into() });
+    wait_until("the first plays", || !s.asked.lock().unwrap().is_empty());
+    for _ in 1..ids.len() {
+        end_current(&s);
+    }
+    wait_for(&s.rt, "autoplay", |st| st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && !st.queue.next.is_empty());
+    wait_until("the service's radio", || yt.calls("radio") > 0);
+    std::thread::sleep(Duration::from_millis(500));
+    let st = s.rt.state();
+    assert!(st.queue.next.iter().all(|e| !ids.contains(&e.track.id)), "{:?}", st.queue.next.iter().map(|e| &e.track.title).collect::<Vec<_>>());
 }

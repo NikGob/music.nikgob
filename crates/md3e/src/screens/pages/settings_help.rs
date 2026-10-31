@@ -121,6 +121,8 @@ pub enum SettingId {
     RadioSource,
     /// «Анализ звука»: how far it is (no control of its own).
     SoundAnalysis,
+    /// «Не повторять сыгранное» in the radio and autoplay.
+    RadioNoRepeat,
     /// The share of new music of one kind of radio.
     NewShareBy(v::RadioKind),
     /// «Миксы для тебя» with «С новым».
@@ -289,6 +291,8 @@ macro_rules! c {
 }
 
 const OPUS: [u32; 4] = [128, 160, 192, 256];
+/// «Не повторять сыгранное», hours.
+const NO_REPEAT: [u8; 5] = [1, 3, 6, 12, 24];
 const SHARES: [v::RadioNewShare; 3] = [v::RadioNewShare::None, v::RadioNewShare::Some, v::RadioNewShare::More];
 
 fn share_index(s: v::RadioNewShare) -> usize {
@@ -313,7 +317,7 @@ impl SettingId {
             | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | DownloadToasts | DownloadSource(_) | PlaylistSync | ImportSpotify
             | ImportYouTube | ImportFiles | ImportSavedSongs | StreamCache | StreamAnalysis | Prowlarr | Soulseek | SoulseekShare | SoulseekUpload | NoSeed | SeedLimit | SeedDays
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
-            RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | NewShareBy(_)
+            RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | RadioNoRepeat | NewShareBy(_)
             | MixesWithNew | BackgroundCountsLess | ProfilesSplit | ProfileNames
             | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | MixClickOpensList | HiddenMixes
             | GraphUse | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste | LastfmKey
@@ -451,6 +455,7 @@ impl SettingId {
             MixesEverything => "Все твои профили в одном миксе, каждый своей долей, с плавными переходами.",
             MixesMoods => "Самое спокойное и самое громкое из того, что ты любишь, на любом языке.",
             MixesOnRepeat => "Что ты включал чаще всего за последние недели.",
+            RadioNoRepeat => "Радио и автовоспроизведение не ставят то, что уже играло за это время или в этом сеансе, пока есть что-то ещё.",
             MixClickOpensList => "Нажатие на карточку микса открывает его страницу с песнями, а играет он по кнопке ▶. Выключи — микс будет играть сразу по нажатию на карточку, а страница откроется из ⋮ → «Список треков».",
             BackgroundCards => "Ровная музыка без слов для фона. Появляется, только если ты так слушаешь.",
             DislikeButton => "Кнопка рядом
@@ -590,6 +595,13 @@ impl SettingId {
                 c!("Два", "До двух: потише и поживее."),
                 c!("До трёх", "Сколько подходит тому, как ты слушаешь фоном, но не больше трёх."),
             ],
+            Self::RadioNoRepeat => &[
+                c!("Час", "Сыгранное может вернуться через час."),
+                c!("3 часа", "Сыгранное может вернуться через три часа."),
+                c!("6 часов", "Сыгранное может вернуться через шесть часов."),
+                c!("12 часов", "Сыгранное может вернуться через полдня."),
+                c!("Сутки", "Сыгранное может вернуться на следующий день."),
+            ],
             Self::ProfileNames => &[
                 c!("Тип и язык", "«Японские песни», «Саундтреки без слов»; исполнители — под названием."),
                 c!("Исполнители", "Названия из главных исполнителей профиля."),
@@ -660,6 +672,7 @@ impl SettingId {
             Self::NewShareBy(kind) => share_index(p.new_share_of(kind)),
             Self::ProfileNames => usize::from(p.profile_names == v::ProfileNames::Artists),
             Self::BackgroundCards => usize::from(p.background_cards.min(3)),
+            Self::RadioNoRepeat => NO_REPEAT.iter().position(|h| *h >= p.radio_no_repeat_hours).unwrap_or(NO_REPEAT.len() - 1),
             _ => 0,
         }
     }
@@ -728,6 +741,7 @@ impl SettingId {
             }
             Self::ProfileNames => p.profile_names = if i == 1 { v::ProfileNames::Artists } else { v::ProfileNames::Kind },
             Self::BackgroundCards => p.background_cards = i.min(3) as u8,
+            Self::RadioNoRepeat => p.radio_no_repeat_hours = NO_REPEAT[i.min(NO_REPEAT.len() - 1)],
             _ => {}
         }
     }
@@ -1809,6 +1823,8 @@ mod tests {
             assert!(!id.help().is_empty());
         }
         assert!(!SettingId::Autoplay.help().is_empty() && !SettingId::RadioSource.help().is_empty());
+        assert_eq!(SettingId::RadioNoRepeat.tab(), TAB_RECS);
+        assert!(!SettingId::RadioNoRepeat.help().is_empty());
         for id in [SettingId::RadioNewShare, SettingId::MixesDownloadedOnly, SettingId::SoundAnalysis, SettingId::StreamAnalysis] {
             assert!(!id.help().is_empty());
         }
@@ -1828,6 +1844,7 @@ mod tests {
             S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
+            S::RadioNoRepeat,
         ] {
 
             assert!(id.choices().len() >= 2, "{id:?}");
