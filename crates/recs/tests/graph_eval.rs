@@ -7,7 +7,10 @@
 //! measured with the graph and without it: the next start's hit@10, how
 //! much of a track's radio stays in the seed's scene and would be heard
 //! out, the diversity of the radio and of «Миксы для тебя», the
-//! separation of the taste profiles (ARI against the scenes).
+//! separation of the taste profiles (ARI against the scenes), and autoplay
+//! from a seed of a scene the library has little of after a session of
+//! another language: how much of it keeps to the seed's kind of song, and
+//! that nothing of the session comes back.
 //!
 //! `NIKGOB_EVAL_OUT=dir cargo test -p nikgob-recs --test graph_eval -- --nocapture`
 //! writes each listener's numbers to `dir/<listener>.json`.
@@ -434,6 +437,52 @@ fn radio(w: &World, l: &Listener, m: &UserModel) -> Value {
     })
 }
 
+/// Autoplay after a session of six songs of a liked Japanese scene and a
+/// seed of a little-held Russian or English scene: the share of the picks
+/// of the seed's kind of song (language) and of its scene, and how many
+/// played in the session.
+fn autoplay(w: &World, l: &Listener, m: &UserModel) -> Value {
+    let recs = Recs::new(&l.catalog, &m.taste, &l.index).with_model(m);
+    let mut rng = Rng::new(91);
+    let of_scene = |s: usize| (0..l.catalog.len()).filter(|&i| w.scene[l.of[i]] == s).collect::<Vec<usize>>();
+    let session_pool = of_scene(6);
+    let seeds: Vec<usize> = [1usize, 5].iter().flat_map(|&s| of_scene(s)).collect();
+    let (mut kind, mut scene, mut picks, mut again) = (0usize, 0usize, 0usize, 0usize);
+    if seeds.is_empty() || session_pool.is_empty() {
+        return json!({ "same_kind": 1.0, "in_seed_scene": 1.0, "repeats": 0, "picks": 0 });
+    }
+    for k in 0..12 {
+        let mut s = Session::default();
+        let mut ts = l.now - 40 * 60_000;
+        let mut played = Vec::new();
+        for _ in 0..6 {
+            let id = l.catalog.tracks()[session_pool[rng.below(session_pool.len())]].id;
+            s.start(id, ts, EventContext::HomeSection, None);
+            ts += 200_000;
+            s.end(id, Ended::Complete);
+            played.push(id);
+        }
+        let seed = seeds[rng.below(seeds.len())];
+        let id = l.catalog.tracks()[seed].id;
+        s.start(id, ts, EventContext::Album, Some(EventOrigin::Manual));
+        s.end(id, Ended::Complete);
+        let mut r = RadioState::new(RadioSeed::Track(id)).continuing();
+        r.attune(s, None);
+        let out = r.extend(&recs, 15, &RadioParams { new_share: 0.0, seed: k });
+        let ws = l.of[seed];
+        for p in &out {
+            let Item::Track(t) = p.item else { continue };
+            let g = t.0.as_u128() as usize - 1;
+            kind += usize::from(w.kind[g].lang == w.kind[ws].lang && w.kind[g].voice == w.kind[ws].voice);
+            scene += usize::from(w.scene[g] == w.scene[ws]);
+            again += usize::from(played.contains(&t));
+            picks += 1;
+        }
+    }
+    let p = picks.max(1) as f32;
+    json!({ "same_kind": round(kind as f32 / p), "in_seed_scene": round(scene as f32 / p), "repeats": again, "picks": picks })
+}
+
 /// The adjusted Rand index of two labelings.
 fn ari(a: &[usize], b: &[usize]) -> f32 {
     let mut table: HashMap<(usize, usize), f64> = HashMap::new();
@@ -511,7 +560,7 @@ fn evaluate(w: &World, l: &Listener, g: &GraphInput, replay: bool) -> Value {
     let mut out = serde_json::Map::new();
     for (name, v) in [("today", TODAY), ("prior", PRIOR), ("graph", GRAPH)] {
         let m = model(l, g, v);
-        let mut row = json!({ "radio": radio(w, l, &m), "mixes": mixes(w, l, &m) });
+        let mut row = json!({ "radio": radio(w, l, &m), "mixes": mixes(w, l, &m), "autoplay": autoplay(w, l, &m) });
         if !l.test.is_empty() && !l.train.events.is_empty() {
             row["held_out"] = hits(l, &m);
         }
@@ -540,6 +589,15 @@ fn evaluate(w: &World, l: &Listener, g: &GraphInput, replay: bool) -> Value {
     v
 }
 
+/// Autoplay from a little-held scene after a session of another language
+/// keeps to the seed's kind of song and brings nothing of the session back.
+fn autoplay_holds(v: &Value) {
+    for k in ["today", "prior", "graph"] {
+        assert!(f(v, &["variants", k, "autoplay", "same_kind"]) >= 0.9, "{k}: {v}");
+        assert_eq!(f(v, &["variants", k, "autoplay", "repeats"]), 0.0, "{k}: {v}");
+    }
+}
+
 fn f(v: &Value, path: &[&str]) -> f32 {
     let mut x = v;
     for p in path {
@@ -560,6 +618,7 @@ fn files_only_and_no_history() {
     let g = collective(&w, 0.7, 1);
     let l = listener("local_no_history", &w, &Habits { plays: 0, days: 1, local: true, holds: collector, likes: 0, background: false }, 11);
     let v = evaluate(&w, &l, &g, false);
+    autoplay_holds(&v);
     let r = |k: &str, m: &str| f(&v, &["variants", k, "radio", m]);
     let x = |k: &str, m: &str| f(&v, &["variants", k, "mixes", m]);
     // The graph keeps a radio in its scene where the sound cannot.
@@ -578,6 +637,7 @@ fn files_only_and_twenty_plays() {
     let g = collective(&w, 0.7, 2);
     let l = listener("local_20_plays", &w, &Habits { plays: 20, days: 3, local: true, holds: collector, likes: 0, background: false }, 12);
     let v = evaluate(&w, &l, &g, false);
+    autoplay_holds(&v);
     let h = |k: &str| f(&v, &["variants", k, "held_out", "hit10"]);
     let r = |k: &str, m: &str| f(&v, &["variants", k, "radio", m]);
     assert!(h("graph") > h("today"), "{v}");
@@ -593,6 +653,7 @@ fn streams_only() {
     let holds = |w: &World, i: usize| (TASTE[w.scene[i]] >= 0.5 && i.is_multiple_of(2)) || (TASTE[w.scene[i]] > 0.0 && i.is_multiple_of(7));
     let l = listener("streams_only", &w, &Habits { plays: 150, days: 20, local: false, holds, likes: 40, background: false }, 13);
     let v = evaluate(&w, &l, &g, false);
+    autoplay_holds(&v);
     let h = |k: &str| f(&v, &["variants", k, "held_out", "hit10"]);
     assert!(h("graph") > h("today") + 0.03, "{v}");
     assert!(f(&v, &["variants", "graph", "radio", "in_seed_scene"]) >= f(&v, &["variants", "today", "radio", "in_seed_scene"]), "{v}");
@@ -604,6 +665,7 @@ fn a_heavy_history() {
     let g = collective(&w, 0.7, 4);
     let l = listener("heavy_history", &w, &Habits { plays: 3_000, days: 120, local: true, holds: collector, likes: 60, background: true }, 14);
     let v = evaluate(&w, &l, &g, true);
+    autoplay_holds(&v);
     let rep = |k: &str| f(&v, &["variants", k, "replay", "all_learned", "hit10"]);
     let x = |k: &str, m: &str| f(&v, &["variants", k, "mixes", m]);
     // The graph helps a little or stays out of the way; profiles and the
@@ -620,6 +682,7 @@ fn never_in_the_background() {
     let g = collective(&w, 0.7, 5);
     let l = listener("never_background", &w, &Habits { plays: 1_200, days: 60, local: true, holds: collector, likes: 20, background: false }, 15);
     let v = evaluate(&w, &l, &g, false);
+    autoplay_holds(&v);
     let x = |k: &str, m: &str| f(&v, &["variants", k, "mixes", m]);
     assert_eq!(v["variants"]["graph"]["mixes"]["has_background"], json!(false), "{v}");
     assert_eq!(x("graph", "profiles"), x("today", "profiles"), "{v}");
