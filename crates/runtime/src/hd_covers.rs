@@ -4,8 +4,8 @@
 //! 181–400 px). For an album whose own cover is smaller than [`HD_SIDE`],
 //! the url of a larger one is looked up — the Cover Art Archive by the
 //! album's MusicBrainz ids, the Deezer album linked to it, else the album
-//! found by its title on the services (Deezer, YouTube Music, Spotify) —
-//! and kept in the library's cache (`cover_hd.<album>`; a miss too, asked
+//! of its artist found by its title on the services (Deezer, YouTube Music, Spotify) —
+//! and kept in the library's cache (`cover_hd.v2.<album>`; a miss too, asked
 //! again after [`RETRY_MS`]). Only the url is kept: the picture goes through
 //! the web cover cache like any cover of a service, never into the music
 //! folders. The stage shows the album's own cover at once and fades the
@@ -33,7 +33,8 @@ const RETRY_MS: i64 = 14 * 86_400_000;
 const BATCH: usize = 12;
 
 fn key(id: ReleaseId) -> String {
-    format!("cover_hd.{id}")
+    // `v2`: found with the album's artist (see [`Want::artists`]).
+    format!("cover_hd.v2.{id}")
 }
 
 /// The larger cover found for `id`, if one was.
@@ -63,6 +64,10 @@ pub(crate) struct Want {
     pub group_mbid: Option<String>,
     pub deezer: Option<u64>,
     pub title: String,
+    /// The album's artist names: an album found by its title is by one of
+    /// them (titles alike are common: «There is a reason (RUS COVER)» is
+    /// not «The Rush – Is the Reason»). Empty: the title alone.
+    pub artists: Vec<String>,
 }
 
 /// Words that tell one part of a series from another: they must be on
@@ -163,7 +168,15 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
                 continue;
             }
         };
-        if let Some(url) = found.into_iter().find(|a| same_album(&w.title, &a.title)).and_then(|a| a.cover_url).filter(|u| !u.is_empty()) {
+        let by_them = |a: &nikgob_core::streaming::StreamAlbum| {
+            w.artists.is_empty() || a.artists.iter().any(|x| crate::better_covers::names_artist(&w.artists, &x.name))
+        };
+        if let Some(url) = found
+            .into_iter()
+            .find(|a| same_album(&w.title, &a.title) && by_them(a))
+            .and_then(|a| a.cover_url)
+            .filter(|u| !u.is_empty())
+        {
             return Ok(Some(url));
         }
     }
@@ -211,7 +224,14 @@ impl Worker {
                 .into_iter()
                 .find(|x| x.service == Service::Deezer)
                 .and_then(|x| x.id.parse().ok());
-            wants.push(Want { id, mbid: r.mbid.clone(), group_mbid: r.release_group_mbid.clone(), deezer, title: r.title.clone() });
+            wants.push(Want {
+                id,
+                mbid: r.mbid.clone(),
+                group_mbid: r.release_group_mbid.clone(),
+                deezer,
+                title: r.title.clone(),
+                artists: vec![r.artist_credit.display()],
+            });
         }
         if wants.is_empty() {
             return;

@@ -24,7 +24,7 @@
 //! network, a refusal) stops it, and the next start takes it up again.
 //!
 //! What is found is kept as a url in the library's cache
-//! (`cover_better.<release>` / `cover_better.track.<track>`, a miss too,
+//! (`cover_better.v2.<release>` / `cover_better.track.<track>`, a miss too,
 //! asked again after [`RETRY_MS`], so art that appears later is picked up)
 //! together with the cover it replaces: a file cover imported later wins
 //! again. The picture goes through the web cover cache, never into the
@@ -76,7 +76,10 @@ pub(crate) enum Target {
 impl Target {
     fn key(self) -> String {
         match self {
-            Self::Release(id) => format!("cover_better.{id}"),
+            // `v2`: an album found by its title alone took the art of
+            // another artist's («There is a reason (RUS COVER)» got «The
+            // Rush – Is the Reason»): asked again with the artist.
+            Self::Release(id) => format!("cover_better.v2.{id}"),
             Self::Track(id) => format!("cover_better.track.{id}"),
         }
     }
@@ -145,15 +148,7 @@ fn folded(s: &str) -> String {
 /// Whether a hit of `artist`, `title` on `album` is the song (or the album)
 /// `w` asks for.
 pub(crate) fn accepts(w: &Want, artist: &str, title: &str, album: Option<&str>) -> bool {
-    let a = artist_key(artist);
-    if a.is_empty() {
-        return false;
-    }
-    let named = w.artists.iter().any(|n| {
-        let k = artist_key(n);
-        !k.is_empty() && (similarity(&k, &a) >= 0.85 || nikgob_core::translit::same_translit(&k, &a) || names::same_name(n, artist))
-    });
-    if !(named || named_in(&w.context, artist)) {
+    if !(names_artist(&w.artists, artist) || named_in(&w.context, artist)) {
         return false;
     }
     let t = title_key(title).base;
@@ -167,6 +162,17 @@ pub(crate) fn accepts(w: &Want, artist: &str, title: &str, album: Option<&str>) 
         _ => false,
     };
     same_album || (song && (w.song_ok || w.album.is_none()))
+}
+
+/// Whether one of `names` is the hit's `artist` (spelled alike, in another
+/// script, or a little apart).
+pub(crate) fn names_artist(names: &[String], artist: &str) -> bool {
+    let a = artist_key(artist);
+    !a.is_empty()
+        && names.iter().any(|n| {
+            let k = artist_key(n);
+            !k.is_empty() && (similarity(&k, &a) >= 0.85 || nikgob_core::translit::same_translit(&k, &a) || names::same_name(n, artist))
+        })
 }
 
 /// An album's titles: the whole and each part of a title in two scripts
@@ -249,7 +255,9 @@ pub(crate) fn stream_trouble(e: &StreamError) -> bool {
 pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamService>], w: &Want) -> Result<Option<String>, String> {
     let mut trouble: Option<String> = None;
     if let Some(album) = &w.album {
-        match hd_covers::find(meta, services, album).await {
+        // By every spelling of the artist the lookup knows.
+        let album = hd_covers::Want { artists: w.artists.clone(), ..album.clone() };
+        match hd_covers::find(meta, services, &album).await {
             Ok(Some(url)) => return Ok(Some(url)),
             Ok(None) => {}
             Err(e) => trouble = Some(e),
@@ -541,6 +549,7 @@ fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: 
                 group_mbid: r.release_group_mbid.clone(),
                 deezer,
                 title: r.title.clone(),
+                artists: Vec::new(),
             }),
             ..Want::default()
         }
@@ -806,6 +815,14 @@ mod tests {
     }
 
     #[test]
+    fn an_album_found_by_its_title_is_by_its_artist() {
+        assert!(!names_artist(&["j.am".into()], "The Rush"), "a cover's single is not the original's");
+        assert!(names_artist(&["Kevin Penkin".into()], "Kevin Penkin"));
+        assert!(names_artist(&["ヨルシカ".into(), "Yorushika".into()], "Yorushika"));
+        assert!(!names_artist(&[], "Kevin Penkin"));
+    }
+
+    #[test]
     fn an_album_matches_by_its_title() {
         let mut w = want(&["藤澤慶昌"], &["Opening"], "");
         w.album = Some(hd_covers::Want {
@@ -814,6 +831,7 @@ mod tests {
             group_mbid: None,
             deezer: None,
             title: "Mushoku Tensei ~Isekai Ittara Honki Dasu~ Original Soundtrack 2 Special Edition".into(),
+            artists: Vec::new(),
         });
         assert!(
             !accepts(&w, "Yoshiaki Fujisawa", "Something", Some("Mushoku Tensei: Jobless Reincarnation (Original Soundtrack 2)")),
@@ -883,7 +901,14 @@ mod tests {
     fn album_want(artist: &str, tracks: &[&str], title: &str, song_ok: bool) -> Want {
         let mut w = want(&[artist], tracks, title);
         w.song_ok = song_ok;
-        w.album = Some(hd_covers::Want { id: ReleaseId::new(), mbid: None, group_mbid: None, deezer: None, title: title.into() });
+        w.album = Some(hd_covers::Want {
+            id: ReleaseId::new(),
+            mbid: None,
+            group_mbid: None,
+            deezer: None,
+            title: title.into(),
+            artists: vec![artist.into()],
+        });
         w
     }
 
