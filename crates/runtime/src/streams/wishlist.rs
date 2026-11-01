@@ -8,7 +8,8 @@
 //! album) picked from its list by the torrent client, the files of any
 //! other source written into `Downloads/.sources/<item>`. The importer
 //! attaches them to the item's track (the job's [`ImportTargets`]). A
-//! doubtful offer waits in "Подтверди"; nothing anywhere → «не нашёл», a
+//! doubtful offer waits in "Подтверди" (a torrent of a track only once its
+//! list shows the track's file: [`Probe`]); nothing anywhere → «не нашёл», a
 //! toast, and a search again a week later until the user dismisses it.
 //! Items from an import wait for the user's "скачать". At most
 //! [`nikgob_view::Prefs::auto_download_limit`] items search or download at
@@ -118,7 +119,30 @@ pub(crate) struct WishState {
     /// An uploader's "Performer - Song" fetched from the performer's
     /// release: the artist and title its file takes once it lands.
     relabel: HashMap<WishlistId, (String, String)>,
+    /// Doubtful offers of a track being looked into before «Подтверди».
+    probe: HashMap<WishlistId, Probe>,
 }
+
+/// The doubtful offers of a track item on their way to «Подтверди»: a
+/// torrent is shown only when its list has the track's file (a torrent
+/// that names only the artist, or a word of their name, is another of
+/// their releases as often as not).
+#[derive(Default)]
+struct Probe {
+    /// The offers, best first.
+    all: Vec<Offer>,
+    /// Those of them still to look into (torrents), in turn.
+    todo: Vec<usize>,
+    /// Those whose list has the file.
+    passed: HashSet<usize>,
+}
+
+/// Torrents of a track looked into before «Подтверди», at most.
+const PROBE_MAX: usize = 6;
+
+/// `cache` key: the track items waiting in «Подтверди» with torrents shown
+/// unlooked (before [`Probe`]) were searched for again.
+const PROBED_KEY: &str = "wish_confirm_probed.v1";
 
 impl WishState {
     /// The direct downloads' progress, for the rows.
@@ -841,6 +865,10 @@ impl Worker {
                 self.publish_sources();
                 self.wish_searched(item, result);
             }
+            WishMsg::Fetched { item, offer, result } if self.streaming.wish.probe.contains_key(&item) => match result {
+                Ok(Fetched::Torrent(p)) => self.wish_inspect(item, *offer, p),
+                Ok(Fetched::Files(_)) | Err(_) => self.probe_done(item, false),
+            },
             WishMsg::Fetched { item, offer, result } => match result {
                 Ok(Fetched::Torrent(p)) => self.wish_inspect(item, *offer, p),
                 Ok(Fetched::Files(files)) => {
@@ -922,10 +950,91 @@ impl Worker {
                 self.wish_fetch(id, best);
             }
             None => {
-                let shown: Vec<Offer> = ranked.into_iter().take(CONFIRM_OPTIONS).map(|r| r.offer).collect();
-                self.ask_confirm(id, &shown);
+                let doubtful: Vec<Offer> = ranked.into_iter().map(|r| r.offer).collect();
+                self.confirm_after_look(id, doubtful);
             }
         }
+    }
+
+    /// The doubtful `offers` (best first) into «Подтверди»; for a track,
+    /// the torrents among them only once their list shows its file
+    /// ([`Probe`]).
+    fn confirm_after_look(&mut self, id: WishlistId, offers: Vec<Offer>) {
+        let track = self.lib.get_wishlist_item(id).ok().flatten().is_some_and(|i| i.scope == WishlistScope::Track);
+        let todo: Vec<usize> = offers
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| track && o.source == SourceKey::Torrents)
+            .map(|(i, _)| i)
+            .take(PROBE_MAX)
+            .collect();
+        // Past the looked-into ones, the torrents stay out.
+        let last = todo.last().copied();
+        let all: Vec<Offer> = offers
+            .into_iter()
+            .enumerate()
+            .filter(|(i, o)| !track || o.source != SourceKey::Torrents || last.is_some_and(|l| *i <= l))
+            .map(|(_, o)| o)
+            .collect();
+        self.streaming.wish.probe.insert(id, Probe { all, todo, passed: HashSet::new() });
+        self.probe_next(id);
+    }
+
+    /// The next torrent of the item's [`Probe`], or «Подтверди» with what
+    /// passed once none is left.
+    fn probe_next(&mut self, id: WishlistId) {
+        let Some(p) = self.streaming.wish.probe.get_mut(&id) else { return };
+        if p.todo.is_empty() {
+            let Some(p) = self.streaming.wish.probe.remove(&id) else { return };
+            let shown: Vec<Offer> = p
+                .all
+                .into_iter()
+                .enumerate()
+                .filter(|(i, o)| o.source != SourceKey::Torrents || p.passed.contains(i))
+                .map(|(_, o)| o)
+                .take(CONFIRM_OPTIONS)
+                .collect();
+            if shown.is_empty() {
+                self.no_torrent(id, true);
+            } else {
+                self.ask_confirm(id, &shown);
+            }
+            return;
+        }
+        let offer = p.all[p.todo[0]].clone();
+        let Some(source) = self.source_of(offer.source) else {
+            if let Some(p) = self.streaming.wish.probe.get_mut(&id) {
+                p.todo.remove(0);
+            }
+            return self.probe_next(id);
+        };
+        let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
+        let want = self.want_of(&item);
+        let dest = self.direct_dir(id);
+        self.set_item(id, |i| i.note = Some(format!("Смотрю, есть ли трек в раздаче: {}", offer.title)));
+        self.streaming.spawn(async move {
+            let quiet: nikgob_core::source::Progress = Arc::new(|_, _| {});
+            let result = match tokio::time::timeout(Duration::from_secs(60), source.fetch(&offer, &want, &dest, quiet)).await {
+                Ok(r) => r,
+                Err(_) => Err(SourceError::Unreachable("the torrent took too long".into())),
+            };
+            Msg::Wish(WishMsg::Fetched { item: id, offer: Box::new(offer), result })
+        });
+        self.publish_wishlist();
+    }
+
+    /// The torrent the item's [`Probe`] looks into now has the track's
+    /// file (`found`) or not: on to the next.
+    fn probe_done(&mut self, id: WishlistId, found: bool) {
+        if let Some(p) = self.streaming.wish.probe.get_mut(&id)
+            && !p.todo.is_empty()
+        {
+            let i = p.todo.remove(0);
+            if found {
+                p.passed.insert(i);
+            }
+        }
+        self.probe_next(id);
     }
 
     /// The user picks among `shown` in «Подтверди».
@@ -1082,6 +1191,17 @@ impl Worker {
     ) {
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
         if matches!(item.status, WishlistStatus::Dismissed | WishlistStatus::Done) {
+            self.streaming.wish.probe.remove(&id);
+            return;
+        }
+        if self.streaming.wish.probe.contains_key(&id) {
+            let want = self.want_of(&item);
+            let found = result.as_ref().is_ok_and(|meta| {
+                let files: Vec<(usize, String, u64)> = meta.files.iter().map(|f| (f.index, f.path.clone(), f.size)).collect();
+                pick_files(&files, &want).is_some()
+            });
+            log::info!("wishlist: {} {} of {:?}", offer.title, if found { "has a file" } else { "has no file" }, want.title);
+            self.probe_done(id, found);
             return;
         }
         let meta = match result {
@@ -1139,8 +1259,7 @@ impl Worker {
                 if doubtful.is_empty() {
                     self.no_torrent(id, true);
                 } else {
-                    let shown: Vec<Offer> = doubtful.into_iter().take(CONFIRM_OPTIONS).collect();
-                    self.ask_confirm(id, &shown);
+                    self.confirm_after_look(id, doubtful);
                 }
             }
         }
@@ -1674,6 +1793,7 @@ impl Worker {
             }
         }
         // Files that waited in «Подтверди» may be gone since.
+        let probed = self.lib.cache_get(PROBED_KEY).ok().flatten().is_some();
         for i in self.lib.list_wishlist_by_status(WishlistStatus::Confirm).unwrap_or_default() {
             if i.note.as_deref() == Some(FILES_WAIT) {
                 if !self.files_wait(i.id) {
@@ -1681,16 +1801,21 @@ impl Worker {
                 }
                 continue;
             }
-            // Offers the matching takes no more (it got stricter since):
-            // searched for again rather than asked about.
+            // Offers the matching takes no more (it got stricter since),
+            // or torrents of a track shown before their lists were looked
+            // into (once): searched for again rather than asked about.
             let offers = i.candidates_json.as_deref().map(offers_of_json).unwrap_or_default();
-            if rank(offers.clone(), &self.want_of(&i), &[]).len() < offers.len() {
+            let unlooked = !probed && i.scope == WishlistScope::Track && offers.iter().any(|o| o.source == SourceKey::Torrents);
+            if unlooked || rank(offers.clone(), &self.want_of(&i), &[]).len() < offers.len() {
                 self.set_item(i.id, |i| {
                     i.status = WishlistStatus::New;
                     i.next_try_at = None;
                     i.candidates_json = None;
                 });
             }
+        }
+        if !probed {
+            let _ = self.lib.cache_put(PROBED_KEY, Self::now(), "1");
         }
     }
 
@@ -1888,7 +2013,8 @@ impl Worker {
                 .map(|(i, o)| v::ConfirmOption {
                     label: o.title.clone(),
                     detail: o.detail(),
-                    recommended: i == 0,
+                    // Without seeders it may never come.
+                    recommended: Some(i) == offers.iter().position(|o| o.seeders != Some(0)),
                 })
                 .collect(),
             skip_label: "Не то — поищу позже".into(),

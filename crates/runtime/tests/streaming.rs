@@ -462,14 +462,42 @@ fn share_copies_a_song_link() {
     drop(mock);
 }
 
+/// The .torrent of a folder `name` in `dir` with these files (title, seconds).
+fn torrent_of(dir: &Path, name: &str, files: &[(&str, f32)]) -> Vec<u8> {
+    let folder = dir.join(name);
+    std::fs::create_dir_all(&folder).unwrap();
+    for (file, secs) in files {
+        write_wav(&folder.join(file), *secs);
+    }
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        librqbit::create_torrent(
+            &folder,
+            librqbit::CreateTorrentOptions::default(),
+            &librqbit::spawn_utils::BlockingSpawner::new(1),
+        )
+        .await
+        .unwrap()
+        .as_bytes()
+        .unwrap()
+        .to_vec()
+    })
+}
+
 #[test]
 fn a_doubtful_release_waits_in_confirm() {
     let lib = Library::open_in_memory().unwrap();
     let track = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-gruppa-2")).unwrap();
     let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], true);
+    let src = tempfile::tempdir().unwrap();
+    // Its list has the song: shown.
+    let torrent = torrent_of(
+        src.path(),
+        "Кино - Группа крови (1988) MP3 320",
+        &[("01 - Группа крови.wav", 1.0), ("02 - Закрой за мной дверь, я ухожу.wav", 1.0)],
+    );
     r.rt.set_indexer(Arc::new(FakeIndexer {
         results: vec![candidate("Кино - Группа крови (1988) MP3 320")],
-        payload: None,
+        payload: Some(torrent),
         asked: Mutex::new(Vec::new()),
     }));
     r.rt.send(Command::Like(LikeTarget::Track(track), true));
@@ -481,6 +509,30 @@ fn a_doubtful_release_waits_in_confirm() {
     r.rt.send(Command::ConfirmChoice { id, option: None });
     wait_for(&r.rt, "no torrent", |s| s.downloads.confirm.is_empty());
     assert_eq!(wish_status(&lib, track), Some(WishlistStatus::NoTorrent));
+}
+
+/// A doubtful torrent of a track (one that names the artist only, «nyan»
+/// of «Happy Nyan! Days» for the artist nyan.mp3) is looked into first:
+/// without the song in its list it is never offered.
+#[test]
+fn a_doubtful_release_without_the_song_is_never_offered() {
+    let lib = Library::open_in_memory().unwrap();
+    let track = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-gruppa-2")).unwrap();
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], true);
+    let src = tempfile::tempdir().unwrap();
+    let torrent = torrent_of(
+        src.path(),
+        "Кино - Звезда по имени Солнце MP3 320",
+        &[("01 - Звезда по имени Солнце.wav", 1.0)],
+    );
+    r.rt.set_indexer(Arc::new(FakeIndexer {
+        results: vec![candidate("Кино - Звезда по имени Солнце MP3 320")],
+        payload: Some(torrent),
+        asked: Mutex::new(Vec::new()),
+    }));
+    r.rt.send(Command::Like(LikeTarget::Track(track), true));
+    wait_until("not found", || wish_status(&lib, track) == Some(WishlistStatus::NoTorrent));
+    assert!(r.rt.state().downloads.confirm.is_empty(), "nothing to confirm");
 }
 
 #[test]
