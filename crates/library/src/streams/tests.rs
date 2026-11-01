@@ -1444,6 +1444,63 @@ fn the_v5_repair_folds_the_service_titles_into_the_files_at_their_places() {
     assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 0, "once");
 }
 
+/// «MADE IN ABYSS ORIGINAL SOUNDTRACK 3» on two discs: YouTube Music
+/// numbers them as one, so its 4 and 5 are the files 2-1 and 2-2, and its
+/// «ベラフの子守歌» credits the character who sings it, not the composer.
+#[test]
+fn a_service_numbering_the_discs_as_one_finds_the_files_of_the_second() {
+    let lib = lib();
+    let kevin = lib.upsert_artist(&Artist::new("Kevin Penkin")).unwrap();
+    let credit = || ArtistCredit::single("Kevin Penkin", Some(kevin.id));
+    let release = lib
+        .upsert_release(&Release::new("MADE IN ABYSS ORIGINAL SOUNDTRACK 3", credit()))
+        .unwrap()
+        .id;
+    abyss_file(&lib, release, "Tomorrowland", credit(), 1, 120_000);
+    // As long as the songs give or take three seconds: no length alone
+    // tells them apart.
+    abyss_file(&lib, release, "Eyes of Irumyuui", credit(), 2, 199_561);
+    abyss_file(&lib, release, "Mallets of Abyss", credit(), 3, 165_984);
+    let belaf = abyss_file(&lib, release, "Belaf's Lullaby", credit(), 1, 199_950);
+    let doll = abyss_file(&lib, release, "Doll x Dragon", credit(), 2, 162_911);
+    lib.write(|tx| {
+        tx.execute("UPDATE track SET disc_no = 2 WHERE id IN (?1, ?2)", params![belaf.to_string(), doll.to_string()])?;
+        Ok(())
+    })
+    .unwrap();
+    let stream = |id: &str, title: &str, credit: &str, no: u32, ms: u64| {
+        let t = separate(&lib, &yt(id, title, "Kevin Penkin", ms, false));
+        lib.write(|tx| {
+            tx.execute(
+                "UPDATE track SET release_id = ?2, disc_no = 1, track_no = ?3, artist_credit = ?4 WHERE id = ?1",
+                params![t.to_string(), release.to_string(), no, credit],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        t
+    };
+    let jp = stream(
+        "BCBcTjDEnmM",
+        "ベラフの子守歌",
+        r#"[{"artist_id":null,"name":"ベラフ","join_phrase":"（CV："},{"artist_id":null,"name":"斎賀みつき","join_phrase":"）"}]"#,
+        4,
+        200_000,
+    );
+    let kevin_credit = r#"[{"artist_id":null,"name":"Kevin Penkin","join_phrase":""}]"#;
+    let mixed = stream("Kxfcg5COTRg", "Ningyō x 龍", kevin_credit, 5, 163_000);
+    // Past both discs: no file there.
+    let past = stream("pastdiscs01", "VOH", kevin_credit, 6, 162_000);
+
+    assert_eq!(lib.merge_duplicate_stream_tracks().unwrap(), 2);
+    for (stream, file, video) in [(jp, belaf, "BCBcTjDEnmM"), (mixed, doll, "Kxfcg5COTRg")] {
+        assert!(lib.get_track(stream).unwrap().is_none(), "{video}: merged");
+        let sources = lib.sources_of_track(file).unwrap();
+        assert!(sources.iter().any(|s| s.locator == video), "{video}: its source moved to the file");
+    }
+    assert!(lib.get_track(past).unwrap().is_some(), "a number past the discs stays");
+}
+
 #[test]
 fn an_album_page_lists_each_place_once() {
     let lib = lib();

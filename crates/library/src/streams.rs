@@ -812,7 +812,7 @@ impl Library {
                 t.track_no = Some(no);
                 // The track at its place, whatever its title («滑落亭» of
                 // the service is the file «KATSURAKUTEI»).
-                let place = (rid.clone(), i64::from(t.disc_no.unwrap_or(1).max(1)), i64::from(no));
+                let place = same::real_place(tx, (rid.clone(), i64::from(t.disc_no.unwrap_or(1).max(1)), i64::from(no)))?;
                 let here = |tx: &Connection| -> Result<Option<TrackId>> {
                     let found = match same::same_place_track(tx, &t, &place)? {
                         Some(id) => Some(id),

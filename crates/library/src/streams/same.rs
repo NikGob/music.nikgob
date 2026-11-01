@@ -98,8 +98,9 @@ const OTHER_SCRIPTS_KEY: &str = "other_script_titles_merged.v1";
 /// with the rule of today (`v1` had no dual titles and no tight slack, `v2`
 /// no shared artists and no clips, `v3` no transliterations, `v4` no places
 /// on a release, `v5` no twins of one service at a place, no artists in
-/// two scripts at a place, no typos).
-const REPAIRED_KEY: &str = "stream_duplicates_merged.v6";
+/// two scripts at a place, no typos, `v6` no places numbered past the first
+/// disc: [`real_place`]).
+const REPAIRED_KEY: &str = "stream_duplicates_merged.v7";
 
 /// What separates the artists of a credit line (lower case).
 const CREDIT_SEPARATORS: &[&str] = &[
@@ -246,6 +247,35 @@ pub(crate) fn place_of(release: Option<String>, disc: i64, track_no: i64) -> Opt
     release.filter(|_| track_no > 0).map(|r| (r, disc.max(1), track_no))
 }
 
+/// The place a service means by a number past the first disc of an album
+/// whose files fill more discs: it numbers them all as one («Doll x Dragon»,
+/// 2-15 of the files, is its 30 after the 15 of disc 1). The discs are as
+/// long as their files say; any other place stays.
+pub(crate) fn real_place(conn: &Connection, place: Place) -> Result<Place> {
+    if place.1 != 1 {
+        return Ok(place);
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT disc_no, max(track_no) FROM track
+          WHERE release_id = ?1 AND has_local = 1 AND deleted_at IS NULL AND track_no > 0
+          GROUP BY disc_no ORDER BY disc_no",
+    )?;
+    let discs: Vec<(i64, i64)> = stmt
+        .query_map([&place.0], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if discs.len() < 2 || discs[0].0 != 1 {
+        return Ok(place);
+    }
+    let mut no = place.2;
+    for (disc, size) in &discs {
+        if no <= *size {
+            return Ok(if *disc == 1 { place } else { (place.0, *disc, no) });
+        }
+        no -= size;
+    }
+    Ok(place)
+}
+
 /// What two tracks are compared by, already folded.
 #[derive(Clone, Debug)]
 pub(crate) struct Song {
@@ -355,6 +385,15 @@ impl Song {
                 return true;
             }
             if apart <= TIGHT_SLACK_MS && self.same_title(o) {
+                return true;
+            }
+            // A character's song: the service credits the character
+            // («ベラフ（CV：…）»), the file the composer. Neither the titles
+            // nor the names can be compared, the place and length tell.
+            if apart <= TIGHT_SLACK_MS
+                && other_scripts(&self.raw_title, &o.raw_title)
+                && other_scripts(&self.artist, &o.artist)
+            {
                 return true;
             }
         }
@@ -1012,6 +1051,7 @@ impl Library {
                 }
                 let names = credit_names(&credit);
                 let artist = names.first().cloned().unwrap_or_default();
+                let place = place.map(|p| real_place(tx, p)).transpose()?;
                 let song = Song::new(&title, &artist, album.as_deref(), duration, isrc.as_deref())
                     .with_names(&names)
                     .at(place);
