@@ -5,6 +5,8 @@
 //! - `fake:discography` — the open library artist gets a «Нет в библиотеке»
 //!   section from the fake Spotify catalog.
 //! - `fake:wishlist` — a wishlist with every status.
+//! - `fake:confirm` — a «Хочу скачать» track in «Подтверди» whose offers
+//!   have long release names.
 //! - `fake:album-status` — the first stream album cards on screen (the
 //!   discography, a service's artist page, search) are queued, downloading,
 //!   fully local and partly local, in that order.
@@ -49,6 +51,7 @@ use nikgob_view::{
 pub struct Fakes {
     discography: bool,
     wishlist: bool,
+    confirm: bool,
     album_status: bool,
     buffering: bool,
     audio: Option<Service>,
@@ -74,6 +77,7 @@ impl Fakes {
         match arg {
             "discography" => self.discography = true,
             "wishlist" => self.wishlist = true,
+            "confirm" => self.confirm = true,
             "album-status" => self.album_status = true,
             "buffering" => self.buffering = true,
             "audio:youtube" => self.audio = Some(Service::Youtube),
@@ -105,6 +109,7 @@ impl Fakes {
     pub fn any(&self) -> bool {
         self.discography
             || self.wishlist
+            || self.confirm
             || self.album_status
             || self.buffering
             || self.audio.is_some()
@@ -133,6 +138,9 @@ impl Fakes {
         }
         if self.wishlist {
             s.downloads.wishlist = wishlist();
+        }
+        if self.confirm {
+            s.downloads.confirm = vec![confirm()];
         }
         if self.keep
             && let Some(t) = s.player.current.clone()
@@ -413,6 +421,32 @@ fn row(n: u128, title: &str, artist: &str, album: &str, status: St) -> WishlistR
         missing: 0,
         has_copy: false,
         source: (status == St::Downloading).then(|| "RuTracker".into()),
+    }
+}
+
+/// A track in «Подтверди» with three offers, the first named at length.
+fn confirm() -> nikgob_view::Confirm {
+    let option = |label: &str, detail: &str, recommended| nikgob_view::ConfirmOption {
+        label: label.into(),
+        detail: detail.into(),
+        recommended,
+    };
+    nikgob_view::Confirm {
+        id: 1,
+        title: "Shake It Now. (feat. Ado) — Nakimushi".into(),
+        origin: "Хочу скачать · трек".into(),
+        question: "Что из этого — этот трек?".into(),
+        options: vec![
+            option(
+                "[Maid-chan] Nakimushi - Shake It Now. (feat. Ado) / Kimi to Boku 3rd Season ED Single Collection Vol.2 [2024.11.06] (FLAC 24bit/96kHz + Scans + BK + Booklet)",
+                "FLAC 24/96 · 450 МБ · 12 сид. · Tokyo Toshokan",
+                true,
+            ),
+            option("Nakimushi - Shake It Now. (2024) [MP3 320K]", "MP3 320 · 52 МБ · 3 сид. · Tokyo Toshokan", false),
+            option("[Nipponsei] Nakimushi - Shake It Now. zip", "58 МБ · 2 сид. · Tokyo Toshokan", false),
+        ],
+        skip_label: "Не то — поищу позже".into(),
+        accept_label: "Скачать".into(),
     }
 }
 

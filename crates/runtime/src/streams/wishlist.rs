@@ -20,7 +20,7 @@
 //! item: it keeps looking once a week in every source, and what is better
 //! than the copy downloads at once and replaces it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -112,6 +112,12 @@ pub(crate) struct WishState {
     pub(crate) fetch_down: HashMap<SourceKey, String>,
     /// Who an item's file comes from, while it downloads.
     from: HashMap<WishlistId, String>,
+    /// Sources the user just turned on or set up: once one can search,
+    /// what was not found is searched for again.
+    pub(crate) enabled: HashSet<SourceKey>,
+    /// An uploader's "Performer - Song" fetched from the performer's
+    /// release: the artist and title its file takes once it lands.
+    relabel: HashMap<WishlistId, (String, String)>,
 }
 
 impl WishState {
@@ -645,6 +651,20 @@ impl Worker {
             .collect()
     }
 
+    /// A source the user turned on or set up can search now: everything not
+    /// found is searched for again, there too.
+    pub(crate) fn wish_sources_ready(&mut self) {
+        if self.streaming.wish.enabled.is_empty() {
+            return;
+        }
+        let keys: Vec<SourceKey> = self.download_sources().iter().map(|s| s.key()).collect();
+        let before = self.streaming.wish.enabled.len();
+        self.streaming.wish.enabled.retain(|k| !keys.contains(k));
+        if self.streaming.wish.enabled.len() < before {
+            self.wish_retry_all();
+        }
+    }
+
     /// Something can search for the items by itself.
     pub(crate) fn can_download(&self) -> bool {
         !self.download_sources().is_empty()
@@ -958,6 +978,10 @@ impl Worker {
         };
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
         let want = self.want_of(&item);
+        match nikgob_sources::matching::performer_of(&offer, &want).filter(|_| item.scope == WishlistScope::Track) {
+            Some(names) => self.streaming.wish.relabel.insert(id, names),
+            None => self.streaming.wish.relabel.remove(&id),
+        };
         let torrent = offer.source == SourceKey::Torrents;
         let dest = self.direct_dir(id);
         let from = if offer.provider.is_empty() { offer.source.display_name().to_owned() } else { offer.provider.clone() };
@@ -1247,6 +1271,27 @@ impl Worker {
         self.publish_wishlist();
     }
 
+    /// Everything not found (or only saved from YouTube) is searched for
+    /// again, in every source that is on now.
+    pub(crate) fn wish_retry_all(&mut self) {
+        let now = Self::now();
+        let mut n = 0;
+        for status in [WishlistStatus::NoTorrent, WishlistStatus::Failed] {
+            for mut item in self.lib.list_wishlist_by_status(status).unwrap_or_default() {
+                item.status = WishlistStatus::New;
+                item.next_try_at = None;
+                item.updated_at = now;
+                self.put_item(&item);
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.toast(format!("Ищу заново: {n}"), None);
+        }
+        self.wish_tick();
+        self.publish_wishlist();
+    }
+
     /// "Подтверди" for a wishlist item: `Some(i)` downloads release `i`,
     /// `None` = none of them (searched again in a week).
     pub(crate) fn wish_confirm(&mut self, confirm: u64, option: Option<usize>) {
@@ -1524,6 +1569,9 @@ impl Worker {
                     }
                     return;
                 }
+                if let (Some(track), Some(names)) = (item.track_id, self.streaming.wish.relabel.remove(&id)) {
+                    self.relabel(track, names);
+                }
                 (WishlistStatus::Done, "Скачано".to_owned())
             }
         };
@@ -1532,6 +1580,7 @@ impl Worker {
             w.cands.remove(&id);
             w.doubtful.remove(&id);
             w.from.remove(&id);
+            w.relabel.remove(&id);
         }
         self.set_item(id, |i| {
             i.status = status;
@@ -1542,6 +1591,26 @@ impl Worker {
         });
         self.publish_wishlist();
         self.wish_tick();
+    }
+
+    /// The file of an uploader's song takes its performer's names: the
+    /// artist, the title, a single of its own (the cover is found for it).
+    fn relabel(&mut self, track: TrackId, (artist, title): (String, String)) {
+        let Some(svc) = &self.import else { return };
+        log::info!("wishlist: {track} is {artist} — {title}, not the uploader's");
+        let importer = svc.importer().clone();
+        let tx = svc.internal();
+        svc.spawn_blocking(move || {
+            let changes = nikgob_import::TagChanges {
+                album: Some(title.clone()),
+                album_artist: Some(artist.clone()),
+                title: Some(title),
+                artist: Some(artist),
+                ..Default::default()
+            };
+            let r = importer.retag(track, changes).map(|_| ()).map_err(|e| e.to_string());
+            let _ = tx.send(crate::import::Internal::Relabeled(track, r));
+        });
     }
 
     /// An import of saved stream audio failed: the item goes back.
@@ -1606,8 +1675,21 @@ impl Worker {
         }
         // Files that waited in «Подтверди» may be gone since.
         for i in self.lib.list_wishlist_by_status(WishlistStatus::Confirm).unwrap_or_default() {
-            if i.note.as_deref() == Some(FILES_WAIT) && !self.files_wait(i.id) {
-                self.wish_settle(i.id);
+            if i.note.as_deref() == Some(FILES_WAIT) {
+                if !self.files_wait(i.id) {
+                    self.wish_settle(i.id);
+                }
+                continue;
+            }
+            // Offers the matching takes no more (it got stricter since):
+            // searched for again rather than asked about.
+            let offers = i.candidates_json.as_deref().map(offers_of_json).unwrap_or_default();
+            if rank(offers.clone(), &self.want_of(&i), &[]).len() < offers.len() {
+                self.set_item(i.id, |i| {
+                    i.status = WishlistStatus::New;
+                    i.next_try_at = None;
+                    i.candidates_json = None;
+                });
             }
         }
     }
@@ -1810,6 +1892,10 @@ impl Worker {
                 })
                 .collect(),
             skip_label: "Не то — поищу позже".into(),
+            question: match item.scope {
+                WishlistScope::Track => "Что из этого — этот трек?".into(),
+                WishlistScope::Album => "Что из этого — этот альбом?".into(),
+            },
             accept_label: "Скачать".into(),
         }
     }

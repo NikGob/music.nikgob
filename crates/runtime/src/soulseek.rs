@@ -224,6 +224,7 @@ impl Worker {
         };
         self.publish(|st| st.downloads.soulseek = view);
         self.publish_sources();
+        self.wish_sources_ready();
         self.wish_tick();
     }
 
@@ -257,6 +258,8 @@ impl Worker {
     /// «Сохранить» under Soulseek: the account, or the service's address.
     pub(crate) fn set_soulseek(&mut self, form: nikgob_view::SoulseekForm) {
         let remote = form.remote;
+        // The account (again): once it is in, a new search everywhere.
+        self.streaming.wish.enabled.insert(SourceKey::Soulseek);
         let saved = self.soulseek_edit(|s| {
             s.mode = if form.remote { SoulseekMode::Remote } else { SoulseekMode::Embedded };
             s.username = form.username.trim().to_owned();
@@ -296,6 +299,8 @@ impl Worker {
 
 /// How long a search listens for the peers' answers.
 const SEARCH_WAIT: Duration = Duration::from_secs(8);
+/// How long a search waits for the client to log in.
+const LOGIN_WAIT: Duration = Duration::from_secs(30);
 /// Lengths further apart (s) are another recording.
 const OTHER_SECS: u32 = 10;
 /// The files a folder of a sharer is taken for.
@@ -437,7 +442,14 @@ impl SlskSource {
 
     async fn search_text(&self, text: String, kind: QueryKind) -> Result<Vec<SearchResult>, SourceError> {
         let slsk = self.slsk.clone();
-        self.on(async move { slsk.search(&SearchQuery { text, kind }, SEARCH_WAIT).await })
+        self.on(async move {
+            // Just started (the switch, the account saved): a search sent
+            // before the login would come back empty, as "not found".
+            if let Soulseek::Embedded(c) = &slsk {
+                c.wait_logged_in(LOGIN_WAIT).await?;
+            }
+            slsk.search(&SearchQuery { text, kind }, SEARCH_WAIT).await
+        })
             .await?
             .map_err(source_error)
     }

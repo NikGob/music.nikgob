@@ -42,6 +42,8 @@ pub(crate) enum Internal {
     Enrich(crate::enrich::Event),
     TagSuggestions(TrackId, Result<Vec<(String, v::TagEdit)>, String>),
     Retagged(TrackId, Result<(), String>),
+    /// An uploader's song took its performer's names.
+    Relabeled(TrackId, Result<(), String>),
     TorrentResults(String, Result<Vec<nikgob_core::indexer::Candidate>, String>),
     IndexerChecked(Result<usize, nikgob_core::indexer::IndexerError>),
     TorrentStarted(Result<nikgob_torrent::TorrentClient, String>),
@@ -426,6 +428,7 @@ impl ImportService {
                     // The file's own tags are an option of their own.
                     skip_label: String::new(),
                     accept_label: "Импортировать".into(),
+                    question: "Это какой трек?".into(),
                 }
             })
             .collect();
@@ -558,6 +561,12 @@ impl Worker {
                 self.publish_downloads();
             }
             m @ (Internal::TagSuggestions(..) | Internal::Retagged(..)) => self.tag_result(m),
+            Internal::Relabeled(track, r) => {
+                if let Err(e) = r {
+                    log::warn!("relabelling {track}: {e}");
+                }
+                self.reload_after_import();
+            }
             Internal::TorrentResults(q, r) => self.torrent_results(q, r),
             Internal::IndexerChecked(r) => self.indexer_checked(r),
             Internal::TorrentStarted(r) => self.torrent_started(r),

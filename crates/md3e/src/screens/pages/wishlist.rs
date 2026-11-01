@@ -1,10 +1,11 @@
 //! Загрузки → «Хочу скачать» (docs/stage3.md §3.5, §3.7): stream tracks on
 //! their way to a file (likes, «Скачать», imports). One summary line with
-//! «Скачать все», filter chips by status, the list grouped by album or by
-//! artist. A row says where its track is in words (no coloured pills) and
-//! offers the one thing that helps now: «Скачать», «Проверить», or for a
-//! track without a torrent «Сохранить с YouTube ▾» with the ways to bring a
-//! file in by hand. Dismissed items can come back. The list draws only the
+//! «Скачать все» and «Искать заново», filter chips by status, the list
+//! grouped by album or by artist. A row says where its track is in words (no
+//! coloured pills) and offers the one thing that helps now: «Скачать»,
+//! «Проверить», or for a track nothing was found for «Искать снова ▾» (with
+//! no source on, «Сохранить с YouTube ▾») with the ways to bring a file in
+//! by hand. Dismissed items can come back. The list draws only the
 //! rows on screen, so thousands of imported likes stay smooth.
 
 use std::collections::HashMap;
@@ -200,6 +201,22 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
                     out.push(Command::WishlistDownload(WishlistSelect::AllWaiting));
                 }
             }
+            // A source added since: what was not found is searched for in
+            // all of them again.
+            let missed = count(Filter::NoTorrent);
+            if torrents
+                && missed > 0
+                && ui
+                    .add(
+                        Button::new(format!("Искать заново ({missed})"))
+                            .icon(Icon::Refresh)
+                            .style(if waiting > 0 { Style::Tonal } else { Style::Filled })
+                            .id_salt("wish-retry-all"),
+                    )
+                    .clicked()
+            {
+                out.push(Command::WishlistRetryAll);
+            }
         });
     });
     if torrents {
@@ -327,6 +344,8 @@ fn group_head(ui: &mut Ui, g: &WishlistGroup, waiting: u32, open: &[WishlistId],
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
+            // The rows' side padding: their ⋮ and this one in one column.
+            ui.add_space(16.0);
             let more = ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("wish-group-more", salt)));
             let select = || match (artist_view, g.release, g.artist) {
                 (false, Some(r), _) => WishlistSelect::Album(r),
@@ -418,11 +437,17 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
                     }
                     St::Downloading => progress(ui, r.progress),
                     St::NoTorrent | St::Failed => {
-                        // The way out without a torrent: YouTube's audio, or
-                        // the user's own .torrent / magnet / file.
-                        // With a copy: look for a better one now.
-                        let save = r.can_save_from_youtube && !r.has_copy;
-                        let main = if save { "Сохранить с YouTube" } else { "Искать снова" };
+                        // With a source on: search again (a new one may have
+                        // it). Without one, YouTube's audio is the way out.
+                        // The rest — the user's own .torrent / magnet / file —
+                        // in the menu.
+                        let can_save = r.can_save_from_youtube && !r.has_copy;
+                        let save = !torrents && can_save;
+                        let (main, other) = if save {
+                            ("Сохранить с YouTube", MenuItem::new("Искать снова").icon(Icon::Refresh))
+                        } else {
+                            ("Искать снова", MenuItem::new("Сохранить с YouTube").icon(Icon::Download).enabled(can_save))
+                        };
                         let o = SplitButton::new(("wish-split", id), main)
                             .size(Size::S)
                             .style(Style::Tonal)
@@ -430,18 +455,22 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
                             .item(MenuItem::new("Magnet-ссылка…").icon(Icon::Link))
                             .item(MenuItem::new("Свой файл…").icon(Icon::UploadFile))
                             .item(MenuItem::new("Папка с альбомом…").icon(Icon::Folder))
-                            .item(MenuItem::new("Искать снова").icon(Icon::Refresh))
+                            .item(other)
                             .item(MenuItem::new("Не качать").icon(Icon::Block))
                             .trigger_tooltip("Другие способы")
                             .show(ui);
+                        let (on_main, on_other) = if save {
+                            (Command::WishlistSaveFromYoutube(id), Command::WishlistRetry(id))
+                        } else {
+                            (Command::WishlistRetry(id), Command::WishlistSaveFromYoutube(id))
+                        };
                         if o.main.clicked() {
-                            out.push(if save {
-                                Command::WishlistSaveFromYoutube(id)
-                            } else {
-                                Command::WishlistRetry(id)
-                            });
+                            out.push(on_main);
                         }
-                        split = o.picked;
+                        match o.picked {
+                            Some(4) => out.push(on_other),
+                            p => split = p,
+                        }
                     }
                     St::Dismissed => {
                         let back = ui.add(Button::new("Вернуть").style(Style::Text).size(Size::S).id_salt(("wish-restore", id)));
@@ -468,7 +497,7 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
         }
     }
     if let Some(i) = split {
-        // The split button's menu: .torrent, magnet, file, folder, again, no.
+        // The split button's menu: .torrent, magnet, file, folder, no.
         attach_pick(i + 3, r, pages, out);
     }
     let menu = |key: &str| {
@@ -508,7 +537,7 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
 
 /// The hand-made ways in, by their place in the ⋮ menu: 3 .torrent, 4
 /// magnet, 5 file, 6 folder; the split button's menu maps onto these and
-/// adds 7 search again and 8 dismiss.
+/// adds 8 dismiss.
 fn attach_pick(i: usize, r: &WishlistRow, pages: &mut PageState, out: &mut Vec<Command>) {
     let id = r.id;
     match i {

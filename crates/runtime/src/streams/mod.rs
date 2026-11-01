@@ -576,6 +576,7 @@ impl Worker {
             Command::WishlistDismiss(ids) => self.wish_dismiss(&ids),
             Command::WishlistRestore(ids) => self.wish_restore(&ids),
             Command::WishlistRetry(id) => self.wish_retry(id),
+            Command::WishlistRetryAll => self.wish_retry_all(),
             Command::WishlistSaveFromYoutube(id) => self.wish_save_from_youtube(id),
             Command::WishlistAttach { item, what } => self.wish_attach(item, what),
             Command::ImportFromService(service) => self.import_from_service(service),

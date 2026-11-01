@@ -843,6 +843,8 @@ pub struct Confirm {
     pub id: u64,
     pub title: String,
     pub origin: String,
+    /// What the options answer ("Это какой трек?", "Что из этого скачать?").
+    pub question: String,
     pub options: Vec<ConfirmOption>,
     /// What `ConfirmChoice { option: None }` does ("Пропустить",
     /// "Оставить теги файла").
@@ -2045,6 +2047,9 @@ pub enum Command {
     WishlistRestore(Vec<WishlistId>),
     /// Search a torrent for this item now (instead of next week).
     WishlistRetry(WishlistId),
+    /// Search again now for every item nothing was found for (a new source
+    /// may have it).
+    WishlistRetryAll,
     /// Save the audio of the item's track from YouTube Music as it is (low
     /// quality, a torrent upgrades it later).
     WishlistSaveFromYoutube(WishlistId),

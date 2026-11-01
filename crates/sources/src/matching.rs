@@ -68,6 +68,15 @@ fn names_artist(hay_key: &str, raw: &str, keys: &[String]) -> bool {
     keys.iter().any(|k| contains_words(hay_key, k) || similarity(&head, k) >= ARTIST)
 }
 
+/// "Someone - …" whose "…" is where the artist's name is: the name is a
+/// song's or an album's there («Sawai Miku - Nakimushi.» for the band
+/// Nakimushi).
+fn artist_after_dash(raw: &str, keys: &[String]) -> bool {
+    let Some((head, _)) = raw.split_once(" - ") else { return false };
+    let head = title_key(head).base;
+    !keys.iter().any(|k| contains_words(&head, k) || similarity(&head, k) >= ARTIST)
+}
+
 /// A credited artist alike one of the wish's.
 pub fn same_artist(name: &str, want: &Want) -> bool {
     let got = artist_key(name);
@@ -111,6 +120,23 @@ pub fn judge(offer: &Offer, want: &Want) -> Option<Verdict> {
 fn performer_in_title(title: &str) -> Option<(&str, &str)> {
     let (head, tail) = title.split_once(" - ")?;
     (!head.trim().is_empty() && !tail.trim().is_empty()).then(|| (head.trim(), tail.trim()))
+}
+
+/// The performer and the song of a wish titled "Performer - Song" by an
+/// uploader, when `offer` is that performer's (it matched through the
+/// title, not through the uploader): the names the file should carry.
+pub fn performer_of(offer: &Offer, want: &Want) -> Option<(String, String)> {
+    let (head, song) = want.title.as_deref().and_then(performer_in_title)?;
+    let key = artist_key(head);
+    if key.is_empty() || same_artist(head, want) {
+        return None;
+    }
+    match (&offer.artist, &offer.track_title) {
+        (Some(artist), title) => (similarity(&artist_key(artist), &key) >= ARTIST && !same_artist(artist, want))
+            .then(|| (artist.clone(), title.clone().unwrap_or_else(|| song.to_owned()))),
+        (None, _) => names_artist(&title_key(&offer.title).base, &offer.title, std::slice::from_ref(&key))
+            .then(|| (head.to_owned(), song.to_owned())),
+    }
 }
 
 /// A wish for a sped-up or slowed upload: the release is the song at its
@@ -217,9 +243,19 @@ fn judge_release(offer: &Offer, want: &Want) -> Option<Verdict> {
     if !names_album && !names_title && !franchise && !collection && !artist {
         return None;
     }
+    // One release of the artist that does not name the wished album is
+    // another of their albums (a track may still sit on one, an album not).
+    if want.scope == WantScope::Album && !albums.is_empty() && !collection && !names_album && !franchise {
+        return None;
+    }
     let seeded = offer.seeders.is_none_or(|s| s > 0);
     let lossless = offer.lossless();
     let named = names_album || names_title || franchise;
+    // The artist's name only after the dash is the title of another one's
+    // release, unless the release names what is wished too.
+    if artist && !named && artist_after_dash(&offer.title, &keys) {
+        return None;
+    }
     let mut score = 0.0;
     if artist {
         score += 0.4;
@@ -330,5 +366,48 @@ mod tests {
         let w = want("Con Fetti Pesto", "Das Nennt Ihr Himmel (Supraland Six Inches Under Credits Song)", "Das Nennt Ihr Himmel", 188);
         assert!(judge(&torrent("Supraland Six Inches Under OST (2022) FLAC", 3), &w).unwrap().sure);
         assert!(judge(&torrent("Supraland OST", 3), &w).is_none(), "another game of the series");
+    }
+
+    #[test]
+    fn another_album_of_the_artist_is_not_the_album() {
+        let w = Want { title: None, scope: WantScope::Album, ..want("MORGENSHTERN", "", "ЛЕГЕНДАРНАЯ ПЫЛЬ", 0) };
+        let other = "Morgenshtern (Моргенштерн) - Alisher (2025) [FLAC 24/48|Lossless|WEB-DL|tracks] <Rap, Hip-Hop>";
+        assert!(judge(&torrent(other, 2), &w).is_none());
+        assert!(judge(&torrent("Morgenshtern - Million Dollar Business (2021) [MP3|320 Kbps]", 1), &w).is_none());
+        assert!(judge(&torrent("Morgenshtern - Легендарная пыль (2020) [FLAC]", 3), &w).unwrap().sure);
+        assert!(judge(&torrent("Morgenshtern - Дискография (2018-2025) FLAC", 3), &w).is_some(), "its folder is looked for");
+        // A track may sit on another album: asked.
+        let w = want("MORGENSHTERN", "Cadillac", "ЛЕГЕНДАРНАЯ ПЫЛЬ", 0);
+        assert!(judge(&torrent(other, 2), &w).is_some());
+    }
+
+    #[test]
+    fn an_uploaders_song_gets_its_performer() {
+        let w = want("Gg2", "Комсомольск - Мозги & деньги", "Комсомольск - Мозги & деньги", 149);
+        let mut t = track("Комсомольск", "Мозги & деньги", 150);
+        assert_eq!(performer_of(&t, &w), Some(("Комсомольск".into(), "Мозги & деньги".into())));
+        t.artist = Some("Gg2".into());
+        assert_eq!(performer_of(&t, &w), None, "the uploader's own");
+        let r = torrent("Комсомольск - Мозги & деньги (2021) [FLAC]", 3);
+        assert_eq!(performer_of(&r, &w), Some(("Комсомольск".into(), "Мозги & деньги".into())));
+        // The artist's own "Song - Version": nothing to change.
+        let w = want("Eve", "Underdog - Acoustic", "Underdog", 194);
+        assert_eq!(performer_of(&track("Eve", "Underdog - Acoustic", 194), &w), None);
+    }
+
+    #[test]
+    fn the_artists_name_as_someone_elses_song_is_not_the_artist() {
+        let w = want("Nakimushi", "Shake It Now. (feat. Ado)", "Shake It Now.", 0);
+        for t in [
+            "[Maid-chan] Sawai Miku - Nakimushi.  (Kimi to Boku ED Single) (FLAC)",
+            "[Maid-chan] Sawai Miku - Nakimushi.  (Kimi to Boku ED Single) (MP3 320K)",
+            "[Nipponsei] Kimi to Boku.  ED Single - Nakimushi.  [Sawai Miku]. zip",
+        ] {
+            assert!(judge(&torrent(t, 2), &w).is_none(), "{t}");
+        }
+        assert!(judge(&torrent("Nakimushi - Shake It Now. (2024) [FLAC]", 2), &w).unwrap().sure);
+        // The song named too: the artist after the dash is still it.
+        let w = want("Sawai Miku", "Nakimushi.", "Nakimushi.", 0);
+        assert!(judge(&torrent("[Nipponsei] Kimi to Boku.  ED Single - Nakimushi.  [Sawai Miku]. zip", 2), &w).is_some());
     }
 }

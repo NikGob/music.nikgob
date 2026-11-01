@@ -567,6 +567,7 @@ impl Worker {
                     Ok(Msg::Indexer(i)) => {
                         self.indexer = Some(i);
                         self.publish_sources();
+                        self.wish_sources_ready();
                         self.wish_tick();
                     }
                     Ok(Msg::Source(s)) => {
@@ -574,6 +575,7 @@ impl Worker {
                         self.sources.retain(|x| x.key() != s.key());
                         self.sources.push(s);
                         self.publish_sources();
+                        self.wish_sources_ready();
                         self.wish_tick();
                     }
                     Ok(Msg::OdesliBase(base)) => self.set_odesli_base(&base),
@@ -1103,6 +1105,7 @@ impl Worker {
             | Command::WishlistDismiss(_)
             | Command::WishlistRestore(_)
             | Command::WishlistRetry(_)
+            | Command::WishlistRetryAll
             | Command::WishlistSaveFromYoutube(_)
             | Command::WishlistAttach { .. }
             | Command::ImportFromService(_)
@@ -2140,12 +2143,22 @@ impl Worker {
         if old.auto_download_limit != p.auto_download_limit {
             self.wish_tick();
         }
+        // A source turned on: what was not found is searched for again once
+        // it can search.
+        for key in nikgob_view::SourceKey::ALL {
+            if !old.source_on(key) && p.source_on(key) {
+                self.streaming.wish.enabled.insert(key);
+            } else if !p.source_on(key) {
+                self.streaming.wish.enabled.remove(&key);
+            }
+        }
         if old.source_on(nikgob_view::SourceKey::Soulseek) != p.source_on(nikgob_view::SourceKey::Soulseek) {
             self.soulseek_apply();
         }
         if old.source_order() != p.source_order() {
             self.publish_sources();
             self.publish_wishlist();
+            self.wish_sources_ready();
             self.wish_tick();
         }
         if old.stream_cache_mb != p.stream_cache_mb {
@@ -2571,13 +2584,18 @@ impl Worker {
         });
         match settings.save(&path) {
             Ok(()) => {
+                let had = self.indexer.is_some();
                 self.indexer = search::indexer_from(Some(&path));
                 let usable = self.indexer.is_some();
                 self.publish(|s| {
                     s.prefs.prowlarr_url = url;
                     s.prefs.prowlarr_configured = usable;
                 });
+                if usable && !had {
+                    self.streaming.wish.enabled.insert(nikgob_view::SourceKey::Torrents);
+                }
                 self.publish_sources();
+                self.wish_sources_ready();
                 self.toast(
                     if usable { "Prowlarr сохранён" } else { "Адрес или ключ Prowlarr не подходят" },
                     None,

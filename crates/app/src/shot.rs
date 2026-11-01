@@ -245,6 +245,7 @@ impl Shot {
                     "trash" => Route::Library(LibraryTab::Trash),
                     "downloads" => Route::Downloads(DownloadsTab::Active),
                     "wishlist" => Route::Downloads(DownloadsTab::Wishlist),
+                    "confirm" => Route::Downloads(DownloadsTab::Confirm),
                     "settings" => Route::Settings,
                     "new_releases" => Route::NewReleases,
                     _ => Route::Home,

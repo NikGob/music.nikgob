@@ -135,23 +135,27 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
             ui.label(TypeRole::TitleMedium.style().rich(&c.title, s.on_surface));
             ui.label(TypeRole::BodySmall.style().rich(&c.origin, s.on_surface_variant));
             ui.add_space(12.0);
-            ui.label(TypeRole::LabelLarge.style().rich("Это какой трек?", s.on_surface_variant));
+            ui.label(TypeRole::LabelLarge.style().rich(&c.question, s.on_surface_variant));
             ui.add_space(4.0);
             for (i, o) in c.options.iter().enumerate() {
                 let bg = ui.painter().add(egui::Shape::Noop);
                 let row = ui.horizontal(|ui| {
                     ui.add_space(4.0);
                     let r = ui.radio(choice == i, "");
+                    // A long release name wraps inside the card instead of
+                    // widening it (and pushing the buttons out).
+                    let width = ui.available_width() - 8.0;
                     ui.vertical(|ui| {
+                        ui.set_max_width(width);
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.horizontal(|ui| {
-                            ui.label(TypeRole::TitleSmall.style().rich(&o.label, s.on_surface));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add(egui::Label::new(TypeRole::TitleSmall.style().rich(&o.label, s.on_surface)).wrap());
                             if o.recommended {
                                 ui.add_space(6.0);
                                 ui.label(TypeRole::LabelSmall.emphasized().rich("РЕКОМЕНДУЕМ", s.primary));
                             }
                         });
-                        ui.label(TypeRole::BodySmall.style().rich(&o.detail, s.on_surface_variant));
+                        ui.add(egui::Label::new(TypeRole::BodySmall.style().rich(&o.detail, s.on_surface_variant)).wrap());
                     });
                     r
                 });
@@ -174,7 +178,6 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
             ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(Button::new(c.accept_label.as_str()).style(Style::Filled).id_salt(("cf-ok", c.id)))
-                    .on_hover_text("Импортировать с тегами выбранного варианта")
                     .clicked()
                 {
                     out.push(Command::ConfirmChoice { id: c.id, option: Some(choice) });
@@ -183,7 +186,6 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
                 if !c.skip_label.is_empty()
                     && ui
                         .add(Button::new(c.skip_label.as_str()).style(Style::Text).id_salt(("cf-skip", c.id)))
-                        .on_hover_text("Импортировать как есть, с тегами из самого файла")
                         .clicked()
                 {
                     out.push(Command::ConfirmChoice { id: c.id, option: None });
