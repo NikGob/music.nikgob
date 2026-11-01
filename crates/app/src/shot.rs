@@ -243,15 +243,20 @@ impl Shot {
                     "albums" => Route::Library(LibraryTab::Albums),
                     "artists" => Route::Library(LibraryTab::Artists),
                     "trash" => Route::Library(LibraryTab::Trash),
+                    "downloaded" => Route::Library(LibraryTab::Downloaded),
                     "downloads" => Route::Downloads(DownloadsTab::Active),
                     "wishlist" => Route::Downloads(DownloadsTab::Wishlist),
                     "confirm" => Route::Downloads(DownloadsTab::Confirm),
+                    "history" => Route::Downloads(DownloadsTab::History),
                     "settings" => Route::Settings,
                     "new_releases" => Route::NewReleases,
                     _ => Route::Home,
                 };
                 if let Route::Library(tab) = r {
                     ui.set_library_tab(tab);
+                    if tab == LibraryTab::Downloaded {
+                        out.push(Command::LoadDownloaded);
+                    }
                 }
                 ui.navigate(ctx, r, out);
                 self.wait = 30;

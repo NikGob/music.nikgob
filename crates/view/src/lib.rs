@@ -228,6 +228,14 @@ pub enum PlaylistCoverMode {
     Custom,
 }
 
+/// One day of «Скачано».
+#[derive(Clone, Debug, PartialEq)]
+pub struct DownloadedDay {
+    /// «Сегодня», «Вчера», «28 октября».
+    pub label: String,
+    pub tracks: Vec<TrackRow>,
+}
+
 /// A deleted track in the "Корзина" view.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrashItem {
@@ -710,6 +718,9 @@ pub struct LibraryView {
     pub loaded: bool,
     /// Deleted tracks ("Корзина"), most recent first; filled by [`Command::LoadTrash`].
     pub trash: Vec<TrashItem>,
+    /// «Скачано»: tracks with a file by the day it came, the latest first;
+    /// filled by [`Command::LoadDownloaded`].
+    pub downloaded: Vec<DownloadedDay>,
     /// The «Всё» overview's rows: the latest albums in, and the most played.
     pub recently_added: Vec<ReleaseCard>,
     pub often_played: Vec<ReleaseCard>,
@@ -835,6 +846,9 @@ pub struct Job {
     /// Pause / cancel make sense (torrents); a folder import runs to the end.
     pub controllable: bool,
     pub error: Option<String>,
+    /// When it ended (ms since the epoch); "История" is newest first by it.
+    /// 0 while it runs.
+    pub at: i64,
 }
 
 /// An item waiting for the user to pick a match ("Подтверди").
@@ -1796,6 +1810,8 @@ pub enum LibraryTab {
     Albums,
     Artists,
     Tracks,
+    /// Tracks by the day their file came (experimental).
+    Downloaded,
     /// Deleted tracks.
     Trash,
 }
@@ -1877,6 +1893,8 @@ pub enum Command {
     EmptyTrash,
     /// Fill [`LibraryView::trash`].
     LoadTrash,
+    /// Fill [`LibraryView::downloaded`].
+    LoadDownloaded,
     /// Collage / smart cover (a custom one is set by [`Command::SetPlaylistCover`]).
     SetPlaylistCoverMode(PlaylistId, PlaylistCoverMode),
 

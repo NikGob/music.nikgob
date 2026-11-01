@@ -22,12 +22,13 @@ use crate::{
     tokens::{shape, state as state_layer},
 };
 
-const TABS: [(LibraryTab, &str); 6] = [
+const TABS: [(LibraryTab, &str); 7] = [
     (LibraryTab::All, "Всё"),
     (LibraryTab::Playlists, "Плейлисты"),
     (LibraryTab::Albums, "Альбомы"),
     (LibraryTab::Artists, "Исполнители"),
     (LibraryTab::Tracks, "Треки"),
+    (LibraryTab::Downloaded, "Скачано"),
     (LibraryTab::Trash, "Корзина"),
 ];
 
@@ -71,6 +72,9 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     if tab == LibraryTab::Trash {
         return trash(ui, state, pages, out);
     }
+    if tab == LibraryTab::Downloaded {
+        return downloaded(ui, state, pages, out);
+    }
     if !lib.loaded {
         // A short wait (the library is read at start): the indicator alone.
         ui.add_space(48.0);
@@ -102,7 +106,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         LibraryTab::Playlists => playlists_tab(ui, state, pages, out, &words, is_list),
         LibraryTab::Albums => albums_tab(ui, state, pages, out, &words, is_list),
         LibraryTab::Artists => artists_tab(ui, state, pages, out, &words, is_list),
-        LibraryTab::Tracks | LibraryTab::Trash => None,
+        LibraryTab::Tracks | LibraryTab::Downloaded | LibraryTab::Trash => None,
     }
 }
 
@@ -127,7 +131,7 @@ fn header(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
     ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(Align::Center), |ui| {
         ui.label(TypeRole::HeadlineMedium.style().rich("Библиотека", s.on_surface));
         ui.add_space(24.0);
-        if tab == LibraryTab::Trash {
+        if matches!(tab, LibraryTab::Trash | LibraryTab::Downloaded) {
             return;
         }
         // The filter stays where it is from tab to tab, right after the
@@ -228,7 +232,7 @@ fn filter_hint(tab: LibraryTab) -> &'static str {
         LibraryTab::Albums => "Найти альбом или исполнителя",
         LibraryTab::Artists => "Найти исполнителя",
         LibraryTab::Tracks => "Найти трек, альбом, исполнителя",
-        LibraryTab::All | LibraryTab::Trash => "Найти в библиотеке",
+        LibraryTab::All | LibraryTab::Downloaded | LibraryTab::Trash => "Найти в библиотеке",
     }
 }
 
@@ -321,6 +325,9 @@ fn open_tab(pages: &mut PageState, tab: LibraryTab, track_sort: TrackSort, out: 
     if tab == LibraryTab::Trash {
         out.push(Command::LoadTrash);
     }
+    if tab == LibraryTab::Downloaded {
+        out.push(Command::LoadDownloaded);
+    }
 }
 
 /// A quiet line at the top of a tab: what is there, and the tab's own
@@ -346,7 +353,7 @@ fn no_results(ui: &mut Ui, pages: &mut PageState) {
         LibraryTab::Albums => "Среди альбомов",
         LibraryTab::Artists => "Среди исполнителей",
         LibraryTab::Tracks => "Среди треков",
-        LibraryTab::All | LibraryTab::Trash => "В библиотеке",
+        LibraryTab::All | LibraryTab::Downloaded | LibraryTab::Trash => "В библиотеке",
     };
     let body = if q.is_empty() {
         format!("{among} с этими фильтрами пусто.")
@@ -880,6 +887,43 @@ fn artist_row(ui: &mut Ui, a: &ArtistCard, out: &mut Vec<Command>) -> Option<Rou
     } else {
         o.response.clicked().then_some(Route::Artist(a.id))
     }
+}
+
+/// «Скачано» (experimental): the tracks with a file under the day their
+/// file came, the latest first; a tap plays from there on down.
+fn downloaded(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
+    let s = Theme::get(ui.ctx()).scheme;
+    let days = &state.library.downloaded;
+    let ids: Vec<_> = days.iter().flat_map(|d| d.tracks.iter().map(|t| t.id)).collect();
+    if ids.is_empty() {
+        widgets::empty_state(ui, Icon::DownloadDone, "Пока ничего", "Скачанные треки появятся здесь, свежие сверху.", None);
+        return None;
+    }
+    count_line(ui, &format!("{}, свежие сверху", count(ids.len(), "трек", "трека", "треков")), |_| {});
+    let mut nav = None;
+    let mut i = 0;
+    for day in days {
+        ui.add_space(8.0);
+        ui.label(TypeRole::TitleSmall.style().rich(&day.label, s.on_surface_variant));
+        ui.add_space(4.0);
+        for t in &day.tracks {
+            let mut line = t.artist.clone();
+            if let Some(a) = &t.album {
+                line = format!("{line} · {a}");
+            }
+            let o = ListItem::new(&t.title)
+                .supporting(line)
+                .leading(Leading::Image(t.cover.as_ref().map(|c| c.uri()), Icon::MusicNote))
+                .id_salt(("downloaded-row", t.id))
+                .show(ui);
+            if o.response.clicked() {
+                out.push(Command::PlayTracks { tracks: ids.clone(), start: i, context: "скачанного".into() });
+            }
+            nav = pages.track_context_menu(&o.response, t, state, out).or(nav);
+            i += 1;
+        }
+    }
+    nav
 }
 
 /// "Корзина": deleted tracks with "Восстановить" and "Удалить навсегда";

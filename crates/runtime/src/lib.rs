@@ -1012,6 +1012,7 @@ impl Worker {
             }
             Command::EmptyTrash => self.empty_trash(),
             Command::LoadTrash => self.load_trash(),
+            Command::LoadDownloaded => self.load_downloaded(),
             Command::SetPlaylistCoverMode(id, mode) => self.set_playlist_cover_mode(id, mode),
             Command::ImportFiles(paths) => self.import_paths(paths),
             Command::ImportFolder(dir) => self.import_paths(vec![dir]),

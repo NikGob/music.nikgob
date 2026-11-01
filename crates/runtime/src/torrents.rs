@@ -150,6 +150,7 @@ fn job(t: &TorrentStatus) -> v::Job {
             TorrentState::Error(e) => Some(e.clone()),
             _ => None,
         },
+        at: 0,
     }
 }
 
@@ -564,6 +565,7 @@ impl Worker {
                     paused: false,
                     controllable: false,
                     error: None,
+                    at: t.completed_at.and_then(|at| at.duration_since(UNIX_EPOCH).ok()).map_or_else(nikgob_library::now_ms, |d| d.as_millis() as i64),
                 });
                 self.torrents.last_view = None;
             }
@@ -633,6 +635,7 @@ impl Worker {
                 s.downloads.seeded_bytes = seeded;
                 s.downloads.history.retain(|j| j.id & crate::IMPORT_ID != 0);
                 s.downloads.history.splice(0..0, history);
+                crate::import::sort_history(&mut s.downloads.history);
             });
         }
 
@@ -661,7 +664,10 @@ impl Worker {
             .map(|e| crate::import::logged_job(e, 0))
             .collect();
         self.torrents.history.extend(logged.iter().cloned());
-        self.publish(|s| s.downloads.history.extend(logged));
+        self.publish(|s| {
+            s.downloads.history.extend(logged);
+            crate::import::sort_history(&mut s.downloads.history);
+        });
     }
 
     fn import_torrent(&mut self, t: &TorrentStatus) {
@@ -680,6 +686,7 @@ impl Worker {
             paused: false,
             controllable: false,
             error: None,
+            at: nikgob_library::now_ms(),
         });
         self.torrents.history.truncate(100);
         self.torrents.last_view = None;

@@ -102,14 +102,27 @@ pub(crate) fn logged_job(e: &nikgob_library::JobLogEntry, kind_bit: u64) -> v::J
     v::Job {
         id: kind_bit | LOGGED_ID | e.seq.max(0) as u64,
         title: e.title.clone(),
-        subtitle: e.subtitle.clone(),
+        // Logged before it was put in the past tense: the files were long
+        // confirmed, the line still said they wait.
+        subtitle: e.subtitle.replace("ждут подтверждения", PARKED),
         progress: Some(1.0),
         rate: None,
         eta: None,
         paused: false,
         controllable: false,
         error: e.error.clone(),
+        at: e.at,
     }
+}
+
+/// A finished import's files that went to «Подтверди» (a history line, so
+/// in the past: they may be long confirmed).
+const PARKED: &str = "отправлено на подтверждение";
+
+/// "История" newest first: the torrents, imports and service imports are
+/// kept apart and each part is spliced in on its own.
+pub(crate) fn sort_history(history: &mut [v::Job]) {
+    history.sort_by_key(|j| std::cmp::Reverse(j.at));
 }
 
 pub(crate) struct ImportService {
@@ -350,6 +363,7 @@ impl ImportService {
                     paused: false,
                     controllable: false,
                     error: p.last_error.clone(),
+                    at: 0,
                 }
             })
             .collect();
@@ -474,6 +488,7 @@ impl Worker {
             s.downloads.confirm.extend(confirm);
             s.downloads.history.retain(|j| others(j.id));
             s.downloads.history.extend(history);
+            sort_history(&mut s.downloads.history);
         });
     }
 
@@ -627,6 +642,7 @@ impl Worker {
                                 paused: false,
                                 controllable: false,
                                 error: None,
+                                at: nikgob_library::now_ms(),
                             });
                             svc.history.truncate(100);
                             svc.apply_reconfigure();
@@ -759,7 +775,7 @@ impl Worker {
                     parts.push(format!("ошибок {failed}"));
                 }
                 if pending > 0 {
-                    parts.push(format!("ждут подтверждения {pending}"));
+                    parts.push(format!("{PARKED} {pending}"));
                 }
                 let summary = parts.join(" · ");
                 let error = (failed > 0).then(|| format!("Не удалось: {failed}"));
@@ -776,6 +792,7 @@ impl Worker {
                     paused: false,
                     controllable: false,
                     error,
+                    at: nikgob_library::now_ms(),
                 });
                 svc.history.truncate(100);
                 finished = Some((summary, pending, svc.wish_jobs.remove(&job.0)));
@@ -838,6 +855,10 @@ impl Worker {
         }
         if let Some(id) = playlist {
             self.load_playlist(id);
+        }
+        // «Скачано» once opened: the new files on top.
+        if !self.state.read().library.downloaded.is_empty() {
+            self.load_downloaded();
         }
     }
 
@@ -965,6 +986,41 @@ impl Worker {
                 })
                 .collect();
         self.publish(|s| s.library.trash = trash);
+    }
+
+    /// The «Скачано» tab: the latest files by the local day they came.
+    pub(crate) fn load_downloaded(&mut self) {
+        const MONTHS: [&str; 12] = [
+            "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября",
+            "декабря",
+        ];
+        let tz = jiff::tz::TimeZone::system();
+        let today = jiff::Zoned::now().date();
+        let label = |date: jiff::civil::Date| {
+            if date == today {
+                "Сегодня".to_owned()
+            } else if today.yesterday().ok() == Some(date) {
+                "Вчера".to_owned()
+            } else if date.year() == today.year() {
+                format!("{} {}", date.day(), MONTHS[date.month() as usize - 1])
+            } else {
+                format!("{} {} {}", date.day(), MONTHS[date.month() as usize - 1], date.year())
+            }
+        };
+        let rows = self.lib.downloaded_tracks(500).unwrap_or_default();
+        let mut days: Vec<(jiff::civil::Date, v::DownloadedDay)> = Vec::new();
+        for (row, at) in &rows {
+            let Ok(ts) = jiff::Timestamp::from_millisecond(*at) else { continue };
+            let date = ts.to_zoned(tz.clone()).date();
+            if days.last().is_none_or(|(d, _)| *d != date) {
+                days.push((date, v::DownloadedDay { label: label(date), tracks: Vec::new() }));
+            }
+            if let Some((_, day)) = days.last_mut() {
+                day.tracks.push(self.res.track(row));
+            }
+        }
+        let downloaded = days.into_iter().map(|(_, d)| d).collect();
+        self.publish(|s| s.library.downloaded = downloaded);
     }
 
     fn after_delete(&mut self) {

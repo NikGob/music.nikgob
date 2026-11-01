@@ -1380,6 +1380,7 @@ impl Worker {
             paused: false,
             controllable: false,
             error,
+            at: nikgob_library::now_ms(),
         });
         cold.history.truncate(HISTORY_KEEP);
         self.publish_cold_jobs();
@@ -1408,6 +1409,7 @@ impl Worker {
                 paused: false,
                 controllable: false,
                 error: None,
+                at: 0,
             })
             .collect();
         let history: Vec<v::Job> = self.streaming.cold.history.iter().cloned().collect();
@@ -1415,9 +1417,8 @@ impl Worker {
             s.downloads.active.retain(|j| j.id & STREAM_JOB == 0);
             s.downloads.active.extend(active);
             s.downloads.history.retain(|j| j.id & STREAM_JOB == 0);
-            for (i, j) in history.into_iter().enumerate() {
-                s.downloads.history.insert(i, j);
-            }
+            s.downloads.history.extend(history);
+            crate::import::sort_history(&mut s.downloads.history);
         });
     }
 
