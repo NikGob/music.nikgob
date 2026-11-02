@@ -25,6 +25,9 @@ pub const FITS: f32 = 0.55;
 /// Line starts spread less than this around their median offset are one
 /// constant shift.
 pub const STEADY: f32 = 0.4;
+/// A line placed further than this from where its own steady times put
+/// it is aligned again in its window.
+const ASTRAY: f32 = 1.0;
 /// Offsets smaller than this are left alone.
 pub const NOTICEABLE: f32 = 0.15;
 /// The aligner puts a word's start this much after the singer starts it
@@ -167,7 +170,7 @@ pub fn fit_text(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], timed: bool)
             .enumerate()
             .filter_map(|(i, l)| {
                 let (a, _) = first[i]?;
-                (line_score(i)? >= bar).then(|| l.start.as_secs_f32() - a)
+                (line_score(i)? >= bar).then_some(l.start.as_secs_f32() - a)
             })
             .collect();
         if diffs.len() < 3 {
@@ -188,6 +191,14 @@ pub fn fit_text(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], timed: bool)
         (Timing::None, 0.0, 0.0)
     };
 
+    // Line times that sit on the voice show where a line went astray in
+    // the pass over the whole song (a spoken intro, an ad-lib the text
+    // lacks can pull its first word away): such a line again, within its
+    // own moved times.
+    if matches!(timing, Timing::Fits | Timing::Shifted) {
+        realign_lines(em, vocab, lines, &mut placed, offset);
+    }
+
     let text: Vec<i32> = tokens.iter().copied().filter(|t| Some(*t) != vocab.sep).collect();
     let heard_letters = crate::ctc::heard_letters(em, vocab.sep);
     let spelled = crate::ctc::letters_heard(&heard_letters, &text);
@@ -206,6 +217,72 @@ pub fn fit_text(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], timed: bool)
     });
     let heard = ((score - chance_score) / (1.0 - chance_score).max(0.05)).clamp(0.0, 1.0);
     Some(Fit { score, heard, spelled, covered: 1.0, timing, offset, spread, lines: timed_lines(lines, &placed) })
+}
+
+/// Aligns again a line placed more than [`ASTRAY`] from its moved start
+/// (source time less `offset`), inside its window: from half a second
+/// before that start to half a second after the next line's. The others
+/// keep the whole-song pass, where every line's neighbours hold their own
+/// words (a window alone lets a line take its neighbour's sounds: 97 % of
+/// words within 0.3 s fell to 65 % when every line was aligned so).
+fn realign_lines(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &mut [Placed], offset: f32) {
+    let starts: Vec<f32> = lines.iter().map(|l| l.start.as_secs_f32() - offset).collect();
+    let total = em.secs(em.frames());
+    for (li, l) in lines.iter().enumerate() {
+        if l.text.trim().is_empty() || l.background {
+            continue;
+        }
+        let next = starts[li + 1..]
+            .iter()
+            .zip(&lines[li + 1..])
+            .find(|(_, n)| !n.background && !n.text.trim().is_empty())
+            .map_or(total, |(s, _)| *s);
+        let first = placed.iter().filter(|p| p.line == li).find_map(|p| p.span).map(|(a, _)| a);
+        if first.is_none_or(|a| (a - starts[li]).abs() <= ASTRAY) {
+            continue;
+        }
+        let (from, to) = ((starts[li] - 0.5).max(0.0), (next + 0.5).min(total));
+        if to - from < 0.3 {
+            continue;
+        }
+        let idx: Vec<usize> = placed.iter().enumerate().filter(|(_, p)| p.line == li).map(|(i, _)| i).collect();
+        let mut tokens = Vec::new();
+        let mut owner = Vec::new();
+        for &i in &idx {
+            let toks = vocab.tokens(&placed[i].text);
+            for t in &toks {
+                tokens.push(*t);
+                owner.push(Some(i));
+            }
+            if let Some(sep) = vocab.sep
+                && !toks.is_empty()
+                && placed[i].text.ends_with(char::is_whitespace)
+            {
+                tokens.push(sep);
+                owner.push(None);
+            }
+        }
+        if tokens.is_empty() {
+            continue;
+        }
+        let (slice, at) = em.slice(from, to);
+        let Some(spans) = force_align(&slice, &tokens) else { continue };
+        let mut fresh: Vec<Option<(f32, f32)>> = vec![None; placed.len()];
+        let mut peaks: Vec<(f32, usize)> = vec![(0.0, 0); placed.len()];
+        for (span, i) in spans.iter().zip(&owner) {
+            let Some(i) = *i else { continue };
+            let (a, b) = (em.secs(at + span.first), em.secs(at + span.last + 1));
+            fresh[i] = Some(fresh[i].map_or((a, b), |(s, e)| (s.min(a), e.max(b))));
+            peaks[i].0 += span.peak;
+            peaks[i].1 += 1;
+        }
+        for &i in &idx {
+            if let Some(span) = fresh[i] {
+                placed[i].span = Some(span);
+                placed[i].peak = peaks[i].0 / peaks[i].1.max(1) as f32;
+            }
+        }
+    }
 }
 
 /// The source's lines with the pieces' times as words. A piece without
@@ -276,7 +353,7 @@ fn median(v: &[f32]) -> f32 {
         return 0.0;
     }
     let m = s.len() / 2;
-    if s.len() % 2 == 0 { (s[m - 1] + s[m]) / 2.0 } else { s[m] }
+    if s.len().is_multiple_of(2) { (s[m - 1] + s[m]) / 2.0 } else { s[m] }
 }
 
 /// Lines of a plain text (no times): one a line, empty lines dropped,

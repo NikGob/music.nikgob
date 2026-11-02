@@ -25,7 +25,6 @@ const WINDOW: usize = 30 * RATE as usize;
 const FRAMES: usize = WINDOW / HOP;
 /// Tokens decoded per stretch at most.
 const MAX_TOKENS: usize = 200;
-/// Seconds a timestamp token stands for.
 
 /// One recognised line.
 #[derive(Clone, Debug, PartialEq)]
@@ -400,7 +399,10 @@ pub fn stretches(voiced: &[bool]) -> Vec<(f32, f32)> {
     out
 }
 
-/// A recognised text in lines: sentences, and a long one at its commas.
+/// A recognised text in lines: sentences; a long one at its commas, then
+/// before its capitalised words (Whisper writes a sung line's start with a
+/// capital even without a full stop); long Japanese at its commas and
+/// spaces.
 fn lines_of(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -417,13 +419,60 @@ fn lines_of(text: &str) -> Vec<String> {
         if s.is_empty() {
             continue;
         }
-        if s.split_whitespace().count() > 8 && s.contains(',') {
-            lines.extend(s.split(',').map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()));
+        let parts: Vec<String> = if s.split_whitespace().count() > 8 && s.contains(',') {
+            s.split(',').map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()).collect()
         } else {
-            lines.push(s);
+            vec![s]
+        };
+        for p in parts {
+            if p.split_whitespace().count() > 8 {
+                lines.extend(at_capitals(&p));
+            } else if p.chars().count() > 24 && p.chars().any(crate::text::is_kana) {
+                for part in p.split(['、', '　', ' ']).map(str::trim).filter(|x| !x.is_empty()) {
+                    lines.extend(cut_long(part));
+                }
+            } else {
+                lines.push(p);
+            }
         }
     }
     lines
+}
+
+/// A long run of Japanese without commas: its repeats apart (a phrase sung
+/// three times comes as one), else pieces of at most 20 characters.
+fn cut_long(line: &str) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    if n <= 24 {
+        return vec![line.to_owned()];
+    }
+    for p in 4..=n / 2 {
+        if n.is_multiple_of(p) && (p..n).all(|i| chars[i] == chars[i % p]) {
+            return vec![chars[..p].iter().collect(); n / p];
+        }
+    }
+    let parts = n.div_ceil(20);
+    let size = n.div_ceil(parts);
+    chars.chunks(size).map(|c| c.iter().collect()).collect()
+}
+
+/// «stands strong That's the price» → two lines, at the capital.
+fn at_capitals(line: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    for w in line.split_whitespace() {
+        let capital = w.chars().next().is_some_and(char::is_uppercase) && w != "I" && !w.starts_with("I'");
+        if capital && cur.len() >= 3 {
+            out.push(cur.join(" "));
+            cur.clear();
+        }
+        cur.push(w);
+    }
+    if !cur.is_empty() {
+        out.push(cur.join(" "));
+    }
+    out
 }
 
 /// Lines Whisper makes up over music (credits of subtitles it learnt from).
@@ -444,10 +493,11 @@ fn pick(logits: &[f32], eot: u32) -> u32 {
         .map_or(eot, |(i, _)| i as u32)
 }
 
-/// The last tokens loop (a short run said again and again).
+/// The last tokens loop (a run said again and again: a short one five
+/// times, a phrase three).
 fn repeating(tokens: &[u32]) -> bool {
-    for n in 1..=8 {
-        let reps = 4;
+    for n in 1..=32 {
+        let reps = if n < 4 { 5 } else { 3 };
         if tokens.len() < n * reps {
             continue;
         }
@@ -498,6 +548,12 @@ mod tests {
     fn lines_from_sentences_and_credits_dropped() {
         assert_eq!(lines_of("Мой топор, я будто тролль. Я разрублю! Что?"), ["Мой топор, я будто тролль", "Я разрублю!", "Что?"]);
         assert_eq!(lines_of("раз два три четыре пять шесть семь восемь, девять десять"), ["раз два три четыре пять шесть семь восемь", "девять десять"]);
+        assert_eq!(
+            lines_of("Cause this house of mine stands strong That's the price you pay Leave behind your heart"),
+            ["Cause this house of mine stands strong", "That's the price you pay", "Leave behind your heart"]
+        );
+        assert_eq!(cut_long("愛しようがないと生きていけぬ愛しようがないと生きていけぬ"), ["愛しようがないと生きていけぬ", "愛しようがないと生きていけぬ"]);
+        assert!(cut_long(&"あ".repeat(10).chars().chain("い".repeat(31).chars()).collect::<String>()).iter().all(|l| l.chars().count() <= 21));
         assert!(hallucinated("Субтитры сделал DimaTorzok"));
         assert!(!hallucinated("Мой топор"));
     }
@@ -536,7 +592,8 @@ mod tests {
         assert_eq!(pick(&logits, 10), 2);
         logits[10] = 6.0;
         assert_eq!(pick(&logits, 10), 10);
-        assert!(repeating(&[1, 2, 1, 2, 1, 2, 1, 2]));
+        assert!(repeating(&[1, 2, 1, 2, 1, 2, 1, 2, 1, 2]));
+        assert!(repeating(&[1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5]));
         assert!(!repeating(&[1, 2, 3, 4, 5, 6, 7, 8]));
     }
 }
@@ -549,7 +606,7 @@ mod against_reference {
     #[ignore = "a manual comparison"]
     fn mel_dump() {
         let raw = std::fs::read(std::env::var("NIKGOB_MEL_IN").unwrap()).unwrap();
-        let samples: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let samples: Vec<f32> = raw.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
         let mel = super::log_mel(&samples, &super::mel_filters());
         let out: Vec<u8> = mel.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(std::env::var("NIKGOB_MEL_OUT").unwrap(), out).unwrap();

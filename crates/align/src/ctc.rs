@@ -28,7 +28,7 @@ pub struct Emissions {
 
 impl Emissions {
     pub fn frames(&self) -> usize {
-        if self.vocab == 0 { 0 } else { self.logp.len() / self.vocab }
+        self.logp.len().checked_div(self.vocab).unwrap_or(0)
     }
 
     pub fn row(&self, t: usize) -> &[f32] {
@@ -107,7 +107,7 @@ pub fn force_align(em: &Emissions, tokens: &[i32]) -> Option<Vec<TokenSpan>> {
         .collect();
     let star: Vec<f32> = best.iter().map(|b| b - STAR_PENALTY).collect();
     let emit = |t: usize, s: usize| -> f32 {
-        if s % 2 == 0 {
+        if s.is_multiple_of(2) {
             em.row(t)[blank]
         } else {
             match tokens[s / 2] {

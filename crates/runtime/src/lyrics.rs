@@ -753,7 +753,9 @@ impl Worker {
         let Some(tl) = svc.lyrics_cache.get_mut(&track) else { return };
         // A manual online pick may be saved immediately; automatic selection waits.
         if tl.embedding { return }
-        let Some(source) = tl.chosen().filter(|s| *s != LyricsSource::File) else { return };
+        // A text heard in the recording is the player's guess: never into
+        // the file.
+        let Some(source) = tl.chosen().filter(|s| !matches!(s, LyricsSource::File | LyricsSource::Recognized)) else { return };
         if tl.pick != Some(source) && !tl.pending.is_empty() { return }
         let text = tl.texts[&source].serialized();
         if tl.last_embed.as_deref() == Some(&text) { return }

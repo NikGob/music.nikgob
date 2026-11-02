@@ -271,14 +271,13 @@ fn text_of(html: &str) -> String {
             i += end;
             continue;
         }
-        if r.starts_with('&') {
-            if let Some(semi) = r[..r.len().min(12)].find(';') {
-                if let Some(c) = entity(&r[1..semi]) {
-                    out.push(c);
-                    i += semi + 1;
-                    continue;
-                }
-            }
+        if r.starts_with('&')
+            && let Some(semi) = r[..r.len().min(12)].find(';')
+            && let Some(c) = entity(&r[1..semi])
+        {
+            out.push(c);
+            i += semi + 1;
+            continue;
         }
         let c = r.chars().next().unwrap_or(' ');
         out.push(c);
