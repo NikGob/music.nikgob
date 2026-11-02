@@ -45,7 +45,7 @@ mod util;
 mod tests;
 
 pub use db::Library;
-pub use lyrics::StoredLyrics;
+pub use lyrics::{AlignCounts, AlignedLyrics, StoredLyrics};
 pub use error::{LibraryError, Result};
 pub use joblog::JOB_LOG_KEEP;
 pub use migrations::SCHEMA_VERSION;

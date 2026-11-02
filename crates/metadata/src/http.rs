@@ -84,6 +84,8 @@ pub struct RateLimits {
     pub listenbrainz: Duration,
     /// Last.fm: five a second averaged, one a second here.
     pub lastfm: Duration,
+    /// Genius's public pages: a request a second.
+    pub genius: Duration,
 }
 
 impl Default for RateLimits {
@@ -104,6 +106,7 @@ impl Default for RateLimits {
             itunes: Duration::from_secs(3),
             listenbrainz: Duration::from_millis(1000),
             lastfm: Duration::from_millis(1000),
+            genius: Duration::from_millis(1000),
         }
     }
 }
@@ -123,6 +126,7 @@ impl RateLimits {
             itunes: Duration::ZERO,
             listenbrainz: Duration::ZERO,
             lastfm: Duration::ZERO,
+            genius: Duration::ZERO,
         }
     }
 }
@@ -167,6 +171,7 @@ pub(crate) enum Service {
     Itunes,
     ListenBrainz,
     LastFm,
+    Genius,
 }
 
 #[derive(Debug)]
@@ -183,6 +188,7 @@ struct Limiters {
     itunes: RateLimiter,
     listenbrainz: RateLimiter,
     lastfm: RateLimiter,
+    genius: RateLimiter,
 }
 
 impl Limiters {
@@ -200,6 +206,7 @@ impl Limiters {
             itunes: RateLimiter::new(l.itunes),
             listenbrainz: RateLimiter::new(l.listenbrainz),
             lastfm: RateLimiter::new(l.lastfm),
+            genius: RateLimiter::new(l.genius),
         }
     }
 
@@ -217,6 +224,7 @@ impl Limiters {
             Service::Itunes => &self.itunes,
             Service::ListenBrainz => &self.listenbrainz,
             Service::LastFm => &self.lastfm,
+            Service::Genius => &self.genius,
         }
     }
 }

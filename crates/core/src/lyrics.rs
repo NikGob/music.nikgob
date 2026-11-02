@@ -61,10 +61,15 @@ pub enum LyricsSource {
     BetterLyrics,
     /// lrclib.net.
     Lrclib,
+    /// genius.com (plain text).
+    Genius,
+    /// Heard in the recording itself (docs/lyrics-align.md): the last resort.
+    Recognized,
 }
 
 impl LyricsSource {
-    pub const ALL: [Self; 5] = [Self::File, Self::LyricsPlus, Self::LrcRed, Self::BetterLyrics, Self::Lrclib];
+    pub const ALL: [Self; 7] =
+        [Self::File, Self::LyricsPlus, Self::LrcRed, Self::BetterLyrics, Self::Lrclib, Self::Genius, Self::Recognized];
 
     /// Stable key for storage.
     pub fn key(self) -> &'static str {
@@ -74,6 +79,8 @@ impl LyricsSource {
             Self::LyricsPlus => "lyricsplus",
             Self::LrcRed => "lrcred",
             Self::BetterLyrics => "betterlyrics",
+            Self::Genius => "genius",
+            Self::Recognized => "recognized",
         }
     }
 
@@ -89,6 +96,8 @@ impl LyricsSource {
             Self::LyricsPlus => "LyricsPlus",
             Self::LrcRed => "lrc.red",
             Self::BetterLyrics => "Better Lyrics",
+            Self::Genius => "Genius",
+            Self::Recognized => "Распознан",
         }
     }
 }

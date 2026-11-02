@@ -19,6 +19,7 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 nikgob-torrent = { path = "../torrent" }
 nikgob-soulseek = { path = "../soulseek" }
 nikgob-recs = { path = "../recs" }
+nikgob-align = { path = "../align" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -334,6 +334,7 @@ fn word_lyrics(track: Option<nikgob_view::TrackId>) -> nikgob_view::LyricsView {
         source: Some(LyricsSource::LyricsPlus),
         picked: false,
         sources: Vec::new(),
+        ..Default::default()
     }
 }
 

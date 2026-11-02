@@ -141,6 +141,7 @@ pub(crate) async fn backfill_lyrics(
     library_dir: PathBuf,
     pace: Pace,
     tx: crossbeam_channel::Sender<Internal>,
+    genius: bool,
 ) {
     tokio::time::sleep(pace.start).await;
     let mut failures = 0;
@@ -164,7 +165,7 @@ pub(crate) async fn backfill_lyrics(
                 .flatten()
                 .filter(|s| s.kind.is_local())
                 .map(|s| resolve(&library_dir, &s.locator));
-            let tl = crate::lyrics::fetch_track_lyrics(meta.clone(), lib.clone(), row, file).await;
+            let tl = crate::lyrics::fetch_track_lyrics(meta.clone(), lib.clone(), row, file, genius).await;
             if tl.failed {
                 failures += 1;
                 if failures >= MAX_FAILURES { return }
@@ -344,8 +345,9 @@ impl Worker {
         svc.enrich.backfill_running = true;
         let dir = svc.config().library_dir.clone();
         let tx = svc.internal();
+        let genius = self.state.read().prefs.lyrics_genius;
         svc.spawn(async move {
-            backfill_lyrics(meta, lib, dir, Pace::LYRICS, tx.clone()).await;
+            backfill_lyrics(meta, lib, dir, Pace::LYRICS, tx.clone(), genius).await;
             let _ = tx.send(Internal::Enrich(Event::BackfillDone));
         });
     }
@@ -541,7 +543,7 @@ mod tests {
         let row = lib.get_track_row(tracks[0].id).unwrap().unwrap();
         assert!(fetch_and_store(&lrclib, &lib, &row).await.is_err());
 
-        backfill_lyrics(metadata(&server).await, lib.clone(), PathBuf::from("/nonexistent"), NO_WAIT, crossbeam_channel::unbounded().0).await;
+        backfill_lyrics(metadata(&server).await, lib.clone(), PathBuf::from("/nonexistent"), NO_WAIT, crossbeam_channel::unbounded().0, false).await;
         for t in &tracks {
             assert!(lib.lyrics(t.id).unwrap().is_none(), "outage must not leave misses");
         }
@@ -584,7 +586,7 @@ mod tests {
         let (_, a) = library_track(&lib, "Кино", "Группа крови");
         let (_, b) = library_track(&lib, "Кино", "Нет такой песни");
 
-        backfill_lyrics(metadata(&server).await, lib.clone(), PathBuf::from("/nonexistent"), NO_WAIT, crossbeam_channel::unbounded().0).await;
+        backfill_lyrics(metadata(&server).await, lib.clone(), PathBuf::from("/nonexistent"), NO_WAIT, crossbeam_channel::unbounded().0, false).await;
         assert!(!lib.lyrics(a.id).unwrap().unwrap().is_miss());
         assert!(lib.lyrics(b.id).unwrap().unwrap().is_miss());
         assert!(lib.tracks_needing_lyrics(now_ms() - LYRICS_RETRY_MS, 10).unwrap().is_empty());

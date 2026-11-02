@@ -5,6 +5,7 @@
 //! shared [`ViewState`]. The UI reads that state each frame under a short
 //! read lock and never calls the library or the audio engine itself.
 
+mod align;
 mod analysis;
 mod better_covers;
 mod convert;
@@ -456,6 +457,13 @@ struct Worker {
     album_queue: Option<(nikgob_core::model::ReleaseId, u64)>,
     /// The Soulseek source (settings.toml `[soulseek]`).
     soulseek: soulseek::SoulseekService,
+    /// The lyrics aligner's thread (docs/lyrics-align.md).
+    align: align::AlignService,
+    /// Where its models are downloaded.
+    models_dir: Option<PathBuf>,
+    align_was_playing: bool,
+    /// The worker's own inbox (for threads started later).
+    internal_tx: Sender<Internal>,
 }
 
 impl Worker {
@@ -476,6 +484,8 @@ impl Worker {
         let streaming = streams::Streams::new(internal.clone());
         let analysis = analysis::FileAnalysis::new(internal.clone());
         let recs = recs::RecsState::new(internal.clone());
+        let models_dir = config.import.as_ref().and_then(|i| i.models_dir.clone());
+        let internal_tx = internal.clone();
         let import = config
             .import
             .and_then(|setup| ImportService::start(setup, config.library.clone(), internal));
@@ -537,6 +547,10 @@ impl Worker {
             album_queue: None,
             recs,
             soulseek,
+            align: Default::default(),
+            models_dir,
+            align_was_playing: false,
+            internal_tx,
         }
     }
 
@@ -558,6 +572,7 @@ impl Worker {
         self.publish_sources();
         self.start_streams();
         self.start_analysis();
+        self.start_align();
         self.dislikes_load(false);
         loop {
             select! {
@@ -601,6 +616,7 @@ impl Worker {
                 }
             }
             self.analysis.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
+            self.align_playing(matches!(self.status, Status::Playing | Status::Buffering));
         }
         self.save_session();
         self.maybe_export(true);
@@ -609,6 +625,7 @@ impl Worker {
         self.soulseek.shutdown();
         self.streaming.analysis.shutdown();
         self.analysis.shutdown();
+        self.align.shutdown();
     }
 
     /// Applies `f` under the state's write lock. The UI waits for this lock
@@ -728,6 +745,9 @@ impl Worker {
             }
             Command::Seek(p) => self.seek(p),
             Command::PickLyricsSource(t, src) => self.pick_lyrics_source(t, src),
+            Command::CraftLyrics { track, source, target } => self.craft_lyrics(track, source, target),
+            Command::KeepCraft(keep) => self.keep_craft(keep),
+            Command::AlignModel { key, download } => self.align_model(&key, download),
             Command::SeekBy(ms) => {
                 let p = self.position_now().as_millis() as i64 + ms;
                 self.seek(Duration::from_millis(p.max(0) as u64));
@@ -2120,6 +2140,7 @@ impl Worker {
         self.publish(|s| s.prefs = *p.clone());
         self.save_prefs();
         self.import_prefs(&p);
+        self.align_settings();
         let lyrics_track = self.state.read().lyrics.track;
         if !old.save_found_lyrics && p.save_found_lyrics
             && let Some(track) = lyrics_track
