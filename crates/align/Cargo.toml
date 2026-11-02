@@ -1,0 +1,31 @@
+[package]
+name = "nikgob-align"
+description = "Lyrics against a song's audio: vocal separation, CTC forced alignment, the fit check of a fetched text and Whisper recognition, on ONNX Runtime loaded at run time (CPU or DirectML); the models' downloads."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nikgob-core.workspace = true
+nikgob-import = { path = "../import" }
+log.workspace = true
+# Loaded at run time from the runtime the app downloads (docs/lyrics-align.md):
+# nothing is linked or fetched at build time.
+ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "load-dynamic", "directml", "api-22"] }
+realfft = "3.5"
+rubato = "5.0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "blocking"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+hound = "3.5"
+tempfile = "3"
+
+[lints]
+workspace = true
