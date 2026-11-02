@@ -122,6 +122,7 @@ fn setting_and_manual_pick_embed_tags_without_sidecars_or_duplicate_tracks() {
                 watch_inbox: false,
                 torrent_state_dir: dir.path().join("torrent-state"),
                 torrent_offline: true,
+                models_dir: None,
             }),
         },
         Box::new(NullPlayback),

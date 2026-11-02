@@ -24,6 +24,30 @@ impl StoredLyrics {
     }
 }
 
+/// What the player made of one text against the recording (`lyrics_align`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AlignedLyrics {
+    pub source: String,
+    pub text_hash: String,
+    pub fit: f32,
+    /// `none` | `fits` | `shifted` | `elsewhere`.
+    pub timing: String,
+    pub offset_ms: i64,
+    pub covered: f32,
+    /// JSON lines with the made word timing.
+    pub body: Option<String>,
+    pub made_by: String,
+    pub made_at: UnixMs,
+    pub saved: bool,
+}
+
+/// How far the background alignment pass is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AlignCounts {
+    pub done: u32,
+    pub total: u32,
+}
+
 impl Library {
     pub fn lyrics(&self, track: TrackId) -> Result<Option<StoredLyrics>> {
         self.read(|c| {
@@ -140,6 +164,116 @@ impl Library {
     }
 }
 
+impl Library {
+    /// Every text of a track the player has fitted to the recording.
+    pub fn lyrics_aligned(&self, track: TrackId) -> Result<Vec<AlignedLyrics>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT source, text_hash, fit, timing, offset_ms, covered, body, made_by, made_at, saved
+                   FROM lyrics_align WHERE track_id = ?1 ORDER BY source",
+            )?;
+            let rows = stmt.query_map([track.to_string()], |r| {
+                Ok(AlignedLyrics {
+                    source: r.get(0)?,
+                    text_hash: r.get(1)?,
+                    fit: r.get::<_, f64>(2)? as f32,
+                    timing: r.get(3)?,
+                    offset_ms: r.get(4)?,
+                    covered: r.get::<_, f64>(5)? as f32,
+                    body: r.get(6)?,
+                    made_by: r.get(7)?,
+                    made_at: r.get(8)?,
+                    saved: r.get::<_, i64>(9)? != 0,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Stores (or replaces) what was made of one text. A text the user saved
+    /// is only replaced by another saved one.
+    pub fn put_lyrics_aligned(&self, track: TrackId, a: &AlignedLyrics) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO lyrics_align(track_id, source, text_hash, fit, timing, offset_ms, covered, body, made_by, made_at, saved)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(track_id, source) DO UPDATE SET text_hash = excluded.text_hash, fit = excluded.fit,
+                    timing = excluded.timing, offset_ms = excluded.offset_ms, covered = excluded.covered,
+                    body = excluded.body, made_by = excluded.made_by, made_at = excluded.made_at, saved = excluded.saved
+                 WHERE lyrics_align.saved = 0 OR excluded.saved = 1",
+                params![
+                    track.to_string(),
+                    a.source,
+                    a.text_hash,
+                    f64::from(a.fit),
+                    a.timing,
+                    a.offset_ms,
+                    f64::from(a.covered),
+                    a.body,
+                    a.made_by,
+                    if a.made_at == 0 { now_ms() } else { a.made_at },
+                    a.saved,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Forgets what was made of a track's text (`None`: of all its texts).
+    pub fn delete_lyrics_aligned(&self, track: TrackId, source: Option<&str>) -> Result<()> {
+        self.write(|tx| {
+            match source {
+                Some(s) => tx.execute("DELETE FROM lyrics_align WHERE track_id = ?1 AND source = ?2", params![track.to_string(), s])?,
+                None => tx.execute("DELETE FROM lyrics_align WHERE track_id = ?1", [track.to_string()])?,
+            };
+            Ok(())
+        })
+    }
+
+    /// Local tracks the background pass of `made_by` has not been through,
+    /// or that failed before `retry_before` (unix ms). Newest first.
+    pub fn tracks_needing_alignment(&self, made_by: &str, retry_before: UnixMs, limit: u32) -> Result<Vec<TrackId>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT t.id FROM track t LEFT JOIN lyrics_align_done d ON d.track_id = t.id
+                  WHERE t.has_local = 1 AND t.deleted_at IS NULL
+                    AND (d.track_id IS NULL OR d.made_by <> ?1 OR (d.state = 'failed' AND d.at < ?2))
+                  ORDER BY d.track_id IS NOT NULL, t.seq DESC
+                  LIMIT ?3",
+            )?;
+            let ids = stmt.query_map(params![made_by, retry_before, limit], |r| get_id(r, 0))?;
+            Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Records the background pass's result for a track.
+    pub fn mark_alignment(&self, track: TrackId, state: &str, detail: Option<&str>, made_by: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO lyrics_align_done(track_id, state, detail, made_by, at) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(track_id) DO UPDATE SET state = excluded.state, detail = excluded.detail,
+                    made_by = excluded.made_by, at = excluded.at",
+                params![track.to_string(), state, detail, made_by, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Local tracks, and how many of them the pass of `made_by` is done with.
+    pub fn alignment_counts(&self, made_by: &str) -> Result<AlignCounts> {
+        self.read(|c| {
+            let (total, done): (i64, i64) = c.query_row(
+                "SELECT COUNT(*), COUNT(d.track_id) FROM track t
+                   LEFT JOIN lyrics_align_done d ON d.track_id = t.id AND d.made_by = ?1 AND d.state <> 'failed'
+                  WHERE t.has_local = 1 AND t.deleted_at IS NULL",
+                [made_by],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(AlignCounts { done: done as u32, total: total as u32 })
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use nikgob_core::model::{Artist, ArtistCredit, Codec, Source, SourceKind, Track};
@@ -192,6 +326,51 @@ mod tests {
         assert_eq!(lib.lyrics_pick(t.id).unwrap().as_deref(), Some("lyricsplus"));
         lib.set_lyrics_pick(t.id, None).unwrap();
         assert_eq!(lib.lyrics_pick(t.id).unwrap(), None);
+    }
+
+    #[test]
+    fn aligned_texts_roundtrip_and_a_saved_one_stays() {
+        let lib = Library::open_in_memory().unwrap();
+        let t = local_track(&lib, "Спокойная ночь");
+        assert!(lib.lyrics_aligned(t.id).unwrap().is_empty());
+        let auto = AlignedLyrics {
+            source: "lrclib".into(),
+            text_hash: "a".into(),
+            fit: 0.8,
+            timing: "shifted".into(),
+            offset_ms: -2180,
+            covered: 0.9,
+            body: Some("[]".into()),
+            made_by: "v1".into(),
+            ..Default::default()
+        };
+        lib.put_lyrics_aligned(t.id, &auto).unwrap();
+        let got = lib.lyrics_aligned(t.id).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].offset_ms, got[0].timing.as_str(), got[0].saved), (-2180, "shifted", false));
+        assert!(got[0].made_at > 0);
+        // What the user saved is not overwritten by the background.
+        lib.put_lyrics_aligned(t.id, &AlignedLyrics { saved: true, body: Some("[1]".into()), ..auto.clone() }).unwrap();
+        lib.put_lyrics_aligned(t.id, &AlignedLyrics { body: Some("[2]".into()), ..auto.clone() }).unwrap();
+        assert_eq!(lib.lyrics_aligned(t.id).unwrap()[0].body.as_deref(), Some("[1]"));
+        lib.delete_lyrics_aligned(t.id, Some("lrclib")).unwrap();
+        assert!(lib.lyrics_aligned(t.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn alignment_pass_queue_and_counts() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = local_track(&lib, "a");
+        let b = local_track(&lib, "b");
+        assert_eq!(lib.alignment_counts("v1").unwrap(), AlignCounts { done: 0, total: 2 });
+        assert_eq!(lib.tracks_needing_alignment("v1", 0, 10).unwrap(), vec![b.id, a.id]);
+        lib.mark_alignment(b.id, "done", None, "v1").unwrap();
+        lib.mark_alignment(a.id, "failed", Some("decode"), "v1").unwrap();
+        assert!(lib.tracks_needing_alignment("v1", 0, 10).unwrap().is_empty());
+        assert_eq!(lib.tracks_needing_alignment("v1", now_ms() + 1000, 10).unwrap(), vec![a.id]);
+        assert_eq!(lib.alignment_counts("v1").unwrap(), AlignCounts { done: 1, total: 2 });
+        // A new aligner goes through everything again.
+        assert_eq!(lib.tracks_needing_alignment("v2", 0, 10).unwrap().len(), 2);
     }
 
     #[test]

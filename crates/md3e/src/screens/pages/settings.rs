@@ -11,7 +11,7 @@ use super::{PageState, connected};
 use crate::screens::{bg_shapes, common::plural, now_playing};
 use crate::{
     Icon, Theme, TypeRole,
-    components::{Button, Divider, FilterChip, Menu, MenuItem, Slider, Style, Switch, TextField},
+    components::{Button, Divider, FilterChip, IconButton, Menu, MenuItem, Slider, Style, Switch, TextField},
 };
 
 pub(super) fn group(ui: &mut Ui, title: &str) -> egui::Response {
@@ -835,6 +835,102 @@ fn pct(v: f32) -> String {
 }
 
 /// Rows drawn faded while what they tune is off (they still work).
+/// «Текст песен»: the check against the recording, word timing for every
+/// song, recognition, where the models run, and the models themselves.
+fn lyrics_align(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Command>) {
+    let a = &state.align;
+    row(ui, Id::LyricsCheck, "Сверять текст с записью", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_check).id_salt("set-lyrics-check"));
+    });
+    let words = (a.total > 0).then(|| format!("Готово {} из {}", a.done.min(a.total), a.total));
+    row(ui, Id::LyricsWordsAll, "Подсветка по словам во всех песнях", words.as_deref(), |ui| {
+        ui.add(Switch::new(&mut p.lyrics_words_all).id_salt("set-lyrics-words"));
+    });
+    row(ui, Id::LyricsRecognize, "Распознавать текст, если его нет нигде", Some("Экспериментально"), |ui| {
+        ui.add(Switch::new(&mut p.lyrics_recognize).id_salt("set-lyrics-recognize"));
+    });
+    row(ui, Id::LyricsSeparate, "Отделять голос от музыки", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_separate).id_salt("set-lyrics-separate"));
+    });
+    let device = match a.on_gpu {
+        Some(true) => Some("Сейчас на видеокарте"),
+        Some(false) if p.lyrics_gpu => Some("Видеокарта недоступна, сейчас на процессоре"),
+        _ => None,
+    };
+    row(ui, Id::LyricsGpu, "Считать на видеокарте", device, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_gpu).id_salt("set-lyrics-gpu"));
+    });
+    row(ui, Id::LyricsGenius, "Искать текст на Genius", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_genius).id_salt("set-lyrics-genius"));
+    });
+    row(ui, Id::LyricsModelsAuto, "Скачивать модели сами", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_models_auto).id_salt("set-lyrics-models-auto"));
+    });
+    let s = Theme::get(ui.ctx()).scheme;
+    settings_help::item(ui, Id::LyricsModels, "Модели", |ui| {
+        row_label(ui, Id::LyricsModels, "Модели");
+        if let Some(e) = &a.error {
+            ui.label(TypeRole::BodySmall.style().rich(e, s.error));
+        }
+        ui.add_space(4.0);
+        crate::components::segmented_list(ui, a.models.len(), |i| {
+            let m = &a.models[i];
+            let key = m.key.clone();
+            let state = m.state;
+            let size = size_label(m.size);
+            let item = crate::components::ListItem::new(m.label.clone()).supporting(size).id_salt(("align-model", i));
+            item.trailing(move |ui: &mut Ui| match state {
+                nikgob_view::ModelState::Ready => {
+                    if ui
+                        .add(IconButton::new(Icon::Delete).tooltip("Удалить").id_salt(("align-model-del", key.clone())))
+                        .clicked()
+                    {
+                        out_push(ui, Command::AlignModel { key: key.clone(), download: false });
+                    }
+                }
+                nikgob_view::ModelState::Downloading(f) => {
+                    // The trailing slot lays out from the right: the share,
+                    // then the bar left of it.
+                    ui.label(TypeRole::LabelMedium.style().rich(format!("{:.0} %", f * 100.0), s.on_surface_variant));
+                    crate::components::wavy_progress(ui, ("align-model-dl", key.clone()), f, 96.0);
+                }
+                nikgob_view::ModelState::Missing => {
+                    if ui
+                        .add(Button::new("Скачать").style(Style::Tonal).size(crate::components::Size::Xs).id_salt(("align-model-get", key.clone())))
+                        .clicked()
+                    {
+                        out_push(ui, Command::AlignModel { key: key.clone(), download: true });
+                    }
+                }
+            })
+        });
+        for c in take_pushed(ui) {
+            out.push(c);
+        }
+    });
+}
+
+/// «317 МБ», «1,1 ГБ».
+fn size_label(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_048_576.0;
+    if mb >= 1000.0 {
+        format!("{:.1} ГБ", mb / 1024.0).replace('.', ",")
+    } else {
+        format!("{mb:.0} МБ")
+    }
+}
+
+/// Commands from list items' trailing closures (they cannot borrow `out`).
+fn out_push(ui: &Ui, c: Command) {
+    let id = egui::Id::new("set-align-pushed");
+    ui.ctx().data_mut(|d| d.get_temp_mut_or_default::<Vec<Command>>(id).push(c));
+}
+
+fn take_pushed(ui: &Ui) -> Vec<Command> {
+    let id = egui::Id::new("set-align-pushed");
+    ui.ctx().data_mut(|d| std::mem::take(d.get_temp_mut_or_default::<Vec<Command>>(id)))
+}
+
 pub(super) fn dimmed(ui: &mut Ui, dim: bool, add: impl FnOnce(&mut Ui)) {
     ui.scope(|ui| {
         if dim {
@@ -947,6 +1043,7 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
             p.lyrics_return_s = v;
         }
     });
+    lyrics_align(ui, _state, p, out);
 
     group(ui, "Звук");
     row(ui, Id::OutputDevice, "Устройство вывода", Some("Переключается сразу, без паузы"), |ui| {

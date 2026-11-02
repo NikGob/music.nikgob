@@ -23,6 +23,7 @@ pub mod odesli;
 pub mod lyricsplus;
 pub mod lrcred;
 pub mod betterlyrics;
+pub mod genius;
 pub mod text;
 pub mod ttml;
 
@@ -47,6 +48,7 @@ pub use odesli::{Odesli, OdesliPage};
 pub use lyricsplus::{LyricsPlus, LyricsPlusText};
 pub use lrcred::LrcRed;
 pub use betterlyrics::BetterLyrics;
+pub use genius::Genius;
 pub use ttml::{TtmlLyrics, parse_ttml};
 
 /// Every client, built from one config and sharing one HTTP stack.
@@ -61,6 +63,8 @@ pub struct Metadata {
     pub lyricsplus: LyricsPlus,
     pub lrcred: LrcRed,
     pub betterlyrics: BetterLyrics,
+    /// Plain lyrics from Genius's public pages (no account).
+    pub genius: Genius,
     pub itunes: Itunes,
     /// Similar artists and recordings (no key).
     pub listenbrainz: ListenBrainz,
@@ -82,6 +86,7 @@ impl Metadata {
             lyricsplus: LyricsPlus::new(http.clone()),
             lrcred: LrcRed::new(http.clone()),
             betterlyrics: BetterLyrics::new(http.clone()),
+            genius: Genius::new(http.clone()),
             itunes: Itunes::new(http.clone()),
             listenbrainz: ListenBrainz::new(http.clone()),
             lastfm: config.lastfm_key.as_deref().and_then(|k| LastFm::new(http, k)),

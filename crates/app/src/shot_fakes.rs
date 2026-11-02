@@ -40,6 +40,14 @@
 //!   («Твой микс» takes the big spot).
 //! - `fake:keep` — the playing song is offered to be kept, as a new song
 //!   heard out twice is («Оставить у себя «…»?»).
+//! - `fake:lyrics-texts` — the playing song has four texts for «Текст
+//!   песни»: LyricsPlus' own word timing, LRCLIB's lines of another take,
+//!   Genius' plain text with words made from the recording, lrc.red lines.
+//! - `fake:craft:decode|separate|listen|align|download` — timing for
+//!   Genius' text is being made, at that stage; `fake:craft:done` — made,
+//!   to check; `fake:craft:failed` — it could not be made.
+//! - `fake:align-models` — Settings → «Текст песен»: models ready, one
+//!   downloading, one missing; the background pass halfway; on the GPU.
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -69,6 +77,9 @@ pub struct Fakes {
     /// `fake:bento`: how many tiles, and whether there is a daylist.
     bento: Option<(usize, bool)>,
     keep: bool,
+    lyrics_texts: bool,
+    craft: Option<String>,
+    align_models: bool,
 }
 
 impl Fakes {
@@ -101,6 +112,9 @@ impl Fakes {
             "bento:2" => self.bento = Some((2, true)),
             "bento:no-daylist" => self.bento = Some((3, false)),
             "keep" => self.keep = true,
+            "lyrics-texts" => self.lyrics_texts = true,
+            "align-models" => self.align_models = true,
+            c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             _ => return false,
         }
         true
@@ -126,6 +140,9 @@ impl Fakes {
             || self.no_recs
             || self.bento.is_some()
             || self.keep
+            || self.lyrics_texts
+            || self.craft.is_some()
+            || self.align_models
     }
 
     /// `state` with the fakes laid over it.
@@ -275,6 +292,19 @@ impl Fakes {
         if self.lyrics {
             s.lyrics = word_lyrics(state.player.current.as_ref().map(|t| t.id));
         }
+        if self.lyrics_texts || self.craft.is_some() {
+            let track = state.player.current.as_ref().map(|t| t.id);
+            s.lyrics = texts_lyrics(track);
+            if s.info.path.is_none() {
+                s.info.path = Some("song.opus".into());
+            }
+            if let (Some(stage), Some(track)) = (self.craft.as_deref(), track) {
+                craft(&mut s, track, stage);
+            }
+        }
+        if self.align_models {
+            align_models(&mut s);
+        }
         if self.link
             && let Some(p) = s.playlist.as_mut()
         {
@@ -334,7 +364,80 @@ fn word_lyrics(track: Option<nikgob_view::TrackId>) -> nikgob_view::LyricsView {
         source: Some(LyricsSource::LyricsPlus),
         picked: false,
         sources: Vec::new(),
+        ..Default::default()
     }
+}
+
+/// The texts of «Текст песни» (`fake:lyrics-texts`).
+fn texts_lyrics(track: Option<nikgob_core::model::TrackId>) -> nikgob_view::LyricsView {
+    use nikgob_core::lyrics::{LyricLine, LyricsSource};
+    use nikgob_view::{LyricsAvail, LyricsOption, LyricsSync, LyricsText};
+    use std::time::Duration;
+    let own = word_lyrics(track);
+    let lines_of = |shift: u64| -> Vec<LyricLine> {
+        own.lines
+            .iter()
+            .map(|l| LyricLine { start: l.start.saturating_sub(Duration::from_millis(shift)), end: None, words: Vec::new(), ..l.clone() })
+            .collect()
+    };
+    let plain: String = own.lines.iter().take(12).map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+    let made: Vec<LyricLine> = own.lines.iter().take(12).cloned().collect();
+    let texts = vec![
+        LyricsText { source: Some(LyricsSource::LyricsPlus), lines: own.lines.clone(), sync: Some(LyricsSync::Word), fits: Some(true), ..Default::default() },
+        LyricsText { source: Some(LyricsSource::LrcRed), lines: lines_of(300), sync: Some(LyricsSync::Line), fits: Some(true), made: Some(own.lines.clone()), ..Default::default() },
+        LyricsText { source: Some(LyricsSource::Lrclib), lines: lines_of(2140), sync: Some(LyricsSync::Line), fits: Some(false), ..Default::default() },
+        LyricsText { source: Some(LyricsSource::Genius), plain: Some(plain), sync: Some(LyricsSync::Plain), fits: Some(true), made: Some(made), ..Default::default() },
+    ];
+    let option = |source, sync, fits, made| LyricsOption { source, state: LyricsAvail::Ready(sync), fits, made };
+    nikgob_view::LyricsView {
+        sources: vec![
+            option(LyricsSource::LyricsPlus, LyricsSync::Word, Some(true), false),
+            option(LyricsSource::LrcRed, LyricsSync::Line, Some(true), true),
+            option(LyricsSource::Lrclib, LyricsSync::Line, Some(false), false),
+            option(LyricsSource::Genius, LyricsSync::Plain, Some(true), true),
+        ],
+        texts,
+        ..own
+    }
+}
+
+/// Timing for Genius' text being made at `stage` (`fake:craft:…`).
+fn craft(s: &mut ViewState, track: nikgob_core::model::TrackId, name: &str) {
+    use nikgob_core::lyrics::LyricsSource;
+    use nikgob_view::{AlignJob, AlignStage, Craft, LyricsSync};
+    let (stage, progress) = match name {
+        "download" => (AlignStage::Download, 0.42),
+        "decode" => (AlignStage::Decode, 0.0),
+        "separate" => (AlignStage::Separate, 0.45),
+        "listen" => (AlignStage::Listen, 0.6),
+        "align" => (AlignStage::Align, 1.0),
+        _ => (AlignStage::Align, 1.0),
+    };
+    let done = s.lyrics.texts.iter().find(|t| t.source == Some(LyricsSource::Genius)).and_then(|t| t.made.clone());
+    let mut c = Craft { track, source: LyricsSource::Genius, target: LyricsSync::Word, lines: None, failed: None };
+    match name {
+        "done" => c.lines = done,
+        "failed" => c.failed = Some("Не удалось скачать модели".into()),
+        _ => s.align.job = Some(AlignJob { track: Some(track), stage, progress, asked: true }),
+    }
+    s.align.craft = Some(c);
+}
+
+/// Settings → «Текст песен» with every model state (`fake:align-models`).
+fn align_models(s: &mut ViewState) {
+    use nikgob_view::{AlignModel, ModelState};
+    let m = |key: &str, label: &str, size: u64, state| AlignModel { key: key.into(), label: label.into(), size, state };
+    s.align.models = vec![
+        m("runtime", "Среда ONNX Runtime", 25_111_930, ModelState::Ready),
+        m("separator", "Отделение голоса", 66_759_214, ModelState::Ready),
+        m("mms", "Выравнивание: другие языки", 317_341_664, ModelState::Ready),
+        m("ru", "Выравнивание: русский", 317_349_889, ModelState::Ready),
+        m("ja", "Выравнивание: японский", 357_414_599, ModelState::Downloading(0.37)),
+        m("whisper", "Распознавание текста", 1_087_361_337, ModelState::Missing),
+    ];
+    s.align.done = 642;
+    s.align.total = 1318;
+    s.align.on_gpu = Some(true);
 }
 
 /// Albums of the fake catalog the library has no release of (by `artist`

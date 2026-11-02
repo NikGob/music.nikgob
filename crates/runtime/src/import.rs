@@ -26,6 +26,9 @@ pub struct ImportSetup {
     pub torrent_state_dir: std::path::PathBuf,
     /// No DHT, listeners, UPnP or local discovery (tests).
     pub torrent_offline: bool,
+    /// Where the lyrics models are downloaded (docs/lyrics-align.md);
+    /// None = no aligner.
+    pub models_dir: Option<std::path::PathBuf>,
 }
 
 /// Messages from background tasks to the worker.
@@ -39,6 +42,8 @@ pub(crate) enum Internal {
     },
     LyricsFetched(TrackId, LyricsSource, Result<Option<crate::lyrics::Text>, String>),
     LyricsEmbedded(TrackId, Result<String, String>),
+    /// From the lyrics aligner's thread.
+    Align(crate::align::Msg),
     Enrich(crate::enrich::Event),
     TagSuggestions(TrackId, Result<Vec<(String, v::TagEdit)>, String>),
     Retagged(TrackId, Result<(), String>),
@@ -709,6 +714,7 @@ impl Worker {
             Internal::Enrich(ev) => self.enrich_event(ev),
             Internal::LyricsFetched(track, source, got) => self.lyrics_fetched(track, source, got),
             Internal::LyricsEmbedded(track, result) => self.lyrics_embedded(track, result),
+            Internal::Align(m) => self.align_msg(m),
         }
     }
 

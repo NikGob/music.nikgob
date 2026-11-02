@@ -424,6 +424,31 @@ pub struct LyricsView {
     pub picked: bool,
     /// Every source that has, or may still get, a text for this track.
     pub sources: Vec<LyricsOption>,
+    /// The shown timing was made by the player from the recording
+    /// (docs/lyrics-align.md), not given by the source.
+    pub made: bool,
+    /// The texts are being checked against the recording right now.
+    pub checking: bool,
+    /// Every text there is, in full («Текст песни» sheet).
+    pub texts: Vec<LyricsText>,
+}
+
+/// One source's text in full, and what the player made of it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LyricsText {
+    pub source: Option<LyricsSource>,
+    /// As the source has it (line starts zero for a plain text).
+    pub lines: Vec<LyricLine>,
+    pub plain: Option<String>,
+    /// The source's own precision.
+    pub sync: Option<LyricsSync>,
+    /// Checked against the recording: `Some(false)` is another song's or
+    /// another version's text. `None`: not checked.
+    pub fits: Option<bool>,
+    /// Word timing the player made from it (when it fits).
+    pub made: Option<Vec<LyricLine>>,
+    /// That timing was made and kept by the user.
+    pub saved: bool,
 }
 
 /// One source in the lyrics source picker.
@@ -431,6 +456,84 @@ pub struct LyricsView {
 pub struct LyricsOption {
     pub source: LyricsSource,
     pub state: LyricsAvail,
+    /// Checked against the recording (`None`: not yet).
+    pub fits: Option<bool>,
+    /// Shown with word timing the player made.
+    pub made: bool,
+}
+
+/// The lyrics models and the work of the aligner (Settings → «Текст песен»,
+/// the «Текст песни» sheet).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AlignView {
+    pub models: Vec<AlignModel>,
+    /// What the aligner is doing now.
+    pub job: Option<AlignJob>,
+    /// The background pass over the library: tracks done of all.
+    pub done: u32,
+    pub total: u32,
+    /// Where the models ran last (`None` before they ran): true the GPU.
+    pub on_gpu: Option<bool>,
+    /// The timing being made in the sheet, then shown to be kept or dropped.
+    pub craft: Option<Craft>,
+    /// The last thing that went wrong (a download, the runtime).
+    pub error: Option<String>,
+}
+
+/// One downloadable part (the runtime or a model).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AlignModel {
+    pub key: String,
+    pub label: String,
+    /// Bytes to download.
+    pub size: u64,
+    pub state: ModelState,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ModelState {
+    #[default]
+    Missing,
+    /// Downloading (done share).
+    Downloading(f32),
+    Ready,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlignJob {
+    pub track: Option<TrackId>,
+    pub stage: AlignStage,
+    /// Done share of the stage.
+    pub progress: f32,
+    /// Asked by the user (the sheet), not the background.
+    pub asked: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignStage {
+    /// Fetching a model first.
+    Download,
+    Decode,
+    /// The voice out of the music.
+    Separate,
+    /// The aligner hears the voice.
+    Listen,
+    Align,
+    /// Hearing a text from scratch.
+    Recognise,
+}
+
+/// Timing made in the sheet from one source's text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Craft {
+    pub track: TrackId,
+    pub source: LyricsSource,
+    /// [`LyricsSync::Line`] or [`LyricsSync::Word`].
+    pub target: LyricsSync,
+    /// The result, once made.
+    pub lines: Option<Vec<LyricLine>>,
+    /// The text does not fit the recording / it could not be made.
+    pub failed: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1038,6 +1141,23 @@ pub struct Prefs {
     pub lyrics_countdown: bool,
     /// Embed the selected online lyrics in the track tags.
     pub save_found_lyrics: bool,
+    /// «Видеокарта»: the lyrics models run on the GPU (DirectML), else on
+    /// the CPU (also when the GPU fails).
+    pub lyrics_gpu: bool,
+    /// «Проверять текст по записи»: a fetched text is aligned to the
+    /// track's own audio before it is trusted.
+    pub lyrics_check: bool,
+    /// «Подсветка по словам для всех песен»: the background pass makes
+    /// word timing for every song with a file.
+    pub lyrics_words_all: bool,
+    /// «Распознавать текст, если его нет нигде» (experimental).
+    pub lyrics_recognize: bool,
+    /// «Отделять голос от музыки» before aligning.
+    pub lyrics_separate: bool,
+    /// «Скачивать модели сами» when they are needed.
+    pub lyrics_models_auto: bool,
+    /// «Искать на Genius».
+    pub lyrics_genius: bool,
     /// The outline the Now Playing cover takes while playing.
     pub cover_shape: CoverShape,
     /// The cover's outline turns while playing (the picture stays put).
@@ -1671,6 +1791,7 @@ pub struct ViewState {
     pub player: PlayerView,
     pub queue: QueueView,
     pub lyrics: LyricsView,
+    pub align: AlignView,
     pub info: TrackInfo,
     pub home: HomeView,
     pub library: LibraryView,
@@ -1842,6 +1963,13 @@ pub enum Command {
     SeekBy(i64),
     /// Show this track's lyrics from another source; `None` = automatic.
     PickLyricsSource(TrackId, Option<LyricsSource>),
+    /// Make line or word timing for a source's text from the recording
+    /// ([`AlignView::craft`]).
+    CraftLyrics { track: TrackId, source: LyricsSource, target: LyricsSync },
+    /// Keep the made timing (it becomes the track's text) or drop it.
+    KeepCraft(bool),
+    /// Download (true) or delete a lyrics model by its [`AlignModel::key`].
+    AlignModel { key: String, download: bool },
     SetVolume(f32),
     ToggleMute,
     ToggleShuffle,
@@ -2191,6 +2319,13 @@ impl Default for Prefs {
             lyrics_gap_waves: 6.0,
             lyrics_countdown: true,
             save_found_lyrics: false,
+            lyrics_gpu: true,
+            lyrics_check: true,
+            lyrics_words_all: true,
+            lyrics_recognize: true,
+            lyrics_separate: true,
+            lyrics_models_auto: true,
+            lyrics_genius: true,
             cover_shape: CoverShape::default(),
             cover_spin: true,
             cover_pulse: true,

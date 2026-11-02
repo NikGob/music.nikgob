@@ -57,6 +57,10 @@ opt-level = 3
 [profile.dev.package.nikgob-recs]
 opt-level = 3
 
+# And the lyrics alignment (spectra, the alignment's dynamic programming).
+[profile.dev.package.nikgob-align]
+opt-level = 3
+
 # The interface draws every frame in its own crates (springs, shape
 # morphs, lyrics layout, the tessellated paths of covers and glows): at
 # opt-level 0 a Now Playing frame takes about three times as long and the

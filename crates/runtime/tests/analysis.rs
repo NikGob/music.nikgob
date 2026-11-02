@@ -73,6 +73,7 @@ fn imported_files_are_analysed_in_the_background() {
                 watch_inbox: false,
                 torrent_state_dir: root.join("torrent-state"),
                 torrent_offline: true,
+                models_dir: None,
             }),
         },
         Box::new(NullPlayback),

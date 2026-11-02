@@ -610,6 +610,7 @@ fn main() -> eframe::Result {
             watch_inbox: !demo,
             torrent_state_dir: paths.db.with_file_name("torrents"),
             torrent_offline: demo,
+            models_dir: Some(paths.db.with_file_name("models")),
         }
     };
     // The demo's discovery and the services' suggestions ask the fake

@@ -11,6 +11,15 @@ mod chrome;
 mod common;
 mod find_song;
 mod lyrics;
+mod lyrics_sheet;
+
+/// Opens «Текст песни» with `expand`'s text unfolded (screenshot runs).
+pub fn open_lyrics_sheet(ctx: &egui::Context, expand: Option<nikgob_view::LyricsSource>) {
+    lyrics_sheet::open(ctx);
+    if let Some(src) = expand {
+        lyrics_sheet::expand(ctx, src);
+    }
+}
 mod pages;
 mod pane;
 mod player_bar;
@@ -474,6 +483,7 @@ impl Md3eUi {
         self.pages.overlays(ctx, state, overlay_area, out);
         self.chrome.overlays(ctx, state, out);
         self.find_song.show(ctx, state, out);
+        lyrics_sheet::show(ctx, state, out);
         // «К исполнителю» of a track with several artists: which one.
         if let Some(route) = artist_links::chooser(ctx) {
             self.chrome.nav = Some(route);
@@ -1147,6 +1157,8 @@ impl Md3eUi {
             "stream-analysis" => S::StreamAnalysis,
             "appearance" => S::Design,
             "pane" => S::PaneQueue,
+            "lyrics" => S::LyricsModels,
+            "lyrics-check" => S::LyricsCheck,
             _ => S::CoverClickPause,
         });
     }

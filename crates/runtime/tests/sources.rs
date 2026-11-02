@@ -217,6 +217,7 @@ fn rig(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs) -> Rig
                 watch_inbox: false,
                 torrent_state_dir: dir.path().join("torrent-state"),
                 torrent_offline: true,
+                models_dir: None,
             }),
         },
         Box::new(Silent),
