@@ -69,8 +69,22 @@ pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec
     sizes.small *= scale;
     sizes.sub *= scale;
     sizes.gap *= scale;
-    paint(ui, rect, &resp, state, style, bass, sizes, mega, out);
+    paint(ui, rect, &resp, state, &state.lyrics.lines, style, bass, sizes, mega, out);
     mega && source_picker(ui, state, out)
+}
+
+/// `lines` drawn as the lyrics view draws the current text (the «Текст
+/// песни» sheet's check of made timing), following the playing position;
+/// a click seeks.
+pub(crate) fn made_preview(ui: &mut Ui, size: egui::Vec2, state: &ViewState, lines: &[LyricLine], out: &mut Vec<Command>) {
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let style = if state.prefs.lyrics_style == 1 { Style::Focus } else { Style::Karaoke };
+    let mut sizes = PANE;
+    sizes.big = 22.0;
+    sizes.small = 17.0;
+    sizes.sub = 13.0;
+    sizes.gap = 14.0;
+    paint(ui, rect, &resp, state, lines, style, 0.0, sizes, false, out);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -79,6 +93,7 @@ fn paint(
     rect: Rect,
     resp: &egui::Response,
     state: &ViewState,
+    lines: &[LyricLine],
     style: Style,
     bass: f32,
     sizes: Sizes,
@@ -88,7 +103,6 @@ fn paint(
     let ctx = ui.ctx().clone();
     let theme = Theme::get(&ctx);
     let s = theme.scheme;
-    let lines = &state.lyrics.lines;
     let items = display_lines(lines);
     if items.is_empty() {
         return;
@@ -1002,6 +1016,7 @@ pub fn source_picker(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> 
         })
     };
     let text = match l.source {
+        Some(src) if l.made && src != LyricsSource::Recognized => format!("{} · слова по записи", src.label()),
         Some(src) => match sync(src) {
             Some(sync) => format!("{} · {}", src.label(), sync.label()),
             None => src.label().to_owned(),
@@ -1020,6 +1035,20 @@ pub fn source_picker(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> 
             Icon::ExpandMore
                 .widget(false, s.on_surface_variant.gamma_multiply(0.8), 14.0)
                 .paint_at(ui, Rect::from_min_size(pos2(r.rect.right() + 2.0, r.rect.center().y - 7.0), vec2(14.0, 14.0)));
+            // ⋮ right after the source: every text in full, and timing
+            // made from the recording.
+            if l.track.is_some() {
+                ui.add_space(20.0);
+                let more = ui.add(
+                    crate::components::IconButton::new(Icon::MoreVert)
+                        .size(Size::Xs)
+                        .tooltip("Текст песни")
+                        .id_salt("lyrics-sheet-open"),
+                );
+                if more.clicked() {
+                    super::lyrics_sheet::open(ui.ctx());
+                }
+            }
             r
         })
         .inner;
@@ -1032,6 +1061,8 @@ pub fn source_picker(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> 
         menu = menu.item(MenuItem::new("Автоматически").selected(!l.picked)).divider();
         for o in &l.sources {
             let state = match o.state {
+                LyricsAvail::Ready(_) if o.fits == Some(false) => "другая запись",
+                LyricsAvail::Ready(_) if o.made && o.source != LyricsSource::Recognized => "слова по записи",
                 LyricsAvail::Ready(sync) => sync.label(),
                 LyricsAvail::Loading => "ищу…",
                 LyricsAvail::Missing => "нет текста",
