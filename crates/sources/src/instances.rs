@@ -91,6 +91,27 @@ mod tests {
         assert!(matches!(again, Err(SourceError::RateLimited { .. })));
     }
 
+    /// An instance that only finds (403 on every file) is set aside after
+    /// a second 403: the next call goes to the others without asking it.
+    #[tokio::test]
+    async fn an_instance_refusing_again_and_again_is_set_aside() {
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let i = Instances::new(&[], &["https://finds-only", "https://works"], Duration::ZERO);
+        let op = |base: String| {
+            let asked = asked.clone();
+            async move {
+                asked.lock().unwrap().push(base.clone());
+                if base == "https://finds-only" { Err(SourceError::Http { status: 403 }) } else { Ok(base) }
+            }
+        };
+        for _ in 0..3 {
+            assert_eq!(i.call(op).await.unwrap(), "https://works");
+        }
+        let asked = asked.lock().unwrap().clone();
+        assert_eq!(asked.iter().filter(|b| *b == "https://finds-only").count(), 2, "{asked:?}");
+        assert_eq!(asked.iter().filter(|b| *b == "https://works").count(), 3);
+    }
+
     /// The one live instance said 403 and the others had no DNS: the 403
     /// is what went wrong, not the last one being gone.
     #[tokio::test]

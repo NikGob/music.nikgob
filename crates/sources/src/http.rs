@@ -57,17 +57,31 @@ impl Pace {
 }
 
 /// A site that turned us away sits out a while: 30 minutes, doubling up
-/// to a day while it keeps doing so; one answer that works ends it.
+/// to a day while it keeps doing so; one answer that works ends it. A bot
+/// check or a rate limit starts the pause at once; a 401/403 (an instance
+/// whose account the service banned: it finds, it does not give files)
+/// only once it said so [`STRIKES`] times with no working answer between.
 pub struct Breaker {
-    state: Mutex<(Option<Instant>, u32)>,
+    state: Mutex<BreakerState>,
+}
+
+#[derive(Default)]
+struct BreakerState {
+    until: Option<Instant>,
+    /// Pauses in a row.
+    pauses: u32,
+    /// 401/403 answers in a row.
+    strikes: u32,
 }
 
 const FIRST_PAUSE: Duration = Duration::from_secs(30 * 60);
 const LONGEST_PAUSE: Duration = Duration::from_secs(24 * 3600);
+/// 401/403 answers in a row that set an instance aside.
+pub const STRIKES: u32 = 2;
 
 impl Default for Breaker {
     fn default() -> Self {
-        Self { state: Mutex::new((None, 0)) }
+        Self { state: Mutex::new(BreakerState::default()) }
     }
 }
 
@@ -75,7 +89,7 @@ impl Breaker {
     /// Err while the site sits out.
     pub fn check(&self) -> Result<(), SourceError> {
         let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        match st.0 {
+        match st.until {
             Some(until) if Instant::now() < until => {
                 Err(SourceError::RateLimited { retry_after: Some(until - Instant::now()) })
             }
@@ -84,22 +98,34 @@ impl Breaker {
     }
 
     /// Notes what a request did: a block or a rate limit starts (or
-    /// lengthens) the pause, an answer ends it.
+    /// lengthens) the pause, so do repeated 401/403 answers; an answer
+    /// ends it.
     pub fn note<T>(&self, r: &Result<T, SourceError>) {
         let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        match r {
-            Ok(_) => *st = (None, 0),
-            Err(SourceError::Blocked(_) | SourceError::RateLimited { .. }) => {
-                let n = st.1.min(6);
-                let pause = (FIRST_PAUSE * 2u32.pow(n)).min(LONGEST_PAUSE);
-                let pause = match r {
-                    Err(SourceError::RateLimited { retry_after: Some(d) }) => (*d).max(Duration::from_secs(60)).min(pause),
-                    _ => pause,
-                };
-                *st = (Some(Instant::now() + pause), st.1 + 1);
+        let pause = match r {
+            Ok(_) => {
+                *st = BreakerState::default();
+                return;
             }
-            Err(_) => {}
+            Err(SourceError::Blocked(_) | SourceError::RateLimited { .. }) => true,
+            Err(SourceError::Http { status: 401 | 403 }) => {
+                st.strikes += 1;
+                st.strikes >= STRIKES
+            }
+            Err(_) => false,
+        };
+        if !pause {
+            return;
         }
+        let n = st.pauses.min(6);
+        let long = (FIRST_PAUSE * 2u32.pow(n)).min(LONGEST_PAUSE);
+        let long = match r {
+            Err(SourceError::RateLimited { retry_after: Some(d) }) => (*d).max(Duration::from_secs(60)).min(long),
+            _ => long,
+        };
+        st.until = Some(Instant::now() + long);
+        st.pauses += 1;
+        st.strikes = 0;
     }
 }
 
@@ -379,6 +405,21 @@ mod tests {
         assert!(b.check().is_err());
         b.note(&Ok(()));
         assert!(b.check().is_ok());
+    }
+
+    /// One 403 may be one track the account cannot play; twice in a row,
+    /// the instance only finds.
+    #[test]
+    fn repeated_403s_set_an_instance_aside() {
+        let b = Breaker::default();
+        b.note::<()>(&Err(SourceError::Http { status: 403 }));
+        assert!(b.check().is_ok(), "once is not yet");
+        b.note::<()>(&Err(SourceError::Http { status: 404 }));
+        b.note::<()>(&Err(SourceError::Http { status: 403 }));
+        assert!(matches!(b.check(), Err(SourceError::RateLimited { retry_after: Some(d) }) if d > Duration::from_secs(25 * 60)));
+        b.note(&Ok(()));
+        b.note::<()>(&Err(SourceError::Http { status: 403 }));
+        assert!(b.check().is_ok(), "an answer between starts the count over");
     }
 
     #[test]

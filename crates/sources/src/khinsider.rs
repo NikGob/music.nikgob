@@ -18,6 +18,7 @@ use nikgob_core::source::{Fetched, Format, Offer, OfferScope, Progress, Source, 
 use nikgob_metadata::text::{similarity, title_key};
 use serde::{Deserialize, Serialize};
 
+use crate::album::{Patience, fetch_each, left_out};
 use crate::html::{Cell, links, table, text_of};
 use crate::http::{Breaker, Cookies, Pace, client, download, get_page, safe_name};
 use crate::matching::contains_words;
@@ -363,38 +364,39 @@ impl Source for Khinsider {
         })
     }
 
-    fn fetch<'a>(&'a self, offer: &'a Offer, _: &'a Want, dest: &'a Path, progress: Progress) -> BoxFuture<'a, Result<Fetched, SourceError>> {
+    fn fetch<'a>(&'a self, offer: &'a Offer, want: &'a Want, dest: &'a Path, progress: Progress) -> BoxFuture<'a, Result<Fetched, SourceError>> {
         Box::pin(async move {
             let h: Handle = serde_json::from_str(&offer.handle).map_err(|e| SourceError::Parse(e.to_string()))?;
-            let songs: Vec<String> = match (h.song, h.album) {
-                (Some(s), _) => vec![s],
+            let songs: Vec<(String, String)> = match (h.song, h.album) {
+                (Some(s), _) => vec![(s, offer.track_title.clone().unwrap_or_else(|| offer.title.clone()))],
                 (None, Some(a)) => {
                     let page = album_page(&self.page(&a).await?);
-                    page.songs.iter().map(|s| self.url(&s.href)).collect()
+                    let all = page.songs.iter().map(|s| (self.url(&s.href), s.name.clone(), s.name.clone())).collect();
+                    left_out(all, &want.got)
                 }
                 (None, None) => return Err(SourceError::NothingToFetch),
             };
             let lossless = offer.lossless();
-            let mut files = Vec::new();
-            let mut before = 0u64;
-            for song in songs {
-                let html = self.page(&song).await?;
-                let found = song_files(&html);
-                let Some((url, _)) = found.iter().find(|(_, flac)| *flac == lossless).or(found.first()).cloned() else {
-                    return Err(SourceError::Parse("a song page without a file".into()));
-                };
-                let url = self.url(&url);
-                self.pace.wait().await;
-                let base = before;
-                let step: Progress = {
-                    let progress = progress.clone();
-                    std::sync::Arc::new(move |done, _| progress(base + done, None))
-                };
-                let path = download(&self.http, &url, &dest.join(file_name(&url)), &step).await?;
-                before += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                files.push(path);
-            }
-            Ok(Fetched::Files(files))
+            let before = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            fetch_each(songs, Patience::default(), |song, _| {
+                let (before, progress) = (before.clone(), progress.clone());
+                async move {
+                    use std::sync::atomic::Ordering;
+                    let html = self.page(&song).await?;
+                    let found = song_files(&html);
+                    let Some((url, _)) = found.iter().find(|(_, flac)| *flac == lossless).or(found.first()).cloned() else {
+                        return Err(SourceError::Parse("a song page without a file".into()));
+                    };
+                    let url = self.url(&url);
+                    self.pace.wait().await;
+                    let base = before.load(Ordering::Relaxed);
+                    let step: Progress = std::sync::Arc::new(move |done, _| progress(base + done, None));
+                    let path = download(&self.http, &url, &dest.join(file_name(&url)), &step).await?;
+                    before.fetch_add(std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0), Ordering::Relaxed);
+                    Ok(path)
+                }
+            })
+            .await
         })
     }
 }

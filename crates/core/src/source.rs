@@ -99,6 +99,10 @@ pub struct Want {
     pub isrc: Option<String>,
     /// Tracks the album has (0 = unknown).
     pub album_tracks: u32,
+    /// Titles of the album's tracks that have a file already: a fetch of
+    /// the album leaves them out (the rest of a partly downloaded album).
+    #[serde(default)]
+    pub got: Vec<String>,
 }
 
 impl Want {
@@ -271,6 +275,13 @@ pub enum Fetched {
     Torrent(TorrentPayload),
     /// Files written into the folder given to `fetch`.
     Files(Vec<PathBuf>),
+    /// Some of an album's files: the rest could not be had (`missing`,
+    /// their names) for `error`, the reason of the last one.
+    Partial {
+        files: Vec<PathBuf>,
+        missing: Vec<String>,
+        error: SourceError,
+    },
 }
 
 /// Bytes done and the total when known, as a download goes.
@@ -304,6 +315,25 @@ impl SourceError {
             self,
             Self::Unreachable(_) | Self::Blocked(_) | Self::RateLimited { .. } | Self::Http { .. }
         )
+    }
+
+    /// The source turned us away (a ban, a 401/403, a rate limit, a server
+    /// error, no answer), as opposed to not having the thing (a 404, a
+    /// file it cannot give): another source may have it, or this one later.
+    pub fn is_refusal(&self) -> bool {
+        match self {
+            Self::Unreachable(_) | Self::Blocked(_) | Self::RateLimited { .. } => true,
+            Self::Http { status } => matches!(status, 401 | 403 | 429) || *status >= 500,
+            _ => false,
+        }
+    }
+
+    /// How long the source asked to wait, when it said.
+    pub fn wait(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited { retry_after } => *retry_after,
+            _ => None,
+        }
     }
 }
 
@@ -397,6 +427,29 @@ mod tests {
         };
         assert!(w.is_single());
         assert!(!Want { album: Some("Kaizin".into()), ..w }.is_single());
+    }
+
+    #[test]
+    fn a_refusal_is_told_from_a_miss() {
+        for e in [
+            SourceError::Http { status: 403 },
+            SourceError::Http { status: 401 },
+            SourceError::Http { status: 503 },
+            SourceError::RateLimited { retry_after: None },
+            SourceError::Blocked("cf".into()),
+            SourceError::Unreachable("dns".into()),
+        ] {
+            assert!(e.is_refusal(), "{e:?}");
+        }
+        for e in [
+            SourceError::Http { status: 404 },
+            SourceError::NothingToFetch,
+            SourceError::Parse("a DASH manifest".into()),
+            SourceError::Io("disk".into()),
+        ] {
+            assert!(!e.is_refusal(), "{e:?}");
+        }
+        assert_eq!(SourceError::RateLimited { retry_after: Some(Duration::from_secs(9)) }.wait(), Some(Duration::from_secs(9)));
     }
 
     #[test]

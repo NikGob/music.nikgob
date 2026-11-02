@@ -511,6 +511,34 @@ impl Worker {
     }
 
     /// An import whose files are meant for `targets` (a wishlist item).
+    /// A line of «Загрузки → История» that is not an import's own (a source
+    /// that turned a wished download away, an album that came in part);
+    /// kept with the imports' lines over a restart.
+    pub(crate) fn history_line(&mut self, title: String, subtitle: String, error: Option<String>) {
+        let seq = match self.lib.log_job("import", &title, &subtitle, error.as_deref()) {
+            Ok(seq) => seq.max(0) as u64,
+            Err(e) => {
+                log::warn!("job log: {e}");
+                0
+            }
+        };
+        let Some(svc) = &mut self.import else { return };
+        svc.history.push_front(v::Job {
+            id: IMPORT_ID | LOGGED_ID | seq,
+            title,
+            subtitle,
+            progress: Some(1.0),
+            rate: None,
+            eta: None,
+            paused: false,
+            controllable: false,
+            error,
+            at: nikgob_library::now_ms(),
+        });
+        svc.history.truncate(100);
+        self.publish_downloads();
+    }
+
     pub(crate) fn import_for(
         &mut self,
         paths: Vec<PathBuf>,

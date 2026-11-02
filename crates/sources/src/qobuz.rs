@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use nikgob_core::indexer::BoxFuture;
@@ -18,6 +19,7 @@ use nikgob_core::model::Codec;
 use nikgob_core::source::{Fetched, Format, Offer, OfferScope, Progress, Source, SourceError, SourceKey, Want, WantScope};
 use serde::Deserialize;
 
+use crate::album::{Patience, fetch_each, left_out};
 use crate::http::{client, download, get_json, safe_name};
 use crate::instances::Instances;
 use crate::text::catalogue_queries;
@@ -291,38 +293,39 @@ impl Source for Qobuz {
         })
     }
 
-    fn fetch<'a>(&'a self, offer: &'a Offer, _: &'a Want, dest: &'a Path, progress: Progress) -> BoxFuture<'a, Result<Fetched, SourceError>> {
+    fn fetch<'a>(&'a self, offer: &'a Offer, want: &'a Want, dest: &'a Path, progress: Progress) -> BoxFuture<'a, Result<Fetched, SourceError>> {
         Box::pin(async move {
             let tracks: Vec<(String, String)> = match offer.handle.strip_prefix("album:") {
-                Some(album) => self
-                    .album_tracks(album)
-                    .await?
-                    .iter()
-                    .filter(|t| t.streamable)
-                    .map(|t| {
-                        let disc = t.media_number.unwrap_or(1);
-                        let no = t.track_number.unwrap_or(0);
-                        let name = with_version(&t.title, t.version.as_deref());
-                        (id_text(&t.id), crate::http::track_file_name(disc, no, &name))
-                    })
-                    .collect(),
+                Some(album) => {
+                    let all: Vec<(String, String, String)> = self
+                        .album_tracks(album)
+                        .await?
+                        .iter()
+                        .filter(|t| t.streamable)
+                        .map(|t| {
+                            let disc = t.media_number.unwrap_or(1);
+                            let no = t.track_number.unwrap_or(0);
+                            let name = with_version(&t.title, t.version.as_deref());
+                            (id_text(&t.id), crate::http::track_file_name(disc, no, &name), name)
+                        })
+                        .collect();
+                    left_out(all, &want.got)
+                }
                 None => vec![(offer.handle.clone(), safe_name(offer.track_title.as_deref().unwrap_or(&offer.title)))],
             };
-            if tracks.is_empty() {
-                return Err(SourceError::NothingToFetch);
-            }
-            let mut files = Vec::new();
-            let mut before = 0u64;
-            for (id, name) in tracks {
-                let url = self.link(&id).await?;
-                let base = before;
-                let p = progress.clone();
-                let step: Progress = Arc::new(move |done, _| p(base + done, None));
-                let path = download(&self.http, &url, &dest.join(format!("{name}.flac")), &step).await?;
-                before += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                files.push(path);
-            }
-            Ok(Fetched::Files(files))
+            let before = Arc::new(AtomicU64::new(0));
+            fetch_each(tracks, Patience::default(), |id, name| {
+                let (before, progress) = (before.clone(), progress.clone());
+                async move {
+                    let url = self.link(&id).await?;
+                    let base = before.load(Ordering::Relaxed);
+                    let step: Progress = Arc::new(move |done, _| progress(base + done, None));
+                    let path = download(&self.http, &url, &dest.join(format!("{name}.flac")), &step).await?;
+                    before.fetch_add(std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0), Ordering::Relaxed);
+                    Ok(path)
+                }
+            })
+            .await
         })
     }
 }

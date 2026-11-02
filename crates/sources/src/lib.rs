@@ -6,6 +6,7 @@
 //! ([`select`]). Soulseek (crates/soulseek) is one more implementation of
 //! the same trait.
 
+pub mod album;
 pub mod html;
 pub mod http;
 pub mod instances;
