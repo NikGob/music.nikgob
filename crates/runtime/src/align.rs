@@ -525,7 +525,7 @@ impl Thread {
         if wants_heard && texts.is_empty() {
             ids.push(ModelId::Whisper);
         }
-        self.ensure(&ids, false, Some(track).filter(|_| asked))?;
+        self.ensure(&ids, false, asked.then_some(track))?;
         let mut prep = self.prepare(track, path, asked)?;
         let mut rows = Vec::new();
         for t in texts {
@@ -542,7 +542,7 @@ impl Thread {
         let mut heard = None;
         // Heard from scratch only where there is no text at all.
         if wants_heard && texts.is_empty() {
-            self.ensure(&[ModelId::Whisper, ModelId::AlignerRu, ModelId::AlignerJa, ModelId::AlignerMms], false, Some(track).filter(|_| asked))?;
+            self.ensure(&[ModelId::Whisper, ModelId::AlignerRu, ModelId::AlignerJa, ModelId::AlignerMms], false, asked.then_some(track))?;
             let mut aligner = std::mem::replace(&mut self.aligner, Aligner::new(Catalog::new(""), Device::Cpu, 1));
             let r = {
                 let mut progress = self.progress(track, asked);
