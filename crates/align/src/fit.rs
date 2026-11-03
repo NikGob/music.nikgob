@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use nikgob_core::lyrics::{LyricLine, LyricWord};
 
+use crate::catalog::ModelId;
 use crate::ctc::{Emissions, force_align};
 use crate::text::{Vocab, pieces};
 
@@ -72,6 +73,9 @@ pub struct Fit {
     pub spread: f32,
     /// The text with word timing from the alignment.
     pub lines: Vec<LyricLine>,
+    /// The aligner the verdict is from (its measures have their own
+    /// levels: docs/lyrics-align.md, «The check»).
+    pub aligner: Option<ModelId>,
 }
 
 impl Fit {
@@ -243,7 +247,7 @@ pub fn fit_text_with(em: &Emissions, vocab: &Vocab, foreign: &[Foreign<'_>], lin
         spans.iter().filter(|s| s.peak >= HEARD).count() as f32 / spans.len().max(1) as f32
     });
     let heard = ((score - chance_score) / (1.0 - chance_score).max(0.05)).clamp(0.0, 1.0);
-    Some(Fit { score, heard, spelled, covered: 1.0, timing, offset, spread, lines: timed_lines(lines, &placed) })
+    Some(Fit { score, heard, spelled, covered: 1.0, timing, offset, spread, lines: timed_lines(lines, &placed), aligner: None })
 }
 
 /// Aligns again a line placed more than [`ASTRAY`] from its moved start

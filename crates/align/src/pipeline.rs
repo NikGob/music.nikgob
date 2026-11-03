@@ -350,6 +350,7 @@ impl Aligner {
             others.iter().zip(&vocabs).map(|((id, ls), v)| Foreign { em: &prep.heard[id], vocab: v, lines: ls }).collect();
         Ok(fit_text_with(&prep.heard[&main], &vocab, &foreign, lines, timed).map(|mut f| {
             f.covered = prep.covered(&f.lines);
+            f.aligner = Some(main);
             f
         }))
     }
@@ -371,6 +372,7 @@ impl Aligner {
         let vocab = self.ctc(id)?.1.clone();
         Ok(fit_text_with(&prep.heard[&id], &vocab, &[], lines, timed).map(|mut f| {
             f.covered = prep.covered(&f.lines);
+            f.aligner = Some(id);
             f
         }))
     }

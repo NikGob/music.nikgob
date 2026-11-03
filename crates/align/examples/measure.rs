@@ -118,7 +118,7 @@ fn main() {
     let catalog = Catalog::new(&args[1]);
     let jobs: Vec<Job> = serde_json::from_str(&std::fs::read_to_string(&args[2]).unwrap()).unwrap();
     let device = if args.get(3).map(String::as_str) == Some("cpu") { Device::Cpu } else { Device::Gpu };
-    let threads = std::env::var("THREADS").ok().and_then(|t| t.parse().ok()).unwrap_or(4);
+    let threads = std::env::var("THREADS").ok().and_then(|t| t.parse().ok()).unwrap_or(2);
     let mut aligner = Aligner::new(catalog, device, threads);
     for job in jobs {
         for separate in if job.mix { vec![true, false] } else { vec![true] } {
@@ -181,5 +181,7 @@ fn main() {
                 println!("JSON {out}");
             }
         }
+        // Frees the GPU between songs (it is shared with the player).
+        aligner.unload();
     }
 }

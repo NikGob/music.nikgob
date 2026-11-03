@@ -38,6 +38,10 @@ pub(crate) const MADE_BY: &str = "align-2";
 pub(crate) const FITS: f32 = 0.08;
 /// Or its letters are heard where they are put this much over chance.
 pub(crate) const HEARD: f32 = 0.6;
+/// The same for the Japanese aligner, which is unsure of every sung
+/// character: right texts without line times 0.23–0.26, other songs'
+/// texts 0.01–0.03 (docs/lyrics-align.md, «The check»).
+pub(crate) const HEARD_JA: f32 = 0.1;
 /// A failed track is tried again after a week.
 const RETRY_MS: i64 = 7 * 86_400_000;
 /// Models stay loaded this long without work.
@@ -226,7 +230,8 @@ pub(crate) fn models_view(catalog: &Catalog, downloading: &HashMap<ModelId, f32>
 /// the voice (one steady offset), which a stranger's text never does
 /// (docs/lyrics-align.md, «The check»).
 pub(crate) fn fits(f: &Fit) -> bool {
-    f.spelled >= FITS || f.heard >= HEARD || matches!(f.timing, Timing::Fits | Timing::Shifted)
+    let heard = if f.aligner == Some(ModelId::AlignerJa) { HEARD_JA } else { HEARD };
+    f.spelled >= FITS || f.heard >= heard || matches!(f.timing, Timing::Fits | Timing::Shifted)
 }
 
 /// A checked text as the library keeps it.
@@ -794,6 +799,7 @@ mod tests {
             offset: -2.14,
             spread: 0.06,
             lines: vec![LyricLine::new(Duration::from_secs(16), "Слово за слово")],
+            aligner: Some(ModelId::AlignerRu),
         }
     }
 
@@ -813,6 +819,21 @@ mod tests {
         assert!(!Aligned::from_row(&misfit).unwrap().1.fits);
         // No aligner spells it: not a verdict on the text.
         assert_eq!(row_of(&text, None).timing, "none");
+    }
+
+    #[test]
+    fn a_japanese_plain_text_is_judged_on_the_japanese_aligner_s_levels() {
+        // Measured: ammo's «Nostalzia» with its own text without line times,
+        // and with another song's text.
+        let text = AlignText { source: LyricsSource::Genius, lines: Vec::new(), timed: false, hash: "h".into() };
+        let ja = |heard: f32, spelled: f32| Fit { heard, aligner: Some(ModelId::AlignerJa), ..fit(spelled, Timing::None) };
+        let right = row_of(&text, Some(&ja(0.23, 0.04)));
+        assert!(right.body.is_some(), "a right Japanese text is not «Другая запись»");
+        assert_eq!(right.timing, "none");
+        assert!(row_of(&text, Some(&ja(0.03, 0.01))).body.is_none());
+        // Another aligner keeps its own bar.
+        let ru = Fit { heard: 0.23, ..fit(0.04, Timing::None) };
+        assert!(row_of(&text, Some(&ru)).body.is_none());
     }
 
     #[test]
