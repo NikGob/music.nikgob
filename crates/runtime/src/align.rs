@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 use nikgob_align::catalog::{self, ModelId, ModelState};
 use nikgob_align::fit::{Fit, Timing};
+use nikgob_align::pipeline::{Route, fallback};
 use nikgob_align::{Aligner, Catalog, Device, Error, Prepared, Stage};
 use nikgob_core::lyrics::{LyricLine, LyricsSource, LyricsSync};
 use nikgob_core::model::TrackId;
@@ -31,7 +32,7 @@ use crate::import::Internal;
 use crate::lyrics::{Aligned, Text};
 
 /// Who made a row: a new aligner or new rules go through the library again.
-pub(crate) const MADE_BY: &str = "align-1";
+pub(crate) const MADE_BY: &str = "align-2";
 /// A text the recording spells at least this well (over chance) is this
 /// song's (docs/lyrics-align.md, «The check»).
 pub(crate) const FITS: f32 = 0.08;
@@ -176,6 +177,9 @@ pub(crate) fn label(id: ModelId) -> &'static str {
         ModelId::Separator => "Отделение голоса",
         ModelId::AlignerRu => "Выравнивание: русский",
         ModelId::AlignerJa => "Выравнивание: японский",
+        ModelId::AlignerEn => "Выравнивание: английский",
+        ModelId::AlignerEn960 => "Выравнивание: английский (960h)",
+        ModelId::AlignerRuGolos => "Выравнивание: русский (Golos)",
         ModelId::AlignerMms => "Выравнивание: другие языки",
         ModelId::Whisper => "Распознавание текста",
     }
@@ -187,6 +191,9 @@ pub(crate) fn key(id: ModelId) -> &'static str {
         ModelId::Separator => "separator",
         ModelId::AlignerRu => "ru",
         ModelId::AlignerJa => "ja",
+        ModelId::AlignerEn => "en",
+        ModelId::AlignerEn960 => "en960",
+        ModelId::AlignerRuGolos => "rugolos",
         ModelId::AlignerMms => "mms",
         ModelId::Whisper => "whisper",
     }
@@ -399,13 +406,17 @@ impl Thread {
     }
 
     /// Makes sure the parts are there, downloading what lacks (when the
-    /// settings let it, or `asked`).
+    /// settings let it, or `asked`). An aligner with a stand-in that is
+    /// there is not downloaded unless the settings let it.
     fn ensure(&mut self, ids: &[ModelId], asked: bool) -> Result<(), Error> {
         for &id in ids {
             if self.aligner.catalog().ready(id) {
                 continue;
             }
             if !asked && !self.settings.models_auto {
+                if fallback(id).is_some_and(|f| self.aligner.catalog().ready(f)) {
+                    continue;
+                }
                 return Err(Error::Missing(label(id)));
             }
             self.downloading.insert(id, 0.0);
@@ -460,20 +471,39 @@ impl Thread {
         }
     }
 
-    /// The parts a check of `texts` needs.
-    fn needs(&self, texts: &[AlignText]) -> Vec<ModelId> {
+    /// The parts a check of `texts` needs, and the aligners their foreign
+    /// lines would like (an English line of a Russian song): those are
+    /// fetched as the others, but a check goes on without them.
+    fn needs(&self, texts: &[AlignText]) -> (Vec<ModelId>, Vec<ModelId>) {
         let mut ids = vec![ModelId::Runtime];
         if self.settings.separate {
             ids.push(ModelId::Separator);
         }
-        for t in texts {
-            if let Some(id) = Aligner::needs(&t.lines)
-                && !ids.contains(&id)
-            {
-                ids.push(id);
+        let mut extra = Vec::new();
+        for route in texts.iter().filter_map(|t| Route::of(&t.lines)) {
+            if !ids.contains(&route.main) {
+                ids.push(route.main);
+            }
+            for id in route.models().into_iter().skip(1) {
+                if !ids.contains(&id) && !extra.contains(&id) {
+                    extra.push(id);
+                }
             }
         }
-        ids
+        extra.retain(|id| !ids.contains(id));
+        (ids, extra)
+    }
+
+    /// [`Self::ensure`] of what [`Self::needs`] says: the extras may fail.
+    fn ensure_for(&mut self, texts: &[AlignText], asked: bool) -> Result<(), Error> {
+        let (ids, extra) = self.needs(texts);
+        self.ensure(&ids, asked)?;
+        for id in extra {
+            if let Err(e) = self.ensure(&[id], asked) {
+                log::info!("align: going on without {id:?}: {e}");
+            }
+        }
+        Ok(())
     }
 
     fn prepare(&mut self, track: TrackId, path: &Path, asked: bool) -> Result<Prepared, Error> {
@@ -507,11 +537,10 @@ impl Thread {
         if texts.is_empty() && !wants_heard {
             return Ok(());
         }
-        let mut ids = self.needs(texts);
         if wants_heard && texts.is_empty() {
-            ids.push(ModelId::Whisper);
+            self.ensure(&[ModelId::Whisper], false)?;
         }
-        self.ensure(&ids, false)?;
+        self.ensure_for(texts, false)?;
         let mut prep = self.prepare(track, path, asked)?;
         let mut rows = Vec::new();
         for t in texts {
@@ -547,8 +576,7 @@ impl Thread {
     }
 
     fn craft(&mut self, track: TrackId, path: &Path, text: &AlignText, target: LyricsSync) -> Result<Vec<LyricLine>, Error> {
-        let ids = self.needs(std::slice::from_ref(text));
-        self.ensure(&ids, true)?;
+        self.ensure_for(std::slice::from_ref(text), true)?;
         let mut prep = self.prepare(track, path, true)?;
         let fit = self.fit(track, &mut prep, text, true)?.ok_or_else(|| Error::Model("Этот текст не выровнять".into()))?;
         Ok(if target == LyricsSync::Line { to_lines(&fit.lines) } else { fit.lines })

@@ -10,9 +10,9 @@ use nikgob_core::lyrics::LyricLine;
 use crate::catalog::{Catalog, ModelId};
 use crate::ctc::Emissions;
 use crate::engine::{Device, Model};
-use crate::fit::{Fit, fit_text};
+use crate::fit::{Fit, Foreign, fit_text_with};
 use crate::separate::{self, KIM_VOCAL_2};
-use crate::text::{Letters, Script, Vocab};
+use crate::text::{Lang, Letters, Vocab};
 use crate::whisper::{self, Whisper};
 use crate::{Error, audio};
 
@@ -97,20 +97,110 @@ impl Prepared {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn text(lines: &[&str]) -> Vec<LyricLine> {
+        lines.iter().map(|l| LyricLine::new(Duration::ZERO, *l)).collect()
+    }
+
+    #[test]
+    fn each_language_goes_to_its_aligner() {
+        let ru = Route::of(&text(&["Я иду домой", "Baby, I love you", "И снова дождь"])).unwrap();
+        assert_eq!(ru.main, ModelId::AlignerRu);
+        assert_eq!(ru.lines, [ModelId::AlignerRu, ModelId::AlignerEn, ModelId::AlignerRu]);
+        assert_eq!(ru.models(), [ModelId::AlignerRu, ModelId::AlignerEn]);
+        let ja = Route::of(&text(&["君の名は", "Sayonara watashi no kokoro", "夢を見た"])).unwrap();
+        assert_eq!(ja.main, ModelId::AlignerJa);
+        // Romaji is heard by the romanising aligner.
+        assert_eq!(ja.lines[1], ModelId::AlignerMms);
+        let en = Route::of(&text(&["Hold me close", "Look me dead in my eyes"])).unwrap();
+        assert_eq!((en.main, en.models().len()), (ModelId::AlignerEn, 1));
+        let es = Route::of(&text(&["Que te quiero, mi amor", "para siempre"])).unwrap();
+        assert_eq!(es.main, ModelId::AlignerMms);
+        assert!(Route::of(&text(&["我爱你"])).is_none());
+        assert_eq!(Aligner::needs(&text(&["Hold me close"])), Some(ModelId::AlignerEn));
+    }
+
+    #[test]
+    fn english_falls_back_to_the_multilingual_aligner() {
+        assert_eq!(fallback(ModelId::AlignerEn), Some(ModelId::AlignerMms));
+        assert_eq!(fallback(ModelId::AlignerRu), None);
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = Catalog::new(dir.path());
+        let ready = |id: ModelId| {
+            std::fs::create_dir_all(catalog.path(id)).unwrap();
+            std::fs::write(catalog.path(id).join(".ready"), b"").unwrap();
+        };
+        let a = Aligner::new(catalog.clone(), Device::Cpu, 1);
+        // Neither there: the English one is what to download.
+        assert_eq!(a.usable(ModelId::AlignerEn), ModelId::AlignerEn);
+        ready(ModelId::AlignerMms);
+        assert_eq!(a.usable(ModelId::AlignerEn), ModelId::AlignerMms);
+        ready(ModelId::AlignerEn);
+        assert_eq!(a.usable(ModelId::AlignerEn), ModelId::AlignerEn);
+    }
+}
+
 fn percentile(v: &[f32], q: f32) -> f32 {
     let mut s = v.to_vec();
     s.sort_by(f32::total_cmp);
     s.get(((s.len() as f32 - 1.0) * q).round() as usize).copied().unwrap_or(0.0)
 }
 
-/// The aligner for a text's script.
-pub fn aligner_for(script: Script) -> Option<ModelId> {
-    match script {
-        Script::Cyrillic => Some(ModelId::AlignerRu),
-        Script::Japanese => Some(ModelId::AlignerJa),
-        Script::Latin | Script::Other => Some(ModelId::AlignerMms),
+/// The aligner for a language (docs/lyrics-align.md, «Models chosen»).
+pub fn aligner_for(lang: Lang) -> Option<ModelId> {
+    match lang {
+        Lang::Russian => Some(ModelId::AlignerRu),
+        Lang::Japanese => Some(ModelId::AlignerJa),
+        Lang::English => Some(ModelId::AlignerEn),
+        Lang::Other => Some(ModelId::AlignerMms),
         // Han without kana and Hangul: no aligner spells them yet.
-        Script::Chinese | Script::Korean => None,
+        Lang::Chinese | Lang::Korean => None,
+    }
+}
+
+/// What hears a language when its own aligner is not there (and may not
+/// be downloaded): the multilingual one, which it was measured against.
+pub fn fallback(id: ModelId) -> Option<ModelId> {
+    (id == ModelId::AlignerEn).then_some(ModelId::AlignerMms)
+}
+
+/// Which aligner hears each line of a text: the text's language's, and
+/// for a line in another script its own (an English line of a Russian
+/// song).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Route {
+    pub main: ModelId,
+    /// One per line.
+    pub lines: Vec<ModelId>,
+}
+
+impl Route {
+    /// `None` when no aligner spells the text's language.
+    pub fn of(lines: &[LyricLine]) -> Option<Self> {
+        let text: String = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+        let lang = Lang::of(&text);
+        let main = aligner_for(lang)?;
+        let lines = Lang::of_lines(lang, lines.iter().map(|l| l.text.as_str()))
+            .into_iter()
+            .map(|l| aligner_for(l).unwrap_or(main))
+            .collect();
+        Some(Self { main, lines })
+    }
+
+    /// Every aligner it uses, the text's own first.
+    pub fn models(&self) -> Vec<ModelId> {
+        let mut out = vec![self.main];
+        for id in &self.lines {
+            if !out.contains(id) {
+                out.push(*id);
+            }
+        }
+        out
     }
 }
 
@@ -228,28 +318,67 @@ impl Aligner {
 
     /// Fits a text to the song (`timed`: its line starts are real times).
     /// `None` when no aligner spells its script or it has nothing to align.
+    /// Each line goes to the aligner of its language ([`Route`]) when that
+    /// one is there; the text's own is needed.
     pub fn fit(&mut self, prep: &mut Prepared, lines: &[LyricLine], timed: bool, progress: &mut dyn FnMut(Stage) -> bool) -> Result<Option<Fit>, Error> {
-        let Some(id) = Self::needs(lines) else { return Ok(None) };
-        self.fit_with(prep, id, lines, timed, progress)
+        let Some(route) = Route::of(lines) else { return Ok(None) };
+        let main = self.usable(route.main);
+        let mut others: Vec<(ModelId, Vec<usize>)> = Vec::new();
+        for (i, id) in route.lines.iter().enumerate() {
+            let id = self.usable(*id);
+            if id == main || !self.catalog.ready(id) {
+                continue;
+            }
+            match others.iter_mut().find(|(o, _)| *o == id) {
+                Some((_, ls)) => ls.push(i),
+                None => others.push((id, vec![i])),
+            }
+        }
+        self.heard(prep, main, progress)?;
+        for (id, _) in &others {
+            self.heard(prep, *id, progress)?;
+        }
+        if !progress(Stage::Align) {
+            return Err(Error::Stopped);
+        }
+        let vocab = self.ctc(main)?.1.clone();
+        let mut vocabs = Vec::new();
+        for (id, _) in &others {
+            vocabs.push(self.ctc(*id)?.1.clone());
+        }
+        let foreign: Vec<Foreign<'_>> =
+            others.iter().zip(&vocabs).map(|((id, ls), v)| Foreign { em: &prep.heard[id], vocab: v, lines: ls }).collect();
+        Ok(fit_text_with(&prep.heard[&main], &vocab, &foreign, lines, timed).map(|mut f| {
+            f.covered = prep.covered(&f.lines);
+            f
+        }))
     }
 
-    /// [`Self::fit`] with a given aligner.
+    /// `id`, or what stands in for it when it is not there and that is.
+    pub fn usable(&self, id: ModelId) -> ModelId {
+        match fallback(id) {
+            Some(f) if !self.catalog.ready(id) && self.catalog.ready(f) => f,
+            _ => id,
+        }
+    }
+
+    /// [`Self::fit`] with a given aligner for every line.
     pub fn fit_with(&mut self, prep: &mut Prepared, id: ModelId, lines: &[LyricLine], timed: bool, progress: &mut dyn FnMut(Stage) -> bool) -> Result<Option<Fit>, Error> {
         self.heard(prep, id, progress)?;
         if !progress(Stage::Align) {
             return Err(Error::Stopped);
         }
         let vocab = self.ctc(id)?.1.clone();
-        Ok(fit_text(&prep.heard[&id], &vocab, lines, timed).map(|mut f| {
+        Ok(fit_text_with(&prep.heard[&id], &vocab, &[], lines, timed).map(|mut f| {
             f.covered = prep.covered(&f.lines);
             f
         }))
     }
 
-    /// The aligners a text needs (to download them first).
+    /// The aligner a text needs (to download it first); its foreign lines
+    /// may want others ([`Route::models`]).
     pub fn needs(lines: &[LyricLine]) -> Option<ModelId> {
-        let text: String = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
-        aligner_for(Script::of(&text))
+        Route::of(lines).map(|r| r.main)
     }
 
     /// Recognises the song from scratch: Whisper's lines, then their words
@@ -285,7 +414,7 @@ impl Aligner {
         }
         // Word timing from the aligner when one spells the language;
         // otherwise the segments as lines.
-        match Self::needs(&lines).filter(|id| self.catalog.ready(*id)) {
+        match Self::needs(&lines).map(|id| self.usable(id)).filter(|id| self.catalog.ready(*id)) {
             Some(_) => Ok(self.fit(prep, &lines, false, progress)?.map_or(lines.clone(), |f| f.lines)),
             None => Ok(lines),
         }

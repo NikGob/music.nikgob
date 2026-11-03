@@ -28,6 +28,11 @@ pub enum ModelId {
     AlignerRu,
     /// The Japanese aligner.
     AlignerJa,
+    /// The English aligner.
+    AlignerEn,
+    /// Candidates measured against the others (docs/lyrics-align.md).
+    AlignerEn960,
+    AlignerRuGolos,
     /// Whisper large-v3-turbo, recognition from scratch.
     Whisper,
 }
@@ -160,6 +165,69 @@ pub const ALIGNER_JA: ModelSpec = ModelSpec {
     ],
 };
 
+pub const ALIGNER_EN: ModelSpec = ModelSpec {
+    id: ModelId::AlignerEn,
+    dir: "xlsr-53-english",
+    files: &[
+        FileSpec {
+            name: "model_int8.onnx",
+            url: hf!("Xenova/wav2vec2-large-xlsr-53-english", "1069a135be5e7a72b173421acc29111b0763adf8", "onnx/model_int8.onnx"),
+            size: 317_490_640,
+            sha256: "f2b8cc658baee8361d529e85101bcb8084d6287a287383393b683f5d32e71482",
+            extract: &[],
+        },
+        FileSpec {
+            name: "vocab.json",
+            url: hf!("Xenova/wav2vec2-large-xlsr-53-english", "1069a135be5e7a72b173421acc29111b0763adf8", "vocab.json"),
+            size: 369,
+            sha256: "f7a204596a4f25139bf3e0e3f6d5d205f16cd58fb6aa29e29bb70240a60401e4",
+            extract: &[],
+        },
+    ],
+};
+
+pub const ALIGNER_EN960: ModelSpec = ModelSpec {
+    id: ModelId::AlignerEn960,
+    dir: "lv60-960h",
+    files: &[
+        FileSpec {
+            name: "model_int8.onnx",
+            url: hf!("linandrea/wav2vec2-large-960h-lv60-self-onnx", "20eaa6d7ea9cd7abb5460b4a697010ca3562377d", "onnx/model_quantized.onnx"),
+            size: 355_006_955,
+            sha256: "7c8f4b674d2130375f82fd7d5dcc407d86efcfe8d782c000e9bda526bfa0d818",
+            extract: &[],
+        },
+        FileSpec {
+            name: "vocab.json",
+            url: hf!("linandrea/wav2vec2-large-960h-lv60-self-onnx", "20eaa6d7ea9cd7abb5460b4a697010ca3562377d", "vocab.json"),
+            size: 358,
+            sha256: "4178db26b3c7570f6a47f14ac6a1c7b32950b8c2800fb097287e53776934f1c5",
+            extract: &[],
+        },
+    ],
+};
+
+pub const ALIGNER_RU_GOLOS: ModelSpec = ModelSpec {
+    id: ModelId::AlignerRuGolos,
+    dir: "golos-ru",
+    files: &[
+        FileSpec {
+            name: "model_int8.onnx",
+            url: hf!("onnx-community/wav2vec2-large-ru-golos-ONNX", "ba91b146009d5e0dec175d161a7eb1f769cf6fa3", "onnx/model_int8.onnx"),
+            size: 317_380_591,
+            sha256: "0ccedf98cd57af2ca87fb4e2b73542934609bd7808e357952db84e520fe17c76",
+            extract: &[],
+        },
+        FileSpec {
+            name: "vocab.json",
+            url: hf!("onnx-community/wav2vec2-large-ru-golos-ONNX", "ba91b146009d5e0dec175d161a7eb1f769cf6fa3", "vocab.json"),
+            size: 445,
+            sha256: "bbc5239b97f1bb67c8831cedd2c72666940933b005e7fa7b7558c0f9bfbe15d3",
+            extract: &[],
+        },
+    ],
+};
+
 pub const WHISPER: ModelSpec = ModelSpec {
     id: ModelId::Whisper,
     dir: "whisper-large-v3-turbo",
@@ -188,7 +256,7 @@ pub const WHISPER: ModelSpec = ModelSpec {
     ],
 };
 
-pub const ALL: [ModelSpec; 6] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, WHISPER];
+pub const ALL: [ModelSpec; 9] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, ALIGNER_EN960, ALIGNER_RU_GOLOS, WHISPER];
 
 impl ModelId {
     pub fn spec(self) -> ModelSpec {

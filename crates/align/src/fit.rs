@@ -28,6 +28,9 @@ pub const STEADY: f32 = 0.4;
 /// A line placed further than this from where its own steady times put
 /// it is aligned again in its window.
 const ASTRAY: f32 = 1.0;
+/// A block of lines heard by another aligner may reach this far into its
+/// neighbours' times.
+const MARGIN: f32 = 0.3;
 /// Offsets smaller than this are left alone.
 pub const NOTICEABLE: f32 = 0.15;
 /// The aligner puts a word's start this much after the singer starts it
@@ -86,9 +89,28 @@ struct Placed {
     peak: f32,
 }
 
+/// Lines of a text that another aligner hears better than the text's own
+/// (an English line of a Russian song): that aligner's emissions of the
+/// song, its letters, and the lines' indices.
+#[derive(Clone, Copy, Debug)]
+pub struct Foreign<'a> {
+    pub em: &'a Emissions,
+    pub vocab: &'a Vocab,
+    pub lines: &'a [usize],
+}
+
 /// Aligns `lines` (the text of a source; `timed` when its line starts are
 /// real times) to the song's emissions.
 pub fn fit_text(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], timed: bool) -> Option<Fit> {
+    fit_text_with(em, vocab, &[], lines, timed)
+}
+
+/// [`fit_text`] with lines in another language: the whole text is aligned
+/// with the text's own aligner first (its foreign lines too, which keeps
+/// their place in time), then each run of foreign lines again with its
+/// own aligner, between the lines around it. The verdict is the text's
+/// own aligner's.
+pub fn fit_text_with(em: &Emissions, vocab: &Vocab, foreign: &[Foreign<'_>], lines: &[LyricLine], timed: bool) -> Option<Fit> {
     // Pieces: a word-timed source keeps its own; others are cut here.
     let mut placed: Vec<Placed> = Vec::new();
     let mut tokens: Vec<i32> = Vec::new();
@@ -195,8 +217,13 @@ pub fn fit_text(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], timed: bool)
     // the pass over the whole song (a spoken intro, an ad-lib the text
     // lacks can pull its first word away): such a line again, within its
     // own moved times.
+    let alien: Vec<bool> = (0..lines.len()).map(|i| foreign.iter().any(|f| f.lines.contains(&i))).collect();
     if matches!(timing, Timing::Fits | Timing::Shifted) {
-        realign_lines(em, vocab, lines, &mut placed, offset);
+        realign_lines(em, vocab, lines, &mut placed, offset, &alien);
+    }
+    let total = em.secs(em.frames());
+    for f in foreign {
+        place_foreign(f, lines, &mut placed, total);
     }
 
     let text: Vec<i32> = tokens.iter().copied().filter(|t| Some(*t) != vocab.sep).collect();
@@ -225,11 +252,11 @@ pub fn fit_text(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], timed: bool)
 /// keep the whole-song pass, where every line's neighbours hold their own
 /// words (a window alone lets a line take its neighbour's sounds: 97 % of
 /// words within 0.3 s fell to 65 % when every line was aligned so).
-fn realign_lines(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &mut [Placed], offset: f32) {
+fn realign_lines(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &mut [Placed], offset: f32, skip: &[bool]) {
     let starts: Vec<f32> = lines.iter().map(|l| l.start.as_secs_f32() - offset).collect();
     let total = em.secs(em.frames());
     for (li, l) in lines.iter().enumerate() {
-        if l.text.trim().is_empty() || l.background {
+        if l.text.trim().is_empty() || l.background || skip[li] {
             continue;
         }
         let next = starts[li + 1..]
@@ -246,41 +273,78 @@ fn realign_lines(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &mu
             continue;
         }
         let idx: Vec<usize> = placed.iter().enumerate().filter(|(_, p)| p.line == li).map(|(i, _)| i).collect();
-        let mut tokens = Vec::new();
-        let mut owner = Vec::new();
-        for &i in &idx {
-            let toks = vocab.tokens(&placed[i].text);
-            for t in &toks {
-                tokens.push(*t);
-                owner.push(Some(i));
-            }
-            if let Some(sep) = vocab.sep
-                && !toks.is_empty()
-                && placed[i].text.ends_with(char::is_whitespace)
-            {
-                tokens.push(sep);
-                owner.push(None);
-            }
-        }
-        if tokens.is_empty() {
+        align_pieces(em, vocab, placed, &idx, from, to);
+    }
+}
+
+/// Aligns each run of `f`'s lines again with its own aligner, between the
+/// end of the line before it and the start of the line after it (as the
+/// whole-song pass placed them), a little into both.
+fn place_foreign(f: &Foreign<'_>, lines: &[LyricLine], placed: &mut [Placed], total: f32) {
+    let span_of = |placed: &[Placed], li: usize| {
+        placed.iter().filter(|p| p.line == li).filter_map(|p| p.span).fold(None, |acc: Option<(f32, f32)>, (a, b)| {
+            Some(acc.map_or((a, b), |(s, e)| (s.min(a), e.max(b))))
+        })
+    };
+    let sung: Vec<usize> = (0..lines.len()).filter(|i| !lines[*i].text.trim().is_empty()).collect();
+    let mut k = 0;
+    while k < sung.len() {
+        if !f.lines.contains(&sung[k]) {
+            k += 1;
             continue;
         }
-        let (slice, at) = em.slice(from, to);
-        let Some(spans) = force_align(&slice, &tokens) else { continue };
-        let mut fresh: Vec<Option<(f32, f32)>> = vec![None; placed.len()];
-        let mut peaks: Vec<(f32, usize)> = vec![(0.0, 0); placed.len()];
-        for (span, i) in spans.iter().zip(&owner) {
-            let Some(i) = *i else { continue };
-            let (a, b) = (em.secs(at + span.first), em.secs(at + span.last + 1));
-            fresh[i] = Some(fresh[i].map_or((a, b), |(s, e)| (s.min(a), e.max(b))));
-            peaks[i].0 += span.peak;
-            peaks[i].1 += 1;
+        let first = k;
+        while k < sung.len() && f.lines.contains(&sung[k]) {
+            k += 1;
         }
-        for &i in &idx {
-            if let Some(span) = fresh[i] {
-                placed[i].span = Some(span);
-                placed[i].peak = peaks[i].0 / peaks[i].1.max(1) as f32;
-            }
+        let from = sung[..first].iter().rev().find_map(|li| span_of(placed, *li)).map_or(0.0, |(_, e)| e);
+        let to = sung[k..].iter().find_map(|li| span_of(placed, *li)).map_or(total, |(a, _)| a);
+        let (from, to) = ((from - MARGIN).max(0.0), (to + MARGIN).min(total));
+        if to - from < 0.3 {
+            continue;
+        }
+        let idx: Vec<usize> = placed.iter().enumerate().filter(|(_, p)| sung[first..k].contains(&p.line)).map(|(i, _)| i).collect();
+        align_pieces(f.em, f.vocab, placed, &idx, from, to);
+    }
+}
+
+/// Aligns the pieces `idx` of `placed` within seconds `from..to` of `em`
+/// and takes their new places (all of them, or none when they do not fit).
+fn align_pieces(em: &Emissions, vocab: &Vocab, placed: &mut [Placed], idx: &[usize], from: f32, to: f32) {
+    let mut tokens = Vec::new();
+    let mut owner = Vec::new();
+    for &i in idx {
+        let toks = vocab.tokens(&placed[i].text);
+        for t in &toks {
+            tokens.push(*t);
+            owner.push(Some(i));
+        }
+        if let Some(sep) = vocab.sep
+            && !toks.is_empty()
+            && placed[i].text.ends_with(char::is_whitespace)
+        {
+            tokens.push(sep);
+            owner.push(None);
+        }
+    }
+    if tokens.is_empty() {
+        return;
+    }
+    let (slice, at) = em.slice(from, to);
+    let Some(spans) = force_align(&slice, &tokens) else { return };
+    let mut fresh: Vec<Option<(f32, f32)>> = vec![None; placed.len()];
+    let mut peaks: Vec<(f32, usize)> = vec![(0.0, 0); placed.len()];
+    for (span, i) in spans.iter().zip(&owner) {
+        let Some(i) = *i else { continue };
+        let (a, b) = (em.secs(at + span.first), em.secs(at + span.last + 1));
+        fresh[i] = Some(fresh[i].map_or((a, b), |(s, e)| (s.min(a), e.max(b))));
+        peaks[i].0 += span.peak;
+        peaks[i].1 += 1;
+    }
+    for &i in idx {
+        if let Some(span) = fresh[i] {
+            placed[i].span = Some(span);
+            placed[i].peak = peaks[i].0 / peaks[i].1.max(1) as f32;
         }
     }
 }
@@ -433,6 +497,39 @@ mod tests {
         // Times all over the place: another version.
         let lines = [line(0.0, "ааа"), line(3.0, "ббб"), line(1.0, "ввв")];
         assert_eq!(fit_text(&em, &v, &lines, true).unwrap().timing, Timing::Elsewhere);
+    }
+
+    /// Emissions over a 5-letter vocabulary (0 blank) from the best letter
+    /// of each frame, at 10 frames a second.
+    fn frames(best: &[usize]) -> Emissions {
+        let mut logp = Vec::new();
+        for &b in best {
+            for i in 0..5 {
+                logp.push(if i == b { 0.9f32.ln() } else { 0.025f32.ln() });
+            }
+        }
+        Emissions { logp, vocab: 5, fps: 10.0, blank: 0 }
+    }
+
+    #[test]
+    fn a_foreign_line_is_placed_by_its_own_aligner() {
+        // The text's aligner hears «а», an ad-lib it takes for letters
+        // (frames 4–5), nothing in the foreign line, then «б»; the other
+        // aligner hears «xyz» at frames 10–12.
+        let (v, _) = setup("");
+        let main = frames(&[0, 2, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 0]);
+        let other_vocab = Vocab::from_json(r#"{"<pad>":0,"|":1,"x":2,"y":3,"z":4}"#, Letters::Native).unwrap();
+        let other = frames(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 4, 0, 0, 0, 0]);
+        let lines = [line(0.0, "а"), line(0.0, "xyz"), line(0.0, "б")];
+        let alone = fit_text(&main, &v, &lines, false).unwrap();
+        assert!(alone.lines[1].start.as_secs_f32() < 0.7, "{:?}", alone.lines[1]);
+        let f = Foreign { em: &other, vocab: &other_vocab, lines: &[1] };
+        let both = fit_text_with(&main, &v, &[f], &lines, false).unwrap();
+        let start = both.lines[1].start.as_secs_f32();
+        assert!((start - (1.0 - LATE)).abs() < 0.05, "{:?}", both.lines[1]);
+        // The verdict stays the text's aligner's.
+        assert_eq!(both.score, alone.score);
+        assert!(both.lines[2].start > both.lines[1].start);
     }
 
     #[test]
