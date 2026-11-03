@@ -28,9 +28,14 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) ->
 
     let l = &state.lyrics;
     let mut rows = Vec::new();
-    let mut menu = Menu::new(("lyrics-menu", l.track));
+    let mut menu = Menu::new(("lyrics-menu", l.track)).align_center(true);
     if l.track.is_some() && !l.sources.is_empty() {
-        menu = menu.item(MenuItem::new("Автоматически").selected(!l.picked)).divider();
+        // Says which text the player chose.
+        let mut auto = MenuItem::new("Автоматически").selected(!l.picked);
+        if let Some(src) = l.source.filter(|_| !l.picked) {
+            auto = auto.shortcut(src.label());
+        }
+        menu = menu.item(auto).divider();
         rows.push(Row::Auto);
         for o in &l.sources {
             menu = menu.item(

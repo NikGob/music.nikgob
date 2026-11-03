@@ -67,31 +67,20 @@ pub(crate) fn show(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
     // The content appears once the container has grown most of the way.
     let content_a = ((k - 0.45) / 0.55).clamp(0.0, 1.0) * alpha;
 
-    // Scrim: dims the player, a click closes.
-    let scrim = Area::new(id.with("scrim"))
-        .fade_in(false)
-        .order(Order::Foreground)
-        .fixed_pos(screen.min)
-        .constrain(false)
-        .interactable(true)
-        .show(ctx, |ui| {
-            let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
-            ui.painter().rect_filled(r, 0.0, s.scrim_overlay().gamma_multiply(alpha));
-            resp
-        })
-        .inner;
-    if open && (scrim.clicked() || ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))) {
-        close(ctx);
-    }
-
+    // One layer over everything (Now Playing too): the scrim that dims the
+    // player and closes on a click, then the dialog.
+    let mut scrim_clicked = false;
     Area::new(id.with("dialog"))
         .fade_in(false)
         .order(Order::Tooltip)
         .fixed_pos(screen.min)
         .constrain(false)
-        .interactable(open && k > 0.9)
+        .interactable(open)
         .show(ctx, |ui| {
             ui.set_clip_rect(screen);
+            let (r, scrim) = ui.allocate_exact_size(screen.size(), Sense::click());
+            ui.painter().rect_filled(r, 0.0, s.scrim_overlay().gamma_multiply(alpha));
+            scrim_clicked = scrim.clicked() && !rect.contains(scrim.interact_pointer_pos().unwrap_or_default());
             let radii = Radii::all(radius).clamped(rect);
             // The control's colour turns into the dialog's.
             let fill = lerp_color(s.secondary_container, s.surface_container_high, k.clamp(0.0, 1.0));
@@ -101,11 +90,16 @@ pub(crate) fn show(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
             let mut cui = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)).id_salt("lyrics-dialog-body"));
             cui.set_clip_rect(rect.shrink(2.0).intersect(screen));
             cui.multiply_opacity(content_a);
-            if content_a < 0.05 {
+            // Usable once it has (nearly) arrived; a disabled ui fades what
+            // it paints, so only the content is.
+            if !(open && k > 0.9) {
                 cui.disable();
             }
             body(&mut cui, inner, state, out);
         });
+    if open && (scrim_clicked || ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))) {
+        close(ctx);
+    }
 }
 
 fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
@@ -122,9 +116,6 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
     ui.allocate_ui_with_layout(vec2(inner.width(), 40.0), Layout::left_to_right(Align::Center), |ui| {
         ui.label(TypeRole::HeadlineSmall.style().rich("Текст песни", s.on_surface));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.add(IconButton::new(Icon::Close).tooltip("Закрыть").id_salt("lyrics-dialog-close")).clicked() {
-                close(ui.ctx());
-            }
             if ui.add(IconButton::new(Icon::Settings).tooltip("Настройки текста").id_salt("lyrics-dialog-settings")).clicked() {
                 close(ui.ctx());
                 super::request(ui.ctx(), super::Request::Settings);
@@ -174,6 +165,9 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
+            if ui.add(Button::new("Готово").style(Style::Text).size(Size::S).id_salt("lyrics-dialog-done")).clicked() {
+                close(ui.ctx());
+            }
             if super::busy(state).is_none() {
                 // The primary action is the finest timing; lines beside it.
                 for (i, (target, label)) in super::actions(state).into_iter().rev().enumerate() {

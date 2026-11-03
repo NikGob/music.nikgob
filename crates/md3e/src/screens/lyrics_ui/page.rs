@@ -16,7 +16,8 @@ use crate::{Icon, Theme, TypeRole};
 const LEFT: f32 = 320.0;
 const GAP: f32 = 24.0;
 
-pub(crate) fn show(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
+/// The page; `bottom` is the room the floating player takes at the bottom.
+pub(crate) fn show(ui: &mut Ui, state: &ViewState, bottom: f32, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let view = ui.clip_rect();
     ui.set_max_width(ui.available_width().min(1120.0));
@@ -44,7 +45,7 @@ pub(crate) fn show(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> Op
 
     let top = ui.cursor().top();
     // As tall as the window leaves (the page scrolls only on small ones).
-    let h = (view.bottom() - top - 32.0).max(360.0);
+    let h = (view.bottom() - top - bottom - 16.0).max(360.0);
     let w = ui.available_width();
     let narrow = w < LEFT + GAP + 360.0;
     if narrow {

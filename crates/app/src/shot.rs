@@ -518,8 +518,9 @@ impl Shot {
                 self.wait = 40;
             }
             "lyrics_ui" => {
+                // `lyrics_ui:4` shoots 4 frames in (mid-transition).
                 nikgob_md3e::screens::lyrics_ui::open(ctx);
-                self.wait = 60;
+                self.wait = arg.parse().unwrap_or(60);
             }
             "search" => {
                 ui.set_search(arg, out);

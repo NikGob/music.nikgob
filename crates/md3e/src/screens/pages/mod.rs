@@ -978,7 +978,7 @@ pub fn page(
                 Route::Playlist(id) => detail::playlist(ui, *id, state, pages, out),
                 Route::Downloads(_) => downloads::show(ui, state, pages, out),
                 Route::Settings => settings::show(ui, state, pages, out),
-                Route::Lyrics => crate::screens::lyrics_ui::page::show(ui, state, out),
+                Route::Lyrics => crate::screens::lyrics_ui::page::show(ui, state, bottom_inset, out),
                 Route::Stream(page) => streams::page(ui, page, state, pages, out),
                 Route::World(key) => world::show(ui, key, state, pages, out),
                 Route::Mix { key, world } => detail::mix(ui, *key, world.as_deref(), state, pages, out),
