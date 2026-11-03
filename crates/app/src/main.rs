@@ -110,8 +110,11 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
         nikgob_view::NpSlot::None
     };
     let legacy = value.get("np_slot").is_none();
+    // Prefs from before a change of the lyrics defaults take the new ones.
+    let lyrics_rev = value.get("lyrics_rev").and_then(|v| v.as_u64()).map_or(0, |r| r.min(u64::from(u8::MAX)) as u8);
     let mut prefs: Prefs = serde_json::from_value(value)?;
     if legacy { prefs.np_slot = slot; }
+    prefs.upgrade_lyrics(lyrics_rev);
     Ok(prefs)
 }
 
@@ -754,6 +757,26 @@ mod prefs_tests {
             assert!(value.get("lyrics_mega").is_none());
             assert!(value.get("np_pane").is_none());
         }
+    }
+
+    /// Prefs saved by a build with the old lyrics defaults (word timing for
+    /// every song on, no line timing of plain texts) get the new defaults
+    /// once; prefs saved since keep what the user chose.
+    #[test]
+    fn old_lyrics_defaults_move_to_the_new_ones_once() {
+        let old = r#"{"lyrics_check":true,"lyrics_words_all":true,"lyrics_recognize":true,"lyrics_gpu":false}"#;
+        let p = parse_prefs(old.as_bytes()).unwrap();
+        assert!(!p.lyrics_words_all && !p.lyrics_words_playing && p.lyrics_lines_auto);
+        assert_eq!(p.lyrics_rev, nikgob_view::LYRICS_REV);
+        // Everything else stays as it was.
+        assert!(p.lyrics_check && p.lyrics_recognize && !p.lyrics_gpu);
+        // Saved again, the user's own choices hold.
+        let mine = Prefs { lyrics_words_all: true, lyrics_words_playing: true, lyrics_lines_auto: false, ..p };
+        let again = parse_prefs(&serde_json::to_vec(&mine).unwrap()).unwrap();
+        assert_eq!(again, mine);
+        // A first start has the new defaults too.
+        let d = prefs_of(None);
+        assert!(!d.lyrics_words_all && !d.lyrics_words_playing && d.lyrics_lines_auto);
     }
 
     /// Главная asks for the name on the first start only: not with a prefs

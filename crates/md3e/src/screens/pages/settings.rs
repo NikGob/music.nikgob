@@ -835,40 +835,43 @@ fn pct(v: f32) -> String {
 }
 
 /// Rows drawn faded while what they tune is off (they still work).
-/// «Текст песен»: the check against the recording, word timing for every
-/// song, recognition, where the models run, and the models themselves.
+/// «Текст песен»: where the texts come from, what timing the player makes
+/// itself, the check, recognition, where the models run, and the models.
 fn lyrics_align(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Command>) {
     let a = &state.align;
-    row(ui, Id::LyricsCheck, "Сверять текст с записью", None, |ui| {
-        ui.add(Switch::new(&mut p.lyrics_check).id_salt("set-lyrics-check"));
+    row(ui, Id::LyricsGenius, "Искать текст на Genius", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_genius).id_salt("set-lyrics-genius"));
     });
-    let words = (a.total > 0).then(|| format!("Готово {} из {}", a.done.min(a.total), a.total));
+    row(ui, Id::LyricsLinesAuto, "Подсветка по строкам для текстов без времени", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_lines_auto).id_salt("set-lyrics-lines"));
+    });
+    row(ui, Id::LyricsWordsPlaying, "Подсветка по словам для песен, которые слушаю", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_words_playing).id_salt("set-lyrics-words-playing"));
+    });
+    let words = (p.lyrics_words_all && a.total > 0).then(|| format!("Готово {} из {}", a.done.min(a.total), a.total));
     row(ui, Id::LyricsWordsAll, "Подсветка по словам во всех песнях", words.as_deref(), |ui| {
         ui.add(Switch::new(&mut p.lyrics_words_all).id_salt("set-lyrics-words"));
     });
-    row(ui, Id::LyricsRecognize, "Распознавать текст, если его нет нигде", Some("Экспериментально"), |ui| {
+    row(ui, Id::LyricsCheck, "Проверять, что текст от этой песни", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_check).id_salt("set-lyrics-check"));
+    });
+    row(ui, Id::LyricsRecognize, "Распознавать слова, если текста нет нигде", Some("Экспериментально"), |ui| {
         ui.add(Switch::new(&mut p.lyrics_recognize).id_salt("set-lyrics-recognize"));
     });
     row(ui, Id::LyricsSeparate, "Отделять голос от музыки", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_separate).id_salt("set-lyrics-separate"));
     });
-    let device = match a.on_gpu {
-        Some(true) => Some("Сейчас на видеокарте"),
-        Some(false) if p.lyrics_gpu => Some("Видеокарта недоступна, сейчас на процессоре"),
-        _ => None,
-    };
-    row(ui, Id::LyricsGpu, "Считать на видеокарте", device, |ui| {
-        ui.add(Switch::new(&mut p.lyrics_gpu).id_salt("set-lyrics-gpu"));
-    });
-    row(ui, Id::LyricsGenius, "Искать текст на Genius", None, |ui| {
-        ui.add(Switch::new(&mut p.lyrics_genius).id_salt("set-lyrics-genius"));
-    });
+    // Says only where the models really run when that is not the choice.
+    let device = (a.on_gpu == Some(false) && p.lyrics_gpu).then_some("Видеокарта недоступна, считает процессор");
+    row(ui, Id::LyricsGpu, "Считать на", device, |ui| choice(ui, Id::LyricsGpu, p));
     row(ui, Id::LyricsModelsAuto, "Скачивать модели сами", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_models_auto).id_salt("set-lyrics-models-auto"));
     });
     let s = Theme::get(ui.ctx()).scheme;
+    let total: u64 = a.models.iter().map(|m| m.size).sum();
+    let title = if total > 0 { format!("Модели · {}", size_label(total)) } else { "Модели".to_owned() };
     settings_help::item(ui, Id::LyricsModels, "Модели", |ui| {
-        row_label(ui, Id::LyricsModels, "Модели");
+        row_label(ui, Id::LyricsModels, &title);
         if let Some(e) = &a.error {
             ui.label(TypeRole::BodySmall.style().rich(e, s.error));
         }
@@ -1035,7 +1038,7 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
     row(ui, Id::Keys, "Клавиши", Some("L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке"), |_| {});
 
     group(ui, "Текст песен");
-    row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", Some("Чтобы текст показывался и без интернета"), |ui| {
+    row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", None, |ui| {
         ui.add(Switch::new(&mut p.save_found_lyrics).id_salt("set-save-lyrics"));
     });
     row(ui, Id::LyricsReturn, &format!("Возвращаться к текущей строке через {:.0} с", p.lyrics_return_s), Some("После ручной прокрутки текста"), |ui| {

@@ -368,7 +368,9 @@ fn word_lyrics(track: Option<nikgob_view::TrackId>) -> nikgob_view::LyricsView {
     }
 }
 
-/// The texts of «Текст песни» (`fake:lyrics-texts`).
+/// The texts of a song whose only text is Genius' plain one, shown with
+/// the line timing the player made (`fake:lyrics-texts`): LyricsPlus and
+/// lrc.red have none, LRCLIB's is another version's.
 fn texts_lyrics(track: Option<nikgob_core::model::TrackId>) -> nikgob_view::LyricsView {
     use nikgob_core::lyrics::{LyricLine, LyricsSource};
     use nikgob_view::{LyricsAvail, LyricsOption, LyricsSync, LyricsText};
@@ -380,45 +382,56 @@ fn texts_lyrics(track: Option<nikgob_core::model::TrackId>) -> nikgob_view::Lyri
             .map(|l| LyricLine { start: l.start.saturating_sub(Duration::from_millis(shift)), end: None, words: Vec::new(), ..l.clone() })
             .collect()
     };
-    let plain: String = own.lines.iter().take(12).map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
-    let made: Vec<LyricLine> = own.lines.iter().take(12).cloned().collect();
+    let plain: String = own.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+    let made = lines_of(0);
     let texts = vec![
-        LyricsText { source: Some(LyricsSource::LyricsPlus), lines: own.lines.clone(), sync: Some(LyricsSync::Word), fits: Some(true), ..Default::default() },
-        LyricsText { source: Some(LyricsSource::LrcRed), lines: lines_of(300), sync: Some(LyricsSync::Line), fits: Some(true), made: Some(own.lines.clone()), ..Default::default() },
         LyricsText { source: Some(LyricsSource::Lrclib), lines: lines_of(2140), sync: Some(LyricsSync::Line), fits: Some(false), ..Default::default() },
-        LyricsText { source: Some(LyricsSource::Genius), plain: Some(plain), sync: Some(LyricsSync::Plain), fits: Some(true), made: Some(made), ..Default::default() },
+        LyricsText { source: Some(LyricsSource::Genius), plain: Some(plain), sync: Some(LyricsSync::Plain), fits: Some(true), made: Some(made.clone()), ..Default::default() },
     ];
-    let option = |source, sync, fits, made| LyricsOption { source, state: LyricsAvail::Ready(sync), fits, made };
+    let option = |source, state, fits, made| LyricsOption { source, state, fits, made };
     nikgob_view::LyricsView {
+        lines: made,
+        source: Some(LyricsSource::Genius),
+        made: true,
         sources: vec![
-            option(LyricsSource::LyricsPlus, LyricsSync::Word, Some(true), false),
-            option(LyricsSource::LrcRed, LyricsSync::Line, Some(true), true),
-            option(LyricsSource::Lrclib, LyricsSync::Line, Some(false), false),
-            option(LyricsSource::Genius, LyricsSync::Plain, Some(true), true),
+            option(LyricsSource::LyricsPlus, LyricsAvail::Missing, None, false),
+            option(LyricsSource::LrcRed, LyricsAvail::Missing, None, false),
+            option(LyricsSource::Lrclib, LyricsAvail::Ready(LyricsSync::Line), Some(false), false),
+            option(LyricsSource::Genius, LyricsAvail::Ready(LyricsSync::Plain), Some(true), true),
         ],
         texts,
         ..own
     }
 }
 
-/// Timing for Genius' text being made at `stage` (`fake:craft:…`).
+/// Word timing for Genius' text asked for and at `stage`
+/// (`fake:craft:download|decode|separate|listen|align|done|failed`); done,
+/// the made words are shown.
 fn craft(s: &mut ViewState, track: nikgob_core::model::TrackId, name: &str) {
     use nikgob_core::lyrics::LyricsSource;
     use nikgob_view::{AlignJob, AlignStage, Craft, LyricsSync};
-    let (stage, progress) = match name {
-        "download" => (AlignStage::Download, 0.42),
-        "decode" => (AlignStage::Decode, 0.0),
-        "separate" => (AlignStage::Separate, 0.45),
-        "listen" => (AlignStage::Listen, 0.6),
-        "align" => (AlignStage::Align, 1.0),
-        _ => (AlignStage::Align, 1.0),
+    let (stage, progress, bytes) = match name {
+        "download" => (AlignStage::Download, 0.42, Some((310_378_496, 743_440_384))),
+        "decode" => (AlignStage::Decode, 0.0, None),
+        "separate" => (AlignStage::Separate, 0.45, None),
+        "listen" => (AlignStage::Listen, 0.6, None),
+        _ => (AlignStage::Align, 1.0, None),
     };
-    let done = s.lyrics.texts.iter().find(|t| t.source == Some(LyricsSource::Genius)).and_then(|t| t.made.clone());
     let mut c = Craft { track, source: LyricsSource::Genius, target: LyricsSync::Word, lines: None, failed: None };
     match name {
-        "done" => c.lines = done,
+        "done" => {
+            // Applied at once: the words are the shown text, picked.
+            let words = word_lyrics(Some(track)).lines;
+            s.lyrics.lines = words.clone();
+            s.lyrics.picked = true;
+            if let Some(t) = s.lyrics.texts.iter_mut().find(|t| t.source == Some(LyricsSource::Genius)) {
+                t.made = Some(words);
+                t.saved = true;
+            }
+            return;
+        }
         "failed" => c.failed = Some("Не удалось скачать модели".into()),
-        _ => s.align.job = Some(AlignJob { track: Some(track), stage, progress, asked: true }),
+        _ => s.align.job = Some(AlignJob { track: Some(track), stage, progress, asked: true, bytes }),
     }
     s.align.craft = Some(c);
 }

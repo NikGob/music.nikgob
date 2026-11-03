@@ -1100,7 +1100,7 @@ pub fn show(
                 NpSlot::Lyrics => {
                     let _p = crate::prof::scope("np.lyrics");
                     if super::lyrics::show(&mut cui, state, pages.levels_bass, true, out) {
-                        pages.open_setting(super::pages::SettingId::LyricsStyle);
+                        pages.open_setting(super::lyrics_ui::SETTINGS);
                         closed = true;
                     }
                 }

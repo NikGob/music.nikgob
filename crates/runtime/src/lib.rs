@@ -746,7 +746,7 @@ impl Worker {
             Command::Seek(p) => self.seek(p),
             Command::PickLyricsSource(t, src) => self.pick_lyrics_source(t, src),
             Command::CraftLyrics { track, source, target } => self.craft_lyrics(track, source, target),
-            Command::KeepCraft(keep) => self.keep_craft(keep),
+            Command::ClearCraft => self.clear_craft(),
             Command::AlignModel { key, download } => self.align_model(&key, download),
             Command::SeekBy(ms) => {
                 let p = self.position_now().as_millis() as i64 + ms;
@@ -2141,6 +2141,11 @@ impl Worker {
         self.save_prefs();
         self.import_prefs(&p);
         self.align_settings();
+        if (old.lyrics_words_playing, old.lyrics_words_all, old.lyrics_lines_auto, old.lyrics_check)
+            != (p.lyrics_words_playing, p.lyrics_words_all, p.lyrics_lines_auto, p.lyrics_check)
+        {
+            self.lyrics_prefs_changed();
+        }
         let lyrics_track = self.state.read().lyrics.track;
         if !old.save_found_lyrics && p.save_found_lyrics
             && let Some(track) = lyrics_track

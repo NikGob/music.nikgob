@@ -93,6 +93,10 @@ pub enum SettingId {
     SaveLyrics,
     LyricsReturn,
     LyricsCheck,
+    /// «Подсветка по строкам для текстов без времени».
+    LyricsLinesAuto,
+    /// «Подсветка по словам для песен, которые слушаю».
+    LyricsWordsPlaying,
     LyricsWordsAll,
     LyricsRecognize,
     LyricsSeparate,
@@ -395,14 +399,16 @@ impl SettingId {
             Keys => "Клавиши, которые работают на экране трека.",
             SaveLyrics => "Найденный в интернете текст песни сохраняется прямо в файл трека и потом показывается без интернета.",
             LyricsReturn => "Если ты сам прокрутил текст, через столько секунд он вернётся к строке, которую поют.",
-            LyricsCheck => "Найденный текст сверяется с самой песней: плеер слушает голос и смотрит, те ли это слова и в то ли время. Текст другой песни или другой записи уступает подходящему, а строки, которые идут раньше или позже голоса, ставятся по записи.",
-            LyricsWordsAll => "Плеер сам расставляет слова по голосу во всех песнях с файлом, понемногу в фоне, и подсветка идёт по словам даже там, где источник дал только строки или простой текст. Сделанное хранится в библиотеке и не делается заново.",
+            LyricsCheck => "Плеер слушает голос играющей песни и проверяет, её ли это текст. Текст другой песни или другой версии уступает подходящему, а строки, которые спешат или опаздывают, встают по голосу.",
+            LyricsLinesAuto => "Если ни у одного источника нет текста со временем строк, плеер сам ставит строки простого текста по голосу играющей песни, и текст идёт вместе с песней.",
+            LyricsWordsPlaying => "Плеер сам расставляет слова по голосу в песне, которая играет, и подсветка идёт по словам даже там, где источник дал только строки или простой текст.",
+            LyricsWordsAll => "То же для всех песен с файлом, понемногу в фоне, пока плеер открыт. На большой библиотеке это часы работы видеокарты. Сделанное хранится в библиотеке и не делается заново.",
             LyricsRecognize => "Если текста нет нигде, плеер пробует расслышать слова сам. Работает медленно и ошибается, особенно в быстром рэпе и сильно обработанном голосе.",
             LyricsSeparate => "Перед сверкой голос отделяется от музыки: слова ложатся точнее. На процессоре это долго, около двух минут на песню.",
-            LyricsGpu => "Модели считают на видеокарте (через DirectML) — в десятки раз быстрее. Если видеокарта не справится, плеер сам перейдёт на процессор.",
+            LyricsGpu => "Где считают модели. На видеокарте (через DirectML) в десятки раз быстрее; если она не справится, плеер сам перейдёт на процессор.",
             LyricsModelsAuto => "Нужные модели скачиваются сами, когда понадобятся. Выключено — только кнопкой ниже.",
-            LyricsGenius => "Если подходящего текста со временем нет, плеер ищет простой текст на genius.com и расставляет его по записи.",
-            LyricsModels => "Модели для сверки и расстановки текста. Хранятся рядом с библиотекой; для песни скачиваются только нужные.",
+            LyricsGenius => "Если подходящего текста со временем нет, плеер берёт простой текст с genius.com. Найденный текст хранится в библиотеке, второй раз его не ищут.",
+            LyricsModels => "Модели, которыми плеер слушает голос и ставит строки и слова. Хранятся рядом с библиотекой; для песни скачиваются только нужные.",
             OutputDevice => "Через что играет звук: колонки, наушники и т. д. Переключается без паузы.",
             Gapless => "Треки альбома идут друг за другом без тишины, как на диске.",
             Crossfade => "Конец трека плавно затихает, пока начинается следующий.",
@@ -523,6 +529,10 @@ impl SettingId {
                 c!("Квадрат", "Обложка как есть, обычный квадрат."),
                 c!("Фигура", "Обложка вырезана одной фигурой, которую ты выберешь ниже."),
                 c!("Случайная", "У каждого трека своя случайная фигура."),
+            ],
+            Self::LyricsGpu => &[
+                c!("Видеокарта", "Быстро: несколько секунд на песню."),
+                c!("Процессор", "Медленно: пара минут на песню, зато видеокарта свободна."),
             ],
             Self::CoverDir | Self::RingDir => &[
                 c!("По часовой", "Поворачивается как стрелки часов: 12 → 3 → 6."),
@@ -653,6 +663,7 @@ impl SettingId {
                 _ => 1,
             },
             Self::CoverDir => usize::from(p.cover_ccw),
+            Self::LyricsGpu => usize::from(!p.lyrics_gpu),
             Self::RingDir => usize::from(p.ring_ccw),
             Self::RingStyle => match p.ring_style {
                 v::RingStyle::Circle => 0,
@@ -710,6 +721,7 @@ impl SettingId {
                 }
             }
             Self::CoverDir => p.cover_ccw = i == 1,
+            Self::LyricsGpu => p.lyrics_gpu = i == 0,
             Self::RingDir => p.ring_ccw = i == 1,
             Self::RingStyle => p.ring_style = [v::RingStyle::Circle, v::RingStyle::Contour, v::RingStyle::Bars][i.min(2)],
             Self::Ambient => p.ambient = [v::Ambient::Off, v::Ambient::Glow, v::Ambient::Reactive][i.min(2)],
@@ -1847,6 +1859,10 @@ mod tests {
         for id in [SettingId::SpotifyPersonal, SettingId::YouTubeCookies, SettingId::ImportFiles, SettingId::ImportSavedSongs, SettingId::AutoDownloads] {
             assert!(!id.help().is_empty());
         }
+        for id in [SettingId::LyricsLinesAuto, SettingId::LyricsWordsPlaying, SettingId::LyricsWordsAll] {
+            assert_eq!(id.tab(), TAB_GENERAL);
+            assert!(!id.help().is_empty());
+        }
         for id in [SettingId::Design, SettingId::FpsLimit, SettingId::Nodes, SettingId::RingBeat] {
             assert!(!id.help().is_empty());
         }
@@ -1860,7 +1876,7 @@ mod tests {
             S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
-            S::RadioNoRepeat,
+            S::RadioNoRepeat, S::LyricsGpu,
         ] {
 
             assert!(id.choices().len() >= 2, "{id:?}");
