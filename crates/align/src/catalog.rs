@@ -30,8 +30,7 @@ pub enum ModelId {
     AlignerJa,
     /// The English aligner.
     AlignerEn,
-    /// Candidates measured against the others (docs/lyrics-align.md).
-    AlignerEn960,
+    /// A candidate measured against the Russian one (docs/lyrics-align.md).
     AlignerRuGolos,
     /// Whisper large-v3-turbo, recognition from scratch.
     Whisper,
@@ -167,28 +166,7 @@ pub const ALIGNER_JA: ModelSpec = ModelSpec {
 
 pub const ALIGNER_EN: ModelSpec = ModelSpec {
     id: ModelId::AlignerEn,
-    dir: "xlsr-53-english",
-    files: &[
-        FileSpec {
-            name: "model_int8.onnx",
-            url: hf!("Xenova/wav2vec2-large-xlsr-53-english", "1069a135be5e7a72b173421acc29111b0763adf8", "onnx/model_int8.onnx"),
-            size: 317_490_640,
-            sha256: "f2b8cc658baee8361d529e85101bcb8084d6287a287383393b683f5d32e71482",
-            extract: &[],
-        },
-        FileSpec {
-            name: "vocab.json",
-            url: hf!("Xenova/wav2vec2-large-xlsr-53-english", "1069a135be5e7a72b173421acc29111b0763adf8", "vocab.json"),
-            size: 369,
-            sha256: "f7a204596a4f25139bf3e0e3f6d5d205f16cd58fb6aa29e29bb70240a60401e4",
-            extract: &[],
-        },
-    ],
-};
-
-pub const ALIGNER_EN960: ModelSpec = ModelSpec {
-    id: ModelId::AlignerEn960,
-    dir: "lv60-960h",
+    dir: "wav2vec2-960h-english",
     files: &[
         FileSpec {
             name: "model_int8.onnx",
@@ -256,7 +234,7 @@ pub const WHISPER: ModelSpec = ModelSpec {
     ],
 };
 
-pub const ALL: [ModelSpec; 9] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, ALIGNER_EN960, ALIGNER_RU_GOLOS, WHISPER];
+pub const ALL: [ModelSpec; 8] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, ALIGNER_RU_GOLOS, WHISPER];
 
 impl ModelId {
     pub fn spec(self) -> ModelSpec {

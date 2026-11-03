@@ -38,8 +38,7 @@ fn id_of(s: &str) -> Option<ModelId> {
         "ru" => ModelId::AlignerRu,
         "rugolos" => ModelId::AlignerRuGolos,
         "ja" => ModelId::AlignerJa,
-        "en" => ModelId::AlignerEn,
-        "en960" => ModelId::AlignerEn960,
+        "en" | "en960" => ModelId::AlignerEn,
         "mms" => ModelId::AlignerMms,
         _ => return None,
     })
