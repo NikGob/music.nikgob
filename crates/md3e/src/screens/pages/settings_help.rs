@@ -66,6 +66,7 @@ pub enum SettingId {
     WaveJump,
     LyricsDim,
     LyricsScale,
+    LyricsLead,
     LyricsCascade,
     LyricsGlow,
     LyricsGap,
@@ -321,7 +322,7 @@ impl SettingId {
             Design | Theme | Contrast | Scheme | ProgressWave | NpVolume | NpVolumeHold | CoverShape | ShapeRange | ShapePick
             | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
             | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
-            | LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsCascade | LyricsGlow
+            | LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow
             | LyricsGap | LyricsGapWaves | LyricsCountdown | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
             | ReducedMotion | FpsLimit => {
                 TAB_APPEARANCE
@@ -379,6 +380,7 @@ impl SettingId {
             WaveJump => "Как высоко подпрыгивают буквы в анимации «Волна». 0 — буквы только загораются.",
             LyricsDim => "Насколько бледнее остальные строки по сравнению с той, что поют сейчас.",
             LyricsScale => "Размер букв в тексте песни.",
+            LyricsLead => "На сколько подсветка опережает голос. Глаз читает чуть раньше, чем слышит, поэтому подсветка, которая загорается немного заранее, кажется точной. Если она торопится — уменьшите, если отстаёт — увеличьте. Перемотка и время в тексте не меняются.",
             LyricsCascade => "При прокрутке дальние строки догоняют с небольшой задержкой — текст движется мягко, волной.",
             LyricsGlow => "Уже спетая часть строки слегка светится.",
             LyricsGap => "Когда в песне долго нет слов, между строками крутится кружок ожидания. Здесь выбирается его вид.",

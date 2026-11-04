@@ -690,6 +690,11 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
             }
         });
     }
+    row(ui, Id::LyricsLead, "Опережение подсветки", Some("0 — точно по голосу, меньше 0 — позже него"), |ui| {
+        if let Some(v) = range_slider(ui, "set-lyrics-lead", p.lyrics_lead, (-0.5, 0.5), 0.05, |v| format!("{v:+.2} с").replace('.', ",")) {
+            p.lyrics_lead = v;
+        }
+    });
     row(ui, Id::LyricsDim, "Приглушение остальных строк", Some("0% — без приглушения, 100% — сильное"), |ui| {
         if let Some(v) = range_slider(ui, "set-lyrics-dim", p.lyrics_dim, (0.0, 1.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
             p.lyrics_dim = v;

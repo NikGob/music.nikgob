@@ -1166,6 +1166,7 @@ impl Md3eUi {
             "lyrics-ui" => S::LyricsUi,
             "lyrics-highlight" => S::LyricsWordsAll,
             "lyrics-check" => S::LyricsCheck,
+            "lyrics-lead" => S::LyricsLead,
             _ => S::CoverClickPause,
         });
     }

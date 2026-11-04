@@ -1140,6 +1140,9 @@ pub struct Prefs {
     pub lyrics_dim: f32,
     /// Text size multiplier for synced lyrics (0.8..1.4).
     pub lyrics_scale: f32,
+    /// Seconds the lyrics highlight runs ahead of the voice (negative:
+    /// behind it), in every animation; seeking and stored times keep theirs.
+    pub lyrics_lead: f32,
     /// Lines further from the current one follow the scroll more lazily.
     pub lyrics_cascade: bool,
     /// The sung part glows a little.
@@ -2357,6 +2360,7 @@ impl Default for Prefs {
             lyrics_wave_jump: 1.0,
             lyrics_dim: 0.5,
             lyrics_scale: 1.0,
+            lyrics_lead: 0.1,
             lyrics_cascade: true,
             lyrics_glow: false,
             lyrics_return_s: 4.0,

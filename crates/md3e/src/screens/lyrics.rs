@@ -117,7 +117,7 @@ fn paint(
     let painter = ui.painter_at(rect);
     let id = ui.id().with("lyrics-view");
     let now = anim::now(&ctx);
-    let pos = state.player.position_now();
+    let pos = led(state.player.position_now(), state.prefs.lyrics_lead);
     let playing = state.player.status == Status::Playing;
 
     // Waiting owns the anchor during a break; otherwise follow the last
@@ -422,6 +422,17 @@ fn hit_target(items: &[Option<(f32, f32, f32)>], y: f32, reach: f32) -> Option<u
         })
         .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.total_cmp(&b.2)))
         .map(|(i, ..)| i)
+}
+
+/// The position the lyrics are painted at: `lead` seconds ahead of `pos`
+/// (behind when negative), within ±0.5 s and never before the start.
+fn led(pos: Duration, lead: f32) -> Duration {
+    let lead = lead.clamp(-0.5, 0.5);
+    if lead >= 0.0 {
+        pos + Duration::from_secs_f32(lead)
+    } else {
+        pos.saturating_sub(Duration::from_secs_f32(-lead))
+    }
 }
 
 fn returning_offset(offset: f32, until: f64, now: f64) -> f32 {
@@ -1337,6 +1348,26 @@ mod tests {
             assert!(close(u[1].1, 1.0 + 2.0 * 3.0 / 12.0), "{:?}", u[1]);
             assert!(close(u[2].1, 1.0 + 2.0 * 8.0 / 12.0), "{:?}", u[2]);
         });
+    }
+
+    /// The lead moves what is painted, within ±0.5 s and never before 0;
+    /// the default lights a little before the voice.
+    #[test]
+    fn the_lead_moves_the_painted_position_only_within_its_range() {
+        let at = |s: f32| Duration::from_secs_f32(s);
+        let led_s = |pos: f32, lead: f32| led(at(pos), lead).as_secs_f32();
+        assert!(close(led_s(10.0, 0.1), 10.1));
+        assert!(close(led_s(10.0, -0.25), 9.75));
+        assert!(close(led_s(10.0, 3.0), 10.5));
+        assert!(close(led_s(10.0, -3.0), 9.5));
+        assert_eq!(led(at(0.2), -0.5), Duration::ZERO);
+        assert!((Prefs::default().lyrics_lead - 0.1).abs() < 1e-6);
+        // A line starting at 10 s is current 0.1 s before the voice.
+        let lines = [line(5.0, Some(9.0), "раз"), line(10.0, Some(12.0), "два")];
+        let items = display_lines(&lines);
+        let cur = |pos| current_item(&lines, &items, pos).map(|i| items[i]);
+        assert_eq!(cur(led(at(9.95), 0.1)), Some(DisplayLine::Line(1)));
+        assert_ne!(cur(led(at(9.95), 0.0)), Some(DisplayLine::Line(1)));
     }
 
     #[test]
