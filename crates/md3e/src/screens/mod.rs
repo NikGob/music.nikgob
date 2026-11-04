@@ -1136,6 +1136,11 @@ impl Md3eUi {
     /// `appearance`, anything else = «Основные».
     pub fn open_settings_at(&mut self, row: &str) {
         use pages::SettingId as S;
+        // As «Настройки текста…» under the lyrics opens it: the whole group.
+        if row == "lyrics-group" {
+            self.pages.open_setting_group(lyrics_ui::SETTINGS);
+            return;
+        }
         self.pages.open_setting(match row {
             "sources" | "spotify" => S::SpotifyEnabled,
             "youtube" => S::YouTubeEnabled,
@@ -1392,7 +1397,7 @@ mod tests {
         for t in [1.0, 1.05, 1.1, 1.2, 1.4] {
             frame(&ctx, &mut ui, &mut state, t, 1280.0, None);
         }
-        let tint = Theme::get(&ctx).scheme.secondary_container;
+        let tint = Theme::get(&ctx).scheme.primary;
         let tinted = |output: &egui::FullOutput| -> Vec<Rect> {
             output.shapes.iter().filter_map(|shape| match &shape.shape {
                 egui::Shape::Rect(r) if r.fill.a() > 0 && r.fill.r().abs_diff((tint.r() as f32 * r.fill.a() as f32 / 255.0) as u8) <= 2

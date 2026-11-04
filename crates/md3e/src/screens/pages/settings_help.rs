@@ -817,6 +817,8 @@ pub fn sync_index(m: v::PlaylistSyncMode) -> usize {
 pub const FOCUS_S: f64 = 1.5;
 /// How long the tint on a linked group lasts.
 pub const GROUP_S: f64 = 2.4;
+/// The opacity of the primary layer tinting a linked group at its fullest.
+pub const GROUP_TINT: f32 = 0.12;
 /// Frames the scroll to a linked row is repeated, while the page settles.
 const SCROLL_FRAMES: u8 = 3;
 
@@ -1030,9 +1032,11 @@ fn end_group(ui: &Ui) {
     let theme = Theme::get(ctx);
     let a = group_tint_at((anim::now(ctx) - f.start) as f32, theme.reduced_motion);
     if a > 0.0 {
-        // A tonal container, as the group's own surface would be.
+        // A primary tonal layer over the page, as a selected surface has:
+        // not secondary_container, which is the sliders' own track colour
+        // and would hide it.
         let painter = Painter::new(ctx.clone(), span.layer, Rect::from_x_y_ranges(rect.x_range(), span.clip.y_range()));
-        painter.set(span.bg, Shape::rect_filled(rect, shape::LARGE, theme.scheme.secondary_container.gamma_multiply(a)));
+        painter.set(span.bg, Shape::rect_filled(rect, shape::LARGE, theme.scheme.primary.gamma_multiply(GROUP_TINT * a)));
     }
     if (anim::now(ctx) - f.start) < GROUP_S {
         ctx.request_repaint();
