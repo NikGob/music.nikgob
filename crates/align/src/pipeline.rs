@@ -354,11 +354,10 @@ impl Aligner {
             }
             let mix = decoded.resampled(separate::RATE)?;
             let model = self.separator.as_mut().expect("loaded above");
-            let voice = separate::vocals(model, KIM_VOCAL_2, &mix, &mut |f| progress(Stage::Separate(f)));
+            let voice = separate::vocals(model, KIM_VOCAL_2, mix, &mut |f| progress(Stage::Separate(f)));
             // The separator's working memory is the largest of all: it goes
             // as soon as the voice is out (loading it again takes a second).
             self.separator = None;
-            drop(mix);
             voice?.resampled(RATE)?.mono()
         } else {
             decoded.resampled(RATE)?.mono()
