@@ -124,7 +124,7 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
         // Timing made and checked here: keeping it is the primary action.
-        if save && ui.add(Button::new("Сохранить текст").style(Style::Filled).size(Size::S).id_salt("lyrics-page-save")).clicked() {
+        if save && ui.add(Button::new(super::save_label(state)).style(Style::Filled).size(Size::S).id_salt("lyrics-page-save")).clicked() {
             super::save(state, out);
         }
         // Else the finest timing is.

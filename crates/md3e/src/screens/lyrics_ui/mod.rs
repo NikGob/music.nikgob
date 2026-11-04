@@ -231,6 +231,12 @@ pub(crate) fn home(l: &LyricsView) -> Option<&'static str> {
     })
 }
 
+/// What keeping the shown text says: a song without a file is saved with
+/// it when the settings say so («Что сохранять»).
+pub(crate) fn save_label(state: &ViewState) -> &'static str {
+    if state.lyrics.stream && state.prefs.lyrics_stream_keep == 1 { "Сохранить песню и текст" } else { "Сохранить текст" }
+}
+
 /// Keeps the shown text on the computer.
 pub(crate) fn save(state: &ViewState, out: &mut Vec<Command>) {
     if let (Some(track), Some(source), true) = (state.lyrics.track, state.lyrics.source, state.lyrics.savable) {
@@ -627,5 +633,18 @@ mod tests {
         state.lyrics.savable = true;
         save(&state, &mut out);
         assert!(matches!(out[..], [Command::SaveLyrics { source: LyricsSource::Lrclib, .. }]));
+    }
+
+    /// A song without a file says when keeping its text saves the song too.
+    #[test]
+    fn keeping_a_stream_s_text_says_whether_the_song_goes_too() {
+        let mut state = ViewState::default();
+        assert_eq!(save_label(&state), "Сохранить текст");
+        state.prefs.lyrics_stream_keep = 1;
+        assert_eq!(save_label(&state), "Сохранить текст", "a file's text");
+        state.lyrics.stream = true;
+        assert_eq!(save_label(&state), "Сохранить песню и текст");
+        state.prefs.lyrics_stream_keep = 0;
+        assert_eq!(save_label(&state), "Сохранить текст");
     }
 }

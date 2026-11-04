@@ -72,7 +72,7 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out:
         section = true;
     }
     if l.savable && !busy {
-        menu = menu.item(MenuItem::new("Сохранить текст"));
+        menu = menu.item(MenuItem::new(super::save_label(state)));
         rows.push(Row::Save);
     }
     if look == super::Variant::Menu {

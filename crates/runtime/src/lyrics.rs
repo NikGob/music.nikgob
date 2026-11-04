@@ -521,6 +521,7 @@ impl TrackLyrics {
             home,
             craft,
             savable,
+            stream: self.place == Place::Stream,
         }
     }
 
@@ -790,7 +791,9 @@ impl Worker {
     pub(crate) fn lyrics_backfilled(&mut self, track: TrackId, mut tl: TrackLyrics) {
         tl.pick = self.lib.lyrics_pick(track).ok().flatten().and_then(|k| LyricsSource::from_key(&k));
         tl.show = Shown::of(&self.state.read().prefs);
-        if tl.texts_of(LyricsSource::File).is_none()
+        let local = self.lib.active_source(track).ok().flatten().is_some_and(|s| s.kind.is_local());
+        if !local
+            && tl.texts_of(LyricsSource::File).is_none()
             && let Some(kept) = self.kept_text(track).as_deref().and_then(read_ttml)
         {
             tl.insert(LyricsSource::File, Some(kept));
