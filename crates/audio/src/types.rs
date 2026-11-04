@@ -3,7 +3,7 @@
 use std::fmt;
 use std::io::{Read, Seek};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// What the engine plays. The `id` is opaque to the engine and comes back in
 /// every [`Event`] that concerns the item.
@@ -225,6 +225,9 @@ pub enum Event {
         id: u64,
         /// Time-based position.
         pos: Duration,
+        /// When it was read: the event may wait in a queue before it is
+        /// taken, and the position moved on meanwhile.
+        at: Instant,
     },
     /// Playback was paused.
     Paused,

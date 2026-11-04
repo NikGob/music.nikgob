@@ -135,9 +135,10 @@ pub(crate) struct AlignService {
     /// The tracks whose check is on its way (and their texts' hashes).
     pub(crate) asked: HashMap<TrackId, Vec<String>>,
     /// Lyrics tags to write once their file is not playing.
-    pub(crate) tag_later: HashMap<TrackId, (PathBuf, Vec<LyricLine>)>,
+    pub(crate) tag_later: HashMap<TrackId, (PathBuf, crate::lyrics_keep::Keep)>,
     /// Texts to keep next to a stream's file once it is imported.
-    pub(crate) after_import: HashMap<TrackId, Vec<LyricLine>>,
+    pub(crate) after_import: HashMap<TrackId, crate::lyrics_keep::Keep>,
+
     /// Stream audio saved for that, to delete once imported.
     pub(crate) saved_audio: HashMap<PathBuf, TrackId>,
 }

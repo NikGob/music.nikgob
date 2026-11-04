@@ -731,9 +731,19 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         ui.add(Switch::new(&mut p.lyrics_soft_edges).id_salt("set-lyrics-soft-edges"));
     });
     if p.lyrics_soft_edges {
-        row(ui, Id::LyricsSoftStrength, "Сила мягких краёв", None, |ui| {
-            if let Some(v) = range_slider(ui, "set-lyrics-soft", p.lyrics_soft_strength, (0.5, 1.5), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+        row(ui, Id::LyricsSoftDepth, "Глубина мягких краёв", Some("Какая часть текста сверху и снизу расплывается"), |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-soft-depth", p.lyrics_soft_depth, (0.08, 0.4), 0.01, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_soft_depth = v;
+            }
+        });
+        row(ui, Id::LyricsSoftStrength, "Сила размытия", Some("0% — строки только тают, без размытия"), |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-soft", p.lyrics_soft_strength, (0.0, 1.5), 0.05, |v| format!("{:.0}%", v * 100.0)) {
                 p.lyrics_soft_strength = v;
+            }
+        });
+        row(ui, Id::LyricsSoftFade, "Затухание", Some("Больше — строки тают раньше, дальше от края"), |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-soft-fade", p.lyrics_soft_fade, (0.0, 1.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_soft_fade = v;
             }
         });
     }
@@ -898,9 +908,6 @@ fn lyrics_align(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Com
     group(ui, "Что подсвечивать само");
     row(ui, Id::LyricsLinesAuto, "Подсвечивать строки, если у текста нет подсветки", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_lines_auto).id_salt("set-lyrics-lines"));
-    });
-    row(ui, Id::LyricsWordsPlaying, "Подсвечивать по словам песню, которая играет", None, |ui| {
-        ui.add(Switch::new(&mut p.lyrics_words_playing).id_salt("set-lyrics-words-playing"));
     });
     let words = (p.lyrics_words_all && a.total > 0).then(|| format!("Готово {} из {}", a.done.min(a.total), a.total));
     row(ui, Id::LyricsWordsAll, "Заранее подсвечивать по словам всю библиотеку", words.as_deref(), |ui| {
@@ -1102,7 +1109,12 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
     row(ui, Id::ToastTime, "Уведомления на экране", None, |ui| choice(ui, Id::ToastTime, p));
 
     group(ui, "Текст песен");
+    // Word highlighting is the default experience: its switch comes first.
+    row(ui, Id::LyricsWordsPlaying, "Подсветка по словам", Some("Плеер сам расставляет слова по голосу в песне, которая играет"), |ui| {
+        ui.add(Switch::new(&mut p.lyrics_words_playing).id_salt("set-lyrics-words-playing"));
+    });
     row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", None, |ui| {
+
         ui.add(Switch::new(&mut p.save_found_lyrics).id_salt("set-save-lyrics"));
     });
     row(ui, Id::LyricsReturn, &format!("После прокрутки рукой возвращаться к текущей строке через {:.0} с", p.lyrics_return_s), None, |ui| {

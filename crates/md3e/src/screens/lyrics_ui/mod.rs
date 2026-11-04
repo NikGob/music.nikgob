@@ -290,9 +290,17 @@ pub(crate) fn show_as(state: &ViewState, sync: LyricsSync, out: &mut Vec<Command
 }
 
 /// What keeping the shown text says: a song without a file is saved with
-/// it when the settings say so («Что сохранять»).
+/// it when the settings say so («Что сохранять») and its song is clear
+/// (a clip keeps only its text).
 pub(crate) fn save_label(state: &ViewState) -> &'static str {
-    if state.lyrics.stream && state.prefs.lyrics_stream_keep == 1 { "Сохранить песню и текст" } else { "Сохранить текст" }
+    let l = &state.lyrics;
+    if l.stream && l.craft == LyricsCraft::Ready && state.prefs.lyrics_stream_keep == 1 { "Сохранить песню и текст" } else { "Сохранить текст" }
+}
+
+/// «Сохранить текст» is the primary action: for timing the player made
+/// (a text from a source is kept as it is, so making timing stays first).
+pub(crate) fn save_first(l: &LyricsView) -> bool {
+    l.savable && l.home == LyricsHome::Library
 }
 
 /// Keeps the shown text on the computer.
@@ -729,6 +737,19 @@ mod tests {
         assert!(matches!(out[..], [Command::SaveLyrics { source: LyricsSource::Lrclib, .. }]));
     }
 
+    /// Any text not on the computer can be saved; only timing the player
+    /// made puts «Сохранить текст» first.
+    #[test]
+    fn saving_comes_first_only_for_timing_the_player_made() {
+        let mut l = LyricsView { source: Some(LyricsSource::Lrclib), savable: true, ..Default::default() };
+        assert!(!save_first(&l), "a source's text: making timing stays first");
+        l.home = LyricsHome::Library;
+        assert!(save_first(&l));
+        l.savable = false;
+        assert!(!save_first(&l));
+    }
+
+
     /// A song without a file says when keeping its text saves the song too.
     #[test]
     fn keeping_a_stream_s_text_says_whether_the_song_goes_too() {
@@ -737,6 +758,8 @@ mod tests {
         state.prefs.lyrics_stream_keep = 1;
         assert_eq!(save_label(&state), "Сохранить текст", "a file's text");
         state.lyrics.stream = true;
+        assert_eq!(save_label(&state), "Сохранить текст", "a clip: only its text");
+        state.lyrics.craft = LyricsCraft::Ready;
         assert_eq!(save_label(&state), "Сохранить песню и текст");
         state.prefs.lyrics_stream_keep = 0;
         assert_eq!(save_label(&state), "Сохранить текст");

@@ -580,7 +580,8 @@ fn lyrics_home(l: &mut nikgob_view::LyricsView, name: &str) {
             l.lines = l.texts[0].lines.clone();
             l.made = false;
             l.home = LyricsHome::Online;
-            l.savable = false;
+            // A found text can be saved too.
+            l.savable = true;
         }
         "saved" | "stream-saved" => {
             l.stream = name == "stream-saved";
@@ -592,8 +593,8 @@ fn lyrics_home(l: &mut nikgob_view::LyricsView, name: &str) {
         }
         "stream" => l.stream = true,
         "clip" => {
+            // Its text can still be kept in the artist's folder.
             l.craft = LyricsCraft::No("Подсветку не сделать: в клипе неясно, какая песня".into());
-            l.savable = false;
         }
         _ => {}
     }
@@ -733,7 +734,8 @@ fn lyrics_state(s: &mut ViewState, arg: &str) {
         l.home = home;
         l.craft = craft;
         l.made = made.is_some();
-        l.savable = made.is_some() && l.craft == LyricsCraft::Ready;
+        // Any text not on the computer yet can be saved there.
+        l.savable = home != LyricsHome::Computer;
         l.lines = made.cloned().unwrap_or(own_lines.clone());
         let finest = LyricsSync::of(&l.lines).unwrap_or(LyricsSync::Plain).max(own);
         l.shows = [LyricsSync::Word, LyricsSync::Line, LyricsSync::Plain].into_iter().filter(|s| *s <= finest).collect();

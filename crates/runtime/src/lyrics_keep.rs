@@ -1,9 +1,10 @@
 //! Where a track's lyrics are made from and kept (docs/lyrics-align.md,
 //! «Keeping a text»): the audio timing is made from (the track's file, or
 //! a stream fetched for a while when its artist and song are clear), and
-//! «Сохранить текст», which puts the shown text with the player's timing
-//! on the computer: into the file's lyrics tag (enhanced LRC) and a
-//! `.ttml` next to the file, which the player reads first. A song without
+//! «Сохранить текст», which puts the shown text with its timing (a
+//! source's, or the one the player made; none for a plain text) on the
+//! computer: into the file's lyrics tag (enhanced LRC, LRC or the plain
+//! text) and a `.ttml` next to the file, which the player reads first. A song without
 //! a file keeps the `.ttml` in its artist's folder of the library («Только
 //! текст»), or is saved as a file there first and keeps its text next to
 //! it like any song («Песню и текст»).
@@ -62,10 +63,44 @@ pub(crate) fn to_millis(lines: &[LyricLine]) -> Vec<LyricLine> {
         .collect()
 }
 
+/// What «Сохранить текст» puts on the computer: the shown text with its
+/// finest timing, or a plain text as it is.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Keep {
+    Lines(Vec<LyricLine>),
+    Plain(String),
+}
+
+impl Keep {
+    /// Times to the millisecond ([`to_millis`]).
+    pub(crate) fn to_millis(self) -> Self {
+        match self {
+            Self::Lines(l) => Self::Lines(to_millis(&l)),
+            plain => plain,
+        }
+    }
+
+    /// As a `.ttml`: word or line timing, or none.
+    fn ttml(&self) -> String {
+        match self {
+            Self::Lines(l) => nikgob_metadata::serialize_ttml(l),
+            Self::Plain(t) => nikgob_metadata::serialize_ttml_plain(t),
+        }
+    }
+
+    /// As the file's lyrics tag: enhanced LRC, LRC or the plain text.
+    fn tag(&self) -> String {
+        match self {
+            Self::Lines(l) => nikgob_metadata::lrc::serialize_lrc(l),
+            Self::Plain(t) => t.clone(),
+        }
+    }
+}
+
 /// Writes the `.ttml` at `path` (its folder made when missing) and gives
 /// the text as the player reads it back.
-pub(crate) fn write_ttml(path: &Path, lines: &[LyricLine]) -> Result<Text, String> {
-    let xml = nikgob_metadata::serialize_ttml(lines);
+pub(crate) fn write_ttml(path: &Path, keep: &Keep) -> Result<Text, String> {
+    let xml = keep.ttml();
     let long = nikgob_import::sanitize::long_path(path);
     if let Some(dir) = long.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -75,9 +110,9 @@ pub(crate) fn write_ttml(path: &Path, lines: &[LyricLine]) -> Result<Text, Strin
 }
 
 /// The lyrics tag of `file` as enhanced LRC (word stamps where the timing
-/// has words), unless it already says so.
-pub(crate) fn write_tag(file: &Path, lines: &[LyricLine]) -> Result<(), String> {
-    crate::lyrics::embed_text(file, &nikgob_metadata::lrc::serialize_lrc(lines)).map_err(|e| e.to_string())
+/// has words), LRC or the plain text, unless it already says so.
+pub(crate) fn write_tag(file: &Path, keep: &Keep) -> Result<(), String> {
+    crate::lyrics::embed_text(file, &keep.tag()).map_err(|e| e.to_string())
 }
 
 impl Worker {
@@ -102,6 +137,14 @@ impl Worker {
         stream_place(src.quality_score == score::STREAM_YOUTUBE_CLIP, known, named)
     }
 
+    /// The text of `track` can be kept in its artist's folder of the
+    /// library: it has no file, and an artist and a title to name it by.
+    pub(crate) fn lyrics_folder(&self, track: TrackId) -> bool {
+        let local = self.lib.active_source(track).ok().flatten().is_some_and(|s| s.kind.is_local());
+        let named = self.lib.get_track(track).ok().flatten().is_some_and(|t| !t.title.trim().is_empty() && !artist_of(&t).trim().is_empty());
+        !local && named && self.import.is_some()
+    }
+
     /// Where the text of `track` is kept while it has no file: its
     /// artist's folder of the library.
     pub(crate) fn kept_text(&self, track: TrackId) -> Option<PathBuf> {
@@ -110,45 +153,48 @@ impl Worker {
         Some(nikgob_import::layout::kept_text_path(&dir, &artist_of(&t), &t.title))
     }
 
-    /// `Command::SaveLyrics`: the shown text with the player's timing goes
-    /// onto the computer (see the module docs).
+    /// `Command::SaveLyrics`: the shown text with its timing goes onto the
+    /// computer (see the module docs).
     pub(crate) fn save_lyrics(&mut self, track: TrackId, source: LyricsSource) {
         let Some(tl) = self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)) else { return };
-        let Some(lines) = tl.shown_lines(source).map(|l| to_millis(&l)) else { return };
-        match tl.place.clone() {
+        let Some(keep) = tl.to_keep(source).map(Keep::to_millis) else { return };
+        let (place, folder) = (tl.place.clone(), tl.folder);
+        match place {
             Place::File => {
                 let Some(src) = self.lib.active_source(track).ok().flatten().filter(|s| s.kind.is_local()) else { return };
                 let file = self.res.path(&src.locator);
-                self.keep_next_to(track, file, lines);
+                self.keep_next_to(track, file, keep);
             }
-            Place::Stream if self.state.read().prefs.lyrics_stream_keep == 1 => self.keep_with_song(track, lines),
-            Place::Stream => {
+            Place::Stream if self.state.read().prefs.lyrics_stream_keep == 1 => self.keep_with_song(track, keep),
+            // Only the text: into the artist's folder (also for a song
+            // whose timing cannot be made: a clip, another service).
+            _ if folder => {
                 let Some(path) = self.kept_text(track) else { return };
                 let Some(svc) = self.import.as_ref() else { return };
                 let tx = svc.internal();
                 svc.spawn_blocking(move || {
-                    let result = write_ttml(&path, &lines);
+                    let result = write_ttml(&path, &keep);
                     let _ = tx.send(Internal::Align(Msg::Kept { track, result }));
                 });
             }
-            Place::None | Place::Unclear(_) => {}
+            _ => {}
         }
     }
 
     /// The `.ttml` next to `file` at once, the file's tag once the file is
     /// not playing (rewriting it under the decoder shifts its pages).
-    fn keep_next_to(&mut self, track: TrackId, file: PathBuf, lines: Vec<LyricLine>) {
+    fn keep_next_to(&mut self, track: TrackId, file: PathBuf, keep: Keep) {
         let in_use = |e: Option<crate::queue::Entry>| e.is_some_and(|e| e.track == track);
         let later = in_use(self.queue.current()) || in_use(self.queue.peek_auto_next());
         if later {
-            self.align.tag_later.insert(track, (file.clone(), lines.clone()));
+            self.align.tag_later.insert(track, (file.clone(), keep.clone()));
         }
         let Some(svc) = self.import.as_ref() else { return };
         let tx = svc.internal();
         svc.spawn_blocking(move || {
-            let result = write_ttml(&file.with_extension("ttml"), &lines).and_then(|text| {
+            let result = write_ttml(&file.with_extension("ttml"), &keep).and_then(|text| {
                 if !later {
-                    write_tag(&file, &lines)?;
+                    write_tag(&file, &keep)?;
                 }
                 Ok(text)
             });
@@ -163,9 +209,9 @@ impl Worker {
         let ready: Vec<TrackId> = self.align.tag_later.keys().copied().filter(|t| !busy.contains(&Some(*t))).collect();
         let Some(svc) = self.import.as_ref() else { return };
         for t in ready {
-            let Some((file, lines)) = self.align.tag_later.remove(&t) else { continue };
+            let Some((file, keep)) = self.align.tag_later.remove(&t) else { continue };
             svc.spawn_blocking(move || {
-                if let Err(e) = write_tag(&file, &lines) {
+                if let Err(e) = write_tag(&file, &keep) {
                     log::warn!("saving lyrics into {}: {e}", file.display());
                 }
             });
@@ -175,13 +221,13 @@ impl Worker {
     /// «Песню и текст»: the stream's audio is saved and imported as the
     /// track's file (as «Сохранить с YouTube» does), then the text goes
     /// next to it ([`Self::lyrics_imported`]).
-    fn keep_with_song(&mut self, track: TrackId, lines: Vec<LyricLine>) {
+    fn keep_with_song(&mut self, track: TrackId, keep: Keep) {
         let Some(yt) = self.service(Service::Youtube) else {
             self.toast("YouTube Music выключен", None);
             return;
         };
         let Some(src) = self.lib.active_source(track).ok().flatten().filter(|s| s.kind == SourceKind::Youtube) else { return };
-        self.align.after_import.insert(track, lines);
+        self.align.after_import.insert(track, keep);
         let dir = self.save_dir();
         let locator = src.locator.clone();
         self.streaming.spawn_internal(async move {
@@ -220,22 +266,23 @@ impl Worker {
         if asked.is_some() {
             let _ = std::fs::remove_file(path);
         }
-        let lines = asked.and_then(|t| self.align.after_import.remove(&t)).or_else(|| self.align.after_import.remove(&track));
+        let keep = asked.and_then(|t| self.align.after_import.remove(&t)).or_else(|| self.align.after_import.remove(&track));
         let Some(src) = self.lib.active_source(track).ok().flatten().filter(|s| s.kind.is_local()) else { return };
         let file = self.res.path(&src.locator);
         let kept = self.kept_text(track).map(|k| nikgob_import::sanitize::long_path(&k)).filter(|k| k.is_file());
         let place = self.lyrics_place(track);
         if let Some(tl) = self.import.as_mut().and_then(|s| s.lyrics_cache.get_mut(&track)) {
             tl.place = place;
+            tl.folder = false;
         }
-        match (lines, kept) {
-            (Some(lines), kept) => {
+        match (keep, kept) {
+            (Some(keep), kept) => {
                 if let Some(k) = kept
                     && let Err(e) = std::fs::remove_file(&k)
                 {
                     log::warn!("removing {}: {e}", k.display());
                 }
-                self.keep_next_to(track, file, lines);
+                self.keep_next_to(track, file, keep);
             }
             (None, Some(k)) => {
                 let next_to = nikgob_import::sanitize::long_path(&file.with_extension("ttml"));
@@ -332,8 +379,8 @@ mod tests {
         let file = dir.path().join("Song.opus");
         opus(&file);
         let lines = to_millis(&timed());
-        let text = write_ttml(&file.with_extension("ttml"), &lines).unwrap();
-        write_tag(&file, &lines).unwrap();
+        let text = write_ttml(&file.with_extension("ttml"), &Keep::Lines(lines.clone())).unwrap();
+        write_tag(&file, &Keep::Lines(lines.clone())).unwrap();
         assert_eq!(text.lines, lines, "read back as saved");
         let (tags, _) = nikgob_import::tags::read_tags(&file).unwrap();
         let tag = tags.lyrics.clone().unwrap();
@@ -354,7 +401,7 @@ mod tests {
         let path = nikgob_import::layout::kept_text_path(root.path(), "LAZZY2WICE", "Summer 15/16");
         assert!(path.starts_with(root.path()));
         let lines = to_millis(&timed());
-        write_ttml(&path, &lines).unwrap();
+        write_ttml(&path, &Keep::Lines(lines.clone())).unwrap();
         assert!(root.path().join("LAZZY2WICE").join("Summer 15-16.ttml").exists());
         let lib = nikgob_library::Library::open_in_memory().unwrap();
         let track = lib.upsert_track(&nikgob_core::model::Track::new("Summer 15/16", nikgob_core::model::ArtistCredit::single("LAZZY2WICE", None))).unwrap().id;
@@ -514,7 +561,9 @@ mod tests {
         assert_eq!(files(&cfg.library_dir), Vec::<String>::new(), "nothing kept");
 
         play(&rt, clip);
-        wait(&rt, "why not", |s| s.lyrics.craft == nikgob_view::LyricsCraft::No(CLIP.into()) && s.lyrics.stream && !s.lyrics.savable);
+        // Its text can still be kept in the artist's folder.
+        wait(&rt, "why not", |s| s.lyrics.craft == nikgob_view::LyricsCraft::No(CLIP.into()) && s.lyrics.stream && s.lyrics.savable);
+
 
         let mut off = rt.state().prefs.clone();
         off.lyrics_streams = false;
@@ -578,7 +627,7 @@ mod tests {
         play(&rt, song);
         wait(&rt, "savable", |s| s.lyrics.savable && s.lyrics.stream);
         let kept = nikgob_import::layout::kept_text_path(&cfg.library_dir, &artist_of(&row), &row.title);
-        write_ttml(&kept, &to_millis(&timed())).unwrap();
+        write_ttml(&kept, &Keep::Lines(to_millis(&timed()))).unwrap();
         rt.send(nikgob_view::Command::SaveLyrics { track: song, source: LyricsSource::Genius });
         wait_until("the song's file", || file_of(&lib, &cfg, song).is_some());
         let src = lib.active_source(song).unwrap().unwrap();
