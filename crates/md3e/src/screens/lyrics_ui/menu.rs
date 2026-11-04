@@ -33,17 +33,19 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) ->
         // Says which text the player chose.
         let mut auto = MenuItem::new("Автоматически").selected(!l.picked);
         if let Some(src) = l.source.filter(|_| !l.picked) {
-            auto = auto.shortcut(src.label());
+            auto = auto.shortcut(super::name(src));
         }
         menu = menu.item(auto).divider();
         rows.push(Row::Auto);
         for o in &l.sources {
-            menu = menu.item(
-                MenuItem::new(o.source.label())
-                    .shortcut(super::source_state(l, o.source))
-                    .enabled(matches!(o.state, LyricsAvail::Ready(_)))
-                    .selected(l.picked && l.source == Some(o.source)),
-            );
+            let mut item = MenuItem::new(super::name(o.source))
+                .enabled(matches!(o.state, LyricsAvail::Ready(_)))
+                .selected(l.picked && l.source == Some(o.source));
+            let state = super::source_state(l, o.source);
+            if !state.is_empty() {
+                item = item.shortcut(state);
+            }
+            menu = menu.item(item);
             rows.push(Row::Source(o.source));
         }
         menu = menu.divider();

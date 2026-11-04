@@ -1077,7 +1077,8 @@ impl ToastKind {
 }
 
 /// The revision of the lyrics defaults: 1 turned word timing off for the
-/// playing song and for the library, and line timing for plain texts on.
+/// playing song and for the library, recognition from scratch off, and
+/// line timing for plain texts on.
 pub const LYRICS_REV: u8 = 1;
 
 /// User-facing settings the UI edits (the runtime persists them).
@@ -1164,6 +1165,10 @@ pub struct Prefs {
     /// «Подсветка по словам для песен, которые слушаю»: the playing song's
     /// texts are shown with word timing made from the recording.
     pub lyrics_words_playing: bool,
+    /// «Вид»: what the control under the lyrics opens: 0 its menu
+    /// («Меню»), 1 a window over the player («Окно»), 2 the «Текст песни»
+    /// page («Экран»).
+    pub lyrics_ui: u8,
     /// Which defaults of the lyrics settings the prefs were written with
     /// ([`LYRICS_REV`]); older prefs are moved to the new defaults once.
     pub lyrics_rev: u8,
@@ -1451,6 +1456,8 @@ impl Prefs {
     /// so what they hold is the old default, not a choice.
     pub fn upgrade_lyrics(&mut self, stored: u8) {
         if stored < 1 {
+            // Recognition from scratch is experimental: off unless chosen.
+            self.lyrics_recognize = false;
             self.lyrics_words_all = false;
             self.lyrics_words_playing = false;
             self.lyrics_lines_auto = true;
@@ -2357,7 +2364,8 @@ impl Default for Prefs {
             lyrics_lines_auto: true,
             lyrics_words_playing: false,
             lyrics_rev: LYRICS_REV,
-            lyrics_recognize: true,
+            lyrics_ui: 0,
+            lyrics_recognize: false,
             lyrics_separate: true,
             lyrics_models_auto: true,
             lyrics_genius: true,

@@ -73,7 +73,7 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
         let mut picked = None;
         segmented_list(ui, n, |i| {
             if i == 0 {
-                let auto = l.source.filter(|_| !l.picked).map(|src| src.label().to_owned());
+                let auto = l.source.filter(|_| !l.picked).map(|src| super::name(src).to_owned());
                 let item = ListItem::new("Автоматически").selected(!l.picked).id_salt("lyrics-page-auto");
                 return match auto {
                     Some(a) => item.supporting(a),
@@ -81,11 +81,12 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
                 };
             }
             let o = &l.sources[i - 1];
-            ListItem::new(o.source.label())
-                .supporting(super::capital(&super::source_state(l, o.source)))
+            let state = super::source_state(l, o.source);
+            let item = ListItem::new(super::name(o.source))
                 .selected(l.picked && l.source == Some(o.source))
                 .enabled(matches!(o.state, LyricsAvail::Ready(_)))
-                .id_salt(("lyrics-page-src", o.source.key()))
+                .id_salt(("lyrics-page-src", o.source.key()));
+            if state.is_empty() { item } else { item.supporting(super::capital(&state)) }
         })
         .into_iter()
         .enumerate()

@@ -2,7 +2,9 @@
 //! to choose from (`NIKGOB_LYRICS_UI=menu|dialog|page`, the menu by
 //! default): [`menu`] puts the sources and the timing actions in the
 //! control's own menu, [`dialog`] grows a modal window out of the control,
-//! [`page`] opens the «Текст песни» page. Each look lives in its own
+//! [`page`] opens the «Текст песни» page. Settings → «Текст песен» →
+//! «Вид» picks the look (`Prefs::lyrics_ui`); `NIKGOB_LYRICS_UI` overrides
+//! it for screenshot runs. Each look lives in its own
 //! module; this one has what they share: the words, the control itself and
 //! the progress of timing being made (docs/lyrics-align.md).
 //!
@@ -35,20 +37,38 @@ pub enum Variant {
 }
 
 impl Variant {
-    pub fn parse(s: &str) -> Self {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.trim() {
-            "dialog" => Self::Dialog,
-            "page" => Self::Page,
+            "menu" => Some(Self::Menu),
+            "dialog" => Some(Self::Dialog),
+            "page" => Some(Self::Page),
+            _ => None,
+        }
+    }
+
+    /// The look `Prefs::lyrics_ui` names (the menu for anything else).
+    pub fn of(pref: u8) -> Self {
+        match pref {
+            1 => Self::Dialog,
+            2 => Self::Page,
             _ => Self::Menu,
         }
     }
 }
 
-/// `NIKGOB_LYRICS_UI`, read once.
-pub fn variant() -> Variant {
-    static V: OnceLock<Variant> = OnceLock::new();
-    *V.get_or_init(|| Variant::parse(&std::env::var("NIKGOB_LYRICS_UI").unwrap_or_default()))
+/// The look in use: `NIKGOB_LYRICS_UI` (read once) when it names one, else
+/// the setting, which switches at once.
+pub fn variant(prefs: &nikgob_view::Prefs) -> Variant {
+    static ENV: OnceLock<Option<Variant>> = OnceLock::new();
+    variant_or(*ENV.get_or_init(|| std::env::var("NIKGOB_LYRICS_UI").ok().as_deref().and_then(Variant::parse)), prefs)
 }
+
+fn variant_or(over: Option<Variant>, prefs: &nikgob_view::Prefs) -> Variant {
+    over.unwrap_or_else(|| Variant::of(prefs.lyrics_ui))
+}
+
+/// The look the control was last drawn with (for [`open`]).
+const SHOWN: &str = "lyrics-ui-variant";
 
 /// What a look asks of the window (taken by `Md3eUi::frame`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,12 +96,12 @@ pub(crate) fn take_request(ctx: &Context) -> Option<Request> {
 }
 
 /// The settings row «Настройки текста…» leads to.
-pub(crate) const SETTINGS: super::pages::SettingId = super::pages::SettingId::LyricsGenius;
+pub(crate) const SETTINGS: super::pages::SettingId = super::pages::SettingId::LyricsUi;
 
 /// Opens what the control opens, as a click would (screenshot runs).
 pub fn open(ctx: &Context) {
     let last = ctx.data(|d| d.get_temp::<(Id, Rect)>(Id::new(LAST)));
-    match variant() {
+    match ctx.data(|d| d.get_temp::<Variant>(Id::new(SHOWN))).unwrap_or(Variant::Menu) {
         Variant::Menu => {
             if let Some((id, _)) = last {
                 ctx.data_mut(|d| d.insert_temp(id.with("md3e-menu-open"), true));
@@ -95,7 +115,9 @@ pub fn open(ctx: &Context) {
 /// The control under the lyrics, centred in the width it is given. True
 /// when «Настройки текста…» was picked (the menu).
 pub fn control(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> bool {
-    match variant() {
+    let v = variant(&state.prefs);
+    ui.ctx().data_mut(|d| d.insert_temp(Id::new(SHOWN), v));
+    match v {
         Variant::Menu => menu::control(ui, state, out),
         Variant::Dialog => {
             let r = chip(ui, state, 0.0, out);
@@ -113,43 +135,72 @@ pub fn control(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> bool {
     }
 }
 
-/// How a text is timed, in a word or two.
+/// How a text lights up as the song goes, for someone who never heard of
+/// timing kinds.
 pub(crate) fn how(sync: LyricsSync) -> &'static str {
     match sync {
-        LyricsSync::Plain => "без времени",
-        LyricsSync::Line => "по строкам",
+        LyricsSync::Plain => "без подсветки",
+        LyricsSync::Line => "строки целиком",
         LyricsSync::Word => "по словам",
         LyricsSync::Syllable => "по слогам",
     }
 }
 
-/// «Genius · по словам»: where the shown text is from and how it goes
-/// with the song (whoever timed it).
-pub(crate) fn chip_label(l: &LyricsView) -> String {
-    match l.source {
-        Some(src) => format!("{} · {}", src.label(), how(LyricsSync::of(&l.lines).unwrap_or(LyricsSync::Plain))),
-        None if l.loading || l.sources.iter().any(|o| o.state == LyricsAvail::Loading) => "Ищу текст…".to_owned(),
-        None => "Текста нет".to_owned(),
+/// A source's name where texts are listed.
+pub(crate) fn name(source: LyricsSource) -> &'static str {
+    match source {
+        LyricsSource::File => "Файл трека",
+        LyricsSource::Recognized => "Расслышал плеер",
+        s => s.label(),
     }
 }
 
-/// How the text of `source` is shown, where the sources are listed:
-/// «по словам, сделал плеер» when the player made the timing itself from
-/// the recording.
+/// «Текст с Genius»: where the shown text came from, in plain words. How
+/// it lights up is said only when it does not (a still text makes one
+/// wonder); a text the player heard itself says so, so it is taken as a
+/// guess.
+pub(crate) fn chip_label(l: &LyricsView) -> String {
+    let from = match l.source {
+        Some(LyricsSource::Recognized) => "Текст расслышан плеером".to_owned(),
+        Some(LyricsSource::File) => "Текст из файла трека".to_owned(),
+        Some(src) => format!("Текст с {}", src.label()),
+        None if l.loading || l.sources.iter().any(|o| o.state == LyricsAvail::Loading) => return "Ищу текст…".to_owned(),
+        None => return "Текста нет".to_owned(),
+    };
+    if l.lines.is_empty() { format!("{from} · без подсветки") } else { from }
+}
+
+/// How `source`'s text lights up as shown: the player's own timing when
+/// it made one, else the source's.
+fn kind(l: &LyricsView, source: LyricsSource) -> Option<LyricsSync> {
+    let o = l.sources.iter().find(|o| o.source == source)?;
+    let LyricsAvail::Ready(sync) = o.state else { return None };
+    if o.fits == Some(false) {
+        return None;
+    }
+    let made = l.texts.iter().find(|t| t.source == Some(source)).and_then(|t| t.made.as_deref()).filter(|_| o.made);
+    Some(made.and_then(LyricsSync::of).unwrap_or(sync))
+}
+
+/// What a source's row says, where the sources are listed: whether it has
+/// a text at all; how it lights up only where that differs between the
+/// texts there are, and then also when the player fitted it to the voice
+/// itself.
 pub(crate) fn source_state(l: &LyricsView, source: LyricsSource) -> String {
     let Some(o) = l.sources.iter().find(|o| o.source == source) else { return String::new() };
     match o.state {
-        LyricsAvail::Loading => "ищу…".to_owned(),
-        LyricsAvail::Missing => "нет текста".to_owned(),
-        LyricsAvail::Ready(_) if source == LyricsSource::Recognized => "слова услышал плеер".to_owned(),
-        LyricsAvail::Ready(_) if o.fits == Some(false) => "не подходит к песне".to_owned(),
-        LyricsAvail::Ready(sync) => {
-            let made = l.texts.iter().find(|t| t.source == Some(source)).and_then(|t| t.made.as_deref());
-            match made.filter(|_| o.made) {
-                Some(lines) => format!("{}, сделал плеер", how(LyricsSync::of(lines).unwrap_or(LyricsSync::Line))),
-                None => how(sync).to_owned(),
-            }
-        }
+        LyricsAvail::Loading => return "ищу…".to_owned(),
+        LyricsAvail::Missing => return "нет текста".to_owned(),
+        LyricsAvail::Ready(_) if o.fits == Some(false) => return "текст другой песни или версии".to_owned(),
+        LyricsAvail::Ready(_) => {}
+    }
+    let kinds: Vec<LyricsSync> = l.sources.iter().filter_map(|o| kind(l, o.source)).collect();
+    let differ = kinds.windows(2).any(|w| w[0] != w[1]);
+    let Some(k) = kind(l, source).filter(|_| differ) else { return String::new() };
+    if o.made && source != LyricsSource::Recognized && k != LyricsSync::Plain {
+        format!("{}, подогнал плеер", how(k))
+    } else {
+        how(k).to_owned()
     }
 }
 
@@ -437,6 +488,23 @@ mod tests {
     use nikgob_view::{LyricsOption, LyricsText};
 
     #[test]
+    fn the_look_follows_the_setting_and_names_parse() {
+        assert_eq!(Variant::of(0), Variant::Menu);
+        assert_eq!(Variant::of(1), Variant::Dialog);
+        assert_eq!(Variant::of(2), Variant::Page);
+        assert_eq!(Variant::of(9), Variant::Menu);
+        assert_eq!(Variant::parse("page"), Some(Variant::Page));
+        assert_eq!(Variant::parse(""), None);
+        // The default is the menu; the setting picks the others.
+        let mut p = nikgob_view::Prefs::default();
+        assert_eq!(variant_or(None, &p), Variant::Menu);
+        p.lyrics_ui = 2;
+        assert_eq!(variant_or(None, &p), Variant::Page);
+        // The screenshot override wins.
+        assert_eq!(variant_or(Some(Variant::Dialog), &p), Variant::Dialog);
+    }
+
+    #[test]
     fn progress_only_moves_on_through_the_stages() {
         let order = [
             overall(AlignStage::Decode, 0.0),
@@ -474,17 +542,31 @@ mod tests {
             texts: vec![LyricsText { source: Some(LyricsSource::Genius), made: Some(lines.clone()), ..Default::default() }],
             ..Default::default()
         };
-        assert_eq!(chip_label(&l), "Genius · по строкам");
-        assert_eq!(source_state(&l, LyricsSource::Genius), "по строкам, сделал плеер");
-        assert_eq!(source_state(&l, LyricsSource::Lrclib), "не подходит к песне");
+        assert_eq!(chip_label(&l), "Текст с Genius");
+        // The only text there is: how it lights up goes without saying.
+        assert_eq!(source_state(&l, LyricsSource::Genius), "");
+        assert_eq!(source_state(&l, LyricsSource::Lrclib), "текст другой песни или версии");
         assert_eq!(source_state(&l, LyricsSource::LyricsPlus), "нет текста");
+        // Another text that lights up otherwise: now each row says how.
+        l.sources.push(o(LyricsSource::LrcRed, LyricsSync::Syllable, Some(true), false));
+        assert_eq!(source_state(&l, LyricsSource::Genius), "строки целиком, подогнал плеер");
+        assert_eq!(source_state(&l, LyricsSource::LrcRed), "по слогам");
         assert_eq!(capital("по строкам"), "По строкам");
         line.words.push(nikgob_view::LyricWord { start: Duration::from_secs(1), end: Duration::from_secs(2), text: "Тёплое ".into() });
         l.lines = vec![line];
-        assert_eq!(chip_label(&l), "Genius · по словам");
+        assert_eq!(chip_label(&l), "Текст с Genius");
+        l.lines.clear();
+        assert_eq!(chip_label(&l), "Текст с Genius · без подсветки");
+        l.source = Some(LyricsSource::Recognized);
+        l.lines = lines.clone();
+        assert_eq!(chip_label(&l), "Текст расслышан плеером");
         l.source = None;
         l.lines.clear();
         assert_eq!(chip_label(&l), "Текста нет");
+        // No internal words anywhere.
+        for w in [how(LyricsSync::Line), how(LyricsSync::Word), name(LyricsSource::Recognized)] {
+            assert!(!w.contains("распознан") && !w.contains("сделал"), "{w}");
+        }
     }
 
     #[test]

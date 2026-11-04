@@ -182,17 +182,20 @@ pub(crate) struct Shown {
     pub(crate) words: bool,
     /// Line timing made from the recording for a plain text.
     pub(crate) lines: bool,
+    /// A text heard in the recording earlier is shown (recognition is on);
+    /// off, it is neither listed nor chosen, picked or not.
+    pub(crate) heard: bool,
 }
 
 impl Default for Shown {
     fn default() -> Self {
-        Self { words: true, lines: true }
+        Self { words: true, lines: true, heard: true }
     }
 }
 
 impl Shown {
     pub(crate) fn of(p: &v::Prefs) -> Self {
-        Self { words: p.lyrics_words_playing || p.lyrics_words_all, lines: p.lyrics_lines_auto }
+        Self { words: p.lyrics_words_playing || p.lyrics_words_all, lines: p.lyrics_lines_auto, heard: p.lyrics_recognize }
     }
 }
 
@@ -295,8 +298,13 @@ impl TrackLyrics {
         Some((!self.misfit(source), tier, covered, order))
     }
 
+    /// `source` may be shown: a heard text only while recognition is on.
+    fn usable(&self, source: LyricsSource) -> bool {
+        source != LyricsSource::Recognized || self.show.heard
+    }
+
     fn chosen(&self) -> Option<LyricsSource> {
-        if let Some(p) = self.pick.filter(|p| self.texts.contains_key(p)) {
+        if let Some(p) = self.pick.filter(|p| self.texts.contains_key(p) && self.usable(*p)) {
             return Some(p);
         }
         if self.texts.get(&LyricsSource::File).is_some_and(|t| t.sync() > LyricsSync::Plain)
@@ -307,6 +315,7 @@ impl TrackLyrics {
         }
         LyricsSource::ALL.into_iter()
             .filter(|s| *s != LyricsSource::File || !self.duplicate_file())
+            .filter(|s| self.usable(*s))
             .filter_map(|s| self.rank(s).map(|r| (s, r)))
             .max_by_key(|(_, r)| *r)
             .map(|(s, _)| s)
@@ -417,6 +426,7 @@ impl TrackLyrics {
         let sources = LyricsSource::ALL
             .into_iter()
             .filter(|s| *s != LyricsSource::File || self.pick == Some(LyricsSource::File) || !self.duplicate_file())
+            .filter(|s| self.usable(*s))
             .filter_map(|s| {
                 let state = if let Some(t) = self.texts.get(&s) {
                     v::LyricsAvail::Ready(t.sync())
@@ -436,6 +446,7 @@ impl TrackLyrics {
             .texts
             .iter()
             .filter(|(s, _)| **s != LyricsSource::File || self.pick == Some(LyricsSource::File) || !self.duplicate_file())
+            .filter(|(s, _)| self.usable(**s))
             .map(|(s, t)| {
                 let a = self.aligned(*s);
                 let (made_lines, made) = self.shown(*s);
@@ -1232,7 +1243,7 @@ mod tests {
     #[test]
     fn without_word_timing_lines_stay_lines_and_a_plain_text_gets_made_lines() {
         use nikgob_align::fit::Timing;
-        let off = Shown { words: false, lines: true };
+        let off = Shown { words: false, lines: true, heard: true };
         let lrc = Text::from_lrc(Some("[00:14.60]Слово за слово\n[00:18.32]Дальше"), None).unwrap();
         let words = made(&[(16_740, "Слово за слово"), (20_460, "Дальше")]);
         for (timing, first, made_flag) in [(Timing::Fits, 14_600, false), (Timing::Shifted, 16_740, false), (Timing::Elsewhere, 16_740, true)] {
@@ -1261,10 +1272,29 @@ mod tests {
         assert!(v.made);
         assert_eq!(v.lines, words);
         // With word timing on, the made words.
-        let mut tl = TrackLyrics { show: Shown { words: true, lines: false }, ..Default::default() };
+        let mut tl = TrackLyrics { show: Shown { words: true, lines: false, heard: true }, ..Default::default() };
         tl.insert(LyricsSource::Genius, Some(genius.clone()));
         tl.set_aligned(LyricsSource::Genius, aligned(&genius, true, Timing::None, 0, words.clone()));
         assert_eq!(tl.view(TrackId::new()).lines, words);
+    }
+
+    /// With recognition off, a text heard earlier is never shown: not
+    /// chosen, not listed, not even when it was picked.
+    #[test]
+    fn a_heard_text_is_hidden_while_recognition_is_off() {
+        let heard = Text::from_lines(made(&[(500, "услышано")])).unwrap();
+        let mut tl = TrackLyrics { show: Shown { heard: false, ..Shown::default() }, ..Default::default() };
+        tl.insert(LyricsSource::Recognized, Some(heard));
+        tl.pick = Some(LyricsSource::Recognized);
+        let v = tl.view(TrackId::new());
+        assert_eq!(v.source, None);
+        assert!(v.lines.is_empty() && v.sources.is_empty() && v.texts.is_empty());
+        // A found text still shows.
+        tl.insert(LyricsSource::Genius, Text::from_plain("свои слова"));
+        assert_eq!(tl.view(TrackId::new()).source, Some(LyricsSource::Genius));
+        // Recognition on again: the heard text is back.
+        tl.show.heard = true;
+        assert_eq!(tl.view(TrackId::new()).source, Some(LyricsSource::Recognized));
     }
 
     /// Genius is asked once: a text it gave is kept in the library and read

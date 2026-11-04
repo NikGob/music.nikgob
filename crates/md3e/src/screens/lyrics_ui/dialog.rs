@@ -39,7 +39,7 @@ fn close(ctx: &Context) {
 
 /// Draws the dialog while it is open or still shrinking back.
 pub(crate) fn show(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
-    if super::variant() != super::Variant::Dialog {
+    if super::variant(&state.prefs) != super::Variant::Dialog {
         return;
     }
     let theme = Theme::get(ctx);
@@ -136,7 +136,7 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
             }
             for o in &l.sources {
                 let on = l.picked && l.source == Some(o.source);
-                let chip = FilterChip::new(o.source.label(), on)
+                let chip = FilterChip::new(super::name(o.source), on)
                     .enabled(matches!(o.state, LyricsAvail::Ready(_)))
                     .id_salt(("lyrics-dialog-src", o.source.key()));
                 if ui.add(chip).clicked() && !on {
@@ -145,10 +145,12 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
             }
         });
         ui.add_space(8.0);
-        if let Some(src) = l.source {
-            let line = format!("{} · {}", src.label(), super::source_state(l, src));
-            ui.label(TypeRole::BodySmall.style().rich(line, s.on_surface_variant));
+        // What the chosen text is, in the control's own words.
+        let mut line = super::chip_label(l);
+        if let Some(state) = l.source.map(|src| super::source_state(l, src)).filter(|s| !s.is_empty()) {
+            line = format!("{line} · {state}");
         }
+        ui.label(TypeRole::BodySmall.style().rich(line, s.on_surface_variant));
         ui.add_space(12.0);
     }
 

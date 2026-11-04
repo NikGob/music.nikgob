@@ -1158,6 +1158,8 @@ impl Md3eUi {
             "pane" => S::PaneQueue,
             "lyrics" => S::LyricsModels,
             "lyrics-timing" => S::LyricsGenius,
+            "lyrics-ui" => S::LyricsUi,
+            "lyrics-highlight" => S::LyricsWordsAll,
             "lyrics-check" => S::LyricsCheck,
             _ => S::CoverClickPause,
         });

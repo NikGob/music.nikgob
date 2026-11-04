@@ -80,6 +80,7 @@ pub struct Fakes {
     lyrics_texts: bool,
     craft: Option<String>,
     align_models: bool,
+    chip: Option<String>,
 }
 
 impl Fakes {
@@ -115,6 +116,7 @@ impl Fakes {
             "lyrics-texts" => self.lyrics_texts = true,
             "align-models" => self.align_models = true,
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
+            c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
             _ => return false,
         }
         true
@@ -143,6 +145,7 @@ impl Fakes {
             || self.lyrics_texts
             || self.craft.is_some()
             || self.align_models
+            || self.chip.is_some()
     }
 
     /// `state` with the fakes laid over it.
@@ -305,6 +308,9 @@ impl Fakes {
         if self.align_models {
             align_models(&mut s);
         }
+        if let Some(name) = self.chip.as_deref() {
+            chip_state(&mut s, name);
+        }
         if self.link
             && let Some(p) = s.playlist.as_mut()
         {
@@ -436,17 +442,93 @@ fn craft(s: &mut ViewState, track: nikgob_core::model::TrackId, name: &str) {
     s.align.craft = Some(c);
 }
 
+/// The text under the lyrics control in each state there is
+/// (`fake:chip:genius-plain|genius-lines|lyricsplus-words|lrcred-syllables|file-lines|recognized|several`).
+fn chip_state(s: &mut ViewState, name: &str) {
+    use nikgob_core::lyrics::{LyricLine, LyricsSource};
+    use nikgob_view::{LyricsAvail, LyricsOption, LyricsSync, LyricsText};
+    let track = s.player.current.as_ref().map(|t| t.id);
+    let words = word_lyrics(track).lines;
+    let lines: Vec<LyricLine> = words.iter().map(|l| LyricLine { words: Vec::new(), ..l.clone() }).collect();
+    // Syllables: every word cut in two.
+    let syllables: Vec<LyricLine> = words
+        .iter()
+        .map(|l| {
+            let mut l = l.clone();
+            l.words = l
+                .words
+                .iter()
+                .flat_map(|w| {
+                    let cut = w.text.char_indices().nth(w.text.chars().count() / 2).map_or(w.text.len(), |(i, _)| i);
+                    let mid = w.start + (w.end - w.start) / 2;
+                    [
+                        nikgob_view::LyricWord { start: w.start, end: mid, text: w.text[..cut].to_owned() },
+                        nikgob_view::LyricWord { start: mid, end: w.end, text: w.text[cut..].to_owned() },
+                    ]
+                })
+                .collect();
+            l
+        })
+        .collect();
+    let plain = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+    let ready = |source, sync| LyricsOption { source, state: LyricsAvail::Ready(sync), fits: Some(true), made: false };
+    let none = |source| LyricsOption { source, state: LyricsAvail::Missing, fits: None, made: false };
+    let (source, shown, sources) = match name {
+        "genius-plain" => (LyricsSource::Genius, Vec::new(), vec![none(LyricsSource::LyricsPlus), none(LyricsSource::Lrclib), ready(LyricsSource::Genius, LyricsSync::Plain)]),
+        "genius-lines" => (LyricsSource::Genius, lines.clone(), vec![none(LyricsSource::LyricsPlus), none(LyricsSource::Lrclib), LyricsOption { made: true, ..ready(LyricsSource::Genius, LyricsSync::Plain) }]),
+        "lyricsplus-words" => (LyricsSource::LyricsPlus, words.clone(), vec![ready(LyricsSource::LyricsPlus, LyricsSync::Word), none(LyricsSource::Lrclib)]),
+        "lrcred-syllables" => (LyricsSource::LrcRed, syllables.clone(), vec![none(LyricsSource::LyricsPlus), ready(LyricsSource::LrcRed, LyricsSync::Syllable)]),
+        "file-lines" => (LyricsSource::File, lines.clone(), vec![ready(LyricsSource::File, LyricsSync::Line), none(LyricsSource::LyricsPlus)]),
+        "recognized" => (LyricsSource::Recognized, words.clone(), vec![none(LyricsSource::LyricsPlus), none(LyricsSource::Lrclib), none(LyricsSource::Genius), ready(LyricsSource::Recognized, LyricsSync::Word)]),
+        // Several texts that light up differently: the list says how.
+        _ => (
+            LyricsSource::LyricsPlus,
+            words.clone(),
+            vec![
+                ready(LyricsSource::LyricsPlus, LyricsSync::Word),
+                ready(LyricsSource::LrcRed, LyricsSync::Syllable),
+                ready(LyricsSource::Lrclib, LyricsSync::Line),
+                LyricsOption { made: true, ..ready(LyricsSource::Genius, LyricsSync::Plain) },
+            ],
+        ),
+    };
+    let texts = sources
+        .iter()
+        .filter(|o| matches!(o.state, LyricsAvail::Ready(_)))
+        .map(|o| LyricsText {
+            source: Some(o.source),
+            plain: (o.source == LyricsSource::Genius).then(|| plain.clone()),
+            made: o.made.then(|| lines.clone()),
+            fits: Some(true),
+            ..Default::default()
+        })
+        .collect();
+    s.lyrics = nikgob_view::LyricsView {
+        track,
+        plain: shown.is_empty().then(|| plain.clone()),
+        lines: shown,
+        source: Some(source),
+        made: source == LyricsSource::Genius && name != "genius-plain",
+        sources,
+        texts,
+        ..Default::default()
+    };
+    if s.info.path.is_none() {
+        s.info.path = Some("song.opus".into());
+    }
+}
+
 /// Settings → «Текст песен» with every model state (`fake:align-models`).
 fn align_models(s: &mut ViewState) {
     use nikgob_view::{AlignModel, ModelState};
     let m = |key: &str, label: &str, size: u64, state| AlignModel { key: key.into(), label: label.into(), size, state };
     s.align.models = vec![
-        m("runtime", "Среда ONNX Runtime", 25_111_930, ModelState::Ready),
-        m("separator", "Отделение голоса", 66_759_214, ModelState::Ready),
-        m("mms", "Выравнивание: другие языки", 317_341_664, ModelState::Ready),
-        m("ru", "Выравнивание: русский", 317_349_889, ModelState::Ready),
-        m("ja", "Выравнивание: японский", 357_414_599, ModelState::Downloading(0.37)),
-        m("whisper", "Распознавание текста", 1_087_361_337, ModelState::Missing),
+        m("runtime", "Основа для моделей (ONNX Runtime)", 25_111_930, ModelState::Ready),
+        m("separator", "Отделение голоса от музыки", 66_759_214, ModelState::Ready),
+        m("mms", "Слова по голосу: другие языки", 317_341_664, ModelState::Ready),
+        m("ru", "Слова по голосу: русский", 317_349_889, ModelState::Ready),
+        m("ja", "Слова по голосу: японский", 357_414_599, ModelState::Downloading(0.37)),
+        m("whisper", "Расслышать текст", 1_087_361_337, ModelState::Missing),
     ];
     s.align.done = 642;
     s.align.total = 1318;

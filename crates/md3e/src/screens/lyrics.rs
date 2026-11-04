@@ -44,18 +44,7 @@ enum Style {
 
 /// Both views share timing and scrolling; true opens the lyrics settings.
 pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec<Command>) -> bool {
-    let style = match state.prefs.lyrics_style {
-        1 => Style::Focus,
-        // Letters jumping on a guessed pace looks wrong: optionally only
-        // with real syllable timing, else the calm Focus.
-        2 if state.prefs.wave_syllables_only
-            && LyricsSync::of(&state.lyrics.lines) != Some(LyricsSync::Syllable) =>
-        {
-            Style::Focus
-        }
-        2 => Style::Wave,
-        _ => Style::Karaoke,
-    };
+    let style = style_for(&state.prefs, &state.lyrics.lines);
     let source_h = if mega { Size::Xs.height() + ui.spacing().item_spacing.y } else { 0.0 };
     let size = vec2(ui.available_width(), (ui.available_height() - source_h).max(80.0));
     if mega && state.lyrics.lines.is_empty() {
@@ -71,6 +60,22 @@ pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec
     sizes.gap *= scale;
     paint(ui, rect, &resp, state, &state.lyrics.lines, style, bass, sizes, mega, out);
     mega && super::lyrics_ui::control(ui, state, out)
+}
+
+/// How `lines` are drawn. Letters jumping on a guessed pace looks wrong:
+/// «Волна» optionally only with real syllable timing; without it a text
+/// with word timing still fills word by word (the label says «по словам»,
+/// a recognised text has real word times), one with line timing only
+/// becomes bright (the calm Focus).
+fn style_for(prefs: &Prefs, lines: &[LyricLine]) -> Style {
+    let sync = LyricsSync::of(lines);
+    match prefs.lyrics_style {
+        1 => Style::Focus,
+        2 if prefs.wave_syllables_only && sync == Some(LyricsSync::Word) => Style::Karaoke,
+        2 if prefs.wave_syllables_only && sync != Some(LyricsSync::Syllable) => Style::Focus,
+        2 => Style::Wave,
+        _ => Style::Karaoke,
+    }
 }
 
 /// `lines` drawn as the lyrics view draws the current text, smaller (the
@@ -1018,6 +1023,29 @@ mod tests {
             DisplayLine::Interlude { start, end, duet } => Some((start.as_secs_f32(), end.as_secs_f32(), duet)),
             _ => None,
         }).collect()
+    }
+
+    /// «Chain of the Abyss»: a recognised text with real word times under
+    /// «Волна» with the calm fallback filled whole lines while the label
+    /// said «по словам». Word times fill by word; only line times focus.
+    #[test]
+    fn the_calm_fallback_of_the_wave_still_fills_word_timing_by_word() {
+        let p = Prefs { lyrics_style: 2, wave_syllables_only: true, ..Prefs::default() };
+        let mut worded = line(1.0, Some(2.0), "Calling through");
+        worded.words = vec![
+            nikgob_view::LyricWord { start: Duration::from_secs(1), end: Duration::from_millis(1500), text: "Calling ".into() },
+            nikgob_view::LyricWord { start: Duration::from_millis(1500), end: Duration::from_secs(2), text: "through".into() },
+        ];
+        let lines_only = line(1.0, Some(2.0), "Calling through");
+        assert!(style_for(&p, std::slice::from_ref(&worded)) == Style::Karaoke);
+        assert!(style_for(&p, std::slice::from_ref(&lines_only)) == Style::Focus);
+        let mut syllables = worded.clone();
+        syllables.words[0].text = "Call".into();
+        assert!(style_for(&p, &[syllables]) == Style::Wave);
+        let p = Prefs { wave_syllables_only: false, ..p };
+        assert!(style_for(&p, &[worded.clone()]) == Style::Wave);
+        let p = Prefs { lyrics_style: 1, ..p };
+        assert!(style_for(&p, &[worded]) == Style::Focus);
     }
 
     #[test]

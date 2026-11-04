@@ -170,12 +170,12 @@ impl Drop for AlignService {
 /// The models a part list shows, with their labels.
 pub(crate) fn label(id: ModelId) -> &'static str {
     match id {
-        ModelId::Runtime => "Среда ONNX Runtime",
-        ModelId::Separator => "Отделение голоса",
-        ModelId::AlignerRu => "Выравнивание: русский",
-        ModelId::AlignerJa => "Выравнивание: японский",
-        ModelId::AlignerMms => "Выравнивание: другие языки",
-        ModelId::Whisper => "Распознавание текста",
+        ModelId::Runtime => "Основа для моделей (ONNX Runtime)",
+        ModelId::Separator => "Отделение голоса от музыки",
+        ModelId::AlignerRu => "Слова по голосу: русский",
+        ModelId::AlignerJa => "Слова по голосу: японский",
+        ModelId::AlignerMms => "Слова по голосу: другие языки",
+        ModelId::Whisper => "Расслышать текст",
     }
 }
 
