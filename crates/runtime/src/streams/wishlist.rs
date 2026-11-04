@@ -28,7 +28,9 @@
 //! it is (a low-quality local copy), or a .torrent, magnet, file or folder
 //! of the user's own, linked to the item's track. A copy does not close the
 //! item: it keeps looking once a week in every source, and what is better
-//! than the copy downloads at once and replaces it.
+//! than the copy downloads at once and replaces it. Files of the library
+//! below the quality the user wants are looked for again the same way, at
+//! a pace of their own ([`upgrade`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -50,6 +52,8 @@ use nikgob_view::{self as v, Command};
 
 use super::Msg;
 use crate::Worker;
+
+mod upgrade;
 
 /// Bit of the "Подтверди" ids of wishlist items (import ids use bit 48,
 /// torrent jobs small numbers).
@@ -161,6 +165,15 @@ pub(crate) struct WishState {
     retry_only: HashMap<WishlistId, Vec<SourceKey>>,
     /// When each source last answered a search for an item.
     asked: HashMap<WishlistId, HashMap<SourceKey, Instant>>,
+    /// Better copies of the library's files ([`upgrade`]): when the last
+    /// searches for them started,
+    upgrade_runs: Vec<Instant>,
+    /// when the worker first could start one,
+    upgrade_since: Option<Instant>,
+    /// what an item's file was before the copy on its way,
+    upgrade_from: HashMap<WishlistId, String>,
+    /// and what its files are now, in words (until a file lands).
+    upgrade_have: HashMap<WishlistId, Option<String>>,
 }
 
 /// Sources whose downloads turned us away: after [`ASIDE_AFTER`] in a row
@@ -740,7 +753,7 @@ impl Worker {
     /// («Скачать» without a like stays: it was asked for on its own).
     pub(crate) fn wish_drop_unstarted(&mut self, track: TrackId) {
         for i in self.lib.wishlist_for_track(track).unwrap_or_default() {
-            if i.origin != WishlistOrigin::Manual
+            if !matches!(i.origin, WishlistOrigin::Manual | WishlistOrigin::Upgrade)
                 && matches!(
                     i.status,
                     WishlistStatus::New | WishlistStatus::Waiting | WishlistStatus::NoTorrent | WishlistStatus::Confirm
@@ -757,7 +770,7 @@ impl Worker {
     pub(crate) fn wish_drop_album(&mut self, release: ReleaseId) {
         for i in self.lib.wishlist_for_release(release).unwrap_or_default() {
             if i.scope == WishlistScope::Album
-                && i.origin != WishlistOrigin::Manual
+                && !matches!(i.origin, WishlistOrigin::Manual | WishlistOrigin::Upgrade)
                 && matches!(i.status, WishlistStatus::New | WishlistStatus::Waiting | WishlistStatus::NoTorrent | WishlistStatus::Confirm)
             {
                 let _ = self.lib.delete_wishlist_item(i.id);
@@ -793,8 +806,13 @@ impl Worker {
     }
 
     fn item_targets(&self, item: &WishlistItem, force: bool) -> ImportTargets {
+        let tracks = self.targets_of(item);
+        // A better copy of one track is that track whatever its file's tags
+        // say: it keeps its title, number, disc and album (and so its file
+        // name), and only the file changes.
+        let force = force || (item.origin == WishlistOrigin::Upgrade && item.scope == WishlistScope::Track && tracks.len() == 1);
         ImportTargets {
-            tracks: self.targets_of(item),
+            tracks,
             force,
             release: item.release_id.filter(|_| item.scope == WishlistScope::Album),
             wishlist: Some(item.id),
@@ -862,6 +880,23 @@ impl Worker {
             // What of the album came already (a part of it from a source
             // that then turned us away): a fetch leaves it out.
             got: match (item.scope, &release) {
+                // A better copy of an album: what is good enough already.
+                (WishlistScope::Album, Some(r)) if item.origin == WishlistOrigin::Upgrade => {
+                    let bar = self.state.read().prefs.upgrade_below.score();
+                    self.lib
+                        .tracks_of_release(r.id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|t| {
+                            self.lib
+                                .active_source(t.id)
+                                .ok()
+                                .flatten()
+                                .is_some_and(|s| s.kind.is_local() && s.quality_score >= bar)
+                        })
+                        .map(|t| t.title)
+                        .collect()
+                }
                 (WishlistScope::Album, Some(r)) => self
                     .lib
                     .tracks_of_release(r.id)
@@ -1169,7 +1204,9 @@ impl Worker {
         };
         let want = self.want_of(&item);
         let order: Vec<SourceKey> = self.state.read().prefs.source_order().iter().map(|s| s.key).collect();
-        let copy = self.copy_quality(&item);
+        // A better copy of a file the library has: only what is at least as
+        // good as the user wants.
+        let copy = self.copy_quality(&item).or_else(|| self.upgrade_floor(&item));
         // A source set aside (its downloads kept failing) is not picked;
         // the item may wait for it.
         let now = Instant::now();
@@ -1202,6 +1239,12 @@ impl Worker {
             } else {
                 self.no_torrent(id, true);
             }
+            return;
+        }
+        // It replaces a file the user has: asked first, unless they let it.
+        if self.upgrade_asks(&item) {
+            let offers: Vec<Offer> = ranked.into_iter().map(|r| r.offer).collect();
+            self.confirm_after_look(id, offers);
             return;
         }
         match pick(&ranked, copy) {
@@ -1330,11 +1373,15 @@ impl Worker {
     /// The user picks among `shown` in «Подтверди».
     fn ask_confirm(&mut self, id: WishlistId, shown: &[Offer]) {
         let json = serde_json::to_string(shown).ok();
+        let upgrade = self.is_upgrade(id);
         self.set_item(id, |i| {
             i.status = WishlistStatus::Confirm;
             i.candidates_json = json;
-            i.note = Some("Не уверен, что это оно — выбери".into());
+            i.note = Some(if upgrade { "Нашёл качество лучше — подтверди замену" } else { "Не уверен, что это оно — выбери" }.into());
         });
+        if upgrade {
+            self.upgrade_offered(id, shown);
+        }
         self.publish_wishlist();
     }
 
@@ -1376,6 +1423,7 @@ impl Worker {
             return;
         };
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
+        self.upgrade_fetching(&item);
         let want = self.want_of(&item);
         match nikgob_sources::matching::performer_of(&offer, &want).filter(|_| item.scope == WishlistScope::Track) {
             Some(names) => self.streaming.wish.relabel.insert(id, names),
@@ -1576,8 +1624,11 @@ impl Worker {
             self.streaming.wish.refusals.worked(offer.source);
             format!("остальных {missing} у {} нет", source_name(offer.source))
         };
-        let what = self.item_title(id);
-        self.wish_line(id, what, format!("Скачано {} из {all} · {why}", files.len()), None);
+        // A better copy says only what it found and what came of it.
+        if !self.is_upgrade(id) {
+            let what = self.item_title(id);
+            self.wish_line(id, what, format!("Скачано {} из {all} · {why}", files.len()), None);
+        }
         self.streaming.wish.partial.insert(id);
         self.wish_files(id, offer, files);
     }
@@ -1626,6 +1677,9 @@ impl Worker {
             Next::Doubtful => "есть варианты под вопросом — выбери в «Хочу скачать»".to_owned(),
             Next::Later(_) | Next::NotFound => return,
         };
+        if self.is_upgrade(id) {
+            return;
+        }
         let why = why_words(offer.source, e, self.item_what(id));
         let title = self.item_title(id);
         self.wish_line(id, title, capitalised(&format!("{why} · {then}")), None);
@@ -1683,6 +1737,10 @@ impl Worker {
             self.streaming.wish.retry_only.remove(&id);
             let copy = self.copy_quality(&item).is_some();
             self.no_torrent(id, false);
+            // A better copy is looked for when its schedule says, quietly.
+            if item.origin == WishlistOrigin::Upgrade {
+                return Next::NotFound;
+            }
             let reasons = if why.is_empty() { "Источники не дали скачать".to_owned() } else { why.join(", ") };
             let line = capitalised(&format!("{reasons} · поищу снова через неделю"));
             if !copy {
@@ -1713,8 +1771,10 @@ impl Worker {
             i.next_try_at = Some(at);
             i.note = Some(note.clone());
         });
-        let title = self.item_title(id);
-        self.wish_line(id, title, note, None);
+        if item.origin != WishlistOrigin::Upgrade {
+            let title = self.item_title(id);
+            self.wish_line(id, title, note, None);
+        }
         self.publish_wishlist();
         Next::Later(at)
     }
@@ -1740,6 +1800,10 @@ impl Worker {
     }
 
     fn no_torrent(&mut self, id: WishlistId, tell: bool) {
+        if self.is_upgrade(id) {
+            self.upgrade_none(id);
+            return;
+        }
         let copy = self.lib.get_wishlist_item(id).ok().flatten().is_some_and(|i| self.copy_quality(&i).is_some());
         let Some(item) = self.set_item(id, |i| {
             i.status = WishlistStatus::NoTorrent;
@@ -1857,12 +1921,23 @@ impl Worker {
     pub(crate) fn wish_retry(&mut self, id: WishlistId) {
         self.streaming.wish.later.remove(&id);
         self.streaming.wish.retry_only.remove(&id);
-        self.set_item(id, |i| {
+        let item = self.set_item(id, |i| {
             if i.status != WishlistStatus::Dismissed {
                 i.status = WishlistStatus::New;
                 i.next_try_at = None;
             }
         });
+        // A better copy the user asks for now is searched now, not at the
+        // pace of the ones that look by themselves.
+        if let Some(item) = item
+            && item.origin == WishlistOrigin::Upgrade
+            && item.status == WishlistStatus::New
+            && self.import.is_some()
+            && self.can_download()
+        {
+            self.streaming.wish.upgrade_runs.push(Instant::now());
+            self.wish_search(item);
+        }
         self.wish_tick();
         self.publish_wishlist();
     }
@@ -1874,6 +1949,10 @@ impl Worker {
         let mut n = 0;
         for status in [WishlistStatus::NoTorrent, WishlistStatus::Failed] {
             for mut item in self.lib.list_wishlist_by_status(status).unwrap_or_default() {
+                // Better copies keep their own schedule.
+                if item.origin == WishlistOrigin::Upgrade {
+                    continue;
+                }
                 item.status = WishlistStatus::New;
                 item.next_try_at = None;
                 item.updated_at = now;
@@ -1883,7 +1962,7 @@ impl Worker {
         }
         // And what waits to be searched again after a source turned it away.
         for mut item in self.lib.list_wishlist_by_status(WishlistStatus::New).unwrap_or_default() {
-            if item.next_try_at.is_some_and(|t| t > now) {
+            if item.origin != WishlistOrigin::Upgrade && item.next_try_at.is_some_and(|t| t > now) {
                 self.streaming.wish.later.remove(&item.id);
                 self.streaming.wish.retry_only.remove(&item.id);
                 item.next_try_at = None;
@@ -2048,6 +2127,8 @@ impl Worker {
     /// satisfies are done; a copy saved from YouTube keeps its item looking
     /// for a real file.
     pub(crate) fn wish_imported(&mut self, track: TrackId, path: &Path) {
+        // What the files of the better-copy items are has changed.
+        self.streaming.wish.upgrade_have.clear();
         if let Some(item) = self.streaming.wish.saving.remove(path) {
             let _ = std::fs::remove_file(path);
             self.set_item(item, |i| {
@@ -2079,6 +2160,14 @@ impl Worker {
         }
         for i in items {
             if matches!(i.status, WishlistStatus::Done | WishlistStatus::Dismissed) {
+                continue;
+            }
+            // A better copy is done once every file of it is good enough.
+            if i.origin == WishlistOrigin::Upgrade {
+                if self.upgrade_reached(&i) {
+                    self.upgrade_done(&i);
+                    changed = true;
+                }
                 continue;
             }
             // An album is «Скачано» once every one of its tracks has a file
@@ -2152,6 +2241,10 @@ impl Worker {
         // A direct download was imported (or turned down): its copy goes.
         self.drop_direct(id);
         if matches!(item.status, WishlistStatus::Dismissed) {
+            return;
+        }
+        if item.origin == WishlistOrigin::Upgrade {
+            self.upgrade_settle(&item);
             return;
         }
         let partial = self.streaming.wish.partial.remove(&id);
@@ -2359,6 +2452,7 @@ impl Worker {
         });
         let now = Self::now();
         let youtube = self.service(Service::Youtube).is_some();
+        let can_search = self.can_download();
         // Albums and artists repeat over the items (an album of 12 = 12
         // items): each is read once per publish.
         let mut releases: std::collections::HashMap<nikgob_core::model::ReleaseId, Option<nikgob_core::model::Release>> =
@@ -2452,6 +2546,7 @@ impl Worker {
                     let days = ((at - now).max(0) as u64).div_ceil(86_400_000);
                     format!("поищу снова через {days} дн.")
                 });
+            let upgrade = self.upgrade_row_words(item, files_wait, next_try.as_deref(), can_search);
             rows.push(v::WishlistRow {
                 id: item.id,
                 title: item.title.clone().unwrap_or_default(),
@@ -2470,6 +2565,7 @@ impl Worker {
                 attempts: item.attempts,
                 can_save_from_youtube: youtube
                     && item.track_id.is_some()
+                    && item.origin != WishlistOrigin::Upgrade
                     && !matches!(item.status, WishlistStatus::Done | WishlistStatus::Dismissed),
                 cover: None,
                 progress: (item.status == WishlistStatus::Downloading)
@@ -2486,6 +2582,7 @@ impl Worker {
                 missing,
                 has_copy: copy,
                 source,
+                upgrade,
             });
             covers.push(release_id);
         }
@@ -2496,7 +2593,7 @@ impl Worker {
             by_album,
             by_artist,
             counts,
-            can_search: self.can_download(),
+            can_search,
         };
         let mut view = view;
         for (row, release) in view.items.iter_mut().zip(covers) {
@@ -2519,6 +2616,9 @@ impl Worker {
                 n
             }
         };
+        if item.origin == WishlistOrigin::Upgrade {
+            return self.upgrade_confirm_view(item, id);
+        }
         let offers = item.candidates_json.as_deref().map(offers_of_json).unwrap_or_default();
         let what = match (&item.artist, &item.title) {
             (Some(a), Some(t)) => format!("{t} — {a}"),

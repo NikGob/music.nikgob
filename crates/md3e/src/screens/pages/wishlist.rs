@@ -76,6 +76,11 @@ impl Filter {
 
 /// The status of an item in words, for its supporting line.
 fn status_text(r: &WishlistRow, torrents: bool) -> String {
+    // A file the library has, looked for in better quality: the runtime
+    // words its state («MP3 128 · ищу lossless»).
+    if let Some(u) = &r.upgrade {
+        return u.clone();
+    }
     match r.status {
         St::Waiting | St::New | St::Searching if !torrents => "ждёт источник скачивания".into(),
         St::Waiting => "ждёт · скачается по кнопке".into(),

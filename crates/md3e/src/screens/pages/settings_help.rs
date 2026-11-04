@@ -214,6 +214,12 @@ pub enum SettingId {
     LikedAlbumsPlace,
     AutoDownloads,
     DownloadToasts,
+    /// «Искать копии лучше»: how often, or never.
+    UpgradeEvery,
+    /// «Хорошее качество»: lossless only, or MP3 320 and up.
+    UpgradeBar,
+    /// «Замена файла»: asked in «Подтверди», or by itself.
+    UpgradeAuto,
     /// One line of «Источники скачивания»: its switch and place.
     DownloadSource(v::SourceKey),
     PlaylistSync,
@@ -350,7 +356,7 @@ impl SettingId {
             }
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
             Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
-            | YouTubeCookies | LikeDownload | PushLikes | AlbumLike | SingleLike | LikedAlbumsPlace | AutoDownloads | DownloadToasts | DownloadSource(_) | PlaylistSync | ImportSpotify
+            | YouTubeCookies | LikeDownload | PushLikes | AlbumLike | SingleLike | LikedAlbumsPlace | AutoDownloads | DownloadToasts | UpgradeEvery | UpgradeBar | UpgradeAuto | DownloadSource(_) | PlaylistSync | ImportSpotify
             | ImportYouTube | ImportFiles | ImportSavedSongs | StreamCache | StreamAnalysis | Prowlarr | Soulseek | SoulseekShare | SoulseekUpload | NoSeed | SeedLimit | SeedDays
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
             RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | RadioNoRepeat | NewShareBy(_)
@@ -481,6 +487,9 @@ impl SettingId {
             LikedAlbumsPlace => "Где в библиотеке лежат любимые альбомы: отдельной полкой или вперемешку с плейлистами.",
             AutoDownloads => "Сколько треков из «Хочу скачать» ищутся и качаются одновременно сами. Меньше — тише для сети.",
             DownloadToasts => "Всплывающие сообщения о загрузках, которые идут сами: раздача не нашлась, начала качаться, скачалась. Выключено — всё это видно только в «Загрузках» и «Хочу скачать».",
+            UpgradeEvery => "Треки и альбомы, у которых файл хуже выбранного в «Хорошее качество», плеер сам ищет снова во всех источниках скачивания — по нескольку в час, чтобы не мешать. Что нашлось лучше, заменяет файл: лайки, прослушивания, плейлисты и текст остаются, старый файл уходит в корзину. Ход поиска видно в «Хочу скачать».",
+            UpgradeBar => "Какое качество считать достаточным. Файлы хуже ищутся снова, и заменяет их только копия не хуже этого.",
+            UpgradeAuto => "Найденная копия может оказаться другим изданием (ремастер, другой трек-лист), поэтому по умолчанию замена ждёт тебя в «Подтверди». «Заменять сам» — плеер скачивает и заменяет без вопросов.",
             DownloadSource(v::SourceKey::Torrents) => "Раздачи, которые находит Prowlarr (адрес и ключ — ниже, в «Торренты»). Из альбома или дискографии берётся только нужный трек. Сначала берётся FLAC, где бы он ни был; при равном качестве — источник выше. Копия с YouTube — только когда нигде нет.",
             DownloadSource(v::SourceKey::Khinsider) => "Саундтреки игр с downloads.khinsider.com, часто во FLAC. Спрашивается только для саундтреков: альбом так и называется или песня написана для игры. Сначала берётся FLAC, где бы он ни был; при равном качестве — источник выше. Копия с YouTube — только когда нигде нет.",
             DownloadSource(v::SourceKey::Soulseek) => "Отдельные треки от других людей в сети Soulseek, часто во FLAC. Сначала берётся FLAC, где бы он ни был; при равном качестве — источник выше. Копия с YouTube — только когда нигде нет.",
@@ -666,6 +675,20 @@ impl SettingId {
                 c!("Отдельно", "Своя полка «Любимые альбомы» в библиотеке."),
                 c!("С плейлистами", "Альбомы стоят среди плейлистов, по времени лайка."),
             ],
+            Self::UpgradeEvery => &[
+                c!("Раз в день", "Каждый файл хуже нужного проверяется раз в сутки."),
+                c!("Раз в неделю", "Раз в неделю — обычно этого хватает: новые раздачи и релизы появляются не каждый день."),
+                c!("Раз в месяц", "Реже всего: меньше запросов к источникам."),
+                c!("Никогда", "Файлы не ищутся снова; то, что уже ищется, убирается из «Хочу скачать»."),
+            ],
+            Self::UpgradeBar => &[
+                c!("Только lossless", "Ищется FLAC (или другой lossless) для всего, что в MP3, AAC или Opus."),
+                c!("MP3 320 и выше", "Ищется копия не хуже MP3 320 для файлов хуже него, например MP3 128."),
+            ],
+            Self::UpgradeAuto => &[
+                c!("Спрашивать", "Найденное лучшее качество ждёт в «Подтверди»: видно, что на что меняется, например «FLAC вместо MP3 128»."),
+                c!("Заменять сам", "Лучшая копия скачивается и заменяет файл без вопросов."),
+            ],
             Self::PlaylistSync => &[
                 c!("Двусторонняя", "Правки здесь уходят в сервис, правки там приходят сюда."),
                 c!("Только слежка", "Плейлист повторяет сервис; свои правки здесь туда не уходят."),
@@ -761,6 +784,9 @@ impl SettingId {
             Self::OpusBitrate => OPUS.iter().position(|b| *b == p.opus_bitrate).unwrap_or(1),
             Self::LikeDownload if !p.like_downloads => 2,
             Self::LikeDownload => usize::from(p.like_download_scope == v::WishlistScope::Album),
+            Self::UpgradeEvery => v::UpgradeEvery::ALL.iter().position(|e| *e == p.upgrade_every).unwrap_or(1),
+            Self::UpgradeBar => usize::from(p.upgrade_below == v::UpgradeBar::Mp3_320),
+            Self::UpgradeAuto => usize::from(p.upgrade_auto),
             Self::PlaylistSync => sync_index(p.playlist_sync_default),
             Self::AlbumLike => usize::from(p.album_like_tracks),
             Self::SingleLike => usize::from(p.single_like_saves),
@@ -831,6 +857,9 @@ impl SettingId {
                     p.like_download_scope = if i == 1 { v::WishlistScope::Album } else { v::WishlistScope::Track };
                 }
             }
+            Self::UpgradeEvery => p.upgrade_every = v::UpgradeEvery::ALL[i.min(3)],
+            Self::UpgradeBar => p.upgrade_below = if i == 1 { v::UpgradeBar::Mp3_320 } else { v::UpgradeBar::Lossless },
+            Self::UpgradeAuto => p.upgrade_auto = i == 1,
             Self::PlaylistSync => p.playlist_sync_default = v::PlaylistSyncMode::ALL[i.min(2)],
             Self::AlbumLike => p.album_like_tracks = i == 1,
             Self::SingleLike => p.single_like_saves = i == 1,
@@ -2095,6 +2124,7 @@ mod tests {
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::AlbumLike, S::SingleLike, S::LikedAlbumsPlace, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
             S::RadioNoRepeat, S::LyricsGpu, S::LyricsUi, S::ToastTime, S::LyricsStreamKeep,
+            S::UpgradeEvery, S::UpgradeBar, S::UpgradeAuto,
         ] {
 
             assert!(id.choices().len() >= 2, "{id:?}");

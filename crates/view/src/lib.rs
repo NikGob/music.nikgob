@@ -1471,6 +1471,14 @@ pub struct Prefs {
     /// torrent started or finished. Off: that is only in «Загрузки» and «Хочу
     /// скачать».
     pub download_toasts: bool,
+    /// «Искать качество лучше»: how often the library's files below
+    /// [`Self::upgrade_below`] are searched for a better copy.
+    pub upgrade_every: UpgradeEvery,
+    /// What is good enough: a file below it is searched for again.
+    pub upgrade_below: UpgradeBar,
+    /// A better copy found replaces the file by itself. Off: it waits in
+    /// «Подтверди» (a release can differ from the one the user has).
+    pub upgrade_auto: bool,
     /// Size limit of the stream audio cache per service, in MB (0 = off):
     /// recently played YouTube files and Spotify's encrypted files.
     pub stream_cache_mb: u32,
@@ -2632,6 +2640,9 @@ impl Default for Prefs {
             auto_download_limit: 2,
             download_sources: Vec::new(),
             download_toasts: false,
+            upgrade_every: UpgradeEvery::Week,
+            upgrade_below: UpgradeBar::Lossless,
+            upgrade_auto: false,
             stream_cache_mb: 500,
             spotify_personal_app: false,
             youtube_cookies_set: false,

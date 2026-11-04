@@ -60,6 +60,14 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
         ui.add(Switch::new(&mut p.download_toasts).id_salt("set-download-toasts"));
     });
 
+    group(ui, "Качество");
+    row(ui, Id::UpgradeEvery, "Искать копии лучше", None, |ui| choice(ui, Id::UpgradeEvery, p));
+    let never = p.upgrade_every == v::UpgradeEvery::Never;
+    dimmed(ui, never, |ui| {
+        row(ui, Id::UpgradeBar, "Хорошее качество", None, |ui| choice(ui, Id::UpgradeBar, p));
+        row(ui, Id::UpgradeAuto, "Замена файла", None, |ui| choice(ui, Id::UpgradeAuto, p));
+    });
+
     group(ui, "Плейлисты");
     row(
         ui,
