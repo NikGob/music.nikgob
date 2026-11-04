@@ -46,10 +46,16 @@
 //! - `fake:craft:decode|separate|listen|align|download` — timing for
 //!   Genius' text is being made, at that stage; `fake:craft:done` — made,
 //!   to check; `fake:craft:failed` — it could not be made.
-//! - `fake:lyrics-home:words|online|saved` — with `fake:lyrics-texts`,
+//! - `fake:lyrics-home:words|online|saved|clip` — with `fake:lyrics-texts`,
 //!   the shown text: Genius' with word timing the player made (to make
-//!   again or save), LRCLIB's lines only online, or a text saved on the
-//!   computer.
+//!   again or save), LRCLIB's lines only online, a text saved on the
+//!   computer, or a clip whose song is unclear (timing cannot be made).
+//! - `fake:lyrics-state:<state>[:word|line|plain]` — the lyrics control in
+//!   each state of docs/lyrics-control.md (`none`, `searching`, `plain`,
+//!   `line`, `word`, `made`, `saved`, `making`, `failed`, `stream`, `clip`,
+//!   `no-audio`), seen by words, by lines or without timing when the last
+//!   part says so. A later one replaces an earlier one (one run, many
+//!   `snap:`s).
 //! - `fake:align-models` — Settings → «Текст песен»: models ready, one
 //!   downloading, one missing; the background pass halfway; on the GPU.
 //! - `fake:lyrics-gap` — LRC lines with an empty stamp making a wait
@@ -91,6 +97,7 @@ pub struct Fakes {
     chip: Option<String>,
     /// `fake:lyrics-gap`: with word timing.
     lyrics_gap: Option<bool>,
+    lyrics_state: Option<String>,
 }
 
 impl Fakes {
@@ -130,6 +137,7 @@ impl Fakes {
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             c if c.starts_with("lyrics-home:") => self.lyrics_home = Some(c["lyrics-home:".len()..].to_owned()),
             c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
+            c if c.starts_with("lyrics-state:") => self.lyrics_state = Some(c["lyrics-state:".len()..].to_owned()),
             _ => return false,
         }
         true
@@ -161,6 +169,7 @@ impl Fakes {
             || self.align_models
             || self.chip.is_some()
             || self.lyrics_gap.is_some()
+            || self.lyrics_state.is_some()
     }
 
     /// `state` with the fakes laid over it.
@@ -332,6 +341,9 @@ impl Fakes {
         if let Some(words) = self.lyrics_gap {
             s.lyrics = gap_lyrics(state.player.current.as_ref().map(|t| t.id), words);
         }
+        if let Some(name) = self.lyrics_state.as_deref() {
+            lyrics_state(&mut s, name);
+        }
         if self.link
             && let Some(p) = s.playlist.as_mut()
         {
@@ -479,7 +491,7 @@ fn texts_lyrics(track: Option<nikgob_core::model::TrackId>) -> nikgob_view::Lyri
 /// Where the shown text of [`texts_lyrics`] lives (`fake:lyrics-home:…`).
 fn lyrics_home(l: &mut nikgob_view::LyricsView, name: &str) {
     use nikgob_core::lyrics::LyricsSource;
-    use nikgob_view::LyricsHome;
+    use nikgob_view::{LyricsCraft, LyricsHome};
     match name {
         "words" => {
             l.lines = word_lyrics(l.track).lines;
@@ -499,6 +511,10 @@ fn lyrics_home(l: &mut nikgob_view::LyricsView, name: &str) {
             l.lines = word_lyrics(l.track).lines;
             l.made = false;
             l.home = LyricsHome::Computer;
+            l.savable = false;
+        }
+        "clip" => {
+            l.craft = LyricsCraft::No("Подсветку не сделать: это клип, неясно, какая в нём песня".into());
             l.savable = false;
         }
         _ => {}
@@ -609,6 +625,118 @@ fn chip_state(s: &mut ViewState, name: &str) {
         ..Default::default()
     };
     if s.info.path.is_none() {
+        s.info.path = Some("song.opus".into());
+    }
+}
+
+/// The lyrics control in one state of docs/lyrics-control.md, as the
+/// runtime would show it (`fake:lyrics-state:<state>[:<seen>]`).
+fn lyrics_state(s: &mut ViewState, arg: &str) {
+    use nikgob_core::lyrics::{LyricLine, LyricsSource as Src};
+    use nikgob_view::{AlignJob, AlignStage, Craft, LyricsAvail, LyricsCraft, LyricsHome, LyricsOption, LyricsSync, LyricsText};
+    let (name, seen) = arg.split_once(':').map_or((arg, None), |(n, v)| (n, Some(v)));
+    let track = s.player.current.as_ref().map(|t| t.id);
+    let words = word_lyrics(track).lines;
+    let lines: Vec<LyricLine> = words.iter().map(|l| LyricLine { words: Vec::new(), ..l.clone() }).collect();
+    let plain = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+    let opt = |source, state| LyricsOption { source, state, fits: None, made: false };
+    let ready = |source, sync| LyricsOption { fits: Some(true), ..opt(source, LyricsAvail::Ready(sync)) };
+    let missing = |source| opt(source, LyricsAvail::Missing);
+    let mut l = nikgob_view::LyricsView { track, ..Default::default() };
+    // The shown text: its source, its own timing, the player's timing of
+    // it, where it lives, whether timing can be made.
+    let text = |l: &mut nikgob_view::LyricsView, source, own: LyricsSync, made: Option<&Vec<LyricLine>>, home, craft: LyricsCraft| {
+        let own_lines = match own {
+            LyricsSync::Plain => Vec::new(),
+            LyricsSync::Line => lines.clone(),
+            _ => words.clone(),
+        };
+        l.source = Some(source);
+        l.home = home;
+        l.craft = craft;
+        l.made = made.is_some();
+        l.savable = made.is_some() && l.craft == LyricsCraft::Ready;
+        l.lines = made.cloned().unwrap_or(own_lines.clone());
+        let finest = LyricsSync::of(&l.lines).unwrap_or(LyricsSync::Plain).max(own);
+        l.shows = [LyricsSync::Word, LyricsSync::Line, LyricsSync::Plain].into_iter().filter(|s| *s <= finest).collect();
+        l.texts = vec![LyricsText {
+            source: Some(source),
+            lines: own_lines,
+            plain: (own == LyricsSync::Plain).then(|| plain.clone()),
+            sync: Some(own),
+            fits: Some(true),
+            made: made.cloned(),
+            saved: made.is_some(),
+        }];
+        if let Some(o) = l.sources.iter_mut().find(|o| o.source == source) {
+            o.made = made.is_some();
+        }
+    };
+    let file = LyricsCraft::Ready;
+    match name {
+        "none" => l.sources = vec![missing(Src::LyricsPlus), missing(Src::LrcRed), missing(Src::Lrclib), missing(Src::Genius)],
+        "searching" => {
+            l.loading = true;
+            l.sources = vec![opt(Src::LyricsPlus, LyricsAvail::Loading), opt(Src::LrcRed, LyricsAvail::Loading), missing(Src::Lrclib)];
+        }
+        "line" => {
+            l.sources = vec![missing(Src::LyricsPlus), ready(Src::Lrclib, LyricsSync::Line), ready(Src::Genius, LyricsSync::Plain)];
+            text(&mut l, Src::Lrclib, LyricsSync::Line, None, LyricsHome::Online, file);
+        }
+        "word" => {
+            l.sources = vec![ready(Src::LyricsPlus, LyricsSync::Word), ready(Src::Lrclib, LyricsSync::Line)];
+            text(&mut l, Src::LyricsPlus, LyricsSync::Word, None, LyricsHome::Online, file);
+        }
+        "made" => {
+            l.sources = vec![missing(Src::LyricsPlus), missing(Src::Lrclib), ready(Src::Genius, LyricsSync::Plain)];
+            text(&mut l, Src::Genius, LyricsSync::Plain, Some(&words), LyricsHome::Library, file);
+            l.picked = true;
+        }
+        "saved" => {
+            l.sources = vec![ready(Src::File, LyricsSync::Word), missing(Src::LyricsPlus), ready(Src::Genius, LyricsSync::Plain)];
+            text(&mut l, Src::File, LyricsSync::Word, None, LyricsHome::Computer, file);
+        }
+        "clip" => {
+            l.sources = vec![missing(Src::LyricsPlus), missing(Src::Lrclib), ready(Src::Genius, LyricsSync::Plain)];
+            let why = LyricsCraft::No("Подсветку не сделать: это клип, неясно, какая в нём песня".into());
+            text(&mut l, Src::Genius, LyricsSync::Plain, None, LyricsHome::Online, why);
+        }
+        "no-audio" => {
+            l.sources = vec![missing(Src::LyricsPlus), missing(Src::Lrclib), ready(Src::Genius, LyricsSync::Plain)];
+            text(&mut l, Src::Genius, LyricsSync::Plain, None, LyricsHome::Online, LyricsCraft::Off);
+        }
+        // plain, making, failed, stream: Genius' plain text, timing can be
+        // made (from the file, or the stream's audio for a while).
+        _ => {
+            l.sources = vec![missing(Src::LyricsPlus), missing(Src::Lrclib), ready(Src::Genius, LyricsSync::Plain)];
+            text(&mut l, Src::Genius, LyricsSync::Plain, None, LyricsHome::Online, file);
+        }
+    }
+    // Seen otherwise than it comes.
+    match seen {
+        Some("plain") => l.lines.clear(),
+        Some("line") => l.lines = lines.clone(),
+        Some("word") if l.shows.contains(&LyricsSync::Word) => l.lines = words.clone(),
+        _ => {}
+    }
+    if l.lines.is_empty() && l.source.is_some() {
+        l.plain = Some(plain.clone());
+    }
+    if let Some(t) = track {
+        let craft = |failed: Option<&str>| Craft { track: t, source: Src::Genius, target: LyricsSync::Word, lines: None, failed: failed.map(str::to_owned) };
+        match name {
+            "making" => {
+                s.align.craft = Some(craft(None));
+                s.align.job = Some(AlignJob { track, stage: AlignStage::Listen, progress: 0.6, asked: true, bytes: None });
+            }
+            "failed" => s.align.craft = Some(craft(Some("Не удалось скачать модели"))),
+            _ => {}
+        }
+    }
+    s.lyrics = l;
+    if name == "stream" || name == "clip" || name == "no-audio" {
+        s.info.path = None;
+    } else if s.info.path.is_none() {
         s.info.path = Some("song.opus".into());
     }
 }

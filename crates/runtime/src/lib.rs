@@ -804,6 +804,8 @@ impl Worker {
             Command::PickLyricsSource(t, src) => self.pick_lyrics_source(t, src),
             Command::CraftLyrics { track, source, target } => self.craft_lyrics(track, source, target),
             Command::ClearCraft => self.clear_craft(),
+            Command::CancelCraft => self.cancel_craft(),
+            Command::ShowLyricsAs(t, sync) => self.show_lyrics_as(t, sync),
             Command::SaveLyrics { track, source } => self.save_lyrics(track, source),
             Command::AlignModel { key, download } => self.align_model(&key, download),
             Command::SeekBy(ms) => {
@@ -2261,8 +2263,8 @@ impl Worker {
         self.save_prefs();
         self.import_prefs(&p);
         self.align_settings();
-        if (old.lyrics_words_playing, old.lyrics_words_all, old.lyrics_lines_auto, old.lyrics_check, old.lyrics_recognize)
-            != (p.lyrics_words_playing, p.lyrics_words_all, p.lyrics_lines_auto, p.lyrics_check, p.lyrics_recognize)
+        if (old.lyrics_words_playing, old.lyrics_words_all, old.lyrics_lines_auto, old.lyrics_check, old.lyrics_recognize, old.lyrics_streams)
+            != (p.lyrics_words_playing, p.lyrics_words_all, p.lyrics_lines_auto, p.lyrics_check, p.lyrics_recognize, p.lyrics_streams)
         {
             self.lyrics_prefs_changed();
         }

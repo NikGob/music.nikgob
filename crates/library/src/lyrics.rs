@@ -145,6 +145,30 @@ impl Library {
         })
     }
 
+    /// How the user chose to see the track's lyrics (`word`, `line` or
+    /// `plain`), if they did.
+    pub fn lyrics_show(&self, track: TrackId) -> Result<Option<String>> {
+        self.read(|c| {
+            Ok(c.query_row("SELECT sync FROM lyrics_show WHERE track_id = ?1", [track.to_string()], |r| r.get(0))
+                .optional()?)
+        })
+    }
+
+    /// Remembers how the track's lyrics are seen; `None` forgets it.
+    pub fn set_lyrics_show(&self, track: TrackId, sync: Option<&str>) -> Result<()> {
+        self.write(|tx| {
+            match sync {
+                Some(s) => tx.execute(
+                    "INSERT INTO lyrics_show(track_id, sync) VALUES (?1, ?2)
+                     ON CONFLICT(track_id) DO UPDATE SET sync = excluded.sync",
+                    params![track.to_string(), s],
+                )?,
+                None => tx.execute("DELETE FROM lyrics_show WHERE track_id = ?1", [track.to_string()])?,
+            };
+            Ok(())
+        })
+    }
+
     /// Local tracks without lyrics that are worth a lookup: never tried, or
     /// "not found" markers older than `retry_before` (unix ms). Untried first.
     pub fn tracks_needing_lyrics(&self, retry_before: UnixMs, limit: u32) -> Result<Vec<TrackId>> {
@@ -326,6 +350,13 @@ mod tests {
         assert_eq!(lib.lyrics_pick(t.id).unwrap().as_deref(), Some("lyricsplus"));
         lib.set_lyrics_pick(t.id, None).unwrap();
         assert_eq!(lib.lyrics_pick(t.id).unwrap(), None);
+
+        assert_eq!(lib.lyrics_show(t.id).unwrap(), None);
+        lib.set_lyrics_show(t.id, Some("line")).unwrap();
+        lib.set_lyrics_show(t.id, Some("plain")).unwrap();
+        assert_eq!(lib.lyrics_show(t.id).unwrap().as_deref(), Some("plain"));
+        lib.set_lyrics_show(t.id, None).unwrap();
+        assert_eq!(lib.lyrics_show(t.id).unwrap(), None);
     }
 
     #[test]

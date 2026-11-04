@@ -10,7 +10,7 @@
 use egui::{Align, Layout, Ui, vec2};
 use nikgob_view::{Command, LyricsAvail, Route, ViewState};
 
-use crate::components::{Button, ListItem, Size, Style, segmented_list};
+use crate::components::{Button, ConnectedGroup, ListItem, Size, Style, segmented_list};
 use crate::{Icon, Theme, TypeRole};
 
 const LEFT: f32 = 320.0;
@@ -109,10 +109,17 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
     }
     if let Some(b) = super::busy(state) {
         super::progress(ui, &b, w);
+        ui.add_space(12.0);
+        if ui.add(Button::new("Отменить").style(Style::Tonal).size(Size::S).id_salt("lyrics-page-cancel")).clicked() {
+            out.push(Command::CancelCraft);
+        }
         return;
     }
     if let Some(e) = super::failed(state) {
         ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
+        ui.add_space(12.0);
+    } else if let Some(why) = super::no_craft(state) {
+        ui.label(TypeRole::BodyMedium.style().rich(why, s.on_surface_variant));
         ui.add_space(12.0);
     }
     let actions = super::actions(state);
@@ -137,7 +144,24 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
     });
 }
 
-/// The shown text in full, following the song. (The editor goes here.)
+/// How the text is seen (where it has timing to choose from), and the
+/// shown text in full, following the song. (The editor goes here.)
 fn text_side(ui: &mut Ui, size: egui::Vec2, state: &ViewState, out: &mut Vec<Command>) {
+    let mut size = size;
+    if !super::shows(state).is_empty() {
+        ui.allocate_ui_with_layout(vec2(size.x, size.y), Layout::top_down(Align::Min), |ui| {
+            let all = super::all_shows(state);
+            let labels = all.map(|a| a.1);
+            let on = all.map(|a| a.2);
+            let at = all.iter().position(|a| a.0 == super::seen(&state.lyrics)).unwrap_or(2);
+            if let Some(i) = ConnectedGroup::new("lyrics-page-show", &labels).enabled(&on).show(ui, at) {
+                super::show_as(state, all[i].0, out);
+            }
+            ui.add_space(16.0);
+            size.y = (size.y - 56.0).max(120.0);
+            super::text_card(ui, size, state, out);
+        });
+        return;
+    }
     super::text_card(ui, size, state, out);
 }

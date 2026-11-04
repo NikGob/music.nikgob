@@ -790,9 +790,14 @@ mod prefs_tests {
         let p = parse_prefs(old.as_bytes()).unwrap();
         assert!(!p.lyrics_words_all && !p.lyrics_words_playing && p.lyrics_lines_auto && !p.lyrics_recognize);
         assert_eq!(p.lyrics_rev, nikgob_view::LYRICS_REV);
-        // The control under the lyrics opens its menu until «Вид» says else.
-        assert_eq!(p.lyrics_ui, 0);
+        // The control under the lyrics opens its window: the old default
+        // («Меню») moves once, a chosen window or page stays, and «Меню»
+        // chosen since stays too.
+        assert_eq!(p.lyrics_ui, 1);
+        assert_eq!(parse_prefs(br#"{"lyrics_ui":0,"lyrics_rev":1}"#).unwrap().lyrics_ui, 1);
         assert_eq!(parse_prefs(br#"{"lyrics_ui":2,"lyrics_rev":1}"#).unwrap().lyrics_ui, 2);
+        assert_eq!(parse_prefs(br#"{"lyrics_ui":0,"lyrics_rev":2}"#).unwrap().lyrics_ui, 0);
+        assert_eq!(prefs_of(None).lyrics_ui, 1);
         // Everything else stays as it was.
         assert!(p.lyrics_check && !p.lyrics_gpu);
         // Saved again, the user's own choices hold.
@@ -802,6 +807,18 @@ mod prefs_tests {
         // A first start has the new defaults too.
         let d = prefs_of(None);
         assert!(!d.lyrics_words_all && !d.lyrics_words_playing && d.lyrics_lines_auto && !d.lyrics_recognize);
+    }
+
+    /// «Настройки текста…» is offered under the lyrics until it is picked
+    /// once, and stays gone after a restart.
+    #[test]
+    fn the_lyrics_settings_row_goes_once_picked() {
+        let mut p = parse_prefs(br#"{"theme":"Dark"}"#).unwrap();
+        assert!(!p.lyrics_settings_seen, "prefs from before: still offered");
+        assert!(!prefs_of(None).lyrics_settings_seen);
+        nikgob_view::PrefPatch::LyricsSettingsSeen.apply(&mut p);
+        let kept = parse_prefs(&serde_json::to_vec(&p).unwrap()).unwrap();
+        assert!(kept.lyrics_settings_seen);
     }
 
     /// Главная asks for the name on the first start only: not with a prefs

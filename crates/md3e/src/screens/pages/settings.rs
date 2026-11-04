@@ -868,6 +868,14 @@ fn lyrics_align(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Com
         ui.add(Switch::new(&mut p.lyrics_words_all).id_salt("set-lyrics-words"));
     });
 
+    group(ui, "Песни без файла");
+    row(ui, Id::LyricsStreams, "Делать подсветку для песен с YouTube", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_streams).id_salt("set-lyrics-streams"));
+    });
+    dimmed(ui, !p.lyrics_streams, |ui| {
+        row(ui, Id::LyricsStreamKeep, "Что сохранять", None, |ui| choice(ui, Id::LyricsStreamKeep, p));
+    });
+
     group(ui, "Модели, которые слушают голос");
     // Says only where the models really run when that is not the choice.
     let device = (a.on_gpu == Some(false) && p.lyrics_gpu).then_some("Видеокарта недоступна, считает процессор");
