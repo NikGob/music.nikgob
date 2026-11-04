@@ -1,9 +1,11 @@
 //! The control's own menu, in every look: «Автоматически», every source
-//! with how its text goes (picking a source never needs a window), the
-//! timing and «Настройки текста…». The `menu` look makes the timing right
-//! here; the others have one «Сделать подсветку…» row that opens their
-//! window or page. While timing is made the control shows its progress;
-//! the result replaces the text by itself.
+//! with how its text goes (picking a source never needs a window), then
+//! where the shown text is kept (a group label: only online, made by the
+//! player and kept in the library, or on the computer) with «Сохранить
+//! текст» and the timing, and «Настройки текста…». The `menu` look makes
+//! the timing right here; the others have one «Сделать подсветку…» row
+//! that opens their window or page. While timing is made the control shows
+//! its progress; the result replaces the text by itself.
 
 use egui::{Id, Ui};
 use nikgob_view::{Command, LyricsAvail, LyricsSync, ViewState};
@@ -18,6 +20,8 @@ enum Row {
     Make(LyricsSync),
     /// The window or page where timing is made.
     Craft,
+    /// «Сохранить текст».
+    Save,
     Settings,
 }
 
@@ -53,9 +57,21 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out:
             menu = menu.item(item);
             rows.push(Row::Source(o.source));
         }
-        menu = menu.divider();
     }
     let busy = super::busy(state).is_some();
+    if !rows.is_empty() {
+        menu = menu.divider();
+    }
+    // Where the shown text is kept, and what can be done with it.
+    let mut section = false;
+    if let Some(home) = super::home(l).filter(|_| l.track.is_some()) {
+        menu = menu.group_label(home);
+        section = true;
+    }
+    if l.savable && !busy {
+        menu = menu.item(MenuItem::new("Сохранить текст"));
+        rows.push(Row::Save);
+    }
     if look == super::Variant::Menu {
         // Making timing shows on the control; the actions come back after.
         let actions = if busy { Vec::new() } else { super::actions(state) };
@@ -63,13 +79,13 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out:
             menu = menu.item(MenuItem::new(*label));
             rows.push(Row::Make(*target));
         }
-        if !actions.is_empty() {
-            menu = menu.divider();
-        }
     } else if l.track.is_some() && (busy || !super::actions(state).is_empty()) {
         // The window shows the timing being made too.
-        menu = menu.item(MenuItem::new(if busy { "Подсветка делается…" } else { "Сделать подсветку…" })).divider();
+        menu = menu.item(MenuItem::new(if busy { "Подсветка делается…" } else { "Сделать подсветку…" }));
         rows.push(Row::Craft);
+    }
+    if section || rows.iter().any(|r| matches!(r, Row::Save | Row::Make(_) | Row::Craft)) {
+        menu = menu.divider();
     }
     menu = menu.item(MenuItem::new("Настройки текста…"));
     rows.push(Row::Settings);
@@ -97,6 +113,10 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out:
                 super::Variant::Page => super::request(&ctx, super::Request::Page),
                 super::Variant::Menu => {}
             }
+            false
+        }
+        Some(Row::Save) => {
+            super::save(state, out);
             false
         }
         Some(Row::Settings) => true,

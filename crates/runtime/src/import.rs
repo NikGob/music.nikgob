@@ -148,8 +148,8 @@ pub(crate) struct ImportService {
     history: VecDeque<v::Job>,
     dirty: bool,
     last_reload: Instant,
-    /// Lyrics looked up this session (found or not): no second request.
-    pub(crate) lyrics_tried: HashSet<(TrackId, LyricsSource)>,
+    /// Lyrics lookups on their way: a source is asked once at a time.
+    pub(crate) lyrics_asking: HashSet<(TrackId, LyricsSource)>,
     /// Background lyrics backfill and artist photos.
     pub(crate) enrich: crate::enrich::Enrich,
     pub(crate) lyrics_cache: HashMap<TrackId, crate::lyrics::TrackLyrics>,
@@ -228,7 +228,7 @@ impl ImportService {
                 .collect(),
             dirty: false,
             last_reload: Instant::now(),
-            lyrics_tried: HashSet::new(),
+            lyrics_asking: HashSet::new(),
             enrich: Default::default(),
             lyrics_cache: HashMap::new(),
             lyrics_order: VecDeque::new(),
@@ -1209,6 +1209,7 @@ impl Worker {
         for t in later {
             self.embed_lyrics(t);
         }
+        self.write_later_tags();
         let src = self
             .lib
             .active_source(track)

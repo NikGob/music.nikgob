@@ -31,8 +31,12 @@ use crate::Worker;
 use crate::import::Internal;
 use crate::lyrics::{Aligned, Text};
 
-/// Who made a row: a new aligner or new rules go through the library again.
-pub(crate) const MADE_BY: &str = "align-2";
+/// Who made a row: a new aligner or new rules go through the library again,
+/// and the playing song's texts are checked again (timing the user kept
+/// stays). `align-3`: words end where the voice ends (never past the
+/// source's end of their line or into a silent tail) and last while the
+/// voice holds them, and a silent window is no longer raised into noise.
+pub(crate) const MADE_BY: &str = "align-3";
 /// A text the recording spells at least this well (over chance) is this
 /// song's (docs/lyrics-align.md, «The check»).
 pub(crate) const FITS: f32 = 0.08;
@@ -104,6 +108,8 @@ pub(crate) enum Msg {
     /// A track's texts were checked (rows as stored), and maybe a text heard.
     Checked { track: TrackId, rows: Vec<AlignedLyrics>, heard: Option<Vec<LyricLine>> },
     Crafted { track: TrackId, source: LyricsSource, result: Result<Vec<LyricLine>, String> },
+    /// A text went onto the computer («Сохранить текст»), as read back.
+    Kept { track: TrackId, result: Result<Text, String> },
     Counts(AlignCounts),
     Device(bool),
     Error(String),
@@ -118,6 +124,8 @@ pub(crate) struct AlignService {
     pub(crate) catalog: Option<Catalog>,
     /// The tracks whose check is on its way (and their texts' hashes).
     pub(crate) asked: HashMap<TrackId, Vec<String>>,
+    /// Lyrics tags to write once their file is not playing.
+    pub(crate) tag_later: HashMap<TrackId, (PathBuf, Vec<LyricLine>)>,
 }
 
 impl AlignService {
@@ -726,6 +734,7 @@ impl Worker {
             Msg::Error(e) => self.publish(|s| s.align.error = Some(e)),
             Msg::Checked { track, rows, heard } => self.lyrics_checked(track, rows, heard),
             Msg::Crafted { track, source, result } => self.crafted(track, source, result),
+            Msg::Kept { track, result } => self.lyrics_kept(track, result),
         }
     }
 

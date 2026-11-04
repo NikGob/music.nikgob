@@ -23,6 +23,19 @@ const WINDOW_S: usize = 30;
 const CONTEXT_S: usize = 2;
 /// Voice energy is measured over this many samples (0.1 s).
 const ENERGY_HOP: usize = 1600;
+/// A window is brought to unit loudness for the aligner, but never raised
+/// by more than this share of the song's own level: a near-silent window
+/// (a song's silent tail) raised to full loudness is noise the aligner
+/// hears letters in, and a text's last word went on into it.
+const QUIET: f32 = 0.1;
+/// Under this share of the voice's loud level a tenth of a second has no
+/// voice in it, for where a word ends.
+const SILENT: f32 = 0.05;
+/// On the mix (no separated voice), a tenth the aligner hears as blank at
+/// least this surely has no voice, and only this long a stretch of them
+/// ends a word (singing is mostly blank to a CTC model between letters).
+const BLANK: f32 = 0.95;
+const MIX_TAIL: f32 = 1.5;
 
 /// Where a job is, for the progress shown.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,6 +75,42 @@ impl Prepared {
 }
 
 impl Prepared {
+    /// What aligner `id` heard in the song, once it has.
+    pub fn emissions(&self, id: ModelId) -> Option<&Emissions> {
+        self.heard.get(&id)
+    }
+
+    /// RMS of the voice every tenth of a second.
+    pub fn energy(&self) -> &[f32] {
+        &self.energy
+    }
+
+    /// Ends the words of `lines` where the voice ends, and holds them while
+    /// it goes on ([`crate::fit::end_with_voice`]; `bounds`: where the
+    /// source ends each line): by the separated voice's energy, or on the
+    /// mix by long stretches aligner `id` hears as blank only (a held vowel
+    /// is mostly blank to it there, so nothing is held on the mix).
+    pub fn end_with_voice(&self, lines: &mut [LyricLine], id: ModelId, bounds: &[Option<f32>]) {
+        use crate::fit::VoiceEnds;
+        if self.separated {
+            let peak = percentile(&self.energy, 0.95);
+            let voiced: Vec<bool> = self.energy.iter().map(|e| *e > peak * SILENT).collect();
+            let step = ENERGY_HOP as f32 / RATE as f32;
+            crate::fit::end_with_voice(lines, VoiceEnds { voiced: &voiced, step, tail: crate::fit::TAIL, level: Some(&self.energy) }, bounds);
+        } else if let Some(em) = self.heard.get(&id) {
+            let per = (em.fps / 10.0).round().max(1.0) as usize;
+            let voiced: Vec<bool> = (0..em.frames().div_ceil(per))
+                .map(|i| {
+                    let frames = i * per..((i + 1) * per).min(em.frames());
+                    let n = frames.len().max(1) as f32;
+                    frames.map(|t| em.row(t)[em.blank].exp()).sum::<f32>() / n < BLANK
+                })
+                .collect();
+            let step = per as f32 / em.fps;
+            crate::fit::end_with_voice(lines, VoiceEnds { voiced: &voiced, step, tail: MIX_TAIL, level: None }, bounds);
+        }
+    }
+
     /// Which tenths of a second have the voice (all of them for a mix).
     pub fn voiced_tenths(&self) -> Vec<bool> {
         if !self.separated {
@@ -432,6 +481,8 @@ impl Aligner {
         let foreign: Vec<Foreign<'_>> =
             others.iter().zip(&vocabs).map(|((id, ls), v)| Foreign { em: &prep.heard[id], vocab: v, lines: ls }).collect();
         Ok(fit_text_with(&prep.heard[&main], &vocab, &foreign, lines, timed).map(|mut f| {
+            let bounds = crate::fit::source_bounds(lines, &f);
+            prep.end_with_voice(&mut f.lines, main, &bounds);
             f.covered = prep.covered(&f.lines);
             f.aligner = Some(main);
             f
@@ -454,6 +505,8 @@ impl Aligner {
         }
         let vocab = self.vocab(id)?;
         Ok(fit_text_with(&prep.heard[&id], &vocab, &[], lines, timed).map(|mut f| {
+            let bounds = crate::fit::source_bounds(lines, &f);
+            prep.end_with_voice(&mut f.lines, id, &bounds);
             f.covered = prep.covered(&f.lines);
             f.aligner = Some(id);
             f
@@ -515,6 +568,7 @@ pub fn emissions(model: &mut Model, voice: &[f32], blank: usize, progress: &mut 
     let sr = RATE as usize;
     let (win, ctx) = (WINDOW_S * sr, CONTEXT_S * sr);
     let n = voice.len();
+    let level = (voice.iter().map(|v| v * v).sum::<f32>() / n.max(1) as f32).sqrt();
     let mut logp: Vec<f32> = Vec::new();
     let mut vocab = 0;
     let mut fps = 50.0f32;
@@ -524,7 +578,7 @@ pub fn emissions(model: &mut Model, voice: &[f32], blank: usize, progress: &mut 
         let mut x = voice[a..b].to_vec();
         let mean = x.iter().sum::<f32>() / x.len() as f32;
         let var = x.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / x.len() as f32;
-        let sd = (var + 1e-7).sqrt();
+        let sd = (var + 1e-7).sqrt().max(level * QUIET);
         for v in &mut x {
             *v = (*v - mean) / sd;
         }

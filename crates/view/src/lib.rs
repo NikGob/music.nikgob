@@ -435,6 +435,35 @@ pub struct LyricsView {
     pub checking: bool,
     /// Every text there is, in full («Текст песни» sheet).
     pub texts: Vec<LyricsText>,
+    /// Where the shown text is kept.
+    pub home: LyricsHome,
+    /// Whether timing can be made for the shown text, or why not.
+    pub craft: LyricsCraft,
+    /// The shown text (with the timing the player made) can be saved on
+    /// the computer: into the file's tags and a `.ttml` next to it.
+    pub savable: bool,
+}
+
+/// Where a shown text is kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LyricsHome {
+    /// Found online (and cached), nothing of it on the computer.
+    #[default]
+    Online,
+    /// Timed or heard by the player and kept in the library.
+    Library,
+    /// On the computer: in the file's tags or in a file next to the song.
+    Computer,
+}
+
+/// Whether timing can be made for the shown text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum LyricsCraft {
+    /// Not offered (no text, a heard one, or no audio to listen to).
+    #[default]
+    Off,
+    /// From the track's file.
+    Ready,
 }
 
 /// One source's text in full, and what the player made of it.
@@ -2028,6 +2057,9 @@ pub enum Command {
     CraftLyrics { track: TrackId, source: LyricsSource, target: LyricsSync },
     /// Forget a failed [`AlignView::craft`] (its message was seen).
     ClearCraft,
+    /// Keep the shown text (with the timing the player made) on the
+    /// computer ([`LyricsView::savable`]).
+    SaveLyrics { track: TrackId, source: LyricsSource },
     /// Download (true) or delete a lyrics model by its [`AlignModel::key`].
     AlignModel { key: String, download: bool },
     SetVolume(f32),

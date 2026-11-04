@@ -38,6 +38,21 @@ pub const NOTICEABLE: f32 = 0.15;
 /// (the median against Apple's word timing on 8 songs, +0.03…+0.11 s;
 /// docs/lyrics-align.md): made times are moved back by it.
 pub const LATE: f32 = 0.06;
+/// A word may run this far past where its source ends the line (the
+/// line's own end, else the next line's start, an empty end stamp too).
+const OVERRUN: f32 = 0.5;
+/// A word whose last this-long stretch has no voice in it ends where the
+/// voice does ([`end_with_voice`]); a shorter pause is the vowel going on.
+pub const TAIL: f32 = 0.6;
+/// … that long after the last voiced moment.
+const AFTER: f32 = 0.1;
+/// A held word with no source end of its line goes on at most this long
+/// past where the aligner ended it.
+const HOLD: f32 = 4.0;
+/// A held word goes on while the voice stays at this share of its line's
+/// level («осенний листопад»: «беда» held at 0.8–1.1 of the loud level,
+/// the reverb after «посильней» at 0.3–0.5 of a line sung at 0.9).
+const HELD: f32 = 0.6;
 
 /// How a text's lines sit against the recording.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -229,6 +244,11 @@ pub fn fit_text_with(em: &Emissions, vocab: &Vocab, foreign: &[Foreign<'_>], lin
     for f in foreign {
         place_foreign(f, lines, &mut placed, total);
     }
+    // No word outlasts its line as the source ends it (whole-song
+    // alignment can drag a last word over the song's silent tail).
+    if matches!(timing, Timing::Fits | Timing::Shifted) {
+        hold_to_source(em, vocab, lines, &mut placed, offset, &alien);
+    }
 
     let text: Vec<i32> = tokens.iter().copied().filter(|t| Some(*t) != vocab.sep).collect();
     let heard_letters = crate::ctc::heard_letters(em, vocab.sep);
@@ -278,6 +298,168 @@ fn realign_lines(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &mu
         }
         let idx: Vec<usize> = placed.iter().enumerate().filter(|(_, p)| p.line == li).map(|(i, _)| i).collect();
         align_pieces(em, vocab, placed, &idx, from, to);
+    }
+}
+
+/// The source's own end of each line in this recording's time (less
+/// `offset`): the line's end, else the next line's start (an empty end
+/// stamp is a line too). `None` for a background line and for the last
+/// line without an end.
+fn source_ends(lines: &[LyricLine], offset: f32) -> Vec<Option<f32>> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if l.background {
+                return None;
+            }
+            let start = l.start.as_secs_f32();
+            let own = l.end.map(|e| e.as_secs_f32()).filter(|e| *e > start);
+            let next = || lines[i + 1..].iter().filter(|n| !n.background).map(|n| n.start.as_secs_f32()).find(|s| *s > start);
+            own.or_else(next).map(|e| e - offset)
+        })
+        .collect()
+}
+
+/// Keeps every word of a line within [`OVERRUN`] of the source's end of
+/// it ([`source_ends`]): a line with a word that starts past that is
+/// aligned again between its own start and that end; a word that only
+/// runs over is cut there.
+fn hold_to_source(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &mut [Placed], offset: f32, skip: &[bool]) {
+    let ends = source_ends(lines, offset);
+    let total = em.secs(em.frames());
+    for (li, l) in lines.iter().enumerate() {
+        let Some(end) = ends[li].filter(|_| !skip[li]) else { continue };
+        let limit = (end + OVERRUN).min(total);
+        let idx: Vec<usize> = placed.iter().enumerate().filter(|(_, p)| p.line == li).map(|(i, _)| i).collect();
+        let spans = || idx.iter().filter_map(|i| placed[*i].span);
+        if spans().all(|(_, b)| b <= limit) {
+            continue;
+        }
+        if spans().any(|(a, _)| a >= limit - 0.1) {
+            let first = spans().map(|(a, _)| a).fold(f32::INFINITY, f32::min);
+            let from = ((l.start.as_secs_f32() - offset).min(first) - 0.5).max(0.0);
+            if limit - from >= 0.3 {
+                align_pieces(em, vocab, placed, &idx, from, limit);
+            }
+        }
+        for &i in &idx {
+            if let Some((a, b)) = placed[i].span {
+                let b = b.min(limit);
+                placed[i].span = Some((a.min(b), b));
+            }
+        }
+    }
+}
+
+/// Where the source ends each line of `fit` in the recording's time
+/// ([`source_ends`]) when the text's own line times sit on the voice;
+/// `None` everywhere else (no times of its own, or another version's).
+pub fn source_bounds(lines: &[LyricLine], fit: &Fit) -> Vec<Option<f32>> {
+    if matches!(fit.timing, Timing::Fits | Timing::Shifted) {
+        source_ends(lines, fit.offset)
+    } else {
+        vec![None; lines.len()]
+    }
+}
+
+/// How the words end against the voice ([`end_with_voice`]).
+#[derive(Clone, Copy, Debug)]
+pub struct VoiceEnds<'a> {
+    /// One flag every `step` seconds: the voice is there.
+    pub voiced: &'a [bool],
+    pub step: f32,
+    /// A word whose last this-long stretch has no voice ends with it.
+    pub tail: f32,
+    /// The voice's loudness at every step, for holding words: a word goes
+    /// on while the voice stays near its line's level (only where it is
+    /// the voice alone, not the mix: `None`).
+    pub level: Option<&'a [f32]>,
+}
+
+/// Ends words where the voice ends, both ways:
+/// * a word whose last `tail` seconds or more have no voice ends a moment
+///   after its last voiced step (never into a silent tail);
+/// * a word the voice goes on holding after the aligner's end (a held
+///   last vowel: the aligner hears its letters only at the start) lasts
+///   while the voice stays at [`HELD`] of its line's level or more (a
+///   reverb tail or a quiet backing voice falls under it), a step under
+///   it bridged, up to the next word's
+///   start, the next line's start and where the source ends its line
+///   (`bounds`, see [`source_bounds`]); without a source end, at most
+///   [`HOLD`] longer.
+///
+/// A line ends with its last word, so no pause starts while a note is
+/// held. A word with no voice under it at all is left where the aligner
+/// put it.
+pub fn end_with_voice(lines: &mut [LyricLine], v: VoiceEnds<'_>, bounds: &[Option<f32>]) {
+    let VoiceEnds { voiced, step, tail, level } = v;
+    if voiced.is_empty() || step <= 0.0 {
+        return;
+    }
+    // Where the next sung line starts, after each line.
+    let next_starts: Vec<Option<f32>> = (0..lines.len())
+        .map(|li| lines[li + 1..].iter().filter(|n| !n.background).find_map(|n| n.words.first().map(|w| w.start.as_secs_f32())))
+        .collect();
+    for (li, l) in lines.iter_mut().enumerate() {
+        if l.words.is_empty() {
+            continue;
+        }
+        for w in &mut l.words {
+            let (a, b) = (w.start.as_secs_f32(), w.end.as_secs_f32());
+            let i0 = ((a / step).floor().max(0.0) as usize).min(voiced.len());
+            let i1 = ((b / step).ceil().max(0.0) as usize).min(voiced.len());
+            let Some(last) = (i0..i1).rev().find(|i| voiced[*i]) else { continue };
+            let cut = (last + 1) as f32 * step + AFTER;
+            if b - (cut - AFTER) >= tail && cut < b {
+                w.end = Duration::from_secs_f32(cut.max(a));
+            }
+        }
+        let Some(level) = level.filter(|_| !l.background) else {
+            l.end = l.words.last().map(|w| w.end);
+            continue;
+        };
+        // The line's level: the median over where its words are sung.
+        let at = |t: f32| ((t / step).floor().max(0.0) as usize).min(level.len());
+        let (a, b) = (l.words[0].start.as_secs_f32(), l.words[l.words.len() - 1].end.as_secs_f32());
+        let sung = &level[at(a)..at(b).max(at(a))];
+        if sung.is_empty() {
+            l.end = l.words.last().map(|w| w.end);
+            continue;
+        }
+        let bar = median(sung) * HELD;
+        let held_at = |j: usize| level.get(j).is_some_and(|e| *e >= bar);
+        let next_line = next_starts[li];
+        let n = l.words.len();
+        for i in 0..n {
+            let b = l.words[i].end.as_secs_f32();
+            let limit = if i + 1 < n {
+                l.words[i + 1].start.as_secs_f32()
+            } else {
+                let own = bounds.get(li).copied().flatten().unwrap_or(b + HOLD);
+                next_line.map_or(own, |s| own.min(s))
+            };
+            if limit <= b {
+                continue;
+            }
+            let mut j = (b / step).floor().max(0.0) as usize;
+            let mut held = None;
+            while j < level.len() && (j as f32) * step < limit {
+                if held_at(j) {
+                    held = Some(j);
+                } else if !held_at(j + 1) {
+                    break;
+                }
+                j += 1;
+            }
+            if let Some(k) = held {
+                let e = ((k + 1) as f32 * step).min(limit);
+                if e > b {
+                    l.words[i].end = Duration::from_secs_f32(e);
+                }
+            }
+        }
+        l.end = l.words.last().map(|w| w.end);
     }
 }
 
@@ -534,6 +716,130 @@ mod tests {
         // The verdict stays the text's aligner's.
         assert_eq!(both.score, alone.score);
         assert!(both.lines[2].start > both.lines[1].start);
+    }
+
+    /// «В этой траве»: the last line's word ends in the song's silent
+    /// tail when that tail is heard as letters; the source's empty end
+    /// stamp holds it.
+    #[test]
+    fn a_last_word_ends_where_the_source_ends_its_line() {
+        let (v, _) = setup("");
+        // «ав» at 0.2 s, «ба» at 0.8 s, «в» at 1.4 s, silence, then a
+        // phantom «а» at 4.1 s.
+        let mut best = vec![0, 0, 2, 0, 4, 1, 0, 0, 3, 0, 2, 1, 0, 0, 4];
+        best.extend([0; 26]);
+        best.extend([2, 2, 0]);
+        let em = frames(&best);
+        let mut lines = vec![line(0.2, "ав"), line(0.8, "ба"), line(1.4, "ва")];
+        let alone = fit_text(&em, &v, &lines, true).unwrap();
+        assert!(matches!(alone.timing, Timing::Fits | Timing::Shifted), "{alone:?}");
+        assert!(alone.lines[2].words[0].end.as_secs_f32() > 4.0, "without an end it runs to the tail: {:?}", alone.lines[2]);
+        // The empty end stamp at 1.7 s.
+        lines.push(line(1.7, ""));
+        let held = fit_text(&em, &v, &lines, true).unwrap();
+        let end = held.lines[2].words[0].end.as_secs_f32();
+        assert!(end <= 1.7 + OVERRUN + 0.01, "{:?}", held.lines[2]);
+        assert_eq!(held.lines[2].end, held.lines[2].words.last().map(|w| w.end));
+        // A line's own end holds it just the same.
+        let mut own = lines[..3].to_vec();
+        own[2].end = Some(Duration::from_secs_f32(1.8));
+        assert!(fit_text(&em, &v, &own, true).unwrap().lines[2].words[0].end.as_secs_f32() <= 1.8 + OVERRUN + 0.01);
+        // A plain text has no times of its own: nothing holds it here.
+        let plain: Vec<LyricLine> = lines[..3].iter().map(|l| line(0.0, &l.text)).collect();
+        assert_eq!(fit_text(&em, &v, &plain, false).unwrap().timing, Timing::None);
+    }
+
+    #[test]
+    fn source_ends_take_the_line_s_end_or_the_next_start() {
+        let mut ls = vec![line(1.0, "а"), line(3.0, "б"), line(5.0, "в"), line(9.0, "")];
+        ls[1].end = Some(Duration::from_secs(4));
+        let mut bg = line(3.5, "о");
+        bg.background = true;
+        ls.insert(2, bg);
+        let ends = source_ends(&ls, 0.5);
+        assert_eq!(ends, [Some(2.5), Some(3.5), None, Some(8.5), None]);
+    }
+
+    /// Where the voice ends, a word ends: a sung held note stays long, a
+    /// word that runs on into silence stops a moment after the voice.
+    #[test]
+    fn a_word_ends_with_the_voice_but_a_held_note_stays() {
+        let w = |a: f32, b: f32, t: &str| LyricWord { start: Duration::from_secs_f32(a), end: Duration::from_secs_f32(b), text: t.into() };
+        let mut held = line(1.0, "о-о-о");
+        held.words = vec![w(1.0, 5.0, "о-о-о")];
+        let mut tail = line(6.0, "ха");
+        tail.words = vec![w(6.0, 6.2, "х"), w(6.2, 16.0, "а")];
+        let mut short = line(17.0, "да");
+        short.words = vec![w(17.0, 17.9, "да")];
+        let mut lines = vec![held, tail, short];
+        // Voice from 1 to 5 s, 6 to 6.8 s, 17 to 17.5 s (tenths).
+        let voiced: Vec<bool> = (0..200).map(|i| (10..50).contains(&i) || (60..68).contains(&i) || (170..175).contains(&i)).collect();
+        let v = VoiceEnds { voiced: &voiced, step: 0.1, tail: TAIL, level: None };
+        end_with_voice(&mut lines, v, &[None; 3]);
+        assert!((lines[0].words[0].end.as_secs_f32() - 5.0).abs() < 1e-3, "held: {:?}", lines[0].words);
+        let end = lines[1].words[1].end.as_secs_f32();
+        assert!((end - 6.9).abs() < 0.01, "{end}");
+        assert_eq!(lines[1].end, Some(lines[1].words[1].end));
+        // 0.4 s of no voice at its end is the vowel going on: kept.
+        assert!((lines[2].words[0].end.as_secs_f32() - 17.9).abs() < 1e-3);
+    }
+
+    /// «осенний листопад»: «беда» is sung held for seconds, the aligner
+    /// hears its letters only at the start (79.88 → 80.16) and the line's
+    /// source end is 85.29. The word goes on while the voice holds it near
+    /// the line's level, a short dip bridged, and stops where the voice
+    /// stops or falls to a reverb tail; never past the source's end of the
+    /// line or into the next line.
+    #[test]
+    fn a_held_last_word_lasts_while_the_voice_holds_it() {
+        let w = |a: f32, b: f32, t: &str| LyricWord { start: Duration::from_secs_f32(a), end: Duration::from_secs_f32(b), text: t.into() };
+        let line_of = |words: Vec<LyricWord>| {
+            let mut l = line(words[0].start.as_secs_f32(), "x");
+            l.end = words.last().map(|w| w.end);
+            l.words = words;
+            l
+        };
+        let lines = vec![
+            line_of(vec![w(78.6, 79.4, "Знаешь, "), w(79.4, 79.88, "не "), w(79.88, 80.16, "беда")]),
+            line_of(vec![w(85.3, 86.0, "Если")]),
+        ];
+        // Sung at 0.9 from 78.6 to 83.4 s with a dip at 81.0 s, a reverb
+        // tail at 0.4 to 84.5 s, the next line from 85.3 s.
+        let level: Vec<f32> = (0..900)
+            .map(|i| match i {
+                810 => 0.3,
+                786..834 => 0.9,
+                834..845 => 0.4,
+                853.. => 0.9,
+                _ => 0.0,
+            })
+            .collect();
+        let voiced: Vec<bool> = level.iter().map(|e| *e > 0.05).collect();
+        let v = VoiceEnds { voiced: &voiced, step: 0.1, tail: TAIL, level: Some(&level) };
+        let mut held = lines.clone();
+        end_with_voice(&mut held, v, &[Some(85.29), None]);
+        let end = held[0].words[2].end.as_secs_f32();
+        assert!((end - 83.4).abs() < 0.01, "{end}");
+        assert_eq!(held[0].end, Some(held[0].words[2].end), "the line ends with the held word");
+        assert!((held[0].words[0].end.as_secs_f32() - 79.4).abs() < 1e-3, "a word followed by the next keeps its end");
+        // Sung on to the next line: the source's end of the line holds it.
+        let on: Vec<f32> = (0..900).map(|i| if i >= 786 { 0.9 } else { 0.0 }).collect();
+        let v_on = VoiceEnds { level: Some(&on), ..v };
+        let mut long = lines.clone();
+        end_with_voice(&mut long, v_on, &[Some(85.0), None]);
+        assert!((long[0].words[2].end.as_secs_f32() - 85.0).abs() < 0.01);
+        // … else the next line's start.
+        let mut next = lines.clone();
+        end_with_voice(&mut next, v_on, &[Some(90.0), None]);
+        assert!((next[0].words[2].end.as_secs_f32() - 85.3).abs() < 0.01);
+        // On the mix nothing is held.
+        let mut mix = lines.clone();
+        end_with_voice(&mut mix, VoiceEnds { level: None, ..v }, &[Some(85.29), None]);
+        assert!((mix[0].words[2].end.as_secs_f32() - 80.16).abs() < 1e-3);
+        // Without a source end, at most HOLD longer (and the last line too).
+        let mut last = vec![lines[0].clone()];
+        end_with_voice(&mut last, v_on, &[None]);
+        assert!((last[0].words[2].end.as_secs_f32() - (80.16 + HOLD)).abs() < 0.01);
     }
 
     #[test]
