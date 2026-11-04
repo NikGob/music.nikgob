@@ -144,6 +144,31 @@ fn upsert_is_idempotent_and_refreshes_metadata() {
     assert_eq!(got.artist_credit.display(), "宇多田ヒカル");
 }
 
+/// YouTube Music's top search result names no album and no length: the
+/// track made from it gets them from the song's details, and the top result
+/// seen again does not take them away.
+#[test]
+fn a_stream_without_its_album_keeps_the_album_the_track_has() {
+    let lib = lib();
+    let full = find(&FakeService::youtube(), "yt-gruppa-1");
+    let mut top = full.clone();
+    top.album = None;
+    top.duration_ms = None;
+    top.track_no = None;
+    let id = lib.upsert_stream_track(&top).unwrap();
+    let got = lib.get_track(id).unwrap().unwrap();
+    assert_eq!((got.release_id, got.duration_ms), (None, None));
+    assert_eq!(lib.upsert_stream_track(&full).unwrap(), id);
+    let completed = lib.get_track(id).unwrap().unwrap();
+    assert!(completed.release_id.is_some());
+    assert!(completed.duration_ms.is_some());
+    assert_eq!(lib.upsert_stream_track(&top).unwrap(), id);
+    let again = lib.get_track(id).unwrap().unwrap();
+    assert_eq!(again.release_id, completed.release_id);
+    assert_eq!(again.track_no, completed.track_no);
+    assert_eq!(again.duration_ms, completed.duration_ms);
+}
+
 #[test]
 fn same_isrc_from_the_other_service_is_a_second_source() {
     let lib = lib();

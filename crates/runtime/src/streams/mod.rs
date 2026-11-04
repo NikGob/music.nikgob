@@ -19,6 +19,7 @@ mod accounts;
 mod analysis;
 mod clips;
 mod cold;
+mod complete;
 mod discography;
 mod export;
 mod likes;
@@ -201,6 +202,13 @@ pub(crate) enum Msg {
     Analysed(analysis::Done),
     /// Its gap or rate-limit pause is over.
     AnalysisWake,
+    /// The details of a playing track that lacked its album or length
+    /// (see [`complete`]).
+    Completed {
+        track: TrackId,
+        id: String,
+        result: Result<StreamTrack, StreamError>,
+    },
 }
 
 /// The worker's streaming state.
@@ -258,6 +266,8 @@ pub(crate) struct Streams {
     tracklist: tracklist::TracklistState,
     /// The sound analysis of stream-only tracks.
     pub(crate) analysis: analysis::StreamAnalysis,
+    /// Playing tracks completed from their service.
+    completing: complete::Completing,
 }
 
 impl Streams {
@@ -305,6 +315,7 @@ impl Streams {
             disco: discography::DiscoState::default(),
             tracklist: tracklist::TracklistState::default(),
             analysis: analysis::StreamAnalysis::default(),
+            completing: complete::Completing::default(),
         }
     }
 
@@ -652,6 +663,7 @@ impl Worker {
             } => self.replace_resolved(track, *pick, youtube_song.map(|s| *s), youtube),
             Msg::Analysed(done) => self.stream_analysed(done),
             Msg::AnalysisWake => self.stream_analysis_step(),
+            Msg::Completed { track, id, result } => self.completed(track, &id, result),
         }
     }
 
