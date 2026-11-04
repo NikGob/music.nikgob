@@ -32,11 +32,15 @@ struct Blurred {
     used: f64,
 }
 
-/// The font atlas's coverage, copied when it has grown since.
+/// The font atlas's coverage, copied when it has grown since, or when a
+/// glyph a line needs is not in the copy yet (new glyphs often land in the
+/// atlas's current row, which leaves its fill ratio as it was).
 struct Atlas {
     size: [usize; 2],
     fill: f32,
     alpha: Vec<u8>,
+    /// The pass it was copied in (at most one copy a pass).
+    pass: u64,
 }
 
 #[derive(Default)]
@@ -88,6 +92,9 @@ pub(crate) fn galley(painter: &Painter, pos: Pos2, g: &Arc<Galley>, color: Color
             if let Some((image, rect)) = make(ctx, &mut c, g, ppp, f32::from(step) * STEP) {
                 let tex = ctx.load_texture("md3e-lyrics-blur", image, TextureOptions::LINEAR);
                 c.items.insert((key, step), Blurred { tex, rect, used: now });
+            } else {
+                // A glyph not in the atlas copy yet: tried again next frame.
+                waiting = true;
             }
         } else {
             waiting = true;
@@ -114,12 +121,26 @@ pub(crate) fn galley(painter: &Painter, pos: Pos2, g: &Arc<Galley>, color: Color
 /// lies from the galley's origin.
 fn make(ctx: &Context, c: &mut Cache, g: &Galley, ppp: f32, sigma: f32) -> Option<(ColorImage, Rect)> {
     let (size, fill) = ctx.fonts(|f| (f.font_image_size(), f.font_atlas_fill_ratio()));
-    if c.atlas.as_ref().is_none_or(|a| a.size != size || a.fill != fill) {
+    let stale = |a: &Atlas| a.size != size || a.fill != fill || quads(g).iter().any(|(_, uv)| !inked(a, uv));
+    if c.atlas.as_ref().is_none_or(|a| a.pass != c.pass && stale(a)) {
         let image = ctx.fonts(|f| f.image());
-        c.atlas = Some(Atlas { size: image.size, fill, alpha: image.pixels.iter().map(|p| p.a()).collect() });
+        c.atlas = Some(Atlas { size: image.size, fill, alpha: image.pixels.iter().map(|p| p.a()).collect(), pass: c.pass });
     }
     let atlas = c.atlas.as_ref()?;
+    // A glyph still missing from this pass's copy: drawn sharp this time,
+    // blurred next pass.
+    if quads(g).iter().any(|(_, uv)| !inked(atlas, uv)) {
+        return None;
+    }
     raster(g, ppp, atlas.size, &atlas.alpha, sigma)
+}
+
+/// Whether the atlas copy has any ink inside `uv` (texels): a glyph that
+/// is there always has some.
+fn inked(a: &Atlas, uv: &Rect) -> bool {
+    let (x0, y0) = (uv.left().max(0.0) as usize, uv.top().max(0.0) as usize);
+    let (x1, y1) = ((uv.right().ceil() as usize).min(a.size[0]), (uv.bottom().ceil() as usize).min(a.size[1]));
+    (y0..y1).any(|y| a.alpha[y * a.size[0] + x0..y * a.size[0] + x1.max(x0)].iter().any(|&v| v > 0))
 }
 
 /// The glyph quads of `g`: where each lies (points, from the galley's
