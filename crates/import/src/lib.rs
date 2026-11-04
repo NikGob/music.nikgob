@@ -27,6 +27,7 @@ pub mod tags;
 pub mod trash;
 pub mod watch;
 
+pub use album::{AlbumTrack, folder_has_album};
 pub use config::{ImportConfig, normalize_masters_dir};
 pub use decide::ImportTargets;
 pub use encode::{EncodeOptions, EncodedInfo, Encoder, FfmpegEncoder, RopusEncoder};

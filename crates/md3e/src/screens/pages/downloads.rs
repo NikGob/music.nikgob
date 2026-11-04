@@ -524,7 +524,8 @@ fn job(ui: &mut Ui, j: &Job, out: &mut Vec<Command>, active: bool) {
                 {
                     out.push(Command::CancelJob(j.id));
                 }
-                if ui
+                if j.pausable
+                    && ui
                     .add(
                         IconButton::new(Icon::Pause)
                             .selected_icon(Icon::PlayArrow)

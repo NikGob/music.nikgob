@@ -1233,8 +1233,18 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
     row(ui, Id::FakeFlac, "Проверять «фейковый» FLAC", Some("Находит FLAC, сделанные из MP3"), |ui| {
         ui.add(Switch::new(&mut p.check_fake_lossless).id_salt("set-fake"));
     });
-    row(ui, Id::FakeConvert, "Превращать «фейковый» FLAC в MP3", Some("Без новых потерь, старый файл — в Корзину"), |ui| {
+    row(ui, Id::FakeConvert, "Предлагать MP3 вместо «фейкового» FLAC", Some("В «Подтверди», FLAC — в Корзину"), |ui| {
         ui.add(Switch::new(&mut p.convert_fake_lossless).id_salt("set-fake-convert"));
+    });
+    ui.add_enabled_ui(p.check_fake_lossless && p.convert_fake_lossless, |ui| {
+        row(ui, Id::FakeAuto, "Без вопроса", None, |ui| {
+            ui.add(Switch::new(&mut p.fake_flac_auto).id_salt("set-fake-auto"));
+        });
+    });
+    row(ui, Id::FakeRestore, "Вернуть FLAC из Корзины", Some("Все, что стали MP3"), |ui| {
+        if ui.add(Button::new("Вернуть").style(Style::Outlined).id_salt("set-fake-restore")).clicked() {
+            out.push(Command::RestoreConvertedFlac);
+        }
     });
     if !pages.metadata_synced {
         pages.metadata_contact = p.metadata_contact.clone();

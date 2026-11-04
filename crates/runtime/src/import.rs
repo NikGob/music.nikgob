@@ -122,6 +122,7 @@ pub(crate) fn logged_job(e: &nikgob_library::JobLogEntry, kind_bit: u64) -> v::J
         eta: None,
         paused: false,
         controllable: false,
+        pausable: false,
         error: e.error.clone(),
         at: e.at,
     }
@@ -422,7 +423,9 @@ impl ImportService {
                     rate: None,
                     eta: None,
                     paused: false,
-                    controllable: false,
+                    // Cancelled, what it added goes back; never paused.
+                    controllable: true,
+                    pausable: false,
                     error: p.last_error.clone(),
                     at: 0,
                 }
@@ -602,6 +605,7 @@ impl Worker {
             eta: None,
             paused: false,
             controllable: false,
+            pausable: false,
             error,
             at: nikgob_library::now_ms(),
         });
@@ -651,6 +655,18 @@ impl Worker {
         // channel is not needed.
         drop(job);
         true
+    }
+
+    /// «Отменить» on an import's row: the importer stops it and takes back
+    /// what it added (the files to the Trash, the rows out, a replaced file
+    /// back); its line says so once it stopped.
+    pub(crate) fn cancel_import(&mut self, job: u64) {
+        let Some(svc) = &self.import else { return };
+        if !svc.jobs.contains_key(&job) && !svc.launching.contains_key(&job) {
+            return;
+        }
+        svc.importer.cancel(nikgob_import::JobId(job));
+        self.toast("Отменяю импорт — добавленное уберу", None);
     }
 
     pub(crate) fn confirm_choice(&mut self, id: u64, option: Option<usize>) {
@@ -762,6 +778,7 @@ impl Worker {
                                 eta: None,
                                 paused: false,
                                 controllable: false,
+                                pausable: false,
                                 error: None,
                                 at: nikgob_library::now_ms(),
                             });
@@ -812,12 +829,16 @@ impl Worker {
         match &ev {
             ImportEvent::Imported { track_id, path, .. } => {
                 self.lyrics_imported(*track_id, path);
+                self.wish_file_came(*track_id, path);
                 self.wish_imported(*track_id, path);
                 self.analysis.kick();
                 self.quality.kick();
             }
-            ImportEvent::Duplicate { kept, path, .. } => {
+            ImportEvent::Duplicate { job, kept, path, quality } => {
                 self.lyrics_imported(*kept, path);
+                if let Some(w) = self.import.as_ref().and_then(|s| s.wish_jobs.get(&job.0).copied()) {
+                    self.wish_duplicate(w, quality.clone());
+                }
                 self.wish_imported(*kept, path);
                 self.analysis.kick();
             }
@@ -827,6 +848,16 @@ impl Worker {
             }
             _ => {}
         }
+        // An import for a better copy says what came of it in plain words.
+        let (upgrade_job, dup) = match &ev {
+            ImportEvent::Finished { job, .. } => {
+                match self.import.as_ref().and_then(|s| s.wish_jobs.get(&job.0).copied()) {
+                    Some(w) if self.is_upgrade(w) => (true, self.upgrade_dup(w)),
+                    _ => (false, None),
+                }
+            }
+            _ => (false, None),
+        };
         let Some(svc) = &mut self.import else { return };
         let mut finished = None;
         let mut parked_for = None;
@@ -891,22 +922,37 @@ impl Worker {
                 duplicates,
                 failed,
                 pending,
+                left_out,
+                cancelled,
             } => {
                 let title = svc
                     .jobs
                     .remove(&job.0)
                     .map_or_else(|| "Импорт".to_owned(), |p| p.title);
-                let mut parts = vec![format!("добавлено {imported}")];
-                if duplicates > 0 {
-                    parts.push(format!("дублей {duplicates}"));
-                }
-                if failed > 0 {
-                    parts.push(format!("ошибок {failed}"));
-                }
-                if pending > 0 {
-                    parts.push(format!("{PARKED} {pending}"));
-                }
-                let summary = parts.join(" · ");
+                let summary = if cancelled {
+                    "отменено — добавленное убрано".to_owned()
+                } else if upgrade_job {
+                    let mut s = crate::streams::upgrade_job_words(imported, duplicates, left_out, failed, dup.as_deref());
+                    if pending > 0 {
+                        s.push_str(&format!(" · {PARKED} {pending}"));
+                    }
+                    s
+                } else {
+                    let mut parts = vec![format!("добавлено {imported}")];
+                    if duplicates > 0 {
+                        parts.push(format!("дублей {duplicates}"));
+                    }
+                    if left_out > 0 {
+                        parts.push(format!("не из этого альбома {left_out}"));
+                    }
+                    if failed > 0 {
+                        parts.push(format!("ошибок {failed}"));
+                    }
+                    if pending > 0 {
+                        parts.push(format!("{PARKED} {pending}"));
+                    }
+                    parts.join(" · ")
+                };
                 let error = (failed > 0).then(|| format!("Не удалось: {failed}"));
                 if let Err(e) = self.lib.log_job("import", &title, &summary, error.as_deref()) {
                     log::warn!("job log: {e}");
@@ -920,11 +966,12 @@ impl Worker {
                     eta: None,
                     paused: false,
                     controllable: false,
+                    pausable: false,
                     error,
                     at: nikgob_library::now_ms(),
                 });
                 svc.history.truncate(100);
-                finished = Some((summary, pending, svc.wish_jobs.remove(&job.0)));
+                finished = Some((summary, cancelled, svc.wish_jobs.remove(&job.0)));
             }
             ImportEvent::TorrentFound(path) => {
                 self.command(Command::AddTorrentFile(path));
@@ -937,13 +984,16 @@ impl Worker {
         if let Some(w) = parked_for {
             self.wish_parked(w);
         }
-        if let Some((summary, pending, wishlist)) = finished {
-            if let Some(w) = wishlist {
-                self.wish_settle(w);
+        if let Some((summary, cancelled, wishlist)) = finished {
+            match wishlist {
+                // Cancelled: the item does not go on by itself (it can be
+                // brought back from the toast).
+                Some(w) if cancelled => self.wish_dismiss(&[w]),
+                Some(w) => self.wish_settle(w),
+                None => {}
             }
             self.reload_after_import();
             self.offer_editions();
-            let _ = pending;
             self.toast(format!("Импорт: {summary}"), None);
             if let Some(svc) = &mut self.import {
                 svc.apply_reconfigure();
@@ -1172,7 +1222,7 @@ impl Worker {
             let mut cfg = old.clone();
             cfg.opus_bitrate_kbps = p.opus_bitrate;
             cfg.check_fake_lossless = p.check_fake_lossless;
-            cfg.convert_fake_lossless = p.convert_fake_lossless;
+            cfg.convert_fake_lossless = p.convert_fake_lossless && p.fake_flac_auto;
             cfg.fallback_seed_argb = p.fallback_seed;
             if !p.library_dir.as_os_str().is_empty() {
                 cfg.library_dir = p.library_dir.clone();

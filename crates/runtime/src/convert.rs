@@ -396,9 +396,17 @@ impl Resolver {
             tags.push(("Номер".into(), format!("{}-{}", row.disc_no, row.track_no)));
         }
         // What the spectrum check found about a file (a stream has none).
+        // A lossy file's own lowpass is its format's: only a check of
+        // lossless sound counts (its own, or the original's it was made from).
         let check = src
             .filter(|s| s.kind == SourceKind::LocalFile)
-            .and_then(|s| self.lib.quality_check(s.id).ok().flatten());
+            .and_then(|s| {
+                self.lib
+                    .quality_check(s.id)
+                    .ok()
+                    .flatten()
+                    .filter(|c| nikgob_core::quality::check_counts(&s.codec, c.made_from.as_ref()))
+            });
         let quality = src.map(|s| {
             // «FLAC из MP3 ~320», «MP3 320 из поддельного FLAC», «Opus 160».
             let mut q = nikgob_core::quality::label(&s.codec, s.bitrate, check.as_ref().map(|c| c.summary()).as_ref());
@@ -605,7 +613,8 @@ pub(crate) fn sound_details(
             nyquist_hz: c.sample_rate as f32 / 2.0,
             cutoff_hz: (c.verdict != nikgob_core::quality::Verdict::Unknown && c.cutoff_hz > 0.0).then_some(c.cutoff_hz),
         }),
-        pending: local && check.is_none(),
+        // Only lossless files are checked.
+        pending: local && src.codec.is_lossless() && check.is_none(),
     }
 }
 
@@ -788,6 +797,9 @@ mod tests {
         assert!(conv.warning);
         assert!(conv.verdict.as_deref().unwrap().starts_with("Сделан из поддельного FLAC"));
         assert_eq!(conv.band.as_deref(), Some("до 20,1 кГц (у исходника)"));
+        // A lossy file is never checked: nothing pending, no verdict.
+        let plain = sound_details(&mp3, Some(Path::new("RuLe.mp3")), None, None, None);
+        assert!(!plain.pending && plain.verdict.is_none());
 
         // A stream: what it gives, nothing to check.
         let mut yt = Source::new(TrackId::new(), SourceKind::Youtube, "abc", Codec::Opus);

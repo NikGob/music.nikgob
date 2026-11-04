@@ -106,6 +106,11 @@ pub struct ImportTargets {
     /// The «Хочу скачать» item, for files that wait in «Подтверди».
     #[serde(default)]
     pub wishlist: Option<WishlistId>,
+    /// Better copies of these tracks (a «Качество лучше» item): a file that
+    /// is none of them (another album, a stranger's song) is left out,
+    /// never imported as something new.
+    #[serde(default)]
+    pub only_targets: bool,
 }
 
 impl ImportTargets {

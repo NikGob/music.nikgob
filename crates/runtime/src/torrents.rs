@@ -149,6 +149,7 @@ fn job(t: &TorrentStatus) -> v::Job {
         eta: t.eta.map(eta_label),
         paused: matches!(t.state, TorrentState::Paused),
         controllable: true,
+        pausable: true,
         error: match &t.state {
             TorrentState::Error(e) => Some(e.clone()),
             _ => None,
@@ -264,11 +265,13 @@ impl Worker {
                     self.toast("Это не magnet-ссылка", None);
                 }
             }
-            // Import jobs (folders, files) have no pause or cancel: their ids
-            // are not torrent ids and must never reach the torrent client.
-            Command::PauseJob(id, _) | Command::CancelJob(id) if id & crate::IMPORT_ID != 0 => {
-                self.toast("Импорт нельзя остановить — он идёт до конца", None);
+            // Import jobs (folders, files) are never paused; a cancel stops
+            // one and takes back what it added. Their ids are not torrent
+            // ids and must never reach the torrent client.
+            Command::PauseJob(id, _) if id & crate::IMPORT_ID != 0 => {
+                self.toast("Импорт нельзя поставить на паузу — его можно только отменить", None);
             }
+            Command::CancelJob(id) if id & crate::IMPORT_ID != 0 => self.cancel_import(id & !crate::IMPORT_ID),
             Command::PauseJob(id, pause) => self.with_client(Box::new(move |w, c| {
                 w.spawn_torrent_op(async move {
                     if pause { c.pause(id).await } else { c.resume(id).await }.map_err(|e| e.to_string())
@@ -301,7 +304,7 @@ impl Worker {
     }
 
     /// Runs a client call; a failure becomes a toast.
-    fn spawn_torrent_op<F>(&self, f: F)
+    pub(crate) fn spawn_torrent_op<F>(&self, f: F)
     where
         F: std::future::Future<Output = Result<(), String>> + Send + 'static,
     {
@@ -571,6 +574,7 @@ impl Worker {
                     eta: None,
                     paused: false,
                     controllable: false,
+                    pausable: false,
                     error: None,
                     at: t.completed_at.and_then(|at| at.duration_since(UNIX_EPOCH).ok()).map_or_else(nikgob_library::now_ms, |d| d.as_millis() as i64),
                 });
@@ -696,6 +700,7 @@ impl Worker {
             eta: None,
             paused: false,
             controllable: false,
+            pausable: false,
             error: None,
             at: nikgob_library::now_ms(),
         });
@@ -705,14 +710,16 @@ impl Worker {
             self.toast(format!("Скачано: {}", t.name), None);
         }
         // Downloaded for a wishlist item: its files become the item's tracks.
-        let targets = self
-            .lib
-            .get_download(&t.info_hash)
-            .ok()
-            .flatten()
-            .and_then(|d| d.wishlist_id)
-            .map(|item| self.wish_targets(item))
-            .unwrap_or_default();
+        let item = self.lib.get_download(&t.info_hash).ok().flatten().and_then(|d| d.wishlist_id);
+        // A better copy the user turned down meanwhile replaces nothing.
+        if let Some(i) = item.and_then(|i| self.lib.get_wishlist_item(i).ok().flatten())
+            && i.origin == nikgob_core::model::WishlistOrigin::Upgrade
+            && i.status == nikgob_core::model::WishlistStatus::Dismissed
+        {
+            log::info!("{}: its better copy was turned down, nothing imported", t.name);
+            return;
+        }
+        let targets = item.map(|item| self.wish_targets(item)).unwrap_or_default();
         self.import_for(
             files,
             format!("Импорт «{}»", t.name),

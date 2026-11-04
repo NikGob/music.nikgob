@@ -54,7 +54,7 @@ pub use joblog::JOB_LOG_KEEP;
 pub use migrations::SCHEMA_VERSION;
 pub use places::{PLACES_FROM_WISH_KEY, PlaceChange};
 pub use playlists::LIKED_PLAYLIST_NAME;
-pub use quality::QualityTodo;
+pub use quality::{Conversion, FakeOffer, QualityTodo};
 pub use rec_facts::{LyricsLevel, LyricsSample, PlaylistTracks, TrackFactsRow};
 pub use graph::{GraphEntry, GraphFetch, GraphRow, GraphTag};
 pub use recs::RecTrack;

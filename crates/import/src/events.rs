@@ -97,24 +97,30 @@ pub enum ImportEvent {
     NeedsConfirmation {
         item: ConfirmItem,
     },
-    /// Not better than what the library has; `kept` is the existing track.
+    /// Not better than what the library has; `kept` is the existing track,
+    /// `quality` what the file really is («FLAC из MP3 ~128», «MP3 320»).
     Duplicate {
         job: JobId,
         path: PathBuf,
         kept: TrackId,
+        quality: Option<String>,
     },
     Failed {
         job: JobId,
         path: PathBuf,
         error: String,
     },
-    /// All files of the job are done or parked.
+    /// All files of the job are done or parked. `left_out`: files that are
+    /// none of the tracks a better copy was fetched for; `cancelled`: the
+    /// user stopped it and what it committed was taken back.
     Finished {
         job: JobId,
         imported: usize,
         duplicates: usize,
         failed: usize,
         pending: usize,
+        left_out: usize,
+        cancelled: bool,
     },
     /// A `.torrent` file showed up in the Inbox (or in the job's paths); the
     /// runtime hands it to the torrent client.

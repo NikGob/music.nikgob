@@ -238,6 +238,70 @@ pub(crate) fn file_is_track(base: &Identity, duration_ms: Option<u32>, t: Slot<'
     (fits && close != Some(false)).then_some(score)
 }
 
+/// The names a file of a folder may go by, for [`folder_has_album`]: its
+/// own («01 - Title», «Artist - Title»), and its last part after « - »
+/// with the number before it («Artist - Album - 06 - Title» is «06 -
+/// Title», «Artist - Album - 01 Title» is «01 Title»).
+fn name_forms(name: &str) -> Vec<String> {
+    let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let mut out = vec![file.to_owned()];
+    let parts: Vec<&str> = file.split(" - ").map(str::trim).collect();
+    if parts.len() >= 2 {
+        let last = parts[parts.len() - 1];
+        let before = parts[parts.len() - 2];
+        let numbered = !before.is_empty() && before.len() <= 3 && before.chars().all(|c| c.is_ascii_digit());
+        out.push(if numbered { format!("{before} - {last}") } else { last.to_owned() });
+    }
+    out
+}
+
+/// A track of an album as [`folder_has_album`] compares it.
+#[derive(Clone, Copy, Debug)]
+pub struct AlbumTrack<'a> {
+    pub title: &'a str,
+    pub disc_no: u32,
+    pub track_no: u32,
+    pub duration_ms: Option<u32>,
+}
+
+/// Whether a folder, known only by its files' names and lengths (a
+/// Soulseek folder, a torrent's list, before anything is downloaded), is
+/// the album whose tracks are `tracks`: at least half of them are there,
+/// each file one track, by the importer's own test of a file and a track
+/// (the title, or the number and a like title, the lengths agreeing when
+/// both are known). Another artist's album under the same word has none of
+/// them.
+pub fn folder_has_album(tracks: &[AlbumTrack<'_>], files: &[(&str, Option<u32>)]) -> bool {
+    if tracks.is_empty() {
+        return true;
+    }
+    let none = crate::tags::TagSet::default();
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for (i, (name, duration)) in files.iter().enumerate() {
+        for form in name_forms(name) {
+            let base = crate::identity::identity_from_tags(&none, Path::new(&form));
+            for (j, t) in tracks.iter().enumerate() {
+                let slot = Slot { title: t.title, disc_no: t.disc_no.max(1), track_no: t.track_no, duration_ms: t.duration_ms };
+                if let Some(score) = file_is_track(&base, *duration, slot) {
+                    pairs.push((score, i, j));
+                }
+            }
+        }
+    }
+    pairs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let (mut file_used, mut track_used) = (vec![false; files.len()], vec![false; tracks.len()]);
+    let mut found = 0usize;
+    for (_, i, j) in pairs {
+        if file_used[i] || track_used[j] {
+            continue;
+        }
+        file_used[i] = true;
+        track_used[j] = true;
+        found += 1;
+    }
+    found > 0 && found * 2 >= tracks.len()
+}
+
 impl Reference {
     /// The release of `targets` (its own, else the one most of its tracks
     /// are on) with every track of it, outside the library too.
@@ -678,6 +742,41 @@ mod tests {
         assert_eq!(r.after(), (1, 6));
         let bonus = r.identity(&bases[5], r.after());
         assert_eq!((bonus.track_no, bonus.album.as_deref(), bonus.release_id), (6, Some("8 способов как бросить..."), Some(release.id)));
+    }
+
+    /// «OMORI OST» in the library; a folder of another «Omori»'s cassette
+    /// has none of its songs, the OST's own folder has them.
+    #[test]
+    fn a_folder_is_the_album_only_with_its_songs() {
+        let lib = [
+            ("Title", 1, 61_000),
+            ("WHITE SPACE", 2, 104_000),
+            ("Acrophobia", 14, 168_000),
+            ("Space Road 1979", 19, 120_000),
+        ];
+        let tracks: Vec<AlbumTrack<'_>> = lib
+            .iter()
+            .map(|(t, no, ms)| AlbumTrack { title: t, disc_no: 1, track_no: *no, duration_ms: Some(*ms) })
+            .collect();
+        let cassette = [
+            ("Omori - Embryogenesis - 01 Deeper Dive.flac", Some(221_000)),
+            ("Omori - Embryogenesis - 02 I didn't realize how fast it all ceased to be.flac", Some(110_000)),
+            ("Omori - Embryogenesis - 03 Struggle against chaos.flac", Some(300_000)),
+        ];
+        assert!(!folder_has_album(&tracks, &cassette));
+        let ost = [
+            ("01 - Title.flac", Some(61_000)),
+            ("02 - WHITE SPACE.flac", Some(104_000)),
+            ("OMORI - OMORI OST - 14 - Acrophobia.flac", Some(168_000)),
+            ("19. Space Road 1979.flac", None),
+        ];
+        assert!(folder_has_album(&tracks, &ost));
+        // The same names, the lengths of another edition: not it.
+        let other: Vec<(&str, Option<u32>)> = ost.iter().map(|(n, _)| (*n, Some(400_000))).collect();
+        assert!(!folder_has_album(&tracks, &other));
+        // A single's file named «Artist - Album - 06 - Title».
+        let one = [AlbumTrack { title: "прости я не знаю", disc_no: 1, track_no: 6, duration_ms: Some(135_000) }];
+        assert!(folder_has_album(&one, &[("СЕРЕГА ПИРАТ - Вот мой альбом, сори - 06 - прости я не знаю.flac", Some(135_000))]));
     }
 
     #[test]

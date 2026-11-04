@@ -1,8 +1,12 @@
-//! The background spectrum check of the library's files: every local file
-//! gets a verdict once (lossless-labelled files first), and again when the
-//! file at its place changes. A "lossless" file found made from a lossy
-//! one is ranked as what it really is, and with «Превращать «фейковый»
-//! FLAC в MP3» on it becomes an MP3 (see `nikgob_import::quality`).
+//! The background spectrum check of the library's lossless files: each
+//! gets a verdict once, and again when the file at its place changes (a
+//! lossy file's own lowpass is its format's: it is never judged). A
+//! "lossless" file found made from a lossy one is ranked as what it really
+//! is and labelled so. It never changes by itself: a plain fake is offered
+//! in «Подтверди», album by album, as an MP3 («Превратить в MP3» /
+//! «Оставить FLAC»); only with «Без вопроса» on is a plain one converted at
+//! once. A converted file's FLAC waits in the Trash, and «Вернуть FLAC»
+//! brings every one back (see `nikgob_import::quality`).
 //!
 //! One thread at the lowest priority, one file at a time with a rest
 //! between files (a longer one while music plays). Files the import
@@ -16,11 +20,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use std::collections::HashMap;
+
 use crossbeam_channel::Sender;
 use nikgob_core::model::{Source, SourceId, SourceOrigin, TrackId, quality_score, score};
-use nikgob_core::quality::{QualityCheck, Verdict, fake_score};
-use nikgob_import::quality::{CheckError, Mp3Encoder, check_file, convert_fake, file_stamp, is_fake};
-use nikgob_library::{Library, QualityTodo};
+use nikgob_core::quality::{QualityCheck, Verdict, clear_fake, fake_score};
+use nikgob_import::quality::{CheckError, Mp3Encoder, check_file, convert_fake, file_stamp, is_fake, restore_conversion};
+use nikgob_library::{FakeOffer, Library, QualityTodo};
+use nikgob_view as v;
 use parking_lot::{Condvar, Mutex};
 
 use crate::Worker;
@@ -35,11 +42,20 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 /// Changed rows are reported at least this often during a pass.
 const REPORT_EVERY: usize = 8;
 
-/// From the check's thread to the worker.
+/// Bit of the «Подтверди» ids of the offers to turn fakes into MP3s.
+pub(crate) const QUALITY_ID: u64 = 1 << 45;
+
+/// From the check's thread (and the conversions the user asked for) to the
+/// worker.
 pub(crate) enum Msg {
     /// These tracks were checked; `changed`: what their rows show changed
     /// (a fake found, a file converted), so the lists reload.
     Checked { tracks: Vec<TrackId>, changed: bool },
+    /// The fakes the user said to turn into MP3s are done: how many, and
+    /// how many failed.
+    Converted { done: usize, failed: usize },
+    /// «Вернуть FLAC»: how many came back, and how many could not.
+    Restored { done: usize, failed: usize },
 }
 
 /// What the settings allow, set by the worker.
@@ -47,8 +63,10 @@ pub(crate) enum Msg {
 pub(crate) struct Settings {
     /// «Проверять «фейковый» FLAC».
     pub check: bool,
-    /// «Превращать «фейковый» FLAC в MP3».
+    /// «Предлагать MP3 вместо «фейкового» FLAC».
     pub convert: bool,
+    /// …«без вопроса»: a plain fake becomes an MP3 at once.
+    pub auto: bool,
     /// The library's Trash, where a converted fake goes (no import service:
     /// nothing is converted).
     pub trash_dir: Option<PathBuf>,
@@ -81,6 +99,10 @@ pub(crate) enum Plan {
 
 /// Whether a listed source needs a check now; `now` is its file's stamp.
 pub(crate) fn plan(t: &QualityTodo, now: Option<(u64, i64)>) -> Plan {
+    // Only lossless sound is judged.
+    if !t.codec.is_lossless() {
+        return Plan::Skip;
+    }
     match (&t.checked, &t.made_from) {
         // A lossy file ranked as lossless was made from a lossless
         // original that was judged on its way in; its own lowpass says
@@ -104,7 +126,7 @@ pub(crate) fn rescore(src: &Source, c: &QualityCheck) -> Option<i32> {
     if !src.codec.is_lossless() || src.origin == SourceOrigin::Stream || c.made_from.is_some() {
         return None;
     }
-    let want = match c.verdict {
+    let want = match nikgob_core::quality::plausible(c.verdict, c.cutoff_hz) {
         Verdict::Transcoded => fake_score(c.origin),
         Verdict::Upsampled => quality_score(&src.codec, src.bitrate, Some(44_100), Some(16), false),
         Verdict::Genuine => quality_score(&src.codec, src.bitrate, src.sample_rate, src.bit_depth, false),
@@ -223,10 +245,14 @@ impl Shared {
                 Err(e) => log::warn!("quality: ranking {}: {e}", t.locator),
             }
         }
-        if is_fake(&src.codec, &c) {
+        let hi_res = src.bit_depth.is_some_and(|b| b > 16) || src.sample_rate.is_some_and(|r| r > 48_000);
+        let plain = clear_fake(c.verdict, c.cutoff_hz, c.steepness_db, hi_res);
+        if is_fake(&src.codec, &c) && plain {
+            // Offered in «Подтверди» unless the user lets it happen by itself.
+            changed = true;
             let (convert, trash) = {
                 let s = self.settings.lock();
-                (s.convert, s.trash_dir.clone())
+                (s.convert && s.auto, s.trash_dir.clone())
             };
             if let (true, Some(trash)) = (convert, trash) {
                 match Mp3Encoder::find() {
@@ -253,6 +279,16 @@ impl Shared {
             Ok(n) => log::info!("quality: {n} checks of sources that are gone dropped"),
             Err(e) => log::warn!("quality: dropping old checks: {e}"),
         }
+        // Checks of lossy files, and fakes «cut» where no encoder cuts: put
+        // right (rows only, no file is touched).
+        match self.lib.tidy_quality_checks() {
+            Ok(tracks) if tracks.is_empty() => {}
+            Ok(tracks) => {
+                log::info!("quality: {} tracks' checks put right", tracks.len());
+                let _ = self.tx.send(Internal::Quality(Msg::Checked { tracks, changed: true }));
+            }
+            Err(e) => log::warn!("quality: putting the checks right: {e}"),
+        }
         // Not tried again in this run (could not be opened).
         let mut skip = HashSet::new();
         while !self.stopped() {
@@ -278,11 +314,61 @@ pub(crate) struct QualityJob {
     settings: Settings,
     shared: Option<Arc<Shared>>,
     gone: Option<crossbeam_channel::Receiver<()>>,
+    /// «Подтверди» cards of the fakes offered as MP3s: the sources of each.
+    cards: HashMap<u64, Vec<SourceId>>,
+    /// Stable card ids by album key.
+    card_ids: HashMap<String, u64>,
+    next_card: u64,
+    /// A conversion or a restore the user asked for is running.
+    busy: bool,
+}
+
+/// The fakes offered as MP3s, one card per album: `(album key, title,
+/// offers)`, in the order the library lists them.
+pub(crate) fn fake_cards(offers: Vec<FakeOffer>) -> Vec<(String, String, Vec<FakeOffer>)> {
+    let mut out: Vec<(String, String, Vec<FakeOffer>)> = Vec::new();
+    for o in offers {
+        let key = o.release.map_or_else(|| "-".to_owned(), |r| r.to_string());
+        match out.iter_mut().find(|(k, ..)| *k == key) {
+            Some((.., list)) => list.push(o),
+            None => {
+                let title = if o.album.is_empty() { "Отдельные треки".to_owned() } else { o.album.clone() };
+                out.push((key, title, vec![o]));
+            }
+        }
+    }
+    out
+}
+
+/// The lines of a card: each file with what it really is.
+pub(crate) fn fake_lines(offers: &[FakeOffer]) -> String {
+    const SHOWN: usize = 8;
+    let mut lines: Vec<String> = offers
+        .iter()
+        .take(SHOWN)
+        .map(|o| {
+            let from = o.origin.lossy_kbps().map_or_else(|| "из сжатого".to_owned(), |k| format!("из MP3 ~{k}"));
+            format!("{} — FLAC {from}, срез {}", o.title, nikgob_core::quality::khz(o.cutoff_hz))
+        })
+        .collect();
+    if offers.len() > SHOWN {
+        lines.push(format!("и ещё {}", offers.len() - SHOWN));
+    }
+    lines.join("\n")
 }
 
 impl QualityJob {
     pub(crate) fn new(tx: Sender<Internal>) -> Self {
-        Self { tx, settings: Settings::default(), shared: None, gone: None }
+        Self {
+            tx,
+            settings: Settings::default(),
+            shared: None,
+            gone: None,
+            cards: HashMap::new(),
+            card_ids: HashMap::new(),
+            next_card: 0,
+            busy: false,
+        }
     }
 
     /// Starts checking after `start`; `idle` is how often the library is
@@ -370,11 +456,126 @@ impl Drop for QualityJob {
 impl Worker {
     /// What the prefs and the import service say the check may do.
     pub(crate) fn quality_settings(&self) -> Settings {
-        let (check, convert) = {
+        let (check, convert, auto) = {
             let st = self.state.read();
-            (st.prefs.check_fake_lossless, st.prefs.convert_fake_lossless)
+            (st.prefs.check_fake_lossless, st.prefs.convert_fake_lossless, st.prefs.fake_flac_auto)
         };
-        Settings { check, convert, trash_dir: self.import.as_ref().map(|s| s.config().trash_dir.clone()) }
+        Settings { check, convert, auto, trash_dir: self.import.as_ref().map(|s| s.config().trash_dir.clone()) }
+    }
+
+    /// «Подтверди»: the plain fakes as MP3 offers, one card per album
+    /// (none while offers are off or a conversion runs).
+    pub(crate) fn publish_fake_offers(&mut self) {
+        let on = {
+            let p = &self.state.read().prefs;
+            p.check_fake_lossless && p.convert_fake_lossless
+        };
+        let offers = if on && !self.quality.busy && self.import.is_some() {
+            self.lib.fake_offers().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let q = &mut self.quality;
+        q.cards.clear();
+        let mut confirms = Vec::new();
+        for (key, title, list) in fake_cards(offers) {
+            let id = match q.card_ids.get(&key) {
+                Some(id) => *id,
+                None => {
+                    q.next_card += 1;
+                    let id = QUALITY_ID | q.next_card;
+                    q.card_ids.insert(key, id);
+                    id
+                }
+            };
+            let n = list.len();
+            confirms.push(v::Confirm {
+                id,
+                title,
+                origin: format!("Ненастоящий FLAC · {n} {}", if n == 1 { "файл" } else if (2..5).contains(&(n % 10)) && !(12..15).contains(&(n % 100)) { "файла" } else { "файлов" }),
+                options: vec![v::ConfirmOption {
+                    label: "MP3 того же звука".into(),
+                    detail: fake_lines(&list),
+                    recommended: false,
+                }],
+                skip_label: "Оставить FLAC".into(),
+                question: "Внутри этих FLAC — MP3. Превратить их в MP3? FLAC уйдут в Корзину, «Вернуть FLAC» в настройках вернёт их".into(),
+                accept_label: "Превратить в MP3".into(),
+            });
+            q.cards.insert(id, list.into_iter().map(|o| o.source_id).collect());
+        }
+        self.publish(|s| {
+            s.downloads.confirm.retain(|c| c.id & QUALITY_ID == 0);
+            s.downloads.confirm.extend(confirms);
+        });
+    }
+
+    /// The answer on a fakes card: their MP3s now, or they stay FLAC and
+    /// are not offered again.
+    pub(crate) fn quality_confirm(&mut self, id: u64, option: Option<usize>) {
+        let Some(sources) = self.quality.cards.remove(&id) else { return };
+        if option.is_none() {
+            for s in &sources {
+                if let Err(e) = self.lib.set_quality_keep(*s, true) {
+                    log::warn!("quality: keeping {s}: {e}");
+                }
+            }
+            log::info!("quality: {} fake files kept as they are", sources.len());
+            self.publish_fake_offers();
+            return;
+        }
+        let Some(svc) = &self.import else { return };
+        let Some(enc) = Mp3Encoder::find() else {
+            self.toast("Нужен ffmpeg, чтобы сделать MP3", None);
+            return;
+        };
+        let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
+        svc.spawn_blocking(move || {
+            crate::analysis::lower_priority();
+            let (mut done, mut failed) = (0, 0);
+            for id in sources {
+                let src = lib.get_source(id).ok().flatten();
+                let check = lib.quality_check(id).ok().flatten();
+                match (src, check) {
+                    (Some(src), Some(c)) if src.trashed_at.is_none() => match convert_fake(&lib, &trash, &enc, &src, &c) {
+                        Ok(_) => done += 1,
+                        Err(e) => {
+                            log::warn!("quality: converting {}: {e}", src.locator);
+                            failed += 1;
+                        }
+                    },
+                    _ => {}
+                }
+            }
+            let _ = tx.send(Internal::Quality(Msg::Converted { done, failed }));
+        });
+        self.quality.busy = true;
+        self.publish_fake_offers();
+    }
+
+    /// «Вернуть FLAC из корзины»: every conversion is undone (one that was
+    /// undone already is left as it is).
+    pub(crate) fn restore_converted_flac(&mut self) {
+        let Some(svc) = &self.import else { return };
+        if self.quality.busy {
+            return;
+        }
+        let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
+        svc.spawn_blocking(move || {
+            let (mut done, mut failed) = (0, 0);
+            for c in lib.conversions().unwrap_or_default() {
+                match restore_conversion(&lib, &trash, &c) {
+                    Ok(()) => done += 1,
+                    Err(e) => {
+                        log::warn!("quality: {} stays in the Trash: {e}", c.trash_path);
+                        failed += 1;
+                    }
+                }
+            }
+            let _ = tx.send(Internal::Quality(Msg::Restored { done, failed }));
+        });
+        self.quality.busy = true;
+        self.publish_fake_offers();
     }
 
     pub(crate) fn start_quality(&mut self) {
@@ -382,19 +583,36 @@ impl Worker {
         let settings = self.quality_settings();
         let (start, idle) = (self.streaming.schedule.analysis_start, self.streaming.schedule.analysis_idle);
         self.quality.start(self.lib.clone(), root, settings, start, idle);
+        self.publish_fake_offers();
     }
 
-    /// The prefs changed: the check follows.
+    /// The prefs changed: the check (and its offers) follow.
     pub(crate) fn quality_prefs(&mut self) {
         let settings = self.quality_settings();
         self.quality.configure(settings);
+        self.publish_fake_offers();
     }
 
     pub(crate) fn quality_msg(&mut self, m: Msg) {
+        let restored = matches!(m, Msg::Restored { .. });
         match m {
+            Msg::Converted { done, failed } | Msg::Restored { done, failed } => {
+                self.quality.busy = false;
+                let text = match (restored, done, failed) {
+                    (true, 0, 0) => "Возвращать нечего: все FLAC на месте".to_owned(),
+                    (true, d, 0) => format!("Вернул FLAC: {d}"),
+                    (true, d, f) => format!("Вернул FLAC: {d}, не получилось: {f}"),
+                    (false, d, 0) => format!("Сделал MP3: {d} · FLAC в Корзине"),
+                    (false, d, f) => format!("Сделал MP3: {d}, не получилось: {f}"),
+                };
+                self.toast(text, None);
+                self.reload_after_import();
+                self.publish_fake_offers();
+            }
             Msg::Checked { tracks, changed } => {
                 if changed {
                     self.reload_after_import();
+                    self.publish_fake_offers();
                 }
                 let current = self.playing.map(|e| e.track).or_else(|| self.queue.current().map(|e| e.track));
                 if current.is_some_and(|c| tracks.contains(&c)) {
@@ -430,7 +648,7 @@ mod tests {
         let flac = todo(Codec::Flac, score::CD_LOSSLESS, None, None);
         assert_eq!(plan(&flac, Some((1, 1))), Plan::Check);
         let mp3 = todo(Codec::Mp3, score::MP3_320, None, None);
-        assert_eq!(plan(&mp3, Some((1, 1))), Plan::Check);
+        assert_eq!(plan(&mp3, Some((1, 1))), Plan::Skip, "a lossy file's own lowpass is its format's");
         // An Opus made from a lossless original before checks were kept.
         let opus = todo(Codec::Opus, score::CD_LOSSLESS, None, None);
         assert_eq!(plan(&opus, Some((1, 1))), Plan::Skip);
@@ -485,5 +703,30 @@ mod tests {
         saved.origin = SourceOrigin::Stream;
         assert_eq!(rescore(&saved, &check(Verdict::Transcoded, 16_000.0)), None);
         assert_eq!(rescore(&flac, &check(Verdict::Unknown, 0.0)), None);
+        // A «cut» at 3 kHz is the music's own: the file is lossless again.
+        flac.quality_score = 500;
+        assert_eq!(rescore(&flac, &check(Verdict::Transcoded, 2_820.0)), None, "no verdict, no change");
+    }
+
+    /// One card per album, each file with what it really is.
+    #[test]
+    fn fakes_are_offered_album_by_album() {
+        let r = nikgob_core::model::ReleaseId::new();
+        let o = |t: &str, release| FakeOffer {
+            source_id: SourceId::new(),
+            track_id: TrackId::new(),
+            title: t.into(),
+            release,
+            album: if release.is_some() { "8 способов как бросить...".into() } else { String::new() },
+            locator: format!("{t}.flac"),
+            cutoff_hz: 19_940.0,
+            steepness_db: 39.6,
+            origin: SoundOrigin::Lossy { kbps: 320 },
+        };
+        let cards = fake_cards(vec![o("Молли", Some(r)), o("Lin Ansty", Some(r)), o("Супермаркет", None)]);
+        assert_eq!(cards.len(), 2);
+        assert_eq!((cards[0].1.as_str(), cards[0].2.len()), ("8 способов как бросить...", 2));
+        assert_eq!(cards[1].1, "Отдельные треки");
+        assert_eq!(fake_lines(&cards[0].2), "Молли — FLAC из MP3 ~320, срез 19,9 кГц\nLin Ansty — FLAC из MP3 ~320, срез 19,9 кГц");
     }
 }

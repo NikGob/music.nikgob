@@ -1379,6 +1379,7 @@ impl Worker {
             eta: None,
             paused: false,
             controllable: false,
+            pausable: false,
             error,
             at: nikgob_library::now_ms(),
         });
@@ -1408,6 +1409,7 @@ impl Worker {
                 eta: None,
                 paused: false,
                 controllable: false,
+                pausable: false,
                 error: None,
                 at: 0,
             })
