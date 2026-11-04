@@ -1052,7 +1052,7 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
             p.lyrics_return_s = v;
         }
     });
-    row(ui, Id::LyricsUi, "Что открывает кнопка под текстом", None, |ui| choice(ui, Id::LyricsUi, p));
+    row(ui, Id::LyricsUi, "Где делать подсветку", None, |ui| choice(ui, Id::LyricsUi, p));
     lyrics_align(ui, _state, p, out);
 
     group(ui, "Звук");

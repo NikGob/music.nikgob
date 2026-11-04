@@ -16,8 +16,8 @@
 //! `world_page:Title` opens its page (`world_page` the first world's).
 //! `mix_page` opens the page of the first mix of Главная (`mix_page:Title`
 //! that one, or the open world page's).
-//! `lyrics_ui` opens what the control under the lyrics opens in the look
-//! `NIKGOB_LYRICS_UI` picks (its menu, the dialog or the page).
+//! `lyrics_ui` opens where timing is made in the look
+//! `NIKGOB_LYRICS_UI` picks (the control's menu, the dialog or the page).
 //! `liked` opens «Любимые»; `play_clip` plays the first clip of the open
 //! playlist (`play_clip:song` its first stream song).
 //! `find_song` opens «Найти песню…» for the first clip of the open

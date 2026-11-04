@@ -1,8 +1,9 @@
-//! The control under the lyrics and what opens behind it, in three looks
-//! to choose from (`NIKGOB_LYRICS_UI=menu|dialog|page`, the menu by
-//! default): [`menu`] puts the sources and the timing actions in the
-//! control's own menu, [`dialog`] grows a modal window out of the control,
-//! [`page`] opens the «Текст песни» page. Settings → «Текст песен» →
+//! The control under the lyrics and what opens behind it. The control
+//! always opens its small menu ([`menu`]): the sources are picked there in
+//! every look. Where timing is made comes in three looks to choose from
+//! (`NIKGOB_LYRICS_UI=menu|dialog|page`, the menu by default): `menu` makes
+//! it from the menu itself, [`dialog`] grows a modal window out of the
+//! control, [`page`] opens the «Текст песни» page. Settings → «Текст песен» →
 //! «Вид» picks the look (`Prefs::lyrics_ui`); `NIKGOB_LYRICS_UI` overrides
 //! it for screenshot runs. Each look lives in its own
 //! module; this one has what they share: the words, the control itself and
@@ -98,7 +99,8 @@ pub(crate) fn take_request(ctx: &Context) -> Option<Request> {
 /// The settings row «Настройки текста…» leads to.
 pub(crate) const SETTINGS: super::pages::SettingId = super::pages::SettingId::LyricsUi;
 
-/// Opens what the control opens, as a click would (screenshot runs).
+/// Opens where timing is made: the menu, the window or the page
+/// (screenshot runs).
 pub fn open(ctx: &Context) {
     let last = ctx.data(|d| d.get_temp::<(Id, Rect)>(Id::new(LAST)));
     match ctx.data(|d| d.get_temp::<Variant>(Id::new(SHOWN))).unwrap_or(Variant::Menu) {
@@ -112,27 +114,12 @@ pub fn open(ctx: &Context) {
     }
 }
 
-/// The control under the lyrics, centred in the width it is given. True
-/// when «Настройки текста…» was picked (the menu).
+/// The control under the lyrics, centred in the width it is given, with
+/// its menu. True when «Настройки текста…» was picked.
 pub fn control(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> bool {
     let v = variant(&state.prefs);
     ui.ctx().data_mut(|d| d.insert_temp(Id::new(SHOWN), v));
-    match v {
-        Variant::Menu => menu::control(ui, state, out),
-        Variant::Dialog => {
-            let r = chip(ui, state, 0.0, out);
-            if r.clicked() {
-                dialog::open(ui.ctx(), r.rect);
-            }
-            false
-        }
-        Variant::Page => {
-            if chip(ui, state, 0.0, out).clicked() {
-                request(ui.ctx(), Request::Page);
-            }
-            false
-        }
-    }
+    menu::control(ui, state, v, out)
 }
 
 /// How a text lights up as the song goes, for someone who never heard of
