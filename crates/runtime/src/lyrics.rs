@@ -386,20 +386,19 @@ impl TrackLyrics {
 
     /// Only confirmed misses enable Better Lyrics; failures never count as
     /// misses. Genius (plain texts) comes last, and only when no text with
-    /// timing that fits the recording is there.
+    /// timing that fits the recording is there. When nothing is left to
+    /// ask, nothing stays pending (a source is never shown as searching
+    /// without a lookup on its way).
     fn next_lookups(&mut self) -> Vec<LyricsSource> {
-        let others = [LyricsSource::LyricsPlus, LyricsSource::LrcRed, LyricsSource::BetterLyrics, LyricsSource::Lrclib];
-        if self.pending.contains(&LyricsSource::Genius) && !others.iter().any(|s| self.pending.contains(s)) {
-            let timed = self.texts.iter().any(|(s, t)| {
-                *s != LyricsSource::Recognized && t.sync() > LyricsSync::Plain && !self.misfit(*s)
-            });
-            if timed || !self.genius {
-                self.pending.remove(&LyricsSource::Genius);
-                return Vec::new();
-            }
+        let online = self.next_online();
+        if !online.is_empty() {
+            return online;
+        }
+        if self.pending.contains(&LyricsSource::Genius) && self.genius && !self.has_timed() {
             return vec![LyricsSource::Genius];
         }
-        self.next_online()
+        self.pending.clear();
+        Vec::new()
     }
 
     fn next_online(&mut self) -> Vec<LyricsSource> {
@@ -714,7 +713,7 @@ impl Worker {
         for t in evict(&mut svc.lyrics_order, LYRICS_KEPT, spare) {
             svc.lyrics_cache.remove(&t);
             // Rebuilt from the library next time; what it lacks is asked again.
-            svc.lyrics_tried.retain(|(tried, _)| *tried != t);
+            svc.lyrics_asking.retain(|(asked, _)| *asked != t);
         }
     }
 
@@ -788,7 +787,8 @@ impl Worker {
         let Some(tl) = svc.lyrics_cache.get_mut(&track) else { return };
         let sources = tl.next_lookups();
         for source in sources {
-            if !svc.lyrics_tried.insert((track, source)) {
+            // Already on its way: its answer asks for the next ones.
+            if !svc.lyrics_asking.insert((track, source)) {
                 continue;
             }
             let (meta, lib, row, tx) = (meta.clone(), self.lib.clone(), row.clone(), svc.internal());
@@ -852,6 +852,7 @@ impl Worker {
 
     pub(crate) fn lyrics_fetched(&mut self, track: TrackId, source: LyricsSource, got: Result<Option<Text>, String>) {
         let Some(svc) = &mut self.import else { return };
+        svc.lyrics_asking.remove(&(track, source));
         let Some(tl) = svc.lyrics_cache.get_mut(&track) else { return };
         match got {
             Ok(text) => tl.insert(source, text),
@@ -859,7 +860,6 @@ impl Worker {
                 log::debug!("lyrics lookup ({}): {e}", source.key());
                 tl.pending.remove(&source);
                 tl.failed = true;
-                svc.lyrics_tried.remove(&(track, source));
             }
         }
         self.start_lyrics_lookups(track);
@@ -1362,6 +1362,44 @@ mod tests {
         let (lines, timed) = back.align_lines();
         assert!(!timed);
         assert_eq!(lines.len(), 2);
+    }
+
+    /// «Summer 15/16»: LRCLIB's lines and lrc.red's text are in the
+    /// library, LyricsPlus, Better Lyrics and Genius are not. Once
+    /// LyricsPlus answers, nothing is left to ask: Genius must not stay
+    /// «ищу…» with no lookup on its way.
+    #[test]
+    fn nothing_stays_pending_once_nothing_is_left_to_ask() {
+        let lib = Library::open_in_memory().unwrap();
+        let track = lib
+            .upsert_track(&nikgob_core::model::Track::new("Summer 15/16", nikgob_core::model::ArtistCredit::single("LAZZY2WICE", None)))
+            .unwrap()
+            .id;
+        lib.put_lyrics(track, Some("[00:01.00]a\n[00:02.00]b"), Some("a\nb"), false).unwrap();
+        let lrcred = Text::from_lrc(Some("[00:01.00]a\n[00:02.00]b"), None).unwrap().body();
+        lib.put_lyrics_text(track, LyricsSource::LrcRed.key(), lrcred.as_deref()).unwrap();
+        let mut tl = cached_lyrics(&lib, track, None, None, true);
+        assert!(tl.pending.contains(&LyricsSource::Genius));
+        assert_eq!(tl.next_lookups(), [LyricsSource::LyricsPlus]);
+        for got in [None, Some(worded())] {
+            let mut tl = tl.clone();
+            tl.insert(LyricsSource::LyricsPlus, got);
+            assert!(tl.next_lookups().is_empty());
+            assert!(tl.pending.is_empty(), "{:?}", tl.pending);
+            let v = tl.view(track);
+            assert!(!v.sources.iter().any(|o| o.state == v::LyricsAvail::Loading), "{:?}", v.sources);
+        }
+        // LyricsPlus failed (no network): still nothing left pending.
+        tl.pending.remove(&LyricsSource::LyricsPlus);
+        tl.failed = true;
+        assert!(tl.next_lookups().is_empty());
+        assert!(tl.pending.is_empty());
+        // Without a timed text Genius is what is asked.
+        let mut plain = TrackLyrics { genius: true, ..Default::default() };
+        plain.insert(LyricsSource::LrcRed, Text::from_lrc(None, Some("a")));
+        plain.pending.extend([LyricsSource::BetterLyrics, LyricsSource::Genius]);
+        assert_eq!(plain.next_lookups(), [LyricsSource::Genius]);
+        assert!(plain.pending.contains(&LyricsSource::Genius));
     }
 
     #[tokio::test]
