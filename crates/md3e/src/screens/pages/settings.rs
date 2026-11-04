@@ -16,6 +16,7 @@ use crate::{
 
 pub(super) fn group(ui: &mut Ui, title: &str) -> egui::Response {
     let s = Theme::get(ui.ctx()).scheme;
+    settings_help::group_start(ui);
     ui.add_space(24.0);
     let header = ui.label(TypeRole::TitleSmall.style().rich(title, s.primary));
     ui.add_space(4.0);
@@ -261,7 +262,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     ui.add_space(16.0);
     if let Some(id) = pages.focus_setting.take() {
         pages.settings_tab = id.tab();
-        settings_help::begin_focus(ui.ctx(), id);
+        settings_help::begin_focus(ui.ctx(), id, std::mem::take(&mut pages.focus_group));
     }
     let tab = pages.settings_tab.min(settings_help::TABS.len() - 1);
     if let (Some(n), _) = connected(ui, egui::Id::new("set-tab"), &settings_help::TABS, tab, &[]) {
@@ -677,16 +678,23 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     row(ui, Id::LyricsStyle, "Анимация", Some("Как выделяется строка, которую поют"), |ui| {
         choice(ui, Id::LyricsStyle, p);
     });
-    if p.lyrics_style == 2 {
-        row(ui, Id::WaveFallback, "Если у текста нет времени слов", Some("Для анимации «Волна»"), |ui| {
+    if matches!(p.lyrics_style, 2 | 3) {
+        row(ui, Id::WaveFallback, "Если у текста нет времени слов", Some("Для анимаций «Волна» и «По словам»"), |ui| {
             choice_menu(ui, Id::WaveFallback, p);
         });
+    }
+    if p.lyrics_style == 2 {
         row(ui, Id::WaveJump, "Высота прыжка букв", Some("0 — буквы только подсвечиваются"), |ui| {
             if let Some(v) = range_slider(ui, "set-lyrics-jump", p.lyrics_wave_jump, (0.0, 2.0), 0.1, |v| format!("{v:.1}")) {
                 p.lyrics_wave_jump = v;
             }
         });
     }
+    row(ui, Id::LyricsLead, "Опережение подсветки", Some("0 — точно по голосу, меньше 0 — позже него"), |ui| {
+        if let Some(v) = range_slider(ui, "set-lyrics-lead", p.lyrics_lead, (-0.5, 0.5), 0.05, |v| format!("{v:+.2} с").replace('.', ",")) {
+            p.lyrics_lead = v;
+        }
+    });
     row(ui, Id::LyricsDim, "Приглушение остальных строк", Some("0% — без приглушения, 100% — сильное"), |ui| {
         if let Some(v) = range_slider(ui, "set-lyrics-dim", p.lyrics_dim, (0.0, 1.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
             p.lyrics_dim = v;

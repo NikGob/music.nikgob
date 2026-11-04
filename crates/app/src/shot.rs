@@ -550,7 +550,8 @@ impl Shot {
                 ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::default()));
                 self.wait = 0;
             }
-            // `settings:sources` opens Settings on that tab / row.
+            // `settings:sources` opens Settings on that tab / row
+            // (`settings:lyrics-group` the lyrics group, as under the lyrics).
             "settings" => {
                 ui.open_settings_at(arg);
                 self.wait = 30;

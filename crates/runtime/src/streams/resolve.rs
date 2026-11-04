@@ -446,6 +446,7 @@ impl Worker {
         // A copy that failed mid-track: the one found goes on from there.
         self.position = self.failover.filter(|(id, _)| *id == e.id).map_or(std::time::Duration::ZERO, |(_, at)| at);
         self.position_at = Instant::now();
+        self.rate = 1.0;
         self.publish_now_playing();
         true
     }

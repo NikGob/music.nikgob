@@ -589,7 +589,7 @@ impl Md3eUi {
         // «Настройки текста» and the «Текст песни» page, asked under the
         // lyrics.
         match lyrics_ui::take_request(ctx) {
-            Some(lyrics_ui::Request::Settings) => self.pages.open_setting(lyrics_ui::SETTINGS),
+            Some(lyrics_ui::Request::Settings) => self.pages.open_setting_group(lyrics_ui::SETTINGS),
             Some(lyrics_ui::Request::Page) => self.pages.pending_nav = Some(Route::Lyrics),
             None => {}
         }
@@ -978,7 +978,7 @@ impl Md3eUi {
             }
         }
         if configure_lyrics {
-            self.pages.open_setting(lyrics_ui::SETTINGS);
+            self.pages.open_setting_group(lyrics_ui::SETTINGS);
         }
     }
 }
@@ -1136,6 +1136,11 @@ impl Md3eUi {
     /// `appearance`, anything else = «Основные».
     pub fn open_settings_at(&mut self, row: &str) {
         use pages::SettingId as S;
+        // As «Настройки текста…» under the lyrics opens it: the whole group.
+        if row == "lyrics-group" {
+            self.pages.open_setting_group(lyrics_ui::SETTINGS);
+            return;
+        }
         self.pages.open_setting(match row {
             "sources" | "spotify" => S::SpotifyEnabled,
             "youtube" => S::YouTubeEnabled,
@@ -1161,6 +1166,7 @@ impl Md3eUi {
             "lyrics-ui" => S::LyricsUi,
             "lyrics-highlight" => S::LyricsWordsAll,
             "lyrics-check" => S::LyricsCheck,
+            "lyrics-lead" => S::LyricsLead,
             _ => S::CoverClickPause,
         });
     }
@@ -1377,6 +1383,54 @@ mod tests {
             assert_eq!(ui.route(), &Route::Settings);
             assert!(ui.pages.focus_setting.is_none());
         }
+    }
+
+    /// «Настройки текста…» lands on the group of the lyrics settings and
+    /// tints all of it (not one row, not the groups around it), then the
+    /// tint goes.
+    #[test]
+    fn lyrics_settings_link_tints_its_whole_group_then_lets_go() {
+        let ctx = context();
+        let mut ui = Md3eUi::new();
+        let mut state = ViewState::default();
+        frame(&ctx, &mut ui, &mut state, 0.0, 1280.0, None);
+        ui.pages.open_setting_group(lyrics_ui::SETTINGS);
+        for t in [1.0, 1.05, 1.1, 1.2, 1.4] {
+            frame(&ctx, &mut ui, &mut state, t, 1280.0, None);
+        }
+        let tint = Theme::get(&ctx).scheme.primary;
+        let tinted = |output: &egui::FullOutput| -> Vec<Rect> {
+            output.shapes.iter().filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(r) if r.fill.a() > 0 && r.fill.r().abs_diff((tint.r() as f32 * r.fill.a() as f32 / 255.0) as u8) <= 2
+                    && r.fill.g().abs_diff((tint.g() as f32 * r.fill.a() as f32 / 255.0) as u8) <= 2
+                    && r.rect.height() > 120.0 => Some(r.rect),
+                _ => None,
+            }).collect()
+        };
+        let text_at = |output: &egui::FullOutput, label: &str| output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos),
+            _ => None,
+        });
+        let output = frame(&ctx, &mut ui, &mut state, 1.6, 1280.0, None);
+        assert_eq!(ui.route(), &Route::Settings);
+        let rects = tinted(&output);
+        assert_eq!(rects.len(), 1, "one tinted group: {rects:?}");
+        for label in ["Текст песен", "Сохранять найденный текст в файл трека", "Где делать подсветку"] {
+            let at = text_at(&output, label).unwrap_or_else(|| panic!("{label} not drawn"));
+            assert!(rects[0].contains(at + vec2(4.0, 4.0)), "{label} outside the tint");
+            assert!((0.0..900.0).contains(&at.y), "{label} not scrolled into view");
+        }
+        for label in ["Где искать текст", "Звук"] {
+            if let Some(at) = text_at(&output, label) {
+                assert!(!rects[0].contains(at + vec2(4.0, 4.0)), "{label} inside the tint");
+            }
+        }
+        frame(&ctx, &mut ui, &mut state, 4.0, 1280.0, None);
+        let output = frame(&ctx, &mut ui, &mut state, 4.1, 1280.0, None);
+        assert!(tinted(&output).is_empty());
+        // A row link still glows its row only.
+        ui.pages.open_setting(pages::SettingId::LyricsUi);
+        assert!(!ui.pages.focus_group);
     }
 
     #[test]

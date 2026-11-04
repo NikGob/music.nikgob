@@ -48,6 +48,9 @@
 //!   to check; `fake:craft:failed` — it could not be made.
 //! - `fake:align-models` — Settings → «Текст песен»: models ready, one
 //!   downloading, one missing; the background pass halfway; on the GPU.
+//! - `fake:lyrics-gap` — LRC lines with an empty stamp making a wait
+//!   (8.26–16.57 s) before a line that wraps, and a hyphenated
+//!   «do-dodge»; `fake:lyrics-gap:words` — the same with word timing.
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -81,6 +84,8 @@ pub struct Fakes {
     craft: Option<String>,
     align_models: bool,
     chip: Option<String>,
+    /// `fake:lyrics-gap`: with word timing.
+    lyrics_gap: Option<bool>,
 }
 
 impl Fakes {
@@ -115,6 +120,8 @@ impl Fakes {
             "keep" => self.keep = true,
             "lyrics-texts" => self.lyrics_texts = true,
             "align-models" => self.align_models = true,
+            "lyrics-gap" => self.lyrics_gap = Some(false),
+            "lyrics-gap:words" => self.lyrics_gap = Some(true),
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
             _ => return false,
@@ -146,6 +153,7 @@ impl Fakes {
             || self.craft.is_some()
             || self.align_models
             || self.chip.is_some()
+            || self.lyrics_gap.is_some()
     }
 
     /// `state` with the fakes laid over it.
@@ -311,6 +319,9 @@ impl Fakes {
         if let Some(name) = self.chip.as_deref() {
             chip_state(&mut s, name);
         }
+        if let Some(words) = self.lyrics_gap {
+            s.lyrics = gap_lyrics(state.player.current.as_ref().map(|t| t.id), words);
+        }
         if self.link
             && let Some(p) = s.playlist.as_mut()
         {
@@ -370,6 +381,48 @@ fn word_lyrics(track: Option<nikgob_view::TrackId>) -> nikgob_view::LyricsView {
         source: Some(LyricsSource::LyricsPlus),
         picked: false,
         sources: Vec::new(),
+        ..Default::default()
+    }
+}
+
+/// LRC lines with an empty stamp before a line that wraps (`fake:lyrics-gap`),
+/// with words timed by their letters inside each line when `words`.
+fn gap_lyrics(track: Option<nikgob_core::model::TrackId>, words: bool) -> nikgob_view::LyricsView {
+    use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource};
+    use std::time::Duration;
+    let stamps = [
+        (5.88, "KOMA"),
+        (8.26, ""),
+        (16.57, "Дырявые кеды — моё отражение в луже у самого дома"),
+        (21.4, "Я делаю do-dodge back — уклоняюсь от атаки"),
+        (25.9, "Кто-то смотрит сверху, но мне всё равно"),
+        (30.2, "Дырявые кеды — моё отражение"),
+        (34.0, ""),
+    ];
+    let lines = stamps
+        .iter()
+        .enumerate()
+        .map(|(i, (start, text))| {
+            let mut l = LyricLine::new(Duration::from_secs_f32(*start), *text);
+            if words && !text.is_empty() {
+                let end = stamps.get(i + 1).map_or(start + 4.0, |n| n.0 - 0.4);
+                let letters = |w: &str| w.chars().filter(|c| !c.is_whitespace()).count() as f32;
+                let total = letters(text).max(1.0);
+                let mut at = 0.0;
+                for w in text.split_inclusive(' ') {
+                    let (a, b) = (start + (end - start) * at / total, start + (end - start) * (at + letters(w)) / total);
+                    at += letters(w);
+                    l.words.push(LyricWord { start: Duration::from_secs_f32(a), end: Duration::from_secs_f32(b), text: w.to_owned() });
+                }
+                l.end = Some(Duration::from_secs_f32(end));
+            }
+            l
+        })
+        .collect();
+    nikgob_view::LyricsView {
+        track,
+        lines,
+        source: Some(if words { LyricsSource::LyricsPlus } else { LyricsSource::Lrclib }),
         ..Default::default()
     }
 }

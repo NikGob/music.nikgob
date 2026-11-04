@@ -295,6 +295,9 @@ pub struct PlayerView {
     pub current: Option<TrackRow>,
     pub position: Duration,
     pub at: Instant,
+    /// How fast the position moves from `at` while playing: 1, or a little
+    /// off while the runtime brings it to what is heard (never below 0).
+    pub rate: f32,
     pub duration: Option<Duration>,
     /// 0..1 perceptual.
     pub volume: f32,
@@ -320,6 +323,7 @@ impl Default for PlayerView {
             current: None,
             position: Duration::ZERO,
             at: Instant::now(),
+            rate: 1.0,
             duration: None,
             volume: 0.8,
             muted: false,
@@ -362,7 +366,7 @@ impl PlayerView {
     /// Position now, extrapolated from the last update.
     pub fn position_now(&self) -> Duration {
         let p = if self.status == Status::Playing {
-            self.position + self.at.elapsed()
+            self.position + self.at.elapsed().mul_f32(self.rate.max(0.0))
         } else {
             self.position
         };
@@ -1124,9 +1128,10 @@ pub struct Prefs {
     pub np_slot: NpSlot,
     /// The dotted ring around the Now Playing cover turns while playing.
     pub spin_ring: bool,
-    /// How synced lyrics animate: 0 karaoke, 1 focus, 2 wave (letter by letter).
+    /// How synced lyrics animate: 0 karaoke, 1 focus, 2 wave (letter by letter),
+    /// 3 words (each written word lights up whole).
     pub lyrics_style: u8,
-    /// Under the wave, a text with line times only (no word times) uses
+    /// Under the wave and words, a text with line times only (no word times) uses
     /// Focus instead of guessing the words' pace.
     pub wave_syllables_only: bool,
     /// Wave letters jump up as they are sung (off: they only light up).
@@ -1135,6 +1140,9 @@ pub struct Prefs {
     pub lyrics_dim: f32,
     /// Text size multiplier for synced lyrics (0.8..1.4).
     pub lyrics_scale: f32,
+    /// Seconds the lyrics highlight runs ahead of the voice (negative:
+    /// behind it), in every animation; seeking and stored times keep theirs.
+    pub lyrics_lead: f32,
     /// Lines further from the current one follow the scroll more lazily.
     pub lyrics_cascade: bool,
     /// The sung part glows a little.
@@ -2352,6 +2360,7 @@ impl Default for Prefs {
             lyrics_wave_jump: 1.0,
             lyrics_dim: 0.5,
             lyrics_scale: 1.0,
+            lyrics_lead: 0.1,
             lyrics_cascade: true,
             lyrics_glow: false,
             lyrics_return_s: 4.0,

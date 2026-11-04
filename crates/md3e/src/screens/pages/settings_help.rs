@@ -66,6 +66,7 @@ pub enum SettingId {
     WaveJump,
     LyricsDim,
     LyricsScale,
+    LyricsLead,
     LyricsCascade,
     LyricsGlow,
     LyricsGap,
@@ -321,7 +322,7 @@ impl SettingId {
             Design | Theme | Contrast | Scheme | ProgressWave | NpVolume | NpVolumeHold | CoverShape | ShapeRange | ShapePick
             | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
             | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
-            | LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsCascade | LyricsGlow
+            | LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow
             | LyricsGap | LyricsGapWaves | LyricsCountdown | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
             | ReducedMotion | FpsLimit => {
                 TAB_APPEARANCE
@@ -375,10 +376,11 @@ impl SettingId {
             BgColors => "В какие цвета окрашены фигуры на фоне.",
             BgHue => "Цвет фигур для варианта «Свой». Яркость подстраивается под тему, чтобы фон не спорил с интерфейсом.",
             LyricsStyle => "Как выделяется строка, которую сейчас поют.",
-            WaveFallback => "У некоторых текстов известно только, когда начинается строка, а время слов нет. Что делать с такими текстами при анимации «Волна».",
+            WaveFallback => "У некоторых текстов известно только, когда начинается строка, а время слов нет. Что делать с такими текстами при анимациях «Волна» и «По словам».",
             WaveJump => "Как высоко подпрыгивают буквы в анимации «Волна». 0 — буквы только загораются.",
             LyricsDim => "Насколько бледнее остальные строки по сравнению с той, что поют сейчас.",
             LyricsScale => "Размер букв в тексте песни.",
+            LyricsLead => "На сколько подсветка опережает голос. Глаз читает чуть раньше, чем слышит, поэтому подсветка, которая загорается немного заранее, кажется точной. Если она торопится — уменьшите, если отстаёт — увеличьте. Перемотка и время в тексте не меняются.",
             LyricsCascade => "При прокрутке дальние строки догоняют с небольшой задержкой — текст движется мягко, волной.",
             LyricsGlow => "Уже спетая часть строки слегка светится.",
             LyricsGap => "Когда в песне долго нет слов, между строками крутится кружок ожидания. Здесь выбирается его вид.",
@@ -582,10 +584,11 @@ impl SettingId {
                 c!("Караоке", "Строка закрашивается слева направо, слог за слогом, как в караоке."),
                 c!("Фокус", "Строка, которую поют, становится яркой целиком."),
                 c!("Волна", "Буквы по очереди загораются и подпрыгивают."),
+                c!("По словам", "Слова загораются по очереди, каждое целиком, когда его начинают петь."),
             ],
             Self::WaveFallback => &[
-                c!("Волна — прыгающие буквы", "Буквы всё равно прыгают, время слов угадывается по строке."),
-                c!("Спокойный Фокус", "Буквы не прыгают, строка просто становится яркой."),
+                c!("Угадывать слова", "Время слов угадывается по строке: слова всё равно загораются по очереди, а в «Волне» прыгают буквы."),
+                c!("Спокойный Фокус", "Слова не идут по очереди, строка просто становится яркой целиком."),
             ],
             Self::LyricsGap => &[
                 c!("Линия", "Тонкий ровный кружок."),
@@ -692,7 +695,7 @@ impl SettingId {
             },
             Self::BgColors => usize::from(p.bg_shapes_colors).min(3),
             Self::BgHue => usize::from(p.bg_shapes_hue).min(7),
-            Self::LyricsStyle => usize::from(p.lyrics_style).min(2),
+            Self::LyricsStyle => usize::from(p.lyrics_style).min(3),
             Self::WaveFallback => usize::from(p.wave_syllables_only),
             Self::LyricsGap => usize::from(p.lyrics_gap_style).min(3),
             Self::NpMotion => usize::from(p.np_motion).min(2),
@@ -752,7 +755,7 @@ impl SettingId {
                 p.bg_shapes_colors = 3;
                 p.bg_shapes_hue = i.min(7) as u8;
             }
-            Self::LyricsStyle => p.lyrics_style = i.min(2) as u8,
+            Self::LyricsStyle => p.lyrics_style = i.min(3) as u8,
             Self::WaveFallback => p.wave_syllables_only = i == 1,
             Self::LyricsGap => p.lyrics_gap_style = i.min(3) as u8,
             Self::NpMotion => p.np_motion = i.min(2) as u8,
@@ -814,6 +817,10 @@ pub fn sync_index(m: v::PlaylistSyncMode) -> usize {
 
 /// How long the glow on a linked row lasts.
 pub const FOCUS_S: f64 = 1.5;
+/// How long the tint on a linked group lasts.
+pub const GROUP_S: f64 = 2.4;
+/// The opacity of the primary layer tinting a linked group at its fullest.
+pub const GROUP_TINT: f32 = 0.12;
 /// Frames the scroll to a linked row is repeated, while the page settles.
 const SCROLL_FRAMES: u8 = 3;
 
@@ -824,6 +831,22 @@ struct Focus {
     start: f64,
     scrolls: u8,
     rect: Option<Rect>,
+    /// The whole group of the row is shown (tinted), not the row.
+    group: bool,
+}
+
+/// The group being drawn while a link asks for a whole group: its tint is
+/// reserved behind its title and painted once its end is known.
+#[derive(Clone, Copy, Debug)]
+struct Span {
+    pass: u64,
+    layer: egui::LayerId,
+    bg: egui::layers::ShapeIdx,
+    clip: Rect,
+    x: egui::Rangef,
+    top: f32,
+    /// It holds the linked row.
+    linked: bool,
 }
 
 /// What a row reports about its insides while it is drawn.
@@ -915,6 +938,10 @@ fn focus_key() -> Id {
     Id::new("settings-focus")
 }
 
+fn span_key() -> Id {
+    Id::new("settings-focus-span")
+}
+
 fn parts_key() -> Id {
     Id::new("settings-help-parts")
 }
@@ -939,10 +966,85 @@ fn set_pinned(ctx: &egui::Context, p: Option<Pinned>) {
     ctx.data_mut(|d| d.insert_temp(pinned_key(), p));
 }
 
-/// Starts the scroll and glow for `id` (the page then switches its tab).
-pub fn begin_focus(ctx: &egui::Context, id: SettingId) {
+/// Starts the scroll and glow for `id` (the page then switches its tab);
+/// with `group`, for the whole group that holds it.
+pub fn begin_focus(ctx: &egui::Context, id: SettingId, group: bool) {
     let start = anim::now(ctx);
-    ctx.data_mut(|d| d.insert_temp(focus_key(), Focus { id, start, scrolls: SCROLL_FRAMES, rect: None }));
+    ctx.data_mut(|d| d.insert_temp(focus_key(), Focus { id, start, scrolls: SCROLL_FRAMES, rect: None, group }));
+}
+
+/// The tint (0..1) of a linked group `t` seconds after the link: it comes
+/// up on the M3 slow-effects spring once the page has landed, holds while
+/// the eye finds it, and eases back out by [`GROUP_S`]. Reduced motion
+/// shows it at once and only fades it out.
+pub fn group_tint_at(t: f32, reduced: bool) -> f32 {
+    const DELAY: f32 = 0.15;
+    const HOLD: f32 = 1.2;
+    let total = GROUP_S as f32;
+    if !(0.0..total).contains(&t) {
+        return 0.0;
+    }
+    let rise = if reduced {
+        1.0
+    } else {
+        let t = (t - DELAY).max(0.0);
+        if t <= 0.0 { 0.0 } else { 1.0 - nikgob_motion::tokens::SLOW_EFFECTS.solve(1.0, 0.0, t).0 }
+    };
+    let out = ((t - HOLD) / (total - HOLD)).clamp(0.0, 1.0);
+    rise.clamp(0.0, 1.0) * (1.0 - out * out * (3.0 - 2.0 * out))
+}
+
+/// Called as each settings group starts (before its title): ends the
+/// group before it and, while a link asks for a whole group, reserves the
+/// new group's tint behind its title.
+pub fn group_start(ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
+    end_group(ui);
+    if ctx.data(|d| d.get_temp::<Focus>(focus_key())).is_some_and(|f| f.group) {
+        let span = Span {
+            pass: ctx.cumulative_pass_nr(),
+            layer: ui.layer_id(),
+            bg: ui.painter().add(Shape::Noop),
+            clip: ui.clip_rect(),
+            x: ui.max_rect().x_range(),
+            // The title comes after a 24 px space.
+            top: ui.cursor().top() + 12.0,
+            linked: false,
+        };
+        ctx.data_mut(|d| d.insert_temp(span_key(), span));
+    }
+}
+
+/// Ends the group being drawn here: the linked one gets its tint and is
+/// where the page scrolls.
+fn end_group(ui: &Ui) {
+    let ctx = ui.ctx();
+    let Some(span) = ctx.data_mut(|d| {
+        let span = d.get_temp::<Span>(span_key());
+        d.remove::<Span>(span_key());
+        span
+    }) else {
+        return;
+    };
+    if span.pass != ctx.cumulative_pass_nr() || !span.linked {
+        return;
+    }
+    let Some(mut f) = ctx.data(|d| d.get_temp::<Focus>(focus_key())) else { return };
+    let rect = Rect::from_x_y_ranges(span.x, span.top..=ui.cursor().top() + 8.0).expand2(vec2(12.0, 0.0));
+    let theme = Theme::get(ctx);
+    let a = group_tint_at((anim::now(ctx) - f.start) as f32, theme.reduced_motion);
+    if a > 0.0 {
+        // A primary tonal layer over the page, as a selected surface has:
+        // not secondary_container, which is the sliders' own track colour
+        // and would hide it.
+        let painter = Painter::new(ctx.clone(), span.layer, Rect::from_x_y_ranges(rect.x_range(), span.clip.y_range()));
+        painter.set(span.bg, Shape::rect_filled(rect, shape::LARGE, theme.scheme.primary.gamma_multiply(GROUP_TINT * a)));
+    }
+    if (anim::now(ctx) - f.start) < GROUP_S {
+        ctx.request_repaint();
+    }
+    f.rect = Some(rect);
+    ctx.data_mut(|d| d.insert_temp(focus_key(), f));
 }
 
 /// The glow (0..1) `t` seconds after a link opened the row: two soft
@@ -967,7 +1069,17 @@ pub fn item<R>(ui: &mut Ui, id: SettingId, label: &str, add: impl FnOnce(&mut Ui
     let bg = ui.painter().add(Shape::Noop);
     let inner = ui.scope(add);
     let rect = inner.response.rect;
-    if let Some(mut f) = ctx.data(|d| d.get_temp::<Focus>(focus_key()))
+    if let Some(f) = ctx.data(|d| d.get_temp::<Focus>(focus_key()))
+        && f.id == id
+        && f.group
+    {
+        ctx.data_mut(|d| {
+            if let Some(mut span) = d.get_temp::<Span>(span_key()) {
+                span.linked = true;
+                d.insert_temp(span_key(), span);
+            }
+        });
+    } else if let Some(mut f) = ctx.data(|d| d.get_temp::<Focus>(focus_key()))
         && f.id == id
     {
         let t = (anim::now(&ctx) - f.start) as f32;
@@ -1087,16 +1199,23 @@ fn help_button_at(ui: &Ui, id: SettingId, rect: Rect) {
 /// lands in `prefs`.
 pub fn finish(ui: &mut Ui, prefs: &mut Prefs) {
     let ctx = ui.ctx().clone();
+    end_group(ui);
     if let Some(mut f) = ctx.data(|d| d.get_temp::<Focus>(focus_key())) {
         if let Some(rect) = f.rect.take()
             && f.scrolls > 0
         {
-            // After the controls, so their nested scroll areas cannot take it.
-            ui.scroll_to_rect(rect.expand(24.0), Some(Align::Center));
+            // After the controls, so their nested scroll areas cannot take
+            // it. A group taller than the view shows from its title.
+            if f.group && rect.height() > ui.clip_rect().height() * 0.8 {
+                ui.scroll_to_rect(Rect::from_min_size(rect.min - vec2(0.0, 16.0), vec2(rect.width(), 1.0)), Some(Align::Min));
+            } else {
+                ui.scroll_to_rect(rect.expand(24.0), Some(Align::Center));
+            }
             f.scrolls -= 1;
             ctx.request_repaint();
         }
-        if f.scrolls == 0 && anim::now(&ctx) - f.start > FOCUS_S {
+        let lasts = if f.group { GROUP_S } else { FOCUS_S };
+        if f.scrolls == 0 && anim::now(&ctx) - f.start > lasts {
             ctx.data_mut(|d| d.remove::<Focus>(focus_key()));
         } else {
             ctx.data_mut(|d| d.insert_temp(focus_key(), f));
@@ -1833,6 +1952,26 @@ mod tests {
         assert!(glow_at(0.375) < glow_at(0.75));
         assert!(glow_at(1.4) < 0.2);
         assert_eq!(glow_at(FOCUS_S as f32), 0.0);
+    }
+
+    #[test]
+    fn group_tint_comes_up_holds_and_eases_out() {
+        assert_eq!(group_tint_at(-0.1, false), 0.0);
+        assert_eq!(group_tint_at(0.1, false), 0.0, "waits for the page to land");
+        assert!(group_tint_at(0.3, false) > 0.5);
+        assert!(group_tint_at(1.0, false) > 0.99);
+        assert!(group_tint_at(2.2, false) < 0.2);
+        assert_eq!(group_tint_at(GROUP_S as f32, false), 0.0);
+        let mut was = 1.0;
+        for ms in 1200..2400 {
+            let v = group_tint_at(ms as f32 / 1000.0, false);
+            assert!(v <= was);
+            was = v;
+        }
+        // Reduced motion: there at once, then only the fade.
+        assert_eq!(group_tint_at(0.0, true), 1.0);
+        assert_eq!(group_tint_at(1.0, true), 1.0);
+        assert!(group_tint_at(2.2, true) < 0.2);
     }
 
     #[test]

@@ -218,7 +218,8 @@ pub enum Event {
         /// Length of `to`, if known.
         duration: Option<Duration>,
     },
-    /// Playback position, at most about four times a second while playing.
+    /// Playback position, about four times a second while an item is loaded
+    /// and not paused (also while it stalls: then it stands still).
     Position {
         /// The item.
         id: u64,
