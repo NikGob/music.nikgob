@@ -91,6 +91,8 @@ pub enum SettingId {
     DblClickShape,
     TapWait,
     Keys,
+    /// «Уведомления на экране»: how long a snackbar stays.
+    ToastTime,
     SaveLyrics,
     LyricsReturn,
     LyricsCheck,
@@ -312,6 +314,8 @@ macro_rules! c {
 }
 
 const OPUS: [u32; 4] = [128, 160, 192, 256];
+/// «Уведомления на экране», seconds; 0 = until closed.
+const TOAST_TIMES: [u8; 4] = [4, 6, 10, 0];
 /// «Не повторять сыгранное», hours.
 const NO_REPEAT: [u8; 5] = [1, 3, 6, 12, 24];
 const SHARES: [v::RadioNewShare; 3] = [v::RadioNewShare::None, v::RadioNewShare::Some, v::RadioNewShare::More];
@@ -407,6 +411,7 @@ impl SettingId {
             DblClickShape => "Двойной клик по экрану трека меняет фигуру обложки.",
             TapWait => "Чтобы отличить одиночный клик (пауза) от двойного (другая фигура), плеер чуть ждёт второго клика. Меньше — пауза срабатывает быстрее, но двойной клик нужно делать быстрее. «Сразу» — пауза мгновенная, а второй клик снимает её обратно и меняет фигуру.",
             Keys => "Клавиши, которые работают на экране трека.",
+            ToastTime => "Сколько держится уведомление внизу окна, пока не уйдёт само. Пока на нём курсор, время стоит.",
             SaveLyrics => "Найденный в интернете текст песни сохраняется прямо в файл трека и потом показывается без интернета.",
             LyricsReturn => "Если ты сам прокрутил текст, через столько секунд он вернётся к строке, которую поют.",
             LyricsCheck => "Плеер слушает голос играющей песни и проверяет, её ли это текст. Текст другой песни или другой версии уступает подходящему, а строки, которые спешат или опаздывают, встают по голосу.",
@@ -610,6 +615,12 @@ impl SettingId {
                 c!("Живо", "Быстро и с лёгким пружинящим толчком в конце."),
                 c!("Быстро", "Почти мгновенно, без толчка."),
             ],
+            Self::ToastTime => &[
+                c!("4 с", "Коротко: уведомление уходит быстро."),
+                c!("6 с", "Чуть дольше, чтобы успеть прочитать."),
+                c!("10 с", "Долго: есть время дочитать и нажать «Отменить»."),
+                c!("Пока не закрою", "Уведомление висит, пока не закроешь его крестиком."),
+            ],
             Self::DblClickShape => &[
                 c!("Выкл", "Двойной клик ничего не меняет."),
                 c!("Только в режиме «Случайная»", "Новая случайная фигура, только если выбрана «Случайная»."),
@@ -721,6 +732,7 @@ impl SettingId {
             Self::LyricsGap => usize::from(p.lyrics_gap_style).min(3),
             Self::NpMotion => usize::from(p.np_motion).min(2),
             Self::DblClickShape => usize::from(p.dbl_click_shape).min(2),
+            Self::ToastTime => TOAST_TIMES.iter().position(|s| *s == p.toast_s).unwrap_or(0),
             Self::OpusBitrate => OPUS.iter().position(|b| *b == p.opus_bitrate).unwrap_or(1),
             Self::LikeDownload if !p.like_downloads => 2,
             Self::LikeDownload => usize::from(p.like_download_scope == v::WishlistScope::Album),
@@ -784,6 +796,7 @@ impl SettingId {
             Self::LyricsGap => p.lyrics_gap_style = i.min(3) as u8,
             Self::NpMotion => p.np_motion = i.min(2) as u8,
             Self::DblClickShape => p.dbl_click_shape = i.min(2) as u8,
+            Self::ToastTime => p.toast_s = TOAST_TIMES[i.min(TOAST_TIMES.len() - 1)],
             Self::OpusBitrate => p.opus_bitrate = OPUS[i.min(OPUS.len() - 1)],
             Self::LikeDownload => {
                 p.like_downloads = i < 2;
@@ -2052,7 +2065,7 @@ mod tests {
             S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::AlbumLike, S::SingleLike, S::LikedAlbumsPlace, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
-            S::RadioNoRepeat, S::LyricsGpu, S::LyricsUi,
+            S::RadioNoRepeat, S::LyricsGpu, S::LyricsUi, S::ToastTime,
         ] {
 
             assert!(id.choices().len() >= 2, "{id:?}");

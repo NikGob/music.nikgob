@@ -681,6 +681,9 @@ fn download_without_a_like_waits_for_torrents_and_leaves_the_likes_alone() {
     r.rt.send(Command::Like(LikeTarget::Track(track), false));
     wait_for(&r.rt, "the unlike", |s| s.toasts.iter().any(|t| t.text == "Убрано из Любимых"));
     assert!(!lib.is_liked(track).unwrap());
+    // The like's message and its undo are gone: the snackbar says what the
+    // heart shows.
+    assert!(toast_starting(&r.rt, "В Любимых").is_none() && toast_starting(&r.rt, "Добавлено в Любимые").is_none());
     assert_eq!(wish_status(&lib, track), Some(WishlistStatus::New), "«Скачать» stays");
 }
 

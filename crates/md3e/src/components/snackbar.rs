@@ -7,9 +7,14 @@
 //! thin line running down with the time left.
 //!
 //! Each snackbar springs up from below with a little bounce (default
-//! spatial) while its corners settle, the stack glides to make room, and an
-//! ending one shrinks and fades in place. Timers are time-based and hold
-//! while the pointer is over any snackbar of the stack.
+//! spatial) while its corners settle, the stack glides to make room (and to
+//! a new place when the area changes), and an ending one shrinks and fades
+//! in place. Timers are time-based and hold while the pointer is over any
+//! snackbar of the stack; an endless duration keeps them up until closed.
+//!
+//! Snackbars live on the top layer ([`Order::Debug`], egui's topmost), so
+//! nothing of a page or an overlay (Now Playing's cover, ring and shapes
+//! included) is ever drawn over them, however the other layers reorder.
 //!
 //! [`SnackbarHost::replacing`] shows one at a time as M3 asks: a new
 //! message replaces the one up (which leaves with its exit, and the new one
@@ -36,6 +41,8 @@ use crate::{
 pub const AUTO_DISMISS: f64 = 4.0;
 /// Snackbars on screen at once; more wait their turn.
 pub const MAX_VISIBLE: usize = 3;
+/// The layer snackbars are drawn on: above everything else.
+const LAYER: Order = Order::Debug;
 /// Seconds an ending snackbar is still drawn (its exit animation).
 const EXIT: f64 = 0.35;
 /// Space between stacked snackbars.
@@ -139,6 +146,7 @@ struct Current {
 
 impl Current {
     fn of(item: &SnackbarItem<'_>, now: f64) -> Self {
+        let longer = if item.longer.is_finite() { item.longer } else { 0.0 };
         Self {
             id: item.id,
             text: item.text.to_owned(),
@@ -146,14 +154,14 @@ impl Current {
             kind: item.kind,
             again: item.again,
             // The countdown of a longer one starts later.
-            shown_at: now + item.longer,
+            shown_at: now + longer,
             leaving_at: None,
         }
     }
 
-    /// The share of its time still left, 1 -> 0.
+    /// The share of its time still left, 1 -> 0 (0 with no time limit).
     fn left(&self, now: f64, duration: f64) -> f32 {
-        if self.leaving_at.is_some() || duration <= 0.0 {
+        if self.leaving_at.is_some() || duration <= 0.0 || !duration.is_finite() {
             return 0.0;
         }
         (1.0 - (now - self.shown_at) / duration).clamp(0.0, 1.0) as f32
@@ -211,7 +219,7 @@ impl Queue {
         }
 
         if replace {
-            self.replace(items, now, &mut dismissed);
+            self.replace(items, now, duration, &mut dismissed);
         } else {
             for item in items {
                 let active = self.shown.iter().filter(|c| c.leaving_at.is_none()).count();
@@ -246,8 +254,9 @@ impl Queue {
     /// One at a time: the one up leaves for a newer one (an undo stays),
     /// and the next comes up once the one before is out: the first waiting
     /// one with an action, else the newest, the plain ones before it
-    /// replaced unseen.
-    fn replace(&mut self, items: &[SnackbarItem<'_>], now: f64, dismissed: &mut Vec<u64>) {
+    /// replaced unseen. With no time limit an undo gives way too once it
+    /// has been up the default time, or nothing newer would ever show.
+    fn replace(&mut self, items: &[SnackbarItem<'_>], now: f64, duration: f64, dismissed: &mut Vec<u64>) {
         let waiting: Vec<&SnackbarItem<'_>> = items
             .iter()
             .filter(|i| !self.done.contains(&i.id) && !self.shown.iter().any(|c| c.id == i.id))
@@ -256,7 +265,8 @@ impl Queue {
             return;
         }
         if let Some(cur) = self.shown.iter_mut().find(|c| c.leaving_at.is_none()) {
-            if cur.action.is_none() {
+            let seen = !duration.is_finite() && now - cur.shown_at >= AUTO_DISMISS;
+            if cur.action.is_none() || seen {
                 cur.leaving_at = Some(now);
                 self.done.push(cur.id);
                 dismissed.push(cur.id);
@@ -322,7 +332,8 @@ impl SnackbarHost {
         self
     }
 
-    /// Seconds before a snackbar dismisses itself.
+    /// Seconds before a snackbar dismisses itself; `f64::INFINITY` keeps
+    /// it up until it is closed (no time-left line then).
     pub fn duration(mut self, seconds: f64) -> Self {
         self.duration = seconds;
         self
@@ -382,7 +393,7 @@ impl SnackbarHost {
                 motion.fast_effects,
             );
             let k = pres.spatial.clamp(0.0, 1.2);
-            let painter = ctx.layer_painter(egui::LayerId::new(Order::Foreground, self.id.with("measure")));
+            let painter = ctx.layer_painter(egui::LayerId::new(LAYER, self.id.with("measure")));
             let lay = layout(&painter, &cur.text, cur.action.as_deref(), self.show_close, max_w);
             // The slot collapses as a snackbar leaves, so the rest glide down.
             let slot = (lay.size.y + GAP) * if leaving { k.min(1.0) } else { 1.0 };
@@ -401,12 +412,19 @@ impl SnackbarHost {
             // Rises from below on entry; shrinks in place on exit.
             let rise = if leaving { 0.0 } else { (1.0 - k) * (lay.size.y * 0.5 + 24.0) };
             let scale = 0.86 + 0.14 * k.min(1.0);
-            let bottom_center = pos2(area.center().x, y + rise);
+            // A new area (Now Playing opening, say) is glided to as well.
+            let x = anim::f32(
+                ctx,
+                self.id.with(("x", cur.id)),
+                area.center().x,
+                motion.default_spatial.without_bounce(),
+            );
+            let bottom_center = pos2(x, y + rise);
             let alpha = pres.alpha();
             let area_id = self.id.with(("area", cur.id));
             let resp = Area::new(area_id)
                 .fade_in(false)
-                .order(Order::Foreground)
+                .order(LAYER)
                 .fixed_pos(bottom_center)
                 .pivot(Align2::CENTER_BOTTOM)
                 .constrain(false)
@@ -492,7 +510,8 @@ impl SnackbarHost {
                         r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &label));
                     }
 
-                    // Time left: a thin line along the bottom, inside the corners.
+                    // Time left: a thin line along the bottom, inside the
+                    // corners (none when it stays until closed).
                     let left = cur.left(now, self.duration);
                     if left > 0.0 && cur.kind != SnackbarKind::Working {
                         let track = Rect::from_min_max(
@@ -672,6 +691,26 @@ mod tests {
         assert!((q.shown[0].left(5.5, AUTO_DISMISS) - 0.125).abs() < 1e-3);
         assert_eq!(q.step(&list, 6.0, 0.0, AUTO_DISMISS, 3), vec![7]);
         assert_eq!(q.shown[0].left(6.0, AUTO_DISMISS), 0.0);
+    }
+
+    #[test]
+    fn an_endless_one_stays_until_closed_with_no_time_line() {
+        let mut q = Queue::default();
+        let list = [SnackbarItem::new(1, "text").longer(f64::INFINITY)];
+        q.step(&list, 0.0, 0.0, f64::INFINITY, 3);
+        assert!(q.step(&list, 3600.0, 0.0, f64::INFINITY, 3).is_empty());
+        assert_eq!(ids(&q), vec![1]);
+        assert_eq!(q.shown[0].left(3600.0, f64::INFINITY), 0.0);
+        assert_eq!(q.dismiss(1, 3601.0), Some(1));
+        // One at a time: an undo up its default time gives way to a newer one.
+        let mut q = Queue::default();
+        let undo = [SnackbarItem::new(1, "Удалено").action("Отменить")];
+        let both = [undo[0], SnackbarItem::new(2, "b")];
+        q.step_as(&undo, 0.0, 0.0, f64::INFINITY, 1, true);
+        assert!(q.step_as(&both, 1.0, 0.0, f64::INFINITY, 1, true).is_empty());
+        assert_eq!(q.step_as(&both, AUTO_DISMISS, 0.0, f64::INFINITY, 1, true), vec![1]);
+        q.step_as(&both[1..], AUTO_DISMISS + EXIT + 0.01, 0.0, f64::INFINITY, 1, true);
+        assert_eq!(ids(&q), vec![2]);
     }
 
     #[test]
