@@ -165,7 +165,8 @@ impl Resolver {
             disc_no: r.disc_no,
             track_no: r.track_no,
             duration: r.duration_ms.map(|ms| Duration::from_millis(u64::from(ms))),
-            quality: r.codec.as_ref().map(codec_label),
+            // Honest about a "FLAC" made from an MP3 («FLAC из MP3 ~320»).
+            quality: r.codec.as_ref().map(|c| nikgob_core::quality::row_label(c, r.check.as_ref())),
             source: r.active_kind,
             has_local: r.has_local,
             liked: r.liked,
@@ -394,11 +395,13 @@ impl Resolver {
         if row.track_no > 0 {
             tags.push(("Номер".into(), format!("{}-{}", row.disc_no, row.track_no)));
         }
+        // What the spectrum check found about a file (a stream has none).
+        let check = src
+            .filter(|s| s.kind == SourceKind::LocalFile)
+            .and_then(|s| self.lib.quality_check(s.id).ok().flatten());
         let quality = src.map(|s| {
-            let mut q = codec_label(&s.codec);
-            if let Some(b) = s.bitrate {
-                q.push_str(&format!(" {b}"));
-            }
+            // «FLAC из MP3 ~320», «MP3 320 из поддельного FLAC», «Opus 160».
+            let mut q = nikgob_core::quality::label(&s.codec, s.bitrate, check.as_ref().map(|c| c.summary()).as_ref());
             if let (Some(sr), Some(bd)) = (s.sample_rate, s.bit_depth) {
                 // 24/44.1, 24/48.
                 let khz = if sr % 1000 == 0 {
@@ -409,6 +412,14 @@ impl Resolver {
                 q.push_str(&format!(" · {bd}/{khz}"));
             }
             q
+        });
+        let sound = src.map(|s| {
+            let path = (s.kind == SourceKind::LocalFile).then(|| self.path(&s.locator));
+            let channels = path
+                .as_deref()
+                .and_then(|p| nikgob_import::tags::probe_info(p).ok())
+                .and_then(|i| i.channels);
+            sound_details(s, path.as_deref(), channels, row.duration_ms, check.as_ref())
         });
         v::TrackInfo {
             track: Some(row.id),
@@ -427,6 +438,7 @@ impl Resolver {
                 .filter(|s| s.kind == SourceKind::LocalFile)
                 .map(|s| self.path(&s.locator)),
             tags,
+            sound,
         }
     }
 
@@ -493,15 +505,107 @@ impl Resolver {
 }
 
 pub fn codec_label(c: &Codec) -> String {
-    match c {
-        Codec::Flac => "FLAC".into(),
-        Codec::Opus => "Opus".into(),
-        Codec::Mp3 => "MP3".into(),
-        Codec::Aac => "AAC".into(),
-        Codec::Vorbis => "Vorbis".into(),
-        Codec::Alac => "ALAC".into(),
-        Codec::Wav => "WAV".into(),
-        Codec::Other(s) => s.to_uppercase(),
+    nikgob_core::quality::codec_name(c)
+}
+
+/// "44,1 кГц".
+fn fmt_rate(hz: u32) -> String {
+    if hz % 1000 == 0 {
+        format!("{} кГц", hz / 1000)
+    } else {
+        format!("{:.1} кГц", f64::from(hz) / 1000.0).replace('.', ",")
+    }
+}
+
+/// "25,5 МБ".
+fn fmt_mb(bytes: u64) -> String {
+    format!("{:.1} МБ", bytes as f64 / 1_048_576.0).replace('.', ",")
+}
+
+/// The container of a file, by its extension.
+fn container_of(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    Some(
+        match ext.as_str() {
+            "flac" => "FLAC",
+            "opus" | "ogg" | "oga" => "Ogg",
+            "mp3" => "MP3",
+            "m4a" | "mp4" | "aac" => "MP4",
+            "wav" => "WAV",
+            "aif" | "aiff" => "AIFF",
+            "webm" | "mka" => "WebM",
+            other => return Some(other.to_uppercase()),
+        }
+        .to_owned(),
+    )
+}
+
+/// The «Качество» section of a track's info: the facts of `src` (a
+/// file's `path` and `channels` when it is one) and its check.
+pub(crate) fn sound_details(
+    src: &Source,
+    path: Option<&Path>,
+    channels: Option<u8>,
+    duration_ms: Option<u32>,
+    check: Option<&nikgob_core::quality::QualityCheck>,
+) -> v::SoundDetails {
+    use nikgob_core::quality::{CheckSummary, cutoff_text, verdict_text};
+    let mut facts = vec![("Кодек".to_owned(), codec_label(&src.codec))];
+    if let Some(c) = path.and_then(container_of) {
+        facts.push(("Контейнер".into(), c));
+    }
+    if let Some(b) = src.bitrate {
+        facts.push(("Битрейт".into(), format!("{b} кбит/с")));
+    }
+    if let Some(sr) = src.sample_rate {
+        facts.push(("Частота".into(), fmt_rate(sr)));
+    }
+    if let Some(bd) = src.bit_depth {
+        facts.push(("Разрядность".into(), format!("{bd} бит")));
+    }
+    if let Some(ch) = channels {
+        let c = match ch {
+            1 => "моно".to_owned(),
+            2 => "стерео".to_owned(),
+            n => n.to_string(),
+        };
+        facts.push(("Каналы".into(), c));
+    }
+    if let Some(ms) = duration_ms {
+        let s = ms / 1000;
+        facts.push(("Длительность".into(), format!("{}:{:02}", s / 60, s % 60)));
+    }
+    if let Some(size) = src.size_bytes.filter(|_| path.is_some()) {
+        facts.push(("Размер".into(), fmt_mb(size)));
+    }
+    let from = match (&src.kind, &src.origin) {
+        (SourceKind::LocalFile, nikgob_core::model::SourceOrigin::Torrent { .. }) => "Торрент",
+        (SourceKind::LocalFile, nikgob_core::model::SourceOrigin::Stream) => "Сохранён со стрима",
+        (SourceKind::LocalFile, nikgob_core::model::SourceOrigin::Inbox) => "Скачан или добавлен файлом",
+        (SourceKind::Spotify, _) => "Поток Spotify",
+        (SourceKind::Youtube | SourceKind::Deezer, _) => "Поток YouTube Music",
+    };
+    facts.push(("Откуда".into(), from.to_owned()));
+    let local = src.kind == SourceKind::LocalFile;
+    let warning = check.is_some_and(|c| {
+        let s: CheckSummary = c.summary();
+        nikgob_core::quality::label(&src.codec, src.bitrate, Some(&s)) != nikgob_core::quality::label(&src.codec, src.bitrate, None)
+    });
+    v::SoundDetails {
+        facts,
+        verdict: check.map(|c| verdict_text(&src.codec, src.bitrate, c)),
+        warning,
+        // A file made from another: the band is the original's.
+        band: check.and_then(|c| {
+            let t = cutoff_text(c)?;
+            Some(if c.made_from.is_some() { format!("{t} (у исходника)") } else { t })
+        }),
+        spectrum: check.filter(|c| !c.spectrum_db.is_empty() && c.sample_rate > 0).map(|c| v::SpectrumPlot {
+            db: c.spectrum_db.clone(),
+            nyquist_hz: c.sample_rate as f32 / 2.0,
+            cutoff_hz: (c.verdict != nikgob_core::quality::Verdict::Unknown && c.cutoff_hz > 0.0).then_some(c.cutoff_hz),
+        }),
+        pending: local && check.is_none(),
     }
 }
 
@@ -620,5 +724,77 @@ mod tests {
         let row = ArtistRow { artist: a, release_count: 0, local_track_count: 0, liked: false };
         let image = res.artist(&row).image.unwrap();
         assert_eq!(image.web_url(), Some("https://fake.invalid/kino.jpg"));
+    }
+
+    fn check(verdict: nikgob_core::quality::Verdict, cutoff: f32, made_from: Option<Codec>) -> nikgob_core::quality::QualityCheck {
+        nikgob_core::quality::QualityCheck {
+            verdict,
+            cutoff_hz: cutoff,
+            steepness_db: 45.0,
+            origin: nikgob_core::quality::SoundOrigin::estimate(verdict, cutoff),
+            sample_rate: 44_100,
+            spectrum_db: vec![-40.0; nikgob_core::quality::SPECTRUM_POINTS],
+            made_from,
+            file_size: 1,
+            file_mtime: 1,
+            checked_at: 1,
+        }
+    }
+
+    #[test]
+    fn the_quality_section_lists_the_facts_and_the_honest_verdict() {
+        use nikgob_core::model::TrackId;
+        use nikgob_core::quality::Verdict;
+        let mut flac = Source::new(TrackId::new(), SourceKind::LocalFile, "a/07 - Молли.flac", Codec::Flac);
+        flac.sample_rate = Some(44_100);
+        flac.bit_depth = Some(16);
+        flac.bitrate = Some(1058);
+        flac.size_bytes = Some(26_733_824);
+        let fake = check(Verdict::Transcoded, 16_000.0, None);
+        let d = sound_details(&flac, Some(Path::new("a/07 - Молли.flac")), Some(2), Some(152_790), Some(&fake));
+        let facts: Vec<(&str, &str)> = d.facts.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(
+            facts,
+            vec![
+                ("Кодек", "FLAC"),
+                ("Контейнер", "FLAC"),
+                ("Битрейт", "1058 кбит/с"),
+                ("Частота", "44,1 кГц"),
+                ("Разрядность", "16 бит"),
+                ("Каналы", "стерео"),
+                ("Длительность", "2:32"),
+                ("Размер", "25,5 МБ"),
+                ("Откуда", "Скачан или добавлен файлом"),
+            ]
+        );
+        assert!(d.warning);
+        assert!(d.verdict.as_deref().unwrap().starts_with("Не настоящий lossless"));
+        assert_eq!(d.band.as_deref(), Some("до 16,0 кГц"));
+        let plot = d.spectrum.unwrap();
+        assert_eq!((plot.nyquist_hz, plot.cutoff_hz), (22_050.0, Some(16_000.0)));
+        assert!(!d.pending);
+
+        // A real one: no warning, the full band; not checked yet: pending.
+        let real = sound_details(&flac, Some(Path::new("x.flac")), None, None, Some(&check(Verdict::Genuine, 22_050.0, None)));
+        assert!(!real.warning);
+        assert_eq!(real.band.as_deref(), Some("до 22,0 кГц, без среза"));
+        let unchecked = sound_details(&flac, Some(Path::new("x.flac")), None, None, None);
+        assert!(unchecked.pending && unchecked.verdict.is_none() && unchecked.spectrum.is_none());
+
+        // The MP3 a fake became: honest, and the band is the original's.
+        let mut mp3 = Source::new(TrackId::new(), SourceKind::LocalFile, "a/07 - Молли.mp3", Codec::Mp3);
+        mp3.bitrate = Some(320);
+        let conv = sound_details(&mp3, Some(Path::new("a/07 - Молли.mp3")), None, None, Some(&check(Verdict::Transcoded, 20_100.0, Some(Codec::Flac))));
+        assert!(conv.warning);
+        assert!(conv.verdict.as_deref().unwrap().starts_with("Сделан из поддельного FLAC"));
+        assert_eq!(conv.band.as_deref(), Some("до 20,1 кГц (у исходника)"));
+
+        // A stream: what it gives, nothing to check.
+        let mut yt = Source::new(TrackId::new(), SourceKind::Youtube, "abc", Codec::Opus);
+        yt.bitrate = Some(160);
+        let s = sound_details(&yt, None, None, Some(200_000), None);
+        assert!(!s.pending && s.verdict.is_none());
+        assert!(s.facts.contains(&("Откуда".into(), "Поток YouTube Music".into())));
+        assert!(!s.facts.iter().any(|(k, _)| k == "Размер" || k == "Контейнер"));
     }
 }

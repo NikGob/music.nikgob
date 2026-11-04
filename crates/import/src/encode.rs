@@ -319,6 +319,11 @@ pub struct FfmpegEncoder {
 impl FfmpegEncoder {
     /// Looks for `ffmpeg` on `PATH`.
     pub fn find() -> Option<Self> {
+        Self::find_exe().map(|exe| Self { exe })
+    }
+
+    /// The `ffmpeg` program on `PATH`.
+    pub fn find_exe() -> Option<PathBuf> {
         let names: &[&str] = if cfg!(windows) {
             &["ffmpeg.exe"]
         } else {
@@ -328,7 +333,6 @@ impl FfmpegEncoder {
         std::env::split_paths(&path)
             .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
             .find(|p| p.is_file())
-            .map(|exe| Self { exe })
     }
 
     pub fn with_exe(exe: impl Into<PathBuf>) -> Self {

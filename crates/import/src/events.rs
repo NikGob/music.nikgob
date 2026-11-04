@@ -72,6 +72,8 @@ pub struct ConfirmItem {
     pub options: Vec<ConfirmOption>,
     /// The «Хочу скачать» item the file was downloaded for.
     pub wishlist: Option<nikgob_core::model::WishlistId>,
+    /// What the file really is («FLAC из MP3 ~320», «MP3 320»).
+    pub quality: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

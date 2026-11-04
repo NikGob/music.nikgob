@@ -209,7 +209,8 @@ async fn awkward_names_are_made_safe_and_lossy_files_are_copied_untouched() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fake_lossless_is_scored_as_lossy_and_kept_unconverted() {
-    let root = Root::new();
+    let mut root = Root::new();
+    root.cfg.convert_fake_lossless = false;
     let (importer, lib) = importer(&root);
     let fake = root.inbox("fake.wav");
     write_wav(&fake, &lowpassed_noise(RATE, 20.0, 16_000.0, 7), RATE);
@@ -222,10 +223,59 @@ async fn fake_lossless_is_scored_as_lossy_and_kept_unconverted() {
     assert!(failures(&events).is_empty(), "{events:?}");
     let (track_id, _) = imported(&events)[0];
     let src = lib.active_source(track_id).unwrap().unwrap();
-    assert_eq!(src.quality_score, 690, "fake FLAC ranks below MP3 V0");
-    assert_eq!(src.codec, Codec::Wav, "never lossy to lossy: kept as a lossless copy");
+    // Cut at 16 kHz: ranked as the MP3 ~128 it was made from, below V0.
+    assert_eq!(
+        src.quality_score,
+        nikgob_core::quality::fake_score(nikgob_core::quality::SoundOrigin::Lossy { kbps: 128 })
+    );
+    assert!(src.quality_score < 690, "fake FLAC ranks below MP3 V0");
+    assert_eq!(src.codec, Codec::Wav, "conversion off: kept as it is");
     assert!(src.locator.ends_with(".wav"));
     assert!(!fake.exists());
+    // The verdict is kept, and the rows say what the file is.
+    let check = lib.quality_check(src.id).unwrap().unwrap();
+    assert_eq!(check.verdict, nikgob_core::quality::Verdict::Transcoded);
+    assert!((check.cutoff_hz - 16_000.0).abs() < 400.0, "{check:?}");
+    assert_eq!(check.spectrum_db.len(), nikgob_core::quality::SPECTRUM_POINTS);
+    assert_eq!(check.made_from, None);
+    let row = lib.get_track_row(track_id).unwrap().unwrap();
+    assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "WAV из MP3 ~128");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fake_lossless_becomes_an_mp3_with_its_tags_and_the_original_goes_to_trash() {
+    if nikgob_import::FfmpegEncoder::find().is_none() {
+        eprintln!("skipped: no ffmpeg on PATH");
+        return;
+    }
+    let root = Root::new();
+    assert!(root.cfg.convert_fake_lossless, "on by default");
+    let (importer, lib) = importer(&root);
+    let fake = root.inbox("fake.wav");
+    write_wav(&fake, &lowpassed_noise(RATE, 20.0, 16_000.0, 7), RATE);
+    tags::write_tags(&fake, &song_tags("Fake")).unwrap();
+
+    let events = importer
+        .import_paths(vec![fake.clone()], SourceOrigin::Inbox)
+        .wait()
+        .await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    assert!(!events.iter().any(|e| matches!(e, ImportEvent::MasterRegistered(_))), "a fake is no master");
+    let (track_id, _) = imported(&events)[0];
+    let src = lib.active_source(track_id).unwrap().unwrap();
+    assert_eq!(src.codec, Codec::Mp3);
+    assert!(src.locator.ends_with(".mp3"));
+    assert!(src.quality_score < 690);
+    let (t, _) = tags::read_tags(std::path::Path::new(&src.locator)).unwrap();
+    assert_eq!(t.title.as_deref(), Some("Fake"));
+    assert_eq!(t.track_id, Some(track_id));
+    // The original is in the Trash, not lost.
+    assert!(!fake.exists());
+    assert_eq!(count_files(&root.cfg.trash_dir), 1);
+    let check = lib.quality_check(src.id).unwrap().unwrap();
+    assert_eq!(check.made_from, Some(Codec::Wav));
+    let row = lib.get_track_row(track_id).unwrap().unwrap();
+    assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "MP3 из поддельного WAV");
 }
 
 #[tokio::test(flavor = "multi_thread")]

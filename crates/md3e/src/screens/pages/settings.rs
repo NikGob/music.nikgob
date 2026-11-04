@@ -1225,6 +1225,9 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
     row(ui, Id::FakeFlac, "Проверять «фейковый» FLAC", Some("Находит FLAC, сделанные из MP3"), |ui| {
         ui.add(Switch::new(&mut p.check_fake_lossless).id_salt("set-fake"));
     });
+    row(ui, Id::FakeConvert, "Превращать «фейковый» FLAC в MP3", Some("Без новых потерь, старый файл — в Корзину"), |ui| {
+        ui.add(Switch::new(&mut p.convert_fake_lossless).id_salt("set-fake-convert"));
+    });
     if !pages.metadata_synced {
         pages.metadata_contact = p.metadata_contact.clone();
         pages.metadata_synced = true;

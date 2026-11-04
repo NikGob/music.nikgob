@@ -16,6 +16,7 @@ pub mod lyrics_ui;
 mod pages;
 mod pane;
 mod player_bar;
+mod sound_quality;
 mod tag_editor;
 mod visualizer;
 

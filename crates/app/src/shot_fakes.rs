@@ -73,6 +73,9 @@
 //!   waiting in «Подтверди» («FLAC вместо MP3 320»), and «Хочу скачать»
 //!   with better copies looked for in each state (`route:confirm`,
 //!   `route:wishlist`).
+//! - `fake:quality:real` / `fake:quality:fake` — what plays is a FLAC whose
+//!   check found it genuine, or made from an MP3 ~128 (its rows and the
+//!   «Качество» section of «Инфо» say so, with the spectrum and its cut).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -113,6 +116,8 @@ pub struct Fakes {
     history_refusals: bool,
     share: bool,
     upgrade_offer: bool,
+    /// `fake:quality:fake` (true) / `fake:quality:real`.
+    quality: Option<bool>,
 }
 
 impl Fakes {
@@ -152,6 +157,8 @@ impl Fakes {
             "history-refusals" => self.history_refusals = true,
             "share" => self.share = true,
             "upgrade-offer" => self.upgrade_offer = true,
+            "quality:real" => self.quality = Some(false),
+            "quality:fake" => self.quality = Some(true),
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             c if c.starts_with("lyrics-home:") => self.lyrics_home = Some(c["lyrics-home:".len()..].to_owned()),
             c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
@@ -191,6 +198,7 @@ impl Fakes {
             || self.history_refusals
             || self.share
             || self.upgrade_offer
+            || self.quality.is_some()
     }
 
     /// `state` with the fakes laid over it.
@@ -375,6 +383,9 @@ impl Fakes {
         if let Some(name) = self.lyrics_state.as_deref() {
             lyrics_state(&mut s, name);
         }
+        if let Some(fake) = self.quality {
+            sound_quality(&mut s, fake);
+        }
         if self.link
             && let Some(p) = s.playlist.as_mut()
         {
@@ -388,6 +399,70 @@ impl Fakes {
         }
         s
     }
+}
+
+/// What plays is a FLAC, genuine or made from an MP3 ~128
+/// (`fake:quality:*`): its rows, the «Инфо» line and «Качество» section,
+/// as the runtime fills them from a stored check.
+fn sound_quality(s: &mut ViewState, fake: bool) {
+    use nikgob_core::model::Codec;
+    use nikgob_core::quality::{QualityCheck, SPECTRUM_POINTS, SoundOrigin, Verdict, cutoff_text, label, verdict_text};
+    let (verdict, cutoff) = if fake { (Verdict::Transcoded, 16_020.0) } else { (Verdict::Genuine, 22_050.0) };
+    let nyquist = 22_050.0_f32;
+    // A music-like slope; a lossy encoder's lowpass is a cliff.
+    let spectrum_db: Vec<f32> = (0..SPECTRUM_POINTS)
+        .map(|i| {
+            let hz = nyquist * (i as f32 + 0.5) / SPECTRUM_POINTS as f32;
+            let body = -32.0 - 2.6 * (hz / 1000.0) - 6.0 * (hz / 400.0 + 1.0).log10() + 1.5 * (i as f32 * 0.7).sin();
+            if fake && hz > cutoff { body - 58.0 - (hz - cutoff) / 400.0 } else { body }
+        })
+        .collect();
+    let check = QualityCheck {
+        verdict,
+        cutoff_hz: cutoff,
+        steepness_db: if fake { 61.4 } else { 0.0 },
+        origin: SoundOrigin::estimate(verdict, cutoff),
+        sample_rate: 44_100,
+        spectrum_db: spectrum_db.clone(),
+        made_from: None,
+        file_size: 26_733_824,
+        file_mtime: 0,
+        checked_at: 0,
+    };
+    let row = label(&Codec::Flac, None, Some(&check.summary()));
+    for t in [s.player.current.as_mut(), s.queue.current.as_mut()].into_iter().flatten() {
+        t.quality = Some(row.clone());
+        t.has_local = true;
+        t.source = Some(nikgob_view::SourceKind::LocalFile);
+    }
+    s.player.audio_service = None;
+    s.player.audio_quality = None;
+    s.info.source = Some("Локальный файл".into());
+    s.info.quality = Some(format!("{row} · 16/44.1"));
+    s.info.path = Some(r"C:\Music\Пошлая Молли\2017 - 8 способов как бросить\07 - Молли.flac".into());
+    let facts = [
+        ("Кодек", "FLAC"),
+        ("Контейнер", "FLAC"),
+        ("Битрейт", "1058 кбит/с"),
+        ("Частота", "44,1 кГц"),
+        ("Разрядность", "16 бит"),
+        ("Каналы", "стерео"),
+        ("Длительность", "2:32"),
+        ("Размер", "25,5 МБ"),
+        ("Откуда", "Скачан или добавлен файлом"),
+    ];
+    s.info.sound = Some(nikgob_view::SoundDetails {
+        facts: facts.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+        verdict: Some(verdict_text(&Codec::Flac, Some(1058), &check)),
+        warning: fake,
+        band: cutoff_text(&check),
+        spectrum: Some(nikgob_view::SpectrumPlot {
+            db: spectrum_db,
+            nyquist_hz: nyquist,
+            cutoff_hz: fake.then_some(cutoff),
+        }),
+        pending: false,
+    });
 }
 
 /// «Загрузки → История» of wished downloads the sources turned away
