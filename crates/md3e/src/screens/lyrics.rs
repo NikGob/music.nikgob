@@ -48,11 +48,12 @@ enum Style {
 /// Both views share timing and scrolling; true opens the lyrics settings.
 pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec<Command>) -> bool {
     let style = style_for(&state.prefs, &state.lyrics.lines);
-    let source_h = if mega { Size::Xs.height() + ui.spacing().item_spacing.y } else { 0.0 };
-    let size = vec2(ui.available_width(), (ui.available_height() - source_h).max(80.0));
+    // The mega view's control sits on the lyrics' bottom edge; they scroll
+    // on behind it.
+    let size = vec2(ui.available_width(), ui.available_height().max(80.0));
     if mega && state.lyrics.lines.is_empty() {
-        plain(ui, size, state);
-        return super::lyrics_ui::control(ui, state, out);
+        let (rect, left) = plain(ui, size, state);
+        return control_on_edge(ui, rect, left, state, out);
     }
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let mut sizes = if mega { MEGA } else { PANE };
@@ -62,7 +63,20 @@ pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec
     sizes.sub *= scale;
     sizes.gap *= scale;
     paint(ui, rect, &resp, state, &state.lyrics.lines, style, bass, sizes, mega, out);
-    mega && super::lyrics_ui::control(ui, state, out)
+    if !mega {
+        return false;
+    }
+    let left = ui.ctx().data(|d| d.get_temp::<f32>(ui.id().with("lyrics-view").with("text-left")));
+    control_on_edge(ui, rect, Some(left.unwrap_or(rect.left() + 12.0)), state, out)
+}
+
+/// The lyrics control over the bottom edge of `rect`, its left edge in line
+/// with the text's (`left`, else centred); drawn after the lyrics, so it
+/// takes the clicks there. True opens the lyrics settings.
+fn control_on_edge(ui: &mut Ui, rect: Rect, left: Option<f32>, state: &ViewState, out: &mut Vec<Command>) -> bool {
+    let bar = Rect::from_min_max(pos2(rect.left(), rect.bottom() - Size::Xs.height()), rect.max);
+    let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(bar).id_salt("lyrics-control-edge"));
+    super::lyrics_ui::control(&mut cui, state, left, out)
 }
 
 /// How `lines` are drawn. «Волна» goes over the letters of each timed word
@@ -170,6 +184,8 @@ fn paint(
         wrap
     };
     let left = rect.left() + 12.0 + (wrap - block) * 0.5;
+    // The control on the lyrics' bottom edge lines up with the text.
+    ctx.data_mut(|d| d.insert_temp(id.with("text-left"), left));
     let wrap = block;
     let gap = sizes.gap;
     let mut tops = Vec::with_capacity(slots.len());
@@ -694,8 +710,11 @@ pub(crate) fn countdown_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
 }
 
 /// Unsynced text still gets a readable column, with its source kept outside
-/// the scroll area so changing providers never requires scrolling to the end.
-fn plain(ui: &mut Ui, size: egui::Vec2, state: &ViewState) {
+/// the scroll area so changing providers never requires scrolling to the end
+/// (the control on its bottom edge, in line with the text: the last lines
+/// scroll clear of it). Returns the area and the text's left edge (none
+/// for the centred «Текста нет»).
+fn plain(ui: &mut Ui, size: egui::Vec2, state: &ViewState) -> (Rect, Option<f32>) {
     let s = Theme::get(ui.ctx()).scheme;
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let column = Rect::from_center_size(rect.center(), vec2(rect.width().min(900.0), rect.height()));
@@ -703,11 +722,14 @@ fn plain(ui: &mut Ui, size: egui::Vec2, state: &ViewState) {
     if let Some(text) = state.lyrics.plain.as_deref().filter(|t| !t.trim().is_empty()) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut child, |ui| {
             ui.label(style_at(MEGA.small * state.prefs.lyrics_scale.clamp(0.8, 1.4)).rich_para(text, s.on_surface));
+            ui.add_space(Size::Xs.height() + 16.0);
         });
     } else {
         let text = if state.lyrics.loading { "Ищу текст…" } else { "Текста нет" };
         child.painter().text(rect.center(), Align2::CENTER_CENTER, text, style_at(MEGA.small).font_id(), s.on_surface_variant);
     }
+    let text = state.lyrics.plain.as_deref().is_some_and(|t| !t.trim().is_empty());
+    (rect, text.then_some(column.left()))
 }
 
 /// One timed piece spans its own glyph advances, even across frozen rows.
@@ -1495,7 +1517,7 @@ mod tests {
             }, |ui| {
                 // Short lines are centred in mega mode: aim at the middle.
                 target = pos2(ui.cursor().left() + ui.available_width() * 0.5,
-                    ui.cursor().top() + (ui.available_height() - Size::Xs.height() - ui.spacing().item_spacing.y) * MEGA.anchor);
+                    ui.cursor().top() + ui.available_height() * MEGA.anchor);
                 show(ui, &state, 0.0, true, &mut commands);
             });
             output.textures_delta.clear();

@@ -1313,9 +1313,10 @@ const CONTROLS_H: f32 = 96.0;
 
 const COMPACT_INFO_H: f32 = 32.0 + 4.0 + 24.0 + 16.0 + 64.0 + 16.0 + 56.0;
 const TRANSPORT_H: f32 = 64.0 + 16.0 + 56.0;
-/// How far below the info block the lyrics end, so that the control under
-/// them is level with the transport row.
-const LYRICS_CONTROL_DROP: f32 = -11.0;
+/// How far the lyrics beside the cover end above the cover column's bottom
+/// air: the control on their bottom edge (32 px) is then centred on the
+/// transport row (56 px) where the column fills the height.
+const LYRICS_CONTROL_LIFT: f32 = 12.0;
 
 struct MegaLayout {
     wide: bool,
@@ -1352,9 +1353,15 @@ fn mega_layout(body: Rect) -> MegaLayout {
             wide: true,
             cover: Rect::from_center_size(pos2(left + col * 0.5, top + RING_PAD + cover * 0.5), vec2(cover, cover)),
             info,
-            // The control under the lyrics sits on the transport row's
-            // centre line.
-            content: Rect::from_min_max(pos2(content_left, body.top()), pos2(content_left + lyrics_w, info.bottom() + LYRICS_CONTROL_DROP)),
+            // The lyrics reach down to the cover column's bottom air, the
+            // control on their bottom edge (they scroll on behind it):
+            // level with the transport row where the column fills the
+            // height, at that same bottom margin where it is centred
+            // higher in a tall window.
+            content: Rect::from_min_max(
+                pos2(content_left, body.top()),
+                pos2(content_left + lyrics_w, body.bottom() - vpad - LYRICS_CONTROL_LIFT),
+            ),
         }
     } else {
         MegaLayout {

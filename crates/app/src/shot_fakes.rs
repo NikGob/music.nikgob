@@ -56,7 +56,8 @@
 //!   each state of docs/lyrics-control.md (`none`, `searching`, `plain`,
 //!   `line`, `word`, `made`, `saved`, `making`, `failed`, `stream`, `clip`,
 //!   `no-audio`), seen by words, by lines or without timing when the last
-//!   part says so. A later one replaces an earlier one (one run, many
+//!   part says so (`made` has LRCLIB's lines beside it, so the source rows
+//!   say how each is timed). A later one replaces an earlier one (one run, many
 //!   `snap:`s).
 //! - `fake:align-models` — Settings → «Текст песен»: models ready, one
 //!   downloading, one missing; the background pass halfway; on the GPU.
@@ -692,7 +693,8 @@ fn lyrics_state(s: &mut ViewState, arg: &str) {
             text(&mut l, Src::LyricsPlus, LyricsSync::Word, None, LyricsHome::Online, file);
         }
         "made" => {
-            l.sources = vec![missing(Src::LyricsPlus), missing(Src::Lrclib), ready(Src::Genius, LyricsSync::Plain)];
+            // LRCLIB's lines beside it: the rows say how each is timed.
+            l.sources = vec![missing(Src::LyricsPlus), ready(Src::Lrclib, LyricsSync::Line), ready(Src::Genius, LyricsSync::Plain)];
             text(&mut l, Src::Genius, LyricsSync::Plain, Some(&words), LyricsHome::Library, file);
             l.picked = true;
         }
