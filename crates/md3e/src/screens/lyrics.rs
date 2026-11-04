@@ -64,23 +64,20 @@ impl Look {
 }
 
 /// Both views share timing and scrolling; true opens the lyrics settings.
-/// `bleed`: the top of the area given that is only room for the soft top
-/// band to paint into (Now Playing's air under its header): no line rests
-/// there and it takes no clicks; with the soft edges off it stays empty.
-pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, bleed: f32, out: &mut Vec<Command>) -> bool {
+/// The lyrics take the whole area given (less the mega view's control row):
+/// the soft bands, or the plain fade with them off, lie inside it.
+pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec<Command>) -> bool {
     let look = style_for(&state.prefs, &state.lyrics.lines);
     let size = vec2(ui.available_width(), ui.available_height().max(80.0));
     let full = Rect::from_min_size(ui.cursor().min, size);
     ui.allocate_rect(full, Sense::hover());
     // The mega view's control has a row of its own under the lyrics: no
     // line ever lies under it.
-    let (full, row) = if mega { control_row(full) } else { (full, None) };
-    let live = Rect::from_min_max(pos2(full.left(), (full.top() + bleed.max(0.0)).min(full.bottom() - 40.0).max(full.top())), full.max);
+    let (live, row) = if mega { control_row(full) } else { (full, None) };
     if mega && state.lyrics.lines.is_empty() {
         let left = plain(ui, live, state);
         return row.is_some_and(|r| control_in(ui, r, left, state, out));
     }
-    let view = if state.prefs.lyrics_soft_edges { full } else { live };
     let resp = ui.interact(live, ui.id().with("lyrics-live"), Sense::click_and_drag());
     let mut sizes = if mega { MEGA } else { PANE };
     let scale = state.prefs.lyrics_scale.clamp(0.8, 1.4);
@@ -88,7 +85,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, bleed: f32, o
     sizes.small *= scale;
     sizes.sub *= scale;
     sizes.gap *= scale;
-    paint(ui, view, live, &resp, state, &state.lyrics.lines, look, bass, sizes, mega, out);
+    paint(ui, live, &resp, state, &state.lyrics.lines, look, bass, sizes, mega, out);
     let Some(row) = row else { return false };
     let left = ui.ctx().data(|d| d.get_temp::<f32>(ui.id().with("lyrics-view").with("text-left")));
     control_in(ui, row, Some(left.unwrap_or(live.left() + 12.0)), state, out)
@@ -138,17 +135,15 @@ pub(crate) fn made_preview(ui: &mut Ui, size: egui::Vec2, state: &ViewState, lin
     sizes.small = 17.0;
     sizes.sub = 13.0;
     sizes.gap = 14.0;
-    paint(ui, rect, rect, &resp, state, lines, look, 0.0, sizes, false, out);
+    paint(ui, rect, &resp, state, lines, look, 0.0, sizes, false, out);
 }
 
 /// Paints `lines` over `rect` (the view, clipped there; the soft bands
-/// reach its edges); `live` is the part that takes the pointer, where the
-/// current line rests with the soft edges off.
+/// reach its edges), which `resp` takes the pointer over.
 #[allow(clippy::too_many_arguments)]
 fn paint(
     ui: &Ui,
     rect: Rect,
-    live: Rect,
     resp: &egui::Response,
     state: &ViewState,
     lines: &[LyricLine],
@@ -275,16 +270,11 @@ fn paint(
     } else if manual != 0.0 && now < until + 0.5 {
         ctx.request_repaint();
     }
-    // Where the current line rests: with the soft edges, in the sharp part
-    // between the bands (a lens: lines come into focus as they arrive and
-    // go soft as they leave); else in the part that takes the pointer.
+    // Where the current line rests: at its share of the whole view, with the
+    // soft edges always clear of the top band (a lens: lines come into
+    // focus as they arrive and go soft as they leave).
     let soft = Soft::of(&state.prefs);
-    let anchor = if state.prefs.lyrics_soft_edges {
-        let (top, bottom) = soft.sharp(rect);
-        top + (bottom - top) * sizes.anchor - rect.top()
-    } else {
-        live.top() - rect.top() + live.height() * sizes.anchor
-    };
+    let anchor = rest_at(rect, sizes.anchor, state.prefs.lyrics_soft_edges.then_some(soft), slots[ci].0 * 0.5, sizes.big * 0.4);
     let scroll = tops[ci] + slots[ci].0 * 0.5 - anchor + returning_offset(manual, until, now);
     let together = if !state.prefs.lyrics_cascade {
         anim::f32(&ctx, id.with("scroll"), scroll, Spring::new(1.0, 300.0))
@@ -519,28 +509,34 @@ impl Soft {
         (rect.height() * self.depth).clamp(40.0, 360.0).min(rect.height() * 0.4)
     }
 
-    /// The sharp part of `rect` (top, bottom): inside the bands' outer
-    /// three quarters, where a line is visibly soft.
-    fn sharp(self, rect: Rect) -> (f32, f32) {
-        let b = self.band(rect) * 0.75;
-        (rect.top() + b, rect.bottom() - b)
+}
+
+/// Where the current line's middle rests, down from `rect`'s top: `share`
+/// of its height; with the soft edges (`soft`) never so high that the line
+/// (`half` its height, its ink `ink` beyond it) reaches into the top band,
+/// though never below the middle.
+fn rest_at(rect: Rect, share: f32, soft: Option<Soft>, half: f32, ink: f32) -> f32 {
+    let at = rect.height() * share;
+    match soft {
+        Some(soft) => at.max((soft.band(rect) + ink + half).min(rect.height() * 0.5)),
+        None => at,
     }
 }
 
 /// The soft edges for an item `height` tall at `top`: (opacity, blur 0..1).
 /// Over the band its blur grows from nothing, slowly at first, to full at
-/// the edge, and it thins on an eased curve (a gentler fade keeps it
-/// bright until nearer the edge); it is gone before its ink (accents and
-/// descenders, `size` × 0.4 around it) reaches the edge, so the view's
-/// clip never cuts a visible line.
+/// the edge, while it stays visible through most of the band, thinning
+/// faster only near the edge (a gentler fade keeps it bright until nearer
+/// the edge), so the band shows blurred lines instead of empty room; it
+/// is gone before its ink (accents and descenders, `size` × 0.4 around
+/// it) reaches the edge, so the view's clip never cuts a visible line.
 fn soft_edge(top: f32, height: f32, rect: Rect, size: f32, soft: Soft) -> (f32, f32) {
     let band = soft.band(rect);
     let ink = size * 0.4;
     let room = (top - ink - rect.top()).min(rect.bottom() - (top + height + ink));
     let f = (room / band.max(1.0)).clamp(0.0, 1.0);
-    let eased = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
     let d = 1.0 - f;
-    (eased.powf(0.5 + 1.5 * soft.fade), d * d * (3.0 - 2.0 * d))
+    (1.0 - d.powf(3.0 - 1.8 * soft.fade), d * d * (3.0 - 2.0 * d))
 }
 
 /// `g` at `pos` in `color`, blurred by `blur` (0..1) of `radius` points
@@ -2089,9 +2085,19 @@ mod tests {
         // A short view keeps its middle sharp.
         let small = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 160.0));
         assert_eq!(soft_edge(60.0, 30.0, small, 20.0, Soft { depth: 0.1, ..soft }), (1.0, 0.0));
-        // The current line rests inside the sharp part.
-        let (top, bottom) = soft.sharp(rect);
-        assert!(top > rect.top() && bottom < rect.bottom() && bottom - top > rect.height() * 0.6);
+        // The band shows blurred lines, not empty room: a quarter of the
+        // way in, a line is still clearly there.
+        let quarter = rect.top() + size * 0.4 + soft.band(rect) * 0.25;
+        assert!(at(quarter).0 > 0.4 && at(quarter).1 > 0.5, "{:?}", at(quarter));
+        // The current line rests at 40 % of the whole view, clear of the
+        // top band even when the band is deep, never below the middle.
+        let (half, ink) = (17.0, size * 0.4);
+        assert_eq!(rest_at(rect, 0.4, None, half, ink), 200.0);
+        assert_eq!(rest_at(rect, 0.4, Some(soft), half, ink), 200.0);
+        let deepest = Soft { depth: 0.4, ..soft };
+        let rest = rest_at(rect, 0.4, Some(deepest), half, ink);
+        assert!(rest > 200.0 && rest <= 250.0);
+        assert!(soft_edge(rect.top() + rest - half, half * 2.0, rect, size, deepest).0 > 0.999);
     }
 
     /// The mega view's control has its own row under the lyrics, with air
@@ -2209,7 +2215,7 @@ mod tests {
                 // Short lines are centred in mega mode: aim at the middle.
                 target = pos2(ui.cursor().left() + ui.available_width() * 0.5,
                     ui.cursor().top() + (ui.available_height() - Size::Xs.height() - CONTROL_GAP) * MEGA.anchor);
-                show(ui, &state, 0.0, true, 0.0, &mut commands);
+                show(ui, &state, 0.0, true, &mut commands);
             });
             output.textures_delta.clear();
         }
@@ -2423,7 +2429,7 @@ mod tests {
         let mut delay = Duration::ZERO;
         for i in 0..20 {
             let mut output = ctx.run_ui(egui::RawInput { time: Some(i as f64 * 0.5), ..Default::default() }, |ui| {
-                show(ui, &state, 0.8, true, 0.0, &mut Vec::new());
+                show(ui, &state, 0.8, true, &mut Vec::new());
 
             });
             delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
@@ -2766,7 +2772,7 @@ mod tests {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 700.0))),
                 time: Some(frame as f64 * 0.25), ..Default::default()
             }, |ui| {
-                show(ui, &state, 0.0, false, 0.0, &mut Vec::new());
+                show(ui, &state, 0.0, false, &mut Vec::new());
             });
             output.textures_delta.clear();
             colours.clear();

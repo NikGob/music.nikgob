@@ -1093,9 +1093,10 @@ pub fn show(
         for (slot, alpha) in [NpSlot::Lyrics, NpSlot::Queue, NpSlot::Info].into_iter().zip(content_alpha) {
             if alpha <= 0.001 { continue; }
             let width = if slot == NpSlot::Lyrics { content.width() } else { content.width().min(720.0) };
-            // The lyrics' soft top band may paint into the air above them.
-            let bleed = if slot == NpSlot::Lyrics { mega.bleed } else { 0.0 };
-            let area = Rect::from_min_max(pos2(content.left(), content.top() - bleed), pos2(content.left() + width, content.bottom()));
+            // The lyrics take the air above the content too, up to just
+            // under the header (or the small cover's row).
+            let lift = if slot == NpSlot::Lyrics { mega.lyrics_lift } else { 0.0 };
+            let area = Rect::from_min_max(pos2(content.left(), content.top() - lift), pos2(content.left() + width, content.bottom()));
             let mut cui = mega_ui.new_child(UiBuilder::new().max_rect(area).id_salt(("np-content", slot as u8)));
             cui.set_clip_rect(area.intersect(ui.clip_rect()));
             cui.multiply_opacity(alpha);
@@ -1103,7 +1104,7 @@ pub fn show(
             match slot {
                 NpSlot::Lyrics => {
                     let _p = crate::prof::scope("np.lyrics");
-                    if super::lyrics::show(&mut cui, state, pages.levels_bass, true, bleed, out) {
+                    if super::lyrics::show(&mut cui, state, pages.levels_bass, true, out) {
                         pages.open_setting_group(super::lyrics_ui::SETTINGS);
                         closed = true;
                     }
@@ -1319,16 +1320,18 @@ const TRANSPORT_H: f32 = 64.0 + 16.0 + 56.0;
 /// air: the control on their bottom edge (32 px) is then centred on the
 /// transport row (56 px) where the column fills the height.
 const LYRICS_CONTROL_LIFT: f32 = 12.0;
+/// Air between the header (or the small cover's row) and the lyrics' top.
+const LYRICS_TOP_GAP: f32 = 8.0;
 
 struct MegaLayout {
     wide: bool,
     cover: Rect,
     info: Rect,
     content: Rect,
-    /// How far above `content` the lyrics' soft top band may paint (into
-    /// air under the header that nothing else uses there): blurred lines
-    /// fade out in it, so the sharp part of the lyrics keeps its height.
-    bleed: f32,
+    /// How far above `content` the lyrics start: they span from just under
+    /// the header (beside the cover) or the small cover's row (narrow) down
+    /// to the control's row, their soft bands inside that span.
+    lyrics_lift: f32,
 }
 
 /// Wide: the cover column and the content form one group centred in the
@@ -1368,10 +1371,8 @@ fn mega_layout(body: Rect) -> MegaLayout {
                 pos2(content_left, body.top()),
                 pos2(content_left + lyrics_w, body.bottom() - vpad - LYRICS_CONTROL_LIFT),
             ),
-            // The 16 px under the header and its row's lower half (its
-            // buttons sit at the window's right, above the lyrics' end;
-            // what reaches there is nearly faded out).
-            bleed: 16.0 + 24.0,
+            // `content` starts 16 px under the header.
+            lyrics_lift: 16.0 - LYRICS_TOP_GAP,
         }
     } else {
         MegaLayout {
@@ -1379,8 +1380,8 @@ fn mega_layout(body: Rect) -> MegaLayout {
             cover: Rect::from_min_size(body.min, vec2(56.0, 56.0)),
             info: Rect::from_min_size(pos2(body.left(), body.bottom() - TRANSPORT_H), vec2(body.width(), TRANSPORT_H)),
             content: Rect::from_min_max(pos2(body.left(), body.top() + 72.0), pos2(body.right(), body.bottom() - TRANSPORT_H - 16.0)),
-            // The air under the title beside the small cover.
-            bleed: 12.0,
+            // `content` starts 16 px under the small cover's row.
+            lyrics_lift: 16.0 - LYRICS_TOP_GAP,
         }
     }
 }
@@ -1941,6 +1942,11 @@ mod tests {
             }
             assert_eq!(lerp_rect(body, layout.cover, 0.0), body);
             assert_eq!(lerp_rect(body, layout.cover, 1.0), layout.cover);
+            // The lyrics start just under the header (16 px above the body)
+            // or the small cover's row, never touching either.
+            let lyrics_top = layout.content.top() - layout.lyrics_lift;
+            let above = if layout.wide { body.top() - 16.0 } else { layout.cover.bottom() };
+            assert_eq!(lyrics_top, above + LYRICS_TOP_GAP, "{width}");
         }
     }
 }
