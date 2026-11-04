@@ -678,7 +678,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         choice(ui, Id::LyricsStyle, p);
     });
     if p.lyrics_style == 2 {
-        row(ui, Id::WaveFallback, "Если нет разметки по слогам", Some("Для анимации «Волна»"), |ui| {
+        row(ui, Id::WaveFallback, "Если у текста нет времени слов", Some("Для анимации «Волна»"), |ui| {
             choice_menu(ui, Id::WaveFallback, p);
         });
         row(ui, Id::WaveJump, "Высота прыжка букв", Some("0 — буквы только подсвечиваются"), |ui| {

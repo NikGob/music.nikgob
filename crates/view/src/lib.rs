@@ -1126,7 +1126,8 @@ pub struct Prefs {
     pub spin_ring: bool,
     /// How synced lyrics animate: 0 karaoke, 1 focus, 2 wave (letter by letter).
     pub lyrics_style: u8,
-    /// Wave only for syllable-synced lyrics; other texts use Focus.
+    /// Under the wave, a text with line times only (no word times) uses
+    /// Focus instead of guessing the words' pace.
     pub wave_syllables_only: bool,
     /// Wave letters jump up as they are sung (off: they only light up).
     pub lyrics_wave_jump: f32,
