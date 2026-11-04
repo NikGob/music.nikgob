@@ -126,6 +126,39 @@ mod tests {
     }
 
     #[test]
+    fn one_aligner_is_held_at_a_time() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        /// A model that counts how many are alive.
+        struct Counted(Rc<Cell<usize>>);
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() - 1);
+            }
+        }
+        let alive = Rc::new(Cell::new(0));
+        let mut slot: OneLoaded<Counted> = OneLoaded::default();
+        let load = |alive: &Rc<Cell<usize>>| {
+            // The one before is gone before the next one loads.
+            assert_eq!(alive.get(), 0, "two aligners in memory at once");
+            alive.set(alive.get() + 1);
+            Ok::<_, ()>(Counted(alive.clone()))
+        };
+        slot.get(ModelId::AlignerRu, || load(&alive)).unwrap();
+        // The same one again is not loaded again.
+        slot.get(ModelId::AlignerRu, || -> Result<Counted, ()> { panic!("loaded twice") }).unwrap();
+        slot.get(ModelId::AlignerEn, || load(&alive)).unwrap();
+        slot.get(ModelId::AlignerJa, || load(&alive)).unwrap();
+        assert_eq!(alive.get(), 1);
+        assert_eq!(slot.held().map(|(id, _)| id), Some(ModelId::AlignerJa));
+        // A failed load leaves nothing held.
+        assert!(slot.get(ModelId::AlignerMms, || Err::<Counted, ()>(())).is_err());
+        assert_eq!((alive.get(), slot.held().is_none()), (0, true));
+        let a = Aligner::new(Catalog::new(""), Device::Cpu, 1);
+        assert_eq!((a.aligner_loaded(), a.loaded()), (None, false));
+    }
+
+    #[test]
     fn english_falls_back_to_the_multilingual_aligner() {
         assert_eq!(fallback(ModelId::AlignerEn), Some(ModelId::AlignerMms));
         assert_eq!(fallback(ModelId::AlignerRu), None);
@@ -208,19 +241,55 @@ fn letters_of(id: ModelId) -> Letters {
     if id == ModelId::AlignerMms { Letters::Roman } else { Letters::Native }
 }
 
-/// The loaded models.
+/// One model of a kind held at a time: the one before is dropped before
+/// another is loaded, so two aligners never sit in memory together.
+pub struct OneLoaded<T> {
+    item: Option<(ModelId, T)>,
+}
+
+impl<T> Default for OneLoaded<T> {
+    fn default() -> Self {
+        Self { item: None }
+    }
+}
+
+impl<T> OneLoaded<T> {
+    /// `id`'s model, loaded by `load` (after the one held is dropped)
+    /// when it is not the one held.
+    pub fn get<E>(&mut self, id: ModelId, load: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E> {
+        if self.item.as_ref().is_none_or(|(held, _)| *held != id) {
+            self.item = None;
+            self.item = Some((id, load()?));
+        }
+        Ok(&mut self.item.as_mut().expect("loaded above").1)
+    }
+
+    pub fn held(&self) -> Option<(ModelId, &T)> {
+        self.item.as_ref().map(|(id, t)| (*id, t))
+    }
+
+    pub fn clear(&mut self) {
+        self.item = None;
+    }
+}
+
+/// The loaded models, kept modest (a whole-library pass runs for hours in
+/// the background): one aligner at a time, the separator only while it
+/// separates, Whisper only while it recognises.
 pub struct Aligner {
     catalog: Catalog,
     device: Device,
     threads: usize,
     separator: Option<Model>,
-    ctc: HashMap<ModelId, (Model, Vocab)>,
+    ctc: OneLoaded<Model>,
+    /// The aligners' letters (small; kept once read).
+    vocabs: HashMap<ModelId, Vocab>,
     whisper: Option<Whisper>,
 }
 
 impl Aligner {
     pub fn new(catalog: Catalog, device: Device, threads: usize) -> Self {
-        Self { catalog, device, threads, separator: None, ctc: HashMap::new(), whisper: None }
+        Self { catalog, device, threads, separator: None, ctc: OneLoaded::default(), vocabs: HashMap::new(), whisper: None }
     }
 
     pub fn catalog(&self) -> &Catalog {
@@ -232,7 +301,7 @@ impl Aligner {
         self.separator
             .as_ref()
             .map(|m| m.device)
-            .or_else(|| self.ctc.values().next().map(|(m, _)| m.device))
+            .or_else(|| self.ctc.held().map(|(_, m)| m.device))
             .unwrap_or(self.device)
     }
 
@@ -252,7 +321,12 @@ impl Aligner {
     }
 
     pub fn loaded(&self) -> bool {
-        self.separator.is_some() || !self.ctc.is_empty() || self.whisper.is_some()
+        self.separator.is_some() || self.ctc.held().is_some() || self.whisper.is_some()
+    }
+
+    /// The aligner held in memory, if any.
+    pub fn aligner_loaded(&self) -> Option<ModelId> {
+        self.ctc.held().map(|(id, _)| id)
     }
 
     fn runtime(&self) -> Result<(), Error> {
@@ -271,14 +345,21 @@ impl Aligner {
         let separated = separate && self.catalog.ready(ModelId::Separator);
         let voice = if separated {
             self.runtime()?;
+            // Separation takes the most memory of all: the aligner held
+            // from the song before goes first (it loads again in a second).
+            self.ctc.clear();
             if self.separator.is_none() {
                 let file = self.catalog.file(ModelId::Separator, "Kim_Vocal_2.onnx");
                 self.separator = Some(Model::load(&file, self.device, self.threads)?);
             }
             let mix = decoded.resampled(separate::RATE)?;
             let model = self.separator.as_mut().expect("loaded above");
-            let voice = separate::vocals(model, KIM_VOCAL_2, &mix, &mut |f| progress(Stage::Separate(f)))?;
-            voice.resampled(RATE)?.mono()
+            let voice = separate::vocals(model, KIM_VOCAL_2, &mix, &mut |f| progress(Stage::Separate(f)));
+            // The separator's working memory is the largest of all: it goes
+            // as soon as the voice is out (loading it again takes a second).
+            self.separator = None;
+            drop(mix);
+            voice?.resampled(RATE)?.mono()
         } else {
             decoded.resampled(RATE)?.mono()
         };
@@ -290,27 +371,30 @@ impl Aligner {
         Ok(Prepared { voice, secs, separated, energy, heard: HashMap::new() })
     }
 
-    fn ctc(&mut self, id: ModelId) -> Result<&mut (Model, Vocab), Error> {
-        if !self.ctc.contains_key(&id) {
-            if !self.catalog.ready(id) {
-                return Err(Error::Missing("aligner"));
-            }
-            self.runtime()?;
-            let model = Model::load(&self.catalog.file(id, "model_int8.onnx"), self.device, self.threads)?;
-            let json = std::fs::read_to_string(self.catalog.file(id, "vocab.json"))?;
-            let vocab = Vocab::from_json(&json, letters_of(id)).map_err(|e| Error::Model(format!("vocab: {e}")))?;
-            self.ctc.insert(id, (model, vocab));
+    /// Aligner `id`'s letters.
+    fn vocab(&mut self, id: ModelId) -> Result<Vocab, Error> {
+        if let Some(v) = self.vocabs.get(&id) {
+            return Ok(v.clone());
         }
-        Ok(self.ctc.get_mut(&id).expect("inserted above"))
+        if !self.catalog.ready(id) {
+            return Err(Error::Missing("aligner"));
+        }
+        let json = std::fs::read_to_string(self.catalog.file(id, "vocab.json"))?;
+        let vocab = Vocab::from_json(&json, letters_of(id)).map_err(|e| Error::Model(format!("vocab: {e}")))?;
+        self.vocabs.insert(id, vocab.clone());
+        Ok(vocab)
     }
 
-    /// What aligner `id` hears in the song (computed once per song).
+    /// What aligner `id` hears in the song (computed once per song; the
+    /// aligner held before is dropped first).
     fn heard(&mut self, prep: &mut Prepared, id: ModelId, progress: &mut dyn FnMut(Stage) -> bool) -> Result<(), Error> {
         if prep.heard.contains_key(&id) {
             return Ok(());
         }
-        let (model, vocab) = self.ctc(id)?;
-        let blank = vocab.blank;
+        let blank = self.vocab(id)?.blank;
+        self.runtime()?;
+        let (file, device, threads) = (self.catalog.file(id, "model_int8.onnx"), self.device, self.threads);
+        let model = self.ctc.get(id, || Model::load(&file, device, threads))?;
         let em = emissions(model, &prep.voice, blank, &mut |f| progress(Stage::Listen(f)))?;
         prep.heard.insert(id, em);
         Ok(())
@@ -341,10 +425,10 @@ impl Aligner {
         if !progress(Stage::Align) {
             return Err(Error::Stopped);
         }
-        let vocab = self.ctc(main)?.1.clone();
+        let vocab = self.vocab(main)?;
         let mut vocabs = Vec::new();
         for (id, _) in &others {
-            vocabs.push(self.ctc(*id)?.1.clone());
+            vocabs.push(self.vocab(*id)?);
         }
         let foreign: Vec<Foreign<'_>> =
             others.iter().zip(&vocabs).map(|((id, ls), v)| Foreign { em: &prep.heard[id], vocab: v, lines: ls }).collect();
@@ -369,7 +453,7 @@ impl Aligner {
         if !progress(Stage::Align) {
             return Err(Error::Stopped);
         }
-        let vocab = self.ctc(id)?.1.clone();
+        let vocab = self.vocab(id)?;
         Ok(fit_text_with(&prep.heard[&id], &vocab, &[], lines, timed).map(|mut f| {
             f.covered = prep.covered(&f.lines);
             f.aligner = Some(id);
@@ -406,7 +490,10 @@ impl Aligner {
         let w = self.whisper.as_mut().expect("loaded above");
         let lang = w.language(&prep.voice[at(a)..at(b)], languages)?;
         log::info!("align: recognising in {lang}");
-        let segments = w.transcribe(&prep.voice, &lang, &spans, &mut |f| progress(Stage::Recognise(f)))?;
+        let segments = w.transcribe(&prep.voice, &lang, &spans, &mut |f| progress(Stage::Recognise(f)));
+        // Whisper (1.1 GB) is held only while it recognises.
+        self.whisper = None;
+        let segments = segments?;
         let lines: Vec<LyricLine> = segments
             .iter()
             .map(|s| LyricLine::new(std::time::Duration::from_secs_f32(s.start.max(0.0)), s.text.clone()))

@@ -77,22 +77,28 @@ impl Model {
             _ => return Err(Error::Runtime("ONNX Runtime is not loaded".into())),
         };
         let ort = |e: ort::Error| Error::Model(format!("{}: {e}", path.display()));
+        // No CPU memory arena and no memory pattern: what a run takes goes
+        // back to the system when the run (or the session) ends, instead of
+        // the largest run's worth staying with the session.
+        let cpu = || ort::ep::CPU::default().with_arena_allocator(false).build();
         let base = || -> Result<ort::session::builder::SessionBuilder, Error> {
             Session::builder(env)
                 .map_err(ort)?
                 .with_optimization_level(level)
                 .map_err(|e| ort(e.into()))?
                 .with_intra_threads(threads.max(1))
+                .map_err(|e| ort(e.into()))?
+                .with_inter_threads(1)
+                .map_err(|e| ort(e.into()))?
+                .with_memory_pattern(false)
                 .map_err(|e| ort(e.into()))
         };
         if device == Device::Gpu {
             let gpu = base()?
-                // DirectML wants these two off.
-                .with_memory_pattern(false)
-                .map_err(|e| ort(e.into()))?
+                // DirectML wants the memory pattern (above) and this off.
                 .with_parallel_execution(false)
                 .map_err(|e| ort(e.into()))?
-                .with_execution_providers([ort::ep::DirectML::default().build().error_on_failure()])
+                .with_execution_providers([ort::ep::DirectML::default().build().error_on_failure(), cpu()])
                 .map_err(|e| ort(e.into()))
                 .and_then(|mut b| b.commit_from_file(path).map_err(ort));
             match gpu {
@@ -100,7 +106,11 @@ impl Model {
                 Err(e) => log::warn!("align: no GPU for {}: {e}", path.display()),
             }
         }
-        let session = base()?.commit_from_file(path).map_err(ort)?;
+        let session = base()?
+            .with_execution_providers([cpu()])
+            .map_err(|e| ort(e.into()))?
+            .commit_from_file(path)
+            .map_err(ort)?;
         Ok(Self { session, device: Device::Cpu })
     }
 

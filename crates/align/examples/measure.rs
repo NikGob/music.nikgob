@@ -36,7 +36,6 @@ struct Job {
 fn id_of(s: &str) -> Option<ModelId> {
     Some(match s {
         "ru" => ModelId::AlignerRu,
-        "rugolos" => ModelId::AlignerRuGolos,
         "ja" => ModelId::AlignerJa,
         "en" | "en960" => ModelId::AlignerEn,
         "mms" => ModelId::AlignerMms,
