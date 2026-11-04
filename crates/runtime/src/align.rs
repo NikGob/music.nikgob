@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 use nikgob_align::catalog::{self, ModelId, ModelState};
 use nikgob_align::fit::{Fit, Timing};
+use nikgob_align::pipeline::{Route, fallback};
 use nikgob_align::{Aligner, Catalog, Device, Error, Prepared, Stage};
 use nikgob_core::lyrics::{LyricLine, LyricsSource, LyricsSync};
 use nikgob_core::model::TrackId;
@@ -31,16 +32,24 @@ use crate::import::Internal;
 use crate::lyrics::{Aligned, Text};
 
 /// Who made a row: a new aligner or new rules go through the library again.
-pub(crate) const MADE_BY: &str = "align-1";
+pub(crate) const MADE_BY: &str = "align-2";
 /// A text the recording spells at least this well (over chance) is this
 /// song's (docs/lyrics-align.md, «The check»).
 pub(crate) const FITS: f32 = 0.08;
-/// Or its letters are heard where they are put this much over chance.
+/// Or its letters are heard where they are put this much over chance (MMS
+/// on English songs: right texts 0.58–0.94, other songs' texts 0.44–0.62;
+/// docs/lyrics-align.md, «The check»).
 pub(crate) const HEARD: f32 = 0.6;
+/// The same for the English aligner: right 0.63–0.98, others 0.11–0.40.
+pub(crate) const HEARD_EN: f32 = 0.5;
+/// The same for the Japanese aligner, which is unsure of every sung
+/// character: right texts 0.12–0.37, others 0.00–0.03.
+pub(crate) const HEARD_JA: f32 = 0.07;
 /// A failed track is tried again after a week.
 const RETRY_MS: i64 = 7 * 86_400_000;
-/// Models stay loaded this long without work.
-const KEEP_LOADED: Duration = Duration::from_secs(90);
+/// Models stay loaded this long without work (an aligner and its few
+/// hundred megabytes; the separator and Whisper go after each use).
+const KEEP_LOADED: Duration = Duration::from_secs(25);
 /// CPU threads of the models.
 const THREADS: usize = 3;
 
@@ -174,6 +183,7 @@ pub(crate) fn label(id: ModelId) -> &'static str {
         ModelId::Separator => "Отделение голоса от музыки",
         ModelId::AlignerRu => "Слова по голосу: русский",
         ModelId::AlignerJa => "Слова по голосу: японский",
+        ModelId::AlignerEn => "Слова по голосу: английский",
         ModelId::AlignerMms => "Слова по голосу: другие языки",
         ModelId::Whisper => "Расслышать текст",
     }
@@ -185,6 +195,7 @@ pub(crate) fn key(id: ModelId) -> &'static str {
         ModelId::Separator => "separator",
         ModelId::AlignerRu => "ru",
         ModelId::AlignerJa => "ja",
+        ModelId::AlignerEn => "en",
         ModelId::AlignerMms => "mms",
         ModelId::Whisper => "whisper",
     }
@@ -217,7 +228,12 @@ pub(crate) fn models_view(catalog: &Catalog, downloading: &HashMap<ModelId, f32>
 /// the voice (one steady offset), which a stranger's text never does
 /// (docs/lyrics-align.md, «The check»).
 pub(crate) fn fits(f: &Fit) -> bool {
-    f.spelled >= FITS || f.heard >= HEARD || matches!(f.timing, Timing::Fits | Timing::Shifted)
+    let heard = match f.aligner {
+        Some(ModelId::AlignerJa) => HEARD_JA,
+        Some(ModelId::AlignerEn) => HEARD_EN,
+        _ => HEARD,
+    };
+    f.spelled >= FITS || f.heard >= heard || matches!(f.timing, Timing::Fits | Timing::Shifted)
 }
 
 /// A checked text as the library keeps it.
@@ -358,7 +374,11 @@ impl Thread {
             if self.aligner.loaded() && self.last_work.elapsed() > KEEP_LOADED {
                 self.aligner.unload();
             }
-            let wait = if Instant::now() < self.pass_at { (self.pass_at - Instant::now()).min(Duration::from_secs(30)) } else { Duration::from_secs(30) };
+            let mut wait = if Instant::now() < self.pass_at { (self.pass_at - Instant::now()).min(Duration::from_secs(30)) } else { Duration::from_secs(30) };
+            if self.aligner.loaded() {
+                // Wake up in time to free the models.
+                wait = wait.min(KEEP_LOADED.saturating_sub(self.last_work.elapsed()) + Duration::from_millis(200));
+            }
             match self.rx.recv_timeout(wait) {
                 Ok(r) => self.take(r),
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
@@ -401,9 +421,16 @@ impl Thread {
 
     /// Makes sure the parts are there, downloading what lacks (when the
     /// settings let it, or `asked`); the progress counts the bytes of all
-    /// that lack, for `track` when a song waits for them.
+    /// that are downloaded, for `track` when a song waits for them. An
+    /// aligner with a stand-in that is there is not downloaded unless the
+    /// settings let it.
     fn ensure(&mut self, ids: &[ModelId], asked: bool, track: Option<TrackId>) -> Result<(), Error> {
-        let lacking: Vec<ModelId> = ids.iter().copied().filter(|id| !self.aligner.catalog().ready(*id)).collect();
+        let lacking: Vec<ModelId> = ids
+            .iter()
+            .copied()
+            .filter(|id| !self.aligner.catalog().ready(*id))
+            .filter(|id| asked || self.settings.models_auto || !fallback(*id).is_some_and(|f| self.aligner.catalog().ready(f)))
+            .collect();
         let total: u64 = lacking.iter().map(|id| id.spec().size()).sum();
         let mut before = 0u64;
         for &id in ids {
@@ -411,6 +438,9 @@ impl Thread {
                 continue;
             }
             if !asked && !self.settings.models_auto {
+                if fallback(id).is_some_and(|f| self.aligner.catalog().ready(f)) {
+                    continue;
+                }
                 return Err(Error::Missing(label(id)));
             }
             self.downloading.insert(id, 0.0);
@@ -474,20 +504,27 @@ impl Thread {
         }
     }
 
-    /// The parts a check of `texts` needs.
+    /// The parts a check of `texts` needs: each text's own aligner. The
+    /// aligner of a few foreign lines (an English ad-lib in a Russian song)
+    /// is not fetched for them: they take it when a text in that language
+    /// brought it, else their text's own.
     fn needs(&self, texts: &[AlignText]) -> Vec<ModelId> {
         let mut ids = vec![ModelId::Runtime];
         if self.settings.separate {
             ids.push(ModelId::Separator);
         }
-        for t in texts {
-            if let Some(id) = Aligner::needs(&t.lines)
-                && !ids.contains(&id)
-            {
-                ids.push(id);
+        for route in texts.iter().filter_map(|t| Route::of(&t.lines)) {
+            if !ids.contains(&route.main) {
+                ids.push(route.main);
             }
         }
         ids
+    }
+
+    /// [`Self::ensure`] of what [`Self::needs`] says.
+    fn ensure_for(&mut self, texts: &[AlignText], asked: bool, track: Option<TrackId>) -> Result<(), Error> {
+        let ids = self.needs(texts);
+        self.ensure(&ids, asked, track)
     }
 
     fn prepare(&mut self, track: TrackId, path: &Path, asked: bool) -> Result<Prepared, Error> {
@@ -521,11 +558,10 @@ impl Thread {
         if texts.is_empty() && !wants_heard {
             return Ok(());
         }
-        let mut ids = self.needs(texts);
         if wants_heard && texts.is_empty() {
-            ids.push(ModelId::Whisper);
+            self.ensure(&[ModelId::Whisper], false, asked.then_some(track))?;
         }
-        self.ensure(&ids, false, asked.then_some(track))?;
+        self.ensure_for(texts, false, asked.then_some(track))?;
         let mut prep = self.prepare(track, path, asked)?;
         let mut rows = Vec::new();
         for t in texts {
@@ -561,8 +597,7 @@ impl Thread {
     }
 
     fn craft(&mut self, track: TrackId, path: &Path, text: &AlignText, target: LyricsSync) -> Result<Vec<LyricLine>, Error> {
-        let ids = self.needs(std::slice::from_ref(text));
-        self.ensure(&ids, true, Some(track))?;
+        self.ensure_for(std::slice::from_ref(text), true, Some(track))?;
         let mut prep = self.prepare(track, path, true)?;
         let fit = self.fit(track, &mut prep, text, true)?.ok_or_else(|| Error::Model("Этот текст не выровнять".into()))?;
         Ok(if target == LyricsSync::Line { to_lines(&fit.lines) } else { fit.lines })
@@ -800,6 +835,7 @@ mod tests {
             offset: -2.14,
             spread: 0.06,
             lines: vec![LyricLine::new(Duration::from_secs(16), "Слово за слово")],
+            aligner: Some(ModelId::AlignerRu),
         }
     }
 
@@ -819,6 +855,25 @@ mod tests {
         assert!(!Aligned::from_row(&misfit).unwrap().1.fits);
         // No aligner spells it: not a verdict on the text.
         assert_eq!(row_of(&text, None).timing, "none");
+    }
+
+    #[test]
+    fn a_japanese_plain_text_is_judged_on_the_japanese_aligner_s_levels() {
+        // Measured: Eve's «Ghost Avenue» with its own text without line
+        // times, and with another song's text.
+        let text = AlignText { source: LyricsSource::Genius, lines: Vec::new(), timed: false, hash: "h".into() };
+        let ja = |heard: f32, spelled: f32| Fit { heard, aligner: Some(ModelId::AlignerJa), ..fit(spelled, Timing::None) };
+        let right = row_of(&text, Some(&ja(0.12, 0.02)));
+        assert!(right.body.is_some(), "a right Japanese text is not «Другая запись»");
+        assert_eq!(right.timing, "none");
+        assert!(row_of(&text, Some(&ja(0.03, 0.01))).body.is_none());
+        // The English aligner hears other songs' texts less than MMS does.
+        let en = |heard: f32| Fit { heard, aligner: Some(ModelId::AlignerEn), ..fit(0.02, Timing::None) };
+        assert!(row_of(&text, Some(&en(0.63))).body.is_some());
+        assert!(row_of(&text, Some(&en(0.40))).body.is_none());
+        // Another aligner keeps its own bar.
+        let ru = Fit { heard: 0.23, ..fit(0.04, Timing::None) };
+        assert!(row_of(&text, Some(&ru)).body.is_none());
     }
 
     #[test]

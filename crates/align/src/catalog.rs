@@ -28,6 +28,8 @@ pub enum ModelId {
     AlignerRu,
     /// The Japanese aligner.
     AlignerJa,
+    /// The English aligner.
+    AlignerEn,
     /// Whisper large-v3-turbo, recognition from scratch.
     Whisper,
 }
@@ -160,6 +162,27 @@ pub const ALIGNER_JA: ModelSpec = ModelSpec {
     ],
 };
 
+pub const ALIGNER_EN: ModelSpec = ModelSpec {
+    id: ModelId::AlignerEn,
+    dir: "wav2vec2-960h-english",
+    files: &[
+        FileSpec {
+            name: "model_int8.onnx",
+            url: hf!("linandrea/wav2vec2-large-960h-lv60-self-onnx", "20eaa6d7ea9cd7abb5460b4a697010ca3562377d", "onnx/model_quantized.onnx"),
+            size: 355_006_955,
+            sha256: "7c8f4b674d2130375f82fd7d5dcc407d86efcfe8d782c000e9bda526bfa0d818",
+            extract: &[],
+        },
+        FileSpec {
+            name: "vocab.json",
+            url: hf!("linandrea/wav2vec2-large-960h-lv60-self-onnx", "20eaa6d7ea9cd7abb5460b4a697010ca3562377d", "vocab.json"),
+            size: 358,
+            sha256: "4178db26b3c7570f6a47f14ac6a1c7b32950b8c2800fb097287e53776934f1c5",
+            extract: &[],
+        },
+    ],
+};
+
 pub const WHISPER: ModelSpec = ModelSpec {
     id: ModelId::Whisper,
     dir: "whisper-large-v3-turbo",
@@ -188,7 +211,7 @@ pub const WHISPER: ModelSpec = ModelSpec {
     ],
 };
 
-pub const ALL: [ModelSpec; 6] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, WHISPER];
+pub const ALL: [ModelSpec; 7] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, WHISPER];
 
 impl ModelId {
     pub fn spec(self) -> ModelSpec {
@@ -433,6 +456,19 @@ mod tests {
         }
         assert_eq!(member_name("onnxruntime/capi/onnxruntime.dll"), "onnxruntime.dll");
         assert!(WHISPER.size() > 1_000_000_000);
+    }
+
+    #[test]
+    fn every_aligner_has_its_folder_model_and_letters() {
+        let dirs: std::collections::HashSet<&str> = ALL.iter().map(|s| s.dir).collect();
+        assert_eq!(dirs.len(), ALL.len(), "two parts share a folder");
+        for id in [ModelId::AlignerMms, ModelId::AlignerRu, ModelId::AlignerJa, ModelId::AlignerEn] {
+            let names: Vec<&str> = id.spec().files.iter().map(|f| f.name).collect();
+            assert_eq!(names, ["model_int8.onnx", "vocab.json"], "{id:?}");
+        }
+        // The English aligner: wav2vec2 large 960h (lv60, self-training).
+        assert!(ALIGNER_EN.files[0].url.contains("wav2vec2-large-960h-lv60-self"));
+        assert!(ALIGNER_EN.size() < 360_000_000);
     }
 
     #[test]

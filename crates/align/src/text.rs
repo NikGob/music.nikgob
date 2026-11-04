@@ -82,6 +82,138 @@ impl Script {
     }
 }
 
+/// The language a text (or one of its lines) is sung in, as far as the
+/// choice of an aligner goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Lang {
+    English,
+    Russian,
+    Japanese,
+    Chinese,
+    Korean,
+    /// Any other language (Latin, Cyrillic or another script).
+    Other,
+}
+
+/// Words that tell a Latin-script language (the commonest of each).
+const WORDS: [(&str, &[&str]); 7] = [
+    ("en", &["the", "and", "you", "i", "to", "me", "my", "it", "is", "that", "your", "on", "for", "be", "we", "all", "with", "love", "so", "this", "but", "just", "when", "what", "like", "don't", "can", "know", "i'm", "it's", "of", "in", "a", "oh", "yeah", "now"]),
+    ("es", &["que", "de", "la", "el", "y", "en", "me", "un", "una", "mi", "por", "te", "lo", "es", "con", "se", "tu", "para", "como", "yo", "pero", "amor", "más"]),
+    ("fr", &["je", "de", "la", "le", "et", "les", "que", "tu", "pas", "un", "une", "est", "des", "dans", "mon", "moi", "pour", "qui", "ne", "il", "sur", "avec", "c'est"]),
+    ("de", &["ich", "und", "die", "der", "du", "nicht", "das", "ist", "es", "ein", "mich", "mir", "zu", "wie", "sie", "wir", "auf", "mein", "dich"]),
+    ("it", &["che", "di", "il", "la", "non", "e", "un", "mi", "ti", "per", "una", "sono", "io", "tu", "lo", "con", "se", "ma"]),
+    ("pt", &["que", "de", "não", "eu", "e", "o", "um", "você", "me", "meu", "do", "da", "se", "em", "mais", "por", "pra"]),
+    ("pl", &["nie", "się", "w", "to", "na", "że", "jest", "z", "mnie", "mi", "jak", "ja", "co", "tak", "ty", "do"]),
+];
+
+/// A word made of Japanese syllables written in Latin letters (romaji).
+fn romaji(word: &str) -> bool {
+    let b = word.as_bytes();
+    let vowel = |c: u8| b"aiueo".contains(&c);
+    let mut i = 0;
+    while i < b.len() {
+        if vowel(b[i]) {
+            i += 1;
+            continue;
+        }
+        if b[i] == b'n' && b.get(i + 1).is_none_or(|c| !vowel(*c) && *c != b'y') {
+            i += 1;
+            continue;
+        }
+        // A consonant (doubled, «sh», «ch», «ts», then maybe «y») and a vowel.
+        let mut j = i + 1;
+        if b.get(j) == Some(&b[i]) && b[i] != b'n' {
+            j += 1;
+        }
+        if matches!((b[i], b.get(j)), (b's' | b'c', Some(b'h')) | (b't', Some(b's'))) {
+            j += 1;
+        }
+        if !b"kgsztdnhbpmyrwfjc".contains(&b[i]) {
+            return false;
+        }
+        if b.get(j) == Some(&b'y') {
+            j += 1;
+        }
+        if !b.get(j).is_some_and(|c| vowel(*c)) {
+            return false;
+        }
+        i = j + 1;
+    }
+    !b.is_empty()
+}
+
+/// Whether a Latin-script text is English (rather than another language
+/// in Latin letters, romaji included). Short lines with nothing telling
+/// count as English: that is what the Latin lines of a Russian or
+/// Japanese song mostly are.
+fn english(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !(c.is_alphabetic() || c == '\'' || c == '’'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.is_empty() {
+        return true;
+    }
+    let share = |list: &[&str]| words.iter().filter(|w| list.contains(w)).count() as f32 / words.len() as f32;
+    let en = share(WORDS[0].1);
+    let rest = WORDS[1..].iter().map(|(_, l)| share(l)).fold(0.0, f32::max);
+    if en >= 0.08 && en >= rest {
+        return true;
+    }
+    if rest >= 0.08 {
+        return false;
+    }
+    let letters: Vec<char> = lower.chars().filter(|c| c.is_alphabetic()).collect();
+    let marked = letters.iter().filter(|c| !c.is_ascii()).count();
+    if marked as f32 > letters.len() as f32 * 0.02 {
+        return false;
+    }
+    let roman = words.iter().filter(|w| w.len() > 1 && romaji(w)).count();
+    roman as f32 <= words.len() as f32 * 0.6 || words.len() < 3
+}
+
+impl Lang {
+    /// The language of a text (or a line).
+    pub fn of(text: &str) -> Self {
+        match Script::of(text) {
+            Script::Japanese => Self::Japanese,
+            Script::Chinese => Self::Chinese,
+            Script::Korean => Self::Korean,
+            Script::Latin if english(text) => Self::English,
+            // Ukrainian and Belarusian letters the Russian aligner lacks.
+            Script::Cyrillic if !text.chars().any(|c| matches!(c, 'і' | 'ї' | 'є' | 'ґ' | 'ў' | 'І' | 'Ї' | 'Є' | 'Ґ' | 'Ў')) => Self::Russian,
+            _ => Self::Other,
+        }
+    }
+
+    /// The language of each line of a text sung mostly in `main`: a line
+    /// in another script than the text's is its own language (an English
+    /// line in a Russian song), the rest are the text's (kanji alone in a
+    /// Japanese song, a Spanish word in an English one).
+    pub fn of_lines<'a>(main: Self, lines: impl IntoIterator<Item = &'a str>) -> Vec<Self> {
+        let script = |l: Self| match l {
+            Self::English => Some(Script::Latin),
+            Self::Russian => Some(Script::Cyrillic),
+            Self::Japanese => Some(Script::Japanese),
+            _ => None,
+        };
+        lines
+            .into_iter()
+            .map(|line| {
+                let own = Script::of(line);
+                let letters = line.chars().filter(|c| c.is_alphabetic()).count();
+                let differs = matches!(own, Script::Latin | Script::Cyrillic | Script::Japanese) && Some(own) != script(main);
+                if letters >= 2 && differs && !(main == Self::Other && own == Script::Latin) {
+                    Self::of(line)
+                } else {
+                    main
+                }
+            })
+            .collect()
+    }
+}
+
 /// Cuts a line into the pieces timed one by one; they keep their trailing
 /// whitespace, so joined they give `line` back.
 pub fn pieces(line: &str) -> Vec<String> {
@@ -139,12 +271,20 @@ impl Vocab {
         let map: std::collections::HashMap<String, i32> = serde_json::from_str(json)?;
         let blank = ["<blank>", "<pad>"].iter().find_map(|k| map.get(*k)).copied().unwrap_or(0) as usize;
         let sep = if letters == Letters::Native { map.get("|").copied() } else { None };
+        let single = |k: &str| {
+            let mut cs = k.chars();
+            let c = cs.next()?;
+            (cs.next().is_none() && c != '|' && !c.is_whitespace()).then_some(c)
+        };
+        // Some models spell in capitals only (wav2vec2 960h): the text is
+        // matched in lower case.
+        let upper = map.keys().filter_map(|k| single(k)).any(char::is_uppercase)
+            && !map.keys().filter_map(|k| single(k)).any(char::is_lowercase);
         let ids = map
             .iter()
             .filter_map(|(k, v)| {
-                let mut cs = k.chars();
-                let c = cs.next()?;
-                (cs.next().is_none() && c != '|' && !c.is_whitespace()).then_some((c, *v))
+                let c = single(k)?;
+                Some((if upper { c.to_lowercase().next().unwrap_or(c) } else { c }, *v))
             })
             .collect();
         Ok(Self { letters, ids, sep, blank })
@@ -159,6 +299,9 @@ impl Vocab {
                 for c in lower.chars().map(fold) {
                     if let Some(id) = self.ids.get(&c) {
                         out.push(*id);
+                    } else if let Some(base) = base_letters(c).filter(|b| b.chars().all(|l| self.ids.contains_key(&l))) {
+                        // «ё» of a model without it, «é» of an English one.
+                        out.extend(base.chars().map(|l| self.ids[&l]));
                     } else if c.is_alphanumeric() {
                         out.push(STAR);
                     }
@@ -215,6 +358,15 @@ fn romanise(c: char, _prev: Option<char>, next: Option<char>) -> Option<String> 
         return kana_roman(hira).map(str::to_owned);
     }
     None
+}
+
+/// The plain letters of a letter with a mark, for a model that lacks it.
+fn base_letters(c: char) -> Option<&'static str> {
+    match c {
+        'ё' => Some("е"),
+        'й' => Some("и"),
+        _ => latin_base(c),
+    }
 }
 
 fn latin_base(c: char) -> Option<&'static str> {
@@ -299,6 +451,44 @@ mod tests {
         assert_eq!(Script::of("Hello"), Script::Latin);
         assert_eq!(Script::of("我爱你"), Script::Chinese);
         assert_eq!(Script::of("…"), Script::Other);
+    }
+
+    #[test]
+    fn languages_of_texts() {
+        assert_eq!(Lang::of("I don't wanna be alone tonight\nHold me close"), Lang::English);
+        assert_eq!(Lang::of("Oh yeah"), Lang::English);
+        assert_eq!(Lang::of("Que te quiero, mi amor, para siempre"), Lang::Other);
+        assert_eq!(Lang::of("Je ne sais pas pourquoi tu es là"), Lang::Other);
+        assert_eq!(Lang::of("Kimi no na wa sayonara watashi no kokoro"), Lang::Other);
+        assert_eq!(Lang::of("Группа крови на рукаве"), Lang::Russian);
+        assert_eq!(Lang::of("Привіт, як справи? Їжак"), Lang::Other);
+        assert_eq!(Lang::of("君の名は"), Lang::Japanese);
+        assert_eq!(Lang::of("我爱你"), Lang::Chinese);
+        assert_eq!(Lang::of("사랑해"), Lang::Korean);
+        assert!(romaji("sayonara") && romaji("kokoro") && romaji("shinjitsu") && romaji("kitto"));
+        assert!(!romaji("love") && !romaji("tonight") && !romaji("the"));
+    }
+
+    #[test]
+    fn a_line_in_another_script_is_its_own_language() {
+        let ru = Lang::of_lines(Lang::Russian, ["Я иду домой", "Baby, I love you", "OK", "(х2)"]);
+        assert_eq!(ru, [Lang::Russian, Lang::English, Lang::English, Lang::Russian]);
+        // Kanji alone are Japanese in a Japanese song; Latin letters are not.
+        let ja = Lang::of_lines(Lang::Japanese, ["君の名は", "夢", "I want you", "a"]);
+        assert_eq!(ja, [Lang::Japanese, Lang::Japanese, Lang::English, Lang::Japanese]);
+        let en = Lang::of_lines(Lang::English, ["Hello there", "Привет, мир", "さよなら"]);
+        assert_eq!(en, [Lang::English, Lang::Russian, Lang::Japanese]);
+        // A Latin line of a Spanish song stays with the Spanish.
+        assert_eq!(Lang::of_lines(Lang::Other, ["Baby I love you"]), [Lang::Other]);
+    }
+
+    #[test]
+    fn capitals_only_vocabularies_and_missing_marks() {
+        let caps = Vocab::from_json(r#"{"<pad>":0,"|":4,"E":5,"T":6,"A":7,"'":27,"C":19,"F":20}"#, Letters::Native).unwrap();
+        assert_eq!(caps.tokens("Eat"), [5, 7, 6]);
+        assert_eq!(caps.tokens("café"), [19, 7, 20, 5]);
+        let ru = Vocab::from_json(r#"{"<pad>":0,"|":4,"е":10,"ж":11}"#, Letters::Native).unwrap();
+        assert_eq!(ru.tokens("Ёж"), [10, 11]);
     }
 
     #[test]

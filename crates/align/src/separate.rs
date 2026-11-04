@@ -29,19 +29,21 @@ pub const KIM_VOCAL_2: MdxSpec = MdxSpec { n_fft: 7680, hop: 1024, dim_f: 3072, 
 
 /// The voice of `mix` (44.1 kHz; mono is doubled). `progress` gets the done
 /// share after each chunk and stops the work when it returns false.
-pub fn vocals(model: &mut Model, spec: MdxSpec, mix: &Audio, progress: &mut dyn FnMut(f32) -> bool) -> Result<Audio, Error> {
-    let mix = mix.clone().stereo();
+pub fn vocals(model: &mut Model, spec: MdxSpec, mix: Audio, progress: &mut dyn FnMut(f32) -> bool) -> Result<Audio, Error> {
+    let mix = mix.stereo();
     let n = mix.frames();
     let chunk = spec.hop * (spec.dim_t - 1);
     let trim = spec.n_fft / 2;
     let step = chunk - 2 * trim;
     let pad = step - n % step;
+    let rate = mix.rate;
+    // The mix goes as it is padded: one copy of the song at a time.
     let padded: Vec<Vec<f32>> = mix
         .channels
-        .iter()
+        .into_iter()
         .map(|c| {
             let mut v = vec![0.0; trim];
-            v.extend_from_slice(c);
+            v.extend_from_slice(&c);
             v.resize(trim + n + pad + trim, 0.0);
             v
         })
@@ -92,7 +94,7 @@ pub fn vocals(model: &mut Model, spec: MdxSpec, mix: &Audio, progress: &mut dyn 
     for c in &mut out {
         c.truncate(n);
     }
-    Ok(Audio { rate: mix.rate, channels: out })
+    Ok(Audio { rate, channels: out })
 }
 
 fn hann(n: usize) -> Vec<f32> {
