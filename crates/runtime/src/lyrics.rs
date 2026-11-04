@@ -206,11 +206,21 @@ impl Shown {
 /// Where the audio to make timing from is (set by the worker).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Place {
-    /// Nothing to listen to.
+    /// Nothing to listen to, or not allowed (a stream with the setting off).
     #[default]
     None,
     /// The track's own file.
     File,
+    /// A stream whose artist and song are clear: fetched for a while.
+    Stream,
+    /// A stream whose song is unclear (a clip, an unofficial upload): why.
+    Unclear(String),
+}
+
+impl Place {
+    fn has_audio(&self) -> bool {
+        matches!(self, Self::File | Self::Stream)
+    }
 }
 
 /// Everything known about one track's lyrics.
@@ -491,11 +501,12 @@ impl TrackLyrics {
         };
         let craft = match (source, &self.place) {
             (None | Some(LyricsSource::Recognized), _) | (_, Place::None) => v::LyricsCraft::Off,
+            (_, Place::Unclear(why)) => v::LyricsCraft::No(why.clone()),
             _ => v::LyricsCraft::Ready,
         };
         // The player's own timing of a found text can go to the computer
         // (a heard text is its guess: never).
-        let savable = made && source.is_some_and(|s| s != LyricsSource::Recognized) && self.place == Place::File;
+        let savable = made && source.is_some_and(|s| s != LyricsSource::Recognized) && self.place.has_audio();
         v::LyricsView {
             track: Some(track),
             lines,
@@ -555,8 +566,11 @@ fn shift_lines(lines: &[LyricLine], by: Duration, early: bool) -> Vec<LyricLine>
 
 /// A `.ttml` (Apple Music style, word-synced) next to the file.
 fn local_ttml(file: &Path) -> Option<Text> {
-    let path = nikgob_import::sanitize::long_path(&file.with_extension("ttml"));
-    Text::from_ttml(&std::fs::read_to_string(path).ok()?)
+    read_ttml(&file.with_extension("ttml"))
+}
+
+fn read_ttml(path: &Path) -> Option<Text> {
+    Text::from_ttml(&std::fs::read_to_string(nikgob_import::sanitize::long_path(path)).ok()?)
 }
 
 /// The artists LyricsPlus is asked with, in order: the full credit
@@ -647,8 +661,16 @@ pub(crate) fn stored_lines(body: &str) -> Option<Text> {
 }
 
 /// Reads only files and caches; expired misses become pending lookups
-/// (Genius only when `genius`).
-pub(crate) fn cached_lyrics(lib: &Library, track: TrackId, path: Option<&Path>, tags: Option<&nikgob_import::tags::TagSet>, genius: bool) -> TrackLyrics {
+/// (Genius only when `genius`). `kept`: the text kept in its artist's
+/// folder for a song without a file ([`nikgob_import::layout::kept_text_path`]).
+pub(crate) fn cached_lyrics(
+    lib: &Library,
+    track: TrackId,
+    path: Option<&Path>,
+    tags: Option<&nikgob_import::tags::TagSet>,
+    genius: bool,
+    kept: Option<&Path>,
+) -> TrackLyrics {
     let mut tl = TrackLyrics {
         pick: lib
             .lyrics_pick(track)
@@ -662,6 +684,8 @@ pub(crate) fn cached_lyrics(lib: &Library, track: TrackId, path: Option<&Path>, 
     let fresh_miss = |at: i64| now_ms() - at < LYRICS_RETRY_MS;
 
     if let Some(t) = path.and_then(local_ttml) {
+        tl.insert(LyricsSource::File, Some(t));
+    } else if let Some(t) = kept.filter(|_| path.is_none()).and_then(read_ttml) {
         tl.insert(LyricsSource::File, Some(t));
     } else if let Some((synced, plain)) = path
         .and_then(|p| crate::enrich::local_lyrics(p, tags))
@@ -694,9 +718,9 @@ pub(crate) fn cached_lyrics(lib: &Library, track: TrackId, path: Option<&Path>, 
 }
 
 /// Background backfill uses the same cache, fallback gates and ranking as playback.
-pub(crate) async fn fetch_track_lyrics(meta: Metadata, lib: Library, row: TrackRow, path: Option<PathBuf>, genius: bool) -> TrackLyrics {
+pub(crate) async fn fetch_track_lyrics(meta: Metadata, lib: Library, row: TrackRow, path: Option<PathBuf>, genius: bool, kept: Option<PathBuf>) -> TrackLyrics {
     let tags = path.as_deref().and_then(|p| nikgob_import::tags::read_tags(p).ok()).map(|(t, _)| t);
-    let mut tl = cached_lyrics(&lib, row.id, path.as_deref(), tags.as_ref(), genius);
+    let mut tl = cached_lyrics(&lib, row.id, path.as_deref(), tags.as_ref(), genius, kept.as_deref());
     loop {
         let sources = tl.next_lookups();
         if sources.is_empty() { break }
@@ -766,6 +790,11 @@ impl Worker {
     pub(crate) fn lyrics_backfilled(&mut self, track: TrackId, mut tl: TrackLyrics) {
         tl.pick = self.lib.lyrics_pick(track).ok().flatten().and_then(|k| LyricsSource::from_key(&k));
         tl.show = Shown::of(&self.state.read().prefs);
+        if tl.texts_of(LyricsSource::File).is_none()
+            && let Some(kept) = self.kept_text(track).as_deref().and_then(read_ttml)
+        {
+            tl.insert(LyricsSource::File, Some(kept));
+        }
         let Some(svc) = self.import.as_mut() else { return };
         // Playback lookups keep ownership of their in-flight results.
         if svc.lyrics_cache.get(&track).is_some_and(|t| !t.pending.is_empty() || t.embedding) { return }
@@ -794,7 +823,8 @@ impl Worker {
             return;
         }
         let genius = self.state.read().prefs.lyrics_genius;
-        let mut tl = cached_lyrics(&self.lib, track, path.as_deref(), tags, genius);
+        let kept = if path.is_none() { self.kept_text(track) } else { None };
+        let mut tl = cached_lyrics(&self.lib, track, path.as_deref(), tags, genius, kept.as_deref());
         tl.show = Shown::of(&self.state.read().prefs);
         tl.place = self.lyrics_place(track);
         if let Some(svc) = self.import.as_mut() {
@@ -925,9 +955,16 @@ impl Worker {
     pub(crate) fn lyrics_prefs_changed(&mut self) {
         let show = Shown::of(&self.state.read().prefs);
         let shown = self.state.read().lyrics.track;
+        let tracks: Vec<TrackId> = self.import.as_ref().map(|s| s.lyrics_cache.keys().copied().collect()).unwrap_or_default();
+        let places: Vec<(TrackId, Place)> = tracks.into_iter().map(|t| (t, self.lyrics_place(t))).collect();
         let Some(svc) = self.import.as_mut() else { return };
         for tl in svc.lyrics_cache.values_mut() {
             tl.show = show;
+        }
+        for (t, place) in places {
+            if let Some(tl) = svc.lyrics_cache.get_mut(&t) {
+                tl.place = place;
+            }
         }
         if let Some(track) = shown
             && let Some(view) = svc.lyrics_cache.get(&track).map(|tl| tl.view(track))
@@ -1352,11 +1389,11 @@ mod tests {
         use nikgob_core::model::{ArtistCredit, Track};
         let lib = Library::open_in_memory().unwrap();
         let track = lib.upsert_track(&Track::new("Замок", ArtistCredit::single("nyan.mp3", None))).unwrap().id;
-        let fresh = cached_lyrics(&lib, track, None, None, true);
+        let fresh = cached_lyrics(&lib, track, None, None, true, None);
         assert!(fresh.pending.contains(&LyricsSource::Genius));
         let body = Text::from_plain("Я невменяемый (Ай)").unwrap().body();
         lib.put_lyrics_text(track, LyricsSource::Genius.key(), body.as_deref()).unwrap();
-        let tl = cached_lyrics(&lib, track, None, None, true);
+        let tl = cached_lyrics(&lib, track, None, None, true, None);
         assert!(!tl.pending.contains(&LyricsSource::Genius));
         assert_eq!(tl.texts_of(LyricsSource::Genius).and_then(|t| t.plain.as_deref()), Some("Я невменяемый (Ай)"));
     }
@@ -1426,7 +1463,7 @@ mod tests {
         lib.put_lyrics(track, Some("[00:01.00]a\n[00:02.00]b"), Some("a\nb"), false).unwrap();
         let lrcred = Text::from_lrc(Some("[00:01.00]a\n[00:02.00]b"), None).unwrap().body();
         lib.put_lyrics_text(track, LyricsSource::LrcRed.key(), lrcred.as_deref()).unwrap();
-        let mut tl = cached_lyrics(&lib, track, None, None, true);
+        let mut tl = cached_lyrics(&lib, track, None, None, true, None);
         assert!(tl.pending.contains(&LyricsSource::Genius));
         assert_eq!(tl.next_lookups(), [LyricsSource::LyricsPlus]);
         for got in [None, Some(worded())] {
@@ -1501,7 +1538,7 @@ mod tests {
             .collect();
         assert_eq!(asked, ["WENARO, LXNER", "WENARO"]);
         // Cached weak.
-        assert!(cached_lyrics(&lib, t.id, None, None, false).texts[&LyricsSource::LyricsPlus].weak);
+        assert!(cached_lyrics(&lib, t.id, None, None, false, None).texts[&LyricsSource::LyricsPlus].weak);
     }
 
     #[tokio::test]
@@ -1520,7 +1557,7 @@ mod tests {
         assert!(fetch_online(meta.clone(), lib.clone(), row.clone(), LyricsSource::LyricsPlus).await.unwrap().is_none());
         let miss = lib.lyrics_text(t.id, "lyricsplus").unwrap().unwrap();
         assert!(miss.0.is_none());
-        assert!(cached_lyrics(&lib, t.id, None, None, false).missing.contains(&LyricsSource::LyricsPlus));
+        assert!(cached_lyrics(&lib, t.id, None, None, false, None).missing.contains(&LyricsSource::LyricsPlus));
         server.reset().await;
         Mock::given(path("/v2/lyrics/get")).respond_with(ResponseTemplate::new(502)).mount(&server).await;
         assert!(fetch_online(meta, lib.clone(), row, LyricsSource::LyricsPlus).await.is_err());

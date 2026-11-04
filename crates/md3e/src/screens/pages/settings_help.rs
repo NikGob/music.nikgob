@@ -105,6 +105,10 @@ pub enum SettingId {
     LyricsGpu,
     LyricsModelsAuto,
     LyricsGenius,
+    /// «Подсветка для песен без файла».
+    LyricsStreams,
+    /// What a song without a file keeps once its text is saved.
+    LyricsStreamKeep,
     LyricsModels,
     OutputDevice,
     Gapless,
@@ -411,6 +415,8 @@ impl SettingId {
             LyricsGpu => "Где считают модели. На видеокарте (через DirectML) в десятки раз быстрее; если она не справится, плеер сам перейдёт на процессор.",
             LyricsModelsAuto => "Нужные модели скачиваются сами, когда понадобятся. Выключено — только кнопкой ниже.",
             LyricsGenius => "Если подходящего текста со временем нет, плеер берёт простой текст с genius.com. Найденный текст хранится в библиотеке, второй раз его не ищут.",
+            LyricsStreams => "Подсветку по словам можно сделать и для песни, которая играет с YouTube: плеер на время скачивает её звук, слушает голос и удаляет звук. Только для песен, где ясно, кто и что поёт.",
+            LyricsStreamKeep => "Что «Сохранить текст» кладёт в папку исполнителя в библиотеке для песни без файла.",
             LyricsModels => "Модели, которыми плеер слушает голос и ставит строки и слова. Хранятся рядом с библиотекой; для песни скачиваются только нужные.",
             OutputDevice => "Через что играет звук: колонки, наушники и т. д. Переключается без паузы.",
             Gapless => "Треки альбома идут друг за другом без тишины, как на диске.",
@@ -537,6 +543,10 @@ impl SettingId {
                 c!("Меню", "Подсветка делается прямо из меню у кнопки."),
                 c!("Окно", "Пункт меню «Сделать подсветку…» открывает окно поверх плеера: источники, весь текст и подсветка."),
                 c!("Экран", "Пункт меню «Сделать подсветку…» открывает отдельный экран «Текст песни», как настройки."),
+            ],
+            Self::LyricsStreamKeep => &[
+                c!("Только текст", "Рядом с остальной музыкой исполнителя ложится только файл текста; песня играет с YouTube, как раньше."),
+                c!("Песню и текст", "Песня скачивается с YouTube в библиотеку как файл, текст ложится рядом с ней."),
             ],
             Self::LyricsGpu => &[
                 c!("Видеокарта", "Быстро: несколько секунд на песню."),
@@ -672,6 +682,7 @@ impl SettingId {
             },
             Self::CoverDir => usize::from(p.cover_ccw),
             Self::LyricsGpu => usize::from(!p.lyrics_gpu),
+            Self::LyricsStreamKeep => usize::from(p.lyrics_stream_keep.min(1)),
             Self::LyricsUi => usize::from(p.lyrics_ui.min(2)),
             Self::RingDir => usize::from(p.ring_ccw),
             Self::RingStyle => match p.ring_style {
@@ -731,6 +742,7 @@ impl SettingId {
             }
             Self::CoverDir => p.cover_ccw = i == 1,
             Self::LyricsGpu => p.lyrics_gpu = i == 0,
+            Self::LyricsStreamKeep => p.lyrics_stream_keep = i.min(1) as u8,
             Self::LyricsUi => p.lyrics_ui = i.min(2) as u8,
             Self::RingDir => p.ring_ccw = i == 1,
             Self::RingStyle => p.ring_style = [v::RingStyle::Circle, v::RingStyle::Contour, v::RingStyle::Bars][i.min(2)],
@@ -1886,7 +1898,7 @@ mod tests {
             S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
-            S::RadioNoRepeat, S::LyricsGpu, S::LyricsUi,
+            S::RadioNoRepeat, S::LyricsGpu, S::LyricsUi, S::LyricsStreamKeep,
         ] {
 
             assert!(id.choices().len() >= 2, "{id:?}");

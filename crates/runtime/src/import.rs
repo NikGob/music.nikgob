@@ -722,10 +722,12 @@ impl Worker {
         // The wishlist hears about every file that landed (or failed).
         match &ev {
             ImportEvent::Imported { track_id, path, .. } => {
+                self.lyrics_imported(*track_id, path);
                 self.wish_imported(*track_id, path);
                 self.analysis.kick();
             }
             ImportEvent::Duplicate { kept, path, .. } => {
+                self.lyrics_imported(*kept, path);
                 self.wish_imported(*kept, path);
                 self.analysis.kick();
             }

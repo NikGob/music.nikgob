@@ -2,10 +2,12 @@
 //! with how its text goes (picking a source never needs a window), then
 //! where the shown text is kept (a group label: only online, made by the
 //! player and kept in the library, or on the computer) with «Сохранить
-//! текст» and the timing, and «Настройки текста…». The `menu` look makes
-//! the timing right here; the others have one «Сделать подсветку…» row
-//! that opens their window or page. While timing is made the control shows
-//! its progress; the result replaces the text by itself.
+//! текст» and the timing, and «Настройки текста…» until it was picked
+//! once. The `menu` look makes the timing right here; the others have one
+//! «Сделать подсветку…» row that opens their window or page. Where timing
+//! cannot be made (a clip whose song is unclear) the menu says why. While
+//! timing is made the control shows its progress; the result replaces the
+//! text by itself.
 
 use egui::{Id, Ui};
 use nikgob_view::{Command, LyricsAvail, LyricsSync, ViewState};
@@ -59,7 +61,8 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out:
         }
     }
     let busy = super::busy(state).is_some();
-    if !rows.is_empty() {
+    let follows = super::home(l).is_some() || super::no_craft(state).is_some() || !state.prefs.lyrics_settings_seen || busy;
+    if !rows.is_empty() && follows {
         menu = menu.divider();
     }
     // Where the shown text is kept, and what can be done with it.
@@ -84,11 +87,18 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out:
         menu = menu.item(MenuItem::new(if busy { "Подсветка делается…" } else { "Сделать подсветку…" }));
         rows.push(Row::Craft);
     }
-    if section || rows.iter().any(|r| matches!(r, Row::Save | Row::Make(_) | Row::Craft)) {
-        menu = menu.divider();
+    if let Some(why) = super::no_craft(state) {
+        menu = menu.group_label(why);
+        section = true;
     }
-    menu = menu.item(MenuItem::new("Настройки текста…"));
-    rows.push(Row::Settings);
+    // Offered until it was picked once (the settings remember).
+    if !state.prefs.lyrics_settings_seen {
+        if section || rows.iter().any(|r| matches!(r, Row::Save | Row::Make(_) | Row::Craft)) {
+            menu = menu.divider();
+        }
+        menu = menu.item(MenuItem::new("Настройки текста…"));
+        rows.push(Row::Settings);
+    }
 
     match menu.attach(&resp).and_then(|i| rows.get(i)) {
         Some(Row::Auto) => {
@@ -119,7 +129,10 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out:
             super::save(state, out);
             false
         }
-        Some(Row::Settings) => true,
+        Some(Row::Settings) => {
+            out.push(Command::SetPref(nikgob_view::PrefPatch::LyricsSettingsSeen));
+            true
+        }
         None => false,
     }
 }

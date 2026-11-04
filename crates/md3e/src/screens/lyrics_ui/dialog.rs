@@ -164,6 +164,8 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
             super::progress(ui, &b, (inner.width() - 160.0).min(360.0));
         } else if let Some(e) = super::failed(state) {
             ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
+        } else if let Some(why) = super::no_craft(state) {
+            ui.label(TypeRole::BodyMedium.style().rich(why, s.on_surface_variant));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;

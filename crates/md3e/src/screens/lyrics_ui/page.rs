@@ -114,6 +114,9 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
     if let Some(e) = super::failed(state) {
         ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
         ui.add_space(12.0);
+    } else if let Some(why) = super::no_craft(state) {
+        ui.label(TypeRole::BodyMedium.style().rich(why, s.on_surface_variant));
+        ui.add_space(12.0);
     }
     let actions = super::actions(state);
     let last = actions.len().saturating_sub(1);

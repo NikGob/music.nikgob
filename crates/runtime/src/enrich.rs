@@ -165,7 +165,7 @@ pub(crate) async fn backfill_lyrics(
                 .flatten()
                 .filter(|s| s.kind.is_local())
                 .map(|s| resolve(&library_dir, &s.locator));
-            let tl = crate::lyrics::fetch_track_lyrics(meta.clone(), lib.clone(), row, file, genius).await;
+            let tl = crate::lyrics::fetch_track_lyrics(meta.clone(), lib.clone(), row, file, genius, None).await;
             if tl.failed {
                 failures += 1;
                 if failures >= MAX_FAILURES { return }

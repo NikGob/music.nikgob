@@ -436,7 +436,8 @@ pub struct LyricsView {
     /// Whether timing can be made for the shown text, or why not.
     pub craft: LyricsCraft,
     /// The shown text (with the timing the player made) can be saved on
-    /// the computer: into the file's tags and a `.ttml` next to it.
+    /// the computer: into the file's tags and a `.ttml` next to it, or for
+    /// a song without a file into its artist's folder of the library.
     pub savable: bool,
 }
 
@@ -458,8 +459,10 @@ pub enum LyricsCraft {
     /// Not offered (no text, a heard one, or no audio to listen to).
     #[default]
     Off,
-    /// From the track's file.
+    /// From the file, or from the stream for a while.
     Ready,
+    /// Not for this song, and why (a clip whose song is unclear).
+    No(String),
 }
 
 /// One source's text in full, and what the player made of it.
@@ -1210,6 +1213,16 @@ pub struct Prefs {
     pub lyrics_models_auto: bool,
     /// «Искать на Genius».
     pub lyrics_genius: bool,
+    /// «Подсветка для песен без файла»: timing may be made for a stream
+    /// (the audio fetched for a while, then deleted).
+    pub lyrics_streams: bool,
+    /// What a stream's made timing keeps in its artist's folder: 0 the
+    /// text alone («Только текст»), 1 the song as a file and the text
+    /// («Песню и текст»).
+    pub lyrics_stream_keep: u8,
+    /// «Настройки текста…» was picked from the control's menu once: the
+    /// menu stops offering it.
+    pub lyrics_settings_seen: bool,
     /// The outline the Now Playing cover takes while playing.
     pub cover_shape: CoverShape,
     /// The cover's outline turns while playing (the picture stays put).
@@ -1590,6 +1603,8 @@ pub enum PrefPatch {
     GraphPersonal(bool),
     LibraryAsTaste(bool),
     RadioNoRepeat(u8),
+    /// «Настройки текста…» was picked from the lyrics control's menu.
+    LyricsSettingsSeen,
 }
 
 impl PrefPatch {
@@ -1650,6 +1665,7 @@ impl PrefPatch {
             Self::GraphOpenData(on) => p.graph_open_data = *on,
             Self::GraphPersonal(on) => p.graph_personal = *on,
             Self::LibraryAsTaste(on) => p.library_as_taste = *on,
+            Self::LyricsSettingsSeen => p.lyrics_settings_seen = true,
             Self::RadioNoRepeat(h) => p.radio_no_repeat_hours = *h,
         }
     }
@@ -2402,6 +2418,9 @@ impl Default for Prefs {
             lyrics_separate: true,
             lyrics_models_auto: true,
             lyrics_genius: true,
+            lyrics_streams: true,
+            lyrics_stream_keep: 0,
+            lyrics_settings_seen: false,
             cover_shape: CoverShape::default(),
             cover_spin: true,
             cover_pulse: true,

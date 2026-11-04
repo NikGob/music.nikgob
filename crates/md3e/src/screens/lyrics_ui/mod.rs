@@ -212,6 +212,15 @@ pub(crate) fn actions(state: &ViewState) -> Vec<(LyricsSync, &'static str)> {
     }
 }
 
+/// Why timing cannot be made for the shown text (a clip whose song is
+/// unclear), where the action would be.
+pub(crate) fn no_craft(state: &ViewState) -> Option<&str> {
+    match &state.lyrics.craft {
+        LyricsCraft::No(why) => Some(why),
+        _ => None,
+    }
+}
+
 /// Where the shown text is kept, in plain words.
 pub(crate) fn home(l: &LyricsView) -> Option<&'static str> {
     l.source?;
@@ -592,6 +601,11 @@ mod tests {
         assert_eq!(actions(&state), [(LyricsSync::Word, "Сделать подсветку заново")]);
         state.lyrics.source = Some(LyricsSource::Recognized);
         assert!(actions(&state).is_empty());
+        // A clip whose song is unclear: why, instead of the action.
+        state.lyrics.source = Some(LyricsSource::Genius);
+        state.lyrics.craft = LyricsCraft::No("Нельзя: это клип".into());
+        assert!(actions(&state).is_empty());
+        assert_eq!(no_craft(&state), Some("Нельзя: это клип"));
     }
 
     #[test]
