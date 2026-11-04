@@ -356,6 +356,9 @@ str_enum!(
         /// A like or playlist that arrived from a service sync.
         Sync = "sync",
         Manual = "manual",
+        /// A library file below the quality the user wants: searched for a
+        /// better copy on a schedule, which replaces it.
+        Upgrade = "upgrade",
     }
 );
 

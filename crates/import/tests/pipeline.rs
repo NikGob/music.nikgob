@@ -833,3 +833,57 @@ fn editions_without_musicbrainz_are_found_by_the_songs_they_share() {
     assert_eq!(lib.tracks_of_release(special).unwrap().len(), 7, "no song twice");
     assert!(nikgob_import::find_release_editions(&lib).unwrap().is_empty());
 }
+
+/// A better copy found for a library track (the wishlist's «качество
+/// лучше») is imported for that track: it replaces the file in place, and
+/// the like, the plays, the playlist entry and the lyrics stay on the same
+/// track; the old file goes to Trash.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_better_copy_for_a_track_keeps_its_like_plays_playlists_and_lyrics() {
+    use nikgob_core::model::{EventContext, EventType};
+    use nikgob_import::ImportTargets;
+
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let audio = broadband(RATE, 8.0, 5);
+    let work = root.dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let wav = work.join("master.wav");
+    write_wav(&wav, &audio, RATE);
+    let low = root.inbox("low.opus");
+    RopusEncoder.encode_to_opus(&wav, &low, &EncodeOptions { bitrate_kbps: 96 }).unwrap();
+    tags::write_tags(&low, &song_tags("Группа крови")).unwrap();
+    let events = importer.import_paths(vec![low], SourceOrigin::Inbox).wait().await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    let (track, _) = imported(&events)[0];
+    let old = lib.active_source(track).unwrap().unwrap();
+
+    lib.like(track).unwrap();
+    lib.record_event(track, EventType::Complete, Some(SourceKind::LocalFile), None, EventContext::default()).unwrap();
+    let playlist = lib.create_playlist("Дорога").unwrap();
+    lib.playlist_add(playlist.id, track).unwrap();
+    lib.put_lyrics(track, None, Some("Тёплое место, но улицы ждут"), false).unwrap();
+
+    // The copy comes as a wished download does: one file for the one track.
+    let hi = work.join("Kino - Gruppa krovi (FLAC).wav");
+    std::fs::copy(&wav, &hi).unwrap();
+    tags::write_tags(&hi, &song_tags("Группа крови")).unwrap();
+    let targets = ImportTargets { tracks: vec![track], force: true, ..ImportTargets::default() };
+    let events = importer.import_paths_for(vec![hi], SourceOrigin::Inbox, targets).wait().await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    assert_eq!(imported(&events), [(track, true)], "{events:?}");
+
+    let new = lib.active_source(track).unwrap().unwrap();
+    assert!(new.quality_score > old.quality_score);
+    assert_ne!(new.id, old.id);
+    assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), 1, "the same track");
+    assert!(lib.is_liked(track).unwrap());
+    assert_eq!(lib.events_of_track(track, 10).unwrap().len(), 1);
+    let entries = lib.playlist_entries(playlist.id, 0, 10).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].entry.track_id, track);
+    assert_eq!(lib.lyrics(track).unwrap().unwrap().plain.as_deref(), Some("Тёплое место, но улицы ждут"));
+    let trash = lib.list_trash().unwrap();
+    assert_eq!(trash.len(), 1);
+    assert_eq!(trash[0].source.id, old.id);
+}

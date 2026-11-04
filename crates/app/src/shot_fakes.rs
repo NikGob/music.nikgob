@@ -69,6 +69,10 @@
 //! - `fake:share` — «Загрузки → Раздача» busy (`route:seeding`): three
 //!   torrents seeding, Soulseek sharing with uploads running, queued, done
 //!   and cut off, and today's and overall totals.
+//! - `fake:upgrade-offer` — a better copy of a library track found and
+//!   waiting in «Подтверди» («FLAC вместо MP3 320»), and «Хочу скачать»
+//!   with better copies looked for in each state (`route:confirm`,
+//!   `route:wishlist`).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -108,6 +112,7 @@ pub struct Fakes {
     lyrics_state: Option<String>,
     history_refusals: bool,
     share: bool,
+    upgrade_offer: bool,
 }
 
 impl Fakes {
@@ -146,6 +151,7 @@ impl Fakes {
             "lyrics-gap:words" => self.lyrics_gap = Some(true),
             "history-refusals" => self.history_refusals = true,
             "share" => self.share = true,
+            "upgrade-offer" => self.upgrade_offer = true,
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             c if c.starts_with("lyrics-home:") => self.lyrics_home = Some(c["lyrics-home:".len()..].to_owned()),
             c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
@@ -184,6 +190,7 @@ impl Fakes {
             || self.lyrics_state.is_some()
             || self.history_refusals
             || self.share
+            || self.upgrade_offer
     }
 
     /// `state` with the fakes laid over it.
@@ -205,6 +212,10 @@ impl Fakes {
         }
         if self.share {
             share(&mut s);
+        }
+        if self.upgrade_offer {
+            s.downloads.confirm = vec![upgrade_offer()];
+            s.downloads.wishlist = upgrades();
         }
         if self.keep
             && let Some(t) = s.player.current.clone()
@@ -975,7 +986,63 @@ fn row(n: u128, title: &str, artist: &str, album: &str, status: St) -> WishlistR
         missing: 0,
         has_copy: false,
         source: (status == St::Downloading).then(|| "RuTracker".into()),
+        upgrade: None,
     }
+}
+
+/// A better copy of a library track in «Подтверди» (`fake:upgrade-offer`),
+/// as the runtime words it (streams/wishlist/upgrade.rs).
+fn upgrade_offer() -> nikgob_view::Confirm {
+    let option = |label: &str, detail: &str, recommended| nikgob_view::ConfirmOption {
+        label: label.into(),
+        detail: detail.into(),
+        recommended,
+    };
+    nikgob_view::Confirm {
+        id: (1 << 47) | 1,
+        title: "8 способов как бросить... — Пошлая Молли".into(),
+        origin: "Качество лучше · трек".into(),
+        question: "Заменить файл трека на это?".into(),
+        options: vec![
+            option(
+                "Пошлая Молли - 8 способов как бросить... (2017) [FLAC]",
+                "FLAC вместо MP3 320 · 31 МБ · 9 сид. · RuTracker",
+                true,
+            ),
+            option("Пошлая Молли — 8 способов как бросить...", "FLAC 24/48 вместо MP3 320 · Qobuz", false),
+        ],
+        skip_label: "Оставить как есть".into(),
+        accept_label: "Заменить".into(),
+    }
+}
+
+/// «Хочу скачать» with better copies looked for, one in each state
+/// (`fake:upgrade-offer`).
+fn upgrades() -> WishlistView {
+    let up = |n: u128, title: &str, artist: &str, album: &str, status: St, scope: WishlistScope, words: &str| {
+        let mut r = row(n, title, artist, album, status);
+        r.origin = WishlistOrigin::Upgrade;
+        r.scope = scope;
+        r.can_save_from_youtube = false;
+        r.next_try = None;
+        r.upgrade = (!words.is_empty()).then(|| words.to_owned());
+        r
+    };
+    let items = vec![
+        up(21, "8 способов как бросить...", "Пошлая Молли", "8 способов как бросить...", St::Confirm, WishlistScope::Track, "MP3 320 · нашёл лучше — подтверди замену"),
+        up(22, "ЛЕГЕНДАРНАЯ ПЫЛЬ", "MORGENSHTERN", "ЛЕГЕНДАРНАЯ ПЫЛЬ", St::Searching, WishlistScope::Album, "MP3 128 у 9 из 10 · ищу lossless"),
+        up(23, "Cadillac", "MORGENSHTERN", "MILLION DOLLAR: HAPPINESS", St::Downloading, WishlistScope::Track, ""),
+        up(24, "Розовое вино", "Элджей, Feduk", "Sayonara детка", St::NoTorrent, WishlistScope::Track, "OPUS 160 · лучше пока нет, поищу снова через 6 дн."),
+        up(25, "Hyperballad", "Björk", "Post", St::Done, WishlistScope::Track, "было MP3 128 — теперь FLAC"),
+    ];
+    let mut counts: Vec<(St, u32)> = Vec::new();
+    for r in &items {
+        match counts.iter_mut().find(|(s, _)| *s == r.status) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((r.status, 1)),
+        }
+    }
+    WishlistView { loaded: true, items, by_album: Vec::new(), by_artist: Vec::new(), counts, can_search: true }
 }
 
 /// A track in «Подтверди» with three offers, the first named at length.

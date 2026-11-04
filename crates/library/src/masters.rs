@@ -151,13 +151,15 @@ fn release_has_files(col: &str) -> String {
 /// The unstarted items of `track` are «Скачано» once it has a file, and an
 /// unstarted album item of its release once every track of it has one
 /// (an import, a rescan, a merge into the track with the file). Items the
-/// pipeline handles settle there. Returns how many items it settled.
+/// pipeline handles settle there, and so do the ones that look for a better
+/// copy of a file (they have one from the start). Returns how many items it
+/// settled.
 pub(crate) fn settle_wishlist_in(tx: &Connection, track: &str) -> Result<usize> {
     let now = now_ms();
     let mut n = tx.execute(
         &format!(
             "UPDATE wishlist SET status = 'done', next_try_at = NULL, note = 'Скачано', updated_at = ?2
-              WHERE scope = 'track' AND track_id = ?1 AND status IN {UNSTARTED} AND {}",
+              WHERE scope = 'track' AND track_id = ?1 AND status IN {UNSTARTED} AND origin != 'upgrade' AND {}",
             has_file("?1")
         ),
         params![track, now],
@@ -170,7 +172,7 @@ pub(crate) fn settle_wishlist_in(tx: &Connection, track: &str) -> Result<usize> 
         n += tx.execute(
             &format!(
                 "UPDATE wishlist SET status = 'done', next_try_at = NULL, note = 'Скачано', updated_at = ?2
-                  WHERE scope = 'album' AND release_id = ?1 AND status IN {UNSTARTED} AND {}",
+                  WHERE scope = 'album' AND release_id = ?1 AND status IN {UNSTARTED} AND origin != 'upgrade' AND {}",
                 release_has_files("?1")
             ),
             params![r, now],
@@ -186,7 +188,7 @@ pub(crate) fn settle_downloaded_in(tx: &Connection) -> Result<usize> {
     let tracks = tx.execute(
         &format!(
             "UPDATE wishlist SET status = 'done', next_try_at = NULL, note = 'Скачано', updated_at = ?1
-              WHERE scope = 'track' AND track_id IS NOT NULL AND status IN {UNSTARTED} AND {}",
+              WHERE scope = 'track' AND track_id IS NOT NULL AND status IN {UNSTARTED} AND origin != 'upgrade' AND {}",
             has_file("wishlist.track_id")
         ),
         [now],
@@ -194,7 +196,7 @@ pub(crate) fn settle_downloaded_in(tx: &Connection) -> Result<usize> {
     let albums = tx.execute(
         &format!(
             "UPDATE wishlist SET status = 'done', next_try_at = NULL, note = 'Скачано', updated_at = ?1
-              WHERE scope = 'album' AND release_id IS NOT NULL AND status IN {UNSTARTED} AND {}",
+              WHERE scope = 'album' AND release_id IS NOT NULL AND status IN {UNSTARTED} AND origin != 'upgrade' AND {}",
             release_has_files("wishlist.release_id")
         ),
         [now],
@@ -209,7 +211,7 @@ fn covered_by_album(w: &str) -> String {
         "({w}.scope = 'track' AND {w}.status IN {UNSTARTED} AND EXISTS (
             SELECT 1 FROM wishlist a
              WHERE a.scope = 'album' AND a.id != {w}.id
-               AND a.status NOT IN ('done', 'dismissed', 'failed')
+               AND a.status NOT IN ('done', 'dismissed', 'failed') AND a.origin != 'upgrade'
                AND a.release_id = coalesce({w}.release_id, (SELECT t.release_id FROM track t WHERE t.id = {w}.track_id))))"
     )
 }
@@ -588,7 +590,8 @@ impl Library {
     }
 
     /// Items in `status` whose `next_try_at` is unset or not after `now`,
-    /// oldest first, at most `limit`.
+    /// oldest first, at most `limit`. The ones that look for a better copy
+    /// of a file are left out: they go at their own pace ([`Self::upgrades_due`]).
     pub fn wishlist_due(
         &self,
         status: WishlistStatus,
@@ -596,10 +599,48 @@ impl Library {
         limit: u32,
     ) -> Result<Vec<WishlistItem>> {
         self.wishlist_where(
-            "status = ?1 AND (next_try_at IS NULL OR next_try_at <= ?2)
+            "status = ?1 AND origin != 'upgrade' AND (next_try_at IS NULL OR next_try_at <= ?2)
               ORDER BY created_at, id LIMIT ?3",
             rusqlite::params![status.as_str(), now, limit],
         )
+    }
+
+    /// Items that look for a better copy of a file and are due: new ones,
+    /// and those whose next search (`next_try_at`) came; the longest
+    /// waiting first, at most `limit`.
+    pub fn upgrades_due(&self, now: nikgob_core::model::UnixMs, limit: u32) -> Result<Vec<WishlistItem>> {
+        self.wishlist_where(
+            "origin = 'upgrade' AND status IN ('new', 'no_torrent') AND (next_try_at IS NULL OR next_try_at <= ?1)
+              ORDER BY coalesce(next_try_at, 0), created_at, id LIMIT ?2",
+            rusqlite::params![now, limit],
+        )
+    }
+
+    /// Library tracks whose playing copy is a file below `below` (and
+    /// better than audio saved from a stream, whose item looks for more
+    /// already), with no wishlist item that is open or was turned down, of
+    /// their own or of their album: the worst first, at most `limit`. With
+    /// each, its album and its file's quality score.
+    pub fn upgrade_candidates(&self, below: i32, limit: u32) -> Result<Vec<(TrackId, Option<ReleaseId>, i32)>> {
+        self.read(|c| {
+            let sql = format!(
+                "SELECT t.id, t.release_id, s.quality_score FROM track t
+                   JOIN source s ON s.track_id = t.id AND s.is_active = 1
+                  WHERE t.deleted_at IS NULL AND s.kind = 'local_file' AND s.trashed_at IS NULL
+                    AND s.available = 1 AND s.quality_score > {} AND s.quality_score < ?1
+                    AND NOT EXISTS (SELECT 1 FROM wishlist w WHERE w.scope = 'track' AND w.track_id = t.id
+                                     AND w.status NOT IN ('done', 'failed'))
+                    AND NOT EXISTS (SELECT 1 FROM wishlist w WHERE w.scope = 'album' AND t.release_id IS NOT NULL
+                                     AND w.release_id = t.release_id AND w.status NOT IN ('done', 'failed'))
+                  ORDER BY s.quality_score, t.id LIMIT ?2",
+                nikgob_core::model::score::SAVED_STREAM
+            );
+            let mut stmt = c.prepare_cached(&sql)?;
+            let rows = stmt.query_map(rusqlite::params![below, limit], |r| {
+                Ok((get_id::<TrackId>(r, 0)?, get_opt_id::<ReleaseId>(r, 1)?, r.get::<_, i32>(2)?))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
     }
 
     fn wishlist_where(
@@ -647,7 +688,7 @@ impl Library {
         self.read(|c| {
             let sql = format!(
                 "SELECT w.id FROM wishlist w
-                  WHERE (w.status IN {UNSTARTED} AND (
+                  WHERE (w.status IN {UNSTARTED} AND w.origin != 'upgrade' AND (
                            (w.scope = 'track' AND w.track_id IS NOT NULL AND {})
                         OR (w.scope = 'album' AND w.release_id IS NOT NULL AND {})))
                      OR {}",
@@ -1016,6 +1057,53 @@ mod tests {
         assert_eq!(status(&lib, whole), WishlistStatus::NoTorrent, "half the album has files");
         file(&lib, tracks[1], 900);
         assert_eq!(status(&lib, whole), WishlistStatus::Done);
+    }
+
+    /// The files below the bar are the ones to look for again (worst
+    /// first), unless an item of theirs is open or was turned down; an item
+    /// that looks for a better copy is never «Скачано» for having a file,
+    /// nor covered, and goes at its own pace.
+    #[test]
+    fn files_below_the_bar_are_looked_for_again_at_their_own_pace() {
+        let lib = lib();
+        let (release, tracks) = album(&lib, "Пыль", 4);
+        file(&lib, tracks[0], 500); // MP3 128
+        file(&lib, tracks[1], score::MP3_320);
+        file(&lib, tracks[2], 900);
+        file(&lib, tracks[3], score::SAVED_STREAM);
+        let ids = |v: Vec<(TrackId, Option<ReleaseId>, i32)>| v.into_iter().map(|(t, ..)| t).collect::<Vec<_>>();
+        assert_eq!(ids(lib.upgrade_candidates(score::CD_LOSSLESS, 10).unwrap()), [tracks[0], tracks[1]]);
+        assert_eq!(ids(lib.upgrade_candidates(score::MP3_320, 10).unwrap()), [tracks[0]]);
+        assert_eq!(lib.upgrade_candidates(score::CD_LOSSLESS, 1).unwrap(), [(tracks[0], Some(release), 500)]);
+
+        // An upgrade item of the first track: it has its file, and stays.
+        let mut w = WishlistItem::new(WishlistStatus::New, 10);
+        w.track_id = Some(tracks[0]);
+        w.release_id = Some(release);
+        w.origin = WishlistOrigin::Upgrade;
+        lib.put_wishlist_item(&w).unwrap();
+        assert_eq!(lib.settle_downloaded_wishlist().unwrap(), 0);
+        assert!(!lib.wishlist_covered().unwrap().contains(&w.id));
+        assert!(lib.wishlist_due(WishlistStatus::New, 100, 10).unwrap().is_empty(), "not the wishlist's pace");
+        assert_eq!(lib.upgrades_due(100, 10).unwrap(), vec![w.clone()]);
+        assert_eq!(ids(lib.upgrade_candidates(score::CD_LOSSLESS, 10).unwrap()), [tracks[1]]);
+        // A file landing does not settle it either.
+        file(&lib, tracks[0], 600);
+        assert_eq!(status(&lib, w.id), WishlistStatus::New);
+        // Searched, nothing better: next in a week.
+        w.status = WishlistStatus::NoTorrent;
+        w.next_try_at = Some(1_000);
+        lib.put_wishlist_item(&w).unwrap();
+        assert!(lib.upgrades_due(999, 10).unwrap().is_empty());
+        assert_eq!(lib.upgrades_due(1_000, 10).unwrap().len(), 1);
+
+        // An album item turned down keeps its tracks out.
+        let a = wish(&lib, None, Some(release), WishlistScope::Album, WishlistStatus::Dismissed);
+        assert!(lib.upgrade_candidates(score::CD_LOSSLESS, 10).unwrap().is_empty());
+        lib.delete_wishlist_item(a).unwrap();
+        // A finished one does not.
+        wish(&lib, None, Some(release), WishlistScope::Album, WishlistStatus::Done);
+        assert_eq!(ids(lib.upgrade_candidates(score::CD_LOSSLESS, 10).unwrap()), [tracks[1]]);
     }
 
     #[test]
