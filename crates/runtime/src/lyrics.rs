@@ -73,6 +73,9 @@ pub(crate) struct Aligned {
     /// from the recording.
     pub(crate) lines: Vec<LyricLine>,
     pub(crate) saved: bool,
+    /// Made by this aligner version ([`crate::align::MADE_BY`]); an older
+    /// row is shown until the text is checked again.
+    pub(crate) current: bool,
 }
 
 impl Aligned {
@@ -97,6 +100,7 @@ impl Aligned {
                 covered: row.covered,
                 lines,
                 saved: row.saved,
+                current: row.made_by == crate::align::MADE_BY,
             },
         ))
     }
@@ -328,7 +332,9 @@ impl TrackLyrics {
             .iter()
             .filter(|(s, _)| **s != LyricsSource::Recognized)
             .filter(|(s, _)| **s != LyricsSource::File || !self.duplicate_file())
-            .filter(|(s, _)| self.aligned(**s).is_none())
+            // Made by an older aligner: checked again (timing the user
+            // kept stays until they make it again).
+            .filter(|(s, _)| self.aligned(**s).is_none_or(|a| !a.current && !a.saved))
             .map(|(s, t)| {
                 let (lines, timed) = t.align_lines();
                 crate::align::AlignText { source: *s, lines, timed, hash: t.hash() }
@@ -1178,6 +1184,7 @@ mod tests {
             covered: 0.9,
             lines,
             saved: false,
+            current: true,
         }
     }
 
