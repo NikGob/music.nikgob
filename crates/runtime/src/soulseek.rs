@@ -641,8 +641,8 @@ mod tests {
         s.enabled = false;
         svc.apply(&s);
         assert!(svc.source().is_none());
-        // The library folder was only read.
-        assert_eq!(std::fs::read_dir(lib.path()).unwrap().count(), 1);
+        // The library folder was only read: still its Music and Trash.
+        assert_eq!(std::fs::read_dir(lib.path()).unwrap().count(), 2);
     }
 
     fn file(user: &str, path: &str, format: &str, secs: u32, free: bool) -> SearchResult {
