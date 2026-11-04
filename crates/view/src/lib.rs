@@ -1274,6 +1274,12 @@ pub struct Prefs {
     pub wave_syllables_only: bool,
     /// How high wave letters (or words) jump as they are sung (0: they only light up).
     pub lyrics_wave_jump: f32,
+    /// «Скорость прыжка»: how fast a wave letter (or word) jumps and
+    /// settles (0.5..2, 1: Material's expressive fast spatial spring).
+    pub lyrics_jump_speed: f32,
+    /// «Скорость подсветки»: how fast a letter or word lights up, 0
+    /// smoothly .. 1 at once (karaoke by letters: how soft the front is).
+    pub lyrics_light_speed: f32,
     /// How far lines other than the current one fade (0 none .. 1 strong).
     pub lyrics_dim: f32,
     /// Text size multiplier for synced lyrics (0.8..1.4).
@@ -1292,6 +1298,10 @@ pub struct Prefs {
     pub lyrics_gap_style: u8,
     /// Crests around the pause ring (wavelength = circumference / this).
     pub lyrics_gap_waves: f32,
+    /// «Высота волн» of the pause ring (0.5..2, 1 the Material height).
+    pub lyrics_gap_height: f32,
+    /// «Размер индикатора»: the pause ring's size (0.8..1.5).
+    pub lyrics_gap_size: f32,
     /// The last seconds of a pause count down in digits instead.
     pub lyrics_countdown: bool,
     /// «Подсвечивать»: every animation goes over whole written words
@@ -2557,6 +2567,8 @@ impl Default for Prefs {
             lyrics_style: 0,
             wave_syllables_only: true,
             lyrics_wave_jump: 1.0,
+            lyrics_jump_speed: 1.0,
+            lyrics_light_speed: 0.65,
             lyrics_dim: 0.5,
             lyrics_scale: 1.0,
             lyrics_lead: 0.1,
@@ -2565,6 +2577,8 @@ impl Default for Prefs {
             lyrics_return_s: 4.0,
             lyrics_gap_style: 1,
             lyrics_gap_waves: 6.0,
+            lyrics_gap_height: 1.0,
+            lyrics_gap_size: 1.0,
             lyrics_countdown: true,
             lyrics_by_words: false,
             lyrics_soft_edges: true,

@@ -692,6 +692,19 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
                 p.lyrics_wave_jump = v;
             }
         });
+        row(ui, Id::JumpSpeed, "Скорость прыжка", None, |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-jump-speed", p.lyrics_jump_speed, (0.5, 2.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_jump_speed = v;
+            }
+        });
+    }
+    // Focus by letters brightens the whole line: nothing lights up by itself.
+    if p.lyrics_style != 1 || p.lyrics_by_words {
+        row(ui, Id::LightSpeed, "Скорость подсветки", Some("0% — плавно, 100% — сразу"), |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-light-speed", p.lyrics_light_speed, (0.0, 1.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_light_speed = v;
+            }
+        });
     }
     row(ui, Id::LyricsLead, "Опережение подсветки", Some("0 — точно по голосу, меньше 0 — позже него"), |ui| {
         if let Some(v) = range_slider(ui, "set-lyrics-lead", p.lyrics_lead, (-0.5, 0.5), 0.05, |v| format!("{v:+.2} с").replace('.', ",")) {
@@ -733,7 +746,17 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
                 p.lyrics_gap_waves = v;
             }
         });
+        row(ui, Id::LyricsGapHeight, "Высота волн", None, |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-gap-height", p.lyrics_gap_height, (0.5, 2.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_gap_height = v;
+            }
+        });
     }
+    row(ui, Id::LyricsGapSize, "Размер индикатора", None, |ui| {
+        if let Some(v) = range_slider(ui, "set-lyrics-gap-size", p.lyrics_gap_size, (0.8, 1.5), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+            p.lyrics_gap_size = v;
+        }
+    });
     row(ui, Id::LyricsCountdown, "Обратный отсчёт 3-2-1 в конце паузы", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_countdown).id_salt("set-lyrics-countdown"));
     });
