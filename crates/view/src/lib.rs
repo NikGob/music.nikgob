@@ -1170,13 +1170,14 @@ pub struct Prefs {
     pub np_slot: NpSlot,
     /// The dotted ring around the Now Playing cover turns while playing.
     pub spin_ring: bool,
-    /// How synced lyrics animate: 0 karaoke, 1 focus, 2 wave (letter by letter),
-    /// 3 words (each written word lights up whole).
+    /// How synced lyrics animate: 0 karaoke, 1 focus, 2 wave. Prefs saved
+    /// with 3 (the old «По словам» animation) move to the wave by words
+    /// ([`Prefs::upgrade_lyrics`]).
     pub lyrics_style: u8,
-    /// Under the wave and words, a text with line times only (no word times) uses
+    /// Under the wave or by words, a text with line times only (no word times) uses
     /// Focus instead of guessing the words' pace.
     pub wave_syllables_only: bool,
-    /// Wave letters jump up as they are sung (off: they only light up).
+    /// How high wave letters (or words) jump as they are sung (0: they only light up).
     pub lyrics_wave_jump: f32,
     /// How far lines other than the current one fade (0 none .. 1 strong).
     pub lyrics_dim: f32,
@@ -1198,6 +1199,15 @@ pub struct Prefs {
     pub lyrics_gap_waves: f32,
     /// The last seconds of a pause count down in digits instead.
     pub lyrics_countdown: bool,
+    /// «Подсвечивать»: every animation goes over whole written words
+    /// (each part of a hyphenated one) instead of letters.
+    pub lyrics_by_words: bool,
+    /// «Мягкие края»: lines near the top and bottom of the lyrics blur and
+    /// fade out instead of being cut.
+    pub lyrics_soft_edges: bool,
+    /// How far into the lyrics the soft edges reach and how much they blur
+    /// (0.5..1.5).
+    pub lyrics_soft_strength: f32,
     /// Embed the selected online lyrics in the track tags.
     pub save_found_lyrics: bool,
     /// «Видеокарта»: the lyrics models run on the GPU (DirectML), else on
@@ -1540,6 +1550,17 @@ impl Prefs {
             self.lyrics_ui = 1;
         }
         self.lyrics_rev = LYRICS_REV;
+        self.upgrade_lyrics_style();
+    }
+
+    /// «По словам» was a fourth animation (`lyrics_style` 3) before it
+    /// became the unit of every animation: it moves to the wave by words,
+    /// once (3 is never written again).
+    pub fn upgrade_lyrics_style(&mut self) {
+        if self.lyrics_style == 3 {
+            self.lyrics_style = 2;
+            self.lyrics_by_words = true;
+        }
     }
 }
 
@@ -2447,6 +2468,9 @@ impl Default for Prefs {
             lyrics_gap_style: 1,
             lyrics_gap_waves: 6.0,
             lyrics_countdown: true,
+            lyrics_by_words: false,
+            lyrics_soft_edges: true,
+            lyrics_soft_strength: 1.0,
             save_found_lyrics: false,
             lyrics_gpu: true,
             lyrics_check: true,
