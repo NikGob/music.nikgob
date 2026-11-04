@@ -203,6 +203,16 @@ impl Shown {
     }
 }
 
+/// Where the audio to make timing from is (set by the worker).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Place {
+    /// Nothing to listen to.
+    #[default]
+    None,
+    /// The track's own file.
+    File,
+}
+
 /// Everything known about one track's lyrics.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TrackLyrics {
@@ -222,6 +232,8 @@ pub(crate) struct TrackLyrics {
     pub(crate) genius: bool,
     /// Which made timing is shown.
     pub(crate) show: Shown,
+    /// Where the audio to make timing from is.
+    pub(crate) place: Place,
 }
 
 impl TrackLyrics {
@@ -355,6 +367,11 @@ impl TrackLyrics {
         self.pending.is_empty()
     }
 
+    /// The source the user picked (`None`: automatic).
+    pub(crate) fn set_pick(&mut self, pick: Option<LyricsSource>) {
+        self.pick = pick;
+    }
+
     /// Takes the aligner's verdict on a text.
     pub(crate) fn set_aligned(&mut self, source: LyricsSource, a: Aligned) {
         self.aligned.insert(source, a);
@@ -466,6 +483,19 @@ impl TrackLyrics {
                 }
             })
             .collect();
+        let home = match source {
+            Some(LyricsSource::Recognized) => v::LyricsHome::Library,
+            Some(_) if made => v::LyricsHome::Library,
+            Some(LyricsSource::File) => v::LyricsHome::Computer,
+            _ => v::LyricsHome::Online,
+        };
+        let craft = match (source, &self.place) {
+            (None | Some(LyricsSource::Recognized), _) | (_, Place::None) => v::LyricsCraft::Off,
+            _ => v::LyricsCraft::Ready,
+        };
+        // The player's own timing of a found text can go to the computer
+        // (a heard text is its guess: never).
+        let savable = made && source.is_some_and(|s| s != LyricsSource::Recognized) && self.place == Place::File;
         v::LyricsView {
             track: Some(track),
             lines,
@@ -477,7 +507,16 @@ impl TrackLyrics {
             made,
             checking: self.checking.is_some(),
             texts,
+            home,
+            craft,
+            savable,
         }
+    }
+
+    /// The lines `source` shows, with the player's timing (to keep them).
+    pub(crate) fn shown_lines(&self, source: LyricsSource) -> Option<Vec<LyricLine>> {
+        let (lines, made) = self.shown(source);
+        (made && !lines.is_empty()).then_some(lines)
     }
 
     /// A lookup or a file write is under way: its result needs this entry.
@@ -708,8 +747,9 @@ impl Worker {
             self.queue.peek_auto_next().map(|e| e.track),
         ];
         let show = Shown::of(&self.state.read().prefs);
+        let place = self.lyrics_place(track);
         let Some(svc) = self.import.as_mut() else { return };
-        svc.lyrics_cache.insert(track, TrackLyrics { show, ..tl });
+        svc.lyrics_cache.insert(track, TrackLyrics { show, place, ..tl });
         svc.lyrics_order.retain(|t| *t != track);
         svc.lyrics_order.push_back(track);
         let (cache, later) = (&svc.lyrics_cache, &svc.embed_later);
@@ -756,6 +796,7 @@ impl Worker {
         let genius = self.state.read().prefs.lyrics_genius;
         let mut tl = cached_lyrics(&self.lib, track, path.as_deref(), tags, genius);
         tl.show = Shown::of(&self.state.read().prefs);
+        tl.place = self.lyrics_place(track);
         if let Some(svc) = self.import.as_mut() {
             if svc.metadata().is_none() {
                 tl.pending.clear();
@@ -920,7 +961,7 @@ impl Worker {
     }
 }
 
-fn embed_text(path: &Path, text: &str) -> nikgob_import::Result<()> {
+pub(crate) fn embed_text(path: &Path, text: &str) -> nikgob_import::Result<()> {
     let (tags, _) = nikgob_import::tags::read_tags(path)?;
     if tags.lyrics.as_deref() != Some(text) {
         nikgob_import::tags::write_lyrics(path, text)?;

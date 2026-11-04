@@ -49,7 +49,7 @@ pub use lyricsplus::{LyricsPlus, LyricsPlusText};
 pub use lrcred::LrcRed;
 pub use betterlyrics::BetterLyrics;
 pub use genius::Genius;
-pub use ttml::{TtmlLyrics, parse_ttml};
+pub use ttml::{TtmlLyrics, parse_ttml, serialize_ttml};
 
 /// Every client, built from one config and sharing one HTTP stack.
 #[derive(Clone, Debug)]

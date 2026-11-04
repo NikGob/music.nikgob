@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 
 use egui::{Context, Id, Pos2, Rect, Response, Sense, Stroke, Ui, pos2, vec2};
 use nikgob_motion::Spring;
-use nikgob_view::{AlignStage, Command, LyricsAvail, LyricsSource, LyricsSync, LyricsView, ViewState};
+use nikgob_view::{AlignStage, Command, LyricsAvail, LyricsCraft, LyricsHome, LyricsSource, LyricsSync, LyricsView, ViewState};
 
 use crate::components::{LoadingIndicator, anim, paint, paint::Radii};
 use crate::tokens::{shape, state};
@@ -198,17 +198,34 @@ pub(crate) fn capital(text: &str) -> String {
 }
 
 /// The timing that can be made for the shown text, with what the action
-/// says: lines for a plain text, words for a text without them.
+/// says: lines for a plain text, words for a text without them, and the
+/// words again for a text that has them (a bad result is made anew).
 pub(crate) fn actions(state: &ViewState) -> Vec<(LyricsSync, &'static str)> {
     let l = &state.lyrics;
-    let Some(source) = l.source else { return Vec::new() };
-    if source == LyricsSource::Recognized || state.info.path.is_none() {
+    if l.craft != LyricsCraft::Ready || l.source.is_none_or(|s| s == LyricsSource::Recognized) {
         return Vec::new();
     }
     match LyricsSync::of(&l.lines).unwrap_or(LyricsSync::Plain) {
         LyricsSync::Plain => vec![(LyricsSync::Line, "Подсветить по строкам"), (LyricsSync::Word, "Подсветить по словам")],
         LyricsSync::Line => vec![(LyricsSync::Word, "Подсветить по словам")],
-        _ => Vec::new(),
+        _ => vec![(LyricsSync::Word, "Сделать подсветку заново")],
+    }
+}
+
+/// Where the shown text is kept, in plain words.
+pub(crate) fn home(l: &LyricsView) -> Option<&'static str> {
+    l.source?;
+    Some(match l.home {
+        LyricsHome::Online => "Текст только в интернете",
+        LyricsHome::Library => "Сделано плеером, хранится в библиотеке",
+        LyricsHome::Computer => "Текст сохранён на компьютере",
+    })
+}
+
+/// Keeps the shown text on the computer.
+pub(crate) fn save(state: &ViewState, out: &mut Vec<Command>) {
+    if let (Some(track), Some(source), true) = (state.lyrics.track, state.lyrics.source, state.lyrics.savable) {
+        out.push(Command::SaveLyrics { track, source });
     }
 }
 
@@ -562,14 +579,39 @@ mod tests {
         let mut state = ViewState::default();
         state.lyrics.source = Some(LyricsSource::Genius);
         state.lyrics.plain = Some("a".into());
-        assert!(actions(&state).is_empty(), "no file, nothing to listen to");
-        state.info.path = Some("song.opus".into());
+        assert!(actions(&state).is_empty(), "nothing to listen to");
+        state.lyrics.craft = LyricsCraft::Ready;
         let targets: Vec<_> = actions(&state).iter().map(|a| a.0).collect();
         assert_eq!(targets, [LyricsSync::Line, LyricsSync::Word]);
-        state.lyrics.lines = vec![nikgob_view::LyricLine::new(Duration::from_secs(1), "a")];
+        let mut line = nikgob_view::LyricLine::new(Duration::from_secs(1), "a");
+        state.lyrics.lines = vec![line.clone()];
         assert_eq!(actions(&state), [(LyricsSync::Word, "Подсветить по словам")]);
+        // Word timing there already: it can be made again.
+        line.words.push(nikgob_view::LyricWord { start: Duration::from_secs(1), end: Duration::from_secs(2), text: "a".into() });
+        state.lyrics.lines = vec![line];
+        assert_eq!(actions(&state), [(LyricsSync::Word, "Сделать подсветку заново")]);
         state.lyrics.source = Some(LyricsSource::Recognized);
         assert!(actions(&state).is_empty());
-        assert!(actions(&state).iter().all(|(_, label)| label.starts_with("Подсветить")));
+    }
+
+    #[test]
+    fn the_menu_says_where_the_text_is_kept() {
+        let mut l = LyricsView::default();
+        assert_eq!(home(&l), None, "no text, nothing to say");
+        l.source = Some(LyricsSource::Lrclib);
+        assert_eq!(home(&l), Some("Текст только в интернете"));
+        l.home = LyricsHome::Library;
+        assert_eq!(home(&l), Some("Сделано плеером, хранится в библиотеке"));
+        l.home = LyricsHome::Computer;
+        assert_eq!(home(&l), Some("Текст сохранён на компьютере"));
+        let mut state = ViewState::default();
+        state.lyrics = l;
+        state.lyrics.track = Some(nikgob_view::TrackId::new());
+        let mut out = Vec::new();
+        save(&state, &mut out);
+        assert!(out.is_empty(), "not savable");
+        state.lyrics.savable = true;
+        save(&state, &mut out);
+        assert!(matches!(out[..], [Command::SaveLyrics { source: LyricsSource::Lrclib, .. }]));
     }
 }

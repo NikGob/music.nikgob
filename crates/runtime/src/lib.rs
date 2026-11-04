@@ -15,6 +15,7 @@ mod home;
 mod home_v2;
 mod import;
 mod lyrics;
+mod lyrics_keep;
 mod playlist_cover;
 mod recs;
 mod search;
@@ -747,6 +748,7 @@ impl Worker {
             Command::PickLyricsSource(t, src) => self.pick_lyrics_source(t, src),
             Command::CraftLyrics { track, source, target } => self.craft_lyrics(track, source, target),
             Command::ClearCraft => self.clear_craft(),
+            Command::SaveLyrics { track, source } => self.save_lyrics(track, source),
             Command::AlignModel { key, download } => self.align_model(&key, download),
             Command::SeekBy(ms) => {
                 let p = self.position_now().as_millis() as i64 + ms;

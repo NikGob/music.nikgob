@@ -46,6 +46,10 @@
 //! - `fake:craft:decode|separate|listen|align|download` — timing for
 //!   Genius' text is being made, at that stage; `fake:craft:done` — made,
 //!   to check; `fake:craft:failed` — it could not be made.
+//! - `fake:lyrics-home:words|online|saved` — with `fake:lyrics-texts`,
+//!   the shown text: Genius' with word timing the player made (to make
+//!   again or save), LRCLIB's lines only online, or a text saved on the
+//!   computer.
 //! - `fake:align-models` — Settings → «Текст песен»: models ready, one
 //!   downloading, one missing; the background pass halfway; on the GPU.
 
@@ -79,6 +83,7 @@ pub struct Fakes {
     keep: bool,
     lyrics_texts: bool,
     craft: Option<String>,
+    lyrics_home: Option<String>,
     align_models: bool,
     chip: Option<String>,
 }
@@ -116,6 +121,7 @@ impl Fakes {
             "lyrics-texts" => self.lyrics_texts = true,
             "align-models" => self.align_models = true,
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
+            c if c.starts_with("lyrics-home:") => self.lyrics_home = Some(c["lyrics-home:".len()..].to_owned()),
             c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
             _ => return false,
         }
@@ -144,6 +150,7 @@ impl Fakes {
             || self.keep
             || self.lyrics_texts
             || self.craft.is_some()
+            || self.lyrics_home.is_some()
             || self.align_models
             || self.chip.is_some()
     }
@@ -295,9 +302,12 @@ impl Fakes {
         if self.lyrics {
             s.lyrics = word_lyrics(state.player.current.as_ref().map(|t| t.id));
         }
-        if self.lyrics_texts || self.craft.is_some() {
+        if self.lyrics_texts || self.craft.is_some() || self.lyrics_home.is_some() {
             let track = state.player.current.as_ref().map(|t| t.id);
             s.lyrics = texts_lyrics(track);
+            if let Some(home) = self.lyrics_home.as_deref() {
+                lyrics_home(&mut s.lyrics, home);
+            }
             if s.info.path.is_none() {
                 s.info.path = Some("song.opus".into());
             }
@@ -406,7 +416,39 @@ fn texts_lyrics(track: Option<nikgob_core::model::TrackId>) -> nikgob_view::Lyri
             option(LyricsSource::Genius, LyricsAvail::Ready(LyricsSync::Plain), Some(true), true),
         ],
         texts,
+        home: nikgob_view::LyricsHome::Library,
+        craft: nikgob_view::LyricsCraft::Ready,
+        savable: true,
         ..own
+    }
+}
+
+/// Where the shown text of [`texts_lyrics`] lives (`fake:lyrics-home:…`).
+fn lyrics_home(l: &mut nikgob_view::LyricsView, name: &str) {
+    use nikgob_core::lyrics::LyricsSource;
+    use nikgob_view::LyricsHome;
+    match name {
+        "words" => {
+            l.lines = word_lyrics(l.track).lines;
+            if let Some(o) = l.sources.iter_mut().find(|o| o.source == LyricsSource::Genius) {
+                o.state = nikgob_view::LyricsAvail::Ready(nikgob_view::LyricsSync::Word);
+            }
+        }
+        "online" => {
+            l.source = Some(LyricsSource::Lrclib);
+            l.lines = l.texts[0].lines.clone();
+            l.made = false;
+            l.home = LyricsHome::Online;
+            l.savable = false;
+        }
+        "saved" => {
+            l.source = Some(LyricsSource::File);
+            l.lines = word_lyrics(l.track).lines;
+            l.made = false;
+            l.home = LyricsHome::Computer;
+            l.savable = false;
+        }
+        _ => {}
     }
 }
 

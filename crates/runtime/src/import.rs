@@ -1209,6 +1209,7 @@ impl Worker {
         for t in later {
             self.embed_lyrics(t);
         }
+        self.write_later_tags();
         let src = self
             .lib
             .active_source(track)

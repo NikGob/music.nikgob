@@ -446,6 +446,94 @@ fn decimal(s: &str) -> Option<Duration> {
     Some(Duration::new(secs, nanos))
 }
 
+/// Writes `lines` as Apple Music style TTML that [`parse_ttml`] reads back
+/// as they are (times to the millisecond): a `<p>` a line with its words
+/// as timed `<span>`s (their spaces inside them), background vocals as an
+/// `x-bg` span of the line before them, the second voice of a duet as
+/// agent `v2`, translations and romanisations as inline spans. A line
+/// without words keeps its text untimed.
+pub fn serialize_ttml(lines: &[LyricLine]) -> String {
+    let words = lines.iter().any(|l| !l.words.is_empty());
+    let mut out = String::from(
+        "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:ttm=\"http://www.w3.org/ns/ttml#metadata\"          xmlns:itunes=\"http://music.apple.com/lyric-ttml-internal\"",
+    );
+    out.push_str(if words { " itunes:timing=\"Word\">
+" } else { " itunes:timing=\"Line\">
+" });
+    out.push_str("<head><metadata><ttm:agent type=\"person\" xml:id=\"v1\"/><ttm:agent type=\"person\" xml:id=\"v2\"/></metadata></head>
+");
+    out.push_str("<body><div>
+");
+    let mut i = 0;
+    while i < lines.len() {
+        let line = &lines[i];
+        // A background line opens a paragraph of its own only when no
+        // main line comes before it.
+        let main = (!line.background).then_some(line);
+        let mut j = i + usize::from(main.is_some());
+        let agent = if line.duet { "v2" } else { "v1" };
+        out.push_str("<p");
+        if let Some(m) = main {
+            times(&mut out, m.start, m.end);
+        }
+        out.push_str(&format!(" ttm:agent=\"{agent}\">"));
+        if let Some(m) = main {
+            inner(&mut out, m);
+        }
+        while j < lines.len() && lines[j].background {
+            let bg = &lines[j];
+            out.push_str("<span ttm:role=\"x-bg\"");
+            times(&mut out, bg.start, bg.end);
+            out.push('>');
+            inner(&mut out, bg);
+            out.push_str("</span>");
+            j += 1;
+        }
+        out.push_str("</p>
+");
+        i = j.max(i + 1);
+    }
+    out.push_str("</div></body></tt>
+");
+    out
+}
+
+/// ` begin=".." end=".."`.
+fn times(out: &mut String, begin: Duration, end: Option<Duration>) {
+    out.push_str(&format!(" begin=\"{}\"", clock(begin)));
+    if let Some(e) = end {
+        out.push_str(&format!(" end=\"{}\"", clock(e)));
+    }
+}
+
+/// A line's words (or its untimed text) and its translation and
+/// romanisation.
+fn inner(out: &mut String, line: &LyricLine) {
+    if line.words.is_empty() {
+        out.push_str(&escape(&line.text));
+    } else {
+        for w in line.words.iter().filter(|w| !w.text.is_empty()) {
+            out.push_str(&format!("<span begin=\"{}\" end=\"{}\">{}</span>", clock(w.start), clock(w.end), escape(&w.text)));
+        }
+    }
+    if let Some(t) = &line.translation {
+        out.push_str(&format!("<span ttm:role=\"x-translation\">{}</span>", escape(t)));
+    }
+    if let Some(r) = &line.romanization {
+        out.push_str(&format!("<span ttm:role=\"x-roman\">{}</span>", escape(r)));
+    }
+}
+
+/// `m:ss.mmm`.
+fn clock(t: Duration) -> String {
+    let ms = t.as_millis();
+    format!("{}:{:02}.{:03}", ms / 60_000, ms / 1000 % 60, ms % 1000)
+}
+
+fn escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,5 +807,35 @@ mod tests {
         let l = &parse_ttml(&xml).unwrap().lines[0];
         assert_eq!(l.words[0].end, ms(2_000));
         assert_eq!(l.words[1].end, ms(4_000));
+    }
+
+    /// What the player saves next to a song is read back as it was:
+    /// words with their spaces, a line without words, an empty end stamp,
+    /// background vocals, the second voice, a translation, characters XML
+    /// must escape.
+    #[test]
+    fn written_ttml_reads_back_as_it_was() {
+        let word = |a: u64, b: u64, t: &str| LyricWord { start: ms(a), end: ms(b), text: t.into() };
+        let mut first = LyricLine::new(ms(1_000), "А я сказал им: \"Ха-ха\" & <всё>");
+        first.words = vec![word(1_000, 1_200, "А "), word(1_200, 1_400, "я "), word(1_400, 2_000, "сказал "), word(2_000, 2_500, "им: "), word(2_500, 3_210, "\"Ха-ха\" "), word(3_210, 3_600, "& "), word(3_600, 4_000, "<всё>")];
+        first.end = Some(ms(4_000));
+        first.translation = Some("And I told them".into());
+        let mut bg = LyricLine::new(ms(3_300), "что? что?");
+        bg.words = vec![word(3_300, 3_500, "что? "), word(3_500, 3_900, "что?")];
+        bg.end = Some(ms(3_900));
+        bg.background = true;
+        let mut duet = LyricLine::new(ms(5_000), "Второй голос");
+        duet.words = vec![word(5_000, 5_400, "Второй "), word(5_400, 6_100, "голос")];
+        duet.end = Some(ms(6_100));
+        duet.duet = true;
+        let mut plain = LyricLine::new(ms(7_000), "Строка без слов");
+        plain.end = Some(ms(9_500));
+        let stamp = LyricLine::new(ms(117_060), "");
+        let lines = vec![first, bg, duet, plain, stamp];
+        let xml = serialize_ttml(&lines);
+        assert_eq!(parse_ttml(&xml).unwrap().lines, lines, "{xml}");
+        // Line timing alone.
+        let only = vec![LyricLine::new(ms(61_230), "Раз"), LyricLine::new(ms(65_000), "Два")];
+        assert_eq!(parse_ttml(&serialize_ttml(&only)).unwrap().lines, only);
     }
 }

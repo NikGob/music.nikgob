@@ -24,6 +24,8 @@ pub const MIN_WIDTH: f32 = 112.0;
 pub const MAX_WIDTH: f32 = 400.0;
 const PAD: f32 = 4.0;
 const DIVIDER_HEIGHT: f32 = 9.0;
+/// A group's label above its items.
+const LABEL_HEIGHT: f32 = 36.0;
 
 /// One selectable row.
 #[derive(Clone, Debug)]
@@ -72,6 +74,8 @@ impl MenuItem {
 enum Entry {
     Item(MenuItem),
     Divider,
+    /// A label over the items that follow (not an item: nothing to pick).
+    Label(String),
 }
 
 /// Where the popup goes.
@@ -118,6 +122,13 @@ impl Menu {
         self
     }
 
+    /// A group label (Label Large, `on-surface-variant`) over the items
+    /// after it; it is not an item and takes no index.
+    pub fn group_label(mut self, text: impl Into<String>) -> Self {
+        self.entries.push(Entry::Label(text.into()));
+        self
+    }
+
     /// Aligns the right edge with the anchor (for ⋮ buttons at the end).
     pub fn align_right(mut self, right: bool) -> Self {
         self.align_right = right;
@@ -141,7 +152,7 @@ impl Menu {
     fn items(&self) -> impl Iterator<Item = &MenuItem> {
         self.entries.iter().filter_map(|e| match e {
             Entry::Item(i) => Some(i),
-            Entry::Divider => None,
+            Entry::Divider | Entry::Label(_) => None,
         })
     }
 
@@ -269,6 +280,11 @@ impl Menu {
             }
             content_w = content_w.max(w);
         }
+        for e in &self.entries {
+            if let Entry::Label(text) = e {
+                content_w = content_w.max(24.0 + common::plain(&painter, text, short_style, s.on_surface).size().x);
+            }
+        }
         let menu_w = menu_width(content_w);
         let height: f32 = 2.0 * PAD
             + self
@@ -277,6 +293,7 @@ impl Menu {
                 .map(|e| match e {
                     Entry::Item(_) => ITEM_HEIGHT,
                     Entry::Divider => DIVIDER_HEIGHT,
+                    Entry::Label(_) => LABEL_HEIGHT,
                 })
                 .sum::<f32>();
         let size = vec2(menu_w, height);
@@ -375,6 +392,12 @@ impl Menu {
                                 Stroke::new(1.0, s.outline_variant),
                             );
                             y += DIVIDER_HEIGHT;
+                        }
+                        Entry::Label(text) => {
+                            let galley = common::plain(ui.painter(), text, TypeRole::LabelLarge.style(), s.on_surface_variant);
+                            let at = pos2(rect.left() + PAD + 12.0, y + (LABEL_HEIGHT - galley.size().y) * 0.5);
+                            ui.painter().galley(at, galley, s.on_surface_variant);
+                            y += LABEL_HEIGHT;
                         }
                         Entry::Item(item) => {
                             let row = Rect::from_min_size(

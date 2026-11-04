@@ -117,11 +117,16 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
     }
     let actions = super::actions(state);
     let last = actions.len().saturating_sub(1);
+    let save = state.lyrics.savable;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        // The finest timing is the primary action.
+        // Timing made and checked here: keeping it is the primary action.
+        if save && ui.add(Button::new("Сохранить текст").style(Style::Filled).size(Size::S).id_salt("lyrics-page-save")).clicked() {
+            super::save(state, out);
+        }
+        // Else the finest timing is.
         for (i, (target, label)) in actions.into_iter().enumerate().rev() {
-            let style = if i == last { Style::Filled } else { Style::Tonal };
+            let style = if i == last && !save { Style::Filled } else { Style::Tonal };
             if ui.add(Button::new(label).style(style).size(Size::S).id_salt(("lyrics-page-make", label))).clicked() {
                 if super::failed(state).is_some() {
                     out.push(Command::ClearCraft);
