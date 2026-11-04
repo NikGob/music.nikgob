@@ -7,12 +7,17 @@
 //!
 //! Instances come and go (Tidal bans their accounts): several are asked in
 //! turn, and the answers are read loosely (older instances wrap them in a
-//! list).
+//! list). Which ones work is read from Monochrome's uptime list
+//! ([`UPTIME`]): it tries every instance it knows every few minutes and
+//! tells those that search from those that also give files. An instance
+//! can search and still refuse every file (`403 {"detail": "Upstream API
+//! error"}`: Tidal no longer plays for its account); the file is asked of
+//! the ones that give files.
 
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use nikgob_core::indexer::BoxFuture;
@@ -21,21 +26,37 @@ use nikgob_core::source::{Fetched, Format, Offer, OfferScope, Progress, Source, 
 use serde_json::Value;
 
 use crate::album::{Patience, fetch_each, left_out};
-use crate::http::{client, download, get_json, safe_name};
+use crate::http::{Pace, client, download, get_json, safe_name};
 use crate::instances::Instances;
 use crate::text::catalogue_queries;
 
-/// The one that answered on 2026-10-31 first; the monochrome.tf names had
-/// no DNS records that day, they stay for when they come back.
-pub const DEFAULT_INSTANCES: &[&str] = &[
-    "https://monochrome-api.samidy.com",
-    "https://api.monochrome.tf",
-    "https://eu-central.monochrome.tf",
-    "https://us-west.monochrome.tf",
+/// Asked when the uptime list cannot be read: the one that searched on
+/// 2026-11-04 (its files answered 403 that day) and Monochrome's own
+/// fallback. The monochrome.tf names (api, eu-central, us-west) had no DNS
+/// records any more.
+pub const DEFAULT_INSTANCES: &[&str] = &["https://monochrome-api.samidy.com", "https://tracks.monochrome.st"];
+
+/// Monochrome's uptime workers: `{"api": [{"url"}], "streaming": [{"url"}],
+/// "down": [{"url", "error"}]}`, the second one a mirror.
+pub const UPTIME: &[&str] = &[
+    "https://tidal-uptime.props-76styles.workers.dev/",
+    "https://tidal-uptime.jiffy-puffs-1j.workers.dev/",
 ];
+/// The uptime list is read again after this.
+const UPTIME_EVERY: Duration = Duration::from_secs(30 * 60);
 
 pub struct Tidal {
+    /// The instances that search (and list albums).
     instances: Instances,
+    /// The instances asked for files.
+    files: Instances,
+    /// One request to the instances per this.
+    pace: Pace,
+    /// Where the lists of the instances that work are read; none when the
+    /// user set the instances.
+    uptime: Vec<String>,
+    /// When the uptime list was last read.
+    checked: tokio::sync::Mutex<Option<Instant>>,
     http: reqwest::Client,
 }
 
@@ -45,11 +66,71 @@ impl Tidal {
     }
 
     pub fn with_pace(urls: &[String], every: Duration) -> Self {
+        let instances = Instances::new(urls, DEFAULT_INSTANCES, Duration::ZERO);
+        let uptime = if instances.is_own() { Vec::new() } else { UPTIME.iter().map(|u| (*u).to_owned()).collect() };
         Self {
-            instances: Instances::new(urls, DEFAULT_INSTANCES, every),
+            instances,
+            files: Instances::new(urls, DEFAULT_INSTANCES, Duration::ZERO),
+            pace: Pace::new(every),
+            uptime,
+            checked: tokio::sync::Mutex::new(None),
             http: client(),
         }
     }
+
+    /// The instances of the uptime list, read at most every
+    /// [`UPTIME_EVERY`]; the lists stay as they were when it cannot be read.
+    async fn refresh(&self) {
+        if self.uptime.is_empty() {
+            return;
+        }
+        let mut checked = self.checked.lock().await;
+        if checked.is_some_and(|t| t.elapsed() < UPTIME_EVERY) {
+            return;
+        }
+        *checked = Some(Instant::now());
+        for url in &self.uptime {
+            match get_json::<Value>(&self.http, url).await {
+                Ok(v) => {
+                    let (search, files) = uptime_lists(&v, DEFAULT_INSTANCES);
+                    let before = (self.instances.urls(), self.files.urls());
+                    self.instances.replace(&search);
+                    self.files.replace(&files);
+                    if before != (self.instances.urls(), self.files.urls()) {
+                        log::info!("tidal: searching in {:?}, files from {:?}", self.instances.urls(), self.files.urls());
+                    }
+                    return;
+                }
+                Err(e) => log::info!("tidal: the uptime list {url}: {e}"),
+            }
+        }
+    }
+}
+
+/// The instances an uptime answer says work: those that search, and those
+/// that give files (the searching ones when it names none apart), each
+/// followed by `defaults` it does not say are down.
+pub fn uptime_lists(v: &Value, defaults: &[&str]) -> (Vec<String>, Vec<String>) {
+    let urls = |key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned).or_else(|| s(x, "url"))).collect())
+            .unwrap_or_default()
+    };
+    let same = |a: &str, b: &str| a.trim_end_matches('/') == b.trim_end_matches('/');
+    let down = urls("down");
+    let with_defaults = |mut list: Vec<String>| {
+        for d in defaults {
+            if !list.iter().chain(&down).any(|u| same(u, d)) {
+                list.push((*d).to_owned());
+            }
+        }
+        list
+    };
+    let api = urls("api");
+    let streaming = urls("streaming");
+    let files = if streaming.is_empty() { api.clone() } else { streaming };
+    (with_defaults(api), with_defaults(files))
 }
 
 /// The first array under `key` anywhere in `v` (breadth first, so the
@@ -218,12 +299,21 @@ fn enc(s: &str) -> String {
 }
 
 impl Tidal {
+    /// `path` of the searching instances.
     async fn ask(&self, path: String) -> Result<Value, SourceError> {
-        let http = &self.http;
-        self.instances
+        self.ask_of(&self.instances, path).await
+    }
+
+    async fn ask_of(&self, instances: &Instances, path: String) -> Result<Value, SourceError> {
+        self.refresh().await;
+        let (http, pace) = (&self.http, &self.pace);
+        instances
             .call(|base| {
                 let path = path.clone();
-                async move { get_json::<Value>(http, &format!("{base}{path}")).await }
+                async move {
+                    pace.wait().await;
+                    get_json::<Value>(http, &format!("{base}{path}")).await
+                }
             })
             .await
     }
@@ -290,7 +380,7 @@ impl Source for Tidal {
             fetch_each(tracks, Patience::default(), |id, name| {
                 let (before, progress) = (before.clone(), progress.clone());
                 async move {
-                    let answer = self.ask(format!("/track/?id={}&quality=LOSSLESS", enc(&id))).await?;
+                    let answer = self.ask_of(&self.files, format!("/track/?id={}&quality=LOSSLESS", enc(&id))).await?;
                     let url = file_url(&answer)?;
                     let base = before.load(Ordering::Relaxed);
                     let step: Progress = Arc::new(move |done, _| progress(base + done, None));
@@ -314,5 +404,25 @@ mod tests {
         assert_eq!(title_of(&v).as_deref(), Some("Spider-Man (Deluxe Edition)"));
         let v = serde_json::json!({"title": "Avant", "version": "Remastered"});
         assert_eq!(title_of(&v).as_deref(), Some("Avant (Remastered)"));
+    }
+
+    /// The uptime list as it was on 2026-11-04: one instance searches,
+    /// none is named for files (so the searching one is asked), the
+    /// monochrome.tf names are down; a default it does not name stays last.
+    #[test]
+    fn the_uptime_list_says_which_instances_to_ask() {
+        let v = serde_json::json!({
+            "lastUpdated": "2026-11-04T18:10:08.444Z",
+            "api": [{"url": "https://monochrome-api.samidy.com", "version": "2.3"}],
+            "streaming": [],
+            "down": [{"url": "https://api.monochrome.tf", "status": 504, "error": "Track unreachable"}]
+        });
+        let defaults = ["https://monochrome-api.samidy.com/", "https://api.monochrome.tf", "https://tracks.monochrome.st"];
+        let (search, files) = uptime_lists(&v, &defaults);
+        assert_eq!(search, ["https://monochrome-api.samidy.com", "https://tracks.monochrome.st"]);
+        assert_eq!(files, search);
+        let v = serde_json::json!({"api": ["https://a", "https://b"], "streaming": [{"url": "https://b"}]});
+        let (search, files) = uptime_lists(&v, &[]);
+        assert_eq!((search.len(), files), (2, vec!["https://b".to_owned()]));
     }
 }

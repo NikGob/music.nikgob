@@ -632,7 +632,8 @@ fn album_item(lib: &Library, release: nikgob_core::model::ReleaseId) -> nikgob_c
 }
 
 /// Tidal is first and finds the song, but its download answers 403: Qobuz,
-/// next, gives it; «История» says who refused and who gave it.
+/// next, gives it; once it came, «История» keeps no line of the refusal
+/// (one line per wish: the import's).
 #[test]
 fn a_refused_download_falls_back_to_the_next_source() {
     let lib = Library::open_in_memory().unwrap();
@@ -649,12 +650,9 @@ fn a_refused_download_falls_back_to_the_next_source() {
     r.rt.send(Command::Like(LikeTarget::Track(track), true));
     wait_until("the item done", || wish_status(&lib, track) == Some(WishlistStatus::Done));
     assert_eq!((*tidal.fetched.lock().unwrap(), *qobuz.fetched.lock().unwrap()), (1, 1));
-    wait_for(&r.rt, "the line", |s| s.downloads.history.iter().any(|j| j.subtitle.contains("беру из Qobuz")));
-    let lines = history(&r.rt);
-    assert!(
-        lines.iter().any(|l| l.starts_with("Tidal: ") && l.contains("не дал скачать: ошибка 403 · беру из Qobuz")),
-        "{lines:?}"
-    );
+    wait_for(&r.rt, "no refusal line left", |s| !s.downloads.history.iter().any(|j| j.subtitle.contains("не отдаёт")));
+    let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
+    assert!(lib.job_log_with("import", "wish:", 50).unwrap().iter().all(|e| e.kind != format!("wish:{}", item.id)));
 }
 
 /// Qobuz asks to wait at the search and nothing else has the song: not
@@ -679,7 +677,9 @@ fn a_source_asking_to_wait_is_searched_again_after_the_wait() {
     let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
     let at = item.next_try_at.unwrap();
     assert!(at >= before + 4 * 60_000 && at < before + 3_600_000, "minutes, not a week: {}", at - before);
-    assert!(item.note.as_deref().unwrap_or_default().starts_with("Qobuz: просит подождать — попробую"), "{:?}", item.note);
+    assert!(item.note.as_deref().unwrap_or_default().starts_with("Qobuz просит подождать · в "), "{:?}", item.note);
+    assert!(item.note.as_deref().unwrap_or_default().ends_with(" спрошу Qobuz"), "{:?}", item.note);
+    wait_for(&r.rt, "its line", |s| s.downloads.history.iter().any(|j| j.subtitle.starts_with("Qobuz просит подождать")));
     assert_eq!(*qobuz.fetched.lock().unwrap(), 0);
 
     // The wait is over: the scheduler asks Qobuz again (and only it).
@@ -718,8 +718,7 @@ fn an_album_that_came_in_part_keeps_its_tracks_and_gets_the_rest_elsewhere() {
     assert_eq!(album_item(&lib, release).note.as_deref(), Some("Скачано"));
     assert_eq!(*tidal.asked.lock().unwrap(), titles, "Tidal was asked for all");
     assert_eq!(*qobuz.asked.lock().unwrap(), ["Вторая", "Третья"], "Qobuz only for what was missing");
-    let lines = history(&r.rt);
-    assert!(lines.iter().any(|l| l.contains("скачано 1 из 3 · остальные 2 не дал: ошибка 403")), "{lines:?}");
+    wait_for(&r.rt, "its line gone once all came", |s| !s.downloads.history.iter().any(|j| j.subtitle.contains("Скачано 1 из 3")));
 }
 
 /// An album only Tidal has, and it asks to wait after one track: the track
@@ -747,10 +746,12 @@ fn an_album_cut_short_by_a_refusal_waits_for_its_rest() {
     assert!(lib.active_source(tracks[0]).unwrap().is_some_and(|s| s.kind.is_local()), "the track that came stays");
     assert!(!lib.active_source(tracks[1]).unwrap().is_some_and(|s| s.kind.is_local()));
     let it = album_item(&lib, release);
-    assert!(it.note.as_deref().unwrap_or_default().starts_with("Скачано 1 из 2 — остальное попробую"), "{:?}", it.note);
+    assert!(it.note.as_deref().unwrap_or_default().starts_with("Есть 1 из 2 · Tidal просит подождать · в "), "{:?}", it.note);
     assert!(it.next_try_at.unwrap() >= nikgob_library::now_ms() + 9 * 60_000, "the wait it asked for");
-    let lines = history(&r.rt);
-    assert!(lines.iter().any(|l| l.contains("скачано 1 из 2 · остальные 1 не дал: просит подождать")), "{lines:?}");
+    wait_for(&r.rt, "one line of the album", |s| {
+        s.downloads.history.iter().filter(|j| j.title == "Тестер — Обрыв").count() == 1
+            && s.downloads.history.iter().any(|j| j.subtitle.starts_with("Есть 1 из 2 · Tidal просит подождать"))
+    });
 }
 
 /// Tidal finds but every download answers 403: after the second it is set
@@ -785,9 +786,10 @@ fn a_source_refusing_again_and_again_is_set_aside() {
     wait_until("searched again", || *tidal.searched.lock().unwrap() == 3 && later());
     assert_eq!(*tidal.fetched.lock().unwrap(), 2, "set aside: its offer is not tried");
     let note = lib.get_wishlist_item(id).unwrap().unwrap().note.unwrap_or_default();
-    assert!(note.starts_with("Tidal: не даёт скачать — попробую"), "{note}");
+    assert!(note.starts_with("Tidal сейчас не отдаёт этот трек · в "), "{note}");
+    // Three refusals, one line: the latest.
     let lines = history(&r.rt);
-    assert!(lines.iter().any(|l| l.contains("Не дал скачать: ошибка 403 · попробую")), "{lines:?}");
+    assert_eq!(lines.iter().filter(|l| l.contains("Tidal сейчас не отдаёт этот трек")).count(), 1, "{lines:?}");
 }
 
 /// A source that has no file of the song (404) is not a refusal: one try,
@@ -811,5 +813,5 @@ fn a_miss_is_not_retried_soon() {
     assert_eq!((*tidal.searched.lock().unwrap(), *tidal.fetched.lock().unwrap()), (1, 1));
     let status = r.rt.state().downloads.sources.iter().find(|v| v.key == SourceKey::Tidal).and_then(|v| v.status.clone());
     assert_eq!(status.as_deref(), Some("Находит, но не скачивает"));
-    assert!(!history(&r.rt).iter().any(|l| l.contains("не дал скачать")));
+    assert!(!history(&r.rt).iter().any(|l| l.contains("не отдаёт")));
 }

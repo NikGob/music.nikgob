@@ -130,6 +130,48 @@ pub(crate) fn sort_history(history: &mut [v::Job]) {
     history.sort_by_key(|j| std::cmp::Reverse(j.at));
 }
 
+/// Job-log kind of the one line of a «Хочу скачать» item: `wish:<id>`.
+pub(crate) const WISH_KIND: &str = "wish:";
+
+pub(crate) fn wish_kind(id: WishlistId) -> String {
+    format!("{WISH_KIND}{id}")
+}
+
+/// A line older versions wrote for a wished download on every refusal or
+/// retry, each its own ("Tidal: … · не дал скачать: ошибка 403 · попробую
+/// в 21:48", "Скачано 1 из 10 — остальное попробую в …").
+fn old_wish_line(e: &nikgob_library::JobLogEntry) -> bool {
+    e.kind == "import"
+        && [e.subtitle.as_str(), e.error.as_deref().unwrap_or_default()]
+            .iter()
+            .any(|t| ["не дал", "Не дал", "попробую", "поищу снова"].iter().any(|w| t.contains(*w)))
+}
+
+/// What a wish's line is about: its title without the source an older
+/// line began with ("Tidal: Eve — Underdog" → "Eve — Underdog").
+fn wish_key(title: &str) -> &str {
+    nikgob_core::source::SourceKey::ALL
+        .iter()
+        .find_map(|k| title.strip_prefix(k.display_name()).and_then(|t| t.strip_prefix(": ")))
+        .unwrap_or(title)
+}
+
+/// The history kept across restarts (newest first), one line per wish: of
+/// a wish's lines (its own one, or the many older versions wrote) only the
+/// newest stays.
+pub(crate) fn kept_history(entries: Vec<nikgob_library::JobLogEntry>) -> Vec<nikgob_library::JobLogEntry> {
+    let mut seen: HashSet<String> = HashSet::new();
+    entries
+        .into_iter()
+        .filter(|e| {
+            if !e.kind.starts_with(WISH_KIND) && !old_wish_line(e) {
+                return true;
+            }
+            seen.insert(wish_key(&e.title).to_owned())
+        })
+        .collect()
+}
+
 pub(crate) struct ImportService {
     rt: tokio::runtime::Runtime,
     importer: Importer,
@@ -146,6 +188,9 @@ pub(crate) struct ImportService {
     /// Parked items being imported right now (already out of `pending`).
     resolving: usize,
     history: VecDeque<v::Job>,
+    /// The history line of each «Хочу скачать» item that has one, by its
+    /// job-log kind ([`wish_kind`]): a new state replaces it.
+    wish_lines: HashMap<String, u64>,
     dirty: bool,
     last_reload: Instant,
     /// Lyrics lookups on their way: a source is asked once at a time.
@@ -207,6 +252,15 @@ impl ImportService {
             Ok(_) => {}
             Err(e) => log::warn!("giving torrent tracks their artists back: {e}"),
         }
+        // Finished imports survive a restart ("Загрузки → История"), and
+        // so does the latest line of each wished download.
+        let mut kept = kept_history(library.job_log_with("import", WISH_KIND, 200).unwrap_or_default());
+        kept.truncate(100);
+        let wish_lines: HashMap<String, u64> = kept
+            .iter()
+            .filter(|e| e.kind.starts_with(WISH_KIND))
+            .map(|e| (e.kind.clone(), logged_job(e, IMPORT_ID).id))
+            .collect();
         let mut svc = Self {
             rt,
             importer,
@@ -219,13 +273,8 @@ impl ImportService {
             launching: HashMap::new(),
             wish_jobs: HashMap::new(),
             resolving: 0,
-            // Finished imports survive a restart ("Загрузки → История").
-            history: library
-                .job_log(Some("import"), 100)
-                .unwrap_or_default()
-                .iter()
-                .map(|e| logged_job(e, IMPORT_ID))
-                .collect(),
+            history: kept.iter().map(|e| logged_job(e, IMPORT_ID)).collect(),
+            wish_lines,
             dirty: false,
             last_reload: Instant::now(),
             lyrics_asking: HashSet::new(),
@@ -515,12 +564,13 @@ impl Worker {
         self.import_for(paths, title, origin, nikgob_import::ImportTargets::default())
     }
 
-    /// An import whose files are meant for `targets` (a wishlist item).
-    /// A line of «Загрузки → История» that is not an import's own (a source
-    /// that turned a wished download away, an album that came in part);
-    /// kept with the imports' lines over a restart.
-    pub(crate) fn history_line(&mut self, title: String, subtitle: String, error: Option<String>) {
-        let seq = match self.lib.log_job("import", &title, &subtitle, error.as_deref()) {
+    /// The line of «Загрузки → История» of the wished download `item` (a
+    /// source that turned it away, an album that came in part, when it is
+    /// tried again): one per item, its latest state replacing the one
+    /// before, at the top; kept with the imports' lines over a restart.
+    pub(crate) fn wish_line(&mut self, item: WishlistId, title: String, subtitle: String, error: Option<String>) {
+        let kind = wish_kind(item);
+        let seq = match self.lib.put_job_line(&kind, &title, &subtitle, error.as_deref()) {
             Ok(seq) => seq.max(0) as u64,
             Err(e) => {
                 log::warn!("job log: {e}");
@@ -528,8 +578,12 @@ impl Worker {
             }
         };
         let Some(svc) = &mut self.import else { return };
+        let id = IMPORT_ID | LOGGED_ID | seq;
+        if let Some(old) = svc.wish_lines.insert(kind, id) {
+            svc.history.retain(|j| j.id != old);
+        }
         svc.history.push_front(v::Job {
-            id: IMPORT_ID | LOGGED_ID | seq,
+            id,
             title,
             subtitle,
             progress: Some(1.0),
@@ -544,6 +598,20 @@ impl Worker {
         self.publish_downloads();
     }
 
+    /// The wished download `item` came: its line goes (the import's own
+    /// line says what came).
+    pub(crate) fn wish_line_drop(&mut self, item: WishlistId) {
+        let kind = wish_kind(item);
+        let Some(svc) = &mut self.import else { return };
+        let Some(old) = svc.wish_lines.remove(&kind) else { return };
+        svc.history.retain(|j| j.id != old);
+        if let Err(e) = self.lib.drop_job_lines(&kind) {
+            log::warn!("job log: {e}");
+        }
+        self.publish_downloads();
+    }
+
+    /// An import whose files are meant for `targets` (a wishlist item).
     pub(crate) fn import_for(
         &mut self,
         paths: Vec<PathBuf>,
@@ -1267,4 +1335,41 @@ pub(crate) fn file_gain_db(path: &Path) -> f32 {
         .map(|q| f32::from(q) / 256.0 + 5.0)
         .or(t.replaygain_track_gain_db)
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(seq: i64, kind: &str, title: &str, subtitle: &str, error: Option<&str>) -> nikgob_library::JobLogEntry {
+        nikgob_library::JobLogEntry {
+            seq,
+            kind: kind.into(),
+            title: title.into(),
+            subtitle: subtitle.into(),
+            error: error.map(str::to_owned),
+            at: seq,
+        }
+    }
+
+    /// The history of 2026-11-04: the same refusal of one song again and
+    /// again, from Tidal and from Qobuz, an album's «Скачано 1 из 10» every
+    /// few hours. One line of each song stays, the newest; the imports'
+    /// lines all stay.
+    #[test]
+    fn one_line_of_each_wish_is_kept() {
+        let entries = vec![
+            line(9, "wish:a", "frutiger pm — cloud city", "Tidal сейчас не отдаёт этот трек", None),
+            line(8, "import", "Tidal: frutiger pm — cloud city", "", Some("Не дал скачать: ошибка 403 · попробую в 21:48")),
+            line(7, "import", "MORGENSHTERN — ЛЕГЕНДАРНАЯ ПЫЛЬ", "", Some("Скачано 1 из 10 — остальное попробую в 21:47")),
+            line(6, "import", "Qobuz: frutiger pm — cloud city", "", Some("Не дал скачать: просит подождать · попробую в 19:40")),
+            line(5, "import", "Импорт «a.flac»", "добавлено 1", None),
+            line(4, "import", "MORGENSHTERN — ЛЕГЕНДАРНАЯ ПЫЛЬ", "", Some("Скачано 1 из 10 — остальное попробую в 17:40")),
+            line(3, "import", "Tidal: Eve — Underdog", "не дал скачать: ошибка 403 · беру из Qobuz", None),
+            line(2, "import", "Qobuz: Eve", "добавлено 1", None),
+            line(1, "import", "Импорт «a.flac»", "добавлено 1", None),
+        ];
+        let kept: Vec<i64> = kept_history(entries).iter().map(|e| e.seq).collect();
+        assert_eq!(kept, [9, 7, 5, 3, 2, 1]);
+    }
 }

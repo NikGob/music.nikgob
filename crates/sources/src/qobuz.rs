@@ -24,9 +24,13 @@ use crate::http::{client, download, get_json, safe_name};
 use crate::instances::Instances;
 use crate::text::catalogue_queries;
 
-/// The one that searched and gave a file on 2026-10-31; `qobuz.squid.wtf`
-/// had no DNS records that day, it stays for when it comes back.
-pub const DEFAULT_INSTANCES: &[&str] = &["https://qobuz-dll.foreyou.workers.dev", "https://qobuz.squid.wtf"];
+/// The one that searched and gave a file on 2026-10-31. It is a Cloudflare
+/// Worker on the free plan: once the day's requests of everyone using it
+/// are spent it answers 429 (error 1027) until midnight UTC, and that wait
+/// is kept ([`crate::http::is_daily_limit`]). `qobuz.squid.wtf` is gone
+/// (no DNS since 2026-10-31, and squid.wtf no longer lists a Qobuz
+/// service on 2026-11-04); other instances go in settings.toml.
+pub const DEFAULT_INSTANCES: &[&str] = &["https://qobuz-dll.foreyou.workers.dev"];
 /// The best format there is.
 const QUALITY: &str = "27";
 

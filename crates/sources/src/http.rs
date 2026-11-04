@@ -60,7 +60,9 @@ impl Pace {
 /// to a day while it keeps doing so; one answer that works ends it. A bot
 /// check or a rate limit starts the pause at once; a 401/403 (an instance
 /// whose account the service banned: it finds, it does not give files)
-/// only once it said so [`STRIKES`] times with no working answer between.
+/// or no answer at all (an instance whose name is gone) only once it did
+/// so [`STRIKES`] times with no working answer between. A wait the site
+/// asked for is waited out whole (up to a day).
 pub struct Breaker {
     state: Mutex<BreakerState>,
 }
@@ -70,13 +72,15 @@ struct BreakerState {
     until: Option<Instant>,
     /// Pauses in a row.
     pauses: u32,
-    /// 401/403 answers in a row.
+    /// 401/403 answers (or none) in a row.
     strikes: u32,
+    /// What started the pause.
+    why: Option<SourceError>,
 }
 
 const FIRST_PAUSE: Duration = Duration::from_secs(30 * 60);
 const LONGEST_PAUSE: Duration = Duration::from_secs(24 * 3600);
-/// 401/403 answers in a row that set an instance aside.
+/// 401/403 answers (or none) in a row that set an instance aside.
 pub const STRIKES: u32 = 2;
 
 impl Default for Breaker {
@@ -86,20 +90,23 @@ impl Default for Breaker {
 }
 
 impl Breaker {
-    /// Err while the site sits out.
+    /// Err while the site sits out: a wait (with how long is left) when
+    /// it turned us away or asked to wait; what it kept answering (a 403,
+    /// no answer) when that set it aside, so it is not told as a wait.
     pub fn check(&self) -> Result<(), SourceError> {
         let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match st.until {
-            Some(until) if Instant::now() < until => {
-                Err(SourceError::RateLimited { retry_after: Some(until - Instant::now()) })
-            }
+            Some(until) if Instant::now() < until => Err(match &st.why {
+                Some(e @ (SourceError::Http { .. } | SourceError::Unreachable(_))) => e.clone(),
+                _ => SourceError::RateLimited { retry_after: Some(until - Instant::now()) },
+            }),
             _ => Ok(()),
         }
     }
 
     /// Notes what a request did: a block or a rate limit starts (or
-    /// lengthens) the pause, so do repeated 401/403 answers; an answer
-    /// ends it.
+    /// lengthens) the pause, so do repeated 401/403 answers and repeated
+    /// failures to answer; an answer ends it.
     pub fn note<T>(&self, r: &Result<T, SourceError>) {
         let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let pause = match r {
@@ -108,7 +115,7 @@ impl Breaker {
                 return;
             }
             Err(SourceError::Blocked(_) | SourceError::RateLimited { .. }) => true,
-            Err(SourceError::Http { status: 401 | 403 }) => {
+            Err(SourceError::Http { status: 401 | 403 } | SourceError::Unreachable(_)) => {
                 st.strikes += 1;
                 st.strikes >= STRIKES
             }
@@ -120,12 +127,13 @@ impl Breaker {
         let n = st.pauses.min(6);
         let long = (FIRST_PAUSE * 2u32.pow(n)).min(LONGEST_PAUSE);
         let long = match r {
-            Err(SourceError::RateLimited { retry_after: Some(d) }) => (*d).max(Duration::from_secs(60)).min(long),
+            Err(SourceError::RateLimited { retry_after: Some(d) }) => (*d).clamp(Duration::from_secs(60), LONGEST_PAUSE),
             _ => long,
         };
         st.until = Some(Instant::now() + long);
         st.pauses += 1;
         st.strikes = 0;
+        st.why = r.as_ref().err().cloned();
     }
 }
 
@@ -135,12 +143,36 @@ pub fn is_bot_check(status: StatusCode, body: &str) -> bool {
         && (body.contains("Just a moment") || body.contains("cf-chl") || body.contains("Attention Required") || body.contains("challenge-platform"))
 }
 
+/// A Cloudflare Worker past the requests its free plan gives a day
+/// (error 1027): nothing until the count starts over at midnight UTC.
+pub fn is_daily_limit(status: StatusCode, body: &str) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS && (body.contains("Error 1027") || body.contains("error code: 1027"))
+}
+
+/// From `now` (unix seconds) to the next midnight UTC.
+pub fn until_utc_midnight(now: u64) -> Duration {
+    const DAY: u64 = 86_400;
+    Duration::from_secs(DAY - now % DAY)
+}
+
+/// No answer, with why (the name not found, the TLS handshake): reqwest's
+/// own line says only that sending failed.
 fn unreachable(e: reqwest::Error) -> SourceError {
     if e.is_timeout() {
-        SourceError::Unreachable("timed out".into())
-    } else {
-        SourceError::Unreachable(e.without_url().to_string())
+        return SourceError::Unreachable("timed out".into());
     }
+    let e = e.without_url();
+    let mut text = e.to_string();
+    let mut cause = std::error::Error::source(&e);
+    while let Some(c) = cause {
+        let line = c.to_string();
+        if !text.contains(&line) {
+            text.push_str(": ");
+            text.push_str(&line);
+        }
+        cause = c.source();
+    }
+    SourceError::Unreachable(text)
 }
 
 fn retry_after(resp: &Response) -> Option<Duration> {
@@ -205,6 +237,10 @@ pub async fn get_page(http: &Client, url: &str, cookies: Option<&Cookies>) -> Re
     }
     if is_bot_check(status, &body) {
         return Err(SourceError::Blocked("a bot check".into()));
+    }
+    if is_daily_limit(status, &body) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        return Err(SourceError::RateLimited { retry_after: Some(until_utc_midnight(now)) });
     }
     Err(match status {
         StatusCode::TOO_MANY_REQUESTS => SourceError::RateLimited { retry_after: wait },
@@ -416,10 +452,49 @@ mod tests {
         assert!(b.check().is_ok(), "once is not yet");
         b.note::<()>(&Err(SourceError::Http { status: 404 }));
         b.note::<()>(&Err(SourceError::Http { status: 403 }));
-        assert!(matches!(b.check(), Err(SourceError::RateLimited { retry_after: Some(d) }) if d > Duration::from_secs(25 * 60)));
+        assert_eq!(b.check(), Err(SourceError::Http { status: 403 }), "told as what it answered, not as a wait");
         b.note(&Ok(()));
         b.note::<()>(&Err(SourceError::Http { status: 403 }));
         assert!(b.check().is_ok(), "an answer between starts the count over");
+    }
+
+    /// An instance whose name is gone is asked twice, then sits out; it is
+    /// told as gone, not as asking to wait.
+    #[test]
+    fn an_instance_with_no_answer_sits_out_as_gone() {
+        let b = Breaker::default();
+        b.note::<()>(&Err(SourceError::Unreachable("dns error".into())));
+        assert!(b.check().is_ok());
+        b.note::<()>(&Err(SourceError::Unreachable("dns error".into())));
+        assert_eq!(b.check(), Err(SourceError::Unreachable("dns error".into())));
+    }
+
+    /// A wait the site asked for (a Worker's day of requests) is waited out
+    /// whole, not cut to the first half hour.
+    #[test]
+    fn a_long_wait_asked_for_is_waited_out() {
+        let b = Breaker::default();
+        b.note::<()>(&Err(SourceError::RateLimited { retry_after: Some(Duration::from_secs(5 * 3600)) }));
+        assert!(matches!(b.check(), Err(SourceError::RateLimited { retry_after: Some(d) }) if d > Duration::from_secs(4 * 3600)));
+    }
+
+    /// A Worker out of its day's requests (what the Qobuz-DL instance
+    /// answered on 2026-11-04): a wait until midnight UTC, not a ban.
+    #[tokio::test]
+    async fn a_worker_past_its_daily_limit_waits_for_midnight_utc() {
+        let server = MockServer::start().await;
+        Mock::given(path("/api"))
+            .respond_with(ResponseTemplate::new(429).set_body_raw(
+                "<title>This website has been temporarily rate limited</title><h2 class=\"cf-subheadline\">Error 1027</h2>",
+                "text/html",
+            ))
+            .mount(&server)
+            .await;
+        let got = get_text(&client(), &format!("{}/api", server.uri())).await.unwrap_err();
+        let SourceError::RateLimited { retry_after: Some(wait) } = got else { panic!("{got:?}") };
+        assert!(wait > Duration::ZERO && wait <= Duration::from_secs(86_400), "{wait:?}");
+        assert_eq!(until_utc_midnight(86_400 * 20_000 + 3_600), Duration::from_secs(23 * 3_600));
+        assert_eq!(until_utc_midnight(86_400 * 20_000), Duration::from_secs(86_400));
     }
 
     #[test]

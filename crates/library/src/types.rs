@@ -341,7 +341,8 @@ pub struct ConfirmRow {
 pub struct JobLogEntry {
     /// Row id, increasing.
     pub seq: i64,
-    /// `import` or `torrent`.
+    /// `import`, `torrent`, or `wish:<item>` (the one line of a wished
+    /// download).
     pub kind: String,
     pub title: String,
     pub subtitle: String,
