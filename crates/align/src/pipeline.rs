@@ -96,7 +96,7 @@ impl Prepared {
             let peak = percentile(&self.energy, 0.95);
             let voiced: Vec<bool> = self.energy.iter().map(|e| *e > peak * SILENT).collect();
             let step = ENERGY_HOP as f32 / RATE as f32;
-            crate::fit::end_with_voice(lines, VoiceEnds { voiced: &voiced, step, tail: crate::fit::TAIL, hold: true }, bounds);
+            crate::fit::end_with_voice(lines, VoiceEnds { voiced: &voiced, step, tail: crate::fit::TAIL, level: Some(&self.energy) }, bounds);
         } else if let Some(em) = self.heard.get(&id) {
             let per = (em.fps / 10.0).round().max(1.0) as usize;
             let voiced: Vec<bool> = (0..em.frames().div_ceil(per))
@@ -107,7 +107,7 @@ impl Prepared {
                 })
                 .collect();
             let step = per as f32 / em.fps;
-            crate::fit::end_with_voice(lines, VoiceEnds { voiced: &voiced, step, tail: MIX_TAIL, hold: false }, bounds);
+            crate::fit::end_with_voice(lines, VoiceEnds { voiced: &voiced, step, tail: MIX_TAIL, level: None }, bounds);
         }
     }
 

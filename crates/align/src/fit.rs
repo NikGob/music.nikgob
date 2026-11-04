@@ -49,6 +49,10 @@ const AFTER: f32 = 0.1;
 /// A held word with no source end of its line goes on at most this long
 /// past where the aligner ended it.
 const HOLD: f32 = 4.0;
+/// A held word goes on while the voice stays at this share of its line's
+/// level («осенний листопад»: «беда» held at 0.8–1.1 of the loud level,
+/// the reverb after «посильней» at 0.3–0.5 of a line sung at 0.9).
+const HELD: f32 = 0.6;
 
 /// How a text's lines sit against the recording.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -367,9 +371,10 @@ pub struct VoiceEnds<'a> {
     pub step: f32,
     /// A word whose last this-long stretch has no voice ends with it.
     pub tail: f32,
-    /// A word goes on while the voice holds it (only where the flags are
-    /// the voice alone, not the mix).
-    pub hold: bool,
+    /// The voice's loudness at every step, for holding words: a word goes
+    /// on while the voice stays near its line's level (only where it is
+    /// the voice alone, not the mix: `None`).
+    pub level: Option<&'a [f32]>,
 }
 
 /// Ends words where the voice ends, both ways:
@@ -377,7 +382,9 @@ pub struct VoiceEnds<'a> {
 ///   after its last voiced step (never into a silent tail);
 /// * a word the voice goes on holding after the aligner's end (a held
 ///   last vowel: the aligner hears its letters only at the start) lasts
-///   while it is held, a step of silence bridged, up to the next word's
+///   while the voice stays at [`HELD`] of its line's level or more (a
+///   reverb tail or a quiet backing voice falls under it), a step under
+///   it bridged, up to the next word's
 ///   start, the next line's start and where the source ends its line
 ///   (`bounds`, see [`source_bounds`]); without a source end, at most
 ///   [`HOLD`] longer.
@@ -386,7 +393,7 @@ pub struct VoiceEnds<'a> {
 /// held. A word with no voice under it at all is left where the aligner
 /// put it.
 pub fn end_with_voice(lines: &mut [LyricLine], v: VoiceEnds<'_>, bounds: &[Option<f32>]) {
-    let VoiceEnds { voiced, step, tail, hold } = v;
+    let VoiceEnds { voiced, step, tail, level } = v;
     if voiced.is_empty() || step <= 0.0 {
         return;
     }
@@ -408,10 +415,20 @@ pub fn end_with_voice(lines: &mut [LyricLine], v: VoiceEnds<'_>, bounds: &[Optio
                 w.end = Duration::from_secs_f32(cut.max(a));
             }
         }
-        if !hold || l.background {
+        let Some(level) = level.filter(|_| !l.background) else {
+            l.end = l.words.last().map(|w| w.end);
+            continue;
+        };
+        // The line's level: the median over where its words are sung.
+        let at = |t: f32| ((t / step).floor().max(0.0) as usize).min(level.len());
+        let (a, b) = (l.words[0].start.as_secs_f32(), l.words[l.words.len() - 1].end.as_secs_f32());
+        let sung = &level[at(a)..at(b).max(at(a))];
+        if sung.is_empty() {
             l.end = l.words.last().map(|w| w.end);
             continue;
         }
+        let bar = median(sung) * HELD;
+        let held_at = |j: usize| level.get(j).is_some_and(|e| *e >= bar);
         let next_line = next_starts[li];
         let n = l.words.len();
         for i in 0..n {
@@ -427,10 +444,10 @@ pub fn end_with_voice(lines: &mut [LyricLine], v: VoiceEnds<'_>, bounds: &[Optio
             }
             let mut j = (b / step).floor().max(0.0) as usize;
             let mut held = None;
-            while j < voiced.len() && (j as f32) * step < limit {
-                if voiced[j] {
+            while j < level.len() && (j as f32) * step < limit {
+                if held_at(j) {
                     held = Some(j);
-                } else if !voiced.get(j + 1).copied().unwrap_or(false) {
+                } else if !held_at(j + 1) {
                     break;
                 }
                 j += 1;
@@ -757,7 +774,7 @@ mod tests {
         let mut lines = vec![held, tail, short];
         // Voice from 1 to 5 s, 6 to 6.8 s, 17 to 17.5 s (tenths).
         let voiced: Vec<bool> = (0..200).map(|i| (10..50).contains(&i) || (60..68).contains(&i) || (170..175).contains(&i)).collect();
-        let v = VoiceEnds { voiced: &voiced, step: 0.1, tail: TAIL, hold: false };
+        let v = VoiceEnds { voiced: &voiced, step: 0.1, tail: TAIL, level: None };
         end_with_voice(&mut lines, v, &[None; 3]);
         assert!((lines[0].words[0].end.as_secs_f32() - 5.0).abs() < 1e-3, "held: {:?}", lines[0].words);
         let end = lines[1].words[1].end.as_secs_f32();
@@ -769,9 +786,10 @@ mod tests {
 
     /// «осенний листопад»: «беда» is sung held for seconds, the aligner
     /// hears its letters only at the start (79.88 → 80.16) and the line's
-    /// source end is 85.29. The word goes on while the voice holds it, a
-    /// short dip bridged, and stops where the voice stops; never past the
-    /// source's end of the line or into the next line.
+    /// source end is 85.29. The word goes on while the voice holds it near
+    /// the line's level, a short dip bridged, and stops where the voice
+    /// stops or falls to a reverb tail; never past the source's end of the
+    /// line or into the next line.
     #[test]
     fn a_held_last_word_lasts_while_the_voice_holds_it() {
         let w = |a: f32, b: f32, t: &str| LyricWord { start: Duration::from_secs_f32(a), end: Duration::from_secs_f32(b), text: t.into() };
@@ -785,31 +803,42 @@ mod tests {
             line_of(vec![w(78.6, 79.4, "Знаешь, "), w(79.4, 79.88, "не "), w(79.88, 80.16, "беда")]),
             line_of(vec![w(85.3, 86.0, "Если")]),
         ];
-        // Voice from 78.6 to 83.4 s with a dip at 81.0 s, then from 85.3 s.
-        let voiced: Vec<bool> = (0..900).map(|i| ((786..834).contains(&i) && i != 810) || i >= 853).collect();
-        let v = VoiceEnds { voiced: &voiced, step: 0.1, tail: TAIL, hold: true };
+        // Sung at 0.9 from 78.6 to 83.4 s with a dip at 81.0 s, a reverb
+        // tail at 0.4 to 84.5 s, the next line from 85.3 s.
+        let level: Vec<f32> = (0..900)
+            .map(|i| match i {
+                810 => 0.3,
+                786..834 => 0.9,
+                834..845 => 0.4,
+                853.. => 0.9,
+                _ => 0.0,
+            })
+            .collect();
+        let voiced: Vec<bool> = level.iter().map(|e| *e > 0.05).collect();
+        let v = VoiceEnds { voiced: &voiced, step: 0.1, tail: TAIL, level: Some(&level) };
         let mut held = lines.clone();
         end_with_voice(&mut held, v, &[Some(85.29), None]);
         let end = held[0].words[2].end.as_secs_f32();
         assert!((end - 83.4).abs() < 0.01, "{end}");
         assert_eq!(held[0].end, Some(held[0].words[2].end), "the line ends with the held word");
         assert!((held[0].words[0].end.as_secs_f32() - 79.4).abs() < 1e-3, "a word followed by the next keeps its end");
-        // Voice to the next line: the source's end of the line holds it.
-        let on: Vec<bool> = (0..900).map(|i| i >= 786).collect();
+        // Sung on to the next line: the source's end of the line holds it.
+        let on: Vec<f32> = (0..900).map(|i| if i >= 786 { 0.9 } else { 0.0 }).collect();
+        let v_on = VoiceEnds { level: Some(&on), ..v };
         let mut long = lines.clone();
-        end_with_voice(&mut long, VoiceEnds { voiced: &on, ..v }, &[Some(85.0), None]);
+        end_with_voice(&mut long, v_on, &[Some(85.0), None]);
         assert!((long[0].words[2].end.as_secs_f32() - 85.0).abs() < 0.01);
         // … else the next line's start.
         let mut next = lines.clone();
-        end_with_voice(&mut next, VoiceEnds { voiced: &on, ..v }, &[Some(90.0), None]);
+        end_with_voice(&mut next, v_on, &[Some(90.0), None]);
         assert!((next[0].words[2].end.as_secs_f32() - 85.3).abs() < 0.01);
         // On the mix nothing is held.
         let mut mix = lines.clone();
-        end_with_voice(&mut mix, VoiceEnds { hold: false, ..v }, &[Some(85.29), None]);
+        end_with_voice(&mut mix, VoiceEnds { level: None, ..v }, &[Some(85.29), None]);
         assert!((mix[0].words[2].end.as_secs_f32() - 80.16).abs() < 1e-3);
         // Without a source end, at most HOLD longer (and the last line too).
         let mut last = vec![lines[0].clone()];
-        end_with_voice(&mut last, VoiceEnds { voiced: &on, ..v }, &[None]);
+        end_with_voice(&mut last, v_on, &[None]);
         assert!((last[0].words[2].end.as_secs_f32() - (80.16 + HOLD)).abs() < 0.01);
     }
 

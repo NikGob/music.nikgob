@@ -35,8 +35,7 @@ use crate::lyrics::{Aligned, Text};
 /// and the playing song's texts are checked again (timing the user kept
 /// stays). `align-3`: words end where the voice ends (never past the
 /// source's end of their line or into a silent tail) and last while the
-/// voice holds them, a silent window is no longer raised into noise, and
-/// the aligners' own start bias is taken off.
+/// voice holds them, and a silent window is no longer raised into noise.
 pub(crate) const MADE_BY: &str = "align-3";
 /// A text the recording spells at least this well (over chance) is this
 /// song's (docs/lyrics-align.md, «The check»).
