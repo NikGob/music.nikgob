@@ -1,15 +1,14 @@
 //! The control's own menu, in every look (docs/lyrics-control.md):
-//! «Автоматически», every source with how its text goes (picking a source
-//! never needs a window); how the shown text is seen («По словам», «По
-//! строкам», «Без подсветки», as far as it has that timing); then where
-//! it is kept (a group label: only online, made by the player and kept in
-//! the library, or on the computer) with «Сохранить текст» and the timing;
-//! and «Настройки текста…» until it was picked once. The `menu` look makes
-//! the timing right here; the others have one «Сделать подсветку…» row
-//! that opens their window or page. Where timing cannot be made (a clip
-//! whose song is unclear) the menu says why. While timing is made the
-//! control shows its progress and the menu offers «Отменить подсветку»;
-//! the result replaces the text by itself.
+//! «Автоматически», every source with how its text is timed (picking a
+//! source never needs a window), and «Настройки текста…» until it was
+//! picked once. The window and page looks have just one row more, «Подсветка…»,
+//! that opens them: everything else about the text is there. The `menu`
+//! look does it all right here: how the shown text is seen («По словам»,
+//! «По строкам», «Без подсветки», as far as it has that timing),
+//! «Сохранить текст», the timing, and why timing cannot be made (a clip
+//! whose song is unclear). While timing is made the control shows its
+//! progress and the menu offers «Отменить подсветку» (the window and the
+//! page their own «Отменить»); the result replaces the text by itself.
 
 use egui::{Id, Ui};
 use nikgob_view::{Command, LyricsAvail, LyricsSync, ViewState};
@@ -73,16 +72,16 @@ impl Rows {
 
 /// The control and its menu, making timing as `look` does; true for
 /// «Настройки текста…».
-pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out: &mut Vec<Command>) -> bool {
+pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left: Option<f32>, out: &mut Vec<Command>) -> bool {
     let ctx = ui.ctx().clone();
     let motion = Theme::get(&ctx).motion;
     let id = ui.id().with("lyrics-control");
     let open = ctx.data(|d| d.get_temp::<bool>(id.with("md3e-menu-open"))).unwrap_or(false);
     let turn = anim::f32(&ctx, Id::new(("lyrics-menu-chevron", id)), if open { 1.0 } else { 0.0 }, motion.fast_spatial);
-    let resp = super::chip(ui, state, turn, out);
+    let resp = super::chip(ui, state, turn, left, out);
 
     let l = &state.lyrics;
-    let mut m = Rows { menu: Some(Menu::new(("lyrics-menu", l.track)).align_center(true)), rows: Vec::new(), open: false, ended: false };
+    let mut m = Rows { menu: Some(Menu::new(("lyrics-menu", l.track)).align_center(left.is_none())), rows: Vec::new(), open: false, ended: false };
     if l.track.is_some() && !l.sources.is_empty() {
         // Says which text the player chose.
         let mut auto = MenuItem::new("Автоматически").selected(!l.picked);
@@ -103,35 +102,38 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out:
         }
         m.split();
     }
-    // How the shown text is seen.
-    let seen = super::seen(l);
-    for (sync, label) in super::shows(state) {
-        m.item(MenuItem::new(label).selected(sync == seen), Row::Show(sync));
-    }
-    m.split();
-    // Where the shown text is kept, and what can be done with it.
     let busy = super::busy(state).is_some();
-    if let Some(home) = super::home(l).filter(|_| l.track.is_some()) {
-        m.label(home);
-    }
-    if l.savable && !busy {
-        m.item(MenuItem::new(super::save_label(state)), Row::Save);
-    }
     if look == super::Variant::Menu {
-        // Making timing shows on the control; the actions come back after.
+        // How the shown text is seen.
+        let seen = super::seen(l);
+        for (sync, label) in super::shows(state) {
+            m.item(MenuItem::new(label).selected(sync == seen), Row::Show(sync));
+        }
+        m.split();
+        // What can be done with the shown text. Making timing shows on the
+        // control; the actions come back after.
+        if l.savable && !busy {
+            m.item(MenuItem::new(super::save_label(state)), Row::Save);
+        }
         let actions = if busy { Vec::new() } else { super::actions(state) };
         for (target, label) in &actions {
             m.item(MenuItem::new(*label), Row::Make(*target));
         }
-    } else if l.track.is_some() && (busy || !super::actions(state).is_empty()) {
-        // The window shows the timing being made too.
-        m.item(MenuItem::new(if busy { "Подсветка делается…" } else { "Сделать подсветку…" }), Row::Craft);
-    }
-    if busy {
-        m.item(MenuItem::new("Отменить подсветку"), Row::Cancel);
-    }
-    if let Some(why) = super::no_craft(state) {
-        m.label(why);
+        if busy {
+            m.item(MenuItem::new("Отменить подсветку"), Row::Cancel);
+        }
+        if let Some(why) = super::no_craft(state) {
+            m.label(why);
+        }
+    } else if l.track.is_some() && (busy || l.source.is_some()) {
+        // Everything else about the text is in the window or on the page,
+        // which shows the timing being made too.
+        let label = match (busy, l.savable) {
+            (true, _) => "Подсветка делается…",
+            (false, true) => "Подсветка и сохранение…",
+            (false, false) => "Подсветка…",
+        };
+        m.item(MenuItem::new(label), Row::Craft);
     }
     m.split();
     // Offered until it was picked once (the settings remember).

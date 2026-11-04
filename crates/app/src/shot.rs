@@ -17,7 +17,8 @@
 //! `mix_page` opens the page of the first mix of Главная (`mix_page:Title`
 //! that one, or the open world page's).
 //! `lyrics_ui` opens where timing is made in the look
-//! `NIKGOB_LYRICS_UI` picks (the control's menu, the dialog or the page).
+//! `NIKGOB_LYRICS_UI` picks (the control's menu, the dialog or the page);
+//! `lyrics_menu` opens the control's own menu in any look.
 //! `liked` opens «Любимые»; `play_clip` plays the first clip of the open
 //! playlist (`play_clip:song` its first stream song).
 //! `find_song` opens «Найти песню…» for the first clip of the open
@@ -523,6 +524,10 @@ impl Shot {
                 // `lyrics_ui:4` shoots 4 frames in (mid-transition).
                 nikgob_md3e::screens::lyrics_ui::open(ctx);
                 self.wait = arg.parse().unwrap_or(60);
+            }
+            "lyrics_menu" => {
+                nikgob_md3e::screens::lyrics_ui::open_menu(ctx);
+                self.wait = arg.parse().unwrap_or(30);
             }
             "search" => {
                 ui.set_search(arg, out);

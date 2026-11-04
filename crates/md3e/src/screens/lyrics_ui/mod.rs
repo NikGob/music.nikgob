@@ -1,9 +1,11 @@
 //! The control under the lyrics and what opens behind it. The control
 //! always opens its small menu ([`menu`]): the sources are picked there in
-//! every look. Where timing is made comes in three looks to choose from
-//! (`NIKGOB_LYRICS_UI=menu|dialog|page`, the window by default): `menu` makes
-//! it from the menu itself, [`dialog`] grows a modal window out of the
-//! control, [`page`] opens the «Текст песни» page. Settings → «Текст песен» →
+//! every look. Where the text is managed (seen by words or lines, timed,
+//! saved) comes in three looks to choose from
+//! (`NIKGOB_LYRICS_UI=menu|dialog|page`, the window by default): `menu` does
+//! it all from the menu itself, [`dialog`] grows a modal window out of the
+//! control, [`page`] opens the «Текст песни» page; their menu only picks
+//! the source and opens them. Settings → «Текст песен» →
 //! «Вид» picks the look (`Prefs::lyrics_ui`); `NIKGOB_LYRICS_UI` overrides
 //! it for screenshot runs. Each look lives in its own
 //! module; this one has what they share: the words, the control itself and
@@ -99,38 +101,45 @@ pub(crate) fn take_request(ctx: &Context) -> Option<Request> {
 /// The settings row «Настройки текста…» leads to.
 pub(crate) const SETTINGS: super::pages::SettingId = super::pages::SettingId::LyricsUi;
 
-/// Opens where timing is made: the menu, the window or the page
+/// Opens where the text is managed: the menu, the window or the page
 /// (screenshot runs).
 pub fn open(ctx: &Context) {
     let last = ctx.data(|d| d.get_temp::<(Id, Rect)>(Id::new(LAST)));
     match ctx.data(|d| d.get_temp::<Variant>(Id::new(SHOWN))).unwrap_or(Variant::Menu) {
-        Variant::Menu => {
-            if let Some((id, _)) = last {
-                ctx.data_mut(|d| d.insert_temp(id.with("md3e-menu-open"), true));
-            }
-        }
+        Variant::Menu => open_menu(ctx),
         Variant::Dialog => dialog::open(ctx, last.map_or(Rect::NOTHING, |(_, r)| r)),
         Variant::Page => request(ctx, Request::Page),
     }
 }
 
-/// The control under the lyrics, centred in the width it is given, with
-/// its menu. True when «Настройки текста…» was picked.
-pub fn control(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> bool {
-    let v = variant(&state.prefs);
-    ui.ctx().data_mut(|d| d.insert_temp(Id::new(SHOWN), v));
-    menu::control(ui, state, v, out)
+/// Opens the control's own menu, in any look (screenshot runs).
+pub fn open_menu(ctx: &Context) {
+    if let Some((id, _)) = ctx.data(|d| d.get_temp::<(Id, Rect)>(Id::new(LAST))) {
+        ctx.data_mut(|d| d.insert_temp(id.with("md3e-menu-open"), true));
+    }
 }
 
-/// How a text lights up as the song goes, for someone who never heard of
-/// timing kinds.
-pub(crate) fn how(sync: LyricsSync) -> &'static str {
-    match sync {
-        LyricsSync::Plain => "без подсветки",
-        LyricsSync::Line => "строки целиком",
+/// The control with its menu: centred in the width it is given, or with
+/// its left edge at `left` (in line with the text). True when «Настройки
+/// текста…» was picked.
+pub fn control(ui: &mut Ui, state: &ViewState, left: Option<f32>, out: &mut Vec<Command>) -> bool {
+    let v = variant(&state.prefs);
+    ui.ctx().data_mut(|d| d.insert_temp(Id::new(SHOWN), v));
+    menu::control(ui, state, v, left, out)
+}
+
+/// How a source's text is timed, for someone who never heard of timing
+/// kinds: by its own times («синхронизирован по строкам») or by the
+/// player's («плеер синхронизировал по словам»). Worded apart from how the
+/// lyrics light up (by letters, by words), so the two are not confused.
+pub(crate) fn timed(sync: LyricsSync, by_player: bool) -> String {
+    let by = match sync {
+        LyricsSync::Plain => return "без синхронизации".to_owned(),
+        LyricsSync::Line => "по строкам",
         LyricsSync::Word => "по словам",
         LyricsSync::Syllable => "по слогам",
-    }
+    };
+    if by_player { format!("плеер синхронизировал {by}") } else { format!("синхронизирован {by}") }
 }
 
 /// A source's name where texts are listed.
@@ -180,8 +189,8 @@ fn kind(l: &LyricsView, source: LyricsSource) -> Option<LyricsSync> {
 }
 
 /// What a source's row says, where the sources are listed: whether it has
-/// a text at all; how it lights up only where that differs between the
-/// texts there are, and then also when the player fitted it to the voice
+/// a text at all; how it is timed only where that differs between the
+/// texts there are, and then also when the player timed it to the voice
 /// itself.
 pub(crate) fn source_state(l: &LyricsView, source: LyricsSource) -> String {
     let Some(o) = l.sources.iter().find(|o| o.source == source) else { return String::new() };
@@ -194,11 +203,7 @@ pub(crate) fn source_state(l: &LyricsView, source: LyricsSource) -> String {
     let kinds: Vec<LyricsSync> = l.sources.iter().filter_map(|o| kind(l, o.source)).collect();
     let differ = kinds.windows(2).any(|w| w[0] != w[1]);
     let Some(k) = kind(l, source).filter(|_| differ) else { return String::new() };
-    if o.made && source != LyricsSource::Recognized && k != LyricsSync::Plain {
-        format!("{}, подогнал плеер", how(k))
-    } else {
-        how(k).to_owned()
-    }
+    timed(k, o.made && source != LyricsSource::Recognized)
 }
 
 /// `text` with a capital first letter (list rows).
@@ -232,14 +237,16 @@ pub(crate) fn no_craft(state: &ViewState) -> Option<&str> {
     }
 }
 
-/// Where the shown text is kept, in plain words.
+/// Where the shown text is kept, in plain words, where that matters (the
+/// window and the page): made by the player and kept in the library, or
+/// saved on the computer. A text only online goes without saying.
 pub(crate) fn home(l: &LyricsView) -> Option<&'static str> {
     l.source?;
-    Some(match l.home {
-        LyricsHome::Online => "Текст только в интернете",
-        LyricsHome::Library => "Сделано плеером, хранится в библиотеке",
-        LyricsHome::Computer => "Текст сохранён на компьютере",
-    })
+    match l.home {
+        LyricsHome::Online => None,
+        LyricsHome::Library => Some("Сделано плеером, хранится в библиотеке"),
+        LyricsHome::Computer => Some("Сохранено на компьютере"),
+    }
 }
 
 /// How the shown text can be seen, with what the choice says: offered
@@ -370,10 +377,11 @@ enum Lead {
     Error,
 }
 
-/// The control: a tonal extra-small button on the centre line of a row as
-/// wide as `ui`. `open` (0..1) turns its chevron over while what it opens
-/// is open. A click on a failure clears it (it was seen).
-pub(crate) fn chip(ui: &mut Ui, state: &ViewState, open: f32, out: &mut Vec<Command>) -> Response {
+/// The control: a tonal extra-small button in a row as wide as `ui`, on its
+/// centre line or from `at` (following it on a spring, kept inside the
+/// row). `open` (0..1) turns its chevron over while what it opens is open.
+/// A click on a failure clears it (it was seen).
+pub(crate) fn chip(ui: &mut Ui, state: &ViewState, open: f32, at: Option<f32>, out: &mut Vec<Command>) -> Response {
     let ctx = ui.ctx().clone();
     let theme = Theme::get(&ctx);
     let (s, motion) = (theme.scheme, theme.motion);
@@ -393,7 +401,14 @@ pub(crate) fn chip(ui: &mut Ui, state: &ViewState, open: f32, out: &mut Vec<Comm
     let target_w = left + slot + galley.size().x + 4.0 + ICON + 10.0;
     let w = anim::f32(&ctx, id.with("w"), target_w, motion.fast_spatial).max(HEIGHT);
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEIGHT), Sense::hover());
-    let visual = Rect::from_center_size(row.center(), vec2(w, HEIGHT));
+    let visual = match at {
+        Some(x) => {
+            let x = anim::f32(&ctx, id.with("x"), x, motion.default_spatial);
+            let x = x.min(row.right() - w).max(row.left());
+            Rect::from_min_size(pos2(x, row.center().y - HEIGHT * 0.5), vec2(w, HEIGHT))
+        }
+        None => Rect::from_center_size(row.center(), vec2(w, HEIGHT)),
+    };
     let response = ui
         .interact(visual.expand2(vec2(0.0, 8.0)), id, Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -619,8 +634,8 @@ mod tests {
         assert_eq!(source_state(&l, LyricsSource::LyricsPlus), "нет текста");
         // Another text that lights up otherwise: now each row says how.
         l.sources.push(o(LyricsSource::LrcRed, LyricsSync::Syllable, Some(true), false));
-        assert_eq!(source_state(&l, LyricsSource::Genius), "строки целиком, подогнал плеер");
-        assert_eq!(source_state(&l, LyricsSource::LrcRed), "по слогам");
+        assert_eq!(source_state(&l, LyricsSource::Genius), "плеер синхронизировал по строкам");
+        assert_eq!(source_state(&l, LyricsSource::LrcRed), "синхронизирован по слогам");
         assert_eq!(capital("по строкам"), "По строкам");
         line.words.push(nikgob_view::LyricWord { start: Duration::from_secs(1), end: Duration::from_secs(2), text: "Тёплое ".into() });
         l.lines = vec![line];
@@ -633,10 +648,12 @@ mod tests {
         l.source = None;
         l.lines.clear();
         assert_eq!(chip_label(&l), "Текста нет");
-        // No internal words anywhere.
-        for w in [how(LyricsSync::Line), how(LyricsSync::Word), name(LyricsSource::Recognized)] {
-            assert!(!w.contains("распознан") && !w.contains("сделал"), "{w}");
+        // No internal words anywhere, and nothing that reads like how the
+        // lyrics light up.
+        for w in [timed(LyricsSync::Line, false), timed(LyricsSync::Word, true), name(LyricsSource::Recognized).to_owned()] {
+            assert!(!w.contains("распознан") && !w.contains("сделал") && !w.contains("подсвет") && !w.contains("целиком"), "{w}");
         }
+        assert_eq!(timed(LyricsSync::Plain, true), "без синхронизации");
     }
 
     #[test]
@@ -692,15 +709,15 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_says_where_the_text_is_kept() {
+    fn the_window_says_where_the_text_is_kept_where_it_matters() {
         let mut l = LyricsView::default();
         assert_eq!(home(&l), None, "no text, nothing to say");
         l.source = Some(LyricsSource::Lrclib);
-        assert_eq!(home(&l), Some("Текст только в интернете"));
+        assert_eq!(home(&l), None, "only online goes without saying");
         l.home = LyricsHome::Library;
         assert_eq!(home(&l), Some("Сделано плеером, хранится в библиотеке"));
         l.home = LyricsHome::Computer;
-        assert_eq!(home(&l), Some("Текст сохранён на компьютере"));
+        assert_eq!(home(&l), Some("Сохранено на компьютере"));
         let mut state = ViewState::default();
         state.lyrics = l;
         state.lyrics.track = Some(nikgob_view::TrackId::new());

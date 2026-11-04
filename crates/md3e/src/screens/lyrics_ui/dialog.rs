@@ -2,7 +2,9 @@
 //! control (container transform: its bounds and corners morph on the
 //! default spatial spring, the content fades in once it has room). Inside:
 //! the sources as a choice, the shown text in full following the song,
-//! and one primary action to make the timing, with its progress.
+//! under it «Подсветка» (how the text is seen and the timing to make, or
+//! its progress), and at the foot where the text is kept with «Сохранить
+//! текст».
 
 use egui::{Align, Area, Context, Id, Key, Layout, Modifiers, Order, Rect, Sense, Stroke, Ui, UiBuilder, vec2};
 use nikgob_view::{Command, LyricsAvail, ViewState};
@@ -153,59 +155,78 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
         ui.label(TypeRole::BodySmall.style().rich(line, s.on_surface_variant));
         ui.add_space(12.0);
     }
-    // How the text is seen, where it has timing to choose from.
-    if !super::shows(state).is_empty() {
-        let all = super::all_shows(state);
-        let labels = all.map(|a| a.1);
-        let on = all.map(|a| a.2);
-        let at = all.iter().position(|a| a.0 == super::seen(l)).unwrap_or(2);
-        if let Some(i) = ConnectedGroup::new("lyrics-dialog-show", &labels).enabled(&on).show(ui, at) {
-            super::show_as(state, all[i].0, out);
-        }
-        ui.add_space(12.0);
-    }
-
-    // The text, and under it the action or its progress.
-    let actions_h = 56.0;
-    let text_h = (inner.bottom() - ui.cursor().top() - actions_h - 16.0).max(120.0);
+    // The text, then the timing (how it is seen and made, or its
+    // progress), then where it is kept and the way out.
+    let busy = super::busy(state);
+    let choice = !super::shows(state).is_empty();
+    let actions = if busy.is_some() { Vec::new() } else { super::actions(state) };
+    let timing = busy.is_some() || choice || !actions.is_empty();
+    let (head_h, timing_h, foot_h) = (24.0, 56.0, 40.0);
+    let below = (if timing { 16.0 + head_h + 4.0 + timing_h } else { 0.0 }) + 16.0 + foot_h;
+    let text_h = (inner.bottom() - ui.cursor().top() - below).max(120.0);
     super::text_card(ui, vec2(inner.width(), text_h), state, out);
+    let save = l.savable && busy.is_none();
+    if timing {
+        ui.add_space(16.0);
+        ui.allocate_ui_with_layout(vec2(inner.width(), head_h), Layout::left_to_right(Align::Center), |ui| {
+            ui.label(TypeRole::TitleSmall.style().rich("Подсветка", s.on_surface));
+        });
+        ui.add_space(4.0);
+        ui.allocate_ui_with_layout(vec2(inner.width(), timing_h), Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if let Some(b) = &busy {
+                super::progress(ui, b, (inner.width() - 160.0).min(360.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(Button::new("Отменить").style(Style::Tonal).size(Size::S).id_salt("lyrics-dialog-cancel")).clicked() {
+                        out.push(Command::CancelCraft);
+                    }
+                });
+                return;
+            }
+            // How the text is seen, where it has timing to choose from.
+            if choice {
+                let all = super::all_shows(state);
+                let labels = all.map(|a| a.1);
+                let on = all.map(|a| a.2);
+                let at = all.iter().position(|a| a.0 == super::seen(l)).unwrap_or(2);
+                if let Some(i) = ConnectedGroup::new("lyrics-dialog-show", &labels).enabled(&on).show(ui, at) {
+                    super::show_as(state, all[i].0, out);
+                }
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                // The finest timing is the primary action unless there is
+                // timing to keep; lines beside it.
+                for (i, (target, label)) in actions.iter().rev().enumerate() {
+                    let style = if i == 0 && !save { Style::Filled } else { Style::Tonal };
+                    let b = Button::new(*label).style(style).size(Size::S).id_salt(("lyrics-dialog-make", *label));
+                    if ui.add(b).clicked() {
+                        if super::failed(state).is_some() {
+                            out.push(Command::ClearCraft);
+                        }
+                        super::make(state, *target, out);
+                    }
+                }
+            });
+        });
+    }
     ui.add_space(16.0);
-    ui.allocate_ui_with_layout(vec2(inner.width(), actions_h), Layout::left_to_right(Align::Center), |ui| {
-        if let Some(b) = super::busy(state) {
-            super::progress(ui, &b, (inner.width() - 160.0).min(360.0));
-        } else if let Some(e) = super::failed(state) {
+    ui.allocate_ui_with_layout(vec2(inner.width(), foot_h), Layout::left_to_right(Align::Center), |ui| {
+        if let Some(e) = super::failed(state).filter(|_| busy.is_none()) {
             ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
         } else if let Some(why) = super::no_craft(state) {
             ui.label(TypeRole::BodyMedium.style().rich(why, s.on_surface_variant));
+        } else if let Some(home) = super::home(l) {
+            ui.label(TypeRole::BodyMedium.style().rich(home, s.on_surface_variant));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             if ui.add(Button::new("Готово").style(Style::Text).size(Size::S).id_salt("lyrics-dialog-done")).clicked() {
                 close(ui.ctx());
             }
-            if super::busy(state).is_some()
-                && ui.add(Button::new("Отменить").style(Style::Tonal).size(Size::S).id_salt("lyrics-dialog-cancel")).clicked()
-            {
-                out.push(Command::CancelCraft);
-            }
-            if super::busy(state).is_none() {
-                // Timing made and checked here: keeping it is the primary
-                // action, making it again goes beside it.
-                let save = l.savable;
-                if save && ui.add(Button::new(super::save_label(state)).style(Style::Filled).size(Size::S).id_salt("lyrics-dialog-save")).clicked() {
-                    super::save(state, out);
-                }
-                // Else the primary action is the finest timing; lines beside it.
-                for (i, (target, label)) in super::actions(state).into_iter().rev().enumerate() {
-                    let style = if i == 0 && !save { Style::Filled } else { Style::Tonal };
-                    let b = Button::new(label).style(style).size(Size::S).id_salt(("lyrics-dialog-make", label));
-                    if ui.add(b).clicked() {
-                        if super::failed(state).is_some() {
-                            out.push(Command::ClearCraft);
-                        }
-                        super::make(state, target, out);
-                    }
-                }
+            // Timing made and checked here: keeping it is the primary action.
+            if save && ui.add(Button::new(super::save_label(state)).style(Style::Filled).size(Size::S).id_salt("lyrics-dialog-save")).clicked() {
+                super::save(state, out);
             }
         });
     });

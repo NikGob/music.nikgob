@@ -1,7 +1,8 @@
 //! `page`: «Текст песни», a page of its own like Настройки (it opens with
 //! the forward page transition and goes back the same way). The sources
-//! on the left with how each goes and the timing action under them; the
-//! shown text on the right, following the song.
+//! on the left with how each is timed, under them «Подсветка» (how the
+//! text is seen and the timing to make) and where the text is kept with
+//! «Сохранить текст»; the shown text on the right, following the song.
 //!
 //! The right side is where the lyrics editor will go (the text and its
 //! times by hand, saved as a lyrics file next to the track): `text_side`
@@ -13,7 +14,8 @@ use nikgob_view::{Command, LyricsAvail, Route, ViewState};
 use crate::components::{Button, ConnectedGroup, ListItem, Size, Style, segmented_list};
 use crate::{Icon, Theme, TypeRole};
 
-const LEFT: f32 = 320.0;
+/// Wide enough for «По словам | По строкам | Без подсветки» in one row.
+const LEFT: f32 = 360.0;
 const GAP: f32 = 24.0;
 
 /// The page; `bottom` is the room the floating player takes at the bottom.
@@ -62,8 +64,9 @@ pub(crate) fn show(ui: &mut Ui, state: &ViewState, bottom: f32, out: &mut Vec<Co
     None
 }
 
-/// Every source with how its text goes (a click shows that one), then
-/// what can be made for the shown text, or its progress.
+/// Every source with how its text is timed (a click shows that one), then
+/// how the shown text is seen and what can be made for it, or its
+/// progress, then where it is kept and keeping it.
 fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let l = &state.lyrics;
@@ -107,61 +110,75 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
         }
         ui.add_space(GAP);
     }
-    if let Some(b) = super::busy(state) {
-        super::progress(ui, &b, w);
+    // «Подсветка»: how the text is seen and the timing to make, or its
+    // progress.
+    let busy = super::busy(state);
+    let choice = !super::shows(state).is_empty();
+    let actions = if busy.is_some() { Vec::new() } else { super::actions(state) };
+    let save = l.savable && busy.is_none();
+    let why = super::failed(state)
+        .filter(|_| busy.is_none())
+        .map(|e| (e, s.error))
+        .or_else(|| super::no_craft(state).map(|w| (w, s.on_surface_variant)));
+    if busy.is_some() || choice || !actions.is_empty() || why.is_some() {
+        ui.label(TypeRole::TitleSmall.style().rich("Подсветка", s.on_surface));
+        ui.add_space(12.0);
+    }
+    if let Some(b) = &busy {
+        super::progress(ui, b, w);
         ui.add_space(12.0);
         if ui.add(Button::new("Отменить").style(Style::Tonal).size(Size::S).id_salt("lyrics-page-cancel")).clicked() {
             out.push(Command::CancelCraft);
         }
         return;
     }
-    if let Some(e) = super::failed(state) {
-        ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
-        ui.add_space(12.0);
-    } else if let Some(why) = super::no_craft(state) {
-        ui.label(TypeRole::BodyMedium.style().rich(why, s.on_surface_variant));
+    if choice {
+        let all = super::all_shows(state);
+        let labels = all.map(|a| a.1);
+        let on = all.map(|a| a.2);
+        let at = all.iter().position(|a| a.0 == super::seen(l)).unwrap_or(2);
+        if let Some(i) = ConnectedGroup::new("lyrics-page-show", &labels).enabled(&on).show(ui, at) {
+            super::show_as(state, all[i].0, out);
+        }
         ui.add_space(12.0);
     }
-    let actions = super::actions(state);
-    let last = actions.len().saturating_sub(1);
-    let save = state.lyrics.savable;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        // Timing made and checked here: keeping it is the primary action.
-        if save && ui.add(Button::new(super::save_label(state)).style(Style::Filled).size(Size::S).id_salt("lyrics-page-save")).clicked() {
-            super::save(state, out);
-        }
-        // Else the finest timing is.
-        for (i, (target, label)) in actions.into_iter().enumerate().rev() {
-            let style = if i == last && !save { Style::Filled } else { Style::Tonal };
-            if ui.add(Button::new(label).style(style).size(Size::S).id_salt(("lyrics-page-make", label))).clicked() {
-                if super::failed(state).is_some() {
-                    out.push(Command::ClearCraft);
+    if let Some((text, color)) = why {
+        ui.label(TypeRole::BodyMedium.style().rich(text, color));
+        ui.add_space(12.0);
+    }
+    if !actions.is_empty() {
+        let last = actions.len() - 1;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            // The finest timing is the primary action unless there is
+            // timing to keep.
+            for (i, (target, label)) in actions.into_iter().enumerate().rev() {
+                let style = if i == last && !save { Style::Filled } else { Style::Tonal };
+                if ui.add(Button::new(label).style(style).size(Size::S).id_salt(("lyrics-page-make", label))).clicked() {
+                    if super::failed(state).is_some() {
+                        out.push(Command::ClearCraft);
+                    }
+                    super::make(state, target, out);
                 }
-                super::make(state, target, out);
             }
-        }
-    });
+        });
+    }
+    // Where the text is kept, where that matters, and keeping it (timing
+    // made and checked here: the primary action).
+    let home = super::home(l);
+    if home.is_some() || save {
+        ui.add_space(GAP);
+    }
+    if let Some(home) = home {
+        ui.label(TypeRole::BodyMedium.style().rich(home, s.on_surface_variant));
+        ui.add_space(12.0);
+    }
+    if save && ui.add(Button::new(super::save_label(state)).style(Style::Filled).size(Size::S).id_salt("lyrics-page-save")).clicked() {
+        super::save(state, out);
+    }
 }
 
-/// How the text is seen (where it has timing to choose from), and the
-/// shown text in full, following the song. (The editor goes here.)
+/// The shown text in full, following the song. (The editor goes here.)
 fn text_side(ui: &mut Ui, size: egui::Vec2, state: &ViewState, out: &mut Vec<Command>) {
-    let mut size = size;
-    if !super::shows(state).is_empty() {
-        ui.allocate_ui_with_layout(vec2(size.x, size.y), Layout::top_down(Align::Min), |ui| {
-            let all = super::all_shows(state);
-            let labels = all.map(|a| a.1);
-            let on = all.map(|a| a.2);
-            let at = all.iter().position(|a| a.0 == super::seen(&state.lyrics)).unwrap_or(2);
-            if let Some(i) = ConnectedGroup::new("lyrics-page-show", &labels).enabled(&on).show(ui, at) {
-                super::show_as(state, all[i].0, out);
-            }
-            ui.add_space(16.0);
-            size.y = (size.y - 56.0).max(120.0);
-            super::text_card(ui, size, state, out);
-        });
-        return;
-    }
     super::text_card(ui, size, state, out);
 }

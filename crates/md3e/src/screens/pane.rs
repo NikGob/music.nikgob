@@ -565,7 +565,7 @@ fn extending_row(ui: &mut Ui) {
 pub(super) fn lyrics(ui: &mut Ui, state: &ViewState, bass: f32, out: &mut Vec<Command>) -> bool {
     let s = Theme::get(ui.ctx()).scheme;
     let l = &state.lyrics;
-    let configure = super::lyrics_ui::control(ui, state, out);
+    let configure = super::lyrics_ui::control(ui, state, None, out);
     ui.add_space(4.0);
     if l.loading {
         ui.vertical_centered(|ui| {
