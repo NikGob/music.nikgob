@@ -666,7 +666,7 @@ impl Control {
             Command::Seek { pos, id, gen_id } => {
                 let _ = self.dec_tx.send(DecCmd::Seek { pos, id, gen_id });
                 if let Some((id, p)) = position_of(&self.sh, &self.clock, &self.pending) {
-                    self.emit(Event::Position { id, pos: p });
+                    self.emit(Event::Position { id, pos: p, at: Instant::now() });
                 }
             }
         }
@@ -762,7 +762,7 @@ impl Control {
             if let Some((id, pos)) = position_of(&self.sh, &self.clock, &self.pending)
                 && self.sh.cursor.read().has_item
             {
-                self.emit(Event::Position { id, pos });
+                self.emit(Event::Position { id, pos, at: Instant::now() });
             }
         }
 

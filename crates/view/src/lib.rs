@@ -1217,8 +1217,17 @@ impl ToastKind {
 /// The revision of the lyrics defaults: 1 turned word timing off for the
 /// playing song and for the library, recognition from scratch off, and
 /// line timing for plain texts on; 2 made «Окно» the look of the lyrics
-/// control.
-pub const LYRICS_REV: u8 = 2;
+/// control; 3 turned word timing for the playing song on and moved the
+/// lead from [`OLD_LYRICS_LEAD`] to [`LYRICS_LEAD`].
+pub const LYRICS_REV: u8 = 3;
+
+/// Seconds the lyrics highlight runs ahead of the voice by default
+/// ([`Prefs::lyrics_lead`]): about what karaoke apps use, which makes up
+/// for the frame being shown a little after it is drawn and for a word's
+/// light easing in.
+pub const LYRICS_LEAD: f32 = 0.2;
+/// The default lead before [`LYRICS_REV`] 3.
+pub const OLD_LYRICS_LEAD: f32 = 0.1;
 
 /// User-facing settings the UI edits (the runtime persists them).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1298,9 +1307,15 @@ pub struct Prefs {
     /// «Мягкие края»: lines near the top and bottom of the lyrics blur and
     /// fade out instead of being cut.
     pub lyrics_soft_edges: bool,
-    /// How far into the lyrics the soft edges reach and how much they blur
-    /// (0.5..1.5).
+    /// «Сила размытия»: how much a line at the very edge is blurred
+    /// (0..1.5, a multiplier).
     pub lyrics_soft_strength: f32,
+    /// «Глубина»: how far into the lyrics each soft edge reaches, as a
+    /// share of their height (0.08..0.4).
+    pub lyrics_soft_depth: f32,
+    /// «Затухание»: how early a line thins out in the soft edge (0: only
+    /// right at the edge .. 1: from where the band starts).
+    pub lyrics_soft_fade: f32,
     /// Embed the selected online lyrics in the track tags.
     pub save_found_lyrics: bool,
     /// «Видеокарта»: the lyrics models run on the GPU (DirectML), else on
@@ -1642,6 +1657,18 @@ impl Prefs {
             // window or page stays.
             self.lyrics_ui = 1;
         }
+        if stored < 3 {
+            // Word highlighting became the default experience: the
+            // playing song's texts are shown by words the player made
+            // (the switch was off by default, never a choice when off).
+            self.lyrics_words_playing = true;
+            // The lead moved to what karaoke apps use; one the user set
+            // stays.
+            if (self.lyrics_lead - OLD_LYRICS_LEAD).abs() < 1e-3 {
+                self.lyrics_lead = LYRICS_LEAD;
+            }
+        }
+
         self.lyrics_rev = LYRICS_REV;
         self.upgrade_lyrics_style();
     }
@@ -2556,7 +2583,7 @@ impl Default for Prefs {
             lyrics_wave_jump: 1.0,
             lyrics_dim: 0.5,
             lyrics_scale: 1.0,
-            lyrics_lead: 0.1,
+            lyrics_lead: LYRICS_LEAD,
             lyrics_cascade: true,
             lyrics_glow: false,
             lyrics_return_s: 4.0,
@@ -2566,12 +2593,14 @@ impl Default for Prefs {
             lyrics_by_words: false,
             lyrics_soft_edges: true,
             lyrics_soft_strength: 1.0,
+            lyrics_soft_depth: 0.18,
+            lyrics_soft_fade: 0.4,
             save_found_lyrics: false,
             lyrics_gpu: true,
             lyrics_check: true,
             lyrics_words_all: false,
             lyrics_lines_auto: true,
-            lyrics_words_playing: false,
+            lyrics_words_playing: true,
             lyrics_rev: LYRICS_REV,
             lyrics_ui: 1,
             lyrics_recognize: false,

@@ -59,7 +59,7 @@ fn main() {
             Ok(event) => {
                 last_activity = std::time::Instant::now();
                 match &event {
-                    Event::Position { id, pos } => println!("  [{id}] {:.1}s", pos.as_secs_f64()),
+                    Event::Position { id, pos, .. } => println!("  [{id}] {:.1}s", pos.as_secs_f64()),
                     other => println!("{other:?}"),
                 }
                 if event == Event::QueueEmpty {

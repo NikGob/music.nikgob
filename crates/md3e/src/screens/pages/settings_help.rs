@@ -77,6 +77,9 @@ pub enum SettingId {
     /// «Мягкие края» of the lyrics and their strength.
     LyricsSoftEdges,
     LyricsSoftStrength,
+    /// «Глубина мягких краёв» and «Затухание».
+    LyricsSoftDepth,
+    LyricsSoftFade,
     RailCompact,
     /// The parts of the side pane: «Очередь», «Текст песни», «Источник и
     /// качество».
@@ -344,7 +347,7 @@ impl SettingId {
             | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
             | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
             | LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow
-            | LyricsGap | LyricsGapWaves | LyricsCountdown | LyricsUnit | LyricsSoftEdges | LyricsSoftStrength | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
+            | LyricsGap | LyricsGapWaves | LyricsCountdown | LyricsUnit | LyricsSoftEdges | LyricsSoftStrength | LyricsSoftDepth | LyricsSoftFade | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
             | ReducedMotion | FpsLimit => {
                 TAB_APPEARANCE
             }
@@ -409,7 +412,9 @@ impl SettingId {
             LyricsCountdown => "За три секунды до новой строки кружок ожидания сменяется отсчётом 3, 2, 1.",
             LyricsUnit => "Что подсвечивается по очереди в любой анимации: каждая буква или каждое слово целиком. Слова через дефис подсвечиваются по частям.",
             LyricsSoftEdges => "Строки у верхнего и нижнего края текста расплываются и тают, а не обрезаются.",
-            LyricsSoftStrength => "Как далеко от краёв строки начинают расплываться и насколько сильно.",
+            LyricsSoftStrength => "Насколько сильно расплывается строка у самого края. Размытие нарастает плавно: строка, которая подходит к краю, мягко теряет резкость, а появляющаяся постепенно становится чёткой.",
+            LyricsSoftDepth => "Какая часть высоты текста сверху и снизу занята мягкими краями. Текущая строка всегда остаётся в чёткой середине.",
+            LyricsSoftFade => "Как рано строка у края становится прозрачной: меньше — тает только у самого края, больше — начинает таять раньше.",
             RailCompact => "Левая панель всегда узкая: только значки разделов, без подписей и кнопки раскрытия.",
             PaneQueue => "Справа от страницы открывается очередь: кнопка в плеере внизу и Ctrl+Q. Выключено — у плеера больше места под полосу перемотки.",
             PaneLyrics => "Справа от страницы открывается текст песни: кнопка в плеере внизу и пункт в меню трека. На экране трека текст есть всегда.",
@@ -867,7 +872,8 @@ impl SettingId {
             LyricsCascade => Preview::Cascade,
             BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue => Preview::Background,
             LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsGlow | LyricsUnit => Preview::Lyrics,
-            LyricsSoftEdges | LyricsSoftStrength => Preview::Edges,
+            LyricsSoftEdges | LyricsSoftStrength | LyricsSoftDepth | LyricsSoftFade => Preview::Edges,
+
             LyricsGap | LyricsGapWaves => Preview::Gap,
             LyricsCountdown => Preview::Countdown,
             NpMotion => Preview::Motion,

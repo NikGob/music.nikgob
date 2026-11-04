@@ -583,7 +583,7 @@ pub(super) fn lyrics(ui: &mut Ui, state: &ViewState, bass: f32, out: &mut Vec<Co
         });
         return configure;
     }
-    super::lyrics::show(ui, state, bass, false, out) || configure
+    super::lyrics::show(ui, state, bass, false, 0.0, out) || configure
 }
 
 pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {

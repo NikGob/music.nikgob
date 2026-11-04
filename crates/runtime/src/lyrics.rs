@@ -128,6 +128,10 @@ impl Text {
     }
 
     pub(crate) fn from_ttml(xml: &str) -> Option<Self> {
+        // A text kept without timing («Сохранить текст» of a plain text).
+        if let Some(plain) = nikgob_metadata::parse_ttml_plain(xml) {
+            return Self::from_plain(&plain);
+        }
         let lines = nikgob_metadata::parse_ttml(xml)
             .map_err(|e| log::debug!("bad TTML: {e}"))
             .ok()?
@@ -217,12 +221,6 @@ pub(crate) enum Place {
     Unclear(String),
 }
 
-impl Place {
-    fn has_audio(&self) -> bool {
-        matches!(self, Self::File | Self::Stream)
-    }
-}
-
 /// Everything known about one track's lyrics.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TrackLyrics {
@@ -244,6 +242,9 @@ pub(crate) struct TrackLyrics {
     pub(crate) show: Shown,
     /// Where the audio to make timing from is.
     pub(crate) place: Place,
+    /// A song without a file whose text can be kept in its artist's
+    /// folder of the library (set by the worker).
+    pub(crate) folder: bool,
     /// How the user chose to see the shown text (`None`: as it comes).
     pub(crate) display: Option<LyricsSync>,
 }
@@ -504,6 +505,9 @@ impl TrackLyrics {
             Some(LyricsSource::Recognized) => v::LyricsHome::Library,
             Some(_) if made => v::LyricsHome::Library,
             Some(LyricsSource::File) => v::LyricsHome::Computer,
+            // A found text the file already holds as it is (saved there
+            // by «Сохранять найденный текст в файл трека»).
+            Some(s) if self.file_holds(s) => v::LyricsHome::Computer,
             _ => v::LyricsHome::Online,
         };
         let craft = match (source, &self.place) {
@@ -511,9 +515,11 @@ impl TrackLyrics {
             (_, Place::Unclear(why)) => v::LyricsCraft::No(why.clone()),
             _ => v::LyricsCraft::Ready,
         };
-        // The player's own timing of a found text can go to the computer
-        // (a heard text is its guess: never).
-        let savable = made && source.is_some_and(|s| s != LyricsSource::Recognized) && self.place.has_audio();
+        // Any shown text not on the computer yet can go there: next to
+        // the file, or into the artist's folder for a song without one.
+        let savable = home != v::LyricsHome::Computer
+            && source.is_some_and(|s| self.to_keep(s).is_some())
+            && (self.place == Place::File || self.folder);
         v::LyricsView {
             track: Some(track),
             lines,
@@ -574,10 +580,27 @@ impl TrackLyrics {
         }
     }
 
-    /// The lines `source` shows, with the player's timing (to keep them).
-    pub(crate) fn shown_lines(&self, source: LyricsSource) -> Option<Vec<LyricLine>> {
-        let (lines, made) = self.shown(source);
-        (made && !lines.is_empty()).then_some(lines)
+    /// What «Сохранить текст» keeps of `source`'s text: its lines with
+    /// the finest timing shown or chosen to be seen (the source's own or
+    /// the player's), else the plain text.
+    pub(crate) fn to_keep(&self, source: LyricsSource) -> Option<crate::lyrics_keep::Keep> {
+        let (shown, _) = self.shown(source);
+        let (seen, _) = self.displayed(source);
+        let lines = if LyricsSync::of(&seen) > LyricsSync::of(&shown) { seen } else { shown };
+        if !lines.is_empty() {
+            return Some(crate::lyrics_keep::Keep::Lines(lines));
+        }
+        let text = self.texts.get(&source)?;
+        let plain = text.plain.clone().unwrap_or_else(|| text.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n"));
+        (!plain.trim().is_empty()).then(|| crate::lyrics_keep::Keep::Plain(plain))
+    }
+
+    /// The file's own text is `source`'s as it is.
+    fn file_holds(&self, source: LyricsSource) -> bool {
+        match (self.texts.get(&LyricsSource::File), self.texts.get(&source)) {
+            (Some(file), Some(t)) => source != LyricsSource::File && (file == t || file.serialized() == t.serialized()),
+            _ => false,
+        }
     }
 
     /// A lookup or a file write is under way: its result needs this entry.
@@ -842,8 +865,9 @@ impl Worker {
         ];
         let show = Shown::of(&self.state.read().prefs);
         let place = self.lyrics_place(track);
+        let folder = self.lyrics_folder(track);
         let Some(svc) = self.import.as_mut() else { return };
-        svc.lyrics_cache.insert(track, TrackLyrics { show, place, ..tl });
+        svc.lyrics_cache.insert(track, TrackLyrics { show, place, folder, ..tl });
         svc.lyrics_order.retain(|t| *t != track);
         svc.lyrics_order.push_back(track);
         let (cache, later) = (&svc.lyrics_cache, &svc.embed_later);
@@ -1511,7 +1535,8 @@ mod tests {
         g.display = Some(LyricsSync::Plain);
         let v = g.view(id);
         assert!(v.lines.is_empty() && v.savable && v.home == v::LyricsHome::Library);
-        assert_eq!(g.shown_lines(LyricsSource::Genius), Some(words.clone()), "saving keeps the made words");
+        assert_eq!(g.to_keep(LyricsSource::Genius), Some(crate::lyrics_keep::Keep::Lines(words.clone())), "saving keeps the made words");
+
         // No text: nothing to choose.
         assert!(TrackLyrics::default().view(id).shows.is_empty());
     }

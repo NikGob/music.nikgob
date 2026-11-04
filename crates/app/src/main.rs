@@ -788,7 +788,8 @@ mod prefs_tests {
     fn old_lyrics_defaults_move_to_the_new_ones_once() {
         let old = r#"{"lyrics_check":true,"lyrics_words_all":true,"lyrics_recognize":true,"lyrics_gpu":false}"#;
         let p = parse_prefs(old.as_bytes()).unwrap();
-        assert!(!p.lyrics_words_all && !p.lyrics_words_playing && p.lyrics_lines_auto && !p.lyrics_recognize);
+        // (Word timing for the playing song came back on with revision 3.)
+        assert!(!p.lyrics_words_all && p.lyrics_words_playing && p.lyrics_lines_auto && !p.lyrics_recognize);
         assert_eq!(p.lyrics_rev, nikgob_view::LYRICS_REV);
         // The control under the lyrics opens its window: the old default
         // («Меню») moves once, a chosen window or page stays, and «Меню»
@@ -806,8 +807,31 @@ mod prefs_tests {
         assert_eq!(again, mine);
         // A first start has the new defaults too.
         let d = prefs_of(None);
-        assert!(!d.lyrics_words_all && !d.lyrics_words_playing && d.lyrics_lines_auto && !d.lyrics_recognize);
+        assert!(!d.lyrics_words_all && d.lyrics_words_playing && d.lyrics_lines_auto && !d.lyrics_recognize);
     }
+
+    /// Revision 3: word highlighting is the default experience, so prefs
+    /// written before it get word timing for the playing song once, and
+    /// the lead moves from the old default to the new one (a lead the user
+    /// set stays); prefs written since keep what they hold.
+    #[test]
+    fn word_timing_and_the_new_lead_come_once() {
+        let old = parse_prefs(br#"{"lyrics_words_playing":false,"lyrics_lead":0.1,"lyrics_rev":2}"#).unwrap();
+        assert!(old.lyrics_words_playing);
+        assert!((old.lyrics_lead - nikgob_view::LYRICS_LEAD).abs() < 1e-6);
+        assert_eq!(old.lyrics_rev, nikgob_view::LYRICS_REV);
+        let set = parse_prefs(br#"{"lyrics_lead":-0.15,"lyrics_rev":2}"#).unwrap();
+        assert!((set.lyrics_lead + 0.15).abs() < 1e-6, "chosen: stays");
+        let since = parse_prefs(br#"{"lyrics_words_playing":false,"lyrics_lead":0.1,"lyrics_rev":3}"#).unwrap();
+        assert!(!since.lyrics_words_playing && (since.lyrics_lead - 0.1).abs() < 1e-6, "chosen since: stays");
+        let again = parse_prefs(&serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(again, old);
+        let d = prefs_of(None);
+        assert!(d.lyrics_words_playing && (d.lyrics_lead - nikgob_view::LYRICS_LEAD).abs() < 1e-6);
+        // The soft edges' new settings come with gentle defaults.
+        assert!(d.lyrics_soft_edges && d.lyrics_soft_depth > 0.1 && d.lyrics_soft_depth < 0.25 && d.lyrics_soft_fade < 0.6);
+    }
+
 
     /// «По словам» was a fourth lyrics animation (`lyrics_style` 3); it is
     /// the unit of every animation now: such prefs move to the wave by

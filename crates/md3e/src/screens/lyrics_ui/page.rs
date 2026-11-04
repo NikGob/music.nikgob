@@ -116,6 +116,9 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
     let choice = !super::shows(state).is_empty();
     let actions = if busy.is_some() { Vec::new() } else { super::actions(state) };
     let save = l.savable && busy.is_none();
+    // Keeping the text leads for timing the player made, or when there is
+    // nothing else to do; else making timing does.
+    let save_lead = save && (super::save_first(l) || actions.is_empty());
     let why = super::failed(state)
         .filter(|_| busy.is_none())
         .map(|e| (e, s.error))
@@ -153,7 +156,7 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
             // The finest timing is the primary action unless there is
             // timing to keep.
             for (i, (target, label)) in actions.into_iter().enumerate().rev() {
-                let style = if i == last && !save { Style::Filled } else { Style::Tonal };
+                let style = if i == last && !save_lead { Style::Filled } else { Style::Tonal };
                 if ui.add(Button::new(label).style(style).size(Size::S).id_salt(("lyrics-page-make", label))).clicked() {
                     if super::failed(state).is_some() {
                         out.push(Command::ClearCraft);
@@ -163,8 +166,8 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
             }
         });
     }
-    // Where the text is kept, where that matters, and keeping it (timing
-    // made and checked here: the primary action).
+    // Where the text is kept, where that matters, and keeping it (any text
+    // not on the computer yet).
     let home = super::home(l);
     if home.is_some() || save {
         ui.add_space(GAP);
@@ -173,7 +176,8 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
         ui.label(TypeRole::BodyMedium.style().rich(home, s.on_surface_variant));
         ui.add_space(12.0);
     }
-    if save && ui.add(Button::new(super::save_label(state)).style(Style::Filled).size(Size::S).id_salt("lyrics-page-save")).clicked() {
+    let style = if save_lead { Style::Filled } else { Style::Tonal };
+    if save && ui.add(Button::new(super::save_label(state)).style(style).size(Size::S).id_salt("lyrics-page-save")).clicked() {
         super::save(state, out);
     }
 }

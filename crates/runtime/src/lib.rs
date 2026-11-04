@@ -86,6 +86,9 @@ pub enum PlaybackEvent {
     /// The preloaded next item took over at the sample boundary.
     TrackChanged { to: u64 },
     Position { id: u64, position: Duration },
+    /// [`Self::Position`] as read at `at`: it moved on while the event
+    /// waited to be taken, which is made up for.
+    PositionAt { id: u64, position: Duration, at: Instant },
     Paused,
     Resumed,
     Ended { id: u64 },
@@ -1686,6 +1689,12 @@ impl Worker {
     }
 
     fn playback_event(&mut self, ev: PlaybackEvent) {
+        // How long a position report waited to be taken (a busy worker can
+        // hold it for a while): the sound went on meanwhile.
+        let (ev, late) = match ev {
+            PlaybackEvent::PositionAt { id, position, at } => (PlaybackEvent::Position { id, position }, at.elapsed().min(POSITION_SNAP)),
+            ev => (ev, Duration::ZERO),
+        };
         match ev {
             PlaybackEvent::Started { id } => {
                 if self.restarted == Some(id) {
@@ -1775,13 +1784,15 @@ impl Worker {
                     // a seek we did not hear about, a long stall) is jumped.
                     let now = Instant::now();
                     let ours = self.position_at_instant(now);
-                    match follow(ours, position, stalled, self.rate) {
+                    // Where the sound is now (a stalled one stands still).
+                    let heard = if stalled { position } else { position + late };
+                    match follow(ours, heard, stalled, self.rate) {
                         Follow::Keep => {}
                         Follow::Snap => {
                             if self.jumped_at.elapsed() < POSITION_SETTLE {
                                 return;
                             }
-                            self.position = position;
+                            self.position = heard;
                             self.position_at = now;
                             self.rate = if stalled { 0.0 } else { 1.0 };
                             self.publish_player();
@@ -1795,7 +1806,8 @@ impl Worker {
                     }
                 }
             }
-            PlaybackEvent::Paused | PlaybackEvent::Resumed => {}
+            // Taken as a position above.
+            PlaybackEvent::Paused | PlaybackEvent::Resumed | PlaybackEvent::PositionAt { .. } => {}
             PlaybackEvent::Duration { id, duration } => {
                 // The library's length wins; the engine's is for a track
                 // without one (a stream whose service did not say).
