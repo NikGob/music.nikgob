@@ -464,14 +464,14 @@ mod tests {
     fn plain_fakes_are_offered_until_kept() {
         let lib = Library::open_in_memory().unwrap();
         let fake = file(&lib, "Молли", Codec::Flac, 690);
-        lib.put_quality_check(fake.id, &QualityCheck { cutoff_hz: 19_940.0, steepness_db: 39.6, ..fake_check() }).unwrap();
+        lib.put_quality_check(fake.id, &QualityCheck { cutoff_hz: 16_100.0, steepness_db: 44.2, ..fake_check() }).unwrap();
         let weak = file(&lib, "На луне", Codec::Flac, 500);
         lib.put_quality_check(weak.id, &QualityCheck { cutoff_hz: 15_200.0, steepness_db: 19.3, ..fake_check() }).unwrap();
         let offers = lib.fake_offers().unwrap();
         assert_eq!(offers.iter().map(|o| o.source_id).collect::<Vec<_>>(), vec![fake.id], "a weak cut is not offered");
         lib.set_quality_keep(fake.id, true).unwrap();
         assert!(lib.fake_offers().unwrap().is_empty());
-        lib.put_quality_check(fake.id, &QualityCheck { cutoff_hz: 19_940.0, steepness_db: 39.6, ..fake_check() }).unwrap();
+        lib.put_quality_check(fake.id, &QualityCheck { cutoff_hz: 16_100.0, steepness_db: 44.2, ..fake_check() }).unwrap();
         assert!(lib.fake_offers().unwrap().is_empty(), "kept over a new check");
     }
 

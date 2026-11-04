@@ -198,13 +198,19 @@ pub fn check_counts(codec: &Codec, made_from: Option<&Codec>) -> bool {
     }
 }
 
+/// Where a cut stops telling an MP3 from a real master: MP3 320 cuts near
+/// 20 kHz, and so do a mastering lowpass and the filter of a 48 → 44.1 kHz
+/// resampling in genuine lossless files.
+pub const HIGHEST_CLEAR_CUT_HZ: f32 = 19_800.0;
+
 /// A fake so plain that turning it into an MP3 loses nothing for sure: a
-/// lossy encoder's cliff (a steep drop where MP3s cut, 15 kHz and up), and
-/// a steeper one still for a file that came as hi-res. Anything less is
-/// labelled, never converted.
+/// lossy encoder's cliff (a steep drop where MP3s of 128–256 kbps cut,
+/// 15 to 19.8 kHz), and a steeper one still for a file that came as hi-res.
+/// A cut at 20 kHz and above may be a real master's own filter. Anything
+/// less is labelled, never converted.
 pub fn clear_fake(verdict: Verdict, cutoff_hz: f32, steepness_db: f32, hi_res: bool) -> bool {
     plausible(verdict, cutoff_hz) == Verdict::Transcoded
-        && cutoff_hz >= 15_000.0
+        && (15_000.0..HIGHEST_CLEAR_CUT_HZ).contains(&cutoff_hz)
         && steepness_db >= if hi_res { 40.0 } else { 30.0 }
 }
 
@@ -482,7 +488,10 @@ mod tests {
         assert!(!clear_fake(Verdict::Transcoded, 2_820.0, 31.0, false));
         assert!(!clear_fake(Verdict::Transcoded, 12_380.0, 56.0, false));
         assert!(!clear_fake(Verdict::Transcoded, 15_200.0, 19.0, false));
-        assert!(clear_fake(Verdict::Transcoded, 19_940.0, 39.6, false));
+        assert!(!clear_fake(Verdict::Transcoded, 19_940.0, 39.6, false), "20 kHz may be a master's own filter");
+        assert!(!clear_fake(Verdict::Transcoded, 20_200.0, 48.8, false));
+        assert!(clear_fake(Verdict::Transcoded, 16_100.0, 44.2, false), "an MP3 128's cliff");
+        assert!(clear_fake(Verdict::Transcoded, 18_200.0, 31.6, false));
         assert!(!clear_fake(Verdict::Transcoded, 16_785.0, 35.0, true), "hi-res needs a steeper cliff");
         assert!(!clear_fake(Verdict::Genuine, 22_000.0, 0.0, false));
     }
