@@ -610,8 +610,11 @@ mod tests {
     async fn starts_applies_share_live_and_stops() {
         let (addr, got) = server().await;
         let lib = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(lib.path().join("A")).unwrap();
-        std::fs::write(lib.path().join("A").join("x.flac"), b"x").unwrap();
+        std::fs::create_dir_all(lib.path().join("Music").join("A")).unwrap();
+        std::fs::write(lib.path().join("Music").join("A").join("x.flac"), b"x").unwrap();
+        // The trash is not shared.
+        std::fs::create_dir_all(lib.path().join("Trash")).unwrap();
+        std::fs::write(lib.path().join("Trash").join("y.flac"), b"y").unwrap();
         let state = tempfile::tempdir().unwrap();
         let mut svc = SoulseekService::new(lib.path().to_path_buf(), Some(state.path().to_path_buf()));
         let mut s = SoulseekSettings { server: addr.to_string(), listen_port: 0, ..SoulseekSettings::default() };
