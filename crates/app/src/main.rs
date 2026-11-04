@@ -782,6 +782,18 @@ mod prefs_tests {
         assert!(!d.lyrics_words_all && !d.lyrics_words_playing && d.lyrics_lines_auto && !d.lyrics_recognize);
     }
 
+    /// «Настройки текста…» is offered under the lyrics until it is picked
+    /// once, and stays gone after a restart.
+    #[test]
+    fn the_lyrics_settings_row_goes_once_picked() {
+        let mut p = parse_prefs(br#"{"theme":"Dark"}"#).unwrap();
+        assert!(!p.lyrics_settings_seen, "prefs from before: still offered");
+        assert!(!prefs_of(None).lyrics_settings_seen);
+        nikgob_view::PrefPatch::LyricsSettingsSeen.apply(&mut p);
+        let kept = parse_prefs(&serde_json::to_vec(&p).unwrap()).unwrap();
+        assert!(kept.lyrics_settings_seen);
+    }
+
     /// Главная asks for the name on the first start only: not with a prefs
     /// file from before, not once «Готово» or «Пропустить» was said.
     #[test]

@@ -99,6 +99,11 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out:
         menu = menu.item(MenuItem::new("Настройки текста…"));
         rows.push(Row::Settings);
     }
+    // Nothing to offer (no text yet, settings seen): no empty menu.
+    if rows.is_empty() {
+        ctx.data_mut(|d| d.insert_temp(resp.id.with("md3e-menu-open"), false));
+        return false;
+    }
 
     match menu.attach(&resp).and_then(|i| rows.get(i)) {
         Some(Row::Auto) => {
