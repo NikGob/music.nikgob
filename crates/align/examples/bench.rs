@@ -10,7 +10,8 @@
 //! in the `show` stretches are printed). The separated voice and what each
 //! aligner hears are kept in the cache dir after the first run (the
 //! separation is what takes minutes on the CPU), so a later run only
-//! aligns. `PREP=1` fills the cache and stops. Each text is aligned with
+//! aligns. `PREP=1` fills the cache and stops; `CACHED=1` leaves out the
+//! songs not in it yet. Each text is aligned with
 //! its line times (as the player does for a timed text) and as a plain
 //! text (no times: what a Genius text gets), and another song's text of
 //! the same language as a plain text, for the check.
@@ -29,6 +30,12 @@ use nikgob_core::lyrics::LyricLine;
 #[derive(serde::Deserialize)]
 struct Job {
     name: String,
+    /// Left out of the runs (kept so the cache's numbering stays).
+    #[serde(default)]
+    off: bool,
+    /// Prepared in this order (lowest first; else the jobs' order).
+    #[serde(default)]
+    rank: Option<usize>,
     path: String,
     kind: String,
     lines: Vec<LyricLine>,
@@ -48,7 +55,7 @@ fn key(id: ModelId) -> &'static str {
 fn read_f32(path: &Path) -> Option<Vec<f32>> {
     let mut bytes = Vec::new();
     std::fs::File::open(path).ok()?.read_to_end(&mut bytes).ok()?;
-    Some(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
+    Some(bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect())
 }
 
 fn write_f32(path: &Path, head: &[f32], v: &[f32]) {
@@ -62,6 +69,9 @@ fn write_f32(path: &Path, head: &[f32], v: &[f32]) {
 /// (and kept) now.
 fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, idx: usize) -> Option<Prepared> {
     let voice_file = cache.join(format!("{idx:02}.voice"));
+    if std::env::var("CACHED").is_ok() && !voice_file.exists() {
+        return None;
+    }
     let mut prep = match read_f32(&voice_file) {
         Some(v) => Prepared::from_voice(v, true),
         None => {
@@ -157,6 +167,8 @@ struct Tally {
     ends: Vec<f32>,
     lines: Vec<f32>,
     overlaps: usize,
+    /// Lines sung once more than the text has them, added.
+    extra: usize,
 }
 
 impl Tally {
@@ -165,6 +177,7 @@ impl Tally {
         self.ends.extend(&o.ends);
         self.lines.extend(&o.lines);
         self.overlaps += o.overlaps;
+        self.extra += o.extra;
     }
 }
 
@@ -188,16 +201,19 @@ fn plain(lines: &[LyricLine]) -> Vec<LyricLine> {
 
 fn summary(label: &str, t: &Tally) -> String {
     format!(
-        "{label:28} words {:5} start<0.3 {:5.1}% end<0.3 {:5.1}% (n {:4}) | lines {:4} start<0.3 {:5.1}% mae {:5.2}s med {:+5.2} | overlaps {}",
+        "{label:28} words {:5} start<0.3 {:5.1}% med {:+.3} end<0.3 {:5.1}% med {:+.3} (n {:4}) | lines {:4} start<0.3 {:5.1}% mae {:5.2}s med {:+5.2} | overlaps {} extra {}",
         t.starts.len(),
         within(&t.starts, 0.3),
+        median(&t.starts),
         within(&t.ends, 0.3),
+        median(&t.ends),
         t.ends.len(),
         t.lines.len(),
         within(&t.lines, 0.3),
         mae(&t.lines),
         median(&t.lines),
-        t.overlaps
+        t.overlaps,
+        t.extra
     )
 }
 
@@ -210,6 +226,39 @@ fn print_lines(lines: &[LyricLine], show: &[(f32, f32)]) {
         println!("    {:7.2} {:>7} «{}»", s, l.end.map_or("-".into(), |e| format!("{:.2}", e.as_secs_f32())), l.text);
         for w in &l.words {
             println!("            {:7.2} {:7.2} {:?}", w.start.as_secs_f32(), w.end.as_secs_f32(), w.text);
+        }
+    }
+}
+
+/// Every tenth of a second in `show`: the voice's energy against its loud
+/// level, the aligner's blank and its best letter.
+fn table(aligner: &Aligner, prep: &Prepared, id: ModelId, show: &[(f32, f32)]) {
+    let json = std::fs::read_to_string(aligner.catalog().file(id, "vocab.json")).unwrap();
+    let vocab: std::collections::HashMap<String, usize> = serde_json::from_str(&json).unwrap();
+    let letter = |i: usize| vocab.iter().find(|(_, v)| **v == i).map_or("?".into(), |(k, _)| k.clone());
+    let em = prep.emissions(id).unwrap();
+    let energy = prep.energy();
+    let mut sorted = energy.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let peak = sorted[((sorted.len() - 1) as f32 * 0.95) as usize];
+    let per = (em.fps / 10.0).round() as usize;
+    for &(a, b) in show {
+        for (i, e) in energy.iter().enumerate().take((b * 10.0) as usize).skip((a * 10.0) as usize) {
+            let frames: Vec<usize> = (i * per..((i + 1) * per).min(em.frames())).collect();
+            if frames.is_empty() {
+                break;
+            }
+            let blank = frames.iter().map(|t| em.row(*t)[em.blank].exp()).sum::<f32>() / frames.len() as f32;
+            let (best, p) = frames
+                .iter()
+                .map(|t| {
+                    let r = em.row(*t);
+                    (0..em.vocab).filter(|v| *v != em.blank).max_by(|a, b| r[*a].total_cmp(&r[*b])).map(|v| (v, r[v].exp())).unwrap()
+                })
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .unwrap();
+            let bar = "#".repeat(((e / peak) * 20.0).min(30.0) as usize);
+            println!("      {:6.1}s blank {:4.2} {:>3} {:4.2} {}", i as f32 / 10.0, blank, letter(best), p, bar);
         }
     }
 }
@@ -236,9 +285,19 @@ fn main() {
         Some((_, g)) => g.add(t),
         None => groups.push((name, t.clone())),
     };
-    for (idx, job) in jobs.iter().enumerate() {
-        if !job.name.contains(&filter) {
+    let mut order: Vec<usize> = (0..jobs.len()).collect();
+    if prep_only {
+        order.sort_by_key(|i| jobs[*i].rank.unwrap_or(*i));
+    }
+    for idx in order {
+        let job = &jobs[idx];
+        if job.off || !job.name.contains(&filter) {
             continue;
+        }
+        // A `stop` file in the cache ends a long run between songs.
+        if cache.join("stop").exists() {
+            println!("stopped");
+            break;
         }
         let Some(mut prep) = prepared(&mut aligner, job, &cache, idx) else { continue };
         if prep_only {
@@ -251,7 +310,7 @@ fn main() {
         let wrong = jobs
             .iter()
             .enumerate()
-            .filter(|(i, j)| *i != idx && j.kind != "case" && Route::of(&j.lines).map(|r| r.main) == Some(main))
+            .filter(|(i, j)| *i != idx && !j.off && j.kind != "case" && Route::of(&j.lines).map(|r| r.main) == Some(main))
             .min_by_key(|(i, _)| (*i + jobs.len() - idx) % jobs.len())
             .map(|(_, j)| plain(&j.lines));
         println!("== {} ({}, {})", job.name, job.kind, key(main));
@@ -266,7 +325,22 @@ fn main() {
             };
             let mode = if timed { "timed" } else { "plain" };
             let reference: Vec<LyricLine> = if timed { job.lines.clone() } else { job.lines.iter().filter(|l| !l.text.trim().is_empty()).cloned().collect() };
-            let mut t = Tally { overlaps: overlaps(&fit.lines), ..Tally::default() };
+            let mut t = Tally { overlaps: overlaps(&fit.lines), extra: fit.lines.len().saturating_sub(lines.len()), ..Tally::default() };
+            // The lines as the reference has them (an added repeat left out).
+            let mut fit = fit;
+            if t.extra > 0 && job.kind != "case" {
+                let mut kept = Vec::new();
+                let mut k = 0;
+                for l in &fit.lines {
+                    if k < lines.len() && l.text == lines[k].text {
+                        kept.push(l.clone());
+                        k += 1;
+                    }
+                }
+                if kept.len() == lines.len() {
+                    fit.lines = kept;
+                }
+            }
             if job.kind == "words" {
                 (t.starts, t.ends) = word_errors(&reference, &fit.lines);
             }
@@ -277,6 +351,9 @@ fn main() {
             println!("  {mode:28} {}", verdict(&fit));
             if job.kind == "case" {
                 print_lines(&fit.lines, &job.show);
+                if timed && std::env::var("TABLE").is_ok() {
+                    table(&aligner, &prep, main, &job.show);
+                }
             } else {
                 pool(format!("{} {} {}", job.kind, key(main), mode), &t);
                 pool(format!("{} all {}", job.kind, mode), &t);

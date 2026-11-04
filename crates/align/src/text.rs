@@ -214,6 +214,25 @@ impl Lang {
     }
 }
 
+/// Whether a piece is hummed or a held vowel rather than said: «м», «мм»,
+/// «мгм», «угу», «хм», «mm», «hmm», «mhm», and one vowel held over a few
+/// letters («а-а», «о-о-о», «ooo»). A speech model hears such a
+/// piece as blank or as anything, so it is timed by the voice instead
+/// ([`crate::ctc::Tok::Hum`]). A single vowel is a word («а», «о», «a»).
+pub fn is_hum(piece: &str) -> bool {
+    let letters: Vec<char> = piece.chars().filter(|c| c.is_alphabetic()).flat_map(char::to_lowercase).collect();
+    // A kana is a syllable of a word («ん» too), never a hum of its own.
+    let Some(&first) = letters.first().filter(|_| !piece.chars().any(is_cjk)) else { return false };
+    let word: String = letters.iter().collect();
+    if letters.iter().all(|c| matches!(c, 'м' | 'm')) {
+        return true;
+    }
+    if matches!(word.as_str(), "мгм" | "угу" | "хм" | "хмм" | "гм" | "hm" | "hmm" | "mhm" | "mmh" | "mmm") {
+        return true;
+    }
+    letters.len() >= 2 && "аеёиоуыэaeiou".contains(first) && letters.iter().all(|c| *c == first)
+}
+
 /// Cuts a line into the pieces timed one by one; they keep their trailing
 /// whitespace, so joined they give `line` back.
 pub fn pieces(line: &str) -> Vec<String> {
@@ -288,6 +307,13 @@ impl Vocab {
             })
             .collect();
         Ok(Self { letters, ids, sep, blank })
+    }
+
+    /// A model of a script's characters (thousands of them: Japanese)
+    /// rather than of an alphabet's letters: it is unsure of every sung
+    /// character, so voice the text lacks cannot be told from the text.
+    pub fn syllabic(&self) -> bool {
+        self.ids.len() > 200
     }
 
     /// The tokens of one piece (empty for punctuation).

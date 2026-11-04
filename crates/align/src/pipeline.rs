@@ -127,6 +127,17 @@ impl Prepared {
         }
     }
 
+    /// Which of `em`'s frames have the separated voice in them (`None` on
+    /// the mix, where it cannot tell).
+    pub fn voiced_frames(&self, em: &Emissions) -> Option<Vec<bool>> {
+        if !self.separated {
+            return None;
+        }
+        let tenths = self.voiced_tenths();
+        let step = ENERGY_HOP as f32 / RATE as f32;
+        Some((0..em.frames()).map(|t| tenths.get((em.secs(t) / step) as usize).copied().unwrap_or(false)).collect())
+    }
+
     /// Which tenths of a second have the voice (all of them for a mix).
     pub fn voiced_tenths(&self) -> Vec<bool> {
         if !self.separated {
@@ -491,8 +502,10 @@ impl Aligner {
         }
         let foreign: Vec<Foreign<'_>> =
             others.iter().zip(&vocabs).map(|((id, ls), v)| Foreign { em: &prep.heard[id], vocab: v, lines: ls }).collect();
-        Ok(fit_text_with(&prep.heard[&main], &vocab, &foreign, lines, timed).map(|mut f| {
-            let bounds = crate::fit::source_bounds(lines, &f);
+        let em = &prep.heard[&main];
+        let voiced = prep.voiced_frames(em);
+        Ok(fit_text_with(em, &vocab, &foreign, lines, timed, voiced.as_deref()).map(|mut f| {
+            let bounds = f.ends.clone();
             prep.end_with_voice(&mut f.lines, main, &bounds);
             f.covered = prep.covered(&f.lines);
             f.aligner = Some(main);
@@ -515,8 +528,10 @@ impl Aligner {
             return Err(Error::Stopped);
         }
         let vocab = self.vocab(id)?;
-        Ok(fit_text_with(&prep.heard[&id], &vocab, &[], lines, timed).map(|mut f| {
-            let bounds = crate::fit::source_bounds(lines, &f);
+        let em = &prep.heard[&id];
+        let voiced = prep.voiced_frames(em);
+        Ok(fit_text_with(em, &vocab, &[], lines, timed, voiced.as_deref()).map(|mut f| {
+            let bounds = f.ends.clone();
             prep.end_with_voice(&mut f.lines, id, &bounds);
             f.covered = prep.covered(&f.lines);
             f.aligner = Some(id);
