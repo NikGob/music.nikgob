@@ -1324,6 +1324,10 @@ pub struct Prefs {
     /// «Скорость подсветки»: how fast a letter or word lights up, 0
     /// smoothly .. 1 at once (karaoke by letters: how soft the front is).
     pub lyrics_light_speed: f32,
+    /// «Плавность»: 0 lights and moves exactly letter by letter .. 1 the
+    /// karaoke front glides and the wave's jumps spread over neighbouring
+    /// letters (motions averaged over up to 0.4 s; the times still lead).
+    pub lyrics_smooth: f32,
     /// How far lines other than the current one fade (0 none .. 1 strong).
     pub lyrics_dim: f32,
     /// Text size multiplier for synced lyrics (0.8..1.4).
@@ -2640,6 +2644,7 @@ impl Default for Prefs {
             lyrics_wave_jump: 1.0,
             lyrics_jump_speed: 1.0,
             lyrics_light_speed: 0.65,
+            lyrics_smooth: 0.5,
             lyrics_dim: 0.5,
             lyrics_scale: 1.0,
             lyrics_lead: LYRICS_LEAD,

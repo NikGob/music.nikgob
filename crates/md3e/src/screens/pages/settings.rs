@@ -681,6 +681,14 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     row(ui, Id::LyricsUnit, "Подсвечивать", None, |ui| {
         choice(ui, Id::LyricsUnit, p);
     });
+    // Focus by letters brightens the whole line: nothing to smooth.
+    if p.lyrics_style != 1 || p.lyrics_by_words {
+        row(ui, Id::LyricsSmooth, "Плавность", Some("0% — по буквам, 100% — плавно"), |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-smooth", p.lyrics_smooth, (0.0, 1.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_smooth = v;
+            }
+        });
+    }
     if p.lyrics_style == 2 || p.lyrics_by_words {
         row(ui, Id::WaveFallback, "Если у текста нет времени слов", Some("Для «Волны» и подсветки по словам"), |ui| {
             choice_menu(ui, Id::WaveFallback, p);
