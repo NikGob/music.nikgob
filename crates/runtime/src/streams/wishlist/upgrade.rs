@@ -160,7 +160,8 @@ impl Worker {
     /// one, so every path of the search (new items, an album's files, what
     /// is good enough) goes by it.
     fn upgrade_wants(&self, track: TrackId) -> bool {
-        self.lib.get_track(track).ok().flatten().is_some()
+        // A song the user deleted from its album stays gone.
+        self.lib.get_track(track).ok().flatten().is_some() && !self.lib.is_track_unwanted(track).unwrap_or(false)
     }
 
     /// The tracks of an album item that are in the library.
