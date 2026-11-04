@@ -64,6 +64,9 @@ pub enum SettingId {
     LyricsStyle,
     WaveFallback,
     WaveJump,
+    /// «Скорость прыжка» and «Скорость подсветки».
+    JumpSpeed,
+    LightSpeed,
     LyricsDim,
     LyricsScale,
     LyricsLead,
@@ -71,6 +74,9 @@ pub enum SettingId {
     LyricsGlow,
     LyricsGap,
     LyricsGapWaves,
+    /// «Высота волн» and «Размер индикатора» of the pause ring.
+    LyricsGapHeight,
+    LyricsGapSize,
     LyricsCountdown,
     /// «Подсвечивать»: by letters or by words, under every animation.
     LyricsUnit,
@@ -343,8 +349,8 @@ impl SettingId {
             Design | Theme | Contrast | Scheme | ProgressWave | NpVolume | NpVolumeHold | CoverShape | ShapeRange | ShapePick
             | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
             | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
-            | LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow
-            | LyricsGap | LyricsGapWaves | LyricsCountdown | LyricsUnit | LyricsSoftEdges | LyricsSoftStrength | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
+            | LyricsStyle | WaveFallback | WaveJump | JumpSpeed | LightSpeed | LyricsDim | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow
+            | LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown | LyricsUnit | LyricsSoftEdges | LyricsSoftStrength | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
             | ReducedMotion | FpsLimit => {
                 TAB_APPEARANCE
             }
@@ -399,6 +405,8 @@ impl SettingId {
             LyricsStyle => "Как выделяется строка, которую сейчас поют.",
             WaveFallback => "У некоторых текстов известно только, когда начинается строка, а время слов нет. Что делать с такими текстами в «Волне» и при подсветке по словам.",
             WaveJump => "Как высоко подпрыгивают буквы или слова в анимации «Волна». 0 — они только загораются.",
+            JumpSpeed => "Как быстро буква или слово в «Волне» взлетает, когда его начинают петь, и встаёт на место. Больше — резче и короче.",
+            LightSpeed => "Как быстро загорается буква или слово, когда его поют: от плавного появления до мгновенного. В караоке по буквам — насколько мягкий край у подсветки.",
             LyricsDim => "Насколько бледнее остальные строки по сравнению с той, что поют сейчас.",
             LyricsScale => "Размер букв в тексте песни.",
             LyricsLead => "На сколько подсветка опережает голос. Глаз читает чуть раньше, чем слышит, поэтому подсветка, которая загорается немного заранее, кажется точной. Если она торопится — уменьшите, если отстаёт — увеличьте. Перемотка и время в тексте не меняются.",
@@ -406,6 +414,8 @@ impl SettingId {
             LyricsGlow => "Уже спетая часть строки слегка светится.",
             LyricsGap => "Когда в песне долго нет слов, между строками крутится кружок ожидания. Здесь выбирается его вид.",
             LyricsGapWaves => "Сколько волн на кружке ожидания. Больше — волны мельче и чаще.",
+            LyricsGapHeight => "Насколько высокие волны на кружке ожидания.",
+            LyricsGapSize => "Насколько большой кружок ожидания между строками.",
             LyricsCountdown => "За три секунды до новой строки кружок ожидания сменяется отсчётом 3, 2, 1.",
             LyricsUnit => "Что подсвечивается по очереди в любой анимации: каждая буква или каждое слово целиком. Слова через дефис подсвечиваются по частям.",
             LyricsSoftEdges => "Строки у верхнего и нижнего края текста расплываются и тают, а не обрезаются.",
@@ -866,9 +876,9 @@ impl SettingId {
             Ring | RingStyle | RingBeat => Preview::Ring,
             LyricsCascade => Preview::Cascade,
             BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue => Preview::Background,
-            LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsGlow | LyricsUnit => Preview::Lyrics,
+            LyricsStyle | WaveFallback | WaveJump | JumpSpeed | LightSpeed | LyricsDim | LyricsScale | LyricsGlow | LyricsUnit => Preview::Lyrics,
             LyricsSoftEdges | LyricsSoftStrength => Preview::Edges,
-            LyricsGap | LyricsGapWaves => Preview::Gap,
+            LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize => Preview::Gap,
             LyricsCountdown => Preview::Countdown,
             NpMotion => Preview::Motion,
             NpVolume | NpVolumeHold => Preview::Volume,
