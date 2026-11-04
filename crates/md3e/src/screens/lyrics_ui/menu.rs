@@ -87,12 +87,12 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out:
         // Says which text the player chose.
         let mut auto = MenuItem::new("Автоматически").selected(!l.picked);
         if let Some(src) = l.source.filter(|_| !l.picked) {
-            auto = auto.shortcut(super::name(src));
+            auto = auto.shortcut(super::source_name(l, src));
         }
         m.item(auto, Row::Auto);
         m.split();
         for o in &l.sources {
-            let mut item = MenuItem::new(super::name(o.source))
+            let mut item = MenuItem::new(super::source_name(l, o.source))
                 .enabled(matches!(o.state, LyricsAvail::Ready(_)))
                 .selected(l.picked && l.source == Some(o.source));
             let state = super::source_state(l, o.source);
@@ -115,7 +115,7 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, out:
         m.label(home);
     }
     if l.savable && !busy {
-        m.item(MenuItem::new("Сохранить текст"), Row::Save);
+        m.item(MenuItem::new(super::save_label(state)), Row::Save);
     }
     if look == super::Variant::Menu {
         // Making timing shows on the control; the actions come back after.

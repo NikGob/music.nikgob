@@ -142,6 +142,15 @@ pub(crate) fn name(source: LyricsSource) -> &'static str {
     }
 }
 
+/// What a song without a file calls the text it kept in its artist's
+/// folder (it has no file to say it comes from).
+const KEPT: &str = "Сохранённый текст";
+
+/// [`name`] for the shown track.
+pub(crate) fn source_name(l: &LyricsView, source: LyricsSource) -> &'static str {
+    if source == LyricsSource::File && l.stream { KEPT } else { name(source) }
+}
+
 /// «Текст с Genius»: where the shown text came from, in plain words. How
 /// it lights up is said only when it does not (a still text makes one
 /// wonder); a text the player heard itself says so, so it is taken as a
@@ -149,6 +158,7 @@ pub(crate) fn name(source: LyricsSource) -> &'static str {
 pub(crate) fn chip_label(l: &LyricsView) -> String {
     let from = match l.source {
         Some(LyricsSource::Recognized) => "Текст расслышан плеером".to_owned(),
+        Some(LyricsSource::File) if l.stream => KEPT.to_owned(),
         Some(LyricsSource::File) => "Текст из файла трека".to_owned(),
         Some(src) => format!("Текст с {}", src.label()),
         None if l.loading || l.sources.iter().any(|o| o.state == LyricsAvail::Loading) => return "Ищу текст…".to_owned(),
@@ -270,6 +280,12 @@ pub(crate) fn show_as(state: &ViewState, sync: LyricsSync, out: &mut Vec<Command
     if let Some(track) = state.lyrics.track.filter(|_| seen(&state.lyrics) != sync) {
         out.push(Command::ShowLyricsAs(track, sync));
     }
+}
+
+/// What keeping the shown text says: a song without a file is saved with
+/// it when the settings say so («Что сохранять»).
+pub(crate) fn save_label(state: &ViewState) -> &'static str {
+    if state.lyrics.stream && state.prefs.lyrics_stream_keep == 1 { "Сохранить песню и текст" } else { "Сохранить текст" }
 }
 
 /// Keeps the shown text on the computer.
@@ -694,5 +710,24 @@ mod tests {
         state.lyrics.savable = true;
         save(&state, &mut out);
         assert!(matches!(out[..], [Command::SaveLyrics { source: LyricsSource::Lrclib, .. }]));
+    }
+
+    /// A song without a file says when keeping its text saves the song too.
+    #[test]
+    fn keeping_a_stream_s_text_says_whether_the_song_goes_too() {
+        let mut state = ViewState::default();
+        assert_eq!(save_label(&state), "Сохранить текст");
+        state.prefs.lyrics_stream_keep = 1;
+        assert_eq!(save_label(&state), "Сохранить текст", "a file's text");
+        state.lyrics.stream = true;
+        assert_eq!(save_label(&state), "Сохранить песню и текст");
+        state.prefs.lyrics_stream_keep = 0;
+        assert_eq!(save_label(&state), "Сохранить текст");
+        // Its kept text is no file's.
+        state.lyrics.source = Some(LyricsSource::File);
+        assert_eq!(source_name(&state.lyrics, LyricsSource::File), "Сохранённый текст");
+        assert_eq!(source_name(&state.lyrics, LyricsSource::Genius), "Genius");
+        state.lyrics.stream = false;
+        assert_eq!(source_name(&state.lyrics, LyricsSource::File), "Файл трека");
     }
 }

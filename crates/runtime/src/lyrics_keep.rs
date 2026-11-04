@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource};
-use nikgob_core::model::{SourceKind, TrackId, score};
+use nikgob_core::model::{SourceKind, Track, TrackId, score};
 use nikgob_core::streaming::Service;
 
 use crate::Worker;
@@ -20,24 +20,31 @@ use crate::align::Msg;
 use crate::import::Internal;
 use crate::lyrics::{Place, Text};
 
-/// Why a stream's timing is not made: what plays is a clip, whose song is
-/// not clear.
-pub(crate) const CLIP: &str = "Подсветку не сделать: это клип, неясно, какая в нём песня";
-/// … an upload that is not the artist's own.
-pub(crate) const UPLOAD: &str = "Подсветку не сделать: неофициальная загрузка, неясно, чья это песня";
+/// Why a stream's timing is not made: what plays is a video (an official
+/// clip or anyone's upload: YouTube tells them apart for neither), whose
+/// song is not clear.
+pub(crate) const CLIP: &str = "Подсветку не сделать: в клипе неясно, какая песня";
+/// … the track has no artist or no title to keep its text under.
+pub(crate) const UNNAMED: &str = "Подсветку не сделать: неясно, чья это песня";
 
-/// Where a stream's timing can come from: an official song (not a clip)
-/// on an album, or anything whose recording the library knows otherwise
-/// (an ISRC, a MusicBrainz id, another service's entry). Covers are songs
-/// like any.
-pub(crate) fn stream_place(clip: bool, album: bool, known: bool) -> Place {
-    if known || (album && !clip) {
+/// Where a stream's timing can come from: a song YouTube Music has as a
+/// record (its official audio, a topic upload; with an album or not), or
+/// a clip whose recording the library knows otherwise (an ISRC, a
+/// MusicBrainz id, another service's entry). Covers are songs like any.
+/// `named`: the track has an artist and a title.
+pub(crate) fn stream_place(clip: bool, known: bool, named: bool) -> Place {
+    if !named {
+        Place::Unclear(UNNAMED.into())
+    } else if !clip || known {
         Place::Stream
-    } else if clip {
-        Place::Unclear(CLIP.into())
     } else {
-        Place::Unclear(UPLOAD.into())
+        Place::Unclear(CLIP.into())
     }
+}
+
+/// The artist whose folder keeps a track's text: the first credited.
+fn artist_of(t: &Track) -> String {
+    t.artist_credit.0.first().map(|p| p.name.clone()).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| t.artist_credit.display())
 }
 
 /// `lines` with their times to the millisecond (as the files keep them),
@@ -91,8 +98,8 @@ impl Worker {
             .iter()
             .any(|s| s.kind != SourceKind::Youtube && s.trashed_at.is_none());
         let known = elsewhere || t.as_ref().is_some_and(|t| t.isrc.is_some() || t.recording_mbid.is_some());
-        let album = t.as_ref().is_some_and(|t| t.release_id.is_some());
-        stream_place(src.quality_score == score::STREAM_YOUTUBE_CLIP, album, known)
+        let named = t.as_ref().is_some_and(|t| !t.title.trim().is_empty() && !artist_of(t).trim().is_empty());
+        stream_place(src.quality_score == score::STREAM_YOUTUBE_CLIP, known, named)
     }
 
     /// Where the text of `track` is kept while it has no file: its
@@ -100,8 +107,7 @@ impl Worker {
     pub(crate) fn kept_text(&self, track: TrackId) -> Option<PathBuf> {
         let dir = self.import.as_ref()?.config().library_dir.clone();
         let t = self.lib.get_track(track).ok().flatten()?;
-        let artist = t.artist_credit.0.first().map(|p| p.name.clone()).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| t.artist_credit.display());
-        Some(nikgob_import::layout::kept_text_path(&dir, &artist, &t.title))
+        Some(nikgob_import::layout::kept_text_path(&dir, &artist_of(&t), &t.title))
     }
 
     /// `Command::SaveLyrics`: the shown text with the player's timing goes
@@ -190,8 +196,10 @@ impl Worker {
             Ok(path) => {
                 self.align.saved_audio.insert(path.clone(), track);
                 let targets = nikgob_import::ImportTargets { tracks: vec![track], force: true, ..Default::default() };
-                if !self.import_for(vec![path], "Сохранение с YouTube".into(), nikgob_core::model::SourceOrigin::Stream, targets) {
+                if !self.import_for(vec![path.clone()], "Сохранение с YouTube".into(), nikgob_core::model::SourceOrigin::Stream, targets) {
+                    self.align.saved_audio.remove(&path);
                     self.align.after_import.remove(&track);
+                    let _ = std::fs::remove_file(&path);
                 }
             }
             Err(e) => {
@@ -202,18 +210,53 @@ impl Worker {
         }
     }
 
-    /// A file landed: a song saved for its text gets the text next to it.
+    /// A file landed for `track` (or was found to be its file): a song
+    /// saved for its text gets the text next to it, and the text it kept
+    /// in its artist's folder goes; any other song that kept a text there
+    /// while it had no file takes it along next to the file (unless one
+    /// lies there already).
     pub(crate) fn lyrics_imported(&mut self, track: TrackId, path: &Path) {
-        if self.align.saved_audio.remove(path).is_some() {
+        let asked = self.align.saved_audio.remove(path);
+        if asked.is_some() {
             let _ = std::fs::remove_file(path);
         }
-        let Some(lines) = self.align.after_import.remove(&track) else { return };
+        let lines = asked.and_then(|t| self.align.after_import.remove(&t)).or_else(|| self.align.after_import.remove(&track));
         let Some(src) = self.lib.active_source(track).ok().flatten().filter(|s| s.kind.is_local()) else { return };
         let file = self.res.path(&src.locator);
+        let kept = self.kept_text(track).map(|k| nikgob_import::sanitize::long_path(&k)).filter(|k| k.is_file());
+        let place = self.lyrics_place(track);
         if let Some(tl) = self.import.as_mut().and_then(|s| s.lyrics_cache.get_mut(&track)) {
-            tl.place = Place::File;
+            tl.place = place;
         }
-        self.keep_next_to(track, file, lines);
+        match (lines, kept) {
+            (Some(lines), kept) => {
+                if let Some(k) = kept
+                    && let Err(e) = std::fs::remove_file(&k)
+                {
+                    log::warn!("removing {}: {e}", k.display());
+                }
+                self.keep_next_to(track, file, lines);
+            }
+            (None, Some(k)) => {
+                let next_to = nikgob_import::sanitize::long_path(&file.with_extension("ttml"));
+                if !next_to.exists()
+                    && let Err(e) = std::fs::rename(&k, &next_to)
+                {
+                    log::warn!("moving {} next to its file: {e}", k.display());
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// A saved song's file could not be imported: it goes, and so does the
+    /// text that waited for it.
+    pub(crate) fn lyrics_import_failed(&mut self, path: &Path) {
+        let Some(track) = self.align.saved_audio.remove(path) else { return };
+        let _ = std::fs::remove_file(path);
+        if self.align.after_import.remove(&track).is_some() {
+            self.toast("Не получилось сохранить песню", None);
+        }
     }
 
     /// The text is on the computer: it is the track's own text now, shown
@@ -248,11 +291,10 @@ mod tests {
 
     #[test]
     fn a_stream_is_timed_only_when_its_song_is_clear() {
-        assert_eq!(stream_place(false, true, false), Place::Stream, "an official song on an album");
-        assert_eq!(stream_place(true, false, true), Place::Stream, "a clip of a song the library knows");
-        assert_eq!(stream_place(true, false, false), Place::Unclear(CLIP.into()));
-        assert_eq!(stream_place(true, true, false), Place::Unclear(CLIP.into()), "a clip on an album stays unclear");
-        assert_eq!(stream_place(false, false, false), Place::Unclear(UPLOAD.into()));
+        assert_eq!(stream_place(false, false, true), Place::Stream, "a song YouTube Music has as a record, a cover too");
+        assert_eq!(stream_place(true, true, true), Place::Stream, "a clip of a recording the library knows");
+        assert_eq!(stream_place(true, false, true), Place::Unclear(CLIP.into()));
+        assert_eq!(stream_place(false, true, false), Place::Unclear(UNNAMED.into()), "no artist or title to keep it under");
     }
 
     fn opus(path: &Path) {
@@ -322,6 +364,231 @@ mod tests {
         let file = root.path().join("Song.opus");
         let other = crate::lyrics::cached_lyrics(&lib, track, Some(&file), None, false, Some(&path));
         assert!(other.texts_of(LyricsSource::File).is_none());
+    }
+
+    /// A runtime on a temp library in `dir` (nothing goes under the real
+    /// one) with the fake YouTube, its aligner's parts marked as there (no
+    /// runtime in them: a job fails at once instead of downloading).
+    fn rig(lib: &nikgob_library::Library, prefs: nikgob_view::Prefs, dir: &Path) -> (crate::Runtime, crate::ImportConfig) {
+        let cfg = crate::ImportConfig::with_root(dir);
+        for d in [&cfg.library_dir, &cfg.inbox_dir, &cfg.downloads_dir, &cfg.trash_dir] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let models = dir.join("models");
+        for s in nikgob_align::catalog::ALL {
+            std::fs::create_dir_all(models.join(s.dir)).unwrap();
+            std::fs::write(models.join(s.dir).join(".ready"), b"").unwrap();
+        }
+        let yt = nikgob_core::streaming::FakeService::youtube().logged_out();
+        let rt = crate::Runtime::start(
+            crate::RuntimeConfig {
+                library: lib.clone(),
+                streams: vec![std::sync::Arc::new(yt)],
+                library_dir: cfg.library_dir.clone(),
+                prefs,
+                prefs_path: None,
+                settings_path: None,
+                import: Some(crate::ImportSetup {
+                    config: cfg.clone(),
+                    metadata: None,
+                    watch_inbox: false,
+                    torrent_state_dir: dir.join("torrent-state"),
+                    torrent_offline: true,
+                    models_dir: Some(models),
+                }),
+            },
+            Box::new(crate::NullPlayback),
+            std::sync::Arc::new(|| {}),
+        );
+        (rt, cfg)
+    }
+
+    const PLAIN: &str = "Знаешь, не беда\nСтрока без слов";
+
+    fn prefs() -> nikgob_view::Prefs {
+        nikgob_view::Prefs { lyrics_gpu: false, lyrics_models_auto: false, ..Default::default() }
+    }
+
+    fn wait(rt: &crate::Runtime, what: &str, f: impl Fn(&nikgob_view::ViewState) -> bool) {
+        let t = std::time::Instant::now();
+        loop {
+            let s = rt.state();
+            if f(&s) {
+                return;
+            }
+            assert!(
+                t.elapsed() < Duration::from_secs(30),
+                "timed out waiting for {what}: lyrics {:?}, craft {:?}, toasts {:?}",
+                s.lyrics,
+                s.align.craft,
+                s.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+            );
+            drop(s);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_until(what: &str, f: impl Fn() -> bool) {
+        let t = std::time::Instant::now();
+        while !f() {
+            assert!(t.elapsed() < Duration::from_secs(30), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A fake YouTube track in the library with Genius' text, and (`made`)
+    /// the word timing the player made of it.
+    fn stream_track(lib: &nikgob_library::Library, id: &str, made: bool) -> TrackId {
+        let t = nikgob_core::streaming::FakeService::youtube().tracks().into_iter().find(|t| t.id.id == id).unwrap();
+        let track = lib.upsert_stream_track(&t).unwrap();
+        let text = Text::from_plain(PLAIN).unwrap();
+        lib.put_lyrics_text(track, LyricsSource::Genius.key(), text.body().as_deref()).unwrap();
+        if made {
+            let row = nikgob_library::AlignedLyrics {
+                source: LyricsSource::Genius.key().to_owned(),
+                text_hash: text.hash(),
+                fit: 1.0,
+                timing: "none".into(),
+                offset_ms: 0,
+                covered: 1.0,
+                body: serde_json::to_string(&to_millis(&timed())).ok(),
+                made_by: crate::align::MADE_BY.into(),
+                made_at: 0,
+                saved: true,
+            };
+            lib.put_lyrics_aligned(track, &row).unwrap();
+        }
+        track
+    }
+
+    fn play(rt: &crate::Runtime, track: TrackId) {
+        rt.send(nikgob_view::Command::PlayTracks { tracks: vec![track], start: 0, context: "lyrics test".into() });
+        wait(rt, "the track's lyrics", |s| s.lyrics.track == Some(track) && s.lyrics.source.is_some());
+    }
+
+    /// The files under `dir`, relative, sorted.
+    fn files(dir: &Path) -> Vec<String> {
+        fn walk(d: &Path, root: &Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, root, out);
+                } else {
+                    out.push(p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out.sort();
+        out
+    }
+
+    /// The track's own file, once it has one.
+    fn file_of(lib: &nikgob_library::Library, cfg: &crate::ImportConfig, track: TrackId) -> Option<PathBuf> {
+        let src = lib.active_source(track).unwrap().filter(|s| s.kind.is_local())?;
+        let p = Path::new(&src.locator);
+        Some(if p.is_absolute() { p.to_owned() } else { cfg.library_dir.join(p) })
+    }
+
+    /// A song YouTube Music has as a record is timed from its stream: the
+    /// audio is fetched into a temp folder and gone after the aligner
+    /// tried; a clip whose recording is not known says why instead; with
+    /// the setting off nothing is offered.
+    #[test]
+    fn a_stream_is_timed_from_its_audio_fetched_for_a_while() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let song = stream_track(&lib, "yt-gruppa-2", false);
+        let clip = stream_track(&lib, "yt-video-kino", false);
+        let (rt, cfg) = rig(&lib, prefs(), dir.path());
+        play(&rt, song);
+        wait(&rt, "timing offered", |s| s.lyrics.craft == nikgob_view::LyricsCraft::Ready && s.lyrics.stream);
+        rt.send(nikgob_view::Command::CraftLyrics { track: song, source: LyricsSource::Genius, target: nikgob_view::LyricsSync::Word });
+        wait(&rt, "the aligner's answer", |s| s.align.craft.as_ref().is_some_and(|c| c.failed.is_some()));
+        let failed = rt.state().align.craft.clone().unwrap().failed.unwrap();
+        assert_ne!(failed, "Не удалось получить звук песни", "the audio came");
+        let temp = cfg.downloads_dir.join(".align");
+        assert!(temp.is_dir(), "fetched there");
+        assert_eq!(files(&temp), Vec::<String>::new(), "and gone");
+        assert_eq!(files(&cfg.library_dir), Vec::<String>::new(), "nothing kept");
+
+        play(&rt, clip);
+        wait(&rt, "why not", |s| s.lyrics.craft == nikgob_view::LyricsCraft::No(CLIP.into()) && s.lyrics.stream && !s.lyrics.savable);
+
+        let mut off = rt.state().prefs.clone();
+        off.lyrics_streams = false;
+        rt.send(nikgob_view::Command::SetPrefs(Box::new(off)));
+        play(&rt, song);
+        wait(&rt, "nothing offered", |s| s.lyrics.track == Some(song) && s.lyrics.craft == nikgob_view::LyricsCraft::Off);
+    }
+
+    /// «Только текст»: the `.ttml` goes into the artist's folder of the
+    /// (temp) library and is the song's text again in a new run; once the
+    /// song gets a file (a YouTube copy here), the text moves next to it.
+    #[test]
+    fn a_stream_s_text_is_kept_in_its_artist_s_folder_and_found_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let song = stream_track(&lib, "yt-gruppa-2", true);
+        let row = lib.get_track(song).unwrap().unwrap();
+        let kept = {
+            let (rt, cfg) = rig(&lib, prefs(), dir.path());
+            play(&rt, song);
+            wait(&rt, "savable", |s| s.lyrics.savable && s.lyrics.stream);
+            rt.send(nikgob_view::Command::SaveLyrics { track: song, source: LyricsSource::Genius });
+            wait(&rt, "the kept text shown", |s| s.lyrics.source == Some(LyricsSource::File));
+            assert_eq!(rt.state().lyrics.home, nikgob_view::LyricsHome::Computer);
+            let kept = nikgob_import::layout::kept_text_path(&cfg.library_dir, &artist_of(&row), &row.title);
+            assert!(kept.is_file(), "{}", kept.display());
+            assert_eq!(files(&cfg.library_dir).len(), 1, "{:?}", files(&cfg.library_dir));
+            assert!(file_of(&lib, &cfg, song).is_none(), "still a stream");
+            kept
+        };
+
+        // A new run reads it back for the stream.
+        let (rt, cfg) = rig(&lib, prefs(), dir.path());
+        play(&rt, song);
+        wait(&rt, "the kept text again", |s| {
+            s.lyrics.source == Some(LyricsSource::File) && s.lyrics.lines.iter().any(|l| !l.words.is_empty())
+        });
+
+        // The song gets a file: the text goes next to it.
+        rt.send(nikgob_view::Command::Like(nikgob_core::model::LikeTarget::Track(song), true));
+        wait_until("the wish", || !lib.wishlist_for_track(song).unwrap().is_empty());
+        let item = lib.wishlist_for_track(song).unwrap().pop().unwrap();
+        rt.send(nikgob_view::Command::WishlistSaveFromYoutube(item.id));
+        wait_until("the copy", || file_of(&lib, &cfg, song).is_some());
+        let file = file_of(&lib, &cfg, song).unwrap();
+        wait_until("the text next to it", || file.with_extension("ttml").is_file());
+        assert!(!kept.exists(), "moved, not copied");
+    }
+
+    /// «Песню и текст»: the song is saved from YouTube and imported as the
+    /// track's file (the YouTube copy), its text next to it, a text it
+    /// kept in the artist's folder before goes, and the saved audio is
+    /// not left behind.
+    #[test]
+    fn saving_a_stream_with_its_song_makes_it_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let song = stream_track(&lib, "yt-gruppa-2", true);
+        let row = lib.get_track(song).unwrap().unwrap();
+        let (rt, cfg) = rig(&lib, nikgob_view::Prefs { lyrics_stream_keep: 1, ..prefs() }, dir.path());
+        play(&rt, song);
+        wait(&rt, "savable", |s| s.lyrics.savable && s.lyrics.stream);
+        let kept = nikgob_import::layout::kept_text_path(&cfg.library_dir, &artist_of(&row), &row.title);
+        write_ttml(&kept, &to_millis(&timed())).unwrap();
+        rt.send(nikgob_view::Command::SaveLyrics { track: song, source: LyricsSource::Genius });
+        wait_until("the song's file", || file_of(&lib, &cfg, song).is_some());
+        let src = lib.active_source(song).unwrap().unwrap();
+        assert_eq!(src.quality_score, score::SAVED_STREAM, "a YouTube copy");
+        let file = file_of(&lib, &cfg, song).unwrap();
+        assert!(file.starts_with(&cfg.library_dir), "{}", file.display());
+        wait_until("the text next to it", || file.with_extension("ttml").is_file());
+        wait(&rt, "its text shown", |s| s.lyrics.source == Some(LyricsSource::File) && !s.lyrics.stream);
+        assert!(!kept.exists(), "the text kept before goes");
+        wait_until("the saved audio gone", || files(&cfg.downloads_dir).is_empty());
     }
 
     #[test]

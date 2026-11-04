@@ -136,7 +136,7 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
             }
             for o in &l.sources {
                 let on = l.picked && l.source == Some(o.source);
-                let chip = FilterChip::new(super::name(o.source), on)
+                let chip = FilterChip::new(super::source_name(l, o.source), on)
                     .enabled(matches!(o.state, LyricsAvail::Ready(_)))
                     .id_salt(("lyrics-dialog-src", o.source.key()));
                 if ui.add(chip).clicked() && !on {
@@ -192,7 +192,7 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
                 // Timing made and checked here: keeping it is the primary
                 // action, making it again goes beside it.
                 let save = l.savable;
-                if save && ui.add(Button::new("Сохранить текст").style(Style::Filled).size(Size::S).id_salt("lyrics-dialog-save")).clicked() {
+                if save && ui.add(Button::new(super::save_label(state)).style(Style::Filled).size(Size::S).id_salt("lyrics-dialog-save")).clicked() {
                     super::save(state, out);
                 }
                 // Else the primary action is the finest timing; lines beside it.

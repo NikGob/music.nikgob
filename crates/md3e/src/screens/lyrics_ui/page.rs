@@ -73,7 +73,7 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
         let mut picked = None;
         segmented_list(ui, n, |i| {
             if i == 0 {
-                let auto = l.source.filter(|_| !l.picked).map(|src| super::name(src).to_owned());
+                let auto = l.source.filter(|_| !l.picked).map(|src| super::source_name(l, src).to_owned());
                 let item = ListItem::new("Автоматически").selected(!l.picked).id_salt("lyrics-page-auto");
                 return match auto {
                     Some(a) => item.supporting(a),
@@ -82,7 +82,7 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
             }
             let o = &l.sources[i - 1];
             let state = super::source_state(l, o.source);
-            let item = ListItem::new(super::name(o.source))
+            let item = ListItem::new(super::source_name(l, o.source))
                 .selected(l.picked && l.source == Some(o.source))
                 .enabled(matches!(o.state, LyricsAvail::Ready(_)))
                 .id_salt(("lyrics-page-src", o.source.key()));
@@ -128,7 +128,7 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
         // Timing made and checked here: keeping it is the primary action.
-        if save && ui.add(Button::new("Сохранить текст").style(Style::Filled).size(Size::S).id_salt("lyrics-page-save")).clicked() {
+        if save && ui.add(Button::new(super::save_label(state)).style(Style::Filled).size(Size::S).id_salt("lyrics-page-save")).clicked() {
             super::save(state, out);
         }
         // Else the finest timing is.

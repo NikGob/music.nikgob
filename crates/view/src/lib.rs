@@ -447,6 +447,10 @@ pub struct LyricsView {
     /// and [`LyricsSync::Line`] as far as it has that timing (the player's
     /// own counts), [`LyricsSync::Plain`] always. Empty without a text.
     pub shows: Vec<LyricsSync>,
+    /// The shown track has no file (it plays from a stream): its text on
+    /// the computer is one kept in its artist's folder, and «Сохранить
+    /// текст» keeps what «Что сохранять» says.
+    pub stream: bool,
 }
 
 /// Where a shown text is kept.

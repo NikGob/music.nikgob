@@ -731,7 +731,10 @@ impl Worker {
                 self.wish_imported(*kept, path);
                 self.analysis.kick();
             }
-            ImportEvent::Failed { path, .. } => self.wish_import_failed(path),
+            ImportEvent::Failed { path, .. } => {
+                self.lyrics_import_failed(path);
+                self.wish_import_failed(path);
+            }
             _ => {}
         }
         let Some(svc) = &mut self.import else { return };

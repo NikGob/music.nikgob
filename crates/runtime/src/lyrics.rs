@@ -529,6 +529,7 @@ impl TrackLyrics {
             craft,
             savable,
             shows: source.map(|s| self.shows(s)).unwrap_or_default(),
+            stream: self.place != Place::File,
         }
     }
 
@@ -860,7 +861,9 @@ impl Worker {
         tl.pick = self.lib.lyrics_pick(track).ok().flatten().and_then(|k| LyricsSource::from_key(&k));
         tl.display = shown_as(&self.lib, track);
         tl.show = Shown::of(&self.state.read().prefs);
-        if tl.texts_of(LyricsSource::File).is_none()
+        let local = self.lib.active_source(track).ok().flatten().is_some_and(|s| s.kind.is_local());
+        if !local
+            && tl.texts_of(LyricsSource::File).is_none()
             && let Some(kept) = self.kept_text(track).as_deref().and_then(read_ttml)
         {
             tl.insert(LyricsSource::File, Some(kept));

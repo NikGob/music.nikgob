@@ -46,10 +46,12 @@
 //! - `fake:craft:decode|separate|listen|align|download` — timing for
 //!   Genius' text is being made, at that stage; `fake:craft:done` — made,
 //!   to check; `fake:craft:failed` — it could not be made.
-//! - `fake:lyrics-home:words|online|saved|clip` — with `fake:lyrics-texts`,
-//!   the shown text: Genius' with word timing the player made (to make
-//!   again or save), LRCLIB's lines only online, a text saved on the
-//!   computer, or a clip whose song is unclear (timing cannot be made).
+//! - `fake:lyrics-home:words|online|saved|stream|stream-saved|clip` —
+//!   with `fake:lyrics-texts`, the shown text: Genius' with word timing
+//!   the player made (to make again or save), LRCLIB's lines only online,
+//!   a text saved on the computer, the made text of a song without a file
+//!   (kept as «Что сохранять» says) or the one it kept, or a clip whose
+//!   song is unclear (timing cannot be made).
 //! - `fake:lyrics-state:<state>[:word|line|plain]` — the lyrics control in
 //!   each state of docs/lyrics-control.md (`none`, `searching`, `plain`,
 //!   `line`, `word`, `made`, `saved`, `making`, `failed`, `stream`, `clip`,
@@ -506,15 +508,17 @@ fn lyrics_home(l: &mut nikgob_view::LyricsView, name: &str) {
             l.home = LyricsHome::Online;
             l.savable = false;
         }
-        "saved" => {
+        "saved" | "stream-saved" => {
+            l.stream = name == "stream-saved";
             l.source = Some(LyricsSource::File);
             l.lines = word_lyrics(l.track).lines;
             l.made = false;
             l.home = LyricsHome::Computer;
             l.savable = false;
         }
+        "stream" => l.stream = true,
         "clip" => {
-            l.craft = LyricsCraft::No("Подсветку не сделать: это клип, неясно, какая в нём песня".into());
+            l.craft = LyricsCraft::No("Подсветку не сделать: в клипе неясно, какая песня".into());
             l.savable = false;
         }
         _ => {}

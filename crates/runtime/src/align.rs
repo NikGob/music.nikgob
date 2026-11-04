@@ -730,6 +730,12 @@ impl Worker {
         let root = self.res.root().to_owned();
         let start = self.streaming.schedule.analysis_start;
         let tx = self.internal_tx.clone();
+        let temp = self.align_audio_dir();
+        if temp.exists()
+            && let Err(e) = std::fs::remove_dir_all(&temp)
+        {
+            log::warn!("align: removing {}: {e}", temp.display());
+        }
         self.align.start(self.lib.clone(), root, models, settings, tx, start);
     }
 
@@ -834,9 +840,16 @@ impl Worker {
                 self.send_craft(track, source, target, path, false);
             }
             Place::Stream => {
-                let Some(yt) = self.service(nikgob_core::streaming::Service::Youtube) else { return };
+                if !self.align.running() {
+                    return;
+                }
                 let Some(src) = self.lib.active_source(track).ok().flatten() else { return };
-                let dir = std::env::temp_dir().join("nikgob-align-audio");
+                let Some(yt) = self.service(nikgob_core::streaming::Service::Youtube) else {
+                    let failed = Some("YouTube Music выключен".to_owned());
+                    self.publish(|s| s.align.craft = Some(v::Craft { track, source, target, lines: None, failed }));
+                    return;
+                };
+                let dir = self.align_audio_dir();
                 let locator = src.locator.clone();
                 self.publish(|s| {
                     s.align.craft = Some(v::Craft { track, source, target, lines: None, failed: None });
@@ -851,8 +864,19 @@ impl Worker {
         }
     }
 
+    /// Where a stream's audio waits while timing is made from it: next to
+    /// the copies saved from YouTube, emptied when the aligner starts (a
+    /// run closed meanwhile leaves nothing behind for long).
+    pub(crate) fn align_audio_dir(&self) -> PathBuf {
+        match &self.import {
+            Some(svc) => svc.config().downloads_dir.join(".align"),
+            None => std::env::temp_dir().join("nikgob-align-audio"),
+        }
+    }
+
     fn send_craft(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync, path: PathBuf, temp: bool) {
-        let Some(text) = self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)).and_then(|tl| tl.texts_of(source)) else {
+        let text = self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)).and_then(|tl| tl.texts_of(source));
+        let Some(text) = text.filter(|_| self.align.running()) else {
             if temp {
                 let _ = std::fs::remove_file(&path);
             }
