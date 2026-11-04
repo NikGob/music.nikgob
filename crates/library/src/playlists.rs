@@ -19,7 +19,7 @@ use crate::catalog::{
 use crate::db::Library;
 use crate::error::{LibraryError, Result};
 use crate::fractional::{key_between, n_keys_between};
-use crate::streams::{refresh_in_library, refresh_in_library_of_playlist};
+use crate::streams::{refresh_in_library, refresh_in_library_of_playlist, refresh_in_library_of_release};
 use crate::types::{
     ArtistRow, PlaylistEntryRow, PlaylistKind, PlaylistSummary, ReleaseRow, TrackRow,
 };
@@ -41,8 +41,10 @@ pub(crate) fn set_like_in(
             deleted = excluded.deleted",
         params![target.kind_str(), target.id_string(), now, device.as_str(), deleted],
     )?;
-    if let LikeTarget::Track(t) = target {
-        refresh_in_library(tx, &t.to_string())?;
+    match target {
+        LikeTarget::Track(t) => refresh_in_library(tx, &t.to_string())?,
+        LikeTarget::Release(r) => refresh_in_library_of_release(tx, &r.to_string())?,
+        _ => {}
     }
     Ok(())
 }
@@ -547,8 +549,8 @@ impl Library {
     }
 
     /// The albums liked as a whole ([`Self::like_release`]), each with when,
-    /// the latest first; those whose tracks were unliked since say so in
-    /// [`ReleaseRow::liked`].
+    /// the latest first; while album likes like the tracks too, those whose
+    /// tracks were unliked since say so in [`ReleaseRow::liked`].
     pub fn liked_releases(&self, offset: u32, limit: u32) -> Result<Vec<(ReleaseRow, UnixMs)>> {
         self.read(|c| {
             // The like's time after the row's own columns.
@@ -575,13 +577,21 @@ impl Library {
         })
     }
 
-    /// Likes (or unlikes) an album: every live track of it goes into (or out
-    /// of) "Любимые" — the local ones when it has any, all of them otherwise —
-    /// and the release's own like row follows, so the album reads as liked
-    /// exactly when [`crate::ReleaseRow::liked`] says so. Returns the tracks.
+    /// Likes (or unlikes) an album. By default it is saved (or unsaved)
+    /// alone: its tracks stay as they are, and none is returned. When album
+    /// likes like the tracks too ([`Self::set_album_likes_tracks`]), every
+    /// live track of it goes into (or out of) "Любимые" — the local ones when
+    /// it has any, all of them otherwise — and the release's own like row
+    /// follows, so the album reads as liked exactly when
+    /// [`crate::ReleaseRow::liked`] says so. Returns the tracks it liked or
+    /// unliked.
     pub fn like_release(&self, release: ReleaseId, on: bool) -> Result<Vec<TrackId>> {
         let device = self.device_id();
         let now = self.tick();
+        if !self.album_likes_tracks() {
+            self.write(|tx| set_like_in(tx, LikeTarget::Release(release), !on, now, &device))?;
+            return Ok(Vec::new());
+        }
         self.write(|tx| {
             let rid = release.to_string();
             let ids: Vec<String> = {
@@ -614,6 +624,7 @@ impl Library {
             for id in &ids {
                 refresh_in_library(tx, id)?;
             }
+            refresh_in_library_of_release(tx, &rid)?;
             ids.iter().map(|s| s.parse().map_err(|_| LibraryError::Invalid(s.clone()))).collect()
         })
     }

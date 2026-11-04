@@ -135,6 +135,8 @@ pub fn worth_headers(groups: usize, items: usize, is_list: bool, cols: usize) ->
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overview {
     Playlists,
+    /// «Любимые альбомы», when they have a shelf of their own.
+    LikedAlbums,
     RecentlyAdded,
     OftenPlayed,
     Albums,
@@ -144,6 +146,9 @@ pub enum Overview {
 /// How many of each there are.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Counts {
+    /// The liked albums on a shelf of their own (none while they sit
+    /// among the playlists).
+    pub liked_albums: usize,
     pub recent: usize,
     pub often: usize,
     pub albums: usize,
@@ -157,6 +162,7 @@ pub fn overview(c: Counts) -> Vec<Overview> {
     let rows_worth = c.albums > 8;
     [
         (Overview::Playlists, true),
+        (Overview::LikedAlbums, c.liked_albums > 0),
         (Overview::RecentlyAdded, rows_worth && c.recent > 0),
         (Overview::OftenPlayed, c.often > 0),
         (Overview::Albums, c.albums > 0),
@@ -287,9 +293,10 @@ mod tests {
 
     #[test]
     fn the_overview_leaves_out_what_it_has_none_of() {
-        let all = Counts { recent: 12, often: 6, albums: 40, artists: 20 };
-        assert_eq!(overview(all).len(), 5);
-        let small = Counts { recent: 5, often: 0, albums: 5, artists: 3 };
+        let all = Counts { liked_albums: 2, recent: 12, often: 6, albums: 40, artists: 20 };
+        assert_eq!(overview(all).len(), 6);
+        assert_eq!(overview(all)[1], Overview::LikedAlbums);
+        let small = Counts { liked_albums: 0, recent: 5, often: 0, albums: 5, artists: 3 };
         assert_eq!(overview(small), vec![Overview::Playlists, Overview::Albums, Overview::Artists]);
         assert_eq!(overview(Counts::default()), vec![Overview::Playlists]);
         assert_eq!(overview_albums(40, 6), 12);

@@ -49,6 +49,8 @@ const IN_LIBRARY_EXPR: &str = "(
                                                       AND x.service = 'seen'))
     OR EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track' AND l.target_id = track.id
                                        AND l.deleted = 0)
+    OR EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release' AND l.target_id = track.release_id
+                                       AND l.deleted = 0)
     OR EXISTS (SELECT 1 FROM playlist_entry e JOIN playlist p ON p.id = e.playlist_id
                 WHERE e.track_id = track.id AND e.deleted = 0 AND p.deleted = 0))";
 
@@ -60,6 +62,19 @@ pub(crate) fn refresh_in_library(conn: &Connection, track: &str) -> Result<()> {
               WHERE id = ?1 AND in_library IS NOT {IN_LIBRARY_EXPR}"
         ),
         [track],
+    )?;
+    Ok(())
+}
+
+/// Recomputes `in_library` of every track of a release (a saved album
+/// keeps its tracks in the library).
+pub(crate) fn refresh_in_library_of_release(conn: &Connection, release: &str) -> Result<()> {
+    conn.execute(
+        &format!(
+            "UPDATE track SET in_library = {IN_LIBRARY_EXPR}
+              WHERE release_id = ?1 AND in_library IS NOT {IN_LIBRARY_EXPR}"
+        ),
+        [release],
     )?;
     Ok(())
 }

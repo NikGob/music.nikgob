@@ -188,7 +188,7 @@ pub fn release_card(
     }
 }
 
-/// What liking an album does: all its tracks go into (or out of) "Любимые".
+/// The like of an album: into (or out of) «Любимые альбомы».
 pub fn album_like_label(liked: bool) -> &'static str {
     if liked { "Убрать из любимого" } else { "В любимое" }
 }
