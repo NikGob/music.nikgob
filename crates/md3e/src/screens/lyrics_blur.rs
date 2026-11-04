@@ -290,6 +290,7 @@ mod tests {
         let v = vec![1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
         let (s, w, h) = shrink(&v, 4, 2, 2);
         assert_eq!((w, h), (2, 1));
-        assert_eq!(s, vec![0.5, 0.5]);
+        // Blocks {1, 0, 1, 1} and {0, 0, 1, 1}.
+        assert_eq!(s, vec![0.75, 0.5]);
     }
 }

@@ -617,14 +617,27 @@ impl Importer {
                         .cmp(&(y.disc_no, y.track_no == 0, y.track_no))
                         .then_with(|| read[a].analyzed.path.cmp(&read[b].analyzed.path))
                 });
+                // A file's own number stays when it is a free place inside
+                // the release (a hole its tracklist doesn't fill); a taken
+                // or outside one goes after the release's tracks.
                 let (disc, mut next) = r.after();
+                let mut taken: std::collections::HashSet<(u32, u32)> =
+                    r.tracks.iter().map(|t| (t.disc_no.max(1), t.track_no)).collect();
+                taken.extend(ids.iter().flatten().map(|id| (id.disc_no.max(1), id.track_no)));
                 for i in rest {
-                    if let Some(id) = ids[i].as_mut() {
-                        (id.disc_no, id.track_no) = (disc, next);
+                    let own = (read[i].base.disc_no.max(1), read[i].base.track_no);
+                    let place = if own.1 > 0 && own.0 == disc && own.1 < next && !taken.contains(&own) {
+                        own
                     } else {
-                        ids[i] = Some(r.identity(&read[i].base, (disc, next)));
+                        next += 1;
+                        (disc, next - 1)
+                    };
+                    taken.insert(place);
+                    if let Some(id) = ids[i].as_mut() {
+                        (id.disc_no, id.track_no) = place;
+                    } else {
+                        ids[i] = Some(r.identity(&read[i].base, place));
                     }
-                    next += 1;
                 }
                 settled = true;
             }
