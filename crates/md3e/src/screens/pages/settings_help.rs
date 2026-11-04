@@ -67,6 +67,8 @@ pub enum SettingId {
     /// «Скорость прыжка» and «Скорость подсветки».
     JumpSpeed,
     LightSpeed,
+    /// «Плавность» of the highlight.
+    LyricsSmooth,
     LyricsDim,
     LyricsScale,
     LyricsLead,
@@ -361,7 +363,7 @@ impl SettingId {
             Design | Theme | Contrast | Scheme | ProgressWave | NpVolume | NpVolumeHold | CoverShape | ShapeRange | ShapePick
             | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
             | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
-            | LyricsStyle | WaveFallback | WaveJump | JumpSpeed | LightSpeed | LyricsDim | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow
+            | LyricsStyle | WaveFallback | WaveJump | JumpSpeed | LightSpeed | LyricsSmooth | LyricsDim | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow
             | LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown | LyricsUnit | LyricsSoftEdges | LyricsSoftStrength | LyricsSoftDepth | LyricsSoftFade | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
             | ReducedMotion | Tooltips | FpsLimit => {
                 TAB_APPEARANCE
@@ -419,6 +421,7 @@ impl SettingId {
             WaveJump => "Как высоко подпрыгивают буквы или слова в анимации «Волна». 0 — они только загораются.",
             JumpSpeed => "Как быстро буква или слово в «Волне» взлетает, когда его начинают петь, и встаёт на место. Больше — резче и короче.",
             LightSpeed => "Как быстро загорается буква или слово, когда его поют: от плавного появления до мгновенного. В караоке по буквам — насколько мягкий край у подсветки.",
+            LyricsSmooth => "Подсветка идёт по времени букв и слогов. Чем плавнее, тем ровнее она скользит по строке, а в «Волне» соседние буквы поднимаются вместе с поющейся. 0% — строго по буквам.",
             LyricsDim => "Насколько бледнее остальные строки по сравнению с той, что поют сейчас.",
             LyricsScale => "Размер букв в тексте песни.",
             LyricsLead => "На сколько подсветка опережает голос. Глаз читает чуть раньше, чем слышит, поэтому подсветка, которая загорается немного заранее, кажется точной. Если она торопится — уменьшите, если отстаёт — увеличьте. Перемотка и время в тексте не меняются.",
@@ -915,7 +918,7 @@ impl SettingId {
             Ring | RingStyle | RingBeat => Preview::Ring,
             LyricsCascade => Preview::Cascade,
             BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue => Preview::Background,
-            LyricsStyle | WaveFallback | WaveJump | JumpSpeed | LightSpeed | LyricsDim | LyricsScale | LyricsGlow | LyricsUnit => Preview::Lyrics,
+            LyricsStyle | WaveFallback | WaveJump | JumpSpeed | LightSpeed | LyricsSmooth | LyricsDim | LyricsScale | LyricsGlow | LyricsUnit => Preview::Lyrics,
             LyricsSoftEdges | LyricsSoftStrength | LyricsSoftDepth | LyricsSoftFade => Preview::Edges,
             LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize => Preview::Gap,
             LyricsCountdown => Preview::Countdown,
