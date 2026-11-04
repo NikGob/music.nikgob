@@ -189,6 +189,8 @@ struct Core {
     autostart: autostart::Keeper,
     /// A second launch asked for the window.
     show_asked: Arc<AtomicBool>,
+    /// A `--quit` launch asked the player to quit, as «Выход» does.
+    quit_asked: Arc<AtomicBool>,
 }
 
 impl Core {
@@ -208,7 +210,7 @@ impl Core {
             drop(lock);
             self.desktop.poll(&state, &mut self.commands)
         };
-        self.quit |= req.quit;
+        self.quit |= req.quit || self.quit_asked.swap(false, Ordering::Relaxed);
         self.wants_show |= req.show || req.toggle || self.show_asked.swap(false, Ordering::Relaxed);
         self.sync_autostart();
         self.runtime.send_all(self.commands.drain(..));
@@ -459,6 +461,21 @@ fn main() -> eframe::Result {
             std::process::exit(code);
         }
     }
+    // `--quit`: the running player quits as from the tray's «Выход» (its
+    // session saved), so a script can restart it; nothing else starts.
+    if std::env::args().any(|a| a == "--quit") {
+        match fastframe_instance::Slot::new("music.nikgob").send("quit") {
+            Ok(_) => std::process::exit(0),
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
+                eprintln!("music.nikgob is not running");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("music.nikgob did not take the request: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     logfile::init();
     stage("log");
     // Meanwhile, while the library opens and the window is made: the
@@ -478,18 +495,22 @@ fn main() -> eframe::Result {
     // the first waits in the tray) shows the running one's window and ends.
     // Demo and screenshot runs live beside the real app.
     let show_asked = Arc::new(AtomicBool::new(false));
+    let quit_asked = Arc::new(AtomicBool::new(false));
     let waker = Waker::default();
     let _instance = if demo {
         None
     } else {
-        let asked = Arc::clone(&show_asked);
+        let (asked, quit) = (Arc::clone(&show_asked), Arc::clone(&quit_asked));
         let w = waker.clone();
         match fastframe_instance::Slot::new("music.nikgob").claim("show", move |request| {
-            (request == "show").then(|| {
-                asked.store(true, Ordering::Relaxed);
-                w.wake();
-                "ok".to_owned()
-            })
+            let flag = match request {
+                "show" => &asked,
+                "quit" => &quit,
+                _ => return None,
+            };
+            flag.store(true, Ordering::Relaxed);
+            w.wake();
+            Some("ok".to_owned())
         }) {
             fastframe_instance::Claim::First(guard) => Some(guard),
             other => {
@@ -676,6 +697,7 @@ fn main() -> eframe::Result {
         window: None,
         autostart: autostart::Keeper::new(autostart_system),
         show_asked,
+        quit_asked,
         geometry: geometry::Keeper::load(
             shot::window_size().is_none().then(|| paths.prefs.with_file_name("window.json")),
         ),
