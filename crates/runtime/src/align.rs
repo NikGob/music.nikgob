@@ -36,7 +36,10 @@ use crate::lyrics::{Aligned, Place, Text};
 /// stays). `align-3`: words end where the voice ends (never past the
 /// source's end of their line or into a silent tail) and last while the
 /// voice holds them, and a silent window is no longer raised into noise.
-pub(crate) const MADE_BY: &str = "align-3";
+/// `align-4`: words timed by a second pass that keeps each line within its
+/// source times, lets voice the text lacks go between lines, times hums
+/// by the voice, never lets lines overlap and adds lines sung once more.
+pub(crate) const MADE_BY: &str = "align-4";
 /// A text the recording spells at least this well (over chance) is this
 /// song's (docs/lyrics-align.md, «The check»).
 pub(crate) const FITS: f32 = 0.08;
@@ -1005,6 +1008,7 @@ mod tests {
             offset: -2.14,
             spread: 0.06,
             lines: vec![LyricLine::new(Duration::from_secs(16), "Слово за слово")],
+            ends: vec![None],
             aligner: Some(ModelId::AlignerRu),
         }
     }

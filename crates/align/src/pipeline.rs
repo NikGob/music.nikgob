@@ -75,6 +75,22 @@ impl Prepared {
 }
 
 impl Prepared {
+    /// A song from its voice at 16 kHz (`separated`: the voice alone, not
+    /// the mix), with nothing heard yet.
+    pub fn from_voice(voice: Vec<f32>, separated: bool) -> Self {
+        let secs = voice.len() as f32 / RATE as f32;
+        let energy = voice
+            .chunks(ENERGY_HOP)
+            .map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt())
+            .collect();
+        Self { voice, secs, separated, energy, heard: HashMap::new() }
+    }
+
+    /// Takes what aligner `id` heard in this song (kept from an earlier run).
+    pub fn set_emissions(&mut self, id: ModelId, em: Emissions) {
+        self.heard.insert(id, em);
+    }
+
     /// What aligner `id` heard in the song, once it has.
     pub fn emissions(&self, id: ModelId) -> Option<&Emissions> {
         self.heard.get(&id)
@@ -109,6 +125,17 @@ impl Prepared {
             let step = per as f32 / em.fps;
             crate::fit::end_with_voice(lines, VoiceEnds { voiced: &voiced, step, tail: MIX_TAIL, level: None }, bounds);
         }
+    }
+
+    /// Which of `em`'s frames have the separated voice in them (`None` on
+    /// the mix, where it cannot tell).
+    pub fn voiced_frames(&self, em: &Emissions) -> Option<Vec<bool>> {
+        if !self.separated {
+            return None;
+        }
+        let tenths = self.voiced_tenths();
+        let step = ENERGY_HOP as f32 / RATE as f32;
+        Some((0..em.frames()).map(|t| tenths.get((em.secs(t) / step) as usize).copied().unwrap_or(false)).collect())
     }
 
     /// Which tenths of a second have the voice (all of them for a mix).
@@ -411,12 +438,7 @@ impl Aligner {
         } else {
             decoded.resampled(RATE)?.mono()
         };
-        let secs = voice.len() as f32 / RATE as f32;
-        let energy = voice
-            .chunks(ENERGY_HOP)
-            .map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt())
-            .collect();
-        Ok(Prepared { voice, secs, separated, energy, heard: HashMap::new() })
+        Ok(Prepared::from_voice(voice, separated))
     }
 
     /// Aligner `id`'s letters.
@@ -435,7 +457,7 @@ impl Aligner {
 
     /// What aligner `id` hears in the song (computed once per song; the
     /// aligner held before is dropped first).
-    fn heard(&mut self, prep: &mut Prepared, id: ModelId, progress: &mut dyn FnMut(Stage) -> bool) -> Result<(), Error> {
+    pub fn hear(&mut self, prep: &mut Prepared, id: ModelId, progress: &mut dyn FnMut(Stage) -> bool) -> Result<(), Error> {
         if prep.heard.contains_key(&id) {
             return Ok(());
         }
@@ -466,9 +488,9 @@ impl Aligner {
                 None => others.push((id, vec![i])),
             }
         }
-        self.heard(prep, main, progress)?;
+        self.hear(prep, main, progress)?;
         for (id, _) in &others {
-            self.heard(prep, *id, progress)?;
+            self.hear(prep, *id, progress)?;
         }
         if !progress(Stage::Align) {
             return Err(Error::Stopped);
@@ -480,8 +502,10 @@ impl Aligner {
         }
         let foreign: Vec<Foreign<'_>> =
             others.iter().zip(&vocabs).map(|((id, ls), v)| Foreign { em: &prep.heard[id], vocab: v, lines: ls }).collect();
-        Ok(fit_text_with(&prep.heard[&main], &vocab, &foreign, lines, timed).map(|mut f| {
-            let bounds = crate::fit::source_bounds(lines, &f);
+        let em = &prep.heard[&main];
+        let voiced = prep.voiced_frames(em);
+        Ok(fit_text_with(em, &vocab, &foreign, lines, timed, voiced.as_deref()).map(|mut f| {
+            let bounds = f.ends.clone();
             prep.end_with_voice(&mut f.lines, main, &bounds);
             f.covered = prep.covered(&f.lines);
             f.aligner = Some(main);
@@ -499,13 +523,15 @@ impl Aligner {
 
     /// [`Self::fit`] with a given aligner for every line.
     pub fn fit_with(&mut self, prep: &mut Prepared, id: ModelId, lines: &[LyricLine], timed: bool, progress: &mut dyn FnMut(Stage) -> bool) -> Result<Option<Fit>, Error> {
-        self.heard(prep, id, progress)?;
+        self.hear(prep, id, progress)?;
         if !progress(Stage::Align) {
             return Err(Error::Stopped);
         }
         let vocab = self.vocab(id)?;
-        Ok(fit_text_with(&prep.heard[&id], &vocab, &[], lines, timed).map(|mut f| {
-            let bounds = crate::fit::source_bounds(lines, &f);
+        let em = &prep.heard[&id];
+        let voiced = prep.voiced_frames(em);
+        Ok(fit_text_with(em, &vocab, &[], lines, timed, voiced.as_deref()).map(|mut f| {
+            let bounds = f.ends.clone();
             prep.end_with_voice(&mut f.lines, id, &bounds);
             f.covered = prep.covered(&f.lines);
             f.aligner = Some(id);

@@ -172,6 +172,253 @@ pub fn force_align(em: &Emissions, tokens: &[i32]) -> Option<Vec<TokenSpan>> {
     spans.into_iter().collect()
 }
 
+/// What a token of a [`Path`] is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Tok {
+    /// A letter of the model (its id), or [`STAR`].
+    Letter(i32),
+    /// Voice the text does not have (a hum, an ad-lib, a line sung once
+    /// more): any letter, discounted more than a wildcard, and skipped
+    /// when there is none. Never first, never two in a row.
+    Filler,
+    /// A hummed interjection («м», «угу»): where the voice is it takes the
+    /// frames the model hears as blank or as any letter, elsewhere it
+    /// costs; it lasts at least [`HUM_FRAMES`].
+    Hum,
+}
+
+/// What a frame a [`Tok::Filler`] takes costs against its best letter.
+const FILL_PENALTY: f32 = 0.7;
+/// … and going into one at all, so short gaps stay blank.
+const FILL_ENTER: f32 = 1.0;
+/// A blank frame inside a filler costs this against the blank (one filler
+/// may take two repeats with a pause between them).
+const FILL_BLANK: f32 = 0.05;
+/// A hum takes at least this many frames (0.16 s at 50 a second).
+pub const HUM_FRAMES: usize = 8;
+/// Where the voice is, a hum's frame is this much likelier than the
+/// blank's, so it covers the hummed voice rather than leaving it blank.
+const HUM_BONUS: f32 = 0.2;
+/// A hum's frame without voice costs this against the blank.
+const HUM_SILENT: f32 = 3.0;
+/// A hum starts where the voice does: starting more than [`ONSET`] frames
+/// after the voice came in costs this (two hums never share one breath).
+const HUM_LATE: f32 = 2.0;
+const ONSET: usize = 6;
+
+/// A line's first token starting further than this from where its source
+/// times put it (seconds) costs ([`PULL`] a second beyond it).
+const SLACK: f32 = 0.5;
+const PULL: f32 = 1.0;
+
+/// A token sequence to align with what the plain sequence has not: frames
+/// each token must stay within (a line between its source times), optional
+/// fillers and hums ([`align_path`]).
+#[derive(Clone, Debug, Default)]
+pub struct Path {
+    pub toks: Vec<Tok>,
+    /// First and last frame each token may take (inclusive), if limited.
+    pub bands: Vec<Option<(usize, usize)>>,
+    /// The frame where a token that starts a line is expected to start
+    /// (its source time): starting far from it costs.
+    pub at: Vec<Option<usize>>,
+}
+
+impl Path {
+    pub fn push(&mut self, tok: Tok, band: Option<(usize, usize)>) {
+        self.push_at(tok, band, None);
+    }
+
+    pub fn push_at(&mut self, tok: Tok, band: Option<(usize, usize)>, at: Option<usize>) {
+        self.toks.push(tok);
+        self.bands.push(band);
+        self.at.push(at);
+    }
+}
+
+/// One state of the alignment graph.
+struct State {
+    emit: Emit,
+    tok: Option<usize>,
+    band: (usize, usize),
+    /// Where the path may come from besides the state itself: the state
+    /// and what the step costs.
+    from: Vec<(usize, f32)>,
+    /// Coming in at another frame than this one costs ([`SLACK`], [`PULL`]).
+    at: Option<usize>,
+    /// Coming in away from where the voice comes in costs ([`HUM_LATE`]).
+    onset: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Emit {
+    Blank,
+    Letter(usize),
+    Star,
+    Filler,
+    Hum,
+}
+
+/// Aligns `path` to `em` like [`force_align`], with its bands, fillers and
+/// hums; `voiced` says which frames have the voice in them (for hums;
+/// `None`: unknown, every frame may). A token's span is `None` where it
+/// was skipped (a filler). `None` when it cannot fit in its bands.
+pub fn align_path(em: &Emissions, path: &Path, voiced: Option<&[bool]>) -> Option<Vec<Option<TokenSpan>>> {
+    let t_len = em.frames();
+    let n = path.toks.len();
+    if n == 0 || t_len == 0 {
+        return Some(vec![None; n]);
+    }
+    let all = (0, t_len - 1);
+    // The graph: a blank, then each token (a hum as a chain of states)
+    // and a blank after it.
+    let mut states: Vec<State> = vec![State { emit: Emit::Blank, tok: None, band: all, from: Vec::new(), at: None, onset: false }];
+    // Each token's first and last state, and the blank after it.
+    let mut first = vec![0usize; n];
+    let mut last = vec![0usize; n];
+    let mut after = vec![0usize; n];
+    let differ = |a: Tok, b: Tok| !matches!((a, b), (Tok::Letter(x), Tok::Letter(y)) if x == y && x != STAR);
+    for (k, &tok) in path.toks.iter().enumerate() {
+        let band = path.bands[k].unwrap_or(all);
+        let blank_before = if k == 0 { 0 } else { after[k - 1] };
+        // Where this token may start from: the blank before it, the token
+        // before when the two differ, and past a skipped filler.
+        let mut from = vec![(blank_before, 0.0)];
+        if k > 0 && differ(path.toks[k - 1], tok) {
+            from.push((last[k - 1], 0.0));
+        }
+        if k > 1 && path.toks[k - 1] == Tok::Filler {
+            from.push((after[k - 2], 0.0));
+            if differ(path.toks[k - 2], tok) {
+                from.push((last[k - 2], 0.0));
+            }
+        }
+        let enter = if tok == Tok::Filler { -FILL_ENTER } else { 0.0 };
+        for (_, c) in &mut from {
+            *c += enter;
+        }
+        let emit = match tok {
+            Tok::Letter(STAR) => Emit::Star,
+            Tok::Letter(id) => Emit::Letter(id as usize),
+            Tok::Filler => Emit::Filler,
+            Tok::Hum => Emit::Hum,
+        };
+        first[k] = states.len();
+        let chain = if tok == Tok::Hum { HUM_FRAMES.min(band.1.saturating_sub(band.0) + 1).max(1) } else { 1 };
+        for j in 0..chain {
+            let (from, at) = if j == 0 { (std::mem::take(&mut from), path.at[k]) } else { (vec![(states.len() - 1, 0.0)], None) };
+            states.push(State { emit, tok: Some(k), band, from, at, onset: j == 0 && tok == Tok::Hum });
+        }
+        last[k] = states.len() - 1;
+        let mut from = vec![(last[k], 0.0)];
+        if tok == Tok::Filler && k > 0 {
+            // Skipped: from the blank before it or the token before it.
+            from.push((blank_before, 0.0));
+            from.push((last[k - 1], 0.0));
+        }
+        after[k] = states.len();
+        states.push(State { emit: Emit::Blank, tok: None, band: all, from, at: None, onset: false });
+    }
+    let s_len = states.len();
+    if t_len.saturating_mul(s_len) > MAX_CELLS || states.iter().any(|s| s.from.len() > 254) {
+        return None;
+    }
+    // How long the voice has been in at each frame (frames; 0 without it).
+    let mut since = vec![usize::MAX; t_len];
+    if let Some(v) = voiced {
+        let mut run = 0;
+        for (t, s) in since.iter_mut().enumerate() {
+            run = if v.get(t).copied().unwrap_or(false) { run + 1 } else { 0 };
+            *s = if run == 0 { usize::MAX } else { run - 1 };
+        }
+    }
+    let blank = em.blank;
+    let best: Vec<f32> = (0..t_len)
+        .map(|t| em.row(t).iter().enumerate().filter(|(i, _)| *i != blank).map(|(_, v)| *v).fold(f32::NEG_INFINITY, f32::max))
+        .collect();
+    let emit = |t: usize, e: Emit| -> f32 {
+        let row = em.row(t);
+        match e {
+            Emit::Blank => row[blank],
+            Emit::Letter(id) => row[id],
+            Emit::Star => best[t] - STAR_PENALTY,
+            Emit::Filler => (best[t] - FILL_PENALTY).max(row[blank] - FILL_BLANK),
+            Emit::Hum => {
+                let heard = row[blank].max(best[t]);
+                match voiced.map(|v| v.get(t).copied().unwrap_or(false)) {
+                    Some(true) => heard + HUM_BONUS,
+                    Some(false) => row[blank] - HUM_SILENT,
+                    None => heard,
+                }
+            }
+        }
+    };
+    const NEG: f32 = -1e30;
+    let mut dp = vec![NEG; s_len];
+    let mut next = vec![NEG; s_len];
+    let mut back = vec![0u8; t_len * s_len];
+    // The path starts in the first blank or the first token.
+    let in_band = |s: &State, t: usize| s.band.0 <= t && t <= s.band.1;
+    for s in [0, first[0]] {
+        if in_band(&states[s], 0) {
+            dp[s] = emit(0, states[s].emit);
+        }
+    }
+    for t in 1..t_len {
+        let row = &mut back[t * s_len..(t + 1) * s_len];
+        for (s, st) in states.iter().enumerate() {
+            if !in_band(st, t) {
+                next[s] = NEG;
+                continue;
+            }
+            let mut best = dp[s];
+            let mut k = 0u8;
+            let mut pull = st.at.map_or(0.0, |a| PULL * ((t.abs_diff(a) as f32 / em.fps) - SLACK).max(0.0));
+            if st.onset && voiced.is_some() && since[t] > ONSET {
+                pull += HUM_LATE;
+            }
+            for (i, (p, c)) in st.from.iter().enumerate() {
+                let v = dp[*p] + c - pull;
+                if v > best {
+                    best = v;
+                    k = i as u8 + 1;
+                }
+            }
+            next[s] = if best <= NEG / 2.0 { NEG } else { best + emit(t, st.emit) };
+            row[s] = k;
+        }
+        std::mem::swap(&mut dp, &mut next);
+    }
+    // It ends in the last blank or the last token (before a filler at the
+    // end that took nothing too).
+    let mut ends = vec![s_len - 1, last[n - 1]];
+    if n > 1 && path.toks[n - 1] == Tok::Filler {
+        ends.push(last[n - 2]);
+    }
+    let mut s = ends.into_iter().fold(s_len - 1, |a, b| if dp[b] > dp[a] { b } else { a });
+    if dp[s] <= NEG / 2.0 {
+        return None;
+    }
+    let mut spans: Vec<Option<TokenSpan>> = vec![None; n];
+    for t in (0..t_len).rev() {
+        let st = &states[s];
+        if let Some(i) = st.tok {
+            let p = match st.emit {
+                Emit::Letter(_) | Emit::Star => (emit(t, st.emit) - best[t]).exp().min(1.0),
+                _ => 0.0,
+            };
+            let span = spans[i].get_or_insert(TokenSpan { first: t, last: t, peak: 0.0 });
+            span.first = t;
+            span.peak = span.peak.max(p);
+        }
+        match back[t * s_len + s] {
+            0 => {}
+            k => s = st.from[k as usize - 1].0,
+        }
+    }
+    Some(spans)
+}
+
 /// The letters the model hears on its own (best letter of each frame,
 /// repeats collapsed, blanks and `skip` left out).
 pub fn heard_letters(em: &Emissions, skip: Option<i32>) -> Vec<i32> {
@@ -267,6 +514,74 @@ mod tests {
         assert!((letters_heard(&heard, &[1, 2, 3, 1]) - 1.0).abs() < 1e-6);
         assert!(letters_heard(&heard, &[3, 3, 2, 2]) < 0.5);
         assert!((letters_heard(&heard, &[STAR, 2]) - 1.0).abs() < 1e-6);
+    }
+
+    fn path(toks: &[Tok]) -> Path {
+        let mut p = Path::default();
+        for t in toks {
+            p.push(*t, None);
+        }
+        p
+    }
+
+    fn frames(spans: &[Option<TokenSpan>]) -> Vec<Option<(usize, usize)>> {
+        spans.iter().map(|s| s.map(|s| (s.first, s.last))).collect()
+    }
+
+    #[test]
+    fn a_plain_path_is_the_forced_alignment() {
+        let e = em(&[0, 0, 1, 1, 0, 2, 0, 0, 3, 3, 3, 0], 0.9);
+        let plain = force_align(&e, &[1, 2, 3]).unwrap();
+        let spans = align_path(&e, &path(&[Tok::Letter(1), Tok::Letter(2), Tok::Letter(3)]), None).unwrap();
+        assert_eq!(spans, plain.into_iter().map(Some).collect::<Vec<_>>());
+    }
+
+    /// Letters the text does not have between two lines go to the filler,
+    /// not to the words around them; with nothing to take it is skipped.
+    #[test]
+    fn a_filler_takes_what_the_text_lacks() {
+        let e = em(&[0, 1, 0, 2, 0, 3, 3, 3, 3, 3, 3, 0, 1, 0, 2, 0], 0.9);
+        let toks = [Tok::Letter(1), Tok::Letter(2), Tok::Filler, Tok::Letter(1), Tok::Letter(2)];
+        let spans = frames(&align_path(&e, &path(&toks), None).unwrap());
+        assert_eq!(spans[1], Some((3, 3)), "{spans:?}");
+        assert_eq!(spans[2], Some((5, 10)), "{spans:?}");
+        assert_eq!(spans[3], Some((12, 12)), "{spans:?}");
+        // Nothing between the lines: no filler.
+        let e = em(&[0, 1, 0, 2, 0, 0, 1, 0, 2, 0], 0.9);
+        let spans = frames(&align_path(&e, &path(&toks), None).unwrap());
+        assert_eq!(spans[2], None, "{spans:?}");
+        assert_eq!((spans[1], spans[3]), (Some((3, 3)), Some((6, 6))));
+    }
+
+    /// A hum heard as blank lasts while the voice does, and at least
+    /// [`HUM_FRAMES`] where nothing tells.
+    #[test]
+    fn a_hum_lasts_while_the_voice_does() {
+        let mut best = vec![0, 1, 0];
+        best.extend([0; 20]);
+        best.extend([2, 0]);
+        let e = em(&best, 0.9);
+        let toks = [Tok::Letter(1), Tok::Hum, Tok::Letter(2)];
+        let voiced: Vec<bool> = (0..best.len()).map(|t| (5..17).contains(&t)).collect();
+        let spans = frames(&align_path(&e, &path(&toks), Some(&voiced)).unwrap());
+        assert_eq!(spans[1], Some((5, 16)), "{spans:?}");
+        let spans = frames(&align_path(&e, &path(&toks), None).unwrap());
+        let (a, b) = spans[1].unwrap();
+        assert!(b + 1 - a >= HUM_FRAMES, "{spans:?}");
+    }
+
+    /// A token kept within its band takes the occurrence there.
+    #[test]
+    fn a_band_picks_the_occurrence() {
+        let e = em(&[0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0], 0.9);
+        let mut p = Path::default();
+        p.push(Tok::Letter(1), Some((5, 9)));
+        assert_eq!(frames(&align_path(&e, &p, None).unwrap()), [Some((6, 7))]);
+        // A band too narrow for its tokens does not fit.
+        let mut p = Path::default();
+        p.push(Tok::Letter(1), Some((5, 5)));
+        p.push(Tok::Letter(2), Some((5, 5)));
+        assert!(align_path(&e, &p, None).is_none());
     }
 
     #[test]
