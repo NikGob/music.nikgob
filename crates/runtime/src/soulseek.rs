@@ -125,7 +125,7 @@ impl SoulseekService {
             username: s.username.clone(),
             password: s.password.clone(),
             listen_port: s.listen_port,
-            share_folders: if self.library_dir.as_os_str().is_empty() { Vec::new() } else { vec![self.library_dir.clone()] },
+            share_folders: shared_folders(&self.library_dir),
             share: share_of(s),
             state_dir: self.state_dir.clone(),
             ..Config::default()
@@ -719,5 +719,30 @@ mod tests {
         }
         assert_eq!(answer.unwrap(), Vec::new());
         svc.shutdown();
+    }
+}
+
+/// What the library shares: its songs (`Music`) and finished downloads
+/// (`Downloads`), not the trash, the inbox or the player's own artist
+/// photos beside them.
+fn shared_folders(library: &std::path::Path) -> Vec<PathBuf> {
+    if library.as_os_str().is_empty() {
+        return Vec::new();
+    }
+    ["Music", "Downloads"].into_iter().map(|d| library.join(d)).filter(|d| d.is_dir()).collect()
+}
+
+#[cfg(test)]
+mod share_tests {
+    use super::shared_folders;
+
+    #[test]
+    fn only_the_songs_and_downloads_are_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        for d in ["Music", "Downloads", "Trash", "Inbox", "Artists"] {
+            std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        }
+        assert_eq!(shared_folders(dir.path()), vec![dir.path().join("Music"), dir.path().join("Downloads")]);
+        assert!(shared_folders(std::path::Path::new("")).is_empty());
     }
 }

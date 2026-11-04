@@ -31,6 +31,10 @@ const SHARED_EXTENSIONS: &[&str] = &[
     "cue", "log", "jpg", "jpeg", "png",
 ];
 
+/// Files of those kinds that are the player's own, not part of an album:
+/// the blurred backdrop it draws behind an album.
+const SKIPPED_NAMES: &[&str] = &["ambient.png"];
+
 pub(crate) const LOSSLESS_EXTENSIONS: &[&str] = &["flac", "wav", "aif", "aiff", "ape", "wv", "alac", "dsf", "dff"];
 
 /// Audio attributes of a file; zero = unknown.
@@ -290,6 +294,9 @@ impl ShareIndex {
                     if !SHARED_EXTENSIONS.contains(&ext.as_str()) {
                         continue;
                     }
+                    if SKIPPED_NAMES.iter().any(|n| name.eq_ignore_ascii_case(n)) {
+                        continue;
+                    }
                     let Ok(md) = e.metadata() else { continue };
                     let size = md.len();
                     let mtime = md
@@ -521,17 +528,21 @@ mod tests {
         std::fs::create_dir_all(lib.join(".musiclib")).unwrap();
         std::fs::write(lib.join("Artist").join("Album").join("01 Song.flac"), b"not really flac").unwrap();
         std::fs::write(lib.join("Artist").join("Album").join("notes.txt"), b"x").unwrap();
+        std::fs::write(lib.join("Artist").join("Album").join("cover.jpg"), b"x").unwrap();
+        std::fs::write(lib.join("Artist").join("Album").join("ambient.png"), b"x").unwrap();
         std::fs::write(lib.join(".musiclib").join("hidden.flac"), b"x").unwrap();
         let before = snapshot(&lib);
         let cache = dir.path().join("state").join("share.cache");
         let i = ShareIndex::scan(std::slice::from_ref(&lib), Some(&cache), ScanOptions::default());
-        assert_eq!(i.file_count(), 1);
+        // The song and its cover; not the notes, the player's backdrop or
+        // what is hidden.
+        assert_eq!(i.file_count(), 2);
         assert_eq!(i.dir_count(), 1);
         assert_eq!(i.search("song", &[], 10)[0].name, "Library\\Artist\\Album\\01 Song.flac");
         assert!(cache.exists());
         // Rescanning with the cache reads the same.
         let again = ShareIndex::scan(std::slice::from_ref(&lib), Some(&cache), ScanOptions::default());
-        assert_eq!(again.file_count(), 1);
+        assert_eq!(again.file_count(), 2);
         assert_eq!(snapshot(&lib), before);
     }
 
