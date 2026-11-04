@@ -551,6 +551,64 @@ pub struct WishlistRow {
     /// Where the file comes from while it downloads («Qobuz», «khinsider»,
     /// the tracker of a torrent).
     pub source: Option<String>,
+    /// An item that looks for a better copy of a file the library has: its
+    /// state in words («MP3 128 · ищу lossless»); `None` for the others.
+    pub upgrade: Option<String>,
+}
+
+/// «Искать качество лучше»: how often a file below
+/// [`crate::Prefs::upgrade_below`] is searched for a better copy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum UpgradeEvery {
+    Day,
+    #[default]
+    Week,
+    Month,
+    Never,
+}
+
+impl UpgradeEvery {
+    pub const ALL: [Self; 4] = [Self::Day, Self::Week, Self::Month, Self::Never];
+
+    /// The time between two searches of one file; `None`: never.
+    pub const fn period(self) -> Option<Duration> {
+        const DAY: u64 = 24 * 3600;
+        match self {
+            Self::Day => Some(Duration::from_secs(DAY)),
+            Self::Week => Some(Duration::from_secs(7 * DAY)),
+            Self::Month => Some(Duration::from_secs(30 * DAY)),
+            Self::Never => None,
+        }
+    }
+}
+
+/// What quality is good enough: a file below it is searched for again,
+/// and only a copy at least this good replaces it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum UpgradeBar {
+    /// MP3 320 and what is as good (Opus 160, AAC 256) or better.
+    Mp3_320,
+    /// FLAC and the other lossless formats only.
+    #[default]
+    Lossless,
+}
+
+impl UpgradeBar {
+    /// The lowest quality score that is good enough.
+    pub const fn score(self) -> i32 {
+        match self {
+            Self::Mp3_320 => nikgob_core::model::score::MP3_320,
+            Self::Lossless => nikgob_core::model::score::CD_LOSSLESS,
+        }
+    }
+
+    /// What is looked for, in words: «lossless», «MP3 320 или лучше».
+    pub const fn wanted(self) -> &'static str {
+        match self {
+            Self::Mp3_320 => "MP3 320 или лучше",
+            Self::Lossless => "lossless",
+        }
+    }
 }
 
 /// Items of one album or one artist, for the grouped view and its bulk

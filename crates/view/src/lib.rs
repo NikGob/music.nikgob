@@ -599,6 +599,37 @@ pub struct TrackInfo {
     pub source: Option<String>,
     pub path: Option<PathBuf>,
     pub tags: Vec<(String, String)>,
+    /// The «Качество» section under the rest.
+    pub sound: Option<SoundDetails>,
+}
+
+/// The «Качество» section of a track's info: the technical facts of what
+/// plays and what the spectrum check found about it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SoundDetails {
+    /// `(name, value)` lines: «Кодек», «Контейнер», «Битрейт»…
+    pub facts: Vec<(String, String)>,
+    /// The check in plain words; `None` while the file is not checked (or
+    /// for a stream, which is not).
+    pub verdict: Option<String>,
+    /// The sound is less than its format promises (a fake lossless file,
+    /// an inflated bitrate).
+    pub warning: bool,
+    /// The real band: «до 16,0 кГц».
+    pub band: Option<String>,
+    pub spectrum: Option<SpectrumPlot>,
+    /// A file not checked yet: the background check comes to it.
+    pub pending: bool,
+}
+
+/// The averaged spectrum the check judged, for a simple chart.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpectrumPlot {
+    /// dB re a full-scale sine, bands evenly spread from 0 to `nyquist_hz`.
+    pub db: Vec<f32>,
+    pub nyquist_hz: f32,
+    /// Where the content stops, when it stops before `nyquist_hz`.
+    pub cutoff_hz: Option<f32>,
 }
 
 /// One card of «Продолжить»: an album of the library, or an album of a
@@ -1217,8 +1248,17 @@ impl ToastKind {
 /// The revision of the lyrics defaults: 1 turned word timing off for the
 /// playing song and for the library, recognition from scratch off, and
 /// line timing for plain texts on; 2 made «Окно» the look of the lyrics
-/// control.
-pub const LYRICS_REV: u8 = 2;
+/// control; 3 turned word timing for the playing song on and moved the
+/// lead from [`OLD_LYRICS_LEAD`] to [`LYRICS_LEAD`].
+pub const LYRICS_REV: u8 = 3;
+
+/// Seconds the lyrics highlight runs ahead of the voice by default
+/// ([`Prefs::lyrics_lead`]): about what karaoke apps use, which makes up
+/// for the frame being shown a little after it is drawn and for a word's
+/// light easing in.
+pub const LYRICS_LEAD: f32 = 0.2;
+/// The default lead before [`LYRICS_REV`] 3.
+pub const OLD_LYRICS_LEAD: f32 = 0.1;
 
 /// User-facing settings the UI edits (the runtime persists them).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1233,11 +1273,17 @@ pub struct Prefs {
     pub ambient: Ambient,
     pub fps_limit: u32,
     pub reduced_motion: bool,
+    /// Hints over buttons on hover (the settings' preview cards show anyway).
+    pub tooltips: bool,
     pub gapless: bool,
     pub crossfade_s: f32,
     pub normalization: bool,
     pub opus_bitrate: u32,
     pub check_fake_lossless: bool,
+    /// A "lossless" file found made from a lossy one becomes an MP3 that
+    /// keeps all its content really has (tags and all; the old file goes
+    /// to the Trash). Off: it stays as it is, labelled for what it is.
+    pub convert_fake_lossless: bool,
     pub library_dir: PathBuf,
     pub inbox_dir: PathBuf,
     /// Where lossless masters (`.flac` originals and `.json` sidecars) are kept.
@@ -1272,6 +1318,12 @@ pub struct Prefs {
     pub wave_syllables_only: bool,
     /// How high wave letters (or words) jump as they are sung (0: they only light up).
     pub lyrics_wave_jump: f32,
+    /// «Скорость прыжка»: how fast a wave letter (or word) jumps and
+    /// settles (0.5..2, 1: Material's expressive fast spatial spring).
+    pub lyrics_jump_speed: f32,
+    /// «Скорость подсветки»: how fast a letter or word lights up, 0
+    /// smoothly .. 1 at once (karaoke by letters: how soft the front is).
+    pub lyrics_light_speed: f32,
     /// How far lines other than the current one fade (0 none .. 1 strong).
     pub lyrics_dim: f32,
     /// Text size multiplier for synced lyrics (0.8..1.4).
@@ -1290,6 +1342,10 @@ pub struct Prefs {
     pub lyrics_gap_style: u8,
     /// Crests around the pause ring (wavelength = circumference / this).
     pub lyrics_gap_waves: f32,
+    /// «Высота волн» of the pause ring (0.5..2, 1 the Material height).
+    pub lyrics_gap_height: f32,
+    /// «Размер индикатора»: the pause ring's size (0.8..1.5).
+    pub lyrics_gap_size: f32,
     /// The last seconds of a pause count down in digits instead.
     pub lyrics_countdown: bool,
     /// «Подсвечивать»: every animation goes over whole written words
@@ -1298,9 +1354,15 @@ pub struct Prefs {
     /// «Мягкие края»: lines near the top and bottom of the lyrics blur and
     /// fade out instead of being cut.
     pub lyrics_soft_edges: bool,
-    /// How far into the lyrics the soft edges reach and how much they blur
-    /// (0.5..1.5).
+    /// «Сила размытия»: how much a line at the very edge is blurred
+    /// (0..1.5, a multiplier).
     pub lyrics_soft_strength: f32,
+    /// «Глубина»: how far into the lyrics each soft edge reaches, as a
+    /// share of their height (0.08..0.4).
+    pub lyrics_soft_depth: f32,
+    /// «Затухание»: how early a line thins out in the soft edge (0: only
+    /// right at the edge .. 1: from where the band starts).
+    pub lyrics_soft_fade: f32,
     /// Embed the selected online lyrics in the track tags.
     pub save_found_lyrics: bool,
     /// «Видеокарта»: the lyrics models run on the GPU (DirectML), else on
@@ -1471,6 +1533,14 @@ pub struct Prefs {
     /// torrent started or finished. Off: that is only in «Загрузки» and «Хочу
     /// скачать».
     pub download_toasts: bool,
+    /// «Искать качество лучше»: how often the library's files below
+    /// [`Self::upgrade_below`] are searched for a better copy.
+    pub upgrade_every: UpgradeEvery,
+    /// What is good enough: a file below it is searched for again.
+    pub upgrade_below: UpgradeBar,
+    /// A better copy found replaces the file by itself. Off: it waits in
+    /// «Подтверди» (a release can differ from the one the user has).
+    pub upgrade_auto: bool,
     /// Size limit of the stream audio cache per service, in MB (0 = off):
     /// recently played YouTube files and Spotify's encrypted files.
     pub stream_cache_mb: u32,
@@ -1642,6 +1712,18 @@ impl Prefs {
             // window or page stays.
             self.lyrics_ui = 1;
         }
+        if stored < 3 {
+            // Word highlighting became the default experience: the
+            // playing song's texts are shown by words the player made
+            // (the switch was off by default, never a choice when off).
+            self.lyrics_words_playing = true;
+            // The lead moved to what karaoke apps use; one the user set
+            // stays.
+            if (self.lyrics_lead - OLD_LYRICS_LEAD).abs() < 1e-3 {
+                self.lyrics_lead = LYRICS_LEAD;
+            }
+        }
+
         self.lyrics_rev = LYRICS_REV;
         self.upgrade_lyrics_style();
     }
@@ -2528,11 +2610,13 @@ impl Default for Prefs {
             ambient: Ambient::Reactive,
             fps_limit: 60,
             reduced_motion: false,
+            tooltips: false,
             gapless: true,
             crossfade_s: 0.0,
             normalization: true,
             opus_bitrate: 160,
             check_fake_lossless: true,
+            convert_fake_lossless: true,
             library_dir: PathBuf::new(),
             inbox_dir: PathBuf::new(),
             masters_dir: PathBuf::new(),
@@ -2554,24 +2638,30 @@ impl Default for Prefs {
             lyrics_style: 0,
             wave_syllables_only: true,
             lyrics_wave_jump: 1.0,
+            lyrics_jump_speed: 1.0,
+            lyrics_light_speed: 0.65,
             lyrics_dim: 0.5,
             lyrics_scale: 1.0,
-            lyrics_lead: 0.1,
+            lyrics_lead: LYRICS_LEAD,
             lyrics_cascade: true,
             lyrics_glow: false,
             lyrics_return_s: 4.0,
             lyrics_gap_style: 1,
             lyrics_gap_waves: 6.0,
+            lyrics_gap_height: 1.0,
+            lyrics_gap_size: 1.0,
             lyrics_countdown: true,
             lyrics_by_words: false,
             lyrics_soft_edges: true,
             lyrics_soft_strength: 1.0,
+            lyrics_soft_depth: 0.18,
+            lyrics_soft_fade: 0.4,
             save_found_lyrics: false,
             lyrics_gpu: true,
             lyrics_check: true,
             lyrics_words_all: false,
             lyrics_lines_auto: true,
-            lyrics_words_playing: false,
+            lyrics_words_playing: true,
             lyrics_rev: LYRICS_REV,
             lyrics_ui: 1,
             lyrics_recognize: false,
@@ -2632,6 +2722,9 @@ impl Default for Prefs {
             auto_download_limit: 2,
             download_sources: Vec::new(),
             download_toasts: false,
+            upgrade_every: UpgradeEvery::Week,
+            upgrade_below: UpgradeBar::Lossless,
+            upgrade_auto: false,
             stream_cache_mb: 500,
             spotify_personal_app: false,
             youtube_cookies_set: false,

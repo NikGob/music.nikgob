@@ -64,36 +64,52 @@ impl Look {
 }
 
 /// Both views share timing and scrolling; true opens the lyrics settings.
-pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec<Command>) -> bool {
+/// `bleed`: the top of the area given that is only room for the soft top
+/// band to paint into (Now Playing's air under its header): no line rests
+/// there and it takes no clicks; with the soft edges off it stays empty.
+pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, bleed: f32, out: &mut Vec<Command>) -> bool {
     let look = style_for(&state.prefs, &state.lyrics.lines);
-    // The mega view's control sits on the lyrics' bottom edge; they scroll
-    // on behind it.
     let size = vec2(ui.available_width(), ui.available_height().max(80.0));
+    let full = Rect::from_min_size(ui.cursor().min, size);
+    ui.allocate_rect(full, Sense::hover());
+    // The mega view's control has a row of its own under the lyrics: no
+    // line ever lies under it.
+    let (full, row) = if mega { control_row(full) } else { (full, None) };
+    let live = Rect::from_min_max(pos2(full.left(), (full.top() + bleed.max(0.0)).min(full.bottom() - 40.0).max(full.top())), full.max);
     if mega && state.lyrics.lines.is_empty() {
-        let (rect, left) = plain(ui, size, state);
-        return control_on_edge(ui, rect, left, state, out);
+        let left = plain(ui, live, state);
+        return row.is_some_and(|r| control_in(ui, r, left, state, out));
     }
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let view = if state.prefs.lyrics_soft_edges { full } else { live };
+    let resp = ui.interact(live, ui.id().with("lyrics-live"), Sense::click_and_drag());
     let mut sizes = if mega { MEGA } else { PANE };
     let scale = state.prefs.lyrics_scale.clamp(0.8, 1.4);
     sizes.big *= scale;
     sizes.small *= scale;
     sizes.sub *= scale;
     sizes.gap *= scale;
-    paint(ui, rect, &resp, state, &state.lyrics.lines, look, bass, sizes, mega, out);
-    if !mega {
-        return false;
-    }
+    paint(ui, view, live, &resp, state, &state.lyrics.lines, look, bass, sizes, mega, out);
+    let Some(row) = row else { return false };
     let left = ui.ctx().data(|d| d.get_temp::<f32>(ui.id().with("lyrics-view").with("text-left")));
-    control_on_edge(ui, rect, Some(left.unwrap_or(rect.left() + 12.0)), state, out)
+    control_in(ui, row, Some(left.unwrap_or(live.left() + 12.0)), state, out)
 }
 
-/// The lyrics control over the bottom edge of `rect`, its left edge in line
-/// with the text's (`left`, else centred); drawn after the lyrics, so it
-/// takes the clicks there. True opens the lyrics settings.
-fn control_on_edge(ui: &mut Ui, rect: Rect, left: Option<f32>, state: &ViewState, out: &mut Vec<Command>) -> bool {
-    let bar = Rect::from_min_max(pos2(rect.left(), rect.bottom() - Size::Xs.height()), rect.max);
-    let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(bar).id_salt("lyrics-control-edge"));
+/// Air between the lyrics and the control's row under them.
+const CONTROL_GAP: f32 = 12.0;
+
+/// `area` less the control's row at its bottom (and the air above it),
+/// and that row.
+fn control_row(area: Rect) -> (Rect, Option<Rect>) {
+    let h = Size::Xs.height();
+    let row = Rect::from_min_max(pos2(area.left(), area.bottom() - h), area.max);
+    let lyrics = Rect::from_min_max(area.min, pos2(area.right(), (row.top() - CONTROL_GAP).max(area.top())));
+    (lyrics, Some(row))
+}
+
+/// The lyrics control in its row under the lyrics, its left edge in line
+/// with the text's (`left`, else centred). True opens the lyrics settings.
+fn control_in(ui: &mut Ui, row: Rect, left: Option<f32>, state: &ViewState, out: &mut Vec<Command>) -> bool {
+    let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(row).id_salt("lyrics-control-edge"));
     super::lyrics_ui::control(&mut cui, state, left, out)
 }
 
@@ -122,13 +138,17 @@ pub(crate) fn made_preview(ui: &mut Ui, size: egui::Vec2, state: &ViewState, lin
     sizes.small = 17.0;
     sizes.sub = 13.0;
     sizes.gap = 14.0;
-    paint(ui, rect, &resp, state, lines, look, 0.0, sizes, false, out);
+    paint(ui, rect, rect, &resp, state, lines, look, 0.0, sizes, false, out);
 }
 
+/// Paints `lines` over `rect` (the view, clipped there; the soft bands
+/// reach its edges); `live` is the part that takes the pointer, where the
+/// current line rests with the soft edges off.
 #[allow(clippy::too_many_arguments)]
 fn paint(
     ui: &Ui,
     rect: Rect,
+    live: Rect,
     resp: &egui::Response,
     state: &ViewState,
     lines: &[LyricLine],
@@ -149,8 +169,8 @@ fn paint(
     let painter = ui.painter_at(rect);
     let id = ui.id().with("lyrics-view");
     let now = anim::now(&ctx);
-    let pos = led(state.player.position_now(), state.prefs.lyrics_lead);
     let playing = state.player.status == Status::Playing;
+    let pos = steady(&ctx, id.with("steady"), led(state.player.position_now(), state.prefs.lyrics_lead), playing);
 
     // Waiting owns the anchor during a break; otherwise follow the last
     // main line. Background voices light up independently while sung.
@@ -180,8 +200,7 @@ fn paint(
         .iter()
         .map(|item| {
             let DisplayLine::Line(i) = *item else {
-                let height = if state.prefs.lyrics_gap_style >= 2 { 42.0 } else { 34.0 };
-                return (height * sizes.big / PANE.big, 0.0);
+                return (wait_height(&state.prefs) * sizes.big / PANE.big, 0.0);
             };
             let l = &lines[i];
             let main = breaks[i].height;
@@ -218,11 +237,13 @@ fn paint(
         // A wait only takes room while it is happening: it unfolds when it
         // starts and folds away when the singing comes back.
         let keep = match items[i] {
+            // On Material's expressive spatial spring: the lines part (and
+            // close again) in one soft move.
             DisplayLine::Interlude { .. } => anim::f32(
                 &ctx,
                 id.with(("wait-room", i)),
                 if cur == Some(i) { 1.0 } else { 0.0 },
-                Spring::new(1.0, 260.0),
+                if theme.reduced_motion { WAIT_ROOM.without_bounce() } else { WAIT_ROOM },
             )
             .clamp(0.0, 1.0),
             DisplayLine::Line(_) => 1.0,
@@ -254,7 +275,16 @@ fn paint(
     } else if manual != 0.0 && now < until + 0.5 {
         ctx.request_repaint();
     }
-    let anchor = rect.height() * sizes.anchor;
+    // Where the current line rests: with the soft edges, in the sharp part
+    // between the bands (a lens: lines come into focus as they arrive and
+    // go soft as they leave); else in the part that takes the pointer.
+    let soft = Soft::of(&state.prefs);
+    let anchor = if state.prefs.lyrics_soft_edges {
+        let (top, bottom) = soft.sharp(rect);
+        top + (bottom - top) * sizes.anchor - rect.top()
+    } else {
+        live.top() - rect.top() + live.height() * sizes.anchor
+    };
     let scroll = tops[ci] + slots[ci].0 * 0.5 - anchor + returning_offset(manual, until, now);
     let together = if !state.prefs.lyrics_cascade {
         anim::f32(&ctx, id.with("scroll"), scroll, Spring::new(1.0, 300.0))
@@ -312,6 +342,10 @@ fn paint(
             Spring::new(1.0, 170.0),
         )
         .clamp(0.0, 1.0);
+        // The sung part's colour comes in faster than the line's focus, so
+        // the first word lights on its beat instead of easing in with it.
+        let shine = anim::f32(&ctx, id.with(("shine", i)), if is_cur { 1.0 } else { 0.0 }, nikgob_motion::tokens::FAST_EFFECTS)
+            .clamp(0.0, 1.0);
         let duet = match *item {
             DisplayLine::Line(j) => lines[j].duet,
             DisplayLine::Interlude { duet, .. } => duet,
@@ -327,11 +361,11 @@ fn paint(
         // Fade out towards the edges: softly, blurring, unless turned off.
         let (edge, blur) = if state.prefs.lyrics_soft_edges {
             let size = sizes.big * if let DisplayLine::Line(j) = *item { scale(&lines[j]) } else { 1.0 };
-            soft_edge(y, slot_h + extra, rect, size, state.prefs.lyrics_soft_strength)
+            soft_edge(y, slot_h + extra, rect, size, soft)
         } else {
             (((y + slot_h - rect.top()) / 72.0).min((rect.bottom() - y) / 72.0).clamp(0.0, 1.0), 0.0)
         };
-        let blur_radius = sizes.big * BLUR * state.prefs.lyrics_soft_strength.clamp(0.5, 1.5);
+        let blur_radius = sizes.big * BLUR * soft.strength;
         // A wait that is unfolding or folding has only part of its slot:
         // its highlight and ring take that part and fade with it.
         let slot = Rect::from_min_size(pos2(left, y), vec2(wrap, (slot_h + extra) * room));
@@ -346,7 +380,7 @@ fn paint(
         }
         let DisplayLine::Line(j) = *item else {
             if let DisplayLine::Interlude { start, end, .. } = *item {
-                let k = sizes.big / PANE.big * room;
+                let k = sizes.big / PANE.big * state.prefs.lyrics_gap_size.clamp(0.8, 1.5) * room;
                 let line = Rect::from_min_size(pos2(side(56.0 * k), y), vec2(56.0 * k, slot_h * room));
                 // Never over its neighbours, wherever their springs are.
                 let above = if i > 0 { ys[i - 1] + slots[i - 1].0 + slots[i - 1].1 } else { f32::NEG_INFINITY };
@@ -356,7 +390,16 @@ fn paint(
                     (y - gap * 0.5 * room).max(above)..=(y + (slot_h + gap * 0.5) * room).min(below),
                 );
                 let clipped = painter.with_clip_rect(room_rect.intersect(painter.clip_rect()));
-                waiting(&clipped, line, k, start, end, pos, is_cur, playing, bass, edge * room, &state.prefs);
+                // The ring comes once its room has begun to open, and goes
+                // before the room closes (see [`waiting`]).
+                let appear = anim::f32(
+                    &ctx,
+                    id.with(("wait-ring", i)),
+                    if is_cur && room > 0.3 { 1.0 } else { 0.0 },
+                    if theme.reduced_motion { WAIT_RING.without_bounce() } else { WAIT_RING },
+                )
+                .max(0.0);
+                waiting(&clipped, line, k, start, end, pos, appear, playing, bass, edge, &state.prefs);
             }
             continue;
         };
@@ -413,16 +456,17 @@ fn paint(
         // fixed tone here made a line dip darker the moment it became
         // current, and jump back when it stopped being so.
         let base = s.on_surface.gamma_multiply(edge * (rest + (rest.min(UNSUNG) - rest) * focus));
-        let color = crate::lerp_color(dim, lit, focus);
+        let color = crate::lerp_color(dim, lit, focus.max(shine));
+        let feather = Pace::of(&state.prefs).feather(size);
         // Words only change colour (their jump stays down), so they still
         // light up one by one.
         if theme.reduced_motion && !look.words {
             if state.prefs.lyrics_glow {
-                let (head, feather) = if look.style == Style::Karaoke { timing.head(pos, size * 0.35) } else { (f32::INFINITY, 0.0) };
+                let (head, feather) = if look.style == Style::Karaoke { timing.head(pos, feather) } else { (f32::INFINITY, 0.0) };
                 glow(&painter, &g, line, head, feather, lit, focus * 0.1);
             }
             if look.style == Style::Karaoke {
-                let (head, feather) = timing.head(pos, size * 0.35);
+                let (head, feather) = timing.head(pos, feather);
                 karaoke(&painter, &g, line, if is_cur { head } else { f32::INFINITY }, feather, base, color);
             } else {
                 painter.galley_with_override_text_color(line.min, g, color);
@@ -446,45 +490,62 @@ fn paint(
 /// pointer and draws nothing.
 const ROOMLESS: f32 = 0.01;
 
-/// How far a line at the very edge is spread by the soft edges, relative
-/// to the big text size (at strength 1).
-const BLUR: f32 = 0.14;
+/// The Gaussian blur (sigma) of a line at the very edge, relative to the
+/// big text size (at «Сила размытия» 100 %).
+const BLUR: f32 = 0.12;
+
+/// The soft edges' settings: how deep each band reaches (a share of the
+/// view's height, «Глубина»), how much a line at the edge is blurred
+/// («Сила размытия») and how early it fades («Затухание»).
+#[derive(Clone, Copy, Debug)]
+struct Soft {
+    depth: f32,
+    strength: f32,
+    fade: f32,
+}
+
+impl Soft {
+    fn of(p: &Prefs) -> Self {
+        Self {
+            depth: p.lyrics_soft_depth.clamp(0.08, 0.4),
+            strength: p.lyrics_soft_strength.clamp(0.0, 1.5),
+            fade: p.lyrics_soft_fade.clamp(0.0, 1.0),
+        }
+    }
+
+    /// How deep the band at each edge of `rect` reaches.
+    fn band(self, rect: Rect) -> f32 {
+        (rect.height() * self.depth).clamp(40.0, 360.0).min(rect.height() * 0.4)
+    }
+
+    /// The sharp part of `rect` (top, bottom): inside the bands' outer
+    /// three quarters, where a line is visibly soft.
+    fn sharp(self, rect: Rect) -> (f32, f32) {
+        let b = self.band(rect) * 0.75;
+        (rect.top() + b, rect.bottom() - b)
+    }
+}
 
 /// The soft edges for an item `height` tall at `top`: (opacity, blur 0..1).
-/// Over a band of about a fifth of the view (times `strength`) it blurs
-/// and thins, and it is gone before its ink (accents and descenders,
-/// `size` × 0.4 around it) reaches the edge, so the view's clip never cuts
-/// a visible line.
-fn soft_edge(top: f32, height: f32, rect: Rect, size: f32, strength: f32) -> (f32, f32) {
-    let band = (rect.height() * 0.2 * strength.clamp(0.5, 1.5)).clamp(40.0, 220.0).min(rect.height() * 0.3);
+/// Over the band its blur grows from nothing, slowly at first, to full at
+/// the edge, and it thins on an eased curve (a gentler fade keeps it
+/// bright until nearer the edge); it is gone before its ink (accents and
+/// descenders, `size` × 0.4 around it) reaches the edge, so the view's
+/// clip never cuts a visible line.
+fn soft_edge(top: f32, height: f32, rect: Rect, size: f32, soft: Soft) -> (f32, f32) {
+    let band = soft.band(rect);
     let ink = size * 0.4;
     let room = (top - ink - rect.top()).min(rect.bottom() - (top + height + ink));
     let f = (room / band.max(1.0)).clamp(0.0, 1.0);
-    (f * f * (3.0 - 2.0 * f), 1.0 - f)
+    let eased = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let d = 1.0 - f;
+    (eased.powf(0.5 + 1.5 * soft.fade), d * d * (3.0 - 2.0 * d))
 }
 
-/// `g` at `pos` in `color`, blurred by `blur` (0..1) over `radius` px:
-/// faint copies in a ring around it take over from the sharp one as the
-/// blur grows, so the line spreads and thins like a blur (egui has no
-/// blur filter). One draw when sharp, seven while blurred.
+/// `g` at `pos` in `color`, blurred by `blur` (0..1) of `radius` points
+/// of Gaussian sigma ([`super::lyrics_blur`]): one draw, sharp or not.
 fn soft_galley(painter: &egui::Painter, pos: egui::Pos2, g: &Arc<Galley>, color: Color32, blur: f32, radius: f32) {
-    const RING: usize = 6;
-    if color.a() == 0 {
-        return;
-    }
-    if blur <= 0.02 || radius * blur < 0.3 {
-        painter.galley_with_override_text_color(pos, g.clone(), color);
-        return;
-    }
-    // The faint copies overlap where the letters are, so together they
-    // keep about the line's weight there.
-    painter.galley_with_override_text_color(pos, g.clone(), color.gamma_multiply(1.0 - 0.6 * blur));
-    let each = color.gamma_multiply(0.2 * blur);
-    let r = radius * blur;
-    for k in 0..RING {
-        let a = std::f32::consts::TAU * k as f32 / RING as f32;
-        painter.galley_with_override_text_color(pos + vec2(a.cos(), a.sin()) * r, g.clone(), each);
-    }
+    super::lyrics_blur::galley(painter, pos, g, color, radius * blur);
 }
 
 /// The item under the pointer at height `y`, from each item's drawn
@@ -516,6 +577,25 @@ fn led(pos: Duration, lead: f32) -> Duration {
         pos.saturating_sub(Duration::from_secs_f32(-lead))
     }
 }
+
+/// The painted position, kept from stepping back by a hair while playing:
+/// the clock may snap back a little as it follows what is heard, which
+/// read as a front flickering backwards; a seek goes further.
+fn steady(ctx: &egui::Context, id: egui::Id, pos: Duration, playing: bool) -> Duration {
+    let pos = steady_pos(ctx.data(|d| d.get_temp(id)), pos, playing);
+    ctx.data_mut(|d| d.insert_temp(id, pos));
+    pos
+}
+
+fn steady_pos(last: Option<Duration>, pos: Duration, playing: bool) -> Duration {
+    match last {
+        Some(last) if playing && pos < last && last - pos <= STEP_BACK => last,
+        _ => pos,
+    }
+}
+
+/// Further back than this the position is a seek, and is followed.
+const STEP_BACK: Duration = Duration::from_millis(350);
 
 fn returning_offset(offset: f32, until: f64, now: f64) -> f32 {
     let t = ((now - until) / 0.5).clamp(0.0, 1.0) as f32;
@@ -726,17 +806,18 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
 pub(crate) fn gap_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
     // The ring (with its wave and the countdown's pop) fits the sample with
-    // ~10 px around it, centred.
+    // ~10 px around it, centred; fitted at the largest size, so the size
+    // setting still shows.
     let base = if prefs.lyrics_gap_style >= 2 { 16.0 } else { 13.0 };
     let reach = base + 8.0;
-    let k = ((rect.width().min(rect.height()) - 20.0) / (2.0 * reach)).clamp(0.6, 1.4);
+    let k = ((rect.width().min(rect.height()) - 20.0) / (2.0 * reach * 1.5)).clamp(0.4, 1.4) * prefs.lyrics_gap_size.clamp(0.8, 1.5);
     let left = rect.center().x - 2.0 * k - base * k;
     let line = Rect::from_min_size(pos2(left, rect.center().y - 21.0 * k), vec2(56.0 * k, 42.0 * k));
     // A seven-second gap: four of the ring (its style is what is compared),
     // then the countdown when it is on.
     let pos = Duration::from_secs_f64(anim::now(ui.ctx()).rem_euclid(7.6));
     let bass = super::pages::settings_help::beat(anim::now(ui.ctx()) as f32) * 0.5;
-    waiting(&painter, line, k, Duration::ZERO, Duration::from_secs(7), pos, true, true, bass, 1.0, prefs);
+    waiting(&painter, line, k, Duration::ZERO, Duration::from_secs(7), pos, ring_in(pos.as_secs_f32()), true, bass, 1.0, prefs);
 }
 
 /// The countdown in context for its setting's card: a sung line, the wait
@@ -753,7 +834,7 @@ pub(crate) fn countdown_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let rest = 1.0 - (1.0 - 0.42) * prefs.lyrics_dim.clamp(0.0, 1.0);
     let dim = s.on_surface.gamma_multiply(rest);
     let small = PANE.small * 0.75;
-    let k = 0.8;
+    let k = 0.8 * prefs.lyrics_gap_size.clamp(0.8, 1.5);
     let row_h = 42.0 * k;
     let prev = fixed_layout(&painter, "Слышишь этот ритм", small);
     let next = fixed_layout(&painter, "Он ведёт меня", small);
@@ -763,7 +844,7 @@ pub(crate) fn countdown_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let line = Rect::from_min_size(pos2(rect.left() + PAD, top + prev.size().y + 4.0), vec2(56.0 * k, row_h));
     let bass = super::pages::settings_help::beat(anim::now(ui.ctx()) as f32) * 0.5;
     let pos = Duration::from_secs_f32(t);
-    waiting(&painter, line, k, Duration::ZERO, Duration::from_secs_f32(GAP), pos, true, true, bass, 1.0, prefs);
+    waiting(&painter, line, k, Duration::ZERO, Duration::from_secs_f32(GAP), pos, ring_in(t), true, bass, 1.0, prefs);
     // The next line: dim while waiting, sung once the wait is over.
     let on = ((t - GAP) / 0.18).clamp(0.0, 1.0);
     let color = crate::lerp_color(dim, s.on_surface, on);
@@ -785,42 +866,40 @@ pub(crate) fn edges_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let n = t.floor() as i64;
     let x = ((t.fract() * STEP) / 0.5).min(1.0) as f32;
     let ease = 1.0 - (1.0 - x).powi(3);
-    let strength = prefs.lyrics_soft_strength.clamp(0.5, 1.5);
+    let soft = Soft::of(prefs);
     for k in -4i64..=5 {
         let g = fixed_layout(&painter, TEXTS[(n + k).rem_euclid(TEXTS.len() as i64) as usize], size);
         let top = rect.center().y + (k as f32 + 1.0 - ease) * pitch - g.size().y * 0.5;
         let (alpha, blur) = if prefs.lyrics_soft_edges {
-            soft_edge(top, g.size().y, rect, size, strength)
+            soft_edge(top, g.size().y, rect, size, soft)
         } else {
             let band = rect.height() * 0.12;
             (((top + g.size().y - rect.top()) / band).min((rect.bottom() - top) / band).clamp(0.0, 1.0), 0.0)
         };
         let rest = if k == 0 { 1.0 } else { 0.45 };
-        soft_galley(&painter, pos2(rect.left() + 12.0, top), &g, s.on_surface.gamma_multiply(rest * alpha), blur, size * BLUR * strength);
+        soft_galley(&painter, pos2(rect.left() + 12.0, top), &g, s.on_surface.gamma_multiply(rest * alpha), blur, size * BLUR * soft.strength);
     }
 }
 
-/// Unsynced text still gets a readable column, with its source kept outside
-/// the scroll area so changing providers never requires scrolling to the end
-/// (the control on its bottom edge, in line with the text: the last lines
-/// scroll clear of it). Returns the area and the text's left edge (none
-/// for the centred «Текста нет»).
-fn plain(ui: &mut Ui, size: egui::Vec2, state: &ViewState) -> (Rect, Option<f32>) {
+/// Unsynced text still gets a readable column in `rect`, with its source
+/// kept outside the scroll area (the control in its row under it, in line
+/// with the text) so changing providers never requires scrolling to the
+/// end. Returns the text's left edge (none for the centred «Текста нет»).
+fn plain(ui: &mut Ui, rect: Rect, state: &ViewState) -> Option<f32> {
     let s = Theme::get(ui.ctx()).scheme;
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let column = Rect::from_center_size(rect.center(), vec2(rect.width().min(900.0), rect.height()));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(column).id_salt("mega-plain"));
     if let Some(text) = state.lyrics.plain.as_deref().filter(|t| !t.trim().is_empty()) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut child, |ui| {
             ui.label(style_at(MEGA.small * state.prefs.lyrics_scale.clamp(0.8, 1.4)).rich_para(text, s.on_surface));
-            ui.add_space(Size::Xs.height() + 16.0);
+            ui.add_space(16.0);
         });
     } else {
         let text = if state.lyrics.loading { "Ищу текст…" } else { "Текста нет" };
         child.painter().text(rect.center(), Align2::CENTER_CENTER, text, style_at(MEGA.small).font_id(), s.on_surface_variant);
     }
     let text = state.lyrics.plain.as_deref().is_some_and(|t| !t.trim().is_empty());
-    (rect, text.then_some(column.left()))
+    text.then_some(column.left())
 }
 
 /// One timed piece spans its own glyph advances, even across frozen rows.
@@ -830,6 +909,7 @@ struct Syllable {
     from: f32,
     to: f32,
     letters: usize,
+    #[cfg_attr(not(test), allow(dead_code))]
     word: usize,
     /// Its first and one past its last glyph.
     glyphs: (usize, usize),
@@ -854,6 +934,9 @@ struct Timing {
     /// Each letter's own part of its syllable's time, weighted by
     /// [`letter_weight`] (spaces have none).
     letter_times: Vec<Option<(f32, f32)>>,
+    /// When each letter lights and jumps (spaces have none): its own
+    /// start, but never before a letter written ahead of it.
+    onsets: Vec<Option<f32>>,
     /// Each glyph's span on the line's run of advances.
     xs: Vec<(f32, f32)>,
     /// First syllable of each whitespace-delimited word.
@@ -933,14 +1016,24 @@ impl Timing {
         // its timing) lights with the one before it.
         let first = syllables.first().map_or(0.0, |s| s.start);
         let mut last = Unit { start: first, end: first };
+        // Letters and units light in the order they are written: a piece
+        // timed to start before one written ahead of it (a timing slip)
+        // waits for it, so the light never runs back along the line.
+        let mut latest = f32::NEG_INFINITY;
         let units = spans
             .into_iter()
             .map(|u| {
                 last = u.unwrap_or(last);
-                last
+                latest = latest.max(last.start);
+                Unit { start: latest, end: last.end.max(latest) }
             })
             .collect();
-        Some(Self { syllables, glyphs, units, glyph_units, letter_times: times, xs, words })
+        let mut latest = f32::NEG_INFINITY;
+        let onsets = times.iter().map(|t| t.map(|(a, _)| {
+            latest = latest.max(a);
+            latest
+        })).collect();
+        Some(Self { syllables, glyphs, units, glyph_units, letter_times: times, onsets, xs, words })
     }
 
     /// The light front as (centre of its soft edge, edge width): solid up
@@ -1030,28 +1123,80 @@ fn written_units(chars: impl IntoIterator<Item = char>) -> Vec<Option<usize>> {
     out
 }
 
-/// How lit (0..1) a unit starting at `start` is at `pos` (seconds): a
-/// whole-unit fade on `spring` (karaoke fills on the fast effects spring,
-/// focus brightens on the slow one), from just before it is sung.
-fn unit_light(spring: Spring, start: f32, pos: f32) -> f32 {
-    const LEAD: f32 = 0.03;
-    let t = pos - start + LEAD;
+/// How a letter or word moves and lights up as it is sung: «Скорость
+/// прыжка» and «Скорость подсветки».
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Pace {
+    /// How fast a jump goes up and settles (1: Material's expressive fast
+    /// spatial spring).
+    jump: f32,
+    /// 0 lights up smoothly .. 1 at once.
+    light: f32,
+}
+
+impl Pace {
+    fn of(prefs: &Prefs) -> Self {
+        Pace { jump: prefs.lyrics_jump_speed.clamp(0.5, 2.0), light: prefs.lyrics_light_speed.clamp(0.0, 1.0) }
+    }
+
+    /// Seconds a letter or word takes to light up (90 % of the way), 0 at
+    /// once; focus brightens [`FOCUS_CALM`] times slower.
+    fn rise(self, style: Style) -> f32 {
+        let rise = 0.5 * (1.0 - self.light) * (1.0 - self.light);
+        if style == Style::Focus { rise * FOCUS_CALM } else { rise }
+    }
+
+    /// The karaoke front's soft edge at text `size`: how long a letter it
+    /// crosses takes to light up.
+    fn feather(self, size: f32) -> f32 {
+        size * (0.06 + 0.8 * (1.0 - self.light))
+    }
+}
+
+/// Focus brightens words this many times slower than the others light them.
+const FOCUS_CALM: f32 = 2.2;
+
+/// A letter or word starts lighting up (and jumping) this long before its
+/// time, so the motion lands on the voice.
+const ONSET_LEAD: f32 = 0.03;
+
+/// How lit (0..1) a letter or word is `t` seconds after its onset: from just
+/// before it, up on a critically damped spring that is 90 % there after
+/// `rise` seconds (at once for 0). Only ever rises.
+fn light_up(t: f32, rise: f32) -> f32 {
+    let t = t + ONSET_LEAD;
     if t <= 0.0 {
         return 0.0;
     }
-    (1.0 - spring.solve(1.0, 0.0, t).0).clamp(0.0, 1.0)
+    if rise < 0.005 {
+        return 1.0;
+    }
+    // (1 + ωt)·e^(−ωt) falls to 0.1 at ωt ≈ 3.89.
+    let w = 3.89 / rise;
+    (1.0 - Spring::new(1.0, w * w).solve(1.0, 0.0, t).0).clamp(0.0, 1.0)
 }
 
-/// How far (0..1) a wave unit is through its jump at `pos` (seconds): as a
-/// letter's over its own time, here over the unit's, at most [`UNIT_JUMP`]
-/// of it so a long held word still bounces instead of floating.
-fn unit_jump(u: Unit, pos: f32) -> f32 {
-    let span = (u.end - u.start).clamp(0.0, UNIT_JUMP);
-    ((pos - u.start + 0.04) / (span + 0.08).max(0.1)).clamp(0.0, 1.0)
+/// How high a jump is `t` seconds after its onset, in rest heights: off the
+/// line at once with a kick, over the top (about 1.6) some 70 ms later, then
+/// down onto its rest height (1) on Material's expressive fast spatial
+/// spring; `speed` times faster or slower.
+fn jump_height(t: f32, speed: f32) -> f32 {
+    let t = t + ONSET_LEAD;
+    if t <= 0.0 {
+        return 0.0;
+    }
+    let k = speed.clamp(0.25, 4.0);
+    let base = nikgob_motion::tokens::EXPRESSIVE_FAST_SPATIAL;
+    let spring = Spring::new(base.damping_ratio, base.stiffness * k * k);
+    1.0 + spring.solve(-1.0, JUMP_KICK * k, t).0
 }
 
-/// The longest a whole word's jump takes, in seconds.
-const UNIT_JUMP: f32 = 0.6;
+/// The jump's upward speed at its onset, in rest heights a second.
+const JUMP_KICK: f32 = 60.0;
+/// A jump at speed 1 is at rest (within a hundredth of a pixel) after this.
+const JUMP_SETTLE: f32 = 0.4;
+/// A sung wave letter (or word) rests this high, in text sizes, at jump 1.
+const RISE: f32 = 0.15;
 
 fn syllable_head(from: f32, to: f32, start: f32, end: f32, pos: f32) -> f32 {
     let progress = if end <= start { f32::from(pos >= start) } else { ((pos - start) / (end - start)).clamp(0.0, 1.0) };
@@ -1078,116 +1223,95 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
     current: bool, focus: f32, size: f32, look: Look, base: Color32, lit: Color32, prefs: &Prefs)
 {
     let style = look.style;
-    let (head, feather) = if current { timing.head(pos, size * 0.35) } else { (f32::INFINITY, 0.0) };
+    let pace = Pace::of(prefs);
+    let rise = pace.rise(style);
+    let (head, feather) = if current { timing.head(pos, pace.feather(size)) } else { (f32::INFINITY, 0.0) };
     let p = pos.as_secs_f32();
     let theme = Theme::get(painter.ctx());
     let glow_color = crate::lerp_color(lit, theme.scheme.primary, 0.3);
-    let mut k = 0;
-    for (row_index, row) in g.rows.iter().enumerate() {
-        let glyphs = &row.row.glyphs;
-        let mut i = 0;
-        while i < glyphs.len() {
-            let syllable = timing.glyphs[k + i].map(|s| &timing.syllables[s]);
-            let word = syllable.map(|s| s.word);
-            // By words: the written unit this run lights as one.
-            let unit = timing.glyph_units[k + i].filter(|_| look.words);
-            let sustained = syllable.filter(|s| current && style == Style::Karaoke
-                && held(s.start, s.end, s.letters, p));
-            let mut end = i + 1;
-            // Ordinary glyphs share one word run (one written unit by
-            // words); held notes and the wave by letters move each letter
-            // on its own.
-            if look.words {
-                while end < glyphs.len() && unit.is_some() && timing.glyph_units[k + end] == unit {
-                    end += 1;
-                }
-            } else if sustained.is_none() && style != Style::Wave {
-                while end < glyphs.len() {
-                    let next = timing.glyphs[k + end].map(|s| &timing.syllables[s]);
-                    if next.map(|s| s.word) != word || next.is_some_and(|s| current && style == Style::Karaoke && held(s.start, s.end, s.letters, p)) { break; }
-                    end += 1;
-                }
-            }
-            // Spaces ride with the letter before them: a lifted glyph's
-            // overhang (the arm of a "y") must not be left at the baseline.
-            if syllable.is_some() || unit.is_some() {
-                while end < glyphs.len() && timing.glyphs[k + end].is_none() {
-                    end += 1;
-                }
-            }
-            // Wave: by letters the letter's own weighted share of its
-            // syllable's time, by words the unit's.
-            let letter_on = if style != Style::Wave {
-                None
-            } else if look.words {
-                unit.map(|u| if current { unit_jump(timing.units[u], p) } else { 1.0 })
-            } else {
-                syllable.map(|s| {
-                    if !current {
-                        return 1.0;
-                    }
-                    let (from, to) = timing.letter_times[k + i].unwrap_or((s.start, s.end));
-                    ((p - from + 0.04) / (to - from + 0.08).max(0.1)).clamp(0.0, 1.0)
-                })
-            };
-            // Karaoke and Focus by words: the whole unit at once, from its
-            // first letter (karaoke fills it quickly, focus brightens it).
-            let unit_on = unit.filter(|_| style != Style::Wave).map(|u| {
-                if !current {
-                    return 1.0;
-                }
-                let spring = if style == Style::Karaoke { nikgob_motion::tokens::FAST_EFFECTS } else { nikgob_motion::tokens::SLOW_EFFECTS };
-                unit_light(spring, timing.units[u].start, p)
-            });
-            // Karaoke and Focus keep one baseline: sung and unsung words
-            // never drift apart (that read as broken text). Reduced motion
-            // keeps the wave by words down too (it only lights up).
-            let lift = match letter_on {
-                Some(t) if !theme.reduced_motion => {
-                    let on = t * t * (3.0 - 2.0 * t);
-                    (on * 0.15 + (std::f32::consts::PI * t).sin() * 0.08) * focus * size * prefs.lyrics_wave_jump.max(0.0)
-                }
-                _ => 0.0,
-            };
-            let shifted = line.translate(vec2(0.0, -lift));
-            let r = outer_room(row_index, g.rows.len(), row.rect().translate(shifted.min.to_vec2()), size);
-            let x0 = if i == 0 { r.left() - 2.0 } else { shifted.left() + row.pos.x + glyphs[i].pos.x };
-            let x1 = if end == glyphs.len() { r.right() + 2.0 } else { shifted.left() + row.pos.x + glyphs[end].pos.x };
-            let run = Rect::from_min_max(pos2(x0, r.top()), pos2(x1, r.bottom()));
-            let clipped = painter.with_clip_rect(run.intersect(painter.clip_rect()));
-            if prefs.lyrics_glow {
-                let strength = focus * (0.1 + sustained.map_or(0.0, |s|
-                    0.06 * ((p - s.start) / 0.3).clamp(0.0, 1.0) * held_envelope(s.end, p)));
-                let (glow_head, glow_feather, strength) = match (letter_on.or(unit_on), style) {
-                    (Some(on), _) => (f32::INFINITY, 0.0, strength * on),
-                    (None, Style::Karaoke) if !look.words => (head, feather, strength),
-                    (None, Style::Focus) if !look.words => (f32::INFINITY, 0.0, strength),
-                    _ => (f32::INFINITY, 0.0, 0.0),
+    let ppp = painter.pixels_per_point();
+    // Sung pieces are lit (and wave pieces up) in full on the current line,
+    // and go back with its focus once it is over.
+    let hold = focus.max(if current { 1.0 } else { 0.0 });
+    let n = timing.glyphs.len();
+    let mut inks = Vec::with_capacity(n);
+    let mut glows = Vec::with_capacity(n);
+    for (k, glyph) in timing.glyphs.iter().enumerate() {
+        let syllable = glyph.map(|s| &timing.syllables[s]);
+        // By words: the written unit this glyph lights (and jumps) with.
+        let unit = timing.glyph_units[k].filter(|_| look.words);
+        let sustained = syllable.filter(|s| current && style == Style::Karaoke && held(s.start, s.end, s.letters, p));
+        // When the piece this glyph goes with is sung: its unit by words,
+        // its own letter in the wave by letters. Karaoke by letters follows
+        // the front instead; focus by letters lights the whole line.
+        let onset = if look.words {
+            unit.map(|u| timing.units[u].start)
+        } else if style == Style::Wave {
+            syllable.map(|s| timing.onsets[k].unwrap_or(s.start))
+        } else {
+            None
+        };
+        let on = onset.map(|at| if current { light_up(p - at, rise) } else { 1.0 });
+        // Karaoke and Focus keep one baseline: sung and unsung words never
+        // drift apart (that read as broken text). Reduced motion keeps the
+        // wave down too (it only lights up).
+        let lift = match onset {
+            Some(at) if style == Style::Wave && !theme.reduced_motion => {
+                let (height, moving) = if current {
+                    let t = p - at;
+                    (jump_height(t, pace.jump), t + ONSET_LEAD < JUMP_SETTLE / pace.jump)
+                } else {
+                    (1.0, false)
                 };
-                glow(&clipped, g, shifted, glow_head, glow_feather, glow_color, strength);
+                let lift = height * RISE * size * prefs.lyrics_wave_jump.max(0.0) * hold;
+                // At rest on whole pixels, so a raised word is as crisp as
+                // the rest; in motion to the fraction, so it never steps.
+                if moving || (hold > 0.0 && hold < 1.0) { lift } else { (lift * ppp).round() / ppp }
             }
-            if let Some(t) = letter_on {
-                let on = t * t * (3.0 - 2.0 * t) * focus.max(if current { 1.0 } else { 0.0 });
-                clipped.galley_with_override_text_color(shifted.min, g.clone(), crate::lerp_color(base, lit, on));
-            } else if let Some(on) = unit_on {
-                let on = on * focus.max(if current { 1.0 } else { 0.0 });
-                clipped.galley_with_override_text_color(shifted.min, g.clone(), crate::lerp_color(base, lit, on));
-            } else if look.words || matches!(style, Style::Focus | Style::Wave) {
-                clipped.galley_with_override_text_color(shifted.min, g.clone(), lit);
-            } else {
-                karaoke(&clipped, g, shifted, head, feather, base, lit);
-            }
-            i = end;
-        }
-        k += glyphs.len();
+            _ => 0.0,
+        };
+        inks.push(match on {
+            Some(on) => Ink::solid(crate::lerp_color(base, lit, on * hold), lift),
+            None if style == Style::Karaoke && !look.words => Ink { lift, base, lit, head, feather },
+            None => Ink::solid(lit, lift),
+        });
+        let strength = focus * (0.1 + sustained.map_or(0.0, |s|
+            0.06 * ((p - s.start) / 0.3).clamp(0.0, 1.0) * held_envelope(s.end, p)));
+        let glow_ink = |strength: f32| glow_color.gamma_multiply(strength.clamp(0.0, 1.0));
+        glows.push(match (on, style) {
+            (Some(on), _) => Ink::solid(glow_ink(strength * on), lift),
+            (None, Style::Karaoke) if !look.words => Ink { lift, base: Color32::TRANSPARENT, lit: glow_ink(strength), head, feather },
+            (None, Style::Focus) if !look.words => Ink::solid(glow_ink(strength), lift),
+            _ => Ink::solid(Color32::TRANSPARENT, lift),
+        });
     }
+    // Every glyph is drawn once, whole, in its own place and colour: no clip
+    // edge between pieces, so no seam, cut overhang or second copy shows.
+    if prefs.lyrics_glow && glows.iter().any(|i| i.lit.a() > 0) {
+        let g = inked(g, |k| glows[k]);
+        for offset in GLOW {
+            painter.galley(line.min + offset, g.clone(), glow_color);
+        }
+    }
+    painter.galley(line.min, inked(g, |k| inks[k]), lit);
 }
+
+/// Where the glow's copies of a line go.
+const GLOW: [egui::Vec2; 3] = [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0)];
 
 #[allow(clippy::too_many_arguments)]
 fn glow(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, head: f32, feather: f32, color: Color32, strength: f32) {
     if strength <= 0.001 { return; }
-    for offset in [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0)] {
-        karaoke(painter, g, line.translate(offset), head, feather, Color32::TRANSPARENT, color.gamma_multiply(strength));
+    let c = color.gamma_multiply(strength);
+    if head.is_infinite() {
+        for offset in GLOW {
+            painter.galley_with_override_text_color(line.min + offset, g.clone(), c);
+        }
+        return;
+    }
+    let g = inked(g, |_| Ink { lift: 0.0, base: Color32::TRANSPARENT, lit: c, head, feather });
+    for offset in GLOW {
+        painter.galley(line.min + offset, g.clone(), c);
     }
 }
 
@@ -1201,13 +1325,120 @@ fn glyph_count(g: &Galley) -> usize {
     g.rows.iter().map(|r| r.row.glyphs.len()).sum::<usize>().max(1)
 }
 
-/// A row's clip area: rows meet edge to edge (so a wrapped line's rows
-/// never paint into each other); only the outer edges get room for accents
-/// above the first row and descenders below the last one.
-fn outer_room(row_index: usize, rows: usize, r: Rect, size: f32) -> Rect {
-    let top = if row_index == 0 { size * 0.4 } else { 0.0 };
-    let bottom = if row_index + 1 == rows { size * 0.4 } else { 0.0 };
-    Rect::from_min_max(pos2(r.left(), r.top() - top), pos2(r.right(), r.bottom() + bottom))
+/// How one glyph is painted: raised by `lift` px and lit along the line: in
+/// `lit` up to `head - feather` px of its advances (rows flattened), fading
+/// to `base` at `head` (a hard edge when `feather` is 0).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Ink {
+    lift: f32,
+    base: Color32,
+    lit: Color32,
+    head: f32,
+    feather: f32,
+}
+
+impl Ink {
+    fn solid(color: Color32, lift: f32) -> Self {
+        Ink { lift, base: color, lit: color, head: f32::INFINITY, feather: 0.0 }
+    }
+
+    fn uniform(self) -> bool {
+        self.base == self.lit || self.head == f32::INFINITY
+    }
+
+    /// How lit (0..1) the line is `x` px along its advances.
+    fn light(self, x: f32) -> f32 {
+        if self.head == f32::INFINITY {
+            1.0
+        } else if self.feather <= 0.0 {
+            f32::from(x < self.head)
+        } else {
+            ((self.head - x) / self.feather).clamp(0.0, 1.0)
+        }
+    }
+
+    fn at(self, x: f32) -> Color32 {
+        if self.uniform() { self.lit } else { crate::lerp_color(self.base, self.lit, self.light(x)) }
+    }
+}
+
+/// `g` with each glyph (numbered over all rows) painted as `ink` says, as
+/// one galley for one draw: vertex colours instead of clip rects, which the
+/// renderer rounds to whole pixels (a front that stepped, slivers of a
+/// neighbour's ink in the wrong colour or height) and which cut glyphs that
+/// reach past their advance.
+fn inked(g: &Galley, ink: impl Fn(usize) -> Ink) -> Arc<Galley> {
+    let mut out = g.clone();
+    let (mut k, mut x) = (0, 0.0);
+    let mut bounds = Rect::NOTHING;
+    let (mut vertices, mut indices) = (0, 0);
+    for placed in &mut out.rows {
+        let row = &placed.row;
+        let src = &row.visuals.mesh;
+        let mut mesh = egui::Mesh::with_texture(src.texture_id);
+        for gl in &row.glyphs {
+            // The line's run of advances at this glyph's x is `along` + x.
+            let along = x - gl.pos.x;
+            x += gl.advance_width;
+            let i = k;
+            k += 1;
+            if gl.uv_rect.is_nothing() {
+                continue;
+            }
+            let first = gl.first_vertex as usize;
+            if let Some(q) = src.vertices.get(first..first + 4) {
+                ink_quad(&mut mesh, [q[0], q[1], q[2], q[3]], along, ink(i));
+            }
+        }
+        let mut new = (**row).clone();
+        new.visuals.mesh_bounds = mesh.calc_bounds();
+        new.visuals.glyph_index_start = 0;
+        new.visuals.glyph_vertex_range = 0..mesh.vertices.len();
+        bounds = bounds.union(new.visuals.mesh_bounds.translate(placed.pos.to_vec2()));
+        vertices += mesh.vertices.len();
+        indices += mesh.indices.len();
+        new.visuals.mesh = mesh;
+        placed.row = Arc::new(new);
+    }
+    out.mesh_bounds = bounds;
+    out.num_vertices = vertices;
+    out.num_indices = indices;
+    Arc::new(out)
+}
+
+/// One glyph's quad (left top, right top, left bottom, right bottom, as
+/// egui lays them out) into `mesh`, raised by `ink.lift`; where the light's
+/// gradient bends inside it, it is split there, so the linearly blended
+/// vertex colours draw the gradient exactly.
+fn ink_quad(mesh: &mut egui::Mesh, q: [egui::epaint::Vertex; 4], along: f32, ink: Ink) {
+    let (left, right) = (q[2].pos.x, q[3].pos.x);
+    let mut cuts = [0.0f32; 4];
+    let mut n = 0;
+    if !ink.uniform() && right > left {
+        for edge in [ink.head - ink.feather, ink.head] {
+            let t = (edge - along - left) / (right - left);
+            if t > cuts[n] && t < 1.0 {
+                n += 1;
+                cuts[n] = t;
+            }
+        }
+    }
+    n += 1;
+    cuts[n] = 1.0;
+    // Each piece's colour is taken just inside it, so a hard edge stays hard.
+    let point = |t: f32, top: bool, inward: f32| {
+        let (a, b) = if top { (q[0], q[1]) } else { (q[2], q[3]) };
+        egui::epaint::Vertex {
+            pos: a.pos.lerp(b.pos, t) - vec2(0.0, ink.lift),
+            uv: a.uv.lerp(b.uv, t),
+            color: ink.at(along + left + (right - left) * t + inward),
+        }
+    };
+    for w in cuts[..=n].windows(2) {
+        let idx = mesh.vertices.len() as u32;
+        mesh.vertices.extend([point(w[0], true, 1e-3), point(w[1], true, -1e-3), point(w[0], false, 1e-3), point(w[1], false, -1e-3)]);
+        mesh.indices.extend([idx, idx + 1, idx + 2, idx + 2, idx + 1, idx + 3]);
+    }
 }
 
 /// The line lit left to right (row by row when it wraps) up to `head`
@@ -1218,63 +1449,59 @@ fn karaoke(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, head: f32, feat
         painter.galley_with_override_text_color(line.min, g.clone(), lit);
         return;
     }
-    painter.galley_with_override_text_color(line.min, g.clone(), base);
-    let mut left = head;
-    for (row_index, row) in g.rows.iter().enumerate() {
-        let r = outer_room(row_index, g.rows.len(), row.rect().translate(line.min.to_vec2()), row.rect().height());
-        let w: f32 = row.row.glyphs.iter().map(|gl| gl.advance_width).sum();
-        let head = left + feather * 0.5;
-        left -= w;
-        if head <= 0.0 {
-            break;
-        }
-        // Solid up to the gradient, then slices fading out.
-        let solid = (head - feather).clamp(0.0, w);
-        if solid > 0.0 {
-            let clip = Rect::from_min_max(r.min, pos2(r.left() + solid, r.bottom()));
-            painter
-                .with_clip_rect(clip.intersect(painter.clip_rect()))
-                .galley_with_override_text_color(line.min, g.clone(), lit);
-        }
-        const SLICES: usize = 8;
-        for k in 0..SLICES {
-            let x0 = head - feather + feather * k as f32 / SLICES as f32;
-            let x1 = head - feather + feather * (k + 1) as f32 / SLICES as f32;
-            let (x0, x1) = (x0.clamp(0.0, w), x1.clamp(0.0, w));
-            if x1 <= x0 {
-                continue;
-            }
-            let a = 1.0 - (k as f32 + 0.5) / SLICES as f32;
-            let clip = Rect::from_min_max(pos2(r.left() + x0, r.top()), pos2(r.left() + x1, r.bottom()));
-            painter
-                .with_clip_rect(clip.intersect(painter.clip_rect()))
-                .galley_with_override_text_color(line.min, g.clone(), crate::lerp_color(base, lit, a));
-        }
-    }
+    painter.galley(line.min, inked(g, |_| Ink { lift: 0.0, base, lit, head, feather }), lit);
+}
+
+/// The room a wait opens between lines, at the pane's text size: taller for
+/// the thick form, a larger ring and higher waves.
+fn wait_height(prefs: &Prefs) -> f32 {
+    let base = if prefs.lyrics_gap_style >= 2 { 42.0 } else { 34.0 };
+    let waves = if prefs.lyrics_gap_style % 2 == 1 {
+        1.0 + 0.15 * (prefs.lyrics_gap_height.clamp(0.5, 2.0) - 1.0).max(0.0)
+    } else {
+        1.0
+    };
+    base * prefs.lyrics_gap_size.clamp(0.8, 1.5) * waves
+}
+
+/// The spring a wait's room opens and closes on (the lines part with it).
+const WAIT_ROOM: Spring = nikgob_motion::tokens::EXPRESSIVE_SLOW_SPATIAL;
+/// The spring its ring grows in on, once the room has begun to open.
+const WAIT_RING: Spring = nikgob_motion::tokens::EXPRESSIVE_DEFAULT_SPATIAL;
+/// How long the ring takes to leave: the first half it closes into one
+/// ring, the second half that ring shrinks and fades.
+const WAIT_LEAVE: f32 = 0.5;
+/// With the countdown the ring is gone this long before the next line, as
+/// the 3 comes in.
+const WAIT_COUNT_GONE: f32 = 2.9;
+
+/// How far (0..1) a ring has grown in `t` seconds after it starts to come,
+/// for the settings' samples (the lyrics drive it by [`WAIT_RING`] itself).
+fn ring_in(t: f32) -> f32 {
+    if t <= 0.0 { 0.0 } else { 1.0 - WAIT_RING.solve(1.0, 0.0, t).0 }
 }
 
 /// The wait between lines: a determinate circular wavy progress indicator
 /// (Material 3 Expressive). The wavy arc grows clockwise from the top as the
 /// gap passes, so it reads as "how much is left"; the rest of the circle is
-/// the flat track. While playing the wave travels and swells with the bass;
-/// in the last moments the indicator shrinks away and the next line takes
-/// over. Song time drives it, so pausing freezes it. `k` scales it with the
-/// text (bigger in mega mode).
+/// the flat track. While playing the wave travels and swells with the bass.
+/// It grows in with `appear` (0..1, on its spring); before the next line
+/// (or the countdown) it closes into one ring, which shrinks and fades as
+/// one shape, so no end or joint ever shows. Song time drives it, so
+/// pausing freezes it. `k` scales it with the text (bigger in mega mode).
 #[allow(clippy::too_many_arguments)]
-fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Duration, pos: Duration, current: bool, playing: bool, bass: f32, edge: f32, prefs: &Prefs) {
+fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Duration, pos: Duration, appear: f32, playing: bool, bass: f32, edge: f32, prefs: &Prefs) {
     use std::f32::consts::{FRAC_PI_2, TAU};
     let theme = Theme::get(painter.ctx());
     let s = theme.scheme;
+    let motion = !theme.reduced_motion;
     let span = end.saturating_sub(start).as_secs_f32().max(0.001);
-    let progress = if current { (pos.saturating_sub(start).as_secs_f32() / span).clamp(0.0, 1.0) } else { 0.0 };
+    let progress = (pos.saturating_sub(start).as_secs_f32() / span).clamp(0.0, 1.0);
     let remaining = end.saturating_sub(pos).as_secs_f32();
-    let fade = if current { (remaining / 0.4).clamp(0.0, 1.0) } else { 1.0 };
+    let fade = (remaining / 0.4).clamp(0.0, 1.0);
     let fade = fade * fade * (3.0 - 2.0 * fade);
-    // Only the wait that is happening is shown.
-    if !current {
-        return;
-    }
-    if edge * fade <= 0.01 {
+    let shown = appear.clamp(0.0, 1.0);
+    if edge * shown <= 0.01 {
         return;
     }
     let countdown = prefs.lyrics_countdown && remaining <= 3.0;
@@ -1288,43 +1515,54 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
     if countdown {
         let ease = 1.0 - (1.0 - (age / 0.22).clamp(0.0, 1.0)).powi(3);
         let pop = if theme.reduced_motion { 1.0 } else { 1.0 + 0.22 * (1.0 - ease) };
-        let alpha = edge * fade * reveal * (age / 0.12).clamp(0.0, 1.0);
+        let alpha = edge * shown * fade * reveal * (age / 0.12).clamp(0.0, 1.0);
         let color = s.primary.gamma_multiply(alpha);
         let g = crate::typography::layout_sized(painter, style_at(28.0 * k * pop), |style, _| {
             LayoutJob::simple_singleline(format!("{digit:.0}"), style.font_id(), color)
         });
         painter.galley(Align2::CENTER_CENTER.anchor_size(c, g.size()).min, g, color);
     }
-    let alpha = edge * fade * (1.0 - reveal);
-    if alpha <= 0.01 { return; }
-    let shrink = (0.6 + 0.4 * fade) * (1.0 - 0.35 * reveal);
+    // Leaving: the gaps shut, the wave smooths out and the track takes the
+    // indicator's colour (one closed ring), then that ring goes.
+    let gone_at = if prefs.lyrics_countdown { WAIT_COUNT_GONE } else { 0.0 };
+    let out = ((gone_at + WAIT_LEAVE - remaining) / WAIT_LEAVE).clamp(0.0, 1.0);
+    let close = (out * 2.0).min(1.0);
+    let close = close * close * (3.0 - 2.0 * close);
+    let vanish = (out * 2.0 - 1.0).clamp(0.0, 1.0);
+    let vanish = vanish * vanish;
+    let alpha = edge * shown * (1.0 - vanish);
+    if alpha <= 0.01 {
+        return;
+    }
+    // From 60 % as it comes (the spring's small overshoot a soft pop), to
+    // 60 % as it goes; reduced motion only fades it.
+    let shrink = if motion { (0.6 + 0.4 * appear) * (1.0 - 0.4 * vanish) } else { 1.0 };
     let radius = base_radius * shrink;
     let thick = if thick_form { 6.0 } else { 3.0 } * k * shrink;
-    let motion = !theme.reduced_motion;
     // As in Compose's CircularWavyProgressIndicator: flat near 0 % and
     // 100 %, wavy in between; the crests travel along the arc (one
     // wavelengths a second) and the ring itself stays put. Wall-clock
     // time while playing, so it never looks frozen; still when paused.
     let ramp = (progress / 0.1).min((1.0 - progress) / 0.05).clamp(0.0, 1.0);
+    let height = prefs.lyrics_gap_height.clamp(0.5, 2.0);
     // About half the stroke: anything less reads as a lumpy polygon, and
     // the tip (where the wave comes out) looks straight half the time.
     let requested_amp = if prefs.lyrics_gap_style % 2 == 1 {
-        ramp * k * shrink * (1.4 + 0.5 * if motion && playing { bass.clamp(0.0, 1.0) } else { 0.0 })
+        ramp * k * shrink * height * (1.4 + 0.5 * if motion && playing { bass.clamp(0.0, 1.0) } else { 0.0 })
     } else { 0.0 };
-    let (waves, amp) = wave_geometry(prefs.lyrics_gap_waves, radius, thick, requested_amp);
+    let (waves, amp) = wave_geometry(prefs.lyrics_gap_waves, radius, thick, requested_amp, height);
+    let amp = amp * (1.0 - close);
     let clock = if motion && playing { anim::now(painter.ctx()) as f32 } else { 0.0 };
     // One wavelength a second: a calm ripple. The ring itself stays put.
     let phase = clock * TAU;
     // Chord clearance includes both round caps and radial wave excursions.
     let clearance = thick + 2.0 * amp + 3.0 * k * shrink;
-    let gap = 2.0 * (clearance / (2.0 * radius)).clamp(0.0, 1.0).asin();
+    let gap = 2.0 * (clearance / (2.0 * radius)).clamp(0.0, 1.0).asin() * (1.0 - close);
     let sweep = progress * TAU;
-    let arc = |from: f32, to: f32, amp: f32, color: Color32| {
-        if to - from <= 0.0 {
-            return;
-        }
+    let feather = 1.0 / painter.pixels_per_point();
+    let points = |from: f32, to: f32, amp: f32| -> Vec<egui::Pos2> {
         let n = ((to - from) * radius / (k * shrink * 0.6)).ceil().max(2.0) as usize;
-        let pts: Vec<egui::Pos2> = (0..=n)
+        (0..=n)
             .map(|i| {
                 let a = from + (to - from) * i as f32 / n as f32;
                 // Anchored at the head and running back from it, like the
@@ -1333,29 +1571,121 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
                 let a = a - FRAC_PI_2;
                 pos2(c.x + r * a.cos(), c.y + r * a.sin())
             })
-            .collect();
-        let (first, last) = (pts[0], pts[pts.len() - 1]);
-        painter.add(egui::Shape::line(pts, egui::Stroke::new(thick, color)));
-        painter.circle_filled(first, thick * 0.5, color);
-        painter.circle_filled(last, thick * 0.5, color);
+            .collect()
+    };
+    // Opaque scheme colours (as in Material: secondary-container track,
+    // primary indicator); transparency only while it fades, and each piece
+    // is one mesh, so nothing in it shows darker.
+    let indicator = s.primary.gamma_multiply(alpha);
+    if close >= 1.0 {
+        let mut ring = points(0.0, TAU, 0.0);
+        ring.pop();
+        painter.add(ribbon(&ring, thick, true, indicator, feather));
+        return;
+    }
+    let arc = |from: f32, to: f32, amp: f32, color: Color32| {
+        if to - from <= 0.0 {
+            return;
+        }
+        // An arc shorter than its stroke thins away instead of ending as a
+        // dot that pops (unless it is closing into the ring).
+        let t = ((to - from) * radius / thick.max(0.01)).clamp(0.0, 1.0);
+        let taper = t * t * (3.0 - 2.0 * t);
+        let width = thick * (taper + (1.0 - taper) * close);
+        painter.add(ribbon(&points(from, to, amp), width, false, color, feather));
     };
     // The flat track: the part still to wait.
-    // Opaque scheme colours (as in Material: secondary-container track,
-    // primary indicator) so caps and stroke joins never show darker
-    // overlaps; transparency only appears while the ring fades out.
-    arc(sweep + gap, TAU - gap, 0.0, s.secondary_container.gamma_multiply(alpha));
+    let track = crate::lerp_color(s.secondary_container, s.primary, close).gamma_multiply(alpha);
+    arc(sweep + gap, TAU - gap, 0.0, track);
     // The wavy arc: the part already waited.
-    arc(0.0, sweep, amp, s.primary.gamma_multiply(alpha));
+    arc(0.0, sweep, amp, indicator);
 }
 
-fn wave_geometry(waves: f32, radius: f32, stroke: f32, requested_amp: f32) -> (f32, f32) {
+/// A stroke `width` wide along `pts`, with round ends (a ring when
+/// `closed`), as one mesh with a soft rim `feather` wide. Nothing in it is
+/// drawn twice, so in a see-through colour no cap, join or seam shows
+/// darker (cap discs laid over a stroke did, as two dots where the ring
+/// closes).
+fn ribbon(pts: &[egui::Pos2], width: f32, closed: bool, color: Color32, feather: f32) -> egui::Shape {
+    use std::f32::consts::PI;
+    let n = pts.len();
+    if n < 2 || width <= 0.0 || color.a() == 0 {
+        return egui::Shape::Noop;
+    }
+    // Thinner than the rim: fainter instead.
+    let (core, color) = if width < feather {
+        (0.0, color.gamma_multiply(width / feather))
+    } else {
+        (width * 0.5 - feather * 0.5, color)
+    };
+    let rim = core + feather;
+    let left = |i: usize| {
+        let (a, b) = if closed {
+            (pts[(i + n - 1) % n], pts[(i + 1) % n])
+        } else {
+            (pts[i.saturating_sub(1)], pts[(i + 1).min(n - 1)])
+        };
+        let d = (b - a).normalized();
+        vec2(-d.y, d.x)
+    };
+    let mut mesh = egui::Mesh::default();
+    // Per point: outer left, core left, core right, outer right.
+    for (i, p) in pts.iter().enumerate() {
+        let l = left(i);
+        mesh.colored_vertex(*p + l * rim, Color32::TRANSPARENT);
+        mesh.colored_vertex(*p + l * core, color);
+        mesh.colored_vertex(*p - l * core, color);
+        mesh.colored_vertex(*p - l * rim, Color32::TRANSPARENT);
+    }
+    let segments = if closed { n } else { n - 1 };
+    for i in 0..segments {
+        let (a, b) = (4 * i as u32, 4 * ((i + 1) % n) as u32);
+        for (x, y) in [(0, 1), (1, 2), (2, 3)] {
+            mesh.add_triangle(a + x, a + y, b + x);
+            mesh.add_triangle(a + y, b + y, b + x);
+        }
+    }
+    if !closed {
+        // Half discs from the left edge round the back to the right one,
+        // sharing the end's own vertices.
+        for (i, back) in [(0, -(pts[1] - pts[0]).normalized()), (n - 1, (pts[n - 1] - pts[n - 2]).normalized())] {
+            let (p, l, at) = (pts[i], left(i), 4 * i as u32);
+            let centre = mesh.vertices.len() as u32;
+            mesh.colored_vertex(p, color);
+            let steps = ((rim * PI * 0.5).ceil() as usize).clamp(4, 24);
+            let (mut core_was, mut rim_was) = (at + 1, at);
+            for j in 1..=steps {
+                let (c, r) = if j == steps {
+                    (at + 2, at + 3)
+                } else {
+                    let a = PI * j as f32 / steps as f32;
+                    let d = l * a.cos() + back * a.sin();
+                    let c = mesh.vertices.len() as u32;
+                    mesh.colored_vertex(p + d * core, color);
+                    mesh.colored_vertex(p + d * rim, Color32::TRANSPARENT);
+                    (c, c + 1)
+                };
+                mesh.add_triangle(centre, core_was, c);
+                mesh.add_triangle(core_was, c, r);
+                mesh.add_triangle(core_was, r, rim_was);
+                (core_was, rim_was) = (c, r);
+            }
+        }
+    }
+    egui::Shape::mesh(mesh)
+}
+
+/// The crests and their height for a ring of `radius` and `stroke`: at
+/// most `height` × 12 % of a wavelength, and never so high that the thick
+/// stroke folds over itself.
+fn wave_geometry(waves: f32, radius: f32, stroke: f32, requested_amp: f32, height: f32) -> (f32, f32) {
     let waves = waves.clamp(3.0, 16.0).round();
     let wavelength = std::f32::consts::TAU * radius / waves;
     // Also bound the curvature so a thick stroke never folds over itself:
     // for r = R + A·sin(nθ) the crest/trough curvature is ≈ (R ± A·n²)/R²,
     // which must stay under 2/stroke.
     let fold = (2.0 * radius * radius / stroke - radius).max(0.0) / (waves * waves + 1.0);
-    let amp = requested_amp.max(0.0).min(wavelength * 0.12).min(fold);
+    let amp = requested_amp.max(0.0).min(wavelength * 0.12 * height.clamp(0.5, 2.0)).min(fold);
     (waves, amp)
 }
 
@@ -1504,17 +1834,19 @@ mod tests {
                 assert!(got.0 == want.0 && close(got.1, want.1) && close(got.2, want.2), "{got:?}");
             }
             // Lit as one: the whole unit's light comes from its start.
-            use nikgob_motion::tokens::{FAST_EFFECTS, SLOW_EFFECTS};
-            assert_eq!(unit_light(SLOW_EFFECTS, 1.5, 1.4), 0.0);
-            assert!(unit_light(SLOW_EFFECTS, 1.5, 1.6) > 0.5);
-            assert!(unit_light(SLOW_EFFECTS, 1.5, 1.9) > 0.99);
+            let pace = Pace::of(&Prefs::default());
+            let (karaoke, focus) = (pace.rise(Style::Karaoke), pace.rise(Style::Focus));
+            let lit = |rise: f32, pos: f32| light_up(pos - 1.5, rise);
+            assert_eq!(lit(focus, 1.4), 0.0);
+            assert!(lit(focus, 1.6) > 0.5);
+            assert!(lit(focus, 1.9) > 0.99);
             // Karaoke fills a word quicker than focus brightens it.
-            assert!(unit_light(FAST_EFFECTS, 1.5, 1.55) > unit_light(SLOW_EFFECTS, 1.5, 1.55));
-            assert!(unit_light(FAST_EFFECTS, 1.5, 1.7) > 0.99);
-            for spring in [FAST_EFFECTS, SLOW_EFFECTS] {
+            assert!(lit(karaoke, 1.55) > lit(focus, 1.55));
+            assert!(lit(karaoke, 1.7) > 0.99);
+            for rise in [karaoke, focus, 0.0, 0.5] {
                 let mut was = 0.0;
                 for ms in 1450..1900 {
-                    let v = unit_light(spring, 1.5, ms as f32 / 1000.0);
+                    let v = lit(rise, ms as f32 / 1000.0);
                     assert!(v >= was && v <= 1.0);
                     was = v;
                 }
@@ -1569,23 +1901,51 @@ mod tests {
         assert_eq!(Look::of(&moved), Look::of(&old));
     }
 
-    /// A word jumps as a whole over its own time (at most [`UNIT_JUMP`]):
-    /// up from rest before it, done once it is sung, never backwards.
+    /// A wave letter or word jumps at its onset: still before it, off the
+    /// line at once, over the top within a tenth of a second, then down onto
+    /// its rest height on the spring; the speed setting scales the time.
     #[test]
-    fn a_wave_word_jumps_once_over_its_time() {
-        let short = Unit { start: 2.0, end: 2.3 };
-        assert_eq!(unit_jump(short, 1.9), 0.0);
-        assert!(unit_jump(short, 2.15) > 0.3 && unit_jump(short, 2.15) < 0.7);
-        assert_eq!(unit_jump(short, 2.4), 1.0);
-        // A long held word bounces within UNIT_JUMP, not over its whole time.
-        let long = Unit { start: 2.0, end: 6.0 };
-        assert_eq!(unit_jump(long, 2.0 + UNIT_JUMP + 0.05), 1.0);
-        let mut was = 0.0;
-        for ms in 1900..3000 {
-            let v = unit_jump(long, ms as f32 / 1000.0);
-            assert!(v >= was);
-            was = v;
+    fn a_wave_piece_jumps_on_its_onset_and_settles() {
+        assert_eq!(jump_height(-0.1, 1.0), 0.0);
+        assert_eq!(jump_height(-ONSET_LEAD, 1.0), 0.0);
+        // Up at once: a fifth of the way within 10 ms of the onset lead.
+        assert!(jump_height(-ONSET_LEAD + 0.01, 1.0) > 0.2);
+        let peak = |speed: f32| {
+            (0..400).map(|ms| (ms, jump_height(ms as f32 / 1000.0 - ONSET_LEAD, speed)))
+                .fold((0, 0.0f32), |a, b| if b.1 > a.1 { b } else { a })
+        };
+        let (at, top) = peak(1.0);
+        assert!(at <= 100 && top > 1.4 && top < 1.8, "{at} ms, {top}");
+        // At rest after its settle time, whatever the speed.
+        for speed in [0.5, 1.0, 2.0] {
+            let rest = jump_height(JUMP_SETTLE / speed - ONSET_LEAD, speed);
+            assert!((rest - 1.0).abs() < 0.005, "{speed}: {rest}");
+            assert!((jump_height(5.0, speed) - 1.0).abs() < 1e-4);
         }
+        // Twice the speed: the same jump in half the time.
+        assert!((peak(2.0).1 - top).abs() < 0.02 && peak(2.0).0 * 2 <= at + 4);
+        assert!(peak(0.5).0 > at);
+    }
+
+    /// The speed settings: defaults light a word in about 60 ms and karaoke
+    /// keeps its old soft edge; the extremes are at once and slow.
+    #[test]
+    fn the_light_speed_runs_from_smooth_to_at_once() {
+        let p = Prefs::default();
+        assert!((p.lyrics_jump_speed - 1.0).abs() < 1e-6);
+        let pace = Pace::of(&p);
+        assert!(pace.rise(Style::Wave) > 0.04 && pace.rise(Style::Wave) < 0.08);
+        assert!(pace.rise(Style::Focus) > pace.rise(Style::Karaoke));
+        assert!((pace.feather(26.0) - 26.0 * 0.34).abs() < 0.5);
+        let at_once = Pace::of(&Prefs { lyrics_light_speed: 1.0, ..p.clone() });
+        assert_eq!(at_once.rise(Style::Karaoke), 0.0);
+        assert_eq!(light_up(-ONSET_LEAD + 0.001, at_once.rise(Style::Wave)), 1.0);
+        let smooth = Pace::of(&Prefs { lyrics_light_speed: 0.0, ..p.clone() });
+        assert!(smooth.rise(Style::Wave) >= 0.5 && smooth.feather(26.0) > pace.feather(26.0));
+        assert!(light_up(0.1, smooth.rise(Style::Wave)) < light_up(0.1, pace.rise(Style::Wave)));
+        // Out-of-range values are held to the slider's range.
+        let wild = Pace::of(&Prefs { lyrics_jump_speed: 9.0, lyrics_light_speed: -1.0, ..p });
+        assert_eq!((wild.jump, wild.light), (2.0, 0.0));
     }
 
     /// Every look paints a word-timed line (current, fading out, and not
@@ -1611,34 +1971,58 @@ mod tests {
     }
 
     /// Soft edges: a line deep inside is sharp and opaque; nearer an edge it
-    /// blurs and thins, and it is gone before its ink reaches the edge.
+    /// blurs and thins, gently at first, and it is gone before its ink
+    /// reaches the edge.
     #[test]
     fn soft_edges_blur_and_fade_before_the_edge() {
         let rect = Rect::from_min_size(pos2(0.0, 100.0), vec2(600.0, 500.0));
         let size = 26.0;
-        let at = |top: f32| soft_edge(top, 34.0, rect, size, 1.0);
+        let soft = Soft::of(&Prefs::default());
+        let at = |top: f32| soft_edge(top, 34.0, rect, size, soft);
         assert_eq!(at(350.0), (1.0, 0.0));
-        let (alpha, blur) = at(rect.top() + size * 0.4 + 50.0);
+        let (alpha, blur) = at(rect.top() + size * 0.4 + 40.0);
         assert!(alpha > 0.0 && alpha < 1.0 && blur > 0.0 && blur < 1.0, "{alpha} {blur}");
         // Touching the edge with its ink: invisible, both at the top and bottom.
         assert_eq!(at(rect.top() + size * 0.4).0, 0.0);
         assert_eq!(at(rect.bottom() - 34.0 - size * 0.4).0, 0.0);
         assert_eq!(at(rect.top() - 10.0), (0.0, 1.0));
-        // Opacity falls and blur grows steadily towards the edge.
+        // Opacity falls and blur grows steadily towards the edge, with no
+        // step at the band's inner end.
         let mut last = (1.0, 0.0);
         for top in (110..350).rev() {
             let (a, b) = at(top as f32);
             assert!(a <= last.0 + 1e-6 && b >= last.1 - 1e-6, "{top}");
+            assert!(last.0 - a < 0.05 && b - last.1 < 0.05, "smooth at {top}");
             last = (a, b);
         }
-        // A stronger setting reaches further in.
-        let near = rect.top() + size * 0.4 + 110.0;
-        assert_eq!(soft_edge(near, 34.0, rect, size, 0.5).0, 1.0);
-        assert!(soft_edge(near, 34.0, rect, size, 1.5).0 < 1.0);
+        // A deeper band reaches further in; a gentler fade keeps a line
+        // brighter at the same place.
+        let near = rect.top() + size * 0.4 + 90.0;
+        let deep = Soft { depth: 0.3, ..soft };
+        assert!(soft_edge(near, 34.0, rect, size, deep).0 < soft_edge(near, 34.0, rect, size, Soft { depth: 0.1, ..soft }).0);
+        let mid = rect.top() + size * 0.4 + soft.band(rect) * 0.5;
+        assert!(soft_edge(mid, 34.0, rect, size, Soft { fade: 0.0, ..soft }).0 > soft_edge(mid, 34.0, rect, size, Soft { fade: 1.0, ..soft }).0);
         // A short view keeps its middle sharp.
         let small = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 160.0));
-        assert_eq!(soft_edge(60.0, 30.0, small, 20.0, 1.5), (1.0, 0.0));
+        assert_eq!(soft_edge(60.0, 30.0, small, 20.0, Soft { depth: 0.1, ..soft }), (1.0, 0.0));
+        // The current line rests inside the sharp part.
+        let (top, bottom) = soft.sharp(rect);
+        assert!(top > rect.top() && bottom < rect.bottom() && bottom - top > rect.height() * 0.6);
     }
+
+    /// The mega view's control has its own row under the lyrics, with air
+    /// between: no line or hover lies under it.
+    #[test]
+    fn the_control_has_a_row_of_its_own_under_the_lyrics() {
+        let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 500.0));
+        let (lyrics, row) = control_row(area);
+        let row = row.unwrap();
+        assert_eq!(row.bottom(), area.bottom());
+        assert_eq!(row.height(), Size::Xs.height());
+        assert!(lyrics.bottom() + CONTROL_GAP <= row.top() + 1e-3);
+        assert!(!lyrics.intersects(row));
+    }
+
 
     /// The lead moves what is painted, within ±0.5 s and never before 0;
     /// the default lights a little before the voice.
@@ -1651,7 +2035,7 @@ mod tests {
         assert!(close(led_s(10.0, 3.0), 10.5));
         assert!(close(led_s(10.0, -3.0), 9.5));
         assert_eq!(led(at(0.2), -0.5), Duration::ZERO);
-        assert!((Prefs::default().lyrics_lead - 0.1).abs() < 1e-6);
+        assert!((Prefs::default().lyrics_lead - nikgob_view::LYRICS_LEAD).abs() < 1e-6);
         // A line starting at 10 s is current 0.1 s before the voice.
         let lines = [line(5.0, Some(9.0), "раз"), line(10.0, Some(12.0), "два")];
         let items = display_lines(&lines);
@@ -1723,6 +2107,9 @@ mod tests {
         state.player.status = Status::Paused;
         state.player.position = Duration::from_secs(1);
         state.lyrics.lines = vec![line(3.0, None, "Свет из окна")];
+        // Without soft edges the line rests at the anchor of the part above
+        // the control's row.
+        state.prefs.lyrics_soft_edges = false;
         let mut target = pos2(0.0, 0.0);
         let mut commands = Vec::new();
         for frame in 0..3 {
@@ -1737,8 +2124,8 @@ mod tests {
             }, |ui| {
                 // Short lines are centred in mega mode: aim at the middle.
                 target = pos2(ui.cursor().left() + ui.available_width() * 0.5,
-                    ui.cursor().top() + ui.available_height() * MEGA.anchor);
-                show(ui, &state, 0.0, true, &mut commands);
+                    ui.cursor().top() + (ui.available_height() - Size::Xs.height() - CONTROL_GAP) * MEGA.anchor);
+                show(ui, &state, 0.0, true, 0.0, &mut commands);
             });
             output.textures_delta.clear();
         }
@@ -1820,7 +2207,7 @@ mod tests {
                 }
                 assert!(letters.next().is_none());
                 let line = Rect::from_min_size(pos2(0.0, 0.0), g.size());
-                karaoke(painter, &g, line, 80.0, size * 0.35, Color32::GRAY, Color32::WHITE);
+                karaoke(painter, &g, line, 80.0, Pace::of(&Prefs::default()).feather(size), Color32::GRAY, Color32::WHITE);
                 timed_line(painter, &g, line, &timing, Duration::from_secs(4), true, 1.0, size, Look { style: Style::Karaoke, words: false }, Color32::GRAY, Color32::WHITE, &Prefs::default());
             }
         });
@@ -1952,7 +2339,8 @@ mod tests {
         let mut delay = Duration::ZERO;
         for i in 0..20 {
             let mut output = ctx.run_ui(egui::RawInput { time: Some(i as f64 * 0.5), ..Default::default() }, |ui| {
-                show(ui, &state, 0.8, true, &mut Vec::new());
+                show(ui, &state, 0.8, true, 0.0, &mut Vec::new());
+
             });
             delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
             output.textures_delta.clear();
@@ -1981,17 +2369,21 @@ mod tests {
 
     #[test]
     fn wave_crests_round_and_clamp_without_folding_thick_strokes() {
-        assert_eq!(wave_geometry(2.0, 13.0, 3.0, 0.0), (3.0, 0.0));
-        assert_eq!(wave_geometry(6.49, 13.0, 3.0, 0.0).0, 6.0);
-        assert_eq!(wave_geometry(6.5, 13.0, 3.0, 0.0).0, 7.0);
-        assert_eq!(wave_geometry(20.0, 13.0, 3.0, 0.0).0, 16.0);
+        assert_eq!(wave_geometry(2.0, 13.0, 3.0, 0.0, 1.0), (3.0, 0.0));
+        assert_eq!(wave_geometry(6.49, 13.0, 3.0, 0.0, 1.0).0, 6.0);
+        assert_eq!(wave_geometry(6.5, 13.0, 3.0, 0.0, 1.0).0, 7.0);
+        assert_eq!(wave_geometry(20.0, 13.0, 3.0, 0.0, 1.0).0, 16.0);
         // The default thin ring (6 crests) gets a wave about half its stroke.
-        assert!(wave_geometry(6.0, 13.0, 3.0, 100.0).1 >= 1.5);
+        assert!(wave_geometry(6.0, 13.0, 3.0, 100.0, 1.0).1 >= 1.5);
+        // «Высота волн» raises the cap with it (up to folding).
+        assert!(wave_geometry(6.0, 13.0, 3.0, 100.0, 2.0).1 > wave_geometry(6.0, 13.0, 3.0, 100.0, 1.0).1 * 1.5);
+        assert!(wave_geometry(6.0, 13.0, 3.0, 100.0, 0.5).1 < wave_geometry(6.0, 13.0, 3.0, 100.0, 1.0).1);
         for radius in [13.0, 16.0, 24.0] {
             for stroke in [3.0, 6.0, 9.0] {
                 for count in 3..=16 {
-                    let (waves, amp) = wave_geometry(count as f32, radius, stroke, 100.0);
+                    let (waves, amp) = wave_geometry(count as f32, radius, stroke, 100.0, 1.0);
                     assert!(amp <= std::f32::consts::TAU * radius / waves * 0.12);
+                    assert!(wave_geometry(count as f32, radius, stroke, 100.0, 2.0).1 <= std::f32::consts::TAU * radius / waves * 0.24);
                     // Exact polar curvature at a crest and a trough stays
                     // under the stroke's half-width limit (no folding).
                     for (r, d2) in [(radius + amp, -amp * waves * waves), (radius - amp, amp * waves * waves)] {
@@ -2002,6 +2394,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The meshes a wait paints at `pos` of a ten-second wait, and its texts.
+    fn wait_shapes(ctx: &egui::Context, prefs: &Prefs, pos: f32, appear: f32) -> (Vec<Arc<egui::Mesh>>, usize) {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            waiting(ui.painter(), Rect::from_min_size(pos2(20.0, 20.0), vec2(56.0, 42.0)), 1.0,
+                Duration::ZERO, Duration::from_secs(10), Duration::from_secs_f32(pos), appear, false, 1.0, 1.0, prefs);
+        });
+        output.textures_delta.clear();
+        let meshes = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Mesh(mesh) => Some(mesh.clone()), _ => None,
+        }).collect();
+        let texts = output.shapes.iter().filter(|shape| matches!(shape.shape, egui::Shape::Text(_))).count();
+        (meshes, texts)
     }
 
     #[test]
@@ -2016,32 +2422,30 @@ mod tests {
             theme.install(&ctx);
             for form in 0..4 {
                 let prefs = Prefs { lyrics_gap_style: form, lyrics_countdown: false, ..Prefs::default() };
-                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                    waiting(ui.painter(), Rect::from_min_size(pos2(20.0, 20.0), vec2(56.0, 42.0)), 1.0,
-                        Duration::ZERO, Duration::from_secs(10), Duration::from_secs(5), true, false, 1.0, 1.0, &prefs);
-                });
-                output.textures_delta.clear();
-                let mut paths = 0;
-                for shape in output.shapes {
-                    match shape.shape {
-                        egui::Shape::Path(path) => {
-                            let egui::epaint::ColorMode::Solid(color) = path.stroke.color else { panic!("ring must use a solid color"); };
-                            assert_eq!(color.a(), 255);
-                            assert_eq!(path.stroke.width, if form >= 2 { 6.0 } else { 3.0 });
-                            paths += 1;
-                        }
-                        egui::Shape::Circle(circle) => assert_eq!(circle.fill.a(), 255),
-                        _ => {}
-                    }
+                // Mid-wait: the track and the indicator, each one opaque
+                // mesh (a solid core inside a clear rim), as wide as the form.
+                let (meshes, _) = wait_shapes(&ctx, &prefs, 5.0, 1.0);
+                assert_eq!(meshes.len(), 2);
+                for mesh in &meshes {
+                    assert!(mesh.vertices.iter().all(|v| v.color.a() == 255 || v.color.a() == 0));
+                    let core = mesh.vertices[1].pos.distance(mesh.vertices[2].pos);
+                    assert!((core - if form >= 2 { 5.0 } else { 2.0 }).abs() < 0.05, "{form}: {core}");
                 }
-                assert_eq!(paths, 2);
+                // Leaving: one closed ring (no ends) that fades as one.
+                let (meshes, _) = wait_shapes(&ctx, &prefs, 9.8, 1.0);
+                assert_eq!(meshes.len(), 1);
+                assert!(meshes[0].vertices.iter().all(|v| v.color.a() < 255));
+                assert_eq!(meshes[0].indices.len(), meshes[0].vertices.len() / 4 * 18, "a ring has no caps");
+                assert!(wait_shapes(&ctx, &prefs, 10.0, 1.0).0.is_empty());
+                // Before it has come, nothing.
+                assert!(wait_shapes(&ctx, &prefs, 5.0, 0.0).0.is_empty());
             }
             let prefs = Prefs { lyrics_countdown: true, ..Prefs::default() };
             for remaining in [2.95, 2.5, 1.5, 0.5] {
                 let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                     waiting(ui.painter(), Rect::from_min_size(pos2(20.0, 20.0), vec2(56.0, 42.0)), 1.0,
                         Duration::ZERO, Duration::from_secs(10), Duration::from_secs_f32(10.0 - remaining),
-                        true, false, 0.0, 1.0, &prefs);
+                        1.0, false, 0.0, 1.0, &prefs);
                 });
                 output.textures_delta.clear();
                 let texts: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
@@ -2054,9 +2458,148 @@ mod tests {
                 if reduced_motion || remaining != 2.95 { assert_eq!(size, 28.0); }
                 else { assert!(size > 28.0); }
                 if remaining <= 2.5 {
-                    assert!(!output.shapes.iter().any(|shape| matches!(shape.shape, egui::Shape::Path(_))));
+                    assert!(!output.shapes.iter().any(|shape| matches!(shape.shape, egui::Shape::Mesh(_))));
                 }
             }
+        }
+    }
+
+    /// A stroke is one mesh: an open one has a half disc on each end built
+    /// on the end's own vertices, a ring none; no triangle is drawn twice.
+    #[test]
+    fn ribbons_are_one_mesh_with_round_ends_or_closed() {
+        let pts: Vec<egui::Pos2> = (0..10).map(|i| pos2(i as f32 * 3.0, (i as f32 * 0.5).sin() * 4.0)).collect();
+        let egui::Shape::Mesh(open) = ribbon(&pts, 6.0, false, Color32::WHITE, 1.0) else { panic!() };
+        let steps = ((3.5f32 * std::f32::consts::PI * 0.5).ceil() as usize).clamp(4, 24);
+        assert_eq!(open.vertices.len(), 4 * pts.len() + 2 * (1 + 2 * (steps - 1)));
+        assert_eq!(open.indices.len(), 18 * (pts.len() - 1) + 2 * 9 * steps);
+        let mut seen = std::collections::HashSet::new();
+        for t in open.indices.chunks(3) {
+            let mut t = [t[0], t[1], t[2]];
+            t.sort_unstable();
+            assert!(seen.insert(t), "{t:?} twice");
+        }
+        // The caps reach half the width past the ends.
+        let reach = open.vertices.iter().filter(|v| v.color.a() == 255).map(|v| v.pos.x).fold(f32::MIN, f32::max);
+        assert!((reach - (27.0 + 2.5)).abs() < 0.6, "{reach}");
+        let ring: Vec<egui::Pos2> = (0..24).map(|i| {
+            let a = std::f32::consts::TAU * i as f32 / 24.0;
+            pos2(a.cos() * 20.0, a.sin() * 20.0)
+        }).collect();
+        let egui::Shape::Mesh(closed) = ribbon(&ring, 4.0, true, Color32::WHITE, 1.0) else { panic!() };
+        assert_eq!((closed.vertices.len(), closed.indices.len()), (4 * 24, 18 * 24));
+        // Too thin for its rim: fainter, not thinner than a pixel.
+        let egui::Shape::Mesh(thin) = ribbon(&pts, 0.5, false, Color32::WHITE, 1.0) else { panic!() };
+        assert!(thin.vertices.iter().all(|v| v.color.a() < 255));
+        assert!(matches!(ribbon(&pts[..1], 4.0, false, Color32::WHITE, 1.0), egui::Shape::Noop));
+    }
+
+    /// The wait's room follows the indicator's size and its waves' height.
+    #[test]
+    fn the_wait_room_grows_with_the_ring() {
+        let p = Prefs::default();
+        assert!((p.lyrics_gap_size - 1.0).abs() < 1e-6 && (p.lyrics_gap_height - 1.0).abs() < 1e-6);
+        assert_eq!(wait_height(&p), 34.0);
+        assert_eq!(wait_height(&Prefs { lyrics_gap_style: 2, ..p.clone() }), 42.0);
+        assert!(wait_height(&Prefs { lyrics_gap_size: 1.5, ..p.clone() }) > 50.0);
+        assert!(wait_height(&Prefs { lyrics_gap_height: 2.0, ..p.clone() }) > 34.0);
+        // A flat ring has no waves to make room for.
+        assert_eq!(wait_height(&Prefs { lyrics_gap_style: 0, lyrics_gap_height: 2.0, ..p.clone() }), 34.0);
+        // It grows in on its spring, from nothing.
+        assert_eq!(ring_in(0.0), 0.0);
+        assert!(ring_in(0.1) > 0.3 && ring_in(1.0) > 0.99);
+    }
+
+    /// Every glyph is drawn once and whole: the pieces a front splits it
+    /// into tile its quad and its texture exactly, a uniform glyph stays
+    /// one quad, the light only falls along the line, and a lift moves the
+    /// whole glyph.
+    #[test]
+    fn inked_glyphs_are_whole_and_lit_along_the_line() {
+        with_painter(|painter| {
+            let g = fixed_layout(painter, "Слышишь этот ритм", 26.0);
+            let quads: usize = g.rows.iter().flat_map(|r| &r.row.glyphs).filter(|gl| !gl.uv_rect.is_nothing()).count();
+            let plain = inked(&g, |_| Ink::solid(Color32::WHITE, 0.0));
+            assert_eq!(plain.rows[0].row.visuals.mesh.vertices.len(), 4 * quads);
+            let lifted = inked(&g, |_| Ink::solid(Color32::WHITE, 3.0));
+            for (a, b) in plain.rows[0].row.visuals.mesh.vertices.iter().zip(&lifted.rows[0].row.visuals.mesh.vertices) {
+                assert!((a.pos.y - b.pos.y - 3.0).abs() < 1e-4 && a.pos.x == b.pos.x && a.uv == b.uv);
+            }
+            let front = Ink { lift: 0.0, base: Color32::BLACK, lit: Color32::WHITE, head: 70.0, feather: 9.0 };
+            let lit = inked(&g, |_| front);
+            let v = &lit.rows[0].row.visuals.mesh.vertices;
+            assert!(v.len() > 4 * quads, "the front splits the glyphs it crosses");
+            let src = &g.rows[0].row.visuals.mesh.vertices;
+            let mut at = 0;
+            for gl in g.rows[0].row.glyphs.iter().filter(|gl| !gl.uv_rect.is_nothing()) {
+                let q = &src[gl.first_vertex as usize..gl.first_vertex as usize + 4];
+                // This glyph's pieces: from its left edge to its right edge,
+                // each starting where the one before ended.
+                assert_eq!(v[at].pos, q[0].pos);
+                let mut x = q[0].pos.x;
+                loop {
+                    assert_eq!(v[at].pos.x, x);
+                    x = v[at + 1].pos.x;
+                    assert!(x > v[at].pos.x);
+                    // Brightness never rises to the right.
+                    assert!(v[at + 1].color.r() <= v[at].color.r());
+                    at += 4;
+                    if x >= q[1].pos.x {
+                        break;
+                    }
+                }
+                assert_eq!(v[at - 3].pos, q[1].pos);
+                assert_eq!(v[at - 3].uv, q[1].uv);
+            }
+            assert_eq!(at, v.len());
+            // Lit before the front, unlit past it.
+            assert_eq!(v[0].color, Color32::WHITE);
+            assert_eq!(v[v.len() - 1].color, Color32::BLACK);
+            // A hard front (no feather) stays hard inside the glyph it cuts.
+            let hard = inked(&g, |_| Ink { feather: 0.0, ..front });
+            assert!(hard.rows[0].row.visuals.mesh.vertices.iter().all(|v| v.color == Color32::WHITE || v.color == Color32::BLACK));
+        });
+    }
+
+    /// A timing slip (a piece timed before one written ahead of it) waits
+    /// for that one: letters and words light in the order they are written.
+    #[test]
+    fn onsets_follow_the_written_order() {
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(3.0), "ab cd ef");
+            l.words = vec![word(1.0, 1.5, "ab "), word(0.8, 1.2, "cd "), word(2.0, 2.5, "ef")];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let t = Timing::new(&l, &g).unwrap();
+            let onsets: Vec<f32> = t.onsets.iter().flatten().copied().collect();
+            assert_eq!(onsets.len(), 6);
+            assert!(onsets.windows(2).all(|w| w[0] <= w[1]), "{onsets:?}");
+            assert!(close(onsets[2], onsets[1]) && close(onsets[4], 2.0));
+            assert!(t.units.windows(2).all(|w| w[0].start <= w[1].start && w[1].start <= w[1].end));
+            // In order, they are the letters' own starts.
+            let mut l = l;
+            l.words[1] = word(1.5, 2.0, "cd ");
+            let t = Timing::new(&l, &fixed_layout(painter, &l.text, 26.0)).unwrap();
+            let own: Vec<f32> = t.letter_times.iter().flatten().map(|(a, _)| *a).collect();
+            assert_eq!(t.onsets.iter().flatten().copied().collect::<Vec<_>>(), own);
+        });
+    }
+
+    /// The painted position holds against a small step back while playing
+    /// (the clock correcting itself), and follows seeks and pauses.
+    #[test]
+    fn the_painted_position_never_steps_back_by_a_hair() {
+        let ms = Duration::from_millis;
+        assert_eq!(steady_pos(Some(ms(10_000)), ms(9_800), true), ms(10_000));
+        assert_eq!(steady_pos(Some(ms(10_000)), ms(10_020), true), ms(10_020));
+        assert_eq!(steady_pos(Some(ms(10_000)), ms(9_000), true), ms(9_000), "a seek");
+        assert_eq!(steady_pos(Some(ms(10_000)), ms(9_800), false), ms(9_800), "paused");
+        assert_eq!(steady_pos(None, ms(5), true), ms(5));
+        let mut last = None;
+        let mut was = Duration::ZERO;
+        for t in [100, 200, 180, 300, 290, 400] {
+            let p = steady_pos(last, ms(t), true);
+            assert!(p >= was);
+            (last, was) = (Some(p), p);
         }
     }
 }

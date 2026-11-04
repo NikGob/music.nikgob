@@ -10,14 +10,14 @@ macro_rules! note {
     };
 }
 
-/// The 16 columns of a [`crate::TrackRow`]; needs aliases `t` (track) and `r` (release).
+/// The 17 columns of a [`crate::TrackRow`]; needs aliases `t` (track) and `r` (release).
 macro_rules! track_row_cols {
     () => {
         "t.id, t.title, t.artist_display, r.title, t.release_id, r.cover_ref, t.disc_no, \
          t.track_no, t.duration_ms, t.active_quality, t.active_codec, t.active_kind, \
          t.has_local, \
          EXISTS(SELECT 1 FROM likes lk WHERE lk.target_kind = 'track' \
-                AND lk.target_id = t.id AND lk.deleted = 0),          t.artist_credit,          (SELECT s.locator FROM source s WHERE s.track_id = t.id AND s.is_active = 1                 AND s.kind = 'youtube')"
+                AND lk.target_id = t.id AND lk.deleted = 0),          t.artist_credit,          (SELECT s.locator FROM source s WHERE s.track_id = t.id AND s.is_active = 1                 AND s.kind = 'youtube'),          (SELECT q.verdict || '|' || q.origin || '|' || coalesce(q.made_from, '')             FROM source s JOIN source_quality q ON q.source_id = s.id            WHERE s.track_id = t.id AND s.is_active = 1 AND q.failed IS NULL)"
     };
 }
 

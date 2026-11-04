@@ -69,6 +69,13 @@
 //! - `fake:share` — «Загрузки → Раздача» busy (`route:seeding`): three
 //!   torrents seeding, Soulseek sharing with uploads running, queued, done
 //!   and cut off, and today's and overall totals.
+//! - `fake:upgrade-offer` — a better copy of a library track found and
+//!   waiting in «Подтверди» («FLAC вместо MP3 320»), and «Хочу скачать»
+//!   with better copies looked for in each state (`route:confirm`,
+//!   `route:wishlist`).
+//! - `fake:quality:real` / `fake:quality:fake` — what plays is a FLAC whose
+//!   check found it genuine, or made from an MP3 ~128 (its rows and the
+//!   «Качество» section of «Инфо» say so, with the spectrum and its cut).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -108,6 +115,9 @@ pub struct Fakes {
     lyrics_state: Option<String>,
     history_refusals: bool,
     share: bool,
+    upgrade_offer: bool,
+    /// `fake:quality:fake` (true) / `fake:quality:real`.
+    quality: Option<bool>,
 }
 
 impl Fakes {
@@ -146,6 +156,9 @@ impl Fakes {
             "lyrics-gap:words" => self.lyrics_gap = Some(true),
             "history-refusals" => self.history_refusals = true,
             "share" => self.share = true,
+            "upgrade-offer" => self.upgrade_offer = true,
+            "quality:real" => self.quality = Some(false),
+            "quality:fake" => self.quality = Some(true),
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             c if c.starts_with("lyrics-home:") => self.lyrics_home = Some(c["lyrics-home:".len()..].to_owned()),
             c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
@@ -184,6 +197,8 @@ impl Fakes {
             || self.lyrics_state.is_some()
             || self.history_refusals
             || self.share
+            || self.upgrade_offer
+            || self.quality.is_some()
     }
 
     /// `state` with the fakes laid over it.
@@ -205,6 +220,10 @@ impl Fakes {
         }
         if self.share {
             share(&mut s);
+        }
+        if self.upgrade_offer {
+            s.downloads.confirm = vec![upgrade_offer()];
+            s.downloads.wishlist = upgrades();
         }
         if self.keep
             && let Some(t) = s.player.current.clone()
@@ -364,6 +383,9 @@ impl Fakes {
         if let Some(name) = self.lyrics_state.as_deref() {
             lyrics_state(&mut s, name);
         }
+        if let Some(fake) = self.quality {
+            sound_quality(&mut s, fake);
+        }
         if self.link
             && let Some(p) = s.playlist.as_mut()
         {
@@ -377,6 +399,70 @@ impl Fakes {
         }
         s
     }
+}
+
+/// What plays is a FLAC, genuine or made from an MP3 ~128
+/// (`fake:quality:*`): its rows, the «Инфо» line and «Качество» section,
+/// as the runtime fills them from a stored check.
+fn sound_quality(s: &mut ViewState, fake: bool) {
+    use nikgob_core::model::Codec;
+    use nikgob_core::quality::{QualityCheck, SPECTRUM_POINTS, SoundOrigin, Verdict, cutoff_text, label, verdict_text};
+    let (verdict, cutoff) = if fake { (Verdict::Transcoded, 16_020.0) } else { (Verdict::Genuine, 22_050.0) };
+    let nyquist = 22_050.0_f32;
+    // A music-like slope; a lossy encoder's lowpass is a cliff.
+    let spectrum_db: Vec<f32> = (0..SPECTRUM_POINTS)
+        .map(|i| {
+            let hz = nyquist * (i as f32 + 0.5) / SPECTRUM_POINTS as f32;
+            let body = -32.0 - 2.6 * (hz / 1000.0) - 6.0 * (hz / 400.0 + 1.0).log10() + 1.5 * (i as f32 * 0.7).sin();
+            if fake && hz > cutoff { body - 58.0 - (hz - cutoff) / 400.0 } else { body }
+        })
+        .collect();
+    let check = QualityCheck {
+        verdict,
+        cutoff_hz: cutoff,
+        steepness_db: if fake { 61.4 } else { 0.0 },
+        origin: SoundOrigin::estimate(verdict, cutoff),
+        sample_rate: 44_100,
+        spectrum_db: spectrum_db.clone(),
+        made_from: None,
+        file_size: 26_733_824,
+        file_mtime: 0,
+        checked_at: 0,
+    };
+    let row = label(&Codec::Flac, None, Some(&check.summary()));
+    for t in [s.player.current.as_mut(), s.queue.current.as_mut()].into_iter().flatten() {
+        t.quality = Some(row.clone());
+        t.has_local = true;
+        t.source = Some(nikgob_view::SourceKind::LocalFile);
+    }
+    s.player.audio_service = None;
+    s.player.audio_quality = None;
+    s.info.source = Some("Локальный файл".into());
+    s.info.quality = Some(format!("{row} · 16/44.1"));
+    s.info.path = Some(r"C:\Music\Пошлая Молли\2017 - 8 способов как бросить\07 - Молли.flac".into());
+    let facts = [
+        ("Кодек", "FLAC"),
+        ("Контейнер", "FLAC"),
+        ("Битрейт", "1058 кбит/с"),
+        ("Частота", "44,1 кГц"),
+        ("Разрядность", "16 бит"),
+        ("Каналы", "стерео"),
+        ("Длительность", "2:32"),
+        ("Размер", "25,5 МБ"),
+        ("Откуда", "Скачан или добавлен файлом"),
+    ];
+    s.info.sound = Some(nikgob_view::SoundDetails {
+        facts: facts.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+        verdict: Some(verdict_text(&Codec::Flac, Some(1058), &check)),
+        warning: fake,
+        band: cutoff_text(&check),
+        spectrum: Some(nikgob_view::SpectrumPlot {
+            db: spectrum_db,
+            nyquist_hz: nyquist,
+            cutoff_hz: fake.then_some(cutoff),
+        }),
+        pending: false,
+    });
 }
 
 /// «Загрузки → История» of wished downloads the sources turned away
@@ -569,7 +655,8 @@ fn lyrics_home(l: &mut nikgob_view::LyricsView, name: &str) {
             l.lines = l.texts[0].lines.clone();
             l.made = false;
             l.home = LyricsHome::Online;
-            l.savable = false;
+            // A found text can be saved too.
+            l.savable = true;
         }
         "saved" | "stream-saved" => {
             l.stream = name == "stream-saved";
@@ -581,8 +668,8 @@ fn lyrics_home(l: &mut nikgob_view::LyricsView, name: &str) {
         }
         "stream" => l.stream = true,
         "clip" => {
+            // Its text can still be kept in the artist's folder.
             l.craft = LyricsCraft::No("Подсветку не сделать: в клипе неясно, какая песня".into());
-            l.savable = false;
         }
         _ => {}
     }
@@ -722,7 +809,8 @@ fn lyrics_state(s: &mut ViewState, arg: &str) {
         l.home = home;
         l.craft = craft;
         l.made = made.is_some();
-        l.savable = made.is_some() && l.craft == LyricsCraft::Ready;
+        // Any text not on the computer yet can be saved there.
+        l.savable = home != LyricsHome::Computer;
         l.lines = made.cloned().unwrap_or(own_lines.clone());
         let finest = LyricsSync::of(&l.lines).unwrap_or(LyricsSync::Plain).max(own);
         l.shows = [LyricsSync::Word, LyricsSync::Line, LyricsSync::Plain].into_iter().filter(|s| *s <= finest).collect();
@@ -975,7 +1063,63 @@ fn row(n: u128, title: &str, artist: &str, album: &str, status: St) -> WishlistR
         missing: 0,
         has_copy: false,
         source: (status == St::Downloading).then(|| "RuTracker".into()),
+        upgrade: None,
     }
+}
+
+/// A better copy of a library track in «Подтверди» (`fake:upgrade-offer`),
+/// as the runtime words it (streams/wishlist/upgrade.rs).
+fn upgrade_offer() -> nikgob_view::Confirm {
+    let option = |label: &str, detail: &str, recommended| nikgob_view::ConfirmOption {
+        label: label.into(),
+        detail: detail.into(),
+        recommended,
+    };
+    nikgob_view::Confirm {
+        id: (1 << 47) | 1,
+        title: "8 способов как бросить... — Пошлая Молли".into(),
+        origin: "Качество лучше · трек".into(),
+        question: "Заменить файл трека на это?".into(),
+        options: vec![
+            option(
+                "Пошлая Молли - 8 способов как бросить... (2017) [FLAC]",
+                "FLAC вместо MP3 320 · 31 МБ · 9 сид. · RuTracker",
+                true,
+            ),
+            option("Пошлая Молли — 8 способов как бросить...", "FLAC 24/48 вместо MP3 320 · Qobuz", false),
+        ],
+        skip_label: "Оставить как есть".into(),
+        accept_label: "Заменить".into(),
+    }
+}
+
+/// «Хочу скачать» with better copies looked for, one in each state
+/// (`fake:upgrade-offer`).
+fn upgrades() -> WishlistView {
+    let up = |n: u128, title: &str, artist: &str, album: &str, status: St, scope: WishlistScope, words: &str| {
+        let mut r = row(n, title, artist, album, status);
+        r.origin = WishlistOrigin::Upgrade;
+        r.scope = scope;
+        r.can_save_from_youtube = false;
+        r.next_try = None;
+        r.upgrade = (!words.is_empty()).then(|| words.to_owned());
+        r
+    };
+    let items = vec![
+        up(21, "8 способов как бросить...", "Пошлая Молли", "8 способов как бросить...", St::Confirm, WishlistScope::Track, "MP3 320 · нашёл лучше — подтверди замену"),
+        up(22, "ЛЕГЕНДАРНАЯ ПЫЛЬ", "MORGENSHTERN", "ЛЕГЕНДАРНАЯ ПЫЛЬ", St::Searching, WishlistScope::Album, "MP3 128 у 9 из 10 · ищу lossless"),
+        up(23, "Cadillac", "MORGENSHTERN", "MILLION DOLLAR: HAPPINESS", St::Downloading, WishlistScope::Track, ""),
+        up(24, "Розовое вино", "Элджей, Feduk", "Sayonara детка", St::NoTorrent, WishlistScope::Track, "OPUS 160 · лучше пока нет, поищу снова через 6 дн."),
+        up(25, "Hyperballad", "Björk", "Post", St::Done, WishlistScope::Track, "было MP3 128 — теперь FLAC"),
+    ];
+    let mut counts: Vec<(St, u32)> = Vec::new();
+    for r in &items {
+        match counts.iter_mut().find(|(s, _)| *s == r.status) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((r.status, 1)),
+        }
+    }
+    WishlistView { loaded: true, items, by_album: Vec::new(), by_artist: Vec::new(), counts, can_search: true }
 }
 
 /// A track in «Подтверди» with three offers, the first named at length.

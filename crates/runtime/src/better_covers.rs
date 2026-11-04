@@ -790,6 +790,7 @@ mod tests {
             liked: false,
             credit: Default::default(),
             youtube_id: None,
+            check: None,
         };
         let w = clip_want(&row);
         assert_eq!(w.titles.first().map(String::as_str), Some("火星人"), "{:?}", w.titles);

@@ -260,7 +260,7 @@ fn forward(events: Receiver<Event>, links: Links, generation: u64) {
                 let mapped = match e {
                     Event::Started { id, .. } => Some(PlaybackEvent::Started { id }),
                     Event::TrackChanged { to, .. } => Some(PlaybackEvent::TrackChanged { to }),
-                    Event::Position { id, pos } => Some(PlaybackEvent::Position { id, position: pos }),
+                    Event::Position { id, pos, at } => Some(PlaybackEvent::PositionAt { id, position: pos, at }),
                     Event::Paused => Some(PlaybackEvent::Paused),
                     Event::Resumed => Some(PlaybackEvent::Resumed),
                     Event::Ended { id } => Some(PlaybackEvent::Ended { id }),

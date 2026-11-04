@@ -1,5 +1,5 @@
 //! Songs the user deleted from an album are «не нужны» (table `unwanted`,
-//! migration 0021): the deletion is a strong «not for me» for that song,
+//! migration 0019): the deletion is a strong «not for me» for that song,
 //! never for its artist or the rest of its album.
 //!
 //! * [`note_unwanted_in`]: a track deleted into the Trash (or purged at

@@ -27,7 +27,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use nikgob_core::model::{
-    ArtistId, Release, ReleaseId, Source, SourceOrigin, TrackId, WishlistItem, WishlistScope, WishlistStatus,
+    ArtistId, Release, ReleaseId, Source, SourceOrigin, TrackId, WishlistItem, WishlistOrigin, WishlistScope,
+    WishlistStatus,
 };
 use nikgob_library::{Library, TrackRow};
 use nikgob_metadata::text::album_key;
@@ -421,9 +422,13 @@ impl Importer {
                 report.artists_removed.push(n);
             }
         }
-        // «Скачано» once every track of the album has its file.
+        // «Скачано» once every track of the album has its file (an album
+        // that looks for a better copy has its files from the start).
         for item in lib.list_wishlist()? {
-            if item.scope != WishlistScope::Album || matches!(item.status, WishlistStatus::Done | WishlistStatus::Dismissed) {
+            if item.scope != WishlistScope::Album
+                || item.origin == WishlistOrigin::Upgrade
+                || matches!(item.status, WishlistStatus::Done | WishlistStatus::Dismissed)
+            {
                 continue;
             }
             let Some(r) = wished_release(lib, &item)?.map(|r| r.id) else { continue };

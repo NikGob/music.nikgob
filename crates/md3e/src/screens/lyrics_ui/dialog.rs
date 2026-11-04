@@ -166,6 +166,9 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
     let text_h = (inner.bottom() - ui.cursor().top() - below).max(120.0);
     super::text_card(ui, vec2(inner.width(), text_h), state, out);
     let save = l.savable && busy.is_none();
+    // Keeping the text leads for timing the player made, or when there is
+    // nothing else to do; else making timing does.
+    let save_lead = save && (super::save_first(l) || actions.is_empty());
     if timing {
         ui.add_space(16.0);
         ui.allocate_ui_with_layout(vec2(inner.width(), head_h), Layout::left_to_right(Align::Center), |ui| {
@@ -198,7 +201,7 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
                 // The finest timing is the primary action unless there is
                 // timing to keep; lines beside it.
                 for (i, (target, label)) in actions.iter().rev().enumerate() {
-                    let style = if i == 0 && !save { Style::Filled } else { Style::Tonal };
+                    let style = if i == 0 && !save_lead { Style::Filled } else { Style::Tonal };
                     let b = Button::new(*label).style(style).size(Size::S).id_salt(("lyrics-dialog-make", *label));
                     if ui.add(b).clicked() {
                         if super::failed(state).is_some() {
@@ -224,8 +227,9 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
             if ui.add(Button::new("Готово").style(Style::Text).size(Size::S).id_salt("lyrics-dialog-done")).clicked() {
                 close(ui.ctx());
             }
-            // Timing made and checked here: keeping it is the primary action.
-            if save && ui.add(Button::new(super::save_label(state)).style(Style::Filled).size(Size::S).id_salt("lyrics-dialog-save")).clicked() {
+            // Keeping the text: any text not on the computer yet.
+            let style = if save_lead { Style::Filled } else { Style::Tonal };
+            if save && ui.add(Button::new(super::save_label(state)).style(style).size(Size::S).id_salt("lyrics-dialog-save")).clicked() {
                 super::save(state, out);
             }
         });

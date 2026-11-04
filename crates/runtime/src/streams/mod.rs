@@ -497,6 +497,7 @@ impl Worker {
             self.streaming.last_wish_tick = Some(Instant::now());
             self.publish_stream_cache();
             self.wish_tick();
+            self.upgrade_tick();
         }
     }
 

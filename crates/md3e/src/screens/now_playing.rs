@@ -1093,7 +1093,9 @@ pub fn show(
         for (slot, alpha) in [NpSlot::Lyrics, NpSlot::Queue, NpSlot::Info].into_iter().zip(content_alpha) {
             if alpha <= 0.001 { continue; }
             let width = if slot == NpSlot::Lyrics { content.width() } else { content.width().min(720.0) };
-            let area = Rect::from_min_size(content.min, vec2(width, content.height()));
+            // The lyrics' soft top band may paint into the air above them.
+            let bleed = if slot == NpSlot::Lyrics { mega.bleed } else { 0.0 };
+            let area = Rect::from_min_max(pos2(content.left(), content.top() - bleed), pos2(content.left() + width, content.bottom()));
             let mut cui = mega_ui.new_child(UiBuilder::new().max_rect(area).id_salt(("np-content", slot as u8)));
             cui.set_clip_rect(area.intersect(ui.clip_rect()));
             cui.multiply_opacity(alpha);
@@ -1101,7 +1103,7 @@ pub fn show(
             match slot {
                 NpSlot::Lyrics => {
                     let _p = crate::prof::scope("np.lyrics");
-                    if super::lyrics::show(&mut cui, state, pages.levels_bass, true, out) {
+                    if super::lyrics::show(&mut cui, state, pages.levels_bass, true, bleed, out) {
                         pages.open_setting_group(super::lyrics_ui::SETTINGS);
                         closed = true;
                     }
@@ -1323,6 +1325,10 @@ struct MegaLayout {
     cover: Rect,
     info: Rect,
     content: Rect,
+    /// How far above `content` the lyrics' soft top band may paint (into
+    /// air under the header that nothing else uses there): blurred lines
+    /// fade out in it, so the sharp part of the lyrics keeps its height.
+    bleed: f32,
 }
 
 /// Wide: the cover column and the content form one group centred in the
@@ -1362,6 +1368,10 @@ fn mega_layout(body: Rect) -> MegaLayout {
                 pos2(content_left, body.top()),
                 pos2(content_left + lyrics_w, body.bottom() - vpad - LYRICS_CONTROL_LIFT),
             ),
+            // The 16 px under the header and its row's lower half (its
+            // buttons sit at the window's right, above the lyrics' end;
+            // what reaches there is nearly faded out).
+            bleed: 16.0 + 24.0,
         }
     } else {
         MegaLayout {
@@ -1369,6 +1379,8 @@ fn mega_layout(body: Rect) -> MegaLayout {
             cover: Rect::from_min_size(body.min, vec2(56.0, 56.0)),
             info: Rect::from_min_size(pos2(body.left(), body.bottom() - TRANSPORT_H), vec2(body.width(), TRANSPORT_H)),
             content: Rect::from_min_max(pos2(body.left(), body.top() + 72.0), pos2(body.right(), body.bottom() - TRANSPORT_H - 16.0)),
+            // The air under the title beside the small cover.
+            bleed: 12.0,
         }
     }
 }
@@ -1547,14 +1559,17 @@ fn info(
             + 4.0 * button.group_gap()
     };
     let tiers: &[(Size, Size)] = if compact {
-        &[(Size::S, Size::M)]
+        &[(Size::S, Size::M), (Size::Xs, Size::S)]
     } else {
         &[(Size::M, Size::L), (Size::S, Size::L), (Size::S, Size::M)]
     };
+    // The compact layouts keep like and dislike at the transport row's
+    // ends (under the progress bar's ends): the group leaves them room.
+    let ends = if compact { 2.0 * (IconButton::new(Icon::Favorite).natural_width() + 8.0) } else { 0.0 };
     let (button_size, hero_size) = tiers
         .iter()
         .copied()
-        .find(|&(b, h)| row_w(b, h) <= col.width())
+        .find(|&(b, h)| row_w(b, h) + ends <= col.width())
         .unwrap_or(tiers[tiers.len() - 1]);
     let group_w = row_w(button_size, hero_size);
     let controls = snap(
@@ -1618,9 +1633,30 @@ fn info(
         out.push(Command::CycleRepeat);
     }
     if compact {
+        // Like at the left end, dislike at the right, as in the full
+        // layout's row under the transport; here level with the transport
+        // (Now Playing with the lyrics, the queue or the details open).
+        let Some(t) = current else { return };
+        let ends = Rect::from_min_size(pos2(col.left(), controls.top()), vec2(col.width(), controls.height()));
+        let mut lui = ui.new_child(
+            UiBuilder::new().max_rect(ends).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("np-compact-like"),
+        );
+        if lui.add(IconButton::new(Icon::Favorite).selected(t.liked).tooltip("Нравится (Ctrl+L)").id_salt("np-like-compact")).clicked() {
+            out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
+        }
+        if state.prefs.dislike_button {
+            let disliked = state.dislikes.track(t.id);
+            let mut dui = ui.new_child(
+                UiBuilder::new().max_rect(ends).layout(egui::Layout::right_to_left(egui::Align::Center)).id_salt("np-compact-dislike"),
+            );
+            if dui.add(IconButton::new(Icon::ThumbDown).selected(disliked).tooltip("Не нравится").id_salt("np-dislike-compact")).clicked() {
+                out.push(Command::Dislike { track: t.id, dislike: !disliked, sure: false, relike: false });
+            }
+        }
         return;
     }
     y += CONTROLS_H + 16.0;
+
 
     // Actions: like and add on the left; volume and dislike on the right,
     // so like and dislike sit at opposite ends of the row.

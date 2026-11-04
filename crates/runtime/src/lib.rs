@@ -7,6 +7,7 @@
 
 mod align;
 mod analysis;
+mod quality;
 mod better_covers;
 mod convert;
 mod enrich;
@@ -86,6 +87,9 @@ pub enum PlaybackEvent {
     /// The preloaded next item took over at the sample boundary.
     TrackChanged { to: u64 },
     Position { id: u64, position: Duration },
+    /// [`Self::Position`] as read at `at`: it moved on while the event
+    /// waited to be taken, which is made up for.
+    PositionAt { id: u64, position: Duration, at: Instant },
     Paused,
     Resumed,
     Ended { id: u64 },
@@ -491,6 +495,8 @@ struct Worker {
     streaming: streams::Streams,
     /// The background sound analysis and the vector index it fills.
     analysis: analysis::FileAnalysis,
+    /// The background spectrum check of the files (fake lossless).
+    quality: quality::QualityJob,
     /// Mixes, radio, discovery (stage 4).
     recs: recs::RecsState,
     /// Albums whose larger cover was looked up in this run.
@@ -531,6 +537,7 @@ impl Worker {
         let soulseek = soulseek::SoulseekService::new(config.library_dir.clone(), slsk_state);
         let streaming = streams::Streams::new(internal.clone());
         let analysis = analysis::FileAnalysis::new(internal.clone());
+        let quality = quality::QualityJob::new(internal.clone());
         let recs = recs::RecsState::new(internal.clone());
         let models_dir = config.import.as_ref().and_then(|i| i.models_dir.clone());
         let internal_tx = internal.clone();
@@ -593,6 +600,7 @@ impl Worker {
             qualities: Vec::new(),
             streaming,
             analysis,
+            quality,
             hd_asked: Default::default(),
             better_asked: Default::default(),
             album_queue: None,
@@ -624,6 +632,7 @@ impl Worker {
         self.publish_sources();
         self.start_streams();
         self.start_analysis();
+        self.start_quality();
         self.start_align();
         self.dislikes_load(false);
         loop {
@@ -669,6 +678,7 @@ impl Worker {
                 }
             }
             self.analysis.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
+            self.quality.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
             self.align_playing(matches!(self.status, Status::Playing | Status::Buffering));
         }
         self.save_session();
@@ -679,6 +689,7 @@ impl Worker {
         self.sharing.save(true);
         self.streaming.analysis.shutdown();
         self.analysis.shutdown();
+        self.quality.shutdown();
         self.align.shutdown();
     }
 
@@ -1686,6 +1697,12 @@ impl Worker {
     }
 
     fn playback_event(&mut self, ev: PlaybackEvent) {
+        // How long a position report waited to be taken (a busy worker can
+        // hold it for a while): the sound went on meanwhile.
+        let (ev, late) = match ev {
+            PlaybackEvent::PositionAt { id, position, at } => (PlaybackEvent::Position { id, position }, at.elapsed().min(POSITION_SNAP)),
+            ev => (ev, Duration::ZERO),
+        };
         match ev {
             PlaybackEvent::Started { id } => {
                 if self.restarted == Some(id) {
@@ -1775,13 +1792,15 @@ impl Worker {
                     // a seek we did not hear about, a long stall) is jumped.
                     let now = Instant::now();
                     let ours = self.position_at_instant(now);
-                    match follow(ours, position, stalled, self.rate) {
+                    // Where the sound is now (a stalled one stands still).
+                    let heard = if stalled { position } else { position + late };
+                    match follow(ours, heard, stalled, self.rate) {
                         Follow::Keep => {}
                         Follow::Snap => {
                             if self.jumped_at.elapsed() < POSITION_SETTLE {
                                 return;
                             }
-                            self.position = position;
+                            self.position = heard;
                             self.position_at = now;
                             self.rate = if stalled { 0.0 } else { 1.0 };
                             self.publish_player();
@@ -1795,7 +1814,8 @@ impl Worker {
                     }
                 }
             }
-            PlaybackEvent::Paused | PlaybackEvent::Resumed => {}
+            // Taken as a position above.
+            PlaybackEvent::Paused | PlaybackEvent::Resumed | PlaybackEvent::PositionAt { .. } => {}
             PlaybackEvent::Duration { id, duration } => {
                 // The library's length wins; the engine's is for a track
                 // without one (a stream whose service did not say).
@@ -2003,6 +2023,10 @@ impl Worker {
         let row = current.as_ref().map(|r| self.res.track(r));
         let mut info = self.res.info(current.as_ref(), src.as_ref());
         if audio_quality.is_some() {
+            // «Качество» of a stream: what it gives.
+            if let (Some(d), Some(q)) = (info.sound.as_mut(), audio_quality.as_ref()) {
+                d.facts.insert(0, ("Поток".into(), q.clone()));
+            }
             info.quality = audio_quality;
         }
         self.publish(|s| {
@@ -2270,6 +2294,9 @@ impl Worker {
         self.publish(|s| s.prefs = *p.clone());
         self.save_prefs();
         self.import_prefs(&p);
+        if (old.check_fake_lossless, old.convert_fake_lossless) != (p.check_fake_lossless, p.convert_fake_lossless) {
+            self.quality_prefs();
+        }
         self.align_settings();
         if (old.lyrics_words_playing, old.lyrics_words_all, old.lyrics_lines_auto, old.lyrics_check, old.lyrics_recognize, old.lyrics_streams)
             != (p.lyrics_words_playing, p.lyrics_words_all, p.lyrics_lines_auto, p.lyrics_check, p.lyrics_recognize, p.lyrics_streams)

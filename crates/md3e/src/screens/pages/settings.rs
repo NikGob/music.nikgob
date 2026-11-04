@@ -692,6 +692,19 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
                 p.lyrics_wave_jump = v;
             }
         });
+        row(ui, Id::JumpSpeed, "Скорость прыжка", None, |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-jump-speed", p.lyrics_jump_speed, (0.5, 2.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_jump_speed = v;
+            }
+        });
+    }
+    // Focus by letters brightens the whole line: nothing lights up by itself.
+    if p.lyrics_style != 1 || p.lyrics_by_words {
+        row(ui, Id::LightSpeed, "Скорость подсветки", Some("0% — плавно, 100% — сразу"), |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-light-speed", p.lyrics_light_speed, (0.0, 1.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_light_speed = v;
+            }
+        });
     }
     row(ui, Id::LyricsLead, "Опережение подсветки", Some("0 — точно по голосу, меньше 0 — позже него"), |ui| {
         if let Some(v) = range_slider(ui, "set-lyrics-lead", p.lyrics_lead, (-0.5, 0.5), 0.05, |v| format!("{v:+.2} с").replace('.', ",")) {
@@ -718,9 +731,19 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         ui.add(Switch::new(&mut p.lyrics_soft_edges).id_salt("set-lyrics-soft-edges"));
     });
     if p.lyrics_soft_edges {
-        row(ui, Id::LyricsSoftStrength, "Сила мягких краёв", None, |ui| {
-            if let Some(v) = range_slider(ui, "set-lyrics-soft", p.lyrics_soft_strength, (0.5, 1.5), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+        row(ui, Id::LyricsSoftDepth, "Глубина мягких краёв", Some("Какая часть текста сверху и снизу расплывается"), |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-soft-depth", p.lyrics_soft_depth, (0.08, 0.4), 0.01, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_soft_depth = v;
+            }
+        });
+        row(ui, Id::LyricsSoftStrength, "Сила размытия", Some("0% — строки только тают, без размытия"), |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-soft", p.lyrics_soft_strength, (0.0, 1.5), 0.05, |v| format!("{:.0}%", v * 100.0)) {
                 p.lyrics_soft_strength = v;
+            }
+        });
+        row(ui, Id::LyricsSoftFade, "Затухание", Some("Больше — строки тают раньше, дальше от края"), |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-soft-fade", p.lyrics_soft_fade, (0.0, 1.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_soft_fade = v;
             }
         });
     }
@@ -733,7 +756,17 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
                 p.lyrics_gap_waves = v;
             }
         });
+        row(ui, Id::LyricsGapHeight, "Высота волн", None, |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-gap-height", p.lyrics_gap_height, (0.5, 2.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_gap_height = v;
+            }
+        });
     }
+    row(ui, Id::LyricsGapSize, "Размер индикатора", None, |ui| {
+        if let Some(v) = range_slider(ui, "set-lyrics-gap-size", p.lyrics_gap_size, (0.8, 1.5), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+            p.lyrics_gap_size = v;
+        }
+    });
     row(ui, Id::LyricsCountdown, "Обратный отсчёт 3-2-1 в конце паузы", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_countdown).id_salt("set-lyrics-countdown"));
     });
@@ -773,6 +806,9 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     });
     row(ui, Id::ReducedMotion, "Меньше движения", Some("Без отскоков, вращения и волн"), |ui| {
         ui.add(Switch::new(&mut p.reduced_motion).id_salt("set-rm"));
+    });
+    row(ui, Id::Tooltips, "Подсказки при наведении", None, |ui| {
+        ui.add(Switch::new(&mut p.tooltips).id_salt("set-tooltips"));
     });
     row(ui, Id::FpsLimit, "Лимит кадров", Some(&format!("{} FPS", p.fps_limit)), |ui| {
         if let Some(v) = range_slider(ui, "set-fps", p.fps_limit as f32, (30.0, 144.0), 1.0, |v| format!("{v:.0}")) {
@@ -872,9 +908,6 @@ fn lyrics_align(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Com
     group(ui, "Что подсвечивать само");
     row(ui, Id::LyricsLinesAuto, "Подсвечивать строки, если у текста нет подсветки", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_lines_auto).id_salt("set-lyrics-lines"));
-    });
-    row(ui, Id::LyricsWordsPlaying, "Подсвечивать по словам песню, которая играет", None, |ui| {
-        ui.add(Switch::new(&mut p.lyrics_words_playing).id_salt("set-lyrics-words-playing"));
     });
     let words = (p.lyrics_words_all && a.total > 0).then(|| format!("Готово {} из {}", a.done.min(a.total), a.total));
     row(ui, Id::LyricsWordsAll, "Заранее подсвечивать по словам всю библиотеку", words.as_deref(), |ui| {
@@ -1076,7 +1109,12 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
     row(ui, Id::ToastTime, "Уведомления на экране", None, |ui| choice(ui, Id::ToastTime, p));
 
     group(ui, "Текст песен");
+    // Word highlighting is the default experience: its switch comes first.
+    row(ui, Id::LyricsWordsPlaying, "Подсветка по словам", Some("Плеер сам расставляет слова по голосу в песне, которая играет"), |ui| {
+        ui.add(Switch::new(&mut p.lyrics_words_playing).id_salt("set-lyrics-words-playing"));
+    });
     row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", None, |ui| {
+
         ui.add(Switch::new(&mut p.save_found_lyrics).id_salt("set-save-lyrics"));
     });
     row(ui, Id::LyricsReturn, &format!("После прокрутки рукой возвращаться к текущей строке через {:.0} с", p.lyrics_return_s), None, |ui| {
@@ -1186,6 +1224,9 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
     });
     row(ui, Id::FakeFlac, "Проверять «фейковый» FLAC", Some("Находит FLAC, сделанные из MP3"), |ui| {
         ui.add(Switch::new(&mut p.check_fake_lossless).id_salt("set-fake"));
+    });
+    row(ui, Id::FakeConvert, "Превращать «фейковый» FLAC в MP3", Some("Без новых потерь, старый файл — в Корзину"), |ui| {
+        ui.add(Switch::new(&mut p.convert_fake_lossless).id_salt("set-fake-convert"));
     });
     if !pages.metadata_synced {
         pages.metadata_contact = p.metadata_contact.clone();

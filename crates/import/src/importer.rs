@@ -42,6 +42,7 @@ use crate::identity::{
 use crate::layout::LayoutInput;
 use crate::sanitize::long_path;
 use crate::spectrum::Verdict;
+use crate::quality::{Mp3Encoder, check_of, file_stamp};
 use crate::store::Store;
 use crate::tags::{self, FileInfo, TagSet};
 use crate::trash::trash_file;
@@ -752,6 +753,7 @@ impl Importer {
             year: analyzed.tags.year,
             track_no: analyzed.tags.track_no,
             duration_ms: Some(analyzed.info.duration_ms()),
+            quality: Some(quality_line(&analyzed)),
         };
         let payload = Payload {
             origin: analyzed.origin.clone(),
@@ -781,6 +783,7 @@ impl Importer {
             duration_ms: payload.tags.duration_ms,
             options: payload.choices.iter().map(|c| c.option(&payload.tags, &path)).collect(),
             wishlist,
+            quality: payload.tags.quality.clone(),
         };
         lock(&self.inner.pending).insert(
             id,
@@ -826,6 +829,7 @@ impl Importer {
                 duration_ms: p.tags.duration_ms,
                 options: p.choices.iter().map(|c| c.option(&p.tags, &path)).collect(),
                 wishlist: row.wishlist,
+                quality: p.tags.quality.clone(),
             };
             lock(&self.inner.active).insert(path);
             lock(&self.inner.pending).insert(
@@ -1125,8 +1129,11 @@ fn analyze(cfg: &ImportConfig, path: &Path, origin: SourceOrigin) -> Result<Anal
     };
     let score = if origin == SourceOrigin::Stream {
         nikgob_core::model::score::SAVED_STREAM
+    } else if fake_lossless {
+        // As what its content really is: an MP3 of about that bitrate.
+        nikgob_core::quality::fake_score(sound_origin(&audio))
     } else {
-        quality_score(&info.codec, info.bitrate_kbps, rate, depth, fake_lossless)
+        quality_score(&info.codec, info.bitrate_kbps, rate, depth, false)
     };
     Ok(Analyzed {
         path: path.to_path_buf(),
@@ -1139,6 +1146,23 @@ fn analyze(cfg: &ImportConfig, path: &Path, origin: SourceOrigin) -> Result<Anal
         targets: Arc::default(),
         force_track: None,
     })
+}
+
+/// The likely origin of an analysed file's sound (unknown without a check).
+fn sound_origin(audio: &AudioAnalysis) -> nikgob_core::quality::SoundOrigin {
+    audio.spectrum.map_or(nikgob_core::quality::SoundOrigin::Unknown, |s| {
+        nikgob_core::quality::SoundOrigin::estimate(s.verdict, s.cutoff_hz)
+    })
+}
+
+/// What a file really is, for «Подтверди»: «FLAC из MP3 ~320», «MP3 320».
+fn quality_line(a: &Analyzed) -> String {
+    let check = a.audio.spectrum.map(|s| nikgob_core::quality::CheckSummary {
+        verdict: s.verdict,
+        origin: nikgob_core::quality::SoundOrigin::estimate(s.verdict, s.cutoff_hz),
+        made_from: None,
+    });
+    nikgob_core::quality::label(&a.info.codec, a.info.bitrate_kbps, check.as_ref())
 }
 
 /// What [`find_existing`] needs about an analyzed file.
@@ -1178,6 +1202,8 @@ struct Prepared {
     /// Lossless input encoded to Opus (so the original is a master).
     converted: bool,
     original_hash: Option<String>,
+    /// A fake lossless input written as MP3 (no master: it is not lossless).
+    fake_mp3: bool,
 }
 
 /// Lossless -> Opus, everything else copied as is (never lossy to lossy). The
@@ -1186,9 +1212,16 @@ fn convert(inner: &Inner, a: &Analyzed, album_dir: &Path) -> Result<Prepared> {
     fsutil::create_dir_all(album_dir)?;
     // Audio saved from a stream is kept exactly as it came.
     let lossless = a.info.codec.is_lossless() && a.origin != SourceOrigin::Stream;
-    let encode = lossless && (!a.fake_lossless || inner.cfg.convert_fake_lossless);
+    let encode = lossless && !a.fake_lossless;
+    // A fake becomes an MP3 that keeps all it has; without ffmpeg it stays
+    // as it is (labelled for what it is).
+    let mp3 = (lossless && a.fake_lossless && inner.cfg.convert_fake_lossless)
+        .then(Mp3Encoder::find)
+        .flatten();
     let ext = if encode {
         "opus".to_owned()
+    } else if mp3.is_some() {
+        "mp3".to_owned()
     } else {
         a.path
             .extension()
@@ -1205,6 +1238,10 @@ fn convert(inner: &Inner, a: &Analyzed, album_dir: &Path) -> Result<Prepared> {
             },
         )?;
         Some(fsutil::hash_file(&a.path)?)
+    } else if let Some(enc) = &mp3 {
+        let target = nikgob_core::quality::Mp3Target::for_origin(sound_origin(&a.audio));
+        enc.encode(&a.path, &tmp, target)?;
+        None
     } else {
         fsutil::copy_file(&a.path, &tmp)?;
         None
@@ -1214,6 +1251,7 @@ fn convert(inner: &Inner, a: &Analyzed, album_dir: &Path) -> Result<Prepared> {
         ext,
         converted: encode,
         original_hash,
+        fake_mp3: mp3.is_some(),
     })
 }
 
@@ -1731,7 +1769,16 @@ fn commit_locked(
         source.file_hash = Some(file_hash);
         source.size_bytes = Some(size);
         source.origin = a.origin.clone();
-        lib.add_source(&source)?;
+        let stored = lib.add_source(&source)?;
+        // What the check found, kept for the labels and the quality panel;
+        // a converted file's check is of the original it was made from.
+        if let Some(report) = &a.audio.spectrum {
+            let made_from = (prep.converted || prep.fake_mp3).then(|| a.info.codec.clone());
+            let check = check_of(report, a.audio.spectrum_db.clone(), a.audio.spec.sample_rate, made_from, file_stamp(&dest));
+            if let Err(e) = lib.put_quality_check(stored.id, &check) {
+                log::warn!("the check of {} is not stored: {e}", dest.display());
+            }
+        }
 
         // From here on the track is in the library: nothing below may fail the import.
         // Palette and ambient texture, once per release (or when the cover grew).
@@ -1765,12 +1812,17 @@ fn commit_locked(
             },
             _ => None,
         };
-        // A lossy file taken from the Inbox now lives in the library.
-        if !prep.converted
-            && a.path.starts_with(&cfg.inbox_dir)
-            && let Err(e) = fsutil::remove_file(&a.path)
-        {
-            log::warn!("cannot remove imported {}: {e}", a.path.display());
+        // A lossy file taken from the Inbox now lives in the library; the
+        // fake lossless file an MP3 was made from goes to the Trash.
+        if !prep.converted && a.path.starts_with(&cfg.inbox_dir) {
+            let gone = if prep.fake_mp3 {
+                trash_file(&cfg.trash_dir, &a.path).map(|_| ())
+            } else {
+                fsutil::remove_file(&a.path)
+            };
+            if let Err(e) = gone {
+                log::warn!("cannot remove imported {}: {e}", a.path.display());
+            }
         }
         Ok(Done {
             track_id: track.id,

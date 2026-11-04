@@ -96,6 +96,10 @@ pub struct TrackRow {
     /// The video id of the active source when it is a YouTube one.
     #[serde(default)]
     pub youtube_id: Option<String>,
+    /// What the spectrum check of the active source found (a "FLAC" made
+    /// from an MP3); `None` until it is checked.
+    #[serde(default)]
+    pub check: Option<nikgob_core::quality::CheckSummary>,
 }
 
 impl TrackRow {

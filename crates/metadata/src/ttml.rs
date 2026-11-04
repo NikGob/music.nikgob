@@ -498,6 +498,46 @@ pub fn serialize_ttml(lines: &[LyricLine]) -> String {
     out
 }
 
+/// Writes a text without timing as TTML (`itunes:timing="None"`): a
+/// `<div>` a stanza, a `<p>` a line, no times. [`parse_ttml_plain`]
+/// reads it back with its stanzas.
+pub fn serialize_ttml_plain(text: &str) -> String {
+    let mut out = String::from(
+        "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:itunes=\"http://music.apple.com/lyric-ttml-internal\" itunes:timing=\"None\">\n<body>\n",
+    );
+    let text = text.replace("\r\n", "\n");
+    for stanza in text.split("\n\n").map(str::trim).filter(|s| !s.is_empty()) {
+        out.push_str("<div>\n");
+        for line in stanza.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            out.push_str(&format!("<p>{}</p>\n", escape(line)));
+        }
+        out.push_str("</div>\n");
+    }
+    out.push_str("</body></tt>\n");
+    out
+}
+
+/// The text of a TTML without timing (`itunes:timing="None"`), stanzas
+/// apart by an empty line; `None` for a timed (or malformed) one.
+pub fn parse_ttml_plain(xml: &str) -> Option<String> {
+    let doc = Document::parse(xml.trim_start_matches('\u{feff}')).ok()?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "tt" || attr(root, "timing") != Some("None") {
+        return None;
+    }
+    let lines_of = |n: Node<'_, '_>| -> Vec<String> {
+        n.descendants().filter(|p| is_named(*p, "p")).map(|p| squash(&all_text(p))).filter(|l| !l.is_empty()).collect()
+    };
+    let body = child_named(root, "body")?;
+    let divs: Vec<Node<'_, '_>> = body.descendants().filter(|n| is_named(*n, "div")).collect();
+    let stanzas: Vec<String> = if divs.is_empty() { vec![lines_of(body)] } else { divs.into_iter().map(lines_of).collect() }
+        .into_iter()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.join("\n"))
+        .collect();
+    (!stanzas.is_empty()).then(|| stanzas.join("\n\n"))
+}
+
 /// ` begin=".." end=".."`.
 fn times(out: &mut String, begin: Duration, end: Option<Duration>) {
     out.push_str(&format!(" begin=\"{}\"", clock(begin)));
@@ -540,6 +580,14 @@ mod tests {
 
     fn ms(v: u64) -> Duration {
         Duration::from_millis(v)
+    }
+
+    #[test]
+    fn a_text_without_timing_reads_back_with_its_stanzas() {
+        let text = "Первая строка & <вторая>\nТретья\n\nПрипев";
+        let xml = serialize_ttml_plain(text);
+        assert_eq!(parse_ttml_plain(&xml).as_deref(), Some(text));
+        assert!(parse_ttml_plain(&serialize_ttml(&[LyricLine::new(ms(1000), "a")])).is_none(), "a timed one is not plain");
     }
 
     const HEAD: &str = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" xmlns:amll="http://www.example.com/ns/amll" itunes:timing="Word">"#;

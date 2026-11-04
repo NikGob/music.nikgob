@@ -68,6 +68,8 @@ pub(crate) enum Internal {
     Stream(crate::streams::Msg),
     /// The background sound analysis, see [`crate::analysis`].
     Analysis(crate::analysis::Msg),
+    /// The background spectrum check, see [`crate::quality`].
+    Quality(crate::quality::Msg),
     /// Recommendations (stage 4), see [`crate::recs`].
     Recs(crate::recs::Msg),
     SeedStopped(Vec<nikgob_torrent::TorrentStatus>),
@@ -445,6 +447,10 @@ impl ImportService {
                 if let Some(ms) = item.duration_ms {
                     origin.push_str(&format!(" · {}", fmt_duration(Duration::from_millis(ms.into()))));
                 }
+                // What the file really is («FLAC из MP3 ~320»).
+                if let Some(q) = &item.quality {
+                    origin.push_str(&format!(" · {q}"));
+                }
                 // The file's own tags come first; the best other answer is
                 // the one to take.
                 let recommended = item
@@ -708,6 +714,7 @@ impl Worker {
             Internal::TorrentAdded(r) => self.torrent_added(r),
             Internal::Stream(m) => self.stream_msg(m),
             Internal::Analysis(m) => self.analysis_msg(m),
+            Internal::Quality(m) => self.quality_msg(m),
             Internal::Recs(m) => self.recs_msg(m),
             Internal::SeedStopped(list) => self.seed_stopped(list),
             Internal::MastersMoveProgress {
@@ -807,6 +814,7 @@ impl Worker {
                 self.lyrics_imported(*track_id, path);
                 self.wish_imported(*track_id, path);
                 self.analysis.kick();
+                self.quality.kick();
             }
             ImportEvent::Duplicate { kept, path, .. } => {
                 self.lyrics_imported(*kept, path);
@@ -1164,6 +1172,7 @@ impl Worker {
             let mut cfg = old.clone();
             cfg.opus_bitrate_kbps = p.opus_bitrate;
             cfg.check_fake_lossless = p.check_fake_lossless;
+            cfg.convert_fake_lossless = p.convert_fake_lossless;
             cfg.fallback_seed_argb = p.fallback_seed;
             if !p.library_dir.as_os_str().is_empty() {
                 cfg.library_dir = p.library_dir.clone();
@@ -1179,6 +1188,7 @@ impl Worker {
             };
             let same = cfg.opus_bitrate_kbps == old.opus_bitrate_kbps
                 && cfg.check_fake_lossless == old.check_fake_lossless
+                && cfg.convert_fake_lossless == old.convert_fake_lossless
                 && cfg.fallback_seed_argb == old.fallback_seed_argb
                 && cfg.library_dir == old.library_dir
                 && cfg.inbox_dir == old.inbox_dir;
