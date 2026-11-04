@@ -1791,6 +1791,9 @@ mod tests {
         state.player.status = Status::Paused;
         state.player.position = Duration::from_secs(1);
         state.lyrics.lines = vec![line(3.0, None, "Свет из окна")];
+        // Without soft edges the line rests at the anchor of the part above
+        // the control's row.
+        state.prefs.lyrics_soft_edges = false;
         let mut target = pos2(0.0, 0.0);
         let mut commands = Vec::new();
         for frame in 0..3 {
@@ -1805,8 +1808,8 @@ mod tests {
             }, |ui| {
                 // Short lines are centred in mega mode: aim at the middle.
                 target = pos2(ui.cursor().left() + ui.available_width() * 0.5,
-                    ui.cursor().top() + ui.available_height() * MEGA.anchor);
-                show(ui, &state, 0.0, true, &mut commands);
+                    ui.cursor().top() + (ui.available_height() - Size::Xs.height() - CONTROL_GAP) * MEGA.anchor);
+                show(ui, &state, 0.0, true, 0.0, &mut commands);
             });
             output.textures_delta.clear();
         }
@@ -2020,7 +2023,8 @@ mod tests {
         let mut delay = Duration::ZERO;
         for i in 0..20 {
             let mut output = ctx.run_ui(egui::RawInput { time: Some(i as f64 * 0.5), ..Default::default() }, |ui| {
-                show(ui, &state, 0.8, true, &mut Vec::new());
+                show(ui, &state, 0.8, true, 0.0, &mut Vec::new());
+
             });
             delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
             output.textures_delta.clear();

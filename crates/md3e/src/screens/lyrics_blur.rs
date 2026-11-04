@@ -79,19 +79,26 @@ pub(crate) fn galley(painter: &Painter, pos: Pos2, g: &Arc<Galley>, color: Color
             c.items.retain(|_, b| now - b.used < KEEP_S);
         }
     }
-    if !c.items.contains_key(&(key, step)) && c.made < PER_FRAME {
-        c.made += 1;
-        if let Some((image, rect)) = make(ctx, &mut c, g, ppp, f32::from(step) * STEP) {
-            let tex = ctx.load_texture("md3e-lyrics-blur", image, TextureOptions::LINEAR);
-            c.items.insert((key, step), Blurred { tex, rect, used: now });
+    // Past this frame's budget the step waits for the next frame (one
+    // that cannot be made is not asked for again and again).
+    let mut waiting = false;
+    if !c.items.contains_key(&(key, step)) {
+        if c.made < PER_FRAME {
+            c.made += 1;
+            if let Some((image, rect)) = make(ctx, &mut c, g, ppp, f32::from(step) * STEP) {
+                let tex = ctx.load_texture("md3e-lyrics-blur", image, TextureOptions::LINEAR);
+                c.items.insert((key, step), Blurred { tex, rect, used: now });
+            }
+        } else {
+            waiting = true;
         }
     }
-    // The step asked for, else the nearest one made (the next frame makes
-    // the rest), else the line as it is.
+    // The step asked for, else the nearest one made, else the line as it is.
     let near = (0..=STEPS).flat_map(|d| [step.saturating_sub(d), step.saturating_add(d).min(STEPS)]).find(|s| *s > 0 && c.items.contains_key(&(key, *s)));
-    if near != Some(step) {
+    if waiting {
         ctx.request_repaint();
     }
+
     match near.and_then(|s| c.items.get_mut(&(key, s))) {
         Some(b) => {
             b.used = now;
