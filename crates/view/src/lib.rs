@@ -439,8 +439,9 @@ pub struct LyricsView {
     /// the computer: into the file's tags and a `.ttml` next to it, or for
     /// a song without a file into its artist's folder of the library.
     pub savable: bool,
-    /// The shown track has no file and its timing is made from its stream:
-    /// «Сохранить текст» keeps what «Что сохранять» says.
+    /// The shown track has no file (it plays from a stream): its text on
+    /// the computer is one kept in its artist's folder, and «Сохранить
+    /// текст» keeps what «Что сохранять» says.
     pub stream: bool,
 }
 

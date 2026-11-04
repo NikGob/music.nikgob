@@ -521,7 +521,7 @@ impl TrackLyrics {
             home,
             craft,
             savable,
-            stream: self.place == Place::Stream,
+            stream: self.place != Place::File,
         }
     }
 

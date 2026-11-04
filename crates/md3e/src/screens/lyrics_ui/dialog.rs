@@ -136,7 +136,7 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
             }
             for o in &l.sources {
                 let on = l.picked && l.source == Some(o.source);
-                let chip = FilterChip::new(super::name(o.source), on)
+                let chip = FilterChip::new(super::source_name(l, o.source), on)
                     .enabled(matches!(o.state, LyricsAvail::Ready(_)))
                     .id_salt(("lyrics-dialog-src", o.source.key()));
                 if ui.add(chip).clicked() && !on {

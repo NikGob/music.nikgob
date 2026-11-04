@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(files(&cfg.library_dir), Vec::<String>::new(), "nothing kept");
 
         play(&rt, clip);
-        wait(&rt, "why not", |s| s.lyrics.craft == nikgob_view::LyricsCraft::No(CLIP.into()) && !s.lyrics.stream);
+        wait(&rt, "why not", |s| s.lyrics.craft == nikgob_view::LyricsCraft::No(CLIP.into()) && s.lyrics.stream && !s.lyrics.savable);
 
         let mut off = rt.state().prefs.clone();
         off.lyrics_streams = false;
