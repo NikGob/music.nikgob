@@ -2190,7 +2190,12 @@ impl Worker {
                 if let (Some(track), Some(names)) = (item.track_id, self.streaming.wish.relabel.remove(&id)) {
                     self.relabel(track, names);
                 }
-                (WishlistStatus::Done, "Скачано".to_owned())
+                // What came, honestly: «Скачано · FLAC из MP3 ~320».
+                let got = item
+                    .track_id
+                    .and_then(|t| self.lib.get_track_row(t).ok().flatten())
+                    .and_then(|r| r.codec.as_ref().map(|c| nikgob_core::quality::row_label(c, r.check.as_ref())));
+                (WishlistStatus::Done, got.map_or_else(|| "Скачано".to_owned(), |q| format!("Скачано · {q}")))
             }
         };
         if status == WishlistStatus::Done {

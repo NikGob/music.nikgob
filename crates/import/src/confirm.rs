@@ -125,6 +125,9 @@ pub(crate) struct TagView {
     pub year: Option<i32>,
     pub track_no: Option<u32>,
     pub duration_ms: Option<u32>,
+    /// What the file really is («FLAC из MP3 ~320»).
+    #[serde(default)]
+    pub quality: Option<String>,
 }
 
 /// The json of a `confirm_item` row.

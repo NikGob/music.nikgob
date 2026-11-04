@@ -599,6 +599,37 @@ pub struct TrackInfo {
     pub source: Option<String>,
     pub path: Option<PathBuf>,
     pub tags: Vec<(String, String)>,
+    /// The «Качество» section under the rest.
+    pub sound: Option<SoundDetails>,
+}
+
+/// The «Качество» section of a track's info: the technical facts of what
+/// plays and what the spectrum check found about it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SoundDetails {
+    /// `(name, value)` lines: «Кодек», «Контейнер», «Битрейт»…
+    pub facts: Vec<(String, String)>,
+    /// The check in plain words; `None` while the file is not checked (or
+    /// for a stream, which is not).
+    pub verdict: Option<String>,
+    /// The sound is less than its format promises (a fake lossless file,
+    /// an inflated bitrate).
+    pub warning: bool,
+    /// The real band: «до 16,0 кГц».
+    pub band: Option<String>,
+    pub spectrum: Option<SpectrumPlot>,
+    /// A file not checked yet: the background check comes to it.
+    pub pending: bool,
+}
+
+/// The averaged spectrum the check judged, for a simple chart.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpectrumPlot {
+    /// dB re a full-scale sine, bands evenly spread from 0 to `nyquist_hz`.
+    pub db: Vec<f32>,
+    pub nyquist_hz: f32,
+    /// Where the content stops, when it stops before `nyquist_hz`.
+    pub cutoff_hz: Option<f32>,
 }
 
 /// One card of «Продолжить»: an album of the library, or an album of a
@@ -1238,6 +1269,10 @@ pub struct Prefs {
     pub normalization: bool,
     pub opus_bitrate: u32,
     pub check_fake_lossless: bool,
+    /// A "lossless" file found made from a lossy one becomes an MP3 that
+    /// keeps all its content really has (tags and all; the old file goes
+    /// to the Trash). Off: it stays as it is, labelled for what it is.
+    pub convert_fake_lossless: bool,
     pub library_dir: PathBuf,
     pub inbox_dir: PathBuf,
     /// Where lossless masters (`.flac` originals and `.json` sidecars) are kept.
@@ -2533,6 +2568,7 @@ impl Default for Prefs {
             normalization: true,
             opus_bitrate: 160,
             check_fake_lossless: true,
+            convert_fake_lossless: true,
             library_dir: PathBuf::new(),
             inbox_dir: PathBuf::new(),
             masters_dir: PathBuf::new(),

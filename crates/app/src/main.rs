@@ -615,6 +615,7 @@ fn main() -> eframe::Result {
         cfg.masters_dir = prefs.masters_dir.clone();
         cfg.opus_bitrate_kbps = prefs.opus_bitrate;
         cfg.check_fake_lossless = prefs.check_fake_lossless;
+        cfg.convert_fake_lossless = prefs.convert_fake_lossless;
         cfg.fallback_seed_argb = prefs.fallback_seed;
         // A demo with the real services asks the real online metadata too
         // (covers, lyrics, the graph of similar music).

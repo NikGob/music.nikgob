@@ -48,17 +48,8 @@ pub const MIN_DYNAMIC_DB: f32 = 40.0;
 pub const MIN_SIGNAL_DB: f32 = -75.0;
 pub const MIN_RATE: u32 = 40_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Verdict {
-    /// Full-band (or at least not cut like a lossy encoder).
-    Genuine,
-    /// Lossless container, lossy content.
-    Transcoded,
-    /// Hi-res container, CD-rate content.
-    Upsampled,
-    /// Too quiet, too short or too low a sample rate to tell.
-    Unknown,
-}
+/// The verdict is kept in the library, so it lives in the core.
+pub use nikgob_core::quality::Verdict;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpectrumReport {
@@ -206,9 +197,19 @@ impl SpectrumCollector {
     }
 
     pub fn finish(self) -> SpectrumReport {
+        self.finish_with_levels().0
+    }
+
+    /// The report and the averaged spectrum it was judged on, in
+    /// [`nikgob_core::quality::SPECTRUM_POINTS`] bands (for the quality
+    /// panel's chart; `None` when too few windows were usable).
+    pub fn finish_with_levels(self) -> (SpectrumReport, Option<Vec<f32>>) {
         match self.levels_db() {
-            Some(levels) => classify(&levels, self.rate, self.used),
-            None => SpectrumReport::unknown(self.used),
+            Some(levels) => (
+                classify(&levels, self.rate, self.used),
+                Some(nikgob_core::quality::downsample_db(&levels, nikgob_core::quality::SPECTRUM_POINTS)),
+            ),
+            None => (SpectrumReport::unknown(self.used), None),
         }
     }
 }
