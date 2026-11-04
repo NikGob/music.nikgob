@@ -774,6 +774,9 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     row(ui, Id::ReducedMotion, "Меньше движения", Some("Без отскоков, вращения и волн"), |ui| {
         ui.add(Switch::new(&mut p.reduced_motion).id_salt("set-rm"));
     });
+    row(ui, Id::Tooltips, "Подсказки при наведении", None, |ui| {
+        ui.add(Switch::new(&mut p.tooltips).id_salt("set-tooltips"));
+    });
     row(ui, Id::FpsLimit, "Лимит кадров", Some(&format!("{} FPS", p.fps_limit)), |ui| {
         if let Some(v) = range_slider(ui, "set-fps", p.fps_limit as f32, (30.0, 144.0), 1.0, |v| format!("{v:.0}")) {
             p.fps_limit = v as u32;

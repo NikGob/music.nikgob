@@ -1233,6 +1233,8 @@ pub struct Prefs {
     pub ambient: Ambient,
     pub fps_limit: u32,
     pub reduced_motion: bool,
+    /// Hints over buttons on hover (the settings' preview cards show anyway).
+    pub tooltips: bool,
     pub gapless: bool,
     pub crossfade_s: f32,
     pub normalization: bool,
@@ -2528,6 +2530,7 @@ impl Default for Prefs {
             ambient: Ambient::Reactive,
             fps_limit: 60,
             reduced_motion: false,
+            tooltips: false,
             gapless: true,
             crossfade_s: 0.0,
             normalization: true,

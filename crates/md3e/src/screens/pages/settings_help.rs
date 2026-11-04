@@ -86,6 +86,7 @@ pub enum SettingId {
     HomeCard,
     NpMotion,
     ReducedMotion,
+    Tooltips,
     FpsLimit,
     // Основные.
     Autostart,
@@ -345,7 +346,7 @@ impl SettingId {
             | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
             | LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow
             | LyricsGap | LyricsGapWaves | LyricsCountdown | LyricsUnit | LyricsSoftEdges | LyricsSoftStrength | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
-            | ReducedMotion | FpsLimit => {
+            | ReducedMotion | Tooltips | FpsLimit => {
                 TAB_APPEARANCE
             }
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
@@ -417,6 +418,7 @@ impl SettingId {
             HomeCard => "Большая карточка вверху Главной: альбом или серия, которую слушаешь, и рядом другие твои миры — что дослушать и что ещё не начато. Без неё Главная начинается сразу с приветствия.",
             NpMotion => "Как экран трека открывается из плеера внизу и закрывается обратно.",
             ReducedMotion => "Убирает подпрыгивания, вращения и волны во всём приложении.",
+            Tooltips => "Короткие подсказки, когда задерживаешь курсор на кнопке. Карточки с примерами в настройках показываются всегда.",
             FpsLimit => "Как часто перерисовывается экран. Меньше — тише вентилятор и дольше работает батарея.",
             Autostart => "Плеер запускается сам, когда ты входишь в Windows. То же, что строка music.nikgob в «Автозагрузке» Диспетчера задач.",
             TrayKeepWindow => "Крестик прячет окно в трей, но не закрывает его совсем: по клику на значок оно появляется сразу, там же, где было. Пока окно спрятано, оно ничего не рисует и не тратит процессор, но держит в памяти свои картинки и шрифты. Выключи — окно будет закрываться полностью и собираться заново при открытии: памяти меньше, открывается чуть дольше.",
