@@ -4,9 +4,12 @@
 //!
 //! A text the aligner checked against the track's own recording
 //! (docs/lyrics-align.md, [`crate::align`]) and found to be another song's
-//! or another version's loses to every text that fits; one that fits is
-//! shown with the word timing made from the recording, which ranks between
-//! a source's own word timing and line timing.
+//! or another version's loses to every text that fits. One that fits is
+//! shown with the word timing made from the recording when word timing is
+//! on ([`Shown`]), which ranks between a source's own word timing and line
+//! timing; else line texts keep their lines (moved when they are one shift
+//! off, made when they are another version's) and a plain text gets the
+//! made lines. Timing the user asked for is always shown.
 //! A LyricsPlus text whose generated word timing was dropped (QQ Music, see
 //! [`nikgob_metadata::lyricsplus`]) is a weak line sync: any other line
 //! sync beats it. LyricsPlus is asked with the track's full artist credit
@@ -132,7 +135,10 @@ impl Text {
         (!lines.is_empty()).then_some(Self { lines, plain: None, weak: false })
     }
 
+    /// A plain text; the zero-width spaces of texts cached before the
+    /// Genius parser dropped them are left out.
     pub(crate) fn from_plain(text: &str) -> Option<Self> {
+        let text = text.replace(['\u{200b}', '\u{feff}'], "");
         (!text.trim().is_empty()).then(|| Self { lines: Vec::new(), plain: Some(text.trim().to_owned()), weak: false })
     }
 
@@ -169,6 +175,30 @@ impl Text {
     }
 }
 
+/// What made timing is shown (from the settings).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Shown {
+    /// Word timing made from the recording for line and plain texts.
+    pub(crate) words: bool,
+    /// Line timing made from the recording for a plain text.
+    pub(crate) lines: bool,
+    /// A text heard in the recording earlier is shown (recognition is on);
+    /// off, it is neither listed nor chosen, picked or not.
+    pub(crate) heard: bool,
+}
+
+impl Default for Shown {
+    fn default() -> Self {
+        Self { words: true, lines: true, heard: true }
+    }
+}
+
+impl Shown {
+    pub(crate) fn of(p: &v::Prefs) -> Self {
+        Self { words: p.lyrics_words_playing || p.lyrics_words_all, lines: p.lyrics_lines_auto, heard: p.lyrics_recognize }
+    }
+}
+
 /// Everything known about one track's lyrics.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TrackLyrics {
@@ -186,6 +216,8 @@ pub(crate) struct TrackLyrics {
     pub(crate) checking: Option<Vec<String>>,
     /// Genius may be asked (the setting).
     pub(crate) genius: bool,
+    /// Which made timing is shown.
+    pub(crate) show: Shown,
 }
 
 impl TrackLyrics {
@@ -201,8 +233,10 @@ impl TrackLyrics {
     }
 
     /// The lines shown for `source`, and whether their timing was made by
-    /// the player: a source's own word timing stays (moved when it is one
-    /// constant shift off), everything else that fits takes the made one.
+    /// the player: what the user asked for; a source's own word timing
+    /// (moved when it is one constant shift off); with word timing on,
+    /// the made words; else a line text's own lines (moved, or the made
+    /// lines of another version) and a plain text's made lines.
     pub(crate) fn shown(&self, source: LyricsSource) -> (Vec<LyricLine>, bool) {
         use nikgob_align::fit::Timing;
         let Some(text) = self.texts.get(&source) else { return (Vec::new(), false) };
@@ -212,12 +246,26 @@ impl TrackLyrics {
         let Some(a) = self.aligned(source).filter(|a| a.fits && !a.lines.is_empty()) else {
             return (text.lines.clone(), false);
         };
-        let own_words = text.sync() >= LyricsSync::Word && !a.saved;
-        match (own_words, a.timing) {
-            (true, Timing::Fits | Timing::None) => (text.lines.clone(), false),
-            (true, Timing::Shifted) => (shift_lines(&text.lines, a.offset, a.offset_early), false),
-            _ => (a.lines.clone(), true),
+        if a.saved {
+            return (a.lines.clone(), true);
         }
+        let shifted = || shift_lines(&text.lines, a.offset, a.offset_early);
+        match (text.sync(), a.timing) {
+            (LyricsSync::Syllable | LyricsSync::Word, Timing::Fits | Timing::None) => (text.lines.clone(), false),
+            (LyricsSync::Syllable | LyricsSync::Word, Timing::Shifted) => (shifted(), false),
+            // Another version's words: the made ones, as fine as the source's.
+            (LyricsSync::Syllable | LyricsSync::Word, _) => (a.lines.clone(), true),
+            _ if self.show.words => (a.lines.clone(), true),
+            (LyricsSync::Line, Timing::Fits | Timing::None) => (text.lines.clone(), false),
+            (LyricsSync::Line, Timing::Shifted) => (shifted(), false),
+            (LyricsSync::Plain, _) if !self.show.lines => (text.lines.clone(), false),
+            _ => (crate::align::to_lines(&a.lines), true),
+        }
+    }
+
+    /// Some source has line timing (or finer) that is not another song's.
+    pub(crate) fn has_timed(&self) -> bool {
+        self.texts.iter().any(|(s, t)| *s != LyricsSource::Recognized && t.sync() > LyricsSync::Plain && !self.misfit(*s))
     }
 
     /// How good a source's text is here, higher first: fitting, then its
@@ -250,8 +298,13 @@ impl TrackLyrics {
         Some((!self.misfit(source), tier, covered, order))
     }
 
+    /// `source` may be shown: a heard text only while recognition is on.
+    fn usable(&self, source: LyricsSource) -> bool {
+        source != LyricsSource::Recognized || self.show.heard
+    }
+
     fn chosen(&self) -> Option<LyricsSource> {
-        if let Some(p) = self.pick.filter(|p| self.texts.contains_key(p)) {
+        if let Some(p) = self.pick.filter(|p| self.texts.contains_key(p) && self.usable(*p)) {
             return Some(p);
         }
         if self.texts.get(&LyricsSource::File).is_some_and(|t| t.sync() > LyricsSync::Plain)
@@ -262,6 +315,7 @@ impl TrackLyrics {
         }
         LyricsSource::ALL.into_iter()
             .filter(|s| *s != LyricsSource::File || !self.duplicate_file())
+            .filter(|s| self.usable(*s))
             .filter_map(|s| self.rank(s).map(|r| (s, r)))
             .max_by_key(|(_, r)| *r)
             .map(|(s, _)| s)
@@ -319,7 +373,7 @@ impl TrackLyrics {
         self.genius
             && !self.texts.contains_key(&LyricsSource::Genius)
             && !self.missing.contains(&LyricsSource::Genius)
-            && !self.texts.iter().any(|(s, t)| *s != LyricsSource::Recognized && t.sync() > LyricsSync::Plain && !self.misfit(*s))
+            && !self.has_timed()
     }
 
     fn duplicate_file(&self) -> bool {
@@ -372,6 +426,7 @@ impl TrackLyrics {
         let sources = LyricsSource::ALL
             .into_iter()
             .filter(|s| *s != LyricsSource::File || self.pick == Some(LyricsSource::File) || !self.duplicate_file())
+            .filter(|s| self.usable(*s))
             .filter_map(|s| {
                 let state = if let Some(t) = self.texts.get(&s) {
                     v::LyricsAvail::Ready(t.sync())
@@ -391,6 +446,7 @@ impl TrackLyrics {
             .texts
             .iter()
             .filter(|(s, _)| **s != LyricsSource::File || self.pick == Some(LyricsSource::File) || !self.duplicate_file())
+            .filter(|(s, _)| self.usable(**s))
             .map(|(s, t)| {
                 let a = self.aligned(*s);
                 let (made_lines, made) = self.shown(*s);
@@ -646,8 +702,9 @@ impl Worker {
             self.queue.current().map(|e| e.track),
             self.queue.peek_auto_next().map(|e| e.track),
         ];
+        let show = Shown::of(&self.state.read().prefs);
         let Some(svc) = self.import.as_mut() else { return };
-        svc.lyrics_cache.insert(track, tl);
+        svc.lyrics_cache.insert(track, TrackLyrics { show, ..tl });
         svc.lyrics_order.retain(|t| *t != track);
         svc.lyrics_order.push_back(track);
         let (cache, later) = (&svc.lyrics_cache, &svc.embed_later);
@@ -663,6 +720,7 @@ impl Worker {
 
     pub(crate) fn lyrics_backfilled(&mut self, track: TrackId, mut tl: TrackLyrics) {
         tl.pick = self.lib.lyrics_pick(track).ok().flatten().and_then(|k| LyricsSource::from_key(&k));
+        tl.show = Shown::of(&self.state.read().prefs);
         let Some(svc) = self.import.as_mut() else { return };
         // Playback lookups keep ownership of their in-flight results.
         if svc.lyrics_cache.get(&track).is_some_and(|t| !t.pending.is_empty() || t.embedding) { return }
@@ -692,6 +750,7 @@ impl Worker {
         }
         let genius = self.state.read().prefs.lyrics_genius;
         let mut tl = cached_lyrics(&self.lib, track, path.as_deref(), tags, genius);
+        tl.show = Shown::of(&self.state.read().prefs);
         if let Some(svc) = self.import.as_mut() {
             if svc.metadata().is_none() {
                 tl.pending.clear();
@@ -812,6 +871,29 @@ impl Worker {
             }
         });
         self.check_if_playing(track);
+    }
+
+    /// The lyrics settings changed: what is shown follows, and the playing
+    /// song is checked for what is newly wanted.
+    pub(crate) fn lyrics_prefs_changed(&mut self) {
+        let show = Shown::of(&self.state.read().prefs);
+        let shown = self.state.read().lyrics.track;
+        let Some(svc) = self.import.as_mut() else { return };
+        for tl in svc.lyrics_cache.values_mut() {
+            tl.show = show;
+        }
+        if let Some(track) = shown
+            && let Some(view) = svc.lyrics_cache.get(&track).map(|tl| tl.view(track))
+        {
+            self.publish(|s| {
+                if s.lyrics.track == Some(track) {
+                    s.lyrics = view;
+                }
+            });
+        }
+        if let Some(track) = self.queue.current().map(|e| e.track) {
+            self.check_lyrics(track);
+        }
     }
 
     pub(crate) fn pick_lyrics_source(&mut self, track: TrackId, source: Option<LyricsSource>) {
@@ -1152,6 +1234,83 @@ mod tests {
         heard.set_aligned(LyricsSource::Lrclib, aligned(&wrong, false, Timing::Elsewhere, 0, Vec::new()));
         assert_eq!(heard.chosen(), Some(LyricsSource::Recognized));
         assert!(heard.view(TrackId::new()).made);
+    }
+
+    /// Word timing off (the default): a line text keeps its lines (moved
+    /// when one shift off, made from the recording when another version's);
+    /// a plain text gets made lines, or none with that off too; timing the
+    /// user asked for shows whatever the settings.
+    #[test]
+    fn without_word_timing_lines_stay_lines_and_a_plain_text_gets_made_lines() {
+        use nikgob_align::fit::Timing;
+        let off = Shown { words: false, lines: true, heard: true };
+        let lrc = Text::from_lrc(Some("[00:14.60]Слово за слово\n[00:18.32]Дальше"), None).unwrap();
+        let words = made(&[(16_740, "Слово за слово"), (20_460, "Дальше")]);
+        for (timing, first, made_flag) in [(Timing::Fits, 14_600, false), (Timing::Shifted, 16_740, false), (Timing::Elsewhere, 16_740, true)] {
+            let mut tl = TrackLyrics { show: off, ..Default::default() };
+            tl.insert(LyricsSource::Lrclib, Some(lrc.clone()));
+            tl.set_aligned(LyricsSource::Lrclib, aligned(&lrc, true, timing, -2140, words.clone()));
+            let v = tl.view(TrackId::new());
+            assert_eq!(LyricsSync::of(&v.lines), Some(LyricsSync::Line), "{timing:?}");
+            assert_eq!(v.lines[0].start, Duration::from_millis(first), "{timing:?}");
+            assert_eq!(v.made, made_flag, "{timing:?}");
+        }
+        let genius = Text::from_plain("Слово за слово\nДальше").unwrap();
+        let mut tl = TrackLyrics { show: off, ..Default::default() };
+        tl.insert(LyricsSource::Genius, Some(genius.clone()));
+        tl.set_aligned(LyricsSource::Genius, aligned(&genius, true, Timing::None, 0, words.clone()));
+        let v = tl.view(TrackId::new());
+        assert!(v.made);
+        assert_eq!(LyricsSync::of(&v.lines), Some(LyricsSync::Line));
+        assert_eq!(v.lines[1].start, Duration::from_millis(20_460));
+        tl.show.lines = false;
+        let v = tl.view(TrackId::new());
+        assert!(v.lines.is_empty() && v.plain.is_some() && !v.made);
+        // Asked for by the user: shown as made, whatever the settings.
+        tl.set_aligned(LyricsSource::Genius, Aligned { saved: true, ..aligned(&genius, true, Timing::None, 0, words.clone()) });
+        let v = tl.view(TrackId::new());
+        assert!(v.made);
+        assert_eq!(v.lines, words);
+        // With word timing on, the made words.
+        let mut tl = TrackLyrics { show: Shown { words: true, lines: false, heard: true }, ..Default::default() };
+        tl.insert(LyricsSource::Genius, Some(genius.clone()));
+        tl.set_aligned(LyricsSource::Genius, aligned(&genius, true, Timing::None, 0, words.clone()));
+        assert_eq!(tl.view(TrackId::new()).lines, words);
+    }
+
+    /// With recognition off, a text heard earlier is never shown: not
+    /// chosen, not listed, not even when it was picked.
+    #[test]
+    fn a_heard_text_is_hidden_while_recognition_is_off() {
+        let heard = Text::from_lines(made(&[(500, "услышано")])).unwrap();
+        let mut tl = TrackLyrics { show: Shown { heard: false, ..Shown::default() }, ..Default::default() };
+        tl.insert(LyricsSource::Recognized, Some(heard));
+        tl.pick = Some(LyricsSource::Recognized);
+        let v = tl.view(TrackId::new());
+        assert_eq!(v.source, None);
+        assert!(v.lines.is_empty() && v.sources.is_empty() && v.texts.is_empty());
+        // A found text still shows.
+        tl.insert(LyricsSource::Genius, Text::from_plain("свои слова"));
+        assert_eq!(tl.view(TrackId::new()).source, Some(LyricsSource::Genius));
+        // Recognition on again: the heard text is back.
+        tl.show.heard = true;
+        assert_eq!(tl.view(TrackId::new()).source, Some(LyricsSource::Recognized));
+    }
+
+    /// Genius is asked once: a text it gave is kept in the library and read
+    /// back from there, never asked for again.
+    #[test]
+    fn a_stored_genius_text_is_not_asked_for_again() {
+        use nikgob_core::model::{ArtistCredit, Track};
+        let lib = Library::open_in_memory().unwrap();
+        let track = lib.upsert_track(&Track::new("Замок", ArtistCredit::single("nyan.mp3", None))).unwrap().id;
+        let fresh = cached_lyrics(&lib, track, None, None, true);
+        assert!(fresh.pending.contains(&LyricsSource::Genius));
+        let body = Text::from_plain("Я невменяемый (Ай)").unwrap().body();
+        lib.put_lyrics_text(track, LyricsSource::Genius.key(), body.as_deref()).unwrap();
+        let tl = cached_lyrics(&lib, track, None, None, true);
+        assert!(!tl.pending.contains(&LyricsSource::Genius));
+        assert_eq!(tl.texts_of(LyricsSource::Genius).and_then(|t| t.plain.as_deref()), Some("Я невменяемый (Ай)"));
     }
 
     #[test]

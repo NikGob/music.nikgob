@@ -79,7 +79,7 @@ enum Entry {
 enum Placement {
     /// Below (or above, if there is no room) a widget; `right` aligns the
     /// menu's right edge with the widget's.
-    Anchored { rect: Rect, right: bool },
+    Anchored { rect: Rect, right: bool, center: bool },
     /// Top-left corner at a point (context menu).
     At(Pos2),
 }
@@ -90,6 +90,7 @@ pub struct Menu {
     id: Id,
     entries: Vec<Entry>,
     align_right: bool,
+    align_center: bool,
 }
 
 impl Menu {
@@ -98,6 +99,7 @@ impl Menu {
             id: Id::new(id_salt),
             entries: Vec::new(),
             align_right: false,
+            align_center: false,
         }
     }
 
@@ -119,6 +121,12 @@ impl Menu {
     /// Aligns the right edge with the anchor (for ⋮ buttons at the end).
     pub fn align_right(mut self, right: bool) -> Self {
         self.align_right = right;
+        self
+    }
+
+    /// Centres the menu over the anchor (a control in the middle of a row).
+    pub fn align_center(mut self, center: bool) -> Self {
+        self.align_center = center;
         self
     }
 
@@ -146,12 +154,13 @@ impl Menu {
         if anchor.clicked() {
             open = !open;
         }
-        let right = self.align_right;
+        let (right, center) = (self.align_right, self.align_center);
         let picked = self.show_at(
             &ctx,
             Placement::Anchored {
                 rect: anchor.rect,
                 right,
+                center,
             },
             &mut open,
         );
@@ -162,12 +171,13 @@ impl Menu {
     /// A popup below `anchor`, open while `*open`. Clicking the anchor does
     /// not close it (the caller toggles `open` on anchor clicks).
     pub fn popup(self, ctx: &Context, anchor: Rect, open: &mut bool) -> Option<usize> {
-        let right = self.align_right;
+        let (right, center) = (self.align_right, self.align_center);
         self.show_at(
             ctx,
             Placement::Anchored {
                 rect: anchor,
                 right,
+                center,
             },
             open,
         )
@@ -274,8 +284,10 @@ impl Menu {
         // Position.
         let screen = ctx.content_rect().shrink(4.0);
         let (mut top_left, pivot) = match placement {
-            Placement::Anchored { rect, right } => {
-                let x = if right {
+            Placement::Anchored { rect, right, center } => {
+                let x = if center {
+                    rect.center().x - menu_w * 0.5
+                } else if right {
                     rect.right() - menu_w
                 } else {
                     rect.left()

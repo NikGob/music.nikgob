@@ -11,15 +11,7 @@ mod chrome;
 mod common;
 mod find_song;
 mod lyrics;
-mod lyrics_sheet;
-
-/// Opens «Текст песни» with `expand`'s text unfolded (screenshot runs).
-pub fn open_lyrics_sheet(ctx: &egui::Context, expand: Option<nikgob_view::LyricsSource>) {
-    lyrics_sheet::open(ctx);
-    if let Some(src) = expand {
-        lyrics_sheet::expand(ctx, src);
-    }
-}
+pub mod lyrics_ui;
 mod pages;
 mod pane;
 mod player_bar;
@@ -483,7 +475,7 @@ impl Md3eUi {
         self.pages.overlays(ctx, state, overlay_area, out);
         self.chrome.overlays(ctx, state, out);
         self.find_song.show(ctx, state, out);
-        lyrics_sheet::show(ctx, state, out);
+        lyrics_ui::overlays(ctx, state, out);
         // «К исполнителю» of a track with several artists: which one.
         if let Some(route) = artist_links::chooser(ctx) {
             self.chrome.nav = Some(route);
@@ -593,6 +585,13 @@ impl Md3eUi {
 
         if let Some(id) = self.chrome.setting.take() {
             self.pages.open_setting(id);
+        }
+        // «Настройки текста» and the «Текст песни» page, asked under the
+        // lyrics.
+        match lyrics_ui::take_request(ctx) {
+            Some(lyrics_ui::Request::Settings) => self.pages.open_setting(lyrics_ui::SETTINGS),
+            Some(lyrics_ui::Request::Page) => self.pages.pending_nav = Some(Route::Lyrics),
+            None => {}
         }
         if let Some(route) = self.pages.pending_nav.take() {
             if self.pages.focus_setting.is_some() && route == Route::Settings {
@@ -979,7 +978,7 @@ impl Md3eUi {
             }
         }
         if configure_lyrics {
-            self.pages.open_setting(pages::SettingId::LyricsStyle);
+            self.pages.open_setting(lyrics_ui::SETTINGS);
         }
     }
 }
@@ -1012,7 +1011,7 @@ fn load_for(route: &Route, out: &mut Vec<Command>) {
         // left meanwhile is loaded by the page itself.
         Route::Mix { .. } | Route::NewReleases => {}
         Route::Downloads(_) => out.push(Command::LoadWishlist),
-        Route::Settings => {}
+        Route::Settings | Route::Lyrics => {}
     }
 }
 
@@ -1158,6 +1157,9 @@ impl Md3eUi {
             "appearance" => S::Design,
             "pane" => S::PaneQueue,
             "lyrics" => S::LyricsModels,
+            "lyrics-timing" => S::LyricsGenius,
+            "lyrics-ui" => S::LyricsUi,
+            "lyrics-highlight" => S::LyricsWordsAll,
             "lyrics-check" => S::LyricsCheck,
             _ => S::CoverClickPause,
         });
@@ -1238,7 +1240,7 @@ impl Md3eUi {
                 Some(1)
             }
             Route::Downloads(_) => Some(2),
-            Route::Settings | Route::Stream(_) => None,
+            Route::Settings | Route::Stream(_) | Route::Lyrics => None,
         };
         // A service's page belongs where it was opened from (the search
         // over Главная, an artist of the library…).

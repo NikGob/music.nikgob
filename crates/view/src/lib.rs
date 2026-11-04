@@ -474,7 +474,8 @@ pub struct AlignView {
     pub total: u32,
     /// Where the models ran last (`None` before they ran): true the GPU.
     pub on_gpu: Option<bool>,
-    /// The timing being made in the sheet, then shown to be kept or dropped.
+    /// Timing the user asked for (the lyrics control): under way, or why
+    /// it failed. Made timing is applied at once and the craft is gone.
     pub craft: Option<Craft>,
     /// The last thing that went wrong (a download, the runtime).
     pub error: Option<String>,
@@ -505,8 +506,10 @@ pub struct AlignJob {
     pub stage: AlignStage,
     /// Done share of the stage.
     pub progress: f32,
-    /// Asked by the user (the sheet), not the background.
+    /// Asked by the user (the lyrics control), not the background.
     pub asked: bool,
+    /// While models download: bytes done and bytes to fetch in all.
+    pub bytes: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -523,7 +526,7 @@ pub enum AlignStage {
     Recognise,
 }
 
-/// Timing made in the sheet from one source's text.
+/// Timing the user asked for from one source's text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Craft {
     pub track: TrackId,
@@ -532,7 +535,7 @@ pub struct Craft {
     pub target: LyricsSync,
     /// The result, once made.
     pub lines: Option<Vec<LyricLine>>,
-    /// The text does not fit the recording / it could not be made.
+    /// It could not be made (the models, the file).
     pub failed: Option<String>,
 }
 
@@ -1073,6 +1076,11 @@ impl ToastKind {
     }
 }
 
+/// The revision of the lyrics defaults: 1 turned word timing off for the
+/// playing song and for the library, recognition from scratch off, and
+/// line timing for plain texts on.
+pub const LYRICS_REV: u8 = 1;
+
 /// User-facing settings the UI edits (the runtime persists them).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -1147,9 +1155,23 @@ pub struct Prefs {
     /// «Проверять текст по записи»: a fetched text is aligned to the
     /// track's own audio before it is trusted.
     pub lyrics_check: bool,
-    /// «Подсветка по словам для всех песен»: the background pass makes
-    /// word timing for every song with a file.
+    /// «Подсветка по словам во всех песнях»: the background pass makes
+    /// word timing for every song with a file (hours on a big library).
     pub lyrics_words_all: bool,
+    /// «Подсветка по строкам для текстов без времени»: the playing song's
+    /// plain text gets line timing from the recording when no source has
+    /// line timing.
+    pub lyrics_lines_auto: bool,
+    /// «Подсветка по словам для песен, которые слушаю»: the playing song's
+    /// texts are shown with word timing made from the recording.
+    pub lyrics_words_playing: bool,
+    /// «Вид»: what the control under the lyrics opens: 0 its menu
+    /// («Меню»), 1 a window over the player («Окно»), 2 the «Текст песни»
+    /// page («Экран»).
+    pub lyrics_ui: u8,
+    /// Which defaults of the lyrics settings the prefs were written with
+    /// ([`LYRICS_REV`]); older prefs are moved to the new defaults once.
+    pub lyrics_rev: u8,
     /// «Распознавать текст, если его нет нигде» (experimental).
     pub lyrics_recognize: bool,
     /// «Отделять голос от музыки» before aligning.
@@ -1426,6 +1448,21 @@ impl Prefs {
     /// Whether `key` is switched on.
     pub fn source_on(&self, key: SourceKey) -> bool {
         self.source_order().iter().find(|s| s.key == key).is_none_or(|s| s.on)
+    }
+
+    /// Prefs written with the lyrics defaults of revision `stored` (0: from
+    /// before [`Prefs::lyrics_rev`]) take the newer defaults once: those
+    /// switches were never on the settings page under their new meaning,
+    /// so what they hold is the old default, not a choice.
+    pub fn upgrade_lyrics(&mut self, stored: u8) {
+        if stored < 1 {
+            // Recognition from scratch is experimental: off unless chosen.
+            self.lyrics_recognize = false;
+            self.lyrics_words_all = false;
+            self.lyrics_words_playing = false;
+            self.lyrics_lines_auto = true;
+        }
+        self.lyrics_rev = LYRICS_REV;
     }
 }
 
@@ -1908,6 +1945,8 @@ pub enum Route {
     Library(LibraryTab),
     Downloads(DownloadsTab),
     Settings,
+    /// «Текст песни»: every text of the playing song and its timing.
+    Lyrics,
     Release(ReleaseId),
     Artist(ArtistId),
     Playlist(PlaylistId),
@@ -1966,8 +2005,8 @@ pub enum Command {
     /// Make line or word timing for a source's text from the recording
     /// ([`AlignView::craft`]).
     CraftLyrics { track: TrackId, source: LyricsSource, target: LyricsSync },
-    /// Keep the made timing (it becomes the track's text) or drop it.
-    KeepCraft(bool),
+    /// Forget a failed [`AlignView::craft`] (its message was seen).
+    ClearCraft,
     /// Download (true) or delete a lyrics model by its [`AlignModel::key`].
     AlignModel { key: String, download: bool },
     SetVolume(f32),
@@ -2321,8 +2360,12 @@ impl Default for Prefs {
             save_found_lyrics: false,
             lyrics_gpu: true,
             lyrics_check: true,
-            lyrics_words_all: true,
-            lyrics_recognize: true,
+            lyrics_words_all: false,
+            lyrics_lines_auto: true,
+            lyrics_words_playing: false,
+            lyrics_rev: LYRICS_REV,
+            lyrics_ui: 0,
+            lyrics_recognize: false,
             lyrics_separate: true,
             lyrics_models_auto: true,
             lyrics_genius: true,

@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use egui::{Align2, Color32, Galley, Rect, Sense, Ui, pos2, text::LayoutJob, vec2};
 use nikgob_motion::Spring;
-use nikgob_view::{Command, LyricLine, LyricsAvail, LyricsSource, LyricsSync, Prefs, Status, ViewState};
+use nikgob_view::{Command, LyricLine, LyricsSync, Prefs, Status, ViewState};
 
 use crate::{
-    Icon, Theme, TypeRole, TypeStyle,
-    components::{Menu, MenuItem, Size, anim},
+    Theme, TypeStyle,
+    components::{Size, anim},
 };
 
 /// Both views share timing and wrapping; only their reading scale differs.
@@ -44,23 +44,12 @@ enum Style {
 
 /// Both views share timing and scrolling; true opens the lyrics settings.
 pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec<Command>) -> bool {
-    let style = match state.prefs.lyrics_style {
-        1 => Style::Focus,
-        // Letters jumping on a guessed pace looks wrong: optionally only
-        // with real syllable timing, else the calm Focus.
-        2 if state.prefs.wave_syllables_only
-            && LyricsSync::of(&state.lyrics.lines) != Some(LyricsSync::Syllable) =>
-        {
-            Style::Focus
-        }
-        2 => Style::Wave,
-        _ => Style::Karaoke,
-    };
+    let style = style_for(&state.prefs, &state.lyrics.lines);
     let source_h = if mega { Size::Xs.height() + ui.spacing().item_spacing.y } else { 0.0 };
     let size = vec2(ui.available_width(), (ui.available_height() - source_h).max(80.0));
     if mega && state.lyrics.lines.is_empty() {
         plain(ui, size, state);
-        return source_picker(ui, state, out);
+        return super::lyrics_ui::control(ui, state, out);
     }
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let mut sizes = if mega { MEGA } else { PANE };
@@ -70,11 +59,27 @@ pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec
     sizes.sub *= scale;
     sizes.gap *= scale;
     paint(ui, rect, &resp, state, &state.lyrics.lines, style, bass, sizes, mega, out);
-    mega && source_picker(ui, state, out)
+    mega && super::lyrics_ui::control(ui, state, out)
 }
 
-/// `lines` drawn as the lyrics view draws the current text (the «Текст
-/// песни» sheet's check of made timing), following the playing position;
+/// How `lines` are drawn. Letters jumping on a guessed pace looks wrong:
+/// «Волна» optionally only with real syllable timing; without it a text
+/// with word timing still fills word by word (the label says «по словам»,
+/// a recognised text has real word times), one with line timing only
+/// becomes bright (the calm Focus).
+fn style_for(prefs: &Prefs, lines: &[LyricLine]) -> Style {
+    let sync = LyricsSync::of(lines);
+    match prefs.lyrics_style {
+        1 => Style::Focus,
+        2 if prefs.wave_syllables_only && sync == Some(LyricsSync::Word) => Style::Karaoke,
+        2 if prefs.wave_syllables_only && sync != Some(LyricsSync::Syllable) => Style::Focus,
+        2 => Style::Wave,
+        _ => Style::Karaoke,
+    }
+}
+
+/// `lines` drawn as the lyrics view draws the current text, smaller (the
+/// whole text behind the lyrics control), following the playing position;
 /// a click seeks.
 pub(crate) fn made_preview(ui: &mut Ui, size: egui::Vec2, state: &ViewState, lines: &[LyricLine], out: &mut Vec<Command>) {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
@@ -1005,88 +1010,6 @@ fn wave_geometry(waves: f32, radius: f32, stroke: f32, requested_amp: f32) -> (f
     (waves, amp)
 }
 
-/// A small "where is this text from" line; clicking it picks another source.
-pub fn source_picker(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> bool {
-    let l = &state.lyrics;
-    let s = Theme::get(ui.ctx()).scheme;
-    let sync = |src: LyricsSource| {
-        l.sources.iter().find(|o| o.source == src).and_then(|o| match o.state {
-            LyricsAvail::Ready(sync) => Some(sync),
-            _ => None,
-        })
-    };
-    let text = match l.source {
-        Some(src) if l.made && src != LyricsSource::Recognized => format!("{} · слова по записи", src.label()),
-        Some(src) => match sync(src) {
-            Some(sync) => format!("{} · {}", src.label(), sync.label()),
-            None => src.label().to_owned(),
-        },
-        None if l.sources.iter().any(|o| o.state == LyricsAvail::Loading) => "Ищу текст…".to_owned(),
-        None => "Источник текста".to_owned(),
-    };
-    let resp = ui
-        .horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            let r = ui.add(
-                egui::Label::new(TypeRole::LabelSmall.style().rich(text, s.on_surface_variant.gamma_multiply(0.8)))
-                    .selectable(false)
-                    .sense(Sense::click()),
-            );
-            Icon::ExpandMore
-                .widget(false, s.on_surface_variant.gamma_multiply(0.8), 14.0)
-                .paint_at(ui, Rect::from_min_size(pos2(r.rect.right() + 2.0, r.rect.center().y - 7.0), vec2(14.0, 14.0)));
-            // ⋮ right after the source: every text in full, and timing
-            // made from the recording.
-            if l.track.is_some() {
-                ui.add_space(20.0);
-                let more = ui.add(
-                    crate::components::IconButton::new(Icon::MoreVert)
-                        .size(Size::Xs)
-                        .tooltip("Текст песни")
-                        .id_salt("lyrics-sheet-open"),
-                );
-                if more.clicked() {
-                    super::lyrics_sheet::open(ui.ctx());
-                }
-            }
-            r
-        })
-        .inner;
-    // The menu also leads to the animation settings, so it always opens.
-    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let track = l.track.filter(|_| !l.sources.is_empty());
-    let mut menu = Menu::new(("lyrics-source", track));
-    let n = if track.is_some() { l.sources.len() + 1 } else { 0 };
-    if track.is_some() {
-        menu = menu.item(MenuItem::new("Автоматически").selected(!l.picked)).divider();
-        for o in &l.sources {
-            let state = match o.state {
-                LyricsAvail::Ready(_) if o.fits == Some(false) => "другая запись",
-                LyricsAvail::Ready(_) if o.made && o.source != LyricsSource::Recognized => "слова по записи",
-                LyricsAvail::Ready(sync) => sync.label(),
-                LyricsAvail::Loading => "ищу…",
-                LyricsAvail::Missing => "нет текста",
-            };
-            menu = menu.item(
-                MenuItem::new(format!("{} · {state}", o.source.label()))
-                    .enabled(matches!(o.state, LyricsAvail::Ready(_)))
-                    .selected(l.picked && l.source == Some(o.source)),
-            );
-        }
-        menu = menu.divider();
-    }
-    menu = menu.item(MenuItem::new("Настроить анимацию…"));
-    match (menu.attach(&resp), track) {
-        (Some(i), _) if i == n => true,
-        (Some(i), Some(track)) => {
-            let pick = if i == 0 { None } else { l.sources.get(i - 1).map(|o| o.source) };
-            out.push(Command::PickLyricsSource(track, pick));
-            false
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1100,6 +1023,29 @@ mod tests {
             DisplayLine::Interlude { start, end, duet } => Some((start.as_secs_f32(), end.as_secs_f32(), duet)),
             _ => None,
         }).collect()
+    }
+
+    /// «Chain of the Abyss»: a recognised text with real word times under
+    /// «Волна» with the calm fallback filled whole lines while the label
+    /// said «по словам». Word times fill by word; only line times focus.
+    #[test]
+    fn the_calm_fallback_of_the_wave_still_fills_word_timing_by_word() {
+        let p = Prefs { lyrics_style: 2, wave_syllables_only: true, ..Prefs::default() };
+        let mut worded = line(1.0, Some(2.0), "Calling through");
+        worded.words = vec![
+            nikgob_view::LyricWord { start: Duration::from_secs(1), end: Duration::from_millis(1500), text: "Calling ".into() },
+            nikgob_view::LyricWord { start: Duration::from_millis(1500), end: Duration::from_secs(2), text: "through".into() },
+        ];
+        let lines_only = line(1.0, Some(2.0), "Calling through");
+        assert!(style_for(&p, std::slice::from_ref(&worded)) == Style::Karaoke);
+        assert!(style_for(&p, std::slice::from_ref(&lines_only)) == Style::Focus);
+        let mut syllables = worded.clone();
+        syllables.words[0].text = "Call".into();
+        assert!(style_for(&p, &[syllables]) == Style::Wave);
+        let p = Prefs { wave_syllables_only: false, ..p };
+        assert!(style_for(&p, &[worded.clone()]) == Style::Wave);
+        let p = Prefs { lyrics_style: 1, ..p };
+        assert!(style_for(&p, &[worded]) == Style::Focus);
     }
 
     #[test]

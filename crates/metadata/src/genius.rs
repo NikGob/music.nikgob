@@ -185,7 +185,9 @@ fn same_song(s: &Song, artist: &str, title: &str) -> bool {
 
 /// The text of a song page: every `data-lyrics-container` block, line
 /// breaks kept, tags and the blocks Genius excludes from selection (its
-/// headers) dropped, section labels left out.
+/// headers) dropped, section labels and zero-width spaces left out. What
+/// is sung stays, a sung tag of the artist in the intro too («Мяу,
+/// nyan.mp3» under «[Интро]»).
 pub fn lyrics_of(html: &str) -> Option<String> {
     const MARK: &str = "data-lyrics-container=\"true\"";
     let mut out = String::new();
@@ -205,6 +207,8 @@ pub fn lyrics_of(html: &str) -> Option<String> {
     if !any {
         return None;
     }
+    // Genius' editors leave zero-width spaces before some lines.
+    let out = out.replace(['\u{200b}', '\u{feff}'], "");
     let lines: Vec<&str> = out
         .lines()
         .map(str::trim)
@@ -337,6 +341,22 @@ mod tests {
         let text = lyrics_of(PAGE).unwrap();
         assert_eq!(text, "Я смотрю в небо,\nтам's космоцветок & звёзды\n\nЛети\nВторой блок");
         assert!(lyrics_of("<html></html>").is_none());
+    }
+
+    /// The page of «Замок» by nyan.mp3 as Genius serves it: the header
+    /// (contributors, «… Lyrics») is not text; the sung intro tag is,
+    /// without the zero-width space before «nyan.pop».
+    #[test]
+    fn a_sung_intro_stays_and_the_header_goes() {
+        let page = concat!(
+            r#"<div data-lyrics-container="true" class="Lyrics__Container"><div data-exclude-from-selection="true" class="LyricsHeader__Container">"#,
+            r#"<button><span><svg viewBox="0 0 22 16.47"><path d="M12.55"></path></svg><span>6 Contributors</span></span></button>"#,
+            r#"<div><div><div><svg role="img"><path d="M4 16"></path></svg></div><h2>Замок (Castle) Lyrics</h2></div></div></div>"#,
+            "[Текст песни «Замок»]<br/><br/>[Интро]<br/><i>Мяу, nyan.mp3</i><br/><i>\u{200b}nyan.pop</i><br/><br/>",
+            "[Куплет 1]<br/>Я невменяемый (Ай)<br/>Грусть и тоска, не хватает внимания (Компании)<br/></div>",
+        );
+        let text = lyrics_of(page).unwrap();
+        assert_eq!(text, "Мяу, nyan.mp3\nnyan.pop\n\nЯ невменяемый (Ай)\nГрусть и тоска, не хватает внимания (Компании)");
     }
 
     fn http() -> Http {

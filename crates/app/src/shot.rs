@@ -16,8 +16,8 @@
 //! `world_page:Title` opens its page (`world_page` the first world's).
 //! `mix_page` opens the page of the first mix of Главная (`mix_page:Title`
 //! that one, or the open world page's).
-//! `lyrics_sheet` opens «Текст песни» (`lyrics_sheet:<source key>` with
-//! that source's text unfolded).
+//! `lyrics_ui` opens what the control under the lyrics opens in the look
+//! `NIKGOB_LYRICS_UI` picks (its menu, the dialog or the page).
 //! `liked` opens «Любимые»; `play_clip` plays the first clip of the open
 //! playlist (`play_clip:song` its first stream song).
 //! `find_song` opens «Найти песню…» for the first clip of the open
@@ -517,10 +517,10 @@ impl Shot {
                 ui.open_lyrics();
                 self.wait = 40;
             }
-            "lyrics_sheet" => {
-                // `lyrics_sheet:genius` unfolds that source's text.
-                nikgob_md3e::screens::open_lyrics_sheet(ctx, nikgob_view::LyricsSource::from_key(arg));
-                self.wait = 60;
+            "lyrics_ui" => {
+                // `lyrics_ui:4` shoots 4 frames in (mid-transition).
+                nikgob_md3e::screens::lyrics_ui::open(ctx);
+                self.wait = arg.parse().unwrap_or(60);
             }
             "search" => {
                 ui.set_search(arg, out);

@@ -1,9 +1,9 @@
 //! The lyrics aligner's thread (docs/lyrics-align.md): it checks the
 //! playing track's texts against its recording as soon as their lookups
-//! settle, makes timing in the «Текст песни» sheet, goes through the whole
-//! library in the background (every text checked, word timing made, a
-//! text heard from scratch where there is none), and downloads the models
-//! on first use.
+//! settle, makes the timing the user asks for under the lyrics, goes
+//! through the whole library in the background when that is on (every
+//! text checked, word timing made, a text heard from scratch where there
+//! is none), and downloads the models on first use.
 //!
 //! One thread at the lowest priority with one [`Aligner`]; the user's jobs
 //! go first, and a background track gives way the moment one comes. Every
@@ -59,7 +59,7 @@ pub(crate) enum Req {
     /// Check these texts of a track (the playing one); `recognise`: hear a
     /// text from scratch when none fits.
     Check { track: TrackId, path: PathBuf, texts: Vec<AlignText>, recognise: bool },
-    /// Make timing for one text in the sheet.
+    /// Make timing for one text (asked under the lyrics).
     Craft { track: TrackId, path: PathBuf, text: AlignText, target: LyricsSync },
     Download(ModelId),
     Remove(ModelId),
@@ -70,7 +70,6 @@ pub(crate) enum Req {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
     pub(crate) gpu: bool,
-    pub(crate) check: bool,
     pub(crate) words_all: bool,
     pub(crate) recognise: bool,
     pub(crate) separate: bool,
@@ -81,7 +80,6 @@ impl Settings {
     pub(crate) fn of(p: &v::Prefs) -> Self {
         Self {
             gpu: p.lyrics_gpu,
-            check: p.lyrics_check,
             words_all: p.lyrics_words_all,
             recognise: p.lyrics_recognize,
             separate: p.lyrics_separate,
@@ -172,12 +170,12 @@ impl Drop for AlignService {
 /// The models a part list shows, with their labels.
 pub(crate) fn label(id: ModelId) -> &'static str {
     match id {
-        ModelId::Runtime => "Среда ONNX Runtime",
-        ModelId::Separator => "Отделение голоса",
-        ModelId::AlignerRu => "Выравнивание: русский",
-        ModelId::AlignerJa => "Выравнивание: японский",
-        ModelId::AlignerMms => "Выравнивание: другие языки",
-        ModelId::Whisper => "Распознавание текста",
+        ModelId::Runtime => "Основа для моделей (ONNX Runtime)",
+        ModelId::Separator => "Отделение голоса от музыки",
+        ModelId::AlignerRu => "Слова по голосу: русский",
+        ModelId::AlignerJa => "Слова по голосу: японский",
+        ModelId::AlignerMms => "Слова по голосу: другие языки",
+        ModelId::Whisper => "Расслышать текст",
     }
 }
 
@@ -369,8 +367,11 @@ impl Thread {
         }
     }
 
+    /// The pass over the library runs only when word timing for every
+    /// song is on (it takes hours); the check and recognition otherwise
+    /// serve the playing song.
     fn pass_wanted(&self) -> bool {
-        (self.settings.words_all || self.settings.check || self.settings.recognise) && !self.offline
+        self.settings.words_all && !self.offline
     }
 
     fn job(&mut self, job: Req) {
@@ -391,7 +392,7 @@ impl Thread {
                 self.send(Msg::Crafted { track, source: text.source, result });
             }
             Req::Download(id) => {
-                let _ = self.ensure(&[id], true);
+                let _ = self.ensure(&[id], true, None);
             }
             _ => {}
         }
@@ -399,8 +400,12 @@ impl Thread {
     }
 
     /// Makes sure the parts are there, downloading what lacks (when the
-    /// settings let it, or `asked`).
-    fn ensure(&mut self, ids: &[ModelId], asked: bool) -> Result<(), Error> {
+    /// settings let it, or `asked`); the progress counts the bytes of all
+    /// that lack, for `track` when a song waits for them.
+    fn ensure(&mut self, ids: &[ModelId], asked: bool, track: Option<TrackId>) -> Result<(), Error> {
+        let lacking: Vec<ModelId> = ids.iter().copied().filter(|id| !self.aligner.catalog().ready(*id)).collect();
+        let total: u64 = lacking.iter().map(|id| id.spec().size()).sum();
+        let mut before = 0u64;
         for &id in ids {
             if self.aligner.catalog().ready(id) {
                 continue;
@@ -415,17 +420,26 @@ impl Thread {
             let mut last = Instant::now();
             let catalog = self.aligner.catalog().clone();
             let downloading = self.downloading.clone();
-            let result = catalog.download(id, &mut |done, total| {
-                let f = done as f32 / total.max(1) as f32;
+            let result = catalog.download(id, &mut |done, size| {
+                let f = done as f32 / size.max(1) as f32;
                 if last.elapsed() > Duration::from_millis(250) {
                     last = Instant::now();
                     let mut d = downloading.clone();
                     d.insert(id, f);
                     let _ = tx.send(Internal::Align(Msg::Models(models_view(&catalog, &d))));
-                    let _ = tx.send(Internal::Align(Msg::Job(Some(v::AlignJob { track: None, stage: v::AlignStage::Download, progress: f, asked }))));
+                    let all = before + done.min(size);
+                    let job = v::AlignJob {
+                        track,
+                        stage: v::AlignStage::Download,
+                        progress: all as f32 / total.max(1) as f32,
+                        asked,
+                        bytes: Some((all, total.max(all))),
+                    };
+                    let _ = tx.send(Internal::Align(Msg::Job(Some(job))));
                 }
                 !stop.load(Ordering::Relaxed)
             });
+            before += id.spec().size();
             self.downloading.remove(&id);
             self.models();
             if let Err(e) = result {
@@ -454,7 +468,7 @@ impl Thread {
             if last_stage != Some(stage) || last.elapsed() > Duration::from_millis(120) {
                 last = Instant::now();
                 last_stage = Some(stage);
-                let _ = self.tx.send(Internal::Align(Msg::Job(Some(v::AlignJob { track: Some(track), stage, progress: f, asked }))));
+                let _ = self.tx.send(Internal::Align(Msg::Job(Some(v::AlignJob { track: Some(track), stage, progress: f, asked, bytes: None }))));
             }
             !self.stopped() && (asked || self.rx.is_empty())
         }
@@ -511,7 +525,7 @@ impl Thread {
         if wants_heard && texts.is_empty() {
             ids.push(ModelId::Whisper);
         }
-        self.ensure(&ids, false)?;
+        self.ensure(&ids, false, asked.then_some(track))?;
         let mut prep = self.prepare(track, path, asked)?;
         let mut rows = Vec::new();
         for t in texts {
@@ -528,7 +542,7 @@ impl Thread {
         let mut heard = None;
         // Heard from scratch only where there is no text at all.
         if wants_heard && texts.is_empty() {
-            self.ensure(&[ModelId::Whisper, ModelId::AlignerRu, ModelId::AlignerJa, ModelId::AlignerMms], false)?;
+            self.ensure(&[ModelId::Whisper, ModelId::AlignerRu, ModelId::AlignerJa, ModelId::AlignerMms], false, asked.then_some(track))?;
             let mut aligner = std::mem::replace(&mut self.aligner, Aligner::new(Catalog::new(""), Device::Cpu, 1));
             let r = {
                 let mut progress = self.progress(track, asked);
@@ -548,7 +562,7 @@ impl Thread {
 
     fn craft(&mut self, track: TrackId, path: &Path, text: &AlignText, target: LyricsSync) -> Result<Vec<LyricLine>, Error> {
         let ids = self.needs(std::slice::from_ref(text));
-        self.ensure(&ids, true)?;
+        self.ensure(&ids, true, Some(track))?;
         let mut prep = self.prepare(track, path, true)?;
         let fit = self.fit(track, &mut prep, text, true)?.ok_or_else(|| Error::Model("Этот текст не выровнять".into()))?;
         Ok(if target == LyricsSync::Line { to_lines(&fit.lines) } else { fit.lines })
@@ -572,7 +586,7 @@ impl Thread {
         let path = if p.is_absolute() { p.to_owned() } else { self.root.join(p) };
         let tags = nikgob_import::tags::read_tags(&path).ok().map(|(t, _)| t);
         let tl = crate::lyrics::cached_lyrics(&self.lib, track, Some(&path), tags.as_ref(), false);
-        let texts: Vec<AlignText> = if self.settings.check || self.settings.words_all { tl.unchecked() } else { Vec::new() };
+        let texts: Vec<AlignText> = tl.unchecked();
         let recognise = self.settings.recognise && tl.texts_empty();
         if texts.is_empty() && !recognise {
             let state = if tl.texts_empty() { "no_text" } else { "done" };
@@ -631,11 +645,13 @@ impl Worker {
     }
 
     /// Sends the track's unchecked texts to the aligner once its lookups
-    /// settled (a file only, the check on); with no text anywhere, asks
-    /// for one heard from scratch.
+    /// settled (a file only): every text with the check or word timing on,
+    /// else only a plain text when no source has line timing (to time its
+    /// lines); with no text anywhere, asks for one heard from scratch.
     pub(crate) fn check_lyrics(&mut self, track: TrackId) {
         let prefs = self.state.read().prefs.clone();
-        if !self.align.running() || !(prefs.lyrics_check || prefs.lyrics_words_all || prefs.lyrics_recognize) {
+        let every = prefs.lyrics_check || prefs.lyrics_words_playing || prefs.lyrics_words_all;
+        if !self.align.running() || !(every || prefs.lyrics_lines_auto || prefs.lyrics_recognize) {
             return;
         }
         let Some(src) = self.lib.active_source(track).ok().flatten().filter(|s| s.kind.is_local()) else { return };
@@ -644,7 +660,11 @@ impl Worker {
         if !tl.settled() {
             return;
         }
-        let texts = tl.unchecked();
+        let mut texts = tl.unchecked();
+        if !every {
+            let wanted = prefs.lyrics_lines_auto && !tl.has_timed();
+            texts.retain(|t| wanted && !t.timed);
+        }
         let recognise = prefs.lyrics_recognize && tl.nothing_found();
         let hashes: Vec<String> = texts.iter().map(|t| t.hash.clone()).collect();
         if (texts.is_empty() && !recognise) || self.align.asked.get(&track) == Some(&hashes) {
@@ -670,14 +690,7 @@ impl Worker {
             }
             Msg::Error(e) => self.publish(|s| s.align.error = Some(e)),
             Msg::Checked { track, rows, heard } => self.lyrics_checked(track, rows, heard),
-            Msg::Crafted { track, source, result } => self.publish(|s| {
-                if let Some(c) = s.align.craft.as_mut().filter(|c| c.track == track && c.source == source) {
-                    match result {
-                        Ok(lines) => c.lines = Some(lines),
-                        Err(e) => c.failed = Some(e),
-                    }
-                }
-            }),
+            Msg::Crafted { track, source, result } => self.crafted(track, source, result),
         }
     }
 
@@ -714,15 +727,29 @@ impl Worker {
         self.align.send(Req::Craft { track, path, text, target });
     }
 
-    /// Keeps the made timing as the track's text (or drops it).
-    pub(crate) fn keep_craft(&mut self, keep: bool) {
-        let Some(craft) = self.state.read().align.craft.clone() else { return };
+    /// Made timing becomes the track's text at once (picking another
+    /// source undoes it); a failure stays for the control to say.
+    fn crafted(&mut self, track: TrackId, source: LyricsSource, result: Result<Vec<LyricLine>, String>) {
+        let asked = self.state.read().align.craft.as_ref().is_some_and(|c| c.track == track && c.source == source);
+        if !asked {
+            return;
+        }
+        let lines = match result {
+            Ok(lines) => lines,
+            Err(e) => {
+                self.publish(|s| {
+                    if let Some(c) = s.align.craft.as_mut() {
+                        c.failed = Some(e);
+                    }
+                });
+                return;
+            }
+        };
         self.publish(|s| s.align.craft = None);
-        let (true, Some(lines)) = (keep, craft.lines) else { return };
-        let Some(tl) = self.import.as_mut().and_then(|s| s.lyrics_cache.get_mut(&craft.track)) else { return };
-        let Some(text) = tl.texts_of(craft.source) else { return };
+        let Some(tl) = self.import.as_mut().and_then(|s| s.lyrics_cache.get_mut(&track)) else { return };
+        let Some(text) = tl.texts_of(source) else { return };
         let row = AlignedLyrics {
-            source: craft.source.key().to_owned(),
+            source: source.key().to_owned(),
             text_hash: text.hash(),
             fit: 1.0,
             timing: "none".into(),
@@ -733,14 +760,21 @@ impl Worker {
             made_at: 0,
             saved: true,
         };
-        if let Err(e) = self.lib.put_lyrics_aligned(craft.track, &row) {
+        if let Err(e) = self.lib.put_lyrics_aligned(track, &row) {
             log::warn!("saving made lyrics: {e}");
             return;
         }
         if let Some((source, a)) = Aligned::from_row(&row) {
             tl.set_aligned(source, a);
         }
-        self.pick_lyrics_source(craft.track, Some(craft.source));
+        self.pick_lyrics_source(track, Some(source));
+    }
+
+    /// `Command::ClearCraft`: a failure was seen.
+    pub(crate) fn clear_craft(&mut self) {
+        if self.state.read().align.craft.as_ref().is_some_and(|c| c.failed.is_some()) {
+            self.publish(|s| s.align.craft = None);
+        }
     }
 
     pub(crate) fn align_model(&mut self, key_: &str, download: bool) {

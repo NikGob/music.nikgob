@@ -835,40 +835,49 @@ fn pct(v: f32) -> String {
 }
 
 /// Rows drawn faded while what they tune is off (they still work).
-/// «Текст песен»: the check against the recording, word timing for every
-/// song, recognition, where the models run, and the models themselves.
+/// The lyrics groups after «Текст песен», in the order one thinks of
+/// them: where texts are looked for, what lights up by itself, and the
+/// models that listen to the voice (and where they run).
 fn lyrics_align(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Command>) {
     let a = &state.align;
-    row(ui, Id::LyricsCheck, "Сверять текст с записью", None, |ui| {
-        ui.add(Switch::new(&mut p.lyrics_check).id_salt("set-lyrics-check"));
-    });
-    let words = (a.total > 0).then(|| format!("Готово {} из {}", a.done.min(a.total), a.total));
-    row(ui, Id::LyricsWordsAll, "Подсветка по словам во всех песнях", words.as_deref(), |ui| {
-        ui.add(Switch::new(&mut p.lyrics_words_all).id_salt("set-lyrics-words"));
-    });
-    row(ui, Id::LyricsRecognize, "Распознавать текст, если его нет нигде", Some("Экспериментально"), |ui| {
-        ui.add(Switch::new(&mut p.lyrics_recognize).id_salt("set-lyrics-recognize"));
-    });
-    row(ui, Id::LyricsSeparate, "Отделять голос от музыки", None, |ui| {
-        ui.add(Switch::new(&mut p.lyrics_separate).id_salt("set-lyrics-separate"));
-    });
-    let device = match a.on_gpu {
-        Some(true) => Some("Сейчас на видеокарте"),
-        Some(false) if p.lyrics_gpu => Some("Видеокарта недоступна, сейчас на процессоре"),
-        _ => None,
-    };
-    row(ui, Id::LyricsGpu, "Считать на видеокарте", device, |ui| {
-        ui.add(Switch::new(&mut p.lyrics_gpu).id_salt("set-lyrics-gpu"));
-    });
-    row(ui, Id::LyricsGenius, "Искать текст на Genius", None, |ui| {
+    group(ui, "Где искать текст");
+    row(ui, Id::LyricsGenius, "Искать текст на Genius, если его нет в других местах", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_genius).id_salt("set-lyrics-genius"));
     });
-    row(ui, Id::LyricsModelsAuto, "Скачивать модели сами", None, |ui| {
+    row(ui, Id::LyricsCheck, "Проверять по голосу, что текст от этой песни", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_check).id_salt("set-lyrics-check"));
+    });
+
+    group(ui, "Что подсвечивать само");
+    row(ui, Id::LyricsLinesAuto, "Подсвечивать строки, если у текста нет подсветки", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_lines_auto).id_salt("set-lyrics-lines"));
+    });
+    row(ui, Id::LyricsWordsPlaying, "Подсвечивать по словам песню, которая играет", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_words_playing).id_salt("set-lyrics-words-playing"));
+    });
+    let words = (p.lyrics_words_all && a.total > 0).then(|| format!("Готово {} из {}", a.done.min(a.total), a.total));
+    row(ui, Id::LyricsWordsAll, "Заранее подсвечивать по словам всю библиотеку", words.as_deref(), |ui| {
+        ui.add(Switch::new(&mut p.lyrics_words_all).id_salt("set-lyrics-words"));
+    });
+
+    group(ui, "Модели, которые слушают голос");
+    // Says only where the models really run when that is not the choice.
+    let device = (a.on_gpu == Some(false) && p.lyrics_gpu).then_some("Видеокарта недоступна, считает процессор");
+    row(ui, Id::LyricsGpu, "Где считать", device, |ui| choice(ui, Id::LyricsGpu, p));
+    row(ui, Id::LyricsSeparate, "Отделять голос от музыки, чтобы слова ложились точнее", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_separate).id_salt("set-lyrics-separate"));
+    });
+    row(ui, Id::LyricsRecognize, "Пробовать расслышать текст, если его нет нигде (может ошибаться)", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_recognize).id_salt("set-lyrics-recognize"));
+    });
+    row(ui, Id::LyricsModelsAuto, "Скачивать модели, когда они нужны", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_models_auto).id_salt("set-lyrics-models-auto"));
     });
     let s = Theme::get(ui.ctx()).scheme;
+    let total: u64 = a.models.iter().map(|m| m.size).sum();
+    let title = if total > 0 { format!("Модели · {}", size_label(total)) } else { "Модели".to_owned() };
     settings_help::item(ui, Id::LyricsModels, "Модели", |ui| {
-        row_label(ui, Id::LyricsModels, "Модели");
+        row_label(ui, Id::LyricsModels, &title);
         if let Some(e) = &a.error {
             ui.label(TypeRole::BodySmall.style().rich(e, s.error));
         }
@@ -1035,14 +1044,15 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
     row(ui, Id::Keys, "Клавиши", Some("L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке"), |_| {});
 
     group(ui, "Текст песен");
-    row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", Some("Чтобы текст показывался и без интернета"), |ui| {
+    row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", None, |ui| {
         ui.add(Switch::new(&mut p.save_found_lyrics).id_salt("set-save-lyrics"));
     });
-    row(ui, Id::LyricsReturn, &format!("Возвращаться к текущей строке через {:.0} с", p.lyrics_return_s), Some("После ручной прокрутки текста"), |ui| {
+    row(ui, Id::LyricsReturn, &format!("После прокрутки рукой возвращаться к текущей строке через {:.0} с", p.lyrics_return_s), None, |ui| {
         if let Some(v) = range_slider(ui, "set-lyrics-return", p.lyrics_return_s, (1.0, 15.0), 1.0, |v| format!("{v:.0} с")) {
             p.lyrics_return_s = v;
         }
     });
+    row(ui, Id::LyricsUi, "Что открывает кнопка под текстом", None, |ui| choice(ui, Id::LyricsUi, p));
     lyrics_align(ui, _state, p, out);
 
     group(ui, "Звук");

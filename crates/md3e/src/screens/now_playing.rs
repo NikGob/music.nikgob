@@ -1100,7 +1100,7 @@ pub fn show(
                 NpSlot::Lyrics => {
                     let _p = crate::prof::scope("np.lyrics");
                     if super::lyrics::show(&mut cui, state, pages.levels_bass, true, out) {
-                        pages.open_setting(super::pages::SettingId::LyricsStyle);
+                        pages.open_setting(super::lyrics_ui::SETTINGS);
                         closed = true;
                     }
                 }
@@ -1286,6 +1286,9 @@ const CONTROLS_H: f32 = 96.0;
 
 const COMPACT_INFO_H: f32 = 32.0 + 4.0 + 24.0 + 16.0 + 64.0 + 16.0 + 56.0;
 const TRANSPORT_H: f32 = 64.0 + 16.0 + 56.0;
+/// How far below the info block the lyrics end, so that the control under
+/// them is level with the transport row.
+const LYRICS_CONTROL_DROP: f32 = -11.0;
 
 struct MegaLayout {
     wide: bool,
@@ -1317,12 +1320,14 @@ fn mega_layout(body: Rect) -> MegaLayout {
             .clamp(120.0, 440.0);
         let height = cover + 2.0 * RING_PAD + 16.0 + COMPACT_INFO_H;
         let top = body.center().y - height * 0.5;
+        let info = Rect::from_min_size(pos2(left, top + cover + 2.0 * RING_PAD + 16.0), vec2(col, COMPACT_INFO_H));
         MegaLayout {
             wide: true,
             cover: Rect::from_center_size(pos2(left + col * 0.5, top + RING_PAD + cover * 0.5), vec2(cover, cover)),
-            info: Rect::from_min_size(pos2(left, top + cover + 2.0 * RING_PAD + 16.0), vec2(col, COMPACT_INFO_H)),
-            // The source line under the lyrics lines up with the transport row.
-            content: Rect::from_min_max(pos2(content_left, body.top()), pos2(content_left + lyrics_w, body.bottom() - vpad)),
+            info,
+            // The control under the lyrics sits on the transport row's
+            // centre line.
+            content: Rect::from_min_max(pos2(content_left, body.top()), pos2(content_left + lyrics_w, info.bottom() + LYRICS_CONTROL_DROP)),
         }
     } else {
         MegaLayout {
