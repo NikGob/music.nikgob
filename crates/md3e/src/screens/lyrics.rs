@@ -718,6 +718,8 @@ struct Syllable {
     to: f32,
     letters: usize,
     word: usize,
+    /// Its first and one past its last glyph.
+    glyphs: (usize, usize),
 }
 
 /// A written unit for «По словам»: a word, or a part of a hyphenated word
@@ -736,6 +738,11 @@ struct Timing {
     units: Vec<Unit>,
     /// Unit index for each glyph (spaces have none).
     glyph_units: Vec<Option<usize>>,
+    /// Each letter's own part of its syllable's time, weighted by
+    /// [`letter_weight`] (spaces have none).
+    letter_times: Vec<Option<(f32, f32)>>,
+    /// Each glyph's span on the line's run of advances.
+    xs: Vec<(f32, f32)>,
     /// First syllable of each whitespace-delimited word.
     #[cfg_attr(not(test), allow(dead_code))]
     words: Vec<usize>,
@@ -758,35 +765,48 @@ impl Timing {
             let n = w.text.chars().filter(|c| !c.is_whitespace()).count();
             syllables.push(Syllable {
                 start: w.start.as_secs_f32(), end: w.end.as_secs_f32().max(w.start.as_secs_f32()),
-                from: 0.0, to: 0.0, letters: n, word: words.len() - 1,
+                from: 0.0, to: 0.0, letters: n, word: words.len() - 1, glyphs: (0, 0),
             });
             letters.extend(std::iter::repeat_n(i, n));
         }
         let mut letters = letters.into_iter();
         let mut x = 0.0;
         let mut glyphs = Vec::new();
+        let mut xs = Vec::new();
         let mut seen = vec![false; syllables.len()];
-        // Each letter's own share of its syllable's time, for the units.
-        let mut nth = vec![0usize; syllables.len()];
-        let mut times = Vec::new();
-        for gl in g.rows.iter().flat_map(|r| &r.row.glyphs) {
+        let mut weights = vec![0.0f32; syllables.len()];
+        for (k, gl) in g.rows.iter().flat_map(|r| &r.row.glyphs).enumerate() {
             let syllable = if gl.chr.is_whitespace() { None } else { letters.next() };
             if let Some(i) = syllable {
                 if !seen[i] {
                     syllables[i].from = x;
+                    syllables[i].glyphs.0 = k;
                     seen[i] = true;
                 }
                 syllables[i].to = x + gl.advance_width;
-                let s = &syllables[i];
-                let share = (s.end - s.start) / s.letters.max(1) as f32;
-                times.push(Some((s.start + share * nth[i] as f32, s.start + share * (nth[i] + 1) as f32)));
-                nth[i] += 1;
-            } else {
-                times.push(None);
+                syllables[i].glyphs.1 = k + 1;
+                weights[i] += letter_weight(gl.chr);
             }
             glyphs.push(syllable);
+            xs.push((x, x + gl.advance_width));
             x += gl.advance_width;
         }
+        // Each letter's own part of its syllable's time: vowels, which
+        // carry a held sound, take more of it than consonants.
+        let mut done = vec![0.0f32; syllables.len()];
+        let times: Vec<Option<(f32, f32)>> = g.rows.iter().flat_map(|r| &r.row.glyphs).zip(&glyphs)
+            .map(|(gl, syllable)| {
+                let i = (*syllable)?;
+                let s = &syllables[i];
+                let per = (s.end - s.start) / weights[i].max(f32::EPSILON);
+                let w = letter_weight(gl.chr);
+                let at = s.start + per * done[i];
+                done[i] += w;
+                // The last letter ends exactly with its syllable.
+                let to = if done[i] >= weights[i] - 1e-4 { s.end } else { (s.start + per * done[i]).min(s.end) };
+                Some((at.min(s.end), to))
+            })
+            .collect();
         let glyph_units = written_units(g.rows.iter().flat_map(|r| &r.row.glyphs).map(|gl| gl.chr));
         let mut spans: Vec<Option<Unit>> = vec![None; glyph_units.iter().flatten().max().map_or(0, |n| n + 1)];
         for (u, t) in glyph_units.iter().zip(&times) {
@@ -807,7 +827,7 @@ impl Timing {
                 last
             })
             .collect();
-        Some(Self { syllables, glyphs, units, glyph_units, words })
+        Some(Self { syllables, glyphs, units, glyph_units, letter_times: times, xs, words })
     }
 
     /// The light front as (centre of its soft edge, edge width): solid up
@@ -832,13 +852,40 @@ impl Timing {
                 break;
             }
             if p < s.end {
-                at = syllable_head(s.from, s.to, s.start, s.end, p);
+                // Over the letters at their weighted pace.
+                at = s.from;
+                for k in s.glyphs.0..s.glyphs.1 {
+                    let (Some((a, b)), (x0, x1)) = (self.letter_times[k], self.xs[k]) else { continue };
+                    if p < b {
+                        at = syllable_head(x0, x1, a, b, p);
+                        break;
+                    }
+                    at = x1;
+                }
                 break;
             }
             at = s.to;
         }
         let f = feather * ((p - first.start) / FADE).clamp(0.0, 1.0).min(out);
         (at + 0.5 * f, f)
+    }
+}
+
+/// How much of its syllable's (or word's) time a letter takes: vowels,
+/// which carry a held sound, more than consonants; signs and marks little.
+/// Letters that are syllables already (kana, hangul, hanzi) share evenly.
+fn letter_weight(c: char) -> f32 {
+    const VOWELS: &str = "aeiouyàáâãäåæèéêëìíîïòóôõöøùúûüýÿœāăąēĕėęěīĭįıōŏőūŭůűųаеёиоуыэюяіїєўαεηιουωάέήίόύώϊϋ";
+    if !c.is_alphanumeric() {
+        return 0.25;
+    }
+    let lower = c.to_lowercase().next().unwrap_or(c);
+    if VOWELS.contains(lower) {
+        2.5
+    } else if matches!(lower, 'ь' | 'ъ') {
+        0.25
+    } else {
+        1.0
     }
 }
 
@@ -940,15 +987,13 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
                     end += 1;
                 }
             }
-            // Wave: the letter's own share of its syllable's time.
+            // Wave: the letter's own weighted share of its syllable's time.
             let letter_on = syllable.filter(|_| style == Style::Wave).map(|s| {
                 if !current {
                     return 1.0;
                 }
-                let letter = timing.glyphs[..k + i].iter().filter(|v| **v == timing.glyphs[k + i]).count();
-                let n = s.letters.max(1) as f32;
-                let from = s.start + (s.end - s.start) * letter as f32 / n;
-                ((p - from + 0.04) / ((s.end - s.start) / n + 0.08).max(0.1)).clamp(0.0, 1.0)
+                let (from, to) = timing.letter_times[k + i].unwrap_or((s.start, s.end));
+                ((p - from + 0.04) / (to - from + 0.08).max(0.1)).clamp(0.0, 1.0)
             });
             // «По словам»: the whole unit at once, from its first letter.
             let unit_on = timing.glyph_units[k + i].filter(|_| style == Style::Words).map(|u| {
@@ -1289,7 +1334,8 @@ mod tests {
     }
 
     /// Word timing keeps «do-dodge» one timed word: its parts share the
-    /// word's time by their letters.
+    /// word's time by their letters, weighted as everywhere: «do-» is
+    /// d 1 + o 2.5 + «-» 0.25, «dodge» 1 + 2.5 + 1 + 1 + 2.5.
     #[test]
     fn words_split_at_the_hyphen_share_the_word_time_by_letters() {
         with_painter(|painter| {
@@ -1297,8 +1343,9 @@ mod tests {
             l.words = vec![word(1.0, 1.2, "Я "), word(1.2, 2.0, "делаю "), word(2.0, 2.8, "do-dodge "), word(3.0, 3.5, "back")];
             let u = units_of(painter, &l);
             assert_eq!(u.iter().map(|u| u.0.as_str()).collect::<Vec<_>>(), ["Я", "делаю", "do-", "dodge", "back"]);
-            assert!(close(u[2].1, 2.0) && close(u[2].2, 2.3), "{:?}", u[2]);
-            assert!(close(u[3].1, 2.3) && close(u[3].2, 2.8), "{:?}", u[3]);
+            let cut = 2.0 + 0.8 * 3.75 / 11.75;
+            assert!(close(u[2].1, 2.0) && close(u[2].2, cut), "{:?}", u[2]);
+            assert!(close(u[3].1, cut) && close(u[3].2, 2.8), "{:?}", u[3]);
             assert!(close(u[4].1, 3.0) && close(u[4].2, 3.5));
         });
     }
@@ -1344,8 +1391,9 @@ mod tests {
         with_painter(|painter| {
             let u = units_of(painter, &paced_words(&lines_only[0], None));
             assert_eq!(u.iter().map(|u| u.0.as_str()).collect::<Vec<_>>(), ["do-", "dodge", "back"]);
-            // 3 + 5 + 4 letters over the line's two seconds.
-            assert!(close(u[1].1, 1.0 + 2.0 * 3.0 / 12.0), "{:?}", u[1]);
+            // 8 + 4 letters over the line's two seconds; inside «do-dodge»
+            // its parts by their weighted letters (3.75 and 8).
+            assert!(close(u[1].1, 1.0 + 2.0 * 8.0 / 12.0 * 3.75 / 11.75), "{:?}", u[1]);
             assert!(close(u[2].1, 1.0 + 2.0 * 8.0 / 12.0), "{:?}", u[2]);
         });
     }
@@ -1537,6 +1585,63 @@ mod tests {
     }
 
     #[test]
+    fn vowels_weigh_more_than_consonants_and_kana_evenly() {
+        for v in ['а', 'Я', 'ё', 'o', 'É', 'y', 'ω'] {
+            assert_eq!(letter_weight(v), 2.5, "{v}");
+        }
+        for c in ['д', 'Ж', 'й', 'k', 'S', '7'] {
+            assert_eq!(letter_weight(c), 1.0, "{c}");
+        }
+        for m in ['-', '\'', ',', 'ь', 'Ъ'] {
+            assert!(letter_weight(m) < 1.0, "{m}");
+        }
+        // Kana, hangul and hanzi are syllables already: even shares.
+        assert!(['か', 'ナ', '한', '中'].iter().all(|c| letter_weight(*c) == 1.0));
+    }
+
+    /// A word with a held last vowel: the consonants go by quickly and the
+    /// vowels take the time, the word still starting and ending on its own
+    /// times, each letter right after the one before.
+    #[test]
+    fn letters_share_their_words_time_by_weight() {
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(4.0), "здесь домой");
+            l.words = vec![word(1.0, 1.6, "здесь "), word(2.0, 3.0, "домой")];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let t = Timing::new(&l, &g).unwrap();
+            let times: Vec<(f32, f32)> = t.letter_times.iter().flatten().copied().collect();
+            assert_eq!(times.len(), 10);
+            let (a, b) = times.split_at(5);
+            for (word, (start, end)) in [(a, (1.0, 1.6)), (b, (2.0, 3.0))] {
+                assert_eq!(word[0].0, start);
+                assert_eq!(word[4].1, end);
+                for pair in word.windows(2) {
+                    assert!(close(pair[0].1, pair[1].0), "{pair:?}");
+                }
+            }
+            // «домой»: 1 + 2.5 + 1 + 2.5 + 1 = 8 shares of a second.
+            let len = |(a, b): (f32, f32)| b - a;
+            assert!(close(len(b[0]), 1.0 / 8.0) && close(len(b[1]), 2.5 / 8.0) && close(len(b[4]), 1.0 / 8.0));
+            assert!(len(b[3]) > 2.0 * len(b[2]));
+            // The karaoke front crosses the «д» by its share, not by a fifth.
+            let at = |s: f32| t.head(Duration::from_secs_f32(s), 0.0).0;
+            let x = |i: usize| t.xs[i];
+            let d = 6; // «д» after «здесь» and the space
+            assert!((at(2.0 + 0.5 / 8.0) - (x(d).0 + x(d).1) / 2.0).abs() < 0.5);
+            assert!((at(2.0 + 1.0 / 8.0) - x(d).1).abs() < 0.5);
+            assert!((at(2.0 + 2.25 / 8.0) - (x(d + 1).0 + x(d + 1).1) / 2.0).abs() < 0.5);
+            let mut was = 0.0;
+            for ms in 1000..3000 {
+                let h = at(ms as f32 / 1000.0);
+                if h.is_finite() {
+                    assert!(h >= was - 1e-3, "{ms}");
+                    was = h;
+                }
+            }
+        });
+    }
+
+    #[test]
     fn syllable_head_is_continuous_and_clamped_to_its_own_span() {
         assert_eq!(syllable_head(20.0, 120.0, 2.0, 4.0, 1.0), 20.0);
         assert_eq!(syllable_head(20.0, 120.0, 2.0, 4.0, 3.0), 70.0);
@@ -1565,7 +1670,10 @@ mod tests {
             assert_eq!(solid(3500), (t.syllables[0].to, 15.0));
             assert_eq!(solid(6500), (t.syllables[1].to, 15.0));
             let (at, feather) = solid(5000);
-            assert!((at - (t.syllables[1].from + t.syllables[1].to) * 0.5).abs() < 0.001);
+            // Halfway through «lo»'s time: «l» takes 1 share, «o» 2.5, so
+            // the front is 0.3 into the «o».
+            let o = t.xs[t.syllables[1].glyphs.0 + 1];
+            assert!((at - (o.0 + 0.3 * (o.1 - o.0))).abs() < 0.01, "{at} {o:?}");
             assert_eq!(feather, 15.0);
             // It fades in and out instead of popping.
             assert!(solid(2050).1 > 0.0 && solid(2050).1 < 15.0);
