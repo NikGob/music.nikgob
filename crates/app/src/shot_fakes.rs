@@ -428,7 +428,7 @@ fn sound_quality(s: &mut ViewState, fake: bool) {
     s.player.audio_quality = None;
     s.info.source = Some("Локальный файл".into());
     s.info.quality = Some(format!("{row} · 16/44.1"));
-    s.info.path = Some("C:\Music\Пошлая Молли\2017 - 8 способов как бросить\07 - Молли.flac".into());
+    s.info.path = Some(r"C:\Music\Пошлая Молли\2017 - 8 способов как бросить\07 - Молли.flac".into());
     let facts = [
         ("Кодек", "FLAC"),
         ("Контейнер", "FLAC"),
