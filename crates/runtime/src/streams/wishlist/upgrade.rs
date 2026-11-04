@@ -20,7 +20,7 @@ use nikgob_core::model::{
 use nikgob_core::source::{Format, Offer};
 use nikgob_view::{self as v, UpgradeBar, UpgradeEvery};
 
-use super::{RETRY_AFTER, offers_of_json};
+use super::{Next, RETRY_AFTER, offers_of_json};
 use crate::Worker;
 
 /// Searches for better copies that start in an hour at most…
@@ -57,21 +57,81 @@ pub(crate) fn below_bar(score: i32, bar: UpgradeBar) -> bool {
     score > score::SAVED_STREAM && score < bar.score()
 }
 
+/// A format in words: «MP3 128», «Opus 160», «FLAC», «FLAC 24/96».
+pub(crate) fn format_words(f: &Format) -> String {
+    let label = f.label();
+    let name = nikgob_core::quality::codec_name(&f.codec);
+    match label.split_once(' ') {
+        Some((_, rest)) => format!("{name} {rest}"),
+        None => name,
+    }
+}
+
 /// A file's format in words: «MP3 128», «FLAC», «FLAC 24/96»; a «FLAC»
 /// the spectrum check found made from a lossy file (its `quality_score`
 /// says so, not its extension) is «FLAC из lossy».
 pub(crate) fn file_label(src: &Source) -> String {
-    let label = Format {
+    let label = format_words(&Format {
         codec: src.codec.clone(),
         bitrate_kbps: src.bitrate,
         bit_depth: src.bit_depth,
         sample_rate: src.sample_rate,
-    }
-    .label();
+    });
     if src.codec.is_lossless() && src.quality_score < score::CD_LOSSLESS {
         format!("{label} из lossy")
     } else {
         label
+    }
+}
+
+/// What a file is for the words of a better copy: a lossy copy ranked as
+/// lossless was made from a lossless master the archive keeps, and that is
+/// what improved: «FLAC 24/96 (в библиотеке Opus 158)». `master` is the
+/// master's format in words, when known.
+pub(crate) fn kept_label(src: &Source, master: Option<&str>) -> String {
+    let own = file_label(src);
+    match master {
+        Some(m) if !src.codec.is_lossless() && src.quality_score >= score::CD_LOSSLESS => {
+            format!("{m} (в библиотеке {own})")
+        }
+        _ => own,
+    }
+}
+
+/// The line of an import done for a better copy, in place of «добавлено 0
+/// · дублей 1»: what came of it, plainly. `dup` is what a copy that was not
+/// better really is («FLAC из MP3 ~128»).
+pub(crate) fn upgrade_job_words(imported: usize, duplicates: usize, left_out: usize, failed: usize, dup: Option<&str>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if imported > 0 {
+        parts.push(format!("заменено {imported}"));
+    }
+    if duplicates > 0 {
+        parts.push(match (imported, duplicates, dup) {
+            (0, 1, Some(q)) if q.contains(" из ") => {
+                let (codec, from) = q.split_once(" из ").unwrap_or((q, ""));
+                format!("скачанный {codec} оказался из {from} — оставил прежний файл")
+            }
+            (0, 1, Some(q)) => format!("скачанный {q} не лучше прежнего — оставил прежний файл"),
+            (0, 1, None) => "скачанный файл не лучше прежнего — оставил прежний".to_owned(),
+            (0, n, _) => format!("скачанное не лучше прежнего ({n}) — оставил прежние файлы"),
+            (_, n, _) => format!("не лучше прежних {n}"),
+        });
+    }
+    if left_out > 0 {
+        parts.push(if imported == 0 && duplicates == 0 {
+            "скачанное не из этого альбома — ничего не добавил".to_owned()
+        } else {
+            format!("не из этого альбома {left_out}")
+        });
+    }
+    if failed > 0 {
+        parts.push(format!("ошибок {failed}"));
+    }
+    if parts.is_empty() {
+        "ничего не пришло".to_owned()
+    } else {
+        parts.join(" · ")
     }
 }
 
@@ -138,7 +198,7 @@ impl Worker {
     }
 
     /// The item looks for a better copy of a file the library has.
-    pub(super) fn is_upgrade(&self, id: WishlistId) -> bool {
+    pub(crate) fn is_upgrade(&self, id: WishlistId) -> bool {
         self.lib.get_wishlist_item(id).ok().flatten().is_some_and(|i| i.origin == WishlistOrigin::Upgrade)
     }
 
@@ -162,6 +222,46 @@ impl Worker {
     fn upgrade_wants(&self, track: TrackId) -> bool {
         // A song the user deleted from its album stays gone.
         self.lib.get_track(track).ok().flatten().is_some() && !self.lib.is_track_unwanted(track).unwrap_or(false)
+    }
+
+    /// The tracks of an album item as a folder must have them to be its
+    /// album: their titles, places and lengths.
+    fn album_tracklist(&self, item: &WishlistItem) -> Vec<(String, u32, u32, Option<u32>)> {
+        nikgob_import::wished_release(&self.lib, item)
+            .ok()
+            .flatten()
+            .map(|r| {
+                self.lib
+                    .tracks_of_release(r.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| self.upgrade_wants(t.id))
+                    .map(|t| (t.title, t.disc_no, t.track_no, t.duration_ms))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether a folder (its files' names and lengths) is the album an item
+    /// that looks for a better copy of an album is for: enough of the
+    /// library's tracks are in it (another artist's album under the same
+    /// word has none). Anything else passes.
+    pub(super) fn upgrade_folder_fits(&self, item: &WishlistItem, files: &[(String, Option<u32>)]) -> bool {
+        if item.origin != WishlistOrigin::Upgrade || item.scope != WishlistScope::Album {
+            return true;
+        }
+        let list = self.album_tracklist(item);
+        let tracks: Vec<nikgob_import::AlbumTrack<'_>> = list
+            .iter()
+            .map(|(title, disc_no, track_no, duration_ms)| nikgob_import::AlbumTrack {
+                title,
+                disc_no: *disc_no,
+                track_no: *track_no,
+                duration_ms: *duration_ms,
+            })
+            .collect();
+        let files: Vec<(&str, Option<u32>)> = files.iter().map(|(n, d)| (n.as_str(), *d)).collect();
+        nikgob_import::folder_has_album(&tracks, &files)
     }
 
     /// The tracks of an album item that are in the library.
@@ -355,6 +455,7 @@ impl Worker {
         w.asked.remove(&id);
         w.upgrade_from.remove(&id);
         w.upgrade_have.remove(&id);
+        w.upgrade_dups.remove(&id);
     }
 
     /// «Никогда»: the items that wait for their next search go (one the
@@ -414,11 +515,17 @@ impl Worker {
     }
 
     /// The item's files are good enough now: «Скачано», in words of what
-    /// changed, in its row and in «История».
+    /// changed, in its row and in «История». A lossy copy made from a
+    /// lossless master says what the master is: «FLAC 24/96 (в библиотеке
+    /// Opus 158)», not a downgrade.
     pub(super) fn upgrade_done(&mut self, item: &WishlistItem) {
         let id = item.id;
         let from = self.streaming.wish.upgrade_from.remove(&id);
-        let to = self.upgrade_files(item).iter().min_by_key(|s| s.quality_score).map(file_label);
+        let worst = self.upgrade_files(item).into_iter().min_by_key(|s| s.quality_score);
+        let to = worst.map(|s| {
+            let master = self.streaming.wish.upgrade_came.remove(&s.track_id).or_else(|| self.master_words(&s));
+            kept_label(&s, master.as_deref())
+        });
         let words = done_words(from.as_deref(), to.as_deref());
         log::info!("upgrade: {} — {words}", item.title.as_deref().unwrap_or("?"));
         self.upgrade_forget(id);
@@ -433,12 +540,62 @@ impl Worker {
         self.publish_wishlist();
     }
 
+    /// The master of a track's lossy copy in words, from what the archive
+    /// knows: its codec, and the rate the check of the copy saw.
+    fn master_words(&self, src: &Source) -> Option<String> {
+        let master = self.lib.get_master(src.track_id).ok().flatten()?;
+        let rate = self.lib.quality_check(src.id).ok().flatten().map(|c| c.sample_rate).filter(|r| *r > 0);
+        let hi_res = src.quality_score >= score::HI_RES_LOSSLESS;
+        let name = nikgob_core::quality::codec_name(&master.codec);
+        Some(match rate {
+            Some(r) if hi_res && r > 48_000 => {
+                let khz = f64::from(r) / 1000.0;
+                if khz.fract() == 0.0 { format!("{name} {khz:.0} кГц") } else { format!("{name} {khz:.1} кГц") }
+            }
+            _ if hi_res => format!("{name} Hi-Res"),
+            _ => name,
+        })
+    }
+
+    /// What a copy that came for the item and was no better really is.
+    pub(crate) fn upgrade_dup(&self, id: WishlistId) -> Option<String> {
+        self.streaming.wish.upgrade_dups.get(&id).cloned()
+    }
+
+    /// A file that came for the item was not better than the one there:
+    /// what it really is, for the words once its import ended.
+    pub(crate) fn wish_duplicate(&mut self, id: WishlistId, quality: Option<String>) {
+        if let Some(q) = quality
+            && self.is_upgrade(id)
+        {
+            self.streaming.wish.upgrade_dups.insert(id, q);
+        }
+    }
+
+    /// What a file that came for an upgrade item is, read from the file
+    /// itself while it is still there (its master's format, for the words).
+    pub(super) fn upgrade_came(&mut self, track: TrackId, path: &std::path::Path) {
+        if let Ok(info) = nikgob_import::tags::probe_info(path) {
+            let f = Format {
+                codec: info.codec,
+                bitrate_kbps: info.bitrate_kbps,
+                bit_depth: info.bit_depth,
+                sample_rate: info.sample_rate,
+            };
+            self.streaming.wish.upgrade_came.insert(track, format_words(&f));
+        }
+    }
+
     /// The item's import ended (no file of it waits in «Подтверди»): done
     /// when its files are good enough; else the rest of an album from the
-    /// next offer, or the next offer, or the next search.
+    /// next offer, or the next offer, or the next search. A copy that came
+    /// and was no better is said plainly («скачанный FLAC оказался из MP3
+    /// ~128 — оставил прежний файл»), and the item waits for its schedule
+    /// rather than asking again in minutes the sources that said «wait».
     pub(super) fn upgrade_settle(&mut self, item: &WishlistItem) {
         let id = item.id;
         let partial = self.streaming.wish.partial.remove(&id);
+        let dup = self.streaming.wish.upgrade_dups.remove(&id);
         if item.status == WishlistStatus::Done {
             return;
         }
@@ -451,10 +608,26 @@ impl Worker {
             return;
         }
         // What came did not make it better (another release, the same
-        // quality, not the song): the next offer, else the next search.
+        // quality, a fake, not the song): the next offer, else the next search.
         if matches!(item.status, WishlistStatus::Downloading | WishlistStatus::Confirm) {
             self.streaming.wish.from.remove(&id);
-            self.wish_next_candidate(id);
+            self.streaming.wish.turned.remove(&id);
+            let next = self.wish_next_candidate(id);
+            // The import's own line says what else came of it (left out,
+            // failed); a copy that was no better is said here too.
+            let Some(dup) = dup else { return };
+            let why = upgrade_job_words(0, 1, 0, 0, Some(&dup));
+            let mut why = {
+                let mut c = why.chars();
+                c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
+            };
+            match next {
+                Next::Offer(from) => why.push_str(&format!(" · дальше — {from}")),
+                Next::Doubtful => why.push_str(" · есть другие варианты — в «Подтверди»"),
+                Next::Later(_) | Next::NotFound => {}
+            }
+            let title = self.item_title(id);
+            self.wish_line(id, title, why, None);
         }
     }
 
@@ -474,11 +647,13 @@ impl Worker {
             origin: if album { "Качество лучше · альбом" } else { "Качество лучше · трек" }.into(),
             options: offers
                 .iter()
-                .enumerate()
-                .map(|(i, o)| v::ConfirmOption {
+                .map(|o| v::ConfirmOption {
                     label: o.title.clone(),
                     detail: offer_detail(o, have.as_deref()),
-                    recommended: Some(i) == offers.iter().position(|o| o.seeders != Some(0)),
+                    // Never «РЕКОМЕНДУЕМ»: «Принять все рекомендованные»
+                    // must not replace a file the user has; each replacement
+                    // is its own «Заменить».
+                    recommended: false,
                 })
                 .collect(),
             skip_label: "Оставить как есть".into(),
@@ -573,6 +748,10 @@ mod tests {
         src.bitrate = Some(128);
         src.quality_score = 500;
         assert_eq!(file_label(&src), "MP3 128");
+        let mut opus = Source::new(TrackId::new(), SourceKind::LocalFile, "a.opus", Codec::Opus);
+        opus.bitrate = Some(160);
+        opus.quality_score = score::OPUS_160;
+        assert_eq!(file_label(&opus), "Opus 160");
         let mut fake = Source::new(TrackId::new(), SourceKind::LocalFile, "a.flac", Codec::Flac);
         fake.quality_score = score::FAKE_LOSSLESS;
         assert_eq!(file_label(&fake), "FLAC из lossy", "the score says, not the extension");
@@ -580,6 +759,39 @@ mod tests {
         assert_eq!(file_label(&fake), "FLAC");
         assert_eq!(done_words(Some("MP3 128"), Some("FLAC")), "Было MP3 128 — теперь FLAC");
         assert_eq!(done_words(None, Some("FLAC")), "Теперь FLAC");
+    }
+
+    /// «Treehouse»: the hi-res FLAC went to the archive, the library plays
+    /// its Opus; the words say what improved, not «теперь OPUS 158».
+    #[test]
+    fn a_copy_made_from_a_master_says_what_the_master_is() {
+        let mut opus = Source::new(TrackId::new(), SourceKind::LocalFile, "06 - Treehouse.opus", Codec::Opus);
+        opus.bitrate = Some(158);
+        opus.quality_score = score::HI_RES_LOSSLESS;
+        assert_eq!(file_label(&opus), "Opus 158");
+        let to = kept_label(&opus, Some("FLAC 24/96"));
+        assert_eq!(to, "FLAC 24/96 (в библиотеке Opus 158)");
+        assert_eq!(done_words(Some("MP3 242"), Some(&to)), "Было MP3 242 — теперь FLAC 24/96 (в библиотеке Opus 158)");
+        // An Opus that is all there is says so.
+        opus.quality_score = score::OPUS_160;
+        assert_eq!(kept_label(&opus, Some("FLAC")), "Opus 158");
+        assert_eq!(format_words(&Format { codec: Codec::Flac, bitrate_kbps: None, bit_depth: Some(24), sample_rate: Some(96_000) }), "FLAC 24/96");
+        // Ranked as its master: not below either bar, so not looked for again.
+        assert!(!below_bar(score::HI_RES_LOSSLESS, UpgradeBar::Lossless));
+    }
+
+    /// «добавлено 0 · дублей 1» said nothing; now the line says why.
+    #[test]
+    fn an_upgrade_import_says_plainly_what_came_of_it() {
+        assert_eq!(
+            upgrade_job_words(0, 1, 0, 0, Some("FLAC из MP3 ~128")),
+            "скачанный FLAC оказался из MP3 ~128 — оставил прежний файл"
+        );
+        assert_eq!(upgrade_job_words(0, 1, 0, 0, Some("MP3 320")), "скачанный MP3 320 не лучше прежнего — оставил прежний файл");
+        assert_eq!(upgrade_job_words(1, 0, 0, 0, None), "заменено 1");
+        assert_eq!(upgrade_job_words(0, 0, 6, 0, None), "скачанное не из этого альбома — ничего не добавил");
+        assert_eq!(upgrade_job_words(3, 1, 2, 0, None), "заменено 3 · не лучше прежних 1 · не из этого альбома 2");
+        assert!(!upgrade_job_words(0, 1, 0, 0, None).contains("дублей"));
     }
 
     /// The row says where the item stands in plain words.

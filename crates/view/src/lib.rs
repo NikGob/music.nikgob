@@ -1032,8 +1032,10 @@ pub struct Job {
     pub rate: Option<String>,
     pub eta: Option<String>,
     pub paused: bool,
-    /// Pause / cancel make sense (torrents); a folder import runs to the end.
+    /// It can be cancelled (a torrent, an import: what it added goes back).
     pub controllable: bool,
+    /// It can be paused too (a torrent).
+    pub pausable: bool,
     pub error: Option<String>,
     /// When it ended (ms since the epoch); "История" is newest first by it.
     /// 0 while it runs.
@@ -1280,10 +1282,13 @@ pub struct Prefs {
     pub normalization: bool,
     pub opus_bitrate: u32,
     pub check_fake_lossless: bool,
-    /// A "lossless" file found made from a lossy one becomes an MP3 that
-    /// keeps all its content really has (tags and all; the old file goes
-    /// to the Trash). Off: it stays as it is, labelled for what it is.
+    /// A "lossless" file plainly made from a lossy one is offered in
+    /// «Подтверди» as an MP3 that keeps all its content really has (tags and
+    /// all; the old file goes to the Trash, «Вернуть FLAC» brings it back).
+    /// Off: it stays as it is, labelled for what it is, and is not offered.
     pub convert_fake_lossless: bool,
+    /// …and becomes the MP3 without asking. Off unless the user says.
+    pub fake_flac_auto: bool,
     pub library_dir: PathBuf,
     pub inbox_dir: PathBuf,
     /// Where lossless masters (`.flac` originals and `.json` sidecars) are kept.
@@ -2398,6 +2403,9 @@ pub enum Command {
     AddMagnet(String),
     PauseJob(u64, bool),
     CancelJob(u64),
+    /// Every fake FLAC turned into an MP3 comes back from the Trash and plays
+    /// again; the MP3s go to the Trash.
+    RestoreConvertedFlac,
     ConfirmChoice { id: u64, option: Option<usize> },
     /// Folds the editions of [`EditionOffer::id`] into one album.
     MergeEditions(u64),
@@ -2621,6 +2629,7 @@ impl Default for Prefs {
             opus_bitrate: 160,
             check_fake_lossless: true,
             convert_fake_lossless: true,
+            fake_flac_auto: false,
             library_dir: PathBuf::new(),
             inbox_dir: PathBuf::new(),
             masters_dir: PathBuf::new(),

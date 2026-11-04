@@ -6,7 +6,8 @@
 //! Trash like any replaced file.
 //!
 //! MP3 is written by `ffmpeg` (libmp3lame) found on `PATH`; without it a
-//! fake stays as it is, honestly labelled.
+//! fake stays as it is, honestly labelled. A conversion is undone by
+//! [`restore_conversion`]: the original comes back from the Trash.
 
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use nikgob_core::model::{Codec, Source, SourceKind, TrackId, UnixMs};
 use nikgob_core::quality::{Mp3Target, QualityCheck, SoundOrigin, Verdict};
-use nikgob_library::Library;
+use nikgob_library::{Conversion, Library};
 
 use crate::decode::{PcmSpec, decode_file};
 use crate::error::{ImportError, Result};
@@ -250,4 +251,67 @@ pub fn convert_fake(
     }
     log::info!("fake lossless {} converted to {}", path.display(), dest.display());
     Ok(new)
+}
+
+/// Undoes a conversion: the original lossless file comes back from the
+/// Trash to its place and plays again (the same track, so its likes, plays,
+/// playlists and lyrics stay), the MP3 goes to the Trash, and the original
+/// is never offered as an MP3 again. Its rank is what its check says now
+/// (a cut no encoder makes is no verdict, see
+/// [`nikgob_core::quality::plausible`]).
+pub fn restore_conversion(lib: &Library, trash_dir: &Path, c: &Conversion) -> Result<()> {
+    // Restored already (by hand, or an earlier run): nothing to do.
+    match lib.get_source(c.original)? {
+        Some(s) if s.trashed_at.is_none() => return Ok(()),
+        None => return Ok(()),
+        Some(_) => {}
+    }
+    let original = PathBuf::from(&c.original_locator);
+    let in_trash = PathBuf::from(&c.trash_path);
+    if !long_path(&in_trash).exists() {
+        return Err(ImportError::Other(format!("{} is not in the Trash any more", in_trash.display())));
+    }
+    if long_path(&original).exists() {
+        return Err(ImportError::Other(format!("{} is taken", original.display())));
+    }
+    if let Some(dir) = original.parent() {
+        fsutil::create_dir_all(dir)?;
+    }
+    fsutil::move_file(&in_trash, &original)?;
+    let put_back = |e: ImportError| {
+        if let Err(m) = fsutil::move_file(&original, &in_trash) {
+            log::warn!("cannot put {} back into the Trash: {m}", original.display());
+        }
+        e
+    };
+    let src = lib.restore_source(c.original).map_err(|e| put_back(e.into()))?;
+    let check = lib.quality_check(c.original).ok().flatten();
+    let rank = match &check {
+        Some(q) if nikgob_core::quality::plausible(q.verdict, q.cutoff_hz) == Verdict::Transcoded => {
+            nikgob_core::quality::fake_score(q.origin)
+        }
+        _ => nikgob_core::model::quality_score(&src.codec, src.bitrate, src.sample_rate, src.bit_depth, false),
+    };
+    if let Err(e) = lib.set_source_score(src.id, rank) {
+        log::warn!("ranking {}: {e}", original.display());
+    }
+    if check.is_some() && let Err(e) = lib.set_quality_keep(src.id, true) {
+        log::warn!("keeping {}: {e}", original.display());
+    }
+    // The MP3 goes where the original was.
+    let mp3 = PathBuf::from(&c.mp3_locator);
+    let mp3_trash = if long_path(&mp3).exists() {
+        Some(trash_file(trash_dir, &mp3)?.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    lib.trash_source(c.mp3, mp3_trash.as_deref())?;
+    // The lyrics file went along with the MP3 when its name differed.
+    let lrc = mp3.with_extension("lrc");
+    let back = original.with_extension("lrc");
+    if lrc != back && long_path(&lrc).exists() && !long_path(&back).exists() {
+        let _ = fsutil::move_file(&lrc, &back);
+    }
+    log::info!("{} is back from the Trash, {} went there", original.display(), mp3.display());
+    Ok(())
 }

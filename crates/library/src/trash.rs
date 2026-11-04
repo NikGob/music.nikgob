@@ -70,6 +70,33 @@ impl Library {
         })
     }
 
+    /// Takes a source out of the library altogether (the import that added
+    /// it was cancelled): its row and its check go, and the track's active
+    /// source is chosen again. The caller moves its file.
+    pub fn forget_source(&self, source: SourceId) -> Result<()> {
+        self.write(|tx| {
+            let Some(src) = source_by_id(tx, source)? else { return Ok(()) };
+            tx.execute("DELETE FROM source_quality WHERE source_id = ?1", [source.to_string()])?;
+            tx.execute("DELETE FROM source WHERE id = ?1", [source.to_string()])?;
+            refresh_active(tx, src.track_id)?;
+            Ok(())
+        })
+    }
+
+    /// Takes a track an import just made out again (the import was
+    /// cancelled): its rows go as a purge's do, but it never was the user's,
+    /// so its song is not «не нужна» on its album.
+    pub fn forget_new_track(&self, track: TrackId) -> Result<PurgedTrack> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE track SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+                params![track.to_string(), now_ms()],
+            )?;
+            Ok(())
+        })?;
+        self.purge_track(track)
+    }
+
     /// Everything in Trash, most recently trashed first.
     pub fn list_trash(&self) -> Result<Vec<TrashEntry>> {
         self.read(|c| {

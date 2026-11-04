@@ -55,6 +55,8 @@ use crate::Worker;
 
 mod upgrade;
 
+pub(crate) use upgrade::upgrade_job_words;
+
 /// Bit of the "Подтверди" ids of wishlist items (import ids use bit 48,
 /// torrent jobs small numbers).
 pub(crate) const WISH_ID: u64 = 1 << 47;
@@ -172,8 +174,14 @@ pub(crate) struct WishState {
     upgrade_since: Option<Instant>,
     /// what an item's file was before the copy on its way,
     upgrade_from: HashMap<WishlistId, String>,
-    /// and what its files are now, in words (until a file lands).
+    /// and what its files are now, in words (until a file lands),
     upgrade_have: HashMap<WishlistId, Option<String>>,
+    /// what a copy that came and was no better really is («FLAC из MP3
+    /// ~128»), until its import ended,
+    upgrade_dups: HashMap<WishlistId, String>,
+    /// and the format of the file that came for a track (its master's, when
+    /// the library keeps an Opus of it), for the words once it is done.
+    upgrade_came: HashMap<TrackId, String>,
 }
 
 /// Sources whose downloads turned us away: after [`ASIDE_AFTER`] in a row
@@ -887,6 +895,9 @@ impl Worker {
             force,
             release: item.release_id.filter(|_| item.scope == WishlistScope::Album),
             wishlist: Some(item.id),
+            // A better copy replaces the item's files or nothing: what else
+            // came (another album under the same word) is never imported.
+            only_targets: item.origin == WishlistOrigin::Upgrade,
         }
     }
 
@@ -1303,6 +1314,18 @@ impl Worker {
             .into_iter()
             // With a copy, only what is better than it.
             .filter(|r| copy.is_none_or(|q| r.offer.quality() > q))
+            // A better copy of an album is a folder with the album's songs
+            // in it, not one that only shares a word with it.
+            .filter(|r| match crate::soulseek::folder_listing(&r.offer) {
+                Some(files) => {
+                    let fits = self.upgrade_folder_fits(&item, &files);
+                    if !fits {
+                        log::info!("wishlist: {} has none of the songs of {:?}", r.offer.title, want.album);
+                    }
+                    fits
+                }
+                None => true,
+            })
             .collect();
         if ranked.is_empty() {
             // Nothing found, but a source could not be asked: later, not
@@ -1361,7 +1384,14 @@ impl Worker {
     /// the torrents among them only once their list shows its file
     /// ([`Probe`]).
     fn confirm_after_look(&mut self, id: WishlistId, offers: Vec<Offer>) {
-        let track = self.lib.get_wishlist_item(id).ok().flatten().is_some_and(|i| i.scope == WishlistScope::Track);
+        // A track's torrents, and those of an album a better copy is looked
+        // for (its list must have the album's songs), are looked into first.
+        let track = self
+            .lib
+            .get_wishlist_item(id)
+            .ok()
+            .flatten()
+            .is_some_and(|i| i.scope == WishlistScope::Track || i.origin == WishlistOrigin::Upgrade);
         let todo: Vec<usize> = offers
             .iter()
             .enumerate()
@@ -1609,7 +1639,7 @@ impl Worker {
             let want = self.want_of(&item);
             let found = result.as_ref().is_ok_and(|meta| {
                 let files: Vec<(usize, String, u64)> = meta.files.iter().map(|f| (f.index, f.path.clone(), f.size)).collect();
-                pick_files(&files, &want).is_some()
+                pick_files(&files, &want).is_some() && self.torrent_fits(&item, &files)
             });
             log::info!("wishlist: {} {} of {:?}", offer.title, if found { "has a file" } else { "has no file" }, want.title);
             self.probe_done(id, found);
@@ -1625,8 +1655,8 @@ impl Worker {
         };
         let files: Vec<(usize, String, u64)> = meta.files.iter().map(|f| (f.index, f.path.clone(), f.size)).collect();
         let want = self.want_of(&item);
-        let Some(picked) = pick_files(&files, &want) else {
-            log::info!("wishlist: {} has no file of {:?}", offer.title, want.title);
+        let Some(picked) = pick_files(&files, &want).filter(|_| self.torrent_fits(&item, &files)) else {
+            log::info!("wishlist: {} has no file of {:?}", offer.title, want.title.as_ref().or(want.album.as_ref()));
             self.wish_next_candidate(id);
             return;
         };
@@ -1652,10 +1682,31 @@ impl Worker {
         self.publish_wishlist();
     }
 
+    /// A torrent's list (path, size) for an item that looks for a better
+    /// copy of an album: it has the album's songs. Anything else passes.
+    fn torrent_fits(&self, item: &WishlistItem, files: &[(usize, String, u64)]) -> bool {
+        let names: Vec<(String, Option<u32>)> = files.iter().map(|(_, p, _)| (p.clone(), None)).collect();
+        self.upgrade_folder_fits(item, &names)
+    }
+
     /// The offer did not work out: the next sure one, else the doubtful
     /// ones in «Подтверди», else later when a source turned the item away,
     /// else not found.
     fn wish_next_candidate(&mut self, id: WishlistId) -> Next {
+        // Turned down (or done) meanwhile: nothing more for it.
+        if self
+            .lib
+            .get_wishlist_item(id)
+            .ok()
+            .flatten()
+            .is_none_or(|i| matches!(i.status, WishlistStatus::Dismissed | WishlistStatus::Done))
+        {
+            let w = &mut self.streaming.wish;
+            w.cands.remove(&id);
+            w.doubtful.remove(&id);
+            w.probe.remove(&id);
+            return Next::NotFound;
+        }
         let next = match self.streaming.wish.cands.get_mut(&id) {
             Some(list) if !list.is_empty() => {
                 list.remove(0);
@@ -1952,7 +2003,20 @@ impl Worker {
         let mut title = None;
         let mut n = 0;
         for &id in ids {
-            self.streaming.wish.cands.remove(&id);
+            let w = &mut self.streaming.wish;
+            w.cands.remove(&id);
+            w.doubtful.remove(&id);
+            w.probe.remove(&id);
+            w.partial.remove(&id);
+            w.retry_only.remove(&id);
+            w.later.remove(&id);
+            w.upgrade_dups.remove(&id);
+            // A better copy turned down is never fetched on: its torrent
+            // goes with what it downloaded (a direct download's folder goes
+            // once it ends, unimported).
+            if self.is_upgrade(id) {
+                self.cancel_wish_torrent(id);
+            }
             self.wish_line_drop(id);
             if let Some(i) = self.set_item(id, |i| {
                 i.status = WishlistStatus::Dismissed;
@@ -2199,6 +2263,22 @@ impl Worker {
     /// A file landed (or was a duplicate of a file there): items it
     /// satisfies are done; a copy saved from YouTube keeps its item looking
     /// for a real file.
+    /// A file became `track`'s (from `path`): for a better copy, what it
+    /// is, read while the file is still there.
+    pub(crate) fn wish_file_came(&mut self, track: TrackId, path: &Path) {
+        if self.lib.wishlist_for_track(track).unwrap_or_default().iter().any(|i| i.origin == WishlistOrigin::Upgrade)
+            || self
+                .lib
+                .get_track(track)
+                .ok()
+                .flatten()
+                .and_then(|t| t.release_id)
+                .is_some_and(|r| self.lib.wishlist_for_release(r).unwrap_or_default().iter().any(|i| i.origin == WishlistOrigin::Upgrade))
+        {
+            self.upgrade_came(track, path);
+        }
+    }
+
     pub(crate) fn wish_imported(&mut self, track: TrackId, path: &Path) {
         // What the files of the better-copy items are has changed.
         self.streaming.wish.upgrade_have.clear();
@@ -2463,6 +2543,32 @@ impl Worker {
         self.lib.list_downloads().unwrap_or_default().iter().any(|d| d.wishlist_id == Some(id))
     }
 
+    /// The torrent of a turned-down item stops, with what it downloaded.
+    fn cancel_wish_torrent(&mut self, id: WishlistId) {
+        let hashes: Vec<String> = self
+            .lib
+            .list_downloads()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| d.wishlist_id == Some(id))
+            .map(|d| d.info_hash)
+            .collect();
+        if hashes.is_empty() {
+            return;
+        }
+        log::info!("wishlist: {id} turned down, its torrent goes");
+        self.with_client(Box::new(move |w, c| {
+            for h in hashes {
+                let _ = w.lib.delete_download(&h);
+                if let Some(t) = c.list().into_iter().find(|t| t.info_hash == h) {
+                    let tid = t.id;
+                    let c = c.clone();
+                    w.spawn_torrent_op(async move { c.remove(tid, true).await.map_err(|e| e.to_string()) });
+                }
+            }
+        }));
+    }
+
     /// After a restart: searches that were running start over, and so do
     /// downloads of sources other than torrents (they do not go on), whose
     /// folders go unless files of them wait in «Подтверди».
@@ -2502,7 +2608,12 @@ impl Worker {
             // into (once): searched for again rather than asked about.
             let offers = i.candidates_json.as_deref().map(offers_of_json).unwrap_or_default();
             let unlooked = !probed && i.scope == WishlistScope::Track && offers.iter().any(|o| o.source == SourceKey::Torrents);
-            if unlooked || rank(offers.clone(), &self.want_of(&i), &[]).len() < offers.len() {
+            // A better copy of an album shown as a folder without its songs.
+            let strangers = offers
+                .iter()
+                .filter_map(crate::soulseek::folder_listing)
+                .any(|files| !self.upgrade_folder_fits(&i, &files));
+            if unlooked || strangers || rank(offers.clone(), &self.want_of(&i), &[]).len() < offers.len() {
                 self.set_item(i.id, |i| {
                     i.status = WishlistStatus::New;
                     i.next_try_at = None;

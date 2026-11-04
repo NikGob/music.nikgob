@@ -1126,6 +1126,10 @@ impl Worker {
             Command::ConfirmChoice { id, option } if id & IMPORT_ID != 0 => {
                 self.confirm_choice(id, option);
             }
+            Command::ConfirmChoice { id, option } if id & quality::QUALITY_ID != 0 => {
+                self.quality_confirm(id, option);
+            }
+            Command::RestoreConvertedFlac => self.restore_converted_flac(),
             Command::LoadLibrary => self.load_library(),
             Command::DownloadsShown(shown) => self.torrents.shown = shown,
             Command::LoadTracks {
@@ -2294,7 +2298,9 @@ impl Worker {
         self.publish(|s| s.prefs = *p.clone());
         self.save_prefs();
         self.import_prefs(&p);
-        if (old.check_fake_lossless, old.convert_fake_lossless) != (p.check_fake_lossless, p.convert_fake_lossless) {
+        if (old.check_fake_lossless, old.convert_fake_lossless, old.fake_flac_auto)
+            != (p.check_fake_lossless, p.convert_fake_lossless, p.fake_flac_auto)
+        {
             self.quality_prefs();
         }
         self.align_settings();

@@ -143,9 +143,10 @@ pub struct QualityCheck {
 
 impl QualityCheck {
     pub fn summary(&self) -> CheckSummary {
+        let verdict = plausible(self.verdict, self.cutoff_hz);
         CheckSummary {
-            verdict: self.verdict,
-            origin: self.origin,
+            verdict,
+            origin: if verdict == self.verdict { self.origin } else { SoundOrigin::Unknown },
             made_from: self.made_from.clone(),
         }
     }
@@ -169,6 +170,42 @@ impl<'de> Deserialize<'de> for SoundOrigin {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         Ok(Self::parse(&String::deserialize(d)?))
     }
+}
+
+/// The lowest lowpass a lossy encoder puts on music people share (MP3 at
+/// 64 kbps cuts near 11 kHz): content that stops below it is the music's
+/// own (a quiet synth, a piano, a chiptune), not a codec's cut.
+pub const LOWEST_LOWPASS_HZ: f32 = 11_000.0;
+
+/// A verdict as it stands: a transcoding found with its cut where no lossy
+/// encoder puts one says nothing (checks stored before this rule read as
+/// [`Verdict::Unknown`]).
+pub fn plausible(verdict: Verdict, cutoff_hz: f32) -> Verdict {
+    if verdict == Verdict::Transcoded && cutoff_hz < LOWEST_LOWPASS_HZ {
+        Verdict::Unknown
+    } else {
+        verdict
+    }
+}
+
+/// A check says something about a file only when it is of lossless audio:
+/// the file's own when it is lossless, or the lossless original it was made
+/// from. A lossy file's own lowpass is what its format does.
+pub fn check_counts(codec: &Codec, made_from: Option<&Codec>) -> bool {
+    match made_from {
+        Some(m) => m.is_lossless(),
+        None => codec.is_lossless(),
+    }
+}
+
+/// A fake so plain that turning it into an MP3 loses nothing for sure: a
+/// lossy encoder's cliff (a steep drop where MP3s cut, 15 kHz and up), and
+/// a steeper one still for a file that came as hi-res. Anything less is
+/// labelled, never converted.
+pub fn clear_fake(verdict: Verdict, cutoff_hz: f32, steepness_db: f32, hi_res: bool) -> bool {
+    plausible(verdict, cutoff_hz) == Verdict::Transcoded
+        && cutoff_hz >= 15_000.0
+        && steepness_db >= if hi_res { 40.0 } else { 30.0 }
 }
 
 impl CheckSummary {
@@ -202,15 +239,6 @@ impl CheckSummary {
             && self.verdict == Verdict::Transcoded
     }
 
-    /// A lossy file whose content is cut far below what its bitrate
-    /// promises: an MP3 320 made from an MP3 128.
-    fn inflated(&self, codec: &Codec, bitrate: Option<u32>) -> Option<u32> {
-        if codec.is_lossless() || self.made_from.is_some() || self.verdict != Verdict::Transcoded {
-            return None;
-        }
-        let real = self.origin.lossy_kbps()?;
-        (real * 2 <= bitrate?).then_some(real)
-    }
 }
 
 /// `quality_score` of a lossless file found transcoded: what its content
@@ -269,7 +297,8 @@ pub fn label(codec: &Codec, bitrate: Option<u32>, check: Option<&CheckSummary>) 
         Some(b) => format!("{name} {b}"),
         None => name.clone(),
     };
-    let Some(c) = check else { return with_rate };
+    // A lossy file's own check says nothing (see [`check_counts`]).
+    let Some(c) = check.filter(|c| check_counts(codec, c.made_from.as_ref())) else { return with_rate };
     if c.fake(codec) {
         return match c.origin.lossy_kbps() {
             Some(k) => format!("{name} из MP3 ~{k}"),
@@ -280,9 +309,6 @@ pub fn label(codec: &Codec, bitrate: Option<u32>, check: Option<&CheckSummary>) 
         let from = c.made_from.as_ref().map(codec_name).unwrap_or_default();
         return format!("{with_rate} из поддельного {from}");
     }
-    if let Some(real) = c.inflated(codec, bitrate) {
-        return format!("{with_rate} из ~{real}");
-    }
     with_rate
 }
 
@@ -292,8 +318,10 @@ pub fn khz(hz: f32) -> String {
 }
 
 /// The verdict in plain words for the quality panel. `codec` and
-/// `bitrate` are the source's own.
+/// `bitrate` are the source's own; the check is one that counts
+/// ([`check_counts`]).
 pub fn verdict_text(codec: &Codec, bitrate: Option<u32>, check: &QualityCheck) -> String {
+    let _ = bitrate;
     let s = check.summary();
     let like = |o: SoundOrigin| match o.lossy_kbps() {
         Some(k) => format!("похоже на MP3 ~{k} кбит/с"),
@@ -309,10 +337,7 @@ pub fn verdict_text(codec: &Codec, bitrate: Option<u32>, check: &QualityCheck) -
             like(check.origin)
         );
     }
-    if let Some(real) = s.inflated(codec, bitrate) {
-        return format!("Битрейт завышен: полоса как у MP3 ~{real} кбит/с");
-    }
-    match (check.verdict, &check.made_from) {
+    match (s.verdict, &check.made_from) {
         (Verdict::Unknown, _) => "Не определить: запись слишком тихая или короткая".into(),
         (Verdict::Upsampled, _) => "Lossless, но не Hi-Res: внутри качество CD, растянутое до большей частоты".into(),
         (Verdict::Genuine, Some(from)) => format!("Сделан из настоящего {}", codec_name(from)),
@@ -429,12 +454,37 @@ mod tests {
         assert_eq!(row_label(&Codec::Flac, None), "FLAC");
         let opus = check(Verdict::Genuine, 22_050.0, Some(Codec::Flac)).summary();
         assert_eq!(label(&Codec::Opus, Some(160), Some(&opus)), "Opus 160");
-        // An MP3 320 cut like a 128, and a genuine 320.
+        // A lossy file's own check is not a verdict: its lowpass is its
+        // format's.
         let blown = check(Verdict::Transcoded, 16_000.0, None).summary();
-        assert_eq!(label(&Codec::Mp3, Some(320), Some(&blown)), "MP3 320 из ~128");
-        let fine = check(Verdict::Transcoded, 20_100.0, None).summary();
+        assert_eq!(label(&Codec::Mp3, Some(320), Some(&blown)), "MP3 320");
+        let fine = check(Verdict::Genuine, 22_000.0, None).summary();
         assert_eq!(label(&Codec::Mp3, Some(320), Some(&fine)), "MP3 320");
-        assert_eq!(label(&Codec::Mp3, Some(192), Some(&blown)), "MP3 192");
+        assert_eq!(label(&Codec::Opus, Some(160), Some(&blown)), "Opus 160");
+        assert_eq!(label(&Codec::Aac, Some(256), Some(&fine)), "AAC 256");
+        assert!(!check_counts(&Codec::Mp3, None) && check_counts(&Codec::Mp3, Some(&Codec::Flac)));
+        assert!(check_counts(&Codec::Flac, None) && !check_counts(&Codec::Opus, Some(&Codec::Mp3)));
+    }
+
+    /// Content that ends where no encoder cuts (an OST's quiet synth at
+    /// 3 kHz, a piano at 6 kHz) is no fake; a fake is converted only for a
+    /// plain cliff.
+    #[test]
+    fn a_cut_no_encoder_makes_is_no_verdict_and_only_a_cliff_is_clear() {
+        assert_eq!(plausible(Verdict::Transcoded, 2_820.0), Verdict::Unknown);
+        assert_eq!(plausible(Verdict::Transcoded, 6_000.0), Verdict::Unknown);
+        assert_eq!(plausible(Verdict::Transcoded, 16_000.0), Verdict::Transcoded);
+        let quiet = check(Verdict::Transcoded, 2_820.0, None);
+        assert_eq!(quiet.summary().verdict, Verdict::Unknown);
+        assert_eq!(row_label(&Codec::Flac, Some(&quiet.summary())), "FLAC");
+        // OMORI's «Title» (2.8 kHz, 31 dB), «WHITE SPACE» (12.4 kHz, 56 dB),
+        // a Серега Пират single (15.2 kHz, 19 dB), «Молли» (19.9 kHz, 40 dB).
+        assert!(!clear_fake(Verdict::Transcoded, 2_820.0, 31.0, false));
+        assert!(!clear_fake(Verdict::Transcoded, 12_380.0, 56.0, false));
+        assert!(!clear_fake(Verdict::Transcoded, 15_200.0, 19.0, false));
+        assert!(clear_fake(Verdict::Transcoded, 19_940.0, 39.6, false));
+        assert!(!clear_fake(Verdict::Transcoded, 16_785.0, 35.0, true), "hi-res needs a steeper cliff");
+        assert!(!clear_fake(Verdict::Genuine, 22_000.0, 0.0, false));
     }
 
     #[test]

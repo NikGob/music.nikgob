@@ -106,6 +106,22 @@ fn best_title(got: &str, want: &[String]) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// The album's folded name says nothing but the artist's (all its words
+/// are in an artist key).
+fn just_the_artist(album: &str, keys: &[String]) -> bool {
+    !album.is_empty() && keys.iter().any(|k| contains_words(k, album))
+}
+
+/// How often the folded words of `needle` occur in `hay` in a row.
+fn word_runs(hay: &str, needle: &str) -> usize {
+    let h: Vec<&str> = hay.split(' ').filter(|w| !w.is_empty()).collect();
+    let n: Vec<&str> = needle.split(' ').filter(|w| !w.is_empty()).collect();
+    if n.is_empty() || h.len() < n.len() {
+        return 0;
+    }
+    h.windows(n.len()).filter(|w| *w == n.as_slice()).count()
+}
+
 /// The verdict on `offer` for `want`, `None` when it is not it.
 pub fn judge(offer: &Offer, want: &Want) -> Option<Verdict> {
     match offer.source {
@@ -225,7 +241,17 @@ fn judge_release(offer: &Offer, want: &Want) -> Option<Verdict> {
         return None;
     }
     let albums: Vec<String> = want.album.as_deref().map(album_keys).unwrap_or_default();
-    let names_album = albums.iter().any(|a| contains_words(&hay, a));
+    let wanted_ost = want.album.as_deref().is_some_and(is_soundtrack);
+    let names_album = albums.iter().any(|a| {
+        if just_the_artist(a, &keys) {
+            // A self-titled album, or «OMORI OST» of OMORI: the first
+            // mention is the artist's, the album needs one more (or the
+            // soundtrack named as one).
+            word_runs(&hay, a) >= 2 || (wanted_ost && is_soundtrack(&offer.title))
+        } else {
+            contains_words(&hay, a)
+        }
+    });
     let titles: Vec<String> = want.title.as_deref().map(title_keys).unwrap_or_default();
     let names_title = want.scope == WantScope::Track && titles.iter().any(|t| contains_words(&hay, t));
     let franchise = want
@@ -379,6 +405,25 @@ mod tests {
         // A track may sit on another album: asked.
         let w = want("MORGENSHTERN", "Cadillac", "ЛЕГЕНДАРНАЯ ПЫЛЬ", 0);
         assert!(judge(&torrent(other, 2), &w).is_some());
+    }
+
+    /// «OMORI OST» of OMORI: a cassette by another «Omori» names the
+    /// artist's word once and is not the album; the OST itself is.
+    #[test]
+    fn an_album_named_like_its_artist_needs_more_than_the_name() {
+        let w = Want { title: None, scope: WantScope::Album, ..want("OMORI", "", "OMORI OST", 0) };
+        let mut cass = torrent("~incomplete~ Amek collective {experimental}. BUL, 2008- / [amek040] Omori - Embryogenesis (cass, 2020)", 1);
+        cass.source = SourceKey::Soulseek;
+        cass.format = Some(Format::new(Codec::Flac));
+        assert!(judge(&cass, &w).is_none());
+        assert!(judge(&torrent("OMORI - OMORI OST (2020) [FLAC]", 3), &w).unwrap().sure);
+        assert!(judge(&torrent("OMORI Original Soundtrack (2020) [FLAC]", 3), &w).is_some());
+        // A self-titled album.
+        let w = Want { title: None, scope: WantScope::Album, ..want("Кино", "", "Кино", 0) };
+        assert!(judge(&torrent("Кино - Кино (1988) [FLAC]", 3), &w).unwrap().sure);
+        assert!(judge(&torrent("Кино - Группа крови (1988) [FLAC]", 3), &w).is_none());
+        assert_eq!(word_runs("omori omori ost", "omori"), 2);
+        assert_eq!(word_runs("a b a b", "a b"), 2);
     }
 
     #[test]

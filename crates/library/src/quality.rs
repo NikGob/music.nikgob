@@ -2,8 +2,10 @@
 //! file's sound really is, kept so a "FLAC" made from an MP3 is never shown
 //! as lossless, and the list of files still to check.
 
-use nikgob_core::model::{Codec, SourceId, TrackId, UnixMs};
-use nikgob_core::quality::{QualityCheck, SoundOrigin, Verdict, spectrum_from_blob, spectrum_to_blob};
+use nikgob_core::model::{Codec, ReleaseId, SourceId, TrackId, UnixMs, quality_score};
+use nikgob_core::quality::{
+    LOWEST_LOWPASS_HZ, QualityCheck, SoundOrigin, Verdict, clear_fake, spectrum_from_blob, spectrum_to_blob,
+};
 use rusqlite::{OptionalExtension, Row, params};
 
 use crate::catalog::refresh_active;
@@ -28,6 +30,38 @@ pub struct QualityTodo {
     pub made_from: Option<Codec>,
 }
 
+/// A lossless file the check found made from a lossy one, plainly enough
+/// to offer it as an MP3 ([`Library::fake_offers`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FakeOffer {
+    pub source_id: SourceId,
+    pub track_id: TrackId,
+    pub title: String,
+    pub release: Option<ReleaseId>,
+    /// The album's title, or the artist's line of a loose track.
+    pub album: String,
+    pub locator: String,
+    pub cutoff_hz: f32,
+    pub steepness_db: f32,
+    pub origin: SoundOrigin,
+}
+
+/// A fake lossless file turned into an MP3 ([`Library::conversions`]): the
+/// MP3 that plays now and the old file in the Trash.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Conversion {
+    pub track_id: TrackId,
+    pub mp3: SourceId,
+    pub mp3_locator: String,
+    pub original: SourceId,
+    /// Where the original lived, and where it is in the Trash now.
+    pub original_locator: String,
+    pub trash_path: String,
+}
+
+/// The lossless codecs as the `source.codec` column spells them.
+const LOSSLESS_SQL: &str = "('flac', 'alac', 'wav')";
+
 const CHECK_COLS: &str = "verdict, cutoff_hz, steepness_db, origin, sample_rate, spectrum, made_from, \
                           file_size, file_mtime, checked_at";
 
@@ -51,10 +85,16 @@ impl Library {
     /// Stores the check of a source (replacing an older one).
     pub fn put_quality_check(&self, source: SourceId, c: &QualityCheck) -> Result<()> {
         self.write(|tx| {
+            // The user's «keep it» stays over a check made again.
             tx.execute(
-                "INSERT OR REPLACE INTO source_quality(source_id, verdict, cutoff_hz, steepness_db, origin,
+                "INSERT INTO source_quality(source_id, verdict, cutoff_hz, steepness_db, origin,
                         sample_rate, spectrum, made_from, file_size, file_mtime, checked_at, failed)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)
+                 ON CONFLICT(source_id) DO UPDATE SET verdict = excluded.verdict, cutoff_hz = excluded.cutoff_hz,
+                        steepness_db = excluded.steepness_db, origin = excluded.origin,
+                        sample_rate = excluded.sample_rate, spectrum = excluded.spectrum,
+                        made_from = excluded.made_from, file_size = excluded.file_size,
+                        file_mtime = excluded.file_mtime, checked_at = excluded.checked_at, failed = NULL",
                 params![
                     source.to_string(),
                     c.verdict.as_str(),
@@ -78,9 +118,12 @@ impl Library {
     pub fn mark_quality_failed(&self, source: SourceId, file_size: u64, file_mtime: UnixMs, why: &str) -> Result<()> {
         self.write(|tx| {
             tx.execute(
-                "INSERT OR REPLACE INTO source_quality(source_id, verdict, origin, file_size, file_mtime,
-                        checked_at, failed)
-                 VALUES (?1, 'unknown', 'unknown', ?2, ?3, ?4, ?5)",
+                "INSERT INTO source_quality(source_id, verdict, origin, file_size, file_mtime, checked_at, failed)
+                 VALUES (?1, 'unknown', 'unknown', ?2, ?3, ?4, ?5)
+                 ON CONFLICT(source_id) DO UPDATE SET verdict = 'unknown', cutoff_hz = 0, steepness_db = 0,
+                        origin = 'unknown', sample_rate = 0, spectrum = NULL, made_from = NULL,
+                        file_size = excluded.file_size, file_mtime = excluded.file_mtime,
+                        checked_at = excluded.checked_at, failed = excluded.failed",
                 params![source.to_string(), file_size as i64, file_mtime, now_ms(), why],
             )?;
             Ok(())
@@ -96,20 +139,20 @@ impl Library {
         })
     }
 
-    /// Every live local source with its check stamp: never checked lossless
-    /// files first, then never checked lossy ones, then the checked ones
-    /// (whose files the caller compares with the stamp).
+    /// Every live local lossless file with its check stamp: the never
+    /// checked first, then the checked ones (whose files the caller
+    /// compares with the stamp). A lossy file's own lowpass is what its
+    /// format does: it is never checked.
     pub fn quality_todo(&self) -> Result<Vec<QualityTodo>> {
         self.read(|c| {
-            let mut stmt = c.prepare_cached(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT s.id, s.track_id, s.locator, s.codec, s.bitrate, s.quality_score,
                         q.file_size, q.file_mtime, q.made_from, q.source_id IS NOT NULL AS checked
                    FROM source s LEFT JOIN source_quality q ON q.source_id = s.id
                   WHERE s.kind = 'local_file' AND s.trashed_at IS NULL AND s.available = 1
-                  ORDER BY checked,
-                           CASE s.codec WHEN 'flac' THEN 0 WHEN 'alac' THEN 0 WHEN 'wav' THEN 0 ELSE 1 END,
-                           s.added_at DESC, s.id",
-            )?;
+                    AND s.codec IN {LOSSLESS_SQL}
+                  ORDER BY checked, s.added_at DESC, s.id"
+            ))?;
             let rows = stmt.query_map([], |r| {
                 let checked: bool = r.get(9)?;
                 Ok(QualityTodo {
@@ -151,6 +194,150 @@ impl Library {
             let track = track.parse::<TrackId>().map_err(|_| crate::error::LibraryError::not_found("track", &track))?;
             refresh_active(tx, track)?;
             Ok(true)
+        })
+    }
+
+    /// Puts the stored checks right with what a check means now: a lossy
+    /// file's own check goes (only a lossless sound is judged), a
+    /// transcoding found with a cut below any encoder's lowpass is no
+    /// verdict, and a live lossless file that was ranked down for such a
+    /// verdict is ranked as what it is again. Returns the tracks whose rows
+    /// change.
+    pub fn tidy_quality_checks(&self) -> Result<Vec<TrackId>> {
+        self.write(|tx| {
+            let mut tracks: Vec<TrackId> = Vec::new();
+            {
+                let mut stmt = tx.prepare_cached(&format!(
+                    "SELECT DISTINCT s.track_id FROM source_quality q JOIN source s ON s.id = q.source_id
+                      WHERE q.made_from IS NULL AND s.codec NOT IN {LOSSLESS_SQL}"
+                ))?;
+                let rows = stmt.query_map([], |r| get_id::<TrackId>(r, 0))?;
+                tracks.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+            }
+            tx.execute(
+                &format!(
+                    "DELETE FROM source_quality WHERE made_from IS NULL
+                        AND source_id IN (SELECT id FROM source WHERE codec NOT IN {LOSSLESS_SQL})"
+                ),
+                [],
+            )?;
+            // The live lossless files a cut no encoder makes ranked down.
+            let wronged: Vec<(SourceId, TrackId, String, Option<u32>, Option<u32>, Option<u32>, i32)> = {
+                let mut stmt = tx.prepare_cached(&format!(
+                    "SELECT s.id, s.track_id, s.codec, s.bitrate, s.sample_rate, s.bit_depth, s.quality_score
+                       FROM source_quality q JOIN source s ON s.id = q.source_id
+                      WHERE q.verdict = 'transcoded' AND q.cutoff_hz < ?1 AND q.made_from IS NULL
+                        AND s.codec IN {LOSSLESS_SQL} AND s.trashed_at IS NULL AND s.origin_kind != 'stream'"
+                ))?;
+                let rows = stmt.query_map([f64::from(LOWEST_LOWPASS_HZ)], |r| {
+                    Ok((get_id(r, 0)?, get_id(r, 1)?, r.get(2)?, opt_u32(r, 3)?, opt_u32(r, 4)?, opt_u32(r, 5)?, r.get(6)?))
+                })?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            tx.execute(
+                "UPDATE source_quality SET verdict = 'unknown', origin = 'unknown'
+                  WHERE verdict = 'transcoded' AND cutoff_hz < ?1",
+                [f64::from(LOWEST_LOWPASS_HZ)],
+            )?;
+            for (id, track, codec, bitrate, rate, depth, was) in wronged {
+                let depth = depth.and_then(|d| u8::try_from(d).ok());
+                let want = quality_score(&Codec::parse(&codec), bitrate, rate, depth, false);
+                if want != was {
+                    tx.execute("UPDATE source SET quality_score = ?2 WHERE id = ?1", params![id.to_string(), want])?;
+                    refresh_active(tx, track)?;
+                    tracks.push(track);
+                }
+            }
+            tracks.sort();
+            tracks.dedup();
+            Ok(tracks)
+        })
+    }
+
+    /// The user's answer about a fake: kept as it is (`true`), or offered
+    /// again.
+    pub fn set_quality_keep(&self, source: SourceId, keep: bool) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE source_quality SET keep = ?2 WHERE source_id = ?1",
+                params![source.to_string(), i64::from(keep)],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The playing lossless files the check found made from a lossy one
+    /// plainly enough ([`clear_fake`]) to offer them as MP3s, that the user
+    /// did not keep: by album, then by place.
+    pub fn fake_offers(&self) -> Result<Vec<FakeOffer>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(&format!(
+                "SELECT s.id, s.track_id, t.title, t.release_id, coalesce(r.title, ''), s.locator,
+                        q.verdict, q.cutoff_hz, q.steepness_db, q.origin, s.sample_rate, s.bit_depth
+                   FROM source s JOIN source_quality q ON q.source_id = s.id
+                   JOIN track t ON t.id = s.track_id
+                   LEFT JOIN release r ON r.id = t.release_id
+                  WHERE s.kind = 'local_file' AND s.is_active = 1 AND s.trashed_at IS NULL AND s.available = 1
+                    AND s.codec IN {LOSSLESS_SQL} AND s.origin_kind != 'stream' AND t.deleted_at IS NULL
+                    AND q.verdict = 'transcoded' AND q.made_from IS NULL AND q.failed IS NULL AND q.keep = 0
+                  ORDER BY coalesce(r.title, ''), t.release_id, t.disc_no, t.track_no, t.title, s.id"
+            ))?;
+            let rows = stmt.query_map([], |r| {
+                let verdict = Verdict::parse(&r.get::<_, String>(6)?);
+                let cutoff = r.get::<_, f64>(7)? as f32;
+                let steep = r.get::<_, f64>(8)? as f32;
+                let hi_res = opt_u32(r, 10)?.is_some_and(|x| x > 48_000) || opt_u32(r, 11)?.is_some_and(|b| b > 16);
+                let offer = FakeOffer {
+                    source_id: get_id(r, 0)?,
+                    track_id: get_id(r, 1)?,
+                    title: r.get(2)?,
+                    release: crate::util::get_opt_id(r, 3)?,
+                    album: r.get(4)?,
+                    locator: r.get(5)?,
+                    cutoff_hz: cutoff,
+                    steepness_db: steep,
+                    origin: SoundOrigin::parse(&r.get::<_, String>(9)?),
+                };
+                Ok(clear_fake(verdict, cutoff, steep, hi_res).then_some(offer))
+            })?;
+            Ok(rows.filter_map(|r| r.transpose()).collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Every fake lossless file turned into an MP3 whose original is still
+    /// in the Trash: the live MP3 made from a lossless file, and the
+    /// trashed lossless source of the same track.
+    pub fn conversions(&self) -> Result<Vec<Conversion>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(&format!(
+                "SELECT m.track_id, m.id, m.locator, o.id, o.locator, o.trash_path
+                   FROM source m JOIN source_quality q ON q.source_id = m.id
+                   JOIN source o ON o.track_id = m.track_id AND o.id != m.id
+                  WHERE m.kind = 'local_file' AND m.trashed_at IS NULL AND m.codec = 'mp3'
+                    AND q.made_from IN {LOSSLESS_SQL}
+                    AND o.kind = 'local_file' AND o.codec IN {LOSSLESS_SQL}
+                    AND o.trashed_at IS NOT NULL AND o.trash_path IS NOT NULL
+                  ORDER BY m.track_id, o.trashed_at DESC"
+            ))?;
+            let rows = stmt.query_map([], |r| {
+                Ok(Conversion {
+                    track_id: get_id(r, 0)?,
+                    mp3: get_id(r, 1)?,
+                    mp3_locator: r.get(2)?,
+                    original: get_id(r, 3)?,
+                    original_locator: r.get(4)?,
+                    trash_path: r.get(5)?,
+                })
+            })?;
+            let mut out: Vec<Conversion> = Vec::new();
+            for c in rows {
+                let c = c?;
+                // One original per MP3: the one trashed last.
+                if !out.iter().any(|o| o.mp3 == c.mp3) {
+                    out.push(c);
+                }
+            }
+            Ok(out)
         })
     }
 
@@ -230,8 +417,9 @@ mod tests {
         lib.put_quality_check(done.id, &fake_check()).unwrap();
         let todo = lib.quality_todo().unwrap();
         let order: Vec<SourceId> = todo.iter().map(|t| t.source_id).collect();
-        assert_eq!(order, vec![flac.id, mp3.id, done.id]);
-        assert_eq!(todo[2].checked, Some((26_733_824, 1_762_000_000_000)));
+        assert_eq!(order, vec![flac.id, done.id], "a lossy file is never checked");
+        assert!(!order.contains(&mp3.id));
+        assert_eq!(todo[1].checked, Some((26_733_824, 1_762_000_000_000)));
         assert_eq!(todo[0].checked, None);
 
         assert!(lib.set_source_score(done.id, nikgob_core::quality::fake_score(SoundOrigin::Lossy { kbps: 128 })).unwrap());
@@ -242,5 +430,66 @@ mod tests {
         // Checks of sources that are gone are dropped.
         lib.put_quality_check(SourceId::new(), &fake_check()).unwrap();
         assert_eq!(lib.drop_orphan_checks().unwrap(), 1);
+    }
+
+    /// «RuLe.mp3 is Transcoded», «Clover.mp3 is Genuine»: an MP3's own
+    /// verdict goes; an OST's quiet FLAC «cut at 2.8 kHz» is no fake and
+    /// ranks as lossless again; a check made from a FLAC stays.
+    #[test]
+    fn stored_checks_are_put_right() {
+        let lib = Library::open_in_memory().unwrap();
+        let mp3 = file(&lib, "RuLe", Codec::Mp3, 500);
+        lib.put_quality_check(mp3.id, &fake_check()).unwrap();
+        let made = file(&lib, "made", Codec::Mp3, score::FAKE_LOSSLESS);
+        lib.put_quality_check(made.id, &QualityCheck { made_from: Some(Codec::Flac), ..fake_check() }).unwrap();
+        let quiet = file(&lib, "Title", Codec::Flac, 500);
+        let quiet_check = QualityCheck { cutoff_hz: 2_820.0, ..fake_check() };
+        lib.put_quality_check(quiet.id, &quiet_check).unwrap();
+        let real_fake = file(&lib, "Молли", Codec::Flac, 500);
+        lib.put_quality_check(real_fake.id, &fake_check()).unwrap();
+
+        let changed = lib.tidy_quality_checks().unwrap();
+        assert!(changed.contains(&mp3.track_id) && changed.contains(&quiet.track_id));
+        assert_eq!(lib.quality_check(mp3.id).unwrap(), None);
+        assert!(lib.quality_check(made.id).unwrap().is_some(), "the check of the original stays");
+        assert_eq!(lib.quality_check(quiet.id).unwrap().unwrap().verdict, Verdict::Unknown);
+        assert!(lib.get_track_row(quiet.track_id).unwrap().unwrap().quality.unwrap() >= score::CD_LOSSLESS);
+        assert_eq!(lib.quality_check(real_fake.id).unwrap().unwrap().verdict, Verdict::Transcoded);
+        assert!(lib.tidy_quality_checks().unwrap().is_empty(), "once");
+    }
+
+    /// A plain fake is offered until the user keeps it; the keep survives
+    /// a check made again.
+    #[test]
+    fn plain_fakes_are_offered_until_kept() {
+        let lib = Library::open_in_memory().unwrap();
+        let fake = file(&lib, "Молли", Codec::Flac, 690);
+        lib.put_quality_check(fake.id, &QualityCheck { cutoff_hz: 19_940.0, steepness_db: 39.6, ..fake_check() }).unwrap();
+        let weak = file(&lib, "На луне", Codec::Flac, 500);
+        lib.put_quality_check(weak.id, &QualityCheck { cutoff_hz: 15_200.0, steepness_db: 19.3, ..fake_check() }).unwrap();
+        let offers = lib.fake_offers().unwrap();
+        assert_eq!(offers.iter().map(|o| o.source_id).collect::<Vec<_>>(), vec![fake.id], "a weak cut is not offered");
+        lib.set_quality_keep(fake.id, true).unwrap();
+        assert!(lib.fake_offers().unwrap().is_empty());
+        lib.put_quality_check(fake.id, &QualityCheck { cutoff_hz: 19_940.0, steepness_db: 39.6, ..fake_check() }).unwrap();
+        assert!(lib.fake_offers().unwrap().is_empty(), "kept over a new check");
+    }
+
+    /// A conversion is found by its MP3 and the original in the Trash.
+    #[test]
+    fn conversions_pair_the_mp3_with_its_original() {
+        let lib = Library::open_in_memory().unwrap();
+        let flac = file(&lib, "Молли", Codec::Flac, 690);
+        let mut mp3 = Source::new(flac.track_id, SourceKind::LocalFile, "/m/Молли.mp3", Codec::Mp3);
+        mp3.quality_score = 690;
+        let mp3 = lib.add_source(&mp3).unwrap();
+        lib.trash_source(flac.id, Some("/t/2026-11-04 Молли.flac")).unwrap();
+        lib.put_quality_check(mp3.id, &QualityCheck { made_from: Some(Codec::Flac), ..fake_check() }).unwrap();
+        // An Opus made from a real FLAC is no conversion.
+        let opus_track = file(&lib, "Opus", Codec::Opus, score::CD_LOSSLESS);
+        lib.put_quality_check(opus_track.id, &QualityCheck { verdict: Verdict::Genuine, made_from: Some(Codec::Flac), ..fake_check() }).unwrap();
+        let all = lib.conversions().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].mp3, all[0].original, all[0].trash_path.as_str()), (mp3.id, flac.id, "/t/2026-11-04 Молли.flac"));
     }
 }

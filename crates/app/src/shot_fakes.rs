@@ -504,6 +504,7 @@ fn refusals_history() -> Vec<nikgob_view::Job> {
             eta: None,
             paused: false,
             controllable: false,
+            pausable: false,
             error: error.map(str::to_owned),
             at: now - i as i64 * 7 * 60_000,
         })

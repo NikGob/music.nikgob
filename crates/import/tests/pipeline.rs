@@ -248,8 +248,9 @@ async fn fake_lossless_becomes_an_mp3_with_its_tags_and_the_original_goes_to_tra
         eprintln!("skipped: no ffmpeg on PATH");
         return;
     }
-    let root = Root::new();
-    assert!(root.cfg.convert_fake_lossless, "on by default");
+    let mut root = Root::new();
+    assert!(!root.cfg.convert_fake_lossless, "never without the user's say");
+    root.cfg.convert_fake_lossless = true;
     let (importer, lib) = importer(&root);
     let fake = root.inbox("fake.wav");
     write_wav(&fake, &lowpassed_noise(RATE, 20.0, 16_000.0, 7), RATE);

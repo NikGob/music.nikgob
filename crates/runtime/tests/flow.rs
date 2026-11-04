@@ -281,8 +281,9 @@ fn queue_without_playable_files_does_not_loop_forever() {
 }
 
 /// Pause/cancel of a folder import used to reach the torrent client with a
-/// non-torrent id ("torrent not found"). Imports are not controllable: the
-/// commands are refused with a toast and the import runs to the end.
+/// non-torrent id ("torrent not found"). An import can be cancelled (by the
+/// importer itself), never paused: the pause is refused with a toast and
+/// the import runs to the end.
 #[test]
 fn pausing_a_folder_import_never_reaches_the_torrent_client() {
     let dir = tempfile::tempdir().unwrap();
@@ -321,15 +322,14 @@ fn pausing_a_folder_import_never_reaches_the_torrent_client() {
         !s.downloads.active.is_empty() || !s.downloads.history.is_empty()
     });
     // The state guard must not outlive this block: the worker needs the lock.
-    let (id, controllable) = {
+    let (id, pausable) = {
         let s = rt.state();
         let job = s.downloads.active.first().or(s.downloads.history.first()).unwrap();
-        (job.id, job.controllable)
+        (job.id, job.pausable)
     };
-    assert!(!controllable, "a folder import offers no pause/cancel");
+    assert!(!pausable, "a folder import offers no pause");
 
     rt.send(Command::PauseJob(id, true));
-    rt.send(Command::CancelJob(id));
     wait_for(&rt, "the refusal", |s| s.toasts.iter().any(|t| t.text.contains("Импорт нельзя")));
     wait_for(&rt, "the import", |s| s.library.track_count == 3 && s.downloads.active.is_empty());
     let s = rt.state();

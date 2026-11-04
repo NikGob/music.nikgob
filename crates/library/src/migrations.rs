@@ -31,6 +31,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0017_lyrics_show.sql"),
     include_str!("../migrations/0018_source_quality.sql"),
     include_str!("../migrations/0019_unwanted_tracks.sql"),
+    include_str!("../migrations/0020_quality_keep.sql"),
 ];
 
 /// Number of migrations known to this build (= the schema version it produces).

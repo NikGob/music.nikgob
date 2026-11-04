@@ -336,6 +336,24 @@ enum SlskHandle {
     Folder { user: String, folder: String, files: Vec<SearchResult> },
 }
 
+/// The audio files of a peer's folder offer as its search listed them:
+/// each file's name and length (ms). `None`: not a Soulseek folder.
+pub(crate) fn folder_listing(offer: &Offer) -> Option<Vec<(String, Option<u32>)>> {
+    if offer.source != SourceKey::Soulseek {
+        return None;
+    }
+    match serde_json::from_str::<SlskHandle>(&offer.handle).ok()? {
+        SlskHandle::Folder { files, .. } => Some(
+            files
+                .iter()
+                .filter(|f| is_audio(f))
+                .map(|f| (f.file_name().to_owned(), f.duration.map(|d| d * 1000)))
+                .collect(),
+        ),
+        SlskHandle::File(_) => None,
+    }
+}
+
 fn source_error(e: nikgob_soulseek::Error) -> SourceError {
     use nikgob_soulseek::Error as E;
     match e {

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use nikgob_core::cover_frame;
 use nikgob_core::model::{
-    Codec, Master, Palette, Source, SourceKind, SourceOrigin, Track, TrackId, quality_score,
+    Codec, Master, Palette, Source, SourceId, SourceKind, SourceOrigin, Track, TrackId, quality_score,
 };
 use nikgob_library::Library;
 use nikgob_metadata::Metadata;
@@ -59,8 +59,10 @@ pub enum FileOutcome {
     /// Waiting in the confirmation queue.
     Parked(ItemId),
     Failed,
-    /// Already being handled.
+    /// Already being handled (or the job was cancelled).
     Skipped,
+    /// None of the tracks a better copy was fetched for: not imported.
+    LeftOut,
 }
 
 /// A running import: progress events arrive on `events`.
@@ -186,6 +188,10 @@ pub(crate) struct Inner {
     active: Mutex<HashSet<PathBuf>>,
     pub(crate) store: Mutex<Store>,
     permits: Arc<Semaphore>,
+    /// Jobs the user cancelled: no file of theirs is committed any more.
+    cancelled: Mutex<HashSet<u64>>,
+    /// What each running job committed, so a cancel takes it back.
+    journal: Mutex<HashMap<u64, Vec<Undo>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -257,6 +263,8 @@ impl Importer {
                 pending: Mutex::new(HashMap::new()),
                 active: Mutex::new(HashSet::new()),
                 permits,
+                cancelled: Mutex::new(HashSet::new()),
+                journal: Mutex::new(HashMap::new()),
             }),
         };
         this.restore_pending();
@@ -323,7 +331,22 @@ impl Importer {
         ImportJob { id, events: rx }
     }
 
+    /// Stops a running job: no more of its files are committed, and what
+    /// it committed already is taken back once it stops (the files to the
+    /// Trash, the rows out, a replaced file back in place).
+    pub fn cancel(&self, job: JobId) {
+        if lock(&self.inner.journal).contains_key(&job.0) {
+            log::info!("import job {} cancelled", job.0);
+            lock(&self.inner.cancelled).insert(job.0);
+        }
+    }
+
+    fn is_cancelled(&self, job: JobId) -> bool {
+        lock(&self.inner.cancelled).contains(&job.0)
+    }
+
     async fn run_job(self, ctx: Ctx, paths: Vec<PathBuf>, origin: SourceOrigin) {
+        lock(&self.inner.journal).insert(ctx.job.0, Vec::new());
         let scanned = tokio::task::spawn_blocking(move || fsutil::scan(&paths)).await;
         let (files, torrents) = scanned.unwrap_or_default();
         ctx.emit(ImportEvent::Started {
@@ -349,8 +372,11 @@ impl Importer {
         for path in files {
             folders.entry(album_group_dir(&path)).or_default().push(path);
         }
-        let (mut imported, mut duplicates, mut failed, mut pending) = (0, 0, 0, 0);
+        let (mut imported, mut duplicates, mut failed, mut pending, mut left_out) = (0, 0, 0, 0, 0);
         for (dir, files) in folders {
+            if self.is_cancelled(ctx.job) {
+                break;
+            }
             let mut set = tokio::task::JoinSet::new();
             for path in files {
                 let Ok(permit) = self.inner.permits.clone().acquire_owned().await else {
@@ -411,9 +437,18 @@ impl Importer {
                     FileOutcome::Duplicate { .. } => duplicates += 1,
                     FileOutcome::Parked(_) => pending += 1,
                     FileOutcome::Failed => failed += 1,
+                    FileOutcome::LeftOut => left_out += 1,
                     FileOutcome::Skipped => {}
                 }
             }
+        }
+        let journal = lock(&self.inner.journal).remove(&ctx.job.0).unwrap_or_default();
+        let cancelled = lock(&self.inner.cancelled).remove(&ctx.job.0);
+        if cancelled {
+            let inner = self.inner.clone();
+            let undone = tokio::task::spawn_blocking(move || roll_back(&inner, journal)).await.unwrap_or(0);
+            log::info!("import job {}: cancelled, {undone} files taken back", ctx.job.0);
+            imported = 0;
         }
         ctx.emit(ImportEvent::Finished {
             job: ctx.job,
@@ -421,6 +456,8 @@ impl Importer {
             duplicates,
             failed,
             pending,
+            left_out,
+            cancelled,
         });
     }
 
@@ -449,6 +486,10 @@ impl Importer {
             base,
             mut identity,
         } = ready;
+        if self.is_cancelled(ctx.job) {
+            lock(&self.inner.active).remove(&analyzed.path);
+            return FileOutcome::Skipped;
+        }
         if let Some(a) = anchor
             && a.fits(&identity, &base)
         {
@@ -519,6 +560,7 @@ impl Importer {
                         job: ctx.job,
                         path: path.to_path_buf(),
                         kept: t.id,
+                        quality: None,
                     });
                     Ok(Read::Done(FileOutcome::Duplicate { kept: t.id }))
                 }
@@ -641,6 +683,21 @@ impl Importer {
                 }
                 settled = true;
             }
+        }
+        // A better copy of the job's tracks is one of them or nothing: the
+        // rest of the folder (another album that came under the same
+        // name) is left out, never imported as an album of its own.
+        if ctx.targets.only_targets {
+            for i in (0..read.len()).rev() {
+                if ids[i].is_none() && !read[i].known {
+                    let p = read.remove(i);
+                    ids.remove(i);
+                    log::info!("import: {} is none of the tracks it was fetched for, left out", p.analyzed.path.display());
+                    lock(&inner.active).remove(&p.analyzed.path);
+                    parked.push(FileOutcome::LeftOut);
+                }
+            }
+            settled = true;
         }
         let open = |ids: &[Option<Identity>], read: &[Pre]| -> Vec<usize> {
             (0..read.len())
@@ -973,12 +1030,23 @@ impl Importer {
 
         let cover = self.prepare_cover(&analyzed, &identity, &album_dir).await;
 
+        if self.is_cancelled(ctx.job) {
+            return Ok(FileOutcome::Skipped);
+        }
         ctx.stage(&path, Stage::Converting);
         let prepared = {
             let (i, a, dir) = (inner.clone(), analyzed.clone(), album_dir.clone());
             blocking(move || convert(&i, &a, &dir)).await?
         };
 
+        // Cancelled while it converted: the converted copy goes.
+        if self.is_cancelled(ctx.job) {
+            let _ = fsutil::remove_file(&prepared.tmp);
+            if let Some(dir) = prepared.tmp.parent() {
+                fsutil::prune_empty_dirs(dir, &inner.cfg.library_dir);
+            }
+            return Ok(FileOutcome::Skipped);
+        }
         ctx.stage(&path, Stage::Tagging);
         let committed = {
             let (i, a, id, c) = (inner.clone(), analyzed.clone(), identity.clone(), cover.clone());
@@ -986,7 +1054,13 @@ impl Importer {
         };
         match committed {
             Committed::Duplicate { kept } => Ok(self.report_duplicate(ctx, &analyzed, kept)),
-            Committed::Imported(done) => {
+            Committed::Imported(mut done) => {
+                // Kept while the job runs: a cancel takes it back.
+                if let Some(undo) = done.undo.take()
+                    && let Some(list) = lock(&inner.journal).get_mut(&ctx.job.0)
+                {
+                    list.push(undo);
+                }
                 ctx.stage(&path, Stage::Deriving);
                 if let Some(master) = done.master.clone() {
                     if let Err(e) = inner.library.put_master(&master) {
@@ -1020,6 +1094,7 @@ impl Importer {
             job: ctx.job,
             path: a.path.clone(),
             kept,
+            quality: Some(quality_line(a)),
         });
         FileOutcome::Duplicate { kept }
     }
@@ -1226,9 +1301,15 @@ fn convert(inner: &Inner, a: &Analyzed, album_dir: &Path) -> Result<Prepared> {
     // Audio saved from a stream is kept exactly as it came.
     let lossless = a.info.codec.is_lossless() && a.origin != SourceOrigin::Stream;
     let encode = lossless && !a.fake_lossless;
-    // A fake becomes an MP3 that keeps all it has; without ffmpeg it stays
-    // as it is (labelled for what it is).
-    let mp3 = (lossless && a.fake_lossless && inner.cfg.convert_fake_lossless)
+    // A plain fake becomes an MP3 that keeps all it has, when the user lets
+    // that happen without asking; without ffmpeg (or a doubtful cut) it
+    // stays as it is, labelled for what it is.
+    let hi_res = a.info.bit_depth.is_some_and(|b| b > 16) || a.info.sample_rate.is_some_and(|r| r > 48_000);
+    let clear = a
+        .audio
+        .spectrum
+        .is_some_and(|r| nikgob_core::quality::clear_fake(r.verdict, r.cutoff_hz, r.steepness_db, hi_res));
+    let mp3 = (lossless && a.fake_lossless && clear && inner.cfg.convert_fake_lossless)
         .then(Mp3Encoder::find)
         .flatten();
     let ext = if encode {
@@ -1272,6 +1353,70 @@ struct Done {
     track_id: TrackId,
     upgraded: bool,
     master: Option<Master>,
+    master_hash: Option<String>,
+    undo: Option<Undo>,
+}
+
+/// What one committed file changed, so a cancelled job can take it back.
+struct Undo {
+    track: TrackId,
+    /// The track as it was before (`None`: the import made it).
+    before: Option<Track>,
+    source: SourceId,
+    /// The file it put in the library.
+    dest: PathBuf,
+    /// A master file it put in the masters folder (not one that was there).
+    master_file: Option<PathBuf>,
+    master_hash: Option<String>,
+    replaced: Replaced,
+}
+
+/// Takes back what a cancelled job committed, the last file first: its
+/// files go to the Trash (never deleted: an Inbox file may have been the
+/// only copy), its rows go, a file it replaced comes back. Returns how many
+/// files were taken back.
+fn roll_back(inner: &Inner, journal: Vec<Undo>) -> usize {
+    let (cfg, lib) = (&inner.cfg, &inner.library);
+    let mut n = 0;
+    for u in journal.into_iter().rev() {
+        let mut gone = vec![u.dest.clone(), u.dest.with_extension("lrc")];
+        gone.extend(u.master_file.clone());
+        for f in gone {
+            if long_path(&f).exists() {
+                match trash_file(&cfg.trash_dir, &f) {
+                    Ok(to) => log::info!("import cancelled: {} moved to {}", f.display(), to.display()),
+                    Err(e) => log::warn!("import cancelled: {} stays: {e}", f.display()),
+                }
+            }
+        }
+        if let Some(hash) = &u.master_hash {
+            let _ = lib.delete_master(u.track);
+            let _ = fsutil::remove_file(&cfg.masters_dir().join(format!("{hash}.json")));
+        }
+        if let Err(e) = lib.forget_source(u.source) {
+            log::warn!("import cancelled: the row of {} stays: {e}", u.dest.display());
+        }
+        u.replaced.undo(lib);
+        match &u.before {
+            Some(t) => {
+                if let Err(e) = lib.upsert_track(t) {
+                    log::warn!("import cancelled: {} keeps its new tags: {e}", t.title);
+                }
+            }
+            None => {
+                if let Err(e) = lib.forget_new_track(u.track) {
+                    log::warn!("import cancelled: track {} stays: {e}", u.track);
+                }
+            }
+        }
+        if let Some(dir) = u.dest.parent() {
+            fsutil::prune_empty_dirs(dir, &cfg.library_dir);
+        }
+        n += 1;
+    }
+    // Albums and artists the job made may be gone: the cache reads again.
+    *lock(&inner.store) = Store::new(lib.clone());
+    n
 }
 
 enum Committed {
@@ -1682,6 +1827,7 @@ fn commit_locked(
         Decision::New => None,
         Decision::Upgrade(e) | Decision::AddSource(e) => Some(e),
     };
+    let before = existing.map(|e| e.track.clone());
     // A track of the wished album keeps its place there (named and tagged
     // so), whatever number the file brought.
     let kept_place;
@@ -1712,6 +1858,7 @@ fn commit_locked(
         let old_path = PathBuf::from(&old.locator);
         let trash_path = if long_path(&old_path).exists() {
             let dest = trash_file(&cfg.trash_dir, &old_path)?;
+            log::info!("import: {} is replaced, the old file is in the Trash at {}", old_path.display(), dest.display());
             replaced.file = Some((old_path.clone(), dest.clone()));
             let lrc = old_path.with_extension("lrc");
             if long_path(&lrc).exists()
@@ -1815,21 +1962,40 @@ fn commit_locked(
             }
         }
 
+        // The master file this import puts in the masters folder (not one a
+        // track of the same sound put there before), for a cancel.
+        let mut master_file = None;
         let master = match (&prep.original_hash, prep.converted) {
-            (Some(hash), true) => match register_master(inner, a, hash, track.id) {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    log::warn!("master of {} not registered: {e}", a.path.display());
-                    None
+            (Some(hash), true) => {
+                let in_dir = (!matches!(a.origin, SourceOrigin::Torrent { .. })).then(|| {
+                    let ext = a
+                        .path
+                        .extension()
+                        .map(|e| e.to_string_lossy().to_lowercase())
+                        .unwrap_or_else(|| "flac".to_owned());
+                    cfg.masters_dir().join(format!("{hash}.{ext}"))
+                });
+                let was_there = in_dir.as_ref().is_some_and(|p| long_path(p).exists());
+                match register_master(inner, a, hash, track.id) {
+                    Ok(m) => {
+                        master_file = in_dir.filter(|_| !was_there);
+                        Some(m)
+                    }
+                    Err(e) => {
+                        log::warn!("master of {} not registered: {e}", a.path.display());
+                        None
+                    }
                 }
-            },
+            }
             _ => None,
         };
         // A lossy file taken from the Inbox now lives in the library; the
         // fake lossless file an MP3 was made from goes to the Trash.
         if !prep.converted && a.path.starts_with(&cfg.inbox_dir) {
             let gone = if prep.fake_mp3 {
-                trash_file(&cfg.trash_dir, &a.path).map(|_| ())
+                trash_file(&cfg.trash_dir, &a.path).map(|to| {
+                    log::info!("import: {} came as an MP3, the fake FLAC is in the Trash at {}", a.path.display(), to.display());
+                })
             } else {
                 fsutil::remove_file(&a.path)
             };
@@ -1840,11 +2006,27 @@ fn commit_locked(
         Ok(Done {
             track_id: track.id,
             upgraded: matches!(decision, Decision::Upgrade(_)),
+            master_hash: master.as_ref().map(|m| m.file_hash.clone()),
             master,
+            undo: Some(Undo {
+                track: track.id,
+                before: before.clone(),
+                source: stored.id,
+                dest: dest.clone(),
+                master_file,
+                master_hash: None,
+                replaced: Replaced::default(),
+            }),
         })
     })();
     match finish {
-        Ok(done) => Ok(Committed::Imported(done)),
+        Ok(mut done) => {
+            if let Some(u) = done.undo.as_mut() {
+                u.master_hash = done.master_hash.take();
+                u.replaced = replaced;
+            }
+            Ok(Committed::Imported(done))
+        }
         Err(e) => {
             let _ = fsutil::remove_file(&dest);
             // The old file may have to come back to the very path just freed.
