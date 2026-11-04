@@ -40,6 +40,9 @@ enum Style {
     Focus,
     /// Letter by letter: each one rises and lights up as it is sung.
     Wave,
+    /// Word by word: each written word (each part of a hyphenated one)
+    /// lights up whole as it starts.
+    Words,
 }
 
 /// Both views share timing and scrolling; true opens the lyrics settings.
@@ -63,14 +66,16 @@ pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec
 }
 
 /// How `lines` are drawn. «Волна» goes over the letters of each timed word
-/// (syllables or words, both are real times). Letters jumping on a pace
-/// guessed from line times alone looks wrong, so a text with line times
-/// only may become bright instead (the calm Focus).
+/// and «По словам» over the written words (syllables or words, both are
+/// real times). Words lit on a pace guessed from line times alone look
+/// wrong, so a text with line times only may become bright instead (the
+/// calm Focus).
 fn style_for(prefs: &Prefs, lines: &[LyricLine]) -> Style {
     match prefs.lyrics_style {
         1 => Style::Focus,
-        2 if prefs.wave_syllables_only && LyricsSync::of(lines) == Some(LyricsSync::Line) => Style::Focus,
+        2 | 3 if prefs.wave_syllables_only && LyricsSync::of(lines) == Some(LyricsSync::Line) => Style::Focus,
         2 => Style::Wave,
+        3 => Style::Words,
         _ => Style::Karaoke,
     }
 }
@@ -168,6 +173,7 @@ fn paint(
     let wrap = block;
     let gap = sizes.gap;
     let mut tops = Vec::with_capacity(slots.len());
+    let mut rooms = Vec::with_capacity(slots.len());
     let mut y = 0.0;
     for (i, (h, extra)) in slots.iter().enumerate() {
         // Background vocals hug the line they belong to.
@@ -188,6 +194,7 @@ fn paint(
             DisplayLine::Line(_) => 1.0,
         };
         y += (h + extra + gap) * keep;
+        rooms.push(keep);
     }
 
     // Keep the user's offset, then ease it back over half a second.
@@ -219,23 +226,44 @@ fn paint(
         anim::f32(&ctx, id.with("scroll"), scroll, Spring::new(1.0, 300.0))
     } else { scroll };
 
-    let hover = resp.hover_pos();
+    // Where each item is drawn this frame.
+    let ys: Vec<f32> = (0..items.len())
+        .map(|i| {
+            let far = (i as i32 - ci as i32).unsigned_abs().min(8) as f32;
+            // A wave: lines further from the current one follow more
+            // lazily, without wobbling past their place.
+            let spring = if manual_on {
+                Spring::new(1.0, 1600.0)
+            } else {
+                Spring::new(0.9, (300.0 - 26.0 * far).max(110.0))
+            };
+            if state.prefs.lyrics_cascade {
+                anim::f32(&ctx, id.with(("y", i)), rect.top() + tops[i] - scroll, spring)
+            } else {
+                rect.top() + tops[i] - together
+            }
+        })
+        .collect();
+    let shown = |i: usize| {
+        let (slot_h, extra) = slots[i];
+        !(ys[i] + slot_h + extra < rect.top() - 60.0 || ys[i] > rect.bottom() + 60.0)
+    };
+    // One item at most is under the pointer: a folded wait has no room to
+    // be hovered in, an unfolding one only the room it has.
+    let target = resp.hover_pos().filter(|p| (left - 8.0..=left + wrap + 8.0).contains(&p.x)).and_then(|p| {
+        let hits: Vec<_> = (0..items.len())
+            .map(|i| shown(i).then(|| (ys[i], (slots[i].0 + slots[i].1) * rooms[i], rooms[i])))
+            .collect();
+        hit_target(&hits, p.y, gap * 0.5)
+    });
     let mut clicked = None;
     for (i, item) in items.iter().enumerate() {
         let dist = i as i32 - ci as i32;
         let far = dist.unsigned_abs().min(8) as f32;
-        // A wave: lines further from the current one follow more lazily,
-        // without wobbling past their place.
-        let spring = if manual_on {
-            Spring::new(1.0, 1600.0)
-        } else {
-            Spring::new(0.9, (300.0 - 26.0 * far).max(110.0))
-        };
-        let y = if state.prefs.lyrics_cascade {
-            anim::f32(&ctx, id.with(("y", i)), rect.top() + tops[i] - scroll, spring)
-        } else { rect.top() + tops[i] - together };
+        let y = ys[i];
         let (slot_h, extra) = slots[i];
-        if y + slot_h + extra < rect.top() - 60.0 || y > rect.bottom() + 60.0 {
+        let room = rooms[i];
+        if !shown(i) || room < ROOMLESS {
             continue;
         }
         let is_cur = match *item {
@@ -264,10 +292,11 @@ fn paint(
         };
         // Fade out towards the edges.
         let edge = ((y + slot_h - rect.top()) / 72.0).min((rect.bottom() - y) / 72.0).clamp(0.0, 1.0);
-        let slot = Rect::from_min_size(pos2(left, y), vec2(wrap, slot_h + extra));
-        let hovered = hover.is_some_and(|p| slot.expand2(vec2(8.0, gap * 0.5)).contains(p));
-        if hovered {
-            painter.rect_filled(slot.expand2(vec2(10.0, 6.0)), 14, s.on_surface.gamma_multiply(0.06 * edge));
+        // A wait that is unfolding or folding has only part of its slot:
+        // its highlight and ring take that part and fade with it.
+        let slot = Rect::from_min_size(pos2(left, y), vec2(wrap, (slot_h + extra) * room));
+        if target == Some(i) {
+            painter.rect_filled(slot.expand2(vec2(10.0, 6.0 * room)), 14, s.on_surface.gamma_multiply(0.06 * edge * room));
             if resp.clicked() {
                 clicked = Some(match *item {
                     DisplayLine::Line(j) => lines[j].start,
@@ -277,9 +306,17 @@ fn paint(
         }
         let DisplayLine::Line(j) = *item else {
             if let DisplayLine::Interlude { start, end, .. } = *item {
-                let k = sizes.big / PANE.big;
-                let line = Rect::from_min_size(pos2(side(56.0 * k), y), vec2(56.0 * k, slot_h));
-                waiting(&painter, line, k, start, end, pos, is_cur, playing, bass, edge, &state.prefs);
+                let k = sizes.big / PANE.big * room;
+                let line = Rect::from_min_size(pos2(side(56.0 * k), y), vec2(56.0 * k, slot_h * room));
+                // Never over its neighbours, wherever their springs are.
+                let above = if i > 0 { ys[i - 1] + slots[i - 1].0 + slots[i - 1].1 } else { f32::NEG_INFINITY };
+                let below = ys.get(i + 1).copied().unwrap_or(f32::INFINITY);
+                let room_rect = Rect::from_x_y_ranges(
+                    rect.x_range(),
+                    (y - gap * 0.5 * room).max(above)..=(y + (slot_h + gap * 0.5) * room).min(below),
+                );
+                let clipped = painter.with_clip_rect(room_rect.intersect(painter.clip_rect()));
+                waiting(&clipped, line, k, start, end, pos, is_cur, playing, bass, edge * room, &state.prefs);
             }
             continue;
         };
@@ -337,7 +374,8 @@ fn paint(
         // current, and jump back when it stopped being so.
         let base = s.on_surface.gamma_multiply(edge * (rest + (rest.min(UNSUNG) - rest) * focus));
         let color = crate::lerp_color(dim, lit, focus);
-        if theme.reduced_motion {
+        // Words only change colour, so they still light up one by one.
+        if theme.reduced_motion && style != Style::Words {
             if state.prefs.lyrics_glow {
                 let (head, feather) = if style == Style::Karaoke { timing.head(pos, size * 0.35) } else { (f32::INFINITY, 0.0) };
                 glow(&painter, &g, line, head, feather, lit, focus * 0.1);
@@ -361,6 +399,29 @@ fn paint(
     if playing {
         ctx.request_repaint();
     }
+}
+
+/// Below this share of its slot a folding wait counts as gone: it takes no
+/// pointer and draws nothing.
+const ROOMLESS: f32 = 0.01;
+
+/// The item under the pointer at height `y`, from each item's drawn
+/// `(top, height, room)` (`None` when it is not drawn). Hit areas reach
+/// `reach` past a slot, so neighbours (and background voices hugging
+/// their line) can share a point: the slot the pointer is really in wins,
+/// else the nearest one; a wait without room never takes it.
+fn hit_target(items: &[Option<(f32, f32, f32)>], y: f32, reach: f32) -> Option<usize> {
+    let off = |top: f32, h: f32| if y < top { top - y } else { (y - top - h).max(0.0) };
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| {
+            let (top, h, room) = (*it)?;
+            let d = off(top, h);
+            (room >= ROOMLESS && d <= reach).then_some((i, d, (y - top - h * 0.5).abs()))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.total_cmp(&b.2)))
+        .map(|(i, ..)| i)
 }
 
 fn returning_offset(offset: f32, until: f64, now: f64) -> f32 {
@@ -506,6 +567,7 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let style = match prefs.lyrics_style {
         1 => Style::Focus,
         2 => Style::Wave,
+        3 => Style::Words,
         _ => Style::Karaoke,
     };
     let scale = prefs.lyrics_scale.clamp(0.8, 1.4);
@@ -647,10 +709,22 @@ struct Syllable {
     word: usize,
 }
 
+/// A written unit for «По словам»: a word, or a part of a hyphenated word
+/// as it is written («do-», «dodge»), from its first letter's time to its
+/// last one's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Unit {
+    start: f32,
+    end: f32,
+}
+
 struct Timing {
     syllables: Vec<Syllable>,
     /// Syllable index for each glyph (spaces have none).
     glyphs: Vec<Option<usize>>,
+    units: Vec<Unit>,
+    /// Unit index for each glyph (spaces have none).
+    glyph_units: Vec<Option<usize>>,
     /// First syllable of each whitespace-delimited word.
     #[cfg_attr(not(test), allow(dead_code))]
     words: Vec<usize>,
@@ -681,6 +755,9 @@ impl Timing {
         let mut x = 0.0;
         let mut glyphs = Vec::new();
         let mut seen = vec![false; syllables.len()];
+        // Each letter's own share of its syllable's time, for the units.
+        let mut nth = vec![0usize; syllables.len()];
+        let mut times = Vec::new();
         for gl in g.rows.iter().flat_map(|r| &r.row.glyphs) {
             let syllable = if gl.chr.is_whitespace() { None } else { letters.next() };
             if let Some(i) = syllable {
@@ -689,11 +766,37 @@ impl Timing {
                     seen[i] = true;
                 }
                 syllables[i].to = x + gl.advance_width;
+                let s = &syllables[i];
+                let share = (s.end - s.start) / s.letters.max(1) as f32;
+                times.push(Some((s.start + share * nth[i] as f32, s.start + share * (nth[i] + 1) as f32)));
+                nth[i] += 1;
+            } else {
+                times.push(None);
             }
             glyphs.push(syllable);
             x += gl.advance_width;
         }
-        Some(Self { syllables, glyphs, words })
+        let glyph_units = written_units(g.rows.iter().flat_map(|r| &r.row.glyphs).map(|gl| gl.chr));
+        let mut spans: Vec<Option<Unit>> = vec![None; glyph_units.iter().flatten().max().map_or(0, |n| n + 1)];
+        for (u, t) in glyph_units.iter().zip(&times) {
+            if let (Some(u), Some((a, b))) = (*u, *t) {
+                let span = spans[u].get_or_insert(Unit { start: a, end: b });
+                span.start = span.start.min(a);
+                span.end = span.end.max(b);
+            }
+        }
+        // A unit none of whose letters is timed (a text that differs from
+        // its timing) lights with the one before it.
+        let first = syllables.first().map_or(0.0, |s| s.start);
+        let mut last = Unit { start: first, end: first };
+        let units = spans
+            .into_iter()
+            .map(|u| {
+                last = u.unwrap_or(last);
+                last
+            })
+            .collect();
+        Some(Self { syllables, glyphs, units, glyph_units, words })
     }
 
     /// The light front as (centre of its soft edge, edge width): solid up
@@ -726,6 +829,46 @@ impl Timing {
         let f = feather * ((p - first.start) / FADE).clamp(0.0, 1.0).min(out);
         (at + 0.5 * f, f)
     }
+}
+
+/// The written unit of each char (whitespace has none): words, and the
+/// parts of a hyphenated word as written, the hyphen ending its part
+/// («do-dodge» is «do-» and «dodge»). A hyphen with no letter before it
+/// («-то») does not split.
+fn written_units(chars: impl IntoIterator<Item = char>) -> Vec<Option<usize>> {
+    let mut out = Vec::new();
+    let mut count = 0;
+    // The last char of the unit being read, and whether it has a letter.
+    let mut prev: Option<char> = None;
+    let mut lettered = false;
+    for c in chars {
+        if c.is_whitespace() {
+            out.push(None);
+            prev = None;
+            continue;
+        }
+        let split = prev.is_some_and(|p| matches!(p, '-' | '\u{2010}' | '\u{2011}') && lettered && c.is_alphanumeric());
+        if prev.is_none() || split {
+            count += 1;
+            lettered = false;
+        }
+        lettered |= c.is_alphanumeric();
+        out.push(Some(count - 1));
+        prev = Some(c);
+    }
+    out
+}
+
+/// How lit (0..1) a unit starting at `start` is at `pos` (seconds): a
+/// whole-unit fade on the M3 slow-effects spring, from just before it is
+/// sung.
+fn unit_light(start: f32, pos: f32) -> f32 {
+    const LEAD: f32 = 0.03;
+    let t = pos - start + LEAD;
+    if t <= 0.0 {
+        return 0.0;
+    }
+    (1.0 - nikgob_motion::tokens::SLOW_EFFECTS.solve(1.0, 0.0, t).0).clamp(0.0, 1.0)
 }
 
 fn syllable_head(from: f32, to: f32, start: f32, end: f32, pos: f32) -> f32 {
@@ -765,9 +908,14 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
             let sustained = syllable.filter(|s| current && style == Style::Karaoke
                 && held(s.start, s.end, s.letters, p));
             let mut end = i + 1;
-            // Ordinary glyphs share one word run; held notes and the wave
-            // move each letter on its own.
-            if sustained.is_none() && style != Style::Wave {
+            // Ordinary glyphs share one word run (one written unit for
+            // «По словам»); held notes and the wave move each letter on its
+            // own.
+            if style == Style::Words {
+                while end < glyphs.len() && timing.glyph_units[k + end].is_some() && timing.glyph_units[k + end] == timing.glyph_units[k + i] {
+                    end += 1;
+                }
+            } else if sustained.is_none() && style != Style::Wave {
                 while end < glyphs.len() {
                     let next = timing.glyphs[k + end].map(|s| &timing.syllables[s]);
                     if next.map(|s| s.word) != word || next.is_some_and(|s| current && style == Style::Karaoke && held(s.start, s.end, s.letters, p)) { break; }
@@ -776,7 +924,7 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
             }
             // Spaces ride with the letter before them: a lifted glyph's
             // overhang (the arm of a "y") must not be left at the baseline.
-            if syllable.is_some() {
+            if syllable.is_some() || timing.glyph_units[k + i].is_some() {
                 while end < glyphs.len() && timing.glyphs[k + end].is_none() {
                     end += 1;
                 }
@@ -790,6 +938,10 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
                 let n = s.letters.max(1) as f32;
                 let from = s.start + (s.end - s.start) * letter as f32 / n;
                 ((p - from + 0.04) / ((s.end - s.start) / n + 0.08).max(0.1)).clamp(0.0, 1.0)
+            });
+            // «По словам»: the whole unit at once, from its first letter.
+            let unit_on = timing.glyph_units[k + i].filter(|_| style == Style::Words).map(|u| {
+                if current { unit_light(timing.units[u].start, p) } else { 1.0 }
             });
             let lift = if let Some(t) = letter_on {
                 let on = t * t * (3.0 - 2.0 * t);
@@ -813,6 +965,7 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
                 let (glow_head, glow_feather, strength) = match style {
                     Style::Karaoke => (head, feather, strength),
                     Style::Wave => (f32::INFINITY, 0.0, strength * letter_on.unwrap_or(0.0)),
+                    Style::Words => (f32::INFINITY, 0.0, strength * unit_on.unwrap_or(0.0)),
                     Style::Focus => (f32::INFINITY, 0.0, strength),
                 };
                 glow(&clipped, g, shifted, glow_head, glow_feather, glow_color, strength);
@@ -820,7 +973,10 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
             if let Some(t) = letter_on {
                 let on = t * t * (3.0 - 2.0 * t) * focus.max(if current { 1.0 } else { 0.0 });
                 clipped.galley_with_override_text_color(shifted.min, g.clone(), crate::lerp_color(base, lit, on));
-            } else if style == Style::Focus || style == Style::Wave {
+            } else if let Some(on) = unit_on {
+                let on = on * focus.max(if current { 1.0 } else { 0.0 });
+                clipped.galley_with_override_text_color(shifted.min, g.clone(), crate::lerp_color(base, lit, on));
+            } else if matches!(style, Style::Focus | Style::Wave | Style::Words) {
                 clipped.galley_with_override_text_color(shifted.min, g.clone(), lit);
             } else {
                 karaoke(&clipped, g, shifted, head, feather, base, lit);
@@ -1046,6 +1202,141 @@ mod tests {
         assert!(style_for(&p, std::slice::from_ref(&worded)) == Style::Focus);
         let p = Prefs { lyrics_style: 0, ..p };
         assert!(style_for(&p, &[worded]) == Style::Karaoke);
+    }
+
+    /// KOMA, an empty stamp (a wait), then a line wrapping in two rows: the
+    /// folded wait sat on the long line's top and took its pointer too.
+    #[test]
+    fn only_one_item_takes_the_pointer_and_a_folded_wait_none() {
+        let reach = 9.0;
+        // Folded: the wait has the long line's top and no room.
+        let folded = [Some((0.0, 34.0, 1.0)), Some((52.0, 42.0, 0.0)), Some((52.0, 68.0, 1.0))];
+        for y in [44.0, 52.0, 60.0, 80.0, 128.0] {
+            assert_eq!(hit_target(&folded, y, reach), Some(2), "y={y}");
+        }
+        assert_eq!(hit_target(&folded, 20.0, reach), Some(0));
+        assert_eq!(hit_target(&folded, 140.0, reach), None);
+        // Half unfolded: the wait owns its half slot, the line moved down
+        // by half of the wait's room (slot and gap).
+        let half = [Some((0.0, 34.0, 1.0)), Some((52.0, 21.0, 0.5)), Some((82.0, 68.0, 1.0))];
+        assert_eq!(hit_target(&half, 60.0, reach), Some(1));
+        assert_eq!(hit_target(&half, 90.0, reach), Some(2));
+        // Between them both reach: the nearer slot wins, never both.
+        assert_eq!(hit_target(&half, 76.0, reach), Some(1));
+        assert_eq!(hit_target(&half, 79.0, reach), Some(2));
+        // A background voice hugging its line: the one the pointer is in.
+        let hug = [Some((0.0, 40.0, 1.0)), Some((30.0, 30.0, 1.0))];
+        assert_eq!(hit_target(&hug, 20.0, reach), Some(0));
+        assert_eq!(hit_target(&hug, 50.0, reach), Some(1));
+        assert_eq!(hit_target(&hug, 32.0, reach), Some(0), "both contain it: the nearer centre");
+        assert_eq!(hit_target(&hug, 36.0, reach), Some(1));
+        // Items not drawn take nothing.
+        assert_eq!(hit_target(&[None, Some((100.0, 20.0, 1.0))], 10.0, reach), None);
+    }
+
+    fn word(start: f32, end: f32, text: &str) -> nikgob_view::LyricWord {
+        nikgob_view::LyricWord { start: Duration::from_secs_f32(start), end: Duration::from_secs_f32(end), text: text.into() }
+    }
+
+    /// The units of a timed line as written, with their times.
+    fn units_of(painter: &egui::Painter, l: &LyricLine) -> Vec<(String, f32, f32)> {
+        let g = fixed_layout(painter, &l.text, 26.0);
+        let t = Timing::new(l, &g).unwrap();
+        let mut out: Vec<(String, f32, f32)> = t.units.iter().map(|u| (String::new(), u.start, u.end)).collect();
+        for (gl, u) in g.rows.iter().flat_map(|r| &r.row.glyphs).zip(&t.glyph_units) {
+            if let Some(u) = u {
+                out[*u].0.push(gl.chr);
+            }
+        }
+        out
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn written_units_split_hyphenated_words_as_written() {
+        let text = "Я делаю do-dodge back — уклоняюсь от атаки";
+        let units = written_units(text.chars());
+        let mut words: Vec<String> = Vec::new();
+        for (c, u) in text.chars().zip(&units) {
+            if let Some(u) = *u {
+                if words.len() <= u {
+                    words.push(String::new());
+                }
+                words[u].push(c);
+            }
+        }
+        assert_eq!(words, ["Я", "делаю", "do-", "dodge", "back", "—", "уклоняюсь", "от", "атаки"]);
+        // A leading or doubled hyphen, or a dash between words, stays put.
+        let parts = |t: &str| written_units(t.chars()).into_iter().flatten().max().map_or(0, |n| n + 1);
+        assert_eq!(parts("-то"), 1);
+        assert_eq!(parts("кто-то"), 2);
+        assert_eq!(parts("a--"), 1);
+        assert_eq!(parts("1-2"), 2);
+    }
+
+    /// Word timing keeps «do-dodge» one timed word: its parts share the
+    /// word's time by their letters.
+    #[test]
+    fn words_split_at_the_hyphen_share_the_word_time_by_letters() {
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(4.0), "Я делаю do-dodge back");
+            l.words = vec![word(1.0, 1.2, "Я "), word(1.2, 2.0, "делаю "), word(2.0, 2.8, "do-dodge "), word(3.0, 3.5, "back")];
+            let u = units_of(painter, &l);
+            assert_eq!(u.iter().map(|u| u.0.as_str()).collect::<Vec<_>>(), ["Я", "делаю", "do-", "dodge", "back"]);
+            assert!(close(u[2].1, 2.0) && close(u[2].2, 2.3), "{:?}", u[2]);
+            assert!(close(u[3].1, 2.3) && close(u[3].2, 2.8), "{:?}", u[3]);
+            assert!(close(u[4].1, 3.0) && close(u[4].2, 3.5));
+        });
+    }
+
+    /// Syllables light with their unit: «dodge» at its first syllable,
+    /// never «dod» then «ge».
+    #[test]
+    fn syllables_of_one_unit_light_together() {
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(4.0), "do-dodge back");
+            l.words = vec![word(1.0, 1.4, "do-"), word(1.5, 1.8, "dod"), word(1.9, 2.4, "ge "), word(2.5, 3.0, "back")];
+            let u = units_of(painter, &l);
+            let want = [("do-", 1.0, 1.4), ("dodge", 1.5, 2.4), ("back", 2.5, 3.0)];
+            assert_eq!(u.len(), want.len());
+            for (got, want) in u.iter().zip(want) {
+                assert!(got.0 == want.0 && close(got.1, want.1) && close(got.2, want.2), "{got:?}");
+            }
+            // Lit as one: the whole unit's light comes from its start.
+            assert_eq!(unit_light(1.5, 1.4), 0.0);
+            assert!(unit_light(1.5, 1.6) > 0.5);
+            assert!(unit_light(1.5, 1.9) > 0.99);
+            let mut was = 0.0;
+            for ms in 1450..1900 {
+                let v = unit_light(1.5, ms as f32 / 1000.0);
+                assert!(v >= was && v <= 1.0);
+                was = v;
+            }
+        });
+    }
+
+    /// Line times only: «Спокойный Фокус» makes the line bright as a
+    /// whole; otherwise the words are paced from the line, split as written.
+    #[test]
+    fn words_follow_the_line_only_fallback() {
+        let lines_only = [line(1.0, Some(3.0), "do-dodge back")];
+        let calm = Prefs { lyrics_style: 3, wave_syllables_only: true, ..Prefs::default() };
+        assert!(style_for(&calm, &lines_only) == Style::Focus);
+        let paced = Prefs { wave_syllables_only: false, ..calm.clone() };
+        assert!(style_for(&paced, &lines_only) == Style::Words);
+        let mut worded = lines_only[0].clone();
+        worded.words = vec![word(1.0, 2.0, "do-dodge "), word(2.0, 3.0, "back")];
+        assert!(style_for(&calm, &[worded]) == Style::Words);
+        with_painter(|painter| {
+            let u = units_of(painter, &paced_words(&lines_only[0], None));
+            assert_eq!(u.iter().map(|u| u.0.as_str()).collect::<Vec<_>>(), ["do-", "dodge", "back"]);
+            // 3 + 5 + 4 letters over the line's two seconds.
+            assert!(close(u[1].1, 1.0 + 2.0 * 3.0 / 12.0), "{:?}", u[1]);
+            assert!(close(u[2].1, 1.0 + 2.0 * 8.0 / 12.0), "{:?}", u[2]);
+        });
     }
 
     #[test]

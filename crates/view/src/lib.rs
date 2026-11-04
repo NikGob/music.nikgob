@@ -1124,9 +1124,10 @@ pub struct Prefs {
     pub np_slot: NpSlot,
     /// The dotted ring around the Now Playing cover turns while playing.
     pub spin_ring: bool,
-    /// How synced lyrics animate: 0 karaoke, 1 focus, 2 wave (letter by letter).
+    /// How synced lyrics animate: 0 karaoke, 1 focus, 2 wave (letter by letter),
+    /// 3 words (each written word lights up whole).
     pub lyrics_style: u8,
-    /// Under the wave, a text with line times only (no word times) uses
+    /// Under the wave and words, a text with line times only (no word times) uses
     /// Focus instead of guessing the words' pace.
     pub wave_syllables_only: bool,
     /// Wave letters jump up as they are sung (off: they only light up).

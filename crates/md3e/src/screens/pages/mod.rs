@@ -143,6 +143,8 @@ pub struct PageState {
     /// A settings row a "настроить" link asked for: Settings opens on its
     /// tab, scrolls to it and makes it glow.
     pub focus_setting: Option<SettingId>,
+    /// The whole group of [`Self::focus_setting`] is shown, not the row.
+    pub focus_group: bool,
     /// Settings tab: 0 general, 1 appearance.
     settings_tab: usize,
     /// Latest bass level for the ambient glow (set by the host each frame).
@@ -273,7 +275,15 @@ impl PageState {
     /// Opens Settings at row `id` (its tab, scrolled into view, glowing).
     pub fn open_setting(&mut self, id: SettingId) {
         self.focus_setting = Some(id);
+        self.focus_group = false;
         self.pending_nav = Some(Route::Settings);
+    }
+
+    /// Opens Settings at the group that holds row `id`, scrolled into view
+    /// and briefly tinted, so it is clear which settings these are.
+    pub fn open_setting_group(&mut self, id: SettingId) {
+        self.open_setting(id);
+        self.focus_group = true;
     }
 
     /// Goes where a message points ([`nikgob_view::Link`]).
