@@ -5,6 +5,8 @@
 //! - `fake:discography` — the open library artist gets a «Нет в библиотеке»
 //!   section from the fake Spotify catalog.
 //! - `fake:wishlist` — a wishlist with every status.
+//! - `fake:history-refusals` — «Загрузки → История» with wished downloads
+//!   the sources turned away, one line each, as the runtime words them.
 //! - `fake:confirm` — a «Хочу скачать» track in «Подтверди» whose offers
 //!   have long release names.
 //! - `fake:album-status` — the first stream album cards on screen (the
@@ -100,6 +102,7 @@ pub struct Fakes {
     /// `fake:lyrics-gap`: with word timing.
     lyrics_gap: Option<bool>,
     lyrics_state: Option<String>,
+    history_refusals: bool,
 }
 
 impl Fakes {
@@ -136,6 +139,7 @@ impl Fakes {
             "align-models" => self.align_models = true,
             "lyrics-gap" => self.lyrics_gap = Some(false),
             "lyrics-gap:words" => self.lyrics_gap = Some(true),
+            "history-refusals" => self.history_refusals = true,
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             c if c.starts_with("lyrics-home:") => self.lyrics_home = Some(c["lyrics-home:".len()..].to_owned()),
             c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
@@ -172,6 +176,7 @@ impl Fakes {
             || self.chip.is_some()
             || self.lyrics_gap.is_some()
             || self.lyrics_state.is_some()
+            || self.history_refusals
     }
 
     /// `state` with the fakes laid over it.
@@ -187,6 +192,9 @@ impl Fakes {
         }
         if self.confirm {
             s.downloads.confirm = vec![confirm()];
+        }
+        if self.history_refusals {
+            s.downloads.history = refusals_history();
         }
         if self.keep
             && let Some(t) = s.player.current.clone()
@@ -359,6 +367,51 @@ impl Fakes {
         }
         s
     }
+}
+
+/// «Загрузки → История» of wished downloads the sources turned away
+/// (`fake:history-refusals`): one line per wish with its latest state, in
+/// the runtime's words (streams/wishlist.rs `why_words`, `later_line`),
+/// among imports' lines.
+fn refusals_history() -> Vec<nikgob_view::Job> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    let lines: [(&str, &str, Option<&str>); 7] = [
+        ("Пошлая Молли — 8 способов как бросить...", "Tidal сейчас не отдаёт этот трек · в 21:48 спрошу Tidal, Soulseek", None),
+        (
+            "MORGENSHTERN — ЛЕГЕНДАРНАЯ ПЫЛЬ",
+            "Есть 1 из 10 · Qobuz просит подождать до 03:00, Tidal сейчас не отдаёт остальное · в 22:15 спрошу Tidal",
+            None,
+        ),
+        ("frutiger pm — cloud city", "Tidal сейчас не отдаёт этот трек · дальше — Soulseek", None),
+        (
+            "Con Fetti Pesto, David Münnich, Alexx Grimm — Meine Freundin ist kaputt",
+            "Tidal сейчас не отдаёт этот трек · есть варианты под вопросом — выбери в «Хочу скачать»",
+            None,
+        ),
+        ("Soulseek: Я не интроверт", "добавлено 1", None),
+        (
+            "Комсомольск — Мозги & деньги",
+            "",
+            Some("Tidal сейчас не отдаёт этот трек, сервер Qobuz недоступен · поищу снова через неделю"),
+        ),
+        ("Импорт «Downloads»", "добавлено 12 · дублей 2", None),
+    ];
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, (title, subtitle, error))| nikgob_view::Job {
+            id: (1 << 48) | (1 << 40) | (900 - i as u64),
+            title: (*title).into(),
+            subtitle: (*subtitle).into(),
+            progress: Some(1.0),
+            rate: None,
+            eta: None,
+            paused: false,
+            controllable: false,
+            error: error.map(str::to_owned),
+            at: now - i as i64 * 7 * 60_000,
+        })
+        .collect()
 }
 
 /// Lines of three words, one word a second, a line every four seconds.

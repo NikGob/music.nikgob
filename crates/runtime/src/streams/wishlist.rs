@@ -12,11 +12,14 @@
 //! list shows the track's file: [`Probe`]); nothing anywhere → «не нашёл», a
 //! toast, and a search again a week later until the user dismisses it.
 //! A source that turns a download away (a 403, «wait», no answer) is not
-//! a miss: the next offer, of another source, takes over; with none left,
-//! the item is searched again after a wait that grows each time
-//! ([`LATER_FIRST`]); a source that keeps refusing is set aside a while
-//! ([`Refusals`]); an album that came in part keeps what came, and its
-//! rest comes from the next offer or later.
+//! a miss: the next offer, of another source, takes over (a lossy or
+//! doubtful one through «Подтверди»); with none left, the item is searched
+//! again once a source that said no can be asked, after a wait that grows
+//! each time ([`plan_retry`]); a source that keeps refusing is set aside a
+//! while ([`Refusals`]); an album that came in part keeps what came, and
+//! its rest comes from the next offer or later. «Загрузки → История» has
+//! one line per such item, its latest state in plain words (why, when,
+//! which sources next), gone once the item's file came.
 //! Items from an import wait for the user's "скачать". At most
 //! [`nikgob_view::Prefs::auto_download_limit`] items search or download at
 //! once.
@@ -73,6 +76,12 @@ const LATER_FIRST: Duration = Duration::from_secs(5 * 60);
 const LATER_LONGEST: Duration = Duration::from_secs(6 * 3600);
 /// …this many times; then it waits the week like an item not found.
 const LATER_TRIES: u32 = 6;
+/// A retry asks the sources that turned the item away, and the others
+/// too once this passed since they last answered for it (Soulseek's peers
+/// come and go, new torrents come out).
+const ASK_AGAIN_AFTER: Duration = Duration::from_secs(6 * 3600);
+/// A shorter wait than this a source asks for is not told with its time.
+const WAIT_TOLD: Duration = Duration::from_secs(15 * 60);
 /// Downloads of a source turned away in a row that set it aside…
 const ASIDE_AFTER: u32 = 2;
 /// …for this, doubling while it keeps refusing, up to a day.
@@ -150,37 +159,54 @@ pub(crate) struct WishState {
     partial: HashSet<WishlistId>,
     /// The sources an item searched again after being turned away asks.
     retry_only: HashMap<WishlistId, Vec<SourceKey>>,
+    /// When each source last answered a search for an item.
+    asked: HashMap<WishlistId, HashMap<SourceKey, Instant>>,
 }
 
 /// Sources whose downloads turned us away: after [`ASIDE_AFTER`] in a row
 /// a source is set aside (its offers are not picked) for a while; a
 /// download that works ends it.
 #[derive(Default)]
-pub(crate) struct Refusals(HashMap<SourceKey, (u32, Option<Instant>)>);
+pub(crate) struct Refusals(HashMap<SourceKey, Refused>);
+
+#[derive(Default)]
+pub(crate) struct Refused {
+    /// Downloads turned away in a row.
+    times: u32,
+    until: Option<Instant>,
+    /// How the last one was.
+    why: Option<SourceError>,
+}
 
 impl Refusals {
     /// `key` turned a download away with `e`: the time it is set aside
     /// until, when it is now.
     pub(crate) fn refused(&mut self, key: SourceKey, e: &SourceError, now: Instant) -> Option<Instant> {
-        let (n, until) = self.0.entry(key).or_default();
-        *n += 1;
-        if *n < ASIDE_AFTER {
+        let r = self.0.entry(key).or_default();
+        r.times += 1;
+        r.why = Some(e.clone());
+        if r.times < ASIDE_AFTER {
             return None;
         }
-        let long = (ASIDE_FIRST * 2u32.pow((*n - ASIDE_AFTER).min(6))).min(ASIDE_LONGEST);
+        let long = (ASIDE_FIRST * 2u32.pow((r.times - ASIDE_AFTER).min(6))).min(ASIDE_LONGEST);
         let at = now + long.max(e.wait().unwrap_or_default());
-        *until = Some(at);
+        r.until = Some(at);
         Some(at)
     }
 
-    /// A download of `key` worked.
-    pub(crate) fn worked(&mut self, key: SourceKey) {
-        self.0.remove(&key);
+    /// A download of `key` worked: true when it was set aside.
+    pub(crate) fn worked(&mut self, key: SourceKey) -> bool {
+        self.0.remove(&key).is_some_and(|r| r.until.is_some())
     }
 
     /// Until when `key` is set aside, if it is.
     pub(crate) fn aside(&self, key: SourceKey, now: Instant) -> Option<Instant> {
-        self.0.get(&key).and_then(|(_, u)| *u).filter(|u| *u > now)
+        self.0.get(&key).and_then(|r| r.until).filter(|u| *u > now)
+    }
+
+    /// How `key`'s last refused download was.
+    pub(crate) fn why(&self, key: SourceKey) -> Option<&SourceError> {
+        self.0.get(&key).and_then(|r| r.why.as_ref())
     }
 }
 
@@ -256,22 +282,40 @@ fn fetch_down_text(e: &SourceError) -> Option<String> {
     }
 }
 
-/// Why a source turned a download away, in a few words.
-fn refusal_words(e: &SourceError) -> String {
-    match e {
-        SourceError::RateLimited { .. } => "просит подождать".into(),
-        SourceError::Blocked(_) => "не пускает".into(),
-        SourceError::Http { status } => format!("ошибка {status}"),
-        SourceError::Unreachable(_) => "не отвечает".into(),
-        _ => "ошибка".into(),
+/// A source's name in a sentence (the indexer behind «Торренты» is the
+/// one that answers or not).
+fn source_name(key: SourceKey) -> &'static str {
+    match key {
+        SourceKey::Torrents => "Prowlarr",
+        k => k.display_name(),
     }
 }
 
-/// «попробую в 21:40» (or «через N мин» when the clock is unknown).
-fn retry_words(wait: Duration) -> String {
+/// Why `key` turned an item away, in plain words that name it: «Tidal
+/// сейчас не отдаёт этот трек», «сервер Qobuz недоступен», «Qobuz просит
+/// подождать до 03:00». `what`: «этот трек», «этот альбом», «остальное».
+fn why_words(key: SourceKey, e: &SourceError, what: &str) -> String {
+    let name = source_name(key);
+    match e {
+        SourceError::RateLimited { retry_after: Some(d) } if *d >= WAIT_TOLD => match super::accounts::hm_after(*d) {
+            Some(hm) => format!("{name} просит подождать до {hm}"),
+            None => format!("{name} просит подождать"),
+        },
+        SourceError::RateLimited { .. } => format!("{name} просит подождать"),
+        SourceError::Blocked(_) => format!("{name} не пускает"),
+        // A ban of the instance's account, a file it cannot give (DRM).
+        SourceError::Http { status: 401 | 403 } | SourceError::Parse(_) => format!("{name} сейчас не отдаёт {what}"),
+        SourceError::Http { status } if *status >= 500 => format!("сервер {name} недоступен"),
+        SourceError::Unreachable(_) => format!("сервер {name} недоступен"),
+        _ => format!("{name} не дал скачать"),
+    }
+}
+
+/// «в 21:40» (or «через N мин» when the clock is unknown).
+fn at_words(wait: Duration) -> String {
     match super::accounts::hm_after(wait) {
-        Some(hm) => format!("попробую в {hm}"),
-        None => format!("попробую через {} мин", wait.as_secs().div_ceil(60)),
+        Some(hm) => format!("в {hm}"),
+        None => format!("через {} мин", wait.as_secs().div_ceil(60)),
     }
 }
 
@@ -281,9 +325,63 @@ fn capitalised(s: &str) -> String {
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
-/// Who an offer comes from, for the lines.
-fn provider_of(offer: &Offer) -> String {
-    if offer.provider.is_empty() { offer.source.display_name().to_owned() } else { offer.provider.clone() }
+/// Where an offer comes from, for the lines: the source (a Soulseek
+/// offer's provider is a user's name), a torrent as such.
+fn offer_from(offer: &Offer) -> String {
+    match offer.source {
+        SourceKey::Torrents => "торрент".into(),
+        k => k.display_name().into(),
+    }
+}
+
+/// When an item every offer of which was turned away is searched again,
+/// and the sources worth naming for then.
+#[derive(Debug, PartialEq, Eq)]
+struct Retry {
+    wait: Duration,
+    ask: Vec<SourceKey>,
+}
+
+/// The `n`th retry in a row of an item: at least [`LATER_FIRST`] doubling
+/// each time (up to [`LATER_LONGEST`]), and not before the first source
+/// that said no can be asked again (`turned`: each one with how long until
+/// then, when known; up to a day). Named for then: those of them back by
+/// then, and the `others` whose last answer for the item (how long ago)
+/// will be [`ASK_AGAIN_AFTER`] old.
+fn plan_retry(n: u32, turned: &[(SourceKey, Option<Duration>)], others: &[(SourceKey, Duration)]) -> Retry {
+    let backoff = (LATER_FIRST * 2u32.pow(n.saturating_sub(1).min(10))).min(LATER_LONGEST);
+    let soonest = turned.iter().map(|(_, back)| back.unwrap_or_default()).min().unwrap_or_default();
+    let wait = backoff.max(soonest.min(ASIDE_LONGEST));
+    let mut ask: Vec<SourceKey> = Vec::new();
+    for (k, back) in turned {
+        if back.is_none_or(|b| b <= wait) && !ask.contains(k) {
+            ask.push(*k);
+        }
+    }
+    for (k, ago) in others {
+        if *ago + wait >= ASK_AGAIN_AFTER && !ask.contains(k) {
+            ask.push(*k);
+        }
+    }
+    Retry { wait, ask }
+}
+
+/// The line of an item every offer of which was turned away: what is
+/// here of an album, why each source said no, and when which sources are
+/// asked again.
+fn later_line(have: Option<(usize, usize)>, why: &[String], wait: Duration, next: &[SourceKey]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some((have, all)) = have {
+        parts.push(format!("Есть {have} из {all}"));
+    }
+    parts.push(if why.is_empty() { "Источники не дали скачать".to_owned() } else { why.join(", ") });
+    let names: Vec<&str> = next.iter().map(|k| source_name(*k)).collect();
+    parts.push(if names.is_empty() {
+        format!("попробую снова {}", at_words(wait))
+    } else {
+        format!("{} спрошу {}", at_words(wait), names.join(", "))
+    });
+    capitalised(&parts.join(" · "))
 }
 
 /// Offers saved in an item before stage 4.5 were the indexer's candidates.
@@ -901,10 +999,14 @@ impl Worker {
 
     fn wish_search(&mut self, item: WishlistItem) {
         let mut sources = self.download_sources();
-        // Searched again because sources turned it away: only those are
-        // asked (the others had nothing it takes).
+        // Searched again because sources turned it away: those are asked,
+        // and the others once they had their [`ASK_AGAIN_AFTER`] (what had
+        // nothing then may have it now).
         if let Some(only) = self.streaming.wish.retry_only.remove(&item.id) {
-            let some: Vec<Arc<dyn Source>> = sources.iter().filter(|s| only.contains(&s.key())).cloned().collect();
+            let asked = self.streaming.wish.asked.get(&item.id);
+            let stale = |k: SourceKey| asked.and_then(|a| a.get(&k)).is_some_and(|t| t.elapsed() >= ASK_AGAIN_AFTER);
+            let some: Vec<Arc<dyn Source>> =
+                sources.iter().filter(|s| only.contains(&s.key()) || stale(s.key())).cloned().collect();
             if !some.is_empty() {
                 sources = some;
             }
@@ -981,8 +1083,10 @@ impl Worker {
                 answered,
                 down,
             } => {
+                let now = Instant::now();
                 for k in answered {
                     self.streaming.wish.down.remove(&k);
+                    self.streaming.wish.asked.entry(item).or_default().insert(k, now);
                 }
                 for (k, e) in &down {
                     self.streaming.wish.down.insert(*k, down_text(e));
@@ -999,11 +1103,15 @@ impl Worker {
             WishMsg::Fetched { item, offer, result } => match result {
                 Ok(Fetched::Torrent(p)) => self.wish_inspect(item, *offer, p),
                 Ok(Fetched::Files(files)) => {
-                    self.streaming.wish.refusals.worked(offer.source);
+                    let was_aside = self.streaming.wish.refusals.worked(offer.source);
                     if self.streaming.wish.fetch_down.remove(&offer.source).is_some() {
                         self.publish_sources();
                     }
-                    self.wish_files(item, *offer, files)
+                    let key = offer.source;
+                    self.wish_files(item, *offer, files);
+                    if was_aside {
+                        self.wish_wake(key);
+                    }
                 }
                 Ok(Fetched::Partial { files, missing, error }) => self.wish_partial(item, *offer, files, missing.len(), error),
                 Err(e) => {
@@ -1046,6 +1154,10 @@ impl Worker {
             Err(e) => {
                 // The sources are down: not "not found", just later.
                 log::warn!("wishlist search: {e}");
+                if self.streaming.wish.turned.get(&id).is_some_and(|t| !t.is_empty()) {
+                    self.wish_later(id);
+                    return;
+                }
                 self.set_item(id, |i| {
                     i.status = WishlistStatus::New;
                     i.next_try_at = Some(Self::now() + 3_600_000);
@@ -1073,7 +1185,9 @@ impl Worker {
         for key in aside {
             let left = self.streaming.wish.refusals.aside(key, now).map(|u| u - now);
             log::info!("wishlist: {key:?} is set aside, its offers wait");
-            self.streaming.wish.turned.entry(id).or_default().push((key, SourceError::RateLimited { retry_after: left }));
+            // Told as what it kept doing (a 403 is not «просит подождать»).
+            let why = self.streaming.wish.refusals.why(key).cloned().unwrap_or(SourceError::RateLimited { retry_after: left });
+            self.streaming.wish.turned.entry(id).or_default().push((key, why));
         }
         let ranked: Vec<_> = rank(offers, &want, &order)
             .into_iter()
@@ -1106,7 +1220,15 @@ impl Worker {
                         .filter(|(i, r)| *i != first && takes(r))
                         .map(|(_, r)| r.offer.clone()),
                 );
-                let doubtful: Vec<Offer> = ranked.iter().filter(|r| !r.verdict.sure).map(|r| r.offer.clone()).collect();
+                // The rest (doubtful, or lossy and sure) go to «Подтверди»
+                // when every one taken is turned away: another source's
+                // file to choose, not a wait for the one that refuses.
+                let doubtful: Vec<Offer> = ranked
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, r)| *i != first && !takes(r))
+                    .map(|(_, r)| r.offer.clone())
+                    .collect();
                 let best = sure[0].clone();
                 self.streaming.wish.cands.insert(id, sure);
                 self.streaming.wish.doubtful.insert(id, doubtful);
@@ -1158,7 +1280,12 @@ impl Worker {
                 .take(CONFIRM_OPTIONS)
                 .collect();
             if shown.is_empty() {
-                self.no_torrent(id, true);
+                // None of them had the file; a source that said no may give it later.
+                if self.streaming.wish.turned.get(&id).is_some_and(|t| !t.is_empty()) {
+                    self.wish_later(id);
+                } else {
+                    self.no_torrent(id, true);
+                }
             } else {
                 self.ask_confirm(id, &shown);
             }
@@ -1417,9 +1544,9 @@ impl Worker {
         };
         match next {
             Some(c) => {
-                let provider = provider_of(&c);
+                let from = offer_from(&c);
                 self.wish_fetch(id, c);
-                Next::Offer(provider)
+                Next::Offer(from)
             }
             None => {
                 self.streaming.wish.cands.remove(&id);
@@ -1444,13 +1571,13 @@ impl Worker {
         log::warn!("wishlist: {} from {:?}: {} of {all} tracks, the rest: {error}", offer.title, offer.source, files.len());
         let why = if error.is_refusal() {
             self.wish_turned_away(id, &offer, &error);
-            format!("остальные {missing} не дал: {}", refusal_words(&error))
+            why_words(offer.source, &error, "остальное")
         } else {
             self.streaming.wish.refusals.worked(offer.source);
-            format!("остальных {missing} там нет")
+            format!("остальных {missing} у {} нет", source_name(offer.source))
         };
         let what = self.item_title(id);
-        self.history_line(format!("{}: {what}", provider_of(&offer)), format!("скачано {} из {all} · {why}", files.len()), None);
+        self.wish_line(id, what, format!("Скачано {} из {all} · {why}", files.len()), None);
         self.streaming.wish.partial.insert(id);
         self.wish_files(id, offer, files);
     }
@@ -1474,88 +1601,130 @@ impl Worker {
         }
     }
 
-    /// «Загрузки → История»: `offer`'s source turned the item away, and
-    /// what came of it (`next`).
-    fn refusal_line(&mut self, id: WishlistId, offer: &Offer, e: &SourceError, next: &Next) {
-        let (then, failed) = match next {
-            Next::Offer(p) => (format!("беру из {p}"), false),
-            Next::Doubtful => ("дальше — варианты под вопросом".to_owned(), false),
-            Next::Later(at) => (retry_words(Duration::from_millis((at - Self::now()).max(0) as u64)), true),
-            Next::NotFound => ("поищу снова через неделю".to_owned(), true),
-        };
-        let line = format!("не дал скачать: {} · {then}", refusal_words(e));
-        let title = format!("{}: {}", provider_of(offer), self.item_title(id));
-        if failed {
-            self.history_line(title, String::new(), Some(capitalised(&line)));
-        } else {
-            self.history_line(title, line, None);
+    /// A download of `key` worked after it had been set aside: the items
+    /// that wait for it are searched again now.
+    fn wish_wake(&mut self, key: SourceKey) {
+        let waiting: Vec<WishlistId> =
+            self.streaming.wish.retry_only.iter().filter(|(_, keys)| keys.contains(&key)).map(|(id, _)| *id).collect();
+        let now = Self::now();
+        for id in waiting {
+            self.set_item(id, |i| {
+                if i.status == WishlistStatus::New && i.next_try_at.is_some_and(|t| t > now) {
+                    i.next_try_at = Some(now);
+                }
+            });
         }
+        self.wish_tick();
+    }
+
+    /// «Загрузки → История»: `offer`'s source turned the item away, and
+    /// what came of it (`next`): the next source, or the choice in
+    /// «Подтверди». A wait has its line from [`Self::wish_later`].
+    fn refusal_line(&mut self, id: WishlistId, offer: &Offer, e: &SourceError, next: &Next) {
+        let then = match next {
+            Next::Offer(from) => format!("дальше — {from}"),
+            Next::Doubtful => "есть варианты под вопросом — выбери в «Хочу скачать»".to_owned(),
+            Next::Later(_) | Next::NotFound => return,
+        };
+        let why = why_words(offer.source, e, self.item_what(id));
+        let title = self.item_title(id);
+        self.wish_line(id, title, capitalised(&format!("{why} · {then}")), None);
     }
 
     /// Every offer of the item was turned away (or a source could not be
-    /// asked): it is searched again after a wait (the longest a source
-    /// asked for, at least [`LATER_FIRST`] doubling each time in a row),
-    /// [`LATER_TRIES`] times, then in a week.
+    /// asked): it is searched again ([`plan_retry`]) [`LATER_TRIES`] times,
+    /// then in a week. The item's note and its line in «История» say why
+    /// and when which sources are asked.
     fn wish_later(&mut self, id: WishlistId) -> Next {
         let turned = self.streaming.wish.turned.remove(&id).unwrap_or_default();
-        let gone = self.lib.get_wishlist_item(id).ok().flatten().is_none_or(|i| matches!(i.status, WishlistStatus::Dismissed | WishlistStatus::Done));
-        if gone {
+        let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return Next::NotFound };
+        if matches!(item.status, WishlistStatus::Dismissed | WishlistStatus::Done) {
             return Next::NotFound;
         }
+        // One reason per source: what it kept doing when it is set aside.
+        let now = Instant::now();
+        let mut seen: Vec<(SourceKey, SourceError, Option<Duration>)> = Vec::new();
+        for (k, e) in turned {
+            if seen.iter().any(|(s, ..)| *s == k) {
+                continue;
+            }
+            let aside = self.streaming.wish.refusals.aside(k, now).map(|u| u - now);
+            let back = match (e.wait(), aside) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
+            let why = match aside {
+                Some(_) => self.streaming.wish.refusals.why(k).cloned().unwrap_or(e),
+                None => e,
+            };
+            seen.push((k, why, back));
+        }
+        let partly = match item.scope {
+            WishlistScope::Album => match self.album_files(&item) {
+                (have, all) if have > 0 && have < all => Some((have, all)),
+                _ => None,
+            },
+            WishlistScope::Track => None,
+        };
+        let what = match (item.scope, partly) {
+            (_, Some(_)) => "остальное",
+            (WishlistScope::Album, None) => "этот альбом",
+            (WishlistScope::Track, None) => "этот трек",
+        };
+        let why: Vec<String> = seen.iter().map(|(k, e, _)| why_words(*k, e, what)).collect();
         let n = {
             let n = self.streaming.wish.later.entry(id).or_default();
             *n += 1;
             *n
         };
         if n > LATER_TRIES {
+            // Tried enough for now: the weekly search, in every source.
             self.streaming.wish.later.remove(&id);
             self.streaming.wish.retry_only.remove(&id);
-            self.no_torrent(id, true);
+            let copy = self.copy_quality(&item).is_some();
+            self.no_torrent(id, false);
+            let reasons = if why.is_empty() { "Источники не дали скачать".to_owned() } else { why.join(", ") };
+            let line = capitalised(&format!("{reasons} · поищу снова через неделю"));
+            if !copy {
+                self.set_item(id, |i| i.note = Some(line.clone()));
+                self.publish_wishlist();
+            }
+            let title = self.item_title(id);
+            self.wish_line(id, title, String::new(), Some(line));
             return Next::NotFound;
         }
-        let backoff = (LATER_FIRST * 2u32.pow((n - 1).min(10))).min(LATER_LONGEST);
-        let asked = turned.iter().filter_map(|(_, e)| e.wait()).max().unwrap_or_default();
-        let wait = backoff.max(asked.min(ASIDE_LONGEST));
-        let at = Self::now() + wait.as_millis() as i64;
-        let mut keys: Vec<SourceKey> = turned.iter().map(|(k, _)| *k).collect();
-        keys.dedup();
+        let keys: Vec<SourceKey> = seen.iter().map(|(k, ..)| *k).collect();
+        let asked = self.streaming.wish.asked.get(&id);
+        let others: Vec<(SourceKey, Duration)> = self
+            .download_sources()
+            .iter()
+            .map(|s| s.key())
+            .filter(|k| !keys.contains(k))
+            .filter_map(|k| asked.and_then(|a| a.get(&k)).map(|t| (k, t.elapsed())))
+            .collect();
+        let backs: Vec<(SourceKey, Option<Duration>)> = seen.iter().map(|(k, _, b)| (*k, *b)).collect();
+        let retry = plan_retry(n, &backs, &others);
+        let at = Self::now() + retry.wait.as_millis() as i64;
         self.streaming.wish.retry_only.insert(id, keys);
-        let mut why: Vec<String> = Vec::new();
-        let now = Instant::now();
-        for (k, e) in &turned {
-            let words = match self.streaming.wish.refusals.aside(*k, now) {
-                Some(_) => "не даёт скачать".to_owned(),
-                None => refusal_words(e),
-            };
-            let line = format!("{}: {words}", k.display_name());
-            if !why.contains(&line) {
-                why.push(line);
-            }
-        }
-        let partly = match self.lib.get_wishlist_item(id).ok().flatten() {
-            Some(i) if i.scope == WishlistScope::Album => match self.album_files(&i) {
-                (have, all) if have > 0 && have < all => Some(format!("Скачано {have} из {all}")),
-                _ => None,
-            },
-            _ => None,
-        };
-        let note = match (&partly, why.is_empty()) {
-            (Some(p), _) => format!("{p} — остальное {}", retry_words(wait)),
-            (None, false) => format!("{} — {}", why.join(", "), retry_words(wait)),
-            (None, true) => format!("Источники не дали скачать — {}", retry_words(wait)),
-        };
-        log::info!("wishlist: {id} was turned away ({}), again in {} min", why.join(", "), wait.as_secs() / 60);
+        let note = later_line(partly, &why, retry.wait, &retry.ask);
+        log::info!("wishlist: {id} was turned away ({}), again in {} min", why.join(", "), retry.wait.as_secs() / 60);
         self.set_item(id, |i| {
             i.status = WishlistStatus::New;
             i.next_try_at = Some(at);
             i.note = Some(note.clone());
         });
-        if partly.is_some() {
-            let what = self.item_title(id);
-            self.history_line(what, String::new(), Some(note));
-        }
+        let title = self.item_title(id);
+        self.wish_line(id, title, note, None);
         self.publish_wishlist();
         Next::Later(at)
+    }
+
+    /// «этот трек» or «этот альбом», as the item is.
+    fn item_what(&self, id: WishlistId) -> &'static str {
+        match self.lib.get_wishlist_item(id).ok().flatten().map(|i| i.scope) {
+            Some(WishlistScope::Album) => "этот альбом",
+            _ => "этот трек",
+        }
     }
 
     /// The item's name for the lines: «Artist — Title».
@@ -1647,6 +1816,7 @@ impl Worker {
         let mut n = 0;
         for &id in ids {
             self.streaming.wish.cands.remove(&id);
+            self.wish_line_drop(id);
             if let Some(i) = self.set_item(id, |i| {
                 i.status = WishlistStatus::Dismissed;
                 i.next_try_at = None;
@@ -1921,6 +2091,8 @@ impl Worker {
                 i.next_try_at = None;
                 i.note = Some("Скачано".into());
             });
+            self.streaming.wish.asked.remove(&i.id);
+            self.wish_line_drop(i.id);
             changed = true;
         }
         if changed {
@@ -2030,6 +2202,8 @@ impl Worker {
             w.turned.remove(&id);
             w.later.remove(&id);
             w.retry_only.remove(&id);
+            w.asked.remove(&id);
+            self.wish_line_drop(id);
         }
         self.set_item(id, |i| {
             i.status = status;
@@ -2398,8 +2572,67 @@ mod tests {
         assert_eq!(r.aside(SourceKey::Qobuz, now), None, "one source only");
         let long = SourceError::RateLimited { retry_after: Some(Duration::from_secs(3 * 3600)) };
         assert_eq!(r.refused(SourceKey::Tidal, &long, now).unwrap() - now, Duration::from_secs(3 * 3600));
-        r.worked(SourceKey::Tidal);
+        assert_eq!(r.why(SourceKey::Tidal), Some(&long));
+        assert!(r.worked(SourceKey::Tidal), "it was set aside");
         assert_eq!(r.aside(SourceKey::Tidal, now), None);
+        assert!(!r.worked(SourceKey::Tidal));
+    }
+
+    const MIN: Duration = Duration::from_secs(60);
+
+    /// The first retry: five minutes, unless every source that said no
+    /// asked for longer; then not before the first of them is back.
+    #[test]
+    fn a_retry_waits_for_the_first_source_back() {
+        let r = plan_retry(1, &[(SourceKey::Tidal, None)], &[]);
+        assert_eq!(r, Retry { wait: LATER_FIRST, ask: vec![SourceKey::Tidal] });
+        // Qobuz is out of its day's requests for 6 h, Tidal set aside 30 min:
+        // Tidal's half hour, and only Tidal is named.
+        let r = plan_retry(1, &[(SourceKey::Qobuz, Some(360 * MIN)), (SourceKey::Tidal, Some(30 * MIN))], &[]);
+        assert_eq!(r, Retry { wait: 30 * MIN, ask: vec![SourceKey::Tidal] });
+        // One of them can be asked any time: the backoff, doubling.
+        let r = plan_retry(3, &[(SourceKey::Qobuz, Some(360 * MIN)), (SourceKey::Tidal, None)], &[]);
+        assert_eq!(r, Retry { wait: 20 * MIN, ask: vec![SourceKey::Tidal] });
+        // Never past a day, never more than the longest backoff otherwise.
+        assert_eq!(plan_retry(1, &[(SourceKey::Qobuz, Some(72 * 60 * MIN))], &[]).wait, ASIDE_LONGEST);
+        assert_eq!(plan_retry(30, &[(SourceKey::Tidal, None)], &[]).wait, LATER_LONGEST);
+    }
+
+    /// The sources that had nothing for the item are asked again with the
+    /// retry once their answer is six hours old: Soulseek answered 5 h 50
+    /// ago and the retry is in 20 min, torrents a minute ago.
+    #[test]
+    fn a_retry_asks_again_what_had_nothing_long_ago() {
+        let others = [(SourceKey::Soulseek, 350 * MIN), (SourceKey::Torrents, MIN)];
+        let r = plan_retry(3, &[(SourceKey::Tidal, None)], &others);
+        assert_eq!(r.ask, [SourceKey::Tidal, SourceKey::Soulseek]);
+    }
+
+    /// The reasons in words a listener understands, the source named.
+    #[test]
+    fn why_a_source_said_no_in_plain_words() {
+        let t = "этот трек";
+        assert_eq!(why_words(SourceKey::Tidal, &SourceError::Http { status: 403 }, t), "Tidal сейчас не отдаёт этот трек");
+        assert_eq!(why_words(SourceKey::Tidal, &SourceError::Parse("a DASH manifest".into()), t), "Tidal сейчас не отдаёт этот трек");
+        assert_eq!(why_words(SourceKey::Qobuz, &SourceError::Unreachable("dns error".into()), t), "сервер Qobuz недоступен");
+        assert_eq!(why_words(SourceKey::Qobuz, &SourceError::Http { status: 522 }, t), "сервер Qobuz недоступен");
+        assert_eq!(why_words(SourceKey::Khinsider, &SourceError::Blocked("a bot check".into()), t), "khinsider не пускает");
+        assert_eq!(why_words(SourceKey::Torrents, &SourceError::Unreachable("x".into()), t), "сервер Prowlarr недоступен");
+        let short = SourceError::RateLimited { retry_after: Some(MIN) };
+        assert_eq!(why_words(SourceKey::Qobuz, &short, t), "Qobuz просит подождать");
+        let long = SourceError::RateLimited { retry_after: Some(300 * MIN) };
+        assert!(why_words(SourceKey::Qobuz, &long, t).starts_with("Qobuz просит подождать до "));
+    }
+
+    /// One line says it all: what is here, why, when and whom it asks.
+    #[test]
+    fn the_line_of_a_wait() {
+        let why = ["Tidal сейчас не отдаёт остальное".to_owned(), "сервер Qobuz недоступен".to_owned()];
+        let line = later_line(Some((1, 10)), &why, 30 * MIN, &[SourceKey::Tidal, SourceKey::Soulseek]);
+        assert!(line.starts_with("Есть 1 из 10 · Tidal сейчас не отдаёт остальное, сервер Qobuz недоступен · "), "{line}");
+        assert!(line.ends_with(" спрошу Tidal, Soulseek"), "{line}");
+        let line = later_line(None, &["сервер Qobuz недоступен".to_owned()], 5 * MIN, &[]);
+        assert!(line.starts_with("Сервер Qobuz недоступен · попробую снова "), "{line}");
     }
 
     #[test]

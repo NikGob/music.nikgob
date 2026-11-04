@@ -198,11 +198,15 @@ mod tests {
             let asked = asked.clone();
             async move {
                 asked.lock().unwrap().push(base.clone());
-                if base == "https://gone" { Err(SourceError::Unreachable("dns error".into())) } else { Err(SourceError::Http { status: 403 }) }
+                if base == "https://gone" {
+                    Err::<(), _>(SourceError::Unreachable("dns error".into()))
+                } else {
+                    Err(SourceError::Http { status: 403 })
+                }
             }
         };
         for _ in 0..4 {
-            assert_eq!(i.call(op).await, Err::<(), _>(SourceError::Http { status: 403 }));
+            assert_eq!(i.call(op).await, Err(SourceError::Http { status: 403 }));
         }
         let asked = asked.lock().unwrap().clone();
         assert_eq!(asked.iter().filter(|b| *b == "https://gone").count(), 2, "{asked:?}");
