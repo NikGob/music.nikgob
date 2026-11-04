@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::PoisonError;
 
-use nikgob_core::model::TrackId;
+use nikgob_core::model::{ReleaseId, TrackId};
 
 use crate::error::{ImportError, Result};
 use crate::fsutil;
@@ -24,10 +24,15 @@ pub struct TagChanges {
     pub album_artist: Option<String>,
     pub year: Option<Option<i32>>,
     pub track_no: Option<Option<u32>>,
+    /// The album's track count.
+    pub track_total: Option<Option<u32>>,
     pub disc_no: Option<Option<u32>>,
     pub genre: Option<String>,
     pub recording_mbid: Option<String>,
     pub release_mbid: Option<String>,
+    /// The album the track stays on, whatever album the tags name (a
+    /// file put back at its place on its album).
+    pub release: Option<ReleaseId>,
     /// The album artist stays as it is even when the artist changes from
     /// the same name (a repair gives a soundtrack's track its composer
     /// back; the editor's renamed artist takes the album along).
@@ -60,6 +65,9 @@ impl TagChanges {
         }
         if let Some(v) = self.track_no {
             t.track_no = v;
+        }
+        if let Some(v) = self.track_total {
+            t.track_total = v;
         }
         if let Some(v) = self.disc_no {
             t.disc_no = v;
@@ -153,6 +161,7 @@ impl Importer {
         let (old_artist, old_aa) = (set.artist.clone(), set.album_artist.clone());
         let before = set.clone();
         let keep_aa = changes.keep_album_artist;
+        let stays_on = changes.release;
         changes.apply(&mut set);
         // The album artist follows a renamed artist when it was the same
         // person (or a placeholder) and the editor left it alone.
@@ -164,7 +173,8 @@ impl Importer {
             set.album_artist = set.artist.clone();
         }
         set.track_id = Some(track);
-        let identity = identity_from_tags(&set, &path);
+        let mut identity = identity_from_tags(&set, &path);
+        identity.release_id = stays_on;
 
         let mut store = self
             .inner

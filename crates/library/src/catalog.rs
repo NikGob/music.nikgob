@@ -577,12 +577,15 @@ pub(crate) fn add_source_in(tx: &Connection, source: &Source) -> Result<Source> 
         }
     };
     // A live file brings a deleted track back (the same song imported
-    // again lands on its old id).
+    // again lands on its old id), and its song is wanted again.
     if source.trashed_at.is_none() && source.kind.is_local() {
-        tx.execute(
+        let back = tx.execute(
             "UPDATE track SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
             [&track],
         )?;
+        if back > 0 {
+            crate::unwanted::forget_unwanted_in(tx, &track)?;
+        }
     }
     // A source handed over to another track must not stay "active" on
     // the track it left.
@@ -1076,7 +1079,8 @@ impl Library {
     pub fn release_listing(&self, release: ReleaseId) -> Result<Option<ReleaseListing>> {
         let Some(r) = self.get_release(release)? else { return Ok(None) };
         let rows = self.tracks_of_release_all(release)?;
-        Ok(Some(ReleaseListing::new(rows, r.total_tracks)))
+        let unwanted = self.read(|c| crate::unwanted::unwanted_places_in(c, &release.to_string()))?;
+        Ok(Some(ReleaseListing::new(rows, r.total_tracks, &unwanted)))
     }
 
     fn tracks_of_release_impl(&self, release: ReleaseId, deleted: bool) -> Result<Vec<TrackRow>> {
@@ -1321,11 +1325,20 @@ pub(crate) const RELEASE_VISIBLE: &str = release_visible!();
 pub(crate) const ARTIST_VISIBLE: &str = artist_visible!();
 
 /// The columns of a [`ReleaseRow`] (alias `r`); deleted tracks count nowhere.
+/// Its count leaves out the places of the songs the user deleted from it
+/// that no live track takes (`unwanted`): no holes of the album.
 macro_rules! release_row_cols {
     () => {
         concat!(
             "SELECT r.id, r.mbid, r.release_group_mbid, r.title, r.artist_credit, r.year,
-                    r.release_type, r.cover_ref, r.total_tracks, r.added_at,
+                    r.release_type, r.cover_ref,
+                    CASE WHEN r.total_tracks IS NULL THEN NULL ELSE max(r.total_tracks - (
+                        SELECT COUNT(*) FROM unwanted u WHERE u.release_id = r.id
+                           AND u.track_no BETWEEN 1 AND r.total_tracks
+                           AND NOT EXISTS (SELECT 1 FROM track o WHERE o.release_id = r.id AND o.deleted_at IS NULL
+                                              AND (o.title_key = u.title_key
+                                                   OR (o.disc_no = u.disc_no AND o.track_no = u.track_no)))), 0) END,
+                    r.added_at,
                     (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.has_local = 1
                                                     AND t.deleted_at IS NULL AND t.in_library = 1),
                     (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.deleted_at IS NULL AND t.in_library = 1),

@@ -182,6 +182,8 @@ impl Library {
             if n == 0 {
                 return Err(LibraryError::not_found("track", track));
             }
+            // Its song is «не нужна» on its album from now on.
+            crate::unwanted::note_unwanted_in(tx, &track.to_string(), at)?;
             Ok(())
         })
     }
@@ -219,6 +221,7 @@ impl Library {
                 "UPDATE track SET deleted_at = NULL WHERE id = ?1",
                 [track.to_string()],
             )?;
+            crate::unwanted::forget_unwanted_in(tx, &track.to_string())?;
             refresh_active(tx, track)?;
             Ok(())
         })
@@ -272,6 +275,13 @@ impl Library {
                 .query_row("SELECT release_id FROM track WHERE id = ?1", [&tid], |r| r.get(0))
                 .optional()?
                 .ok_or_else(|| LibraryError::not_found("track", track))?;
+            // Deleted for good at once (no Trash): its song is «не нужна»
+            // too; a row of a track from the Trash stays without it.
+            let live: bool = tx.query_row("SELECT deleted_at IS NULL FROM track WHERE id = ?1", [&tid], |r| r.get(0))?;
+            if live {
+                crate::unwanted::note_unwanted_in(tx, &tid, now)?;
+            }
+            crate::unwanted::unlink_unwanted_in(tx, &tid)?;
             let mut out = PurgedTrack::default();
             let files: Vec<(String, String, bool, Option<String>)> = {
                 let mut stmt = tx.prepare_cached(

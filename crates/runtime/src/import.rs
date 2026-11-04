@@ -49,6 +49,9 @@ pub(crate) enum Internal {
     Retagged(TrackId, Result<(), String>),
     /// An uploader's song took its performer's names.
     Relabeled(TrackId, Result<(), String>),
+    /// The file of a track of a wished album followed its new place (its
+    /// tags and name): the one-time repair of wished albums' places.
+    Placed(TrackId, Result<(), String>),
     TorrentResults(String, Result<Vec<nikgob_core::indexer::Candidate>, String>),
     IndexerChecked(Result<usize, nikgob_core::indexer::IndexerError>),
     TorrentStarted(Result<nikgob_torrent::TorrentClient, String>),
@@ -685,6 +688,14 @@ impl Worker {
                 }
                 self.reload_after_import();
             }
+            Internal::Placed(track, r) => {
+                if let Err(e) = r {
+                    log::warn!("the file of {track} stays as it was: {e}");
+                }
+                if let Some(svc) = &mut self.import {
+                    svc.dirty = true;
+                }
+            }
             Internal::TorrentResults(q, r) => self.torrent_results(q, r),
             Internal::IndexerChecked(r) => self.indexer_checked(r),
             Internal::TorrentStarted(r) => self.torrent_started(r),
@@ -992,6 +1003,7 @@ impl Worker {
         if self.playing.is_some_and(|e| tracks.contains(&e.track)) {
             self.command(Command::Next);
         }
+        let albums = self.wish_drop_deleted(&tracks);
         let mut failed = 0;
         for &t in &tracks {
             if let Err(e) = nikgob_import::delete_track_to_trash(&self.lib, &cfg.trash_dir, &cfg.library_dir, t) {
@@ -999,6 +1011,7 @@ impl Worker {
                 failed += 1;
             }
         }
+        self.wish_settle_albums(&albums);
         if failed == tracks.len() {
             self.toast("Не получилось удалить", None);
         } else {
@@ -1036,6 +1049,7 @@ impl Worker {
         if self.playing.is_some_and(|e| tracks.contains(&e.track)) {
             self.command(Command::Next);
         }
+        let albums = self.wish_drop_deleted(&tracks);
         let (mut done, mut failed) = (0usize, 0usize);
         for &t in &tracks {
             match nikgob_import::purge_track(&self.lib, &cfg, t) {
@@ -1049,6 +1063,7 @@ impl Worker {
                 }
             }
         }
+        self.wish_settle_albums(&albums);
         self.toast(
             if failed > 0 {
                 "Удалено, но не все файлы получилось стереть".to_owned()

@@ -30,6 +30,7 @@ fn changes(e: v::TagEdit) -> nikgob_import::TagChanges {
     nikgob_import::TagChanges {
         year: Some(e.year.trim().get(..4).and_then(|y| y.parse().ok())),
         track_no: Some(num(&e.track_no)),
+        track_total: None,
         disc_no: Some(num(&e.disc_no)),
         title: Some(e.title),
         artist: Some(e.artist),
@@ -38,6 +39,7 @@ fn changes(e: v::TagEdit) -> nikgob_import::TagChanges {
         genre: Some(e.genre),
         recording_mbid: (!e.recording_mbid.is_empty()).then_some(e.recording_mbid),
         release_mbid: (!e.release_mbid.is_empty()).then_some(e.release_mbid),
+        release: None,
         keep_album_artist: false,
     }
 }

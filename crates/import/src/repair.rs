@@ -521,8 +521,14 @@ impl Importer {
         Ok(back)
     }
 
-    /// Rewrites the tags of a track's file from the library and moves it
-    /// where PLAN §5 puts it. Returns whether the file moved.
+    /// Rewrites the tags of a track's file from the library (its title,
+    /// album, place and the album's count; it stays on its album) and
+    /// moves it where PLAN §5 puts it. Returns whether the file moved.
+    pub fn place_track_file(&self, track: TrackId) -> Result<bool> {
+        let lib = self.library().clone();
+        self.place_file(&lib, track)
+    }
+
     fn place_file(&self, lib: &Library, track: TrackId) -> Result<bool> {
         let Some(row) = lib.get_track_row(track)? else { return Ok(false) };
         let Some(src) = lib.active_source(track)?.filter(|s| s.kind.is_local()) else { return Ok(false) };
@@ -537,8 +543,10 @@ impl Importer {
             album_artist: release.as_ref().map(|r| r.artist_credit.display()),
             year: release.as_ref().map(|r| r.year),
             track_no: Some((row.track_no > 0).then_some(row.track_no)),
+            track_total: release.as_ref().and_then(|r| r.total_tracks).map(Some),
             disc_no: Some(Some(row.disc_no.max(1))),
             release_mbid: release.as_ref().map(|r| r.mbid.clone().unwrap_or_default()),
+            release: row.release_id,
             keep_album_artist: true,
             ..TagChanges::default()
         };

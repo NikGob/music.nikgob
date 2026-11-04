@@ -130,8 +130,12 @@ impl Worker {
         }
     }
 
-    /// A like of `track`: its dislike goes.
+    /// A like of `track`: its dislike goes, and so does the «не нужна» of
+    /// its song on its album (a song deleted from it, liked on purpose).
     pub(crate) fn liked_undislikes(&mut self, track: TrackId) {
+        if self.lib.forget_unwanted_song(track).unwrap_or(false) {
+            self.recs_dirty(std::time::Duration::ZERO);
+        }
         self.dislikes_load(false);
         if self.recs.dislikes.tracks.contains(&track) {
             let _ = self.log_err("отзыв", self.lib.set_rec_feedback("track", &track.to_string(), false));

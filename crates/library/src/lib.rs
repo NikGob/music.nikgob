@@ -29,6 +29,7 @@ mod lyrics;
 mod masters;
 mod migrations;
 mod photos;
+mod places;
 mod playlists;
 mod rec_facts;
 mod graph;
@@ -38,6 +39,7 @@ pub mod search;
 mod streams;
 mod trash;
 mod types;
+mod unwanted;
 mod userdata;
 mod util;
 
@@ -49,10 +51,12 @@ pub use lyrics::{AlignCounts, AlignedLyrics, StoredLyrics};
 pub use error::{LibraryError, Result};
 pub use joblog::JOB_LOG_KEEP;
 pub use migrations::SCHEMA_VERSION;
+pub use places::{PLACES_FROM_WISH_KEY, PlaceChange};
 pub use playlists::LIKED_PLAYLIST_NAME;
 pub use rec_facts::{LyricsLevel, LyricsSample, PlaylistTracks, TrackFactsRow};
 pub use graph::{GraphEntry, GraphFetch, GraphRow, GraphTag};
 pub use recs::RecTrack;
+pub use unwanted::Unwanted;
 pub use streams::{LikedClip, MatchRow, TrackSnapshot, event_id, is_web_ref, other_scripts};
 pub use types::{
     AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, ConfirmRow, DeletedTrack, ExportReport, ImportReport, JobLogEntry,

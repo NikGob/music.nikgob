@@ -767,6 +767,11 @@ fn read_parts(
             filter.disliked_songs.insert(song_key(&r.title, &r.artist));
         }
     }
+    // A song the user deleted from an album is a strong «not for me» for
+    // that song (not its artist): new music never brings it back.
+    for u in lib.unwanted_songs().unwrap_or_default() {
+        filter.disliked_songs.insert(song_key(&u.title, &u.artist));
+    }
     filter.known_ids = remote.into_iter().collect();
     filter.known_songs = rows
         .iter()

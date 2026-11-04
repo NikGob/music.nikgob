@@ -7,7 +7,11 @@
 //!   [FLAC]» names both when the tags say nothing);
 //! * [`Reference`]: a torrent fetched for a «Хочу скачать» item lands on the
 //!   item's release, whose tracks (stream tracks with their numbers, titles
-//!   and lengths) the files attach to; MusicBrainz is not asked;
+//!   and lengths) the files attach to, each track to one file; the
+//!   release's tracklist numbers them, never the files' own tags (a folder
+//!   of a bigger edition), a file that is none of its tracks follows its
+//!   last one, and a song the user deleted from it is left out;
+//!   MusicBrainz is not asked;
 //! * otherwise MusicBrainz is asked for the release as a whole
 //!   ([`lookup_album`]: by artist and title, then the track count and the
 //!   lengths pick the edition), and each file takes its track of that
@@ -16,8 +20,8 @@
 
 use std::path::Path;
 
-use nikgob_core::model::{Release, ReleaseType, TrackId};
-use nikgob_library::{Library, TrackRow};
+use nikgob_core::model::{Release, ReleaseType, Track, TrackId};
+use nikgob_library::{Library, TrackRow, Unwanted};
 use nikgob_metadata::Metadata;
 use nikgob_metadata::matcher::{MatchCandidate, candidates_from_release};
 use nikgob_metadata::musicbrainz::Release as MbRelease;
@@ -178,11 +182,23 @@ impl Evidence {
     }
 }
 
-/// The «Хочу скачать» release a download was for, with its tracks.
+/// The «Хочу скачать» release a download was for, with its tracks: its
+/// tracklist numbers the files, whatever numbers their tags carry (a folder
+/// of a bigger edition, files from several sources).
 #[derive(Clone, Debug)]
 pub(crate) struct Reference {
     pub release: Release,
     pub tracks: Vec<TrackRow>,
+    /// The songs the user deleted from it: their files are not needed.
+    pub unwanted: Vec<Unwanted>,
+}
+
+/// What a file of the folder is on the release: one of its tracks, or a
+/// song the user deleted from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OnRelease {
+    Track(TrackId),
+    Unwanted,
 }
 
 /// A place on a release: a library track or a MusicBrainz track.
@@ -202,7 +218,9 @@ impl<'a> From<&'a TrackRow> for Slot<'a> {
 
 /// Whether a file (its tags) and a track are one, and how well: the same
 /// number and a similar title (or the same length), or the same title;
-/// lengths within the slack when both are known.
+/// lengths within the slack when both are known. A similar title outranks
+/// a number alone: a folder of another edition numbers the songs its own
+/// way, and its «4» of the same length is not the album's «4».
 pub(crate) fn file_is_track(base: &Identity, duration_ms: Option<u32>, t: Slot<'_>) -> Option<f64> {
     let (have, want) = (title_key(t.title), title_key(&base.title));
     if have.variant != want.variant {
@@ -214,8 +232,10 @@ pub(crate) fn file_is_track(base: &Identity, duration_ms: Option<u32>, t: Slot<'
         (Some(a), Some(b)) => Some(a.abs_diff(b) <= DURATION_SLACK_MS),
         _ => None,
     };
-    let fits = sim >= TITLE || (numbered && (sim >= NUMBERED_TITLE || close == Some(true)));
-    (fits && close != Some(false)).then_some(sim + if numbered { 1.0 } else { 0.0 })
+    let titled = sim >= TITLE;
+    let fits = titled || (numbered && (sim >= NUMBERED_TITLE || close == Some(true)));
+    let score = sim + if numbered { 1.0 } else { 0.0 } + if titled { 2.0 } else { 0.0 };
+    (fits && close != Some(false)).then_some(score)
 }
 
 impl Reference {
@@ -239,16 +259,54 @@ impl Reference {
         })?;
         let release = lib.get_release(release).ok()??;
         let tracks = lib.tracks_of_release_all(release.id).unwrap_or_default();
-        Some(Self { release, tracks })
+        let unwanted = lib.unwanted_of_release(release.id).unwrap_or_default();
+        Some(Self { release, tracks, unwanted })
     }
 
-    /// The track of the release a file is.
-    pub fn track_of(&self, base: &Identity, duration_ms: Option<u32>) -> Option<TrackId> {
-        self.tracks
+    /// What each file (`None`: not to be matched) is on the release: the
+    /// best pairs first, each track (and deleted song) taken once, so two
+    /// files never claim one place.
+    pub fn match_files(&self, files: &[Option<(&Identity, Option<u32>)>]) -> Vec<Option<OnRelease>> {
+        let slots: Vec<(Slot<'_>, OnRelease)> = self
+            .tracks
             .iter()
-            .filter_map(|t| Some((file_is_track(base, duration_ms, t.into())?, t.id)))
-            .max_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, id)| id)
+            .map(|t| (Slot::from(t), OnRelease::Track(t.id)))
+            .chain(self.unwanted.iter().map(|u| {
+                let slot = Slot { title: &u.title, disc_no: u.disc_no.max(1), track_no: u.track_no, duration_ms: u.duration_ms };
+                (slot, OnRelease::Unwanted)
+            }))
+            .collect();
+        let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+        for (i, f) in files.iter().enumerate() {
+            let Some((base, duration)) = f else { continue };
+            for (j, (slot, _)) in slots.iter().enumerate() {
+                if let Some(score) = file_is_track(base, *duration, *slot) {
+                    pairs.push((score, i, j));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        let mut out = vec![None; files.len()];
+        let mut taken = vec![false; slots.len()];
+        for (_, i, j) in pairs {
+            if out[i].is_some() || taken[j] {
+                continue;
+            }
+            taken[j] = true;
+            out[i] = Some(slots[j].1);
+        }
+        out
+    }
+
+    /// The first place after the album's tracks (its count, its last
+    /// line): where a file of the folder that is none of them goes, so a
+    /// bonus song of another edition follows the album instead of taking
+    /// the number its own edition gave it.
+    pub fn after(&self) -> (u32, u32) {
+        let disc = self.tracks.iter().map(|t| t.disc_no.max(1)).max().unwrap_or(1);
+        let count = if disc == 1 { self.release.total_tracks.unwrap_or(0) } else { 0 };
+        let last = self.tracks.iter().filter(|t| t.disc_no.max(1) == disc).map(|t| t.track_no).max().unwrap_or(0);
+        (disc, count.max(last) + 1)
     }
 
     /// Whether the folder is this release: its album title (exactly, or a
@@ -268,26 +326,52 @@ impl Reference {
     }
 
     /// A file of the release that is none of its known tracks: the release's
-    /// album fields, its own title and number.
-    pub fn identity(&self, base: &Identity) -> Identity {
-        let r = &self.release;
+    /// album fields, its own title, the place `place` (see [`Self::after`]).
+    pub fn identity(&self, base: &Identity, place: (u32, u32)) -> Identity {
         let mut id = base.clone();
-        id.album = Some(r.title.clone());
-        let line = r.artist_credit.display();
-        id.album_artist = Some(line.clone()).filter(|a| !a.is_empty());
-        if (id.artist_line.trim().is_empty() || id.artist_line == "Unknown Artist") && !line.is_empty() {
-            id.artist_line = line.clone();
-            id.artists = r.artist_credit.0.iter().map(|p| p.name.clone()).collect();
-        }
-        id.year = r.year.or(id.year);
-        id.release_type = r.release_type;
-        id.compilation = r.release_type == ReleaseType::Compilation;
-        id.release_mbid = r.mbid.clone().or(id.release_mbid);
-        id.release_group_mbid = r.release_group_mbid.clone().or(id.release_group_mbid);
-        id.track_total = r.total_tracks.or(id.track_total);
-        id.release_id = Some(r.id);
+        (id.disc_no, id.track_no) = place;
+        onto_release(&mut id, &self.release);
         id
     }
+}
+
+/// The album fields of `r` on a file's identity: it lands there.
+fn onto_release(id: &mut Identity, r: &Release) {
+    id.album = Some(r.title.clone());
+    let line = r.artist_credit.display();
+    id.album_artist = Some(line.clone()).filter(|a| !a.is_empty());
+    if (id.artist_line.trim().is_empty() || id.artist_line == "Unknown Artist") && !line.is_empty() {
+        id.artist_line = line.clone();
+        id.artists = r.artist_credit.0.iter().map(|p| p.name.clone()).collect();
+    }
+    id.year = r.year.or(id.year);
+    id.release_type = r.release_type;
+    id.compilation = r.release_type == ReleaseType::Compilation;
+    id.release_mbid = r.mbid.clone().or(id.release_mbid.take());
+    id.release_group_mbid = r.release_group_mbid.clone().or(id.release_group_mbid.take());
+    id.track_total = r.total_tracks.or(id.track_total);
+    id.release_id = Some(r.id);
+}
+
+/// A file of a «Хочу скачать» download that is a track of the album the
+/// download is for (found by its ids, a liked stream, «Подтверди»; not by
+/// the album's tracklist) keeps the track's place and lands on that album:
+/// a file never renumbers its album, nor takes the track to the album its
+/// own tags name. `None`: nothing to change.
+pub(crate) fn keep_place(lib: &Library, targets: &ImportTargets, track: &Track, id: &Identity) -> Option<Identity> {
+    let wished = targets
+        .release
+        .or_else(|| targets.tracks.iter().find_map(|t| lib.get_track(*t).ok().flatten()?.release_id))?;
+    if track.release_id != Some(wished) {
+        return None;
+    }
+    let release = lib.get_release(wished).ok()??;
+    let mut out = id.clone();
+    if track.track_no > 0 {
+        (out.disc_no, out.track_no) = (track.disc_no.max(1), track.track_no);
+    }
+    onto_release(&mut out, &release);
+    (out != *id).then_some(out)
 }
 
 fn track_count(r: &MbRelease) -> usize {
@@ -526,5 +610,101 @@ mod tests {
         // Another edition: the lengths are off.
         let far: Vec<(&Identity, Option<u32>)> = bases.iter().zip(OLIVER).map(|(b, (_, ms))| (b, Some(*ms + 20_000))).collect();
         assert!(assign(&album, &far).is_none());
+    }
+
+    /// «8 способов как бросить...»: five places of the wished album, the
+    /// fifth deleted by the user.
+    fn wished(lib: &Library) -> (Release, Vec<TrackId>) {
+        use nikgob_core::model::{ArtistCredit, Track};
+        let credit = ArtistCredit::single("Пошлая Молли", None);
+        let mut r = Release::new("8 способов как бросить...", credit.clone());
+        r.total_tracks = Some(5);
+        let release = lib.upsert_release(&r).unwrap();
+        let songs = [
+            ("Любимая песня твоей сестры", 188_000),
+            ("Даже моя бэйби не знает", 234_336),
+            ("Нон стоп", 213_786),
+            ("Ханнамонтана", 215_824),
+            ("Супермаркет", 214_256),
+        ];
+        let ids = songs
+            .iter()
+            .enumerate()
+            .map(|(i, (title, ms))| {
+                let mut t = Track::new(*title, credit.clone());
+                t.release_id = Some(release.id);
+                t.track_no = i as u32 + 1;
+                t.duration_ms = Some(*ms);
+                lib.upsert_track(&t).unwrap().id
+            })
+            .collect::<Vec<_>>();
+        lib.mark_track_deleted(ids[4], 1).unwrap();
+        (release, ids)
+    }
+
+    #[test]
+    fn a_folder_of_a_bigger_edition_takes_the_wished_albums_places() {
+        let lib = Library::open_in_memory().unwrap();
+        let (release, ids) = wished(&lib);
+        let targets = ImportTargets { release: Some(release.id), ..ImportTargets::default() };
+        let r = Reference::load(&lib, &targets).unwrap();
+        assert_eq!(r.unwanted.len(), 1);
+        // The folder numbers the songs its own way (an intro first): the
+        // album's «4» is its «5», and its «4» is as long as the album's «4».
+        let folder = [
+            ("Визитка", 1, 188_000),
+            ("Даже моя бэйби не знает", 3, 234_336),
+            ("Нон стоп", 4, 213_786),
+            ("Ханнамонтана", 5, 215_824),
+            ("Супермаркет", 6, 214_256),
+            ("Lin Ansty", 11, 152_790),
+        ];
+        let bases: Vec<Identity> = folder.iter().map(|(t, no, _)| file(t, *no, Some("Пошлая Молли"), Some("8 способов как бросить дрочить"))).collect();
+        let files: Vec<Option<(&Identity, Option<u32>)>> = bases.iter().zip(&folder).map(|(b, (_, _, ms))| Some((b, Some(*ms)))).collect();
+        let got = r.match_files(&files);
+        assert_eq!(
+            got,
+            [
+                Some(OnRelease::Track(ids[0])),
+                Some(OnRelease::Track(ids[1])),
+                Some(OnRelease::Track(ids[2])),
+                Some(OnRelease::Track(ids[3])),
+                Some(OnRelease::Unwanted),
+                None,
+            ],
+            "titles first, each place once, the deleted song not needed"
+        );
+        // The bonus song follows the album, not at its own «11».
+        assert_eq!(r.after(), (1, 6));
+        let bonus = r.identity(&bases[5], r.after());
+        assert_eq!((bonus.track_no, bonus.album.as_deref(), bonus.release_id), (6, Some("8 способов как бросить..."), Some(release.id)));
+    }
+
+    #[test]
+    fn two_files_never_claim_one_place() {
+        let lib = Library::open_in_memory().unwrap();
+        let (release, ids) = wished(&lib);
+        let r = Reference::load(&lib, &ImportTargets { release: Some(release.id), ..ImportTargets::default() }).unwrap();
+        let a = file("Любимая песня твоей сестры", 2, None, None);
+        let b = file("Визитка", 1, None, None);
+        let got = r.match_files(&[Some((&a, Some(188_000))), Some((&b, Some(188_000)))]);
+        assert_eq!(got, [Some(OnRelease::Track(ids[0])), None]);
+    }
+
+    #[test]
+    fn a_track_of_the_wished_album_keeps_its_place_whatever_its_file_says() {
+        let lib = Library::open_in_memory().unwrap();
+        let (release, ids) = wished(&lib);
+        let targets = ImportTargets { release: Some(release.id), ..ImportTargets::default() };
+        let track = lib.get_track(ids[1]).unwrap().unwrap();
+        // Found by its MusicBrainz id: the file says «3» of another album.
+        let base = file("Даже моя бэйби не знает", 3, Some("Пошлая Молли"), Some("8 способов как бросить дрочить"));
+        let kept = keep_place(&lib, &targets, &track, &base).unwrap();
+        assert_eq!((kept.track_no, kept.disc_no), (2, 1));
+        assert_eq!((kept.album.as_deref(), kept.release_id, kept.track_total), (Some("8 способов как бросить..."), Some(release.id), Some(5)));
+        assert_eq!(keep_place(&lib, &targets, &track, &kept), None, "nothing more to change");
+        // Another album's download: the file is left as it is.
+        let other = ImportTargets { release: Some(nikgob_core::model::ReleaseId::new()), ..ImportTargets::default() };
+        assert_eq!(keep_place(&lib, &other, &track, &base), None);
     }
 }

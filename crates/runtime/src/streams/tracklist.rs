@@ -17,12 +17,20 @@
 //!   shows them muted with ▶ and ↓, the cards say «1 из 15». Found is
 //!   kept only once every place the album counts has a line; an album
 //!   still short of its count is asked again like a miss.
+//! * Once per library (`wished_album_places_fixed.v1`, see
+//!   [`nikgob_library::Library::place_album_tracks`]): a «Хочу скачать»
+//!   album whose files came from several sources and brought their own
+//!   numbers is put back in the order of the album it is linked to in a
+//!   service, one album per [`EVERY`] before the pass; the files follow
+//!   (tags and names). The library is backed up before the first change;
+//!   an album whose tracklist could not be had leaves the mark unset, so
+//!   the next start asks again.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nikgob_core::model::{ReleaseId, UnixMs};
+use nikgob_core::model::{ReleaseId, TrackId, UnixMs};
 use nikgob_core::streaming::{EntityKind, SearchKind, Service, StreamAlbum, StreamError, StreamService};
 use nikgob_core::translit::same_translit;
 use nikgob_metadata::text::{album_key, artist_key};
@@ -48,6 +56,12 @@ pub(crate) struct TracklistMsg {
 pub(crate) struct TracklistState {
     asking: HashSet<ReleaseId>,
     last: Option<Instant>,
+    /// The one-time repair of wished albums' places: the albums left to
+    /// put in order (`None` before it started), the one asked now, and
+    /// whether one of them could not be done.
+    places: Option<Vec<ReleaseId>>,
+    placing: Option<ReleaseId>,
+    places_missed: bool,
 }
 
 fn cache_key(release: ReleaseId) -> String {
@@ -137,6 +151,18 @@ impl Worker {
         }
         // A linked album first.
         asks.sort_by_key(|(_, id)| id.is_none());
+        self.ask_tracklist(release, &r, asks);
+    }
+
+    /// Asks the services `asks` (each with the album's id there, if linked)
+    /// for the tracklist of `r`, in order; the answer comes as a
+    /// [`TracklistMsg`].
+    fn ask_tracklist(
+        &mut self,
+        release: ReleaseId,
+        r: &nikgob_core::model::Release,
+        asks: Vec<(Arc<dyn StreamService>, Option<String>)>,
+    ) {
         if asks.is_empty() || !self.streaming.tracklist.asking.insert(release) {
             return;
         }
@@ -159,6 +185,11 @@ impl Worker {
 
     pub(crate) fn tracklist_msg(&mut self, m: TracklistMsg) {
         self.streaming.tracklist.asking.remove(&m.release);
+        if self.streaming.tracklist.placing == Some(m.release) {
+            self.streaming.tracklist.placing = None;
+            self.places_found(m.release, m.result);
+            return;
+        }
         let now = nikgob_library::now_ms();
         let key = cache_key(m.release);
         match m.result {
@@ -218,6 +249,9 @@ impl Worker {
             return;
         }
         t.last = Some(Instant::now());
+        if self.places_tick() {
+            return;
+        }
         let releases = self.lib.releases(0, 100_000, nikgob_library::ReleaseSort::asc(Default::default())).unwrap_or_default();
         for r in releases {
             if r.local_tracks == 0 || r.release.total_tracks.is_some_and(|t| r.known_tracks >= t) {
@@ -227,6 +261,113 @@ impl Worker {
             if !self.streaming.tracklist.asking.is_empty() {
                 break;
             }
+        }
+    }
+}
+
+impl Worker {
+    /// The next step of the one-time repair of wished albums' places (see
+    /// the module docs). Returns whether it asked a service now.
+    fn places_tick(&mut self) -> bool {
+        let key = nikgob_library::PLACES_FROM_WISH_KEY;
+        if self.streaming.tracklist.placing.is_some() || self.lib.meta_value(key).ok().flatten().is_some() {
+            return false;
+        }
+        if self.streaming.tracklist.places.is_none() {
+            let found = self.lib.wished_albums_out_of_place().unwrap_or_default();
+            if !found.is_empty() {
+                log::info!("tracklist: {} wished albums are out of order", found.len());
+            }
+            self.streaming.tracklist.places = Some(found.into_iter().rev().collect());
+        }
+        loop {
+            let Some(release) = self.streaming.tracklist.places.as_mut().and_then(Vec::pop) else {
+                // All done (or none to do): once, unless one could not be had.
+                if !self.streaming.tracklist.places_missed {
+                    let _ = self.lib.set_meta_value(key, &nikgob_library::now_ms().to_string());
+                }
+                return false;
+            };
+            let Some(r) = self.lib.get_release(release).ok().flatten() else { continue };
+            // Only the album the wish is linked to says its order: a search
+            // could find another edition.
+            let linked = self.lib.external_ids(EntityKind::Album, *release.as_uuid()).unwrap_or_default();
+            let asks: Vec<(Arc<dyn StreamService>, Option<String>)> = [Service::Deezer, Service::Youtube, Service::Spotify]
+                .into_iter()
+                .filter_map(|kind| {
+                    let id = linked.iter().find(|l| l.service == kind)?.id.clone();
+                    Some((self.service(kind)?, Some(id)))
+                })
+                .collect();
+            if asks.is_empty() {
+                log::info!("tracklist: «{}» is linked to no service on, its places stay", r.title);
+                if !linked.is_empty() {
+                    // Its services are off now: asked again next start.
+                    self.streaming.tracklist.places_missed = true;
+                }
+                continue;
+            }
+            self.streaming.tracklist.placing = Some(release);
+            self.ask_tracklist(release, &r, asks);
+            if self.streaming.tracklist.asking.contains(&release) {
+                return true;
+            }
+            self.streaming.tracklist.placing = None;
+        }
+    }
+
+    /// The tracklist of a wished album out of order came: its tracks take
+    /// their places, their files follow.
+    fn places_found(&mut self, release: ReleaseId, result: Result<Option<StreamAlbum>, StreamError>) {
+        let album = match result {
+            Ok(Some(a)) => a,
+            Ok(None) => {
+                log::info!("tracklist: places of {release}: its album has no tracks there now");
+                self.streaming.tracklist.places_missed = true;
+                return;
+            }
+            Err(e) => {
+                log::info!("tracklist: places of {release}: {e}");
+                self.streaming.tracklist.places_missed = true;
+                return;
+            }
+        };
+        if let Err(e) = self.lib.backup_before(nikgob_library::PLACES_FROM_WISH_KEY) {
+            log::warn!("tracklist: no backup before putting albums in order: {e}");
+            self.streaming.tracklist.places_missed = true;
+            return;
+        }
+        let moved = match self.lib.place_album_tracks(release, &album) {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("tracklist: places of {release}: {e}");
+                self.streaming.tracklist.places_missed = true;
+                return;
+            }
+        };
+        log::info!("album {release}: {} tracks put at their places on {}", moved.len(), album.id);
+        // Every file of the album then says its place, the count and the
+        // album (one of another edition kept its own), named so.
+        let files: Vec<TrackId> = if moved.is_empty() {
+            Vec::new()
+        } else {
+            self.lib.tracks_of_release(release).unwrap_or_default().into_iter().filter(|t| t.has_local).map(|t| t.id).collect()
+        };
+        if let Some(svc) = &self.import
+            && !files.is_empty()
+        {
+            let importer = svc.importer().clone();
+            let tx = svc.internal();
+            svc.spawn_blocking(move || {
+                for t in files {
+                    let r = importer.place_track_file(t).map(|_| ()).map_err(|e| e.to_string());
+                    let _ = tx.send(crate::import::Internal::Placed(t, r));
+                }
+            });
+        }
+        self.load_library();
+        if self.state.read().release.as_ref().is_some_and(|r| r.card.id == release) {
+            self.load_release(release);
         }
     }
 }

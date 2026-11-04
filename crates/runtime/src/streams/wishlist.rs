@@ -765,6 +765,77 @@ impl Worker {
         }
     }
 
+    /// The user deletes `tracks` (to the Trash, or for good): the items of
+    /// each of them that are not done are dismissed (a deleted song is
+    /// not downloaded again). Returns the albums of their album items, to
+    /// [`Self::wish_settle_albums`] once the tracks are gone.
+    pub(crate) fn wish_drop_deleted(&mut self, tracks: &[TrackId]) -> Vec<ReleaseId> {
+        let mut albums: Vec<ReleaseId> = Vec::new();
+        for &t in tracks {
+            for i in self.lib.wishlist_for_track(t).unwrap_or_default() {
+                if i.scope == WishlistScope::Track && !matches!(i.status, WishlistStatus::Done | WishlistStatus::Dismissed) {
+                    self.streaming.wish.cands.remove(&i.id);
+                    self.wish_line_drop(i.id);
+                    self.set_item(i.id, |i| {
+                        i.status = WishlistStatus::Dismissed;
+                        i.next_try_at = None;
+                    });
+                }
+            }
+            let release = self.lib.get_track(t).ok().flatten().and_then(|t| t.release_id);
+            if let Some(r) = release.filter(|r| !albums.contains(r)) {
+                albums.push(r);
+            }
+        }
+        albums
+    }
+
+    /// Tracks of `releases` were deleted: an album item that waits for
+    /// more of its album (not one on its way) is «Скачано» once the rest is
+    /// there (the deleted songs count as not needed), and goes when none
+    /// of its album is wanted any more.
+    pub(crate) fn wish_settle_albums(&mut self, releases: &[ReleaseId]) {
+        let mut changed = false;
+        for &r in releases {
+            if self.lib.get_release(r).ok().flatten().is_none() {
+                continue;
+            }
+            for i in self.lib.wishlist_for_release(r).unwrap_or_default() {
+                if i.scope != WishlistScope::Album
+                    || matches!(
+                        i.status,
+                        WishlistStatus::Dismissed | WishlistStatus::Searching | WishlistStatus::Downloading | WishlistStatus::Confirm
+                    )
+                {
+                    continue;
+                }
+                let Ok((have, all)) = nikgob_import::release_files(&self.lib, r) else { continue };
+                let status = match (have, all) {
+                    (0, 0) => WishlistStatus::Dismissed,
+                    (have, all) if have == all => WishlistStatus::Done,
+                    _ => continue,
+                };
+                if status == i.status && (status != WishlistStatus::Done || i.note.as_deref() == Some("Скачано")) {
+                    continue;
+                }
+                self.streaming.wish.cands.remove(&i.id);
+                self.streaming.wish.later.remove(&i.id);
+                self.wish_line_drop(i.id);
+                self.set_item(i.id, |i| {
+                    i.status = status;
+                    i.next_try_at = None;
+                    if status == WishlistStatus::Done {
+                        i.note = Some("Скачано".into());
+                    }
+                });
+                changed = true;
+            }
+        }
+        if changed {
+            self.publish_wishlist();
+        }
+    }
+
     /// The tracks an item's files should become (an album's tracks outside
     /// the library too: the ones «Хочу скачать» made for it).
     fn targets_of(&self, item: &WishlistItem) -> Vec<TrackId> {
@@ -860,7 +931,8 @@ impl Worker {
             isrc: track.as_ref().and_then(|t| t.isrc.clone()).or_else(|| item.isrc.clone()),
             album_tracks: release.as_ref().and_then(|r| r.total_tracks).unwrap_or(0),
             // What of the album came already (a part of it from a source
-            // that then turned us away): a fetch leaves it out.
+            // that then turned us away), and the songs the user deleted
+            // from it: a fetch leaves them out.
             got: match (item.scope, &release) {
                 (WishlistScope::Album, Some(r)) => self
                     .lib
@@ -869,6 +941,7 @@ impl Worker {
                     .into_iter()
                     .filter(|t| t.has_local)
                     .map(|t| t.title)
+                    .chain(self.lib.unwanted_of_release(r.id).unwrap_or_default().into_iter().map(|u| u.title))
                     .collect(),
                 _ => Vec::new(),
             },

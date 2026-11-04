@@ -794,7 +794,8 @@ impl Library {
     /// track is on another album the library has files of (the deluxe
     /// edition) gets one here, which the stream moves to (docs/stage4.md
     /// §12.13). An album id linked to another release with tracks is left
-    /// alone; one linked to an empty release is taken over.
+    /// alone; one linked to an empty release is taken over. A song the
+    /// user deleted from the album (`unwanted`) gets no line again.
     /// Returns how many tracks were added.
     pub fn adopt_stream_album(&self, release: ReleaseId, album: &StreamAlbum) -> Result<usize> {
         self.write(|tx| {
@@ -842,6 +843,10 @@ impl Library {
                 t.album = Some(reference.clone());
                 let no = t.track_no.unwrap_or(i as u32 + 1);
                 t.track_no = Some(no);
+                // A song the user deleted from the album stays out of it.
+                if crate::unwanted::unwanted_stream_in(tx, &rid, &t, (t.disc_no.unwrap_or(1).max(1), no))? {
+                    continue;
+                }
                 // The track at its place, whatever its title («滑落亭» of
                 // the service is the file «KATSURAKUTEI»).
                 let place = same::real_place(tx, (rid.clone(), i64::from(t.disc_no.unwrap_or(1).max(1)), i64::from(no)))?;

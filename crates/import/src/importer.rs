@@ -27,7 +27,7 @@ use tokio::sync::{Semaphore, broadcast, mpsc};
 use crate::analysis::{AudioAnalysis, analyze_file};
 use crate::config::ImportConfig;
 use crate::cover::{ProcessedCover, derive_visuals, process_cover};
-use crate::album::{Evidence, Reference, lookup_album, names_of};
+use crate::album::{Evidence, OnRelease, Reference, lookup_album, names_of};
 use crate::confirm::{Choice, Payload, TagView};
 use crate::decide::{Decision, ImportTargets, Incoming, decide, find_existing, stream_doubt};
 use crate::encode::{EncodeOptions, Encoder, RopusEncoder};
@@ -573,26 +573,57 @@ impl Importer {
         };
         let mut ids: Vec<Option<Identity>> = vec![None; read.len()];
         let mut settled = false;
-        // The tracks the job is for: by number, title and length.
+        let mut parked = Vec::new();
+        // The tracks the job is for: by number, title and length, each
+        // track for one file.
         if let Some(r) = reference {
-            let mut matched = 0;
+            let files: Vec<Option<(&Identity, Option<u32>)>> =
+                read.iter().map(|p| (!p.known).then(|| (&p.base, p.duration_ms()))).collect();
+            let found = r.match_files(&files);
+            let matched = found.iter().flatten().count();
+            let mut unwanted = Vec::new();
             for (i, p) in read.iter_mut().enumerate() {
-                if p.known {
-                    continue;
-                }
-                if let Some(t) = r.track_of(&p.base, p.duration_ms()) {
-                    p.analyzed.force_track = Some(t);
-                    p.known = true;
-                    ids[i] = identity_of_track(&inner.library, t, &p.base);
-                    matched += 1;
+                match found[i] {
+                    Some(OnRelease::Track(t)) => {
+                        p.analyzed.force_track = Some(t);
+                        p.known = true;
+                        ids[i] = identity_of_track(&inner.library, t, &p.base);
+                    }
+                    Some(OnRelease::Unwanted) => unwanted.push(i),
+                    None => {}
                 }
             }
             if r.fits(&ev, matched) {
-                // The rest of the folder is more of the release.
-                for (i, p) in read.iter().enumerate() {
-                    if ids[i].is_none() && !p.known {
-                        ids[i] = Some(r.identity(&p.base));
+                // A song the user deleted from the album is not needed.
+                for i in unwanted.into_iter().rev() {
+                    let p = read.remove(i);
+                    ids.remove(i);
+                    log::info!("import: {} is a song deleted from «{}», left out", p.analyzed.path.display(), r.release.title);
+                    lock(&inner.active).remove(&p.analyzed.path);
+                    parked.push(FileOutcome::Skipped);
+                }
+                // The rest of the folder is more of the release, and so is
+                // a track of it that has no place yet: after its tracks, in
+                // the folder's order, whatever their own numbers.
+                let unplaced = |i: usize| match &ids[i] {
+                    None => !read[i].known,
+                    Some(id) => read[i].analyzed.force_track.is_some() && id.track_no == 0,
+                };
+                let mut rest: Vec<usize> = (0..read.len()).filter(|&i| unplaced(i)).collect();
+                rest.sort_by(|&a, &b| {
+                    let (x, y) = (&read[a].base, &read[b].base);
+                    (x.disc_no, x.track_no == 0, x.track_no)
+                        .cmp(&(y.disc_no, y.track_no == 0, y.track_no))
+                        .then_with(|| read[a].analyzed.path.cmp(&read[b].analyzed.path))
+                });
+                let (disc, mut next) = r.after();
+                for i in rest {
+                    if let Some(id) = ids[i].as_mut() {
+                        (id.disc_no, id.track_no) = (disc, next);
+                    } else {
+                        ids[i] = Some(r.identity(&read[i].base, (disc, next)));
                     }
+                    next += 1;
                 }
                 settled = true;
             }
@@ -602,7 +633,6 @@ impl Importer {
                 .filter(|&i| ids[i].is_none() && !read[i].known && !read[i].fully_tagged)
                 .collect()
         };
-        let mut parked = Vec::new();
         if !settled && ev.is_album() {
             // One album: what the folder says fills what its tags lack, and
             // MusicBrainz is asked for the release as a whole.
@@ -903,9 +933,6 @@ impl Importer {
         let path = analyzed.path.clone();
         ctx.stage(&path, Stage::Deciding);
 
-        let layout = layout_input(&identity);
-        let album_dir = layout.album_dir(&inner.cfg.library_dir);
-
         // Early decision: a worse duplicate costs nothing more than this.
         let early = {
             let (i, a, id) = (inner.clone(), analyzed.clone(), identity.clone());
@@ -915,6 +942,17 @@ impl Importer {
             let kept = e.track.id;
             return Ok(self.report_duplicate(ctx, &analyzed, kept));
         }
+        // A track of the wished album: its album and place (the commit
+        // decides again).
+        let identity = match &early {
+            Decision::Upgrade(e) | Decision::AddSource(e) => {
+                crate::album::keep_place(&inner.library, &analyzed.targets, &e.track, &identity).unwrap_or(identity)
+            }
+            _ => identity,
+        };
+
+        let layout = layout_input(&identity);
+        let album_dir = layout.album_dir(&inner.cfg.library_dir);
 
         let cover = self.prepare_cover(&analyzed, &identity, &album_dir).await;
 
@@ -1592,6 +1630,16 @@ fn commit_locked(
         Decision::Duplicate(e) => return Ok(Committed::Duplicate { kept: e.track.id }),
         Decision::New => None,
         Decision::Upgrade(e) | Decision::AddSource(e) => Some(e),
+    };
+    // A track of the wished album keeps its place there (named and tagged
+    // so), whatever number the file brought.
+    let kept_place;
+    let id = match existing.and_then(|e| crate::album::keep_place(lib, &a.targets, &e.track, id)) {
+        Some(placed) => {
+            kept_place = placed;
+            &kept_place
+        }
+        None => id,
     };
     let track_id = match existing {
         Some(e) => e.track.id,

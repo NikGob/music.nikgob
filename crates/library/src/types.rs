@@ -150,8 +150,15 @@ pub struct ReleaseListing {
 }
 
 impl ReleaseListing {
-    pub(crate) fn new(rows: Vec<TrackRow>, total_tracks: Option<u32>) -> Self {
+    /// `unwanted`: the places of songs the user deleted from the album
+    /// (`crate::unwanted`); within its count and free, they are no holes.
+    pub(crate) fn new(rows: Vec<TrackRow>, total_tracks: Option<u32>, unwanted: &[(u32, u32)]) -> Self {
         let local = rows.iter().filter(|r| r.has_local).count() as u32;
+        let count = total_tracks.unwrap_or(0);
+        let placed: std::collections::HashSet<(u32, u32)> = rows.iter().map(|r| (r.disc_no.max(1), r.track_no)).collect();
+        let gone: std::collections::HashSet<(u32, u32)> =
+            unwanted.iter().copied().filter(|(d, n)| (1..=count).contains(n) && !placed.contains(&(*d, *n))).collect();
+        let total_tracks = total_tracks.map(|t| t.saturating_sub(gone.len() as u32));
         let progress = ReleaseProgress::new(local, local, rows.len() as u32, total_tracks);
         let holes = progress.total as usize - rows.len();
         let discs: std::collections::BTreeSet<u32> = rows.iter().map(|r| r.disc_no.max(1)).collect();
@@ -160,7 +167,11 @@ impl ReleaseListing {
         let mut numbered: Vec<u32> = Vec::new();
         if discs.len() <= 1 {
             let taken: std::collections::HashSet<u32> = rows.iter().map(|r| r.track_no).collect();
-            numbered = (1..=progress.total).filter(|n| !taken.contains(n)).take(holes).collect();
+            let skipped: std::collections::HashSet<u32> = gone.iter().map(|(_, n)| *n).collect();
+            numbered = (1..=progress.total.max(count))
+                .filter(|n| !taken.contains(n) && !skipped.contains(n))
+                .take(holes)
+                .collect();
         }
         let mut entries = Vec::with_capacity(progress.total as usize);
         let mut next = numbered.iter().copied().peekable();
