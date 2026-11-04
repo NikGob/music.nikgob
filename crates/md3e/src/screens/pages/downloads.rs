@@ -2,15 +2,18 @@
 //! "Подтверди" queue, seeding and history.
 
 use egui::{Rect, Stroke, Ui, vec2};
-use nikgob_view::{Command, DownloadsTab, Job, Route, SeedRow, ViewState};
+use nikgob_view::{
+    Command, DownloadsTab, Job, Route, SeedRow, SharingView, SlskSharingView, UploadRow, UploadRowState, ViewState,
+};
 
-use super::{PageState, connected, fmt_size, widgets};
+use super::{PageState, SettingId, connected, fmt_size, widgets};
 use crate::{
     Icon, Theme, TypeRole,
     components::{
-        Button, Card, IconButton, LoadingIndicator, ListItem, Radii, Size, Style, badge, paint,
-        wavy_progress,
+        Button, Card, ConnectedGroup, IconButton, LoadingIndicator, ListItem, Radii, Size, Style, Switch, badge,
+        paint, segmented_list, wavy_progress,
     },
+    screens::common::plural,
     tokens::shape,
 };
 
@@ -197,24 +200,96 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     }
 }
 
-/// "Раздача": uploaded vs the limit, the cleanup policy, one row per torrent.
-fn seeding(ui: &mut Ui, state: &ViewState, pages: &mut PageState, _out: &mut Vec<Command>) -> Option<Route> {
+/// "Раздача": how much the network is used and how much was given away,
+/// then torrents and Soulseek apart, each with its policy (editable here or
+/// one click from its Settings row) and what it gives away.
+fn seeding(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
+    share_summary(ui, &state.downloads.sharing);
+    ui.add_space(24.0);
+    torrent_share(ui, state, pages);
+    ui.add_space(24.0);
+    slsk_share(ui, &state.downloads.sharing.slsk, pages, out);
+    None
+}
+
+/// The top card: speeds now and what was given away, summed and split.
+fn share_summary(ui: &mut Ui, sh: &SharingView) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let split = |t: u64, k: u64, f: fn(u64) -> String| format!("торренты {} · Soulseek {}", f(t), f(k));
+    let tiles = [
+        ("Отдача", fmt_rate(sh.up_bps()), split(sh.torrent_up_bps, sh.slsk_up_bps, fmt_rate)),
+        ("Загрузка", fmt_rate(sh.down_bps()), split(sh.torrent_down_bps, sh.slsk_down_bps, fmt_rate)),
+        ("Отдано сегодня", fmt_size(sh.today()), split(sh.torrent_today, sh.slsk_today, fmt_size)),
+        ("Отдано всего", fmt_size(sh.total()), split(sh.torrent_total, sh.slsk_total, fmt_size)),
+    ];
+    Card::filled().id_salt("share-summary").show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        // Four across, or two by two when narrow.
+        let per_row = if ui.available_width() < 640.0 { 2 } else { 4 };
+        for (r, row) in tiles.chunks(per_row).enumerate() {
+            if r > 0 {
+                ui.add_space(16.0);
+            }
+            ui.columns(per_row, |cols| {
+                for (col, (caption, value, parts)) in cols.iter_mut().zip(row) {
+                    col.spacing_mut().item_spacing.y = 2.0;
+                    col.label(TypeRole::LabelLarge.style().rich(*caption, s.on_surface_variant));
+                    col.label(TypeRole::HeadlineSmall.style().rich(value.as_str(), s.on_surface));
+                    col.add(egui::Label::new(TypeRole::BodySmall.style().rich(parts.as_str(), s.on_surface_variant)).wrap());
+                }
+            });
+        }
+        if sh.seeding_disk_bytes > 0 {
+            ui.add_space(12.0);
+            ui.label(TypeRole::BodyMedium.style().rich(
+                format!("Раздачи занимают на диске {}", fmt_size(sh.seeding_disk_bytes)),
+                s.on_surface_variant,
+            ));
+        }
+    });
+}
+
+/// A section title.
+fn section(ui: &mut Ui, title: &str) {
+    let s = Theme::get(ui.ctx()).scheme;
+    ui.label(TypeRole::TitleLarge.style().rich(title, s.on_surface));
+    ui.add_space(8.0);
+}
+
+/// A short line in a section (nothing there, or what is shared).
+fn note(ui: &mut Ui, text: &str) {
+    let s = Theme::get(ui.ctx()).scheme;
+    ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich(text, s.on_surface_variant)).wrap());
+}
+
+/// Policy rows: each opens its row in Settings.
+fn policy_rows(ui: &mut Ui, salt: &str, rows: &[(&str, String, SettingId)], pages: &mut PageState) {
+    let outs = segmented_list(ui, rows.len(), |i| {
+        let (title, value, _) = &rows[i];
+        ListItem::new(*title).trailing_text(value.as_str()).id_salt((salt, i))
+    });
+    for (o, (_, _, id)) in outs.iter().zip(rows) {
+        if o.response.clicked() {
+            pages.open_setting(*id);
+        }
+    }
+}
+
+/// «Торренты»: the policy, what the held torrents uploaded against the cap,
+/// and a row per torrent.
+fn torrent_share(ui: &mut Ui, state: &ViewState, pages: &mut PageState) {
     let s = Theme::get(ui.ctx()).scheme;
     let d = &state.downloads;
     let p = &state.prefs;
-    let limit = u64::from(p.seed_limit_gb) * (1 << 30);
-
-    Card::filled().id_salt("seed-header").show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        if p.no_seed {
-            ui.label(TypeRole::TitleMedium.style().rich("Раздача выключена", s.on_surface));
-            ui.label(TypeRole::BodySmall.style().rich(
-                "Скачанное сразу перестаёт раздаваться (Настройки → Источники → Торренты).",
-                s.on_surface_variant,
-            ));
-        } else {
+    section(ui, "Торренты");
+    if p.no_seed {
+        policy_rows(ui, "seed-off", &[("Раздача выключена", "включить".to_owned(), SettingId::NoSeed)], pages);
+    } else {
+        let limit = u64::from(p.seed_limit_gb) * (1 << 30);
+        Card::filled().id_salt("seed-header").show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(TypeRole::TitleMedium.style().rich("Отдано", s.on_surface));
+                ui.label(TypeRole::TitleMedium.style().rich("Отдано раздачами", s.on_surface));
                 ui.label(TypeRole::TitleMedium.style().rich(fmt_size(d.seeded_bytes), s.primary));
                 ui.label(TypeRole::BodyMedium.style().rich(
                     if limit > 0 { format!("из лимита {} ГБ", p.seed_limit_gb) } else { "без лимита".to_owned() },
@@ -231,14 +306,7 @@ fn seeding(ui: &mut Ui, state: &ViewState, pages: &mut PageState, _out: &mut Vec
                     paint::container(ui.painter(), fill, Radii::all(shape::FULL), s.primary, Stroke::NONE);
                 }
             }
-            ui.add_space(4.0);
-            ui.label(TypeRole::BodySmall.style().rich(
-                format!("Раздаю до {} дн., потом чистка. Раздач: {}.", p.seed_days, d.seeding.len()),
-                s.on_surface_variant,
-            ));
-        }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
+            ui.add_space(8.0);
             if ui
                 .add(
                     Button::new("Очистить сейчас")
@@ -251,40 +319,171 @@ fn seeding(ui: &mut Ui, state: &ViewState, pages: &mut PageState, _out: &mut Vec
             {
                 pages.confirm_clean = true;
             }
-            if ui
-                .add(Button::new("Политика раздачи").style(Style::Text).icon(Icon::Settings).id_salt("seed-policy"))
-                .clicked()
-            {
-                pages.open_setting(super::SettingId::NoSeed);
-            }
         });
-    });
+        ui.add_space(8.0);
+        policy_rows(
+            ui,
+            "seed-policy",
+            &[
+                ("Раздавать до ratio", ratio_target(p.seed_ratio), SettingId::SeedRatio),
+                ("Срок раздачи", format!("{} дн. после скачивания", p.seed_days), SettingId::SeedDays),
+                ("Лимит на все раздачи", if limit > 0 { format!("{} ГБ", p.seed_limit_gb) } else { "без лимита".to_owned() }, SettingId::SeedLimit),
+                ("Скорость отдачи", super::settings::fmt_speed(p.upload_limit_kbps), SettingId::UploadLimit),
+            ],
+            pages,
+        );
+    }
     ui.add_space(12.0);
-
     if d.seeding.is_empty() {
-        widgets::empty_state(ui, Icon::CloudDownload, "Ничего не раздаётся", "Скачанные торренты появятся здесь.", None);
+        note(ui, "Сейчас ничего не раздаётся. Скачанные торренты раздаются здесь, пока не сработает политика.");
+        return;
     }
-    for r in &d.seeding {
-        seed_row(ui, r);
-    }
-    None
+    let _ = segmented_list(ui, d.seeding.len(), |i| seed_row(&d.seeding[i], p.seed_ratio));
 }
 
-fn seed_row(ui: &mut Ui, r: &SeedRow) {
-    let ratio = if r.downloaded_bytes > 0 {
-        format!("ratio {:.2}", r.uploaded_bytes as f64 / r.downloaded_bytes as f64)
-    } else {
-        "ratio —".to_owned()
-    };
-    let mut sub = format!("↑ {} · ↓ {} · {ratio}", fmt_size(r.uploaded_bytes), fmt_size(r.downloaded_bytes));
-    if let Some(e) = &r.expires {
-        sub.push_str(&format!(" · {e}"));
+/// "до 2.0" / "без лимита" (the ratio slider's own words).
+fn ratio_target(r: f32) -> String {
+    if r < 0.05 { "без лимита".to_owned() } else { format!("{r:.1}") }
+}
+
+/// What one torrent does: speed and peers now, what it gave away against
+/// the ratio it stops at, its size and when it is cleaned up.
+fn seed_line(r: &SeedRow, seed_ratio: f32) -> String {
+    let mut parts = Vec::new();
+    if r.up_bps > 0 {
+        parts.push(format!("отдаёт {}", fmt_rate(r.up_bps)));
     }
+    parts.push(format!("{} {}", r.peers, plural(u64::from(r.peers), "пир", "пира", "пиров")));
+    let ratio = if r.size_bytes > 0 { r.uploaded_bytes as f64 / r.size_bytes as f64 } else { 0.0 };
+    let target = if seed_ratio < 0.05 { String::new() } else { format!(" из {seed_ratio:.1}") };
+    parts.push(format!("отдано {} · ratio {ratio:.2}{target}", fmt_size(r.uploaded_bytes)));
+    parts.push(fmt_size(r.size_bytes));
+    if let Some(e) = &r.expires {
+        parts.push(e.clone());
+    }
+    parts.join(" · ")
+}
+
+fn seed_row(r: &SeedRow, seed_ratio: f32) -> ListItem<'static> {
     ListItem::new(&r.title)
-        .supporting(sub)
+        .supporting(seed_line(r, seed_ratio))
         .leading_icon(Icon::CloudDownload)
         .id_salt(("seed", r.id))
-        .show(ui);
+}
+
+/// «Soulseek»: what is shared, the switch, limit and slots, and the uploads.
+fn slsk_share(ui: &mut Ui, k: &SlskSharingView, pages: &mut PageState, out: &mut Vec<Command>) {
+    section(ui, "Soulseek");
+    if !k.configured {
+        policy_rows(ui, "slsk-none", &[("Soulseek не подключён", "настроить".to_owned(), SettingId::Soulseek)], pages);
+        return;
+    }
+    // The switch and the slots are drawn inside the rows; what they pick
+    // comes out after.
+    let (share_on, slots_picked) = (std::cell::Cell::new(k.share), std::cell::Cell::new(None::<u32>));
+    let labels = ["1", "2", "3", "4", "5"];
+    let (share, slots, labels) = (&share_on, &slots_picked, &labels);
+    let outs = segmented_list(ui, 3, |i| match i {
+        0 => ListItem::new("Раздавать библиотеку").id_salt("share-slsk-on").trailing(move |ui| {
+            let mut on = share.get();
+            ui.add(Switch::new(&mut on).id_salt("share-slsk-switch"));
+            share.set(on);
+        }),
+        1 => ListItem::new("Скорость отдачи")
+            .trailing_text(super::settings::fmt_speed(k.upload_limit_kbps))
+            .id_salt("share-slsk-speed"),
+        _ => ListItem::new("Отдач одновременно").id_salt("share-slsk-slots").trailing(move |ui| {
+            // Five buttons of 48 and their 2 dp gaps, at the row's end.
+            let at = k.upload_slots.saturating_sub(1) as usize;
+            ui.allocate_ui_with_layout(vec2(5.0 * 48.0 + 8.0, 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                if let Some(i) = ConnectedGroup::new("share-slsk-slots-group", labels).equal_width(48.0).show(ui, at) {
+                    slots.set(Some(i as u32 + 1));
+                }
+            });
+        }),
+    });
+    if share.get() != k.share {
+        out.push(Command::SetSoulseekShare { share: share.get(), upload_limit_kbps: k.upload_limit_kbps });
+    }
+    if let Some(n) = slots.get()
+        && n != k.upload_slots
+    {
+        out.push(Command::SetSoulseekSlots(n));
+    }
+    if outs.get(1).is_some_and(|o| o.response.clicked()) {
+        pages.open_setting(SettingId::SoulseekUpload);
+    }
+    ui.add_space(12.0);
+    if !k.share {
+        note(ui, "Библиотека не раздаётся: другие не могут у тебя ничего скачать.");
+        return;
+    }
+    if !k.running {
+        note(ui, "Soulseek не запущен: раздача начнётся, когда он подключится.");
+        return;
+    }
+    note(ui, &shared_line(k));
+    ui.add_space(12.0);
+    let (now, done): (Vec<&UploadRow>, Vec<&UploadRow>) =
+        k.uploads.iter().partition(|u| matches!(u.state, UploadRowState::Sending | UploadRowState::Queued));
+    if now.is_empty() && done.is_empty() {
+        note(ui, "Пока никто ничего не скачивал.");
+        return;
+    }
+    for (title, rows, salt) in [("Отдаётся сейчас", &now, "up-now"), ("Отдано недавно", &done, "up-done")] {
+        if rows.is_empty() {
+            continue;
+        }
+        let s = Theme::get(ui.ctx()).scheme;
+        ui.label(TypeRole::TitleSmall.style().rich(title, s.on_surface_variant));
+        ui.add_space(4.0);
+        let _ = segmented_list(ui, rows.len(), |i| {
+            let u = rows[i];
+            ListItem::new(&u.file).supporting(upload_line(u)).leading_icon(Icon::Person).id_salt((salt, u.id))
+        });
+        ui.add_space(12.0);
+    }
+}
+
+/// What Soulseek shares, in one line.
+fn shared_line(k: &SlskSharingView) -> String {
+    let files = if k.files == 0 {
+        "список файлов ещё собирается".to_owned()
+    } else {
+        format!(
+            "{} {} в {} {}",
+            k.files,
+            plural(u64::from(k.files), "файл", "файла", "файлов"),
+            k.folders,
+            if k.folders % 10 == 1 && k.folders % 100 != 11 { "папке" } else { "папках" },
+        )
+    };
+    if k.remote {
+        format!("Раздаёт утилита nikgob-slsk на другом компьютере: {files}.")
+    } else {
+        format!("Раздаются папки Music и Downloads библиотеки — песни и их обложки: {files}.")
+    }
+}
+
+/// Who takes the file and how far it is.
+fn upload_line(u: &UploadRow) -> String {
+    match u.state {
+        UploadRowState::Queued => format!("{} · в очереди · {}", u.user, fmt_size(u.size)),
+        UploadRowState::Sending => format!(
+            "{} · {} из {} · {}",
+            u.user,
+            fmt_size(u.sent),
+            fmt_size(u.size),
+            fmt_rate(u.bytes_per_sec)
+        ),
+        UploadRowState::Done => format!("{} · {} · {}", u.user, fmt_size(u.size), fmt_rate(u.bytes_per_sec)),
+        UploadRowState::Failed => format!("{} · прервано на {} из {}", u.user, fmt_size(u.sent), fmt_size(u.size)),
+    }
+}
+
+/// Bytes per second as the page says it ("0 Б/с", "512 КБ/с", "1.2 МБ/с").
+fn fmt_rate(bps: u64) -> String {
+    format!("{}/с", fmt_size(bps))
 }
 
 fn job(ui: &mut Ui, j: &Job, out: &mut Vec<Command>, active: bool) {
@@ -342,4 +541,77 @@ fn job(ui: &mut Ui, j: &Job, out: &mut Vec<Command>, active: bool) {
         }
     });
     ui.add_space(12.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn upload(state: UploadRowState) -> UploadRow {
+        UploadRow {
+            id: 1,
+            user: "peer".into(),
+            file: "01 Song.flac".into(),
+            size: 30 * 1024 * 1024,
+            sent: 3 * 1024 * 1024,
+            bytes_per_sec: 512 * 1024,
+            state,
+            ended_at: 0,
+        }
+    }
+
+    #[test]
+    fn rates_read_per_second() {
+        assert_eq!(fmt_rate(0), "0 Б/с");
+        assert_eq!(fmt_rate(512 * 1024), "512 КБ/с");
+        assert_eq!(fmt_rate(1536 * 1024), "1.5 МБ/с");
+    }
+
+    #[test]
+    fn ratio_target_says_no_limit_at_zero() {
+        assert_eq!(ratio_target(0.0), "без лимита");
+        assert_eq!(ratio_target(2.0), "2.0");
+    }
+
+    #[test]
+    fn seed_line_tells_speed_peers_ratio_and_cleanup() {
+        let r = SeedRow {
+            id: 1,
+            title: "Album".into(),
+            uploaded_bytes: 512 * 1024 * 1024,
+            downloaded_bytes: 1024 * 1024 * 1024,
+            expires: Some("чистка через 3 дн.".into()),
+            up_bps: 100 * 1024,
+            down_bps: 0,
+            peers: 2,
+            size_bytes: 1024 * 1024 * 1024,
+        };
+        assert_eq!(
+            seed_line(&r, 2.0),
+            "отдаёт 100 КБ/с · 2 пира · отдано 512 МБ · ratio 0.50 из 2.0 · 1.0 ГБ · чистка через 3 дн."
+        );
+        let idle = SeedRow { up_bps: 0, peers: 0, expires: None, size_bytes: 0, ..r };
+        assert_eq!(seed_line(&idle, 0.0), "0 пиров · отдано 512 МБ · ratio 0.00 · 0 Б");
+    }
+
+    #[test]
+    fn shared_line_counts_files_and_folders() {
+        let k = SlskSharingView { files: 4812, folders: 391, ..Default::default() };
+        assert_eq!(
+            shared_line(&k),
+            "Раздаются папки Music и Downloads библиотеки — песни и их обложки: 4812 файлов в 391 папке."
+        );
+        let k = SlskSharingView { files: 2, folders: 12, remote: true, ..Default::default() };
+        assert_eq!(shared_line(&k), "Раздаёт утилита nikgob-slsk на другом компьютере: 2 файла в 12 папках.");
+        let k = SlskSharingView::default();
+        assert!(shared_line(&k).ends_with("список файлов ещё собирается."));
+    }
+
+    #[test]
+    fn upload_lines_follow_the_state() {
+        assert_eq!(upload_line(&upload(UploadRowState::Queued)), "peer · в очереди · 30.0 МБ");
+        assert_eq!(upload_line(&upload(UploadRowState::Sending)), "peer · 3.0 МБ из 30.0 МБ · 512 КБ/с");
+        assert_eq!(upload_line(&upload(UploadRowState::Done)), "peer · 30.0 МБ · 512 КБ/с");
+        assert_eq!(upload_line(&upload(UploadRowState::Failed)), "peer · прервано на 3.0 МБ из 30.0 МБ");
+    }
 }

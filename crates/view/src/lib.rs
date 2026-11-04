@@ -981,6 +981,13 @@ pub struct SeedRow {
     pub downloaded_bytes: u64,
     /// When it will be cleaned up ("через 12 дн.").
     pub expires: Option<String>,
+    /// Upload and download right now, bytes per second.
+    pub up_bps: u64,
+    pub down_bps: u64,
+    /// Peers connected right now.
+    pub peers: u32,
+    /// What it takes on disk (the selected files).
+    pub size_bytes: u64,
 }
 
 /// An import or download job shown in "Загрузки".
@@ -1041,6 +1048,92 @@ pub struct DownloadsView {
     pub sources: Vec<SourceView>,
     /// `[soulseek]` of settings.toml as «Источники» shows it.
     pub soulseek: SoulseekView,
+    /// What «Раздача» says about both kinds of sharing.
+    pub sharing: SharingView,
+}
+
+/// «Загрузки → Раздача»: how much the network is used and how much was
+/// given away, torrents and Soulseek apart.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SharingView {
+    /// Right now, bytes per second.
+    pub torrent_up_bps: u64,
+    pub torrent_down_bps: u64,
+    pub slsk_up_bps: u64,
+    pub slsk_down_bps: u64,
+    /// Given away today (the local day) and over all time.
+    pub torrent_today: u64,
+    pub slsk_today: u64,
+    pub torrent_total: u64,
+    pub slsk_total: u64,
+    /// What the torrents being seeded take on disk.
+    pub seeding_disk_bytes: u64,
+    /// Peers connected to all torrents now.
+    pub torrent_peers: u32,
+    pub slsk: SlskSharingView,
+}
+
+impl SharingView {
+    pub fn up_bps(&self) -> u64 {
+        self.torrent_up_bps + self.slsk_up_bps
+    }
+
+    pub fn down_bps(&self) -> u64 {
+        self.torrent_down_bps + self.slsk_down_bps
+    }
+
+    pub fn today(&self) -> u64 {
+        self.torrent_today + self.slsk_today
+    }
+
+    pub fn total(&self) -> u64 {
+        self.torrent_total + self.slsk_total
+    }
+}
+
+/// The Soulseek half of «Раздача».
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SlskSharingView {
+    /// An account (or a service) is saved.
+    pub configured: bool,
+    /// The client (or the link to the service) runs.
+    pub running: bool,
+    /// On a server or a small device (`nikgob-slsk`).
+    pub remote: bool,
+    /// Sharing is on in settings.toml.
+    pub share: bool,
+    /// What is shared, as the client counts it (0 before the first scan).
+    pub files: u32,
+    pub folders: u32,
+    /// KiB/s for all uploads together, 0 = no limit.
+    pub upload_limit_kbps: u32,
+    /// Uploads at once.
+    pub upload_slots: u32,
+    /// Running, queued, then the last finished.
+    pub uploads: Vec<UploadRow>,
+}
+
+/// One file someone takes from us over Soulseek.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UploadRow {
+    pub id: u64,
+    pub user: String,
+    /// The file name, without folders.
+    pub file: String,
+    pub size: u64,
+    pub sent: u64,
+    pub bytes_per_sec: u64,
+    pub state: UploadRowState,
+    /// Ms since the epoch when it ended (0 while not ended).
+    pub ended_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadRowState {
+    Queued,
+    Sending,
+    Done,
+    Failed,
 }
 
 /// A transient message ("Добавлено в Любимые · Отменить").
@@ -2219,6 +2312,8 @@ pub enum Command {
     /// Soulseek's sharing, applied at once: share the library, and the
     /// upload limit in KiB/s (0 = none).
     SetSoulseekShare { share: bool, upload_limit_kbps: u32 },
+    /// Soulseek uploads at once (`upload_slots` in settings.toml).
+    SetSoulseekSlots(u32),
     /// Asks Prowlarr whether it answers ([`ViewState::indexer_check`]) at the
     /// address and key typed in the settings (not saved yet); an empty address
     /// checks the saved one, an empty key uses the saved key.

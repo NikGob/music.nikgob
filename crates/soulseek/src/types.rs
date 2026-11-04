@@ -183,6 +183,45 @@ pub struct DownloadInfo {
     pub state: DownloadState,
 }
 
+/// Where an upload (a file someone takes from us) is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UploadState {
+    /// Waiting for a free slot.
+    Queued,
+    Sending,
+    Done,
+    /// Declined by the peer, cut off, or ended because sharing was turned
+    /// off.
+    Failed { reason: String },
+}
+
+/// An upload in a list: queued, running, or one of the last finished.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadInfo {
+    pub id: u64,
+    /// Who takes it.
+    pub user: String,
+    /// The shared path as peers see it.
+    pub path: String,
+    pub size: u64,
+    /// Where in the file the transfer is (resumed transfers start past 0).
+    pub sent: u64,
+    /// Average speed of this transfer so far (0 when not sending).
+    pub bytes_per_sec: u64,
+    pub state: UploadState,
+    /// Seconds since the epoch when it ended (0 while not ended).
+    #[serde(default)]
+    pub ended_at: u64,
+}
+
+impl UploadInfo {
+    /// The file name, without the shared folders.
+    pub fn file_name(&self) -> &str {
+        self.path.rsplit(['\\', '/']).next().unwrap_or(&self.path)
+    }
+}
+
 /// What and how we share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -313,5 +352,24 @@ mod tests {
         };
         let back: DownloadInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
         assert_eq!(back, info);
+    }
+
+    #[test]
+    fn uploads_serialize_and_name_their_file() {
+        let u = UploadInfo {
+            id: 3,
+            user: "u".into(),
+            path: "@@music\\Artist\\Album\\01 Song.flac".into(),
+            size: 10,
+            sent: 4,
+            bytes_per_sec: 2,
+            state: UploadState::Failed { reason: "Cancelled".into() },
+            ended_at: 5,
+        };
+        assert_eq!(u.file_name(), "01 Song.flac");
+        let back: UploadInfo = serde_json::from_str(&serde_json::to_string(&u).unwrap()).unwrap();
+        assert_eq!(back, u);
+        let s = serde_json::to_string(&UploadState::Sending).unwrap();
+        assert_eq!(s, r#"{"state":"sending"}"#);
     }
 }

@@ -63,6 +63,9 @@
 //! - `fake:lyrics-gap` — LRC lines with an empty stamp making a wait
 //!   (8.26–16.57 s) before a line that wraps, and a hyphenated
 //!   «do-dodge»; `fake:lyrics-gap:words` — the same with word timing.
+//! - `fake:share` — «Загрузки → Раздача» busy (`route:seeding`): three
+//!   torrents seeding, Soulseek sharing with uploads running, queued, done
+//!   and cut off, and today's and overall totals.
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -100,6 +103,7 @@ pub struct Fakes {
     /// `fake:lyrics-gap`: with word timing.
     lyrics_gap: Option<bool>,
     lyrics_state: Option<String>,
+    share: bool,
 }
 
 impl Fakes {
@@ -136,6 +140,7 @@ impl Fakes {
             "align-models" => self.align_models = true,
             "lyrics-gap" => self.lyrics_gap = Some(false),
             "lyrics-gap:words" => self.lyrics_gap = Some(true),
+            "share" => self.share = true,
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             c if c.starts_with("lyrics-home:") => self.lyrics_home = Some(c["lyrics-home:".len()..].to_owned()),
             c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
@@ -172,6 +177,7 @@ impl Fakes {
             || self.chip.is_some()
             || self.lyrics_gap.is_some()
             || self.lyrics_state.is_some()
+            || self.share
     }
 
     /// `state` with the fakes laid over it.
@@ -187,6 +193,9 @@ impl Fakes {
         }
         if self.confirm {
             s.downloads.confirm = vec![confirm()];
+        }
+        if self.share {
+            share(&mut s);
         }
         if self.keep
             && let Some(t) = s.player.current.clone()
@@ -764,6 +773,71 @@ fn align_models(s: &mut ViewState) {
 
 /// Albums of the fake catalog the library has no release of (by `artist`
 /// when there are such, else anyone's).
+/// «Раздача» with both kinds of sharing busy.
+fn share(s: &mut ViewState) {
+    use nikgob_view::{SeedRow, SharingView, SlskSharingView, UploadRow, UploadRowState as U};
+    const MB: u64 = 1024 * 1024;
+    let seed = |id: u64, title: &str, size: u64, uploaded: u64, up_bps: u64, peers: u32, days: u32| SeedRow {
+        id,
+        title: title.into(),
+        uploaded_bytes: uploaded,
+        downloaded_bytes: size,
+        expires: Some(format!("чистка через {days} дн.")),
+        up_bps,
+        down_bps: 0,
+        peers,
+        size_bytes: size,
+    };
+    s.prefs.no_seed = false;
+    s.downloads.seeding = vec![
+        seed(1, "Aimer - Daydream (2016) [FLAC]", 612 * MB, 418 * MB, 240 * 1024, 4, 12),
+        seed(2, "ZUTOMAYO - Gusare (2021) [FLAC 24-96]", 1480 * MB, 2210 * MB, 0, 1, 27),
+        seed(3, "Radiohead - In Rainbows (2007) [FLAC]", 296 * MB, 37 * MB, 56 * 1024, 2, 3),
+    ];
+    s.downloads.seeded_bytes = s.downloads.seeding.iter().map(|r| r.uploaded_bytes).sum();
+    let up = |id: u64, user: &str, file: &str, size: u64, sent: u64, bps: u64, state: U| UploadRow {
+        id,
+        user: user.into(),
+        file: file.into(),
+        size,
+        sent,
+        bytes_per_sec: bps,
+        state,
+        ended_at: 0,
+    };
+    let uploads = vec![
+        up(9, "nightowl", "03 Brave Shine.flac", 38 * MB, 21 * MB, 310 * 1024, U::Sending),
+        up(10, "mira_k", "05 Kansaete Kuyashiiwa.flac", 44 * MB, 6 * MB, 120 * 1024, U::Sending),
+        up(11, "nightowl", "04 Insane Dream.flac", 41 * MB, 0, 0, U::Queued),
+        up(8, "deepcuts", "Reckoner.flac", 33 * MB, 33 * MB, 280 * 1024, U::Done),
+        up(7, "deepcuts", "cover.jpg", MB / 2, MB / 2, 400 * 1024, U::Done),
+        up(6, "lofi_fan", "Nude.flac", 29 * MB, 11 * MB, 90 * 1024, U::Failed),
+    ];
+    s.downloads.sharing = SharingView {
+        torrent_up_bps: 296 * 1024,
+        torrent_down_bps: 1200 * 1024,
+        slsk_up_bps: 430 * 1024,
+        slsk_down_bps: 0,
+        torrent_today: 860 * MB,
+        slsk_today: 212 * MB,
+        torrent_total: 2665 * MB + 41 * 1024 * MB,
+        slsk_total: 6300 * MB,
+        seeding_disk_bytes: (612 + 1480 + 296) * MB,
+        torrent_peers: 7,
+        slsk: SlskSharingView {
+            configured: true,
+            running: true,
+            remote: false,
+            share: true,
+            files: 4812,
+            folders: 391,
+            upload_limit_kbps: 1024,
+            upload_slots: 2,
+            uploads,
+        },
+    };
+}
+
 fn discography(artist: &str, library: &[nikgob_view::ReleaseCard]) -> DiscographyView {
     let all = FakeService::spotify().albums();
     let missing: Vec<_> = all.iter().filter(|a| !library.iter().any(|r| r.title == a.title)).collect();

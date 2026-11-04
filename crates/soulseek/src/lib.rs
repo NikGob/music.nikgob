@@ -41,7 +41,7 @@ pub use remote::RemoteClient;
 pub use share::ScanOptions;
 pub use types::{
     AlbumResult, Connection, DownloadInfo, DownloadState, Error, QueryKind, SearchQuery, SearchResult, ShareSettings,
-    Status, group_albums,
+    Status, UploadInfo, UploadState, group_albums,
 };
 
 /// The official server.
@@ -168,6 +168,23 @@ impl Soulseek {
         match self {
             Self::Embedded(c) => Ok(c.download(result, dir)),
             Self::Remote(r) => r.download(result, dir).await,
+        }
+    }
+
+    /// Downloads in a list (running, queued and the last finished).
+    pub async fn downloads(&self) -> Result<Vec<DownloadInfo>, Error> {
+        match self {
+            Self::Embedded(c) => Ok(c.downloads()),
+            Self::Remote(r) => r.downloads().await,
+        }
+    }
+
+    /// Uploads in a list (running, queued and the last finished). A
+    /// service from before the list existed answers with an error.
+    pub async fn uploads(&self) -> Result<Vec<UploadInfo>, Error> {
+        match self {
+            Self::Embedded(c) => Ok(c.uploads()),
+            Self::Remote(r) => r.uploads().await,
         }
     }
 
