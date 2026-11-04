@@ -75,6 +75,22 @@ impl Prepared {
 }
 
 impl Prepared {
+    /// A song from its voice at 16 kHz (`separated`: the voice alone, not
+    /// the mix), with nothing heard yet.
+    pub fn from_voice(voice: Vec<f32>, separated: bool) -> Self {
+        let secs = voice.len() as f32 / RATE as f32;
+        let energy = voice
+            .chunks(ENERGY_HOP)
+            .map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt())
+            .collect();
+        Self { voice, secs, separated, energy, heard: HashMap::new() }
+    }
+
+    /// Takes what aligner `id` heard in this song (kept from an earlier run).
+    pub fn set_emissions(&mut self, id: ModelId, em: Emissions) {
+        self.heard.insert(id, em);
+    }
+
     /// What aligner `id` heard in the song, once it has.
     pub fn emissions(&self, id: ModelId) -> Option<&Emissions> {
         self.heard.get(&id)
@@ -411,12 +427,7 @@ impl Aligner {
         } else {
             decoded.resampled(RATE)?.mono()
         };
-        let secs = voice.len() as f32 / RATE as f32;
-        let energy = voice
-            .chunks(ENERGY_HOP)
-            .map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt())
-            .collect();
-        Ok(Prepared { voice, secs, separated, energy, heard: HashMap::new() })
+        Ok(Prepared::from_voice(voice, separated))
     }
 
     /// Aligner `id`'s letters.
@@ -435,7 +446,7 @@ impl Aligner {
 
     /// What aligner `id` hears in the song (computed once per song; the
     /// aligner held before is dropped first).
-    fn heard(&mut self, prep: &mut Prepared, id: ModelId, progress: &mut dyn FnMut(Stage) -> bool) -> Result<(), Error> {
+    pub fn hear(&mut self, prep: &mut Prepared, id: ModelId, progress: &mut dyn FnMut(Stage) -> bool) -> Result<(), Error> {
         if prep.heard.contains_key(&id) {
             return Ok(());
         }
@@ -466,9 +477,9 @@ impl Aligner {
                 None => others.push((id, vec![i])),
             }
         }
-        self.heard(prep, main, progress)?;
+        self.hear(prep, main, progress)?;
         for (id, _) in &others {
-            self.heard(prep, *id, progress)?;
+            self.hear(prep, *id, progress)?;
         }
         if !progress(Stage::Align) {
             return Err(Error::Stopped);
@@ -499,7 +510,7 @@ impl Aligner {
 
     /// [`Self::fit`] with a given aligner for every line.
     pub fn fit_with(&mut self, prep: &mut Prepared, id: ModelId, lines: &[LyricLine], timed: bool, progress: &mut dyn FnMut(Stage) -> bool) -> Result<Option<Fit>, Error> {
-        self.heard(prep, id, progress)?;
+        self.hear(prep, id, progress)?;
         if !progress(Stage::Align) {
             return Err(Error::Stopped);
         }
