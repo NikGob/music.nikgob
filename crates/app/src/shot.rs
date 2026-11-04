@@ -250,6 +250,7 @@ impl Shot {
                     "wishlist" => Route::Downloads(DownloadsTab::Wishlist),
                     "confirm" => Route::Downloads(DownloadsTab::Confirm),
                     "history" => Route::Downloads(DownloadsTab::History),
+                    "seeding" => Route::Downloads(DownloadsTab::Seeding),
                     "settings" => Route::Settings,
                     "new_releases" => Route::NewReleases,
                     _ => Route::Home,

@@ -235,6 +235,10 @@ async fn start_download(State(st): Shared, axum::Json(r): axum::Json<SearchResul
     Ok(axum::Json(api_info(&st.downloads, info)))
 }
 
+async fn list_uploads(State(st): Shared) -> impl IntoResponse {
+    axum::Json(st.client.uploads())
+}
+
 async fn list_downloads(State(st): Shared) -> impl IntoResponse {
     let v: Vec<DownloadInfo> = st.client.downloads().into_iter().map(|d| api_info(&st.downloads, d)).collect();
     axum::Json(v)
@@ -337,6 +341,7 @@ pub fn router(client: Client, downloads: PathBuf, token: String) -> Router {
         .route("/api/folder", post(folder))
         .route("/api/downloads", get(list_downloads).post(start_download))
         .route("/api/downloads/{id}", get(get_download).delete(cancel_download))
+        .route("/api/uploads", get(list_uploads))
         .route("/api/files", get(list_files))
         .route("/api/files/{*path}", get(get_file).delete(delete_file))
         .route("/api/share", get(get_share).put(put_share))

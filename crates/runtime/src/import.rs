@@ -68,6 +68,8 @@ pub(crate) enum Internal {
     /// Recommendations (stage 4), see [`crate::recs`].
     Recs(crate::recs::Msg),
     SeedStopped(Vec<nikgob_torrent::TorrentStatus>),
+    /// A look at Soulseek for «Раздача».
+    Sharing(crate::sharing::SlskPoll),
     MastersMoveProgress {
         job: u64,
         done: usize,
@@ -783,6 +785,7 @@ impl Worker {
             Internal::LyricsFetched(track, source, got) => self.lyrics_fetched(track, source, got),
             Internal::LyricsEmbedded(track, result) => self.lyrics_embedded(track, result),
             Internal::Align(m) => self.align_msg(m),
+            Internal::Sharing(p) => self.share_polled(p),
         }
     }
 

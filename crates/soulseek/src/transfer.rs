@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use log::{debug, info};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::{Inner, PeerHandle};
 use crate::msg::{ConnType, PeerMsg, ToServer};
-use crate::{DownloadInfo, DownloadState, Error, SearchResult};
+use crate::{DownloadInfo, DownloadState, Error, SearchResult, UploadInfo, UploadState};
 
 /// Tries of one download before it fails (an interrupted transfer, the
 /// sharer saying the upload failed).
@@ -30,6 +30,8 @@ const MAX_QUEUED_PER_USER: usize = 200;
 const MAX_QUEUED: usize = 5000;
 /// Finished downloads kept in the list.
 const FINISHED_KEPT: usize = 200;
+/// Finished uploads kept in the list.
+const UPLOADS_KEPT: usize = 50;
 const BUF: usize = 64 * 1024;
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
@@ -363,29 +365,98 @@ async fn receive(inner: &Arc<Inner>, e: &Arc<DownloadEntry>, mut s: TcpStream) -
 // ---- uploads ----
 
 struct QueuedUpload {
+    id: u64,
     user: String,
     vpath: String,
     real: PathBuf,
     size: u64,
 }
 
+/// How far a running upload is, written by its task.
+#[derive(Default)]
+struct UploadProgress {
+    /// The place in the file.
+    sent: AtomicU64,
+    /// Bytes sent by this transfer (a resumed one starts past 0).
+    moved: AtomicU64,
+}
+
 struct ActiveUpload {
     id: u64,
     user: String,
     vpath: String,
+    size: u64,
     cancel: CancellationToken,
+    progress: Arc<UploadProgress>,
+    started: Instant,
+}
+
+impl ActiveUpload {
+    /// The row, with the speed this transfer averaged so far.
+    fn info(&self, state: UploadState, ended_at: u64) -> UploadInfo {
+        let secs = self.started.elapsed().as_secs_f64().max(0.001);
+        UploadInfo {
+            id: self.id,
+            user: self.user.clone(),
+            path: self.vpath.clone(),
+            size: self.size,
+            sent: self.progress.sent.load(Ordering::Relaxed),
+            bytes_per_sec: (self.progress.moved.load(Ordering::Relaxed) as f64 / secs) as u64,
+            state,
+            ended_at,
+        }
+    }
+}
+
+fn unix_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 #[derive(Default)]
 pub(crate) struct Uploads {
     queue: VecDeque<QueuedUpload>,
     active: Vec<ActiveUpload>,
+    /// The last finished ones, newest first.
+    finished: VecDeque<UploadInfo>,
     next_id: u64,
 }
 
 impl Uploads {
     pub(crate) fn counts(&self) -> (u32, u32) {
         (self.active.len() as u32, self.queue.len() as u32)
+    }
+
+    /// Running uploads, then the queue in order, then the finished ones
+    /// (newest first).
+    pub(crate) fn list(&self) -> Vec<UploadInfo> {
+        let running = self.active.iter().map(|a| a.info(UploadState::Sending, 0));
+        let queued = self.queue.iter().map(|q| UploadInfo {
+            id: q.id,
+            user: q.user.clone(),
+            path: q.vpath.clone(),
+            size: q.size,
+            sent: 0,
+            bytes_per_sec: 0,
+            state: UploadState::Queued,
+            ended_at: 0,
+        });
+        running.chain(queued).chain(self.finished.iter().cloned()).collect()
+    }
+
+    /// Takes running upload `id` off the list and keeps how it ended: done
+    /// when the whole file went, failed otherwise (a peer that declined
+    /// ends the task without an error but has nothing).
+    fn finish(&mut self, id: u64, outcome: Result<(), String>) {
+        let Some(i) = self.active.iter().position(|a| a.id == id) else { return };
+        let a = self.active.remove(i);
+        let complete = a.progress.sent.load(Ordering::Relaxed) >= a.size;
+        let state = match outcome {
+            Ok(()) if complete => UploadState::Done,
+            Ok(()) => UploadState::Failed { reason: "Declined".into() },
+            Err(reason) => UploadState::Failed { reason },
+        };
+        self.finished.push_front(a.info(state, unix_secs()));
+        self.finished.truncate(UPLOADS_KEPT);
     }
 
     fn place(&self, user: &str, vpath: &str) -> Option<u32> {
@@ -411,7 +482,9 @@ impl Inner {
             if u.queue.len() >= MAX_QUEUED || u.queue.iter().filter(|q| q.user == user).count() >= MAX_QUEUED_PER_USER {
                 return Err("Too many files");
             }
-            u.queue.push_back(QueuedUpload { user: user.to_owned(), vpath: vpath.to_owned(), real, size });
+            u.next_id += 1;
+            let id = u.next_id;
+            u.queue.push_back(QueuedUpload { id, user: user.to_owned(), vpath: vpath.to_owned(), real, size });
         }
         self.pump_uploads();
         Ok(())
@@ -427,25 +500,34 @@ impl Inner {
             }
             let Some(i) = u.queue.iter().position(|q| !u.active.iter().any(|a| a.user == q.user)) else { return };
             let q = u.queue.remove(i).expect("an index in range");
-            u.next_id += 1;
-            let id = u.next_id;
+            let id = q.id;
             let cancel = self.shutdown.child_token();
-            u.active.push(ActiveUpload { id, user: q.user.clone(), vpath: q.vpath.clone(), cancel: cancel.clone() });
+            let progress = Arc::new(UploadProgress::default());
+            u.active.push(ActiveUpload {
+                id,
+                user: q.user.clone(),
+                vpath: q.vpath.clone(),
+                size: q.size,
+                cancel: cancel.clone(),
+                progress: progress.clone(),
+                started: Instant::now(),
+            });
             drop(u);
             let me = self.clone();
             tokio::spawn(async move {
                 let user = q.user.clone();
                 let vpath = q.vpath.clone();
-                match me.upload(&q, &cancel).await {
-                    Ok(()) => {}
+                let outcome = match me.upload(&q, &cancel, &progress).await {
+                    Ok(()) => Ok(()),
                     Err(e) => {
                         debug!("soulseek: upload of {vpath} to {user} stopped: {e}");
                         if let Some(h) = me.live_peer(&user) {
                             h.send(&PeerMsg::UploadFailed(vpath.clone()));
                         }
+                        Err(e.to_string())
                     }
-                }
-                me.uploads.lock().active.retain(|a| a.id != id);
+                };
+                me.uploads.lock().finish(id, outcome);
                 me.pump_uploads();
             });
         }
@@ -466,7 +548,12 @@ impl Inner {
         }
     }
 
-    async fn upload(self: &Arc<Self>, q: &QueuedUpload, cancel: &CancellationToken) -> Result<(), Error> {
+    async fn upload(
+        self: &Arc<Self>,
+        q: &QueuedUpload,
+        cancel: &CancellationToken,
+        progress: &UploadProgress,
+    ) -> Result<(), Error> {
         let h = self.peer(&q.user).await?;
         let token = self.token();
         let (tx, rx) = oneshot::channel();
@@ -497,6 +584,7 @@ impl Inner {
         file.seek(std::io::SeekFrom::Start(offset)).await?;
         let mut buf = vec![0u8; BUF];
         let mut sent = offset;
+        progress.sent.store(sent, Ordering::Relaxed);
         let started = Instant::now();
         while sent < q.size {
             let n = self.limiter.chunk(BUF).min((q.size - sent) as usize);
@@ -511,6 +599,8 @@ impl Inner {
             s.write_all(&buf[..n]).await?;
             sent += n as u64;
             self.uploaded_bytes.fetch_add(n as u64, Ordering::Relaxed);
+            progress.sent.store(sent, Ordering::Relaxed);
+            progress.moved.fetch_add(n as u64, Ordering::Relaxed);
         }
         s.flush().await?;
         // The downloader closes the connection once it has everything.
@@ -620,6 +710,68 @@ mod tests {
         assert_eq!(sanitize(".."), "_");
         assert_eq!(sanitize("Album. "), "Album");
         assert_eq!(sanitize("勘冴えて悔しいわ.flac"), "勘冴えて悔しいわ.flac");
+    }
+
+    fn active(u: &mut Uploads, size: u64, sent: u64) -> u64 {
+        u.next_id += 1;
+        let progress = Arc::new(UploadProgress::default());
+        progress.sent.store(sent, Ordering::Relaxed);
+        progress.moved.store(sent, Ordering::Relaxed);
+        u.active.push(ActiveUpload {
+            id: u.next_id,
+            user: "peer".into(),
+            vpath: format!("@@music\\{}.flac", u.next_id),
+            size,
+            cancel: CancellationToken::new(),
+            progress,
+            started: Instant::now(),
+        });
+        u.next_id
+    }
+
+    #[test]
+    fn uploads_list_running_queued_then_finished() {
+        let mut u = Uploads::default();
+        let a = active(&mut u, 10, 4);
+        u.next_id += 1;
+        u.queue.push_back(QueuedUpload {
+            id: u.next_id,
+            user: "other".into(),
+            vpath: "@@music\\q.flac".into(),
+            real: PathBuf::from("q.flac"),
+            size: 7,
+        });
+        let list = u.list();
+        assert_eq!(list.len(), 2);
+        assert_eq!((list[0].id, list[0].sent, list[0].state.clone()), (a, 4, UploadState::Sending));
+        assert_eq!(list[1].state, UploadState::Queued);
+
+        u.finish(a, Ok(()));
+        let list = u.list();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].state, UploadState::Queued);
+        assert!(matches!(list[1].state, UploadState::Failed { .. }), "4 of 10 bytes is not done");
+        assert!(list[1].ended_at > 0);
+    }
+
+    #[test]
+    fn finished_uploads_are_done_failed_and_capped() {
+        let mut u = Uploads::default();
+        let whole = active(&mut u, 10, 10);
+        u.finish(whole, Ok(()));
+        let cut = active(&mut u, 10, 3);
+        u.finish(cut, Err("timed out".into()));
+        let list = u.list();
+        assert_eq!(list[0].state, UploadState::Failed { reason: "timed out".into() });
+        assert_eq!(list[1].state, UploadState::Done);
+        // An id no longer running changes nothing.
+        u.finish(whole, Ok(()));
+        assert_eq!(u.list().len(), 2);
+        for _ in 0..UPLOADS_KEPT + 5 {
+            let id = active(&mut u, 1, 1);
+            u.finish(id, Ok(()));
+        }
+        assert_eq!(u.list().len(), UPLOADS_KEPT);
     }
 
     #[test]

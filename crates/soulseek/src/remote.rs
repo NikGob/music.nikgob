@@ -110,6 +110,10 @@ impl RemoteClient {
         self.send(self.req(reqwest::Method::GET, "/api/downloads")).await
     }
 
+    pub async fn uploads(&self) -> Result<Vec<crate::UploadInfo>, Error> {
+        self.send(self.req(reqwest::Method::GET, "/api/uploads")).await
+    }
+
     pub async fn files(&self) -> Result<Vec<FileInfo>, Error> {
         self.send(self.req(reqwest::Method::GET, "/api/files")).await
     }

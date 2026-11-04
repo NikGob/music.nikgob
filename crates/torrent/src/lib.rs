@@ -169,6 +169,8 @@ pub struct TorrentStatus {
     pub completed_at: Option<SystemTime>,
     /// Absolute on-disk paths of the selected files.
     pub selected_files: Vec<PathBuf>,
+    /// Peers connected right now (0 when not live).
+    pub peers: u32,
 }
 
 struct Inner {
@@ -566,6 +568,10 @@ fn snapshot(
     let (down_bps, up_bps) = stats.live.as_ref().map_or((0, 0), |l| {
         (l.download_speed.as_bytes(), l.upload_speed.as_bytes())
     });
+    let peers = stats
+        .live
+        .as_ref()
+        .map_or(0, |l| l.snapshot.peer_stats.live);
     // librqbit counts whole pieces, which spill into neighbouring unselected
     // files; per-file sizes and progress give exact selected bytes.
     let files = selected_files(handle);
@@ -618,6 +624,7 @@ fn snapshot(
             eta,
             completed_at: completed_at.map(|s| UNIX_EPOCH + Duration::from_secs(s)),
             selected_files: files.into_iter().map(|f| f.path).collect(),
+            peers,
         },
         complete,
         completed_age: completed_at.map(|c| Duration::from_secs(now.saturating_sub(c))),

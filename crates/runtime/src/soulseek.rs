@@ -41,6 +41,8 @@ pub(crate) struct SoulseekService {
     library_dir: PathBuf,
     /// The share index cache; None = not kept.
     state_dir: Option<PathBuf>,
+    /// Counts the clients started (a new one counts its uploads from 0).
+    generation: u64,
 }
 
 fn share_of(s: &SoulseekSettings) -> ShareSettings {
@@ -61,7 +63,12 @@ fn same_session(a: &SoulseekSettings, b: &SoulseekSettings) -> bool {
 
 impl SoulseekService {
     pub(crate) fn new(library_dir: PathBuf, state_dir: Option<PathBuf>) -> Self {
-        Self { running: None, applied: None, library_dir, state_dir }
+        Self { running: None, applied: None, library_dir, state_dir, generation: 0 }
+    }
+
+    /// Which client runs: changes whenever one is started.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The running source, if any.
@@ -76,7 +83,6 @@ impl SoulseekService {
     }
 
     /// Runs `f` on the source's runtime.
-    #[allow(dead_code)]
     pub(crate) fn spawn<F>(&self, f: F) -> bool
     where
         F: Future<Output = ()> + Send + 'static,
@@ -110,7 +116,10 @@ impl SoulseekService {
             return;
         }
         match self.start(s) {
-            Ok(r) => self.running = Some(r),
+            Ok(r) => {
+                self.generation += 1;
+                self.running = Some(r);
+            }
             Err(e) => log::warn!("soulseek: not started: {e}"),
         }
     }
@@ -222,6 +231,7 @@ impl Worker {
             upload_limit_kbps: s.upload_limit_kbps,
             running: self.soulseek.source().is_some(),
         };
+        self.share_settings(&s, view.configured());
         self.publish(|st| st.downloads.soulseek = view);
         self.publish_sources();
         self.wish_sources_ready();
@@ -286,6 +296,12 @@ impl Worker {
             (false, true) => "Soulseek сохранён, но не подключился",
         };
         self.toast(text, None);
+    }
+
+    /// Soulseek uploads at once (1 to 10).
+    pub(crate) fn set_soulseek_slots(&mut self, n: u32) {
+        let n = n.clamp(1, 10);
+        self.soulseek_edit(|s| s.upload_slots = n);
     }
 
     /// Sharing and its limit, at once.

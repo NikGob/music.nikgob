@@ -84,7 +84,10 @@ fn shape(active: &[v::Job], seeding: &[v::SeedRow]) -> (Vec<v::Job>, Vec<v::Seed
             ..j.clone()
         })
         .collect();
-    let seeding = seeding.iter().map(|r| v::SeedRow { uploaded_bytes: 0, downloaded_bytes: 0, ..r.clone() }).collect();
+    let seeding = seeding
+        .iter()
+        .map(|r| v::SeedRow { uploaded_bytes: 0, downloaded_bytes: 0, up_bps: 0, down_bps: 0, peers: 0, ..r.clone() })
+        .collect();
     (active, seeding)
 }
 
@@ -516,8 +519,12 @@ impl Worker {
     /// Once a second while the client runs: progress, finished payloads,
     /// seed policy, cleanup.
     pub(crate) fn poll_torrents(&mut self) {
-        let Some(c) = self.torrents.client.clone() else { return };
+        let Some(c) = self.torrents.client.clone() else {
+            self.share_no_torrents();
+            return;
+        };
         let list = c.list();
+        self.share_torrents(&list);
         let downloads: HashMap<String, Download> = self
             .lib
             .list_downloads()
@@ -611,6 +618,10 @@ impl Worker {
                             .as_secs();
                         format!("чистка через {} дн.", left.div_ceil(86_400))
                     }),
+                up_bps: t.up_bps,
+                down_bps: t.down_bps,
+                peers: t.peers,
+                size_bytes: t.total,
             })
             .collect();
         let seeded: u64 = list.iter().map(|t| t.uploaded).sum();

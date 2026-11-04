@@ -24,6 +24,7 @@ mod tags;
 mod torrents;
 pub mod queue;
 mod session;
+mod sharing;
 mod editions;
 mod streams;
 
@@ -501,6 +502,8 @@ struct Worker {
     album_queue: Option<(nikgob_core::model::ReleaseId, u64)>,
     /// The Soulseek source (settings.toml `[soulseek]`).
     soulseek: soulseek::SoulseekService,
+    /// «Загрузки → Раздача»: speeds and what was given away.
+    sharing: sharing::Sharing,
     /// The lyrics aligner's thread (docs/lyrics-align.md).
     align: align::AlignService,
     /// Where its models are downloaded.
@@ -524,6 +527,7 @@ impl Worker {
             .map(|i| (i.torrent_state_dir.clone(), i.torrent_offline))
             .unwrap_or_default();
         let slsk_state = config.import.as_ref().map(|i| i.torrent_state_dir.with_file_name("soulseek"));
+        let sharing = sharing::Sharing::new(config.import.as_ref().and_then(|i| i.torrent_state_dir.parent()));
         let soulseek = soulseek::SoulseekService::new(config.library_dir.clone(), slsk_state);
         let streaming = streams::Streams::new(internal.clone());
         let analysis = analysis::FileAnalysis::new(internal.clone());
@@ -594,6 +598,7 @@ impl Worker {
             album_queue: None,
             recs,
             soulseek,
+            sharing,
             align: Default::default(),
             models_dir,
             align_was_playing: false,
@@ -652,6 +657,7 @@ impl Worker {
                 recv(internal) -> m => if let Ok(m) = m { self.internal(m) },
                 recv(fast) -> _ => {
                     self.poll_torrents();
+                    self.poll_share();
                     self.wish_poll_direct();
                 }
                 recv(ticker) -> _ => {
@@ -670,6 +676,7 @@ impl Worker {
         self.playback.stop();
         self.shutdown_torrents();
         self.soulseek.shutdown();
+        self.sharing.save(true);
         self.streaming.analysis.shutdown();
         self.analysis.shutdown();
         self.align.shutdown();
@@ -1142,6 +1149,7 @@ impl Worker {
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
             Command::SetSoulseek(form) => self.set_soulseek(form),
             Command::SetSoulseekShare { share, upload_limit_kbps } => self.set_soulseek_share(share, upload_limit_kbps),
+            Command::SetSoulseekSlots(n) => self.set_soulseek_slots(n),
             Command::CheckIndexer { url, api_key } => self.check_indexer(url, api_key),
             Command::DismissToast(id) => {
                 self.publish(|s| s.toasts.retain(|t| t.id != id));

@@ -336,6 +336,11 @@ impl Client {
         self.inner.downloads.lock().list()
     }
 
+    /// Running and queued uploads, then the last finished ones.
+    pub fn uploads(&self) -> Vec<crate::UploadInfo> {
+        self.inner.uploads.lock().list()
+    }
+
     /// A download started earlier, by id.
     pub fn download_by_id(&self, id: u64) -> Option<Download> {
         self.inner.downloads.lock().handle(id)
