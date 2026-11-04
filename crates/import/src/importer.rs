@@ -1858,6 +1858,7 @@ fn commit_locked(
         let old_path = PathBuf::from(&old.locator);
         let trash_path = if long_path(&old_path).exists() {
             let dest = trash_file(&cfg.trash_dir, &old_path)?;
+            log::info!("import: {} is replaced, the old file is in the Trash at {}", old_path.display(), dest.display());
             replaced.file = Some((old_path.clone(), dest.clone()));
             let lrc = old_path.with_extension("lrc");
             if long_path(&lrc).exists()
@@ -1992,7 +1993,9 @@ fn commit_locked(
         // fake lossless file an MP3 was made from goes to the Trash.
         if !prep.converted && a.path.starts_with(&cfg.inbox_dir) {
             let gone = if prep.fake_mp3 {
-                trash_file(&cfg.trash_dir, &a.path).map(|_| ())
+                trash_file(&cfg.trash_dir, &a.path).map(|to| {
+                    log::info!("import: {} came as an MP3, the fake FLAC is in the Trash at {}", a.path.display(), to.display());
+                })
             } else {
                 fsutil::remove_file(&a.path)
             };

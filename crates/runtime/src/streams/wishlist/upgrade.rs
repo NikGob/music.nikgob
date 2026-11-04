@@ -647,8 +647,7 @@ impl Worker {
             origin: if album { "Качество лучше · альбом" } else { "Качество лучше · трек" }.into(),
             options: offers
                 .iter()
-                .enumerate()
-                .map(|(_, o)| v::ConfirmOption {
+                .map(|o| v::ConfirmOption {
                     label: o.title.clone(),
                     detail: offer_detail(o, have.as_deref()),
                     // Never «РЕКОМЕНДУЕМ»: «Принять все рекомендованные»

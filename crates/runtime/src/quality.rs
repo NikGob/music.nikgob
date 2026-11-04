@@ -14,13 +14,11 @@
 //! original, are not decoded again. Rows whose label changed go back to
 //! the worker as [`Msg::Checked`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-
-use std::collections::HashMap;
 
 use crossbeam_channel::Sender;
 use nikgob_core::model::{Source, SourceId, SourceOrigin, TrackId, quality_score, score};
