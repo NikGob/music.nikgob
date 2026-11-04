@@ -72,6 +72,11 @@ pub enum SettingId {
     LyricsGap,
     LyricsGapWaves,
     LyricsCountdown,
+    /// «Подсвечивать»: by letters or by words, under every animation.
+    LyricsUnit,
+    /// «Мягкие края» of the lyrics and their strength.
+    LyricsSoftEdges,
+    LyricsSoftStrength,
     RailCompact,
     /// The parts of the side pane: «Очередь», «Текст песни», «Источник и
     /// качество».
@@ -299,6 +304,8 @@ enum Preview {
     Turn(bool),
     /// Lines following a scroll, with or without the cascade.
     Cascade,
+    /// Lines rolling through the lyrics' soft edges (or cut, when off).
+    Edges,
     /// The end of a pause: digits 3-2-1, or the ring simply fading away.
     Countdown,
 }
@@ -337,7 +344,7 @@ impl SettingId {
             | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
             | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
             | LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow
-            | LyricsGap | LyricsGapWaves | LyricsCountdown | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
+            | LyricsGap | LyricsGapWaves | LyricsCountdown | LyricsUnit | LyricsSoftEdges | LyricsSoftStrength | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
             | ReducedMotion | FpsLimit => {
                 TAB_APPEARANCE
             }
@@ -390,8 +397,8 @@ impl SettingId {
             BgColors => "В какие цвета окрашены фигуры на фоне.",
             BgHue => "Цвет фигур для варианта «Свой». Яркость подстраивается под тему, чтобы фон не спорил с интерфейсом.",
             LyricsStyle => "Как выделяется строка, которую сейчас поют.",
-            WaveFallback => "У некоторых текстов известно только, когда начинается строка, а время слов нет. Что делать с такими текстами при анимациях «Волна» и «По словам».",
-            WaveJump => "Как высоко подпрыгивают буквы в анимации «Волна». 0 — буквы только загораются.",
+            WaveFallback => "У некоторых текстов известно только, когда начинается строка, а время слов нет. Что делать с такими текстами в «Волне» и при подсветке по словам.",
+            WaveJump => "Как высоко подпрыгивают буквы или слова в анимации «Волна». 0 — они только загораются.",
             LyricsDim => "Насколько бледнее остальные строки по сравнению с той, что поют сейчас.",
             LyricsScale => "Размер букв в тексте песни.",
             LyricsLead => "На сколько подсветка опережает голос. Глаз читает чуть раньше, чем слышит, поэтому подсветка, которая загорается немного заранее, кажется точной. Если она торопится — уменьшите, если отстаёт — увеличьте. Перемотка и время в тексте не меняются.",
@@ -400,6 +407,9 @@ impl SettingId {
             LyricsGap => "Когда в песне долго нет слов, между строками крутится кружок ожидания. Здесь выбирается его вид.",
             LyricsGapWaves => "Сколько волн на кружке ожидания. Больше — волны мельче и чаще.",
             LyricsCountdown => "За три секунды до новой строки кружок ожидания сменяется отсчётом 3, 2, 1.",
+            LyricsUnit => "Что подсвечивается по очереди в любой анимации: каждая буква или каждое слово целиком. Слова через дефис подсвечиваются по частям.",
+            LyricsSoftEdges => "Строки у верхнего и нижнего края текста расплываются и тают, а не обрезаются.",
+            LyricsSoftStrength => "Как далеко от краёв строки начинают расплываться и насколько сильно.",
             RailCompact => "Левая панель всегда узкая: только значки разделов, без подписей и кнопки раскрытия.",
             PaneQueue => "Справа от страницы открывается очередь: кнопка в плеере внизу и Ctrl+Q. Выключено — у плеера больше места под полосу перемотки.",
             PaneLyrics => "Справа от страницы открывается текст песни: кнопка в плеере внизу и пункт в меню трека. На экране трека текст есть всегда.",
@@ -605,10 +615,13 @@ impl SettingId {
                 c!("Розовый", "Фигуры в розовых тонах."),
             ],
             Self::LyricsStyle => &[
-                c!("Караоке", "Строка закрашивается слева направо, слог за слогом, как в караоке."),
-                c!("Фокус", "Строка, которую поют, становится яркой целиком."),
-                c!("Волна", "Буквы по очереди загораются и подпрыгивают."),
-                c!("По словам", "Слова загораются по очереди, каждое целиком, когда его начинают петь."),
+                c!("Караоке", "Строка закрашивается слева направо, как в караоке: буква за буквой или слово за словом."),
+                c!("Фокус", "Строка, которую поют, становится яркой: целиком или слово за словом, когда его начинают петь."),
+                c!("Волна", "Буквы или слова по очереди загораются и подпрыгивают."),
+            ],
+            Self::LyricsUnit => &[
+                c!("По буквам", "Караоке закрашивает слова буква за буквой, в «Волне» прыгает каждая буква, «Фокус» зажигает строку целиком."),
+                c!("По словам", "Каждое слово загорается целиком, когда его начинают петь, а в «Волне» подпрыгивает всё слово."),
             ],
             Self::WaveFallback => &[
                 c!("Угадывать слова", "Время слов угадывается по строке: слова всё равно загораются по очереди, а в «Волне» прыгают буквы."),
@@ -738,7 +751,8 @@ impl SettingId {
             },
             Self::BgColors => usize::from(p.bg_shapes_colors).min(3),
             Self::BgHue => usize::from(p.bg_shapes_hue).min(7),
-            Self::LyricsStyle => usize::from(p.lyrics_style).min(3),
+            Self::LyricsStyle => usize::from(p.lyrics_style).min(2),
+            Self::LyricsUnit => usize::from(p.lyrics_by_words),
             Self::WaveFallback => usize::from(p.wave_syllables_only),
             Self::LyricsGap => usize::from(p.lyrics_gap_style).min(3),
             Self::NpMotion => usize::from(p.np_motion).min(2),
@@ -803,7 +817,8 @@ impl SettingId {
                 p.bg_shapes_colors = 3;
                 p.bg_shapes_hue = i.min(7) as u8;
             }
-            Self::LyricsStyle => p.lyrics_style = i.min(3) as u8,
+            Self::LyricsStyle => p.lyrics_style = i.min(2) as u8,
+            Self::LyricsUnit => p.lyrics_by_words = i == 1,
             Self::WaveFallback => p.wave_syllables_only = i == 1,
             Self::LyricsGap => p.lyrics_gap_style = i.min(3) as u8,
             Self::NpMotion => p.np_motion = i.min(2) as u8,
@@ -851,7 +866,8 @@ impl SettingId {
             Ring | RingStyle | RingBeat => Preview::Ring,
             LyricsCascade => Preview::Cascade,
             BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue => Preview::Background,
-            LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsGlow => Preview::Lyrics,
+            LyricsStyle | WaveFallback | WaveJump | LyricsDim | LyricsScale | LyricsGlow | LyricsUnit => Preview::Lyrics,
+            LyricsSoftEdges | LyricsSoftStrength => Preview::Edges,
             LyricsGap | LyricsGapWaves => Preview::Gap,
             LyricsCountdown => Preview::Countdown,
             NpMotion => Preview::Motion,
@@ -1824,6 +1840,7 @@ fn paint_preview(ui: &mut Ui, rect: Rect, kind: Preview, prefs: &Prefs, salt: Op
         Preview::Volume => volume_preview(ui, rect, prefs),
         Preview::Turn(ring) => turn_preview(ui, rect, prefs, ring),
         Preview::Cascade => cascade_preview(ui, rect, prefs),
+        Preview::Edges => lyrics::edges_preview(ui, rect, prefs),
     }
     ui.ctx().request_repaint();
 }
@@ -2074,7 +2091,7 @@ mod tests {
         use SettingId as S;
         for id in [
             S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::RingDir, S::RingStyle, S::Ambient,
-            S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
+            S::BgShapes, S::BgColors, S::LyricsStyle, S::LyricsUnit, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::AlbumLike, S::SingleLike, S::LikedAlbumsPlace, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
             S::RadioNoRepeat, S::LyricsGpu, S::LyricsUi, S::ToastTime, S::LyricsStreamKeep,

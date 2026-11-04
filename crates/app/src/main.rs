@@ -809,6 +809,33 @@ mod prefs_tests {
         assert!(!d.lyrics_words_all && !d.lyrics_words_playing && d.lyrics_lines_auto && !d.lyrics_recognize);
     }
 
+    /// «По словам» was a fourth lyrics animation (`lyrics_style` 3); it is
+    /// the unit of every animation now: such prefs move to the wave by
+    /// words once, whatever their revision, and the other animations keep
+    /// their unit.
+    #[test]
+    fn the_old_words_animation_moves_to_the_wave_by_words_once() {
+        for rev in ["", r#","lyrics_rev":1"#, r#","lyrics_rev":2"#] {
+            let p = parse_prefs(format!(r#"{{"lyrics_style":3{rev}}}"#).as_bytes()).unwrap();
+            assert_eq!((p.lyrics_style, p.lyrics_by_words), (2, true), "{rev}");
+            // Saved and read again it stays the wave by words.
+            let again = parse_prefs(&serde_json::to_vec(&p).unwrap()).unwrap();
+            assert_eq!(again, p);
+        }
+        for style in 0..3u8 {
+            for words in [false, true] {
+                let json = format!(r#"{{"lyrics_style":{style},"lyrics_by_words":{words},"lyrics_rev":2}}"#);
+                let p = parse_prefs(json.as_bytes()).unwrap();
+                assert_eq!((p.lyrics_style, p.lyrics_by_words), (style, words));
+            }
+        }
+        // Old prefs without the new fields: by letters, soft edges on.
+        let p = parse_prefs(br#"{"lyrics_style":2,"lyrics_rev":2}"#).unwrap();
+        assert!(!p.lyrics_by_words && p.lyrics_soft_edges && (p.lyrics_soft_strength - 1.0).abs() < 1e-6);
+        let d = prefs_of(None);
+        assert!(d.lyrics_style == 0 && !d.lyrics_by_words && d.lyrics_soft_edges);
+    }
+
     /// «Настройки текста…» is offered under the lyrics until it is picked
     /// once, and stays gone after a restart.
     #[test]

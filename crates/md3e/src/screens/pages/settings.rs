@@ -678,13 +678,16 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     row(ui, Id::LyricsStyle, "Анимация", Some("Как выделяется строка, которую поют"), |ui| {
         choice(ui, Id::LyricsStyle, p);
     });
-    if matches!(p.lyrics_style, 2 | 3) {
-        row(ui, Id::WaveFallback, "Если у текста нет времени слов", Some("Для анимаций «Волна» и «По словам»"), |ui| {
+    row(ui, Id::LyricsUnit, "Подсвечивать", None, |ui| {
+        choice(ui, Id::LyricsUnit, p);
+    });
+    if p.lyrics_style == 2 || p.lyrics_by_words {
+        row(ui, Id::WaveFallback, "Если у текста нет времени слов", Some("Для «Волны» и подсветки по словам"), |ui| {
             choice_menu(ui, Id::WaveFallback, p);
         });
     }
     if p.lyrics_style == 2 {
-        row(ui, Id::WaveJump, "Высота прыжка букв", Some("0 — буквы только подсвечиваются"), |ui| {
+        row(ui, Id::WaveJump, "Высота прыжка", Some("0 — буквы и слова только подсвечиваются"), |ui| {
             if let Some(v) = range_slider(ui, "set-lyrics-jump", p.lyrics_wave_jump, (0.0, 2.0), 0.1, |v| format!("{v:.1}")) {
                 p.lyrics_wave_jump = v;
             }
@@ -711,6 +714,16 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     row(ui, Id::LyricsGlow, "Свечение текста", Some("Лёгкое свечение спетой части"), |ui| {
         ui.add(Switch::new(&mut p.lyrics_glow).id_salt("set-lyrics-glow"));
     });
+    row(ui, Id::LyricsSoftEdges, "Мягкие края", Some("Строки у краёв расплываются, а не обрезаются"), |ui| {
+        ui.add(Switch::new(&mut p.lyrics_soft_edges).id_salt("set-lyrics-soft-edges"));
+    });
+    if p.lyrics_soft_edges {
+        row(ui, Id::LyricsSoftStrength, "Сила мягких краёв", None, |ui| {
+            if let Some(v) = range_slider(ui, "set-lyrics-soft", p.lyrics_soft_strength, (0.5, 1.5), 0.05, |v| format!("{:.0}%", v * 100.0)) {
+                p.lyrics_soft_strength = v;
+            }
+        });
+    }
     row(ui, Id::LyricsGap, "Индикатор паузы", Some("Кружок, пока в песне нет слов"), |ui| {
         choice_menu(ui, Id::LyricsGap, p);
     });
