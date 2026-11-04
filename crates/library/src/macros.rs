@@ -35,12 +35,17 @@ macro_rules! page_row {
     };
 }
 
-/// Whether an album (alias `r`) counts as liked: every one of its live tracks
-/// is liked (the local ones, when it has any); an album without tracks falls
-/// back to its own like row.
+/// Whether an album (alias `r`) counts as liked: it is saved (its own like
+/// row); when album likes like the tracks too
+/// ([`crate::Library::set_album_likes_tracks`]), every one of its live tracks
+/// is liked instead (the local ones, when it has any), and an album without
+/// tracks falls back to its own like row.
 macro_rules! release_liked_expr {
     () => {
-        "(SELECT CASE WHEN COUNT(*) = 0
+        "(SELECT CASE WHEN NOT album_likes_tracks()
+                     THEN EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release'
+                                     AND l.target_id = r.id AND l.deleted = 0)
+                     WHEN COUNT(*) = 0
                      THEN EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release'
                                      AND l.target_id = r.id AND l.deleted = 0)
                      ELSE COUNT(*) = SUM(EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track'

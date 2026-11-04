@@ -312,7 +312,8 @@ impl Shot {
                 self.wait = 30;
             }
             "like_album" => {
-                if let Some(r) = state.library.releases.first() {
+                // `like_album:n` the first n albums.
+                for r in state.library.releases.iter().take(arg.parse().unwrap_or(1)) {
                     out.push(Command::Like(nikgob_view::LikeTarget::Release(r.id), !r.liked));
                 }
                 self.wait = 20;

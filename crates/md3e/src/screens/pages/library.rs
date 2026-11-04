@@ -39,6 +39,9 @@ const SORTS: [(ReleaseSort, &str); 4] = [
     (ReleaseSort::Added, "Недавно добавленные"),
 ];
 
+/// The «Любимые» chip of «Альбомы» (after «Всё», «Альбомы», «Синглы», «EP»).
+const LIKED_FILTER: usize = 4;
+
 /// Artist avatars in grids and rows.
 const AVATAR: f32 = 136.0;
 
@@ -379,7 +382,9 @@ fn overview(
     let mut nav = None;
     widgets::edition_offers(ui, state, None, out);
     let cols = widgets::columns(ui.available_width(), widgets::CARD_W);
+    let apart = !state.prefs.liked_albums_with_playlists;
     let sections = shelf::overview(shelf::Counts {
+        liked_albums: if apart { lib.liked_albums.len() } else { 0 },
         recent: lib.recently_added.len(),
         often: lib.often_played.len(),
         albums: lib.releases.len(),
@@ -394,11 +399,21 @@ fn overview(
                 if widgets::section_header(ui, "Плейлисты", true) {
                     open_tab(pages, LibraryTab::Playlists, lib.track_sort, out);
                 }
-                // «Новый плейлист» first, then every playlist and liked album.
-                let items = shelf_items(lib, &[]);
+                // «Новый плейлист» first, then every playlist (and liked
+                // album, when they sit together).
+                let items = shelf_items(lib, &[], !apart);
                 widgets::card_row_virtual(ui, "lib-playlists", items.len() + 1, widgets::CARD_W, |ui, i| match i {
                     0 => new_playlist_card(ui, pages, widgets::CARD_W),
                     i => nav = shelf_card(ui, items[i - 1], widgets::CARD_W, pages, out).or(nav.take()),
+                });
+            }
+            shelf::Overview::LikedAlbums => {
+                if widgets::section_header(ui, "Любимые альбомы", true) {
+                    pages.release_filter = LIKED_FILTER;
+                    open_tab(pages, LibraryTab::Albums, lib.track_sort, out);
+                }
+                widgets::card_row_virtual(ui, "lib-liked-albums", lib.liked_albums.len(), widgets::CARD_W, |ui, i| {
+                    nav = widgets::release_card(ui, &lib.liked_albums[i].1, widgets::CARD_W, "lib-liked", out).or(nav.take());
                 });
             }
             shelf::Overview::RecentlyAdded => {
@@ -512,7 +527,7 @@ fn playlists_tab(
     is_list: bool,
 ) -> Option<Route> {
     let lib = &state.library;
-    let shown = shelf_items(lib, words);
+    let shown = shelf_items(lib, words, state.prefs.liked_albums_with_playlists);
     if !words.is_empty() && shown.is_empty() {
         no_results(ui, pages);
         return None;
@@ -559,6 +574,7 @@ fn albums_tab(
             1 => matches!(r.release_type, ReleaseType::Album | ReleaseType::Compilation),
             2 => r.release_type == ReleaseType::Single,
             3 => r.release_type == ReleaseType::Ep,
+            LIKED_FILTER => lib.liked_albums.iter().any(|(_, l)| l.id == r.id),
             _ => true,
         })
         .filter(|r| match pages.release_source {
@@ -569,7 +585,7 @@ fn albums_tab(
         })
         .filter(|r| shelf::release_matches(words, r))
         .collect();
-    album_chips(ui, state, pages, shown.len());
+    album_chips(ui, state, pages, shown.len(), !lib.liked_albums.is_empty());
     if shown.is_empty() {
         no_results(ui, pages);
         return None;
@@ -593,12 +609,17 @@ fn albums_tab(
     nav
 }
 
-/// The kind and source chips of «Альбомы», the count at the end.
-fn album_chips(ui: &mut Ui, state: &ViewState, pages: &mut PageState, n: usize) {
+/// The kind and source chips of «Альбомы» («Любимые» while there are
+/// liked albums), the count at the end.
+fn album_chips(ui: &mut Ui, state: &ViewState, pages: &mut PageState, n: usize, liked: bool) {
     let s = Theme::get(ui.ctx()).scheme;
+    if !liked && pages.release_filter == LIKED_FILTER {
+        pages.release_filter = 0;
+    }
     ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        for (idx, label) in ["Всё", "Альбомы", "Синглы", "EP"].iter().enumerate() {
+        let kinds = ["Всё", "Альбомы", "Синглы", "EP", "Любимые"];
+        for (idx, label) in kinds.iter().enumerate().take(if liked { kinds.len() } else { LIKED_FILTER }) {
             if ui.add(FilterChip::new(*label, pages.release_filter == idx).id_salt(("rel-filter", idx))).clicked() {
                 pages.release_filter = idx;
             }
@@ -687,10 +708,10 @@ enum ShelfItem<'a> {
     Album(&'a ReleaseCard),
 }
 
-/// The playlists and liked albums matching `words`, in the library's order
-/// (latest first, «Любимые» first of all).
-fn shelf_items<'a>(lib: &'a nikgob_view::LibraryView, words: &[String]) -> Vec<ShelfItem<'a>> {
-    let mut albums = lib.liked_albums.iter().peekable();
+/// The playlists matching `words` and, with `albums`, the liked albums
+/// too, in the library's order (latest first, «Любимые» first of all).
+fn shelf_items<'a>(lib: &'a nikgob_view::LibraryView, words: &[String], albums: bool) -> Vec<ShelfItem<'a>> {
+    let mut albums = lib.liked_albums.iter().take(if albums { usize::MAX } else { 0 }).peekable();
     let mut items = Vec::new();
     let album = |r: &'a ReleaseCard, items: &mut Vec<ShelfItem<'a>>| {
         if shelf::release_matches(words, r) {

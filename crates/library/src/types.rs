@@ -119,7 +119,8 @@ pub struct ReleaseRow {
     pub local_tracks: u32,
     /// Tracks of this release known to the library.
     pub known_tracks: u32,
-    /// Every (local) track of the album is liked; see [`crate::Library::like_release`].
+    /// The album is liked: saved, or, while album likes like the tracks
+    /// too, every (local) track of it is; see [`crate::Library::like_release`].
     pub liked: bool,
     /// Rows of its page ([`crate::Library::tracks_of_release_all`]: outside
     /// the library too).

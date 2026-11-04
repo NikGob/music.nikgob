@@ -813,9 +813,10 @@ pub enum TrackSort {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LibraryView {
     pub playlists: Vec<PlaylistCard>,
-    /// The albums liked as a whole, shown among the playlists: each with
-    /// the index in [`Self::playlists`] it goes before (its length: after
-    /// them all), so both read latest first.
+    /// The albums liked as a whole («Любимые альбомы»), shown on a shelf
+    /// of their own or among the playlists: each with the index in
+    /// [`Self::playlists`] it goes before (its length: after them all), so
+    /// both read latest first.
     pub liked_albums: Vec<(usize, ReleaseCard)>,
     pub releases: Vec<ReleaseCard>,
     pub artists: Vec<ArtistCard>,
@@ -1289,6 +1290,14 @@ pub struct Prefs {
     pub playlist_sync_default: PlaylistSyncMode,
     /// Likes and unlikes here go to the services the track is in.
     pub push_likes: bool,
+    /// A like of an album likes all its tracks too (into «Любимые» and the
+    /// services). Off: it only saves the album.
+    pub album_like_tracks: bool,
+    /// The saved albums sit among the playlists. Off: a shelf of their own,
+    /// «Любимые альбомы».
+    pub liked_albums_with_playlists: bool,
+    /// A like of a single's song saves the single as an album too.
+    pub single_like_saves: bool,
     /// An import of export files reads the songs saved in the music library
     /// (Takeout's «music library songs»): they teach the taste only, no
     /// likes, no downloads, not in the library. Off: that file is skipped.
@@ -2421,6 +2430,9 @@ impl Default for Prefs {
             like_downloads: true,
             playlist_sync_default: PlaylistSyncMode::Follow,
             push_likes: true,
+            album_like_tracks: false,
+            liked_albums_with_playlists: false,
+            single_like_saves: false,
             import_saved_songs: true,
             library_only_downloaded: false,
             auto_download_limit: 2,

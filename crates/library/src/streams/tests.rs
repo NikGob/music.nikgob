@@ -97,10 +97,20 @@ fn playlists_bring_stream_tracks_in_and_take_them_out() {
     assert_eq!(lib.track_in_library(b).unwrap(), Some(false));
     assert_eq!(listed(&lib).0, 0);
 
-    // Liking an album of stream tracks likes them all into the library.
+    // Saving an album of stream tracks puts them all into the library,
+    // without liking them; unsaving takes them out again.
     let rid = lib.get_track(a).unwrap().unwrap().release_id.unwrap();
     lib.like_release(rid, true).unwrap();
     assert_eq!(listed(&lib).0, 2);
+    assert_eq!(lib.liked_count().unwrap(), 0);
+    lib.like_release(rid, false).unwrap();
+    assert_eq!(listed(&lib).0, 0);
+
+    // Liking an album that likes its tracks likes them all into the library.
+    lib.set_album_likes_tracks(true);
+    lib.like_release(rid, true).unwrap();
+    assert_eq!(listed(&lib).0, 2);
+    assert_eq!(lib.liked_count().unwrap(), 2);
 }
 
 #[test]

@@ -227,6 +227,8 @@ fn liking_a_twelve_track_album_is_one_call() {
     let sp = Arc::new(FakeService::spotify().with_album("big", "Big", 12));
     pulled_before(&lib, std::slice::from_ref(&sp));
     let rig = start(&lib, std::slice::from_ref(&sp), quick());
+    // The album like that likes its tracks too.
+    rig.rt.send(Command::SetPrefs(Box::new(Prefs { album_like_tracks: true, ..rig.rt.state().prefs.clone() })));
     let album = RemoteId::new(Service::Spotify, "sp-alb-big");
     rig.rt.send(Command::LoadStream(StreamPage::Album(album.clone())));
     wait_for("the page", 10, || rig.rt.state().stream_page.as_ref().is_some_and(|p| p.tracks.len() == 12));

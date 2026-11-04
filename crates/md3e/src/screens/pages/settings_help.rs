@@ -195,6 +195,12 @@ pub enum SettingId {
     DeezerEnabled,
     LikeDownload,
     PushLikes,
+    /// «Лайк альбома»: the album alone, or its tracks too.
+    AlbumLike,
+    /// «Лайк песни из сингла»: the song alone, or the single saved too.
+    SingleLike,
+    /// «Любимые альбомы»: a shelf of their own, or among the playlists.
+    LikedAlbumsPlace,
     AutoDownloads,
     DownloadToasts,
     /// One line of «Источники скачивания»: its switch and place.
@@ -329,7 +335,7 @@ impl SettingId {
             }
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
             Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
-            | YouTubeCookies | LikeDownload | PushLikes | AutoDownloads | DownloadToasts | DownloadSource(_) | PlaylistSync | ImportSpotify
+            | YouTubeCookies | LikeDownload | PushLikes | AlbumLike | SingleLike | LikedAlbumsPlace | AutoDownloads | DownloadToasts | DownloadSource(_) | PlaylistSync | ImportSpotify
             | ImportYouTube | ImportFiles | ImportSavedSongs | StreamCache | StreamAnalysis | Prowlarr | Soulseek | SoulseekShare | SoulseekUpload | NoSeed | SeedLimit | SeedDays
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
             RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | RadioNoRepeat | NewShareBy(_)
@@ -449,6 +455,9 @@ impl SettingId {
             YouTubeCookies => "Запасной вход, если окно «Войти через Google» не помогло: выгрузи cookies.txt для music.youtube.com расширением браузера, пока ты вошёл, и вставь сюда. Обычно хватает «Войти через Google».",
             LikeDownload => "Что скачивать, когда лайкаешь трек из стрима: только его (вырезается из раздачи альбома), сразу весь альбом или ничего — тогда лайк остаётся только лайком. Лайк альбома качает весь альбом. «Скачать» у трека или альбома качает всегда, без лайка.",
             PushLikes => "Лайк здесь ставится и в Spotify / YouTube Music, а снятый лайк снимается и там. Только для треков, которые есть в сервисе.",
+            AlbumLike => "Что делает сердечко у альбома: только кладёт альбом в «Любимые альбомы» или ещё и лайкает все его треки — тогда они попадают в «Любимые».",
+            SingleLike => "Сингл — это альбом из одной песни. Лайк такой песни может заодно класть сингл в «Любимые альбомы».",
+            LikedAlbumsPlace => "Где в библиотеке лежат любимые альбомы: отдельной полкой или вперемешку с плейлистами.",
             AutoDownloads => "Сколько треков из «Хочу скачать» ищутся и качаются одновременно сами. Меньше — тише для сети.",
             DownloadToasts => "Всплывающие сообщения о загрузках, которые идут сами: раздача не нашлась, начала качаться, скачалась. Выключено — всё это видно только в «Загрузках» и «Хочу скачать».",
             DownloadSource(v::SourceKey::Torrents) => "Раздачи, которые находит Prowlarr (адрес и ключ — ниже, в «Торренты»). Из альбома или дискографии берётся только нужный трек. Сначала берётся FLAC, где бы он ни был; при равном качестве — источник выше. Копия с YouTube — только когда нигде нет.",
@@ -611,6 +620,18 @@ impl SettingId {
                 c!("Весь альбом", "Лайк трека скачивает весь альбом, в котором он вышел."),
                 c!("Ничего", "Лайк — только лайк: ничего не качается. «Скачать» у трека и альбома качает и так."),
             ],
+            Self::AlbumLike => &[
+                c!("Только альбом", "Альбом попадает в «Любимые альбомы», его треки не трогаются."),
+                c!("Альбом и все треки", "Все треки альбома лайкаются: попадают в «Любимые» и, если включено, в сервисы. Снять лайк с альбома — снять со всех."),
+            ],
+            Self::SingleLike => &[
+                c!("Только песня", "Лайк песни — только лайк песни."),
+                c!("И сам сингл", "Лайк песни из сингла кладёт сингл в «Любимые альбомы», снятый лайк убирает."),
+            ],
+            Self::LikedAlbumsPlace => &[
+                c!("Отдельно", "Своя полка «Любимые альбомы» в библиотеке."),
+                c!("С плейлистами", "Альбомы стоят среди плейлистов, по времени лайка."),
+            ],
             Self::PlaylistSync => &[
                 c!("Двусторонняя", "Правки здесь уходят в сервис, правки там приходят сюда."),
                 c!("Только слежка", "Плейлист повторяет сервис; свои правки здесь туда не уходят."),
@@ -704,6 +725,9 @@ impl SettingId {
             Self::LikeDownload if !p.like_downloads => 2,
             Self::LikeDownload => usize::from(p.like_download_scope == v::WishlistScope::Album),
             Self::PlaylistSync => sync_index(p.playlist_sync_default),
+            Self::AlbumLike => usize::from(p.album_like_tracks),
+            Self::SingleLike => usize::from(p.single_like_saves),
+            Self::LikedAlbumsPlace => usize::from(p.liked_albums_with_playlists),
             Self::RadioSource if p.mixes_downloaded_only => 0,
             Self::RadioSource if p.radio_new_share == v::RadioNewShare::None => 1,
             Self::RadioSource => 2,
@@ -768,6 +792,9 @@ impl SettingId {
                 }
             }
             Self::PlaylistSync => p.playlist_sync_default = v::PlaylistSyncMode::ALL[i.min(2)],
+            Self::AlbumLike => p.album_like_tracks = i == 1,
+            Self::SingleLike => p.single_like_saves = i == 1,
+            Self::LikedAlbumsPlace => p.liked_albums_with_playlists = i == 1,
             Self::RadioSource => {
                 p.mixes_downloaded_only = i == 0;
                 if i == 1 {
@@ -2023,7 +2050,7 @@ mod tests {
         for id in [
             S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::RingDir, S::RingStyle, S::Ambient,
             S::BgShapes, S::BgColors, S::LyricsStyle, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
-            S::OpusBitrate, S::NpVolume, S::LikeDownload, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
+            S::OpusBitrate, S::NpVolume, S::LikeDownload, S::AlbumLike, S::SingleLike, S::LikedAlbumsPlace, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
             S::RadioNoRepeat, S::LyricsGpu, S::LyricsUi,
         ] {

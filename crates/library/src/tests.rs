@@ -2095,8 +2095,50 @@ fn purging_removes_rows_files_and_empty_albums() {
 }
 
 #[test]
+fn liking_an_album_saves_it_and_leaves_its_tracks() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let r = release(&lib, &a, "Album", None);
+    let t1 = track(&lib, &a, Some(&r), "One", 1);
+    let t2 = track(&lib, &a, Some(&r), "Two", 2);
+    local(&lib, &t1, "1.opus", Codec::Opus, Some(160));
+    local(&lib, &t2, "2.opus", Codec::Opus, Some(160));
+    lib.like(t1.id).unwrap();
+    let liked = |lib: &Library| {
+        lib.releases(0, 10, ReleaseSort::asc(ReleaseSortKey::Title)).unwrap()[0].liked
+    };
+    assert!(!liked(&lib), "a liked track does not make the album liked");
+
+    assert!(lib.like_release(r.id, true).unwrap().is_empty(), "no track touched");
+    assert!(liked(&lib) && lib.release_liked(r.id).unwrap());
+    assert_eq!(titles(&lib.liked_tracks(0, 10).unwrap()), vec!["One"]);
+    let albums = lib.liked_releases(0, 10).unwrap();
+    assert_eq!(albums.iter().map(|a| a.0.release.id).collect::<Vec<_>>(), vec![r.id]);
+    assert!(albums[0].0.liked);
+
+    // Unliking a track leaves the album saved.
+    lib.unlike(t1.id).unwrap();
+    assert!(lib.release_liked(r.id).unwrap());
+
+    // Unsaving leaves the tracks' own likes.
+    lib.like(t2.id).unwrap();
+    lib.like_release(r.id, false).unwrap();
+    assert!(!liked(&lib));
+    assert!(lib.liked_releases(0, 10).unwrap().is_empty());
+    assert_eq!(titles(&lib.liked_tracks(0, 10).unwrap()), vec!["Two"]);
+
+    // The other mode reads the same likes its way: all tracks liked or not.
+    lib.like_release(r.id, true).unwrap();
+    lib.set_album_likes_tracks(true);
+    assert!(!liked(&lib), "only one of its two tracks is liked");
+    lib.like(t1.id).unwrap();
+    assert!(liked(&lib));
+}
+
+#[test]
 fn liking_an_album_likes_all_its_tracks() {
     let lib = lib();
+    lib.set_album_likes_tracks(true);
     let a = artist(&lib, "A");
     let r = release(&lib, &a, "Album", None);
     let t1 = track(&lib, &a, Some(&r), "One", 1);

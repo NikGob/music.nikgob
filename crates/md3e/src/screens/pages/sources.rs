@@ -47,6 +47,9 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     row(ui, Id::PushLikes, "Лайки обратно в сервисы", Some("Лайк здесь ставится и в Spotify / YouTube Music"), |ui| {
         ui.add(Switch::new(&mut p.push_likes).id_salt("set-push-likes"));
     });
+    row(ui, Id::AlbumLike, "Лайк альбома", None, |ui| choice(ui, Id::AlbumLike, p));
+    row(ui, Id::SingleLike, "Лайк песни из сингла", None, |ui| choice(ui, Id::SingleLike, p));
+    row(ui, Id::LikedAlbumsPlace, "Любимые альбомы", None, |ui| choice(ui, Id::LikedAlbumsPlace, p));
     let n = p.auto_download_limit.clamp(1, 8);
     row(ui, Id::AutoDownloads, "Одновременных автозагрузок", Some(&format!("{n} из «Хочу скачать» за раз")), |ui| {
         if let Some(v) = range_slider(ui, "set-auto-dl", n as f32, (1.0, 8.0), 1.0, |v| format!("{v:.0}")) {

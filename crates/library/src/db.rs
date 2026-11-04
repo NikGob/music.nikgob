@@ -2,7 +2,7 @@
 //! read-only connections.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -33,6 +33,9 @@ struct Inner {
     readers: Option<ReadPool>,
     device: RwLock<DeviceId>,
     last_ts: AtomicI64,
+    /// See [`Library::set_album_likes_tracks`]; the SQL reads it through
+    /// `album_likes_tracks()`.
+    album_likes_tracks: Arc<AtomicBool>,
 }
 
 struct ReadPool {
@@ -76,6 +79,16 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panic while holding a connection leaves SQLite itself consistent
     // (open transactions roll back on drop), so poisoning is ignored.
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The functions the library's SQL calls: `album_likes_tracks()`, the
+/// mode of [`Library::set_album_likes_tracks`].
+fn add_functions(conn: &Connection, album_likes_tracks: &Arc<AtomicBool>) -> Result<()> {
+    let flag = Arc::clone(album_likes_tracks);
+    conn.create_scalar_function("album_likes_tracks", 0, rusqlite::functions::FunctionFlags::SQLITE_UTF8, move |_| {
+        Ok(flag.load(Ordering::Relaxed))
+    })?;
+    Ok(())
 }
 
 fn configure(conn: &Connection, writer: bool) -> Result<()> {
@@ -140,6 +153,13 @@ impl Library {
     }
 
     fn from_parts(writer: Connection, readers: Option<ReadPool>) -> Result<Self> {
+        let album_likes_tracks = Arc::new(AtomicBool::new(false));
+        add_functions(&writer, &album_likes_tracks)?;
+        if let Some(pool) = &readers {
+            for conn in pool.conns.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+                add_functions(conn, &album_likes_tracks)?;
+            }
+        }
         let device = match meta_get(&writer, "device_id")? {
             Some(id) => DeviceId(id),
             None => {
@@ -154,8 +174,21 @@ impl Library {
                 readers,
                 device: RwLock::new(device),
                 last_ts: AtomicI64::new(0),
+                album_likes_tracks,
             }),
         })
+    }
+
+    /// How an album like works: off (the default), it saves the album
+    /// alone and the album reads as liked exactly while it is saved; on, it
+    /// likes every track of the album too, and the album reads as liked
+    /// while all of them are (see [`Self::like_release`]).
+    pub fn set_album_likes_tracks(&self, on: bool) {
+        self.inner.album_likes_tracks.store(on, Ordering::Relaxed);
+    }
+
+    pub fn album_likes_tracks(&self) -> bool {
+        self.inner.album_likes_tracks.load(Ordering::Relaxed)
     }
 
     /// Identity stamped into `updated_by` / `Event::device`. Generated on first

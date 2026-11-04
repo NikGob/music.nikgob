@@ -535,6 +535,7 @@ impl Worker {
         let volume = saved.volume.unwrap_or(0.8).clamp(0.0, 1.0);
         playback.set_volume(if saved.muted { 0.0 } else { volume });
         playback.configure(crossfade(&config.prefs), config.prefs.normalization);
+        config.library.set_album_likes_tracks(config.prefs.album_like_tracks);
         Self {
             res: Resolver::new(config.library.clone(), config.library_dir),
             lib: config.library,
@@ -982,6 +983,10 @@ impl Worker {
                         (false, _) => "Убрано из Любимых",
                     };
                     self.toast(text, Some(("Отменить".into(), Command::Like(target, !on))));
+                    // Its album's cards are read again below.
+                    if let LikeTarget::Track(t) = target {
+                        let _ = self.single_follows_like(t, on);
+                    }
                     self.refresh_liked(target, on, before);
                 }
             }
@@ -2253,6 +2258,15 @@ impl Worker {
             self.publish_accounts();
             self.preload_next();
         }
+        if old.album_like_tracks != p.album_like_tracks {
+            // The album hearts read the likes the new way.
+            self.lib.set_album_likes_tracks(p.album_like_tracks);
+            self.load_library();
+            let release = self.state.read().release.as_ref().map(|r| r.card.id);
+            if let Some(r) = release {
+                self.load_release(r);
+            }
+        }
         if old.library_only_downloaded != p.library_only_downloaded {
             self.load_library();
         }
@@ -2406,9 +2420,15 @@ impl Worker {
         }
     }
 
-    /// Liking an album = liking all its tracks; unliking unlikes them all.
+    /// Liking an album saves it; when album likes like the tracks too
+    /// ([`nikgob_view::Prefs::album_like_tracks`]), it likes all its tracks,
+    /// and unliking unlikes them all.
     fn like_release(&mut self, id: nikgob_core::model::ReleaseId, on: bool) {
         let before = self.library_tracks();
+        if !self.state.read().prefs.album_like_tracks {
+            self.save_release(id, on, before);
+            return;
+        }
         let Some(tracks) = self.log_err("лайк", self.lib.like_release(id, on)) else { return };
         for &t in &tracks {
             let _ = self.lib.record_event(
@@ -2472,6 +2492,62 @@ impl Worker {
             }
         });
         self.after_like_change(before, vec![id]);
+    }
+
+    /// An album saved (or unsaved) alone: its tracks keep their likes; a
+    /// saved album still downloads whole, as a like of it always did.
+    fn save_release(&mut self, id: nikgob_core::model::ReleaseId, on: bool, before: Held) {
+        if self.log_err("лайк", self.lib.like_release(id, on)).is_none() {
+            return;
+        }
+        let wished = if on {
+            let rows = self.lib.tracks_of_release_all(id).unwrap_or_default();
+            let local: Vec<TrackId> = rows.iter().filter(|r| r.has_local).map(|r| r.id).collect();
+            let tracks = if local.is_empty() { rows.iter().map(|r| r.id).collect() } else { local };
+            self.wish_for_album(id, &tracks, nikgob_core::model::WishlistOrigin::Like)
+        } else {
+            self.wish_drop_album(id);
+            false
+        };
+        self.publish_wishlist();
+        self.wish_tick();
+        let text = match (on, wished) {
+            (true, true) if self.can_download() => "В любимых альбомах · скачаю в фоне",
+            (true, true) => "В любимых альбомах · скачается, когда подключишь торренты",
+            (true, false) => "Добавлено в любимые альбомы",
+            (false, _) => "Убрано из любимых альбомов",
+        };
+        self.toast(text, Some(("Отменить".into(), Command::Like(LikeTarget::Release(id), !on))));
+        self.publish(|s| {
+            for r in [&mut s.home.long_unplayed, &mut s.home.recently_added, &mut s.search.releases] {
+                r.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
+            }
+            for c in &mut s.home.continue_listening {
+                if let nikgob_view::ContinueCard::Release(c) = c
+                    && c.id == id
+                {
+                    c.liked = on;
+                }
+            }
+        });
+        self.after_like_change(before, vec![id]);
+    }
+
+    /// A like of a single's song saves (or unsaves) the single as well,
+    /// when [`nikgob_view::Prefs::single_like_saves`] asks for it.
+    fn single_follows_like(&mut self, track: TrackId, on: bool) -> Option<()> {
+        if !self.state.read().prefs.single_like_saves {
+            return None;
+        }
+        let release = self.lib.get_track(track).ok().flatten()?.release_id?;
+        let r = self.lib.get_release(release).ok().flatten()?;
+        let rows = self.lib.tracks_of_release_all(release).unwrap_or_default();
+        let single = r.release_type == nikgob_core::model::ReleaseType::Single || (rows.len() == 1 && r.total_tracks.unwrap_or(1) <= 1);
+        if !single || self.lib.is_liked(LikeTarget::Release(release)).unwrap_or(false) == on {
+            return None;
+        }
+        let r = if on { self.lib.like(LikeTarget::Release(release)) } else { self.lib.unlike(LikeTarget::Release(release)) };
+        self.log_err("лайк", r)
     }
 
     /// Track likes changed: album hearts and "Любимые" follow.

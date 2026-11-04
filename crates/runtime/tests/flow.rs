@@ -546,7 +546,7 @@ fn likes_and_playlist_edits_update_the_library_in_place() {
             library: lib.clone(),
             streams: Vec::new(),
             library_dir: std::env::temp_dir(),
-            prefs: Prefs::default(),
+            prefs: Prefs { album_like_tracks: true, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: None,
@@ -594,6 +594,77 @@ fn likes_and_playlist_edits_update_the_library_in_place() {
     assert_eq!(rt.state().library.track_count, 2);
     rt.send(Command::Like(LikeTarget::Track(stream.id), true));
     wait_for(&rt, "the stream song in", |s| s.library.track_count == 3);
+}
+
+/// By default a like of an album saves it alone: its tracks keep their
+/// likes, it sits on the shelf of liked albums, and an unlike takes only it
+/// away. A like of a single's song saves the single only when asked.
+#[test]
+fn an_album_like_saves_the_album_and_leaves_its_tracks() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, LikeTarget, Release, ReleaseType, Source, SourceKind, Track};
+
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let release = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    let mut single = Release::new("Single", credit.clone());
+    single.release_type = ReleaseType::Single;
+    let single = lib.upsert_release(&single).unwrap();
+    let add = |title: &str, release: &Release, no: u32| {
+        let mut t = Track::new(title, credit.clone());
+        t.release_id = Some(release.id);
+        t.track_no = no;
+        let t = lib.upsert_track(&t).unwrap();
+        lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("Music/{title}.opus"), Codec::Opus)).unwrap();
+        t
+    };
+    let tracks = [add("t0", &release, 1), add("t1", &release, 2)];
+    let song = add("s", &single, 1);
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: Vec::new(),
+            library_dir: std::env::temp_dir(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt.send(Command::LoadLibrary);
+    wait_for(&rt, "the library", |s| s.library.loaded && s.library.tracks.len() == 3);
+    let album = |s: &ViewState, id| s.library.releases.iter().find(|r| r.id == id).map(|r| r.liked);
+    let shelf = |s: &ViewState| s.library.liked_albums.iter().map(|(_, r)| r.id).collect::<Vec<_>>();
+
+    rt.send(Command::Like(LikeTarget::Track(tracks[0].id), true));
+    rt.send(Command::Like(LikeTarget::Track(tracks[1].id), true));
+    wait_for(&rt, "both tracks liked", |s| s.library.tracks.iter().filter(|t| t.liked).count() == 2);
+    assert_eq!(album(&rt.state(), release.id), Some(false), "liked tracks do not like the album");
+
+    rt.send(Command::Like(LikeTarget::Release(release.id), true));
+    wait_for(&rt, "the album saved", |s| album(s, release.id) == Some(true) && shelf(s) == [release.id]);
+    rt.send(Command::Like(LikeTarget::Release(release.id), false));
+    wait_for(&rt, "the album unsaved", |s| album(s, release.id) == Some(false) && shelf(s).is_empty());
+    assert_eq!(lib.liked_count().unwrap(), 2, "the tracks keep their own likes");
+
+    rt.send(Command::Like(LikeTarget::Track(song.id), true));
+    wait_for(&rt, "the song liked", |s| s.library.tracks.iter().any(|t| t.id == song.id && t.liked));
+    assert_eq!(album(&rt.state(), single.id), Some(false));
+    rt.send(Command::SetPrefs(Box::new(Prefs { single_like_saves: true, ..rt.state().prefs.clone() })));
+    rt.send(Command::Like(LikeTarget::Track(song.id), false));
+    rt.send(Command::Like(LikeTarget::Track(song.id), true));
+    wait_for(&rt, "the single saved", |s| album(s, single.id) == Some(true) && shelf(s) == [single.id]);
+    rt.send(Command::Like(LikeTarget::Track(song.id), false));
+    wait_for(&rt, "the single unsaved", |s| album(s, single.id) == Some(false) && shelf(s).is_empty());
+
+    // The old way: the album likes its tracks, its heart follows them.
+    rt.send(Command::SetPrefs(Box::new(Prefs { album_like_tracks: true, ..rt.state().prefs.clone() })));
+    rt.send(Command::Like(LikeTarget::Release(release.id), false));
+    wait_for(&rt, "its tracks unliked", |s| s.library.tracks.iter().all(|t| !t.liked));
+    rt.send(Command::Like(LikeTarget::Release(release.id), true));
+    wait_for(&rt, "its tracks liked", |s| album(s, release.id) == Some(true) && s.library.tracks.iter().filter(|t| t.liked).count() == 2);
 }
 
 /// Under «Только скачанное» an album that is only partly downloaded plays
