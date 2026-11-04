@@ -305,13 +305,48 @@ fn added_to_playlist(name: &str, added: usize, already: usize) -> String {
     }
 }
 
-/// How far the engine's position may differ from our extrapolation before
-/// the view is told (normal jitter is a few tens of milliseconds).
-const POSITION_DRIFT: Duration = Duration::from_millis(1500);
+/// Up to this far apart, our position and the heard one are the same.
+const POSITION_JITTER: Duration = Duration::from_millis(4);
+/// Further apart than this, our position jumps to the heard one (a seek, a
+/// loop, a long stall); closer, it runs faster or slower until they meet.
+const POSITION_SNAP: Duration = Duration::from_millis(300);
+/// The pace is off by the difference over this (half of it is gone by
+/// the next report, a quarter second later) ...
+const SLEW_SECS: f64 = 0.5;
+/// ... with the pace at most this much off the normal one.
+const SLEW_MAX: f64 = 0.25;
 /// After we move the position ourselves (seek, start), a report the engine
 /// sent before it heard about that can still be on its way: such a far-off
 /// report is ignored for this long.
 const POSITION_SETTLE: Duration = Duration::from_millis(500);
+/// What to do with our position when the engine reports the heard one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Follow {
+    Keep,
+    /// Go on from where we are at this pace.
+    Rate(f64),
+    /// Jump to the heard position.
+    Snap,
+}
+
+/// How our position `ours` follows the heard one (`stalled`: it has not
+/// moved since the last report) while playing at `rate`. It never moves
+/// backwards: ahead of a stalled sound it waits, ahead of a moving one it
+/// slows down.
+fn follow(ours: Duration, heard: Duration, stalled: bool, rate: f64) -> Follow {
+    if ours.abs_diff(heard) > POSITION_SNAP {
+        return Follow::Snap;
+    }
+    if stalled && ours >= heard {
+        return Follow::Rate(0.0);
+    }
+    if ours.abs_diff(heard) <= POSITION_JITTER {
+        return if rate == 1.0 { Follow::Keep } else { Follow::Rate(1.0) };
+    }
+    let error = heard.as_secs_f64() - ours.as_secs_f64();
+    Follow::Rate((1.0 + error / SLEW_SECS).clamp(1.0 - SLEW_MAX, 1.0 + SLEW_MAX))
+}
+
 /// A toast no snackbar took away is dropped after this long.
 const TOAST_KEPT: Duration = Duration::from_secs(60);
 
@@ -381,6 +416,11 @@ struct Worker {
     status: Status,
     position: Duration,
     position_at: Instant,
+    /// How fast `position` moves from `position_at` (1 normal; a little off
+    /// while it meets the heard position, 0 while the sound stalls).
+    rate: f64,
+    /// The engine's last position report, to tell a stall.
+    reported: Option<(u64, Duration)>,
     /// When we last moved `position` ourselves (see [`POSITION_SETTLE`]).
     jumped_at: Instant,
     volume: f32,
@@ -507,6 +547,8 @@ impl Worker {
             status: Status::Stopped,
             position: Duration::ZERO,
             position_at: Instant::now(),
+            rate: 1.0,
+            reported: None,
             jumped_at: Instant::now(),
             volume,
             muted: saved.muted,
@@ -1177,11 +1219,29 @@ impl Worker {
     // ---------------------------------------------------------------- playback
 
     fn position_now(&self) -> Duration {
+        self.position_at_instant(Instant::now())
+    }
+
+    /// Where we take playback to be at `now`, going from the last anchor at
+    /// [`Self::rate`].
+    fn position_at_instant(&self, now: Instant) -> Duration {
         if self.status == Status::Playing {
-            self.position + self.position_at.elapsed()
+            self.position + now.saturating_duration_since(self.position_at).mul_f64(self.rate)
         } else {
             self.position
         }
+    }
+
+    /// Publishes only where playback is and how fast the view should move
+    /// it (a position report, many a second: none of the rest changed).
+    fn publish_clock(&mut self) {
+        let now = Instant::now();
+        let (position, rate) = (self.position_at_instant(now), self.rate);
+        self.publish(|s| {
+            s.player.position = position;
+            s.player.at = now;
+            s.player.rate = rate as f32;
+        });
     }
 
     /// What to hand the engine for `e`: its best source that is usable and
@@ -1296,6 +1356,7 @@ impl Worker {
         self.play_request(e, req, source, kind);
         self.position = Duration::ZERO;
         self.position_at = Instant::now();
+        self.rate = 1.0;
         self.jumped_at = Instant::now();
         self.seek_to_failover(e);
         self.preload_next();
@@ -1311,6 +1372,7 @@ impl Worker {
         self.playback.seek(at);
         self.position = at;
         self.position_at = Instant::now();
+        self.rate = 1.0;
         self.jumped_at = Instant::now();
         self.publish_player();
     }
@@ -1399,6 +1461,7 @@ impl Worker {
         self.play_request(e, req, source, kind);
         self.position = Duration::ZERO;
         self.position_at = Instant::now();
+        self.rate = 1.0;
         self.jumped_at = Instant::now();
         self.record_start(e, (!kind.is_local()).then_some(kind));
         self.preload_next();
@@ -1435,6 +1498,7 @@ impl Worker {
             Status::Paused => {
                 self.heard_tick();
                 self.position_at = Instant::now();
+                self.rate = 1.0;
                 self.status = Status::Playing;
                 self.playback.resume();
                 self.publish_player();
@@ -1471,6 +1535,7 @@ impl Worker {
         self.playback.seek(p);
         self.position = p;
         self.position_at = Instant::now();
+        self.rate = 1.0;
         self.jumped_at = Instant::now();
         if let Some(e) = self.playing {
             let _ = self.lib.record_event(
@@ -1607,6 +1672,7 @@ impl Worker {
                         _ => Duration::ZERO,
                     };
                     self.position_at = Instant::now();
+                    self.rate = 1.0;
                     self.publish_player();
                 }
             }
@@ -1637,6 +1703,7 @@ impl Worker {
                         .map(|(_, source, kind)| (source, kind));
                     self.position = Duration::ZERO;
                     self.position_at = Instant::now();
+                    self.rate = 1.0;
                     let kind = self.playing_source.map(|(_, k)| k).filter(|k| !k.is_local());
                     self.record_start(e, kind);
                     self.preload_next();
@@ -1658,23 +1725,43 @@ impl Worker {
                     self.status = Status::Playing;
                     self.position = position;
                     self.position_at = Instant::now();
+                    self.rate = 1.0;
                     self.publish_player();
                     return;
                 }
                 if self.playing.map(|e| e.id) == Some(id) {
-                    // The view extrapolates from its last publish and stops at
-                    // the track's end. When the engine reports somewhere else
-                    // (a repeat-one loop or a seek we did not hear about), it
-                    // would stay frozen there: publish the real position.
-                    let drifted = self.status == Status::Playing
-                        && self.position_now().abs_diff(position) > POSITION_DRIFT;
-                    if drifted && self.jumped_at.elapsed() < POSITION_SETTLE {
+                    let stalled = self.reported == Some((id, position));
+                    self.reported = Some((id, position));
+                    if self.status != Status::Playing {
+                        self.position = position;
+                        self.position_at = Instant::now();
+                        self.rate = 1.0;
                         return;
                     }
-                    self.position = position;
-                    self.position_at = Instant::now();
-                    if drifted {
-                        self.publish_player();
+                    // The view extrapolates from its last publish and stops at
+                    // the track's end, so it follows what is heard: a small
+                    // difference is made up by running a little faster or
+                    // slower (never backwards); a far one (a repeat-one loop,
+                    // a seek we did not hear about, a long stall) is jumped.
+                    let now = Instant::now();
+                    let ours = self.position_at_instant(now);
+                    match follow(ours, position, stalled, self.rate) {
+                        Follow::Keep => {}
+                        Follow::Snap => {
+                            if self.jumped_at.elapsed() < POSITION_SETTLE {
+                                return;
+                            }
+                            self.position = position;
+                            self.position_at = now;
+                            self.rate = if stalled { 0.0 } else { 1.0 };
+                            self.publish_player();
+                        }
+                        Follow::Rate(rate) => {
+                            self.position = ours;
+                            self.position_at = now;
+                            self.rate = rate;
+                            self.publish_clock();
+                        }
                     }
                 }
             }
@@ -1799,7 +1886,8 @@ impl Worker {
         self.radio_top_up();
         let radio = self.radio_view();
         let status = self.status;
-        let position = self.position_now();
+        let now = Instant::now();
+        let (position, rate) = (self.position_at_instant(now), self.rate as f32);
         let (volume, muted) = (self.volume, self.muted);
         let (shuffle, repeat) = (self.queue.shuffle, self.queue.repeat);
         let context = self.queue.context.clone();
@@ -1834,7 +1922,8 @@ impl Worker {
             p.audio_service = audio_service;
             p.audio_quality = audio_quality;
             p.position = position;
-            p.at = Instant::now();
+            p.at = now;
+            p.rate = rate;
             p.volume = volume;
             p.muted = muted;
             p.shuffle = shuffle;
@@ -2662,6 +2751,7 @@ impl Worker {
             }
             self.position = pos;
             self.position_at = Instant::now();
+            self.rate = 1.0;
             self.preload_next();
         }
     }
@@ -2869,4 +2959,126 @@ impl Worker {
 fn youtube_refused_midway(message: &str) -> bool {
     let m = message.to_lowercase();
     (m.contains("refused") || m.contains("http 403")) && !streams::resolve::video_refused(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(v: u64) -> Duration {
+        Duration::from_millis(v)
+    }
+
+    #[test]
+    fn follow_slews_small_differences_and_jumps_far_ones() {
+        assert_eq!(follow(ms(10_000), ms(10_002), false, 1.0), Follow::Keep);
+        assert_eq!(follow(ms(10_000), ms(10_002), false, 1.1), Follow::Rate(1.0));
+        // Behind: faster; ahead: slower, never backwards.
+        let Follow::Rate(r) = follow(ms(10_000), ms(10_100), false, 1.0) else { panic!() };
+        assert!((r - 1.2).abs() < 1e-9);
+        let Follow::Rate(r) = follow(ms(10_100), ms(10_000), false, 1.0) else { panic!() };
+        assert!((r - 0.8).abs() < 1e-9);
+        let Follow::Rate(r) = follow(ms(10_290), ms(10_000), false, 1.0) else { panic!() };
+        assert!((r - (1.0 - SLEW_MAX)).abs() < 1e-9);
+        // A seek or a loop.
+        assert_eq!(follow(ms(10_000), ms(500), false, 1.0), Follow::Snap);
+        assert_eq!(follow(ms(10_000), ms(10_400), false, 1.0), Follow::Snap);
+        // Stalled behind us: wait for it; stalled ahead: catch up.
+        assert_eq!(follow(ms(10_200), ms(10_000), true, 1.0), Follow::Rate(0.0));
+        assert!(matches!(follow(ms(10_000), ms(10_100), true, 1.0), Follow::Rate(r) if r > 1.0));
+    }
+
+    /// Our clock as the runtime keeps it, driven by simulated reports.
+    struct Sim {
+        position: f64,
+        at: f64,
+        rate: f64,
+        heard: Option<Duration>,
+        jumps: u32,
+    }
+
+    impl Sim {
+        fn at(&self, t: f64) -> f64 {
+            self.position + (t - self.at) * self.rate
+        }
+
+        fn report(&mut self, t: f64, heard: f64) {
+            let h = Duration::from_secs_f64(heard);
+            let stalled = self.heard == Some(h);
+            self.heard = Some(h);
+            let ours = self.at(t);
+            match follow(Duration::from_secs_f64(ours), h, stalled, self.rate) {
+                Follow::Keep => {}
+                Follow::Snap => {
+                    (self.position, self.at, self.rate) = (heard, t, if stalled { 0.0 } else { 1.0 });
+                    self.jumps += 1;
+                }
+                Follow::Rate(r) => (self.position, self.at, self.rate) = (ours, t, r),
+            }
+        }
+    }
+
+    /// Plays `secs` of simulated time: the heard position from `heard(t)`,
+    /// reports every 250 ms arriving 0–12 ms late, the view sampled every
+    /// frame. Returns the largest |ours − heard| from `settle` on (s) and
+    /// the jumps, and checks the view never went backwards without one.
+    fn run(start: f64, secs: f64, settle: f64, heard: impl Fn(f64) -> f64) -> (f64, u32) {
+        let mut sim = Sim { position: start, at: 0.0, rate: 1.0, heard: None, jumps: 0 };
+        let (mut worst, mut last, mut next_report, mut k) = (0.0f64, f64::MIN, 0.25, 0u64);
+        let mut jumps = 0;
+        let frame = 1.0 / 120.0;
+        let mut t = 0.0;
+        while t < secs {
+            if t >= next_report {
+                // Pseudo-random delivery delay, the same every run.
+                k = k.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                let late = (k >> 33) as f64 / (1u64 << 31) as f64 * 0.012;
+                sim.report(t, heard(t - late));
+                next_report += 0.25;
+            }
+            let ours = sim.at(t);
+            // Only a jump may move it back.
+            assert!(ours >= last - 1e-9 || sim.jumps != jumps, "went back at {t}");
+            (last, jumps) = (ours, sim.jumps);
+            if t >= settle {
+                worst = worst.max((ours - heard(t)).abs());
+            }
+            t += frame;
+        }
+        (worst, sim.jumps)
+    }
+
+    /// The numbers behind the clock: how far the lyrics and the progress
+    /// can be from what is heard (`cargo test -p nikgob-runtime clock --
+    /// --nocapture` prints them).
+    #[test]
+    fn the_clock_follows_what_is_heard() {
+        // The sound clock runs 0.3 % off the system clock.
+        let (drift, jumps) = run(0.0, 120.0, 1.0, |t| t * 1.003);
+        assert_eq!(jumps, 0);
+        // 200 ms off at the start (latency the old clock did not know).
+        let (offset, jumps) = run(0.2, 30.0, 2.0, |t| t);
+        assert_eq!(jumps, 0);
+        let (offset_first, _) = run(0.2, 30.0, 0.0, |t| t);
+        // A stream stalls for 0.8 s at 10 s, then plays on: told by the
+        // second report that stands still, by then up to half a second
+        // ahead, it waits or jumps back once.
+        let stall_at = |t: f64| if t < 10.0 { t } else if t < 10.8 { 10.0 } else { t - 0.8 };
+        let (stall, jumps) = run(0.0, 30.0, 1.0, stall_at);
+        assert!(jumps <= 1, "{jumps}");
+        let (after_stall, _) = run(0.0, 30.0, 12.5, stall_at);
+        println!(
+            "clock error: drift 0.3 % {:.1} ms; 200 ms off {:.0} ms at first, {:.1} ms after 2 s; \
+             0.8 s stall {:.0} ms at most, {:.1} ms 1.7 s after it",
+            drift * 1e3,
+            offset_first * 1e3,
+            offset * 1e3,
+            stall * 1e3,
+            after_stall * 1e3,
+        );
+        assert!(drift < 0.02, "{drift}");
+        assert!(offset < 0.02, "{offset}");
+        assert!(stall < 0.55, "{stall}");
+        assert!(after_stall < 0.02, "{after_stall}");
+    }
 }

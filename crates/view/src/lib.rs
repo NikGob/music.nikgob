@@ -295,6 +295,9 @@ pub struct PlayerView {
     pub current: Option<TrackRow>,
     pub position: Duration,
     pub at: Instant,
+    /// How fast the position moves from `at` while playing: 1, or a little
+    /// off while the runtime brings it to what is heard (never below 0).
+    pub rate: f32,
     pub duration: Option<Duration>,
     /// 0..1 perceptual.
     pub volume: f32,
@@ -320,6 +323,7 @@ impl Default for PlayerView {
             current: None,
             position: Duration::ZERO,
             at: Instant::now(),
+            rate: 1.0,
             duration: None,
             volume: 0.8,
             muted: false,
@@ -362,7 +366,7 @@ impl PlayerView {
     /// Position now, extrapolated from the last update.
     pub fn position_now(&self) -> Duration {
         let p = if self.status == Status::Playing {
-            self.position + self.at.elapsed()
+            self.position + self.at.elapsed().mul_f32(self.rate.max(0.0))
         } else {
             self.position
         };

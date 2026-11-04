@@ -757,8 +757,10 @@ impl Control {
 
         if !self.is_paused && now.duration_since(self.last_position) >= POSITION_INTERVAL {
             self.last_position = now;
+            // A loaded item that does not move (the ring ran dry) is reported
+            // too: its position standing still tells a stall.
             if let Some((id, pos)) = position_of(&self.sh, &self.clock, &self.pending)
-                && self.sh.cursor.read().moving
+                && self.sh.cursor.read().has_item
             {
                 self.emit(Event::Position { id, pos });
             }
