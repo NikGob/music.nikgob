@@ -80,6 +80,19 @@ fn errors(reference: &[LyricLine], made: &[LyricLine], words: bool) -> Vec<f32> 
     errs
 }
 
+/// Ends of the made words against the reference's, word for word where the
+/// line was cut into the same words.
+fn end_errors(reference: &[LyricLine], made: &[LyricLine]) -> Vec<f32> {
+    let mut errs = Vec::new();
+    for (r, g) in reference.iter().zip(made) {
+        if r.text.trim().is_empty() || r.background || r.words.len() != g.words.len() {
+            continue;
+        }
+        errs.extend(r.words.iter().zip(&g.words).map(|(rw, gw)| gw.end.as_secs_f32() - rw.end.as_secs_f32()));
+    }
+    errs
+}
+
 fn stats(errs: &[f32]) -> serde_json::Value {
     let mut sorted = errs.to_vec();
     sorted.sort_by(f32::total_cmp);
@@ -153,10 +166,14 @@ fn main() {
                 if let Some(f) = &timed {
                     out["timed"]["words"] = stats(&errors(&job.lines, &f.lines, words));
                     out["timed"]["lines"] = stats(&errors(&job.lines, &f.lines, false));
+                    out["timed"]["ends"] = stats(&end_errors(&job.lines, &f.lines));
+                    out["timed"]["starts"] = serde_json::json!(errors(&job.lines, &f.lines, words));
+                    out["timed"]["end_errs"] = serde_json::json!(end_errors(&job.lines, &f.lines));
                 }
                 if let Some(f) = &blind {
                     out["plain"]["words"] = stats(&errors(&kept, &f.lines, words));
                     out["plain"]["lines"] = stats(&errors(&kept, &f.lines, false));
+                    out["plain"]["starts"] = serde_json::json!(errors(&kept, &f.lines, words));
                 }
                 let pick = |v: &serde_json::Value, k: &str, m: &str| v[k][m]["w03"].as_f64().unwrap_or(f64::NAN);
                 println!(
