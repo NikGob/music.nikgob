@@ -693,6 +693,15 @@ impl Worker {
     }
 
     fn push_toast(&mut self, text: String, action: Option<(String, Command)>, open: Option<(String, nikgob_view::Link)>) {
+        // A like or unlike makes the undo of the one before on the same
+        // thing wrong («Убрано из Любимых · Отменить» after a like again):
+        // it is withdrawn, so the snackbar says what the heart shows.
+        if let Some((_, Command::Like(target, _))) = &action {
+            let stale = |t: &Toast| matches!(&t.action, Some((_, Command::Like(old, _))) if old == target);
+            if self.state.read().toasts.iter().any(|t| stale(t) && t.text != text) {
+                self.publish(|s| s.toasts.retain(|t| !stale(t) || t.text == text));
+            }
+        }
         // The same message while it is up: its time starts over.
         let same = self.state.read().toasts.iter().position(|t| t.text == text && t.action == action && t.open == open);
         if let Some(k) = same {
@@ -723,7 +732,8 @@ impl Worker {
     fn expire_toasts(&mut self) {
         let stale = {
             let s = self.state.read();
-            s.toasts.iter().any(|t| t.at.elapsed() > TOAST_KEPT)
+            // «Пока не закрою»: they stay until the user closes them.
+            s.prefs.toast_s != 0 && s.toasts.iter().any(|t| t.at.elapsed() > TOAST_KEPT)
         };
         if stale {
             self.publish(|s| s.toasts.retain(|t| t.at.elapsed() <= TOAST_KEPT));

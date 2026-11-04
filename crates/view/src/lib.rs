@@ -1236,6 +1236,9 @@ pub struct Prefs {
     /// How long a tap on the cover waits for a second one, in seconds;
     /// 0 pauses at once (a second tap then undoes it).
     pub np_tap_wait: f32,
+    /// Seconds a snackbar with a timeout stays up (one with an undo twice
+    /// as long); 0 = until it is closed.
+    pub toast_s: u8,
     /// Material shapes behind Now Playing that follow the music.
     pub bg_shapes: BgShapes,
     /// How many of them (4..=32).
@@ -2399,6 +2402,7 @@ impl Default for Prefs {
             cover_click_pause: true,
             dbl_click_shape: 1,
             np_tap_wait: 0.22,
+            toast_s: 4,
             bg_shapes: BgShapes::Off,
             bg_shapes_count: 14,
             bg_shapes_size: 1.0,

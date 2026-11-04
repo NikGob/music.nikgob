@@ -472,7 +472,13 @@ impl Md3eUi {
         } else {
             self.content_rect
         };
-        self.pages.overlays(ctx, state, overlay_area, out);
+        // Snackbars: above the floating player; on Now Playing where it
+        // leaves room (the place it chose last frame).
+        let np_spot = (self.now_playing || self.chrome.np_covering)
+            .then(|| ctx.data(|d| d.get_temp::<(Rect, f32)>(egui::Id::new(now_playing::SNACK_SPOT))))
+            .flatten();
+        let snack = np_spot.unwrap_or((overlay_area, 64.0 + 16.0 + 16.0));
+        self.pages.overlays(ctx, state, overlay_area, snack, out);
         self.chrome.overlays(ctx, state, out);
         self.find_song.show(ctx, state, out);
         lyrics_ui::overlays(ctx, state, out);

@@ -627,7 +627,8 @@ impl PageState {
     }
 
     /// Draws global overlays: the playlist picker, dialogs, snackbars.
-    pub fn overlays(&mut self, ctx: &Context, state: &ViewState, area: Rect, out: &mut Vec<Command>) {
+    /// `snack`: where the snackbars sit, `(area, bottom inset)`.
+    pub fn overlays(&mut self, ctx: &Context, state: &ViewState, area: Rect, snack: (Rect, f32), out: &mut Vec<Command>) {
         // Playlist picker.
         if let Some(tracks) = self.pending_add.clone() {
             let mut open = true;
@@ -891,7 +892,11 @@ impl PageState {
             self.pending_nav = Some(Route::Downloads(nikgob_view::DownloadsTab::Wishlist));
         }
 
-        // Snackbars.
+        // Snackbars: «Уведомления на экране» seconds (0 = until closed).
+        let duration = match state.prefs.toast_s {
+            0 => f64::INFINITY,
+            s => f64::from(s),
+        };
         let items: Vec<SnackbarItem<'_>> = state
             .toasts
             .iter()
@@ -902,7 +907,7 @@ impl PageState {
                     nikgob_view::ToastKind::Working => crate::components::SnackbarKind::Working,
                     nikgob_view::ToastKind::Error => crate::components::SnackbarKind::Error,
                 });
-                let i = if t.long { i.longer(crate::components::snackbar::AUTO_DISMISS) } else { i }.again(t.again);
+                let i = if t.long { i.longer(duration) } else { i }.again(t.again);
                 match (&t.action, &t.open) {
                     (Some((label, _)), _) | (None, Some((label, _))) => i.action(label),
                     (None, None) => i,
@@ -914,7 +919,8 @@ impl PageState {
             .replacing(true)
             .max_visible(1)
             .show_close(true)
-            .show(ctx, area, 64.0 + 16.0 + 16.0, &items);
+            .duration(duration)
+            .show(ctx, snack.0, snack.1, &items);
         if let Some(id) = ev.action_clicked
             && let Some(t) = state.toasts.iter().find(|t| t.id == id)
         {

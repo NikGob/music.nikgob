@@ -902,6 +902,8 @@ pub fn show(
         )
     };
 
+    snack_spot(&ctx, rect, wide, slot_open, cover_box, info_rect);
+
     // Cover: playing → Cookie12Sided, paused → rounded square; the ring
     // around it fades in with the cookie.
     let morph = anim::fraction(
@@ -1116,6 +1118,31 @@ pub fn show(
     }
 
     closed
+}
+
+/// Where snackbars go while Now Playing is open: `(area, bottom inset)`,
+/// written each frame and read by the shell the next ([`snack_spot`]).
+pub const SNACK_SPOT: &str = "np-snack-spot";
+
+/// Picks the snackbars' place so they cover neither the transport nor the
+/// cover: under the controls column (the cover beside it) or below
+/// everything (the cover above), and where there is no room for that over
+/// the cover's lower edge, on top of the picture, never of a control; with
+/// a slot open, at the bottom.
+fn snack_spot(ctx: &egui::Context, rect: Rect, wide: bool, slot_open: bool, cover: Rect, info: Rect) {
+    // A two-line snackbar and its margins.
+    const ROOM: f32 = 72.0 + 24.0 + 8.0;
+    const INSET: f32 = 24.0;
+    let room = rect.bottom() - info.bottom() >= ROOM;
+    let over_cover = (rect.bottom() - cover.bottom() + 12.0).max(INSET);
+    let spot = match (slot_open, wide, room) {
+        (true, ..) => (rect, INSET),
+        (false, true, true) => (Rect::from_x_y_ranges(info.x_range(), rect.y_range()), INSET),
+        (false, true, false) => (Rect::from_x_y_ranges(cover.x_range(), rect.y_range()), over_cover),
+        (false, false, true) => (rect, INSET),
+        (false, false, false) => (rect, over_cover),
+    };
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(SNACK_SPOT), spot));
 }
 
 /// «Громкость — при изменении»: a floating pill at the bottom centre that

@@ -1051,6 +1051,9 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
     });
     row(ui, Id::Keys, "Клавиши", Some("L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке"), |_| {});
 
+    group(ui, "Уведомления");
+    row(ui, Id::ToastTime, "Уведомления на экране", None, |ui| choice(ui, Id::ToastTime, p));
+
     group(ui, "Текст песен");
     row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", None, |ui| {
         ui.add(Switch::new(&mut p.save_found_lyrics).id_salt("set-save-lyrics"));
