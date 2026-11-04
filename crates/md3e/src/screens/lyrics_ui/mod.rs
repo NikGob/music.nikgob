@@ -1,7 +1,7 @@
 //! The control under the lyrics and what opens behind it. The control
 //! always opens its small menu ([`menu`]): the sources are picked there in
 //! every look. Where timing is made comes in three looks to choose from
-//! (`NIKGOB_LYRICS_UI=menu|dialog|page`, the menu by default): `menu` makes
+//! (`NIKGOB_LYRICS_UI=menu|dialog|page`, the window by default): `menu` makes
 //! it from the menu itself, [`dialog`] grows a modal window out of the
 //! control, [`page`] opens the «Текст песни» page. Settings → «Текст песен» →
 //! «Вид» picks the look (`Prefs::lyrics_ui`); `NIKGOB_LYRICS_UI` overrides
@@ -205,7 +205,8 @@ pub(crate) fn actions(state: &ViewState) -> Vec<(LyricsSync, &'static str)> {
     if l.craft != LyricsCraft::Ready || l.source.is_none_or(|s| s == LyricsSource::Recognized) {
         return Vec::new();
     }
-    match LyricsSync::of(&l.lines).unwrap_or(LyricsSync::Plain) {
+    // The finest timing the text has, however it is seen now.
+    match l.shows.first().copied().or_else(|| LyricsSync::of(&l.lines)).unwrap_or(LyricsSync::Plain) {
         LyricsSync::Plain => vec![(LyricsSync::Line, "Подсветить по строкам"), (LyricsSync::Word, "Подсветить по словам")],
         LyricsSync::Line => vec![(LyricsSync::Word, "Подсветить по словам")],
         _ => vec![(LyricsSync::Word, "Сделать подсветку заново")],
@@ -229,6 +230,46 @@ pub(crate) fn home(l: &LyricsView) -> Option<&'static str> {
         LyricsHome::Library => "Сделано плеером, хранится в библиотеке",
         LyricsHome::Computer => "Текст сохранён на компьютере",
     })
+}
+
+/// How the shown text can be seen, with what the choice says: offered
+/// only where there is a choice (a text with timing).
+pub(crate) fn shows(state: &ViewState) -> Vec<(LyricsSync, &'static str)> {
+    let l = &state.lyrics;
+    if l.track.is_none() || l.shows.len() < 2 {
+        return Vec::new();
+    }
+    l.shows.iter().map(|s| (*s, show_label(*s))).collect()
+}
+
+fn show_label(sync: LyricsSync) -> &'static str {
+    match sync {
+        LyricsSync::Word | LyricsSync::Syllable => "По словам",
+        LyricsSync::Line => "По строкам",
+        LyricsSync::Plain => "Без подсветки",
+    }
+}
+
+/// Every way of seeing a text, finest first, with whether the shown one
+/// has it (the window and the page show them all).
+pub(crate) fn all_shows(state: &ViewState) -> [(LyricsSync, &'static str, bool); 3] {
+    [LyricsSync::Word, LyricsSync::Line, LyricsSync::Plain].map(|s| (s, show_label(s), state.lyrics.shows.contains(&s)))
+}
+
+/// How the shown text is seen now.
+pub(crate) fn seen(l: &LyricsView) -> LyricsSync {
+    match LyricsSync::of(&l.lines) {
+        Some(LyricsSync::Syllable | LyricsSync::Word) => LyricsSync::Word,
+        Some(LyricsSync::Line) => LyricsSync::Line,
+        _ => LyricsSync::Plain,
+    }
+}
+
+/// Sees the shown text as `sync` from now on.
+pub(crate) fn show_as(state: &ViewState, sync: LyricsSync, out: &mut Vec<Command>) {
+    if let Some(track) = state.lyrics.track.filter(|_| seen(&state.lyrics) != sync) {
+        out.push(Command::ShowLyricsAs(track, sync));
+    }
 }
 
 /// Keeps the shown text on the computer.
@@ -508,9 +549,9 @@ mod tests {
         assert_eq!(Variant::of(9), Variant::Menu);
         assert_eq!(Variant::parse("page"), Some(Variant::Page));
         assert_eq!(Variant::parse(""), None);
-        // The default is the menu; the setting picks the others.
+        // The default is the window; the setting picks the others.
         let mut p = nikgob_view::Prefs::default();
-        assert_eq!(variant_or(None, &p), Variant::Menu);
+        assert_eq!(variant_or(None, &p), Variant::Dialog);
         p.lyrics_ui = 2;
         assert_eq!(variant_or(None, &p), Variant::Page);
         // The screenshot override wins.
@@ -599,6 +640,10 @@ mod tests {
         line.words.push(nikgob_view::LyricWord { start: Duration::from_secs(1), end: Duration::from_secs(2), text: "a".into() });
         state.lyrics.lines = vec![line];
         assert_eq!(actions(&state), [(LyricsSync::Word, "Сделать подсветку заново")]);
+        // Seen by lines, the words are still there: made anew, not again.
+        state.lyrics.shows = vec![LyricsSync::Word, LyricsSync::Line, LyricsSync::Plain];
+        state.lyrics.lines.iter_mut().for_each(|l| l.words.clear());
+        assert_eq!(actions(&state), [(LyricsSync::Word, "Сделать подсветку заново")]);
         state.lyrics.source = Some(LyricsSource::Recognized);
         assert!(actions(&state).is_empty());
         // A clip whose song is unclear: why, instead of the action.
@@ -606,6 +651,28 @@ mod tests {
         state.lyrics.craft = LyricsCraft::No("Нельзя: это клип".into());
         assert!(actions(&state).is_empty());
         assert_eq!(no_craft(&state), Some("Нельзя: это клип"));
+    }
+
+    #[test]
+    fn a_text_with_timing_offers_how_to_see_it() {
+        use std::time::Duration;
+        let mut state = ViewState::default();
+        state.lyrics.track = Some(nikgob_view::TrackId::new());
+        state.lyrics.shows = vec![LyricsSync::Plain];
+        assert!(shows(&state).is_empty(), "a plain text: no choice");
+        state.lyrics.shows = vec![LyricsSync::Word, LyricsSync::Line, LyricsSync::Plain];
+        assert_eq!(shows(&state).iter().map(|s| s.1).collect::<Vec<_>>(), ["По словам", "По строкам", "Без подсветки"]);
+        state.lyrics.shows = vec![LyricsSync::Line, LyricsSync::Plain];
+        assert_eq!(all_shows(&state).map(|s| s.2), [false, true, true]);
+        // Seen as it is now; picking that again asks for nothing.
+        assert_eq!(seen(&state.lyrics), LyricsSync::Plain);
+        state.lyrics.lines = vec![nikgob_view::LyricLine::new(Duration::from_secs(1), "a")];
+        assert_eq!(seen(&state.lyrics), LyricsSync::Line);
+        let mut out = Vec::new();
+        show_as(&state, LyricsSync::Line, &mut out);
+        assert!(out.is_empty());
+        show_as(&state, LyricsSync::Plain, &mut out);
+        assert!(matches!(out[..], [Command::ShowLyricsAs(_, LyricsSync::Plain)]));
     }
 
     #[test]

@@ -7,7 +7,7 @@
 use egui::{Align, Area, Context, Id, Key, Layout, Modifiers, Order, Rect, Sense, Stroke, Ui, UiBuilder, vec2};
 use nikgob_view::{Command, LyricsAvail, ViewState};
 
-use crate::components::{Button, FilterChip, IconButton, Size, Style, anim, paint, paint::Radii};
+use crate::components::{Button, ConnectedGroup, FilterChip, IconButton, Size, Style, anim, paint, paint::Radii};
 use crate::tokens::{Elevation, shape};
 use crate::{Icon, Theme, TypeRole};
 
@@ -153,6 +153,17 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
         ui.label(TypeRole::BodySmall.style().rich(line, s.on_surface_variant));
         ui.add_space(12.0);
     }
+    // How the text is seen, where it has timing to choose from.
+    if !super::shows(state).is_empty() {
+        let all = super::all_shows(state);
+        let labels = all.map(|a| a.1);
+        let on = all.map(|a| a.2);
+        let at = all.iter().position(|a| a.0 == super::seen(l)).unwrap_or(2);
+        if let Some(i) = ConnectedGroup::new("lyrics-dialog-show", &labels).enabled(&on).show(ui, at) {
+            super::show_as(state, all[i].0, out);
+        }
+        ui.add_space(12.0);
+    }
 
     // The text, and under it the action or its progress.
     let actions_h = 56.0;
@@ -171,6 +182,11 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
             ui.spacing_mut().item_spacing.x = 8.0;
             if ui.add(Button::new("Готово").style(Style::Text).size(Size::S).id_salt("lyrics-dialog-done")).clicked() {
                 close(ui.ctx());
+            }
+            if super::busy(state).is_some()
+                && ui.add(Button::new("Отменить").style(Style::Tonal).size(Size::S).id_salt("lyrics-dialog-cancel")).clicked()
+            {
+                out.push(Command::CancelCraft);
             }
             if super::busy(state).is_none() {
                 // Timing made and checked here: keeping it is the primary

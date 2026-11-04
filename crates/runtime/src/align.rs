@@ -14,7 +14,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -74,8 +74,9 @@ pub(crate) enum Req {
     /// text from scratch when none fits.
     Check { track: TrackId, path: PathBuf, texts: Vec<AlignText>, recognise: bool },
     /// Make timing for one text (asked under the lyrics); `temp`: the
-    /// audio was fetched from a stream for this and goes after it.
-    Craft { track: TrackId, path: PathBuf, text: AlignText, target: LyricsSync, temp: bool },
+    /// audio was fetched from a stream for this and goes after it. `seq`
+    /// numbers the asks ([`AlignService::cancel_crafts`]).
+    Craft { track: TrackId, path: PathBuf, text: AlignText, target: LyricsSync, temp: bool, seq: u64 },
     Download(ModelId),
     Remove(ModelId),
     Settings(Settings),
@@ -126,6 +127,10 @@ pub(crate) enum Msg {
 pub(crate) struct AlignService {
     tx: Option<Sender<Req>>,
     stop: Arc<AtomicBool>,
+    /// Timing asked for up to this [`Req::Craft`] `seq` was called off.
+    cancel: Arc<AtomicU64>,
+    /// The `seq` of the last [`Req::Craft`] sent.
+    crafts: u64,
     thread: Option<std::thread::JoinHandle<()>>,
     pub(crate) catalog: Option<Catalog>,
     /// The tracks whose check is on its way (and their texts' hashes).
@@ -145,11 +150,13 @@ impl AlignService {
         }
         let (req_tx, req_rx) = crossbeam_channel::unbounded();
         let stop = self.stop.clone();
+        let cancel = self.cancel.clone();
         let catalog = Catalog::new(models);
         self.catalog = Some(catalog.clone());
         let spawned = std::thread::Builder::new().name("nikgob-align".into()).spawn(move || {
             crate::analysis::lower_priority();
             let mut t = Thread::new(lib, root, catalog, settings, tx, req_rx, stop, start);
+            t.cancel = cancel;
             t.run();
         });
         match spawned {
@@ -169,6 +176,19 @@ impl AlignService {
 
     pub(crate) fn running(&self) -> bool {
         self.tx.is_some()
+    }
+
+    /// The `seq` for the next [`Req::Craft`].
+    pub(crate) fn next_craft(&mut self) -> u64 {
+        self.crafts += 1;
+        self.crafts
+    }
+
+    /// Calls off every timing asked for so far: one being made stops at
+    /// its next step (a download too), queued ones are dropped, and none
+    /// of them reports back.
+    pub(crate) fn cancel_crafts(&self) {
+        self.cancel.store(self.crafts, Ordering::Relaxed);
     }
 
     pub(crate) fn shutdown(&mut self) {
@@ -290,6 +310,10 @@ struct Thread {
     tx: Sender<Internal>,
     rx: Receiver<Req>,
     stop: Arc<AtomicBool>,
+    /// [`AlignService::cancel`].
+    cancel: Arc<AtomicU64>,
+    /// The `seq` of the timing being made now.
+    crafting: Option<u64>,
     asked: VecDeque<Req>,
     /// The background pass waits until then (playback and the first screens
     /// go first).
@@ -315,6 +339,8 @@ impl Thread {
             tx,
             rx,
             stop,
+            cancel: Arc::new(AtomicU64::new(0)),
+            crafting: None,
             asked: VecDeque::new(),
             pass_at: Instant::now() + start,
             skip: Default::default(),
@@ -335,6 +361,11 @@ impl Thread {
 
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    /// The timing being made was called off.
+    fn cancelled(&self) -> bool {
+        self.crafting.is_some_and(|seq| seq <= self.cancel.load(Ordering::Relaxed))
     }
 
     /// Takes what came in; settings apply at once, jobs queue.
@@ -421,10 +452,19 @@ impl Thread {
                     self.send(Msg::Checked { track, rows: Vec::new(), heard: None });
                 }
             }
-            Req::Craft { track, path, text, target, temp } => {
-                let result = self.craft(track, &path, &text, target);
+            Req::Craft { track, path, text, target, temp, seq } => {
+                self.crafting = Some(seq);
+                // Called off while queued: never started.
+                let result = if self.cancelled() { Err(Error::Stopped) } else { self.craft(track, &path, &text, target) };
+                let cancelled = self.cancelled();
+                self.crafting = None;
                 if temp && let Err(e) = std::fs::remove_file(&path) {
                     log::warn!("align: removing {}: {e}", path.display());
+                }
+                if cancelled {
+                    log::info!("align: timing of {track} called off");
+                    self.send(Msg::Job(None));
+                    return;
                 }
                 let result = result.map_err(|e| match e {
                     Error::Missing(_) | Error::Download(_) => "Не удалось скачать модели".to_owned(),
@@ -469,6 +509,7 @@ impl Thread {
             self.models();
             let tx = self.tx.clone();
             let stop = self.stop.clone();
+            let (cancel, crafting) = (self.cancel.clone(), self.crafting);
             let mut last = Instant::now();
             let catalog = self.aligner.catalog().clone();
             let downloading = self.downloading.clone();
@@ -489,12 +530,16 @@ impl Thread {
                     };
                     let _ = tx.send(Internal::Align(Msg::Job(Some(job))));
                 }
-                !stop.load(Ordering::Relaxed)
+                !stop.load(Ordering::Relaxed) && crafting.is_none_or(|seq| seq > cancel.load(Ordering::Relaxed))
             });
             before += id.spec().size();
             self.downloading.remove(&id);
             self.models();
             if let Err(e) = result {
+                // Called off or shutting down: not a failure.
+                if matches!(e, Error::Stopped) {
+                    return Err(e);
+                }
                 log::warn!("align: downloading {id:?}: {e}");
                 self.offline = true;
                 self.send(Msg::Error(format!("{}: {e}", label(id))));
@@ -522,7 +567,7 @@ impl Thread {
                 last_stage = Some(stage);
                 let _ = self.tx.send(Internal::Align(Msg::Job(Some(v::AlignJob { track: Some(track), stage, progress: f, asked, bytes: None }))));
             }
-            !self.stopped() && (asked || self.rx.is_empty())
+            !self.stopped() && !self.cancelled() && (asked || self.rx.is_empty())
         }
     }
 
@@ -816,7 +861,8 @@ impl Worker {
         };
         let (lines, timed) = text.align_lines();
         let text = AlignText { source, lines, timed, hash: text.hash() };
-        self.align.send(Req::Craft { track, path, text, target, temp });
+        let seq = self.align.next_craft();
+        self.align.send(Req::Craft { track, path, text, target, temp, seq });
     }
 
     /// A stream's audio is here: the timing is made from it (and it goes
@@ -880,7 +926,29 @@ impl Worker {
         if let Some((source, a)) = Aligned::from_row(&row) {
             tl.set_aligned(source, a);
         }
+        // Asked for: seen as made, whatever was chosen to be seen before.
+        if tl.display.take().is_some()
+            && let Err(e) = self.lib.set_lyrics_show(track, None)
+        {
+            log::warn!("forgetting how lyrics are seen: {e}");
+        }
         self.pick_lyrics_source(track, Some(source));
+    }
+
+    /// `Command::CancelCraft`: the timing being made stops (the aligner's
+    /// job, or the stream's audio is dropped once it comes); the text stays
+    /// as it was.
+    pub(crate) fn cancel_craft(&mut self) {
+        if !self.state.read().align.craft.as_ref().is_some_and(|c| c.failed.is_none()) {
+            return;
+        }
+        self.align.cancel_crafts();
+        self.publish(|s| {
+            s.align.craft = None;
+            if s.align.job.as_ref().is_some_and(|j| j.asked) {
+                s.align.job = None;
+            }
+        });
     }
 
     /// `Command::ClearCraft`: a failure was seen.
@@ -915,6 +983,41 @@ mod tests {
             lines: vec![LyricLine::new(Duration::from_secs(16), "Слово за слово")],
             aligner: Some(ModelId::AlignerRu),
         }
+    }
+
+    /// Called-off timing stops the job at its next step and a queued one
+    /// never starts; neither reports back (the text stays as it was), and
+    /// timing asked for after that runs.
+    #[test]
+    fn called_off_timing_stops_and_says_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (_req_tx, req_rx) = crossbeam_channel::unbounded();
+        let lib = Library::open_in_memory().unwrap();
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false };
+        let mut t = Thread::new(lib, dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
+        let mut service = AlignService::default();
+        t.cancel = service.cancel.clone();
+        let first = service.next_craft();
+        // While it is made: the progress says go on until it is called off.
+        t.crafting = Some(first);
+        let track = TrackId::new();
+        assert!(t.progress(track, true)(Stage::Decode));
+        service.cancel_crafts();
+        assert!(!t.progress(track, true)(Stage::Separate(0.5)));
+        t.crafting = None;
+        // Queued and called off: dropped; its temp audio goes too.
+        let audio = dir.path().join("stream.opus");
+        std::fs::write(&audio, b"x").unwrap();
+        let text = AlignText { source: LyricsSource::Genius, lines: vec![LyricLine::new(Duration::ZERO, "a")], timed: false, hash: "h".into() };
+        t.job(Req::Craft { track, path: audio.clone(), text, target: LyricsSync::Word, temp: true, seq: first });
+        assert!(!audio.exists());
+        let said: Vec<Internal> = rx.try_iter().collect();
+        assert!(said.iter().all(|m| !matches!(m, Internal::Align(Msg::Crafted { .. }))));
+        assert!(said.iter().any(|m| matches!(m, Internal::Align(Msg::Job(None)))));
+        // Asked again: not called off.
+        t.crafting = Some(service.next_craft());
+        assert!(t.progress(track, true)(Stage::Decode));
     }
 
     #[test]

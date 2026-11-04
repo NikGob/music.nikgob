@@ -244,6 +244,8 @@ pub(crate) struct TrackLyrics {
     pub(crate) show: Shown,
     /// Where the audio to make timing from is.
     pub(crate) place: Place,
+    /// How the user chose to see the shown text (`None`: as it comes).
+    pub(crate) display: Option<LyricsSync>,
 }
 
 impl TrackLyrics {
@@ -454,7 +456,12 @@ impl TrackLyrics {
     pub(crate) fn view(&self, track: TrackId) -> v::LyricsView {
         let source = self.chosen();
         let text = source.and_then(|s| self.texts.get(&s)).cloned().unwrap_or_default();
-        let (lines, made) = source.map(|s| self.shown(s)).unwrap_or_default();
+        let (_, made) = source.map(|s| self.shown(s)).unwrap_or_default();
+        let (lines, made_shown) = source.map(|s| self.displayed(s)).unwrap_or_default();
+        // Seen without timing: the text's lines as plain text.
+        let plain = text.plain.clone().or_else(|| {
+            (lines.is_empty() && !text.lines.is_empty()).then(|| text.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n"))
+        });
         let sources = LyricsSource::ALL
             .into_iter()
             .filter(|s| *s != LyricsSource::File || self.pick == Some(LyricsSource::File) || !self.duplicate_file())
@@ -510,17 +517,59 @@ impl TrackLyrics {
         v::LyricsView {
             track: Some(track),
             lines,
-            plain: text.plain,
+            plain,
             loading: source.is_none() && !self.pending.is_empty(),
             source,
             picked: self.pick.is_some() && self.pick == source,
             sources,
-            made,
+            made: made_shown,
             checking: self.checking.is_some(),
             texts,
             home,
             craft,
             savable,
+            shows: source.map(|s| self.shows(s)).unwrap_or_default(),
+        }
+    }
+
+    /// Timing the player made of `source`'s text that fits the recording.
+    fn made_lines(&self, source: LyricsSource) -> Option<&Vec<LyricLine>> {
+        self.aligned(source).filter(|a| a.fits && !a.lines.is_empty()).map(|a| &a.lines)
+    }
+
+    /// How `source`'s text can be seen, finest first: by words and by
+    /// lines as far as the shown timing or the player's made one goes,
+    /// without timing always.
+    pub(crate) fn shows(&self, source: LyricsSource) -> Vec<LyricsSync> {
+        if !self.texts.contains_key(&source) {
+            return Vec::new();
+        }
+        let (lines, _) = self.shown(source);
+        let made = if source == LyricsSource::Recognized { None } else { self.made_lines(source) };
+        let finest = LyricsSync::of(&lines).max(made.and_then(|m| LyricsSync::of(m))).unwrap_or(LyricsSync::Plain);
+        [LyricsSync::Word, LyricsSync::Line, LyricsSync::Plain].into_iter().filter(|s| *s <= finest).collect()
+    }
+
+    /// The lines `source` is seen with, and whether their timing is the
+    /// player's: [`Self::shown`], made coarser or finer as the user chose
+    /// ([`Self::display`]) as far as the text has that timing.
+    pub(crate) fn displayed(&self, source: LyricsSource) -> (Vec<LyricLine>, bool) {
+        let (lines, made) = self.shown(source);
+        let Some(want) = self.display else { return (lines, made) };
+        let have = LyricsSync::of(&lines).unwrap_or(LyricsSync::Plain);
+        let other = if source == LyricsSource::Recognized { None } else { self.made_lines(source) };
+        match want {
+            LyricsSync::Plain => (Vec::new(), false),
+            LyricsSync::Line if have >= LyricsSync::Line => (crate::align::to_lines(&lines), made),
+            LyricsSync::Line => match other {
+                Some(m) => (crate::align::to_lines(m), true),
+                None => (lines, made),
+            },
+            _ if have >= LyricsSync::Word => (lines, made),
+            _ => match other.filter(|m| LyricsSync::of(m) >= Some(LyricsSync::Word)) {
+                Some(m) => (m.clone(), true),
+                None => (lines, made),
+            },
         }
     }
 
@@ -679,6 +728,7 @@ pub(crate) fn cached_lyrics(
             .and_then(|k| LyricsSource::from_key(&k)),
         aligned: lib.lyrics_aligned(track).unwrap_or_default().iter().filter_map(Aligned::from_row).collect(),
         genius,
+        display: shown_as(lib, track),
         ..Default::default()
     };
     let fresh_miss = |at: i64| now_ms() - at < LYRICS_RETRY_MS;
@@ -715,6 +765,25 @@ pub(crate) fn cached_lyrics(
     }
     tl.pending.extend(need);
     tl
+}
+
+/// How the user chose to see `track`'s lyrics ([`TrackLyrics::display`]).
+fn shown_as(lib: &Library, track: TrackId) -> Option<LyricsSync> {
+    match lib.lyrics_show(track).ok().flatten()?.as_str() {
+        "word" => Some(LyricsSync::Word),
+        "line" => Some(LyricsSync::Line),
+        "plain" => Some(LyricsSync::Plain),
+        _ => None,
+    }
+}
+
+/// The key [`shown_as`] reads.
+fn show_key(sync: LyricsSync) -> &'static str {
+    match sync {
+        LyricsSync::Plain => "plain",
+        LyricsSync::Line => "line",
+        LyricsSync::Word | LyricsSync::Syllable => "word",
+    }
 }
 
 /// Background backfill uses the same cache, fallback gates and ranking as playback.
@@ -789,6 +858,7 @@ impl Worker {
 
     pub(crate) fn lyrics_backfilled(&mut self, track: TrackId, mut tl: TrackLyrics) {
         tl.pick = self.lib.lyrics_pick(track).ok().flatten().and_then(|k| LyricsSource::from_key(&k));
+        tl.display = shown_as(&self.lib, track);
         tl.show = Shown::of(&self.state.read().prefs);
         if tl.texts_of(LyricsSource::File).is_none()
             && let Some(kept) = self.kept_text(track).as_deref().and_then(read_ttml)
@@ -978,6 +1048,30 @@ impl Worker {
         if let Some(track) = self.queue.current().map(|e| e.track) {
             self.check_lyrics(track);
         }
+    }
+
+    /// `Command::ShowLyricsAs`: the track's lyrics are seen by words, by
+    /// lines or without timing from now on (remembered per track; a text
+    /// without that timing is seen as fine as it goes).
+    pub(crate) fn show_lyrics_as(&mut self, track: TrackId, sync: LyricsSync) {
+        self.set_lyrics_display(track, Some(sync));
+    }
+
+    /// Remembers how `track`'s lyrics are seen (`None`: as they come) and
+    /// shows them so.
+    pub(crate) fn set_lyrics_display(&mut self, track: TrackId, sync: Option<LyricsSync>) {
+        let sync = sync.map(|s| if s == LyricsSync::Syllable { LyricsSync::Word } else { s });
+        if let Err(e) = self.lib.set_lyrics_show(track, sync.map(show_key)) {
+            log::warn!("saving how lyrics are seen: {e}");
+        }
+        let Some(tl) = self.import.as_mut().and_then(|s| s.lyrics_cache.get_mut(&track)) else { return };
+        tl.display = sync;
+        let view = tl.view(track);
+        self.publish(|s| {
+            if s.lyrics.track == Some(track) {
+                s.lyrics = view;
+            }
+        });
     }
 
     pub(crate) fn pick_lyrics_source(&mut self, track: TrackId, source: Option<LyricsSource>) {
@@ -1361,6 +1455,62 @@ mod tests {
         tl.insert(LyricsSource::Genius, Some(genius.clone()));
         tl.set_aligned(LyricsSource::Genius, aligned(&genius, true, Timing::None, 0, words.clone()));
         assert_eq!(tl.view(TrackId::new()).lines, words);
+    }
+
+    /// The shown text is seen by words, by lines or without timing as the
+    /// user chose, as far as it (or the player's timing of it) goes; the
+    /// timing kept and the place it lives do not change with it.
+    #[test]
+    fn a_text_is_seen_as_chosen_as_far_as_it_has_that_timing() {
+        use nikgob_align::fit::Timing;
+        let off = Shown { words: false, lines: true, heard: true };
+        let lrc = Text::from_lrc(Some("[00:14.60]Слово за слово
+[00:18.32]Дальше"), None).unwrap();
+        let words = made(&[(14_600, "Слово за слово"), (18_320, "Дальше")]);
+        let mut tl = TrackLyrics { show: off, ..Default::default() };
+        tl.insert(LyricsSource::Lrclib, Some(lrc.clone()));
+        let id = TrackId::new();
+        // Lines only: by lines or without timing.
+        let v = tl.view(id);
+        assert_eq!(v.shows, [LyricsSync::Line, LyricsSync::Plain]);
+        tl.display = Some(LyricsSync::Word);
+        assert_eq!(tl.view(id).lines, lrc.lines, "no words: as fine as it goes");
+        tl.display = Some(LyricsSync::Plain);
+        let v = tl.view(id);
+        assert!(v.lines.is_empty() && !v.made);
+        assert_eq!(v.plain.as_deref(), Some("Слово за слово
+Дальше"));
+        // The player made words (word timing off in the settings): they
+        // can be seen, and lines stay the source's own.
+        tl.set_aligned(LyricsSource::Lrclib, aligned(&lrc, true, Timing::Fits, 0, words.clone()));
+        tl.display = None;
+        let v = tl.view(id);
+        assert_eq!(v.lines, lrc.lines);
+        assert_eq!(v.shows, [LyricsSync::Word, LyricsSync::Line, LyricsSync::Plain]);
+        tl.display = Some(LyricsSync::Word);
+        let v = tl.view(id);
+        assert_eq!(v.lines, words);
+        assert!(v.made);
+        // Words by lines: the same lines without the words.
+        let mut own = TrackLyrics::default();
+        own.insert(LyricsSource::LyricsPlus, Some(worded()));
+        own.display = Some(LyricsSync::Line);
+        let v = own.view(id);
+        assert_eq!(LyricsSync::of(&v.lines), Some(LyricsSync::Line));
+        assert_eq!(v.lines[0].start, worded().lines[0].start);
+        assert_eq!(v.shows, [LyricsSync::Word, LyricsSync::Line, LyricsSync::Plain]);
+        // Made timing kept by the user stays savable whatever is seen.
+        let genius = Text::from_plain("Слово за слово
+Дальше").unwrap();
+        let mut g = TrackLyrics { place: Place::File, ..Default::default() };
+        g.insert(LyricsSource::Genius, Some(genius.clone()));
+        g.set_aligned(LyricsSource::Genius, Aligned { saved: true, ..aligned(&genius, true, Timing::None, 0, words.clone()) });
+        g.display = Some(LyricsSync::Plain);
+        let v = g.view(id);
+        assert!(v.lines.is_empty() && v.savable && v.home == v::LyricsHome::Library);
+        assert_eq!(g.shown_lines(LyricsSource::Genius), Some(words.clone()), "saving keeps the made words");
+        // No text: nothing to choose.
+        assert!(TrackLyrics::default().view(id).shows.is_empty());
     }
 
     /// With recognition off, a text heard earlier is never shown: not

@@ -439,6 +439,10 @@ pub struct LyricsView {
     /// the computer: into the file's tags and a `.ttml` next to it, or for
     /// a song without a file into its artist's folder of the library.
     pub savable: bool,
+    /// How the shown text can be seen, finest first: [`LyricsSync::Word`]
+    /// and [`LyricsSync::Line`] as far as it has that timing (the player's
+    /// own counts), [`LyricsSync::Plain`] always. Empty without a text.
+    pub shows: Vec<LyricsSync>,
 }
 
 /// Where a shown text is kept.
@@ -1110,8 +1114,9 @@ impl ToastKind {
 
 /// The revision of the lyrics defaults: 1 turned word timing off for the
 /// playing song and for the library, recognition from scratch off, and
-/// line timing for plain texts on.
-pub const LYRICS_REV: u8 = 1;
+/// line timing for plain texts on; 2 made «Окно» the look of the lyrics
+/// control.
+pub const LYRICS_REV: u8 = 2;
 
 /// User-facing settings the UI edits (the runtime persists them).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1199,8 +1204,8 @@ pub struct Prefs {
     /// texts are shown with word timing made from the recording.
     pub lyrics_words_playing: bool,
     /// «Вид»: what the control under the lyrics opens: 0 its menu
-    /// («Меню»), 1 a window over the player («Окно»), 2 the «Текст песни»
-    /// page («Экран»).
+    /// («Меню»), 1 a window over the player («Окно», the default), 2 the
+    /// «Текст песни» page («Экран»).
     pub lyrics_ui: u8,
     /// Which defaults of the lyrics settings the prefs were written with
     /// ([`LYRICS_REV`]); older prefs are moved to the new defaults once.
@@ -1504,6 +1509,11 @@ impl Prefs {
             self.lyrics_words_all = false;
             self.lyrics_words_playing = false;
             self.lyrics_lines_auto = true;
+        }
+        if stored < 2 && self.lyrics_ui == 0 {
+            // «Окно» became the default: the old default moves, a chosen
+            // window or page stays.
+            self.lyrics_ui = 1;
         }
         self.lyrics_rev = LYRICS_REV;
     }
@@ -2053,6 +2063,12 @@ pub enum Command {
     CraftLyrics { track: TrackId, source: LyricsSource, target: LyricsSync },
     /// Forget a failed [`AlignView::craft`] (its message was seen).
     ClearCraft,
+    /// Stop the timing being made ([`AlignView::craft`]); the text stays
+    /// as it was.
+    CancelCraft,
+    /// See this track's lyrics by words, by lines or without timing
+    /// ([`LyricsView::shows`]); remembered per track.
+    ShowLyricsAs(TrackId, LyricsSync),
     /// Keep the shown text (with the timing the player made) on the
     /// computer ([`LyricsView::savable`]).
     SaveLyrics { track: TrackId, source: LyricsSource },
@@ -2413,7 +2429,7 @@ impl Default for Prefs {
             lyrics_lines_auto: true,
             lyrics_words_playing: false,
             lyrics_rev: LYRICS_REV,
-            lyrics_ui: 0,
+            lyrics_ui: 1,
             lyrics_recognize: false,
             lyrics_separate: true,
             lyrics_models_auto: true,

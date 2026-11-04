@@ -748,6 +748,8 @@ impl Worker {
             Command::PickLyricsSource(t, src) => self.pick_lyrics_source(t, src),
             Command::CraftLyrics { track, source, target } => self.craft_lyrics(track, source, target),
             Command::ClearCraft => self.clear_craft(),
+            Command::CancelCraft => self.cancel_craft(),
+            Command::ShowLyricsAs(t, sync) => self.show_lyrics_as(t, sync),
             Command::SaveLyrics { track, source } => self.save_lyrics(track, source),
             Command::AlignModel { key, download } => self.align_model(&key, download),
             Command::SeekBy(ms) => {

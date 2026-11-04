@@ -768,9 +768,14 @@ mod prefs_tests {
         let p = parse_prefs(old.as_bytes()).unwrap();
         assert!(!p.lyrics_words_all && !p.lyrics_words_playing && p.lyrics_lines_auto && !p.lyrics_recognize);
         assert_eq!(p.lyrics_rev, nikgob_view::LYRICS_REV);
-        // The control under the lyrics opens its menu until «Вид» says else.
-        assert_eq!(p.lyrics_ui, 0);
+        // The control under the lyrics opens its window: the old default
+        // («Меню») moves once, a chosen window or page stays, and «Меню»
+        // chosen since stays too.
+        assert_eq!(p.lyrics_ui, 1);
+        assert_eq!(parse_prefs(br#"{"lyrics_ui":0,"lyrics_rev":1}"#).unwrap().lyrics_ui, 1);
         assert_eq!(parse_prefs(br#"{"lyrics_ui":2,"lyrics_rev":1}"#).unwrap().lyrics_ui, 2);
+        assert_eq!(parse_prefs(br#"{"lyrics_ui":0,"lyrics_rev":2}"#).unwrap().lyrics_ui, 0);
+        assert_eq!(prefs_of(None).lyrics_ui, 1);
         // Everything else stays as it was.
         assert!(p.lyrics_check && !p.lyrics_gpu);
         // Saved again, the user's own choices hold.
