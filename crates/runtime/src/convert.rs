@@ -170,10 +170,15 @@ impl Resolver {
             has_local: r.has_local,
             liked: r.liked,
             // A clip has no album: its song's art when it was found, else
-            // the video's own picture.
+            // the video's own picture. So has a song YouTube Music named no
+            // album for (its top search result) until its details come: its
+            // picture is the album art between black bars, cut out on load.
             cover: self.cover_for(r.release_id, r.cover_ref.as_deref()).or_else(|| {
-                let video = r.youtube_id.as_deref().filter(|_| r.is_clip())?;
-                let art = crate::better_covers::cached(&self.lib, crate::better_covers::Target::Track(r.id), None);
+                let video = r.youtube_id.as_deref()?;
+                let art = r
+                    .is_clip()
+                    .then(|| crate::better_covers::cached(&self.lib, crate::better_covers::Target::Track(r.id), None))
+                    .flatten();
                 Some(v::Cover::web(art.unwrap_or_else(|| format!("https://i.ytimg.com/vi/{video}/hqdefault.jpg"))))
             }),
             clip: r.is_clip(),

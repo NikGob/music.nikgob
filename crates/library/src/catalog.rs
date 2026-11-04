@@ -897,6 +897,19 @@ impl Library {
         self.write(|tx| refresh_active(tx, track))
     }
 
+    /// Gives a track that has no length the one heard (`ms`, what the
+    /// engine found in a stream whose service did not say). True when it
+    /// was stored; a length the track has stays.
+    pub fn fill_duration(&self, track: TrackId, ms: u32) -> Result<bool> {
+        self.write(|tx| {
+            let n = tx.execute(
+                "UPDATE track SET duration_ms = ?2 WHERE id = ?1 AND duration_ms IS NULL",
+                params![track.to_string(), ms],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
     /// Marks a source (un)playable (stream withdrawn, file missing) and
     /// re-selects the active source.
     pub fn set_source_available(&self, source: SourceId, available: bool) -> Result<()> {

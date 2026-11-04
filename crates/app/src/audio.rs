@@ -250,6 +250,13 @@ fn forward(events: Receiver<Event>, links: Links, generation: u64) {
                 if links.generation.load(Ordering::Acquire) != generation {
                     break;
                 }
+                // The length the engine found goes along (a stream track
+                // whose service did not say has none of its own).
+                let length = match &e {
+                    Event::Started { id, duration: Some(d) } => Some((*id, *d)),
+                    Event::TrackChanged { to, duration: Some(d), .. } => Some((*to, *d)),
+                    _ => None,
+                };
                 let mapped = match e {
                     Event::Started { id, .. } => Some(PlaybackEvent::Started { id }),
                     Event::TrackChanged { to, .. } => Some(PlaybackEvent::TrackChanged { to }),
@@ -271,7 +278,8 @@ fn forward(events: Receiver<Event>, links: Links, generation: u64) {
                 let Some(m) = mapped else { continue };
                 let to = links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
                 if let Some(to) = to
-                    && to.send(m).is_err()
+                    && (to.send(m).is_err()
+                        || length.is_some_and(|(id, duration)| to.send(PlaybackEvent::Duration { id, duration }).is_err()))
                 {
                     break;
                 }

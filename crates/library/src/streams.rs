@@ -536,7 +536,9 @@ pub(crate) fn upsert_stream_track_in(
 
 /// Writes the metadata of the stream `t` (title, credit, album, numbers,
 /// length, ISRC, cover) onto the track `id` (a new track when `None`);
-/// a `fresh` track starts outside the library.
+/// a `fresh` track starts outside the library. A stream that names no album
+/// (YouTube Music's top search result) leaves the track's album and numbers
+/// as they are.
 fn write_stream_meta(conn: &Connection, t: &StreamTrack, id: Option<TrackId>, fresh: bool) -> Result<TrackId> {
     let credit = credit_for(conn, &t.artists)?;
     let release_id = t
@@ -544,12 +546,27 @@ fn write_stream_meta(conn: &Connection, t: &StreamTrack, id: Option<TrackId>, fr
         .as_ref()
         .map(|a| release_for(conn, a, &t.artists))
         .transpose()?;
+    let kept: Option<(String, u32, u32)> = match (&release_id, id) {
+        (None, Some(id)) => conn
+            .query_row(
+                "SELECT release_id, disc_no, track_no FROM track WHERE id = ?1 AND release_id IS NOT NULL",
+                [id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?,
+        _ => None,
+    };
     let mut track = Track::new(t.title.clone(), credit);
     track.id = id.unwrap_or_default();
     track.isrc = normal_isrc(t.isrc.as_deref());
     track.release_id = release_id;
     track.disc_no = t.disc_no.unwrap_or(1).max(1);
     track.track_no = t.track_no.unwrap_or(0);
+    if let Some((release, disc, no)) = kept {
+        track.release_id = Some(parse(&release)?);
+        track.disc_no = disc.max(1);
+        track.track_no = no;
+    }
     track.duration_ms = t.duration_ms.and_then(|ms| u32::try_from(ms).ok());
     let id = upsert_track_in(conn, &track)?.id;
     set_stream_cover(conn, id, t, true)?;

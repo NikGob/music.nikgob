@@ -385,3 +385,63 @@ fn a_youtube_stream_refused_midway_opens_again_once_where_it_stopped() {
     wait_for("stopped", || rig.status() == Status::Stopped);
     assert_eq!(rig.asked.lock().unwrap().len(), 2);
 }
+
+/// YouTube Music's top search result («Всё») names a song's cover but no
+/// album and no length.
+fn top_result(t: &StreamTrack) -> StreamTrack {
+    let mut top = t.clone();
+    top.album = None;
+    top.duration_ms = None;
+    top.track_no = None;
+    top
+}
+
+/// A song started from the top search result: its video's picture shows
+/// at once, then its details bring the album with its cover and the length.
+#[test]
+fn a_top_search_result_gets_its_album_cover_and_length_while_it_plays() {
+    let yt = FakeService::youtube().with_song("mozgi", "Мозги & деньги", "Комсомольск", "Комсомольск-1", 150);
+    let full = find(&yt, "yt-x-mozgi");
+    let lib = Library::open_in_memory().unwrap();
+    let track = lib.upsert_stream_track(&top_result(&full)).unwrap();
+    assert_eq!(lib.get_track(track).unwrap().unwrap().release_id, None);
+    let rig = Rig::start(lib.clone(), vec![Arc::new(yt)]);
+    rig.play(track);
+    assert_eq!(rig.asked(0).source, stream(Service::Youtube, "yt-x-mozgi"));
+    wait_for("the album", || {
+        rig.rt.state().player.current.as_ref().is_some_and(|r| r.release_id.is_some())
+    });
+    let s = rig.rt.state();
+    let row = s.player.current.as_ref().unwrap();
+    assert_eq!(row.album.as_deref(), Some("Комсомольск-1"));
+    assert_eq!(row.cover.as_ref().and_then(|c| c.web_url()), full.cover_url.as_deref());
+    assert_eq!(s.player.duration, Some(Duration::from_secs(150)));
+}
+
+/// A stream its service has no details of: the video's picture is its
+/// cover, and the length the engine found is its length.
+#[test]
+fn a_stream_without_details_takes_the_heard_length_and_its_video_picture() {
+    let mut t = top_result(&find(&FakeService::youtube(), "yt-gruppa-1"));
+    t.id = nikgob_core::streaming::RemoteId::new(Service::Youtube, "yt-not-in-the-catalog");
+    let lib = Library::open_in_memory().unwrap();
+    let track = lib.upsert_stream_track(&t).unwrap();
+    let rig = Rig::start(lib.clone(), vec![Arc::new(FakeService::youtube())]);
+    rig.play(track);
+    let first = rig.asked(0);
+    wait_for("buffering", || rig.status() == Status::Buffering);
+    {
+        let s = rig.rt.state();
+        assert_eq!(s.player.duration, None);
+        assert_eq!(
+            s.player.current.as_ref().and_then(|r| r.cover.as_ref()).and_then(|c| c.web_url()),
+            Some("https://i.ytimg.com/vi/yt-not-in-the-catalog/hqdefault.jpg")
+        );
+    }
+    let tx = rig.rt.playback_sender();
+    tx.send(PlaybackEvent::Started { id: first.id }).unwrap();
+    tx.send(PlaybackEvent::Duration { id: first.id, duration: Duration::from_millis(149_521) }).unwrap();
+    wait_for("the length", || rig.rt.state().player.duration.is_some());
+    assert_eq!(rig.rt.state().player.duration, Some(Duration::from_millis(149_521)));
+    assert_eq!(lib.get_track(track).unwrap().unwrap().duration_ms, Some(149_521));
+}

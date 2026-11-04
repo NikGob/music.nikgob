@@ -90,6 +90,9 @@ pub enum PlaybackEvent {
     Error { id: u64, message: String },
     /// What a stream item actually plays ("Opus ~160 кбит/с"), once opened.
     Quality { id: u64, label: String },
+    /// How long the item is, as the engine found it (the container's
+    /// length, else the stream's): the length of a track that has none.
+    Duration { id: u64, duration: Duration },
 }
 
 /// The audio engine as the runtime sees it.
@@ -1766,6 +1769,16 @@ impl Worker {
                 }
             }
             PlaybackEvent::Paused | PlaybackEvent::Resumed => {}
+            PlaybackEvent::Duration { id, duration } => {
+                // The library's length wins; the engine's is for a track
+                // without one (a stream whose service did not say).
+                let Some(e) = self.playing.filter(|e| e.id == id) else { return };
+                let ms = u32::try_from(duration.as_millis()).unwrap_or(u32::MAX);
+                if ms > 0 && self.lib.fill_duration(e.track, ms).unwrap_or(false) {
+                    log::debug!(target: "nikgob_runtime::streams", "{}: its length {ms} ms is the heard one", e.track);
+                    self.publish_now_playing();
+                }
+            }
             PlaybackEvent::Quality { id, label } => {
                 log::debug!(target: "nikgob_runtime::streams", "item {id} plays as {label}");
                 self.qualities.retain(|(i, _)| *i != id);
@@ -1974,6 +1987,7 @@ impl Worker {
         if changed && let Some(t) = current.as_ref().map(|r| r.id) {
             self.track_details(t);
             self.kick_better_covers(Some(t));
+            self.complete_playing(t);
         }
         self.publish_player();
     }
