@@ -520,6 +520,8 @@ fn main() {
     flag("T_INNER", &mut tuning.sound_inner);
     flag("T_RUNS", &mut tuning.sound_runs);
     flag("T_COMMA_FILL", &mut tuning.comma_fill);
+    num("T_END_LEVEL", &mut tuning.end_level);
+    num("T_END_GAP", &mut tuning.end_gap);
     flag("T_COMMA_ENDS", &mut tuning.comma_ends);
     aligner.set_tuning(tuning);
     println!("deep {deep:?} on {device:?}, jobs matching {filter:?}");

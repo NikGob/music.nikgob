@@ -141,6 +141,14 @@ pub struct Tuning {
     /// line's next words onto it («Он такой скучный, (он такой скучный,
     /// он такой…) просто зануда»).
     pub comma_fill: bool,
+    /// The last word of a line ends where the separated voice falls under
+    /// this share of its line's level ([`end_with_voice`]) and stays under
+    /// it for the usual tail, not only where it falls silent: a reverb or
+    /// the instrumental's bleed after a held last word is no more of it
+    /// (0: off). Only before a gap of at least [`Tuning::end_gap`] seconds
+    /// to the next line (0: before any).
+    pub end_level: f32,
+    pub end_gap: f32,
     /// A word before punctuation inside a line ends with its voice once
     /// [`BREATH`] of what follows has none (not [`TAIL`]).
     pub comma_ends: bool,
@@ -200,6 +208,8 @@ impl Tuning {
             sound_inner: false,
             sound_runs: false,
             comma_fill: false,
+            end_level: 0.0,
+            end_gap: 0.0,
             comma_ends: false,
         }
     }
@@ -999,11 +1009,26 @@ pub fn end_with_voice(lines: &mut [LyricLine], v: VoiceEnds<'_>, bounds: &[Optio
             continue;
         }
         let words = l.words.len();
+        // With `end_level`, the voice counts for an end only at that share
+        // of the line's level (the median over where its words are sung).
+        let floor = match level.filter(|_| tuning.end_level > 0.0 && !l.background) {
+            Some(level) => {
+                let at = |t: f32| ((t / step).floor().max(0.0) as usize).min(level.len());
+                let (a, b) = (at(l.words[0].start.as_secs_f32()), at(l.words[words - 1].end.as_secs_f32()));
+                let sung = &level[a..b.max(a)];
+                (!sung.is_empty()).then(|| median(sung) * tuning.end_level)
+            }
+            None => None,
+        };
+        let gap = next_starts[li].map_or(f32::INFINITY, |n| n - l.words[words - 1].end.as_secs_f32());
+        let floor = floor.filter(|_| gap >= tuning.end_gap);
         for (i, w) in l.words.iter_mut().enumerate() {
             let (a, b) = (w.start.as_secs_f32(), w.end.as_secs_f32());
             let i0 = ((a / step).floor().max(0.0) as usize).min(voiced.len());
             let i1 = ((b / step).ceil().max(0.0) as usize).min(voiced.len());
-            let Some(last) = (i0..i1).rev().find(|i| voiced[*i]) else { continue };
+            let floor = floor.filter(|_| i + 1 == words);
+            let sounds = |i: usize| voiced[i] && floor.is_none_or(|f| level.and_then(|l| l.get(i)).is_some_and(|e| *e >= f));
+            let Some(last) = (i0..i1).rev().find(|i| sounds(*i)) else { continue };
             let cut = (last + 1) as f32 * step + AFTER;
             // A word before a comma inside a line ends with its voice after
             // a shorter silence: the line takes its breath there
@@ -1824,6 +1849,29 @@ mod tests {
     /// «Дави на газ, [pause] дави на газ»: a word before a comma ends with
     /// its voice after a shorter silence than elsewhere; a word without one,
     /// and the last word of a line, keep the usual tail.
+    /// «…oh, that's fine» and a long tail of the voice at a third of the
+    /// line's level under the instrumental: with `end_level` the last word
+    /// ends where the voice falls under half the line's level; a word
+    /// inside the line keeps the usual rule.
+    #[test]
+    fn a_last_word_ends_where_its_voice_falls_to_a_tail() {
+        let w = |a: f32, b: f32, t: &str| LyricWord { start: Duration::from_secs_f32(a), end: Duration::from_secs_f32(b), text: t.into() };
+        let mut l = line(1.0, "that's fine");
+        l.words = vec![w(1.0, 1.5, "that's "), w(1.5, 3.0, "fine")];
+        // The line at 1.0 from 1.0 to 2.0 s, then 0.3 to 3.0 s, then nothing.
+        let level: Vec<f32> = (0..40).map(|i| if (10..20).contains(&i) { 1.0 } else if (20..30).contains(&i) { 0.3 } else { 0.0 }).collect();
+        let voiced: Vec<bool> = level.iter().map(|e| *e > 0.05).collect();
+        let ends = |tuning: Tuning| {
+            let mut lines = vec![l.clone()];
+            end_with_voice(&mut lines, VoiceEnds { voiced: &voiced, step: 0.1, tail: TAIL, level: Some(&level), tuning }, &[Some(3.0)]);
+            lines[0].words.iter().map(|w| w.end.as_secs_f32()).collect::<Vec<_>>()
+        };
+        assert!((ends(Tuning::align4())[1] - 3.0).abs() < 0.01);
+        let e = ends(Tuning { end_level: 0.5, ..Tuning::align4() });
+        assert!((e[1] - 2.1).abs() < 0.01, "{e:?}");
+        assert!((e[0] - 1.5).abs() < 0.01, "{e:?}");
+    }
+
     #[test]
     fn a_word_before_a_comma_ends_with_its_breath() {
         let w = |a: f32, b: f32, t: &str| LyricWord { start: Duration::from_secs_f32(a), end: Duration::from_secs_f32(b), text: t.into() };
