@@ -3,9 +3,10 @@
 //!
 //! The check itself lives in the importer (`nikgob_import::spectrum`); its
 //! result is kept per source in the library ([`QualityCheck`]) and read
-//! back here into labels: «FLAC из MP3 ~320» for a FLAC made from an MP3,
-//! «MP3 320 из поддельного FLAC» for one converted after the check, and
-//! the plain words of the track's quality panel.
+//! back here into labels: «FLAC из MP3 ~192» for a FLAC made from an MP3,
+//! «FLAC, возможно из MP3 320» for a cut a real master may have too, «MP3
+//! 320 из поддельного FLAC» for one converted after the check, and the
+//! plain words of the track's quality panel.
 
 use std::fmt;
 
@@ -148,8 +149,15 @@ impl QualityCheck {
             verdict,
             origin: if verdict == self.verdict { self.origin } else { SoundOrigin::Unknown },
             made_from: self.made_from.clone(),
+            cutoff_hz: summary_cut(self.cutoff_hz),
         }
     }
+}
+
+/// The cut as a summary keeps it: whole Hz, truncated as the rows' SQL
+/// does (`CAST(cutoff_hz AS INTEGER)`), none when unknown.
+fn summary_cut(hz: f32) -> Option<u32> {
+    (hz >= 1.0).then_some(hz as u32)
 }
 
 /// What a track row needs of a check: the label, without the spectrum.
@@ -158,6 +166,11 @@ pub struct CheckSummary {
     pub verdict: Verdict,
     pub origin: SoundOrigin,
     pub made_from: Option<Codec>,
+    /// Where the band was cut, whole Hz: whether a transcoding is plain or
+    /// only possible ([`CheckSummary::sure`]). `None` in a summary encoded
+    /// before it was kept.
+    #[serde(default)]
+    pub cutoff_hz: Option<u32>,
 }
 
 impl Serialize for SoundOrigin {
@@ -214,23 +227,46 @@ pub fn clear_fake(verdict: Verdict, cutoff_hz: f32, steepness_db: f32, hi_res: b
         && steepness_db >= if hi_res { 40.0 } else { 30.0 }
 }
 
+/// A transcoding found with this cut is only a possibility: at
+/// [`HIGHEST_CLEAR_CUT_HZ`] and above an MP3 320 cuts where a real master's
+/// own lowpass or a resampling filter does too.
+pub fn unsure_cut(cutoff_hz: f32) -> bool {
+    cutoff_hz >= HIGHEST_CLEAR_CUT_HZ
+}
+
 impl CheckSummary {
-    /// `verdict|origin|made_from`, as the library's track rows select it.
+    /// `verdict|origin|made_from|cutoff_hz`, as the library's track rows
+    /// select it (the cut in whole Hz, empty when unknown).
     pub fn encode(&self) -> String {
         format!(
-            "{}|{}|{}",
+            "{}|{}|{}|{}",
             self.verdict.as_str(),
             self.origin.as_str(),
-            self.made_from.as_ref().map_or("", Codec::as_str)
+            self.made_from.as_ref().map_or("", Codec::as_str),
+            self.cutoff_hz.map_or_else(String::new, |c| c.to_string())
         )
     }
 
+    /// Reads [`Self::encode`]; a summary of three fields (encoded before
+    /// the cut was kept) has no cut.
     pub fn decode(s: &str) -> Option<Self> {
         let mut it = s.split('|');
         let verdict = Verdict::parse(it.next()?);
         let origin = SoundOrigin::parse(it.next()?);
         let made_from = it.next().filter(|m| !m.is_empty()).map(Codec::parse);
-        Some(Self { verdict, origin, made_from })
+        let cutoff_hz = it.next().and_then(|c| c.trim().parse::<f64>().ok()).and_then(|c| summary_cut(c as f32));
+        Some(Self { verdict, origin, made_from, cutoff_hz })
+    }
+
+    /// The transcoding is plain: cut below [`HIGHEST_CLEAR_CUT_HZ`]. At or
+    /// above it the file may be a real master. Without the cut (a summary
+    /// from before it was kept) an MP3 320's origin is taken as unsure and
+    /// a lower one as plain: those come from cuts well under 19.8 kHz.
+    pub fn sure(&self) -> bool {
+        match self.cutoff_hz {
+            Some(c) => !unsure_cut(c as f32),
+            None => self.origin.lossy_kbps() != Some(320),
+        }
     }
 
     /// The source's own codec is lossless and its content is not.
@@ -247,10 +283,15 @@ impl CheckSummary {
 
 }
 
-/// `quality_score` of a lossless file found transcoded: what its content
-/// really is (an MP3 of the estimated bitrate), and never above
-/// [`score::FAKE_LOSSLESS`], below MP3 V0.
-pub fn fake_score(origin: SoundOrigin) -> i32 {
+/// `quality_score` of a lossless file found transcoded with its band cut at
+/// `cutoff_hz`: what its content really is (an MP3 of the estimated
+/// bitrate), and never above [`score::FAKE_LOSSLESS`], below MP3 V0. A cut
+/// a real master may have too ([`unsure_cut`]) ranks as an MP3 320, never
+/// below it: the file may be what it says.
+pub fn fake_score(origin: SoundOrigin, cutoff_hz: f32) -> i32 {
+    if unsure_cut(cutoff_hz) {
+        return score::MP3_320;
+    }
     match origin.lossy_kbps() {
         Some(kbps) => quality_score(&Codec::Mp3, Some(kbps), None, None, false).min(score::FAKE_LOSSLESS),
         None => score::FAKE_LOSSLESS,
@@ -289,14 +330,15 @@ pub fn codec_name(c: &Codec) -> String {
 }
 
 /// The codec as a list row shows it, honest about what the content is:
-/// «FLAC из MP3 ~320», «MP3 из поддельного FLAC», «MP3 из ~128», else the
-/// codec («FLAC», «Opus»).
+/// «FLAC из MP3 ~192», «FLAC, возможно из MP3 320» (a cut a real master may
+/// have too), «MP3 из поддельного FLAC», else the codec («FLAC», «Opus»).
 pub fn row_label(codec: &Codec, check: Option<&CheckSummary>) -> String {
     label(codec, None, check)
 }
 
 /// [`row_label`] with the bitrate where it says something: «MP3 320 из
-/// поддельного FLAC», «MP3 320 из ~128», «FLAC из MP3 ~320», «Opus 160».
+/// поддельного FLAC», «MP3 320 из FLAC, возможно поддельного», «FLAC из MP3
+/// ~192», «FLAC, возможно из MP3 320», «Opus 160».
 pub fn label(codec: &Codec, bitrate: Option<u32>, check: Option<&CheckSummary>) -> String {
     let name = codec_name(codec);
     let with_rate = match bitrate.filter(|_| !codec.is_lossless()) {
@@ -306,14 +348,20 @@ pub fn label(codec: &Codec, bitrate: Option<u32>, check: Option<&CheckSummary>) 
     // A lossy file's own check says nothing (see [`check_counts`]).
     let Some(c) = check.filter(|c| check_counts(codec, c.made_from.as_ref())) else { return with_rate };
     if c.fake(codec) {
-        return match c.origin.lossy_kbps() {
-            Some(k) => format!("{name} из MP3 ~{k}"),
-            None => format!("{name} из сжатого"),
+        return match (c.origin.lossy_kbps(), c.sure()) {
+            (Some(k), true) => format!("{name} из MP3 ~{k}"),
+            (Some(k), false) => format!("{name}, возможно из MP3 {k}"),
+            (None, true) => format!("{name} из сжатого"),
+            (None, false) => format!("{name}, возможно из сжатого"),
         };
     }
     if c.from_fake(codec) {
         let from = c.made_from.as_ref().map(codec_name).unwrap_or_default();
-        return format!("{with_rate} из поддельного {from}");
+        return if c.sure() {
+            format!("{with_rate} из поддельного {from}")
+        } else {
+            format!("{with_rate} из {from}, возможно поддельного")
+        };
     }
     with_rate
 }
@@ -333,15 +381,23 @@ pub fn verdict_text(codec: &Codec, bitrate: Option<u32>, check: &QualityCheck) -
         Some(k) => format!("похоже на MP3 ~{k} кбит/с"),
         None => "сжатый источник".to_owned(),
     };
+    // A cut a real master may have too is said as a possibility.
+    let maybe = |o: SoundOrigin| {
+        let from = o.lossy_kbps().map_or_else(|| "сжатого файла".to_owned(), |k| format!("MP3 ~{k} кбит/с"));
+        format!("сделан из {from}; срез {} бывает и у настоящих записей", khz(check.cutoff_hz))
+    };
     if s.fake(codec) {
+        if !s.sure() {
+            return format!("Возможно, {}", maybe(check.origin));
+        }
         return format!("Не настоящий lossless: сделан из сжатого файла, {}", like(check.origin));
     }
     if s.from_fake(codec) {
-        return format!(
-            "Сделан из поддельного {}: внутри был сжатый звук, {}",
-            check.made_from.as_ref().map(codec_name).unwrap_or_default(),
-            like(check.origin)
-        );
+        let from = check.made_from.as_ref().map(codec_name).unwrap_or_default();
+        if !s.sure() {
+            return format!("Сделан из {from}, который, возможно, {}", maybe(check.origin));
+        }
+        return format!("Сделан из поддельного {from}: внутри был сжатый звук, {}", like(check.origin));
     }
     match (s.verdict, &check.made_from) {
         (Verdict::Unknown, _) => "Не определить: запись слишком тихая или короткая".into(),
@@ -437,21 +493,82 @@ mod tests {
     #[test]
     fn summaries_round_trip_through_the_row_column() {
         let s = check(Verdict::Transcoded, 16_000.0, Some(Codec::Flac)).summary();
-        assert_eq!(s.encode(), "transcoded|lossy:128|flac");
+        assert_eq!(s.encode(), "transcoded|lossy:128|flac|16000");
         assert_eq!(CheckSummary::decode(&s.encode()), Some(s));
         let plain = check(Verdict::Genuine, 22_050.0, None).summary();
         assert_eq!(CheckSummary::decode(&plain.encode()), Some(plain));
         assert_eq!(CheckSummary::decode(""), None);
+        // The cut is kept in whole Hz, truncated as the rows' SQL does.
+        assert_eq!(check(Verdict::Transcoded, 19_799.9, None).summary().cutoff_hz, Some(19_799));
+        assert_eq!(check(Verdict::Unknown, 0.0, None).summary().cutoff_hz, None);
+        assert_eq!(check(Verdict::Unknown, 0.0, None).summary().encode(), "unknown|unknown||");
+        // The SQL gives the cut as an integer; a REAL would read too.
+        assert_eq!(CheckSummary::decode("transcoded|lossy:320||20186").unwrap().cutoff_hz, Some(20_186));
+        assert_eq!(CheckSummary::decode("transcoded|lossy:320||20186.0").unwrap().cutoff_hz, Some(20_186));
+    }
+
+    /// Summaries encoded before the cut was kept (three fields) still read:
+    /// an MP3 320's origin is taken as unsure, a lower one as plain.
+    #[test]
+    fn old_summaries_without_the_cut_still_decode() {
+        let old = CheckSummary::decode("transcoded|lossy:320|").unwrap();
+        assert_eq!((old.verdict, old.origin, old.made_from.clone(), old.cutoff_hz), (Verdict::Transcoded, SoundOrigin::Lossy { kbps: 320 }, None, None));
+        assert!(!old.sure());
+        assert_eq!(row_label(&Codec::Flac, Some(&old)), "FLAC, возможно из MP3 320");
+        let low = CheckSummary::decode("transcoded|lossy:128|").unwrap();
+        assert!(low.sure());
+        assert_eq!(row_label(&Codec::Flac, Some(&low)), "FLAC из MP3 ~128");
+        let conv = CheckSummary::decode("transcoded|lossy:192|flac").unwrap();
+        assert_eq!(conv.made_from, Some(Codec::Flac));
+        assert_eq!(label(&Codec::Mp3, Some(256), Some(&conv)), "MP3 256 из поддельного FLAC");
+        // A JSON summary from before the field reads with no cut.
+        let json: CheckSummary = serde_json::from_str(r#"{"verdict":"transcoded","origin":"lossy:320","made_from":null}"#).unwrap();
+        assert_eq!(json.cutoff_hz, None);
+    }
+
+    /// A cut at 19.8 kHz and above may be a real master's own lowpass or a
+    /// resampling filter: every label says it as a possibility; a cut below
+    /// it plainly.
+    #[test]
+    fn a_cut_a_master_may_have_is_said_as_a_possibility() {
+        let maybe = check(Verdict::Transcoded, 20_186.0, None);
+        assert_eq!(row_label(&Codec::Flac, Some(&maybe.summary())), "FLAC, возможно из MP3 320");
+        assert_eq!(label(&Codec::Flac, Some(1000), Some(&maybe.summary())), "FLAC, возможно из MP3 320");
+        assert_eq!(
+            verdict_text(&Codec::Flac, None, &maybe),
+            "Возможно, сделан из MP3 ~320 кбит/с; срез 20,2 кГц бывает и у настоящих записей"
+        );
+        // Right at the line: 19.8 kHz is unsure, a hair under it is plain.
+        let edge = check(Verdict::Transcoded, 19_800.0, None).summary();
+        assert_eq!(row_label(&Codec::Flac, Some(&edge)), "FLAC, возможно из MP3 256");
+        let under = check(Verdict::Transcoded, 19_790.0, None).summary();
+        assert_eq!(row_label(&Codec::Flac, Some(&under)), "FLAC из MP3 ~256");
+        // Converted before plain fakes were told apart (OMORI at 20.1 kHz).
+        let conv = check(Verdict::Transcoded, 20_100.0, Some(Codec::Flac));
+        assert_eq!(label(&Codec::Mp3, Some(320), Some(&conv.summary())), "MP3 320 из FLAC, возможно поддельного");
+        assert_eq!(row_label(&Codec::Mp3, Some(&conv.summary())), "MP3 из FLAC, возможно поддельного");
+        assert_eq!(
+            verdict_text(&Codec::Mp3, Some(320), &conv),
+            "Сделан из FLAC, который, возможно, сделан из MP3 ~320 кбит/с; срез 20,1 кГц бывает и у настоящих записей"
+        );
+        // A plain one is said plainly.
+        let plain = check(Verdict::Transcoded, 16_100.0, None);
+        assert_eq!(row_label(&Codec::Flac, Some(&plain.summary())), "FLAC из MP3 ~128");
+        assert!(verdict_text(&Codec::Flac, None, &plain).starts_with("Не настоящий lossless: сделан из сжатого файла"));
+        assert!(plain.summary().sure() && !maybe.summary().sure());
+        // A real file and an unknown one are never «возможно».
+        assert_eq!(row_label(&Codec::Flac, Some(&check(Verdict::Genuine, 22_050.0, None).summary())), "FLAC");
+        assert_eq!(row_label(&Codec::Flac, Some(&check(Verdict::Upsampled, 21_000.0, None).summary())), "FLAC");
     }
 
     #[test]
     fn a_fake_is_never_labelled_lossless() {
-        let fake = check(Verdict::Transcoded, 20_100.0, None).summary();
-        assert_eq!(row_label(&Codec::Flac, Some(&fake)), "FLAC из MP3 ~320");
+        let fake = check(Verdict::Transcoded, 18_600.0, None).summary();
+        assert_eq!(row_label(&Codec::Flac, Some(&fake)), "FLAC из MP3 ~192");
         let low = check(Verdict::Transcoded, 16_000.0, None).summary();
         assert_eq!(label(&Codec::Flac, Some(1000), Some(&low)), "FLAC из MP3 ~128");
         // Converted after the check.
-        let conv = check(Verdict::Transcoded, 20_100.0, Some(Codec::Flac)).summary();
+        let conv = check(Verdict::Transcoded, 19_600.0, Some(Codec::Flac)).summary();
         assert_eq!(label(&Codec::Mp3, Some(320), Some(&conv)), "MP3 320 из поддельного FLAC");
         assert_eq!(row_label(&Codec::Mp3, Some(&conv)), "MP3 из поддельного FLAC");
         // A real one, and a file not checked yet, keep their codec.
@@ -505,7 +622,7 @@ mod tests {
         assert!(verdict_text(&Codec::Flac, None, &real).starts_with("Настоящий lossless"));
         assert_eq!(cutoff_text(&real).as_deref(), Some("до 22,0 кГц, без среза"));
         assert_eq!(cutoff_text(&fake).as_deref(), Some("до 16,0 кГц"));
-        let conv = check(Verdict::Transcoded, 20_100.0, Some(Codec::Flac));
+        let conv = check(Verdict::Transcoded, 19_600.0, Some(Codec::Flac));
         assert!(verdict_text(&Codec::Mp3, Some(320), &conv).starts_with("Сделан из поддельного FLAC"));
         let opus = check(Verdict::Genuine, 22_050.0, Some(Codec::Flac));
         assert_eq!(verdict_text(&Codec::Opus, Some(160), &opus), "Сделан из настоящего FLAC");
@@ -520,10 +637,16 @@ mod tests {
 
     #[test]
     fn a_fake_scores_as_what_it_really_is() {
-        assert_eq!(fake_score(SoundOrigin::Lossy { kbps: 320 }), score::FAKE_LOSSLESS);
-        assert!(fake_score(SoundOrigin::Lossy { kbps: 128 }) < score::FAKE_LOSSLESS);
-        assert_eq!(fake_score(SoundOrigin::Unknown), score::FAKE_LOSSLESS);
-        assert!(fake_score(SoundOrigin::Lossy { kbps: 320 }) < score::MP3_V0);
+        assert_eq!(fake_score(SoundOrigin::Lossy { kbps: 256 }, 19_600.0), score::FAKE_LOSSLESS);
+        assert!(fake_score(SoundOrigin::Lossy { kbps: 128 }, 16_000.0) < score::FAKE_LOSSLESS);
+        assert_eq!(fake_score(SoundOrigin::Unknown, 16_000.0), score::FAKE_LOSSLESS);
+        assert!(fake_score(SoundOrigin::Lossy { kbps: 256 }, 19_600.0) < score::MP3_V0);
+        // A cut a real master may have too: never below an MP3 320, never
+        // above a real CD.
+        assert_eq!(fake_score(SoundOrigin::Lossy { kbps: 320 }, 20_186.0), score::MP3_320);
+        assert_eq!(fake_score(SoundOrigin::Lossy { kbps: 256 }, 19_800.0), score::MP3_320);
+        assert!(fake_score(SoundOrigin::Lossy { kbps: 320 }, 20_186.0) < score::CD_LOSSLESS);
+        assert!(fake_score(SoundOrigin::Lossy { kbps: 256 }, 19_799.0) < score::MP3_V0);
         assert_eq!(Mp3Target::for_origin(SoundOrigin::Lossy { kbps: 320 }), Mp3Target::Cbr320);
         assert_eq!(Mp3Target::for_origin(SoundOrigin::Lossy { kbps: 256 }), Mp3Target::Cbr320);
         assert_eq!(Mp3Target::for_origin(SoundOrigin::Lossy { kbps: 192 }), Mp3Target::V0);

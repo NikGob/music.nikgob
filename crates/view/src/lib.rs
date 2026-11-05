@@ -1056,6 +1056,11 @@ pub struct Confirm {
     pub skip_label: String,
     /// Button for the chosen option ("Скачать", "Импортировать").
     pub accept_label: String,
+    /// A card of songs each ticked on its own (the fake FLACs offered as
+    /// MP3s): `options` are its songs, none is ticked at first, and both
+    /// buttons act on the ticked ones only ([`Command::ConfirmPicked`]).
+    /// `None`: one option is chosen ([`Command::ConfirmChoice`]).
+    pub pick: Option<ConfirmPick>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1063,6 +1068,34 @@ pub struct ConfirmOption {
     pub label: String,
     pub detail: String,
     pub recommended: bool,
+}
+
+/// The songs of a [`Confirm::pick`] card and the words of its buttons.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfirmPick {
+    /// The source of each option, in order: what
+    /// [`Command::ConfirmPicked`] carries for the ticked ones.
+    pub sources: Vec<nikgob_core::model::SourceId>,
+    /// The accept button around the count of ticked songs: («Превратить»,
+    /// «в MP3») reads «Превратить 3 в MP3».
+    pub accept: (String, String),
+    /// The other button, the same way: («Оставить», «FLAC») reads
+    /// «Оставить 3 FLAC».
+    pub skip: (String, String),
+}
+
+impl ConfirmPick {
+    /// A button's words around `n` ticked songs; with none ticked, without
+    /// a count («Превратить в MP3»).
+    pub fn words(around: &(String, String), n: usize) -> String {
+        let (before, after) = around;
+        match (n, after.is_empty()) {
+            (0, true) => before.clone(),
+            (0, false) => format!("{before} {after}"),
+            (n, true) => format!("{before} {n}"),
+            (n, false) => format!("{before} {n} {after}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -2407,6 +2440,10 @@ pub enum Command {
     /// again; the MP3s go to the Trash.
     RestoreConvertedFlac,
     ConfirmChoice { id: u64, option: Option<usize> },
+    /// The ticked songs of a [`Confirm::pick`] card: accepted (`accept`,
+    /// the fakes become MP3s) or not (kept as they are, never offered
+    /// again). Only these sources change, never the rest of the card.
+    ConfirmPicked { id: u64, sources: Vec<nikgob_core::model::SourceId>, accept: bool },
     /// Folds the editions of [`EditionOffer::id`] into one album.
     MergeEditions(u64),
     /// Keeps them apart and never offers them again.

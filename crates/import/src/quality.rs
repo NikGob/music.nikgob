@@ -288,7 +288,7 @@ pub fn restore_conversion(lib: &Library, trash_dir: &Path, c: &Conversion) -> Re
     let check = lib.quality_check(c.original).ok().flatten();
     let rank = match &check {
         Some(q) if nikgob_core::quality::plausible(q.verdict, q.cutoff_hz) == Verdict::Transcoded => {
-            nikgob_core::quality::fake_score(q.origin)
+            nikgob_core::quality::fake_score(q.origin, q.cutoff_hz)
         }
         _ => nikgob_core::model::quality_score(&src.codec, src.bitrate, src.sample_rate, src.bit_depth, false),
     };

@@ -168,8 +168,21 @@ fn paint(
     let pos = steady(&ctx, id.with("steady"), led(state.player.position_now(), state.prefs.lyrics_lead), playing);
 
     // Waiting owns the anchor during a break; otherwise follow the last
-    // main line. Background voices light up independently while sung.
-    let cur = current_item(lines, &items, pos);
+    // main line. Background voices light up independently while sung. A
+    // clicked line is the current one from the click on, while its seek
+    // comes back.
+    let back = Duration::from_secs_f32((-state.prefs.lyrics_lead.clamp(-0.5, 0.5)).max(0.0));
+    let jump_id = id.with("jump");
+    let by_pos = current_item(lines, &items, pos);
+    let (cur, jump) = with_jump(ctx.data(|d| d.get_temp::<Jump>(jump_id)), lines, &items, by_pos, pos, back, now);
+    match jump {
+        Some(j) => {
+            ctx.data_mut(|d| d.insert_temp(jump_id, j));
+            // Let go of it at the latest when it times out.
+            ctx.request_repaint_after(Duration::from_secs_f64((j.at + JUMP_HOLD - now).max(0.0) + 0.01));
+        }
+        None => ctx.data_mut(|d| d.remove::<Jump>(jump_id)),
+    }
     let ci = cur.unwrap_or(0);
     let active = |i: usize| {
         let l = &lines[i];
@@ -247,35 +260,40 @@ fn paint(
         rooms.push(keep);
     }
 
-    // Keep the user's offset, then ease it back over half a second.
-    let (mut manual, mut until): (f32, f64) = ctx.data(|d| d.get_temp(id)).unwrap_or((0.0, 0.0));
-    let mut dy = if resp.dragged() { ctx.input(|i| i.pointer.delta().y) } else { 0.0 };
-    if resp.hovered() {
-        dy += ctx.input(|i| i.smooth_scroll_delta.y);
-        ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
-    }
-    if dy != 0.0 {
-        manual = returning_offset(manual, until, now) - dy;
-        until = now + f64::from(state.prefs.lyrics_return_s.max(0.0));
-    }
-    // Scrolling stops at the text's ends: the first line or the last one
-    // at the anchor, never into empty space.
-    let centre = |i: usize| tops[i] + slots[i].0 * 0.5;
-    let last = tops.len().saturating_sub(1);
-    manual = manual.clamp(centre(0) - centre(ci), centre(last) - centre(ci));
-    let manual_on = now < until;
-    ctx.data_mut(|d| d.insert_temp(id, (manual, until)));
-    if manual_on {
-        ctx.request_repaint_after(Duration::from_secs_f64((until - now).max(0.0)));
-    } else if manual != 0.0 && now < until + 0.5 {
-        ctx.request_repaint();
-    }
     // Where the current line rests: at its share of the whole view, with the
     // soft edges always clear of the top band (a lens: lines come into
     // focus as they arrive and go soft as they leave).
     let soft = Soft::of(&state.prefs);
     let anchor = rest_at(rect, sizes.anchor, state.prefs.lyrics_soft_edges.then_some(soft), slots[ci].0 * 0.5, sizes.big * 0.4);
-    let scroll = tops[ci] + slots[ci].0 * 0.5 - anchor + returning_offset(manual, until, now);
+    let follow = tops[ci] + slots[ci].0 * 0.5 - anchor;
+
+    // Keep the user's offset, then ease it back over half a second.
+    let manual_id = id.with("manual");
+    let mut dy = if resp.dragged() { ctx.input(|i| i.pointer.delta().y) } else { 0.0 };
+    if resp.hovered() {
+        dy += ctx.input(|i| i.smooth_scroll_delta.y);
+        ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+    }
+    // Scrolling stops at the text's ends: the first line (or wait) with
+    // room or the last one at the anchor, never into empty space.
+    let centre = |i: usize| tops[i] + slots[i].0 * 0.5;
+    let first = rooms.iter().position(|r| *r >= ROOMLESS).unwrap_or(0);
+    let last = tops.len().saturating_sub(1);
+    let manual = ctx.data(|d| d.get_temp::<Manual>(manual_id)).unwrap_or_default().step(
+        follow,
+        dy,
+        now,
+        f64::from(state.prefs.lyrics_return_s.max(0.0)),
+        (centre(first) - centre(ci), centre(last) - centre(ci)),
+    );
+    let manual_on = manual.on(now);
+    ctx.data_mut(|d| d.insert_temp(manual_id, manual));
+    if manual_on {
+        ctx.request_repaint_after(Duration::from_secs_f64((manual.until - now).max(0.0)));
+    } else if manual.offset != 0.0 && now < manual.until + 0.5 {
+        ctx.request_repaint();
+    }
+    let scroll = follow + manual.shift(now);
     let together = if !state.prefs.lyrics_cascade {
         anim::f32(&ctx, id.with("scroll"), scroll, Spring::new(1.0, 300.0))
     } else { scroll };
@@ -304,13 +322,18 @@ fn paint(
     };
     // One item at most is under the pointer: a folded wait has no room to
     // be hovered in, an unfolding one only the room it has.
-    let target = resp.hover_pos().filter(|p| (left - 8.0..=left + wrap + 8.0).contains(&p.x)).and_then(|p| {
-        let hits: Vec<_> = (0..items.len())
-            .map(|i| shown(i).then(|| (ys[i], (slots[i].0 + slots[i].1) * rooms[i], rooms[i])))
-            .collect();
-        hit_target(&hits, p.y, gap * 0.5)
-    });
-    let mut clicked = None;
+    let item_at = |p: Option<egui::Pos2>| {
+        p.filter(|p| (left - 8.0..=left + wrap + 8.0).contains(&p.x)).and_then(|p| {
+            let hits: Vec<_> = (0..items.len())
+                .map(|i| shown(i).then(|| (ys[i], (slots[i].0 + slots[i].1) * rooms[i], rooms[i])))
+                .collect();
+            hit_target(&hits, p.y, gap * 0.5)
+        })
+    };
+    let target = item_at(resp.hover_pos());
+    // A tap on a touch screen ends with the pointer gone, so nothing is
+    // hovered in the frame of its click: the click is placed where it was.
+    let clicked = if resp.clicked() { item_at(resp.interact_pointer_pos().or(resp.hover_pos())) } else { None };
     for (i, item) in items.iter().enumerate() {
         let dist = i as i32 - ci as i32;
         let far = dist.unsigned_abs().min(8) as f32;
@@ -361,12 +384,6 @@ fn paint(
         let slot = Rect::from_min_size(pos2(left, y), vec2(wrap, (slot_h + extra) * room));
         if target == Some(i) {
             painter.rect_filled(slot.expand2(vec2(10.0, 6.0 * room)), 14, s.on_surface.gamma_multiply(0.06 * edge * room));
-            if resp.clicked() {
-                clicked = Some(match *item {
-                    DisplayLine::Line(j) => lines[j].start,
-                    DisplayLine::Interlude { end, .. } => end.saturating_sub(Duration::from_secs(1)),
-                });
-            }
         }
         let DisplayLine::Line(j) = *item else {
             if let DisplayLine::Interlude { start, end, .. } = *item {
@@ -466,8 +483,17 @@ fn paint(
             timed_line(&painter, &g, line, &timing, pos, is_cur, focus, size, look, base, color, &state.prefs);
         }
     }
-    if let Some(pos) = clicked {
-        out.push(Command::Seek(pos));
+    // A click goes to its line (a wait: to just before the singing): the
+    // song seeks there, the line becomes the current one at once and the
+    // view settles on it as for any new line; the user's scroll ends.
+    if let Some(i) = clicked {
+        let to = seek_to(lines, items[i]);
+        out.push(Command::Seek(to));
+        ctx.data_mut(|d| {
+            d.insert_temp(jump_id, Jump { item: items[i], to, at: now });
+            d.insert_temp(manual_id, Manual::default());
+        });
+        ctx.request_repaint();
     }
     if resp.hovered() {
         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -597,6 +623,106 @@ const STEP_BACK: Duration = Duration::from_millis(350);
 fn returning_offset(offset: f32, until: f64, now: f64) -> f32 {
     let t = ((now - until) / 0.5).clamp(0.0, 1.0) as f32;
     offset * (1.0 - t * t * (3.0 - 2.0 * t))
+}
+
+/// The user's own scroll of the lyrics: `offset` from following the current
+/// line, held until `until` (then eased back over half a second), and the
+/// follow position (`from`) it was last measured against.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Manual {
+    offset: f32,
+    until: f64,
+    from: f32,
+}
+
+impl Manual {
+    /// One frame. `follow`: where following the current line scrolls to
+    /// now; `dy`: the user's scroll this frame; `hold`: how long a scroll
+    /// holds, seconds; `range`: the offsets that keep the text's first and
+    /// last lines reachable. While it holds, the text stays where the user
+    /// left it as the song moves on (a new current line moves `follow`, the
+    /// offset takes the move back), so the line under the pointer is the
+    /// line that gets clicked.
+    fn step(self, follow: f32, dy: f32, now: f64, hold: f64, range: (f32, f32)) -> Self {
+        let mut m = self;
+        if m.on(now) {
+            m.offset += m.from - follow;
+        }
+        if dy != 0.0 {
+            m.offset = m.shift(now) - dy;
+            m.until = now + hold;
+        }
+        // Not `clamp`: it panics on an empty range.
+        m.offset = m.offset.max(range.0).min(range.1);
+        m.from = follow;
+        m
+    }
+
+    fn on(&self, now: f64) -> bool {
+        now < self.until
+    }
+
+    /// The offset as drawn (easing back once the hold is over).
+    fn shift(&self, now: f64) -> f32 {
+        returning_offset(self.offset, self.until, now)
+    }
+}
+
+/// Where a click on an item seeks: a line's start; a wait's end less a
+/// second, to hear the singing come.
+fn seek_to(lines: &[LyricLine], item: DisplayLine) -> Duration {
+    match item {
+        DisplayLine::Line(j) => lines[j].start,
+        DisplayLine::Interlude { end, .. } => end.saturating_sub(Duration::from_secs(1)),
+    }
+}
+
+/// A clicked item, current from the click until its seek has come back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Jump {
+    item: DisplayLine,
+    /// Where it seeks ([`seek_to`]).
+    to: Duration,
+    /// When it was clicked (the frame's time).
+    at: f64,
+}
+
+/// A click holds its item at most this long while the seek does not come
+/// back (nothing plays).
+const JUMP_HOLD: f64 = 3.0;
+
+/// Past the seek's point by up to this, the painted position has reached
+/// the clicked item; further on it is still the position before the seek.
+const JUMP_REACH: Duration = Duration::from_millis(1500);
+
+/// The current item with a click's `jump`: the clicked item, from the
+/// click until the painted position `pos` has reached the seek's point (the
+/// seek comes back a frame or more after the click; with a lead behind the
+/// sound, `back`, the painted position comes up to it a little later, and
+/// waits there while paused). At most [`JUMP_HOLD`] while the seek has not
+/// come back; dropped when the text changed. Returns the current item and
+/// the jump while it holds; without one, `by_pos`.
+fn with_jump(
+    jump: Option<Jump>,
+    lines: &[LyricLine],
+    items: &[DisplayLine],
+    by_pos: Option<usize>,
+    pos: Duration,
+    back: Duration,
+    now: f64,
+) -> (Option<usize>, Option<Jump>) {
+    let Some(j) = jump else { return (by_pos, None) };
+    let Some(i) = items.iter().position(|it| *it == j.item).filter(|i| seek_to(lines, items[*i]) == j.to) else {
+        return (by_pos, None);
+    };
+    if pos >= j.to && pos <= j.to + JUMP_REACH {
+        return (by_pos, None);
+    }
+    let lagging = pos < j.to && pos + back >= j.to;
+    if !lagging && !(j.at..=j.at + JUMP_HOLD).contains(&now) {
+        return (by_pos, None);
+    }
+    (Some(i), Some(j))
 }
 
 /// How long a line without an end time takes to sing: ~15 letters a second,
@@ -2220,6 +2346,133 @@ mod tests {
             output.textures_delta.clear();
         }
         assert!(commands.iter().any(|c| matches!(c, Command::Seek(t) if *t == Duration::from_secs(2))));
+    }
+
+    /// A tap on a touch screen: the pointer is gone in the frame the press
+    /// ends, so nothing is hovered then. The tap still seeks (it was lost:
+    /// the view stayed where it was and went back to the current line).
+    #[test]
+    fn a_tap_seeks_though_the_pointer_is_gone_when_it_ends() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        crate::typography::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+        let mut state = ViewState::default();
+        state.player.status = Status::Paused;
+        state.player.position = Duration::from_secs(1);
+        state.lyrics.lines = vec![line(3.0, None, "Свет из окна")];
+        state.prefs.lyrics_soft_edges = false;
+        let mut target = pos2(0.0, 0.0);
+        let mut commands = Vec::new();
+        for frame in 0..3 {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: target, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            };
+            let events = match frame {
+                0 => Vec::new(),
+                1 => vec![egui::Event::PointerMoved(target), button(true)],
+                _ => vec![button(false), egui::Event::PointerGone],
+            };
+            let mut output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 700.0))),
+                time: Some(frame as f64 * 0.05), events, ..Default::default()
+            }, |ui| {
+                target = pos2(ui.cursor().left() + ui.available_width() * 0.5,
+                    ui.cursor().top() + (ui.available_height() - Size::Xs.height() - CONTROL_GAP) * MEGA.anchor);
+                show(ui, &state, 0.0, true, &mut commands);
+            });
+            output.textures_delta.clear();
+        }
+        assert!(commands.iter().any(|c| matches!(c, Command::Seek(t) if *t == Duration::from_secs(2))), "{commands:?}");
+    }
+
+    /// Where a click seeks: a line's start; a wait's end less a second.
+    #[test]
+    fn a_click_seeks_to_its_line_or_just_before_the_singing() {
+        let lines = [line(3.0, Some(4.0), "a"), line(10.0, None, "b")];
+        let items = display_lines(&lines);
+        let at = |item: DisplayLine| seek_to(&lines, item);
+        assert_eq!(at(DisplayLine::Line(1)), Duration::from_secs(10));
+        assert_eq!(at(items[0]), Duration::from_secs(2), "the intro's wait");
+        assert_eq!(at(DisplayLine::Interlude { start: Duration::ZERO, end: Duration::from_millis(500), duet: false }), Duration::ZERO);
+    }
+
+    /// Scrolled down by hand to a line far below and clicked: the line is
+    /// the current one from the click on, while the seek has not come back
+    /// (the position still the old one, above or below), while a lead behind
+    /// the sound paints a little before it (as long as it takes, paused
+    /// too), and at most 3 s when nothing plays. Reaching the line lets go;
+    /// another text drops it.
+    #[test]
+    fn a_clicked_line_is_current_until_its_seek_comes_back() {
+        let lines = [line(3.0, Some(4.0), "a"), line(10.0, Some(12.0), "b"), line(60.0, None, "c")];
+        let items = display_lines(&lines);
+        let of = |item: DisplayLine| items.iter().position(|it| *it == item).unwrap();
+        let (a, b, c) = (of(DisplayLine::Line(0)), of(DisplayLine::Line(1)), of(DisplayLine::Line(2)));
+        let by = |secs: f32| current_item(&lines, &items, Duration::from_secs_f32(secs));
+        let at = |secs: f32| Duration::from_secs_f32(secs);
+        let none = Duration::ZERO;
+        let jump = Jump { item: DisplayLine::Line(2), to: at(60.0), at: 100.0 };
+        // Before the seek comes back the position is still at «b».
+        assert_eq!(by(10.5), Some(b));
+        assert_eq!(with_jump(Some(jump), &lines, &items, by(10.5), at(10.5), none, 100.02), (Some(c), Some(jump)));
+        assert_eq!(with_jump(Some(jump), &lines, &items, by(10.6), at(10.6), none, 102.9), (Some(c), Some(jump)));
+        // Back: the position says it, the jump is done.
+        assert_eq!(with_jump(Some(jump), &lines, &items, by(60.0), at(60.0), none, 100.1), (Some(c), None));
+        assert_eq!(with_jump(Some(jump), &lines, &items, by(60.3), at(60.3), none, 100.1), (Some(c), None));
+        // Nothing plays: let go after 3 s.
+        assert_eq!(with_jump(Some(jump), &lines, &items, by(10.6), at(10.6), none, 103.1), (Some(b), None));
+        // A lead 0.4 s behind the sound paints at 59.7 s: still «c», paused
+        // for as long as it takes; without such a lead 59.7 is not «c».
+        let back = Duration::from_millis(400);
+        assert_eq!(with_jump(Some(jump), &lines, &items, by(59.7), at(59.7), back, 200.0), (Some(c), Some(jump)));
+        assert_eq!(with_jump(Some(jump), &lines, &items, by(59.7), at(59.7), none, 200.0), (by(59.7), None));
+        // Up: clicked «a» while «c» plays, far past it.
+        let up = Jump { item: DisplayLine::Line(0), to: at(3.0), at: 50.0 };
+        assert_eq!(with_jump(Some(up), &lines, &items, by(61.0), at(61.0), none, 50.05), (Some(a), Some(up)));
+        assert_eq!(with_jump(Some(up), &lines, &items, by(3.0), at(3.0), none, 50.2), (Some(a), None));
+        // Another text (the song changed): dropped at once.
+        let other = [line(1.0, None, "x"), line(2.0, None, "y"), line(5.0, None, "z")];
+        let other_items = display_lines(&other);
+        let by_other = current_item(&other, &other_items, at(0.5));
+        assert_eq!(with_jump(Some(jump), &other, &other_items, by_other, at(0.5), none, 100.05), (by_other, None));
+        assert_eq!(with_jump(None, &lines, &items, by(10.5), at(10.5), none, 1.0), (Some(b), None));
+    }
+
+    /// Scrolled by hand, the text stays where the user left it as the song
+    /// moves to its next lines (it jumped a line at a time under the
+    /// pointer, and a click took the line that had moved there); the hold
+    /// ends and it eases back; a click ends it at once.
+    #[test]
+    fn a_scrolled_text_stays_put_while_the_song_moves_on() {
+        let range = (-5000.0, 5000.0);
+        // The wheel down 300: the text moves up, 300 past the current line.
+        let m = Manual::default().step(100.0, -300.0, 10.0, 4.0, range);
+        assert_eq!((m.offset, m.until, m.from), (300.0, 14.0, 100.0));
+        assert!(m.on(10.0));
+        // The next line becomes current (follow moves by 60): the text
+        // stays at 400 all the same.
+        let m = m.step(160.0, 0.0, 11.0, 4.0, range);
+        assert_eq!(160.0 + m.shift(11.0), 400.0);
+        let m = m.step(230.0, 0.0, 12.0, 4.0, range);
+        assert_eq!(230.0 + m.shift(12.0), 400.0);
+        // Scrolled on from there.
+        let m = m.step(230.0, -50.0, 12.5, 4.0, range);
+        assert_eq!(230.0 + m.shift(12.5), 450.0);
+        assert_eq!(m.until, 16.5);
+        // The hold is over: back to following, eased over half a second.
+        let m = m.step(300.0, 0.0, 16.75, 4.0, range);
+        assert!(!m.on(16.75));
+        assert!(m.shift(16.75) > 0.0 && m.shift(16.75) < m.offset);
+        assert_eq!(m.shift(17.0), 0.0);
+        // The text's ends hold it; an empty range never panics.
+        assert_eq!(Manual::default().step(0.0, -9000.0, 1.0, 4.0, (-50.0, 80.0)).offset, 80.0);
+        assert_eq!(Manual::default().step(0.0, 9000.0, 1.0, 4.0, (-50.0, 80.0)).offset, -50.0);
+        assert_eq!(Manual::default().step(0.0, 0.0, 1.0, 4.0, (30.0, 0.0)).offset, 0.0);
+        // A click puts it back to following at once.
+        let clicked = Manual::default();
+        assert!(!clicked.on(12.0));
+        assert_eq!(clicked.shift(12.0), 0.0);
     }
 
     fn with_painter(test: impl FnOnce(&egui::Painter)) {

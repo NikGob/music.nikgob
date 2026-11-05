@@ -69,6 +69,9 @@
 //! - `fake:share` — «Загрузки → Раздача» busy (`route:seeding`): three
 //!   torrents seeding, Soulseek sharing with uploads running, queued, done
 //!   and cut off, and today's and overall totals.
+//! - `fake:fake-flac` — «Подтверди» with a card of three fake FLACs of one
+//!   album offered as MP3s, a row per song to tick (`route:confirm`), as
+//!   the runtime words it (runtime/src/quality.rs).
 //! - `fake:upgrade-offer` — a better copy of a library track found and
 //!   waiting in «Подтверди» («FLAC вместо MP3 320»), and «Хочу скачать»
 //!   with better copies looked for in each state (`route:confirm`,
@@ -116,6 +119,7 @@ pub struct Fakes {
     history_refusals: bool,
     share: bool,
     upgrade_offer: bool,
+    fake_flac: bool,
     /// `fake:quality:fake` (true) / `fake:quality:real`.
     quality: Option<bool>,
 }
@@ -157,6 +161,7 @@ impl Fakes {
             "history-refusals" => self.history_refusals = true,
             "share" => self.share = true,
             "upgrade-offer" => self.upgrade_offer = true,
+            "fake-flac" => self.fake_flac = true,
             "quality:real" => self.quality = Some(false),
             "quality:fake" => self.quality = Some(true),
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
@@ -198,6 +203,7 @@ impl Fakes {
             || self.history_refusals
             || self.share
             || self.upgrade_offer
+            || self.fake_flac
             || self.quality.is_some()
     }
 
@@ -224,6 +230,10 @@ impl Fakes {
         if self.upgrade_offer {
             s.downloads.confirm = vec![upgrade_offer()];
             s.downloads.wishlist = upgrades();
+        }
+        if self.fake_flac {
+            s.downloads.confirm.retain(|c| c.pick.is_none());
+            s.downloads.confirm.push(fake_flac_card());
         }
         if self.keep
             && let Some(t) = s.player.current.clone()
@@ -1091,6 +1101,37 @@ fn upgrade_offer() -> nikgob_view::Confirm {
         ],
         skip_label: "Оставить как есть".into(),
         accept_label: "Заменить".into(),
+        pick: None,
+    }
+}
+
+/// Three fake FLACs of one album offered as MP3s (`fake:fake-flac`), a row
+/// per song, as the runtime words them (runtime/src/quality.rs).
+fn fake_flac_card() -> nikgob_view::Confirm {
+    let song = |title: &str, detail: &str| nikgob_view::ConfirmOption {
+        label: title.into(),
+        detail: detail.into(),
+        recommended: false,
+    };
+    let ids = (1..=3u128).map(|n| nikgob_core::model::SourceId(nikgob_core::model::Uuid::from_u128(0xfa1e_0000 + n))).collect();
+    nikgob_view::Confirm {
+        // The runtime's bit of the fakes cards (`quality::QUALITY_ID`).
+        id: (1 << 45) | 1,
+        title: "8 способов как бросить...".into(),
+        origin: "Ненастоящий FLAC · 3 файла".into(),
+        question: "Внутри этих FLAC — MP3. Отметь, какие превратить в MP3: FLAC уйдут в Корзину, «Вернуть FLAC» в настройках вернёт их".into(),
+        options: vec![
+            song("Молли", "FLAC из MP3 ~128 · срез 16,1 кГц"),
+            song("Почему ты ещё не фанат?", "FLAC из MP3 ~192 · срез 18,2 кГц"),
+            song("Вайбмен", "FLAC из MP3 ~256 · срез 19,6 кГц"),
+        ],
+        skip_label: "Оставить FLAC".into(),
+        accept_label: "Превратить в MP3".into(),
+        pick: Some(nikgob_view::ConfirmPick {
+            sources: ids,
+            accept: ("Превратить".into(), "в MP3".into()),
+            skip: ("Оставить".into(), "FLAC".into()),
+        }),
     }
 }
 
@@ -1146,6 +1187,7 @@ fn confirm() -> nikgob_view::Confirm {
         ],
         skip_label: "Не то — поищу позже".into(),
         accept_label: "Скачать".into(),
+        pick: None,
     }
 }
 

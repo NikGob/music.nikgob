@@ -2,9 +2,10 @@
 //! file's sound really is, kept so a "FLAC" made from an MP3 is never shown
 //! as lossless, and the list of files still to check.
 
-use nikgob_core::model::{Codec, ReleaseId, SourceId, TrackId, UnixMs, quality_score};
+use nikgob_core::model::{Codec, ReleaseId, SourceId, TrackId, UnixMs, quality_score, score};
 use nikgob_core::quality::{
-    LOWEST_LOWPASS_HZ, QualityCheck, SoundOrigin, Verdict, clear_fake, spectrum_from_blob, spectrum_to_blob,
+    HIGHEST_CLEAR_CUT_HZ, LOWEST_LOWPASS_HZ, QualityCheck, SoundOrigin, Verdict, clear_fake, spectrum_from_blob,
+    spectrum_to_blob,
 };
 use rusqlite::{OptionalExtension, Row, params};
 
@@ -201,8 +202,10 @@ impl Library {
     /// file's own check goes (only a lossless sound is judged), a
     /// transcoding found with a cut below any encoder's lowpass is no
     /// verdict, and a live lossless file that was ranked down for such a
-    /// verdict is ranked as what it is again. Returns the tracks whose rows
-    /// change.
+    /// verdict is ranked as what it is again; one found cut where a real
+    /// master may be cut too (at [`HIGHEST_CLEAR_CUT_HZ`] and above), and an
+    /// MP3 made from it, rank no lower than an MP3 320. Returns the tracks
+    /// whose rows change.
     pub fn tidy_quality_checks(&self) -> Result<Vec<TrackId>> {
         self.write(|tx| {
             let mut tracks: Vec<TrackId> = Vec::new();
@@ -247,6 +250,25 @@ impl Library {
                     refresh_active(tx, track)?;
                     tracks.push(track);
                 }
+            }
+            // A cut a real master may have too was ranked as a plain fake
+            // before; it may be what it says (`fake_score`).
+            let unsure: Vec<(SourceId, TrackId)> = {
+                let mut stmt = tx.prepare_cached(&format!(
+                    "SELECT s.id, s.track_id FROM source_quality q JOIN source s ON s.id = q.source_id
+                      WHERE q.verdict = 'transcoded' AND q.cutoff_hz >= ?1 AND q.failed IS NULL
+                        AND s.quality_score < ?2 AND s.trashed_at IS NULL AND s.origin_kind != 'stream'
+                        AND ((q.made_from IS NULL AND s.codec IN {LOSSLESS_SQL}) OR q.made_from IN {LOSSLESS_SQL})"
+                ))?;
+                let rows = stmt.query_map(params![f64::from(HIGHEST_CLEAR_CUT_HZ), score::MP3_320], |r| {
+                    Ok((get_id(r, 0)?, get_id(r, 1)?))
+                })?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            for (id, track) in unsure {
+                tx.execute("UPDATE source SET quality_score = ?2 WHERE id = ?1", params![id.to_string(), score::MP3_320])?;
+                refresh_active(tx, track)?;
+                tracks.push(track);
             }
             tracks.sort();
             tracks.dedup();
@@ -399,7 +421,10 @@ mod tests {
         assert!(back.spectrum_db.iter().zip(&c.spectrum_db).all(|(a, b)| (a - b).abs() <= 0.051));
 
         let row = lib.get_track_row(s.track_id).unwrap().unwrap();
-        assert_eq!(row.check, Some(CheckSummary { verdict: Verdict::Transcoded, origin: SoundOrigin::Lossy { kbps: 128 }, made_from: None }));
+        assert_eq!(
+            row.check,
+            Some(CheckSummary { verdict: Verdict::Transcoded, origin: SoundOrigin::Lossy { kbps: 128 }, made_from: None, cutoff_hz: Some(16_012) })
+        );
         assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "FLAC из MP3 ~128");
 
         // A failed check is not a verdict for the rows.
@@ -422,8 +447,8 @@ mod tests {
         assert_eq!(todo[1].checked, Some((26_733_824, 1_762_000_000_000)));
         assert_eq!(todo[0].checked, None);
 
-        assert!(lib.set_source_score(done.id, nikgob_core::quality::fake_score(SoundOrigin::Lossy { kbps: 128 })).unwrap());
-        assert!(!lib.set_source_score(done.id, nikgob_core::quality::fake_score(SoundOrigin::Lossy { kbps: 128 })).unwrap());
+        assert!(lib.set_source_score(done.id, nikgob_core::quality::fake_score(SoundOrigin::Lossy { kbps: 128 }, 16_012.5)).unwrap());
+        assert!(!lib.set_source_score(done.id, nikgob_core::quality::fake_score(SoundOrigin::Lossy { kbps: 128 }, 16_012.5)).unwrap());
         let row = lib.get_track_row(done.track_id).unwrap().unwrap();
         assert!(row.quality.unwrap() < score::MP3_V0);
 
@@ -455,6 +480,42 @@ mod tests {
         assert_eq!(lib.quality_check(quiet.id).unwrap().unwrap().verdict, Verdict::Unknown);
         assert!(lib.get_track_row(quiet.track_id).unwrap().unwrap().quality.unwrap() >= score::CD_LOSSLESS);
         assert_eq!(lib.quality_check(real_fake.id).unwrap().unwrap().verdict, Verdict::Transcoded);
+        assert!(lib.tidy_quality_checks().unwrap().is_empty(), "once");
+    }
+
+    /// OMORI's tracks cut at 20.1–20.2 kHz (may be the master's own filter)
+    /// were ranked as plain fakes: they rank as an MP3 320 now, an MP3 made
+    /// from one too; the rows say it as a possibility. A plain fake stays.
+    #[test]
+    fn a_cut_a_master_may_have_ranks_as_mp3_320_and_says_maybe() {
+        let lib = Library::open_in_memory().unwrap();
+        let unsure_check = QualityCheck {
+            cutoff_hz: 20_186.0,
+            steepness_db: 48.8,
+            origin: SoundOrigin::estimate(Verdict::Transcoded, 20_186.0),
+            ..fake_check()
+        };
+        let flac = file(&lib, "Title", Codec::Flac, score::FAKE_LOSSLESS);
+        lib.put_quality_check(flac.id, &unsure_check).unwrap();
+        let mp3 = file(&lib, "Final Duet", Codec::Mp3, score::FAKE_LOSSLESS);
+        lib.put_quality_check(mp3.id, &QualityCheck { made_from: Some(Codec::Flac), cutoff_hz: 20_100.0, ..unsure_check.clone() }).unwrap();
+        let plain = file(&lib, "Молли", Codec::Flac, score::FAKE_LOSSLESS);
+        lib.put_quality_check(plain.id, &fake_check()).unwrap();
+
+        let row = lib.get_track_row(flac.track_id).unwrap().unwrap();
+        assert_eq!(row.check.as_ref().and_then(|c| c.cutoff_hz), Some(20_186));
+        assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "FLAC, возможно из MP3 320");
+        let row = lib.get_track_row(mp3.track_id).unwrap().unwrap();
+        assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "MP3 из FLAC, возможно поддельного");
+        let row = lib.get_track_row(plain.track_id).unwrap().unwrap();
+        assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "FLAC из MP3 ~128");
+
+        let changed = lib.tidy_quality_checks().unwrap();
+        assert!(changed.contains(&flac.track_id) && changed.contains(&mp3.track_id));
+        assert!(!changed.contains(&plain.track_id));
+        assert_eq!(lib.get_source(flac.id).unwrap().unwrap().quality_score, score::MP3_320);
+        assert_eq!(lib.get_source(mp3.id).unwrap().unwrap().quality_score, score::MP3_320);
+        assert_eq!(lib.get_source(plain.id).unwrap().unwrap().quality_score, score::FAKE_LOSSLESS);
         assert!(lib.tidy_quality_checks().unwrap().is_empty(), "once");
     }
 

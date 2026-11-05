@@ -1219,7 +1219,7 @@ fn analyze(cfg: &ImportConfig, path: &Path, origin: SourceOrigin) -> Result<Anal
         nikgob_core::model::score::SAVED_STREAM
     } else if fake_lossless {
         // As what its content really is: an MP3 of about that bitrate.
-        nikgob_core::quality::fake_score(sound_origin(&audio))
+        nikgob_core::quality::fake_score(sound_origin(&audio), audio.spectrum.map_or(0.0, |s| s.cutoff_hz))
     } else {
         quality_score(&info.codec, info.bitrate_kbps, rate, depth, false)
     };
@@ -1249,6 +1249,7 @@ fn quality_line(a: &Analyzed) -> String {
         verdict: s.verdict,
         origin: nikgob_core::quality::SoundOrigin::estimate(s.verdict, s.cutoff_hz),
         made_from: None,
+        cutoff_hz: (s.cutoff_hz >= 1.0).then_some(s.cutoff_hz as u32),
     });
     nikgob_core::quality::label(&a.info.codec, a.info.bitrate_kbps, check.as_ref())
 }
