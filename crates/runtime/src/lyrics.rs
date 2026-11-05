@@ -150,6 +150,16 @@ impl Text {
         (!text.trim().is_empty()).then(|| Self { lines: Vec::new(), plain: Some(text.trim().to_owned()), weak: false })
     }
 
+    /// The text less its credits lines ([`nikgob_core::lyrics::drop_credits`]);
+    /// `None` when nothing is left.
+    pub(crate) fn without_credits(mut self, names: &[String]) -> Option<Self> {
+        nikgob_core::lyrics::drop_credits(&mut self.lines, names);
+        if let Some(p) = &self.plain {
+            self.plain = Some(nikgob_core::lyrics::drop_credit_text(p, names));
+        }
+        (!self.lines.is_empty() || self.plain.as_deref().is_some_and(|p| !p.trim().is_empty())).then_some(self)
+    }
+
     /// The cached body of an online text (see [`stored_lines`]).
     pub(crate) fn body(&self) -> Option<String> {
         if self.weak || (self.lines.is_empty() && self.plain.is_some()) {
@@ -247,6 +257,9 @@ pub(crate) struct TrackLyrics {
     pub(crate) folder: bool,
     /// How the user chose to see the shown text (`None`: as it comes).
     pub(crate) display: Option<LyricsSync>,
+    /// The track's artists, to tell a line of a fetched text that only
+    /// credits them from a sung one ([`nikgob_core::lyrics::drop_credits`]).
+    pub(crate) names: Vec<String>,
 }
 
 impl TrackLyrics {
@@ -610,6 +623,11 @@ impl TrackLyrics {
 
     fn insert(&mut self, source: LyricsSource, text: Option<Text>) {
         self.pending.remove(&source);
+        // A songwriters line before the first sung one is not lyrics.
+        let text = match text {
+            Some(t) if source != LyricsSource::Recognized => t.without_credits(&self.names),
+            t => t,
+        };
         match text {
             Some(t) => {
                 self.missing.remove(&source);
@@ -753,6 +771,7 @@ pub(crate) fn cached_lyrics(
         aligned: lib.lyrics_aligned(track).unwrap_or_default().iter().filter_map(Aligned::from_row).collect(),
         genius,
         display: shown_as(lib, track),
+        names: lib.get_track(track).ok().flatten().map(|t| t.artist_credit.0.into_iter().map(|p| p.name).collect()).unwrap_or_default(),
         ..Default::default()
     };
     let fresh_miss = |at: i64| now_ms() - at < LYRICS_RETRY_MS;
@@ -1185,6 +1204,22 @@ mod tests {
         // A pick whose text is gone falls back to the automatic choice.
         tl.pick = Some(LyricsSource::File);
         assert_eq!(tl.view(id).source, Some(LyricsSource::LyricsPlus));
+    }
+
+    /// «Take Me to the Beach»: LyricsPlus' first line is its songwriters.
+    #[test]
+    fn a_songwriters_line_is_not_shown_as_a_lyric() {
+        let mut tl = TrackLyrics { names: vec!["Imagine Dragons".into()], ..TrackLyrics::default() };
+        let credits = "Ben McKee/Dan Reynolds/Mattias Larsson/Robin Lennart Fredriksson/Wayne Sermon/Matteo Professione";
+        let text = Text::from_lines(vec![line(2246, credits), line(9435, "People pleasing planet"), line(11436, "Got a million people saying how to plan it")]);
+        tl.insert(LyricsSource::LyricsPlus, text);
+        let shown = &tl.texts[&LyricsSource::LyricsPlus];
+        assert_eq!(shown.lines.len(), 2);
+        assert_eq!(shown.lines[0].text, "People pleasing planet");
+        // A Genius text's credits line too.
+        tl.insert(LyricsSource::Genius, Text::from_plain("Written by: Dan Reynolds
+People pleasing planet"));
+        assert_eq!(tl.texts[&LyricsSource::Genius].plain.as_deref(), Some("People pleasing planet"));
     }
 
     #[test]

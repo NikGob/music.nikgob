@@ -8,9 +8,9 @@ use std::path::Path;
 use nikgob_core::lyrics::LyricLine;
 
 use crate::catalog::{Catalog, ModelId};
-use crate::ctc::Emissions;
+use crate::ctc::{Emissions, Voice};
 use crate::engine::{Device, Model};
-use crate::fit::{Fit, Foreign, fit_text_with};
+use crate::fit::{Fit, Foreign, Tuning, fit_text_with};
 use crate::separate::{self, KIM_VOCAL_2};
 use crate::text::{Lang, Letters, Vocab};
 use crate::whisper::{self, Whisper};
@@ -20,6 +20,9 @@ use crate::{Error, audio};
 const RATE: u32 = 16_000;
 /// Window of the aligners, with context on both sides.
 const WINDOW_S: usize = 30;
+/// The second hearing of [`Tuning::windows`] cuts its windows this much
+/// later (seconds): half a window.
+pub const SHIFT_S: usize = 15;
 const CONTEXT_S: usize = 2;
 /// Voice energy is measured over this many samples (0.1 s).
 const ENERGY_HOP: usize = 1600;
@@ -36,6 +39,15 @@ const SILENT: f32 = 0.05;
 /// ends a word (singing is mostly blank to a CTC model between letters).
 const BLANK: f32 = 0.95;
 const MIX_TAIL: f32 = 1.5;
+/// The voice coming in: its loudness rising this much (dB) over the frames
+/// before counts as half an onset, twice that as a whole one.
+const ONSET_DB: f32 = 6.0;
+/// … looked for this many frames back from where a word starts.
+const ONSET_BACK: usize = 4;
+/// The separated voice's sides at this share of its level or under: the
+/// lead alone, in the middle; at [`SIDE_BACKING`] or over: backing vocals.
+const SIDE_LEAD: f32 = 0.15;
+const SIDE_BACKING: f32 = 0.6;
 
 /// Where a job is, for the progress shown.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -58,6 +70,14 @@ pub struct Prepared {
     pub separated: bool,
     /// RMS of the voice every 0.1 s.
     energy: Vec<f32>,
+    /// RMS of the separated voice's sides (left less right, halved) every
+    /// 0.1 s: a voice panned off the centre (backing vocals) is loud here,
+    /// the lead sung in the middle is not. Empty when unknown.
+    side: Vec<f32>,
+    /// RMS of the mix every 0.1 s (empty when unknown): a sound the
+    /// separator lets through (a lead synth on a drop) is loud in the
+    /// voice but small against the mix.
+    mix: Vec<f32>,
     heard: HashMap<ModelId, Emissions>,
 }
 
@@ -83,7 +103,24 @@ impl Prepared {
             .chunks(ENERGY_HOP)
             .map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt())
             .collect();
-        Self { voice, secs, separated, energy, heard: HashMap::new() }
+        Self { voice, secs, separated, energy, side: Vec::new(), mix: Vec::new(), heard: HashMap::new() }
+    }
+
+    /// Takes the side and mix levels ([`Self::side`], [`Self::mix`]; kept
+    /// from an earlier run).
+    pub fn set_levels(&mut self, side: Vec<f32>, mix: Vec<f32>) {
+        self.side = side;
+        self.mix = mix;
+    }
+
+    /// RMS of the separated voice's sides every tenth of a second.
+    pub fn side(&self) -> &[f32] {
+        &self.side
+    }
+
+    /// RMS of the mix every tenth of a second.
+    pub fn mix(&self) -> &[f32] {
+        &self.mix
     }
 
     /// Takes what aligner `id` heard in this song (kept from an earlier run).
@@ -106,13 +143,16 @@ impl Prepared {
     /// source ends each line): by the separated voice's energy, or on the
     /// mix by long stretches aligner `id` hears as blank only (a held vowel
     /// is mostly blank to it there, so nothing is held on the mix).
-    pub fn end_with_voice(&self, lines: &mut [LyricLine], id: ModelId, bounds: &[Option<f32>]) {
+    pub fn end_with_voice(&self, lines: &mut [LyricLine], id: ModelId, bounds: &[Option<f32>], tuning: &Tuning) {
         use crate::fit::VoiceEnds;
         if self.separated {
             let peak = percentile(&self.energy, 0.95);
-            let voiced: Vec<bool> = self.energy.iter().map(|e| *e > peak * SILENT).collect();
+            let voiced: Vec<bool> = (0..self.energy.len()).map(|i| self.energy[i] > peak * SILENT && self.over_mix(i, tuning.mix_ratio)).collect();
+            // What leaks from the mix is no voice to hold a word on.
+            let level: Vec<f32> = (0..self.energy.len()).map(|i| if self.over_mix(i, tuning.mix_ratio) { self.energy[i] } else { 0.0 }).collect();
             let step = ENERGY_HOP as f32 / RATE as f32;
-            crate::fit::end_with_voice(lines, VoiceEnds { voiced: &voiced, step, tail: crate::fit::TAIL, level: Some(&self.energy) }, bounds);
+            let v = VoiceEnds { voiced: &voiced, step, tail: crate::fit::TAIL, level: Some(&level), tuning: *tuning };
+            crate::fit::end_with_voice(lines, v, bounds);
         } else if let Some(em) = self.heard.get(&id) {
             let per = (em.fps / 10.0).round().max(1.0) as usize;
             let voiced: Vec<bool> = (0..em.frames().div_ceil(per))
@@ -123,19 +163,72 @@ impl Prepared {
                 })
                 .collect();
             let step = per as f32 / em.fps;
-            crate::fit::end_with_voice(lines, VoiceEnds { voiced: &voiced, step, tail: MIX_TAIL, level: None }, bounds);
+            crate::fit::end_with_voice(lines, VoiceEnds { voiced: &voiced, step, tail: MIX_TAIL, level: None, tuning: *tuning }, bounds);
         }
     }
 
+    /// Tenth `i`'s voice is at least `ratio` of the mix there (always
+    /// with no ratio or no mix level).
+    fn over_mix(&self, i: usize, ratio: f32) -> bool {
+        ratio <= 0.0 || self.mix.get(i).is_none_or(|m| self.energy.get(i).is_some_and(|e| *e >= m * ratio))
+    }
+
     /// Which of `em`'s frames have the separated voice in them (`None` on
-    /// the mix, where it cannot tell).
-    pub fn voiced_frames(&self, em: &Emissions) -> Option<Vec<bool>> {
+    /// the mix, where it cannot tell); `ratio`: [`Tuning::mix_ratio`].
+    pub fn voiced_frames(&self, em: &Emissions, ratio: f32) -> Option<Vec<bool>> {
         if !self.separated {
             return None;
         }
-        let tenths = self.voiced_tenths();
+        let tenths: Vec<bool> = self.voiced_tenths().into_iter().enumerate().map(|(i, v)| v && self.over_mix(i, ratio)).collect();
         let step = ENERGY_HOP as f32 / RATE as f32;
         Some((0..em.frames()).map(|t| tenths.get((em.secs(t) / step) as usize).copied().unwrap_or(false)).collect())
+    }
+
+    /// How much of the separated voice is off the centre at each of `em`'s
+    /// frames (0..1: its sides' level against its whole level, from a
+    /// share of [`SIDE_LEAD`] up to [`SIDE_BACKING`]). Empty when unknown.
+    pub fn backing_frames(&self, em: &Emissions) -> Vec<f32> {
+        if self.side.is_empty() {
+            return Vec::new();
+        }
+        let step = ENERGY_HOP as f32 / RATE as f32;
+        (0..em.frames())
+            .map(|t| {
+                let i = (em.secs(t) / step) as usize;
+                let (s, e) = (self.side.get(i).copied().unwrap_or(0.0), self.energy.get(i).copied().unwrap_or(0.0));
+                if e <= 1e-6 { 0.0 } else { ((s / e - SIDE_LEAD) / (SIDE_BACKING - SIDE_LEAD)).clamp(0.0, 1.0) }
+            })
+            .collect()
+    }
+
+    /// How sharply the separated voice comes in at each of `em`'s frames
+    /// (0..1): its loudness rising by [`ONSET_DB`] or more against the
+    /// frames just before, looked for a few frames back (the aligner puts a
+    /// word's start a little after the singer starts it). Empty on the mix.
+    pub fn onset_frames(&self, em: &Emissions, voiced: &[bool]) -> Vec<f32> {
+        if !self.separated || em.fps <= 0.0 {
+            return Vec::new();
+        }
+        let hop = ((RATE as f32 / em.fps).round() as usize).max(1);
+        let db: Vec<f32> = (0..em.frames())
+            .map(|t| {
+                let a = (t * hop).min(self.voice.len());
+                let b = ((t + 1) * hop).min(self.voice.len());
+                let c = &self.voice[a..b];
+                let rms = (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt();
+                20.0 * (rms + 1e-5).log10()
+            })
+            .collect();
+        let rise: Vec<f32> = (0..db.len())
+            .map(|t| {
+                let before = db[t.saturating_sub(4)..t].iter().copied().fold(f32::INFINITY, f32::min);
+                if !voiced.get(t).copied().unwrap_or(false) || !before.is_finite() {
+                    return 0.0;
+                }
+                ((db[t] - before - ONSET_DB) / ONSET_DB).clamp(0.0, 1.0)
+            })
+            .collect();
+        (0..rise.len()).map(|t| rise[t.saturating_sub(ONSET_BACK)..=t].iter().copied().fold(0.0, f32::max)).collect()
     }
 
     /// Which tenths of a second have the voice (all of them for a mix).
@@ -234,6 +327,37 @@ mod tests {
         assert_eq!((a.aligner_loaded(), a.loaded()), (None, false));
     }
 
+    /// Latin lines of a Russian text stay with the Russian aligner (spelled
+    /// by sound), unless the text is sung in both languages.
+    #[test]
+    fn latin_lines_of_a_russian_text_stay_with_it_by_sound() {
+        let ru = text(&["Я пойду прогуляюсь", "Miley Cyrus", "Miley Cyrus", "Где мои деньги", "Дома закончился крэк", "Мы рисовали в подъезде то ли пентаграмму"]);
+        assert_eq!(Route::of_with(&ru, false).unwrap().lines[1], ModelId::AlignerEn);
+        let by_sound = Route::of_with(&ru, true).unwrap();
+        assert_eq!(by_sound.models(), [ModelId::AlignerRu]);
+        let both = text(&["Я иду домой", "Baby, I love you so much tonight", "Hold me close and never let me go"]);
+        assert_eq!(Route::of_with(&both, true).unwrap().lines[1], ModelId::AlignerEn);
+    }
+
+    /// The voice coming in sharply is an onset a few frames on; backing
+    /// vocals are the voice off the centre.
+    #[test]
+    fn onsets_and_backing_vocals_from_the_voice() {
+        // Silence for 0.5 s, then a loud tone.
+        let voice: Vec<f32> = (0..16_000).map(|i| if i < 8_000 { 0.0 } else { (i as f32 * 0.05).sin() * 0.5 }).collect();
+        let mut prep = Prepared::from_voice(voice, true);
+        let em = Emissions { logp: vec![0.0; 50 * 2], vocab: 2, fps: 50.0, blank: 0 };
+        let voiced = vec![true; 50];
+        let onset = prep.onset_frames(&em, &voiced);
+        assert_eq!(onset.len(), 50);
+        assert!(onset[25] > 0.9 && onset[28] > 0.9, "{onset:?}");
+        assert!(onset[10] == 0.0 && onset[40] == 0.0, "{onset:?}");
+        assert!(prep.backing_frames(&em).is_empty());
+        prep.set_levels(vec![0.0; 5].into_iter().chain(vec![0.3; 5]).collect(), Vec::new());
+        let b = prep.backing_frames(&em);
+        assert!(b[30] > 0.9 && b[10] == 0.0, "{b:?}");
+    }
+
     #[test]
     fn english_falls_back_to_the_multilingual_aligner() {
         assert_eq!(fallback(ModelId::AlignerEn), Some(ModelId::AlignerMms));
@@ -252,6 +376,12 @@ mod tests {
         ready(ModelId::AlignerEn);
         assert_eq!(a.usable(ModelId::AlignerEn), ModelId::AlignerEn);
     }
+}
+
+/// RMS of `x` (at `rate`) every tenth of a second.
+fn tenths(x: &[f32], rate: u32) -> Vec<f32> {
+    let hop = (rate as usize / 10).max(1);
+    x.chunks(hop).map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt()).collect()
 }
 
 fn percentile(v: &[f32], q: f32) -> f32 {
@@ -291,12 +421,19 @@ pub struct Route {
 impl Route {
     /// `None` when no aligner spells the text's language.
     pub fn of(lines: &[LyricLine]) -> Option<Self> {
+        Self::of_with(lines, Tuning::default().by_sound)
+    }
+
+    /// [`Self::of`]; `by_sound`: the Latin lines of a mostly Russian text
+    /// stay with the Russian aligner, spelled by sound ([`Tuning::by_sound`]).
+    pub fn of_with(lines: &[LyricLine], by_sound: bool) -> Option<Self> {
         let text: String = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
         let lang = Lang::of(&text);
         let main = aligner_for(lang)?;
+        let keep = by_sound && lang == Lang::Russian && latin_share(&text) < BILINGUAL;
         let lines = Lang::of_lines(lang, lines.iter().map(|l| l.text.as_str()))
             .into_iter()
-            .map(|l| aligner_for(l).unwrap_or(main))
+            .map(|l| if keep && l == Lang::English { main } else { aligner_for(l).unwrap_or(main) })
             .collect();
         Some(Self { main, lines })
     }
@@ -311,6 +448,17 @@ impl Route {
         }
         out
     }
+}
+
+/// A Russian text with this share of its words in Latin letters or more is
+/// sung in two languages: its English lines go to the English aligner.
+const BILINGUAL: f32 = 0.34;
+
+/// The share of a text's words written in Latin letters.
+fn latin_share(text: &str) -> f32 {
+    let words: Vec<&str> = text.split_whitespace().filter(|w| w.chars().any(char::is_alphabetic)).collect();
+    let latin = words.iter().filter(|w| w.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_ascii_alphabetic())).count();
+    latin as f32 / words.len().max(1) as f32
 }
 
 fn letters_of(id: ModelId) -> Letters {
@@ -361,11 +509,22 @@ pub struct Aligner {
     /// The aligners' letters (small; kept once read).
     vocabs: HashMap<ModelId, Vocab>,
     whisper: Option<Whisper>,
+    /// How the timing pass places words.
+    tuning: Tuning,
 }
 
 impl Aligner {
     pub fn new(catalog: Catalog, device: Device, threads: usize) -> Self {
-        Self { catalog, device, threads, separator: None, ctc: OneLoaded::default(), vocabs: HashMap::new(), whisper: None }
+        Self { catalog, device, threads, separator: None, ctc: OneLoaded::default(), vocabs: HashMap::new(), whisper: None, tuning: Tuning::default() }
+    }
+
+    /// How the timing pass places words from now on.
+    pub fn set_tuning(&mut self, tuning: Tuning) {
+        self.tuning = tuning;
+    }
+
+    pub fn tuning(&self) -> Tuning {
+        self.tuning
     }
 
     pub fn catalog(&self) -> &Catalog {
@@ -418,6 +577,8 @@ impl Aligner {
             return Err(Error::Stopped);
         }
         let decoded = audio::decode(path)?;
+        let mix_level = tenths(&decoded.mono(), decoded.rate);
+        let mut side = Vec::new();
         let separated = separate && self.catalog.ready(ModelId::Separator);
         let voice = if separated {
             self.runtime()?;
@@ -434,17 +595,26 @@ impl Aligner {
             // The separator's working memory is the largest of all: it goes
             // as soon as the voice is out (loading it again takes a second).
             self.separator = None;
-            voice?.resampled(RATE)?.mono()
+            let voice = voice?.resampled(RATE)?;
+            if let [l, r] = &voice.channels[..] {
+                let s: Vec<f32> = l.iter().zip(r).map(|(a, b)| (a - b) / 2.0).collect();
+                side = tenths(&s, RATE);
+            }
+            voice.mono()
         } else {
             decoded.resampled(RATE)?.mono()
         };
-        Ok(Prepared::from_voice(voice, separated))
+        let mut prep = Prepared::from_voice(voice, separated);
+        prep.set_levels(side, mix_level);
+        Ok(prep)
     }
 
     /// Aligner `id`'s letters.
     fn vocab(&mut self, id: ModelId) -> Result<Vocab, Error> {
         if let Some(v) = self.vocabs.get(&id) {
-            return Ok(v.clone());
+            let mut v = v.clone();
+            v.by_sound = self.tuning.by_sound;
+            return Ok(v);
         }
         if !self.catalog.ready(id) {
             return Err(Error::Missing("aligner"));
@@ -452,6 +622,8 @@ impl Aligner {
         let json = std::fs::read_to_string(self.catalog.file(id, "vocab.json"))?;
         let vocab = Vocab::from_json(&json, letters_of(id)).map_err(|e| Error::Model(format!("vocab: {e}")))?;
         self.vocabs.insert(id, vocab.clone());
+        let mut vocab = vocab;
+        vocab.by_sound = self.tuning.by_sound;
         Ok(vocab)
     }
 
@@ -465,9 +637,25 @@ impl Aligner {
         self.runtime()?;
         let (file, device, threads) = (self.catalog.file(id, "model_int8.onnx"), self.device, self.threads);
         let model = self.ctc.get(id, || Model::load(&file, device, threads))?;
-        let em = emissions(model, &prep.voice, blank, &mut |f| progress(Stage::Listen(f)))?;
+        let windows = self.tuning.windows;
+        let share = if windows { 0.5 } else { 1.0 };
+        let mut em = emissions(model, &prep.voice, blank, 0, &mut |f| progress(Stage::Listen(f * share)))?;
+        if windows {
+            let other = emissions(model, &prep.voice, blank, SHIFT_S * RATE as usize, &mut |f| progress(Stage::Listen(0.5 + f * 0.5)))?;
+            em.merge(&other);
+        }
         prep.heard.insert(id, em);
         Ok(())
+    }
+
+    /// What aligner `id` hears over windows cut [`SHIFT_S`] later than
+    /// [`Self::hear`]'s (for [`Tuning::windows`], kept apart by the bench).
+    pub fn hear_shifted(&mut self, prep: &Prepared, id: ModelId) -> Result<Emissions, Error> {
+        let blank = self.vocab(id)?.blank;
+        self.runtime()?;
+        let (file, device, threads) = (self.catalog.file(id, "model_int8.onnx"), self.device, self.threads);
+        let model = self.ctc.get(id, || Model::load(&file, device, threads))?;
+        emissions(model, &prep.voice, blank, SHIFT_S * RATE as usize, &mut |_| true)
     }
 
     /// Fits a text to the song (`timed`: its line starts are real times).
@@ -475,7 +663,7 @@ impl Aligner {
     /// Each line goes to the aligner of its language ([`Route`]) when that
     /// one is there; the text's own is needed.
     pub fn fit(&mut self, prep: &mut Prepared, lines: &[LyricLine], timed: bool, progress: &mut dyn FnMut(Stage) -> bool) -> Result<Option<Fit>, Error> {
-        let Some(route) = Route::of(lines) else { return Ok(None) };
+        let Some(route) = Route::of_with(lines, self.tuning.by_sound) else { return Ok(None) };
         let main = self.usable(route.main);
         let mut others: Vec<(ModelId, Vec<usize>)> = Vec::new();
         for (i, id) in route.lines.iter().enumerate() {
@@ -503,10 +691,14 @@ impl Aligner {
         let foreign: Vec<Foreign<'_>> =
             others.iter().zip(&vocabs).map(|((id, ls), v)| Foreign { em: &prep.heard[id], vocab: v, lines: ls }).collect();
         let em = &prep.heard[&main];
-        let voiced = prep.voiced_frames(em);
-        Ok(fit_text_with(em, &vocab, &foreign, lines, timed, voiced.as_deref()).map(|mut f| {
+        let tuning = self.tuning;
+        let voiced = prep.voiced_frames(em, tuning.mix_ratio);
+        let onset = voiced.as_ref().map(|v| prep.onset_frames(em, v)).unwrap_or_default();
+        let backing = prep.backing_frames(em);
+        let voice = voiced.as_deref().map(|v| Voice { voiced: v, onset: &onset, backing: &backing });
+        Ok(fit_text_with(em, &vocab, &foreign, lines, timed, voice, &tuning).map(|mut f| {
             let bounds = f.ends.clone();
-            prep.end_with_voice(&mut f.lines, main, &bounds);
+            prep.end_with_voice(&mut f.lines, main, &bounds, &tuning);
             f.covered = prep.covered(&f.lines);
             f.aligner = Some(main);
             f
@@ -529,10 +721,14 @@ impl Aligner {
         }
         let vocab = self.vocab(id)?;
         let em = &prep.heard[&id];
-        let voiced = prep.voiced_frames(em);
-        Ok(fit_text_with(em, &vocab, &[], lines, timed, voiced.as_deref()).map(|mut f| {
+        let tuning = self.tuning;
+        let voiced = prep.voiced_frames(em, tuning.mix_ratio);
+        let onset = voiced.as_ref().map(|v| prep.onset_frames(em, v)).unwrap_or_default();
+        let backing = prep.backing_frames(em);
+        let voice = voiced.as_deref().map(|v| Voice { voiced: v, onset: &onset, backing: &backing });
+        Ok(fit_text_with(em, &vocab, &[], lines, timed, voice, &tuning).map(|mut f| {
             let bounds = f.ends.clone();
-            prep.end_with_voice(&mut f.lines, id, &bounds);
+            prep.end_with_voice(&mut f.lines, id, &bounds, &tuning);
             f.covered = prep.covered(&f.lines);
             f.aligner = Some(id);
             f
@@ -590,7 +786,17 @@ impl Aligner {
 
 /// Per-frame log-probabilities of a CTC model over the whole voice, in
 /// windows with context so words at the edges are heard whole.
-pub fn emissions(model: &mut Model, voice: &[f32], blank: usize, progress: &mut dyn FnMut(f32) -> bool) -> Result<Emissions, Error> {
+/// `shift`: the windows are cut this many samples later (the song is heard
+/// after as much silence, which is left out again).
+pub fn emissions(model: &mut Model, voice: &[f32], blank: usize, shift: usize, progress: &mut dyn FnMut(f32) -> bool) -> Result<Emissions, Error> {
+    if shift > 0 {
+        let mut padded = vec![0.0f32; shift];
+        padded.extend_from_slice(voice);
+        let mut em = emissions(model, &padded, blank, 0, progress)?;
+        let skip = ((shift as f32 / RATE as f32) * em.fps).round() as usize;
+        em.logp.drain(..(skip * em.vocab).min(em.logp.len()));
+        return Ok(em);
+    }
     let sr = RATE as usize;
     let (win, ctx) = (WINDOW_S * sr, CONTEXT_S * sr);
     let n = voice.len();
