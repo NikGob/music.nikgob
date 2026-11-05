@@ -39,8 +39,10 @@ pub struct Deep {
     /// the two averaged (`fit::Tuning::windows`).
     pub windows: bool,
     /// Quiet sung passages raised before the aligners hear them
-    /// ([`level`]).
+    /// ([`level`]), for every language…
     pub level: bool,
+    /// … or for Russian only.
+    pub level_russian: bool,
     /// GigaAM for Russian.
     pub russian: Second,
     /// The singing aligner (Tune Studio's) for English.
@@ -59,6 +61,7 @@ impl Deep {
         overlap: true,
         windows: false,
         level: false,
+        level_russian: false,
         russian: Second::Off,
         english: Second::Off,
         other: Second::Off,
@@ -67,7 +70,7 @@ impl Deep {
 
     /// What the setting turns on: what measured better (docs/lyrics-align.md,
     /// «Deep mode»).
-    pub const CHOSEN: Self = Self { separator: true, russian: Second::Fused, english: Second::Fused, ..Self::OFF };
+    pub const CHOSEN: Self = Self { separator: true, level_russian: true, russian: Second::Fused, english: Second::Fused, ..Self::OFF };
 
     /// The second aligner of aligner `main`, and how it is used.
     pub fn second(&self, main: ModelId) -> Option<(ModelId, Second)> {
@@ -78,6 +81,11 @@ impl Deep {
             _ => return None,
         };
         (how != Second::Off).then_some((id, how))
+    }
+
+    /// Aligner `id` hears the voice with its quiet passages raised.
+    pub fn levels(&self, id: ModelId) -> bool {
+        self.level || (self.level_russian && matches!(id, ModelId::AlignerRu | ModelId::AlignerRuDeep))
     }
 
     /// Deep mode's separator takes the voice out for a text heard by
@@ -267,5 +275,6 @@ mod tests {
         assert!(d.parts(ModelId::AlignerJa, true).contains(&ModelId::SeparatorDeep));
         assert!(!d.parts(ModelId::AlignerEn, false).contains(&ModelId::SeparatorDeep));
         assert!(d.separates(None) && !d.separates(Some(ModelId::AlignerRu)));
+        assert!(d.levels(ModelId::AlignerRuDeep) && !d.levels(ModelId::AlignerEn) && !Deep::OFF.levels(ModelId::AlignerRu));
     }
 }

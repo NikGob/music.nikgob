@@ -743,17 +743,26 @@ impl Aligner {
         let model = self.ctc.get(id, || Model::load(&file, device, threads))?;
         let windows = self.tuning.windows || self.deep.windows;
         let second = self.deep.second(id).filter(|(s, _)| self.catalog.ready(*s));
+        // Deep mode may time with quiet passages raised ([`deep::level`]):
+        // heard once more so, the verdict keeps the plain hearing.
+        let level = self.deep.levels(id);
         // The share of the hearing each pass is, for the progress.
-        let passes = 1.0 + f32::from(u8::from(windows)) + f32::from(u8::from(second.is_some()));
-        // Deep mode may hear quiet passages raised ([`deep::level`]).
-        let leveled = self.deep.level.then(|| deep::level(&prep.voice));
-        let voice = leveled.as_deref().unwrap_or(&prep.voice);
-        let mut em = emissions(model, voice, blank, 0, &mut |f| progress(Stage::Listen(f / passes)))?;
+        let passes = 1.0 + f32::from(u8::from(windows)) + f32::from(u8::from(level)) + f32::from(u8::from(second.is_some()));
+        let mut em = emissions(model, &prep.voice, blank, 0, &mut |f| progress(Stage::Listen(f / passes)))?;
         if windows {
-            let other = emissions(model, voice, blank, SHIFT_S * RATE as usize, &mut |f| progress(Stage::Listen((1.0 + f) / passes)))?;
+            let other = emissions(model, &prep.voice, blank, SHIFT_S * RATE as usize, &mut |f| progress(Stage::Listen((1.0 + f) / passes)))?;
             em.merge(&other);
         }
+        let leveled = if level {
+            let done = passes - 1.0 - f32::from(u8::from(second.is_some()));
+            Some(emissions(model, &deep::level(&prep.voice), blank, 0, &mut |f| progress(Stage::Listen((done + f) / passes)))?)
+        } else {
+            None
+        };
         prep.heard.insert(id, em);
+        if let Some(l) = &leveled {
+            prep.deep.insert(id, (l.clone(), self.vocab(id)?));
+        }
         if let Some((sid, how)) = second {
             let done = passes - 1.0;
             match self.hear_second(prep, id, sid, how, &mut |f| progress(Stage::Listen((done + f) / passes))) {
@@ -777,9 +786,10 @@ impl Aligner {
     }
 
     /// What aligner `id`'s texts are timed by in deep mode, from what its
-    /// second aligner `sid` heard (`em`, at its own frame rate).
+    /// second aligner `sid` heard (`em`, at its own frame rate), with what
+    /// the first one heard for the timing (raised: [`Deep::levels`]).
     pub fn second_heard(&mut self, prep: &Prepared, id: ModelId, sid: ModelId, how: Second, em: &Emissions) -> Result<(Emissions, Vocab), Error> {
-        let main = prep.heard.get(&id).ok_or(Error::Missing("aligner"))?;
+        let main = prep.deep.get(&id).map(|(e, _)| e).or_else(|| prep.heard.get(&id)).ok_or(Error::Missing("aligner"))?;
         let em = em.at_rate(main.fps);
         Ok(match how {
             Second::Fused | Second::Product => {
@@ -797,7 +807,7 @@ impl Aligner {
         self.runtime()?;
         let (file, device, threads) = (self.catalog.file(id, id.model_file()), self.device, self.threads);
         let model = self.ctc.get(id, || Model::load(&file, device, threads))?;
-        let leveled = self.deep.level.then(|| deep::level(&prep.voice));
+        let leveled = self.deep.levels(id).then(|| deep::level(&prep.voice));
         let voice = leveled.as_deref().unwrap_or(&prep.voice);
         if id == ModelId::AlignerRuDeep {
             crate::gigaam::emissions(model, voice, blank, progress)

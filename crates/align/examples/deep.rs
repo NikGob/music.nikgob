@@ -134,6 +134,7 @@ fn deep_from_env() -> Deep {
         overlap: var("OVERLAP") != "0",
         windows: var("WIN") == "1",
         level: var("LEVEL") == "1",
+        level_russian: var("LEVEL") == "ru",
         russian: second_of(&var("RU")),
         english: second_of(&var("EN")),
         other: second_of(&var("OTHER")),
@@ -150,7 +151,9 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Opti
     let old = std::env::var("OLD").is_ok();
     // `CACHED=1`: no model runs, only what the cache has.
     let cached = old || std::env::var("CACHED").is_ok();
-    let tag = match (rof, old, deep.level) {
+    // What an aligner heard, by its name in the cache: raised first
+    // (`Deep::levels`) or not.
+    let tag = |id: ModelId| match (rof, old, deep.levels(id)) {
         (true, _, false) => "rof.",
         (true, _, true) => "rof.lv.",
         (false, true, _) => "",
@@ -190,7 +193,7 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Opti
     }
     let route = Route::of(&job.lines)?;
     for id in route.models() {
-        let file = cache.join(format!("{stem}.{tag}{}.em", key(id)));
+        let file = cache.join(format!("{stem}.{}{}.em", tag(id), key(id)));
         let mut em = match read_em(&file) {
             Some(e) => e,
             None if !old && !cached => {
@@ -201,7 +204,7 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Opti
             None => return None,
         };
         if deep.windows {
-            let file = cache.join(format!("{stem}.{tag}{}.w.em", key(id)));
+            let file = cache.join(format!("{stem}.{}{}.w.em", tag(id), key(id)));
             let other = match read_em(&file) {
                 Some(e) => e,
                 None if cached => return None,
@@ -217,7 +220,7 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Opti
         }
         prep.set_emissions(id, em);
         if let Some((sid, how)) = deep.second(id) {
-            let file = cache.join(format!("{stem}.{tag}{}.em", key(sid)));
+            let file = cache.join(format!("{stem}.{}{}.em", tag(sid), key(sid)));
             let sem = match read_em(&file) {
                 Some(e) => e,
                 None if cached => return None,
