@@ -312,18 +312,6 @@ pub(crate) fn no_craft(state: &ViewState) -> Option<&str> {
     }
 }
 
-/// Where the shown text is kept, in plain words, where that matters (the
-/// window and the page): made by the player and kept in the library, or
-/// saved on the computer. A text only online goes without saying.
-pub(crate) fn home(l: &LyricsView) -> Option<&'static str> {
-    l.source?;
-    match l.home {
-        LyricsHome::Online => None,
-        LyricsHome::Library => Some("Сделано плеером, хранится в библиотеке"),
-        LyricsHome::Computer => Some("Сохранено на компьютере"),
-    }
-}
-
 /// How the shown text can be seen, with what the choice says: offered
 /// only where there is a choice (a text with timing).
 pub(crate) fn shows(state: &ViewState) -> Vec<(LyricsSync, &'static str)> {
@@ -819,15 +807,9 @@ mod tests {
     }
 
     #[test]
-    fn the_window_says_where_the_text_is_kept_where_it_matters() {
+    fn only_a_savable_text_is_saved() {
         let mut l = LyricsView::default();
-        assert_eq!(home(&l), None, "no text, nothing to say");
         l.source = Some(LyricsSource::Lrclib);
-        assert_eq!(home(&l), None, "only online goes without saying");
-        l.home = LyricsHome::Library;
-        assert_eq!(home(&l), Some("Сделано плеером, хранится в библиотеке"));
-        l.home = LyricsHome::Computer;
-        assert_eq!(home(&l), Some("Сохранено на компьютере"));
         let mut state = ViewState::default();
         state.lyrics = l;
         state.lyrics.track = Some(nikgob_view::TrackId::new());

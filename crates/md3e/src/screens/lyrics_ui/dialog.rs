@@ -150,14 +150,8 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
                 }
             }
         });
-        ui.add_space(8.0);
-        // What the chosen text is, in the control's own words.
-        let mut line = super::chip_label(l);
-        if let Some(state) = l.source.map(|src| super::source_state(l, src)).filter(|s| !s.is_empty()) {
-            line = format!("{line} · {state}");
-        }
-        ui.label(TypeRole::BodySmall.style().rich(line, s.on_surface_variant));
-        ui.add_space(12.0);
+        // The checked chip says where the text is from; no caption repeats it.
+        ui.add_space(16.0);
     }
     // The text, then the timing (how it is seen and made, or its
     // progress), then where it is kept and the way out.
@@ -259,8 +253,6 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
             ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
         } else if let Some(why) = super::no_craft(state) {
             ui.label(TypeRole::BodyMedium.style().rich(why, s.on_surface_variant));
-        } else if let Some(home) = super::home(l) {
-            ui.label(TypeRole::BodyMedium.style().rich(home, s.on_surface_variant));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;

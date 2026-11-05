@@ -155,15 +155,9 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
         let stacked = super::make_width(ui, &actions) > w;
         super::make_row(ui, state, "lyrics-page", !save_lead, stacked, out);
     }
-    // Where the text is kept, where that matters, and keeping it (any text
-    // not on the computer yet).
-    let home = super::home(l);
-    if home.is_some() || save {
+    // Keeping the text (any text not on the computer yet).
+    if save {
         ui.add_space(GAP);
-    }
-    if let Some(home) = home {
-        ui.label(TypeRole::BodyMedium.style().rich(home, s.on_surface_variant));
-        ui.add_space(12.0);
     }
     let style = if save_lead { Style::Filled } else { Style::Tonal };
     if save && ui.add(Button::new(super::save_label(state)).style(style).size(Size::S).id_salt("lyrics-page-save")).clicked() {
