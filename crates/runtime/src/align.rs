@@ -79,8 +79,10 @@ pub(crate) enum Req {
     Check { track: TrackId, path: PathBuf, texts: Vec<AlignText>, recognise: bool },
     /// Make timing for one text (asked under the lyrics); `temp`: the
     /// audio was fetched from a stream for this and goes after it. `seq`
-    /// numbers the asks ([`AlignService::cancel_crafts`]).
-    Craft { track: TrackId, path: PathBuf, text: AlignText, target: LyricsSync, temp: bool, seq: u64 },
+    /// numbers the asks ([`AlignService::cancel_crafts`]). `deep`: deep
+    /// mode for this timing only, whatever [`Settings::deep`] says (the
+    /// jobs after it go as the settings say again).
+    Craft { track: TrackId, path: PathBuf, text: AlignText, target: LyricsSync, deep: bool, temp: bool, seq: u64 },
     Download(ModelId),
     Remove(ModelId),
     Settings(Settings),
@@ -127,7 +129,7 @@ pub(crate) enum Msg {
     CheckDropped(TrackId),
     Crafted { track: TrackId, source: LyricsSource, result: Result<Vec<LyricLine>, String> },
     /// A stream's audio was fetched to make timing from.
-    StreamAudio { track: TrackId, source: LyricsSource, target: LyricsSync, result: Result<PathBuf, String> },
+    StreamAudio { track: TrackId, source: LyricsSource, target: LyricsSync, deep: bool, result: Result<PathBuf, String> },
     /// A text went onto the computer («Сохранить текст»), as read back.
     Kept { track: TrackId, result: Result<Text, String> },
     /// A stream was saved as a file for its text («Песню и текст»).
@@ -485,6 +487,9 @@ impl Thread {
                     log::error!("align: a job broke off");
                     self.crafting = None;
                     self.checking = None;
+                    // A timing made deep (or not) for itself leaves the
+                    // settings' mode to the jobs after it.
+                    self.aligner.set_deep(self.settings.deep());
                     match asked {
                         Some((track, None)) => self.send(Msg::Checked { track, rows: Vec::new(), heard: None }),
                         Some((track, Some(source))) => {
@@ -551,10 +556,14 @@ impl Thread {
                     }
                 }
             }
-            Req::Craft { track, path, text, target, temp, seq } => {
+            Req::Craft { track, path, text, target, deep, temp, seq } => {
                 self.crafting = Some(seq);
+                // Deep or not for this timing only; the jobs after it go as
+                // the settings say (one thread: nothing runs meanwhile).
+                self.aligner.set_deep(if deep { Deep::CHOSEN } else { Deep::OFF });
                 // Called off while queued: never started.
                 let result = if self.cancelled() { Err(Error::Stopped) } else { self.craft(track, &path, &text, target) };
+                self.aligner.set_deep(self.settings.deep());
                 let cancelled = self.cancelled();
                 self.crafting = None;
                 if temp && let Err(e) = std::fs::remove_file(&path) {
@@ -692,8 +701,9 @@ impl Thread {
             }
         }
         // Deep mode's parts after the normal ones (downloaded on its first
-        // use, never needed: see [`Self::ensure`]).
-        let deep = self.settings.deep();
+        // use, never needed: see [`Self::ensure`]). As the job under way
+        // has it: the settings', or a timing's own ([`Req::Craft`]).
+        let deep = self.aligner.deep();
         for route in texts.iter().filter_map(|t| Route::of(&t.lines)) {
             let main = self.aligner.usable(route.main);
             for id in deep.parts(main, self.settings.separate) {
@@ -933,7 +943,7 @@ impl Worker {
                 }
             }
             Msg::Crafted { track, source, result } => self.crafted(track, source, result),
-            Msg::StreamAudio { track, source, target, result } => self.stream_audio(track, source, target, result),
+            Msg::StreamAudio { track, source, target, deep, result } => self.stream_audio(track, source, target, deep, result),
             Msg::Kept { track, result } => self.lyrics_kept(track, result),
             Msg::SongSaved { track, result } => self.song_saved(track, result),
         }
@@ -962,8 +972,9 @@ impl Worker {
     }
 
     /// Makes `target` timing of `source`'s text from the track's file, or
-    /// from its stream's audio fetched for a while.
-    pub(crate) fn craft_lyrics(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync) {
+    /// from its stream's audio fetched for a while; `deep`: with deep
+    /// mode's parts ([`Req::Craft`]).
+    pub(crate) fn craft_lyrics(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync, deep: bool) {
         if self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)).and_then(|tl| tl.texts_of(source)).is_none() {
             return;
         }
@@ -972,7 +983,7 @@ impl Worker {
                 let Some(src) = self.lib.active_source(track).ok().flatten().filter(|s| s.kind.is_local()) else { return };
                 let path = self.res.path(&src.locator);
                 self.publish(|s| s.align.craft = Some(v::Craft { track, source, target, lines: None, failed: None }));
-                self.send_craft(track, source, target, path, false);
+                self.send_craft(track, source, target, deep, path, false);
             }
             Place::Stream => {
                 if !self.align.running() {
@@ -992,7 +1003,7 @@ impl Worker {
                 });
                 self.streaming.spawn_internal(async move {
                     let result = yt.save_audio(&locator, &dir).await.map_err(|e| e.to_string());
-                    Internal::Align(Msg::StreamAudio { track, source, target, result })
+                    Internal::Align(Msg::StreamAudio { track, source, target, deep, result })
                 });
             }
             Place::None | Place::Unclear(_) => {}
@@ -1009,7 +1020,7 @@ impl Worker {
         }
     }
 
-    fn send_craft(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync, path: PathBuf, temp: bool) {
+    fn send_craft(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync, deep: bool, path: PathBuf, temp: bool) {
         let text = self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)).and_then(|tl| tl.texts_of(source));
         let Some(text) = text.filter(|_| self.align.running()) else {
             if temp {
@@ -1020,15 +1031,15 @@ impl Worker {
         let (lines, timed) = text.align_lines();
         let text = AlignText { source, lines, timed, hash: text.hash() };
         let seq = self.align.next_craft();
-        self.align.send(Req::Craft { track, path, text, target, temp, seq });
+        self.align.send(Req::Craft { track, path, text, target, deep, temp, seq });
     }
 
     /// A stream's audio is here: the timing is made from it (and it goes
     /// after); a failure says why on the control.
-    fn stream_audio(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync, result: Result<PathBuf, String>) {
+    fn stream_audio(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync, deep: bool, result: Result<PathBuf, String>) {
         let asked = self.state.read().align.craft.as_ref().is_some_and(|c| c.track == track && c.source == source);
         match result {
-            Ok(path) if asked => self.send_craft(track, source, target, path, true),
+            Ok(path) if asked => self.send_craft(track, source, target, deep, path, true),
             Ok(path) => {
                 let _ = std::fs::remove_file(&path);
             }
@@ -1169,7 +1180,7 @@ mod tests {
         let audio = dir.path().join("stream.opus");
         std::fs::write(&audio, b"x").unwrap();
         let text = AlignText { source: LyricsSource::Genius, lines: vec![LyricLine::new(Duration::ZERO, "a")], timed: false, hash: "h".into() };
-        t.job(Req::Craft { track, path: audio.clone(), text, target: LyricsSync::Word, temp: true, seq: first });
+        t.job(Req::Craft { track, path: audio.clone(), text, target: LyricsSync::Word, deep: false, temp: true, seq: first });
         assert!(!audio.exists());
         let said: Vec<Internal> = rx.try_iter().collect();
         assert!(said.iter().all(|m| !matches!(m, Internal::Align(Msg::Crafted { .. }))));
@@ -1206,6 +1217,7 @@ mod tests {
         assert!(t.ensure_for(std::slice::from_ref(&text), false, None).is_ok());
         assert!(!t.offline);
         t.settings.deep = false;
+        t.aligner.set_deep(t.settings.deep());
         assert_eq!(t.needs(std::slice::from_ref(&text)).len(), 3);
     }
 

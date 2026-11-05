@@ -551,7 +551,7 @@ mod tests {
         let (rt, cfg) = rig(&lib, prefs(), dir.path());
         play(&rt, song);
         wait(&rt, "timing offered", |s| s.lyrics.craft == nikgob_view::LyricsCraft::Ready && s.lyrics.stream);
-        rt.send(nikgob_view::Command::CraftLyrics { track: song, source: LyricsSource::Genius, target: nikgob_view::LyricsSync::Word });
+        rt.send(nikgob_view::Command::CraftLyrics { track: song, source: LyricsSource::Genius, target: nikgob_view::LyricsSync::Word, deep: false });
         wait(&rt, "the aligner's answer", |s| s.align.craft.as_ref().is_some_and(|c| c.failed.is_some()));
         let failed = rt.state().align.craft.clone().unwrap().failed.unwrap();
         assert_ne!(failed, "Не удалось получить звук песни", "the audio came");

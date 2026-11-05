@@ -161,7 +161,17 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
     let choice = !super::shows(state).is_empty();
     let actions = if busy.is_some() { Vec::new() } else { super::actions(state) };
     let timing = busy.is_some() || choice || !actions.is_empty();
-    let (head_h, timing_h, foot_h) = (24.0, 56.0, 40.0);
+    // The buttons from the primary one; beside the choice of how the text
+    // is seen while they fit, else on a row of their own under it.
+    let buttons = super::from_primary(&actions);
+    let own_row = choice && !buttons.is_empty() && {
+        let at: &Ui = ui;
+        let w = |label: &str| Button::new(label).size(Size::S).natural_width(at);
+        let shows: f32 = super::all_shows(state).iter().map(|a| w(a.1) + 2.0).sum();
+        let makes: f32 = buttons.iter().map(|a| w(a.label) + 8.0).sum();
+        shows + 16.0 + makes > inner.width()
+    };
+    let (head_h, timing_h, foot_h) = (24.0, if own_row { 56.0 + 8.0 + 40.0 } else { 56.0 }, 40.0);
     let below = (if timing { 16.0 + head_h + 4.0 + timing_h } else { 0.0 }) + 16.0 + foot_h;
     let text_h = (inner.bottom() - ui.cursor().top() - below).max(120.0);
     super::text_card(ui, vec2(inner.width(), text_h), state, out);
@@ -175,7 +185,26 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
             ui.label(TypeRole::TitleSmall.style().rich("Подсветка", s.on_surface));
         });
         ui.add_space(4.0);
-        ui.allocate_ui_with_layout(vec2(inner.width(), timing_h), Layout::left_to_right(Align::Center), |ui| {
+        // The timing to make, from the right: the normal word timing is
+        // the primary action unless there is timing to keep; deep and
+        // lines beside it.
+        let make_buttons = |ui: &mut Ui, out: &mut Vec<Command>| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                for (i, a) in buttons.iter().enumerate() {
+                    let style = if i == 0 && !save_lead { Style::Filled } else { Style::Tonal };
+                    let b = Button::new(a.label).style(style).size(Size::S).id_salt(("lyrics-dialog-make", a.label));
+                    if ui.add(b).clicked() {
+                        if super::failed(state).is_some() {
+                            out.push(Command::ClearCraft);
+                        }
+                        super::make(state, *a, out);
+                    }
+                }
+            });
+        };
+        let row_h = if own_row { 56.0 } else { timing_h };
+        ui.allocate_ui_with_layout(vec2(inner.width(), row_h), Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             if let Some(b) = &busy {
                 super::progress(ui, b, (inner.width() - 160.0).min(360.0));
@@ -196,22 +225,14 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
                     super::show_as(state, all[i].0, out);
                 }
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                // The finest timing is the primary action unless there is
-                // timing to keep; lines beside it.
-                for (i, (target, label)) in actions.iter().rev().enumerate() {
-                    let style = if i == 0 && !save_lead { Style::Filled } else { Style::Tonal };
-                    let b = Button::new(*label).style(style).size(Size::S).id_salt(("lyrics-dialog-make", *label));
-                    if ui.add(b).clicked() {
-                        if super::failed(state).is_some() {
-                            out.push(Command::ClearCraft);
-                        }
-                        super::make(state, *target, out);
-                    }
-                }
-            });
+            if !own_row {
+                make_buttons(ui, out);
+            }
         });
+        if own_row && busy.is_none() {
+            ui.add_space(8.0);
+            ui.allocate_ui_with_layout(vec2(inner.width(), 40.0), Layout::left_to_right(Align::Center), |ui| make_buttons(ui, out));
+        }
     }
     ui.add_space(16.0);
     ui.allocate_ui_with_layout(vec2(inner.width(), foot_h), Layout::left_to_right(Align::Center), |ui| {
