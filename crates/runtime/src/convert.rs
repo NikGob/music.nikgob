@@ -793,10 +793,10 @@ mod tests {
         // The MP3 a fake became: honest, and the band is the original's.
         let mut mp3 = Source::new(TrackId::new(), SourceKind::LocalFile, "a/07 - Молли.mp3", Codec::Mp3);
         mp3.bitrate = Some(320);
-        let conv = sound_details(&mp3, Some(Path::new("a/07 - Молли.mp3")), None, None, Some(&check(Verdict::Transcoded, 20_100.0, Some(Codec::Flac))));
+        let conv = sound_details(&mp3, Some(Path::new("a/07 - Молли.mp3")), None, None, Some(&check(Verdict::Transcoded, 16_000.0, Some(Codec::Flac))));
         assert!(conv.warning);
         assert!(conv.verdict.as_deref().unwrap().starts_with("Сделан из поддельного FLAC"));
-        assert_eq!(conv.band.as_deref(), Some("до 20,1 кГц (у исходника)"));
+        assert_eq!(conv.band.as_deref(), Some("до 16,0 кГц (у исходника)"));
         // A lossy file is never checked: nothing pending, no verdict.
         let plain = sound_details(&mp3, Some(Path::new("RuLe.mp3")), None, None, None);
         assert!(!plain.pending && plain.verdict.is_none());
