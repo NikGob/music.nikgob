@@ -234,9 +234,14 @@ impl Tuning {
 ///
 /// Measured on the bench with the hearing cut at whole strides (50 frames a
 /// second), alone and together; none is worse on any song or case of it.
-/// The rest of the knobs measured worse or no better, or better only on
-/// the user's case songs and on none of the reference-timed ones
-/// ([`Tuning::sound_inner`], [`Tuning::sound_runs`]: off).
+/// Also on, though they change only the user's case songs and none of
+/// the reference-timed ones (no worse there, alone or together): a lone
+/// Latin word between Cyrillic ones and a run of two or more Latin words
+/// in a Cyrillic line by sound ([`Tuning::sound_inner`],
+/// [`Tuning::sound_runs`]: «swag?», «Oliver Sykes»), and a line's last
+/// word ending where its voice falls under half the line's level
+/// ([`Tuning::end_level`]: «fine» held over a reverb tail). The rest of
+/// the knobs measured worse or no better.
 impl Default for Tuning {
     fn default() -> Self {
         let mut t = Self::align4();
@@ -252,6 +257,9 @@ impl Default for Tuning {
         t.foreign_costs = true;
         t.said = true;
         t.comma_ends = true;
+        t.sound_inner = true;
+        t.sound_runs = true;
+        t.end_level = 0.5;
         t
     }
 }
