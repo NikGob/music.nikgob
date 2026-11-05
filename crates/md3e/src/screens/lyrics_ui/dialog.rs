@@ -162,18 +162,21 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
     let actions = if busy.is_some() { Vec::new() } else { super::actions(state) };
     let timing = busy.is_some() || choice || !actions.is_empty();
     // The buttons from the primary one; beside the choice of how the text
-    // is seen while they fit, else on a row of their own under it.
-    let buttons = super::from_primary(&actions);
-    let own_row = choice && !buttons.is_empty() && {
+    // is seen while they fit, else on a row of their own under it. Measured
+    // on what is offered also while timing is made, so the text card keeps
+    // its height when a button is pressed.
+    let offered = super::from_primary(&super::actions(state));
+    let own_row = choice && !offered.is_empty() && {
         let at: &Ui = ui;
         let w = |label: &str| Button::new(label).size(Size::S).natural_width(at);
         let shows: f32 = super::all_shows(state).iter().map(|a| w(a.1) + 2.0).sum();
-        let makes: f32 = buttons.iter().map(|a| w(a.label) + 8.0).sum();
+        let makes: f32 = offered.iter().map(|a| w(a.label) + 8.0).sum();
         shows + 16.0 + makes > inner.width()
     };
     let (head_h, timing_h, foot_h) = (24.0, if own_row { 56.0 + 8.0 + 40.0 } else { 56.0 }, 40.0);
     let below = (if timing { 16.0 + head_h + 4.0 + timing_h } else { 0.0 }) + 16.0 + foot_h;
     let text_h = (inner.bottom() - ui.cursor().top() - below).max(120.0);
+    let buttons = if busy.is_some() { Vec::new() } else { offered };
     super::text_card(ui, vec2(inner.width(), text_h), state, out);
     let save = l.savable && busy.is_none();
     // Keeping the text leads for timing the player made, or when there is
@@ -203,7 +206,8 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
                 }
             });
         };
-        let row_h = if own_row { 56.0 } else { timing_h };
+        // The progress keeps the whole height (centred in it).
+        let row_h = if own_row && busy.is_none() { 56.0 } else { timing_h };
         ui.allocate_ui_with_layout(vec2(inner.width(), row_h), Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             if let Some(b) = &busy {
