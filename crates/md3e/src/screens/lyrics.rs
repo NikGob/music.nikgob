@@ -169,7 +169,7 @@ fn paint(
     // Each item's motion (its place, focus, wait) is kept under its slot,
     // which stays with the same line when the text is swapped for the same
     // song's (timing made, another source), so nothing moves or dims then.
-    let slot = slots(&ctx, id.with("slots"), &item_keys(lines, &items));
+    let slot_of = slots(&ctx, id.with("slots"), &item_keys(lines, &items));
 
     // Waiting owns the anchor during a break; otherwise follow the last
     // main line. Background voices light up independently while sung. A
@@ -260,7 +260,7 @@ fn paint(
             // close again) in one soft move.
             DisplayLine::Interlude { .. } => anim::fraction(
                 &ctx,
-                id.with(("wait-room", slot[i])),
+                id.with(("wait-room", slot_of[i])),
                 if cur == Some(i) { 1.0 } else { 0.0 },
                 if theme.reduced_motion { WAIT_ROOM.without_bounce() } else { WAIT_ROOM },
             )
@@ -317,7 +317,7 @@ fn paint(
         let (top, anchor) = (frame.0 - was.0, frame.1 - was.1);
         if state.prefs.lyrics_cascade {
             for i in 0..items.len() {
-                anim::shift_f32(&ctx, id.with(("y", slot[i])), top + anchor);
+                anim::shift_f32(&ctx, id.with(("y", slot_of[i])), top + anchor);
             }
         } else {
             anim::shift_f32(&ctx, id.with("scroll"), -anchor);
@@ -343,7 +343,7 @@ fn paint(
                 Spring::new(0.9, (300.0 - 26.0 * far).max(110.0))
             };
             if state.prefs.lyrics_cascade {
-                anim::f32(&ctx, id.with(("y", slot[i])), rect.top() + tops[i] - scroll, spring)
+                anim::f32(&ctx, id.with(("y", slot_of[i])), rect.top() + tops[i] - scroll, spring)
             } else {
                 rect.top() + tops[i] - together
             }
@@ -383,14 +383,14 @@ fn paint(
         // 0 → 1 as the line becomes the current one, and back.
         let focus = anim::fraction(
             &ctx,
-            id.with(("focus", slot[i])),
+            id.with(("focus", slot_of[i])),
             if is_cur { 1.0 } else { 0.0 },
             Spring::new(1.0, 170.0),
         )
         .clamp(0.0, 1.0);
         // The sung part's colour comes in faster than the line's focus, so
         // the first word lights on its beat instead of easing in with it.
-        let shine = anim::fraction(&ctx, id.with(("shine", slot[i])), if is_cur { 1.0 } else { 0.0 }, nikgob_motion::tokens::FAST_EFFECTS)
+        let shine = anim::fraction(&ctx, id.with(("shine", slot_of[i])), if is_cur { 1.0 } else { 0.0 }, nikgob_motion::tokens::FAST_EFFECTS)
             .clamp(0.0, 1.0);
         let duet = match *item {
             DisplayLine::Line(j) => lines[j].duet,
@@ -434,7 +434,7 @@ fn paint(
                 // before the room closes (see [`waiting`]).
                 let appear = anim::fraction(
                     &ctx,
-                    id.with(("wait-ring", slot[i])),
+                    id.with(("wait-ring", slot_of[i])),
                     if is_cur && room > 0.3 { 1.0 } else { 0.0 },
                     if theme.reduced_motion { WAIT_RING.without_bounce() } else { WAIT_RING },
                 )
@@ -478,7 +478,7 @@ fn paint(
         // once it is not, it goes on being sung as it fades (a front or a
         // jump mid-word when the next line comes in finishes instead of
         // jumping to the end), held where it was after a seek.
-        let sung_id = id.with(("sung", slot[i]));
+        let sung_id = id.with(("sung", slot_of[i]));
         let sung = if is_cur { pos } else { sung_pos(ctx.data(|d| d.get_temp::<Duration>(sung_id)), pos) };
         ctx.data_mut(|d| d.insert_temp(sung_id, sung));
         // A line-synced line is sung at a speaking pace (the source label
