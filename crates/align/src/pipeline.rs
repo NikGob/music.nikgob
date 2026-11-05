@@ -395,7 +395,7 @@ mod tests {
             voice[c] = 1.0;
         }
         for shift in [0, SHIFT_S * RATE as usize] {
-            let em = emissions_with(&mut run, &voice, 0, shift, true, &mut |_| true).unwrap();
+            let em = emissions_with(&mut run, &voice, 0, shift, &mut |_| true).unwrap();
             assert_eq!(em.fps, 50.0);
             assert!(em.frames().abs_diff(secs * 50) <= 1, "{}", em.frames());
             for &c in &clicks {
@@ -640,6 +640,12 @@ impl Aligner {
 
     /// Decodes `path` and, with `separate`, takes the voice out of the mix.
     pub fn prepare(&mut self, path: &Path, separate: bool, progress: &mut dyn FnMut(Stage) -> bool) -> Result<Prepared, Error> {
+        self.prepare_for(path, separate, None, progress)
+    }
+
+    /// [`Self::prepare`] for texts heard by aligner `main` (deep mode
+    /// separates some languages' voice its own way: [`Deep::separates`]).
+    pub fn prepare_for(&mut self, path: &Path, separate: bool, main: Option<ModelId>, progress: &mut dyn FnMut(Stage) -> bool) -> Result<Prepared, Error> {
         if !progress(Stage::Decode) {
             return Err(Error::Stopped);
         }
@@ -655,7 +661,7 @@ impl Aligner {
             self.ctc.clear();
             let mix = decoded.resampled(separate::RATE)?;
             let mut voice = None;
-            if self.deep.separator && self.catalog.ready(ModelId::SeparatorDeep) {
+            if self.deep.separates(main) && self.catalog.ready(ModelId::SeparatorDeep) {
                 match self.separate_deep(mix.clone(), progress) {
                     Ok(v) => {
                         voice = Some(v);
@@ -739,13 +745,9 @@ impl Aligner {
         let second = self.deep.second(id).filter(|(s, _)| self.catalog.ready(*s));
         // The share of the hearing each pass is, for the progress.
         let passes = 1.0 + f32::from(u8::from(windows)) + f32::from(u8::from(second.is_some()));
-        // Deep mode hears at whole strides ([`emissions_exact`]): its
-        // hearings line up with each other.
-        type Hear = fn(&mut Model, &[f32], usize, usize, &mut dyn FnMut(f32) -> bool) -> Result<Emissions, Error>;
-        let hear: Hear = if self.deep == Deep::OFF { emissions } else { emissions_exact };
-        let mut em = hear(model, &prep.voice, blank, 0, &mut |f| progress(Stage::Listen(f / passes)))?;
+        let mut em = emissions(model, &prep.voice, blank, 0, &mut |f| progress(Stage::Listen(f / passes)))?;
         if windows {
-            let other = hear(model, &prep.voice, blank, SHIFT_S * RATE as usize, &mut |f| progress(Stage::Listen((1.0 + f) / passes)))?;
+            let other = emissions(model, &prep.voice, blank, SHIFT_S * RATE as usize, &mut |f| progress(Stage::Listen((1.0 + f) / passes)))?;
             em.merge(&other);
         }
         prep.heard.insert(id, em);
@@ -775,11 +777,11 @@ impl Aligner {
     /// second aligner `sid` heard (`em`, at its own frame rate).
     pub fn second_heard(&mut self, prep: &Prepared, id: ModelId, sid: ModelId, how: Second, em: &Emissions) -> Result<(Emissions, Vocab), Error> {
         let main = prep.heard.get(&id).ok_or(Error::Missing("aligner"))?;
-        let em = deep::earlier(&em.at_rate(main.fps), self.deep.late(sid));
+        let em = em.at_rate(main.fps);
         Ok(match how {
-            Second::Fused => {
+            Second::Fused | Second::Product => {
                 let (a, b) = (deep::letters(&vocab_text(&self.catalog, id)?), deep::letters(&vocab_text(&self.catalog, sid)?));
-                (deep::fuse(main, &a, &em, &b, self.deep.weight), self.vocab(id)?)
+                (deep::fuse(main, &a, &em, &b, self.deep.weight, how == Second::Product), self.vocab(id)?)
             }
             _ => (em, self.vocab(sid)?),
         })
@@ -795,7 +797,7 @@ impl Aligner {
         if id == ModelId::AlignerRuDeep {
             crate::gigaam::emissions(model, &prep.voice, blank, progress)
         } else {
-            emissions_exact(model, &prep.voice, blank, 0, progress)
+            emissions(model, &prep.voice, blank, 0, progress)
         }
     }
 
@@ -812,16 +814,6 @@ impl Aligner {
         let (file, device, threads) = (self.catalog.file(id, "model_int8.onnx"), self.device, self.threads);
         let model = self.ctc.get(id, || Model::load(&file, device, threads))?;
         emissions(model, &prep.voice, blank, SHIFT_S * RATE as usize, &mut |_| true)
-    }
-
-    /// [`Self::hear_shifted`] at whole strides, as deep mode hears
-    /// ([`emissions_exact`]).
-    pub fn hear_shifted_exact(&mut self, prep: &Prepared, id: ModelId) -> Result<Emissions, Error> {
-        let blank = self.vocab(id)?.blank;
-        self.runtime()?;
-        let (file, device, threads) = (self.catalog.file(id, "model_int8.onnx"), self.device, self.threads);
-        let model = self.ctc.get(id, || Model::load(&file, device, threads))?;
-        emissions_exact(model, &prep.voice, blank, SHIFT_S * RATE as usize, &mut |_| true)
     }
 
     /// Fits a text to the song (`timed`: its line starts are real times).
@@ -991,37 +983,29 @@ impl Aligner {
 /// `shift`: the windows are cut this many samples later (the song is heard
 /// after as much silence, which is left out again).
 ///
-/// Each window's frames are cut by its own frames a second (a little under
-/// 50), so each window loses its last frame and the times of the next ones
-/// are stretched by about as much: within a few milliseconds, but not the
-/// same for windows cut elsewhere. The normal timing was measured so and
-/// stays so; deep mode, which adds hearings over other windows, cuts at
-/// whole strides ([`emissions_exact`]).
+/// Each window's frames are cut at whole strides of the model (320 samples
+/// for wav2vec2): every frame is kept, in its place, 50 a second exactly.
+/// (Until `align-6` they were cut by the last window's own frames a
+/// second, a little under 50 for a short last window, which stretched the
+/// whole song's times by up to 1 %: «World's Smallest Violin» heard 0.4 s
+/// late at three minutes; docs/lyrics-align.md, «Deep mode».)
 pub fn emissions(model: &mut Model, voice: &[f32], blank: usize, shift: usize, progress: &mut dyn FnMut(f32) -> bool) -> Result<Emissions, Error> {
-    emissions_with(&mut |x| model.run_f32_shaped(vec![1, x.len()], x), voice, blank, shift, false, progress)
+    emissions_with(&mut |x| model.run_f32_shaped(vec![1, x.len()], x), voice, blank, shift, progress)
 }
 
-/// [`emissions`] with each window's frames cut at whole strides of the
-/// model (320 samples for wav2vec2): every frame kept, in its place, 50 a
-/// second exactly, whatever the windows.
-pub fn emissions_exact(model: &mut Model, voice: &[f32], blank: usize, shift: usize, progress: &mut dyn FnMut(f32) -> bool) -> Result<Emissions, Error> {
-    emissions_with(&mut |x| model.run_f32_shaped(vec![1, x.len()], x), voice, blank, shift, true, progress)
-}
-
-/// [`emissions`] (`exact`: [`emissions_exact`]) with the model as a
-/// function from a window's samples to its logits and their shape.
+/// [`emissions`] with the model as a function from a window's samples to
+/// its logits and their shape.
 fn emissions_with(
     run: &mut dyn FnMut(Vec<f32>) -> Result<(Vec<i64>, Vec<f32>), Error>,
     voice: &[f32],
     blank: usize,
     shift: usize,
-    exact: bool,
     progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<Emissions, Error> {
     if shift > 0 {
         let mut padded = vec![0.0f32; shift];
         padded.extend_from_slice(voice);
-        let mut em = emissions_with(run, &padded, blank, 0, exact, progress)?;
+        let mut em = emissions_with(run, &padded, blank, 0, progress)?;
         let skip = (shift as f32 / RATE as f32 * em.fps).round() as usize;
         em.logp.drain(..(skip * em.vocab).min(em.logp.len()));
         return Ok(em);
@@ -1052,19 +1036,13 @@ fn emissions_with(
         };
         vocab = v;
         Emissions::log_softmax(&mut logits, v);
-        let (s, e) = if exact {
-            // A window gives a frame every stride from its first sample;
-            // the stride is read off the first (longest) window: a short
-            // last one rounds off.
-            let hop = *stride.get_or_insert(((len as f32 / frames.max(1) as f32).round() as usize).max(1));
-            fps = sr as f32 / hop as f32;
-            let s = ((start - a) / hop).min(frames);
-            (s, (s + win.min(n - start).div_ceil(hop)).min(frames))
-        } else {
-            fps = frames as f32 / (len as f32 / sr as f32);
-            let s = (((start - a) as f32 / sr as f32) * fps).round() as usize;
-            (s, (s + ((win.min(n - start)) as f32 / sr as f32 * fps).round() as usize).min(frames))
-        };
+        // A window gives a frame every stride from its first sample; the
+        // stride is read off the first (longest) window: a short last one
+        // rounds off.
+        let hop = *stride.get_or_insert(((len as f32 / frames.max(1) as f32).round() as usize).max(1));
+        fps = sr as f32 / hop as f32;
+        let s = ((start - a) / hop).min(frames);
+        let e = (s + win.min(n - start).div_ceil(hop)).min(frames);
         logp.extend_from_slice(&logits[s * v..e * v]);
         start += win;
         if !progress((start.min(n)) as f32 / n as f32) {

@@ -8,16 +8,15 @@
 //! (a song without them is left out); what deep mode adds is kept there
 //! too under names of its own: `<song>.rof.voice` / `.rof.levels` (the
 //! voice by Mel-Band RoFormer), `<song>.x.<aligner>.em` for what an aligner
-//! (`giga`, `hubert`, `sung` the second ones) hears in the bench's voice,
+//! (`giga`, `sung` the second ones) hears in the bench's voice,
 //! `<song>.rof.<aligner>.em` in the RoFormer voice; `.w.em` for a second
 //! hearing over shifted windows. `OLD=1` takes the bench's own hearing
 //! instead (made before the windows were cut at whole strides). Nothing
 //! there is overwritten.
 //!
 //! What is measured is set by variables: `SEP=rof` (RoFormer's voice),
-//! `WIN=1` (heard twice), `RU`, `EN`, `OTHER` = `alone` | `fused` (the
-//! second aligner of Russian, English, the MMS languages), `ENM=hubert` |
-//! `sung` (English's second aligner), `W=0.5` (the first aligner's share
+//! `WIN=1` (heard twice), `RU`, `EN`, `OTHER` = `alone` | `fused` | `product` (the
+//! second aligner of Russian, English, the MMS languages), `W=0.5` (the first aligner's share
 //! when fused), `OVERLAP=0` (RoFormer's chunks one after another).
 //! `PREP=1` only fills the cache; `CACHED=1` runs no model (a song
 //! missing something is left out). Every model run takes the round's GPU
@@ -56,7 +55,6 @@ fn key(id: ModelId) -> &'static str {
         ModelId::AlignerJa => "ja",
         ModelId::AlignerEn => "en",
         ModelId::AlignerRuDeep => "giga",
-        ModelId::AlignerEnDeep => "hubert",
         ModelId::AlignerSung => "sung",
         _ => "mms",
     }
@@ -119,29 +117,32 @@ fn second_of(s: &str) -> Second {
     match s {
         "alone" => Second::Alone,
         "fused" => Second::Fused,
+        "product" => Second::Product,
         _ => Second::Off,
     }
 }
 
 fn deep_from_env() -> Deep {
     let var = |k: &str| std::env::var(k).unwrap_or_default();
+    if var("CHOSEN") == "1" {
+        return Deep::CHOSEN;
+    }
     Deep {
         separator: var("SEP") == "rof",
+        separator_russian: var("SEP") == "rof",
         overlap: var("OVERLAP") != "0",
         windows: var("WIN") == "1",
         russian: second_of(&var("RU")),
         english: second_of(&var("EN")),
-        english_model: if var("ENM") == "sung" { ModelId::AlignerSung } else { ModelId::AlignerEnDeep },
         other: second_of(&var("OTHER")),
         weight: var("W").parse().unwrap_or(0.5),
-        giga_late: var("LATE").parse().unwrap_or(nikgob_align::deep::GIGA_LATE),
     }
 }
 
 /// The song from the cache, with what `deep` adds heard (and kept) now.
 fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Option<Prepared> {
     let stem = Path::new(&job.path).file_stem()?.to_string_lossy().into_owned();
-    let rof = deep.separator;
+    let rof = deep.separates(Route::of(&job.lines).map(|r| r.main));
     // What the aligners heard: the bench's own (`OLD=1`, made before the
     // windows were cut at whole strides) or this example's.
     let old = std::env::var("OLD").is_ok();
@@ -199,7 +200,7 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Opti
                 None => {
                     let mut p = Prepared::from_voice(prep.voice.clone(), true);
                     p.set_emissions(id, em.clone());
-                    let e = model_run(&format!("{} {} shifted", job.name, key(id)), || aligner.hear_shifted_exact(&p, id)).ok()?;
+                    let e = model_run(&format!("{} {} shifted", job.name, key(id)), || aligner.hear_shifted(&p, id)).ok()?;
                     write_em(&file, &e);
                     e
                 }
@@ -416,8 +417,10 @@ fn timed_run(aligner: &mut Aligner, job: &Job, deep: Deep) {
     aligner.set_deep(deep);
     let t0 = Instant::now();
     let mut sep = 0.0;
+    let mut used = String::new();
     let r = model_run(&format!("{} whole", job.name), || -> Result<Option<Fit>, nikgob_align::Error> {
-        let mut prep = aligner.prepare(Path::new(&job.path), true, &mut |s| {
+        let main = Route::of(&job.lines).map(|r| aligner.usable(r.main));
+        let mut prep = aligner.prepare_for(Path::new(&job.path), true, main, &mut |s| {
             if let Stage::Listen(_) = s
                 && sep == 0.0
             {
@@ -426,7 +429,10 @@ fn timed_run(aligner: &mut Aligner, job: &Job, deep: Deep) {
             true
         })?;
         sep = t0.elapsed().as_secs_f32();
-        aligner.fit(&mut prep, &job.lines, true, &mut |_| true)
+        let fit = aligner.fit(&mut prep, &job.lines, true, &mut |_| true);
+        // What deep mode really used (a part that failed falls back).
+        used = format!("RoFormer {}, second aligner {}", prep.deep_separated, main.is_some_and(|m| prep.deep_emissions(m).is_some()));
+        fit
     });
     let total = t0.elapsed().as_secs_f32();
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -434,7 +440,7 @@ fn timed_run(aligner: &mut Aligner, job: &Job, deep: Deep) {
     let (ws, private) = mem::peak();
     let vram = *peak.lock().unwrap() - base;
     println!(
-        "  TIME {} {:?} ok {} | separation {:.1} s, all {:.1} s | peak working set {:.0} MB private {:.0} MB | card +{:.0} MB",
+        "  TIME {} {:?} ok {} ({used}) | separation {:.1} s, all {:.1} s | peak working set {:.0} MB private {:.0} MB | card +{:.0} MB",
         job.name,
         aligner.device(),
         r.as_ref().is_ok_and(Option::is_some),

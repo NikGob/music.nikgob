@@ -36,11 +36,8 @@ pub enum ModelId {
     SeparatorDeep,
     /// GigaAM-v3 CTC, a second Russian aligner (deep mode).
     AlignerRuDeep,
-    /// HuBERT large (LibriSpeech 960 h), a second English aligner (deep
-    /// mode).
-    AlignerEnDeep,
     /// MMS-300m forced aligner fine-tuned on singing (Tune Studio), a
-    /// second aligner for romanised letters (deep mode).
+    /// second aligner for English (and romanised letters; deep mode).
     AlignerSung,
 }
 
@@ -257,27 +254,6 @@ pub const ALIGNER_RU_DEEP: ModelSpec = ModelSpec {
     ],
 };
 
-pub const ALIGNER_EN_DEEP: ModelSpec = ModelSpec {
-    id: ModelId::AlignerEnDeep,
-    dir: "hubert-large-ls960",
-    files: &[
-        FileSpec {
-            name: "model.onnx",
-            url: hf!("aureortiz/melodex-hubert-large-ls960-ft-onnx", "a9037a27bcd15e5ccc03fe4865088119042650fe", "model.onnx"),
-            size: 1_262_262_148,
-            sha256: "1c77fe7e8aa0c5204e0d3f04139be7a2d6f7b4a4236fd57b3a653612bcfa105b",
-            extract: &[],
-        },
-        FileSpec {
-            name: "vocab.json",
-            url: hf!("aureortiz/melodex-hubert-large-ls960-ft-onnx", "a9037a27bcd15e5ccc03fe4865088119042650fe", "vocab.json"),
-            size: 293,
-            sha256: "756e5535a825a3f81190ea56b364bbbb427b89fd5c67800b6f2b73191bb73c2d",
-            extract: &[],
-        },
-    ],
-};
-
 pub const ALIGNER_SUNG: ModelSpec = ModelSpec {
     id: ModelId::AlignerSung,
     dir: "tunestudio-aligner",
@@ -299,8 +275,7 @@ pub const ALIGNER_SUNG: ModelSpec = ModelSpec {
     ],
 };
 
-pub const ALL: [ModelSpec; 11] =
-    [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, WHISPER, SEPARATOR_DEEP, ALIGNER_RU_DEEP, ALIGNER_EN_DEEP, ALIGNER_SUNG];
+pub const ALL: [ModelSpec; 10] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, WHISPER, SEPARATOR_DEEP, ALIGNER_RU_DEEP, ALIGNER_SUNG];
 
 impl ModelId {
     pub fn spec(self) -> ModelSpec {
@@ -314,7 +289,7 @@ impl ModelId {
 
     /// A part only deep mode uses (docs/lyrics-align.md, «Deep mode»).
     pub fn deep(self) -> bool {
-        matches!(self, Self::SeparatorDeep | Self::AlignerRuDeep | Self::AlignerEnDeep | Self::AlignerSung)
+        matches!(self, Self::SeparatorDeep | Self::AlignerRuDeep | Self::AlignerSung)
     }
 }
 

@@ -239,8 +239,7 @@ pub(crate) fn label(id: ModelId) -> &'static str {
         ModelId::Whisper => "Расслышать текст",
         ModelId::SeparatorDeep => "Глубокое создание: отделение голоса",
         ModelId::AlignerRuDeep => "Глубокое создание: русский",
-        ModelId::AlignerEnDeep => "Глубокое создание: английский",
-        ModelId::AlignerSung => "Глубокое создание: другие языки",
+        ModelId::AlignerSung => "Глубокое создание: английский и другие языки",
     }
 }
 
@@ -255,7 +254,6 @@ pub(crate) fn key(id: ModelId) -> &'static str {
         ModelId::Whisper => "whisper",
         ModelId::SeparatorDeep => "separator-deep",
         ModelId::AlignerRuDeep => "ru-deep",
-        ModelId::AlignerEnDeep => "en-deep",
         ModelId::AlignerSung => "sung",
     }
 }
@@ -636,13 +634,15 @@ impl Thread {
         self.ensure(&ids, asked, track)
     }
 
-    fn prepare(&mut self, track: TrackId, path: &Path, asked: bool) -> Result<Prepared, Error> {
+    /// Decodes and separates `path` for texts heard by aligner `main`
+    /// (deep mode separates some languages' voice its own way).
+    fn prepare(&mut self, track: TrackId, path: &Path, main: Option<ModelId>, asked: bool) -> Result<Prepared, Error> {
         let separate = self.settings.separate;
         // The callback borrows `self`; the aligner is taken out meanwhile.
         let mut aligner = std::mem::replace(&mut self.aligner, Aligner::new(Catalog::new(""), Device::Cpu, 1));
         let r = {
             let mut progress = self.progress(track, asked);
-            aligner.prepare(path, separate, &mut progress)
+            aligner.prepare_for(path, separate, main, &mut progress)
         };
         self.aligner = aligner;
         let on_gpu = self.aligner.device() == Device::Gpu;
@@ -671,7 +671,8 @@ impl Thread {
             self.ensure(&[ModelId::Whisper], false, asked.then_some(track))?;
         }
         self.ensure_for(texts, false, asked.then_some(track))?;
-        let mut prep = self.prepare(track, path, asked)?;
+        let main = texts.iter().find_map(|t| Route::of(&t.lines)).map(|r| self.aligner.usable(r.main));
+        let mut prep = self.prepare(track, path, main, asked)?;
         let mut rows = Vec::new();
         for t in texts {
             if Aligner::needs(&t.lines).is_none() {
@@ -707,7 +708,8 @@ impl Thread {
 
     fn craft(&mut self, track: TrackId, path: &Path, text: &AlignText, target: LyricsSync) -> Result<Vec<LyricLine>, Error> {
         self.ensure_for(std::slice::from_ref(text), true, Some(track))?;
-        let mut prep = self.prepare(track, path, true)?;
+        let main = Route::of(&text.lines).map(|r| self.aligner.usable(r.main));
+        let mut prep = self.prepare(track, path, main, true)?;
         let fit = self.fit(track, &mut prep, text, true)?.ok_or_else(|| Error::Model("Этот текст не выровнять".into()))?;
         Ok(if target == LyricsSync::Line { to_lines(&fit.lines) } else { fit.lines })
     }
