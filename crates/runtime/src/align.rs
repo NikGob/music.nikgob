@@ -416,13 +416,41 @@ impl Thread {
                 self.take(r);
             }
             if let Some(job) = self.asked.pop_front() {
-                self.job(job);
+                let asked = match &job {
+                    Req::Check { track, .. } => Some((*track, None)),
+                    Req::Craft { track, text, .. } => Some((*track, Some(text.source))),
+                    _ => None,
+                };
+                // A job that breaks off (a bug on one song) says so and
+                // leaves the thread serving the others.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.job(job))).is_err() {
+                    log::error!("align: a job broke off");
+                    self.crafting = None;
+                    match asked {
+                        Some((track, None)) => self.send(Msg::Checked { track, rows: Vec::new(), heard: None }),
+                        Some((track, Some(source))) => {
+                            self.send(Msg::Crafted { track, source, result: Err("Не получилось сделать подсветку".to_owned()) });
+                        }
+                        None => {}
+                    }
+                    self.send(Msg::Job(None));
+                }
                 self.last_work = Instant::now();
                 continue;
             }
-            if Instant::now() >= self.pass_at && self.pass_wanted() && self.pass_step() {
-                self.last_work = Instant::now();
-                continue;
+            if Instant::now() >= self.pass_at && self.pass_wanted() {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.pass_step())) {
+                    Ok(true) => {
+                        self.last_work = Instant::now();
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(_) => {
+                        log::error!("align: the library pass broke off");
+                        self.send(Msg::Job(None));
+                        self.pass_at = Instant::now() + Duration::from_secs(30 * 60);
+                    }
+                }
             }
             if self.aligner.loaded() && self.last_work.elapsed() > KEEP_LOADED {
                 self.aligner.unload();

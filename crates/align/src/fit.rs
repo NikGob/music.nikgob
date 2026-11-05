@@ -707,7 +707,8 @@ fn repeats(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &[Placed]
             t += 1;
         }
         let mut from = a;
-        while b + 1 - from >= long {
+        // A repeat found here may end past `b` (its slice runs 0.3 s on).
+        while (b + 1).saturating_sub(from) >= long {
             let (sa, sb) = (em.secs(from), em.secs(b + 1));
             let mut before: Vec<usize> = (0..lines.len()).filter(|&i| usable(i) && place[i].is_some_and(|(_, e)| e <= sa + 0.3)).collect();
             before.sort_by(|x, y| place[*y].unwrap().1.total_cmp(&place[*x].unwrap().1));
