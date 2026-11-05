@@ -113,7 +113,12 @@ pub(crate) fn galley(painter: &Painter, pos: Pos2, g: &Arc<Galley>, color: Color
             mesh.add_rect_with_uv(b.rect.translate(pos.to_vec2()), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), color);
             painter.add(egui::Shape::mesh(mesh));
         }
-        None => painter.galley_with_override_text_color(pos, g.clone(), color),
+        // Not made yet (a frame at most): the sharp line, as faint as its
+        // blur would spread it, so a blurred line never flashes sharp.
+        None => {
+            let faint = 1.0 - 0.7 * f32::from(step) / f32::from(STEPS);
+            painter.galley_with_override_text_color(pos, g.clone(), color.gamma_multiply(faint));
+        }
     }
 }
 
