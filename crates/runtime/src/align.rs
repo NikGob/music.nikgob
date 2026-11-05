@@ -736,7 +736,7 @@ impl Thread {
         // The made words in syllables, each timed by the voice.
         let r = r.map(|f| {
             f.map(|mut f| {
-                aligner.syllables(prep, &text.lines, &mut f);
+                aligner.syllables(prep, &text.lines, text.timed, &mut f);
                 f
             })
         });

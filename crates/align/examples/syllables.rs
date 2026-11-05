@@ -292,7 +292,7 @@ fn main() {
         };
         let words = fit.lines.clone();
         let t1 = std::time::Instant::now();
-        aligner.syllables(&prep, &lines, &mut fit);
+        aligner.syllables(&prep, &lines, true, &mut fit);
         let took = t1.elapsed().as_secs_f32();
         let mut p = Pool::default();
         // The words as they were, glued back from the pieces.

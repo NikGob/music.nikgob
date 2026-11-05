@@ -1095,7 +1095,7 @@ impl Aligner {
         match Self::needs(&lines).map(|id| self.usable(id)).filter(|id| self.catalog.ready(*id)) {
             Some(_) => Ok(match self.fit(prep, &lines, false, progress)? {
                 Some(mut f) => {
-                    self.syllables(prep, &lines, &mut f);
+                    self.syllables(prep, &lines, false, &mut f);
                     f.lines
                 }
                 None => lines,
@@ -1108,10 +1108,13 @@ impl Aligner {
 impl Aligner {
     /// Cuts the made words of `fit` into syllables timed by the voice
     /// ([`crate::syllables`]), each line by the aligner that heard it
-    /// (`lines`: the text `fit` was made from). Word starts and ends stay.
-    pub fn syllables(&mut self, prep: &Prepared, lines: &[LyricLine], fit: &mut Fit) {
+    /// (`lines`: the text `fit` was made from, `timed` as it was given to
+    /// [`Aligner::fit`], so each line goes where it went). Word starts and
+    /// ends stay.
+    pub fn syllables(&mut self, prep: &Prepared, lines: &[LyricLine], timed: bool, fit: &mut Fit) {
         let Some(main) = fit.aligner else { return };
-        let route = Route::of_with(lines, self.tuning.by_sound);
+        let t = self.tuning;
+        let route = Route::of_with(lines, t.by_sound, t.sound_lines, timed || !t.sound_plain);
         let ids: Vec<ModelId> = fit
             .lines
             .iter()
