@@ -11,11 +11,18 @@
 //! to «Космоцветок» of 2020): when the track's album is known, the version
 //! on that album wins. Translation and romanisation pages (by «Genius …»
 //! accounts) are never taken.
+//!
+//! Genius's bot check turns this client away with 403 at times (November
+//! 2026: every request, for hours, while the system's curl got through):
+//! then the system's curl asks for the rest of the session.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Deserialize;
 use url::Url;
 
-use crate::error::Result;
+use crate::error::{MetadataError, Result};
 use crate::http::{Http, Service, base_url, build_url, ok_body, parse_json};
 use crate::text::{album_key, artist_key, search_artist, search_title, similarity, title_key};
 
@@ -52,20 +59,38 @@ struct Song {
 pub struct Genius {
     http: Http,
     base: Url,
+    /// Genius turned the client away: curl asks (shared by the clones).
+    turned_away: Arc<AtomicBool>,
 }
 
 impl Genius {
     pub fn new(http: Http) -> Self {
-        Self { http, base: base_url(DEFAULT_BASE).expect("default base URL is valid") }
+        Self { http, base: base_url(DEFAULT_BASE).expect("default base URL is valid"), turned_away: Arc::default() }
     }
 
     pub fn with_base_url(http: Http, base: &str) -> Result<Self> {
-        Ok(Self { http, base: base_url(base)? })
+        Ok(Self { http, base: base_url(base)?, turned_away: Arc::default() })
     }
 
     async fn get(&self, url: Url) -> Result<Vec<u8>> {
-        let req = self.http.client().get(url).header(reqwest::header::USER_AGENT, BROWSER);
-        ok_body(self.http.send(Service::Genius, req).await?).await
+        if !self.turned_away.load(Ordering::Relaxed) {
+            let req = self.http.client().get(url.clone()).header(reqwest::header::USER_AGENT, BROWSER);
+            let resp = self.http.send(Service::Genius, req).await?;
+            if resp.status() != reqwest::StatusCode::FORBIDDEN {
+                return ok_body(resp).await;
+            }
+            log::info!("genius: turned away (403), asking through curl from now on");
+            self.turned_away.store(true, Ordering::Relaxed);
+        }
+        self.http.wait_turn(Service::Genius).await;
+        let got = tokio::task::spawn_blocking(move || curl(&url))
+            .await
+            .map_err(|e| MetadataError::Network(format!("curl: {e}")))?;
+        if let Err(MetadataError::NotConfigured(_)) = &got {
+            // No curl here: the client is tried again next time.
+            self.turned_away.store(false, Ordering::Relaxed);
+        }
+        got
     }
 
     async fn search(&self, query: &str) -> Result<Vec<Song>> {
@@ -174,6 +199,43 @@ impl Genius {
         let page = if self.base.host_str() == Some("genius.com") { page } else { build_url(&self.base, page.path().trim_start_matches('/'), &[])? };
         let html = String::from_utf8_lossy(&self.get(page).await?).into_owned();
         Ok(lyrics_of(&html).filter(|t| !t.trim().is_empty()))
+    }
+}
+
+/// `url` through the system's curl (in Windows since 10 1803), as
+/// [`ok_body`] would read it. No curl: [`MetadataError::NotConfigured`].
+fn curl(url: &Url) -> Result<Vec<u8>> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["--silent", "--show-error", "--location", "--connect-timeout", "10", "--max-time", "15"])
+        .args(["--user-agent", BROWSER, "--write-out", "%{http_code}", url.as_str()])
+        .stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // No console window flashing up.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => MetadataError::NotConfigured("curl"),
+        _ => MetadataError::Network(format!("curl: {e}")),
+    })?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(MetadataError::Network(format!("curl: {}", err.trim())));
+    }
+    // The body, then the three digits of the status.
+    let mut body = out.stdout;
+    let at = body.len().checked_sub(3).ok_or_else(|| MetadataError::Parse("curl: no status".into()))?;
+    let status: u16 = std::str::from_utf8(&body[at..])
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| MetadataError::Parse("curl: no status".into()))?;
+    body.truncate(at);
+    match status {
+        200..=299 => Ok(body),
+        404 => Err(MetadataError::NotFound),
+        _ => Err(MetadataError::Status { status, body: String::from_utf8_lossy(&body).chars().take(200).collect() }),
     }
 }
 
@@ -551,6 +613,25 @@ mod tests {
             .respond_with(hits(&[song(5, "Космоцветок", "mzlff", "mzlff")])).mount(&server).await;
         let g = Genius::with_base_url(http(), &server.uri()).unwrap();
         assert_eq!(g.find(&["mzlff"], "Космоцветок (Cosmoflower)", None).await.unwrap().as_deref(), Some("text 5"));
+    }
+
+    /// Genius turns the client away: curl asks, for that request and the
+    /// ones after it.
+    #[tokio::test]
+    async fn a_client_genius_turns_away_asks_through_curl() {
+        if std::process::Command::new("curl").arg("--version").output().is_err() {
+            return;
+        }
+        let server = server().await;
+        let razgrom = song(1, "Разгром (Mayhem)", "MellSher & и ещё 1 исполнитель (i eshe 1 ispolnitel')", "MellSher");
+        let challenge = ResponseTemplate::new(403).set_body_raw("<!DOCTYPE html><title>Genius</title>", "text/html");
+        Mock::given(path("/api/search/multi")).respond_with(challenge).up_to_n_times(1).with_priority(1).mount(&server).await;
+        Mock::given(path("/api/search/multi")).and(query_param("q", "MellSher Разгром")).respond_with(hits(&[razgrom])).mount(&server).await;
+        let g = Genius::with_base_url(http(), &server.uri()).unwrap();
+        assert_eq!(g.find(&["MellSher"], "Разгром", None).await.unwrap().as_deref(), Some("text 1"));
+        assert!(g.turned_away.load(Ordering::Relaxed));
+        // Answers other than 200 read as the client's would.
+        assert!(matches!(curl(&build_url(&g.base, "nowhere", &[]).unwrap()), Err(MetadataError::NotFound)));
     }
 
     #[test]

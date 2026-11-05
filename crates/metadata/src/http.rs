@@ -274,6 +274,11 @@ impl Http {
         &self.client
     }
 
+    /// Waits for the service's rate-limit slot (a request sent another way).
+    pub(crate) async fn wait_turn(&self, service: Service) {
+        self.limiters.get(service).acquire().await;
+    }
+
     /// Sends the request, waiting for the service's rate-limit slot before every
     /// attempt and retrying on 429/503 and connection failures.
     pub(crate) async fn send(&self, service: Service, req: RequestBuilder) -> Result<Response> {
