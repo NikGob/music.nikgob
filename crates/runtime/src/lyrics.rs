@@ -1088,7 +1088,8 @@ impl Worker {
         match got {
             Ok(text) => tl.insert(source, text),
             Err(e) => {
-                log::debug!("lyrics lookup ({}): {e}", source.key());
+                // Not a miss: asked again the next time the song is shown.
+                log::info!("lyrics lookup ({}): {e}", source.key());
                 tl.pending.remove(&source);
                 tl.failed = true;
             }
