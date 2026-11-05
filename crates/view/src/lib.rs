@@ -1359,8 +1359,8 @@ pub struct Prefs {
     /// with 3 (the old «По словам» animation) move to the wave by words
     /// ([`Prefs::upgrade_lyrics`]).
     pub lyrics_style: u8,
-    /// Under the wave or by words, a text with line times only (no word times) uses
-    /// Focus instead of guessing the words' pace.
+    /// A text with line times only (no word times) uses the calm Focus
+    /// under every animation and unit instead of guessing the words' pace.
     pub wave_syllables_only: bool,
     /// How high wave letters (or words) jump as they are sung (0: they only light up).
     pub lyrics_wave_jump: f32,

@@ -3,7 +3,7 @@
 
 use egui::{Sense, Ui};
 use nikgob_shapes::paint as shape_paint;
-use nikgob_view::{Ambient, BgShapes, Command, CoverShape, LYRICS_BY_LETTERS, LYRICS_BY_WORDS, PrefPatch, Prefs, RingStyle, Route, ViewState};
+use nikgob_view::{Ambient, BgShapes, Command, CoverShape, LYRICS_BY_LETTERS, PrefPatch, Prefs, RingStyle, Route, ViewState};
 
 
 use super::settings_help::{self, SettingId as Id};
@@ -689,8 +689,10 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
             }
         });
     }
-    if p.lyrics_style == 2 || p.lyrics_unit == LYRICS_BY_WORDS {
-        row(ui, Id::WaveFallback, "Если у текста нет времени слов", Some("Для «Волны» и подсветки по словам"), |ui| {
+    // Every look and unit falls back but Focus by letters, which is the
+    // calm Focus already.
+    if p.lyrics_style != 1 || p.lyrics_unit != LYRICS_BY_LETTERS {
+        row(ui, Id::WaveFallback, "Если у текста нет времени слов", None, |ui| {
             choice_menu(ui, Id::WaveFallback, p);
         });
     }
