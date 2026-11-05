@@ -1255,6 +1255,60 @@ mod tests {
         assert!(t.progress(track, true)(Stage::Decode));
     }
 
+    /// A timing asked for under the lyrics goes deep or not as its row
+    /// says, whatever the switch says, and the jobs after it go as the
+    /// switch says again.
+    #[test]
+    fn a_timing_s_own_mode_lasts_for_that_timing_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (_req_tx, req_rx) = crossbeam_channel::unbounded();
+        let lib = Library::open_in_memory().unwrap();
+        let catalog = Catalog::new(dir.path());
+        for id in [ModelId::Runtime, ModelId::AlignerRu] {
+            std::fs::create_dir_all(catalog.path(id)).unwrap();
+            std::fs::write(catalog.path(id).join(".ready"), b"").unwrap();
+        }
+        // Deep mode's Russian part is on disk but not marked ready: fetching
+        // it needs no network and shows in the parts list as coming.
+        let deep_part = catalog.path(ModelId::AlignerRuDeep);
+        std::fs::create_dir_all(&deep_part).unwrap();
+        for f in ModelId::AlignerRuDeep.spec().files {
+            std::fs::write(deep_part.join(f.name), b"").unwrap();
+        }
+        let off = Settings { gpu: false, words_all: false, recognise: false, separate: false, models_auto: false, deep: false };
+        let on = Settings { deep: true, ..off };
+        let mut t = Thread::new(lib, dir.path().into(), catalog, on, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
+        let track = TrackId::new();
+        let text = AlignText { source: LyricsSource::Genius, lines: vec![LyricLine::new(Duration::ZERO, "Я иду домой")], timed: false, hash: "h".into() };
+        // No such file: each timing stops after its parts, at the decoding.
+        let craft = |deep: bool, seq: u64| Req::Craft { track, path: dir.path().join("none.opus"), text: text.clone(), target: LyricsSync::Word, deep, temp: false, seq };
+        let deep_fetched = |rx: &Receiver<Internal>| {
+            let said: Vec<Internal> = rx.try_iter().collect();
+            said.iter().any(|m| {
+                matches!(m, Internal::Align(Msg::Models(models))
+                    if models.iter().any(|p| p.key == key(ModelId::AlignerRuDeep) && matches!(p.state, v::ModelState::Downloading(_))))
+            })
+        };
+        // The switch on, «Сделать подсветку заново»: the normal way.
+        t.job(craft(false, 1));
+        assert!(!deep_fetched(&rx), "made the normal way");
+        assert!(!t.aligner.catalog().ready(ModelId::AlignerRuDeep));
+        assert_eq!(t.aligner.deep(), Deep::CHOSEN, "the switch's mode after it");
+        assert!(t.needs(std::slice::from_ref(&text)).contains(&ModelId::AlignerRuDeep));
+        // The switch off, «Сделать глубокую подсветку»: deep for this one.
+        t.take(Req::Settings(off));
+        t.job(craft(true, 2));
+        assert!(deep_fetched(&rx), "deep mode's part was fetched for it");
+        assert!(t.aligner.catalog().ready(ModelId::AlignerRuDeep));
+        assert_eq!(t.aligner.deep(), Deep::OFF, "the normal mode after it");
+        assert_eq!(t.needs(std::slice::from_ref(&text)), [ModelId::Runtime, ModelId::AlignerRu]);
+        // It answered (the file is not there), as any timing does.
+        t.job(craft(false, 3));
+        assert!(rx.try_iter().any(|m| matches!(m, Internal::Align(Msg::Crafted { result: Err(_), .. }))));
+        assert_eq!(t.aligner.deep(), Deep::OFF);
+    }
+
     /// Deep mode's parts come after the normal ones, and missing ones
     /// that may not be downloaded leave the timing to the normal ones.
     #[test]
