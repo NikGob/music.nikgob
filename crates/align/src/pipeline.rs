@@ -745,9 +745,12 @@ impl Aligner {
         let second = self.deep.second(id).filter(|(s, _)| self.catalog.ready(*s));
         // The share of the hearing each pass is, for the progress.
         let passes = 1.0 + f32::from(u8::from(windows)) + f32::from(u8::from(second.is_some()));
-        let mut em = emissions(model, &prep.voice, blank, 0, &mut |f| progress(Stage::Listen(f / passes)))?;
+        // Deep mode may hear quiet passages raised ([`deep::level`]).
+        let leveled = self.deep.level.then(|| deep::level(&prep.voice));
+        let voice = leveled.as_deref().unwrap_or(&prep.voice);
+        let mut em = emissions(model, voice, blank, 0, &mut |f| progress(Stage::Listen(f / passes)))?;
         if windows {
-            let other = emissions(model, &prep.voice, blank, SHIFT_S * RATE as usize, &mut |f| progress(Stage::Listen((1.0 + f) / passes)))?;
+            let other = emissions(model, voice, blank, SHIFT_S * RATE as usize, &mut |f| progress(Stage::Listen((1.0 + f) / passes)))?;
             em.merge(&other);
         }
         prep.heard.insert(id, em);
@@ -794,16 +797,13 @@ impl Aligner {
         self.runtime()?;
         let (file, device, threads) = (self.catalog.file(id, id.model_file()), self.device, self.threads);
         let model = self.ctc.get(id, || Model::load(&file, device, threads))?;
+        let leveled = self.deep.level.then(|| deep::level(&prep.voice));
+        let voice = leveled.as_deref().unwrap_or(&prep.voice);
         if id == ModelId::AlignerRuDeep {
-            crate::gigaam::emissions(model, &prep.voice, blank, progress)
+            crate::gigaam::emissions(model, voice, blank, progress)
         } else {
-            emissions(model, &prep.voice, blank, 0, progress)
+            emissions(model, voice, blank, 0, progress)
         }
-    }
-
-    /// Where aligner `id` runs now, if it is held.
-    pub fn held_device(&self) -> Option<Device> {
-        self.ctc.held().map(|(_, m)| m.device)
     }
 
     /// What aligner `id` hears over windows cut [`SHIFT_S`] later than

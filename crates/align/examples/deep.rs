@@ -15,7 +15,8 @@
 //! there is overwritten.
 //!
 //! What is measured is set by variables: `SEP=rof` (RoFormer's voice),
-//! `WIN=1` (heard twice), `RU`, `EN`, `OTHER` = `alone` | `fused` | `product` (the
+//! `WIN=1` (heard twice), `LEVEL=1` (quiet passages raised first; its
+//! hearing kept as `<song>.lv.<aligner>.em`), `RU`, `EN`, `OTHER` = `alone` | `fused` | `product` (the
 //! second aligner of Russian, English, the MMS languages), `W=0.5` (the first aligner's share
 //! when fused), `OVERLAP=0` (RoFormer's chunks one after another).
 //! `PREP=1` only fills the cache; `CACHED=1` runs no model (a song
@@ -132,6 +133,7 @@ fn deep_from_env() -> Deep {
         separator_russian: var("SEP") == "rof",
         overlap: var("OVERLAP") != "0",
         windows: var("WIN") == "1",
+        level: var("LEVEL") == "1",
         russian: second_of(&var("RU")),
         english: second_of(&var("EN")),
         other: second_of(&var("OTHER")),
@@ -148,7 +150,13 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Opti
     let old = std::env::var("OLD").is_ok();
     // `CACHED=1`: no model runs, only what the cache has.
     let cached = old || std::env::var("CACHED").is_ok();
-    let tag = if rof { "rof." } else if old { "" } else { "x." };
+    let tag = match (rof, old, deep.level) {
+        (true, _, false) => "rof.",
+        (true, _, true) => "rof.lv.",
+        (false, true, _) => "",
+        (false, false, false) => "x.",
+        (false, false, true) => "lv.",
+    };
     let vtag = if rof { "rof." } else { "" };
     let voice_file = cache.join(format!("{stem}.{vtag}voice"));
     let levels_file = cache.join(format!("{stem}.{vtag}levels"));
@@ -399,57 +407,52 @@ mod mem {
 /// time, the process's peak memory and the card's (its most used memory
 /// over what it used before).
 fn timed_run(aligner: &mut Aligner, job: &Job, deep: Deep) {
-    let base = mem::vram();
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let peak = std::sync::Arc::new(std::sync::Mutex::new(base));
-    let watcher = {
-        let (stop, peak) = (stop.clone(), peak.clone());
-        std::thread::spawn(move || {
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let v = mem::vram();
-                let mut p = peak.lock().unwrap();
-                *p = p.max(v);
-                drop(p);
-                std::thread::sleep(Duration::from_millis(300));
-            }
-        })
-    };
     aligner.set_deep(deep);
-    let t0 = Instant::now();
-    let mut sep = 0.0;
-    let mut used = String::new();
-    let r = model_run(&format!("{} whole", job.name), || -> Result<Option<Fit>, nikgob_align::Error> {
+    let mut line = String::new();
+    model_run(&format!("{} whole", job.name), || {
+        // Measured from here, under the lock: the card's memory over what
+        // it used just before (another program's use may still move it).
+        let base = mem::vram();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let peak = std::sync::Arc::new(std::sync::Mutex::new(base));
+        let watcher = {
+            let (stop, peak) = (stop.clone(), peak.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let v = mem::vram();
+                    let mut p = peak.lock().unwrap();
+                    *p = p.max(v);
+                    drop(p);
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+            })
+        };
+        let t0 = Instant::now();
+        let mut sep = 0.0;
         let main = Route::of(&job.lines).map(|r| aligner.usable(r.main));
-        let mut prep = aligner.prepare_for(Path::new(&job.path), true, main, &mut |s| {
-            if let Stage::Listen(_) = s
-                && sep == 0.0
-            {
-                sep = t0.elapsed().as_secs_f32();
+        let prep = aligner.prepare_for(Path::new(&job.path), true, main, &mut |_| true);
+        sep += t0.elapsed().as_secs_f32();
+        let (ok, used) = match prep {
+            Ok(mut prep) => {
+                let fit = aligner.fit(&mut prep, &job.lines, true, &mut |_| true);
+                // What deep mode really used (a part that failed falls back).
+                let used = format!("RoFormer {}, second aligner {}", prep.deep_separated, main.is_some_and(|m| prep.deep_emissions(m).is_some()));
+                (fit.as_ref().is_ok_and(Option::is_some), used)
             }
-            true
-        })?;
-        sep = t0.elapsed().as_secs_f32();
-        let fit = aligner.fit(&mut prep, &job.lines, true, &mut |_| true);
-        // What deep mode really used (a part that failed falls back).
-        used = format!("RoFormer {}, second aligner {}", prep.deep_separated, main.is_some_and(|m| prep.deep_emissions(m).is_some()));
-        fit
+            Err(e) => (false, e.to_string()),
+        };
+        let total = t0.elapsed().as_secs_f32();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = watcher.join();
+        let vram = *peak.lock().unwrap() - base;
+        let (ws, private) = mem::peak();
+        line = format!(
+            "  TIME {} {:?} ok {ok} ({used}) | decode and separation {sep:.1} s, all {total:.1} s | peak working set {ws:.0} MB private {private:.0} MB | card +{vram:.0} MB",
+            job.name,
+            aligner.device(),
+        );
     });
-    let total = t0.elapsed().as_secs_f32();
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    let _ = watcher.join();
-    let (ws, private) = mem::peak();
-    let vram = *peak.lock().unwrap() - base;
-    println!(
-        "  TIME {} {:?} ok {} ({used}) | separation {:.1} s, all {:.1} s | peak working set {:.0} MB private {:.0} MB | card +{:.0} MB",
-        job.name,
-        aligner.device(),
-        r.as_ref().is_ok_and(Option::is_some),
-        sep,
-        total,
-        ws,
-        private,
-        vram
-    );
+    println!("{line}");
     aligner.unload();
 }
 

@@ -38,6 +38,9 @@ pub struct Deep {
     /// The song heard a second time over windows cut half a window later,
     /// the two averaged (`fit::Tuning::windows`).
     pub windows: bool,
+    /// Quiet sung passages raised before the aligners hear them
+    /// ([`level`]).
+    pub level: bool,
     /// GigaAM for Russian.
     pub russian: Second,
     /// The singing aligner (Tune Studio's) for English.
@@ -55,6 +58,7 @@ impl Deep {
         separator_russian: false,
         overlap: true,
         windows: false,
+        level: false,
         russian: Second::Off,
         english: Second::Off,
         other: Second::Off,
@@ -94,6 +98,53 @@ impl Deep {
         }
         out
     }
+}
+
+/// A quiet passage is raised towards this share of the voice's loud level…
+const LEVEL_TO: f32 = 0.5;
+/// … by at most this much…
+const LEVEL_MAX: f32 = 6.0;
+/// … where the voice is at least this share of its loud level (under it,
+/// silence and noise stay as they are).
+const LEVEL_FLOOR: f32 = 0.04;
+
+/// The voice (16 kHz) with its quiet sung passages raised: each tenth of a
+/// second's loudness (over the half second around it) brought towards
+/// [`LEVEL_TO`] of the voice's loud level, the gain eased between tenths.
+/// An aligner hears a 30 s window brought to one loudness as a whole, so a
+/// line chanted at a fifth of the song's level next to loud ones is nearly
+/// silence to it.
+pub fn level(voice: &[f32]) -> Vec<f32> {
+    const HOP: usize = 1600;
+    let rms: Vec<f32> = voice.chunks(HOP).map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt()).collect();
+    if rms.is_empty() {
+        return voice.to_vec();
+    }
+    let mut sorted = rms.clone();
+    sorted.sort_by(f32::total_cmp);
+    let loud = sorted[((sorted.len() - 1) as f32 * 0.95) as usize];
+    if loud <= 0.0 {
+        return voice.to_vec();
+    }
+    let gain: Vec<f32> = (0..rms.len())
+        .map(|i| {
+            let around = &rms[i.saturating_sub(2)..(i + 3).min(rms.len())];
+            let r = (around.iter().map(|v| v * v).sum::<f32>() / around.len() as f32).sqrt();
+            if r < loud * LEVEL_FLOOR { 1.0 } else { (loud * LEVEL_TO / r).clamp(1.0, LEVEL_MAX) }
+        })
+        .collect();
+    voice
+        .iter()
+        .enumerate()
+        .map(|(n, s)| {
+            // Between the centres of the tenths around this sample.
+            let x = (n as f32 / HOP as f32 - 0.5).max(0.0);
+            let i = (x as usize).min(gain.len() - 1);
+            let j = (i + 1).min(gain.len() - 1);
+            let f = x - i as f32;
+            s * (gain[i] * (1.0 - f) + gain[j] * f)
+        })
+        .collect()
 }
 
 /// A model's letters by name (`vocab.json`), its blank under `<blank>`.
@@ -187,6 +238,21 @@ mod tests {
         assert!(g.row(1)[1].exp() < f.row(1)[1].exp() && (g.row(0)[1].exp() - 0.8).abs() < 1e-5);
         let same = fuse(&main, &ml, &other, &ol, 1.0, true);
         assert!(same.logp.iter().zip(&main.logp).all(|(a, b)| (a - b).abs() < 1e-5));
+    }
+
+    /// A quiet sung line is raised, a loud one and silence are not.
+    #[test]
+    fn quiet_singing_is_raised() {
+        let tone = |n: usize, a: f32| (0..n).map(move |i| (i as f32 * 0.07).sin() * a);
+        let voice: Vec<f32> = tone(32_000, 0.5).chain(tone(32_000, 0.1)).chain(std::iter::repeat_n(0.0, 32_000)).chain(tone(32_000, 0.002)).collect();
+        let out = level(&voice);
+        let rms = |a: usize, b: usize| (out[a..b].iter().map(|s| s * s).sum::<f32>() / (b - a) as f32).sqrt();
+        let loud = rms(8_000, 24_000);
+        assert!((loud - 0.5 / 2f32.sqrt()).abs() < 0.02, "{loud}");
+        let quiet = rms(40_000, 56_000);
+        assert!(quiet > 0.15, "raised: {quiet}");
+        assert!(rms(72_000, 88_000) < 1e-6);
+        assert!(rms(104_000, 120_000) < 0.002, "noise stays");
     }
 
     #[test]
