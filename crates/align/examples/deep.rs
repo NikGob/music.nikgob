@@ -19,7 +19,8 @@
 //! second aligner of Russian, English, the MMS languages), `ENM=hubert` |
 //! `sung` (English's second aligner), `W=0.5` (the first aligner's share
 //! when fused), `OVERLAP=0` (RoFormer's chunks one after another).
-//! `PREP=1` only fills the cache. Every model run takes the round's GPU
+//! `PREP=1` only fills the cache; `CACHED=1` runs no model (a song
+//! missing something is left out). Every model run takes the round's GPU
 //! lock (`LOCK=<dir>`) and, with `DUTY=0.5`, sleeps as long as it ran.
 //! `DEVICE=cpu` and `THREADS` (2) say where models run. `TIME=1`: no
 //! cache, each job made from its file as the player does (normal, then
@@ -133,6 +134,7 @@ fn deep_from_env() -> Deep {
         english_model: if var("ENM") == "sung" { ModelId::AlignerSung } else { ModelId::AlignerEnDeep },
         other: second_of(&var("OTHER")),
         weight: var("W").parse().unwrap_or(0.5),
+        giga_late: var("LATE").parse().unwrap_or(nikgob_align::deep::GIGA_LATE),
     }
 }
 
@@ -143,13 +145,15 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Opti
     // What the aligners heard: the bench's own (`OLD=1`, made before the
     // windows were cut at whole strides) or this example's.
     let old = std::env::var("OLD").is_ok();
+    // `CACHED=1`: no model runs, only what the cache has.
+    let cached = old || std::env::var("CACHED").is_ok();
     let tag = if rof { "rof." } else if old { "" } else { "x." };
     let vtag = if rof { "rof." } else { "" };
     let voice_file = cache.join(format!("{stem}.{vtag}voice"));
     let levels_file = cache.join(format!("{stem}.{vtag}levels"));
     let voice = match read_f32(&voice_file) {
         Some(v) => v,
-        None if rof => {
+        None if rof && !cached => {
             aligner.set_deep(Deep { separator: true, ..Deep::OFF });
             let p = model_run(&format!("{} RoFormer separation", job.name), || aligner.prepare(Path::new(&job.path), true, &mut |_: Stage| true));
             aligner.set_deep(*deep);
@@ -180,7 +184,7 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Opti
         let file = cache.join(format!("{stem}.{tag}{}.em", key(id)));
         let mut em = match read_em(&file) {
             Some(e) => e,
-            None if !old => {
+            None if !old && !cached => {
                 let em = model_run(&format!("{} {}", job.name, key(id)), || aligner.hear_with(&prep, id, &mut |_| true)).ok()?;
                 write_em(&file, &em);
                 em
@@ -191,10 +195,11 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Opti
             let file = cache.join(format!("{stem}.{tag}{}.w.em", key(id)));
             let other = match read_em(&file) {
                 Some(e) => e,
+                None if cached => return None,
                 None => {
                     let mut p = Prepared::from_voice(prep.voice.clone(), true);
                     p.set_emissions(id, em.clone());
-                    let e = model_run(&format!("{} {} shifted", job.name, key(id)), || aligner.hear_shifted(&p, id)).ok()?;
+                    let e = model_run(&format!("{} {} shifted", job.name, key(id)), || aligner.hear_shifted_exact(&p, id)).ok()?;
                     write_em(&file, &e);
                     e
                 }
@@ -206,6 +211,7 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Opti
             let file = cache.join(format!("{stem}.{tag}{}.em", key(sid)));
             let sem = match read_em(&file) {
                 Some(e) => e,
+                None if cached => return None,
                 None => {
                     let e = model_run(&format!("{} {}", job.name, key(sid)), || aligner.hear_with(&prep, sid, &mut |_| true));
                     match e {

@@ -42,6 +42,9 @@ pub struct Deep {
     pub other: Second,
     /// The first aligner's share in [`Second::Fused`].
     pub weight: f32,
+    /// How much later than the Russian wav2vec2 model GigaAM hears the
+    /// same letter (seconds; its frames are moved back by as much).
+    pub giga_late: f32,
 }
 
 impl Deep {
@@ -55,6 +58,7 @@ impl Deep {
         english_model: ModelId::AlignerEnDeep,
         other: Second::Off,
         weight: 0.5,
+        giga_late: GIGA_LATE,
     };
 
     /// What the setting turns on: what measured better (docs/lyrics-align.md,
@@ -72,6 +76,16 @@ impl Deep {
         (how != Second::Off).then_some((id, how))
     }
 
+    /// How much later than its first aligner a second aligner hears the
+    /// same letter (seconds).
+    pub fn late(&self, second: ModelId) -> f32 {
+        match second {
+            ModelId::AlignerRuDeep => self.giga_late,
+            ModelId::AlignerEnDeep => HUBERT_LATE,
+            _ => 0.0,
+        }
+    }
+
     /// The parts deep mode wants for a text heard by `main` (with a
     /// separation: `separate`).
     pub fn parts(&self, main: ModelId, separate: bool) -> Vec<ModelId> {
@@ -84,6 +98,40 @@ impl Deep {
         }
         out
     }
+}
+
+/// GigaAM hears a letter 40–60 ms after the Russian wav2vec2 model does
+/// (the letters both hear, matched frame by frame over «Мой топор» and
+/// «Апельсин», agree best 2–3 frames later): one of its frames.
+pub const GIGA_LATE: f32 = 0.04;
+
+/// HuBERT hears a letter a frame (20 ms) before the English wav2vec2 model
+/// does (matched as above over «Natural» and «As It Was»).
+pub const HUBERT_LATE: f32 = -0.02;
+
+/// `em` moved `secs` earlier (later when below zero), keeping its length:
+/// the frames moved out are dropped, the edge frame repeated in their
+/// place.
+pub fn earlier(em: &Emissions, secs: f32) -> Emissions {
+    let n = em.frames();
+    let k = ((secs.abs() * em.fps).round() as usize).min(n);
+    if k == 0 || n == 0 {
+        return em.clone();
+    }
+    let v = em.vocab;
+    let mut out = Vec::with_capacity(em.logp.len());
+    if secs > 0.0 {
+        out.extend_from_slice(&em.logp[k * v..]);
+        for _ in 0..k {
+            out.extend_from_slice(em.row(n - 1));
+        }
+    } else {
+        for _ in 0..k {
+            out.extend_from_slice(em.row(0));
+        }
+        out.extend_from_slice(&em.logp[..(n - k) * v]);
+    }
+    Emissions { logp: out, ..em.clone() }
 }
 
 /// A model's letters by name (`vocab.json`), its blank under `<blank>`.
@@ -169,6 +217,17 @@ mod tests {
         // All of it the first model's: nothing changes.
         let same = fuse(&main, &ml, &other, &ol, 1.0);
         assert!(same.logp.iter().zip(&main.logp).all(|(a, b)| (a - b).abs() < 1e-5));
+    }
+
+    #[test]
+    fn a_late_hearing_is_moved_back() {
+        let e = em(&[[0.1, 0.8, 0.1], [0.8, 0.1, 0.1], [0.1, 0.1, 0.8]]);
+        let back = earlier(&e, 0.02);
+        assert_eq!(back.frames(), 3);
+        assert!((back.row(0)[0].exp() - 0.8).abs() < 1e-5 && (back.row(2)[2].exp() - 0.8).abs() < 1e-5);
+        assert_eq!(earlier(&e, 0.0).logp, e.logp);
+        let later = earlier(&e, -0.02);
+        assert!((later.row(1)[1].exp() - 0.8).abs() < 1e-5 && (later.row(0)[1].exp() - 0.8).abs() < 1e-5);
     }
 
     #[test]
