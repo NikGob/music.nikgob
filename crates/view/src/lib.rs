@@ -306,6 +306,9 @@ pub struct PlayerView {
     pub repeat: Repeat,
     /// What the current queue was started from ("Играет из «…»").
     pub context: Option<String>,
+    /// The page of what the queue was started from, when it has one (an
+    /// album, a playlist, an artist): the name in the header line opens it.
+    pub context_page: Option<Route>,
     /// The service the current track's sound comes from (`None` for a local
     /// file): the "звук: YouTube" label, e.g. for a Spotify track played
     /// from YouTube Music because Spotify has no sound for this account.
@@ -330,6 +333,7 @@ impl Default for PlayerView {
             shuffle: false,
             repeat: Repeat::Off,
             context: None,
+            context_page: None,
             audio_service: None,
             audio_quality: None,
         }

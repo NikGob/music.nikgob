@@ -217,15 +217,15 @@ impl Worker {
 
     /// The queue still plays `release` (replaced by nothing since): its
     /// tracks the queue lacks join it in album order, and the first of
-    /// them plays when nothing could. Under «Только скачанное» the songs
-    /// that only stream stay out, as playing the album leaves them.
+    /// them plays when nothing could. They only stream: each is looked up
+    /// when it comes up, as playing the album does.
     pub(crate) fn extend_album_queue(&mut self, release: ReleaseId) {
         if self.album_queue != Some((release, self.queue.generation())) {
             return;
         }
         let have: HashSet<_> = self.queue.tracks().into_iter().collect();
         let rows = self.lib.tracks_of_release_all(release).unwrap_or_default();
-        let more: Vec<_> = self.playable(&rows, None).into_iter().filter(|t| !have.contains(t)).collect();
+        let more: Vec<_> = rows.iter().map(|r| r.id).filter(|t| !have.contains(t)).collect();
         if more.is_empty() {
             return;
         }

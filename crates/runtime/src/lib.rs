@@ -456,6 +456,10 @@ struct Worker {
     /// What the queue plays (`release:<id>`, `playlist:<id>`, a mix, a
     /// radio's seed): the history's `context_id`.
     play_context_id: Option<String>,
+    /// The page of the queue the last run left (`release:<id>`…, see
+    /// [`context_page`]) and the queue generation it came back in: the
+    /// header's link while that queue plays.
+    restored_page: Option<(u64, String)>,
     /// Who chose the next start, when the command that starts it knows.
     next_origin: Option<EventOrigin>,
     /// The queue generation of the last start: a start in another queue
@@ -579,6 +583,7 @@ impl Worker {
             revision: 0,
             play_context: EventContext::Other,
             play_context_id: None,
+            restored_page: None,
             next_origin: None,
             origin_gen: None,
             ended: true,
@@ -860,7 +865,7 @@ impl Worker {
                 self.publish_player();
             }
             Command::PlayRelease { id, start, shuffle } => {
-                let ids = self.release_tracks(id, start);
+                let ids = self.release_tracks(id);
                 let title = self
                     .lib
                     .get_release(id)
@@ -912,7 +917,7 @@ impl Worker {
                 self.toast("Добавлено в очередь", None);
             }
             Command::PlayReleaseNext(id) => {
-                let ids = self.release_tracks(id, None);
+                let ids = self.release_tracks(id);
                 if ids.is_empty() {
                     return;
                 }
@@ -923,7 +928,7 @@ impl Worker {
                 self.toast(format!("Следующим: «{title}»"), None);
             }
             Command::EnqueueRelease(id) => {
-                let ids = self.release_tracks(id, None);
+                let ids = self.release_tracks(id);
                 self.command(Command::Enqueue(ids));
             }
             Command::EnqueueArtist(id) => {
@@ -1963,6 +1968,7 @@ impl Worker {
         let (volume, muted) = (self.volume, self.muted);
         let (shuffle, repeat) = (self.queue.shuffle, self.queue.repeat);
         let context = self.queue.context.clone();
+        let page = self.context_page_id().and_then(context_page);
         let upcoming: Vec<Entry> = self.queue.upcoming().iter().take(200).copied().collect();
         let history = self.queue.history();
         let history: Vec<Entry> = history[history.len().saturating_sub(HISTORY_SHOWN)..].to_vec();
@@ -2001,12 +2007,21 @@ impl Worker {
             p.shuffle = shuffle;
             p.repeat = repeat;
             p.context = context;
+            p.context_page = page;
             s.queue.next = next;
             s.queue.prev = prev;
             s.queue.current_entry = current_entry;
             s.queue.current_why = current_why;
             s.queue.radio = radio;
         });
+    }
+
+    /// The id of what the queue was started from (see
+    /// [`Self::play_context_id`]); after a restart, the one the last run
+    /// left, while its queue plays.
+    pub(crate) fn context_page_id(&self) -> Option<&str> {
+        let restored = self.restored_page.as_ref().filter(|(g, _)| *g == self.queue.generation());
+        self.play_context_id.as_deref().or(restored.map(|(_, id)| id.as_str()))
     }
 
     /// Volume and mute only: nothing else of the player or the queue changes.
@@ -2681,12 +2696,13 @@ impl Worker {
         Held::Tracks(self.lib.count_tracks(nikgob_library::TrackFilter::All).ok())
     }
 
-    /// The tracks an album plays from `start`, in its order: the whole
-    /// album, its songs that only stream too, as [`Self::playable`] leaves
-    /// them.
-    fn release_tracks(&mut self, id: nikgob_core::model::ReleaseId, start: Option<TrackId>) -> Vec<TrackId> {
+    /// The tracks an album plays, in its order: every song its page lists,
+    /// the ones that only stream too, under «Только скачанное» as well (a
+    /// song without a file is looked up when it comes up, and one not found
+    /// is skipped with a notice).
+    fn release_tracks(&mut self, id: nikgob_core::model::ReleaseId) -> Vec<TrackId> {
         let rows = self.log_err("альбом", self.lib.tracks_of_release_all(id)).unwrap_or_default();
-        self.playable(&rows, start)
+        rows.iter().map(|r| r.id).collect()
     }
 
     /// «Только скачанное» is on, of the home or of the library.
@@ -2695,10 +2711,11 @@ impl Worker {
         p.mixes_downloaded_only || p.library_only_downloaded
     }
 
-    /// What a list of tracks (an album, a playlist, an artist's songs)
-    /// plays: all of it; under «Только скачанное» only its songs with a
-    /// file and `start`, the song picked to start from (played even when it
-    /// only streams). A list without a single file plays whole.
+    /// What a list of tracks (a playlist, an artist's songs) plays: all of
+    /// it; under «Только скачанное» only its songs with a file and `start`,
+    /// the song picked to start from (played even when it only streams). A
+    /// list without a single file plays whole. An album plays whole always
+    /// ([`Self::release_tracks`]).
     fn playable(&self, rows: &[nikgob_library::TrackRow], start: Option<TrackId>) -> Vec<TrackId> {
         let only_local = self.only_downloaded() && rows.iter().any(|r| r.has_local);
         rows.iter().filter(|r| !only_local || r.has_local || Some(r.id) == start).map(|r| r.id).collect()
@@ -3020,6 +3037,19 @@ fn metadata_config(m: &nikgob_core::settings::MetadataSettings) -> MetadataConfi
     cfg
 }
 
+/// The page a queue's context id opens (`release:<id>`, `playlist:<id>`,
+/// `artist:<id>`); none for the rest (a mix, a radio, a search).
+fn context_page(id: &str) -> Option<nikgob_view::Route> {
+    use nikgob_view::Route;
+    let (kind, id) = id.split_once(':')?;
+    match kind {
+        "release" => id.parse().ok().map(Route::Release),
+        "playlist" => id.parse().ok().map(Route::Playlist),
+        "artist" => id.parse().ok().map(Route::Artist),
+        _ => None,
+    }
+}
+
 /// Which tracks the library lists ([`nikgob_view::Prefs::library_only_downloaded`]).
 fn track_filter(only_local: bool) -> nikgob_library::TrackFilter {
     if only_local {
@@ -3120,6 +3150,21 @@ mod tests {
 
     fn ms(v: u64) -> Duration {
         Duration::from_millis(v)
+    }
+
+    #[test]
+    fn a_queue_started_from_an_album_a_playlist_or_an_artist_has_its_page() {
+        use nikgob_view::Route;
+        let (r, p, a) = (nikgob_core::model::ReleaseId::new(), PlaylistId::new(), nikgob_core::model::ArtistId::new());
+        assert_eq!(context_page(&format!("release:{r}")), Some(Route::Release(r)));
+        assert_eq!(context_page(&format!("playlist:{p}")), Some(Route::Playlist(p)));
+        assert_eq!(context_page(&format!("playlist:{LIKED_PLAYLIST}")), Some(Route::Playlist(LIKED_PLAYLIST)));
+        assert_eq!(context_page(&format!("artist:{a}")), Some(Route::Artist(a)));
+        // A radio of an artist, a mix, a broken id: no page.
+        assert_eq!(context_page(&format!("radio:artist:{a}")), None);
+        assert_eq!(context_page("mix:Спокойное"), None);
+        assert_eq!(context_page("release:nope"), None);
+        assert_eq!(context_page("release"), None);
     }
 
     #[test]
