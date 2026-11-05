@@ -216,42 +216,87 @@ pub(crate) fn capital(text: &str) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Action {
     pub target: LyricsSync,
-    /// Made with deep mode's parts for this song only; else the normal
-    /// way, whatever the setting says.
-    pub deep: bool,
+    /// Its row in the control's menu.
     pub label: &'static str,
+    /// Its button under «Подсветка» (the window and the page), where the
+    /// heading says what it is about.
+    pub button: &'static str,
+    /// Word timing can also be made deep, for this song only
+    /// (docs/lyrics-align.md, «Deep mode»): that row in the control's menu,
+    /// right after this one. Under «Подсветка» it is the split button's
+    /// menu ([`DEEP`]).
+    pub deep: Option<&'static str>,
 }
 
-const fn action(target: LyricsSync, deep: bool, label: &'static str) -> Action {
-    Action { target, deep, label }
-}
+/// The deep variant in the split button's menu.
+pub(crate) const DEEP: &str = "Глубокая подсветка";
 
-/// The timing that can be made for the shown text, with what the action
-/// says: lines for a plain text, words for a text without them, and the
-/// words again for a text that has them (a bad result is made anew). The
-/// words come twice: the normal way and deep (docs/lyrics-align.md, «Deep
-/// mode»).
+/// The timing that can be made for the shown text, coarsest first: lines
+/// for a plain text, words for a text without them, and the words again
+/// for a text that has them (a bad result is made anew). The action makes
+/// it the normal way whatever the deep setting says; word timing has its
+/// deep variant.
 pub(crate) fn actions(state: &ViewState) -> Vec<Action> {
     let l = &state.lyrics;
     if l.craft != LyricsCraft::Ready || l.source.is_none_or(|s| s == LyricsSource::Recognized) {
         return Vec::new();
     }
-    const WORDS: [Action; 2] =
-        [action(LyricsSync::Word, false, "Подсветить по словам"), action(LyricsSync::Word, true, "Подсветить по словам глубоко")];
+    const LINES: Action = Action { target: LyricsSync::Line, label: "Подсветить по строкам", button: "Подсветить по строкам", deep: None };
+    const WORDS: Action =
+        Action { target: LyricsSync::Word, label: "Подсветить по словам", button: "Подсветить по словам", deep: Some("Подсветить по словам глубоко") };
+    const AGAIN: Action =
+        Action { target: LyricsSync::Word, label: "Сделать подсветку заново", button: "Сделать заново", deep: Some("Сделать глубокую подсветку") };
     // The finest timing the text has, however it is seen now.
     match l.shows.first().copied().or_else(|| LyricsSync::of(&l.lines)).unwrap_or(LyricsSync::Plain) {
-        LyricsSync::Plain => [&[action(LyricsSync::Line, false, "Подсветить по строкам")][..], &WORDS[..]].concat(),
-        LyricsSync::Line => WORDS.to_vec(),
-        _ => vec![action(LyricsSync::Word, false, "Сделать подсветку заново"), action(LyricsSync::Word, true, "Сделать глубокую подсветку")],
+        LyricsSync::Plain => vec![LINES, WORDS],
+        LyricsSync::Line => vec![WORDS],
+        _ => vec![AGAIN],
     }
 }
 
-/// [`actions`] in the order the window and the page lay out their buttons
-/// from the primary one: the normal word timing first (it leads), then
-/// the others from the finest (deep beside its normal twin).
-pub(crate) fn from_primary(actions: &[Action]) -> Vec<Action> {
-    let Some(p) = actions.iter().rposition(|a| !a.deep) else { return actions.to_vec() };
-    std::iter::once(actions[p]).chain(actions.iter().enumerate().rev().filter(|(i, _)| *i != p).map(|(_, a)| *a)).collect()
+const MAKE_GAP: f32 = 8.0;
+
+/// The width [`make_row`] wants in one row.
+pub(crate) fn make_width(ui: &Ui, actions: &[Action]) -> f32 {
+    let w = |a: &Action| match a.deep {
+        Some(_) => crate::components::SplitButton::new("w", a.button).size(crate::components::Size::S).natural_width(ui),
+        None => crate::components::Button::new(a.button).size(crate::components::Size::S).natural_width(ui),
+    };
+    actions.iter().map(w).sum::<f32>() + MAKE_GAP * actions.len().saturating_sub(1) as f32
+}
+
+/// The timing to make under «Подсветка» (the window and the page), from
+/// the left, the finest first: word timing as a split button whose menu
+/// holds its deep variant, lines as a plain button beside it, or under it
+/// (`stacked`, 12 apart) where [`make_width`] is more than the row has.
+/// The first is filled when it `leads`.
+pub(crate) fn make_row(ui: &mut Ui, state: &ViewState, salt: &str, leads: bool, stacked: bool, out: &mut Vec<Command>) {
+    use crate::components::{Button, MenuItem, Size, SplitButton, Style};
+    let all = actions(state);
+    let row = |ui: &mut Ui| {
+        ui.spacing_mut().item_spacing = vec2(MAKE_GAP, 12.0);
+        for (i, a) in all.iter().rev().enumerate() {
+            let style = if i == 0 && leads { Style::Filled } else { Style::Tonal };
+            let (normal, deep) = match a.deep {
+                Some(_) => {
+                    let o = SplitButton::new((salt, "make", a.button), a.button).size(Size::S).style(style).item(MenuItem::new(DEEP)).show(ui);
+                    (o.main.clicked(), o.picked == Some(0))
+                }
+                None => (ui.add(Button::new(a.button).style(style).size(Size::S).id_salt((salt, "make", a.button))).clicked(), false),
+            };
+            if normal || deep {
+                if failed(state).is_some() {
+                    out.push(Command::ClearCraft);
+                }
+                make(state, a.target, deep, out);
+            }
+        }
+    };
+    if stacked {
+        ui.vertical(row);
+    } else {
+        ui.horizontal(row);
+    }
 }
 
 /// Why timing cannot be made for the shown text (a clip whose song is
@@ -336,10 +381,11 @@ pub(crate) fn save(state: &ViewState, out: &mut Vec<Command>) {
     }
 }
 
-/// Asks for the timing `a` makes of the shown text.
-pub(crate) fn make(state: &ViewState, a: Action, out: &mut Vec<Command>) {
+/// Asks for `target` timing of the shown text, `deep` or the normal way
+/// (for this timing only, whatever the setting says).
+pub(crate) fn make(state: &ViewState, target: LyricsSync, deep: bool, out: &mut Vec<Command>) {
     if let (Some(track), Some(source)) = (state.lyrics.track, state.lyrics.source) {
-        out.push(Command::CraftLyrics { track, source, target: a.target, deep: a.deep });
+        out.push(Command::CraftLyrics { track, source, target, deep });
     }
 }
 
@@ -693,26 +739,21 @@ mod tests {
     #[test]
     fn actions_make_what_the_shown_text_lacks() {
         use std::time::Duration;
-        let made = |state: &ViewState| actions(state).iter().map(|a| (a.target, a.deep, a.label)).collect::<Vec<_>>();
+        let made = |state: &ViewState| actions(state).iter().map(|a| (a.target, a.label, a.button, a.deep)).collect::<Vec<_>>();
         let mut state = ViewState::default();
         state.lyrics.source = Some(LyricsSource::Genius);
         state.lyrics.plain = Some("a".into());
         assert!(actions(&state).is_empty(), "nothing to listen to");
         state.lyrics.craft = LyricsCraft::Ready;
-        // A plain text: lines, words, and words deep (lines have no twin).
-        assert_eq!(
-            made(&state),
-            [
-                (LyricsSync::Line, false, "Подсветить по строкам"),
-                (LyricsSync::Word, false, "Подсветить по словам"),
-                (LyricsSync::Word, true, "Подсветить по словам глубоко"),
-            ]
-        );
+        // A plain text: lines (no deep variant), and words with theirs.
+        let words = (LyricsSync::Word, "Подсветить по словам", "Подсветить по словам", Some("Подсветить по словам глубоко"));
+        assert_eq!(made(&state), [(LyricsSync::Line, "Подсветить по строкам", "Подсветить по строкам", None), words]);
         let mut line = nikgob_view::LyricLine::new(Duration::from_secs(1), "a");
         state.lyrics.lines = vec![line.clone()];
-        assert_eq!(made(&state), [(LyricsSync::Word, false, "Подсветить по словам"), (LyricsSync::Word, true, "Подсветить по словам глубоко")]);
-        // Word timing there already: it can be made again, either way.
-        let again = [(LyricsSync::Word, false, "Сделать подсветку заново"), (LyricsSync::Word, true, "Сделать глубокую подсветку")];
+        assert_eq!(made(&state), [words]);
+        // Word timing there already: it can be made again, either way; the
+        // button under «Подсветка» says it short.
+        let again = [(LyricsSync::Word, "Сделать подсветку заново", "Сделать заново", Some("Сделать глубокую подсветку"))];
         line.words.push(nikgob_view::LyricWord { start: Duration::from_secs(1), end: Duration::from_secs(2), text: "a".into() });
         state.lyrics.lines = vec![line];
         assert_eq!(made(&state), again);
@@ -729,19 +770,18 @@ mod tests {
         assert_eq!(no_craft(&state), Some("Нельзя: это клип"));
     }
 
-    /// Each row asks for its own mode; the window and the page lead with
-    /// the normal word timing, deep beside it.
+    /// The command carries the mode asked for.
     #[test]
-    fn the_deep_rows_ask_for_deep_timing_and_the_normal_ones_lead() {
+    fn timing_asked_for_carries_its_mode() {
         let mut state = ViewState::default();
+        let mut out = Vec::new();
+        make(&state, LyricsSync::Word, true, &mut out);
+        assert!(out.is_empty(), "no text: nothing asked");
         state.lyrics.track = Some(nikgob_view::TrackId::new());
         state.lyrics.source = Some(LyricsSource::Genius);
-        state.lyrics.craft = LyricsCraft::Ready;
-        let all = actions(&state);
-        let mut out = Vec::new();
-        for a in &all {
-            make(&state, *a, &mut out);
-        }
+        make(&state, LyricsSync::Word, true, &mut out);
+        make(&state, LyricsSync::Word, false, &mut out);
+        make(&state, LyricsSync::Line, false, &mut out);
         let asked: Vec<_> = out
             .iter()
             .map(|c| match c {
@@ -749,12 +789,7 @@ mod tests {
                 c => panic!("{c:?}"),
             })
             .collect();
-        assert_eq!(asked, [(LyricsSync::Line, false), (LyricsSync::Word, false), (LyricsSync::Word, true)]);
-        let order: Vec<_> = from_primary(&all).iter().map(|a| a.label).collect();
-        assert_eq!(order, ["Подсветить по словам", "Подсветить по словам глубоко", "Подсветить по строкам"]);
-        let again = [action(LyricsSync::Word, false, "Сделать подсветку заново"), action(LyricsSync::Word, true, "Сделать глубокую подсветку")];
-        assert_eq!(from_primary(&again), again);
-        assert!(from_primary(&[]).is_empty());
+        assert_eq!(asked, [(LyricsSync::Word, true), (LyricsSync::Word, false), (LyricsSync::Line, false)]);
     }
 
     #[test]

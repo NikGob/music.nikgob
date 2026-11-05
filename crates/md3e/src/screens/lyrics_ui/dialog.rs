@@ -17,6 +17,8 @@ const OPEN: &str = "lyrics-dialog-open";
 const FROM: &str = "lyrics-dialog-from";
 const MAX_W: f32 = 720.0;
 const MAX_H: f32 = 640.0;
+/// A row of buttons under «Подсветка».
+const ROW: f32 = 40.0;
 
 /// Opens the dialog growing out of `from` (the control).
 pub(super) fn open(ctx: &Context, from: Rect) {
@@ -161,22 +163,23 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
     let choice = !super::shows(state).is_empty();
     let actions = if busy.is_some() { Vec::new() } else { super::actions(state) };
     let timing = busy.is_some() || choice || !actions.is_empty();
-    // The buttons from the primary one; beside the choice of how the text
-    // is seen while they fit, else on a row of their own under it. Measured
-    // on what is offered also while timing is made, so the text card keeps
-    // its height when a button is pressed.
-    let offered = super::from_primary(&super::actions(state));
-    let own_row = choice && !offered.is_empty() && {
-        let at: &Ui = ui;
-        let w = |label: &str| Button::new(label).size(Size::S).natural_width(at);
-        let shows: f32 = super::all_shows(state).iter().map(|a| w(a.1) + 2.0).sum();
-        let makes: f32 = offered.iter().map(|a| w(a.label) + 8.0).sum();
-        shows + 16.0 + makes > inner.width()
+    // Under «Подсветка», left-aligned, each on its row: how the text is
+    // seen, then the timing to make (one row more where it does not fit
+    // the width). Measured on what is offered also while timing is made,
+    // so the text card keeps its height when a button is pressed.
+    let offered = super::actions(state);
+    let make_rows = match offered.len() {
+        0 => 0,
+        n if n > 1 && super::make_width(ui, &offered) > inner.width() => n,
+        _ => 1,
     };
-    let (head_h, timing_h, foot_h) = (24.0, if own_row { 56.0 + 8.0 + 40.0 } else { 56.0 }, 40.0);
-    let below = (if timing { 16.0 + head_h + 4.0 + timing_h } else { 0.0 }) + 16.0 + foot_h;
+    let rows = usize::from(choice) + make_rows;
+    let (head_h, foot_h) = (24.0, 40.0);
+    // Room for the progress (48) with one row; rows of buttons 12 apart.
+    let timing_h = if rows <= 1 { 56.0 } else { rows as f32 * ROW + (rows - 1) as f32 * 12.0 };
+    // 24 of air above the footer under «Подсветка».
+    let below = (if timing { 16.0 + head_h + 8.0 + timing_h + 24.0 } else { 16.0 }) + foot_h;
     let text_h = (inner.bottom() - ui.cursor().top() - below).max(120.0);
-    let buttons = if busy.is_some() { Vec::new() } else { offered };
     super::text_card(ui, vec2(inner.width(), text_h), state, out);
     let save = l.savable && busy.is_none();
     // Keeping the text leads for timing the player made, or when there is
@@ -187,38 +190,20 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
         ui.allocate_ui_with_layout(vec2(inner.width(), head_h), Layout::left_to_right(Align::Center), |ui| {
             ui.label(TypeRole::TitleSmall.style().rich("Подсветка", s.on_surface));
         });
-        ui.add_space(4.0);
-        // The timing to make, from the right: the normal word timing is
-        // the primary action unless there is timing to keep; deep and
-        // lines beside it.
-        let make_buttons = |ui: &mut Ui, out: &mut Vec<Command>| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.add_space(8.0);
+        let top = ui.cursor().top();
+        if let Some(b) = &busy {
+            // The progress in the whole height (centred in it).
+            ui.allocate_ui_with_layout(vec2(inner.width(), timing_h), Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                for (i, a) in buttons.iter().enumerate() {
-                    let style = if i == 0 && !save_lead { Style::Filled } else { Style::Tonal };
-                    let b = Button::new(a.label).style(style).size(Size::S).id_salt(("lyrics-dialog-make", a.label));
-                    if ui.add(b).clicked() {
-                        if super::failed(state).is_some() {
-                            out.push(Command::ClearCraft);
-                        }
-                        super::make(state, *a, out);
-                    }
-                }
-            });
-        };
-        // The progress keeps the whole height (centred in it).
-        let row_h = if own_row && busy.is_none() { 56.0 } else { timing_h };
-        ui.allocate_ui_with_layout(vec2(inner.width(), row_h), Layout::left_to_right(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if let Some(b) = &busy {
                 super::progress(ui, b, (inner.width() - 160.0).min(360.0));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.add(Button::new("Отменить").style(Style::Tonal).size(Size::S).id_salt("lyrics-dialog-cancel")).clicked() {
                         out.push(Command::CancelCraft);
                     }
                 });
-                return;
-            }
+            });
+        } else {
             // How the text is seen, where it has timing to choose from.
             if choice {
                 let all = super::all_shows(state);
@@ -229,16 +214,25 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
                     super::show_as(state, all[i].0, out);
                 }
             }
-            if !own_row {
-                make_buttons(ui, out);
+            // The timing to make under it: the finest is the primary action
+            // unless there is timing to keep; its deep variant is in the
+            // split button's menu.
+            if !actions.is_empty() {
+                if choice {
+                    ui.add_space(12.0);
+                }
+                super::make_row(ui, state, "lyrics-dialog", !save_lead, make_rows > 1, out);
             }
-        });
-        if own_row && busy.is_none() {
-            ui.add_space(8.0);
-            ui.allocate_ui_with_layout(vec2(inner.width(), 40.0), Layout::left_to_right(Align::Center), |ui| make_buttons(ui, out));
         }
+        // The same height however it is filled.
+        let used = ui.cursor().top() - top;
+        if used < timing_h {
+            ui.add_space(timing_h - used);
+        }
+        ui.add_space(24.0);
+    } else {
+        ui.add_space(16.0);
     }
-    ui.add_space(16.0);
     ui.allocate_ui_with_layout(vec2(inner.width(), foot_h), Layout::left_to_right(Align::Center), |ui| {
         if let Some(e) = super::failed(state).filter(|_| busy.is_none()) {
             ui.label(TypeRole::BodyMedium.style().rich(e, s.error));

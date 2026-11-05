@@ -22,7 +22,8 @@ enum Row {
     Source(nikgob_view::LyricsSource),
     /// See the text so.
     Show(LyricsSync),
-    Make(super::Action),
+    /// Make timing so, deep or the normal way.
+    Make(LyricsSync, bool),
     /// The window or page where timing is made.
     Craft,
     /// Stop the timing being made.
@@ -116,8 +117,12 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
             m.item(MenuItem::new(super::save_label(state)), Row::Save);
         }
         let actions = if busy { Vec::new() } else { super::actions(state) };
+        // Each with its deep variant right after it (word timing).
         for a in &actions {
-            m.item(MenuItem::new(a.label), Row::Make(*a));
+            m.item(MenuItem::new(a.label), Row::Make(a.target, false));
+            if let Some(deep) = a.deep {
+                m.item(MenuItem::new(deep), Row::Make(a.target, true));
+            }
         }
         if busy {
             m.item(MenuItem::new("Отменить подсветку"), Row::Cancel);
@@ -164,8 +169,8 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
             super::show_as(state, *sync, out);
             false
         }
-        Some(Row::Make(a)) => {
-            super::make(state, *a, out);
+        Some(Row::Make(target, deep)) => {
+            super::make(state, *target, *deep, out);
             false
         }
         Some(Row::Craft) => {
