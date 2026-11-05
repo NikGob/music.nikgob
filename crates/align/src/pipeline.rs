@@ -12,7 +12,7 @@ use crate::ctc::{Emissions, Voice};
 use crate::engine::{Device, Model};
 use crate::fit::{Fit, Foreign, Tuning, fit_text_with};
 use crate::separate::{self, KIM_VOCAL_2};
-use crate::text::{Lang, Letters, Vocab};
+use crate::text::{Lang, Letters, Vocab, sung_by_sound};
 use crate::whisper::{self, Whisper};
 use crate::{Error, audio};
 
@@ -48,6 +48,25 @@ const ONSET_BACK: usize = 4;
 /// lead alone, in the middle; at [`SIDE_BACKING`] or over: backing vocals.
 const SIDE_LEAD: f32 = 0.15;
 const SIDE_BACKING: f32 = 0.6;
+
+/// Seconds on each side a voice's loudness is measured against for its
+/// prominence ([`Prepared::prominence_frames`]).
+const AROUND: f32 = 4.0;
+
+/// The voice's curves at an aligner's frames ([`Voice`]).
+struct Curves {
+    voiced: Option<Vec<bool>>,
+    onset: Vec<f32>,
+    backing: Vec<f32>,
+    vmr: Vec<f32>,
+    prominence: Vec<f32>,
+}
+
+impl Curves {
+    fn voice(&self) -> Option<Voice<'_>> {
+        self.voiced.as_deref().map(|v| Voice { voiced: v, onset: &self.onset, backing: &self.backing, vmr: &self.vmr, prominence: &self.prominence })
+    }
+}
 
 /// Where a job is, for the progress shown.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -148,8 +167,13 @@ impl Prepared {
         if self.separated {
             let peak = percentile(&self.energy, 0.95);
             let voiced: Vec<bool> = (0..self.energy.len()).map(|i| self.energy[i] > peak * SILENT && self.over_mix(i, tuning.mix_ratio)).collect();
-            // What leaks from the mix is no voice to hold a word on.
-            let level: Vec<f32> = (0..self.energy.len()).map(|i| if self.over_mix(i, tuning.mix_ratio) { self.energy[i] } else { 0.0 }).collect();
+            // What leaks from the mix, a backing voice or a reverb tail is
+            // no voice to hold a word on.
+            let prominence = if tuning.hold_prominence > 0.0 { self.prominence_tenths() } else { Vec::new() };
+            let lead = |i: usize| prominence.get(i).is_none_or(|p| *p >= tuning.hold_prominence);
+            let level: Vec<f32> = (0..self.energy.len())
+                .map(|i| if self.over_mix(i, tuning.mix_ratio) && self.over_mix(i, tuning.hold_vmr) && lead(i) { self.energy[i] } else { 0.0 })
+                .collect();
             let step = ENERGY_HOP as f32 / RATE as f32;
             let v = VoiceEnds { voiced: &voiced, step, tail: crate::fit::TAIL, level: Some(&level), tuning: *tuning };
             crate::fit::end_with_voice(lines, v, bounds);
@@ -229,6 +253,67 @@ impl Prepared {
             })
             .collect();
         (0..rise.len()).map(|t| rise[t.saturating_sub(ONSET_BACK)..=t].iter().copied().fold(0.0, f32::max)).collect()
+    }
+
+    /// The separated voice against the mix at each of `em`'s frames
+    /// (RMS over RMS, 0..1): a synth or a guitar leaking into the voice on
+    /// a drop is a small share of the mix. Empty when unknown.
+    pub fn vmr_frames(&self, em: &Emissions) -> Vec<f32> {
+        if !self.separated || self.mix.is_empty() {
+            return Vec::new();
+        }
+        let step = ENERGY_HOP as f32 / RATE as f32;
+        (0..em.frames())
+            .map(|t| {
+                let i = (em.secs(t) / step) as usize;
+                let (e, m) = (self.energy.get(i).copied().unwrap_or(0.0), self.mix.get(i).copied().unwrap_or(0.0));
+                (e / (m + 1e-4)).min(1.0)
+            })
+            .collect()
+    }
+
+    /// How much the voice at each of `em`'s frames is the lead (0..1):
+    /// its share in the middle (RMS of the middle over the middle and the
+    /// sides) times its loudness against the loud level of the [`AROUND`]
+    /// seconds on each side. The lead ~0.8–1, wide backing vocals, doubles
+    /// and ad-libs ~0.2–0.5. Empty when unknown.
+    pub fn prominence_frames(&self, em: &Emissions) -> Vec<f32> {
+        let tenths = self.prominence_tenths();
+        if tenths.is_empty() {
+            return tenths;
+        }
+        let step = ENERGY_HOP as f32 / RATE as f32;
+        (0..em.frames()).map(|t| tenths.get((em.secs(t) / step) as usize).copied().unwrap_or(0.0)).collect()
+    }
+
+    /// [`Self::prominence_frames`] every tenth of a second.
+    fn prominence_tenths(&self) -> Vec<f32> {
+        if !self.separated || self.side.is_empty() || self.energy.is_empty() {
+            return Vec::new();
+        }
+        let n = self.energy.len();
+        let around = (AROUND * 10.0) as usize;
+        // The loud level around each tenth (a high percentile, not the
+        // peak: one shout does not make the whole window quiet).
+        (0..n)
+            .map(|i| {
+                let e = self.energy[i];
+                let s = self.side.get(i).copied().unwrap_or(0.0);
+                let centre = e / (e + s + 1e-6);
+                let mut w: Vec<f32> = self.energy[i.saturating_sub(around)..(i + around + 1).min(n)].to_vec();
+                w.sort_by(f32::total_cmp);
+                let loud = w[((w.len() - 1) as f32 * 0.9) as usize];
+                centre * (e / (loud + 1e-6)).min(1.0)
+            })
+            .collect()
+    }
+
+    /// What the timing pass knows of the voice under `em`'s frames, for
+    /// [`Voice`] (all empty on the mix).
+    fn curves(&self, em: &Emissions, tuning: &Tuning) -> Curves {
+        let voiced = self.voiced_frames(em, tuning.mix_ratio);
+        let onset = voiced.as_ref().map(|v| self.onset_frames(em, v)).unwrap_or_default();
+        Curves { backing: self.backing_frames(em), vmr: self.vmr_frames(em), prominence: self.prominence_frames(em), onset, voiced }
     }
 
     /// Which tenths of a second have the voice (all of them for a mix).
@@ -332,11 +417,21 @@ mod tests {
     #[test]
     fn latin_lines_of_a_russian_text_stay_with_it_by_sound() {
         let ru = text(&["Я пойду прогуляюсь", "Miley Cyrus", "Miley Cyrus", "Где мои деньги", "Дома закончился крэк", "Мы рисовали в подъезде то ли пентаграмму"]);
-        assert_eq!(Route::of_with(&ru, false).unwrap().lines[1], ModelId::AlignerEn);
-        let by_sound = Route::of_with(&ru, true).unwrap();
+        assert_eq!(Route::of_with(&ru, false, false, true).unwrap().lines[1], ModelId::AlignerEn);
+        let by_sound = Route::of_with(&ru, true, false, true).unwrap();
         assert_eq!(by_sound.models(), [ModelId::AlignerRu]);
         let both = text(&["Я иду домой", "Baby, I love you so much tonight", "Hold me close and never let me go"]);
-        assert_eq!(Route::of_with(&both, true).unwrap().lines[1], ModelId::AlignerEn);
+        assert_eq!(Route::of_with(&both, true, false, true).unwrap().lines[1], ModelId::AlignerEn);
+        // Lines of two Latin words or more by sound, a lone «Swag» by the
+        // English aligner.
+        let lines = text(&["Я пойду прогуляюсь", "Miley Cyrus", "Swag", "Где мои деньги", "Дома закончился крэк", "Мы рисовали в подъезде то ли пентаграмму"]);
+        let r = Route::of_with(&lines, false, true, true).unwrap();
+        assert_eq!(r.lines[1..3], [ModelId::AlignerRu, ModelId::AlignerEn]);
+        // Without line times a hook sung over and over stays with the
+        // English aligner, a tag sung once goes by sound.
+        let hook = text(&["Я пойду прогуляюсь", "Miley Cyrus", "Miley Cyrus", "Мяу, nyan.mp3", "Где мои деньги", "Дома закончился крэк", "Мы рисовали в подъезде"]);
+        let r = Route::of_with(&hook, false, true, false).unwrap();
+        assert_eq!(r.lines[1..4], [ModelId::AlignerEn, ModelId::AlignerEn, ModelId::AlignerRu]);
     }
 
     /// The voice coming in sharply is an onset a few frames on; backing
@@ -421,19 +516,36 @@ pub struct Route {
 impl Route {
     /// `None` when no aligner spells the text's language.
     pub fn of(lines: &[LyricLine]) -> Option<Self> {
-        Self::of_with(lines, Tuning::default().by_sound)
+        let t = Tuning::default();
+        Self::of_with(lines, t.by_sound, t.sound_lines, true)
     }
 
     /// [`Self::of`]; `by_sound`: the Latin lines of a mostly Russian text
-    /// stay with the Russian aligner, spelled by sound ([`Tuning::by_sound`]).
-    pub fn of_with(lines: &[LyricLine], by_sound: bool) -> Option<Self> {
+    /// stay with the Russian aligner, spelled by sound ([`Tuning::by_sound`]);
+    /// `sound_lines`: those of two Latin words or more ([`sung_by_sound`],
+    /// [`Tuning::sound_lines`]), with `repeated` also those sung again in
+    /// the next or the line before (a hook: without line times to hold
+    /// each repeat, the English aligner keeps them better).
+    pub fn of_with(lines: &[LyricLine], by_sound: bool, sound_lines: bool, repeated: bool) -> Option<Self> {
         let text: String = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
         let lang = Lang::of(&text);
         let main = aligner_for(lang)?;
-        let keep = by_sound && lang == Lang::Russian && latin_share(&text) < BILINGUAL;
+        let keep = (by_sound || sound_lines) && lang == Lang::Russian && latin_share(&text) < BILINGUAL;
+        let key = |l: &LyricLine| -> String { l.text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect() };
+        let again = |i: usize| (i > 0 && key(&lines[i - 1]) == key(&lines[i])) || lines.get(i + 1).is_some_and(|n| key(n) == key(&lines[i]));
         let lines = Lang::of_lines(lang, lines.iter().map(|l| l.text.as_str()))
             .into_iter()
-            .map(|l| if keep && l == Lang::English { main } else { aligner_for(l).unwrap_or(main) })
+            .zip(lines)
+            .enumerate()
+            .map(|(i, (l, line))| {
+                if !by_sound && !repeated && again(i) {
+                    return aligner_for(l).unwrap_or(main);
+                }
+                // A Latin line with a Cyrillic word («С Miley Cyrus») reads as
+                // another language, not English: by sound all the same.
+                let latin = l == Lang::English || (l == Lang::Other && sung_by_sound(&line.text));
+                if keep && latin && (by_sound || sung_by_sound(&line.text)) { main } else { aligner_for(l).unwrap_or(main) }
+            })
             .collect();
         Some(Self { main, lines })
     }
@@ -614,6 +726,7 @@ impl Aligner {
         if let Some(v) = self.vocabs.get(&id) {
             let mut v = v.clone();
             v.by_sound = self.tuning.by_sound;
+            v.said = self.tuning.said;
             return Ok(v);
         }
         if !self.catalog.ready(id) {
@@ -624,6 +737,7 @@ impl Aligner {
         self.vocabs.insert(id, vocab.clone());
         let mut vocab = vocab;
         vocab.by_sound = self.tuning.by_sound;
+        vocab.said = self.tuning.said;
         Ok(vocab)
     }
 
@@ -663,7 +777,11 @@ impl Aligner {
     /// Each line goes to the aligner of its language ([`Route`]) when that
     /// one is there; the text's own is needed.
     pub fn fit(&mut self, prep: &mut Prepared, lines: &[LyricLine], timed: bool, progress: &mut dyn FnMut(Stage) -> bool) -> Result<Option<Fit>, Error> {
-        let Some(route) = Route::of_with(lines, self.tuning.by_sound) else { return Ok(None) };
+        // A hook of Latin lines sung over and over by sound only where the
+        // line times hold each repeat in its place (without them «Miley
+        // Cyrus» ×8 slips a repeat).
+        let tuning = self.tuning;
+        let Some(route) = Route::of_with(lines, tuning.by_sound, tuning.sound_lines, timed || !tuning.sound_plain) else { return Ok(None) };
         let main = self.usable(route.main);
         let mut others: Vec<(ModelId, Vec<usize>)> = Vec::new();
         for (i, id) in route.lines.iter().enumerate() {
@@ -691,11 +809,8 @@ impl Aligner {
         let foreign: Vec<Foreign<'_>> =
             others.iter().zip(&vocabs).map(|((id, ls), v)| Foreign { em: &prep.heard[id], vocab: v, lines: ls }).collect();
         let em = &prep.heard[&main];
-        let tuning = self.tuning;
-        let voiced = prep.voiced_frames(em, tuning.mix_ratio);
-        let onset = voiced.as_ref().map(|v| prep.onset_frames(em, v)).unwrap_or_default();
-        let backing = prep.backing_frames(em);
-        let voice = voiced.as_deref().map(|v| Voice { voiced: v, onset: &onset, backing: &backing });
+        let curves = prep.curves(em, &tuning);
+        let voice = curves.voice();
         Ok(fit_text_with(em, &vocab, &foreign, lines, timed, voice, &tuning).map(|mut f| {
             let bounds = f.ends.clone();
             prep.end_with_voice(&mut f.lines, main, &bounds, &tuning);
@@ -722,10 +837,8 @@ impl Aligner {
         let vocab = self.vocab(id)?;
         let em = &prep.heard[&id];
         let tuning = self.tuning;
-        let voiced = prep.voiced_frames(em, tuning.mix_ratio);
-        let onset = voiced.as_ref().map(|v| prep.onset_frames(em, v)).unwrap_or_default();
-        let backing = prep.backing_frames(em);
-        let voice = voiced.as_deref().map(|v| Voice { voiced: v, onset: &onset, backing: &backing });
+        let curves = prep.curves(em, &tuning);
+        let voice = curves.voice();
         Ok(fit_text_with(em, &vocab, &[], lines, timed, voice, &tuning).map(|mut f| {
             let bounds = f.ends.clone();
             prep.end_with_voice(&mut f.lines, id, &bounds, &tuning);

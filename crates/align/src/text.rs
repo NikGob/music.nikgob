@@ -233,6 +233,53 @@ pub fn is_hum(piece: &str) -> bool {
     letters.len() >= 2 && "аеёиоуыэaeiou".contains(first) && letters.iter().all(|c| *c == first)
 }
 
+/// A line of a Russian text the Russian aligner hears with its Latin
+/// words spelled by sound ([`crate::fit::Tuning::sound_lines`]): written
+/// mostly in Latin letters, two Latin words or more («Miley Cyrus»,
+/// «Джинсовка Levi's, йоу! Totally Spies, йоу!»). A lone «Swag» or
+/// «Sheesh» is heard better by the English aligner in its window.
+pub fn sung_by_sound(line: &str) -> bool {
+    let latin = line
+        .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '’'))
+        .filter(|w| w.chars().any(|c| c.is_ascii_alphabetic()) && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '\'' || c == '’'))
+        .count();
+    Script::of(line) == Script::Latin && latin >= 2
+}
+
+/// Whether a word's last sound can be held (a sung note goes on): a vowel
+/// or a sonorant («м», «н», «л», «р», «й»; «n», «m», «l», «r», «ng»), and
+/// a hiss («с», «ш», «sh»); not a stop or an affricate («п», «т», «к»,
+/// «б», «д», «г», «ц», «ч»; «p», «t», «k», «b», «d», «g», «ch», «x»).
+/// English spelling: a silent final «e» and a final «gh» read through,
+/// «-ng» is held. A word without letters (a kana, a number) can.
+pub fn can_hold(word: &str) -> bool {
+    let w: Vec<char> = word.chars().filter(|c| c.is_alphabetic()).flat_map(char::to_lowercase).collect();
+    let Some(&last) = w.last() else { return true };
+    if is_cjk(last) {
+        return true;
+    }
+    let n = w.len();
+    let at = |i: usize| w.get(i).copied();
+    match last {
+        'ь' | 'ъ' => return n < 2 || can_hold(&w[..n - 1].iter().collect::<String>()),
+        'п' | 'т' | 'к' | 'б' | 'д' | 'г' | 'ц' | 'ч' => return false,
+        _ if !last.is_ascii() => return true,
+        _ => {}
+    }
+    // English.
+    if last == 'e' && n > 2 && !"aeiouy".contains(w[n - 2]) && w[..n - 2].iter().any(|c| "aeiouy".contains(*c)) {
+        // A silent «e»: the consonant before it.
+        return can_hold(&w[..n - 1].iter().collect::<String>()) || at(n - 2) == Some('c');
+    }
+    if n >= 2 && w[n - 2..] == ['g', 'h'] {
+        return true;
+    }
+    if n >= 2 && w[n - 2..] == ['n', 'g'] {
+        return true;
+    }
+    !matches!(last, 'p' | 't' | 'k' | 'b' | 'd' | 'g' | 'c' | 'x' | 'q') && !(n >= 2 && w[n - 2..] == ['c', 'h'])
+}
+
 /// Cuts a line into the pieces timed one by one; they keep their trailing
 /// whitespace, so joined they give `line` back.
 pub fn pieces(line: &str) -> Vec<String> {
@@ -286,6 +333,11 @@ pub struct Vocab {
     /// ([`english_as_russian`]) when it has Cyrillic letters and no Latin
     /// ones; off, they are wildcards.
     pub by_sound: bool,
+    /// Numbers are spelled as said («25» → «двадцать пять», «twenty
+    /// five»), and an abbreviation in capitals without vowels by its
+    /// letters' names («ТГК» → «тэгэка»), instead of wildcards and
+    /// letters run together ([`said`]).
+    pub said: bool,
 }
 
 impl Vocab {
@@ -310,11 +362,11 @@ impl Vocab {
                 Some((if upper { c.to_lowercase().next().unwrap_or(c) } else { c }, *v))
             })
             .collect();
-        Ok(Self { letters, ids, sep, blank, by_sound: false })
+        Ok(Self { letters, ids, sep, blank, by_sound: false, said: false })
     }
 
     /// The model spells Russian and has no Latin letters.
-    fn cyrillic_only(&self) -> bool {
+    pub fn cyrillic_only(&self) -> bool {
         self.ids.contains_key(&'а') && !self.ids.contains_key(&'a')
     }
 
@@ -339,6 +391,15 @@ impl Vocab {
     /// The tokens of one piece (empty for punctuation).
     pub fn tokens(&self, piece: &str) -> Vec<i32> {
         let mut out = Vec::new();
+        let said_piece;
+        // Only for a model of Russian or Latin letters (a Japanese one
+        // keeps its wildcards).
+        let piece = if self.said && self.letters == Letters::Native && (self.cyrillic_only() || self.ids.contains_key(&'a')) {
+            said_piece = said(piece.trim(), self.cyrillic_only());
+            said_piece.as_str()
+        } else {
+            piece
+        };
         let mut lower: String = piece.trim().chars().flat_map(char::to_lowercase).collect();
         if self.by_sound && self.letters == Letters::Native && self.cyrillic_only() && lower.chars().any(|c| c.is_ascii_alphabetic()) {
             lower = latin_by_sound(&lower);
@@ -376,11 +437,19 @@ impl Vocab {
 }
 
 /// Every run of Latin letters in `text` read the Russian way
-/// ([`english_as_russian`]); the rest stays.
-fn latin_by_sound(text: &str) -> String {
+/// ([`english_as_russian`]), and the digits of a word with Latin letters
+/// («mp3») said in Russian; the rest stays.
+pub fn latin_by_sound(text: &str) -> String {
     let mut out = String::with_capacity(text.len() * 2);
     let mut word = String::new();
     let chars: Vec<char> = text.chars().collect();
+    let latin_near = |i: usize| {
+        let mut j = i;
+        while j > 0 && chars[j - 1].is_ascii_alphanumeric() {
+            j -= 1;
+        }
+        chars[j..].iter().take_while(|c| c.is_ascii_alphanumeric()).any(char::is_ascii_alphabetic)
+    };
     for (i, &c) in chars.iter().enumerate() {
         // An apostrophe inside a Latin word («Levi's», «don't») is part of it.
         let inside = matches!(c, '\'' | '’') && !word.is_empty() && chars.get(i + 1).is_some_and(char::is_ascii_alphabetic);
@@ -391,12 +460,163 @@ fn latin_by_sound(text: &str) -> String {
         if !word.is_empty() {
             out.push_str(&english_as_russian(&std::mem::take(&mut word)));
         }
-        out.push(c);
+        match c.to_digit(10) {
+            Some(d) if latin_near(i) => out.push_str(DIGITS[d as usize]),
+            _ => out.push(c),
+        }
     }
     if !word.is_empty() {
         out.push_str(&english_as_russian(&word));
     }
     out
+}
+
+/// A piece as it is said: its numbers in words (Russian for a Russian
+/// model, `ru`, else English) and an abbreviation in capitals without
+/// vowels («ТГК», «МВД») by its letters' names. Punctuation stays.
+pub fn said(piece: &str, ru: bool) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = piece.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_digit() {
+            let j = (i..chars.len()).find(|k| !chars[*k].is_ascii_digit()).unwrap_or(chars.len());
+            let digits: String = chars[i..j].iter().collect();
+            // A number glued to Latin letters («mp3») is read by sound.
+            let glued = (i > 0 && chars[i - 1].is_ascii_alphabetic()) || chars.get(j).is_some_and(char::is_ascii_alphabetic);
+            match digits.parse::<u32>().ok().filter(|n| *n < 1_000_000 && !glued) {
+                Some(n) => {
+                    if !out.is_empty() && !out.ends_with(' ') {
+                        out.push(' ');
+                    }
+                    out.push_str(&if ru { number_ru(n) } else { number_en(n) });
+                }
+                None => out.push_str(&digits),
+            }
+            i = j;
+            continue;
+        }
+        if chars[i].is_alphabetic() {
+            let j = (i..chars.len()).find(|k| !chars[*k].is_alphabetic()).unwrap_or(chars.len());
+            let word: String = chars[i..j].iter().collect();
+            let cyr = word.chars().all(|c| matches!(c, 'А'..='Я' | 'Ё'));
+            let vowels = word.chars().any(|c| "АЕЁИОУЫЭЮЯ".contains(c));
+            if ru && cyr && (2..=5).contains(&word.chars().count()) && !vowels {
+                out.extend(word.chars().map(cyrillic_name));
+            } else {
+                out.push_str(&word);
+            }
+            i = j;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// A Russian consonant's name («Т» → «тэ», «К» → «ка»).
+fn cyrillic_name(c: char) -> &'static str {
+    match c {
+        'Б' => "бэ", 'В' => "вэ", 'Г' => "гэ", 'Д' => "дэ", 'Ж' => "жэ", 'З' => "зэ", 'Й' => "й", 'К' => "ка", 'Л' => "эль",
+        'М' => "эм", 'Н' => "эн", 'П' => "пэ", 'Р' => "эр", 'С' => "эс", 'Т' => "тэ", 'Ф' => "эф", 'Х' => "ха", 'Ц' => "цэ",
+        'Ч' => "чэ", 'Ш' => "ша", 'Щ' => "ща", 'Ъ' | 'Ь' => "",
+        _ => "",
+    }
+}
+
+/// A number in Russian words (nominative: «двадцать пять», «сто один»).
+pub fn number_ru(n: u32) -> String {
+    const ONES: [&str; 20] = [
+        "ноль", "один", "два", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять", "десять", "одиннадцать", "двенадцать",
+        "тринадцать", "четырнадцать", "пятнадцать", "шестнадцать", "семнадцать", "восемнадцать", "девятнадцать",
+    ];
+    const TENS: [&str; 10] = ["", "", "двадцать", "тридцать", "сорок", "пятьдесят", "шестьдесят", "семьдесят", "восемьдесят", "девяносто"];
+    const HUNDREDS: [&str; 10] = ["", "сто", "двести", "триста", "четыреста", "пятьсот", "шестьсот", "семьсот", "восемьсот", "девятьсот"];
+    fn under_1000(n: u32, out: &mut Vec<String>, feminine: bool) {
+        if n >= 100 {
+            out.push(HUNDREDS[(n / 100) as usize].to_owned());
+        }
+        let r = n % 100;
+        if r >= 20 {
+            out.push(TENS[(r / 10) as usize].to_owned());
+            if r % 10 > 0 {
+                out.push(unit(r % 10, feminine));
+            }
+        } else if r > 0 {
+            out.push(unit(r, feminine));
+        }
+    }
+    fn unit(n: u32, feminine: bool) -> String {
+        match (n, feminine) {
+            (1, true) => "одна".into(),
+            (2, true) => "две".into(),
+            _ => ONES[n as usize].into(),
+        }
+    }
+    if n == 0 {
+        return ONES[0].into();
+    }
+    let mut out = Vec::new();
+    let (th, rest) = (n / 1000, n % 1000);
+    if th > 0 {
+        under_1000(th, &mut out, true);
+        let last = th % 100;
+        out.push(match (last % 10, (11..=14).contains(&last)) {
+            (1, false) => "тысяча",
+            (2..=4, false) => "тысячи",
+            _ => "тысяч",
+        }.into());
+    }
+    under_1000(rest, &mut out, false);
+    out.join(" ")
+}
+
+/// A number in English words («twenty five»).
+pub fn number_en(n: u32) -> String {
+    const ONES: [&str; 20] = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+        "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+    ];
+    const TENS: [&str; 10] = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+    fn under_1000(n: u32, out: &mut Vec<String>) {
+        if n >= 100 {
+            out.push(ONES[(n / 100) as usize].to_owned());
+            out.push("hundred".into());
+        }
+        let r = n % 100;
+        if r >= 20 {
+            out.push(TENS[(r / 10) as usize].to_owned());
+            if r % 10 > 0 {
+                out.push(ONES[(r % 10) as usize].to_owned());
+            }
+        } else if r > 0 {
+            out.push(ONES[r as usize].to_owned());
+        }
+    }
+    if n == 0 {
+        return ONES[0].into();
+    }
+    let mut out = Vec::new();
+    if n >= 1000 {
+        under_1000(n / 1000, &mut out);
+        out.push("thousand".into());
+    }
+    under_1000(n % 1000, &mut out);
+    out.join(" ")
+}
+
+/// Digits as a Russian listener says them.
+const DIGITS: [&str; 10] = ["ноль", "один", "два", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять"];
+
+/// English letter names, for a short word without vowels («mp», «dj»).
+fn letter_name(c: u8) -> &'static str {
+    match c {
+        b'b' => "би", b'c' => "си", b'd' => "ди", b'f' => "эф", b'g' => "джи", b'h' => "эйч", b'j' => "джей", b'k' => "кей",
+        b'l' => "эл", b'm' => "эм", b'n' => "эн", b'p' => "пи", b'q' => "кью", b'r' => "ар", b's' => "эс", b't' => "ти",
+        b'v' => "ви", b'w' => "дабл ю", b'x' => "экс", b'z' => "зед",
+        _ => "",
+    }
 }
 
 /// Common words the rules below read wrong.
@@ -427,6 +647,10 @@ pub fn english_as_russian(word: &str) -> String {
     let w: Vec<u8> = w.bytes().filter(|b| b.is_ascii_alphabetic()).collect();
     if w.is_empty() {
         return String::new();
+    }
+    // A short word without vowels is said letter by letter («mp», «dj»).
+    if w.len() <= 4 && !w.iter().any(|c| b"aeiouy".contains(c)) {
+        return w.iter().map(|c| letter_name(*c)).collect();
     }
     let n = w.len();
     let vowel = |i: usize| w.get(i).is_some_and(|c| b"aeiou".contains(c) || (*c == b'y' && i > 0 && !w.get(i + 1).is_some_and(|n| b"aeiou".contains(n))));
@@ -504,8 +728,9 @@ pub fn english_as_russian(word: &str) -> String {
             i += 2;
             continue;
         }
-        if c == b'y' && i == 0 && w.get(1).is_some_and(|n| b"aeiou".contains(n)) {
-            let r = match w[1] {
+        // «y» before a vowel softens it («yeah», «nyan»).
+        if c == b'y' && w.get(i + 1).is_some_and(|n| b"aeiou".contains(n)) {
+            let r = match w[i + 1] {
                 b'a' => "я",
                 b'o' => "йо",
                 b'u' => "ю",
@@ -780,6 +1005,9 @@ mod tests {
         }
         assert_eq!(latin_by_sound("с miley cyrus, йоу!"), "с майли сайрус, йоу!");
         assert_eq!(latin_by_sound("speed'ом"), "спид'ом");
+        // Letters said by name, digits in Russian, a number alone stays.
+        assert_eq!(latin_by_sound("мяу, nyan.mp3"), "мяу, нян.эмпитри");
+        assert_eq!(latin_by_sound("номер 777"), "номер 777");
     }
 
     /// A Russian model spells a Latin word by sound instead of wildcards.
@@ -797,6 +1025,43 @@ mod tests {
         assert!(en.similar().is_empty());
         let vowels = Vocab::from_json(r#"{"<pad>":0,"|":4,"а":5,"о":6,"и":7,"е":8}"#, Letters::Native).unwrap();
         assert_eq!(vowels.similar(), [(7, 8), (5, 6)]);
+    }
+
+    /// Numbers and abbreviations as they are said.
+    #[test]
+    fn numbers_and_abbreviations_are_spelled_as_said() {
+        assert_eq!(said("25", true), "двадцать пять");
+        assert_eq!(said("ТГК", true), "тэгэка");
+        assert_eq!(said("777", true), "семьсот семьдесят семь");
+        assert_eq!(said("2001", true), "две тысячи один");
+        assert_eq!(said("21", false), "twenty one");
+        assert_eq!(said("mp3", true), "mp3");
+        assert_eq!(said("СССР", true), "эсэсэсэр");
+        // Words with vowels stay: «МАМА», «Я».
+        assert_eq!(said("МАМА", true), "МАМА");
+        let mut ru = Vocab::from_json(r#"{"<pad>":0,"|":4,"д":5,"в":6,"а":7,"ц":8,"т":9,"ь":10,"п":11,"я":12,"э":13,"г":14,"к":15}"#, Letters::Native).unwrap();
+        assert!(ru.tokens("25").iter().all(|t| *t == STAR));
+        ru.said = true;
+        assert_eq!(ru.tokens("25").len(), "двадцатьпять".chars().count());
+        assert!(!ru.tokens("ТГК").contains(&STAR));
+    }
+
+    #[test]
+    fn latin_lines_sung_by_sound() {
+        assert!(sung_by_sound("Miley Cyrus") && sung_by_sound("С Miley Cyrus, Miley Cyrus") && sung_by_sound("Джинсовка Levi's, йоу! Totally Spies, йоу!"));
+        assert!(sung_by_sound("Мяу, nyan.mp3") && sung_by_sound("Nyan.pop"));
+        assert!(!sung_by_sound("Swag") && !sung_by_sound("Я будто тролль warlord"));
+    }
+
+    #[test]
+    fn which_last_sounds_can_be_held() {
+        for w in ["мама", "сон", "мир,", "твой", "космоцветок-", "нон-стоп", "Miley", "Cyrus", "time", "song", "high", "dance", "now", "love", "кровь", "ночь", "家"] {
+            let held = !matches!(w, "космоцветок-" | "нон-стоп" | "ночь");
+            assert_eq!(can_hold(w), held, "{w}");
+        }
+        for w in ["ток", "стоп!", "back", "made", "page", "night", "bad", "watch", "box", "ад", "дуб"] {
+            assert!(!can_hold(w), "{w}");
+        }
     }
 
     #[test]

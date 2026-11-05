@@ -17,7 +17,7 @@ use nikgob_core::lyrics::{LyricLine, LyricWord};
 
 use crate::catalog::ModelId;
 use crate::ctc::{Costs, Emissions, Voice, force_align};
-use crate::text::{Vocab, is_hum, pieces};
+use crate::text::{Vocab, can_hold, is_hum, latin_by_sound, pieces, sung_by_sound};
 
 /// A piece the model hears this clearly is there.
 const HEARD: f32 = 0.3;
@@ -92,13 +92,69 @@ pub struct Tuning {
     /// Lines heard by another aligner (a run of English lines) keep their
     /// own line bands when the text's times sit on the voice.
     pub foreign_bands: bool,
+    /// Lines of a Russian text written mostly in Latin letters («Miley
+    /// Cyrus», «Джинсовка Levi's, йоу! Totally Spies, йоу!») stay with the
+    /// Russian aligner, their Latin words spelled by sound; Latin words of
+    /// a mostly Cyrillic line («Я будто тролль warlord») stay wildcards
+    /// ([`Self::by_sound`] spells those too).
+    pub sound_lines: bool,
+    /// A line whose end comes from the next line's start more than
+    /// [`FAR_GAP`] after its own start (an instrumental before the next
+    /// line) is held at most until its first word plus how long its words
+    /// take to sing ([`speech_secs`]) and [`FAR_SLACK`].
+    pub far_cap: bool,
+    /// For holding a word, the voice counts only where it is at least
+    /// this share of the mix (0: off)
+    pub hold_vmr: f32,
+    /// … and at least this prominent (the lead, not a backing voice or a
+    /// reverb; 0: off).
+    pub hold_prominence: f32,
+    /// A hum («м», «угу») ends where its voice does instead of lasting
+    /// until the next word.
+    pub hum_ends: bool,
+    /// Lines heard by another aligner are aligned again with the timing
+    /// pass's costs (a blank inside a word or a pause inside a line where
+    /// there is no voice), not by a plain forced alignment: «Мяу,
+    /// nyan.mp3» no longer starts 15 s before the tag is said.
+    pub foreign_costs: bool,
+    /// Numbers and abbreviations in capitals are spelled as they are said
+    /// ([`crate::text::said`]).
+    pub said: bool,
+    /// Without line times, [`Self::sound_lines`] leaves out lines sung
+    /// again in the next or the line before (a hook: the English aligner
+    /// keeps its repeats better there).
+    pub sound_plain: bool,
+}
+
+/// See [`Tuning::far_cap`].
+pub const FAR_GAP: f32 = 5.0;
+pub const FAR_SLACK: f32 = 2.5;
+/// A sung syllable takes about this long (seconds), for [`speech_secs`].
+const SYLLABLE: f32 = 0.3;
+
+/// About how long a line's words take to sing: its vowels (syllables).
+pub fn speech_secs(text: &str) -> f32 {
+    text.chars().flat_map(char::to_lowercase).filter(|c| "аеёиоуыэюяaeiouy".contains(*c)).count().max(1) as f32 * SYLLABLE
 }
 
 impl Tuning {
     /// The timing pass of `align-4`.
     pub const fn align4() -> Self {
         Self {
-            costs: Costs { in_word: 0.0, in_word_silent: 0.0, line_pause: 0.0, onset: 0.0, vowels: 0.0, lead: 0.0 },
+            costs: Costs {
+                in_word: 0.0,
+                in_word_silent: 0.0,
+                line_pause: 0.0,
+                onset: 0.0,
+                vowels: 0.0,
+                lead: 0.0,
+                quiet_vmr: 0.0,
+                gap_backing: 0.0,
+                gap_lead: 0.0,
+                pause_after: 0,
+                fill_base: 0.0,
+                fill_prominence: 0.0,
+            },
             by_sound: false,
             even: 0.0,
             squeezed: false,
@@ -107,19 +163,46 @@ impl Tuning {
             mix_ratio: 0.0,
             windows: false,
             foreign_bands: false,
+            sound_lines: false,
+            far_cap: false,
+            hold_vmr: 0.0,
+            hold_prominence: 0.0,
+            hum_ends: false,
+            foreign_costs: false,
+            sound_plain: false,
+            said: false,
         }
     }
 
 }
 
-/// `align-5`: a blank inside a word costs where there is no voice
-/// (docs/lyrics-align.md, «align-5»). Latin by sound is off: better on
-/// «Ханнамонтана», a line worse on «Мой топор»; the rest measured no
-/// better.
+/// `align-6` (docs/lyrics-align.md, «align-6»): `align-5`'s blank inside a
+/// word where there is no voice, and
+/// * Latin lines of a Russian text by sound ([`Tuning::sound_lines`]; a hook
+///   sung over and over only with line times, [`Tuning::sound_plain`]);
+/// * a pause without voice longer than 8 frames (0.16 s) between two words
+///   of a line costs 0.2 a frame (the pause goes between lines);
+/// * a word that cannot be held is held at most 0.15 s ([`Tuning::stop_hold`]);
+/// * hums end with their voice ([`Tuning::hum_ends`]);
+/// * lines heard by another aligner keep these costs
+///   ([`Tuning::foreign_costs`]);
+/// * numbers and abbreviations in capitals are spelled as said
+///   ([`Tuning::said`]: «25 ТГК» → «двадцать пять тэгэка»).
+///
+/// Each was measured on the bench alone and together; none is worse on any
+/// song or case of it. The rest of the knobs measured worse or no better.
 impl Default for Tuning {
     fn default() -> Self {
         let mut t = Self::align4();
         t.costs.in_word_silent = 0.3;
+        t.costs.line_pause = 0.2;
+        t.costs.pause_after = 8;
+        t.sound_lines = true;
+        t.sound_plain = true;
+        t.stop_hold = 0.15;
+        t.hum_ends = true;
+        t.foreign_costs = true;
+        t.said = true;
         t
     }
 }
@@ -179,6 +262,9 @@ impl Fit {
 struct Placed {
     line: usize,
     text: String,
+    /// What the aligner spells for it: the text, or a Latin line of a
+    /// Russian text by sound ([`Tuning::sound_lines`]).
+    say: String,
     span: Option<(f32, f32)>,
     peak: f32,
 }
@@ -220,16 +306,20 @@ pub fn fit_text_with(em: &Emissions, vocab: &Vocab, foreign: &[Foreign<'_>], lin
         if l.text.trim().is_empty() {
             continue;
         }
+        // A line of a Russian text written mostly in Latin letters, heard
+        // by the Russian aligner: its Latin words by sound.
+        let by_sound = tuning.sound_lines && !foreign.iter().any(|f| f.lines.contains(&li)) && vocab.cyrillic_only() && sung_by_sound(&l.text);
         let ps: Vec<String> = if l.words.is_empty() { pieces(&l.text) } else { l.words.iter().map(|w| w.text.clone()).collect() };
         for p in ps {
-            let toks = vocab.tokens(&p);
+            let say = if by_sound { latin_by_sound(&p.to_lowercase()) } else { p.clone() };
+            let toks = vocab.tokens(&say);
             let idx = placed.len();
             for t in &toks {
                 tokens.push(*t);
                 owner.push(Some(idx));
             }
             let ends_word = p.ends_with(char::is_whitespace);
-            placed.push(Placed { line: li, text: p, span: None, peak: 0.0 });
+            placed.push(Placed { line: li, text: p, say, span: None, peak: 0.0 });
             if let Some(sep) = vocab.sep
                 && ends_word
                 && !toks.is_empty()
@@ -327,7 +417,8 @@ pub fn fit_text_with(em: &Emissions, vocab: &Vocab, foreign: &[Foreign<'_>], lin
     }
     let total = em.secs(em.frames());
     for f in foreign {
-        place_foreign(f, lines, &mut placed, total, bands.as_deref().filter(|_| tuning.foreign_bands));
+        let costs = tuning.foreign_costs.then_some((tuning.costs, voice.map(|v| v.voiced).filter(|v| v.len() == f.em.frames())));
+        place_foreign(f, lines, &mut placed, total, bands.as_deref().filter(|_| tuning.foreign_bands), costs);
     }
     // No word outlasts its line as the source ends it (whole-song
     // alignment can drag a last word over the song's silent tail).
@@ -362,7 +453,7 @@ pub fn fit_text_with(em: &Emissions, vocab: &Vocab, foreign: &[Foreign<'_>], lin
             placed.extend(extra.into_iter().map(|p| Placed { line: at, ..p }));
         }
     }
-    let made = timed_lines(&all, &placed);
+    let made = timed_lines(&all, &placed, tuning.hum_ends);
     let own_ends = if steady { source_ends(lines, offset) } else { vec![None; lines.len()] };
     // The repeats where they are sung, after the line before them.
     let mut order: Vec<usize> = (0..lines.len()).collect();
@@ -379,6 +470,11 @@ pub fn fit_text_with(em: &Emissions, vocab: &Vocab, foreign: &[Foreign<'_>], lin
             let e = own_ends.get(i).copied().flatten()?;
             let last = made[i].words.last().map(|w| w.end.as_secs_f32() + LATE);
             let far = tuning.far_end > 0.0 && next_end.get(i) == Some(&true) && last.is_some_and(|b| e - b > tuning.far_end);
+            let first = made[i].words.first().map(|w| w.start.as_secs_f32() + LATE);
+            let e = match first {
+                Some(a) if tuning.far_cap && next_end.get(i) == Some(&true) && e - a > FAR_GAP => e.min(a + speech_secs(&made[i].text) + FAR_SLACK),
+                _ => e,
+            };
             (!far).then_some(e)
         })
         .collect();
@@ -446,11 +542,11 @@ fn place_on_path(
     // Each line's first token, for lines sung alike.
     let mut heads: Vec<(usize, usize)> = Vec::new();
     let mut line = None;
-    let spelled: Vec<bool> = placed.iter().map(|p| is_hum(&p.text) || !vocab.tokens(&p.text).is_empty()).collect();
+    let spelled: Vec<bool> = placed.iter().map(|p| is_hum(&p.text) || !vocab.tokens(&p.say).is_empty()).collect();
     for (i, p) in placed.iter().enumerate() {
         let band = bands.and_then(|b| b[p.line]);
         let hum = is_hum(&p.text);
-        let toks = vocab.tokens(&p.text);
+        let toks = vocab.tokens(&p.say);
         if !spelled[i] {
             continue;
         }
@@ -472,8 +568,11 @@ fn place_on_path(
         }
         line = Some(p.line);
         // The last piece of its line: the blank after it is between lines.
-        let ends_line = placed[i + 1..].iter().zip(&spelled[i + 1..]).find(|(_, s)| **s).is_none_or(|(n, _)| n.line != p.line);
-        let gap = if ends_line { Gap::Lines } else { Gap::Words };
+        let next = placed[i + 1..].iter().zip(&spelled[i + 1..]).find(|(_, s)| **s).map(|(n, _)| n);
+        let ends_line = next.is_none_or(|n| n.line != p.line);
+        // Hums are breaths apart («м, м, м, угу»): a pause next to one is
+        // no pause inside a line.
+        let gap = if ends_line || hum || next.is_some_and(|n| is_hum(&n.text)) { Gap::Lines } else { Gap::Words };
         let band = band.map(|b| (frame(b.from), frame(b.to)));
         let toks = if hum { vec![Tok::Hum] } else { toks.into_iter().map(Tok::Letter).collect() };
         let first = path.toks.len();
@@ -493,7 +592,7 @@ fn place_on_path(
             owner.push(None);
             let k = path.toks.len() - 1;
             path.gaps[k] = gap;
-            path.pauses[k] = !ends_line;
+            path.pauses[k] = gap == Gap::Words;
         }
     }
     if path.toks.is_empty() {
@@ -650,7 +749,7 @@ fn repeats(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &[Placed]
                 let mut path = Path::default();
                 let mut owner = Vec::new();
                 for (k, p) in mine.iter().enumerate() {
-                    let toks = if is_hum(&p.text) { vec![Tok::Hum] } else { vocab.tokens(&p.text).into_iter().map(Tok::Letter).collect() };
+                    let toks = if is_hum(&p.text) { vec![Tok::Hum] } else { vocab.tokens(&p.say).into_iter().map(Tok::Letter).collect() };
                     for t in toks {
                         path.push(t, None);
                         owner.push(Some(k));
@@ -669,7 +768,7 @@ fn repeats(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &[Placed]
                 }
                 path.push(Tok::Filler, None);
                 owner.push(None);
-                let v = crate::ctc::Voice { voiced: &voiced[at..(at + slice.frames()).min(voiced.len())], onset: &[], backing: &[] };
+                let v = crate::ctc::Voice { voiced: &voiced[at..(at + slice.frames()).min(voiced.len())], onset: &[], ..Default::default() };
                 let Some(spans) = align_path(&slice, &path, Some(v)) else { continue };
                 let heard = spans
                     .iter()
@@ -680,7 +779,7 @@ fn repeats(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &[Placed]
                 if score < REPEAT || best.as_ref().is_some_and(|(s, ..)| *s >= score) {
                     continue;
                 }
-                let mut pieces: Vec<Placed> = mine.iter().map(|p| Placed { line: li, text: p.text.clone(), span: None, peak: 0.0 }).collect();
+                let mut pieces: Vec<Placed> = mine.iter().map(|p| Placed { line: li, text: p.text.clone(), say: p.say.clone(), span: None, peak: 0.0 }).collect();
                 let mut end = from;
                 for (span, own) in spans.iter().zip(&owner) {
                     let (Some(span), Some(k)) = (span, own) else { continue };
@@ -874,7 +973,7 @@ pub fn end_with_voice(lines: &mut [LyricLine], v: VoiceEnds<'_>, bounds: &[Optio
                 let own = bound.unwrap_or(b + HOLD);
                 next_line.map_or(own, |s| own.min(s))
             };
-            if tuning.stop_hold > 0.0 && ends_in_stop(&l.words[i].text) {
+            if tuning.stop_hold > 0.0 && !can_hold(&l.words[i].text) {
                 limit = limit.min(b + tuning.stop_hold);
             }
             if limit <= b {
@@ -907,9 +1006,49 @@ pub fn end_with_voice(lines: &mut [LyricLine], v: VoiceEnds<'_>, bounds: &[Optio
     }
 }
 
-/// Whether a word ends in a stop or an affricate (its last letter).
-fn ends_in_stop(word: &str) -> bool {
-    word.chars().rev().find(|c| c.is_alphabetic()).and_then(|c| c.to_lowercase().next()).is_some_and(|c| "пткбдгцчptkbdgc".contains(c))
+/// Letters left at one frame each («Miley»: «M» heard, «-iley» dumped at
+/// the end of a long held stretch) after this many frames of voice inside
+/// the word are spread over it ([`spread_collapsed`]).
+const COLLAPSED_AFTER: usize = 10;
+
+/// A word's letters (first and last frame each, in order) where two or
+/// more at its end got a frame each right after a long stretch of voice
+/// ([`COLLAPSED_AFTER`] frames, most of them `voiced`) inside the word:
+/// they are spread evenly over that stretch, from the end of the last
+/// letter before them to the word's end, a vowel (`vowel`) taking twice a
+/// consonant's share. The word's start and end stay; what moves is where
+/// its syllables fall inside it. Nothing changes otherwise.
+pub fn spread_collapsed(letters: &mut [(usize, usize)], vowel: &[bool], voiced: &[bool]) {
+    let n = letters.len();
+    let mut k = 0;
+    while k < n && letters[n - 1 - k].0 == letters[n - 1 - k].1 && (k == 0 || letters[n - k].0 <= letters[n - 1 - k].1 + 2) {
+        k += 1;
+    }
+    if k < 2 || k == n {
+        return;
+    }
+    let first = n - k;
+    let from = letters[first - 1].1 + 1;
+    let end = letters[n - 1].1;
+    let gap = letters[first].0.saturating_sub(from);
+    if gap < COLLAPSED_AFTER || end + 1 - from < k {
+        return;
+    }
+    let sung = (from..letters[first].0).filter(|t| voiced.get(*t).copied().unwrap_or(false)).count();
+    if sung * 2 < gap {
+        return;
+    }
+    let weight = |i: usize| if vowel.get(i).copied().unwrap_or(false) { 2.0 } else { 1.0 };
+    let total: f32 = (first..n).map(weight).sum();
+    let frames = (end + 1 - from) as f32;
+    let mut at = from as f32;
+    for i in first..n {
+        let a = at.round() as usize;
+        at += frames * weight(i) / total;
+        let b = ((at.round() as usize).max(a + 1) - 1).min(end);
+        letters[i] = (a.min(end), b.max(a.min(end)));
+    }
+    letters[n - 1].1 = end;
 }
 
 /// A word gets at least this long a letter (seconds), up to [`FAIR_MAX`].
@@ -990,7 +1129,20 @@ fn no_overlap(lines: &mut [LyricLine]) {
 /// whole-song pass placed them), a little into both; with `bands` (the
 /// text's line times sit on the voice) each line of the run within its
 /// own band there, as the timing pass keeps them.
-fn place_foreign(f: &Foreign<'_>, lines: &[LyricLine], placed: &mut [Placed], total: f32, bands: Option<&[Option<Band>]>) {
+///
+/// With `costs` ([`Tuning::foreign_costs`]) the run is aligned as the
+/// timing pass aligns the text: what its blanks cost inside a word and
+/// between words, over which frames have the voice (when known at that
+/// aligner's frames), so a word is not stretched over seconds of silence
+/// and a line not split around one.
+fn place_foreign(
+    f: &Foreign<'_>,
+    lines: &[LyricLine],
+    placed: &mut [Placed],
+    total: f32,
+    bands: Option<&[Option<Band>]>,
+    costs: Option<(Costs, Option<&[bool]>)>,
+) {
     let span_of = |placed: &[Placed], li: usize| {
         placed.iter().filter(|p| p.line == li).filter_map(|p| p.span).fold(None, |acc: Option<(f32, f32)>, (a, b)| {
             Some(acc.map_or((a, b), |(s, e)| (s.min(a), e.max(b))))
@@ -1014,53 +1166,78 @@ fn place_foreign(f: &Foreign<'_>, lines: &[LyricLine], placed: &mut [Placed], to
             continue;
         }
         let idx: Vec<usize> = placed.iter().enumerate().filter(|(_, p)| sung[first..k].contains(&p.line)).map(|(i, _)| i).collect();
-        if !bands.is_some_and(|b| align_banded(f.em, f.vocab, placed, &idx, from, to, b)) {
+        let fits = match costs {
+            Some((c, voiced)) => align_banded(f.em, f.vocab, placed, &idx, from, to, bands, Some((c, voiced))),
+            None => bands.is_some_and(|b| align_banded(f.em, f.vocab, placed, &idx, from, to, Some(b), None)),
+        };
+        if !fits {
             align_pieces(f.em, f.vocab, placed, &idx, from, to);
         }
     }
 }
 
 /// [`align_pieces`] with each piece's line kept within its band (as far as
-/// it overlaps `from..to`), a filler between lines. False (nothing changed)
-/// when they do not fit.
-fn align_banded(em: &Emissions, vocab: &Vocab, placed: &mut [Placed], idx: &[usize], from: f32, to: f32, bands: &[Option<Band>]) -> bool {
-    use crate::ctc::{Path, Tok, align_path};
+/// it overlaps `from..to`; `bands`), a filler between lines, and with
+/// `costs` what blanks inside a word and between words cost over which
+/// frames of `em` have the voice. False (nothing changed) when they do
+/// not fit.
+#[allow(clippy::too_many_arguments)]
+fn align_banded(
+    em: &Emissions,
+    vocab: &Vocab,
+    placed: &mut [Placed],
+    idx: &[usize],
+    from: f32,
+    to: f32,
+    bands: Option<&[Option<Band>]>,
+    costs: Option<(Costs, Option<&[bool]>)>,
+) -> bool {
+    use crate::ctc::{Gap, Path, Tok, align_path};
     let (slice, at) = em.slice(from, to);
     let n = slice.frames();
     if n == 0 {
         return false;
     }
     let frame = |s: f32| (((s * em.fps).round().max(0.0) as usize).saturating_sub(at)).min(n - 1);
-    let mut path = Path::default();
+    let mut path = Path { costs: costs.map(|c| c.0).unwrap_or_default(), ..Path::default() };
     let mut owner = Vec::new();
     let mut line = None;
-    for &i in idx {
+    let spelled: Vec<usize> = idx.iter().copied().filter(|i| !vocab.tokens(&placed[*i].say).is_empty()).collect();
+    for (k, &i) in spelled.iter().enumerate() {
         let p = &placed[i];
-        let toks = vocab.tokens(&p.text);
-        if toks.is_empty() {
-            continue;
-        }
+        let toks = vocab.tokens(&p.say);
         if line.is_some_and(|l| l != p.line) && !vocab.syllabic() {
             path.push(Tok::Filler, None);
             owner.push(None);
         }
         line = Some(p.line);
-        let band = bands.get(p.line).copied().flatten().map(|b| (frame(b.from), frame(b.to)));
+        let band = bands.and_then(|b| b.get(p.line).copied().flatten()).map(|b| (frame(b.from), frame(b.to)));
+        let in_line = spelled.get(k + 1).is_some_and(|n| placed[*n].line == p.line);
+        let gap = if costs.is_some() && in_line { Gap::Words } else { Gap::Lines };
         for t in toks {
             path.push(Tok::Letter(t), band);
             owner.push(Some(i));
+            let j = path.toks.len() - 1;
+            path.gaps[j] = if costs.is_some() { Gap::InWord } else { Gap::Lines };
         }
+        let j = path.toks.len() - 1;
+        path.gaps[j] = gap;
         if let Some(sep) = vocab.sep
             && p.text.ends_with(char::is_whitespace)
         {
             path.push(Tok::Letter(sep), None);
             owner.push(None);
+            let j = path.toks.len() - 1;
+            path.gaps[j] = gap;
+            path.pauses[j] = gap == Gap::Words;
         }
     }
     if path.toks.is_empty() {
         return false;
     }
-    let Some(spans) = align_path(&slice, &path, None) else { return false };
+    let voiced = costs.and_then(|c| c.1).map(|v| &v[at.min(v.len())..(at + n).min(v.len())]);
+    let voice = voiced.map(|v| crate::ctc::Voice { voiced: v, ..Default::default() });
+    let Some(spans) = align_path(&slice, &path, voice) else { return false };
     let mut fresh: Vec<Option<(f32, f32)>> = vec![None; placed.len()];
     for (span, own) in spans.iter().zip(&owner) {
         let (Some(span), Some(i)) = (span, own) else { continue };
@@ -1081,7 +1258,7 @@ fn align_pieces(em: &Emissions, vocab: &Vocab, placed: &mut [Placed], idx: &[usi
     let mut tokens = Vec::new();
     let mut owner = Vec::new();
     for &i in idx {
-        let toks = vocab.tokens(&placed[i].text);
+        let toks = vocab.tokens(&placed[i].say);
         for t in &toks {
             tokens.push(*t);
             owner.push(Some(i));
@@ -1119,7 +1296,7 @@ fn align_pieces(em: &Emissions, vocab: &Vocab, placed: &mut [Placed], idx: &[usi
 /// The source's lines with the pieces' times as words. A piece without
 /// letters (a dash) sticks to the one before it; a line without any keeps
 /// its own start.
-fn timed_lines(lines: &[LyricLine], placed: &[Placed]) -> Vec<LyricLine> {
+fn timed_lines(lines: &[LyricLine], placed: &[Placed], hum_ends: bool) -> Vec<LyricLine> {
     let mut out: Vec<LyricLine> = Vec::with_capacity(lines.len());
     let d = |s: f32| Duration::from_secs_f32((s - LATE).max(0.0));
     for (li, l) in lines.iter().enumerate() {
@@ -1146,9 +1323,13 @@ fn timed_lines(lines: &[LyricLine], placed: &[Placed]) -> Vec<LyricLine> {
             words[0].text = w0.text + &words[0].text;
         }
         // A word lasts until the next one starts when the gap is short
-        // (the sung vowel goes on), so the fill does not stall.
+        // (the sung vowel goes on), so the fill does not stall; a hum ends
+        // with its voice (`hum_ends`: «м, м, м, угу» with breaths between).
         for i in 0..words.len().saturating_sub(1) {
             let next = words[i + 1].start;
+            if hum_ends && is_hum(&words[i].text) {
+                continue;
+            }
             if next > words[i].end && next - words[i].end < Duration::from_millis(600) {
                 words[i].end = next;
             }
@@ -1300,6 +1481,29 @@ mod tests {
         // The verdict stays the text's aligner's.
         assert_eq!(both.score, alone.score);
         assert!(both.lines[2].start > both.lines[1].start);
+    }
+
+    /// «M» heard at once, «-iley» dumped at the end of the held stretch:
+    /// the dumped letters are spread over it, vowels longer.
+    #[test]
+    fn collapsed_letters_are_spread_over_the_voiced_stretch() {
+        let mut letters = vec![(0, 3), (40, 40), (41, 41), (42, 42), (43, 43)];
+        let vowel = [false, true, false, true, true];
+        let voiced = vec![true; 50];
+        spread_collapsed(&mut letters, &vowel, &voiced);
+        assert_eq!(letters[0], (0, 3));
+        assert_eq!(letters[1].0, 4);
+        assert_eq!(letters[4].1, 43);
+        for w in letters.windows(2) {
+            assert!(w[1].0 > w[0].1 && w[1].0 == w[0].1 + 1, "{letters:?}");
+        }
+        // The vowel «i» takes about twice the consonant «l».
+        let len = |s: (usize, usize)| s.1 + 1 - s.0;
+        assert!(len(letters[1]) >= 2 * len(letters[2]) - 1, "{letters:?}");
+        // Over silence nothing moves (the word's end is the aligner's).
+        let mut quiet = vec![(0, 3), (40, 40), (41, 41)];
+        spread_collapsed(&mut quiet, &[false, true, false], &[false; 50]);
+        assert_eq!(quiet, [(0, 3), (40, 40), (41, 41)]);
     }
 
     /// «Хитрый Юра» four times: a line the text has twice while the song
@@ -1511,7 +1715,7 @@ mod tests {
         let mut stopped = vec![l];
         end_with_voice(&mut stopped, VoiceEnds { tuning: Tuning { stop_hold: 0.2, ..Tuning::align4() }, ..v }, &[Some(5.0)]);
         assert!((stopped[0].words[0].end.as_secs_f32() - 1.8).abs() < 0.01, "{:?}", stopped[0].words);
-        assert!(!ends_in_stop("Sykes?!") && ends_in_stop("хватит") && ends_in_stop("crack,"));
+        assert!(can_hold("Sykes?!") && !can_hold("хватит") && !can_hold("crack,"));
     }
 
     /// «Это нон-стоп» then twelve seconds of instrumental: the next line's
@@ -1530,7 +1734,7 @@ mod tests {
         use crate::ctc::{Path, Tok, TokenSpan};
         let lines: Vec<LyricLine> = (0..4).map(|i| line(i as f32, "Miley Cyrus")).collect();
         // One token a line: lines at frames 0, 10, 30 (two repeats), 35.
-        let placed: Vec<Placed> = (0..4).map(|li| Placed { line: li, text: "x".into(), span: None, peak: 0.0 }).collect();
+        let placed: Vec<Placed> = (0..4).map(|li| Placed { line: li, text: "x".into(), say: "x".into(), span: None, peak: 0.0 }).collect();
         let mut path = Path::default();
         for _ in 0..4 {
             path.push(Tok::Letter(1), None);

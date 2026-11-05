@@ -262,7 +262,30 @@ pub struct Costs {
     /// (sung in the middle, [`Voice::backing`] low): voice the text lacks
     /// is mostly backing vocals off the centre.
     pub lead: f32,
+    /// A frame counts as without voice for the costs above when the voice
+    /// is under this share of the mix there ([`Voice::vmr`]; 0: by
+    /// [`Voice::voiced`]).
+    pub quiet_vmr: f32,
+    /// The blank between two words of a line may take a voiced frame of
+    /// background voice ([`Voice::prominence`] under [`PROMINENT`]) at this
+    /// under the frame's best letter (an ad-lib between words; 0: off),
+    pub gap_backing: f32,
+    /// … and a frame of the lead voice at this under it (dear, so a sung
+    /// word is not skipped).
+    pub gap_lead: f32,
+    /// [`Self::line_pause`] only in a pause without voice longer than this
+    /// many frames (0: every frame of one).
+    pub pause_after: usize,
+    /// A filler frame costs this plus [`Self::fill_prominence`] times the
+    /// frame's [`Voice::prominence`] against its best letter (quiet backing
+    /// repeats go to the filler, the lead stays with the text; both 0:
+    /// a constant [`FILL_PENALTY`]).
+    pub fill_base: f32,
+    pub fill_prominence: f32,
 }
+
+/// Voice this prominent or more is the lead ([`Voice::prominence`]).
+pub const PROMINENT: f32 = 0.45;
 
 /// A token sequence to align with what the plain sequence has not: frames
 /// each token must stay within (a line between its source times), optional
@@ -306,7 +329,7 @@ impl Path {
 }
 
 /// The voice under the frames, where it is known (the separated voice).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Voice<'a> {
     /// Which frames have the voice in them.
     pub voiced: &'a [bool],
@@ -316,6 +339,12 @@ pub struct Voice<'a> {
     /// How much of the voice at each frame is off the centre (0 the lead
     /// in the middle, 1 backing vocals at the sides; empty: unknown).
     pub backing: &'a [f32],
+    /// The separated voice against the mix at each frame (0..1; empty:
+    /// unknown): a synth leaking into the voice on a drop is small here.
+    pub vmr: &'a [f32],
+    /// How much each frame's voice is the lead (0..1; empty: unknown): sung
+    /// in the middle and loud against the seconds around it.
+    pub prominence: &'a [f32],
 }
 
 /// One state of the alignment graph.
@@ -346,7 +375,7 @@ enum Stay {
     Words,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Emit {
     Blank,
     Letter(usize),
@@ -449,6 +478,23 @@ pub fn align_path(em: &Emissions, path: &Path, voice: Option<Voice<'_>>) -> Opti
             *s = if run == 0 { usize::MAX } else { run - 1 };
         }
     }
+    // Frames without voice for the costs, and how long the pause each is in.
+    let quiet: Vec<bool> = (0..t_len)
+        .map(|t| match voice.map(|v| v.vmr).filter(|m| costs.quiet_vmr > 0.0 && !m.is_empty()) {
+            Some(m) => m.get(t).is_none_or(|r| *r < costs.quiet_vmr),
+            None => voiced.is_some_and(|v| !v.get(t).copied().unwrap_or(false)),
+        })
+        .collect();
+    let mut pause = vec![0usize; t_len];
+    let mut t = 0;
+    while t < t_len {
+        let a = t;
+        while t < t_len && quiet[t] {
+            t += 1;
+        }
+        pause[a..t].iter_mut().for_each(|p| *p = t - a);
+        t += 1;
+    }
     let blank = em.blank;
     let best: Vec<f32> = (0..t_len)
         .map(|t| em.row(t).iter().enumerate().filter(|(i, _)| *i != blank).map(|(_, v)| *v).fold(f32::NEG_INFINITY, f32::max))
@@ -464,7 +510,11 @@ pub fn align_path(em: &Emissions, path: &Path, voice: Option<Voice<'_>>) -> Opti
                     Some(b) if costs.lead > 0.0 => costs.lead * (1.0 - b),
                     _ => 0.0,
                 };
-                (best[t] - FILL_PENALTY - lead).max(row[blank] - FILL_BLANK)
+                let fill = match voice.and_then(|v| v.prominence.get(t)) {
+                    Some(p) if costs.fill_base + costs.fill_prominence > 0.0 => costs.fill_base + costs.fill_prominence * p,
+                    _ => FILL_PENALTY,
+                };
+                (best[t] - fill - lead).max(row[blank] - FILL_BLANK)
             }
             Emit::Hum => {
                 let heard = row[blank].max(best[t]);
@@ -486,12 +536,23 @@ pub fn align_path(em: &Emissions, path: &Path, voice: Option<Voice<'_>>) -> Opti
                 v = v.max(row[a] - costs.vowels);
             }
         }
-        let quiet = voiced.is_some_and(|v| !v.get(t).copied().unwrap_or(false));
+        let quiet = quiet[t];
+        if st.stay == Stay::Words && st.emit == Emit::Blank && !quiet {
+            // Background voice between words is skipped cheaply, the lead dearly.
+            let under = match voice.and_then(|v| v.prominence.get(t)) {
+                Some(p) if *p < PROMINENT => costs.gap_backing,
+                Some(_) => costs.gap_lead,
+                None => 0.0,
+            };
+            if under > 0.0 {
+                v = v.max(best[t] - under);
+            }
+        }
         v - match st.stay {
             Stay::Free => 0.0,
             Stay::InWord if quiet => costs.in_word_silent,
             Stay::InWord => costs.in_word,
-            Stay::Words if quiet => costs.line_pause,
+            Stay::Words if quiet && pause[t] > costs.pause_after => costs.line_pause,
             Stay::Words => 0.0,
         }
     };
@@ -708,7 +769,7 @@ mod tests {
         let e = em(&best, 0.9);
         let toks = [Tok::Letter(1), Tok::Hum, Tok::Letter(2)];
         let voiced: Vec<bool> = (0..best.len()).map(|t| (5..17).contains(&t)).collect();
-        let spans = frames(&align_path(&e, &path(&toks), Some(Voice { voiced: &voiced, onset: &[], backing: &[] })).unwrap());
+        let spans = frames(&align_path(&e, &path(&toks), Some(Voice { voiced: &voiced, onset: &[], ..Default::default() })).unwrap());
         assert_eq!(spans[1], Some((5, 16)), "{spans:?}");
         let spans = frames(&align_path(&e, &path(&toks), None).unwrap());
         let (a, b) = spans[1].unwrap();
@@ -742,7 +803,7 @@ mod tests {
         let mut p = path(&[Tok::Letter(1), Tok::Letter(2)]);
         p.gaps[0] = Gap::InWord;
         let voiced: Vec<bool> = (0..best.len()).map(|t| t < 5).collect();
-        let v = Voice { voiced: &voiced, onset: &[], backing: &[] };
+        let v = Voice { voiced: &voiced, onset: &[], ..Default::default() };
         assert_eq!(frames(&align_path(&e, &p, Some(v)).unwrap())[1], Some((15, 15)));
         p.costs.in_word_silent = 1.0;
         let (a, _) = frames(&align_path(&e, &p, Some(v)).unwrap())[1].unwrap();
@@ -759,7 +820,7 @@ mod tests {
         p.starts[0] = true;
         let voiced = vec![true; 12];
         let onset: Vec<f32> = (0..12).map(|t| if t == 6 { 1.0 } else { 0.0 }).collect();
-        let v = Voice { voiced: &voiced, onset: &onset, backing: &[] };
+        let v = Voice { voiced: &voiced, onset: &onset, ..Default::default() };
         p.costs.onset = 2.0;
         assert_eq!(frames(&align_path(&e, &p, Some(v)).unwrap())[0].map(|s| s.0), Some(6));
     }
