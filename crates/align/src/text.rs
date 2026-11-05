@@ -164,7 +164,9 @@ fn english(text: &str) -> bool {
     if rest >= 0.08 {
         return false;
     }
-    let letters: Vec<char> = lower.chars().filter(|c| c.is_alphabetic()).collect();
+    // Latin letters with marks tell another language; a Cyrillic word in
+    // the line («С Miley Cyrus») does not.
+    let letters: Vec<char> = lower.chars().filter(|c| c.is_alphabetic() && !matches!(c, '\u{0400}'..='\u{04ff}')).collect();
     let marked = letters.iter().filter(|c| !c.is_ascii()).count();
     if marked as f32 > letters.len() as f32 * 0.02 {
         return false;
@@ -231,6 +233,53 @@ pub fn is_hum(piece: &str) -> bool {
         return true;
     }
     letters.len() >= 2 && "аеёиоуыэaeiou".contains(first) && letters.iter().all(|c| *c == first)
+}
+
+/// A line of a Russian text the Russian aligner hears with its Latin
+/// words spelled by sound ([`crate::fit::Tuning::sound_lines`]): written
+/// mostly in Latin letters, two Latin words or more («Miley Cyrus»,
+/// «Джинсовка Levi's, йоу! Totally Spies, йоу!»). A lone «Swag» or
+/// «Sheesh» is heard better by the English aligner in its window.
+pub fn sung_by_sound(line: &str) -> bool {
+    let latin = line
+        .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '’'))
+        .filter(|w| w.chars().any(|c| c.is_ascii_alphabetic()) && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '\'' || c == '’'))
+        .count();
+    Script::of(line) == Script::Latin && latin >= 2
+}
+
+/// Whether a word's last sound can be held (a sung note goes on): a vowel
+/// or a sonorant («м», «н», «л», «р», «й»; «n», «m», «l», «r», «ng»), and
+/// a hiss («с», «ш», «sh»); not a stop or an affricate («п», «т», «к»,
+/// «б», «д», «г», «ц», «ч»; «p», «t», «k», «b», «d», «g», «ch», «x»).
+/// English spelling: a silent final «e» and a final «gh» read through,
+/// «-ng» is held. A word without letters (a kana, a number) can.
+pub fn can_hold(word: &str) -> bool {
+    let w: Vec<char> = word.chars().filter(|c| c.is_alphabetic()).flat_map(char::to_lowercase).collect();
+    let Some(&last) = w.last() else { return true };
+    if is_cjk(last) {
+        return true;
+    }
+    let n = w.len();
+    let at = |i: usize| w.get(i).copied();
+    match last {
+        'ь' | 'ъ' => return n < 2 || can_hold(&w[..n - 1].iter().collect::<String>()),
+        'п' | 'т' | 'к' | 'б' | 'д' | 'г' | 'ц' | 'ч' => return false,
+        _ if !last.is_ascii() => return true,
+        _ => {}
+    }
+    // English.
+    if last == 'e' && n > 2 && !"aeiouy".contains(w[n - 2]) && w[..n - 2].iter().any(|c| "aeiouy".contains(*c)) {
+        // A silent «e»: the consonant before it.
+        return can_hold(&w[..n - 1].iter().collect::<String>()) || at(n - 2) == Some('c');
+    }
+    if n >= 2 && w[n - 2..] == ['g', 'h'] {
+        return true;
+    }
+    if n >= 2 && w[n - 2..] == ['n', 'g'] {
+        return true;
+    }
+    !matches!(last, 'p' | 't' | 'k' | 'b' | 'd' | 'g' | 'c' | 'x' | 'q') && !(n >= 2 && w[n - 2..] == ['c', 'h'])
 }
 
 /// Cuts a line into the pieces timed one by one; they keep their trailing
@@ -314,7 +363,7 @@ impl Vocab {
     }
 
     /// The model spells Russian and has no Latin letters.
-    fn cyrillic_only(&self) -> bool {
+    pub fn cyrillic_only(&self) -> bool {
         self.ids.contains_key(&'а') && !self.ids.contains_key(&'a')
     }
 
@@ -376,11 +425,19 @@ impl Vocab {
 }
 
 /// Every run of Latin letters in `text` read the Russian way
-/// ([`english_as_russian`]); the rest stays.
-fn latin_by_sound(text: &str) -> String {
+/// ([`english_as_russian`]), and the digits of a word with Latin letters
+/// («mp3») said in Russian; the rest stays.
+pub fn latin_by_sound(text: &str) -> String {
     let mut out = String::with_capacity(text.len() * 2);
     let mut word = String::new();
     let chars: Vec<char> = text.chars().collect();
+    let latin_near = |i: usize| {
+        let mut j = i;
+        while j > 0 && chars[j - 1].is_ascii_alphanumeric() {
+            j -= 1;
+        }
+        chars[j..].iter().take_while(|c| c.is_ascii_alphanumeric()).any(char::is_ascii_alphabetic)
+    };
     for (i, &c) in chars.iter().enumerate() {
         // An apostrophe inside a Latin word («Levi's», «don't») is part of it.
         let inside = matches!(c, '\'' | '’') && !word.is_empty() && chars.get(i + 1).is_some_and(char::is_ascii_alphabetic);
@@ -391,12 +448,28 @@ fn latin_by_sound(text: &str) -> String {
         if !word.is_empty() {
             out.push_str(&english_as_russian(&std::mem::take(&mut word)));
         }
-        out.push(c);
+        match c.to_digit(10) {
+            Some(d) if latin_near(i) => out.push_str(DIGITS[d as usize]),
+            _ => out.push(c),
+        }
     }
     if !word.is_empty() {
         out.push_str(&english_as_russian(&word));
     }
     out
+}
+
+/// Digits as a Russian listener says them.
+const DIGITS: [&str; 10] = ["ноль", "один", "два", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять"];
+
+/// English letter names, for a short word without vowels («mp», «dj»).
+fn letter_name(c: u8) -> &'static str {
+    match c {
+        b'b' => "би", b'c' => "си", b'd' => "ди", b'f' => "эф", b'g' => "джи", b'h' => "эйч", b'j' => "джей", b'k' => "кей",
+        b'l' => "эл", b'm' => "эм", b'n' => "эн", b'p' => "пи", b'q' => "кью", b'r' => "ар", b's' => "эс", b't' => "ти",
+        b'v' => "ви", b'w' => "дабл ю", b'x' => "экс", b'z' => "зед",
+        _ => "",
+    }
 }
 
 /// Common words the rules below read wrong.
@@ -427,6 +500,10 @@ pub fn english_as_russian(word: &str) -> String {
     let w: Vec<u8> = w.bytes().filter(|b| b.is_ascii_alphabetic()).collect();
     if w.is_empty() {
         return String::new();
+    }
+    // A short word without vowels is said letter by letter («mp», «dj»).
+    if w.len() <= 4 && !w.iter().any(|c| b"aeiouy".contains(c)) {
+        return w.iter().map(|c| letter_name(*c)).collect();
     }
     let n = w.len();
     let vowel = |i: usize| w.get(i).is_some_and(|c| b"aeiou".contains(c) || (*c == b'y' && i > 0 && !w.get(i + 1).is_some_and(|n| b"aeiou".contains(n))));
@@ -504,8 +581,9 @@ pub fn english_as_russian(word: &str) -> String {
             i += 2;
             continue;
         }
-        if c == b'y' && i == 0 && w.get(1).is_some_and(|n| b"aeiou".contains(n)) {
-            let r = match w[1] {
+        // «y» before a vowel softens it («yeah», «nyan»).
+        if c == b'y' && w.get(i + 1).is_some_and(|n| b"aeiou".contains(n)) {
+            let r = match w[i + 1] {
                 b'a' => "я",
                 b'o' => "йо",
                 b'u' => "ю",
@@ -720,6 +798,8 @@ mod tests {
     fn languages_of_texts() {
         assert_eq!(Lang::of("I don't wanna be alone tonight\nHold me close"), Lang::English);
         assert_eq!(Lang::of("Oh yeah"), Lang::English);
+        // A Cyrillic word in a Latin line of a Russian song.
+        assert_eq!(Lang::of("С Miley Cyrus, Miley Cyrus"), Lang::English);
         assert_eq!(Lang::of("Que te quiero, mi amor, para siempre"), Lang::Other);
         assert_eq!(Lang::of("Je ne sais pas pourquoi tu es là"), Lang::Other);
         assert_eq!(Lang::of("Kimi no na wa sayonara watashi no kokoro"), Lang::Other);
@@ -780,6 +860,9 @@ mod tests {
         }
         assert_eq!(latin_by_sound("с miley cyrus, йоу!"), "с майли сайрус, йоу!");
         assert_eq!(latin_by_sound("speed'ом"), "спид'ом");
+        // Letters said by name, digits in Russian, a number alone stays.
+        assert_eq!(latin_by_sound("мяу, nyan.mp3"), "мяу, нян.эмпитри");
+        assert_eq!(latin_by_sound("номер 777"), "номер 777");
     }
 
     /// A Russian model spells a Latin word by sound instead of wildcards.
@@ -797,6 +880,24 @@ mod tests {
         assert!(en.similar().is_empty());
         let vowels = Vocab::from_json(r#"{"<pad>":0,"|":4,"а":5,"о":6,"и":7,"е":8}"#, Letters::Native).unwrap();
         assert_eq!(vowels.similar(), [(7, 8), (5, 6)]);
+    }
+
+    #[test]
+    fn latin_lines_sung_by_sound() {
+        assert!(sung_by_sound("Miley Cyrus") && sung_by_sound("С Miley Cyrus, Miley Cyrus") && sung_by_sound("Джинсовка Levi's, йоу! Totally Spies, йоу!"));
+        assert!(sung_by_sound("Мяу, nyan.mp3") && sung_by_sound("Nyan.pop"));
+        assert!(!sung_by_sound("Swag") && !sung_by_sound("Я будто тролль warlord"));
+    }
+
+    #[test]
+    fn which_last_sounds_can_be_held() {
+        for w in ["мама", "сон", "мир,", "твой", "космоцветок-", "нон-стоп", "Miley", "Cyrus", "time", "song", "high", "dance", "now", "love", "кровь", "ночь", "家"] {
+            let held = !matches!(w, "космоцветок-" | "нон-стоп" | "ночь");
+            assert_eq!(can_hold(w), held, "{w}");
+        }
+        for w in ["ток", "стоп!", "back", "made", "page", "night", "bad", "watch", "box", "ад", "дуб"] {
+            assert!(!can_hold(w), "{w}");
+        }
     }
 
     #[test]

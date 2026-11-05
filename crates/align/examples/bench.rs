@@ -11,7 +11,10 @@
 //! aligner hears are kept in the cache dir after the first run (the
 //! separation is what takes minutes on the CPU), so a later run only
 //! aligns. `PREP=1` fills the cache and stops; `CACHED=1` leaves out the
-//! songs not in it yet. Each text is aligned with
+//! songs not in it yet. `DEVICE=gpu` runs the models on the GPU (else the
+//! CPU, `THREADS` threads, 2 by default); `DUTY=0.5` keeps them busy only
+//! that share of the time (after each chunk a model runs, the bench sleeps
+//! as long again), so a run leaves the machine usable. Each text is aligned with
 //! its line times (as the player does for a timed text) and as a plain
 //! text (no times: what a Genius text gets), and another song's text of
 //! the same language as a plain text, for the check.
@@ -70,9 +73,38 @@ fn write_f32(path: &Path, head: &[f32], v: &[f32]) {
     }
 }
 
+/// Sleeps after a stretch of model work so the model runs only `DUTY` of
+/// the time (`DUTY=0.5`: as long again as the work took). Called from the
+/// models' progress, so a long separation is spread out chunk by chunk.
+struct Duty {
+    share: f32,
+    since: std::time::Instant,
+}
+
+impl Duty {
+    fn from_env() -> Self {
+        let share = std::env::var("DUTY").ok().and_then(|d| d.parse().ok()).unwrap_or(1.0f32).clamp(0.05, 1.0);
+        Self { share, since: std::time::Instant::now() }
+    }
+
+    /// A model call starts now.
+    fn start(&mut self) {
+        self.since = std::time::Instant::now();
+    }
+
+    /// A chunk of model work ended: rest, then count from here.
+    fn rest(&mut self) {
+        if self.share < 1.0 {
+            let took = self.since.elapsed().as_secs_f32();
+            std::thread::sleep(Duration::from_secs_f32(took * (1.0 - self.share) / self.share));
+        }
+        self.since = std::time::Instant::now();
+    }
+}
+
 /// The song's voice and what its aligners hear, from the cache or made
 /// (and kept) now.
-fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path) -> Option<Prepared> {
+fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, duty: &mut Duty) -> Option<Prepared> {
     // Kept by the audio file's name: jobs on one song share it.
     let stem = Path::new(&job.path).file_stem()?.to_string_lossy().into_owned();
     let voice_file = cache.join(format!("{stem}.voice"));
@@ -90,13 +122,19 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path) -> Option<Prepared> 
             p
         }
         None => {
-            let p = match aligner.prepare(Path::new(&job.path), true, &mut |_: Stage| true) {
+            duty.start();
+            let t0 = std::time::Instant::now();
+            let p = match aligner.prepare(Path::new(&job.path), true, &mut |_: Stage| {
+                duty.rest();
+                true
+            }) {
                 Ok(p) => p,
                 Err(e) => {
                     println!("{}: {e}", job.name);
                     return None;
                 }
             };
+            println!("{}: decoded and separated in {:.1} s (with rests)", job.name, t0.elapsed().as_secs_f32());
             write_f32(&voice_file, &[], &p.voice);
             write_f32(&levels, &[p.side().len() as f32], &[p.side(), p.mix()].concat());
             p
@@ -114,8 +152,16 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path) -> Option<Prepared> 
                 // Heard once here; the second hearing is kept apart below.
                 let tuning = aligner.tuning();
                 aligner.set_tuning(Tuning { windows: false, ..tuning });
-                aligner.hear(&mut prep, id, &mut |_| true).unwrap();
+                duty.start();
+                let t0 = std::time::Instant::now();
+                aligner
+                    .hear(&mut prep, id, &mut |_| {
+                        duty.rest();
+                        true
+                    })
+                    .unwrap();
                 aligner.set_tuning(tuning);
+                println!("{}: heard by {} in {:.1} s (with rests)", job.name, key(id), t0.elapsed().as_secs_f32());
                 let em = prep.emissions(id).unwrap();
                 write_f32(&file, &[em.vocab as f32, em.blank as f32, em.fps], &em.logp);
             }
@@ -126,7 +172,9 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path) -> Option<Prepared> 
             let other = match read_f32(&file) {
                 Some(v) => Emissions { logp: v[3..].to_vec(), vocab: v[0] as usize, fps: v[2], blank: v[1] as usize },
                 None => {
+                    duty.start();
                     let em = aligner.hear_shifted(&prep, id).unwrap();
+                    duty.rest();
                     write_f32(&file, &[em.vocab as f32, em.blank as f32, em.fps], &em.logp);
                     em
                 }
@@ -353,10 +401,24 @@ fn tuning_from_env() -> Tuning {
     num("T_STOP", &mut t.stop_hold);
     num("T_MIX", &mut t.mix_ratio);
     num("T_LEAD", &mut t.costs.lead);
+    num("T_QUIET_VMR", &mut t.costs.quiet_vmr);
+    num("T_GAP_BACKING", &mut t.costs.gap_backing);
+    num("T_GAP_LEAD", &mut t.costs.gap_lead);
+    num("T_FILL_BASE", &mut t.costs.fill_base);
+    num("T_FILL_PROM", &mut t.costs.fill_prominence);
+    if let Some(x) = std::env::var("T_PAUSE_AFTER").ok().and_then(|x| x.parse().ok()) {
+        t.costs.pause_after = x;
+    }
     flag("T_WINDOWS", &mut t.windows);
     flag("T_FOREIGN", &mut t.foreign_bands);
     flag("T_SOUND", &mut t.by_sound);
     flag("T_SQUEEZED", &mut t.squeezed);
+    flag("T_SOUND_LINES", &mut t.sound_lines);
+    flag("T_FAR_CAP", &mut t.far_cap);
+    flag("T_HUM_ENDS", &mut t.hum_ends);
+    flag("T_FOREIGN_COSTS", &mut t.foreign_costs);
+    num("T_HOLD_VMR", &mut t.hold_vmr);
+    num("T_HOLD_PROM", &mut t.hold_prominence);
     t
 }
 
@@ -369,7 +431,9 @@ fn main() {
     let filter = args.get(4).cloned().unwrap_or_default();
     let threads = std::env::var("THREADS").ok().and_then(|t| t.parse().ok()).unwrap_or(2);
     let prep_only = std::env::var("PREP").is_ok();
-    let mut aligner = Aligner::new(catalog, Device::Cpu, threads);
+    let device = if std::env::var("DEVICE").as_deref() == Ok("gpu") { Device::Gpu } else { Device::Cpu };
+    let mut aligner = Aligner::new(catalog, device, threads);
+    let mut duty = Duty::from_env();
     aligner.set_tuning(tuning_from_env());
     println!("tuning {:?}", aligner.tuning());
     let mut groups: Vec<(String, Tally)> = Vec::new();
@@ -393,7 +457,7 @@ fn main() {
             println!("stopped");
             break;
         }
-        let Some(mut prep) = prepared(&mut aligner, job, &cache) else { continue };
+        let Some(mut prep) = prepared(&mut aligner, job, &cache, &mut duty) else { continue };
         if prep_only {
             println!("prepared {}", job.name);
             aligner.unload();
@@ -443,6 +507,8 @@ fn main() {
             }
             if job.kind != "case" {
                 t.lines = line_errors(&reference, &fit.lines);
+                let far: Vec<String> = t.lines.iter().enumerate().filter(|(_, e)| e.abs() >= 0.3).map(|(i, e)| format!("{i} {e:+.2}")).collect();
+                println!("  {mode:28} lines off: {}", far.join(", "));
             }
             println!("  {}", summary(mode, &t));
             println!("  {mode:28} {}", verdict(&fit));
@@ -481,7 +547,9 @@ fn main() {
                 pool(format!("{} all {}", job.kind, mode), &t);
             }
         }
-        if let Some(w) = wrong
+        // `NOWRONG=1`: the check of another song's text left out (it does
+        // not depend on the timing pass).
+        if let Some(w) = wrong.filter(|_| std::env::var("NOWRONG").is_err())
             && let Ok(Some(f)) = aligner.fit(&mut prep, &w, false, &mut |_| true)
         {
             println!("  {:28} {}", "another song's text", verdict(&f));

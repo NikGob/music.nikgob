@@ -57,6 +57,10 @@ struct Stored {
     plain: Option<String>,
 }
 
+/// Line times one shift this far off belong to another take of the song
+/// (a source's own habit is a few tenths at most).
+const OTHER_TAKE: Duration = Duration::from_secs(1);
+
 /// What the aligner made of one text (`lyrics_align`).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Aligned {
@@ -417,12 +421,27 @@ impl TrackLyrics {
         self.texts.is_empty()
     }
 
-    /// Genius is worth asking now: no text with timing fits the recording.
+    /// Genius is worth asking now: no text with timing fits the recording
+    /// as this take of the song ([`Self::other_take`]).
     fn genius_wanted(&self) -> bool {
         self.genius
             && !self.texts.contains_key(&LyricsSource::Genius)
             && !self.missing.contains(&LyricsSource::Genius)
-            && !self.has_timed()
+            && !self.has_timed_take()
+    }
+
+    /// A text with timing fits the recording and its times are this take's.
+    fn has_timed_take(&self) -> bool {
+        self.texts.iter().any(|(s, t)| *s != LyricsSource::Recognized && t.sync() > LyricsSync::Plain && !self.misfit(*s) && !self.other_take(*s))
+    }
+
+    /// The recording spells the text, but its own line times are another
+    /// take's: another version, or one shift of [`OTHER_TAKE`] or more (a
+    /// re-recording that opens with a spoken line: «космоцветок», 2.14 s).
+    /// Its words may be that take's too, so a plain text is worth a look.
+    fn other_take(&self, source: LyricsSource) -> bool {
+        use nikgob_align::fit::Timing;
+        self.aligned(source).is_some_and(|a| a.fits && (a.timing == Timing::Elsewhere || (a.timing == Timing::Shifted && a.offset >= OTHER_TAKE)))
     }
 
     fn duplicate_file(&self) -> bool {
@@ -443,7 +462,7 @@ impl TrackLyrics {
         if !online.is_empty() {
             return online;
         }
-        if self.pending.contains(&LyricsSource::Genius) && self.genius && !self.has_timed() {
+        if self.pending.contains(&LyricsSource::Genius) && self.genius && !self.has_timed_take() {
             return vec![LyricsSource::Genius];
         }
         self.pending.clear();
@@ -1648,6 +1667,13 @@ People pleasing planet"));
         assert!(tl.genius_wanted());
         tl.pending.insert(LyricsSource::Genius);
         assert_eq!(tl.next_lookups(), [LyricsSource::Genius]);
+        // Its words fit, its times are another take's (two seconds off):
+        // Genius is worth a look too; a source's usual few tenths are not.
+        tl.pending.remove(&LyricsSource::Genius);
+        tl.set_aligned(LyricsSource::Lrclib, aligned(&lrc, true, Timing::Shifted, -2140, Vec::new()));
+        assert!(tl.genius_wanted());
+        tl.set_aligned(LyricsSource::Lrclib, aligned(&lrc, true, Timing::Shifted, -300, Vec::new()));
+        assert!(!tl.genius_wanted());
         // Off in the settings: never.
         let mut off = TrackLyrics::default();
         off.pending.insert(LyricsSource::Genius);
