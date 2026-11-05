@@ -11,4 +11,5 @@ pub mod quality;
 pub mod settings;
 pub mod source;
 pub mod streaming;
+pub mod syllables;
 pub mod translit;

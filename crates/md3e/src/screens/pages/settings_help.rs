@@ -437,7 +437,7 @@ impl SettingId {
             LyricsGapHeight => "Насколько высокие волны на кружке ожидания.",
             LyricsGapSize => "Насколько большой кружок ожидания между строками.",
             LyricsCountdown => "За три секунды до новой строки кружок ожидания сменяется отсчётом 3, 2, 1.",
-            LyricsUnit => "Что подсвечивается по очереди в любой анимации: каждая буква или каждое слово целиком. Слова через дефис подсвечиваются по частям.",
+            LyricsUnit => "Что подсвечивается по очереди в любой анимации: каждая буква, каждый слог или каждое слово целиком. Слова через дефис подсвечиваются по частям.",
             LyricsSoftEdges => "Строки у верхнего и нижнего края текста расплываются и тают, а не обрезаются.",
             LyricsSoftStrength => "Насколько сильно расплывается строка у самого края. Размытие нарастает плавно: строка, которая подходит к краю, мягко теряет резкость, а появляющаяся постепенно становится чёткой.",
             LyricsSoftDepth => "Какая часть высоты текста сверху и снизу занята мягкими краями. Текущая строка всегда остаётся в чёткой середине.",
@@ -661,6 +661,7 @@ impl SettingId {
             ],
             Self::LyricsUnit => &[
                 c!("По буквам", "Караоке закрашивает слова буква за буквой, в «Волне» прыгает каждая буква, «Фокус» зажигает строку целиком."),
+                c!("По слогам", "Каждый слог заливается, пока его поют: быстрые слоги пробегают быстро, протяжный светится всю ноту. В «Волне» слово поднимается со своими слогами."),
                 c!("По словам", "Каждое слово загорается целиком, когда его начинают петь, а в «Волне» подпрыгивает всё слово."),
             ],
             Self::WaveFallback => &[
@@ -806,7 +807,7 @@ impl SettingId {
             Self::BgColors => usize::from(p.bg_shapes_colors).min(3),
             Self::BgHue => usize::from(p.bg_shapes_hue).min(7),
             Self::LyricsStyle => usize::from(p.lyrics_style).min(2),
-            Self::LyricsUnit => usize::from(p.lyrics_by_words),
+            Self::LyricsUnit => usize::from(p.lyrics_unit.min(2)),
             Self::WaveFallback => usize::from(p.wave_syllables_only),
             Self::LyricsGap => usize::from(p.lyrics_gap_style).min(3),
             Self::NpMotion => usize::from(p.np_motion).min(2),
@@ -875,7 +876,7 @@ impl SettingId {
                 p.bg_shapes_hue = i.min(7) as u8;
             }
             Self::LyricsStyle => p.lyrics_style = i.min(2) as u8,
-            Self::LyricsUnit => p.lyrics_by_words = i == 1,
+            Self::LyricsUnit => p.lyrics_unit = i.min(2) as u8,
             Self::WaveFallback => p.wave_syllables_only = i == 1,
             Self::LyricsGap => p.lyrics_gap_style = i.min(3) as u8,
             Self::NpMotion => p.np_motion = i.min(2) as u8,

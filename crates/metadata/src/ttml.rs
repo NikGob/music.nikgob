@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use nikgob_core::lyrics::{LyricLine, LyricWord};
+use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSync};
 use roxmltree::{Document, Node};
 
 use crate::error::{MetadataError, Result};
@@ -451,13 +451,18 @@ fn decimal(s: &str) -> Option<Duration> {
 /// as timed `<span>`s (their spaces inside them), background vocals as an
 /// `x-bg` span of the line before them, the second voice of a duet as
 /// agent `v2`, translations and romanisations as inline spans. A line
-/// without words keeps its text untimed.
+/// without words keeps its text untimed. Syllables are glued spans under
+/// `itunes:timing="Syllable"`.
 pub fn serialize_ttml(lines: &[LyricLine]) -> String {
     let words = lines.iter().any(|l| !l.words.is_empty());
+    // Apple's own format: a word of several syllables is spans with no
+    // space between them («нон-», «стоп »).
+    let syllables = LyricsSync::of(lines) == Some(LyricsSync::Syllable);
     let mut out = String::from(
         "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:ttm=\"http://www.w3.org/ns/ttml#metadata\"          xmlns:itunes=\"http://music.apple.com/lyric-ttml-internal\"",
     );
-    out.push_str(if words { " itunes:timing=\"Word\">
+    out.push_str(if syllables { " itunes:timing=\"Syllable\">
+" } else if words { " itunes:timing=\"Word\">
 " } else { " itunes:timing=\"Line\">
 " });
     out.push_str("<head><metadata><ttm:agent type=\"person\" xml:id=\"v1\"/><ttm:agent type=\"person\" xml:id=\"v2\"/></metadata></head>
@@ -885,5 +890,23 @@ mod tests {
         // Line timing alone.
         let only = vec![LyricLine::new(ms(61_230), "Раз"), LyricLine::new(ms(65_000), "Два")];
         assert_eq!(parse_ttml(&serialize_ttml(&only)).unwrap().lines, only);
+    }
+
+    /// A word timed by syllables is glued spans under
+    /// `itunes:timing="Syllable"` and reads back as the same pieces.
+    #[test]
+    fn written_syllables_read_back_glued() {
+        let word = |a: u64, b: u64, t: &str| LyricWord { start: ms(a), end: ms(b), text: t.into() };
+        let mut l = LyricLine::new(ms(159_100), "Это нон-стоп");
+        l.words = vec![word(159_100, 159_400, "Э"), word(159_400, 159_600, "то "), word(159_600, 159_900, "нон-"), word(159_900, 160_300, "стоп")];
+        l.end = Some(ms(160_300));
+        let xml = serialize_ttml(std::slice::from_ref(&l));
+        assert!(xml.contains("itunes:timing=\"Syllable\""), "{xml}");
+        assert!(xml.contains("нон-</span><span begin=\"2:39.900\""), "{xml}");
+        assert_eq!(parse_ttml(&xml).unwrap().lines, vec![l]);
+        // Words only stay «Word».
+        let mut w = LyricLine::new(ms(1_000), "Раз два");
+        w.words = vec![word(1_000, 1_500, "Раз "), word(1_500, 2_000, "два")];
+        assert!(serialize_ttml(&[w]).contains("itunes:timing=\"Word\""));
     }
 }

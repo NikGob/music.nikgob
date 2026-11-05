@@ -1093,9 +1093,46 @@ impl Aligner {
         // Word timing from the aligner when one spells the language;
         // otherwise the segments as lines.
         match Self::needs(&lines).map(|id| self.usable(id)).filter(|id| self.catalog.ready(*id)) {
-            Some(_) => Ok(self.fit(prep, &lines, false, progress)?.map_or(lines.clone(), |f| f.lines)),
+            Some(_) => Ok(match self.fit(prep, &lines, false, progress)? {
+                Some(mut f) => {
+                    self.syllables(prep, &lines, &mut f);
+                    f.lines
+                }
+                None => lines,
+            }),
             None => Ok(lines),
         }
+    }
+}
+
+impl Aligner {
+    /// Cuts the made words of `fit` into syllables timed by the voice
+    /// ([`crate::syllables`]), each line by the aligner that heard it
+    /// (`lines`: the text `fit` was made from). Word starts and ends stay.
+    pub fn syllables(&mut self, prep: &Prepared, lines: &[LyricLine], fit: &mut Fit) {
+        let Some(main) = fit.aligner else { return };
+        let route = Route::of_with(lines, self.tuning.by_sound);
+        let ids: Vec<ModelId> = fit
+            .lines
+            .iter()
+            .map(|l| {
+                let own = route.as_ref().zip(lines.iter().position(|s| s.text == l.text)).map(|(r, i)| self.usable(r.lines[i]));
+                own.filter(|id| prep.emissions(*id).is_some()).unwrap_or(main)
+            })
+            .collect();
+        let mut vocabs: HashMap<ModelId, Vocab> = HashMap::new();
+        for id in &ids {
+            if !vocabs.contains_key(id)
+                && let Ok(v) = self.vocab(*id)
+            {
+                vocabs.insert(*id, v);
+            }
+        }
+        let heard: Vec<Option<crate::syllables::Heard<'_>>> = ids
+            .iter()
+            .map(|id| Some(crate::syllables::Heard { em: prep.emissions(*id)?, vocab: vocabs.get(id)?, english: *id != ModelId::AlignerMms }))
+            .collect();
+        crate::syllables::time_lines(&mut fit.lines, &heard);
     }
 }
 
