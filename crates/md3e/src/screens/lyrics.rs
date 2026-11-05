@@ -415,8 +415,16 @@ fn paint(
         // A wait that is unfolding or folding has only part of its slot:
         // its highlight and ring take that part and fade with it.
         let slot = Rect::from_min_size(pos2(left, y), vec2(wrap, (slot_h + extra) * room));
-        if target == Some(i) {
-            painter.rect_filled(slot.expand2(vec2(10.0, 6.0 * room)), 14, s.on_surface.gamma_multiply(0.06 * edge * room));
+        // The hover's state layer fades in and out like any M3 one.
+        let hover = anim::fraction(
+            &ctx,
+            id.with(("hover", slot_of[i])),
+            if target == Some(i) { 1.0 } else { 0.0 },
+            nikgob_motion::tokens::FAST_EFFECTS,
+        )
+        .clamp(0.0, 1.0);
+        if hover > 0.001 {
+            painter.rect_filled(slot.expand2(vec2(10.0, 6.0 * room)), 14, s.on_surface.gamma_multiply(0.06 * edge * room * hover));
         }
         let DisplayLine::Line(j) = *item else {
             if let DisplayLine::Interlude { start, end, .. } = *item {
@@ -1881,6 +1889,18 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
             LayoutJob::simple_singleline(format!("{digit:.0}"), style.font_id(), color)
         });
         painter.galley(Align2::CENTER_CENTER.anchor_size(c, g.size()).min, g, color);
+        // The digit before fades out (shrinking a little) while this one
+        // fades in, so the count never blinks between them.
+        if digit < 3.0 && age < 0.12 {
+            let out = 1.0 - age / 0.12;
+            let prev = edge * shown * fade * reveal * out * out;
+            let shrink = if theme.reduced_motion { 1.0 } else { 1.0 - 0.12 * (1.0 - out) };
+            let color = s.primary.gamma_multiply(prev);
+            let g = crate::typography::layout_sized(painter, style_at(28.0 * k * shrink), |style, _| {
+                LayoutJob::simple_singleline(format!("{:.0}", digit + 1.0), style.font_id(), color)
+            });
+            painter.galley(Align2::CENTER_CENTER.anchor_size(c, g.size()).min, g, color);
+        }
     }
     // Leaving: the gaps shut, the wave smooths out and the track takes the
     // indicator's colour (one closed ring), then that ring goes.
