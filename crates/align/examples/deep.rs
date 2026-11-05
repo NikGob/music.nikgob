@@ -518,6 +518,8 @@ fn main() {
     num("T_STOP", &mut tuning.stop_hold);
     flag("T_COMMA", &mut tuning.comma_pause);
     flag("T_INNER", &mut tuning.sound_inner);
+    flag("T_RUNS", &mut tuning.sound_runs);
+    flag("T_COMMA_FILL", &mut tuning.comma_fill);
     flag("T_COMMA_ENDS", &mut tuning.comma_ends);
     aligner.set_tuning(tuning);
     println!("deep {deep:?} on {device:?}, jobs matching {filter:?}");
@@ -558,6 +560,15 @@ fn main() {
             let mode = if timed { "timed" } else { "plain" };
             let (t, far) = score(job, &lines, timed, &fit);
             println!("  {mode} {} | {}{}", t.show(), verdict(&fit), if far.is_empty() { String::new() } else { format!(" | off: {far}") });
+            // `SHOW=86-92`: the made words of the lines starting in those seconds.
+            if let Some((from, to)) = std::env::var("SHOW").ok().and_then(|s| s.split_once('-').and_then(|(a, b)| Some((a.parse::<f32>().ok()?, b.parse::<f32>().ok()?)))) {
+                for l in fit.lines.iter().filter(|l| (from..=to).contains(&l.start.as_secs_f32())) {
+                    println!("    {:7.2} «{}»", l.start.as_secs_f32(), l.text);
+                    for w in &l.words {
+                        println!("            {:7.2} {:7.2} {:?}", w.start.as_secs_f32(), w.end.as_secs_f32(), w.text);
+                    }
+                }
+            }
             let group = if job.kind == "case" { format!("case {mode}") } else { format!("{} {} {mode}", job.kind, key(main)) };
             for g in [group, format!("all {mode}")] {
                 match pooled.iter_mut().find(|(n, _)| *n == g) {

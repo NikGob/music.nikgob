@@ -441,6 +441,8 @@ fn tuning_from_env() -> Tuning {
     flag("T_SAID", &mut t.said);
     flag("T_COMMA", &mut t.comma_pause);
     flag("T_INNER", &mut t.sound_inner);
+    flag("T_RUNS", &mut t.sound_runs);
+    flag("T_COMMA_FILL", &mut t.comma_fill);
     flag("T_COMMA_ENDS", &mut t.comma_ends);
     num("T_HOLD_VMR", &mut t.hold_vmr);
     num("T_HOLD_PROM", &mut t.hold_prominence);

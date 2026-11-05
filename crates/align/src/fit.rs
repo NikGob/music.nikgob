@@ -130,6 +130,17 @@ pub struct Tuning {
     /// spelled by sound for the Russian aligner (not one at a line's end:
     /// «Я будто тролль warlord» lost a line so).
     pub sound_inner: bool,
+    /// Two or more Latin words in a row in a line of a Russian text that
+    /// is not mostly Latin, anywhere in it, are spelled by sound for the
+    /// Russian aligner («Грёбаный сукин сын Oliver Sykes?!»); a single
+    /// one at the line's end is not.
+    pub sound_runs: bool,
+    /// Voice the text lacks may also go after punctuation inside a line
+    /// (the filler there too, not only between lines): an echo or a
+    /// backing repeat of the words before the comma does not pull the
+    /// line's next words onto it («Он такой скучный, (он такой скучный,
+    /// он такой…) просто зануда»).
+    pub comma_fill: bool,
     /// A word before punctuation inside a line ends with its voice once
     /// [`BREATH`] of what follows has none (not [`TAIL`]).
     pub comma_ends: bool,
@@ -187,6 +198,8 @@ impl Tuning {
             said: false,
             comma_pause: false,
             sound_inner: false,
+            sound_runs: false,
+            comma_fill: false,
             comma_ends: false,
         }
     }
@@ -196,8 +209,7 @@ impl Tuning {
 /// `align-7` (docs/lyrics-align.md, «align-6», «align-7»):
 /// `align-5`'s blank inside a word where there is no voice, and
 /// * Latin lines of a Russian text by sound ([`Tuning::sound_lines`]; a hook
-///   sung over and over only with line times, [`Tuning::sound_plain`]), and
-///   a lone Latin word between Cyrillic ones ([`Tuning::sound_inner`]);
+///   sung over and over only with line times, [`Tuning::sound_plain`]);
 /// * a pause without voice longer than 8 frames (0.16 s) between two words
 ///   of a line costs 0.3 a frame, 0.2 after punctuation
 ///   ([`Tuning::comma_pause`]: the pause goes between lines, or where the
@@ -212,7 +224,9 @@ impl Tuning {
 ///
 /// Measured on the bench with the hearing cut at whole strides (50 frames a
 /// second), alone and together; none is worse on any song or case of it.
-/// The rest of the knobs measured worse or no better.
+/// The rest of the knobs measured worse or no better, or better only on
+/// the user's case songs and on none of the reference-timed ones
+/// ([`Tuning::sound_inner`], [`Tuning::sound_runs`]: off).
 impl Default for Tuning {
     fn default() -> Self {
         let mut t = Self::align4();
@@ -227,7 +241,6 @@ impl Default for Tuning {
         t.hum_ends = true;
         t.foreign_costs = true;
         t.said = true;
-        t.sound_inner = true;
         t.comma_ends = true;
         t
     }
@@ -338,7 +351,10 @@ pub fn fit_text_with(em: &Emissions, vocab: &Vocab, foreign: &[Foreign<'_>], lin
         let ps: Vec<String> = if l.words.is_empty() { pieces(&l.text) } else { l.words.iter().map(|w| w.text.clone()).collect() };
         // A lone Latin word with Cyrillic words on both sides («Кто
         // раздаёт вам swag? (Ла-ла-ла-ла)») by sound too (`sound_inner`).
-        let inner = if tuning.sound_inner && vocab.cyrillic_only() { latin_inside(&ps) } else { vec![false; ps.len()] };
+        // So is a run of two or more Latin words (`sound_runs`: «сукин сын
+        // Oliver Sykes?!»), unless another aligner takes the line.
+        let runs = tuning.sound_runs && !foreign.iter().any(|f| f.lines.contains(&li));
+        let inner = if (tuning.sound_inner || runs) && vocab.cyrillic_only() { latin_inside(&ps, tuning.sound_inner, runs) } else { vec![false; ps.len()] };
         for (p, inner) in ps.into_iter().zip(inner) {
             let say = if by_sound || inner { latin_by_sound(&p.to_lowercase()) } else { p.clone() };
             let toks = vocab.tokens(&say);
@@ -631,6 +647,12 @@ fn place_on_path(
             let k = path.toks.len() - 1;
             path.gaps[k] = gap;
             path.pauses[k] = matches!(gap, Gap::Words | Gap::Comma);
+        }
+        // After a comma the voice may hold what the text does not write
+        // (`comma_fill`): an echo of the words before it.
+        if gap == Gap::Comma && tuning.comma_fill && fill && path.toks.last() != Some(&Tok::Filler) {
+            path.push(Tok::Filler, band);
+            owner.push(None);
         }
     }
     if path.toks.is_empty() {
@@ -1337,14 +1359,35 @@ fn align_pieces(em: &Emissions, vocab: &Vocab, placed: &mut [Placed], idx: &[usi
 }
 
 /// Which of a line's pieces are a lone Latin word with a Cyrillic word
-/// on each side ([`Tuning::sound_inner`]); one at either end of the line is
-/// not («Я будто тролль warlord»).
-fn latin_inside(pieces: &[String]) -> Vec<bool> {
-    let cyrillic = |p: &String| p.chars().any(|c| matches!(c, '\u{0400}'..='\u{04ff}'));
-    let latin = |p: &String| p.chars().any(|c| c.is_ascii_alphabetic()) && !cyrillic(p);
-    (0..pieces.len())
-        .map(|i| latin(&pieces[i]) && i > 0 && cyrillic(&pieces[i - 1]) && pieces.get(i + 1).is_some_and(cyrillic))
-        .collect()
+/// on each side (`lone`, [`Tuning::sound_inner`]), or one of two or more
+/// Latin words in a row (`runs`, [`Tuning::sound_runs`]); a single one at
+/// either end of the line is neither («Я будто тролль warlord»).
+///
+/// Pieces glued without a space between them («war|lord», a word in
+/// syllables) are one word here.
+fn latin_inside(pieces: &[String], lone: bool, runs: bool) -> Vec<bool> {
+    // The written words: each piece's word, and each word's text.
+    let mut word_of = Vec::with_capacity(pieces.len());
+    let mut words: Vec<String> = Vec::new();
+    let mut open = false;
+    for p in pieces {
+        if !open {
+            words.push(String::new());
+        }
+        word_of.push(words.len() - 1);
+        words.last_mut().unwrap().push_str(p);
+        open = !p.ends_with(char::is_whitespace);
+    }
+    let cyrillic = |w: &String| w.chars().any(|c| matches!(c, '\u{0400}'..='\u{04ff}'));
+    let latin: Vec<bool> = words.iter().map(|w| w.chars().any(|c| c.is_ascii_alphabetic()) && !cyrillic(w)).collect();
+    let chosen: Vec<bool> = (0..words.len())
+        .map(|i| {
+            let alone = lone && i > 0 && cyrillic(&words[i - 1]) && words.get(i + 1).is_some_and(cyrillic);
+            let in_run = runs && (i > 0 && latin[i - 1] || latin.get(i + 1).copied().unwrap_or(false));
+            latin[i] && (alone || in_run)
+        })
+        .collect();
+    word_of.into_iter().map(|w| chosen[w]).collect()
 }
 
 /// A word written with punctuation after it (a comma, a dash, a full
@@ -1802,11 +1845,18 @@ mod tests {
 
     #[test]
     fn a_lone_latin_word_inside_a_cyrillic_line_is_found() {
-        let inside = |t: &str| latin_inside(&pieces(t));
+        let inside = |t: &str| latin_inside(&pieces(t), true, false);
         assert_eq!(inside("Кто раздаёт вам swag? (Ла-ла-ла-ла)"), [false, false, false, true, false]);
         assert_eq!(inside("Я будто тролль warlord"), [false; 4]);
         assert_eq!(inside("Джинсовка Levi's, йоу!"), [false, true, false]);
         assert_eq!(inside("Totally Spies, йоу!"), [false; 3]);
+        let runs = |t: &str| latin_inside(&pieces(t), false, true);
+        assert_eq!(runs("Грёбаный сукин сын Oliver Sykes?!"), [false, false, false, true, true]);
+        assert_eq!(runs("Я будто тролль warlord"), [false; 4]);
+        assert_eq!(runs("Кто раздаёт вам swag? (Ла-ла-ла-ла)"), [false; 5]);
+        // A word in syllables is one word.
+        let glued: Vec<String> = ["Я ", "будто ", "тролль ", "war", "lord"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(latin_inside(&glued, true, true), [false; 5]);
     }
 
     /// «Это нон-стоп» then twelve seconds of instrumental: the next line's
