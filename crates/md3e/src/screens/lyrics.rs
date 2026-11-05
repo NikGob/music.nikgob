@@ -183,6 +183,13 @@ fn paint(
         }
         None => ctx.data_mut(|d| d.remove::<Jump>(jump_id)),
     }
+    // While a click holds its line, everything is painted where the seek
+    // will land (its point, with the lead): the clicked line starts as it
+    // will go on and the old one keeps its state as it fades, instead of a
+    // frame or more of the old position's singing on the new line. Once
+    // the seek is back and the painted position is only coming up to its
+    // point (a lead behind the sound), it is followed.
+    let pos = jump_pos(jump, pos, back, state.prefs.lyrics_lead);
     let ci = cur.unwrap_or(0);
     let active = |i: usize| {
         let l = &lines[i];
@@ -746,6 +753,17 @@ fn with_jump(
         return (by_pos, None);
     }
     (Some(i), Some(j))
+}
+
+/// The painted position while a click's `jump` holds: where its seek will
+/// land, with the `lead`, until the painted position `pos` is coming up to
+/// the seek's point from behind (`back`, a lead behind the sound), which is
+/// then followed; `pos` without a jump.
+fn jump_pos(jump: Option<Jump>, pos: Duration, back: Duration, lead: f32) -> Duration {
+    match jump {
+        Some(j) if !(pos < j.to && pos + back >= j.to) => led(j.to, lead),
+        _ => pos,
+    }
 }
 
 /// How long a line without an end time takes to sing: ~15 letters a second,
@@ -3129,6 +3147,23 @@ mod tests {
             assert!(p >= was);
             (last, was) = (Some(p), p);
         }
+    }
+
+    /// While a click holds its line, the lyrics are painted where its seek
+    /// will land, so the painted position meets the seek's without a jump.
+    #[test]
+    fn a_held_click_is_painted_where_its_seek_lands() {
+        let ms = Duration::from_millis;
+        let j = Jump { item: DisplayLine::Line(3), to: ms(20_000), at: 1.0 };
+        assert_eq!(jump_pos(None, ms(5_000), Duration::ZERO, 0.2), ms(5_000));
+        // A lead ahead: where the seek lands is its point plus the lead.
+        assert_eq!(jump_pos(Some(j), ms(5_000), Duration::ZERO, 0.2), led(ms(20_000), 0.2));
+        assert_eq!(jump_pos(Some(j), ms(40_000), Duration::ZERO, 0.0), ms(20_000));
+        // A lead behind: the seek lands behind its point and is followed.
+        let back = ms(300);
+        assert_eq!(jump_pos(Some(j), ms(5_000), back, -0.3), ms(19_700));
+        assert_eq!(jump_pos(Some(j), ms(19_700), back, -0.3), ms(19_700));
+        assert_eq!(jump_pos(Some(j), ms(19_850), back, -0.3), ms(19_850));
     }
 
     /// A line that is no longer current goes on being sung from where it
