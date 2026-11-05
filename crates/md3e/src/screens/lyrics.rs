@@ -166,6 +166,10 @@ fn paint(
     let now = anim::now(&ctx);
     let playing = state.player.status == Status::Playing;
     let pos = steady(&ctx, id.with("steady"), led(state.player.position_now(), state.prefs.lyrics_lead), playing);
+    // Each item's motion (its place, focus, wait) is kept under its slot,
+    // which stays with the same line when the text is swapped for the same
+    // song's (timing made, another source), so nothing moves or dims then.
+    let slot_of = slots(&ctx, id.with("slots"), &item_keys(lines, &items));
 
     // Waiting owns the anchor during a break; otherwise follow the last
     // main line. Background voices light up independently while sung. A
@@ -183,6 +187,13 @@ fn paint(
         }
         None => ctx.data_mut(|d| d.remove::<Jump>(jump_id)),
     }
+    // While a click holds its line, everything is painted where the seek
+    // will land (its point, with the lead): the clicked line starts as it
+    // will go on and the old one keeps its state as it fades, instead of a
+    // frame or more of the old position's singing on the new line. Once
+    // the seek is back and the painted position is only coming up to its
+    // point (a lead behind the sound), it is followed.
+    let pos = jump_pos(jump, pos, back, state.prefs.lyrics_lead);
     let ci = cur.unwrap_or(0);
     let active = |i: usize| {
         let l = &lines[i];
@@ -247,9 +258,9 @@ fn paint(
         let keep = match items[i] {
             // On Material's expressive spatial spring: the lines part (and
             // close again) in one soft move.
-            DisplayLine::Interlude { .. } => anim::f32(
+            DisplayLine::Interlude { .. } => anim::fraction(
                 &ctx,
-                id.with(("wait-room", i)),
+                id.with(("wait-room", slot_of[i])),
                 if cur == Some(i) { 1.0 } else { 0.0 },
                 if theme.reduced_motion { WAIT_ROOM.without_bounce() } else { WAIT_ROOM },
             )
@@ -294,8 +305,30 @@ fn paint(
         ctx.request_repaint();
     }
     let scroll = follow + manual.shift(now);
+    // When the view moves or resizes (the window, the layout's span, a card
+    // that rises in), the text goes with it at once, kept at its share of
+    // the height: the springs are moved with their frame instead of chasing
+    // it, so only the text's own moves are animated.
+    let frame = (rect.top(), rect.height() * sizes.anchor);
+    let frame_id = id.with("frame");
+    if let Some(was) = ctx.data(|d| d.get_temp::<(f32, f32)>(frame_id))
+        && was != frame
+    {
+        let (top, anchor) = (frame.0 - was.0, frame.1 - was.1);
+        if state.prefs.lyrics_cascade {
+            for i in 0..items.len() {
+                anim::shift_f32(&ctx, id.with(("y", slot_of[i])), top + anchor);
+            }
+        } else {
+            anim::shift_f32(&ctx, id.with("scroll"), -anchor);
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(frame_id, frame));
+
+    // A scroll by hand follows the hand as closely in both modes; the
+    // text's own moves take the calmer spring.
     let together = if !state.prefs.lyrics_cascade {
-        anim::f32(&ctx, id.with("scroll"), scroll, Spring::new(1.0, 300.0))
+        anim::f32(&ctx, id.with("scroll"), scroll, if manual_on { HAND } else { Spring::new(1.0, 300.0) })
     } else { scroll };
 
     // Where each item is drawn this frame.
@@ -305,12 +338,12 @@ fn paint(
             // A wave: lines further from the current one follow more
             // lazily, without wobbling past their place.
             let spring = if manual_on {
-                Spring::new(1.0, 1600.0)
+                HAND
             } else {
                 Spring::new(0.9, (300.0 - 26.0 * far).max(110.0))
             };
             if state.prefs.lyrics_cascade {
-                anim::f32(&ctx, id.with(("y", i)), rect.top() + tops[i] - scroll, spring)
+                anim::f32(&ctx, id.with(("y", slot_of[i])), rect.top() + tops[i] - scroll, spring)
             } else {
                 rect.top() + tops[i] - together
             }
@@ -348,16 +381,16 @@ fn paint(
             DisplayLine::Interlude { .. } => cur == Some(i),
         };
         // 0 → 1 as the line becomes the current one, and back.
-        let focus = anim::f32(
+        let focus = anim::fraction(
             &ctx,
-            id.with(("focus", i)),
+            id.with(("focus", slot_of[i])),
             if is_cur { 1.0 } else { 0.0 },
             Spring::new(1.0, 170.0),
         )
         .clamp(0.0, 1.0);
         // The sung part's colour comes in faster than the line's focus, so
         // the first word lights on its beat instead of easing in with it.
-        let shine = anim::f32(&ctx, id.with(("shine", i)), if is_cur { 1.0 } else { 0.0 }, nikgob_motion::tokens::FAST_EFFECTS)
+        let shine = anim::fraction(&ctx, id.with(("shine", slot_of[i])), if is_cur { 1.0 } else { 0.0 }, nikgob_motion::tokens::FAST_EFFECTS)
             .clamp(0.0, 1.0);
         let duet = match *item {
             DisplayLine::Line(j) => lines[j].duet,
@@ -399,9 +432,9 @@ fn paint(
                 let clipped = painter.with_clip_rect(room_rect.intersect(painter.clip_rect()));
                 // The ring comes once its room has begun to open, and goes
                 // before the room closes (see [`waiting`]).
-                let appear = anim::f32(
+                let appear = anim::fraction(
                     &ctx,
-                    id.with(("wait-ring", i)),
+                    id.with(("wait-ring", slot_of[i])),
                     if is_cur && room > 0.3 { 1.0 } else { 0.0 },
                     if theme.reduced_motion { WAIT_RING.without_bounce() } else { WAIT_RING },
                 )
@@ -441,6 +474,13 @@ fn paint(
             soft_galley(&painter, line.min, &g, dim, blur, blur_radius);
             continue;
         }
+        // Where the line is sung up to: the position while it is current;
+        // once it is not, it goes on being sung as it fades (a front or a
+        // jump mid-word when the next line comes in finishes instead of
+        // jumping to the end), held where it was after a seek.
+        let sung_id = id.with(("sung", slot_of[i]));
+        let sung = if is_cur { pos } else { sung_pos(ctx.data(|d| d.get_temp::<Duration>(sung_id)), pos) };
+        ctx.data_mut(|d| d.insert_temp(sung_id, sung));
         // A line-synced line is sung at a speaking pace (the source label
         // says «по строкам», so it's not passed off as real timing).
         let paced;
@@ -470,17 +510,17 @@ fn paint(
         // light up one by one.
         if theme.reduced_motion && !look.words {
             if state.prefs.lyrics_glow {
-                let (head, feather) = if look.style == Style::Karaoke { timing.glide(pos, feather, window) } else { (f32::INFINITY, 0.0) };
+                let (head, feather) = if look.style == Style::Karaoke { timing.glide(sung, feather, window) } else { (f32::INFINITY, 0.0) };
                 glow(&painter, &g, line, head, feather, lit, focus * 0.1);
             }
             if look.style == Style::Karaoke {
-                let (head, feather) = timing.glide(pos, feather, window);
-                karaoke(&painter, &g, line, if is_cur { head } else { f32::INFINITY }, feather, base, color);
+                let (head, feather) = timing.glide(sung, feather, window);
+                karaoke(&painter, &g, line, head, feather, base, color);
             } else {
                 painter.galley_with_override_text_color(line.min, g, color);
             }
         } else {
-            timed_line(&painter, &g, line, &timing, pos, is_cur, focus, size, look, base, color, &state.prefs);
+            timed_line(&painter, &g, line, &timing, sung, is_cur, focus, size, look, base, color, &state.prefs);
         }
     }
     // A click goes to its line (a wait: to just before the singing): the
@@ -502,6 +542,9 @@ fn paint(
         ctx.request_repaint();
     }
 }
+
+/// The spring the text follows a scroll by hand on.
+const HAND: Spring = Spring::new(1.0, 1600.0);
 
 /// Below this share of its slot a folding wait counts as gone: it takes no
 /// pointer and draws nothing.
@@ -620,6 +663,17 @@ fn steady_pos(last: Option<Duration>, pos: Duration, playing: bool) -> Duration 
 /// Further back than this the position is a seek, and is followed.
 const STEP_BACK: Duration = Duration::from_millis(350);
 
+/// Where a line that is no longer current is sung up to, from where it was
+/// sung the frame before (`last`): on with the song as it plays, but a
+/// seek either way (further than [`STEP_BACK`]) leaves it as it was while
+/// it fades.
+fn sung_pos(last: Option<Duration>, pos: Duration) -> Duration {
+    match last {
+        Some(last) if pos < last || pos - last > STEP_BACK => last,
+        _ => pos,
+    }
+}
+
 fn returning_offset(offset: f32, until: f64, now: f64) -> f32 {
     let t = ((now - until) / 0.5).clamp(0.0, 1.0) as f32;
     offset * (1.0 - t * t * (3.0 - 2.0 * t))
@@ -725,6 +779,17 @@ fn with_jump(
     (Some(i), Some(j))
 }
 
+/// The painted position while a click's `jump` holds: where its seek will
+/// land, with the `lead`, until the painted position `pos` is coming up to
+/// the seek's point from behind (`back`, a lead behind the sound), which is
+/// then followed; `pos` without a jump.
+fn jump_pos(jump: Option<Jump>, pos: Duration, back: Duration, lead: f32) -> Duration {
+    match jump {
+        Some(j) if !(pos < j.to && pos + back >= j.to) => led(j.to, lead),
+        _ => pos,
+    }
+}
+
 /// How long a line without an end time takes to sing: ~15 letters a second,
 /// at least 0.8 s, but never past 92 % of the `gap` (seconds) to the next line.
 /// Word timing for a line that only has a start: its words share a
@@ -757,6 +822,78 @@ fn speaking_secs(text: &str, gap: f32) -> f32 {
     // Not `clamp`: with lines closer than 0.87 s the cap is the smaller
     // bound, and `clamp` panics on that.
     (0.4 + letters * 0.066).max(0.8).min((gap * 0.92).max(0.3))
+}
+
+/// A key for each item that is the same for the same line in another
+/// copy of the text: its words (and whether it is a background voice) and
+/// how many times they came before; a wait by the line it waits for.
+fn item_keys(lines: &[LyricLine], items: &[DisplayLine]) -> Vec<u64> {
+    use std::hash::{Hash, Hasher};
+    let hash = |v: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        v(&mut h);
+        h.finish()
+    };
+    let mut seen = std::collections::HashMap::<(&str, bool), u32>::new();
+    let mut keys: Vec<u64> = items
+        .iter()
+        .map(|item| match *item {
+            DisplayLine::Line(j) => {
+                let l = &lines[j];
+                let n = seen.entry((l.text.trim(), l.background)).or_default();
+                *n += 1;
+                hash(&|h| ("line", l.text.trim(), l.background, *n).hash(h))
+            }
+            DisplayLine::Interlude { .. } => 0,
+        })
+        .collect();
+    let mut next = hash(&|h| "end".hash(h));
+    for (k, item) in keys.iter_mut().zip(items).rev() {
+        match item {
+            DisplayLine::Line(_) => next = *k,
+            DisplayLine::Interlude { .. } => *k = hash(&|h| ("wait", next).hash(h)),
+        }
+    }
+    keys
+}
+
+/// The items' slots, kept under `id` from frame to frame.
+#[derive(Clone, Default)]
+struct Slots {
+    keys: Vec<u64>,
+    slots: Vec<u64>,
+    next: u64,
+}
+
+/// The slot of each item with `keys`: when most of them were there the
+/// frame before (the same song's text, swapped), each keeps its slot and a
+/// new one gets a slot of its own; otherwise (another song) the slots go
+/// by place, as the items do.
+fn slots(ctx: &egui::Context, id: egui::Id, keys: &[u64]) -> Vec<u64> {
+    let was = ctx.data(|d| d.get_temp::<Slots>(id)).unwrap_or_default();
+    if was.keys == keys {
+        return was.slots;
+    }
+    let now = carry_slots(&was, keys);
+    let out = now.slots.clone();
+    ctx.data_mut(|d| d.insert_temp(id, now));
+    out
+}
+
+fn carry_slots(was: &Slots, keys: &[u64]) -> Slots {
+    let mut next = was.next.max(was.slots.iter().max().map_or(0, |m| m + 1));
+    let mut fresh = || {
+        next += 1;
+        next - 1
+    };
+    let old: std::collections::HashMap<u64, u64> = was.keys.iter().copied().zip(was.slots.iter().copied()).collect();
+    let kept = keys.iter().filter(|k| old.contains_key(k)).count();
+    let slots = if !was.keys.is_empty() && kept * 2 >= keys.len() {
+        keys.iter().map(|k| old.get(k).copied().unwrap_or_else(&mut fresh)).collect()
+    } else {
+        (0..keys.len()).map(|i| was.slots.get(i).copied().unwrap_or_else(&mut fresh)).collect()
+    };
+    Slots { keys: keys.to_vec(), slots, next }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1395,6 +1532,21 @@ const JUMP_SETTLE: f32 = 0.4;
 /// A sung wave letter (or word) rests this high, in text sizes, at jump 1.
 const RISE: f32 = 0.15;
 
+/// How far (0..1) a wave lift is drawn on whole pixels: from none while it
+/// moves to all within [`CRISP`] seconds of coming to rest (`rested`
+/// seconds ago, negative while it still moves), and back to none as its
+/// line's `hold` leaves 1 (it moves again then, going down).
+fn crisp_lift(rested: f32, hold: f32) -> f32 {
+    let smooth = |x: f32| {
+        let x = x.clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    };
+    smooth(rested / CRISP) * smooth((hold - 0.9) / 0.1)
+}
+
+/// Seconds a lift at rest takes to settle onto whole pixels.
+const CRISP: f32 = 0.15;
+
 fn syllable_head(from: f32, to: f32, start: f32, end: f32, pos: f32) -> f32 {
     let progress = if end <= start { f32::from(pos >= start) } else { ((pos - start) / (end - start)).clamp(0.0, 1.0) };
     from + (to - from) * progress
@@ -1416,6 +1568,9 @@ fn held_envelope(end: f32, pos: f32) -> f32 {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `pos` is where the line is sung up to: the position while it is
+/// current, and after that on as it fades ([`sung_pos`]), so nothing in it
+/// jumps when it stops being current; it only goes back with `focus`.
 fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Timing, pos: Duration,
     current: bool, focus: f32, size: f32, look: Look, base: Color32, lit: Color32, prefs: &Prefs)
 {
@@ -1423,7 +1578,7 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
     let pace = Pace::of(prefs);
     let rise = pace.rise(style);
     let window = pace.window();
-    let (head, feather) = if current { timing.glide(pos, pace.feather(size), window) } else { (f32::INFINITY, 0.0) };
+    let (head, feather) = timing.glide(pos, pace.feather(size), window);
     let p = pos.as_secs_f32();
     let theme = Theme::get(painter.ctx());
     let glow_color = crate::lerp_color(lit, theme.scheme.primary, 0.3);
@@ -1449,24 +1604,23 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         } else {
             None
         };
-        let on = onset.map(|at| if current { light_over(p - at, rise, window) } else { 1.0 });
+        let on = onset.map(|at| light_over(p - at, rise, window));
         // Karaoke and Focus keep one baseline: sung and unsung words never
         // drift apart (that read as broken text). Reduced motion keeps the
         // wave down too (it only lights up).
         let lift = match onset {
             Some(at) if style == Style::Wave && !theme.reduced_motion => {
-                let (height, moving) = if current {
-                    let t = p - at;
-                    // The jump's speed scales its smoothing window too.
-                    let spread = window / pace.jump;
-                    (jump_over(t, pace.jump, spread), t + ONSET_LEAD < JUMP_SETTLE / pace.jump + spread)
-                } else {
-                    (1.0, false)
-                };
+                let t = p - at;
+                // The jump's speed scales its smoothing window too.
+                let spread = window / pace.jump;
+                let height = jump_over(t, pace.jump, spread);
                 let lift = height * RISE * size * prefs.lyrics_wave_jump.max(0.0) * hold;
                 // At rest on whole pixels, so a raised word is as crisp as
                 // the rest; in motion to the fraction, so it never steps.
-                if moving || (hold > 0.0 && hold < 1.0) { lift } else { (lift * ppp).round() / ppp }
+                // It eases between the two, so it never steps onto or off
+                // the pixel either.
+                let crisp = crisp_lift(t + ONSET_LEAD - (JUMP_SETTLE / pace.jump + spread), hold);
+                lift + ((lift * ppp).round() / ppp - lift) * crisp
             }
             _ => 0.0,
         };
@@ -1747,8 +1901,8 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
     let thick = if thick_form { 6.0 } else { 3.0 } * k * shrink;
     // As in Compose's CircularWavyProgressIndicator: flat near 0 % and
     // 100 %, wavy in between; the crests travel along the arc (one
-    // wavelengths a second) and the ring itself stays put. Wall-clock
-    // time while playing, so it never looks frozen; still when paused.
+    // wavelengths a second) and the ring itself stays put. Song time, so
+    // it is still when paused and goes on from there.
     let ramp = (progress / 0.1).min((1.0 - progress) / 0.05).clamp(0.0, 1.0);
     let height = prefs.lyrics_gap_height.clamp(0.5, 2.0);
     // About half the stroke: anything less reads as a lumpy polygon, and
@@ -1758,7 +1912,10 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
     } else { 0.0 };
     let (waves, amp) = wave_geometry(prefs.lyrics_gap_waves, radius, thick, requested_amp, height);
     let amp = amp * (1.0 - close);
-    let clock = if motion && playing { anim::now(painter.ctx()) as f32 } else { 0.0 };
+    // The song's own time: it stops where it is on a pause and goes on from
+    // there (the wall clock while playing and 0 when paused made the wave
+    // jump at both).
+    let clock = if motion { pos.as_secs_f32() } else { 0.0 };
     // One wavelength a second: a calm ripple. The ring itself stays put.
     let phase = clock * TAU;
     // Chord clearance includes both round caps and radial wave excursions.
@@ -3107,5 +3264,112 @@ mod tests {
             assert!(p >= was);
             (last, was) = (Some(p), p);
         }
+    }
+
+    /// A raised letter goes onto whole pixels only after its jump is over,
+    /// and off them as its line goes, each without a step.
+    #[test]
+    fn a_lift_eases_onto_and_off_whole_pixels() {
+        assert_eq!(crisp_lift(-0.1, 1.0), 0.0, "still moving");
+        assert_eq!(crisp_lift(0.0, 1.0), 0.0);
+        assert_eq!(crisp_lift(CRISP, 1.0), 1.0);
+        assert_eq!(crisp_lift(5.0, 0.9), 0.0, "going down with its line");
+        assert_eq!(crisp_lift(5.0, 0.5), 0.0);
+        let mut was = 0.0;
+        for i in 0..=100 {
+            let c = crisp_lift(i as f32 * CRISP / 100.0, 1.0);
+            assert!(c >= was && c - was < 0.05, "{i}: {was} → {c}");
+            was = c;
+        }
+        let mut was = 1.0;
+        for i in 0..=100 {
+            let c = crisp_lift(5.0, 1.0 - i as f32 * 0.001);
+            assert!(c <= was && was - c < 0.05, "{i}: {was} → {c}");
+            was = c;
+        }
+    }
+
+    /// The same song's text swapped (timing made, another source) keeps each
+    /// line's slot, so its place, focus and wait go on; another song's text
+    /// takes the slots by place.
+    #[test]
+    fn a_swapped_text_keeps_each_line_in_its_slot() {
+        let plain = vec![line(1.0, Some(2.0), "Раз"), line(2.0, Some(3.0), "Два"), line(6.0, Some(7.0), "Раз"), line(7.0, Some(8.0), "Три")];
+        let items = display_lines(&plain);
+        let keys = item_keys(&plain, &items);
+        assert_eq!(keys.len(), items.len());
+        let unique: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len(), "a repeated line is told apart");
+        let first = carry_slots(&Slots::default(), &keys);
+        assert_eq!(first.slots, (0..keys.len() as u64).collect::<Vec<_>>());
+        // Made timing ends the second line sooner: a wait comes in before
+        // the third line, the lines keep their slots and the wait gets one.
+        let mut made = plain.clone();
+        made[1].end = Some(Duration::from_secs_f32(2.0));
+        let made_items = display_lines(&made);
+        assert!(made_items.len() > items.len(), "{made_items:?}");
+        let swapped = carry_slots(&first, &item_keys(&made, &made_items));
+        for (i, item) in made_items.iter().enumerate() {
+            if let DisplayLine::Line(j) = item {
+                let was = items.iter().position(|it| *it == DisplayLine::Line(*j)).unwrap();
+                assert_eq!(swapped.slots[i], first.slots[was], "line {j}");
+            } else {
+                assert!(!first.slots.contains(&swapped.slots[i]), "the new wait has a slot of its own");
+            }
+        }
+        // Another song: by place.
+        let other = vec![line(1.0, Some(2.0), "Иное"), line(2.0, Some(3.0), "Совсем")];
+        let other_items = display_lines(&other);
+        let next = carry_slots(&swapped, &item_keys(&other, &other_items));
+        assert_eq!(next.slots[..], swapped.slots[..other_items.len()]);
+    }
+
+    /// While a click holds its line, the lyrics are painted where its seek
+    /// will land, so the painted position meets the seek's without a jump.
+    #[test]
+    fn a_held_click_is_painted_where_its_seek_lands() {
+        let ms = Duration::from_millis;
+        let j = Jump { item: DisplayLine::Line(3), to: ms(20_000), at: 1.0 };
+        assert_eq!(jump_pos(None, ms(5_000), Duration::ZERO, 0.2), ms(5_000));
+        // A lead ahead: where the seek lands is its point plus the lead.
+        assert_eq!(jump_pos(Some(j), ms(5_000), Duration::ZERO, 0.2), led(ms(20_000), 0.2));
+        assert_eq!(jump_pos(Some(j), ms(40_000), Duration::ZERO, 0.0), ms(20_000));
+        // A lead behind: the seek lands behind its point and is followed.
+        let back = Duration::from_secs_f32(0.3);
+        let landed = led(ms(20_000), -0.3);
+        assert_eq!(jump_pos(Some(j), ms(5_000), back, -0.3), landed);
+        assert_eq!(jump_pos(Some(j), landed, back, -0.3), landed);
+        assert_eq!(jump_pos(Some(j), ms(19_850), back, -0.3), ms(19_850));
+    }
+
+    /// A line that is no longer current goes on being sung from where it
+    /// was (no jump to the end when the next line comes in mid-word), and
+    /// stays as it was when the song went back before it.
+    #[test]
+    fn a_line_left_goes_on_from_where_it_was_sung() {
+        let ms = Duration::from_millis;
+        assert_eq!(sung_pos(Some(ms(3_000)), ms(3_016)), ms(3_016), "on with the song");
+        assert_eq!(sung_pos(Some(ms(3_000)), ms(1_000)), ms(3_000), "a seek back holds it");
+        assert_eq!(sung_pos(Some(ms(3_000)), ms(9_000)), ms(3_000), "so does a seek on");
+        assert_eq!(sung_pos(None, ms(1_000)), ms(1_000));
+        // Frame by frame it keeps up with the song for as long as it fades.
+        let mut last = Some(ms(3_000));
+        for f in 1..60 {
+            let p = sung_pos(last, ms(3_000 + 16 * f));
+            assert_eq!(p, ms(3_000 + 16 * f));
+            last = Some(p);
+        }
+        // Karaoke: the front where the line was left is where it goes on
+        // from, instead of the whole line lit at once.
+        let mut l = line(1.0, Some(4.0), "Свет из окна");
+        l.words = vec![word(1.0, 2.0, "Свет "), word(2.0, 2.5, "из "), word(2.5, 4.0, "окна")];
+        with_painter(|painter| {
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let t = Timing::new(&l, &g).unwrap();
+            let left = ms(3_000);
+            let (at, _) = t.glide(left, 8.0, 0.2);
+            let (next, _) = t.glide(sung_pos(Some(left), left + ms(16)), 8.0, 0.2);
+            assert!(at.is_finite() && next >= at && next - at < 5.0, "{at} → {next}");
+        });
     }
 }

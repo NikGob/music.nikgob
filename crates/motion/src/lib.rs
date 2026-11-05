@@ -234,6 +234,16 @@ impl<T: Animatable> Animated<T> {
         self.spring = spring;
     }
 
+    /// Move the value, its target and its whole way there by `by`, as when
+    /// the frame it is measured in moves: speed and timing stay as they were.
+    pub fn shift(&mut self, by: T) {
+        let by = by.to_components();
+        for i in 0..T::LEN {
+            self.from[i] += by[i];
+            self.target[i] += by[i];
+        }
+    }
+
     /// Jump to `value` with no animation.
     pub fn snap(&mut self, value: T) {
         let c = value.to_components();
@@ -307,6 +317,22 @@ mod tests {
         assert!((a.velocity(0.1) - vel).abs() < 1e-2);
         assert!(a.is_settled(5.0));
         assert_eq!(a.value(5.0), -50.0);
+    }
+
+    #[test]
+    fn a_shift_moves_the_whole_way_and_keeps_its_speed() {
+        let mut a = Animated::new(0.0_f32, EXPRESSIVE_DEFAULT_SPATIAL);
+        a.set_target(100.0, 0.0);
+        let (x, v) = (a.value(0.05), a.velocity(0.05));
+        a.shift(-30.0);
+        assert!((a.value(0.05) - (x - 30.0)).abs() < 1e-3);
+        assert!((a.velocity(0.05) - v).abs() < 1e-2);
+        assert_eq!(a.target(), 70.0);
+        assert_eq!(a.value(5.0), 70.0);
+        let mut rest = Animated::new(5.0_f32, EXPRESSIVE_DEFAULT_SPATIAL);
+        rest.shift(2.0);
+        assert!(rest.is_settled(1.0));
+        assert_eq!(rest.value(1.0), 7.0);
     }
 
     #[test]
