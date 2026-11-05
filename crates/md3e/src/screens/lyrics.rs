@@ -1331,6 +1331,7 @@ struct Timing {
 
 impl Timing {
     /// The timing of `l` laid out as `g`, its letters' times by weight.
+    #[cfg(test)]
     fn new(l: &LyricLine, g: &Galley) -> Option<Self> {
         Self::build(l, g, false)
     }
