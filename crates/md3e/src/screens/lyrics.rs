@@ -247,7 +247,7 @@ fn paint(
         let keep = match items[i] {
             // On Material's expressive spatial spring: the lines part (and
             // close again) in one soft move.
-            DisplayLine::Interlude { .. } => anim::f32(
+            DisplayLine::Interlude { .. } => anim::fraction(
                 &ctx,
                 id.with(("wait-room", i)),
                 if cur == Some(i) { 1.0 } else { 0.0 },
@@ -348,7 +348,7 @@ fn paint(
             DisplayLine::Interlude { .. } => cur == Some(i),
         };
         // 0 → 1 as the line becomes the current one, and back.
-        let focus = anim::f32(
+        let focus = anim::fraction(
             &ctx,
             id.with(("focus", i)),
             if is_cur { 1.0 } else { 0.0 },
@@ -357,7 +357,7 @@ fn paint(
         .clamp(0.0, 1.0);
         // The sung part's colour comes in faster than the line's focus, so
         // the first word lights on its beat instead of easing in with it.
-        let shine = anim::f32(&ctx, id.with(("shine", i)), if is_cur { 1.0 } else { 0.0 }, nikgob_motion::tokens::FAST_EFFECTS)
+        let shine = anim::fraction(&ctx, id.with(("shine", i)), if is_cur { 1.0 } else { 0.0 }, nikgob_motion::tokens::FAST_EFFECTS)
             .clamp(0.0, 1.0);
         let duet = match *item {
             DisplayLine::Line(j) => lines[j].duet,
@@ -399,7 +399,7 @@ fn paint(
                 let clipped = painter.with_clip_rect(room_rect.intersect(painter.clip_rect()));
                 // The ring comes once its room has begun to open, and goes
                 // before the room closes (see [`waiting`]).
-                let appear = anim::f32(
+                let appear = anim::fraction(
                     &ctx,
                     id.with(("wait-ring", i)),
                     if is_cur && room > 0.3 { 1.0 } else { 0.0 },
