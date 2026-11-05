@@ -222,6 +222,9 @@ struct Pool {
     /// Syllables of a cut word that last nothing, and under 40 ms.
     zero: usize,
     brief: usize,
+    /// Pieces that end before they start or start before the one before
+    /// them ends (out of order, or out of their word).
+    disorder: usize,
     ref_mine: Vec<f32>,
     ref_weighted: Vec<f32>,
     on_mine: Vec<f32>,
@@ -232,12 +235,13 @@ struct Pool {
 
 fn report(name: &str, p: &Pool) {
     println!(
-        "  {name:24} words {:4} moved {} pieces {:4} zero {} <40ms {} | vs reference ({:3}): mine <0.05 {:5.1}% <0.1 {:5.1}% med {:.3} ({:+.3}) / weighted <0.05 {:5.1}% <0.1 {:5.1}% med {:.3} ({:+.3}) | vs voice rises ({:4}): mine <0.04 {:5.1}% <0.08 {:5.1}% med {:.3} ({:+.3}) / weighted <0.04 {:5.1}% <0.08 {:5.1}% med {:.3} ({:+.3})",
+        "  {name:24} words {:4} moved {} pieces {:4} zero {} <40ms {} disorder {} | vs reference ({:3}): mine <0.05 {:5.1}% <0.1 {:5.1}% med {:.3} ({:+.3}) / weighted <0.05 {:5.1}% <0.1 {:5.1}% med {:.3} ({:+.3}) | vs voice rises ({:4}): mine <0.04 {:5.1}% <0.08 {:5.1}% med {:.3} ({:+.3}) / weighted <0.04 {:5.1}% <0.08 {:5.1}% med {:.3} ({:+.3})",
         p.words,
         p.moved,
         p.pieces,
         p.zero,
         p.brief,
+        p.disorder,
         p.ref_mine.len(),
         within(&p.ref_mine, 0.05),
         within(&p.ref_mine, 0.1),
@@ -310,6 +314,7 @@ fn main() {
             p.pieces += after.words.len();
             p.zero += after.words.iter().filter(|w| w.end <= w.start).count();
             p.brief += after.words.iter().filter(|w| w.end > w.start && w.end - w.start < Duration::from_millis(40)).count();
+            p.disorder += after.words.iter().filter(|w| w.end < w.start).count() + after.words.windows(2).filter(|w| w[1].start + Duration::from_millis(1) < w[0].end).count();
             p.moved += before.words.iter().zip(&glued[0].words).filter(|(a, b)| a != b).count() + before.words.len().abs_diff(glued[0].words.len());
         }
         // The reference's syllables against these, at the same letters.
@@ -372,6 +377,7 @@ fn merge(into: &mut Pool, p: Pool) {
     into.pieces += p.pieces;
     into.zero += p.zero;
     into.brief += p.brief;
+    into.disorder += p.disorder;
     into.ref_mine.extend(p.ref_mine);
     into.ref_weighted.extend(p.ref_weighted);
     into.on_mine.extend(p.on_mine);
