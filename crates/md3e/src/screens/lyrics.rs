@@ -3160,9 +3160,10 @@ mod tests {
         assert_eq!(jump_pos(Some(j), ms(5_000), Duration::ZERO, 0.2), led(ms(20_000), 0.2));
         assert_eq!(jump_pos(Some(j), ms(40_000), Duration::ZERO, 0.0), ms(20_000));
         // A lead behind: the seek lands behind its point and is followed.
-        let back = ms(300);
-        assert_eq!(jump_pos(Some(j), ms(5_000), back, -0.3), ms(19_700));
-        assert_eq!(jump_pos(Some(j), ms(19_700), back, -0.3), ms(19_700));
+        let back = Duration::from_secs_f32(0.3);
+        let landed = led(ms(20_000), -0.3);
+        assert_eq!(jump_pos(Some(j), ms(5_000), back, -0.3), landed);
+        assert_eq!(jump_pos(Some(j), landed, back, -0.3), landed);
         assert_eq!(jump_pos(Some(j), ms(19_850), back, -0.3), ms(19_850));
     }
 
