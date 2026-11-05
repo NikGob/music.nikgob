@@ -117,6 +117,13 @@ pub struct Tuning {
     /// there is no voice), not by a plain forced alignment: «Мяу,
     /// nyan.mp3» no longer starts 15 s before the tag is said.
     pub foreign_costs: bool,
+    /// Numbers and abbreviations in capitals are spelled as they are said
+    /// ([`crate::text::said`]).
+    pub said: bool,
+    /// Without line times, [`Self::sound_lines`] leaves out lines sung
+    /// again in the next or the line before (a hook: the English aligner
+    /// keeps its repeats better there).
+    pub sound_plain: bool,
 }
 
 /// See [`Tuning::far_cap`].
@@ -162,19 +169,40 @@ impl Tuning {
             hold_prominence: 0.0,
             hum_ends: false,
             foreign_costs: false,
+            sound_plain: false,
+            said: false,
         }
     }
 
 }
 
-/// `align-5`: a blank inside a word costs where there is no voice
-/// (docs/lyrics-align.md, «align-5»). Latin by sound is off: better on
-/// «Ханнамонтана», a line worse on «Мой топор»; the rest measured no
-/// better.
+/// `align-6` (docs/lyrics-align.md, «align-6»): `align-5`'s blank inside a
+/// word where there is no voice, and
+/// * Latin lines of a Russian text by sound ([`Tuning::sound_lines`]; a hook
+///   sung over and over only with line times, [`Tuning::sound_plain`]);
+/// * a pause without voice longer than 8 frames (0.16 s) between two words
+///   of a line costs 0.2 a frame (the pause goes between lines);
+/// * a word that cannot be held is held at most 0.15 s ([`Tuning::stop_hold`]);
+/// * hums end with their voice ([`Tuning::hum_ends`]);
+/// * lines heard by another aligner keep these costs
+///   ([`Tuning::foreign_costs`]);
+/// * numbers and abbreviations in capitals are spelled as said
+///   ([`Tuning::said`]: «25 ТГК» → «двадцать пять тэгэка»).
+///
+/// Each was measured on the bench alone and together; none is worse on any
+/// song or case of it. The rest of the knobs measured worse or no better.
 impl Default for Tuning {
     fn default() -> Self {
         let mut t = Self::align4();
         t.costs.in_word_silent = 0.3;
+        t.costs.line_pause = 0.2;
+        t.costs.pause_after = 8;
+        t.sound_lines = true;
+        t.sound_plain = true;
+        t.stop_hold = 0.15;
+        t.hum_ends = true;
+        t.foreign_costs = true;
+        t.said = true;
         t
     }
 }

@@ -140,7 +140,9 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, duty: &mut Duty) -> 
             p
         }
     };
-    let route = Route::of(&job.lines)?;
+    // Every aligner any tuning may route a line to (Latin lines by sound
+    // or not), so measuring never runs a model.
+    let route = Route::of_with(&job.lines, false, false, true)?;
     for id in route.models() {
         let file = cache.join(format!("{stem}.{}.em", key(id)));
         match read_f32(&file) {
@@ -148,6 +150,8 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, duty: &mut Duty) -> 
                 let (vocab, blank, fps) = (v[0] as usize, v[1] as usize, v[2]);
                 prep.set_emissions(id, Emissions { logp: v[3..].to_vec(), vocab, fps, blank });
             }
+            // `CACHED=1` never runs a model.
+            None if std::env::var("CACHED").is_ok() => return None,
             None => {
                 // Heard once here; the second hearing is kept apart below.
                 let tuning = aligner.tuning();
@@ -378,9 +382,19 @@ fn verdict(f: &Fit) -> String {
 }
 
 /// The timing pass to measure: the player's ([`Tuning::default`]), or
-/// `align-4`'s with `BASE=4`, each knob overridden by its variable.
+/// `align-4`'s with `BASE=4`, `align-5`'s with `BASE=5`, each knob
+/// overridden by its variable.
 fn tuning_from_env() -> Tuning {
-    let mut t = if std::env::var("BASE").as_deref() == Ok("4") { Tuning::align4() } else { Tuning::default() };
+    let mut t = match std::env::var("BASE").as_deref() {
+        Ok("4") => Tuning::align4(),
+        // align-5: align-4 and a blank inside a word without voice at 0.3.
+        Ok("5") => {
+            let mut t = Tuning::align4();
+            t.costs.in_word_silent = 0.3;
+            t
+        }
+        _ => Tuning::default(),
+    };
     let num = |k: &str, v: &mut f32| {
         if let Some(x) = std::env::var(k).ok().and_then(|x| x.parse().ok()) {
             *v = x;
@@ -417,6 +431,8 @@ fn tuning_from_env() -> Tuning {
     flag("T_FAR_CAP", &mut t.far_cap);
     flag("T_HUM_ENDS", &mut t.hum_ends);
     flag("T_FOREIGN_COSTS", &mut t.foreign_costs);
+    flag("T_SOUND_PLAIN", &mut t.sound_plain);
+    flag("T_SAID", &mut t.said);
     num("T_HOLD_VMR", &mut t.hold_vmr);
     num("T_HOLD_PROM", &mut t.hold_prominence);
     t

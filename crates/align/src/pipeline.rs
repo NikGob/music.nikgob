@@ -417,16 +417,21 @@ mod tests {
     #[test]
     fn latin_lines_of_a_russian_text_stay_with_it_by_sound() {
         let ru = text(&["Я пойду прогуляюсь", "Miley Cyrus", "Miley Cyrus", "Где мои деньги", "Дома закончился крэк", "Мы рисовали в подъезде то ли пентаграмму"]);
-        assert_eq!(Route::of_with(&ru, false, false).unwrap().lines[1], ModelId::AlignerEn);
-        let by_sound = Route::of_with(&ru, true, false).unwrap();
+        assert_eq!(Route::of_with(&ru, false, false, true).unwrap().lines[1], ModelId::AlignerEn);
+        let by_sound = Route::of_with(&ru, true, false, true).unwrap();
         assert_eq!(by_sound.models(), [ModelId::AlignerRu]);
         let both = text(&["Я иду домой", "Baby, I love you so much tonight", "Hold me close and never let me go"]);
-        assert_eq!(Route::of_with(&both, true, false).unwrap().lines[1], ModelId::AlignerEn);
+        assert_eq!(Route::of_with(&both, true, false, true).unwrap().lines[1], ModelId::AlignerEn);
         // Lines of two Latin words or more by sound, a lone «Swag» by the
         // English aligner.
         let lines = text(&["Я пойду прогуляюсь", "Miley Cyrus", "Swag", "Где мои деньги", "Дома закончился крэк", "Мы рисовали в подъезде то ли пентаграмму"]);
-        let r = Route::of_with(&lines, false, true).unwrap();
+        let r = Route::of_with(&lines, false, true, true).unwrap();
         assert_eq!(r.lines[1..3], [ModelId::AlignerRu, ModelId::AlignerEn]);
+        // Without line times a hook sung over and over stays with the
+        // English aligner, a tag sung once goes by sound.
+        let hook = text(&["Я пойду прогуляюсь", "Miley Cyrus", "Miley Cyrus", "Мяу, nyan.mp3", "Где мои деньги", "Дома закончился крэк", "Мы рисовали в подъезде"]);
+        let r = Route::of_with(&hook, false, true, false).unwrap();
+        assert_eq!(r.lines[1..4], [ModelId::AlignerEn, ModelId::AlignerEn, ModelId::AlignerRu]);
     }
 
     /// The voice coming in sharply is an onset a few frames on; backing
@@ -512,22 +517,30 @@ impl Route {
     /// `None` when no aligner spells the text's language.
     pub fn of(lines: &[LyricLine]) -> Option<Self> {
         let t = Tuning::default();
-        Self::of_with(lines, t.by_sound, t.sound_lines)
+        Self::of_with(lines, t.by_sound, t.sound_lines, true)
     }
 
     /// [`Self::of`]; `by_sound`: the Latin lines of a mostly Russian text
     /// stay with the Russian aligner, spelled by sound ([`Tuning::by_sound`]);
     /// `sound_lines`: those of two Latin words or more ([`sung_by_sound`],
-    /// [`Tuning::sound_lines`]).
-    pub fn of_with(lines: &[LyricLine], by_sound: bool, sound_lines: bool) -> Option<Self> {
+    /// [`Tuning::sound_lines`]), with `repeated` also those sung again in
+    /// the next or the line before (a hook: without line times to hold
+    /// each repeat, the English aligner keeps them better).
+    pub fn of_with(lines: &[LyricLine], by_sound: bool, sound_lines: bool, repeated: bool) -> Option<Self> {
         let text: String = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
         let lang = Lang::of(&text);
         let main = aligner_for(lang)?;
         let keep = (by_sound || sound_lines) && lang == Lang::Russian && latin_share(&text) < BILINGUAL;
+        let key = |l: &LyricLine| -> String { l.text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect() };
+        let again = |i: usize| (i > 0 && key(&lines[i - 1]) == key(&lines[i])) || lines.get(i + 1).is_some_and(|n| key(n) == key(&lines[i]));
         let lines = Lang::of_lines(lang, lines.iter().map(|l| l.text.as_str()))
             .into_iter()
             .zip(lines)
-            .map(|(l, line)| {
+            .enumerate()
+            .map(|(i, (l, line))| {
+                if !by_sound && !repeated && again(i) {
+                    return aligner_for(l).unwrap_or(main);
+                }
                 // A Latin line with a Cyrillic word («С Miley Cyrus») reads as
                 // another language, not English: by sound all the same.
                 let latin = l == Lang::English || (l == Lang::Other && sung_by_sound(&line.text));
@@ -713,6 +726,7 @@ impl Aligner {
         if let Some(v) = self.vocabs.get(&id) {
             let mut v = v.clone();
             v.by_sound = self.tuning.by_sound;
+            v.said = self.tuning.said;
             return Ok(v);
         }
         if !self.catalog.ready(id) {
@@ -723,6 +737,7 @@ impl Aligner {
         self.vocabs.insert(id, vocab.clone());
         let mut vocab = vocab;
         vocab.by_sound = self.tuning.by_sound;
+        vocab.said = self.tuning.said;
         Ok(vocab)
     }
 
@@ -762,10 +777,11 @@ impl Aligner {
     /// Each line goes to the aligner of its language ([`Route`]) when that
     /// one is there; the text's own is needed.
     pub fn fit(&mut self, prep: &mut Prepared, lines: &[LyricLine], timed: bool, progress: &mut dyn FnMut(Stage) -> bool) -> Result<Option<Fit>, Error> {
-        // Latin lines by sound only where the line times hold each repeat
-        // in its place (a plain text: «Miley Cyrus» ×8 slips a repeat).
-        let tuning = Tuning { sound_lines: self.tuning.sound_lines && timed, ..self.tuning };
-        let Some(route) = Route::of_with(lines, tuning.by_sound, tuning.sound_lines) else { return Ok(None) };
+        // A hook of Latin lines sung over and over by sound only where the
+        // line times hold each repeat in its place (without them «Miley
+        // Cyrus» ×8 slips a repeat).
+        let tuning = self.tuning;
+        let Some(route) = Route::of_with(lines, tuning.by_sound, tuning.sound_lines, timed || !tuning.sound_plain) else { return Ok(None) };
         let main = self.usable(route.main);
         let mut others: Vec<(ModelId, Vec<usize>)> = Vec::new();
         for (i, id) in route.lines.iter().enumerate() {
