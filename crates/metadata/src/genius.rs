@@ -2,6 +2,11 @@
 //! the site's own search (`/api/search/multi`, what its search box asks)
 //! finds the song, its public page has the text.
 //!
+//! The track's artists are matched one by one against Genius's own («MellSher»
+//! and «и ещё 1 исполнитель» against «MellSher & и ещё 1 исполнитель (i eshe
+//! 1 ispolnitel')»), and the search is asked again with the title alone when
+//! the main artist and the title find nothing that fits.
+//!
 //! A song can be on Genius twice (a re-recording, «космоцветок (ONF)» next
 //! to «Космоцветок» of 2020): when the track's album is known, the version
 //! on that album wins. Translation and romanisation pages (by «Genius …»
@@ -21,6 +26,9 @@ const MIN_TITLE_SIMILARITY: f64 = 0.85;
 const MIN_ARTIST_SIMILARITY: f64 = 0.7;
 /// Candidates whose album is looked at when there are several.
 const ALBUM_CHECKS: usize = 3;
+/// When the current matching came (2026-11-06 UTC): a miss stored before it
+/// was found by an older one and is worth asking again.
+pub const MATCHING_SINCE: i64 = 1_793_923_200_000;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
@@ -121,11 +129,18 @@ impl Genius {
         Ok(env.response.song.album.map(|a| a.name).filter(|n| !n.trim().is_empty()))
     }
 
-    /// The plain text of the song, `None` when Genius has none.
-    pub async fn find(&self, artist: &str, title: &str, album: Option<&str>) -> Result<Option<String>> {
-        let (artist, title) = (search_artist(artist), search_title(title));
-        let hits = self.search(&format!("{artist} {title}")).await?;
-        let mut found: Vec<Song> = hits.into_iter().filter(|s| same_song(s, &artist, &title)).collect();
+    /// The plain text of the song, `None` when Genius has none. `artists`:
+    /// the track's credited artists, the main one first (one shown credit
+    /// such as «A, B» or «A feat. B» is split here).
+    pub async fn find(&self, artists: &[&str], title: &str, album: Option<&str>) -> Result<Option<String>> {
+        let names = credited(artists);
+        let mut found = Vec::new();
+        for query in queries(&names, &search_title(title)) {
+            found = self.search(&query).await?.into_iter().filter(|s| same_song(s, &names, title)).collect();
+            if !found.is_empty() {
+                break;
+            }
+        }
         if found.is_empty() {
             return Ok(None);
         }
@@ -168,19 +183,98 @@ fn base_part(title: &str) -> &str {
     title.split(" (").next().unwrap_or(title).trim()
 }
 
-fn same_song(s: &Song, artist: &str, title: &str) -> bool {
+/// The names to match: each credited artist, or one shown credit split
+/// («A, B», «A feat. B» → «A», «B»). Only clear separators split: «и ещё 1
+/// исполнитель», «Florence and the Machine» stay whole.
+fn credited(artists: &[&str]) -> Vec<String> {
+    let parts: Vec<String> = match artists {
+        [one] => {
+            let main = search_artist(one);
+            let feat = one.trim().strip_prefix(main.as_str()).unwrap_or("");
+            let feat = feat.trim_start().split_once(' ').map_or("", |(_, rest)| rest);
+            main.split([',', '&', ';']).chain(feat.split([',', '&', ';'])).map(str::to_owned).collect()
+        }
+        many => many.iter().map(|a| search_artist(a)).collect(),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for part in parts {
+        let part = part.trim();
+        if !part.is_empty() && !out.iter().any(|o| o == part) {
+            out.push(part.to_owned());
+        }
+    }
+    out
+}
+
+/// What the search is asked, in order until one finds the song: the main
+/// artist with the title, every artist with it (when there are several),
+/// the title alone.
+fn queries(names: &[String], title: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(main) = names.first() {
+        out.push(format!("{main} {title}"));
+    }
+    if names.len() > 1 {
+        out.push(format!("{} {title}", names.join(" ")));
+    }
+    out.push(title.to_owned());
+    out.dedup();
+    out
+}
+
+/// A Genius credit's names: the primary artist, every one in «A, B & C
+/// (Ft. D)», each also without its transliteration in brackets.
+fn genius_names(s: &Song) -> Vec<String> {
+    let names = s.artist_names.replace(" (Ft. ", ", ").replace(" (Feat. ", ", ").replace(" (feat. ", ", ");
+    let mut out = vec![artist_key(&s.primary_artist.name), artist_key(base_part(&s.primary_artist.name)), artist_key(&names)];
+    for part in names.split([',', '&']) {
+        let part = part.trim().trim_end_matches(')').trim();
+        out.push(artist_key(part));
+        out.push(artist_key(base_part(part)));
+    }
+    out.retain(|k| !k.is_empty());
+    out
+}
+
+/// A title in two scripts, «Разгром (Mayhem)» or «Mayhem (Разгром)»: the
+/// part before the bracket, which says the same in another script.
+fn one_script(title: &str) -> Option<&str> {
+    let (base, rest) = title.split_once(" (")?;
+    let cyrillic = |t: &str| t.chars().any(|c| matches!(c, '\u{0400}'..='\u{04FF}'));
+    let latin = |t: &str| t.chars().any(|c| c.is_ascii_alphabetic());
+    let other = (cyrillic(base) && !cyrillic(rest) && latin(rest)) || (latin(base) && !latin(rest) && cyrillic(rest));
+    other.then_some(base.trim())
+}
+
+fn same_song(s: &Song, names: &[String], title: &str) -> bool {
     if s.primary_artist.name.starts_with("Genius ") || s.lyrics_state.eq_ignore_ascii_case("unreleased") {
         return false;
     }
-    let want = title_key(title).base;
-    let t = similarity(&want, &title_key(&s.title).base).max(similarity(&want, &title_key(base_part(&s.title)).base));
+    // A translation or romanisation page under the artist's own name.
+    let lower = s.title.to_lowercase();
+    if ["translation)", "romanized)", "перевод)"].iter().any(|w| lower.contains(w)) {
+        return false;
+    }
+    let theirs = [title_key(&s.title).base, title_key(base_part(&s.title)).base];
+    let ours = [Some(title), one_script(title)];
+    let t = ours
+        .iter()
+        .flatten()
+        .map(|o| title_key(o).base)
+        .flat_map(|o| theirs.iter().map(move |t| similarity(&o, t)))
+        .fold(0.0, f64::max);
     if t < MIN_TITLE_SIMILARITY {
         return false;
     }
-    let want = artist_key(artist);
-    want.is_empty()
-        || similarity(&want, &artist_key(&s.primary_artist.name)) >= MIN_ARTIST_SIMILARITY
-        || s.artist_names.split([',', '&']).any(|a| similarity(&want, &artist_key(a.trim())) >= MIN_ARTIST_SIMILARITY)
+    let mut want: Vec<String> = names.iter().map(|n| artist_key(n)).filter(|k| !k.is_empty()).collect();
+    if want.is_empty() {
+        return true;
+    }
+    if names.len() > 1 {
+        want.push(artist_key(&names.join(" & ")));
+    }
+    let theirs = genius_names(s);
+    want.iter().any(|w| theirs.iter().any(|t| similarity(w, t) >= MIN_ARTIST_SIMILARITY))
 }
 
 /// The text of a song page: every `data-lyrics-container` block, line
@@ -378,12 +472,95 @@ mod tests {
         Mock::given(path("/old-lyrics")).respond_with(page("старый")).mount(&server).await;
         Mock::given(path("/new-lyrics")).respond_with(page("новый")).mount(&server).await;
         let g = Genius::with_base_url(http(), &server.uri()).unwrap();
-        assert_eq!(g.find("mzlff", "космоцветок", Some("не забытое старое")).await.unwrap().as_deref(), Some("новый"));
+        assert_eq!(g.find(&["mzlff"], "космоцветок", Some("не забытое старое")).await.unwrap().as_deref(), Some("новый"));
         // Without an album, the first hit.
-        assert_eq!(g.find("mzlff", "космоцветок", None).await.unwrap().as_deref(), Some("старый"));
+        assert_eq!(g.find(&["mzlff"], "космоцветок", None).await.unwrap().as_deref(), Some("старый"));
         // Another song: nothing.
         Mock::given(path("/api/search/multi")).and(query_param("q", "mzlff другое")).respond_with(ResponseTemplate::new(200).set_body_raw(hits, "application/json")).mount(&server).await;
-        assert_eq!(g.find("mzlff", "другое", None).await.unwrap(), None);
+        Mock::given(path("/api/search/multi")).and(query_param("q", "другое")).respond_with(ResponseTemplate::new(200).set_body_raw(hits, "application/json")).mount(&server).await;
+        assert_eq!(g.find(&["mzlff"], "другое", None).await.unwrap(), None);
+    }
+
+    fn song(id: u64, title: &str, artist_names: &str, primary: &str) -> String {
+        format!(r#"{{"type":"song","result":{{"id":{id},"title":"{title}","artist_names":"{artist_names}","primary_artist":{{"name":"{primary}"}},"url":"https://genius.com/song-{id}","lyrics_state":"complete"}}}}"#)
+    }
+
+    fn hits(songs: &[String]) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_raw(format!(r#"{{"response":{{"sections":[{{"type":"song","hits":[{}]}}]}}}}"#, songs.join(",")), "application/json")
+    }
+
+    /// A server that answers every other search with nothing and serves
+    /// `song-<id>` pages with «text <id>».
+    async fn server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/search/multi")).respond_with(hits(&[])).with_priority(10).mount(&server).await;
+        for id in 1..=9 {
+            Mock::given(path(format!("/song-{id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(format!(r#"<div data-lyrics-container="true">text {id}</div>"#), "text/html"))
+                .mount(&server)
+                .await;
+        }
+        server
+    }
+
+    /// «Разгром» by MellSher and «и ещё 1 исполнитель»: on Genius as
+    /// «Разгром (Mayhem)» by «MellSher & и ещё 1 исполнитель (i eshe 1
+    /// ispolnitel')». Each artist is matched on its own, and the shown
+    /// credit as one string is split the same way.
+    #[tokio::test]
+    async fn a_song_of_several_artists_is_found_by_each_of_them() {
+        let server = server().await;
+        let razgrom = song(1, "Разгром (Mayhem)", "MellSher & и ещё 1 исполнитель (i eshe 1 ispolnitel')", "MellSher");
+        Mock::given(path("/api/search/multi")).and(query_param("q", "MellSher Разгром")).respond_with(hits(&[razgrom.clone()])).mount(&server).await;
+        let g = Genius::with_base_url(http(), &server.uri()).unwrap();
+        let found = |artists: &'static [&'static str]| {
+            let g = g.clone();
+            async move { g.find(artists, "Разгром", Some("Разгром")).await.unwrap() }
+        };
+        assert_eq!(found(&["MellSher", "и ещё 1 исполнитель"]).await.as_deref(), Some("text 1"));
+        assert_eq!(found(&["MellSher, и ещё 1 исполнитель"]).await.as_deref(), Some("text 1"));
+        // Only the second artist known: found by the title alone.
+        Mock::given(path("/api/search/multi")).and(query_param("q", "Разгром")).respond_with(hits(&[razgrom])).mount(&server).await;
+        assert_eq!(found(&["и ещё 1 исполнитель"]).await.as_deref(), Some("text 1"));
+    }
+
+    /// The main artist with the title finds other songs: the title alone
+    /// finds this one, the one by another artist of the same title is not
+    /// taken, nor a translation page under the artist's own name.
+    #[tokio::test]
+    async fn the_title_alone_is_asked_when_the_artist_and_title_find_nothing() {
+        let server = server().await;
+        Mock::given(path("/api/search/multi")).and(query_param("q", "Кино Звезда"))
+            .respond_with(hits(&[song(1, "Звезда по имени Солнце", "КИНО (KINO)", "КИНО (KINO)")])).mount(&server).await;
+        Mock::given(path("/api/search/multi")).and(query_param("q", "Звезда")).respond_with(hits(&[
+            song(2, "Звезда (Star)", "Другой", "Другой"),
+            song(3, "Звезда (English Translation)", "Кино", "Кино"),
+            song(4, "Звезда (Zvezda)", "КИНО (KINO)", "КИНО (KINO)"),
+        ])).mount(&server).await;
+        let g = Genius::with_base_url(http(), &server.uri()).unwrap();
+        assert_eq!(g.find(&["Кино"], "Звезда", None).await.unwrap().as_deref(), Some("text 4"));
+        // Another artist with a song of that title only: nothing.
+        assert_eq!(g.find(&["Ария"], "Звезда", None).await.unwrap(), None);
+    }
+
+    /// A title in two scripts on our side matches Genius's one-script one.
+    #[tokio::test]
+    async fn a_title_with_its_translation_in_brackets_matches() {
+        let server = server().await;
+        Mock::given(path("/api/search/multi")).and(query_param("q", "mzlff Космоцветок Cosmoflower"))
+            .respond_with(hits(&[song(5, "Космоцветок", "mzlff", "mzlff")])).mount(&server).await;
+        let g = Genius::with_base_url(http(), &server.uri()).unwrap();
+        assert_eq!(g.find(&["mzlff"], "Космоцветок (Cosmoflower)", None).await.unwrap().as_deref(), Some("text 5"));
+    }
+
+    #[test]
+    fn credits_split_only_on_clear_separators() {
+        assert_eq!(credited(&["MellSher, и ещё 1 исполнитель"]), ["MellSher", "и ещё 1 исполнитель"]);
+        assert_eq!(credited(&["A feat. B & C"]), ["A", "B", "C"]);
+        assert_eq!(credited(&["Florence and the Machine"]), ["Florence and the Machine"]);
+        assert_eq!(credited(&["MellSher", "и ещё 1 исполнитель"]), ["MellSher", "и ещё 1 исполнитель"]);
+        assert_eq!(queries(&credited(&["A", "B"]), "T"), ["A T", "A B T", "T"]);
+        assert_eq!(queries(&[], "T"), ["T"]);
     }
 }
 
@@ -396,8 +573,12 @@ mod live {
     #[ignore = "asks genius.com"]
     async fn genius_live() {
         let g = Genius::new(Http::new(&crate::MetadataConfig::new("tests@example.invalid")).unwrap());
-        let text = g.find("mzlff", "космоцветок", Some("не забытое старое")).await.unwrap().unwrap();
+        let text = g.find(&["mzlff"], "космоцветок", Some("не забытое старое")).await.unwrap().unwrap();
+        println!("{text}");
+        assert!(text.lines().count() > 10);
+        let text = g.find(&["MellSher", "и ещё 1 исполнитель"], "Разгром", Some("Разгром")).await.unwrap().unwrap();
         println!("{text}");
         assert!(text.lines().count() > 10);
     }
 }
+
