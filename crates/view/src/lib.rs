@@ -2358,8 +2358,10 @@ pub enum Command {
     /// Show this track's lyrics from another source; `None` = automatic.
     PickLyricsSource(TrackId, Option<LyricsSource>),
     /// Make line or word timing for a source's text from the recording
-    /// ([`AlignView::craft`]).
-    CraftLyrics { track: TrackId, source: LyricsSource, target: LyricsSync },
+    /// ([`AlignView::craft`]); `deep`: with deep mode's parts for this one
+    /// timing, whatever `Prefs::lyrics_deep` says (which decides only the
+    /// timing the player makes by itself).
+    CraftLyrics { track: TrackId, source: LyricsSource, target: LyricsSync, deep: bool },
     /// Forget a failed [`AlignView::craft`] (its message was seen).
     ClearCraft,
     /// Stop the timing being made ([`AlignView::craft`]); the text stays

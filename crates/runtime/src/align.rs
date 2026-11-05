@@ -13,8 +13,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -79,8 +79,13 @@ pub(crate) enum Req {
     Check { track: TrackId, path: PathBuf, texts: Vec<AlignText>, recognise: bool },
     /// Make timing for one text (asked under the lyrics); `temp`: the
     /// audio was fetched from a stream for this and goes after it. `seq`
-    /// numbers the asks ([`AlignService::cancel_crafts`]).
-    Craft { track: TrackId, path: PathBuf, text: AlignText, target: LyricsSync, temp: bool, seq: u64 },
+    /// numbers the asks ([`AlignService::cancel_crafts`]). `deep`: deep
+    /// mode for this timing only, whatever [`Settings::deep`] says (the
+    /// jobs after it go as the settings say again).
+    Craft { track: TrackId, path: PathBuf, text: AlignText, target: LyricsSync, deep: bool, temp: bool, seq: u64 },
+    /// A part asked for in Settings: it goes ahead of the jobs waiting
+    /// (after the parts asked before it) and shows as waiting until then
+    /// ([`AlignService::download`]).
     Download(ModelId),
     Remove(ModelId),
     Settings(Settings),
@@ -127,7 +132,7 @@ pub(crate) enum Msg {
     CheckDropped(TrackId),
     Crafted { track: TrackId, source: LyricsSource, result: Result<Vec<LyricLine>, String> },
     /// A stream's audio was fetched to make timing from.
-    StreamAudio { track: TrackId, source: LyricsSource, target: LyricsSync, result: Result<PathBuf, String> },
+    StreamAudio { track: TrackId, source: LyricsSource, target: LyricsSync, deep: bool, result: Result<PathBuf, String> },
     /// A text went onto the computer («Сохранить текст»), as read back.
     Kept { track: TrackId, result: Result<Text, String> },
     /// A stream was saved as a file for its text («Песню и текст»).
@@ -150,6 +155,9 @@ pub(crate) struct AlignService {
     /// check under way (only the playing song's is wanted).
     checks: Arc<AtomicU64>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The parts asked for in Settings that wait for the job under way:
+    /// the parts list shows them as coming.
+    waiting: Arc<Mutex<Vec<ModelId>>>,
     pub(crate) catalog: Option<Catalog>,
     /// The tracks whose check is on its way (and their texts' hashes).
     pub(crate) asked: HashMap<TrackId, Vec<String>>,
@@ -171,6 +179,7 @@ impl AlignService {
         let stop = self.stop.clone();
         let cancel = self.cancel.clone();
         let checks = self.checks.clone();
+        let waiting = self.waiting.clone();
         let catalog = Catalog::new(models);
         self.catalog = Some(catalog.clone());
         let spawned = std::thread::Builder::new().name("nikgob-align".into()).spawn(move || {
@@ -178,6 +187,7 @@ impl AlignService {
             let mut t = Thread::new(lib, root, catalog, settings, tx, req_rx, stop, start);
             t.cancel = cancel;
             t.checks = checks;
+            t.waiting = waiting;
             t.run();
         });
         match spawned {
@@ -197,6 +207,24 @@ impl AlignService {
 
     pub(crate) fn running(&self) -> bool {
         self.tx.is_some()
+    }
+
+    /// Asks for a part from Settings; false when it waits already (or the
+    /// thread is not there). It shows as coming at once, and every part
+    /// asked comes, one after another, before the jobs waiting.
+    pub(crate) fn download(&self, id: ModelId) -> bool {
+        if !self.running() {
+            return false;
+        }
+        {
+            let mut w = lock(&self.waiting);
+            if w.contains(&id) {
+                return false;
+            }
+            w.push(id);
+        }
+        self.send(Req::Download(id));
+        true
     }
 
     /// Asks for the playing song's check; one asked before it is called off.
@@ -239,6 +267,20 @@ impl Drop for AlignService {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What the parts list shows as downloading: the parts under way with
+/// their share, and the parts asked for that wait their turn (none yet).
+fn shares(downloading: &HashMap<ModelId, f32>, waiting: &Mutex<Vec<ModelId>>) -> HashMap<ModelId, f32> {
+    let mut all = downloading.clone();
+    for id in lock(waiting).iter() {
+        all.entry(*id).or_insert(0.0);
+    }
+    all
 }
 
 /// The models a part list shows, with their labels.
@@ -358,6 +400,8 @@ struct Thread {
     /// Tracks the pass could not do in this run.
     skip: std::collections::HashSet<TrackId>,
     downloading: HashMap<ModelId, f32>,
+    /// [`AlignService::waiting`].
+    waiting: Arc<Mutex<Vec<ModelId>>>,
     last_work: Instant,
     playing: bool,
     /// The last download failed: the pass waits for the user.
@@ -386,6 +430,7 @@ impl Thread {
             pass_at: Instant::now() + start,
             skip: Default::default(),
             downloading: HashMap::new(),
+            waiting: Arc::default(),
             last_work: Instant::now(),
             playing: false,
             offline: false,
@@ -397,7 +442,7 @@ impl Thread {
     }
 
     fn models(&self) {
-        self.send(Msg::Models(models_view(self.aligner.catalog(), &self.downloading)));
+        self.send(Msg::Models(models_view(self.aligner.catalog(), &shares(&self.downloading, &self.waiting))));
     }
 
     fn stopped(&self) -> bool {
@@ -437,10 +482,13 @@ impl Thread {
                 }
                 self.models();
             }
+            Req::Download(_) => {
+                self.offline = false;
+                // Ahead of the jobs waiting, after the parts asked before.
+                let at = self.asked.iter().take_while(|r| matches!(r, Req::Download(_))).count();
+                self.asked.insert(at, req);
+            }
             other => {
-                if let Req::Download(_) = other {
-                    self.offline = false;
-                }
                 if matches!(other, Req::Check { .. }) {
                     // Only the playing song's check is wanted: skipping
                     // through songs must not queue a separation for each.
@@ -485,6 +533,9 @@ impl Thread {
                     log::error!("align: a job broke off");
                     self.crafting = None;
                     self.checking = None;
+                    // A timing made deep (or not) for itself leaves the
+                    // settings' mode to the jobs after it.
+                    self.aligner.set_deep(self.settings.deep());
                     match asked {
                         Some((track, None)) => self.send(Msg::Checked { track, rows: Vec::new(), heard: None }),
                         Some((track, Some(source))) => {
@@ -551,10 +602,14 @@ impl Thread {
                     }
                 }
             }
-            Req::Craft { track, path, text, target, temp, seq } => {
+            Req::Craft { track, path, text, target, deep, temp, seq } => {
                 self.crafting = Some(seq);
+                // Deep or not for this timing only; the jobs after it go as
+                // the settings say (one thread: nothing runs meanwhile).
+                self.aligner.set_deep(if deep { Deep::CHOSEN } else { Deep::OFF });
                 // Called off while queued: never started.
                 let result = if self.cancelled() { Err(Error::Stopped) } else { self.craft(track, &path, &text, target) };
+                self.aligner.set_deep(self.settings.deep());
                 let cancelled = self.cancelled();
                 self.crafting = None;
                 if temp && let Err(e) = std::fs::remove_file(&path) {
@@ -573,7 +628,10 @@ impl Thread {
                 self.send(Msg::Crafted { track, source: text.source, result });
             }
             Req::Download(id) => {
+                // Its turn: no longer waiting (the download shows itself).
+                lock(&self.waiting).retain(|w| *w != id);
                 let _ = self.ensure(&[id], true, None);
+                self.models();
             }
             _ => {}
         }
@@ -614,13 +672,19 @@ impl Thread {
             let mut last = Instant::now();
             let catalog = self.aligner.catalog().clone();
             let downloading = self.downloading.clone();
+            let waiting = self.waiting.clone();
+            // The song waiting for it hears of the download at once, not
+            // after the first quarter second.
+            let job = v::AlignJob { track, stage: v::AlignStage::Download, progress: before as f32 / total.max(1) as f32, asked, bytes: Some((before, total.max(before))) };
+            let _ = tx.send(Internal::Align(Msg::Job(Some(job))));
             let result = catalog.download(id, &mut |done, size| {
                 let f = done as f32 / size.max(1) as f32;
                 if last.elapsed() > Duration::from_millis(250) {
                     last = Instant::now();
                     let mut d = downloading.clone();
                     d.insert(id, f);
-                    let _ = tx.send(Internal::Align(Msg::Models(models_view(&catalog, &d))));
+                    // The parts that wait their turn still show as coming.
+                    let _ = tx.send(Internal::Align(Msg::Models(models_view(&catalog, &shares(&d, &waiting)))));
                     let all = before + done.min(size);
                     let job = v::AlignJob {
                         track,
@@ -692,8 +756,9 @@ impl Thread {
             }
         }
         // Deep mode's parts after the normal ones (downloaded on its first
-        // use, never needed: see [`Self::ensure`]).
-        let deep = self.settings.deep();
+        // use, never needed: see [`Self::ensure`]). As the job under way
+        // has it: the settings', or a timing's own ([`Req::Craft`]).
+        let deep = self.aligner.deep();
         for route in texts.iter().filter_map(|t| Route::of(&t.lines)) {
             let main = self.aligner.usable(route.main);
             for id in deep.parts(main, self.settings.separate) {
@@ -933,7 +998,7 @@ impl Worker {
                 }
             }
             Msg::Crafted { track, source, result } => self.crafted(track, source, result),
-            Msg::StreamAudio { track, source, target, result } => self.stream_audio(track, source, target, result),
+            Msg::StreamAudio { track, source, target, deep, result } => self.stream_audio(track, source, target, deep, result),
             Msg::Kept { track, result } => self.lyrics_kept(track, result),
             Msg::SongSaved { track, result } => self.song_saved(track, result),
         }
@@ -962,8 +1027,9 @@ impl Worker {
     }
 
     /// Makes `target` timing of `source`'s text from the track's file, or
-    /// from its stream's audio fetched for a while.
-    pub(crate) fn craft_lyrics(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync) {
+    /// from its stream's audio fetched for a while; `deep`: with deep
+    /// mode's parts ([`Req::Craft`]).
+    pub(crate) fn craft_lyrics(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync, deep: bool) {
         if self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)).and_then(|tl| tl.texts_of(source)).is_none() {
             return;
         }
@@ -972,7 +1038,7 @@ impl Worker {
                 let Some(src) = self.lib.active_source(track).ok().flatten().filter(|s| s.kind.is_local()) else { return };
                 let path = self.res.path(&src.locator);
                 self.publish(|s| s.align.craft = Some(v::Craft { track, source, target, lines: None, failed: None }));
-                self.send_craft(track, source, target, path, false);
+                self.send_craft(track, source, target, deep, path, false);
             }
             Place::Stream => {
                 if !self.align.running() {
@@ -992,7 +1058,7 @@ impl Worker {
                 });
                 self.streaming.spawn_internal(async move {
                     let result = yt.save_audio(&locator, &dir).await.map_err(|e| e.to_string());
-                    Internal::Align(Msg::StreamAudio { track, source, target, result })
+                    Internal::Align(Msg::StreamAudio { track, source, target, deep, result })
                 });
             }
             Place::None | Place::Unclear(_) => {}
@@ -1009,7 +1075,7 @@ impl Worker {
         }
     }
 
-    fn send_craft(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync, path: PathBuf, temp: bool) {
+    fn send_craft(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync, deep: bool, path: PathBuf, temp: bool) {
         let text = self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)).and_then(|tl| tl.texts_of(source));
         let Some(text) = text.filter(|_| self.align.running()) else {
             if temp {
@@ -1020,15 +1086,15 @@ impl Worker {
         let (lines, timed) = text.align_lines();
         let text = AlignText { source, lines, timed, hash: text.hash() };
         let seq = self.align.next_craft();
-        self.align.send(Req::Craft { track, path, text, target, temp, seq });
+        self.align.send(Req::Craft { track, path, text, target, deep, temp, seq });
     }
 
     /// A stream's audio is here: the timing is made from it (and it goes
     /// after); a failure says why on the control.
-    fn stream_audio(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync, result: Result<PathBuf, String>) {
+    fn stream_audio(&mut self, track: TrackId, source: LyricsSource, target: LyricsSync, deep: bool, result: Result<PathBuf, String>) {
         let asked = self.state.read().align.craft.as_ref().is_some_and(|c| c.track == track && c.source == source);
         match result {
-            Ok(path) if asked => self.send_craft(track, source, target, path, true),
+            Ok(path) if asked => self.send_craft(track, source, target, deep, path, true),
             Ok(path) => {
                 let _ = std::fs::remove_file(&path);
             }
@@ -1116,10 +1182,20 @@ impl Worker {
         }
     }
 
+    /// Settings' «Скачать» and «Удалить» of a part. A part asked for shows
+    /// as coming at once, also while it waits for the job under way.
     pub(crate) fn align_model(&mut self, key_: &str, download: bool) {
         let Some(id) = id_of(key_) else { return };
         self.publish(|s| s.align.error = None);
-        self.align.send(if download { Req::Download(id) } else { Req::Remove(id) });
+        if !download {
+            self.align.send(Req::Remove(id));
+        } else if self.align.download(id) {
+            self.publish(|s| {
+                if let Some(m) = s.align.models.iter_mut().find(|m| m.key == key_ && m.state == v::ModelState::Missing) {
+                    m.state = v::ModelState::Downloading(0.0);
+                }
+            });
+        }
     }
 }
 
@@ -1169,7 +1245,7 @@ mod tests {
         let audio = dir.path().join("stream.opus");
         std::fs::write(&audio, b"x").unwrap();
         let text = AlignText { source: LyricsSource::Genius, lines: vec![LyricLine::new(Duration::ZERO, "a")], timed: false, hash: "h".into() };
-        t.job(Req::Craft { track, path: audio.clone(), text, target: LyricsSync::Word, temp: true, seq: first });
+        t.job(Req::Craft { track, path: audio.clone(), text, target: LyricsSync::Word, deep: false, temp: true, seq: first });
         assert!(!audio.exists());
         let said: Vec<Internal> = rx.try_iter().collect();
         assert!(said.iter().all(|m| !matches!(m, Internal::Align(Msg::Crafted { .. }))));
@@ -1177,6 +1253,60 @@ mod tests {
         // Asked again: not called off.
         t.crafting = Some(service.next_craft());
         assert!(t.progress(track, true)(Stage::Decode));
+    }
+
+    /// A timing asked for under the lyrics goes deep or not as its row
+    /// says, whatever the switch says, and the jobs after it go as the
+    /// switch says again.
+    #[test]
+    fn a_timing_s_own_mode_lasts_for_that_timing_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (_req_tx, req_rx) = crossbeam_channel::unbounded();
+        let lib = Library::open_in_memory().unwrap();
+        let catalog = Catalog::new(dir.path());
+        for id in [ModelId::Runtime, ModelId::AlignerRu] {
+            std::fs::create_dir_all(catalog.path(id)).unwrap();
+            std::fs::write(catalog.path(id).join(".ready"), b"").unwrap();
+        }
+        // Deep mode's Russian part is on disk but not marked ready: fetching
+        // it needs no network and shows in the parts list as coming.
+        let deep_part = catalog.path(ModelId::AlignerRuDeep);
+        std::fs::create_dir_all(&deep_part).unwrap();
+        for f in ModelId::AlignerRuDeep.spec().files {
+            std::fs::write(deep_part.join(f.name), b"").unwrap();
+        }
+        let off = Settings { gpu: false, words_all: false, recognise: false, separate: false, models_auto: false, deep: false };
+        let on = Settings { deep: true, ..off };
+        let mut t = Thread::new(lib, dir.path().into(), catalog, on, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
+        let track = TrackId::new();
+        let text = AlignText { source: LyricsSource::Genius, lines: vec![LyricLine::new(Duration::ZERO, "Я иду домой")], timed: false, hash: "h".into() };
+        // No such file: each timing stops after its parts, at the decoding.
+        let craft = |deep: bool, seq: u64| Req::Craft { track, path: dir.path().join("none.opus"), text: text.clone(), target: LyricsSync::Word, deep, temp: false, seq };
+        let deep_fetched = |rx: &Receiver<Internal>| {
+            let said: Vec<Internal> = rx.try_iter().collect();
+            said.iter().any(|m| {
+                matches!(m, Internal::Align(Msg::Models(models))
+                    if models.iter().any(|p| p.key == key(ModelId::AlignerRuDeep) && matches!(p.state, v::ModelState::Downloading(_))))
+            })
+        };
+        // The switch on, «Сделать подсветку заново»: the normal way.
+        t.job(craft(false, 1));
+        assert!(!deep_fetched(&rx), "made the normal way");
+        assert!(!t.aligner.catalog().ready(ModelId::AlignerRuDeep));
+        assert_eq!(t.aligner.deep(), Deep::CHOSEN, "the switch's mode after it");
+        assert!(t.needs(std::slice::from_ref(&text)).contains(&ModelId::AlignerRuDeep));
+        // The switch off, «Сделать глубокую подсветку»: deep for this one.
+        t.take(Req::Settings(off));
+        t.job(craft(true, 2));
+        assert!(deep_fetched(&rx), "deep mode's part was fetched for it");
+        assert!(t.aligner.catalog().ready(ModelId::AlignerRuDeep));
+        assert_eq!(t.aligner.deep(), Deep::OFF, "the normal mode after it");
+        assert_eq!(t.needs(std::slice::from_ref(&text)), [ModelId::Runtime, ModelId::AlignerRu]);
+        // It answered (the file is not there), as any timing does.
+        t.job(craft(false, 3));
+        assert!(rx.try_iter().any(|m| matches!(m, Internal::Align(Msg::Crafted { result: Err(_), .. }))));
+        assert_eq!(t.aligner.deep(), Deep::OFF);
     }
 
     /// Deep mode's parts come after the normal ones, and missing ones
@@ -1206,6 +1336,7 @@ mod tests {
         assert!(t.ensure_for(std::slice::from_ref(&text), false, None).is_ok());
         assert!(!t.offline);
         t.settings.deep = false;
+        t.aligner.set_deep(t.settings.deep());
         assert_eq!(t.needs(std::slice::from_ref(&text)).len(), 3);
     }
 
@@ -1284,6 +1415,58 @@ mod tests {
         let lines = to_lines(&[l]);
         assert!(lines[0].words.is_empty());
         assert_eq!(lines[0].end, Some(Duration::from_secs(3)));
+    }
+
+    /// Parts asked for in Settings go ahead of the jobs waiting, in the
+    /// order asked, each once, and show as coming until their turn.
+    #[test]
+    fn asked_parts_go_first_and_show_as_coming_while_they_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (req_tx, req_rx) = crossbeam_channel::unbounded();
+        let lib = Library::open_in_memory().unwrap();
+        let catalog = Catalog::new(dir.path());
+        std::fs::create_dir_all(catalog.path(ModelId::AlignerRu)).unwrap();
+        std::fs::write(catalog.path(ModelId::AlignerRu).join(".ready"), b"").unwrap();
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false };
+        let mut t = Thread::new(lib, dir.path().into(), catalog, settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
+        let mut service = AlignService::default();
+        assert!(!service.download(ModelId::SeparatorDeep), "no thread: nothing asked");
+        service.tx = Some(req_tx);
+        t.waiting = service.waiting.clone();
+        // A timing and a check wait; then two parts are asked, one twice.
+        let track = TrackId::new();
+        t.take(Req::Check { track, path: PathBuf::new(), texts: Vec::new(), recognise: false });
+        assert!(service.download(ModelId::SeparatorDeep));
+        assert!(service.download(ModelId::AlignerSung));
+        assert!(!service.download(ModelId::SeparatorDeep), "asked already");
+        while let Ok(r) = t.rx.try_recv() {
+            t.take(r);
+        }
+        let order: Vec<Option<ModelId>> = t.asked.iter().map(|r| if let Req::Download(id) = r { Some(*id) } else { None }).collect();
+        assert_eq!(order, [Some(ModelId::SeparatorDeep), Some(ModelId::AlignerSung), None]);
+        // Both show as coming before either started.
+        t.models();
+        let shown = |rx: &Receiver<Internal>| {
+            rx.try_iter()
+                .filter_map(|m| if let Internal::Align(Msg::Models(v)) = m { Some(v) } else { None })
+                .last()
+                .unwrap()
+        };
+        let view = shown(&rx);
+        let state = |view: &[v::AlignModel], id: ModelId| view.iter().find(|m| m.key == key(id)).unwrap().state;
+        assert_eq!(state(&view, ModelId::SeparatorDeep), v::ModelState::Downloading(0.0));
+        assert_eq!(state(&view, ModelId::AlignerSung), v::ModelState::Downloading(0.0));
+        assert_eq!(state(&view, ModelId::Whisper), v::ModelState::Missing);
+        // A part that is there already: its turn ends its waiting.
+        assert!(service.download(ModelId::AlignerRu));
+        t.take(t.rx.try_recv().unwrap());
+        assert!(matches!(t.asked[2], Req::Download(ModelId::AlignerRu)));
+        let ru = t.asked.remove(2).unwrap();
+        t.job(ru);
+        assert!(!service.waiting.lock().unwrap().contains(&ModelId::AlignerRu));
+        assert_eq!(state(&shown(&rx), ModelId::AlignerRu), v::ModelState::Ready);
+        assert!(service.download(ModelId::AlignerRu), "asked again later: asked");
     }
 
     #[test]
