@@ -1210,7 +1210,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (_req_tx, req_rx) = crossbeam_channel::unbounded();
         let lib = Library::open_in_memory().unwrap();
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false };
         let mut t = Thread::new(lib, dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let service = AlignService::default();
         t.checks = service.checks.clone();
