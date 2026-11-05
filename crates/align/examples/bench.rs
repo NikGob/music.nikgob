@@ -67,13 +67,23 @@ fn write_f32(path: &Path, head: &[f32], v: &[f32]) {
 
 /// The song's voice and what its aligners hear, from the cache or made
 /// (and kept) now.
-fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, idx: usize) -> Option<Prepared> {
-    let voice_file = cache.join(format!("{idx:02}.voice"));
+fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path) -> Option<Prepared> {
+    // Kept by the audio file's name: jobs on one song share it.
+    let stem = Path::new(&job.path).file_stem()?.to_string_lossy().into_owned();
+    let voice_file = cache.join(format!("{stem}.voice"));
     if std::env::var("CACHED").is_ok() && !voice_file.exists() {
         return None;
     }
+    let levels = cache.join(format!("{stem}.levels"));
     let mut prep = match read_f32(&voice_file) {
-        Some(v) => Prepared::from_voice(v, true),
+        Some(v) => {
+            let mut p = Prepared::from_voice(v, true);
+            if let Some(l) = read_f32(&levels) {
+                let n = l[0] as usize;
+                p.set_levels(l[1..1 + n].to_vec(), l[1 + n..].to_vec());
+            }
+            p
+        }
         None => {
             let p = match aligner.prepare(Path::new(&job.path), true, &mut |_: Stage| true) {
                 Ok(p) => p,
@@ -83,12 +93,13 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, idx: usize) -> Optio
                 }
             };
             write_f32(&voice_file, &[], &p.voice);
+            write_f32(&levels, &[p.side().len() as f32], &[p.side(), p.mix()].concat());
             p
         }
     };
     let route = Route::of(&job.lines)?;
     for id in route.models() {
-        let file = cache.join(format!("{idx:02}.{}.em", key(id)));
+        let file = cache.join(format!("{stem}.{}.em", key(id)));
         match read_f32(&file) {
             Some(v) => {
                 let (vocab, blank, fps) = (v[0] as usize, v[1] as usize, v[2]);
@@ -299,7 +310,7 @@ fn main() {
             println!("stopped");
             break;
         }
-        let Some(mut prep) = prepared(&mut aligner, job, &cache, idx) else { continue };
+        let Some(mut prep) = prepared(&mut aligner, job, &cache) else { continue };
         if prep_only {
             println!("prepared {}", job.name);
             aligner.unload();

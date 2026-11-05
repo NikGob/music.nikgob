@@ -58,6 +58,14 @@ pub struct Prepared {
     pub separated: bool,
     /// RMS of the voice every 0.1 s.
     energy: Vec<f32>,
+    /// RMS of the separated voice's sides (left less right, halved) every
+    /// 0.1 s: a voice panned off the centre (backing vocals) is loud here,
+    /// the lead sung in the middle is not. Empty when unknown.
+    side: Vec<f32>,
+    /// RMS of the mix every 0.1 s (empty when unknown): a sound the
+    /// separator lets through (a lead synth on a drop) is loud in the
+    /// voice but small against the mix.
+    mix: Vec<f32>,
     heard: HashMap<ModelId, Emissions>,
 }
 
@@ -83,7 +91,24 @@ impl Prepared {
             .chunks(ENERGY_HOP)
             .map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt())
             .collect();
-        Self { voice, secs, separated, energy, heard: HashMap::new() }
+        Self { voice, secs, separated, energy, side: Vec::new(), mix: Vec::new(), heard: HashMap::new() }
+    }
+
+    /// Takes the side and mix levels ([`Self::side`], [`Self::mix`]; kept
+    /// from an earlier run).
+    pub fn set_levels(&mut self, side: Vec<f32>, mix: Vec<f32>) {
+        self.side = side;
+        self.mix = mix;
+    }
+
+    /// RMS of the separated voice's sides every tenth of a second.
+    pub fn side(&self) -> &[f32] {
+        &self.side
+    }
+
+    /// RMS of the mix every tenth of a second.
+    pub fn mix(&self) -> &[f32] {
+        &self.mix
     }
 
     /// Takes what aligner `id` heard in this song (kept from an earlier run).
@@ -254,6 +279,12 @@ mod tests {
     }
 }
 
+/// RMS of `x` (at `rate`) every tenth of a second.
+fn tenths(x: &[f32], rate: u32) -> Vec<f32> {
+    let hop = (rate as usize / 10).max(1);
+    x.chunks(hop).map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt()).collect()
+}
+
 fn percentile(v: &[f32], q: f32) -> f32 {
     let mut s = v.to_vec();
     s.sort_by(f32::total_cmp);
@@ -418,6 +449,8 @@ impl Aligner {
             return Err(Error::Stopped);
         }
         let decoded = audio::decode(path)?;
+        let mix_level = tenths(&decoded.mono(), decoded.rate);
+        let mut side = Vec::new();
         let separated = separate && self.catalog.ready(ModelId::Separator);
         let voice = if separated {
             self.runtime()?;
@@ -434,11 +467,18 @@ impl Aligner {
             // The separator's working memory is the largest of all: it goes
             // as soon as the voice is out (loading it again takes a second).
             self.separator = None;
-            voice?.resampled(RATE)?.mono()
+            let voice = voice?.resampled(RATE)?;
+            if let [l, r] = &voice.channels[..] {
+                let s: Vec<f32> = l.iter().zip(r).map(|(a, b)| (a - b) / 2.0).collect();
+                side = tenths(&s, RATE);
+            }
+            voice.mono()
         } else {
             decoded.resampled(RATE)?.mono()
         };
-        Ok(Prepared::from_voice(voice, separated))
+        let mut prep = Prepared::from_voice(voice, separated);
+        prep.set_levels(side, mix_level);
+        Ok(prep)
     }
 
     /// Aligner `id`'s letters.
