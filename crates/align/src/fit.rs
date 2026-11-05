@@ -112,13 +112,13 @@ impl Tuning {
 
 }
 
-/// `align-5`: Latin words of a Russian text spelled by sound, and a blank
-/// inside a word costing where there is no voice (docs/lyrics-align.md,
-/// «align-5»); the rest measured no better and stays off.
+/// `align-5`: a blank inside a word costs where there is no voice
+/// (docs/lyrics-align.md, «align-5»). Latin by sound is off: better on
+/// «Ханнамонтана», a line worse on «Мой топор»; the rest measured no
+/// better.
 impl Default for Tuning {
     fn default() -> Self {
         let mut t = Self::align4();
-        t.by_sound = true;
         t.costs.in_word_silent = 0.3;
         t
     }

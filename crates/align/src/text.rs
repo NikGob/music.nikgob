@@ -533,7 +533,7 @@ pub fn english_as_russian(word: &str) -> String {
                 (b'e', true) => "и",
                 (b'o', true) => "оу",
                 (b'u', true) => "ю",
-                (b'a', false) if group == 1 && i + 1 < end => "э",
+                (b'a', false) if group == 1 && i + 1 < end && w[i + 1] != b'r' => "э",
                 (b'a', false) => "а",
                 (b'e', false) if i == 0 => "э",
                 (b'e', false) => "е",
@@ -576,7 +576,8 @@ pub fn english_as_russian(word: &str) -> String {
             b't' => "т",
             b'v' => "в",
             b'w' if i == 0 && w.get(1) == Some(&b'r') => "",
-            b'w' if i > 0 && b"st".contains(&w[i - 1]) => "в",
+            // «warlord», «swag»: read as «в» before a vowel at a word's start.
+            b'w' if (i == 0 || b"st".contains(&w[i - 1])) && w.get(i + 1).is_some_and(|n| b"aeiou".contains(n)) => "в",
             b'w' => "у",
             b'x' => "кс",
             b'z' => "з",
@@ -773,6 +774,7 @@ mod tests {
             ("goodbye", "гудбай"),
             ("night", "найт"),
             ("Come", "кам"),
+            ("warlord", "варлорд"),
         ] {
             assert_eq!(english_as_russian(en), ru, "{en}");
         }
