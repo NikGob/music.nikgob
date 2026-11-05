@@ -50,6 +50,25 @@ impl Emissions {
         )
     }
 
+    /// The same emissions at another frame rate: each frame takes the frame
+    /// under its start. The alignment works at the 50 frames a second of
+    /// the wav2vec2 aligners (its costs and least lengths are counted in
+    /// frames), so a model with longer frames (GigaAM's 40 ms) is brought
+    /// to that rate first.
+    pub fn at_rate(&self, fps: f32) -> Self {
+        if fps <= 0.0 || self.fps <= 0.0 || (fps - self.fps).abs() < 1e-3 {
+            return self.clone();
+        }
+        let n = self.frames();
+        let out = ((n as f32) * fps / self.fps).round() as usize;
+        let mut logp = Vec::with_capacity(out * self.vocab);
+        for t in 0..out {
+            let s = ((t as f32 * self.fps / fps) as usize).min(n.saturating_sub(1));
+            logp.extend_from_slice(self.row(s));
+        }
+        Self { logp, vocab: self.vocab, fps, blank: self.blank }
+    }
+
     /// Averages `other`'s probabilities into these, frame by frame (the
     /// same model heard over windows cut elsewhere); frames `other` lacks
     /// stay as they are.
@@ -845,6 +864,18 @@ mod tests {
         assert!((a.row(1)[2].exp() - (0.9 + 0.1 / 3.0) / 2.0).abs() < 1e-4);
         let sum: f32 = a.row(1).iter().map(|v| v.exp()).sum();
         assert!((sum - 1.0).abs() < 1e-4);
+    }
+
+    /// 25 frames a second become 50: each frame twice, in order.
+    #[test]
+    fn emissions_go_to_another_frame_rate() {
+        let mut e = em(&[1, 2, 3], 0.9);
+        e.fps = 25.0;
+        let up = e.at_rate(50.0);
+        assert_eq!((up.frames(), up.fps), (6, 50.0));
+        let best: Vec<usize> = (0..6).map(|t| (0..4).max_by(|a, b| up.row(t)[*a].total_cmp(&up.row(t)[*b])).unwrap()).collect();
+        assert_eq!(best, [1, 1, 2, 2, 3, 3]);
+        assert_eq!(up.at_rate(50.0).frames(), 6);
     }
 
     #[test]

@@ -1434,6 +1434,9 @@ pub struct Prefs {
     pub lyrics_recognize: bool,
     /// «Отделять голос от музыки» before aligning.
     pub lyrics_separate: bool,
+    /// «Глубокое создание субтитров»: timing made with the stronger
+    /// separator and aligners (docs/lyrics-align.md, «Deep mode»), slower.
+    pub lyrics_deep: bool,
     /// «Скачивать модели сами» when they are needed.
     pub lyrics_models_auto: bool,
     /// «Искать на Genius».
@@ -2717,6 +2720,7 @@ impl Default for Prefs {
             lyrics_ui: 1,
             lyrics_recognize: false,
             lyrics_separate: true,
+            lyrics_deep: false,
             lyrics_models_auto: true,
             lyrics_genius: true,
             lyrics_streams: true,

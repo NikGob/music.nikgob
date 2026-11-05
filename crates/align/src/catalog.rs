@@ -32,6 +32,13 @@ pub enum ModelId {
     AlignerEn,
     /// Whisper large-v3-turbo, recognition from scratch.
     Whisper,
+    /// Mel-Band RoFormer vocal separation (deep mode).
+    SeparatorDeep,
+    /// GigaAM-v3 CTC, a second Russian aligner (deep mode).
+    AlignerRuDeep,
+    /// MMS-300m forced aligner fine-tuned on singing (Tune Studio), a
+    /// second aligner for English (and romanised letters; deep mode).
+    AlignerSung,
 }
 
 /// One file of a part.
@@ -211,11 +218,78 @@ pub const WHISPER: ModelSpec = ModelSpec {
     ],
 };
 
-pub const ALL: [ModelSpec; 7] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, WHISPER];
+pub const SEPARATOR_DEEP: ModelSpec = ModelSpec {
+    id: ModelId::SeparatorDeep,
+    dir: "mel-roformer-kim",
+    files: &[FileSpec {
+        // fp16 weights, fp32 compute: right on DirectML and on the CPU
+        // (the fp16-compute export gives a wrong voice on DirectML, the
+        // int8 one a wrong voice there and slowly).
+        name: "mel-roformer.fp16.onnx",
+        url: hf!("audiojs/mel-roformer", "c1aba02c00a0bee852d6754fe6ede8164f90a4b3", "mel-roformer.fp16.onnx"),
+        size: 464_050_097,
+        sha256: "adcbbb826f12453fbb86652b503242d565a9c81cdef1bca2fe0e54752eba91ef",
+        extract: &[],
+    }],
+};
+
+pub const ALIGNER_RU_DEEP: ModelSpec = ModelSpec {
+    id: ModelId::AlignerRuDeep,
+    dir: "gigaam-v3-ctc",
+    files: &[
+        FileSpec {
+            name: "model_int8.onnx",
+            url: hf!("istupakov/gigaam-v3-onnx", "322c3b29492673eb7d0b434bfa9dfb8653e34d02", "v3_ctc.int8.onnx"),
+            size: 224_721_181,
+            sha256: "ceb61454e2e1a2dec5872cbac1de0fe0a4271d1148f6b26b5bda53ff30a12acd",
+            extract: &[],
+        },
+        FileSpec {
+            name: "vocab.txt",
+            url: hf!("istupakov/gigaam-v3-onnx", "322c3b29492673eb7d0b434bfa9dfb8653e34d02", "v3_vocab.txt"),
+            size: 198,
+            sha256: "a9143c30844d3c0bee3e9e927e4084774eb1b9eeaafc473b2c4521e4911a7c07",
+            extract: &[],
+        },
+    ],
+};
+
+pub const ALIGNER_SUNG: ModelSpec = ModelSpec {
+    id: ModelId::AlignerSung,
+    dir: "tunestudio-aligner",
+    files: &[
+        FileSpec {
+            name: "aligner.onnx",
+            url: hf!("tuneperfect/tunestudio-aligner", "3564dc1bf90f62ce479b93be173a772d6ca8a279", "aligner.onnx"),
+            size: 1_262_284_621,
+            sha256: "597a1d775df8f7fe3c94310568751ef9253645b4d8cdf21bb7a3da1ab80225a1",
+            extract: &[],
+        },
+        FileSpec {
+            name: "vocab.json",
+            url: hf!("tuneperfect/tunestudio-aligner", "3564dc1bf90f62ce479b93be173a772d6ca8a279", "vocab.json"),
+            size: 384,
+            sha256: "7c08508d30f76c24863785b16bfa16477216848b3f1a3f90d5f3bb8c7e1920d1",
+            extract: &[],
+        },
+    ],
+};
+
+pub const ALL: [ModelSpec; 10] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, WHISPER, SEPARATOR_DEEP, ALIGNER_RU_DEEP, ALIGNER_SUNG];
 
 impl ModelId {
     pub fn spec(self) -> ModelSpec {
         ALL.into_iter().find(|s| s.id == self).expect("every id has a spec")
+    }
+
+    /// The model file of a part (its first file).
+    pub fn model_file(self) -> &'static str {
+        self.spec().files[0].name
+    }
+
+    /// A part only deep mode uses (docs/lyrics-align.md, «Deep mode»).
+    pub fn deep(self) -> bool {
+        matches!(self, Self::SeparatorDeep | Self::AlignerRuDeep | Self::AlignerSung)
     }
 }
 
