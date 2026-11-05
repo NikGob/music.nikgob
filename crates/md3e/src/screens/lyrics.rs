@@ -132,21 +132,21 @@ fn control_in(ui: &mut Ui, row: Rect, left: Option<f32>, state: &ViewState, out:
     super::lyrics_ui::control(&mut cui, state, left, out)
 }
 
-/// How `lines` are drawn. «Волна» goes over the letters of each timed word
-/// and «По словам» over the written words (syllables or words, both are
-/// real times). Words lit on a pace guessed from line times alone look
-/// wrong, so under the wave or by words a text with line times only may
-/// become bright instead (the calm Focus, the line as a whole). By
-/// syllables a guessed text has no syllables: its guessed words fill as
-/// the karaoke front does.
+/// How `lines` are drawn: the look the settings ask for over real times
+/// (syllables or words). A text with line times only has its words paced
+/// from the line, which looks wrong under any look and unit, so with
+/// «Спокойный Фокус» it becomes bright instead (the calm Focus, the line as
+/// a whole; Focus by letters is that already).
 fn style_for(prefs: &Prefs, lines: &[LyricLine]) -> Look {
-    let look = Look::of(prefs);
     let guessed = LyricsSync::of(lines) == Some(LyricsSync::Line);
-    if (look.style == Style::Wave || look.words()) && prefs.wave_syllables_only && guessed {
-        return Look { style: Style::Focus, by: By::Letters };
+    if prefs.wave_syllables_only && guessed {
+        return CALM;
     }
-    look
+    Look::of(prefs)
 }
+
+/// The calm Focus: the line being sung becomes bright as a whole.
+const CALM: Look = Look { style: Style::Focus, by: By::Letters };
 
 /// `lines` drawn as the lyrics view draws the current text, smaller (the
 /// whole text behind the lyrics control), following the playing position;
@@ -2398,31 +2398,36 @@ mod tests {
     }
 
     /// Line times only: «Спокойный Фокус» makes the line bright as a
-    /// whole under every animation by words; otherwise the words are paced
-    /// from the line, split as written.
+    /// whole under every animation and every unit; otherwise the words are
+    /// paced from the line, split as written. Real times keep the look.
     #[test]
-    fn words_follow_the_line_only_fallback() {
+    fn every_look_and_unit_follows_the_line_only_fallback() {
+        use nikgob_view::{LYRICS_BY_LETTERS, LYRICS_BY_SYLLABLES, LYRICS_BY_WORDS};
         let lines_only = [line(1.0, Some(3.0), "do-dodge back")];
         let mut worded = lines_only[0].clone();
         worded.words = vec![word(1.0, 2.0, "do-dodge "), word(2.0, 3.0, "back")];
-        let whole = Look { style: Style::Focus, by: By::Letters };
+        let mut syllabled = lines_only[0].clone();
+        syllabled.words = vec![word(1.0, 1.4, "do-"), word(1.4, 1.7, "dod"), word(1.7, 2.0, "ge "), word(2.0, 3.0, "back")];
+        assert_eq!(LyricsSync::of(std::slice::from_ref(&syllabled)), Some(LyricsSync::Syllable));
         for (anim, style) in [(0, Style::Karaoke), (1, Style::Focus), (2, Style::Wave)] {
-            let calm = Prefs { lyrics_style: anim, lyrics_unit: nikgob_view::LYRICS_BY_WORDS, wave_syllables_only: true, ..Prefs::default() };
-            assert_eq!(style_for(&calm, &lines_only), whole);
-            let paced = Prefs { wave_syllables_only: false, ..calm.clone() };
-            assert_eq!(style_for(&paced, &lines_only), Look { style, by: By::Words });
-            assert_eq!(style_for(&calm, std::slice::from_ref(&worded)), Look { style, by: By::Words });
+            for (unit, by) in [(LYRICS_BY_LETTERS, By::Letters), (LYRICS_BY_SYLLABLES, By::Syllables), (LYRICS_BY_WORDS, By::Words)] {
+                let calm = Prefs { lyrics_style: anim, lyrics_unit: unit, wave_syllables_only: true, ..Prefs::default() };
+                let case = format!("style {anim}, unit {unit}");
+                assert_eq!(style_for(&calm, &lines_only), CALM, "{case}");
+                let paced = Prefs { wave_syllables_only: false, ..calm.clone() };
+                assert_eq!(style_for(&paced, &lines_only), Look { style, by }, "{case}");
+                for timed in [&worded, &syllabled] {
+                    assert_eq!(style_for(&calm, std::slice::from_ref(timed)), Look { style, by }, "{case}");
+                    assert_eq!(style_for(&paced, std::slice::from_ref(timed)), Look { style, by }, "{case}");
+                }
+            }
         }
-        // Karaoke and Focus by letters or by syllables pace line times as
-        // before, whatever the fallback; the wave falls back.
-        for by in [nikgob_view::LYRICS_BY_LETTERS, nikgob_view::LYRICS_BY_SYLLABLES] {
-            let karaoke = Prefs { lyrics_style: 0, lyrics_unit: by, wave_syllables_only: true, ..Prefs::default() };
-            assert_eq!(style_for(&karaoke, &lines_only).style, Style::Karaoke);
-            let wave = Prefs { lyrics_style: 2, ..karaoke.clone() };
-            assert_eq!(style_for(&wave, &lines_only), whole);
-        }
-        let syllables = Prefs { lyrics_style: 1, wave_syllables_only: true, ..Prefs::default() };
-        assert_eq!(style_for(&syllables, &lines_only), Look { style: Style::Focus, by: By::Syllables });
+        // The old fourth animation reads as the wave by words here too.
+        let old = Prefs { lyrics_style: 3, wave_syllables_only: true, ..Prefs::default() };
+        assert_eq!(style_for(&old, &lines_only), CALM);
+        assert_eq!(style_for(&old, std::slice::from_ref(&worded)), Look { style: Style::Wave, by: By::Words });
+        // No text is not a guessed one.
+        assert_eq!(style_for(&Prefs::default(), &[]), Look::of(&Prefs::default()));
         with_painter(|painter| {
             let u = units_of(painter, &paced_words(&lines_only[0], None));
             assert_eq!(u.iter().map(|u| u.0.as_str()).collect::<Vec<_>>(), ["do-", "dodge", "back"]);
@@ -3429,7 +3434,6 @@ mod tests {
         for (timing, l, calm) in [("word", &worded, true), ("syllable", &syllables, true), ("guessed", &lines_only, false), ("calm", &lines_only, true)] {
             for style in 0..3u8 {
                 for unit in [nikgob_view::LYRICS_BY_LETTERS, nikgob_view::LYRICS_BY_SYLLABLES, nikgob_view::LYRICS_BY_WORDS] {
-                    let words = unit == nikgob_view::LYRICS_BY_WORDS;
                     let letters = unit == nikgob_view::LYRICS_BY_LETTERS;
                     for smooth in [0.0, 0.5, 1.0] {
                         let prefs = Prefs { lyrics_style: style, lyrics_unit: unit, wave_syllables_only: calm, lyrics_smooth: smooth, ..Prefs::default() };
@@ -3441,7 +3445,7 @@ mod tests {
                             assert!(close(c.unwrap(), lit), "{case}: letter {k} is {:?}, lit is {lit:?}", c.unwrap());
                         }
                         // «ложится» is still to come.
-                        let whole = (style == 1 && letters) || (timing == "calm" && (style == 2 || words));
+                        let whole = (style == 1 && letters) || timing == "calm";
                         for (k, c) in glyphs[13..].iter().enumerate() {
                             assert_eq!(close(c.unwrap(), lit), whole, "{case}: letter {} is {:?}", 13 + k, c.unwrap());
                         }
