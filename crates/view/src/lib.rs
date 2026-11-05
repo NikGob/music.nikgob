@@ -568,8 +568,6 @@ pub struct AlignJob {
     pub asked: bool,
     /// While models download: bytes done and bytes to fetch in all.
     pub bytes: Option<(u64, u64)>,
-    /// While models download: the one coming now, as Settings names it.
-    pub model: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

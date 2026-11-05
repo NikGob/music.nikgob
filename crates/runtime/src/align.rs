@@ -13,8 +13,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -83,6 +83,9 @@ pub(crate) enum Req {
     /// mode for this timing only, whatever [`Settings::deep`] says (the
     /// jobs after it go as the settings say again).
     Craft { track: TrackId, path: PathBuf, text: AlignText, target: LyricsSync, deep: bool, temp: bool, seq: u64 },
+    /// A part asked for in Settings: it goes ahead of the jobs waiting
+    /// (after the parts asked before it) and shows as waiting until then
+    /// ([`AlignService::download`]).
     Download(ModelId),
     Remove(ModelId),
     Settings(Settings),
@@ -152,6 +155,9 @@ pub(crate) struct AlignService {
     /// check under way (only the playing song's is wanted).
     checks: Arc<AtomicU64>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The parts asked for in Settings that wait for the job under way:
+    /// the parts list shows them as coming.
+    waiting: Arc<Mutex<Vec<ModelId>>>,
     pub(crate) catalog: Option<Catalog>,
     /// The tracks whose check is on its way (and their texts' hashes).
     pub(crate) asked: HashMap<TrackId, Vec<String>>,
@@ -173,6 +179,7 @@ impl AlignService {
         let stop = self.stop.clone();
         let cancel = self.cancel.clone();
         let checks = self.checks.clone();
+        let waiting = self.waiting.clone();
         let catalog = Catalog::new(models);
         self.catalog = Some(catalog.clone());
         let spawned = std::thread::Builder::new().name("nikgob-align".into()).spawn(move || {
@@ -180,6 +187,7 @@ impl AlignService {
             let mut t = Thread::new(lib, root, catalog, settings, tx, req_rx, stop, start);
             t.cancel = cancel;
             t.checks = checks;
+            t.waiting = waiting;
             t.run();
         });
         match spawned {
@@ -199,6 +207,24 @@ impl AlignService {
 
     pub(crate) fn running(&self) -> bool {
         self.tx.is_some()
+    }
+
+    /// Asks for a part from Settings; false when it waits already (or the
+    /// thread is not there). It shows as coming at once, and every part
+    /// asked comes, one after another, before the jobs waiting.
+    pub(crate) fn download(&self, id: ModelId) -> bool {
+        if !self.running() {
+            return false;
+        }
+        {
+            let mut w = lock(&self.waiting);
+            if w.contains(&id) {
+                return false;
+            }
+            w.push(id);
+        }
+        self.send(Req::Download(id));
+        true
     }
 
     /// Asks for the playing song's check; one asked before it is called off.
@@ -241,6 +267,20 @@ impl Drop for AlignService {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What the parts list shows as downloading: the parts under way with
+/// their share, and the parts asked for that wait their turn (none yet).
+fn shares(downloading: &HashMap<ModelId, f32>, waiting: &Mutex<Vec<ModelId>>) -> HashMap<ModelId, f32> {
+    let mut all = downloading.clone();
+    for id in lock(waiting).iter() {
+        all.entry(*id).or_insert(0.0);
+    }
+    all
 }
 
 /// The models a part list shows, with their labels.
@@ -360,6 +400,8 @@ struct Thread {
     /// Tracks the pass could not do in this run.
     skip: std::collections::HashSet<TrackId>,
     downloading: HashMap<ModelId, f32>,
+    /// [`AlignService::waiting`].
+    waiting: Arc<Mutex<Vec<ModelId>>>,
     last_work: Instant,
     playing: bool,
     /// The last download failed: the pass waits for the user.
@@ -388,6 +430,7 @@ impl Thread {
             pass_at: Instant::now() + start,
             skip: Default::default(),
             downloading: HashMap::new(),
+            waiting: Arc::default(),
             last_work: Instant::now(),
             playing: false,
             offline: false,
@@ -399,7 +442,7 @@ impl Thread {
     }
 
     fn models(&self) {
-        self.send(Msg::Models(models_view(self.aligner.catalog(), &self.downloading)));
+        self.send(Msg::Models(models_view(self.aligner.catalog(), &shares(&self.downloading, &self.waiting))));
     }
 
     fn stopped(&self) -> bool {
@@ -439,10 +482,13 @@ impl Thread {
                 }
                 self.models();
             }
+            Req::Download(_) => {
+                self.offline = false;
+                // Ahead of the jobs waiting, after the parts asked before.
+                let at = self.asked.iter().take_while(|r| matches!(r, Req::Download(_))).count();
+                self.asked.insert(at, req);
+            }
             other => {
-                if let Req::Download(_) = other {
-                    self.offline = false;
-                }
                 if matches!(other, Req::Check { .. }) {
                     // Only the playing song's check is wanted: skipping
                     // through songs must not queue a separation for each.
@@ -582,7 +628,10 @@ impl Thread {
                 self.send(Msg::Crafted { track, source: text.source, result });
             }
             Req::Download(id) => {
+                // Its turn: no longer waiting (the download shows itself).
+                lock(&self.waiting).retain(|w| *w != id);
                 let _ = self.ensure(&[id], true, None);
+                self.models();
             }
             _ => {}
         }
@@ -623,13 +672,19 @@ impl Thread {
             let mut last = Instant::now();
             let catalog = self.aligner.catalog().clone();
             let downloading = self.downloading.clone();
+            let waiting = self.waiting.clone();
+            // The song waiting for it hears of the download at once, not
+            // after the first quarter second.
+            let job = v::AlignJob { track, stage: v::AlignStage::Download, progress: before as f32 / total.max(1) as f32, asked, bytes: Some((before, total.max(before))) };
+            let _ = tx.send(Internal::Align(Msg::Job(Some(job))));
             let result = catalog.download(id, &mut |done, size| {
                 let f = done as f32 / size.max(1) as f32;
                 if last.elapsed() > Duration::from_millis(250) {
                     last = Instant::now();
                     let mut d = downloading.clone();
                     d.insert(id, f);
-                    let _ = tx.send(Internal::Align(Msg::Models(models_view(&catalog, &d))));
+                    // The parts that wait their turn still show as coming.
+                    let _ = tx.send(Internal::Align(Msg::Models(models_view(&catalog, &shares(&d, &waiting)))));
                     let all = before + done.min(size);
                     let job = v::AlignJob {
                         track,
@@ -1127,10 +1182,20 @@ impl Worker {
         }
     }
 
+    /// Settings' «Скачать» and «Удалить» of a part. A part asked for shows
+    /// as coming at once, also while it waits for the job under way.
     pub(crate) fn align_model(&mut self, key_: &str, download: bool) {
         let Some(id) = id_of(key_) else { return };
         self.publish(|s| s.align.error = None);
-        self.align.send(if download { Req::Download(id) } else { Req::Remove(id) });
+        if !download {
+            self.align.send(Req::Remove(id));
+        } else if self.align.download(id) {
+            self.publish(|s| {
+                if let Some(m) = s.align.models.iter_mut().find(|m| m.key == key_ && m.state == v::ModelState::Missing) {
+                    m.state = v::ModelState::Downloading(0.0);
+                }
+            });
+        }
     }
 }
 
@@ -1296,6 +1361,58 @@ mod tests {
         let lines = to_lines(&[l]);
         assert!(lines[0].words.is_empty());
         assert_eq!(lines[0].end, Some(Duration::from_secs(3)));
+    }
+
+    /// Parts asked for in Settings go ahead of the jobs waiting, in the
+    /// order asked, each once, and show as coming until their turn.
+    #[test]
+    fn asked_parts_go_first_and_show_as_coming_while_they_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (req_tx, req_rx) = crossbeam_channel::unbounded();
+        let lib = Library::open_in_memory().unwrap();
+        let catalog = Catalog::new(dir.path());
+        std::fs::create_dir_all(catalog.path(ModelId::AlignerRu)).unwrap();
+        std::fs::write(catalog.path(ModelId::AlignerRu).join(".ready"), b"").unwrap();
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false };
+        let mut t = Thread::new(lib, dir.path().into(), catalog, settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
+        let mut service = AlignService::default();
+        assert!(!service.download(ModelId::SeparatorDeep), "no thread: nothing asked");
+        service.tx = Some(req_tx);
+        t.waiting = service.waiting.clone();
+        // A timing and a check wait; then two parts are asked, one twice.
+        let track = TrackId::new();
+        t.take(Req::Check { track, path: PathBuf::new(), texts: Vec::new(), recognise: false });
+        assert!(service.download(ModelId::SeparatorDeep));
+        assert!(service.download(ModelId::AlignerSung));
+        assert!(!service.download(ModelId::SeparatorDeep), "asked already");
+        while let Ok(r) = t.rx.try_recv() {
+            t.take(r);
+        }
+        let order: Vec<Option<ModelId>> = t.asked.iter().map(|r| if let Req::Download(id) = r { Some(*id) } else { None }).collect();
+        assert_eq!(order, [Some(ModelId::SeparatorDeep), Some(ModelId::AlignerSung), None]);
+        // Both show as coming before either started.
+        t.models();
+        let shown = |rx: &Receiver<Internal>| {
+            rx.try_iter()
+                .filter_map(|m| if let Internal::Align(Msg::Models(v)) = m { Some(v) } else { None })
+                .last()
+                .unwrap()
+        };
+        let view = shown(&rx);
+        let state = |view: &[v::AlignModel], id: ModelId| view.iter().find(|m| m.key == key(id)).unwrap().state;
+        assert_eq!(state(&view, ModelId::SeparatorDeep), v::ModelState::Downloading(0.0));
+        assert_eq!(state(&view, ModelId::AlignerSung), v::ModelState::Downloading(0.0));
+        assert_eq!(state(&view, ModelId::Whisper), v::ModelState::Missing);
+        // A part that is there already: its turn ends its waiting.
+        assert!(service.download(ModelId::AlignerRu));
+        t.take(t.rx.try_recv().unwrap());
+        assert!(matches!(t.asked[2], Req::Download(ModelId::AlignerRu)));
+        let ru = t.asked.remove(2).unwrap();
+        t.job(ru);
+        assert!(!service.waiting.lock().unwrap().contains(&ModelId::AlignerRu));
+        assert_eq!(state(&shown(&rx), ModelId::AlignerRu), v::ModelState::Ready);
+        assert!(service.download(ModelId::AlignerRu), "asked again later: asked");
     }
 
     #[test]
