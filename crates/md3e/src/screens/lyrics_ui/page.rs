@@ -150,18 +150,17 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
         ui.add_space(12.0);
     }
     if !actions.is_empty() {
-        let last = actions.len() - 1;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-            // The finest timing is the primary action unless there is
-            // timing to keep.
-            for (i, (target, label)) in actions.into_iter().enumerate().rev() {
-                let style = if i == last && !save_lead { Style::Filled } else { Style::Tonal };
-                if ui.add(Button::new(label).style(style).size(Size::S).id_salt(("lyrics-page-make", label))).clicked() {
+            // The normal word timing is the primary action unless there is
+            // timing to keep; deep and lines after it.
+            for (i, a) in super::from_primary(&actions).into_iter().enumerate() {
+                let style = if i == 0 && !save_lead { Style::Filled } else { Style::Tonal };
+                if ui.add(Button::new(a.label).style(style).size(Size::S).id_salt(("lyrics-page-make", a.label))).clicked() {
                     if super::failed(state).is_some() {
                         out.push(Command::ClearCraft);
                     }
-                    super::make(state, target, out);
+                    super::make(state, a, out);
                 }
             }
         });

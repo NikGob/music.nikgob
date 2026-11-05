@@ -22,7 +22,7 @@ enum Row {
     Source(nikgob_view::LyricsSource),
     /// See the text so.
     Show(LyricsSync),
-    Make(LyricsSync),
+    Make(super::Action),
     /// The window or page where timing is made.
     Craft,
     /// Stop the timing being made.
@@ -116,8 +116,8 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
             m.item(MenuItem::new(super::save_label(state)), Row::Save);
         }
         let actions = if busy { Vec::new() } else { super::actions(state) };
-        for (target, label) in &actions {
-            m.item(MenuItem::new(*label), Row::Make(*target));
+        for a in &actions {
+            m.item(MenuItem::new(a.label), Row::Make(*a));
         }
         if busy {
             m.item(MenuItem::new("Отменить подсветку"), Row::Cancel);
@@ -164,8 +164,8 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
             super::show_as(state, *sync, out);
             false
         }
-        Some(Row::Make(target)) => {
-            super::make(state, *target, out);
+        Some(Row::Make(a)) => {
+            super::make(state, *a, out);
             false
         }
         Some(Row::Craft) => {
