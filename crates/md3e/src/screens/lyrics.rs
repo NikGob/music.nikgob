@@ -301,6 +301,26 @@ fn paint(
         ctx.request_repaint();
     }
     let scroll = follow + manual.shift(now);
+    // When the view moves or resizes (the window, the layout's span, a card
+    // that rises in), the text goes with it at once, kept at its share of
+    // the height: the springs are moved with their frame instead of chasing
+    // it, so only the text's own moves are animated.
+    let frame = (rect.top(), rect.height() * sizes.anchor);
+    let frame_id = id.with("frame");
+    if let Some(was) = ctx.data(|d| d.get_temp::<(f32, f32)>(frame_id))
+        && was != frame
+    {
+        let (top, anchor) = (frame.0 - was.0, frame.1 - was.1);
+        if state.prefs.lyrics_cascade {
+            for i in 0..items.len() {
+                anim::shift_f32(&ctx, id.with(("y", i)), top + anchor);
+            }
+        } else {
+            anim::shift_f32(&ctx, id.with("scroll"), -anchor);
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(frame_id, frame));
+
     // A scroll by hand follows the hand as closely in both modes; the
     // text's own moves take the calmer spring.
     let together = if !state.prefs.lyrics_cascade {
