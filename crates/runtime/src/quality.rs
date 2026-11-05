@@ -125,7 +125,7 @@ pub(crate) fn rescore(src: &Source, c: &QualityCheck) -> Option<i32> {
         return None;
     }
     let want = match nikgob_core::quality::plausible(c.verdict, c.cutoff_hz) {
-        Verdict::Transcoded => fake_score(c.origin),
+        Verdict::Transcoded => fake_score(c.origin, c.cutoff_hz),
         Verdict::Upsampled => quality_score(&src.codec, src.bitrate, Some(44_100), Some(16), false),
         Verdict::Genuine => quality_score(&src.codec, src.bitrate, src.sample_rate, src.bit_depth, false),
         Verdict::Unknown => return None,

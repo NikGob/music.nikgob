@@ -69,7 +69,9 @@ pub(crate) fn format_words(f: &Format) -> String {
 
 /// A file's format in words: «MP3 128», «FLAC», «FLAC 24/96»; a «FLAC»
 /// the spectrum check found made from a lossy file (its `quality_score`
-/// says so, not its extension) is «FLAC из lossy».
+/// says so, not its extension) is «FLAC из lossy», and one cut where a real
+/// master may be cut too (ranked as an MP3 320, above a plain fake) «FLAC,
+/// возможно из lossy».
 pub(crate) fn file_label(src: &Source) -> String {
     let label = format_words(&Format {
         codec: src.codec.clone(),
@@ -77,10 +79,12 @@ pub(crate) fn file_label(src: &Source) -> String {
         bit_depth: src.bit_depth,
         sample_rate: src.sample_rate,
     });
-    if src.codec.is_lossless() && src.quality_score < score::CD_LOSSLESS {
-        format!("{label} из lossy")
-    } else {
+    if !src.codec.is_lossless() || src.quality_score >= score::CD_LOSSLESS {
         label
+    } else if src.quality_score > score::FAKE_LOSSLESS {
+        format!("{label}, возможно из lossy")
+    } else {
+        format!("{label} из lossy")
     }
 }
 
@@ -108,6 +112,11 @@ pub(crate) fn upgrade_job_words(imported: usize, duplicates: usize, left_out: us
     }
     if duplicates > 0 {
         parts.push(match (imported, duplicates, dup) {
+            // «FLAC, возможно из MP3 320»: a cut a real master may have too.
+            (0, 1, Some(q)) if q.contains(", возможно из ") => {
+                let (codec, from) = q.split_once(", возможно из ").unwrap_or((q, ""));
+                format!("скачанный {codec}, возможно, из {from} — оставил прежний файл")
+            }
             (0, 1, Some(q)) if q.contains(" из ") => {
                 let (codec, from) = q.split_once(" из ").unwrap_or((q, ""));
                 format!("скачанный {codec} оказался из {from} — оставил прежний файл")
@@ -755,6 +764,9 @@ mod tests {
         let mut fake = Source::new(TrackId::new(), SourceKind::LocalFile, "a.flac", Codec::Flac);
         fake.quality_score = score::FAKE_LOSSLESS;
         assert_eq!(file_label(&fake), "FLAC из lossy", "the score says, not the extension");
+        // Cut where a real master may be cut too: ranked as an MP3 320.
+        fake.quality_score = score::MP3_320;
+        assert_eq!(file_label(&fake), "FLAC, возможно из lossy");
         fake.quality_score = score::CD_LOSSLESS;
         assert_eq!(file_label(&fake), "FLAC");
         assert_eq!(done_words(Some("MP3 128"), Some("FLAC")), "Было MP3 128 — теперь FLAC");
@@ -788,6 +800,10 @@ mod tests {
             "скачанный FLAC оказался из MP3 ~128 — оставил прежний файл"
         );
         assert_eq!(upgrade_job_words(0, 1, 0, 0, Some("MP3 320")), "скачанный MP3 320 не лучше прежнего — оставил прежний файл");
+        assert_eq!(
+            upgrade_job_words(0, 1, 0, 0, Some("FLAC, возможно из MP3 320")),
+            "скачанный FLAC, возможно, из MP3 320 — оставил прежний файл"
+        );
         assert_eq!(upgrade_job_words(1, 0, 0, 0, None), "заменено 1");
         assert_eq!(upgrade_job_words(0, 0, 6, 0, None), "скачанное не из этого альбома — ничего не добавил");
         assert_eq!(upgrade_job_words(3, 1, 2, 0, None), "заменено 3 · не лучше прежних 1 · не из этого альбома 2");

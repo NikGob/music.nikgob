@@ -17,7 +17,7 @@ macro_rules! track_row_cols {
          t.track_no, t.duration_ms, t.active_quality, t.active_codec, t.active_kind, \
          t.has_local, \
          EXISTS(SELECT 1 FROM likes lk WHERE lk.target_kind = 'track' \
-                AND lk.target_id = t.id AND lk.deleted = 0),          t.artist_credit,          (SELECT s.locator FROM source s WHERE s.track_id = t.id AND s.is_active = 1                 AND s.kind = 'youtube'),          (SELECT q.verdict || '|' || q.origin || '|' || coalesce(q.made_from, '')             FROM source s JOIN source_quality q ON q.source_id = s.id            WHERE s.track_id = t.id AND s.is_active = 1 AND q.failed IS NULL)"
+                AND lk.target_id = t.id AND lk.deleted = 0),          t.artist_credit,          (SELECT s.locator FROM source s WHERE s.track_id = t.id AND s.is_active = 1                 AND s.kind = 'youtube'),          (SELECT q.verdict || '|' || q.origin || '|' || coalesce(q.made_from, '') || '|'                    || CAST(q.cutoff_hz AS INTEGER)             FROM source s JOIN source_quality q ON q.source_id = s.id            WHERE s.track_id = t.id AND s.is_active = 1 AND q.failed IS NULL)"
     };
 }
 

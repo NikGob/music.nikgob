@@ -226,7 +226,7 @@ async fn fake_lossless_is_scored_as_lossy_and_kept_unconverted() {
     // Cut at 16 kHz: ranked as the MP3 ~128 it was made from, below V0.
     assert_eq!(
         src.quality_score,
-        nikgob_core::quality::fake_score(nikgob_core::quality::SoundOrigin::Lossy { kbps: 128 })
+        nikgob_core::quality::fake_score(nikgob_core::quality::SoundOrigin::Lossy { kbps: 128 }, lib.quality_check(src.id).unwrap().unwrap().cutoff_hz)
     );
     assert!(src.quality_score < 690, "fake FLAC ranks below MP3 V0");
     assert_eq!(src.codec, Codec::Wav, "conversion off: kept as it is");
