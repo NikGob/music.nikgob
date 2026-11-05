@@ -928,16 +928,25 @@ fn downloaded(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut V
         ui.label(TypeRole::TitleSmall.style().rich(&day.label, s.on_surface_variant));
         ui.add_space(4.0);
         for t in &day.tracks {
+            // Each artist and the album are links to their pages.
             let mut line = t.artist.clone();
+            let (mut links, mut routes) = crate::screens::artist_links::library_spans(&t.artists, &t.artist);
             if let Some(a) = &t.album {
-                line = format!("{line} · {a}");
+                let at = crate::screens::artist_links::append_source(&mut line, a);
+                if let Some(r) = t.release_id {
+                    links.push(at);
+                    routes.push(Route::Release(r));
+                }
             }
             let o = ListItem::new(&t.title)
                 .supporting(line)
+                .supporting_links(links)
                 .leading(Leading::Image(t.cover.as_ref().map(|c| c.uri()), Icon::MusicNote))
                 .id_salt(("downloaded-row", t.id))
                 .show(ui);
-            if o.response.clicked() {
+            if let Some(r) = o.link_clicked.and_then(|k| routes.get(k).cloned()) {
+                nav = Some(r);
+            } else if o.response.clicked() {
                 out.push(Command::PlayTracks { tracks: ids.clone(), start: i, context: "скачанного".into() });
             }
             nav = pages.track_context_menu(&o.response, t, state, out).or(nav);
@@ -1247,19 +1256,27 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
         let g = line(ui.painter(), &artist, TypeRole::BodyMedium.style(), variant, tw);
         // Each artist is a link to its page.
         let (links, routes) = crate::screens::artist_links::library_spans(&t.artists, &artist);
-        let (clicked, over) =
+        let (clicked, mut over) =
             crate::components::interact_links(ui, id.with("artists"), &g, pos2(tx, cy + 2.0), &links, variant);
-        if over != link_hover {
-            ui.ctx().data_mut(|d| d.insert_temp(link_hover_key, over));
-        }
         if let Some(r) = clicked.and_then(|k| routes.get(k).cloned()) {
             nav = Some(r);
         }
         ui.painter().galley(pos2(tx, cy + 2.0), g, variant);
-        // Альбом.
+        // Альбом: a link to its page, like the artists.
         if let (Some((x0, x1)), Some(a)) = (cols.album, &t.album) {
             let g = line(ui.painter(), a, TypeRole::BodyMedium.style(), variant, x1 - x0);
-            ui.painter().galley(pos2(x0, cy - g.size().y * 0.5), g, variant);
+            let at = pos2(x0, cy - g.size().y * 0.5);
+            if let Some(r) = t.release_id {
+                let (clicked, on) = crate::components::interact_links(ui, id.with("album"), &g, at, &[0..a.len()], variant);
+                over |= on;
+                if clicked.is_some() {
+                    nav = Some(Route::Release(r));
+                }
+            }
+            ui.painter().galley(at, g, variant);
+        }
+        if over != link_hover {
+            ui.ctx().data_mut(|d| d.insert_temp(link_hover_key, over));
         }
         // Качество; a track without a file plays from a service: "стрим".
         if let Some((x0, x1)) = cols.quality {

@@ -862,7 +862,19 @@ pub fn show(
                 .max_rect(title)
                 .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)),
         );
-        common::label(&mut tui, &ctx_text, TypeRole::TitleSmall, s.on_surface_variant);
+        // The album, playlist or artist it plays from: its name is a link to
+        // its page, like the album under the title.
+        match (p.context_link(&ctx_text), p.context_page.clone()) {
+            (Some(name), Some(page)) => {
+                let format = TypeRole::TitleSmall.style().text_format(s.on_surface_variant);
+                if crate::components::link_label(&mut tui, "np-context", &ctx_text, &[name], format).clicked.is_some() {
+                    chrome.nav = Some(page);
+                }
+            }
+            _ => {
+                common::label(&mut tui, &ctx_text, TypeRole::TitleSmall, s.on_surface_variant);
+            }
+        }
     }
 
     let body = Rect::from_min_max(pos2(inner.left(), header.bottom() + 16.0), inner.max);

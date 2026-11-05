@@ -711,7 +711,7 @@ pub fn track_list_ext(
         };
         let t = &tracks[i];
         let o = track_row(ui, id, i, t, lead, two_line, opts, &wish, state, out);
-        if let Some(r) = o.artist.clone() {
+        if let Some(r) = o.link.clone() {
             *nav = Some(r);
         }
         if let Some(h) = &o.handle {
@@ -837,8 +837,9 @@ fn hole_row(
 /// What a drawn track row reported.
 struct RowOut {
     response: Response,
-    /// An artist name of the supporting line was clicked: its page.
-    artist: Option<Route>,
+    /// An artist name or the album of the supporting line was clicked: its
+    /// page.
+    link: Option<Route>,
     handle: Option<Response>,
     more: Option<Response>,
     play_clicked: bool,
@@ -868,10 +869,16 @@ fn track_row(
         Lead::Cover => Leading::Image(t.cover.as_ref().map(|c| c.uri()), Icon::MusicNote),
     };
     let mut supporting = t.artist.clone();
+    // Each artist of the line is a link to its page, and so is the album.
+    let (mut links, mut routes) = artist_links::library_spans(&t.artists, &t.artist);
     if lead == Lead::Cover
         && let Some(a) = &t.album
     {
-        supporting = format!("{supporting} · {a}");
+        let at = artist_links::append_source(&mut supporting, a);
+        if let Some(r) = t.release_id {
+            links.push(at);
+            routes.push(Route::Release(r));
+        }
     }
     // A liked YouTube clip without its song: said, as search says it.
     if t.clip {
@@ -942,8 +949,6 @@ fn track_row(
             });
         })
         .id_salt(("track", id, i, t.id));
-    // Each artist of the line is a link to its page.
-    let (links, artist_routes) = artist_links::library_spans(&t.artists, &supporting);
     if two_line {
         item = item.supporting(supporting).supporting_links(links);
     }
@@ -966,8 +971,8 @@ fn track_row(
             .playing(playing)
             .paint_at(ui, Rect::from_center_size(center, vec2(24.0, 24.0)));
     }
-    let artist = o.link_clicked.and_then(|k| artist_routes.get(k).cloned());
-    RowOut { response: o.response, artist, handle: o.handle, more: menu_resp, play_clicked: o.play_clicked }
+    let link = o.link_clicked.and_then(|k| routes.get(k).cloned());
+    RowOut { response: o.response, link, handle: o.handle, more: menu_resp, play_clicked: o.play_clicked }
 }
 
 /// Lays out `n` rows of `row_h` one under another (the page's item
