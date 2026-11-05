@@ -446,14 +446,10 @@ fn paint(
         // Where the line is sung up to: the position while it is current;
         // once it is not, it goes on being sung as it fades (a front or a
         // jump mid-word when the next line comes in finishes instead of
-        // jumping to the end), held where it was if the song went back.
+        // jumping to the end), held where it was after a seek.
         let sung_id = id.with(("sung", i));
-        let sung = if is_cur {
-            ctx.data_mut(|d| d.insert_temp(sung_id, pos));
-            pos
-        } else {
-            sung_pos(ctx.data(|d| d.get_temp::<Duration>(sung_id)), pos)
-        };
+        let sung = if is_cur { pos } else { sung_pos(ctx.data(|d| d.get_temp::<Duration>(sung_id)), pos) };
+        ctx.data_mut(|d| d.insert_temp(sung_id, sung));
         // A line-synced line is sung at a speaking pace (the source label
         // says «по строкам», so it's not passed off as real timing).
         let paced;
@@ -637,10 +633,14 @@ fn steady_pos(last: Option<Duration>, pos: Duration, playing: bool) -> Duration 
 const STEP_BACK: Duration = Duration::from_millis(350);
 
 /// Where a line that is no longer current is sung up to, from where it was
-/// last sung while current (`last`): on with the song, but never back (a
-/// seek before it leaves it as it was while it fades).
+/// sung the frame before (`last`): on with the song as it plays, but a
+/// seek either way (further than [`STEP_BACK`]) leaves it as it was while
+/// it fades.
 fn sung_pos(last: Option<Duration>, pos: Duration) -> Duration {
-    last.map_or(pos, |last| last.max(pos))
+    match last {
+        Some(last) if pos < last || pos - last > STEP_BACK => last,
+        _ => pos,
+    }
 }
 
 fn returning_offset(offset: f32, until: f64, now: f64) -> f32 {
@@ -3139,7 +3139,15 @@ mod tests {
         let ms = Duration::from_millis;
         assert_eq!(sung_pos(Some(ms(3_000)), ms(3_016)), ms(3_016), "on with the song");
         assert_eq!(sung_pos(Some(ms(3_000)), ms(1_000)), ms(3_000), "a seek back holds it");
+        assert_eq!(sung_pos(Some(ms(3_000)), ms(9_000)), ms(3_000), "so does a seek on");
         assert_eq!(sung_pos(None, ms(1_000)), ms(1_000));
+        // Frame by frame it keeps up with the song for as long as it fades.
+        let mut last = Some(ms(3_000));
+        for f in 1..60 {
+            let p = sung_pos(last, ms(3_000 + 16 * f));
+            assert_eq!(p, ms(3_000 + 16 * f));
+            last = Some(p);
+        }
         // Karaoke: the front where the line was left is where it goes on
         // from, instead of the whole line lit at once.
         let mut l = line(1.0, Some(4.0), "Свет из окна");
