@@ -130,8 +130,15 @@ fn track_row(
     };
     // What the row is, in words: a music video, a song already on disk.
     let mut supporting = t.artist.clone();
+    // Each artist of the line is a link to its page in the service, and so
+    // is the album.
+    let (mut links, mut routes) = artist_links::stream_spans(&t.artists, &t.artist);
     if !numbered && let Some(a) = &t.album {
-        supporting = format!("{supporting} · {a}");
+        let at = artist_links::append_source(&mut supporting, a);
+        if let Some(id) = &t.album_id {
+            links.push(at);
+            routes.push(Route::Stream(StreamPage::Album(id.clone())));
+        }
     }
     let mut extras: Vec<String> = Vec::new();
     if t.kind == TrackKind::Video {
@@ -160,8 +167,6 @@ fn track_row(
     let dur = t.duration.map(common::fmt_time).unwrap_or_default();
     let mut menu_resp = None;
     let mut item = ListItem::new(&t.title);
-    // Each artist of the line is a link to its page in the service.
-    let (links, artist_routes) = artist_links::stream_spans(&t.artists, &supporting);
     if two_line {
         item = item.supporting(supporting).supporting_links(links);
     }
@@ -221,8 +226,8 @@ fn track_row(
     }
     let picked = track_menu(egui::Id::new(("st-menu-ctx", id, i)), t, wished, &super::marks(&o.response.ctx)).context_menu(&o.response);
     let nav = track_pick(&o.response.ctx, picked, t, None, pages, out).or(nav);
-    // An artist name of the line: its page.
-    o.link_clicked.and_then(|k| artist_routes.get(k).cloned()).or(nav)
+    // An artist name or the album of the line: its page.
+    o.link_clicked.and_then(|k| routes.get(k).cloned()).or(nav)
 }
 
 fn track_menu(key: egui::Id, t: &StreamTrackRow, wished: Option<WishlistStatus>, marks: &nikgob_view::DislikesView) -> Menu {
