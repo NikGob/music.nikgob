@@ -1883,8 +1883,8 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
     let thick = if thick_form { 6.0 } else { 3.0 } * k * shrink;
     // As in Compose's CircularWavyProgressIndicator: flat near 0 % and
     // 100 %, wavy in between; the crests travel along the arc (one
-    // wavelengths a second) and the ring itself stays put. Wall-clock
-    // time while playing, so it never looks frozen; still when paused.
+    // wavelengths a second) and the ring itself stays put. Song time, so
+    // it is still when paused and goes on from there.
     let ramp = (progress / 0.1).min((1.0 - progress) / 0.05).clamp(0.0, 1.0);
     let height = prefs.lyrics_gap_height.clamp(0.5, 2.0);
     // About half the stroke: anything less reads as a lumpy polygon, and
@@ -1894,7 +1894,10 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
     } else { 0.0 };
     let (waves, amp) = wave_geometry(prefs.lyrics_gap_waves, radius, thick, requested_amp, height);
     let amp = amp * (1.0 - close);
-    let clock = if motion && playing { anim::now(painter.ctx()) as f32 } else { 0.0 };
+    // The song's own time: it stops where it is on a pause and goes on from
+    // there (the wall clock while playing and 0 when paused made the wave
+    // jump at both).
+    let clock = if motion { pos.as_secs_f32() } else { 0.0 };
     // One wavelength a second: a calm ripple. The ring itself stays put.
     let phase = clock * TAU;
     // Chord clearance includes both round caps and radial wave excursions.
