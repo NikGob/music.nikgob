@@ -443,6 +443,17 @@ fn paint(
             soft_galley(&painter, line.min, &g, dim, blur, blur_radius);
             continue;
         }
+        // Where the line is sung up to: the position while it is current;
+        // once it is not, it goes on being sung as it fades (a front or a
+        // jump mid-word when the next line comes in finishes instead of
+        // jumping to the end), held where it was if the song went back.
+        let sung_id = id.with(("sung", i));
+        let sung = if is_cur {
+            ctx.data_mut(|d| d.insert_temp(sung_id, pos));
+            pos
+        } else {
+            sung_pos(ctx.data(|d| d.get_temp::<Duration>(sung_id)), pos)
+        };
         // A line-synced line is sung at a speaking pace (the source label
         // says «по строкам», so it's not passed off as real timing).
         let paced;
@@ -472,17 +483,17 @@ fn paint(
         // light up one by one.
         if theme.reduced_motion && !look.words {
             if state.prefs.lyrics_glow {
-                let (head, feather) = if look.style == Style::Karaoke { timing.glide(pos, feather, window) } else { (f32::INFINITY, 0.0) };
+                let (head, feather) = if look.style == Style::Karaoke { timing.glide(sung, feather, window) } else { (f32::INFINITY, 0.0) };
                 glow(&painter, &g, line, head, feather, lit, focus * 0.1);
             }
             if look.style == Style::Karaoke {
-                let (head, feather) = timing.glide(pos, feather, window);
-                karaoke(&painter, &g, line, if is_cur { head } else { f32::INFINITY }, feather, base, color);
+                let (head, feather) = timing.glide(sung, feather, window);
+                karaoke(&painter, &g, line, head, feather, base, color);
             } else {
                 painter.galley_with_override_text_color(line.min, g, color);
             }
         } else {
-            timed_line(&painter, &g, line, &timing, pos, is_cur, focus, size, look, base, color, &state.prefs);
+            timed_line(&painter, &g, line, &timing, sung, is_cur, focus, size, look, base, color, &state.prefs);
         }
     }
     // A click goes to its line (a wait: to just before the singing): the
@@ -624,6 +635,13 @@ fn steady_pos(last: Option<Duration>, pos: Duration, playing: bool) -> Duration 
 
 /// Further back than this the position is a seek, and is followed.
 const STEP_BACK: Duration = Duration::from_millis(350);
+
+/// Where a line that is no longer current is sung up to, from where it was
+/// last sung while current (`last`): on with the song, but never back (a
+/// seek before it leaves it as it was while it fades).
+fn sung_pos(last: Option<Duration>, pos: Duration) -> Duration {
+    last.map_or(pos, |last| last.max(pos))
+}
 
 fn returning_offset(offset: f32, until: f64, now: f64) -> f32 {
     let t = ((now - until) / 0.5).clamp(0.0, 1.0) as f32;
@@ -1421,6 +1439,9 @@ fn held_envelope(end: f32, pos: f32) -> f32 {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `pos` is where the line is sung up to: the position while it is
+/// current, and after that on as it fades ([`sung_pos`]), so nothing in it
+/// jumps when it stops being current; it only goes back with `focus`.
 fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Timing, pos: Duration,
     current: bool, focus: f32, size: f32, look: Look, base: Color32, lit: Color32, prefs: &Prefs)
 {
@@ -1428,7 +1449,7 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
     let pace = Pace::of(prefs);
     let rise = pace.rise(style);
     let window = pace.window();
-    let (head, feather) = if current { timing.glide(pos, pace.feather(size), window) } else { (f32::INFINITY, 0.0) };
+    let (head, feather) = timing.glide(pos, pace.feather(size), window);
     let p = pos.as_secs_f32();
     let theme = Theme::get(painter.ctx());
     let glow_color = crate::lerp_color(lit, theme.scheme.primary, 0.3);
@@ -1454,20 +1475,16 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         } else {
             None
         };
-        let on = onset.map(|at| if current { light_over(p - at, rise, window) } else { 1.0 });
+        let on = onset.map(|at| light_over(p - at, rise, window));
         // Karaoke and Focus keep one baseline: sung and unsung words never
         // drift apart (that read as broken text). Reduced motion keeps the
         // wave down too (it only lights up).
         let lift = match onset {
             Some(at) if style == Style::Wave && !theme.reduced_motion => {
-                let (height, moving) = if current {
-                    let t = p - at;
-                    // The jump's speed scales its smoothing window too.
-                    let spread = window / pace.jump;
-                    (jump_over(t, pace.jump, spread), t + ONSET_LEAD < JUMP_SETTLE / pace.jump + spread)
-                } else {
-                    (1.0, false)
-                };
+                let t = p - at;
+                // The jump's speed scales its smoothing window too.
+                let spread = window / pace.jump;
+                let (height, moving) = (jump_over(t, pace.jump, spread), t + ONSET_LEAD < JUMP_SETTLE / pace.jump + spread);
                 let lift = height * RISE * size * prefs.lyrics_wave_jump.max(0.0) * hold;
                 // At rest on whole pixels, so a raised word is as crisp as
                 // the rest; in motion to the fraction, so it never steps.
@@ -3112,5 +3129,28 @@ mod tests {
             assert!(p >= was);
             (last, was) = (Some(p), p);
         }
+    }
+
+    /// A line that is no longer current goes on being sung from where it
+    /// was (no jump to the end when the next line comes in mid-word), and
+    /// stays as it was when the song went back before it.
+    #[test]
+    fn a_line_left_goes_on_from_where_it_was_sung() {
+        let ms = Duration::from_millis;
+        assert_eq!(sung_pos(Some(ms(3_000)), ms(3_016)), ms(3_016), "on with the song");
+        assert_eq!(sung_pos(Some(ms(3_000)), ms(1_000)), ms(3_000), "a seek back holds it");
+        assert_eq!(sung_pos(None, ms(1_000)), ms(1_000));
+        // Karaoke: the front where the line was left is where it goes on
+        // from, instead of the whole line lit at once.
+        let mut l = line(1.0, Some(4.0), "Свет из окна");
+        l.words = vec![word(1.0, 2.0, "Свет "), word(2.0, 2.5, "из "), word(2.5, 4.0, "окна")];
+        with_painter(|painter| {
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let t = Timing::new(&l, &g).unwrap();
+            let left = ms(3_000);
+            let (at, _) = t.glide(left, 8.0, 0.2);
+            let (next, _) = t.glide(sung_pos(Some(left), left + ms(16)), 8.0, 0.2);
+            assert!(at.is_finite() && next >= at && next - at < 5.0, "{at} → {next}");
+        });
     }
 }
