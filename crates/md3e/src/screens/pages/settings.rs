@@ -3,7 +3,7 @@
 
 use egui::{Sense, Ui};
 use nikgob_shapes::paint as shape_paint;
-use nikgob_view::{Ambient, BgShapes, Command, CoverShape, PrefPatch, Prefs, RingStyle, Route, ViewState};
+use nikgob_view::{Ambient, BgShapes, Command, CoverShape, LYRICS_BY_LETTERS, LYRICS_BY_WORDS, PrefPatch, Prefs, RingStyle, Route, ViewState};
 
 
 use super::settings_help::{self, SettingId as Id};
@@ -682,14 +682,14 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         choice(ui, Id::LyricsUnit, p);
     });
     // Focus by letters brightens the whole line: nothing to smooth.
-    if p.lyrics_style != 1 || p.lyrics_by_words {
+    if p.lyrics_style != 1 || p.lyrics_unit != LYRICS_BY_LETTERS {
         row(ui, Id::LyricsSmooth, "Плавность", Some("0% — по буквам, 100% — плавно"), |ui| {
             if let Some(v) = range_slider(ui, "set-lyrics-smooth", p.lyrics_smooth, (0.0, 1.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
                 p.lyrics_smooth = v;
             }
         });
     }
-    if p.lyrics_style == 2 || p.lyrics_by_words {
+    if p.lyrics_style == 2 || p.lyrics_unit == LYRICS_BY_WORDS {
         row(ui, Id::WaveFallback, "Если у текста нет времени слов", Some("Для «Волны» и подсветки по словам"), |ui| {
             choice_menu(ui, Id::WaveFallback, p);
         });
@@ -707,7 +707,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
         });
     }
     // Focus by letters brightens the whole line: nothing lights up by itself.
-    if p.lyrics_style != 1 || p.lyrics_by_words {
+    if p.lyrics_style != 1 || p.lyrics_unit != LYRICS_BY_LETTERS {
         row(ui, Id::LightSpeed, "Скорость подсветки", Some("0% — плавно, 100% — сразу"), |ui| {
             if let Some(v) = range_slider(ui, "set-lyrics-light-speed", p.lyrics_light_speed, (0.0, 1.0), 0.05, |v| format!("{:.0}%", v * 100.0)) {
                 p.lyrics_light_speed = v;

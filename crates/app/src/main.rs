@@ -863,6 +863,19 @@ mod prefs_tests {
         assert!(d.lyrics_style == 0 && !d.lyrics_by_words && d.lyrics_soft_edges);
     }
 
+    /// Revision 4: «По слогам» is the unit of the lyrics' animations; prefs
+    /// from before it at «По буквам» (the old default) move to it, «По
+    /// словам» chosen stays, and what is chosen since stays.
+    #[test]
+    fn syllables_become_the_unit_once() {
+        use nikgob_view::{LYRICS_BY_LETTERS, LYRICS_BY_SYLLABLES, LYRICS_BY_WORDS};
+        assert_eq!(parse_prefs(br#"{"lyrics_by_words":false,"lyrics_rev":3}"#).unwrap().lyrics_unit, LYRICS_BY_SYLLABLES);
+        assert_eq!(parse_prefs(br#"{"lyrics_by_words":true,"lyrics_rev":3}"#).unwrap().lyrics_unit, LYRICS_BY_WORDS);
+        assert_eq!(parse_prefs(br#"{"lyrics_style":3}"#).unwrap().lyrics_unit, LYRICS_BY_WORDS);
+        assert_eq!(parse_prefs(br#"{"lyrics_unit":0,"lyrics_rev":4}"#).unwrap().lyrics_unit, LYRICS_BY_LETTERS);
+        assert_eq!(prefs_of(None).lyrics_unit, LYRICS_BY_SYLLABLES);
+    }
+
     /// «Настройки текста…» is offered under the lyrics until it is picked
     /// once, and stays gone after a restart.
     #[test]

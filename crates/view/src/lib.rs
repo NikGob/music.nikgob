@@ -1284,8 +1284,16 @@ impl ToastKind {
 /// playing song and for the library, recognition from scratch off, and
 /// line timing for plain texts on; 2 made «Окно» the look of the lyrics
 /// control; 3 turned word timing for the playing song on and moved the
-/// lead from [`OLD_LYRICS_LEAD`] to [`LYRICS_LEAD`].
-pub const LYRICS_REV: u8 = 3;
+/// lead from [`OLD_LYRICS_LEAD`] to [`LYRICS_LEAD`]; 4 made «По слогам»
+/// the unit of the lyrics' animations ([`Prefs::lyrics_unit`]).
+pub const LYRICS_REV: u8 = 4;
+
+/// [`Prefs::lyrics_unit`]: letter by letter («По буквам») …
+pub const LYRICS_BY_LETTERS: u8 = 0;
+/// … syllable by syllable («По слогам», the default) …
+pub const LYRICS_BY_SYLLABLES: u8 = 1;
+/// … or whole written words («По словам»).
+pub const LYRICS_BY_WORDS: u8 = 2;
 
 /// Seconds the lyrics highlight runs ahead of the voice by default
 /// ([`Prefs::lyrics_lead`]): about what karaoke apps use, which makes up
@@ -1390,9 +1398,15 @@ pub struct Prefs {
     pub lyrics_gap_size: f32,
     /// The last seconds of a pause count down in digits instead.
     pub lyrics_countdown: bool,
-    /// «Подсвечивать»: every animation goes over whole written words
-    /// (each part of a hyphenated one) instead of letters.
+    /// The old «Подсвечивать» switch (whole written words instead of
+    /// letters), before [`Self::lyrics_unit`]: read once by
+    /// [`Prefs::upgrade_lyrics`].
     pub lyrics_by_words: bool,
+    /// «Подсвечивать»: what every animation goes over, [`LYRICS_BY_LETTERS`],
+    /// [`LYRICS_BY_SYLLABLES`] (the timed syllables of a text that has
+    /// them, the timed words of one that has words) or [`LYRICS_BY_WORDS`]
+    /// (each part of a hyphenated word).
+    pub lyrics_unit: u8,
     /// «Мягкие края»: lines near the top and bottom of the lyrics blur and
     /// fade out instead of being cut.
     pub lyrics_soft_edges: bool,
@@ -1765,6 +1779,11 @@ impl Prefs {
                 self.lyrics_lead = LYRICS_LEAD;
             }
         }
+        if stored < 4 {
+            // «По слогам» became the default unit: «По буквам» (the old
+            // default) moves to it, «По словам» chosen stays.
+            self.lyrics_unit = if self.lyrics_by_words || self.lyrics_style == 3 { LYRICS_BY_WORDS } else { LYRICS_BY_SYLLABLES };
+        }
 
         self.lyrics_rev = LYRICS_REV;
         self.upgrade_lyrics_style();
@@ -1777,6 +1796,7 @@ impl Prefs {
         if self.lyrics_style == 3 {
             self.lyrics_style = 2;
             self.lyrics_by_words = true;
+            self.lyrics_unit = LYRICS_BY_WORDS;
         }
     }
 }
@@ -2703,6 +2723,7 @@ impl Default for Prefs {
             lyrics_gap_size: 1.0,
             lyrics_countdown: true,
             lyrics_by_words: false,
+            lyrics_unit: LYRICS_BY_SYLLABLES,
             lyrics_soft_edges: true,
             lyrics_soft_strength: 1.0,
             lyrics_soft_depth: 0.18,

@@ -42,12 +42,24 @@ enum Style {
     Wave,
 }
 
-/// An animation and what it goes over: letters, or whole written words
-/// (each part of a hyphenated one; the syllables of one light together).
+/// What an animation goes over («Подсвечивать»).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum By {
+    Letters,
+    /// The timed pieces: the syllables of a text timed by syllables (the
+    /// words of one timed by words), each filled evenly across its letters
+    /// over its own time; under the wave a word rises with its syllables.
+    Syllables,
+    /// Whole written words (each part of a hyphenated one; the syllables
+    /// of one light together).
+    Words,
+}
+
+/// An animation and what it goes over.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Look {
     style: Style,
-    words: bool,
+    by: By,
 }
 
 impl Look {
@@ -59,7 +71,17 @@ impl Look {
             2 | 3 => Style::Wave,
             _ => Style::Karaoke,
         };
-        Look { style, words: prefs.lyrics_by_words || prefs.lyrics_style == 3 }
+        let by = match prefs.lyrics_unit {
+            _ if prefs.lyrics_style == 3 => By::Words,
+            nikgob_view::LYRICS_BY_LETTERS => By::Letters,
+            nikgob_view::LYRICS_BY_WORDS => By::Words,
+            _ => By::Syllables,
+        };
+        Look { style, by }
+    }
+
+    fn words(self) -> bool {
+        self.by == By::Words
     }
 }
 
@@ -114,12 +136,14 @@ fn control_in(ui: &mut Ui, row: Rect, left: Option<f32>, state: &ViewState, out:
 /// and «По словам» over the written words (syllables or words, both are
 /// real times). Words lit on a pace guessed from line times alone look
 /// wrong, so under the wave or by words a text with line times only may
-/// become bright instead (the calm Focus, the line as a whole).
+/// become bright instead (the calm Focus, the line as a whole). By
+/// syllables a guessed text has no syllables: its guessed words fill as
+/// the karaoke front does.
 fn style_for(prefs: &Prefs, lines: &[LyricLine]) -> Look {
     let look = Look::of(prefs);
     let guessed = LyricsSync::of(lines) == Some(LyricsSync::Line);
-    if (look.style == Style::Wave || look.words) && prefs.wave_syllables_only && guessed {
-        return Look { style: Style::Focus, words: false };
+    if (look.style == Style::Wave || look.words()) && prefs.wave_syllables_only && guessed {
+        return Look { style: Style::Focus, by: By::Letters };
     }
     look
 }
@@ -169,7 +193,14 @@ fn paint(
     // Each item's motion (its place, focus, wait) is kept under its slot,
     // which stays with the same line when the text is swapped for the same
     // song's (timing made, another source), so nothing moves or dims then.
+    // A wait new to a swapped text opens from folded instead of popping
+    // open; the first frame of the view shows its state as it is.
+    let first_frame = ctx.data(|d| d.get_temp::<Slots>(id.with("slots"))).is_none();
     let slot_of = slots(&ctx, id.with("slots"), &item_keys(lines, &items));
+    // When the text's timing turns from line times only to real times or
+    // back (made timing arrives, «По строкам» picked), the calm Focus and
+    // the chosen look fade into each other instead of swapping at once.
+    let (look_was, look_mix) = look_change(&ctx, id.with("look"), look, now);
 
     // Waiting owns the anchor during a break; otherwise follow the last
     // main line. Background voices light up independently while sung. A
@@ -235,7 +266,15 @@ fn paint(
             .enumerate()
             .map(|(i, l)| breaks[i].width.max(sub(l).map_or(0.0, |t| sub_layout(t).size().x)))
             .fold(0.0, f32::max);
-        widest.min(wrap)
+        // Another text moves the block to its new place on the spatial
+        // spring instead of jumping there; a resize (another wrap) moves
+        // it at once, with the view.
+        let (widest_id, wrap_id) = (id.with("widest"), id.with("widest-wrap"));
+        if ctx.data(|d| d.get_temp::<f32>(wrap_id)) != Some(wrap) {
+            anim::snap_f32(&ctx, widest_id, widest);
+            ctx.data_mut(|d| d.insert_temp(wrap_id, wrap));
+        }
+        anim::f32(&ctx, widest_id, widest, BLOCK).clamp(0.0, wrap)
     } else {
         wrap
     };
@@ -254,7 +293,12 @@ fn paint(
         }
         tops.push(y);
         // A wait only takes room while it is happening: it unfolds when it
-        // starts and folds away when the singing comes back.
+        // starts and folds away when the singing comes back; one new to a
+        // swapped text that is happening already unfolds too (its spring
+        // would start where it goes).
+        if !first_frame && matches!(items[i], DisplayLine::Interlude { .. }) {
+            anim::fraction_starts_at(&ctx, id.with(("wait-room", slot_of[i])), 0.0);
+        }
         let keep = match items[i] {
             // On Material's expressive spatial spring: the lines part (and
             // close again) in one soft move.
@@ -461,10 +505,15 @@ fn paint(
         };
         let line = Rect::from_min_size(pos2(side(g.size().x), y + (slot_h - g.size().y) * 0.5), g.size());
         // Brightness of a line at rest: past lines a bit brighter than the
-        // ones to come; focus mode pushes the rest far back.
-        let mut rest = match look.style {
+        // ones to come; focus mode pushes the rest far back (from the look
+        // before as the look changes).
+        let rest_in = |style: Style| match style {
             Style::Focus => 0.62f32.powf(far).max(0.08) * 0.7,
             _ => (if dist < 0 { 0.5 } else { 0.42 }) * 0.86f32.powf((far - 1.0).max(0.0)),
+        };
+        let mut rest = match look_was {
+            Some(was) => rest_in(was.style) + (rest_in(look.style) - rest_in(was.style)) * look_mix,
+            None => rest_in(look.style),
         };
         if l.background {
             rest *= 0.8;
@@ -499,7 +548,7 @@ fn paint(
         } else {
             l
         };
-        let Some(timing) = Timing::new(timed, &g) else {
+        let Some(timing) = Timing::of(timed, &g, look) else {
             if state.prefs.lyrics_glow {
                 glow(&painter, &g, line, f32::INFINITY, 0.0, lit, focus * 0.1);
             }
@@ -514,21 +563,37 @@ fn paint(
         let color = crate::lerp_color(dim, lit, focus.max(shine));
         let pace = Pace::of(&state.prefs);
         let (feather, window) = (pace.feather(size), pace.window());
-        // Words only change colour (their jump stays down), so they still
-        // light up one by one.
-        if theme.reduced_motion && !look.words {
-            if state.prefs.lyrics_glow {
-                let (head, feather) = if look.style == Style::Karaoke { timing.glide(sung, feather, window) } else { (f32::INFINITY, 0.0) };
-                glow(&painter, &g, line, head, feather, lit, focus * 0.1);
-            }
-            if look.style == Style::Karaoke {
-                let (head, feather) = timing.glide(sung, feather, window);
-                karaoke(&painter, &g, line, head, feather, base, color);
+        let draw = |painter: &egui::Painter, look: Look, timing: &Timing| {
+            // Words only change colour (their jump stays down), so they
+            // still light up one by one.
+            if theme.reduced_motion && !look.words() {
+                if state.prefs.lyrics_glow {
+                    let (head, feather) = if look.style == Style::Karaoke { timing.glide(sung, feather, window) } else { (f32::INFINITY, 0.0) };
+                    glow(painter, &g, line, head, feather, lit, focus * 0.1);
+                }
+                if look.style == Style::Karaoke {
+                    let (head, feather) = timing.glide(sung, feather, window);
+                    karaoke(painter, &g, line, head, feather, base, color);
+                } else {
+                    painter.galley_with_override_text_color(line.min, g.clone(), color);
+                }
             } else {
-                painter.galley_with_override_text_color(line.min, g, color);
+                timed_line(painter, &g, line, timing, sung, is_cur, focus, size, look, base, color, &state.prefs);
             }
-        } else {
-            timed_line(&painter, &g, line, &timing, sung, is_cur, focus, size, look, base, color, &state.prefs);
+        };
+        match look_was.and_then(|was| Some((was, Timing::of(timed, &g, was)?))) {
+            // The look before goes as the new one comes, the line about as
+            // opaque as ever between them (see [`look_fades`]).
+            Some((was, before)) => {
+                let (out, inn) = look_fades(look_mix);
+                let mut old = painter.clone();
+                old.multiply_opacity(out);
+                draw(&old, was, &before);
+                let mut new = painter.clone();
+                new.multiply_opacity(inn);
+                draw(&new, look, &timing);
+            }
+            None => draw(&painter, look, &timing),
         }
     }
     // A click goes to its line (a wait: to just before the singing): the
@@ -553,6 +618,59 @@ fn paint(
 
 /// The spring the text follows a scroll by hand on.
 const HAND: Spring = Spring::new(1.0, 1600.0);
+
+/// The spring mega mode's block of text moves to its new middle on when
+/// the text changes.
+const BLOCK: Spring = nikgob_motion::tokens::EXPRESSIVE_DEFAULT_SPATIAL;
+
+/// The effects spring one look fades into another on.
+const LOOK_FADE: Spring = nikgob_motion::tokens::SLOW_EFFECTS;
+
+/// A change of look ([`look_change`]): the look now, the one before and
+/// when it changed.
+#[derive(Clone, Copy, Debug)]
+struct LookChange {
+    now: Look,
+    was: Look,
+    at: f64,
+}
+
+/// The look before `look` while the view fades from it (with how far, 0..1,
+/// the fade is), else `None` and 1.
+fn look_change(ctx: &egui::Context, id: egui::Id, look: Look, now: f64) -> (Option<Look>, f32) {
+    let c = match ctx.data(|d| d.get_temp::<LookChange>(id)) {
+        Some(c) if c.now == look => c,
+        // A first frame shows its look as it is.
+        None => LookChange { now: look, was: look, at: f64::NEG_INFINITY },
+        Some(c) => LookChange { now: look, was: c.now, at: now },
+    };
+    ctx.data_mut(|d| d.insert_temp(id, c));
+    let mix = look_mix(c.was, c.now, (now - c.at) as f32);
+    if mix < 1.0 {
+        ctx.request_repaint();
+        (Some(c.was), mix)
+    } else {
+        (None, 1.0)
+    }
+}
+
+/// How far (0..1) a fade from look `was` to `now` is `t` seconds after the
+/// change: on [`LOOK_FADE`], done once it is within a thousandth.
+fn look_mix(was: Look, now: Look, t: f32) -> f32 {
+    if was == now || !t.is_finite() {
+        return 1.0;
+    }
+    let mix = (1.0 - LOOK_FADE.solve(1.0, 0.0, t.max(0.0)).0).clamp(0.0, 1.0);
+    if mix > 0.999 { 1.0 } else { mix }
+}
+
+/// The opacity of the look going and of the one coming at `mix`: the one
+/// going stays nearly whole until the new one has come in mostly, so the
+/// line (one drawn over the other) never thins out between them.
+fn look_fades(mix: f32) -> (f32, f32) {
+    let m = mix.clamp(0.0, 1.0);
+    (1.0 - m.powi(3), 1.0 - (1.0 - m).powi(3))
+}
 
 /// Below this share of its slot a folding wait counts as gone: it takes no
 /// pointer and draws nothing.
@@ -1016,7 +1134,7 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     const TEXTS: [&str; 3] = ["Где-то рядом", "Слышишь этот ритм", "Он ведёт меня"];
     let pos = Duration::from_secs_f64(anim::now(ui.ctx()).rem_euclid(LOOP));
     let mut at = 0.3;
-    let words = ["Слы", "шишь ", "этот ", "ритм"]
+    let words = ["Слы", "шишь ", "э", "тот ", "ритм"]
         .iter()
         .map(|w| {
             let d = 0.16 * w.trim().chars().count() as f32;
@@ -1058,7 +1176,7 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
         painter.galley_with_override_text_color(pos2(cur.left(), top), sg, dim);
     }
     let base = s.on_surface.gamma_multiply(rest.min(UNSUNG));
-    if let Some(timing) = Timing::new(&line, &g) {
+    if let Some(timing) = Timing::of(&line, &g, look) {
         // Past the end the line is drawn as no longer current, its light
         // (and the wave's lift) easing out with `focus`.
         let back = ((pos.as_secs_f32() - BACK) / 0.4).clamp(0.0, 1.0);
@@ -1177,7 +1295,7 @@ struct Syllable {
     from: f32,
     to: f32,
     letters: usize,
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Its whitespace-delimited word ([`Timing::words`]).
     word: usize,
     /// Its first and one past its last glyph.
     glyphs: (usize, usize),
@@ -1208,12 +1326,23 @@ struct Timing {
     /// Each glyph's span on the line's run of advances.
     xs: Vec<(f32, f32)>,
     /// First syllable of each whitespace-delimited word.
-    #[cfg_attr(not(test), allow(dead_code))]
     words: Vec<usize>,
 }
 
 impl Timing {
+    /// The timing of `l` laid out as `g`, its letters' times by weight.
     fn new(l: &LyricLine, g: &Galley) -> Option<Self> {
+        Self::build(l, g, false)
+    }
+
+    /// [`Self::new`] for `look`: by syllables each piece fills evenly
+    /// across its letters over its own time (the fill of a word runs piece
+    /// by piece, each at its own pace).
+    fn of(l: &LyricLine, g: &Galley, look: Look) -> Option<Self> {
+        Self::build(l, g, look.by == By::Syllables)
+    }
+
+    fn build(l: &LyricLine, g: &Galley, even: bool) -> Option<Self> {
         if l.words.is_empty() {
             return None;
         }
@@ -1256,12 +1385,18 @@ impl Timing {
             x += gl.advance_width;
         }
         // Each letter's own part of its syllable's time: vowels, which
-        // carry a held sound, take more of it than consonants.
+        // carry a held sound, take more of it than consonants (evenly by
+        // its advance, `even`).
         let mut done = vec![0.0f32; syllables.len()];
-        let times: Vec<Option<(f32, f32)>> = g.rows.iter().flat_map(|r| &r.row.glyphs).zip(&glyphs)
-            .map(|(gl, syllable)| {
+        let times: Vec<Option<(f32, f32)>> = g.rows.iter().flat_map(|r| &r.row.glyphs).zip(&glyphs).zip(&xs)
+            .map(|((gl, syllable), &(x0, x1))| {
                 let i = (*syllable)?;
                 let s = &syllables[i];
+                if even {
+                    let at = |x: f32| s.start + (s.end - s.start) * ((x - s.from) / (s.to - s.from).max(f32::EPSILON)).clamp(0.0, 1.0);
+                    // The last letter ends exactly with its syllable.
+                    return Some((at(x0), if x1 >= s.to - 1e-3 { s.end } else { at(x1) }));
+                }
                 let per = (s.end - s.start) / weights[i].max(f32::EPSILON);
                 let w = letter_weight(gl.chr);
                 let at = s.start + per * done[i];
@@ -1341,6 +1476,23 @@ impl Timing {
         };
         let f = feather * ((p + half - first.start) / FADE).clamp(0.0, 1.0).min(out);
         (at + 0.5 * f, f)
+    }
+
+    /// How high (in rest heights) the written word of syllable `s` stands
+    /// at `p` by syllables: it goes up with each of its syllables, a share
+    /// at a time and each with its own jump, so it is up in full once the
+    /// last is sung. With the seconds since that last one's onset
+    /// (negative before it), for its settling onto whole pixels.
+    fn word_jump(&self, s: usize, p: f32, speed: f32, window: f32) -> (f32, f32) {
+        let w = self.syllables[s].word;
+        let first = self.words[w];
+        let end = self.words.get(w + 1).copied().unwrap_or(self.syllables.len()).max(first + 1);
+        let onset = |i: usize| {
+            let sy = &self.syllables[i];
+            if sy.letters == 0 { sy.start } else { self.onsets.get(sy.glyphs.0).copied().flatten().unwrap_or(sy.start) }
+        };
+        let height = (first..end).map(|i| jump_over(p - onset(i), speed, window)).sum::<f32>() / (end - first) as f32;
+        (height, p - onset(end - 1))
     }
 
     /// How far along the line's advances it is sung at `p` seconds.
@@ -1600,14 +1752,18 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
     for (k, glyph) in timing.glyphs.iter().enumerate() {
         let syllable = glyph.map(|s| &timing.syllables[s]);
         // By words: the written unit this glyph lights (and jumps) with.
-        let unit = timing.glyph_units[k].filter(|_| look.words);
-        let sustained = syllable.filter(|s| current && style == Style::Karaoke && held(s.start, s.end, s.letters, p));
+        let unit = timing.glyph_units[k].filter(|_| look.words());
+        // A note held long glows while it is held: under karaoke, and in
+        // every look by syllables.
+        let sustained = syllable.filter(|s| current && (style == Style::Karaoke || look.by == By::Syllables) && held(s.start, s.end, s.letters, p));
         // When the piece this glyph goes with is sung: its unit by words,
-        // its own letter in the wave by letters. Karaoke by letters follows
-        // the front instead; focus by letters lights the whole line.
-        let onset = if look.words {
+        // its own letter in the wave (and in focus by syllables, which
+        // fills each syllable across its letters). Karaoke by letters or
+        // syllables follows the front instead; focus by letters lights the
+        // whole line.
+        let onset = if look.words() {
             unit.map(|u| timing.units[u].start)
-        } else if style == Style::Wave {
+        } else if style == Style::Wave || (style == Style::Focus && look.by == By::Syllables) {
             syllable.map(|s| timing.onsets[k].unwrap_or(s.start))
         } else {
             None
@@ -1618,10 +1774,13 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         // wave down too (it only lights up).
         let lift = match onset {
             Some(at) if style == Style::Wave && !theme.reduced_motion => {
-                let t = p - at;
                 // The jump's speed scales its smoothing window too.
                 let spread = window / pace.jump;
-                let height = jump_over(t, pace.jump, spread);
+                // By syllables the whole written word goes up with them.
+                let (height, t) = match glyph.filter(|_| look.by == By::Syllables) {
+                    Some(s) => timing.word_jump(s, p, pace.jump, spread),
+                    None => (jump_over(p - at, pace.jump, spread), p - at),
+                };
                 let lift = height * RISE * size * prefs.lyrics_wave_jump.max(0.0) * hold;
                 // At rest on whole pixels, so a raised word is as crisp as
                 // the rest; in motion to the fraction, so it never steps.
@@ -1634,7 +1793,7 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         };
         inks.push(match on {
             Some(on) => Ink::solid(crate::lerp_color(base, lit, on * hold), lift),
-            None if style == Style::Karaoke && !look.words => Ink { lift, base, lit, head, feather },
+            None if style == Style::Karaoke && !look.words() => Ink { lift, base, lit, head, feather },
             None => Ink::solid(lit, lift),
         });
         let strength = focus * (0.1 + sustained.map_or(0.0, |s|
@@ -1642,8 +1801,8 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         let glow_ink = |strength: f32| glow_color.gamma_multiply(strength.clamp(0.0, 1.0));
         glows.push(match (on, style) {
             (Some(on), _) => Ink::solid(glow_ink(strength * on), lift),
-            (None, Style::Karaoke) if !look.words => Ink { lift, base: Color32::TRANSPARENT, lit: glow_ink(strength), head, feather },
-            (None, Style::Focus) if !look.words => Ink::solid(glow_ink(strength), lift),
+            (None, Style::Karaoke) if !look.words() => Ink { lift, base: Color32::TRANSPARENT, lit: glow_ink(strength), head, feather },
+            (None, Style::Focus) if !look.words() => Ink::solid(glow_ink(strength), lift),
             _ => Ink::solid(Color32::TRANSPARENT, lift),
         });
     }
@@ -2245,17 +2404,24 @@ mod tests {
         let lines_only = [line(1.0, Some(3.0), "do-dodge back")];
         let mut worded = lines_only[0].clone();
         worded.words = vec![word(1.0, 2.0, "do-dodge "), word(2.0, 3.0, "back")];
-        let whole = Look { style: Style::Focus, words: false };
+        let whole = Look { style: Style::Focus, by: By::Letters };
         for (anim, style) in [(0, Style::Karaoke), (1, Style::Focus), (2, Style::Wave)] {
-            let calm = Prefs { lyrics_style: anim, lyrics_by_words: true, wave_syllables_only: true, ..Prefs::default() };
+            let calm = Prefs { lyrics_style: anim, lyrics_unit: nikgob_view::LYRICS_BY_WORDS, wave_syllables_only: true, ..Prefs::default() };
             assert_eq!(style_for(&calm, &lines_only), whole);
             let paced = Prefs { wave_syllables_only: false, ..calm.clone() };
-            assert_eq!(style_for(&paced, &lines_only), Look { style, words: true });
-            assert_eq!(style_for(&calm, std::slice::from_ref(&worded)), Look { style, words: true });
+            assert_eq!(style_for(&paced, &lines_only), Look { style, by: By::Words });
+            assert_eq!(style_for(&calm, std::slice::from_ref(&worded)), Look { style, by: By::Words });
         }
-        // Karaoke by letters paces line times as before, whatever the fallback.
-        let karaoke = Prefs { lyrics_style: 0, wave_syllables_only: true, ..Prefs::default() };
-        assert_eq!(style_for(&karaoke, &lines_only), Look { style: Style::Karaoke, words: false });
+        // Karaoke and Focus by letters or by syllables pace line times as
+        // before, whatever the fallback; the wave falls back.
+        for by in [nikgob_view::LYRICS_BY_LETTERS, nikgob_view::LYRICS_BY_SYLLABLES] {
+            let karaoke = Prefs { lyrics_style: 0, lyrics_unit: by, wave_syllables_only: true, ..Prefs::default() };
+            assert_eq!(style_for(&karaoke, &lines_only).style, Style::Karaoke);
+            let wave = Prefs { lyrics_style: 2, ..karaoke.clone() };
+            assert_eq!(style_for(&wave, &lines_only), whole);
+        }
+        let syllables = Prefs { lyrics_style: 1, wave_syllables_only: true, ..Prefs::default() };
+        assert_eq!(style_for(&syllables, &lines_only), Look { style: Style::Focus, by: By::Syllables });
         with_painter(|painter| {
             let u = units_of(painter, &paced_words(&lines_only[0], None));
             assert_eq!(u.iter().map(|u| u.0.as_str()).collect::<Vec<_>>(), ["do-", "dodge", "back"]);
@@ -2266,22 +2432,36 @@ mod tests {
         });
     }
 
-    /// The unit applies to each animation; the old fourth animation
-    /// (`lyrics_style` 3, «По словам») reads as the wave by words.
+    /// The unit applies to each animation (by syllables unless chosen
+    /// otherwise); the old fourth animation (`lyrics_style` 3, «По
+    /// словам») reads as the wave by words.
     #[test]
     fn the_unit_goes_with_every_animation_and_the_old_words_style_is_the_wave_by_words() {
+        use nikgob_view::{LYRICS_BY_LETTERS, LYRICS_BY_SYLLABLES, LYRICS_BY_WORDS};
         for (anim, style) in [(0, Style::Karaoke), (1, Style::Focus), (2, Style::Wave)] {
-            for words in [false, true] {
-                let p = Prefs { lyrics_style: anim, lyrics_by_words: words, ..Prefs::default() };
-                assert_eq!(Look::of(&p), Look { style, words });
+            for (unit, by) in [(LYRICS_BY_LETTERS, By::Letters), (LYRICS_BY_SYLLABLES, By::Syllables), (LYRICS_BY_WORDS, By::Words)] {
+                let p = Prefs { lyrics_style: anim, lyrics_unit: unit, ..Prefs::default() };
+                assert_eq!(Look::of(&p), Look { style, by });
             }
         }
-        let old = Prefs { lyrics_style: 3, lyrics_by_words: false, ..Prefs::default() };
-        assert_eq!(Look::of(&old), Look { style: Style::Wave, words: true });
+        assert_eq!(Look::of(&Prefs::default()).by, By::Syllables);
+        let old = Prefs { lyrics_style: 3, lyrics_by_words: false, lyrics_unit: LYRICS_BY_LETTERS, ..Prefs::default() };
+        assert_eq!(Look::of(&old), Look { style: Style::Wave, by: By::Words });
         let mut moved = old.clone();
         moved.upgrade_lyrics_style();
-        assert_eq!((moved.lyrics_style, moved.lyrics_by_words), (2, true));
+        assert_eq!((moved.lyrics_style, moved.lyrics_by_words, moved.lyrics_unit), (2, true, LYRICS_BY_WORDS));
         assert_eq!(Look::of(&moved), Look::of(&old));
+        // Prefs from before syllables: letters (the old default) move to
+        // syllables, words chosen stay.
+        for (by_words, unit) in [(false, LYRICS_BY_SYLLABLES), (true, LYRICS_BY_WORDS)] {
+            let mut p = Prefs { lyrics_by_words: by_words, lyrics_unit: LYRICS_BY_LETTERS, ..Prefs::default() };
+            p.upgrade_lyrics(3);
+            assert_eq!(p.lyrics_unit, unit);
+            // Chosen since, it stays.
+            let mut q = Prefs { lyrics_unit: LYRICS_BY_LETTERS, ..p };
+            q.upgrade_lyrics(nikgob_view::LYRICS_REV);
+            assert_eq!(q.lyrics_unit, LYRICS_BY_LETTERS);
+        }
     }
 
     /// A wave letter or word jumps at its onset: still before it, off the
@@ -2339,14 +2519,15 @@ mod tests {
             let mut l = line(1.0, Some(4.0), "Я делаю do-dodge back");
             l.words = vec![word(1.0, 1.2, "Я "), word(1.2, 2.0, "делаю "), word(2.0, 2.4, "do-"), word(2.4, 2.8, "dod"), word(2.8, 3.0, "ge "), word(3.0, 3.5, "back")];
             let g = fixed_layout(painter, &l.text, 26.0);
-            let t = Timing::new(&l, &g).unwrap();
             let rect = Rect::from_min_size(pos2(0.0, 0.0), g.size());
             for style in [Style::Karaoke, Style::Focus, Style::Wave] {
-                for words in [false, true] {
+                for by in [By::Letters, By::Syllables, By::Words] {
+                    let look = Look { style, by };
+                    let t = Timing::of(&l, &g, look).unwrap();
                     let prefs = Prefs { lyrics_glow: true, ..Prefs::default() };
                     for (at, current, focus) in [(0.5, true, 1.0), (2.5, true, 1.0), (2.9, false, 0.4), (5.0, false, 0.0)] {
                         timed_line(painter, &g, rect, &t, Duration::from_secs_f32(at), current, focus, 26.0,
-                            Look { style, words }, Color32::GRAY, Color32::WHITE, &prefs);
+                            look, Color32::GRAY, Color32::WHITE, &prefs);
                     }
                 }
             }
@@ -2728,7 +2909,7 @@ mod tests {
                 assert!(letters.next().is_none());
                 let line = Rect::from_min_size(pos2(0.0, 0.0), g.size());
                 karaoke(painter, &g, line, 80.0, Pace::of(&Prefs::default()).feather(size), Color32::GRAY, Color32::WHITE);
-                timed_line(painter, &g, line, &timing, Duration::from_secs(4), true, 1.0, size, Look { style: Style::Karaoke, words: false }, Color32::GRAY, Color32::WHITE, &Prefs::default());
+                timed_line(painter, &g, line, &timing, Duration::from_secs(4), true, 1.0, size, Look { style: Style::Karaoke, by: By::Letters }, Color32::GRAY, Color32::WHITE, &Prefs::default());
             }
         });
     }
@@ -3246,10 +3427,12 @@ mod tests {
         let close = |a: Color32, b: Color32| a.to_array().iter().zip(b.to_array()).all(|(x, y)| x.abs_diff(y) <= 3);
         for (timing, l, calm) in [("word", &worded, true), ("syllable", &syllables, true), ("guessed", &lines_only, false), ("calm", &lines_only, true)] {
             for style in 0..3u8 {
-                for words in [false, true] {
+                for unit in [nikgob_view::LYRICS_BY_LETTERS, nikgob_view::LYRICS_BY_SYLLABLES, nikgob_view::LYRICS_BY_WORDS] {
+                    let words = unit == nikgob_view::LYRICS_BY_WORDS;
+                    let letters = unit == nikgob_view::LYRICS_BY_LETTERS;
                     for smooth in [0.0, 0.5, 1.0] {
-                        let prefs = Prefs { lyrics_style: style, lyrics_by_words: words, wave_syllables_only: calm, lyrics_smooth: smooth, ..Prefs::default() };
-                        let case = format!("{timing}, style {style}, words {words}, smooth {smooth}");
+                        let prefs = Prefs { lyrics_style: style, lyrics_unit: unit, wave_syllables_only: calm, lyrics_smooth: smooth, ..Prefs::default() };
+                        let case = format!("{timing}, style {style}, unit {unit}, smooth {smooth}");
                         let (glyphs, lit) = painted_glyphs(&prefs, l, 2.4);
                         assert_eq!(glyphs.len(), text.chars().count(), "{case}: the line was not painted with its timing");
                         // «Свет» was sung over a second ago.
@@ -3257,7 +3440,7 @@ mod tests {
                             assert!(close(c.unwrap(), lit), "{case}: letter {k} is {:?}, lit is {lit:?}", c.unwrap());
                         }
                         // «ложится» is still to come.
-                        let whole = (style == 1 && !words) || (timing == "calm" && (style == 2 || words));
+                        let whole = (style == 1 && letters) || (timing == "calm" && (style == 2 || words));
                         for (k, c) in glyphs[13..].iter().enumerate() {
                             assert_eq!(close(c.unwrap(), lit), whole, "{case}: letter {} is {:?}", 13 + k, c.unwrap());
                         }
@@ -3391,5 +3574,131 @@ mod tests {
             let (next, _) = t.glide(sung_pos(Some(left), left + ms(16)), 8.0, 0.2);
             assert!(at.is_finite() && next >= at && next - at < 5.0, "{at} → {next}");
         });
+    }
+
+    /// By syllables each piece fills evenly across its letters over its
+    /// own time: a fast «ко» and «смо», a held «цве», then «ток».
+    #[test]
+    fn a_syllable_fills_evenly_over_its_own_time() {
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(3.0), "космоцветок");
+            l.words = vec![word(1.0, 1.1, "ко"), word(1.1, 1.25, "смо"), word(1.25, 2.1, "цве"), word(2.1, 2.3, "ток")];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let t = Timing::of(&l, &g, Look { style: Style::Karaoke, by: By::Syllables }).unwrap();
+            let s = &t.syllables[2];
+            // Halfway through its time the front is halfway across it.
+            let mid = t.sung_at((s.start + s.end) * 0.5);
+            assert!((mid - (s.from + s.to) * 0.5).abs() < 0.5, "{mid} in {}..{}", s.from, s.to);
+            assert!((t.sung_at(s.start) - s.from).abs() < 1e-3 && (t.sung_at(s.end - 1e-4) - s.to).abs() < 0.1);
+            // The held one runs slowest.
+            let pace = |i: usize| (t.syllables[i].to - t.syllables[i].from) / (t.syllables[i].end - t.syllables[i].start);
+            assert!(pace(2) < pace(0) && pace(2) < pace(1));
+            // By letters the same piece is weighted (its vowel takes longer).
+            let w = Timing::new(&l, &g).unwrap();
+            assert!((w.sung_at((s.start + s.end) * 0.5) - mid).abs() > 0.5);
+        });
+    }
+
+    /// By syllables under the wave a written word rises with each of its
+    /// syllables, all its letters together, and is up in full once the
+    /// last is sung.
+    #[test]
+    fn by_syllables_a_word_rises_with_its_syllables() {
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(4.0), "нон-стоп ok");
+            l.words = vec![word(1.0, 1.5, "нон-"), word(1.5, 2.5, "стоп "), word(3.0, 3.5, "ok")];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let t = Timing::of(&l, &g, Look { style: Style::Wave, by: By::Syllables }).unwrap();
+            assert_eq!(t.words, [0, 2]);
+            let at = |p: f32| t.word_jump(1, p, 1.0, 0.0);
+            assert_eq!(at(0.5).0, 0.0);
+            // Half up (at rest) between its syllables, then whole.
+            assert!((at(1.45).0 - 0.5).abs() < 0.01, "{:?}", at(1.45));
+            assert!((at(2.4).0 - 1.0).abs() < 0.01);
+            assert_eq!(t.word_jump(0, 1.45, 1.0, 0.0), at(1.45));
+            // Seconds since its last syllable, negative before it.
+            assert!(at(1.45).1 < 0.0 && (at(2.0).1 - 0.5).abs() < 0.05);
+            // The next word has not moved.
+            assert_eq!(t.word_jump(2, 2.4, 1.0, 0.0).0, 0.0);
+        });
+    }
+
+    /// Switching between the calm Focus and a timed look fades from the old
+    /// one to the new one, the line never thinning much between them.
+    #[test]
+    fn a_change_of_look_fades_and_the_line_stays_whole() {
+        let calm = Look { style: Style::Focus, by: By::Letters };
+        let wave = Look { style: Style::Wave, by: By::Syllables };
+        assert_eq!(look_mix(calm, calm, 0.0), 1.0);
+        assert_eq!(look_mix(calm, wave, f32::INFINITY), 1.0);
+        assert_eq!(look_mix(calm, wave, 0.0), 0.0);
+        let mut last = -1.0;
+        for ms in 0..400 {
+            let m = look_mix(calm, wave, ms as f32 / 1000.0);
+            assert!(m >= last && (0.0..=1.0).contains(&m));
+            last = m;
+        }
+        assert_eq!(last, 1.0, "done within 0.4 s");
+        assert_eq!(look_fades(0.0), (1.0, 0.0));
+        assert_eq!(look_fades(1.0), (0.0, 1.0));
+        for k in 0..=20 {
+            let (out, inn) = look_fades(k as f32 / 20.0);
+            assert!(inn + out - inn * out > 0.85, "{k}");
+        }
+        // In the view: a first frame shows its look, a change starts a fade.
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("look");
+        assert_eq!(look_change(&ctx, id, calm, 10.0), (None, 1.0));
+        assert_eq!(look_change(&ctx, id, wave, 10.0), (Some(calm), 0.0));
+        assert_eq!(look_change(&ctx, id, wave, 11.0), (None, 1.0));
+    }
+
+    /// A wait new to a swapped text opens from folded: its room's spring,
+    /// started at 0, moves to its first target instead of starting there.
+    #[test]
+    fn a_new_wait_opens_from_folded() {
+        let ctx = egui::Context::default();
+        let (seeded, plain) = (egui::Id::new("seeded"), egui::Id::new("plain"));
+        anim::fraction_starts_at(&ctx, seeded, 0.0);
+        assert!(anim::fraction(&ctx, seeded, 1.0, WAIT_ROOM) < 0.01);
+        assert_eq!(anim::fraction(&ctx, plain, 1.0, WAIT_ROOM), 1.0);
+        // One that moves already is left as it is.
+        anim::fraction_starts_at(&ctx, plain, 0.0);
+        assert_eq!(anim::fraction(&ctx, plain, 1.0, WAIT_ROOM), 1.0);
+    }
+
+    /// Mega mode: another text moves the block of lines to its new middle
+    /// on a spring instead of jumping there; a resize moves it at once.
+    #[test]
+    fn the_mega_block_glides_to_a_new_text_and_follows_a_resize() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        crate::typography::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+        let mut state = ViewState::default();
+        state.player.status = Status::Paused;
+        state.prefs.lyrics_soft_edges = false;
+        let left_at = |state: &ViewState, time: f64, width: f32| -> f32 {
+            let mut left = 0.0;
+            let mut output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 700.0))),
+                time: Some(time), ..Default::default()
+            }, |ui| {
+                show(ui, state, 0.0, true, &mut Vec::new());
+                left = ui.ctx().data(|d| d.get_temp::<f32>(ui.id().with("lyrics-view").with("text-left"))).unwrap_or(f32::NAN);
+            });
+            output.textures_delta.clear();
+            left
+        };
+        state.lyrics.lines = vec![line(1.0, None, "Да"), line(2.0, None, "Нет")];
+        let a = left_at(&state, 0.0, 1000.0);
+        assert_eq!(left_at(&state, 0.5, 1000.0), a);
+        state.lyrics.lines = vec![line(1.0, None, "Строка подлиннее, чем те"), line(2.0, None, "И ещё одна длинная строка")];
+        let b0 = left_at(&state, 1.0, 1000.0);
+        let b1 = left_at(&state, 3.0, 1000.0);
+        assert!((b0 - a).abs() < 1.0, "a new text starts where the block was: {a} → {b0}");
+        assert!(b1 < a - 20.0, "then it moves to its own middle: {a} → {b1}");
+        let c = left_at(&state, 3.1, 800.0);
+        assert!((left_at(&state, 5.0, 800.0) - c).abs() < 0.5, "a resize at once");
     }
 }
