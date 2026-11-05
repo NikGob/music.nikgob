@@ -1532,6 +1532,21 @@ const JUMP_SETTLE: f32 = 0.4;
 /// A sung wave letter (or word) rests this high, in text sizes, at jump 1.
 const RISE: f32 = 0.15;
 
+/// How far (0..1) a wave lift is drawn on whole pixels: from none while it
+/// moves to all within [`CRISP`] seconds of coming to rest (`rested`
+/// seconds ago, negative while it still moves), and back to none as its
+/// line's `hold` leaves 1 (it moves again then, going down).
+fn crisp_lift(rested: f32, hold: f32) -> f32 {
+    let smooth = |x: f32| {
+        let x = x.clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    };
+    smooth(rested / CRISP) * smooth((hold - 0.9) / 0.1)
+}
+
+/// Seconds a lift at rest takes to settle onto whole pixels.
+const CRISP: f32 = 0.15;
+
 fn syllable_head(from: f32, to: f32, start: f32, end: f32, pos: f32) -> f32 {
     let progress = if end <= start { f32::from(pos >= start) } else { ((pos - start) / (end - start)).clamp(0.0, 1.0) };
     from + (to - from) * progress
@@ -1598,11 +1613,14 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
                 let t = p - at;
                 // The jump's speed scales its smoothing window too.
                 let spread = window / pace.jump;
-                let (height, moving) = (jump_over(t, pace.jump, spread), t + ONSET_LEAD < JUMP_SETTLE / pace.jump + spread);
+                let height = jump_over(t, pace.jump, spread);
                 let lift = height * RISE * size * prefs.lyrics_wave_jump.max(0.0) * hold;
                 // At rest on whole pixels, so a raised word is as crisp as
                 // the rest; in motion to the fraction, so it never steps.
-                if moving || (hold > 0.0 && hold < 1.0) { lift } else { (lift * ppp).round() / ppp }
+                // It eases between the two, so it never steps onto or off
+                // the pixel either.
+                let crisp = crisp_lift(t + ONSET_LEAD - (JUMP_SETTLE / pace.jump + spread), hold);
+                lift + ((lift * ppp).round() / ppp - lift) * crisp
             }
             _ => 0.0,
         };
@@ -3245,6 +3263,29 @@ mod tests {
             let p = steady_pos(last, ms(t), true);
             assert!(p >= was);
             (last, was) = (Some(p), p);
+        }
+    }
+
+    /// A raised letter goes onto whole pixels only after its jump is over,
+    /// and off them as its line goes, each without a step.
+    #[test]
+    fn a_lift_eases_onto_and_off_whole_pixels() {
+        assert_eq!(crisp_lift(-0.1, 1.0), 0.0, "still moving");
+        assert_eq!(crisp_lift(0.0, 1.0), 0.0);
+        assert_eq!(crisp_lift(CRISP, 1.0), 1.0);
+        assert_eq!(crisp_lift(5.0, 0.9), 0.0, "going down with its line");
+        assert_eq!(crisp_lift(5.0, 0.5), 0.0);
+        let mut was = 0.0;
+        for i in 0..=100 {
+            let c = crisp_lift(i as f32 * CRISP / 100.0, 1.0);
+            assert!(c >= was && c - was < 0.05, "{i}: {was} → {c}");
+            was = c;
+        }
+        let mut was = 1.0;
+        for i in 0..=100 {
+            let c = crisp_lift(5.0, 1.0 - i as f32 * 0.001);
+            assert!(c <= was && was - c < 0.05, "{i}: {was} → {c}");
+            was = c;
         }
     }
 
