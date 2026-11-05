@@ -166,6 +166,10 @@ fn paint(
     let now = anim::now(&ctx);
     let playing = state.player.status == Status::Playing;
     let pos = steady(&ctx, id.with("steady"), led(state.player.position_now(), state.prefs.lyrics_lead), playing);
+    // Each item's motion (its place, focus, wait) is kept under its slot,
+    // which stays with the same line when the text is swapped for the same
+    // song's (timing made, another source), so nothing moves or dims then.
+    let slot = slots(&ctx, id.with("slots"), &item_keys(lines, &items));
 
     // Waiting owns the anchor during a break; otherwise follow the last
     // main line. Background voices light up independently while sung. A
@@ -256,7 +260,7 @@ fn paint(
             // close again) in one soft move.
             DisplayLine::Interlude { .. } => anim::fraction(
                 &ctx,
-                id.with(("wait-room", i)),
+                id.with(("wait-room", slot[i])),
                 if cur == Some(i) { 1.0 } else { 0.0 },
                 if theme.reduced_motion { WAIT_ROOM.without_bounce() } else { WAIT_ROOM },
             )
@@ -313,7 +317,7 @@ fn paint(
         let (top, anchor) = (frame.0 - was.0, frame.1 - was.1);
         if state.prefs.lyrics_cascade {
             for i in 0..items.len() {
-                anim::shift_f32(&ctx, id.with(("y", i)), top + anchor);
+                anim::shift_f32(&ctx, id.with(("y", slot[i])), top + anchor);
             }
         } else {
             anim::shift_f32(&ctx, id.with("scroll"), -anchor);
@@ -339,7 +343,7 @@ fn paint(
                 Spring::new(0.9, (300.0 - 26.0 * far).max(110.0))
             };
             if state.prefs.lyrics_cascade {
-                anim::f32(&ctx, id.with(("y", i)), rect.top() + tops[i] - scroll, spring)
+                anim::f32(&ctx, id.with(("y", slot[i])), rect.top() + tops[i] - scroll, spring)
             } else {
                 rect.top() + tops[i] - together
             }
@@ -379,14 +383,14 @@ fn paint(
         // 0 → 1 as the line becomes the current one, and back.
         let focus = anim::fraction(
             &ctx,
-            id.with(("focus", i)),
+            id.with(("focus", slot[i])),
             if is_cur { 1.0 } else { 0.0 },
             Spring::new(1.0, 170.0),
         )
         .clamp(0.0, 1.0);
         // The sung part's colour comes in faster than the line's focus, so
         // the first word lights on its beat instead of easing in with it.
-        let shine = anim::fraction(&ctx, id.with(("shine", i)), if is_cur { 1.0 } else { 0.0 }, nikgob_motion::tokens::FAST_EFFECTS)
+        let shine = anim::fraction(&ctx, id.with(("shine", slot[i])), if is_cur { 1.0 } else { 0.0 }, nikgob_motion::tokens::FAST_EFFECTS)
             .clamp(0.0, 1.0);
         let duet = match *item {
             DisplayLine::Line(j) => lines[j].duet,
@@ -430,7 +434,7 @@ fn paint(
                 // before the room closes (see [`waiting`]).
                 let appear = anim::fraction(
                     &ctx,
-                    id.with(("wait-ring", i)),
+                    id.with(("wait-ring", slot[i])),
                     if is_cur && room > 0.3 { 1.0 } else { 0.0 },
                     if theme.reduced_motion { WAIT_RING.without_bounce() } else { WAIT_RING },
                 )
@@ -474,7 +478,7 @@ fn paint(
         // once it is not, it goes on being sung as it fades (a front or a
         // jump mid-word when the next line comes in finishes instead of
         // jumping to the end), held where it was after a seek.
-        let sung_id = id.with(("sung", i));
+        let sung_id = id.with(("sung", slot[i]));
         let sung = if is_cur { pos } else { sung_pos(ctx.data(|d| d.get_temp::<Duration>(sung_id)), pos) };
         ctx.data_mut(|d| d.insert_temp(sung_id, sung));
         // A line-synced line is sung at a speaking pace (the source label
@@ -818,6 +822,78 @@ fn speaking_secs(text: &str, gap: f32) -> f32 {
     // Not `clamp`: with lines closer than 0.87 s the cap is the smaller
     // bound, and `clamp` panics on that.
     (0.4 + letters * 0.066).max(0.8).min((gap * 0.92).max(0.3))
+}
+
+/// A key for each item that is the same for the same line in another
+/// copy of the text: its words (and whether it is a background voice) and
+/// how many times they came before; a wait by the line it waits for.
+fn item_keys(lines: &[LyricLine], items: &[DisplayLine]) -> Vec<u64> {
+    use std::hash::{Hash, Hasher};
+    let hash = |v: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        v(&mut h);
+        h.finish()
+    };
+    let mut seen = std::collections::HashMap::<(&str, bool), u32>::new();
+    let mut keys: Vec<u64> = items
+        .iter()
+        .map(|item| match *item {
+            DisplayLine::Line(j) => {
+                let l = &lines[j];
+                let n = seen.entry((l.text.trim(), l.background)).or_default();
+                *n += 1;
+                hash(&|h| ("line", l.text.trim(), l.background, *n).hash(h))
+            }
+            DisplayLine::Interlude { .. } => 0,
+        })
+        .collect();
+    let mut next = hash(&|h| "end".hash(h));
+    for (k, item) in keys.iter_mut().zip(items).rev() {
+        match item {
+            DisplayLine::Line(_) => next = *k,
+            DisplayLine::Interlude { .. } => *k = hash(&|h| ("wait", next).hash(h)),
+        }
+    }
+    keys
+}
+
+/// The items' slots, kept under `id` from frame to frame.
+#[derive(Clone, Default)]
+struct Slots {
+    keys: Vec<u64>,
+    slots: Vec<u64>,
+    next: u64,
+}
+
+/// The slot of each item with `keys`: when most of them were there the
+/// frame before (the same song's text, swapped), each keeps its slot and a
+/// new one gets a slot of its own; otherwise (another song) the slots go
+/// by place, as the items do.
+fn slots(ctx: &egui::Context, id: egui::Id, keys: &[u64]) -> Vec<u64> {
+    let was = ctx.data(|d| d.get_temp::<Slots>(id)).unwrap_or_default();
+    if was.keys == keys {
+        return was.slots;
+    }
+    let now = carry_slots(&was, keys);
+    let out = now.slots.clone();
+    ctx.data_mut(|d| d.insert_temp(id, now));
+    out
+}
+
+fn carry_slots(was: &Slots, keys: &[u64]) -> Slots {
+    let mut next = was.next.max(was.slots.iter().max().map_or(0, |m| m + 1));
+    let mut fresh = || {
+        next += 1;
+        next - 1
+    };
+    let old: std::collections::HashMap<u64, u64> = was.keys.iter().copied().zip(was.slots.iter().copied()).collect();
+    let kept = keys.iter().filter(|k| old.contains_key(k)).count();
+    let slots = if !was.keys.is_empty() && kept * 2 >= keys.len() {
+        keys.iter().map(|k| old.get(k).copied().unwrap_or_else(&mut fresh)).collect()
+    } else {
+        (0..keys.len()).map(|i| was.slots.get(i).copied().unwrap_or_else(&mut fresh)).collect()
+    };
+    Slots { keys: keys.to_vec(), slots, next }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3167,6 +3243,41 @@ mod tests {
             assert!(p >= was);
             (last, was) = (Some(p), p);
         }
+    }
+
+    /// The same song's text swapped (timing made, another source) keeps each
+    /// line's slot, so its place, focus and wait go on; another song's text
+    /// takes the slots by place.
+    #[test]
+    fn a_swapped_text_keeps_each_line_in_its_slot() {
+        let plain = vec![line(1.0, Some(2.0), "Раз"), line(2.0, Some(3.0), "Два"), line(6.0, Some(7.0), "Раз"), line(7.0, Some(8.0), "Три")];
+        let items = display_lines(&plain);
+        let keys = item_keys(&plain, &items);
+        assert_eq!(keys.len(), items.len());
+        let unique: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len(), "a repeated line is told apart");
+        let first = carry_slots(&Slots::default(), &keys);
+        assert_eq!(first.slots, (0..keys.len() as u64).collect::<Vec<_>>());
+        // Made timing ends the second line sooner: a wait comes in before
+        // the third line, the lines keep their slots and the wait gets one.
+        let mut made = plain.clone();
+        made[1].end = Some(Duration::from_secs_f32(2.0));
+        let made_items = display_lines(&made);
+        assert!(made_items.len() > items.len(), "{made_items:?}");
+        let swapped = carry_slots(&first, &item_keys(&made, &made_items));
+        for (i, item) in made_items.iter().enumerate() {
+            if let DisplayLine::Line(j) = item {
+                let was = items.iter().position(|it| *it == DisplayLine::Line(*j)).unwrap();
+                assert_eq!(swapped.slots[i], first.slots[was], "line {j}");
+            } else {
+                assert!(!first.slots.contains(&swapped.slots[i]), "the new wait has a slot of its own");
+            }
+        }
+        // Another song: by place.
+        let other = vec![line(1.0, Some(2.0), "Иное"), line(2.0, Some(3.0), "Совсем")];
+        let other_items = display_lines(&other);
+        let next = carry_slots(&swapped, &item_keys(&other, &other_items));
+        assert_eq!(next.slots[..], swapped.slots[..other_items.len()]);
     }
 
     /// While a click holds its line, the lyrics are painted where its seek
