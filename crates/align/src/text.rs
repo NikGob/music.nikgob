@@ -282,6 +282,10 @@ pub struct Vocab {
     /// The word separator (`|`), for native models.
     pub sep: Option<i32>,
     pub blank: usize,
+    /// Latin words are spelled by how they sound in the model's letters
+    /// ([`english_as_russian`]) when it has Cyrillic letters and no Latin
+    /// ones; off, they are wildcards.
+    pub by_sound: bool,
 }
 
 impl Vocab {
@@ -306,7 +310,23 @@ impl Vocab {
                 Some((if upper { c.to_lowercase().next().unwrap_or(c) } else { c }, *v))
             })
             .collect();
-        Ok(Self { letters, ids, sep, blank })
+        Ok(Self { letters, ids, sep, blank, by_sound: false })
+    }
+
+    /// The model spells Russian and has no Latin letters.
+    fn cyrillic_only(&self) -> bool {
+        self.ids.contains_key(&'а') && !self.ids.contains_key(&'a')
+    }
+
+    /// Letters a singer's vowels are heard as for each other (ids, both
+    /// ways): и/ы/е/э, а/о/я, у/ю ([`crate::ctc::Costs::vowels`]). Only for
+    /// a Russian model.
+    pub fn similar(&self) -> Vec<(i32, i32)> {
+        if !self.cyrillic_only() {
+            return Vec::new();
+        }
+        let pairs = [('и', 'ы'), ('и', 'е'), ('е', 'э'), ('ы', 'е'), ('а', 'о'), ('а', 'я'), ('у', 'ю'), ('о', 'у')];
+        pairs.iter().filter_map(|(a, b)| Some((*self.ids.get(a)?, *self.ids.get(b)?))).collect()
     }
 
     /// A model of a script's characters (thousands of them: Japanese)
@@ -319,7 +339,10 @@ impl Vocab {
     /// The tokens of one piece (empty for punctuation).
     pub fn tokens(&self, piece: &str) -> Vec<i32> {
         let mut out = Vec::new();
-        let lower: String = piece.trim().chars().flat_map(char::to_lowercase).collect();
+        let mut lower: String = piece.trim().chars().flat_map(char::to_lowercase).collect();
+        if self.by_sound && self.letters == Letters::Native && self.cyrillic_only() && lower.chars().any(|c| c.is_ascii_alphabetic()) {
+            lower = latin_by_sound(&lower);
+        }
         match self.letters {
             Letters::Native => {
                 for c in lower.chars().map(fold) {
@@ -350,6 +373,219 @@ impl Vocab {
         }
         out
     }
+}
+
+/// Every run of Latin letters in `text` read the Russian way
+/// ([`english_as_russian`]); the rest stays.
+fn latin_by_sound(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    let mut word = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        // An apostrophe inside a Latin word («Levi's», «don't») is part of it.
+        let inside = matches!(c, '\'' | '’') && !word.is_empty() && chars.get(i + 1).is_some_and(char::is_ascii_alphabetic);
+        if c.is_ascii_alphabetic() || inside {
+            word.push(c);
+            continue;
+        }
+        if !word.is_empty() {
+            out.push_str(&english_as_russian(&std::mem::take(&mut word)));
+        }
+        out.push(c);
+    }
+    if !word.is_empty() {
+        out.push_str(&english_as_russian(&word));
+    }
+    out
+}
+
+/// Common words the rules below read wrong.
+const SAID: &[(&str, &str)] = &[
+    ("a", "э"), ("i", "ай"), ("i'm", "айм"), ("the", "зе"), ("to", "ту"), ("do", "ду"), ("who", "ху"), ("you", "ю"), ("your", "ёр"),
+    ("you're", "юр"), ("my", "май"), ("yeah", "е"), ("yea", "е"), ("oh", "оу"), ("ah", "а"), ("uh", "а"), ("ok", "окей"), ("okay", "окей"),
+    ("hey", "хей"), ("what", "уот"), ("want", "уонт"), ("was", "уоз"), ("of", "оф"), ("are", "ар"), ("were", "уер"), ("one", "уан"),
+    ("come", "кам"), ("some", "сам"), ("love", "лав"), ("give", "гив"), ("live", "лив"), ("have", "хэв"), ("gone", "гон"), ("done", "дан"),
+    ("none", "нан"), ("there", "зэр"), ("where", "уэр"), ("here", "хир"), ("more", "мор"), ("sure", "шур"), ("all", "ол"), ("call", "кол"),
+    ("ball", "бол"), ("talk", "ток"), ("walk", "уок"), ("know", "ноу"), ("money", "мани"), ("honey", "хани"), ("heart", "харт"),
+    ("good", "гуд"), ("look", "лук"), ("book", "бук"), ("put", "пут"), ("push", "пуш"), ("full", "фул"), ("people", "пипл"),
+    ("beautiful", "бьютифул"), ("girl", "гёрл"), ("world", "уорлд"), ("work", "уорк"), ("word", "уорд"), ("night", "найт"),
+    ("baby", "бейби"), ("lady", "леди"), ("hello", "хеллоу"), ("bye", "бай"), ("goodbye", "гудбай"), ("levi's", "ливайс"),
+    ("oliver", "оливер"), ("never", "невер"), ("ever", "эвер"), ("every", "эври"), ("very", "вери"), ("any", "эни"), ("many", "мени"),
+];
+
+/// How a Russian listener reads an English word, in Cyrillic, for the
+/// Russian aligner: «Miley» → «майли», «Cyrus» → «сайрус», «Spies» →
+/// «спайс», «Totally» → «тотали». A handful of rules (digraphs, a silent
+/// final «e», a vowel long before one consonant in a two-syllable word, a
+/// final «y»), common words from [`SAID`]; it need not be exact, only
+/// closer to what is sung than wildcards are.
+pub fn english_as_russian(word: &str) -> String {
+    let w: String = word.to_lowercase().replace('’', "'");
+    if let Some((_, r)) = SAID.iter().find(|(k, _)| *k == w) {
+        return (*r).to_owned();
+    }
+    let w: Vec<u8> = w.bytes().filter(|b| b.is_ascii_alphabetic()).collect();
+    if w.is_empty() {
+        return String::new();
+    }
+    let n = w.len();
+    let vowel = |i: usize| w.get(i).is_some_and(|c| b"aeiou".contains(c) || (*c == b'y' && i > 0 && !w.get(i + 1).is_some_and(|n| b"aeiou".contains(n))));
+    // A silent final «e» after a consonant, in a word with another vowel.
+    // A silent «e» after one consonant at the end («lone», «Sykes»): left
+    // out, and the vowel before that consonant is long.
+    let silent = if n > 2 && w[n - 1] == b'e' && !vowel(n - 2) && (0..n - 2).any(vowel) {
+        Some(n - 1)
+    } else if n > 3 && w[n - 1] == b's' && w[n - 2] == b'e' && !vowel(n - 3) && !b"sxzhc".contains(&w[n - 3]) && (0..n - 3).any(vowel) {
+        Some(n - 2)
+    } else {
+        None
+    };
+    let magic_at = silent.and_then(|e| e.checked_sub(2)).filter(|v| vowel(*v));
+    let end = n;
+    // Vowel groups, for how many syllables the word has.
+    let mut groups = 0;
+    let mut i = 0;
+    while i < end {
+        if vowel(i) && Some(i) != silent {
+            groups += 1;
+            while i < end && vowel(i) && Some(i) != silent {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let mut out = String::new();
+    let mut i = 0;
+    let mut group = 0;
+    let at = |i: usize, s: &[u8]| w[i..].starts_with(s);
+    while i < end {
+        let c = w[i];
+        if Some(i) == silent {
+            i += 1;
+            continue;
+        }
+        // Groups of letters first.
+        let groups_of: &[(&str, &str)] = &[
+            ("tion", "шн"), ("sion", "жн"), ("tch", "ч"), ("sch", "ск"), ("igh", "ай"), ("sh", "ш"), ("ch", "ч"), ("th", "з"),
+            ("ph", "ф"), ("ck", "к"), ("qu", "кв"), ("wh", "у"), ("ng", "нг"), ("ee", "и"), ("ea", "и"), ("oo", "у"), ("ou", "ау"),
+            ("oy", "ой"), ("oi", "ой"), ("ay", "ей"), ("ai", "ей"), ("au", "о"), ("aw", "о"), ("ew", "ю"),
+        ];
+        if let Some((g, r)) = groups_of.iter().find(|(g, _)| at(i, g.as_bytes()) && i + g.len() <= end) {
+            if b"aeiouy".contains(&g.as_bytes()[0]) || *g == "igh" {
+                group += 1;
+            }
+            out.push_str(r);
+            i += g.len();
+            continue;
+        }
+        if at(i, b"ow") {
+            group += 1;
+            out.push_str(if i + 2 == end && i > 1 { "оу" } else { "ау" });
+            i += 2;
+            continue;
+        }
+        if at(i, b"ey") && i + 2 == end {
+            group += 1;
+            out.push_str("и");
+            i += 2;
+            continue;
+        }
+        if at(i, b"ie") && (i + 2 == end || (i + 3 == end && w[end - 1] == b's')) {
+            group += 1;
+            // «spies», «die»: one syllable; «movie»: the last of two.
+            out.push_str(if group == 1 { "ай" } else { "и" });
+            i += 2;
+            continue;
+        }
+        if at(i, b"ye") && i > 0 && i + 2 == end {
+            group += 1;
+            out.push_str("ай");
+            i += 2;
+            continue;
+        }
+        if c == b'y' && i == 0 && w.get(1).is_some_and(|n| b"aeiou".contains(n)) {
+            let r = match w[1] {
+                b'a' => "я",
+                b'o' => "йо",
+                b'u' => "ю",
+                b'e' => "е",
+                _ => "й",
+            };
+            out.push_str(r);
+            group += 1;
+            i += 2;
+            continue;
+        }
+        if vowel(i) {
+            group += 1;
+            // Long before one consonant and a vowel (or a silent «e») in a
+            // word of two syllables, or open at the end of a short word.
+            let next_vowel = i + 2 < n && !vowel(i + 1) && vowel(i + 2) && Some(i + 2) != silent && w[i + 1] != b'x';
+            let magic = magic_at == Some(i);
+            let open = i + 1 == end && groups == 1;
+            let long = magic || open || (next_vowel && groups == 2 && group == 1);
+            let r = match (c, long) {
+                (b'y', _) if i + 1 == end && groups > 1 => "и",
+                (b'y', true) | (b'i', true) => "ай",
+                (b'y', false) => "и",
+                (b'a', true) => "ей",
+                (b'e', true) => "и",
+                (b'o', true) => "оу",
+                (b'u', true) => "ю",
+                (b'a', false) if group == 1 && i + 1 < end => "э",
+                (b'a', false) => "а",
+                (b'e', false) if i == 0 => "э",
+                (b'e', false) => "е",
+                (b'i', false) => "и",
+                (b'o', false) => "о",
+                (b'u', false) if group == 1 => "а",
+                _ => "у",
+            };
+            out.push_str(r);
+            i += 1;
+            continue;
+        }
+        // A doubled consonant is one.
+        if i > 0 && w[i - 1] == c && !b"aeiou".contains(&c) {
+            i += 1;
+            continue;
+        }
+        let soft = w.get(i + 1).is_some_and(|n| b"eiy".contains(n));
+        let r = match c {
+            b'b' => "б",
+            b'c' if soft => "с",
+            b'c' => "к",
+            b'd' => "д",
+            b'f' => "ф",
+            b'g' if soft && silent == Some(i + 1) => "дж",
+            b'g' => "г",
+            // Silent after a vowel at the end («oh», «yeah»).
+            b'h' if i + 1 == end && i > 0 => "",
+            b'h' => "х",
+            b'j' => "дж",
+            b'k' if i == 0 && w.get(1) == Some(&b'n') => "",
+            b'k' => "к",
+            b'l' => "л",
+            b'm' => "м",
+            b'n' => "н",
+            b'p' => "п",
+            b'q' => "к",
+            b'r' => "р",
+            b's' => "с",
+            b't' => "т",
+            b'v' => "в",
+            b'w' if i == 0 && w.get(1) == Some(&b'r') => "",
+            b'w' if i > 0 && b"st".contains(&w[i - 1]) => "в",
+            b'w' => "у",
+            b'x' => "кс",
+            b'z' => "з",
+            _ => "",
+        };
+        out.push_str(r);
+        i += 1;
+    }
+    out
 }
 
 /// Letters some texts use for others the models know.
@@ -515,6 +751,50 @@ mod tests {
         assert_eq!(caps.tokens("café"), [19, 7, 20, 5]);
         let ru = Vocab::from_json(r#"{"<pad>":0,"|":4,"е":10,"ж":11}"#, Letters::Native).unwrap();
         assert_eq!(ru.tokens("Ёж"), [10, 11]);
+    }
+
+    #[test]
+    fn english_words_read_the_russian_way() {
+        for (en, ru) in [
+            ("Miley", "майли"),
+            ("Cyrus", "сайрус"),
+            ("Spies", "спайс"),
+            ("Totally", "тотали"),
+            ("Sykes", "сайкс"),
+            ("sunshine", "саншайн"),
+            ("Sorry", "сори"),
+            ("Swag", "свэг"),
+            ("Sheesh", "шиш"),
+            ("crack", "крэк"),
+            ("Rockstar", "рокстар"),
+            ("Monster", "монстер"),
+            ("high", "хай"),
+            ("Levi's", "ливайс"),
+            ("goodbye", "гудбай"),
+            ("night", "найт"),
+            ("Come", "кам"),
+        ] {
+            assert_eq!(english_as_russian(en), ru, "{en}");
+        }
+        assert_eq!(latin_by_sound("с miley cyrus, йоу!"), "с майли сайрус, йоу!");
+        assert_eq!(latin_by_sound("speed'ом"), "спид'ом");
+    }
+
+    /// A Russian model spells a Latin word by sound instead of wildcards.
+    #[test]
+    fn latin_words_of_a_russian_text_are_spelled_by_sound() {
+        let mut ru = Vocab::from_json(r#"{"<pad>":0,"|":4,"а":5,"й":6,"м":7,"л":8,"и":9}"#, Letters::Native).unwrap();
+        assert_eq!(ru.tokens("Miley"), [STAR, STAR, STAR, STAR, STAR]);
+        ru.by_sound = true;
+        assert_eq!(ru.tokens("Miley"), [7, 5, 6, 8, 9]);
+        assert_eq!(ru.tokens("мама"), [7, 5, 7, 5]);
+        // A model with Latin letters keeps them.
+        let mut en = Vocab::from_json(r#"{"<pad>":0,"|":4,"m":5,"i":6}"#, Letters::Native).unwrap();
+        en.by_sound = true;
+        assert_eq!(en.tokens("mi"), [5, 6]);
+        assert!(en.similar().is_empty());
+        let vowels = Vocab::from_json(r#"{"<pad>":0,"|":4,"а":5,"о":6,"и":7,"е":8}"#, Letters::Native).unwrap();
+        assert_eq!(vowels.similar(), [(7, 8), (5, 6)]);
     }
 
     #[test]

@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use nikgob_align::catalog::ModelId;
 use nikgob_align::ctc::Emissions;
-use nikgob_align::fit::Fit;
+use nikgob_align::fit::{Fit, Tuning};
 use nikgob_align::pipeline::Route;
 use nikgob_align::{Aligner, Catalog, Device, Prepared, Stage};
 use nikgob_core::lyrics::LyricLine;
@@ -41,6 +41,11 @@ struct Job {
     lines: Vec<LyricLine>,
     #[serde(default)]
     show: Vec<(f32, f32)>,
+    /// What is sung where in a "case" job: `[line, word, start, end]`,
+    /// the line counted among the text's non-empty lines, the word among
+    /// its made words, seconds (an end below zero is not checked).
+    #[serde(default)]
+    marks: Vec<(usize, usize, f32, f32)>,
 }
 
 fn key(id: ModelId) -> &'static str {
@@ -106,10 +111,29 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path) -> Option<Prepared> 
                 prep.set_emissions(id, Emissions { logp: v[3..].to_vec(), vocab, fps, blank });
             }
             None => {
+                // Heard once here; the second hearing is kept apart below.
+                let tuning = aligner.tuning();
+                aligner.set_tuning(Tuning { windows: false, ..tuning });
                 aligner.hear(&mut prep, id, &mut |_| true).unwrap();
+                aligner.set_tuning(tuning);
                 let em = prep.emissions(id).unwrap();
                 write_f32(&file, &[em.vocab as f32, em.blank as f32, em.fps], &em.logp);
             }
+        }
+        // Over windows cut half a window later (`Tuning::windows`).
+        if aligner.tuning().windows {
+            let file = cache.join(format!("{stem}.{}.w.em", key(id)));
+            let other = match read_f32(&file) {
+                Some(v) => Emissions { logp: v[3..].to_vec(), vocab: v[0] as usize, fps: v[2], blank: v[1] as usize },
+                None => {
+                    let em = aligner.hear_shifted(&prep, id).unwrap();
+                    write_f32(&file, &[em.vocab as f32, em.blank as f32, em.fps], &em.logp);
+                    em
+                }
+            };
+            let mut em = prep.emissions(id).unwrap().clone();
+            em.merge(&other);
+            prep.set_emissions(id, em);
         }
     }
     Some(prep)
@@ -274,11 +298,66 @@ fn table(aligner: &Aligner, prep: &Prepared, id: ModelId, show: &[(f32, f32)]) {
     }
 }
 
+/// The made words against a case's marks: start errors and end errors.
+fn mark_errors(marks: &[(usize, usize, f32, f32)], lines: &[LyricLine], made: &[LyricLine]) -> (Vec<f32>, Vec<f32>) {
+    // The made lines as the text has them (lines added as repeats left out).
+    let sung: Vec<&LyricLine> = lines.iter().filter(|l| !l.text.trim().is_empty()).collect();
+    let mut kept: Vec<&LyricLine> = Vec::new();
+    for l in made {
+        if kept.len() < sung.len() && l.text == sung[kept.len()].text {
+            kept.push(l);
+        }
+    }
+    let (mut starts, mut ends) = (Vec::new(), Vec::new());
+    for &(li, wi, start, end) in marks {
+        let Some(w) = kept.get(li).and_then(|l| l.words.get(wi)) else {
+            starts.push(f32::INFINITY);
+            continue;
+        };
+        starts.push(w.start.as_secs_f32() - start);
+        if end >= 0.0 {
+            ends.push(w.end.as_secs_f32() - end);
+        }
+    }
+    (starts, ends)
+}
+
 fn verdict(f: &Fit) -> String {
     format!(
         "score {:.2} heard {:.2} spelled {:.2} covered {:.2} {:?} {:+.2}/{:.2}",
         f.score, f.heard, f.spelled, f.covered, f.timing, f.offset, f.spread
     )
+}
+
+/// The timing pass to measure: the player's ([`Tuning::default`]), or
+/// `align-4`'s with `BASE=4`, each knob overridden by its variable.
+fn tuning_from_env() -> Tuning {
+    let mut t = if std::env::var("BASE").as_deref() == Ok("4") { Tuning::align4() } else { Tuning::default() };
+    let num = |k: &str, v: &mut f32| {
+        if let Some(x) = std::env::var(k).ok().and_then(|x| x.parse().ok()) {
+            *v = x;
+        }
+    };
+    let flag = |k: &str, v: &mut bool| {
+        if let Ok(x) = std::env::var(k) {
+            *v = x == "1";
+        }
+    };
+    num("T_IN_WORD", &mut t.costs.in_word);
+    num("T_IN_WORD_SILENT", &mut t.costs.in_word_silent);
+    num("T_LINE_PAUSE", &mut t.costs.line_pause);
+    num("T_ONSET", &mut t.costs.onset);
+    num("T_VOWELS", &mut t.costs.vowels);
+    num("T_EVEN", &mut t.even);
+    num("T_FAR_END", &mut t.far_end);
+    num("T_STOP", &mut t.stop_hold);
+    num("T_MIX", &mut t.mix_ratio);
+    num("T_LEAD", &mut t.costs.lead);
+    flag("T_WINDOWS", &mut t.windows);
+    flag("T_FOREIGN", &mut t.foreign_bands);
+    flag("T_SOUND", &mut t.by_sound);
+    flag("T_SQUEEZED", &mut t.squeezed);
+    t
 }
 
 fn main() {
@@ -291,12 +370,16 @@ fn main() {
     let threads = std::env::var("THREADS").ok().and_then(|t| t.parse().ok()).unwrap_or(2);
     let prep_only = std::env::var("PREP").is_ok();
     let mut aligner = Aligner::new(catalog, Device::Cpu, threads);
+    aligner.set_tuning(tuning_from_env());
+    println!("tuning {:?}", aligner.tuning());
     let mut groups: Vec<(String, Tally)> = Vec::new();
     let mut pool = |name: String, t: &Tally| match groups.iter_mut().find(|(n, _)| *n == name) {
         Some((_, g)) => g.add(t),
         None => groups.push((name, t.clone())),
     };
     let mut order: Vec<usize> = (0..jobs.len()).collect();
+    // Seconds spent aligning (the hearing is cached).
+    let mut secs = 0.0f32;
     if prep_only {
         order.sort_by_key(|i| jobs[*i].rank.unwrap_or(*i));
     }
@@ -327,7 +410,10 @@ fn main() {
         println!("== {} ({}, {})", job.name, job.kind, key(main));
         for timed in [true, false] {
             let lines = if timed { job.lines.clone() } else { plain(&job.lines) };
-            let fit = match aligner.fit(&mut prep, &lines, timed, &mut |_| true) {
+            let t0 = std::time::Instant::now();
+            let fit = aligner.fit(&mut prep, &lines, timed, &mut |_| true);
+            secs += t0.elapsed().as_secs_f32();
+            let fit = match fit {
                 Ok(Some(f)) => f,
                 other => {
                     println!("  {}: {:?}", if timed { "timed" } else { "plain" }, other.err());
@@ -361,7 +447,32 @@ fn main() {
             println!("  {}", summary(mode, &t));
             println!("  {mode:28} {}", verdict(&fit));
             if job.kind == "case" {
-                print_lines(&fit.lines, &job.show);
+                if !job.marks.is_empty() {
+                    let (starts, ends) = mark_errors(&job.marks, &lines, &fit.lines);
+                    let far: Vec<String> = job
+                        .marks
+                        .iter()
+                        .zip(&starts)
+                        .filter(|(_, e)| e.abs() >= 0.3)
+                        .map(|(m, e)| format!("{}/{} {:+.2}", m.0, m.1, e))
+                        .collect();
+                    println!(
+                        "  {mode:28} marks {:3} start<0.3 {:5.1}% mae {:5.2}s | ends {:3} <0.3 {:5.1}% mae {:5.2}s | off: {}",
+                        starts.len(),
+                        within(&starts, 0.3),
+                        mae(&starts.iter().map(|e| e.clamp(-30.0, 30.0)).collect::<Vec<_>>()),
+                        ends.len(),
+                        within(&ends, 0.3),
+                        mae(&ends),
+                        far.join(", ")
+                    );
+                    let mut t = Tally { starts, ends, ..Tally::default() };
+                    t.overlaps = overlaps(&fit.lines);
+                    pool(format!("case marks {mode}"), &t);
+                }
+                if std::env::var("QUIET").is_err() {
+                    print_lines(&fit.lines, &job.show);
+                }
                 if timed && std::env::var("TABLE").is_ok() {
                     table(&aligner, &prep, main, &job.show);
                 }
@@ -376,6 +487,7 @@ fn main() {
             println!("  {:28} {}", "another song's text", verdict(&f));
         }
     }
+    println!("aligning took {secs:.1} s");
     if !groups.is_empty() {
         println!("== pooled");
         groups.sort_by(|a, b| a.0.cmp(&b.0));
