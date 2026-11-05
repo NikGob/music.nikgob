@@ -233,8 +233,9 @@ fn pick_card(ui: &mut Ui, c: &Confirm, pick: &ConfirmPick, out: &mut Vec<Command
         let bg = ui.painter().add(egui::Shape::Noop);
         let mut flag = on;
         let line = ui.horizontal(|ui| {
+            ui.set_min_width(ui.available_width());
             ui.add_space(4.0);
-            let r = ui.add(egui::Checkbox::without_text(&mut flag).indeterminate(mixed));
+            let r = ui.add(crate::components::Checkbox::new(&mut flag).mixed(mixed).id_salt(("cf-pick-box", salt)));
             let width = ui.available_width() - 8.0;
             ui.vertical(|ui| {
                 ui.set_max_width(width);

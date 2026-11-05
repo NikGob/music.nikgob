@@ -25,7 +25,9 @@ pub const PHOTO_TEXTURE: egui::TextureOptions =
     egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear));
 pub mod badge;
 pub mod divider;
+pub mod checkbox;
 pub mod switch;
+pub use checkbox::Checkbox;
 pub mod tooltip;
 pub use switch::Switch;
 pub use tooltip::{TooltipExt, tooltip};
