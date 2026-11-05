@@ -618,6 +618,13 @@ impl Thread {
             let mut progress = self.progress(track, asked);
             aligner.fit(prep, &text.lines, text.timed, &mut progress)
         };
+        // The made words in syllables, each timed by the voice.
+        let r = r.map(|f| {
+            f.map(|mut f| {
+                aligner.syllables(prep, &text.lines, &mut f);
+                f
+            })
+        });
         self.aligner = aligner;
         r
     }

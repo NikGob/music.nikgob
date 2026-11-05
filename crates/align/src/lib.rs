@@ -3,6 +3,7 @@
 //! * [`separate`]: the voice out of the mix (MDX-Net).
 //! * [`ctc`] and [`text`]: forced alignment of a known text to the voice,
 //!   piece by piece (words; characters of Japanese).
+//! * [`syllables`]: the made words cut into syllables timed by the voice.
 //! * [`fit`]: whether a fetched text is this recording's, how far its line
 //!   times are off, and its word timing made from the alignment.
 //! * [`whisper`]: a text from scratch when there is none anywhere.
@@ -18,6 +19,7 @@ pub mod engine;
 pub mod fit;
 pub mod pipeline;
 pub mod separate;
+pub mod syllables;
 pub mod text;
 pub mod whisper;
 
