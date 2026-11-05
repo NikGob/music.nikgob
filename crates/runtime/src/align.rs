@@ -39,7 +39,10 @@ use crate::lyrics::{Aligned, Place, Text};
 /// `align-4`: words timed by a second pass that keeps each line within its
 /// source times, lets voice the text lacks go between lines, times hums
 /// by the voice, never lets lines overlap and adds lines sung once more.
-pub(crate) const MADE_BY: &str = "align-4";
+/// `align-5`: Latin words of a Russian text are spelled by sound for the
+/// Russian aligner, and its Latin lines stay with it; a word is not split
+/// over a stretch without voice.
+pub(crate) const MADE_BY: &str = "align-5";
 /// A text the recording spells at least this well (over chance) is this
 /// song's (docs/lyrics-align.md, «The check»).
 pub(crate) const FITS: f32 = 0.08;

@@ -110,16 +110,17 @@ impl Tuning {
         }
     }
 
-    /// «Глубокое создание субтитров»: what measured better on the hard
-    /// cases for more time (docs/lyrics-align.md, «Deep mode»).
-    pub fn deep() -> Self {
-        Self { windows: true, ..Self::default() }
-    }
 }
 
+/// `align-5`: Latin words of a Russian text spelled by sound, and a blank
+/// inside a word costing where there is no voice (docs/lyrics-align.md,
+/// «align-5»); the rest measured no better and stays off.
 impl Default for Tuning {
     fn default() -> Self {
-        Self::align4()
+        let mut t = Self::align4();
+        t.by_sound = true;
+        t.costs.in_word_silent = 0.3;
+        t
     }
 }
 
