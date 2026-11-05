@@ -113,6 +113,9 @@ pub(crate) enum Msg {
     Job(Option<v::AlignJob>),
     /// A track's texts were checked (rows as stored), and maybe a text heard.
     Checked { track: TrackId, rows: Vec<AlignedLyrics>, heard: Option<Vec<LyricLine>> },
+    /// A track's check was dropped for a newer song's (skipped past):
+    /// its texts stay unchecked, to be checked when it plays again.
+    CheckDropped(TrackId),
     Crafted { track: TrackId, source: LyricsSource, result: Result<Vec<LyricLine>, String> },
     /// A stream's audio was fetched to make timing from.
     StreamAudio { track: TrackId, source: LyricsSource, target: LyricsSync, result: Result<PathBuf, String> },
@@ -134,6 +137,9 @@ pub(crate) struct AlignService {
     cancel: Arc<AtomicU64>,
     /// The `seq` of the last [`Req::Craft`] sent.
     crafts: u64,
+    /// How many [`Req::Check`]s were sent: a newer one calls off the
+    /// check under way (only the playing song's is wanted).
+    checks: Arc<AtomicU64>,
     thread: Option<std::thread::JoinHandle<()>>,
     pub(crate) catalog: Option<Catalog>,
     /// The tracks whose check is on its way (and their texts' hashes).
@@ -155,12 +161,14 @@ impl AlignService {
         let (req_tx, req_rx) = crossbeam_channel::unbounded();
         let stop = self.stop.clone();
         let cancel = self.cancel.clone();
+        let checks = self.checks.clone();
         let catalog = Catalog::new(models);
         self.catalog = Some(catalog.clone());
         let spawned = std::thread::Builder::new().name("nikgob-align".into()).spawn(move || {
             crate::analysis::lower_priority();
             let mut t = Thread::new(lib, root, catalog, settings, tx, req_rx, stop, start);
             t.cancel = cancel;
+            t.checks = checks;
             t.run();
         });
         match spawned {
@@ -180,6 +188,12 @@ impl AlignService {
 
     pub(crate) fn running(&self) -> bool {
         self.tx.is_some()
+    }
+
+    /// Asks for the playing song's check; one asked before it is called off.
+    pub(crate) fn check(&self, req: Req) {
+        self.checks.fetch_add(1, Ordering::Relaxed);
+        self.send(req);
     }
 
     /// The `seq` for the next [`Req::Craft`].
@@ -318,6 +332,10 @@ struct Thread {
     cancel: Arc<AtomicU64>,
     /// The `seq` of the timing being made now.
     crafting: Option<u64>,
+    /// [`AlignService::checks`].
+    checks: Arc<AtomicU64>,
+    /// [`Self::checks`] when the check under way started.
+    checking: Option<u64>,
     asked: VecDeque<Req>,
     /// The background pass waits until then (playback and the first screens
     /// go first).
@@ -345,6 +363,8 @@ impl Thread {
             stop,
             cancel: Arc::new(AtomicU64::new(0)),
             crafting: None,
+            checks: Arc::new(AtomicU64::new(0)),
+            checking: None,
             asked: VecDeque::new(),
             pass_at: Instant::now() + start,
             skip: Default::default(),
@@ -372,6 +392,11 @@ impl Thread {
         self.crafting.is_some_and(|seq| seq <= self.cancel.load(Ordering::Relaxed))
     }
 
+    /// The check under way is for a song skipped past.
+    fn superseded(&self) -> bool {
+        self.checking.is_some_and(|n| self.checks.load(Ordering::Relaxed) > n)
+    }
+
     /// Takes what came in; settings apply at once, jobs queue.
     fn take(&mut self, req: Req) {
         match req {
@@ -397,6 +422,21 @@ impl Thread {
             other => {
                 if let Req::Download(_) = other {
                     self.offline = false;
+                }
+                if matches!(other, Req::Check { .. }) {
+                    // Only the playing song's check is wanted: skipping
+                    // through songs must not queue a separation for each.
+                    let mut dropped = Vec::new();
+                    self.asked.retain(|r| match r {
+                        Req::Check { track, .. } => {
+                            dropped.push(*track);
+                            false
+                        }
+                        _ => true,
+                    });
+                    for track in dropped {
+                        self.send(Msg::CheckDropped(track));
+                    }
                 }
                 self.asked.push_back(other);
             }
@@ -426,6 +466,7 @@ impl Thread {
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.job(job))).is_err() {
                     log::error!("align: a job broke off");
                     self.crafting = None;
+                    self.checking = None;
                     match asked {
                         Some((track, None)) => self.send(Msg::Checked { track, rows: Vec::new(), heard: None }),
                         Some((track, Some(source))) => {
@@ -478,10 +519,18 @@ impl Thread {
     fn job(&mut self, job: Req) {
         match job {
             Req::Check { track, path, texts, recognise } => {
+                self.checking = Some(self.checks.load(Ordering::Relaxed));
                 let result = self.check(track, &path, &texts, recognise, true);
+                let superseded = self.superseded();
+                self.checking = None;
                 if let Err(e) = result {
-                    log::info!("align: checking {track}: {e}");
-                    self.send(Msg::Checked { track, rows: Vec::new(), heard: None });
+                    if superseded {
+                        log::info!("align: checking {track} called off for the next song");
+                        self.send(Msg::CheckDropped(track));
+                    } else {
+                        log::info!("align: checking {track}: {e}");
+                        self.send(Msg::Checked { track, rows: Vec::new(), heard: None });
+                    }
                 }
             }
             Req::Craft { track, path, text, target, temp, seq } => {
@@ -599,7 +648,7 @@ impl Thread {
                 last_stage = Some(stage);
                 let _ = self.tx.send(Internal::Align(Msg::Job(Some(v::AlignJob { track: Some(track), stage, progress: f, asked, bytes: None }))));
             }
-            !self.stopped() && !self.cancelled() && (asked || self.rx.is_empty())
+            !self.stopped() && !self.cancelled() && !self.superseded() && (asked || self.rx.is_empty())
         }
     }
 
@@ -812,7 +861,7 @@ impl Worker {
         }
         tl.checking = Some(hashes.clone());
         self.align.asked.insert(track, hashes);
-        self.align.send(Req::Check { track, path, texts, recognise });
+        self.align.check(Req::Check { track, path, texts, recognise });
     }
 
     pub(crate) fn align_msg(&mut self, m: Msg) {
@@ -830,6 +879,12 @@ impl Worker {
             }
             Msg::Error(e) => self.publish(|s| s.align.error = Some(e)),
             Msg::Checked { track, rows, heard } => self.lyrics_checked(track, rows, heard),
+            Msg::CheckDropped(track) => {
+                self.align.asked.remove(&track);
+                if let Some(tl) = self.import.as_mut().and_then(|s| s.lyrics_cache.get_mut(&track)) {
+                    tl.checking = None;
+                }
+            }
             Msg::Crafted { track, source, result } => self.crafted(track, source, result),
             Msg::StreamAudio { track, source, target, result } => self.stream_audio(track, source, target, result),
             Msg::Kept { track, result } => self.lyrics_kept(track, result),
@@ -1075,6 +1130,33 @@ mod tests {
         // Asked again: not called off.
         t.crafting = Some(service.next_craft());
         assert!(t.progress(track, true)(Stage::Decode));
+    }
+
+    #[test]
+    fn skipping_songs_keeps_only_the_playing_song_s_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (_req_tx, req_rx) = crossbeam_channel::unbounded();
+        let lib = Library::open_in_memory().unwrap();
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false };
+        let mut t = Thread::new(lib, dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
+        let service = AlignService::default();
+        t.checks = service.checks.clone();
+        let tracks: Vec<TrackId> = (0..3).map(|_| TrackId::new()).collect();
+        let check = |track: TrackId| Req::Check { track, path: PathBuf::new(), texts: Vec::new(), recognise: false };
+        // A check under way goes on until a newer song's is asked.
+        service.checks.fetch_add(1, Ordering::Relaxed);
+        t.checking = Some(service.checks.load(Ordering::Relaxed));
+        assert!(!t.superseded());
+        for &track in &tracks {
+            service.checks.fetch_add(1, Ordering::Relaxed);
+            t.take(check(track));
+        }
+        assert!(t.superseded(), "the check under way is called off");
+        assert_eq!(t.asked.len(), 1, "only the last song's check is queued");
+        assert!(matches!(t.asked[0], Req::Check { track, .. } if track == tracks[2]));
+        let dropped = rx.try_iter().filter(|m| matches!(m, Internal::Align(Msg::CheckDropped(_)))).count();
+        assert_eq!(dropped, 2);
     }
 
     #[test]
