@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use nikgob_align::catalog::{self, ModelId, ModelState};
+use nikgob_align::deep::Deep;
 use nikgob_align::fit::{Fit, Timing};
 use nikgob_align::pipeline::{Route, fallback};
 use nikgob_align::{Aligner, Catalog, Device, Error, Prepared, Stage};
@@ -93,6 +94,8 @@ pub(crate) struct Settings {
     pub(crate) recognise: bool,
     pub(crate) separate: bool,
     pub(crate) models_auto: bool,
+    /// «Глубокое создание субтитров» (docs/lyrics-align.md, «Deep mode»).
+    pub(crate) deep: bool,
 }
 
 impl Settings {
@@ -103,7 +106,13 @@ impl Settings {
             recognise: p.lyrics_recognize,
             separate: p.lyrics_separate,
             models_auto: p.lyrics_models_auto,
+            deep: p.lyrics_deep,
         }
+    }
+
+    /// What deep mode adds with these settings.
+    pub(crate) fn deep(&self) -> Deep {
+        if self.deep { Deep::CHOSEN } else { Deep::OFF }
     }
 }
 
@@ -228,6 +237,10 @@ pub(crate) fn label(id: ModelId) -> &'static str {
         ModelId::AlignerEn => "Слова по голосу: английский",
         ModelId::AlignerMms => "Слова по голосу: другие языки",
         ModelId::Whisper => "Расслышать текст",
+        ModelId::SeparatorDeep => "Глубокое создание: отделение голоса",
+        ModelId::AlignerRuDeep => "Глубокое создание: русский",
+        ModelId::AlignerEnDeep => "Глубокое создание: английский",
+        ModelId::AlignerSung => "Глубокое создание: другие языки",
     }
 }
 
@@ -240,6 +253,10 @@ pub(crate) fn key(id: ModelId) -> &'static str {
         ModelId::AlignerEn => "en",
         ModelId::AlignerMms => "mms",
         ModelId::Whisper => "whisper",
+        ModelId::SeparatorDeep => "separator-deep",
+        ModelId::AlignerRuDeep => "ru-deep",
+        ModelId::AlignerEnDeep => "en-deep",
+        ModelId::AlignerSung => "sung",
     }
 }
 
@@ -335,10 +352,12 @@ impl Thread {
     #[allow(clippy::too_many_arguments)]
     fn new(lib: Library, root: PathBuf, catalog: Catalog, settings: Settings, tx: Sender<Internal>, rx: Receiver<Req>, stop: Arc<AtomicBool>, start: Duration) -> Self {
         let device = if settings.gpu { Device::Gpu } else { Device::Cpu };
+        let mut aligner = Aligner::new(catalog, device, THREADS);
+        aligner.set_deep(settings.deep());
         Self {
             lib,
             root,
-            aligner: Aligner::new(catalog, device, THREADS),
+            aligner,
             settings,
             tx,
             rx,
@@ -382,6 +401,7 @@ impl Thread {
                 if s.models_auto && !self.settings.models_auto {
                     self.offline = false;
                 }
+                self.aligner.set_deep(s.deep());
                 self.settings = s;
             }
             Req::Playing(p) => self.playing = p,
@@ -504,7 +524,9 @@ impl Thread {
                 continue;
             }
             if !asked && !self.settings.models_auto {
-                if fallback(id).is_some_and(|f| self.aligner.catalog().ready(f)) {
+                // Deep mode's parts only add to the normal ones: without
+                // them the timing is made as usual.
+                if id.deep() || fallback(id).is_some_and(|f| self.aligner.catalog().ready(f)) {
                     continue;
                 }
                 return Err(Error::Missing(label(id)));
@@ -545,8 +567,13 @@ impl Thread {
                     return Err(e);
                 }
                 log::warn!("align: downloading {id:?}: {e}");
-                self.offline = true;
                 self.send(Msg::Error(format!("{}: {e}", label(id))));
+                // A deep mode part that would not come: the timing is made
+                // as usual (it is tried again next time).
+                if id.deep() {
+                    continue;
+                }
+                self.offline = true;
                 return Err(e);
             }
         }
@@ -587,6 +614,17 @@ impl Thread {
         for route in texts.iter().filter_map(|t| Route::of(&t.lines)) {
             if !ids.contains(&route.main) {
                 ids.push(route.main);
+            }
+        }
+        // Deep mode's parts after the normal ones (downloaded on its first
+        // use, never needed: see [`Self::ensure`]).
+        let deep = self.settings.deep();
+        for route in texts.iter().filter_map(|t| Route::of(&t.lines)) {
+            let main = self.aligner.usable(route.main);
+            for id in deep.parts(main, self.settings.separate) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
             }
         }
         ids
@@ -1023,7 +1061,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (_req_tx, req_rx) = crossbeam_channel::unbounded();
         let lib = Library::open_in_memory().unwrap();
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false };
         let mut t = Thread::new(lib, dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let mut service = AlignService::default();
         t.cancel = service.cancel.clone();
@@ -1047,6 +1085,31 @@ mod tests {
         // Asked again: not called off.
         t.crafting = Some(service.next_craft());
         assert!(t.progress(track, true)(Stage::Decode));
+    }
+
+    /// Deep mode's parts come after the normal ones, and missing ones
+    /// that may not be downloaded leave the timing to the normal ones.
+    #[test]
+    fn deep_mode_parts_are_wanted_but_never_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (_req_tx, req_rx) = crossbeam_channel::unbounded();
+        let lib = Library::open_in_memory().unwrap();
+        let catalog = Catalog::new(dir.path());
+        for id in [ModelId::Runtime, ModelId::Separator, ModelId::AlignerRu] {
+            std::fs::create_dir_all(catalog.path(id)).unwrap();
+            std::fs::write(catalog.path(id).join(".ready"), b"").unwrap();
+        }
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: true };
+        let mut t = Thread::new(lib, dir.path().into(), catalog, settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
+        let text = AlignText { source: LyricsSource::Genius, lines: vec![LyricLine::new(Duration::ZERO, "Я иду домой")], timed: false, hash: "h".into() };
+        let ids = t.needs(std::slice::from_ref(&text));
+        assert_eq!(&ids[..3], [ModelId::Runtime, ModelId::Separator, ModelId::AlignerRu]);
+        assert!(ids[3..].iter().all(|id| id.deep()) && ids.contains(&ModelId::SeparatorDeep) && ids.contains(&ModelId::AlignerRuDeep), "{ids:?}");
+        assert!(t.ensure_for(std::slice::from_ref(&text), false, None).is_ok());
+        assert!(!t.offline);
+        t.settings.deep = false;
+        assert_eq!(t.needs(std::slice::from_ref(&text)).len(), 3);
     }
 
     #[test]

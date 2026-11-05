@@ -937,6 +937,9 @@ fn lyrics_align(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Com
     row(ui, Id::LyricsSeparate, "Отделять голос от музыки, чтобы слова ложились точнее", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_separate).id_salt("set-lyrics-separate"));
     });
+    row(ui, Id::LyricsDeep, "Глубокое создание субтитров", None, |ui| {
+        ui.add(Switch::new(&mut p.lyrics_deep).id_salt("set-lyrics-deep"));
+    });
     row(ui, Id::LyricsRecognize, "Пробовать расслышать текст, если его нет нигде (может ошибаться)", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_recognize).id_salt("set-lyrics-recognize"));
     });
