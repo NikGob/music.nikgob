@@ -164,9 +164,7 @@ fn english(text: &str) -> bool {
     if rest >= 0.08 {
         return false;
     }
-    // Latin letters with marks tell another language; a Cyrillic word in
-    // the line («С Miley Cyrus») does not.
-    let letters: Vec<char> = lower.chars().filter(|c| c.is_alphabetic() && !matches!(c, '\u{0400}'..='\u{04ff}')).collect();
+    let letters: Vec<char> = lower.chars().filter(|c| c.is_alphabetic()).collect();
     let marked = letters.iter().filter(|c| !c.is_ascii()).count();
     if marked as f32 > letters.len() as f32 * 0.02 {
         return false;
@@ -798,8 +796,6 @@ mod tests {
     fn languages_of_texts() {
         assert_eq!(Lang::of("I don't wanna be alone tonight\nHold me close"), Lang::English);
         assert_eq!(Lang::of("Oh yeah"), Lang::English);
-        // A Cyrillic word in a Latin line of a Russian song.
-        assert_eq!(Lang::of("С Miley Cyrus, Miley Cyrus"), Lang::English);
         assert_eq!(Lang::of("Que te quiero, mi amor, para siempre"), Lang::Other);
         assert_eq!(Lang::of("Je ne sais pas pourquoi tu es là"), Lang::Other);
         assert_eq!(Lang::of("Kimi no na wa sayonara watashi no kokoro"), Lang::Other);

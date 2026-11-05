@@ -528,7 +528,10 @@ impl Route {
             .into_iter()
             .zip(lines)
             .map(|(l, line)| {
-                if keep && l == Lang::English && (by_sound || sung_by_sound(&line.text)) { main } else { aligner_for(l).unwrap_or(main) }
+                // A Latin line with a Cyrillic word («С Miley Cyrus») reads as
+                // another language, not English: by sound all the same.
+                let latin = l == Lang::English || (l == Lang::Other && sung_by_sound(&line.text));
+                if keep && latin && (by_sound || sung_by_sound(&line.text)) { main } else { aligner_for(l).unwrap_or(main) }
             })
             .collect();
         Some(Self { main, lines })
@@ -759,7 +762,10 @@ impl Aligner {
     /// Each line goes to the aligner of its language ([`Route`]) when that
     /// one is there; the text's own is needed.
     pub fn fit(&mut self, prep: &mut Prepared, lines: &[LyricLine], timed: bool, progress: &mut dyn FnMut(Stage) -> bool) -> Result<Option<Fit>, Error> {
-        let Some(route) = Route::of_with(lines, self.tuning.by_sound, self.tuning.sound_lines) else { return Ok(None) };
+        // Latin lines by sound only where the line times hold each repeat
+        // in its place (a plain text: «Miley Cyrus» ×8 slips a repeat).
+        let tuning = Tuning { sound_lines: self.tuning.sound_lines && timed, ..self.tuning };
+        let Some(route) = Route::of_with(lines, tuning.by_sound, tuning.sound_lines) else { return Ok(None) };
         let main = self.usable(route.main);
         let mut others: Vec<(ModelId, Vec<usize>)> = Vec::new();
         for (i, id) in route.lines.iter().enumerate() {
@@ -787,7 +793,6 @@ impl Aligner {
         let foreign: Vec<Foreign<'_>> =
             others.iter().zip(&vocabs).map(|((id, ls), v)| Foreign { em: &prep.heard[id], vocab: v, lines: ls }).collect();
         let em = &prep.heard[&main];
-        let tuning = self.tuning;
         let curves = prep.curves(em, &tuning);
         let voice = curves.voice();
         Ok(fit_text_with(em, &vocab, &foreign, lines, timed, voice, &tuning).map(|mut f| {
