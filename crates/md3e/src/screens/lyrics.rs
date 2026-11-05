@@ -2108,9 +2108,12 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
         (0..=n)
             .map(|i| {
                 let a = from + (to - from) * i as f32 / n as f32;
-                // Anchored at the head and running back from it, like the
-                // linear wavy progress: the wave comes out of the tip.
-                let r = radius + amp * (waves * (sweep - a) - phase).sin();
+                // Running back from the head, like the linear wavy
+                // progress: the wave comes out of the tip. The crests keep
+                // their own pace on the ring; tied to the growing head they
+                // stood still in a gap as many seconds long as there are
+                // crests, and crawled or ran backwards in others.
+                let r = radius + amp * (-waves * a - phase).sin();
                 let a = a - FRAC_PI_2;
                 pos2(c.x + r * a.cos(), c.y + r * a.sin())
             })
