@@ -148,8 +148,10 @@ fn fair(weights: &[f32], room: f32) -> Vec<f32> {
 }
 
 /// A syllable squeezed under half its fair length takes that length from
-/// the one before it (then from the one after), each giver keeping its
-/// own; starts stay in order within `a`..`b`.
+/// the ones before it (then from the ones after): its start moves back,
+/// and a syllable that leaves under half its own moves back in turn, as
+/// far as the syllables before can all keep theirs. Starts stay in order
+/// within `a`..`b`.
 fn spread_squeezed(starts: &mut [f32], weights: &[f32], a: f32, b: f32) {
     let n = starts.len();
     if n < 2 {
@@ -161,26 +163,19 @@ fn spread_squeezed(starts: &mut [f32], weights: &[f32], a: f32, b: f32) {
     }
     let fair = fair(weights, b - a);
     let end = |s: &[f32], i: usize| if i + 1 < n { s[i + 1] } else { b };
+    // Where a syllable may start at the earliest (all before it whole) and
+    // at the latest (all after it whole).
+    let floor = |i: usize| a + fair[..i].iter().sum::<f32>();
+    let ceil = |i: usize| b - fair[i..].iter().sum::<f32>();
     for i in (1..n).rev() {
         let e = end(starts, i);
-        if e - starts[i] >= fair[i] * 0.5 {
-            continue;
-        }
-        let floor = starts[i - 1] + fair[i - 1];
-        let new = (e - fair[i]).max(floor);
-        if new < starts[i] {
-            starts[i] = new;
+        if e - starts[i] < fair[i] * 0.5 {
+            starts[i] = starts[i].min((e - fair[i]).max(floor(i)));
         }
     }
     for i in 0..n - 1 {
-        let e = starts[i + 1];
-        if e - starts[i] >= fair[i] * 0.5 {
-            continue;
-        }
-        let ceil = end(starts, i + 1) - fair[i + 1];
-        let new = (starts[i] + fair[i]).min(ceil);
-        if new > starts[i + 1] {
-            starts[i + 1] = new;
+        if starts[i + 1] - starts[i] < fair[i] * 0.5 {
+            starts[i + 1] = starts[i + 1].max((starts[i] + fair[i]).min(ceil(i + 1)));
         }
     }
     for i in 1..n {
@@ -264,6 +259,13 @@ mod tests {
         let last = s[1].end.as_secs_f32() - s[1].start.as_secs_f32();
         assert!(last >= 0.15, "{last}");
         assert_eq!((s[0].start, s[1].end), (w.start, w.end));
+        // A fast word whose last syllable came out at 20 ms: the one before
+        // gives, and gives on in turn while each keeps half its own.
+        let mut starts = vec![0.0, 0.12, 0.2, 0.28];
+        spread_squeezed(&mut starts, &[3.0, 3.0, 3.0, 2.0], 0.0, 0.3);
+        let lens: Vec<f32> = (0..4).map(|i| if i < 3 { starts[i + 1] - starts[i] } else { 0.3 - starts[i] }).collect();
+        assert!(lens[3] > 0.05 && lens.iter().all(|l| *l > 0.04), "{lens:?}");
+        assert!(starts.windows(2).all(|w| w[0] <= w[1]) && starts[0] == 0.0);
     }
 
     #[test]
