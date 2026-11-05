@@ -707,6 +707,14 @@ fn lyricsplus_artists(lib: &Library, row: &TrackRow) -> Vec<String> {
     out
 }
 
+/// The artists Genius is asked with, the main one first: each credited
+/// artist on its own («MellSher», «и ещё 1 исполнитель»), or the shown
+/// credit when the track has none.
+fn genius_artists(row: &TrackRow) -> Vec<String> {
+    let names: Vec<String> = row.credit.0.iter().map(|p| p.name.trim().to_owned()).filter(|n| !n.is_empty()).collect();
+    if names.is_empty() { vec![row.artist.clone()] } else { names }
+}
+
 /// LyricsPlus for `row`: the full credit first, the main artist only when
 /// that finds nothing (see the module docs).
 async fn find_lyricsplus(meta: &Metadata, lib: &Library, row: &TrackRow) -> Result<Option<Text>, MetadataError> {
@@ -745,7 +753,11 @@ async fn fetch_online(
                     .and_then(Text::from_lines)
             }
             LyricsSource::BetterLyrics => meta.betterlyrics.find(&row.artist, &row.title).await?.and_then(Text::from_lines),
-            LyricsSource::Genius => meta.genius.find(&row.artist, &row.title, row.album.as_deref()).await?.and_then(|t| Text::from_plain(&t)),
+            LyricsSource::Genius => {
+                let artists = genius_artists(&row);
+                let artists: Vec<&str> = artists.iter().map(String::as_str).collect();
+                meta.genius.find(&artists, &row.title, row.album.as_deref()).await?.and_then(|t| Text::from_plain(&t))
+            }
             LyricsSource::File | LyricsSource::Lrclib | LyricsSource::Recognized => None,
         })
     };
@@ -816,7 +828,7 @@ pub(crate) fn cached_lyrics(
     for source in [LyricsSource::LyricsPlus, LyricsSource::LrcRed, LyricsSource::BetterLyrics, LyricsSource::Genius] {
         match lib.lyrics_text(track, source.key()).ok().flatten() {
             Some((Some(body), _)) => tl.insert(source, stored_lines(&body)),
-            Some((None, at)) if fresh_miss(at) => tl.insert(source, None),
+            Some((None, at)) if miss_holds(source, at, now_ms()) => tl.insert(source, None),
             _ if source == LyricsSource::Genius && !genius => {}
             _ => need.push(source),
         }
@@ -827,6 +839,13 @@ pub(crate) fn cached_lyrics(
     }
     tl.pending.extend(need);
     tl
+}
+
+/// A miss stored at `at` still holds at `now`: younger than
+/// [`LYRICS_RETRY_MS`], and for Genius found by its current matching (an
+/// older miss is asked again).
+fn miss_holds(source: LyricsSource, at: i64, now: i64) -> bool {
+    now - at < LYRICS_RETRY_MS && (source != LyricsSource::Genius || at >= nikgob_metadata::genius::MATCHING_SINCE)
 }
 
 /// How the user chose to see `track`'s lyrics ([`TrackLyrics::display`]).
@@ -1069,7 +1088,8 @@ impl Worker {
         match got {
             Ok(text) => tl.insert(source, text),
             Err(e) => {
-                log::debug!("lyrics lookup ({}): {e}", source.key());
+                // Not a miss: asked again the next time the song is shown.
+                log::info!("lyrics lookup ({}): {e}", source.key());
                 tl.pending.remove(&source);
                 tl.failed = true;
             }
@@ -1089,12 +1109,14 @@ impl Worker {
     /// song is checked for what is newly wanted.
     pub(crate) fn lyrics_prefs_changed(&mut self) {
         let show = Shown::of(&self.state.read().prefs);
+        let genius = self.state.read().prefs.lyrics_genius;
         let shown = self.state.read().lyrics.track;
         let tracks: Vec<TrackId> = self.import.as_ref().map(|s| s.lyrics_cache.keys().copied().collect()).unwrap_or_default();
         let places: Vec<(TrackId, Place)> = tracks.into_iter().map(|t| (t, self.lyrics_place(t))).collect();
         let Some(svc) = self.import.as_mut() else { return };
         for tl in svc.lyrics_cache.values_mut() {
             tl.show = show;
+            tl.genius = genius;
         }
         for (t, place) in places {
             if let Some(tl) = svc.lyrics_cache.get_mut(&t) {
@@ -1109,6 +1131,10 @@ impl Worker {
                     s.lyrics = view;
                 }
             });
+        }
+        // Genius just turned on: the shown song asks it when it is wanted.
+        if let Some(track) = shown {
+            self.start_lyrics_lookups_again(track);
         }
         if let Some(track) = self.queue.current().map(|e| e.track) {
             self.check_lyrics(track);
@@ -1628,6 +1654,34 @@ People pleasing planet"));
         let tl = cached_lyrics(&lib, track, None, None, true, None);
         assert!(!tl.pending.contains(&LyricsSource::Genius));
         assert_eq!(tl.texts_of(LyricsSource::Genius).and_then(|t| t.plain.as_deref()), Some("Я невменяемый (Ай)"));
+    }
+
+    /// A Genius miss stored before its current matching is asked again; a
+    /// newer one, and any other source's, holds for the usual week.
+    #[test]
+    fn a_genius_miss_from_older_matching_is_asked_again() {
+        let since = nikgob_metadata::genius::MATCHING_SINCE;
+        let day = 86_400_000;
+        assert!(!miss_holds(LyricsSource::Genius, since - day, since + day));
+        assert!(miss_holds(LyricsSource::Genius, since, since + day));
+        assert!(miss_holds(LyricsSource::LrcRed, since - day, since + day));
+        assert!(!miss_holds(LyricsSource::Genius, since, since + LYRICS_RETRY_MS));
+    }
+
+    /// Genius is asked with every credited artist on its own, the main one
+    /// first; without a credit, with the shown one.
+    #[test]
+    fn genius_is_asked_with_each_credited_artist() {
+        use nikgob_core::model::{ArtistCredit, ArtistCreditPart, Track};
+        let part = |name: &str, join: &str| ArtistCreditPart { artist_id: None, name: name.into(), join_phrase: join.into() };
+        let lib = Library::open_in_memory().unwrap();
+        let credit = ArtistCredit(vec![part("MellSher", ", "), part("и ещё 1 исполнитель", "")]);
+        let track = lib.upsert_track(&Track::new("Разгром", credit)).unwrap().id;
+        let mut row = lib.get_track_row(track).unwrap().unwrap();
+        assert_eq!(genius_artists(&row), ["MellSher", "и ещё 1 исполнитель"]);
+        row.credit = ArtistCredit(Vec::new());
+        row.artist = "MellSher, и ещё 1 исполнитель".into();
+        assert_eq!(genius_artists(&row), ["MellSher, и ещё 1 исполнитель"]);
     }
 
     #[test]
