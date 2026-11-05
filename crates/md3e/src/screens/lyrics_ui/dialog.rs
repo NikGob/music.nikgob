@@ -19,6 +19,8 @@ const MAX_W: f32 = 720.0;
 const MAX_H: f32 = 640.0;
 /// A row of buttons under «Подсветка».
 const ROW: f32 = 40.0;
+/// The least room between the choice and making timing on one row.
+const BESIDE_GAP: f32 = 24.0;
 
 /// Opens the dialog growing out of `from` (the control).
 pub(super) fn open(ctx: &Context, from: Rect) {
@@ -168,8 +170,13 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
     // the width). Measured on what is offered also while timing is made,
     // so the text card keeps its height when a button is pressed.
     let offered = super::actions(state);
+    // Making timing goes on the choice's row, at its right end, where both
+    // fit with room between them.
+    let choice_w = super::all_shows(state).iter().map(|a| Button::new(a.1).size(Size::S).natural_width(ui)).sum::<f32>() + 2.0 * 2.0;
+    let beside = choice && !offered.is_empty() && choice_w + BESIDE_GAP + super::make_width(ui, &offered) <= inner.width();
     let make_rows = match offered.len() {
         0 => 0,
+        _ if beside => 0,
         n if n > 1 && super::make_width(ui, &offered) > inner.width() => n,
         _ => 1,
     };
@@ -205,7 +212,7 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
             });
         } else {
             // How the text is seen, where it has timing to choose from.
-            if choice {
+            let mut show = |ui: &mut Ui| {
                 let all = super::all_shows(state);
                 let labels = all.map(|a| a.1);
                 let on = all.map(|a| a.2);
@@ -213,11 +220,25 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
                 if let Some(i) = ConnectedGroup::new("lyrics-dialog-show", &labels).enabled(&on).show(ui, at) {
                     super::show_as(state, all[i].0, out);
                 }
+            };
+            if beside {
+                // One row: the choice on the left, making timing at the
+                // right end, over the footer's buttons.
+                let mut make = Vec::new();
+                ui.allocate_ui_with_layout(vec2(inner.width(), ROW), Layout::left_to_right(Align::Center), |ui| {
+                    ui.allocate_ui_with_layout(vec2(choice_w, ROW), Layout::left_to_right(Align::Center), &mut show);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        super::make_row(ui, state, "lyrics-dialog", !save_lead, false, &mut make);
+                    });
+                });
+                out.append(&mut make);
+            } else if choice {
+                show(ui);
             }
             // The timing to make under it: the finest is the primary action
             // unless there is timing to keep; its deep variant is in the
             // split button's menu.
-            if !actions.is_empty() {
+            if !actions.is_empty() && !beside {
                 if choice {
                     ui.add_space(12.0);
                 }

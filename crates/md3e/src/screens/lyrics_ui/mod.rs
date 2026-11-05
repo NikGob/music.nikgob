@@ -17,7 +17,7 @@
 
 use std::sync::OnceLock;
 
-use egui::{Context, Id, Pos2, Rect, Response, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align, Context, Id, Layout, Pos2, Rect, Response, Sense, Stroke, Ui, pos2, vec2};
 use nikgob_motion::Spring;
 use nikgob_view::{AlignStage, Command, LyricsAvail, LyricsCraft, LyricsHome, LyricsSource, LyricsSync, LyricsView, ViewState};
 
@@ -295,7 +295,11 @@ pub(crate) fn make_row(ui: &mut Ui, state: &ViewState, salt: &str, leads: bool, 
     if stacked {
         ui.vertical(row);
     } else {
-        ui.horizontal(row);
+        // Exactly one button tall, in the parent's direction: `horizontal`
+        // starts from a shorter row and pushes the buttons off the centre
+        // line of a row they share (the choice's in the window).
+        let dir = if ui.layout().prefer_right_to_left() { Layout::right_to_left(Align::Center) } else { Layout::left_to_right(Align::Center) };
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), Size::S.height()), dir, row);
     }
 }
 
