@@ -446,9 +446,16 @@ fn parity(aligner: &mut Aligner, dir: &Path) {
     nikgob_align::engine::load_runtime(&catalog.path(ModelId::Runtime)).unwrap();
     let file = std::env::var("REF_MODEL").map(PathBuf::from).unwrap_or_else(|_| catalog.file(ModelId::SeparatorDeep, ModelId::SeparatorDeep.model_file()));
     let device = aligner.device();
-    let mut model = nikgob_align::engine::Model::load(&file, device, 2).unwrap();
+    use nikgob_align::engine::GraphOptimizationLevel as O;
+    let level = match std::env::var("OPT").as_deref() {
+        Ok("0") => O::Disable,
+        Ok("1") => O::Level1,
+        Ok("2") => O::Level2,
+        _ => O::Level3,
+    };
+    let mut model = nikgob_align::engine::Model::load_with(&file, device, 2, level).unwrap();
     let t0 = Instant::now();
-    let out = model_run("RoFormer chunk", || vocals_roformer(&mut model, mix, ROFORMER_CHUNK, &mut |_| true)).unwrap();
+    let out = model_run("RoFormer chunk", || vocals_roformer(&mut model, mix, ROFORMER_CHUNK, std::env::var("SPEC").is_err(), &mut |_| true)).unwrap();
     println!("one chunk on {:?}: {:.1} s", model.device, t0.elapsed().as_secs_f32());
     let got: Vec<f32> = (0..out.channels[0].len()).flat_map(|i| [out.channels[0][i], out.channels[1][i]]).collect();
     for name in ["ref-stems-all-int8.f32", "ref-stems-all-fp16.f32"] {

@@ -110,14 +110,14 @@ pub const ROFORMER_CHUNK: usize = 352_800;
 /// a chunk: each moment heard twice; a whole chunk: once, half the work),
 /// faded in and out over a tenth of a chunk where they overlap and added
 /// up, weighed by the fades. `progress` as for [`vocals`].
-pub fn vocals_roformer(model: &mut Model, mix: Audio, step: usize, progress: &mut dyn FnMut(f32) -> bool) -> Result<Audio, Error> {
+pub fn vocals_roformer(model: &mut Model, mix: Audio, step: usize, masks: bool, progress: &mut dyn FnMut(f32) -> bool) -> Result<Audio, Error> {
     let shape = vec![1, 4, ROFORMER.dim_f, ROFORMER.dim_t];
-    roformer_with(&mut |x| model.run_f32(shape.clone(), x), mix, step, progress)
+    roformer_with(&mut |x| model.run_f32(shape.clone(), x), mix, step, masks, progress)
 }
 
 /// [`vocals_roformer`] with the model as a function from a chunk's
-/// spectrum to its mask.
-fn roformer_with(run: &mut dyn FnMut(Vec<f32>) -> Result<Vec<f32>, Error>, mix: Audio, step: usize, progress: &mut dyn FnMut(f32) -> bool) -> Result<Audio, Error> {
+/// spectrum to its mask (`masks`), or to the voice's spectrum.
+fn roformer_with(run: &mut dyn FnMut(Vec<f32>) -> Result<Vec<f32>, Error>, mix: Audio, step: usize, masks: bool, progress: &mut dyn FnMut(f32) -> bool) -> Result<Audio, Error> {
     let spec = ROFORMER;
     let chunk = ROFORMER_CHUNK;
     let step = step.clamp(1, chunk);
@@ -192,7 +192,7 @@ fn roformer_with(run: &mut dyn FnMut(Vec<f32>) -> Result<Vec<f32>, Error>, mix: 
                     let im = re + plane;
                     let (a, b) = (input[re], input[im]);
                     let (m, q) = (mask[re], mask[im]);
-                    s[t * bins + f] = Complex32::new(a * m - b * q, a * q + b * m);
+                    s[t * bins + f] = if masks { Complex32::new(a * m - b * q, a * q + b * m) } else { Complex32::new(m, q) };
                 }
             }
             let wav = istft(&mut s, spec, &window, &inv, chunk);
@@ -342,7 +342,7 @@ mod tests {
                 calls += 1;
                 Ok([vec![1.0; plane], vec![0.0; plane], vec![1.0; plane], vec![0.0; plane]].concat())
             };
-            let out = roformer_with(&mut run, mix, step, &mut |_| true).unwrap();
+            let out = roformer_with(&mut run, mix, step, true, &mut |_| true).unwrap();
             assert_eq!(out.channels[0].len(), n);
             let err = out.channels[0].iter().zip(&wav).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
             // The DC bin left out costs a little where a frame does not hold whole cycles.

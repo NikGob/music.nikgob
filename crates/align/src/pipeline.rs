@@ -674,7 +674,8 @@ impl Aligner {
         let file = self.catalog.file(ModelId::SeparatorDeep, ModelId::SeparatorDeep.model_file());
         let mut model = Model::load(&file, self.device, self.threads)?;
         let step = if self.deep.overlap { ROFORMER_CHUNK / 2 } else { ROFORMER_CHUNK };
-        separate::vocals_roformer(&mut model, mix, step, &mut |f| progress(Stage::Separate(f)))
+        // This export gives the voice's spectrum, not a mask.
+        separate::vocals_roformer(&mut model, mix, step, false, &mut |f| progress(Stage::Separate(f)))
     }
 
     /// Aligner `id`'s letters.

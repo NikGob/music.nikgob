@@ -225,10 +225,13 @@ pub const SEPARATOR_DEEP: ModelSpec = ModelSpec {
     id: ModelId::SeparatorDeep,
     dir: "mel-roformer-kim",
     files: &[FileSpec {
-        name: "sep-all-int8.onnx",
-        url: hf!("redbaty/ytm-vocal-separator", "d9d3f27d58c4f9c0286a07ed541b18ceaa91f107", "sep-all-int8.onnx"),
-        size: 235_623_148,
-        sha256: "e9570dac2ae14382c99357a547a6739777a029ad7f2b5f6e6bc22e9b0e7b2580",
+        // fp16 weights, fp32 compute: right on DirectML and on the CPU
+        // (the fp16-compute export gives a wrong voice on DirectML, the
+        // int8 one a wrong voice there and slowly).
+        name: "mel-roformer.fp16.onnx",
+        url: hf!("audiojs/mel-roformer", "c1aba02c00a0bee852d6754fe6ede8164f90a4b3", "mel-roformer.fp16.onnx"),
+        size: 464_050_097,
+        sha256: "adcbbb826f12453fbb86652b503242d565a9c81cdef1bca2fe0e54752eba91ef",
         extract: &[],
     }],
 };
