@@ -27,6 +27,10 @@ pub(crate) struct Session {
     pub position_ms: u64,
     /// The radio the queue plays, if any (it goes on after a restart).
     pub radio: Option<crate::recs::RadioSave>,
+    /// What the queue was started from when that has a page
+    /// (`release:<id>`, `playlist:<id>`, `artist:<id>`): the header of Now
+    /// Playing links it after a restart too.
+    pub page: Option<String>,
 }
 
 impl Session {
@@ -73,6 +77,7 @@ impl Worker {
             return;
         }
         self.queue.restore(&saved.queue);
+        self.restored_page = saved.page.map(|p| (self.queue.generation(), p));
         if let Some(radio) = saved.radio {
             self.radio_restore(radio);
         }
@@ -100,8 +105,10 @@ impl Worker {
     pub(crate) fn save_session(&mut self) {
         let Some(path) = self.session_path.clone() else { return };
         let radio = self.radio_save();
+        let page = self.context_page_id().filter(|id| crate::context_page(id).is_some()).map(str::to_owned);
         let session = Session {
             radio,
+            page,
             volume: Some(self.volume),
             muted: self.muted,
             queue: self.queue.snapshot(),

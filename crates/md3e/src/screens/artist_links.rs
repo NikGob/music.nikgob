@@ -1,7 +1,8 @@
 //! Getting from a track to each of its artists: links on every name of an
 //! artist line, and «К исполнителю» in menus, which opens the artist
 //! straight away when there is one and a small chooser when there are
-//! several.
+//! several. The album after the artists in a track's line is a link to its
+//! page the same way ([`append_source`]).
 
 use std::ops::Range;
 
@@ -40,6 +41,15 @@ pub(crate) fn stream_spans(c: &StreamArtistLinks, line: &str) -> (Vec<Range<usiz
         .into_iter()
         .map(|(r, id)| (r, Route::Stream(StreamPage::Artist(id.clone()))))
         .unzip()
+}
+
+/// Puts « · `name`» (the album a track is from) after `line`; returns
+/// where the name is in it, for its link.
+pub(crate) fn append_source(line: &mut String, name: &str) -> Range<usize> {
+    line.push_str(" · ");
+    let start = line.len();
+    line.push_str(name);
+    start..line.len()
 }
 
 /// A one-line artist label (player bar, Now Playing) with a link on each
@@ -106,5 +116,21 @@ mod tests {
         assert_eq!(go_to(&ctx, library(&Credit::single("A", Some(a)))), Some(Route::Artist(a)));
         assert_eq!(go_to(&ctx, library(&c)), None, "two: the chooser opens");
         assert_eq!(go_to(&ctx, Vec::new()), None);
+    }
+
+    #[test]
+    fn the_album_after_the_artists_is_a_span_of_its_own() {
+        let mut line = "Кино".to_owned();
+        let r = append_source(&mut line, "Группа крови");
+        assert_eq!(line, "Кино · Группа крови");
+        assert_eq!(&line[r], "Группа крови");
+        // Its artists are found before it, never in it.
+        let a = ArtistId::new();
+        let c: ArtistLinks = Credit::single("Кино", Some(a));
+        let mut line = "Кино".to_owned();
+        let album = append_source(&mut line, "Кино");
+        let (ranges, _) = library_spans(&c, &line[..album.start]);
+        assert_eq!(ranges, vec![0.."Кино".len()]);
+        assert_eq!(album, "Кино · ".len()..line.len());
     }
 }

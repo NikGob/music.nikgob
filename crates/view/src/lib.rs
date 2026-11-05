@@ -306,6 +306,9 @@ pub struct PlayerView {
     pub repeat: Repeat,
     /// What the current queue was started from ("Играет из «…»").
     pub context: Option<String>,
+    /// The page of what the queue was started from, when it has one (an
+    /// album, a playlist, an artist): the name in the header line opens it.
+    pub context_page: Option<Route>,
     /// The service the current track's sound comes from (`None` for a local
     /// file): the "звук: YouTube" label, e.g. for a Spotify track played
     /// from YouTube Music because Spotify has no sound for this account.
@@ -330,6 +333,7 @@ impl Default for PlayerView {
             shuffle: false,
             repeat: Repeat::Off,
             context: None,
+            context_page: None,
             audio_service: None,
             audio_quality: None,
         }
@@ -361,6 +365,16 @@ impl PlayerView {
             return format!("Играет из {c}");
         }
         format!("Играет из «{c}»")
+    }
+
+    /// Where the name is in `line` ([`Self::context_line`]: between « and
+    /// »), when the queue has a page to open ([`Self::context_page`]): the
+    /// link of the header line.
+    pub fn context_link(&self, line: &str) -> Option<std::ops::Range<usize>> {
+        self.context_page.as_ref()?;
+        let start = line.find('«')? + '«'.len_utf8();
+        let end = line.rfind('»')?;
+        (start < end).then_some(start..end)
     }
 
     /// Position now, extrapolated from the last update.
@@ -1359,8 +1373,8 @@ pub struct Prefs {
     /// with 3 (the old «По словам» animation) move to the wave by words
     /// ([`Prefs::upgrade_lyrics`]).
     pub lyrics_style: u8,
-    /// Under the wave or by words, a text with line times only (no word times) uses
-    /// Focus instead of guessing the words' pace.
+    /// A text with line times only (no word times) uses the calm Focus
+    /// under every animation and unit instead of guessing the words' pace.
     pub wave_syllables_only: bool,
     /// How high wave letters (or words) jump as they are sung (0: they only light up).
     pub lyrics_wave_jump: f32,
@@ -2922,5 +2936,21 @@ mod context_tests {
         for c in ["Spotify · «лёд»", "Поиск «лёд»", "альбома «X»", "Кино"] {
             assert!(line(Some(c)).matches('«').count() <= 1, "{c}");
         }
+    }
+
+    #[test]
+    fn the_name_of_a_page_is_the_link_of_the_header() {
+        let with = |c: &str, page: Option<crate::Route>| {
+            let p = PlayerView { context: Some(c.to_owned()), context_page: page, ..PlayerView::default() };
+            let l = p.context_line();
+            p.context_link(&l).map(|r| l[r].to_owned())
+        };
+        let album = Some(crate::Route::Release(crate::ReleaseId::new()));
+        assert_eq!(with("альбома «Группа крови»", album.clone()).as_deref(), Some("Группа крови"));
+        assert_eq!(with("Кино", Some(crate::Route::Artist(crate::ArtistId::new()))).as_deref(), Some("Кино"));
+        // No page (a search, a queue of picked songs), or nothing quoted.
+        assert_eq!(with("альбома «Группа крови»", None), None);
+        assert_eq!(with("поиска: лёд", album.clone()), None);
+        assert_eq!(with("библиотеки", album), None);
     }
 }

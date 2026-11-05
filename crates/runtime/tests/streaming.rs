@@ -880,11 +880,11 @@ fn an_album_page_with_one_file_shows_the_whole_album_from_a_service() {
     assert_eq!(lib.tracks_of_release_all(release.id).unwrap().len(), 4);
 }
 
-/// Under «Только скачанное» an album with one file plays that file alone:
-/// the rest of its tracklist, found on a service after it started, does not
-/// join the queue.
+/// Under «Только скачанное» an album with one file still plays whole: the
+/// rest of its tracklist, found on a service after it started, joins the
+/// queue after the file, in album order, and streams when it comes up.
 #[test]
-fn only_downloaded_keeps_an_albums_tracklist_found_later_out_of_the_queue() {
+fn only_downloaded_lets_an_albums_tracklist_found_later_join_the_queue() {
     use nikgob_core::model::{Artist, ArtistCredit, Release, Track};
     let lib = Library::open_in_memory().unwrap();
     let kino = lib.upsert_artist(&Artist::new("Кино")).unwrap();
@@ -900,26 +900,26 @@ fn only_downloaded_keeps_an_albums_tracklist_found_later_out_of_the_queue() {
         yt.set_liked_remotely(&id, false);
     }
     let r = rig(&lib, vec![Arc::new(yt)], false);
-    r.rt.send(Command::SetPref(nikgob_view::PrefPatch::MixesDownloadedOnly(true)));
-    wait_for(&r.rt, "the filter on", |s| s.prefs.mixes_downloaded_only);
+    let prefs = nikgob_view::Prefs { library_only_downloaded: true, ..r.rt.state().prefs.clone() };
+    r.rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&r.rt, "the filter on", |s| s.prefs.library_only_downloaded);
 
     r.rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
-    // The card says 1 of 4 once the tracklist is in (and the queue was
-    // offered the rest).
-    wait_for(&r.rt, "the whole tracklist", |s| {
-        s.library.releases.iter().any(|c| c.id == release.id && c.total_tracks == Some(4))
-    });
-    assert_eq!(lib.tracks_of_release_all(release.id).unwrap().len(), 4);
-    let st = r.rt.state();
-    let queued: Vec<TrackId> = st
-        .queue
-        .prev
-        .iter()
-        .map(|e| e.track.id)
-        .chain(st.queue.current.iter().map(|t| t.id))
-        .chain(st.queue.next.iter().map(|e| e.track.id))
-        .collect();
-    assert_eq!(queued, [file.id], "only the file");
+    let queued = |s: &ViewState| -> Vec<TrackId> {
+        s.queue
+            .prev
+            .iter()
+            .map(|e| e.track.id)
+            .chain(s.queue.current.iter().map(|t| t.id))
+            .chain(s.queue.next.iter().map(|e| e.track.id))
+            .collect()
+    };
+    wait_for(&r.rt, "the rest of the album in the queue", |s| queued(s).len() == 4);
+    let album: Vec<TrackId> = lib.tracks_of_release_all(release.id).unwrap().iter().map(|t| t.id).collect();
+    assert_eq!(album.len(), 4);
+    assert_eq!(album[0], file.id, "the file is its first song");
+    assert_eq!(queued(&r.rt.state()), album, "the whole album, in its order");
+    assert_eq!(lib.count_tracks(nikgob_library::TrackFilter::All).unwrap(), 1, "the rest stays outside the library");
 }
 
 /// «Хочу скачать» shows neither a song that has its file already nor the

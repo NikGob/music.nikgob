@@ -1197,7 +1197,12 @@ mod tests {
         let text = AlignText { source: LyricsSource::Genius, lines: vec![LyricLine::new(Duration::ZERO, "Я иду домой")], timed: false, hash: "h".into() };
         let ids = t.needs(std::slice::from_ref(&text));
         assert_eq!(&ids[..3], [ModelId::Runtime, ModelId::Separator, ModelId::AlignerRu]);
-        assert!(ids[3..].iter().all(|id| id.deep()) && ids.contains(&ModelId::SeparatorDeep) && ids.contains(&ModelId::AlignerRuDeep), "{ids:?}");
+        // Russian keeps the normal separator in deep mode; its second
+        // aligner is the deep part.
+        assert!(ids[3..].iter().all(|id| id.deep()) && ids.contains(&ModelId::AlignerRuDeep), "{ids:?}");
+        assert!(!ids.contains(&ModelId::SeparatorDeep), "{ids:?}");
+        let en = AlignText { source: LyricsSource::Genius, lines: vec![LyricLine::new(Duration::ZERO, "Hold me close tonight")], timed: false, hash: "e".into() };
+        assert!(t.needs(std::slice::from_ref(&en)).contains(&ModelId::SeparatorDeep));
         assert!(t.ensure_for(std::slice::from_ref(&text), false, None).is_ok());
         assert!(!t.offline);
         t.settings.deep = false;
@@ -1210,7 +1215,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (_req_tx, req_rx) = crossbeam_channel::unbounded();
         let lib = Library::open_in_memory().unwrap();
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false };
         let mut t = Thread::new(lib, dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let service = AlignService::default();
         t.checks = service.checks.clone();
