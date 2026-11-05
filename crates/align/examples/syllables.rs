@@ -26,6 +26,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use nikgob_align::catalog::ModelId;
 use nikgob_align::ctc::Emissions;
@@ -67,7 +68,9 @@ fn cached(job: &Job, lines: &[LyricLine], cache: &Path) -> Option<Prepared> {
         prep.set_levels(l[1..1 + n].to_vec(), l[1 + n..].to_vec());
     }
     for id in Route::of(lines)?.models() {
-        let v = read_f32(&cache.join(format!("{stem}.{}.em", key(id))))?;
+        // `EMS=x.`: the hearings kept as `<stem>.x.<aligner>.em`.
+        let ems = std::env::var("EMS").unwrap_or_default();
+        let v = read_f32(&cache.join(format!("{stem}.{ems}{}.em", key(id))))?;
         prep.set_emissions(id, Emissions { logp: v[3..].to_vec(), vocab: v[0] as usize, fps: v[2], blank: v[1] as usize });
     }
     Some(prep)
@@ -216,6 +219,9 @@ struct Pool {
     words: usize,
     moved: usize,
     pieces: usize,
+    /// Syllables of a cut word that last nothing, and under 40 ms.
+    zero: usize,
+    brief: usize,
     ref_mine: Vec<f32>,
     ref_weighted: Vec<f32>,
     on_mine: Vec<f32>,
@@ -226,10 +232,12 @@ struct Pool {
 
 fn report(name: &str, p: &Pool) {
     println!(
-        "  {name:24} words {:4} moved {} pieces {:4} | vs reference ({:3}): mine <0.05 {:5.1}% <0.1 {:5.1}% med {:.3} ({:+.3}) / weighted <0.05 {:5.1}% <0.1 {:5.1}% med {:.3} ({:+.3}) | vs voice rises ({:4}): mine <0.04 {:5.1}% <0.08 {:5.1}% med {:.3} ({:+.3}) / weighted <0.04 {:5.1}% <0.08 {:5.1}% med {:.3} ({:+.3})",
+        "  {name:24} words {:4} moved {} pieces {:4} zero {} <40ms {} | vs reference ({:3}): mine <0.05 {:5.1}% <0.1 {:5.1}% med {:.3} ({:+.3}) / weighted <0.05 {:5.1}% <0.1 {:5.1}% med {:.3} ({:+.3}) | vs voice rises ({:4}): mine <0.04 {:5.1}% <0.08 {:5.1}% med {:.3} ({:+.3}) / weighted <0.04 {:5.1}% <0.08 {:5.1}% med {:.3} ({:+.3})",
         p.words,
         p.moved,
         p.pieces,
+        p.zero,
+        p.brief,
         p.ref_mine.len(),
         within(&p.ref_mine, 0.05),
         within(&p.ref_mine, 0.1),
@@ -300,6 +308,8 @@ fn main() {
             let glued = whole_words(std::slice::from_ref(after));
             p.words += before.words.len();
             p.pieces += after.words.len();
+            p.zero += after.words.iter().filter(|w| w.end <= w.start).count();
+            p.brief += after.words.iter().filter(|w| w.end > w.start && w.end - w.start < Duration::from_millis(40)).count();
             p.moved += before.words.iter().zip(&glued[0].words).filter(|(a, b)| a != b).count() + before.words.len().abs_diff(glued[0].words.len());
         }
         // The reference's syllables against these, at the same letters.
@@ -360,6 +370,8 @@ fn merge(into: &mut Pool, p: Pool) {
     into.words += p.words;
     into.moved += p.moved;
     into.pieces += p.pieces;
+    into.zero += p.zero;
+    into.brief += p.brief;
     into.ref_mine.extend(p.ref_mine);
     into.ref_weighted.extend(p.ref_weighted);
     into.on_mine.extend(p.on_mine);

@@ -120,6 +120,17 @@ pub struct Tuning {
     /// Numbers and abbreviations in capitals are spelled as they are said
     /// ([`crate::text::said`]).
     pub said: bool,
+    /// A pause inside a line after a comma, a dash or other punctuation
+    /// costs [`Costs::comma_pause`] instead of [`Costs::line_pause`]: that is
+    /// where a line breathes.
+    pub comma_pause: bool,
+    /// A lone Latin word between Cyrillic words of a Cyrillic line is
+    /// spelled by sound for the Russian aligner (not one at a line's end:
+    /// «Я будто тролль warlord» lost a line so).
+    pub sound_inner: bool,
+    /// A word before punctuation and a pause of 0.3 s or more does not
+    /// last until the next word.
+    pub comma_ends: bool,
     /// Without line times, [`Self::sound_lines`] leaves out lines sung
     /// again in the next or the line before (a hook: the English aligner
     /// keeps its repeats better there).
@@ -152,6 +163,7 @@ impl Tuning {
                 gap_backing: 0.0,
                 gap_lead: 0.0,
                 pause_after: 0,
+                comma_pause: 0.0,
                 fill_base: 0.0,
                 fill_prominence: 0.0,
             },
@@ -171,38 +183,48 @@ impl Tuning {
             foreign_costs: false,
             sound_plain: false,
             said: false,
+            comma_pause: false,
+            sound_inner: false,
+            comma_ends: false,
         }
     }
 
 }
 
-/// `align-6` (docs/lyrics-align.md, «align-6»): `align-5`'s blank inside a
-/// word where there is no voice, and
+/// `align-6` (docs/lyrics-align.md, «align-6», «After the merge»):
+/// `align-5`'s blank inside a word where there is no voice, and
 /// * Latin lines of a Russian text by sound ([`Tuning::sound_lines`]; a hook
-///   sung over and over only with line times, [`Tuning::sound_plain`]);
+///   sung over and over only with line times, [`Tuning::sound_plain`]), and
+///   a lone Latin word between Cyrillic ones ([`Tuning::sound_inner`]);
 /// * a pause without voice longer than 8 frames (0.16 s) between two words
-///   of a line costs 0.2 a frame (the pause goes between lines);
-/// * a word that cannot be held is held at most 0.15 s ([`Tuning::stop_hold`]);
+///   of a line costs 0.3 a frame, 0.2 after punctuation
+///   ([`Tuning::comma_pause`]: the pause goes between lines, or where the
+///   line takes its breath);
+/// * a word that cannot be held is held at most 0.25 s ([`Tuning::stop_hold`]);
 /// * hums end with their voice ([`Tuning::hum_ends`]);
 /// * lines heard by another aligner keep these costs
 ///   ([`Tuning::foreign_costs`]);
 /// * numbers and abbreviations in capitals are spelled as said
 ///   ([`Tuning::said`]: «25 ТГК» → «двадцать пять тэгэка»).
 ///
-/// Each was measured on the bench alone and together; none is worse on any
-/// song or case of it. The rest of the knobs measured worse or no better.
+/// Measured on the bench with the hearing cut at whole strides (50 frames a
+/// second), alone and together; none is worse on any song or case of it.
+/// The rest of the knobs measured worse or no better.
 impl Default for Tuning {
     fn default() -> Self {
         let mut t = Self::align4();
         t.costs.in_word_silent = 0.3;
-        t.costs.line_pause = 0.2;
+        t.costs.line_pause = 0.3;
         t.costs.pause_after = 8;
+        t.costs.comma_pause = 0.2;
+        t.comma_pause = true;
         t.sound_lines = true;
         t.sound_plain = true;
-        t.stop_hold = 0.15;
+        t.stop_hold = 0.25;
         t.hum_ends = true;
         t.foreign_costs = true;
         t.said = true;
+        t.sound_inner = true;
         t
     }
 }
@@ -310,8 +332,15 @@ pub fn fit_text_with(em: &Emissions, vocab: &Vocab, foreign: &[Foreign<'_>], lin
         // by the Russian aligner: its Latin words by sound.
         let by_sound = tuning.sound_lines && !foreign.iter().any(|f| f.lines.contains(&li)) && vocab.cyrillic_only() && sung_by_sound(&l.text);
         let ps: Vec<String> = if l.words.is_empty() { pieces(&l.text) } else { l.words.iter().map(|w| w.text.clone()).collect() };
-        for p in ps {
-            let say = if by_sound { latin_by_sound(&p.to_lowercase()) } else { p.clone() };
+        // A lone Latin word with Cyrillic words on both sides («Кто
+        // раздаёт вам swag? (Ла-ла-ла-ла)») by sound too (`sound_inner`).
+        let cyr = |p: &String| p.chars().any(|c| matches!(c, '\u{0400}'..='\u{04ff}'));
+        let latin = |p: &String| p.chars().any(|c| c.is_ascii_alphabetic()) && !cyr(p);
+        let inner: Vec<bool> = (0..ps.len())
+            .map(|i| tuning.sound_inner && vocab.cyrillic_only() && latin(&ps[i]) && i > 0 && cyr(&ps[i - 1]) && ps.get(i + 1).is_some_and(cyr))
+            .collect();
+        for (p, inner) in ps.into_iter().zip(inner) {
+            let say = if by_sound || inner { latin_by_sound(&p.to_lowercase()) } else { p.clone() };
             let toks = vocab.tokens(&say);
             let idx = placed.len();
             for t in &toks {
@@ -453,7 +482,7 @@ pub fn fit_text_with(em: &Emissions, vocab: &Vocab, foreign: &[Foreign<'_>], lin
             placed.extend(extra.into_iter().map(|p| Placed { line: at, ..p }));
         }
     }
-    let made = timed_lines(&all, &placed, tuning.hum_ends);
+    let made = timed_lines(&all, &placed, tuning);
     let own_ends = if steady { source_ends(lines, offset) } else { vec![None; lines.len()] };
     // The repeats where they are sung, after the line before them.
     let mut order: Vec<usize> = (0..lines.len()).collect();
@@ -572,7 +601,16 @@ fn place_on_path(
         let ends_line = next.is_none_or(|n| n.line != p.line);
         // Hums are breaths apart («м, м, м, угу»): a pause next to one is
         // no pause inside a line.
-        let gap = if ends_line || hum || next.is_some_and(|n| is_hum(&n.text)) { Gap::Lines } else { Gap::Words };
+        // A comma or a dash is where a line takes its breath («Дави на газ,
+        // [pause] дави на газ»): a pause there is free (`comma_pause`).
+        let comma = tuning.comma_pause && p.text.trim_end().ends_with([',', ';', ':', '—', '–', '-', '…', '.', '!', '?']);
+        let gap = if ends_line || hum || next.is_some_and(|n| is_hum(&n.text)) {
+            Gap::Lines
+        } else if comma {
+            Gap::Comma
+        } else {
+            Gap::Words
+        };
         let band = band.map(|b| (frame(b.from), frame(b.to)));
         let toks = if hum { vec![Tok::Hum] } else { toks.into_iter().map(Tok::Letter).collect() };
         let first = path.toks.len();
@@ -592,7 +630,7 @@ fn place_on_path(
             owner.push(None);
             let k = path.toks.len() - 1;
             path.gaps[k] = gap;
-            path.pauses[k] = gap == Gap::Words;
+            path.pauses[k] = matches!(gap, Gap::Words | Gap::Comma);
         }
     }
     if path.toks.is_empty() {
@@ -1296,7 +1334,7 @@ fn align_pieces(em: &Emissions, vocab: &Vocab, placed: &mut [Placed], idx: &[usi
 /// The source's lines with the pieces' times as words. A piece without
 /// letters (a dash) sticks to the one before it; a line without any keeps
 /// its own start.
-fn timed_lines(lines: &[LyricLine], placed: &[Placed], hum_ends: bool) -> Vec<LyricLine> {
+fn timed_lines(lines: &[LyricLine], placed: &[Placed], tuning: &Tuning) -> Vec<LyricLine> {
     let mut out: Vec<LyricLine> = Vec::with_capacity(lines.len());
     let d = |s: f32| Duration::from_secs_f32((s - LATE).max(0.0));
     for (li, l) in lines.iter().enumerate() {
@@ -1324,10 +1362,17 @@ fn timed_lines(lines: &[LyricLine], placed: &[Placed], hum_ends: bool) -> Vec<Ly
         }
         // A word lasts until the next one starts when the gap is short
         // (the sung vowel goes on), so the fill does not stall; a hum ends
-        // with its voice (`hum_ends`: «м, м, м, угу» with breaths between).
+        // with its voice (`hum_ends`: «м, м, м, угу» with breaths between),
+        // and so does a word before punctuation and a pause of 0.3 s or
+        // more (`comma_ends`).
         for i in 0..words.len().saturating_sub(1) {
             let next = words[i + 1].start;
-            if hum_ends && is_hum(&words[i].text) {
+            if tuning.hum_ends && is_hum(&words[i].text) {
+                continue;
+            }
+            // A word before a breath at a comma ends where it was sung.
+            let breath = tuning.comma_ends && words[i].text.trim_end().ends_with([',', ';', ':', '—', '–', '…', '.', '!', '?']);
+            if breath && next > words[i].end && next - words[i].end >= Duration::from_millis(300) {
                 continue;
             }
             if next > words[i].end && next - words[i].end < Duration::from_millis(600) {

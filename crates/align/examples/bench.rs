@@ -17,7 +17,9 @@
 //! as long again), so a run leaves the machine usable. Each text is aligned with
 //! its line times (as the player does for a timed text) and as a plain
 //! text (no times: what a Genius text gets), and another song's text of
-//! the same language as a plain text, for the check.
+//! the same language as a plain text, for the check. `EMS=x.` reads and
+//! keeps the hearings as `<stem>.x.<aligner>.em` (another hearing of the
+//! same voice: the fixed 50-a-second slicing).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -144,7 +146,9 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, duty: &mut Duty) -> 
     // or not), so measuring never runs a model.
     let route = Route::of_with(&job.lines, false, false, true)?;
     for id in route.models() {
-        let file = cache.join(format!("{stem}.{}.em", key(id)));
+        // `EMS=x.`: another set of hearings kept beside these (`<stem>.x.ru.em`).
+        let ems = std::env::var("EMS").unwrap_or_default();
+        let file = cache.join(format!("{stem}.{ems}{}.em", key(id)));
         match read_f32(&file) {
             Some(v) => {
                 let (vocab, blank, fps) = (v[0] as usize, v[1] as usize, v[2]);
@@ -172,7 +176,7 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, duty: &mut Duty) -> 
         }
         // Over windows cut half a window later (`Tuning::windows`).
         if aligner.tuning().windows {
-            let file = cache.join(format!("{stem}.{}.w.em", key(id)));
+            let file = cache.join(format!("{stem}.{ems}{}.w.em", key(id)));
             let other = match read_f32(&file) {
                 Some(v) => Emissions { logp: v[3..].to_vec(), vocab: v[0] as usize, fps: v[2], blank: v[1] as usize },
                 None => {
@@ -420,6 +424,7 @@ fn tuning_from_env() -> Tuning {
     num("T_GAP_LEAD", &mut t.costs.gap_lead);
     num("T_FILL_BASE", &mut t.costs.fill_base);
     num("T_FILL_PROM", &mut t.costs.fill_prominence);
+    num("T_COMMA_COST", &mut t.costs.comma_pause);
     if let Some(x) = std::env::var("T_PAUSE_AFTER").ok().and_then(|x| x.parse().ok()) {
         t.costs.pause_after = x;
     }
@@ -433,6 +438,9 @@ fn tuning_from_env() -> Tuning {
     flag("T_FOREIGN_COSTS", &mut t.foreign_costs);
     flag("T_SOUND_PLAIN", &mut t.sound_plain);
     flag("T_SAID", &mut t.said);
+    flag("T_COMMA", &mut t.comma_pause);
+    flag("T_INNER", &mut t.sound_inner);
+    flag("T_COMMA_ENDS", &mut t.comma_ends);
     num("T_HOLD_VMR", &mut t.hold_vmr);
     num("T_HOLD_PROM", &mut t.hold_prominence);
     t

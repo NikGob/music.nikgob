@@ -255,6 +255,9 @@ pub enum Gap {
     Words,
     /// Between two letters of one word.
     InWord,
+    /// Between two words of a line after a comma, a dash or other
+    /// punctuation ([`Costs::comma_pause`]).
+    Comma,
 }
 
 /// What frames of some states cost beyond what the model hears, and what
@@ -295,6 +298,9 @@ pub struct Costs {
     /// [`Self::line_pause`] only in a pause without voice longer than this
     /// many frames (0: every frame of one).
     pub pause_after: usize,
+    /// [`Self::line_pause`] after punctuation ([`Gap::Comma`]): where a line
+    /// takes its breath.
+    pub comma_pause: f32,
     /// A filler frame costs this plus [`Self::fill_prominence`] times the
     /// frame's [`Voice::prominence`] against its best letter (quiet backing
     /// repeats go to the filler, the lead stays with the text; both 0:
@@ -392,6 +398,7 @@ enum Stay {
     Free,
     InWord,
     Words,
+    Comma,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -460,7 +467,11 @@ pub fn align_path(em: &Emissions, path: &Path, voice: Option<Voice<'_>>) -> Opti
                 .collect(),
             _ => Vec::new(),
         };
-        let stay = if path.pauses.get(k).copied().unwrap_or(false) { Stay::Words } else { Stay::Free };
+        let stay = match (path.pauses.get(k).copied().unwrap_or(false), path.gaps.get(k)) {
+            (true, Some(Gap::Comma)) => Stay::Comma,
+            (true, _) => Stay::Words,
+            _ => Stay::Free,
+        };
         first[k] = states.len();
         let chain = if tok == Tok::Hum { HUM_FRAMES.min(band.1.saturating_sub(band.0) + 1).max(1) } else { 1 };
         for j in 0..chain {
@@ -481,6 +492,7 @@ pub fn align_path(em: &Emissions, path: &Path, voice: Option<Voice<'_>>) -> Opti
             Gap::Lines => Stay::Free,
             Gap::Words => Stay::Words,
             Gap::InWord => Stay::InWord,
+            Gap::Comma => Stay::Comma,
         };
         states.push(blank_state(from, stay));
     }
@@ -572,7 +584,8 @@ pub fn align_path(em: &Emissions, path: &Path, voice: Option<Voice<'_>>) -> Opti
             Stay::InWord if quiet => costs.in_word_silent,
             Stay::InWord => costs.in_word,
             Stay::Words if quiet && pause[t] > costs.pause_after => costs.line_pause,
-            Stay::Words => 0.0,
+            Stay::Comma if quiet && pause[t] > costs.pause_after => costs.comma_pause,
+            Stay::Words | Stay::Comma => 0.0,
         }
     };
     const NEG: f32 = -1e30;
