@@ -14,8 +14,9 @@
 //!   word (how the view lit a word before) puts it, both from the word's
 //!   own start (so a word that is off as a whole does not count);
 //! * every boundary inside a word against the nearest rise of the
-//!   separated voice's loudness (a syllable's vowel coming in), the same
-//!   for the weighted share.
+//!   separated voice's loudness (a syllable's vowel coming in) and the
+//!   nearest dip (the consonant between two vowels), the same for the
+//!   weighted share.
 //!
 //! `SHOW=<from>-<to>` prints the syllables of the lines starting there and
 //! the voice's loudness every 20 ms, to read them off by hand; `FIND=<text>`
@@ -164,6 +165,31 @@ fn onsets(voice: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// Dips of the voice's loudness (a consonant between two vowels): every
+/// 10 ms, the lowest within 30 ms, with 3 dB more on both sides within
+/// 80 ms, where the voice is there.
+fn dips(voice: &[f32]) -> Vec<f32> {
+    const HOP: usize = 160;
+    let db: Vec<f32> = voice
+        .chunks(HOP)
+        .map(|c| 10.0 * (c.iter().map(|x| x * x).sum::<f32>() / c.len().max(1) as f32 + 1e-9).log10())
+        .collect();
+    let mut sorted = db.clone();
+    sorted.sort_by(f32::total_cmp);
+    let loud = sorted[((sorted.len() - 1) as f32 * 0.95) as usize];
+    let n = db.len();
+    let top = |r: std::ops::Range<usize>| db[r].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    (8..n.saturating_sub(8))
+        .filter(|&t| {
+            (t - 3..t + 4).all(|u| db[u] >= db[t])
+                && top(t - 8..t) - db[t] >= 3.0
+                && top(t + 1..t + 9) - db[t] >= 3.0
+                && top(t - 8..t + 9) > loud - 25.0
+        })
+        .map(|t| (t as f32 + 0.5) * HOP as f32 / 16_000.0)
+        .collect()
+}
+
 fn nearest(onsets: &[f32], t: f32) -> f32 {
     let i = onsets.partition_point(|o| *o < t);
     [i.checked_sub(1), Some(i)].into_iter().flatten().filter_map(|j| onsets.get(j)).map(|o| t - o).min_by(|a, b| a.abs().total_cmp(&b.abs())).unwrap_or(f32::INFINITY)
@@ -194,6 +220,8 @@ struct Pool {
     ref_weighted: Vec<f32>,
     on_mine: Vec<f32>,
     on_weighted: Vec<f32>,
+    dip_mine: Vec<f32>,
+    dip_weighted: Vec<f32>,
 }
 
 fn report(name: &str, p: &Pool) {
@@ -220,6 +248,19 @@ fn report(name: &str, p: &Pool) {
         within(&p.on_weighted, 0.08),
         median(&p.on_weighted),
         signed_median(&p.on_weighted),
+    );
+    println!(
+        "  {:24} vs voice dips ({:4}): mine <0.04 {:5.1}% <0.08 {:5.1}% med {:.3} ({:+.3}) / weighted <0.04 {:5.1}% <0.08 {:5.1}% med {:.3} ({:+.3})",
+        "",
+        p.dip_mine.len(),
+        within(&p.dip_mine, 0.04),
+        within(&p.dip_mine, 0.08),
+        median(&p.dip_mine),
+        signed_median(&p.dip_mine),
+        within(&p.dip_weighted, 0.04),
+        within(&p.dip_weighted, 0.08),
+        median(&p.dip_weighted),
+        signed_median(&p.dip_weighted),
     );
 }
 
@@ -281,12 +322,14 @@ fn main() {
             }
         }
         // Every boundary against the voice's rises.
-        let rises = onsets(&prep.voice);
+        let (rises, falls) = (onsets(&prep.voice), dips(&prep.voice));
         for (l, w) in fit.lines.iter().zip(&words) {
             for (k, t, _) in inner_cuts(l) {
                 if let Some((wt, _)) = weighted_at(&w.words, k) {
                     p.on_mine.push(nearest(&rises, t));
                     p.on_weighted.push(nearest(&rises, wt));
+                    p.dip_mine.push(nearest(&falls, t));
+                    p.dip_weighted.push(nearest(&falls, wt));
                 }
             }
         }
@@ -321,6 +364,8 @@ fn merge(into: &mut Pool, p: Pool) {
     into.ref_weighted.extend(p.ref_weighted);
     into.on_mine.extend(p.on_mine);
     into.on_weighted.extend(p.on_weighted);
+    into.dip_mine.extend(p.dip_mine);
+    into.dip_weighted.extend(p.dip_weighted);
 }
 
 /// Words cut into syllables of very uneven lengths, against the weighted
