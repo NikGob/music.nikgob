@@ -7,10 +7,12 @@
 //! separated voice and what the normal aligners hear are read from there
 //! (a song without them is left out); what deep mode adds is kept there
 //! too under names of its own: `<song>.rof.voice` / `.rof.levels` (the
-//! voice by Mel-Band RoFormer), `<song>.giga.em`, `<song>.hubert.em`,
-//! `<song>.sung.em` (the second aligners), and `<song>.rof.<aligner>.em`
-//! for what an aligner hears in the RoFormer voice; `.w.em` for a
-//! second hearing over shifted windows. Nothing there is overwritten.
+//! voice by Mel-Band RoFormer), `<song>.x.<aligner>.em` for what an aligner
+//! (`giga`, `hubert`, `sung` the second ones) hears in the bench's voice,
+//! `<song>.rof.<aligner>.em` in the RoFormer voice; `.w.em` for a second
+//! hearing over shifted windows. `OLD=1` takes the bench's own hearing
+//! instead (made before the windows were cut at whole strides). Nothing
+//! there is overwritten.
 //!
 //! What is measured is set by variables: `SEP=rof` (RoFormer's voice),
 //! `WIN=1` (heard twice), `RU`, `EN`, `OTHER` = `alone` | `fused` (the
@@ -138,9 +140,13 @@ fn deep_from_env() -> Deep {
 fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Option<Prepared> {
     let stem = Path::new(&job.path).file_stem()?.to_string_lossy().into_owned();
     let rof = deep.separator;
-    let tag = if rof { "rof." } else { "" };
-    let voice_file = cache.join(format!("{stem}.{tag}voice"));
-    let levels_file = cache.join(format!("{stem}.{tag}levels"));
+    // What the aligners heard: the bench's own (`OLD=1`, made before the
+    // windows were cut at whole strides) or this example's.
+    let old = std::env::var("OLD").is_ok();
+    let tag = if rof { "rof." } else if old { "" } else { "x." };
+    let vtag = if rof { "rof." } else { "" };
+    let voice_file = cache.join(format!("{stem}.{vtag}voice"));
+    let levels_file = cache.join(format!("{stem}.{vtag}levels"));
     let voice = match read_f32(&voice_file) {
         Some(v) => v,
         None if rof => {
@@ -174,7 +180,7 @@ fn prepared(aligner: &mut Aligner, job: &Job, cache: &Path, deep: &Deep) -> Opti
         let file = cache.join(format!("{stem}.{tag}{}.em", key(id)));
         let mut em = match read_em(&file) {
             Some(e) => e,
-            None if rof || std::env::var("HEAR").is_ok() => {
+            None if !old => {
                 let em = model_run(&format!("{} {}", job.name, key(id)), || aligner.hear_with(&prep, id, &mut |_| true)).ok()?;
                 write_em(&file, &em);
                 em
@@ -471,13 +477,13 @@ fn main() {
     let catalog = Catalog::new(&args[1]);
     let jobs: Vec<Job> = serde_json::from_str(&std::fs::read_to_string(&args[2]).unwrap()).unwrap();
     let cache = PathBuf::from(&args[3]);
-    let filter = args.get(4).cloned().unwrap_or_default();
+    let filter = args.get(4).map(|f| f.trim_matches('"').to_owned()).unwrap_or_default();
     let threads = std::env::var("THREADS").ok().and_then(|t| t.parse().ok()).unwrap_or(2);
     let device = if std::env::var("DEVICE").as_deref() == Ok("cpu") { Device::Cpu } else { Device::Gpu };
     let mut aligner = Aligner::new(catalog, device, threads);
     let deep = deep_from_env();
     aligner.set_deep(deep);
-    println!("deep {deep:?} on {device:?}");
+    println!("deep {deep:?} on {device:?}, jobs matching {filter:?}");
     if let Ok(dir) = std::env::var("REF") {
         parity(&mut aligner, Path::new(&dir));
         return;

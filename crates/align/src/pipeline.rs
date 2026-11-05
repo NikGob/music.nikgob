@@ -376,6 +376,35 @@ mod tests {
         assert!(b[30] > 0.9 && b[10] == 0.0, "{b:?}");
     }
 
+    /// Frames are cut from each window at whole strides of the model: a
+    /// click is heard at its own frame in every window, the first and the
+    /// shifted hearing alike.
+    #[test]
+    fn every_window_keeps_its_frames_in_place() {
+        // A wav2vec2-like model: a frame every 320 samples over 400 of
+        // them; letter 1 where the frame holds a click.
+        let mut run = |x: Vec<f32>| -> Result<(Vec<i64>, Vec<f32>), Error> {
+            let frames = (x.len() - 400) / 320 + 1;
+            let logits: Vec<f32> = (0..frames).flat_map(|j| if x[j * 320..j * 320 + 400].iter().any(|v| *v > 5.0) { [0.0, 9.0] } else { [9.0, 0.0] }).collect();
+            Ok((vec![1, frames as i64, 2], logits))
+        };
+        let secs = 100;
+        let mut voice = vec![0.0f32; secs * RATE as usize];
+        let clicks: Vec<usize> = (1..secs).map(|s| s * RATE as usize + 3200 * (s % 7)).collect();
+        for &c in &clicks {
+            voice[c] = 1.0;
+        }
+        for shift in [0, SHIFT_S * RATE as usize] {
+            let em = emissions_with(&mut run, &voice, 0, shift, &mut |_| true).unwrap();
+            assert_eq!(em.fps, 50.0);
+            assert!(em.frames().abs_diff(secs * 50) <= 1, "{}", em.frames());
+            for &c in &clicks {
+                let t = c / 320;
+                assert!(em.row(t)[1] > em.row(t)[0], "shift {shift}: the click at {c} is not at frame {t}");
+            }
+        }
+    }
+
     #[test]
     fn english_falls_back_to_the_multilingual_aligner() {
         assert_eq!(fallback(ModelId::AlignerEn), Some(ModelId::AlignerMms));
@@ -948,11 +977,23 @@ impl Aligner {
 /// `shift`: the windows are cut this many samples later (the song is heard
 /// after as much silence, which is left out again).
 pub fn emissions(model: &mut Model, voice: &[f32], blank: usize, shift: usize, progress: &mut dyn FnMut(f32) -> bool) -> Result<Emissions, Error> {
+    emissions_with(&mut |x| model.run_f32_shaped(vec![1, x.len()], x), voice, blank, shift, progress)
+}
+
+/// [`emissions`] with the model as a function from a window's samples to
+/// its logits and their shape.
+fn emissions_with(
+    run: &mut dyn FnMut(Vec<f32>) -> Result<(Vec<i64>, Vec<f32>), Error>,
+    voice: &[f32],
+    blank: usize,
+    shift: usize,
+    progress: &mut dyn FnMut(f32) -> bool,
+) -> Result<Emissions, Error> {
     if shift > 0 {
         let mut padded = vec![0.0f32; shift];
         padded.extend_from_slice(voice);
-        let mut em = emissions(model, &padded, blank, 0, progress)?;
-        let skip = ((shift as f32 / RATE as f32) * em.fps).round() as usize;
+        let mut em = emissions_with(run, &padded, blank, 0, progress)?;
+        let skip = (shift as f32 / RATE as f32 * em.fps).round() as usize;
         em.logp.drain(..(skip * em.vocab).min(em.logp.len()));
         return Ok(em);
     }
@@ -963,6 +1004,7 @@ pub fn emissions(model: &mut Model, voice: &[f32], blank: usize, shift: usize, p
     let mut logp: Vec<f32> = Vec::new();
     let mut vocab = 0;
     let mut fps = 50.0f32;
+    let mut stride: Option<usize> = None;
     let mut start = 0;
     while start < n {
         let (a, b) = (start.saturating_sub(ctx), (start + win + ctx).min(n));
@@ -974,16 +1016,23 @@ pub fn emissions(model: &mut Model, voice: &[f32], blank: usize, shift: usize, p
             *v = (*v - mean) / sd;
         }
         let len = x.len();
-        let (shape, mut logits) = model.run_f32_shaped(vec![1, len], x)?;
+        let (shape, mut logits) = run(x)?;
         let (frames, v) = match shape[..] {
             [1, t, v] => (t as usize, v as usize),
             _ => return Err(Error::Model(format!("aligner output shape {shape:?}"))),
         };
         vocab = v;
         Emissions::log_softmax(&mut logits, v);
-        fps = frames as f32 / (len as f32 / sr as f32);
-        let s = (((start - a) as f32 / sr as f32) * fps).round() as usize;
-        let e = (s + ((win.min(n - start)) as f32 / sr as f32 * fps).round() as usize).min(frames);
+        // The model's stride (320 samples for wav2vec2): a window gives a
+        // frame every stride from its first sample, so its frames are cut
+        // at whole strides. (Cut by the window's own frames a second, a
+        // little under 50, each window lost its last frame and the next
+        // ones came a frame early.)
+        // Read off the first (longest) window: a short last one rounds off.
+        let hop = *stride.get_or_insert(((len as f32 / frames.max(1) as f32).round() as usize).max(1));
+        fps = sr as f32 / hop as f32;
+        let s = ((start - a) / hop).min(frames);
+        let e = (s + win.min(n - start).div_ceil(hop)).min(frames);
         logp.extend_from_slice(&logits[s * v..e * v]);
         start += win;
         if !progress((start.min(n)) as f32 / n as f32) {
