@@ -294,8 +294,10 @@ fn paint(
         ctx.request_repaint();
     }
     let scroll = follow + manual.shift(now);
+    // A scroll by hand follows the hand as closely in both modes; the
+    // text's own moves take the calmer spring.
     let together = if !state.prefs.lyrics_cascade {
-        anim::f32(&ctx, id.with("scroll"), scroll, Spring::new(1.0, 300.0))
+        anim::f32(&ctx, id.with("scroll"), scroll, if manual_on { HAND } else { Spring::new(1.0, 300.0) })
     } else { scroll };
 
     // Where each item is drawn this frame.
@@ -305,7 +307,7 @@ fn paint(
             // A wave: lines further from the current one follow more
             // lazily, without wobbling past their place.
             let spring = if manual_on {
-                Spring::new(1.0, 1600.0)
+                HAND
             } else {
                 Spring::new(0.9, (300.0 - 26.0 * far).max(110.0))
             };
@@ -502,6 +504,9 @@ fn paint(
         ctx.request_repaint();
     }
 }
+
+/// The spring the text follows a scroll by hand on.
+const HAND: Spring = Spring::new(1.0, 1600.0);
 
 /// Below this share of its slot a folding wait counts as gone: it takes no
 /// pointer and draws nothing.
