@@ -32,6 +32,16 @@ pub enum ModelId {
     AlignerEn,
     /// Whisper large-v3-turbo, recognition from scratch.
     Whisper,
+    /// Mel-Band RoFormer vocal separation (deep mode).
+    SeparatorDeep,
+    /// GigaAM-v3 CTC, a second Russian aligner (deep mode).
+    AlignerRuDeep,
+    /// HuBERT large (LibriSpeech 960 h), a second English aligner (deep
+    /// mode).
+    AlignerEnDeep,
+    /// MMS-300m forced aligner fine-tuned on singing (Tune Studio), a
+    /// second aligner for romanised letters (deep mode).
+    AlignerSung,
 }
 
 /// One file of a part.
@@ -211,11 +221,97 @@ pub const WHISPER: ModelSpec = ModelSpec {
     ],
 };
 
-pub const ALL: [ModelSpec; 7] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, WHISPER];
+pub const SEPARATOR_DEEP: ModelSpec = ModelSpec {
+    id: ModelId::SeparatorDeep,
+    dir: "mel-roformer-kim",
+    files: &[FileSpec {
+        name: "sep-all-int8.onnx",
+        url: hf!("redbaty/ytm-vocal-separator", "d9d3f27d58c4f9c0286a07ed541b18ceaa91f107", "sep-all-int8.onnx"),
+        size: 235_623_148,
+        sha256: "e9570dac2ae14382c99357a547a6739777a029ad7f2b5f6e6bc22e9b0e7b2580",
+        extract: &[],
+    }],
+};
+
+pub const ALIGNER_RU_DEEP: ModelSpec = ModelSpec {
+    id: ModelId::AlignerRuDeep,
+    dir: "gigaam-v3-ctc",
+    files: &[
+        FileSpec {
+            name: "model_int8.onnx",
+            url: hf!("istupakov/gigaam-v3-onnx", "322c3b29492673eb7d0b434bfa9dfb8653e34d02", "v3_ctc.int8.onnx"),
+            size: 224_721_181,
+            sha256: "ceb61454e2e1a2dec5872cbac1de0fe0a4271d1148f6b26b5bda53ff30a12acd",
+            extract: &[],
+        },
+        FileSpec {
+            name: "vocab.txt",
+            url: hf!("istupakov/gigaam-v3-onnx", "322c3b29492673eb7d0b434bfa9dfb8653e34d02", "v3_vocab.txt"),
+            size: 198,
+            sha256: "a9143c30844d3c0bee3e9e927e4084774eb1b9eeaafc473b2c4521e4911a7c07",
+            extract: &[],
+        },
+    ],
+};
+
+pub const ALIGNER_EN_DEEP: ModelSpec = ModelSpec {
+    id: ModelId::AlignerEnDeep,
+    dir: "hubert-large-ls960",
+    files: &[
+        FileSpec {
+            name: "model.onnx",
+            url: hf!("aureortiz/melodex-hubert-large-ls960-ft-onnx", "a9037a27bcd15e5ccc03fe4865088119042650fe", "model.onnx"),
+            size: 1_262_262_148,
+            sha256: "1c77fe7e8aa0c5204e0d3f04139be7a2d6f7b4a4236fd57b3a653612bcfa105b",
+            extract: &[],
+        },
+        FileSpec {
+            name: "vocab.json",
+            url: hf!("aureortiz/melodex-hubert-large-ls960-ft-onnx", "a9037a27bcd15e5ccc03fe4865088119042650fe", "vocab.json"),
+            size: 293,
+            sha256: "756e5535a825a3f81190ea56b364bbbb427b89fd5c67800b6f2b73191bb73c2d",
+            extract: &[],
+        },
+    ],
+};
+
+pub const ALIGNER_SUNG: ModelSpec = ModelSpec {
+    id: ModelId::AlignerSung,
+    dir: "tunestudio-aligner",
+    files: &[
+        FileSpec {
+            name: "aligner.onnx",
+            url: hf!("tuneperfect/tunestudio-aligner", "3564dc1bf90f62ce479b93be173a772d6ca8a279", "aligner.onnx"),
+            size: 1_262_284_621,
+            sha256: "597a1d775df8f7fe3c94310568751ef9253645b4d8cdf21bb7a3da1ab80225a1",
+            extract: &[],
+        },
+        FileSpec {
+            name: "vocab.json",
+            url: hf!("tuneperfect/tunestudio-aligner", "3564dc1bf90f62ce479b93be173a772d6ca8a279", "vocab.json"),
+            size: 384,
+            sha256: "7c08508d30f76c24863785b16bfa16477216848b3f1a3f90d5f3bb8c7e1920d1",
+            extract: &[],
+        },
+    ],
+};
+
+pub const ALL: [ModelSpec; 11] =
+    [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, WHISPER, SEPARATOR_DEEP, ALIGNER_RU_DEEP, ALIGNER_EN_DEEP, ALIGNER_SUNG];
 
 impl ModelId {
     pub fn spec(self) -> ModelSpec {
         ALL.into_iter().find(|s| s.id == self).expect("every id has a spec")
+    }
+
+    /// The model file of a part (its first file).
+    pub fn model_file(self) -> &'static str {
+        self.spec().files[0].name
+    }
+
+    /// A part only deep mode uses (docs/lyrics-align.md, «Deep mode»).
+    pub fn deep(self) -> bool {
+        matches!(self, Self::SeparatorDeep | Self::AlignerRuDeep | Self::AlignerEnDeep | Self::AlignerSung)
     }
 }
 

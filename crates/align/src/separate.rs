@@ -97,6 +97,159 @@ pub fn vocals(model: &mut Model, spec: MdxSpec, mix: Audio, progress: &mut dyn F
     Ok(Audio { rate, channels: out })
 }
 
+/// Mel-Band RoFormer (Kim's vocal model, deep mode): the model gives a
+/// complex mask over the short-time spectrum of an 8 s stereo chunk
+/// (n_fft 2048, hop 441: 1025 bins × 801 frames, the planes L.re, L.im,
+/// R.re, R.im), the voice is the mix's spectrum times it.
+pub const ROFORMER: MdxSpec = MdxSpec { n_fft: 2048, hop: 441, dim_f: 1025, dim_t: 801 };
+/// Samples of one chunk (8 s).
+pub const ROFORMER_CHUNK: usize = 352_800;
+
+/// The voice of `mix` (44.1 kHz; mono is doubled) by Mel-Band RoFormer, as
+/// its training code runs it (`demix`): chunks every `step` samples (half
+/// a chunk: each moment heard twice; a whole chunk: once, half the work),
+/// faded in and out over a tenth of a chunk where they overlap and added
+/// up, weighed by the fades. `progress` as for [`vocals`].
+pub fn vocals_roformer(model: &mut Model, mix: Audio, step: usize, progress: &mut dyn FnMut(f32) -> bool) -> Result<Audio, Error> {
+    let shape = vec![1, 4, ROFORMER.dim_f, ROFORMER.dim_t];
+    roformer_with(&mut |x| model.run_f32(shape.clone(), x), mix, step, progress)
+}
+
+/// [`vocals_roformer`] with the model as a function from a chunk's
+/// spectrum to its mask.
+fn roformer_with(run: &mut dyn FnMut(Vec<f32>) -> Result<Vec<f32>, Error>, mix: Audio, step: usize, progress: &mut dyn FnMut(f32) -> bool) -> Result<Audio, Error> {
+    let spec = ROFORMER;
+    let chunk = ROFORMER_CHUNK;
+    let step = step.clamp(1, chunk);
+    let border = chunk - step;
+    // Fades only where chunks overlap: chunks one after another meet
+    // whole (faded, both would weigh nothing where they meet).
+    let fade = (chunk / 10).min(border);
+    let mix = mix.stereo();
+    let rate = mix.rate;
+    let n = mix.frames();
+    // Overlapping chunks: the song is reflected at both ends so its first
+    // and last moments are heard as often as the rest.
+    let padded = border > 0 && n > 2 * border;
+    let src: Vec<Vec<f32>> = mix.channels.into_iter().map(|c| if padded { reflect_pad(&c, border) } else { c }).collect();
+    let len = src[0].len();
+    let mut ramp = vec![1.0f32; chunk];
+    for i in 0..fade {
+        let f = i as f32 / (fade - 1).max(1) as f32;
+        ramp[i] = f;
+        ramp[chunk - 1 - i] = f;
+    }
+    let mut planner = RealFftPlanner::<f32>::new();
+    let fwd = planner.plan_fft_forward(spec.n_fft);
+    let inv = planner.plan_fft_inverse(spec.n_fft);
+    let window = hann(spec.n_fft);
+    let bins = spec.n_fft / 2 + 1;
+    let plane = spec.dim_f * spec.dim_t;
+    let mut out: Vec<Vec<f32>> = vec![vec![0.0; len]; 2];
+    let mut weight = vec![0.0f32; len];
+    let chunks = if len <= chunk { 1 } else { (len - chunk).div_ceil(step) + 1 };
+    let mut at = 0;
+    let mut k = 0;
+    while at < len {
+        let part = (len - at).min(chunk);
+        let mut input = vec![0.0f32; 4 * plane];
+        for (c, ch) in src.iter().enumerate() {
+            let mut wav = ch[at..at + part].to_vec();
+            if part < chunk {
+                // The last chunk: reflected on when it is over half a chunk
+                // long, else silence.
+                wav = if part > chunk / 2 + 1 { reflect_pad_end(&wav, chunk) } else { [wav, vec![0.0; chunk - part]].concat() };
+            }
+            let s = stft(&wav, spec, &window, &fwd);
+            for t in 0..spec.dim_t {
+                for f in 0..spec.dim_f {
+                    let z = s[t * bins + f];
+                    input[(2 * c) * plane + f * spec.dim_t + t] = z.re;
+                    input[(2 * c + 1) * plane + f * spec.dim_t + t] = z.im;
+                }
+            }
+        }
+        let mask = run(input.clone())?;
+        if mask.iter().any(|v| !v.is_finite()) {
+            return Err(Error::Model("separation gave values that are not numbers".into()));
+        }
+        if mask.len() != 4 * plane {
+            return Err(Error::Model(format!("separation gave {} values", mask.len())));
+        }
+        let mut w = ramp.clone();
+        if at == 0 {
+            w[..fade].fill(1.0);
+        }
+        if at + chunk >= len {
+            w[chunk - fade..].fill(1.0);
+        }
+        for c in 0..2 {
+            let mut s = vec![Complex32::new(0.0, 0.0); spec.dim_t * bins];
+            for t in 0..spec.dim_t {
+                // The DC bin is left out of the voice (`zero_dc`).
+                for f in 1..spec.dim_f {
+                    let re = (2 * c) * plane + f * spec.dim_t + t;
+                    let im = re + plane;
+                    let (a, b) = (input[re], input[im]);
+                    let (m, q) = (mask[re], mask[im]);
+                    s[t * bins + f] = Complex32::new(a * m - b * q, a * q + b * m);
+                }
+            }
+            let wav = istft(&mut s, spec, &window, &inv, chunk);
+            for i in 0..part {
+                out[c][at + i] += wav[i] * w[i];
+            }
+        }
+        for i in 0..part {
+            weight[at + i] += w[i];
+        }
+        k += 1;
+        if !progress(k as f32 / chunks as f32) {
+            return Err(Error::Stopped);
+        }
+        if at + chunk >= len {
+            break;
+        }
+        at += step;
+    }
+    for c in &mut out {
+        for (v, w) in c.iter_mut().zip(&weight) {
+            *v = if *w > 1e-8 { *v / w } else { 0.0 };
+        }
+        if padded {
+            c.drain(..border);
+            c.truncate(n);
+        }
+    }
+    Ok(Audio { rate, channels: out })
+}
+
+/// `x` with `pad` samples reflected onto both ends (as `torch`'s reflect
+/// padding, never repeating the edge sample).
+fn reflect_pad(x: &[f32], pad: usize) -> Vec<f32> {
+    let n = x.len() as isize;
+    let at = |i: isize| -> f32 {
+        let mut i = i;
+        if i < 0 {
+            i = -i;
+        }
+        if i >= n {
+            i = 2 * (n - 1) - i;
+        }
+        x[i.clamp(0, n - 1) as usize]
+    };
+    (-(pad as isize)..n + pad as isize).map(at).collect()
+}
+
+/// `x` reflected on at its end up to `len` samples.
+fn reflect_pad_end(x: &[f32], len: usize) -> Vec<f32> {
+    let n = x.len();
+    let mut out = x.to_vec();
+    // Called with less to add than `x` has (over half a chunk long).
+    out.extend((0..len.saturating_sub(n)).map(|i| x[n.saturating_sub(2 + i).min(n - 1)]));
+    out
+}
+
 fn hann(n: usize) -> Vec<f32> {
     (0..n).map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / n as f32).cos()).collect()
 }
@@ -172,5 +325,36 @@ mod tests {
         let back = istft(&mut s, spec, &w, &inv, len);
         let err = wav.iter().zip(&back).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         assert!(err < 1e-4, "{err}");
+    }
+
+    /// A mask that keeps everything gives the mix back, chunk seams and
+    /// both ends included, whatever the step.
+    #[test]
+    fn a_whole_mask_gives_the_mix_back() {
+        let n = ROFORMER_CHUNK * 2 + 12_345;
+        let wav: Vec<f32> = (0..n).map(|i| (i as f32 * 0.31).sin() * 0.4 + (i as f32 * 0.21).sin() * 0.2).collect();
+        let plane = ROFORMER.dim_f * ROFORMER.dim_t;
+        for step in [ROFORMER_CHUNK / 2, ROFORMER_CHUNK] {
+            let mix = Audio { rate: RATE, channels: vec![wav.clone(), wav.iter().map(|v| -v).collect()] };
+            let mut calls = 0;
+            let mut run = |x: Vec<f32>| {
+                assert_eq!(x.len(), 4 * plane);
+                calls += 1;
+                Ok([vec![1.0; plane], vec![0.0; plane], vec![1.0; plane], vec![0.0; plane]].concat())
+            };
+            let out = roformer_with(&mut run, mix, step, &mut |_| true).unwrap();
+            assert_eq!(out.channels[0].len(), n);
+            let err = out.channels[0].iter().zip(&wav).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            // The DC bin left out costs a little where a frame does not hold whole cycles.
+            assert!(err < 5e-3, "step {step}: {err}");
+            assert!((out.channels[1][1000] + wav[1000]).abs() < 5e-3);
+            assert!(calls >= n / step, "step {step}: {calls} chunks");
+        }
+    }
+
+    #[test]
+    fn reflecting_never_repeats_the_edge() {
+        assert_eq!(reflect_pad(&[1.0, 2.0, 3.0, 4.0], 2), [3.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 2.0]);
+        assert_eq!(reflect_pad_end(&[1.0, 2.0, 3.0, 4.0], 6), [1.0, 2.0, 3.0, 4.0, 3.0, 2.0]);
     }
 }

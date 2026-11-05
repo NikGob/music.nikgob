@@ -14,8 +14,10 @@
 pub mod audio;
 pub mod catalog;
 pub mod ctc;
+pub mod deep;
 pub mod engine;
 pub mod fit;
+pub mod gigaam;
 pub mod pipeline;
 pub mod separate;
 pub mod text;
