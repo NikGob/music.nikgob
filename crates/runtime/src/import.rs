@@ -510,6 +510,7 @@ impl ImportService {
                     // The file's own tags are an option of their own.
                     skip_label: String::new(),
                     accept_label: "Импортировать".into(),
+                    pick: None,
                     question: "Это какой трек?".into(),
                 }
             })

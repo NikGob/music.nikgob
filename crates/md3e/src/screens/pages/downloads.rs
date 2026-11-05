@@ -2,8 +2,10 @@
 //! "Подтверди" queue, seeding and history.
 
 use egui::{Rect, Stroke, Ui, vec2};
+use nikgob_core::model::SourceId;
 use nikgob_view::{
-    Command, DownloadsTab, Job, Route, SeedRow, SharingView, SlskSharingView, UploadRow, UploadRowState, ViewState,
+    Command, Confirm, ConfirmPick, DownloadsTab, Job, Route, SeedRow, SharingView, SlskSharingView, UploadRow,
+    UploadRowState, ViewState,
 };
 
 use super::{PageState, SettingId, connected, fmt_size, widgets};
@@ -105,9 +107,11 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
             ),
         );
         ui.add_space(12.0);
+        // A card ticked song by song is never answered from here.
         let recommended: Vec<(u64, usize)> = d
             .confirm
             .iter()
+            .filter(|c| c.pick.is_none())
             .filter_map(|c| c.options.iter().position(|o| o.recommended).map(|i| (c.id, i)))
             .collect();
         if !recommended.is_empty()
@@ -128,6 +132,11 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     ui.add_space(12.0);
 
     for c in &d.confirm {
+        if let Some(pick) = &c.pick {
+            pick_card(ui, c, pick, out);
+            ui.add_space(12.0);
+            continue;
+        }
         let key = egui::Id::new(("confirm-choice", c.id));
         let mut choice: usize = ui
             .ctx()
@@ -198,6 +207,121 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
         ui.ctx().data_mut(|m| m.insert_temp(key, choice));
         ui.add_space(12.0);
     }
+}
+
+/// The ticked songs that are still on the card, in the card's order: a
+/// song that left it (turned into an MP3, kept) is ticked no more.
+fn ticked_on_card(ticked: &[SourceId], sources: &[SourceId]) -> Vec<SourceId> {
+    sources.iter().filter(|s| ticked.contains(s)).copied().collect()
+}
+
+/// A card whose songs are ticked one by one (the fake FLACs offered as
+/// MP3s): a list of rows with a checkbox each, nothing ticked at first,
+/// «Выбрать все» over them when there are several. Both buttons say how
+/// many songs they act on, act on the ticked ones only and wait for a tick
+/// (no song is changed, or kept for good, unless the user ticked it).
+fn pick_card(ui: &mut Ui, c: &Confirm, pick: &ConfirmPick, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let key = egui::Id::new(("confirm-pick", c.id));
+    let n = c.options.len().min(pick.sources.len());
+    let sources = &pick.sources[..n];
+    let stored: Vec<SourceId> = ui.ctx().data(|m| m.get_temp(key)).unwrap_or_default();
+    let mut ticked = ticked_on_card(&stored, sources);
+    // One row: a checkbox and its text, the whole row a target, filled
+    // while ticked (with `highlight`). True when it was toggled.
+    let row = |ui: &mut Ui, salt: (u64, usize), on: bool, mixed: bool, highlight: bool, text: &mut dyn FnMut(&mut Ui)| -> bool {
+        let bg = ui.painter().add(egui::Shape::Noop);
+        let mut flag = on;
+        let line = ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            let r = ui.add(egui::Checkbox::without_text(&mut flag).indeterminate(mixed));
+            let width = ui.available_width() - 8.0;
+            ui.vertical(|ui| {
+                ui.set_max_width(width);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                text(ui);
+            });
+            r
+        });
+        let area = line.response.rect.expand2(vec2(4.0, 4.0));
+        let hit = ui.interact(area, ui.id().with(("cf-pick-row", salt)), egui::Sense::click());
+        let toggled = line.inner.changed() || hit.clicked();
+        let fill = if highlight && on != toggled {
+            s.secondary_container.gamma_multiply(0.6)
+        } else if hit.hovered() {
+            s.on_surface.gamma_multiply(0.06)
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter().set(bg, egui::Shape::rect_filled(area, 12, fill));
+        toggled
+    };
+    Card::outlined().id_salt(("confirm", c.id)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(TypeRole::TitleMedium.style().rich(&c.title, s.on_surface));
+        ui.label(TypeRole::BodySmall.style().rich(&c.origin, s.on_surface_variant));
+        ui.add_space(12.0);
+        ui.add(egui::Label::new(TypeRole::LabelLarge.style().rich(&c.question, s.on_surface_variant)).wrap());
+        ui.add_space(4.0);
+        if n > 1 {
+            let all = ticked.len() == n;
+            let mixed = !ticked.is_empty() && !all;
+            let mut words = |ui: &mut Ui| {
+                ui.label(TypeRole::LabelLarge.style().rich("Выбрать все", s.on_surface));
+            };
+            if row(ui, (c.id, usize::MAX), all, mixed, false, &mut words) {
+                ticked = if all { Vec::new() } else { sources.to_vec() };
+            }
+            ui.add_space(6.0);
+        }
+        for (i, (o, src)) in c.options.iter().zip(sources).enumerate() {
+            let on = ticked.contains(src);
+            let mut words = |ui: &mut Ui| {
+                ui.add(egui::Label::new(TypeRole::TitleSmall.style().rich(&o.label, s.on_surface)).wrap());
+                ui.add(egui::Label::new(TypeRole::BodySmall.style().rich(&o.detail, s.on_surface_variant)).wrap());
+            };
+            if row(ui, (c.id, i), on, false, true, &mut words) {
+                if on {
+                    ticked.retain(|t| t != src);
+                } else {
+                    ticked.push(*src);
+                }
+            }
+            ui.add_space(6.0);
+        }
+        let ticked_now = ticked_on_card(&ticked, sources);
+        let k = ticked_now.len();
+        ui.add_space(8.0);
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(
+                    Button::new(ConfirmPick::words(&pick.accept, k))
+                        .style(Style::Filled)
+                        .enabled(k > 0)
+                        .id_salt(("cf-ok", c.id)),
+                )
+                .clicked()
+                && k > 0
+            {
+                out.push(Command::ConfirmPicked { id: c.id, sources: ticked_now.clone(), accept: true });
+                ticked.clear();
+            }
+            if ui
+                .add(
+                    Button::new(ConfirmPick::words(&pick.skip, k))
+                        .style(Style::Text)
+                        .enabled(k > 0)
+                        .id_salt(("cf-skip", c.id)),
+                )
+                .clicked()
+                && k > 0
+            {
+                out.push(Command::ConfirmPicked { id: c.id, sources: ticked_now.clone(), accept: false });
+                ticked.clear();
+            }
+        });
+    });
+    ui.ctx().data_mut(|m| m.insert_temp(key, ticked));
 }
 
 /// "Раздача": how much the network is used and how much was given away,
@@ -559,6 +683,23 @@ mod tests {
             state,
             ended_at: 0,
         }
+    }
+
+    /// A song that left its card (turned into an MP3, kept) is ticked no
+    /// more; the ticked ones go in the card's order; the buttons count them.
+    #[test]
+    fn ticks_follow_the_card_and_the_buttons_count_them() {
+        let ids: Vec<SourceId> = (1..=3u128).map(|n| SourceId(nikgob_core::model::Uuid::from_u128(n))).collect();
+        let gone = SourceId(nikgob_core::model::Uuid::from_u128(9));
+        assert_eq!(ticked_on_card(&[ids[2], gone, ids[0]], &ids), vec![ids[0], ids[2]]);
+        assert_eq!(ticked_on_card(&[ids[1]], &ids[..1]), Vec::<SourceId>::new());
+        assert!(ticked_on_card(&[], &ids).is_empty(), "nothing is ticked at first");
+        let accept = ("Превратить".to_owned(), "в MP3".to_owned());
+        let skip = ("Оставить".to_owned(), "FLAC".to_owned());
+        assert_eq!(ConfirmPick::words(&accept, 3), "Превратить 3 в MP3");
+        assert_eq!(ConfirmPick::words(&accept, 0), "Превратить в MP3");
+        assert_eq!(ConfirmPick::words(&skip, 2), "Оставить 2 FLAC");
+        assert_eq!(ConfirmPick::words(&("Убрать".to_owned(), String::new()), 4), "Убрать 4");
     }
 
     #[test]

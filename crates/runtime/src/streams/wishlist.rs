@@ -2837,6 +2837,7 @@ impl Worker {
                 WishlistScope::Album => "Что из этого — этот альбом?".into(),
             },
             accept_label: "Скачать".into(),
+            pick: None,
         }
     }
 }

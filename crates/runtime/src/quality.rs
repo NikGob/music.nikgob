@@ -3,8 +3,9 @@
 //! lossy file's own lowpass is its format's: it is never judged). A
 //! "lossless" file found made from a lossy one is ranked as what it really
 //! is and labelled so. It never changes by itself: a plain fake is offered
-//! in «Подтверди», album by album, as an MP3 («Превратить в MP3» /
-//! «Оставить FLAC»); only with «Без вопроса» on is a plain one converted at
+//! in «Подтверди» as an MP3, one card per album with a row per song; the
+//! user ticks songs and «Превратить 3 в MP3» / «Оставить 3 FLAC» act on
+//! those only. Only with «Без вопроса» on is a plain one converted at
 //! once. A converted file's FLAC waits in the Trash, and «Вернуть FLAC»
 //! brings every one back (see `nikgob_import::quality`).
 //!
@@ -312,9 +313,8 @@ pub(crate) struct QualityJob {
     settings: Settings,
     shared: Option<Arc<Shared>>,
     gone: Option<crossbeam_channel::Receiver<()>>,
-    /// «Подтверди» cards of the fakes offered as MP3s: the sources of each.
-    cards: HashMap<u64, Vec<SourceId>>,
-    /// Stable card ids by album key.
+    /// Stable ids of the «Подтверди» cards of the fakes offered as MP3s,
+    /// by album key.
     card_ids: HashMap<String, u64>,
     next_card: u64,
     /// A conversion or a restore the user asked for is running.
@@ -338,21 +338,58 @@ pub(crate) fn fake_cards(offers: Vec<FakeOffer>) -> Vec<(String, String, Vec<Fak
     out
 }
 
-/// The lines of a card: each file with what it really is.
-pub(crate) fn fake_lines(offers: &[FakeOffer]) -> String {
-    const SHOWN: usize = 8;
-    let mut lines: Vec<String> = offers
-        .iter()
-        .take(SHOWN)
-        .map(|o| {
-            let from = o.origin.lossy_kbps().map_or_else(|| "из сжатого".to_owned(), |k| format!("из MP3 ~{k}"));
-            format!("{} — FLAC {from}, срез {}", o.title, nikgob_core::quality::khz(o.cutoff_hz))
-        })
-        .collect();
-    if offers.len() > SHOWN {
-        lines.push(format!("и ещё {}", offers.len() - SHOWN));
+/// A song's row on its card: its title, and what the file really is (only
+/// plain fakes are offered, so said plainly).
+pub(crate) fn fake_option(o: &FakeOffer) -> v::ConfirmOption {
+    let from = o.origin.lossy_kbps().map_or_else(|| "из сжатого".to_owned(), |k| format!("из MP3 ~{k}"));
+    v::ConfirmOption {
+        label: o.title.clone(),
+        detail: format!("FLAC {from} · срез {}", nikgob_core::quality::khz(o.cutoff_hz)),
+        recommended: false,
     }
-    lines.join("\n")
+}
+
+/// The «Подтверди» card of an album's fakes (`id`, the album's `title`):
+/// a row per song to tick, nothing ticked; the buttons act on the ticked
+/// songs only.
+pub(crate) fn fake_card(id: u64, title: String, offers: &[FakeOffer]) -> v::Confirm {
+    let n = offers.len();
+    v::Confirm {
+        id,
+        title,
+        origin: format!(
+            "Ненастоящий FLAC · {n} {}",
+            if n % 10 == 1 && n % 100 != 11 {
+                "файл"
+            } else if (2..5).contains(&(n % 10)) && !(12..15).contains(&(n % 100)) {
+                "файла"
+            } else {
+                "файлов"
+            }
+        ),
+        options: offers.iter().map(fake_option).collect(),
+        skip_label: "Оставить FLAC".into(),
+        question: "Внутри этих FLAC — MP3. Отметь, какие превратить в MP3: FLAC уйдут в Корзину, «Вернуть FLAC» в настройках вернёт их".into(),
+        accept_label: "Превратить в MP3".into(),
+        pick: Some(v::ConfirmPick {
+            sources: offers.iter().map(|o| o.source_id).collect(),
+            accept: ("Превратить".into(), "в MP3".into()),
+            skip: ("Оставить".into(), "FLAC".into()),
+        }),
+    }
+}
+
+/// The ticked sources a card's answer may act on: those still offered
+/// (not kept, converted or checked again meanwhile), each once, in the
+/// order ticked. Nothing else, whatever album they are on.
+pub(crate) fn still_offered(picked: &[SourceId], offers: &[FakeOffer]) -> Vec<SourceId> {
+    let mut out: Vec<SourceId> = Vec::new();
+    for s in picked {
+        if offers.iter().any(|o| o.source_id == *s) && !out.contains(s) {
+            out.push(*s);
+        }
+    }
+    out
 }
 
 impl QualityJob {
@@ -362,7 +399,6 @@ impl QualityJob {
             settings: Settings::default(),
             shared: None,
             gone: None,
-            cards: HashMap::new(),
             card_ids: HashMap::new(),
             next_card: 0,
             busy: false,
@@ -461,8 +497,8 @@ impl Worker {
         Settings { check, convert, auto, trash_dir: self.import.as_ref().map(|s| s.config().trash_dir.clone()) }
     }
 
-    /// «Подтверди»: the plain fakes as MP3 offers, one card per album
-    /// (none while offers are off or a conversion runs).
+    /// «Подтверди»: the plain fakes as MP3 offers, one card per album with
+    /// a row per song (none while offers are off or a conversion runs).
     pub(crate) fn publish_fake_offers(&mut self) {
         let on = {
             let p = &self.state.read().prefs;
@@ -474,7 +510,6 @@ impl Worker {
             Vec::new()
         };
         let q = &mut self.quality;
-        q.cards.clear();
         let mut confirms = Vec::new();
         for (key, title, list) in fake_cards(offers) {
             let id = match q.card_ids.get(&key) {
@@ -486,21 +521,7 @@ impl Worker {
                     id
                 }
             };
-            let n = list.len();
-            confirms.push(v::Confirm {
-                id,
-                title,
-                origin: format!("Ненастоящий FLAC · {n} {}", if n == 1 { "файл" } else if (2..5).contains(&(n % 10)) && !(12..15).contains(&(n % 100)) { "файла" } else { "файлов" }),
-                options: vec![v::ConfirmOption {
-                    label: "MP3 того же звука".into(),
-                    detail: fake_lines(&list),
-                    recommended: false,
-                }],
-                skip_label: "Оставить FLAC".into(),
-                question: "Внутри этих FLAC — MP3. Превратить их в MP3? FLAC уйдут в Корзину, «Вернуть FLAC» в настройках вернёт их".into(),
-                accept_label: "Превратить в MP3".into(),
-            });
-            q.cards.insert(id, list.into_iter().map(|o| o.source_id).collect());
+            confirms.push(fake_card(id, title, &list));
         }
         self.publish(|s| {
             s.downloads.confirm.retain(|c| c.id & QUALITY_ID == 0);
@@ -508,18 +529,33 @@ impl Worker {
         });
     }
 
-    /// The answer on a fakes card: their MP3s now, or they stay FLAC and
-    /// are not offered again.
-    pub(crate) fn quality_confirm(&mut self, id: u64, option: Option<usize>) {
-        let Some(sources) = self.quality.cards.remove(&id) else { return };
-        if option.is_none() {
+    /// The answer on a fakes card for the songs the user ticked, and only
+    /// those still offered ([`still_offered`]): their MP3s now
+    /// (`convert`), or they stay FLAC and are not offered again. The rest
+    /// of the card, and of the album, is left as it is.
+    pub(crate) fn quality_picked(&mut self, picked: Vec<SourceId>, convert: bool) {
+        let offers = self.lib.fake_offers().unwrap_or_default();
+        let sources = still_offered(&picked, &offers);
+        if sources.len() < picked.len() {
+            log::info!("quality: {} of the ticked files are no longer offered", picked.len() - sources.len());
+        }
+        if sources.is_empty() {
+            self.publish_fake_offers();
+            return;
+        }
+        if !convert {
             for s in &sources {
-                if let Err(e) = self.lib.set_quality_keep(*s, true) {
-                    log::warn!("quality: keeping {s}: {e}");
+                let file = offers.iter().find(|o| o.source_id == *s).map_or("", |o| o.locator.as_str());
+                match self.lib.set_quality_keep(*s, true) {
+                    Ok(()) => log::info!("quality: {file} kept as it is"),
+                    Err(e) => log::warn!("quality: keeping {file}: {e}"),
                 }
             }
-            log::info!("quality: {} fake files kept as they are", sources.len());
             self.publish_fake_offers();
+            return;
+        }
+        if self.quality.busy {
+            log::info!("quality: a conversion runs, the ticked files wait");
             return;
         }
         let Some(svc) = &self.import else { return };
@@ -528,6 +564,7 @@ impl Worker {
             return;
         };
         let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
+        log::info!("quality: turning {} ticked fake files into MP3s", sources.len());
         svc.spawn_blocking(move || {
             crate::analysis::lower_priority();
             let (mut done, mut failed) = (0, 0);
@@ -706,25 +743,60 @@ mod tests {
         assert_eq!(rescore(&flac, &check(Verdict::Transcoded, 2_820.0)), None, "no verdict, no change");
     }
 
-    /// One card per album, each file with what it really is.
-    #[test]
-    fn fakes_are_offered_album_by_album() {
-        let r = nikgob_core::model::ReleaseId::new();
-        let o = |t: &str, release| FakeOffer {
+    fn offer(title: &str, release: Option<nikgob_core::model::ReleaseId>) -> FakeOffer {
+        FakeOffer {
             source_id: SourceId::new(),
             track_id: TrackId::new(),
-            title: t.into(),
+            title: title.into(),
             release,
             album: if release.is_some() { "8 способов как бросить...".into() } else { String::new() },
-            locator: format!("{t}.flac"),
-            cutoff_hz: 19_940.0,
-            steepness_db: 39.6,
-            origin: SoundOrigin::Lossy { kbps: 320 },
-        };
-        let cards = fake_cards(vec![o("Молли", Some(r)), o("Lin Ansty", Some(r)), o("Супермаркет", None)]);
+            locator: format!("{title}.flac"),
+            cutoff_hz: 16_100.0,
+            steepness_db: 44.2,
+            origin: SoundOrigin::Lossy { kbps: 128 },
+        }
+    }
+
+    /// One card per album, a row per song with what it really is, nothing
+    /// ticked; the buttons count the ticked songs.
+    #[test]
+    fn fakes_are_offered_album_by_album_and_song_by_song() {
+        let r = nikgob_core::model::ReleaseId::new();
+        let cards = fake_cards(vec![offer("Молли", Some(r)), offer("Lin Ansty", Some(r)), offer("Супермаркет", None)]);
         assert_eq!(cards.len(), 2);
         assert_eq!((cards[0].1.as_str(), cards[0].2.len()), ("8 способов как бросить...", 2));
         assert_eq!(cards[1].1, "Отдельные треки");
-        assert_eq!(fake_lines(&cards[0].2), "Молли — FLAC из MP3 ~320, срез 19,9 кГц\nLin Ansty — FLAC из MP3 ~320, срез 19,9 кГц");
+        let card = fake_card(QUALITY_ID | 1, cards[0].1.clone(), &cards[0].2);
+        assert_eq!(card.origin, "Ненастоящий FLAC · 2 файла");
+        assert_eq!(card.options.len(), 2, "a row per song");
+        assert_eq!((card.options[0].label.as_str(), card.options[0].detail.as_str()), ("Молли", "FLAC из MP3 ~128 · срез 16,1 кГц"));
+        assert!(card.options.iter().all(|o| !o.recommended), "never accepted with the recommended ones");
+        let pick = card.pick.as_ref().expect("ticked song by song");
+        assert_eq!(pick.sources, cards[0].2.iter().map(|o| o.source_id).collect::<Vec<_>>());
+        assert_eq!(v::ConfirmPick::words(&pick.accept, 3), "Превратить 3 в MP3");
+        assert_eq!(v::ConfirmPick::words(&pick.accept, 0), "Превратить в MP3");
+        assert_eq!(v::ConfirmPick::words(&pick.skip, 1), "Оставить 1 FLAC");
+        let one = fake_card(QUALITY_ID | 2, cards[1].1.clone(), &cards[1].2);
+        assert_eq!(one.origin, "Ненастоящий FLAC · 1 файл");
+        let many: Vec<FakeOffer> = (0..21).map(|i| offer(&i.to_string(), Some(r))).collect();
+        assert_eq!(fake_card(QUALITY_ID | 3, String::new(), &many).origin, "Ненастоящий FLAC · 21 файл");
+        assert_eq!(fake_card(QUALITY_ID | 3, String::new(), &many[..11]).origin, "Ненастоящий FLAC · 11 файлов");
+        assert_eq!(fake_card(QUALITY_ID | 3, String::new(), &many[..7]).origin, "Ненастоящий FLAC · 7 файлов");
+    }
+
+    /// The OMORI card: one song ticked of seven turns only that one; a
+    /// source no longer offered (kept, converted, from another card) or
+    /// ticked twice is never acted on, and nothing expands to the album.
+    #[test]
+    fn only_the_ticked_songs_still_offered_are_acted_on() {
+        let r = nikgob_core::model::ReleaseId::new();
+        let album: Vec<FakeOffer> = (1..=7).map(|i| offer(&format!("OMORI {i}"), Some(r))).collect();
+        let ticked = vec![album[2].source_id];
+        assert_eq!(still_offered(&ticked, &album), ticked);
+        let gone = SourceId::new();
+        let picked = vec![album[0].source_id, gone, album[0].source_id, album[5].source_id];
+        assert_eq!(still_offered(&picked, &album), vec![album[0].source_id, album[5].source_id]);
+        assert!(still_offered(&[], &album).is_empty());
+        assert!(still_offered(&[gone], &album).is_empty());
     }
 }

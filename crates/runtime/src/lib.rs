@@ -1126,8 +1126,16 @@ impl Worker {
             Command::ConfirmChoice { id, option } if id & IMPORT_ID != 0 => {
                 self.confirm_choice(id, option);
             }
-            Command::ConfirmChoice { id, option } if id & quality::QUALITY_ID != 0 => {
-                self.quality_confirm(id, option);
+            Command::ConfirmChoice { id, .. } if id & quality::QUALITY_ID != 0 => {
+                // A fakes card is answered song by song (`ConfirmPicked`),
+                // never as a whole.
+                log::warn!("quality: a whole fakes card answered, ignored");
+            }
+            Command::ConfirmPicked { id, sources, accept } if id & quality::QUALITY_ID != 0 => {
+                self.quality_picked(sources, accept);
+            }
+            Command::ConfirmPicked { .. } => {
+                log::warn!("picked songs of an unknown card");
             }
             Command::RestoreConvertedFlac => self.restore_converted_flac(),
             Command::LoadLibrary => self.load_library(),

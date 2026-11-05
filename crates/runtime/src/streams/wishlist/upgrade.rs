@@ -668,6 +668,7 @@ impl Worker {
             skip_label: "Оставить как есть".into(),
             question: if album { "Заменить файлы альбома на это?" } else { "Заменить файл трека на это?" }.into(),
             accept_label: "Заменить".into(),
+            pick: None,
         }
     }
 }
