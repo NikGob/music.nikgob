@@ -19,7 +19,8 @@
 //! text (no times: what a Genius text gets), and another song's text of
 //! the same language as a plain text, for the check. `EMS=x.` reads and
 //! keeps the hearings as `<stem>.x.<aligner>.em` (another hearing of the
-//! same voice: the fixed 50-a-second slicing).
+//! same voice: the fixed 50-a-second slicing). `SHOW=150-176` prints a
+//! case's made words in those seconds instead of its `show` stretches.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -560,11 +561,16 @@ fn main() {
                     t.overlaps = overlaps(&fit.lines);
                     pool(format!("case marks {mode}"), &t);
                 }
+                // `SHOW=150-176`: these seconds instead of the job's own.
+                let show: Vec<(f32, f32)> = match std::env::var("SHOW").ok().and_then(|s| s.split_once('-').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))) {
+                    Some(r) => vec![r],
+                    None => job.show.clone(),
+                };
                 if std::env::var("QUIET").is_err() {
-                    print_lines(&fit.lines, &job.show);
+                    print_lines(&fit.lines, &show);
                 }
                 if timed && std::env::var("TABLE").is_ok() {
-                    table(&aligner, &prep, main, &job.show);
+                    table(&aligner, &prep, main, &show);
                 }
             } else {
                 pool(format!("{} {} {}", job.kind, key(main), mode), &t);

@@ -842,6 +842,30 @@ mod tests {
         assert!(a <= 4, "{a}");
     }
 
+    /// A pause between two words of a line costs, one after a comma
+    /// (`Gap::Comma`) costs [`Costs::comma_pause`] instead: the second word
+    /// goes to its clear frame after the silence, not to a faint one before.
+    #[test]
+    fn a_pause_after_a_comma_costs_its_own() {
+        // «1», the word separator «3», «2» faintly at frame 5 and clearly at
+        // frame 15; no voice at frames 6–14.
+        let row = |best: usize, p: f32| (0..4).map(move |i| if i == best { p.ln() } else { ((1.0 - p) / 3.0).ln() });
+        let mut logp: Vec<f32> = [(0, 0.9), (1, 0.9), (0, 0.9), (3, 0.9), (0, 0.9), (2, 0.5)].iter().flat_map(|&(b, p)| row(b, p)).collect();
+        logp.extend((6..15).flat_map(|_| row(0, 0.9)));
+        logp.extend(row(2, 0.9).chain(row(0, 0.9)));
+        let e = Emissions { logp, vocab: 4, fps: 50.0, blank: 0 };
+        let voiced: Vec<bool> = (0..17).map(|t| !(6..15).contains(&t)).collect();
+        let v = Voice { voiced: &voiced, ..Default::default() };
+        let mut p = path(&[Tok::Letter(1), Tok::Letter(3), Tok::Letter(2)]);
+        p.pauses[1] = true;
+        p.costs.line_pause = 1.0;
+        p.costs.comma_pause = 0.0;
+        p.gaps[1] = Gap::Words;
+        assert_eq!(frames(&align_path(&e, &p, Some(v)).unwrap())[2], Some((5, 5)));
+        p.gaps[1] = Gap::Comma;
+        assert_eq!(frames(&align_path(&e, &p, Some(v)).unwrap())[2], Some((15, 15)));
+    }
+
     /// A word starts where the voice comes in when the model cannot tell.
     #[test]
     fn a_word_starts_at_a_voice_onset() {

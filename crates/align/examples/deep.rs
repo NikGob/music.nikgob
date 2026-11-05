@@ -501,6 +501,25 @@ fn main() {
     let mut aligner = Aligner::new(catalog, device, threads);
     let deep = deep_from_env();
     aligner.set_deep(deep);
+    // The timing pass's knobs the bench also reads (`T_LINE_PAUSE`, …).
+    let mut tuning = aligner.tuning();
+    let num = |k: &str, v: &mut f32| {
+        if let Some(x) = std::env::var(k).ok().and_then(|x| x.parse().ok()) {
+            *v = x;
+        }
+    };
+    let flag = |k: &str, v: &mut bool| {
+        if let Ok(x) = std::env::var(k) {
+            *v = x == "1";
+        }
+    };
+    num("T_LINE_PAUSE", &mut tuning.costs.line_pause);
+    num("T_COMMA_COST", &mut tuning.costs.comma_pause);
+    num("T_STOP", &mut tuning.stop_hold);
+    flag("T_COMMA", &mut tuning.comma_pause);
+    flag("T_INNER", &mut tuning.sound_inner);
+    flag("T_COMMA_ENDS", &mut tuning.comma_ends);
+    aligner.set_tuning(tuning);
     println!("deep {deep:?} on {device:?}, jobs matching {filter:?}");
     if let Ok(dir) = std::env::var("REF") {
         parity(&mut aligner, Path::new(&dir));
