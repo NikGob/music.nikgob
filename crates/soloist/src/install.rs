@@ -48,6 +48,8 @@ pub enum InstallError {
     WontRun,
     #[error("у Spotify пока только просроченная сборка Soloist")]
     Expired,
+    #[error("у сборки Soloist нет подписи Spotify: {0}")]
+    Signature(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
 }
@@ -162,12 +164,15 @@ pub fn remove_pointer(root: &Path, name: &str) {
 }
 
 /// Deletes build folders not in `keep` and staging folders left by an
-/// interrupted download.
+/// interrupted download of an earlier run (this run's own may be in use by a
+/// download going on).
 pub fn collect(root: &Path, keep: &[&str]) {
+    let ours = std::process::id().to_string();
     for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let build = name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit());
-        let stale = (build && !keep.contains(&name.as_str())) || name.starts_with("staging-");
+        let staging = name.starts_with("staging-") && name.rsplit('-').next() != Some(ours.as_str());
+        let stale = (build && !keep.contains(&name.as_str())) || staging;
         if stale && e.file_type().is_ok_and(|t| t.is_dir()) {
             let _ = std::fs::remove_dir_all(e.path());
         }
@@ -194,11 +199,14 @@ pub async fn archive_size(http: &reqwest::Client) -> Option<u64> {
 
 /// Downloads, unpacks and checks the current build into `root`; `progress`
 /// gets (bytes so far, total when known). Returns it without pointing to
-/// it: the caller decides whether it runs now or waits.
+/// it: the caller decides whether it runs now or waits. `purpose` names its
+/// staging folder, so a renewal and a download asked for by the user never
+/// unpack into the same one.
 pub async fn download(
     root: &Path,
     http: &reqwest::Client,
     progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    purpose: &str,
 ) -> Result<Build, InstallError> {
     let artifact = artifact().ok_or(InstallError::Unsupported)?;
     let url = format!("https://{CDN}/{artifact}");
@@ -234,7 +242,7 @@ pub async fn download(
     }
     progress(bytes.len() as u64, total);
     std::fs::create_dir_all(root)?;
-    let stage = root.join(format!("staging-{}", std::process::id()));
+    let stage = root.join(staging_name(purpose));
     let _ = std::fs::remove_dir_all(&stage);
     let zipped = artifact.ends_with(".zip");
     let unpack_to = stage.clone();
@@ -249,10 +257,25 @@ pub async fn download(
     result
 }
 
-/// Runs the unpacked executable's `--version`, then moves the folder to its
-/// digest's name.
+/// `staging-<purpose>-<process id>`: [`collect`] leaves this run's alone.
+fn staging_name(purpose: &str) -> String {
+    let purpose: String = purpose.chars().filter(char::is_ascii_alphanumeric).collect();
+    format!("staging-{purpose}-{}", std::process::id())
+}
+
+/// Checks Spotify's signature (Windows), runs the unpacked executable's
+/// `--version`, then moves the folder to its digest's name.
 async fn adopt(root: &Path, stage: &Path) -> Result<Build, InstallError> {
     let exe = stage.join(EXE);
+    // Nothing unpacked runs before Windows confirmed it is Spotify's.
+    #[cfg(windows)]
+    {
+        let path = exe.clone();
+        tokio::task::spawn_blocking(move || signature::check(&path))
+            .await
+            .map_err(|e| InstallError::Signature(e.to_string()))?
+            .map_err(InstallError::Signature)?;
+    }
     let text = version_of(&exe).await.ok_or(InstallError::WontRun)?;
     let (version, built) = parse_version(&text).ok_or(InstallError::WontRun)?;
     let digest = digest_of(&exe)?;
@@ -404,10 +427,123 @@ fn unpack(bytes: &[u8], zipped: bool, dest: &Path) -> Result<(), InstallError> {
     Ok(())
 }
 
+/// Whether the signer's name (the certificate's display name, «Spotify AB»)
+/// is Spotify's.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn spotify_signer(name: &str) -> bool {
+    name.split_whitespace()
+        .next()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .is_some_and(|w| w.eq_ignore_ascii_case("spotify"))
+}
+
+/// Authenticode: the executable carries a valid signature that chains to a
+/// root Windows trusts, and its signer is Spotify.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod signature {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Security::Cryptography::{CERT_NAME_SIMPLE_DISPLAY_TYPE, CertGetNameStringW};
+    use windows::Win32::Security::WinTrust::{
+        WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
+        WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE, WTHelperGetProvSignerFromChain,
+        WTHelperProvDataFromStateData, WinVerifyTrust,
+    };
+
+    pub fn check(exe: &Path) -> Result<(), String> {
+        let path: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut file = WINTRUST_FILE_INFO {
+            cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+            pcwszFilePath: windows_core::PCWSTR(path.as_ptr()),
+            ..Default::default()
+        };
+        let mut data = WINTRUST_DATA {
+            cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+            dwUIChoice: WTD_UI_NONE,
+            // Revocation lists would need the network; the chain and the
+            // signer are checked offline.
+            fdwRevocationChecks: WTD_REVOKE_NONE,
+            dwUnionChoice: WTD_CHOICE_FILE,
+            Anonymous: WINTRUST_DATA_0 { pFile: &raw mut file },
+            dwStateAction: WTD_STATEACTION_VERIFY,
+            ..Default::default()
+        };
+        let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        // SAFETY: `data` points at `file`, which points at `path`; all live
+        // until the state is closed below.
+        let status = unsafe { WinVerifyTrust(HWND::default(), &raw mut action, (&raw mut data).cast()) };
+        let signer = if status == 0 { unsafe { signer_name(&data) } } else { None };
+        data.dwStateAction = WTD_STATEACTION_CLOSE;
+        unsafe { WinVerifyTrust(HWND::default(), &raw mut action, (&raw mut data).cast()) };
+        if status != 0 {
+            return Err(format!("подпись не прошла проверку (0x{:08x})", status as u32));
+        }
+        match signer {
+            Some(name) if super::spotify_signer(&name) => Ok(()),
+            Some(name) => Err(format!("подписано «{name}»")),
+            None => Err("подписавший не известен".into()),
+        }
+    }
+
+    /// The display name of the first signer's certificate.
+    ///
+    /// SAFETY: `data` was verified with `WTD_STATEACTION_VERIFY` and its state
+    /// is not closed yet.
+    unsafe fn signer_name(data: &WINTRUST_DATA) -> Option<String> {
+        unsafe {
+            let provider = WTHelperProvDataFromStateData(data.hWVTStateData);
+            if provider.is_null() {
+                return None;
+            }
+            let signer = WTHelperGetProvSignerFromChain(provider, 0, false, 0);
+            if signer.is_null() || (*signer).csCertChain == 0 || (*signer).pasCertChain.is_null() {
+                return None;
+            }
+            let cert = (*(*signer).pasCertChain).pCert;
+            if cert.is_null() {
+                return None;
+            }
+            let mut buf = [0u16; 256];
+            let n = CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, None, Some(&mut buf)) as usize;
+            // The count includes the closing zero.
+            let name = String::from_utf16_lossy(&buf[..n.saturating_sub(1).min(buf.len())]);
+            (!name.trim().is_empty()).then_some(name)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn only_spotify_signs_soloist() {
+        assert!(spotify_signer("Spotify AB"));
+        assert!(spotify_signer("spotify ab"));
+        assert!(spotify_signer("Spotify, Inc."));
+        assert!(!spotify_signer("Spotifyy AB"));
+        assert!(!spotify_signer("Not Spotify AB"));
+        assert!(!spotify_signer(""));
+    }
+
+    #[test]
+    fn staging_folders_of_this_run_are_left_to_their_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let renew = staging_name("renew");
+        let download = staging_name("download");
+        assert_ne!(renew, download);
+        for d in [renew.as_str(), download.as_str(), "staging-renew-1", "staging-1"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        collect(root, &[]);
+        assert!(root.join(&renew).exists() && root.join(&download).exists());
+        assert!(!root.join("staging-renew-1").exists() && !root.join("staging-1").exists());
+    }
 
     fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
