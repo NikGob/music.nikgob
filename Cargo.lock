@@ -5196,6 +5196,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nikgob-sc-widget"
+version = "0.0.2"
+dependencies = [
+ "log",
+ "nikgob-audio",
+ "nikgob-soloist",
+]
+
+[[package]]
 name = "nikgob-shapes"
 version = "0.0.2"
 dependencies = [
