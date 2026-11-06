@@ -1,5 +1,6 @@
 //! Durable Spotify grants in the platform credential store (Windows
-//! Credential Manager), plus the small non-secret state file beside them.
+//! Credential Manager, the Secret Service on Linux), plus the small
+//! non-secret state file beside them.
 //!
 //! Ported (simplified) from Spotifast `src/credentials.rs`
 //! (https://github.com/crmne/spotifast).
@@ -138,7 +139,8 @@ pub struct Profile {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
-    #[error("хранилище учётных данных Windows недоступно")]
+    #[cfg_attr(windows, error("хранилище учётных данных Windows недоступно"))]
+    #[cfg_attr(not(windows), error("хранилище паролей системы недоступно"))]
     Unavailable,
     #[error("хранилище учётных данных не ответило")]
     Timeout,
@@ -146,7 +148,8 @@ pub enum StoreError {
     Stale,
 }
 
-/// The protected backend: Windows Credential Manager, or memory in tests.
+/// The protected backend: Windows Credential Manager, the Secret Service on
+/// Linux, or memory in tests.
 pub(crate) trait Backend: Send {
     fn read(&mut self, key: &str) -> Result<Option<Vec<u8>>, StoreError>;
     fn write(&mut self, key: &str, secret: &[u8]) -> Result<(), StoreError>;
@@ -181,7 +184,12 @@ impl Native {
             #[cfg(windows)]
             let store = windows_native_keyring_store::Store::new()
                 .map(|s| s as Arc<keyring_core::api::CredentialStore>);
-            #[cfg(not(windows))]
+            // No Secret Service on the session bus (no keyring daemon, or no
+            // session bus at all) fails here, as an unavailable store.
+            #[cfg(target_os = "linux")]
+            let store = zbus_secret_service_keyring_store::Store::new()
+                .map(|s| s as Arc<keyring_core::api::CredentialStore>);
+            #[cfg(not(any(windows, target_os = "linux")))]
             let store: keyring_core::Result<Arc<keyring_core::api::CredentialStore>> =
                 Err(keyring_core::Error::NoDefaultStore);
             match store {
@@ -196,7 +204,16 @@ impl Native {
         // default (Enterprise) is refused or kept per logon session on some
         // (Spotifast #815).
         let modifiers = std::collections::HashMap::from([("persistence", "Local")]);
-        #[cfg(not(windows))]
+        // The Secret Service has no such choice; the label is what a keyring
+        // manager (Seahorse, KWallet) lists the item as.
+        #[cfg(target_os = "linux")]
+        let label = format!("music.nikgob {key}");
+        #[cfg(target_os = "linux")]
+        let modifiers = {
+            drop(modifiers);
+            std::collections::HashMap::from([("label", label.as_str())])
+        };
+        #[cfg(not(any(windows, target_os = "linux")))]
         let modifiers = {
             drop(modifiers);
             std::collections::HashMap::new()
@@ -275,7 +292,7 @@ pub struct Store {
 }
 
 impl Store {
-    /// The Windows Credential Manager store for the app data in `dir`.
+    /// The platform's credential store for the app data in `dir`.
     pub fn native(dir: PathBuf) -> Self {
         Self::with_backend(dir, Box::new(Native::default()))
     }

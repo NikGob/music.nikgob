@@ -36,6 +36,11 @@ keyring-core = "1"
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = { version = "1.1", default-features = false }
 
+# The Secret Service (GNOME Keyring, KWallet, KeePassXC) over zbus, with
+# RustCrypto for the session's encryption: no libdbus or OpenSSL to link.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", default-features = false, features = ["crypto-rust"] }
+
 [dev-dependencies]
 nikgob-audio = { path = "../audio" }
 tokio = { version = "1", features = ["macros", "rt", "test-util"] }
