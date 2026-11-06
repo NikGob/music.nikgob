@@ -7629,6 +7629,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sc-widget-probe"
+version = "0.0.2"
+dependencies = [
+ "winit",
+ "wry",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
