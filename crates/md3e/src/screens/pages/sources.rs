@@ -508,7 +508,7 @@ fn soloist_dialogs(ui: &mut Ui, st: &SoloistStatus, pages: &mut PageState, out: 
                 .action("Не сейчас")
                 .action_with(DialogAction::new("Готово").enabled(typed.len() >= 8))
                 .show_with(&ctx, &mut open, |ui| {
-                    ui.add_space(4.0);
+                    ui.add_space(12.0);
                     numbered(ui, 1, 20.0, |ui| {
                         ui.label(TypeRole::BodyMedium.style().rich_para("Войди в аккаунт Spotify с Premium", s.on_surface));
                     });
@@ -546,12 +546,11 @@ fn soloist_dialogs(ui: &mut Ui, st: &SoloistStatus, pages: &mut PageState, out: 
         }
         SoloistDialog::Pair => {
             let name = st.device_name.clone();
-            let starting = matches!(st.phase, SoloistPhase::Starting | SoloistPhase::Off);
             let r = Dialog::new("solo-pair-dialog", "Подключить Soloist")
                 .max_width(480.0)
                 .action("Закрыть")
                 .show_with(&ctx, &mut open, |ui| {
-                    ui.add_space(4.0);
+                    ui.add_space(12.0);
                     numbered(ui, 1, 20.0, |ui| {
                         ui.label(TypeRole::BodyMedium.style().rich_para(
                             "Открой Spotify на телефоне или компьютере в этой же сети",
@@ -564,16 +563,10 @@ fn soloist_dialogs(ui: &mut Ui, st: &SoloistStatus, pages: &mut PageState, out: 
                             s.on_surface,
                         ));
                     });
+                    // It closes by itself once Spotify chose it; only a failure
+                    // has something to say.
                     if let SoloistPhase::Failed(why) = &st.phase {
                         ui.label(TypeRole::BodyMedium.style().rich_para(why, s.error));
-                    } else {
-                        ui.horizontal(|ui| {
-                            ui.add_space(36.0);
-                            ui.add(LoadingIndicator::new().size(32.0));
-                            if starting {
-                                ui.label(TypeRole::BodyMedium.style().rich("Запускается", s.on_surface_variant));
-                            }
-                        });
                     }
                 });
             if r.action.is_some() || r.dismissed || !open {
