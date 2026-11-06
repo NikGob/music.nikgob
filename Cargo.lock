@@ -5251,6 +5251,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nikgob-soundcloud"
+version = "0.0.2"
+dependencies = [
+ "fastrand",
+ "keyring-core",
+ "log",
+ "nikgob-core",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "windows-native-keyring-store",
+ "zbus-secret-service-keyring-store",
+]
+
+[[package]]
 name = "nikgob-sources"
 version = "0.0.2"
 dependencies = [

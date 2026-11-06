@@ -216,18 +216,21 @@ str_enum!(
         /// A Deezer catalogue entry: it has no sound of its own, its track
         /// plays from YouTube Music (docs/stage3.md §0 «Каталог Deezer»).
         Deezer = "deezer",
+        /// A SoundCloud track (AAC in HLS; DRM-only tracks play elsewhere).
+        Soundcloud = "soundcloud",
     }
 );
 
 impl SourceKind {
-    /// Lower is better: local file > Spotify > YouTube > Deezer (PLAN §4;
-    /// a Deezer entry never plays itself).
+    /// Lower is better: local file > Spotify > YouTube > SoundCloud >
+    /// Deezer (PLAN §4; a Deezer entry never plays itself).
     pub const fn priority(self) -> u8 {
         match self {
             Self::LocalFile => 0,
             Self::Spotify => 1,
             Self::Youtube => 2,
-            Self::Deezer => 3,
+            Self::Soundcloud => 3,
+            Self::Deezer => 4,
         }
     }
 
@@ -500,6 +503,9 @@ pub mod score {
     /// A Deezer catalogue entry: no sound of its own (it plays from YouTube
     /// Music), so below every stream that plays.
     pub const STREAM_DEEZER: i32 = 270;
+    /// A SoundCloud stream (AAC 160 in HLS): below YouTube's song and clip,
+    /// above the Deezer catalogue.
+    pub const STREAM_SOUNDCLOUD: i32 = 275;
 }
 
 /// Ranks a source by quality, PLAN §6:
