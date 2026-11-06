@@ -33,6 +33,13 @@ const BACKOFF: [Duration; 3] = [Duration::from_secs(2), Duration::from_secs(10),
 const TICK: Duration = Duration::from_secs(2);
 /// Soloist's playback cache.
 const CACHE_MB: u32 = 512;
+/// The level of Soloist's own audio session while our engine plays its
+/// captured sound: -120 dB, inaudible, yet process loopback (which takes the
+/// session level as a plain float factor before it captures) gives a copy
+/// that, scaled back by the same factor, is as clean as at full level.
+/// Muting the session or a level of 0 would silence the capture as well
+/// (`tests/loopback_mute.rs`).
+pub const ROUTED_LEVEL: f32 = 1e-6;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -113,6 +120,8 @@ pub struct Soloist {
     pub(crate) playing: AtomicU32,
     /// Soloist's audio session has our level.
     session_applied: AtomicU32,
+    /// When [`Soloist::prepare_output`] last looked for the session.
+    session_try: Mutex<Option<Instant>>,
     /// The engine paused Soloist.
     user_paused: std::sync::atomic::AtomicBool,
     /// The CDN was asked for the download's size (once a run).
@@ -183,6 +192,7 @@ impl Soloist {
             on_change: Mutex::new(None),
             playing: AtomicU32::new(0),
             session_applied: AtomicU32::new(0),
+            session_try: Mutex::new(None),
             user_paused: std::sync::atomic::AtomicBool::new(false),
             size_asked: AtomicU32::new(0),
         });
@@ -476,6 +486,11 @@ impl Soloist {
                 let me = self.clone();
                 renewal = Some(self.rt.spawn(async move { me.renew().await }));
             }
+            if self.playing.load(Ordering::Acquire) > 0 {
+                // The user may move Soloist in the volume mixer, or it may
+                // open a new session (another output device).
+                self.session_dirty();
+            }
             self.apply_session_volume();
             tokio::select! {
                 () = self.wake.notified() => {}
@@ -681,14 +696,36 @@ impl Soloist {
         lock(&self.commands).as_ref().is_some_and(|tx| tx.send(c).is_ok())
     }
 
+    /// The running capture; one that failed is dropped, and Soloist's own
+    /// output is made audible again.
     #[cfg(windows)]
     pub(crate) fn capture(&self) -> Option<Arc<crate::capture::ProcessCapture>> {
-        lock(&self.capture).clone()
+        let mut slot = lock(&self.capture);
+        if let Some(e) = slot.as_ref().and_then(|c| c.failure()) {
+            log::warn!("soloist: capture lost ({e}): it plays out loud itself");
+            *slot = None;
+            drop(slot);
+            self.session_dirty();
+            return None;
+        }
+        slot.clone()
     }
 
-    /// The user's volume (0–1, the engine's slider). On Windows it becomes
-    /// the level of Soloist's audio session (the engine's cubic curve);
-    /// elsewhere Soloist's own volume.
+    /// Soloist's sound reaches the listener through our engine: its capture
+    /// runs, and its own output is turned down to [`ROUTED_LEVEL`]. Without
+    /// a capture (other systems, an older Windows, a failure) Soloist is
+    /// heard itself and the engine plays its track at volume 0.
+    pub fn routed(&self) -> bool {
+        #[cfg(windows)]
+        return self.capture().is_some();
+        #[cfg(not(windows))]
+        false
+    }
+
+    /// The user's volume (0–1, the engine's slider). Routed, the engine
+    /// applies it; otherwise it becomes the level of Soloist's audio
+    /// session through the engine's cubic curve (Windows), or Soloist's own
+    /// volume.
     pub fn set_volume(&self, v: f32) {
         let v = if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 };
         let old = f32::from_bits(self.volume.swap(v.to_bits(), Ordering::AcqRel));
@@ -703,10 +740,29 @@ impl Soloist {
         }
     }
 
-    /// The gain the captured sound went through (the session level).
+    /// The level of Soloist's audio session, which the capture went through:
+    /// [`ROUTED_LEVEL`] while routed, else the user's volume.
     pub(crate) fn capture_gain(&self) -> f32 {
+        if self.routed() {
+            return ROUTED_LEVEL;
+        }
         let v = f32::from_bits(self.volume.load(Ordering::Relaxed));
         if cfg!(windows) { v * v * v } else { 1.0 }
+    }
+
+    /// While a track starts: its session gets our level as soon as it
+    /// appears (at most every 50 ms; the enumeration is a few COM calls).
+    pub(crate) fn prepare_output(&self) {
+        if self.session_applied.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let mut last = lock(&self.session_try);
+        if last.is_some_and(|t| t.elapsed() < Duration::from_millis(50)) {
+            return;
+        }
+        *last = Some(Instant::now());
+        drop(last);
+        self.apply_session_volume();
     }
 
     pub fn pause(&self) {
@@ -806,6 +862,10 @@ impl crate::track::Link for Soloist {
 
     fn paused_by_us(&self) -> bool {
         self.user_paused.load(Ordering::Acquire)
+    }
+
+    fn prepare_output(&self) {
+        Soloist::prepare_output(self);
     }
 
     fn playing(&self, delta: i32) {

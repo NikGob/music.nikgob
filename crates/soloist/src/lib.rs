@@ -19,22 +19,23 @@
 //!
 //! # Where the sound goes
 //!
-//! The plan was to capture Soloist's sound and play only our copy, so the
-//! engine's volume, normalization and visualizer act on it. On Windows that
-//! needs Soloist's own output silenced while the capture still hears it, and
-//! the test in `tests/loopback_mute.rs` shows it cannot be: muting Soloist's
-//! audio session or turning it to 0 silences the process-loopback capture
-//! too. So Soloist stays the audible copy. The capture feeds the engine an
-//! inaudible copy (the engine plays a Soloist item at volume 0; its
-//! visualizer reads before the volume), so the spectrum and visualizer still
-//! move, and the position, the end of the track and errors reach the queue
-//! like any other source's. The user's volume becomes the level of Soloist's
-//! audio session through the engine's own curve (Soloist itself is kept at
-//! 100), and the captured copy is scaled back up by the same factor.
+//! Soloist's sound goes through our engine, so the engine's volume,
+//! normalization, visualizer and output device act on it as on any track.
+//! On Windows the capture is WASAPI process loopback of Soloist's process
+//! tree; the copy Soloist itself plays has to be inaudible while the
+//! capture still hears it. Muting its audio session or a level of 0
+//! silences the capture too (`tests/loopback_mute.rs`), but any level above
+//! 0 is a plain float factor before the capture: the session is set to
+//! 1e-6 (-120 dB) and the captured sound is scaled back up, as clean as at
+//! full level (`examples/route_bench.rs` on the bench branch measured it,
+//! with no gaps over minutes, ~160 ms added delay and 2-3 % of one core).
+//! Soloist's own volume stays at 100. Without a capture (other systems, an
+//! older Windows, a failure) Soloist is heard itself: the user's volume
+//! becomes its session level and the engine plays its track at volume 0.
 //!
-//! What cannot apply to a live stream played by another program: crossfade
-//! and gapless into or out of a Soloist track (one player, no overlap: a
-//! clean cut), normalization (Soloist does its own), a choice of quality.
+//! What cannot apply to a live stream: crossfade and gapless into or out of
+//! a Soloist track (one player, no overlap: a clean cut), a choice of
+//! quality.
 
 pub mod capture;
 pub mod client;

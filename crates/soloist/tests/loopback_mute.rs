@@ -7,9 +7,9 @@
 //!
 //! Result on Windows 11 26200 (2026-11-06): open -63 dBFS, muted -inf,
 //! volume 0 -inf, restored -63. The session's mute and volume act before
-//! process loopback, so Soloist's own output cannot be silenced while its
-//! capture still hears it: Soloist stays the audible copy and the capture
-//! feeds only the visualizer (see the crate docs).
+//! process loopback, so Soloist's output is never muted or set to 0; a
+//! small level above 0 is a plain factor the capture undoes (see the crate
+//! docs and `ROUTED_LEVEL`).
 #![cfg(windows)]
 
 use std::process::{Command, Stdio};

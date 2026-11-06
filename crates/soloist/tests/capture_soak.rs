@@ -1,7 +1,7 @@
 //! How Soloist's captured sound fares on its way through our engine: a child
 //! (this binary again) renders a quiet tone, the parent captures it by
 //! process id and plays it through a real engine on the default output via
-//! [`SoloistTrack`], with the engine at volume 0 (as for a Soloist track).
+//! [`SoloistTrack`], with the engine at volume 0 (so nothing is heard).
 //! It reports the output's underruns, the added delay (capture prebuffer +
 //! the engine's ring + the device) and the process' CPU, then the same for
 //! the tone played straight by the engine as the baseline. By hand:

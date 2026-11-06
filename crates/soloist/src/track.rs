@@ -1,14 +1,14 @@
 //! One Spotify track played through Soloist, as a live [`PcmSource`] of
 //! our engine.
 //!
-//! Soloist plays the track itself (its own output is the one heard: muting
-//! its audio session silences the process-loopback capture as well, see
-//! `tests/loopback_mute.rs`). The engine still gets an item, so the queue,
-//! the position, the end of the track and errors flow exactly as for any
-//! other source: the source hands the engine Soloist's sound as captured
-//! (Windows), which feeds the visualizer and the spectrum while the engine
-//! plays it at volume 0, or, without a capture, silence paced by Soloist's
-//! own position.
+//! Soloist plays the track; the source hands the engine Soloist's sound as
+//! captured from its process (Windows), and that copy is the one heard:
+//! Soloist's own output is turned down to an inaudible level the capture
+//! undoes (see [`crate::manager::ROUTED_LEVEL`]), so the engine's volume,
+//! normalization, visualizer and output device apply as to any track. The
+//! queue, the position, the end of the track and errors flow as for any
+//! other source. Without a capture the source gives silence paced by
+//! Soloist's own position, and Soloist is heard itself.
 //!
 //! Soloist has no "track ended" event. The end is read from its state: the
 //! item changes to another one (it went on by itself: it is paused at once,
@@ -58,6 +58,8 @@ pub trait Link: Send + Sync + 'static {
     fn paused_by_us(&self) -> bool;
     /// A track starts (+1) or is done (-1).
     fn playing(&self, delta: i32);
+    /// Called while the track starts: Soloist's output gets its level.
+    fn prepare_output(&self) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -171,8 +173,7 @@ impl SoloistTrack {
                 if n == 0 {
                     return PcmRead::Pending;
                 }
-                // The capture comes after the session level; the visualizer
-                // should not shrink with the volume. The level is a plain
+                // The capture comes after the session level, undone here. The level is a plain
                 // float factor before process loopback (the capture at
                 // 1e-6, scaled back, matches the one at 1: see
                 // examples/route_bench.rs), so any level above 0 is undone.
@@ -235,6 +236,7 @@ impl PcmSource for SoloistTrack {
                 return Ok(PcmRead::Pending);
             }
             Phase::Requested { at, changes } => {
+                self.link.prepare_output();
                 if !view.ready {
                     return Err(err("Spotify Soloist отключился"));
                 }
@@ -278,6 +280,7 @@ impl PcmSource for SoloistTrack {
         if !view.ready {
             return Err(err("Spotify Soloist отключился"));
         }
+        self.link.prepare_output();
         if self.ended(&view) {
             if !self.ours(&view) && view.status == Status::Playing {
                 // It went on by itself (autoplay, its queue): ours decides.
