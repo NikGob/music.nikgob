@@ -7,8 +7,20 @@
     { self, nixpkgs }:
     let
       system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
+      # The player is not free software (PolyForm Strict), so nixpkgs would
+      # refuse to build it; allow this one package and nothing else.
+      pkgs = import nixpkgs {
+        inherit system;
+        config.allowUnfreePredicate = p: nixpkgs.lib.getName p == "music.nikgob";
+      };
       inherit (pkgs) lib;
+      license = {
+        spdxId = "PolyForm-Strict-1.0.0";
+        fullName = "PolyForm Strict License 1.0.0";
+        url = "https://polyformproject.org/licenses/strict/1.0.0";
+        free = false;
+        redistributable = false;
+      };
       version = (lib.importTOML ./Cargo.toml).workspace.package.version;
 
       # Linked by the binary: the sign-in window's GTK and WebKitGTK (and the
@@ -50,6 +62,7 @@
           fileset = lib.fileset.unions [
             ./Cargo.toml
             ./Cargo.lock
+            ./LICENSE.md
             ./assets
             ./crates
             ./packaging
@@ -90,6 +103,7 @@
           ]);
 
         postInstall = ''
+          install -Dm644 LICENSE.md $out/share/licenses/music.nikgob/LICENSE.md
           install -Dm644 packaging/music.nikgob.desktop $out/share/applications/music.nikgob.desktop
           for size in 64 128 256 512; do
             install -Dm644 packaging/icons/music.nikgob-$size.png \
@@ -104,7 +118,7 @@
         meta = {
           description = "Desktop music player: a local library with streaming services, lyrics and recommendations";
           homepage = "https://github.com/NikGob/music.nikgob";
-          license = lib.licenses.unfree;
+          inherit license;
           mainProgram = "nikgob";
           platforms = [ system ];
         };

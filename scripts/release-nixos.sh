@@ -21,7 +21,7 @@ stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 src="$stage/src"
 mkdir -p "$src"
-for f in flake.nix flake.lock Cargo.toml Cargo.lock assets crates packaging vendor; do
+for f in flake.nix flake.lock Cargo.toml Cargo.lock LICENSE.md assets crates packaging vendor; do
   [ -e "$root/$f" ] && cp -r "$root/$f" "$src/"
 done
 
