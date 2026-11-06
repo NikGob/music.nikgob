@@ -23,6 +23,7 @@ mod shot_fakes;
 mod streams;
 mod sysmotion;
 mod titlebar;
+mod scwidget;
 mod web_images;
 mod ytlogin;
 
@@ -455,12 +456,19 @@ fn stage(name: &str) {
 
 fn main() -> eframe::Result {
     LAUNCHED.get_or_init(Instant::now);
-    // `--youtube-login`: this run is only the Google sign-in window. It logs to
-    // stderr, which the app copies into its own log; it must not write the
-    // app's log file itself.
-    if std::env::args().any(|a| a == "--youtube-login") {
+    // `--youtube-login` / `--soundcloud-login`: this run is only a sign-in
+    // window; `--sc-widget`: only SoundCloud's player host. They log to
+    // stderr, which the app copies into its own log; they must not write the
+    // app's log file themselves.
+    if std::env::args().any(|a| a == "--youtube-login" || a == "--soundcloud-login") {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
         if let Some(code) = ytlogin::child_main() {
+            std::process::exit(code);
+        }
+    }
+    if std::env::args().nth(1).is_some_and(|a| a == nikgob_sc_widget::protocol::FLAG) {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Some(code) = scwidget::child_main() {
             std::process::exit(code);
         }
     }
@@ -594,7 +602,7 @@ fn main() -> eframe::Result {
             .output_device
             .clone()
             .filter(|d| prefs.output_devices.contains(d));
-        match audio::Engine::start(device, streams.clone(), streams::soloist()) {
+        match audio::Engine::start(device, streams.clone(), streams::soloist(), streams::sc_widget()) {
             Ok((engine, links)) => (Box::new(engine), Some(links)),
             Err(e) => {
                 log::error!("audio engine failed to start: {e}");

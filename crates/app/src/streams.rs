@@ -46,10 +46,22 @@ pub fn soloist() -> Option<Arc<nikgob_soloist::Soloist>> {
     SOLOIST.get().cloned()
 }
 
-/// Stops Soloist as the app quits.
+/// SoundCloud's official player for DRM-only tracks (Windows, the real
+/// SoundCloud; set by [`real`]).
+static SC_WIDGET: std::sync::OnceLock<Arc<nikgob_sc_widget::ScWidget>> = std::sync::OnceLock::new();
+
+/// SoundCloud's official player, when it can run here.
+pub fn sc_widget() -> Option<Arc<nikgob_sc_widget::ScWidget>> {
+    SC_WIDGET.get().cloned()
+}
+
+/// Stops Soloist and SoundCloud's player host as the app quits.
 pub fn shutdown() {
     if let Some(s) = SOLOIST.get() {
         s.shutdown();
+    }
+    if let Some(w) = SC_WIDGET.get() {
+        w.shutdown();
     }
 }
 
@@ -106,6 +118,17 @@ pub fn real(data_dir: &Path, secrets: &StreamingSettings) -> Services {
     match nikgob_soundcloud::Soundcloud::new(sc) {
         Ok(sc) => out.push(sc),
         Err(e) => log::error!("SoundCloud did not start: {e}"),
+    }
+    // Its DRM-only tracks play through its own player (WebView2 has the
+    // Widevine CDM; WebKitGTK has none, so not on Linux). Its profile is its
+    // own, never the sign-in window's: it plays signed out.
+    if cfg!(windows)
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let _ = SC_WIDGET.set(nikgob_sc_widget::ScWidget::new(nikgob_sc_widget::Config {
+            exe,
+            profile: data_dir.join("soundcloud").join("widget"),
+        }));
     }
     out
 }

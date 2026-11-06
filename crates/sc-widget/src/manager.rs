@@ -2,6 +2,7 @@
 //! between tracks, closed after a few idle minutes), the state its events
 //! build, and the router of its sound.
 
+use std::collections::HashSet;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command as Process, Stdio};
@@ -27,7 +28,7 @@ const MAX_BAD_RUNS: u32 = 3;
 const CAPTURE_WAIT: Duration = Duration::from_millis(600);
 /// A position report this old no longer moves the position on (the widget
 /// went quiet: it buffers, or it hangs).
-const STALE: Duration = Duration::from_secs(2);
+const STALE: Duration = Duration::from_secs(3);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -138,6 +139,9 @@ pub struct ScWidget {
     user_paused: AtomicBool,
     /// Given up on for this session.
     broken: AtomicBool,
+    /// Tracks the widget did not play this session (they keep their old
+    /// fallback).
+    refused: Mutex<HashSet<u64>>,
 }
 
 impl ScWidget {
@@ -158,6 +162,7 @@ impl ScWidget {
                 seq: AtomicU64::new(0),
                 user_paused: AtomicBool::new(false),
                 broken: AtomicBool::new(false),
+                refused: Mutex::new(HashSet::new()),
             }
         })
     }
@@ -165,6 +170,17 @@ impl ScWidget {
     /// Whether DRM tracks can go to the widget now.
     pub fn usable(&self) -> bool {
         !self.broken.load(Ordering::Acquire)
+    }
+
+    /// Whether SoundCloud track `id` can go to the widget: it is usable
+    /// and did not fail this track before.
+    pub fn plays(&self, id: &str) -> bool {
+        self.usable() && id.trim().parse::<u64>().is_ok_and(|n| !lock(&self.refused).contains(&n))
+    }
+
+    /// The widget failed track `track`: it is not tried again this session.
+    pub(crate) fn refuse(&self, track: u64) {
+        lock(&self.refused).insert(track);
     }
 
     pub fn view(&self) -> Live {

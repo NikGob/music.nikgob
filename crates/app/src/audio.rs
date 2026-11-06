@@ -17,12 +17,20 @@
 //! or out of such a track (one player cannot overlap two tracks): a clean
 //! cut.
 //!
+//! SoundCloud tracks it streams only with DRM go the same way through its
+//! official player (`nikgob-sc-widget`, Windows): the first open of such a
+//! track fails with [`nikgob_runtime::OFFICIAL_PLAYER_ROUTE`] in its error,
+//! the track is remembered, and the runtime plays the same source again,
+//! which is then a live source of the widget. A track the widget failed
+//! keeps the old fallback (the runtime's next source, YouTube Music).
+//!
 //! Switching the output device restarts the engine: the old `Player` is
 //! dropped (its threads stop and the device closes), a new one opens the
 //! chosen device, and the runtime replays the current track from where it
 //! was. Events and the analyzer go through shared slots so the runtime and
 //! the window never hold a stale engine.
 
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -30,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use nikgob_audio::{Analyzer, ByteSource, Event, ItemSource, PlayItem, Player, PlayerOptions};
-use nikgob_core::streaming::{AudioStream, StreamService};
+use nikgob_core::streaming::{AudioStream, StreamError, StreamService};
 use nikgob_core::streaming::Service as StreamKind;
 use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent};
 
@@ -57,12 +65,54 @@ pub struct Engine {
     links: Links,
     streams: Vec<Arc<dyn StreamService>>,
     soloist: Option<Arc<nikgob_soloist::Soloist>>,
-    /// The user's volume (the engine plays a Soloist track at 0).
+    /// SoundCloud's official player (Windows).
+    widget: Option<Arc<nikgob_sc_widget::ScWidget>>,
+    /// SoundCloud tracks found to be DRM-only this session.
+    drm: Arc<Mutex<HashSet<String>>>,
+    /// The user's volume (the engine plays a live track at 0 while its
+    /// player is heard itself).
     volume: f32,
-    /// What plays now goes through Soloist.
-    on_soloist: bool,
-    /// ... and Soloist is heard itself (no capture): the engine is at 0.
-    soloist_direct: bool,
+    /// What plays now is a live track (Soloist, SoundCloud's player).
+    on_live: Option<Live>,
+    /// ... and its player is heard itself (no capture): the engine is at 0.
+    live_direct: bool,
+}
+
+/// A player whose sound a live track hands the engine.
+#[derive(Clone)]
+enum Live {
+    Soloist(Arc<nikgob_soloist::Soloist>),
+    Widget(Arc<nikgob_sc_widget::ScWidget>),
+}
+
+impl Live {
+    fn routed(&self) -> bool {
+        match self {
+            Self::Soloist(s) => s.routed(),
+            Self::Widget(w) => w.routed(),
+        }
+    }
+
+    fn set_volume(&self, v: f32) {
+        match self {
+            Self::Soloist(s) => s.set_volume(v),
+            Self::Widget(w) => w.set_volume(v),
+        }
+    }
+
+    fn pause(&self) {
+        match self {
+            Self::Soloist(s) => s.pause(),
+            Self::Widget(w) => w.pause(),
+        }
+    }
+
+    fn resume(&self) {
+        match self {
+            Self::Soloist(s) => s.resume(),
+            Self::Widget(w) => w.resume(),
+        }
+    }
 }
 
 fn spawn(device: Option<String>, links: &Links) -> Result<Player, String> {
@@ -84,6 +134,7 @@ impl Engine {
         device: Option<String>,
         streams: Vec<Arc<dyn StreamService>>,
         soloist: Option<Arc<nikgob_soloist::Soloist>>,
+        widget: Option<Arc<nikgob_sc_widget::ScWidget>>,
     ) -> Result<(Self, Links), String> {
         let links = Links::default();
         let player = spawn(device, &links)?;
@@ -93,9 +144,11 @@ impl Engine {
                 links: links.clone(),
                 streams,
                 soloist,
+                widget,
+                drm: Arc::default(),
                 volume: 1.0,
-                on_soloist: false,
-                soloist_direct: false,
+                on_live: None,
+                live_direct: false,
             },
             links,
         ))
@@ -110,7 +163,44 @@ impl Engine {
         }
     }
 
+    /// SoundCloud's player for a request: a SoundCloud track known to be
+    /// DRM-only that the player has not failed.
+    fn widget_for(&self, r: &PlayRequest) -> Option<&Arc<nikgob_sc_widget::ScWidget>> {
+        match &r.source {
+            PlaySource::Stream { service: StreamKind::Soundcloud, id } => self
+                .widget
+                .as_ref()
+                .filter(|w| w.plays(id) && self.drm.lock().unwrap_or_else(PoisonError::into_inner).contains(id)),
+            _ => None,
+        }
+    }
+
+    /// The live player a request plays through, if any.
+    fn live_for(&self, r: &PlayRequest) -> Option<Live> {
+        if let Some(s) = self.soloist_for(r) {
+            return Some(Live::Soloist(s.clone()));
+        }
+        self.widget_for(r).map(|w| Live::Widget(w.clone()))
+    }
+
+    fn quality(&self, id: u64, label: &str) {
+        let to = self.links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(to) = to {
+            let _ = to.send(PlaybackEvent::Quality { id, label: label.into() });
+        }
+    }
+
     fn item(&self, r: PlayRequest) -> PlayItem {
+        if let (Some(w), PlaySource::Stream { id, .. }) = (self.widget_for(&r), &r.source) {
+            log::debug!("soundcloud {id} plays through SoundCloud's player (item {})", r.id);
+            self.quality(r.id, "Плеер SoundCloud");
+            return PlayItem {
+                id: r.id,
+                source: ItemSource::Pcm(Box::new(w.track(id, r.duration))),
+                gain_db: 0.0,
+                duration_hint: r.duration,
+            };
+        }
         if let (Some(s), PlaySource::Stream { id, .. }) = (self.soloist_for(&r), &r.source) {
             log::debug!("spotify {id} plays through Soloist (item {})", r.id);
             let to = self.links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
@@ -130,11 +220,22 @@ impl Engine {
                 let svc = self.streams.iter().find(|s| s.service() == service).cloned();
                 let events = self.links.events.clone();
                 let item = r.id;
+                // A DRM-only SoundCloud track can go to SoundCloud's player.
+                let widget = self.widget.clone().filter(|_| service == StreamKind::Soundcloud);
+                let drm = self.drm.clone();
                 ItemSource::Stream(Box::new(move || {
                     let svc = svc.ok_or_else(|| format!("{service} is not available"))?;
                     log::debug!("opening {service} stream {id} (item {item})");
                     let stream = svc.open_audio(&id).map_err(|e| {
                         log::info!("{service} stream {id} did not open: {e}");
+                        if matches!(e, StreamError::Drm)
+                            && let Some(w) = widget.as_ref().filter(|w| w.plays(&id))
+                        {
+                            drm.lock().unwrap_or_else(PoisonError::into_inner).insert(id.clone());
+                            // Its play comes back at once: the host starts now.
+                            w.warm();
+                            return format!("{service}: {e} {}", nikgob_runtime::OFFICIAL_PLAYER_ROUTE);
+                        }
                         format!("{service}: {e}")
                     })?;
                     Ok(Box::new(StreamBytes {
@@ -228,28 +329,33 @@ impl ByteSource for StreamBytes {
 
 impl Playback for Engine {
     fn play(&mut self, req: PlayRequest) {
-        let soloist = self.soloist_for(&req).cloned();
-        let direct = soloist.as_ref().is_some_and(|s| !s.routed());
-        if let Some(s) = &soloist {
-            s.set_volume(self.volume);
+        let live = self.live_for(&req);
+        if let Some(Live::Widget(w)) = &live {
+            // Its host runs and its capture had a moment, so `routed`
+            // answers for this track.
+            w.prepare();
+        }
+        let direct = live.as_ref().is_some_and(|l| !l.routed());
+        if let Some(l) = &live {
+            l.set_volume(self.volume);
         }
         if direct {
-            // Soloist is heard itself; the engine's copy only moves the
+            // The player is heard itself; the engine's copy only moves the
             // visualizer.
             self.player.set_volume(0.0);
-        } else if self.soloist_direct {
+        } else if self.live_direct {
             self.player.set_volume(self.volume);
         }
-        self.on_soloist = soloist.is_some();
-        self.soloist_direct = direct;
+        self.on_live = live;
+        self.live_direct = direct;
         let item = self.item(req);
         self.player.play(item);
     }
 
     fn set_next(&mut self, next: Option<PlayRequest>) {
         match next {
-            // Into or out of a Soloist track: a clean cut after `Ended`.
-            Some(r) if self.on_soloist || self.soloist_for(&r).is_some() => self.player.clear_next(),
+            // Into or out of a live track: a clean cut after `Ended`.
+            Some(r) if self.on_live.is_some() || self.live_for(&r).is_some() => self.player.clear_next(),
             Some(r) => {
                 let item = self.item(r);
                 self.player.set_next(item);
@@ -260,27 +366,23 @@ impl Playback for Engine {
 
     fn pause(&mut self) {
         self.player.pause();
-        if self.on_soloist
-            && let Some(s) = &self.soloist
-        {
-            s.pause();
+        if let Some(l) = &self.on_live {
+            l.pause();
         }
     }
 
     fn resume(&mut self) {
         self.player.resume();
-        if self.on_soloist
-            && let Some(s) = &self.soloist
-        {
-            s.resume();
+        if let Some(l) = &self.on_live {
+            l.resume();
         }
     }
 
     fn stop(&mut self) {
         self.player.stop();
-        self.on_soloist = false;
-        if self.soloist_direct {
-            self.soloist_direct = false;
+        self.on_live = None;
+        if self.live_direct {
+            self.live_direct = false;
             self.player.set_volume(self.volume);
         }
     }
@@ -294,7 +396,10 @@ impl Playback for Engine {
         if let Some(s) = &self.soloist {
             s.set_volume(volume);
         }
-        if !self.soloist_direct {
+        if let Some(w) = &self.widget {
+            w.set_volume(volume);
+        }
+        if !self.live_direct {
             self.player.set_volume(volume);
         }
     }
@@ -314,8 +419,8 @@ impl Playback for Engine {
             Ok(p) => {
                 self.player = p;
                 self.player.set_volume(self.volume);
-                self.on_soloist = false;
-                self.soloist_direct = false;
+                self.on_live = None;
+                self.live_direct = false;
                 true
             }
             Err(e) => {

@@ -57,6 +57,13 @@ use queue::{Entry, Queue};
 /// How many of the tracks before the current one the queue view lists.
 const HISTORY_SHOWN: usize = 50;
 
+/// In a [`PlaybackEvent::Error`] of a SoundCloud track: SoundCloud streams
+/// it only with DRM, and the backend can play it through SoundCloud's own
+/// player instead (`nikgob-sc-widget`). The same source is then played
+/// again, once per entry; the backend knows the track now and takes that
+/// route. If that fails too, its other sources are tried as for any error.
+pub const OFFICIAL_PLAYER_ROUTE: &str = "[soundcloud official player]";
+
 /// Where the audio of a [`PlayRequest`] comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlaySource {
@@ -444,6 +451,9 @@ struct Worker {
     /// The entry whose YouTube stream was opened once more after its URLs
     /// kept being refused mid-track (once per entry).
     stream_retried: Option<u64>,
+    /// The entry whose DRM-only SoundCloud source went to SoundCloud's own
+    /// player (once per entry, see [`OFFICIAL_PLAYER_ROUTE`]).
+    official_player_tried: Option<u64>,
     /// `session.json` (volume and queue between runs) and what was last
     /// written to it.
     session_path: Option<PathBuf>,
@@ -576,6 +586,7 @@ impl Worker {
             resume_at: None,
             failover: None,
             stream_retried: None,
+            official_player_tried: None,
             session_path,
             session_saved: String::new(),
             editions: Vec::new(),
@@ -1887,6 +1898,23 @@ impl Worker {
                     // The preloaded next track: it is tried again (with
                     // all its sources) when its turn comes.
                     return;
+                }
+                if let Some(e) = playing
+                    && let Some((source, kind)) = self.playing_source
+                    && kind == SourceKind::Soundcloud
+                    && message.contains(OFFICIAL_PLAYER_ROUTE)
+                    && self.official_player_tried != Some(e.id)
+                {
+                    // Only DRM streams: the backend plays the same source
+                    // through SoundCloud's own player now.
+                    self.official_player_tried = Some(e.id);
+                    let skip = self.tried.clone();
+                    if let Some((req, again, kind)) = self.request_skipping(e, &skip).filter(|(_, s, _)| *s == source) {
+                        log::info!("{}: SoundCloud has it only with DRM, playing it through SoundCloud's player", e.track);
+                        self.play_request(e, req, again, kind);
+                        self.seek_to_failover(e);
+                        return;
+                    }
                 }
                 if let Some(e) = playing
                     && let Some((source, kind)) = self.playing_source

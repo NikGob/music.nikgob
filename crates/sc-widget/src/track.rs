@@ -137,6 +137,37 @@ impl PcmSource for WidgetTrack {
     }
 
     fn read(&mut self, out: &mut [f32]) -> Result<PcmRead, PcmError> {
+        let r = self.step(out);
+        if r.is_err() {
+            if let Some(t) = self.track {
+                self.widget.refuse(t);
+            }
+            // Failed: it is done, and the widget stops.
+            self.stop();
+            self.phase = Phase::Ended;
+        }
+        r
+    }
+
+    fn seek(&mut self, position: Duration) -> bool {
+        let ms = position.as_millis() as u64;
+        match self.phase {
+            Phase::Ended => false,
+            Phase::Unrequested | Phase::Requested { .. } => {
+                self.pending_seek = Some(ms);
+                true
+            }
+            Phase::Playing { seq } | Phase::Seeking { seq, .. } => {
+                self.seek_to(seq, ms);
+                true
+            }
+        }
+    }
+}
+
+impl WidgetTrack {
+    /// [`PcmSource::read`]'s work.
+    fn step(&mut self, out: &mut [f32]) -> Result<PcmRead, PcmError> {
         let view = self.widget.view();
         match self.phase {
             Phase::Ended => return Ok(PcmRead::End),
@@ -200,30 +231,20 @@ impl PcmSource for WidgetTrack {
         Ok(self.feed.produce(pos, &*self.widget, out))
     }
 
-    fn seek(&mut self, position: Duration) -> bool {
-        let ms = position.as_millis() as u64;
-        match self.phase {
-            Phase::Ended => false,
-            Phase::Unrequested | Phase::Requested { .. } => {
-                self.pending_seek = Some(ms);
-                true
-            }
-            Phase::Playing { seq } | Phase::Seeking { seq, .. } => {
-                self.seek_to(seq, ms);
-                true
-            }
-        }
-    }
-}
-
-impl Drop for WidgetTrack {
-    fn drop(&mut self) {
+    /// Pauses this load in the widget unless the engine already paused it.
+    fn stop(&mut self) {
         if let Phase::Requested { seq, .. } | Phase::Playing { seq } | Phase::Seeking { seq, .. } = self.phase
             && !self.widget.paused_by_us()
         {
             // Only this load: a newer one already asked for plays on.
             self.widget.send(Command::Pause { seq });
         }
+    }
+}
+
+impl Drop for WidgetTrack {
+    fn drop(&mut self) {
+        self.stop();
         if self.counted {
             self.widget.playing(-1);
         }
