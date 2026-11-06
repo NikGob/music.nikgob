@@ -213,6 +213,7 @@ impl Runtime {
         }
         let state = Arc::new(RwLock::new(ViewState {
             prefs: initial_prefs,
+            home: nikgob_view::HomeView { loading: true, ..Default::default() },
             ..ViewState::default()
         }));
         let worker = {

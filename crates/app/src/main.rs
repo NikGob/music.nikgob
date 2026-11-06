@@ -92,11 +92,11 @@ fn log_panics(dir: PathBuf) {
 }
 
 /// The prefs of a prefs file's bytes; without a file (the first start)
-/// the defaults, and Главная asks for the name.
+/// those of [`Prefs::first_start`].
 fn prefs_of(bytes: Option<&[u8]>) -> Prefs {
     match bytes {
         Some(b) => parse_prefs(b).unwrap_or_default(),
-        None => Prefs { name_prompt: true, ..Prefs::default() },
+        None => Prefs::first_start(),
     }
 }
 
@@ -831,8 +831,8 @@ mod prefs_tests {
         assert_eq!(again, old);
         let d = prefs_of(None);
         assert!(d.lyrics_words_playing && (d.lyrics_lead - nikgob_view::LYRICS_LEAD).abs() < 1e-6);
-        // The soft edges' new settings come with gentle defaults.
-        assert!(d.lyrics_soft_edges && d.lyrics_soft_depth > 0.1 && d.lyrics_soft_depth < 0.25 && d.lyrics_soft_fade < 0.6);
+        // The soft edges come off, with gentle settings for when they are on.
+        assert!(!d.lyrics_soft_edges && d.lyrics_soft_strength < 0.5 && d.lyrics_soft_depth < 0.35 && d.lyrics_soft_fade < 0.6);
     }
 
 
@@ -860,7 +860,7 @@ mod prefs_tests {
         let p = parse_prefs(br#"{"lyrics_style":2,"lyrics_rev":2}"#).unwrap();
         assert!(!p.lyrics_by_words && p.lyrics_soft_edges && (p.lyrics_soft_strength - 1.0).abs() < 1e-6);
         let d = prefs_of(None);
-        assert!(d.lyrics_style == 0 && !d.lyrics_by_words && d.lyrics_soft_edges);
+        assert!(d.lyrics_style == 0 && !d.lyrics_by_words && !d.lyrics_soft_edges);
     }
 
     /// Revision 4: «По слогам» is the unit of the lyrics' animations; prefs

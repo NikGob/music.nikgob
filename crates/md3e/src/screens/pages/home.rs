@@ -229,8 +229,14 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     let grid = Grid::new(ui.cursor().left(), ui.available_width());
     let local_only = state.prefs.mixes_downloaded_only;
 
+    if h.loading {
+        super::brand::loading(ui);
+        return None;
+    }
     ui.add_space(8.0);
-    if is_empty(h) {
+    // With «Только скачанное» on and nothing downloaded the page keeps its
+    // header, so the chip that emptied it can be turned off again.
+    if is_empty(h) && !local_only {
         if asks_name(&state.prefs) {
             name_prompt(ui, grid, pages, out);
         }

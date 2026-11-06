@@ -4768,7 +4768,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nikgob"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "blake3",
  "crossbeam-channel",
@@ -4810,7 +4810,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-align"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "hound",
  "log",
@@ -4830,7 +4830,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-audio"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "cpal",
  "crossbeam-channel",
@@ -4850,7 +4850,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-core"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "directories",
  "log",
@@ -4863,7 +4863,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-deezer"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "log",
  "nikgob-core",
@@ -4876,7 +4876,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-import"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -4907,7 +4907,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-indexer-prowlarr"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "log",
  "nikgob-core",
@@ -4921,7 +4921,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-library"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "log",
  "nikgob-core",
@@ -4934,7 +4934,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-md3e"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "egui",
  "egui_extras",
@@ -4953,7 +4953,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-metadata"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "log",
  "nikgob-core",
@@ -4970,11 +4970,11 @@ dependencies = [
 
 [[package]]
 name = "nikgob-motion"
-version = "0.1.0"
+version = "0.0.2"
 
 [[package]]
 name = "nikgob-recs"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "bliss-audio",
  "nikgob-core",
@@ -4988,7 +4988,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-runtime"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "crossbeam-channel",
  "fastrand",
@@ -5021,14 +5021,14 @@ dependencies = [
 
 [[package]]
 name = "nikgob-shapes"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "egui",
 ]
 
 [[package]]
 name = "nikgob-soulseek"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "axum",
  "env_logger",
@@ -5052,7 +5052,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-sources"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -5070,7 +5070,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-spotify"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "base64 0.22.1",
  "keyring-core",
@@ -5097,7 +5097,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-torrent"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "librqbit",
  "librqbit-utp",
@@ -5112,7 +5112,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-view"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "nikgob-core",
  "serde",
@@ -5120,7 +5120,7 @@ dependencies = [
 
 [[package]]
 name = "nikgob-youtube"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "env_logger",
  "fastrand",

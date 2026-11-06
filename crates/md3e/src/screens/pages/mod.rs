@@ -1,5 +1,6 @@
 //! Content pages and the menus and dialogs they open.
 
+mod brand;
 mod detail;
 mod downloads;
 mod cards;

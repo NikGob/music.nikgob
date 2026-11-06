@@ -820,6 +820,9 @@ pub enum WorldGo {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HomeView {
+    /// Главная is not built yet (the start of a run): the page shows the
+    /// app's mark instead of an empty library.
+    pub loading: bool,
     pub greeting_hour: u8,
     /// Something was ever played, liked or put in a playlist.
     pub history: bool,
@@ -2853,6 +2856,74 @@ impl Default for Prefs {
             library_as_taste: true,
             lastfm_configured: false,
             radio_no_repeat_hours: 3,
+        }
+    }
+}
+
+impl Prefs {
+    /// The prefs of a first start (no prefs file yet): the player as its
+    /// owner tuned it, with nothing of theirs (folders, accounts, name),
+    /// not starting with Windows, and Главная asks for the name.
+    pub fn first_start() -> Self {
+        Self {
+            fps_limit: 142,
+            normalization: false,
+            seed_ratio: 3.5,
+            lyrics_wave_jump: 0.5,
+            lyrics_jump_speed: 2.0,
+            lyrics_light_speed: 0.9,
+            lyrics_smooth: 0.85,
+            lyrics_dim: 0.75,
+            lyrics_scale: 0.9,
+            lyrics_lead: 0.2,
+            lyrics_glow: true,
+            lyrics_return_s: 2.0,
+            lyrics_gap_waves: 7.0,
+            lyrics_gap_height: 0.5,
+            lyrics_countdown: false,
+            lyrics_soft_edges: false,
+            lyrics_soft_strength: 0.25,
+            lyrics_soft_depth: 0.29,
+            save_found_lyrics: true,
+            lyrics_deep: true,
+            cover_shape: CoverShape::Random,
+            ring_style: RingStyle::Circle,
+            np_volume_pop: true,
+            np_volume_pop_hold: 0.5,
+            random_shapes: vec![
+                CoverShape::Cookie12,
+                CoverShape::Cookie9,
+                CoverShape::Cookie7,
+                CoverShape::Cookie6,
+                CoverShape::Sunny,
+                CoverShape::VerySunny,
+                CoverShape::Flower,
+                CoverShape::Clover4,
+                CoverShape::Clover8,
+                CoverShape::SoftBurst,
+                CoverShape::Puffy,
+                CoverShape::PuffyDiamond,
+                CoverShape::Pentagon,
+                CoverShape::Gem,
+            ],
+            autostart: false,
+            autostart_hidden: false,
+            bg_shapes: BgShapes::Morph,
+            bg_shapes_count: 10,
+            bg_shapes_opacity: 0.25,
+            bg_shapes_speed: 0.65,
+            bg_shapes_react: 0.5,
+            bg_shapes_colors: 1,
+            bg_shapes_hue: 6,
+            rail_compact: true,
+            spotify_enabled: false,
+            library_only_downloaded: true,
+            auto_download_limit: 3,
+            upgrade_every: UpgradeEvery::Never,
+            stream_cache_mb: 700,
+            mixes_with_new: true,
+            name_prompt: true,
+            ..Self::default()
         }
     }
 }

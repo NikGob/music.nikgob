@@ -276,6 +276,9 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         _ => general(ui, state, &mut p, pages, out),
     }
     ui.add(Divider::new());
+    ui.add_space(16.0);
+    super::brand::made_by(ui);
+    ui.add_space(8.0);
     settings_help::finish(ui, &mut p);
 
     // The recommendations' rows change one preference each.
