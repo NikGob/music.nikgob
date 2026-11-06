@@ -278,30 +278,80 @@ fn set_as(name: &str, on: bool) -> Result<(), String> {
 
 /// The program the line starts: this exe, or on Linux the Nix wrapper that
 /// ran it. Nix's wrappers run the binary as `.nikgob-wrapped` with the
-/// wrapper's own `argv[0]` (a path, or the bare name it was found by on
-/// `PATH`), and the binary alone lacks what the wrapper sets up (GTK's
-/// schemas, GIO's TLS module), so the entry starts the wrapper.
+/// wrapper's own `argv[0]` (a path, relative to the working folder or not,
+/// or the bare name it was found by on `PATH`), and the binary alone lacks
+/// what the wrapper sets up (GTK's schemas, GIO's TLS module), so the entry
+/// starts the wrapper. A path into the Nix store changes with every
+/// version and goes away with garbage collection: the profile's own path to
+/// the same file is written when there is one.
 fn program() -> std::io::Result<std::path::PathBuf> {
     let exe = std::env::current_exe()?;
     #[cfg(target_os = "linux")]
-    if exe
+    return Ok(linux_program(exe));
+    #[cfg(not(target_os = "linux"))]
+    Ok(exe)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_program(exe: std::path::PathBuf) -> std::path::PathBuf {
+    use std::path::PathBuf;
+
+    let wrapped = exe
         .file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with('.') && n.ends_with("-wrapped"))
-        && let Some(wrapper) = std::env::args_os().next().map(std::path::PathBuf::from).and_then(|p| {
-            if p.is_absolute() {
-                Some(p)
-            } else if p.components().count() == 1 {
-                std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(&p)).find(|c| c.is_file())
-            } else {
-                None
-            }
-        })
-        && wrapper.is_file()
-    {
-        return Ok(wrapper);
+        .and_then(|n| n.strip_prefix('.')?.strip_suffix("-wrapped"))
+        .map(str::to_owned);
+    let Some(wrapped) = wrapped else {
+        return stable_nix_path(exe);
+    };
+    let from_argv0 = std::env::args_os().next().map(PathBuf::from).and_then(|p| {
+        if p.is_absolute() {
+            Some(p)
+        } else if p.components().count() == 1 {
+            std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(&p)).find(|c| c.is_file())
+        } else {
+            // `./nikgob`, `bin/nikgob`: relative to where it was started.
+            Some(std::env::current_dir().ok()?.join(&p))
+        }
+    });
+    // The wrapper sits next to the binary it runs.
+    let beside = exe.with_file_name(&wrapped);
+    let wrapper = from_argv0
+        .filter(|w| w.is_file())
+        .or_else(|| beside.is_file().then_some(beside));
+    wrapper.map_or(exe, stable_nix_path)
+}
+
+/// For a path in the Nix store, the same file as the profile (or the
+/// system) reaches it, `~/.nix-profile/bin/nikgob` and the like; `path`
+/// itself when it is elsewhere or no profile has it.
+#[cfg(target_os = "linux")]
+fn stable_nix_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    use std::path::PathBuf;
+
+    if !path.starts_with("/nix/store") {
+        return path;
     }
-    Ok(exe)
+    let (Some(name), Ok(real)) = (path.file_name(), path.canonicalize()) else {
+        return path;
+    };
+    let var = |k: &str| std::env::var_os(k).map(PathBuf::from).filter(|p| p.is_absolute());
+    let home = var("HOME");
+    let mut bins = Vec::new();
+    if let Some(h) = &home {
+        bins.push(h.join(".nix-profile/bin"));
+    }
+    if let Some(state) = var("XDG_STATE_HOME").or_else(|| home.as_ref().map(|h| h.join(".local/state"))) {
+        bins.push(state.join("nix/profile/bin"));
+    }
+    if let Some(user) = std::env::var_os("USER") {
+        bins.push(PathBuf::from("/etc/profiles/per-user").join(user).join("bin"));
+    }
+    bins.push(PathBuf::from("/run/current-system/sw/bin"));
+    bins.into_iter()
+        .map(|b| b.join(name))
+        .find(|c| c.canonicalize().is_ok_and(|r| r == real))
+        .unwrap_or(path)
 }
 
 /// An enabled line follows the exe that runs now (a moved or rebuilt copy).
