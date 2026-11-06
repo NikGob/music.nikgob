@@ -2,6 +2,7 @@
 //! queued, every event updates the shared [`Live`] state. The connection
 //! ends on any socket error; the daemon decides whether to connect again.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,13 +31,43 @@ pub struct Live {
     pub track_changes: u64,
     /// The last refusal and when it came.
     pub error: Option<(String, Instant)>,
+    /// The command the last refusal answered, when it is known.
+    pub error_command: Option<&'static str>,
+    /// When the last `command_result` of a `play` came.
+    pub play_accepted: Option<Instant>,
+    /// When the position last came.
+    pub anchor_at: Option<Instant>,
     /// When the last event arrived.
     pub heard: Option<Instant>,
+    /// Commands sent and not answered yet, oldest first: Soloist answers in
+    /// order, so a refusal belongs to the oldest.
+    awaiting: VecDeque<(&'static str, Instant)>,
 }
 
+/// An answer later than this is not waited for (Soloist may not answer
+/// every command).
+const ANSWER_WINDOW: Duration = Duration::from_secs(5);
+/// Unanswered commands kept, at most.
+const AWAITING_LIMIT: usize = 64;
+
 impl Live {
+    /// A command went out on the socket.
+    pub fn sent(&mut self, c: &Command) {
+        if !c.answered() {
+            return;
+        }
+        if self.awaiting.len() >= AWAITING_LIMIT {
+            self.awaiting.pop_front();
+        }
+        self.awaiting.push_back((c.name(), Instant::now()));
+    }
+
     fn apply(&mut self, e: Event) {
-        self.heard = Some(Instant::now());
+        let now = Instant::now();
+        self.heard = Some(now);
+        while self.awaiting.front().is_some_and(|(_, at)| now.duration_since(*at) > ANSWER_WINDOW) {
+            self.awaiting.pop_front();
+        }
         match e {
             Event::Auth { logged_in, active, device_name } => {
                 self.logged_in = logged_in;
@@ -51,13 +82,18 @@ impl Live {
                 }
             }
             Event::State { status, item, position, volume, active } => {
-                self.status = status;
-                if item.as_ref().map(|i| &i.uri) != self.item.as_ref().map(|i| &i.uri) {
-                    self.track_changes += 1;
+                if let Some(s) = status {
+                    self.status = s;
                 }
-                self.item = item;
+                if let Some(item) = item {
+                    if item.as_ref().map(|i| &i.uri) != self.item.as_ref().map(|i| &i.uri) {
+                        self.track_changes += 1;
+                    }
+                    self.item = item;
+                }
                 if position.is_some() {
                     self.anchor = position;
+                    self.anchor_at = Some(now);
                 }
                 if volume.is_some() {
                     self.volume = volume;
@@ -68,17 +104,33 @@ impl Live {
             }
             Event::TrackChanged(item) => {
                 self.track_changes += 1;
-                self.item = item;
+                if let Some(item) = item {
+                    self.item = item;
+                }
             }
             Event::PlaybackChanged(status) => self.status = status,
             Event::Volume(v) => self.volume = Some(v),
             Event::Device { active } => self.active = active,
-            Event::Position(a) => self.anchor = Some(a),
-            Event::Error(m) => {
-                log::info!("soloist refused a command: {m}");
-                self.error = Some((m, Instant::now()));
+            Event::Position(a) => {
+                self.anchor = Some(a);
+                self.anchor_at = Some(now);
             }
-            Event::Accepted(_) | Event::Other(_) => {}
+            Event::Error(m) => {
+                let command = self.awaiting.pop_front().map(|(name, _)| name);
+                log::info!("soloist refused a command ({}): {m}", command.unwrap_or("?"));
+                self.error = Some((m, now));
+                self.error_command = command;
+            }
+            Event::Accepted(name) => {
+                // Commands before it that got no answer will not get one.
+                if let Some(i) = self.awaiting.iter().position(|(n, _)| *n == name) {
+                    self.awaiting.drain(..=i);
+                }
+                if name == "play" {
+                    self.play_accepted = Some(now);
+                }
+            }
+            Event::Other(_) => {}
         }
     }
 
@@ -136,6 +188,7 @@ pub async fn serve(
                     Some(c) => {
                         log::debug!("soloist: {}", c.name());
                         socket.send(Message::Text(c.to_json().into())).await.map_err(|e| e.to_string())?;
+                        lock(&live).sent(&c);
                     }
                     None => return Ok(()),
                 },
@@ -184,6 +237,36 @@ mod tests {
             }
         }
         got
+    }
+
+    #[test]
+    fn refusals_belong_to_the_oldest_unanswered_command() {
+        let mut l = Live::default();
+        l.sent(&Command::GetState);
+        l.sent(&Command::Activate);
+        l.sent(&Command::Play(Some("spotify:track:x".into())));
+        l.sent(&Command::Seek(10));
+        l.apply(Event::Error("no device".into()));
+        assert_eq!(l.error_command, Some("activate"));
+        assert!(l.play_accepted.is_none());
+        l.apply(Event::Accepted("play".into()));
+        assert!(l.play_accepted.is_some());
+        l.apply(Event::Error("seek not allowed".into()));
+        assert_eq!(l.error_command, Some("seek"));
+        l.apply(Event::Error("out of the blue".into()));
+        assert_eq!(l.error_command, None, "nothing waits for an answer");
+    }
+
+    #[test]
+    fn a_state_without_an_item_keeps_the_item() {
+        let mut l = Live::default();
+        let item = crate::protocol::Item { uri: "spotify:track:x".into(), duration_ms: Some(1000) };
+        l.apply(Event::State { status: Some(Status::Playing), item: Some(Some(item)), position: None, volume: None, active: None });
+        let changes = l.track_changes;
+        l.apply(Event::State { status: None, item: None, position: None, volume: None, active: None });
+        assert_eq!((l.uri(), l.status, l.track_changes), (Some("spotify:track:x"), Status::Playing, changes));
+        l.apply(Event::State { status: Some(Status::Idle), item: Some(None), position: None, volume: None, active: None });
+        assert_eq!((l.uri(), l.status), (None, Status::Idle));
     }
 
     #[tokio::test]

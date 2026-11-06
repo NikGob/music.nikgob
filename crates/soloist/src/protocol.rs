@@ -49,12 +49,14 @@ pub enum Status {
 }
 
 impl Status {
-    fn parse(s: &str) -> Self {
+    /// A status this player does not know is no status: the last one stands.
+    fn parse(s: &str) -> Option<Self> {
         match s {
-            "playing" => Self::Playing,
-            "paused" => Self::Paused,
-            "buffering" => Self::Buffering,
-            _ => Self::Idle,
+            "playing" => Some(Self::Playing),
+            "paused" => Some(Self::Paused),
+            "buffering" => Some(Self::Buffering),
+            "idle" | "stopped" => Some(Self::Idle),
+            _ => None,
         }
     }
 }
@@ -80,6 +82,12 @@ impl Item {
                 .filter(|d| *d > 0),
         })
     }
+
+    /// The `item` field of an event: `None` when it is missing (the item
+    /// before stands), `Some(None)` when it is null (nothing plays).
+    fn field(event: &Value) -> Option<Option<Self>> {
+        event.get("item").map(Self::parse)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -90,13 +98,16 @@ pub enum Event {
         device_name: String,
     },
     State {
-        status: Status,
-        item: Option<Item>,
+        /// `None`: missing or unknown, the status before stands.
+        status: Option<Status>,
+        /// `None`: missing, the item before stands.
+        item: Option<Option<Item>>,
         position: Option<Anchor>,
         volume: Option<u8>,
         active: Option<bool>,
     },
-    TrackChanged(Option<Item>),
+    /// `None`: the item is missing, the one before stands.
+    TrackChanged(Option<Option<Item>>),
     PlaybackChanged(Status),
     Volume(u8),
     Device {
@@ -127,16 +138,17 @@ impl Event {
                 device_name: v.get("device_name").and_then(Value::as_str).unwrap_or_default().to_owned(),
             },
             "playback_state" => Self::State {
-                status: Status::parse(v.get("status").and_then(Value::as_str).unwrap_or_default()),
-                item: v.get("item").and_then(Item::parse),
+                status: v.get("status").and_then(Value::as_str).and_then(Status::parse),
+                item: Item::field(&v),
                 position: v.get("position").and_then(Anchor::parse),
                 volume: v.get("volume").and_then(volume),
                 active: flag("is_active"),
             },
-            "track_changed" => Self::TrackChanged(v.get("item").and_then(Item::parse)),
-            "playback_changed" => {
-                Self::PlaybackChanged(Status::parse(v.get("status").and_then(Value::as_str).unwrap_or_default()))
-            }
+            "track_changed" => Self::TrackChanged(Item::field(&v)),
+            "playback_changed" => match v.get("status").and_then(Value::as_str).and_then(Status::parse) {
+                Some(status) => Self::PlaybackChanged(status),
+                None => Self::Other(kind.to_owned()),
+            },
             "volume_changed" => Self::Volume(v.get("volume").and_then(volume)?),
             "device_changed" => Self::Device {
                 active: flag("is_active").unwrap_or(false),
@@ -167,6 +179,12 @@ pub enum Command {
 }
 
 impl Command {
+    /// Soloist answers it with `command_result` or `error` (the two
+    /// requests for state answer with the state itself).
+    pub fn answered(&self) -> bool {
+        !matches!(self, Self::GetAuthState | Self::GetState)
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Self::GetAuthState => "get_auth_state",
@@ -219,8 +237,8 @@ mod tests {
             "item":{"uri":"spotify:track:abc","entity_type":"track","decorations":{"playback":{"duration_ms":123000}}},
             "options":{"shuffle":false,"repeat":"off"}}"#;
         let Some(Event::State { status, item, position, volume, active }) = Event::parse(state) else { panic!() };
-        assert_eq!(status, Status::Playing);
-        assert_eq!(item, Some(Item { uri: "spotify:track:abc".into(), duration_ms: Some(123_000) }));
+        assert_eq!(status, Some(Status::Playing));
+        assert_eq!(item, Some(Some(Item { uri: "spotify:track:abc".into(), duration_ms: Some(123_000) })));
         assert_eq!(position.unwrap().at(1500), 2800);
         assert_eq!((volume, active), (Some(52), Some(true)));
         assert_eq!(
@@ -234,6 +252,29 @@ mod tests {
         );
         assert_eq!(Event::parse(r#"{"type":"queue_changed","previous":[],"upcoming":[]}"#), Some(Event::Other("queue_changed".into())));
         assert_eq!(Event::parse("not json"), None);
+    }
+
+    #[test]
+    fn missing_fields_and_unknown_statuses_change_nothing() {
+        let Some(Event::State { status, item, .. }) = Event::parse(r#"{"type":"playback_state","status":"seeking"}"#) else {
+            panic!()
+        };
+        assert_eq!((status, item), (None, None), "unknown status, no item field");
+        let Some(Event::State { status, item, .. }) = Event::parse(r#"{"type":"playback_state","status":"idle","item":null}"#)
+        else {
+            panic!()
+        };
+        assert_eq!((status, item), (Some(Status::Idle), Some(None)), "a null item is cleared");
+        assert_eq!(Event::parse(r#"{"type":"track_changed"}"#), Some(Event::TrackChanged(None)));
+        assert_eq!(
+            Event::parse(r#"{"type":"playback_changed","status":"weird"}"#),
+            Some(Event::Other("playback_changed".into()))
+        );
+        assert_eq!(
+            Event::parse(r#"{"type":"playback_changed","status":"paused"}"#),
+            Some(Event::PlaybackChanged(Status::Paused))
+        );
+        assert!(Command::Play(None).answered() && !Command::GetState.answered());
     }
 
     #[test]

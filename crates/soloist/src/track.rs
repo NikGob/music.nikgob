@@ -10,10 +10,16 @@
 //! other source. Without a capture the source gives silence paced by
 //! Soloist's own position, and Soloist is heard itself.
 //!
+//! The level is undone only once Soloist's session is known to be at it;
+//! until then, and whenever the captured sound is louder than that level
+//! allows (the session is at another level: a new session, the volume
+//! mixer), the copy is silence.
+//!
 //! Soloist has no "track ended" event. The end is read from its state: the
 //! item changes to another one (it went on by itself: it is paused at once,
-//! our queue decides what comes next), it goes idle, or it stops at the end
-//! of the track without having been paused by us.
+//! our queue decides what comes next), it goes idle, it stops (or goes back
+//! to the start) after reaching the end of the track without having been
+//! paused by us, or its position runs past the end.
 //!
 //! The engine reads on its decoder thread every few milliseconds while a
 //! read is [`PcmRead::Pending`]; nothing here blocks.
@@ -32,6 +38,12 @@ pub const CHANNELS: u16 = 2;
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a seek may take to show in Soloist's position.
 const SEEK_TIMEOUT: Duration = Duration::from_secs(4);
+/// With no sign that Soloist started our request, the state counts as
+/// ours after this long.
+const FRESH_FALLBACK: Duration = Duration::from_secs(2);
+/// A position this close to the start, sent after our request, is the
+/// start of what we asked for (the same track again included).
+const NEAR_START_MS: u64 = 1500;
 /// Captured sound held before the first frames go to the engine: enough
 /// for the capture's 10 ms packets to arrive unevenly without the engine
 /// running dry, little enough to keep the copy close to what is heard.
@@ -41,6 +53,15 @@ pub const PREBUFFER_MS: u64 = 40;
 pub const DRIFT_MS: u64 = 160;
 /// A pause this close to the track's end is its end.
 const END_SLACK_MS: u64 = 1500;
+/// A position this far past the track's end is its end, whatever the
+/// status says.
+const OVERRUN_MS: u64 = 3000;
+/// Back this far from the furthest point after reaching the end, without
+/// a seek of ours: it went round to the start, the track is over.
+const REWIND_MS: u64 = 10_000;
+/// A captured sample above this many times the session level cannot have
+/// come through it (full scale is 1): the session is at another level.
+const TOO_LOUD: f32 = 8.0;
 
 /// What a track needs of Soloist (the manager; a fake in tests).
 pub trait Link: Send + Sync + 'static {
@@ -52,7 +73,8 @@ pub trait Link: Send + Sync + 'static {
     fn clear_captured(&self);
     /// Drops all but the newest `frames` captured frames.
     fn keep_captured(&self, frames: usize);
-    /// The gain the capture went through after Soloist (its session level).
+    /// The gain the capture went through after Soloist (its session level);
+    /// 0 while that level is not known.
     fn capture_gain(&self) -> f32;
     /// The engine paused Soloist (a pause near the end is not an end then).
     fn paused_by_us(&self) -> bool;
@@ -60,6 +82,9 @@ pub trait Link: Send + Sync + 'static {
     fn playing(&self, delta: i32);
     /// Called while the track starts: Soloist's output gets its level.
     fn prepare_output(&self) {}
+    /// The captured sound is louder than [`Link::capture_gain`] allows:
+    /// the session is not at that level, it is set again.
+    fn session_wrong(&self) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,10 +103,14 @@ pub struct SoloistTrack {
     phase: Phase,
     counted: bool,
     prebuffered: bool,
+    /// Whether the last frames came from the capture (`None`: none yet).
+    capturing: Option<bool>,
     /// Without a capture: Soloist's position where silence counting began,
     /// and the frames of silence given since.
     base_ms: u64,
     given: u64,
+    /// The furthest position seen while playing.
+    max_pos: u64,
     /// A seek asked for before the track started.
     pending_seek: Option<u64>,
 }
@@ -96,6 +125,33 @@ fn err(text: &str) -> PcmError {
     text.to_owned().into()
 }
 
+/// The refusal that answers our `play` asked at `at`: a refusal of another
+/// command, or one after the play was accepted, is not.
+fn refusal(view: &LiveView, at: Instant) -> Option<&str> {
+    let (message, when) = view.error.as_ref()?;
+    if *when < at {
+        return None;
+    }
+    let ours = match view.error_command {
+        Some(c) => c == "play",
+        None => !view.play_accepted.is_some_and(|p| p >= at && p <= *when),
+    };
+    ours.then_some(message.as_str())
+}
+
+/// Soloist (re)started something after our request at `at`: a position
+/// near the start came after it, or a position came after the play was
+/// accepted. This is how the same track played again is told from the
+/// play before.
+fn restarted(view: &LiveView, at: Instant) -> bool {
+    let Some(anchor_at) = view.anchor_at.filter(|t| *t >= at) else {
+        return false;
+    };
+    let near_start = view.anchor.is_some_and(|a| a.position_ms < NEAR_START_MS);
+    let after_accept = view.play_accepted.is_some_and(|p| p >= at && anchor_at >= p);
+    near_start || after_accept
+}
+
 impl SoloistTrack {
     /// `uri`: `spotify:track:…`; `duration`: the length the library knows.
     pub fn new(link: Arc<dyn Link>, uri: String, duration: Option<Duration>) -> Self {
@@ -106,8 +162,10 @@ impl SoloistTrack {
             phase: Phase::Unrequested,
             counted: false,
             prebuffered: false,
+            capturing: None,
             base_ms: 0,
             given: 0,
+            max_pos: 0,
             pending_seek: None,
         }
     }
@@ -124,13 +182,21 @@ impl SoloistTrack {
         view.uri.as_deref() == Some(self.uri.as_str())
     }
 
+    /// Counting starts again from Soloist's position `ms` (a start, a seek,
+    /// a switch between the capture and silence).
+    fn restart_count(&mut self, ms: u64) {
+        self.prebuffered = false;
+        self.base_ms = ms;
+        self.given = 0;
+    }
+
     fn start_playing(&mut self, view: &LiveView) {
         // What was captured before is the track before ours.
         self.link.clear_captured();
         self.phase = Phase::Playing;
-        self.prebuffered = false;
-        self.base_ms = Self::position_ms(view);
-        self.given = 0;
+        let pos = Self::position_ms(view);
+        self.restart_count(pos);
+        self.max_pos = pos;
         if let Some(ms) = self.pending_seek.take() {
             self.seek_to(ms);
         }
@@ -143,21 +209,37 @@ impl SoloistTrack {
     }
 
     /// The track is over by Soloist's state.
-    fn ended(&self, view: &LiveView) -> bool {
+    fn ended(&mut self, view: &LiveView) -> bool {
         if !self.ours(view) || view.status == Status::Idle {
             return true;
         }
-        if view.status == Status::Paused && !self.link.paused_by_us() {
-            let pos = Self::position_ms(view);
-            return self.duration_ms(view).is_some_and(|d| pos + END_SLACK_MS >= d);
+        let pos = Self::position_ms(view);
+        if view.status == Status::Playing {
+            self.max_pos = self.max_pos.max(pos);
         }
-        false
+        let Some(d) = self.duration_ms(view) else { return false };
+        let reached = self.max_pos.max(pos) + END_SLACK_MS >= d;
+        match view.status {
+            // It stops at the end, where it is or back at the start.
+            Status::Paused => reached && !self.link.paused_by_us(),
+            // Past the end (no word from it since), or round to the start.
+            Status::Playing => pos >= d + OVERRUN_MS || (reached && pos + REWIND_MS < self.max_pos),
+            Status::Buffering | Status::Idle => false,
+        }
     }
 
     fn produce(&mut self, view: &LiveView, out: &mut [f32]) -> PcmRead {
         let ch = usize::from(CHANNELS);
         let want = out.len() / ch;
-        match self.link.buffered_frames() {
+        let buffered = self.link.buffered_frames();
+        if self.capturing != Some(buffered.is_some()) {
+            if self.capturing.is_some() {
+                log::info!("soloist: its capture {} mid-track", if buffered.is_some() { "came back" } else { "is gone" });
+            }
+            self.capturing = Some(buffered.is_some());
+            self.restart_count(Self::position_ms(view));
+        }
+        match buffered {
             Some(buffered) => {
                 let pre = (PREBUFFER_MS * u64::from(RATE) / 1000) as usize;
                 if !self.prebuffered {
@@ -173,17 +255,7 @@ impl SoloistTrack {
                 if n == 0 {
                     return PcmRead::Pending;
                 }
-                // The capture comes after the session level, undone here. The level is a plain
-                // float factor before process loopback (the capture at
-                // 1e-6, scaled back, matches the one at 1: see
-                // examples/route_bench.rs), so any level above 0 is undone.
-                let g = self.link.capture_gain();
-                if g > 1e-9 && g < 0.999 {
-                    let k = 1.0 / g;
-                    for s in &mut out[..n] {
-                        *s = (*s * k).clamp(-1.0, 1.0);
-                    }
-                }
+                undo_level(&mut out[..n], self.link.capture_gain(), &*self.link);
                 PcmRead::Frames(n / ch)
             }
             None => {
@@ -199,6 +271,31 @@ impl SoloistTrack {
                 PcmRead::Frames(n)
             }
         }
+    }
+}
+
+/// Undoes the session level `gain` the captured `block` went through. The
+/// level is a plain float factor before process loopback (the capture at
+/// 1e-6, scaled back, matches the one at 1: see examples/route_bench.rs).
+/// An unknown level (0), or a block louder than the level allows, gives
+/// silence: scaled up by the wrong factor it would be loud clipped noise.
+fn undo_level(block: &mut [f32], gain: f32, link: &dyn Link) {
+    if !gain.is_finite() || gain <= 0.0 {
+        block.fill(0.0);
+        return;
+    }
+    if gain >= 0.999 {
+        return;
+    }
+    let limit = gain * TOO_LOUD;
+    if block.iter().any(|s| s.abs() > limit) {
+        block.fill(0.0);
+        link.session_wrong();
+        return;
+    }
+    let k = 1.0 / gain;
+    for s in block {
+        *s = (*s * k).clamp(-1.0, 1.0);
     }
 }
 
@@ -240,14 +337,13 @@ impl PcmSource for SoloistTrack {
                 if !view.ready {
                     return Err(err("Spotify Soloist отключился"));
                 }
-                if let Some((m, when)) = &view.error
-                    && *when >= at
-                {
+                if let Some(m) = refusal(&view, at) {
                     return Err(format!("Spotify Soloist: {m}").into());
                 }
                 // The state may still show the track before ours (or ours
-                // from before): it counts once an item came after the request.
-                let fresh = view.track_changes > changes || at.elapsed() > Duration::from_secs(2);
+                // from before): it counts once an item came after the
+                // request, or a restart of ours shows.
+                let fresh = view.track_changes > changes || restarted(&view, at) || at.elapsed() > FRESH_FALLBACK;
                 if fresh && self.ours(&view) && view.status == Status::Playing {
                     self.start_playing(&view);
                 } else if at.elapsed() > START_TIMEOUT {
@@ -265,9 +361,9 @@ impl PcmSource for SoloistTrack {
                 if there || at.elapsed() > SEEK_TIMEOUT {
                     self.link.clear_captured();
                     self.phase = Phase::Playing;
-                    self.prebuffered = false;
-                    self.base_ms = if there { pos } else { target_ms };
-                    self.given = 0;
+                    let from = if there { pos } else { target_ms };
+                    self.restart_count(from);
+                    self.max_pos = from;
                 } else {
                     return Ok(PcmRead::Pending);
                 }
@@ -336,6 +432,7 @@ mod tests {
         gain: Mutex<f32>,
         paused_by_us: Mutex<bool>,
         playing: Mutex<i32>,
+        wrong: Mutex<u32>,
     }
 
     impl Fake {
@@ -367,6 +464,15 @@ mod tests {
                 v.status = Status::Playing;
                 v.duration_ms = Some(200_000);
                 v.anchor = Some(Anchor { position_ms: ms, timestamp_ms: now_ms(), speed: 1.0 });
+                v.anchor_at = Some(Instant::now());
+            });
+        }
+        /// Soloist's position is `ms` (moving while it plays), as of now.
+        fn at(&self, ms: u64) {
+            self.set(|v| {
+                let speed = if v.status == Status::Playing { 1.0 } else { 0.0 };
+                v.anchor = Some(Anchor { position_ms: ms, timestamp_ms: now_ms(), speed });
+                v.anchor_at = Some(Instant::now());
             });
         }
     }
@@ -412,12 +518,26 @@ mod tests {
         fn playing(&self, delta: i32) {
             *self.playing.lock().unwrap() += delta;
         }
+        fn session_wrong(&self) {
+            *self.wrong.lock().unwrap() += 1;
+        }
     }
 
     const URI: &str = "spotify:track:ours";
 
     fn track(f: &Arc<Fake>) -> SoloistTrack {
         SoloistTrack::new(f.clone(), URI.into(), Some(Duration::from_secs(200)))
+    }
+
+    /// A track of `f`, requested and started at 0, its capture flowing.
+    fn started(f: &Arc<Fake>) -> SoloistTrack {
+        let mut t = track(f);
+        let mut buf = vec![0f32; 960];
+        t.read(&mut buf).unwrap();
+        f.plays(URI, 0);
+        t.read(&mut buf).unwrap();
+        f.sent();
+        t
     }
 
     #[test]
@@ -446,13 +566,40 @@ mod tests {
     }
 
     #[test]
-    fn another_item_or_idle_ends_the_track_and_autoplay_is_paused() {
+    fn the_same_track_again_starts_on_its_new_position() {
         let f = Fake::new(true);
+        f.plays(URI, 90_000);
         let mut t = track(&f);
         let mut buf = vec![0f32; 960];
         t.read(&mut buf).unwrap();
-        f.plays(URI, 0);
+        f.capture(4000, 0.1);
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::Pending, "still the play before, at 1:30");
+        f.at(90_050);
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::Pending, "a position of the play before");
+        f.at(0);
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::Pending, "started again: the old capture is dropped");
+        assert_eq!(f.buffered_frames(), Some(0));
+        f.capture(4000, 0.1);
+        assert!(matches!(t.read(&mut buf).unwrap(), PcmRead::Frames(_)));
+
+        // A position after the play was accepted counts too.
+        let f = Fake::new(true);
+        f.plays(URI, 90_000);
+        let mut t = track(&f);
         t.read(&mut buf).unwrap();
+        f.set(|v| v.play_accepted = Some(Instant::now()));
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::Pending);
+        f.at(3_000);
+        t.read(&mut buf).unwrap();
+        f.capture(4000, 0.1);
+        assert!(matches!(t.read(&mut buf).unwrap(), PcmRead::Frames(_)));
+    }
+
+    #[test]
+    fn another_item_or_idle_ends_the_track_and_autoplay_is_paused() {
+        let f = Fake::new(true);
+        let mut t = started(&f);
+        let mut buf = vec![0f32; 960];
         f.capture(4000, 0.1);
         assert!(matches!(t.read(&mut buf).unwrap(), PcmRead::Frames(_)));
         f.sent();
@@ -464,10 +611,7 @@ mod tests {
         assert!(f.sent().is_empty(), "an ended track does not pause again");
 
         let f = Fake::new(false);
-        let mut t = track(&f);
-        t.read(&mut buf).unwrap();
-        f.plays(URI, 0);
-        t.read(&mut buf).unwrap();
+        let mut t = started(&f);
         f.set(|v| v.status = Status::Idle);
         assert_eq!(t.read(&mut buf).unwrap(), PcmRead::End);
     }
@@ -475,11 +619,8 @@ mod tests {
     #[test]
     fn a_pause_at_the_end_is_the_end_unless_we_paused() {
         let f = Fake::new(false);
-        let mut t = track(&f);
+        let mut t = started(&f);
         let mut buf = vec![0f32; 960];
-        t.read(&mut buf).unwrap();
-        f.plays(URI, 0);
-        t.read(&mut buf).unwrap();
         f.set(|v| {
             v.status = Status::Paused;
             v.anchor = Some(Anchor { position_ms: 199_500, timestamp_ms: now_ms(), speed: 0.0 });
@@ -487,6 +628,42 @@ mod tests {
         *f.paused_by_us.lock().unwrap() = true;
         assert_ne!(t.read(&mut buf).unwrap(), PcmRead::End, "our own pause");
         *f.paused_by_us.lock().unwrap() = false;
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::End);
+    }
+
+    #[test]
+    fn the_end_shows_after_a_rewind_or_a_position_past_it() {
+        let mut buf = vec![0f32; 960];
+        // It reached the end, then paused back at the start.
+        let f = Fake::new(false);
+        let mut t = started(&f);
+        f.at(199_200);
+        assert_ne!(t.read(&mut buf).unwrap(), PcmRead::End);
+        f.set(|v| v.status = Status::Paused);
+        f.at(0);
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::End);
+
+        // ... or went round to the start, still playing.
+        let f = Fake::new(false);
+        let mut t = started(&f);
+        f.at(199_200);
+        t.read(&mut buf).unwrap();
+        f.at(200);
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::End);
+
+        // A pause in the middle and back to the start is not the end.
+        let f = Fake::new(false);
+        let mut t = started(&f);
+        f.at(60_000);
+        t.read(&mut buf).unwrap();
+        f.set(|v| v.status = Status::Paused);
+        f.at(0);
+        assert_ne!(t.read(&mut buf).unwrap(), PcmRead::End);
+
+        // No word from it while its position runs past the end.
+        let f = Fake::new(false);
+        let mut t = started(&f);
+        f.at(203_500);
         assert_eq!(t.read(&mut buf).unwrap(), PcmRead::End);
     }
 
@@ -506,6 +683,20 @@ mod tests {
         let total = n + if let PcmRead::Frames(m) = first { m } else { 0 };
         assert!((11_500..=12_600).contains(&total), "{total}");
         assert!(buf[..n * 2].iter().all(|s| *s == 0.0));
+    }
+
+    #[test]
+    fn a_capture_lost_mid_track_counts_silence_from_there() {
+        let f = Fake::new(true);
+        let mut t = started(&f);
+        let mut buf = vec![1f32; 48_000 * 2];
+        f.capture(4000, 0.1);
+        assert!(matches!(t.read(&mut buf).unwrap(), PcmRead::Frames(_)));
+        // A minute on, the capture is gone.
+        *f.captured.lock().unwrap() = None;
+        f.at(60_000);
+        let r = t.read(&mut buf).unwrap();
+        assert!(matches!(r, PcmRead::Pending | PcmRead::Frames(0..=480)), "not a minute of silence at once: {r:?}");
     }
 
     #[test]
@@ -558,16 +749,75 @@ mod tests {
     }
 
     #[test]
+    fn only_a_refusal_of_the_play_fails_the_track() {
+        let mut buf = vec![0f32; 960];
+        // Of another command (activate goes out first).
+        let f = Fake::new(true);
+        let mut t = track(&f);
+        t.read(&mut buf).unwrap();
+        f.set(|v| {
+            v.error = Some(("no active device".into(), Instant::now()));
+            v.error_command = Some("activate");
+        });
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::Pending);
+
+        // After the play was accepted, of something unknown.
+        let f = Fake::new(true);
+        let mut t = track(&f);
+        t.read(&mut buf).unwrap();
+        f.set(|v| v.play_accepted = Some(Instant::now()));
+        f.set(|v| v.error = Some(("rate limited".into(), Instant::now())));
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::Pending);
+
+        // Of the play itself.
+        let f = Fake::new(true);
+        let mut t = track(&f);
+        t.read(&mut buf).unwrap();
+        f.set(|v| {
+            v.error = Some(("track unavailable".into(), Instant::now()));
+            v.error_command = Some("play");
+        });
+        assert!(t.read(&mut buf).unwrap_err().to_string().contains("track unavailable"));
+    }
+
+    #[test]
     fn the_visualizer_copy_keeps_its_level_at_a_lower_volume() {
         let f = Fake::new(true);
         *f.gain.lock().unwrap() = 0.125;
-        let mut t = track(&f);
+        let mut t = started(&f);
         let mut buf = vec![0f32; 960];
-        t.read(&mut buf).unwrap();
-        f.plays(URI, 0);
-        t.read(&mut buf).unwrap();
         f.capture(4000, 0.05);
         assert!(matches!(t.read(&mut buf).unwrap(), PcmRead::Frames(_)));
         assert!((buf[0] - 0.4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_routed_level_is_undone_only_when_the_sound_fits_it() {
+        let mut buf = vec![1f32; 960];
+        // The session level is not known yet: silence.
+        let f = Fake::new(true);
+        *f.gain.lock().unwrap() = 0.0;
+        let mut t = started(&f);
+        f.capture(4000, 0.3);
+        assert!(matches!(t.read(&mut buf).unwrap(), PcmRead::Frames(_)));
+        assert!(buf.iter().all(|s| *s == 0.0));
+
+        // At 1e-6: scaled back.
+        let f = Fake::new(true);
+        *f.gain.lock().unwrap() = 1e-6;
+        let mut t = started(&f);
+        f.capture(4000, 2e-7);
+        assert!(matches!(t.read(&mut buf).unwrap(), PcmRead::Frames(_)));
+        assert!((buf[0] - 0.2).abs() < 1e-4, "{}", buf[0]);
+        assert_eq!(*f.wrong.lock().unwrap(), 0);
+
+        // Louder than 1e-6 allows (the session is at another level): silence,
+        // and the level is set again.
+        f.clear_captured();
+        f.capture(4000, 0.01);
+        buf.fill(1.0);
+        assert!(matches!(t.read(&mut buf).unwrap(), PcmRead::Frames(_)));
+        assert!(buf.iter().all(|s| *s == 0.0));
+        assert!(*f.wrong.lock().unwrap() > 0);
     }
 }
