@@ -952,8 +952,12 @@ fn lyrics_align(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Com
 
     group(ui, "Модели, которые слушают голос");
     // Says only where the models really run when that is not the choice.
-    let device = (a.on_gpu == Some(false) && p.lyrics_gpu).then_some("Видеокарта недоступна, считает процессор");
-    row(ui, Id::LyricsGpu, "Где считать", device, |ui| choice(ui, Id::LyricsGpu, p));
+    // The GPU is DirectML's, Windows' own: elsewhere the CPU is the only
+    // choice, so there is none to show.
+    if cfg!(windows) {
+        let device = (a.on_gpu == Some(false) && p.lyrics_gpu).then_some("Видеокарта недоступна, считает процессор");
+        row(ui, Id::LyricsGpu, "Где считать", device, |ui| choice(ui, Id::LyricsGpu, p));
+    }
     row(ui, Id::LyricsSeparate, "Отделять голос от музыки, чтобы слова ложились точнее", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_separate).id_salt("set-lyrics-separate"));
     });
