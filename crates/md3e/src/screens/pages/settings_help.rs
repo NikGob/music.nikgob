@@ -409,6 +409,13 @@ impl SettingId {
         }
     }
 
+    /// Not tested by users yet: the row carries a «Бета» mark and its card
+    /// says so.
+    pub fn beta(self) -> bool {
+        use SettingId::*;
+        matches!(self, ImportSpotify | ImportYouTube | ImportFiles | LyricsRecognize)
+    }
+
     /// One line on what the option changes.
     pub fn help(self) -> &'static str {
         use SettingId::*;
@@ -1663,6 +1670,9 @@ struct Layout {
     close: bool,
 }
 
+/// The first words of a [`SettingId::beta`] row's card.
+const BETA_CARD: &str = "Функция в бета-тестировании. ";
+
 /// Room for the close button beside the title.
 const CLOSE_W: f32 = 32.0;
 
@@ -1673,12 +1683,13 @@ impl Layout {
         let choices = row.id.choices();
         let kind = if body == Body::All { None } else { row.id.preview() };
         let (title, help) = match body {
-            Body::Option(i) => (format!("{} · {}", row.label, choices[i].label), choices[i].help),
-            _ => (row.label.clone(), row.id.help()),
+            Body::Option(i) => (format!("{} · {}", row.label, choices[i].label), choices[i].help.to_owned()),
+            _ if row.id.beta() => (row.label.clone(), BETA_CARD.to_owned() + row.id.help()),
+            _ => (row.label.clone(), row.id.help().to_owned()),
         };
         let close_w = if pinned { CLOSE_W } else { 0.0 };
         let title = para(&painter, TypeRole::TitleSmall, &title, s.on_surface, CARD_W - close_w);
-        let help = para(&painter, TypeRole::BodyMedium, help, s.on_surface_variant, CARD_W);
+        let help = para(&painter, TypeRole::BodyMedium, &help, s.on_surface_variant, CARD_W);
         let texts: Vec<(Arc<Galley>, Arc<Galley>)> = if body == Body::All {
             choices
                 .iter()

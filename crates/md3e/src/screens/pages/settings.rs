@@ -35,8 +35,22 @@ fn row_label(ui: &mut Ui, id: Id, label: &str) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(TypeRole::BodyLarge.style().rich(label, s.on_surface));
+        if id.beta() {
+            beta_mark(ui);
+        }
         settings_help::help_button(ui, id);
     });
+}
+
+/// «Бета» after a row's label: a 16 dp outlined label-small mark.
+fn beta_mark(ui: &mut Ui) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let galley = ui.painter().layout_no_wrap("Бета".to_owned(), TypeRole::LabelSmall.font_id(), s.tertiary);
+    let size = egui::vec2(galley.size().x + 12.0, 16.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter();
+    p.rect_stroke(rect, rect.height() * 0.5, egui::Stroke::new(1.0, s.tertiary), egui::StrokeKind::Inside);
+    p.galley(rect.center() - galley.size() * 0.5, galley, s.tertiary);
 }
 
 /// The control, reported so the row's cards line up with it. Beside the
