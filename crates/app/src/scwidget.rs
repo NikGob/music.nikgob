@@ -75,11 +75,46 @@ mod host {
     use winit::platform::windows::WindowAttributesExtWindows as _;
     use winit::window::{Window, WindowId};
     use wry::http::Response;
-    use wry::{NewWindowResponse, PageLoadEvent, WebContext, WebView, WebViewBuilder};
+    use wry::{NewWindowResponse, PageLoadEvent, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows as _};
 
     use super::{Command, Event, read_stdin, say};
 
     const ORIGIN: &str = "http://scwidget.localhost/";
+    /// wry's own defaults (they are replaced by any arguments given), plus
+    /// no media keys: the keyboard's play/pause and the system's media
+    /// flyout never reach the widget, only the app pauses it.
+    const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,HardwareMediaKeyHandling \
+                                --autoplay-policy=no-user-gesture-required";
+
+    /// Keeps the off-screen window out of Alt+Tab and Task View (a tool
+    /// window; the taskbar already leaves it out).
+    #[allow(unsafe_code)]
+    fn hide_from_switcher(window: &Window) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+            SetWindowLongPtrW, SetWindowPos, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        };
+        use winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+        let Ok(handle) = window.window_handle() else { return };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+        let hwnd = h.hwnd.get() as *mut core::ffi::c_void;
+        // SAFETY: the window is ours and alive; only its extended style
+        // changes, then its frame is refreshed without moving or activating.
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            let style = (style | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style);
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
 
     enum Msg {
         Command(Command),
@@ -161,6 +196,7 @@ mod host {
                 .with_skip_taskbar(true)
                 .with_visible(true);
             let window = el.create_window(attrs).map_err(|e| e.to_string())?;
+            hide_from_switcher(&window);
             let up = self.proxy.clone();
             let webview = WebViewBuilder::new_with_web_context(&mut self.context)
                 .with_custom_protocol("scwidget".into(), |_, _| {
@@ -172,6 +208,7 @@ mod host {
                 })
                 .with_url(ORIGIN)
                 .with_autoplay(true)
+                .with_additional_browser_args(BROWSER_ARGS)
                 .with_ipc_handler(move |req| {
                     let body = req.body();
                     match Event::parse(body) {

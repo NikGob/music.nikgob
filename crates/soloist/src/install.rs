@@ -427,14 +427,12 @@ fn unpack(bytes: &[u8], zipped: bool, dest: &Path) -> Result<(), InstallError> {
     Ok(())
 }
 
-/// Whether the signer's name (the certificate's display name, «Spotify AB»)
-/// is Spotify's.
+/// Whether a name of the signer's certificate (its display name or its
+/// Organization) is exactly Spotify's, «Spotify AB» (the Windows builds are
+/// signed `CN=Spotify AB, O=Spotify AB, L=Stockholm, C=SE`).
 #[cfg_attr(not(windows), allow(dead_code))]
 fn spotify_signer(name: &str) -> bool {
-    name.split_whitespace()
-        .next()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
-        .is_some_and(|w| w.eq_ignore_ascii_case("spotify"))
+    name.trim().eq_ignore_ascii_case("Spotify AB")
 }
 
 /// Authenticode: the executable carries a valid signature that chains to a
@@ -446,7 +444,9 @@ mod signature {
     use std::path::Path;
 
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::Security::Cryptography::{CERT_NAME_SIMPLE_DISPLAY_TYPE, CertGetNameStringW};
+    use windows::Win32::Security::Cryptography::{
+        CERT_NAME_ATTR_TYPE, CERT_NAME_SIMPLE_DISPLAY_TYPE, CertGetNameStringW, szOID_ORGANIZATION_NAME,
+    };
     use windows::Win32::Security::WinTrust::{
         WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
         WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE, WTHelperGetProvSignerFromChain,
@@ -482,17 +482,20 @@ mod signature {
             return Err(format!("подпись не прошла проверку (0x{:08x})", status as u32));
         }
         match signer {
-            Some(name) if super::spotify_signer(&name) => Ok(()),
-            Some(name) => Err(format!("подписано «{name}»")),
+            Some((name, org)) if super::spotify_signer(&name) || org.as_deref().is_some_and(super::spotify_signer) => {
+                Ok(())
+            }
+            Some((name, _)) => Err(format!("подписано «{name}»")),
             None => Err("подписавший не известен".into()),
         }
     }
 
-    /// The display name of the first signer's certificate.
+    /// The display name and the Organization of the first signer's
+    /// certificate.
     ///
     /// SAFETY: `data` was verified with `WTD_STATEACTION_VERIFY` and its state
     /// is not closed yet.
-    unsafe fn signer_name(data: &WINTRUST_DATA) -> Option<String> {
+    unsafe fn signer_name(data: &WINTRUST_DATA) -> Option<(String, Option<String>)> {
         unsafe {
             let provider = WTHelperProvDataFromStateData(data.hWVTStateData);
             if provider.is_null() {
@@ -506,11 +509,16 @@ mod signature {
             if cert.is_null() {
                 return None;
             }
-            let mut buf = [0u16; 256];
-            let n = CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, None, Some(&mut buf)) as usize;
-            // The count includes the closing zero.
-            let name = String::from_utf16_lossy(&buf[..n.saturating_sub(1).min(buf.len())]);
-            (!name.trim().is_empty()).then_some(name)
+            let name_of = |kind: u32, para: Option<*const core::ffi::c_void>| {
+                let mut buf = [0u16; 256];
+                let n = CertGetNameStringW(cert, kind, 0, para, Some(&mut buf)) as usize;
+                // The count includes the closing zero.
+                let name = String::from_utf16_lossy(&buf[..n.saturating_sub(1).min(buf.len())]);
+                (!name.trim().is_empty()).then_some(name)
+            };
+            let name = name_of(CERT_NAME_SIMPLE_DISPLAY_TYPE, None)?;
+            let org = name_of(CERT_NAME_ATTR_TYPE, Some(szOID_ORGANIZATION_NAME.0.cast()));
+            Some((name, org))
         }
     }
 }
@@ -524,7 +532,8 @@ mod tests {
     fn only_spotify_signs_soloist() {
         assert!(spotify_signer("Spotify AB"));
         assert!(spotify_signer("spotify ab"));
-        assert!(spotify_signer("Spotify, Inc."));
+        assert!(!spotify_signer("Spotify, Inc."));
+        assert!(!spotify_signer("Spotify AB Fake"));
         assert!(!spotify_signer("Spotifyy AB"));
         assert!(!spotify_signer("Not Spotify AB"));
         assert!(!spotify_signer(""));

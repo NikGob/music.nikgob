@@ -541,6 +541,12 @@ pub fn set_sessions_read_back(pids: &[u32], mute: Option<bool>, volume: Option<f
 /// `pid` and every process it started, and the ones those started, as
 /// running now (a WebView2's audio service is a grandchild of its host).
 /// Just `pid` when the processes cannot be listed.
+///
+/// A parent's id may have been reused since its child started, which would
+/// pull an unrelated program into the tree (and its sessions down to the
+/// routed level). With `pid` in our job object only the job's processes
+/// count (everything `pid` started is in it); otherwise a child counts only
+/// if it started after its parent.
 pub fn process_tree(pid: u32) -> Vec<u32> {
     let mut parents: Vec<(u32, u32)> = Vec::new();
     // SAFETY: a process snapshot handle, walked with an entry of the right
@@ -558,11 +564,35 @@ pub fn process_tree(pid: u32) -> Vec<u32> {
         }
         let _ = CloseHandle(snap);
     }
-    tree_of(pid, &parents)
+    match crate::job::members().filter(|m| m.contains(&pid)) {
+        Some(members) => {
+            parents.retain(|(child, _)| members.contains(child));
+            tree_of(pid, &parents, |_, _| true)
+        }
+        None => tree_of(pid, &parents, |child, parent| {
+            matches!((created(child), created(parent)), (Some(c), Some(p)) if c > p)
+        }),
+    }
 }
 
-/// The processes under `root` in a (pid, parent) list, `root` first.
-fn tree_of(root: u32, parents: &[(u32, u32)]) -> Vec<u32> {
+/// When process `pid` started (FILETIME ticks).
+fn created(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: a process handle opened for querying, closed afterwards.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let (mut created, mut exited, mut kernel, mut user) =
+            (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        let ok = GetProcessTimes(process, &raw mut created, &raw mut exited, &raw mut kernel, &raw mut user).is_ok();
+        let _ = CloseHandle(process);
+        ok.then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    }
+}
+
+/// The processes under `root` in a (pid, parent) list, `root` first;
+/// `related(child, parent)` must also hold for a child to count.
+fn tree_of(root: u32, parents: &[(u32, u32)], related: impl Fn(u32, u32) -> bool) -> Vec<u32> {
     let mut out = vec![root];
     let mut i = 0;
     while i < out.len() {
@@ -570,7 +600,7 @@ fn tree_of(root: u32, parents: &[(u32, u32)]) -> Vec<u32> {
         for &(child, parent) in parents {
             // Pid 0 is its own parent; a reused pid may claim a parent that
             // is already listed: each once.
-            if parent == p && child != p && !out.contains(&child) {
+            if parent == p && child != p && !out.contains(&child) && related(child, parent) {
                 out.push(child);
             }
         }
@@ -584,7 +614,9 @@ mod tests {
     #[test]
     fn a_tree_has_children_and_grandchildren_only() {
         let list = [(1, 0), (10, 1), (11, 10), (12, 10), (20, 2), (13, 11), (0, 0)];
-        assert_eq!(super::tree_of(10, &list), vec![10, 11, 12, 13]);
-        assert_eq!(super::tree_of(99, &list), vec![99]);
+        assert_eq!(super::tree_of(10, &list, |_, _| true), vec![10, 11, 12, 13]);
+        assert_eq!(super::tree_of(99, &list, |_, _| true), vec![99]);
+        // 12 is an older program whose parent's id 10 was reused since.
+        assert_eq!(super::tree_of(10, &list, |c, _| c != 12), vec![10, 11, 13]);
     }
 }
