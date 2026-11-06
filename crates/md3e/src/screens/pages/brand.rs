@@ -1,8 +1,9 @@
 //! The app's mark: the NikGob sun over «Made by NikGob». It closes
-//! Настройки (a click opens the author's GitHub) and stands in for Главная
-//! while the page is built at the start of a run.
+//! Настройки (a click opens the author's GitHub), with the version at the
+//! page's right, and stands in for Главная while the page is built at the
+//! start of a run.
 
-use egui::{Color32, CursorIcon, Image, ImageSource, Rect, Sense, Ui, pos2, vec2};
+use egui::{Align2, Color32, CursorIcon, Image, ImageSource, Rangef, Rect, Sense, Ui, pos2, vec2};
 
 use crate::{Theme, TypeRole, components::anim};
 
@@ -16,6 +17,16 @@ const LARGE: f32 = 96.0;
 const GAP: f32 = 8.0;
 /// One breath of the loading mark (seconds).
 const BREATH: f64 = 1.8;
+
+/// What the build calls itself: the version for a handout build (made by
+/// scripts/release.ps1, which sets `NIKGOB_RELEASE`), «admin» for the
+/// owner's own builds.
+pub fn version() -> &'static str {
+    match option_env!("NIKGOB_RELEASE") {
+        Some(_) => env!("CARGO_PKG_VERSION"),
+        None => "admin",
+    }
+}
 
 /// The sun over the label, centred in `rect`'s width from its top;
 /// `alpha` fades both.
@@ -31,23 +42,30 @@ fn height(side: f32) -> f32 {
     side + GAP + TypeRole::LabelLarge.style().line_height
 }
 
-/// The foot of Настройки: the mark, centred; a click opens GitHub.
-pub fn made_by(ui: &mut Ui) {
+/// The foot of Настройки across the page's width `page`: the mark in its
+/// middle (a click opens GitHub), the version at its right on the label's
+/// line.
+pub fn made_by(ui: &mut Ui, page: Rangef) {
     let s = Theme::get(ui.ctx()).scheme;
-    let width = ui.available_width();
-    let (row, _) = ui.allocate_exact_size(vec2(width, height(SMALL) + 32.0), Sense::hover());
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), height(SMALL) + 24.0), Sense::hover());
+    let row = Rect::from_x_y_ranges(page, row.y_range());
     let g = crate::typography::layout(ui.painter(), TypeRole::LabelLarge.style().job(LABEL, s.on_surface_variant));
-    let hit = Rect::from_center_size(row.center(), vec2(g.size().x.max(SMALL) + 24.0, row.height() - 8.0));
+    let top = row.center().y - height(SMALL) / 2.0;
+    let hit = Rect::from_center_size(pos2(row.center().x, top + height(SMALL) / 2.0), vec2(g.size().x.max(SMALL), height(SMALL)));
     let resp = ui
         .interact(hit, ui.id().with("made-by-nikgob"), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
-    if hover > 0.0 {
-        ui.painter().rect_filled(hit, 12.0, s.on_surface.gamma_multiply(0.08 * hover));
-    }
     let color = lerp(s.on_surface_variant, s.on_surface, hover);
-    let top = row.center().y - height(SMALL) / 2.0;
     paint(ui, Rect::from_min_max(pos2(row.left(), top), row.max), SMALL, color, 0.85 + 0.15 * hover);
+    let line = top + SMALL + GAP + TypeRole::LabelLarge.style().line_height / 2.0;
+    ui.painter().text(
+        pos2(row.right() - 16.0, line),
+        Align2::RIGHT_CENTER,
+        version(),
+        TypeRole::LabelSmall.style().font_id(),
+        s.on_surface_variant,
+    );
     if resp.clicked() {
         super::sources::open_url(GITHUB);
     }

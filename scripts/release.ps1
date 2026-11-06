@@ -23,11 +23,15 @@ if ((Test-Path $out) -and -not $Force) {
 
 $target = 'x86_64-pc-windows-msvc'
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
+# A handout build shows its version at the foot of Настройки; the owner's
+# own builds say «admin» there.
+$env:NIKGOB_RELEASE = '1'
 try {
     cargo build --release -p nikgob --target $target --target-dir target\dist
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
 } finally {
     Remove-Item Env:RUSTFLAGS
+    Remove-Item Env:NIKGOB_RELEASE
 }
 
 New-Item -ItemType Directory -Force releases | Out-Null

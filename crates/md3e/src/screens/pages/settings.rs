@@ -256,6 +256,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     let s = Theme::get(ui.ctx()).scheme;
     let mut p: Prefs = state.prefs.clone();
     let before = p.clone();
+    let page = ui.available_rect_before_wrap().x_range();
     ui.set_max_width(ui.available_width().min(840.0));
     ui.add_space(8.0);
     ui.label(TypeRole::HeadlineMedium.style().rich("Настройки", s.on_surface));
@@ -277,7 +278,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     }
     ui.add(Divider::new());
     ui.add_space(16.0);
-    super::brand::made_by(ui);
+    super::brand::made_by(ui, page);
     ui.add_space(8.0);
     settings_help::finish(ui, &mut p);
 
