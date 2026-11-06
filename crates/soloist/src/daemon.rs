@@ -167,6 +167,10 @@ pub async fn run(launch: &Launch, live: &Shared, hooks: &Hooks, mut stop: watch:
     (hooks.commands)(None);
     let _ = child.kill().await;
     let _ = child.wait().await;
+    // Killed, it leaves its discovery files behind.
+    for f in ["ws.port", "ws.addr", "soloist.pid"] {
+        let _ = std::fs::remove_file(launch.data_dir.join(f));
+    }
     (hooks.process)(None);
     {
         let mut l = client::lock(live);

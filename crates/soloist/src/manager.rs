@@ -96,6 +96,8 @@ struct State {
     /// The user asked to stop the current run.
     stop: Option<watch::Sender<bool>>,
     expired_retry_done: bool,
+    /// The app is quitting.
+    closing: bool,
 }
 
 pub struct Soloist {
@@ -180,6 +182,7 @@ impl Soloist {
                 restart_when_idle: false,
                 stop: None,
                 expired_retry_done: false,
+                closing: false,
             }),
             wake: Notify::new(),
             live: Shared::default(),
@@ -270,7 +273,7 @@ impl Soloist {
     /// Spotify is switched on in the settings (or not).
     pub fn set_wanted(&self, on: bool) {
         let mut st = lock(&self.state);
-        if st.wanted != on {
+        if st.wanted != on && !st.closing {
             st.wanted = on;
             drop(st);
             self.wake.notify_one();
@@ -371,7 +374,13 @@ impl Soloist {
 
     /// Stops the child (the app is quitting); waits a moment for it.
     pub fn shutdown(&self) {
-        let stop = lock(&self.state).stop.take();
+        let stop = {
+            let mut st = lock(&self.state);
+            // Nothing starts it again.
+            st.wanted = false;
+            st.closing = true;
+            st.stop.take()
+        };
         if let Some(stop) = stop {
             let _ = stop.send(true);
             let until = Instant::now() + Duration::from_secs(2);
