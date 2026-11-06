@@ -311,7 +311,8 @@ impl Soloist {
             SoloistAction::Enable | SoloistAction::Retry => {
                 st.saved.enabled = true;
                 st.failures = 0;
-                st.download_error = None;
+                // A download that failed is tried again (it was asked for).
+                let download = st.download_error.take().is_some() && st.build.is_none() && st.downloading.is_none();
                 st.expired_retry_done = false;
                 if matches!(st.run, Run::Failed { .. }) {
                     st.run = Run::Idle;
@@ -319,6 +320,9 @@ impl Soloist {
                 let saved = st.saved.clone();
                 drop(st);
                 self.save(&saved);
+                if download && let Some(me) = self.me.upgrade() {
+                    self.rt.spawn(async move { me.download_now().await });
+                }
             }
             SoloistAction::Disable => {
                 st.saved.enabled = false;

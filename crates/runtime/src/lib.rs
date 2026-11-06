@@ -1978,7 +1978,7 @@ impl Worker {
         let current_entry = self.queue.current().map(|e| e.id);
         let audio_service = self.playing_source.and_then(|(_, k)| k.service());
         let audio_quality = self.audio_quality();
-        let soloist = audio_service == Some(Service::Spotify) && self.soloist_ready();
+        let soloist = audio_service == Some(StreamKind::Spotify) && self.soloist_ready();
         // The rows of both lists in one query, before the lock.
         let ids: Vec<TrackId> = upcoming.iter().chain(&history).map(|e| e.track).collect();
         let found = self.lib.get_track_rows(&ids).unwrap_or_default();
