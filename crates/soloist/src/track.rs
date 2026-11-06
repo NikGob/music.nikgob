@@ -172,9 +172,12 @@ impl SoloistTrack {
                     return PcmRead::Pending;
                 }
                 // The capture comes after the session level; the visualizer
-                // should not shrink with the volume.
+                // should not shrink with the volume. The level is a plain
+                // float factor before process loopback (the capture at
+                // 1e-6, scaled back, matches the one at 1: see
+                // examples/route_bench.rs), so any level above 0 is undone.
                 let g = self.link.capture_gain();
-                if g > 1e-4 && g < 0.999 {
+                if g > 1e-9 && g < 0.999 {
                     let k = 1.0 / g;
                     for s in &mut out[..n] {
                         *s = (*s * k).clamp(-1.0, 1.0);

@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
-    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+    AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
     AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
     AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, ActivateAudioInterfaceAsync, DEVICE_STATE_ACTIVE,
@@ -38,9 +38,11 @@ use windows::Win32::System::Com::StructuredStorage::{
 use windows::Win32::System::Com::{
     BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, SetEvent, WaitForSingleObject,
+};
 use windows::Win32::System::Variant::VT_BLOB;
-use windows_core::{IUnknown, Interface, implement};
+use windows_core::{IUnknown, Interface, implement, w};
 
 /// The format asked of the capture; Windows converts to it.
 pub const RATE: u32 = 48_000;
@@ -52,6 +54,52 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// `WAVE_FORMAT_IEEE_FLOAT`.
 const FORMAT_FLOAT: u16 = 3;
 
+/// How the capture thread runs.
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureOptions {
+    /// Join MMCSS's "Pro Audio" class, as the engine's render thread joins
+    /// "Audio" (cpal's `realtime`). The capture wakes every 10 ms; with every
+    /// core busy (14 spinning threads and a 144 Hz frame loop on 12) the
+    /// longest time between two packets was 40 ms at normal priority and
+    /// 11 ms in MMCSS, and the engine's live source only has its small ring
+    /// to cover such a wait.
+    pub mmcss: bool,
+    /// The buffer asked of the capture client. It adds no latency (packets
+    /// come every engine period, 10 ms of 480 frames, however big it is).
+    /// Process loopback reports a buffer of one period whatever is asked,
+    /// yet a thread held up for 40 ms by a fully loaded CPU lost nothing
+    /// (`examples/route_bench.rs`), so the packets queue behind it.
+    pub buffer: Duration,
+}
+
+impl Default for CaptureOptions {
+    fn default() -> Self {
+        Self {
+            mmcss: true,
+            buffer: Duration::from_millis(200),
+        }
+    }
+}
+
+/// What the capture saw, for diagnostics.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CaptureStats {
+    /// The client's buffer, in frames.
+    pub buffer_frames: u32,
+    /// The engine's default period, in 100 ns units.
+    pub period_hns: i64,
+    pub packets: u64,
+    pub min_packet: u32,
+    pub max_packet: u32,
+    /// Packets WASAPI flagged as following lost sound (the thread was late
+    /// beyond the buffer).
+    pub discontinuities: u64,
+    /// The longest time between two wakes that found sound, in µs.
+    pub max_gap_us: u64,
+    /// Whether the thread joined MMCSS.
+    pub mmcss: bool,
+}
+
 struct Shared {
     queue: Mutex<VecDeque<f32>>,
     stop: AtomicBool,
@@ -60,6 +108,7 @@ struct Shared {
     /// Frames of them with any sample other than zero.
     sounding: AtomicU64,
     failure: Mutex<Option<String>>,
+    stats: Mutex<CaptureStats>,
     /// The thread's start-up result, once it has one.
     started: (Mutex<Option<Result<(), String>>>, Condvar),
 }
@@ -78,18 +127,24 @@ impl ProcessCapture {
     /// Starts capturing `pid` and its child processes; returns once the
     /// capture client runs (or could not be made).
     pub fn start(pid: u32) -> Result<Self, String> {
+        Self::start_with(pid, CaptureOptions::default())
+    }
+
+    /// [`start`](Self::start) with the given options.
+    pub fn start_with(pid: u32, options: CaptureOptions) -> Result<Self, String> {
         let shared = Arc::new(Shared {
             queue: Mutex::new(VecDeque::with_capacity(RATE as usize * usize::from(CHANNELS))),
             stop: AtomicBool::new(false),
             frames: AtomicU64::new(0),
             sounding: AtomicU64::new(0),
             failure: Mutex::new(None),
+            stats: Mutex::new(CaptureStats::default()),
             started: (Mutex::new(None), Condvar::new()),
         });
         let s = shared.clone();
         let thread = std::thread::Builder::new()
             .name("soloist-capture".into())
-            .spawn(move || run(pid, &s))
+            .spawn(move || run(pid, options, &s))
             .map_err(|e| e.to_string())?;
         let (lock_, cv) = &shared.started;
         let mut started = lock(lock_);
@@ -150,6 +205,10 @@ impl ProcessCapture {
     /// Frames captured that were not silence.
     pub fn frames_sounding(&self) -> u64 {
         self.shared.sounding.load(Ordering::Acquire)
+    }
+
+    pub fn stats(&self) -> CaptureStats {
+        *lock(&self.shared.stats)
     }
 
     /// Why capture stopped, once it has.
@@ -242,7 +301,7 @@ fn float_format() -> WAVEFORMATEX {
 }
 
 /// The capture client of `pid`'s process tree, initialised and given `event`.
-fn activate(pid: u32, event: &Event) -> Result<(IAudioClient, IAudioCaptureClient), String> {
+fn activate(pid: u32, buffer: Duration, event: &Event) -> Result<(IAudioClient, IAudioCaptureClient), String> {
     let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
         ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
         Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
@@ -298,7 +357,7 @@ fn activate(pid: u32, event: &Event) -> Result<(IAudioClient, IAudioCaptureClien
         client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
             AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-            2_000_000, // 200 ms in 100 ns units
+            (buffer.as_nanos() / 100) as i64,
             0,
             &raw const format,
             None,
@@ -311,7 +370,29 @@ fn activate(pid: u32, event: &Event) -> Result<(IAudioClient, IAudioCaptureClien
     Ok((client, packets))
 }
 
-fn run(pid: u32, shared: &Shared) {
+/// The calling thread in an MMCSS class until dropped.
+struct Mmcss(HANDLE);
+
+impl Mmcss {
+    fn join() -> Option<Self> {
+        let mut index = 0u32;
+        match unsafe { AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &raw mut index) } {
+            Ok(h) => Some(Self(h)),
+            Err(e) => {
+                log::debug!("soloist capture: MMCSS: {e}");
+                None
+            }
+        }
+    }
+}
+
+impl Drop for Mmcss {
+    fn drop(&mut self) {
+        let _ = unsafe { AvRevertMmThreadCharacteristics(self.0) };
+    }
+}
+
+fn run(pid: u32, options: CaptureOptions, shared: &Shared) {
     let started = |r: Result<(), String>| {
         let (m, cv) = &shared.started;
         *lock(m) = Some(r);
@@ -325,11 +406,23 @@ fn run(pid: u32, shared: &Shared) {
         Ok(e) => e,
         Err(e) => return started(Err(e)),
     };
-    let (client, packets) = match activate(pid, &event) {
+    let (client, packets) = match activate(pid, options.buffer, &event) {
         Ok(p) => p,
         Err(e) => return started(Err(e)),
     };
+    let _mmcss = options.mmcss.then(Mmcss::join).flatten();
+    {
+        let mut st = lock(&shared.stats);
+        st.buffer_frames = unsafe { client.GetBufferSize() }.unwrap_or(0);
+        let mut period = 0i64;
+        if unsafe { client.GetDevicePeriod(Some(&raw mut period), None) }.is_ok() {
+            st.period_hns = period;
+        }
+        st.min_packet = u32::MAX;
+        st.mmcss = _mmcss.is_some();
+    }
     started(Ok(()));
+    let mut last_sound: Option<std::time::Instant> = None;
     let cap = RATE as usize * usize::from(CHANNELS) * QUEUE_SECONDS;
     let mut scratch: Vec<f32> = Vec::with_capacity(RATE as usize / 10 * usize::from(CHANNELS));
     let failed = |e: String| {
@@ -369,6 +462,20 @@ fn run(pid: u32, shared: &Shared) {
                 scratch.extend_from_slice(packet);
             }
             let _ = unsafe { packets.ReleaseBuffer(frames) };
+            {
+                let now = std::time::Instant::now();
+                let mut st = lock(&shared.stats);
+                st.packets += 1;
+                st.min_packet = st.min_packet.min(frames);
+                st.max_packet = st.max_packet.max(frames);
+                if flags & (AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32) != 0 {
+                    st.discontinuities += 1;
+                }
+                if let Some(last) = last_sound {
+                    st.max_gap_us = st.max_gap_us.max(now.duration_since(last).as_micros() as u64);
+                }
+                last_sound = Some(now);
+            }
             shared.frames.fetch_add(u64::from(frames), Ordering::AcqRel);
             if scratch.iter().any(|s| *s != 0.0) {
                 shared.sounding.fetch_add(u64::from(frames), Ordering::AcqRel);
