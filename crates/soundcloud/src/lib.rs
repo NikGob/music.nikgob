@@ -1333,6 +1333,21 @@ impl StreamService for Soundcloud {
 
     fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError> {
         let id = num_id(id)?.to_owned();
+        // A DRM-only track fails here, at the open, so the engine can hand
+        // it to SoundCloud's own player; inside the stream's first read the
+        // error would only be a failed read. The listing just shown usually
+        // has the track already.
+        if tokio::runtime::Handle::try_current().is_err() {
+            let inner = Arc::clone(&self.inner);
+            let probe = id.clone();
+            if let Ok(t) = self.runtime.handle().block_on(async move { inner.raw_track(&probe, false).await })
+                && t.playable_transcoding().is_none()
+                && t.drm_only()
+            {
+                log::info!("soundcloud: track {id} has only encrypted streams");
+                return Err(StreamError::Drm);
+            }
+        }
         let inner = Arc::clone(&self.inner);
         let first = Arc::new(AtomicBool::new(true));
         let kbps = Arc::new(AtomicU64::new(160));
