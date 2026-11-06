@@ -30,7 +30,11 @@ pub fn reduced() -> bool {
     static READING: AtomicBool = AtomicBool::new(false);
     if !READING.swap(true, Ordering::AcqRel) {
         let spawned = std::thread::Builder::new().name("reduced-motion".into()).spawn(|| {
-            REDUCED.store(linux::gnome_off().or_else(linux::kde_off).unwrap_or(false), Ordering::Relaxed);
+            // Either desktop's switch counts: GNOME's key reads "on" on KDE
+            // and KDE's file does not exist on GNOME, so the first answer
+            // that says "on" must not hide the other's "off".
+            let off = linux::gnome_off() == Some(true) || linux::kde_off() == Some(true);
+            REDUCED.store(off, Ordering::Relaxed);
             READING.store(false, Ordering::Release);
         });
         if spawned.is_err() {
