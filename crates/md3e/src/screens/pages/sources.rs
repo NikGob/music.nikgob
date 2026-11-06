@@ -42,7 +42,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     let s = Theme::get(ui.ctx()).scheme;
     ui.add_space(12.0);
     ui.label(TypeRole::BodyMedium.style().rich_para(
-        "Бесплатно работают YouTube Music, Deezer и торренты; Spotify — с Premium.",
+        "Бесплатно работают YouTube Music, SoundCloud, Deezer и торренты; Spotify — с Premium.",
         s.on_surface_variant,
     ));
     spotify(ui, state, p, pages, out);
