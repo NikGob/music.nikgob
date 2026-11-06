@@ -1,6 +1,6 @@
 //! ONNX Runtime, loaded from the files the app downloads (never linked):
 //! one environment per process, sessions on the GPU through DirectML (any
-//! DirectX 12 card) or on the CPU.
+//! DirectX 12 card) or on the CPU. Linux has the CPU only.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -24,19 +24,25 @@ pub enum Device {
 static RUNTIME: OnceLock<Result<ort::environment::Environment, String>> = OnceLock::new();
 /// Which runtime folder the process loaded.
 static LOADED_FROM: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// The runtime's library in its folder (see `catalog::RUNTIME`).
+const LIBRARY: &str = if cfg!(target_os = "linux") { "libonnxruntime.so.1.24.4" } else { "onnxruntime.dll" };
+/// DirectML runs the GPU sessions, and it is Windows' own.
+const GPU: bool = cfg!(windows);
 
-/// Loads ONNX Runtime from `dir` (`onnxruntime.dll` and `DirectML.dll`).
-/// DirectML is loaded first by its full path: Windows has an older one of
-/// its own that would be found otherwise.
+/// Loads ONNX Runtime from `dir` (`onnxruntime.dll` and `DirectML.dll`;
+/// on Linux `libonnxruntime.so.1.24.4`). DirectML is loaded first by its
+/// full path: Windows has an older one of its own that would be found
+/// otherwise.
 pub fn load_runtime(dir: &Path) -> Result<(), Error> {
     let got = RUNTIME.get_or_init(|| {
         let dml = dir.join("DirectML.dll");
-        if dml.exists()
+        if GPU
+            && dml.exists()
             && let Err(e) = ort::util::preload_dylib(&dml)
         {
             log::warn!("align: loading DirectML: {e}");
         }
-        let env = ort::init_from(dir.join("onnxruntime.dll"))
+        let env = ort::init_from(dir.join(LIBRARY))
             .map_err(|e| e.to_string())?
             .with_name("nikgob")
             .with_telemetry(false)
@@ -93,7 +99,7 @@ impl Model {
                 .with_memory_pattern(false)
                 .map_err(|e| ort(e.into()))
         };
-        if device == Device::Gpu {
+        if device == Device::Gpu && GPU {
             let gpu = base()?
                 // DirectML wants the memory pattern (above) and this off.
                 .with_parallel_execution(false)

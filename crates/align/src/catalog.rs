@@ -18,7 +18,7 @@ use crate::Error;
 /// A downloadable part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum ModelId {
-    /// ONNX Runtime with DirectML.
+    /// ONNX Runtime with DirectML (the CPU build on Linux).
     Runtime,
     /// MDX-Net vocal separation.
     Separator,
@@ -78,6 +78,7 @@ macro_rules! hf {
     };
 }
 
+#[cfg(not(target_os = "linux"))]
 pub const RUNTIME: ModelSpec = ModelSpec {
     id: ModelId::Runtime,
     dir: "runtime-1.24.4",
@@ -90,6 +91,24 @@ pub const RUNTIME: ModelSpec = ModelSpec {
             "onnxruntime/capi/onnxruntime.dll",
             "onnxruntime/capi/onnxruntime_providers_shared.dll",
             "onnxruntime/capi/DirectML.dll",
+        ],
+    }],
+};
+
+/// The same version's CPU build: DirectML is Windows' own, and the wheel's
+/// manylinux library needs nothing past glibc and libstdc++.
+#[cfg(target_os = "linux")]
+pub const RUNTIME: ModelSpec = ModelSpec {
+    id: ModelId::Runtime,
+    dir: "runtime-1.24.4",
+    files: &[FileSpec {
+        name: "onnxruntime-1.24.4.whl",
+        url: "https://files.pythonhosted.org/packages/6d/ab/5b68110e0460d73fad814d5bd11c7b1ddcce5c37b10177eb264d6a36e331/onnxruntime-1.24.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        size: 17_244_912,
+        sha256: "0d640eb9f3782689b55cfa715094474cd5662f2f137be6a6f847a594b6e9705c",
+        extract: &[
+            "onnxruntime/capi/libonnxruntime.so.1.24.4",
+            "onnxruntime/capi/libonnxruntime_providers_shared.so",
         ],
     }],
 };
