@@ -277,9 +277,10 @@ fn set_as(name: &str, on: bool) -> Result<(), String> {
 }
 
 /// The program the line starts: this exe, or on Linux the Nix wrapper that
-/// ran it. Nix's wrappers run the binary as `.nikgob-wrapped` with their own
-/// path as `argv[0]`, and the binary alone lacks what the wrapper sets up
-/// (GTK's schemas, GIO's TLS module), so the entry starts the wrapper.
+/// ran it. Nix's wrappers run the binary as `.nikgob-wrapped` with the
+/// wrapper's own `argv[0]` (a path, or the bare name it was found by on
+/// `PATH`), and the binary alone lacks what the wrapper sets up (GTK's
+/// schemas, GIO's TLS module), so the entry starts the wrapper.
 fn program() -> std::io::Result<std::path::PathBuf> {
     let exe = std::env::current_exe()?;
     #[cfg(target_os = "linux")]
@@ -287,10 +288,16 @@ fn program() -> std::io::Result<std::path::PathBuf> {
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.starts_with('.') && n.ends_with("-wrapped"))
-        && let Some(wrapper) = std::env::args_os()
-            .next()
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.is_absolute() && p.is_file())
+        && let Some(wrapper) = std::env::args_os().next().map(std::path::PathBuf::from).and_then(|p| {
+            if p.is_absolute() {
+                Some(p)
+            } else if p.components().count() == 1 {
+                std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(&p)).find(|c| c.is_file())
+            } else {
+                None
+            }
+        })
+        && wrapper.is_file()
     {
         return Ok(wrapper);
     }
