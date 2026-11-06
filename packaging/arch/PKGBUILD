@@ -11,17 +11,18 @@ pkgdesc='Desktop music player: a local library with streaming services, lyrics a
 arch=('x86_64')
 url='https://github.com/NikGob/music.nikgob'
 license=('MIT')
-# Linked: GTK, WebKitGTK and their stack (the YouTube Music sign-in window),
-# ALSA (cpal), Wayland. Loaded at run time and so invisible to ldd: libGL and
-# libEGL (glutin), libxkbcommon, and the X11 libraries (winit on X11).
+# Linked (readelf): GTK, WebKitGTK and their stack for the sign-in window
+# and the file dialogs, ALSA under cpal, OpenSSL under native-tls. Loaded
+# with dlopen at run time and so invisible to ldd and namcap: libwayland,
+# libxkbcommon and the X11 libraries (winit), libGL and libEGL (glutin).
 depends=(
   'alsa-lib'
-  'cairo'
-  'gcc-libs'
   'gdk-pixbuf2'
   'glib2'
   'glibc'
   'gtk3'
+  'hicolor-icon-theme'
+  'libgcc'
   'libglvnd'
   'libsoup3'
   'libx11'
@@ -29,7 +30,7 @@ depends=(
   'libxi'
   'libxkbcommon'
   'libxrandr'
-  'pango'
+  'openssl'
   'wayland'
   'webkit2gtk-4.1'
 )
