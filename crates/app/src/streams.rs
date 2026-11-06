@@ -30,11 +30,46 @@ use std::sync::Arc;
 use nikgob_core::settings::StreamingSettings;
 use nikgob_core::streaming::{
     Account, AudioStream, BoxFuture, EntityKind, FakeService, LikedHead, LoginInput, LoginPrompt,
-    Played, SearchKind, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamSearch, StreamService,
-    StreamTrack,
+    Played, SearchKind, Service, SoloistAction, SoloistPhase, SoloistStatus, StreamAlbum, StreamArtist, StreamError,
+    StreamPlaylist, StreamSearch, StreamService, StreamTrack,
 };
 
 pub type Services = Vec<Arc<dyn StreamService>>;
+
+/// The real Spotify's Soloist, for the audio engine (set by [`real`]).
+static SOLOIST: std::sync::OnceLock<Arc<nikgob_soloist::Soloist>> = std::sync::OnceLock::new();
+
+/// Spotify Soloist, when the real Spotify runs.
+pub fn soloist() -> Option<Arc<nikgob_soloist::Soloist>> {
+    SOLOIST.get().cloned()
+}
+
+/// Stops Soloist as the app quits.
+pub fn shutdown() {
+    if let Some(s) = SOLOIST.get() {
+        s.shutdown();
+    }
+}
+
+/// The demo Spotify's Soloist (`NIKGOB_DEMO_SOLOIST`: `absent`, `offer`,
+/// `downloading`, `key`, `pairing`, `ready`, `off`, `failed`), for
+/// screenshots of its setup.
+fn demo_soloist(base: FakeService) -> FakeService {
+    let Ok(mode) = std::env::var("NIKGOB_DEMO_SOLOIST") else {
+        return base;
+    };
+    let phase = match mode.as_str() {
+        "absent" | "offer" => SoloistPhase::Absent,
+        "downloading" => SoloistPhase::Downloading { done: 4_200_000, total: Some(9_780_408) },
+        "key" => SoloistPhase::NeedsKey,
+        "pairing" => SoloistPhase::Pairing,
+        "ready" => SoloistPhase::Ready,
+        "off" => SoloistPhase::Off,
+        "failed" => SoloistPhase::Failed("Soloist остановился".into()),
+        _ => return base,
+    };
+    base.with_soloist(phase, mode == "offer")
+}
 
 /// The real services, their state under `data_dir`.
 pub fn real(data_dir: &Path, secrets: &StreamingSettings) -> Services {
@@ -45,7 +80,13 @@ pub fn real(data_dir: &Path, secrets: &StreamingSettings) -> Services {
     // encrypted by librespot (never decrypted on disk). Bounded by
     // `Prefs::stream_cache_mb`, set by the runtime at start.
     let cache = data_dir.join("cache").join("streams");
-    out.push(nikgob_spotify::Spotify::new(sp).with_audio_cache(cache.join("spotify")));
+    let spotify = nikgob_spotify::Spotify::new(sp)
+        .with_audio_cache(cache.join("spotify"))
+        .with_soloist(data_dir.join("spotify").join("soloist"));
+    if let Some(s) = spotify.soloist_handle() {
+        let _ = SOLOIST.set(s);
+    }
+    out.push(spotify);
     match nikgob_youtube::Youtube::new(nikgob_youtube::YoutubeConfig::new(data_dir.join("youtube"))) {
         Ok(yt) => {
             yt.warm_up();
@@ -101,7 +142,7 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
             .with_new_release("bjork", "aurora", "Aurora", 9)
             // An artist of the demo library: «Новые релизы» has its single.
             .with_new_release("daft", "voyager2", "Voyager 2", 12),
-        Service::Spotify => FakeService::new(service),
+        Service::Spotify => demo_soloist(FakeService::new(service)),
     };
     // Long enough to watch a track play (lyrics, progress) in screenshots.
     base.set_audio_secs(180.0);
@@ -230,6 +271,12 @@ impl StreamService for Shown {
     }
     fn web_url(&self, kind: EntityKind, id: &str) -> String {
         self.inner.web_url(kind, id)
+    }
+    fn soloist(&self) -> Option<SoloistStatus> {
+        self.inner.soloist()
+    }
+    fn soloist_act(&self, action: SoloistAction) {
+        self.inner.soloist_act(action);
     }
     fn search_kind(&self, query: &str, kind: SearchKind) -> BoxFuture<'_, Result<StreamSearch, StreamError>> {
         self.inner.search_kind(query, kind)

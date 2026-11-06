@@ -20,6 +20,7 @@ nikgob-library = { path = "../library" }
 nikgob-recs = { path = "../recs" }
 nikgob-audio = { path = "../audio" }
 nikgob-spotify = { path = "../spotify" }
+nikgob-soloist = { path = "../soloist" }
 nikgob-youtube = { path = "../youtube" }
 nikgob-deezer = { path = "../deezer" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

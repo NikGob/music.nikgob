@@ -671,6 +671,7 @@ impl Worker {
                 recv(pb) -> e => if let Ok(e) = e { self.playback_event(e) },
                 recv(internal) -> m => if let Ok(m) = m { self.internal(m) },
                 recv(fast) -> _ => {
+                    self.soloist_poll();
                     self.poll_torrents();
                     self.poll_share();
                     self.wish_poll_direct();
@@ -1204,6 +1205,7 @@ impl Worker {
             }
             c @ (Command::StreamLogin { .. }
             | Command::StreamLogout(_)
+            | Command::Soloist(_)
             | Command::SetStreamSecrets { .. }
             | Command::SetSearchSources(_)
             | Command::LoadStream(_)
@@ -1976,6 +1978,7 @@ impl Worker {
         let current_entry = self.queue.current().map(|e| e.id);
         let audio_service = self.playing_source.and_then(|(_, k)| k.service());
         let audio_quality = self.audio_quality();
+        let soloist = audio_service == Some(Service::Spotify) && self.soloist_ready();
         // The rows of both lists in one query, before the lock.
         let ids: Vec<TrackId> = upcoming.iter().chain(&history).map(|e| e.track).collect();
         let found = self.lib.get_track_rows(&ids).unwrap_or_default();
@@ -2000,6 +2003,7 @@ impl Worker {
             p.status = status;
             p.audio_service = audio_service;
             p.audio_quality = audio_quality;
+            p.soloist = soloist;
             p.position = position;
             p.at = now;
             p.rate = rate;
@@ -2348,6 +2352,7 @@ impl Worker {
         if (old.spotify_enabled, old.youtube_enabled, old.deezer_enabled)
             != (p.spotify_enabled, p.youtube_enabled, p.deezer_enabled)
         {
+            self.soloist_wanted();
             self.publish_accounts();
             self.preload_next();
         }

@@ -234,6 +234,8 @@ pub(crate) struct Streams {
     web: HashMap<Service, Arc<dyn WebLogin>>,
     web_state: HashMap<Service, web_login::WebState>,
     last_accounts: Vec<v::AccountView>,
+    /// Soloist's status as last published (polled every second).
+    last_soloist: Option<nikgob_core::streaming::SoloistStatus>,
     pub(crate) search: search::SearchState,
     page_seq: u64,
     /// YouTube lookups running / failed recently (unix ms), by track.
@@ -293,6 +295,7 @@ impl Streams {
             web: HashMap::new(),
             web_state: HashMap::new(),
             last_accounts: Vec::new(),
+            last_soloist: None,
             search: search::SearchState::default(),
             page_seq: 0,
             resolving: HashSet::new(),
@@ -444,6 +447,51 @@ impl Worker {
     }
 
 
+    /// Spotify's Soloist, if the registered Spotify has one (switched on
+    /// in the settings or not).
+    fn spotify_soloist(&self) -> Option<(Arc<dyn StreamService>, nikgob_core::streaming::SoloistStatus)> {
+        let s = self.streams.iter().find(|s| s.service() == Service::Spotify)?.clone();
+        let status = s.soloist()?;
+        Some((s, status))
+    }
+
+    /// Spotify's sound comes from Soloist now.
+    pub(crate) fn soloist_ready(&self) -> bool {
+        self.state.read().prefs.spotify_enabled && self.spotify_soloist().is_some_and(|(_, st)| st.ready())
+    }
+
+    /// Soloist runs only while Spotify is switched on.
+    pub(crate) fn soloist_wanted(&mut self) {
+        let on = self.state.read().prefs.spotify_enabled;
+        if let Some(s) = self.streams.iter().find(|s| s.service() == Service::Spotify) {
+            s.set_soloist_wanted(on);
+        }
+    }
+
+    pub(crate) fn soloist_act(&mut self, action: nikgob_core::streaming::SoloistAction) {
+        if let Some((s, _)) = self.spotify_soloist() {
+            s.soloist_act(action);
+        }
+        self.soloist_poll();
+    }
+
+    /// Every second: Soloist's steps (download progress, pairing) show as
+    /// they happen; the accounts are published when it changed.
+    pub(crate) fn soloist_poll(&mut self) {
+        let now = self.spotify_soloist().map(|(_, st)| st);
+        if now != self.streaming.last_soloist {
+            let was_ready = self.streaming.last_soloist.as_ref().is_some_and(|s| s.ready());
+            let ready = now.as_ref().is_some_and(|s| s.ready());
+            self.streaming.last_soloist = now;
+            self.publish_accounts();
+            if was_ready != ready {
+                // What plays next may now come from Soloist, or no longer.
+                self.preload_next();
+                self.publish_now_playing();
+            }
+        }
+    }
+
     /// The services' audio caches follow [`v::Prefs::stream_cache_mb`].
     pub(crate) fn apply_stream_cache(&mut self) {
         let bytes = u64::from(self.state.read().prefs.stream_cache_mb) * 1024 * 1024;
@@ -463,6 +511,7 @@ impl Worker {
     /// Start-up: accounts, the first check of likes (each service as soon
     /// as its login is restored), the wishlist view.
     pub(crate) fn start_streams(&mut self) {
+        self.soloist_wanted();
         self.apply_stream_cache();
         self.retry_clip_misses_once();
         self.publish_accounts();
@@ -539,6 +588,7 @@ impl Worker {
         match c {
             Command::StreamLogin { service, input } => self.stream_login(service, input),
             Command::StreamLogout(service) => self.stream_logout(service),
+            Command::Soloist(action) => self.soloist_act(action),
             Command::SetStreamSecrets {
                 spotify_client_id,
                 youtube_cookies,

@@ -1151,22 +1151,29 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
             p.output_device = if n == 0 { None } else { p.output_devices.get(n - 1).cloned() };
         }
     });
-    row(ui, Id::Gapless, "Без пауз между треками", Some("Треки альбома идут без тишины между ними"), |ui| {
-        ui.add(Switch::new(&mut p.gapless).id_salt("set-gapless"));
-    });
-    row(
-        ui,
-        Id::Crossfade,
-        "Кроссфейд",
-        Some(&if p.crossfade_s < 0.5 { "выключен".to_owned() } else { format!("{:.0} с", p.crossfade_s) }),
-        |ui| {
-            if let Some(v) = range_slider(ui, "set-xfade", p.crossfade_s, (0.0, 12.0), 1.0, |v| format!("{v:.0} с")) {
-                p.crossfade_s = v;
-            }
-        },
-    );
-    row(ui, Id::Normalization, "Нормализация громкости", Some("Все треки примерно одинаково громкие"), |ui| {
-        ui.add(Switch::new(&mut p.normalization).id_salt("set-norm"));
+    // A track Spotify Soloist plays is another program's sound: these do
+    // not apply to it.
+    let soloist = _state.player.soloist;
+    dimmed(ui, soloist, |ui| {
+        row(ui, Id::Gapless, "Без пауз между треками", Some("Треки альбома идут без тишины между ними"), |ui| {
+            ui.add(Switch::new(&mut p.gapless).enabled(!soloist).id_salt("set-gapless"));
+        });
+        row(
+            ui,
+            Id::Crossfade,
+            "Кроссфейд",
+            Some(&if p.crossfade_s < 0.5 { "выключен".to_owned() } else { format!("{:.0} с", p.crossfade_s) }),
+            |ui| {
+                ui.add_enabled_ui(!soloist, |ui| {
+                    if let Some(v) = range_slider(ui, "set-xfade", p.crossfade_s, (0.0, 12.0), 1.0, |v| format!("{v:.0} с")) {
+                        p.crossfade_s = v;
+                    }
+                });
+            },
+        );
+        row(ui, Id::Normalization, "Нормализация громкости", Some("Все треки примерно одинаково громкие"), |ui| {
+            ui.add(Switch::new(&mut p.normalization).enabled(!soloist).id_salt("set-norm"));
+        });
     });
 
     group(ui, "Библиотека");

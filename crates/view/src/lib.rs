@@ -317,6 +317,9 @@ pub struct PlayerView {
     /// ~128 кбит/с", "Vorbis 320 кбит/с"): the source that plays, not the
     /// track's best source. `None` for a local file (its row says).
     pub audio_quality: Option<String>,
+    /// The track plays through Spotify Soloist (another program plays it:
+    /// crossfade, gapless and normalization do not apply).
+    pub soloist: bool,
 }
 
 impl Default for PlayerView {
@@ -335,6 +338,7 @@ impl Default for PlayerView {
             context: None,
             context_page: None,
             audio_service: None,
+            soloist: false,
             audio_quality: None,
         }
     }
@@ -2526,6 +2530,8 @@ pub enum Command {
     /// saved to settings.toml on success.
     StreamLogin { service: Service, input: LoginInput },
     StreamLogout(Service),
+    /// A step of Spotify Soloist's setup ([`AccountView::soloist`]).
+    Soloist(SoloistAction),
     /// Secrets → settings.toml (never into prefs): `None` keeps the value,
     /// `Some("")` clears it.
     SetStreamSecrets {

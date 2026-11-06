@@ -14,7 +14,8 @@ pub use nikgob_core::model::{
 };
 pub use nikgob_core::source::SourceKey;
 pub use nikgob_core::streaming::{
-    Account, EntityKind, LoginInput, LoginPrompt, PlaylistSyncMode, RemoteId, Service, TrackKind,
+    Account, EntityKind, LoginInput, LoginPrompt, PlaylistSyncMode, RemoteId, Service, SoloistAction,
+    SoloistPhase, SoloistStatus, TrackKind,
 };
 
 use crate::{ArtistId, PlaylistId, ReleaseId, ReleaseType, StreamArtistLinks, TrackId};
@@ -56,6 +57,8 @@ pub struct AccountView {
     /// A feed of suggestions needs a new sign-in: «Переподключи Spotify,
     /// чтобы брать твой топ».
     pub suggestions_note: Option<String>,
+    /// Spotify Soloist, for a service that has one.
+    pub soloist: Option<SoloistStatus>,
 }
 
 // ---------------------------------------------------------------- rows

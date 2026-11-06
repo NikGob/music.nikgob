@@ -115,6 +115,8 @@ pub struct Soloist {
     session_applied: AtomicU32,
     /// The engine paused Soloist.
     user_paused: std::sync::atomic::AtomicBool,
+    /// The CDN was asked for the download's size (once a run).
+    size_asked: AtomicU32,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -182,6 +184,7 @@ impl Soloist {
             playing: AtomicU32::new(0),
             session_applied: AtomicU32::new(0),
             user_paused: std::sync::atomic::AtomicBool::new(false),
+            size_asked: AtomicU32::new(0),
         });
         let s = me.clone();
         rt.spawn(async move { s.supervise().await });
@@ -366,7 +369,7 @@ impl Soloist {
 
     /// The size of the download, asked of the CDN once (for the dialog).
     pub fn ask_size(&self) {
-        if lock(&self.state).size.is_some() {
+        if self.size_asked.swap(1, Ordering::AcqRel) != 0 || lock(&self.state).size.is_some() {
             return;
         }
         let Some(me) = self.me.upgrade() else { return };

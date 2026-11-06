@@ -36,6 +36,16 @@
 //! state file from before still listing the shared app's grant has it
 //! deleted on start (see [`Spotify::new`]).
 //!
+//! # Sound through Spotify Soloist
+//!
+//! Spotify refuses librespot's audio keys to many Premium accounts lately
+//! (librespot #1649). Once the user sets up Spotify Soloist (crate
+//! `nikgob-soloist`, turned on by [`Spotify::with_soloist`]; its key is one
+//! more slot of the credential store), the app's engine plays Spotify
+//! tracks through it, the account counts as having sound and the refused
+//! keys no longer send its tracks to YouTube Music. Without it everything
+//! is as before: librespot, then YouTube Music.
+//!
 //! # Quota
 //!
 //! Every grant has its own budget of 4 concurrent requests and its own
@@ -50,6 +60,7 @@ mod cache;
 mod convert;
 mod credentials;
 mod session;
+mod soloist;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -60,7 +71,7 @@ use std::time::{Duration, Instant};
 use librespot_core::authentication::Credentials;
 use nikgob_core::streaming::{
     Account, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput, LoginPrompt, Played,
-    SPOTIFY_PREMIUM_REQUIRED, SearchKind, Service, StreamAlbum, StreamArtist, StreamError,
+    SPOTIFY_PREMIUM_REQUIRED, SearchKind, Service, SoloistAction, SoloistStatus, StreamAlbum, StreamArtist, StreamError,
     StreamPlaylist, StreamSearch, StreamService, StreamTrack, SuggestedArtist, SuggestedTrack,
     SuggestionFeed, SuggestionKind, Suggestions, rank_weight,
 };
@@ -239,6 +250,8 @@ pub struct Spotify {
     opener: Mutex<auth::Opener>,
     /// When connecting the session for reads last failed.
     connect_failed: Mutex<Option<Instant>>,
+    /// Spotify Soloist, once the app turns it on ([`Spotify::with_soloist`]).
+    soloist: OnceLock<Arc<nikgob_soloist::Soloist>>,
 }
 
 /// The system browser; in tests a stub that only logs (a test reads the
@@ -368,6 +381,7 @@ impl Spotify {
             recent: Default::default(),
             opener: Mutex::new(default_opener()),
             connect_failed: Mutex::new(None),
+            soloist: OnceLock::new(),
         });
         let me = spotify.me.clone();
         spotify.web.set_listener(Box::new(move |event| {
@@ -392,6 +406,24 @@ impl Spotify {
     pub fn with_audio_cache(self: Arc<Self>, dir: PathBuf) -> Arc<Self> {
         self.sessions.set_cache_dir(dir);
         self
+    }
+
+    /// Lets Spotify Soloist (kept in `dir`) play this account's tracks once
+    /// the user sets it up; see `nikgob-soloist`.
+    pub fn with_soloist(self: Arc<Self>, dir: PathBuf) -> Arc<Self> {
+        let agent = concat!("nikgob-music/", env!("CARGO_PKG_VERSION")).to_owned();
+        let _ = self.soloist.set(soloist::start(self.store.clone(), dir, agent, self.rt.clone()));
+        self
+    }
+
+    /// The Soloist tracks play through (the app's engine asks it).
+    pub fn soloist_handle(&self) -> Option<Arc<nikgob_soloist::Soloist>> {
+        self.soloist.get().cloned()
+    }
+
+    /// Soloist is paired and running: Spotify's sound comes from it.
+    fn soloist_ready(&self) -> bool {
+        self.soloist.get().is_some_and(|s| s.ready())
     }
 
     fn arc(&self) -> Option<Arc<Self>> {
@@ -452,6 +484,7 @@ impl Spotify {
                     playback = Some(c);
                     kept.push(slot);
                 }
+                Ok(Some(Secret::Soloist(_))) => kept.push(slot),
                 Ok(None) => log::info!("spotify: saved {slot:?} grant is gone"),
                 Err(e) => {
                     // Locked or unavailable: keep the record for the next start.
@@ -587,6 +620,9 @@ impl Spotify {
         }
         self.sessions.close();
         self.clear_caches();
+        if let Some(s) = self.soloist.get() {
+            s.forget_key();
+        }
     }
 
     /// Records the account type a session reports.
@@ -1556,7 +1592,7 @@ impl StreamService for Spotify {
     }
 
     fn audio_refused(&self) -> bool {
-        lock(&self.state).keys_refused()
+        lock(&self.state).keys_refused() && !self.soloist_ready()
     }
 
     fn account(&self) -> Account {
@@ -1578,7 +1614,7 @@ impl StreamService for Spotify {
             return Account::LoggedIn {
                 name,
                 premium,
-                audio: st.playback.is_some() && premium == Some(true),
+                audio: (st.playback.is_some() || self.soloist_ready()) && premium == Some(true),
             };
         }
         if st.restoring {
@@ -1802,6 +1838,31 @@ impl StreamService for Spotify {
     fn save_audio(&self, _id: &str, _dir: &Path) -> BoxFuture<'_, Result<PathBuf, StreamError>> {
         // Never downloaded from Spotify (docs/stage3.md §0).
         Box::pin(async { Err(StreamError::Unsupported) })
+    }
+
+    fn soloist(&self) -> Option<SoloistStatus> {
+        let s = self.soloist.get()?;
+        let mut status = s.status();
+        // The setup is offered once, to a Premium account that is connected.
+        let premium = lock(&self.state).premium() == Some(true) && self.web.has_grant();
+        status.offer &= premium;
+        // Its size, for the dialog that asks before downloading (once).
+        if premium && status.phase == nikgob_core::streaming::SoloistPhase::Absent && status.size.is_none() {
+            s.ask_size();
+        }
+        Some(status)
+    }
+
+    fn soloist_act(&self, action: SoloistAction) {
+        if let Some(s) = self.soloist.get() {
+            s.act(action);
+        }
+    }
+
+    fn set_soloist_wanted(&self, on: bool) {
+        if let Some(s) = self.soloist.get() {
+            s.set_wanted(on);
+        }
     }
 
     fn web_url(&self, kind: EntityKind, id: &str) -> String {

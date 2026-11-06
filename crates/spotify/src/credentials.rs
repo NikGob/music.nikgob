@@ -37,16 +37,19 @@ pub enum Slot {
     Shared,
     Personal,
     Playback,
+    /// The user's own Spotify Soloist key (nikgob-soloist).
+    Soloist,
 }
 
 impl Slot {
-    pub const ALL: [Self; 3] = [Self::Shared, Self::Personal, Self::Playback];
+    pub const ALL: [Self; 4] = [Self::Shared, Self::Personal, Self::Playback, Self::Soloist];
 
     fn name(self) -> &'static str {
         match self {
             Self::Shared => "shared-web",
             Self::Personal => "personal-web",
             Self::Playback => "playback",
+            Self::Soloist => "soloist",
         }
     }
 }
@@ -86,6 +89,7 @@ mod b64 {
 pub enum Secret {
     Web(StoredToken),
     Playback(PlaybackCredential),
+    Soloist(String),
 }
 
 impl Secret {
@@ -97,6 +101,7 @@ impl Secret {
             (Slot::Playback, Self::Playback(c)) => {
                 !c.username.is_empty() && !c.auth_data.is_empty()
             }
+            (Slot::Soloist, Self::Soloist(key)) => !key.is_empty(),
             _ => false,
         }
     }
@@ -273,7 +278,7 @@ type Job = Box<dyn FnOnce(&mut dyn Backend) + Send>;
 #[derive(Clone)]
 pub struct Store {
     jobs: mpsc::Sender<Job>,
-    generations: Arc<[AtomicU64; 3]>,
+    generations: Arc<[AtomicU64; 4]>,
     /// Distinguishes data directories (a test profile from the real one).
     profile: String,
     state_path: PathBuf,
@@ -301,7 +306,7 @@ impl Store {
             .expect("spawn the credential thread");
         Self {
             jobs,
-            generations: Arc::new([AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)]),
+            generations: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
             profile,
             state_path: dir.join("state.json"),
         }
