@@ -161,6 +161,12 @@ fn search_key(query: &str) -> String {
         .to_lowercase()
 }
 
+/// How long the tracks of an account whose audio keys Spotify refused
+/// play from YouTube Music before Spotify is asked again.
+pub const KEYS_RETRY: Duration = Duration::from_secs(12 * 3600);
+/// Refusals in a row that mean the account's, not the track's.
+const KEY_REFUSALS: u32 = 2;
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -177,9 +183,18 @@ struct AccountState {
     /// `Some` while a login waits for the browser.
     prompt: Option<Option<LoginPrompt>>,
     failure: Option<String>,
+    /// Audio keys refused in a row since the last track that opened.
+    key_refusals: u32,
 }
 
 impl AccountState {
+    /// Spotify refuses this account's audio keys lately ([`KEYS_RETRY`]).
+    fn keys_refused(&self) -> bool {
+        self.saved
+            .keys_refused_at
+            .is_some_and(|at| now_secs().saturating_sub(at) < KEYS_RETRY.as_secs())
+    }
+
     fn premium(&self) -> Option<bool> {
         self.saved.session_premium.or_else(|| {
             self.saved
@@ -1464,6 +1479,7 @@ impl Spotify {
             lock(&self.cache_size).opened = Some(Instant::now());
             match audio::open(&session, &id, premium).await {
                 Ok(opened) => {
+                    self.note_key(true);
                     if let Some(me) = self.arc() {
                         let s = session.clone();
                         self.rt.spawn(async move { me.note_session(&s).await });
@@ -1475,11 +1491,34 @@ impl Spotify {
                     if e.error == StreamError::PremiumRequired {
                         self.set_session_premium(false);
                     }
+                    if e.key_refused {
+                        self.note_key(false);
+                    }
                     return Err(e.error);
                 }
             }
         }
         Err(StreamError::Unavailable)
+    }
+
+    /// Counts the audio keys refused in a row: at [`KEY_REFUSALS`] the
+    /// account's tracks play from YouTube Music for [`KEYS_RETRY`]; a track
+    /// that opens ends it.
+    fn note_key(&self, given: bool) {
+        let mut st = lock(&self.state);
+        if given {
+            st.key_refusals = 0;
+            if st.saved.keys_refused_at.take().is_some() {
+                self.persist(&st);
+            }
+            return;
+        }
+        st.key_refusals += 1;
+        if st.key_refusals >= KEY_REFUSALS && !st.keys_refused() {
+            log::warn!("spotify: audio keys refused {} times in a row: tracks play from YouTube Music for {} h", st.key_refusals, KEYS_RETRY.as_secs() / 3600);
+            st.saved.keys_refused_at = Some(now_secs());
+            self.persist(&st);
+        }
     }
 
     /// The session found the account is not Premium (a track refused):
@@ -1514,6 +1553,10 @@ impl Drop for PromptGuard<'_> {
 impl StreamService for Spotify {
     fn service(&self) -> Service {
         Service::Spotify
+    }
+
+    fn audio_refused(&self) -> bool {
+        lock(&self.state).keys_refused()
     }
 
     fn account(&self) -> Account {

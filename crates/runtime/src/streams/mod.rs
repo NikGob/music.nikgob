@@ -434,7 +434,7 @@ impl Worker {
         let Some(s) = self.service(kind) else {
             return false;
         };
-        if s.catalogue_only() {
+        if s.catalogue_only() || s.audio_refused() {
             return false;
         }
         match kind {

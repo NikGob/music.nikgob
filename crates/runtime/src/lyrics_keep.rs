@@ -116,9 +116,28 @@ pub(crate) fn write_tag(file: &Path, keep: &Keep) -> Result<(), String> {
 }
 
 impl Worker {
+    /// The YouTube copy whose audio a stream's timing is made from: the
+    /// active source, or for a track of another service (Spotify, whose
+    /// audio cannot be saved) its YouTube copy that plays.
+    pub(crate) fn timing_stream(&self, track: TrackId) -> Option<nikgob_core::model::Source> {
+        let active = self.lib.active_source(track).ok().flatten()?;
+        if active.kind == SourceKind::Youtube || active.kind.is_local() {
+            return Some(active);
+        }
+        let mut copies: Vec<_> = self
+            .lib
+            .sources_of_track(track)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.kind == SourceKind::Youtube && s.trashed_at.is_none() && s.available)
+            .collect();
+        copies.sort_by_key(|s| std::cmp::Reverse(s.quality_score));
+        copies.into_iter().next()
+    }
+
     /// Where `track`'s timing can be made from.
     pub(crate) fn lyrics_place(&self, track: TrackId) -> Place {
-        let Some(src) = self.lib.active_source(track).ok().flatten() else { return Place::None };
+        let Some(src) = self.timing_stream(track) else { return Place::None };
         if src.kind.is_local() {
             return Place::File;
         }
@@ -226,7 +245,7 @@ impl Worker {
             self.toast("YouTube Music выключен", None);
             return;
         };
-        let Some(src) = self.lib.active_source(track).ok().flatten().filter(|s| s.kind == SourceKind::Youtube) else { return };
+        let Some(src) = self.timing_stream(track).filter(|s| s.kind == SourceKind::Youtube) else { return };
         self.align.after_import.insert(track, keep);
         let dir = self.save_dir();
         let locator = src.locator.clone();

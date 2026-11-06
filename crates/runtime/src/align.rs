@@ -1044,7 +1044,7 @@ impl Worker {
                 if !self.align.running() {
                     return;
                 }
-                let Some(src) = self.lib.active_source(track).ok().flatten() else { return };
+                let Some(src) = self.timing_stream(track) else { return };
                 let Some(yt) = self.service(nikgob_core::streaming::Service::Youtube) else {
                     let failed = Some("YouTube Music выключен".to_owned());
                     self.publish(|s| s.align.craft = Some(v::Craft { track, source, target, lines: None, failed }));

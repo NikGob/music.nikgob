@@ -117,6 +117,11 @@ pub struct State {
     /// The playback session's account type, when it was last seen.
     #[serde(default)]
     pub session_premium: Option<bool>,
+    /// When Spotify last refused audio keys track after track to this
+    /// account (unix seconds): its tracks play from YouTube Music for a
+    /// while ([`crate::KEYS_RETRY`]).
+    #[serde(default)]
+    pub keys_refused_at: Option<u64>,
     /// When `profile` was last read from `GET /me` (unix seconds).
     #[serde(default)]
     pub profile_at: Option<u64>,

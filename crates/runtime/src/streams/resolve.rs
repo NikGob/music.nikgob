@@ -164,6 +164,8 @@ fn miss_key(track: TrackId) -> String {
 const LIMIT_RETRIES: u32 = 3;
 /// The pause assumed when YouTube Music does not say how long it is.
 const UNKNOWN_PAUSE: Duration = Duration::from_secs(30);
+/// How long a miss keeps a track the user plays from being looked up again.
+const PLAYED_MISS_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// A lookup's answer: the hit (or none), or `Err(retry_after)` when the
 /// service rate-limited it.
@@ -305,13 +307,19 @@ impl Worker {
     /// The track can be looked up on YouTube Music: YouTube is on, the
     /// track has no YouTube source yet, and it did not miss recently.
     pub(crate) fn can_resolve(&mut self, track: TrackId) -> bool {
+        let ttl = self.streaming.schedule.miss_ttl;
+        self.can_resolve_within(track, ttl)
+    }
+
+    /// [`Self::can_resolve`] with a miss older than `ttl` forgotten.
+    fn can_resolve_within(&mut self, track: TrackId, ttl: Duration) -> bool {
         if self.service(Service::Youtube).is_none() || !self.has_audio(Service::Youtube) {
             return false;
         }
         if self.streaming.resolving.contains(&track) {
             return true;
         }
-        let ttl = self.streaming.schedule.miss_ttl.as_millis() as i64;
+        let ttl = ttl.as_millis() as i64;
         let now = nikgob_library::now_ms();
         let missed = match self.streaming.misses.get(&track) {
             Some(at) => Some(*at),
@@ -434,7 +442,10 @@ impl Worker {
     /// `e` has nothing playable now but can be looked up: it waits
     /// (Buffering) for the lookup instead of being skipped.
     pub(crate) fn wait_for_youtube(&mut self, e: Entry) -> bool {
-        if !self.can_resolve(e.track) {
+        // A track being played is looked up again unless it was missed just
+        // now: a miss of a lookup ahead (or of a search that failed) must
+        // not keep it silent for days.
+        if !self.can_resolve_within(e.track, PLAYED_MISS_TTL) {
             return false;
         }
         self.begin_resolve(e.track);
@@ -473,6 +484,7 @@ impl Worker {
                 }
             }
             None => {
+                log::info!("{track}: no copy on YouTube Music");
                 let now = nikgob_library::now_ms();
                 self.streaming.misses.insert(track, now);
                 let _ = self.lib.cache_put(&miss_key(track), now, "");

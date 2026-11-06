@@ -126,6 +126,8 @@ impl Drop for Opened {
 pub struct OpenError {
     pub error: StreamError,
     pub retry_with_new_session: bool,
+    /// Spotify refused the file's key to a Premium account.
+    pub key_refused: bool,
 }
 
 impl OpenError {
@@ -133,6 +135,7 @@ impl OpenError {
         Self {
             error,
             retry_with_new_session: session.is_invalid(),
+            key_refused: false,
         }
     }
 }
@@ -175,13 +178,13 @@ pub async fn open(session: &Session, id: &str, premium: Option<bool>) -> Result<
         Err(e) => {
             log::warn!("spotify: audio key refused for {id}: {e}");
             controller.close();
-            // Spotify refuses keys to free accounts.
-            let error = if premium == Some(true) {
-                StreamError::Unavailable
+            // Spotify refuses keys to free accounts, and lately to some
+            // Premium ones too (librespot #1649).
+            return Err(if premium == Some(true) {
+                OpenError { key_refused: true, ..failed(StreamError::Unavailable) }
             } else {
-                StreamError::PremiumRequired
-            };
-            return Err(failed(error));
+                failed(StreamError::PremiumRequired)
+            });
         }
     };
     // The first range is fetched in random-access mode, then streaming

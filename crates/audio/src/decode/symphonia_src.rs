@@ -98,7 +98,10 @@ type Reopen = Box<dyn Fn() -> Result<Box<dyn FormatReader>, DecodeError> + Send>
 
 /// A [`ByteSource`] as Symphonia's `MediaSource` (which must be `Sync`). The
 /// source is shared so its gain and duration can be asked after the probe.
-struct SharedBytes(Arc<Mutex<Box<dyn ByteSource>>>);
+/// The first read error is kept: the probe reads past it as the end of
+/// the bytes, and the stream's own reason (a refused key, an age gate)
+/// says more than «no suitable format reader».
+struct SharedBytes(Arc<Mutex<Box<dyn ByteSource>>>, Arc<Mutex<Option<String>>>);
 
 impl SharedBytes {
     fn with<T>(&self, f: impl FnOnce(&mut Box<dyn ByteSource>) -> T) -> T {
@@ -108,7 +111,9 @@ impl SharedBytes {
 
 impl Read for SharedBytes {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.with(|s| s.read(buf))
+        self.with(|s| s.read(buf)).inspect_err(|e| {
+            self.1.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(|| e.to_string());
+        })
     }
 }
 
@@ -162,9 +167,19 @@ impl SymphoniaSource {
             .trim_start_matches('.')
             .to_ascii_lowercase();
         let shared = Arc::new(Mutex::new(bytes));
+        let failure = Arc::new(Mutex::new(None));
         let ext = (!hint.is_empty()).then_some(hint);
-        let mut source =
-            Self::open_media(Box::new(SharedBytes(Arc::clone(&shared))), ext.as_deref())?;
+        let opened = Self::open_media(
+            Box::new(SharedBytes(Arc::clone(&shared), Arc::clone(&failure))),
+            ext.as_deref(),
+        );
+        let mut source = match opened {
+            Ok(s) => s,
+            Err(e) => {
+                let why = failure.lock().unwrap_or_else(PoisonError::into_inner).take();
+                return Err(why.map_or(e, DecodeError::Stream));
+            }
+        };
         if source.is_mkv() {
             let shared = Arc::clone(&shared);
             source.reopen = Some(Box::new(move || {
@@ -172,7 +187,10 @@ impl SymphoniaSource {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .seek(SeekFrom::Start(0))?;
-                probe(Box::new(SharedBytes(Arc::clone(&shared))), ext.as_deref())
+                probe(
+                    Box::new(SharedBytes(Arc::clone(&shared), Arc::new(Mutex::new(None)))),
+                    ext.as_deref(),
+                )
             }));
         }
         let info = {
@@ -565,5 +583,41 @@ impl FrameSource for SymphoniaSource {
         self.prefetch = None;
         self.exact_start = None;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stream that fails before its first byte, the way a refused
+    /// Spotify key or a YouTube age gate does.
+    struct Refused;
+
+    impl Read for Refused {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("youtube: age-restricted"))
+        }
+    }
+
+    impl Seek for Refused {
+        fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    impl ByteSource for Refused {
+        fn byte_len(&self) -> Option<u64> {
+            None
+        }
+        fn format_hint(&self) -> &str {
+            "ogg"
+        }
+    }
+
+    #[test]
+    fn a_stream_that_fails_says_its_own_reason() {
+        let Err(e) = SymphoniaSource::open_stream(Box::new(Refused)) else { panic!("opened") };
+        assert!(e.to_string().contains("age-restricted"), "{e}");
     }
 }

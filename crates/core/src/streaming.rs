@@ -789,6 +789,13 @@ pub trait StreamService: Send + Sync {
         false
     }
 
+    /// The service refuses this account's sound for now though the account
+    /// should have it (Spotify keeps refusing the audio keys of a Premium
+    /// account): its tracks play from YouTube Music meanwhile.
+    fn audio_refused(&self) -> bool {
+        false
+    }
+
     /// Current account state. Cheap, no network.
     fn account(&self) -> Account;
 
