@@ -9,7 +9,8 @@ use std::sync::OnceLock;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject, SetInformationJobObject,
 };
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
 
@@ -48,4 +49,33 @@ pub fn adopt(pid: u32) {
         }
         let _ = CloseHandle(process);
     }
+}
+
+/// The processes in the job now (those adopted and every process they
+/// started, which a job takes in with them); `None` when there is no job or
+/// it cannot be asked.
+pub fn members() -> Option<Vec<u32>> {
+    /// `JOBOBJECT_BASIC_PROCESS_ID_LIST` with room for many ids.
+    #[repr(C)]
+    struct List {
+        assigned: u32,
+        listed: u32,
+        ids: [usize; 1024],
+    }
+    let job = job()?;
+    let mut list = Box::new(List { assigned: 0, listed: 0, ids: [0; 1024] });
+    // SAFETY: the buffer is a `JOBOBJECT_BASIC_PROCESS_ID_LIST` of the size
+    // given (its id array longer than the declared one), written by Windows.
+    unsafe {
+        QueryInformationJobObject(
+            Some(job.0),
+            JobObjectBasicProcessIdList,
+            (&raw mut *list).cast(),
+            std::mem::size_of::<List>() as u32,
+            None,
+        )
+        .ok()?;
+    }
+    let n = (list.listed as usize).min(list.ids.len());
+    Some(list.ids[..n].iter().map(|&id| id as u32).collect())
 }
