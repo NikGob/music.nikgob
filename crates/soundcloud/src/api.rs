@@ -184,8 +184,6 @@ pub(crate) struct Playlist {
     #[serde(default)]
     pub(crate) set_type: Option<String>,
     #[serde(default)]
-    pub(crate) is_album: Option<bool>,
-    #[serde(default)]
     pub(crate) release_date: Option<String>,
     #[serde(default)]
     pub(crate) published_at: Option<String>,
@@ -213,11 +211,6 @@ impl Playlist {
             Some(serde_json::Value::String(s)) => Some(s.clone()),
             _ => self.urn.clone(),
         }
-    }
-
-    pub(crate) fn is_album(&self) -> bool {
-        self.is_album == Some(true)
-            || matches!(self.set_type.as_deref(), Some("album" | "ep" | "single" | "compilation"))
     }
 }
 
@@ -308,7 +301,9 @@ pub(crate) fn track(t: &Track) -> StreamTrack {
     // A label's or a fan's upload credits the record's artist in the
     // publisher metadata; that artist has no SoundCloud id here.
     let artists = match published_artist {
-        Some(a) if !a.eq_ignore_ascii_case(user.username.trim()) => vec![ArtistRef::new(None, a)],
+        Some(a) if !a.eq_ignore_ascii_case(user.username.trim()) => {
+            a.split(", ").map(str::trim).filter(|n| !n.is_empty()).map(|n| ArtistRef::new(None, n)).collect()
+        }
         _ if user.username.trim().is_empty() => Vec::new(),
         _ => vec![user_ref(&user)],
     };
@@ -468,7 +463,6 @@ mod tests {
             "track_count":14,"user":{"id":203812859,"username":"Daft Punk"},"tracks":[]}"#,
         )
         .unwrap();
-        assert!(p.is_album());
         let a = album(&p, &[serde_json::from_str(TRACK).unwrap()]);
         assert_eq!(a.id, rid("243583729"));
         assert_eq!(a.release_date.as_deref(), Some("2001-03-12"));

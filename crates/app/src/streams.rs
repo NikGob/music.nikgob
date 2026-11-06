@@ -1,8 +1,10 @@
 //! The streaming services the app runs (docs/stage3.md §1 "app").
 //!
-//! Normal start: the real Spotify and YouTube Music services, each with its
-//! own folder in the app's data dir (`spotify/`, `youtube/`) and its secrets
-//! from settings.toml, and the Deezer catalogue (no folder, no secrets).
+//! Normal start: the real Spotify, YouTube Music and SoundCloud services,
+//! each with its own folder in the app's data dir (`spotify/`, `youtube/`,
+//! `soundcloud/`) and its secrets from settings.toml (SoundCloud's token
+//! from the credential store), and the Deezer catalogue (no folder, no
+//! secrets).
 //! All are always registered; whether one is used is the runtime's call
 //! (`Prefs::spotify_enabled` / `youtube_enabled` / `deezer_enabled`), so
 //! switching a service on in the settings works without a restart.
@@ -98,6 +100,13 @@ pub fn real(data_dir: &Path, secrets: &StreamingSettings) -> Services {
         Ok(dz) => out.push(dz),
         Err(e) => log::error!("Deezer did not start: {e}"),
     }
+    let mut sc = nikgob_soundcloud::SoundcloudConfig::new(data_dir.join("soundcloud"));
+    // The demo's real services keep their sign-in out of the user's store.
+    sc.memory_store = real_in_demo();
+    match nikgob_soundcloud::Soundcloud::new(sc) {
+        Ok(sc) => out.push(sc),
+        Err(e) => log::error!("SoundCloud did not start: {e}"),
+    }
     out
 }
 
@@ -116,7 +125,7 @@ pub fn demo(demo_dir: &Path, secrets: &StreamingSettings) -> Services {
             .map(|(_, v)| v.trim().to_ascii_lowercase())
             .unwrap_or_else(|| "in".to_owned())
     };
-    [Service::Spotify, Service::Youtube, Service::Deezer]
+    [Service::Spotify, Service::Youtube, Service::Deezer, Service::Soundcloud]
         .into_iter()
         .map(|s| fake(s, &mode(s.as_str())))
         .collect()
@@ -143,6 +152,7 @@ fn fake(service: Service, mode: &str) -> Arc<dyn StreamService> {
             // An artist of the demo library: «Новые релизы» has its single.
             .with_new_release("daft", "voyager2", "Voyager 2", 12),
         Service::Spotify => demo_soloist(FakeService::new(service)),
+        Service::Soundcloud => FakeService::new(service),
     };
     // Long enough to watch a track play (lyrics, progress) in screenshots.
     base.set_audio_secs(180.0);

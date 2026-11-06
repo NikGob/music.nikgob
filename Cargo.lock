@@ -4969,6 +4969,7 @@ dependencies = [
  "nikgob-recs",
  "nikgob-runtime",
  "nikgob-soloist",
+ "nikgob-soundcloud",
  "nikgob-spotify",
  "nikgob-view",
  "nikgob-youtube",

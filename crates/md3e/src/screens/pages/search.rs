@@ -38,6 +38,7 @@ pub enum Filter {
     Library,
     Deezer,
     Youtube,
+    Soundcloud,
     Spotify,
     Torrents,
 }
@@ -50,13 +51,14 @@ impl Filter {
             spotify: service == Some(Service::Spotify),
             youtube: service == Some(Service::Youtube),
             deezer: service == Some(Service::Deezer),
+            soundcloud: service == Some(Service::Soundcloud),
             torrents: false,
             mixed: false,
         };
         match self {
             Self::All => SearchSources::all(),
             Self::Library => only(true, None),
-            Self::Deezer | Self::Youtube | Self::Spotify => only(false, self.service()),
+            Self::Deezer | Self::Youtube | Self::Soundcloud | Self::Spotify => only(false, self.service()),
             // The library stays for context; the indexer is asked by its button.
             Self::Torrents => only(true, None),
         }
@@ -67,6 +69,7 @@ impl Filter {
             Self::Spotify => Some(Service::Spotify),
             Self::Youtube => Some(Service::Youtube),
             Self::Deezer => Some(Service::Deezer),
+            Self::Soundcloud => Some(Service::Soundcloud),
             _ => None,
         }
     }
@@ -124,7 +127,8 @@ pub fn search_results(
     let mut f = filter(&ctx);
     let spotify = usable(state, Service::Spotify);
     let deezer = state.account(Service::Deezer).is_some_and(|a| a.registered);
-    if (f == Filter::Spotify && !spotify) || (f == Filter::Deezer && !deezer) {
+    let soundcloud = usable(state, Service::Soundcloud) && state.prefs.soundcloud_enabled;
+    if (f == Filter::Spotify && !spotify) || (f == Filter::Deezer && !deezer) || (f == Filter::Soundcloud && !soundcloud) {
         f = Filter::All;
     }
     let mut hui = ui.new_child(
@@ -144,6 +148,9 @@ pub fn search_results(
                     chips.push(("Deezer", Filter::Deezer));
                 }
                 chips.push(("YouTube Music", Filter::Youtube));
+                if soundcloud {
+                    chips.push(("SoundCloud", Filter::Soundcloud));
+                }
                 if spotify {
                     chips.push(("Spotify", Filter::Spotify));
                 }
@@ -186,7 +193,7 @@ pub fn search_results(
                 Filter::Library => {
                     nav = library(ui, query, state, pages, out).or(nav.take());
                 }
-                Filter::Deezer | Filter::Youtube | Filter::Spotify => {
+                Filter::Deezer | Filter::Youtube | Filter::Soundcloud | Filter::Spotify => {
                     if let Some(service) = f.service() {
                         nav = stream_section(ui, query, service, state, pages, out).or(nav.take());
                     }
@@ -522,6 +529,7 @@ fn stream_section(
                     Service::Spotify => super::SettingId::SpotifyEnabled,
                     Service::Youtube => super::SettingId::YouTubeEnabled,
                     Service::Deezer => super::SettingId::DeezerEnabled,
+                    Service::Soundcloud => super::SettingId::SoundCloudEnabled,
                 });
             }
         }

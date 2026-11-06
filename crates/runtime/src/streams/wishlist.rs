@@ -496,7 +496,7 @@ impl Worker {
                     Service::Youtube if plays.is_none() => item.youtube_id = Some(r.id),
                     Service::Youtube => item.youtube_id.clone_from(&plays),
                     // The wishlist searches torrents by name and ISRC.
-                    Service::Deezer => {}
+                    Service::Deezer | Service::Soundcloud => {}
                 }
             }
         } else {

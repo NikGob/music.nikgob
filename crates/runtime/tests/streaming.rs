@@ -767,6 +767,7 @@ fn under_a_service_chip_its_songs_in_the_library_stay_in_its_list() {
         spotify: true,
         youtube: false,
         deezer: false,
+        soundcloud: false,
         torrents: false,
         mixed: false,
     }));

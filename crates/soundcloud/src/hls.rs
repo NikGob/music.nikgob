@@ -17,7 +17,7 @@
 //! **Downloading.** Nothing happens until the first read. Then a task on
 //! the service's runtime resolves the stream (the track's transcoding to a
 //! signed playlist url, then the playlist), fetches the init segment and
-//! the first [`HEAD`] bytes of every segment (8 at a time: their sizes from
+//! the first [`HEAD`] bytes of every segment (16 at a time: their sizes from
 //! `Content-Range`, and their moof boxes, so a seek walks the boxes without
 //! waiting for whole segments), and then whole segments in order from the
 //! one being read, wrapping around to the gaps before it. Everything is
@@ -44,7 +44,7 @@ use tokio::sync::{Notify, Semaphore};
 /// 2 KB for ten seconds of AAC).
 const HEAD: u64 = 8 * 1024;
 /// Segment heads fetched at once.
-const HEADS_IN_FLIGHT: usize = 8;
+const HEADS_IN_FLIGHT: usize = 16;
 /// Attempts without progress before a network error is final.
 const MAX_ATTEMPTS: u32 = 5;
 /// Re-resolves without progress before a refusal is final.

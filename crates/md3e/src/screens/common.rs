@@ -99,6 +99,7 @@ pub fn sound_line(state: &nikgob_view::ViewState) -> Option<String> {
         nikgob_view::Service::Spotify => "Spotify",
         // A Deezer entry plays from YouTube Music.
         nikgob_view::Service::Youtube | nikgob_view::Service::Deezer => "YouTube",
+        nikgob_view::Service::Soundcloud => "SoundCloud",
     });
     let service = service.map(|s| if clip { format!("{s} · клип") } else { s.to_owned() });
     match (service, quality) {

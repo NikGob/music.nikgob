@@ -1,5 +1,7 @@
 //! Signing in through a window the app opens itself (YouTube Music: Google's
-//! own sign-in page in a WebView2 window, see the app's `ytlogin`).
+//! own sign-in page in a WebView2 window, see the app's `ytlogin`;
+//! SoundCloud: soundcloud.com/signin, whose `oauth_token` cookie is the
+//! sign-in).
 //!
 //! The runtime has no GUI: the app hands it a [`WebLogin`] per service
 //! ([`crate::Runtime::set_web_login`]). A [`LoginInput::Browser`] login of
@@ -23,6 +25,16 @@ use crate::import::Internal;
 
 /// What the window shows next to the account while it is open.
 pub const WINDOW_HINT: &str = "Войди в аккаунт Google в открывшемся окне. Пароль вводится только на странице Google — приложение его не видит.";
+/// The same for SoundCloud's window.
+pub const SOUNDCLOUD_WINDOW_HINT: &str = "Войди в SoundCloud в открывшемся окне. Пароль вводится только на странице SoundCloud — приложение его не видит.";
+
+/// The hint of a service's window.
+pub fn window_hint(service: Service) -> &'static str {
+    match service {
+        Service::Soundcloud => SOUNDCLOUD_WINDOW_HINT,
+        _ => WINDOW_HINT,
+    }
+}
 
 /// A sign-in window of the app.
 pub trait WebLogin: Send + Sync {
@@ -49,6 +61,18 @@ pub enum WebLoginError {
 }
 
 impl WebLoginError {
+    /// As the user reads it, for a service's window.
+    pub fn text_for(&self, service: Service) -> String {
+        if service != Service::Soundcloud {
+            return self.text();
+        }
+        match self {
+            Self::Refused => "SoundCloud не разрешил вход во встроенном окне. Можно вставить токен: «Вставить токен…»".into(),
+            Self::Failed(m) => format!("Окно входа не открылось ({m}). Можно вставить токен: «Вставить токен…»"),
+            other => other.text(),
+        }
+    }
+
     /// As the user reads it.
     pub fn text(&self) -> String {
         match self {
@@ -76,7 +100,7 @@ impl Worker {
     /// wins over what the service says (it knows nothing of the window).
     pub(crate) fn web_account(&self, service: Service, account: Account) -> Account {
         match self.streaming.web_state.get(&service) {
-            Some(WebState::Running(_)) => Account::LoggingIn(Some(LoginPrompt::Window(WINDOW_HINT.into()))),
+            Some(WebState::Running(_)) => Account::LoggingIn(Some(LoginPrompt::Window(window_hint(service).into()))),
             Some(WebState::Failed(m)) if !account.is_logged_in() => Account::Failed(m.clone()),
             _ => account,
         }
@@ -107,7 +131,7 @@ impl Worker {
         if let Err(e) = spawned {
             self.streaming
                 .web_state
-                .insert(service, WebState::Failed(WebLoginError::Failed(e.to_string()).text()));
+                .insert(service, WebState::Failed(WebLoginError::Failed(e.to_string()).text_for(service)));
         }
         self.publish_accounts();
         true
@@ -127,7 +151,7 @@ impl Worker {
             Err(WebLoginError::Cancelled) => {}
             Err(e) => {
                 log::warn!("{service}: sign-in window: {e:?}");
-                self.streaming.web_state.insert(service, WebState::Failed(e.text()));
+                self.streaming.web_state.insert(service, WebState::Failed(e.text_for(service)));
             }
         }
         self.publish_accounts();

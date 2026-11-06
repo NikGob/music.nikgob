@@ -1446,6 +1446,8 @@ impl Worker {
             let batch = match service {
                 Service::Spotify => ENRICH_BATCH_SPOTIFY,
                 Service::Youtube | Service::Deezer => ENRICH_BATCH_YOUTUBE,
+                // `/tracks?ids=`: 50 a request.
+                Service::Soundcloud => ENRICH_BATCH_SPOTIFY,
             };
             let todo: Vec<(TrackId, String)> = self
                 .lib
@@ -1480,7 +1482,7 @@ impl Worker {
     fn enriched(&mut self, service: Service, results: Vec<(TrackId, String, Result<StreamTrack, StreamError>)>) {
         let pause = match service {
             Service::Spotify => self.streaming.schedule.enrich_pause.0,
-            Service::Youtube | Service::Deezer => self.streaming.schedule.enrich_pause.1,
+            Service::Youtube | Service::Deezer | Service::Soundcloud => self.streaming.schedule.enrich_pause.1,
         };
         let mut next = Instant::now() + pause;
         let mut done = 0;

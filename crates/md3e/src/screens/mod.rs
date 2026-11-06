@@ -1154,6 +1154,7 @@ impl Md3eUi {
             "sources" | "spotify" => S::SpotifyEnabled,
             "youtube" => S::YouTubeEnabled,
             "deezer" => S::DeezerEnabled,
+            "soundcloud" => S::SoundCloudEnabled,
             "personal" => S::SpotifyPersonal,
             "soloist" => S::SpotifySoloist,
             "sound" => S::Gapless,

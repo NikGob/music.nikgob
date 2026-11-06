@@ -49,6 +49,8 @@ pub const fn kind_weight(kind: SuggestionKind) -> f32 {
         SuggestionKind::ListenAgain => 0.8,
         SuggestionKind::TopHalfYear => 0.7,
         SuggestionKind::Recent => 0.5,
+        SuggestionKind::Followed => 0.6,
+        SuggestionKind::Reposted => 0.7,
     }
 }
 

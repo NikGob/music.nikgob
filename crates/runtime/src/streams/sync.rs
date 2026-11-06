@@ -717,12 +717,15 @@ impl Worker {
     }
 
     /// Where a local playlist goes when it becomes TwoWay: the logged-in
-    /// service most of its tracks have ids in (Spotify on a tie).
+    /// service most of its tracks have ids in (Spotify on a tie), never
+    /// SoundCloud (read only).
     fn service_for_new_remote(&self, playlist: PlaylistId) -> Option<Service> {
         let entries = self.lib.playlist_entries(playlist, 0, u32::MAX).unwrap_or_default();
         Service::ALL
             .iter()
             .copied()
+            // SoundCloud is read only: no playlist is made there.
+            .filter(|s| *s != Service::Soundcloud)
             .filter(|s| self.service(*s).is_some_and(|svc| svc.account().is_logged_in()))
             .map(|s| {
                 let n = entries

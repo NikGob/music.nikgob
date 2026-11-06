@@ -439,6 +439,7 @@ impl Resolver {
                     SourceKind::Youtube => "YouTube Music",
                     // Never plays itself (the YouTube copy does).
                     SourceKind::Deezer => "Deezer",
+                    SourceKind::Soundcloud => "SoundCloud",
                 }
                 .to_owned()
             }),
@@ -592,6 +593,7 @@ pub(crate) fn sound_details(
         (SourceKind::LocalFile, nikgob_core::model::SourceOrigin::Inbox) => "Скачан или добавлен файлом",
         (SourceKind::Spotify, _) => "Поток Spotify",
         (SourceKind::Youtube | SourceKind::Deezer, _) => "Поток YouTube Music",
+        (SourceKind::Soundcloud, _) => "Поток SoundCloud",
     };
     facts.push(("Откуда".into(), from.to_owned()));
     let local = src.kind == SourceKind::LocalFile;

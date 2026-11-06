@@ -57,7 +57,7 @@ pub(crate) use replace::shown_title;
 pub(crate) use wishlist::{WISH_ID, upgrade_job_words};
 pub(crate) use schedule::wake_jitter;
 pub use schedule::StreamSchedule;
-pub use web_login::{WINDOW_HINT, WebLogin, WebLoginError};
+pub use web_login::{SOUNDCLOUD_WINDOW_HINT, WINDOW_HINT, WebLogin, WebLoginError, window_hint};
 
 /// How long a YouTube video that did not play is not picked again.
 const REFUSED_TTL: Duration = Duration::from_secs(6 * 3600);
@@ -381,6 +381,7 @@ pub(crate) fn error_text(e: &StreamError) -> String {
         StreamError::Unsupported => "Сервис так не умеет".into(),
         StreamError::AgeRestricted => "Только для 18+ — нужно войти".into(),
         StreamError::RegionBlocked => "Недоступно в твоём регионе".into(),
+        StreamError::Drm => "Только в защищённом виде — сыграет с YouTube Music".into(),
         StreamError::Http { status } => format!("Сервис ответил ошибкой (HTTP {status})"),
         // The details go to the log at the call site.
         StreamError::Network(_) => "Нет связи — проверь интернет".into(),
@@ -395,7 +396,7 @@ pub(crate) fn error_text(e: &StreamError) -> String {
 pub(crate) fn usable(kind: Service, account: &Account) -> bool {
     match kind {
         Service::Spotify => account.is_logged_in(),
-        Service::Youtube | Service::Deezer => true,
+        Service::Youtube | Service::Deezer | Service::Soundcloud => true,
     }
 }
 
@@ -442,7 +443,9 @@ impl Worker {
         }
         match kind {
             Service::Spotify => matches!(s.account(), Account::LoggedIn { audio: true, .. }),
-            Service::Youtube | Service::Deezer => !matches!(s.account(), Account::LoggedIn { audio: false, .. }),
+            Service::Youtube | Service::Deezer | Service::Soundcloud => {
+                !matches!(s.account(), Account::LoggedIn { audio: false, .. })
+            }
         }
     }
 

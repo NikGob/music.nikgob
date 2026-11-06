@@ -47,6 +47,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
     ));
     spotify(ui, state, p, pages, out);
     youtube(ui, state, p, pages, out);
+    soundcloud(ui, state, p, pages, out);
     deezer(ui, state, p);
     download_sources(ui, state, p);
 
@@ -722,6 +723,7 @@ fn import_row(ui: &mut Ui, state: &ViewState, service: Service, out: &mut Vec<Co
     let id = match service {
         Service::Spotify => Id::ImportSpotify,
         Service::Youtube | Service::Deezer => Id::ImportYouTube,
+        Service::Soundcloud => Id::ImportSoundCloud,
     };
     let ready = state.prefs.service_enabled(service);
     row(ui, id, "Плейлисты и история", Some("Свои плейлисты и недавние прослушивания; лайки приходят сами"), |ui| {
@@ -913,6 +915,97 @@ fn youtube(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
         }
         if !logged_in(acc) && (pages.yt_form || p.youtube_cookies_set) {
             cookies_form(ui, p, pages, registered && !busy, out);
+        }
+    });
+}
+
+/// SoundCloud: the switch, the account (its sign-in window, the token as
+/// the fallback), the import and its suggestions.
+fn soundcloud(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
+    let acc = state.account(Service::Soundcloud);
+    let registered = acc.is_some_and(|a| a.registered);
+    group(ui, "SoundCloud");
+    row(ui, Id::SoundCloudEnabled, "Использовать SoundCloud", None, |ui| {
+        ui.add(Switch::new(&mut p.soundcloud_enabled).id_salt("set-sc-on"));
+    });
+    dimmed(ui, !p.soundcloud_enabled, |ui| {
+        let busy = acc.is_some_and(|a| a.busy || matches!(a.account, Account::LoggingIn(_)));
+        let line = account_line(acc);
+        row(ui, Id::SoundCloud, "Аккаунт", Some(&line), |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if busy {
+                    ui.add(LoadingIndicator::new().size(32.0));
+                }
+                if logged_in(acc) {
+                    if ui.add(Button::new("Выйти").icon(Icon::Logout).style(Style::Outlined).id_salt("sc-logout")).clicked() {
+                        out.push(Command::StreamLogout(Service::Soundcloud));
+                    }
+                } else if !busy {
+                    if ui
+                        .add(
+                            Button::new("Войти")
+                                .icon(Icon::Login)
+                                .style(Style::Filled)
+                                .enabled(registered && p.soundcloud_enabled)
+                                .id_salt("sc-login"),
+                        )
+                        .clicked()
+                    {
+                        pages.sc_form = false;
+                        out.push(Command::StreamLogin { service: Service::Soundcloud, input: LoginInput::Browser });
+                    }
+                    if ui
+                        .add(
+                            Button::new("Вставить токен…")
+                                .style(Style::Text)
+                                .size(Size::S)
+                                .selected(pages.sc_form)
+                                .enabled(registered && p.soundcloud_enabled)
+                                .id_salt("sc-token-open"),
+                        )
+                        .clicked()
+                    {
+                        pages.sc_form = !pages.sc_form;
+                    }
+                }
+            });
+        });
+        if let Some(a) = acc {
+            login_prompt(ui, a, out);
+            login_error(ui, a);
+            paused_line(ui, a);
+        }
+        if logged_in(acc) {
+            import_row(ui, state, Service::Soundcloud, out);
+        }
+        if let Some(a) = acc {
+            suggestions_line(ui, a, !busy, out);
+        }
+        if !logged_in(acc) && pages.sc_form {
+            let can = registered && !busy && p.soundcloud_enabled;
+            settings_help::item(ui, Id::SoundCloudToken, "Токен", |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    TextField::new(&mut pages.sc_token, "oauth_token")
+                        .password(true)
+                        .width(ui.available_width().min(420.0))
+                        .id_salt("sc-token")
+                        .show(ui);
+                    settings_help::help_button(ui, Id::SoundCloudToken);
+                });
+                ui.add_space(8.0);
+                let text = pages.sc_token.trim().to_owned();
+                if ui
+                    .add(Button::new("Войти").style(Style::Filled).enabled(can && !text.is_empty()).id_salt("sc-token-login"))
+                    .clicked()
+                {
+                    out.push(Command::StreamLogin { service: Service::Soundcloud, input: LoginInput::Cookies(text) });
+                    pages.sc_token.clear();
+                    pages.sc_form = false;
+                }
+                ui.add_space(8.0);
+            });
         }
     });
 }
