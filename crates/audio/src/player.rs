@@ -68,8 +68,9 @@ impl Default for PlayerOptions {
     fn default() -> Self {
         Self {
             output: OutputOptions {
-                // Shared-mode WASAPI underruns with the driver's own buffer.
-                buffer: Buffer::FixedOnWindows(BufferSize::Duration(DEVICE_BUFFER)),
+                // Shared-mode WASAPI underruns with the driver's own buffer;
+                // PulseAudio's default is about two seconds.
+                buffer: Buffer::Fixed(BufferSize::Duration(DEVICE_BUFFER)),
                 ..OutputOptions::default()
             },
             wake: None,
@@ -686,7 +687,10 @@ impl Control {
                 CbEvent::Ended(id) => {
                     self.emit(Event::Ended { id });
                     self.emit(Event::QueueEmpty);
-                    self.idle_pause_at = Some(Instant::now() + IDLE_PAUSE_DELAY);
+                    // The last frames are rendered, not heard: pausing
+                    // before the device plays out its buffer cuts the tail.
+                    let latency = self.clock.get().map_or(Duration::ZERO, PlayClock::latency);
+                    self.idle_pause_at = Some(Instant::now() + IDLE_PAUSE_DELAY + latency);
                 }
                 CbEvent::PauseReady => {
                     if self.is_paused && !self.device_paused {
