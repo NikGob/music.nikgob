@@ -424,8 +424,17 @@ pub fn open_browser(url: &str) {
     let result = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let result = std::process::Command::new("xdg-open").arg(url).spawn();
-    if let Err(e) = result {
-        log::warn!("spotify: cannot open the browser: {e}");
+    match result {
+        // Reaped in the background, or the finished opener stays a zombie.
+        #[cfg(unix)]
+        Ok(mut child) => {
+            let _ = std::thread::Builder::new().name("opener".into()).spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        #[cfg(not(unix))]
+        Ok(_) => {}
+        Err(e) => log::warn!("spotify: cannot open the browser: {e}"),
     }
 }
 

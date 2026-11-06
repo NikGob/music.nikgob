@@ -67,6 +67,9 @@
           };
         };
 
+        # Makes the build call itself by its version, not «admin».
+        NIKGOB_RELEASE = "1";
+
         cargoBuildFlags = [ "-p" "nikgob" ];
         # `cargo test --workspace` runs the tests; some of them want a
         # display, a session bus or the network, none of which the sandbox

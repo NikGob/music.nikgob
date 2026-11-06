@@ -2757,7 +2757,8 @@ impl Default for Prefs {
             lyrics_soft_depth: 0.18,
             lyrics_soft_fade: 0.4,
             save_found_lyrics: false,
-            lyrics_gpu: true,
+            // DirectML is Windows' own: the CPU is the only choice elsewhere.
+            lyrics_gpu: cfg!(windows),
             lyrics_check: true,
             lyrics_words_all: false,
             lyrics_lines_auto: true,

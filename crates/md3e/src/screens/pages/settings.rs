@@ -952,8 +952,12 @@ fn lyrics_align(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Com
 
     group(ui, "Модели, которые слушают голос");
     // Says only where the models really run when that is not the choice.
-    let device = (a.on_gpu == Some(false) && p.lyrics_gpu).then_some("Видеокарта недоступна, считает процессор");
-    row(ui, Id::LyricsGpu, "Где считать", device, |ui| choice(ui, Id::LyricsGpu, p));
+    // The GPU is DirectML's, Windows' own: elsewhere the CPU is the only
+    // choice, so there is none to show.
+    if cfg!(windows) {
+        let device = (a.on_gpu == Some(false) && p.lyrics_gpu).then_some("Видеокарта недоступна, считает процессор");
+        row(ui, Id::LyricsGpu, "Где считать", device, |ui| choice(ui, Id::LyricsGpu, p));
+    }
     row(ui, Id::LyricsSeparate, "Отделять голос от музыки, чтобы слова ложились точнее", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_separate).id_salt("set-lyrics-separate"));
     });
@@ -1210,11 +1214,12 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
             if ui
                 .add(Button::new("Перенести…").style(Style::Tonal).id_salt("move-masters"))
                 .clicked()
-                && let Some(dir) = rfd::FileDialog::new()
-                    .set_title("Выбери диск или папку для FLAC-оригиналов")
-                    .pick_folder()
             {
-                out.push(Command::MoveMastersDir(dir));
+                super::dialogs::folder(
+                    |d| d.set_title("Выбери диск или папку для FLAC-оригиналов"),
+                    Command::MoveMastersDir,
+                    out,
+                );
             }
             if ui
                 .add(Button::new("Открыть").style(Style::Outlined).id_salt("open-masters"))
@@ -1353,7 +1358,15 @@ pub(super) fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
     }
     let _ = std::fs::create_dir_all(path);
     let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
-    std::process::Command::new(opener).arg(path).spawn().map(|_| ())
+    let mut child = std::process::Command::new(opener).arg(path).spawn()?;
+    // Reaped in the background, or the finished opener stays a zombie.
+    #[cfg(unix)]
+    let _ = std::thread::Builder::new().name("opener".into()).spawn(move || {
+        let _ = child.wait();
+    });
+    #[cfg(not(unix))]
+    drop(child);
+    Ok(())
 }
 
 #[cfg(test)]

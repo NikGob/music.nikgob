@@ -49,12 +49,25 @@ if [ "$(id -u)" = 0 ]; then
 else
   sudo nix-store --import < "$here/closure.nar" > /dev/null
 fi
-if [ "${1:-}" = "--no-profile" ]; then
-  :
-elif nix profile add "$store" 2>/dev/null || nix profile install "$store" 2>/dev/null; then
-  echo "music.nikgob is in your profile: run nikgob, or find it in the menu."
-else
-  nix-env --install "$store"
+if [ "${1:-}" != "--no-profile" ]; then
+  nixcmd() { nix --extra-experimental-features "nix-command flakes" "$@"; }
+  if [ -e "$HOME/.nix-profile/manifest.json" ]; then
+    # A `nix profile` profile: drop the previous version, then add this one.
+    if nixcmd profile list 2>/dev/null | grep -q 'music\.nikgob'; then
+      nixcmd profile remove music.nikgob
+    fi
+    if nixcmd profile --help 2>&1 | grep -qw add; then
+      nixcmd profile add "$store"
+    else
+      nixcmd profile install "$store"
+    fi
+  else
+    # A nix-env profile.
+    if nix-env --query music.nikgob > /dev/null 2>&1; then
+      nix-env --uninstall music.nikgob
+    fi
+    nix-env --install "$store"
+  fi
   echo "music.nikgob is in your profile: run nikgob, or find it in the menu."
 fi
 cat <<MSG

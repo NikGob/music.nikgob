@@ -854,19 +854,16 @@ fn empty(ui: &mut Ui, grid: Grid, pages: &mut PageState, out: &mut Vec<Command>)
             if ui.add(Button::new("Найти музыку").icon(Icon::Search).style(Style::Filled).id_salt("home-empty-search")).clicked() {
                 pages.focus_search = true;
             }
-            if ui.add(Button::new("Добавить папку…").icon(Icon::Folder).style(Style::Tonal).id_salt("home-empty-folder")).clicked()
-                && let Some(dir) = rfd::FileDialog::new().set_title("Добавить папку").pick_folder()
-            {
-                out.push(Command::ImportFolder(dir));
+            if ui.add(Button::new("Добавить папку…").icon(Icon::Folder).style(Style::Tonal).id_salt("home-empty-folder")).clicked() {
+                super::dialogs::folder(|d| d.set_title("Добавить папку"), Command::ImportFolder, out);
             }
         });
         ui.add_space(8.0);
         if ui
             .add(Button::new("Перенести историю из Spotify или YouTube Music…").style(Style::Text).id_salt("home-empty-import"))
             .clicked()
-            && let Some(path) = rfd::FileDialog::new().set_title("Выгрузка Spotify или Google Takeout").pick_file()
         {
-            out.push(Command::ImportExportFiles(path));
+            super::dialogs::file(|d| d.set_title("Выгрузка Spotify или Google Takeout"), Command::ImportExportFiles, out);
         }
     });
 }

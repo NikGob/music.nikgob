@@ -43,7 +43,8 @@ pub fn run(args: &ChildArgs) -> i32 {
             return EXIT_NO_WEBVIEW;
         }
     }
-    if let Err(e) = std::fs::create_dir_all(&args.profile) {
+    // The profile holds the session cookies: the owner's alone.
+    if let Err(e) = private_dir(&args.profile) {
         log::error!("cannot create {}: {e}", args.profile.display());
         return EXIT_ERROR;
     }
@@ -117,6 +118,7 @@ pub fn run(args: &ChildArgs) -> i32 {
 
     let webview = Rc::new(webview);
     let mut state = Check {
+        outcome: outcome.clone(),
         args: args.clone(),
         started: Instant::now(),
         last_url: String::new(),
@@ -153,8 +155,19 @@ pub fn run(args: &ChildArgs) -> i32 {
     code
 }
 
+/// Creates `dir` (and its missing parents) readable by the owner only, and
+/// takes the group and others away from one that already exists.
+fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
 /// What the periodic check looks at.
 struct Check {
+    /// Set when the window ended some other way (the close button), also
+    /// while this check waits for the cookie store.
+    outcome: Rc<Cell<Option<i32>>>,
     args: ChildArgs,
     started: Instant,
     last_url: String,
@@ -193,6 +206,11 @@ impl Check {
                 }
                 Err(e) => log::warn!("cookies of {u}: {e}"),
             }
+        }
+        // Reading the cookies runs GTK's loop: the window may have been
+        // closed meanwhile, and a closed window leaves no cookie file behind.
+        if self.outcome.get().is_some() {
+            return None;
         }
         if !signed_in(&url, &cookies) {
             return None;

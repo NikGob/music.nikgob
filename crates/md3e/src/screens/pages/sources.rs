@@ -1008,17 +1008,19 @@ fn imports(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 if ui.add(Button::new("Папка…").icon(Icon::Folder).style(Style::Tonal).id_salt("import-dir")).clicked()
-                    && let Some(d) = rfd::FileDialog::new().set_title("Папка с выгрузкой Spotify или Google Takeout").pick_folder()
                 {
-                    out.push(Command::ImportExportFiles(d));
+                    super::dialogs::folder(
+                        |d| d.set_title("Папка с выгрузкой Spotify или Google Takeout"),
+                        Command::ImportExportFiles,
+                        out,
+                    );
                 }
-                if ui.add(Button::new(".zip…").icon(Icon::UploadFile).style(Style::Outlined).id_salt("import-zip")).clicked()
-                    && let Some(f) = rfd::FileDialog::new()
-                        .set_title("Архив выгрузки Spotify или Google Takeout")
-                        .add_filter("Архив", &["zip"])
-                        .pick_file()
-                {
-                    out.push(Command::ImportExportFiles(f));
+                if ui.add(Button::new(".zip…").icon(Icon::UploadFile).style(Style::Outlined).id_salt("import-zip")).clicked() {
+                    super::dialogs::file(
+                        |d| d.set_title("Архив выгрузки Spotify или Google Takeout").add_filter("Архив", &["zip"]),
+                        Command::ImportExportFiles,
+                        out,
+                    );
                 }
             });
         },
@@ -1255,8 +1257,17 @@ pub(super) fn open_url(url: &str) {
         panic!("a test tried to launch an external program");
     }
     let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
-    if let Err(e) = std::process::Command::new(opener).arg(url).spawn() {
-        log::warn!("cannot open {url}: {e}");
+    match std::process::Command::new(opener).arg(url).spawn() {
+        // Reaped in the background, or the finished opener stays a zombie.
+        #[cfg(unix)]
+        Ok(mut child) => {
+            let _ = std::thread::Builder::new().name("opener".into()).spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        #[cfg(not(unix))]
+        Ok(_) => {}
+        Err(e) => log::warn!("cannot open {url}: {e}"),
     }
 }
 

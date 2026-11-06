@@ -31,7 +31,7 @@ out="$root/releases"
 mkdir -p "$out"
 
 echo "music.nikgob $version: building"
-(cd "$root" && nice -n 19 cargo build --release --locked -p nikgob)
+(cd "$root" && NIKGOB_RELEASE=1 nice -n 19 cargo build --release --locked -p nikgob)
 bin="$target/release/nikgob"
 [ -x "$bin" ] || { echo "no binary at $bin" >&2; exit 1; }
 
@@ -89,5 +89,5 @@ cp "$root"/packaging/icons/music.nikgob-*.png "$pkg/"
 echo "  $out/music.nikgob-$pkgver-1-x86_64.pkg.tar.zst"
 
 if [ "$nixos" = 1 ]; then
-  "$root/scripts/release-nixos.sh"
+  bash "$root/scripts/release-nixos.sh"
 fi

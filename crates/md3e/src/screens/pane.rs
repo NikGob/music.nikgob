@@ -696,7 +696,8 @@ fn reveal(path: &std::path::Path) {
                 .status()
                 .is_ok_and(|s| s.success());
             if !shown && let Some(dir) = path.parent() {
-                let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+                // This thread is the background: wait, so no zombie is left.
+                let _ = std::process::Command::new("xdg-open").arg(dir).status();
             }
         });
     }

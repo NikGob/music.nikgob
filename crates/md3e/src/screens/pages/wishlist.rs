@@ -546,26 +546,25 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
 fn attach_pick(i: usize, r: &WishlistRow, pages: &mut PageState, out: &mut Vec<Command>) {
     let id = r.id;
     match i {
-        3 => {
-            if let Some(f) = rfd::FileDialog::new().set_title("Свой .torrent для этого трека").add_filter("Торрент", &["torrent"]).pick_file() {
-                out.push(Command::WishlistAttach { item: id, what: WishlistAttach::TorrentFile(f) });
-            }
-        }
+        3 => super::dialogs::file(
+            |d| d.set_title("Свой .torrent для этого трека").add_filter("Торрент", &["torrent"]),
+            move |f| Command::WishlistAttach { item: id, what: WishlistAttach::TorrentFile(f) },
+            out,
+        ),
         4 => pages.open_ask(Ask::WishMagnet(id)),
-        5 => {
-            if let Some(files) = rfd::FileDialog::new()
-                .set_title("Файл этого трека")
-                .add_filter("Музыка", &["flac", "wav", "alac", "aiff", "mp3", "m4a", "ogg", "opus"])
-                .pick_files()
-            {
-                out.push(Command::WishlistAttach { item: id, what: WishlistAttach::Files(files) });
-            }
-        }
-        6 => {
-            if let Some(d) = rfd::FileDialog::new().set_title("Папка с альбомом").pick_folder() {
-                out.push(Command::WishlistAttach { item: id, what: WishlistAttach::Folder(d) });
-            }
-        }
+        5 => super::dialogs::files(
+            |d| {
+                d.set_title("Файл этого трека")
+                    .add_filter("Музыка", &["flac", "wav", "alac", "aiff", "mp3", "m4a", "ogg", "opus"])
+            },
+            move |files| Command::WishlistAttach { item: id, what: WishlistAttach::Files(files) },
+            out,
+        ),
+        6 => super::dialogs::folder(
+            |d| d.set_title("Папка с альбомом"),
+            move |d| Command::WishlistAttach { item: id, what: WishlistAttach::Folder(d) },
+            out,
+        ),
         7 => out.push(Command::WishlistRetry(id)),
         8 => out.push(Command::WishlistDismiss(vec![id])),
         _ => {}
