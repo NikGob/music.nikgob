@@ -35,6 +35,9 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
 };
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::Com::{
     BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
@@ -533,4 +536,55 @@ pub fn set_sessions_read_back(pids: &[u32], mute: Option<bool>, volume: Option<f
         }
     }
     Ok(levels)
+}
+
+/// `pid` and every process it started, and the ones those started, as
+/// running now (a WebView2's audio service is a grandchild of its host).
+/// Just `pid` when the processes cannot be listed.
+pub fn process_tree(pid: u32) -> Vec<u32> {
+    let mut parents: Vec<(u32, u32)> = Vec::new();
+    // SAFETY: a process snapshot handle, walked with an entry of the right
+    // size and closed afterwards.
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return vec![pid] };
+        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        if Process32FirstW(snap, &raw mut entry).is_ok() {
+            loop {
+                parents.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                if Process32NextW(snap, &raw mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+    tree_of(pid, &parents)
+}
+
+/// The processes under `root` in a (pid, parent) list, `root` first.
+fn tree_of(root: u32, parents: &[(u32, u32)]) -> Vec<u32> {
+    let mut out = vec![root];
+    let mut i = 0;
+    while i < out.len() {
+        let p = out[i];
+        for &(child, parent) in parents {
+            // Pid 0 is its own parent; a reused pid may claim a parent that
+            // is already listed: each once.
+            if parent == p && child != p && !out.contains(&child) {
+                out.push(child);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_tree_has_children_and_grandchildren_only() {
+        let list = [(1, 0), (10, 1), (11, 10), (12, 10), (20, 2), (13, 11), (0, 0)];
+        assert_eq!(super::tree_of(10, &list), vec![10, 11, 12, 13]);
+        assert_eq!(super::tree_of(99, &list), vec![99]);
+    }
 }

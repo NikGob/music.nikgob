@@ -75,7 +75,7 @@ mod bench {
     };
     use nikgob_soloist::capture::{CaptureOptions, ProcessCapture, set_sessions};
     use nikgob_soloist::protocol::{Anchor, Command, Status};
-    use nikgob_soloist::track::Link;
+    use nikgob_soloist::track::{Captured, Link};
     use nikgob_soloist::{LiveView, SoloistTrack};
     use windows::Win32::Foundation::FILETIME;
     use windows::Win32::System::Threading::{
@@ -543,6 +543,13 @@ mod bench {
             }
             true
         }
+        fn paused_by_us(&self) -> bool {
+            false
+        }
+        fn playing(&self, _delta: i32) {}
+    }
+
+    impl Captured for BenchLink {
         fn take_captured(&self, out: &mut [f32]) -> Option<usize> {
             Some(self.cap.take(out))
         }
@@ -558,10 +565,6 @@ mod bench {
         fn capture_gain(&self) -> f32 {
             self.gain
         }
-        fn paused_by_us(&self) -> bool {
-            false
-        }
-        fn playing(&self, _delta: i32) {}
     }
 
     /// Notes when a marker comes out of the capture (read time on the

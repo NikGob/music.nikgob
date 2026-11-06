@@ -1,6 +1,7 @@
-//! Windows: Soloist goes into a job object that kills it when the player's
-//! last handle to the job closes, which happens however the player ends
-//! (quit, crash, killed), so no Soloist outlives it holding the data dir.
+//! Windows: Soloist (and SoundCloud's player host) goes into a job object
+//! that kills it when the player's last handle to the job closes, which
+//! happens however the player ends (quit, crash, killed), so no Soloist
+//! outlives it holding the data dir.
 #![allow(unsafe_code)]
 
 use std::sync::OnceLock;
@@ -43,7 +44,7 @@ pub fn adopt(pid: u32) {
             return;
         };
         if let Err(e) = AssignProcessToJobObject(job.0, process) {
-            log::debug!("soloist: not in the job object: {e}");
+            log::debug!("process {pid} not in the job object: {e}");
         }
         let _ = CloseHandle(process);
     }

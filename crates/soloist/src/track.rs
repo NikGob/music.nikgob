@@ -4,7 +4,7 @@
 //! Soloist plays the track; the source hands the engine Soloist's sound as
 //! captured from its process (Windows), and that copy is the one heard:
 //! Soloist's own output is turned down to an inaudible level the capture
-//! undoes (see [`crate::manager::ROUTED_LEVEL`]), so the engine's volume,
+//! undoes (see [`crate::route::ROUTED_LEVEL`]), so the engine's volume,
 //! normalization, visualizer and output device apply as to any track. The
 //! queue, the position, the end of the track and errors flow as for any
 //! other source. Without a capture the source gives silence paced by
@@ -31,9 +31,9 @@ use nikgob_audio::{PcmError, PcmRead, PcmSource};
 
 use crate::manager::LiveView;
 use crate::protocol::{Command, Status};
+pub use crate::route::{CHANNELS, Captured, DRIFT_MS, PREBUFFER_MS, RATE};
+use crate::route::Feed;
 
-pub const RATE: u32 = 48_000;
-pub const CHANNELS: u16 = 2;
 /// How long Soloist may take to start a track.
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a seek may take to show in Soloist's position.
@@ -44,13 +44,6 @@ const FRESH_FALLBACK: Duration = Duration::from_secs(2);
 /// A position this close to the start, sent after our request, is the
 /// start of what we asked for (the same track again included).
 const NEAR_START_MS: u64 = 1500;
-/// Captured sound held before the first frames go to the engine: enough
-/// for the capture's 10 ms packets to arrive unevenly without the engine
-/// running dry, little enough to keep the copy close to what is heard.
-pub const PREBUFFER_MS: u64 = 40;
-/// More than this much waiting means the clocks drifted (Soloist's output
-/// and ours are different devices): it is cut back to the prebuffer.
-pub const DRIFT_MS: u64 = 160;
 /// A pause this close to the track's end is its end.
 const END_SLACK_MS: u64 = 1500;
 /// A position this far past the track's end is its end, whatever the
@@ -59,32 +52,18 @@ const OVERRUN_MS: u64 = 3000;
 /// Back this far from the furthest point after reaching the end, without
 /// a seek of ours: it went round to the start, the track is over.
 const REWIND_MS: u64 = 10_000;
-/// A captured sample above this many times the session level cannot have
-/// come through it (full scale is 1): the session is at another level.
-const TOO_LOUD: f32 = 8.0;
 
-/// What a track needs of Soloist (the manager; a fake in tests).
-pub trait Link: Send + Sync + 'static {
+/// What a track needs of Soloist (the manager; a fake in tests), besides
+/// its capture.
+pub trait Link: Captured + 'static {
     fn snapshot(&self) -> LiveView;
     fn send(&self, c: Command) -> bool;
-    /// Moves captured samples into `out`; `None` when there is no capture.
-    fn take_captured(&self, out: &mut [f32]) -> Option<usize>;
-    fn buffered_frames(&self) -> Option<usize>;
-    fn clear_captured(&self);
-    /// Drops all but the newest `frames` captured frames.
-    fn keep_captured(&self, frames: usize);
-    /// The gain the capture went through after Soloist (its session level);
-    /// 0 while that level is not known.
-    fn capture_gain(&self) -> f32;
     /// The engine paused Soloist (a pause near the end is not an end then).
     fn paused_by_us(&self) -> bool;
     /// A track starts (+1) or is done (-1).
     fn playing(&self, delta: i32);
     /// Called while the track starts: Soloist's output gets its level.
     fn prepare_output(&self) {}
-    /// The captured sound is louder than [`Link::capture_gain`] allows:
-    /// the session is not at that level, it is set again.
-    fn session_wrong(&self) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -102,13 +81,8 @@ pub struct SoloistTrack {
     duration: Option<Duration>,
     phase: Phase,
     counted: bool,
-    prebuffered: bool,
-    /// Whether the last frames came from the capture (`None`: none yet).
-    capturing: Option<bool>,
-    /// Without a capture: Soloist's position where silence counting began,
-    /// and the frames of silence given since.
-    base_ms: u64,
-    given: u64,
+    /// The sound for the engine.
+    feed: Feed,
     /// The furthest position seen while playing.
     max_pos: u64,
     /// A seek asked for before the track started.
@@ -161,10 +135,7 @@ impl SoloistTrack {
             duration,
             phase: Phase::Unrequested,
             counted: false,
-            prebuffered: false,
-            capturing: None,
-            base_ms: 0,
-            given: 0,
+            feed: Feed::new("soloist"),
             max_pos: 0,
             pending_seek: None,
         }
@@ -185,9 +156,7 @@ impl SoloistTrack {
     /// Counting starts again from Soloist's position `ms` (a start, a seek,
     /// a switch between the capture and silence).
     fn restart_count(&mut self, ms: u64) {
-        self.prebuffered = false;
-        self.base_ms = ms;
-        self.given = 0;
+        self.feed.restart(ms);
     }
 
     fn start_playing(&mut self, view: &LiveView) {
@@ -229,73 +198,7 @@ impl SoloistTrack {
     }
 
     fn produce(&mut self, view: &LiveView, out: &mut [f32]) -> PcmRead {
-        let ch = usize::from(CHANNELS);
-        let want = out.len() / ch;
-        let buffered = self.link.buffered_frames();
-        if self.capturing != Some(buffered.is_some()) {
-            if self.capturing.is_some() {
-                log::info!("soloist: its capture {} mid-track", if buffered.is_some() { "came back" } else { "is gone" });
-            }
-            self.capturing = Some(buffered.is_some());
-            self.restart_count(Self::position_ms(view));
-        }
-        match buffered {
-            Some(buffered) => {
-                let pre = (PREBUFFER_MS * u64::from(RATE) / 1000) as usize;
-                if !self.prebuffered {
-                    if buffered < pre {
-                        return PcmRead::Pending;
-                    }
-                    self.prebuffered = true;
-                }
-                if buffered > (DRIFT_MS * u64::from(RATE) / 1000) as usize {
-                    self.link.keep_captured(pre);
-                }
-                let n = self.link.take_captured(&mut out[..want * ch]).unwrap_or(0) / ch * ch;
-                if n == 0 {
-                    return PcmRead::Pending;
-                }
-                undo_level(&mut out[..n], self.link.capture_gain(), &*self.link);
-                PcmRead::Frames(n / ch)
-            }
-            None => {
-                // Silence as long as Soloist's position moved on.
-                let moved = Self::position_ms(view).saturating_sub(self.base_ms);
-                let due = moved * u64::from(RATE) / 1000;
-                let n = due.saturating_sub(self.given).min(want as u64) as usize;
-                if n == 0 {
-                    return PcmRead::Pending;
-                }
-                out[..n * ch].fill(0.0);
-                self.given += n as u64;
-                PcmRead::Frames(n)
-            }
-        }
-    }
-}
-
-/// Undoes the session level `gain` the captured `block` went through. The
-/// level is a plain float factor before process loopback (the capture at
-/// 1e-6, scaled back, matches the one at 1: see examples/route_bench.rs).
-/// An unknown level (0), or a block louder than the level allows, gives
-/// silence: scaled up by the wrong factor it would be loud clipped noise.
-fn undo_level(block: &mut [f32], gain: f32, link: &dyn Link) {
-    if !gain.is_finite() || gain <= 0.0 {
-        block.fill(0.0);
-        return;
-    }
-    if gain >= 0.999 {
-        return;
-    }
-    let limit = gain * TOO_LOUD;
-    if block.iter().any(|s| s.abs() > limit) {
-        block.fill(0.0);
-        link.session_wrong();
-        return;
-    }
-    let k = 1.0 / gain;
-    for s in block {
-        *s = (*s * k).clamp(-1.0, 1.0);
+        self.feed.produce(Self::position_ms(view), &*self.link, out)
     }
 }
 
@@ -485,6 +388,15 @@ mod tests {
             self.sent.lock().unwrap().push(c);
             true
         }
+        fn paused_by_us(&self) -> bool {
+            *self.paused_by_us.lock().unwrap()
+        }
+        fn playing(&self, delta: i32) {
+            *self.playing.lock().unwrap() += delta;
+        }
+    }
+
+    impl Captured for Fake {
         fn take_captured(&self, out: &mut [f32]) -> Option<usize> {
             let mut c = self.captured.lock().unwrap();
             let c = c.as_mut()?;
@@ -511,12 +423,6 @@ mod tests {
         }
         fn capture_gain(&self) -> f32 {
             *self.gain.lock().unwrap()
-        }
-        fn paused_by_us(&self) -> bool {
-            *self.paused_by_us.lock().unwrap()
-        }
-        fn playing(&self, delta: i32) {
-            *self.playing.lock().unwrap() += delta;
         }
         fn session_wrong(&self) {
             *self.wrong.lock().unwrap() += 1;

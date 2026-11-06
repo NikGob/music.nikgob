@@ -5,4 +5,6 @@
 mod windows;
 
 #[cfg(windows)]
-pub use self::windows::{CHANNELS, CaptureOptions, CaptureStats, ProcessCapture, RATE, set_sessions, set_sessions_read_back};
+pub use self::windows::{
+    CHANNELS, CaptureOptions, CaptureStats, ProcessCapture, RATE, process_tree, set_sessions, set_sessions_read_back,
+};

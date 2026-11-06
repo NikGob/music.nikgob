@@ -12,15 +12,11 @@
 //!
 //! On Windows a thread of its own keeps Soloist's audio session at its
 //! level (COM calls never run on the engine's decoder thread), watches the
-//! capture, and starts it again after a failure.
+//! capture, and starts it again after a failure ([`crate::route::Router`]).
 
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-#[cfg(windows)]
-use std::sync::OnceLock;
-#[cfg(windows)]
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
@@ -34,7 +30,7 @@ use crate::client::{self, Live, Shared};
 use crate::daemon::{self, Launch, Outcome};
 use crate::install::{self, Build, CURRENT, PENDING};
 use crate::protocol::{Command, Status};
-
+use crate::route::{Captured, Router, Sessions};
 
 /// Restarts after a failed run, then it waits for the user.
 const BACKOFF: [Duration; 3] = [Duration::from_secs(2), Duration::from_secs(10), Duration::from_secs(30)];
@@ -42,35 +38,11 @@ const BACKOFF: [Duration; 3] = [Duration::from_secs(2), Duration::from_secs(10),
 const TICK: Duration = Duration::from_secs(2);
 /// Soloist's playback cache.
 const CACHE_MB: u32 = 512;
-/// The level of Soloist's own audio session while our engine plays its
-/// captured sound: -120 dB, inaudible, yet process loopback (which takes the
-/// session level as a plain float factor before it captures) gives a copy
-/// that, scaled back by the same factor, is as clean as at full level.
-/// Muting the session or a level of 0 would silence the capture as well
-/// (`tests/loopback_mute.rs`).
-pub const ROUTED_LEVEL: f32 = 1e-6;
 /// A staged renewal goes in once nothing has played for this long.
 const RENEW_IDLE: Duration = Duration::from_secs(30);
 /// A run this long counts as stable: the restarts begin again from the
 /// first delay.
 const STABLE_RUN: Duration = Duration::from_secs(300);
-/// While a track plays, the session level is set again this often (the
-/// volume mixer, a new session on another output device).
-#[cfg(windows)]
-const REAPPLY: Duration = Duration::from_secs(2);
-/// Soloist plays and the capture's frames stand still this long: it
-/// stalled.
-#[cfg_attr(not(windows), allow(dead_code))]
-const STALL: Duration = Duration::from_millis(500);
-/// ... or this long before the capture ever heard anything (Soloist may
-/// take a moment to open its output).
-#[cfg_attr(not(windows), allow(dead_code))]
-const FIRST_SOUND: Duration = Duration::from_secs(2);
-/// Waits before starting a capture again after it failed, then the last
-/// one over and over.
-#[cfg(windows)]
-const CAPTURE_RETRY: [Duration; 4] =
-    [Duration::from_secs(3), Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(60)];
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -143,101 +115,17 @@ pub struct Soloist {
     wake: Notify,
     live: Shared,
     commands: Mutex<Option<mpsc::UnboundedSender<Command>>>,
-    pid: Mutex<Option<u32>>,
-    #[cfg(windows)]
-    route: Route,
-    /// The user's volume, 0–1 (f32 bits).
-    volume: AtomicU32,
+    /// Soloist's process, its capture and its session level.
+    router: Arc<Router>,
     /// Bumped by every change, for the settings to notice.
     revision: AtomicU64,
     on_change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// A track plays through Soloist (renewals wait).
-    pub(crate) playing: AtomicU32,
     /// When a track last started or ended.
     busy_at: Mutex<Instant>,
-    /// Bumped whenever Soloist's audio session should get its level again.
-    session_want: AtomicU32,
-    /// The `session_want` the level was last set (and read back) for.
-    session_done: AtomicU32,
-    /// The level Soloist's sessions were read back at after it was last
-    /// set (f32 bits); NaN while not known.
-    session_level: AtomicU32,
     /// The engine paused Soloist.
     user_paused: std::sync::atomic::AtomicBool,
     /// The CDN was asked for the download's size (once a run).
     size_asked: AtomicU32,
-}
-
-/// Soloist's capture and the thread that keeps its session (Windows).
-#[cfg(windows)]
-#[derive(Default)]
-struct Route {
-    /// The capture whose copy is heard.
-    capture: Mutex<Option<Arc<crate::capture::ProcessCapture>>>,
-    /// A capture started since (of that process id): it goes in as the next
-    /// track is about to play ([`Soloist::routed`]), so the engine's volume,
-    /// set for a track as it starts, matches where its sound comes from.
-    spare: Mutex<Option<(u32, Arc<crate::capture::ProcessCapture>)>>,
-    /// A capture is being started.
-    starting: AtomicBool,
-    retry: Mutex<Retry>,
-    /// The session thread, woken when there is work.
-    thread: OnceLock<std::thread::Thread>,
-}
-
-/// Starting the capture again after it failed.
-#[cfg(windows)]
-#[derive(Default)]
-struct Retry {
-    attempts: usize,
-    /// Not before then (`None`: now).
-    next_at: Option<Instant>,
-}
-
-#[cfg(windows)]
-fn retry_delay(attempts: usize) -> Duration {
-    CAPTURE_RETRY[attempts.min(CAPTURE_RETRY.len() - 1)]
-}
-
-/// A level read back is the level set (float rounding aside).
-fn level_matches(got: f32, want: f32) -> bool {
-    got.is_finite() && want.is_finite() && (got - want).abs() <= want.abs() * 0.01 + 1e-9
-}
-
-/// Watches a capture's frame count while Soloist plays.
-#[derive(Debug, Default)]
-#[cfg_attr(not(windows), allow(dead_code))]
-struct Watch {
-    /// Which capture (its address).
-    key: usize,
-    frames: u64,
-    /// Since when sound is expected and no new frames came.
-    since: Option<Instant>,
-    /// It captured anything at all.
-    heard: bool,
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
-impl Watch {
-    /// True once the frames stood still too long while sound was expected
-    /// (Soloist plays a track of ours).
-    fn stalled(&mut self, key: usize, frames: u64, expected: bool, now: Instant) -> bool {
-        if key != self.key {
-            *self = Self { key, frames, since: None, heard: frames > 0 };
-        }
-        if frames != self.frames {
-            self.frames = frames;
-            self.heard = true;
-            self.since = Some(now);
-            return false;
-        }
-        if !expected {
-            self.since = None;
-            return false;
-        }
-        let since = *self.since.get_or_insert(now);
-        now.duration_since(since) >= if self.heard { STALL } else { FIRST_SOUND }
-    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -300,35 +188,19 @@ impl Soloist {
             wake: Notify::new(),
             live: Shared::default(),
             commands: Mutex::new(None),
-            pid: Mutex::new(None),
-            #[cfg(windows)]
-            route: Route::default(),
-            volume: AtomicU32::new(1.0f32.to_bits()),
+            router: Router::new("soloist", Sessions::Own, {
+                // The capture should hear something while Soloist plays.
+                let me = me.clone();
+                Box::new(move || me.upgrade().is_some_and(|s| client::lock(&s.live).status == Status::Playing))
+            }),
             revision: AtomicU64::new(0),
             on_change: Mutex::new(None),
-            playing: AtomicU32::new(0),
             busy_at: Mutex::new(Instant::now()),
-            session_want: AtomicU32::new(1),
-            session_done: AtomicU32::new(0),
-            session_level: AtomicU32::new(f32::NAN.to_bits()),
             user_paused: std::sync::atomic::AtomicBool::new(false),
             size_asked: AtomicU32::new(0),
         });
         let s = me.clone();
         rt.spawn(async move { s.supervise().await });
-        #[cfg(windows)]
-        {
-            let weak = Arc::downgrade(&me);
-            match std::thread::Builder::new()
-                .name("soloist-session".into())
-                .spawn(move || session_loop(&weak))
-            {
-                Ok(t) => {
-                    let _ = me.route.thread.set(t.thread().clone());
-                }
-                Err(e) => log::warn!("soloist: no session thread: {e}"),
-            }
-        }
         me
     }
 
@@ -512,7 +384,7 @@ impl Soloist {
         if let Some(stop) = stop {
             let _ = stop.send(true);
             let until = Instant::now() + Duration::from_secs(2);
-            while lock(&self.pid).is_some() && Instant::now() < until {
+            while self.router.pid().is_some() && Instant::now() < until {
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
@@ -651,7 +523,7 @@ impl Soloist {
     }
 
     fn launch(&self, build: &Build, key: String) -> Launch {
-        let volume = f32::from_bits(self.volume.load(Ordering::Relaxed));
+        let volume = self.router.volume();
         Launch {
             exe: build.exe(&self.builds()),
             builds: self.builds(),
@@ -769,7 +641,7 @@ impl Soloist {
     /// How long nothing has played through Soloist (`None`: something
     /// plays, a track of ours or one the user started from another app).
     fn quiet_for(&self) -> Option<Duration> {
-        if self.playing.load(Ordering::Acquire) > 0 || client::lock(&self.live).status == Status::Playing {
+        if self.router.playing_count() > 0 || client::lock(&self.live).status == Status::Playing {
             return None;
         }
         Some(lock(&self.busy_at).elapsed())
@@ -818,24 +690,12 @@ impl Soloist {
     }
 
     fn set_process(&self, pid: Option<u32>) {
-        *lock(&self.pid) = pid;
+        // Into the job first: however the player ends, Soloist ends too.
         #[cfg(windows)]
-        {
-            // Into the job first: however the player ends, Soloist ends too.
-            if let Some(p) = pid {
-                crate::job::adopt(p);
-            }
-            let old = (lock(&self.route.capture).take(), lock(&self.route.spare).take());
-            *lock(&self.route.retry) = Retry::default();
-            if let Some(p) = pid {
-                self.start_capture(p);
-            }
-            if old.0.is_some() || old.1.is_some() {
-                // A capture stops by joining its thread.
-                self.rt.spawn_blocking(move || drop(old));
-            }
+        if let Some(p) = pid {
+            crate::job::adopt(p);
         }
-        self.session_invalidate();
+        self.router.set_process(pid);
     }
 
     fn after_connect(&self) {
@@ -874,199 +734,14 @@ impl Soloist {
         lock(&self.commands).as_ref().is_some_and(|tx| tx.send(c).is_ok())
     }
 
-    /// The running capture; one that failed is dropped, and Soloist's own
-    /// output is made audible again.
-    #[cfg(windows)]
-    pub(crate) fn capture(&self) -> Option<Arc<crate::capture::ProcessCapture>> {
-        let mut slot = lock(&self.route.capture);
-        if let Some(e) = slot.as_ref().and_then(|c| c.failure()) {
-            log::warn!("soloist: capture lost ({e}): it plays out loud itself");
-            let old = slot.take();
-            drop(slot);
-            self.capture_lost();
-            // Its thread has already ended: joining it is quick.
-            drop(old);
-            return None;
-        }
-        slot.clone()
-    }
-
     /// Soloist's sound reaches the listener through our engine: its capture
-    /// runs, and its own output is turned down to [`ROUTED_LEVEL`]. Without
+    /// runs, and its own output is turned down to [`crate::route::ROUTED_LEVEL`]. Without
     /// a capture (other systems, an older Windows, a failure) Soloist is
     /// heard itself and the engine plays its track at volume 0.
     ///
-    /// Asked as a track is about to play (the engine sets its volume for
-    /// the answer): a capture started since the last track goes in now, and
-    /// only now, so the answer holds for the whole track (a capture can
-    /// still be lost during it; its track then gives silence and Soloist is
-    /// heard itself).
+    /// Asked as a track is about to play (see [`Router::routed`]).
     pub fn routed(&self) -> bool {
-        #[cfg(windows)]
-        {
-            let (promoted, discard) = {
-                let mut slot = lock(&self.route.capture);
-                if slot.is_some() {
-                    (false, None)
-                } else {
-                    let spare = lock(&self.route.spare).take();
-                    let pid = *lock(&self.pid);
-                    match spare {
-                        Some((p, c)) if Some(p) == pid && c.failure().is_none() => {
-                            *slot = Some(c);
-                            (true, None)
-                        }
-                        other => (false, other),
-                    }
-                }
-            };
-            if discard.is_some() {
-                self.capture_lost();
-                drop(discard);
-            }
-            if promoted {
-                log::info!("soloist: its sound goes through the player");
-                self.session_invalidate();
-            }
-            self.capture().is_some()
-        }
-        #[cfg(not(windows))]
-        false
-    }
-
-    /// Whether the capture runs now (no capture goes in).
-    fn routed_now(&self) -> bool {
-        #[cfg(windows)]
-        return self.capture().is_some();
-        #[cfg(not(windows))]
-        false
-    }
-
-    /// Starts capturing `pid` off the async workers (it may take seconds);
-    /// the capture waits as the spare until a track is about to play.
-    #[cfg(windows)]
-    fn start_capture(&self, pid: u32) {
-        let Some(me) = self.me.upgrade() else { return };
-        if self.route.starting.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        self.rt.spawn_blocking(move || {
-            let result = crate::capture::ProcessCapture::start(pid);
-            let current = *lock(&me.pid) == Some(pid);
-            match result {
-                Ok(c) if current => *lock(&me.route.spare) = Some((pid, Arc::new(c))),
-                Ok(c) => drop(c),
-                Err(e) => {
-                    log::info!("soloist: no capture of its sound: {e}");
-                    if current {
-                        me.retry_later();
-                    }
-                }
-            }
-            me.route.starting.store(false, Ordering::Release);
-            me.kick();
-        });
-    }
-
-    /// The next start of the capture waits a while.
-    #[cfg(windows)]
-    fn retry_later(&self) {
-        let mut r = lock(&self.route.retry);
-        r.next_at = Some(Instant::now() + retry_delay(r.attempts));
-    }
-
-    /// The capture is gone: Soloist is heard itself until a new one runs.
-    #[cfg(windows)]
-    fn capture_lost(&self) {
-        self.retry_later();
-        self.session_invalidate();
-    }
-
-    /// Starts the capture again when there is none and its wait is over.
-    #[cfg(windows)]
-    fn restart_capture_if_due(&self) {
-        let Some(pid) = *lock(&self.pid) else { return };
-        if self.route.starting.load(Ordering::Acquire) || lock(&self.route.capture).is_some() {
-            return;
-        }
-        let failed = {
-            let mut spare = lock(&self.route.spare);
-            match spare.as_ref() {
-                Some((p, c)) if *p == pid && c.failure().is_none() => return,
-                Some(_) => spare.take(),
-                None => None,
-            }
-        };
-        if failed.is_some() {
-            drop(failed);
-            self.retry_later();
-            return;
-        }
-        {
-            let mut r = lock(&self.route.retry);
-            if r.next_at.is_some_and(|t| Instant::now() < t) {
-                return;
-            }
-            r.attempts += 1;
-            r.next_at = None;
-        }
-        log::info!("soloist: starting its capture again");
-        self.start_capture(pid);
-    }
-
-    /// Soloist plays a track of ours and the capture's frames stand still:
-    /// the capture is dropped, Soloist is heard itself.
-    #[cfg(windows)]
-    fn watch_capture(&self, w: &mut Watch) {
-        let Some(c) = lock(&self.route.capture).clone() else {
-            *w = Watch::default();
-            return;
-        };
-        let expected = self.playing.load(Ordering::Acquire) > 0 && client::lock(&self.live).status == Status::Playing;
-        if w.stalled(Arc::as_ptr(&c) as usize, c.frames_captured(), expected, Instant::now()) {
-            log::warn!("soloist: its capture stalled: it plays out loud itself");
-            let old = {
-                let mut slot = lock(&self.route.capture);
-                if slot.as_ref().is_some_and(|s| Arc::ptr_eq(s, &c)) { slot.take() } else { None }
-            };
-            drop(c);
-            if old.is_some() {
-                self.capture_lost();
-            }
-            drop(old);
-            *w = Watch::default();
-        }
-    }
-
-    /// One look of the session thread; returns how long to wait for the
-    /// next.
-    #[cfg(windows)]
-    fn session_pass(&self, watch: &mut Watch, applied_at: &mut Option<Instant>) -> Duration {
-        let playing = self.playing.load(Ordering::Acquire) > 0;
-        self.watch_capture(watch);
-        self.restart_capture_if_due();
-        if playing && self.session_clean() && applied_at.is_none_or(|t| t.elapsed() >= REAPPLY) {
-            // The user may move Soloist in the volume mixer, or it may open
-            // a new session (another output device).
-            self.session_dirty();
-        }
-        if !self.session_clean() && self.apply_session_volume() {
-            *applied_at = Some(Instant::now());
-        }
-        match (playing, self.session_clean()) {
-            (true, false) => Duration::from_millis(50),
-            (true, true) => Duration::from_millis(100),
-            (false, false) => Duration::from_secs(1),
-            (false, true) => Duration::from_secs(2),
-        }
-    }
-
-    /// Wakes the session thread.
-    fn kick(&self) {
-        #[cfg(windows)]
-        if let Some(t) = self.route.thread.get() {
-            t.unpark();
-        }
+        self.router.routed()
     }
 
     /// The user's volume (0–1, the engine's slider). Routed, the engine
@@ -1074,64 +749,9 @@ impl Soloist {
     /// session through the engine's cubic curve (Windows), or Soloist's own
     /// volume.
     pub fn set_volume(&self, v: f32) {
-        let v = if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 };
-        let old = f32::from_bits(self.volume.swap(v.to_bits(), Ordering::AcqRel));
-        if (old - v).abs() < f32::EPSILON {
-            return;
+        if self.router.set_volume(v) && !cfg!(windows) {
+            self.send(Command::SetVolume((self.router.volume() * 100.0).round() as u8));
         }
-        if cfg!(windows) {
-            self.session_dirty();
-            self.kick();
-        } else {
-            self.send(Command::SetVolume((v * 100.0).round() as u8));
-        }
-    }
-
-    /// The level Soloist's audio session should be at: [`ROUTED_LEVEL`]
-    /// while routed, else the user's volume through the engine's curve.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    fn target_level(&self) -> f32 {
-        if self.routed_now() {
-            return ROUTED_LEVEL;
-        }
-        let v = f32::from_bits(self.volume.load(Ordering::Relaxed));
-        v * v * v
-    }
-
-    /// The level of Soloist's audio session, which the capture went through.
-    /// Routed, it is [`ROUTED_LEVEL`] only once the session was read back at
-    /// it; 0 (unknown: the track gives silence) until then.
-    pub(crate) fn capture_gain(&self) -> f32 {
-        if self.routed_now() {
-            let level = f32::from_bits(self.session_level.load(Ordering::Acquire));
-            return if level_matches(level, ROUTED_LEVEL) { ROUTED_LEVEL } else { 0.0 };
-        }
-        let v = f32::from_bits(self.volume.load(Ordering::Relaxed));
-        if cfg!(windows) { v * v * v } else { 1.0 }
-    }
-
-    /// While a track starts: its session gets our level as soon as it
-    /// appears (the session thread looks every 50 ms then; this only wakes
-    /// it, the decoder thread never waits for COM).
-    pub(crate) fn prepare_output(&self) {
-        if !self.session_clean() {
-            self.kick();
-        }
-    }
-
-    /// The captured sound is louder than the level allows: the session is at
-    /// another level (a new session, the volume mixer). The track gives
-    /// silence until the level is set and read back again.
-    pub(crate) fn session_wrong(&self) {
-        static LAST: Mutex<Option<Instant>> = Mutex::new(None);
-        {
-            let mut last = lock(&LAST);
-            if last.is_none_or(|t| t.elapsed() > Duration::from_secs(10)) {
-                log::info!("soloist: its session is not at the routed level: set again");
-                *last = Some(Instant::now());
-            }
-        }
-        self.session_invalidate();
     }
 
     pub fn pause(&self) {
@@ -1148,64 +768,31 @@ impl Soloist {
     pub fn track(self: &Arc<Self>, id: &str, duration: Option<Duration>) -> crate::track::SoloistTrack {
         crate::track::SoloistTrack::new(self.clone(), crate::protocol::track_uri(id), duration)
     }
-
-    /// The session should get its level again (what it had stays known).
-    fn session_dirty(&self) {
-        self.session_want.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// The session's level is not known any more (another route, another
-    /// process, a level that does not fit the sound): set it again.
-    fn session_invalidate(&self) {
-        self.session_level.store(f32::NAN.to_bits(), Ordering::Release);
-        self.session_dirty();
-        self.kick();
-    }
-
-    fn session_clean(&self) -> bool {
-        self.session_done.load(Ordering::Acquire) == self.session_want.load(Ordering::Acquire)
-    }
-
-    /// Sets Soloist's audio sessions to their level and reads it back (the
-    /// session thread only); true once every session is at it. A session
-    /// appears with Soloist's first sound: until then there is none to set.
-    #[cfg(windows)]
-    fn apply_session_volume(&self) -> bool {
-        let Some(pid) = *lock(&self.pid) else { return false };
-        let generation = self.session_want.load(Ordering::Acquire);
-        let want = self.target_level();
-        match crate::capture::set_sessions_read_back(&[pid], Some(false), Some(want)) {
-            Ok(levels) if !levels.is_empty() => {
-                let all = levels.iter().all(|l| level_matches(*l, want));
-                self.session_level.store(if all { want } else { f32::NAN }.to_bits(), Ordering::Release);
-                if all {
-                    self.session_done.store(generation, Ordering::Release);
-                } else {
-                    log::debug!("soloist: session levels {levels:?} after setting {want}");
-                }
-                all
-            }
-            Ok(_) => false,
-            Err(e) => {
-                self.session_level.store(f32::NAN.to_bits(), Ordering::Release);
-                log::debug!("soloist: session level: {e}");
-                false
-            }
-        }
-    }
 }
 
-/// The session thread: keeps Soloist's session at its level, watches the
-/// capture and starts it again; ends with the manager.
-#[cfg(windows)]
-fn session_loop(me: &Weak<Soloist>) {
-    let mut watch = Watch::default();
-    let mut applied_at = None;
-    loop {
-        let Some(s) = me.upgrade() else { return };
-        let wait = s.session_pass(&mut watch, &mut applied_at);
-        drop(s);
-        std::thread::park_timeout(wait);
+impl Captured for Soloist {
+    fn take_captured(&self, out: &mut [f32]) -> Option<usize> {
+        self.router.take_captured(out)
+    }
+
+    fn buffered_frames(&self) -> Option<usize> {
+        self.router.buffered_frames()
+    }
+
+    fn clear_captured(&self) {
+        self.router.clear_captured();
+    }
+
+    fn keep_captured(&self, frames: usize) {
+        self.router.keep_captured(frames);
+    }
+
+    fn capture_gain(&self) -> f32 {
+        self.router.capture_gain()
+    }
+
+    fn session_wrong(&self) {
+        self.router.session_wrong();
     }
 }
 
@@ -1221,65 +808,18 @@ impl crate::track::Link for Soloist {
         Soloist::send(self, c)
     }
 
-    fn take_captured(&self, out: &mut [f32]) -> Option<usize> {
-        #[cfg(windows)]
-        return self.capture().map(|c| c.take(out));
-        #[cfg(not(windows))]
-        {
-            let _ = out;
-            None
-        }
-    }
-
-    fn buffered_frames(&self) -> Option<usize> {
-        #[cfg(windows)]
-        return self.capture().map(|c| c.buffered_frames());
-        #[cfg(not(windows))]
-        None
-    }
-
-    fn clear_captured(&self) {
-        #[cfg(windows)]
-        if let Some(c) = self.capture() {
-            c.clear();
-        }
-    }
-
-    fn keep_captured(&self, frames: usize) {
-        #[cfg(windows)]
-        if let Some(c) = self.capture() {
-            c.keep_newest(frames);
-        }
-        #[cfg(not(windows))]
-        let _ = frames;
-    }
-
-    fn capture_gain(&self) -> f32 {
-        Soloist::capture_gain(self)
-    }
-
     fn paused_by_us(&self) -> bool {
         self.user_paused.load(Ordering::Acquire)
     }
 
     fn prepare_output(&self) {
-        Soloist::prepare_output(self);
-    }
-
-    fn session_wrong(&self) {
-        Soloist::session_wrong(self);
+        self.router.prepare_output();
     }
 
     /// Only counts and wakes: a staged renewal waits for the supervisor.
     fn playing(&self, delta: i32) {
         *lock(&self.busy_at) = Instant::now();
-        if delta > 0 {
-            self.playing.fetch_add(1, Ordering::AcqRel);
-            self.session_dirty();
-            self.kick();
-        } else {
-            let _ = self.playing.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
-        }
+        self.router.playing(delta);
     }
 }
 
@@ -1323,44 +863,4 @@ impl LiveView {
 fn capitalised(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_level_read_back_matches_only_the_level_set() {
-        assert!(level_matches(ROUTED_LEVEL, ROUTED_LEVEL));
-        assert!(level_matches(1.000_001e-6, ROUTED_LEVEL), "float rounding");
-        assert!(!level_matches(1e-5, ROUTED_LEVEL));
-        assert!(!level_matches(1.0, ROUTED_LEVEL), "the volume mixer moved it");
-        assert!(!level_matches(f32::NAN, ROUTED_LEVEL), "not known");
-        assert!(level_matches(0.0, 0.0));
-        assert!(level_matches(0.125, 0.125));
-    }
-
-    #[test]
-    fn a_capture_stalls_only_while_soloist_plays() {
-        let t0 = Instant::now();
-        let ms = |n: u64| t0 + Duration::from_millis(n);
-        let mut w = Watch::default();
-        // A new capture that heard nothing yet gets longer.
-        assert!(!w.stalled(1, 0, true, ms(0)));
-        assert!(!w.stalled(1, 0, true, ms(1500)));
-        assert!(w.stalled(1, 0, true, ms(2000)));
-        // Frames come: the clock starts again, and 500 ms is enough now.
-        assert!(!w.stalled(1, 480, true, ms(2010)));
-        assert!(!w.stalled(1, 960, true, ms(2020)));
-        assert!(!w.stalled(1, 960, true, ms(2300)));
-        assert!(w.stalled(1, 960, true, ms(2520)));
-        // Paused: no sound is expected, and the wait starts over on playing.
-        assert!(!w.stalled(1, 960, false, ms(5000)));
-        assert!(!w.stalled(1, 960, true, ms(5100)));
-        assert!(!w.stalled(1, 960, true, ms(5500)));
-        assert!(w.stalled(1, 960, true, ms(5600)));
-        // Another capture starts afresh.
-        assert!(!w.stalled(2, 0, true, ms(5700)));
-        assert!(!w.stalled(2, 0, true, ms(6200)));
-    }
 }

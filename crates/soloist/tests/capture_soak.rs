@@ -19,7 +19,7 @@ use nikgob_audio::{PcmRead, PcmSource, PlayItem, Player, PlayerOptions};
 use nikgob_soloist::LiveView;
 use nikgob_soloist::capture::ProcessCapture;
 use nikgob_soloist::protocol::{Anchor, Command, Status};
-use nikgob_soloist::track::{Link, SoloistTrack};
+use nikgob_soloist::track::{Captured, Link, SoloistTrack};
 
 const CHILD: &str = "NIKGOB_SOAK_CHILD";
 const URI: &str = "spotify:track:soak";
@@ -81,6 +81,13 @@ impl Link for CaptureLink {
     fn send(&self, _c: Command) -> bool {
         true
     }
+    fn paused_by_us(&self) -> bool {
+        false
+    }
+    fn playing(&self, _delta: i32) {}
+}
+
+impl Captured for CaptureLink {
     fn take_captured(&self, out: &mut [f32]) -> Option<usize> {
         let n = self.capture.take(out);
         self.taken.fetch_add(n as u64 / 2, Ordering::Relaxed);
@@ -98,10 +105,6 @@ impl Link for CaptureLink {
     fn capture_gain(&self) -> f32 {
         1.0
     }
-    fn paused_by_us(&self) -> bool {
-        false
-    }
-    fn playing(&self, _delta: i32) {}
 }
 
 /// CPU time of this process so far.

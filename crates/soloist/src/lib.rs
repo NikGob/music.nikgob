@@ -16,6 +16,9 @@
 //!   device once in a Spotify app), restarts, the handle tracks play through.
 //! * [`SoloistTrack`]: one track as a live source of our engine.
 //! * [`capture`]: Soloist's sound captured from its process (Windows).
+//! * [`route`]: what any process routed this way needs (the capture, the
+//!   session level, the watchdog, the live feed), shared with SoundCloud's
+//!   official player (`nikgob-sc-widget`).
 //!
 //! # Where the sound goes
 //!
@@ -42,9 +45,10 @@ pub mod client;
 pub mod daemon;
 pub mod install;
 #[cfg(windows)]
-mod job;
+pub mod job;
 mod manager;
 pub mod protocol;
+pub mod route;
 pub mod track;
 
 pub use manager::{BoxFuture, Config, KeyStore, LiveView, Soloist, default_device_name};
