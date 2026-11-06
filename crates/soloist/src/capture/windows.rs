@@ -248,16 +248,18 @@ impl Drop for Event {
     }
 }
 
-// SAFETY of sharing: a Win32 event handle may be signalled from any thread.
-#[derive(Clone, Copy)]
-struct SendHandle(HANDLE);
-unsafe impl Send for SendHandle {}
-unsafe impl Sync for SendHandle {}
+// SAFETY of sharing: a Win32 event handle may be waited on, signalled and
+// closed from any thread.
+unsafe impl Send for Event {}
+unsafe impl Sync for Event {}
 
-/// Gets the activation's result and signals `done`.
+/// Gets the activation's result and signals `done`. It holds the event
+/// itself: it may be called after the activation timed out and `activate`
+/// returned, and the handle must still be the event then (closed only when
+/// both are done with it).
 #[implement(IActivateAudioInterfaceCompletionHandler)]
 struct Activated {
-    done: SendHandle,
+    done: Arc<Event>,
 }
 
 impl IActivateAudioInterfaceCompletionHandler_Impl for Activated_Impl {
@@ -329,8 +331,8 @@ fn activate(pid: u32, buffer: Duration, event: &Event) -> Result<(IAudioClient, 
             }),
         },
     });
-    let done = Event::new()?;
-    let handler: IActivateAudioInterfaceCompletionHandler = Activated { done: SendHandle(done.0) }.into();
+    let done = Arc::new(Event::new()?);
+    let handler: IActivateAudioInterfaceCompletionHandler = Activated { done: done.clone() }.into();
     let operation = unsafe {
         ActivateAudioInterfaceAsync(
             VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
@@ -494,11 +496,17 @@ fn run(pid: u32, options: CaptureOptions, shared: &Shared) {
 /// Sets mute and volume on every audio session of the processes in `pids`
 /// on the active output devices; returns how many sessions it changed.
 pub fn set_sessions(pids: &[u32], mute: Option<bool>, volume: Option<f32>) -> Result<usize, String> {
+    set_sessions_read_back(pids, mute, volume).map(|levels| levels.len())
+}
+
+/// [`set_sessions`], returning the level each session it changed was read
+/// back at afterwards (what Windows really applies, not what was asked).
+pub fn set_sessions_read_back(pids: &[u32], mute: Option<bool>, volume: Option<f32>) -> Result<Vec<f32>, String> {
     let _com = Com::init().ok();
     let enumerator: IMMDeviceEnumerator =
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|e| format!("MMDeviceEnumerator: {e}"))?;
     let devices = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }.map_err(|e| e.to_string())?;
-    let mut changed = 0;
+    let mut levels = Vec::new();
     for d in 0..unsafe { devices.GetCount() }.unwrap_or(0) {
         let Ok(device) = (unsafe { devices.Item(d) }) else { continue };
         let Ok(manager) = (unsafe { device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) }) else {
@@ -520,8 +528,9 @@ pub fn set_sessions(pids: &[u32], mute: Option<bool>, volume: Option<f32>) -> Re
                 unsafe { simple.SetMasterVolume(v.clamp(0.0, 1.0), std::ptr::null()) }
                     .map_err(|e| format!("SetMasterVolume: {e}"))?;
             }
-            changed += 1;
+            let level = unsafe { simple.GetMasterVolume() }.map_err(|e| format!("GetMasterVolume: {e}"))?;
+            levels.push(level);
         }
     }
-    Ok(changed)
+    Ok(levels)
 }

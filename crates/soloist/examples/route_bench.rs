@@ -534,6 +534,7 @@ mod bench {
                 anchor: Some(Anchor { position_ms: 0, timestamp_ms: self.start_ms, speed: 1.0 }),
                 track_changes: self.changes.load(Ordering::Acquire),
                 error: None,
+                ..Default::default()
             }
         }
         fn send(&self, c: Command) -> bool {

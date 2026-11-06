@@ -75,6 +75,7 @@ impl Link for CaptureLink {
             anchor: Some(Anchor { position_ms: 0, timestamp_ms: 1, speed: 1.0 }),
             track_changes: 1,
             error: None,
+            ..Default::default()
         }
     }
     fn send(&self, _c: Command) -> bool {
