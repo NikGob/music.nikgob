@@ -1257,8 +1257,17 @@ pub(super) fn open_url(url: &str) {
         panic!("a test tried to launch an external program");
     }
     let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
-    if let Err(e) = std::process::Command::new(opener).arg(url).spawn() {
-        log::warn!("cannot open {url}: {e}");
+    match std::process::Command::new(opener).arg(url).spawn() {
+        // Reaped in the background, or the finished opener stays a zombie.
+        #[cfg(unix)]
+        Ok(mut child) => {
+            let _ = std::thread::Builder::new().name("opener".into()).spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        #[cfg(not(unix))]
+        Ok(_) => {}
+        Err(e) => log::warn!("cannot open {url}: {e}"),
     }
 }
 

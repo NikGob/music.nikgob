@@ -1354,7 +1354,15 @@ pub(super) fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
     }
     let _ = std::fs::create_dir_all(path);
     let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
-    std::process::Command::new(opener).arg(path).spawn().map(|_| ())
+    let mut child = std::process::Command::new(opener).arg(path).spawn()?;
+    // Reaped in the background, or the finished opener stays a zombie.
+    #[cfg(unix)]
+    let _ = std::thread::Builder::new().name("opener".into()).spawn(move || {
+        let _ = child.wait();
+    });
+    #[cfg(not(unix))]
+    drop(child);
+    Ok(())
 }
 
 #[cfg(test)]
