@@ -1,6 +1,6 @@
 //! YouTube Music sign-in in a window of the app (like pear-desktop): Google's
-//! own sign-in page in the system WebView2, then the session's cookies go
-//! into the ordinary cookies login.
+//! own sign-in page in the system webview (WebView2 on Windows, WebKitGTK on
+//! Linux), then the session's cookies go into the ordinary cookies login.
 //!
 //! **Two processes.** winit allows one event loop per process and eframe owns
 //! the app's, so the window is a child run of the same exe:
@@ -9,9 +9,10 @@
 //! nikgob.exe --youtube-login <out-file> --profile <webview-dir> [--timeout <secs>] [--watch-stdin]
 //! ```
 //!
-//! The child ([`window`]) opens «Вход в YouTube Music» at Google's sign-in
-//! page with a persistent WebView2 profile (`<data>/youtube/webview`, so a
-//! later sign-in is one click). Once the page is on music.youtube.com and the
+//! The child (`window` on Windows, `gtk_window` on Linux) opens «Вход в
+//! YouTube Music» at Google's sign-in page with a persistent webview profile
+//! (`<data>/youtube/webview`, so a later sign-in is one click). Once the
+//! page is on music.youtube.com and the
 //! cookie store has `SAPISID` and `LOGIN_INFO` for .youtube.com, it writes
 //! the cookies of music.youtube.com and www.youtube.com as a Netscape
 //! cookies.txt to `<out-file>` and exits [`EXIT_OK`]; a closed window exits
@@ -29,6 +30,8 @@
 
 #[cfg(windows)]
 mod window;
+#[cfg(target_os = "linux")]
+mod gtk_window;
 
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader};
@@ -109,10 +112,14 @@ pub fn child_main() -> Option<i32> {
     {
         Some(window::run(&args))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        Some(gtk_window::run(&args))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = args;
-        log::error!("sign-in window: only on Windows");
+        log::error!("sign-in window: only on Windows and Linux");
         Some(EXIT_ERROR)
     }
 }
@@ -246,7 +253,7 @@ pub fn write_secret(path: &Path, text: &str) -> std::io::Result<()> {
 /// Runs the sign-in window as a child of this exe (see the module docs).
 pub struct WindowLogin {
     exe: PathBuf,
-    /// The WebView2 profile.
+    /// The webview's profile.
     profile: PathBuf,
     /// Where the child writes the cookies.
     out: PathBuf,
@@ -263,6 +270,9 @@ impl WindowLogin {
         })
     }
 }
+
+/// What the user is told when the child finds no webview to show.
+const NO_WEBVIEW: &str = if cfg!(windows) { "в системе нет WebView2" } else { "в системе нет WebKitGTK" };
 
 /// How long the child gets to close by itself after «Отмена».
 const CANCEL_GRACE: Duration = Duration::from_secs(3);
@@ -336,7 +346,7 @@ impl WebLogin for WindowLogin {
             Some(EXIT_CLOSED) => Err(WebLoginError::Closed),
             Some(EXIT_TIMEOUT) => Err(WebLoginError::TimedOut),
             Some(EXIT_REFUSED) => Err(WebLoginError::Refused),
-            Some(EXIT_NO_WEBVIEW) => Err(WebLoginError::Failed("в системе нет WebView2".into())),
+            Some(EXIT_NO_WEBVIEW) => Err(WebLoginError::Failed(NO_WEBVIEW.into())),
             other => {
                 let _ = std::fs::remove_file(&self.out);
                 Err(WebLoginError::Failed(match other {
@@ -348,8 +358,8 @@ impl WebLogin for WindowLogin {
     }
 
     fn forget(&self) {
-        // WebView2's own processes may hold the files for a moment after the
-        // window is gone.
+        // The webview's own processes (WebView2's, WebKit's) may hold the
+        // files for a moment after the window is gone.
         for _ in 0..20 {
             match std::fs::remove_dir_all(&self.profile) {
                 Ok(()) => {
