@@ -1151,8 +1151,8 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
             p.output_device = if n == 0 { None } else { p.output_devices.get(n - 1).cloned() };
         }
     });
-    // A track Spotify Soloist plays is another program's sound: these do
-    // not apply to it.
+    // A track Spotify Soloist plays is a live stream of another player:
+    // nothing can overlap it.
     let soloist = _state.player.soloist;
     dimmed(ui, soloist, |ui| {
         row(ui, Id::Gapless, "Без пауз между треками", Some("Треки альбома идут без тишины между ними"), |ui| {
@@ -1171,9 +1171,9 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
                 });
             },
         );
-        row(ui, Id::Normalization, "Нормализация громкости", Some("Все треки примерно одинаково громкие"), |ui| {
-            ui.add(Switch::new(&mut p.normalization).enabled(!soloist).id_salt("set-norm"));
-        });
+    });
+    row(ui, Id::Normalization, "Нормализация громкости", Some("Все треки примерно одинаково громкие"), |ui| {
+        ui.add(Switch::new(&mut p.normalization).id_salt("set-norm"));
     });
 
     group(ui, "Библиотека");

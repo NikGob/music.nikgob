@@ -27,7 +27,7 @@
 //! silences the capture too (`tests/loopback_mute.rs`), but any level above
 //! 0 is a plain float factor before the capture: the session is set to
 //! 1e-6 (-120 dB) and the captured sound is scaled back up, as clean as at
-//! full level (`examples/route_bench.rs` on the bench branch measured it,
+//! full level (`examples/route_bench.rs` measured it,
 //! with no gaps over minutes, ~160 ms added delay and 2-3 % of one core).
 //! Soloist's own volume stays at 100. Without a capture (other systems, an
 //! older Windows, a failure) Soloist is heard itself: the user's volume

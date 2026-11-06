@@ -8,11 +8,14 @@
 //! streams too.
 //!
 //! Spotify tracks play through Spotify Soloist while it is set up and
-//! paired (`nikgob-soloist`): the item is a live PCM source driving Soloist,
-//! which plays the track itself; the engine gets its captured sound at
-//! volume 0 (for the visualizer, the position and the end of the track),
-//! and the user's volume goes to Soloist. Nothing is preloaded into or out of
-//! such a track (one player cannot overlap two tracks): a clean cut.
+//! paired (`nikgob-soloist`): the item is a live PCM source driving Soloist
+//! and handing the engine Soloist's captured sound, which is the copy heard
+//! (Soloist's own output is turned down to an inaudible level), so volume,
+//! normalization, visualizer and output device work as for any track.
+//! Without a capture Soloist is heard itself: the engine plays the item at
+//! volume 0 and the user's volume goes to Soloist. Nothing is preloaded into
+//! or out of such a track (one player cannot overlap two tracks): a clean
+//! cut.
 //!
 //! Switching the output device restarts the engine: the old `Player` is
 //! dropped (its threads stop and the device closes), a new one opens the
@@ -58,6 +61,8 @@ pub struct Engine {
     volume: f32,
     /// What plays now goes through Soloist.
     on_soloist: bool,
+    /// ... and Soloist is heard itself (no capture): the engine is at 0.
+    soloist_direct: bool,
 }
 
 fn spawn(device: Option<String>, links: &Links) -> Result<Player, String> {
@@ -90,6 +95,7 @@ impl Engine {
                 soloist,
                 volume: 1.0,
                 on_soloist: false,
+                soloist_direct: false,
             },
             links,
         ))
@@ -223,14 +229,19 @@ impl ByteSource for StreamBytes {
 impl Playback for Engine {
     fn play(&mut self, req: PlayRequest) {
         let soloist = self.soloist_for(&req).cloned();
+        let direct = soloist.as_ref().is_some_and(|s| !s.routed());
         if let Some(s) = &soloist {
-            // Soloist is heard; the engine's copy is only for the visualizer.
             s.set_volume(self.volume);
+        }
+        if direct {
+            // Soloist is heard itself; the engine's copy only moves the
+            // visualizer.
             self.player.set_volume(0.0);
-        } else if self.on_soloist {
+        } else if self.soloist_direct {
             self.player.set_volume(self.volume);
         }
         self.on_soloist = soloist.is_some();
+        self.soloist_direct = direct;
         let item = self.item(req);
         self.player.play(item);
     }
@@ -267,8 +278,9 @@ impl Playback for Engine {
 
     fn stop(&mut self) {
         self.player.stop();
-        if self.on_soloist {
-            self.on_soloist = false;
+        self.on_soloist = false;
+        if self.soloist_direct {
+            self.soloist_direct = false;
             self.player.set_volume(self.volume);
         }
     }
@@ -279,9 +291,11 @@ impl Playback for Engine {
 
     fn set_volume(&mut self, volume: f32) {
         self.volume = volume;
-        match (&self.soloist, self.on_soloist) {
-            (Some(s), true) => s.set_volume(volume),
-            _ => self.player.set_volume(volume),
+        if let Some(s) = &self.soloist {
+            s.set_volume(volume);
+        }
+        if !self.soloist_direct {
+            self.player.set_volume(volume);
         }
     }
 
@@ -301,6 +315,7 @@ impl Playback for Engine {
                 self.player = p;
                 self.player.set_volume(self.volume);
                 self.on_soloist = false;
+                self.soloist_direct = false;
                 true
             }
             Err(e) => {

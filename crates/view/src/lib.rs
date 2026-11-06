@@ -317,8 +317,8 @@ pub struct PlayerView {
     /// ~128 кбит/с", "Vorbis 320 кбит/с"): the source that plays, not the
     /// track's best source. `None` for a local file (its row says).
     pub audio_quality: Option<String>,
-    /// The track plays through Spotify Soloist (another program plays it:
-    /// crossfade, gapless and normalization do not apply).
+    /// The track plays through Spotify Soloist (a live stream of another
+    /// player: crossfade and gapless do not apply).
     pub soloist: bool,
 }
 
