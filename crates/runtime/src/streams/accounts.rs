@@ -93,7 +93,11 @@ impl Worker {
                     LoginInput::PersonalApp { client_id } => {
                         self.save_stream_secrets(Some(client_id.clone()), None, false);
                     }
-                    LoginInput::Cookies(c) => self.save_stream_secrets(None, Some(c.clone()), false),
+                    // SoundCloud keeps its token in the credential store itself.
+                    LoginInput::Cookies(c) if service == Service::Youtube => {
+                        self.save_stream_secrets(None, Some(c.clone()), false);
+                    }
+                    LoginInput::Cookies(_) => {}
                     LoginInput::Browser | LoginInput::Playback => {}
                 }
                 self.login_toast(service, &input);

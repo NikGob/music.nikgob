@@ -185,6 +185,7 @@ fn a_deezer_track_plays_from_youtube_music_with_the_isrc_deezer_gives() {
         spotify: false,
         youtube: false,
         deezer: true,
+        soundcloud: false,
         torrents: false,
         mixed: false,
     }));
@@ -247,6 +248,7 @@ fn a_like_of_a_deezer_track_stays_local_and_learns_its_isrc() {
         spotify: false,
         youtube: false,
         deezer: true,
+        soundcloud: false,
         torrents: false,
         mixed: false,
     }));
@@ -300,6 +302,7 @@ fn a_query_with_ye_finds_the_song_written_with_yo() {
         spotify: false,
         youtube: false,
         deezer: true,
+        soundcloud: false,
         torrents: false,
         mixed: false,
     }));

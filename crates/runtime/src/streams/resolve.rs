@@ -238,6 +238,8 @@ pub(crate) fn failure_text(
         } else {
             ("на YouTube только для 18+ — нужен вход в YouTube Music".into(), Some(SettingLink::Youtube))
         }
+    } else if m.contains("drm") {
+        ("в SoundCloud только в защищённом виде".into(), None)
     } else if m.contains("blocked in this region") {
         ("недоступно в твоём регионе".into(), None)
     } else if m.contains("premium") {

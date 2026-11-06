@@ -674,9 +674,13 @@ fn main() -> eframe::Result {
     if let Some(l) = &links {
         l.connect(runtime.playback_sender());
     }
-    // «Войти через Google»: the sign-in window, its profile in youtube/webview.
-    if let Some(login) = ytlogin::WindowLogin::new(&data_dir.join("youtube")) {
+    // «Войти через Google»: the sign-in window, its profile in youtube/webview;
+    // SoundCloud's in soundcloud/webview.
+    if let Some(login) = ytlogin::WindowLogin::new(ytlogin::Site::Youtube, &data_dir.join("youtube")) {
         runtime.set_web_login(nikgob_core::streaming::Service::Youtube, Arc::new(login));
+    }
+    if let Some(login) = ytlogin::WindowLogin::new(ytlogin::Site::Soundcloud, &data_dir.join("soundcloud")) {
+        runtime.set_web_login(nikgob_core::streaming::Service::Soundcloud, Arc::new(login));
     }
     if let Some(c) = relogin {
         runtime.send(c);

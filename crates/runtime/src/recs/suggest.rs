@@ -50,7 +50,7 @@ const RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
 /// Library cache keys: `suggest.youtube`, `suggest.spotify`.
 const KEY: &str = "suggest.";
 /// The services that can have suggestions, in the order they are asked.
-const SERVICES: [Service; 2] = [Service::Youtube, Service::Spotify];
+const SERVICES: [Service; 3] = [Service::Youtube, Service::Spotify, Service::Soundcloud];
 
 /// One service's suggestions as kept.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

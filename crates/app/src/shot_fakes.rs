@@ -294,7 +294,7 @@ impl Fakes {
             }
             let name = svc.display_name();
             let other = match svc {
-                Service::Spotify | Service::Deezer => Service::Youtube,
+                Service::Spotify | Service::Deezer | Service::Soundcloud => Service::Youtube,
                 Service::Youtube => Service::Deezer,
             }
             .display_name();
@@ -369,6 +369,7 @@ impl Fakes {
             s.player.audio_quality = Some(match svc {
                 Service::Youtube | Service::Deezer => nikgob_core::streaming::quality_label("Opus", 160, true),
                 Service::Spotify => nikgob_core::streaming::quality_label("Vorbis", 320, false),
+                Service::Soundcloud => nikgob_core::streaming::quality_label("AAC", 160, false),
             });
             if self.soloist {
                 s.player.soloist = true;

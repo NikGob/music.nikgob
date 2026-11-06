@@ -245,6 +245,7 @@ fn stream_outcome(e: StreamError) -> Outcome {
         StreamError::Unavailable
         | StreamError::AgeRestricted
         | StreamError::RegionBlocked
+        | StreamError::Drm
         | StreamError::Unsupported
         | StreamError::PremiumRequired
         | StreamError::Parse(_) => Outcome::Failed(e.to_string()),

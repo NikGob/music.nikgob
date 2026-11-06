@@ -218,6 +218,9 @@ pub struct PageState {
     sp_client_id: String,
     yt_cookies: String,
     yt_form: bool,
+    /// SoundCloud's pasted token and whether its field is open.
+    sc_token: String,
+    sc_form: bool,
     track_window: (usize, usize),
     /// Tracks waiting for the "В плейлист" picker.
     pending_add: Option<Vec<TrackId>>,

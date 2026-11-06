@@ -4969,6 +4969,7 @@ dependencies = [
  "nikgob-recs",
  "nikgob-runtime",
  "nikgob-soloist",
+ "nikgob-soundcloud",
  "nikgob-spotify",
  "nikgob-view",
  "nikgob-youtube",
@@ -5248,6 +5249,22 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "nikgob-soundcloud"
+version = "0.0.2"
+dependencies = [
+ "fastrand",
+ "keyring-core",
+ "log",
+ "nikgob-core",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "windows-native-keyring-store",
+ "zbus-secret-service-keyring-store",
 ]
 
 [[package]]

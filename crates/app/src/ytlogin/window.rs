@@ -14,15 +14,12 @@ use winit::window::{Icon, Window, WindowId};
 use wry::{NewWindowResponse, PageLoadEvent, WebContext, WebView, WebViewBuilder};
 
 use super::{
-    ChildArgs, Cookie, EXIT_CLOSED, EXIT_ERROR, EXIT_NO_WEBVIEW, EXIT_OK, EXIT_REFUSED, EXIT_TIMEOUT,
-    START_URL, netscape, redact, refused, signed_in, write_secret,
+    ChildArgs, Cookie, EXIT_CLOSED, EXIT_ERROR, EXIT_NO_WEBVIEW, EXIT_OK, EXIT_REFUSED, EXIT_TIMEOUT, netscape,
+    redact, write_secret,
 };
 
-const TITLE: &str = "Вход в YouTube Music";
 /// How often the page and the cookie store are looked at.
 const CHECK_EVERY: Duration = Duration::from_secs(1);
-/// Where the session cookies are read from.
-const COOKIE_URLS: [&str; 2] = ["https://music.youtube.com/", "https://www.youtube.com/"];
 
 pub fn run(args: &ChildArgs) -> i32 {
     match wry::webview_version() {
@@ -89,7 +86,7 @@ impl App {
     fn open(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
         let icon = Icon::from_rgba(crate::desktop::icon_rgba(64), 64, 64).ok();
         let attrs = Window::default_attributes()
-            .with_title(TITLE)
+            .with_title(self.args.site.title())
             .with_inner_size(LogicalSize::new(520.0, 720.0))
             .with_min_inner_size(LogicalSize::new(380.0, 480.0))
             .with_window_icon(icon)
@@ -102,8 +99,9 @@ impl App {
             window.set_outer_position(PhysicalPosition::new(x, y));
         }
         window.set_visible(true);
+        let site = self.args.site;
         let webview = WebViewBuilder::new_with_web_context(&mut self.context)
-            .with_url(START_URL)
+            .with_url(site.start_url())
             .with_document_title_changed_handler(|t| log::info!("title: {t}"))
             .with_on_page_load_handler(|ev, url| {
                 if matches!(ev, PageLoadEvent::Finished) {
@@ -111,7 +109,11 @@ impl App {
                 }
             })
             // Help links and the like: no second window.
-            .with_new_window_req_handler(|url, _| {
+            .with_new_window_req_handler(move |url, _| {
+                if site.popup_allowed(&url) {
+                    log::info!("popup opened: {}", redact(&url));
+                    return NewWindowResponse::Allow;
+                }
                 log::info!("popup not opened: {}", redact(&url));
                 NewWindowResponse::Deny
             })
@@ -120,7 +122,7 @@ impl App {
         window.focus_window();
         self.window = Some(window);
         self.webview = Some(webview);
-        log::info!("window open at {}", redact(START_URL));
+        log::info!("window open at {}", redact(site.start_url()));
         Ok(())
     }
 
@@ -149,15 +151,16 @@ impl App {
             log::info!("at {}", redact(&url));
             self.last_url.clone_from(&url);
         }
-        if refused(&url) {
-            log::warn!("Google refused the sign-in in this window");
+        let site = self.args.site;
+        if site.refused(&url) {
+            log::warn!("the sign-in was refused in this window");
             return self.finish(el, EXIT_REFUSED);
         }
-        if super::host(&url) != "music.youtube.com" {
+        if !site.at_home(&url) {
             return;
         }
         let mut cookies = Vec::new();
-        for u in COOKIE_URLS {
+        for u in site.cookie_urls() {
             match webview.cookies_for_url(u) {
                 Ok(list) => {
                     let read_for = super::host(u);
@@ -166,7 +169,7 @@ impl App {
                 Err(e) => log::warn!("cookies of {u}: {e}"),
             }
         }
-        if !signed_in(&url, &cookies) {
+        if !site.signed_in(&url, &cookies) {
             return;
         }
         log::info!("signed in: {} cookies", cookies.len());

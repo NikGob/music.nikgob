@@ -17,15 +17,12 @@ use gtk::prelude::*;
 use wry::{NewWindowResponse, PageLoadEvent, WebContext, WebView, WebViewBuilder, WebViewBuilderExtUnix as _};
 
 use super::{
-    ChildArgs, Cookie, EXIT_CLOSED, EXIT_ERROR, EXIT_NO_WEBVIEW, EXIT_OK, EXIT_REFUSED, EXIT_TIMEOUT,
-    START_URL, netscape, redact, refused, signed_in, write_secret,
+    ChildArgs, Cookie, EXIT_CLOSED, EXIT_ERROR, EXIT_NO_WEBVIEW, EXIT_OK, EXIT_REFUSED, EXIT_TIMEOUT, netscape,
+    redact, write_secret,
 };
 
-const TITLE: &str = "Вход в YouTube Music";
 /// How often the page and the cookie store are looked at.
 const CHECK_EVERY: Duration = Duration::from_secs(1);
-/// Where the session cookies are read from.
-const COOKIE_URLS: [&str; 2] = ["https://music.youtube.com/", "https://www.youtube.com/"];
 /// The window icon's side, in pixels.
 const ICON: usize = 64;
 
@@ -60,7 +57,7 @@ pub fn run(args: &ChildArgs) -> i32 {
     }
 
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
-    window.set_title(TITLE);
+    window.set_title(args.site.title());
     window.set_default_size(520, 720);
     window.set_size_request(380, 480);
     window.set_position(gtk::WindowPosition::Center);
@@ -71,9 +68,10 @@ pub fn run(args: &ChildArgs) -> i32 {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     window.add(&content);
 
+    let site = args.site;
     let mut context = WebContext::new(Some(args.profile.clone()));
     let webview = match WebViewBuilder::new_with_web_context(&mut context)
-        .with_url(START_URL)
+        .with_url(site.start_url())
         .with_document_title_changed_handler(|t| log::info!("title: {t}"))
         .with_on_page_load_handler(|ev, url| {
             if matches!(ev, PageLoadEvent::Finished) {
@@ -81,7 +79,11 @@ pub fn run(args: &ChildArgs) -> i32 {
             }
         })
         // Help links and the like: no second window.
-        .with_new_window_req_handler(|url, _| {
+        .with_new_window_req_handler(move |url, _| {
+            if site.popup_allowed(&url) {
+                log::info!("popup opened: {}", redact(&url));
+                return NewWindowResponse::Allow;
+            }
             log::info!("popup not opened: {}", redact(&url));
             NewWindowResponse::Deny
         })
@@ -95,7 +97,7 @@ pub fn run(args: &ChildArgs) -> i32 {
     };
     window.show_all();
     window.present();
-    log::info!("window open at {}", redact(START_URL));
+    log::info!("window open at {}", redact(site.start_url()));
 
     let outcome: Rc<Cell<Option<i32>>> = Rc::new(Cell::new(None));
     let finish = {
@@ -190,15 +192,16 @@ impl Check {
             log::info!("at {}", redact(&url));
             self.last_url.clone_from(&url);
         }
-        if refused(&url) {
-            log::warn!("Google refused the sign-in in this window");
+        let site = self.args.site;
+        if site.refused(&url) {
+            log::warn!("the sign-in was refused in this window");
             return Some(EXIT_REFUSED);
         }
-        if super::host(&url) != "music.youtube.com" {
+        if !site.at_home(&url) {
             return None;
         }
         let mut cookies = Vec::new();
-        for u in COOKIE_URLS {
+        for u in site.cookie_urls() {
             match webview.cookies_for_url(u) {
                 Ok(list) => {
                     let read_for = super::host(u);
@@ -212,7 +215,7 @@ impl Check {
         if self.outcome.get().is_some() {
             return None;
         }
-        if !signed_in(&url, &cookies) {
+        if !site.signed_in(&url, &cookies) {
             return None;
         }
         log::info!("signed in: {} cookies", cookies.len());

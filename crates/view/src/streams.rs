@@ -213,6 +213,7 @@ pub struct SearchSources {
     pub youtube: bool,
     /// The Deezer catalogue.
     pub deezer: bool,
+    pub soundcloud: bool,
     /// The indexer (Prowlarr): slow, so off unless asked for.
     pub torrents: bool,
     /// The «Всё» page: the runtime also builds one merged answer
@@ -231,6 +232,7 @@ impl Default for SearchSources {
             spotify: true,
             youtube: true,
             deezer: true,
+            soundcloud: true,
             torrents: false,
             mixed: false,
         }
@@ -243,6 +245,7 @@ impl SearchSources {
             Service::Spotify => self.spotify,
             Service::Youtube => self.youtube,
             Service::Deezer => self.deezer,
+            Service::Soundcloud => self.soundcloud,
         }
     }
 
@@ -253,6 +256,7 @@ impl SearchSources {
             spotify: true,
             youtube: true,
             deezer: true,
+            soundcloud: true,
             torrents: false,
             mixed: true,
         }

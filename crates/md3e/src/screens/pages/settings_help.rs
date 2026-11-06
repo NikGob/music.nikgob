@@ -225,6 +225,9 @@ pub enum SettingId {
     YouTubeEnabled,
     YouTubeCookies,
     DeezerEnabled,
+    SoundCloudEnabled,
+    /// «Вставить токен…» of SoundCloud.
+    SoundCloudToken,
     LikeDownload,
     PushLikes,
     /// «Лайк альбома»: the album alone, or its tracks too.
@@ -246,6 +249,7 @@ pub enum SettingId {
     PlaylistSync,
     ImportSpotify,
     ImportYouTube,
+    ImportSoundCloud,
     ImportFiles,
     /// «Песни медиатеки YouTube Music» of an export.
     ImportSavedSongs,
@@ -265,6 +269,7 @@ pub enum SettingId {
     UploadLimit,
     Spotify,
     YouTube,
+    SoundCloud,
     Nodes,
 }
 
@@ -395,6 +400,7 @@ impl SettingId {
             }
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
             Spotify | SpotifyEnabled | SpotifyPlayback | SpotifySoloist | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
+            | SoundCloud | SoundCloudEnabled | SoundCloudToken | ImportSoundCloud
             | YouTubeCookies | LikeDownload | PushLikes | AlbumLike | SingleLike | LikedAlbumsPlace | AutoDownloads | DownloadToasts | UpgradeEvery | UpgradeBar | UpgradeAuto | DownloadSource(_) | PlaylistSync | ImportSpotify
             | ImportYouTube | ImportFiles | ImportSavedSongs | StreamCache | StreamAnalysis | Prowlarr | Soulseek | SoulseekShare | SoulseekUpload | NoSeed | SeedLimit | SeedDays
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
@@ -413,7 +419,7 @@ impl SettingId {
     /// says so.
     pub fn beta(self) -> bool {
         use SettingId::*;
-        matches!(self, ImportSpotify | ImportYouTube | ImportFiles | LyricsRecognize)
+        matches!(self, ImportSpotify | ImportYouTube | ImportSoundCloud | ImportFiles | LyricsRecognize)
     }
 
     /// One line on what the option changes.
@@ -538,6 +544,10 @@ impl SettingId {
             YouTube => "Вход нужен только для лайков, плейлистов и истории; поиск и звук работают и без него. «Войти через Google» открывает окно со страницей входа Google: пароль вводится только там, приложение его не видит и берёт лишь cookies сессии. Окно запоминает вход, так что повторный вход — в один клик; «Выйти» забывает и его. Если Google не пускает во встроенном окне — «Вставить cookies…».",
             YouTubeEnabled => "Выключи — YouTube Music не используется: ни в поиске, ни как запасной звук для треков Spotify.",
             DeezerEnabled => "Deezer — открытый каталог: поиск, альбомы и дискографии исполнителей без аккаунта и без ключа. Своего звука у него нет: трек Deezer играет с YouTube Music (по ISRC, иначе по исполнителю, названию и длительности). Лайк трека Deezer остаётся здесь — в Deezer ничего не уходит. Выключи — поиск и дискографии обойдутся YouTube Music и Spotify.",
+            SoundCloud => "Вход нужен для лайков, плейлистов, истории и подписок; поиск и звук работают и без него. «Войти» открывает страницу входа SoundCloud в окне приложения: пароль вводится только там, приложение берёт лишь токен сессии и хранит его в системном хранилище паролей. Треки, которые SoundCloud отдаёт только в защищённом виде или только 30-секундным отрывком, играют с YouTube Music.",
+            SoundCloudEnabled => "Выключи — SoundCloud не используется: ни в поиске, ни для звука, ни для лайков. Вход при этом не забывается.",
+            SoundCloudToken => "Запасной вход: на soundcloud.com, пока ты вошёл, открой инструменты разработчика → Application → Cookies и скопируй значение oauth_token. Подойдут и cookies.txt, и заголовок Cookie.",
+            ImportSoundCloud => "Забирает из SoundCloud свои и понравившиеся плейлисты и до 1000 последних прослушиваний. Лайки приходят сами после входа; подписки и репосты учат рекомендации.",
             YouTubeCookies => "Запасной вход, если окно «Войти через Google» не помогло: выгрузи cookies.txt для music.youtube.com расширением браузера, пока ты вошёл, и вставь сюда. Обычно хватает «Войти через Google».",
             LikeDownload => "Что скачивать, когда лайкаешь трек из стрима: только его (вырезается из раздачи альбома), сразу весь альбом или ничего — тогда лайк остаётся только лайком. Лайк альбома качает весь альбом. «Скачать» у трека или альбома качает всегда, без лайка.",
             PushLikes => "Лайк здесь ставится и в Spotify / YouTube Music, а снятый лайк снимается и там. Только для треков, которые есть в сервисе.",

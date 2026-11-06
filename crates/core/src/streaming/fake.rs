@@ -327,6 +327,7 @@ fn prefix(service: Service) -> &'static str {
         Service::Spotify => "sp",
         Service::Youtube => "yt",
         Service::Deezer => "dz",
+        Service::Soundcloud => "sc",
     }
 }
 
@@ -1191,7 +1192,7 @@ impl FakeService {
         let supported = match self.service {
             Service::Spotify => false,
             Service::Deezer => name != "radio",
-            Service::Youtube => true,
+            Service::Youtube | Service::Soundcloud => true,
         };
         self.gate(name)?;
         if supported { f() } else { Err(StreamError::Unsupported) }
@@ -1650,7 +1651,7 @@ impl StreamService for FakeService {
         match self.service {
             Service::Youtube => YOUTUBE_FEEDS,
             Service::Spotify => SPOTIFY_FEEDS,
-            Service::Deezer => &[],
+            Service::Deezer | Service::Soundcloud => &[],
         }
     }
 
@@ -1708,6 +1709,7 @@ impl StreamService for FakeService {
                 };
                 format!("https://www.deezer.com/{kind}/{id}")
             }
+            Service::Soundcloud => format!("https://soundcloud.com/{}/{id}", kind.as_str()),
         }
     }
 }

@@ -1,13 +1,21 @@
-//! YouTube Music sign-in in a window of the app (like pear-desktop): Google's
-//! own sign-in page in the system webview (WebView2 on Windows, WebKitGTK on
+//! Sign-in in a window of the app (like pear-desktop): the service's own
+//! sign-in page in the system webview (WebView2 on Windows, WebKitGTK on
 //! Linux), then the session's cookies go into the ordinary cookies login.
+//! Two sites use it ([`Site`]): YouTube Music (Google's sign-in) and
+//! SoundCloud (soundcloud.com/signin, done once `.soundcloud.com` has an
+//! `oauth_token` cookie; its «Continue with Google / Apple / Facebook»
+//! popups are let through, every other popup is not).
 //!
 //! **Two processes.** winit allows one event loop per process and eframe owns
 //! the app's, so the window is a child run of the same exe:
 //!
 //! ```text
 //! nikgob.exe --youtube-login <out-file> --profile <webview-dir> [--timeout <secs>] [--watch-stdin]
+//! nikgob.exe --soundcloud-login <out-file> --profile <webview-dir> [...]
 //! ```
+//!
+//! What follows says it for YouTube Music; SoundCloud's window works the
+//! same way with its own page, cookies and profile (`<data>/soundcloud/webview`).
 //!
 //! The child (`window` on Windows, `gtk_window` on Linux) opens «Вход в
 //! YouTube Music» at Google's sign-in page with a persistent webview profile
@@ -57,27 +65,129 @@ pub const TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// The cookie domain RustyPipe takes its login cookies from.
 const COOKIE_DOMAIN: &str = ".youtube.com";
 
+/// SoundCloud's sign-in page.
+pub const SOUNDCLOUD_START_URL: &str = "https://soundcloud.com/signin";
+
+/// The site a sign-in window is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Site {
+    Youtube,
+    Soundcloud,
+}
+
+impl Site {
+    /// The child run's flag.
+    pub const fn flag(self) -> &'static str {
+        match self {
+            Self::Youtube => "--youtube-login",
+            Self::Soundcloud => "--soundcloud-login",
+        }
+    }
+
+    /// For the log.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Youtube => "youtube",
+            Self::Soundcloud => "soundcloud",
+        }
+    }
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Youtube => "Вход в YouTube Music",
+            Self::Soundcloud => "Вход в SoundCloud",
+        }
+    }
+
+    pub const fn start_url(self) -> &'static str {
+        match self {
+            Self::Youtube => START_URL,
+            Self::Soundcloud => SOUNDCLOUD_START_URL,
+        }
+    }
+
+    /// Where the session cookies are read from.
+    pub const fn cookie_urls(self) -> &'static [&'static str] {
+        match self {
+            Self::Youtube => &["https://music.youtube.com/", "https://www.youtube.com/"],
+            Self::Soundcloud => &["https://soundcloud.com/"],
+        }
+    }
+
+    /// The page is where the cookies are worth reading.
+    pub fn at_home(self, url: &str) -> bool {
+        let h = host(url);
+        match self {
+            Self::Youtube => h == "music.youtube.com",
+            Self::Soundcloud => h == "soundcloud.com" || h.ends_with(".soundcloud.com"),
+        }
+    }
+
+    /// The sign-in is done.
+    pub fn signed_in(self, url: &str, cookies: &[Cookie]) -> bool {
+        match self {
+            Self::Youtube => signed_in(url, cookies),
+            Self::Soundcloud => soundcloud_signed_in(url, cookies),
+        }
+    }
+
+    /// The provider refuses to sign in inside the window.
+    pub fn refused(self, url: &str) -> bool {
+        match self {
+            Self::Youtube => refused(url),
+            // Google's refusal would come in SoundCloud's «Continue with
+            // Google» popup, a window of its own; the user closes it.
+            Self::Soundcloud => false,
+        }
+    }
+
+    /// A popup the window lets open (SoundCloud's sign-in with Google,
+    /// Apple or Facebook).
+    pub fn popup_allowed(self, url: &str) -> bool {
+        match self {
+            Self::Youtube => false,
+            Self::Soundcloud => matches!(
+                host(url).as_str(),
+                "accounts.google.com" | "appleid.apple.com" | "www.facebook.com" | "m.facebook.com" | "secure.soundcloud.com"
+            ),
+        }
+    }
+}
+
+/// SoundCloud's sign-in is done: a soundcloud.com page is open and the
+/// cookie store has a non-empty `oauth_token` for .soundcloud.com.
+pub fn soundcloud_signed_in(url: &str, cookies: &[Cookie]) -> bool {
+    Site::Soundcloud.at_home(url)
+        && cookies.iter().any(|c| {
+            c.name == "oauth_token"
+                && c.domain.trim_start_matches('.').eq_ignore_ascii_case("soundcloud.com")
+                && !c.value.is_empty()
+        })
+}
+
 /// The child run's arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChildArgs {
+    pub site: Site,
     pub out: PathBuf,
     pub profile: PathBuf,
     pub timeout: Duration,
     pub watch_stdin: bool,
 }
 
-/// `None` when this is not a child run (no `--youtube-login`).
+/// `None` when this is not a child run (no `--youtube-login` or
+/// `--soundcloud-login`).
 pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Option<Result<ChildArgs, String>> {
     let mut it = args.into_iter().skip(1);
     let mut out = None;
     let mut profile = None;
     let mut timeout = TIMEOUT;
     let mut watch_stdin = false;
-    let mut child = false;
+    let mut child = None;
     while let Some(a) = it.next() {
         match a.to_str() {
-            Some("--youtube-login") => {
-                child = true;
+            Some(flag @ ("--youtube-login" | "--soundcloud-login")) => {
+                child = Some(if flag == "--youtube-login" { Site::Youtube } else { Site::Soundcloud });
                 out = it.next().map(PathBuf::from);
             }
             Some("--profile") => profile = it.next().map(PathBuf::from),
@@ -89,14 +199,12 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Option<Result<Chi
             _ => {}
         }
     }
-    if !child {
-        return None;
-    }
+    let site = child?;
     let Some(out) = out.filter(|o| !o.as_os_str().is_empty()) else {
-        return Some(Err("--youtube-login needs the file to write the cookies to".into()));
+        return Some(Err(format!("{} needs the file to write the cookies to", site.flag())));
     };
     let profile = profile.unwrap_or_else(|| out.with_file_name("webview"));
-    Some(Ok(ChildArgs { out, profile, timeout, watch_stdin }))
+    Some(Ok(ChildArgs { site, out, profile, timeout, watch_stdin }))
 }
 
 /// The child run, if this is one: its exit code.
@@ -252,6 +360,7 @@ pub fn write_secret(path: &Path, text: &str) -> std::io::Result<()> {
 
 /// Runs the sign-in window as a child of this exe (see the module docs).
 pub struct WindowLogin {
+    site: Site,
     exe: PathBuf,
     /// The webview's profile.
     profile: PathBuf,
@@ -260,10 +369,11 @@ pub struct WindowLogin {
 }
 
 impl WindowLogin {
-    /// `dir` is YouTube Music's data folder.
-    pub fn new(dir: &Path) -> Option<Self> {
+    /// `dir` is the service's data folder.
+    pub fn new(site: Site, dir: &Path) -> Option<Self> {
         let exe = std::env::current_exe().ok()?;
         Some(Self {
+            site,
             exe,
             profile: dir.join("webview"),
             out: dir.join("signin-cookies.txt"),
@@ -283,8 +393,9 @@ impl WebLogin for WindowLogin {
         if let Some(d) = self.out.parent() {
             let _ = std::fs::create_dir_all(d);
         }
+        let site = self.site.name();
         let mut child = Command::new(&self.exe)
-            .arg("--youtube-login")
+            .arg(self.site.flag())
             .arg(&self.out)
             .arg("--profile")
             .arg(&self.profile)
@@ -294,9 +405,9 @@ impl WebLogin for WindowLogin {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| WebLoginError::Failed(e.to_string()))?;
-        log::info!("youtube: sign-in window started (pid {})", child.id());
+        log::info!("{site}: sign-in window started (pid {})", child.id());
         if let Some(err) = child.stderr.take() {
-            let _ = std::thread::Builder::new().name("youtube-signin-log".into()).spawn(move || {
+            let _ = std::thread::Builder::new().name(format!("{site}-signin-log")).spawn(move || {
                 for line in BufReader::new(err).lines().map_while(Result::ok) {
                     log::info!("[sign-in window] {line}");
                 }
@@ -309,7 +420,7 @@ impl WebLogin for WindowLogin {
                 Ok(Some(s)) => break Some(s),
                 Ok(None) => {}
                 Err(e) => {
-                    log::warn!("youtube: sign-in window: {e}");
+                    log::warn!("{site}: sign-in window: {e}");
                     break None;
                 }
             }
@@ -336,7 +447,7 @@ impl WebLogin for WindowLogin {
             return Err(WebLoginError::Cancelled);
         }
         let code = status.and_then(|s| s.code());
-        log::info!("youtube: sign-in window exited ({code:?})");
+        log::info!("{site}: sign-in window exited ({code:?})");
         if code != Some(EXIT_OK) {
             // Whatever it left behind (a close that raced the write) is
             // not a sign-in.
@@ -367,14 +478,14 @@ impl WebLogin for WindowLogin {
         for _ in 0..20 {
             match std::fs::remove_dir_all(&self.profile) {
                 Ok(()) => {
-                    log::info!("youtube: sign-in window profile forgotten");
+                    log::info!("{}: sign-in window profile forgotten", self.site.name());
                     return;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
                 Err(_) => std::thread::sleep(Duration::from_millis(500)),
             }
         }
-        log::warn!("youtube: cannot remove {}", self.profile.display());
+        log::warn!("{}: cannot remove {}", self.site.name(), self.profile.display());
     }
 }
 
@@ -466,6 +577,22 @@ mod tests {
     }
 
     #[test]
+    fn soundcloud_completes_with_its_token() {
+        let token = [c("soundcloud.com", "oauth_token", "2-1-2-abc")];
+        assert!(Site::Soundcloud.signed_in("https://soundcloud.com/discover", &token));
+        assert!(Site::Soundcloud.signed_in("https://soundcloud.com/signin", &[c(".soundcloud.com", "oauth_token", "t")]));
+        assert!(!Site::Soundcloud.signed_in("https://soundcloud.com/", &[c(".soundcloud.com", "oauth_token", "")]));
+        assert!(!Site::Soundcloud.signed_in("https://accounts.google.com/", &token));
+        assert!(!Site::Soundcloud.signed_in("https://soundcloud.com/", &[c(".soundcloud.com", "sc_anonymous_id", "x")]));
+        assert!(Site::Soundcloud.popup_allowed("https://accounts.google.com/o/oauth2/auth?x"));
+        assert!(!Site::Soundcloud.popup_allowed("https://evil.example/"));
+        assert!(!Site::Youtube.popup_allowed("https://accounts.google.com/"));
+        // The window's cookies go through the service's own parser.
+        let text = netscape(&[c(".soundcloud.com", "oauth_token", "2-1-2-abc")]);
+        assert_eq!(nikgob_soundcloud::token::parse(&text).as_deref(), Some("2-1-2-abc"));
+    }
+
+    #[test]
     fn refusal_and_urls() {
         assert!(refused("https://accounts.google.com/v3/signin/rejected?continue=x"));
         assert!(refused("https://accounts.google.com/signin/rejected"));
@@ -489,6 +616,7 @@ mod tests {
         assert_eq!(
             args(&["--youtube-login", out]),
             Some(Ok(ChildArgs {
+                site: Site::Youtube,
                 out: out.into(),
                 profile: profile.into(),
                 timeout: TIMEOUT,
@@ -498,6 +626,7 @@ mod tests {
         assert_eq!(
             args(&["--youtube-login", "o.txt", "--profile", "p", "--timeout", "30", "--watch-stdin"]),
             Some(Ok(ChildArgs {
+                site: Site::Youtube,
                 out: "o.txt".into(),
                 profile: "p".into(),
                 timeout: Duration::from_secs(30),
@@ -505,6 +634,7 @@ mod tests {
             }))
         );
         assert!(matches!(args(&["--youtube-login"]), Some(Err(_))));
+        assert_eq!(args(&["--soundcloud-login", "o.txt", "--profile", "p"]).unwrap().unwrap().site, Site::Soundcloud);
         assert!(matches!(args(&["--youtube-login", "o", "--timeout", "x"]), Some(Err(_))));
     }
 

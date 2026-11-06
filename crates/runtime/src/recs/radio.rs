@@ -1072,6 +1072,7 @@ impl Worker {
             RadioSeed::Stream { id: r, .. } => match r.service {
                 Service::Youtube => calls.push((Call::Radio(r.id), seed_name)),
                 Service::Deezer => calls.push((Call::Related(Service::Deezer, r.id), seed_name)),
+                Service::Soundcloud => calls.push((Call::Related(Service::Soundcloud, r.id), seed_name)),
                 Service::Spotify => {}
             },
             RadioSeed::Artist(a) => calls.extend(artist_call(self, a, &[Service::Deezer, Service::Youtube])),

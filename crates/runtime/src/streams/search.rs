@@ -1011,7 +1011,8 @@ impl Worker {
             Service::Youtube if kind == TrackKind::Song => 2,
             Service::Spotify => 3,
             Service::Deezer => 4,
-            Service::Youtube => 5,
+            Service::Soundcloud if kind == TrackKind::Song => 4,
+            Service::Youtube | Service::Soundcloud => 5,
         }
     }
 }

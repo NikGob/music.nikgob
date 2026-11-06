@@ -1579,6 +1579,8 @@ pub struct Prefs {
     /// The Deezer catalogue is used (search, albums, discographies; no
     /// account, its tracks play from YouTube Music).
     pub deezer_enabled: bool,
+    /// SoundCloud is used (search, pages and sound work without an account).
+    pub soundcloud_enabled: bool,
     /// What a like of a stream track downloads: the track (from its
     /// album's torrent) or the whole album. An album like is always the album.
     pub like_download_scope: WishlistScope,
@@ -2812,6 +2814,7 @@ impl Default for Prefs {
             spotify_enabled: true,
             youtube_enabled: true,
             deezer_enabled: true,
+            soundcloud_enabled: true,
             like_download_scope: WishlistScope::Track,
             like_downloads: true,
             playlist_sync_default: PlaylistSyncMode::Follow,
@@ -2953,6 +2956,7 @@ impl Prefs {
             Service::Spotify => self.spotify_enabled,
             Service::Youtube => self.youtube_enabled,
             Service::Deezer => self.deezer_enabled,
+            Service::Soundcloud => self.soundcloud_enabled,
         }
     }
 }

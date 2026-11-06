@@ -207,7 +207,8 @@ fn decorations(title: &str) -> Vec<&str> {
 fn official(t: &StreamTrack) -> bool {
     match t.id.service {
         Service::Deezer | Service::Spotify => true,
-        Service::Youtube => t.kind == TrackKind::Song,
+        // SoundCloud: a release with its publisher's metadata, not an upload.
+        Service::Youtube | Service::Soundcloud => t.kind == TrackKind::Song,
     }
 }
 

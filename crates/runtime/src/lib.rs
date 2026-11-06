@@ -50,7 +50,7 @@ pub use recs::{
 };
 pub use nikgob_import::ImportConfig;
 pub use nikgob_metadata::{Metadata, MetadataConfig};
-pub use streams::{StreamSchedule, WINDOW_HINT, WebLogin, WebLoginError};
+pub use streams::{SOUNDCLOUD_WINDOW_HINT, StreamSchedule, WINDOW_HINT, WebLogin, WebLoginError, window_hint};
 use import::{IMPORT_ID, ImportService, Internal};
 use queue::{Entry, Queue};
 
@@ -2349,8 +2349,8 @@ impl Worker {
         if old.output_device != p.output_device {
             self.switch_device(p.output_device.clone());
         }
-        if (old.spotify_enabled, old.youtube_enabled, old.deezer_enabled)
-            != (p.spotify_enabled, p.youtube_enabled, p.deezer_enabled)
+        if (old.spotify_enabled, old.youtube_enabled, old.deezer_enabled, old.soundcloud_enabled)
+            != (p.spotify_enabled, p.youtube_enabled, p.deezer_enabled, p.soundcloud_enabled)
         {
             self.soloist_wanted();
             self.publish_accounts();

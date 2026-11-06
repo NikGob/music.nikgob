@@ -54,10 +54,11 @@ pub enum Service {
     Spotify,
     Youtube,
     Deezer,
+    Soundcloud,
 }
 
 impl Service {
-    pub const ALL: &'static [Self] = &[Self::Spotify, Self::Youtube, Self::Deezer];
+    pub const ALL: &'static [Self] = &[Self::Spotify, Self::Youtube, Self::Deezer, Self::Soundcloud];
 
     /// Stable lowercase name used in the database and in JSON.
     pub const fn as_str(self) -> &'static str {
@@ -65,6 +66,7 @@ impl Service {
             Self::Spotify => "spotify",
             Self::Youtube => "youtube",
             Self::Deezer => "deezer",
+            Self::Soundcloud => "soundcloud",
         }
     }
 
@@ -73,6 +75,7 @@ impl Service {
             "spotify" => Some(Self::Spotify),
             "youtube" => Some(Self::Youtube),
             "deezer" => Some(Self::Deezer),
+            "soundcloud" => Some(Self::Soundcloud),
             _ => None,
         }
     }
@@ -83,16 +86,18 @@ impl Service {
             Self::Spotify => "Spotify",
             Self::Youtube => "YouTube Music",
             Self::Deezer => "Deezer",
+            Self::Soundcloud => "SoundCloud",
         }
     }
 
     /// Codec of the audio the service streams (YouTube also has AAC
     /// formats; Opus is what is asked for). A Deezer track plays from
-    /// YouTube Music.
+    /// YouTube Music. SoundCloud streams AAC in HLS.
     pub fn codec(self) -> Codec {
         match self {
             Self::Spotify => Codec::Vorbis,
             Self::Youtube | Self::Deezer => Codec::Opus,
+            Self::Soundcloud => Codec::Aac,
         }
     }
 
@@ -102,6 +107,7 @@ impl Service {
         match self {
             Self::Spotify => quality_label("Vorbis", 320, false),
             Self::Youtube | Self::Deezer => quality_label("Opus", 160, true),
+            Self::Soundcloud => quality_label("AAC", 160, false),
         }
     }
 
@@ -109,7 +115,7 @@ impl Service {
     pub const fn bitrate_kbps(self) -> u32 {
         match self {
             Self::Spotify => 320,
-            Self::Youtube | Self::Deezer => 160,
+            Self::Youtube | Self::Deezer | Self::Soundcloud => 160,
         }
     }
 
@@ -120,6 +126,7 @@ impl Service {
             Self::Spotify => score::STREAM_SPOTIFY,
             Self::Youtube => score::STREAM_YOUTUBE,
             Self::Deezer => score::STREAM_DEEZER,
+            Self::Soundcloud => score::STREAM_SOUNDCLOUD,
         }
     }
 
@@ -129,6 +136,7 @@ impl Service {
             Self::Spotify => SourceKind::Spotify,
             Self::Youtube => SourceKind::Youtube,
             Self::Deezer => SourceKind::Deezer,
+            Self::Soundcloud => SourceKind::Soundcloud,
         }
     }
 }
@@ -162,6 +170,7 @@ impl SourceKind {
             Self::Spotify => Some(Service::Spotify),
             Self::Youtube => Some(Service::Youtube),
             Self::Deezer => Some(Service::Deezer),
+            Self::Soundcloud => Some(Service::Soundcloud),
         }
     }
 }
@@ -486,15 +495,21 @@ pub enum SuggestionKind {
     /// Played lately in the service's own apps (YouTube Music's history,
     /// Spotify's recently played).
     Recent,
+    /// An artist the user follows (SoundCloud's followings).
+    Followed,
+    /// A track the user reposted (SoundCloud).
+    Reposted,
 }
 
 /// One request's worth of suggestions ([`StreamService::suggestions`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuggestionFeed {
-    /// YouTube Music's home (`FEmusic_home`): quick picks and listen again.
+    /// YouTube Music's home (`FEmusic_home`): quick picks and listen again;
+    /// SoundCloud's personal shelves of `/mixed-selections`.
     Home,
-    /// YouTube Music's history (`FEmusic_history`).
+    /// YouTube Music's history (`FEmusic_history`); SoundCloud's play
+    /// history.
     History,
     /// Spotify `me/top/tracks?time_range=short_term`.
     TopTracksMonth,
@@ -506,6 +521,10 @@ pub enum SuggestionFeed {
     TopArtistsHalfYear,
     /// Spotify `me/player/recently-played`.
     RecentlyPlayed,
+    /// SoundCloud's followed artists (`/users/{me}/followings`).
+    Followings,
+    /// SoundCloud's reposts of the user (`/stream/users/{me}/reposts`).
+    Reposts,
 }
 
 /// A track the service suggests.
@@ -658,6 +677,11 @@ pub enum StreamError {
     /// Blocked where the user is (a label or region block).
     #[error("blocked in this region")]
     RegionBlocked,
+    /// The service has this track only as encrypted (DRM) streams, which
+    /// the app never decrypts (SoundCloud's major-label tracks): it can
+    /// only play through the service's own player, a route of its own.
+    #[error("only DRM-protected streams")]
+    Drm,
     /// The service cannot do this at all (saving audio from Spotify).
     #[error("not supported by this service")]
     Unsupported,
