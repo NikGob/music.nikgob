@@ -270,12 +270,28 @@ async fn adopt(root: &Path, stage: &Path) -> Result<Build, InstallError> {
         // The same build is already there (the folder's name is its hash).
         if digest_of(&build.exe(root)).ok().as_deref() != Some(build.digest.as_str()) {
             let _ = std::fs::remove_dir_all(&dest);
-            std::fs::rename(stage, &dest)?;
+            rename_patiently(stage, &dest).await?;
         }
     } else {
-        std::fs::rename(stage, &dest)?;
+        rename_patiently(stage, &dest).await?;
     }
     Ok(build)
+}
+
+/// A folder holding an executable that just ran (or that the antivirus is
+/// scanning, being new) cannot be renamed for a moment on Windows.
+async fn rename_patiently(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if tries < 40 && e.kind() == std::io::ErrorKind::PermissionDenied => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// What `exe --version` prints, within ten seconds.

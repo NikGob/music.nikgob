@@ -5044,6 +5044,7 @@ dependencies = [
  "futures-util",
  "log",
  "nikgob-audio",
+ "nikgob-core",
  "reqwest 0.13.5",
  "serde",
  "serde_json",
