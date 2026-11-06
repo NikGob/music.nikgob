@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=music.nikgob
+GenericName=Music Player
+GenericName[ru]=Музыкальный плеер
+Comment=Play and gather your music library
+Comment[ru]=Слушать и собирать свою музыку
+Exec=nikgob
+Icon=music.nikgob
+Terminal=false
+StartupWMClass=music.nikgob
+Categories=AudioVideo;Audio;Player;
+Keywords=music;player;audio;opus;flac;

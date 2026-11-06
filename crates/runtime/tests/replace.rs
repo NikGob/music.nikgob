@@ -214,6 +214,9 @@ fn in_youtube_music_the_like_moves_to_the_song_stays_put_and_comes_back() {
         youtube: true,
     });
     wait_until("the replacement", || !lib.get_track_row(track).unwrap().unwrap().is_clip());
+    // The like row moves just after the track is written, so a check in
+    // between still sees the clip's.
+    wait_until("the like moved", || remote_likes(&lib, track) == ["yt-gruppa-2"]);
     assert_eq!(remote_likes(&lib, track), ["yt-gruppa-2"], "the like is the song's now");
     // The choice is the next default, kept in the prefs.
     wait_until("the prefs", || rt.state().prefs.replace_in_youtube);

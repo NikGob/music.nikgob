@@ -59,3 +59,16 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 wry = { version = "0.57", default-features = false, features = ["os-webview"] }
 # The «Запускать вместе с Windows» line under the user's Run key.
 windows-registry = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The window on Wayland and X11 (the workspace's eframe has its default
+# features off, and with them winit's Linux backends).
+eframe = { workspace = true, features = ["wayland", "x11"] }
+# The winit eframe runs on (patched to the fork); for the monitor's refresh
+# rate, and for drawn Adwaita title bars where a Wayland compositor (GNOME's)
+# leaves decorations to the window.
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "wayland-csd-adwaita"] }
+# The YouTube Music sign-in window (WebKitGTK, see ytlogin.rs) in a GTK
+# window of its own: wry's webview runs in GTK's main loop, not winit's.
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+gtk = "0.18"

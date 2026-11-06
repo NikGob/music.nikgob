@@ -1085,7 +1085,8 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
     });
 
     group(ui, "Запуск");
-    row(ui, Id::Autostart, "Запускать вместе с Windows", Some("Когда входишь в систему"), |ui| {
+    let autostart = if cfg!(windows) { "Запускать вместе с Windows" } else { "Запускать вместе с системой" };
+    row(ui, Id::Autostart, autostart, Some("Когда входишь в систему"), |ui| {
         ui.add(Switch::new(&mut p.autostart).id_salt("set-autostart"));
     });
     dimmed(ui, !p.autostart, |ui| {
@@ -1330,7 +1331,8 @@ pub(super) fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
         panic!("a test tried to launch an external program");
     }
     let _ = std::fs::create_dir_all(path);
-    std::process::Command::new("explorer").arg(path).spawn().map(|_| ())
+    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    std::process::Command::new(opener).arg(path).spawn().map(|_| ())
 }
 
 #[cfg(test)]

@@ -279,17 +279,20 @@ fn a_like_downloads_the_track_and_the_file_lands_on_the_same_id() {
     std::fs::create_dir_all(&album).unwrap();
     write_wav(&album.join("01 - Группа крови.wav"), 3.0);
     write_wav(&album.join("02 - Закрой за мной дверь.wav"), 2.0);
-    let torrent = tokio::runtime::Runtime::new().unwrap().block_on(async {
-        librqbit::create_torrent(
+    let (torrent, track_file) = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let made = librqbit::create_torrent(
             &album,
             librqbit::CreateTorrentOptions::default(),
             &librqbit::spawn_utils::BlockingSpawner::new(1),
         )
         .await
-        .unwrap()
-        .as_bytes()
-        .unwrap()
-        .to_vec()
+        .unwrap();
+        // The track's file in the torrent: librqbit lists the folder in the
+        // order the file system gives (sorted on NTFS, not on ext4).
+        let index = made.as_info().info.data.files.as_ref().unwrap().iter().position(|f| {
+            f.path.last().is_some_and(|p| p.as_ref() == "01 - Группа крови.wav".as_bytes())
+        });
+        (made.as_bytes().unwrap().to_vec(), index.unwrap())
     });
     let indexer = Arc::new(FakeIndexer {
         results: vec![
@@ -312,7 +315,7 @@ fn a_like_downloads_the_track_and_the_file_lands_on_the_same_id() {
     assert!(lib.is_liked(track).unwrap(), "the like stays on the same track");
     // Only the track's file was taken from the album's torrent.
     let dl = lib.list_downloads().unwrap();
-    assert_eq!(dl[0].selected_files, vec!["0".to_owned()]);
+    assert_eq!(dl[0].selected_files, vec![track_file.to_string()]);
     assert_eq!(dl[0].wishlist_id, Some(item.id));
     wait_for(&r.rt, "the wishlist view", |s| {
         s.downloads.wishlist.count(WishlistStatus::Done) == 1

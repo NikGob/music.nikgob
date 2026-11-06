@@ -26,6 +26,13 @@ thread-priority = "3"
 [target.'cfg(windows)'.dependencies]
 cpal = { version = "0.18.2", default-features = false, features = ["realtime"] }
 
+# cpal's PulseAudio backend (pure Rust), which PipeWire serves too: cpal then
+# takes it as its default host instead of raw ALSA, so the output follows the
+# desktop's default device and the device list holds the desktop's own
+# outputs rather than every ALSA plugin and hw: node.
+[target.'cfg(target_os = "linux")'.dependencies]
+fastframe-audio = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47", features = ["pulseaudio"] }
+
 [dev-dependencies]
 hound = "3.5"
 tempfile = "3"

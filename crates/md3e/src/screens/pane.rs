@@ -673,15 +673,61 @@ fn reveal(path: &std::path::Path) {
             .raw_arg(format!("/select,\"{}\"", path.display()))
             .spawn();
     }
-    #[cfg(not(windows))]
-    if let Some(dir) = path.parent() {
-        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    // The file manager's own "show this file" (FileManager1, which Nautilus,
+    // Dolphin, Nemo and others serve); without one, the folder opens.
+    #[cfg(unix)]
+    {
+        let (path, uri) = (path.to_owned(), file_uri(path));
+        let _ = std::thread::Builder::new().name("reveal".into()).spawn(move || {
+            let shown = std::process::Command::new("dbus-send")
+                .args([
+                    "--session",
+                    "--print-reply",
+                    "--dest=org.freedesktop.FileManager1",
+                    "--type=method_call",
+                    "/org/freedesktop/FileManager1",
+                    "org.freedesktop.FileManager1.ShowItems",
+                ])
+                .arg(format!("array:string:{uri}"))
+                .arg("string:")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if !shown && let Some(dir) = path.parent() {
+                let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+            }
+        });
     }
+}
+
+/// A `file://` URI for an absolute path, every byte outside the unreserved
+/// set and `/` percent-encoded (a comma would split dbus-send's array).
+#[cfg(unix)]
+fn file_uri(path: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut uri = String::from("file://");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+            uri.push(char::from(b));
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn revealed_files_are_uris() {
+        assert_eq!(file_uri(std::path::Path::new("/home/u/Music/a b,c.opus")), "file:///home/u/Music/a%20b%2Cc.opus");
+        assert_eq!(file_uri(std::path::Path::new("/м/1.flac")), "file:///%D0%BC/1.flac");
+    }
 
     #[test]
     fn radio_queue_is_named_and_its_menu_starts_a_radio() {

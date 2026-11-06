@@ -1,3 +1,5 @@
 /target
 *.log
 /releases
+/result
+/result-*

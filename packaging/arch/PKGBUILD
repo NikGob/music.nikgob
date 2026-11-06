@@ -1,0 +1,60 @@
+# The pacman package of a release: it packs the binary scripts/release-linux.sh
+# has already built (with the .desktop entry and the icons beside it) instead
+# of building from source, so the package is the same binary as the tarball.
+# The script copies this file next to those files, sets pkgver from
+# Cargo.toml and runs makepkg there.
+
+pkgname=music.nikgob
+pkgver=0.0.0
+pkgrel=1
+pkgdesc='Desktop music player: a local library with streaming services, lyrics and recommendations'
+arch=('x86_64')
+url='https://github.com/NikGob/music.nikgob'
+license=('MIT')
+# Linked (readelf): GTK, WebKitGTK and their stack for the sign-in window
+# and the file dialogs, ALSA under cpal, OpenSSL under native-tls. Loaded
+# with dlopen at run time and so invisible to ldd and namcap: libwayland,
+# libxkbcommon and the X11 libraries (winit), libGL and libEGL (glutin).
+depends=(
+  'alsa-lib'
+  'gdk-pixbuf2'
+  'glib2'
+  'glibc'
+  'gtk3'
+  'hicolor-icon-theme'
+  'libgcc'
+  'libglvnd'
+  'libsoup3'
+  'libx11'
+  'libxcursor'
+  'libxi'
+  'libxkbcommon'
+  'libxrandr'
+  'openssl'
+  'wayland'
+  'webkit2gtk-4.1'
+)
+optdepends=(
+  'ffmpeg: turning fake lossless files into MP3'
+  'curl: Genius lyrics when its bot check turns the player away'
+  'gnome-keyring: a Secret Service that keeps the Spotify sign-in (KeePassXC or KWallet serve it too)'
+  'xdg-utils: opening links and folders'
+)
+options=('!debug' '!lto')
+source=(
+  'nikgob'
+  'music.nikgob.desktop'
+  'music.nikgob-64.png'
+  'music.nikgob-128.png'
+  'music.nikgob-256.png'
+  'music.nikgob-512.png'
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -Dm755 nikgob "$pkgdir/usr/bin/nikgob"
+  install -Dm644 music.nikgob.desktop "$pkgdir/usr/share/applications/music.nikgob.desktop"
+  for size in 64 128 256 512; do
+    install -Dm644 "music.nikgob-$size.png" "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/music.nikgob.png"
+  done
+}

@@ -1041,7 +1041,8 @@ pub(super) fn open_url(url: &str) {
     if cfg!(test) {
         panic!("a test tried to launch an external program");
     }
-    if let Err(e) = std::process::Command::new("explorer").arg(url).spawn() {
+    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    if let Err(e) = std::process::Command::new(opener).arg(url).spawn() {
         log::warn!("cannot open {url}: {e}");
     }
 }

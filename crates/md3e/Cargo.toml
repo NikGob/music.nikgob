@@ -22,5 +22,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 jpeg-decoder = { version = "0.3", default-features = false }
 rfd = { version = "0.15", default-features = false }
 
+# rfd needs a backend on Linux: GTK's own dialogs, as GTK is there anyway for
+# the sign-in window's WebKitGTK, and unlike the portal they need no
+# xdg-desktop-portal running.
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
+
 [lints]
 workspace = true

@@ -128,14 +128,15 @@ impl Pacer {
     }
 }
 
-/// The refresh rate of the window's monitor.
-#[cfg(windows)]
+/// The refresh rate of the window's monitor (X11 and Wayland report it
+/// too).
+#[cfg(any(windows, target_os = "linux"))]
 fn read(frame: &eframe::Frame) -> Option<f64> {
     let mhz = frame.winit_window()?.current_monitor()?.refresh_rate_millihertz()?;
     Some(f64::from(mhz) / 1000.0)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn read(_: &eframe::Frame) -> Option<f64> {
     None
 }
