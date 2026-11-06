@@ -71,8 +71,8 @@ const UNKNOWN_WAIT: Duration = Duration::from_secs(60);
 /// waits for Deezer (fast, and the best catalogue) before it is settled.
 pub(crate) const SETTLE_GRACE: Duration = Duration::from_millis(300);
 /// The order services are merged in (and win ties): Spotify (when it is
-/// asked at all), the Deezer catalogue, YouTube Music.
-const MERGE_ORDER: [Service; 3] = [Service::Spotify, Service::Deezer, Service::Youtube];
+/// asked at all), the Deezer catalogue, YouTube Music, SoundCloud.
+const MERGE_ORDER: [Service; 4] = [Service::Spotify, Service::Deezer, Service::Youtube, Service::Soundcloud];
 
 /// What the settled top result is, to find it again in a later rebuild.
 #[derive(Clone, Debug)]

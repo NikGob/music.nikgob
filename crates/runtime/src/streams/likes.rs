@@ -240,7 +240,9 @@ impl Worker {
         l.limited = 0;
         let now = nikgob_library::now_ms();
         let _ = self.lib.cache_put(&full_key(service), now, "");
-        self.take_likes(service, liked, false);
+        // A list cut at the service's cap says nothing about what is gone.
+        let capped = self.service(service).is_some_and(|s| s.liked_partial());
+        self.take_likes(service, liked, capped);
     }
 
     /// Stores a pull's likes; a few new YouTube clips first ask for their

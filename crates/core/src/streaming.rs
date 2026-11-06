@@ -20,8 +20,9 @@
 //!   waiting on a lock held across I/O. They may be called from any thread,
 //!   the UI thread included.
 //! * [`StreamService::open_audio`] is called by the audio engine off the UI
-//!   and worker threads (on its own opener thread) and must not touch the
-//!   network itself: the network work happens on the first read of the
+//!   and worker threads (on its own opener thread) and does no stream
+//!   network work itself (at most a cached metadata check, as SoundCloud's
+//!   DRM check): the download happens on the first read of the
 //!   returned [`AudioStream`]. Reads then run on the engine's decoder thread,
 //!   so a stream should download ahead on a background task and hand out
 //!   buffered bytes, blocking only while the wanted range is not there yet.
@@ -711,8 +712,8 @@ pub mod format {
 
 /// The encoded bytes of one stream, as the audio engine reads them.
 ///
-/// Created by [`StreamService::open_audio`] without any network traffic; the
-/// first `read`/`seek` does the network work. Read on the engine's decoder
+/// Created by [`StreamService::open_audio`] without stream traffic (at most a
+/// cached metadata check); the first `read`/`seek` does the network work. Read on the engine's decoder
 /// thread (see the module docs).
 pub trait AudioStream: Read + Seek + Send {
     /// Total size in bytes, if known. Called after the first read.
@@ -953,6 +954,12 @@ pub trait StreamService: Send + Sync {
                 complete: true,
             })
         })
+    }
+
+    /// The last [`Self::liked`] stopped at the service's cap: it is not the
+    /// whole list, so nothing absent from it counts as unliked.
+    fn liked_partial(&self) -> bool {
+        false
     }
 
     /// Likes (or unlikes) a track. Needs a login.

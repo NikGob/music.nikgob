@@ -54,6 +54,19 @@ impl Worker {
                 }
             })
             .collect();
+        // SoundCloud refused the sign-in: the window's saved cookie is as
+        // dead as the token, so «Войти» must not hand it back.
+        let refused = self
+            .streams
+            .iter()
+            .find(|s| s.service() == Service::Soundcloud)
+            .is_some_and(|s| matches!(s.account(), nikgob_core::streaming::Account::Failed(_)));
+        if refused != self.streaming.sc_refused {
+            self.streaming.sc_refused = refused;
+            if refused {
+                self.forget_web_login(Service::Soundcloud);
+            }
+        }
         if accounts != self.streaming.last_accounts {
             self.streaming.last_accounts = accounts.clone();
             self.publish(|s| s.accounts = accounts);

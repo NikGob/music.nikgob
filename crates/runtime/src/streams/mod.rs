@@ -234,6 +234,8 @@ pub(crate) struct Streams {
     web: HashMap<Service, Arc<dyn WebLogin>>,
     web_state: HashMap<Service, web_login::WebState>,
     last_accounts: Vec<v::AccountView>,
+    /// SoundCloud's own account read Failed at the last publish.
+    sc_refused: bool,
     /// Soloist's status as last published (polled every second).
     last_soloist: Option<nikgob_core::streaming::SoloistStatus>,
     pub(crate) search: search::SearchState,
@@ -295,6 +297,7 @@ impl Streams {
             web: HashMap::new(),
             web_state: HashMap::new(),
             last_accounts: Vec::new(),
+            sc_refused: false,
             last_soloist: None,
             search: search::SearchState::default(),
             page_seq: 0,
