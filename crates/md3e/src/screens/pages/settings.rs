@@ -1358,6 +1358,7 @@ pub(super) fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
     }
     let _ = std::fs::create_dir_all(path);
     let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut child = std::process::Command::new(opener).arg(path).spawn()?;
     // Reaped in the background, or the finished opener stays a zombie.
     #[cfg(unix)]
