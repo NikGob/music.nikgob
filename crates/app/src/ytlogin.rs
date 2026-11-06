@@ -480,11 +480,13 @@ mod tests {
     fn child_args() {
         assert_eq!(args(&[]), None);
         assert_eq!(args(&["--other"]), None);
+        // The profile goes beside the file, in this system's own paths.
+        let (out, profile) = if cfg!(windows) { ("C:\\d\\out.txt", "C:\\d\\webview") } else { ("/d/out.txt", "/d/webview") };
         assert_eq!(
-            args(&["--youtube-login", "C:\\d\\out.txt"]),
+            args(&["--youtube-login", out]),
             Some(Ok(ChildArgs {
-                out: "C:\\d\\out.txt".into(),
-                profile: "C:\\d\\webview".into(),
+                out: out.into(),
+                profile: profile.into(),
                 timeout: TIMEOUT,
                 watch_stdin: false,
             }))
