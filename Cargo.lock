@@ -4968,6 +4968,7 @@ dependencies = [
  "nikgob-md3e",
  "nikgob-recs",
  "nikgob-runtime",
+ "nikgob-sc-widget",
  "nikgob-soloist",
  "nikgob-soundcloud",
  "nikgob-spotify",
@@ -7635,14 +7636,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "sc-widget-probe"
-version = "0.0.2"
-dependencies = [
- "winit",
- "wry",
 ]
 
 [[package]]
