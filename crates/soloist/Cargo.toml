@@ -43,5 +43,9 @@ windows-core = "0.62"
 tokio = { version = "1", features = ["macros", "rt", "test-util"] }
 tempfile = "3"
 
+# examples/route_bench.rs records a device's input to time what is heard.
+[target.'cfg(windows)'.dev-dependencies]
+cpal = { version = "0.18.2", default-features = false }
+
 [lints]
 workspace = true

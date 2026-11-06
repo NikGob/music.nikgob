@@ -5041,6 +5041,7 @@ dependencies = [
 name = "nikgob-soloist"
 version = "0.0.2"
 dependencies = [
+ "cpal",
  "flate2",
  "futures-util",
  "log",
