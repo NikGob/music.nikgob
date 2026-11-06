@@ -1155,6 +1155,8 @@ impl Md3eUi {
             "youtube" => S::YouTubeEnabled,
             "deezer" => S::DeezerEnabled,
             "personal" => S::SpotifyPersonal,
+            "soloist" => S::SpotifySoloist,
+            "sound" => S::Gapless,
             "likes" => S::LikeDownload,
             "import" => S::ImportFiles,
             "torrents" => S::Prowlarr,

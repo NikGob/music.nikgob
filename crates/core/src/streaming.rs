@@ -1059,6 +1059,100 @@ pub trait StreamService: Send + Sync {
     /// Link to the item on the service's website (open.spotify.com/…,
     /// music.youtube.com/…). No network.
     fn web_url(&self, kind: EntityKind, id: &str) -> String;
+
+    // Spotify Soloist: Spotify's official player app as the sound of the
+    // service, set up in steps the user goes through (see [`SoloistPhase`]).
+
+    /// Where the service's Soloist stands; `None`: the service has none.
+    /// Cheap, no network.
+    fn soloist(&self) -> Option<SoloistStatus> {
+        None
+    }
+
+    /// A step the user took in the settings.
+    fn soloist_act(&self, action: SoloistAction) {
+        let _ = action;
+    }
+
+    /// Whether the service is switched on in the settings: Soloist runs
+    /// only then (and is never downloaded unasked).
+    fn set_soloist_wanted(&self, on: bool) {
+        let _ = on;
+    }
+}
+
+/// Where Spotify Soloist stands, in the order the user meets the steps.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SoloistPhase {
+    /// Spotify publishes no build for this system.
+    #[default]
+    Unsupported,
+    /// Not downloaded.
+    Absent,
+    Downloading { done: u64, total: Option<u64> },
+    /// Downloaded; the user's own key is missing (or was refused).
+    NeedsKey,
+    /// Set up and switched off by the user (or Spotify is off).
+    Off,
+    Starting,
+    /// Running, waiting to be chosen in a Spotify app on the network.
+    Pairing,
+    /// Signed in: Spotify's sound comes from it.
+    Ready,
+    /// It could not run; the text says why, in Russian.
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SoloistStatus {
+    pub phase: SoloistPhase,
+    /// The name it shows in Spotify's device list.
+    pub device_name: String,
+    /// The download's size in bytes, once known.
+    pub size: Option<u64>,
+    /// When the installed build expires (unix seconds).
+    pub expires_at: Option<u64>,
+    /// A key is saved.
+    pub has_key: bool,
+    /// Offer the setup once (first sign-in with Premium, not answered yet).
+    pub offer: bool,
+}
+
+impl SoloistStatus {
+    /// Spotify's sound comes from Soloist now.
+    pub fn ready(&self) -> bool {
+        self.phase == SoloistPhase::Ready
+    }
+}
+
+/// The steps of Soloist's setup.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SoloistAction {
+    /// Download it (the user confirmed); it starts once it has a key.
+    Download,
+    /// The user's own key (saved in the credential store); starts it.
+    SetKey(String),
+    /// Switch it on again.
+    Enable,
+    /// Switch it off: Spotify plays as before.
+    Disable,
+    /// Try again after a failure.
+    Retry,
+    /// The one-time offer was answered (either way).
+    AnswerOffer,
+}
+
+impl fmt::Debug for SoloistAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SetKey(_) => f.write_str("SetKey(..)"),
+            Self::Download => f.write_str("Download"),
+            Self::Enable => f.write_str("Enable"),
+            Self::Disable => f.write_str("Disable"),
+            Self::Retry => f.write_str("Retry"),
+            Self::AnswerOffer => f.write_str("AnswerOffer"),
+        }
+    }
 }
 
 #[cfg(test)]

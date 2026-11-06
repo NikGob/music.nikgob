@@ -43,7 +43,7 @@ use super::{
     Account, AlbumRef, ArtistRef, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput,
     Played, RemoteId, SearchKind, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist,
     StreamSearch, StreamService, StreamTrack, SuggestedArtist, SuggestedTrack, SuggestionFeed, SuggestionKind,
-    Suggestions, TrackKind, format, only_kind, rank_weight,
+    SoloistAction, SoloistPhase, SoloistStatus, Suggestions, TrackKind, format, only_kind, rank_weight,
 };
 use crate::model::{ReleaseType, UnixMs};
 
@@ -591,6 +591,8 @@ struct State {
     /// Spotify's tops answer as a token without `user-top-read`
     /// ([`FakeService::without_top_scope`]).
     no_top_scope: bool,
+    /// Its Spotify Soloist ([`FakeService::with_soloist`]).
+    soloist: Option<SoloistStatus>,
 }
 
 /// Deterministic fake of a streaming service (feature `fake`).
@@ -662,6 +664,7 @@ impl FakeService {
                 },
                 cached: HashSet::new(),
                 no_top_scope: false,
+                soloist: None,
             }),
         }
     }
@@ -686,6 +689,21 @@ impl FakeService {
             t.isrc = None;
         }
         t
+    }
+
+    /// Has a Spotify Soloist at `phase` (screenshots of its setup); its
+    /// steps move it along as the real one would, at once.
+    #[must_use]
+    pub fn with_soloist(self, phase: SoloistPhase, offer: bool) -> Self {
+        self.lock().soloist = Some(SoloistStatus {
+            phase,
+            device_name: "music.nikgob (DEMO-PC)".into(),
+            size: Some(9_780_408),
+            expires_at: Some(1_801_699_311),
+            has_key: false,
+            offer,
+        });
+        self
     }
 
     /// Starts logged out instead.
@@ -1640,6 +1658,28 @@ impl StreamService for FakeService {
     /// [`FakeService::rate_limit_next`]); needs a login.
     fn suggestions(&self, feed: SuggestionFeed) -> BoxFuture<'_, Result<Suggestions, StreamError>> {
         ready(self.gate("suggestions").and_then(|()| self.suggestions_now(feed)))
+    }
+
+    fn soloist(&self) -> Option<SoloistStatus> {
+        self.lock().soloist.clone()
+    }
+
+    fn soloist_act(&self, action: SoloistAction) {
+        let mut st = self.lock();
+        let Some(s) = st.soloist.as_mut() else { return };
+        match action {
+            SoloistAction::Download => {
+                s.offer = false;
+                s.phase = SoloistPhase::NeedsKey;
+            }
+            SoloistAction::SetKey(_) => {
+                s.has_key = true;
+                s.phase = SoloistPhase::Pairing;
+            }
+            SoloistAction::Enable | SoloistAction::Retry => s.phase = SoloistPhase::Pairing,
+            SoloistAction::Disable => s.phase = SoloistPhase::Off,
+            SoloistAction::AnswerOffer => s.offer = false,
+        }
     }
 
     fn web_url(&self, kind: EntityKind, id: &str) -> String {

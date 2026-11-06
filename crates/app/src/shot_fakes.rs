@@ -13,7 +13,8 @@
 //!   discography, a service's artist page, search) are queued, downloading,
 //!   fully local and partly local, in that order.
 //! - `fake:buffering` — the player waits for a stream.
-//! - `fake:audio:youtube` / `fake:audio:spotify` — where the sound comes from.
+//! - `fake:audio:youtube` / `fake:audio:spotify` — where the sound comes from;
+//!   `fake:audio:soloist` — a Spotify track Spotify Soloist plays.
 //! - `fake:link` — the open playlist follows a Spotify playlist.
 //! - `fake:lyrics` — word-synced lyrics (LyricsPlus) for whatever plays:
 //!   the demo has no network to fetch any for a stream track.
@@ -94,6 +95,7 @@ pub struct Fakes {
     album_status: bool,
     buffering: bool,
     audio: Option<Service>,
+    soloist: bool,
     link: bool,
     lyrics: bool,
     paused: Option<Service>,
@@ -135,6 +137,10 @@ impl Fakes {
             "buffering" => self.buffering = true,
             "audio:youtube" => self.audio = Some(Service::Youtube),
             "audio:spotify" => self.audio = Some(Service::Spotify),
+            "audio:soloist" => {
+                self.audio = Some(Service::Spotify);
+                self.soloist = true;
+            }
             "link" => self.link = true,
             "lyrics" => self.lyrics = true,
             "paused:youtube" => self.paused = Some(Service::Youtube),
@@ -364,6 +370,10 @@ impl Fakes {
                 Service::Youtube | Service::Deezer => nikgob_core::streaming::quality_label("Opus", 160, true),
                 Service::Spotify => nikgob_core::streaming::quality_label("Vorbis", 320, false),
             });
+            if self.soloist {
+                s.player.soloist = true;
+                s.player.audio_quality = Some("Soloist".into());
+            }
         }
         if self.lyrics {
             s.lyrics = word_lyrics(state.player.current.as_ref().map(|t| t.id));

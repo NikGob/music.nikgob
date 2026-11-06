@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 nikgob-core.workspace = true
+nikgob-soloist = { path = "../soloist" }
 log.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form", "query"] }
 serde = { version = "1", features = ["derive"] }

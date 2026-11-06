@@ -266,6 +266,9 @@ impl Resident for Core {
     fn shutdown(&mut self) {
         self.geometry.flush();
         self.runtime.send(Command::Pause);
+        // Soloist would also go with the process (its job object); stopping
+        // it here lets it leave Spotify Connect cleanly.
+        streams::shutdown();
     }
 }
 
@@ -591,7 +594,7 @@ fn main() -> eframe::Result {
             .output_device
             .clone()
             .filter(|d| prefs.output_devices.contains(d));
-        match audio::Engine::start(device, streams.clone()) {
+        match audio::Engine::start(device, streams.clone(), streams::soloist()) {
             Ok((engine, links)) => (Box::new(engine), Some(links)),
             Err(e) => {
                 log::error!("audio engine failed to start: {e}");

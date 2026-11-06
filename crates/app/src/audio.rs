@@ -7,6 +7,16 @@
 //! service gives one) replaces the item gain, so normalization covers
 //! streams too.
 //!
+//! Spotify tracks play through Spotify Soloist while it is set up and
+//! paired (`nikgob-soloist`): the item is a live PCM source driving Soloist
+//! and handing the engine Soloist's captured sound, which is the copy heard
+//! (Soloist's own output is turned down to an inaudible level), so volume,
+//! normalization, visualizer and output device work as for any track.
+//! Without a capture Soloist is heard itself: the engine plays the item at
+//! volume 0 and the user's volume goes to Soloist. Nothing is preloaded into
+//! or out of such a track (one player cannot overlap two tracks): a clean
+//! cut.
+//!
 //! Switching the output device restarts the engine: the old `Player` is
 //! dropped (its threads stop and the device closes), a new one opens the
 //! chosen device, and the runtime replays the current track from where it
@@ -21,6 +31,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 use nikgob_audio::{Analyzer, ByteSource, Event, ItemSource, PlayItem, Player, PlayerOptions};
 use nikgob_core::streaming::{AudioStream, StreamService};
+use nikgob_core::streaming::Service as StreamKind;
 use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent};
 
 /// The analyzer of the engine that plays right now.
@@ -45,6 +56,13 @@ pub struct Engine {
     player: Player,
     links: Links,
     streams: Vec<Arc<dyn StreamService>>,
+    soloist: Option<Arc<nikgob_soloist::Soloist>>,
+    /// The user's volume (the engine plays a Soloist track at 0).
+    volume: f32,
+    /// What plays now goes through Soloist.
+    on_soloist: bool,
+    /// ... and Soloist is heard itself (no capture): the engine is at 0.
+    soloist_direct: bool,
 }
 
 fn spawn(device: Option<String>, links: &Links) -> Result<Player, String> {
@@ -65,6 +83,7 @@ impl Engine {
     pub fn start(
         device: Option<String>,
         streams: Vec<Arc<dyn StreamService>>,
+        soloist: Option<Arc<nikgob_soloist::Soloist>>,
     ) -> Result<(Self, Links), String> {
         let links = Links::default();
         let player = spawn(device, &links)?;
@@ -73,12 +92,38 @@ impl Engine {
                 player,
                 links: links.clone(),
                 streams,
+                soloist,
+                volume: 1.0,
+                on_soloist: false,
+                soloist_direct: false,
             },
             links,
         ))
     }
 
+    /// The Soloist a request plays through: a Spotify track while Soloist
+    /// is ready.
+    fn soloist_for(&self, r: &PlayRequest) -> Option<&Arc<nikgob_soloist::Soloist>> {
+        match &r.source {
+            PlaySource::Stream { service: StreamKind::Spotify, .. } => self.soloist.as_ref().filter(|s| s.ready()),
+            _ => None,
+        }
+    }
+
     fn item(&self, r: PlayRequest) -> PlayItem {
+        if let (Some(s), PlaySource::Stream { id, .. }) = (self.soloist_for(&r), &r.source) {
+            log::debug!("spotify {id} plays through Soloist (item {})", r.id);
+            let to = self.links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            if let Some(to) = to {
+                let _ = to.send(PlaybackEvent::Quality { id: r.id, label: "Soloist".into() });
+            }
+            return PlayItem {
+                id: r.id,
+                source: ItemSource::Pcm(Box::new(s.track(id, r.duration))),
+                gain_db: 0.0,
+                duration_hint: r.duration,
+            };
+        }
         let source = match r.source {
             PlaySource::File(path) => ItemSource::File(path),
             PlaySource::Stream { service, id } => {
@@ -183,12 +228,28 @@ impl ByteSource for StreamBytes {
 
 impl Playback for Engine {
     fn play(&mut self, req: PlayRequest) {
+        let soloist = self.soloist_for(&req).cloned();
+        let direct = soloist.as_ref().is_some_and(|s| !s.routed());
+        if let Some(s) = &soloist {
+            s.set_volume(self.volume);
+        }
+        if direct {
+            // Soloist is heard itself; the engine's copy only moves the
+            // visualizer.
+            self.player.set_volume(0.0);
+        } else if self.soloist_direct {
+            self.player.set_volume(self.volume);
+        }
+        self.on_soloist = soloist.is_some();
+        self.soloist_direct = direct;
         let item = self.item(req);
         self.player.play(item);
     }
 
     fn set_next(&mut self, next: Option<PlayRequest>) {
         match next {
+            // Into or out of a Soloist track: a clean cut after `Ended`.
+            Some(r) if self.on_soloist || self.soloist_for(&r).is_some() => self.player.clear_next(),
             Some(r) => {
                 let item = self.item(r);
                 self.player.set_next(item);
@@ -199,14 +260,29 @@ impl Playback for Engine {
 
     fn pause(&mut self) {
         self.player.pause();
+        if self.on_soloist
+            && let Some(s) = &self.soloist
+        {
+            s.pause();
+        }
     }
 
     fn resume(&mut self) {
         self.player.resume();
+        if self.on_soloist
+            && let Some(s) = &self.soloist
+        {
+            s.resume();
+        }
     }
 
     fn stop(&mut self) {
         self.player.stop();
+        self.on_soloist = false;
+        if self.soloist_direct {
+            self.soloist_direct = false;
+            self.player.set_volume(self.volume);
+        }
     }
 
     fn seek(&mut self, position: Duration) {
@@ -214,7 +290,13 @@ impl Playback for Engine {
     }
 
     fn set_volume(&mut self, volume: f32) {
-        self.player.set_volume(volume);
+        self.volume = volume;
+        if let Some(s) = &self.soloist {
+            s.set_volume(volume);
+        }
+        if !self.soloist_direct {
+            self.player.set_volume(volume);
+        }
     }
 
     fn position(&self) -> Duration {
@@ -231,6 +313,9 @@ impl Playback for Engine {
         match spawn(device, &self.links) {
             Ok(p) => {
                 self.player = p;
+                self.player.set_volume(self.volume);
+                self.on_soloist = false;
+                self.soloist_direct = false;
                 true
             }
             Err(e) => {

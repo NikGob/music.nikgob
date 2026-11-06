@@ -206,6 +206,14 @@ pub struct PageState {
     name_synced: bool,
     /// «Источники»: what is typed into the Spotify Client ID and the
     /// YouTube cookies fields, and which folds are open.
+    /// Spotify Soloist's setup: the open dialog, the key being typed, the
+    /// flow (each step's dialog opens when the one before is done), the
+    /// one-time offer shown this run, a step to send.
+    soloist_dialog: sources::SoloistDialog,
+    soloist_key: String,
+    soloist_flow: bool,
+    soloist_offered: bool,
+    soloist_action: Option<nikgob_view::SoloistAction>,
     sp_client_id: String,
     yt_cookies: String,
     yt_form: bool,

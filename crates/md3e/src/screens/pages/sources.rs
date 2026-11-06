@@ -9,19 +9,34 @@
 
 use egui::{Sense, Stroke, Ui, Widget as _, emath::TSTransform, vec2};
 use nikgob_core::streaming::SPOTIFY_PREMIUM_REQUIRED;
-use nikgob_view::{self as v, Account, AccountView, Command, LoginInput, LoginPrompt, Prefs, Service, ViewState};
+use nikgob_view::{
+    self as v, Account, AccountView, Command, LoginInput, LoginPrompt, Prefs, Service, SoloistAction, SoloistPhase,
+    SoloistStatus, ViewState,
+};
 
 use super::PageState;
 use super::settings::{choice, dimmed, fmt_speed, group, range_slider, row, speed_slider, speed_slider_parts};
 use super::settings_help::{self, SettingId as Id};
 use crate::{
     Icon, Theme, TypeRole,
-    components::{Button, Card, IconButton, LoadingIndicator, Size, Style, Switch, TextField, anim},
+    components::{Button, Card, Dialog, DialogAction, IconButton, LoadingIndicator, Size, Style, Switch, TextField, anim},
 };
 
 /// Where the user's own Spotify app is made and what it must allow.
 const DASHBOARD: &str = "https://developer.spotify.com/dashboard";
 const REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
+/// Where each user makes their own Spotify Soloist key (Premium only).
+const SOLOIST_KEY_PAGE: &str = "https://developer.spotify.com/dashboard/soloist";
+
+/// The step of Soloist's setup a dialog asks about.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SoloistDialog {
+    #[default]
+    None,
+    Download,
+    Key,
+    Pair,
+}
 
 pub fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
@@ -337,31 +352,229 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
         // Signed in means Premium: the sound is one more consent away, or on.
         pages.sp_client_id.clear();
         let audio = acc.is_some_and(|a| a.audio);
+        let soloist = acc.and_then(|a| a.soloist.clone()).filter(|s| s.phase != SoloistPhase::Unsupported);
+        let on_soloist = soloist.as_ref().is_some_and(SoloistStatus::ready);
         let sound_line = if audio {
             "Включён: треки Spotify играют из Spotify"
         } else {
             "Ещё одно разрешение — и звук пойдёт прямо из Spotify"
         };
-        row(ui, Id::SpotifyPlayback, "Звук из Spotify", Some(sound_line), |ui| {
-            if !audio
-                && ui
-                    .add(
-                        Button::new("Включить звук")
-                            .icon(Icon::VolumeUp)
-                            .style(Style::Tonal)
-                            .enabled(!busy)
-                            .id_salt("sp-playback"),
-                    )
-                    .clicked()
-            {
-                out.push(Command::StreamLogin { service: Service::Spotify, input: LoginInput::Playback });
-            }
+        dimmed(ui, on_soloist, |ui| {
+            row(ui, Id::SpotifyPlayback, "Звук из Spotify", Some(sound_line), |ui| {
+                if !audio
+                    && ui
+                        .add(
+                            Button::new("Включить звук")
+                                .icon(Icon::VolumeUp)
+                                .style(Style::Tonal)
+                                .enabled(!busy && !on_soloist)
+                                .id_salt("sp-playback"),
+                        )
+                        .clicked()
+                {
+                    out.push(Command::StreamLogin { service: Service::Spotify, input: LoginInput::Playback });
+                }
+            });
         });
+        // Only while Spotify is switched on: it is never downloaded otherwise.
+        if let Some(st) = &soloist {
+            soloist_row(ui, st, p.spotify_enabled, pages);
+            if p.spotify_enabled {
+                soloist_dialogs(ui, st, pages, out);
+            }
+        }
         import_row(ui, state, Service::Spotify, out);
         if let Some(a) = acc {
             suggestions_line(ui, a, !busy, out);
         }
     });
+}
+
+/// «Spotify Soloist»: where its setup stands and the one step that applies.
+fn soloist_row(ui: &mut Ui, st: &SoloistStatus, can: bool, pages: &mut PageState) {
+    let line = match &st.phase {
+        SoloistPhase::Absent | SoloistPhase::Unsupported => "Не скачан".to_owned(),
+        SoloistPhase::Downloading { done, total } => match total {
+            Some(t) if *t > 0 => format!("Скачивается · {} %", done * 100 / t),
+            _ => "Скачивается".to_owned(),
+        },
+        SoloistPhase::NeedsKey if st.has_key => "Ключ не подошёл".to_owned(),
+        SoloistPhase::NeedsKey => "Нужен ключ".to_owned(),
+        SoloistPhase::Off => "Выключен".to_owned(),
+        SoloistPhase::Starting => "Запускается".to_owned(),
+        SoloistPhase::Pairing => "Не подключён".to_owned(),
+        SoloistPhase::Ready => "Подключён".to_owned(),
+        SoloistPhase::Failed(why) => why.clone(),
+    };
+    row(ui, Id::SpotifySoloist, "Spotify Soloist", Some(&line), |ui| {
+        let button = |ui: &mut Ui, label: &str, style: Style, salt: &str| {
+            ui.add(Button::new(label).style(style).enabled(can).id_salt(salt)).clicked()
+        };
+        match &st.phase {
+            SoloistPhase::Downloading { .. } | SoloistPhase::Starting => {
+                ui.add(LoadingIndicator::new().size(32.0));
+            }
+            SoloistPhase::Absent | SoloistPhase::Unsupported => {
+                if button(ui, "Скачать", Style::Tonal, "solo-download") {
+                    pages.soloist_dialog = SoloistDialog::Download;
+                }
+            }
+            SoloistPhase::NeedsKey => {
+                if button(ui, "Ввести ключ", Style::Tonal, "solo-key") {
+                    pages.soloist_dialog = SoloistDialog::Key;
+                }
+            }
+            SoloistPhase::Pairing => {
+                if button(ui, "Подключить", Style::Tonal, "solo-pair") {
+                    pages.soloist_dialog = SoloistDialog::Pair;
+                }
+            }
+            SoloistPhase::Ready => {
+                if button(ui, "Выключить", Style::Outlined, "solo-off") {
+                    pages.soloist_action = Some(SoloistAction::Disable);
+                }
+            }
+            SoloistPhase::Off => {
+                if button(ui, "Включить", Style::Tonal, "solo-on") {
+                    pages.soloist_action = Some(SoloistAction::Enable);
+                    pages.soloist_dialog = SoloistDialog::Pair;
+                }
+            }
+            SoloistPhase::Failed(_) => {
+                if button(ui, "Повторить", Style::Tonal, "solo-retry") {
+                    pages.soloist_action = Some(SoloistAction::Retry);
+                }
+            }
+        }
+    });
+}
+
+/// The setup's dialogs: the download asked first (also once by itself after
+/// a Premium sign-in), then the key, then choosing the device in Spotify;
+/// each opens by itself when the step before is done.
+fn soloist_dialogs(ui: &mut Ui, st: &SoloistStatus, pages: &mut PageState, out: &mut Vec<Command>) {
+    if let Some(a) = pages.soloist_action.take() {
+        out.push(Command::Soloist(a));
+    }
+    let ctx = ui.ctx().clone();
+    let s = Theme::get(&ctx).scheme;
+    // The step after: open its dialog when the one before finished.
+    if pages.soloist_dialog == SoloistDialog::None && pages.soloist_flow {
+        pages.soloist_dialog = match st.phase {
+            SoloistPhase::NeedsKey => SoloistDialog::Key,
+            SoloistPhase::Pairing => SoloistDialog::Pair,
+            _ => SoloistDialog::None,
+        };
+    }
+    if st.offer && !pages.soloist_offered && st.phase == SoloistPhase::Absent {
+        pages.soloist_offered = true;
+        pages.soloist_dialog = SoloistDialog::Download;
+    }
+    if st.ready() {
+        pages.soloist_flow = false;
+        if pages.soloist_dialog == SoloistDialog::Pair {
+            pages.soloist_dialog = SoloistDialog::None;
+        }
+    }
+    let mut open = true;
+    match pages.soloist_dialog {
+        SoloistDialog::None => {}
+        SoloistDialog::Download => {
+            let size = st.size.map_or_else(String::new, |b| format!(" (≈{} МБ)", (b + 524_288) / 1_048_576));
+            let r = Dialog::new("solo-dl-dialog", "Звук Spotify")
+                .icon(Icon::Download)
+                .supporting(format!("Чтобы играл звук из Spotify, нужен Spotify Soloist — официальный плеер Spotify{size}."))
+                .action("Не сейчас")
+                .action("Скачать")
+                .show(&ctx, &mut open);
+            if r.action == Some(1) {
+                out.push(Command::Soloist(SoloistAction::Download));
+                pages.soloist_flow = true;
+            } else if r.action.is_some() || r.dismissed || !open {
+                if st.offer {
+                    out.push(Command::Soloist(SoloistAction::AnswerOffer));
+                }
+                pages.soloist_flow = false;
+            }
+            if r.action.is_some() || r.dismissed || !open {
+                pages.soloist_dialog = SoloistDialog::None;
+            }
+        }
+        SoloistDialog::Key => {
+            let typed = pages.soloist_key.trim().to_owned();
+            let refused = st.has_key && st.phase == SoloistPhase::NeedsKey;
+            let r = Dialog::new("solo-key-dialog", "Ключ Soloist")
+                .max_width(480.0)
+                .action("Не сейчас")
+                .action_with(DialogAction::new("Готово").enabled(typed.len() >= 8))
+                .show_with(&ctx, &mut open, |ui| {
+                    ui.add_space(12.0);
+                    numbered(ui, 1, 20.0, |ui| {
+                        ui.label(TypeRole::BodyMedium.style().rich_para("Войди в аккаунт Spotify с Premium", s.on_surface));
+                    });
+                    numbered(ui, 2, 20.0, |ui| {
+                        ui.label(TypeRole::BodyMedium.style().rich_para("Создай ключ и скопируй его", s.on_surface));
+                        ui.add_space(4.0);
+                        if ui
+                            .add(Button::new("Открыть страницу ключа").icon(Icon::OpenInNew).style(Style::Tonal).id_salt("solo-key-page"))
+                            .clicked()
+                        {
+                            open_url(SOLOIST_KEY_PAGE);
+                        }
+                    });
+                    numbered(ui, 3, 20.0, |ui| {
+                        ui.label(TypeRole::BodyMedium.style().rich_para("Вставь его сюда", s.on_surface));
+                        ui.add_space(4.0);
+                        let mut field = TextField::new(&mut pages.soloist_key, "Ключ").password(true);
+                        if refused {
+                            field = field.error("Ключ не подошёл");
+                        }
+                        field.width(ui.available_width().min(380.0)).id_salt("solo-key-field").show(ui);
+                    });
+                });
+            if r.action == Some(1) && typed.len() >= 8 {
+                out.push(Command::Soloist(SoloistAction::SetKey(typed)));
+                pages.soloist_key.clear();
+                pages.soloist_flow = true;
+            } else if r.action.is_some() || r.dismissed || !open {
+                pages.soloist_key.clear();
+                pages.soloist_flow = false;
+            }
+            if r.action.is_some() || r.dismissed || !open {
+                pages.soloist_dialog = SoloistDialog::None;
+            }
+        }
+        SoloistDialog::Pair => {
+            let name = st.device_name.clone();
+            let r = Dialog::new("solo-pair-dialog", "Подключить Soloist")
+                .max_width(480.0)
+                .action("Закрыть")
+                .show_with(&ctx, &mut open, |ui| {
+                    ui.add_space(12.0);
+                    numbered(ui, 1, 20.0, |ui| {
+                        ui.label(TypeRole::BodyMedium.style().rich_para(
+                            "Открой Spotify на телефоне или компьютере в этой же сети",
+                            s.on_surface,
+                        ));
+                    });
+                    numbered(ui, 2, 20.0, |ui| {
+                        ui.label(TypeRole::BodyMedium.style().rich_para(
+                            format!("В списке устройств выбери «{name}»"),
+                            s.on_surface,
+                        ));
+                    });
+                    // It closes by itself once Spotify chose it; only a failure
+                    // has something to say.
+                    if let SoloistPhase::Failed(why) = &st.phase {
+                        ui.label(TypeRole::BodyMedium.style().rich_para(why, s.error));
+                    }
+                });
+            if r.action.is_some() || r.dismissed || !open {
+                pages.soloist_dialog = SoloistDialog::None;
+                pages.soloist_flow = false;
+            }
+        }
+    }
 }
 
 /// Not connected: what it takes, and the numbered steps to it — the user's

@@ -2418,6 +2418,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4958,6 +4968,7 @@ dependencies = [
  "nikgob-md3e",
  "nikgob-recs",
  "nikgob-runtime",
+ "nikgob-soloist",
  "nikgob-spotify",
  "nikgob-view",
  "nikgob-youtube",
@@ -5191,6 +5202,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "nikgob-soloist"
+version = "0.0.2"
+dependencies = [
+ "cpal",
+ "flate2",
+ "futures-util",
+ "log",
+ "nikgob-audio",
+ "nikgob-core",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+ "zip",
+]
+
+[[package]]
 name = "nikgob-soulseek"
 version = "0.0.2"
 dependencies = [
@@ -5245,6 +5281,7 @@ dependencies = [
  "log",
  "nikgob-audio",
  "nikgob-core",
+ "nikgob-soloist",
  "protobuf",
  "rand 0.9.5",
  "reqwest 0.13.5",
@@ -8571,6 +8608,16 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+]
 
 [[package]]
 name = "target-lexicon"

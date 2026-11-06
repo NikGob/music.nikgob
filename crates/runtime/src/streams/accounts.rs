@@ -50,6 +50,7 @@ impl Worker {
                     paused_until_hm: registered.and_then(|s| s.paused_until()).map(minute_up).and_then(local_hm),
                     suggestions,
                     suggestions_note,
+                    soloist: registered.and_then(|s| s.soloist()),
                 }
             })
             .collect();

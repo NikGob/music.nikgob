@@ -219,6 +219,8 @@ pub enum SettingId {
     // Источники.
     SpotifyEnabled,
     SpotifyPlayback,
+    /// «Spotify Soloist»: Spotify's official player as the sound.
+    SpotifySoloist,
     SpotifyPersonal,
     YouTubeEnabled,
     YouTubeCookies,
@@ -392,7 +394,7 @@ impl SettingId {
                 TAB_APPEARANCE
             }
             // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
-            Spotify | SpotifyEnabled | SpotifyPlayback | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
+            Spotify | SpotifyEnabled | SpotifyPlayback | SpotifySoloist | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
             | YouTubeCookies | LikeDownload | PushLikes | AlbumLike | SingleLike | LikedAlbumsPlace | AutoDownloads | DownloadToasts | UpgradeEvery | UpgradeBar | UpgradeAuto | DownloadSource(_) | PlaylistSync | ImportSpotify
             | ImportYouTube | ImportFiles | ImportSavedSongs | StreamCache | StreamAnalysis | Prowlarr | Soulseek | SoulseekShare | SoulseekUpload | NoSeed | SeedLimit | SeedDays
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
@@ -524,6 +526,7 @@ impl SettingId {
             Spotify => "Вход в аккаунт Spotify через браузер со своим ключом: поиск, лайки, плейлисты и история. Нужен Premium — без него Spotify не подключить, а YouTube Music работает и так. Пароль приложение не видит.",
             SpotifyEnabled => "Выключи — Spotify не используется нигде: ни в поиске, ни для звука, ни для лайков. Вход при этом не забывается.",
             SpotifyPlayback => "Отдельное разрешение на звук из Spotify (второе окно согласия). Пока его нет, те же треки играют с YouTube Music — в плеере это видно по подписи «YouTube».",
+            SpotifySoloist => "Spotify Soloist — официальный плеер Spotify без окна. Скачанный, со своим ключом и выбранный один раз в приложении Spotify, он играет треки Spotify; без него они играют как раньше. Скачивается только с сервера Spotify и только с твоего согласия. Ключ у каждого свой, на developer.spotify.com/dashboard/soloist, нужен Premium. Кроссфейд и «без пауз» к его трекам не применяются.",
             SpotifyPersonal => "Ключ — это Client ID своего приложения на developer.spotify.com, со своей квотой запросов. Spotify пускает такое приложение, только пока у владельца Premium. Заводится один раз; хранится в settings.toml.",
             YouTube => "Вход нужен только для лайков, плейлистов и истории; поиск и звук работают и без него. «Войти через Google» открывает окно со страницей входа Google: пароль вводится только там, приложение его не видит и берёт лишь cookies сессии. Окно запоминает вход, так что повторный вход — в один клик; «Выйти» забывает и его. Если Google не пускает во встроенном окне — «Вставить cookies…».",
             YouTubeEnabled => "Выключи — YouTube Music не используется: ни в поиске, ни как запасной звук для треков Spotify.",
