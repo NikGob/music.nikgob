@@ -2,6 +2,7 @@
 
 mod brand;
 mod detail;
+mod dialogs;
 mod downloads;
 mod cards;
 mod home;
@@ -333,29 +334,20 @@ impl PageState {
         let mut cui = ui.new_child(UiBuilder::new().max_rect(slot).id_salt("add-fab-slot"));
         let picked = menu.show(&mut cui).clicked;
         match picked {
-            Some(0) => {
-                if let Some(files) = rfd::FileDialog::new()
-                    .set_title("Добавить файлы")
-                    .add_filter("Музыка", &["flac", "mp3", "m4a", "aac", "ogg", "opus", "wav", "alac", "aiff"])
-                    .pick_files()
-                {
-                    out.push(Command::ImportFiles(files));
-                }
-            }
-            Some(1) => {
-                if let Some(dir) = rfd::FileDialog::new().set_title("Добавить папку").pick_folder() {
-                    out.push(Command::ImportFolder(dir));
-                }
-            }
-            Some(2) => {
-                if let Some(f) = rfd::FileDialog::new()
-                    .set_title("Открыть .torrent")
-                    .add_filter("Торрент", &["torrent"])
-                    .pick_file()
-                {
-                    out.push(Command::AddTorrentFile(f));
-                }
-            }
+            Some(0) => dialogs::files(
+                |d| {
+                    d.set_title("Добавить файлы")
+                        .add_filter("Музыка", &["flac", "mp3", "m4a", "aac", "ogg", "opus", "wav", "alac", "aiff"])
+                },
+                Command::ImportFiles,
+                out,
+            ),
+            Some(1) => dialogs::folder(|d| d.set_title("Добавить папку"), Command::ImportFolder, out),
+            Some(2) => dialogs::file(
+                |d| d.set_title("Открыть .torrent").add_filter("Торрент", &["torrent"]),
+                Command::AddTorrentFile,
+                out,
+            ),
             Some(3) => self.open_ask(Ask::Magnet),
             Some(4) => self.open_ask(Ask::NewPlaylist { then_add: Vec::new() }),
             _ => {}
@@ -638,6 +630,7 @@ impl PageState {
     /// Draws global overlays: the playlist picker, dialogs, snackbars.
     /// `snack`: where the snackbars sit, `(area, bottom inset)`.
     pub fn overlays(&mut self, ctx: &Context, state: &ViewState, area: Rect, snack: (Rect, f32), out: &mut Vec<Command>) {
+        dialogs::drain(ctx, out);
         // Playlist picker.
         if let Some(tracks) = self.pending_add.clone() {
             let mut open = true;

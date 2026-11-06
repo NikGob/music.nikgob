@@ -1210,11 +1210,12 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
             if ui
                 .add(Button::new("Перенести…").style(Style::Tonal).id_salt("move-masters"))
                 .clicked()
-                && let Some(dir) = rfd::FileDialog::new()
-                    .set_title("Выбери диск или папку для FLAC-оригиналов")
-                    .pick_folder()
             {
-                out.push(Command::MoveMastersDir(dir));
+                super::dialogs::folder(
+                    |d| d.set_title("Выбери диск или папку для FLAC-оригиналов"),
+                    Command::MoveMastersDir,
+                    out,
+                );
             }
             if ui
                 .add(Button::new("Открыть").style(Style::Outlined).id_salt("open-masters"))

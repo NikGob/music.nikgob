@@ -91,9 +91,8 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             "Здесь пока пусто",
             "Лайкни трек в поиске — он появится здесь. Свои файлы: папка Inbox или «Добавить».",
             Some("Добавить папку"),
-        ) && let Some(dir) = rfd::FileDialog::new().pick_folder()
-        {
-            out.push(Command::ImportFolder(dir));
+        ) {
+            super::dialogs::folder(|d| d, Command::ImportFolder, out);
         }
         return None;
     }
