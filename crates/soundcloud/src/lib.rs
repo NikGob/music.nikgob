@@ -374,10 +374,13 @@ fn with_client_id(url: &str, id: &str) -> String {
     format!("{base}?{}", parts.join("&"))
 }
 
-/// Both urls are https and on one host.
+/// Both urls are on one origin (scheme, host and port).
 fn same_host(a: &str, b: &str) -> bool {
     let (Ok(a), Ok(b)) = (reqwest::Url::parse(a), reqwest::Url::parse(b)) else { return false };
-    a.scheme() == "https" && b.scheme() == "https" && a.host_str().is_some() && a.host_str() == b.host_str()
+    a.host_str().is_some()
+        && a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
 }
 
 /// What one request answered.
