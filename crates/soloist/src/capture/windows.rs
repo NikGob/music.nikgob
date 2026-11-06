@@ -1,0 +1,420 @@
+//! WASAPI process loopback: the sound one process (and the processes it
+//! started) renders, captured on its own, with nothing else of the system mix
+//! (Windows 10 2004 / build 19041 and later; activation fails before that).
+//!
+//! Capture runs on a thread of its own in the multithreaded COM apartment:
+//! `ActivateAudioInterfaceAsync` on the virtual process-loopback device, an
+//! event-driven shared-mode client in 48 kHz stereo `f32` (the engine
+//! converts from the process' own format), and the packets go into a bounded
+//! queue the reader drains. A packet flagged silent is written as zeros so
+//! the stream keeps its timing.
+//!
+//! The session helpers find the target's audio sessions on the active output
+//! devices (by process id) and set their mute and volume, which is what the
+//! Windows volume mixer does.
+#![allow(unsafe_code)]
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Media::Audio::{
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
+    AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, ActivateAudioInterfaceAsync, DEVICE_STATE_ACTIVE,
+    IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+    IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
+    IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume,
+    MMDeviceEnumerator, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, eRender,
+};
+use windows::Win32::System::Com::StructuredStorage::{
+    PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
+};
+use windows::Win32::System::Com::{
+    BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+};
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Variant::VT_BLOB;
+use windows_core::{IUnknown, Interface, implement};
+
+/// The format asked of the capture; Windows converts to it.
+pub const RATE: u32 = 48_000;
+pub const CHANNELS: u16 = 2;
+/// At most this much captured sound waits for the reader; older is dropped.
+const QUEUE_SECONDS: usize = 2;
+/// Activation answers within milliseconds; this only bounds a hung one.
+const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// `WAVE_FORMAT_IEEE_FLOAT`.
+const FORMAT_FLOAT: u16 = 3;
+
+struct Shared {
+    queue: Mutex<VecDeque<f32>>,
+    stop: AtomicBool,
+    /// Frames captured since the start (silent packets included).
+    frames: AtomicU64,
+    /// Frames of them with any sample other than zero.
+    sounding: AtomicU64,
+    failure: Mutex<Option<String>>,
+    /// The thread's start-up result, once it has one.
+    started: (Mutex<Option<Result<(), String>>>, Condvar),
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The sound of one process tree, captured until dropped.
+pub struct ProcessCapture {
+    shared: Arc<Shared>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ProcessCapture {
+    /// Starts capturing `pid` and its child processes; returns once the
+    /// capture client runs (or could not be made).
+    pub fn start(pid: u32) -> Result<Self, String> {
+        let shared = Arc::new(Shared {
+            queue: Mutex::new(VecDeque::with_capacity(RATE as usize * usize::from(CHANNELS))),
+            stop: AtomicBool::new(false),
+            frames: AtomicU64::new(0),
+            sounding: AtomicU64::new(0),
+            failure: Mutex::new(None),
+            started: (Mutex::new(None), Condvar::new()),
+        });
+        let s = shared.clone();
+        let thread = std::thread::Builder::new()
+            .name("soloist-capture".into())
+            .spawn(move || run(pid, &s))
+            .map_err(|e| e.to_string())?;
+        let (lock_, cv) = &shared.started;
+        let mut started = lock(lock_);
+        while started.is_none() {
+            let (next, timeout) = cv
+                .wait_timeout(started, ACTIVATION_TIMEOUT * 2)
+                .unwrap_or_else(PoisonError::into_inner);
+            started = next;
+            if timeout.timed_out() && started.is_none() {
+                shared.stop.store(true, Ordering::Release);
+                return Err("process loopback did not start".into());
+            }
+        }
+        let result = started.take().unwrap_or(Ok(()));
+        drop(started);
+        let capture = Self {
+            shared,
+            thread: Some(thread),
+        };
+        result.map(|()| capture)
+    }
+
+    /// Moves up to `out.len()` captured samples (interleaved stereo) into
+    /// `out`; returns how many.
+    pub fn take(&self, out: &mut [f32]) -> usize {
+        let mut q = lock(&self.shared.queue);
+        let n = out.len().min(q.len());
+        for (o, s) in out.iter_mut().zip(q.drain(..n)) {
+            *o = s;
+        }
+        n
+    }
+
+    /// Whole frames waiting to be taken.
+    pub fn buffered_frames(&self) -> usize {
+        lock(&self.shared.queue).len() / usize::from(CHANNELS)
+    }
+
+    /// Drops what waits (a seek or pause: what was captured before is stale).
+    pub fn clear(&self) {
+        lock(&self.shared.queue).clear();
+    }
+
+    /// Drops all but the newest `frames` frames.
+    pub fn keep_newest(&self, frames: usize) {
+        let mut q = lock(&self.shared.queue);
+        let keep = frames * usize::from(CHANNELS);
+        if q.len() > keep {
+            let extra = q.len() - keep;
+            q.drain(..extra);
+        }
+    }
+
+    pub fn frames_captured(&self) -> u64 {
+        self.shared.frames.load(Ordering::Acquire)
+    }
+
+    /// Frames captured that were not silence.
+    pub fn frames_sounding(&self) -> u64 {
+        self.shared.sounding.load(Ordering::Acquire)
+    }
+
+    /// Why capture stopped, once it has.
+    pub fn failure(&self) -> Option<String> {
+        lock(&self.shared.failure).clone()
+    }
+}
+
+impl Drop for ProcessCapture {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::Release);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// An event handle closed when dropped.
+struct Event(HANDLE);
+
+impl Event {
+    fn new() -> Result<Self, String> {
+        unsafe { CreateEventW(None, false, false, None) }
+            .map(Self)
+            .map_err(|e| format!("CreateEvent: {e}"))
+    }
+
+    /// Waits up to `ms`; true when it was set.
+    fn wait(&self, ms: u32) -> bool {
+        unsafe { WaitForSingleObject(self.0, ms) == WAIT_OBJECT_0 }
+    }
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+// SAFETY of sharing: a Win32 event handle may be signalled from any thread.
+#[derive(Clone, Copy)]
+struct SendHandle(HANDLE);
+unsafe impl Send for SendHandle {}
+unsafe impl Sync for SendHandle {}
+
+/// Gets the activation's result and signals `done`.
+#[implement(IActivateAudioInterfaceCompletionHandler)]
+struct Activated {
+    done: SendHandle,
+}
+
+impl IActivateAudioInterfaceCompletionHandler_Impl for Activated_Impl {
+    fn ActivateCompleted(
+        &self,
+        _operation: windows_core::Ref<'_, IActivateAudioInterfaceAsyncOperation>,
+    ) -> windows_core::Result<()> {
+        unsafe { SetEvent(self.done.0) }
+    }
+}
+
+/// COM for this thread, released when dropped.
+struct Com;
+
+impl Com {
+    fn init() -> Result<Self, String> {
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+            .ok()
+            .map(|()| Self)
+            .map_err(|e| format!("CoInitializeEx: {e}"))
+    }
+}
+
+impl Drop for Com {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
+}
+
+fn float_format() -> WAVEFORMATEX {
+    let block = CHANNELS * 4;
+    WAVEFORMATEX {
+        wFormatTag: FORMAT_FLOAT,
+        nChannels: CHANNELS,
+        nSamplesPerSec: RATE,
+        nAvgBytesPerSec: RATE * u32::from(block),
+        nBlockAlign: block,
+        wBitsPerSample: 32,
+        cbSize: 0,
+    }
+}
+
+/// The capture client of `pid`'s process tree, initialised and given `event`.
+fn activate(pid: u32, event: &Event) -> Result<(IAudioClient, IAudioCaptureClient), String> {
+    let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
+        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                TargetProcessId: pid,
+                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+            },
+        },
+    };
+    // ManuallyDrop: windows-rs drops a PROPVARIANT with PropVariantClear,
+    // which would free the blob, and it points at `params` on the stack.
+    let prop = std::mem::ManuallyDrop::new(PROPVARIANT {
+        Anonymous: PROPVARIANT_0 {
+            Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                vt: VT_BLOB,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: PROPVARIANT_0_0_0 {
+                    blob: BLOB {
+                        cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                        pBlobData: (&raw mut params).cast(),
+                    },
+                },
+            }),
+        },
+    });
+    let done = Event::new()?;
+    let handler: IActivateAudioInterfaceCompletionHandler = Activated { done: SendHandle(done.0) }.into();
+    let operation = unsafe {
+        ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            &IAudioClient::IID,
+            Some(&raw const *prop),
+            &handler,
+        )
+    }
+    .map_err(|e| format!("ActivateAudioInterfaceAsync: {e}"))?;
+    if !done.wait(ACTIVATION_TIMEOUT.as_millis() as u32) {
+        return Err("process loopback activation timed out".into());
+    }
+    let mut hr = windows_core::HRESULT(0);
+    let mut unknown: Option<IUnknown> = None;
+    unsafe { operation.GetActivateResult(&raw mut hr, &raw mut unknown) }
+        .map_err(|e| format!("GetActivateResult: {e}"))?;
+    hr.ok().map_err(|e| format!("process loopback activation: {e}"))?;
+    let client: IAudioClient = unknown
+        .ok_or("process loopback gave no client")?
+        .cast()
+        .map_err(|e| format!("IAudioClient: {e}"))?;
+    let format = float_format();
+    unsafe {
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+            2_000_000, // 200 ms in 100 ns units
+            0,
+            &raw const format,
+            None,
+        )
+    }
+    .map_err(|e| format!("IAudioClient::Initialize: {e}"))?;
+    let packets: IAudioCaptureClient = unsafe { client.GetService() }.map_err(|e| format!("IAudioCaptureClient: {e}"))?;
+    unsafe { client.SetEventHandle(event.0) }.map_err(|e| format!("SetEventHandle: {e}"))?;
+    unsafe { client.Start() }.map_err(|e| format!("IAudioClient::Start: {e}"))?;
+    Ok((client, packets))
+}
+
+fn run(pid: u32, shared: &Shared) {
+    let started = |r: Result<(), String>| {
+        let (m, cv) = &shared.started;
+        *lock(m) = Some(r);
+        cv.notify_all();
+    };
+    let _com = match Com::init() {
+        Ok(c) => c,
+        Err(e) => return started(Err(e)),
+    };
+    let event = match Event::new() {
+        Ok(e) => e,
+        Err(e) => return started(Err(e)),
+    };
+    let (client, packets) = match activate(pid, &event) {
+        Ok(p) => p,
+        Err(e) => return started(Err(e)),
+    };
+    started(Ok(()));
+    let cap = RATE as usize * usize::from(CHANNELS) * QUEUE_SECONDS;
+    let mut scratch: Vec<f32> = Vec::with_capacity(RATE as usize / 10 * usize::from(CHANNELS));
+    let failed = |e: String| {
+        log::warn!("soloist capture stopped: {e}");
+        *lock(&shared.failure) = Some(e);
+    };
+    while !shared.stop.load(Ordering::Acquire) {
+        event.wait(100);
+        loop {
+            let next = match unsafe { packets.GetNextPacketSize() } {
+                Ok(n) => n,
+                Err(e) => {
+                    failed(format!("GetNextPacketSize: {e}"));
+                    let _ = unsafe { client.Stop() };
+                    return;
+                }
+            };
+            if next == 0 {
+                break;
+            }
+            let mut data: *mut u8 = std::ptr::null_mut();
+            let mut frames = 0u32;
+            let mut flags = 0u32;
+            if let Err(e) = unsafe { packets.GetBuffer(&raw mut data, &raw mut frames, &raw mut flags, None, None) } {
+                failed(format!("GetBuffer: {e}"));
+                let _ = unsafe { client.Stop() };
+                return;
+            }
+            let samples = frames as usize * usize::from(CHANNELS);
+            scratch.clear();
+            if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data.is_null() || frames > RATE {
+                scratch.resize(samples.min(RATE as usize * 2), 0.0);
+            } else {
+                // SAFETY: WASAPI hands `frames` frames of the format asked for
+                // (stereo f32) at `data` until ReleaseBuffer.
+                let packet = unsafe { std::slice::from_raw_parts(data.cast::<f32>(), samples) };
+                scratch.extend_from_slice(packet);
+            }
+            let _ = unsafe { packets.ReleaseBuffer(frames) };
+            shared.frames.fetch_add(u64::from(frames), Ordering::AcqRel);
+            if scratch.iter().any(|s| *s != 0.0) {
+                shared.sounding.fetch_add(u64::from(frames), Ordering::AcqRel);
+            }
+            let mut q = lock(&shared.queue);
+            q.extend(scratch.iter().copied());
+            if q.len() > cap {
+                let extra = q.len() - cap;
+                q.drain(..extra);
+            }
+        }
+    }
+    let _ = unsafe { client.Stop() };
+}
+
+/// Sets mute and volume on every audio session of the processes in `pids`
+/// on the active output devices; returns how many sessions it changed.
+pub fn set_sessions(pids: &[u32], mute: Option<bool>, volume: Option<f32>) -> Result<usize, String> {
+    let _com = Com::init().ok();
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|e| format!("MMDeviceEnumerator: {e}"))?;
+    let devices = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }.map_err(|e| e.to_string())?;
+    let mut changed = 0;
+    for d in 0..unsafe { devices.GetCount() }.unwrap_or(0) {
+        let Ok(device) = (unsafe { devices.Item(d) }) else { continue };
+        let Ok(manager) = (unsafe { device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) }) else {
+            continue;
+        };
+        let Ok(sessions) = (unsafe { manager.GetSessionEnumerator() }) else { continue };
+        for i in 0..unsafe { sessions.GetCount() }.unwrap_or(0) {
+            let Ok(control) = (unsafe { sessions.GetSession(i) }) else { continue };
+            let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+            let Ok(pid) = (unsafe { control2.GetProcessId() }) else { continue };
+            if !pids.contains(&pid) {
+                continue;
+            }
+            let Ok(simple) = control.cast::<ISimpleAudioVolume>() else { continue };
+            if let Some(m) = mute {
+                unsafe { simple.SetMute(m, std::ptr::null()) }.map_err(|e| format!("SetMute: {e}"))?;
+            }
+            if let Some(v) = volume {
+                unsafe { simple.SetMasterVolume(v.clamp(0.0, 1.0), std::ptr::null()) }
+                    .map_err(|e| format!("SetMasterVolume: {e}"))?;
+            }
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
