@@ -247,6 +247,17 @@ pub(crate) struct Me {
     pub(crate) username: String,
     #[serde(default)]
     pub(crate) full_name: Option<String>,
+    #[serde(default)]
+    pub(crate) likes_count: Option<u64>,
+    #[serde(default)]
+    pub(crate) public_favorites_count: Option<u64>,
+}
+
+impl Me {
+    /// How many tracks the account liked, as `/me` says.
+    pub(crate) fn likes(&self) -> Option<u64> {
+        self.likes_count.or(self.public_favorites_count)
+    }
 }
 
 /// The resolve of a transcoding: `{"url": "…/playlist.m3u8?…"}`.
@@ -331,7 +342,11 @@ pub(crate) fn track(t: &Track) -> StreamTrack {
         disc_no: None,
         track_no: None,
         cover_url: cover,
-        playable: !preview && t.policy.as_deref() != Some("BLOCK") && t.streamable != Some(false),
+        // DRM-only tracks play through the official widget, on Windows only.
+        playable: !preview
+            && t.policy.as_deref() != Some("BLOCK")
+            && t.streamable != Some(false)
+            && (cfg!(windows) || !t.drm_only()),
     }
 }
 
@@ -440,7 +455,8 @@ mod tests {
         )
         .unwrap();
         assert!(drm.drm_only());
-        assert!(track(&drm).playable, "listed as playable: another route may play it");
+        // Windows plays them through the official widget; elsewhere nothing does.
+        assert_eq!(track(&drm).playable, cfg!(windows));
         let stub: Track = serde_json::from_str(r#"{"id":4,"kind":"track","policy":"ALLOW"}"#).unwrap();
         assert!(stub.is_stub());
     }

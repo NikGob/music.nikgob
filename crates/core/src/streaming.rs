@@ -21,9 +21,9 @@
 //!   the UI thread included.
 //! * [`StreamService::open_audio`] is called by the audio engine off the UI
 //!   and worker threads (on its own opener thread) and does no stream
-//!   network work itself (at most a cached metadata check, as SoundCloud's
-//!   DRM check): the download happens on the first read of the
-//!   returned [`AudioStream`]. Reads then run on the engine's decoder thread,
+//!   network work itself (at most a small metadata check, cached when a
+//!   listing has it, as SoundCloud's DRM check): the download happens on the
+//!   first read of the returned [`AudioStream`]. Reads then run on the engine's decoder thread,
 //!   so a stream should download ahead on a background task and hand out
 //!   buffered bytes, blocking only while the wanted range is not there yet.
 
@@ -713,8 +713,8 @@ pub mod format {
 /// The encoded bytes of one stream, as the audio engine reads them.
 ///
 /// Created by [`StreamService::open_audio`] without stream traffic (at most a
-/// cached metadata check); the first `read`/`seek` does the network work. Read on the engine's decoder
-/// thread (see the module docs).
+/// small metadata check); the first `read`/`seek` does the network work. Read
+/// on the engine's decoder thread (see the module docs).
 pub trait AudioStream: Read + Seek + Send {
     /// Total size in bytes, if known. Called after the first read.
     fn byte_len(&self) -> Option<u64>;
@@ -995,8 +995,9 @@ pub trait StreamService: Send + Sync {
     /// Recently played tracks, newest first. Needs a login.
     fn recent(&self) -> BoxFuture<'_, Result<Vec<Played>, StreamError>>;
 
-    /// The audio of a track. No network here: everything happens on the
-    /// first read of the stream (see the module docs).
+    /// The audio of a track. No stream network here (a cached metadata check
+    /// is allowed): the download happens on the first read of the stream (see
+    /// the module docs).
     fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError>;
 
     /// Saves the audio as it is (YouTube: Opus remuxed to Ogg, no re-encode)

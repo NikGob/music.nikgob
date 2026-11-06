@@ -20,9 +20,12 @@
 //! the first [`HEAD`] bytes of every segment (16 at a time: their sizes from
 //! `Content-Range`, and their moof boxes, so a seek walks the boxes without
 //! waiting for whole segments), and then whole segments in order from the
-//! one being read, wrapping around to the gaps before it. Everything is
-//! kept in memory (a five-minute track is about 6.5 MB). Reads block only
-//! while their bytes are not there yet.
+//! one being read, on to the end of a window of [`KEEP_AHEAD`] seconds.
+//! Whole segments farther than [`KEEP_BEHIND`] seconds behind the reader
+//! (or [`KEEP_AHEAD`] ahead of it) are dropped again, so a long track is
+//! never all in memory; the heads stay (8 KB a segment), and a seek into
+//! a dropped segment fetches it again. Reads block only while their bytes
+//! are not there yet.
 //!
 //! **Expired urls.** The urls are signed for a limited time (CloudFront
 //! `Policy`/`Signature`, about an hour). A 403 or 410 of a segment
@@ -53,6 +56,33 @@ const MAX_RESOLVES: u32 = 3;
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// A playlist expiring within this is resolved again before a segment.
 const EXPIRY_MARGIN: u64 = 60;
+/// Seconds of whole segments kept behind the reader, and downloaded and
+/// kept ahead of it.
+const KEEP_BEHIND: f64 = 60.0;
+const KEEP_AHEAD: f64 = 60.0;
+/// Rounds of retries of one segment head before the stream fails.
+const HEAD_ROUNDS: u32 = 3;
+/// How often the idle download looks at the reader again.
+const IDLE_TICK: Duration = Duration::from_secs(2);
+
+/// The segments `[lo, hi]` kept around segment `want` (by their seconds).
+fn window(durations: &[f64], want: usize) -> (usize, usize) {
+    let last = durations.len().saturating_sub(1);
+    let want = want.min(last);
+    let mut lo = want;
+    let mut sum = 0.0;
+    while lo > 0 && sum + durations[lo - 1].max(0.0) <= KEEP_BEHIND {
+        lo -= 1;
+        sum += durations[lo].max(0.0);
+    }
+    let mut hi = want;
+    let mut sum = durations.get(want).copied().unwrap_or(0.0).max(0.0);
+    while hi < last && sum < KEEP_AHEAD {
+        hi += 1;
+        sum += durations[hi].max(0.0);
+    }
+    (lo, hi)
+}
 
 /// Where the stream's pieces are, as the playlist says.
 #[derive(Clone, Debug, PartialEq)]
@@ -322,7 +352,15 @@ impl Read for HlsStream {
                 let avail = (bytes.len().min(seg.len as usize)).saturating_sub(off);
                 let n = avail.min(buf.len());
                 buf[..n].copy_from_slice(&bytes[off..off + n]);
+                // The download follows the reader along the track.
+                let moved = st.want != i;
+                if moved {
+                    st.want = i;
+                }
                 drop(st);
+                if moved {
+                    shared.wake.notify_one();
+                }
                 self.pos += n as u64;
                 return Ok(n);
             }
@@ -450,7 +488,7 @@ impl Download {
                                 let total = if status == 206 { total } else { Some(b.len() as u64) };
                                 return Ok(Got::Bytes(b.to_vec(), total));
                             }
-                            Err(e) => StreamError::Network(e.to_string()),
+                            Err(e) => StreamError::Network(e.without_url().to_string()),
                         }
                     } else if status == 429 || status >= 500 {
                         StreamError::Http { status }
@@ -458,7 +496,7 @@ impl Download {
                         return Err(StreamError::Http { status });
                     }
                 }
-                Err(e) => StreamError::Network(e.to_string()),
+                Err(e) => StreamError::Network(e.without_url().to_string()),
             };
             attempt += 1;
             if attempt >= MAX_ATTEMPTS || self.closed() {
@@ -470,6 +508,9 @@ impl Download {
 
     async fn download(&self) -> Result<(), StreamError> {
         let mut plan = (self.resolve)().await?;
+        // A clock that runs ahead would make every url look expired: then
+        // the expiry is ignored (a refused url still resolves again).
+        let mut ignore_expiry = plan.expires.is_some_and(|e| e <= now_secs());
         let total_time = plan.duration();
         *self.duration.lock().unwrap_or_else(PoisonError::into_inner) = Some(total_time);
         let mut resolves = 0;
@@ -484,6 +525,7 @@ impl Download {
                         return Err(StreamError::Http { status: 403 });
                     }
                     plan = (self.resolve)().await?;
+                    ignore_expiry |= plan.expires.is_some_and(|e| e <= now_secs());
                 }
             }
         };
@@ -511,23 +553,33 @@ impl Download {
         }
         self.shared.ready.notify_all();
 
-        // Whole segments, from the one being read.
+        // Whole segments, from the one being read to the end of the window;
+        // the ones outside it are dropped.
+        let durations: Vec<f64> = plan.segments.iter().map(|(_, d)| *d).collect();
         loop {
             if self.closed() {
                 return Ok(());
             }
             let next = {
-                let st = self.shared.lock();
-                let layout = st.layout.as_ref().expect("set above");
+                let mut st = self.shared.lock();
                 let want = st.want.min(count.saturating_sub(1));
-                (want..count).chain(0..want).find(|&i| layout.segments[i].data.is_none())
+                let (lo, hi) = window(&durations, want);
+                let layout = st.layout.as_mut().expect("set above");
+                for (i, seg) in layout.segments.iter_mut().enumerate() {
+                    if (i < lo || i > hi) && seg.data.is_some() {
+                        seg.data = None;
+                    }
+                }
+                (want..=hi).find(|&i| layout.segments[i].data.is_none())
             };
             let Some(i) = next else {
-                log::debug!("soundcloud: stream downloaded ({count} segments)");
-                return Ok(());
+                // Nothing to fetch: wait for the reader to move.
+                let _ = tokio::time::timeout(IDLE_TICK, self.shared.wake.notified()).await;
+                continue;
             };
-            if plan.expires.is_some_and(|e| e <= now_secs() + EXPIRY_MARGIN) {
+            if !ignore_expiry && plan.expires.is_some_and(|e| e <= now_secs() + EXPIRY_MARGIN) {
                 plan = self.resolve_again(&plan).await?;
+                ignore_expiry = plan.expires.is_some_and(|e| e <= now_secs());
             }
             let got = self.get(&plan.segments[i].0, None).await?;
             match got {
@@ -552,6 +604,7 @@ impl Download {
                     }
                     log::info!("soundcloud: segment url refused, resolving the stream again");
                     plan = self.resolve_again(&plan).await?;
+                    ignore_expiry |= plan.expires.is_some_and(|e| e <= now_secs());
                 }
             }
         }
@@ -580,11 +633,28 @@ impl Download {
             };
             set.spawn(async move {
                 let _turn = limit.acquire().await;
-                (i, me.get(&url, Some(HEAD)).await)
+                // One head failing (after its own retries) is asked again
+                // a few times before the stream fails.
+                let mut last = StreamError::Network("stream closed".into());
+                for round in 0..HEAD_ROUNDS {
+                    if me.closed() {
+                        break;
+                    }
+                    match me.get(&url, Some(HEAD)).await {
+                        Ok(got) => return (i, Ok(got)),
+                        Err(e) => last = e,
+                    }
+                    tokio::time::sleep(Duration::from_secs(u64::from(round) + 1)).await;
+                }
+                (i, Err(last))
             });
         }
         let mut out: Vec<Option<(Vec<u8>, u64, bool)>> = vec![None; plan.segments.len()];
         while let Some(joined) = set.join_next().await {
+            if self.closed() {
+                set.abort_all();
+                return Err(StreamError::Network("stream closed".into()));
+            }
             let (i, r) = joined.map_err(|e| StreamError::Network(format!("task failed: {e}")))?;
             match r? {
                 Got::Bytes(mut b, total) => {
@@ -651,6 +721,15 @@ mod tests {
         assert!(patch_init(&mut mdhd, Duration::from_secs_f64(322.606425)));
         assert_eq!(u32::from_be_bytes(mdhd[24..28].try_into().unwrap()), 14_226_943);
         assert!(!patch_init(&mut [0u8; 16], Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn the_window_keeps_a_minute_each_way() {
+        let d = vec![10.0; 40];
+        assert_eq!(window(&d, 20), (14, 25));
+        assert_eq!(window(&d, 0), (0, 5));
+        assert_eq!(window(&d, 39), (33, 39));
+        assert_eq!(window(&[3.0], 5), (0, 0));
     }
 
     #[test]

@@ -46,7 +46,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nikgob_core::streaming::{
     Account, AudioStream, BoxFuture, EntityKind, LikedHead, LoginInput, Played, SearchKind, SearchParts, Service,
@@ -93,6 +93,8 @@ const PLAYLIST_TTL: Duration = Duration::from_secs(10 * 60);
 const RAW_TTL: Duration = Duration::from_secs(5 * 60);
 /// A scraped client id older than this is scraped again at the start.
 const CLIENT_ID_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+/// The client id is scraped again at most this often after refusals.
+const RESCRAPE_EVERY: Duration = Duration::from_secs(10 * 60);
 
 /// Where the service keeps its state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,6 +145,16 @@ struct Inner {
     /// dropped.
     generation: AtomicU64,
     store: token::Store,
+    /// A sign-in is being tried: a refusal of the new token is the login's
+    /// to handle, not a sign-out.
+    trying: AtomicBool,
+    /// When the client id was last scraped because of refusals.
+    rescraped_at: Mutex<Option<Instant>>,
+    /// The `/me` likes count minus the tracks the last full read kept (stubs
+    /// and removed tracks), so the count can say how long the list is.
+    likes_skew: Mutex<Option<i64>>,
+    /// The last full read stopped at [`LIKES_MAX`].
+    likes_capped: AtomicBool,
     gate: limit::Gate,
     searches: TtlCache<StreamSearch>,
     raw: TtlCache<api::Track>,
@@ -237,6 +249,10 @@ impl Soundcloud {
                 account: Mutex::new(Account::LoggedOut),
                 generation: AtomicU64::new(0),
                 store,
+                trying: AtomicBool::new(false),
+                rescraped_at: Mutex::new(None),
+                likes_skew: Mutex::new(None),
+                likes_capped: AtomicBool::new(false),
                 gate: limit::Gate::new(),
                 searches: TtlCache::new(SEARCH_TTL, 64),
                 raw: TtlCache::new(RAW_TTL, 500),
@@ -358,6 +374,12 @@ fn with_client_id(url: &str, id: &str) -> String {
     format!("{base}?{}", parts.join("&"))
 }
 
+/// Both urls are https and on one host.
+fn same_host(a: &str, b: &str) -> bool {
+    let (Ok(a), Ok(b)) = (reqwest::Url::parse(a), reqwest::Url::parse(b)) else { return false };
+    a.scheme() == "https" && b.scheme() == "https" && a.host_str().is_some() && a.host_str() == b.host_str()
+}
+
 /// What one request answered.
 enum Answer {
     Ok(Vec<u8>),
@@ -404,10 +426,10 @@ impl Inner {
     }
 
     async fn fetch_text(&self, url: &str) -> Result<String, StreamError> {
-        let resp = self.http.get(url).send().await.map_err(|e| StreamError::Network(e.to_string()))?;
+        let resp = self.http.get(url).send().await.map_err(|e| StreamError::Network(e.without_url().to_string()))?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
-        let body = resp.bytes().await.map_err(|e| StreamError::Network(e.to_string()))?;
+        let body = resp.bytes().await.map_err(|e| StreamError::Network(e.without_url().to_string()))?;
         if status == 403 && is_bot_check(&headers, &body) {
             return Err(StreamError::RateLimited { retry_after: None });
         }
@@ -438,15 +460,19 @@ impl Inner {
             .header("Accept", "application/json, text/javascript, */*; q=0.01")
             .header("Origin", self.site.as_str())
             .header("Referer", format!("{}/", self.site));
-        if let Some(t) = token {
+        // The sign-in goes to the API's host only (a `next_href` or a stream
+        // url is not one).
+        if let Some(t) = token
+            && same_host(&url, &self.api)
+        {
             req = req.header("Authorization", format!("OAuth {t}"));
         }
-        let resp = req.send().await.map_err(|e| StreamError::Network(e.to_string()))?;
+        let resp = req.send().await.map_err(|e| StreamError::Network(e.without_url().to_string()))?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let retry_after =
             headers.get("retry-after").and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).map(Duration::from_secs);
-        let body = resp.bytes().await.map_err(|e| StreamError::Network(e.to_string()))?;
+        let body = resp.bytes().await.map_err(|e| StreamError::Network(e.without_url().to_string()))?;
         match status {
             200..=299 => Ok(Answer::Ok(body.to_vec())),
             429 => Err(StreamError::RateLimited { retry_after }),
@@ -464,9 +490,34 @@ impl Inner {
         }
     }
 
-    /// A request with the client id (scraped again once when refused) and
-    /// the sign-in when there is one. `signed` calls need the sign-in: a
-    /// refusal of theirs is the token's.
+    /// Whether the catalogue answers with this client id and no sign-in.
+    async fn anonymous_ok(&self, id: &str) -> Result<bool, StreamError> {
+        let query = [("q", "a".to_owned()), ("limit", "1".to_owned())];
+        Ok(matches!(self.send(reqwest::Method::GET, "/search/tracks", &query, id, None).await?, Answer::Ok(_)))
+    }
+
+    /// The client id scraped again, at most once in [`RESCRAPE_EVERY`] (a
+    /// scrape another call made meanwhile counts).
+    async fn rescrape(&self, id: &str) -> Option<String> {
+        let due = {
+            let mut at = lock(&self.rescraped_at);
+            if at.is_none_or(|t| t.elapsed() >= RESCRAPE_EVERY) {
+                *at = Some(Instant::now());
+                true
+            } else {
+                false
+            }
+        };
+        if due {
+            return self.client_id(true, Some(id)).await.ok();
+        }
+        lock(&self.client_id).clone().filter(|c| c != id)
+    }
+
+    /// A request with the client id (scraped again when refused and the
+    /// catalogue refuses a plain probe too) and the sign-in when there is
+    /// one. `signed` calls need the sign-in: a 401 of theirs is the token's
+    /// (a 403 is not: it is only a refusal of that call).
     async fn request(
         &self,
         method: reqwest::Method,
@@ -480,29 +531,41 @@ impl Inner {
         }
         let generation = self.generation.load(Ordering::SeqCst);
         let mut id = self.client_id(false, None).await?;
-        let mut refused = 0;
+        let mut rescraped = false;
         let mut with_token = token.is_some();
+        let mut token_status = None;
         loop {
             let t = if with_token { token.as_deref() } else { None };
             match self.send(method.clone(), url, query, &id, t).await? {
                 Answer::Ok(body) => {
-                    if !with_token && token.is_some() {
-                        // The catalogue answered without the sign-in.
-                        self.token_refused(generation);
+                    // The catalogue answered without the sign-in that it
+                    // had refused with a 401.
+                    if !with_token && token_status == Some(401) {
+                        self.token_refused(generation, token.as_deref());
                     }
                     return Ok(body);
                 }
                 Answer::Refused(status) => {
-                    refused += 1;
-                    match refused {
-                        // A stale client id is the usual reason.
-                        1 => id = self.client_id(true, Some(&id)).await?,
-                        2 if with_token && !signed => with_token = false,
-                        _ if with_token => {
-                            self.token_refused(generation);
+                    if with_token && !signed {
+                        token_status = Some(status);
+                        with_token = false;
+                        continue;
+                    }
+                    if self.anonymous_ok(&id).await? {
+                        // The client id is fine: the refusal is the call's.
+                        if signed && status == 401 {
+                            self.token_refused(generation, token.as_deref());
                             return Err(StreamError::NotLoggedIn);
                         }
-                        _ => return Err(StreamError::Http { status }),
+                        return Err(StreamError::Http { status });
+                    }
+                    if rescraped {
+                        return Err(StreamError::Http { status });
+                    }
+                    rescraped = true;
+                    match self.rescrape(&id).await {
+                        Some(new) => id = new,
+                        None => return Err(StreamError::Http { status }),
                     }
                 }
             }
@@ -555,15 +618,27 @@ impl Inner {
         if self.token().is_some() { Ok(()) } else { Err(StreamError::NotLoggedIn) }
     }
 
-    /// The token was refused: the account must sign in again.
-    fn token_refused(&self, generation: u64) {
+    /// The token was refused: the account must sign in again, and the
+    /// saved copy must not come back.
+    fn token_refused(&self, generation: u64, used: Option<&str>) {
         if self.generation.load(Ordering::SeqCst) != generation {
             return;
         }
-        if lock(&self.token).take().is_some() {
-            log::warn!("soundcloud: the sign-in was refused");
-            *self.account() = Account::Failed(SESSION_EXPIRED.into());
+        {
+            let mut current = lock(&self.token);
+            if current.as_deref() != used {
+                return;
+            }
+            current.take();
         }
+        // A sign-in being tried: the login restores the old one itself.
+        if self.trying.load(Ordering::SeqCst) {
+            return;
+        }
+        log::warn!("soundcloud: the sign-in was refused");
+        *lock(&self.me) = None;
+        *self.account() = Account::Failed(SESSION_EXPIRED.into());
+        self.store.clear();
     }
 
     /// The saved sign-in, at the start.
@@ -622,8 +697,12 @@ impl Inner {
         };
         let generation = self.generation.load(Ordering::SeqCst);
         let before = lock(&self.token).replace(token.clone());
-        *lock(&self.me) = None;
-        match self.load_me().await {
+        let account_before = self.account().clone();
+        let me_before = lock(&self.me).take();
+        self.trying.store(true, Ordering::SeqCst);
+        let result = self.load_me().await;
+        self.trying.store(false, Ordering::SeqCst);
+        match result {
             Ok(me) if self.generation.load(Ordering::SeqCst) == generation => {
                 self.store.save(&token);
                 log::info!("soundcloud: signed in as {}", me.username);
@@ -631,10 +710,13 @@ impl Inner {
             }
             Ok(_) => Err(StreamError::NotLoggedIn),
             Err(e) => {
-                *lock(&self.token) = before;
+                if self.generation.load(Ordering::SeqCst) == generation {
+                    // The old sign-in, if any, holds with its account.
+                    *lock(&self.token) = before;
+                    *self.account() = account_before;
+                    *lock(&self.me) = me_before;
+                }
                 if matches!(e, StreamError::NotLoggedIn) {
-                    // The refusal marked the account; the old sign-in, if
-                    // any, still holds.
                     Err(StreamError::Network("SoundCloud не принял вход — токен устарел".into()))
                 } else {
                     Err(e)
@@ -944,6 +1026,28 @@ impl Inner {
     }
 
     // -- the account's data -------------------------------------------------
+
+    /// Every like (up to [`LIKES_MAX`]); keeps what the head check needs:
+    /// whether the list was cut, and how the `/me` count relates to it.
+    async fn liked_all(&self) -> Result<Vec<StreamTrack>, StreamError> {
+        let (tracks, complete) = self.liked(LIKES_MAX).await?;
+        self.likes_capped.store(!complete, Ordering::SeqCst);
+        let skew = if complete {
+            self.load_me().await.ok().and_then(|m| m.likes()).map(|c| c as i64 - tracks.len() as i64)
+        } else {
+            None
+        };
+        *lock(&self.likes_skew) = skew;
+        Ok(tracks)
+    }
+
+    /// The length the list has now, from the `/me` count (as the full
+    /// read counted it), if it can be told.
+    async fn liked_total(&self) -> Option<u32> {
+        let skew = (*lock(&self.likes_skew))?;
+        let count = self.load_me().await.ok()?.likes()?;
+        u32::try_from(count as i64 - skew).ok()
+    }
 
     async fn liked(&self, max: usize) -> Result<(Vec<StreamTrack>, bool), StreamError> {
         let me = self.me_id().await?;
@@ -1292,14 +1396,19 @@ impl StreamService for Soundcloud {
     }
 
     fn liked(&self) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
-        self.run(move |inner| async move { Ok(inner.liked(LIKES_MAX).await?.0) })
+        self.run(move |inner| async move { inner.liked_all().await })
+    }
+
+    fn liked_partial(&self) -> bool {
+        self.inner.likes_capped.load(Ordering::SeqCst)
     }
 
     fn liked_head(&self) -> BoxFuture<'_, Result<LikedHead, StreamError>> {
         self.run(move |inner| async move {
             let (tracks, complete) = inner.liked(50).await?;
+            let total = if complete { u32::try_from(tracks.len()).ok() } else { inner.liked_total().await };
             Ok(LikedHead {
-                total: if complete { u32::try_from(tracks.len()).ok() } else { None },
+                total,
                 tracks,
                 complete,
             })
