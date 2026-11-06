@@ -269,16 +269,37 @@ pub fn set(on: bool) -> Result<(), String> {
 
 fn set_as(name: &str, on: bool) -> Result<(), String> {
     let line = if on {
-        Some(command(&std::env::current_exe().map_err(|e| e.to_string())?))
+        Some(command(&program().map_err(|e| e.to_string())?))
     } else {
         None
     };
     sys::write(name, line.as_deref()).map_err(|e| e.to_string())
 }
 
+/// The program the line starts: this exe, or on Linux the Nix wrapper that
+/// ran it. Nix's wrappers run the binary as `.nikgob-wrapped` with their own
+/// path as `argv[0]`, and the binary alone lacks what the wrapper sets up
+/// (GTK's schemas, GIO's TLS module), so the entry starts the wrapper.
+fn program() -> std::io::Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    #[cfg(target_os = "linux")]
+    if exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with('.') && n.ends_with("-wrapped"))
+        && let Some(wrapper) = std::env::args_os()
+            .next()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute() && p.is_file())
+    {
+        return Ok(wrapper);
+    }
+    Ok(exe)
+}
+
 /// An enabled line follows the exe that runs now (a moved or rebuilt copy).
 pub fn refresh() {
-    if let (true, Some(line), Ok(exe)) = (enabled(), sys::line(NAME), std::env::current_exe())
+    if let (true, Some(line), Ok(exe)) = (enabled(), sys::line(NAME), program())
         && line != command(&exe)
         && let Err(e) = set(true)
     {
@@ -361,7 +382,7 @@ mod tests {
     fn on_off_and_task_manager() {
         let name = "music.nikgob test";
         set_as(name, true).unwrap();
-        let exe = std::env::current_exe().unwrap();
+        let exe = program().unwrap();
         assert_eq!(sys::line(name), Some(command(&exe)));
         assert!(enabled_as(name));
         sys::switch_off(name);
