@@ -337,6 +337,11 @@ impl WebLogin for WindowLogin {
         }
         let code = status.and_then(|s| s.code());
         log::info!("youtube: sign-in window exited ({code:?})");
+        if code != Some(EXIT_OK) {
+            // Whatever it left behind (a close that raced the write) is
+            // not a sign-in.
+            let _ = std::fs::remove_file(&self.out);
+        }
         match code {
             Some(EXIT_OK) => match read() {
                 Ok(t) if !t.trim().is_empty() => Ok(t),
@@ -348,7 +353,6 @@ impl WebLogin for WindowLogin {
             Some(EXIT_REFUSED) => Err(WebLoginError::Refused),
             Some(EXIT_NO_WEBVIEW) => Err(WebLoginError::Failed(NO_WEBVIEW.into())),
             other => {
-                let _ = std::fs::remove_file(&self.out);
                 Err(WebLoginError::Failed(match other {
                     Some(c) => format!("ошибка {c}"),
                     None => "окно упало".into(),
