@@ -15,5 +15,7 @@ gen 1.5 1.0 -c:a libopus -b:a 64k -ar 48000 opus_b.opus
 gen 0 1.0 -c:a libmp3lame -b:a 128k tone.mp3
 gen 0 1.0 -c:a libvorbis -q:a 3 tone.ogg
 gen 0 1.0 -c:a aac -b:a 96k tone.m4a
+# WebM Opus like YouTube's itag 251, several clusters (and cues).
+gen 0 1.0 -c:a libopus -b:a 64k -ar 48000 -cluster_time_limit 200 tone.webm
 gen 0 0.5 -c:a alac tone_alac.m4a
 gen 0 0.5 -c:a flac tone.flac

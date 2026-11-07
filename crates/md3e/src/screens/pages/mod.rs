@@ -1,16 +1,26 @@
 //! Content pages and the menus and dialogs they open.
 
+mod brand;
 mod detail;
+mod dialogs;
 mod downloads;
+mod cards;
 mod home;
 mod library;
 mod search;
+mod shelf;
 mod settings;
 pub(crate) mod settings_help;
+mod sources;
+mod streams;
+mod wishlist;
+mod world;
+mod worlds;
 pub mod widgets;
 
-pub use search::search_results;
+pub use search::{restore_search_scroll, search_results, search_scroll};
 pub use settings_help::SettingId;
+pub(crate) use worlds::choose as choose_world;
 
 use egui::{Context, Rect, Response, Ui, UiBuilder, vec2};
 use nikgob_view::{
@@ -32,6 +42,10 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 enum Ask {
     NewPlaylist { then_add: Vec<TrackId> },
+    /// A new playlist for stream tracks.
+    NewPlaylistStream(Vec<nikgob_view::RemoteId>),
+    /// A magnet link for a wishlist item without a torrent.
+    WishMagnet(nikgob_view::WishlistId),
     RenamePlaylist(nikgob_view::PlaylistId),
     Magnet,
 }
@@ -49,14 +63,90 @@ pub(crate) fn request_release_delete(ctx: &Context, id: nikgob_view::ReleaseId, 
     ctx.data_mut(|d| d.insert_temp(egui::Id::new("release-delete-request"), (id, title.to_owned(), forever)));
 }
 
+/// «Радио по треку» in the track menus.
+pub(crate) const RADIO_BY_TRACK: &str = "Радио по треку";
+
+/// «Не нравится» of a track, or its undo when it is disliked.
+pub(crate) fn dislike_item(disliked: bool) -> MenuItem {
+    MenuItem::new(if disliked { "Убрать «Не нравится»" } else { "Не нравится" }).icon(Icon::ThumbDown).selected(disliked)
+}
+
+pub(crate) fn dislike_command(track: nikgob_view::TrackId, marks: &nikgob_view::DislikesView) -> Command {
+    Command::Dislike { track, dislike: !marks.track(track), sure: false, relike: false }
+}
+
+/// «Не рекомендовать исполнителя» of `artist`, or its undo.
+pub(crate) fn ban_item(artist: Option<nikgob_view::ArtistId>, marks: &nikgob_view::DislikesView) -> MenuItem {
+    let banned = artist.is_some_and(|a| marks.artist(a));
+    MenuItem::new(if banned { "Снова рекомендовать исполнителя" } else { "Не рекомендовать исполнителя" })
+        .icon(Icon::Block)
+        .enabled(artist.is_some())
+}
+
+pub(crate) fn ban_command(artist: nikgob_view::ArtistId, marks: &nikgob_view::DislikesView) -> Command {
+    Command::RecFeedback { target: nikgob_view::RecTarget::Artist(artist), dislike: !marks.artist(artist) }
+}
+
+fn marks_key() -> egui::Id {
+    egui::Id::new("md3e-dislike-marks")
+}
+
+/// Keeps the marks for the menus drawn without the view state (cards).
+pub(crate) fn set_marks(ctx: &Context, marks: &nikgob_view::DislikesView) {
+    let same = ctx.data(|d| d.get_temp::<std::sync::Arc<nikgob_view::DislikesView>>(marks_key())).is_some_and(|m| *m == *marks);
+    if !same {
+        ctx.data_mut(|d| d.insert_temp(marks_key(), std::sync::Arc::new(marks.clone())));
+    }
+}
+
+/// The marks [`set_marks`] kept.
+pub(crate) fn marks(ctx: &Context) -> std::sync::Arc<nikgob_view::DislikesView> {
+    ctx.data(|d| d.get_temp(marks_key())).unwrap_or_default()
+}
+
+
+
+/// Where «Радио по треку» is in the track menu of the lists.
+const RADIO_ITEM: usize = 3;
+
+/// The command of «Радио по треку» for a library track.
+pub(crate) fn radio_by_track(track: TrackId) -> Command {
+    Command::StartRadio { seed: nikgob_view::RadioSeed::Track(track) }
+}
+
+/// The tabs and chips a page is on, beyond its route: what a step of the
+/// history brings back with the page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tabs {
+    library: LibraryTab,
+    downloads: usize,
+    settings: usize,
+}
+
+/// A page scrolled to `y` once its content is tall enough (it may still be
+/// loading), for at most `frames` frames.
+#[derive(Clone, Debug, PartialEq)]
+struct ScrollRestore {
+    route: Route,
+    y: f32,
+    frames: u32,
+}
+
 /// Page-level presentation state that outlives a frame.
 #[derive(Default)]
 pub struct PageState {
+    /// How far the page on screen is scrolled (last frame).
+    pub(crate) scroll_now: f32,
+    scroll_restore: Option<ScrollRestore>,
+    /// The library tab came back from the history: it loads what it shows.
+    reopen_library_tab: bool,
     /// A navigation requested from inside an overlay or menu.
     pub pending_nav: Option<Route>,
     /// A settings row a "настроить" link asked for: Settings opens on its
     /// tab, scrolls to it and makes it glow.
     pub focus_setting: Option<SettingId>,
+    /// The whole group of [`Self::focus_setting`] is shown, not the row.
+    pub focus_group: bool,
     /// Settings tab: 0 general, 1 appearance.
     settings_tab: usize,
     /// Latest bass level for the ambient glow (set by the host each frame).
@@ -65,10 +155,19 @@ pub struct PageState {
     pub open_pane: Option<PaneTab>,
     /// A page asked to go back (its ← button).
     pub go_back: bool,
+    /// A page asked for the search bar («Найти музыку» on an empty Home).
+    pub focus_search: bool,
+    /// A page asked for Now Playing («Сейчас играет» on the card of Главная).
+    pub open_now_playing: bool,
     pub(crate) library_tab: LibraryTab,
+    /// The instant filter of Библиотека (the current tab by title and
+    /// artist), and what «Треки» last asked the runtime for.
+    library_filter: String,
+    track_filter_sent: String,
     release_filter: usize,
+    /// Library albums by source: 0 all, 1 with files, 2 stream.
+    release_source: usize,
     downloads_tab: usize,
-    home_filter: usize,
     ask: Option<Ask>,
     ask_text: String,
     confirm_delete: Option<nikgob_view::PlaylistId>,
@@ -88,22 +187,131 @@ pub struct PageState {
     files_done: bool,
     indexer_url: String,
     indexer_key: String,
+    /// «Soulseek» on «Источники»: what is typed (the password and the
+    /// token are never shown back), and whether the fields were filled from
+    /// the saved settings.
+    slsk_remote: bool,
+    slsk_user: String,
+    slsk_pass: String,
+    slsk_url: String,
+    slsk_token: String,
+    slsk_synced: bool,
     acoustid_key: String,
+    /// What is typed into «Ключ Last.fm» before «Сохранить».
+    lastfm_key: String,
     metadata_contact: String,
     metadata_synced: bool,
+    /// What is typed into «Как к тебе обращаться» (Главная's question and
+    /// the settings row) before it is kept.
+    name_draft: String,
+    name_synced: bool,
+    /// «Источники»: what is typed into the Spotify Client ID and the
+    /// YouTube cookies fields, and which folds are open.
+    /// Spotify Soloist's setup: the open dialog, the key being typed, the
+    /// flow (each step's dialog opens when the one before is done), the
+    /// one-time offer shown this run, a step to send.
+    soloist_dialog: sources::SoloistDialog,
+    soloist_key: String,
+    soloist_flow: bool,
+    soloist_offered: bool,
+    soloist_action: Option<nikgob_view::SoloistAction>,
+    sp_client_id: String,
+    yt_cookies: String,
+    yt_form: bool,
+    /// SoundCloud's pasted token and whether its field is open.
+    sc_token: String,
+    sc_form: bool,
     track_window: (usize, usize),
     /// Tracks waiting for the "В плейлист" picker.
     pending_add: Option<Vec<TrackId>>,
     pending_add_anchor: Option<Rect>,
     /// (playlist name, tracks) to add once the new playlist appears.
     add_after_create: Option<(String, Vec<TrackId>)>,
+    /// Stream tracks waiting for the "В плейлист" picker, and for a new
+    /// playlist to appear.
+    pending_add_stream: Option<Vec<nikgob_view::RemoteId>>,
+    stream_after_create: Option<(String, Vec<nikgob_view::RemoteId>)>,
+}
+
+/// The library as a list (true) or a grid.
+pub(crate) fn set_library_list(ctx: &Context, list: bool) {
+    library::set_list_view(ctx, list);
 }
 
 impl PageState {
+    pub(crate) fn set_library_filter(&mut self, text: &str) {
+        self.library_filter = text.to_owned();
+    }
+
+    /// Opens the "В плейлист" picker for stream tracks.
+    pub(crate) fn add_stream_to_playlist(&mut self, tracks: Vec<nikgob_view::RemoteId>, anchor: Option<Rect>) {
+        self.pending_add_stream = Some(tracks);
+        self.pending_add_anchor = anchor;
+    }
+
+    /// Shows `tab` of «Загрузки» (a route that names one).
+    pub(crate) fn set_downloads_tab(&mut self, tab: nikgob_view::DownloadsTab) {
+        self.downloads_tab = downloads::tab_index(tab);
+    }
+
+    pub(crate) fn unfold_sources(&mut self) {
+        self.yt_form = true;
+    }
+
+    /// The tabs the pages are on.
+    pub(crate) fn tabs(&self) -> Tabs {
+        Tabs { library: self.library_tab, downloads: self.downloads_tab, settings: self.settings_tab }
+    }
+
+    /// Back on `tabs` (a step of the history).
+    pub(crate) fn set_tabs(&mut self, tabs: Tabs) {
+        if tabs.library != self.library_tab {
+            self.reopen_library_tab = true;
+        }
+        self.library_tab = tabs.library;
+        self.downloads_tab = tabs.downloads;
+        self.settings_tab = tabs.settings;
+    }
+
+    /// The page of `route` shows from `y` down once it can.
+    pub(crate) fn scroll_to(&mut self, route: Route, y: f32) {
+        // About two seconds for its content to arrive.
+        self.scroll_restore = Some(ScrollRestore { route, y, frames: 120 });
+    }
+
+    /// Where the page waits to be scrolled to (tests).
+    #[cfg(test)]
+    pub(crate) fn scroll_target(&self) -> Option<f32> {
+        self.scroll_restore.as_ref().map(|r| r.y)
+    }
+
     /// Opens Settings at row `id` (its tab, scrolled into view, glowing).
     pub fn open_setting(&mut self, id: SettingId) {
         self.focus_setting = Some(id);
+        self.focus_group = false;
         self.pending_nav = Some(Route::Settings);
+    }
+
+    /// Opens Settings at the group that holds row `id`, scrolled into view
+    /// and briefly tinted, so it is clear which settings these are.
+    pub fn open_setting_group(&mut self, id: SettingId) {
+        self.open_setting(id);
+        self.focus_group = true;
+    }
+
+    /// Goes where a message points ([`nikgob_view::Link`]).
+    pub fn follow(&mut self, link: nikgob_view::Link) {
+        use nikgob_view::{Link, SettingLink};
+        match link {
+            Link::Route(r) => self.pending_nav = Some(r),
+            Link::Setting(s) => self.open_setting(match s {
+                SettingLink::Spotify => SettingId::Spotify,
+                SettingLink::SpotifyPlayback => SettingId::SpotifyPlayback,
+                SettingLink::Youtube => SettingId::YouTube,
+                SettingLink::Torrents => SettingId::Prowlarr,
+                SettingLink::LikeDownload => SettingId::LikeDownload,
+            }),
+        }
     }
 
     /// The "Добавить" FAB menu (§2.1): the rail's FAB turns into a close button
@@ -129,29 +337,20 @@ impl PageState {
         let mut cui = ui.new_child(UiBuilder::new().max_rect(slot).id_salt("add-fab-slot"));
         let picked = menu.show(&mut cui).clicked;
         match picked {
-            Some(0) => {
-                if let Some(files) = rfd::FileDialog::new()
-                    .set_title("Добавить файлы")
-                    .add_filter("Музыка", &["flac", "mp3", "m4a", "aac", "ogg", "opus", "wav", "alac", "aiff"])
-                    .pick_files()
-                {
-                    out.push(Command::ImportFiles(files));
-                }
-            }
-            Some(1) => {
-                if let Some(dir) = rfd::FileDialog::new().set_title("Добавить папку").pick_folder() {
-                    out.push(Command::ImportFolder(dir));
-                }
-            }
-            Some(2) => {
-                if let Some(f) = rfd::FileDialog::new()
-                    .set_title("Открыть .torrent")
-                    .add_filter("Торрент", &["torrent"])
-                    .pick_file()
-                {
-                    out.push(Command::AddTorrentFile(f));
-                }
-            }
+            Some(0) => dialogs::files(
+                |d| {
+                    d.set_title("Добавить файлы")
+                        .add_filter("Музыка", &["flac", "mp3", "m4a", "aac", "ogg", "opus", "wav", "alac", "aiff"])
+                },
+                Command::ImportFiles,
+                out,
+            ),
+            Some(1) => dialogs::folder(|d| d.set_title("Добавить папку"), Command::ImportFolder, out),
+            Some(2) => dialogs::file(
+                |d| d.set_title("Открыть .torrent").add_filter("Торрент", &["torrent"]),
+                Command::AddTorrentFile,
+                out,
+            ),
             Some(3) => self.open_ask(Ask::Magnet),
             Some(4) => self.open_ask(Ask::NewPlaylist { then_add: Vec::new() }),
             _ => {}
@@ -166,41 +365,111 @@ impl PageState {
     /// The track menu, keyed by its anchor: the ⋮ menu and the right-click
     /// menu of one row (or the same track in two lists) must not share an id,
     /// or each closes the other and both draw the same widgets.
-    fn track_menu_items(anchor: egui::Id, track: &TrackRow) -> Menu {
+    fn track_menu_items(anchor: egui::Id, track: &TrackRow, marks: &nikgob_view::DislikesView, info: bool) -> Menu {
+        // A file: its tags and a better copy; no file: download it (no
+        // like) or look for a release by hand.
+        let (fetch, fetch_icon) = if track.has_local {
+            ("Редактировать теги…", Icon::Edit)
+        } else {
+            ("Скачать", Icon::Download)
+        };
         let mut m = Menu::new(("track-menu", anchor))
             .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
             .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
             .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
+            .item(MenuItem::new(RADIO_BY_TRACK).icon(Icon::Radio))
+            .item(dislike_item(marks.track(track.id)))
+            .item(ban_item(track.artist_id(), marks))
             .divider()
             .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()))
-            .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(track.artist_id.is_some()))
-            .item(MenuItem::new("Источник и качество").icon(Icon::Info))
-            .item(MenuItem::new("Редактировать теги…").icon(Icon::Edit).enabled(track.has_local))
+            .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()));
+        // «Источник и качество» opens a part of the side pane, off by default.
+        if info {
+            m = m.item(MenuItem::new("Источник и качество").icon(Icon::Info));
+        }
+        m = m
+            .item(MenuItem::new("Поделиться").icon(Icon::Share))
+            .item(MenuItem::new(fetch).icon(fetch_icon))
+            .item(MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(track.release_id.is_some()))
+            .item(MenuItem::new(if track.has_local { "Найти качество лучше…" } else { "Искать раздачу…" }).icon(Icon::Search));
+        // A clip: its song by hand; a stream from YouTube: another version.
+        if let Some(find) = super::find_song::label(track) {
+            m = m.item(MenuItem::new(find).icon(Icon::MusicNote));
+        }
+        m = m
             .divider()
             .item(MenuItem::new("Удалить из библиотеки").icon(Icon::Delete))
-            .item(MenuItem::new("Удалить навсегда").icon(Icon::Delete));
+            .item(MenuItem::new("Удалить навсегда").icon(Icon::Delete).enabled(track.has_local));
         m = m.align_right(true);
         m
     }
 
     fn track_menu_pick(
         &mut self,
+        ctx: &Context,
         picked: Option<usize>,
         track: &TrackRow,
+        marks: &nikgob_view::DislikesView,
+        info: bool,
         out: &mut Vec<Command>,
     ) -> Option<Route> {
-        match picked? {
+        let find = super::find_song::label(track).is_some();
+        // «Радио по треку», «Не нравится» and «Не рекомендовать
+        // исполнителя» sit after «В плейлист…»; the rest as before them.
+        let picked = match picked? {
+            RADIO_ITEM => {
+                out.push(radio_by_track(track.id));
+                return None;
+            }
+            n if n == RADIO_ITEM + 1 => {
+                out.push(dislike_command(track.id, marks));
+                return None;
+            }
+            n if n == RADIO_ITEM + 2 => {
+                out.extend(track.artist_id().map(|a| ban_command(a, marks)));
+                return None;
+            }
+            n if n > RADIO_ITEM => n - 3,
+            n => n,
+        };
+        // Without «Источник и качество» the items after it move up one.
+        let picked = if !info && picked >= 5 { picked + 1 } else { picked };
+        // The deletes come after the optional «Найти песню…».
+        let picked = match picked {
+            10 if find => {
+                out.push(Command::FindSong { track: track.id, query: None });
+                return None;
+            }
+            n if find && n > 10 => n - 1,
+            n => n,
+        };
+        match picked {
             0 => out.push(Command::PlayNext(vec![track.id])),
             1 => out.push(Command::Enqueue(vec![track.id])),
             2 => {
                 self.pending_add = Some(vec![track.id]);
             }
             3 => return track.release_id.map(Route::Release),
-            4 => return track.artist_id.map(Route::Artist),
+            // Several artists: a chooser.
+            4 => return crate::screens::artist_links::go_to(ctx, crate::screens::artist_links::library(&track.artists)),
             5 => self.open_pane = Some(PaneTab::Info),
-            6 => out.push(Command::OpenTagEditor(track.id)),
-            7 => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
-            8 => self.confirm_purge = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
+            6 => out.push(Command::Share(nikgob_view::ShareTarget::Track(track.id))),
+            7 if track.has_local => out.push(Command::OpenTagEditor(track.id)),
+            7 => out.push(Command::DownloadTracks(vec![track.id])),
+            // The whole album the track is from, the files it lacks.
+            8 => {
+                if let Some(r) = track.release_id {
+                    out.push(Command::DownloadRelease(r));
+                }
+            }
+            9 => out.push(Command::SearchTorrents(format!(
+                "{} {}{}",
+                track.artist,
+                track.album.as_deref().unwrap_or(&track.title),
+                if track.has_local { " FLAC" } else { "" }
+            ))),
+            10 => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
+            11 => self.confirm_purge = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
             _ => {}
         }
         None
@@ -211,11 +480,12 @@ impl PageState {
         &mut self,
         anchor: &Response,
         track: &TrackRow,
-        _state: &ViewState,
+        state: &ViewState,
         out: &mut Vec<Command>,
     ) -> Option<Route> {
-        let picked = Self::track_menu_items(anchor.id, track).attach(anchor);
-        self.track_menu_pick(picked, track, out)
+        let info = state.prefs.pane_info;
+        let picked = Self::track_menu_items(anchor.id, track, &state.dislikes, info).attach(anchor);
+        self.track_menu_pick(&anchor.ctx, picked, track, &state.dislikes, info, out)
     }
 
     /// Right click on a track row.
@@ -223,11 +493,15 @@ impl PageState {
         &mut self,
         row: &Response,
         track: &TrackRow,
-        _state: &ViewState,
+        state: &ViewState,
         out: &mut Vec<Command>,
     ) -> Option<Route> {
-        let picked = Self::track_menu_items(row.id.with("ctx"), track).context_menu(row);
-        self.track_menu_pick(picked, track, out)
+        if Menu::context_idle(row, row.id.with("ctx")) {
+            return None;
+        }
+        let info = state.prefs.pane_info;
+        let picked = Self::track_menu_items(row.id.with("ctx"), track, &state.dislikes, info).context_menu(row);
+        self.track_menu_pick(&row.ctx, picked, track, &state.dislikes, info, out)
     }
 
     /// The ⋮ menu for the playing track (Now Playing header).
@@ -236,11 +510,12 @@ impl PageState {
         _ui: &mut Ui,
         anchor: &Response,
         track: Option<&TrackRow>,
+        marks: &nikgob_view::DislikesView,
         out: &mut Vec<Command>,
     ) {
         if let Some(t) = track {
-            let picked = Self::track_menu_items(anchor.id, t).attach(anchor);
-            if let Some(r) = self.track_menu_pick(picked, t, out) {
+            let picked = Self::track_menu_items(anchor.id, t, marks, true).attach(anchor);
+            if let Some(r) = self.track_menu_pick(&anchor.ctx, picked, t, marks, true, out) {
                 self.pending_nav = Some(r);
             }
         }
@@ -356,7 +631,9 @@ impl PageState {
     }
 
     /// Draws global overlays: the playlist picker, dialogs, snackbars.
-    pub fn overlays(&mut self, ctx: &Context, state: &ViewState, area: Rect, out: &mut Vec<Command>) {
+    /// `snack`: where the snackbars sit, `(area, bottom inset)`.
+    pub fn overlays(&mut self, ctx: &Context, state: &ViewState, area: Rect, snack: (Rect, f32), out: &mut Vec<Command>) {
+        dialogs::drain(ctx, out);
         // Playlist picker.
         if let Some(tracks) = self.pending_add.clone() {
             let mut open = true;
@@ -385,17 +662,54 @@ impl PageState {
             }
         }
 
+        // The same picker for stream tracks. «Любимые» only for one track:
+        // a like of each of many would also download each.
+        if let Some(tracks) = self.pending_add_stream.clone() {
+            let mut open = true;
+            let liked = tracks.len() == 1;
+            let mut menu = Menu::new("playlist-picker-stream");
+            if liked {
+                menu = menu.item(MenuItem::new("Любимые").icon(Icon::Favorite));
+            }
+            let user: Vec<_> = state.library.playlists.iter().filter(|p| !p.pinned).collect();
+            for p in &user {
+                menu = menu.item(MenuItem::new(&p.name).icon(Icon::QueueMusic));
+            }
+            menu = menu.divider().item(MenuItem::new("Новый плейлист…").icon(Icon::Add));
+            let anchor = self
+                .pending_add_anchor
+                .unwrap_or_else(|| Rect::from_center_size(area.center(), egui::vec2(1.0, 1.0)));
+            let picked = menu.popup(ctx, anchor, &mut open).map(|i| if liked { i } else { i + 1 });
+            match picked {
+                Some(0) => out.extend(tracks.into_iter().map(|track| Command::LikeStream { track, on: true })),
+                Some(i) if i <= user.len() => out.push(Command::AddStreamToPlaylist(user[i - 1].id, tracks)),
+                Some(_) => self.open_ask(Ask::NewPlaylistStream(tracks)),
+                None => {}
+            }
+            if picked.is_some() || !open {
+                self.pending_add_stream = None;
+                self.pending_add_anchor = None;
+            }
+        }
+
         // Text input dialogs.
         if let Some(ask) = self.ask.clone() {
             let mut open = true;
             let dialog = match &ask {
-                Ask::NewPlaylist { .. } => TextInputDialog::new("ask-new-playlist", "Новый плейлист", "Название")
+                Ask::NewPlaylist { .. } | Ask::NewPlaylistStream(_) => TextInputDialog::new("ask-new-playlist", "Новый плейлист", "Название")
                     .icon(Icon::PlaylistAdd)
                     .buttons("Создать", "Отмена")
                     .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned())),
                 Ask::RenamePlaylist(_) => TextInputDialog::new("ask-rename", "Переименовать", "Название")
                     .buttons("Сохранить", "Отмена")
                     .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned())),
+                Ask::WishMagnet(_) => TextInputDialog::new("ask-wish-magnet", "Magnet-ссылка", "magnet:?xt=…")
+                    .icon(Icon::Link)
+                    .supporting("Раздача скачается как этот трек из «Хочу скачать».")
+                    .buttons("Скачать", "Отмена")
+                    .validate(|t| {
+                        (!t.trim().starts_with("magnet:")).then(|| "Ссылка должна начинаться с magnet:".to_owned())
+                    }),
                 Ask::Magnet => TextInputDialog::new("ask-magnet", "Magnet-ссылка", "magnet:?xt=…")
                     .icon(Icon::Link)
                     .supporting("Загрузка появится во вкладке «Загрузки».")
@@ -416,6 +730,14 @@ impl PageState {
                         }
                         Ask::RenamePlaylist(id) => out.push(Command::RenamePlaylist(id, text)),
                         Ask::Magnet => out.push(Command::AddMagnet(text)),
+                        Ask::NewPlaylistStream(tracks) => {
+                            out.push(Command::CreatePlaylist(text.clone()));
+                            self.stream_after_create = Some((text, tracks));
+                        }
+                        Ask::WishMagnet(item) => out.push(Command::WishlistAttach {
+                            item,
+                            what: nikgob_view::WishlistAttach::Magnet(text),
+                        }),
                     }
                     self.ask = None;
                 }
@@ -434,13 +756,33 @@ impl PageState {
             out.push(Command::AddToPlaylist(p.id, tracks));
             self.add_after_create = None;
         }
+        if let Some((name, tracks)) = self.stream_after_create.clone()
+            && let Some(p) = state.library.playlists.iter().find(|p| p.name == name && !p.pinned)
+        {
+            out.push(Command::AddStreamToPlaylist(p.id, tracks));
+            self.stream_after_create = None;
+        }
 
         // Delete confirmation.
         if let Some(id) = self.confirm_delete {
             let mut open = true;
+            // A playlist that follows a service: that one stays as it is.
+            let service = state
+                .playlist
+                .as_ref()
+                .filter(|p| p.card.id == id)
+                .and_then(|p| p.sync.as_ref())
+                .map(|l| l.remote.service)
+                // From a card's menu: what the card knows.
+                .or_else(|| state.library.playlists.iter().find(|p| p.id == id).and_then(|p| p.service))
+                .map(|s| s.display_name());
+            let text = match service {
+                Some(s) => format!("Треки останутся в библиотеке, а плейлист в {s} — как был."),
+                None => "Треки останутся в библиотеке.".to_owned(),
+            };
             let r = crate::components::Dialog::new("confirm-delete", "Удалить плейлист?")
                 .icon(Icon::Delete)
-                .supporting("Треки останутся в библиотеке.")
+                .supporting(text)
                 .action("Отмена")
                 .action("Удалить")
                 .show(ctx, &mut open);
@@ -550,7 +892,16 @@ impl PageState {
             None => self.files_done = false,
         }
 
-        // Snackbars.
+        // A row's «Хочу скачать» mark was clicked.
+        if ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new(widgets::OPEN_WISHLIST))).unwrap_or(false) {
+            self.pending_nav = Some(Route::Downloads(nikgob_view::DownloadsTab::Wishlist));
+        }
+
+        // Snackbars: «Уведомления на экране» seconds (0 = until closed).
+        let duration = match state.prefs.toast_s {
+            0 => f64::INFINITY,
+            s => f64::from(s),
+        };
         let items: Vec<SnackbarItem<'_>> = state
             .toasts
             .iter()
@@ -561,20 +912,28 @@ impl PageState {
                     nikgob_view::ToastKind::Working => crate::components::SnackbarKind::Working,
                     nikgob_view::ToastKind::Error => crate::components::SnackbarKind::Error,
                 });
-                match &t.action {
-                    Some((label, _)) => i.action(label),
-                    None => i,
+                let i = if t.long { i.longer(duration) } else { i }.again(t.again);
+                match (&t.action, &t.open) {
+                    (Some((label, _)), _) | (None, Some((label, _))) => i.action(label),
+                    (None, None) => i,
                 }
             })
             .collect();
+        // One at a time (M3): a new one replaces the one up, an undo stays.
         let ev = SnackbarHost::new("toasts")
+            .replacing(true)
+            .max_visible(1)
             .show_close(true)
-            .show(ctx, area, 64.0 + 16.0 + 16.0, &items);
+            .duration(duration)
+            .show(ctx, snack.0, snack.1, &items);
         if let Some(id) = ev.action_clicked
             && let Some(t) = state.toasts.iter().find(|t| t.id == id)
-            && let Some((_, cmd)) = &t.action
         {
-            out.push(cmd.clone());
+            match (&t.action, &t.open) {
+                (Some((_, cmd)), _) => out.push(cmd.clone()),
+                (None, Some((_, link))) => self.follow(link.clone()),
+                (None, None) => {}
+            }
         }
         for id in ev.dismissed {
             out.push(Command::DismissToast(id));
@@ -582,25 +941,32 @@ impl PageState {
     }
 }
 
-pub fn search_bar(ui: &mut Ui, rect: Rect, query: &mut String, focus: &mut bool, out: &mut Vec<Command>) {
+/// The search bar. Returns whether the text changed (the caller sends the
+/// query once typing pauses, see `Md3eUi::flush_search`).
+pub fn search_bar(
+    ui: &mut Ui,
+    rect: Rect,
+    query: &mut String,
+    focus: &mut bool,
+    torrents: bool,
+    out: &mut Vec<Command>,
+) -> bool {
     let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("search-bar"));
     let before = query.clone();
     let o = SearchBar::new("main-search")
-        .placeholder("Поиск: библиотека, Spotify, YouTube…")
+        .placeholder("Поиск")
         .width(rect.width())
         .shortcut(true)
         .show(&mut cui, query);
     if std::mem::take(focus) {
         o.response.request_focus();
     }
-    if *query != before {
-        out.push(Command::Search(query.clone()));
-    }
-    // Enter looks for torrents: Prowlarr is slow, so never on typing.
-    if o.submitted && !query.trim().is_empty() {
+    // Enter looks for torrents (Prowlarr is slow, so never on typing) when
+    // Prowlarr is set up; the chip stays, the results land in «Торренты».
+    if o.submitted && torrents && !query.trim().is_empty() {
         out.push(Command::SearchTorrents(query.trim().to_owned()));
-        search::set_filter(ui.ctx(), search::Filter::Torrents);
     }
+    *query != before
 }
 
 /// The page for `route`, inside a vertical scroll area that leaves room
@@ -615,9 +981,14 @@ pub fn page(
 ) -> Option<Route> {
     let mut nav = None;
     let id = format!("{route:?}");
-    egui::ScrollArea::vertical()
-        .id_salt(("page-scroll", id))
-        .auto_shrink([false, false])
+    // Back where it was: the offset is held until the page is tall enough
+    // for it (a page that loads is short at first).
+    let restore = pages.scroll_restore.as_ref().filter(|r| r.route == *route).map(|r| r.y);
+    let mut area = egui::ScrollArea::vertical().id_salt(("page-scroll", id)).auto_shrink([false, false]);
+    if let Some(y) = restore {
+        area = area.vertical_scroll_offset(y);
+    }
+    let o = area
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
             let r = match route {
@@ -628,10 +999,25 @@ pub fn page(
                 Route::Playlist(id) => detail::playlist(ui, *id, state, pages, out),
                 Route::Downloads(_) => downloads::show(ui, state, pages, out),
                 Route::Settings => settings::show(ui, state, pages, out),
+                Route::Lyrics => crate::screens::lyrics_ui::page::show(ui, state, bottom_inset, out),
+                Route::Stream(page) => streams::page(ui, page, state, pages, out),
+                Route::World(key) => world::show(ui, key, state, pages, out),
+                Route::Mix { key, world } => detail::mix(ui, *key, world.as_deref(), state, pages, out),
+                Route::NewReleases => home::new_releases(ui, state, pages, out),
             };
             nav = r.or(nav.take());
             ui.add_space(bottom_inset);
         });
+    pages.scroll_now = o.state.offset.y;
+    if let (Some(y), Some(r)) = (restore, pages.scroll_restore.as_mut()) {
+        let reachable = (o.content_size.y - o.inner_rect.height()).max(0.0) + 0.5 >= y;
+        r.frames = r.frames.saturating_sub(1);
+        if reachable || r.frames == 0 {
+            pages.scroll_restore = None;
+        } else {
+            ui.ctx().request_repaint();
+        }
+    }
     nav
 }
 

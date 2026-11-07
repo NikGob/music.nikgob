@@ -33,6 +33,15 @@ pub enum Leading {
     Avatar(Option<String>, Icon),
     /// A 56x56 image with radius 8.
     Image(Option<String>, Icon),
+    /// A 40 dp avatar in a Material shape: the photo (URI), or the initials
+    /// on `fill` in `on`.
+    Shape {
+        uri: Option<String>,
+        initials: String,
+        shape: nikgob_shapes::MaterialShape,
+        fill: Color32,
+        on: Color32,
+    },
     /// A fixed-width column with text (track number).
     Number(String),
 }
@@ -42,7 +51,7 @@ impl Leading {
         match self {
             Self::None => 0.0,
             Self::Icon(_) => 24.0,
-            Self::Avatar(..) => 40.0,
+            Self::Avatar(..) | Self::Shape { .. } => 40.0,
             Self::Image(..) => 56.0,
             Self::Number(_) => 28.0,
         }
@@ -87,6 +96,12 @@ pub struct ListItemOutput {
     /// The drag handle's response (drag it to reorder), if the item has one.
     pub handle: Option<Response>,
     pub rect: Rect,
+    /// The ▶ over the leading image / number was clicked
+    /// ([`ListItem::hover_play`]): play from this row with one click.
+    pub play_clicked: bool,
+    /// The link of the supporting text clicked this frame
+    /// ([`ListItem::supporting_links`]), by index.
+    pub link_clicked: Option<usize>,
 }
 
 type TrailingFn<'a> = Box<dyn FnOnce(&mut Ui) + 'a>;
@@ -96,6 +111,7 @@ type TrailingFn<'a> = Box<dyn FnOnce(&mut Ui) + 'a>;
 pub struct ListItem<'a> {
     headline: String,
     supporting: Option<String>,
+    supporting_links: Vec<std::ops::Range<usize>>,
     supporting_lines: usize,
     leading: Leading,
     trailing_text: Option<String>,
@@ -108,6 +124,7 @@ pub struct ListItem<'a> {
     fill: Option<Color32>,
     radii: Option<Radii>,
     min_height: Option<f32>,
+    hover_play: bool,
     id_salt: Option<Id>,
 }
 
@@ -116,6 +133,7 @@ impl<'a> ListItem<'a> {
         Self {
             headline: headline.into(),
             supporting: None,
+            supporting_links: Vec::new(),
             supporting_lines: 1,
             leading: Leading::None,
             trailing_text: None,
@@ -128,13 +146,29 @@ impl<'a> ListItem<'a> {
             fill: None,
             radii: None,
             min_height: None,
+            hover_play: false,
             id_salt: None,
         }
+    }
+
+    /// With the pointer on the row, the leading image or number turns
+    /// into ▶, which plays with one click ([`ListItemOutput::play_clicked`]).
+    pub fn hover_play(mut self, on: bool) -> Self {
+        self.hover_play = on;
+        self
     }
 
     /// A second line (72 dp row).
     pub fn supporting(mut self, text: impl Into<String>) -> Self {
         self.supporting = Some(text.into());
+        self
+    }
+
+    /// Parts of the supporting text (byte ranges) that are links of their
+    /// own, e.g. each artist of "A, B · альбом": hover underlines one,
+    /// a click is [`ListItemOutput::link_clicked`] instead of the row's.
+    pub fn supporting_links(mut self, links: Vec<std::ops::Range<usize>>) -> Self {
+        self.supporting_links = links;
         self
     }
 
@@ -266,6 +300,28 @@ impl<'a> ListItem<'a> {
             .then(|| ui.interact(handle_rect, id.with("handle"), Sense::drag()));
         let handle_active = handle.as_ref().is_some_and(|h| h.dragged());
 
+        // The one-click ▶ over the leading part (registered after the row,
+        // so it takes the click there).
+        let lead_x = rect.left() + SIDE;
+        let lead_rect = match &self.leading {
+            Leading::Image(..) => Some(Rect::from_center_size(pos2(lead_x + 28.0, rect.center().y), vec2(56.0, 56.0))),
+            Leading::Number(_) => Some(Rect::from_center_size(pos2(lead_x + 14.0, rect.center().y), vec2(40.0, 40.0))),
+            Leading::Avatar(..) | Leading::Shape { .. } => {
+                Some(Rect::from_center_size(pos2(lead_x + 20.0, rect.center().y), vec2(40.0, 40.0)))
+            }
+            _ => None,
+        };
+        let lead = lead_rect
+            .filter(|_| self.hover_play && self.enabled)
+            .map(|r| ui.interact(r, id.with("lead-play"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand));
+        // The pointer on a link of the supporting text is on the row too
+        // (last frame's answer: the links are laid out with the text).
+        let link_hover_key = id.with("link-hover");
+        let link_hover = ctx.data(|d| d.get_temp::<bool>(link_hover_key)).unwrap_or(false);
+        let show_play = lead.as_ref().is_some_and(|l| l.hovered() || response.hovered() || link_hover);
+        let mut link_clicked = None;
+        let mut link_hover_now = false;
+
         // Trailing widgets: measured last frame, laid out at the end.
         let handle_w = if self.drag_handle { HANDLE_SLOT } else { 0.0 };
         let trailing_right =
@@ -322,12 +378,11 @@ impl<'a> ListItem<'a> {
             )
             .clamped(rect);
             paint::container(ui.painter(), rect, radii, fill, egui::Stroke::NONE);
-            let layer = anim::fraction(
-                &ctx,
-                id.with("layer"),
-                common::state_target(&response, self.enabled, self.dragging || handle_active),
-                motion.fast_effects,
-            );
+            let mut target = common::state_target(&response, self.enabled, self.dragging || handle_active);
+            if target == 0.0 && link_hover && self.enabled {
+                target = state::HOVER;
+            }
+            let layer = anim::fraction(&ctx, id.with("layer"), target, motion.fast_effects);
             let layer_color = if selected {
                 s.on_secondary_container
             } else {
@@ -361,25 +416,48 @@ impl<'a> ListItem<'a> {
                         *icon,
                     );
                 }
+                Leading::Shape { uri, initials, shape, fill, on } => {
+                    let r = Rect::from_center_size(pos2(x + 20.0, lead_cy), vec2(40.0, 40.0));
+                    common::paint_shape_avatar(ui, r, uri.as_deref(), initials, *shape, *fill, *on);
+                    if show_play {
+                        let pressed = lead.as_ref().is_some_and(Response::is_pointer_button_down_on);
+                        let d = if pressed { 30.0 } else { 32.0 };
+                        ui.painter().circle_filled(r.center(), d * 0.5, s.primary);
+                        Icon::PlayArrow
+                            .widget(true, s.on_primary, 20.0)
+                            .paint_at(ui, Rect::from_center_size(r.center(), vec2(20.0, 20.0)));
+                    }
+                }
                 Leading::Image(uri, icon) => {
-                    common::paint_image(
-                        ui,
-                        Rect::from_center_size(pos2(x + 28.0, rect.center().y), vec2(56.0, 56.0)),
-                        uri.as_deref(),
-                        CornerRadius::same(shape::SMALL as u8),
-                        *icon,
-                    );
+                    let r = Rect::from_center_size(pos2(x + 28.0, rect.center().y), vec2(56.0, 56.0));
+                    common::paint_image(ui, r, uri.as_deref(), CornerRadius::same(shape::SMALL as u8), *icon);
+                    if show_play {
+                        // The card's play button, small: a filled disc.
+                        let pressed = lead.as_ref().is_some_and(Response::is_pointer_button_down_on);
+                        let d = if pressed { 30.0 } else { 32.0 };
+                        ui.painter().circle_filled(r.center(), d * 0.5, s.primary);
+                        Icon::PlayArrow
+                            .widget(true, s.on_primary, 20.0)
+                            .paint_at(ui, Rect::from_center_size(r.center(), vec2(20.0, 20.0)));
+                    }
                 }
                 Leading::Number(n) => {
-                    let g = common::line(ui.painter(), n, TypeRole::BodyLarge.style(), variant, lw);
-                    ui.painter().galley(
-                        pos2(
-                            x + (lw - g.size().x).max(0.0) * 0.5,
-                            rect.center().y - g.size().y * 0.5,
-                        ),
-                        g,
-                        variant,
-                    );
+                    if show_play {
+                        Icon::PlayArrow.widget(true, variant, 24.0).paint_at(
+                            ui,
+                            Rect::from_center_size(pos2(x + lw * 0.5, rect.center().y), vec2(24.0, 24.0)),
+                        );
+                    } else {
+                        let g = common::line(ui.painter(), n, TypeRole::BodyLarge.style(), variant, lw);
+                        ui.painter().galley(
+                            pos2(
+                                x + (lw - g.size().x).max(0.0) * 0.5,
+                                rect.center().y - g.size().y * 0.5,
+                            ),
+                            g,
+                            variant,
+                        );
+                    }
                 }
             }
             if lw > 0.0 {
@@ -421,17 +499,21 @@ impl<'a> ListItem<'a> {
             ui.painter().galley(pos2(x, y), head, content);
             y += 24.0;
             if let Some(sup) = &self.supporting {
-                let mut job = LayoutJob::single_section(
-                    sup.clone(),
-                    TypeRole::BodyMedium.style().text_format(variant),
-                );
+                let format = TypeRole::BodyMedium.style().text_format(variant);
+                // Centred in its 20 like the headline in its 24.
+                let y = y + crate::typography::para_shift(ui.ctx(), &format);
+                let mut job = LayoutJob::single_section(sup.clone(), format);
                 job.wrap = TextWrapping {
                     max_width: text_w,
                     max_rows: n_support.max(1),
                     break_anywhere: n_support <= 1,
                     ..TextWrapping::default()
                 };
-                let g = ui.painter().layout_job(job);
+                let g = crate::typography::layout(ui.painter(), job);
+                if self.enabled {
+                    (link_clicked, link_hover_now) =
+                        super::links::interact_links(ui, id, &g, pos2(x, y), &self.supporting_links, variant);
+                }
                 ui.painter().galley(pos2(x, y), g, variant);
             }
 
@@ -460,6 +542,9 @@ impl<'a> ListItem<'a> {
             }
         }
 
+        if link_hover_now != link_hover {
+            ctx.data_mut(|d| d.insert_temp(link_hover_key, link_hover_now));
+        }
         let label = self.headline.clone();
         let (enabled, sel) = (self.enabled, selected);
         response.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, sel, &label));
@@ -467,6 +552,8 @@ impl<'a> ListItem<'a> {
             response,
             handle,
             rect,
+            play_clicked: lead.as_ref().is_some_and(|l| l.clicked() && !l.double_clicked()),
+            link_clicked,
         }
     }
 }

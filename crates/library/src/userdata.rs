@@ -7,7 +7,23 @@
 //! * `playlists.json` - playlists with their entries, tombstones included;
 //! * `likes.json` - the LWW like set, tombstones included;
 //! * `events.jsonl` - one event per line, oldest first (append-friendly: tools
-//!   may append lines, import ignores ids it already has).
+//!   may append lines, import ignores ids it already has);
+//! * `streams.json` - the stream-only tracks the likes, playlists and marks
+//!   of `saved.json` point at (no file to rebuild them from): their ids and
+//!   their remote ids and metadata per service, so an import recreates them
+//!   under the same ids. Written only once there is something to write.
+//! * `saved.json` - the marks of songs saved in a service's library
+//!   («медиатека»: the service, the song's id there, its track). Marks only
+//!   come, so an import adds the ones it lacks. Written only once there is
+//!   something to write.
+//! * `rec_feedback.json` - «Не рекомендовать» marks (tracks, artists and the
+//!   songs and artists of the services), cleared ones included; merged by
+//!   their time like likes. Written only once there is something to write.
+//!
+//! * `fingerprint.json` - [`Library::userdata_fingerprint`] of the database
+//!   the files were written from, written last: a database that no longer
+//!   matches it (a backup put back) is exported again
+//!   ([`Library::userdata_export_stale`]). Never imported.
 //!
 //! Every file is written to a temp file and renamed into place. Import merges
 //! with last-writer-wins per row: the copy with the larger `updated_at` wins;
@@ -19,7 +35,8 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
-use nikgob_core::model::{Event, Like, Playlist, PlaylistEntry, Uuid};
+use nikgob_core::model::{Event, Like, Playlist, PlaylistEntry, TrackId, Uuid};
+use nikgob_core::streaming::StreamTrack;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +44,8 @@ use crate::db::Library;
 use crate::error::{LibraryError, Result};
 use crate::events::insert_event;
 use crate::playlists::{ENTRY_COLS, PLAYLIST_COLS, entry_from_row, playlist_from_row};
-use crate::types::{ExportReport, ImportReport};
+use crate::streams::{put_saved_mark_in, refresh_in_library_all, saved_marks_in, stream_refs_in, upsert_stream_track_in};
+use crate::types::{ExportReport, ImportReport, RecFeedback};
 use crate::util::{meta_get, meta_set};
 
 /// Format version written into the JSON files.
@@ -36,6 +54,10 @@ pub const USERDATA_VERSION: u32 = 1;
 pub const PLAYLISTS_FILE: &str = "playlists.json";
 pub const LIKES_FILE: &str = "likes.json";
 pub const EVENTS_FILE: &str = "events.jsonl";
+pub const STREAMS_FILE: &str = "streams.json";
+pub const REC_FEEDBACK_FILE: &str = "rec_feedback.json";
+pub const SAVED_FILE: &str = "saved.json";
+pub const FINGERPRINT_FILE: &str = "fingerprint.json";
 
 #[derive(Serialize, Deserialize)]
 struct PlaylistsFile {
@@ -49,6 +71,45 @@ struct PlaylistDoc {
     playlist: Playlist,
     #[serde(default)]
     entries: Vec<PlaylistEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StreamsFile {
+    version: u32,
+    tracks: Vec<StreamDoc>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StreamDoc {
+    track_id: TrackId,
+    /// One per service the track streams from.
+    refs: Vec<StreamTrack>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RecFeedbackFile {
+    version: u32,
+    feedback: Vec<RecFeedback>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedFile {
+    version: u32,
+    saved: Vec<SavedDoc>,
+}
+
+/// A song saved in a service's library and its track.
+#[derive(Serialize, Deserialize)]
+struct SavedDoc {
+    service: String,
+    id: String,
+    track_id: TrackId,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FingerprintFile {
+    version: u32,
+    fingerprint: Vec<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -107,10 +168,69 @@ fn events_marker_key(dir: &Path) -> String {
     format!("events_export_count:{}", dir.display())
 }
 
+/// Where the last export of `events.jsonl` ended: how many events it held,
+/// the last one written (by `ts, id`) and the file's length then.
+struct EventsMark {
+    count: u64,
+    last: (i64, String),
+    len: u64,
+}
+
+impl EventsMark {
+    fn parse(s: &str) -> Option<Self> {
+        let mut it = s.splitn(4, '|');
+        let count = it.next()?.parse().ok()?;
+        let ts = it.next()?.parse().ok()?;
+        let id = it.next()?.to_owned();
+        let len = it.next()?.parse().ok()?;
+        Some(Self { count, last: (ts, id), len })
+    }
+
+    fn encode(&self) -> String {
+        format!("{}|{}|{}|{}", self.count, self.last.0, self.last.1, self.len)
+    }
+}
+
+/// `events.jsonl` brought up to date with the database: left alone when the
+/// last export holds every event, the newer events appended when only newer
+/// ones came (the usual case: plays since the last export), else written
+/// anew (events older than the last one written, removed ones, a file
+/// changed by someone else). The new mark, when the file changed.
+fn export_events(
+    c: &Connection,
+    path: &Path,
+    mark: Option<EventsMark>,
+    count: u64,
+) -> Result<Option<EventsMark>> {
+    let len = fs::metadata(path).ok().map(|m| m.len());
+    if let Some(m) = mark.filter(|m| len == Some(m.len) && m.count <= count) {
+        if m.count == count {
+            return Ok(None);
+        }
+        let mut newer = Vec::new();
+        let (n, last) = write_events(c, &mut newer, Some((m.last.0, &m.last.1)))?;
+        if m.count + n == count {
+            let mut f = fs::OpenOptions::new().append(true).open(path)?;
+            f.write_all(&newer)?;
+            f.sync_all()?;
+            let last = last.unwrap_or(m.last);
+            return Ok(Some(EventsMark { count, last, len: m.len + newer.len() as u64 }));
+        }
+    }
+    let mut last = None;
+    atomic_with(path, |w| {
+        last = write_events(c, w, None)?.1;
+        Ok(())
+    })?;
+    let len = fs::metadata(path)?.len();
+    Ok(Some(EventsMark { count, last: last.unwrap_or((i64::MIN, String::new())), len }))
+}
+
 impl Library {
     /// Writes `playlists.json`, `likes.json` and `events.jsonl` into `dir`
     /// (created if missing). Files whose content did not change are left
-    /// untouched; events are only rewritten when the event count changed.
+    /// untouched; new events are appended to `events.jsonl` (see
+    /// [`export_events`]).
     pub fn export_userdata(&self, dir: impl AsRef<Path>) -> Result<ExportReport> {
         let dir = dir.as_ref();
         fs::create_dir_all(dir)?;
@@ -118,18 +238,18 @@ impl Library {
         let events_path = dir.join(EVENTS_FILE);
 
         // One snapshot for everything.
-        let (playlists, likes, events_done, event_count) = self.read(|c| {
+        let (playlists, likes, streams, feedback, saved, fingerprint, events_mark, event_count) = self.read(|c| {
             let playlists = read_playlists(c)?;
             let likes = read_likes(c)?;
+            let streams = read_streams(c)?;
+            let feedback = read_feedback(c)?;
+            let saved = read_saved(c)?;
+            let fingerprint = fingerprint_in(c)?;
             let event_count: u64 =
                 c.query_row("SELECT COUNT(*) FROM event", [], |r| r.get::<_, i64>(0))? as u64;
-            let up_to_date = events_path.exists()
-                && meta_get(c, &marker_key)?.and_then(|v| v.parse::<u64>().ok())
-                    == Some(event_count);
-            if !up_to_date {
-                atomic_with(&events_path, |w| write_events(c, w))?;
-            }
-            Ok((playlists, likes, up_to_date, event_count))
+            let mark = meta_get(c, &marker_key)?.as_deref().and_then(EventsMark::parse);
+            let mark = export_events(c, &events_path, mark, event_count)?;
+            Ok((playlists, likes, streams, feedback, saved, fingerprint, mark, event_count))
         })?;
 
         let mut report = ExportReport {
@@ -137,8 +257,35 @@ impl Library {
             playlist_entries: playlists.iter().map(|p| p.entries.len()).sum(),
             likes: likes.len(),
             events: event_count as usize,
-            files_written: usize::from(!events_done),
+            stream_tracks: streams.len(),
+            rec_feedback: feedback.len(),
+            saved: saved.len(),
+            files_written: usize::from(events_mark.is_some()),
         };
+        let saved_path = dir.join(SAVED_FILE);
+        if !saved.is_empty() || saved_path.exists() {
+            let json = serde_json::to_vec_pretty(&SavedFile {
+                version: USERDATA_VERSION,
+                saved,
+            })?;
+            report.files_written += usize::from(write_atomic(&saved_path, &json)?);
+        }
+        let feedback_path = dir.join(REC_FEEDBACK_FILE);
+        if !feedback.is_empty() || feedback_path.exists() {
+            let json = serde_json::to_vec_pretty(&RecFeedbackFile {
+                version: USERDATA_VERSION,
+                feedback,
+            })?;
+            report.files_written += usize::from(write_atomic(&feedback_path, &json)?);
+        }
+        let streams_path = dir.join(STREAMS_FILE);
+        if !streams.is_empty() || streams_path.exists() {
+            let json = serde_json::to_vec_pretty(&StreamsFile {
+                version: USERDATA_VERSION,
+                tracks: streams,
+            })?;
+            report.files_written += usize::from(write_atomic(&streams_path, &json)?);
+        }
 
         let playlists_json = serde_json::to_vec_pretty(&PlaylistsFile {
             version: USERDATA_VERSION,
@@ -152,10 +299,38 @@ impl Library {
             usize::from(write_atomic(&dir.join(PLAYLISTS_FILE), &playlists_json)?);
         report.files_written += usize::from(write_atomic(&dir.join(LIKES_FILE), &likes_json)?);
 
-        if !events_done {
-            self.write(|tx| meta_set(tx, &marker_key, &event_count.to_string()))?;
+        if let Some(mark) = events_mark {
+            self.write(|tx| meta_set(tx, &marker_key, &mark.encode()))?;
         }
+        let json = serde_json::to_vec(&FingerprintFile {
+            version: USERDATA_VERSION,
+            fingerprint,
+        })?;
+        write_atomic(&dir.join(FINGERPRINT_FILE), &json)?;
         Ok(report)
+    }
+
+    /// The export in `dir` holds what the database held at some other time
+    /// (a backup put back since, an export of an older build): its
+    /// fingerprint is not this database's. A folder without an export is
+    /// not stale.
+    pub fn userdata_export_stale(&self, dir: impl AsRef<Path>) -> Result<bool> {
+        let dir = dir.as_ref();
+        if !dir.join(PLAYLISTS_FILE).exists() {
+            return Ok(false);
+        }
+        let kept: Option<FingerprintFile> = read_json(&dir.join(FINGERPRINT_FILE)).unwrap_or(None);
+        let now = self.userdata_fingerprint()?;
+        Ok(kept.is_none_or(|k| k.fingerprint != now))
+    }
+
+    /// A cheap fingerprint of what [`Library::export_userdata`] writes: the
+    /// same as at the last export means there is nothing new to write
+    /// (playlists, entries, likes and feedback are stamped on every change,
+    /// a tombstone included; events only come; stream tracks come with
+    /// their sources).
+    pub fn userdata_fingerprint(&self) -> Result<Vec<i64>> {
+        self.read(fingerprint_in)
     }
 
     /// Merges the files found in `dir` into the database (missing files are
@@ -165,9 +340,15 @@ impl Library {
 
         let playlists: Option<PlaylistsFile> = read_json(&dir.join(PLAYLISTS_FILE))?;
         let likes: Option<LikesFile> = read_json(&dir.join(LIKES_FILE))?;
+        let streams: Option<StreamsFile> = read_json(&dir.join(STREAMS_FILE))?;
+        let feedback: Option<RecFeedbackFile> = read_json(&dir.join(REC_FEEDBACK_FILE))?;
+        let saved: Option<SavedFile> = read_json(&dir.join(SAVED_FILE))?;
         for version in [
             playlists.as_ref().map(|f| f.version),
             likes.as_ref().map(|f| f.version),
+            streams.as_ref().map(|f| f.version),
+            feedback.as_ref().map(|f| f.version),
+            saved.as_ref().map(|f| f.version),
         ]
         .into_iter()
         .flatten()
@@ -201,6 +382,12 @@ impl Library {
                 invalid_lines,
                 ..ImportReport::default()
             };
+            for doc in streams.iter().flat_map(|f| &f.tracks) {
+                for r in &doc.refs {
+                    upsert_stream_track_in(tx, r, Some(doc.track_id))?;
+                }
+                report.stream_tracks += 1;
+            }
             for doc in playlists.iter().flat_map(|f| &f.playlists) {
                 merge_playlist(tx, &doc.playlist, &mut report)?;
                 for entry in &doc.entries {
@@ -210,11 +397,21 @@ impl Library {
             for like in likes.iter().flat_map(|f| &f.likes) {
                 merge_like(tx, like, &mut report)?;
             }
+            for f in feedback.iter().flat_map(|f| &f.feedback) {
+                merge_feedback(tx, f, &mut report)?;
+            }
+            for s in saved.iter().flat_map(|f| &f.saved) {
+                if put_saved_mark_in(tx, &s.service, &s.id, &s.track_id.to_string())? {
+                    report.saved += 1;
+                }
+            }
             for event in &events {
                 if insert_event(tx, event)? {
                     report.events_added += 1;
                 }
             }
+            // Likes and entries came in: stream tracks may join or leave.
+            refresh_in_library_all(tx)?;
             Ok(report)
         })
     }
@@ -229,11 +426,11 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 }
 
 fn read_playlists(conn: &Connection) -> Result<Vec<PlaylistDoc>> {
-    let mut stmt = conn.prepare(&format!("SELECT {PLAYLIST_COLS} FROM playlist ORDER BY id"))?;
+    let mut stmt = conn.prepare_cached(&format!("SELECT {PLAYLIST_COLS} FROM playlist ORDER BY id"))?;
     let playlists = stmt
         .query_map([], playlist_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut entries_stmt = conn.prepare(&format!(
+    let mut entries_stmt = conn.prepare_cached(&format!(
         "SELECT {ENTRY_COLS} FROM playlist_entry WHERE playlist_id = ?1 ORDER BY position, id"
     ))?;
     playlists
@@ -247,8 +444,63 @@ fn read_playlists(conn: &Connection) -> Result<Vec<PlaylistDoc>> {
         .collect()
 }
 
+/// See [`Library::userdata_fingerprint`].
+fn fingerprint_in(c: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = c.prepare_cached(
+        "SELECT (SELECT COUNT(*) FROM playlist), (SELECT COALESCE(SUM(updated_at), 0) FROM playlist),
+                (SELECT COUNT(*) FROM playlist_entry),
+                (SELECT COALESCE(SUM(updated_at), 0) FROM playlist_entry),
+                (SELECT COUNT(*) FROM likes), (SELECT COALESCE(SUM(updated_at), 0) FROM likes),
+                (SELECT COUNT(*) FROM rec_feedback),
+                (SELECT COALESCE(SUM(updated_at + dislike), 0) FROM rec_feedback),
+                (SELECT COUNT(*) FROM event), (SELECT COALESCE(MAX(ts), 0) FROM event),
+                (SELECT COUNT(*) FROM track), (SELECT COUNT(*) FROM source),
+                (SELECT COUNT(*) FROM external_id WHERE service = 'saved')",
+    )?;
+    Ok(stmt.query_row([], |r| (0..13).map(|i| r.get(i)).collect())?)
+}
+
+fn read_saved(conn: &Connection) -> Result<Vec<SavedDoc>> {
+    saved_marks_in(conn)?
+        .into_iter()
+        .map(|(service, id, track)| Ok(SavedDoc { service, id, track_id: crate::streams::parse(&track)? }))
+        .collect()
+}
+
+/// Stream-only tracks (no local source row) that a live like, a live
+/// playlist entry or a mark of a song saved in a service's library points
+/// at.
+fn read_streams(conn: &Connection) -> Result<Vec<StreamDoc>> {
+    let ids: Vec<TrackId> = {
+        let mut stmt = conn.prepare_cached(
+            "SELECT t.id FROM track t
+              WHERE NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id
+                                   AND s.kind = 'local_file')
+                AND EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id
+                               AND s.kind != 'local_file' AND s.trashed_at IS NULL)
+                AND (EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track'
+                                AND l.target_id = t.id AND l.deleted = 0)
+                     OR EXISTS (SELECT 1 FROM playlist_entry e WHERE e.track_id = t.id
+                                   AND e.deleted = 0)
+                     OR EXISTS (SELECT 1 FROM external_id x WHERE x.service = 'saved'
+                                   AND x.kind = 'track' AND x.local_id = t.id))
+              ORDER BY t.id",
+        )?;
+        let rows = stmt.query_map([], |r| crate::util::get_id(r, 0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut out = Vec::new();
+    for track_id in ids {
+        let refs = stream_refs_in(conn, track_id)?;
+        if !refs.is_empty() {
+            out.push(StreamDoc { track_id, refs });
+        }
+    }
+    Ok(out)
+}
+
 fn read_likes(conn: &Connection) -> Result<Vec<Like>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT target_kind, target_id, updated_at, updated_by, deleted FROM likes
           ORDER BY target_kind, target_id",
     )?;
@@ -273,23 +525,65 @@ fn read_likes(conn: &Connection) -> Result<Vec<Like>> {
     Ok(out)
 }
 
-fn write_events(conn: &Connection, w: &mut BufWriter<File>) -> io::Result<()> {
-    let to_io = |e: rusqlite::Error| io::Error::other(e);
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, ts, track_id, source_kind, type, position_ms, context, device
-               FROM event ORDER BY ts, id",
-        )
-        .map_err(to_io)?;
-    let rows = stmt
-        .query_map([], crate::events::event_from_row)
-        .map_err(to_io)?;
-    for row in rows {
-        let event = row.map_err(to_io)?;
-        serde_json::to_writer(&mut *w, &event).map_err(io::Error::other)?;
-        w.write_all(b"\n")?;
+fn read_feedback(conn: &Connection) -> Result<Vec<RecFeedback>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT target_kind, target_id, dislike, updated_at FROM rec_feedback
+          ORDER BY target_kind, target_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(RecFeedback {
+            target_kind: r.get(0)?,
+            target_id: r.get(1)?,
+            dislike: r.get(2)?,
+            updated_at: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The later mark wins (the stored one on a tie).
+fn merge_feedback(conn: &Connection, f: &RecFeedback, report: &mut ImportReport) -> Result<()> {
+    let n = conn.execute(
+        "INSERT INTO rec_feedback(target_kind, target_id, dislike, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(target_kind, target_id) DO UPDATE SET dislike = excluded.dislike,
+            updated_at = excluded.updated_at
+          WHERE excluded.updated_at > rec_feedback.updated_at",
+        params![f.target_kind, f.target_id, f.dislike, f.updated_at],
+    )?;
+    if n > 0 {
+        report.applied += 1;
+    } else {
+        report.skipped += 1;
     }
     Ok(())
+}
+
+/// Writes the events (all, or those after `after` by `ts, id`) one per line,
+/// oldest first; how many, and the last one's `ts, id`.
+fn write_events(
+    conn: &Connection,
+    w: &mut impl Write,
+    after: Option<(i64, &str)>,
+) -> io::Result<(u64, Option<(i64, String)>)> {
+    let to_io = |e: rusqlite::Error| io::Error::other(e);
+    let mut stmt = conn
+        .prepare_cached(&format!(
+            "SELECT {} FROM event WHERE ?1 IS NULL OR ts > ?1 OR (ts = ?1 AND id > ?2) ORDER BY ts, id",
+            crate::events::EVENT_COLS
+        ))
+        .map_err(to_io)?;
+    let rows = stmt
+        .query_map(params![after.map(|a| a.0), after.map_or("", |a| a.1)], crate::events::event_from_row)
+        .map_err(to_io)?;
+    let (mut n, mut last) = (0, None);
+    for row in rows {
+        let event: Event = row.map_err(to_io)?;
+        serde_json::to_writer(&mut *w, &event).map_err(io::Error::other)?;
+        w.write_all(b"\n")?;
+        n += 1;
+        last = Some((event.ts, event.id.to_string()));
+    }
+    Ok((n, last))
 }
 
 fn merge_playlist(conn: &Connection, p: &Playlist, report: &mut ImportReport) -> Result<()> {

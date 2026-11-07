@@ -1,0 +1,29 @@
+[package]
+name = "nikgob-youtube"
+description = "YouTube Music streaming service (RustyPipe): catalog, account data, audio streams, saving audio as Ogg Opus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fastrand = "2"
+nikgob-core.workspace = true
+log.workspace = true
+# GPL-3.0. `userdata`: liked tracks, saved playlists, history.
+rustypipe = { version = "0.11.4", features = ["userdata"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+reqwest = { version = "0.12", default-features = false }
+ogg = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = "0.3"
+
+[dev-dependencies]
+nikgob-audio = { path = "../audio" }
+env_logger.workspace = true
+tempfile = "3"
+
+[lints]
+workspace = true

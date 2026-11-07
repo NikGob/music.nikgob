@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use egui::{Color32, Rect, Stroke, Ui, vec2};
-use nikgob_view::{Cover, SourceKind};
+use nikgob_view::Cover;
 
 use crate::{
     Icon, Theme,
@@ -68,21 +68,6 @@ pub fn cover(ui: &Ui, cover: Option<&Cover>, rect: Rect, radius: f32) {
     }
 }
 
-/// The source badge on a cover corner: nothing for local files.
-pub fn source_badge(ui: &Ui, rect: Rect, source: Option<SourceKind>) {
-    let s = Theme::get(ui.ctx()).scheme;
-    let (icon, color) = match source {
-        Some(SourceKind::Spotify) => (Icon::GraphicEq, Color32::from_rgb(0x1E, 0xD7, 0x60)),
-        Some(SourceKind::Youtube) => (Icon::PlayArrow, s.error),
-        _ => return,
-    };
-    let size = (rect.width() * 0.4).clamp(14.0, 22.0);
-    let b = Rect::from_min_size(rect.right_bottom() - vec2(size, size), vec2(size, size));
-    ui.painter().circle_filled(b.center(), size * 0.5, s.surface_container_highest);
-    icon.widget(true, color, size * 0.7)
-        .paint_at(ui, Rect::from_center_size(b.center(), vec2(size * 0.7, size * 0.7)));
-}
-
 /// Ellipsized single-line text.
 pub fn label(ui: &mut Ui, text: &str, role: crate::TypeRole, color: Color32) -> egui::Response {
     ui.add(
@@ -90,4 +75,37 @@ pub fn label(ui: &mut Ui, text: &str, role: crate::TypeRole, color: Color32) -> 
             .truncate()
             .selectable(false),
     )
+}
+
+/// A stream still opening: the play button's icon gives way to a loading
+/// indicator in the button's own colours (`bg` hides the icon).
+pub fn buffering_overlay(ui: &mut Ui, button: Rect, bg: Color32, fg: Color32) {
+    let size = (button.height().min(button.width()) * 0.62).max(20.0);
+    let c = button.center();
+    ui.painter().circle_filled(c, size * 0.5, bg);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(c, vec2(size, size))).id_salt(("buffering", button.min.x as i32, button.min.y as i32)));
+    child.add(crate::components::LoadingIndicator::new().size(size).color(fg));
+}
+
+/// What plays, in one quiet line: «YouTube · Opus ~160 кбит/с» for a
+/// stream (where its sound really comes from: a Spotify track may play
+/// from YouTube Music), «YouTube · клип · Opus ~160 кбит/с» for a music
+/// video without its song, the file's own format for a local track.
+pub fn sound_line(state: &nikgob_view::ViewState) -> Option<String> {
+    let p = &state.player;
+    let clip = p.current.as_ref().is_some_and(|t| t.clip);
+    let quality = p.audio_quality.as_deref().or_else(|| p.current.as_ref().and_then(|t| t.quality.as_deref()));
+    let service = p.audio_service.map(|s| match s {
+        nikgob_view::Service::Spotify => "Spotify",
+        // A Deezer entry plays from YouTube Music.
+        nikgob_view::Service::Youtube | nikgob_view::Service::Deezer => "YouTube",
+        nikgob_view::Service::Soundcloud => "SoundCloud",
+    });
+    let service = service.map(|s| if clip { format!("{s} · клип") } else { s.to_owned() });
+    match (service, quality) {
+        (Some(s), Some(q)) => Some(format!("{s} · {q}")),
+        (Some(s), None) => Some(s),
+        (None, Some(q)) => Some(q.to_owned()),
+        (None, None) => None,
+    }
 }

@@ -2,7 +2,7 @@
 //! read-only connections.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -33,6 +33,9 @@ struct Inner {
     readers: Option<ReadPool>,
     device: RwLock<DeviceId>,
     last_ts: AtomicI64,
+    /// See [`Library::set_album_likes_tracks`]; the SQL reads it through
+    /// `album_likes_tracks()`.
+    album_likes_tracks: Arc<AtomicBool>,
 }
 
 struct ReadPool {
@@ -78,10 +81,28 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The functions the library's SQL calls: `album_likes_tracks()`, the
+/// mode of [`Library::set_album_likes_tracks`].
+fn add_functions(conn: &Connection, album_likes_tracks: &Arc<AtomicBool>) -> Result<()> {
+    let flag = Arc::clone(album_likes_tracks);
+    conn.create_scalar_function("album_likes_tracks", 0, rusqlite::functions::FunctionFlags::SQLITE_UTF8, move |_| {
+        Ok(flag.load(Ordering::Relaxed))
+    })?;
+    Ok(())
+}
+
 fn configure(conn: &Connection, writer: bool) -> Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
+    // Hot reads (queue rows, cards, likes) keep their statements prepared.
+    conn.set_prepared_statement_cache_capacity(64);
     conn.pragma_update(None, "temp_store", "MEMORY")?;
-    conn.pragma_update(None, "cache_size", -16_000)?;
+    // 16 MB of pages for the writer, 2 MB for each reader: their full-table
+    // reads (recs, stats, export) would otherwise each keep a copy of most of
+    // the database, which the system's file cache already holds once. No
+    // memory mapping: on Windows a file mapped by the readers cannot be
+    // truncated by the writer's checkpoint, and an I/O error in a mapping
+    // ends the process instead of failing the query.
+    conn.pragma_update(None, "cache_size", if writer { -16_000 } else { -2_000 })?;
     if writer {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -132,6 +153,13 @@ impl Library {
     }
 
     fn from_parts(writer: Connection, readers: Option<ReadPool>) -> Result<Self> {
+        let album_likes_tracks = Arc::new(AtomicBool::new(false));
+        add_functions(&writer, &album_likes_tracks)?;
+        if let Some(pool) = &readers {
+            for conn in pool.conns.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+                add_functions(conn, &album_likes_tracks)?;
+            }
+        }
         let device = match meta_get(&writer, "device_id")? {
             Some(id) => DeviceId(id),
             None => {
@@ -146,8 +174,21 @@ impl Library {
                 readers,
                 device: RwLock::new(device),
                 last_ts: AtomicI64::new(0),
+                album_likes_tracks,
             }),
         })
+    }
+
+    /// How an album like works: off (the default), it saves the album
+    /// alone and the album reads as liked exactly while it is saved; on, it
+    /// likes every track of the album too, and the album reads as liked
+    /// while all of them are (see [`Self::like_release`]).
+    pub fn set_album_likes_tracks(&self, on: bool) {
+        self.inner.album_likes_tracks.store(on, Ordering::Relaxed);
+    }
+
+    pub fn album_likes_tracks(&self) -> bool {
+        self.inner.album_likes_tracks.load(Ordering::Relaxed)
     }
 
     /// Identity stamped into `updated_by` / `Event::device`. Generated on first
@@ -213,6 +254,12 @@ impl Library {
         }
     }
 
+    /// Runs `f` on the writer connection outside any transaction (`VACUUM`).
+    pub(crate) fn with_writer<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let conn = lock(&self.inner.writer);
+        f(&conn)
+    }
+
     /// Runs `f` inside one write transaction (committed if `f` succeeds).
     pub(crate) fn write<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let mut conn = lock(&self.inner.writer);
@@ -220,6 +267,15 @@ impl Library {
         let out = f(&tx)?;
         tx.commit()?;
         Ok(out)
+    }
+
+    /// [`Self::write`] whose transaction is rolled back whatever `f` returns.
+    pub(crate) fn write_rolled_back<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+        let mut conn = lock(&self.inner.writer);
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let out = f(&tx);
+        tx.rollback()?;
+        out
     }
 }
 

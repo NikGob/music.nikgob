@@ -1,0 +1,12 @@
+[
+  {"header": "YouTube Music", "title": "Просмотрено: Группа крови", "titleUrl": "https://music.youtube.com/watch?v=yt-gruppa-1",
+   "subtitles": [{"name": "Кино - Topic", "url": "https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx"}],
+   "time": "2023-05-01T12:34:56.789Z", "products": ["YouTube"], "activityControls": ["YouTube watch history"]},
+  {"header": "YouTube", "title": "Просмотрено: какое-то видео", "titleUrl": "https://www.youtube.com/watch?v=abcdefghijk",
+   "subtitles": [{"name": "Блогер", "url": "https://www.youtube.com/channel/UCyyyyyyyyyyyyyyyyyyyyyy"}],
+   "time": "2023-05-01T13:00:00Z", "products": ["YouTube"]},
+  {"header": "YouTube Music", "title": "Watched Digital Love", "titleUrl": "https://music.youtube.com/watch?v=yt-discovery-3",
+   "subtitles": [{"name": "Daft Punk - Topic"}], "time": "2023-05-02T09:00:00Z", "products": ["YouTube"]},
+  {"header": "YouTube Music", "title": "https://music.youtube.com/watch?v=removedvid1",
+   "titleUrl": "https://music.youtube.com/watch?v=removedvid1", "time": "2023-05-03T09:00:00Z", "products": ["YouTube"]}
+]

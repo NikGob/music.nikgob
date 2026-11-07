@@ -7,9 +7,21 @@
 //! thin line running down with the time left.
 //!
 //! Each snackbar springs up from below with a little bounce (default
-//! spatial) while its corners settle, the stack glides to make room, and an
-//! ending one shrinks and fades in place. Timers are time-based and hold
-//! while the pointer is over any snackbar of the stack.
+//! spatial) while its corners settle, the stack glides to make room (and to
+//! a new place when the area changes), and an ending one shrinks and fades
+//! in place. Timers are time-based and hold while the pointer is over any
+//! snackbar of the stack; an endless duration keeps them up until closed.
+//!
+//! Snackbars live on the top layer ([`Order::Debug`], egui's topmost), so
+//! nothing of a page or an overlay (Now Playing's cover, ring and shapes
+//! included) is ever drawn over them, however the other layers reorder.
+//!
+//! [`SnackbarHost::replacing`] shows one at a time as M3 asks: a new
+//! message replaces the one up (which leaves with its exit, and the new one
+//! comes up once it is out), the same message again only starts its timer
+//! over ([`SnackbarItem::again`]), and one with an action (an undo) is never
+//! replaced: what comes meanwhile waits, the newest plain one of it shown
+//! after.
 
 use egui::{
     Align2, Area, Context, Id, Order, Rect, Sense, Stroke, Vec2, WidgetInfo, WidgetType,
@@ -29,6 +41,8 @@ use crate::{
 pub const AUTO_DISMISS: f64 = 4.0;
 /// Snackbars on screen at once; more wait their turn.
 pub const MAX_VISIBLE: usize = 3;
+/// The layer snackbars are drawn on: above everything else.
+const LAYER: Order = Order::Debug;
 /// Seconds an ending snackbar is still drawn (its exit animation).
 const EXIT: f64 = 0.35;
 /// Space between stacked snackbars.
@@ -54,6 +68,10 @@ pub struct SnackbarItem<'a> {
     pub text: &'a str,
     pub action: Option<&'a str>,
     pub kind: SnackbarKind,
+    /// Seconds it stays beyond the host's duration.
+    pub longer: f64,
+    /// How many times it came again: a change starts its timer over.
+    pub again: u32,
 }
 
 impl<'a> SnackbarItem<'a> {
@@ -63,7 +81,21 @@ impl<'a> SnackbarItem<'a> {
             text,
             action: None,
             kind: SnackbarKind::Info,
+            longer: 0.0,
+            again: 0,
         }
+    }
+
+    /// The same message came `n` times more: its timer starts over each.
+    pub fn again(mut self, n: u32) -> Self {
+        self.again = n;
+        self
+    }
+
+    /// Stays `seconds` longer than the host's duration.
+    pub fn longer(mut self, seconds: f64) -> Self {
+        self.longer = seconds.max(0.0);
+        self
     }
 
     pub fn action(mut self, label: &'a str) -> Self {
@@ -84,6 +116,8 @@ impl<'a> From<(u64, &'a str, Option<&'a str>)> for SnackbarItem<'a> {
             text,
             action,
             kind: SnackbarKind::Info,
+            longer: 0.0,
+            again: 0,
         }
     }
 }
@@ -105,14 +139,29 @@ struct Current {
     text: String,
     action: Option<String>,
     kind: SnackbarKind,
+    again: u32,
     shown_at: f64,
     leaving_at: Option<f64>,
 }
 
 impl Current {
-    /// The share of its time still left, 1 -> 0.
+    fn of(item: &SnackbarItem<'_>, now: f64) -> Self {
+        let longer = if item.longer.is_finite() { item.longer } else { 0.0 };
+        Self {
+            id: item.id,
+            text: item.text.to_owned(),
+            action: item.action.map(str::to_owned),
+            kind: item.kind,
+            again: item.again,
+            // The countdown of a longer one starts later.
+            shown_at: now + longer,
+            leaving_at: None,
+        }
+    }
+
+    /// The share of its time still left, 1 -> 0 (0 with no time limit).
     fn left(&self, now: f64, duration: f64) -> f32 {
-        if self.leaving_at.is_some() || duration <= 0.0 {
+        if self.leaving_at.is_some() || duration <= 0.0 || !duration.is_finite() {
             return 0.0;
         }
         (1.0 - (now - self.shown_at) / duration).clamp(0.0, 1.0) as f32
@@ -129,8 +178,8 @@ struct Queue {
 }
 
 impl Queue {
-    /// Advances the queue; returns the ids that timed out this step.
-    /// `held` is the time the timers were paused (pointer over the stack).
+    /// [`Self::step_as`] stacking.
+    #[cfg(test)]
     fn step(
         &mut self,
         items: &[SnackbarItem<'_>],
@@ -139,27 +188,49 @@ impl Queue {
         duration: f64,
         max: usize,
     ) -> Vec<u64> {
+        self.step_as(items, now, held, duration, max, false)
+    }
+
+    /// Advances the queue; returns the ids that timed out (or, `replace`,
+    /// were replaced) this step. `held` is the time the timers were paused
+    /// (pointer over the stack). `replace`: one at a time, a new one
+    /// replacing the one up unless that has an action (the module docs).
+    fn step_as(
+        &mut self,
+        items: &[SnackbarItem<'_>],
+        now: f64,
+        held: f64,
+        duration: f64,
+        max: usize,
+        replace: bool,
+    ) -> Vec<u64> {
         let mut dismissed = Vec::new();
         self.done.retain(|d| items.iter().any(|i| i.id == *d));
         self.shown
             .retain(|c| c.leaving_at.is_none_or(|t| now - t < EXIT));
+        // The same message again: its timer starts over.
+        for cur in self.shown.iter_mut().filter(|c| c.leaving_at.is_none()) {
+            if let Some(item) = items.iter().find(|i| i.id == cur.id)
+                && item.again != cur.again
+            {
+                cur.again = item.again;
+                cur.shown_at = cur.shown_at.max(now);
+            }
+        }
 
-        for item in items {
-            let active = self.shown.iter().filter(|c| c.leaving_at.is_none()).count();
-            if active >= max {
-                break;
+        if replace {
+            self.replace(items, now, duration, &mut dismissed);
+        } else {
+            for item in items {
+                let active = self.shown.iter().filter(|c| c.leaving_at.is_none()).count();
+                if active >= max {
+                    break;
+                }
+                if self.done.contains(&item.id) || self.shown.iter().any(|c| c.id == item.id) {
+                    continue;
+                }
+                self.shown.push(Current::of(item, now));
             }
-            if self.done.contains(&item.id) || self.shown.iter().any(|c| c.id == item.id) {
-                continue;
-            }
-            self.shown.push(Current {
-                id: item.id,
-                text: item.text.to_owned(),
-                action: item.action.map(str::to_owned),
-                kind: item.kind,
-                shown_at: now,
-                leaving_at: None,
-            });
         }
         for cur in &mut self.shown {
             if cur.leaving_at.is_some() {
@@ -178,6 +249,39 @@ impl Queue {
             }
         }
         dismissed
+    }
+
+    /// One at a time: the one up leaves for a newer one (an undo stays),
+    /// and the next comes up once the one before is out: the first waiting
+    /// one with an action, else the newest, the plain ones before it
+    /// replaced unseen. With no time limit an undo gives way too once it
+    /// has been up the default time, or nothing newer would ever show.
+    fn replace(&mut self, items: &[SnackbarItem<'_>], now: f64, duration: f64, dismissed: &mut Vec<u64>) {
+        let waiting: Vec<&SnackbarItem<'_>> = items
+            .iter()
+            .filter(|i| !self.done.contains(&i.id) && !self.shown.iter().any(|c| c.id == i.id))
+            .collect();
+        if waiting.is_empty() {
+            return;
+        }
+        if let Some(cur) = self.shown.iter_mut().find(|c| c.leaving_at.is_none()) {
+            let seen = !duration.is_finite() && now - cur.shown_at >= AUTO_DISMISS;
+            if cur.action.is_none() || seen {
+                cur.leaving_at = Some(now);
+                self.done.push(cur.id);
+                dismissed.push(cur.id);
+            }
+            return;
+        }
+        if self.shown.iter().any(|c| c.leaving_at.is_some()) {
+            return;
+        }
+        let next = waiting.iter().position(|i| i.action.is_some()).unwrap_or(waiting.len() - 1);
+        for i in &waiting[..next] {
+            self.done.push(i.id);
+            dismissed.push(i.id);
+        }
+        self.shown.push(Current::of(waiting[next], now));
     }
 
     /// The user dismissed snackbar `id`. Returns it if it was still up.
@@ -208,6 +312,7 @@ pub struct SnackbarHost {
     duration: f64,
     show_close: bool,
     max_visible: usize,
+    replace: bool,
 }
 
 impl SnackbarHost {
@@ -217,10 +322,18 @@ impl SnackbarHost {
             duration: AUTO_DISMISS,
             show_close: false,
             max_visible: MAX_VISIBLE,
+            replace: false,
         }
     }
 
-    /// Seconds before a snackbar dismisses itself.
+    /// One at a time, a new one replacing the one up (the module docs).
+    pub fn replacing(mut self, on: bool) -> Self {
+        self.replace = on;
+        self
+    }
+
+    /// Seconds before a snackbar dismisses itself; `f64::INFINITY` keeps
+    /// it up until it is closed (no time-left line then).
     pub fn duration(mut self, seconds: f64) -> Self {
         self.duration = seconds;
         self
@@ -261,7 +374,7 @@ impl SnackbarHost {
         };
 
         let mut events = SnackbarEvents {
-            dismissed: queue.step(items, now, held, self.duration, self.max_visible),
+            dismissed: queue.step_as(items, now, held, self.duration, self.max_visible, self.replace),
             ..SnackbarEvents::default()
         };
         let mut hovering = false;
@@ -280,7 +393,7 @@ impl SnackbarHost {
                 motion.fast_effects,
             );
             let k = pres.spatial.clamp(0.0, 1.2);
-            let painter = ctx.layer_painter(egui::LayerId::new(Order::Foreground, self.id.with("measure")));
+            let painter = ctx.layer_painter(egui::LayerId::new(LAYER, self.id.with("measure")));
             let lay = layout(&painter, &cur.text, cur.action.as_deref(), self.show_close, max_w);
             // The slot collapses as a snackbar leaves, so the rest glide down.
             let slot = (lay.size.y + GAP) * if leaving { k.min(1.0) } else { 1.0 };
@@ -299,12 +412,19 @@ impl SnackbarHost {
             // Rises from below on entry; shrinks in place on exit.
             let rise = if leaving { 0.0 } else { (1.0 - k) * (lay.size.y * 0.5 + 24.0) };
             let scale = 0.86 + 0.14 * k.min(1.0);
-            let bottom_center = pos2(area.center().x, y + rise);
+            // A new area (Now Playing opening, say) is glided to as well.
+            let x = anim::f32(
+                ctx,
+                self.id.with(("x", cur.id)),
+                area.center().x,
+                motion.default_spatial.without_bounce(),
+            );
+            let bottom_center = pos2(x, y + rise);
             let alpha = pres.alpha();
             let area_id = self.id.with(("area", cur.id));
             let resp = Area::new(area_id)
                 .fade_in(false)
-                .order(Order::Foreground)
+                .order(LAYER)
                 .fixed_pos(bottom_center)
                 .pivot(Align2::CENTER_BOTTOM)
                 .constrain(false)
@@ -390,7 +510,8 @@ impl SnackbarHost {
                         r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &label));
                     }
 
-                    // Time left: a thin line along the bottom, inside the corners.
+                    // Time left: a thin line along the bottom, inside the
+                    // corners (none when it stays until closed).
                     let left = cur.left(now, self.duration);
                     if left > 0.0 && cur.kind != SnackbarKind::Working {
                         let track = Rect::from_min_max(
@@ -573,6 +694,26 @@ mod tests {
     }
 
     #[test]
+    fn an_endless_one_stays_until_closed_with_no_time_line() {
+        let mut q = Queue::default();
+        let list = [SnackbarItem::new(1, "text").longer(f64::INFINITY)];
+        q.step(&list, 0.0, 0.0, f64::INFINITY, 3);
+        assert!(q.step(&list, 3600.0, 0.0, f64::INFINITY, 3).is_empty());
+        assert_eq!(ids(&q), vec![1]);
+        assert_eq!(q.shown[0].left(3600.0, f64::INFINITY), 0.0);
+        assert_eq!(q.dismiss(1, 3601.0), Some(1));
+        // One at a time: an undo up its default time gives way to a newer one.
+        let mut q = Queue::default();
+        let undo = [SnackbarItem::new(1, "Удалено").action("Отменить")];
+        let both = [undo[0], SnackbarItem::new(2, "b")];
+        q.step_as(&undo, 0.0, 0.0, f64::INFINITY, 1, true);
+        assert!(q.step_as(&both, 1.0, 0.0, f64::INFINITY, 1, true).is_empty());
+        assert_eq!(q.step_as(&both, AUTO_DISMISS, 0.0, f64::INFINITY, 1, true), vec![1]);
+        q.step_as(&both[1..], AUTO_DISMISS + EXIT + 0.01, 0.0, f64::INFINITY, 1, true);
+        assert_eq!(ids(&q), vec![2]);
+    }
+
+    #[test]
     fn user_dismissal_and_withdrawal() {
         let mut q = Queue::default();
         let list = items(&[1, 2]);
@@ -587,5 +728,61 @@ mod tests {
         q.step(&[], 2.5, 0.0, AUTO_DISMISS, 3);
         assert!(q.shown.is_empty());
         assert_eq!(q.remaining(2.5, AUTO_DISMISS), None);
+    }
+
+    fn replacing(q: &mut Queue, list: &[SnackbarItem<'_>], now: f64) -> Vec<u64> {
+        q.step_as(list, now, 0.0, AUTO_DISMISS, 1, true)
+    }
+
+    #[test]
+    fn a_new_one_replaces_the_one_up_after_its_exit() {
+        let mut q = Queue::default();
+        assert!(replacing(&mut q, &items(&[1]), 0.0).is_empty());
+        assert_eq!(ids(&q), vec![1]);
+        // A second: the first leaves with its whole exit, then the second
+        // comes up.
+        assert_eq!(replacing(&mut q, &items(&[1, 2]), 1.0), vec![1]);
+        assert!(ids(&q).is_empty());
+        replacing(&mut q, &items(&[2]), 1.2);
+        assert!(ids(&q).is_empty(), "the first is still on its way out");
+        replacing(&mut q, &items(&[2]), 1.01 + EXIT);
+        assert_eq!(ids(&q), vec![2]);
+        // Its full time from there.
+        assert!(replacing(&mut q, &items(&[2]), 1.01 + EXIT + 3.9).is_empty());
+        assert_eq!(replacing(&mut q, &items(&[2]), 1.02 + EXIT + AUTO_DISMISS), vec![2]);
+    }
+
+    #[test]
+    fn the_same_message_again_starts_its_timer_over() {
+        let mut q = Queue::default();
+        replacing(&mut q, &items(&[1]), 0.0);
+        let again = [SnackbarItem::new(1, "text").again(1)];
+        assert!(replacing(&mut q, &again, 3.0).is_empty());
+        assert!(replacing(&mut q, &again, 6.9).is_empty(), "four seconds from the repeat");
+        assert_eq!(replacing(&mut q, &again, 7.0), vec![1]);
+    }
+
+    #[test]
+    fn an_undo_is_never_replaced_and_the_newest_waiting_comes_next() {
+        let mut q = Queue::default();
+        let list = [
+            SnackbarItem::new(1, "Удалено").action("Отменить"),
+            SnackbarItem::new(2, "a"),
+            SnackbarItem::new(3, "b"),
+        ];
+        replacing(&mut q, &list[..1], 0.0);
+        assert!(replacing(&mut q, &list, 1.0).is_empty());
+        assert_eq!(ids(&q), vec![1], "the undo stays its time");
+        assert_eq!(replacing(&mut q, &list, AUTO_DISMISS), vec![1]);
+        // Out: the newest plain one comes, the older replaced unseen.
+        assert_eq!(replacing(&mut q, &list[1..], AUTO_DISMISS + EXIT + 0.01), vec![2]);
+        assert_eq!(ids(&q), vec![3]);
+        // An undo waiting comes before a newer plain one.
+        let mut q = Queue::default();
+        let list = [SnackbarItem::new(4, "x"), SnackbarItem::new(5, "Скрыто").action("Вернуть"), SnackbarItem::new(6, "y")];
+        replacing(&mut q, &list[..1], 0.0);
+        assert_eq!(replacing(&mut q, &list, 0.5), vec![4]);
+        replacing(&mut q, &list[1..], 0.51 + EXIT);
+        assert_eq!(ids(&q), vec![5]);
     }
 }

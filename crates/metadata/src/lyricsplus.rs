@@ -1,4 +1,11 @@
 //! LyricsPlus v2: millisecond line and syllable timing.
+//!
+//! LyricsPlus answers from several providers (`metadata.source`: Apple,
+//! Musixmatch, QQ Music …). QQ Music's word timing of a song that is not
+//! Chinese, Japanese or Korean is generated (words back to back, lengths in
+//! proportion to the letters), so such a text keeps only its line times
+//! ([`LyricsPlusText::words_dropped`]). Credit lines («Composed by：…»,
+//! «作词 : …») are left out whatever the provider.
 
 use std::time::Duration;
 
@@ -28,6 +35,7 @@ impl LyricsPlus {
         })
     }
 
+    /// The lines alone (see [`Self::find_text`]).
     pub async fn find(
         &self,
         artist: &str,
@@ -35,6 +43,18 @@ impl LyricsPlus {
         album: Option<&str>,
         duration: Option<Duration>,
     ) -> Result<Option<Vec<LyricLine>>> {
+        Ok(self.find_text(artist, title, album, duration).await?.map(|t| t.lines))
+    }
+
+    /// The text for `artist` (sent as given: «A, B» finds what «A» may
+    /// not) and `title`; `None` when LyricsPlus has none.
+    pub async fn find_text(
+        &self,
+        artist: &str,
+        title: &str,
+        album: Option<&str>,
+        duration: Option<Duration>,
+    ) -> Result<Option<LyricsPlusText>> {
         if artist.trim().is_empty() || title.trim().is_empty() {
             return Err(MetadataError::InvalidArgument(
                 "title and artist are required".into(),
@@ -54,11 +74,23 @@ impl LyricsPlus {
             .get_json::<Payload>(Service::LyricsPlus, url)
             .await
         {
-            Ok(payload) => Ok(Some(payload.lines()?).filter(|l| !l.is_empty())),
+            Ok(payload) => Ok(Some(payload.text()?).filter(|t| !t.lines.is_empty())),
             Err(MetadataError::NotFound) => Ok(None),
             Err(e) => Err(e),
         }
     }
+}
+
+/// One LyricsPlus answer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LyricsPlusText {
+    pub lines: Vec<LyricLine>,
+    /// Who LyricsPlus took it from (`metadata.source`), when it says.
+    pub provider: Option<String>,
+    /// The provider's word timing was generated (QQ Music, a song that is
+    /// not CJK) and was dropped: the lines keep their own times, which are
+    /// less trustworthy than another source's line sync.
+    pub words_dropped: bool,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +98,61 @@ struct Payload {
     #[serde(rename = "type")]
     kind: String,
     lyrics: Vec<Entry>,
+    #[serde(default)]
+    metadata: Option<Meta>,
+}
+
+#[derive(Default, Deserialize)]
+struct Meta {
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// QQ Music (`"QQ Music"`, `"qq"`).
+fn is_qq(provider: &str) -> bool {
+    provider.to_ascii_lowercase().contains("qq")
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3040}'..='\u{30FF}'   // Hiragana, Katakana
+        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+        | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+        | '\u{AC00}'..='\u{D7AF}' // Hangul syllables
+        | '\u{1100}'..='\u{11FF}' // Hangul Jamo
+        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
+    )
+}
+
+/// The lines are Chinese, Japanese or Korean: at least a tenth of their
+/// letters are (an ideograph is a word, a Latin word many letters).
+fn mostly_cjk(lines: &[LyricLine]) -> bool {
+    let (mut cjk, mut letters) = (0usize, 0usize);
+    for c in lines.iter().flat_map(|l| l.text.chars()).filter(|c| c.is_alphabetic()) {
+        letters += 1;
+        cjk += usize::from(is_cjk(c));
+    }
+    cjk > 0 && cjk * 10 >= letters
+}
+
+/// Credit labels a line may start with (before a `:` or `：`).
+const CREDITS: &[&str] = &[
+    "composed by", "composer", "lyrics by", "lyricist", "written by", "writer", "words by",
+    "music by", "arranged by", "arranger", "producer", "produced by", "mixed by", "mastered by",
+    "recorded by", "vocals by",
+    "作词", "作曲", "编曲", "作詞", "編曲", "词", "曲", "制作人", "监制", "混音", "母带", "录音",
+    "和声", "出品", "发行", "企划", "统筹", "吉他", "贝斯", "鼓",
+];
+
+/// «Composed by：Еремин Василий Сергеевич», «作词 : 周杰伦»: a credit, not
+/// a sung line.
+pub fn is_credit_line(text: &str) -> bool {
+    let lower = text.trim_start().to_lowercase();
+    CREDITS.iter().any(|label| {
+        lower
+            .strip_prefix(label)
+            .is_some_and(|rest| rest.trim_start().starts_with([':', '：']))
+    })
 }
 
 #[derive(Deserialize)]
@@ -101,6 +188,24 @@ struct Syllable {
 }
 
 impl Payload {
+    fn text(mut self) -> Result<LyricsPlusText> {
+        let provider = self
+            .metadata
+            .take()
+            .and_then(|m| m.source)
+            .filter(|p| !p.trim().is_empty());
+        let mut lines = self.lines()?;
+        lines.retain(|l| !is_credit_line(&l.text));
+        let generated = provider.as_deref().is_some_and(is_qq) && !mostly_cjk(&lines);
+        let words_dropped = generated && lines.iter().any(LyricLine::is_word_synced);
+        if generated {
+            for l in &mut lines {
+                l.words.clear();
+            }
+        }
+        Ok(LyricsPlusText { lines, provider, words_dropped })
+    }
+
     fn lines(self) -> Result<Vec<LyricLine>> {
         let word = if self.kind.eq_ignore_ascii_case("word") {
             true
@@ -192,6 +297,72 @@ mod tests {
         assert!(lines[1].background && lines[1].duet);
         assert_eq!(lines[1].text, "oh");
         assert_eq!(lines[1].start, Duration::from_millis(2500));
+    }
+
+    /// A QQ Music answer of `type: Word` with `lines` (text, time) whose
+    /// words are cut at spaces, back to back.
+    fn qq(lines: &[(&str, u64)]) -> String {
+        let entries: Vec<String> = lines
+            .iter()
+            .map(|(text, time)| {
+                let mut t = *time;
+                let words: Vec<String> = text
+                    .split_inclusive(' ')
+                    .map(|w| {
+                        let d = 100 * w.chars().count() as u64;
+                        let s = format!(r#"{{"time":{t},"duration":{d},"text":{}}}"#, serde_json::to_string(w).unwrap());
+                        t += d;
+                        s
+                    })
+                    .collect();
+                format!(
+                    r#"{{"time":{time},"duration":{},"text":{},"syllabus":[{}]}}"#,
+                    t - time,
+                    serde_json::to_string(text).unwrap(),
+                    words.join(",")
+                )
+            })
+            .collect();
+        format!(r#"{{"type":"Word","metadata":{{"source":"QQ Music"}},"lyrics":[{}]}}"#, entries.join(","))
+    }
+
+    #[test]
+    fn qq_word_timing_of_a_russian_song_is_dropped_with_the_credits() {
+        let json = qq(&[
+            ("Lyrics by：Еремин Василий Сергеевич", 0),
+            ("Composed by：Еремин Василий Сергеевич", 500),
+            ("Ты мой лёд ", 12_000),
+            ("И я таю ", 15_000),
+        ]);
+        let text = serde_json::from_str::<Payload>(&json).unwrap().text().unwrap();
+        assert_eq!(text.provider.as_deref(), Some("QQ Music"));
+        assert!(text.words_dropped);
+        let got: Vec<(&str, u64)> = text.lines.iter().map(|l| (l.text.as_str(), l.start.as_millis() as u64)).collect();
+        assert_eq!(got, [("Ты мой лёд ", 12_000), ("И я таю ", 15_000)]);
+        assert!(text.lines.iter().all(|l| l.words.is_empty()));
+        assert_eq!(nikgob_core::lyrics::LyricsSync::of(&text.lines), Some(nikgob_core::lyrics::LyricsSync::Line));
+    }
+
+    #[test]
+    fn qq_word_timing_of_a_chinese_song_stays() {
+        let json = qq(&[("作词 : 周杰伦", 0), ("作曲：周杰伦", 300), ("窗外的 麻雀 ", 20_000), ("在电线杆上 多嘴 ", 24_000)]);
+        let text = serde_json::from_str::<Payload>(&json).unwrap().text().unwrap();
+        assert!(!text.words_dropped);
+        assert_eq!(text.lines.len(), 2, "no credits: {:?}", text.lines);
+        assert!(text.lines.iter().all(LyricLine::is_word_synced));
+    }
+
+    #[test]
+    fn other_providers_keep_their_words_and_lose_credits() {
+        let json = r#"{"type":"Word","metadata":{"source":"Apple"},"lyrics":[{"time":0,"duration":500,"text":"Written by: Somebody"},{"time":1000,"duration":1000,"text":"Hello ","syllabus":[{"time":1000,"duration":400,"text":"Hel"},{"time":1400,"duration":600,"text":"lo "}]}]}"#;
+        let text = serde_json::from_str::<Payload>(json).unwrap().text().unwrap();
+        assert!(!text.words_dropped);
+        assert_eq!(text.lines.len(), 1);
+        assert_eq!(text.lines[0].words.len(), 2);
+        // Not a credit: a sung line that mentions one.
+        assert!(!is_credit_line("Producer of my dreams"));
+        assert!(is_credit_line("  PRODUCER : X"));
+        assert!(is_credit_line("编曲：X"));
     }
 
     #[test]

@@ -1,0 +1,28 @@
+{
+  "data": [
+    {
+      "id": 1551523502, "readable": true, "title": "Лёд", "title_short": "Лёд", "title_version": "",
+      "link": "https://www.deezer.com/track/1551523502", "duration": 186, "rank": 512330, "explicit_lyrics": false,
+      "preview": "https://cdnt-preview.dzcdn.net/api/1/1/x.mp3", "md5_image": "4b2c1f0e0a1b2c3d4e5f60718293a4b5",
+      "artist": { "id": 13612387, "name": "Монеточка", "link": "https://www.deezer.com/artist/13612387",
+        "picture_xl": "https://cdn-images.dzcdn.net/images/artist/9a8b7c6d5e4f30211223344556677889/1000x1000-000000-80-0-0.jpg", "type": "artist" },
+      "album": { "id": 278000001, "title": "Раскраски для взрослых", "cover_xl": "https://cdn-images.dzcdn.net/images/cover/4b2c1f0e0a1b2c3d4e5f60718293a4b5/1000x1000-000000-80-0-0.jpg",
+        "md5_image": "4b2c1f0e0a1b2c3d4e5f60718293a4b5", "type": "album" },
+      "type": "track"
+    },
+    {
+      "id": 908765432, "readable": true, "title": "Лёд (feat. Тима Белорусских)", "title_short": "Лёд",
+      "duration": 201, "rank": 401220, "md5_image": "",
+      "artist": { "id": 55501, "name": "NILETTO", "type": "artist" },
+      "album": { "id": 133000222, "title": "Лёд", "cover_xl": "", "md5_image": "aa11bb22cc33dd44ee55ff6677889900", "type": "album" },
+      "type": "track"
+    },
+    {
+      "id": 77001, "readable": false, "title": "Lyod", "duration": 0,
+      "artist": { "id": 1, "name": "Someone" },
+      "type": "track"
+    }
+  ],
+  "total": 3,
+  "next": "https://api.deezer.com/search?q=%D0%BB%D1%91%D0%B4&index=25"
+}

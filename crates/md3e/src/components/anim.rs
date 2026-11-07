@@ -75,6 +75,29 @@ pub fn color(ctx: &Context, id: Id, target: Color32, spring: Spring) -> Color32 
     Color32::from_rgba_unmultiplied(ch(c[0]), ch(c[1]), ch(c[2]), ch(c[3]))
 }
 
+/// Move an animation and its target by `by` without changing its motion,
+/// as when the frame it is measured in moved (a view that moved or resized).
+pub fn shift_f32(ctx: &Context, id: Id, by: f32) {
+    ctx.data_mut(|d| {
+        if let Some(mut a) = d.get_temp::<Animated<f32>>(id) {
+            a.shift(by);
+            d.insert_temp(id, a);
+        }
+    });
+}
+
+/// Start a fraction that has no motion yet at `from`, so its first target
+/// is moved to rather than started at (something that appears where it
+/// should be already open opens).
+pub fn fraction_starts_at(ctx: &Context, id: Id, from: f32) {
+    ctx.data_mut(|d| {
+        if d.get_temp::<Animated<f32>>(id).is_none() {
+            // Any spring: the first `fraction` call moves on its own.
+            d.insert_temp(id, Animated::new(from, Spring::new(1.0, 1.0)).with_threshold(0.001));
+        }
+    });
+}
+
 /// Jump an animation to `value` (e.g. on first show of a screen).
 pub fn snap_f32(ctx: &Context, id: Id, value: f32) {
     ctx.data_mut(|d| {

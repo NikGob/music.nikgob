@@ -1,0 +1,8 @@
+{ "data": [
+  { "id": 278000001, "title": "Раскраски для взрослых", "link": "https://www.deezer.com/album/278000001",
+    "cover_xl": "https://cdn-images.dzcdn.net/images/cover/4b2c1f0e0a1b2c3d4e5f60718293a4b5/1000x1000-000000-80-0-0.jpg",
+    "md5_image": "4b2c1f0e0a1b2c3d4e5f60718293a4b5", "genre_id": 132, "nb_tracks": 12, "record_type": "album",
+    "explicit_lyrics": false, "artist": { "id": 13612387, "name": "Монеточка", "type": "artist" }, "type": "album" },
+  { "id": 133000222, "title": "Лёд", "nb_tracks": 1, "record_type": "single", "md5_image": "aa11bb22cc33dd44ee55ff6677889900",
+    "artist": { "id": 55501, "name": "NILETTO" }, "type": "album" }
+], "total": 2 }

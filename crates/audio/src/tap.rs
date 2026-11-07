@@ -3,14 +3,18 @@
 //!
 //! The writer (audio thread) does one relaxed store per frame and one release
 //! store per block. A reader (the UI, only while a visualizer is visible)
-//! copies the newest [`SNAPSHOT_LEN`] samples and checks, seqlock style, that
-//! the writer did not lap it during the copy. Nobody ever waits for anybody.
+//! copies the newest [`SNAPSHOT_LEN`] samples that are being heard (the
+//! callback renders the device's latency ahead of the speakers) and checks,
+//! seqlock style, that the writer did not lap it during the copy. Nobody ever
+//! waits for anybody.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Samples in a snapshot (about 85 ms at 48 kHz).
 pub const SNAPSHOT_LEN: usize = 4096;
-const RING_LEN: usize = 16_384;
+const RING_LEN: usize = 65_536;
+/// The most a snapshot lags the newest sample (about 680 ms at 48 kHz).
+const MAX_DELAY: usize = RING_LEN / 2;
 const MASK: usize = RING_LEN - 1;
 
 /// The shared sample ring. Cheap to clone through an `Arc`.
@@ -20,6 +24,8 @@ pub struct VisualizerTap {
     /// Total mono samples ever written.
     written: AtomicU64,
     sample_rate: AtomicU32,
+    /// Samples written but not heard yet (the output latency).
+    delay: AtomicU32,
 }
 
 impl Default for VisualizerTap {
@@ -36,6 +42,7 @@ impl VisualizerTap {
             samples: (0..RING_LEN).map(|_| AtomicU32::new(0)).collect(),
             written: AtomicU64::new(0),
             sample_rate: AtomicU32::new(48_000),
+            delay: AtomicU32::new(0),
         }
     }
 
@@ -47,6 +54,13 @@ impl VisualizerTap {
 
     pub(crate) fn set_sample_rate(&self, rate: u32) {
         self.sample_rate.store(rate, Ordering::Relaxed);
+    }
+
+    /// How many of the newest samples are still on their way to the
+    /// speakers; snapshots end before them.
+    pub fn set_delay(&self, samples: u32) {
+        self.delay
+            .store(samples.min(MAX_DELAY as u32), Ordering::Relaxed);
     }
 
     /// Total samples ever written; lets a reader skip work when nothing new
@@ -81,12 +95,15 @@ impl VisualizerTap {
         self.write_interleaved(samples, 1);
     }
 
-    /// Copies the newest [`SNAPSHOT_LEN`] samples, oldest first, into `out`.
-    /// Returns `false` (and leaves `out` unspecified) when fewer than
-    /// `SNAPSHOT_LEN` samples were ever written or the writer lapped the copy.
+    /// Copies the newest [`SNAPSHOT_LEN`] samples heard by now (see
+    /// [`set_delay`](Self::set_delay)), oldest first, into `out`. Returns
+    /// `false` (and leaves `out` unspecified) when fewer than `SNAPSHOT_LEN`
+    /// samples were heard or the writer lapped the copy.
     pub fn snapshot(&self, out: &mut [f32; SNAPSHOT_LEN]) -> bool {
         for _ in 0..4 {
-            let end = self.written.load(Ordering::Acquire);
+            let written = self.written.load(Ordering::Acquire);
+            let delay = u64::from(self.delay.load(Ordering::Relaxed));
+            let end = written.saturating_sub(delay);
             if (end as usize) < SNAPSHOT_LEN {
                 return false;
             }
@@ -134,6 +151,20 @@ mod tests {
         let mut out = [0.0; SNAPSHOT_LEN];
         assert!(tap.snapshot(&mut out));
         assert!(out.iter().all(|&s| (s - 0.5).abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_delay_ends_the_snapshot_before_the_samples_not_heard_yet() {
+        let tap = VisualizerTap::new();
+        let data: Vec<f32> = (0..10_000).map(|i| i as f32).collect();
+        tap.write_mono(&data);
+        tap.set_delay(1000);
+        let mut out = [0.0; SNAPSHOT_LEN];
+        assert!(tap.snapshot(&mut out));
+        assert_eq!(out[SNAPSHOT_LEN - 1], 8_999.0);
+        assert_eq!(out[0], (9_000 - SNAPSHOT_LEN) as f32);
+        tap.set_delay(8_000);
+        assert!(!tap.snapshot(&mut out), "not enough heard yet");
     }
 
     #[test]

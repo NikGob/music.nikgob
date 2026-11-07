@@ -110,6 +110,12 @@ pub trait Indexer: Send + Sync {
         &self,
         candidate: &Candidate,
     ) -> BoxFuture<'_, Result<TorrentPayload, IndexerError>>;
+
+    /// Whether the indexer answers with these settings, without a search:
+    /// how many trackers it searches. Indexers that cannot tell say 0.
+    fn check(&self) -> BoxFuture<'_, Result<usize, IndexerError>> {
+        Box::pin(async { Ok(0) })
+    }
 }
 
 #[cfg(test)]

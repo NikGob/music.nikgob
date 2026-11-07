@@ -43,7 +43,7 @@ pub(crate) struct Anchor {
 }
 
 /// Same album title, or one the other plus more words ("X" and "X Deluxe").
-fn same_title(a: &str, b: &str) -> bool {
+pub(crate) fn same_title(a: &str, b: &str) -> bool {
     let within = |long: &str, short: &str| long.strip_prefix(short).is_some_and(|r| r.starts_with(' '));
     a == b || within(a, b) || within(b, a)
 }
@@ -127,7 +127,7 @@ pub(crate) fn primary_credit(line: &str) -> &str {
     let line = line.trim();
     let first = parse_credit(line).first().map_or(line.len(), |(_, n)| n.len());
     let head = line.get(..first).unwrap_or(line);
-    let cut = [", ", " & ", " / "]
+    let cut = [", ", " & ", " / ", "、", "，", " × "]
         .iter()
         .filter_map(|s| head.find(s))
         .min()

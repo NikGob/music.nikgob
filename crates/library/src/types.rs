@@ -89,8 +89,31 @@ pub struct TrackRow {
     /// The active source is a local file.
     pub has_local: bool,
     pub liked: bool,
+    /// Every credited artist with the text between them (`artist` is its
+    /// display).
+    #[serde(default)]
+    pub credit: nikgob_core::model::ArtistCredit,
+    /// The video id of the active source when it is a YouTube one.
+    #[serde(default)]
+    pub youtube_id: Option<String>,
+    /// What the spectrum check of the active source found (a "FLAC" made
+    /// from an MP3); `None` until it is checked.
+    #[serde(default)]
+    pub check: Option<nikgob_core::quality::CheckSummary>,
+}
+
+impl TrackRow {
     /// The first credited artist, when linked to an artist row.
-    pub artist_id: Option<nikgob_core::model::ArtistId>,
+    pub fn artist_id(&self) -> Option<nikgob_core::model::ArtistId> {
+        self.credit.primary().and_then(|p| p.artist_id)
+    }
+
+    /// What plays is a YouTube music video, not the song (a liked clip
+    /// whose song YouTube Music does not have).
+    pub fn is_clip(&self) -> bool {
+        self.active_kind == Some(SourceKind::Youtube)
+            && self.quality == Some(nikgob_core::model::score::STREAM_YOUTUBE_CLIP)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,34 +123,116 @@ pub struct ReleaseRow {
     pub local_tracks: u32,
     /// Tracks of this release known to the library.
     pub known_tracks: u32,
-    /// Every (local) track of the album is liked; see [`crate::Library::like_release`].
+    /// The album is liked: saved, or, while album likes like the tracks
+    /// too, every (local) track of it is; see [`crate::Library::like_release`].
     pub liked: bool,
+    /// Rows of its page ([`crate::Library::tracks_of_release_all`]: outside
+    /// the library too).
+    pub rows: u32,
 }
 
 impl ReleaseRow {
-    /// "3 из 12 у тебя".
+    /// "3 из 12 у тебя", as its page counts ([`ReleaseListing`]).
     pub fn progress(&self) -> ReleaseProgress {
-        ReleaseProgress::new(
-            self.local_tracks,
-            self.known_tracks,
-            self.release.total_tracks,
-        )
+        ReleaseProgress::new(self.local_tracks, self.known_tracks, self.rows, self.release.total_tracks)
+    }
+}
+
+/// One line of an album's page ([`crate::Library::release_listing`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ListingEntry {
+    Track(TrackRow),
+    /// A place the album counts that no row has: `no` 0 when unknown.
+    Hole { disc: u32, no: u32 },
+}
+
+/// An album's page: its rows and holes, and the counts of both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReleaseListing {
+    pub entries: Vec<ListingEntry>,
+    pub progress: ReleaseProgress,
+}
+
+impl ReleaseListing {
+    /// `unwanted`: the places of songs the user deleted from the album
+    /// (`crate::unwanted`); within its count and free, they are no holes.
+    pub(crate) fn new(rows: Vec<TrackRow>, total_tracks: Option<u32>, unwanted: &[(u32, u32)]) -> Self {
+        let local = rows.iter().filter(|r| r.has_local).count() as u32;
+        let count = total_tracks.unwrap_or(0);
+        let placed: std::collections::HashSet<(u32, u32)> = rows.iter().map(|r| (r.disc_no.max(1), r.track_no)).collect();
+        let gone: std::collections::HashSet<(u32, u32)> =
+            unwanted.iter().copied().filter(|(d, n)| (1..=count).contains(n) && !placed.contains(&(*d, *n))).collect();
+        let total_tracks = total_tracks.map(|t| t.saturating_sub(gone.len() as u32));
+        let progress = ReleaseProgress::new(local, local, rows.len() as u32, total_tracks);
+        let holes = progress.total as usize - rows.len();
+        let discs: std::collections::BTreeSet<u32> = rows.iter().map(|r| r.disc_no.max(1)).collect();
+        let disc = discs.iter().next_back().copied().unwrap_or(1);
+        // Numbered holes on one disc: the free numbers up to the count.
+        let mut numbered: Vec<u32> = Vec::new();
+        if discs.len() <= 1 {
+            let taken: std::collections::HashSet<u32> = rows.iter().map(|r| r.track_no).collect();
+            let skipped: std::collections::HashSet<u32> = gone.iter().map(|(_, n)| *n).collect();
+            numbered = (1..=progress.total.max(count))
+                .filter(|n| !taken.contains(n) && !skipped.contains(n))
+                .take(holes)
+                .collect();
+        }
+        let mut entries = Vec::with_capacity(progress.total as usize);
+        let mut next = numbered.iter().copied().peekable();
+        for r in rows {
+            while let Some(&n) = next.peek() {
+                if r.track_no == 0 || n > r.track_no {
+                    break;
+                }
+                entries.push(ListingEntry::Hole { disc, no: n });
+                next.next();
+            }
+            entries.push(ListingEntry::Track(r));
+        }
+        entries.extend(next.map(|no| ListingEntry::Hole { disc, no }));
+        while entries.len() < progress.total as usize {
+            entries.push(ListingEntry::Hole { disc, no: 0 });
+        }
+        Self { entries, progress }
+    }
+
+    pub fn holes(&self) -> usize {
+        self.entries.iter().filter(|e| matches!(e, ListingEntry::Hole { .. })).count()
+    }
+
+    pub fn tracks(&self) -> impl Iterator<Item = &TrackRow> {
+        self.entries.iter().filter_map(|e| match e {
+            ListingEntry::Track(t) => Some(t),
+            ListingEntry::Hole { .. } => None,
+        })
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseProgress {
+    /// Tracks with a local file ("3 из 12 у тебя").
     pub local: u32,
-    /// `total_tracks` of the release, or the number of known tracks if larger/unknown.
+    /// Tracks in the library: with a file, or liked / in a playlist from a
+    /// service (stream only, "стрим").
+    #[serde(default)]
+    pub in_library: u32,
+    /// `total_tracks` of the release, or the rows of its page if more or
+    /// unknown: the lines of its page ([`ReleaseListing`]).
     pub total: u32,
 }
 
 impl ReleaseProgress {
-    pub(crate) fn new(local: u32, known: u32, total_tracks: Option<u32>) -> Self {
+    pub(crate) fn new(local: u32, known: u32, rows: u32, total_tracks: Option<u32>) -> Self {
         Self {
             local,
-            total: total_tracks.unwrap_or(0).max(known),
+            in_library: known,
+            total: total_tracks.unwrap_or(0).max(rows).max(known),
         }
+    }
+
+    /// Lines of the page without a file: «1 нет».
+    pub fn missing(&self) -> u32 {
+        self.total.saturating_sub(self.local)
     }
 
     pub fn is_complete(&self) -> bool {
@@ -141,6 +246,9 @@ pub struct ArtistRow {
     pub release_count: u32,
     /// Credited tracks that have a local file.
     pub local_track_count: u32,
+    /// The artist itself is liked.
+    #[serde(default)]
+    pub liked: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,12 +339,25 @@ pub struct PurgedTrack {
     pub release_removed: bool,
 }
 
+/// A file parked in «Подтверди» (see `Library::put_confirm_item`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfirmRow {
+    pub id: i64,
+    pub path: String,
+    /// The «Хочу скачать» item the file was downloaded for.
+    pub wishlist: Option<nikgob_core::model::WishlistId>,
+    /// The importer's own json.
+    pub payload: String,
+    pub created_at: UnixMs,
+}
+
 /// One finished job of "Загрузки → История".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobLogEntry {
     /// Row id, increasing.
     pub seq: i64,
-    /// `import` or `torrent`.
+    /// `import`, `torrent`, or `wish:<item>` (the one line of a wished
+    /// download).
     pub kind: String,
     pub title: String,
     pub subtitle: String,
@@ -261,8 +382,40 @@ pub struct ExportReport {
     pub playlist_entries: usize,
     pub likes: usize,
     pub events: usize,
+    /// Stream-only tracks written to `streams.json` (liked or in playlists).
+    pub stream_tracks: usize,
+    /// «Не рекомендовать» marks written to `rec_feedback.json`.
+    pub rec_feedback: usize,
+    /// Marks of songs saved in a service's library written to `saved.json`.
+    pub saved: usize,
     /// Files whose content actually changed on disk.
     pub files_written: usize,
+}
+
+/// A library playlist linked to a playlist in a streaming service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaylistRemote {
+    pub playlist_id: nikgob_core::model::PlaylistId,
+    pub remote: nikgob_core::streaming::RemoteId,
+    pub sync_mode: nikgob_core::streaming::PlaylistSyncMode,
+    /// The service's snapshot id / etag at the last sync.
+    pub remote_version: Option<String>,
+    pub synced_at: Option<nikgob_core::model::UnixMs>,
+    /// The content at the last sync (JSON, shape owned by the sync code):
+    /// the base of a three-way merge.
+    pub base_json: Option<String>,
+}
+
+/// One liked track of a streaming service as the last pull saw it (table
+/// `remote_like`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteLike {
+    pub remote: nikgob_core::streaming::RemoteId,
+    pub track_id: TrackId,
+    /// The local like was made by a pull from this service (so the service
+    /// may take it back); `false` = the user liked it here (or before).
+    pub pulled: bool,
+    pub seen_at: UnixMs,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +425,56 @@ pub struct ImportReport {
     /// Rows ignored because the local copy was newer (or identical).
     pub skipped: usize,
     pub events_added: usize,
+    /// Stream tracks recreated (or re-linked) from `streams.json`.
+    pub stream_tracks: usize,
+    /// Marks of songs saved in a service's library taken from `saved.json`.
+    pub saved: usize,
     /// Unparsable lines in `events.jsonl`.
     pub invalid_lines: usize,
+}
+
+/// A track whose local file is due for sound analysis
+/// ([`crate::Library::tracks_needing_analysis`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnalysisTodo {
+    pub track_id: TrackId,
+    /// The active local source.
+    pub source_id: SourceId,
+    /// Its path (relative to the library root, or absolute).
+    pub locator: String,
+    /// Which file this is (source id, hash, size): a failure is remembered
+    /// for this key ([`crate::Library::mark_analysis_failed`]).
+    pub file_key: String,
+}
+
+/// A stream-only track due for sound analysis
+/// ([`crate::Library::streams_needing_analysis`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamAnalysisTodo {
+    pub track_id: TrackId,
+    /// Its YouTube video, if it has one that plays (else its song has to
+    /// be found on YouTube Music first).
+    pub youtube: Option<String>,
+}
+
+/// How far the sound analysis is ([`crate::Library::analysis_counts`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AnalysisCounts {
+    /// Tracks with a file analysed from it with the current analysis.
+    pub files_done: u32,
+    /// Tracks with a file, without those that failed to decode.
+    pub files_total: u32,
+    /// Stream-only tracks that are liked or in a playlist and have a
+    /// current analysis.
+    pub streams_done: u32,
+    pub streams_total: u32,
+}
+
+/// One «Не рекомендовать» mark ([`crate::Library::set_rec_feedback`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecFeedback {
+    pub target_kind: String,
+    pub target_id: String,
+    pub dislike: bool,
+    pub updated_at: UnixMs,
 }

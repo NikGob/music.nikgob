@@ -59,6 +59,7 @@ fn import_retag_trash_undo() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -69,6 +70,7 @@ fn import_retag_trash_undo() {
                 watch_inbox: false,
                 torrent_state_dir: root.join("torrent-state"),
                 torrent_offline: true,
+                models_dir: None,
             }),
         },
         Box::new(NullPlayback),
@@ -136,7 +138,7 @@ fn import_retag_trash_undo() {
     let wav2 = root.join("other.wav");
     write_wav(&wav2, 2.0);
     rt.send(Command::ImportFiles(vec![wav2]));
-    wait_for(&rt, "the second import", |s| s.library.track_count == 1);
+    wait_for(&rt, "the second import", |s| s.library.track_count == 1 && s.library.tracks.len() == 1);
     let second = rt.state().library.tracks[0].id;
     let file = std::path::PathBuf::from(lib.active_source(second).unwrap().unwrap().locator);
     let in_trash = std::fs::read_dir(&cfg.trash_dir).unwrap().count();
@@ -177,6 +179,7 @@ fn torrent_download_imports_and_cleans_up() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -187,13 +190,15 @@ fn torrent_download_imports_and_cleans_up() {
                 watch_inbox: false,
                 torrent_state_dir: root.join("torrent-state"),
                 torrent_offline: true,
+                models_dir: None,
             }),
         },
         Box::new(NullPlayback),
         Arc::new(|| {}),
     );
     rt.send(Command::AddTorrentFile(tfile));
-    wait_for(&rt, "the torrent import", |s| s.library.track_count == 2);
+    // The count and the rows of the list are published apart.
+    wait_for(&rt, "the torrent import", |s| s.library.track_count == 2 && s.library.tracks.len() == 2);
     let track = rt.state().library.tracks[0].id;
     let src = lib.active_source(track).unwrap().unwrap();
     assert!(matches!(src.origin, nikgob_core::model::SourceOrigin::Torrent { .. }), "{src:?}");
@@ -216,6 +221,7 @@ fn torrent_download_imports_and_cleans_up() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -226,6 +232,7 @@ fn torrent_download_imports_and_cleans_up() {
                 watch_inbox: false,
                 torrent_state_dir: root.join("torrent-state"),
                 torrent_offline: true,
+                models_dir: None,
             }),
         },
         Box::new(NullPlayback),
@@ -251,6 +258,7 @@ fn queue_without_playable_files_does_not_loop_forever() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib,
+            streams: Vec::new(),
             library_dir: std::env::temp_dir(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -273,8 +281,9 @@ fn queue_without_playable_files_does_not_loop_forever() {
 }
 
 /// Pause/cancel of a folder import used to reach the torrent client with a
-/// non-torrent id ("torrent not found"). Imports are not controllable: the
-/// commands are refused with a toast and the import runs to the end.
+/// non-torrent id ("torrent not found"). An import can be cancelled (by the
+/// importer itself), never paused: the pause is refused with a toast and
+/// the import runs to the end.
 #[test]
 fn pausing_a_folder_import_never_reaches_the_torrent_client() {
     let dir = tempfile::tempdir().unwrap();
@@ -290,6 +299,7 @@ fn pausing_a_folder_import_never_reaches_the_torrent_client() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: Library::open_in_memory().unwrap(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -300,6 +310,7 @@ fn pausing_a_folder_import_never_reaches_the_torrent_client() {
                 watch_inbox: false,
                 torrent_state_dir: root.join("torrent-state"),
                 torrent_offline: true,
+                models_dir: None,
             }),
         },
         Box::new(NullPlayback),
@@ -311,15 +322,14 @@ fn pausing_a_folder_import_never_reaches_the_torrent_client() {
         !s.downloads.active.is_empty() || !s.downloads.history.is_empty()
     });
     // The state guard must not outlive this block: the worker needs the lock.
-    let (id, controllable) = {
+    let (id, pausable) = {
         let s = rt.state();
         let job = s.downloads.active.first().or(s.downloads.history.first()).unwrap();
-        (job.id, job.controllable)
+        (job.id, job.pausable)
     };
-    assert!(!controllable, "a folder import offers no pause/cancel");
+    assert!(!pausable, "a folder import offers no pause");
 
     rt.send(Command::PauseJob(id, true));
-    rt.send(Command::CancelJob(id));
     wait_for(&rt, "the refusal", |s| s.toasts.iter().any(|t| t.text.contains("Импорт нельзя")));
     wait_for(&rt, "the import", |s| s.library.track_count == 3 && s.downloads.active.is_empty());
     let s = rt.state();
@@ -346,6 +356,7 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: Some(prefs_path.clone()),
@@ -356,6 +367,7 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
                 watch_inbox: false,
                 torrent_state_dir: root.join("torrent-state"),
                 torrent_offline: true,
+                models_dir: None,
             }),
         },
         Box::new(NullPlayback),
@@ -363,7 +375,7 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
     );
 
     rt.send(Command::ImportFiles(vec![wav1]));
-    wait_for(&rt, "first import", |s| s.library.track_count == 1);
+    wait_for(&rt, "first import", |s| s.library.track_count == 1 && s.library.tracks.len() == 1);
     let track1 = rt.state().library.tracks[0].id;
     let opus1 = std::path::PathBuf::from(lib.active_source(track1).unwrap().unwrap().locator);
     assert!(opus1.is_file(), "Opus is in the library");
@@ -414,6 +426,7 @@ fn custom_playlist_cover_copy_goes_when_switching_to_auto() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -458,6 +471,7 @@ fn volume_and_queue_come_back_after_a_restart_paused_in_place() {
         Runtime::start(
             RuntimeConfig {
                 library: lib.clone(),
+                streams: Vec::new(),
                 library_dir: cfg.library_dir.clone(),
                 prefs: Prefs::default(),
                 prefs_path: Some(root.join("prefs.json")),
@@ -468,6 +482,7 @@ fn volume_and_queue_come_back_after_a_restart_paused_in_place() {
                     watch_inbox: false,
                     torrent_state_dir: root.join("torrent-state"),
                     torrent_offline: true,
+                    models_dir: None,
                 }),
             },
             Box::new(NullPlayback),
@@ -477,7 +492,7 @@ fn volume_and_queue_come_back_after_a_restart_paused_in_place() {
 
     let rt = start();
     rt.send(Command::ImportFiles(vec![wav.clone()]));
-    wait_for(&rt, "the import", |s| s.library.track_count == 1);
+    wait_for(&rt, "the import", |s| s.library.track_count == 1 && s.library.tracks.len() == 1);
     let track = rt.state().library.tracks[0].id;
     rt.send(Command::PlayTracks { tracks: vec![track], start: 0, context: "Тест".into() });
     wait_for(&rt, "playing", |s| s.player.current.as_ref().is_some_and(|t| t.id == track));
@@ -503,3 +518,374 @@ fn volume_and_queue_come_back_after_a_restart_paused_in_place() {
         s.player.status == nikgob_view::Status::Playing && s.player.position >= Duration::from_millis(1500)
     });
 }
+
+/// The header of Now Playing names what the queue was started from; an
+/// album, a playlist or an artist also gives its page to open, after a
+/// restart too. A queue of picked songs has none.
+#[test]
+fn the_queue_names_the_page_it_was_started_from() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+    use nikgob_view::Route;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let release = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    let ids: Vec<_> = (0..2)
+        .map(|i| {
+            let mut t = Track::new(format!("t{i}"), credit.clone());
+            t.release_id = Some(release.id);
+            t.track_no = i + 1;
+            let t = lib.upsert_track(&t).unwrap();
+            let file = root.join(format!("t{i}.wav"));
+            write_wav(&file, 3.0);
+            lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav)).unwrap();
+            t.id
+        })
+        .collect();
+    let playlist = lib.create_playlist("P").unwrap();
+    lib.playlist_add(playlist.id, ids[1]).unwrap();
+    let start = || {
+        Runtime::start(
+            RuntimeConfig {
+                library: lib.clone(),
+                streams: Vec::new(),
+                library_dir: root.to_owned(),
+                prefs: Prefs::default(),
+                prefs_path: Some(root.join("prefs.json")),
+                settings_path: None,
+                import: None,
+            },
+            Box::new(NullPlayback),
+            Arc::new(|| {}),
+        )
+    };
+    let page = |s: &ViewState| s.player.context_page.clone();
+    let rt = start();
+    rt.send(Command::PlayPlaylist { id: playlist.id, start: None, shuffle: false });
+    wait_for(&rt, "the playlist's page", |s| {
+        page(s) == Some(Route::Playlist(playlist.id)) && s.player.context_line() == "Играет из плейлиста «P»"
+    });
+    rt.send(Command::PlayArtist { id: artist.id, shuffle: false });
+    wait_for(&rt, "the artist's page", |s| page(s) == Some(Route::Artist(artist.id)));
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "Тест".into() });
+    wait_for(&rt, "no page", |s| s.player.context.as_deref() == Some("Тест") && page(s).is_none());
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[1]), shuffle: false });
+    wait_for(&rt, "the album's page", |s| {
+        page(s) == Some(Route::Release(release.id)) && s.player.context_line() == "Играет из альбома «Album»"
+    });
+    rt.send(Command::Pause);
+    wait_for(&rt, "paused", |s| s.player.status == nikgob_view::Status::Paused);
+    drop(rt);
+
+    let rt = start();
+    // The album's page after a restart.
+    wait_for(&rt, "the restored queue and its page", |s| {
+        s.player.current.as_ref().is_some_and(|t| t.id == ids[1]) && page(s) == Some(Route::Release(release.id))
+    });
+    // Another queue: the old page goes with the old queue.
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "Тест".into() });
+    wait_for(&rt, "no page again", |s| s.player.context.as_deref() == Some("Тест") && page(s).is_none());
+}
+
+/// A like of a song with a file and a playlist edit publish what changed in
+/// the library (the album's heart, the songs' hearts, the playlist cards)
+/// without reading it all again; a stream song liked joins the library.
+#[test]
+fn likes_and_playlist_edits_update_the_library_in_place() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, LikeTarget, Release, Source, SourceKind, Track};
+
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let release = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    let tracks: Vec<Track> = (0..2)
+        .map(|i| {
+            let mut t = Track::new(format!("t{i}"), credit.clone());
+            t.release_id = Some(release.id);
+            t.track_no = i + 1;
+            let t = lib.upsert_track(&t).unwrap();
+            lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("Music/t{i}.opus"), Codec::Opus))
+                .unwrap();
+            t
+        })
+        .collect();
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: Vec::new(),
+            library_dir: std::env::temp_dir(),
+            prefs: Prefs { album_like_tracks: true, ..Prefs::default() },
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt.send(Command::LoadLibrary);
+    wait_for(&rt, "the library", |s| s.library.loaded && s.library.tracks.len() == 2);
+    let album = |s: &ViewState| s.library.releases.iter().find(|r| r.id == release.id).map(|r| r.liked);
+    let row = |s: &ViewState, i: usize| s.library.tracks.iter().find(|t| t.id == tracks[i].id).map(|t| t.liked);
+    assert_eq!(album(&rt.state()), Some(false));
+
+    rt.send(Command::Like(LikeTarget::Track(tracks[0].id), true));
+    wait_for(&rt, "the first heart", |s| row(s, 0) == Some(true));
+    assert_eq!(album(&rt.state()), Some(false), "one of two");
+    rt.send(Command::AddToPlaylist(nikgob_view::LIKED_PLAYLIST, vec![tracks[1].id]));
+    wait_for(&rt, "the album's heart", |s| album(s) == Some(true) && row(s, 1) == Some(true));
+    rt.send(Command::Like(LikeTarget::Track(tracks[1].id), false));
+    wait_for(&rt, "the album's heart gone", |s| album(s) == Some(false) && row(s, 1) == Some(false));
+
+    rt.send(Command::CreatePlaylist("Дорога".into()));
+    wait_for(&rt, "the playlist", |s| s.library.playlists.iter().any(|p| p.name == "Дорога"));
+    let id = rt.state().library.playlists.iter().find(|p| p.name == "Дорога").unwrap().id;
+    // Never a track twice: what it has is told, the rest added.
+    let toast = |text: &'static str| move |s: &ViewState| s.toasts.iter().any(|t| t.text == text);
+    rt.send(Command::AddToPlaylist(id, vec![tracks[0].id]));
+    wait_for(&rt, "the first added", toast("Добавлено в «Дорога»"));
+    rt.send(Command::AddToPlaylist(id, vec![tracks[0].id]));
+    wait_for(&rt, "the one it has", toast("Уже есть в «Дорога»"));
+    rt.send(Command::AddToPlaylist(id, vec![tracks[0].id, tracks[1].id]));
+    wait_for(&rt, "the other added", toast("Добавлено 1, 1 уже был в «Дорога»"));
+    assert_eq!(lib.playlist_len(id).unwrap(), 2);
+    rt.send(Command::AddToPlaylist(nikgob_view::LIKED_PLAYLIST, vec![tracks[0].id]));
+    wait_for(&rt, "a like it has", toast("Уже есть в «Любимые»"));
+    rt.send(Command::RenamePlaylist(id, "Путь".into()));
+    wait_for(&rt, "the new name", |s| s.library.playlists.iter().any(|p| p.id == id && p.name == "Путь"));
+    rt.send(Command::DeletePlaylist(id));
+    wait_for(&rt, "the playlist gone", |s| !s.library.playlists.iter().any(|p| p.id == id));
+
+    // A song without a file joins the library with its like.
+    let stream = lib.upsert_track(&Track::new("stream", credit)).unwrap();
+    lib.add_source(&Source::new(stream.id, SourceKind::Spotify, "spotify:track:x", Codec::Vorbis))
+        .unwrap();
+    assert_eq!(rt.state().library.track_count, 2);
+    rt.send(Command::Like(LikeTarget::Track(stream.id), true));
+    wait_for(&rt, "the stream song in", |s| s.library.track_count == 3);
+}
+
+/// By default a like of an album saves it alone: its tracks keep their
+/// likes, it sits on the shelf of liked albums, and an unlike takes only it
+/// away. A like of a single's song saves the single only when asked.
+#[test]
+fn an_album_like_saves_the_album_and_leaves_its_tracks() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, LikeTarget, Release, ReleaseType, Source, SourceKind, Track};
+
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let release = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    let mut single = Release::new("Single", credit.clone());
+    single.release_type = ReleaseType::Single;
+    let single = lib.upsert_release(&single).unwrap();
+    let add = |title: &str, release: &Release, no: u32| {
+        let mut t = Track::new(title, credit.clone());
+        t.release_id = Some(release.id);
+        t.track_no = no;
+        let t = lib.upsert_track(&t).unwrap();
+        lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("Music/{title}.opus"), Codec::Opus)).unwrap();
+        t
+    };
+    let tracks = [add("t0", &release, 1), add("t1", &release, 2)];
+    let song = add("s", &single, 1);
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: Vec::new(),
+            library_dir: std::env::temp_dir(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt.send(Command::LoadLibrary);
+    wait_for(&rt, "the library", |s| s.library.loaded && s.library.tracks.len() == 3);
+    let album = |s: &ViewState, id| s.library.releases.iter().find(|r| r.id == id).map(|r| r.liked);
+    let shelf = |s: &ViewState| s.library.liked_albums.iter().map(|(_, r)| r.id).collect::<Vec<_>>();
+
+    rt.send(Command::Like(LikeTarget::Track(tracks[0].id), true));
+    rt.send(Command::Like(LikeTarget::Track(tracks[1].id), true));
+    wait_for(&rt, "both tracks liked", |s| s.library.tracks.iter().filter(|t| t.liked).count() == 2);
+    assert_eq!(album(&rt.state(), release.id), Some(false), "liked tracks do not like the album");
+
+    rt.send(Command::Like(LikeTarget::Release(release.id), true));
+    wait_for(&rt, "the album saved", |s| album(s, release.id) == Some(true) && shelf(s) == [release.id]);
+    rt.send(Command::Like(LikeTarget::Release(release.id), false));
+    wait_for(&rt, "the album unsaved", |s| album(s, release.id) == Some(false) && shelf(s).is_empty());
+    assert_eq!(lib.liked_count().unwrap(), 2, "the tracks keep their own likes");
+
+    rt.send(Command::Like(LikeTarget::Track(song.id), true));
+    wait_for(&rt, "the song liked", |s| s.library.tracks.iter().any(|t| t.id == song.id && t.liked));
+    assert_eq!(album(&rt.state(), single.id), Some(false));
+    rt.send(Command::SetPrefs(Box::new(Prefs { single_like_saves: true, ..rt.state().prefs.clone() })));
+    rt.send(Command::Like(LikeTarget::Track(song.id), false));
+    rt.send(Command::Like(LikeTarget::Track(song.id), true));
+    wait_for(&rt, "the single saved", |s| album(s, single.id) == Some(true) && shelf(s) == [single.id]);
+    rt.send(Command::Like(LikeTarget::Track(song.id), false));
+    wait_for(&rt, "the single unsaved", |s| album(s, single.id) == Some(false) && shelf(s).is_empty());
+
+    // The old way: the album likes its tracks, its heart follows them.
+    rt.send(Command::SetPrefs(Box::new(Prefs { album_like_tracks: true, ..rt.state().prefs.clone() })));
+    rt.send(Command::Like(LikeTarget::Release(release.id), false));
+    wait_for(&rt, "its tracks unliked", |s| s.library.tracks.iter().all(|t| !t.liked));
+    rt.send(Command::Like(LikeTarget::Release(release.id), true));
+    wait_for(&rt, "its tracks liked", |s| album(s, release.id) == Some(true) && s.library.tracks.iter().filter(|t| t.liked).count() == 2);
+}
+
+/// Under «Только скачанное» an album that is only partly downloaded still
+/// plays whole, its songs that only stream too (each looked up when it
+/// comes up): played, from one of its songs, after the queue, and the
+/// library's own switch alike. Its artist's songs and a playlist keep to
+/// the songs with a file; a song that only streams plays there when it is
+/// the one picked.
+#[test]
+fn only_downloaded_still_plays_an_album_whole() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let release = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    let tracks: Vec<Track> = (0..3)
+        .map(|i| {
+            let mut t = Track::new(format!("t{i}"), credit.clone());
+            t.release_id = Some(release.id);
+            t.track_no = i + 1;
+            let t = lib.upsert_track(&t).unwrap();
+            if i == 1 {
+                lib.add_source(&Source::new(t.id, SourceKind::Spotify, "spotify:track:x", Codec::Vorbis)).unwrap();
+            } else {
+                let file = dir.path().join(format!("t{i}.wav"));
+                write_wav(&file, 2.0);
+                lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav))
+                    .unwrap();
+            }
+            t
+        })
+        .collect();
+    let ids: Vec<_> = tracks.iter().map(|t| t.id).collect();
+    let playlist = lib.create_playlist("P").unwrap();
+    for t in [ids[1], ids[2], ids[0]] {
+        lib.playlist_add(playlist.id, t).unwrap();
+    }
+    let prefs = Prefs { mixes_downloaded_only: true, ..Prefs::default() };
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs,
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let queued = |s: &ViewState| {
+        let mut ids: Vec<_> = s.queue.current.iter().map(|t| t.id).chain(s.queue.next.iter().map(|e| e.track.id)).collect();
+        ids.extend(s.queue.prev.iter().map(|e| e.track.id));
+        ids
+    };
+    // Each step plays another song first, so a state of the step before
+    // never passes for it.
+    let playing = |s: &ViewState, t: usize, n: usize, stream: bool| {
+        let q = queued(s);
+        s.queue.current.as_ref().is_some_and(|c| c.id == ids[t]) && q.len() == n && q.contains(&ids[1]) == stream
+    };
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the whole album", |s| playing(s, 0, 3, true));
+    rt.send(Command::PlayArtist { id: artist.id, shuffle: false });
+    wait_for(&rt, "the artist's downloaded songs", |s| playing(s, 0, 2, false));
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[2]), shuffle: false });
+    wait_for(&rt, "the whole album from a song", |s| playing(s, 2, 3, true));
+    rt.send(Command::PlayPlaylist { id: playlist.id, start: None, shuffle: false });
+    wait_for(&rt, "the playlist's downloaded songs", |s| playing(s, 2, 2, false));
+    // Picked in the playlist, the song that only streams joins (it cannot
+    // play here: no service, so the next one plays).
+    rt.send(Command::PlayPlaylist { id: playlist.id, start: Some(ids[1]), shuffle: false });
+    wait_for(&rt, "the picked stream song", |s| queued(s).len() == 3);
+    rt.send(Command::PlayArtist { id: artist.id, shuffle: false });
+    wait_for(&rt, "the artist's downloaded songs again", |s| playing(s, 0, 2, false));
+    rt.send(Command::EnqueueRelease(release.id));
+    wait_for(&rt, "the whole album after them", |s| {
+        let q = queued(s);
+        q.len() == 5 && q.contains(&ids[1])
+    });
+    // The library's switch instead of the home's: the same.
+    let prefs = Prefs { library_only_downloaded: true, mixes_downloaded_only: false, ..rt.state().prefs.clone() };
+    rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&rt, "the library's switch", |s| s.prefs.library_only_downloaded && !s.prefs.mixes_downloaded_only);
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[0]), shuffle: false });
+    wait_for(&rt, "the whole album again", |s| playing(s, 0, 3, true));
+}
+
+/// «Сыграть следующим» of an album while a track plays: the whole album in
+/// its order right after the current track, then the rest of the queue;
+/// under «Только скачанное» too, as playing it.
+#[test]
+fn an_album_played_next_goes_right_after_the_current_track() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let add = |title: &str, release: Option<&Release>, no: u32, local: bool| {
+        let mut t = Track::new(title, credit.clone());
+        t.release_id = release.map(|r| r.id);
+        t.track_no = no;
+        let t = lib.upsert_track(&t).unwrap();
+        if local {
+            let file = dir.path().join(format!("{title}.wav"));
+            write_wav(&file, 2.0);
+            lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav)).unwrap();
+        } else {
+            lib.add_source(&Source::new(t.id, SourceKind::Spotify, format!("spotify:track:{title}"), Codec::Vorbis)).unwrap();
+        }
+        t
+    };
+    let single = lib.upsert_release(&Release::new("Single", credit.clone())).unwrap();
+    let queue: Vec<Track> = (0..3).map(|i| add(&format!("q{i}"), Some(&single), i + 1, true)).collect();
+    let album = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    // Added out of order: the album plays by its track numbers.
+    let a3 = add("a3", Some(&album), 3, true);
+    let a1 = add("a1", Some(&album), 1, true);
+    let a2 = add("a2", Some(&album), 2, false);
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let order = |s: &ViewState| -> Vec<_> { s.queue.current.iter().map(|t| t.id).chain(s.queue.next.iter().map(|e| e.track.id)).collect() };
+    let ids: Vec<_> = queue.iter().map(|t| t.id).collect();
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "q".into() });
+    wait_for(&rt, "the queue", |s| order(s) == ids);
+    rt.send(Command::PlayReleaseNext(album.id));
+    let want = vec![ids[0], a1.id, a2.id, a3.id, ids[1], ids[2]];
+    wait_for(&rt, "the album after the current track", |s| order(s) == want);
+    assert!(rt.state().toasts.iter().any(|t| t.text == "Следующим: «Album»"));
+    // Only the downloaded: the album still goes in whole.
+    rt.send(Command::SetPref(nikgob_view::PrefPatch::MixesDownloadedOnly(true)));
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "q".into() });
+    wait_for(&rt, "the queue again", |s| order(s) == ids && s.prefs.mixes_downloaded_only);
+    rt.send(Command::PlayReleaseNext(album.id));
+    let want = vec![ids[0], a1.id, a2.id, a3.id, ids[1], ids[2]];
+    wait_for(&rt, "the whole album after the current track", |s| order(s) == want);
+}
+

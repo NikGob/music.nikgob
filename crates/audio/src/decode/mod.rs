@@ -7,9 +7,9 @@ mod symphonia_src;
 use std::path::Path;
 
 pub(crate) use pcm::PcmFrames;
-pub(crate) use symphonia_src::SymphoniaSource;
+pub(crate) use symphonia_src::{StreamInfo, SymphoniaSource};
 
-use crate::types::DecodeError;
+use crate::types::{ByteSource, DecodeError};
 
 /// Outcome of one [`FrameSource::read`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,4 +41,11 @@ pub(crate) trait FrameSource: Send {
 /// Opens a file as a frame source.
 pub(crate) fn open_file(path: &Path) -> Result<SymphoniaSource, DecodeError> {
     SymphoniaSource::open(path)
+}
+
+/// Opens the encoded bytes of a stream as a frame source.
+pub(crate) fn open_stream(
+    bytes: Box<dyn ByteSource>,
+) -> Result<(SymphoniaSource, StreamInfo), DecodeError> {
+    SymphoniaSource::open_stream(bytes)
 }

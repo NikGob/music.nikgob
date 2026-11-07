@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::tap::VisualizerTap;
 
@@ -27,6 +27,15 @@ impl PlayClock {
 
     pub(crate) fn played_ns(&self) -> u64 {
         u64::try_from(self.played().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Between rendering a sample and the device playing it, as the device
+    /// last said (zero for the manual clock).
+    pub(crate) fn latency(&self) -> Duration {
+        match self {
+            Self::Device(clock) => clock.latency(),
+            Self::Manual(_) => Duration::ZERO,
+        }
     }
 }
 
@@ -132,6 +141,18 @@ pub(crate) struct Shared {
     pub consumed_id: AtomicU64,
     /// Callback blocks that ran out of data while an item was playing.
     pub underruns: AtomicU64,
+    /// Callbacks of steady playback that came late or found the device
+    /// buffer drained: the device itself ran dry.
+    pub late_callbacks: AtomicU64,
+    /// The longest time between two such callbacks since the control thread
+    /// last took it, in microseconds.
+    pub worst_callback_gap_us: AtomicU64,
+    /// The fewest samples the ring held at a callback since the control
+    /// thread last took it (`u64::MAX`: not measured).
+    pub ring_low_samples: AtomicU64,
+    /// The device buffer asked for, in nanoseconds (0: the driver's own,
+    /// or a size in frames, unknown here).
+    pub device_buffer_ns: AtomicU64,
     // --- published by the decoder thread ---
     /// The decoder has nothing to produce (no current item).
     pub decoder_idle: AtomicBool,
@@ -158,6 +179,10 @@ impl Shared {
             consumed_pos_ns: AtomicU64::new(0),
             consumed_id: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
+            late_callbacks: AtomicU64::new(0),
+            worst_callback_gap_us: AtomicU64::new(0),
+            ring_low_samples: AtomicU64::new(u64::MAX),
+            device_buffer_ns: AtomicU64::new(0),
             decoder_idle: AtomicBool::new(true),
             inflight: AtomicU32::new(0),
             end_frame: AtomicU64::new(u64::MAX),
@@ -167,6 +192,43 @@ impl Shared {
 
     pub(crate) fn volume_gain(&self) -> f32 {
         f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+}
+
+/// Counts occurrences of something worth a warning and says when to report
+/// them: at most once per `every`, with everything counted since the last
+/// report. Not for the audio callback (it is used by the threads that log).
+#[derive(Debug)]
+pub(crate) struct LogLimiter {
+    every: Duration,
+    last: Option<Instant>,
+    pending: u64,
+}
+
+impl LogLimiter {
+    pub(crate) const fn new(every: Duration) -> Self {
+        Self {
+            every,
+            last: None,
+            pending: 0,
+        }
+    }
+
+    /// Adds `n` occurrences seen at `now` (0 just asks). Returns how many to
+    /// report when a report is due, and starts a new period.
+    pub(crate) fn record(&mut self, n: u64, now: Instant) -> Option<u64> {
+        self.pending = self.pending.saturating_add(n);
+        if self.pending == 0 {
+            return None;
+        }
+        let due = self
+            .last
+            .is_none_or(|t| now.saturating_duration_since(t) >= self.every);
+        if !due {
+            return None;
+        }
+        self.last = Some(now);
+        Some(std::mem::take(&mut self.pending))
     }
 }
 
@@ -223,6 +285,21 @@ mod tests {
         assert!((volume_curve(0.5) - 0.125).abs() < 1e-6);
         assert_eq!(volume_curve(2.0), 1.0);
         assert_eq!(volume_curve(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn log_limiter_reports_once_per_period_with_everything_counted() {
+        let every = Duration::from_secs(10);
+        let mut l = LogLimiter::new(every);
+        let t0 = Instant::now();
+        assert_eq!(l.record(0, t0), None, "nothing to report");
+        assert_eq!(l.record(1, t0), Some(1), "the first one goes out at once");
+        assert_eq!(l.record(2, t0 + Duration::from_secs(3)), None);
+        assert_eq!(l.record(0, t0 + Duration::from_secs(9)), None);
+        // The period is over: the held-back ones go out, even with no new one.
+        assert_eq!(l.record(0, t0 + every), Some(2));
+        assert_eq!(l.record(0, t0 + every * 3), None);
+        assert_eq!(l.record(4, t0 + every * 3), Some(4));
     }
 
     #[test]

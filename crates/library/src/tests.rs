@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use nikgob_core::model::{
-    Analysis, Artist, ArtistCredit, Codec, EventContext, EventType, LikeTarget, Palette,
+    Analysis, AnalysisSource, Artist, ArtistCredit, Codec, Event, EventContext, EventId, EventType, LikeTarget, Palette,
     PlaylistId, Release, ReleaseType, Source, SourceKind, SourceOrigin, Track, TrackId,
 };
 use serde_json::Value;
@@ -531,6 +531,22 @@ fn move_and_remove_entries() {
     lib.playlist_remove(first.id).unwrap();
     assert_ne!(lib.playlist_add(p.id, t.id).unwrap().id, first.id);
     assert_eq!(lib.playlist_len(p.id).unwrap(), 5);
+}
+
+#[test]
+fn adding_to_a_playlist_skips_what_it_has() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let p = lib.create_playlist("Ночь").unwrap();
+    let ts: Vec<TrackId> = (0..5).map(|k| track(&lib, &a, None, &format!("t{k}"), k).id).collect();
+    assert_eq!(lib.playlist_add_missing(p.id, &ts[..2]).unwrap(), (2, 0));
+    // Two it has, three new (one of them twice in the list).
+    let more = [ts[0], ts[2], ts[1], ts[3], ts[4], ts[3]];
+    assert_eq!(lib.playlist_add_missing(p.id, &more).unwrap(), (3, 2));
+    assert_eq!(lib.playlist_len(p.id).unwrap(), 5);
+    assert_eq!(lib.playlist_add_missing(p.id, &ts[4..]).unwrap(), (0, 1));
+    let order: Vec<TrackId> = lib.playlist_entries(p.id, 0, u32::MAX).unwrap().iter().map(|e| e.track.id).collect();
+    assert_eq!(order, ts);
 }
 
 #[test]
@@ -1160,24 +1176,264 @@ fn palette_and_analysis_roundtrip() {
     assert_eq!(lib.get_palette(r.id).unwrap().unwrap(), p);
     assert!(lib.releases_needing_palette(10).unwrap().is_empty());
 
-    assert_eq!(lib.tracks_needing_analysis("bliss-1", 10).unwrap(), [t.id]);
-    let an = Analysis {
-        track_id: t.id,
-        bliss_vector: (0..20).map(|i| i as f32 * 0.25 - 1.0).collect(),
-        analyzed_with: "bliss-1".into(),
-    };
-    lib.put_analysis(&an).unwrap();
+    assert_eq!(due(&lib, "bliss-1"), [t.id]);
+    let an = analysis(t.id, "bliss-1", AnalysisSource::File, 0.0);
+    assert!(lib.put_analysis(&an).unwrap());
     assert_eq!(lib.get_analysis(t.id).unwrap().unwrap(), an);
-    assert!(
-        lib.tracks_needing_analysis("bliss-1", 10)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(due(&lib, "bliss-1").is_empty());
+    assert_eq!(due(&lib, "bliss-2"), [t.id], "new version re-queues");
+}
+
+fn analysis(track: TrackId, with: &str, source: AnalysisSource, x: f32) -> Analysis {
+    Analysis {
+        track_id: track,
+        bliss_vector: (0..23).map(|i| i as f32 * 0.05 - 1.0 + x).collect(),
+        analyzed_with: with.into(),
+        source,
+    }
+}
+
+fn due(lib: &Library, with: &str) -> Vec<TrackId> {
+    lib.tracks_needing_analysis(with, 100)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.track_id)
+        .collect()
+}
+
+#[test]
+fn analysis_queue_prefers_files_and_skips_failed_files_until_they_change() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let old = track(&lib, &a, None, "Old", 1);
+    let file = local(&lib, &old, "old.opus", Codec::Opus, Some(160));
+    let new = track(&lib, &a, None, "New", 2);
+    local(&lib, &new, "new.opus", Codec::Opus, Some(160));
+    let stream_only = track(&lib, &a, None, "Stream", 3);
+    lib.add_source(&source(&stream_only, SourceKind::Youtube, "vid", Codec::Opus, None))
+        .unwrap();
+
+    // Files only, never-analysed newest first; the todo names the file.
+    let todo = lib.tracks_needing_analysis("v2", 10).unwrap();
+    assert_eq!(todo.iter().map(|t| t.track_id).collect::<Vec<_>>(), [new.id, old.id]);
+    let old_todo = todo.iter().find(|t| t.track_id == old.id).unwrap().clone();
+    assert_eq!((old_todo.source_id, old_todo.locator.as_str()), (file.id, "old.opus"));
+    assert_eq!(lib.tracks_needing_analysis("v2", 1).unwrap().len(), 1);
+
+    // An analysis of another version goes after the never-analysed ones.
+    lib.put_analysis(&analysis(new.id, "v1", AnalysisSource::File, 0.0)).unwrap();
+    assert_eq!(due(&lib, "v2"), [old.id, new.id]);
+    lib.put_analysis(&analysis(new.id, "v2", AnalysisSource::File, 0.0)).unwrap();
+    assert_eq!(due(&lib, "v2"), [old.id]);
+
+    // A stream's analysis of a track with a file is done again from the file…
+    assert!(lib.put_analysis(&analysis(old.id, "v2", AnalysisSource::Youtube, 0.0)).unwrap());
+    assert_eq!(due(&lib, "v2"), [old.id]);
+    let from_file = analysis(old.id, "v2", AnalysisSource::File, 0.5);
+    assert!(lib.put_analysis(&from_file).unwrap());
+    assert!(due(&lib, "v2").is_empty());
+    // …and a stream's never replaces the file's of the same version.
+    assert!(!lib.put_analysis(&analysis(old.id, "v2", AnalysisSource::Youtube, 0.9)).unwrap());
+    assert_eq!(lib.get_analysis(old.id).unwrap().unwrap(), from_file);
+    assert!(lib.put_analysis(&analysis(old.id, "v3", AnalysisSource::Youtube, 0.9)).unwrap());
+
+    // A file that cannot be decoded is not tried again…
+    lib.mark_analysis_failed(&old_todo, "cannot decode").unwrap();
+    assert!(due(&lib, "v3").iter().all(|t| *t != old.id));
+    assert_eq!(lib.analysis_counts("v3").unwrap().files_total, 1, "nor counted");
+    // …until the track's file changes (a better file arrives).
+    let flac = local(&lib, &old, "old.flac", Codec::Flac, None);
+    let again = lib.tracks_needing_analysis("v3", 10).unwrap();
+    let again = again.iter().find(|t| t.track_id == old.id).expect("queued again");
+    assert_eq!(again.source_id, flac.id);
+    assert_ne!(again.file_key, old_todo.file_key);
+    // The file's analysis clears the mark.
+    lib.mark_analysis_failed(again, "once more").unwrap();
+    lib.put_analysis(&analysis(old.id, "v3", AnalysisSource::File, 0.0)).unwrap();
+    lib.put_analysis(&analysis(old.id, "v4", AnalysisSource::File, 0.0)).unwrap();
+    assert!(due(&lib, "v5").contains(&old.id));
+
+    // A deleted track is neither queued nor in the vectors.
+    lib.mark_track_deleted(new.id, 1).unwrap();
+    assert!(!due(&lib, "v9").contains(&new.id));
+    assert!(lib.analysis_vectors("v2").unwrap().is_empty());
+    // Purged for good, its analysis and failure mark go along.
+    lib.mark_analysis_failed(&todo[0], "x").unwrap();
+    lib.purge_track(new.id).unwrap();
+    assert!(lib.get_analysis(new.id).unwrap().is_none());
+    let left: u32 = lib
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM analysis_failed", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn analysis_vectors_and_progress_counts() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let mut files = Vec::new();
+    for i in 0..3 {
+        let t = track(&lib, &a, None, &format!("F{i}"), i);
+        local(&lib, &t, &format!("f{i}.opus"), Codec::Opus, Some(160));
+        files.push(t);
+    }
+    // Stream-only: liked, in a playlist, in a deleted playlist, neither.
+    let stream = |title: &str, id: &str| {
+        let t = track(&lib, &a, None, title, 9);
+        lib.add_source(&source(&t, SourceKind::Youtube, id, Codec::Opus, None)).unwrap();
+        t
+    };
+    let liked = stream("Liked", "v1");
+    lib.like(liked.id).unwrap();
+    let listed = stream("Listed", "v2");
+    let p = lib.create_playlist("P").unwrap();
+    lib.playlist_add(p.id, listed.id).unwrap();
+    let dropped = stream("Dropped", "v3");
+    let gone = lib.create_playlist("Gone").unwrap();
+    lib.playlist_add(gone.id, dropped.id).unwrap();
+    lib.delete_playlist(gone.id).unwrap();
+    let seen = stream("Seen", "v4");
+    let no_sound = track(&lib, &a, None, "Wish", 10);
+    lib.like(no_sound.id).unwrap();
+
+    let empty = lib.analysis_counts("v2").unwrap();
     assert_eq!(
-        lib.tracks_needing_analysis("bliss-2", 10).unwrap(),
-        [t.id],
-        "new version re-queues"
+        empty,
+        crate::AnalysisCounts {
+            files_done: 0,
+            files_total: 3,
+            streams_done: 0,
+            streams_total: 2
+        }
     );
+
+    lib.put_analysis(&analysis(files[0].id, "v2", AnalysisSource::File, 0.0)).unwrap();
+    lib.put_analysis(&analysis(files[1].id, "v1", AnalysisSource::File, 0.0)).unwrap();
+    lib.put_analysis(&analysis(files[2].id, "v2", AnalysisSource::Youtube, 0.0)).unwrap();
+    lib.put_analysis(&analysis(liked.id, "v2", AnalysisSource::Youtube, 0.3)).unwrap();
+    lib.put_analysis(&analysis(seen.id, "v2", AnalysisSource::Youtube, 0.0)).unwrap();
+    let c = lib.analysis_counts("v2").unwrap();
+    assert_eq!((c.files_done, c.files_total), (1, 3), "an old version or a stream's is not done");
+    assert_eq!((c.streams_done, c.streams_total), (1, 2));
+
+    // Everything current, for the index; another version is not comparable.
+    let mut vectors = lib.analysis_vectors("v2").unwrap();
+    vectors.sort_by_key(|v| v.track_id);
+    let mut want = vec![files[0].id, files[2].id, liked.id, seen.id];
+    want.sort();
+    assert_eq!(vectors.iter().map(|v| v.track_id).collect::<Vec<_>>(), want);
+    let l = vectors.iter().find(|v| v.track_id == liked.id).unwrap();
+    assert_eq!((l.source, l.bliss_vector.len()), (AnalysisSource::Youtube, 23));
+    assert_eq!(l, &analysis(liked.id, "v2", AnalysisSource::Youtube, 0.3));
+    assert_eq!(lib.analysis_vectors("v1").unwrap().len(), 1);
+}
+
+#[test]
+fn the_stream_analysis_queue_skips_failures_until_they_are_old() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let stream = |title: &str, kind: SourceKind, id: &str, n: u32| {
+        let t = track(&lib, &a, None, title, n);
+        lib.add_source(&source(&t, kind, id, Codec::Opus, None)).unwrap();
+        lib.like(t.id).unwrap();
+        t
+    };
+    let older = stream("Older", SourceKind::Youtube, "v1", 1);
+    let spotify = stream("Spotify", SourceKind::Spotify, "s1", 2);
+    let filed = stream("File", SourceKind::Youtube, "v3", 3);
+    local(&lib, &filed, "f.opus", Codec::Opus, Some(160));
+    let unliked = track(&lib, &a, None, "Seen", 4);
+    lib.add_source(&source(&unliked, SourceKind::Youtube, "v4", Codec::Opus, None)).unwrap();
+
+    let due = |before: i64| -> Vec<(TrackId, Option<String>)> {
+        lib.streams_needing_analysis("v2", before, 10)
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.track_id, t.youtube))
+            .collect()
+    };
+    // Newest first; a Spotify-only track has no video yet; not a file's.
+    assert_eq!(due(0), [(spotify.id, None), (older.id, Some("v1".into()))]);
+
+    lib.mark_stream_analysis_failed(spotify.id, "no YouTube Music song").unwrap();
+    assert_eq!(due(0), [(older.id, Some("v1".into()))], "a fresh failure waits");
+    assert_eq!(due(crate::now_ms() + 1).len(), 2, "an old one is tried again");
+    let c = lib.analysis_counts("v2").unwrap();
+    assert_eq!((c.streams_done, c.streams_total), (0, 1), "nor counted meanwhile");
+
+    lib.put_analysis(&analysis(older.id, "v2", AnalysisSource::Youtube, 0.1)).unwrap();
+    assert!(due(0).is_empty());
+    assert_eq!(lib.streams_needing_analysis("v3", 0, 10).unwrap().len(), 1, "another version");
+    let c = lib.analysis_counts("v2").unwrap();
+    assert_eq!((c.streams_done, c.streams_total), (1, 1));
+    // The stream's mark does not keep a file out of the file queue.
+    assert!(lib.tracks_needing_analysis("v2", 10).unwrap().iter().any(|t| t.track_id == filed.id));
+}
+
+#[test]
+fn rec_feedback_is_last_writer_wins() {
+    let lib = lib();
+    assert!(lib.rec_dislikes().unwrap().is_empty());
+    let t = TrackId::new();
+    lib.set_rec_feedback("track", &t.to_string(), true).unwrap();
+    lib.set_rec_feedback("artist", "a-1", true).unwrap();
+    assert!(lib.is_rec_disliked("track", &t.to_string()).unwrap());
+    assert!(!lib.is_rec_disliked("artist", &t.to_string()).unwrap());
+    let all = lib.rec_dislikes().unwrap();
+    assert_eq!(
+        all.iter().map(|f| (f.target_kind.as_str(), f.target_id.as_str())).collect::<Vec<_>>(),
+        [("artist", "a-1"), ("track", t.to_string().as_str())],
+        "newest first"
+    );
+    assert!(all.iter().all(|f| f.dislike));
+    // «Отменить»: cleared, the row stays with its time.
+    lib.set_rec_feedback("artist", "a-1", false).unwrap();
+    assert!(!lib.is_rec_disliked("artist", "a-1").unwrap());
+    assert_eq!(lib.rec_dislikes().unwrap().len(), 1);
+    let (dislike, at): (bool, i64) = lib
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT dislike, updated_at FROM rec_feedback WHERE target_id = 'a-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert!(!dislike && at > all[0].updated_at - 1);
+    // An older write does not win.
+    lib.write(|tx| {
+        tx.execute(
+            "INSERT INTO rec_feedback(target_kind, target_id, dislike, updated_at) VALUES ('artist', 'a-1', 1, 5)
+             ON CONFLICT(target_kind, target_id) DO UPDATE SET dislike = excluded.dislike,
+                updated_at = excluded.updated_at WHERE excluded.updated_at >= rec_feedback.updated_at",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(!lib.is_rec_disliked("artist", "a-1").unwrap());
+}
+
+#[test]
+fn migration_keeps_analyses_as_from_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.db");
+    let id = "00000000-0000-0000-0000-000000000001";
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for (i, sql) in crate::migrations::MIGRATIONS.iter().take(8).enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i as u32 + 1).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO analysis(track_id, bliss_vector, analyzed_with, analyzed_at) VALUES (?1, ?2, 'bliss-1', 1)",
+            rusqlite::params![id, vec![0u8; 8]],
+        )
+        .unwrap();
+    }
+    let lib = Library::open(&path).unwrap();
+    let an = lib.get_analysis(id.parse().unwrap()).unwrap().unwrap();
+    assert_eq!((an.source, an.bliss_vector), (AnalysisSource::File, vec![0.0, 0.0]));
 }
 
 // ---------------------------------------------------------------- userdata
@@ -1204,6 +1460,45 @@ fn pair() -> Pair {
         })
         .collect();
     Pair { a, b, tracks }
+}
+
+/// A play's origin, what played it, why it ended and how it was heard go
+/// out with the history and come back; a history written before them
+/// still imports.
+#[test]
+fn events_carry_their_outcome_through_export_and_import() {
+    use nikgob_core::model::{EndReason, EventMeta, EventOrigin};
+    let Pair { a, b, tracks } = pair();
+    let meta = |origin, end_reason| EventMeta { origin, context_id: Some("release:x".into()), end_reason, ..EventMeta::default() };
+    a.record_event_with(tracks[0].id, EventType::Start, None, Some(0), EventContext::Album, meta(Some(EventOrigin::Manual), None))
+        .unwrap();
+    let heard = EventMeta { attention: Some(0.75), volume: Some(0.5), ..meta(None, Some(EndReason::AppClosed)) };
+    a.record_event_with(tracks[0].id, EventType::Skip, None, Some(4_000), EventContext::Album, heard).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("userdata");
+    a.export_userdata(&out).unwrap();
+    let mut text = fs::read_to_string(out.join("events.jsonl")).unwrap();
+    assert!(text.contains("\"origin\":\"manual\"") && text.contains("\"end_reason\":\"app_closed\""), "{text}");
+    assert!(text.contains("\"attention\":0.75") && text.contains("\"volume\":0.5"), "{text}");
+    // A line of an older export: no such fields.
+    let old = format!(
+        "{{\"id\":\"{}\",\"ts\":5,\"track_id\":\"{}\",\"source_kind\":null,\"type\":\"start\",\"position_ms\":0,\"context\":\"album\",\"device\":\"old\"}}
+",
+        EventId::new(),
+        tracks[1].id
+    );
+    text.insert_str(0, &old);
+    fs::write(out.join("events.jsonl"), text).unwrap();
+    let report = b.import_userdata(&out).unwrap();
+    assert_eq!((report.events_added, report.invalid_lines), (3, 0));
+    let events = b.recent_events(10).unwrap();
+    let start = events.iter().find(|e| e.track_id == tracks[0].id && e.event_type == EventType::Start).unwrap();
+    assert_eq!((start.origin, start.context_id.as_deref()), (Some(EventOrigin::Manual), Some("release:x")));
+    let skip = events.iter().find(|e| e.event_type == EventType::Skip).unwrap();
+    assert_eq!(skip.end_reason, Some(EndReason::AppClosed));
+    assert_eq!((skip.attention, skip.volume, start.attention), (Some(0.75), Some(0.5), None));
+    let older = events.iter().find(|e| e.track_id == tracks[1].id).unwrap();
+    assert_eq!((older.origin, older.context_id.clone(), older.end_reason), (None, None, None));
 }
 
 #[test]
@@ -1295,17 +1590,81 @@ fn export_import_roundtrip_rebuilds_user_data() {
     assert_eq!(again.events_added, 0);
     assert_eq!(b.count_events().unwrap(), 2);
 
-    // New events appended later are exported (count changed -> rewritten).
-    a.record_event(
-        tracks[2].id,
-        EventType::Skip,
-        None,
-        None,
-        EventContext::Radio,
-    )
-    .unwrap();
+    // New events are appended: the lines already there stay as they are.
+    let before = fs::read_to_string(out.join("events.jsonl")).unwrap();
+    let skip = a
+        .record_event(
+            tracks[2].id,
+            EventType::Skip,
+            None,
+            None,
+            EventContext::Radio,
+        )
+        .unwrap();
     assert_eq!(a.export_userdata(&out).unwrap().files_written, 1);
+    let after = fs::read_to_string(out.join("events.jsonl")).unwrap();
+    assert!(after.starts_with(&before));
+    assert_eq!(after.lines().count(), 3);
+    assert_eq!(a.export_userdata(&out).unwrap().files_written, 0);
     assert_eq!(b.import_userdata(&out).unwrap().events_added, 1);
+
+    // An event older than the last one written (an imported history): the
+    // file is written anew, still oldest first.
+    let old = Event {
+        id: EventId::new(),
+        ts: 1,
+        ..skip.clone()
+    };
+    a.record_event_raw(&old).unwrap();
+    assert_eq!(a.export_userdata(&out).unwrap().files_written, 1);
+    let lines: Vec<String> = fs::read_to_string(out.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(lines.len(), 4);
+    assert!(lines[0].contains(&old.id.to_string()));
+    assert!(lines[3].contains(&skip.id.to_string()));
+
+    // A file changed by someone else is written anew too.
+    fs::write(out.join("events.jsonl"), "").unwrap();
+    assert_eq!(a.export_userdata(&out).unwrap().files_written, 1);
+    assert_eq!(
+        fs::read_to_string(out.join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        4
+    );
+    assert_eq!(b.import_userdata(&out).unwrap().events_added, 1);
+}
+
+#[test]
+fn the_userdata_fingerprint_moves_with_every_change_the_export_writes() {
+    let Pair { a, tracks, .. } = pair();
+    let mut seen = vec![a.userdata_fingerprint().unwrap()];
+    let mut changed = |a: &Library, what: &str| {
+        let fp = a.userdata_fingerprint().unwrap();
+        assert!(!seen.contains(&fp), "{what} left the fingerprint as it was");
+        seen.push(fp);
+    };
+    a.like(tracks[0].id).unwrap();
+    changed(&a, "a like");
+    a.unlike(tracks[0].id).unwrap();
+    changed(&a, "an unlike");
+    let p = a.create_playlist("Дорога").unwrap();
+    changed(&a, "a playlist");
+    let e = a.playlist_add(p.id, tracks[1].id).unwrap();
+    changed(&a, "an entry");
+    a.rename_playlist(p.id, "Путь").unwrap();
+    changed(&a, "a rename");
+    a.playlist_remove(e.id).unwrap();
+    changed(&a, "a removed entry");
+    a.record_event(tracks[2].id, EventType::Complete, None, None, EventContext::Radio)
+        .unwrap();
+    changed(&a, "an event");
+    // Nothing changed: the same.
+    assert_eq!(&a.userdata_fingerprint().unwrap(), seen.last().unwrap());
 }
 
 #[test]
@@ -1432,6 +1791,30 @@ fn import_ties_prefer_tombstones_then_device() {
     });
     lib.import_userdata(dir.path()).unwrap();
     assert!(!lib.is_liked(t.id).unwrap());
+}
+
+#[test]
+fn rec_feedback_travels_with_the_user_data() {
+    let a = lib();
+    let dir = tempfile::tempdir().unwrap();
+    a.export_userdata(dir.path()).unwrap();
+    assert!(!dir.path().join(crate::REC_FEEDBACK_FILE).exists(), "nothing to write yet");
+    a.set_rec_feedback("track", "t1", true).unwrap();
+    a.set_rec_feedback("artist", "a1", true).unwrap();
+    a.set_rec_feedback("artist", "a1", false).unwrap();
+    let rep = a.export_userdata(dir.path()).unwrap();
+    assert_eq!(rep.rec_feedback, 2, "cleared marks travel too");
+
+    let b = lib();
+    b.set_rec_feedback("track", "t2", true).unwrap();
+    b.import_userdata(dir.path()).unwrap();
+    assert!(b.is_rec_disliked("track", "t1").unwrap());
+    assert!(!b.is_rec_disliked("artist", "a1").unwrap());
+    assert!(b.is_rec_disliked("track", "t2").unwrap(), "its own mark stays");
+    // A newer local undo is not overwritten by the older mark.
+    b.set_rec_feedback("track", "t1", false).unwrap();
+    b.import_userdata(dir.path()).unwrap();
+    assert!(!b.is_rec_disliked("track", "t1").unwrap());
 }
 
 #[test]
@@ -1712,8 +2095,50 @@ fn purging_removes_rows_files_and_empty_albums() {
 }
 
 #[test]
+fn liking_an_album_saves_it_and_leaves_its_tracks() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let r = release(&lib, &a, "Album", None);
+    let t1 = track(&lib, &a, Some(&r), "One", 1);
+    let t2 = track(&lib, &a, Some(&r), "Two", 2);
+    local(&lib, &t1, "1.opus", Codec::Opus, Some(160));
+    local(&lib, &t2, "2.opus", Codec::Opus, Some(160));
+    lib.like(t1.id).unwrap();
+    let liked = |lib: &Library| {
+        lib.releases(0, 10, ReleaseSort::asc(ReleaseSortKey::Title)).unwrap()[0].liked
+    };
+    assert!(!liked(&lib), "a liked track does not make the album liked");
+
+    assert!(lib.like_release(r.id, true).unwrap().is_empty(), "no track touched");
+    assert!(liked(&lib) && lib.release_liked(r.id).unwrap());
+    assert_eq!(titles(&lib.liked_tracks(0, 10).unwrap()), vec!["One"]);
+    let albums = lib.liked_releases(0, 10).unwrap();
+    assert_eq!(albums.iter().map(|a| a.0.release.id).collect::<Vec<_>>(), vec![r.id]);
+    assert!(albums[0].0.liked);
+
+    // Unliking a track leaves the album saved.
+    lib.unlike(t1.id).unwrap();
+    assert!(lib.release_liked(r.id).unwrap());
+
+    // Unsaving leaves the tracks' own likes.
+    lib.like(t2.id).unwrap();
+    lib.like_release(r.id, false).unwrap();
+    assert!(!liked(&lib));
+    assert!(lib.liked_releases(0, 10).unwrap().is_empty());
+    assert_eq!(titles(&lib.liked_tracks(0, 10).unwrap()), vec!["Two"]);
+
+    // The other mode reads the same likes its way: all tracks liked or not.
+    lib.like_release(r.id, true).unwrap();
+    lib.set_album_likes_tracks(true);
+    assert!(!liked(&lib), "only one of its two tracks is liked");
+    lib.like(t1.id).unwrap();
+    assert!(liked(&lib));
+}
+
+#[test]
 fn liking_an_album_likes_all_its_tracks() {
     let lib = lib();
+    lib.set_album_likes_tracks(true);
     let a = artist(&lib, "A");
     let r = release(&lib, &a, "Album", None);
     let t1 = track(&lib, &a, Some(&r), "One", 1);
@@ -1732,23 +2157,35 @@ fn liking_an_album_likes_all_its_tracks() {
     assert!(liked(&lib) && lib.release_liked(r.id).unwrap());
     assert_eq!(titles(&lib.liked_tracks(0, 10).unwrap()), vec!["One", "Two"], "album order");
     assert!(!lib.is_liked(stream_only.id).unwrap());
+    let albums = lib.liked_releases(0, 10).unwrap();
+    assert_eq!(albums.iter().map(|a| a.0.release.id).collect::<Vec<_>>(), vec![r.id]);
+    let first_at = albums[0].1;
+    assert!(albums[0].0.liked && first_at > 0);
 
     // Unliking one track: the album is no longer liked.
     lib.unlike(t2.id).unwrap();
     assert!(!lib.release_liked(r.id).unwrap());
+    assert_eq!(lib.liked_track_times().unwrap().iter().map(|l| l.0).collect::<Vec<_>>(), vec![t1.id]);
     lib.like(t2.id).unwrap();
     assert!(lib.release_liked(r.id).unwrap());
+    let times = lib.liked_track_times().unwrap();
+    assert_eq!(times.len(), 2);
+    assert!(times[0].1 >= times[1].1, "newest first");
 
     // Unliking the album unlikes all its tracks.
     lib.like_release(r.id, false).unwrap();
     assert_eq!(lib.liked_count().unwrap(), 0);
     assert!(!liked(&lib));
+    assert!(lib.liked_releases(0, 10).unwrap().is_empty());
 
     // An album without local files: all its tracks count.
     let r2 = release(&lib, &a, "Streams", None);
     let s1 = track(&lib, &a, Some(&r2), "S1", 1);
     assert_eq!(lib.like_release(r2.id, true).unwrap(), vec![s1.id]);
     assert!(lib.release_liked(r2.id).unwrap());
+    let albums = lib.liked_releases(0, 10).unwrap();
+    assert_eq!(albums.iter().map(|a| a.0.release.id).collect::<Vec<_>>(), vec![r2.id]);
+    assert!(albums[0].0.liked && albums[0].1 > first_at);
 }
 
 /// Regression guard for "the history went to zero after an import": every
@@ -1873,4 +2310,148 @@ fn albums_without_live_tracks_are_not_listed_but_kept() {
     assert!(lib.release_progress(old.id).unwrap().is_none());
     assert!(lib.get_release(old.id).unwrap().is_some());
     assert_eq!(lib.releases_with_deleted(0, 10, ReleaseSort::asc(ReleaseSortKey::Title)).unwrap().len(), 2);
+}
+#[test]
+fn migration_drops_cached_lyricsplus_texts_and_picks_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.db");
+    {
+        // A v7 database: one track, liked, with cached lyrics of two sources
+        // and picks of each.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for (i, sql) in crate::migrations::MIGRATIONS.iter().take(7).enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i as u32 + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO track(id, title, title_key, artist_credit, artist_display, artist_key, added_at)
+             VALUES ('00000000-0000-0000-0000-000000000001', 'Лёд', 'лед', '[]', 'WENARO', 'wenaro', 1),
+                    ('00000000-0000-0000-0000-000000000002', 'Two', 'two', '[]', 'X', 'x', 1);
+             INSERT INTO likes(target_kind, target_id, updated_at, updated_by)
+             VALUES ('track', '00000000-0000-0000-0000-000000000001', 1, 'test');
+             INSERT INTO lyrics_text(track_id, source, body, fetched_at) VALUES
+               ('00000000-0000-0000-0000-000000000001', 'lyricsplus', '[]', 1),
+               ('00000000-0000-0000-0000-000000000002', 'lyricsplus', NULL, 1),
+               ('00000000-0000-0000-0000-000000000001', 'lrcred', '[]', 1);
+             INSERT INTO lyrics_pick(track_id, source) VALUES
+               ('00000000-0000-0000-0000-000000000001', 'lyricsplus'),
+               ('00000000-0000-0000-0000-000000000002', 'lrclib');",
+        )
+        .unwrap();
+    }
+    let lib = Library::open(&path).unwrap();
+    assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
+    let one: TrackId = "00000000-0000-0000-0000-000000000001".parse().unwrap();
+    let two: TrackId = "00000000-0000-0000-0000-000000000002".parse().unwrap();
+    assert!(lib.lyrics_text(one, "lyricsplus").unwrap().is_none());
+    assert!(lib.lyrics_text(two, "lyricsplus").unwrap().is_none());
+    assert_eq!(lib.lyrics_text(one, "lrcred").unwrap().unwrap().0.as_deref(), Some("[]"));
+    assert_eq!(lib.lyrics_pick(one).unwrap(), None);
+    assert_eq!(lib.lyrics_pick(two).unwrap().as_deref(), Some("lrclib"));
+    // Tracks and likes stay.
+    assert_eq!(lib.get_track(one).unwrap().unwrap().title, "Лёд");
+    assert!(lib.is_liked(one).unwrap());
+    assert!(lib.get_track(two).unwrap().is_some());
+}
+
+#[test]
+fn track_facts_and_playlist_tracks_for_the_tiles() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let r = release(&lib, &a, "Made in Abyss OST", Some(2017));
+    let t1 = track(&lib, &a, Some(&r), "One", 1);
+    let t2 = track(&lib, &a, Some(&r), "Two", 2);
+    let t3 = track(&lib, &a, None, "Three", 0);
+    let t4 = track(&lib, &a, None, "Four", 0);
+    local(&lib, &t1, "1.opus", Codec::Opus, Some(160));
+    lib.put_lyrics(t1.id, Some("[00:01.00]la"), None, false).unwrap();
+    lib.put_lyrics(t2.id, None, Some("la la"), false).unwrap();
+    lib.put_lyrics_text(t3.id, "lyricsplus", Some(r#"[{"start":{"secs":1,"nanos":0},"text":"la","words":[{"text":"la"}]}]"#))
+        .unwrap();
+    lib.put_lyrics(t4.id, None, None, true).unwrap();
+    let facts: std::collections::HashMap<TrackId, crate::TrackFactsRow> =
+        lib.track_facts().unwrap().into_iter().map(|f| (f.id, f)).collect();
+    let f1 = &facts[&t1.id];
+    assert_eq!((f1.year, f1.album.as_deref(), f1.track_no, f1.duration_ms), (Some(2017), Some("Made in Abyss OST"), 1, Some(181_000)));
+    assert!(f1.has_local && !facts[&t2.id].has_local);
+    assert_eq!(f1.lyrics, crate::LyricsLevel::Lines);
+    assert_eq!(facts[&t2.id].lyrics, crate::LyricsLevel::Plain);
+    assert_eq!(facts[&t3.id].lyrics, crate::LyricsLevel::Words);
+    assert_eq!(facts[&t4.id].lyrics, crate::LyricsLevel::None, "instrumental");
+    assert!(facts[&t1.id].added_at > 0);
+
+    let p = lib.create_playlist("Вечером").unwrap();
+    lib.playlist_add_many(p.id, &[t2.id, t1.id]).unwrap();
+    let lists = lib.playlist_tracks().unwrap();
+    assert_eq!(lists.len(), 1);
+    assert_eq!((lists[0].name.as_str(), lists[0].tracks.clone()), ("Вечером", vec![t2.id, t1.id]));
+}
+
+// ------------------------------------------------------------------ album pages
+
+/// The lines of an album's page: `#7` a hole, `5` a row.
+fn lines(l: &crate::ReleaseListing) -> Vec<String> {
+    l.entries
+        .iter()
+        .map(|e| match e {
+            crate::ListingEntry::Track(t) => format!("{}-{}", t.disc_no, t.track_no),
+            crate::ListingEntry::Hole { disc, no } => format!("#{disc}-{no}"),
+        })
+        .collect()
+}
+
+#[test]
+fn an_album_page_counts_its_lines_and_shows_its_holes() {
+    let lib = lib();
+    let a = artist(&lib, "Oliver Tree");
+    let mut r = Release::new("Ugly Is Beautiful", credit(&a));
+    r.total_tracks = Some(14);
+    let r = lib.upsert_release(&r).unwrap();
+    for no in (1..=14).filter(|n| *n != 7) {
+        let t = track(&lib, &a, Some(&r), &format!("Song {no}"), no);
+        local(&lib, &t, &format!("M/{no}.opus"), Codec::Opus, Some(160));
+    }
+    let l = lib.release_listing(r.id).unwrap().unwrap();
+    assert_eq!(l.entries.len(), 14);
+    assert_eq!(lines(&l)[6], "#1-7");
+    assert_eq!(l.holes(), 1);
+    assert_eq!((l.progress.local, l.progress.total, l.progress.missing()), (13, 14, 1), "13 of 14, 1 missing");
+    // The card counts the same.
+    assert_eq!(lib.release_progress(r.id).unwrap().unwrap().total, l.progress.total);
+    let card = lib.releases(0, 10, ReleaseSort::asc(ReleaseSortKey::Title)).unwrap();
+    assert_eq!(card[0].progress(), lib.release_progress(r.id).unwrap().unwrap());
+
+    // No count: the rows are the album. A count below the rows: the rows.
+    for total in [None, Some(3)] {
+        let mut r2 = Release::new(format!("B {total:?}"), credit(&a));
+        r2.total_tracks = total;
+        let r2 = lib.upsert_release(&r2).unwrap();
+        for no in 1..=5 {
+            track(&lib, &a, Some(&r2), &format!("B{no}"), no);
+        }
+        let l = lib.release_listing(r2.id).unwrap().unwrap();
+        assert_eq!((l.entries.len(), l.holes(), l.progress.total, l.progress.local), (5, 0, 5, 0));
+    }
+
+    // Two discs: the holes come last, unnumbered; unnumbered rows count.
+    let mut r3 = Release::new("Double", credit(&a));
+    r3.total_tracks = Some(6);
+    let r3 = lib.upsert_release(&r3).unwrap();
+    for (disc, no) in [(1, 1), (1, 2), (2, 1)] {
+        let mut t = Track::new(format!("D{disc}{no}"), credit(&a));
+        t.release_id = Some(r3.id);
+        t.disc_no = disc;
+        t.track_no = no;
+        lib.upsert_track(&t).unwrap();
+    }
+    let l = lib.release_listing(r3.id).unwrap().unwrap();
+    assert_eq!(lines(&l), ["1-1", "1-2", "2-1", "#2-0", "#2-0", "#2-0"]);
+    let mut r4 = Release::new("Loose", credit(&a));
+    r4.total_tracks = Some(3);
+    let r4 = lib.upsert_release(&r4).unwrap();
+    track(&lib, &a, Some(&r4), "No number", 0);
+    track(&lib, &a, Some(&r4), "Second", 2);
+    let l = lib.release_listing(r4.id).unwrap().unwrap();
+    assert_eq!(lines(&l), ["1-0", "#1-1", "1-2"]);
+    assert_eq!(l.progress.total as usize, l.entries.len());
 }

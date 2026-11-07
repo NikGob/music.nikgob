@@ -19,10 +19,44 @@ use crate::catalog::{
 use crate::db::Library;
 use crate::error::{LibraryError, Result};
 use crate::fractional::{key_between, n_keys_between};
+use crate::streams::{refresh_in_library, refresh_in_library_of_playlist, refresh_in_library_of_release};
 use crate::types::{
     ArtistRow, PlaylistEntryRow, PlaylistKind, PlaylistSummary, ReleaseRow, TrackRow,
 };
 use crate::util::get_id;
+
+/// Likes (or, `deleted`, unlikes) inside a transaction.
+pub(crate) fn set_like_in(
+    tx: &Connection,
+    target: LikeTarget,
+    deleted: bool,
+    now: UnixMs,
+    device: &DeviceId,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO likes(target_kind, target_id, updated_at, updated_by, deleted)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(target_kind, target_id) DO UPDATE SET
+            updated_at = excluded.updated_at, updated_by = excluded.updated_by,
+            deleted = excluded.deleted",
+        params![target.kind_str(), target.id_string(), now, device.as_str(), deleted],
+    )?;
+    match target {
+        LikeTarget::Track(t) => refresh_in_library(tx, &t.to_string())?,
+        LikeTarget::Release(r) => refresh_in_library_of_release(tx, &r.to_string())?,
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn is_liked_in(c: &Connection, target: LikeTarget) -> Result<bool> {
+    Ok(c
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM likes
+                            WHERE target_kind = ?1 AND target_id = ?2 AND deleted = 0)",
+        )?
+        .query_row(params![target.kind_str(), target.id_string()], |r| r.get(0))?)
+}
 
 /// Name of the pinned virtual playlist of liked tracks.
 pub const LIKED_PLAYLIST_NAME: &str = "Любимые";
@@ -161,6 +195,18 @@ fn insert_entry(
     now: UnixMs,
     device: &DeviceId,
 ) -> Result<PlaylistEntry> {
+    insert_new_entry(conn, playlist, track, index, now, device).map(|(e, _)| e)
+}
+
+/// [`insert_entry`], and whether the entry is new.
+fn insert_new_entry(
+    conn: &Connection,
+    playlist: PlaylistId,
+    track: TrackId,
+    index: usize,
+    now: UnixMs,
+    device: &DeviceId,
+) -> Result<(PlaylistEntry, bool)> {
     live_playlist(conn, playlist)?;
     let pid = playlist.to_string();
     // A track lives in a playlist at most once: re-adding returns the existing entry.
@@ -175,7 +221,7 @@ fn insert_entry(
         )
         .optional()?;
     if let Some(entry) = existing {
-        return Ok(entry);
+        return Ok((entry, false));
     }
     let position = position_for(conn, &pid, None, index, now, device)?;
     let entry = PlaylistEntry {
@@ -201,7 +247,8 @@ fn insert_entry(
             device.as_str()
         ],
     )?;
-    Ok(entry)
+    refresh_in_library(conn, &track.to_string())?;
+    Ok((entry, true))
 }
 
 impl Library {
@@ -273,6 +320,7 @@ impl Library {
                 "UPDATE playlist SET deleted = 1, updated_at = ?2, updated_by = ?3 WHERE id = ?1",
                 params![id.to_string(), now, device.as_str()],
             )?;
+            refresh_in_library_of_playlist(tx, &id.to_string())?;
             Ok(())
         })
     }
@@ -305,7 +353,7 @@ impl Library {
             })?,
         }];
         out.extend(self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{PLAYLIST_SUMMARY_SELECT} WHERE p.deleted = 0 ORDER BY 4 DESC, p.seq DESC"
             ))?;
             let rows = stmt.query_map([], playlist_summary)?;
@@ -325,7 +373,7 @@ impl Library {
         limit: u32,
     ) -> Result<Vec<PlaylistEntryRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(concat!(
+            let mut stmt = c.prepare_cached(concat!(
                 "SELECT e.id, e.playlist_id, e.track_id, e.position, e.added_at, e.updated_at, \
                         e.updated_by, e.deleted, ",
                 track_row_cols!(),
@@ -389,6 +437,28 @@ impl Library {
         })
     }
 
+    /// Appends the tracks the playlist does not have yet, each once, in one
+    /// transaction: how many were added and how many it had already.
+    pub fn playlist_add_missing(&self, playlist: PlaylistId, tracks: &[TrackId]) -> Result<(usize, usize)> {
+        let device = self.device_id();
+        let now = self.tick();
+        self.write(|tx| {
+            let (mut added, mut already) = (0, 0);
+            let mut seen = std::collections::HashSet::new();
+            for t in tracks {
+                if !seen.insert(*t) {
+                    continue;
+                }
+                if insert_new_entry(tx, playlist, *t, usize::MAX, now, &device)?.1 {
+                    added += 1;
+                } else {
+                    already += 1;
+                }
+            }
+            Ok((added, already))
+        })
+    }
+
     /// Moves an entry so it ends up at `new_index` in the list (clamped to the
     /// end). Only that entry's `position` changes.
     pub fn playlist_move(&self, entry: EntryId, new_index: usize) -> Result<PlaylistEntry> {
@@ -413,12 +483,13 @@ impl Library {
         let device = self.device_id();
         let now = self.tick();
         self.write(|tx| {
-            live_entry(tx, entry)?;
+            let removed = live_entry(tx, entry)?;
             tx.execute(
                 "UPDATE playlist_entry SET deleted = 1, updated_at = ?2, updated_by = ?3
                   WHERE id = ?1",
                 params![entry.to_string(), now, device.as_str()],
             )?;
+            refresh_in_library(tx, &removed.track_id.to_string())?;
             Ok(())
         })
     }
@@ -429,6 +500,12 @@ impl Library {
         self.set_like(target.into(), false)
     }
 
+    /// A like set at `at` rather than now (the demo's history of likes).
+    pub fn like_at(&self, target: impl Into<LikeTarget>, at: UnixMs) -> Result<()> {
+        let device = self.device_id();
+        self.write(|tx| set_like_in(tx, target.into(), false, at, &device))
+    }
+
     pub fn unlike(&self, target: impl Into<LikeTarget>) -> Result<()> {
         self.set_like(target.into(), true)
     }
@@ -436,41 +513,18 @@ impl Library {
     fn set_like(&self, target: LikeTarget, deleted: bool) -> Result<()> {
         let device = self.device_id();
         let now = self.tick();
-        self.write(|tx| {
-            tx.execute(
-                "INSERT INTO likes(target_kind, target_id, updated_at, updated_by, deleted)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(target_kind, target_id) DO UPDATE SET
-                    updated_at = excluded.updated_at, updated_by = excluded.updated_by,
-                    deleted = excluded.deleted",
-                params![
-                    target.kind_str(),
-                    target.id_string(),
-                    now,
-                    device.as_str(),
-                    deleted
-                ],
-            )?;
-            Ok(())
-        })
+        self.write(|tx| set_like_in(tx, target, deleted, now, &device))
     }
 
     pub fn is_liked(&self, target: impl Into<LikeTarget>) -> Result<bool> {
         let target = target.into();
-        self.read(|c| {
-            Ok(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM likes
-                                WHERE target_kind = ?1 AND target_id = ?2 AND deleted = 0)",
-                params![target.kind_str(), target.id_string()],
-                |r| r.get(0),
-            )?)
-        })
+        self.read(|c| is_liked_in(c, target))
     }
 
     /// Liked tracks, most recently liked first (the content of "Любимые").
     pub fn liked_tracks(&self, offset: u32, limit: u32) -> Result<Vec<TrackRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(concat!(
+            let mut stmt = c.prepare_cached(concat!(
                 "SELECT ",
                 track_row_cols!(),
                 " FROM likes l JOIN track t ON t.id = l.target_id \
@@ -494,21 +548,26 @@ impl Library {
         })
     }
 
-    pub fn liked_releases(&self, offset: u32, limit: u32) -> Result<Vec<ReleaseRow>> {
+    /// The albums liked as a whole ([`Self::like_release`]), each with when,
+    /// the latest first; while album likes like the tracks too, those whose
+    /// tracks were unliked since say so in [`ReleaseRow::liked`].
+    pub fn liked_releases(&self, offset: u32, limit: u32) -> Result<Vec<(ReleaseRow, UnixMs)>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
-                "{RELEASE_ROW_SELECT}
+            // The like's time after the row's own columns.
+            let select = RELEASE_ROW_SELECT.replacen(" FROM (SELECT * FROM release rv", ", l.updated_at FROM (SELECT * FROM release rv", 1);
+            let mut stmt = c.prepare_cached(&format!(
+                "{select}
                   JOIN likes l ON l.target_kind = 'release' AND l.target_id = r.id
                  WHERE l.deleted = 0 ORDER BY l.updated_at DESC, r.seq DESC LIMIT ?1 OFFSET ?2"
             ))?;
-            let rows = stmt.query_map(params![limit, offset], release_row)?;
+            let rows = stmt.query_map(params![limit, offset], |r| Ok((release_row(r)?, r.get(14)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 
     pub fn liked_artists(&self, offset: u32, limit: u32) -> Result<Vec<ArtistRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{ARTIST_ROW_SELECT}
                   JOIN likes l ON l.target_kind = 'artist' AND l.target_id = a.id
                  WHERE l.deleted = 0 ORDER BY l.updated_at DESC, a.seq DESC LIMIT ?1 OFFSET ?2"
@@ -518,17 +577,25 @@ impl Library {
         })
     }
 
-    /// Likes (or unlikes) an album: every live track of it goes into (or out
-    /// of) "Любимые" — the local ones when it has any, all of them otherwise —
-    /// and the release's own like row follows, so the album reads as liked
-    /// exactly when [`crate::ReleaseRow::liked`] says so. Returns the tracks.
+    /// Likes (or unlikes) an album. By default it is saved (or unsaved)
+    /// alone: its tracks stay as they are, and none is returned. When album
+    /// likes like the tracks too ([`Self::set_album_likes_tracks`]), every
+    /// live track of it goes into (or out of) "Любимые" — the local ones when
+    /// it has any, all of them otherwise — and the release's own like row
+    /// follows, so the album reads as liked exactly when
+    /// [`crate::ReleaseRow::liked`] says so. Returns the tracks it liked or
+    /// unliked.
     pub fn like_release(&self, release: ReleaseId, on: bool) -> Result<Vec<TrackId>> {
         let device = self.device_id();
         let now = self.tick();
+        if !self.album_likes_tracks() {
+            self.write(|tx| set_like_in(tx, LikeTarget::Release(release), !on, now, &device))?;
+            return Ok(Vec::new());
+        }
         self.write(|tx| {
             let rid = release.to_string();
             let ids: Vec<String> = {
-                let mut stmt = tx.prepare(
+                let mut stmt = tx.prepare_cached(
                     "SELECT t.id FROM track t
                       WHERE t.release_id = ?1 AND t.deleted_at IS NULL
                         AND (t.has_local = 1 OR NOT EXISTS (
@@ -554,6 +621,10 @@ impl Library {
                 upsert.execute(params!["track", id, at, device.as_str(), !on])?;
             }
             upsert.execute(params!["release", rid, now, device.as_str(), !on])?;
+            for id in &ids {
+                refresh_in_library(tx, id)?;
+            }
+            refresh_in_library_of_release(tx, &rid)?;
             ids.iter().map(|s| s.parse().map_err(|_| LibraryError::Invalid(s.clone()))).collect()
         })
     }
@@ -576,7 +647,7 @@ impl Library {
     /// album cover, in playlist order (one item per track, for counting).
     pub fn playlist_cover_refs(&self, playlist: PlaylistId) -> Result<Vec<(ReleaseId, String)>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT r.id, r.cover_ref FROM playlist_entry e
                    JOIN track t ON t.id = e.track_id
                    JOIN release r ON r.id = t.release_id
@@ -592,7 +663,7 @@ impl Library {
     /// Ids of all liked tracks, whether or not the catalog knows them yet.
     pub fn liked_track_ids(&self) -> Result<Vec<TrackId>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT target_id FROM likes WHERE target_kind = 'track' AND deleted = 0
                   ORDER BY updated_at DESC",
             )?;

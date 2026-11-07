@@ -25,6 +25,9 @@ pub struct Queue {
     pub repeat: Repeat,
     pub context: Option<String>,
     next_id: u64,
+    /// Bumped whenever the whole queue is replaced ([`Self::set`],
+    /// [`Self::restore`]): a radio knows its queue is gone.
+    generation: u64,
 }
 
 /// A queue as saved between runs (entry ids are not kept: they are only
@@ -78,6 +81,12 @@ impl Queue {
             _ => Repeat::Off,
         };
         self.context = s.context.clone();
+        self.generation += 1;
+    }
+
+    /// See the field: changes when the queue is replaced.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     fn entry(&mut self, track: TrackId) -> Entry {
@@ -94,10 +103,24 @@ impl Queue {
         self.original = items.clone();
         self.items = items;
         self.context = context;
+        self.generation += 1;
         self.pos = (!self.items.is_empty()).then(|| start.min(self.items.len() - 1));
         if self.shuffle {
             self.shuffle_rest();
         }
+    }
+
+    /// Every entry of `from` plays `to` instead (the track was merged into
+    /// another one). Returns whether any did.
+    pub fn retarget(&mut self, from: TrackId, to: TrackId) -> bool {
+        let mut any = false;
+        for e in self.items.iter_mut().chain(self.original.iter_mut()) {
+            if e.track == from {
+                e.track = to;
+                any = true;
+            }
+        }
+        any
     }
 
     pub fn current(&self) -> Option<Entry> {

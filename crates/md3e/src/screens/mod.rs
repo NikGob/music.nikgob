@@ -5,13 +5,18 @@
 //! navigation stack, which panes are open, transitions.
 
 mod ambient;
+mod artist_links;
 mod bg_shapes;
 mod chrome;
 mod common;
+mod find_song;
 mod lyrics;
+mod lyrics_blur;
+pub mod lyrics_ui;
 mod pages;
 mod pane;
 mod player_bar;
+mod sound_quality;
 mod tag_editor;
 mod visualizer;
 
@@ -29,6 +34,9 @@ use crate::{
     size_class,
 };
 
+/// How long the search text must rest before it is searched for.
+const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PaneTab {
     #[default]
@@ -37,15 +45,50 @@ pub enum PaneTab {
     Info,
 }
 
+impl PaneTab {
+    /// The pane's parts in the order of its tabs.
+    pub const ALL: [Self; 3] = [Self::Queue, Self::Lyrics, Self::Info];
+
+    /// The part is turned on in Settings (none is by default).
+    pub fn on(self, prefs: &nikgob_view::Prefs) -> bool {
+        match self {
+            Self::Queue => prefs.pane_queue,
+            Self::Lyrics => prefs.pane_lyrics,
+            Self::Info => prefs.pane_info,
+        }
+    }
+}
+
+/// A step of the history: the whole stack, the tabs and chips the page was
+/// on, and how far it was scrolled.
+#[derive(Clone, Debug)]
+struct Place {
+    stack: Vec<Route>,
+    tabs: pages::Tabs,
+    scroll: f32,
+}
+
+impl Place {
+    /// The same page on the same tabs (the scroll aside).
+    fn same(&self, other: &Self) -> bool {
+        self.stack == other.stack && self.tabs == other.tabs
+    }
+}
+
 /// Presentation state of the MD3E window.
 pub struct Md3eUi {
     stack: Vec<Route>,
-    /// Browser-like history of whole stacks, for the mouse's back and
-    /// forward buttons (and Alt+← / Alt+→).
-    past: Vec<Vec<Route>>,
-    future: Vec<Vec<Route>>,
+    /// Browser-like history, for the mouse's back and forward buttons (and
+    /// Alt+← / Alt+→): a page comes back on its tab, scrolled where it was.
+    past: Vec<Place>,
+    future: Vec<Place>,
+    /// The stack and tabs drawn last frame, and how far it was scrolled: a
+    /// tab or chip switched on the same page is a step of the history too.
+    seen: Option<Place>,
     /// +1 forward, -1 back, 0 fade-through (top-level switch).
     nav_dir: f32,
+    /// «Загрузки» is the route, as the runtime was last told.
+    downloads_shown: bool,
     nav_anim: Animated<f32>,
     rail_expanded: bool,
     pane: Option<PaneTab>,
@@ -64,9 +107,19 @@ pub struct Md3eUi {
     content_rect: Rect,
     search: String,
     search_focus: bool,
+    /// The search text (and how far its results were scrolled) of pages
+    /// left from the search results, by the stack they were on: going back
+    /// there shows the results again, where they were.
+    search_marks: Vec<(Vec<Route>, String, f32)>,
+    /// The query last sent to the runtime, and when the text last changed:
+    /// it is sent once typing pauses for [`SEARCH_DEBOUNCE`].
+    search_sent: String,
+    search_edited: Option<std::time::Instant>,
     scheme: SchemeAnim,
     pub(crate) pages: pages::PageState,
     chrome: chrome::Chrome,
+    /// «Найти песню…» over everything.
+    find_song: find_song::FindSongUi,
     system_reduced_motion: bool,
     fullscreen: bool,
     /// Window fullscreen asked for with F11 (the visualizer forces it too).
@@ -85,7 +138,9 @@ impl Md3eUi {
             stack: vec![Route::Home],
             past: Vec::new(),
             future: Vec::new(),
+            seen: None,
             nav_dir: 0.0,
+            downloads_shown: false,
             nav_anim: Animated::new(0.0, crate::tokens::Motion::expressive().slow_effects),
             rail_expanded: true,
             // The pane opens on demand (queue / lyrics buttons), not always.
@@ -100,9 +155,13 @@ impl Md3eUi {
             content_rect: Rect::NOTHING,
             search: String::new(),
             search_focus: false,
+            search_marks: Vec::new(),
+            search_sent: String::new(),
+            search_edited: None,
             scheme: SchemeAnim::default(),
             pages: pages::PageState::default(),
             chrome: chrome::Chrome::default(),
+            find_song: find_song::FindSongUi::default(),
             system_reduced_motion: false,
             fullscreen: false,
             user_fullscreen: false,
@@ -113,12 +172,18 @@ impl Md3eUi {
         self.stack.last().unwrap_or(&Route::Home)
     }
 
+    /// Chooses a world on the card at the top of Главная (screenshots).
+    pub fn choose_world(&self, ctx: &Context, key: &str) {
+        pages::choose_world(ctx, key);
+    }
+
     /// Opens a route. Top-level routes replace the stack (fade through);
     /// detail routes push (forward).
     pub fn navigate(&mut self, ctx: &Context, route: Route, out: &mut Vec<Command>) {
         if self.route() == &route {
             return;
         }
+        self.mark_search(ctx, self.stack.clone());
         self.remember();
         let top_level = matches!(
             route,
@@ -130,10 +195,49 @@ impl Md3eUi {
         } else {
             self.nav_dir = 1.0;
         }
-        load_for(&route, out);
+        // A route that names a tab of «Загрузки» opens it (the rail's
+        // plain «Загрузки» keeps the last one).
+        if let Route::Downloads(tab) = route
+            && tab != nikgob_view::DownloadsTab::Active
+        {
+            self.pages.set_downloads_tab(tab);
+        }
+        self.load_for(&route, out);
+        // A page opened anew starts at its top (not where it was last time).
+        if !top_level {
+            self.pages.scroll_to(route.clone(), 0.0);
+        }
         self.stack.push(route);
         self.search.clear();
+        self.seen = Some(self.place());
         self.restart_nav(ctx);
+    }
+
+    /// Remembers the search on screen before going to a page from it.
+    fn mark_search(&mut self, ctx: &Context, stack: Vec<Route>) {
+        const KEEP: usize = 20;
+        if self.search.trim().is_empty() {
+            return;
+        }
+        self.search_marks.retain(|(s, ..)| *s != stack);
+        self.search_marks.push((stack, self.search.clone(), pages::search_scroll(ctx)));
+        if self.search_marks.len() > KEEP {
+            self.search_marks.remove(0);
+        }
+    }
+
+    /// Back on a stack that was left from the search: its results again
+    /// (the services answer from their cache), scrolled where they were.
+    fn restore_search(&mut self, ctx: &Context) {
+        if let Some(i) = self.search_marks.iter().rposition(|(s, ..)| *s == self.stack) {
+            let (_, text, scroll) = self.search_marks.remove(i);
+            self.search = text;
+            self.search_sent.clear();
+            self.search_edited = None;
+            pages::restore_search_scroll(ctx, scroll);
+        } else {
+            self.search.clear();
+        }
     }
 
     /// Up one level (the page's ← and Esc). When that is where the user
@@ -143,13 +247,15 @@ impl Md3eUi {
             return false;
         }
         let parent = &self.stack[..self.stack.len() - 1];
-        if self.past.last().is_some_and(|p| p == parent) {
+        if self.past.last().is_some_and(|p| p.stack == parent) {
             return self.history_back(ctx, out);
         }
         self.remember();
         self.stack.pop();
         self.nav_dir = -1.0;
-        load_for(self.route(), out);
+        self.load_for(&self.route().clone(), out);
+        self.restore_search(ctx);
+        self.seen = Some(self.place());
         self.restart_nav(ctx);
         true
     }
@@ -157,24 +263,34 @@ impl Md3eUi {
     /// Where the user was before (the mouse's back button).
     pub fn history_back(&mut self, ctx: &Context, out: &mut Vec<Command>) -> bool {
         let Some(prev) = self.past.pop() else { return false };
-        self.future.push(std::mem::replace(&mut self.stack, prev));
-        self.arrive(ctx, -1.0, out);
+        self.future.push(self.place());
+        self.arrive(ctx, prev, -1.0, out);
         true
     }
 
     /// Back again to where history-back came from.
     pub fn history_forward(&mut self, ctx: &Context, out: &mut Vec<Command>) -> bool {
         let Some(next) = self.future.pop() else { return false };
-        self.past.push(std::mem::replace(&mut self.stack, next));
-        self.arrive(ctx, 1.0, out);
+        self.past.push(self.place());
+        self.arrive(ctx, next, 1.0, out);
         true
+    }
+
+    /// Where the user is now.
+    fn place(&self) -> Place {
+        Place { stack: self.stack.clone(), tabs: self.pages.tabs(), scroll: self.pages.scroll_now }
     }
 
     /// Notes the current page before going somewhere new.
     fn remember(&mut self) {
+        let here = self.place();
+        self.remember_place(here);
+    }
+
+    fn remember_place(&mut self, here: Place) {
         const KEEP: usize = 50;
-        if self.past.last() != Some(&self.stack) {
-            self.past.push(self.stack.clone());
+        if !self.past.last().is_some_and(|p| p.same(&here)) {
+            self.past.push(here);
             if self.past.len() > KEEP {
                 self.past.remove(0);
             }
@@ -182,13 +298,34 @@ impl Md3eUi {
         self.future.clear();
     }
 
-    fn arrive(&mut self, ctx: &Context, dir: f32, out: &mut Vec<Command>) {
+    /// A tab or chip switched on the page since last frame: where it was
+    /// is a step back (and the new tab starts at the top).
+    fn note_tab_switch(&mut self) {
+        let now = self.place();
+        // (Settings turning to the tab of a row a link asked for is part
+        // of that one step.)
+        if let Some(seen) = self.seen.take()
+            && seen.stack == now.stack
+            && seen.tabs != now.tabs
+            && self.pages.focus_setting.is_none()
+        {
+            self.remember_place(seen);
+            self.pages.scroll_to(self.route().clone(), 0.0);
+        }
+        self.seen = Some(now);
+    }
+
+    fn arrive(&mut self, ctx: &Context, place: Place, dir: f32, out: &mut Vec<Command>) {
+        self.stack = place.stack;
         if self.stack.is_empty() {
             self.stack.push(Route::Home);
         }
+        self.pages.set_tabs(place.tabs);
+        self.pages.scroll_to(self.route().clone(), place.scroll);
         self.nav_dir = dir;
-        load_for(self.route(), out);
-        self.search.clear();
+        self.load_for(&self.route().clone(), out);
+        self.restore_search(ctx);
+        self.seen = Some(Place { scroll: place.scroll, ..self.place() });
         self.restart_nav(ctx);
     }
 
@@ -221,7 +358,8 @@ impl Md3eUi {
             .current
             .as_ref()
             .and_then(|t| t.cover.as_ref())
-            .and_then(|c| c.seed)
+            // A stream's cover is seeded once it is decoded for drawing.
+            .and_then(|c| c.seed.or_else(|| c.web_url().and_then(|u| crate::covers::web_seed(ctx, u))))
             .unwrap_or(prefs.fallback_seed);
         // The settings' samples paint other variants of the same seed.
         ctx.data_mut(|d| d.insert_temp(scheme_seed_id(), seed));
@@ -241,14 +379,32 @@ impl Md3eUi {
     pub fn frame(&mut self, root: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
         let ctx = &root.ctx().clone();
         let first_cmd = out.len();
+        let theme_scope = crate::prof::scope("theme");
         self.update_theme(ctx, state);
+        drop(theme_scope);
+        pages::set_marks(ctx, &state.dislikes);
+        crate::components::tooltip::set_enabled(ctx, state.prefs.tooltips);
         root.spacing_mut().scroll = crate::components::scrollbars::apply(ctx);
-        // The current and the next cover stay loaded while off screen.
-        let pinned: Vec<String> = (state.player.current.iter())
-            .chain(state.queue.next.first().map(|e| &e.track))
-            .filter_map(|t| t.cover.as_ref().map(|c| c.uri()))
-            .collect();
-        crate::covers::pin(ctx, pinned.iter().map(String::as_str));
+        // The current and the next cover stay loaded while off screen (set
+        // again only when the state changed; kept in the context, so a new
+        // window's covers are pinned at once).
+        let pinned_id = egui::Id::new("md3e-pinned-revision");
+        if ctx.data(|d| d.get_temp::<u64>(pinned_id)) != Some(state.revision) {
+            ctx.data_mut(|d| d.insert_temp(pinned_id, state.revision));
+            let pinned: Vec<String> = (state.player.current.iter())
+                .chain(state.queue.next.first().map(|e| &e.track))
+                .filter_map(|t| t.cover.as_ref().map(|c| c.uri()))
+                .collect();
+            crate::covers::pin(ctx, pinned.iter().map(String::as_str));
+        }
+        // The next one is decoded and uploaded at the sizes the current one
+        // is drawn at, while nothing waits for it.
+        if let (Some(current), Some(next)) = (state.player.current.as_ref(), state.queue.next.first()) {
+            let uri = |t: &nikgob_view::TrackRow| t.cover.as_ref().map(nikgob_view::Cover::uri);
+            if let (Some(c), Some(n)) = (uri(current), uri(&next.track)) {
+                crate::covers::prefetch_like(ctx, &c, &n);
+            }
+        }
         self.np_motion = state.prefs.np_motion;
         if !self.chrome.np_loaded {
             self.chrome.np_loaded = true;
@@ -260,6 +416,10 @@ impl Md3eUi {
         self.shortcuts(ctx, state, out);
         let theme = Theme::get(ctx);
         let s = theme.scheme;
+        // Now Playing open all the way hides the shell under its opaque
+        // surface: the pages are not laid out for nothing (with the side
+        // pane's lyrics they cost more than Now Playing itself).
+        let covered = self.now_playing && self.np_anim.value(anim::now(ctx)) >= 0.999;
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(s.surface))
@@ -291,10 +451,17 @@ impl Md3eUi {
                     now_playing::show(ui, full, state, true, &mut self.pages, &mut self.chrome, out);
                     return;
                 }
+                if covered {
+                    self.flush_search(ctx, out);
+                    return;
+                }
+                let _p = crate::prof::scope("layout");
                 self.layout(ui, full, class, state, out);
             });
+        let overlays_scope = crate::prof::scope("overlays");
 
         // Requests pages made this frame.
+        self.note_tab_switch();
         if std::mem::take(&mut self.pages.go_back) {
             self.back(ctx, out);
         }
@@ -308,9 +475,23 @@ impl Md3eUi {
         } else {
             self.content_rect
         };
-        self.pages.overlays(ctx, state, overlay_area, out);
+        // Snackbars: above the floating player; on Now Playing where it
+        // leaves room (the place it chose last frame).
+        let np_spot = (self.now_playing || self.chrome.np_covering)
+            .then(|| ctx.data(|d| d.get_temp::<(Rect, f32)>(egui::Id::new(now_playing::SNACK_SPOT))))
+            .flatten();
+        let snack = np_spot.unwrap_or((overlay_area, 64.0 + 16.0 + 16.0));
+        self.pages.overlays(ctx, state, overlay_area, snack, out);
         self.chrome.overlays(ctx, state, out);
+        self.find_song.show(ctx, state, out);
+        lyrics_ui::overlays(ctx, state, out);
+        // «К исполнителю» of a track with several artists: which one.
+        if let Some(route) = artist_links::chooser(ctx) {
+            self.chrome.nav = Some(route);
+        }
 
+        drop(overlays_scope);
+        let _np_scope = crate::prof::scope("np");
         // Now Playing overlay, transformed out of the floating player: the
         // container grows from the pill to the window while the content,
         // laid out for the full window, scales up from the pill and fades in.
@@ -411,6 +592,16 @@ impl Md3eUi {
             }
         }
 
+        if let Some(id) = self.chrome.setting.take() {
+            self.pages.open_setting(id);
+        }
+        // «Настройки текста» and the «Текст песни» page, asked under the
+        // lyrics.
+        match lyrics_ui::take_request(ctx) {
+            Some(lyrics_ui::Request::Settings) => self.pages.open_setting_group(lyrics_ui::SETTINGS),
+            Some(lyrics_ui::Request::Page) => self.pages.pending_nav = Some(Route::Lyrics),
+            None => {}
+        }
         if let Some(route) = self.pages.pending_nav.take() {
             if self.pages.focus_setting.is_some() && route == Route::Settings {
                 self.pane = None;
@@ -455,6 +646,7 @@ impl Md3eUi {
                 self.set_now_playing(ctx, false);
             }
             self.search = q.clone();
+            self.search_sent = q.clone();
             out.push(Command::Search(q));
         }
 
@@ -484,10 +676,7 @@ impl Md3eUi {
             if let Some(Command::SetPrefs(prefs)) = out[first_cmd..].iter_mut().rev().find(|c| matches!(c, Command::SetPrefs(_))) {
                 prefs.np_slot = self.chrome.np_slot;
             } else {
-                out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs {
-                    np_slot: self.chrome.np_slot,
-                    ..state.prefs.clone()
-                })));
+                out.push(Command::SetPref(nikgob_view::PrefPatch::NpSlot(self.chrome.np_slot)));
             }
         }
     }
@@ -516,7 +705,7 @@ impl Md3eUi {
             if i.consume_key(Modifiers::COMMAND, Key::K) || i.consume_key(Modifiers::COMMAND, Key::F) {
                 self.search_focus = true;
             }
-            if !now_playing_open && i.consume_key(Modifiers::COMMAND, Key::Q) {
+            if !now_playing_open && PaneTab::Queue.on(&state.prefs) && i.consume_key(Modifiers::COMMAND, Key::Q) {
                 self.pane = if self.pane == Some(PaneTab::Queue) {
                     None
                 } else {
@@ -574,8 +763,8 @@ impl Md3eUi {
         // browser; back first closes Now Playing.
         let (mouse_back, mouse_forward) = ctx.input_mut(|i| {
             (
-                i.pointer.button_clicked(egui::PointerButton::Extra1) || i.consume_key(Modifiers::ALT, Key::ArrowLeft),
-                i.pointer.button_clicked(egui::PointerButton::Extra2) || i.consume_key(Modifiers::ALT, Key::ArrowRight),
+                i.pointer.button_released(egui::PointerButton::Extra1) || i.consume_key(Modifiers::ALT, Key::ArrowLeft),
+                i.pointer.button_released(egui::PointerButton::Extra2) || i.consume_key(Modifiers::ALT, Key::ArrowRight),
             )
         });
         if !self.chrome.visualizer {
@@ -619,7 +808,16 @@ impl Md3eUi {
         let rail_slot = rail_w;
         let rail_rect = Rect::from_min_size(full.min, vec2(rail_w, full.height()));
 
-        // Supporting pane (inline on Large/XL).
+        // Supporting pane (inline on Large/XL). A part turned off in
+        // Settings closes, and the pane comes back on a part that is on.
+        if self.pane.is_some_and(|t| !t.on(&state.prefs)) {
+            self.pane = None;
+        }
+        if let Some(t) = PaneTab::ALL.into_iter().find(|t| t.on(&state.prefs))
+            && !self.last_pane.on(&state.prefs)
+        {
+            self.last_pane = t;
+        }
         let inline_pane = class >= SizeClass::Large;
         // Dropping below Large turns the inline pane into a modal sheet: do
         // not pop it open over the content just because it was visible.
@@ -673,7 +871,13 @@ impl Md3eUi {
         let search_rect = Rect::from_min_size(inner.min + vec2(0.0, 16.0), vec2(inner.width(), 56.0));
         let page_rect = Rect::from_min_max(pos2(inner.left(), search_rect.bottom() + 16.0), inner.max);
 
-        pages::search_bar(ui, search_rect, &mut self.search, &mut self.search_focus, out);
+        if std::mem::take(&mut self.pages.focus_search) {
+            self.search_focus = true;
+        }
+        if pages::search_bar(ui, search_rect, &mut self.search, &mut self.search_focus, state.prefs.prowlarr_configured, out) {
+            self.search_edited = Some(std::time::Instant::now());
+        }
+        self.flush_search(&ctx, out);
 
         // Page with nav transition.
         let t = anim::now(&ctx);
@@ -692,6 +896,7 @@ impl Md3eUi {
         page_ui.multiply_opacity((1.0 - k.abs()).clamp(0.0, 1.0));
         let bottom_inset = 64.0 + 16.0 + 16.0;
         let mut nav = None;
+        let _page_scope = crate::prof::scope("layout.page");
         if self.search.trim().is_empty() {
             nav = pages::page(&mut page_ui, &route, state, bottom_inset, &mut self.pages, out);
         } else {
@@ -701,6 +906,7 @@ impl Md3eUi {
             self.navigate(&ctx, r, out);
         }
 
+        drop(_page_scope);
         // Floating player.
         let bar_w = (content.width() - 32.0).min(960.0);
         let bar = Rect::from_center_size(
@@ -720,7 +926,7 @@ impl Md3eUi {
                 &mut self.chrome,
                 out,
             );
-            if bo.open_now_playing {
+            if bo.open_now_playing || std::mem::take(&mut self.pages.open_now_playing) {
                 self.set_now_playing(&ctx, true);
             }
             if let Some(tab) = bo.toggle_pane {
@@ -781,8 +987,21 @@ impl Md3eUi {
             }
         }
         if configure_lyrics {
-            self.pages.open_setting(pages::SettingId::LyricsStyle);
+            self.pages.open_setting_group(lyrics_ui::SETTINGS);
         }
+    }
+}
+
+impl Md3eUi {
+    /// The load request a route needs, and whether «Загрузки» is shown
+    /// (when that changes).
+    fn load_for(&mut self, route: &Route, out: &mut Vec<Command>) {
+        let downloads = matches!(route, Route::Downloads(_));
+        if downloads != self.downloads_shown {
+            self.downloads_shown = downloads;
+            out.push(Command::DownloadsShown(downloads));
+        }
+        load_for(route, out);
     }
 }
 
@@ -792,9 +1011,16 @@ fn load_for(route: &Route, out: &mut Vec<Command>) {
         Route::Home => out.push(Command::LoadHome),
         Route::Library(_) => out.push(Command::LoadLibrary),
         Route::Release(id) => out.push(Command::LoadRelease(*id)),
+        // The runtime loads the discography with the artist (cached).
         Route::Artist(id) => out.push(Command::LoadArtist(*id)),
         Route::Playlist(id) => out.push(Command::LoadPlaylist(*id)),
-        Route::Downloads(_) | Route::Settings => {}
+        Route::Stream(page) => out.push(Command::LoadStream(page.clone())),
+        Route::World(key) => out.push(Command::LoadWorld(key.clone())),
+        // Of what is on screen already (Главная, the world's page); a world
+        // left meanwhile is loaded by the page itself.
+        Route::Mix { .. } | Route::NewReleases => {}
+        Route::Downloads(_) => out.push(Command::LoadWishlist),
+        Route::Settings | Route::Lyrics => {}
     }
 }
 
@@ -904,10 +1130,87 @@ impl Md3eUi {
         self.pages.library_tab = tab;
     }
 
-    /// Types into the search bar (used by scripted screenshots).
-    pub fn set_search(&mut self, query: &str, out: &mut Vec<Command>) {
+    /// Types into the library's filter (scripted screenshots).
+    pub fn set_library_filter(&mut self, text: &str) {
+        self.pages.set_library_filter(text);
+    }
+
+    /// The library as a list (true) or a grid (scripted screenshots).
+    pub fn set_library_list(ctx: &egui::Context, list: bool) {
+        pages::set_library_list(ctx, list);
+    }
+
+    /// Opens Settings on a tab, scrolled to the row named `row` (scripted
+    /// screenshots): `sources`, `spotify`, `youtube`, `import`, `torrents`,
+    /// `appearance`, anything else = «Основные».
+    pub fn open_settings_at(&mut self, row: &str) {
+        use pages::SettingId as S;
+        // As «Настройки текста…» under the lyrics opens it: the whole group.
+        if row == "lyrics-group" {
+            self.pages.open_setting_group(lyrics_ui::SETTINGS);
+            return;
+        }
+        self.pages.open_setting(match row {
+            "sources" | "spotify" => S::SpotifyEnabled,
+            "youtube" => S::YouTubeEnabled,
+            "deezer" => S::DeezerEnabled,
+            "soundcloud" => S::SoundCloudEnabled,
+            "personal" => S::SpotifyPersonal,
+            "soloist" => S::SpotifySoloist,
+            "sound" => S::Gapless,
+            "likes" => S::LikeDownload,
+            "import" => S::ImportFiles,
+            "torrents" => S::Prowlarr,
+            "download-sources" => S::DownloadSource(nikgob_view::SourceKey::Torrents),
+            "soulseek" => S::Soulseek,
+            "graph" => S::GraphUse,
+            "no-repeat" => S::RadioNoRepeat,
+            "recs" => S::RadioNewShare,
+            "autoplay" => S::Autoplay,
+            "mixes" => S::MixesProfiles,
+            "dislikes" => S::DislikeButton,
+            "blacklist" => S::DislikedArtists,
+            "stream-analysis" => S::StreamAnalysis,
+            "appearance" => S::Design,
+            "pane" => S::PaneQueue,
+            "lyrics" => S::LyricsModels,
+            "lyrics-timing" => S::LyricsGenius,
+            "lyrics-ui" => S::LyricsUi,
+            "lyrics-highlight" => S::LyricsWordsAll,
+            "lyrics-check" => S::LyricsCheck,
+            "lyrics-lead" => S::LyricsLead,
+            "lyrics-streams" => S::LyricsStreamKeep,
+            _ => S::CoverClickPause,
+        });
+    }
+
+    /// Opens the cookies form of «Источники»
+    /// (scripted screenshots).
+    pub fn unfold_sources(&mut self) {
+        self.pages.unfold_sources();
+    }
+
+    /// Types into the search bar (used by scripted screenshots); sent like
+    /// typed text, once typing pauses.
+    pub fn set_search(&mut self, query: &str, _out: &mut Vec<Command>) {
         self.search = query.to_owned();
-        out.push(Command::Search(self.search.clone()));
+        self.search_edited = Some(std::time::Instant::now());
+    }
+
+    /// Sends the search text once it has not changed for
+    /// [`SEARCH_DEBOUNCE`] (clearing it is sent at once), so a burst of
+    /// keys is one search, not one per key.
+    fn flush_search(&mut self, ctx: &egui::Context, out: &mut Vec<Command>) {
+        if self.search == self.search_sent {
+            return;
+        }
+        let waited = self.search_edited.map_or(SEARCH_DEBOUNCE, |t| t.elapsed());
+        if self.search.trim().is_empty() || waited >= SEARCH_DEBOUNCE {
+            self.search_sent = self.search.clone();
+            out.push(Command::Search(self.search.clone()));
+        } else {
+            ctx.request_repaint_after(SEARCH_DEBOUNCE - waited);
+        }
     }
 }
 
@@ -950,15 +1253,23 @@ impl Md3eUi {
     /// destination was picked.
     fn rail(&mut self, ui: &mut Ui, rail_rect: Rect, expansion: f32, state: &ViewState, out: &mut Vec<Command>) -> bool {
         let ctx = ui.ctx().clone();
-        let route = self.route().clone();
-        let selected = match route {
-            Route::Home => Some(0),
+        let of = |r: &Route| match r {
+            Route::Home | Route::World(_) | Route::Mix { .. } | Route::NewReleases => Some(0),
             Route::Library(_) | Route::Release(_) | Route::Artist(_) | Route::Playlist(_) => {
                 Some(1)
             }
             Route::Downloads(_) => Some(2),
-            Route::Settings => None,
+            Route::Settings | Route::Stream(_) | Route::Lyrics => None,
         };
+        // A service's page belongs where it was opened from (the search
+        // over Главная, an artist of the library…).
+        let selected = self
+            .stack
+            .iter()
+            .rev()
+            .find(|r| !matches!(r, Route::Stream(_)))
+            .filter(|_| matches!(self.route(), Route::Stream(_)))
+            .map_or_else(|| of(self.route()), of);
         let pending = state.downloads.confirm.len() as u32;
         let items = [
             RailItem { icon: Icon::Home, label: "Главная", badge: None },
@@ -976,7 +1287,7 @@ impl Md3eUi {
                     items: &items,
                     bottom: &bottom,
                     selected,
-                    bottom_selected: (route == Route::Settings).then_some(0),
+                    bottom_selected: (*self.route() == Route::Settings).then_some(0),
                 }
                 .show(ui)
             })
@@ -986,6 +1297,11 @@ impl Md3eUi {
             .or(rail_out.bottom_clicked.map(|_| 3))
             .map(|i| Self::destinations()[i].clone());
         if let Some(r) = picked.clone() {
+            // The page the search was typed over: its destination leaves the
+            // results for it too.
+            if self.route() == &r {
+                self.search.clear();
+            }
             self.navigate(&ctx, r, out);
         }
         if let Some(fab) = &rail_out.fab {
@@ -1035,7 +1351,11 @@ mod tests {
         }, |root| ui.frame(root, state, &mut commands));
         output.textures_delta.clear();
         for command in commands {
-            if let Command::SetPrefs(prefs) = command { state.prefs = *prefs; }
+            match command {
+                Command::SetPrefs(prefs) => state.prefs = *prefs,
+                Command::SetPref(patch) => patch.apply(&mut state.prefs),
+                _ => {}
+            }
         }
         output
     }
@@ -1078,6 +1398,54 @@ mod tests {
         }
     }
 
+    /// «Настройки текста…» lands on the group of the lyrics settings and
+    /// tints all of it (not one row, not the groups around it), then the
+    /// tint goes.
+    #[test]
+    fn lyrics_settings_link_tints_its_whole_group_then_lets_go() {
+        let ctx = context();
+        let mut ui = Md3eUi::new();
+        let mut state = ViewState::default();
+        frame(&ctx, &mut ui, &mut state, 0.0, 1280.0, None);
+        ui.pages.open_setting_group(lyrics_ui::SETTINGS);
+        for t in [1.0, 1.05, 1.1, 1.2, 1.4] {
+            frame(&ctx, &mut ui, &mut state, t, 1280.0, None);
+        }
+        let tint = Theme::get(&ctx).scheme.primary;
+        let tinted = |output: &egui::FullOutput| -> Vec<Rect> {
+            output.shapes.iter().filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(r) if r.fill.a() > 0 && r.fill.r().abs_diff((tint.r() as f32 * r.fill.a() as f32 / 255.0) as u8) <= 2
+                    && r.fill.g().abs_diff((tint.g() as f32 * r.fill.a() as f32 / 255.0) as u8) <= 2
+                    && r.rect.height() > 120.0 => Some(r.rect),
+                _ => None,
+            }).collect()
+        };
+        let text_at = |output: &egui::FullOutput, label: &str| output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos),
+            _ => None,
+        });
+        let output = frame(&ctx, &mut ui, &mut state, 1.6, 1280.0, None);
+        assert_eq!(ui.route(), &Route::Settings);
+        let rects = tinted(&output);
+        assert_eq!(rects.len(), 1, "one tinted group: {rects:?}");
+        for label in ["Текст песен", "Сохранять найденный текст в файл трека", "Где делать подсветку"] {
+            let at = text_at(&output, label).unwrap_or_else(|| panic!("{label} not drawn"));
+            assert!(rects[0].contains(at + vec2(4.0, 4.0)), "{label} outside the tint");
+            assert!((0.0..900.0).contains(&at.y), "{label} not scrolled into view");
+        }
+        for label in ["Где искать текст", "Звук"] {
+            if let Some(at) = text_at(&output, label) {
+                assert!(!rects[0].contains(at + vec2(4.0, 4.0)), "{label} inside the tint");
+            }
+        }
+        frame(&ctx, &mut ui, &mut state, 4.0, 1280.0, None);
+        let output = frame(&ctx, &mut ui, &mut state, 4.1, 1280.0, None);
+        assert!(tinted(&output).is_empty());
+        // A row link still glows its row only.
+        ui.pages.open_setting(pages::SettingId::LyricsUi);
+        assert!(!ui.pages.focus_group);
+    }
+
     #[test]
     fn back_and_forward_walk_the_pages_like_a_browser() {
         let ctx = context();
@@ -1104,6 +1472,42 @@ mod tests {
         assert!(!ui.history_forward(&ctx, &mut out));
         assert!(ui.history_back(&ctx, &mut out));
         assert_eq!(ui.route(), &album);
+    }
+
+    #[test]
+    fn history_brings_a_page_back_on_its_tab_and_where_it_was_scrolled() {
+        use nikgob_view::LibraryTab;
+        let ctx = context();
+        let mut ui = Md3eUi::new();
+        let mut out = Vec::new();
+        ui.navigate(&ctx, Route::Library(LibraryTab::All), &mut out);
+        ui.note_tab_switch();
+        // «Альбомы», scrolled down, then an album from there.
+        ui.pages.library_tab = LibraryTab::Albums;
+        ui.note_tab_switch();
+        assert_eq!(ui.pages.scroll_target(), Some(0.0), "a new tab starts at the top");
+        ui.pages.scroll_now = 640.0;
+        ui.note_tab_switch();
+        let album = Route::Release(nikgob_view::ReleaseId::new());
+        ui.navigate(&ctx, album.clone(), &mut out);
+        assert_eq!(ui.pages.scroll_target(), Some(0.0), "an album opens at its top");
+        ui.pages.scroll_now = 200.0;
+
+        // Back: the albums tab, scrolled where it was.
+        assert!(ui.history_back(&ctx, &mut out));
+        assert_eq!(ui.route(), &Route::Library(LibraryTab::All));
+        assert_eq!(ui.pages.library_tab, LibraryTab::Albums);
+        assert_eq!(ui.pages.scroll_target(), Some(640.0));
+        ui.note_tab_switch();
+        // Back again: the tab before it; forward twice: the album as it was.
+        assert!(ui.history_back(&ctx, &mut out));
+        assert_eq!(ui.pages.library_tab, LibraryTab::All);
+        ui.note_tab_switch();
+        assert!(ui.history_forward(&ctx, &mut out));
+        assert_eq!(ui.pages.library_tab, LibraryTab::Albums);
+        assert!(ui.history_forward(&ctx, &mut out));
+        assert_eq!(ui.route(), &album);
+        assert_eq!(ui.pages.scroll_target(), Some(200.0));
     }
 
     #[test]
@@ -1151,8 +1555,8 @@ mod tests {
         let mut chrome = chrome::Chrome::default();
         let track = nikgob_view::TrackRow {
             id: nikgob_view::TrackId::new(), title: "Track".into(), artist: "Artist".into(),
-            album: None, release_id: None, artist_id: None, disc_no: 1, track_no: 1,
-            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None,
+            album: None, release_id: None, artists: Default::default(), disc_no: 1, track_no: 1,
+            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
         };
         let mut out = Vec::new();
         chrome.apply(chrome::Act::Info, &track, Rect::NOTHING, chrome::Where::Np, &mut out);
@@ -1219,8 +1623,8 @@ mod tests {
         let mut state = ViewState::default();
         state.player.current = Some(nikgob_view::TrackRow {
             id: nikgob_view::TrackId::new(), title: "Track".into(), artist: "Artist".into(),
-            album: None, release_id: None, artist_id: None, disc_no: 1, track_no: 1,
-            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None,
+            album: None, release_id: None, artists: Default::default(), disc_no: 1, track_no: 1,
+            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
         });
         for i in 0..3 {
             frame(&ctx, &mut ui, &mut state, i as f64 * 0.016, 1263.0, None);

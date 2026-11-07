@@ -193,6 +193,21 @@ impl Card {
     }
 }
 
+/// What a media card says about its album in the cover corner, next to
+/// (or instead of) its badge text.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum CoverStatus {
+    /// Nothing to say: only the badge text, if any.
+    #[default]
+    None,
+    /// Waiting for its download: «в очереди».
+    Queued,
+    /// Downloading: a small ring, filled to the fraction when known.
+    Progress(Option<f32>),
+    /// Fully on disk: a check before the badge text («у тебя»).
+    Done,
+}
+
 /// Which part of a media card was clicked.
 pub struct MediaCardOutput {
     /// The whole card.
@@ -200,6 +215,11 @@ pub struct MediaCardOutput {
     pub card_clicked: bool,
     /// The play button over the cover.
     pub play_clicked: bool,
+    /// The ⬇ button shown on hover ([`MediaCard::download_button`]).
+    pub download_clicked: bool,
+    /// The ⋮ button shown on hover ([`MediaCard::menu_button`]), for a
+    /// menu attached to it.
+    pub menu: Option<Response>,
     pub card_secondary_clicked: bool,
 }
 
@@ -210,12 +230,19 @@ pub struct MediaCard {
     title: String,
     subtitle: Option<String>,
     cover: Option<String>,
+    /// Four covers drawn 2×2 instead of `cover` (a mix of many albums).
+    collage: Vec<String>,
+    /// The title may take two lines (only without a subtitle).
+    title_two_lines: bool,
     placeholder: Icon,
     badge: Option<String>,
     width: f32,
     container: Option<CardKind>,
     play_button: bool,
     always_show_play: bool,
+    status: CoverStatus,
+    download: Option<String>,
+    menu_button: bool,
     id_salt: Option<Id>,
 }
 
@@ -225,12 +252,17 @@ impl MediaCard {
             title: title.into(),
             subtitle: None,
             cover: None,
+            collage: Vec::new(),
+            title_two_lines: false,
             placeholder: Icon::Album,
             badge: None,
             width: 160.0,
             container: Some(CardKind::Filled),
             play_button: true,
             always_show_play: false,
+            status: CoverStatus::None,
+            download: None,
+            menu_button: false,
             id_salt: None,
         }
     }
@@ -248,6 +280,24 @@ impl MediaCard {
 
     pub fn cover_opt(mut self, uri: Option<String>) -> Self {
         self.cover = uri;
+        self
+    }
+
+    /// Covers of a mix: four or more are drawn as a 2×2 collage (the first
+    /// four), fewer as the first alone (the same as [`Self::cover`]).
+    pub fn collage(mut self, uris: Vec<String>) -> Self {
+        if uris.len() < 4 {
+            self.cover = uris.into_iter().next();
+        } else {
+            self.collage = uris;
+        }
+        self
+    }
+
+    /// Lets a long title wrap onto the subtitle's line (a card without a
+    /// subtitle, like a mix named by its artists).
+    pub fn title_two_lines(mut self, on: bool) -> Self {
+        self.title_two_lines = on;
         self
     }
 
@@ -296,6 +346,29 @@ impl MediaCard {
         self
     }
 
+    /// A status in the badge corner of the cover ([`CoverStatus`]).
+    pub fn status(mut self, status: CoverStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// A small tonal ⬇ button next to ▶ on hover, with this tooltip.
+    pub fn download_button(mut self, tooltip: Option<impl Into<String>>) -> Self {
+        self.download = tooltip.map(Into::into);
+        self
+    }
+
+    /// A ⋮ button at the end of the title lines on hover.
+    pub fn menu_button(mut self, show: bool) -> Self {
+        self.menu_button = show;
+        self
+    }
+
+    /// How tall a card `width` wide is (its cover and two lines under it).
+    pub fn height(width: f32) -> f32 {
+        width + 56.0
+    }
+
     pub fn show(self, ui: &mut Ui) -> MediaCardOutput {
         let ctx = ui.ctx().clone();
         let theme = Theme::get(&ctx);
@@ -304,7 +377,7 @@ impl MediaCard {
             .id_salt
             .map_or_else(|| ui.next_auto_id(), |salt| ui.id().with(salt));
         let w = self.width;
-        let (rect, _) = ui.allocate_exact_size(vec2(w, w + 56.0), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(vec2(w, Self::height(w)), Sense::hover());
         let response = ui.interact(rect, id, Sense::click());
         let radii = Radii::all(shape::MEDIUM);
         let hover = response.contains_pointer() || common::focused(&response);
@@ -350,26 +423,34 @@ impl MediaCard {
             } else {
                 CornerRadius::same(r)
             };
-            common::paint_image_zoomed(ui, cover, self.cover.as_deref(), corner, self.placeholder, zoom);
-            if let Some(text) = &self.badge {
-                badge::text_badge(
-                    &painter,
-                    pos2(cover.left() + 8.0, cover.top() + 16.0),
-                    text,
-                    s.secondary_container,
-                    s.on_secondary_container,
-                );
+            if self.collage.len() >= 4 {
+                paint_collage(ui, cover, &self.collage[..4], corner, self.placeholder, zoom);
+            } else {
+                common::paint_image_zoomed(ui, cover, self.cover.as_deref(), corner, self.placeholder, zoom);
+            }
+            let corner_at = pos2(cover.left() + 8.0, cover.top() + 16.0);
+            match (self.status, &self.badge) {
+                (CoverStatus::None, Some(text)) => {
+                    badge::text_badge(&painter, corner_at, text, s.secondary_container, s.on_secondary_container);
+                }
+                (CoverStatus::None, None) => {}
+                (status, text) => status_chip(ui, &painter, corner_at, status, text.as_deref()),
             }
 
-            // Text.
-            let text_w = w - 2.0 * pad;
-            let title = common::line(
-                &painter,
-                &self.title,
-                TypeRole::TitleSmall.style(),
-                s.on_surface,
-                text_w,
-            );
+            // Text (shorter while the ⋮ shows at its end).
+            let text_w = w - 2.0 * pad - if self.menu_button && hover { 28.0 } else { 0.0 };
+            let title = if self.title_two_lines && self.subtitle.is_none() {
+                let mut job = TypeRole::TitleSmall.style().job(&self.title, s.on_surface);
+                job.wrap = egui::text::TextWrapping {
+                    max_width: text_w.max(1.0),
+                    max_rows: 2,
+                    break_anywhere: false,
+                    overflow_character: Some('…'),
+                };
+                crate::typography::layout(&painter, job)
+            } else {
+                common::line(&painter, &self.title, TypeRole::TitleSmall.style(), s.on_surface, text_w)
+            };
             painter.galley(
                 pos2(rect.left() + pad, cover.bottom() + 8.0),
                 title,
@@ -430,16 +511,138 @@ impl MediaCard {
             }
         }
 
+        // ⬇ next to ▶, and ⋮ after the title lines, with the pointer.
+        let mut download_clicked = false;
+        let mut menu = None;
+        let k = anim::fraction(&ctx, id.with("extras"), f32::from(u8::from(hover)), motion.fast_effects).clamp(0.0, 1.0);
+        if k > 0.01 {
+            if let Some(tip) = &self.download {
+                let play = Size::M.height();
+                let size = Size::Xs.height();
+                let c = pos2(
+                    rect.left() + w - 8.0 - play - 8.0 - size * 0.5,
+                    rect.top() + w - 8.0 - play * 0.5,
+                );
+                let mut child = ui.new_child(
+                    UiBuilder::new().max_rect(Rect::from_center_size(c, vec2(size, size))).id_salt((id, "dl-slot")),
+                );
+                child.set_opacity(k);
+                download_clicked = child
+                    .add_enabled(
+                        k > 0.5,
+                        IconButton::new(Icon::Download)
+                            .size(Size::Xs)
+                            .style(Style::Tonal)
+                            .tooltip(tip.clone())
+                            .id_salt((id, "dl-btn")),
+                    )
+                    .clicked();
+            }
+            if self.menu_button {
+                let size = Size::Xs.height();
+                let c = pos2(rect.right() - 4.0 - size * 0.5, rect.top() + w + 28.0);
+                let mut child = ui.new_child(
+                    UiBuilder::new().max_rect(Rect::from_center_size(c, vec2(size, size))).id_salt((id, "more-slot")),
+                );
+                child.set_opacity(k);
+                menu = Some(child.add_enabled(
+                    k > 0.5,
+                    IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt((id, "more-btn")),
+                ));
+            }
+        }
+        let extra_clicked = download_clicked || menu.as_ref().is_some_and(Response::clicked);
+
         let label = match &self.subtitle {
             Some(sub) => format!("{}, {sub}", self.title),
             None => self.title.clone(),
         };
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &label));
         MediaCardOutput {
-            card_clicked: response.clicked() && !play_clicked,
+            card_clicked: response.clicked() && !play_clicked && !extra_clicked,
             card_secondary_clicked: response.secondary_clicked(),
             play_clicked,
+            download_clicked,
+            menu,
             response,
         }
     }
+}
+
+/// Four covers in the quarters of `rect`, each keeping the outer corner of
+/// `corner` it sits in.
+fn paint_collage(ui: &Ui, rect: Rect, uris: &[String], corner: CornerRadius, placeholder: Icon, zoom: f32) {
+    let half = rect.size() * 0.5;
+    for (i, uri) in uris.iter().take(4).enumerate() {
+        let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+        let r = Rect::from_min_size(rect.min + vec2(col * half.x, row * half.y), half);
+        let c = CornerRadius {
+            nw: if i == 0 { corner.nw } else { 0 },
+            ne: if i == 1 { corner.ne } else { 0 },
+            sw: if i == 2 { corner.sw } else { 0 },
+            se: if i == 3 { corner.se } else { 0 },
+        };
+        common::paint_image_zoomed(ui, r, Some(uri), c, placeholder, zoom);
+    }
+}
+
+/// Height of a status chip on a cover: the large badge's.
+const STATUS_H: f32 = badge::LARGE_HEIGHT;
+
+/// The cover-corner chip of a [`CoverStatus`]: an icon or a ring, then the
+/// text («в очереди», «3 из 12», «у тебя»).
+fn status_chip(ui: &Ui, painter: &egui::Painter, left_center: egui::Pos2, status: CoverStatus, text: Option<&str>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let (bg, fg) = match status {
+        CoverStatus::Done => (s.primary_container, s.on_primary_container),
+        _ => (s.secondary_container, s.on_secondary_container),
+    };
+    let text = match status {
+        CoverStatus::Queued => Some("в очереди"),
+        CoverStatus::Done => Some(text.unwrap_or("у тебя")),
+        _ => text,
+    };
+    let galley = text.map(|t| painter.layout_no_wrap(t.to_owned(), TypeRole::LabelSmall.font_id(), fg));
+    let icon = 12.0;
+    let w = 2.0 + icon + galley.as_ref().map_or(2.0, |g| 3.0 + g.size().x + 5.0);
+    let rect = Rect::from_min_size(pos2(left_center.x, left_center.y - STATUS_H * 0.5), vec2(w, STATUS_H));
+    paint::container(painter, rect, Radii::all(shape::FULL), bg, Stroke::NONE);
+    let ic = Rect::from_center_size(pos2(rect.left() + 2.0 + icon * 0.5, rect.center().y), vec2(icon, icon));
+    match status {
+        CoverStatus::Queued => Icon::HourglassEmpty.widget(false, fg, icon).paint_at(ui, ic),
+        CoverStatus::Done => Icon::Check.widget(false, fg, icon).paint_at(ui, ic),
+        CoverStatus::Progress(p) => progress_ring(ui, painter, ic.shrink(0.5), p, fg),
+        CoverStatus::None => {}
+    }
+    if let Some(g) = galley {
+        painter.galley(pos2(ic.right() + 3.0, rect.center().y - g.size().y * 0.5), g, fg);
+    }
+}
+
+/// A small circular progress ring in `rect`: filled to `p`, or a turning
+/// arc while the fraction is unknown.
+fn progress_ring(ui: &Ui, painter: &egui::Painter, rect: Rect, p: Option<f32>, color: Color32) {
+    use std::f32::consts::TAU;
+    let (c, r) = (rect.center(), rect.width() * 0.5 - 1.0);
+    let stroke = Stroke::new(1.75, color);
+    painter.circle_stroke(c, r, Stroke::new(1.75, color.gamma_multiply(0.3)));
+    let (start, sweep) = match p {
+        Some(p) => (-TAU / 4.0, TAU * p.clamp(0.0, 1.0)),
+        None => {
+            let t = ui.ctx().input(|i| i.time) as f32;
+            ui.ctx().request_repaint();
+            (t * TAU * 0.8, TAU * 0.3)
+        }
+    };
+    if sweep <= 0.0 {
+        return;
+    }
+    let n = ((sweep / TAU) * 32.0).ceil().max(2.0) as usize;
+    let points: Vec<egui::Pos2> = (0..=n)
+        .map(|i| {
+            let a = start + sweep * i as f32 / n as f32;
+            c + r * vec2(a.cos(), a.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, stroke));
 }

@@ -1,8 +1,9 @@
 //! Public value types: items, events, errors.
 
 use std::fmt;
+use std::io::{Read, Seek};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// What the engine plays. The `id` is opaque to the engine and comes back in
 /// every [`Event`] that concerns the item.
@@ -44,6 +45,18 @@ impl PlayItem {
         }
     }
 
+    /// A stream opened lazily by `open` (see [`ItemSource::Stream`]), with no
+    /// gain correction and no duration hint.
+    #[must_use]
+    pub fn stream(id: u64, open: StreamOpener) -> Self {
+        Self {
+            id,
+            source: ItemSource::Stream(open),
+            gain_db: 0.0,
+            duration_hint: None,
+        }
+    }
+
     /// Sets the loudness correction.
     #[must_use]
     pub fn with_gain_db(mut self, gain_db: f32) -> Self {
@@ -74,8 +87,59 @@ impl fmt::Debug for PlayItem {
 pub enum ItemSource {
     /// A local file (FLAC, MP3, AAC/M4A, Vorbis, WAV, ALAC, Opus in Ogg).
     File(PathBuf),
-    /// Raw samples pulled from the caller (librespot sink, YouTube stream...).
+    /// Raw samples pulled from the caller.
     Pcm(Box<dyn PcmSource>),
+    /// Encoded bytes of a stream (Spotify Ogg Vorbis, YouTube WebM Opus or
+    /// M4A AAC), decoded like a file. The opener runs on a short-lived opener
+    /// thread of the engine, never on the caller's thread, so it (and the
+    /// first reads of the probe) may do network I/O; the engine keeps
+    /// answering commands meanwhile. Later reads run on the decoder thread.
+    ///
+    /// While a [`Player::play`](crate::Player::play) of a stream is opening,
+    /// nothing is heard (what played before is cut at once) and the
+    /// position reads the item at its start; a seek meanwhile is applied
+    /// once it is open. `Started` follows once it is open, an
+    /// [`Event::Error`] for the item if it cannot be opened. A stream given to
+    /// [`Player::set_next`](crate::Player::set_next) is opened in the
+    /// background; if the current item ends first, playback waits for it.
+    Stream(StreamOpener),
+}
+
+impl ItemSource {
+    /// Whether opening may be slow (network) and happens off the decoder thread.
+    pub(crate) const fn is_stream(&self) -> bool {
+        matches!(self, Self::Stream(_))
+    }
+}
+
+/// Opens the bytes of an [`ItemSource::Stream`]; the error text ends up in
+/// [`Event::Error`].
+pub type StreamOpener = Box<dyn FnOnce() -> Result<Box<dyn ByteSource>, String> + Send>;
+
+/// Encoded audio bytes the engine reads like a file. Implemented by the
+/// application over a streaming service's download.
+///
+/// `read` / `seek` run on engine threads (the opener thread for the probe,
+/// then the decoder thread); they may block on the network, but a read that
+/// blocks for long starves the output, so implementations should download
+/// ahead in the background.
+pub trait ByteSource: Read + Seek + Send {
+    /// Total size in bytes, if known.
+    fn byte_len(&self) -> Option<u64>;
+    /// The container as a file extension (`"ogg"`, `"webm"`, `"m4a"`,
+    /// `"wav"`); `""` lets the probe guess.
+    fn format_hint(&self) -> &str;
+    /// Loudness correction in dB; when `Some`, it replaces
+    /// [`PlayItem::gain_db`]. Asked once the stream has been probed.
+    fn gain_db(&self) -> Option<f32> {
+        None
+    }
+    /// Length of the audio, used when the container does not tell it (it
+    /// replaces [`PlayItem::duration_hint`] when `Some`). Asked once the
+    /// stream has been probed.
+    fn duration(&self) -> Option<Duration> {
+        None
+    }
 }
 
 impl fmt::Debug for ItemSource {
@@ -83,6 +147,7 @@ impl fmt::Debug for ItemSource {
         match self {
             Self::File(path) => f.debug_tuple("File").field(path).finish(),
             Self::Pcm(_) => f.write_str("Pcm(..)"),
+            Self::Stream(_) => f.write_str("Stream(..)"),
         }
     }
 }
@@ -153,12 +218,16 @@ pub enum Event {
         /// Length of `to`, if known.
         duration: Option<Duration>,
     },
-    /// Playback position, at most about four times a second while playing.
+    /// Playback position, about four times a second while an item is loaded
+    /// and not paused (also while it stalls: then it stands still).
     Position {
         /// The item.
         id: u64,
         /// Time-based position.
         pos: Duration,
+        /// When it was read: the event may wait in a queue before it is
+        /// taken, and the position moved on meanwhile.
+        at: Instant,
     },
     /// Playback was paused.
     Paused,
@@ -221,6 +290,9 @@ pub enum DecodeError {
     /// A [`PcmSource`] failed.
     #[error("pcm source: {0}")]
     Pcm(String),
+    /// An [`ItemSource::Stream`] could not be opened.
+    #[error("stream: {0}")]
+    Stream(String),
 }
 
 impl From<symphonia::core::errors::Error> for DecodeError {

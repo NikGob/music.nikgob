@@ -12,12 +12,21 @@ name = "nikgob"
 path = "src/main.rs"
 
 [dependencies]
-nikgob-core.workspace = true
+nikgob-core = { workspace = true, features = ["fake"] }
 nikgob-md3e.workspace = true
 nikgob-view.workspace = true
 nikgob-runtime = { path = "../runtime" }
 nikgob-library = { path = "../library" }
+nikgob-recs = { path = "../recs" }
 nikgob-audio = { path = "../audio" }
+nikgob-spotify = { path = "../spotify" }
+nikgob-soloist = { path = "../soloist" }
+nikgob-youtube = { path = "../youtube" }
+nikgob-deezer = { path = "../deezer" }
+nikgob-soundcloud = { path = "../soundcloud" }
+nikgob-sc-widget = { path = "../sc-widget" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 crossbeam-channel = "0.5"
 serde_json = "1"
 egui.workspace = true
@@ -25,19 +34,44 @@ eframe.workspace = true
 egui_extras = { workspace = true, features = ["file", "image", "svg"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 directories = "6"
+blake3 = "1.8"
 fastframe-text.workspace = true
 fastframe-fonts.workspace = true
+# The system fallback faces, chosen as fastframe-fonts does and mapped.
+skrifa = "0.44"
+memmap2 = "0.9"
 fastframe-scroll.workspace = true
 fastframe-shell.workspace = true
 fastframe-tray.workspace = true
 fastframe-now-playing.workspace = true
+fastframe-instance.workspace = true
 log.workspace = true
 env_logger.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Globalization", "Win32_UI_WindowsAndMessaging"] }
 # The winit eframe runs on (patched to the fork); for the caption colours.
-winit = { version = "0.30", default-features = false }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+# The YouTube Music sign-in window (system WebView2, see ytlogin.rs).
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+# The «Запускать вместе с Windows» line under the user's Run key.
+windows-registry = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The window on Wayland and X11 (the workspace's eframe has its default
+# features off, and with them winit's Linux backends).
+eframe = { workspace = true, features = ["wayland", "x11"] }
+# The winit eframe runs on (patched to the fork); for the monitor's refresh
+# rate, and for drawn Adwaita title bars where a Wayland compositor (GNOME's)
+# leaves decorations to the window.
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "wayland-csd-adwaita"] }
+# The YouTube Music sign-in window (WebKitGTK, see ytlogin.rs) in a GTK
+# window of its own: wry's webview runs in GTK's main loop, not winit's.
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+gtk = "0.18"

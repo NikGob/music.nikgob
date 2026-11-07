@@ -155,6 +155,9 @@ pub struct AudioAnalysis {
     /// Integrated loudness, LUFS.
     pub loudness_lufs: Option<f64>,
     pub spectrum: Option<SpectrumReport>,
+    /// The averaged spectrum behind `spectrum`, in
+    /// [`nikgob_core::quality::SPECTRUM_POINTS`] bands.
+    pub spectrum_db: Option<Vec<f32>>,
 }
 
 impl AudioAnalysis {
@@ -252,12 +255,17 @@ pub fn analyze_file(
         .as_ref()
         .and_then(|m| m.loudness_global().ok())
         .filter(|l| l.is_finite());
+    let (spectrum, spectrum_db) = match st.spectrum.map(SpectrumCollector::finish_with_levels) {
+        Some((report, levels)) => (Some(report), levels),
+        None => (None, None),
+    };
     Ok(AudioAnalysis {
         spec,
         frames: st.frames,
         fingerprint,
         loudness_lufs,
-        spectrum: st.spectrum.map(SpectrumCollector::finish),
+        spectrum,
+        spectrum_db,
     })
 }
 

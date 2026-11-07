@@ -16,10 +16,16 @@ use crate::{
 };
 
 pub const ITEM_HEIGHT: f32 = 48.0;
+/// The pass a menu was last on screen in (see [`Menu::shown_lately`]).
+const SHOWN_KEY: &str = "md3e-menu-shown";
 pub const MIN_WIDTH: f32 = 112.0;
-pub const MAX_WIDTH: f32 = 280.0;
+/// Wide enough for every label the app has: a menu grows to its longest
+/// item, so no label is cut.
+pub const MAX_WIDTH: f32 = 400.0;
 const PAD: f32 = 4.0;
 const DIVIDER_HEIGHT: f32 = 9.0;
+/// A group's label above its items.
+const LABEL_HEIGHT: f32 = 36.0;
 
 /// One selectable row.
 #[derive(Clone, Debug)]
@@ -68,6 +74,8 @@ impl MenuItem {
 enum Entry {
     Item(MenuItem),
     Divider,
+    /// A label over the items that follow (not an item: nothing to pick).
+    Label(String),
 }
 
 /// Where the popup goes.
@@ -75,7 +83,7 @@ enum Entry {
 enum Placement {
     /// Below (or above, if there is no room) a widget; `right` aligns the
     /// menu's right edge with the widget's.
-    Anchored { rect: Rect, right: bool },
+    Anchored { rect: Rect, right: bool, center: bool },
     /// Top-left corner at a point (context menu).
     At(Pos2),
 }
@@ -86,6 +94,7 @@ pub struct Menu {
     id: Id,
     entries: Vec<Entry>,
     align_right: bool,
+    align_center: bool,
 }
 
 impl Menu {
@@ -94,6 +103,7 @@ impl Menu {
             id: Id::new(id_salt),
             entries: Vec::new(),
             align_right: false,
+            align_center: false,
         }
     }
 
@@ -112,9 +122,22 @@ impl Menu {
         self
     }
 
+    /// A group label (Label Large, `on-surface-variant`) over the items
+    /// after it; it is not an item and takes no index.
+    pub fn group_label(mut self, text: impl Into<String>) -> Self {
+        self.entries.push(Entry::Label(text.into()));
+        self
+    }
+
     /// Aligns the right edge with the anchor (for ⋮ buttons at the end).
     pub fn align_right(mut self, right: bool) -> Self {
         self.align_right = right;
+        self
+    }
+
+    /// Centres the menu over the anchor (a control in the middle of a row).
+    pub fn align_center(mut self, center: bool) -> Self {
+        self.align_center = center;
         self
     }
 
@@ -129,7 +152,7 @@ impl Menu {
     fn items(&self) -> impl Iterator<Item = &MenuItem> {
         self.entries.iter().filter_map(|e| match e {
             Entry::Item(i) => Some(i),
-            Entry::Divider => None,
+            Entry::Divider | Entry::Label(_) => None,
         })
     }
 
@@ -142,12 +165,13 @@ impl Menu {
         if anchor.clicked() {
             open = !open;
         }
-        let right = self.align_right;
+        let (right, center) = (self.align_right, self.align_center);
         let picked = self.show_at(
             &ctx,
             Placement::Anchored {
                 rect: anchor.rect,
                 right,
+                center,
             },
             &mut open,
         );
@@ -158,15 +182,42 @@ impl Menu {
     /// A popup below `anchor`, open while `*open`. Clicking the anchor does
     /// not close it (the caller toggles `open` on anchor clicks).
     pub fn popup(self, ctx: &Context, anchor: Rect, open: &mut bool) -> Option<usize> {
-        let right = self.align_right;
+        let (right, center) = (self.align_right, self.align_center);
         self.show_at(
             ctx,
             Placement::Anchored {
                 rect: anchor,
                 right,
+                center,
             },
             open,
         )
+    }
+
+    /// A menu was on screen this pass or the one before (long lists then
+    /// lay out every row, so the row a menu belongs to never goes away
+    /// under it).
+    pub fn shown_lately(ctx: &Context) -> bool {
+        let pass = ctx.cumulative_pass_nr();
+        ctx.data(|d| d.get_temp::<u64>(Id::new(SHOWN_KEY))).is_some_and(|at| at + 1 >= pass)
+    }
+
+    /// Whether the context menu `id_salt` of `response` has nothing to show
+    /// this frame: closed, not opened by this click, its exit done. Its
+    /// items need not be built then (lists build one menu per row).
+    pub fn context_idle(response: &Response, id_salt: impl egui::AsId) -> bool {
+        if response.secondary_clicked() {
+            return false;
+        }
+        let id = Id::new(id_salt);
+        response.ctx.data(|d| {
+            let open = d
+                .get_temp::<(bool, Pos2)>(response.id.with("md3e-context-menu"))
+                .is_some_and(|(open, _)| open);
+            !open
+                && d.get_temp::<nikgob_motion::Animated<f32>>(id.with("p-spatial")).is_none()
+                && d.get_temp::<nikgob_motion::Animated<f32>>(id.with("p-effects")).is_none()
+        })
     }
 
     /// Opens at the pointer on a right click on `response`.
@@ -205,6 +256,8 @@ impl Menu {
             ctx.data_mut(|d| d.remove::<Option<usize>>(self.id.with("hl")));
             return None;
         }
+        let pass = ctx.cumulative_pass_nr();
+        ctx.data_mut(|d| d.insert_temp(Id::new(SHOWN_KEY), pass));
 
         // Measure.
         let painter = ctx.layer_painter(layer);
@@ -227,7 +280,12 @@ impl Menu {
             }
             content_w = content_w.max(w);
         }
-        let menu_w = (content_w + 2.0 * PAD).clamp(MIN_WIDTH, MAX_WIDTH);
+        for e in &self.entries {
+            if let Entry::Label(text) = e {
+                content_w = content_w.max(24.0 + common::plain(&painter, text, short_style, s.on_surface).size().x);
+            }
+        }
+        let menu_w = menu_width(content_w);
         let height: f32 = 2.0 * PAD
             + self
                 .entries
@@ -235,6 +293,7 @@ impl Menu {
                 .map(|e| match e {
                     Entry::Item(_) => ITEM_HEIGHT,
                     Entry::Divider => DIVIDER_HEIGHT,
+                    Entry::Label(_) => LABEL_HEIGHT,
                 })
                 .sum::<f32>();
         let size = vec2(menu_w, height);
@@ -242,8 +301,10 @@ impl Menu {
         // Position.
         let screen = ctx.content_rect().shrink(4.0);
         let (mut top_left, pivot) = match placement {
-            Placement::Anchored { rect, right } => {
-                let x = if right {
+            Placement::Anchored { rect, right, center } => {
+                let x = if center {
+                    rect.center().x - menu_w * 0.5
+                } else if right {
                     rect.right() - menu_w
                 } else {
                     rect.left()
@@ -331,6 +392,12 @@ impl Menu {
                                 Stroke::new(1.0, s.outline_variant),
                             );
                             y += DIVIDER_HEIGHT;
+                        }
+                        Entry::Label(text) => {
+                            let galley = common::plain(ui.painter(), text, TypeRole::LabelLarge.style(), s.on_surface_variant);
+                            let at = pos2(rect.left() + PAD + 12.0, y + (LABEL_HEIGHT - galley.size().y) * 0.5);
+                            ui.painter().galley(at, galley, s.on_surface_variant);
+                            y += LABEL_HEIGHT;
                         }
                         Entry::Item(item) => {
                             let row = Rect::from_min_size(
@@ -461,6 +528,12 @@ fn paint_item(ui: &egui::Ui, row: Rect, item: &MenuItem, r: &Response, highlight
     r.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, sel, &label));
 }
 
+/// The width of a menu whose longest item is `content_w` wide: a point to
+/// spare, so the label measured is never cut when it is laid out again.
+pub fn menu_width(content_w: f32) -> f32 {
+    (content_w.ceil() + 1.0 + 2.0 * PAD).clamp(MIN_WIDTH, MAX_WIDTH)
+}
+
 /// Moves a menu highlight over the enabled items, wrapping around. `None`
 /// starts from the top (`dir > 0`) or the bottom (`dir < 0`). Returns `None`
 /// when nothing is enabled.
@@ -491,6 +564,14 @@ pub fn step_index(current: Option<usize>, enabled: &[bool], dir: i32) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_menu_fits_its_longest_item() {
+        // «Не рекомендовать исполнителя» with its icon is about 330 points.
+        assert!(menu_width(330.4) - 2.0 * PAD >= 330.4 + 0.5);
+        assert_eq!(menu_width(10.0), MIN_WIDTH);
+        assert_eq!(menu_width(900.0), MAX_WIDTH);
+    }
 
     #[test]
     fn highlight_wraps_and_skips_disabled() {

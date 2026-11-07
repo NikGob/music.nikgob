@@ -45,6 +45,16 @@ pub fn is_various_artists(name: &str) -> bool {
     )
 }
 
+/// Where a lyrics text kept for a song without a file goes: the artist's
+/// folder (named as [`LayoutInput::album_dir`] names it), the song's title
+/// as the name, `.ttml`.
+pub fn kept_text_path(library_dir: &Path, artist: &str, title: &str) -> PathBuf {
+    let input = LayoutInput { artist: artist.to_owned(), title: title.to_owned(), ..Default::default() };
+    let title = if title.trim().is_empty() { "Untitled" } else { title.trim() };
+    let stem = truncate_chars(&sanitize_component(title), MAX_STEM_CHARS);
+    library_dir.join(input.artist_folder()).join(format!("{stem}.ttml"))
+}
+
 impl LayoutInput {
     fn is_compilation(&self) -> bool {
         self.compilation
@@ -169,6 +179,13 @@ mod tests {
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join("/")
+    }
+
+    #[test]
+    fn a_kept_text_goes_into_its_artist_s_folder() {
+        let root = Path::new("C:\\Music");
+        assert_eq!(rel(&kept_text_path(root, "LAZZY2WICE", "Summer 15/16"), root), "LAZZY2WICE/Summer 15-16.ttml");
+        assert_eq!(rel(&kept_text_path(root, " ", ""), root), "Unknown Artist/Untitled.ttml");
     }
 
     #[test]

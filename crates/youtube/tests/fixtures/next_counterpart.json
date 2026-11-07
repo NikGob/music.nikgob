@@ -1,0 +1,326 @@
+{
+ "contents": {
+  "singleColumnMusicWatchNextResultsRenderer": {
+   "tabbedRenderer": {
+    "watchNextTabbedResultsRenderer": {
+     "tabs": [
+      {
+       "tabRenderer": {
+        "title": "Up next",
+        "content": {
+         "musicQueueRenderer": {
+          "content": {
+           "playlistPanelRenderer": {
+            "contents": [
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "ファイトソング (Fight Song) - Eve Music Video"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Eve",
+                  "navigationEndpoint": {
+                   "browseEndpoint": {
+                    "browseId": "UCXW81UHV3UeWUjVMr11ov2A",
+                    "browseEndpointContextSupportedConfigs": {
+                     "browseEndpointContextMusicConfig": {
+                      "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                     }
+                    }
+                   }
+                  }
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "20M views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "399K likes"
+                 }
+                ]
+               },
+               "thumbnail": {
+                "thumbnails": [
+                 {
+                  "url": "https://i.ytimg.com/vi/35nV_M3asRs/hqdefault.jpg?sqp=-oaymwEWCJADEOEBIAQqCggAEOADGC0guwJIWg&rs=AMzJL3mre6XHV1mMwoZNfNY92gGGq_AFuQ",
+                  "width": 400,
+                  "height": 225
+                 },
+                 {
+                  "url": "https://i.ytimg.com/vi/35nV_M3asRs/hq720.jpg?sqp=-oaymwEKCKAGEMIDIABIWg&rs=AMzJL3lRQlokL8qUPLDFHryIHaaU5eBkNg",
+                  "width": 800,
+                  "height": 450
+                 },
+                 {
+                  "url": "https://i.ytimg.com/vi/35nV_M3asRs/hq720.jpg?sqp=-oaymwEKCNUGEN8DIABIWg&rs=AMzJL3l4j8uR_Sgd8eUMerUVC7NUdF13IA",
+                  "width": 853,
+                  "height": 479
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "4:01"
+                 }
+                ],
+                "accessibility": {
+                 "accessibilityData": {
+                  "label": "4 minutes, 1 second"
+                 }
+                }
+               },
+               "selected": true,
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "2eOg5DoYuwU",
+                 "params": "OAHyAQIIAeoECzM1blZfTTNhc1Jz",
+                 "playerParams": "0gcJCU4BEIKdP_Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_OMV"
+                  }
+                 }
+                }
+               },
+               "videoId": "2eOg5DoYuwU",
+               "shortBylineText": {
+                "runs": [
+                 {
+                  "text": "Eve"
+                 }
+                ]
+               }
+              }
+             },
+             {
+              "playlistPanelVideoWrapperRenderer": {
+               "primaryRenderer": {
+                "playlistPanelVideoRenderer": {
+                 "title": {
+                  "runs": [
+                   {
+                    "text": "インソムニア - Insomnia"
+                   }
+                  ]
+                 },
+                 "longBylineText": {
+                  "runs": [
+                   {
+                    "text": "Eve",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "UCXW81UHV3UeWUjVMr11ov2A",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "20M views"
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "399K likes"
+                   }
+                  ]
+                 },
+                 "thumbnail": {
+                  "thumbnails": [
+                   {
+                    "url": "https://i.ytimg.com/vi/35nV_M3asRs/hqdefault.jpg?sqp=-oaymwEWCJADEOEBIAQqCggAEOADGC0guwJIWg&rs=AMzJL3mre6XHV1mMwoZNfNY92gGGq_AFuQ",
+                    "width": 400,
+                    "height": 225
+                   },
+                   {
+                    "url": "https://i.ytimg.com/vi/35nV_M3asRs/hq720.jpg?sqp=-oaymwEKCKAGEMIDIABIWg&rs=AMzJL3lRQlokL8qUPLDFHryIHaaU5eBkNg",
+                    "width": 800,
+                    "height": 450
+                   },
+                   {
+                    "url": "https://i.ytimg.com/vi/35nV_M3asRs/hq720.jpg?sqp=-oaymwEKCNUGEN8DIABIWg&rs=AMzJL3l4j8uR_Sgd8eUMerUVC7NUdF13IA",
+                    "width": 853,
+                    "height": 479
+                   }
+                  ]
+                 },
+                 "lengthText": {
+                  "runs": [
+                   {
+                    "text": "4:01"
+                   }
+                  ],
+                  "accessibility": {
+                   "accessibilityData": {
+                    "label": "4 minutes, 1 second"
+                   }
+                  }
+                 },
+                 "selected": true,
+                 "navigationEndpoint": {
+                  "watchEndpoint": {
+                   "videoId": "35nV_M3asRs",
+                   "params": "OAHyAQIIAeoECzM1blZfTTNhc1Jz",
+                   "playerParams": "0gcJCU4BEIKdP_Kw",
+                   "watchEndpointMusicSupportedConfigs": {
+                    "watchEndpointMusicConfig": {
+                     "hasPersistentPlaylistPanel": true,
+                     "musicVideoType": "MUSIC_VIDEO_TYPE_OMV"
+                    }
+                   }
+                  }
+                 },
+                 "videoId": "35nV_M3asRs",
+                 "shortBylineText": {
+                  "runs": [
+                   {
+                    "text": "Eve"
+                   }
+                  ]
+                 }
+                }
+               },
+               "counterpart": [
+                {
+                 "counterpartRenderer": {
+                  "playlistPanelVideoRenderer": {
+                   "title": {
+                    "runs": [
+                     {
+                      "text": "Insomnia"
+                     }
+                    ]
+                   },
+                   "longBylineText": {
+                    "runs": [
+                     {
+                      "text": "Eve",
+                      "navigationEndpoint": {
+                       "browseEndpoint": {
+                        "browseId": "UCXW81UHV3UeWUjVMr11ov2A",
+                        "browseEndpointContextSupportedConfigs": {
+                         "browseEndpointContextMusicConfig": {
+                          "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                         }
+                        }
+                       }
+                      }
+                     },
+                     {
+                      "text": " • "
+                     },
+                     {
+                      "text": "Under Blue",
+                      "navigationEndpoint": {
+                       "browseEndpoint": {
+                        "browseId": "MPREb_eve_underblue",
+                        "browseEndpointContextSupportedConfigs": {
+                         "browseEndpointContextMusicConfig": {
+                          "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                         }
+                        }
+                       }
+                      }
+                     },
+                     {
+                      "text": " • "
+                     },
+                     {
+                      "text": "2023"
+                     }
+                    ]
+                   },
+                   "thumbnail": {
+                    "thumbnails": [
+                     {
+                      "url": "https://lh3.googleusercontent.com/under-blue=w60-h60-l90-rj",
+                      "width": 60,
+                      "height": 60
+                     },
+                     {
+                      "url": "https://lh3.googleusercontent.com/under-blue=w120-h120-l90-rj",
+                      "width": 120,
+                      "height": 120
+                     }
+                    ]
+                   },
+                   "lengthText": {
+                    "runs": [
+                     {
+                      "text": "3:27"
+                     }
+                    ],
+                    "accessibility": {
+                     "accessibilityData": {
+                      "label": "3 minutes, 27 seconds"
+                     }
+                    }
+                   },
+                   "navigationEndpoint": {
+                    "watchEndpoint": {
+                     "videoId": "0VlKjNUmUKE",
+                     "watchEndpointMusicSupportedConfigs": {
+                      "watchEndpointMusicConfig": {
+                       "hasPersistentPlaylistPanel": true,
+                       "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                      }
+                     }
+                    }
+                   },
+                   "videoId": "0VlKjNUmUKE",
+                   "shortBylineText": {
+                    "runs": [
+                     {
+                      "text": "Eve"
+                     }
+                    ]
+                   }
+                  }
+                 },
+                 "segmentMap": {
+                  "segment": [
+                   {
+                    "primaryVideoStartTimeMilliseconds": "0",
+                    "counterpartVideoStartTimeMilliseconds": "0",
+                    "durationMilliseconds": "207000"
+                   }
+                  ]
+                 }
+                }
+               ]
+              }
+             }
+            ],
+            "playlistId": "RDAMVM35nV_M3asRs"
+           }
+          }
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}

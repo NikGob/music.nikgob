@@ -9,13 +9,14 @@ publish.workspace = true
 
 [dependencies]
 nikgob-core.workspace = true
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 log.workspace = true
 
 [dev-dependencies]
+nikgob-core = { workspace = true, features = ["fake"] }
 tempfile = "3"
 
 [lints]

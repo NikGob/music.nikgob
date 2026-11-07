@@ -1,5 +1,6 @@
-//! Editions of one album (one MusicBrainz release group) are offered to
-//! merge, never merged on their own: at start-up and after each import.
+//! Editions of one album (one MusicBrainz release group, or releases of one
+//! artist sharing most songs) are offered to merge, never merged on their
+//! own: at start-up and after each import.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -40,7 +41,7 @@ impl Worker {
                 new_songs: g.new_songs,
             })
             .collect();
-        self.publish(|s, _| s.editions = offers);
+        self.publish(|s| s.editions = offers);
         if fresh {
             self.toast("Похоже, некоторые альбомы повторяются — посмотри в Библиотеке", None);
         }
@@ -68,7 +69,7 @@ impl Worker {
             return;
         };
         let group = g.group.clone();
-        self.publish(|s, _| s.prefs.kept_editions.push(group));
+        self.publish(|s| s.prefs.kept_editions.push(group));
         self.save_prefs();
         self.offer_editions();
     }

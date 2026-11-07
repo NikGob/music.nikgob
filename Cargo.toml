@@ -1,10 +1,11 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor"]
 default-members = ["crates/app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.3"
 edition = "2024"
 rust-version = "1.98"
 license = "PolyForm-Strict-1.0.0"
@@ -45,6 +46,40 @@ dbg_macro = "warn"
 [profile.dev.package."*"]
 opt-level = 2
 
+# The audio engine's per-sample loops (decoder thread and the realtime
+# callback) run 2-4x slower unoptimised, which eats into the decoded-audio
+# headroom of a dev build; optimise it even in dev.
+[profile.dev.package.nikgob-audio]
+opt-level = 3
+
+# Same for the sound analysis (downmix and resampling loops, the vector
+# index's brute-force passes), which runs in the background of a dev build.
+[profile.dev.package.nikgob-recs]
+opt-level = 3
+
+# And the lyrics alignment (spectra, the alignment's dynamic programming).
+[profile.dev.package.nikgob-align]
+opt-level = 3
+
+# The interface draws every frame in its own crates (springs, shape
+# morphs, lyrics layout, the tessellated paths of covers and glows): at
+# opt-level 0 a Now Playing frame takes about three times as long and the
+# animations miss frames, so the app's crates are optimised in dev as well.
+[profile.dev.package.nikgob]
+opt-level = 2
+
+[profile.dev.package.nikgob-md3e]
+opt-level = 2
+
+[profile.dev.package.nikgob-shapes]
+opt-level = 2
+
+[profile.dev.package.nikgob-motion]
+opt-level = 2
+
+[profile.dev.package.nikgob-view]
+opt-level = 2
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
@@ -61,3 +96,8 @@ emath = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1
 epaint = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
 epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
 winit = { git = "https://github.com/crmne/winit", rev = "ed7caa9023f10b397f5b6ec8284a840cbd8a6f65" }
+# librespot-core 0.8.0 with a one-line fix so it builds next to librqbit (vendor/librespot-core/README.nikgob.md).
+librespot-core = { path = "vendor/librespot-core" }
+# librqbit-dualstack-sockets 0.7.0 that skips Windows per-datagram UDP receive errors, which
+# otherwise stop DHT and uTP for the session (vendor/librqbit-dualstack-sockets/README.nikgob.md).
+librqbit-dualstack-sockets = { path = "vendor/librqbit-dualstack-sockets" }

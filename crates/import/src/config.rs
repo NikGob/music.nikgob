@@ -25,9 +25,12 @@ pub struct ImportConfig {
     pub check_fake_lossless: bool,
     /// Longest edge of `cover.jpg` and of the embedded cover. Default 1200.
     pub cover_max_edge: u32,
-    /// Convert lossless files that look transcoded from a lossy source anyway.
-    /// Off by default: the PLAN forbids lossy-to-lossy conversion, so such a
-    /// file is kept as a FLAC/WAV copy and scored as lossy.
+    /// A lossless file plainly transcoded from a lossy source
+    /// ([`nikgob_core::quality::clear_fake`]) becomes an MP3 that keeps all
+    /// its content has (320 CBR, V0 for a lower origin; `ffmpeg` needed),
+    /// instead of a FLAC/WAV copy scored as lossy. Off by default: the
+    /// player asks first; either way it is never registered as a lossless
+    /// master.
     pub convert_fake_lossless: bool,
     /// Enable background online lyrics enrichment in the runtime.
     pub fetch_lyrics: bool,

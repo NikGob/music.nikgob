@@ -260,7 +260,8 @@ fn volume_uses_a_cubic_curve_without_steps() {
 #[test]
 fn normalization_applies_item_gain_only_when_enabled() {
     let dir = tmp();
-    let data = vec![0.4f32; RATE as usize * 4];
+    // 4 s of stereo.
+    let data = vec![0.4f32; RATE as usize * 8];
     let p = path(&dir, "c.wav");
     write_wav_f32(&p, RATE, 2, &data);
     let mut rig = rig(RATE);
@@ -272,8 +273,8 @@ fn normalization_applies_item_gain_only_when_enabled() {
         out[out.len() - 10]
     );
     rig.player.set_normalization(false);
-    // Audible after the already-buffered ~300 ms.
-    rig.device.render(RATE as usize / 2);
+    // Audible after the already-buffered ~1 s.
+    rig.device.render(RATE as usize * 3 / 2);
     let out = rig.device.render(RATE as usize / 2);
     assert!(
         (out[out.len() - 10] - 0.4).abs() < 1e-3,
@@ -382,6 +383,89 @@ impl PcmSource for Sine {
         self.left -= n;
         Ok(PcmRead::Frames(n))
     }
+}
+
+/// A 440 Hz stereo sine at the device rate whose reads hang once, for
+/// `stall`, after `stall_at` frames: a disk or CPU holding the decoder up.
+struct StallingSine {
+    frame: usize,
+    stall_at: usize,
+    stall: Option<Duration>,
+}
+
+impl PcmSource for StallingSine {
+    fn sample_rate(&self) -> u32 {
+        RATE
+    }
+    fn channels(&self) -> u16 {
+        2
+    }
+    fn read(&mut self, out: &mut [f32]) -> Result<PcmRead, PcmError> {
+        if self.frame >= self.stall_at
+            && let Some(stall) = self.stall.take()
+        {
+            std::thread::sleep(stall);
+        }
+        let frames = out.len() / 2;
+        for f in out.as_chunks_mut::<2>().0 {
+            let s = (0.5
+                * (std::f64::consts::TAU * 440.0 * self.frame as f64 / f64::from(RATE)).sin())
+                as f32;
+            f[0] = s;
+            f[1] = s;
+            self.frame += 1;
+        }
+        Ok(PcmRead::Frames(frames))
+    }
+}
+
+#[test]
+fn a_stalled_decoder_is_a_counted_dropout_without_clicks() {
+    let mut rig = rig(RATE);
+    rig.player.play(PlayItem::pcm(
+        4,
+        Box::new(StallingSine {
+            frame: 0,
+            stall_at: RATE as usize,
+            stall: Some(Duration::from_millis(1500)),
+        }),
+        None,
+    ));
+    // The decoder fills its second ahead and hangs; half of it is pulled.
+    let mut heard = rig.device.render(RATE as usize / 2);
+    assert_eq!(rig.player.underruns(), 0);
+    // Then in real time, like a sound card: the ring runs dry half a second
+    // later and plays again once the source answers.
+    let block = 256;
+    let began = std::time::Instant::now();
+    let mut pulled = 0usize;
+    while pulled < RATE as usize * 5 / 2 {
+        heard.extend(rig.device.render_now(block));
+        pulled += block;
+        let due = Duration::from_secs_f64(pulled as f64 / f64::from(RATE));
+        if let Some(wait) = due.checked_sub(began.elapsed()) {
+            std::thread::sleep(wait);
+        }
+    }
+    let dropouts = rig.player.underruns();
+    assert!(
+        dropouts > 10,
+        "{dropouts} underruns for a second of silence"
+    );
+    let left: Vec<f32> = heard.iter().step_by(2).copied().collect();
+    let silent = left.iter().filter(|s| **s == 0.0).count();
+    assert!(silent > RATE as usize / 2, "{silent} silent frames");
+    assert!(
+        left[left.len() - 1000..].iter().any(|s| s.abs() > 0.3),
+        "it plays again"
+    );
+    // A 440 Hz sine at 0.5 moves at most 0.03 a sample; a hard cut to or
+    // from silence jumps up to 0.5.
+    let step = left
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0f32, f32::max);
+    assert!(step < 0.1, "a click of {step}");
 }
 
 #[test]
@@ -614,11 +698,14 @@ fn device_change_mid_playback_carries_on_from_the_same_position() {
         (crossings as f64 - want).abs() <= 1.5,
         "{crossings} vs {want}"
     );
-    // No spurious start/track events from the reconfiguration.
-    let ev: Vec<_> = rig
-        .events
-        .try_iter()
-        .filter(|e| !matches!(e, Event::Position { .. }))
-        .collect();
+    // No spurious start/track events from the reconfiguration. The engine
+    // can render all of this before the control thread has passed on even
+    // the `Started`, so wait for that, then give stray ones a moment.
+    let mut ev = wait_event(&rig.events, Duration::from_secs(2), |e| {
+        matches!(e, Event::Started { .. })
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    ev.extend(rig.events.try_iter());
+    ev.retain(|e| !matches!(e, Event::Position { .. }));
     assert_eq!(ev.len(), 1, "{ev:?}");
 }

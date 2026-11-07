@@ -11,6 +11,8 @@ pub struct MetadataConfig {
     pub contact: String,
     /// AcoustID application key. Without it fingerprint lookups are unavailable.
     pub acoustid_client_key: Option<String>,
+    /// The user's Last.fm API key. Without it Last.fm is not asked.
+    pub lastfm_key: Option<String>,
 }
 
 impl MetadataConfig {
@@ -18,7 +20,14 @@ impl MetadataConfig {
         Self {
             contact: contact.into(),
             acoustid_client_key: None,
+            lastfm_key: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_lastfm_key(mut self, key: impl Into<String>) -> Self {
+        self.lastfm_key = Some(key.into()).filter(|k: &String| !k.trim().is_empty());
+        self
     }
 
     #[must_use]
@@ -65,6 +74,7 @@ impl fmt::Debug for MetadataConfig {
                 "acoustid_client_key",
                 &self.acoustid_client_key.as_ref().map(|_| "<redacted>"),
             )
+            .field("lastfm_key", &self.lastfm_key.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }

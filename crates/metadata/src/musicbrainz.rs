@@ -371,6 +371,24 @@ impl MusicBrainz {
         Ok(raw.recordings)
     }
 
+    /// Releases called `title` by `artist` (an album found as a whole: a
+    /// downloaded folder is matched to one of them by its track count and
+    /// lengths). Search results list media with their track counts only;
+    /// [`Self::lookup_release`] gives the tracks.
+    pub async fn search_releases(&self, artist: &str, title: &str, limit: u32) -> Result<Vec<Release>> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default, deserialize_with = "null_default")]
+            releases: Vec<Release>,
+        }
+        let lucene = format!("release:{} AND artist:{}", phrase(title), phrase(artist));
+        let limit = limit.clamp(1, PAGE_MAX).to_string();
+        let raw: Raw = self
+            .get("release", &[("query", lucene.as_str()), ("limit", limit.as_str())])
+            .await?;
+        Ok(raw.releases)
+    }
+
     /// `inc=recordings+artist-credits+labels+media+release-groups`
     pub async fn lookup_release(&self, mbid: &str) -> Result<Release> {
         check_mbid(mbid)?;
@@ -479,6 +497,87 @@ impl MusicBrainz {
             }
         }
         Ok(all)
+    }
+
+    /// The artist called `name` (the best hit whose name folds to it, a
+    /// score of 90 at least) with its tags and genres, one request: the
+    /// graph of similar music reads them (docs/recs-graph.md).
+    pub async fn search_artist_tags(&self, name: &str) -> Result<Option<ArtistTags>> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default, deserialize_with = "null_default")]
+            artists: Vec<RawTagged>,
+        }
+        let query = format!("artist:{}", phrase(name));
+        let raw: Raw = self.get("artist", &[("query", query.as_str()), ("limit", "5")]).await?;
+        let want = crate::text::artist_key(name);
+        Ok(raw
+            .artists
+            .into_iter()
+            .filter(|a| a.score.unwrap_or(0) >= 90 && (crate::text::artist_key(&a.name) == want || a.aliases.iter().any(|x| crate::text::artist_key(&x.name) == want)))
+            .map(RawTagged::tags)
+            .next())
+    }
+
+    /// The tags and genres of the artist `mbid`.
+    pub async fn artist_tags(&self, mbid: &str) -> Result<ArtistTags> {
+        check_mbid(mbid)?;
+        let raw: RawTagged = self.get(&format!("artist/{mbid}"), &[("inc", "tags+genres")]).await?;
+        Ok(raw.tags())
+    }
+}
+
+/// An artist's MusicBrainz id and its tags and genres with their votes
+/// (a genre counts as its tag; the larger vote stands).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtistTags {
+    pub id: String,
+    pub name: String,
+    pub tags: Vec<(String, u32)>,
+}
+
+#[derive(Deserialize)]
+struct RawTag {
+    name: String,
+    #[serde(default)]
+    count: i64,
+}
+
+#[derive(Deserialize)]
+struct RawAlias {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct RawTagged {
+    id: String,
+    name: String,
+    #[serde(default)]
+    score: Option<u32>,
+    #[serde(default, deserialize_with = "null_default")]
+    aliases: Vec<RawAlias>,
+    #[serde(default, deserialize_with = "null_default")]
+    tags: Vec<RawTag>,
+    #[serde(default, deserialize_with = "null_default")]
+    genres: Vec<RawTag>,
+}
+
+impl RawTagged {
+    fn tags(self) -> ArtistTags {
+        let mut by: Vec<(String, u32)> = Vec::new();
+        for t in self.tags.into_iter().chain(self.genres) {
+            let name = t.name.trim().to_lowercase();
+            let votes = u32::try_from(t.count.max(0)).unwrap_or(0);
+            if name.is_empty() {
+                continue;
+            }
+            match by.iter_mut().find(|x| x.0 == name) {
+                Some(x) => x.1 = x.1.max(votes),
+                None => by.push((name, votes)),
+            }
+        }
+        by.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        ArtistTags { id: self.id, name: self.name, tags: by }
     }
 }
 

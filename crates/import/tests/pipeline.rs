@@ -209,7 +209,8 @@ async fn awkward_names_are_made_safe_and_lossy_files_are_copied_untouched() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fake_lossless_is_scored_as_lossy_and_kept_unconverted() {
-    let root = Root::new();
+    let mut root = Root::new();
+    root.cfg.convert_fake_lossless = false;
     let (importer, lib) = importer(&root);
     let fake = root.inbox("fake.wav");
     write_wav(&fake, &lowpassed_noise(RATE, 20.0, 16_000.0, 7), RATE);
@@ -222,10 +223,60 @@ async fn fake_lossless_is_scored_as_lossy_and_kept_unconverted() {
     assert!(failures(&events).is_empty(), "{events:?}");
     let (track_id, _) = imported(&events)[0];
     let src = lib.active_source(track_id).unwrap().unwrap();
-    assert_eq!(src.quality_score, 690, "fake FLAC ranks below MP3 V0");
-    assert_eq!(src.codec, Codec::Wav, "never lossy to lossy: kept as a lossless copy");
+    // Cut at 16 kHz: ranked as the MP3 ~128 it was made from, below V0.
+    assert_eq!(
+        src.quality_score,
+        nikgob_core::quality::fake_score(nikgob_core::quality::SoundOrigin::Lossy { kbps: 128 }, lib.quality_check(src.id).unwrap().unwrap().cutoff_hz)
+    );
+    assert!(src.quality_score < 690, "fake FLAC ranks below MP3 V0");
+    assert_eq!(src.codec, Codec::Wav, "conversion off: kept as it is");
     assert!(src.locator.ends_with(".wav"));
     assert!(!fake.exists());
+    // The verdict is kept, and the rows say what the file is.
+    let check = lib.quality_check(src.id).unwrap().unwrap();
+    assert_eq!(check.verdict, nikgob_core::quality::Verdict::Transcoded);
+    assert!((check.cutoff_hz - 16_000.0).abs() < 400.0, "{check:?}");
+    assert_eq!(check.spectrum_db.len(), nikgob_core::quality::SPECTRUM_POINTS);
+    assert_eq!(check.made_from, None);
+    let row = lib.get_track_row(track_id).unwrap().unwrap();
+    assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "WAV из MP3 ~128");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fake_lossless_becomes_an_mp3_with_its_tags_and_the_original_goes_to_trash() {
+    if nikgob_import::FfmpegEncoder::find().is_none() {
+        eprintln!("skipped: no ffmpeg on PATH");
+        return;
+    }
+    let mut root = Root::new();
+    assert!(!root.cfg.convert_fake_lossless, "never without the user's say");
+    root.cfg.convert_fake_lossless = true;
+    let (importer, lib) = importer(&root);
+    let fake = root.inbox("fake.wav");
+    write_wav(&fake, &lowpassed_noise(RATE, 20.0, 16_000.0, 7), RATE);
+    tags::write_tags(&fake, &song_tags("Fake")).unwrap();
+
+    let events = importer
+        .import_paths(vec![fake.clone()], SourceOrigin::Inbox)
+        .wait()
+        .await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    assert!(!events.iter().any(|e| matches!(e, ImportEvent::MasterRegistered(_))), "a fake is no master");
+    let (track_id, _) = imported(&events)[0];
+    let src = lib.active_source(track_id).unwrap().unwrap();
+    assert_eq!(src.codec, Codec::Mp3);
+    assert!(src.locator.ends_with(".mp3"));
+    assert!(src.quality_score < 690);
+    let (t, _) = tags::read_tags(std::path::Path::new(&src.locator)).unwrap();
+    assert_eq!(t.title.as_deref(), Some("Fake"));
+    assert_eq!(t.track_id, Some(track_id));
+    // The original is in the Trash, not lost.
+    assert!(!fake.exists());
+    assert_eq!(count_files(&root.cfg.trash_dir), 1);
+    let check = lib.quality_check(src.id).unwrap().unwrap();
+    assert_eq!(check.made_from, Some(Codec::Wav));
+    let row = lib.get_track_row(track_id).unwrap().unwrap();
+    assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "MP3 из поддельного WAV");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -775,4 +826,115 @@ fn a_release_group_alone_is_not_enough_to_offer_a_merge() {
     // Same group and a shared song, but another artist.
     release("Album", "B", "r3", &[("One", "rec-1")]);
     assert!(nikgob_import::find_release_editions(&lib).unwrap().is_empty());
+}
+
+#[test]
+fn editions_without_musicbrainz_are_found_by_the_songs_they_share() {
+    use nikgob_core::model::{ArtistCredit, Release, Track};
+    let lib = Library::open_in_memory().unwrap();
+    let release = |title: &str, group: Option<&str>, songs: &[(&str, u32)]| {
+        let mut r = Release::new(title, ArtistCredit::single("Fujisawa Yoshiaki", None));
+        r.release_group_mbid = group.map(Into::into);
+        let r = lib.upsert_release(&r).unwrap();
+        for (i, (title, secs)) in songs.iter().enumerate() {
+            let mut t = Track::new(*title, ArtistCredit::single("Fujisawa Yoshiaki", None));
+            t.release_id = Some(r.id);
+            t.track_no = i as u32 + 1;
+            t.duration_ms = Some(secs * 1000);
+            lib.upsert_track(&t).unwrap();
+        }
+        r.id
+    };
+    let ost = release(
+        "Original Soundtrack 1",
+        None,
+        &[("魔術の授業", 114), ("詠唱", 103), ("無職転生", 137), ("まだ見ぬ世界", 119), ("友達", 96)],
+    );
+    // New tracks in between: the shared ones sit at other numbers.
+    let special = release(
+        "Original Soundtrack 1 Special Edition",
+        None,
+        &[
+            ("魔術の授業", 114),
+            ("詠唱", 103),
+            ("ロキシーの訓練", 99),
+            ("無職転生", 137),
+            ("5歳のお祝い", 100),
+            ("まだ見ぬ世界", 119),
+            ("友達", 96),
+        ],
+    );
+    // The next volume shares nothing; a single shares one song; two
+    // releases MusicBrainz tells apart (two release groups) stay apart.
+    release("Original Soundtrack 2", None, &[("復活", 136), ("凛として", 142), ("敵襲", 140)]);
+    release("無職転生", None, &[("無職転生", 137)]);
+    let live = [("Opening", 200), ("Theme", 210), ("Ending", 220)];
+    release("Concert", Some("concert"), &live);
+    release("Concert Encore", Some("encore"), &live);
+
+    let found = nikgob_import::find_release_editions(&lib).unwrap();
+    let titles: Vec<_> = found
+        .iter()
+        .map(|g| (g.keep.release.title.as_str(), g.others.iter().map(|r| r.release.title.as_str()).collect::<Vec<_>>()))
+        .collect();
+    assert_eq!(titles, [("Original Soundtrack 1 Special Edition", vec!["Original Soundtrack 1"])]);
+    assert_eq!((found[0].same_songs, found[0].new_songs), (5, 0));
+    nikgob_import::fold_editions(&lib, &found[0]).unwrap();
+    assert!(lib.get_release(ost).unwrap().is_none());
+    assert_eq!(lib.tracks_of_release(special).unwrap().len(), 7, "no song twice");
+    assert!(nikgob_import::find_release_editions(&lib).unwrap().is_empty());
+}
+
+/// A better copy found for a library track (the wishlist's «качество
+/// лучше») is imported for that track: it replaces the file in place, and
+/// the like, the plays, the playlist entry and the lyrics stay on the same
+/// track; the old file goes to Trash.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_better_copy_for_a_track_keeps_its_like_plays_playlists_and_lyrics() {
+    use nikgob_core::model::{EventContext, EventType};
+    use nikgob_import::ImportTargets;
+
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let audio = broadband(RATE, 8.0, 5);
+    let work = root.dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let wav = work.join("master.wav");
+    write_wav(&wav, &audio, RATE);
+    let low = root.inbox("low.opus");
+    RopusEncoder.encode_to_opus(&wav, &low, &EncodeOptions { bitrate_kbps: 96 }).unwrap();
+    tags::write_tags(&low, &song_tags("Группа крови")).unwrap();
+    let events = importer.import_paths(vec![low], SourceOrigin::Inbox).wait().await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    let (track, _) = imported(&events)[0];
+    let old = lib.active_source(track).unwrap().unwrap();
+
+    lib.like(track).unwrap();
+    lib.record_event(track, EventType::Complete, Some(SourceKind::LocalFile), None, EventContext::default()).unwrap();
+    let playlist = lib.create_playlist("Дорога").unwrap();
+    lib.playlist_add(playlist.id, track).unwrap();
+    lib.put_lyrics(track, None, Some("Тёплое место, но улицы ждут"), false).unwrap();
+
+    // The copy comes as a wished download does: one file for the one track.
+    let hi = work.join("Kino - Gruppa krovi (FLAC).wav");
+    std::fs::copy(&wav, &hi).unwrap();
+    tags::write_tags(&hi, &song_tags("Группа крови")).unwrap();
+    let targets = ImportTargets { tracks: vec![track], force: true, ..ImportTargets::default() };
+    let events = importer.import_paths_for(vec![hi], SourceOrigin::Inbox, targets).wait().await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    assert_eq!(imported(&events), [(track, true)], "{events:?}");
+
+    let new = lib.active_source(track).unwrap().unwrap();
+    assert!(new.quality_score > old.quality_score);
+    assert_ne!(new.id, old.id);
+    assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), 1, "the same track");
+    assert!(lib.is_liked(track).unwrap());
+    assert_eq!(lib.events_of_track(track, 10).unwrap().len(), 1);
+    let entries = lib.playlist_entries(playlist.id, 0, 10).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].entry.track_id, track);
+    assert_eq!(lib.lyrics(track).unwrap().unwrap().plain.as_deref(), Some("Тёплое место, но улицы ждут"));
+    let trash = lib.list_trash().unwrap();
+    assert_eq!(trash.len(), 1);
+    assert_eq!(trash[0].source.id, old.id);
 }

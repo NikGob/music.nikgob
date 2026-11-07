@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use fastframe_audio::Render;
 
 use crate::backend::RenderHandle;
+use crate::render::dropout_frames;
 use crate::shared::{ManualClock, Shared, frames_to_ns};
 
 /// Format of an [`OfflineDevice`].
@@ -97,6 +98,23 @@ impl OfflineDevice {
         out
     }
 
+    /// Pulls `frames` frames the way a sound card does: without waiting for
+    /// the decoder, so a decoder that falls behind is heard (and counted) as
+    /// a dropout. Empty while the device is paused.
+    pub fn render_now(&mut self, frames: usize) -> Vec<f32> {
+        let ch = usize::from(self.options.channels);
+        let mut out = Vec::with_capacity(frames * ch);
+        let mut left = frames;
+        while left > 0 && !self.is_device_paused() {
+            let n = left.min(self.options.block_frames);
+            let mut block = vec![0.0; n * ch];
+            self.pull(&mut block);
+            out.extend_from_slice(&block);
+            left -= n;
+        }
+        out
+    }
+
     /// Pulls until the playing item ends with nothing following it (or
     /// `max_frames` frames, or the device is paused). The result ends exactly
     /// at the last sample of the last item.
@@ -140,7 +158,10 @@ impl OfflineDevice {
     }
 
     fn wait_for_data(&mut self, frames: usize) {
-        let need = frames * usize::from(self.options.channels);
+        // A real device's ring is far ahead; with only a block in it the
+        // callback would take the decoder for stalled and ramp out.
+        let reserve = dropout_frames(self.options.sample_rate) as usize;
+        let need = (frames + reserve) * usize::from(self.options.channels);
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let (available, resyncing) = {

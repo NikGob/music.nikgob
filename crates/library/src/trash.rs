@@ -17,6 +17,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::catalog::{SOURCE_COLS, refresh_active, source_by_id, source_from_row, track_row_at};
 use crate::db::Library;
 use crate::error::{LibraryError, Result};
+use crate::streams::refresh_in_library;
 use crate::types::{DeletedTrack, PurgedFile, PurgedTrack, TrashEntry};
 use crate::util::{get_id, now_ms};
 
@@ -69,6 +70,33 @@ impl Library {
         })
     }
 
+    /// Takes a source out of the library altogether (the import that added
+    /// it was cancelled): its row and its check go, and the track's active
+    /// source is chosen again. The caller moves its file.
+    pub fn forget_source(&self, source: SourceId) -> Result<()> {
+        self.write(|tx| {
+            let Some(src) = source_by_id(tx, source)? else { return Ok(()) };
+            tx.execute("DELETE FROM source_quality WHERE source_id = ?1", [source.to_string()])?;
+            tx.execute("DELETE FROM source WHERE id = ?1", [source.to_string()])?;
+            refresh_active(tx, src.track_id)?;
+            Ok(())
+        })
+    }
+
+    /// Takes a track an import just made out again (the import was
+    /// cancelled): its rows go as a purge's do, but it never was the user's,
+    /// so its song is not «не нужна» on its album.
+    pub fn forget_new_track(&self, track: TrackId) -> Result<PurgedTrack> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE track SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+                params![track.to_string(), now_ms()],
+            )?;
+            Ok(())
+        })?;
+        self.purge_track(track)
+    }
+
     /// Everything in Trash, most recently trashed first.
     pub fn list_trash(&self) -> Result<Vec<TrashEntry>> {
         self.read(|c| {
@@ -77,7 +105,7 @@ impl Library {
                 .map(|c| format!("s.{}", c.trim()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {cols}, s.trash_path, t.title, t.artist_display
                    FROM source s JOIN track t ON t.id = s.track_id
                   WHERE s.trashed_at IS NOT NULL ORDER BY s.trashed_at DESC, s.id"
@@ -107,7 +135,7 @@ impl Library {
     pub fn purge_trash_before(&self, cutoff: UnixMs) -> Result<Vec<PurgedFile>> {
         self.write(|tx| {
             let purged = {
-                let mut stmt = tx.prepare(&format!(
+                let mut stmt = tx.prepare_cached(&format!(
                     "SELECT {SOURCE_COLS}, trash_path FROM source
                       WHERE trashed_at IS NOT NULL AND trashed_at < ?1 AND {NOT_OF_DELETED}
                       ORDER BY trashed_at, id"
@@ -155,6 +183,13 @@ impl Library {
                 ),
                 [cutoff],
             )?;
+            // A stream track whose last downloaded file is gone for good is
+            // a stream track again.
+            let mut touched: Vec<String> = purged.iter().map(|p| p.track_id.to_string()).collect();
+            touched.dedup();
+            for t in &touched {
+                refresh_in_library(tx, t)?;
+            }
             Ok(purged)
         })
     }
@@ -174,6 +209,8 @@ impl Library {
             if n == 0 {
                 return Err(LibraryError::not_found("track", track));
             }
+            // Its song is «не нужна» on its album from now on.
+            crate::unwanted::note_unwanted_in(tx, &track.to_string(), at)?;
             Ok(())
         })
     }
@@ -211,6 +248,7 @@ impl Library {
                 "UPDATE track SET deleted_at = NULL WHERE id = ?1",
                 [track.to_string()],
             )?;
+            crate::unwanted::forget_unwanted_in(tx, &track.to_string())?;
             refresh_active(tx, track)?;
             Ok(())
         })
@@ -219,7 +257,7 @@ impl Library {
     /// Deleted tracks, most recently deleted first.
     pub fn deleted_tracks(&self) -> Result<Vec<DeletedTrack>> {
         self.read(|c| {
-            let mut stmt = c.prepare(concat!(
+            let mut stmt = c.prepare_cached(concat!(
                 "SELECT t.deleted_at, ",
                 track_row_cols!(),
                 " ",
@@ -240,7 +278,7 @@ impl Library {
     /// Tracks deleted strictly before `cutoff` (the 30-day auto-purge).
     pub fn deleted_tracks_before(&self, cutoff: UnixMs) -> Result<Vec<TrackId>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare_cached(
                 "SELECT id FROM track WHERE deleted_at IS NOT NULL AND deleted_at < ?1
                   ORDER BY deleted_at, seq",
             )?;
@@ -264,9 +302,16 @@ impl Library {
                 .query_row("SELECT release_id FROM track WHERE id = ?1", [&tid], |r| r.get(0))
                 .optional()?
                 .ok_or_else(|| LibraryError::not_found("track", track))?;
+            // Deleted for good at once (no Trash): its song is «не нужна»
+            // too; a row of a track from the Trash stays without it.
+            let live: bool = tx.query_row("SELECT deleted_at IS NULL FROM track WHERE id = ?1", [&tid], |r| r.get(0))?;
+            if live {
+                crate::unwanted::note_unwanted_in(tx, &tid, now)?;
+            }
+            crate::unwanted::unlink_unwanted_in(tx, &tid)?;
             let mut out = PurgedTrack::default();
             let files: Vec<(String, String, bool, Option<String>)> = {
-                let mut stmt = tx.prepare(
+                let mut stmt = tx.prepare_cached(
                     "SELECT kind, locator, trashed_at IS NOT NULL, trash_path FROM source
                       WHERE track_id = ?1 ORDER BY added_at, id",
                 )?;
@@ -302,7 +347,7 @@ impl Library {
                 .query_row("SELECT file_hash FROM master WHERE track_id = ?1", [&tid], |r| r.get(0))
                 .optional()?;
             let artists: Vec<String> = {
-                let mut stmt = tx.prepare(
+                let mut stmt = tx.prepare_cached(
                     "SELECT artist_id FROM track_artist WHERE track_id = ?1
                      UNION SELECT artist_id FROM release_artist WHERE release_id = ?2",
                 )?;
@@ -311,7 +356,7 @@ impl Library {
             };
 
             tx.execute("DELETE FROM source WHERE track_id = ?1", [&tid])?;
-            for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "master"] {
+            for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "analysis_failed", "master"] {
                 tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&tid])?;
             }
             if let Some(hash) = &out.master_hash {
@@ -331,37 +376,17 @@ impl Library {
                   WHERE track_id = ?1 AND deleted = 0",
                 params![tid, now, device.as_str()],
             )?;
+            // Nothing points at it any more: its ids in the services go,
+            // its «Хочу скачать» items forget it.
+            tx.execute("DELETE FROM external_id WHERE kind = 'track' AND local_id = ?1", [&tid])?;
+            tx.execute("UPDATE wishlist SET track_id = NULL WHERE track_id = ?1", [&tid])?;
             tx.execute("DELETE FROM track WHERE id = ?1", [&tid])?;
 
             if let Some(rid) = &release {
-                let empty: bool = tx.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM track WHERE release_id = ?1)",
-                    [rid],
-                    |r| r.get(0),
-                )?;
-                if empty {
-                    tx.execute("DELETE FROM release_artist WHERE release_id = ?1", [rid])?;
-                    tx.execute("DELETE FROM palette WHERE release_id = ?1", [rid])?;
-                    tx.execute(
-                        "UPDATE likes SET deleted = 1, updated_at = ?2, updated_by = ?3
-                          WHERE target_kind = 'release' AND target_id = ?1 AND deleted = 0",
-                        params![rid, now, device.as_str()],
-                    )?;
-                    tx.execute("DELETE FROM release WHERE id = ?1", [rid])?;
-                    out.release_removed = true;
-                }
+                out.release_removed = crate::repairs::drop_empty_release_in(tx, rid, None, device.as_str(), now)?;
             }
             for a in artists {
-                let orphan: bool = tx.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM track_artist WHERE artist_id = ?1)
-                        AND NOT EXISTS(SELECT 1 FROM release_artist WHERE artist_id = ?1)",
-                    [&a],
-                    |r| r.get(0),
-                )?;
-                if orphan {
-                    tx.execute("DELETE FROM artist_photo WHERE artist_id = ?1", [&a])?;
-                    tx.execute("DELETE FROM artist WHERE id = ?1", [&a])?;
-                }
+                crate::repairs::drop_orphan_artist_in(tx, &a)?;
             }
             Ok(out)
         })

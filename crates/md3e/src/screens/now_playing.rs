@@ -708,7 +708,7 @@ fn change_shape(ctx: &egui::Context, prefs: &nikgob_view::Prefs, out: &mut Vec<C
         None => pool[0],
     };
     if next != prefs.cover_shape {
-        out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs { cover_shape: next, ..prefs.clone() })));
+        out.push(Command::SetPref(nikgob_view::PrefPatch::CoverShape(next)));
     }
 }
 
@@ -771,7 +771,10 @@ pub fn show(
     {
         closed = true;
     }
-    ambient(ui, rect, state, pages);
+    {
+        let _p = crate::prof::scope("np.ambient");
+        ambient(ui, rect, state, pages);
+    }
     let motion = !theme.reduced_motion;
     let bass = if playing { pages.levels_bass } else { 0.0 };
     let (kick, transients) = if playing && motion {
@@ -779,7 +782,10 @@ pub fn show(
     } else {
         (0.0, Vec::new())
     };
-    super::bg_shapes::paint(ui, rect, &state.prefs, playing, kick, &transients, bass);
+    {
+        let _p = crate::prof::scope("np.bg_shapes");
+        super::bg_shapes::paint(ui, rect, &state.prefs, playing, kick, &transients, bass);
+    }
 
     let class = size_class(rect.width());
     let margin = class.margin();
@@ -801,25 +807,29 @@ pub fn show(
     {
         closed = true;
     }
-    let ctx_text = p
-        .context
-        .as_deref()
-        .map_or_else(|| "Сейчас играет".to_owned(), |c| format!("Играет из «{c}»"));
+    let ctx_text = p.context_line();
     let left_used = hui.min_rect().right() - header.left();
     let right_used = hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let more = ui.add(IconButton::new(Icon::MoreVert).tooltip("Ещё").id_salt("np-more"));
         if let Some(t) = p.current.as_ref() {
             let acts = [
                 Act::Playlist,
+                Act::Radio,
                 Act::Artist,
                 Act::Album,
                 Act::Info,
+                Act::Share,
+                Act::FindSong,
                 Act::Tags,
                 Act::Replace,
                 Act::Visualizer,
                 Act::Sep,
+                Act::Dislike,
+                Act::BanArtist,
+                Act::Sep,
                 Act::Trash,
             ];
+
             let wh = Where::Np;
             chrome.track_menu(&more, "np-more", &acts, t, state, wh, out);
         }
@@ -852,7 +862,19 @@ pub fn show(
                 .max_rect(title)
                 .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)),
         );
-        common::label(&mut tui, &ctx_text, TypeRole::TitleSmall, s.on_surface_variant);
+        // The album, playlist or artist it plays from: its name is a link to
+        // its page, like the album under the title.
+        match (p.context_link(&ctx_text), p.context_page.clone()) {
+            (Some(name), Some(page)) => {
+                let format = TypeRole::TitleSmall.style().text_format(s.on_surface_variant);
+                if crate::components::link_label(&mut tui, "np-context", &ctx_text, &[name], format).clicked.is_some() {
+                    chrome.nav = Some(page);
+                }
+            }
+            _ => {
+                common::label(&mut tui, &ctx_text, TypeRole::TitleSmall, s.on_surface_variant);
+            }
+        }
     }
 
     let body = Rect::from_min_max(pos2(inner.left(), header.bottom() + 16.0), inner.max);
@@ -891,6 +913,8 @@ pub fn show(
             Rect::from_min_size(pos2(cx - col_w * 0.5, top + cover + 24.0), vec2(col_w, info_h)),
         )
     };
+
+    snack_spot(&ctx, rect, wide, slot_open, cover_box, info_rect);
 
     // Cover: playing → Cookie12Sided, paused → rounded square; the ring
     // around it fades in with the cookie.
@@ -938,6 +962,7 @@ pub fn show(
         _ => Outline::new(shape, morph, shaped, angle),
     };
     let mega_outline = Outline::new(shape, morph, mega.cover, 0.0);
+    let ring_scope = crate::prof::scope("np.ring");
     if prefs.ring {
         let period = if prefs.spin_ring && motion { 36.0 } else { 0.0 };
         let angle = turn(ui, "np-ring-angle", playing, bass, period, prefs.ring_ccw);
@@ -963,6 +988,8 @@ pub fn show(
             ring(ui, &mega_outline, &input);
         }
     }
+    drop(ring_scope);
+    let cover_scope = crate::prof::scope("np.cover");
     if theme.reduced_motion {
         let mut normal_ui = ui.new_child(UiBuilder::new().max_rect(body).id_salt("np-cover-fade"));
         normal_ui.multiply_opacity(1.0 - mega_k);
@@ -973,6 +1000,7 @@ pub fn show(
     } else {
         outline.paint(ui, uri.as_deref());
     }
+    drop(cover_scope);
     let mut cover_resp = ui.interact(cover_rect, ui.id().with("np-cover"), Sense::click());
     // Only the shape itself is the cover: its square's corners count as
     // the background.
@@ -1053,6 +1081,7 @@ pub fn show(
         Some(Tap::Pause) => out.push(Command::TogglePlay),
         None => {}
     }
+    let info_scope = crate::prof::scope("np.info");
     if mega_k < 0.999 {
         let mut normal_ui = ui.new_child(UiBuilder::new().max_rect(info_rect).id_salt("np-normal-info"));
         normal_ui.multiply_opacity(1.0 - mega_k);
@@ -1076,15 +1105,19 @@ pub fn show(
         for (slot, alpha) in [NpSlot::Lyrics, NpSlot::Queue, NpSlot::Info].into_iter().zip(content_alpha) {
             if alpha <= 0.001 { continue; }
             let width = if slot == NpSlot::Lyrics { content.width() } else { content.width().min(720.0) };
-            let area = Rect::from_min_size(content.min, vec2(width, content.height()));
+            // The lyrics take the air above the content too, up to just
+            // under the header (or the small cover's row).
+            let lift = if slot == NpSlot::Lyrics { mega.lyrics_lift } else { 0.0 };
+            let area = Rect::from_min_max(pos2(content.left(), content.top() - lift), pos2(content.left() + width, content.bottom()));
             let mut cui = mega_ui.new_child(UiBuilder::new().max_rect(area).id_salt(("np-content", slot as u8)));
             cui.set_clip_rect(area.intersect(ui.clip_rect()));
             cui.multiply_opacity(alpha);
             if chrome.np_slot != slot { cui.disable(); }
             match slot {
                 NpSlot::Lyrics => {
+                    let _p = crate::prof::scope("np.lyrics");
                     if super::lyrics::show(&mut cui, state, pages.levels_bass, true, out) {
-                        pages.open_setting(super::pages::SettingId::LyricsStyle);
+                        pages.open_setting_group(super::lyrics_ui::SETTINGS);
                         closed = true;
                     }
                 }
@@ -1094,11 +1127,37 @@ pub fn show(
             }
         }
     }
+    drop(info_scope);
     if state.prefs.np_volume_pop && !state.prefs.np_volume {
         volume_pop(ui, rect, state, chrome, out);
     }
 
     closed
+}
+
+/// Where snackbars go while Now Playing is open: `(area, bottom inset)`,
+/// written each frame and read by the shell the next ([`snack_spot`]).
+pub const SNACK_SPOT: &str = "np-snack-spot";
+
+/// Picks the snackbars' place so they cover neither the transport nor the
+/// cover: under the controls column (the cover beside it) or below
+/// everything (the cover above), and where there is no room for that over
+/// the cover's lower edge, on top of the picture, never of a control; with
+/// a slot open, at the bottom.
+fn snack_spot(ctx: &egui::Context, rect: Rect, wide: bool, slot_open: bool, cover: Rect, info: Rect) {
+    // A two-line snackbar and its margins.
+    const ROOM: f32 = 72.0 + 24.0 + 8.0;
+    const INSET: f32 = 24.0;
+    let room = rect.bottom() - info.bottom() >= ROOM;
+    let over_cover = (rect.bottom() - cover.bottom() + 12.0).max(INSET);
+    let spot = match (slot_open, wide, room) {
+        (true, ..) => (rect, INSET),
+        (false, true, true) => (Rect::from_x_y_ranges(info.x_range(), rect.y_range()), INSET),
+        (false, true, false) => (Rect::from_x_y_ranges(cover.x_range(), rect.y_range()), over_cover),
+        (false, false, true) => (rect, INSET),
+        (false, false, false) => (rect, over_cover),
+    };
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(SNACK_SPOT), spot));
 }
 
 /// «Громкость — при изменении»: a floating pill at the bottom centre that
@@ -1156,7 +1215,7 @@ fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, o
         let w = (row.available_width() - label_w - 8.0).max(64.0);
         let vo = Slider::new("np-vol-pop-slider", volume).track(12.0).width(w).show(&mut row);
         if let Some(v) = vo.dragging.or(vo.committed) {
-            out.push(Command::SetVolume(v));
+            chrome.push_volume(state, v, out);
         }
         common::label(&mut row, &format!("{:.0}%", volume * 100.0), TypeRole::LabelLarge, s.on_surface);
         hovered = back.contains_pointer() || vo.dragging.is_some();
@@ -1269,12 +1328,22 @@ const CONTROLS_H: f32 = 96.0;
 
 const COMPACT_INFO_H: f32 = 32.0 + 4.0 + 24.0 + 16.0 + 64.0 + 16.0 + 56.0;
 const TRANSPORT_H: f32 = 64.0 + 16.0 + 56.0;
+/// How far the lyrics beside the cover end above the cover column's bottom
+/// air: the control on their bottom edge (32 px) is then centred on the
+/// transport row (56 px) where the column fills the height.
+const LYRICS_CONTROL_LIFT: f32 = 12.0;
+/// Air between the header (or the small cover's row) and the lyrics' top.
+const LYRICS_TOP_GAP: f32 = 8.0;
 
 struct MegaLayout {
     wide: bool,
     cover: Rect,
     info: Rect,
     content: Rect,
+    /// How far above `content` the lyrics start: they span from just under
+    /// the header (beside the cover) or the small cover's row (narrow) down
+    /// to the control's row, their soft bands inside that span.
+    lyrics_lift: f32,
 }
 
 /// Wide: the cover column and the content form one group centred in the
@@ -1300,12 +1369,22 @@ fn mega_layout(body: Rect) -> MegaLayout {
             .clamp(120.0, 440.0);
         let height = cover + 2.0 * RING_PAD + 16.0 + COMPACT_INFO_H;
         let top = body.center().y - height * 0.5;
+        let info = Rect::from_min_size(pos2(left, top + cover + 2.0 * RING_PAD + 16.0), vec2(col, COMPACT_INFO_H));
         MegaLayout {
             wide: true,
             cover: Rect::from_center_size(pos2(left + col * 0.5, top + RING_PAD + cover * 0.5), vec2(cover, cover)),
-            info: Rect::from_min_size(pos2(left, top + cover + 2.0 * RING_PAD + 16.0), vec2(col, COMPACT_INFO_H)),
-            // The source line under the lyrics lines up with the transport row.
-            content: Rect::from_min_max(pos2(content_left, body.top()), pos2(content_left + lyrics_w, body.bottom() - vpad)),
+            info,
+            // The lyrics reach down to the cover column's bottom air, the
+            // control on their bottom edge (they scroll on behind it):
+            // level with the transport row where the column fills the
+            // height, at that same bottom margin where it is centred
+            // higher in a tall window.
+            content: Rect::from_min_max(
+                pos2(content_left, body.top()),
+                pos2(content_left + lyrics_w, body.bottom() - vpad - LYRICS_CONTROL_LIFT),
+            ),
+            // `content` starts 16 px under the header.
+            lyrics_lift: 16.0 - LYRICS_TOP_GAP,
         }
     } else {
         MegaLayout {
@@ -1313,6 +1392,8 @@ fn mega_layout(body: Rect) -> MegaLayout {
             cover: Rect::from_min_size(body.min, vec2(56.0, 56.0)),
             info: Rect::from_min_size(pos2(body.left(), body.bottom() - TRANSPORT_H), vec2(body.width(), TRANSPORT_H)),
             content: Rect::from_min_max(pos2(body.left(), body.top() + 72.0), pos2(body.right(), body.bottom() - TRANSPORT_H - 16.0)),
+            // `content` starts 16 px under the small cover's row.
+            lyrics_lift: 16.0 - LYRICS_TOP_GAP,
         }
     }
 }
@@ -1327,14 +1408,43 @@ fn thumbnail_info(ui: &mut Ui, cover: Rect, state: &ViewState, chrome: &mut Chro
     let rect = Rect::from_min_max(pos2(cover.right() + 16.0, cover.top()), pos2(ui.max_rect().right(), cover.bottom()));
     let mut tui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("mega-title"));
     tui.add(egui::Label::new(TypeRole::TitleLarge.emphasized().rich(&t.title, s.on_surface)).truncate());
-    let artist = tui.add(
-        egui::Label::new(TypeRole::TitleMedium.style().rich(&t.artist, s.on_surface_variant))
-            .truncate()
-            .sense(Sense::click()),
-    );
-    if artist.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-        chrome.nav = t.artist_id.map(nikgob_view::Route::Artist);
+    let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
+    if let Some(r) = super::artist_links::label(&mut tui, "mega-artists", &t.artist, &t.artists, format) {
+        chrome.nav = Some(r);
     }
+}
+
+/// The natural widths of «Artist · Album»: all the artists, the first
+/// one's name, « · » and the album (0 without one).
+#[derive(Clone, Copy)]
+struct LineWidths {
+    artist: f32,
+    first: f32,
+    sep: f32,
+    album: f32,
+}
+
+/// The least of the album worth showing after « · »: a few letters and «…».
+const ALBUM_MIN: f32 = 48.0;
+
+/// How `width` is shared by the artists and « · album»: both whole when
+/// they fit; else the album truncates down to [`ALBUM_MIN`], then the
+/// artists down to the first one's name, then the album goes.
+fn split_line(width: f32, w: LineWidths) -> (f32, Option<f32>) {
+    if w.album <= 0.0 {
+        return (w.artist.min(width), None);
+    }
+    let album = w.sep + w.album;
+    if w.artist + album <= width {
+        return (w.artist, Some(album));
+    }
+    let least = w.sep + ALBUM_MIN.min(w.album);
+    if w.artist + least <= width {
+        return (w.artist, Some(width - w.artist));
+    }
+    let artist = (width - least).max(w.first.min(w.artist)).min(width);
+    let rest = width - artist;
+    (artist, (rest >= least).then_some(rest))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1345,7 +1455,7 @@ enum InfoMode {
 }
 
 /// Title, artist · album, progress, transport and the action row (like,
-/// add to playlist, volume).
+/// add to playlist, volume, dislike).
 #[allow(clippy::too_many_arguments)]
 fn info(
     ui: &mut Ui,
@@ -1376,24 +1486,44 @@ fn info(
         match current {
             Some(t) => {
                 tui.add(egui::Label::new(title_role.emphasized().rich(&t.title, s.on_surface)).truncate());
-                tui.horizontal(|ui| {
+                // The artists, « · » and the album are laid out alike, so
+                // they share one baseline.
+                tui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    let link = |ui: &mut Ui, text: &str| {
-                        let r = ui.add(
-                            egui::Label::new(TypeRole::TitleMedium.style().rich(text, s.on_surface_variant))
-                                .truncate()
-                                .sense(Sense::click()),
-                        );
-                        r.on_hover_cursor(egui::CursorIcon::PointingHand)
+                    // «Artist · Album» in one line: the album gives way
+                    // first, the artists keep at least the first one's name.
+                    let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
+                    let width_of = |text: &str| {
+                        ui.painter()
+                            .layout_job(egui::text::LayoutJob::single_section(text.to_owned(), format.clone()))
+                            .size()
+                            .x
+                            .ceil()
+                            + 1.0
                     };
-                    if link(ui, &t.artist).clicked() {
-                        chrome.nav = t.artist_id.map(nikgob_view::Route::Artist);
-                    }
-                    if !compact && let Some(a) = &t.album {
-                        ui.label(TypeRole::TitleMedium.style().rich(" · ", s.on_surface_variant));
-                        if link(ui, a).clicked() {
-                            chrome.nav = t.release_id.map(nikgob_view::Route::Release);
+                    let first = t.artists.0.first().map_or(t.artist.as_str(), |c| c.name.as_str());
+                    let widths = LineWidths {
+                        artist: width_of(&t.artist),
+                        first: width_of(first),
+                        sep: width_of(" · "),
+                        album: t.album.as_deref().map_or(0.0, width_of),
+                    };
+                    let (artist_w, album_w) = split_line(ui.available_width(), widths);
+                    let h = ui.available_height();
+                    // Each artist is a link of its own.
+                    ui.allocate_ui(vec2(artist_w, h), |ui| {
+                        if let Some(r) = super::artist_links::label(ui, "np-artists", &t.artist, &t.artists, format.clone()) {
+                            chrome.nav = Some(r);
                         }
+                    });
+                    if let (Some(a), Some(w)) = (&t.album, album_w) {
+                        crate::components::link_label(ui, "np-sep", " · ", &[], format.clone());
+                        ui.allocate_ui(vec2(w - widths.sep, h), |ui| {
+                            let album = crate::components::link_label(ui, "np-album", a, &[0..a.len()], format.clone());
+                            if album.clicked.is_some() {
+                                chrome.nav = t.release_id.map(nikgob_view::Route::Release);
+                            }
+                        });
                     }
                 });
             }
@@ -1421,9 +1551,13 @@ fn info(
         ui.label(TypeRole::LabelMedium.style().rich(common::fmt_time(shown), s.on_surface_variant));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(TypeRole::LabelMedium.style().rich(common::fmt_time(dur), s.on_surface_variant));
-            if let Some(q) = current.and_then(|t| t.quality.as_deref()) {
+            // What really plays, in one quiet line: where a stream's sound
+            // comes from (a Spotify track may play from YouTube Music) and
+            // its format, or a file's own format.
+            if let Some(line) = common::sound_line(state) {
                 ui.add_space(8.0);
-                ui.label(TypeRole::LabelMedium.style().rich(q, s.primary));
+                ui.label(TypeRole::LabelMedium.style().rich(line, s.on_surface_variant))
+                    .on_hover_text("Откуда идёт звук и в каком качестве");
             }
         });
     });
@@ -1438,14 +1572,17 @@ fn info(
             + 4.0 * button.group_gap()
     };
     let tiers: &[(Size, Size)] = if compact {
-        &[(Size::S, Size::M)]
+        &[(Size::S, Size::M), (Size::Xs, Size::S)]
     } else {
         &[(Size::M, Size::L), (Size::S, Size::L), (Size::S, Size::M)]
     };
+    // The compact layouts keep like and dislike at the transport row's
+    // ends (under the progress bar's ends): the group leaves them room.
+    let ends = if compact { 2.0 * (IconButton::new(Icon::Favorite).natural_width() + 8.0) } else { 0.0 };
     let (button_size, hero_size) = tiers
         .iter()
         .copied()
-        .find(|&(b, h)| row_w(b, h) <= col.width())
+        .find(|&(b, h)| row_w(b, h) + ends <= col.width())
         .unwrap_or(tiers[tiers.len() - 1]);
     let group_w = row_w(button_size, hero_size);
     let controls = snap(
@@ -1468,7 +1605,7 @@ fn info(
         .size(hero_size)
         .style(Style::Filled)
         .shape(BtnShape::Round)
-        .selected(playing)
+        .selected(playing || p.status == Status::Buffering)
         .filled_icon(true)
         .colors(Colors {
             container: s.primary,
@@ -1496,6 +1633,9 @@ fn info(
     if r[1].clicked() {
         chrome::press_previous(&ctx, state, out);
     }
+    if p.status == Status::Buffering {
+        common::buffering_overlay(ui, r[2].rect, s.primary, s.on_primary);
+    }
     if r[2].clicked() {
         out.push(Command::TogglePlay);
     }
@@ -1506,11 +1646,33 @@ fn info(
         out.push(Command::CycleRepeat);
     }
     if compact {
+        // Like at the left end, dislike at the right, as in the full
+        // layout's row under the transport; here level with the transport
+        // (Now Playing with the lyrics, the queue or the details open).
+        let Some(t) = current else { return };
+        let ends = Rect::from_min_size(pos2(col.left(), controls.top()), vec2(col.width(), controls.height()));
+        let mut lui = ui.new_child(
+            UiBuilder::new().max_rect(ends).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("np-compact-like"),
+        );
+        if lui.add(IconButton::new(Icon::Favorite).selected(t.liked).tooltip("Нравится (Ctrl+L)").id_salt("np-like-compact")).clicked() {
+            out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
+        }
+        if state.prefs.dislike_button {
+            let disliked = state.dislikes.track(t.id);
+            let mut dui = ui.new_child(
+                UiBuilder::new().max_rect(ends).layout(egui::Layout::right_to_left(egui::Align::Center)).id_salt("np-compact-dislike"),
+            );
+            if dui.add(IconButton::new(Icon::ThumbDown).selected(disliked).tooltip("Не нравится").id_salt("np-dislike-compact")).clicked() {
+                out.push(Command::Dislike { track: t.id, dislike: !disliked, sure: false, relike: false });
+            }
+        }
         return;
     }
     y += CONTROLS_H + 16.0;
 
-    // Actions: like and add on the left, volume on the right.
+
+    // Actions: like and add on the left; volume and dislike on the right,
+    // so like and dislike sit at opposite ends of the row.
     let row = snap(ui, Rect::from_min_size(pos2(col.left(), y), vec2(col.width(), 48.0)));
     let mut aui = ui.new_child(
         UiBuilder::new()
@@ -1531,20 +1693,23 @@ fn info(
             out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
         }
         let add = aui.add(IconButton::new(Icon::PlaylistAdd).tooltip("В плейлист").id_salt("np-add"));
+
         pages.playlist_menu(&mut aui, &add, vec![t.id], state, out);
     }
+    let dislike = current.filter(|_| state.prefs.dislike_button).map(|t| (t.id, state.dislikes.track(t.id)));
     aui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let volume = if p.muted { 0.0 } else { chrome.volume_now(&ctx, state) };
         // The slider is optional; the wheel sets the volume either way.
         if state.prefs.np_volume {
-            let w = (ui.available_width() - 48.0).clamp(96.0, 220.0);
+            let buttons = if dislike.is_some() { 96.0 } else { 48.0 };
+            let w = (ui.available_width() - buttons).clamp(96.0, 220.0);
             let vo = Slider::new("np-vol", volume)
                 .track(8.0)
                 .width(w)
                 .value_label(|v| format!("{:.0}%", v * 100.0))
                 .show(ui);
             if let Some(v) = vo.dragging.or(vo.committed) {
-                out.push(Command::SetVolume(v));
+                chrome.push_volume(state, v, out);
             }
         }
         if ui
@@ -1556,6 +1721,13 @@ fn info(
             .clicked()
         {
             out.push(Command::ToggleMute);
+        }
+        if let Some((track, disliked)) = dislike
+            && ui
+                .add(IconButton::new(Icon::ThumbDown).selected(disliked).tooltip("Не нравится").id_salt("np-dislike"))
+                .clicked()
+        {
+            out.push(Command::Dislike { track, dislike: !disliked, sure: false, relike: false });
         }
     });
 }
@@ -1580,6 +1752,18 @@ fn ambient(ui: &Ui, rect: Rect, state: &ViewState, pages: &PageState) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_album_gives_way_before_the_artists() {
+        let w = super::LineWidths { artist: 120.0, first: 60.0, sep: 12.0, album: 200.0 };
+        assert_eq!(super::split_line(400.0, w), (120.0, Some(212.0)), "both whole");
+        assert_eq!(super::split_line(200.0, w), (120.0, Some(80.0)), "the album truncates");
+        assert_eq!(super::split_line(150.0, w), (90.0, Some(60.0)), "then the artists");
+        assert_eq!(super::split_line(80.0, w), (60.0, None), "the first artist stays, the album goes");
+        assert_eq!(super::split_line(40.0, w), (40.0, None));
+        let alone = super::LineWidths { album: 0.0, ..w };
+        assert_eq!(super::split_line(100.0, alone), (100.0, None));
+    }
     use super::*;
 
     #[test]
@@ -1770,6 +1954,11 @@ mod tests {
             }
             assert_eq!(lerp_rect(body, layout.cover, 0.0), body);
             assert_eq!(lerp_rect(body, layout.cover, 1.0), layout.cover);
+            // The lyrics start just under the header (16 px above the body)
+            // or the small cover's row, never touching either.
+            let lyrics_top = layout.content.top() - layout.lyrics_lift;
+            let above = if layout.wide { body.top() - 16.0 } else { layout.cover.bottom() };
+            assert_eq!(lyrics_top, above + LYRICS_TOP_GAP, "{width}");
         }
     }
 }

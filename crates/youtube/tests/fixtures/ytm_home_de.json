@@ -1,0 +1,341 @@
+{
+ "responseContext": {
+  "visitorData": "fixture"
+ },
+ "contents": {
+  "singleColumnBrowseResultsRenderer": {
+   "tabs": [
+    {
+     "tabRenderer": {
+      "content": {
+       "sectionListRenderer": {
+        "contents": [
+         {
+          "musicCarouselShelfRenderer": {
+           "header": {
+            "musicCarouselShelfBasicHeaderRenderer": {
+             "title": {
+              "runs": [
+               {
+                "text": "Erneut anhören"
+               }
+              ]
+             },
+             "strapline": {
+              "runs": [
+               {
+                "text": "Test User"
+               }
+              ]
+             },
+             "thumbnail": {
+              "musicThumbnailRenderer": {
+               "thumbnail": {
+                "thumbnails": [
+                 {
+                  "url": "https://lh3.googleusercontent.com/avatar=w60-h60-l90-rj",
+                  "width": 60,
+                  "height": 60
+                 },
+                 {
+                  "url": "https://lh3.googleusercontent.com/avatar=w120-h120-l90-rj",
+                  "width": 120,
+                  "height": 120
+                 }
+                ]
+               }
+              }
+             }
+            }
+           },
+           "contents": [
+            {
+             "musicTwoRowItemRenderer": {
+              "thumbnailRenderer": {
+               "musicThumbnailRenderer": {
+                "thumbnail": {
+                 "thumbnails": [
+                  {
+                   "url": "https://lh3.googleusercontent.com/card-Alter-Liebling=w60-h60-l90-rj",
+                   "width": 60,
+                   "height": 60
+                  },
+                  {
+                   "url": "https://lh3.googleusercontent.com/card-Alter-Liebling=w120-h120-l90-rj",
+                   "width": 120,
+                   "height": 120
+                  }
+                 ]
+                }
+               }
+              },
+              "title": {
+               "runs": [
+                {
+                 "text": "Alter Liebling",
+                 "navigationEndpoint": {
+                  "watchEndpoint": {
+                   "videoId": "la000000003",
+                   "watchEndpointMusicSupportedConfigs": {
+                    "watchEndpointMusicConfig": {
+                     "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                    }
+                   }
+                  }
+                 }
+                }
+               ]
+              },
+              "subtitle": {
+               "runs": [
+                {
+                 "text": "Titel"
+                },
+                {
+                 "text": " • "
+                },
+                {
+                 "text": "Nachteulen",
+                 "navigationEndpoint": {
+                  "browseEndpoint": {
+                   "browseId": "UCartist000000000000002",
+                   "browseEndpointContextSupportedConfigs": {
+                    "browseEndpointContextMusicConfig": {
+                     "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                    }
+                   }
+                  }
+                 }
+                }
+               ]
+              },
+              "navigationEndpoint": {
+               "watchEndpoint": {
+                "videoId": "la000000003",
+                "watchEndpointMusicSupportedConfigs": {
+                 "watchEndpointMusicConfig": {
+                  "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                 }
+                }
+               }
+              }
+             }
+            }
+           ]
+          }
+         },
+         {
+          "musicCarouselShelfRenderer": {
+           "header": {
+            "musicCarouselShelfBasicHeaderRenderer": {
+             "title": {
+              "runs": [
+               {
+                "text": "Schnellauswahl"
+               }
+              ]
+             }
+            }
+           },
+           "contents": [
+            {
+             "musicResponsiveListItemRenderer": {
+              "thumbnail": {
+               "musicThumbnailRenderer": {
+                "thumbnail": {
+                 "thumbnails": [
+                  {
+                   "url": "https://lh3.googleusercontent.com/cover-qp000000021=w60-h60-l90-rj",
+                   "width": 60,
+                   "height": 60
+                  },
+                  {
+                   "url": "https://lh3.googleusercontent.com/cover-qp000000021=w120-h120-l90-rj",
+                   "width": 120,
+                   "height": 120
+                  }
+                 ]
+                }
+               }
+              },
+              "overlay": {
+               "musicItemThumbnailOverlayRenderer": {
+                "content": {
+                 "musicPlayButtonRenderer": {
+                  "playNavigationEndpoint": {
+                   "watchEndpoint": {
+                    "videoId": "qp000000021",
+                    "watchEndpointMusicSupportedConfigs": {
+                     "watchEndpointMusicConfig": {
+                      "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                     }
+                    }
+                   }
+                  }
+                 }
+                }
+               }
+              },
+              "flexColumns": [
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Papierlaterne",
+                    "navigationEndpoint": {
+                     "watchEndpoint": {
+                      "videoId": "qp000000021",
+                      "watchEndpointMusicSupportedConfigs": {
+                       "watchEndpointMusicConfig": {
+                        "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  ]
+                 }
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Die Laternen",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "UCartist000000000000001",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  ]
+                 }
+                }
+               }
+              ],
+              "menu": {
+               "menuRenderer": {
+                "items": [
+                 {
+                  "menuNavigationItemRenderer": {
+                   "text": {
+                    "runs": [
+                     {
+                      "text": "Start radio"
+                     }
+                    ]
+                   }
+                  }
+                 }
+                ]
+               }
+              },
+              "playlistItemData": {
+               "videoId": "qp000000021"
+              }
+             }
+            }
+           ],
+           "numItemsPerColumn": "4",
+           "itemSize": "COLLECTION_STYLE_ITEM_SIZE_SMALL"
+          }
+         },
+         {
+          "musicCarouselShelfRenderer": {
+           "header": {
+            "musicCarouselShelfBasicHeaderRenderer": {
+             "title": {
+              "runs": [
+               {
+                "text": "Charts"
+               }
+              ]
+             }
+            }
+           },
+           "contents": [
+            {
+             "musicTwoRowItemRenderer": {
+              "thumbnailRenderer": {
+               "musicThumbnailRenderer": {
+                "thumbnail": {
+                 "thumbnails": [
+                  {
+                   "url": "https://lh3.googleusercontent.com/card-Chart-Lied=w60-h60-l90-rj",
+                   "width": 60,
+                   "height": 60
+                  },
+                  {
+                   "url": "https://lh3.googleusercontent.com/card-Chart-Lied=w120-h120-l90-rj",
+                   "width": 120,
+                   "height": 120
+                  }
+                 ]
+                }
+               }
+              },
+              "title": {
+               "runs": [
+                {
+                 "text": "Chart Lied",
+                 "navigationEndpoint": {
+                  "watchEndpoint": {
+                   "videoId": "ch000000002",
+                   "watchEndpointMusicSupportedConfigs": {
+                    "watchEndpointMusicConfig": {
+                     "musicVideoType": "MUSIC_VIDEO_TYPE_OMV"
+                    }
+                   }
+                  }
+                 }
+                }
+               ]
+              },
+              "subtitle": {
+               "runs": [
+                {
+                 "text": "Jemand",
+                 "navigationEndpoint": {
+                  "browseEndpoint": {
+                   "browseId": "UCartist000000000000098",
+                   "browseEndpointContextSupportedConfigs": {
+                    "browseEndpointContextMusicConfig": {
+                     "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                    }
+                   }
+                  }
+                 }
+                }
+               ]
+              },
+              "navigationEndpoint": {
+               "watchEndpoint": {
+                "videoId": "ch000000002",
+                "watchEndpointMusicSupportedConfigs": {
+                 "watchEndpointMusicConfig": {
+                  "musicVideoType": "MUSIC_VIDEO_TYPE_OMV"
+                 }
+                }
+               }
+              }
+             }
+            }
+           ]
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   ]
+  }
+ }
+}

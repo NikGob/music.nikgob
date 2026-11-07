@@ -1,6 +1,6 @@
 //! Listening history: append-only events and per-track stats.
 
-use nikgob_core::model::{DeviceId, Event, EventContext, EventId, EventType, SourceKind, TrackId};
+use nikgob_core::model::{DeviceId, Event, EventContext, EventId, EventMeta, EventType, SourceKind, TrackId};
 use rusqlite::{Connection, Row, params};
 
 use crate::db::Library;
@@ -8,7 +8,8 @@ use crate::error::Result;
 use crate::types::TrackStats;
 use crate::util::{get_enum, get_id, get_opt_enum, opt_u32};
 
-const EVENT_COLS: &str = "id, ts, track_id, source_kind, type, position_ms, context, device";
+pub(crate) const EVENT_COLS: &str =
+    "id, ts, track_id, source_kind, type, position_ms, context, device, origin, context_id, end_reason, attention, volume";
 
 pub(crate) fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
@@ -20,6 +21,11 @@ pub(crate) fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
         position_ms: opt_u32(row, 5)?,
         context: get_enum(row, 6)?,
         device: DeviceId(row.get(7)?),
+        origin: get_opt_enum(row, 8)?,
+        context_id: row.get(9)?,
+        end_reason: get_opt_enum(row, 10)?,
+        attention: row.get(11)?,
+        volume: row.get(12)?,
     })
 }
 
@@ -41,8 +47,8 @@ fn stats_from_row_at(row: &Row<'_>, base: usize) -> rusqlite::Result<TrackStats>
 pub(crate) fn insert_event(conn: &Connection, event: &Event) -> Result<bool> {
     let n = conn.execute(
         "INSERT OR IGNORE INTO event(id, ts, track_id, source_kind, type, position_ms, context,
-                                     device)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                     device, origin, context_id, end_reason, attention, volume)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             event.id.to_string(),
             event.ts,
@@ -51,7 +57,12 @@ pub(crate) fn insert_event(conn: &Connection, event: &Event) -> Result<bool> {
             event.event_type.as_str(),
             event.position_ms,
             event.context.as_str(),
-            event.device.as_str()
+            event.device.as_str(),
+            event.origin.map(|o| o.as_str()),
+            event.context_id.as_deref(),
+            event.end_reason.map(|r| r.as_str()),
+            event.attention,
+            event.volume
         ],
     )?;
     Ok(n > 0)
@@ -67,6 +78,20 @@ impl Library {
         position_ms: Option<u32>,
         context: EventContext,
     ) -> Result<Event> {
+        self.record_event_with(track, event_type, source_kind, position_ms, context, EventMeta::default())
+    }
+
+    /// [`Self::record_event`] with who chose the play, what played it, why
+    /// it ended and how it was heard.
+    pub fn record_event_with(
+        &self,
+        track: TrackId,
+        event_type: EventType,
+        source_kind: Option<SourceKind>,
+        position_ms: Option<u32>,
+        context: EventContext,
+        meta: EventMeta,
+    ) -> Result<Event> {
         let event = Event {
             id: EventId::new(),
             ts: self.tick(),
@@ -76,6 +101,11 @@ impl Library {
             position_ms,
             context,
             device: self.device_id(),
+            origin: meta.origin,
+            context_id: meta.context_id,
+            end_reason: meta.end_reason,
+            attention: meta.attention,
+            volume: meta.volume,
         };
         self.record_event_raw(&event)?;
         Ok(event)
@@ -90,7 +120,7 @@ impl Library {
     /// Latest events, newest first.
     pub fn recent_events(&self, limit: u32) -> Result<Vec<Event>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {EVENT_COLS} FROM event ORDER BY ts DESC, id DESC LIMIT ?1"
             ))?;
             let rows = stmt.query_map([limit], event_from_row)?;
@@ -101,7 +131,7 @@ impl Library {
     /// Latest events of one track, newest first.
     pub fn events_of_track(&self, track: TrackId, limit: u32) -> Result<Vec<Event>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {EVENT_COLS} FROM event WHERE track_id = ?1
                   ORDER BY ts DESC, id DESC LIMIT ?2"
             ))?;
@@ -112,18 +142,16 @@ impl Library {
 
     pub fn track_stats(&self, track: TrackId) -> Result<TrackStats> {
         self.read(|c| {
-            Ok(c.query_row(
-                &format!("SELECT {STATS_COLS} FROM event WHERE track_id = ?1"),
-                [track.to_string()],
-                |r| stats_from_row_at(r, 0),
-            )?)
+            Ok(c
+                .prepare_cached(&format!("SELECT {STATS_COLS} FROM event WHERE track_id = ?1"))?
+                .query_row([track.to_string()], |r| stats_from_row_at(r, 0))?)
         })
     }
 
     /// Stats of every track that has at least one event (input for recommendations).
     pub fn all_track_stats(&self) -> Result<Vec<(TrackId, TrackStats)>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT track_id, {STATS_COLS} FROM event GROUP BY track_id"
             ))?;
             let rows = stmt.query_map([], |r| Ok((get_id(r, 0)?, stats_from_row_at(r, 1)?)))?;

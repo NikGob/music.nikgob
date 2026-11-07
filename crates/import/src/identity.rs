@@ -59,54 +59,16 @@ pub struct Identity {
     pub genre: Option<String>,
     pub cover_url: Option<String>,
     pub identified_by: IdentifiedBy,
+    /// The library release the file is known to belong to (the release a
+    /// wishlist download was for): it lands there whatever the title says.
+    pub release_id: Option<nikgob_core::model::ReleaseId>,
 }
 
-const FEAT_MARKERS: &[&str] = &[" feat. ", " feat ", " ft. ", " featuring ", "; "];
-
-/// Splits `"A feat. B; C"` into `[("", "A"), (" feat. ", "B"), ("; ", "C")]`.
+/// Splits `"A feat. B; C"` into `[("", "A"), (" feat. ", "B"), ("; ", "C")]`
+/// and `"A, B"` into `[("", "A"), (", ", "B")]` (see
+/// [`nikgob_core::credit::split_credit`] for the rules).
 pub fn parse_credit(line: &str) -> Vec<(String, String)> {
-    let mut parts: Vec<(String, String)> = Vec::new();
-    let lower = line.to_lowercase();
-    // ASCII-only markers keep byte offsets identical in `line` and `lower`
-    // unless the text holds characters whose lowercase has another length.
-    let aligned = lower.len() == line.len();
-    let mut rest_start = 0usize;
-    let mut join = String::new();
-    if aligned {
-        loop {
-            let hay = &lower[rest_start..];
-            let next = FEAT_MARKERS
-                .iter()
-                .filter_map(|m| hay.find(m).map(|i| (i, *m)))
-                .min_by_key(|(i, _)| *i);
-            match next {
-                Some((i, marker)) => {
-                    let name = line[rest_start..rest_start + i].trim();
-                    if !name.is_empty() {
-                        parts.push((std::mem::take(&mut join), name.to_owned()));
-                    }
-                    join = if marker == "; " {
-                        "; ".to_owned()
-                    } else {
-                        // Keep the author's spelling of the marker.
-                        line[rest_start + i..rest_start + i + marker.len()].to_owned()
-                    };
-                    rest_start += i + marker.len();
-                }
-                None => {
-                    let name = line[rest_start..].trim();
-                    if !name.is_empty() {
-                        parts.push((std::mem::take(&mut join), name.to_owned()));
-                    }
-                    break;
-                }
-            }
-        }
-    }
-    if parts.is_empty() && !line.trim().is_empty() {
-        parts.push((String::new(), line.trim().to_owned()));
-    }
-    parts
+    nikgob_core::credit::split_credit(line)
 }
 
 /// Aligns individual `names` with the credit `line` to recover join phrases.
@@ -216,7 +178,51 @@ pub fn identity_from_tags(tags: &TagSet, path: &Path) -> Identity {
         genre: tags.genre.clone(),
         cover_url: None,
         identified_by: IdentifiedBy::Tags,
+        release_id: None,
     }
+}
+
+/// The identity of the library track `track` (its title, credit, album and
+/// numbers), for a file that is known to be that track whatever its tags
+/// say (attached by the user, saved from the track's stream). What the
+/// library does not know stays as in `base`.
+pub fn identity_of_track(
+    lib: &nikgob_library::Library,
+    track: nikgob_core::model::TrackId,
+    base: &Identity,
+) -> Option<Identity> {
+    let t = lib.get_track(track).ok()??;
+    let release = t.release_id.and_then(|r| lib.get_release(r).ok().flatten());
+    let mut id = base.clone();
+    id.title = t.title.clone();
+    let names: Vec<String> = t.artist_credit.0.iter().map(|p| p.name.clone()).collect();
+    if !names.is_empty() {
+        id.artists = names;
+        id.artist_line = t.artist_credit.display();
+    }
+    id.track_no = t.track_no;
+    id.disc_no = t.disc_no.max(1);
+    id.isrc = t.isrc.clone().or(id.isrc);
+    id.recording_mbid = t.recording_mbid.clone().or(id.recording_mbid);
+    id.release_id = t.release_id;
+    match release {
+        Some(r) => {
+            id.release_mbid = r.mbid.clone().or(id.release_mbid);
+            id.release_group_mbid = r.release_group_mbid.clone().or(id.release_group_mbid);
+            id.album = Some(r.title.clone());
+            id.album_artist = Some(r.artist_credit.display()).filter(|a| !a.is_empty());
+            id.year = r.year.or(id.year);
+            id.release_type = r.release_type;
+            id.compilation = r.release_type == ReleaseType::Compilation;
+            id.track_total = r.total_tracks.or(id.track_total);
+        }
+        None => {
+            id.album = None;
+            id.release_type = ReleaseType::Single;
+            id.compilation = false;
+        }
+    }
+    Some(id)
 }
 
 fn year_of(date: &str) -> Option<i32> {
@@ -307,6 +313,7 @@ pub fn confirm_option(c: &MatchCandidate) -> ConfirmOption {
         album: c.metadata.album.clone(),
         year: c.metadata.date.as_deref().and_then(year_of),
         track_no: c.metadata.track_no,
+        duration_ms: c.metadata.duration.map(|d| d.as_millis() as u32),
         score: c.score,
         source: match c.source {
             MatchSource::MusicBrainz => "musicbrainz",
@@ -361,12 +368,70 @@ async fn timed<T>(
     }
 }
 
+/// Folded single names of credit lines (`"A feat. B"`, `"A & B"` and
+/// `"A, B"` give `a` and `b`; the line itself counts too, for a band named
+/// `"Simon & Garfunkel"`).
+pub fn artist_names<S: AsRef<str>>(lines: &[S]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in lines {
+        let line = line.as_ref();
+        let mut push = |n: &str| {
+            let k = nikgob_metadata::text::artist_key(n);
+            if !k.is_empty() && !out.contains(&k) && !is_various_artists(n) {
+                out.push(k);
+            }
+        };
+        push(line);
+        for (_, name) in parse_credit(line) {
+            push(&name);
+            if let Some(pair) = nikgob_core::credit::split_pair(&name) {
+                for (_, n) in pair {
+                    push(&n);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether two lists of credit lines name one artist in common (see
+/// [`artist_names`]). Nothing to compare (an empty side) is no veto.
+pub fn shares_artist<A: AsRef<str>, B: AsRef<str>>(a: &[A], b: &[B]) -> bool {
+    let (a, b) = (artist_names(a), artist_names(b));
+    a.is_empty() || b.is_empty() || a.iter().any(|n| b.contains(n))
+}
+
+/// Drops candidates none of whose artists is one the file, its folder or
+/// its torrent names (`artists`): a title alone is no match («Cash
+/// Machine» by Oliver Tree is not DRAM's). A vetoed best candidate takes
+/// the verdict «sure» with it.
+pub fn veto(mut result: MatchResult, artists: &[String]) -> MatchResult {
+    if artist_names(artists).is_empty() {
+        return result;
+    }
+    let fits = |c: &MatchCandidate| {
+        let mut lines = vec![c.metadata.artist.clone()];
+        lines.extend(c.metadata.artists.iter().cloned());
+        lines.extend(c.metadata.album_artist.iter().cloned());
+        shares_artist(&lines, artists)
+    };
+    let best_ok = result.ranked.first().is_some_and(fits);
+    result.ranked.retain(fits);
+    result.options.retain(fits);
+    if !best_ok {
+        result.confidence = Confidence::Unsure;
+    }
+    result
+}
+
 /// AcoustID + MusicBrainz, with Deezer as the fallback. Never errors.
+/// Candidates by other artists than `artists` are vetoed ([`veto`]).
 pub async fn lookup(
     meta: &Metadata,
     cfg: &ImportConfig,
     mut ev: LocalEvidence,
     fingerprint: Option<&Fingerprint>,
+    artists: &[String],
 ) -> Lookup {
     let duration = ev
         .duration
@@ -435,7 +500,7 @@ pub async fn lookup(
             result = match_candidates(&ev, candidates);
         }
     }
-    decide_lookup(result)
+    decide_lookup(veto(result, artists))
 }
 
 /// Sure / worth asking about / nothing.
@@ -553,6 +618,37 @@ mod tests {
         let opt = confirm_option(&cand);
         assert_eq!(opt.year, Some(2019));
         assert_eq!(opt.source, "musicbrainz");
+    }
+
+    fn cand(title: &str, artist: &str, score: f64) -> MatchCandidate {
+        MatchCandidate {
+            score,
+            source: MatchSource::MusicBrainz,
+            ids: CandidateIds::default(),
+            metadata: TrackMetadata {
+                title: title.into(),
+                artist: artist.into(),
+                artists: vec![artist.into()],
+                ..Default::default()
+            },
+            breakdown: Default::default(),
+        }
+    }
+
+    #[test]
+    fn candidates_by_strangers_are_vetoed() {
+        let all = vec![cand("Cash Machine", "DRAM", 0.9), cand("Cash Machine", "Oliver Tree", 0.7)];
+        let result = MatchResult { confidence: Confidence::Sure, ranked: all.clone(), options: all };
+        let kept = veto(result.clone(), &["Oliver Tree".into()]);
+        assert_eq!(kept.ranked.len(), 1);
+        assert_eq!(kept.options[0].metadata.artist, "Oliver Tree");
+        assert_eq!(kept.confidence, Confidence::Unsure, "the sure one was a stranger");
+        let none = veto(result.clone(), &["Oliver Tree feat. Little Ricky ZR3".into(), "Someone".into()]);
+        assert_eq!(none.ranked.len(), 1, "a guest line still names the artist");
+        assert!(matches!(decide_lookup(veto(result.clone(), &["Kino".into()])), Lookup::None));
+        assert_eq!(veto(result, &[]).ranked.len(), 2, "nothing to compare: no veto");
+        assert!(shares_artist(&["Kevin Penkin & Raj Ramayya"], &["Raj Ramayya"]));
+        assert!(!shares_artist(&["Sean Kelly"], &["Oliver Tree"]));
     }
 
     #[test]

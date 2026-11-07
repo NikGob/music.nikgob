@@ -2,25 +2,39 @@
 //!
 //! Opens the library, starts the audio engine and the runtime, and draws
 //! the MD3E interface. Closing the window hides the app to the tray while
-//! music keeps playing; the window (and its textures) is made again on show.
+//! music keeps playing: the window only hides and comes back at once
+//! («Быстрое открытие из трея»), or, with that off, it is destroyed and
+//! made again (with its textures) on show.
 
 #![windows_subsystem = "windows"]
 
 mod audio;
+mod autostart;
+mod cover_cache;
 mod demo;
 mod desktop;
+mod fallback_fonts;
+mod frames;
 mod geometry;
+mod logfile;
+mod pacing;
 mod shot;
+mod shot_fakes;
+mod streams;
 mod sysmotion;
 mod titlebar;
+mod scwidget;
+mod web_images;
+mod ytlogin;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use fastframe_shell::{Closed, Headless, Resident, Shell, Waker};
 use nikgob_md3e::screens::Md3eUi;
-use nikgob_runtime::{NullPlayback, Playback, Runtime, RuntimeConfig};
+use nikgob_runtime::{NullPlayback, Playback, Runtime, RuntimeConfig, StreamSchedule};
 use nikgob_view::{Command, Prefs};
 
 /// Where things live on disk (PLAN §5).
@@ -78,6 +92,15 @@ fn log_panics(dir: PathBuf) {
     }));
 }
 
+/// The prefs of a prefs file's bytes; without a file (the first start)
+/// those of [`Prefs::first_start`].
+fn prefs_of(bytes: Option<&[u8]>) -> Prefs {
+    match bytes {
+        Some(b) => parse_prefs(b).unwrap_or_default(),
+        None => Prefs::first_start(),
+    }
+}
+
 fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
     let slot = if value.get("lyrics_mega").and_then(|v| v.as_bool()) == Some(true) {
@@ -88,16 +111,23 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
         nikgob_view::NpSlot::None
     };
     let legacy = value.get("np_slot").is_none();
+    // Prefs from before a change of the lyrics defaults take the new ones.
+    let lyrics_rev = value.get("lyrics_rev").and_then(|v| v.as_u64()).map_or(0, |r| r.min(u64::from(u8::MAX)) as u8);
     let mut prefs: Prefs = serde_json::from_value(value)?;
     if legacy { prefs.np_slot = slot; }
+    prefs.upgrade_lyrics(lyrics_rev);
     Ok(prefs)
 }
 
-fn load_prefs(paths: &Paths) -> Prefs {
-    let mut p: Prefs = std::fs::read(&paths.prefs)
-        .ok()
-        .and_then(|b| parse_prefs(&b).ok())
-        .unwrap_or_default();
+/// The prefs file with what the settings file and the system add: `settings`
+/// as read once at the start, `devices` the audio outputs (enumerated on
+/// their own thread meanwhile).
+fn load_prefs(
+    paths: &Paths,
+    settings: Option<&nikgob_core::settings::Settings>,
+    devices: std::thread::JoinHandle<Vec<String>>,
+) -> Prefs {
+    let mut p = prefs_of(std::fs::read(&paths.prefs).ok().as_deref());
     if p.library_dir.as_os_str().is_empty() {
         p.library_dir = paths.root.join("Music");
     }
@@ -107,19 +137,18 @@ fn load_prefs(paths: &Paths) -> Prefs {
     if p.masters_dir.as_os_str().is_empty() {
         p.masters_dir = p.library_dir.join(".musiclib").join("masters");
     }
-    if let Some(s) = paths
-        .settings
-        .as_ref()
-        .and_then(|s| nikgob_core::settings::Settings::load(s).ok())
-    {
-        if let Some(pr) = s.indexer.prowlarr {
-            p.prowlarr_url = pr.url;
+    if let Some(s) = settings {
+        if let Some(pr) = &s.indexer.prowlarr {
+            p.prowlarr_url = pr.url.clone();
             p.prowlarr_configured = !pr.api_key.is_empty();
         }
-        p.metadata_contact = s.metadata.contact;
-        p.acoustid_configured = s.metadata.acoustid_key.is_some_and(|k| !k.trim().is_empty());
+        p.metadata_contact = s.metadata.contact.clone();
+        p.acoustid_configured = s.metadata.acoustid_key.as_ref().is_some_and(|k| !k.trim().is_empty());
+        p.lastfm_configured = s.metadata.lastfm_key.as_ref().is_some_and(|k| !k.trim().is_empty());
+        p.spotify_personal_app = s.streaming.spotify_client_id.is_some();
+        p.youtube_cookies_set = s.streaming.youtube_cookies.is_some();
     }
-    p.output_devices = nikgob_audio::output_device_names().unwrap_or_default();
+    p.output_devices = devices.join().unwrap_or_default();
     if p.output_device.as_ref().is_some_and(|d| !p.output_devices.contains(d)) {
         log::warn!("audio device {:?} is gone, using the default", p.output_device);
     }
@@ -134,31 +163,83 @@ struct Core {
     analyzer: Option<audio::AnalyzerSlot>,
     commands: Vec<Command>,
     shot: Option<shot::Shot>,
+    /// `NIKGOB_FRAMES`: the frame-time log.
+    frames: Option<frames::Frames>,
     quit: bool,
+    /// A screenshot run's `reopen`: the window closes and a new one opens.
+    reopen: bool,
     wants_show: bool,
+    /// The window is kept but hidden in the tray (it draws nothing).
+    hidden: bool,
+    /// When the window was asked for from the tray: its first frame logs
+    /// how long it took to show.
+    show_at: Option<Instant>,
     last_frame: Instant,
+    /// The frame limit, kept to whole vblanks ([`pacing`]).
+    pacer: pacing::Pacer,
     /// One clock for every window: each new window's egui starts its time
     /// at zero, and animations started in the old one would sit in the
     /// future (the page stayed blank until enough clicks repainted it).
     started: Instant,
     geometry: geometry::Keeper,
+    /// The last [`nikgob_view::ClipboardRequest`] copied.
+    copied: u64,
+    /// The window state the runtime last heard (visible, focused).
+    window: Option<(bool, bool)>,
+    /// The «Запускать вместе с Windows» switch, put into the system.
+    autostart: autostart::Keeper,
+    /// A second launch asked for the window.
+    show_asked: Arc<AtomicBool>,
+    /// A `--quit` launch asked the player to quit, as «Выход» does.
+    quit_asked: Arc<AtomicBool>,
 }
 
 impl Core {
+    /// Tells the runtime when the window is shown, hidden or (un)focused:
+    /// it holds its periodic network work while hidden and idle.
+    fn report_window(&mut self, visible: bool, focused: bool) {
+        if self.window != Some((visible, focused)) {
+            self.window = Some((visible, focused));
+            self.runtime.send(Command::WindowState { visible, focused });
+        }
+    }
+
     fn poll_desktop(&mut self) {
         let req = {
+            let lock = nikgob_md3e::prof::scope("state-lock");
             let state = self.runtime.state();
+            drop(lock);
             self.desktop.poll(&state, &mut self.commands)
         };
-        self.quit |= req.quit;
-        self.wants_show |= req.show || req.toggle;
+        self.quit |= req.quit || self.quit_asked.swap(false, Ordering::Relaxed);
+        self.wants_show |= req.show || req.toggle || self.show_asked.swap(false, Ordering::Relaxed);
+        self.sync_autostart();
         self.runtime.send_all(self.commands.drain(..));
+    }
+
+    /// Puts a changed autostart switch into the system; one it refused
+    /// flips back in Settings.
+    fn sync_autostart(&mut self) {
+        let system = {
+            let state = self.runtime.state();
+            self.autostart.sync(state.prefs.autostart)
+        };
+        if let Some(system) = system {
+            self.commands.push(Command::SetPref(nikgob_view::PrefPatch::Autostart(system)));
+        }
     }
 }
 
 impl Resident for Core {
+    /// A start at sign-in may stay in the tray, if the tray is there.
+    fn start_hidden(&mut self) -> bool {
+        self.desktop.can_hide()
+    }
+
     fn closed(&self) -> Closed {
-        if !self.quit && self.desktop.can_hide() {
+        if self.reopen {
+            Closed::Reopen
+        } else if !self.quit && self.desktop.can_hide() {
             Closed::Hide
         } else {
             Closed::Quit
@@ -166,6 +247,7 @@ impl Resident for Core {
     }
 
     fn window_gone(&mut self) {
+        self.report_window(false, false);
         self.geometry.flush();
         self.wants_show = false;
     }
@@ -175,6 +257,7 @@ impl Resident for Core {
         if self.quit {
             Headless::Quit
         } else if self.wants_show {
+            self.show_at = Some(Instant::now());
             Headless::Show
         } else {
             Headless::Wait
@@ -184,8 +267,14 @@ impl Resident for Core {
     fn shutdown(&mut self) {
         self.geometry.flush();
         self.runtime.send(Command::Pause);
+        // Soloist would also go with the process (its job object); stopping
+        // it here lets it leave Spotify Connect cleanly.
+        streams::shutdown();
     }
 }
+
+/// The largest texture side the app asks of egui (the font atlas's width).
+const MAX_TEXTURE_SIDE: usize = 8192;
 
 struct Window {
     core: fastframe_shell::Held<Core>,
@@ -199,13 +288,23 @@ struct Window {
 impl eframe::App for Window {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         raw_input.time = Some(self.core.started.elapsed().as_secs_f64());
+        // egui makes the font atlas as wide as the largest texture the GPU
+        // takes (16384) and lets it grow as tall before starting over: up to
+        // a gigabyte in memory, and on the GPU again. Nothing here needs
+        // textures that large (covers stop at 4096).
+        raw_input.max_texture_side = Some(raw_input.max_texture_side.unwrap_or(MAX_TEXTURE_SIDE).min(MAX_TEXTURE_SIDE));
         if let Some(s) = self.core.shot.as_mut() {
             s.raw_input(raw_input);
         }
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        if !std::mem::replace(&mut self.recovery_checked, true) {
+        self.core.pacer.begin();
+        if let Some(f) = self.core.frames.as_mut() {
+            f.begin();
+        }
+        // A screenshot run stays off the screen on purpose.
+        if !std::mem::replace(&mut self.recovery_checked, true) && !shot::offscreen() {
             fastframe_shell::window::recover_offscreen(ctx, frame);
         }
         if self.motion_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
@@ -213,13 +312,36 @@ impl eframe::App for Window {
             self.core.ui.set_system_reduced_motion(sysmotion::reduced());
         }
         let core = &mut *self.core;
-        core.geometry.observe(ctx);
+        if !core.hidden {
+            core.geometry.observe(ctx);
+        }
+        let (minimized, focused, close) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.minimized.unwrap_or(false), v.focused.unwrap_or(true), v.close_requested())
+        });
+        // «Быстрое открытие из трея»: the window hides instead of closing.
+        // Hidden, eframe runs only this logic (no drawing, no animation),
+        // and only when something wakes it: the tray, the runtime.
+        if close && !core.quit && !core.reopen && core.desktop.can_hide() && core.runtime.state().prefs.tray_keep_window {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            core.hidden = true;
+            core.geometry.flush();
+            log::info!("window hidden to the tray (kept)");
+        }
+        let shown = !minimized && !core.hidden;
+        core.report_window(shown, focused && shown);
         core.poll_desktop();
         if core.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if std::mem::take(&mut core.wants_show) {
             // Tray "show/hide" while the window exists: bring it forward.
+            if std::mem::take(&mut core.hidden) {
+                core.show_at = Some(Instant::now());
+                // Drawn at once with what it had: no rebuild.
+                ctx.request_repaint();
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -227,8 +349,15 @@ impl eframe::App for Window {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Kept in the tray: eframe still calls this for a hidden window
+        // (about ten times a second while something asks for frames), so
+        // nothing is drawn and nothing animates until it is shown again.
+        if self.core.hidden {
+            return;
+        }
         self.scrolling.apply(ui.ctx());
         let core = &mut *self.core;
+        let levels = nikgob_md3e::prof::scope("levels");
         if core.ui.wants_levels()
             && let Some(slot) = &core.analyzer
             && let Some(a) = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut()
@@ -237,24 +366,65 @@ impl eframe::App for Window {
             core.ui.set_levels(a.bass_energy());
             core.ui.set_bands(a.bands());
         }
+        drop(levels);
         let fps = {
+            let lock = nikgob_md3e::prof::scope("state-lock");
             let state = core.runtime.state();
-            core.ui.frame(ui, &state, &mut core.commands);
+            drop(lock);
+            // Screenshot runs may lay states the demo cannot reach over it.
+            let faked = core.shot.as_ref().and_then(|s| s.overlay(&state));
+            let draw = nikgob_md3e::prof::scope("frame");
+            core.ui.frame(ui, faked.as_ref().unwrap_or(&*state), &mut core.commands);
+            drop(draw);
+            // The runtime asks for the clipboard (a share link); copied once.
+            if let Some(c) = state.clipboard.as_ref().filter(|c| c.id != core.copied) {
+                core.copied = c.id;
+                ui.ctx().copy_text(c.text.clone());
+            }
             self.titlebar.sync(ui.ctx(), frame, state.prefs.theme);
             if let Some(s) = core.shot.as_mut() {
                 if s.frame(ui.ctx(), &mut core.ui, &state, &mut core.commands) {
                     core.quit = true;
                 }
+                if s.take_reopen() {
+                    core.reopen = true;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if let Some(after) = s.take_hide() {
+                    // As the window's ✕, then the tray's click a moment later.
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    let (asked, ctx) = (Arc::clone(&core.show_asked), ui.ctx().clone());
+                    std::thread::spawn(move || {
+                        std::thread::sleep(after);
+                        asked.store(true, Ordering::Relaxed);
+                        ctx.request_repaint();
+                    });
+                }
             }
             state.prefs.fps_limit.max(15)
         };
         core.runtime.send_all(core.commands.drain(..));
+        static FIRST: AtomicBool = AtomicBool::new(true);
+        if FIRST.swap(false, Ordering::Relaxed) {
+            stage("first frame");
+        }
+        if let Some(t) = core.show_at.take() {
+            log::info!("window: shown from the tray, first frame drawn in {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+        }
+        if let Some(f) = core.frames.as_mut() {
+            let atlas = ui.ctx().fonts(|f| f.font_image_size());
+            f.end(frame.info().cpu_usage, core.shot.as_ref().map_or("live", |s| s.label()), atlas);
+        }
 
         // Frame limit: only matters while something animates continuously.
-        let budget = Duration::from_secs_f64(1.0 / f64::from(fps));
-        let spent = core.last_frame.elapsed();
-        if spent < budget && ui.ctx().has_requested_repaint() {
-            std::thread::sleep(budget - spent);
+        let wait = core.pacer.wait(frame, fps, core.last_frame.elapsed());
+        if !ui.ctx().has_requested_repaint() {
+            core.pacer.idle();
+        } else if !wait.is_zero() {
+            std::thread::sleep(wait);
+            if let Some(f) = core.frames.as_mut() {
+                f.slept(wait);
+            }
         }
         core.last_frame = Instant::now();
     }
@@ -263,8 +433,8 @@ impl eframe::App for Window {
 /// Installed fonts for the scripts Roboto Flex does not draw (CJK, Arabic,
 /// ...), behind every family, so Japanese titles are not boxes.
 fn add_system_fallbacks(fonts: &mut egui::FontDefinitions) {
-    for f in fastframe_fonts::system::fallbacks() {
-        let mut data = egui::FontData::from_static(&f.bytes);
+    for f in fallback_fonts::faces() {
+        let mut data = egui::FontData::from_static(f.bytes);
         data.index = f.index;
         data.tweak.scale = f.scale;
         data.tweak.y_offset_factor = f.y_offset_factor;
@@ -275,19 +445,97 @@ fn add_system_fallbacks(fonts: &mut egui::FontDefinitions) {
     }
 }
 
+/// When the process started, for the startup stages in the log.
+static LAUNCHED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Logs how long after the start a stage of the startup ended.
+fn stage(name: &str) {
+    let ms = LAUNCHED.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0;
+    log::info!("startup: {name} at {ms:.0} ms");
+}
+
 fn main() -> eframe::Result {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let mut paths = paths();
-    if let Some(dir) = paths.db.parent() {
-        log_panics(dir.to_owned());
+    LAUNCHED.get_or_init(Instant::now);
+    // `--youtube-login` / `--soundcloud-login`: this run is only a sign-in
+    // window; `--sc-widget`: only SoundCloud's player host. They log to
+    // stderr, which the app copies into its own log; they must not write the
+    // app's log file themselves.
+    if std::env::args().any(|a| a == "--youtube-login" || a == "--soundcloud-login") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Some(code) = ytlogin::child_main() {
+            std::process::exit(code);
+        }
     }
-    let demo = std::env::var_os("NIKGOB_DEMO").is_some();
+    if std::env::args().nth(1).is_some_and(|a| a == nikgob_sc_widget::protocol::FLAG) {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Some(code) = scwidget::child_main() {
+            std::process::exit(code);
+        }
+    }
+    // `--quit`: the running player quits as from the tray's «Выход» (its
+    // session saved), so a script can restart it; nothing else starts.
+    if std::env::args().any(|a| a == "--quit") {
+        match fastframe_instance::Slot::new("music.nikgob").send("quit") {
+            Ok(_) => std::process::exit(0),
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
+                eprintln!("music.nikgob is not running");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("music.nikgob did not take the request: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    logfile::init();
+    stage("log");
+    // Meanwhile, while the library opens and the window is made: the
+    // fallback faces (the window's creator waits for them if need be) and
+    // the audio outputs (the prefs wait for them).
+    let _ = std::thread::Builder::new().name("fallback-fonts".into()).spawn(|| {
+        fallback_fonts::faces();
+    });
+    let devices = std::thread::spawn(|| nikgob_audio::output_device_names().unwrap_or_default());
+    let mut paths = paths();
+    // `NIKGOB_DATA=dir`: a demo run on a library already in `dir` (a copy
+    // of a real one, say) instead of the generated one.
+    let data_dir_asked = std::env::var_os("NIKGOB_DATA").map(PathBuf::from);
+    let demo = std::env::var_os("NIKGOB_DEMO").is_some() || data_dir_asked.is_some();
+    let at_sign_in = std::env::args().any(|a| a == autostart::FLAG);
+    // One player per user: a second launch (a click on the shortcut while
+    // the first waits in the tray) shows the running one's window and ends.
+    // Demo and screenshot runs live beside the real app.
+    let show_asked = Arc::new(AtomicBool::new(false));
+    let quit_asked = Arc::new(AtomicBool::new(false));
+    let waker = Waker::default();
+    let _instance = if demo {
+        None
+    } else {
+        let (asked, quit) = (Arc::clone(&show_asked), Arc::clone(&quit_asked));
+        let w = waker.clone();
+        match fastframe_instance::Slot::new("music.nikgob").claim("show", move |request| {
+            let flag = match request {
+                "show" => &asked,
+                "quit" => &quit,
+                _ => return None,
+            };
+            flag.store(true, Ordering::Relaxed);
+            w.wake();
+            Some("ok".to_owned())
+        }) {
+            fastframe_instance::Claim::First(guard) => Some(guard),
+            other => {
+                log::info!("music.nikgob is already running: {other:?}");
+                return Ok(());
+            }
+        }
+    };
     if demo {
-        let dir = std::env::temp_dir().join("nikgob-demo");
+        let dir = data_dir_asked.clone().unwrap_or_else(|| std::env::temp_dir().join("nikgob-demo"));
         // A demo library from an older seed (duplicate artists, old covers)
         // is thrown away and seeded again.
         let marker = dir.join(demo::VERSION);
-        if !marker.exists() {
+        if data_dir_asked.is_none() && !marker.exists() {
             let _ = std::fs::remove_dir_all(&dir);
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(&marker, b"");
@@ -295,7 +543,12 @@ fn main() -> eframe::Result {
         paths.db = dir.join("library.sqlite");
         paths.root = dir.join("root");
         paths.prefs = dir.join("prefs.json");
-        paths.settings = None;
+        // The real services keep what is typed in next to the demo library.
+        paths.settings = streams::real_in_demo().then(|| dir.join("settings.toml"));
+    }
+    // Next to the library in use: a demo's crash stays in the demo's dir.
+    if let Some(dir) = paths.db.parent() {
+        log_panics(dir.to_owned());
     }
     for sub in ["Music", "Inbox", "Downloads", "Trash"] {
         let _ = std::fs::create_dir_all(paths.root.join(sub));
@@ -310,11 +563,36 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         }
     };
-    if demo {
+    if demo && data_dir_asked.is_none() {
         demo::seed(&library, &paths.root.join("Music"));
     }
-    let prefs = load_prefs(&paths);
-    let waker = Waker::default();
+    stage("library");
+    let settings = paths.settings.as_ref().and_then(|s| nikgob_core::settings::Settings::load(s).ok());
+    let mut prefs = load_prefs(&paths, settings.as_ref(), devices);
+    stage("prefs");
+    // The system says whether autostart is on (Task Manager may have turned
+    // it off), and a wished-for line that is gone is written again; demo
+    // runs leave it alone.
+    let autostart_system = (!demo).then(|| autostart::reconcile(prefs.autostart));
+    if let Some(on) = autostart_system {
+        prefs.autostart = on;
+    }
+    let start_hidden = at_sign_in && !demo && prefs.autostart_hidden;
+
+    // Streaming services: each keeps its state in its own folder of the
+    // data dir (the demo's own, in demo mode).
+    let settings = settings.unwrap_or_default();
+    let secrets = settings.streaming.clone();
+    let data_dir = paths.db.parent().map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
+    let streams = if demo {
+        streams::demo(&data_dir, &secrets)
+    } else {
+        streams::real(&data_dir, &secrets)
+    };
+    let relogin = streams::relogin(&streams, &secrets);
+    stage("streams");
+    // Covers of the services, kept on disk between starts.
+    let covers_dir = data_dir.join("cache").join("covers");
 
     // Audio: the real engine unless disabled.
     let (backend, links): (Box<dyn Playback>, _) = if std::env::var_os("NIKGOB_NO_AUDIO").is_some() {
@@ -324,7 +602,7 @@ fn main() -> eframe::Result {
             .output_device
             .clone()
             .filter(|d| prefs.output_devices.contains(d));
-        match audio::Engine::start(device) {
+        match audio::Engine::start(device, streams.clone(), streams::soloist(), streams::sc_widget()) {
             Ok((engine, links)) => (Box::new(engine), Some(links)),
             Err(e) => {
                 log::error!("audio engine failed to start: {e}");
@@ -332,6 +610,7 @@ fn main() -> eframe::Result {
             }
         }
     };
+    stage("audio");
 
     let wake = {
         let w = waker.clone();
@@ -347,18 +626,21 @@ fn main() -> eframe::Result {
         cfg.masters_dir = prefs.masters_dir.clone();
         cfg.opus_bitrate_kbps = prefs.opus_bitrate;
         cfg.check_fake_lossless = prefs.check_fake_lossless;
+        // A plain fake becomes an MP3 on its way in only when the user lets
+        // that happen without asking.
+        cfg.convert_fake_lossless = prefs.convert_fake_lossless && prefs.fake_flac_auto;
         cfg.fallback_seed_argb = prefs.fallback_seed;
-        let settings = paths
-            .settings
-            .as_ref()
-            .and_then(|s| nikgob_core::settings::Settings::load(s).ok())
-            .unwrap_or_default();
-        let offline = demo || std::env::var_os("NIKGOB_OFFLINE").is_some();
+        // A demo with the real services asks the real online metadata too
+        // (covers, lyrics, the graph of similar music).
+        let offline = (demo && !streams::real_in_demo()) || std::env::var_os("NIKGOB_OFFLINE").is_some();
         cfg.fetch_lyrics = !offline;
         cfg.fetch_cover_online = !offline;
         let mut meta = nikgob_runtime::MetadataConfig::new(settings.metadata.contact);
         if let Some(k) = settings.metadata.acoustid_key.filter(|k| !k.trim().is_empty()) {
             meta = meta.with_acoustid_key(k);
+        }
+        if let Some(k) = settings.metadata.lastfm_key {
+            meta = meta.with_lastfm_key(k);
         }
         nikgob_runtime::ImportSetup {
             config: cfg,
@@ -366,9 +648,24 @@ fn main() -> eframe::Result {
             watch_inbox: !demo,
             torrent_state_dir: paths.db.with_file_name("torrents"),
             torrent_offline: demo,
+            models_dir: Some(paths.db.with_file_name("models")),
         }
     };
-    let runtime = Runtime::start(
+    // The demo's discovery and the services' suggestions ask the fake
+    // services quickly, so the home's «Новое для тебя» and the suggestions
+    // line of «Источники» are there within seconds for screenshots.
+    let schedule = if demo && !streams::real_in_demo() {
+        StreamSchedule {
+            discover_gap: (Duration::from_millis(100), Duration::from_millis(200)),
+            graph_gap_youtube: (Duration::from_millis(100), Duration::from_millis(200)),
+            graph_gap_deezer: (Duration::from_millis(100), Duration::from_millis(200)),
+            suggest_first: Duration::from_secs(2),
+            ..StreamSchedule::default()
+        }
+    } else {
+        StreamSchedule::default()
+    };
+    let runtime = Runtime::start_scheduled(
         RuntimeConfig {
             library,
             library_dir: prefs.library_dir.clone(),
@@ -376,13 +673,27 @@ fn main() -> eframe::Result {
             prefs_path: Some(paths.prefs.clone()),
             settings_path: paths.settings.clone(),
             import: Some(import),
+            streams,
         },
         backend,
         Arc::new(wake.clone()),
+        schedule,
     );
     if let Some(l) = &links {
         l.connect(runtime.playback_sender());
     }
+    // «Войти через Google»: the sign-in window, its profile in youtube/webview;
+    // SoundCloud's in soundcloud/webview.
+    if let Some(login) = ytlogin::WindowLogin::new(ytlogin::Site::Youtube, &data_dir.join("youtube")) {
+        runtime.set_web_login(nikgob_core::streaming::Service::Youtube, Arc::new(login));
+    }
+    if let Some(login) = ytlogin::WindowLogin::new(ytlogin::Site::Soundcloud, &data_dir.join("soundcloud")) {
+        runtime.set_web_login(nikgob_core::streaming::Service::Soundcloud, Arc::new(login));
+    }
+    if let Some(c) = relogin {
+        runtime.send(c);
+    }
+    stage("runtime");
     let core = Core {
         ui: Md3eUi::new(),
         runtime,
@@ -390,21 +701,38 @@ fn main() -> eframe::Result {
         analyzer: links.map(|l| l.analyzer),
         commands: Vec::new(),
         shot: shot::Shot::from_env(),
+        frames: frames::Frames::from_env(),
         quit: false,
+        reopen: false,
         wants_show: false,
+        hidden: false,
+        show_at: None,
         last_frame: Instant::now(),
+        pacer: pacing::Pacer::default(),
         started: Instant::now(),
         // Screenshot runs get their own size and leave the real one alone.
+        copied: 0,
+        window: None,
+        autostart: autostart::Keeper::new(autostart_system),
+        show_asked,
+        quit_asked,
         geometry: geometry::Keeper::load(
             shot::window_size().is_none().then(|| paths.prefs.with_file_name("window.json")),
         ),
     };
 
-    Shell::new(core, &waker).run(|lease| {
+    stage("desktop");
+    Shell::new(core, &waker).start_hidden(start_hidden).run(|lease| {
+        let covers_dir = covers_dir.clone();
+        let mut viewport = lease.peek(|core| core.geometry.apply(egui::ViewportBuilder::default()));
+        if shot::offscreen() {
+            viewport = viewport.with_position(shot::OFFSCREEN).with_active(false).with_taskbar(false);
+        }
+        stage("shell");
         eframe::run_native(
             "music.nikgob",
             eframe::NativeOptions {
-                viewport: lease.peek(|core| core.geometry.apply(egui::ViewportBuilder::default()))
+                viewport: viewport
                     .with_title("music.nikgob")
                     .with_app_id("music.nikgob")
                     .with_icon(egui::IconData {
@@ -416,15 +744,20 @@ fn main() -> eframe::Result {
                 ..Default::default()
             },
             Box::new(move |cc| {
+                stage("window");
                 let ctx = cc.egui_ctx.clone();
                 let mut fonts = egui::FontDefinitions::default();
                 nikgob_md3e::typography::install_fonts(&mut fonts);
                 add_system_fallbacks(&mut fonts);
                 fastframe_text::detect().apply_to(&mut fonts);
                 ctx.set_fonts(fonts);
+                stage("fonts");
                 nikgob_md3e::icons::install(&ctx);
+                web_images::WebImages::install(&ctx, covers_dir);
+                stage("web covers");
                 nikgob_md3e::Theme::new(nikgob_md3e::ColorScheme::baseline(true), true).install(&ctx);
                 let mut core = lease.take(&ctx);
+                core.reopen = false;
                 core.desktop.attach();
                 Ok(Box::new(Window {
                     core,
@@ -464,5 +797,126 @@ mod prefs_tests {
             assert!(value.get("lyrics_mega").is_none());
             assert!(value.get("np_pane").is_none());
         }
+    }
+
+    /// Prefs saved by a build with the old lyrics defaults (word timing for
+    /// every song on, no line timing of plain texts) get the new defaults
+    /// once; prefs saved since keep what the user chose.
+    #[test]
+    fn old_lyrics_defaults_move_to_the_new_ones_once() {
+        let old = r#"{"lyrics_check":true,"lyrics_words_all":true,"lyrics_recognize":true,"lyrics_gpu":false}"#;
+        let p = parse_prefs(old.as_bytes()).unwrap();
+        // (Word timing for the playing song came back on with revision 3.)
+        assert!(!p.lyrics_words_all && p.lyrics_words_playing && p.lyrics_lines_auto && !p.lyrics_recognize);
+        assert_eq!(p.lyrics_rev, nikgob_view::LYRICS_REV);
+        // The control under the lyrics opens its window: the old default
+        // («Меню») moves once, a chosen window or page stays, and «Меню»
+        // chosen since stays too.
+        assert_eq!(p.lyrics_ui, 1);
+        assert_eq!(parse_prefs(br#"{"lyrics_ui":0,"lyrics_rev":1}"#).unwrap().lyrics_ui, 1);
+        assert_eq!(parse_prefs(br#"{"lyrics_ui":2,"lyrics_rev":1}"#).unwrap().lyrics_ui, 2);
+        assert_eq!(parse_prefs(br#"{"lyrics_ui":0,"lyrics_rev":2}"#).unwrap().lyrics_ui, 0);
+        assert_eq!(prefs_of(None).lyrics_ui, 1);
+        // Everything else stays as it was.
+        assert!(p.lyrics_check && !p.lyrics_gpu);
+        // Saved again, the user's own choices hold.
+        let mine = Prefs { lyrics_words_all: true, lyrics_words_playing: true, lyrics_lines_auto: false, lyrics_recognize: true, ..p };
+        let again = parse_prefs(&serde_json::to_vec(&mine).unwrap()).unwrap();
+        assert_eq!(again, mine);
+        // A first start has the new defaults too.
+        let d = prefs_of(None);
+        assert!(!d.lyrics_words_all && d.lyrics_words_playing && d.lyrics_lines_auto && !d.lyrics_recognize);
+    }
+
+    /// Revision 3: word highlighting is the default experience, so prefs
+    /// written before it get word timing for the playing song once, and
+    /// the lead moves from the old default to the new one (a lead the user
+    /// set stays); prefs written since keep what they hold.
+    #[test]
+    fn word_timing_and_the_new_lead_come_once() {
+        let old = parse_prefs(br#"{"lyrics_words_playing":false,"lyrics_lead":0.1,"lyrics_rev":2}"#).unwrap();
+        assert!(old.lyrics_words_playing);
+        assert!((old.lyrics_lead - nikgob_view::LYRICS_LEAD).abs() < 1e-6);
+        assert_eq!(old.lyrics_rev, nikgob_view::LYRICS_REV);
+        let set = parse_prefs(br#"{"lyrics_lead":-0.15,"lyrics_rev":2}"#).unwrap();
+        assert!((set.lyrics_lead + 0.15).abs() < 1e-6, "chosen: stays");
+        let since = parse_prefs(br#"{"lyrics_words_playing":false,"lyrics_lead":0.1,"lyrics_rev":3}"#).unwrap();
+        assert!(!since.lyrics_words_playing && (since.lyrics_lead - 0.1).abs() < 1e-6, "chosen since: stays");
+        let again = parse_prefs(&serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(again, old);
+        let d = prefs_of(None);
+        assert!(d.lyrics_words_playing && (d.lyrics_lead - nikgob_view::LYRICS_LEAD).abs() < 1e-6);
+        // The soft edges come off, with gentle settings for when they are on.
+        assert!(!d.lyrics_soft_edges && d.lyrics_soft_strength < 0.5 && d.lyrics_soft_depth < 0.35 && d.lyrics_soft_fade < 0.6);
+    }
+
+
+    /// «По словам» was a fourth lyrics animation (`lyrics_style` 3); it is
+    /// the unit of every animation now: such prefs move to the wave by
+    /// words once, whatever their revision, and the other animations keep
+    /// their unit.
+    #[test]
+    fn the_old_words_animation_moves_to_the_wave_by_words_once() {
+        for rev in ["", r#","lyrics_rev":1"#, r#","lyrics_rev":2"#] {
+            let p = parse_prefs(format!(r#"{{"lyrics_style":3{rev}}}"#).as_bytes()).unwrap();
+            assert_eq!((p.lyrics_style, p.lyrics_by_words), (2, true), "{rev}");
+            // Saved and read again it stays the wave by words.
+            let again = parse_prefs(&serde_json::to_vec(&p).unwrap()).unwrap();
+            assert_eq!(again, p);
+        }
+        for style in 0..3u8 {
+            for words in [false, true] {
+                let json = format!(r#"{{"lyrics_style":{style},"lyrics_by_words":{words},"lyrics_rev":2}}"#);
+                let p = parse_prefs(json.as_bytes()).unwrap();
+                assert_eq!((p.lyrics_style, p.lyrics_by_words), (style, words));
+            }
+        }
+        // Old prefs without the new fields: by letters, soft edges on.
+        let p = parse_prefs(br#"{"lyrics_style":2,"lyrics_rev":2}"#).unwrap();
+        assert!(!p.lyrics_by_words && p.lyrics_soft_edges && (p.lyrics_soft_strength - 1.0).abs() < 1e-6);
+        let d = prefs_of(None);
+        assert!(d.lyrics_style == 0 && !d.lyrics_by_words && !d.lyrics_soft_edges);
+    }
+
+    /// Revision 4: «По слогам» is the unit of the lyrics' animations; prefs
+    /// from before it at «По буквам» (the old default) move to it, «По
+    /// словам» chosen stays, and what is chosen since stays.
+    #[test]
+    fn syllables_become_the_unit_once() {
+        use nikgob_view::{LYRICS_BY_LETTERS, LYRICS_BY_SYLLABLES, LYRICS_BY_WORDS};
+        assert_eq!(parse_prefs(br#"{"lyrics_by_words":false,"lyrics_rev":3}"#).unwrap().lyrics_unit, LYRICS_BY_SYLLABLES);
+        assert_eq!(parse_prefs(br#"{"lyrics_by_words":true,"lyrics_rev":3}"#).unwrap().lyrics_unit, LYRICS_BY_WORDS);
+        assert_eq!(parse_prefs(br#"{"lyrics_style":3}"#).unwrap().lyrics_unit, LYRICS_BY_WORDS);
+        assert_eq!(parse_prefs(br#"{"lyrics_unit":0,"lyrics_rev":4}"#).unwrap().lyrics_unit, LYRICS_BY_LETTERS);
+        assert_eq!(prefs_of(None).lyrics_unit, LYRICS_BY_SYLLABLES);
+    }
+
+    /// «Настройки текста…» is offered under the lyrics until it is picked
+    /// once, and stays gone after a restart.
+    #[test]
+    fn the_lyrics_settings_row_goes_once_picked() {
+        let mut p = parse_prefs(br#"{"theme":"Dark"}"#).unwrap();
+        assert!(!p.lyrics_settings_seen, "prefs from before: still offered");
+        assert!(!prefs_of(None).lyrics_settings_seen);
+        nikgob_view::PrefPatch::LyricsSettingsSeen.apply(&mut p);
+        let kept = parse_prefs(&serde_json::to_vec(&p).unwrap()).unwrap();
+        assert!(kept.lyrics_settings_seen);
+    }
+
+    /// Главная asks for the name on the first start only: not with a prefs
+    /// file from before, not once «Готово» or «Пропустить» was said.
+    #[test]
+    fn the_name_is_asked_on_the_first_start_only() {
+        use nikgob_view::PrefPatch;
+        let mut first = prefs_of(None);
+        assert!(first.name_prompt && first.user_name.is_empty());
+        assert!(!prefs_of(Some(br#"{"theme":"Dark"}"#)).name_prompt, "a prefs file from before");
+        let mut skipped = first.clone();
+        PrefPatch::NamePrompt(false).apply(&mut skipped);
+        let kept = serde_json::to_vec(&skipped).unwrap();
+        assert!(!prefs_of(Some(&kept)).name_prompt, "skipped: never again");
+        PrefPatch::UserName("  Ник  ".into()).apply(&mut first);
+        let kept = prefs_of(Some(&serde_json::to_vec(&first).unwrap()));
+        assert_eq!((kept.user_name.as_str(), kept.name_prompt), ("Ник", false));
     }
 }

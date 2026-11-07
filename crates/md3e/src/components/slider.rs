@@ -336,6 +336,13 @@ fn wave_phase(ctx: &Context, id: Id, running: bool, speed: f32) -> f32 {
 
 /// The wavy linear progress indicator (4 dp, gap 4, stop dot). `fraction` in 0..1.
 pub fn wavy_progress(ui: &mut Ui, id_salt: impl egui::AsId, fraction: f32, width: f32) -> Response {
+    let track = Theme::get(ui.ctx()).scheme.secondary_container;
+    wavy_progress_on(ui, id_salt, fraction, width, track)
+}
+
+/// [`wavy_progress`] with its own track colour, for a container whose
+/// colour is the usual track's (the card of Главная on secondary_container).
+pub fn wavy_progress_on(ui: &mut Ui, id_salt: impl egui::AsId, fraction: f32, width: f32, track: Color32) -> Response {
     let theme = Theme::get(ui.ctx());
     let s = &theme.scheme;
     let (rect, response) = ui.allocate_exact_size(vec2(width, 10.0), Sense::hover());
@@ -361,7 +368,7 @@ pub fn wavy_progress(ui: &mut Ui, id_salt: impl egui::AsId, fraction: f32, width
         if track_start < rect.right() - thick * 0.5 {
             ui.painter().line_segment(
                 [pos2(track_start, cy), pos2(rect.right() - thick * 0.5, cy)],
-                Stroke::new(thick, s.secondary_container),
+                Stroke::new(thick, track),
             );
             ui.painter().circle_filled(pos2(rect.right() - 2.0, cy), 2.0, s.primary);
         }

@@ -401,13 +401,16 @@ fn write_vorbis(path: &Path, ft: FileType, t: &TagSet) -> Result<()> {
     if let Some(n) = t.track_no {
         put(&mut vc, "TRACKNUMBER", Some(&n.to_string()));
     }
+    // The other spellings of the counts go: one count, read back as written.
     if let Some(n) = t.track_total {
+        for _ in vc.remove("TOTALTRACKS") {}
         put(&mut vc, "TRACKTOTAL", Some(&n.to_string()));
     }
     if let Some(n) = t.disc_no {
         put(&mut vc, "DISCNUMBER", Some(&n.to_string()));
     }
     if let Some(n) = t.disc_total {
+        for _ in vc.remove("TOTALDISCS") {}
         put(&mut vc, "DISCTOTAL", Some(&n.to_string()));
     }
     let date = t.date.clone().or_else(|| t.year.map(|y| format!("{y:04}")));

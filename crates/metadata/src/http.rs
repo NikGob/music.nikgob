@@ -76,6 +76,16 @@ pub struct RateLimits {
     pub lyricsplus: Duration,
     pub lrcred: Duration,
     pub betterlyrics: Duration,
+    /// Odesli (song.link): 10 requests a minute without an API key.
+    pub odesli: Duration,
+    /// The iTunes Search API: about 20 requests a minute.
+    pub itunes: Duration,
+    /// ListenBrainz (its labs too): about one a second is polite.
+    pub listenbrainz: Duration,
+    /// Last.fm: five a second averaged, one a second here.
+    pub lastfm: Duration,
+    /// Genius's public pages: a request a second.
+    pub genius: Duration,
 }
 
 impl Default for RateLimits {
@@ -92,6 +102,11 @@ impl Default for RateLimits {
             lyricsplus: Duration::from_millis(500),
             lrcred: Duration::from_millis(500),
             betterlyrics: Duration::from_millis(500),
+            odesli: Duration::from_secs(6),
+            itunes: Duration::from_secs(3),
+            listenbrainz: Duration::from_millis(1000),
+            lastfm: Duration::from_millis(1000),
+            genius: Duration::from_millis(1000),
         }
     }
 }
@@ -107,6 +122,11 @@ impl RateLimits {
             lyricsplus: Duration::ZERO,
             lrcred: Duration::ZERO,
             betterlyrics: Duration::ZERO,
+            odesli: Duration::ZERO,
+            itunes: Duration::ZERO,
+            listenbrainz: Duration::ZERO,
+            lastfm: Duration::ZERO,
+            genius: Duration::ZERO,
         }
     }
 }
@@ -147,6 +167,11 @@ pub(crate) enum Service {
     LyricsPlus,
     LrcRed,
     BetterLyrics,
+    Odesli,
+    Itunes,
+    ListenBrainz,
+    LastFm,
+    Genius,
 }
 
 #[derive(Debug)]
@@ -159,6 +184,11 @@ struct Limiters {
     lyricsplus: RateLimiter,
     lrcred: RateLimiter,
     betterlyrics: RateLimiter,
+    odesli: RateLimiter,
+    itunes: RateLimiter,
+    listenbrainz: RateLimiter,
+    lastfm: RateLimiter,
+    genius: RateLimiter,
 }
 
 impl Limiters {
@@ -172,6 +202,11 @@ impl Limiters {
             lyricsplus: RateLimiter::new(l.lyricsplus),
             lrcred: RateLimiter::new(l.lrcred),
             betterlyrics: RateLimiter::new(l.betterlyrics),
+            odesli: RateLimiter::new(l.odesli),
+            itunes: RateLimiter::new(l.itunes),
+            listenbrainz: RateLimiter::new(l.listenbrainz),
+            lastfm: RateLimiter::new(l.lastfm),
+            genius: RateLimiter::new(l.genius),
         }
     }
 
@@ -185,6 +220,11 @@ impl Limiters {
             Service::LyricsPlus => &self.lyricsplus,
             Service::LrcRed => &self.lrcred,
             Service::BetterLyrics => &self.betterlyrics,
+            Service::Odesli => &self.odesli,
+            Service::Itunes => &self.itunes,
+            Service::ListenBrainz => &self.listenbrainz,
+            Service::LastFm => &self.lastfm,
+            Service::Genius => &self.genius,
         }
     }
 }
@@ -234,6 +274,11 @@ impl Http {
         &self.client
     }
 
+    /// Waits for the service's rate-limit slot (a request sent another way).
+    pub(crate) async fn wait_turn(&self, service: Service) {
+        self.limiters.get(service).acquire().await;
+    }
+
     /// Sends the request, waiting for the service's rate-limit slot before every
     /// attempt and retrying on 429/503 and connection failures.
     pub(crate) async fn send(&self, service: Service, req: RequestBuilder) -> Result<Response> {
@@ -260,7 +305,8 @@ impl Http {
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.trim().parse::<u64>().ok())
                         .map(Duration::from_secs)
-                        .map(|d| d.min(self.retry.max_delay));
+                        // `Retry-After: 0` (MusicBrainz's 503) still waits a second.
+                        .map(|d| d.max(Duration::from_secs(1)).min(self.retry.max_delay));
                     let delay = hinted.unwrap_or_else(|| self.retry.backoff(attempt));
                     // Shared schedule: other tasks hitting the same service back off
                     // too, also when this caller gives up (the server is still angry).

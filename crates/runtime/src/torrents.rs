@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use nikgob_core::indexer::TorrentPayload;
-use nikgob_core::model::{Download, DownloadStatus, SeedPolicy, SourceOrigin};
+use nikgob_core::model::{Download, DownloadStatus, SeedPolicy, SourceOrigin, WishlistId};
 use nikgob_torrent::{TorrentClient, TorrentConfig, TorrentMeta, TorrentState, TorrentStatus};
 use nikgob_view::{self as v, Command};
 
@@ -18,6 +18,16 @@ use crate::import::Internal;
 
 /// A request waiting for the client to start.
 pub(crate) type Op = Box<dyn FnOnce(&mut Worker, TorrentClient) + Send>;
+
+/// A torrent the client took.
+pub(crate) struct Added {
+    hash: String,
+    name: String,
+    files: Option<Vec<usize>>,
+    magnet: Option<String>,
+    /// The wishlist item it was added for.
+    wish: Option<WishlistId>,
+}
 
 pub(crate) struct Torrents {
     client: Option<TorrentClient>,
@@ -35,6 +45,11 @@ pub(crate) struct Torrents {
     history: VecDeque<v::Job>,
     last_policy: Instant,
     last_view: Option<(Vec<v::Job>, Vec<v::SeedRow>)>,
+    /// `last_view` without what changes every second (bytes, rates,
+    /// progress, ETAs).
+    last_shape: Option<(Vec<v::Job>, Vec<v::SeedRow>)>,
+    /// «Загрузки» is shown ([`Command::DownloadsShown`](nikgob_view::Command::DownloadsShown)).
+    pub(crate) shown: bool,
 }
 
 impl Torrents {
@@ -51,8 +66,29 @@ impl Torrents {
             history: VecDeque::new(),
             last_policy: Instant::now(),
             last_view: None,
+            last_shape: None,
+            shown: false,
         }
     }
+}
+
+/// A torrent view without the numbers that move every second.
+fn shape(active: &[v::Job], seeding: &[v::SeedRow]) -> (Vec<v::Job>, Vec<v::SeedRow>) {
+    let active = active
+        .iter()
+        .map(|j| v::Job {
+            subtitle: String::new(),
+            progress: j.progress.map(|_| 0.0),
+            rate: None,
+            eta: None,
+            ..j.clone()
+        })
+        .collect();
+    let seeding = seeding
+        .iter()
+        .map(|r| v::SeedRow { uploaded_bytes: 0, downloaded_bytes: 0, up_bps: 0, down_bps: 0, peers: 0, ..r.clone() })
+        .collect();
+    (active, seeding)
 }
 
 fn config(p: &v::Prefs, downloads: &Path, state: &Path) -> TorrentConfig {
@@ -113,10 +149,12 @@ fn job(t: &TorrentStatus) -> v::Job {
         eta: t.eta.map(eta_label),
         paused: matches!(t.state, TorrentState::Paused),
         controllable: true,
+        pausable: true,
         error: match &t.state {
             TorrentState::Error(e) => Some(e.clone()),
             _ => None,
         },
+        at: 0,
     }
 }
 
@@ -128,7 +166,7 @@ impl Worker {
     }
 
     /// Runs `op` with the client, starting it first if needed.
-    fn with_client(&mut self, op: Op) {
+    pub(crate) fn with_client(&mut self, op: Op) {
         if let Some(c) = self.torrents.client.clone() {
             op(self, c);
             return;
@@ -203,7 +241,7 @@ impl Worker {
         match c {
             Command::DownloadTorrent { result, files } => self.download_result(result, files),
             Command::ListTorrentFiles(result) => self.list_files(result),
-            Command::CloseTorrentFiles => self.publish(|s, _| s.downloads.files = None),
+            Command::CloseTorrentFiles => self.publish(|s| s.downloads.files = None),
             Command::AddTorrentFile(path) => match std::fs::read(&path) {
                 Ok(bytes) => {
                     self.add_payload(TorrentPayload::TorrentFile(bytes), None, None);
@@ -227,11 +265,13 @@ impl Worker {
                     self.toast("Это не magnet-ссылка", None);
                 }
             }
-            // Import jobs (folders, files) have no pause or cancel: their ids
-            // are not torrent ids and must never reach the torrent client.
-            Command::PauseJob(id, _) | Command::CancelJob(id) if id & crate::IMPORT_ID != 0 => {
-                self.toast("Импорт нельзя остановить — он идёт до конца", None);
+            // Import jobs (folders, files) are never paused; a cancel stops
+            // one and takes back what it added. Their ids are not torrent
+            // ids and must never reach the torrent client.
+            Command::PauseJob(id, _) if id & crate::IMPORT_ID != 0 => {
+                self.toast("Импорт нельзя поставить на паузу — его можно только отменить", None);
             }
+            Command::CancelJob(id) if id & crate::IMPORT_ID != 0 => self.cancel_import(id & !crate::IMPORT_ID),
             Command::PauseJob(id, pause) => self.with_client(Box::new(move |w, c| {
                 w.spawn_torrent_op(async move {
                     if pause { c.pause(id).await } else { c.resume(id).await }.map_err(|e| e.to_string())
@@ -264,7 +304,7 @@ impl Worker {
     }
 
     /// Runs a client call; a failure becomes a toast.
-    fn spawn_torrent_op<F>(&self, f: F)
+    pub(crate) fn spawn_torrent_op<F>(&self, f: F)
     where
         F: std::future::Future<Output = Result<(), String>> + Send + 'static,
     {
@@ -322,7 +362,7 @@ impl Worker {
             Err(e) => {
                 log::warn!("fetching torrent: {e}");
                 self.toast(format!("Не скачать .torrent: {e}"), None);
-                self.publish(|s, _| {
+                self.publish(|s| {
                     if let Some(f) = s.downloads.files.as_mut().filter(|f| f.result == Some(result)) {
                         f.loading = false;
                         f.error = Some(e);
@@ -333,7 +373,7 @@ impl Worker {
     }
 
     fn download_result(&mut self, result: usize, files: Option<Vec<usize>>) {
-        self.publish(|s, _| s.downloads.files = None);
+        self.publish(|s| s.downloads.files = None);
         self.toast("Добавляю раздачу…", None);
         self.fetch_payload(result, move |w, p| {
             let magnet = match &p {
@@ -350,7 +390,7 @@ impl Worker {
             .get(result)
             .map(|c| c.title.clone())
             .unwrap_or_default();
-        self.publish(|s, _| {
+        self.publish(|s| {
             s.downloads.files = Some(v::TorrentFiles {
                 result: Some(result),
                 name,
@@ -371,7 +411,7 @@ impl Worker {
     }
 
     pub(crate) fn files_listed(&mut self, result: usize, r: Result<TorrentMeta, String>) {
-        self.publish(|s, _| {
+        self.publish(|s| {
             let Some(f) = s.downloads.files.as_mut().filter(|f| f.result == Some(result)) else {
                 return;
             };
@@ -387,6 +427,18 @@ impl Worker {
     }
 
     fn add_payload(&mut self, p: TorrentPayload, files: Option<Vec<usize>>, magnet: Option<String>) {
+        self.add_payload_for(p, files, magnet, None);
+    }
+
+    /// Adds a torrent; `wish` = the wishlist item it is downloaded for (its
+    /// files are then imported as that item's tracks).
+    pub(crate) fn add_payload_for(
+        &mut self,
+        p: TorrentPayload,
+        files: Option<Vec<usize>>,
+        magnet: Option<String>,
+        wish: Option<WishlistId>,
+    ) {
         self.with_client(Box::new(move |w, c| {
             let Some(svc) = &w.import else { return };
             let tx = svc.internal();
@@ -394,8 +446,14 @@ impl Worker {
                 let r = match c.add(p, files.clone()).await {
                     Ok(id) => {
                         let st = c.list().into_iter().find(|t| t.id == id);
-                        st.map(|t| (t.info_hash, t.name, files, magnet))
-                            .ok_or_else(|| "торрент пропал из сессии".to_owned())
+                        st.map(|t| Added {
+                            hash: t.info_hash,
+                            name: t.name,
+                            files,
+                            magnet,
+                            wish,
+                        })
+                        .ok_or_else(|| "торрент пропал из сессии".to_owned())
                     }
                     Err(e) => Err(e.to_string()),
                 };
@@ -404,12 +462,15 @@ impl Worker {
         }));
     }
 
-    pub(crate) fn torrent_added(
-        &mut self,
-        r: Result<(String, String, Option<Vec<usize>>, Option<String>), String>,
-    ) {
+    pub(crate) fn torrent_added(&mut self, r: Result<Added, String>) {
         match r {
-            Ok((hash, name, files, magnet)) => {
+            Ok(Added {
+                hash,
+                name,
+                files,
+                magnet,
+                wish,
+            }) => {
                 let now = std::time::SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as i64);
@@ -431,14 +492,22 @@ impl Worker {
                     },
                     bytes_up: 0,
                     bytes_down: 0,
-                    wishlist_id: None,
+                    wishlist_id: wish,
                     created_at: now,
                     updated_at: now,
+                };
+                // A torrent known already keeps the item it was added for.
+                let known = self.lib.get_download(&d.info_hash).ok().flatten();
+                let d = Download {
+                    wishlist_id: d.wishlist_id.or(known.and_then(|k| k.wishlist_id)),
+                    ..d
                 };
                 if let Err(e) = self.lib.put_download(&d) {
                     log::warn!("saving download: {e}");
                 }
-                self.toast(format!("Качается: {name}"), None);
+                if self.state.read().prefs.download_toasts {
+                    self.toast(format!("Качается: {name}"), None);
+                }
                 self.poll_torrents();
             }
             Err(e) => {
@@ -453,8 +522,12 @@ impl Worker {
     /// Once a second while the client runs: progress, finished payloads,
     /// seed policy, cleanup.
     pub(crate) fn poll_torrents(&mut self) {
-        let Some(c) = self.torrents.client.clone() else { return };
+        let Some(c) = self.torrents.client.clone() else {
+            self.share_no_torrents();
+            return;
+        };
         let list = c.list();
+        self.share_torrents(&list);
         let downloads: HashMap<String, Download> = self
             .lib
             .list_downloads()
@@ -501,10 +574,31 @@ impl Worker {
                     eta: None,
                     paused: false,
                     controllable: false,
+                    pausable: false,
                     error: None,
+                    at: t.completed_at.and_then(|at| at.duration_since(UNIX_EPOCH).ok()).map_or_else(nikgob_library::now_ms, |d| d.as_millis() as i64),
                 });
                 self.torrents.last_view = None;
             }
+        }
+
+        // How far the torrents of wishlist items are, for their rows.
+        let wish: HashMap<nikgob_core::model::WishlistId, u8> = list
+            .iter()
+            .filter(|t| !complete(t))
+            .filter_map(|t| {
+                let item = downloads.get(&t.info_hash)?.wishlist_id?;
+                Some((item, (t.progress.clamp(0.0, 1.0) * 100.0) as u8))
+            })
+            .chain(self.streaming.wish.direct_progress())
+            .collect();
+        if wish != self.streaming.wish.progress {
+            self.streaming.wish.progress = wish.clone();
+            self.publish(|s| {
+                for r in &mut s.downloads.wishlist.items {
+                    r.progress = wish.get(&r.id).copied().filter(|_| r.status == nikgob_view::WishlistStatus::Downloading);
+                }
+            });
         }
 
         let seed_days = self.state.read().prefs.seed_days;
@@ -528,20 +622,35 @@ impl Worker {
                             .as_secs();
                         format!("чистка через {} дн.", left.div_ceil(86_400))
                     }),
+                up_bps: t.up_bps,
+                down_bps: t.down_bps,
+                peers: t.peers,
+                size_bytes: t.total,
             })
             .collect();
         let seeded: u64 = list.iter().map(|t| t.uploaded).sum();
         let view = (active.clone(), seeding.clone());
-        if self.torrents.last_view.as_ref() != Some(&view) {
+        // Off «Загрузки» (or with the window hidden) only a change of what
+        // is there is published: a torrent added, finished, paused or gone;
+        // its numbers catch up once the page is shown.
+        let live = self.torrents.shown && self.window_visible();
+        let moved = self.torrents.last_view.as_ref() != Some(&view);
+        let changed = moved && (live || {
+            let shape = shape(&active, &seeding);
+            self.torrents.last_shape.as_ref() != Some(&shape)
+        });
+        if changed {
+            self.torrents.last_shape = Some(shape(&active, &seeding));
             self.torrents.last_view = Some(view);
             let history: Vec<v::Job> = self.torrents.history.iter().cloned().collect();
-            self.publish(|s, _| {
+            self.publish(|s| {
                 s.downloads.active.retain(|j| j.id & crate::IMPORT_ID != 0);
                 s.downloads.active.splice(0..0, active);
                 s.downloads.seeding = seeding;
                 s.downloads.seeded_bytes = seeded;
                 s.downloads.history.retain(|j| j.id & crate::IMPORT_ID != 0);
                 s.downloads.history.splice(0..0, history);
+                crate::import::sort_history(&mut s.downloads.history);
             });
         }
 
@@ -570,7 +679,10 @@ impl Worker {
             .map(|e| crate::import::logged_job(e, 0))
             .collect();
         self.torrents.history.extend(logged.iter().cloned());
-        self.publish(|s, _| s.downloads.history.extend(logged));
+        self.publish(|s| {
+            s.downloads.history.extend(logged);
+            crate::import::sort_history(&mut s.downloads.history);
+        });
     }
 
     fn import_torrent(&mut self, t: &TorrentStatus) {
@@ -588,18 +700,34 @@ impl Worker {
             eta: None,
             paused: false,
             controllable: false,
+            pausable: false,
             error: None,
+            at: nikgob_library::now_ms(),
         });
         self.torrents.history.truncate(100);
         self.torrents.last_view = None;
-        self.toast(format!("Скачано: {}", t.name), None);
-        self.import_with_origin(
+        if self.state.read().prefs.download_toasts {
+            self.toast(format!("Скачано: {}", t.name), None);
+        }
+        // Downloaded for a wishlist item: its files become the item's tracks.
+        let item = self.lib.get_download(&t.info_hash).ok().flatten().and_then(|d| d.wishlist_id);
+        // A better copy the user turned down meanwhile replaces nothing.
+        if let Some(i) = item.and_then(|i| self.lib.get_wishlist_item(i).ok().flatten())
+            && i.origin == nikgob_core::model::WishlistOrigin::Upgrade
+            && i.status == nikgob_core::model::WishlistStatus::Dismissed
+        {
+            log::info!("{}: its better copy was turned down, nothing imported", t.name);
+            return;
+        }
+        let targets = item.map(|item| self.wish_targets(item)).unwrap_or_default();
+        self.import_for(
             files,
             format!("Импорт «{}»", t.name),
             SourceOrigin::Torrent {
                 info_hash: t.info_hash.clone(),
                 path_in_torrent: String::new(),
             },
+            targets,
         );
     }
 

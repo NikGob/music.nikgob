@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# `streaming::FakeService`: an in-memory streaming service for tests and demos.
+fake = []
+
 [dependencies]
 log.workspace = true
 serde = { version = "1", features = ["derive"] }

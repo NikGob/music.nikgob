@@ -17,6 +17,9 @@ use crate::layout::VARIOUS_ARTISTS;
 
 const PAGE: u32 = 500;
 
+/// MusicBrainz id of «Various Artists».
+pub(crate) const VARIOUS_ARTISTS_MBID: &str = "89ad4ac3-39f7-470e-963a-56509c546377";
+
 pub(crate) struct Store {
     lib: Library,
     loaded: bool,
@@ -48,6 +51,14 @@ pub(crate) fn release_key(title: &str, artist_line: &str) -> (String, String) {
 /// one artist.
 pub(crate) fn lead_key(title: &str, artist_line: &str) -> (String, String) {
     (album_key(title), name_key(primary_credit(artist_line)))
+}
+
+/// The bracket closing the last voice credit of `line` (`リコ(CV:富田美憂)`)
+/// as the credit's tail.
+fn close_credit(credit: &mut ArtistCredit, line: &str) {
+    if let Some(last) = credit.0.last_mut() {
+        last.join_phrase = nikgob_core::credit::closing_tail(line, &last.name);
+    }
 }
 
 /// The release has a real album artist (not just the track artist standing in).
@@ -92,6 +103,10 @@ impl Store {
             }
             offset += PAGE;
         }
+        // Other spellings of known artists find them («Ohara Yuiko» is 大原ゆい子).
+        for (artist, alias) in self.lib.artist_aliases()? {
+            self.artists.entry(name_key(&alias)).or_insert(artist);
+        }
         let mut offset = 0;
         loop {
             let page = self
@@ -134,6 +149,11 @@ impl Store {
     /// The existing release this identity belongs to, if any (nothing is created).
     pub fn find_release(&mut self, id: &Identity) -> Result<Option<ReleaseId>> {
         self.ensure_loaded()?;
+        if let Some(r) = id.release_id
+            && self.lib.get_release(r)?.is_some()
+        {
+            return Ok(Some(r));
+        }
         if let Some(m) = &id.release_mbid
             && let Some(r) = self.releases_by_mbid.get(m)
         {
@@ -170,6 +190,7 @@ impl Store {
         let mut credit = ArtistCredit::default();
         for (i, (join, name)) in parts.iter().enumerate() {
             let key = name_key(name);
+            let various = key == name_key(VARIOUS_ARTISTS);
             let mut artist = match self.artists.get(&key) {
                 Some(id) => self
                     .lib
@@ -177,8 +198,11 @@ impl Store {
                     .unwrap_or_else(|| Artist::new(name.clone())),
                 None => Artist::new(name.clone()),
             };
-            if i == 0
-                && let Some(m) = first_mbid.filter(|m| !m.is_empty())
+            // An alias of an artist is credited under the artist's name.
+            let name = if name_key(&artist.name) == key { name.clone() } else { artist.name.clone() };
+            // «Various Artists» is nobody's MBID but its own.
+            let mbid = if various { Some(VARIOUS_ARTISTS_MBID) } else { first_mbid.filter(|_| i == 0) };
+            if let Some(m) = mbid.filter(|m| !m.is_empty())
                 && artist.mbid.is_none()
             {
                 artist.mbid = Some(m.to_owned());
@@ -187,7 +211,7 @@ impl Store {
             self.artists.insert(key, stored.id);
             credit.0.push(ArtistCreditPart {
                 artist_id: Some(stored.id),
-                name: name.clone(),
+                name,
                 join_phrase: String::new(),
             });
             if i > 0 {
@@ -201,7 +225,29 @@ impl Store {
     /// Credit of the track: the individual names aligned with the display line.
     pub fn track_credit(&mut self, id: &Identity) -> Result<ArtistCredit> {
         let parts = credit_parts(&id.artist_line, &id.artists);
-        self.ensure_credit(&parts, id.artist_mbid.as_deref())
+        let parts = self.split_known_pairs(parts)?;
+        let mut credit = self.ensure_credit(&parts, id.artist_mbid.as_deref())?;
+        close_credit(&mut credit, &id.artist_line);
+        Ok(credit)
+    }
+
+    /// A lone `A & B` is one name for the line splitter (`Simon &
+    /// Garfunkel`); it is two artists when the library already knows both
+    /// on their own and not the pair.
+    fn split_known_pairs(&mut self, parts: Vec<(String, String)>) -> Result<Vec<(String, String)>> {
+        self.ensure_loaded()?;
+        let mut out = Vec::with_capacity(parts.len());
+        for (join, name) in parts {
+            let known = |n: &str| self.artists.contains_key(&name_key(n));
+            match nikgob_core::credit::split_pair(&name) {
+                Some([(_, a), (j, b)]) if !known(&name) && known(&a) && known(&b) => {
+                    out.push((join, a));
+                    out.push((j, b));
+                }
+                _ => out.push((join, name)),
+            }
+        }
+        Ok(out)
     }
 
     /// Creates or updates the release of this identity.
@@ -223,15 +269,18 @@ impl Store {
                 let parts = if parts.is_empty() {
                     vec![(String::new(), line.clone())]
                 } else {
-                    parts
+                    self.split_known_pairs(parts)?
                 };
                 // The album artist's MBID is unknown here; the track artist's MBID
-                // only fits when both are the same person.
-                let same_artist = id.album_artist.is_none() || id.album_artist.as_deref() == Some(&id.artist_line);
-                self.ensure_credit(
+                // only fits when both are the same person (not a compilation's
+                // «Various Artists» standing for the track artist).
+                let same_artist = line == id.artist_line;
+                let mut credit = self.ensure_credit(
                     &parts,
                     if same_artist { id.artist_mbid.as_deref() } else { None },
-                )?
+                )?;
+                close_credit(&mut credit, &line);
+                credit
             }
         };
         let mut release = Release::new(Self::release_title(id), credit);
@@ -296,5 +345,82 @@ mod tests {
         // An explicit album artist never falls back to the first name.
         let explicit = identity("Radwimps", Some("Radwimps, Kazuma Jinnouchi"), "Suzume");
         assert_eq!(store.find_release(&explicit).unwrap(), None);
+    }
+
+    #[test]
+    fn a_track_of_two_artists_links_to_both() {
+        use nikgob_core::model::Track;
+        let lib = Library::open_in_memory().unwrap();
+        let mut store = Store::new(lib.clone());
+        let id = identity("Кино, Земфира", None, "Live");
+        let credit = store.track_credit(&id).unwrap();
+        assert_eq!(credit.0.len(), 2);
+        assert_eq!(credit.0[0].name, "Кино");
+        assert_eq!(credit.0[1].name, "Земфира");
+        assert_eq!(credit.display(), "Кино, Земфира", "the line reads as tagged");
+        let ids: Vec<_> = credit.artist_ids().collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        lib.upsert_track(&Track::new("Song", credit)).unwrap();
+        for a in ids {
+            let rows = lib.tracks_of_artist(a, 0, 10).unwrap();
+            assert_eq!(rows.len(), 1, "each artist page has the track");
+            assert_eq!(rows[0].credit.0.len(), 2);
+        }
+        // A lone "A & B" splits once both are known on their own.
+        let pair = store.track_credit(&identity("Кино & Земфира", None, "X")).unwrap();
+        assert_eq!(pair.0.len(), 2);
+        let band = store.track_credit(&identity("Simon & Garfunkel", None, "X")).unwrap();
+        assert_eq!(band.0.len(), 1);
+    }
+
+    #[test]
+    fn various_artists_does_not_take_the_track_mbid() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut store = Store::new(lib.clone());
+        let mut id = identity("Ado", None, "NO SONG NO LIFE");
+        id.compilation = true;
+        id.artist_mbid = Some("e134b52f-0000-0000-0000-000000000000".into());
+        let release = store.ensure_release(&id, None).unwrap();
+        let track = store.track_credit(&id).unwrap();
+        let va = release.artist_credit.0[0].artist_id.unwrap();
+        let ado = track.0[0].artist_id.unwrap();
+        assert_ne!(va, ado);
+        assert_eq!(lib.get_artist(va).unwrap().unwrap().mbid.as_deref(), Some(VARIOUS_ARTISTS_MBID));
+        assert_eq!(lib.get_artist(ado).unwrap().unwrap().mbid, id.artist_mbid);
+        assert_eq!(lib.get_artist(ado).unwrap().unwrap().name, "Ado");
+    }
+
+    #[test]
+    fn an_alias_is_credited_under_the_artists_name() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut store = Store::new(lib.clone());
+        let ohara = store.track_credit(&identity("大原ゆい子", None, "Clover")).unwrap();
+        let latin = store.track_credit(&identity("Ohara Yuiko", None, "Kimi no Kioku")).unwrap();
+        let (a, b) = (ohara.0[0].artist_id.unwrap(), latin.0[0].artist_id.unwrap());
+        lib.merge_artists(b, a).unwrap();
+        let mut store = Store::new(lib);
+        let again = store.track_credit(&identity("Ohara Yuiko", None, "Musubime")).unwrap();
+        assert_eq!(again.0[0].artist_id, Some(a));
+        assert_eq!(again.display(), "大原ゆい子");
+    }
+
+    #[test]
+    fn credit_parts_keep_the_closing_bracket() {
+        let mut store = Store::new(Library::open_in_memory().unwrap());
+        // The names one by one (the ARTISTS tag) and as one line.
+        let mut tagged = identity("リコ(CV:富田美憂)", None, "Deep in Abyss");
+        tagged.artists = vec!["リコ".into(), "富田美憂".into()];
+        let line = identity("リコ(CV:富田美憂)", None, "Deep in Abyss");
+        let full = identity("リコ（CV：富田美憂）", None, "Deep in Abyss");
+        for id in [&tagged, &line, &full] {
+            let credit = store.track_credit(id).unwrap();
+            let names: Vec<_> = credit.0.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, ["リコ", "富田美憂"], "{}", id.artist_line);
+            assert_eq!(credit.display(), id.artist_line, "the line reads as tagged");
+        }
+        let a = store.track_credit(&tagged).unwrap();
+        let b = store.track_credit(&full).unwrap();
+        assert_eq!(a.artist_ids().collect::<Vec<_>>(), b.artist_ids().collect::<Vec<_>>(), "one character, one actor");
     }
 }

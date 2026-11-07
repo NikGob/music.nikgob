@@ -1,0 +1,78 @@
+<!doctype html><meta charset="utf-8"><title>SoundCloud</title><body>
+<script>
+// The host page of SoundCloud's embed widget (w.soundcloud.com/player),
+// driven with its SC.Widget API. The host calls window.nk.* (protocol.rs)
+// and reads what this page posts through window.ipc.
+window.nk = { load() {}, play() {}, pause() {}, seek() {}, volume() {} };
+</script>
+<script src="https://w.soundcloud.com/player/api.js"
+ onerror="window.ipc.postMessage('FAIL the SoundCloud player script did not load')"></script>
+<script>
+(() => {
+  if (!window.SC || !SC.Widget) return;
+  const post = s => window.ipc.postMessage(s);
+  const src = id => 'https://w.soundcloud.com/player/?url=' +
+    encodeURIComponent('https://api.soundcloud.com/tracks/' + id) +
+    '&auto_play=false&visual=false&show_artwork=false&buying=false&sharing=false&download=false&show_comments=false';
+  let widget = null;
+  // The load asked for last, and the one the widget has ready (its events
+  // are told as that one's).
+  let want = 0, cur = 0, readyFor = 0;
+  // The player paused the load asked for: it does not start by itself.
+  let held = false;
+
+  function ready(seq) {
+    if (seq !== want || readyFor === seq) return;
+    readyFor = seq;
+    cur = seq;
+    widget.setVolume(100);
+    widget.getDuration(d => {
+      if (seq !== want) return;
+      post(seq + ' READY ' + Math.round(d || 0));
+      if (!held) widget.play();
+    });
+  }
+
+  function bind() {
+    const E = SC.Widget.Events;
+    widget.bind(E.READY, () => ready(want));
+    widget.bind(E.PLAY, () => post(cur + ' PLAY'));
+    widget.bind(E.PAUSE, () => post(cur + ' PAUSE'));
+    widget.bind(E.FINISH, () => post(cur + ' FINISH'));
+    widget.bind(E.PLAY_PROGRESS, d => post(cur + ' PROGRESS ' + Math.round((d && d.currentPosition) || 0)));
+    widget.bind(E.SEEK, d => post(cur + ' PROGRESS ' + Math.round((d && d.currentPosition) || 0)));
+    // An error is about the load under way.
+    widget.bind(E.ERROR, () => post(want + ' ERROR the widget reported an error'));
+  }
+
+  window.nk = {
+    load(seq, id) {
+      want = seq;
+      held = false;
+      if (!widget) {
+        const f = document.createElement('iframe');
+        f.allow = 'autoplay; encrypted-media';
+        f.width = '400';
+        f.height = '200';
+        f.src = src(id);
+        document.body.appendChild(f);
+        widget = SC.Widget(f);
+        bind();
+      } else {
+        widget.load('https://api.soundcloud.com/tracks/' + id, {
+          auto_play: false, visual: false, show_artwork: false, buying: false, sharing: false, download: false,
+          show_comments: false, callback: () => ready(seq),
+        });
+      }
+    },
+    play(seq) { if (seq !== want) return; held = false; if (widget && readyFor === seq) widget.play(); },
+    pause(seq) { if (seq !== want) return; held = true; if (widget) widget.pause(); },
+    seek(seq, ms) { if (seq === want && widget && readyFor === seq) widget.seekTo(ms); },
+    volume(v) { if (widget) widget.setVolume(v); },
+  };
+  // Only logged (load 0 is never one of ours): a stray script error is not
+  // the track's failure.
+  window.onerror = (m) => post('0 ERROR page: ' + String(m).slice(0, 120));
+  post('HOST');
+})();
+</script>

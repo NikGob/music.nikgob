@@ -49,6 +49,7 @@ fn playing_on_repeat_one() -> (Runtime, u64) {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib,
+            streams: Vec::new(),
             library_dir: std::env::temp_dir(),
             prefs: Prefs::default(),
             prefs_path: None,
@@ -112,4 +113,25 @@ fn a_gapless_repeat_one_loop_restarts_the_progress() {
     wait_for("the view to follow the engine forward", || shown(&rt) >= Duration::from_secs(99));
     tx.send(PlaybackEvent::TrackChanged { to: id }).unwrap();
     wait_for("the loop to restart the progress", || shown(&rt) < Duration::from_secs(3));
+}
+
+/// A report a little behind ours (the sound came late) slows the shown
+/// position down instead of moving it back.
+#[test]
+fn a_small_difference_is_made_up_without_moving_back() {
+    let (rt, id) = playing_on_repeat_one();
+    let tx = rt.playback_sender();
+    tx.send(PlaybackEvent::Position { id, position: Duration::from_secs(10) }).unwrap();
+    wait_for("the jump to 10 s", || shown(&rt) >= Duration::from_secs(10));
+    std::thread::sleep(Duration::from_millis(300));
+    let before = shown(&rt);
+    tx.send(PlaybackEvent::Position { id, position: before.saturating_sub(Duration::from_millis(150)) }).unwrap();
+    wait_for("a slower pace", || rt.state().player.rate < 1.0);
+    let mut last = before;
+    for _ in 0..30 {
+        let now = shown(&rt);
+        assert!(now >= last, "moved back from {last:?} to {now:?}");
+        last = now;
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

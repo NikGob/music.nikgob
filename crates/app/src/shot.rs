@@ -3,10 +3,47 @@
 //! look at screens without a human at the keyboard.
 //!
 //! Synthetic input (logical points): `move:x,y`, `click:x,y`, `rclick:x,y`,
-//! `dblclick:x,y` (`click:x,y,frames` sets the wait after it), `drag:x1,y1,x2,y2`, `wheel:x,y,dy`,
+//! `dblclick:x,y` (`click:x,y,frames` sets the wait after it), `xback:x,y` /
+//! `xforward:x,y` (the mouse's side buttons), `drag:x1,y1,x2,y2`, `wheel:x,y,dy`,
 //! `key:space|escape|l|q|f11|f12` (`key:ctrl+2` and other egui key names too), `toasts` (a few snackbars).
 //! `prefs:{json}` merges into the prefs.
-//! `NIKGOB_SHOT_SIZE=w,h` sets the window size.
+//! `type:text,frames` types into the search bar one character every
+//! `frames` frames (like a person; the bar's debounce applies).
+//! `snap:path.png` saves a screenshot there and goes on (a sequence of
+//! pictures in one run).
+//! `album` opens the first album of the library (`album:Title` that one).
+//! `world:Title` chooses that world on the card of Главная,
+//! `world_page:Title` opens its page (`world_page` the first world's).
+//! `mix_page` opens the page of the first mix of Главная (`mix_page:Title`
+//! that one, or the open world page's).
+//! `lyrics_ui` opens where timing is made in the look
+//! `NIKGOB_LYRICS_UI` picks (the control's menu, the dialog or the page);
+//! `lyrics_menu` opens the control's own menu in any look.
+//! `liked` opens «Любимые»; `play_clip` plays the first clip of the open
+//! playlist (`play_clip:song` its first stream song).
+//! `find_song` opens «Найти песню…» for the first clip of the open
+//! playlist (`find_song:Title` for the clip shown so, `find_song:song` «Другая
+//! версия…» for its first stream song); `replace_first` replaces it with the
+//! dialog's first result in the scope the dialog would offer.
+//! `play_track:<id>` plays one track of the library by its id.
+//! `play_mix:daily|discover|mood|style|daylist|tile` plays a mix of Главная
+//! (the first mood or style mix, the bento's daylist, its first tile;
+//! `play_mix:tile:artist_of_day` the tile of that kind); `radio` starts «Радио по треку» from the first
+//! library track (`radio:artist` the first artist's radio).
+//! `libfilter:text` types into the library's filter, `liblist:1` shows it
+//! as a list, `sort:artist|title|year|added` sorts its albums.
+//! `reopen` closes the window and opens a new one, as the tray does.
+//! `hide:ms` closes the window as its ✕ does (to the tray) and asks for it
+//! back from the tray `ms` later (1000 by default).
+//! `mark:name` names the frames that follow in `NIKGOB_FRAMES` (until a
+//! run's first mark, each step names them after itself).
+//! `NIKGOB_SHOT_SIZE=w,h` sets the window size; `NIKGOB_DATA=dir` runs on the
+//! library in `dir` (as the demo does, with its fake services).
+//! `NIKGOB_HOME_EPOCH=n` numbers the run for Главная's epoch (each start
+//! draws another home; the same `n` and part of the day, the same one).
+//! The window opens off the screen, unfocused and without a taskbar button,
+//! so a run never jumps over the user's windows; `NIKGOB_SHOT_VISIBLE=1`
+//! shows it.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -22,6 +59,18 @@ pub struct Shot {
     requested: bool,
     /// Raw input to feed, one entry per frame.
     input: VecDeque<Vec<Event>>,
+    /// States laid over the view for the picture (`fake:…`).
+    fakes: crate::shot_fakes::Fakes,
+    /// Where the screenshot asked by `snap:` goes (None: the final one).
+    snap: Option<PathBuf>,
+    /// The step the frames belong to, for `NIKGOB_FRAMES` (`mark:name`
+    /// names them).
+    label: String,
+    marked: bool,
+    /// `reopen` asked for a new window.
+    reopen: bool,
+    /// `hide` asked to go to the tray and come back after this long.
+    hide: Option<std::time::Duration>,
 }
 
 fn nums(arg: &str) -> Vec<f32> {
@@ -30,6 +79,17 @@ fn nums(arg: &str) -> Vec<f32> {
 
 fn button(pos: Pos2, button: PointerButton, pressed: bool) -> Event {
     Event::PointerButton { pos, button, pressed, modifiers: Modifiers::NONE }
+}
+
+/// Where a screenshot run's window opens: far off every screen, so it
+/// neither shows up over the user's windows nor takes the focus. (Not
+/// −32000: Windows parks minimized windows there.)
+pub const OFFSCREEN: [f32; 2] = [-16000.0, -16000.0];
+
+/// A screenshot run keeps its window off the screen, unfocused and off the
+/// taskbar (`NIKGOB_SHOT_VISIBLE=1` shows it where a normal start would).
+pub fn offscreen() -> bool {
+    std::env::var_os("NIKGOB_SHOT").is_some() && std::env::var_os("NIKGOB_SHOT_VISIBLE").is_none()
 }
 
 /// `NIKGOB_SHOT_SIZE=w,h`: the window size for a screenshot run.
@@ -56,7 +116,34 @@ impl Shot {
             wait: 40,
             requested: false,
             input: VecDeque::new(),
+            fakes: Default::default(),
+            snap: None,
+            label: "start".to_owned(),
+            marked: false,
+            reopen: false,
+            hide: None,
         })
+    }
+
+    /// The view state with the `fake:` steps so far laid over it, if any.
+    pub fn overlay(&self, state: &nikgob_view::ViewState) -> Option<nikgob_view::ViewState> {
+        self.fakes.any().then(|| self.fakes.apply(state))
+    }
+
+    /// True once after `reopen`: the window closes and a new one opens,
+    /// as when it is shown again from the tray.
+    pub fn take_reopen(&mut self) -> bool {
+        std::mem::take(&mut self.reopen)
+    }
+
+    /// Once after `hide`: how long the window stays in the tray.
+    pub fn take_hide(&mut self) -> Option<std::time::Duration> {
+        self.hide.take()
+    }
+
+    /// The step running, for the frame log.
+    pub fn label(&self) -> &str {
+        &self.label
     }
 
     /// Feeds queued synthetic events into this frame's raw input.
@@ -92,8 +179,19 @@ impl Shot {
         if let Some(img) = image {
             let [w, h] = img.size;
             let raw: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-            if let Some(buf) = image::RgbaImage::from_raw(w as u32, h as u32, raw) {
-                let _ = buf.save(&self.path);
+            let to = self.snap.take();
+            match image::RgbaImage::from_raw(w as u32, h as u32, raw) {
+                Some(buf) => {
+                    if let Err(e) = buf.save(to.as_ref().unwrap_or(&self.path)) {
+                        log::warn!("shot: cannot save the screenshot to {}: {e}", to.as_ref().unwrap_or(&self.path).display());
+                    }
+                }
+                None => log::warn!("shot: the screenshot is not {w}×{h}"),
+            }
+            if to.is_some() {
+                self.requested = false;
+                ctx.request_repaint();
+                return false;
             }
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return true;
@@ -114,8 +212,24 @@ impl Shot {
         let step = self.steps.remove(0);
         self.wait = 2;
         let (verb, arg) = step.split_once(':').unwrap_or((step.as_str(), ""));
+        // Once a step is `mark`ed, only marks rename the frames.
+        if verb == "mark" {
+            self.label = arg.to_owned();
+            self.marked = true;
+        } else if !self.marked && !matches!(verb, "wait" | "snap" | "typed") {
+            self.label = step.clone();
+        }
         match verb {
             "wait" => self.wait = arg.parse().unwrap_or(30),
+            "mark" => self.wait = 0,
+            "reopen" => {
+                self.reopen = true;
+                self.wait = 40;
+            }
+            "hide" => {
+                self.hide = Some(std::time::Duration::from_millis(arg.parse().unwrap_or(1000)));
+                self.wait = 40;
+            }
             "size" => {
                 if let Some((w, h)) = arg.split_once('x')
                     && let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>())
@@ -129,20 +243,64 @@ impl Shot {
                     "library" => Route::Library(LibraryTab::All),
                     "tracks" => Route::Library(LibraryTab::Tracks),
                     "playlists" => Route::Library(LibraryTab::Playlists),
+                    "albums" => Route::Library(LibraryTab::Albums),
+                    "artists" => Route::Library(LibraryTab::Artists),
                     "trash" => Route::Library(LibraryTab::Trash),
+                    "downloaded" => Route::Library(LibraryTab::Downloaded),
                     "downloads" => Route::Downloads(DownloadsTab::Active),
+                    "wishlist" => Route::Downloads(DownloadsTab::Wishlist),
+                    "confirm" => Route::Downloads(DownloadsTab::Confirm),
+                    "history" => Route::Downloads(DownloadsTab::History),
+                    "seeding" => Route::Downloads(DownloadsTab::Seeding),
                     "settings" => Route::Settings,
+                    "new_releases" => Route::NewReleases,
                     _ => Route::Home,
                 };
                 if let Route::Library(tab) = r {
                     ui.set_library_tab(tab);
+                    if tab == LibraryTab::Downloaded {
+                        out.push(Command::LoadDownloaded);
+                    }
                 }
                 ui.navigate(ctx, r, out);
                 self.wait = 30;
             }
+            "world" | "world_page" => {
+                // A world of the card by its title: chosen on the card, or
+                // its page opened (`world_page:Title`).
+                if let Some(w) = state.home.worlds.iter().find(|w| arg.is_empty() || w.title == arg) {
+                    if verb == "world" {
+                        ui.choose_world(ctx, &w.key);
+                    } else {
+                        ui.navigate(ctx, Route::World(w.key.clone()), out);
+                    }
+                }
+                self.wait = 30;
+            }
+            "mix_page" => {
+                // The page of the first mix of Главная (`mix_page:Title` the
+                // one of that title, of the open world's page if it has it).
+                let home = state.home.lanes.iter().find(|l| arg.is_empty() || l.title == arg);
+                let world = state.world.as_ref().and_then(|v| v.mixes.iter().find(|l| l.title == arg).map(|l| (l, &v.world.key)));
+                let route = match (home, world) {
+                    (Some(l), _) => Some(Route::Mix { key: l.key, world: None }),
+                    (None, Some((l, w))) => Some(Route::Mix { key: l.key, world: Some(w.clone()) }),
+                    _ => None,
+                };
+                if let Some(r) = route {
+                    ui.navigate(ctx, r, out);
+                }
+                self.wait = 30;
+            }
             "album" => {
-                // The first album of the loaded library.
-                if let Some(r) = state.library.releases.first() {
+                // The first album of the loaded library (`album:Title` the
+                // one of that title).
+                let r = if arg.is_empty() {
+                    state.library.releases.first()
+                } else {
+                    state.library.releases.iter().find(|r| r.title == arg)
+                };
+                if let Some(r) = r {
                     ui.navigate(ctx, Route::Release(r.id), out);
                 }
                 self.wait = 30;
@@ -156,20 +314,78 @@ impl Shot {
                 self.wait = 30;
             }
             "like_album" => {
-                if let Some(r) = state.library.releases.first() {
+                // `like_album:n` the first n albums.
+                for r in state.library.releases.iter().take(arg.parse().unwrap_or(1)) {
                     out.push(Command::Like(nikgob_view::LikeTarget::Release(r.id), !r.liked));
                 }
                 self.wait = 20;
             }
             "playlist" => {
                 // The first user playlist.
-                if let Some(p) = state.library.playlists.iter().find(|p| !p.pinned) {
+                // `playlist:Name` picks one by name.
+                if let Some(p) = state.library.playlists.iter().find(|p| !p.pinned && (arg.is_empty() || p.name == arg)) {
                     ui.navigate(ctx, Route::Playlist(p.id), out);
                 }
                 self.wait = 30;
             }
+            "liked" => {
+                // «Любимые».
+                ui.navigate(ctx, Route::Playlist(nikgob_view::LIKED_PLAYLIST), out);
+                self.wait = 30;
+            }
+            "play_clip" => {
+                // The first clip of the open playlist (`play_clip:song` plays
+                // its first stream track that is not a clip).
+                let want_clip = arg != "song";
+                let pick = state.playlist.as_ref().and_then(|p| {
+                    p.tracks.iter().find(|t| t.clip == want_clip && (want_clip || !t.has_local))
+                });
+                if let Some(t) = pick {
+                    out.push(Command::PlayTracks { tracks: vec![t.id], start: 0, context: "Любимые".into() });
+                }
+                self.wait = 30;
+            }
+            "find_song" => {
+                let pick = state.playlist.as_ref().and_then(|p| {
+                    p.tracks.iter().find(|t| match arg {
+                        "" => t.clip,
+                        "song" => !t.clip && !t.has_local,
+                        title => t.clip && t.title == title,
+                    })
+                });
+                if let Some(t) = pick {
+                    out.push(Command::FindSong { track: t.id, query: None });
+                }
+                self.wait = 40;
+            }
+            "replace_first" => {
+                if let Some(f) = &state.find_song
+                    && let Some(r) = f.results.first()
+                {
+                    out.push(Command::ReplaceTrack {
+                        track: f.track,
+                        with: r.remote.clone(),
+                        youtube: state.prefs.replace_in_youtube && f.youtube_off.is_none(),
+                    });
+                }
+                self.wait = 40;
+            }
+            "play_track" => {
+                // `play_track:<id>` plays that one track of the library (a
+                // stream one too) as a queue of its own.
+                if let Ok(id) = arg.parse::<nikgob_core::model::TrackId>() {
+                    out.push(Command::PlayTracks { tracks: vec![id], start: 0, context: "Скриншот".into() });
+                }
+                self.wait = 30;
+            }
             "play" => {
-                if let Some(r) = state.library.releases.first() {
+                // `play:Title` plays the album of that title.
+                let r = if arg.is_empty() {
+                    state.library.releases.first()
+                } else {
+                    state.library.releases.iter().find(|r| r.title == arg)
+                };
+                if let Some(r) = r {
                     out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false });
                 }
                 self.wait = 20;
@@ -205,7 +421,7 @@ impl Shot {
                     }
                 }
             }
-            "click" | "rclick" | "dblclick" => {
+            "click" | "rclick" | "dblclick" | "xback" | "xforward" => {
                 // `click:x,y,frames`: how long to wait after it (default 20;
                 // 0 = the next step right after the release, for rapid clicks).
                 let n = nums(arg);
@@ -214,6 +430,8 @@ impl Shot {
                     let (b, times) = match verb {
                         "rclick" => (PointerButton::Secondary, 1),
                         "dblclick" => (PointerButton::Primary, 2),
+                        "xback" => (PointerButton::Extra1, 1),
+                        "xforward" => (PointerButton::Extra2, 1),
                         _ => (PointerButton::Primary, 1),
                     };
                     self.press(pos2(x, y), b, times);
@@ -279,6 +497,13 @@ impl Shot {
                 self.wait = 20;
             }
             // A few snackbars of different kinds, from real commands.
+            // `volume:0` (a screenshot run with the real engine stays quiet).
+            "volume" => {
+                if let Ok(v) = arg.parse::<f32>() {
+                    out.push(Command::SetVolume(v));
+                }
+                self.wait = 5;
+            }
             "toasts" => {
                 if let Some(t) = &state.player.current {
                     out.push(Command::Enqueue(vec![t.id]));
@@ -295,9 +520,96 @@ impl Shot {
                 ui.open_lyrics();
                 self.wait = 40;
             }
+            "lyrics_ui" => {
+                // `lyrics_ui:4` shoots 4 frames in (mid-transition).
+                nikgob_md3e::screens::lyrics_ui::open(ctx);
+                self.wait = arg.parse().unwrap_or(60);
+            }
+            "lyrics_menu" => {
+                nikgob_md3e::screens::lyrics_ui::open_menu(ctx);
+                self.wait = arg.parse().unwrap_or(30);
+            }
             "search" => {
                 ui.set_search(arg, out);
                 self.wait = 20;
+            }
+            "type" => {
+                let (text, frames) = match arg.rsplit_once(',') {
+                    Some((t, f)) if f.trim().parse::<u32>().is_ok() => (t, f.trim().parse().unwrap_or(6)),
+                    _ => (arg, 6),
+                };
+                let chars: Vec<char> = text.chars().collect();
+                for n in (1..=chars.len()).rev() {
+                    let prefix: String = chars[..n].iter().collect();
+                    self.steps.insert(0, format!("typed:{frames}:{prefix}"));
+                }
+                self.wait = 0;
+            }
+            "typed" => {
+                if let Some((frames, text)) = arg.split_once(':') {
+                    ui.set_search(text, out);
+                    self.wait = frames.parse().unwrap_or(6);
+                }
+            }
+            "snap" => {
+                self.snap = Some(PathBuf::from(arg));
+                self.requested = true;
+                ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::default()));
+                self.wait = 0;
+            }
+            // `settings:sources` opens Settings on that tab / row
+            // (`settings:lyrics-group` the lyrics group, as under the lyrics).
+            "settings" => {
+                ui.open_settings_at(arg);
+                self.wait = 30;
+            }
+            // `stream:album:spotify:sp-alb-gruppa` opens a page of a service.
+            "stream" => {
+                let mut it = arg.splitn(3, ':');
+                if let (Some(kind), Some(service), Some(id)) = (it.next(), it.next(), it.next())
+                    && let Some(service) = nikgob_view::Service::parse(service)
+                {
+                    let remote = nikgob_view::RemoteId::new(service, id);
+                    let page = match kind {
+                        "artist" => nikgob_view::StreamPage::Artist(remote),
+                        "playlist" => nikgob_view::StreamPage::Playlist(remote),
+                        _ => nikgob_view::StreamPage::Album(remote),
+                    };
+                    ui.navigate(ctx, Route::Stream(page), out);
+                }
+                self.wait = 40;
+            }
+            // `play_stream:spotify:sp-gruppa-2` plays one stream track.
+            "play_stream" => {
+                if let Some((service, id)) = arg.split_once(':')
+                    && let Some(service) = nikgob_view::Service::parse(service)
+                {
+                    out.push(Command::PlayStreamTracks {
+                        tracks: vec![nikgob_view::RemoteId::new(service, id)],
+                        start: 0,
+                        context: "Скриншот".into(),
+                    });
+                }
+                self.wait = 30;
+            }
+            "artist" => {
+                // The library artist named `arg`, or the first one.
+                let a = state.library.artists.iter().find(|a| a.name == arg).or(state.library.artists.first());
+                if let Some(a) = a {
+                    ui.navigate(ctx, Route::Artist(a.id), out);
+                }
+                self.wait = 30;
+            }
+            // `fake:wishlist` etc. (see shot_fakes.rs).
+            "fake" => {
+                if !self.fakes.add(arg) {
+                    log::warn!("unknown fake {arg}");
+                }
+                self.wait = 10;
+            }
+            "unfold" => {
+                ui.unfold_sources();
+                self.wait = 10;
             }
             // `prefs:{"ring_style":"Bars"}`: merges JSON into the prefs.
             "prefs" => {
@@ -312,6 +624,43 @@ impl Shot {
                 }
                 self.wait = 10;
             }
+            "play_mix" => {
+                let h = &state.home;
+                let id = match arg {
+                    "discover" => Some(nikgob_view::MixId::Discover),
+                    "mood" => h.moods.first().map(|m| m.id),
+                    "style" => h.style_mixes.first().map(|m| m.id),
+                    "daylist" => Some(nikgob_view::MixId::Daylist),
+                    "tile" => h.tiles.first().map(|m| m.id),
+                    a if a.starts_with("tile:") => nikgob_view::TileKind::from_key(&a[5..]).map(nikgob_view::MixId::Tile),
+                    _ => Some(nikgob_view::MixId::Daily),
+                };
+                if let Some(id) = id {
+                    out.push(Command::PlayMix { id });
+                }
+                self.wait = 60;
+            }
+            "radio" => {
+                let seed = match arg {
+                    "artist" => state.library.artists.first().map(|a| nikgob_view::RadioSeed::Artist(a.id)),
+                    _ => (state.library.tracks.first())
+                        .or(state.home.mix.first())
+                        .map(|t| nikgob_view::RadioSeed::Track(t.id)),
+                };
+                if let Some(seed) = seed {
+                    out.push(Command::StartRadio { seed });
+                }
+                self.wait = 60;
+            }
+            // The library's filter, view and sort.
+            "libfilter" => ui.set_library_filter(arg),
+            "liblist" => Md3eUi::set_library_list(ctx, arg != "0"),
+            "sort" => out.push(Command::SortReleases(match arg {
+                "title" => nikgob_view::ReleaseSort::Title,
+                "year" => nikgob_view::ReleaseSort::Year,
+                "added" => nikgob_view::ReleaseSort::Added,
+                _ => nikgob_view::ReleaseSort::Artist,
+            })),
             "light" => out.push(Command::SetPrefs(Box::new(nikgob_view::Prefs {
                 theme: nikgob_view::ThemeMode::Light,
                 ..state.prefs.clone()

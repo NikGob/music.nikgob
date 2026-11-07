@@ -31,6 +31,12 @@ pub enum Stage {
     Deriving,
 }
 
+/// [`ConfirmOption::source`] of "attach to this stream track".
+pub const STREAM_OPTION: &str = "stream";
+/// [`ConfirmOption::source`] of "what the file's own tags say" (always the
+/// first option).
+pub const TAGS_OPTION: &str = "tags";
+
 /// One possible identity offered to the user.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfirmOption {
@@ -39,9 +45,12 @@ pub struct ConfirmOption {
     pub album: Option<String>,
     pub year: Option<i32>,
     pub track_no: Option<u32>,
+    /// Length of the recording (of the file, for [`TAGS_OPTION`]).
+    pub duration_ms: Option<u32>,
     /// 0..=1, from the matcher.
     pub score: f64,
-    /// `"musicbrainz"` or `"deezer"`.
+    /// `"musicbrainz"`, `"deezer"`, [`TAGS_OPTION`], or [`STREAM_OPTION`]
+    /// for a liked stream track the file may be (its length is off).
     pub source: &'static str,
     pub recording_mbid: Option<String>,
     pub release_mbid: Option<String>,
@@ -59,8 +68,12 @@ pub struct ConfirmItem {
     pub tag_artist: Option<String>,
     pub tag_album: Option<String>,
     pub duration_ms: Option<u32>,
-    /// Up to three, best first.
+    /// The file's own tags first, then up to three candidates, best first.
     pub options: Vec<ConfirmOption>,
+    /// The «Хочу скачать» item the file was downloaded for.
+    pub wishlist: Option<nikgob_core::model::WishlistId>,
+    /// What the file really is («FLAC из MP3 ~320», «MP3 320»).
+    pub quality: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -84,24 +97,30 @@ pub enum ImportEvent {
     NeedsConfirmation {
         item: ConfirmItem,
     },
-    /// Not better than what the library has; `kept` is the existing track.
+    /// Not better than what the library has; `kept` is the existing track,
+    /// `quality` what the file really is («FLAC из MP3 ~128», «MP3 320»).
     Duplicate {
         job: JobId,
         path: PathBuf,
         kept: TrackId,
+        quality: Option<String>,
     },
     Failed {
         job: JobId,
         path: PathBuf,
         error: String,
     },
-    /// All files of the job are done or parked.
+    /// All files of the job are done or parked. `left_out`: files that are
+    /// none of the tracks a better copy was fetched for; `cancelled`: the
+    /// user stopped it and what it committed was taken back.
     Finished {
         job: JobId,
         imported: usize,
         duplicates: usize,
         failed: usize,
         pending: usize,
+        left_out: usize,
+        cancelled: bool,
     },
     /// A `.torrent` file showed up in the Inbox (or in the job's paths); the
     /// runtime hands it to the torrent client.

@@ -1,6 +1,6 @@
-//! Files written by real encoders (ffmpeg with libopus, libmp3lame, libvorbis,
-//! aac, flac, alac; see `tests/fixtures/regenerate.sh`) decoded through the
-//! whole engine and compared with the analytic signal they encode.
+//! Files written by real encoders (ffmpeg with libopus in Ogg and WebM,
+//! libmp3lame, libvorbis, aac, flac, alac; see `tests/fixtures/regenerate.sh`)
+//! decoded through the whole engine and compared with the analytic signal they encode.
 
 mod common;
 
@@ -116,7 +116,12 @@ fn real_lossless_files_decode_exactly() {
 
 #[test]
 fn real_lossy_files_play_with_correct_length_and_alignment() {
-    for (name, tolerance_frames) in [("tone.mp3", 1), ("tone.ogg", 1), ("tone.m4a", 2_200)] {
+    for (name, tolerance_frames) in [
+        ("tone.mp3", 1),
+        ("tone.ogg", 1),
+        ("tone.m4a", 2_200),
+        ("tone.webm", 1),
+    ] {
         let m = measure(name, 0.0);
         assert!(
             (m.frames as i64 - 48_000).abs() <= 2_200,

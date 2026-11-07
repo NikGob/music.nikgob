@@ -1,0 +1,121 @@
+{
+ "contents": {
+  "singleColumnMusicWatchNextResultsRenderer": {
+   "tabbedRenderer": {
+    "watchNextTabbedResultsRenderer": {
+     "tabs": [
+      {
+       "tabRenderer": {
+        "title": "Up next",
+        "content": {
+         "musicQueueRenderer": {
+          "content": {
+           "playlistPanelRenderer": {
+            "contents": [
+             {
+              "playlistPanelVideoRenderer": {
+               "title": {
+                "runs": [
+                 {
+                  "text": "インソムニア - Insomnia"
+                 }
+                ]
+               },
+               "longBylineText": {
+                "runs": [
+                 {
+                  "text": "Eve",
+                  "navigationEndpoint": {
+                   "browseEndpoint": {
+                    "browseId": "UCXW81UHV3UeWUjVMr11ov2A",
+                    "browseEndpointContextSupportedConfigs": {
+                     "browseEndpointContextMusicConfig": {
+                      "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                     }
+                    }
+                   }
+                  }
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "20M views"
+                 },
+                 {
+                  "text": " • "
+                 },
+                 {
+                  "text": "399K likes"
+                 }
+                ]
+               },
+               "thumbnail": {
+                "thumbnails": [
+                 {
+                  "url": "https://i.ytimg.com/vi/35nV_M3asRs/hqdefault.jpg?sqp=-oaymwEWCJADEOEBIAQqCggAEOADGC0guwJIWg&rs=AMzJL3mre6XHV1mMwoZNfNY92gGGq_AFuQ",
+                  "width": 400,
+                  "height": 225
+                 },
+                 {
+                  "url": "https://i.ytimg.com/vi/35nV_M3asRs/hq720.jpg?sqp=-oaymwEKCKAGEMIDIABIWg&rs=AMzJL3lRQlokL8qUPLDFHryIHaaU5eBkNg",
+                  "width": 800,
+                  "height": 450
+                 },
+                 {
+                  "url": "https://i.ytimg.com/vi/35nV_M3asRs/hq720.jpg?sqp=-oaymwEKCNUGEN8DIABIWg&rs=AMzJL3l4j8uR_Sgd8eUMerUVC7NUdF13IA",
+                  "width": 853,
+                  "height": 479
+                 }
+                ]
+               },
+               "lengthText": {
+                "runs": [
+                 {
+                  "text": "4:01"
+                 }
+                ],
+                "accessibility": {
+                 "accessibilityData": {
+                  "label": "4 minutes, 1 second"
+                 }
+                }
+               },
+               "selected": true,
+               "navigationEndpoint": {
+                "watchEndpoint": {
+                 "videoId": "35nV_M3asRs",
+                 "params": "OAHyAQIIAeoECzM1blZfTTNhc1Jz",
+                 "playerParams": "0gcJCU4BEIKdP_Kw",
+                 "watchEndpointMusicSupportedConfigs": {
+                  "watchEndpointMusicConfig": {
+                   "hasPersistentPlaylistPanel": true,
+                   "musicVideoType": "MUSIC_VIDEO_TYPE_OMV"
+                  }
+                 }
+                }
+               },
+               "videoId": "35nV_M3asRs",
+               "shortBylineText": {
+                "runs": [
+                 {
+                  "text": "Eve"
+                 }
+                ]
+               }
+              }
+             }
+            ],
+            "playlistId": "RDAMVM35nV_M3asRs"
+           }
+          }
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}

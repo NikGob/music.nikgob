@@ -111,6 +111,7 @@ fn setting_and_manual_pick_embed_tags_without_sidecars_or_duplicate_tracks() {
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib.clone(),
+            streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
             prefs: Prefs::default(),
             prefs_path: Some(prefs_path.clone()),
@@ -121,6 +122,7 @@ fn setting_and_manual_pick_embed_tags_without_sidecars_or_duplicate_tracks() {
                 watch_inbox: false,
                 torrent_state_dir: dir.path().join("torrent-state"),
                 torrent_offline: true,
+                models_dir: None,
             }),
         },
         Box::new(NullPlayback),
@@ -175,6 +177,19 @@ fn setting_and_manual_pick_embed_tags_without_sidecars_or_duplicate_tracks() {
         read_tags(&path).is_ok_and(|(t, _)| t.lyrics.as_deref() == Some("[00:01.000]Another text"))
     });
     assert_eq!(lib.lyrics_pick(track.id).unwrap().as_deref(), Some("lrclib"));
+    // Seen without timing: the text stays, its lines come as plain text,
+    // and the choice is remembered for the track.
+    rt.send(Command::PlayTracks { tracks: vec![track.id], start: 0, context: "lyrics test".into() });
+    wait_for(|| rt.state().lyrics.track == Some(track.id) && !rt.state().lyrics.lines.is_empty());
+    rt.send(Command::ShowLyricsAs(track.id, nikgob_core::lyrics::LyricsSync::Plain));
+    wait_for(|| rt.state().lyrics.lines.is_empty());
+    assert_eq!(rt.state().lyrics.plain.as_deref(), Some("Another text"));
+    assert_eq!(lib.lyrics_show(track.id).unwrap().as_deref(), Some("plain"));
+    // Nothing being made: calling it off changes nothing.
+    rt.send(Command::CancelCraft);
+    rt.send(Command::ShowLyricsAs(track.id, nikgob_core::lyrics::LyricsSync::Line));
+    wait_for(|| !rt.state().lyrics.lines.is_empty());
+    assert_eq!(lib.lyrics_show(track.id).unwrap().as_deref(), Some("line"));
     // A rescan uses the preserved NIKGOB_TRACK_ID and locator, not the mtime.
     let report = nikgob_import::rebuild_from_files(&lib, &cfg).unwrap();
     assert_eq!(report.tracks_created, 0);

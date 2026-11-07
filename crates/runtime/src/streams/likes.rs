@@ -1,0 +1,592 @@
+//! Likes both ways (docs/stage3.md §0 "Лайки обратно").
+//!
+//! * Push: a like / unlike here (a track, or an album = its tracks) goes to
+//!   every logged-in service the track has an id in, when
+//!   [`nikgob_view::Prefs::push_likes`] is on. Pushes wait in a queue per
+//!   service for [`StreamSchedule::like_delay`] and go out together (Spotify:
+//!   40 per request; YouTube: one at a time); a like and its unlike within
+//!   that time cancel out and send nothing.
+//! * Pull: each logged-in service's liked list is compared with the one the
+//!   last pull saw (`remote_like`): as soon as its login is up, then every
+//!   [`StreamSchedule::likes_every`] (± jitter), and on window focus or a
+//!   playback start when the last check is older than
+//!   [`StreamSchedule::likes_fresh`]. A check reads only the first page
+//!   and the list's length ([`StreamService::liked_head`]): when every
+//!   track of it is known and the counts add up, nothing else is asked
+//!   (one request); new likes at the top come from that page; anything else
+//!   (an unlike, more than a page of news) and once a day read the whole
+//!   list. A new remote like becomes a like here (origin `sync`, so it
+//!   downloads like a new like); a remote unlike takes the like back only
+//!   if that like came from this service. Pulled likes are never pushed
+//!   back, so nothing echoes.
+//! * The very first pull of a service behaves like an import: its likes land
+//!   in the library with wishlist items that wait (`import`, "ждёт") for the
+//!   user's "скачать" instead of starting hundreds of downloads. The API
+//!   import ([`super::cold`]) goes through the same code, so whichever runs
+//!   first takes the likes and the other finds them known.
+//!
+//! [`StreamSchedule::like_delay`]: super::StreamSchedule::like_delay
+//! [`StreamSchedule::likes_every`]: super::StreamSchedule::likes_every
+//! [`StreamSchedule::likes_fresh`]: super::StreamSchedule::likes_fresh
+//! [`StreamService::liked_head`]: nikgob_core::streaming::StreamService::liked_head
+
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+use nikgob_core::model::{TrackId, WishlistOrigin};
+use nikgob_core::streaming::{LikedHead, RemoteId, Service, StreamError, StreamTrack};
+use nikgob_library::RemoteLike;
+
+use super::Msg;
+use crate::Worker;
+
+/// Library meta key: when the whole liked list of a service was last read.
+fn full_key(service: Service) -> String {
+    format!("likes_full.{service}")
+}
+
+/// Likes and unlikes waiting to be sent, per service.
+#[derive(Default)]
+pub(crate) struct LikeQueue {
+    pending: HashMap<Service, Vec<(RemoteId, bool)>>,
+    /// A flush is on its way.
+    armed: HashSet<Service>,
+}
+
+impl LikeQueue {
+    /// Queues `remote` → `on`; a pending opposite cancels out (nothing is
+    /// sent). Returns whether the queue was empty (a flush must be armed).
+    pub(crate) fn push(&mut self, remote: RemoteId, on: bool) -> bool {
+        let q = self.pending.entry(remote.service).or_default();
+        if let Some(i) = q.iter().position(|(r, _)| *r == remote) {
+            if q[i].1 != on {
+                q.remove(i);
+            }
+            return false;
+        }
+        q.push((remote.clone(), on));
+        self.armed.insert(remote.service)
+    }
+
+    fn take(&mut self, service: Service) -> Vec<(RemoteId, bool)> {
+        self.armed.remove(&service);
+        self.pending.remove(&service).unwrap_or_default()
+    }
+}
+
+/// What a head check says.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HeadVerdict {
+    /// Nothing new, nothing gone.
+    Same,
+    /// Only these (from the head, newest first) are new.
+    New(Vec<StreamTrack>),
+    /// Something else changed: read the whole list.
+    Full,
+}
+
+/// Compares the head of a liked list with what the last pull saw.
+pub(crate) fn judge_head(head: &LikedHead, known: &HashSet<String>) -> HeadVerdict {
+    let new: Vec<StreamTrack> = head
+        .tracks
+        .iter()
+        .filter(|t| !known.contains(&t.id.id))
+        .cloned()
+        .collect();
+    let Some(total) = head.total else {
+        return HeadVerdict::Full;
+    };
+    // The newest likes are on top: news below a known track, or a last
+    // track that is news too (more news on the next page), is not a clean
+    // addition.
+    let first_known = head.tracks.iter().position(|t| known.contains(&t.id.id));
+    let clean_top = match first_known {
+        Some(i) => head.tracks[i..].iter().all(|t| known.contains(&t.id.id)),
+        None => head.complete,
+    };
+    if total as usize != known.len() + new.len() || !clean_top {
+        return HeadVerdict::Full;
+    }
+    if new.is_empty() {
+        HeadVerdict::Same
+    } else {
+        HeadVerdict::New(new)
+    }
+}
+
+impl Worker {
+    /// From the tick: each logged-in service whose check is due (as soon as
+    /// its login is up: the Spotify login is restored in the background).
+    pub(crate) fn likes_tick(&mut self) {
+        let now = Instant::now();
+        for &s in Service::ALL {
+            let due = self
+                .streaming
+                .likes
+                .get(&s)
+                .is_none_or(|l| !l.pulling && l.next_at.is_none_or(|at| now >= at));
+            if due {
+                self.pull_likes(s);
+            }
+        }
+    }
+
+    /// Window focus, a playback start: a check older than
+    /// [`super::StreamSchedule::likes_fresh`] runs now.
+    pub(crate) fn likes_if_stale(&mut self) {
+        let fresh = self.streaming.schedule.likes_fresh;
+        for &s in Service::ALL {
+            let stale = self
+                .streaming
+                .likes
+                .get(&s)
+                .is_some_and(|l| {
+                    // A rate-limited check already has its retry set.
+                    !l.pulling && l.limited == 0 && l.last.is_some_and(|t| t.elapsed() >= fresh)
+                });
+            if stale {
+                self.pull_likes(s);
+            }
+        }
+    }
+
+    /// Checks a service's likes now: its head, or the whole list when that
+    /// is due (first pull, once a day).
+    pub(crate) fn pull_likes(&mut self, service: Service) {
+        let Some(svc) = self.service(service) else { return };
+        if svc.catalogue_only() || !svc.account().is_logged_in() {
+            return;
+        }
+        let every = self.streaming.schedule.jittered(self.streaming.schedule.likes_every);
+        let full_every = self.streaming.schedule.likes_full_every;
+        let l = self.streaming.likes.entry(service).or_default();
+        if l.pulling {
+            return;
+        }
+        l.pulling = true;
+        l.last = Some(Instant::now());
+        l.next_at = Some(Instant::now() + every);
+        let first = !self.lib.likes_pulled(service).unwrap_or(true);
+        let now = nikgob_library::now_ms();
+        let full_due = self
+            .lib
+            .cache_get(&full_key(service))
+            .ok()
+            .flatten()
+            .is_none_or(|(at, _)| now - at >= full_every.as_millis() as i64);
+        if first || full_due {
+            log::debug!("{service}: reading the whole liked list");
+            self.streaming
+                .spawn(async move { Msg::LikesPulled(service, svc.liked().await) });
+        } else {
+            self.streaming
+                .spawn(async move { Msg::LikesHead(service, svc.liked_head().await) });
+        }
+    }
+
+    pub(crate) fn likes_head(&mut self, service: Service, r: Result<LikedHead, StreamError>) {
+        let head = match r {
+            Ok(h) => h,
+            Err(e) => {
+                log::warn!("{service}: checking likes: {e}");
+                self.likes_failed(service, &e);
+                return;
+            }
+        };
+        self.streaming.likes.entry(service).or_default().limited = 0;
+        if head.complete {
+            self.likes_pulled(service, Ok(head.tracks));
+            return;
+        }
+        let known: HashSet<String> = self
+            .lib
+            .remote_likes(service)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|k| k.remote.id)
+            .collect();
+        match judge_head(&head, &known) {
+            HeadVerdict::Same => {
+                log::debug!("{service}: likes unchanged ({} known)", known.len());
+                self.streaming.likes.entry(service).or_default().pulling = false;
+            }
+            HeadVerdict::New(new) => {
+                self.streaming.likes.entry(service).or_default().pulling = false;
+                self.take_likes(service, new, true);
+            }
+            HeadVerdict::Full => {
+                log::debug!("{service}: likes changed beyond their first page: reading them all");
+                let Some(svc) = self.service(service) else {
+                    self.streaming.likes.entry(service).or_default().pulling = false;
+                    return;
+                };
+                self.streaming
+                    .spawn(async move { Msg::LikesPulled(service, svc.liked().await) });
+            }
+        }
+    }
+
+    pub(crate) fn likes_pulled(&mut self, service: Service, r: Result<Vec<StreamTrack>, StreamError>) {
+        let liked = match r {
+            Ok(l) => l,
+            Err(e) => {
+                log::warn!("{service}: pulling likes: {e}");
+                self.likes_failed(service, &e);
+                return;
+            }
+        };
+        let l = self.streaming.likes.entry(service).or_default();
+        l.pulling = false;
+        l.limited = 0;
+        let now = nikgob_library::now_ms();
+        let _ = self.lib.cache_put(&full_key(service), now, "");
+        // A list cut at the service's cap says nothing about what is gone.
+        let capped = self.service(service).is_some_and(|s| s.liked_partial());
+        self.take_likes(service, liked, capped);
+    }
+
+    /// Stores a pull's likes; a few new YouTube clips first ask for their
+    /// songs (see [`super::clips`]).
+    fn take_likes(&mut self, service: Service, liked: Vec<StreamTrack>, partial: bool) {
+        let videos = self.videos_to_convert(service, &liked);
+        if videos.is_empty() {
+            self.apply_remote_likes(service, &liked, false, partial);
+        } else {
+            self.convert_then_apply(service, liked, videos, partial);
+        }
+    }
+
+    /// A check failed. A rate limit tries again when the service's pause
+    /// ends, then after 2× and 4× it (so the first likes after a login come
+    /// within a minute or two even under 429s), then at the normal
+    /// interval; anything else waits for the normal interval.
+    fn likes_failed(&mut self, service: Service, e: &StreamError) {
+        let pause = match e {
+            StreamError::RateLimited { retry_after } => Some(retry_after.or_else(|| self.pause_left(service))),
+            _ => None,
+        };
+        let schedule = self.streaming.schedule.clone();
+        let l = self.streaming.likes.entry(service).or_default();
+        l.pulling = false;
+        let Some(pause) = pause else {
+            l.limited = 0;
+            return;
+        };
+        l.limited += 1;
+        match schedule.rate_limit_retry(pause, l.limited) {
+            Some(after) => {
+                log::info!(
+                    "{service}: checking likes again in {} s (rate limit {} of {})",
+                    after.as_secs(),
+                    l.limited,
+                    super::schedule::RATE_LIMIT_RETRIES
+                );
+                l.next_at = Some(Instant::now() + after);
+            }
+            None => {
+                log::info!("{service}: likes still rate limited: next check at the usual time");
+                l.limited = 0;
+            }
+        }
+    }
+
+    /// Brings the service's liked list in (see the module docs). New likes
+    /// wait in the wishlist on the first pull; with `import` (the API
+    /// import of part B, which never touches the wishlist) they are likes
+    /// alone. With `partial`, `liked` is only the news (nothing is gone).
+    /// Returns how many likes are new here.
+    pub(crate) fn apply_remote_likes(
+        &mut self,
+        service: Service,
+        liked: &[StreamTrack],
+        import: bool,
+        partial: bool,
+    ) -> usize {
+        self.apply_remote_likes_with(service, liked, import, partial, &super::clips::Songs::new())
+    }
+
+    /// [`Self::apply_remote_likes`] storing each liked clip in `songs` as
+    /// its song (see [`super::clips`]).
+    pub(crate) fn apply_remote_likes_with(
+        &mut self,
+        service: Service,
+        liked: &[StreamTrack],
+        import: bool,
+        partial: bool,
+        songs: &super::clips::Songs,
+    ) -> usize {
+        let first = !self.lib.likes_pulled(service).unwrap_or(true);
+        let known = self.lib.remote_likes(service).unwrap_or_default();
+        let known_ids: HashSet<&str> = known.iter().map(|k| k.remote.id.as_str()).collect();
+        let now = nikgob_library::now_ms();
+        let origin = if first {
+            WishlistOrigin::Import
+        } else {
+            WishlistOrigin::Sync
+        };
+        // Oldest first, so "Любимые" keeps the service's order (newest on top).
+        let mut seen = HashSet::new();
+        // A like change sent from here a moment ago wins over a list that
+        // does not show it yet (see `replace`): an id unliked here is no
+        // news, an id liked here is not gone.
+        let echo = &self.streaming.replace;
+        let adds: Vec<StreamTrack> = liked
+            .iter()
+            .rev()
+            .filter(|t| !known_ids.contains(t.id.id.as_str()) && seen.insert(t.id.id.as_str()))
+            .filter(|t| echo.echo(&t.id) != Some(false))
+            .cloned()
+            .collect();
+        // Gone from the service: the like goes only if it came from there.
+        let gone: Vec<RemoteLike> = if partial {
+            Vec::new()
+        } else {
+            let there: HashSet<&str> = liked.iter().map(|t| t.id.id.as_str()).collect();
+            known
+                .iter()
+                .filter(|k| !there.contains(k.remote.id.as_str()) && echo.echo(&k.remote) != Some(true))
+                .cloned()
+                .collect()
+        };
+        let (new, unliked) = if adds.is_empty() && gone.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            self.log_err("лайки", self.lib.take_remote_likes_with(&adds, songs, &gone, now))
+                .unwrap_or_default()
+        };
+        for &t in new.iter().filter(|_| !import) {
+            self.wish_for_like(t, origin);
+        }
+        for &t in &unliked {
+            self.wish_drop_unstarted(t);
+        }
+        if first {
+            let _ = self.lib.set_likes_pulled(service, now);
+            // The first pull is an import the user did not ask for: say what
+            // came and where it waits (an API import says it in its summary).
+            if !import && !new.is_empty() {
+                self.first_likes_toast(service, new.len());
+            }
+        }
+        let changed = new.len() + unliked.len();
+        log::info!(
+            "{service}: {} liked{}, {changed} changes here",
+            liked.len(),
+            if partial { " (new ones)" } else { "" }
+        );
+        if changed > 0 {
+            self.after_like_change(crate::Held::Tracks(None), Vec::new());
+            self.publish_wishlist();
+            self.wish_tick();
+        }
+        new.len()
+    }
+
+    /// «Spotify: 312 лайков теперь в Любимых · ждут скачивания» with the way
+    /// to «Хочу скачать».
+    fn first_likes_toast(&mut self, service: Service, n: usize) {
+        let likes = if n % 10 == 1 && n % 100 != 11 {
+            "лайк"
+        } else if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) {
+            "лайка"
+        } else {
+            "лайков"
+        };
+        let head = format!("{}: {n} {likes} теперь в Любимых", service.display_name());
+        if self.state.read().prefs.like_downloads {
+            self.toast_open(
+                format!("{head} · ждут скачивания"),
+                "Открыть",
+                nikgob_view::Link::Route(nikgob_view::Route::Downloads(nikgob_view::DownloadsTab::Wishlist)),
+            );
+        } else {
+            self.toast(head, None);
+        }
+    }
+
+    /// The ids of `track` a like / unlike goes to: one per service. An
+    /// unlike goes to what the service likes (a liked clip that is a song
+    /// here is unliked as the clip); a like to the id that plays (the
+    /// song, not its clip), else the first known.
+    fn like_targets(&self, track: TrackId, on: bool) -> Vec<RemoteId> {
+        let mut remotes = self
+            .lib
+            .external_ids(nikgob_core::streaming::EntityKind::Track, *track.as_uuid())
+            .unwrap_or_default();
+        let liked_there = if on { Vec::new() } else { self.lib.remote_likes_of(track).unwrap_or_default() };
+        let mut sources = self.lib.sources_of_track(track).unwrap_or_default();
+        sources.retain(|s| s.available && s.trashed_at.is_none());
+        sources.sort_by_key(|s| std::cmp::Reverse(s.quality_score));
+        // Best first: liked there, then what plays, then the rest.
+        remotes.sort_by_key(|r| {
+            let liked = liked_there.iter().any(|l| l.remote == *r);
+            let plays = sources.iter().position(|s| s.kind.service() == Some(r.service) && s.locator == r.id);
+            (!liked, plays.unwrap_or(usize::MAX))
+        });
+        let mut out: Vec<RemoteId> = Vec::new();
+        for r in remotes {
+            let first = !out.iter().any(|o| o.service == r.service);
+            // Every like there is taken back; else one id per service.
+            if first || liked_there.iter().any(|l| l.remote == r) {
+                out.push(r);
+            }
+        }
+        out
+    }
+
+    /// Queues a like / unlike of a library track for its services (sent
+    /// together a moment later, see the module docs).
+    pub(crate) fn push_like(&mut self, track: TrackId, on: bool) {
+        if !self.state.read().prefs.push_likes {
+            return;
+        }
+        let remotes = self.like_targets(track, on);
+        let now = nikgob_library::now_ms();
+        for remote in remotes {
+            let Some(svc) = self.service(remote.service) else { continue };
+            // A catalogue (Deezer) keeps no likes: they stay here.
+            if svc.catalogue_only() || !svc.account().is_logged_in() {
+                continue;
+            }
+            // Recorded now, so the next pull sees it as known, not as news.
+            if on {
+                let _ = self.lib.put_remote_like(&RemoteLike {
+                    remote: remote.clone(),
+                    track_id: track,
+                    pulled: false,
+                    seen_at: now,
+                });
+            } else {
+                let _ = self.lib.delete_remote_like(&remote);
+            }
+            self.queue_remote_like(remote, on);
+        }
+    }
+
+    /// Queues `remote` → `on` for its service, unless that service keeps
+    /// no likes or is not logged in; the flush follows a moment later.
+    pub(crate) fn push_like_remote(&mut self, remote: RemoteId, on: bool) {
+        let Some(svc) = self.service(remote.service) else { return };
+        if svc.catalogue_only() || !svc.account().is_logged_in() {
+            return;
+        }
+        self.queue_remote_like(remote, on);
+    }
+
+    fn queue_remote_like(&mut self, remote: RemoteId, on: bool) {
+        let service = remote.service;
+        if self.streaming.like_queue.push(remote, on) {
+            let wait = self.streaming.schedule.like_wait();
+            self.streaming.spawn(async move {
+                tokio::time::sleep(wait).await;
+                Msg::LikeFlush(service)
+            });
+        }
+    }
+
+    /// Sends what waits in the queue of `service`: one call per direction.
+    pub(crate) fn flush_likes(&mut self, service: Service) {
+        let queued = self.streaming.like_queue.take(service);
+        if queued.is_empty() {
+            return;
+        }
+        let Some(svc) = self.service(service) else { return };
+        for on in [true, false] {
+            let remotes: Vec<RemoteId> = queued
+                .iter()
+                .filter(|(_, o)| *o == on)
+                .map(|(r, _)| r.clone())
+                .collect();
+            if remotes.is_empty() {
+                continue;
+            }
+            let ids: Vec<String> = remotes.iter().map(|r| r.id.clone()).collect();
+            let svc = svc.clone();
+            log::debug!("{service}: sending {} {}", ids.len(), if on { "likes" } else { "unlikes" });
+            self.streaming.spawn(async move {
+                let result = svc.set_liked_many(&ids, on).await;
+                Msg::LikesPushed {
+                    service,
+                    remotes,
+                    on,
+                    result,
+                }
+            });
+        }
+    }
+
+    pub(crate) fn likes_pushed(
+        &mut self,
+        service: Service,
+        remotes: &[RemoteId],
+        on: bool,
+        r: Result<(), StreamError>,
+    ) {
+        if let Err(e) = r {
+            log::warn!("{service}: set_liked_many({on}, {}): {e}", remotes.len());
+            if on {
+                for remote in remotes {
+                    let _ = self.lib.delete_remote_like(remote);
+                }
+            }
+            self.toast(
+                format!(
+                    "Не получилось {} лайк в {}",
+                    if on { "поставить" } else { "снять" },
+                    service.display_name()
+                ),
+                None,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nikgob_core::streaming::StreamTrack;
+
+    fn t(id: &str) -> StreamTrack {
+        StreamTrack::new(RemoteId::new(Service::Spotify, id), id)
+    }
+
+    fn known(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn head(ids: &[&str], total: u32) -> LikedHead {
+        LikedHead {
+            tracks: ids.iter().map(|i| t(i)).collect(),
+            total: Some(total),
+            complete: false,
+        }
+    }
+
+    #[test]
+    fn a_head_tells_same_new_or_read_everything() {
+        let k = known(&["a", "b", "c", "d"]);
+        assert_eq!(judge_head(&head(&["a", "b"], 4), &k), HeadVerdict::Same);
+        let HeadVerdict::New(n) = judge_head(&head(&["x", "a", "b"], 5), &k) else { panic!() };
+        assert_eq!(n.len(), 1);
+        // An unlike: the count is short.
+        assert_eq!(judge_head(&head(&["a", "b"], 3), &k), HeadVerdict::Full);
+        // One like and one unlike: the count matches the known list, but
+        // there is news: everything is read.
+        assert_eq!(judge_head(&head(&["x", "a"], 4), &k), HeadVerdict::Full);
+        // News below a known track (re-liked older song): everything.
+        assert_eq!(judge_head(&head(&["a", "x", "b"], 5), &k), HeadVerdict::Full);
+        // A whole page of news: more may follow.
+        assert_eq!(judge_head(&head(&["x", "y"], 6), &k), HeadVerdict::Full);
+    }
+
+    #[test]
+    fn a_like_and_its_unlike_cancel_out() {
+        let mut q = LikeQueue::default();
+        let r = RemoteId::new(Service::Spotify, "a");
+        assert!(q.push(r.clone(), true), "first in the queue: arm a flush");
+        assert!(!q.push(RemoteId::new(Service::Spotify, "b"), true));
+        assert!(!q.push(r.clone(), false), "cancelled");
+        assert_eq!(q.take(Service::Spotify), vec![(RemoteId::new(Service::Spotify, "b"), true)]);
+        assert!(q.push(r, true), "armed again after a flush");
+    }
+}

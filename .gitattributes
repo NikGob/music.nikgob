@@ -1,0 +1,6 @@
+# Run inside Linux (WSL included) from a Windows checkout: keep LF.
+*.sh text eol=lf
+*.nix text eol=lf
+flake.lock text eol=lf
+PKGBUILD text eol=lf
+*.desktop text eol=lf

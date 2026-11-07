@@ -36,6 +36,17 @@ pub enum Act {
     Replace,
     Visualizer,
     Trash,
+    /// A song.link of the track into the clipboard.
+    Share,
+    /// «Найти песню…» for a clip, «Другая версия…» for another stream
+    /// that plays from YouTube (only shown then).
+    FindSong,
+    /// «Радио по треку»: an endless queue grown from the track.
+    Radio,
+    /// «Не нравится» (or its undo).
+    Dislike,
+    /// «Не рекомендовать исполнителя» (or its undo) of the main artist.
+    BanArtist,
     /// A divider.
     Sep,
 }
@@ -85,6 +96,8 @@ struct Volume {
     dragging: bool,
     /// The value we just sent, shown until the runtime state catches up.
     shadow: Option<(f32, f64)>,
+    /// What a held slider sent last and the state revision it saw then.
+    pushed: Option<(f32, u64)>,
     /// Wheel zones and the rects inside them that scroll instead, as drawn
     /// last frame (`zones`) and this frame (`next_*`).
     zones: Vec<(Rect, WheelZone)>,
@@ -117,6 +130,8 @@ pub struct Chrome {
     pub nav: Option<Route>,
     /// Show this tab in the shell's pane.
     pub open_pane: Option<PaneTab>,
+    /// Open Settings at this row (it also closes Now Playing).
+    pub setting: Option<super::pages::SettingId>,
     pub tag: TagEditorUi,
     picker: Option<Picker>,
     ask: Option<Ask>,
@@ -150,28 +165,35 @@ impl Chrome {
 
     fn item(act: Act, t: &TrackRow, state: &ViewState) -> MenuItem {
         match act {
-            Act::Like => MenuItem::new(if t.liked { "Убрать из любимых" } else { "В любимые" })
+            Act::Like => MenuItem::new(if t.liked { "Убрать из любимого" } else { "В любимое" })
                 .icon(Icon::Favorite)
                 .shortcut("Ctrl+L"),
             Act::Lyrics => MenuItem::new("Текст песни").icon(Icon::Lyrics),
             Act::Volume => MenuItem::new("Громкость…")
                 .icon(Icon::volume(state.player.volume, state.player.muted)),
             Act::Playlist => MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd),
+            Act::Radio => MenuItem::new(super::pages::RADIO_BY_TRACK).icon(Icon::Radio),
+            Act::Dislike => super::pages::dislike_item(state.dislikes.track(t.id)),
+            Act::BanArtist => super::pages::ban_item(t.artist_id(), &state.dislikes),
             Act::Artist => MenuItem::new("К исполнителю")
                 .icon(Icon::Person)
-                .enabled(t.artist_id.is_some()),
+                .enabled(!t.artists.linked().is_empty()),
             Act::Album => MenuItem::new("К альбому")
                 .icon(Icon::Album)
                 .enabled(t.release_id.is_some()),
             Act::Info => MenuItem::new("Источник и качество").icon(Icon::Info),
-            Act::Tags => MenuItem::new("Редактировать теги…").icon(Icon::Edit),
-            Act::Replace => {
-                MenuItem::new("Заменить на лучшее качество…").icon(Icon::CloudDownload)
-            }
+            // A stream has no file: no tags to edit; «Скачать» instead of a
+            // better copy.
+            Act::Tags => MenuItem::new("Редактировать теги…").icon(Icon::Edit).enabled(t.has_local),
+            Act::Replace if t.has_local => MenuItem::new("Найти качество лучше…").icon(Icon::Search),
+            Act::Replace => MenuItem::new("Скачать").icon(Icon::Download),
             Act::Visualizer => MenuItem::new("Визуализатор")
                 .icon(Icon::GraphicEq)
                 .shortcut("F12"),
-            Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete),
+            // Only what is in the library (a file, or a like) can leave it.
+            Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete).enabled(t.has_local || t.liked),
+            Act::Share => MenuItem::new("Поделиться").icon(Icon::Share),
+            Act::FindSong => MenuItem::new(super::find_song::label(t).unwrap_or("Найти песню…")).icon(Icon::MusicNote),
             Act::Sep => MenuItem::new(""),
         }
     }
@@ -190,16 +212,41 @@ impl Chrome {
     ) {
         let mut menu = Menu::new(("md3e-track-menu", salt)).align_right(true);
         let mut picks = Vec::new();
-        for &a in acts {
+        // A stream has no file to tag, and only what is in the library (a
+        // file, or a like) can leave it: those items are left out, with a
+        // divider that would end the menu or follow another.
+        let shown: Vec<Act> = acts
+            .iter()
+            .copied()
+            .filter(|&a| match a {
+                Act::Tags => track.has_local,
+                Act::Trash => track.has_local || track.liked,
+                Act::FindSong => super::find_song::label(track).is_some(),
+                _ => true,
+            })
+            .collect();
+        for (i, &a) in shown.iter().enumerate() {
             if a == Act::Sep {
-                menu = menu.divider();
+                let next = shown.get(i + 1).is_some_and(|&n| n != Act::Sep);
+                if next && i > 0 {
+                    menu = menu.divider();
+                }
             } else {
                 menu = menu.item(Self::item(a, track, state));
                 picks.push(a);
             }
         }
         if let Some(i) = menu.attach(anchor) {
-            self.apply(picks[i], track, anchor.rect, wh, out);
+            if picks[i] == Act::Artist {
+                // Several artists: which one.
+                self.nav = super::artist_links::go_to(&anchor.ctx, super::artist_links::library(&track.artists));
+            } else if picks[i] == Act::Dislike {
+                out.push(super::pages::dislike_command(track.id, &state.dislikes));
+            } else if picks[i] == Act::BanArtist {
+                out.extend(track.artist_id().map(|a| super::pages::ban_command(a, &state.dislikes)));
+            } else {
+                self.apply(picks[i], track, anchor.rect, wh, out);
+            }
         }
     }
 
@@ -224,13 +271,19 @@ impl Chrome {
             Act::Playlist => {
                 self.picker = Some(Picker { tracks: vec![t.id], anchor });
             }
-            Act::Artist => self.nav = t.artist_id.map(Route::Artist),
+            Act::Artist => self.nav = t.artist_id().map(Route::Artist),
             Act::Album => self.nav = t.release_id.map(Route::Release),
             Act::Tags => out.push(Command::OpenTagEditor(t.id)),
-            Act::Replace => out.push(Command::SearchTorrents(replace_query(t))),
+            Act::Replace if t.has_local => out.push(Command::SearchTorrents(replace_query(t))),
+            Act::Replace => out.push(Command::DownloadTracks(vec![t.id])),
             Act::Visualizer => self.visualizer = true,
             Act::Trash => self.trash = Some((t.id, t.title.clone())),
-            Act::Sep => {}
+            Act::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),
+            Act::FindSong => out.push(Command::FindSong { track: t.id, query: None }),
+            Act::Radio => out.push(super::pages::radio_by_track(t.id)),
+            // Handled where the marks are known.
+            Act::Dislike | Act::BanArtist | Act::Sep => {}
+
         }
     }
 
@@ -360,6 +413,18 @@ impl Chrome {
     fn send_volume(&mut self, ctx: &Context, v: f32, out: &mut Vec<Command>) {
         let v = v.clamp(0.0, 1.0);
         self.vol.shadow = Some((v, anim::now(ctx)));
+        out.push(Command::SetVolume(v));
+    }
+
+    /// Sends the volume of a held slider, which reports its value every
+    /// frame: only a value the runtime does not have or was not just sent.
+    pub fn push_volume(&mut self, state: &ViewState, v: f32, out: &mut Vec<Command>) {
+        let p = &state.player;
+        let known = v == p.volume || self.vol.pushed == Some((v, state.revision));
+        if known && !p.muted {
+            return;
+        }
+        self.vol.pushed = Some((v, state.revision));
         out.push(Command::SetVolume(v));
     }
 
@@ -498,12 +563,16 @@ impl Chrome {
             return;
         };
 
+        // Over the bar's own sound button the pill needs no mute button of
+        // its own: that one right below already mutes.
+        let own_mute = self.vol.pinned.is_some() || anchor != self.vol.button;
+        let size = if own_mute { POPOVER } else { POPOVER - vec2(0.0, 36.0) };
         let screen = ctx.content_rect().shrink(8.0);
-        let x = (a.center().x - POPOVER.x * 0.5)
-            .clamp(screen.left(), (screen.right() - POPOVER.x).max(screen.left()));
-        let above = a.top() - 8.0 - POPOVER.y;
+        let x = (a.center().x - size.x * 0.5)
+            .clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
+        let above = a.top() - 8.0 - size.y;
         let y = if above >= screen.top() { above } else { a.bottom() + 8.0 };
-        let rect = Rect::from_min_size(pos2(x, y + (1.0 - alpha) * 8.0), POPOVER);
+        let rect = Rect::from_min_size(pos2(x, y + (1.0 - alpha) * 8.0), size);
         self.vol.popover = Some(rect);
 
         let volume = if state.player.muted { 0.0 } else { self.volume_now(ctx, state) };
@@ -518,7 +587,7 @@ impl Chrome {
             .interactable(true)
             .show(ctx, |ui| {
                 ui.set_opacity(alpha);
-                let (r, _) = ui.allocate_exact_size(POPOVER, Sense::hover());
+                let (r, _) = ui.allocate_exact_size(size, Sense::hover());
                 let radii = Radii::all(shape::EXTRA_LARGE);
                 paint::shadow(ui.painter(), r, radii, Elevation::Level2);
                 paint::container(ui.painter(), r, radii, s.surface_container_high, Stroke::NONE);
@@ -538,7 +607,7 @@ impl Chrome {
 
                 let track = Rect::from_min_max(
                     pos2(r.center().x - 18.0, r.top() + 34.0),
-                    pos2(r.center().x + 18.0, r.bottom() - 50.0),
+                    pos2(r.center().x + 18.0, r.bottom() - if own_mute { 50.0 } else { 14.0 }),
                 );
                 let resp = ui.interact(track, Id::new("md3e-volume-slider"), Sense::click_and_drag());
                 dragging = resp.dragged();
@@ -549,6 +618,9 @@ impl Chrome {
                 }
                 paint_vslider(ui, track, new_value.unwrap_or(volume), dragging);
 
+                if !own_mute {
+                    return;
+                }
                 let btn = Rect::from_center_size(pos2(r.center().x, r.bottom() - 25.0), vec2(40.0, 40.0));
                 let mute = ui
                     .scope_builder(UiBuilder::new().max_rect(btn), |ui| {

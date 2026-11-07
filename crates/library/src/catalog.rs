@@ -2,16 +2,17 @@
 
 use nikgob_core::model::{
     Artist, ArtistCredit, ArtistId, Codec, Release, ReleaseId, Source, SourceId, SourceOrigin,
-    Track, TrackId,
+    Track, TrackId, UnixMs,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::db::Library;
 use crate::error::{LibraryError, Result};
 use crate::types::{
-    ArtistRow, ArtistSort, ArtistSortKey, ReleaseProgress, ReleaseRow, ReleaseSort, ReleaseSortKey,
+    ArtistRow, ArtistSort, ArtistSortKey, ReleaseListing, ReleaseProgress, ReleaseRow, ReleaseSort, ReleaseSortKey,
     TrackFilter, TrackRow, TrackSort, TrackSortKey,
 };
+use crate::streams::refresh_in_library;
 use crate::util::{
     credit_columns, get_enum, get_id, get_json, get_opt_enum, get_opt_id, now_ms, opt_u32, sort_key,
 };
@@ -25,7 +26,7 @@ pub(crate) fn track_row(row: &Row<'_>) -> rusqlite::Result<TrackRow> {
     track_row_at(row, 0)
 }
 
-/// Maps the 15 columns of `track_row_cols!()` starting at column `base`.
+/// Maps the 17 columns of `track_row_cols!()` starting at column `base`.
 pub(crate) fn track_row_at(row: &Row<'_>, base: usize) -> rusqlite::Result<TrackRow> {
     Ok(TrackRow {
         id: get_id(row, base)?,
@@ -44,7 +45,11 @@ pub(crate) fn track_row_at(row: &Row<'_>, base: usize) -> rusqlite::Result<Track
         active_kind: get_opt_enum(row, base + 11)?,
         has_local: row.get(base + 12)?,
         liked: row.get(base + 13)?,
-        artist_id: get_opt_id(row, base + 14)?,
+        credit: get_json(row, base + 14)?,
+        youtube_id: row.get(base + 15)?,
+        check: row
+            .get::<_, Option<String>>(base + 16)?
+            .and_then(|c| nikgob_core::quality::CheckSummary::decode(&c)),
     })
 }
 
@@ -79,10 +84,10 @@ fn release_from_row(row: &Row<'_>) -> rusqlite::Result<Release> {
     })
 }
 
-const TRACK_COLS: &str = "id, recording_mbid, isrc, acoustid, title, artist_credit, release_id, \
+pub(crate) const TRACK_COLS: &str = "id, recording_mbid, isrc, acoustid, title, artist_credit, release_id, \
                           disc_no, track_no, duration_ms, added_at";
 
-fn track_from_row(row: &Row<'_>) -> rusqlite::Result<Track> {
+pub(crate) fn track_from_row(row: &Row<'_>) -> rusqlite::Result<Track> {
     Ok(Track {
         id: get_id(row, 0)?,
         recording_mbid: row.get(1)?,
@@ -147,41 +152,29 @@ pub(crate) fn origin_columns(origin: &SourceOrigin) -> (&'static str, Option<&st
 
 fn artist_by_id(conn: &Connection, id: ArtistId) -> Result<Option<Artist>> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {ARTIST_COLS} FROM artist WHERE id = ?1"),
-            [id.to_string()],
-            artist_from_row,
-        )
+        .prepare_cached(&format!("SELECT {ARTIST_COLS} FROM artist WHERE id = ?1"))?
+        .query_row([id.to_string()], artist_from_row)
         .optional()?)
 }
 
 fn release_by_id(conn: &Connection, id: ReleaseId) -> Result<Option<Release>> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {RELEASE_COLS} FROM release WHERE id = ?1"),
-            [id.to_string()],
-            release_from_row,
-        )
+        .prepare_cached(&format!("SELECT {RELEASE_COLS} FROM release WHERE id = ?1"))?
+        .query_row([id.to_string()], release_from_row)
         .optional()?)
 }
 
 fn track_by_id(conn: &Connection, id: TrackId) -> Result<Option<Track>> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {TRACK_COLS} FROM track WHERE id = ?1"),
-            [id.to_string()],
-            track_from_row,
-        )
+        .prepare_cached(&format!("SELECT {TRACK_COLS} FROM track WHERE id = ?1"))?
+        .query_row([id.to_string()], track_from_row)
         .optional()?)
 }
 
 pub(crate) fn source_by_id(conn: &Connection, id: SourceId) -> Result<Option<Source>> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {SOURCE_COLS} FROM source WHERE id = ?1"),
-            [id.to_string()],
-            source_from_row,
-        )
+        .prepare_cached(&format!("SELECT {SOURCE_COLS} FROM source WHERE id = ?1"))?
+        .query_row([id.to_string()], source_from_row)
         .optional()?)
 }
 
@@ -197,7 +190,7 @@ fn parse_id<T: std::str::FromStr>(s: &str) -> Result<T> {
     s.parse().map_err(|_| LibraryError::Invalid(s.to_owned()))
 }
 
-fn write_credit_links(
+pub(crate) fn write_credit_links(
     conn: &Connection,
     table: &str,
     owner_col: &str,
@@ -264,6 +257,472 @@ pub(crate) fn refresh_active(conn: &Connection, track: TrackId) -> Result<Option
     best.map(|b| parse_id(&b.0)).transpose()
 }
 
+/// [`Library::upsert_artist`] inside an open write transaction.
+pub(crate) fn upsert_artist_in(tx: &Connection, artist: &Artist) -> Result<Artist> {
+    let mut found = first_string(
+        tx,
+        "SELECT id FROM artist WHERE id = ?1",
+        [artist.id.to_string()],
+    )?;
+    if found.is_none()
+        && let Some(mbid) = &artist.mbid
+    {
+        found = first_string(tx, "SELECT id FROM artist WHERE mbid = ?1", [mbid])?;
+    }
+    let sort_name = if artist.sort_name.trim().is_empty() {
+        &artist.name
+    } else {
+        &artist.sort_name
+    };
+    let key = sort_key(sort_name);
+    let images = serde_json::to_string(&artist.images)?;
+    let id = match found {
+        Some(id) => {
+            tx.execute(
+                "UPDATE artist SET mbid = coalesce(?2, mbid), name = ?3, sort_name = ?4,
+                        sort_key = ?5,
+                        images = CASE WHEN ?6 = '[]' THEN images ELSE ?6 END
+                  WHERE id = ?1",
+                params![id, artist.mbid, artist.name, sort_name, key, images],
+            )?;
+            id
+        }
+        None => {
+            let added = if artist.added_at == 0 {
+                now_ms()
+            } else {
+                artist.added_at
+            };
+            let id = artist.id.to_string();
+            tx.execute(
+                "INSERT INTO artist(id, mbid, name, sort_name, sort_key, images, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, artist.mbid, artist.name, sort_name, key, images, added],
+            )?;
+            id
+        }
+    };
+    let id: ArtistId = parse_id(&id)?;
+    artist_by_id(tx, id)?.ok_or_else(|| LibraryError::not_found("artist", id))
+}
+
+/// [`Library::upsert_release`] inside an open write transaction.
+pub(crate) fn upsert_release_in(tx: &Connection, release: &Release) -> Result<Release> {
+    let mut found = first_string(
+        tx,
+        "SELECT id FROM release WHERE id = ?1",
+        [release.id.to_string()],
+    )?;
+    if found.is_none()
+        && let Some(mbid) = &release.mbid
+    {
+        found = first_string(tx, "SELECT id FROM release WHERE mbid = ?1", [mbid])?;
+    }
+    let (credit_json, display, artist_key) = credit_columns(&release.artist_credit)?;
+    let title_key = sort_key(&release.title);
+    let kind = release.release_type.as_str();
+    let id = match found {
+        Some(id) => {
+            tx.execute(
+                "UPDATE release SET mbid = coalesce(?2, mbid),
+                        release_group_mbid = coalesce(?3, release_group_mbid),
+                        title = ?4, title_key = ?5, artist_credit = ?6,
+                        artist_display = ?7, artist_key = ?8,
+                        year = coalesce(?9, year), release_type = ?10,
+                        cover_ref = coalesce(?11, cover_ref),
+                        total_tracks = coalesce(?12, total_tracks)
+                  WHERE id = ?1",
+                params![
+                    id,
+                    release.mbid,
+                    release.release_group_mbid,
+                    release.title,
+                    title_key,
+                    credit_json,
+                    display,
+                    artist_key,
+                    release.year,
+                    kind,
+                    release.cover_ref,
+                    release.total_tracks
+                ],
+            )?;
+            id
+        }
+        None => {
+            let added = if release.added_at == 0 {
+                now_ms()
+            } else {
+                release.added_at
+            };
+            let id = release.id.to_string();
+            tx.execute(
+                "INSERT INTO release(id, mbid, release_group_mbid, title, title_key,
+                        artist_credit, artist_display, artist_key, year, release_type,
+                        cover_ref, total_tracks, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    id,
+                    release.mbid,
+                    release.release_group_mbid,
+                    release.title,
+                    title_key,
+                    credit_json,
+                    display,
+                    artist_key,
+                    release.year,
+                    kind,
+                    release.cover_ref,
+                    release.total_tracks,
+                    added
+                ],
+            )?;
+            id
+        }
+    };
+    write_credit_links(
+        tx,
+        "release_artist",
+        "release_id",
+        &id,
+        &release.artist_credit,
+    )?;
+    tx.execute(
+        "UPDATE track SET album_key = ?2 WHERE release_id = ?1 AND album_key != ?2",
+        params![id, title_key],
+    )?;
+    let id: ReleaseId = parse_id(&id)?;
+    release_by_id(tx, id)?.ok_or_else(|| LibraryError::not_found("release", id))
+}
+
+/// [`Library::upsert_track`] inside an open write transaction.
+pub(crate) fn upsert_track_in(tx: &Connection, track: &Track) -> Result<Track> {
+    let release_id = track.release_id.map(|r| r.to_string());
+    let mut found = first_string(
+        tx,
+        "SELECT id FROM track WHERE id = ?1",
+        [track.id.to_string()],
+    )?;
+    if found.is_none()
+        && let Some(mbid) = &track.recording_mbid
+    {
+        found = first_string(
+            tx,
+            "SELECT id FROM track WHERE recording_mbid = ?1 AND release_id IS ?2",
+            params![mbid, release_id],
+        )?;
+    }
+    let (credit_json, display, artist_key) = credit_columns(&track.artist_credit)?;
+    let title_key = sort_key(&track.title);
+    let album_key: String = match &release_id {
+        Some(r) => first_string(tx, "SELECT title_key FROM release WHERE id = ?1", [r])?
+            .ok_or_else(|| LibraryError::not_found("release", r))?,
+        None => String::new(),
+    };
+    let id = match found {
+        Some(id) => {
+            tx.execute(
+                "UPDATE track SET recording_mbid = coalesce(?2, recording_mbid),
+                        isrc = coalesce(?3, isrc), acoustid = coalesce(?4, acoustid),
+                        title = ?5, title_key = ?6, artist_credit = ?7,
+                        artist_display = ?8, artist_key = ?9, release_id = ?10,
+                        album_key = ?11, disc_no = ?12, track_no = ?13,
+                        duration_ms = coalesce(?14, duration_ms)
+                  WHERE id = ?1",
+                params![
+                    id,
+                    track.recording_mbid,
+                    track.isrc,
+                    track.acoustid,
+                    track.title,
+                    title_key,
+                    credit_json,
+                    display,
+                    artist_key,
+                    release_id,
+                    album_key,
+                    track.disc_no,
+                    track.track_no,
+                    track.duration_ms
+                ],
+            )?;
+            id
+        }
+        None => {
+            let added = if track.added_at == 0 {
+                now_ms()
+            } else {
+                track.added_at
+            };
+            let id = track.id.to_string();
+            tx.execute(
+                "INSERT INTO track(id, recording_mbid, isrc, acoustid, title, title_key,
+                        artist_credit, artist_display, artist_key, release_id, album_key,
+                        disc_no, track_no, duration_ms, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    id,
+                    track.recording_mbid,
+                    track.isrc,
+                    track.acoustid,
+                    track.title,
+                    title_key,
+                    credit_json,
+                    display,
+                    artist_key,
+                    release_id,
+                    album_key,
+                    track.disc_no,
+                    track.track_no,
+                    track.duration_ms,
+                    added
+                ],
+            )?;
+            id
+        }
+    };
+    write_credit_links(tx, "track_artist", "track_id", &id, &track.artist_credit)?;
+    let id: TrackId = parse_id(&id)?;
+    track_by_id(tx, id)?.ok_or_else(|| LibraryError::not_found("track", id))
+}
+
+/// [`Library::add_source`] inside an open write transaction.
+pub(crate) fn add_source_in(tx: &Connection, source: &Source) -> Result<Source> {
+    let track = source.track_id.to_string();
+    let kind = source.kind.as_str();
+    let mut found = first_string(
+        tx,
+        "SELECT id FROM source WHERE id = ?1",
+        [source.id.to_string()],
+    )?;
+    if found.is_none() && source.trashed_at.is_none() {
+        found = first_string(
+            tx,
+            "SELECT id FROM source
+              WHERE kind = ?1 AND locator = ?2 AND trashed_at IS NULL",
+            params![kind, source.locator],
+        )?;
+    }
+    let (origin_kind, info_hash, origin_path) = origin_columns(&source.origin);
+    let size = source.size_bytes.map(|s| s as i64);
+    let mut moved_from: Option<String> = None;
+    let id = match found {
+        Some(id) => {
+            moved_from = first_string(
+                tx,
+                "SELECT track_id FROM source WHERE id = ?1 AND track_id != ?2",
+                params![id, track],
+            )?;
+            tx.execute(
+                "UPDATE source SET track_id = ?2, kind = ?3, locator = ?4, codec = ?5,
+                        is_active = CASE WHEN track_id = ?2 THEN is_active ELSE 0 END,
+                        bitrate = ?6, sample_rate = ?7, bit_depth = ?8, quality_score = ?9,
+                        file_hash = coalesce(?10, file_hash),
+                        size_bytes = coalesce(?11, size_bytes),
+                        origin_kind = ?12, origin_info_hash = ?13, origin_path = ?14,
+                        available = ?15
+                  WHERE id = ?1",
+                params![
+                    id,
+                    track,
+                    kind,
+                    source.locator,
+                    source.codec.as_str(),
+                    source.bitrate,
+                    source.sample_rate,
+                    source.bit_depth,
+                    source.quality_score,
+                    source.file_hash,
+                    size,
+                    origin_kind,
+                    info_hash,
+                    origin_path,
+                    source.available
+                ],
+            )?;
+            id
+        }
+        None => {
+            let added = if source.added_at == 0 {
+                now_ms()
+            } else {
+                source.added_at
+            };
+            let id = source.id.to_string();
+            tx.execute(
+                "INSERT INTO source(id, track_id, kind, locator, codec, bitrate,
+                        sample_rate, bit_depth, quality_score, is_active, file_hash,
+                        size_bytes, origin_kind, origin_info_hash, origin_path, available,
+                        added_at, trashed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14,
+                         ?15, ?16, ?17)",
+                params![
+                    id,
+                    track,
+                    kind,
+                    source.locator,
+                    source.codec.as_str(),
+                    source.bitrate,
+                    source.sample_rate,
+                    source.bit_depth,
+                    source.quality_score,
+                    source.file_hash,
+                    size,
+                    origin_kind,
+                    info_hash,
+                    origin_path,
+                    source.available,
+                    added,
+                    source.trashed_at
+                ],
+            )?;
+            id
+        }
+    };
+    // A live file brings a deleted track back (the same song imported
+    // again lands on its old id), and its song is wanted again.
+    if source.trashed_at.is_none() && source.kind.is_local() {
+        let back = tx.execute(
+            "UPDATE track SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [&track],
+        )?;
+        if back > 0 {
+            crate::unwanted::forget_unwanted_in(tx, &track)?;
+        }
+    }
+    // A source handed over to another track must not stay "active" on
+    // the track it left.
+    if let Some(old) = moved_from {
+        refresh_active(tx, parse_id(&old)?)?;
+        refresh_in_library(tx, &old)?;
+    }
+    refresh_active(tx, source.track_id)?;
+    refresh_in_library(tx, &track)?;
+    // A file: its «Хочу скачать» items that did not start are done.
+    if source.trashed_at.is_none() && source.kind.is_local() {
+        crate::masters::settle_wishlist_in(tx, &track)?;
+    }
+    let sid: SourceId = parse_id(&id)?;
+    source_by_id(tx, sid)?.ok_or_else(|| LibraryError::not_found("source", sid))
+}
+
+/// See [`Library::merge_track_into`]. Wishlist items of the track: one
+/// per track stays (the one furthest along, else the oldest).
+pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, device: &str, now: UnixMs) -> Result<bool> {
+    if from == into {
+        return Ok(false);
+    }
+    let (f, t) = (from.to_string(), into.to_string());
+    for id in [&f, &t] {
+        if first_string(tx, "SELECT id FROM track WHERE id = ?1", [id])?.is_none() {
+            return Ok(false);
+        }
+    }
+    tx.execute("UPDATE source SET track_id = ?2, is_active = 0 WHERE track_id = ?1", params![f, t])?;
+    tx.execute(
+        "UPDATE playlist_entry SET track_id = ?2, updated_at = ?3, updated_by = ?4
+          WHERE track_id = ?1 AND deleted = 0",
+        params![f, t, now, device],
+    )?;
+    let liked: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM likes WHERE target_kind = 'track' AND target_id = ?1 AND deleted = 0)",
+        [&f],
+        |r| r.get(0),
+    )?;
+    if liked {
+        tx.execute(
+            "INSERT INTO likes(target_kind, target_id, updated_at, updated_by, deleted)
+             VALUES ('track', ?1, ?2, ?3, 0)
+             ON CONFLICT(target_kind, target_id) DO UPDATE SET
+                deleted = 0, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+            params![t, now, device],
+        )?;
+        tx.execute(
+            "UPDATE likes SET deleted = 1, updated_at = ?2, updated_by = ?3
+              WHERE target_kind = 'track' AND target_id = ?1",
+            params![f, now, device],
+        )?;
+    }
+    tx.execute("UPDATE event SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+    tx.execute(
+        "INSERT OR IGNORE INTO track_alias(track_id, title, key, source)
+         SELECT ?2, title, key, source FROM track_alias WHERE track_id = ?1
+            AND key != (SELECT title_key FROM track WHERE id = ?2)",
+        params![f, t],
+    )?;
+    // Ids in the services and their likes follow; a "seen" marker would
+    // hide `into` from the library, so it goes.
+    tx.execute("DELETE FROM external_id WHERE kind = 'track' AND local_id = ?1 AND service = 'seen'", [&f])?;
+    tx.execute("UPDATE external_id SET local_id = ?2 WHERE kind = 'track' AND local_id = ?1", params![f, t])?;
+    tx.execute("UPDATE remote_like SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+    tx.execute("UPDATE wishlist SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+    dedupe_wishlist_of_track(tx, &t)?;
+    // The item of a stream twin merged into the track with the file.
+    crate::masters::settle_wishlist_in(tx, &t)?;
+    // What it leaves behind: its artists and its album, when nothing else
+    // has them (the album's ids go to the album `into` is on, when it is
+    // the same one).
+    let artists: Vec<String> = {
+        let mut stmt = tx.prepare_cached("SELECT artist_id FROM track_artist WHERE track_id = ?1")?;
+        let rows = stmt.query_map([&f], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let (release, into_release): (Option<String>, Option<String>) = (
+        first_string(tx, "SELECT release_id FROM track WHERE id = ?1 AND release_id IS NOT NULL", [&f])?,
+        first_string(tx, "SELECT release_id FROM track WHERE id = ?1 AND release_id IS NOT NULL", [&t])?,
+    );
+    for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "analysis_failed", "master"] {
+        tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&f])?;
+    }
+    tx.execute("DELETE FROM track WHERE id = ?1", [&f])?;
+    refresh_active(tx, into)?;
+    refresh_in_library(tx, &t)?;
+    if let Some(r) = release.filter(|r| into_release.as_ref() != Some(r)) {
+        crate::repairs::drop_empty_release_in(tx, &r, into_release.as_deref(), device, now)?;
+    }
+    for a in artists {
+        crate::repairs::drop_orphan_artist_in(tx, &a)?;
+    }
+    Ok(true)
+}
+
+/// What points at the release `from` that goes into `to`: its ids in the
+/// services and its «Хочу скачать» items follow, its tracklist mark goes.
+fn carry_release_links(tx: &Connection, from: &str, to: &str) -> Result<()> {
+    tx.execute("UPDATE external_id SET local_id = ?2 WHERE kind = 'release' AND local_id = ?1", params![from, to])?;
+    tx.execute("UPDATE wishlist SET release_id = ?2 WHERE release_id = ?1", params![from, to])?;
+    tx.execute("DELETE FROM meta WHERE key = ?1", [format!("cache.tracklist.{from}")])?;
+    Ok(())
+}
+
+/// Keeps one track-scope wishlist item of a track: the one furthest along
+/// (downloading, searching, waiting for a confirm, done, dismissed for good),
+/// else the oldest; downloads of the others point at it.
+fn dedupe_wishlist_of_track(tx: &Connection, track: &str) -> Result<()> {
+    let keep = first_string(
+        tx,
+        "SELECT id FROM wishlist WHERE track_id = ?1 AND scope = 'track'
+          ORDER BY CASE status WHEN 'downloading' THEN 0 WHEN 'searching' THEN 1
+                               WHEN 'confirm' THEN 2 WHEN 'done' THEN 3 WHEN 'dismissed' THEN 4
+                               WHEN 'no_torrent' THEN 5 WHEN 'new' THEN 6 WHEN 'waiting' THEN 7
+                               ELSE 8 END, created_at, id
+          LIMIT 1",
+        [track],
+    )?;
+    if let Some(keep) = keep {
+        tx.execute(
+            "UPDATE download SET wishlist_id = ?2
+              WHERE wishlist_id IN (SELECT id FROM wishlist WHERE track_id = ?1 AND scope = 'track' AND id != ?2)",
+            params![track, keep],
+        )?;
+        tx.execute(
+            "DELETE FROM wishlist WHERE track_id = ?1 AND scope = 'track' AND id != ?2",
+            params![track, keep],
+        )?;
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ public API
 
 impl Library {
@@ -273,146 +732,14 @@ impl Library {
     /// the one with the same `mbid`; returns the stored artist (whose `id` may
     /// differ from the argument when matched by `mbid`).
     pub fn upsert_artist(&self, artist: &Artist) -> Result<Artist> {
-        self.write(|tx| {
-            let mut found = first_string(
-                tx,
-                "SELECT id FROM artist WHERE id = ?1",
-                [artist.id.to_string()],
-            )?;
-            if found.is_none()
-                && let Some(mbid) = &artist.mbid
-            {
-                found = first_string(tx, "SELECT id FROM artist WHERE mbid = ?1", [mbid])?;
-            }
-            let sort_name = if artist.sort_name.trim().is_empty() {
-                &artist.name
-            } else {
-                &artist.sort_name
-            };
-            let key = sort_key(sort_name);
-            let images = serde_json::to_string(&artist.images)?;
-            let id = match found {
-                Some(id) => {
-                    tx.execute(
-                        "UPDATE artist SET mbid = coalesce(?2, mbid), name = ?3, sort_name = ?4,
-                                sort_key = ?5,
-                                images = CASE WHEN ?6 = '[]' THEN images ELSE ?6 END
-                          WHERE id = ?1",
-                        params![id, artist.mbid, artist.name, sort_name, key, images],
-                    )?;
-                    id
-                }
-                None => {
-                    let added = if artist.added_at == 0 {
-                        now_ms()
-                    } else {
-                        artist.added_at
-                    };
-                    let id = artist.id.to_string();
-                    tx.execute(
-                        "INSERT INTO artist(id, mbid, name, sort_name, sort_key, images, added_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        params![id, artist.mbid, artist.name, sort_name, key, images, added],
-                    )?;
-                    id
-                }
-            };
-            let id: ArtistId = parse_id(&id)?;
-            artist_by_id(tx, id)?.ok_or_else(|| LibraryError::not_found("artist", id))
-        })
+        self.write(|tx| upsert_artist_in(tx, artist))
     }
 
     /// Inserts or updates a release (match: `id`, then `mbid`). Optional
     /// identifiers (`mbid`, `release_group_mbid`, `cover_ref`, `year`,
     /// `total_tracks`) are kept when the new value is `None`.
     pub fn upsert_release(&self, release: &Release) -> Result<Release> {
-        self.write(|tx| {
-            let mut found = first_string(
-                tx,
-                "SELECT id FROM release WHERE id = ?1",
-                [release.id.to_string()],
-            )?;
-            if found.is_none()
-                && let Some(mbid) = &release.mbid
-            {
-                found = first_string(tx, "SELECT id FROM release WHERE mbid = ?1", [mbid])?;
-            }
-            let (credit_json, display, artist_key) = credit_columns(&release.artist_credit)?;
-            let title_key = sort_key(&release.title);
-            let kind = release.release_type.as_str();
-            let id = match found {
-                Some(id) => {
-                    tx.execute(
-                        "UPDATE release SET mbid = coalesce(?2, mbid),
-                                release_group_mbid = coalesce(?3, release_group_mbid),
-                                title = ?4, title_key = ?5, artist_credit = ?6,
-                                artist_display = ?7, artist_key = ?8,
-                                year = coalesce(?9, year), release_type = ?10,
-                                cover_ref = coalesce(?11, cover_ref),
-                                total_tracks = coalesce(?12, total_tracks)
-                          WHERE id = ?1",
-                        params![
-                            id,
-                            release.mbid,
-                            release.release_group_mbid,
-                            release.title,
-                            title_key,
-                            credit_json,
-                            display,
-                            artist_key,
-                            release.year,
-                            kind,
-                            release.cover_ref,
-                            release.total_tracks
-                        ],
-                    )?;
-                    id
-                }
-                None => {
-                    let added = if release.added_at == 0 {
-                        now_ms()
-                    } else {
-                        release.added_at
-                    };
-                    let id = release.id.to_string();
-                    tx.execute(
-                        "INSERT INTO release(id, mbid, release_group_mbid, title, title_key,
-                                artist_credit, artist_display, artist_key, year, release_type,
-                                cover_ref, total_tracks, added_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                        params![
-                            id,
-                            release.mbid,
-                            release.release_group_mbid,
-                            release.title,
-                            title_key,
-                            credit_json,
-                            display,
-                            artist_key,
-                            release.year,
-                            kind,
-                            release.cover_ref,
-                            release.total_tracks,
-                            added
-                        ],
-                    )?;
-                    id
-                }
-            };
-            write_credit_links(
-                tx,
-                "release_artist",
-                "release_id",
-                &id,
-                &release.artist_credit,
-            )?;
-            tx.execute(
-                "UPDATE track SET album_key = ?2 WHERE release_id = ?1 AND album_key != ?2",
-                params![id, title_key],
-            )?;
-            let id: ReleaseId = parse_id(&id)?;
-            release_by_id(tx, id)?.ok_or_else(|| LibraryError::not_found("release", id))
-        })
+        self.write(|tx| upsert_release_in(tx, release))
     }
 
     /// Moves every track of `from` onto `to` and removes `from` (its palette,
@@ -467,6 +794,7 @@ impl Library {
                                      WHERE target_kind = 'release' AND target_id = ?2)",
                 params![f, t, now_ms()],
             )?;
+            carry_release_links(tx, &f, &t)?;
             tx.execute("DELETE FROM release_artist WHERE release_id = ?1", [&f])?;
             tx.execute("DELETE FROM palette WHERE release_id = ?1", [&f])?;
             tx.execute("DELETE FROM release WHERE id = ?1", [&f])?;
@@ -481,66 +809,32 @@ impl Library {
 
     /// Folds `from` into `into` (one recording imported twice): its sources
     /// become more sources of `into` (the best one plays), its playlist
-    /// entries, like and listening history move over, and the `from` row
-    /// goes. No file is touched. Returns false when either track is missing.
+    /// entries, like, listening history, ids in the services and wishlist
+    /// items move over, and the `from` row goes. No file is touched. Returns
+    /// false when either track is missing.
     pub fn merge_track_into(&self, from: TrackId, into: TrackId) -> Result<bool> {
         if from == into {
             return Ok(false);
         }
         let device = self.device_id();
         let now = self.tick();
-        self.write(|tx| {
-            let (f, t) = (from.to_string(), into.to_string());
-            for id in [&f, &t] {
-                if first_string(tx, "SELECT id FROM track WHERE id = ?1", [id])?.is_none() {
-                    return Ok(false);
-                }
-            }
-            tx.execute("UPDATE source SET track_id = ?2, is_active = 0 WHERE track_id = ?1", params![f, t])?;
-            tx.execute(
-                "UPDATE playlist_entry SET track_id = ?2, updated_at = ?3, updated_by = ?4
-                  WHERE track_id = ?1 AND deleted = 0",
-                params![f, t, now, device.as_str()],
-            )?;
-            let liked: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM likes WHERE target_kind = 'track' AND target_id = ?1 AND deleted = 0)",
-                [&f],
-                |r| r.get(0),
-            )?;
-            if liked {
-                tx.execute(
-                    "INSERT INTO likes(target_kind, target_id, updated_at, updated_by, deleted)
-                     VALUES ('track', ?1, ?2, ?3, 0)
-                     ON CONFLICT(target_kind, target_id) DO UPDATE SET
-                        deleted = 0, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
-                    params![t, now, device.as_str()],
-                )?;
-                tx.execute(
-                    "UPDATE likes SET deleted = 1, updated_at = ?2, updated_by = ?3
-                      WHERE target_kind = 'track' AND target_id = ?1",
-                    params![f, now, device.as_str()],
-                )?;
-            }
-            tx.execute("UPDATE event SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
-            for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "master"] {
-                tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&f])?;
-            }
-            tx.execute("DELETE FROM track WHERE id = ?1", [&f])?;
-            refresh_active(tx, into)?;
-            Ok(true)
-        })
+        self.write(|tx| merge_track_in(tx, from, into, device.as_str(), now))
     }
 
     /// Moves the tracks of `from`, another edition of the same album, onto
     /// `to` and removes `from`; `to` keeps its title and MBIDs (unlike
     /// [`Self::merge_releases`], two editions are allowed). Returns how many
-    /// tracks moved.
+    /// tracks moved (none when `from` is gone: merging its last track
+    /// removed it).
     pub fn absorb_edition(&self, from: ReleaseId, to: ReleaseId) -> Result<u32> {
         if from == to {
             return Ok(0);
         }
         self.write(|tx| {
             let (f, t) = (from.to_string(), to.to_string());
+            if first_string(tx, "SELECT id FROM release WHERE id = ?1", [&f])?.is_none() {
+                return Ok(0);
+            }
             for (id, rid) in [(&f, from), (&t, to)] {
                 first_string(tx, "SELECT id FROM release WHERE id = ?1", [id])?
                     .ok_or_else(|| LibraryError::not_found("release", rid))?;
@@ -565,9 +859,18 @@ impl Library {
                                      WHERE target_kind = 'release' AND target_id = ?2)",
                 params![f, t, now_ms()],
             )?;
+            carry_release_links(tx, &f, &t)?;
+            let artists: Vec<String> = {
+                let mut stmt = tx.prepare_cached("SELECT artist_id FROM release_artist WHERE release_id = ?1")?;
+                let rows = stmt.query_map([&f], |r| r.get(0))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
             tx.execute("DELETE FROM release_artist WHERE release_id = ?1", [&f])?;
             tx.execute("DELETE FROM palette WHERE release_id = ?1", [&f])?;
             tx.execute("DELETE FROM release WHERE id = ?1", [&f])?;
+            for a in artists {
+                crate::repairs::drop_orphan_artist_in(tx, &a)?;
+            }
             Ok(moved as u32)
         })
     }
@@ -580,95 +883,7 @@ impl Library {
     /// track). Optional identifiers and `duration_ms` are kept when the new
     /// value is `None`. The referenced release must already exist.
     pub fn upsert_track(&self, track: &Track) -> Result<Track> {
-        self.write(|tx| {
-            let release_id = track.release_id.map(|r| r.to_string());
-            let mut found = first_string(
-                tx,
-                "SELECT id FROM track WHERE id = ?1",
-                [track.id.to_string()],
-            )?;
-            if found.is_none()
-                && let Some(mbid) = &track.recording_mbid
-            {
-                found = first_string(
-                    tx,
-                    "SELECT id FROM track WHERE recording_mbid = ?1 AND release_id IS ?2",
-                    params![mbid, release_id],
-                )?;
-            }
-            let (credit_json, display, artist_key) = credit_columns(&track.artist_credit)?;
-            let title_key = sort_key(&track.title);
-            let album_key: String = match &release_id {
-                Some(r) => first_string(tx, "SELECT title_key FROM release WHERE id = ?1", [r])?
-                    .ok_or_else(|| LibraryError::not_found("release", r))?,
-                None => String::new(),
-            };
-            let id = match found {
-                Some(id) => {
-                    tx.execute(
-                        "UPDATE track SET recording_mbid = coalesce(?2, recording_mbid),
-                                isrc = coalesce(?3, isrc), acoustid = coalesce(?4, acoustid),
-                                title = ?5, title_key = ?6, artist_credit = ?7,
-                                artist_display = ?8, artist_key = ?9, release_id = ?10,
-                                album_key = ?11, disc_no = ?12, track_no = ?13,
-                                duration_ms = coalesce(?14, duration_ms)
-                          WHERE id = ?1",
-                        params![
-                            id,
-                            track.recording_mbid,
-                            track.isrc,
-                            track.acoustid,
-                            track.title,
-                            title_key,
-                            credit_json,
-                            display,
-                            artist_key,
-                            release_id,
-                            album_key,
-                            track.disc_no,
-                            track.track_no,
-                            track.duration_ms
-                        ],
-                    )?;
-                    id
-                }
-                None => {
-                    let added = if track.added_at == 0 {
-                        now_ms()
-                    } else {
-                        track.added_at
-                    };
-                    let id = track.id.to_string();
-                    tx.execute(
-                        "INSERT INTO track(id, recording_mbid, isrc, acoustid, title, title_key,
-                                artist_credit, artist_display, artist_key, release_id, album_key,
-                                disc_no, track_no, duration_ms, added_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                        params![
-                            id,
-                            track.recording_mbid,
-                            track.isrc,
-                            track.acoustid,
-                            track.title,
-                            title_key,
-                            credit_json,
-                            display,
-                            artist_key,
-                            release_id,
-                            album_key,
-                            track.disc_no,
-                            track.track_no,
-                            track.duration_ms,
-                            added
-                        ],
-                    )?;
-                    id
-                }
-            };
-            write_credit_links(tx, "track_artist", "track_id", &id, &track.artist_credit)?;
-            let id: TrackId = parse_id(&id)?;
-            track_by_id(tx, id)?.ok_or_else(|| LibraryError::not_found("track", id))
-        })
+        self.write(|tx| upsert_track_in(tx, track))
     }
 
     // ---- sources
@@ -678,115 +893,7 @@ impl Library {
     /// file is idempotent). Re-selects the track's active source and returns
     /// the stored row.
     pub fn add_source(&self, source: &Source) -> Result<Source> {
-        self.write(|tx| {
-            let track = source.track_id.to_string();
-            let kind = source.kind.as_str();
-            let mut found = first_string(
-                tx,
-                "SELECT id FROM source WHERE id = ?1",
-                [source.id.to_string()],
-            )?;
-            if found.is_none() && source.trashed_at.is_none() {
-                found = first_string(
-                    tx,
-                    "SELECT id FROM source
-                      WHERE kind = ?1 AND locator = ?2 AND trashed_at IS NULL",
-                    params![kind, source.locator],
-                )?;
-            }
-            let (origin_kind, info_hash, origin_path) = origin_columns(&source.origin);
-            let size = source.size_bytes.map(|s| s as i64);
-            let mut moved_from: Option<String> = None;
-            let id = match found {
-                Some(id) => {
-                    moved_from = first_string(
-                        tx,
-                        "SELECT track_id FROM source WHERE id = ?1 AND track_id != ?2",
-                        params![id, track],
-                    )?;
-                    tx.execute(
-                        "UPDATE source SET track_id = ?2, kind = ?3, locator = ?4, codec = ?5,
-                                is_active = CASE WHEN track_id = ?2 THEN is_active ELSE 0 END,
-                                bitrate = ?6, sample_rate = ?7, bit_depth = ?8, quality_score = ?9,
-                                file_hash = coalesce(?10, file_hash),
-                                size_bytes = coalesce(?11, size_bytes),
-                                origin_kind = ?12, origin_info_hash = ?13, origin_path = ?14,
-                                available = ?15
-                          WHERE id = ?1",
-                        params![
-                            id,
-                            track,
-                            kind,
-                            source.locator,
-                            source.codec.as_str(),
-                            source.bitrate,
-                            source.sample_rate,
-                            source.bit_depth,
-                            source.quality_score,
-                            source.file_hash,
-                            size,
-                            origin_kind,
-                            info_hash,
-                            origin_path,
-                            source.available
-                        ],
-                    )?;
-                    id
-                }
-                None => {
-                    let added = if source.added_at == 0 {
-                        now_ms()
-                    } else {
-                        source.added_at
-                    };
-                    let id = source.id.to_string();
-                    tx.execute(
-                        "INSERT INTO source(id, track_id, kind, locator, codec, bitrate,
-                                sample_rate, bit_depth, quality_score, is_active, file_hash,
-                                size_bytes, origin_kind, origin_info_hash, origin_path, available,
-                                added_at, trashed_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14,
-                                 ?15, ?16, ?17)",
-                        params![
-                            id,
-                            track,
-                            kind,
-                            source.locator,
-                            source.codec.as_str(),
-                            source.bitrate,
-                            source.sample_rate,
-                            source.bit_depth,
-                            source.quality_score,
-                            source.file_hash,
-                            size,
-                            origin_kind,
-                            info_hash,
-                            origin_path,
-                            source.available,
-                            added,
-                            source.trashed_at
-                        ],
-                    )?;
-                    id
-                }
-            };
-            // A live file brings a deleted track back (the same song imported
-            // again lands on its old id).
-            if source.trashed_at.is_none() {
-                tx.execute(
-                    "UPDATE track SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
-                    [&track],
-                )?;
-            }
-            // A source handed over to another track must not stay "active" on
-            // the track it left.
-            if let Some(old) = moved_from {
-                refresh_active(tx, parse_id(&old)?)?;
-            }
-            refresh_active(tx, source.track_id)?;
-            let sid: SourceId = parse_id(&id)?;
-            source_by_id(tx, sid)?.ok_or_else(|| LibraryError::not_found("source", sid))
-        })
+        self.write(|tx| add_source_in(tx, source))
     }
 
     /// Re-selects the active source of a track: local file > Spotify > YouTube,
@@ -794,6 +901,19 @@ impl Library {
     /// Returns the new active source, `None` if the track has no usable one.
     pub fn set_active_source(&self, track: TrackId) -> Result<Option<SourceId>> {
         self.write(|tx| refresh_active(tx, track))
+    }
+
+    /// Gives a track that has no length the one heard (`ms`, what the
+    /// engine found in a stream whose service did not say). True when it
+    /// was stored; a length the track has stays.
+    pub fn fill_duration(&self, track: TrackId, ms: u32) -> Result<bool> {
+        self.write(|tx| {
+            let n = tx.execute(
+                "UPDATE track SET duration_ms = ?2 WHERE id = ?1 AND duration_ms IS NULL",
+                params![track.to_string(), ms],
+            )?;
+            Ok(n > 0)
+        })
     }
 
     /// Marks a source (un)playable (stream withdrawn, file missing) and
@@ -818,7 +938,7 @@ impl Library {
     /// Non-trashed sources of a track, the active one first.
     pub fn sources_of_track(&self, track: TrackId) -> Result<Vec<Source>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {SOURCE_COLS} FROM source WHERE track_id = ?1 AND trashed_at IS NULL
                   ORDER BY is_active DESC, quality_score DESC, added_at, id"
             ))?;
@@ -841,7 +961,7 @@ impl Library {
     /// Non-trashed sources with this content hash (duplicate detection).
     pub fn sources_by_hash(&self, file_hash: &str) -> Result<Vec<Source>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {SOURCE_COLS} FROM source WHERE file_hash = ?1 AND trashed_at IS NULL"
             ))?;
             let rows = stmt.query_map([file_hash], source_from_row)?;
@@ -857,12 +977,44 @@ impl Library {
 
     pub fn get_track_row(&self, id: TrackId) -> Result<Option<TrackRow>> {
         self.read(|c| {
-            Ok(c.query_row(
-                &format!("{TRACK_ROW_SELECT} WHERE t.id = ?1"),
-                [id.to_string()],
-                track_row,
-            )
+            Ok(c.prepare_cached(concat!(
+                "SELECT ", track_row_cols!(), " ", track_row_from!(), " WHERE t.id = ?1"
+            ))?
+            .query_row([id.to_string()], track_row)
             .optional()?)
+        })
+    }
+
+    /// Live tracks with a file, the latest file first, each with when its
+    /// file came («Скачано»: a song liked long ago is as new as its file).
+    pub fn downloaded_tracks(&self, limit: u32) -> Result<Vec<(TrackRow, UnixMs)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(concat!(
+                "SELECT f.at, ", track_row_cols!(), " ", track_row_from!(),
+                " JOIN (SELECT track_id, max(added_at) AS at FROM source
+                         WHERE kind = 'local_file' AND trashed_at IS NULL GROUP BY track_id) f ON f.track_id = t.id
+                  WHERE t.deleted_at IS NULL
+                  ORDER BY f.at DESC, t.album_key, t.disc_no, t.track_no, t.seq LIMIT ?1"
+            ))?;
+            let rows = stmt.query_map([limit], |r| Ok((track_row_at(r, 1)?, r.get(0)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// The rows of `ids` in one query, by id (a missing id has none).
+    pub fn get_track_rows(&self, ids: &[TrackId]) -> Result<std::collections::HashMap<TrackId, TrackRow>> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let list = serde_json::to_string(&ids.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .unwrap_or_else(|_| "[]".into());
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(concat!(
+                "SELECT ", track_row_cols!(), " ", track_row_from!(),
+                " WHERE t.id IN (SELECT value FROM json_each(?1))"
+            ))?;
+            let rows = stmt.query_map([list], track_row)?;
+            Ok(rows.map(|r| r.map(|r| (r.id, r))).collect::<rusqlite::Result<_>>()?)
         })
     }
 
@@ -889,7 +1041,7 @@ impl Library {
 
     fn tracks_where(&self, column: &'static str, value: &str) -> Result<Vec<Track>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "SELECT {TRACK_COLS} FROM track WHERE {column} = ?1 ORDER BY added_at, id"
             ))?;
             let rows = stmt.query_map([value], track_from_row)?;
@@ -910,10 +1062,38 @@ impl Library {
         self.tracks_of_release_impl(release, true)
     }
 
+    /// [`Self::tracks_of_release`] with the tracks outside the library too
+    /// (stream tracks asked for in «Хочу скачать» without a like: the ones a
+    /// download of the album is for). A stream track outside the library at
+    /// the place of a track with a file and as long within 2 s is that
+    /// file's song under another title (see `streams::same`) and is left
+    /// out: the album lists each of its places once.
+    pub fn tracks_of_release_all(&self, release: ReleaseId) -> Result<Vec<TrackRow>> {
+        self.tracks_of_release_where(release, concat!("AND ", page_row!()))
+    }
+
+    /// The page of an album (docs/stage4.md §12.13): its rows
+    /// ([`Self::tracks_of_release_all`]) and a hole for every place it
+    /// counts that no row has, in order, with the counts every view of the
+    /// album shows (the page's header, its card, «Хочу скачать»):
+    /// `progress.total == entries.len()`, `progress.local` the rows with a
+    /// file. With one disc a hole has its number (the first ones free up to
+    /// the count); with several the holes come last, unnumbered.
+    pub fn release_listing(&self, release: ReleaseId) -> Result<Option<ReleaseListing>> {
+        let Some(r) = self.get_release(release)? else { return Ok(None) };
+        let rows = self.tracks_of_release_all(release)?;
+        let unwanted = self.read(|c| crate::unwanted::unwanted_places_in(c, &release.to_string()))?;
+        Ok(Some(ReleaseListing::new(rows, r.total_tracks, &unwanted)))
+    }
+
     fn tracks_of_release_impl(&self, release: ReleaseId, deleted: bool) -> Result<Vec<TrackRow>> {
-        let live = if deleted { "" } else { "AND t.deleted_at IS NULL" };
+        let live = if deleted { "" } else { "AND t.deleted_at IS NULL AND t.in_library = 1" };
+        self.tracks_of_release_where(release, live)
+    }
+
+    fn tracks_of_release_where(&self, release: ReleaseId, live: &str) -> Result<Vec<TrackRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{TRACK_ROW_SELECT} WHERE t.release_id = ?1 {live}
                   ORDER BY t.disc_no, t.track_no, t.seq"
             ))?;
@@ -930,10 +1110,10 @@ impl Library {
         limit: u32,
     ) -> Result<Vec<TrackRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{TRACK_ROW_SELECT}
                   WHERE t.id IN (SELECT track_id FROM track_artist WHERE artist_id = ?1)
-                    AND t.deleted_at IS NULL
+                    AND t.deleted_at IS NULL AND t.in_library = 1
                   ORDER BY t.album_key, t.disc_no, t.track_no, t.seq LIMIT ?2 OFFSET ?3"
             ))?;
             let rows = stmt.query_map(params![artist.to_string(), limit, offset], track_row)?;
@@ -967,12 +1147,12 @@ impl Library {
             TrackSortKey::Quality => format!("t.active_quality {d}, t.seq {d}"),
         };
         let where_ = match filter {
-            TrackFilter::All => "WHERE t.deleted_at IS NULL",
-            TrackFilter::LocalOnly => "WHERE t.deleted_at IS NULL AND t.has_local = 1",
-            TrackFilter::NoLocalFile => "WHERE t.deleted_at IS NULL AND t.has_local = 0",
+            TrackFilter::All => "WHERE t.deleted_at IS NULL AND t.in_library = 1",
+            TrackFilter::LocalOnly => "WHERE t.deleted_at IS NULL AND t.in_library = 1 AND t.has_local = 1",
+            TrackFilter::NoLocalFile => "WHERE t.deleted_at IS NULL AND t.in_library = 1 AND t.has_local = 0",
         };
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{TRACK_ROW_SELECT} {where_} ORDER BY {order} LIMIT ?1 OFFSET ?2"
             ))?;
             let rows = stmt.query_map(params![limit, offset], track_row)?;
@@ -982,9 +1162,11 @@ impl Library {
 
     pub fn count_tracks(&self, filter: TrackFilter) -> Result<u32> {
         let where_ = match filter {
-            TrackFilter::All => "WHERE deleted_at IS NULL",
-            TrackFilter::LocalOnly => "WHERE deleted_at IS NULL AND has_local = 1",
-            TrackFilter::NoLocalFile => "WHERE deleted_at IS NULL AND has_local = 0",
+            TrackFilter::All => "WHERE deleted_at IS NULL AND in_library = 1",
+            TrackFilter::LocalOnly => "WHERE deleted_at IS NULL AND in_library = 1 AND has_local = 1",
+            TrackFilter::NoLocalFile => {
+                "WHERE deleted_at IS NULL AND in_library = 1 AND has_local = 0"
+            }
         };
         self.read(|c| {
             Ok(
@@ -1045,16 +1227,24 @@ impl Library {
             ReleaseSortKey::Added => format!("r.added_at {d}, r.seq {d}"),
         };
         self.read(|c| {
-            let mut stmt = c.prepare(&format!("{select} ORDER BY {order} LIMIT ?1 OFFSET ?2"))?;
+            let mut stmt = c.prepare_cached(&format!("{select} ORDER BY {order} LIMIT ?1 OFFSET ?2"))?;
             let rows = stmt.query_map(params![limit, offset], release_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// One release as [`Self::releases`] lists it (`None`: not listed).
+    pub fn get_release_row(&self, id: ReleaseId) -> Result<Option<ReleaseRow>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(&format!("{RELEASE_ROW_SELECT} WHERE r.id = ?1"))?;
+            Ok(stmt.query_row([id.to_string()], release_row).optional()?)
         })
     }
 
     /// Releases credited to an artist, newest first.
     pub fn releases_of_artist(&self, artist: ArtistId) -> Result<Vec<ReleaseRow>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!(
+            let mut stmt = c.prepare_cached(&format!(
                 "{RELEASE_ROW_SELECT}
                   WHERE r.id IN (SELECT release_id FROM release_artist WHERE artist_id = ?1)
                   ORDER BY r.year IS NULL, r.year DESC, r.title_key, r.seq"
@@ -1104,7 +1294,7 @@ impl Library {
             ArtistSortKey::Added => format!("a.added_at {d}, a.seq {d}"),
         };
         self.read(|c| {
-            let mut stmt = c.prepare(&format!("{select} ORDER BY {order} LIMIT ?1 OFFSET ?2"))?;
+            let mut stmt = c.prepare_cached(&format!("{select} ORDER BY {order} LIMIT ?1 OFFSET ?2"))?;
             let rows = stmt.query_map(params![limit, offset], artist_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
@@ -1116,7 +1306,7 @@ impl Library {
 /// row itself stays (the importer may still point at it).
 macro_rules! release_visible {
     () => {
-        "EXISTS (SELECT 1 FROM track t WHERE t.release_id = rv.id AND t.deleted_at IS NULL)"
+        "EXISTS (SELECT 1 FROM track t WHERE t.release_id = rv.id AND t.deleted_at IS NULL AND t.in_library = 1)"
     };
 }
 
@@ -1125,9 +1315,9 @@ macro_rules! release_visible {
 macro_rules! artist_visible {
     () => {
         "(EXISTS (SELECT 1 FROM track_artist ta JOIN track t ON t.id = ta.track_id
-                   WHERE ta.artist_id = av.id AND t.deleted_at IS NULL)
+                   WHERE ta.artist_id = av.id AND t.deleted_at IS NULL AND t.in_library = 1)
           OR EXISTS (SELECT 1 FROM release_artist ra JOIN track t ON t.release_id = ra.release_id
-                      WHERE ra.artist_id = av.id AND t.deleted_at IS NULL)
+                      WHERE ra.artist_id = av.id AND t.deleted_at IS NULL AND t.in_library = 1)
           OR NOT (EXISTS (SELECT 1 FROM track_artist ta WHERE ta.artist_id = av.id)
                   OR EXISTS (SELECT 1 FROM release_artist ra JOIN track t
                                 ON t.release_id = ra.release_id WHERE ra.artist_id = av.id)))"
@@ -1138,16 +1328,29 @@ pub(crate) const RELEASE_VISIBLE: &str = release_visible!();
 pub(crate) const ARTIST_VISIBLE: &str = artist_visible!();
 
 /// The columns of a [`ReleaseRow`] (alias `r`); deleted tracks count nowhere.
+/// Its count leaves out the places of the songs the user deleted from it
+/// that no live track takes (`unwanted`): no holes of the album.
 macro_rules! release_row_cols {
     () => {
         concat!(
             "SELECT r.id, r.mbid, r.release_group_mbid, r.title, r.artist_credit, r.year,
-                    r.release_type, r.cover_ref, r.total_tracks, r.added_at,
+                    r.release_type, r.cover_ref,
+                    CASE WHEN r.total_tracks IS NULL THEN NULL ELSE max(r.total_tracks - (
+                        SELECT COUNT(*) FROM unwanted u WHERE u.release_id = r.id
+                           AND u.track_no BETWEEN 1 AND r.total_tracks
+                           AND NOT EXISTS (SELECT 1 FROM track o WHERE o.release_id = r.id AND o.deleted_at IS NULL
+                                              AND (o.title_key = u.title_key
+                                                   OR (o.disc_no = u.disc_no AND o.track_no = u.track_no)))), 0) END,
+                    r.added_at,
                     (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.has_local = 1
-                                                    AND t.deleted_at IS NULL),
-                    (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.deleted_at IS NULL),
+                                                    AND t.deleted_at IS NULL AND t.in_library = 1),
+                    (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.deleted_at IS NULL AND t.in_library = 1),
                     ",
-            release_liked_expr!()
+            release_liked_expr!(),
+            ",
+                    (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND ",
+            page_row!(),
+            ")"
         )
     };
 }
@@ -1170,6 +1373,7 @@ pub(crate) fn release_row(row: &Row<'_>) -> rusqlite::Result<ReleaseRow> {
         local_tracks: row.get::<_, i64>(10)? as u32,
         known_tracks: row.get::<_, i64>(11)? as u32,
         liked: row.get(12)?,
+        rows: row.get::<_, i64>(13)? as u32,
     })
 }
 
@@ -1183,7 +1387,9 @@ macro_rules! artist_row_cols {
             release_visible!(),
             "),
                     (SELECT COUNT(*) FROM track_artist ta JOIN track t ON t.id = ta.track_id
-                      WHERE ta.artist_id = a.id AND t.has_local = 1 AND t.deleted_at IS NULL)"
+                      WHERE ta.artist_id = a.id AND t.has_local = 1 AND t.deleted_at IS NULL AND t.in_library = 1),
+                    EXISTS(SELECT 1 FROM likes lk WHERE lk.target_kind = 'artist'
+                            AND lk.target_id = a.id AND lk.deleted = 0)"
         )
     };
 }
@@ -1204,5 +1410,6 @@ pub(crate) fn artist_row(row: &Row<'_>) -> rusqlite::Result<ArtistRow> {
         artist: artist_from_row(row)?,
         release_count: row.get::<_, i64>(6)? as u32,
         local_track_count: row.get::<_, i64>(7)? as u32,
+        liked: row.get(8)?,
     })
 }

@@ -26,6 +26,9 @@
 //! | 19.5 .. 20.3 kHz  | 35 dB            | MP3 V0 and the like             |
 //! | 20.3 kHz and up   | never            | indistinguishable from a CD ADC |
 //!
+//! A cut below [`nikgob_core::quality::LOWEST_LOWPASS_HZ`] (11 kHz) is no
+//! encoder's: the music ends there by itself, and the verdict is `Unknown`.
+//!
 //! Hi-res files (above 48 kHz) whose content stops below 24 kHz with a cliff are
 //! reported as [`Verdict::Upsampled`]: not lossy, but not Hi-Res either.
 //!
@@ -48,17 +51,8 @@ pub const MIN_DYNAMIC_DB: f32 = 40.0;
 pub const MIN_SIGNAL_DB: f32 = -75.0;
 pub const MIN_RATE: u32 = 40_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Verdict {
-    /// Full-band (or at least not cut like a lossy encoder).
-    Genuine,
-    /// Lossless container, lossy content.
-    Transcoded,
-    /// Hi-res container, CD-rate content.
-    Upsampled,
-    /// Too quiet, too short or too low a sample rate to tell.
-    Unknown,
-}
+/// The verdict is kept in the library, so it lives in the core.
+pub use nikgob_core::quality::Verdict;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpectrumReport {
@@ -206,9 +200,19 @@ impl SpectrumCollector {
     }
 
     pub fn finish(self) -> SpectrumReport {
+        self.finish_with_levels().0
+    }
+
+    /// The report and the averaged spectrum it was judged on, in
+    /// [`nikgob_core::quality::SPECTRUM_POINTS`] bands (for the quality
+    /// panel's chart; `None` when too few windows were usable).
+    pub fn finish_with_levels(self) -> (SpectrumReport, Option<Vec<f32>>) {
         match self.levels_db() {
-            Some(levels) => classify(&levels, self.rate, self.used),
-            None => SpectrumReport::unknown(self.used),
+            Some(levels) => (
+                classify(&levels, self.rate, self.used),
+                Some(nikgob_core::quality::downsample_db(&levels, nikgob_core::quality::SPECTRUM_POINTS)),
+            ),
+            None => (SpectrumReport::unknown(self.used), None),
         }
     }
 }
@@ -302,7 +306,11 @@ pub fn classify(levels_db: &[f32], sample_rate: u32, windows: usize) -> Spectrum
     let transcoded = (cutoff_hz < 17_500.0 && steepness_db >= 15.0)
         || (cutoff_hz < 19_500.0 && steepness_db >= 25.0)
         || (cutoff_hz < 20_300.0 && steepness_db >= 35.0);
-    let verdict = if transcoded {
+    let verdict = if transcoded && cutoff_hz < nikgob_core::quality::LOWEST_LOWPASS_HZ {
+        // Nothing above a few kHz is the music's own (a quiet synth, a
+        // piano), not an encoder's lowpass: no telling from the spectrum.
+        Verdict::Unknown
+    } else if transcoded {
         Verdict::Transcoded
     } else if sample_rate > 48_000 && cutoff_hz <= 24_000.0 && steepness_db >= 25.0 {
         Verdict::Upsampled
@@ -442,6 +450,21 @@ mod tests {
         let stereo: Vec<f32> = mono.iter().flat_map(|s| [*s, *s]).collect();
         let r = analyze_buffer(&stereo, 44_100, 2);
         assert_eq!(r.verdict, Verdict::Transcoded, "{r:?}");
+    }
+
+    /// A quiet synth of an OST: nothing above 3 kHz, a cliff to the dither.
+    /// No encoder cuts there, so it is no fake.
+    #[test]
+    fn music_that_ends_at_3_khz_is_not_called_a_fake() {
+        let bins = 2049;
+        let hz_per_bin = 22_050.0 / (bins - 1) as f32;
+        let levels: Vec<f32> = (0..bins)
+            .map(|k| if k as f32 * hz_per_bin < 2_800.0 { -50.0 } else { -115.0 })
+            .collect();
+        let r = classify(&levels, 44_100, 10);
+        assert_eq!(r.verdict, Verdict::Unknown, "{r:?}");
+        let sig = noise(44_100, 30.0, 0.2, Some(6_000.0), 10);
+        assert_eq!(analyze_buffer(&sig, 44_100, 1).verdict, Verdict::Unknown);
     }
 
     #[test]

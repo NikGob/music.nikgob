@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use egui::{Rect, Sense, Ui, vec2};
-use nikgob_view::{Command, LikeTarget, Repeat, Route, Status, ViewState};
+use nikgob_view::{Command, LikeTarget, Repeat, Status, ViewState};
 
 use super::{
     PaneTab,
@@ -67,7 +67,6 @@ pub fn show(
         let cover = Rect::from_min_size(info_rect.min, vec2(48.0, 48.0));
         let current = p.current.as_ref();
         common::cover(ui, current.and_then(|t| t.cover.as_ref()), cover, 24.0);
-        common::source_badge(ui, cover, current.and_then(|t| t.source));
         let text_rect = Rect::from_min_max(
             info_rect.min + vec2(56.0, 4.0),
             info_rect.max - vec2(0.0, 4.0),
@@ -82,19 +81,11 @@ pub fn show(
         match current {
             Some(t) => {
                 common::label(&mut tui, &t.title, TypeRole::TitleSmall, on);
-                // The artist opens their page; the rest of the block opens
+                // Each artist opens their page; the rest of the block opens
                 // Now Playing.
-                let artist = tui.add(
-                    egui::Label::new(TypeRole::BodySmall.style().rich(&t.artist, on.gamma_multiply(0.8)))
-                        .truncate()
-                        .selectable(false)
-                        .sense(Sense::click()),
-                );
-                if let Some(id) = t.artist_id {
-                    let artist = artist.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if artist.clicked() {
-                        chrome.nav = Some(Route::Artist(id));
-                    }
+                let format = TypeRole::BodySmall.style().text_format(on.gamma_multiply(0.8));
+                if let Some(r) = super::artist_links::label(&mut tui, "bar-artists", &t.artist, &t.artists, format) {
+                    chrome.nav = Some(r);
                 }
             }
             None => {
@@ -106,6 +97,25 @@ pub fn show(
         }
 
         ui.add_space(8.0);
+        // Toggles sit on a tinted disc while on: the pill's flat item
+        // colours alone look the same either way.
+        let toggle_colors = |on_: bool| if on_ { Colors { container: on.gamma_multiply(0.24), ..item } } else { item };
+        if ui
+            .add(
+                IconButton::new(Icon::Shuffle)
+                    .selected(p.shuffle)
+                    .colors(toggle_colors(p.shuffle))
+                    .tooltip(if p.shuffle {
+                        "Очередь перемешана — нажми, чтобы вернуть порядок"
+                    } else {
+                        "Перемешать очередь"
+                    })
+                    .id_salt("bar-shuffle"),
+            )
+            .clicked()
+        {
+            out.push(Command::ToggleShuffle);
+        }
         if ui
             .add(IconButton::new(Icon::SkipPrevious).colors(item).tooltip("Назад (Ctrl+←)"))
             .clicked()
@@ -113,21 +123,24 @@ pub fn show(
             chrome::press_previous(ui.ctx(), state, out);
         }
         let playing = p.status == Status::Playing;
+        let buffering = p.status == Status::Buffering;
         // Play/pause: filled toggle M; playing = square, paused = round.
-        if ui
-            .add(
-                IconButton::new(Icon::PlayArrow)
-                    .selected_icon(Icon::Pause)
-                    .size(Size::M)
-                    .style(Style::Filled)
-                    .selected(playing)
-                    .colors(play_colors)
-                    .filled_icon(true)
-                    .tooltip("Пауза / играть (Space)")
-                    .id_salt("bar-play"),
-            )
-            .clicked()
-        {
+        // A stream that is still opening shows a loading indicator instead.
+        let play = ui.add(
+            IconButton::new(Icon::PlayArrow)
+                .selected_icon(Icon::Pause)
+                .size(Size::M)
+                .style(Style::Filled)
+                .selected(playing || buffering)
+                .colors(play_colors)
+                .filled_icon(true)
+                .tooltip(if buffering { "Загружается… (Space — пауза)" } else { "Пауза / играть (Space)" })
+                .id_salt("bar-play"),
+        );
+        if buffering {
+            common::buffering_overlay(ui, play.rect, play_colors.container, play_colors.content);
+        }
+        if play.clicked() {
             out.push(Command::TogglePlay);
         }
         if ui
@@ -136,18 +149,11 @@ pub fn show(
         {
             out.push(Command::Next);
         }
-        // On (the whole queue or one track) it sits on a tinted disc: the
-        // pill's flat item colours alone look the same either way.
-        let repeat_colors = if p.repeat == Repeat::Off {
-            item
-        } else {
-            Colors { container: on.gamma_multiply(0.24), ..item }
-        };
         if ui
             .add(
                 IconButton::new(repeat_icon(p.repeat))
                     .selected(p.repeat != Repeat::Off)
-                    .colors(repeat_colors)
+                    .colors(toggle_colors(p.repeat != Repeat::Off))
                     .tooltip(repeat_tip(p.repeat))
                     .id_salt("bar-repeat"),
             )
@@ -157,9 +163,15 @@ pub fn show(
         }
         ui.add_space(8.0);
 
+        // The pane's buttons only for its parts turned on in Settings; the
+        // room of those that are off goes to the slider.
+        let (queue_on, lyrics_on) = (PaneTab::Queue.on(&state.prefs), PaneTab::Lyrics.on(&state.prefs));
+        let (show_like, show_lyrics, show_volume) = (!compact, wide && lyrics_on, wide);
+        let trailing = [show_like, queue_on, show_lyrics, show_volume, true].into_iter().filter(|b| *b).count();
+
         // Progress: label, slider, label; a bare slider when narrower; a
         // line under the title when there is no room at all.
-        let trailing_w = if wide { 5.0 * 44.0 } else if compact { 2.0 * 44.0 } else { 3.0 * 44.0 };
+        let trailing_w = trailing as f32 * 44.0;
         let avail = ui.available_width() - trailing_w - 8.0;
         if compact && avail >= 112.0 {
             let dur = p.duration.unwrap_or_default();
@@ -196,7 +208,6 @@ pub fn show(
             ui.add_space(avail.max(0.0));
         }
 
-        let (show_like, show_lyrics, show_volume) = (!compact, wide, wide);
         if show_like {
             let liked = current.is_some_and(|t| t.liked);
             if ui
@@ -213,15 +224,16 @@ pub fn show(
                 out.push(Command::Like(LikeTarget::Track(t.id), !liked));
             }
         }
-        if ui
-            .add(
-                IconButton::new(Icon::QueueMusic)
-                    .selected(pane == Some(PaneTab::Queue))
-                    .colors(item)
-                    .tooltip("Очередь (Ctrl+Q)")
-                    .id_salt("bar-queue"),
-            )
-            .clicked()
+        if queue_on
+            && ui
+                .add(
+                    IconButton::new(Icon::QueueMusic)
+                        .selected(pane == Some(PaneTab::Queue))
+                        .colors(item)
+                        .tooltip("Очередь (Ctrl+Q)")
+                        .id_salt("bar-queue"),
+                )
+                .clicked()
         {
             result.toggle_pane = Some(PaneTab::Queue);
         }
@@ -264,12 +276,24 @@ pub fn show(
             // What does not fit in the pill lives in the menu.
             let mut acts = Vec::new();
             acts.extend((!show_like).then_some(Act::Like));
-            acts.extend((!show_lyrics).then_some(Act::Lyrics));
+            acts.extend((lyrics_on && !show_lyrics).then_some(Act::Lyrics));
             acts.extend((!show_volume).then_some(Act::Volume));
             if !acts.is_empty() {
                 acts.push(Act::Sep);
             }
-            acts.extend([Act::Playlist, Act::Artist, Act::Album, Act::Info, Act::Sep, Act::Tags, Act::Replace]);
+            acts.extend([Act::Playlist, Act::Radio, Act::Artist, Act::Album]);
+            acts.extend(PaneTab::Info.on(&state.prefs).then_some(Act::Info));
+            acts.extend([
+                Act::Share,
+                Act::FindSong,
+                Act::Sep,
+                Act::Tags,
+                Act::Replace,
+                Act::Sep,
+                Act::Dislike,
+                Act::BanArtist,
+            ]);
+
             chrome.track_menu(&more, "bar-more", &acts, t, state, Where::Bar, out);
         }
     });
@@ -289,7 +313,7 @@ pub fn show(
             ui.painter().line_segment([egui::pos2(x0, y), egui::pos2(x0 + (x1 - x0) * f, y)], stroke(on));
         }
     }
-    if p.status == Status::Playing {
+    if matches!(p.status, Status::Playing | Status::Buffering) {
         // Labels tick once a second; the wave asks for frames itself.
         ui.ctx().request_repaint_after(Duration::from_millis(250));
     }

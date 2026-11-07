@@ -5,45 +5,83 @@
 //! shared [`ViewState`]. The UI reads that state each frame under a short
 //! read lock and never calls the library or the audio engine itself.
 
+mod align;
+mod analysis;
+mod quality;
+mod better_covers;
 mod convert;
 mod enrich;
+mod hd_covers;
 mod home;
+mod home_v2;
 mod import;
 mod lyrics;
+mod lyrics_keep;
 mod playlist_cover;
+mod recs;
 mod search;
+mod soulseek;
 mod tags;
 mod torrents;
 pub mod queue;
 mod session;
+mod sharing;
 mod editions;
+mod streams;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, select, tick};
-use nikgob_core::model::{EventContext, EventType, LikeTarget, PlaylistId, TrackId};
+use nikgob_core::model::{
+    EndReason, EventContext, EventMeta, EventOrigin, EventType, LikeTarget, PlaylistId, SourceId, SourceKind, TrackId,
+};
+use nikgob_core::streaming::{Service as StreamKind, StreamService};
 use nikgob_library::{Library, ReleaseSortKey, Sort, TrackSortKey};
 use nikgob_view::{Command, LIKED_PLAYLIST, Status, Toast, ViewState};
 use parking_lot::{RwLock, RwLockReadGuard};
 
 pub use convert::Resolver;
 pub use import::ImportSetup;
+pub use recs::{
+    HomePreview, ModelPreview, PreviewTile, preview_home, preview_home_with, preview_ready_tiles, preview_replay, preview_replay_with,
+    preview_tile_days,
+};
 pub use nikgob_import::ImportConfig;
-pub use nikgob_metadata::MetadataConfig;
+pub use nikgob_metadata::{Metadata, MetadataConfig};
+pub use streams::{SOUNDCLOUD_WINDOW_HINT, StreamSchedule, WINDOW_HINT, WebLogin, WebLoginError, window_hint};
 use import::{IMPORT_ID, ImportService, Internal};
 use queue::{Entry, Queue};
 
 /// How many of the tracks before the current one the queue view lists.
 const HISTORY_SHOWN: usize = 50;
 
-/// What the playback backend should play: a queue entry id and its file.
+/// In a [`PlaybackEvent::Error`] of a SoundCloud track: SoundCloud streams
+/// it only with DRM, and the backend can play it through SoundCloud's own
+/// player instead (`nikgob-sc-widget`). The same source is then played
+/// again, once per entry; the backend knows the track now and takes that
+/// route. If that fails too, its other sources are tried as for any error.
+pub const OFFICIAL_PLAYER_ROUTE: &str = "[soundcloud official player]";
+
+/// Where the audio of a [`PlayRequest`] comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlaySource {
+    /// A local file.
+    File(PathBuf),
+    /// A track of a streaming service, opened through the
+    /// [`StreamService`] registered for `service` (`id` is the remote id,
+    /// the locator of the library source).
+    Stream { service: StreamKind, id: String },
+}
+
+/// What the playback backend should play: a queue entry id and its audio.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayRequest {
     pub id: u64,
-    pub path: PathBuf,
-    /// ReplayGain/R128 track gain to apply, in dB.
+    pub source: PlaySource,
+    /// ReplayGain/R128 track gain to apply, in dB (0 for streams: their
+    /// gain comes with the stream).
     pub gain_db: f32,
     pub duration: Option<Duration>,
 }
@@ -56,10 +94,18 @@ pub enum PlaybackEvent {
     /// The preloaded next item took over at the sample boundary.
     TrackChanged { to: u64 },
     Position { id: u64, position: Duration },
+    /// [`Self::Position`] as read at `at`: it moved on while the event
+    /// waited to be taken, which is made up for.
+    PositionAt { id: u64, position: Duration, at: Instant },
     Paused,
     Resumed,
     Ended { id: u64 },
     Error { id: u64, message: String },
+    /// What a stream item actually plays ("Opus ~160 кбит/с"), once opened.
+    Quality { id: u64, label: String },
+    /// How long the item is, as the engine found it (the container's
+    /// length, else the stream's): the length of a track that has none.
+    Duration { id: u64, duration: Duration },
 }
 
 /// The audio engine as the runtime sees it.
@@ -117,11 +163,20 @@ pub struct RuntimeConfig {
     pub settings_path: Option<PathBuf>,
     /// Import, Inbox, Trash and lyrics; None = playback only.
     pub import: Option<ImportSetup>,
+    /// The streaming services (at most one per [`StreamKind`]). Tracks whose
+    /// sources are streams play through them; without one, such a source is
+    /// skipped.
+    pub streams: Vec<Arc<dyn StreamService>>,
 }
 
 enum Msg {
     Cmd(Command),
     Service(Box<dyn Service>),
+    Indexer(Arc<dyn nikgob_core::indexer::Indexer>),
+    Source(Arc<dyn nikgob_core::source::Source>),
+    OdesliBase(String),
+    GraphMetadata(Box<nikgob_metadata::Metadata>),
+    WebLogin(StreamKind, Arc<dyn WebLogin>),
     Shutdown,
 }
 
@@ -141,6 +196,17 @@ impl Runtime {
         playback: Box<dyn Playback>,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
+        Self::start_scheduled(config, playback, wake, StreamSchedule::default())
+    }
+
+    /// [`Self::start`] with other streaming intervals (tests make them
+    /// short).
+    pub fn start_scheduled(
+        config: RuntimeConfig,
+        playback: Box<dyn Playback>,
+        wake: Arc<dyn Fn() + Send + Sync>,
+        schedule: StreamSchedule,
+    ) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (pb_tx, pb_rx) = crossbeam_channel::unbounded();
         let (in_tx, in_rx) = crossbeam_channel::unbounded();
@@ -154,6 +220,7 @@ impl Runtime {
         }
         let state = Arc::new(RwLock::new(ViewState {
             prefs: initial_prefs,
+            home: nikgob_view::HomeView { loading: true, ..Default::default() },
             ..ViewState::default()
         }));
         let worker = {
@@ -162,6 +229,7 @@ impl Runtime {
                 .name("nikgob-runtime".into())
                 .spawn(move || {
                     let mut w = Worker::new(config, playback, state, wake, in_tx);
+                    w.streaming.schedule = schedule;
                     w.run(rx, pb_rx, in_rx);
                 })
                 .expect("spawn runtime thread")
@@ -199,6 +267,38 @@ impl Runtime {
     pub fn add_service(&self, service: Box<dyn Service>) {
         let _ = self.tx.send(Msg::Service(service));
     }
+
+    /// Uses this torrent indexer instead of the one from settings.toml
+    /// (another backend, or a fake one in tests).
+    pub fn set_indexer(&self, indexer: Arc<dyn nikgob_core::indexer::Indexer>) {
+        let _ = self.tx.send(Msg::Indexer(indexer));
+    }
+
+    /// One more download source (Soulseek, or a fake one in tests); it
+    /// replaces a source of the same kind. Whether it is used is its switch
+    /// on «Источники».
+    pub fn add_source(&self, source: Arc<dyn nikgob_core::source::Source>) {
+        let _ = self.tx.send(Msg::Source(source));
+    }
+
+    /// Logs `service` in through this sign-in window of the app for a
+    /// [`nikgob_core::streaming::LoginInput::Browser`] login (YouTube Music's
+    /// Google sign-in; see [`WebLogin`]). A logout also forgets its session.
+    pub fn set_web_login(&self, service: StreamKind, login: Arc<dyn WebLogin>) {
+        let _ = self.tx.send(Msg::WebLogin(service, login));
+    }
+
+    /// Asks this Odesli base url for share links instead of
+    /// api.song.link (tests).
+    pub fn set_odesli_base(&self, base: impl Into<String>) {
+        let _ = self.tx.send(Msg::OdesliBase(base.into()));
+    }
+
+    /// The graph of similar music asks this online metadata (tests: its
+    /// clients pointed at a mock server) instead of the import's.
+    pub fn set_graph_metadata(&self, m: nikgob_metadata::Metadata) {
+        let _ = self.tx.send(Msg::GraphMetadata(Box::new(m)));
+    }
 }
 
 impl Drop for Runtime {
@@ -210,13 +310,112 @@ impl Drop for Runtime {
     }
 }
 
-/// How far the engine's position may differ from our extrapolation before
-/// the view is told (normal jitter is a few tens of milliseconds).
-const POSITION_DRIFT: Duration = Duration::from_millis(1500);
+/// The toast of «Добавить в плейлист»: what was added and what the
+/// playlist had already.
+fn added_to_playlist(name: &str, added: usize, already: usize) -> String {
+    match (added, already) {
+        (0, 0) => format!("Добавлено в «{name}»"),
+        (0, _) => format!("Уже есть в «{name}»"),
+        (_, 0) => format!("Добавлено в «{name}»"),
+        (_, 1) => format!("Добавлено {added}, 1 уже был в «{name}»"),
+        _ => format!("Добавлено {added}, {already} уже были в «{name}»"),
+    }
+}
+
+/// Up to this far apart, our position and the heard one are the same.
+const POSITION_JITTER: Duration = Duration::from_millis(4);
+/// Further apart than this, our position jumps to the heard one (a seek, a
+/// loop, a long stall); closer, it runs faster or slower until they meet.
+const POSITION_SNAP: Duration = Duration::from_millis(300);
+/// The pace is off by the difference over this (half of it is gone by
+/// the next report, a quarter second later) ...
+const SLEW_SECS: f64 = 0.5;
+/// ... with the pace at most this much off the normal one.
+const SLEW_MAX: f64 = 0.25;
 /// After we move the position ourselves (seek, start), a report the engine
 /// sent before it heard about that can still be on its way: such a far-off
 /// report is ignored for this long.
 const POSITION_SETTLE: Duration = Duration::from_millis(500);
+/// What to do with our position when the engine reports the heard one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Follow {
+    Keep,
+    /// Go on from where we are at this pace.
+    Rate(f64),
+    /// Jump to the heard position.
+    Snap,
+}
+
+/// How our position `ours` follows the heard one (`stalled`: it has not
+/// moved since the last report) while playing at `rate`. It never moves
+/// backwards: ahead of a stalled sound it waits, ahead of a moving one it
+/// slows down.
+fn follow(ours: Duration, heard: Duration, stalled: bool, rate: f64) -> Follow {
+    if ours.abs_diff(heard) > POSITION_SNAP {
+        return Follow::Snap;
+    }
+    if stalled && ours >= heard {
+        return Follow::Rate(0.0);
+    }
+    if ours.abs_diff(heard) <= POSITION_JITTER {
+        return if rate == 1.0 { Follow::Keep } else { Follow::Rate(1.0) };
+    }
+    let error = heard.as_secs_f64() - ours.as_secs_f64();
+    Follow::Rate((1.0 + error / SLEW_SECS).clamp(1.0 - SLEW_MAX, 1.0 + SLEW_MAX))
+}
+
+/// A toast no snackbar took away is dropped after this long.
+const TOAST_KEPT: Duration = Duration::from_secs(60);
+
+/// How the playing track is heard (profiles-v1 §11): the time it played,
+/// that time weighted by how far the window was from the user (0 focused,
+/// 0.5 in view behind another window, 1 hidden) where that is known, and
+/// by the volume. Counted between the moments anything of it changes.
+#[derive(Default)]
+struct Heard {
+    since: Option<Instant>,
+    played_ms: f64,
+    known_ms: f64,
+    away_ms: f64,
+    volume_ms: f64,
+}
+
+impl Heard {
+    /// Counting starts over (a new track starts).
+    fn reset(&mut self) {
+        *self = Self { since: Some(Instant::now()), ..Self::default() };
+    }
+
+    /// The time since the last tick played (or not) in this state.
+    fn tick(&mut self, playing: bool, away: Option<f32>, volume: f32) {
+        let now = Instant::now();
+        let ms = self.since.map_or(0.0, |s| now.duration_since(s).as_secs_f64() * 1000.0);
+        self.since = Some(now);
+        self.add(ms, playing, away, volume);
+    }
+
+    fn add(&mut self, ms: f64, playing: bool, away: Option<f32>, volume: f32) {
+        if !playing {
+            return;
+        }
+        self.played_ms += ms;
+        self.volume_ms += ms * f64::from(volume);
+        if let Some(a) = away {
+            self.known_ms += ms;
+            self.away_ms += ms * f64::from(a);
+        }
+    }
+
+    /// The attention (when the window's state covers half the time played
+    /// at least) and the mean volume.
+    fn take(&self) -> (Option<f32>, Option<f32>) {
+        if self.played_ms < 1.0 {
+            return (None, None);
+        }
+        let attention = (self.known_ms >= 0.5 * self.played_ms).then(|| (self.away_ms / self.known_ms) as f32);
+        (attention, Some((self.volume_ms / self.played_ms) as f32))
+    }
+}
 
 struct Worker {
     lib: Library,
@@ -234,6 +433,11 @@ struct Worker {
     status: Status,
     position: Duration,
     position_at: Instant,
+    /// How fast `position` moves from `position_at` (1 normal; a little off
+    /// while it meets the heard position, 0 while the sound stalls).
+    rate: f64,
+    /// The engine's last position report, to tell a stall.
+    reported: Option<(u64, Duration)>,
     /// When we last moved `position` ourselves (see [`POSITION_SETTLE`]).
     jumped_at: Instant,
     volume: f32,
@@ -241,6 +445,15 @@ struct Worker {
     /// The queue came back from the last run, paused here; nothing is
     /// loaded in the backend until play (see [`session`]).
     resume_at: Option<Duration>,
+    /// The source of the playing entry failed mid-track (entry id, where it
+    /// got to): the next one starts there, not from the top.
+    failover: Option<(u64, Duration)>,
+    /// The entry whose YouTube stream was opened once more after its URLs
+    /// kept being refused mid-track (once per entry).
+    stream_retried: Option<u64>,
+    /// The entry whose DRM-only SoundCloud source went to SoundCloud's own
+    /// player (once per entry, see [`OFFICIAL_PLAYER_ROUTE`]).
+    official_player_tried: Option<u64>,
     /// `session.json` (volume and queue between runs) and what was last
     /// written to it.
     session_path: Option<PathBuf>,
@@ -251,15 +464,74 @@ struct Worker {
     toast_id: u64,
     revision: u64,
     play_context: EventContext,
+    /// What the queue plays (`release:<id>`, `playlist:<id>`, a mix, a
+    /// radio's seed): the history's `context_id`.
+    play_context_id: Option<String>,
+    /// The page of the queue the last run left (`release:<id>`…, see
+    /// [`context_page`]) and the queue generation it came back in: the
+    /// header's link while that queue plays.
+    restored_page: Option<(u64, String)>,
+    /// Who chose the next start, when the command that starts it knows.
+    next_origin: Option<EventOrigin>,
+    /// The queue generation of the last start: a start in another queue
+    /// is the user's choice.
+    origin_gen: Option<u64>,
+    /// The playing entry's end is recorded already.
+    ended: bool,
+    /// How the playing entry is heard so far (its end's attention and
+    /// volume).
+    heard: Heard,
+    /// Entries «Автовоспроизведение» added to continue an album's world.
+    autoplay_entries: std::collections::HashSet<u64>,
     prefs_path: Option<PathBuf>,
     settings_path: Option<PathBuf>,
     exported_rev: u64,
     last_export: Instant,
+    /// Where the last export went and [`Library::userdata_fingerprint`] then.
+    exported_fp: Option<(PathBuf, Vec<i64>)>,
     import: Option<ImportService>,
+    /// Registered streaming services (see [`RuntimeConfig::streams`]).
+    streams: Vec<Arc<dyn StreamService>>,
+    /// Sources of the playing entry that failed to open, and the one asked
+    /// for last (see [`Worker::request`]).
+    tried: Vec<SourceId>,
+    playing_source: Option<(SourceId, SourceKind)>,
+    /// What recent stream items really are, by item id (see
+    /// [`PlaybackEvent::Quality`]; the preloaded next one opens early).
+    qualities: Vec<(u64, String)>,
     indexer: Option<Arc<dyn nikgob_core::indexer::Indexer>>,
+    /// Download sources other than the indexer's torrents (khinsider, the
+    /// free services, Soulseek), whether on or not (docs/stage4.5.md).
+    sources: Vec<Arc<dyn nikgob_core::source::Source>>,
     /// Last torrent search, indexed like `SearchView::torrents.results`.
     candidates: Vec<nikgob_core::indexer::Candidate>,
     torrents: torrents::Torrents,
+    /// Accounts, stream search and pages, likes sync, wishlist, sharing.
+    streaming: streams::Streams,
+    /// The background sound analysis and the vector index it fills.
+    analysis: analysis::FileAnalysis,
+    /// The background spectrum check of the files (fake lossless).
+    quality: quality::QualityJob,
+    /// Mixes, radio, discovery (stage 4).
+    recs: recs::RecsState,
+    /// Albums whose larger cover was looked up in this run.
+    hd_asked: hd_covers::Asked,
+    /// Albums and clips whose real art was looked up in this run.
+    better_asked: better_covers::Asked,
+    /// The album the queue plays (and the queue's generation then): its
+    /// tracks the services add later join the queue.
+    album_queue: Option<(nikgob_core::model::ReleaseId, u64)>,
+    /// The Soulseek source (settings.toml `[soulseek]`).
+    soulseek: soulseek::SoulseekService,
+    /// «Загрузки → Раздача»: speeds and what was given away.
+    sharing: sharing::Sharing,
+    /// The lyrics aligner's thread (docs/lyrics-align.md).
+    align: align::AlignService,
+    /// Where its models are downloaded.
+    models_dir: Option<PathBuf>,
+    align_was_playing: bool,
+    /// The worker's own inbox (for threads started later).
+    internal_tx: Sender<Internal>,
 }
 
 impl Worker {
@@ -275,6 +547,15 @@ impl Worker {
             .as_ref()
             .map(|i| (i.torrent_state_dir.clone(), i.torrent_offline))
             .unwrap_or_default();
+        let slsk_state = config.import.as_ref().map(|i| i.torrent_state_dir.with_file_name("soulseek"));
+        let sharing = sharing::Sharing::new(config.import.as_ref().and_then(|i| i.torrent_state_dir.parent()));
+        let soulseek = soulseek::SoulseekService::new(config.library_dir.clone(), slsk_state);
+        let streaming = streams::Streams::new(internal.clone());
+        let analysis = analysis::FileAnalysis::new(internal.clone());
+        let quality = quality::QualityJob::new(internal.clone());
+        let recs = recs::RecsState::new(internal.clone());
+        let models_dir = config.import.as_ref().and_then(|i| i.models_dir.clone());
+        let internal_tx = internal.clone();
         let import = config
             .import
             .and_then(|setup| ImportService::start(setup, config.library.clone(), internal));
@@ -284,6 +565,7 @@ impl Worker {
         let volume = saved.volume.unwrap_or(0.8).clamp(0.0, 1.0);
         playback.set_volume(if saved.muted { 0.0 } else { volume });
         playback.configure(crossfade(&config.prefs), config.prefs.normalization);
+        config.library.set_album_likes_tracks(config.prefs.album_like_tracks);
         Self {
             res: Resolver::new(config.library.clone(), config.library_dir),
             lib: config.library,
@@ -296,10 +578,15 @@ impl Worker {
             status: Status::Stopped,
             position: Duration::ZERO,
             position_at: Instant::now(),
+            rate: 1.0,
+            reported: None,
             jumped_at: Instant::now(),
             volume,
             muted: saved.muted,
             resume_at: None,
+            failover: None,
+            stream_retried: None,
+            official_player_tried: None,
             session_path,
             session_saved: String::new(),
             editions: Vec::new(),
@@ -307,53 +594,130 @@ impl Worker {
             toast_id: 0,
             revision: 0,
             play_context: EventContext::Other,
+            play_context_id: None,
+            restored_page: None,
+            next_origin: None,
+            origin_gen: None,
+            ended: true,
+            heard: Heard::default(),
+            autoplay_entries: Default::default(),
             prefs_path: config.prefs_path,
             settings_path: config.settings_path.clone(),
             exported_rev: 0,
             last_export: Instant::now(),
+            exported_fp: None,
             indexer: search::indexer_from(config.settings_path.as_deref()),
+            sources: search::web_sources_from(config.settings_path.as_deref()),
             candidates: Vec::new(),
             torrents: torrents::Torrents::new(torrent_state, torrent_offline),
             import,
+            streams: config.streams,
+            tried: Vec::new(),
+            playing_source: None,
+            qualities: Vec::new(),
+            streaming,
+            analysis,
+            quality,
+            hd_asked: Default::default(),
+            better_asked: Default::default(),
+            album_queue: None,
+            recs,
+            soulseek,
+            sharing,
+            align: Default::default(),
+            models_dir,
+            align_was_playing: false,
+            internal_tx,
         }
     }
 
     fn run(&mut self, rx: Receiver<Msg>, pb: Receiver<PlaybackEvent>, internal: Receiver<Internal>) {
-        let ticker = tick(Duration::from_secs(5));
+        let ticker = tick(self.streaming.schedule.tick);
         let fast = tick(Duration::from_secs(1));
+        // Once each, after a backup: doubles of a song, an artist or an
+        // album become one, and every album has a line per place it counts.
+        self.lib.repair_catalog();
+        self.export_if_stale();
         self.load_torrent_history();
         self.publish_downloads();
         self.resume_torrents();
+        self.soulseek_apply();
         self.start_enrich();
         self.restore_session();
         self.offer_editions();
+        self.wish_restart();
+        self.publish_sources();
+        self.start_streams();
+        self.start_analysis();
+        self.start_quality();
+        self.start_align();
+        self.dislikes_load(false);
         loop {
             select! {
                 recv(rx) -> m => match m {
                     Ok(Msg::Cmd(c)) => self.command(c),
                     Ok(Msg::Service(s)) => self.services.push(s),
-                    Ok(Msg::Shutdown) | Err(_) => break,
+                    Ok(Msg::Indexer(i)) => {
+                        self.indexer = Some(i);
+                        self.publish_sources();
+                        self.wish_sources_ready();
+                        self.wish_tick();
+                    }
+                    Ok(Msg::Source(s)) => {
+                        // One per kind: a new one of a kind replaces the old.
+                        self.sources.retain(|x| x.key() != s.key());
+                        self.sources.push(s);
+                        self.publish_sources();
+                        self.wish_sources_ready();
+                        self.wish_tick();
+                    }
+                    Ok(Msg::OdesliBase(base)) => self.set_odesli_base(&base),
+                    Ok(Msg::GraphMetadata(m)) => self.set_graph_metadata(*m),
+                    Ok(Msg::WebLogin(service, login)) => self.set_web_login(service, login),
+                    Ok(Msg::Shutdown) | Err(_) => {
+                        self.record_closed();
+                        break;
+                    }
                 },
                 recv(pb) -> e => if let Ok(e) = e { self.playback_event(e) },
                 recv(internal) -> m => if let Ok(m) = m { self.internal(m) },
-                recv(fast) -> _ => self.poll_torrents(),
+                recv(fast) -> _ => {
+                    self.soloist_poll();
+                    self.poll_torrents();
+                    self.poll_share();
+                    self.wish_poll_direct();
+                }
                 recv(ticker) -> _ => {
                     self.expire_toasts();
                     self.maybe_export(false);
                     self.save_session();
+                    self.stream_tick();
+                    self.recs_tick();
                 }
             }
+            self.analysis.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
+            self.quality.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
+            self.align_playing(matches!(self.status, Status::Playing | Status::Buffering));
         }
         self.save_session();
         self.maybe_export(true);
         self.playback.stop();
         self.shutdown_torrents();
+        self.soulseek.shutdown();
+        self.sharing.save(true);
+        self.streaming.analysis.shutdown();
+        self.analysis.shutdown();
+        self.quality.shutdown();
+        self.align.shutdown();
     }
 
-    fn publish(&mut self, f: impl FnOnce(&mut ViewState, &mut Resolver)) {
+    /// Applies `f` under the state's write lock. The UI waits for this lock
+    /// every frame, so view values are built before it (the library, the
+    /// resolver and files are never touched inside `f`).
+    fn publish(&mut self, f: impl FnOnce(&mut ViewState)) {
         {
             let mut st = self.state.write();
-            f(&mut st, &mut self.res);
+            f(&mut st);
             self.revision += 1;
             st.revision = self.revision;
         }
@@ -361,25 +725,59 @@ impl Worker {
     }
 
     fn toast(&mut self, text: impl Into<String>, action: Option<(String, Command)>) {
+        self.push_toast(text.into(), action, None);
+    }
+
+    /// A toast whose button takes the user somewhere ([`nikgob_view::Link`]).
+    fn toast_open(&mut self, text: impl Into<String>, label: &str, link: nikgob_view::Link) {
+        self.push_toast(text.into(), None, Some((label.to_owned(), link)));
+    }
+
+    fn push_toast(&mut self, text: String, action: Option<(String, Command)>, open: Option<(String, nikgob_view::Link)>) {
+        // A like or unlike makes the undo of the one before on the same
+        // thing wrong («Убрано из Любимых · Отменить» after a like again):
+        // it is withdrawn, so the snackbar says what the heart shows.
+        if let Some((_, Command::Like(target, _))) = &action {
+            let stale = |t: &Toast| matches!(&t.action, Some((_, Command::Like(old, _))) if old == target);
+            if self.state.read().toasts.iter().any(|t| stale(t) && t.text != text) {
+                self.publish(|s| s.toasts.retain(|t| !stale(t) || t.text == text));
+            }
+        }
+        // The same message while it is up: its time starts over.
+        let same = self.state.read().toasts.iter().position(|t| t.text == text && t.action == action && t.open == open);
+        if let Some(k) = same {
+            self.publish(|s| {
+                let t = &mut s.toasts[k];
+                t.at = Instant::now();
+                t.again += 1;
+            });
+            return;
+        }
         self.toast_id += 1;
-        let text = text.into();
         let t = Toast {
             id: self.toast_id,
             kind: nikgob_view::ToastKind::guess(&text),
             text,
             action,
+            open,
             at: Instant::now(),
+            long: false,
+            again: 0,
         };
-        self.publish(|s, _| s.toasts.push(t));
+        self.publish(|s| s.toasts.push(t));
     }
 
+    /// Toasts no snackbar host took away (the window was hidden): the UI
+    /// shows one at a time and dismisses each as it ends, a toast waiting
+    /// behind an undo too, so this is only the last resort.
     fn expire_toasts(&mut self) {
         let stale = {
             let s = self.state.read();
-            s.toasts.iter().any(|t| t.at.elapsed() > Duration::from_secs(6))
+            // «Пока не закрою»: they stay until the user closes them.
+            s.prefs.toast_s != 0 && s.toasts.iter().any(|t| t.at.elapsed() > TOAST_KEPT)
         };
         if stale {
-            self.publish(|s, _| s.toasts.retain(|t| t.at.elapsed() <= Duration::from_secs(6)));
+            self.publish(|s| s.toasts.retain(|t| t.at.elapsed() <= TOAST_KEPT));
         }
     }
 
@@ -413,7 +811,7 @@ impl Worker {
         }
         match c {
             Command::TogglePlay => match self.status {
-                Status::Playing => self.pause(),
+                Status::Playing | Status::Buffering => self.pause(),
                 Status::Paused => self.resume(),
                 _ => {
                     if let Some(e) = self.queue.current() {
@@ -424,7 +822,7 @@ impl Worker {
             Command::Play => self.resume(),
             Command::Pause => self.pause(),
             Command::Next => {
-                self.record_end(true);
+                self.record_end(true, EndReason::UserNext);
                 match self.queue.skip_forward() {
                     Some(e) => self.start(e),
                     None => self.stop(),
@@ -434,26 +832,39 @@ impl Worker {
                 if self.position_now() > Duration::from_secs(3) || self.queue.current().is_none() {
                     self.seek(Duration::ZERO);
                 } else if let Some(e) = self.queue.previous() {
+                    self.user_switch(EventOrigin::Manual);
                     self.start(e);
                 }
             }
             Command::Seek(p) => self.seek(p),
             Command::PickLyricsSource(t, src) => self.pick_lyrics_source(t, src),
+            Command::CraftLyrics { track, source, target, deep } => self.craft_lyrics(track, source, target, deep),
+            Command::ClearCraft => self.clear_craft(),
+            Command::CancelCraft => self.cancel_craft(),
+            Command::ShowLyricsAs(t, sync) => self.show_lyrics_as(t, sync),
+            Command::SaveLyrics { track, source } => self.save_lyrics(track, source),
+            Command::AlignModel { key, download } => self.align_model(&key, download),
             Command::SeekBy(ms) => {
                 let p = self.position_now().as_millis() as i64 + ms;
                 self.seek(Duration::from_millis(p.max(0) as u64));
             }
             Command::SetVolume(v) => {
-                self.volume = v.clamp(0.0, 1.0);
+                let v = v.clamp(0.0, 1.0);
+                if v == self.volume && !self.muted {
+                    return;
+                }
+                self.heard_tick();
+                self.volume = v;
                 self.muted = false;
                 self.playback.set_volume(self.volume);
-                self.publish_player();
+                self.publish_volume();
             }
             Command::ToggleMute => {
+                self.heard_tick();
                 self.muted = !self.muted;
                 self.playback
                     .set_volume(if self.muted { 0.0 } else { self.volume });
-                self.publish_player();
+                self.publish_volume();
             }
             Command::ToggleShuffle => {
                 let on = !self.queue.shuffle;
@@ -467,37 +878,41 @@ impl Worker {
                 self.publish_player();
             }
             Command::PlayRelease { id, start, shuffle } => {
-                let rows = self
-                    .log_err("альбом", self.lib.tracks_of_release(id))
-                    .unwrap_or_default();
+                let ids = self.release_tracks(id);
                 let title = self
                     .lib
                     .get_release(id)
                     .ok()
                     .flatten()
-                    .map(|r| r.title);
-                let ids: Vec<TrackId> = rows.iter().map(|r| r.id).collect();
-                self.play_list(ids, start, shuffle, title, EventContext::Album);
+                    .map(|r| format!("альбома «{}»", r.title));
+                self.play_list(ids, start, shuffle, title, EventContext::Album, Some(format!("release:{id}")));
+                // An album known in part plays at once; the rest of its
+                // tracklist joins the queue when the services tell it.
+                self.album_queue = Some((id, self.queue.generation()));
+                self.complete_tracklist(id);
             }
             Command::PlayPlaylist { id, start, shuffle } => {
-                let (ids, name) = self.playlist_tracks(id);
-                self.play_list(ids, start, shuffle, Some(name), EventContext::Playlist);
+                let (ids, name) = self.playlist_tracks(id, start);
+                let name = format!("плейлиста «{name}»");
+                self.play_list(ids, start, shuffle, Some(name), EventContext::Playlist, Some(format!("playlist:{id}")));
             }
             Command::PlayArtist { id, shuffle } => {
                 let rows = self
                     .log_err("исполнитель", self.lib.tracks_of_artist(id, 0, 500))
                     .unwrap_or_default();
                 let name = self.lib.get_artist(id).ok().flatten().map(|a| a.name);
-                let ids = rows.iter().map(|r| r.id).collect();
-                self.play_list(ids, None, shuffle, name, EventContext::Artist);
+                let ids = self.playable(&rows, None);
+                self.play_list(ids, None, shuffle, name, EventContext::Artist, Some(format!("artist:{id}")));
             }
             Command::PlayTracks {
                 tracks,
                 start,
                 context,
             } => {
+                self.user_switch(EventOrigin::Manual);
                 self.queue.set(&tracks, start, Some(context));
                 self.play_context = EventContext::Library;
+                self.play_context_id = None;
                 if let Some(e) = self.queue.current() {
                     self.start(e);
                 }
@@ -514,26 +929,31 @@ impl Worker {
                 self.publish_player();
                 self.toast("Добавлено в очередь", None);
             }
+            Command::PlayReleaseNext(id) => {
+                let ids = self.release_tracks(id);
+                if ids.is_empty() {
+                    return;
+                }
+                self.queue.play_next(&ids);
+                self.preload_next();
+                self.publish_player();
+                let title = self.lib.get_release(id).ok().flatten().map(|r| r.title).unwrap_or_default();
+                self.toast(format!("Следующим: «{title}»"), None);
+            }
             Command::EnqueueRelease(id) => {
-                let ids: Vec<TrackId> = self
-                    .log_err("альбом", self.lib.tracks_of_release(id))
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|r| r.id)
-                    .collect();
+                let ids = self.release_tracks(id);
                 self.command(Command::Enqueue(ids));
             }
             Command::EnqueueArtist(id) => {
-                let ids: Vec<TrackId> = self
+                let rows = self
                     .log_err("исполнитель", self.lib.tracks_of_artist(id, 0, 2000))
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|r| r.id)
-                    .collect();
+                    .unwrap_or_default();
+                let ids = self.playable(&rows, None);
                 self.command(Command::Enqueue(ids));
             }
             Command::PlayQueueEntry(entry) => {
                 if let Some(e) = self.queue.jump(entry) {
+                    self.user_switch(EventOrigin::Manual);
                     self.start(e);
                 }
             }
@@ -552,23 +972,52 @@ impl Worker {
                 self.preload_next();
                 self.publish_player();
             }
-            Command::SaveQueueAsPlaylist(name) => {
-                let tracks = self.queue.tracks();
+            Command::SaveTracksAsPlaylist { name, tracks } => {
+                let before = self.library_tracks();
                 if let Some(p) = self.log_err("плейлист", self.lib.create_playlist(&name)) {
                     let _ = self.log_err("плейлист", self.lib.playlist_add_many(p.id, &tracks));
                     self.toast(format!("Плейлист «{name}» сохранён"), None);
-                    self.load_library();
+                    self.library_edited(before, Vec::new());
+                }
+            }
+            Command::HideHomeCard => {
+                self.publish(|s| s.prefs.home_card = false);
+                self.save_prefs();
+                self.load_home();
+                self.toast(
+                    "Карточка скрыта. Включить её снова можно в Настройках → Внешний вид → Главная.",
+                    Some(("Вернуть".into(), Command::SetPref(nikgob_view::PrefPatch::HomeCard(true)))),
+                );
+                self.publish(|s| {
+                    if let Some(t) = s.toasts.last_mut() {
+                        t.long = true;
+                    }
+                });
+            }
+            Command::SaveQueueAsPlaylist(name) => {
+                let tracks = self.queue.tracks();
+                let before = self.library_tracks();
+                if let Some(p) = self.log_err("плейлист", self.lib.create_playlist(&name)) {
+                    let _ = self.log_err("плейлист", self.lib.playlist_add_many(p.id, &tracks));
+                    self.toast(format!("Плейлист «{name}» сохранён"), None);
+                    self.library_edited(before, Vec::new());
                 }
             }
             Command::Like(LikeTarget::Release(id), on) => self.like_release(id, on),
             Command::Like(target, on) => {
+                let before = self.library_tracks();
                 let r = if on {
                     self.lib.like(target)
                 } else {
                     self.lib.unlike(target)
                 };
                 if self.log_err("лайк", r).is_some() {
+                    let mut wished = false;
                     if let LikeTarget::Track(t) = target {
+                        if on {
+                            self.liked_undislikes(t);
+                            self.new_liked(t);
+                        }
                         let _ = self.lib.record_event(
                             t,
                             if on { EventType::Like } else { EventType::Unlike },
@@ -576,38 +1025,58 @@ impl Worker {
                             None,
                             EventContext::Other,
                         );
+                        wished = self.track_liked(t, on);
                     }
-                    self.toast(
-                        if on { "Добавлено в Любимые" } else { "Убрано из Любимых" },
-                        Some(("Отменить".into(), Command::Like(target, !on))),
-                    );
-                    self.refresh_liked(target, on);
+                    // A like that downloads says so (a like of a track
+                    // without a file puts it into «Хочу скачать»).
+                    let text = match (on, wished) {
+                        (true, true) if self.can_download() => "В Любимых · скачаю в фоне",
+                        (true, true) => "В Любимых · скачается, когда подключишь торренты",
+                        (true, false) => "Добавлено в Любимые",
+                        (false, _) => "Убрано из Любимых",
+                    };
+                    self.toast(text, Some(("Отменить".into(), Command::Like(target, !on))));
+                    // Its album's cards are read again below.
+                    if let LikeTarget::Track(t) = target {
+                        let _ = self.single_follows_like(t, on);
+                    }
+                    self.refresh_liked(target, on, before);
                 }
             }
             Command::CreatePlaylist(name) => {
                 if self.log_err("плейлист", self.lib.create_playlist(&name)).is_some() {
-                    self.load_library();
+                    self.library_edited(Held::Same, Vec::new());
                 }
             }
             Command::RenamePlaylist(id, name) => {
                 if self.log_err("плейлист", self.lib.rename_playlist(id, &name)).is_some() {
-                    self.load_library();
+                    self.library_edited(Held::Same, Vec::new());
                     self.load_playlist(id);
                 }
             }
             Command::DeletePlaylist(id) => {
+                let before = self.library_tracks();
                 if self.log_err("плейлист", self.lib.delete_playlist(id)).is_some() {
                     self.toast("Плейлист удалён", None);
-                    self.load_library();
+                    self.library_edited(before, Vec::new());
                 }
             }
             Command::AddToPlaylist(id, tracks) => {
+                let before = self.library_tracks();
+                // Only what it does not have yet: never a track twice.
+                let (mut added, mut already) = (0, 0);
                 if id == LIKED_PLAYLIST {
-                    for t in &tracks {
-                        let _ = self.lib.like(*t);
+                    let mut seen = std::collections::HashSet::new();
+                    for t in tracks.iter().filter(|t| seen.insert(**t)) {
+                        if self.lib.is_liked(*t).unwrap_or(false) {
+                            already += 1;
+                        } else if self.lib.like(*t).is_ok() {
+                            added += 1;
+                            self.track_liked(*t, true);
+                        }
                     }
-                } else {
-                    let _ = self.log_err("плейлист", self.lib.playlist_add_many(id, &tracks));
+                } else if let Some(n) = self.log_err("плейлист", self.lib.playlist_add_missing(id, &tracks)) {
+                    (added, already) = n;
                 }
                 let name = if id == LIKED_PLAYLIST {
                     "Любимые".to_owned()
@@ -618,10 +1087,13 @@ impl Worker {
                         .flatten()
                         .map_or_else(String::new, |p| p.name)
                 };
-                self.toast(format!("Добавлено в «{name}»"), None);
-                self.load_library();
+                self.toast(added_to_playlist(&name, added, already), None);
+                let releases = if id == LIKED_PLAYLIST { self.releases_of(&tracks) } else { Vec::new() };
+                self.library_edited(before, releases);
+                self.playlist_edited(id);
             }
             Command::RemoveFromPlaylist(id, track) => {
+                let before = self.library_tracks();
                 if id == LIKED_PLAYLIST {
                     let _ = self.lib.unlike(track);
                 } else if let Ok(entries) = self.lib.playlist_entries(id, 0, u32::MAX)
@@ -630,7 +1102,9 @@ impl Worker {
                         let _ = self.log_err("плейлист", self.lib.playlist_remove(e.entry.id));
                 }
                 self.load_playlist(id);
-                self.load_library();
+                let releases = if id == LIKED_PLAYLIST { self.releases_of(&[track]) } else { Vec::new() };
+                self.library_edited(before, releases);
+                self.playlist_edited(id);
             }
             Command::MoveInPlaylist {
                 playlist,
@@ -658,63 +1132,76 @@ impl Worker {
             }
             Command::EmptyTrash => self.empty_trash(),
             Command::LoadTrash => self.load_trash(),
+            Command::LoadDownloaded => self.load_downloaded(),
             Command::SetPlaylistCoverMode(id, mode) => self.set_playlist_cover_mode(id, mode),
             Command::ImportFiles(paths) => self.import_paths(paths),
             Command::ImportFolder(dir) => self.import_paths(vec![dir]),
             Command::MergeEditions(id) => self.merge_editions(id),
             Command::KeepEditionsApart(id) => self.keep_editions_apart(id),
+            Command::ConfirmChoice { id, option } if id & streams::WISH_ID != 0 => {
+                self.wish_confirm(id, option);
+            }
             Command::ConfirmChoice { id, option } if id & IMPORT_ID != 0 => {
                 self.confirm_choice(id, option);
             }
+            Command::ConfirmChoice { id, .. } if id & quality::QUALITY_ID != 0 => {
+                // A fakes card is answered song by song (`ConfirmPicked`),
+                // never as a whole.
+                log::warn!("quality: a whole fakes card answered, ignored");
+            }
+            Command::ConfirmPicked { id, sources, accept } if id & quality::QUALITY_ID != 0 => {
+                self.quality_picked(sources, accept);
+            }
+            Command::ConfirmPicked { .. } => {
+                log::warn!("picked songs of an unknown card");
+            }
+            Command::RestoreConvertedFlac => self.restore_converted_flac(),
             Command::LoadLibrary => self.load_library(),
+            Command::DownloadsShown(shown) => self.torrents.shown = shown,
             Command::LoadTracks {
                 offset,
                 limit,
                 sort,
             } => self.load_tracks(offset, limit, sort),
+            Command::FilterTracks(q) => self.filter_tracks(&q),
             Command::SortReleases(sort) => {
-                self.publish(|s, _| s.library.release_sort = sort);
+                self.publish(|s| s.library.release_sort = sort);
                 self.load_library();
             }
             Command::LoadRelease(id) => self.load_release(id),
             Command::LoadArtist(id) => self.load_artist(id),
-            Command::LoadPlaylist(id) => self.load_playlist(id),
+            Command::LoadWorld(key) => self.load_world(&key),
+            Command::LoadPlaylist(id) => {
+                self.load_playlist(id);
+                self.sync_on_open(id);
+            }
             Command::LoadHome => self.load_home(),
             Command::Search(q) => self.search(q),
-            Command::SetPrefs(mut p) => {
-                let old = self.state.read().prefs.clone();
-                if p.masters_dir.as_os_str().is_empty() && !old.masters_dir.as_os_str().is_empty() {
-                    p.masters_dir = old.masters_dir.clone();
-                }
-                self.playback.configure(crossfade(&p), p.normalization);
-                self.torrent_prefs(&p);
-                self.publish(|s, _| s.prefs = *p.clone());
-                self.save_prefs();
-                self.import_prefs(&p);
-                let lyrics_track = self.state.read().lyrics.track;
-                if !old.save_found_lyrics && p.save_found_lyrics
-                    && let Some(track) = lyrics_track
-                {
-                    self.embed_lyrics(track);
-                }
-                if old.gapless != p.gapless {
-                    self.preload_next();
-                }
-                if old.output_device != p.output_device {
-                    self.switch_device(p.output_device.clone());
+            Command::SetPrefs(p) => self.set_prefs(p),
+            Command::SetPref(patch) => {
+                let mut p = self.state.read().prefs.clone();
+                patch.apply(&mut p);
+                self.set_prefs(Box::new(p));
+                if let nikgob_view::PrefPatch::HideMix(m) = patch {
+                    self.mix_hidden(m);
                 }
             }
             Command::MoveMastersDir(dir) => self.move_masters_dir(dir),
             Command::SetIndexer { url, api_key } => self.set_indexer(url, api_key),
+            Command::SetSoulseek(form) => self.set_soulseek(form),
+            Command::SetSoulseekShare { share, upload_limit_kbps } => self.set_soulseek_share(share, upload_limit_kbps),
+            Command::SetSoulseekSlots(n) => self.set_soulseek_slots(n),
+            Command::CheckIndexer { url, api_key } => self.check_indexer(url, api_key),
             Command::DismissToast(id) => {
-                self.publish(|s, _| s.toasts.retain(|t| t.id != id));
+                self.publish(|s| s.toasts.retain(|t| t.id != id));
             }
             Command::OpenTagEditor(t) => self.open_tag_editor(t),
             Command::LookupTags { track, query } => self.lookup_tags(track, query),
             Command::SaveTags { track, tags } => self.save_tags(track, tags),
-            Command::CloseTagEditor => self.publish(|s, _| s.tag_editor = Default::default()),
+            Command::CloseTagEditor => self.publish(|s| s.tag_editor = Default::default()),
             Command::SetPlaylistCover(id, path) => self.set_playlist_cover(id, path),
             Command::SetMetadata { contact, acoustid_key } => self.set_metadata(contact, acoustid_key),
+            Command::SetLastfmKey(key) => self.set_lastfm_key(&key),
             Command::SearchTorrents(q) => self.search_torrents(q),
             c @ (Command::DownloadTorrent { .. }
             | Command::ListTorrentFiles(_)
@@ -727,23 +1214,155 @@ impl Worker {
             Command::ConfirmChoice { .. } => {
                 log::warn!("confirm choice for an unknown item");
             }
+            c @ (Command::StreamLogin { .. }
+            | Command::StreamLogout(_)
+            | Command::Soloist(_)
+            | Command::SetStreamSecrets { .. }
+            | Command::SetSearchSources(_)
+            | Command::LoadStream(_)
+            | Command::PlayStreamTracks { .. }
+            | Command::PlaySearch { .. }
+            | Command::PlayStreamAlbum { .. }
+            | Command::PlayStreamPlaylist { .. }
+            | Command::PlayStreamNext(_)
+            | Command::EnqueueStream(_)
+            | Command::LikeStream { .. }
+            | Command::LikeStreamAlbum { .. }
+            | Command::DownloadStream { .. }
+            | Command::DownloadStreamAlbum(_)
+            | Command::DownloadTracks(_)
+            | Command::DownloadRelease(_)
+            | Command::FollowStreamPlaylist(_)
+            | Command::AddStreamToPlaylist(..)
+            | Command::Share(_)
+            | Command::LoadWishlist
+            | Command::WishlistDownload(_)
+            | Command::WishlistDismiss(_)
+            | Command::WishlistRestore(_)
+            | Command::WishlistRetry(_)
+            | Command::WishlistRetryAll
+            | Command::WishlistSaveFromYoutube(_)
+            | Command::WishlistAttach { .. }
+            | Command::ImportFromService(_)
+            | Command::ImportExportFiles(_)
+            | Command::ClearStreamCache
+            | Command::WindowState { .. }
+            | Command::SetPlaylistSync { .. }
+            | Command::LoadDiscography(_)
+            | Command::FindSong { .. }
+            | Command::CloseFindSong
+            | Command::ReplaceTrack { .. }
+            | Command::UndoReplace(_)) => {
+                if let Some(c) = self.stream_command(c) {
+                    log::warn!("unhandled {c:?}");
+                }
+            }
+            c @ (Command::PlayMix { .. }
+            | Command::StartRadio { .. }
+            | Command::RecFeedback { .. }
+            | Command::Dislike { .. }
+            | Command::RefreshMix { .. }
+            | Command::PlayBlend { .. }
+            | Command::DownloadMix { .. }) => {
+                if let Some(c) = self.recs_command(c) {
+                    log::warn!("unhandled {c:?}");
+                }
+            }
         }
+    }
+
+    /// A track was liked / unliked here: the services hear about it, and a
+    /// new like of a track without a file starts its download.
+    /// A like / unlike of a track: to its services, and to «Хочу скачать».
+    /// True when the like put the track there.
+    fn track_liked(&mut self, track: TrackId, on: bool) -> bool {
+        self.push_like(track, on);
+        let wished = if on {
+            self.wish_for_like(track, nikgob_core::model::WishlistOrigin::Like)
+        } else {
+            self.wish_drop_unstarted(track);
+            false
+        };
+        self.publish_wishlist();
+        self.wish_tick();
+        wished
     }
 
     // ---------------------------------------------------------------- playback
 
     fn position_now(&self) -> Duration {
+        self.position_at_instant(Instant::now())
+    }
+
+    /// Where we take playback to be at `now`, going from the last anchor at
+    /// [`Self::rate`].
+    fn position_at_instant(&self, now: Instant) -> Duration {
         if self.status == Status::Playing {
-            self.position + self.position_at.elapsed()
+            self.position + now.saturating_duration_since(self.position_at).mul_f64(self.rate)
         } else {
             self.position
         }
     }
 
-    fn request(&mut self, e: Entry) -> Option<PlayRequest> {
-        let src = self.lib.active_source(e.track).ok().flatten()?;
-        if src.kind != nikgob_core::model::SourceKind::LocalFile {
+    /// Publishes only where playback is and how fast the view should move
+    /// it (a position report, many a second: none of the rest changed).
+    fn publish_clock(&mut self) {
+        let now = Instant::now();
+        let (position, rate) = (self.position_at_instant(now), self.rate);
+        self.publish(|s| {
+            s.player.position = position;
+            s.player.at = now;
+            s.player.rate = rate as f32;
+        });
+    }
+
+    /// What to hand the engine for `e`: its best source that is usable and
+    /// not in `skip` (local > Spotify > YouTube, then quality). A stream
+    /// source needs its service registered. A stream copy set aside earlier
+    /// (its details or its video refused once) is tried again when nothing
+    /// else plays, unless it was refused in the last hours (`REFUSED_TTL`).
+    /// Returns the source too; says in the log why nothing plays.
+    fn request_skipping(
+        &mut self,
+        e: Entry,
+        skip: &[SourceId],
+    ) -> Option<(PlayRequest, SourceId, SourceKind)> {
+        let mut sources = match self.lib.sources_of_track(e.track) {
+            Ok(s) => s,
+            Err(err) => {
+                log::warn!("{}: its sources could not be read: {err}", e.track);
+                return None;
+            }
+        };
+        let all = sources.len();
+        sources.retain(|s| s.trashed_at.is_none() && !skip.contains(&s.id));
+        sources.sort_by_key(|s| (!s.available, s.kind.priority(), std::cmp::Reverse(s.quality_score)));
+        let refused = self.refused_videos();
+        // A stream needs its service on and able to play sound for this
+        // account (Spotify not connected, or before its playback login:
+        // the library's Spotify tracks play from YouTube Music).
+        let usable = |w: &mut Self, s: &nikgob_core::model::Source| match s.kind.service() {
+            None => s.available,
+            Some(service) => {
+                (s.available || (s.kind == SourceKind::Youtube && !refused.contains(&s.locator))) && w.has_audio(service)
+            }
+        };
+        let Some(src) = sources.iter().find(|s| usable(self, s)).cloned() else {
+            let why = if all == 0 {
+                "it has no source".to_owned()
+            } else if sources.is_empty() {
+                format!("all its {all} sources were tried or trashed")
+            } else if sources.iter().all(|s| !s.available && s.kind.service().is_none()) {
+                "its files are missing".to_owned()
+            } else {
+                let services: Vec<&str> = sources.iter().filter_map(|s| s.kind.service()).map(|s| s.as_str()).collect();
+                format!("no audio from {} now ({} sources set aside)", services.join(", "), sources.iter().filter(|s| !s.available).count())
+            };
+            log::warn!("{}: nothing to play: {why}", e.track);
             return None;
+        };
+        if !src.available {
+            log::info!("{}: trying its {} copy {} set aside earlier", e.track, src.kind.as_str(), src.locator);
         }
         let duration = self
             .lib
@@ -752,13 +1371,82 @@ impl Worker {
             .flatten()
             .and_then(|t| t.duration_ms)
             .map(|ms| Duration::from_millis(u64::from(ms)));
-        let path = self.res.path(&src.locator);
-        Some(PlayRequest {
+        let (source, gain_db) = match src.kind.service() {
+            None => {
+                let path = self.res.path(&src.locator);
+                let gain = import::file_gain_db(&path);
+                (PlaySource::File(path), gain)
+            }
+            Some(service) => (
+                PlaySource::Stream {
+                    service,
+                    id: src.locator.clone(),
+                },
+                0.0,
+            ),
+        };
+        let req = PlayRequest {
             id: e.id,
-            gain_db: import::file_gain_db(&path),
-            path,
+            source,
+            gain_db,
             duration,
-        })
+        };
+        Some((req, src.id, src.kind))
+    }
+
+    /// [`Self::request_skipping`] with nothing skipped.
+    fn request(&mut self, e: Entry) -> Option<PlayRequest> {
+        self.request_skipping(e, &[]).map(|(req, ..)| req)
+    }
+
+    /// Hands `req` (for the playing entry `e`) to the engine. A stream reads
+    /// Buffering until the engine reports its start.
+    fn play_request(&mut self, e: Entry, req: PlayRequest, source: SourceId, kind: SourceKind) {
+        self.playback.play(req);
+        self.restarted = Some(e.id);
+        self.playing = Some(e);
+        self.playing_source = Some((source, kind));
+        self.status = if kind.is_local() {
+            Status::Playing
+        } else {
+            Status::Buffering
+        };
+    }
+
+    /// The source playing `e` did not open: tries its next source. Returns
+    /// false when there is none left.
+    fn try_next_source(&mut self, e: Entry) -> bool {
+        if let Some((failed, _)) = self.playing_source.take() {
+            self.tried.push(failed);
+        }
+        let skip = self.tried.clone();
+        let Some((req, source, kind)) = self.request_skipping(e, &skip) else {
+            // Last chance: the same song on YouTube Music.
+            return self.wait_for_youtube(e);
+        };
+        log::info!("playing {} from its next source ({kind})", e.track);
+        self.play_request(e, req, source, kind);
+        self.position = Duration::ZERO;
+        self.position_at = Instant::now();
+        self.rate = 1.0;
+        self.jumped_at = Instant::now();
+        self.seek_to_failover(e);
+        self.preload_next();
+        self.publish_player();
+        true
+    }
+
+    /// The entry `e` just started on another source after its last one
+    /// failed mid-track: on from where that one stopped.
+    pub(crate) fn seek_to_failover(&mut self, e: Entry) {
+        let Some((_, at)) = self.failover.filter(|(id, _)| *id == e.id) else { return };
+        log::info!("{}: going on at {} s", e.track, at.as_secs());
+        self.playback.seek(at);
+        self.position = at;
+        self.position_at = Instant::now();
+        self.rate = 1.0;
+        self.jumped_at = Instant::now();
+        self.publish_player();
     }
 
     fn play_list(
@@ -768,6 +1456,7 @@ impl Worker {
         shuffle: bool,
         context: Option<String>,
         ctx: EventContext,
+        context_id: Option<String>,
     ) {
         if ids.is_empty() {
             self.toast("Нечего играть", None);
@@ -782,12 +1471,16 @@ impl Worker {
                     0
                 }
             });
+        self.user_switch(EventOrigin::Manual);
         self.queue.shuffle = false;
         self.queue.set(&ids, start_idx, context);
         if shuffle {
             self.queue.set_shuffle(true);
         }
+        // The new queue's own context, never the one before it (a mix's,
+        // a playlist's) carried over.
         self.play_context = ctx;
+        self.play_context_id = context_id;
         if let Some(e) = self.queue.current() {
             self.start(e);
         }
@@ -795,29 +1488,31 @@ impl Worker {
 
     fn start(&mut self, e: Entry) {
         self.resume_at = None;
+        self.failover = None;
         let mut e = e;
         // Skip forward over unplayable items rather than stall. With repeat on,
         // `skip_forward` wraps around, so the walk is bounded by the queue
         // length (otherwise a queue without a single playable file recurses
         // until the stack overflows).
         for attempt in 0..=self.queue.len() {
-            if let Some(req) = self.request(e) {
-                self.playback.play(req);
-                self.restarted = Some(e.id);
-                self.playing = Some(e);
-                self.status = Status::Playing;
-                self.position = Duration::ZERO;
-                self.position_at = Instant::now();
-                self.jumped_at = Instant::now();
-                let _ = self.lib.record_event(
-                    e.track,
-                    EventType::Start,
-                    None,
-                    Some(0),
-                    self.play_context,
-                );
-                self.preload_next();
-                self.publish_now_playing();
+            self.tried.clear();
+            // Disliked, where the app picked it: the next one.
+            if self.skips_disliked(e) {
+                log::info!("skipping the disliked {}", e.track);
+                match self.queue.skip_forward() {
+                    Some(n) if n.id != e.id => {
+                        e = n;
+                        continue;
+                    }
+                    _ => break,
+                }
+            }
+            if let Some((req, source, kind)) = self.request_skipping(e, &[]) {
+                self.start_with(e, req, source, kind);
+                return;
+            }
+            // Nothing plays now, but YouTube Music may have it: wait for it.
+            if self.wait_for_youtube(e) {
                 return;
             }
             log::warn!("no playable source for {}", e.track);
@@ -832,6 +1527,22 @@ impl Worker {
         self.stop();
     }
 
+    /// Plays `e` from `req` and records the start (with the service that
+    /// actually plays, for a stream).
+    fn start_with(&mut self, e: Entry, req: PlayRequest, source: SourceId, kind: SourceKind) {
+        self.play_request(e, req, source, kind);
+        self.position = Duration::ZERO;
+        self.position_at = Instant::now();
+        self.rate = 1.0;
+        self.jumped_at = Instant::now();
+        self.record_start(e, (!kind.is_local()).then_some(kind));
+        self.preload_next();
+        // What only YouTube Music may have is looked up ahead, gapless or not.
+        self.resolve_ahead();
+        self.publish_now_playing();
+        self.likes_if_stale();
+    }
+
     fn preload_next(&mut self) {
         // Gapless off: nothing is prepared, the next track starts after `Ended`.
         if !self.state.read().prefs.gapless {
@@ -844,7 +1555,8 @@ impl Worker {
     }
 
     fn pause(&mut self) {
-        if self.status == Status::Playing {
+        if matches!(self.status, Status::Playing | Status::Buffering) {
+            self.heard_tick();
             self.position = self.position_now();
             self.status = Status::Paused;
             self.playback.pause();
@@ -856,7 +1568,9 @@ impl Worker {
         match self.status {
             Status::Paused if self.playing.is_none() => self.start_restored(),
             Status::Paused => {
+                self.heard_tick();
                 self.position_at = Instant::now();
+                self.rate = 1.0;
                 self.status = Status::Playing;
                 self.playback.resume();
                 self.publish_player();
@@ -873,6 +1587,8 @@ impl Worker {
     fn stop(&mut self) {
         self.playback.stop();
         self.playing = None;
+        self.playing_source = None;
+        self.failover = None;
         self.status = Status::Stopped;
         self.position = Duration::ZERO;
         self.publish_now_playing();
@@ -891,6 +1607,7 @@ impl Worker {
         self.playback.seek(p);
         self.position = p;
         self.position_at = Instant::now();
+        self.rate = 1.0;
         self.jumped_at = Instant::now();
         if let Some(e) = self.playing {
             let _ = self.lib.record_event(
@@ -904,9 +1621,80 @@ impl Worker {
         self.publish_player();
     }
 
-    /// Records how the current track ended: a skip before 90 %, else complete.
-    fn record_end(&mut self, by_user: bool) {
+    /// Who chose `e`, starting now: what the command said, else the user
+    /// when the queue is another one, else the radio or autoplay that
+    /// added it, else the queue going on.
+    fn origin_of(&mut self, e: Entry) -> EventOrigin {
+        let generation = self.queue.generation();
+        let new_queue = self.origin_gen != Some(generation);
+        self.origin_gen = Some(generation);
+        if new_queue {
+            self.autoplay_entries.clear();
+        }
+        if let Some(o) = self.next_origin.take() {
+            return o;
+        }
+        if let Some(o) = self.radio_origin(e.id) {
+            return o;
+        }
+        if self.autoplay_entries.contains(&e.id) {
+            return EventOrigin::Autoplay;
+        }
+        if new_queue { EventOrigin::Manual } else { EventOrigin::Queue }
+    }
+
+    /// Records the start of `e` with who chose it and what plays it.
+    fn record_start(&mut self, e: Entry, kind: Option<SourceKind>) {
+        let origin = self.origin_of(e);
+        // What the radio or autoplay added plays in it, even in the queue
+        // of an album it went on after.
+        let (context, context_id) = match self.radio_context(e.id) {
+            Some((ctx, id)) => (ctx, Some(id)),
+            None => (self.play_context, self.play_context_id.clone()),
+        };
+        self.ended = false;
+        self.heard.reset();
+        let meta = EventMeta { origin: Some(origin), context_id, ..EventMeta::default() };
+        let _ = self.lib.record_event_with(e.track, EventType::Start, kind, Some(0), context, meta);
+        self.recs_started(e.track, origin);
+    }
+
+    /// The playing track's [`Heard`] counts the time since its last tick,
+    /// in the state the player and the window are in.
+    pub(crate) fn heard_tick(&mut self) {
+        let playing = self.status == Status::Playing;
+        let away = self.window_away();
+        let volume = if self.muted { 0.0 } else { self.volume };
+        self.heard.tick(playing, away, volume);
+    }
+
+    /// The user picks something else to play (`origin` of what comes): the
+    /// playing track ends here.
+    pub(crate) fn user_switch(&mut self, origin: EventOrigin) {
+        if !self.ended {
+            self.record_end(true, EndReason::UserPick);
+        }
+        self.next_origin = Some(origin);
+    }
+
+    /// The app closes: the playing (or paused) track ends as it is.
+    fn record_closed(&mut self) {
+        if !self.ended && self.playing.is_some() {
+            self.record_end(true, EndReason::AppClosed);
+        }
+    }
+
+    /// Records how the current track ended (`reason`): a skip before 90 %,
+    /// else complete; once per start.
+    fn record_end(&mut self, by_user: bool, reason: EndReason) {
         let Some(e) = self.playing else { return };
+        if self.ended {
+            return;
+        }
+        self.ended = true;
+        if let Some((source, SourceKind::Youtube)) = self.playing_source {
+            self.analyse_played(e.track, source);
+        }
         let pos = self.position_now();
         let dur = self
             .lib
@@ -916,7 +1704,16 @@ impl Worker {
             .and_then(|t| t.duration_ms);
         let complete = !by_user
             || dur.is_some_and(|d| pos.as_millis() as f64 >= f64::from(d) * 0.9);
-        let _ = self.lib.record_event(
+        let position_ms = pos.as_millis() as u32;
+        if reason != EndReason::AppClosed {
+            self.radio_feedback(e.track, complete, position_ms);
+            self.recs_played();
+            self.recs_ended(e.track, complete, position_ms);
+        }
+        self.heard_tick();
+        let (attention, volume) = self.heard.take();
+        let meta = EventMeta { end_reason: Some(reason), attention, volume, ..EventMeta::default() };
+        let _ = self.lib.record_event_with(
             e.track,
             if complete {
                 EventType::Complete
@@ -924,20 +1721,36 @@ impl Worker {
                 EventType::Skip
             },
             None,
-            Some(pos.as_millis() as u32),
+            Some(position_ms),
             self.play_context,
+            meta,
         );
     }
 
     fn playback_event(&mut self, ev: PlaybackEvent) {
+        // How long a position report waited to be taken (a busy worker can
+        // hold it for a while): the sound went on meanwhile.
+        let (ev, late) = match ev {
+            PlaybackEvent::PositionAt { id, position, at } => (PlaybackEvent::Position { id, position }, at.elapsed().min(POSITION_SNAP)),
+            ev => (ev, Duration::ZERO),
+        };
         match ev {
             PlaybackEvent::Started { id } => {
                 if self.restarted == Some(id) {
                     self.restarted = None;
                 }
                 if self.playing.map(|e| e.id) == Some(id) {
-                    self.position = Duration::ZERO;
+                    if self.status == Status::Buffering {
+                        self.heard_tick();
+                        self.status = Status::Playing;
+                    }
+                    // A failover starts where the failed source stopped.
+                    self.position = match self.failover.take() {
+                        Some((failed, at)) if failed == id => at,
+                        _ => Duration::ZERO,
+                    };
                     self.position_at = Instant::now();
+                    self.rate = 1.0;
                     self.publish_player();
                 }
             }
@@ -947,61 +1760,217 @@ impl Worker {
                 // otherwise is repeat-one looping gaplessly: handled below
                 // like any auto-advance, so the position starts over.
                 if self.restarted.take() == Some(to) {
+                    if self.status == Status::Buffering {
+                        self.heard_tick();
+                        self.status = Status::Playing;
+                        self.publish_player();
+                    }
                     return;
                 }
                 if self.queue.peek_auto_next().map(|e| e.id) != Some(to) {
                     log::debug!("backend changed to {to}, not the queued next");
                     return;
                 }
-                self.record_end(false);
+                self.record_end(false, EndReason::Ended);
                 if let Some(e) = self.queue.advance_auto() {
                     self.playing = Some(e);
+                    self.tried.clear();
+                    // The engine took over what `preload_next` asked for.
+                    self.playing_source = self
+                        .request_skipping(e, &[])
+                        .map(|(_, source, kind)| (source, kind));
                     self.position = Duration::ZERO;
                     self.position_at = Instant::now();
-                    let _ = self.lib.record_event(
-                        e.track,
-                        EventType::Start,
-                        None,
-                        Some(0),
-                        self.play_context,
-                    );
+                    self.rate = 1.0;
+                    let kind = self.playing_source.map(|(_, k)| k).filter(|k| !k.is_local());
+                    self.record_start(e, kind);
                     self.preload_next();
                     self.publish_now_playing();
                 }
             }
             PlaybackEvent::Position { id, position } => {
-                if self.playing.map(|e| e.id) == Some(id) {
-                    // The view extrapolates from its last publish and stops at
-                    // the track's end. When the engine reports somewhere else
-                    // (a repeat-one loop or a seek we did not hear about), it
-                    // would stay frozen there: publish the real position.
-                    let drifted = self.status == Status::Playing
-                        && self.position_now().abs_diff(position) > POSITION_DRIFT;
-                    if drifted && self.jumped_at.elapsed() < POSITION_SETTLE {
-                        return;
-                    }
+                // The engine plays it: a start report that never came (or
+                // was taken for another item) must not leave the player in
+                // Buffering, where the view freezes the position and the
+                // lyrics stop following the words.
+                if self.playing.map(|e| e.id) == Some(id)
+                    && self.status == Status::Buffering
+                    && position > Duration::ZERO
+                {
+                    log::info!("item {id} plays without a start report; playing now");
+                    self.restarted = None;
+                    self.heard_tick();
+                    self.status = Status::Playing;
                     self.position = position;
                     self.position_at = Instant::now();
-                    if drifted {
-                        self.publish_player();
+                    self.rate = 1.0;
+                    self.publish_player();
+                    return;
+                }
+                if self.playing.map(|e| e.id) == Some(id) {
+                    let stalled = self.reported == Some((id, position));
+                    self.reported = Some((id, position));
+                    if self.status != Status::Playing {
+                        self.position = position;
+                        self.position_at = Instant::now();
+                        self.rate = 1.0;
+                        return;
+                    }
+                    // The view extrapolates from its last publish and stops at
+                    // the track's end, so it follows what is heard: a small
+                    // difference is made up by running a little faster or
+                    // slower (never backwards); a far one (a repeat-one loop,
+                    // a seek we did not hear about, a long stall) is jumped.
+                    let now = Instant::now();
+                    let ours = self.position_at_instant(now);
+                    // Where the sound is now (a stalled one stands still).
+                    let heard = if stalled { position } else { position + late };
+                    match follow(ours, heard, stalled, self.rate) {
+                        Follow::Keep => {}
+                        Follow::Snap => {
+                            if self.jumped_at.elapsed() < POSITION_SETTLE {
+                                return;
+                            }
+                            self.position = heard;
+                            self.position_at = now;
+                            self.rate = if stalled { 0.0 } else { 1.0 };
+                            self.publish_player();
+                        }
+                        Follow::Rate(rate) => {
+                            self.position = ours;
+                            self.position_at = now;
+                            self.rate = rate;
+                            self.publish_clock();
+                        }
                     }
                 }
             }
-            PlaybackEvent::Paused | PlaybackEvent::Resumed => {}
+            // Taken as a position above.
+            PlaybackEvent::Paused | PlaybackEvent::Resumed | PlaybackEvent::PositionAt { .. } => {}
+            PlaybackEvent::Duration { id, duration } => {
+                // The library's length wins; the engine's is for a track
+                // without one (a stream whose service did not say).
+                let Some(e) = self.playing.filter(|e| e.id == id) else { return };
+                let ms = u32::try_from(duration.as_millis()).unwrap_or(u32::MAX);
+                if ms > 0 && self.lib.fill_duration(e.track, ms).unwrap_or(false) {
+                    log::debug!(target: "nikgob_runtime::streams", "{}: its length {ms} ms is the heard one", e.track);
+                    self.publish_now_playing();
+                }
+            }
+            PlaybackEvent::Quality { id, label } => {
+                log::debug!(target: "nikgob_runtime::streams", "item {id} plays as {label}");
+                self.qualities.retain(|(i, _)| *i != id);
+                if self.qualities.len() >= 4 {
+                    self.qualities.remove(0);
+                }
+                self.qualities.push((id, label));
+                if self.playing.map(|e| e.id) == Some(id) {
+                    // A copy set aside earlier plays after all: it counts again.
+                    if let Some((source, kind)) = self.playing_source.filter(|(_, k)| !k.is_local())
+                        && self.lib.get_source(source).ok().flatten().is_some_and(|s| !s.available)
+                    {
+                        log::info!("{kind} copy {source} plays again");
+                        if let Err(e) = self.lib.set_source_available(source, true) {
+                            log::warn!("{source}: {e}");
+                        }
+                    }
+                    self.publish_now_playing();
+                }
+            }
             PlaybackEvent::Ended { id } => {
                 if self.playing.map(|e| e.id) == Some(id) {
-                    self.record_end(false);
+                    self.record_end(false, EndReason::Ended);
                     // Repeat-one with no preload (or preload failed): restart.
                     match self.queue.advance_auto() {
                         Some(e) => self.start(e),
-                        None => self.stop(),
+                        None => {
+                            self.stop();
+                            // A radio still picking its next tracks plays on.
+                            self.radio_ran_out();
+                        }
                     }
                 }
             }
             PlaybackEvent::Error { id, message } => {
                 log::error!("playback error on {id}: {message}");
-                self.toast("Не получилось воспроизвести трек", None);
-                if self.playing.map(|e| e.id) == Some(id) {
+                let playing = self.playing.filter(|e| e.id == id);
+                if playing.is_none() && self.queue.peek_auto_next().is_some_and(|n| n.id == id) {
+                    // The preloaded next track: it is tried again (with
+                    // all its sources) when its turn comes.
+                    return;
+                }
+                if let Some(e) = playing
+                    && let Some((source, kind)) = self.playing_source
+                    && kind == SourceKind::Soundcloud
+                    && message.contains(OFFICIAL_PLAYER_ROUTE)
+                    && self.official_player_tried != Some(e.id)
+                {
+                    // Only DRM streams: the backend plays the same source
+                    // through SoundCloud's own player now.
+                    self.official_player_tried = Some(e.id);
+                    let skip = self.tried.clone();
+                    if let Some((req, again, kind)) = self.request_skipping(e, &skip).filter(|(_, s, _)| *s == source) {
+                        log::info!("{}: SoundCloud has it only with DRM, playing it through SoundCloud's player", e.track);
+                        self.play_request(e, req, again, kind);
+                        self.seek_to_failover(e);
+                        return;
+                    }
+                }
+                if let Some(e) = playing
+                    && let Some((source, kind)) = self.playing_source
+                    && kind == SourceKind::Youtube
+                    && youtube_refused_midway(&message)
+                    && !self.position.is_zero()
+                    && self.stream_retried != Some(e.id)
+                {
+                    // YouTube refused the stream's URLs after it played a
+                    // while (the ~15 s 403): a new stream asks the player
+                    // afresh and goes on from here, once.
+                    self.stream_retried = Some(e.id);
+                    self.failover = Some((e.id, self.position));
+                    let skip = self.tried.clone();
+                    if let Some((req, again, kind)) = self.request_skipping(e, &skip).filter(|(_, s, _)| *s == source) {
+                        log::info!("{}: YouTube refused the stream midway, opening it again", e.track);
+                        self.play_request(e, req, again, kind);
+                        self.seek_to_failover(e);
+                        return;
+                    }
+                }
+                if let Some(e) = playing
+                    && let Some((source, kind)) = self.playing_source
+                    && !self.stream_failed(e.track, source, &message)
+                    && kind == SourceKind::Youtube
+                {
+                    // YouTube's failure, not the video's: its other copies
+                    // would hang the same way.
+                    let copies = self.lib.sources_of_track(e.track).unwrap_or_default();
+                    self.tried
+                        .extend(copies.iter().filter(|s| s.kind == SourceKind::Youtube).map(|s| s.id));
+                }
+                // Where the engine had got to (what it last reported, not
+                // the extrapolation: a stream that runs dry stands still).
+                if let Some(e) = playing
+                    && !self.position.is_zero()
+                {
+                    self.failover = Some((e.id, self.position));
+                }
+                if let Some(e) = playing
+                    && self.try_next_source(e)
+                {
+                    return;
+                }
+                let title = playing
+                    .and_then(|e| self.lib.get_track(e.track).ok().flatten())
+                    .map(|t| t.title);
+                let why = playing.and_then(|e| self.streaming.failures.remove(&e.track));
+                match (title, why) {
+                    (Some(t), Some((why, Some(link)))) => {
+                        self.toast_open(format!("{t}: {why}"), "Войти", nikgob_view::Link::Setting(link));
+                    }
+                    (Some(t), Some((why, None))) => self.toast(format!("{t}: {why}"), None),
+                    _ => self.toast("Не получилось воспроизвести трек", None),
+                }
+                if playing.is_some() {
                     match self.queue.skip_forward() {
                         Some(e) if e.id != id => self.start(e),
                         _ => self.stop(),
@@ -1011,40 +1980,89 @@ impl Worker {
         }
     }
 
+    /// What the playing stream is: what it said once opened, else what its
+    /// service usually streams. `None` for a local file.
+    fn audio_quality(&self) -> Option<String> {
+        let service = self.playing_source.and_then(|(_, k)| k.service())?;
+        let id = self.playing?.id;
+        let known = self.qualities.iter().find(|(i, _)| *i == id).map(|(_, q)| q.clone());
+        Some(known.unwrap_or_else(|| service.nominal_quality()))
+    }
+
     fn publish_player(&mut self) {
+        // A radio picks more when its queue runs low.
+        self.radio_top_up();
+        let radio = self.radio_view();
         let status = self.status;
-        let position = self.position_now();
+        let now = Instant::now();
+        let (position, rate) = (self.position_at_instant(now), self.rate as f32);
         let (volume, muted) = (self.volume, self.muted);
         let (shuffle, repeat) = (self.queue.shuffle, self.queue.repeat);
         let context = self.queue.context.clone();
+        let page = self.context_page_id().and_then(context_page);
         let upcoming: Vec<Entry> = self.queue.upcoming().iter().take(200).copied().collect();
         let history = self.queue.history();
         let history: Vec<Entry> = history[history.len().saturating_sub(HISTORY_SHOWN)..].to_vec();
         let current_entry = self.queue.current().map(|e| e.id);
-        let lib = self.lib.clone();
-        self.publish(|s, res| {
+        let audio_service = self.playing_source.and_then(|(_, k)| k.service());
+        let audio_quality = self.audio_quality();
+        let soloist = audio_service == Some(StreamKind::Spotify) && self.soloist_ready();
+        // The rows of both lists in one query, before the lock.
+        let ids: Vec<TrackId> = upcoming.iter().chain(&history).map(|e| e.track).collect();
+        let found = self.lib.get_track_rows(&ids).unwrap_or_default();
+        let why = &self.recs.why;
+        let current_why = current_entry.and_then(|e| why.get(&e).cloned());
+        let res = &mut self.res;
+        let mut rows = |list: &[Entry]| -> Vec<nikgob_view::QueueEntry> {
+            list.iter()
+                .filter_map(|e| {
+                    found.get(&e.track).map(|r| nikgob_view::QueueEntry {
+                        entry: e.id,
+                        track: res.track(r),
+                        why: why.get(&e.id).cloned(),
+                    })
+                })
+                .collect()
+        };
+        let next = rows(&upcoming);
+        let prev = rows(&history);
+        self.publish(|s| {
             let p = &mut s.player;
             p.status = status;
+            p.audio_service = audio_service;
+            p.audio_quality = audio_quality;
+            p.soloist = soloist;
             p.position = position;
-            p.at = Instant::now();
+            p.at = now;
+            p.rate = rate;
             p.volume = volume;
             p.muted = muted;
             p.shuffle = shuffle;
             p.repeat = repeat;
             p.context = context;
-            let mut rows = |list: &[Entry]| -> Vec<nikgob_view::QueueEntry> {
-                list.iter()
-                    .filter_map(|e| {
-                        lib.get_track_row(e.track).ok().flatten().map(|r| nikgob_view::QueueEntry {
-                            entry: e.id,
-                            track: res.track(&r),
-                        })
-                    })
-                    .collect()
-            };
-            s.queue.next = rows(&upcoming);
-            s.queue.prev = rows(&history);
+            p.context_page = page;
+            s.queue.next = next;
+            s.queue.prev = prev;
             s.queue.current_entry = current_entry;
+            s.queue.current_why = current_why;
+            s.queue.radio = radio;
+        });
+    }
+
+    /// The id of what the queue was started from (see
+    /// [`Self::play_context_id`]); after a restart, the one the last run
+    /// left, while its queue plays.
+    pub(crate) fn context_page_id(&self) -> Option<&str> {
+        let restored = self.restored_page.as_ref().filter(|(g, _)| *g == self.queue.generation());
+        self.play_context_id.as_deref().or(restored.map(|(_, id)| id.as_str()))
+    }
+
+    /// Volume and mute only: nothing else of the player or the queue changes.
+    fn publish_volume(&mut self) {
+        let (volume, muted) = (self.volume, self.muted);
+        self.publish(|s| {
+            s.player.volume = volume;
+            s.player.muted = muted;
         });
     }
 
@@ -1052,26 +2070,66 @@ impl Worker {
         let shown = self.playing.or_else(|| self.resume_at.and(self.queue.current()));
         let current = shown
             .and_then(|e| self.lib.get_track_row(e.track).ok().flatten());
-        let src = shown
-            .and_then(|e| self.lib.active_source(e.track).ok().flatten());
+        // The source that plays (a Spotify track may sound from YouTube),
+        // else the track's best one.
+        let playing = self
+            .playing_source
+            .filter(|_| self.playing.is_some() && self.playing == shown)
+            .and_then(|(id, _)| self.lib.get_source(id).ok().flatten());
+        let src = playing.or_else(|| shown.and_then(|e| self.lib.active_source(e.track).ok().flatten()));
+        let audio_quality = self.audio_quality();
         let changed = self.state.read().player.current.as_ref().map(|r| r.id)
             != current.as_ref().map(|r| r.id);
-        self.publish(|s, res| {
-            let row = current.as_ref().map(|r| res.track(r));
+        let row = current.as_ref().map(|r| self.res.track(r));
+        let mut info = self.res.info(current.as_ref(), src.as_ref());
+        if audio_quality.is_some() {
+            // «Качество» of a stream: what it gives.
+            if let (Some(d), Some(q)) = (info.sound.as_mut(), audio_quality.as_ref()) {
+                d.facts.insert(0, ("Поток".into(), q.clone()));
+            }
+            info.quality = audio_quality;
+        }
+        self.publish(|s| {
             s.player.duration = row.as_ref().and_then(|r| r.duration);
             s.player.current = row.clone();
             s.queue.current = row;
-            s.info = res.info(current.as_ref(), src.as_ref());
+            s.info = info;
         });
         if changed && let Some(t) = current.as_ref().map(|r| r.id) {
             self.track_details(t);
+            self.kick_better_covers(Some(t));
+            self.complete_playing(t);
         }
         self.publish_player();
     }
 
     // ---------------------------------------------------------------- loads
 
+    /// The library's playlists and the albums liked as a whole among them
+    /// ([`nikgob_view::LibraryView::liked_albums`]), both latest first,
+    /// «Любимые» staying first; under «только скачанное» the albums with a
+    /// file.
+    fn shelf(&mut self) -> (Vec<nikgob_view::PlaylistCard>, Vec<(usize, nikgob_view::ReleaseCard)>) {
+        let playlists = self.log_err("плейлисты", self.lib.list_playlists()).unwrap_or_default();
+        let albums = self.log_err("альбомы", self.lib.liked_releases(0, 10_000)).unwrap_or_default();
+        let only_local = self.state.read().prefs.library_only_downloaded;
+        let pinned = playlists.iter().take_while(|p| p.id.is_none()).count();
+        let res = &mut self.res;
+        let albums = albums
+            .iter()
+            .filter(|(r, _)| r.liked && (!only_local || r.local_tracks > 0))
+            .map(|(r, at)| {
+                let before = playlists.iter().skip(pinned).position(|p| p.updated_at < *at);
+                (before.map_or(playlists.len(), |i| i + pinned), res.release(r))
+            })
+            .collect();
+        let playlists = playlists.iter().map(|p| res.playlist(p)).collect();
+        (playlists, albums)
+    }
+
     fn load_library(&mut self) {
+        self.stream_analysis_changed();
+        self.recs_library_changed();
         let sort = self.state.read().library.release_sort;
         let key = match sort {
             nikgob_view::ReleaseSort::Artist => Sort::asc(ReleaseSortKey::Artist),
@@ -1082,28 +2140,86 @@ impl Worker {
         let releases = self
             .log_err("библиотека", self.lib.releases(0, 20_000, key))
             .unwrap_or_default();
-        let playlists = self
-            .log_err("плейлисты", self.lib.list_playlists())
-            .unwrap_or_default();
+        let (playlists, liked_albums) = self.shelf();
         let artists = self
             .log_err(
                 "исполнители",
                 self.lib.artists(0, 20_000, Sort::asc(nikgob_library::ArtistSortKey::Name)),
             )
             .unwrap_or_default();
+        // The inconspicuous "только скачанное": what has a file.
+        let only_local = self.state.read().prefs.library_only_downloaded;
+        let (releases, artists) = if only_local {
+            (
+                releases.into_iter().filter(|r| r.local_tracks > 0).collect(),
+                artists.into_iter().filter(|a| a.local_track_count > 0).collect(),
+            )
+        } else {
+            (releases, artists)
+        };
         let count = self
             .lib
-            .count_tracks(nikgob_library::TrackFilter::All)
+            .count_tracks(track_filter(only_local))
             .unwrap_or(0) as usize;
-        self.publish(|s, res| {
-            s.library.releases = releases.iter().map(|r| res.release(r)).collect();
-            s.library.playlists = playlists.iter().map(|p| res.playlist(p)).collect();
-            s.library.artists = artists.iter().map(|a| res.artist(a)).collect();
+        // The overview's rows: the latest albums in and the most played.
+        let tracks = self.lib.rec_tracks().unwrap_or_default();
+        let stats = self.lib.all_track_stats().unwrap_or_default();
+        let per_artist = home::artist_track_counts(&tracks, only_local);
+        let often = home::often_played(&tracks, &stats, 12);
+        let mut recent: Vec<&nikgob_library::ReleaseRow> = releases.iter().collect();
+        recent.sort_by_key(|r| std::cmp::Reverse(r.release.added_at));
+        let brought = self.lib.releases_of_imported_playlists().unwrap_or_default();
+        recent.retain(|r| !brought.contains(&r.release.id));
+        recent.truncate(12);
+        let by_id: std::collections::HashMap<_, _> = releases.iter().map(|r| (r.release.id, r)).collect();
+        let often: Vec<&nikgob_library::ReleaseRow> = often.iter().filter_map(|id| by_id.get(id).copied()).collect();
+        let res = &mut self.res;
+        let releases: Vec<_> = releases.iter().map(|r| res.release(r)).collect();
+        let artists: Vec<_> = artists
+            .iter()
+            .map(|a| {
+                let mut card = res.artist(a);
+                card.track_count = per_artist.get(&a.artist.id).copied().unwrap_or(card.track_count);
+                card
+            })
+            .collect();
+        let recent: Vec<_> = recent.iter().map(|r| res.release(r)).collect();
+        let often: Vec<_> = often.iter().map(|r| res.release(r)).collect();
+        self.publish(|s| {
+            s.library.releases = releases;
+            s.library.playlists = playlists;
+            s.library.liked_albums = liked_albums;
+            s.library.artists = artists;
+            s.library.recently_added = recent;
+            s.library.often_played = often;
             s.library.track_count = count;
             s.library.loaded = true;
         });
         let sort = self.state.read().library.track_sort;
         self.load_tracks(0, 200, sort);
+    }
+
+    /// The library filter on «Треки»: what the library search finds,
+    /// without the stream when «только скачанное» is on.
+    fn filter_tracks(&mut self, q: &str) {
+        let q = q.trim();
+        if q.is_empty() {
+            self.publish(|s| s.library.track_hits = None);
+            return;
+        }
+        let only_local = self.state.read().prefs.library_only_downloaded;
+        let rows: Vec<_> = self
+            .log_err("фильтр треков", self.lib.search(q, 500))
+            .map(|r| r.tracks)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.has_local || !only_local)
+            .collect();
+        let q = q.to_owned();
+        let hits = rows.iter().map(|t| self.res.track(t)).collect();
+        self.publish(|s| {
+            s.library.track_hits = Some((q, hits));
+        });
     }
 
     fn load_tracks(&mut self, offset: usize, limit: usize, sort: nikgob_view::TrackSort) {
@@ -1114,26 +2230,34 @@ impl Worker {
             nikgob_view::TrackSort::Added => Sort::desc(TrackSortKey::Added),
             nikgob_view::TrackSort::Duration => Sort::asc(TrackSortKey::Duration),
         };
+        let filter = track_filter(self.state.read().prefs.library_only_downloaded);
         let rows = self
-            .log_err("треки", self.lib.tracks(offset as u32, limit as u32, key))
+            .log_err("треки", self.lib.tracks_filtered(offset as u32, limit as u32, key, filter))
             .unwrap_or_default();
-        self.publish(|s, res| {
+        let rows = rows.iter().map(|r| self.res.track(r)).collect();
+        self.publish(|s| {
             s.library.tracks_offset = offset;
-            s.library.tracks = rows.iter().map(|r| res.track(r)).collect();
+            s.library.tracks = rows;
             s.library.track_sort = sort;
         });
     }
 
-    fn load_release(&mut self, id: nikgob_core::model::ReleaseId) {
+    pub(crate) fn load_release(&mut self, id: nikgob_core::model::ReleaseId) {
         let Some(release) = self.lib.get_release(id).ok().flatten() else {
             return;
         };
-        let rows = self.lib.tracks_of_release(id).unwrap_or_default();
-        let progress = self.lib.release_progress(id).ok().flatten();
+        // Its songs outside the library too: the ones a service knows it
+        // has and nothing here plays from a file (▶ stream, ↓ download).
+        // A line per place the album counts: a hole where none has a row.
+        let Some(listing) = self.lib.release_listing(id).ok().flatten() else {
+            return;
+        };
         let liked = self.lib.release_liked(id).unwrap_or(false);
-        self.publish(|s, res| {
-            s.release = Some(res.release_detail(&release, &rows, progress, liked));
+        let detail = self.res.release_detail(&release, &listing, liked);
+        self.publish(|s| {
+            s.release = Some(detail);
         });
+        self.complete_tracklist(id);
     }
 
     fn load_artist(&mut self, id: nikgob_core::model::ArtistId) {
@@ -1152,16 +2276,24 @@ impl Worker {
         let top: Vec<_> = plays.iter().take(5).map(|&(_, i)| tracks[i].clone()).collect();
         tracks.clear();
         let liked = self.lib.is_liked(id).unwrap_or(false);
-        self.publish(|s, res| {
-            s.artist = Some(res.artist_detail(&artist, &top, &releases, liked));
+        let detail = self.res.artist_detail(&artist, &top, &releases, liked);
+        self.publish(|s| {
+            s.artist = Some(detail);
         });
         self.kick_photos(Some(id));
+        // "Нет в библиотеке": from the cache, or looked up once a day.
+        self.load_discography(id, false);
     }
 
-    fn playlist_tracks(&mut self, id: PlaylistId) -> (Vec<TrackId>, String) {
+    /// What a playlist plays from `start` (see [`Self::playable`]).
+    fn playlist_tracks(&mut self, id: PlaylistId, start: Option<TrackId>) -> (Vec<TrackId>, String) {
         if id == LIKED_PLAYLIST {
-            let ids = self.lib.liked_track_ids().unwrap_or_default();
-            return (ids, "Любимые".into());
+            if !self.only_downloaded() {
+                let ids = self.lib.liked_track_ids().unwrap_or_default();
+                return (ids, "Любимые".into());
+            }
+            let rows = self.lib.liked_tracks(0, u32::MAX).unwrap_or_default();
+            return (self.playable(&rows, start), "Любимые".into());
         }
         let entries = self.lib.playlist_entries(id, 0, u32::MAX).unwrap_or_default();
         let name = self
@@ -1170,7 +2302,8 @@ impl Worker {
             .ok()
             .flatten()
             .map_or_else(String::new, |p| p.name);
-        (entries.iter().map(|e| e.track.id).collect(), name)
+        let rows: Vec<nikgob_library::TrackRow> = entries.into_iter().map(|e| e.track).collect();
+        (self.playable(&rows, start), name)
     }
 
     fn load_playlist(&mut self, id: PlaylistId) {
@@ -1191,38 +2324,237 @@ impl Worker {
             .into_iter()
             .find(|p| p.id.unwrap_or(LIKED_PLAYLIST) == id);
         let Some(summary) = summary else { return };
-        self.publish(|s, res| {
-            s.playlist = Some(res.playlist_detail(&summary, &rows));
+        let sync = self.playlist_sync_view(id);
+        let mut detail = self.res.playlist_detail(&summary, &rows);
+        detail.sync = sync;
+        self.publish(|s| {
+            s.playlist = Some(detail);
         });
     }
 
+    /// What the home and a world's page are built for now.
+    fn visit(&self) -> home_v2::Visit {
+        let playing = self.queue.current().map(|e| e.track);
+        let mut visit = home_v2::Visit::now(playing, &self.state.read().prefs);
+        visit.sound = Some(self.analysis.index().clone());
+        visit.profiles = self.snapshot().map(|s| s.profiles.clone());
+        visit.epoch = self.home_epoch();
+        visit
+    }
+
+    /// `Command::SetPrefs`: every preference at once, and what each change
+    /// sets going.
+    fn set_prefs(&mut self, mut p: Box<nikgob_view::Prefs>) {
+        let old = self.state.read().prefs.clone();
+        if p.masters_dir.as_os_str().is_empty() && !old.masters_dir.as_os_str().is_empty() {
+            p.masters_dir = old.masters_dir.clone();
+        }
+        self.playback.configure(crossfade(&p), p.normalization);
+        self.torrent_prefs(&p);
+        self.publish(|s| s.prefs = *p.clone());
+        self.save_prefs();
+        self.import_prefs(&p);
+        if (old.check_fake_lossless, old.convert_fake_lossless, old.fake_flac_auto)
+            != (p.check_fake_lossless, p.convert_fake_lossless, p.fake_flac_auto)
+        {
+            self.quality_prefs();
+        }
+        self.align_settings();
+        if (old.lyrics_words_playing, old.lyrics_words_all, old.lyrics_lines_auto, old.lyrics_check, old.lyrics_recognize, old.lyrics_streams, old.lyrics_genius)
+            != (p.lyrics_words_playing, p.lyrics_words_all, p.lyrics_lines_auto, p.lyrics_check, p.lyrics_recognize, p.lyrics_streams, p.lyrics_genius)
+        {
+            self.lyrics_prefs_changed();
+        }
+        let lyrics_track = self.state.read().lyrics.track;
+        if !old.save_found_lyrics && p.save_found_lyrics
+            && let Some(track) = lyrics_track
+        {
+            self.embed_lyrics(track);
+        }
+        if old.gapless != p.gapless {
+            self.preload_next();
+        }
+        if old.output_device != p.output_device {
+            self.switch_device(p.output_device.clone());
+        }
+        if (old.spotify_enabled, old.youtube_enabled, old.deezer_enabled, old.soundcloud_enabled)
+            != (p.spotify_enabled, p.youtube_enabled, p.deezer_enabled, p.soundcloud_enabled)
+        {
+            self.soloist_wanted();
+            self.publish_accounts();
+            self.preload_next();
+        }
+        if old.album_like_tracks != p.album_like_tracks {
+            // The album hearts read the likes the new way.
+            self.lib.set_album_likes_tracks(p.album_like_tracks);
+            self.load_library();
+            let release = self.state.read().release.as_ref().map(|r| r.card.id);
+            if let Some(r) = release {
+                self.load_release(r);
+            }
+        }
+        if old.library_only_downloaded != p.library_only_downloaded {
+            self.load_library();
+        }
+        if old.auto_download_limit != p.auto_download_limit {
+            self.wish_tick();
+        }
+        // A source turned on: what was not found is searched for again once
+        // it can search.
+        for key in nikgob_view::SourceKey::ALL {
+            if !old.source_on(key) && p.source_on(key) {
+                self.streaming.wish.enabled.insert(key);
+            } else if !p.source_on(key) {
+                self.streaming.wish.enabled.remove(&key);
+            }
+        }
+        if old.source_on(nikgob_view::SourceKey::Soulseek) != p.source_on(nikgob_view::SourceKey::Soulseek) {
+            self.soulseek_apply();
+        }
+        if old.source_order() != p.source_order() {
+            self.publish_sources();
+            self.publish_wishlist();
+            self.wish_sources_ready();
+            self.wish_tick();
+        }
+        if old.stream_cache_mb != p.stream_cache_mb {
+            self.apply_stream_cache();
+        }
+        if old.stream_analysis != p.stream_analysis {
+            self.stream_analysis_pref(p.stream_analysis);
+        }
+        if old.mixes_downloaded_only != p.mixes_downloaded_only {
+            // The rows it hides go (or come back) at once; the
+            // mixes follow when they are picked again.
+            self.load_home();
+            self.recs_prefs_changed();
+        }
+        if old.home_card != p.home_card || old.home_hidden_worlds != p.home_hidden_worlds {
+            self.load_home();
+        }
+        if old.mixes_downloaded_only != p.mixes_downloaded_only || old.radio_new_share != p.radio_new_share || old.radio_new_share_by != p.radio_new_share_by {
+            self.radio_source_changed();
+        }
+        if old.dislike_in_recs != p.dislike_in_recs
+            || old.background_counts_less != p.background_counts_less
+            || old.profiles_split != p.profiles_split
+            || old.profile_names != p.profile_names
+            || old.mixes_profiles != p.mixes_profiles
+            || old.mixes_everything != p.mixes_everything
+            || old.mixes_moods != p.mixes_moods
+            || old.mixes_on_repeat != p.mixes_on_repeat
+            || old.background_cards != p.background_cards
+            || old.home_hidden_mixes != p.home_hidden_mixes
+            || old.graph_use != p.graph_use
+            || old.graph_personal != p.graph_personal
+            || old.library_as_taste != p.library_as_taste
+        {
+            self.recs_prefs_changed();
+        }
+        if (!old.graph_services && p.graph_services) || (!old.graph_open_data && p.graph_open_data) {
+            self.graph_now();
+        }
+        if old.autoplay && !p.autoplay {
+            self.autoplay_off();
+        }
+        if !old.autoplay && p.autoplay {
+            self.publish_player();
+        }
+    }
+
     fn load_home(&mut self) {
-        let home = home::build(&self.lib);
-        self.publish(|s, res| s.home = res.home(&home));
+        let visit = self.visit();
+        let home = home::build_with(&self.lib, &visit);
+        let parts = self.recs_home_parts();
+        let mut view = self.res.home(&home);
+        parts.apply(&mut view, &mut self.res);
+        let stages: Vec<_> = view.worlds.iter().filter_map(|w| w.release).collect();
+        self.publish(|s| {
+            s.home = view;
+        });
+        self.kick_hd_covers(stages);
+    }
+
+    /// A world's page ([`Command::LoadWorld`]).
+    fn load_world(&mut self, key: &str) {
+        let visit = self.visit();
+        let Some(w) = home_v2::world(&self.lib, &visit, key) else {
+            self.publish(|s| s.world = None);
+            return;
+        };
+        let (_, releases) = if visit.local_only { (Vec::new(), Vec::new()) } else { self.discover_rows() };
+        let new_album = home_v2::world_release(&w.world, &releases).map(|i| releases[i].clone());
+        let mut view = self.res.world_view(&w, new_album);
+        view.mixes = self.world_mix_cards(&view.world);
+        let stage = view.world.release;
+        self.publish(|s| s.world = Some(view));
+        self.kick_hd_covers(stage);
     }
 
     fn search(&mut self, q: String) {
         let trimmed = q.trim().to_owned();
+        let sources = self.streaming.search.sources;
         if trimmed.is_empty() {
-            self.publish(|s, _| s.search = nikgob_view::SearchView::default());
+            self.search_streams("", Vec::new());
+            self.publish(|s| {
+                s.search = nikgob_view::SearchView {
+                    sources,
+                    ..Default::default()
+                };
+            });
             return;
         }
-        let r = self.lib.search(&trimmed, 20).unwrap_or_default();
-        self.publish(|s, res| {
+        // Library first (at once), then the services as they answer.
+        let started = Instant::now();
+        let r = if sources.library {
+            self.lib.search(&trimmed, 20).unwrap_or_default()
+        } else {
+            nikgob_library::SearchResults::default()
+        };
+        log::debug!(
+            target: "nikgob_runtime::streams",
+            "search «{trimmed}»: library {} tracks, {} albums in {} ms",
+            r.tracks.len(),
+            r.releases.len(),
+            started.elapsed().as_millis()
+        );
+        let lib_tracks = r.tracks.clone();
+        let res = &mut self.res;
+        let tracks = r.tracks.iter().map(|t| res.track(t)).collect();
+        let releases = r.releases.iter().map(|x| res.release(x)).collect();
+        let artists = r.artists.iter().map(|a| res.artist(a)).collect();
+        let playlists = r.playlists.iter().map(|p| res.playlist(p)).collect();
+        self.publish(|s| {
             s.search = nikgob_view::SearchView {
                 query: q,
-                tracks: r.tracks.iter().map(|t| res.track(t)).collect(),
-                releases: r.releases.iter().map(|x| res.release(x)).collect(),
-                artists: r.artists.iter().map(|a| res.artist(a)).collect(),
-                playlists: r.playlists.iter().map(|p| res.playlist(p)).collect(),
+                tracks,
+                releases,
+                artists,
+                playlists,
                 searching: false,
+                sources,
+                // The services' sections and the merged answer stay until
+                // their new answers.
+                streams: std::mem::take(&mut s.search.streams),
+                answer: std::mem::take(&mut s.search.answer),
                 torrents: std::mem::take(&mut s.search.torrents),
             };
         });
+        self.search_streams(&trimmed, lib_tracks);
+        if sources.torrents && self.state.read().search.torrents.query != trimmed {
+            self.search_torrents(trimmed);
+        }
     }
 
-    /// Liking an album = liking all its tracks; unliking unlikes them all.
+    /// Liking an album saves it; when album likes like the tracks too
+    /// ([`nikgob_view::Prefs::album_like_tracks`]), it likes all its tracks,
+    /// and unliking unlikes them all.
     fn like_release(&mut self, id: nikgob_core::model::ReleaseId, on: bool) {
+        let before = self.library_tracks();
+        if !self.state.read().prefs.album_like_tracks {
+            self.save_release(id, on, before);
+            return;
+        }
         let Some(tracks) = self.log_err("лайк", self.lib.like_release(id, on)) else { return };
         for &t in &tracks {
             let _ = self.lib.record_event(
@@ -1232,7 +2564,18 @@ impl Worker {
                 None,
                 EventContext::Album,
             );
+            self.push_like(t, on);
         }
+        // An album like downloads the whole album (one wishlist item).
+        let wished = on && self.wish_for_album(id, &tracks, nikgob_core::model::WishlistOrigin::Like);
+        if !on {
+            self.wish_drop_album(id);
+            for &t in &tracks {
+                self.wish_drop_unstarted(t);
+            }
+        }
+        self.publish_wishlist();
+        self.wish_tick();
         let n = tracks.len() as u64;
         let what = format!("{n} {}", if n % 10 == 1 && n % 100 != 11 {
             "трек"
@@ -1241,11 +2584,14 @@ impl Worker {
         } else {
             "треков"
         });
-        self.toast(
-            if on { format!("Альбом в Любимых · {what}") } else { format!("Альбом убран из Любимых · {what}") },
-            Some(("Отменить".into(), Command::Like(LikeTarget::Release(id), !on))),
-        );
-        self.publish(|s, _| {
+        let text = match (on, wished) {
+            (true, true) if self.can_download() => format!("Альбом в Любимых · {what} · скачаю в фоне"),
+            (true, true) => format!("Альбом в Любимых · {what} · скачается, когда подключишь торренты"),
+            (true, false) => format!("Альбом в Любимых · {what}"),
+            (false, _) => format!("Альбом убран из Любимых · {what}"),
+        };
+        self.toast(text, Some(("Отменить".into(), Command::Like(LikeTarget::Release(id), !on))));
+        self.publish(|s| {
             let fix = |t: &mut nikgob_view::TrackRow| {
                 if tracks.contains(&t.id) {
                     t.liked = on;
@@ -1260,16 +2606,80 @@ impl Worker {
             s.queue.next.iter_mut().for_each(|e| fix(&mut e.track));
             s.library.tracks.iter_mut().for_each(fix);
             s.search.tracks.iter_mut().for_each(fix);
-            for r in [&mut s.home.continue_listening, &mut s.home.long_unplayed, &mut s.home.recently_added, &mut s.search.releases] {
+            for r in [&mut s.home.long_unplayed, &mut s.home.recently_added, &mut s.search.releases] {
                 r.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
             }
+            for c in &mut s.home.continue_listening {
+                if let nikgob_view::ContinueCard::Release(c) = c
+                    && c.id == id
+                {
+                    c.liked = on;
+                }
+            }
         });
-        self.after_like_change();
+        self.after_like_change(before, vec![id]);
+    }
+
+    /// An album saved (or unsaved) alone: its tracks keep their likes; a
+    /// saved album still downloads whole, as a like of it always did.
+    fn save_release(&mut self, id: nikgob_core::model::ReleaseId, on: bool, before: Held) {
+        if self.log_err("лайк", self.lib.like_release(id, on)).is_none() {
+            return;
+        }
+        let wished = if on {
+            let rows = self.lib.tracks_of_release_all(id).unwrap_or_default();
+            let local: Vec<TrackId> = rows.iter().filter(|r| r.has_local).map(|r| r.id).collect();
+            let tracks = if local.is_empty() { rows.iter().map(|r| r.id).collect() } else { local };
+            self.wish_for_album(id, &tracks, nikgob_core::model::WishlistOrigin::Like)
+        } else {
+            self.wish_drop_album(id);
+            false
+        };
+        self.publish_wishlist();
+        self.wish_tick();
+        let text = match (on, wished) {
+            (true, true) if self.can_download() => "В любимых альбомах · скачаю в фоне",
+            (true, true) => "В любимых альбомах · скачается, когда подключишь торренты",
+            (true, false) => "Добавлено в любимые альбомы",
+            (false, _) => "Убрано из любимых альбомов",
+        };
+        self.toast(text, Some(("Отменить".into(), Command::Like(LikeTarget::Release(id), !on))));
+        self.publish(|s| {
+            for r in [&mut s.home.long_unplayed, &mut s.home.recently_added, &mut s.search.releases] {
+                r.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
+            }
+            for c in &mut s.home.continue_listening {
+                if let nikgob_view::ContinueCard::Release(c) = c
+                    && c.id == id
+                {
+                    c.liked = on;
+                }
+            }
+        });
+        self.after_like_change(before, vec![id]);
+    }
+
+    /// A like of a single's song saves (or unsaves) the single as well,
+    /// when [`nikgob_view::Prefs::single_like_saves`] asks for it.
+    fn single_follows_like(&mut self, track: TrackId, on: bool) -> Option<()> {
+        if !self.state.read().prefs.single_like_saves {
+            return None;
+        }
+        let release = self.lib.get_track(track).ok().flatten()?.release_id?;
+        let r = self.lib.get_release(release).ok().flatten()?;
+        let rows = self.lib.tracks_of_release_all(release).unwrap_or_default();
+        let single = r.release_type == nikgob_core::model::ReleaseType::Single || (rows.len() == 1 && r.total_tracks.unwrap_or(1) <= 1);
+        if !single || self.lib.is_liked(LikeTarget::Release(release)).unwrap_or(false) == on {
+            return None;
+        }
+        let r = if on { self.lib.like(LikeTarget::Release(release)) } else { self.lib.unlike(LikeTarget::Release(release)) };
+        self.log_err("лайк", r)
     }
 
     /// Track likes changed: album hearts and "Любимые" follow.
-    fn after_like_change(&mut self) {
-        self.load_library();
+    fn after_like_change(&mut self, before: Held, releases: Vec<nikgob_core::model::ReleaseId>) {
+        self.refresh_stream_page();
+        self.library_edited(before, releases);
         let (release, playlist) = {
             let s = self.state.read();
             (s.release.as_ref().map(|r| r.card.id), s.playlist.as_ref().map(|p| p.card.id))
@@ -1309,14 +2719,103 @@ impl Worker {
                     let _ = std::fs::remove_file(&old);
                 }
             }
-            self.load_library();
+            self.library_edited(Held::Same, Vec::new());
             self.load_playlist(id);
         }
     }
 
+    /// How many tracks the library holds now, to tell whether an edit of
+    /// likes or playlists changed what is in it ([`Self::library_edited`]).
+    fn library_tracks(&self) -> Held {
+        Held::Tracks(self.lib.count_tracks(nikgob_library::TrackFilter::All).ok())
+    }
+
+    /// The tracks an album plays, in its order: every song its page lists,
+    /// the ones that only stream too, under «Только скачанное» as well (a
+    /// song without a file is looked up when it comes up, and one not found
+    /// is skipped with a notice).
+    fn release_tracks(&mut self, id: nikgob_core::model::ReleaseId) -> Vec<TrackId> {
+        let rows = self.log_err("альбом", self.lib.tracks_of_release_all(id)).unwrap_or_default();
+        rows.iter().map(|r| r.id).collect()
+    }
+
+    /// «Только скачанное» is on, of the home or of the library.
+    fn only_downloaded(&self) -> bool {
+        let p = &self.state.read().prefs;
+        p.mixes_downloaded_only || p.library_only_downloaded
+    }
+
+    /// What a list of tracks (a playlist, an artist's songs) plays: all of
+    /// it; under «Только скачанное» only its songs with a file and `start`,
+    /// the song picked to start from (played even when it only streams). A
+    /// list without a single file plays whole. An album plays whole always
+    /// ([`Self::release_tracks`]).
+    fn playable(&self, rows: &[nikgob_library::TrackRow], start: Option<TrackId>) -> Vec<TrackId> {
+        let only_local = self.only_downloaded() && rows.iter().any(|r| r.has_local);
+        rows.iter().filter(|r| !only_local || r.has_local || Some(r.id) == start).map(|r| r.id).collect()
+    }
+
+    /// The releases of `tracks`, once each.
+
+    fn releases_of(&self, tracks: &[TrackId]) -> Vec<nikgob_core::model::ReleaseId> {
+        let mut ids: Vec<_> =
+            tracks.iter().filter_map(|t| self.lib.get_track(*t).ok().flatten()?.release_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Likes or playlists were edited. When the library holds the same
+    /// tracks as `before` (a local song liked, a playlist renamed…), only
+    /// what such an edit changes there is read again and published: the
+    /// playlist cards, the cards of `releases` and the page of «Треки»
+    /// (their hearts). When it
+    /// does not (a stream song liked or added to a playlist joins the
+    /// library, one unliked leaves it), or the library was never loaded,
+    /// all of it is read again.
+    fn library_edited(&mut self, before: Held, releases: Vec<nikgob_core::model::ReleaseId>) {
+        let same = match before {
+            Held::Same => true,
+            Held::Tracks(Some(n)) => self.library_tracks() == Held::Tracks(Some(n)),
+            Held::Tracks(None) => false,
+        };
+        if !same || !self.state.read().library.loaded {
+            self.load_library();
+            return;
+        }
+        self.stream_analysis_changed();
+        self.recs_library_changed();
+        let (playlists, liked_albums) = self.shelf();
+        let rows: Vec<_> =
+            releases.iter().filter_map(|id| self.lib.get_release_row(*id).ok().flatten()).collect();
+        let res = &mut self.res;
+        let cards: Vec<_> = rows.iter().map(|r| res.release(r)).collect();
+        let liked = !cards.is_empty();
+        self.publish(|s| {
+            s.library.playlists = playlists;
+            s.library.liked_albums = liked_albums;
+            let l = &mut s.library;
+            for list in [&mut l.releases, &mut l.recently_added, &mut l.often_played] {
+                for c in list.iter_mut() {
+                    if let Some(new) = cards.iter().find(|n| n.id == c.id) {
+                        *c = new.clone();
+                    }
+                }
+            }
+        });
+        // Likes: the hearts of «Треки» too.
+        if liked {
+            let (offset, sort) = {
+                let s = self.state.read();
+                (s.library.tracks_offset, s.library.track_sort)
+            };
+            self.load_tracks(offset, 200, sort);
+        }
+    }
+
     /// Updates `liked` flags already shown without reloading everything.
-    fn refresh_liked(&mut self, target: LikeTarget, on: bool) {
-        self.publish(|s, _| {
+    fn refresh_liked(&mut self, target: LikeTarget, on: bool, before: Held) {
+        self.publish(|s| {
             let fix = |t: &mut nikgob_view::TrackRow| {
                 if LikeTarget::Track(t.id) == target {
                     t.liked = on;
@@ -1360,7 +2859,11 @@ impl Worker {
             };
             s.library.releases.iter_mut().for_each(fix_release);
             s.search.releases.iter_mut().for_each(fix_release);
-            s.home.continue_listening.iter_mut().for_each(fix_release);
+            for c in &mut s.home.continue_listening {
+                if let nikgob_view::ContinueCard::Release(c) = c {
+                    fix_release(c);
+                }
+            }
             s.home.long_unplayed.iter_mut().for_each(fix_release);
             s.home.recently_added.iter_mut().for_each(fix_release);
             if let Some(r) = s.release.as_mut() {
@@ -1370,8 +2873,9 @@ impl Worker {
             s.search.artists.iter_mut().for_each(fix_artist);
             s.home.artist_mixes.iter_mut().for_each(fix_artist);
         });
-        if let LikeTarget::Track(_) = target {
-            self.after_like_change();
+        if let LikeTarget::Track(t) = target {
+            let releases = self.releases_of(&[t]);
+            self.after_like_change(before, releases);
         }
     }
 }
@@ -1400,16 +2904,26 @@ impl Worker {
         });
         match settings.save(&path) {
             Ok(()) => {
+                let had = self.indexer.is_some();
                 self.indexer = search::indexer_from(Some(&path));
                 let usable = self.indexer.is_some();
-                self.publish(|s, _| {
+                self.publish(|s| {
                     s.prefs.prowlarr_url = url;
                     s.prefs.prowlarr_configured = usable;
                 });
+                if usable && !had {
+                    self.streaming.wish.enabled.insert(nikgob_view::SourceKey::Torrents);
+                }
+                self.publish_sources();
+                self.wish_sources_ready();
                 self.toast(
                     if usable { "Prowlarr сохранён" } else { "Адрес или ключ Prowlarr не подходят" },
                     None,
                 );
+                // Whether it answers, right away (the settings show it).
+                if usable {
+                    self.check_indexer(String::new(), String::new());
+                }
             }
             Err(e) => {
                 log::error!("saving settings: {e}");
@@ -1441,6 +2955,7 @@ impl Worker {
             }
             self.position = pos;
             self.position_at = Instant::now();
+            self.rate = 1.0;
             self.preload_next();
         }
     }
@@ -1507,18 +3022,86 @@ impl Worker {
             self.toast("Не удалось сохранить настройки", None);
             return;
         }
-        let mut cfg = MetadataConfig::new(settings.metadata.contact.clone());
-        if let Some(k) = &settings.metadata.acoustid_key {
-            cfg = cfg.with_acoustid_key(k.clone());
-        }
-        self.set_metadata_config(&cfg);
+        self.set_metadata_config(&metadata_config(&settings.metadata));
         let configured = settings.metadata.acoustid_key.is_some();
-        self.publish(|s, _| {
+        self.publish(|s| {
             s.prefs.metadata_contact = settings.metadata.contact;
             s.prefs.acoustid_configured = configured;
         });
         self.toast("Сохранено", None);
     }
+
+    /// The Last.fm key of the graph of similar music → settings.toml
+    /// (empty: none), applied live.
+    fn set_lastfm_key(&mut self, key: &str) {
+        let Some(path) = self.settings_path.clone() else {
+            self.toast("Некуда сохранить настройки", None);
+            return;
+        };
+        let mut settings = match nikgob_core::settings::Settings::load(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("loading settings: {e}");
+                self.toast("settings.toml не читается — поправь файл вручную", None);
+                return;
+            }
+        };
+        settings.metadata.lastfm_key = Some(key.trim().to_owned()).filter(|k| !k.is_empty());
+        if let Err(e) = settings.save(&path) {
+            log::error!("saving settings: {e}");
+            self.toast("Не удалось сохранить настройки", None);
+            return;
+        }
+        self.set_metadata_config(&metadata_config(&settings.metadata));
+        let configured = settings.metadata.lastfm_key.is_some();
+        self.publish(|s| s.prefs.lastfm_configured = configured);
+        self.toast(if configured { "Сохранено" } else { "Ключ убран" }, None);
+    }
+}
+
+/// The online metadata's config of settings.toml's.
+fn metadata_config(m: &nikgob_core::settings::MetadataSettings) -> MetadataConfig {
+    let mut cfg = MetadataConfig::new(m.contact.clone());
+    if let Some(k) = &m.acoustid_key {
+        cfg = cfg.with_acoustid_key(k.clone());
+    }
+    if let Some(k) = &m.lastfm_key {
+        cfg = cfg.with_lastfm_key(k.clone());
+    }
+    cfg
+}
+
+/// The page a queue's context id opens (`release:<id>`, `playlist:<id>`,
+/// `artist:<id>`); none for the rest (a mix, a radio, a search).
+fn context_page(id: &str) -> Option<nikgob_view::Route> {
+    use nikgob_view::Route;
+    let (kind, id) = id.split_once(':')?;
+    match kind {
+        "release" => id.parse().ok().map(Route::Release),
+        "playlist" => id.parse().ok().map(Route::Playlist),
+        "artist" => id.parse().ok().map(Route::Artist),
+        _ => None,
+    }
+}
+
+/// Which tracks the library lists ([`nikgob_view::Prefs::library_only_downloaded`]).
+fn track_filter(only_local: bool) -> nikgob_library::TrackFilter {
+    if only_local {
+        nikgob_library::TrackFilter::LocalOnly
+    } else {
+        nikgob_library::TrackFilter::All
+    }
+}
+
+/// What the library held before an edit of likes or playlists
+/// ([`Worker::library_edited`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Held {
+    /// How many tracks (`None`: unknown).
+    Tracks(Option<u32>),
+    /// The edit cannot move a track in or out (a playlist created or
+    /// renamed, its cover).
+    Same,
 }
 
 /// Crossfade length from prefs; `None` means gapless back-to-back.
@@ -1539,9 +3122,30 @@ impl Worker {
         }
     }
 
+    /// At the start: an export next to the library that this database no
+    /// longer matches (a backup of the database put back since) is written
+    /// again at once, not at the next change.
+    fn export_if_stale(&mut self) {
+        let dir = self.res.path(".musiclib/userdata");
+        match self.lib.userdata_export_stale(&dir) {
+            Ok(false) => {}
+            Ok(true) => {
+                log::info!("userdata export in {} is not this library's, writing it again", dir.display());
+                let fp = self.lib.userdata_fingerprint().ok().map(|fp| (dir.clone(), fp));
+                match self.lib.export_userdata(&dir) {
+                    Ok(_) => self.exported_fp = fp,
+                    Err(e) => log::warn!("userdata export to {}: {e}", dir.display()),
+                }
+            }
+            Err(e) => log::warn!("userdata export in {}: {e}", dir.display()),
+        }
+    }
+
     /// Writes playlists, likes and history next to the library (PLAN §4:
     /// the DB can be rebuilt from files + this export). At most once a
-    /// minute while things change, and once more on shutdown.
+    /// minute while things change, and once more on shutdown; only when the
+    /// user data itself changed (most publishes are playback, downloads and
+    /// pages, which leave it alone).
     fn maybe_export(&mut self, force: bool) {
         if self.revision == self.exported_rev {
             return;
@@ -1550,12 +3154,163 @@ impl Worker {
             return;
         }
         let dir = self.res.path(".musiclib/userdata");
+        let fp = self.lib.userdata_fingerprint().ok().map(|fp| (dir.clone(), fp));
+        if fp.is_some() && fp == self.exported_fp {
+            self.exported_rev = self.revision;
+            self.last_export = Instant::now();
+            return;
+        }
         match self.lib.export_userdata(&dir) {
             Ok(_) => {
                 self.exported_rev = self.revision;
                 self.last_export = Instant::now();
+                self.exported_fp = fp;
             }
             Err(e) => log::warn!("userdata export to {}: {e}", dir.display()),
         }
+    }
+}
+
+/// A playback error that is YouTube refusing a stream's URLs (every client
+/// asked, HTTP 403), not the video's own refusal or a lost connection.
+fn youtube_refused_midway(message: &str) -> bool {
+    let m = message.to_lowercase();
+    (m.contains("refused") || m.contains("http 403")) && !streams::resolve::video_refused(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(v: u64) -> Duration {
+        Duration::from_millis(v)
+    }
+
+    #[test]
+    fn a_queue_started_from_an_album_a_playlist_or_an_artist_has_its_page() {
+        use nikgob_view::Route;
+        let (r, p, a) = (nikgob_core::model::ReleaseId::new(), PlaylistId::new(), nikgob_core::model::ArtistId::new());
+        assert_eq!(context_page(&format!("release:{r}")), Some(Route::Release(r)));
+        assert_eq!(context_page(&format!("playlist:{p}")), Some(Route::Playlist(p)));
+        assert_eq!(context_page(&format!("playlist:{LIKED_PLAYLIST}")), Some(Route::Playlist(LIKED_PLAYLIST)));
+        assert_eq!(context_page(&format!("artist:{a}")), Some(Route::Artist(a)));
+        // A radio of an artist, a mix, a broken id: no page.
+        assert_eq!(context_page(&format!("radio:artist:{a}")), None);
+        assert_eq!(context_page("mix:Спокойное"), None);
+        assert_eq!(context_page("release:nope"), None);
+        assert_eq!(context_page("release"), None);
+    }
+
+    #[test]
+    fn follow_slews_small_differences_and_jumps_far_ones() {
+        assert_eq!(follow(ms(10_000), ms(10_002), false, 1.0), Follow::Keep);
+        assert_eq!(follow(ms(10_000), ms(10_002), false, 1.1), Follow::Rate(1.0));
+        // Behind: faster; ahead: slower, never backwards.
+        let Follow::Rate(r) = follow(ms(10_000), ms(10_100), false, 1.0) else { panic!() };
+        assert!((r - 1.2).abs() < 1e-9);
+        let Follow::Rate(r) = follow(ms(10_100), ms(10_000), false, 1.0) else { panic!() };
+        assert!((r - 0.8).abs() < 1e-9);
+        let Follow::Rate(r) = follow(ms(10_290), ms(10_000), false, 1.0) else { panic!() };
+        assert!((r - (1.0 - SLEW_MAX)).abs() < 1e-9);
+        // A seek or a loop.
+        assert_eq!(follow(ms(10_000), ms(500), false, 1.0), Follow::Snap);
+        assert_eq!(follow(ms(10_000), ms(10_400), false, 1.0), Follow::Snap);
+        // Stalled behind us: wait for it; stalled ahead: catch up.
+        assert_eq!(follow(ms(10_200), ms(10_000), true, 1.0), Follow::Rate(0.0));
+        assert!(matches!(follow(ms(10_000), ms(10_100), true, 1.0), Follow::Rate(r) if r > 1.0));
+    }
+
+    /// Our clock as the runtime keeps it, driven by simulated reports.
+    struct Sim {
+        position: f64,
+        at: f64,
+        rate: f64,
+        heard: Option<Duration>,
+        jumps: u32,
+    }
+
+    impl Sim {
+        fn at(&self, t: f64) -> f64 {
+            self.position + (t - self.at) * self.rate
+        }
+
+        fn report(&mut self, t: f64, heard: f64) {
+            let h = Duration::from_secs_f64(heard);
+            let stalled = self.heard == Some(h);
+            self.heard = Some(h);
+            let ours = self.at(t);
+            match follow(Duration::from_secs_f64(ours), h, stalled, self.rate) {
+                Follow::Keep => {}
+                Follow::Snap => {
+                    (self.position, self.at, self.rate) = (heard, t, if stalled { 0.0 } else { 1.0 });
+                    self.jumps += 1;
+                }
+                Follow::Rate(r) => (self.position, self.at, self.rate) = (ours, t, r),
+            }
+        }
+    }
+
+    /// Plays `secs` of simulated time: the heard position from `heard(t)`,
+    /// reports every 250 ms arriving 0–12 ms late, the view sampled every
+    /// frame. Returns the largest |ours − heard| from `settle` on (s) and
+    /// the jumps, and checks the view never went backwards without one.
+    fn run(start: f64, secs: f64, settle: f64, heard: impl Fn(f64) -> f64) -> (f64, u32) {
+        let mut sim = Sim { position: start, at: 0.0, rate: 1.0, heard: None, jumps: 0 };
+        let (mut worst, mut last, mut next_report, mut k) = (0.0f64, f64::MIN, 0.25, 0u64);
+        let mut jumps = 0;
+        let frame = 1.0 / 120.0;
+        let mut t = 0.0;
+        while t < secs {
+            if t >= next_report {
+                // Pseudo-random delivery delay, the same every run.
+                k = k.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                let late = (k >> 33) as f64 / (1u64 << 31) as f64 * 0.012;
+                sim.report(t, heard(t - late));
+                next_report += 0.25;
+            }
+            let ours = sim.at(t);
+            // Only a jump may move it back.
+            assert!(ours >= last - 1e-9 || sim.jumps != jumps, "went back at {t}");
+            (last, jumps) = (ours, sim.jumps);
+            if t >= settle {
+                worst = worst.max((ours - heard(t)).abs());
+            }
+            t += frame;
+        }
+        (worst, sim.jumps)
+    }
+
+    /// The numbers behind the clock: how far the lyrics and the progress
+    /// can be from what is heard (`cargo test -p nikgob-runtime clock --
+    /// --nocapture` prints them).
+    #[test]
+    fn the_clock_follows_what_is_heard() {
+        // The sound clock runs 0.3 % off the system clock.
+        let (drift, jumps) = run(0.0, 120.0, 1.0, |t| t * 1.003);
+        assert_eq!(jumps, 0);
+        // 200 ms off at the start (latency the old clock did not know).
+        let (offset, jumps) = run(0.2, 30.0, 2.0, |t| t);
+        assert_eq!(jumps, 0);
+        let (offset_first, _) = run(0.2, 30.0, 0.0, |t| t);
+        // A stream stalls for 0.8 s at 10 s, then plays on: told by the
+        // second report that stands still, by then up to half a second
+        // ahead, it waits or jumps back once.
+        let stall_at = |t: f64| if t < 10.0 { t } else if t < 10.8 { 10.0 } else { t - 0.8 };
+        let (stall, jumps) = run(0.0, 30.0, 1.0, stall_at);
+        assert!(jumps <= 1, "{jumps}");
+        let (after_stall, _) = run(0.0, 30.0, 12.5, stall_at);
+        println!(
+            "clock error: drift 0.3 % {:.1} ms; 200 ms off {:.0} ms at first, {:.1} ms after 2 s; \
+             0.8 s stall {:.0} ms at most, {:.1} ms 1.7 s after it",
+            drift * 1e3,
+            offset_first * 1e3,
+            offset * 1e3,
+            stall * 1e3,
+            after_stall * 1e3,
+        );
+        assert!(drift < 0.02, "{drift}");
+        assert!(offset < 0.02, "{offset}");
+        assert!(stall < 0.55, "{stall}");
+        assert!(after_stall < 0.02, "{after_stall}");
     }
 }

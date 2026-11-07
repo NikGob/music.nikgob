@@ -10,9 +10,23 @@
 //! frames fall at negative indices, which are dropped. The last page's
 //! granule position already encodes the end trim; the demuxer turns that into
 //! `trim_end` on the final packet, which is applied by the Opus wrapper.
+//!
+//! Opus in Matroska / WebM (YouTube itag 251) goes through the same `ropus`
+//! wrapper. There the demuxer has already subtracted the `CodecDelay` from
+//! the block timestamps, so the timeline origin is 0; as the delay is
+//! rounded to the millisecond, the first packet is snapped to exactly
+//! `-pre_skip`. `DiscardPadding` (end trim) is not applied by Symphonia's
+//! Matroska demuxer, so a WebM stream may end a few milliseconds late.
+//!
+//! Symphonia 0.6's Matroska seek lands (and labels packets) up to a cluster
+//! off when it uses the cues, so Matroska is seeked without them: the
+//! container is opened again and packets are skipped, without decoding, up
+//! to the target.
 
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::well_known::{
@@ -22,14 +36,14 @@ use symphonia::core::codecs::audio::{AudioCodecId, AudioDecoder, AudioDecoderOpt
 use symphonia::core::errors::{Error as SymError, SeekErrorKind};
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::packet::Packet;
 use symphonia::core::units::{TimeBase, Timestamp};
 
 use super::opus::{OpusHead, OpusPackets};
 use super::{FrameSource, ReadStatus};
-use crate::types::DecodeError;
+use crate::types::{ByteSource, DecodeError};
 
 /// How long before the seek target decoding restarts for codecs whose output
 /// depends on earlier packets (80 ms is the Opus recommendation).
@@ -67,23 +81,166 @@ pub(crate) struct SymphoniaSource {
     /// Decoded while learning the format of a stream whose parameters were
     /// incomplete; handed out by the first `read`.
     prefetch: Option<Vec<f32>>,
+    /// Matroska Opus: the first packet's exact timeline index (`-pre_skip`),
+    /// used once at the start of the stream (see the module docs).
+    exact_start: Option<i64>,
+    /// Matroska Opus: frames added to every packet position, the rounding of
+    /// the `CodecDelay` learnt from the first packet.
+    pts_fix: i64,
+    /// Matroska: seek by reopening and skipping packets (see the module docs).
+    reopen: Option<Reopen>,
+    /// A packet read ahead by such a seek, handed to the next `read`.
+    held: Option<Packet>,
+}
+
+/// Opens the container again from its first byte (Matroska seeking).
+type Reopen = Box<dyn Fn() -> Result<Box<dyn FormatReader>, DecodeError> + Send>;
+
+/// A [`ByteSource`] as Symphonia's `MediaSource` (which must be `Sync`). The
+/// source is shared so its gain and duration can be asked after the probe.
+/// The first read error is kept: the probe reads past it as the end of
+/// the bytes, and the stream's own reason (a refused key, an age gate)
+/// says more than «no suitable format reader».
+struct SharedBytes(Arc<Mutex<Box<dyn ByteSource>>>, Arc<Mutex<Option<String>>>);
+
+impl SharedBytes {
+    fn with<T>(&self, f: impl FnOnce(&mut Box<dyn ByteSource>) -> T) -> T {
+        f(&mut self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+impl Read for SharedBytes {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.with(|s| s.read(buf)).inspect_err(|e| {
+            self.1.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(|| e.to_string());
+        })
+    }
+}
+
+impl Seek for SharedBytes {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.with(|s| s.seek(pos))
+    }
+}
+
+impl MediaSource for SharedBytes {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.with(|s| s.byte_len())
+    }
+}
+
+/// What a stream says about itself once probed.
+pub(crate) struct StreamInfo {
+    pub gain_db: Option<f32>,
+    pub duration: Option<std::time::Duration>,
 }
 
 impl SymphoniaSource {
     pub(crate) fn open(path: &Path) -> Result<Self, DecodeError> {
         let file = File::open(path)?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            hint.with_extension(ext);
+        let ext = path.extension().and_then(|e| e.to_str());
+        let mut source = Self::open_media(Box::new(file), ext)?;
+        if source.is_mkv() {
+            let (path, ext) = (path.to_owned(), ext.map(str::to_owned));
+            source.reopen = Some(Box::new(move || {
+                let file = File::open(&path)?;
+                probe(Box::new(file), ext.as_deref())
+            }));
         }
-        let format = symphonia::default::get_probe().probe(
-            &hint,
-            mss,
-            FormatOptions::default(),
-            MetadataOptions::default(),
-        )?;
-        Self::from_format(format)
+        Ok(source)
+    }
+
+    fn is_mkv(&self) -> bool {
+        self.format.format_info().short_name == "matroska"
+    }
+
+    /// Probes and opens encoded bytes from a stream.
+    pub(crate) fn open_stream(
+        bytes: Box<dyn ByteSource>,
+    ) -> Result<(Self, StreamInfo), DecodeError> {
+        let hint = bytes
+            .format_hint()
+            .trim_start_matches('.')
+            .to_ascii_lowercase();
+        let shared = Arc::new(Mutex::new(bytes));
+        let failure = Arc::new(Mutex::new(None));
+        let ext = (!hint.is_empty()).then_some(hint);
+        let opened = Self::open_media(
+            Box::new(SharedBytes(Arc::clone(&shared), Arc::clone(&failure))),
+            ext.as_deref(),
+        );
+        let mut source = match opened {
+            Ok(s) => s,
+            Err(e) => {
+                let why = failure.lock().unwrap_or_else(PoisonError::into_inner).take();
+                return Err(why.map_or(e, DecodeError::Stream));
+            }
+        };
+        if source.is_mkv() {
+            let shared = Arc::clone(&shared);
+            source.reopen = Some(Box::new(move || {
+                shared
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .seek(SeekFrom::Start(0))?;
+                probe(
+                    Box::new(SharedBytes(Arc::clone(&shared), Arc::new(Mutex::new(None)))),
+                    ext.as_deref(),
+                )
+            }));
+        }
+        let info = {
+            let s = shared.lock().unwrap_or_else(PoisonError::into_inner);
+            StreamInfo {
+                gain_db: s.gain_db().filter(|g| g.is_finite()),
+                duration: s.duration(),
+            }
+        };
+        Ok((source, info))
+    }
+
+    fn open_media(media: Box<dyn MediaSource>, ext: Option<&str>) -> Result<Self, DecodeError> {
+        Self::from_format(probe(media, ext)?)
+    }
+
+    /// Matroska seek: reopen, then skip whole packets up to the one holding
+    /// timeline frame `from`, which is kept for the next read.
+    fn seek_by_skipping(&mut self, from: i64) -> Result<(), DecodeError> {
+        let Some(reopen) = &self.reopen else {
+            return Err(DecodeError::Seek("cannot reopen".into()));
+        };
+        self.format = reopen()?;
+        self.held = None;
+        loop {
+            match self.format.next_packet() {
+                Ok(Some(packet)) => {
+                    if packet.track_id != self.track_id {
+                        continue;
+                    }
+                    let end = self.ts_to_frames(packet.pts)
+                        + self.dur_to_frames(packet.dur.get() as i64)
+                        - self.origin
+                        + self.pts_fix;
+                    if end > from {
+                        self.held = Some(packet);
+                        return Ok(());
+                    }
+                }
+                Ok(None) | Err(SymError::ResetRequired) => {
+                    self.eof = true;
+                    return Ok(());
+                }
+                Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    self.eof = true;
+                    return Ok(());
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     fn from_format(format: Box<dyn FormatReader>) -> Result<Self, DecodeError> {
@@ -98,11 +255,19 @@ impl SymphoniaSource {
         let track_id = track.id;
         let start_ts = track.start_ts;
         let num_frames = track.num_frames;
-        let duration = track.duration;
+        let is_mkv = format.format_info().short_name == "matroska";
+        // Matroska tracks carry no length of their own; the segment does.
+        let duration = track.duration.or_else(|| {
+            let media = format.media_info();
+            media
+                .duration
+                .filter(|_| is_mkv && media.time_base == track.time_base)
+        });
         let is_opus = params.codec == CODEC_ID_OPUS;
 
         let mut rate = params.sample_rate.unwrap_or(0);
         let mut channels = params.channels.as_ref().map_or(0, |c| c.count());
+        let mut exact_start = None;
 
         let (dec, origin) = if is_opus {
             let extra = params
@@ -112,10 +277,12 @@ impl SymphoniaSource {
             let head = OpusHead::parse(extra)?;
             rate = 48_000;
             channels = head.channels;
-            (
-                Dec::Opus(Box::new(OpusPackets::new(head)?)),
-                i64::from(head.pre_skip),
-            )
+            // Matroska timestamps already exclude the pre-skip (CodecDelay).
+            let origin = if is_mkv { 0 } else { i64::from(head.pre_skip) };
+            if is_mkv {
+                exact_start = Some(-i64::from(head.pre_skip));
+            }
+            (Dec::Opus(Box::new(OpusPackets::new(head)?)), origin)
         } else {
             let decoder = symphonia::default::get_codecs()
                 .make_audio_decoder(&params, &AudioDecoderOptions::default())
@@ -147,6 +314,10 @@ impl SymphoniaSource {
             bad_packets: 0,
             scratch: Vec::new(),
             prefetch: None,
+            exact_start,
+            pts_fix: 0,
+            reopen: None,
+            held: None,
         };
         source.emitted = source.ts_to_frames(start_ts) - origin;
 
@@ -253,6 +424,23 @@ impl SymphoniaSource {
     }
 }
 
+fn probe(
+    media: Box<dyn MediaSource>,
+    ext: Option<&str>,
+) -> Result<Box<dyn FormatReader>, DecodeError> {
+    let mss = MediaSourceStream::new(media, Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = ext {
+        hint.with_extension(ext);
+    }
+    Ok(symphonia::default::get_probe().probe(
+        &hint,
+        mss,
+        FormatOptions::default(),
+        MetadataOptions::default(),
+    )?)
+}
+
 fn preroll_frames(codec: AudioCodecId, rate: u32) -> u64 {
     let ms = if codec == CODEC_ID_OPUS {
         OPUS_PREROLL_MS
@@ -294,7 +482,11 @@ impl FrameSource for SymphoniaSource {
             if self.eof {
                 return Ok(ReadStatus::Eof);
             }
-            let packet = match self.format.next_packet() {
+            let next = match self.held.take() {
+                Some(packet) => Ok(Some(packet)),
+                None => self.format.next_packet(),
+            };
+            let packet = match next {
                 Ok(Some(packet)) => packet,
                 Ok(None) | Err(SymError::ResetRequired) => {
                     self.eof = true;
@@ -332,7 +524,14 @@ impl FrameSource for SymphoniaSource {
                 let first = self.ts_to_frames(packet.pts)
                     + self.dur_to_frames(packet.trim_start.get() as i64)
                     - self.origin;
-                self.emitted = first;
+                // Within a millisecond of the exact start: it is the start,
+                // and the difference is the delay's rounding.
+                if let Some(exact) = self.exact_start.take()
+                    && (first - exact).abs() <= i64::from(self.rate / 1000)
+                {
+                    self.pts_fix = exact - first;
+                }
+                self.emitted = first + self.pts_fix;
                 self.resync = false;
             }
             let ch = self.channels;
@@ -349,6 +548,17 @@ impl FrameSource for SymphoniaSource {
     fn seek(&mut self, frame: u64) -> Result<(), DecodeError> {
         let target = i64::try_from(frame).unwrap_or(i64::MAX);
         let from = (target - self.preroll as i64).max(0);
+        if self.reopen.is_some() {
+            self.eof = false;
+            self.seek_by_skipping(from)?;
+            self.reset_decoder()?;
+            self.resync = true;
+            self.skip_to = target;
+            self.bad_packets = 0;
+            self.prefetch = None;
+            self.exact_start = None;
+            return Ok(());
+        }
         let ts = self.frames_to_ts(from + self.origin);
         match self.format.seek(
             SeekMode::Accurate,
@@ -371,6 +581,43 @@ impl FrameSource for SymphoniaSource {
         self.skip_to = target;
         self.bad_packets = 0;
         self.prefetch = None;
+        self.exact_start = None;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stream that fails before its first byte, the way a refused
+    /// Spotify key or a YouTube age gate does.
+    struct Refused;
+
+    impl Read for Refused {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("youtube: age-restricted"))
+        }
+    }
+
+    impl Seek for Refused {
+        fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    impl ByteSource for Refused {
+        fn byte_len(&self) -> Option<u64> {
+            None
+        }
+        fn format_hint(&self) -> &str {
+            "ogg"
+        }
+    }
+
+    #[test]
+    fn a_stream_that_fails_says_its_own_reason() {
+        let Err(e) = SymphoniaSource::open_stream(Box::new(Refused)) else { panic!("opened") };
+        assert!(e.to_string().contains("age-restricted"), "{e}");
     }
 }

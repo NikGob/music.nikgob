@@ -213,16 +213,24 @@ str_enum!(
         LocalFile = "local_file",
         Spotify = "spotify",
         Youtube = "youtube",
+        /// A Deezer catalogue entry: it has no sound of its own, its track
+        /// plays from YouTube Music (docs/stage3.md §0 «Каталог Deezer»).
+        Deezer = "deezer",
+        /// A SoundCloud track (AAC in HLS; DRM-only tracks play elsewhere).
+        Soundcloud = "soundcloud",
     }
 );
 
 impl SourceKind {
-    /// Lower is better: local file > Spotify > YouTube (PLAN §4).
+    /// Lower is better: local file > Spotify > YouTube > SoundCloud >
+    /// Deezer (PLAN §4; a Deezer entry never plays itself).
     pub const fn priority(self) -> u8 {
         match self {
             Self::LocalFile => 0,
             Self::Spotify => 1,
             Self::Youtube => 2,
+            Self::Soundcloud => 3,
+            Self::Deezer => 4,
         }
     }
 
@@ -258,6 +266,47 @@ str_enum!(
     }
 );
 
+str_enum!(
+    /// Who chose what a start plays (recs-v2 §4.1): the user, or the app
+    /// going on by itself.
+    pub enum EventOrigin {
+        /// A click on a track, an album, an artist, a search result.
+        Manual = "manual",
+        /// The next one of the queue (after the one before ended, or «Дальше»).
+        Queue = "queue",
+        /// «Автовоспроизведение» going on after the queue.
+        Autoplay = "autoplay",
+        /// A radio's pick.
+        Radio = "radio",
+        /// A mix's song.
+        Mix = "mix",
+        /// A play of another service's history brought in (Takeout,
+        /// Spotify): long-term taste, never a session of this app.
+        Import = "import",
+    }
+);
+
+impl EventOrigin {
+    /// Not the user's own choice: a recommendation, or the queue going on.
+    pub const fn is_auto(self) -> bool {
+        !matches!(self, Self::Manual)
+    }
+}
+
+str_enum!(
+    /// Why a play ended (recs-v2 §15, phase 2).
+    pub enum EndReason {
+        /// «Дальше».
+        UserNext = "user_next",
+        /// Something else was picked to play.
+        UserPick = "user_pick",
+        /// The app was closed while it played.
+        AppClosed = "app_closed",
+        /// It played to its end.
+        Ended = "ended",
+    }
+);
+
 #[allow(clippy::derivable_impls)]
 impl Default for EventContext {
     fn default() -> Self {
@@ -266,15 +315,62 @@ impl Default for EventContext {
 }
 
 str_enum!(
+    /// Where a wishlist item stands (docs/stage3.md §3.7).
     pub enum WishlistStatus {
+        /// Imported, waits for the user's "download" (bulk buttons).
+        Waiting = "waiting",
+        /// To be searched for automatically.
         New = "new",
         Searching = "searching",
+        /// A doubtful match waits for the user.
         Confirm = "confirm",
         Downloading = "downloading",
         Done = "done",
+        /// Nothing found; searched again later (`next_try_at`).
+        NoTorrent = "no_torrent",
         Failed = "failed",
+        /// The user said no: never offered again.
+        Dismissed = "dismissed",
     }
 );
+
+str_enum!(
+    /// What a wishlist item wants downloaded.
+    pub enum WishlistScope {
+        Track = "track",
+        Album = "album",
+    }
+);
+
+#[allow(clippy::derivable_impls)]
+impl Default for WishlistScope {
+    fn default() -> Self {
+        Self::Track
+    }
+}
+
+str_enum!(
+    /// Why a wishlist item exists.
+    pub enum WishlistOrigin {
+        /// The user liked a stream track or album.
+        Like = "like",
+        /// Brought in by an import of likes / playlists.
+        Import = "import",
+        /// A like or playlist that arrived from a service sync.
+        Sync = "sync",
+        Manual = "manual",
+        /// A library file below the quality the user wants: searched for a
+        /// better copy on a schedule, which replaces it.
+        Upgrade = "upgrade",
+    }
+);
+
+#[allow(clippy::derivable_impls)]
+impl Default for WishlistOrigin {
+    fn default() -> Self {
+        Self::Manual
+    }
+}
 
 str_enum!(
     pub enum DownloadStatus {
@@ -391,6 +487,25 @@ pub mod score {
     /// A "lossless" file whose spectrum is cut like a lossy one. Below MP3 V0.
     pub const FAKE_LOSSLESS: i32 = 690;
     pub const OTHER: i32 = 300;
+    /// Audio saved from a stream as it is ("Сохранить с YouTube"): a local
+    /// file, but marked low quality, so any real download upgrades it.
+    pub const SAVED_STREAM: i32 = 295;
+    /// A Spotify stream (Vorbis 320). Below every local file: a downloaded
+    /// copy always wins, whatever its codec.
+    pub const STREAM_SPOTIFY: i32 = 290;
+    /// A YouTube stream (Opus ~160 or AAC), below Spotify.
+    pub const STREAM_YOUTUBE: i32 = 280;
+    /// A YouTube music video (a clip: its own intro and outro, not the
+    /// record), one below [`STREAM_YOUTUBE`] so the song of the same track
+    /// always plays first. A library track whose active source has this
+    /// score is shown as a clip.
+    pub const STREAM_YOUTUBE_CLIP: i32 = 279;
+    /// A Deezer catalogue entry: no sound of its own (it plays from YouTube
+    /// Music), so below every stream that plays.
+    pub const STREAM_DEEZER: i32 = 270;
+    /// A SoundCloud stream (AAC 160 in HLS): below YouTube's song and clip,
+    /// above the Deezer catalogue.
+    pub const STREAM_SOUNDCLOUD: i32 = 275;
 }
 
 /// Ranks a source by quality, PLAN §6:
@@ -534,7 +649,8 @@ impl ArtistCredit {
     }
 
     /// `"A feat. B"`: names glued with their join phrases. A missing phrase
-    /// between two parts becomes `", "`; the last part's phrase is ignored.
+    /// between two parts becomes `", "`; the last part's phrase is the
+    /// line's tail (the bracket closing `リコ(CV:富田美憂)`).
     pub fn display(&self) -> String {
         let mut out = String::new();
         let last = self.0.len().saturating_sub(1);
@@ -546,6 +662,8 @@ impl ArtistCredit {
                 } else {
                     out.push_str(&part.join_phrase);
                 }
+            } else if part.join_phrase.chars().all(|c| matches!(c, ')' | '）' | ' ')) {
+                out.push_str(part.join_phrase.trim_end());
             }
         }
         out
@@ -831,7 +949,7 @@ pub struct Like {
 }
 
 /// Append-only listening history record.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub id: EventId,
     pub ts: UnixMs,
@@ -843,6 +961,33 @@ pub struct Event {
     #[serde(default)]
     pub context: EventContext,
     pub device: DeviceId,
+    /// Who chose it (a start); `None` in a history older than the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EventOrigin>,
+    /// What played it: a release, a playlist, a mix, a radio's seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
+    /// Why it ended (a skip or a complete).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<EndReason>,
+    /// How far the app was from the user while it played (an end): 0 the
+    /// window focused, 0.5 in view behind another, 1 hidden or minimised,
+    /// averaged over the time it played.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<f32>,
+    /// The player's mean volume while it played (an end), 0…1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f32>,
+}
+
+/// What a recorded play says beyond its kind and position.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EventMeta {
+    pub origin: Option<EventOrigin>,
+    pub context_id: Option<String>,
+    pub end_reason: Option<EndReason>,
+    pub attention: Option<f32>,
+    pub volume: Option<f32>,
 }
 
 impl Event {
@@ -856,6 +1001,11 @@ impl Event {
             position_ms: None,
             context: EventContext::Other,
             device,
+            origin: None,
+            context_id: None,
+            end_reason: None,
+            attention: None,
+            volume: None,
         }
     }
 }
@@ -864,11 +1014,28 @@ impl Event {
 // Derived data and tails
 // ---------------------------------------------------------------------------
 
+str_enum!(
+    /// What a track's sound analysis was computed from (docs/stage4.md §2).
+    /// An analysis of the file always wins over one of a stream.
+    pub enum AnalysisSource {
+        /// The track's local file.
+        File = "file",
+        /// The track's song on YouTube (Music), for a track without a file.
+        Youtube = "youtube",
+    }
+);
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Analysis {
     pub track_id: TrackId,
     pub bliss_vector: Vec<f32>,
     pub analyzed_with: String,
+    #[serde(default = "analysis_from_file")]
+    pub source: AnalysisSource,
+}
+
+fn analysis_from_file() -> AnalysisSource {
+    AnalysisSource::File
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -906,6 +1073,51 @@ pub struct WishlistItem {
     pub candidates_json: Option<String>,
     pub created_at: UnixMs,
     pub updated_at: UnixMs,
+    /// The library track it is for (a stream track until the file arrives).
+    #[serde(default)]
+    pub track_id: Option<TrackId>,
+    /// The album, for [`WishlistScope::Album`] (or the track's album).
+    #[serde(default)]
+    pub release_id: Option<ReleaseId>,
+    #[serde(default)]
+    pub scope: WishlistScope,
+    #[serde(default)]
+    pub origin: WishlistOrigin,
+    /// Searches done so far.
+    #[serde(default)]
+    pub attempts: u32,
+    /// Not searched again before this time (unix ms).
+    #[serde(default)]
+    pub next_try_at: Option<UnixMs>,
+    /// Free text for the user (why it failed, what was chosen).
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+impl WishlistItem {
+    /// A fresh item in `status`, stamped `now`, with every optional field empty.
+    pub fn new(status: WishlistStatus, now: UnixMs) -> Self {
+        Self {
+            id: WishlistId::new(),
+            title: None,
+            artist: None,
+            recording_mbid: None,
+            isrc: None,
+            spotify_id: None,
+            youtube_id: None,
+            status,
+            candidates_json: None,
+            created_at: now,
+            updated_at: now,
+            track_id: None,
+            release_id: None,
+            scope: WishlistScope::Track,
+            origin: WishlistOrigin::Manual,
+            attempts: 0,
+            next_try_at: None,
+            note: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -974,6 +1186,7 @@ mod tests {
         assert!("nope".parse::<ReleaseType>().is_err());
         assert!(SourceKind::LocalFile.priority() < SourceKind::Spotify.priority());
         assert!(SourceKind::Spotify.priority() < SourceKind::Youtube.priority());
+        assert!(SourceKind::Youtube.priority() < SourceKind::Deezer.priority());
     }
 
     #[test]
@@ -1031,6 +1244,9 @@ mod tests {
         assert!(v0 > fake, "fake FLAC is below MP3 V0");
         assert!(fake > mp3_128);
         assert!(mp3_128 > other);
+        // Streams rank below every local file, YouTube below Spotify.
+        assert!(score::STREAM_SPOTIFY < other.min(q(Codec::Mp3, Some(64), None, None, false)));
+        const { assert!(score::STREAM_YOUTUBE < score::STREAM_SPOTIFY) };
         // Opus / AAC / MP3 rank by bitrate too.
         assert!(q(Codec::Opus, Some(192), None, None, false) > opus);
         assert!(opus > q(Codec::Opus, Some(96), None, None, false));
