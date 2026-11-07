@@ -2,7 +2,7 @@
 
 <https://polyformproject.org/licenses/strict/1.0.0>
 
-Required Notice: Copyright (c) 2026 NikGob (https://github.com/NikGob)
+Required Notice: Copyright (c) 2026 Ignat (NikGob) Kuskildin (https://github.com/NikGob)
 
 ## Acceptance
 
