@@ -61,6 +61,11 @@ opt-level = 3
 [profile.dev.package.nikgob-align]
 opt-level = 3
 
+# And the file checks of the import (Chromaprint of the first two minutes,
+# the spectrum of the quality check), run on every library file once.
+[profile.dev.package.nikgob-import]
+opt-level = 3
+
 # The interface draws every frame in its own crates (springs, shape
 # morphs, lyrics layout, the tessellated paths of covers and glows): at
 # opt-level 0 a Now Playing frame takes about three times as long and the
