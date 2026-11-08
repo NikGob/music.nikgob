@@ -292,7 +292,12 @@ impl Worker {
     }
 
     fn keep_own(&mut self, track: TrackId, keep: Keep) {
-        let Some(path) = self.own_path(track) else { return };
+        let Some(path) = self.own_path(track) else {
+            // A song without a file and without an artist or a title to
+            // keep its text under.
+            self.toast("Не получилось сохранить текст: неясно, чья это песня", None);
+            return;
+        };
         let Some(svc) = self.import.as_ref() else { return };
         let (trash, tx) = (svc.config().trash_dir.clone(), svc.internal());
         svc.spawn_blocking(move || {
