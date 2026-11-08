@@ -765,7 +765,9 @@ async fn fetch_online(
         .await
         .unwrap_or_else(|_| Err(MetadataError::Network("timeout".into())))?;
     let body = text.as_ref().and_then(Text::body);
-    let _ = lib.put_lyrics_text(row.id, source.key(), body.as_deref());
+    if let Err(e) = lib.put_lyrics_text(row.id, source.key(), body.as_deref()) {
+        log::warn!("caching lyrics ({}): {e}", source.key());
+    }
     Ok(text)
 }
 
@@ -884,7 +886,8 @@ pub(crate) async fn fetch_track_lyrics(meta: Metadata, lib: Library, row: TrackR
             match result {
                 Ok(text) => tl.insert(source, text),
                 Err(e) => {
-                    log::debug!("lyrics backfill ({}): {e}", source.key());
+                    // Logged as a playback lookup is: not a miss, asked again.
+                    log::info!("lyrics backfill ({}): {e}", source.key());
                     tl.pending.remove(&source);
                     tl.failed = true;
                 }

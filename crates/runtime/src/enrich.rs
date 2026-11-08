@@ -134,7 +134,8 @@ pub(crate) async fn fetch_and_store(
 }
 
 /// Fills in the lyrics of every local track that has none, slowly, for as long
-/// as there is work, using the same source chain as playback.
+/// as there is work, using the same source chain as playback. Its requests
+/// give way to the shown song's ([`nikgob_metadata::in_background`]).
 pub(crate) async fn backfill_lyrics(
     meta: Metadata,
     lib: Library,
@@ -165,7 +166,8 @@ pub(crate) async fn backfill_lyrics(
                 .flatten()
                 .filter(|s| s.kind.is_local())
                 .map(|s| resolve(&library_dir, &s.locator));
-            let tl = crate::lyrics::fetch_track_lyrics(meta.clone(), lib.clone(), row, file, genius, None).await;
+            // The playing song's lookups go first (`in_background`).
+            let tl = nikgob_metadata::in_background(crate::lyrics::fetch_track_lyrics(meta.clone(), lib.clone(), row, file, genius, None)).await;
             if tl.failed {
                 failures += 1;
                 if failures >= MAX_FAILURES { return }
