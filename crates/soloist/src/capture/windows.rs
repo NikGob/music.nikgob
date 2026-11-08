@@ -20,17 +20,17 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
     AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, ActivateAudioInterfaceAsync, DEVICE_STATE_ACTIVE,
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, ActivateAudioInterfaceAsync, DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole,
     IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
     IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
-    IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume,
-    MMDeviceEnumerator, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, eRender,
+    IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, IMMNotificationClient,
+    IMMNotificationClient_Impl, ISimpleAudioVolume, MMDeviceEnumerator, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, eAll, eRender,
 };
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
@@ -45,7 +45,7 @@ use windows::Win32::System::Threading::{
     AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, SetEvent, WaitForSingleObject,
 };
 use windows::Win32::System::Variant::VT_BLOB;
-use windows_core::{IUnknown, Interface, implement, w};
+use windows_core::{IUnknown, Interface, PCWSTR, implement, w};
 
 /// The format asked of the capture; Windows converts to it.
 pub const RATE: u32 = 48_000;
@@ -506,10 +506,29 @@ pub fn set_sessions(pids: &[u32], mute: Option<bool>, volume: Option<f32>) -> Re
 /// back at afterwards (what Windows really applies, not what was asked).
 pub fn set_sessions_read_back(pids: &[u32], mute: Option<bool>, volume: Option<f32>) -> Result<Vec<f32>, String> {
     let _com = Com::init().ok();
+    find_sessions(pids, mute, volume).map(|(levels, _)| levels)
+}
+
+/// [`set_sessions_read_back`], and the sessions held to read their level
+/// again later without looking for them ([`HeldSessions::levels`]). The
+/// calling thread holds a [`ComThread`] for as long as it keeps them.
+pub fn set_sessions_held(pids: &[u32], mute: Option<bool>, volume: Option<f32>) -> Result<(Vec<f32>, HeldSessions), String> {
+    let _com = Com::init().ok();
+    find_sessions(pids, mute, volume).map(|(levels, held)| (levels, HeldSessions(held)))
+}
+
+/// Every audio session of the processes in `pids` on the active output
+/// devices, set to `mute` and `volume`, and the level each was read back at.
+fn find_sessions(
+    pids: &[u32],
+    mute: Option<bool>,
+    volume: Option<f32>,
+) -> Result<(Vec<f32>, Vec<ISimpleAudioVolume>), String> {
     let enumerator: IMMDeviceEnumerator =
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|e| format!("MMDeviceEnumerator: {e}"))?;
     let devices = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }.map_err(|e| e.to_string())?;
     let mut levels = Vec::new();
+    let mut held = Vec::new();
     for d in 0..unsafe { devices.GetCount() }.unwrap_or(0) {
         let Ok(device) = (unsafe { devices.Item(d) }) else { continue };
         let Ok(manager) = (unsafe { device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) }) else {
@@ -533,9 +552,108 @@ pub fn set_sessions_read_back(pids: &[u32], mute: Option<bool>, volume: Option<f
             }
             let level = unsafe { simple.GetMasterVolume() }.map_err(|e| format!("GetMasterVolume: {e}"))?;
             levels.push(level);
+            held.push(simple);
         }
     }
-    Ok(levels)
+    Ok((levels, held))
+}
+
+/// Audio sessions found by [`set_sessions_held`]: reading their level again
+/// is one call each, no search of the devices. A session that appeared
+/// since (on another output device, of a new process) is not among them.
+pub struct HeldSessions(Vec<ISimpleAudioVolume>);
+
+impl HeldSessions {
+    /// Their levels now; an error once one of them is gone (its device was
+    /// removed or reset).
+    pub fn levels(&self) -> Result<Vec<f32>, String> {
+        self.0
+            .iter()
+            .map(|s| unsafe { s.GetMasterVolume() }.map_err(|e| format!("GetMasterVolume: {e}")))
+            .collect()
+    }
+}
+
+/// COM for the calling thread while held (the multithreaded apartment), for
+/// a thread that keeps COM objects between calls ([`HeldSessions`],
+/// [`DeviceWatch`]). Declared before them, so it is released after them.
+pub struct ComThread(#[allow(dead_code)] Option<Com>);
+
+impl ComThread {
+    pub fn init() -> Self {
+        Self(Com::init().ok())
+    }
+}
+
+/// Tells of the output devices changing (one added, removed, enabled or
+/// disabled, another one made the default) until dropped. A process that
+/// follows the default device opens a new audio session on the new one, at
+/// a level of its own.
+pub struct DeviceWatch {
+    enumerator: IMMDeviceEnumerator,
+    client: IMMNotificationClient,
+}
+
+impl DeviceWatch {
+    /// `on_change` is called on a thread of the system's: it must not block.
+    pub fn start(on_change: Box<dyn Fn() + Send + Sync>) -> Result<Self, String> {
+        let enumerator: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|e| format!("MMDeviceEnumerator: {e}"))?;
+        let client: IMMNotificationClient = DeviceEvents { on_change }.into();
+        unsafe { enumerator.RegisterEndpointNotificationCallback(&client) }
+            .map_err(|e| format!("RegisterEndpointNotificationCallback: {e}"))?;
+        Ok(Self { enumerator, client })
+    }
+}
+
+impl Drop for DeviceWatch {
+    fn drop(&mut self) {
+        let _ = unsafe { self.enumerator.UnregisterEndpointNotificationCallback(&self.client) };
+    }
+}
+
+#[implement(IMMNotificationClient)]
+struct DeviceEvents {
+    on_change: Box<dyn Fn() + Send + Sync>,
+}
+
+impl DeviceEvents {
+    /// Tells of a change of device `id`, unless it is a microphone's (an
+    /// endpoint id is "{0.0.0.…}" for output, "{0.0.1.…}" for input).
+    fn changed(&self, id: &PCWSTR) {
+        let input = !id.is_null() && unsafe { id.to_string() }.is_ok_and(|s| s.starts_with("{0.0.1."));
+        if !input {
+            (self.on_change)();
+        }
+    }
+}
+
+impl IMMNotificationClient_Impl for DeviceEvents_Impl {
+    fn OnDeviceStateChanged(&self, device: &PCWSTR, _state: DEVICE_STATE) -> windows_core::Result<()> {
+        self.changed(device);
+        Ok(())
+    }
+
+    fn OnDeviceAdded(&self, device: &PCWSTR) -> windows_core::Result<()> {
+        self.changed(device);
+        Ok(())
+    }
+
+    fn OnDeviceRemoved(&self, device: &PCWSTR) -> windows_core::Result<()> {
+        self.changed(device);
+        Ok(())
+    }
+
+    fn OnDefaultDeviceChanged(&self, flow: EDataFlow, _role: ERole, _device: &PCWSTR) -> windows_core::Result<()> {
+        if flow == eRender || flow == eAll {
+            (self.on_change)();
+        }
+        Ok(())
+    }
+
+    fn OnPropertyValueChanged(&self, _device: &PCWSTR, _key: &PROPERTYKEY) -> windows_core::Result<()> {
+        Ok(())
+    }
 }
 
 /// `pid` and every process it started, and the ones those started, as

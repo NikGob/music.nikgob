@@ -21,6 +21,9 @@ const IDLE_QUIT: Duration = Duration::from_secs(300);
 const TICK: Duration = Duration::from_secs(15);
 /// How long the host gets to close by itself before it is killed.
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
+/// How long the app's exit waits for the host to close (its sessions back
+/// at full level first); the job object ends it after that anyway.
+const QUIT_WAIT: Duration = Duration::from_secs(1);
 /// Host runs that end without ever being ready, in a row, before the route
 /// is given up for this session (no WebView2, a broken install).
 const MAX_BAD_RUNS: u32 = 3;
@@ -114,8 +117,8 @@ enum Ctl {
     Exited(u64),
     /// The host cannot play anything: it is closed.
     Close(String),
-    /// The app quits.
-    Quit,
+    /// The app quits; answered once the host is closed.
+    Quit(SyncSender<()>),
 }
 
 struct Host {
@@ -297,10 +300,14 @@ impl ScWidget {
         crate::track::WidgetTrack::new(self.clone(), id.trim().parse().ok(), duration)
     }
 
-    /// Closes the host (the app is quitting).
+    /// Closes the host (the app is quitting): waits [`QUIT_WAIT`] at most
+    /// for its sessions to be put back at full level and for it to end.
     pub fn shutdown(&self) {
         if let Some(tx) = lock(&self.ctl).take() {
-            let _ = tx.send(Ctl::Quit);
+            let (done, closed) = mpsc::sync_channel(1);
+            if tx.send(Ctl::Quit(done)).is_ok() {
+                let _ = closed.recv_timeout(QUIT_WAIT);
+            }
         }
     }
 
@@ -426,10 +433,11 @@ fn write_line(host: &mut Host, c: &Command) -> bool {
     stdin.write_all(format!("{}\n", c.line()).as_bytes()).and_then(|()| stdin.flush()).is_ok()
 }
 
-/// Closes the host: its sessions back at full level, its stdin closed (it
-/// exits by itself), killed if it does not.
+/// Closes the host: no longer routed and its sessions back at full level
+/// (in that order, so the session thread does not turn them down again),
+/// its stdin closed (it exits by itself), killed if it does not.
 fn close(me: &ScWidget, mut host: Host, why: &str) {
-    me.router.restore_sessions();
+    me.router.release_process();
     host.stdin = None;
     let until = Instant::now() + CLOSE_GRACE;
     loop {
@@ -454,6 +462,8 @@ fn control_loop(me: &Weak<ScWidget>, rx: &Receiver<Ctl>, tx: &Sender<Ctl>) {
     let mut runs = 0u64;
     let mut bad_runs = 0u32;
     let mut last_busy = Instant::now();
+    // Who waits for the host to close as the app quits.
+    let mut quit: Option<SyncSender<()>> = None;
     loop {
         let msg = rx.recv_timeout(TICK);
         let Some(w) = me.upgrade() else { break };
@@ -505,7 +515,11 @@ fn control_loop(me: &Weak<ScWidget>, rx: &Receiver<Ctl>, tx: &Sender<Ctl>) {
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
-            Ok(Ctl::Quit) | Err(RecvTimeoutError::Disconnected) => break,
+            Ok(Ctl::Quit(done)) => {
+                quit = Some(done);
+                break;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
         }
         if bad_runs >= MAX_BAD_RUNS && !w.broken.swap(true, Ordering::AcqRel) {
             log::warn!("sc widget: the player host never came up {bad_runs} times: off for this session");
@@ -529,6 +543,9 @@ fn control_loop(me: &Weak<ScWidget>, rx: &Receiver<Ctl>, tx: &Sender<Ctl>) {
                 let _ = h.child.wait();
             }
         }
+    }
+    if let Some(done) = quit {
+        let _ = done.try_send(());
     }
 }
 
