@@ -657,6 +657,9 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
     tx.execute("UPDATE remote_like SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     tx.execute("UPDATE wishlist SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     dedupe_wishlist_of_track(tx, &t)?;
+    // What is not taken for the song again follows it.
+    tx.execute("UPDATE OR IGNORE wrong_audio SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+    tx.execute("DELETE FROM wrong_audio WHERE track_id = ?1", [&f])?;
     // The item of a stream twin merged into the track with the file.
     crate::masters::settle_wishlist_in(tx, &t)?;
     // What it leaves behind: its artists and its album, when nothing else

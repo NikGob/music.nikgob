@@ -356,7 +356,7 @@ impl Library {
             };
 
             tx.execute("DELETE FROM source WHERE track_id = ?1", [&tid])?;
-            for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "analysis_failed", "master"] {
+            for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "analysis_failed", "master", "wrong_audio"] {
                 tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&tid])?;
             }
             if let Some(hash) = &out.master_hash {
