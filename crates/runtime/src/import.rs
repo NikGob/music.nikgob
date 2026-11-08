@@ -74,6 +74,9 @@ pub(crate) enum Internal {
     SameAudio(crate::same_audio::Msg),
     /// Recommendations (stage 4), see [`crate::recs`].
     Recs(crate::recs::Msg),
+    /// Real art of a stream track's video thumbnail, see
+    /// [`crate::stream_covers`].
+    StreamCover(crate::stream_covers::Found),
     SeedStopped(Vec<nikgob_torrent::TorrentStatus>),
     /// A look at Soulseek for «Раздача».
     Sharing(crate::sharing::SlskPoll),
@@ -753,6 +756,7 @@ impl Worker {
             Internal::Quality(m) => self.quality_msg(m),
             Internal::SameAudio(m) => self.same_audio_msg(m),
             Internal::Recs(m) => self.recs_msg(m),
+            Internal::StreamCover(f) => self.real_cover_found(f),
             Internal::SeedStopped(list) => self.seed_stopped(list),
             Internal::MastersMoveProgress {
                 job,

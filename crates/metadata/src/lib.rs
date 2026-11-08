@@ -66,7 +66,8 @@ pub struct Metadata {
     /// Plain lyrics from Genius's public pages (no account).
     pub genius: Genius,
     pub itunes: Itunes,
-    /// Similar artists and recordings (no key).
+    /// Similar artists and recordings (no key); the popularity with the
+    /// user's token.
     pub listenbrainz: ListenBrainz,
     /// `None` without the user's Last.fm key.
     pub lastfm: Option<LastFm>,
@@ -88,7 +89,7 @@ impl Metadata {
             betterlyrics: BetterLyrics::new(http.clone()),
             genius: Genius::new(http.clone()),
             itunes: Itunes::new(http.clone()),
-            listenbrainz: ListenBrainz::new(http.clone()),
+            listenbrainz: ListenBrainz::new(http.clone()).with_token(config.listenbrainz_token.as_deref()),
             lastfm: config.lastfm_key.as_deref().and_then(|k| LastFm::new(http, k)),
         })
     }

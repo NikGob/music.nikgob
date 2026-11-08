@@ -1,13 +1,13 @@
 //! The clients of the graph of similar music against a mock server:
-//! ListenBrainz's similar artists, recordings and popularity, Last.fm's
-//! similar tracks and artists with the user's key, MusicBrainz's artist
-//! search with its tags.
+//! ListenBrainz's similar artists, recordings and popularity (with the
+//! user's token), Last.fm's similar tracks and artists and an artist's top
+//! tracks with the user's key, MusicBrainz's artist search with its tags.
 
 mod common;
 
 use nikgob_metadata::musicbrainz::MusicBrainz;
 use nikgob_metadata::{LastFm, ListenBrainz, MetadataError};
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const RADIOHEAD: &str = "a74b1b7f-71a5-4011-9441-d0b5e4122711";
@@ -38,8 +38,10 @@ async fn listenbrainz_lists_similar_artists_recordings_and_tops() {
         ))
         .mount(&server)
         .await;
+    // The popularity answers only with the token.
     Mock::given(method("GET"))
         .and(path(format!("/api/popularity/top-recordings-for-artist/{RADIOHEAD}")))
+        .and(header("authorization", "Token t0k3n"))
         .respond_with(json(&format!(
             r#"[{{"artist_mbids":["{RADIOHEAD}"],"artist_name":"Radiohead","recording_mbid":"{KARMA}","recording_name":"Karma Police","total_listen_count":900}}]"#
         )))
@@ -52,7 +54,17 @@ async fn listenbrainz_lists_similar_artists_recordings_and_tops() {
         .respond_with(ResponseTemplate::new(400).set_body_string("unknown"))
         .mount(&server)
         .await;
-    let lb = ListenBrainz::with_base_urls(common::http(), &format!("{}/labs/", server.uri()), &format!("{}/api/", server.uri())).unwrap();
+    Mock::given(method("GET"))
+        .and(path(format!("/api/popularity/top-recordings-for-artist/{RADIOHEAD}")))
+        .respond_with(ResponseTemplate::new(401).set_body_string(r#"{"code":401,"error":"provide an Auth token"}"#))
+        .mount(&server)
+        .await;
+    let base = ListenBrainz::with_base_urls(common::http(), &format!("{}/labs/", server.uri()), &format!("{}/api/", server.uri())).unwrap();
+    assert!(!base.has_token());
+    assert!(matches!(base.top_recordings(RADIOHEAD).await, Err(MetadataError::Status { status: 401, .. })));
+    assert!(!base.clone().with_token(Some("  ")).has_token());
+    let lb = base.with_token(Some(" t0k3n "));
+    assert!(lb.has_token() && !format!("{lb:?}").contains("t0k3n"));
     let artists = lb.similar_artists(RADIOHEAD).await.unwrap();
     assert_eq!(artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Nirvana", "Muse"]);
     let recs = lb.similar_recordings(KARMA).await.unwrap();
@@ -85,6 +97,15 @@ async fn lastfm_needs_a_key_and_reads_its_lists() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
+        .and(query_param("method", "artist.gettoptracks"))
+        .and(query_param("artist", "Radiohead"))
+        .respond_with(json(
+            r#"{"toptracks":{"track":[{"name":"Creep","playcount":"9000","listeners":"2500","mbid":"","artist":{"name":"Radiohead"},"@attr":{"rank":"1"}},
+                {"name":"Karma Police","playcount":8000,"listeners":1800,"mbid":"9e2ad5bc-c6f9-40d2-a36f-3122ee2072a3","artist":{"name":"Radiohead"}}]}}"#,
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
         .and(query_param("artist", "Nobody"))
         .respond_with(json(r#"{"error":6,"message":"Track not found"}"#))
         .mount(&server)
@@ -98,6 +119,11 @@ async fn lastfm_needs_a_key_and_reads_its_lists() {
     let a = fm.similar_artists("Radiohead").await.unwrap();
     assert_eq!(a[0].name, "Thom Yorke");
     assert!(fm.similar_tracks("Nobody", "x").await.unwrap().is_empty());
+    let top = fm.top_tracks("Radiohead").await.unwrap();
+    assert_eq!(top.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Creep", "Karma Police"]);
+    assert_eq!((top[0].artist.as_str(), top[0].mbid.clone(), top[0].score), ("Radiohead", None, 2500.0));
+    assert_eq!(top[1].mbid.as_deref(), Some(KARMA));
+    assert!(fm.top_tracks("Nobody").await.unwrap().is_empty());
 
     // A bad key is an error, not an empty list.
     let bad = MockServer::start().await;

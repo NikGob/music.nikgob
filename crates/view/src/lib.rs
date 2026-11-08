@@ -1782,6 +1782,8 @@ pub struct Prefs {
     pub library_as_taste: bool,
     /// settings.toml has a Last.fm API key (the key is not here).
     pub lastfm_configured: bool,
+    /// settings.toml has a ListenBrainz token (the token is not here).
+    pub listenbrainz_configured: bool,
     /// «Не повторять сыгранное»: the radio and autoplay leave out what
     /// played this many hours ago or less (and in the session) while
     /// anything else is left.
@@ -2348,6 +2350,9 @@ pub struct ViewState {
     /// Bumped when cover files on disk may have been rewritten (an import,
     /// a retag), so a UI looks at the covers it holds again.
     pub cover_files: u64,
+    /// Real album art found for the video thumbnails of stream tracks drawn
+    /// on screen ([`Command::RealCovers`]): the thumbnail's url → the art's.
+    pub real_covers: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Bumped on every change, so a UI can skip work when nothing changed.
     pub revision: u64,
 }
@@ -2651,6 +2656,12 @@ pub enum Command {
     /// The Last.fm API key of the graph of similar music → settings.toml
     /// (never into prefs); empty clears it.
     SetLastfmKey(String),
+    /// The ListenBrainz token of the graph's popularity → settings.toml
+    /// (never into prefs); empty clears it.
+    SetListenbrainzToken(String),
+    /// Video thumbnails (`i.ytimg.com`) of stream tracks drawn on screen:
+    /// their real album art is looked up ([`ViewState::real_covers`]).
+    RealCovers(Vec<String>),
     DismissToast(u64),
 
     // Streaming: accounts (stage 3). Every network call runs in the
@@ -2995,6 +3006,7 @@ impl Default for Prefs {
             graph_personal: true,
             library_as_taste: true,
             lastfm_configured: false,
+            listenbrainz_configured: false,
             radio_no_repeat_hours: 3,
             radio_explore: RadioExplore::Rare,
             radio_unheard: RadioUnheard::Usual,

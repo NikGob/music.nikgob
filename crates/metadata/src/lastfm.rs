@@ -1,5 +1,6 @@
 //! Last.fm: similar tracks and artists from its scrobbles
-//! (`track.getSimilar`, `artist.getSimilar`), only with the user's own free
+//! (`track.getSimilar`, `artist.getSimilar`) and an artist's tracks by its
+//! listeners (`artist.getTopTracks`), only with the user's own free
 //! API key (Settings, settings.toml; empty by default). The key is a query
 //! parameter: it never reaches a log (errors carry no URL).
 
@@ -22,7 +23,7 @@ pub struct LastFmSimilar {
     /// A track's artist; empty for an artist.
     pub artist: String,
     pub mbid: Option<String>,
-    /// Last.fm's `match`, 0…1.
+    /// Last.fm's `match`, 0…1 (a top track's listeners).
     pub score: f32,
 }
 
@@ -52,6 +53,9 @@ struct RawEntry {
     mbid: Option<String>,
     #[serde(default, rename = "match", deserialize_with = "number")]
     score: f32,
+    /// A top track's listeners.
+    #[serde(default, deserialize_with = "number")]
+    listeners: f32,
     #[serde(default)]
     artist: Option<RawArtistRef>,
 }
@@ -78,6 +82,8 @@ struct RawAnswer {
     similartracks: Option<RawTracks>,
     #[serde(default)]
     similarartists: Option<RawArtists>,
+    #[serde(default)]
+    toptracks: Option<RawTracks>,
 }
 
 /// Last.fm writes numbers as numbers or as strings.
@@ -138,6 +144,22 @@ impl LastFm {
                 name: e.name,
                 mbid: e.mbid.filter(|m| !m.is_empty()),
                 score: e.score,
+            })
+            .collect())
+    }
+
+    /// The tracks of `artist` by how many listen to them, the most first.
+    pub async fn top_tracks(&self, artist: &str) -> Result<Vec<LastFmSimilar>> {
+        let a = self.ask(&[("method", "artist.gettoptracks"), ("artist", artist)]).await?;
+        Ok(a.toptracks
+            .map(|l| l.track)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| LastFmSimilar {
+                artist: e.artist.map(|a| a.name).unwrap_or_default(),
+                name: e.name,
+                mbid: e.mbid.filter(|m| !m.is_empty()),
+                score: e.listeners,
             })
             .collect())
     }

@@ -520,6 +520,26 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
             }
         });
     });
+    ui.add_space(16.0);
+    dimmed(ui, !p.graph_use || !p.graph_open_data, |ui| {
+        settings_help::item(ui, Id::ListenbrainzToken, "Токен ListenBrainz", |ui| {
+            TextField::new(&mut pages.listenbrainz_token, "Токен ListenBrainz").password(true).width(480.0).id_salt("set-listenbrainz").show(ui);
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if ui
+                .add(Button::new("Сохранить").style(Style::Tonal).enabled(!pages.listenbrainz_token.trim().is_empty()).id_salt("set-listenbrainz-save"))
+                .clicked()
+            {
+                out.push(Command::SetListenbrainzToken(std::mem::take(&mut pages.listenbrainz_token).trim().to_owned()));
+            }
+            if p.listenbrainz_configured && ui.add(Button::new("Убрать токен").style(Style::Text).id_salt("set-listenbrainz-clear")).clicked() {
+                pages.listenbrainz_token.clear();
+                out.push(Command::SetListenbrainzToken(String::new()));
+            }
+        });
+    });
 
     group(ui, "Не нравится");
     row(ui, Id::DislikeButton, "Кнопка на экране трека", None, |ui| {

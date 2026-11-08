@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use reqwest::header::RETRY_AFTER;
+use reqwest::header::{AUTHORIZATION, RETRY_AFTER};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use tokio::time::{Instant, sleep, sleep_until};
@@ -387,6 +387,21 @@ impl Http {
         url: Url,
     ) -> Result<T> {
         let resp = self.send(service, self.client.get(url)).await?;
+        parse_json(&ok_body(resp).await?)
+    }
+
+    /// [`Self::get_json`] with an `Authorization` header when one is given.
+    pub(crate) async fn get_json_auth<T: DeserializeOwned>(
+        &self,
+        service: Service,
+        url: Url,
+        auth: Option<&str>,
+    ) -> Result<T> {
+        let mut req = self.client.get(url);
+        if let Some(a) = auth {
+            req = req.header(AUTHORIZATION, a);
+        }
+        let resp = self.send(service, req).await?;
         parse_json(&ok_body(resp).await?)
     }
 

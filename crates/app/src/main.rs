@@ -145,6 +145,7 @@ fn load_prefs(
         p.metadata_contact = s.metadata.contact.clone();
         p.acoustid_configured = s.metadata.acoustid_key.as_ref().is_some_and(|k| !k.trim().is_empty());
         p.lastfm_configured = s.metadata.lastfm_key.as_ref().is_some_and(|k| !k.trim().is_empty());
+        p.listenbrainz_configured = s.metadata.listenbrainz_token.as_ref().is_some_and(|k| !k.trim().is_empty());
         p.spotify_personal_app = s.streaming.spotify_client_id.is_some();
         p.youtube_cookies_set = s.streaming.youtube_cookies.is_some();
     }
@@ -641,6 +642,9 @@ fn main() -> eframe::Result {
         }
         if let Some(k) = settings.metadata.lastfm_key {
             meta = meta.with_lastfm_key(k);
+        }
+        if let Some(t) = settings.metadata.listenbrainz_token {
+            meta = meta.with_listenbrainz_token(t);
         }
         nikgob_runtime::ImportSetup {
             config: cfg,
