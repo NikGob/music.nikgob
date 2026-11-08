@@ -889,3 +889,69 @@ fn an_album_played_next_goes_right_after_the_current_track() {
     wait_for(&rt, "the whole album after the current track", |s| order(s) == want);
 }
 
+
+/// «Перемешивание остаётся включённым»: on (the default), a new album keeps
+/// shuffle on; off, it turns shuffle off and plays in order, «Перемешать»
+/// still turns it on, and shuffle off by hand brings the order back.
+#[test]
+fn a_new_album_keeps_shuffle_as_the_setting_says() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let release = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    let ids: Vec<_> = (0..4)
+        .map(|i| {
+            let mut t = Track::new(format!("t{i}"), credit.clone());
+            t.release_id = Some(release.id);
+            t.track_no = i + 1;
+            let t = lib.upsert_track(&t).unwrap();
+            let file = dir.path().join(format!("t{i}.wav"));
+            write_wav(&file, 2.0);
+            lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav)).unwrap();
+            t.id
+        })
+        .collect();
+    // No radio after the last track: only the album is queued.
+    let prefs = Prefs { autoplay: false, ..Prefs::default() };
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs,
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let order = |s: &ViewState| {
+        let mut q: Vec<_> = s.queue.prev.iter().map(|e| e.track.id).collect();
+        q.extend(s.queue.current.iter().map(|t| t.id));
+        q.extend(s.queue.next.iter().map(|e| e.track.id));
+        q
+    };
+    let current = |s: &ViewState| s.queue.current.as_ref().map(|t| t.id);
+    let same = |a: &[nikgob_core::model::TrackId]| a.len() == ids.len() && ids.iter().all(|t| a.contains(t));
+    assert!(rt.state().prefs.keep_shuffle && !rt.state().prefs.shuffle_radio);
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "shuffle on", |s| s.player.shuffle);
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[1]), shuffle: false });
+    wait_for(&rt, "the album under shuffle", |s| current(s) == Some(ids[1]) && s.player.shuffle && same(&order(s)));
+
+    let prefs = Prefs { keep_shuffle: false, ..rt.state().prefs.clone() };
+    rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&rt, "the setting off", |s| !s.prefs.keep_shuffle);
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[2]), shuffle: false });
+    wait_for(&rt, "the album in order, shuffle off", |s| current(s) == Some(ids[2]) && !s.player.shuffle && order(s) == ids);
+    // «Перемешать» turns it on all the same.
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: true });
+    wait_for(&rt, "the album shuffled", |s| s.player.shuffle && s.queue.prev.is_empty() && same(&order(s)));
+    let playing = current(&rt.state());
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "the order back", |s| !s.player.shuffle && order(s) == ids && current(s) == playing);
+}
