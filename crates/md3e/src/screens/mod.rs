@@ -410,6 +410,14 @@ impl Md3eUi {
                 crate::covers::refresh(ctx);
             }
         }
+        // Video thumbnails of stream tracks: the real art the runtime found
+        // is drawn in their place, those drawn since the last frame are
+        // looked up.
+        crate::covers::set_real_covers(ctx, &state.real_covers);
+        let thumbnails = crate::covers::take_thumbnails(ctx);
+        if !thumbnails.is_empty() {
+            out.push(Command::RealCovers(thumbnails));
+        }
         // The next one is decoded and uploaded at the sizes the current one
         // is drawn at, while nothing waits for it.
         if let (Some(current), Some(next)) = (state.player.current.as_ref(), state.queue.next.first()) {

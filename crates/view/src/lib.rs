@@ -2350,6 +2350,9 @@ pub struct ViewState {
     /// Bumped when cover files on disk may have been rewritten (an import,
     /// a retag), so a UI looks at the covers it holds again.
     pub cover_files: u64,
+    /// Real album art found for the video thumbnails of stream tracks drawn
+    /// on screen ([`Command::RealCovers`]): the thumbnail's url → the art's.
+    pub real_covers: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Bumped on every change, so a UI can skip work when nothing changed.
     pub revision: u64,
 }
@@ -2656,6 +2659,9 @@ pub enum Command {
     /// The ListenBrainz token of the graph's popularity → settings.toml
     /// (never into prefs); empty clears it.
     SetListenbrainzToken(String),
+    /// Video thumbnails (`i.ytimg.com`) of stream tracks drawn on screen:
+    /// their real album art is looked up ([`ViewState::real_covers`]).
+    RealCovers(Vec<String>),
     DismissToast(u64),
 
     // Streaming: accounts (stage 3). Every network call runs in the

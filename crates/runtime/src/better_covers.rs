@@ -444,7 +444,7 @@ pub(crate) fn widen(lib: &Library, spellings: &Spellings, w: &mut Want, own: &[T
 /// A clip title's song titles, the most specific first: a quoted title
 /// («"ReawakeR" by LiSA»), the title before « by », then the halves of the
 /// title from the last (the quoted song of «ヨルシカ「火星人」») to the whole.
-fn clip_titles(title: &str, channel: &str) -> Vec<String> {
+pub(crate) fn clip_titles(title: &str, channel: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |t: &str| {
         let t = t.trim().trim_matches(|c: char| "\"'«»“”".contains(c)).trim();

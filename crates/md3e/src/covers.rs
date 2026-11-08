@@ -21,7 +21,10 @@
 //! decoded to ([`web_seed`]).
 //!
 //! A cover inside black bars (a video's picture of a song uploaded with its
-//! art) is decoded without them (`nikgob_core::cover_frame`).
+//! art) is decoded without them (`nikgob_core::cover_frame`). A video's
+//! thumbnail (`i.ytimg.com`) that is drawn is remembered for the app
+//! ([`take_thumbnails`]) so it can look up the song's real art; once found
+//! ([`set_real_covers`]) the art is drawn in the thumbnail's place.
 //!
 //! A cover file can be rewritten while its sizes are loaded (an import
 //! replaces an album's `cover.jpg` with a larger one). Every size remembers
@@ -136,6 +139,11 @@ struct Shared {
     /// the pass.
     stale: Mutex<Vec<String>>,
     check: Mutex<Check>,
+    /// A video thumbnail's url → the real art found for it.
+    real: Mutex<Arc<HashMap<String, String>>>,
+    /// Video thumbnails drawn so far with the pass each was last drawn in,
+    /// and those not handed to the app yet.
+    thumbnails: Mutex<(HashMap<String, u64>, Vec<String>)>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -176,6 +184,8 @@ pub fn install(ctx: &Context) {
         stamps: Mutex::default(),
         stale: Mutex::default(),
         check: Mutex::default(),
+        real: Mutex::default(),
+        thumbnails: Mutex::default(),
     });
     ctx.add_image_loader(Arc::new(CoverLoader(Arc::clone(&shared))));
     ctx.data_mut(|d| d.insert_temp(data_id(), Covers(Arc::clone(&shared))));
@@ -240,7 +250,30 @@ pub fn refresh(ctx: &Context) {
 /// been decoded; `None` before, or for a cover too grey for one.
 pub fn web_seed(ctx: &Context, url: &str) -> Option<u32> {
     let shared = shared(ctx)?;
-    lock(&shared.web_seeds).get(url).copied().flatten()
+    let url = shared.real_of(url).unwrap_or_else(|| url.to_owned());
+    lock(&shared.web_seeds).get(&url).copied().flatten()
+}
+
+/// The real art found for video thumbnails (thumbnail url → art url): drawn
+/// in their place from now on.
+pub fn set_real_covers(ctx: &Context, real: &Arc<HashMap<String, String>>) {
+    if let Some(s) = shared(ctx) {
+        let mut held = lock(&s.real);
+        if !Arc::ptr_eq(&held, real) {
+            *held = Arc::clone(real);
+        }
+    }
+}
+
+/// The video thumbnails that came on screen since the last call (once
+/// while they stay drawn): the app looks up their real art.
+pub fn take_thumbnails(ctx: &Context) -> Vec<String> {
+    shared(ctx).map(|s| std::mem::take(&mut lock(&s.thumbnails).1)).unwrap_or_default()
+}
+
+/// Whether `url` is a video's thumbnail rather than album art.
+fn is_thumbnail(url: &str) -> bool {
+    url.contains("i.ytimg.com/")
 }
 
 fn load(ctx: &Context, uri: &str) -> Result<Option<SizedTexture>, LoadError> {
@@ -279,9 +312,22 @@ pub fn texture(ctx: &Context, uri: &str, size: Vec2, zoom: f32) -> Option<SizedT
         Some(s) if parse(uri).is_some() => s,
         _ => return load(ctx, uri).ok().flatten(),
     };
+    // A video's thumbnail: its real art once found (the thumbnail while
+    // the art loads, so the swap does not blink), else it is asked for.
+    if is_web(uri) && is_thumbnail(uri) {
+        match shared.real_of(uri) {
+            Some(real) => return sized_texture(ctx, &shared, &real, size, zoom).or_else(|| sized_texture(ctx, &shared, uri, size, zoom)),
+            None => shared.thumbnail_drawn(uri, ctx.cumulative_pass_nr()),
+        }
+    }
+    sized_texture(ctx, &shared, uri, size, zoom)
+}
+
+/// [`texture`] of a cover the loader handles.
+fn sized_texture(ctx: &Context, shared: &Shared, uri: &str, size: Vec2, zoom: f32) -> Option<SizedTexture> {
     let px = size.max_elem() * ctx.pixels_per_point() * zoom.max(1.0);
     let tier = TIERS.iter().find(|t| px <= **t as f32).copied();
-    let (wanted, origin) = sized(&shared, uri, tier);
+    let (wanted, origin) = sized(shared, uri, tier);
     let pass = ctx.cumulative_pass_nr();
     match load(ctx, &wanted) {
         Ok(Some(texture)) => {
@@ -443,6 +489,21 @@ fn scaled_jpeg(bytes: &[u8], side: u32) -> Option<image::DynamicImage> {
 }
 
 impl Shared {
+    /// The real art found for the web cover `url`, if it is a thumbnail.
+    fn real_of(&self, url: &str) -> Option<String> {
+        lock(&self.real).get(url).cloned()
+    }
+
+    /// Remembers the thumbnail `url` drawn in `pass`: handed to the app when
+    /// it was not drawn in the pass before (it came on screen).
+    fn thumbnail_drawn(&self, url: &str, pass: u64) {
+        let mut t = lock(&self.thumbnails);
+        let before = t.0.insert(url.to_owned(), pass);
+        if before.is_none_or(|p| p + 1 < pass) {
+            t.1.push(url.to_owned());
+        }
+    }
+
     fn used(&self, uri: &str, origin: &str, tier: Option<u32>, pass: u64, bytes: usize) {
         let mut lru = lock(&self.lru);
         let u = lru
@@ -760,6 +821,28 @@ mod tests {
         let ctx = Context::default();
         install(&ctx);
         ctx
+    }
+
+    /// A thumbnail is handed to the app when it comes on screen, not at
+    /// every pass it stays drawn; the art found is drawn in its place.
+    #[test]
+    fn a_thumbnail_on_screen_is_handed_over_and_its_real_art_taken() {
+        let ctx = ctx();
+        let s = shared(&ctx).unwrap();
+        let thumb = "https://i.ytimg.com/vi/a/hqdefault.jpg";
+        s.thumbnail_drawn(thumb, 1);
+        s.thumbnail_drawn(thumb, 1);
+        s.thumbnail_drawn(thumb, 2);
+        assert_eq!(take_thumbnails(&ctx), vec![thumb.to_owned()]);
+        assert!(take_thumbnails(&ctx).is_empty());
+        // Scrolled away and back.
+        s.thumbnail_drawn(thumb, 9);
+        assert_eq!(take_thumbnails(&ctx), vec![thumb.to_owned()]);
+        assert_eq!(s.real_of(thumb), None);
+        let real = Arc::new(HashMap::from([(thumb.to_owned(), "https://x.invalid/art.jpg".to_owned())]));
+        set_real_covers(&ctx, &real);
+        assert_eq!(s.real_of(thumb).as_deref(), Some("https://x.invalid/art.jpg"));
+        assert!(is_thumbnail(thumb) && !is_thumbnail("https://x.invalid/art.jpg"));
     }
 
     #[test]

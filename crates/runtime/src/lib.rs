@@ -10,6 +10,7 @@ mod analysis;
 mod quality;
 mod same_audio;
 mod better_covers;
+mod stream_covers;
 mod convert;
 mod enrich;
 mod hd_covers;
@@ -522,6 +523,8 @@ struct Worker {
     hd_asked: hd_covers::Asked,
     /// Albums and clips whose real art was looked up in this run.
     better_asked: better_covers::Asked,
+    /// Real art of the stream tracks' video thumbnails on screen.
+    stream_covers: stream_covers::StreamCovers,
     /// The album the queue plays (and the queue's generation then): its
     /// tracks the services add later join the queue.
     album_queue: Option<(nikgob_core::model::ReleaseId, u64)>,
@@ -626,6 +629,7 @@ impl Worker {
             same_audio,
             hd_asked: Default::default(),
             better_asked: Default::default(),
+            stream_covers: Default::default(),
             album_queue: None,
             recs,
             soulseek,
@@ -1225,6 +1229,7 @@ impl Worker {
             Command::SetMetadata { contact, acoustid_key } => self.set_metadata(contact, acoustid_key),
             Command::SetLastfmKey(key) => self.set_lastfm_key(&key),
             Command::SetListenbrainzToken(token) => self.set_listenbrainz_token(&token),
+            Command::RealCovers(urls) => self.real_covers_wanted(urls),
             Command::SearchTorrents(q) => self.search_torrents(q),
             c @ (Command::DownloadTorrent { .. }
             | Command::ListTorrentFiles(_)
