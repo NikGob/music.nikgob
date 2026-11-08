@@ -774,9 +774,9 @@ struct Keeping {
 fn session_loop(me: &Weak<Router>) {
     let com = crate::capture::ComThread::init();
     let devices = {
-        let me = me.clone();
+        let weak = me.clone();
         match crate::capture::DeviceWatch::start(Box::new(move || {
-            if let Some(r) = me.upgrade() {
+            if let Some(r) = weak.upgrade() {
                 r.devices_changed();
             }
         })) {
