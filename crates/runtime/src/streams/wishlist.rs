@@ -197,6 +197,17 @@ pub(crate) fn offer_key(offer: &Offer) -> String {
     format!("{}:{}", offer.source.as_str(), offer.id)
 }
 
+/// The line of an item a file of which held another song: from where, what
+/// it sounds like, and «ищу дальше» only when the item does look again.
+fn wrong_audio_words(from: Option<&str>, sounds_like: Option<&str>, looks: bool) -> String {
+    let song = sounds_like.map(|s| format!(" — «{s}»")).unwrap_or_default();
+    let tail = if looks { " · ищу дальше" } else { "" };
+    match from {
+        Some(f) => format!("В файле от {f} другая песня{song}{tail}"),
+        None => format!("В файле другая песня{song}{tail}"),
+    }
+}
+
 /// Sources whose downloads turned us away: after [`ASIDE_AFTER`] in a row
 /// a source is set aside (its offers are not picked) for a while; a
 /// download that works ends it.
@@ -2499,6 +2510,9 @@ impl Worker {
         }
         // A direct download was imported (or turned down): its copy goes.
         self.drop_direct(id);
+        // A file of this import held another song: taken here once, so a
+        // later settle of the item does not look again for it.
+        let wrong = self.streaming.wish.wrong.remove(&id);
         if matches!(item.status, WishlistStatus::Dismissed) {
             return;
         }
@@ -2525,19 +2539,21 @@ impl Worker {
                     .and_then(|t| self.lib.active_source(t).ok().flatten())
                     .is_some_and(|s| s.kind.is_local() && s.quality_score > score::SAVED_STREAM);
                 if !local {
-                    if item.status == WishlistStatus::Confirm && item.note.as_deref() == Some(FILES_WAIT) {
+                    let mut status = item.status;
+                    if status == WishlistStatus::Confirm && item.note.as_deref() == Some(FILES_WAIT) {
                         self.set_item(id, |i| i.status = WishlistStatus::Downloading);
                         self.publish_wishlist();
+                        status = WishlistStatus::Downloading;
                     }
                     // A file that held another song's audio (a torrent's
                     // too): the next offer, or a search without that place.
-                    if item.status == WishlistStatus::Downloading && self.streaming.wish.wrong.remove(&id) {
+                    if status == WishlistStatus::Downloading && wrong {
                         self.wish_look_again(id);
                         return;
                     }
                     // A direct download that did not become the track's
                     // file (another song, a fake): the next offer.
-                    if item.status == WishlistStatus::Downloading
+                    if status == WishlistStatus::Downloading
                         && !self.torrent_of(id)
                         && self.streaming.wish.from.remove(&id).is_some()
                     {
@@ -2567,7 +2583,6 @@ impl Worker {
             w.retry_only.remove(&id);
             w.asked.remove(&id);
             w.offer_keys.remove(&id);
-            w.wrong.remove(&id);
             self.wish_line_drop(id);
         }
         self.set_item(id, |i| {
@@ -2640,14 +2655,21 @@ impl Worker {
     /// 32; the importer noted the file and its place for the track): the
     /// item says so, and looks again once its import ends.
     pub(crate) fn wish_wrong_audio(&mut self, id: WishlistId, sounds_like: Option<String>) {
-        self.streaming.wish.wrong.insert(id);
+        // Only a track looks again at once (a better copy goes to its next
+        // offer anyway); an album settles with what came, so its line does
+        // not promise a search.
+        let looks = self
+            .lib
+            .get_wishlist_item(id)
+            .ok()
+            .flatten()
+            .is_some_and(|i| i.scope == WishlistScope::Track || i.origin == WishlistOrigin::Upgrade);
+        if looks {
+            self.streaming.wish.wrong.insert(id);
+        }
         let what = self.item_title(id);
         let from = self.streaming.wish.from.get(&id).cloned();
-        let song = sounds_like.map(|s| format!(" — «{s}»")).unwrap_or_default();
-        let text = match from {
-            Some(f) => format!("В файле от {f} другая песня{song} · ищу дальше"),
-            None => format!("В файле другая песня{song} · ищу дальше"),
-        };
+        let text = wrong_audio_words(from.as_deref(), sounds_like.as_deref(), looks);
         self.wish_line(id, what, text, None);
     }
 
@@ -3016,6 +3038,17 @@ impl Worker {
 mod tests {
     use super::*;
     use nikgob_core::indexer::CandidateHandle;
+
+    /// «ищу дальше» only for an item that looks again.
+    #[test]
+    fn wrong_audio_line_promises_a_search_only_when_it_looks() {
+        assert_eq!(
+            wrong_audio_words(Some("Soulseek"), Some("Song"), true),
+            "В файле от Soulseek другая песня — «Song» · ищу дальше"
+        );
+        assert_eq!(wrong_audio_words(None, None, false), "В файле другая песня");
+        assert!(!wrong_audio_words(Some("RuTracker"), None, false).contains("ищу"));
+    }
 
     /// One refusal is not yet a pattern; the second sets the source aside,
     /// for at least as long as it asked to wait; a download that works ends it.
