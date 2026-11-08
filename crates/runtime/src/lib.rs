@@ -1467,21 +1467,15 @@ impl Worker {
             self.toast("Нечего играть", None);
             return;
         }
-        let start_idx = start
-            .and_then(|s| ids.iter().position(|&t| t == s))
-            .unwrap_or_else(|| {
-                if shuffle {
-                    fastrand::usize(..ids.len())
-                } else {
-                    0
-                }
-            });
+        let start_idx = start.and_then(|s| ids.iter().position(|&t| t == s));
         self.user_switch(EventOrigin::Manual);
-        self.queue.shuffle = false;
-        self.queue.set(&ids, start_idx, context);
+        // «Перемешать» turns shuffle on; a plain play keeps it as the user
+        // set it (on: the list plays shuffled, from a random track unless
+        // one was picked).
         if shuffle {
-            self.queue.set_shuffle(true);
+            self.queue.shuffle = true;
         }
+        self.queue.set_from(&ids, start_idx, context);
         // The new queue's own context, never the one before it (a mix's,
         // a playlist's) carried over.
         self.play_context = ctx;

@@ -73,6 +73,8 @@ impl Worker {
         let Some(path) = self.session_path.clone() else { return };
         let saved = Session::load(&path);
         if saved.queue.items.is_empty() {
+            // Shuffle and repeat are the player's: kept without a queue too.
+            self.queue.restore_modes(&saved.queue);
             self.publish_player();
             return;
         }

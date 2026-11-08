@@ -258,7 +258,8 @@ impl Worker {
         }
         log::info!("album {release}: {} more tracks join the queue", more.len());
         let idle = self.playing.is_none();
-        self.queue.enqueue(&more);
+        // Under shuffle they join the shuffled rest, not its end.
+        self.queue.enqueue_shuffled(&more);
         if idle {
             if let Some(e) = self.queue.skip_forward().filter(|e| e.track == more[0]).or_else(|| self.queue.current()) {
                 self.start(e);
