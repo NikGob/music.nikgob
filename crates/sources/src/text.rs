@@ -278,6 +278,18 @@ pub fn artist_keys(w: &Want) -> Vec<String> {
     out
 }
 
+/// Every name of the main artist as written (the main artist without
+/// credit noise, then the aliases), for the keys of [`artist_keys`].
+pub fn artist_names(w: &Want) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in std::iter::once(main_artist(w.artist())).chain(w.aliases.iter().cloned()) {
+        if !artist_key(&n).is_empty() && !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    out
+}
+
 /// The album's folded core.
 pub fn album_keys(raw: &str) -> Vec<String> {
     let mut out = vec![album_key(raw)];
