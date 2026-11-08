@@ -40,7 +40,7 @@ pub struct Settings {
 /// Where the download sources other than the indexer live
 /// (docs/stage4.5.md). Public instances, no accounts: empty lists take the
 /// built-in ones, a list of the user's own replaces them.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SourcesSettings {
     /// Qobuz-DL instances (`https://host`, the API under `/api/`).
@@ -49,6 +49,26 @@ pub struct SourcesSettings {
     pub tidal_instances: Vec<String>,
     /// khinsider's address (empty: downloads.khinsider.com).
     pub khinsider_url: String,
+    /// A Subsonic server's address (empty: squidify.org), like
+    /// `https://music.example` or the user's own Navidrome.
+    pub subsonic_url: String,
+    /// Its login (empty: the guest login squidify.org publishes).
+    pub subsonic_user: String,
+    /// Never reaches logs.
+    pub subsonic_password: String,
+}
+
+impl fmt::Debug for SourcesSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SourcesSettings")
+            .field("qobuz_instances", &self.qobuz_instances)
+            .field("tidal_instances", &self.tidal_instances)
+            .field("khinsider_url", &self.khinsider_url)
+            .field("subsonic_url", &self.subsonic_url)
+            .field("subsonic_user", &self.subsonic_user)
+            .field("subsonic_password", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Where Soulseek runs (docs/stage4.5.md, poll answer 3).
@@ -274,6 +294,8 @@ mod tests {
             },
             sources: SourcesSettings {
                 qobuz_instances: vec!["https://qobuz.example".into()],
+                subsonic_user: "navi-user".into(),
+                subsonic_password: "navi-pass".into(),
                 ..SourcesSettings::default()
             },
             soulseek: SoulseekSettings {
@@ -333,6 +355,8 @@ username = \"me\"
         assert!(!dbg.contains("my-client-id"));
         assert!(!dbg.contains("slsk-pass"));
         assert!(!dbg.contains("slsk-token"));
+        assert!(!dbg.contains("navi-pass"));
+        assert!(dbg.contains("navi-user"));
         assert!(dbg.contains("localhost:9696"));
     }
 }

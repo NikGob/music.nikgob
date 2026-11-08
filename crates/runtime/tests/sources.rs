@@ -434,7 +434,7 @@ fn the_users_order_and_switches_pick_among_equals() {
     wait_for(&r.rt, "the sources", |s| s.downloads.sources.iter().filter(|v| v.available).count() == 3);
     // Torrents, not listed, keep their default place: first.
     let order: Vec<SourceKey> = r.rt.state().downloads.sources.iter().map(|v| v.key).collect();
-    assert_eq!(order, [SourceKey::Torrents, SourceKey::Tidal, SourceKey::Qobuz, SourceKey::Khinsider, SourceKey::Soulseek]);
+    assert_eq!(order, [SourceKey::Torrents, SourceKey::Tidal, SourceKey::Qobuz, SourceKey::Khinsider, SourceKey::Soulseek, SourceKey::Squidify]);
     r.rt.send(Command::Like(LikeTarget::Track(track), true));
     wait_until("the item done", || wish_status(&lib, track) == Some(WishlistStatus::Done));
     assert_eq!((*tidal.fetched.lock().unwrap(), *qobuz.fetched.lock().unwrap()), (1, 0));

@@ -5285,6 +5285,7 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "log",
+ "md-5",
  "nikgob-core",
  "nikgob-metadata",
  "reqwest 0.13.5",
