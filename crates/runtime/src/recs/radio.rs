@@ -358,8 +358,7 @@ impl Worker {
         self.radio_fetch_new();
         match first {
             Some(t) => {
-                self.queue.shuffle = false;
-                self.queue.set(&[t], 0, Some(context));
+                self.queue.set_ordered(&[t], 0, Some(context));
                 self.play_context = ctx;
                 self.play_context_id = self.recs.radio.run.as_ref().map(|r| seed_context_id(&r.state.seed, false));
                 let generation = self.queue.generation();
@@ -811,8 +810,9 @@ impl Worker {
             }
             None => {
                 let (context, ctx) = (context_of(&run.title), run.ctx);
-                self.queue.shuffle = false;
-                self.queue.set(&ids, 0, Some(context));
+                // A radio's picks are a path: they keep their order, shuffle
+                // stays as the user set it.
+                self.queue.set_ordered(&ids, 0, Some(context));
                 self.play_context = ctx;
                 self.play_context_id = None;
                 let generation = self.queue.generation();
