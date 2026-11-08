@@ -1,12 +1,14 @@
 //! The one gate every unattended background pass goes through, so the
 //! player never loads the PC while the user plays a game.
 //!
-//! * **A game or another fullscreen app** ([`busy`]): while one is in
-//!   front, the passes wait and look again every [`POLL`]. Windows says so
-//!   itself for exclusive fullscreen and presentation mode
-//!   (`SHQueryUserNotificationState`); a borderless game is a window of
-//!   another process that covers its whole monitor. Our own window in
-//!   front is never busy. Elsewhere nothing is detected.
+//! * **A game** ([`busy`]): while one is in front, the passes wait and
+//!   look again every [`POLL`]. Windows says so itself for exclusive
+//!   fullscreen and presentation mode (`SHQueryUserNotificationState`); a
+//!   borderless game is a window of another process that covers its whole
+//!   monitor without being maximized ([`game_like`]). A maximized window
+//!   (Discord, Steam, a browser) and a browser's fullscreen video are no
+//!   game. Our own window in front is never busy. Elsewhere nothing is
+//!   detected.
 //! * **Duty cycle** ([`Pacer`]): after work that took `t`, a pass rests
 //!   [`K`]`·t`, so it uses about a sixth of one core on average; a long
 //!   unit (a decode) rests between its chunks.
@@ -69,13 +71,29 @@ pub(crate) enum Front {
     Nothing,
     /// A window of this process.
     Ours,
-    /// A window of another process; `covers_monitor`: borderless over its
-    /// whole monitor (not a plain maximized window).
+    /// A window of another process; `covers_monitor`: a borderless game
+    /// over its whole monitor ([`game_like`]).
     Other { covers_monitor: bool },
 }
 
-/// `QUNS_BUSY`: a fullscreen app runs (sometimes left stuck by the shell).
+/// Window class prefixes of browsers and of the apps built on them
+/// (Discord, Spotify, Slack): their fullscreen is a video or a page, never
+/// a game.
 #[cfg_attr(not(windows), allow(dead_code))]
+const BROWSER_CLASSES: &[&str] = &["Chrome_WidgetWin_", "MozillaWindowClass", "MozillaDialogClass"];
+
+/// Whether a window of another process is a borderless game: it `covers`
+/// its whole monitor, is not merely maximized (`zoomed`, `WS_MAXIMIZE`:
+/// with an auto-hidden taskbar or none on that monitor a maximized app
+/// covers it too), and is no browser (`class`, its window class).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn game_like(covers: bool, zoomed: bool, class: &str) -> bool {
+    covers && !zoomed && !BROWSER_CLASSES.iter().any(|c| class.starts_with(c))
+}
+
+/// `QUNS_BUSY`: a fullscreen window is in front, a browser's video too
+/// (and sometimes left stuck by the shell): no game by itself.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const QUNS_BUSY: i32 = 2;
 /// `QUNS_RUNNING_D3D_FULL_SCREEN`: an exclusive fullscreen game.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -91,13 +109,11 @@ pub(crate) fn busy_of(state: Option<i32>, front: Front) -> bool {
     match front {
         Front::Ours => false,
         Front::Other { covers_monitor: true } => true,
-        Front::Nothing | Front::Other { covers_monitor: false } => match state {
-            Some(QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE) => true,
-            // Only with another app in front: a stuck state over the
-            // desktop would hold the passes forever.
-            Some(QUNS_BUSY) => matches!(front, Front::Other { .. }),
-            _ => false,
-        },
+        // `QUNS_BUSY` is not enough: a browser's fullscreen video says it
+        // too, and a borderless game is caught by its window.
+        Front::Nothing | Front::Other { covers_monitor: false } => {
+            matches!(state, Some(QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE))
+        }
     }
 }
 
@@ -254,11 +270,11 @@ mod system {
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::Shell::SHQueryUserNotificationState;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_STYLE, GetClassNameW, GetDesktopWindow, GetForegroundWindow, GetShellWindow, GetWindowLongW, GetWindowRect,
-        GetWindowThreadProcessId, IsZoomed, WS_CAPTION,
+        GetClassNameW, GetDesktopWindow, GetForegroundWindow, GetShellWindow, GetWindowRect, GetWindowThreadProcessId,
+        IsZoomed,
     };
 
-    use super::{Front, busy_of};
+    use super::{Front, busy_of, game_like};
 
     pub(super) fn busy() -> bool {
         let mut state = 0;
@@ -281,9 +297,9 @@ mod system {
             if pid == GetCurrentProcessId() {
                 return Front::Ours;
             }
-            let mut class = [0u16; 16];
+            let mut class = [0u16; 64];
             let n = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
-            let class = String::from_utf16_lossy(&class[..n.clamp(0, 16) as usize]);
+            let class = String::from_utf16_lossy(&class[..n.clamp(0, 64) as usize]);
             // The desktop behind the icons.
             if class == "Progman" || class == "WorkerW" {
                 return Front::Nothing;
@@ -303,10 +319,7 @@ mod system {
             }
             let m = mi.rcMonitor;
             let covers = r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom;
-            // A maximized window with a title bar (an auto-hidden taskbar
-            // lets it cover the monitor) is no game.
-            let captioned = (GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CAPTION) == WS_CAPTION;
-            other(covers && !(IsZoomed(hwnd) != 0 && captioned))
+            other(game_like(covers, IsZoomed(hwnd) != 0, &class))
         }
     }
 }
@@ -332,9 +345,10 @@ mod tests {
         assert!(share <= 0.2, "{share}");
     }
 
-    /// Exclusive fullscreen and presentation mode wait, a borderless window
+    /// Exclusive fullscreen and presentation mode wait, a borderless game
     /// over its monitor waits, our own window in front never does, and a
-    /// «busy» left over the desktop does not hold the passes.
+    /// plain «busy» (a browser's fullscreen video, one left over the
+    /// desktop) does not hold the passes.
     #[test]
     fn the_busy_state_maps_from_the_system() {
         let other = Front::Other { covers_monitor: false };
@@ -342,8 +356,9 @@ mod tests {
         assert!(busy_of(Some(QUNS_RUNNING_D3D_FULL_SCREEN), other));
         assert!(busy_of(Some(QUNS_RUNNING_D3D_FULL_SCREEN), Front::Nothing));
         assert!(busy_of(Some(QUNS_PRESENTATION_MODE), Front::Nothing));
-        assert!(busy_of(Some(QUNS_BUSY), other));
+        assert!(!busy_of(Some(QUNS_BUSY), other), "a browser's fullscreen video");
         assert!(!busy_of(Some(QUNS_BUSY), Front::Nothing));
+        assert!(busy_of(Some(QUNS_BUSY), borderless));
         assert!(busy_of(Some(5), borderless), "QUNS_ACCEPTS_NOTIFICATIONS with a borderless game");
         assert!(busy_of(None, borderless));
         assert!(!busy_of(Some(5), other));
@@ -352,6 +367,21 @@ mod tests {
         for s in [None, Some(QUNS_BUSY), Some(QUNS_RUNNING_D3D_FULL_SCREEN), Some(QUNS_PRESENTATION_MODE)] {
             assert!(!busy_of(s, Front::Ours), "our window in front: {s:?}");
         }
+    }
+
+    /// A borderless game counts; a maximized app (with a title bar or its
+    /// own frame), a browser's fullscreen video and a window that does not
+    /// cover its monitor do not.
+    #[test]
+    fn only_a_borderless_game_covers_the_monitor() {
+        assert!(game_like(true, false, "UnrealWindow"));
+        assert!(game_like(true, false, "SDL_app"));
+        assert!(!game_like(true, true, "Chrome_WidgetWin_1"), "Discord maximized over a monitor without a taskbar");
+        assert!(!game_like(true, true, "SDL_app"), "Steam maximized");
+        assert!(!game_like(true, true, "Notepad"));
+        assert!(!game_like(true, false, "Chrome_WidgetWin_1"), "a fullscreen video in Chrome or Edge");
+        assert!(!game_like(true, false, "MozillaWindowClass"), "a fullscreen video in Firefox");
+        assert!(!game_like(false, false, "UnrealWindow"));
     }
 
     /// The system is asked at most every `recheck`; the answer holds between.
