@@ -136,6 +136,8 @@ pub(crate) enum Msg {
     StreamAudio { track: TrackId, source: LyricsSource, target: LyricsSync, deep: bool, result: Result<PathBuf, String> },
     /// A text went onto the computer («Сохранить текст»), as read back.
     Kept { track: TrackId, result: Result<Text, String> },
+    /// The user's own text went onto the computer, as read back.
+    KeptOwn { track: TrackId, result: Result<Text, String> },
     /// A stream was saved as a file for its text («Песню и текст»).
     SongSaved { track: TrackId, result: Result<PathBuf, String> },
     Counts(AlignCounts),
@@ -169,6 +171,9 @@ pub(crate) struct AlignService {
 
     /// Stream audio saved for that, to delete once imported.
     pub(crate) saved_audio: HashMap<PathBuf, TrackId>,
+    /// The user's own texts sent to the Trash («Вернуть найденный»): where
+    /// each went and where it lay, for the undo.
+    pub(crate) own_trashed: HashMap<TrackId, (PathBuf, PathBuf)>,
 }
 
 impl AlignService {
@@ -1009,6 +1014,7 @@ impl Worker {
             Msg::Crafted { track, source, result } => self.crafted(track, source, result),
             Msg::StreamAudio { track, source, target, deep, result } => self.stream_audio(track, source, target, deep, result),
             Msg::Kept { track, result } => self.lyrics_kept(track, result),
+            Msg::KeptOwn { track, result } => self.own_lyrics_kept(track, result),
             Msg::SongSaved { track, result } => self.song_saved(track, result),
         }
     }

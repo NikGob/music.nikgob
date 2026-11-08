@@ -15,6 +15,11 @@
 //! sync beats it. LyricsPlus is asked with the track's full artist credit
 //! («WENARO, LXNER», which finds Apple's lines) and with the main artist
 //! only when that finds nothing.
+//!
+//! The user's own text ([`LyricsSource::Own`], edited by hand and kept as
+//! a marked `.ttml` next to the file, see [`crate::lyrics_keep`]) is shown
+//! first whatever the sources found; nothing fetched or made in the
+//! background ever takes its place, and only the user removes it.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -333,6 +338,7 @@ impl TrackLyrics {
         };
         let covered = self.aligned(source).filter(|a| a.fits).map_or(10, |a| (a.covered * 10.0).round() as u8);
         let order = match source {
+            LyricsSource::Own => 7,
             LyricsSource::Recognized => 0,
             LyricsSource::Genius => 1,
             LyricsSource::File => 2,
@@ -353,6 +359,10 @@ impl TrackLyrics {
         if let Some(p) = self.pick.filter(|p| self.texts.contains_key(p) && self.usable(*p)) {
             return Some(p);
         }
+        // The user's own text comes before anything found.
+        if self.has_own() {
+            return Some(LyricsSource::Own);
+        }
         if self.texts.get(&LyricsSource::File).is_some_and(|t| t.sync() > LyricsSync::Plain)
             && !self.duplicate_file()
             && !self.misfit(LyricsSource::File)
@@ -372,7 +382,8 @@ impl TrackLyrics {
     pub(crate) fn unchecked(&self) -> Vec<crate::align::AlignText> {
         self.texts
             .iter()
-            .filter(|(s, _)| **s != LyricsSource::Recognized)
+            // The user's own text is timed only when they ask.
+            .filter(|(s, _)| !matches!(**s, LyricsSource::Recognized | LyricsSource::Own))
             .filter(|(s, _)| **s != LyricsSource::File || !self.duplicate_file())
             // Made by an older aligner: checked again (timing the user
             // kept stays until they make it again).
@@ -400,6 +411,22 @@ impl TrackLyrics {
     /// The source the user picked (`None`: automatic).
     pub(crate) fn set_pick(&mut self, pick: Option<LyricsSource>) {
         self.pick = pick;
+    }
+
+    /// The source the user picked, if any.
+    pub(crate) fn picked(&self) -> Option<LyricsSource> {
+        self.pick
+    }
+
+    /// `source`'s text is gone (the user's own text taken away): neither
+    /// found nor missed, and no longer picked.
+    pub(crate) fn forget(&mut self, source: LyricsSource) {
+        self.texts.remove(&source);
+        self.missing.remove(&source);
+        self.pending.remove(&source);
+        if self.pick == Some(source) {
+            self.pick = None;
+        }
     }
 
     /// Takes the aligner's verdict on a text.
@@ -556,7 +583,7 @@ impl TrackLyrics {
         let home = match source {
             Some(LyricsSource::Recognized) => v::LyricsHome::Library,
             Some(_) if made => v::LyricsHome::Library,
-            Some(LyricsSource::File) => v::LyricsHome::Computer,
+            Some(LyricsSource::File | LyricsSource::Own) => v::LyricsHome::Computer,
             // A found text the file already holds as it is (saved there
             // by «Сохранять найденный текст в файл трека»).
             Some(s) if self.file_holds(s) => v::LyricsHome::Computer,
@@ -569,8 +596,11 @@ impl TrackLyrics {
         };
         // Any shown text not on the computer yet can go there: next to
         // the file, or into the artist's folder for a song without one.
+        // Never another text over the user's own (it goes back to the
+        // found ones first, «Вернуть найденный»).
         let savable = home != v::LyricsHome::Computer
             && source.is_some_and(|s| self.to_keep(s).is_some())
+            && (source == Some(LyricsSource::Own) || !self.has_own())
             && (self.place == Place::File || self.folder);
         v::LyricsView {
             track: Some(track),
@@ -647,6 +677,11 @@ impl TrackLyrics {
         (!plain.trim().is_empty()).then(|| crate::lyrics_keep::Keep::Plain(plain))
     }
 
+    /// The user's own text is there ([`LyricsSource::Own`]).
+    pub(crate) fn has_own(&self) -> bool {
+        self.texts.contains_key(&LyricsSource::Own)
+    }
+
     /// The file's own text is `source`'s as it is.
     fn file_holds(&self, source: LyricsSource) -> bool {
         match (self.texts.get(&LyricsSource::File), self.texts.get(&source)) {
@@ -685,9 +720,10 @@ impl TrackLyrics {
 
     fn insert(&mut self, source: LyricsSource, text: Option<Text>) {
         self.pending.remove(&source);
-        // A songwriters line before the first sung one is not lyrics.
+        // A songwriters line before the first sung one is not lyrics (the
+        // user's own text stays as they wrote it).
         let text = match text {
-            Some(t) if source != LyricsSource::Recognized => t.without_credits(&self.names),
+            Some(t) if !matches!(source, LyricsSource::Recognized | LyricsSource::Own) => t.without_credits(&self.names),
             t => t,
         };
         match text {
@@ -717,13 +753,17 @@ fn shift_lines(lines: &[LyricLine], by: Duration, early: bool) -> Vec<LyricLine>
         .collect()
 }
 
-/// A `.ttml` (Apple Music style, word-synced) next to the file.
-fn local_ttml(file: &Path) -> Option<Text> {
+/// A `.ttml` (Apple Music style, word-synced) next to the file, and
+/// whether it is the user's own text.
+fn local_ttml(file: &Path) -> Option<(Text, bool)> {
     read_ttml(&file.with_extension("ttml"))
 }
 
-fn read_ttml(path: &Path) -> Option<Text> {
-    Text::from_ttml(&std::fs::read_to_string(nikgob_import::sanitize::long_path(path)).ok()?)
+/// The `.ttml` at `path`, and whether it is the user's own text
+/// ([`nikgob_metadata::ttml_is_own`]).
+pub(crate) fn read_ttml(path: &Path) -> Option<(Text, bool)> {
+    let xml = std::fs::read_to_string(nikgob_import::sanitize::long_path(path)).ok()?;
+    Some((Text::from_ttml(&xml)?, nikgob_metadata::ttml_is_own(&xml)))
 }
 
 /// The artists LyricsPlus is asked with, in order: the full credit
@@ -803,7 +843,7 @@ async fn fetch_online(
                 let artists: Vec<&str> = artists.iter().map(String::as_str).collect();
                 meta.genius.find(&artists, &row.title, row.album.as_deref()).await?.and_then(|t| Text::from_plain(&t))
             }
-            LyricsSource::File | LyricsSource::Lrclib | LyricsSource::Recognized => None,
+            LyricsSource::Own | LyricsSource::File | LyricsSource::Lrclib | LyricsSource::Recognized => None,
         })
     };
     let text = tokio::time::timeout(LOOKUP_TIMEOUT, lookup)
@@ -872,9 +912,22 @@ fn cached_lyrics_at(
     };
     let fresh_miss = |at: i64| now - at < LYRICS_RETRY_MS;
 
-    if let Some(t) = path.and_then(local_ttml) {
-        tl.insert(LyricsSource::File, Some(t));
-    } else if let Some(t) = kept.filter(|_| path.is_none()).and_then(read_ttml) {
+    // The `.ttml` next to the file (or kept for a song without one): the
+    // user's own text, or the file's; the user's leaves the file's text to
+    // its tag.
+    let ttml = match path {
+        Some(p) => local_ttml(p),
+        None => kept.and_then(read_ttml),
+    };
+    let file = match ttml {
+        Some((t, true)) => {
+            tl.insert(LyricsSource::Own, Some(t));
+            None
+        }
+        Some((t, false)) => Some(t),
+        None => None,
+    };
+    if let Some(t) = file {
         tl.insert(LyricsSource::File, Some(t));
     } else if let Some((synced, plain)) = path
         .and_then(|p| crate::enrich::local_lyrics(p, tags))
@@ -1011,9 +1064,10 @@ impl Worker {
         let local = self.lib.active_source(track).ok().flatten().is_some_and(|s| s.kind.is_local());
         if !local
             && tl.texts_of(LyricsSource::File).is_none()
-            && let Some(kept) = self.kept_text(track).as_deref().and_then(read_ttml)
+            && !tl.has_own()
+            && let Some((kept, own)) = self.kept_text(track).as_deref().and_then(read_ttml)
         {
-            tl.insert(LyricsSource::File, Some(kept));
+            tl.insert(if own { LyricsSource::Own } else { LyricsSource::File }, Some(kept));
         }
         let Some(svc) = self.import.as_mut() else { return };
         // Playback lookups keep ownership of their in-flight results.
@@ -1129,7 +1183,8 @@ impl Worker {
         if tl.embedding { return }
         // A text heard in the recording is the player's guess: never into
         // the file.
-        let Some(source) = tl.chosen().filter(|s| !matches!(s, LyricsSource::File | LyricsSource::Recognized)) else { return };
+        // The user's own text stays in its `.ttml` (never into the tag).
+        let Some(source) = tl.chosen().filter(|s| !matches!(s, LyricsSource::Own | LyricsSource::File | LyricsSource::Recognized)) else { return };
         if tl.pick != Some(source) && !tl.pending.is_empty() { return }
         let text = tl.texts[&source].serialized();
         if tl.last_embed.as_deref() == Some(&text) { return }
@@ -1349,6 +1404,64 @@ mod tests {
         tl.insert(LyricsSource::Genius, Text::from_plain("Written by: Dan Reynolds
 People pleasing planet"));
         assert_eq!(tl.texts[&LyricsSource::Genius].plain.as_deref(), Some("People pleasing planet"));
+    }
+
+    /// The user's own text: shown first over a finer found one, never
+    /// replaced by a source that answers again (a refetch), never sent to
+    /// the aligner by itself, and nothing else is saved over it; a pick
+    /// still shows another text, and timing made of it on asking is shown
+    /// and kept as theirs.
+    #[test]
+    fn the_own_text_comes_first_and_a_refetch_never_replaces_it() {
+        use nikgob_align::fit::Timing;
+        let id = TrackId::new();
+        let mut tl = TrackLyrics { place: Place::File, ..TrackLyrics::default() };
+        tl.insert(LyricsSource::LyricsPlus, Some(worded()));
+        tl.insert(LyricsSource::Own, Text::from_lrc(Some("[00:02.00]Своя строка\n[00:04.00]Written by: me"), None));
+        assert_eq!(tl.chosen(), Some(LyricsSource::Own), "over a word-synced source");
+        assert_eq!(tl.texts_of(LyricsSource::Own).unwrap().lines.len(), 2, "kept as written");
+        tl.search_again();
+        tl.found(LyricsSource::LyricsPlus, Some(worded()));
+        tl.found(LyricsSource::LrcRed, None);
+        let v = tl.view(id);
+        assert_eq!(v.source, Some(LyricsSource::Own));
+        assert_eq!(v.lines[0].text, "Своя строка");
+        assert!(!v.picked, "chosen, not picked");
+        assert_eq!(v.home, v::LyricsHome::Computer);
+        assert!(!v.savable, "on the computer already");
+        assert!(v.sources.iter().any(|o| o.source == LyricsSource::Own));
+        assert!(tl.unchecked().iter().all(|t| t.source != LyricsSource::Own), "never checked by itself");
+        // Another source picked: shown, but never saved over the own text.
+        tl.pick = Some(LyricsSource::LyricsPlus);
+        let v = tl.view(id);
+        assert_eq!(v.source, Some(LyricsSource::LyricsPlus));
+        assert!(!v.savable);
+        tl.pick = None;
+        // Word timing made of it on asking: shown, and kept as theirs.
+        let hash = tl.texts_of(LyricsSource::Own).unwrap().hash();
+        tl.set_aligned(
+            LyricsSource::Own,
+            Aligned {
+                hash,
+                fits: true,
+                timing: Timing::None,
+                offset: Duration::ZERO,
+                offset_early: false,
+                covered: 1.0,
+                lines: worded().lines,
+                saved: true,
+                current: true,
+            },
+        );
+        let v = tl.view(id);
+        assert!(v.made && v.savable);
+        assert_eq!(v.source, Some(LyricsSource::Own));
+        // «Вернуть найденный»: the found texts again.
+        tl.pick = Some(LyricsSource::Own);
+        tl.forget(LyricsSource::Own);
+        assert_eq!(tl.picked(), None);
+        assert_eq!(tl.view(id).source, Some(LyricsSource::LyricsPlus));
+        assert!(!tl.view(id).sources.iter().any(|o| o.source == LyricsSource::Own));
     }
 
     #[test]
