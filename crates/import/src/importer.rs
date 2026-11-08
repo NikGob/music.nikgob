@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use nikgob_core::cover_frame;
 use nikgob_core::model::{
-    Codec, Master, Palette, Source, SourceId, SourceKind, SourceOrigin, Track, TrackId, quality_score,
+    Codec, Master, Palette, ReleaseId, Source, SourceId, SourceKind, SourceOrigin, Track, TrackId, quality_score,
 };
 use nikgob_library::Library;
 use nikgob_metadata::Metadata;
@@ -40,6 +40,7 @@ use crate::identity::{
     lookup as online_lookup,
 };
 use crate::layout::LayoutInput;
+use crate::same_audio::{Heard, Judgement, Known, file_keys, judge, marked_before, print_file};
 use crate::sanitize::long_path;
 use crate::spectrum::Verdict;
 use crate::quality::{Mp3Encoder, check_of, file_stamp};
@@ -97,6 +98,8 @@ struct Ctx {
     events: broadcast::Sender<ImportEvent>,
     /// The tracks the job's files are meant for.
     targets: Arc<ImportTargets>,
+    /// When the job started: a file the library had before it is settled.
+    started: i64,
 }
 
 impl Ctx {
@@ -129,6 +132,10 @@ struct Analyzed {
     /// The track this file is, whatever the tags say: the job's forced
     /// target, or the stream track the user confirmed.
     force_track: Option<TrackId>,
+    /// BLAKE3 of the file as it came.
+    came_hash: Option<String>,
+    /// When its job started ([`Ctx::started`]).
+    job_started: i64,
 }
 
 /// A file that is read (tags, length, fingerprint) and waits for its folder.
@@ -325,6 +332,7 @@ impl Importer {
             tx,
             events: self.inner.events.clone(),
             targets: Arc::new(targets),
+            started: nikgob_library::now_ms(),
         };
         let this = self.clone();
         tokio::spawn(async move { this.run_job(ctx, paths, origin).await });
@@ -506,6 +514,15 @@ impl Importer {
 
     fn failed(&self, ctx: &Ctx, path: &Path, e: &ImportError) -> FileOutcome {
         log::warn!("import of {} failed: {e}", path.display());
+        if let ImportError::WrongAudio { track, title, sounds_like } = e {
+            ctx.emit(ImportEvent::WrongAudio {
+                job: ctx.job,
+                path: path.to_path_buf(),
+                track: *track,
+                title: title.clone(),
+                sounds_like: sounds_like.clone(),
+            });
+        }
         ctx.emit(ImportEvent::Failed {
             job: ctx.job,
             path: path.to_path_buf(),
@@ -547,6 +564,7 @@ impl Importer {
         };
         analyzed.force_track = ctx.targets.forced();
         analyzed.targets = ctx.targets.clone();
+        analyzed.job_started = ctx.started;
         ctx.stage(path, Stage::QualityCheck);
 
         if path.starts_with(&inner.cfg.library_dir) {
@@ -950,6 +968,7 @@ impl Importer {
                     let mut a = blocking(move || analyze(&inner.cfg, &p, o)).await?;
                     a.targets = parked.targets.clone();
                     a.force_track = parked.targets.forced();
+                    a.job_started = ctx.started;
                     let mut base = identity_from_tags(&a.tags, &path);
                     if let Some(t) = a.force_track
                         && let Some(id) = identity_of_track(&self.inner.library, t, &base)
@@ -974,11 +993,7 @@ impl Importer {
         match result {
             Ok(o) => Ok(o),
             Err(e) => {
-                ctx.emit(ImportEvent::Failed {
-                    job: ctx.job,
-                    path,
-                    error: e.to_string(),
-                });
+                self.failed(&ctx, &path, &e);
                 Err(e)
             }
         }
@@ -993,6 +1008,7 @@ impl Importer {
             tx,
             events: self.inner.events.clone(),
             targets,
+            started: nikgob_library::now_ms(),
         }
     }
 
@@ -1015,6 +1031,23 @@ impl Importer {
         if let Decision::Duplicate(e) = &early {
             let kept = e.track.id;
             return Ok(self.report_duplicate(ctx, &analyzed, kept));
+        }
+        // Another song's audio is not imported as this one: refused before
+        // any work is spent on it (the commit asks again).
+        {
+            let (i, a, id) = (inner.clone(), analyzed.clone(), identity.clone());
+            let track = match &early {
+                Decision::Upgrade(e) | Decision::AddSource(e) | Decision::Duplicate(e) => Some(e.track.clone()),
+                Decision::New => None,
+            };
+            blocking(move || {
+                let release = match &track {
+                    Some(t) => t.release_id,
+                    None => lock(&i.store).find_release(&id)?,
+                };
+                audio_check(&i, &a, &id, track.as_ref(), release, true).map(|_| ())
+            })
+            .await?;
         }
         // A track of the wished album: its album and place (the commit
         // decides again).
@@ -1223,6 +1256,9 @@ fn analyze(cfg: &ImportConfig, path: &Path, origin: SourceOrigin) -> Result<Anal
     } else {
         quality_score(&info.codec, info.bitrate_kbps, rate, depth, false)
     };
+    // What the file is as it came: a file found holding another song is
+    // known by it again.
+    let came_hash = fsutil::hash_file(path).ok();
     Ok(Analyzed {
         path: path.to_path_buf(),
         origin,
@@ -1233,6 +1269,8 @@ fn analyze(cfg: &ImportConfig, path: &Path, origin: SourceOrigin) -> Result<Anal
         score,
         targets: Arc::default(),
         force_track: None,
+        came_hash,
+        job_started: nikgob_library::now_ms(),
     })
 }
 
@@ -1285,6 +1323,145 @@ fn decide_for(store: &mut Store, a: &Analyzed, id: &Identity) -> Result<Decision
     Ok(decide(existing, a.score))
 }
 
+/// Files of an album without a stored print that an import hears first,
+/// at most (once each: their prints are kept).
+const BACKFILL_MAX: usize = 24;
+
+/// Where a file came from, as [`crate::same_audio::file_keys`] names it:
+/// the place its job says (a Soulseek peer's file, a service's id) and its
+/// torrent.
+fn came_from(a: &Analyzed) -> Vec<String> {
+    let mut out: Vec<String> = a.targets.from.iter().cloned().collect();
+    if let SourceOrigin::Torrent { info_hash, .. } = &a.origin
+        && !info_hash.is_empty()
+    {
+        out.push(format!("torrent:{info_hash}"));
+    }
+    out
+}
+
+/// Hears the files of `release` that have no stored print yet (a few, at
+/// the import's low priority) and keeps their prints.
+fn backfill_prints(lib: &Library, release: ReleaseId) {
+    let todo = match lib.prints_todo(Some(release), BACKFILL_MAX) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("import: the album's files without a print: {e}");
+            return;
+        }
+    };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    for t in todo {
+        let path = PathBuf::from(&t.locator);
+        let (print, duration_ms, failed) = match print_file(&path, &stop) {
+            Ok((p, d)) => (Some(p), d, None),
+            // Not there right now: heard another time.
+            Err(crate::quality::CheckError::Unavailable(_)) => continue,
+            Err(e) => (None, None, Some(format!("{e:?}"))),
+        };
+        let row = nikgob_library::AudioPrint {
+            source_id: t.source_id,
+            track_id: t.track_id,
+            print,
+            duration_ms,
+            came_hash: None,
+            came_from: Vec::new(),
+            failed,
+        };
+        if let Err(e) = lib.put_audio_print(&row) {
+            log::warn!("import: the print of {} is not stored: {e}", path.display());
+        }
+    }
+}
+
+/// Whether the file is the song it is taken for (see [`crate::same_audio`]).
+/// `track` is the library track it would become (`None`: a new one) on
+/// `release`. A file marked before for the track, or one that sounds like
+/// a song of its album the library had, is refused: what it is and where
+/// it came from are noted for the track, and the error says so. One that
+/// sounds like a song that came with it is flagged (`Some`: that file, its
+/// track and how alike; the pair goes to «Подтверди» once it is in).
+/// `backfill`: the album's files without a stored print are heard first.
+fn audio_check(
+    inner: &Inner,
+    a: &Analyzed,
+    id: &Identity,
+    track: Option<&Track>,
+    release: Option<ReleaseId>,
+    backfill: bool,
+) -> Result<Option<(SourceId, TrackId, f64)>> {
+    let lib = &inner.library;
+    // Audio saved from a stream is what the stream is.
+    if a.origin == SourceOrigin::Stream {
+        return Ok(None);
+    }
+    let Some(print) = a.audio.fingerprint.as_ref().map(|f| f.raw.as_slice()) else {
+        return Ok(None);
+    };
+    let keys = file_keys(a.came_hash.as_deref(), &came_from(a));
+    let title = track.map_or(id.title.as_str(), |t| t.title.as_str());
+    let title_of = |t: TrackId| lib.get_track(t).ok().flatten().map(|t| t.title);
+    if let Some(t) = track {
+        let marked = lib.wrong_audio_of(t.id)?;
+        if let Some(m) = marked_before(&keys, Some(print), &marked) {
+            let sounds_like = m.sounds_like;
+            log::warn!("import: {} was found holding another song for «{title}» before, refused", a.path.display());
+            lib.put_wrong_audio(t.id, &keys, sounds_like, Some(print))?;
+            return Err(ImportError::WrongAudio {
+                track: Some(t.id),
+                title: title.to_owned(),
+                sounds_like: sounds_like.and_then(title_of),
+            });
+        }
+    }
+    if backfill && let Some(r) = release {
+        backfill_prints(lib, r);
+    }
+    let credit = track.map_or_else(|| id.artist_line.clone(), |t| t.artist_credit.display());
+    let artist_key = nikgob_library::sort_key(&credit);
+    let near = lib.prints_near(release, track.map(|t| t.id), Some(&artist_key))?;
+    let own = match track {
+        Some(t) => lib.prints_of_track(t.id)?,
+        None => Vec::new(),
+    };
+    let known: Vec<Known<'_>> = near
+        .iter()
+        .map(|n| Known {
+            source: n.source_id,
+            track: n.track_id,
+            title: &n.title,
+            print: &n.print,
+            duration_ms: n.duration_ms,
+            settled: n.added_at < a.job_started,
+            same_release: release.is_some() && n.release_id == release,
+        })
+        .collect();
+    let heard = Heard {
+        title,
+        track: track.map(|t| t.id),
+        print,
+        duration_ms: (!a.info.duration.is_zero()).then(|| a.info.duration_ms()),
+        expected_ms: track.and_then(|t| t.duration_ms),
+        own: &own,
+    };
+    match judge(&heard, &known) {
+        Judgement::Fine => Ok(None),
+        Judgement::Flag { source, track: other, similarity } => Ok(Some((source, other, similarity))),
+        Judgement::Refuse { track: other, similarity, .. } => {
+            let sounds_like = near.iter().find(|n| n.track_id == other).map(|n| n.title.clone());
+            log::warn!(
+                "import: {} sounds like «{}» ({similarity:.2}), not «{title}»: refused",
+                a.path.display(),
+                sounds_like.as_deref().unwrap_or("?")
+            );
+            if let Some(t) = track {
+                lib.put_wrong_audio(t.id, &keys, Some(other), Some(print))?;
+            }
+            Err(ImportError::WrongAudio { track: track.map(|t| t.id), title: title.to_owned(), sounds_like })
+        }
+    }
+}
+
 struct Prepared {
     tmp: PathBuf,
     ext: String,
@@ -1332,7 +1509,10 @@ fn convert(inner: &Inner, a: &Analyzed, album_dir: &Path) -> Result<Prepared> {
                 bitrate_kbps: inner.cfg.opus_bitrate_kbps,
             },
         )?;
-        Some(fsutil::hash_file(&a.path)?)
+        match &a.came_hash {
+            Some(h) => Some(h.clone()),
+            None => Some(fsutil::hash_file(&a.path)?),
+        }
     } else if let Some(enc) = &mp3 {
         let target = nikgob_core::quality::Mp3Target::for_origin(sound_origin(&a.audio));
         enc.encode(&a.path, &tmp, target)?;
@@ -1839,6 +2019,13 @@ fn commit_locked(
         }
         None => id,
     };
+    // Another song's audio: asked again now that the album's other files
+    // of this job may be in (a file that came with this one is flagged).
+    let release = match existing {
+        Some(e) => e.track.release_id,
+        None => store.find_release(id)?,
+    };
+    let flagged = audio_check(inner, a, id, existing.map(|e| &e.track), release, false)?;
     let track_id = match existing {
         Some(e) => e.track.id,
         // Keep the id a rebuilt/backed-up file already carries, if it is free.
@@ -1938,6 +2125,27 @@ fn commit_locked(
             let check = check_of(report, a.audio.spectrum_db.clone(), a.audio.spec.sample_rate, made_from, file_stamp(&dest));
             if let Err(e) = lib.put_quality_check(stored.id, &check) {
                 log::warn!("the check of {} is not stored: {e}", dest.display());
+            }
+        }
+        // What it sounds like, what it was as it came and where from.
+        if let Some(fp) = &a.audio.fingerprint {
+            let print = nikgob_library::AudioPrint {
+                source_id: stored.id,
+                track_id: track.id,
+                print: Some(fp.raw.clone()),
+                duration_ms: Some(out_info.duration_ms()),
+                came_hash: a.came_hash.clone(),
+                came_from: came_from(a),
+                failed: None,
+            };
+            if let Err(e) = lib.put_audio_print(&print) {
+                log::warn!("the print of {} is not stored: {e}", dest.display());
+            }
+        }
+        if let Some((other_source, other_track, similarity)) = flagged {
+            log::warn!("import: {} sounds like the file of {other_track} ({similarity:.2}), asked about", dest.display());
+            if let Err(e) = lib.put_same_audio((stored.id, track.id), (other_source, other_track), similarity) {
+                log::warn!("the pair of {} is not stored: {e}", dest.display());
             }
         }
 
