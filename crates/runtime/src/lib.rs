@@ -931,15 +931,8 @@ impl Worker {
                 tracks,
                 start,
                 context,
-            } => {
-                self.user_switch(EventOrigin::Manual);
-                self.queue.set(&tracks, start, Some(context));
-                self.play_context = EventContext::Library;
-                self.play_context_id = None;
-                if let Some(e) = self.queue.current() {
-                    self.start(e);
-                }
-            }
+            } => self.play_tracks(&tracks, Some(start), context),
+            Command::PlayAll { tracks, context } => self.play_tracks(&tracks, None, context),
             Command::PlayNext(t) => {
                 self.queue.play_next(&t);
                 self.preload_next();
@@ -1496,6 +1489,21 @@ impl Worker {
     /// and the daylist's picks play shuffled while shuffle is on.
     pub(crate) fn shuffle_radio(&self) -> bool {
         self.state.read().prefs.shuffle_radio
+    }
+
+    /// A list of tracks of the library's pages (downloaded, «Слушать
+    /// снова», worlds, cards) from `start`, or from the first (a random one
+    /// under shuffle) when the user picked none; shuffle stays or goes off
+    /// as for any new list.
+    fn play_tracks(&mut self, tracks: &[TrackId], start: Option<usize>, context: String) {
+        self.user_switch(EventOrigin::Manual);
+        self.new_list();
+        self.queue.set_from(tracks, start, Some(context));
+        self.play_context = EventContext::Library;
+        self.play_context_id = None;
+        if let Some(e) = self.queue.current() {
+            self.start(e);
+        }
     }
 
     fn play_list(

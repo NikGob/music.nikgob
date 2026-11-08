@@ -954,4 +954,21 @@ fn a_new_album_keeps_shuffle_as_the_setting_says() {
     let playing = current(&rt.state());
     rt.send(Command::ToggleShuffle);
     wait_for(&rt, "the order back", |s| !s.player.shuffle && order(s) == ids && current(s) == playing);
+
+    // The library's own lists (downloaded, «Слушать снова», worlds) go the
+    // same way: with the setting off, shuffle goes off and they play in order.
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "shuffle on again", |s| s.player.shuffle);
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 1, context: "скачанного".into() });
+    wait_for(&rt, "the downloaded in order, shuffle off", |s| {
+        current(s) == Some(ids[1]) && !s.player.shuffle && order(s) == ids
+    });
+    // With it on, «Слушать всё» under shuffle plays the whole list shuffled.
+    let prefs = Prefs { keep_shuffle: true, ..rt.state().prefs.clone() };
+    rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&rt, "the setting on", |s| s.prefs.keep_shuffle);
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "shuffle on", |s| s.player.shuffle);
+    rt.send(Command::PlayAll { tracks: ids.clone(), context: "Слушать снова".into() });
+    wait_for(&rt, "the whole list under shuffle", |s| s.player.shuffle && s.queue.prev.is_empty() && same(&order(s)));
 }

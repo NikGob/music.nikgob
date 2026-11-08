@@ -2519,7 +2519,11 @@ pub enum Command {
     PlayRelease { id: ReleaseId, start: Option<TrackId>, shuffle: bool },
     PlayPlaylist { id: PlaylistId, start: Option<TrackId>, shuffle: bool },
     PlayArtist { id: ArtistId, shuffle: bool },
+    /// These tracks from the one at `start` (the user picked it).
     PlayTracks { tracks: Vec<TrackId>, start: usize, context: String },
+    /// A whole list with no track picked («Слушать всё»): from the first,
+    /// or from a random one under shuffle.
+    PlayAll { tracks: Vec<TrackId>, context: String },
     PlayNext(Vec<TrackId>),
     Enqueue(Vec<TrackId>),
     /// All tracks of an album / an artist to the end of the queue.

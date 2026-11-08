@@ -542,7 +542,7 @@ fn listen_again(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, pages: &mu
     let mut nav = None;
     entering(ui, rect, n, "again", |ui| {
         if section_header(ui, grid, rect, "Слушать снова", Some(("Слушать всё", Some(Icon::PlayArrow)))) {
-            out.push(Command::PlayTracks { tracks: rows.iter().map(|t| t.id).collect(), start: 0, context: "Слушать снова".into() });
+            out.push(Command::PlayAll { tracks: rows.iter().map(|t| t.id).collect(), context: "Слушать снова".into() });
         }
         let top = rect.top() + HEADER_H + HEADER_GAP;
         for (i, t) in rows.iter().enumerate() {
