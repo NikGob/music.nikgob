@@ -142,11 +142,13 @@ impl Site {
     }
 
     /// A popup the window lets open (SoundCloud's sign-in with Google,
-    /// Apple or Facebook).
+    /// Apple or Facebook). SoundCloud opens these as a blank window first
+    /// and only then sends it to the provider, so a blank one is let
+    /// through too.
     pub fn popup_allowed(self, url: &str) -> bool {
         match self {
             Self::Youtube => false,
-            Self::Soundcloud => matches!(
+            Self::Soundcloud => url.is_empty() || url == "about:blank" || matches!(
                 host(url).as_str(),
                 "accounts.google.com" | "appleid.apple.com" | "www.facebook.com" | "m.facebook.com" | "secure.soundcloud.com"
             ),
@@ -587,6 +589,9 @@ mod tests {
         assert!(Site::Soundcloud.popup_allowed("https://accounts.google.com/o/oauth2/auth?x"));
         assert!(!Site::Soundcloud.popup_allowed("https://evil.example/"));
         assert!(!Site::Youtube.popup_allowed("https://accounts.google.com/"));
+        // «Continue with Google» opens a blank popup first.
+        assert!(Site::Soundcloud.popup_allowed("about:blank"));
+        assert!(!Site::Youtube.popup_allowed("about:blank"));
         // The window's cookies go through the service's own parser.
         let text = netscape(&[c(".soundcloud.com", "oauth_token", "2-1-2-abc")]);
         assert_eq!(nikgob_soundcloud::token::parse(&text).as_deref(), Some("2-1-2-abc"));
