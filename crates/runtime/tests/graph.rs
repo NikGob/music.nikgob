@@ -39,6 +39,8 @@ fn start(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs) -> R
 }
 
 fn start_with(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs, schedule: StreamSchedule) -> Runtime {
+    // A game on the machine running the tests must not hold the walk.
+    nikgob_runtime::set_background_quiet(false);
     Runtime::start_scheduled(
         RuntimeConfig {
             library: lib.clone(),

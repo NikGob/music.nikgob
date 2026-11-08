@@ -316,8 +316,13 @@ pub struct Stat {
 
 /// The status in a `statdownload` answer (JSON, or JSON in a script call).
 pub fn stat_result(body: &str) -> Option<Stat> {
-    let (a, b) = (body.find('{')?, body.rfind('}')?);
-    (a < b).then(|| serde_json::from_str(&body[a..=b]).ok()).flatten()
+    // The object handed to `statResult(…)`, not the braces of the `if`
+    // block around the call.
+    let from = body.find("statResult").map_or(0, |i| i + "statResult".len());
+    let to = body.rfind(')').filter(|&e| e > from).unwrap_or(body.len());
+    let inner = &body[from..to];
+    let (a, b) = (inner.find('{')?, inner.rfind('}')?);
+    (a < b).then(|| serde_json::from_str(&inner[a..=b]).ok()).flatten()
 }
 
 /// `href` on the site of `page`.

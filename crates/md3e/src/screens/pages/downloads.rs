@@ -145,7 +145,9 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
         Card::outlined().id_salt(("confirm", c.id)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(TypeRole::TitleMedium.style().rich(&c.title, s.on_surface));
-            ui.label(TypeRole::BodySmall.style().rich(&c.origin, s.on_surface_variant));
+            if !c.origin.is_empty() {
+                ui.label(TypeRole::BodySmall.style().rich(&c.origin, s.on_surface_variant));
+            }
             ui.add_space(12.0);
             ui.label(TypeRole::LabelLarge.style().rich(&c.question, s.on_surface_variant));
             ui.add_space(4.0);
@@ -171,7 +173,9 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
                     });
                     r
                 });
-                let area = row.response.rect.expand2(vec2(4.0, 4.0));
+                // The whole width of the card, not just the words.
+                let r = row.response.rect;
+                let area = egui::Rect::from_min_max(r.min, egui::pos2(ui.max_rect().right(), r.max.y)).expand2(vec2(4.0, 4.0));
                 let hit = ui.interact(area, ui.id().with(("cf-row", c.id, i)), egui::Sense::click());
                 if hit.clicked() || row.inner.clicked() {
                     choice = i;
@@ -244,7 +248,8 @@ fn pick_card(ui: &mut Ui, c: &Confirm, pick: &ConfirmPick, out: &mut Vec<Command
             });
             r
         });
-        let area = line.response.rect.expand2(vec2(4.0, 4.0));
+        let r = line.response.rect;
+        let area = egui::Rect::from_min_max(r.min, egui::pos2(ui.max_rect().right(), r.max.y)).expand2(vec2(4.0, 4.0));
         let hit = ui.interact(area, ui.id().with(("cf-pick-row", salt)), egui::Sense::click());
         let toggled = line.inner.changed() || hit.clicked();
         let fill = if highlight && on != toggled {
@@ -260,7 +265,9 @@ fn pick_card(ui: &mut Ui, c: &Confirm, pick: &ConfirmPick, out: &mut Vec<Command
     Card::outlined().id_salt(("confirm", c.id)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.label(TypeRole::TitleMedium.style().rich(&c.title, s.on_surface));
-        ui.label(TypeRole::BodySmall.style().rich(&c.origin, s.on_surface_variant));
+        if !c.origin.is_empty() {
+            ui.label(TypeRole::BodySmall.style().rich(&c.origin, s.on_surface_variant));
+        }
         ui.add_space(12.0);
         ui.add(egui::Label::new(TypeRole::LabelLarge.style().rich(&c.question, s.on_surface_variant)).wrap());
         ui.add_space(4.0);

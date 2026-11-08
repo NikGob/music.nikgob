@@ -145,7 +145,17 @@ impl Gate {
     }
 }
 
-static GATE: LazyLock<Gate> = LazyLock::new(|| Gate::new(system::busy, RECHECK, POLL));
+/// Whether the gate looks at the screen at all (see [`set_enabled`]).
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+static GATE: LazyLock<Gate> = LazyLock::new(|| Gate::new(|| ENABLED.load(Ordering::Relaxed) && system::busy(), RECHECK, POLL));
+
+/// Turns the game check on or off for the whole process: the runtime's
+/// own tests turn it off, so a game on the machine running them does not
+/// hold their background work.
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::Relaxed);
+}
 
 /// The app's gate.
 pub(crate) fn gate() -> &'static Gate {

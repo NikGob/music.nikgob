@@ -59,6 +59,8 @@ fn imported_files_are_analysed_in_the_background() {
         analysis_idle: Duration::from_millis(200),
         ..StreamSchedule::default()
     };
+    // A game on the machine running the tests must not hold the analysis.
+    nikgob_runtime::set_background_quiet(false);
     let rt = Runtime::start_scheduled(
         RuntimeConfig {
             library: lib.clone(),

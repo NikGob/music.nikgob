@@ -135,6 +135,31 @@ impl Shared {
         }
     }
 
+    /// The open pairs judged again by today's rule from their stored prints:
+    /// those it no longer finds (a soundtrack's leitmotif, two versions of
+    /// one song) are forgotten.
+    fn recheck_offers(&self) {
+        let Ok(offers) = self.lib.same_audio_offers() else { return };
+        let mut dropped = 0;
+        for o in &offers {
+            let print = |s: SourceId| self.lib.audio_print(s).ok().flatten().and_then(|p| p.print);
+            let still = match (print(o.a.source_id), print(o.b.source_id)) {
+                (Some(a), Some(b)) => {
+                    !nikgob_import::same_audio::versions_of_one_song(&o.a.title, &o.b.title)
+                        && nikgob_import::same_audio::overlap(&a, &b) >= nikgob_import::same_audio::SAME_SONG
+                }
+                _ => true,
+            };
+            if !still && self.lib.drop_same_audio(o.a.source_id, o.b.source_id).is_ok() {
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            log::info!("same audio: {dropped} of {} open pairs are not the same audio by the stricter rule", offers.len());
+            let _ = self.tx.send(Internal::SameAudio(Msg::Found));
+        }
+    }
+
     /// One look over the files without a print; true when one was heard.
     fn pass(&self, skip: &mut HashSet<SourceId>, pacer: &mut Pacer<'_>) -> bool {
         let todo = match self.lib.prints_todo(None, BATCH + skip.len()) {
@@ -221,6 +246,7 @@ impl Shared {
             Ok(n) => log::info!("same audio: {n} rows of files that are gone dropped"),
             Err(e) => log::warn!("same audio: dropping old prints: {e}"),
         }
+        self.recheck_offers();
         let mut pacer = Pacer::new(&self.stop);
         // Not tried again in this run (could not be opened).
         let mut skip = HashSet::new();
@@ -279,7 +305,7 @@ pub(crate) fn pair_card(id: u64, o: &SameAudioOffer) -> v::Confirm {
     v::Confirm {
         id,
         title: o.album.clone(),
-        origin: "Одинаковый звук".into(),
+        origin: String::new(),
         question: "В каком файле другая песня?".into(),
         options: vec![side_option(first), side_option(second)],
         skip_label: "Всё верно".into(),

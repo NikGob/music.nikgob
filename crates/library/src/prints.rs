@@ -391,6 +391,19 @@ impl Library {
         })
     }
 
+    /// Forgets an open pair (a stricter rule no longer finds it): it is not
+    /// offered, and a later check may note it again.
+    pub fn drop_same_audio(&self, a: SourceId, b: SourceId) -> Result<()> {
+        let (sa, sb) = if a.to_string() <= b.to_string() { (a, b) } else { (b, a) };
+        self.write(|tx| {
+            tx.execute(
+                "DELETE FROM same_audio WHERE source_id = ?1 AND other_source = ?2 AND kept = 0",
+                params![sa.to_string(), sb.to_string()],
+            )?;
+            Ok(())
+        })
+    }
+
     /// The open pairs whose two files are still the ones their tracks play,
     /// by album and place.
     pub fn same_audio_offers(&self) -> Result<Vec<SameAudioOffer>> {

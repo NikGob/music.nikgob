@@ -24,6 +24,7 @@ mod recs;
 mod search;
 mod soulseek;
 mod quiet;
+pub use quiet::set_enabled as set_background_quiet;
 mod tags;
 mod torrents;
 pub mod queue;

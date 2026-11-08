@@ -43,10 +43,16 @@ pub const MIN_ITEMS: usize = 120;
 /// Items equal for this many in a row are silence or a held frame.
 const FLAT_RUN: usize = 3;
 /// The share of the longer print two files must share to be one song.
-pub const SAME_SONG: f64 = 0.6;
+pub const SAME_SONG: f64 = 0.8;
 /// …when the file's length fits the track it is taken for and not the
 /// other song's.
-pub const SAME_SONG_AGAINST_LENGTH: f64 = 0.8;
+pub const SAME_SONG_AGAINST_LENGTH: f64 = 0.9;
+/// A matching segment counts only when its items differ in this many bits
+/// of 32 at most: one recording (a re-encode, the same file) stays well
+/// under it, while two songs on one melody (a soundtrack's leitmotif) or two
+/// versions of one song (another language over the same backing) reach the
+/// matcher's own limit of 10 but not this.
+const SAME_AUDIO_SCORE: f64 = 6.0;
 /// A file marked as another song before is caught again from anywhere
 /// above this.
 pub const SAME_FILE_AGAIN: f64 = 0.85;
@@ -89,7 +95,7 @@ pub fn overlap(a: &[u32], b: &[u32]) -> f64 {
         return 0.0;
     };
     let mut covered = 0usize;
-    for s in &segments {
+    for s in segments.iter().filter(|s| s.score <= SAME_AUDIO_SCORE) {
         for k in 0..s.items_count {
             if ia.get(s.offset1 + k) == Some(&true) && ib.get(s.offset2 + k) == Some(&true) {
                 covered += 1;
@@ -104,6 +110,20 @@ pub fn overlap(a: &[u32], b: &[u32]) -> f64 {
 pub fn same_title(a: &str, b: &str) -> bool {
     let (ka, kb) = (title_key(a), title_key(b));
     (!ka.base.is_empty() && ka.base == kb.base) || same_dual_title(a, b, |t| title_key(t).base)
+}
+
+/// Two titles of versions of one song: the same title once a version in
+/// brackets or after a dash is left out («spiral (TV size)» and «spiral
+/// (English Short Ver.)»). Not another song, whatever the files sound like.
+pub fn versions_of_one_song(a: &str, b: &str) -> bool {
+    fn main(t: &str) -> String {
+        let cut = t.find(|c| matches!(c, '(' | '[' | '（' | '【')).unwrap_or(t.len());
+        let t = &t[..cut];
+        let t = t.split(" - ").next().unwrap_or(t);
+        title_key(t.trim()).base
+    }
+    let (ma, mb) = (main(a), main(b));
+    !ma.is_empty() && ma == mb
 }
 
 /// Two files as long as one recording.
@@ -171,7 +191,7 @@ pub fn judge(heard: &Heard<'_>, known: &[Known<'_>]) -> Judgement {
     }
     let mut best: Option<(f64, &Known<'_>)> = None;
     for k in known {
-        if Some(k.track) == heard.track || same_title(heard.title, k.title) {
+        if Some(k.track) == heard.track || same_title(heard.title, k.title) || versions_of_one_song(heard.title, k.title) {
             continue;
         }
         if !lengths_close(heard.duration_ms, k.duration_ms) {
@@ -333,6 +353,14 @@ mod tests {
             start += note;
         }
         out
+    }
+
+    #[test]
+    fn versions_of_one_song_are_not_another_song() {
+        assert!(versions_of_one_song("spiral (English Short Ver.)", "spiral (TV size)"));
+        assert!(versions_of_one_song("Song - Remastered", "Song"));
+        assert!(!versions_of_one_song("Friends.", "Lost At A Sleepover"));
+        assert!(!versions_of_one_song("Сфотографирую", "Тмстс"));
     }
 
     fn silence(secs: f64) -> Vec<f32> {
