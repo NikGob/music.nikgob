@@ -16,6 +16,34 @@ use crate::error::{MetadataError, Result};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Which of two requests waiting for one service goes first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Lane {
+    /// What someone waits for (the playing song's lyrics): the next free
+    /// slot, in call order.
+    #[default]
+    Now,
+    /// A background pass: a slot only while no request of the `Now` lane
+    /// wants it.
+    Background,
+}
+
+tokio::task_local! {
+    static LANE: Lane;
+}
+
+/// Runs `fut` in the background lane: each of its requests gives way to
+/// any other request to the same service, which takes the next free slot
+/// ahead of it. The rate stays the service's.
+pub async fn in_background<F: std::future::Future>(fut: F) -> F::Output {
+    LANE.scope(Lane::Background, fut).await
+}
+
+/// The lane of the task asking ([`in_background`]).
+fn current_lane() -> Lane {
+    LANE.try_with(|l| *l).unwrap_or_default()
+}
+
 /// Spaces requests at least `interval` apart. Clones share one schedule, so the
 /// limit holds across every task that uses the same service.
 #[derive(Clone, Debug)]
@@ -43,8 +71,32 @@ impl RateLimiter {
         self.inner.interval
     }
 
-    /// Waits for this caller's slot. Slots are handed out in call order.
+    /// Waits for this caller's slot. Slots are handed out in call order,
+    /// a request of a background pass ([`in_background`]) after all others.
     pub async fn acquire(&self) {
+        self.acquire_in(current_lane()).await;
+    }
+
+    /// [`Self::acquire`] in `lane`. A background request holds no slot while
+    /// it waits: it takes the free one when its time comes, so a request of
+    /// the `Now` lane asking meanwhile gets that slot and it waits again.
+    pub(crate) async fn acquire_in(&self, lane: Lane) {
+        if lane == Lane::Background {
+            loop {
+                let wait = {
+                    let mut next = self.inner.next.lock().unwrap_or_else(|e| e.into_inner());
+                    let now = Instant::now();
+                    match *next {
+                        Some(n) if n > now => n,
+                        _ => {
+                            *next = Some(now + self.inner.interval);
+                            return;
+                        }
+                    }
+                };
+                sleep_until(wait).await;
+            }
+        }
         let slot = {
             let mut next = self.inner.next.lock().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
@@ -505,6 +557,58 @@ mod tests {
         let t = Instant::now();
         other.acquire().await;
         assert_eq!(t.elapsed(), Duration::from_millis(100));
+    }
+
+    /// The playing song's lookup takes the next slot ahead of a background
+    /// pass's request already waiting for it; the rate stays one a second.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_now_goes_before_a_background_one_waiting() {
+        let limiter = RateLimiter::new(Duration::from_secs(1));
+        let start = Instant::now();
+        limiter.acquire().await;
+        let l = limiter.clone();
+        let background = tokio::spawn(in_background(async move {
+            assert_eq!(current_lane(), Lane::Background);
+            l.acquire().await;
+            start.elapsed()
+        }));
+        sleep(Duration::from_millis(500)).await;
+        assert_eq!(current_lane(), Lane::Now);
+        limiter.acquire().await;
+        assert_eq!(start.elapsed(), Duration::from_secs(1), "the slot at 1 s is the song's");
+        assert_eq!(background.await.unwrap(), Duration::from_secs(2), "the pass waits for the next one");
+        // Alone, a background pass keeps the usual pace.
+        let t = Instant::now();
+        in_background(async {
+            limiter.acquire().await;
+            limiter.acquire().await;
+        })
+        .await;
+        assert_eq!(t.elapsed(), Duration::from_secs(2));
+    }
+
+    /// Several requests now go in call order before any background one; a
+    /// penalty holds back both lanes.
+    #[tokio::test(start_paused = true)]
+    async fn background_requests_wait_for_every_request_now_and_for_penalties() {
+        let limiter = RateLimiter::new(Duration::from_secs(1));
+        let start = Instant::now();
+        limiter.penalize(Duration::from_secs(3));
+        let l = limiter.clone();
+        let background = tokio::spawn(in_background(async move {
+            l.acquire().await;
+            start.elapsed()
+        }));
+        tokio::task::yield_now().await;
+        let now = |l: RateLimiter| async move {
+            l.acquire().await;
+            start.elapsed()
+        };
+        let (a, b) = tokio::join!(now(limiter.clone()), now(limiter.clone()));
+        let mut times = [a, b];
+        times.sort();
+        assert_eq!(times, [Duration::from_secs(3), Duration::from_secs(4)]);
+        assert_eq!(background.await.unwrap(), Duration::from_secs(5));
     }
 
     #[test]

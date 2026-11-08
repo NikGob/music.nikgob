@@ -33,7 +33,7 @@ pub use coverart::{CoverArtArchive, CoverImage, CoverTarget, FetchedCover};
 pub use deezer::{Deezer, DeezerAlbum, DeezerArtistHit, DeezerTrack};
 pub use itunes::{Itunes, ItunesSong};
 pub use error::{MetadataError, Result};
-pub use http::{Http, RateLimiter, RateLimits, RetryPolicy};
+pub use http::{Http, RateLimiter, RateLimits, RetryPolicy, in_background};
 pub use lastfm::{LastFm, LastFmSimilar};
 pub use listenbrainz::{ListenBrainz, Similar};
 pub use lrc::{parse_lrc, parse_lrc_lines};
