@@ -358,6 +358,7 @@ impl Worker {
         self.radio_fetch_new();
         match first {
             Some(t) => {
+                self.new_list();
                 self.queue.set_ordered(&[t], 0, Some(context));
                 self.play_context = ctx;
                 self.play_context_id = self.recs.radio.run.as_ref().map(|r| seed_context_id(&r.state.seed, false));
@@ -484,9 +485,9 @@ impl Worker {
             let next = crate::home_v2::world_next(&self.lib, e.track, &queued, local_only);
             if !next.is_empty() {
                 log::info!("autoplay: the world goes on with {} tracks of its next album", next.len());
-                self.queue.enqueue(&next);
-                let up = self.queue.upcoming();
-                self.autoplay_entries.extend(up[up.len().saturating_sub(next.len())..].iter().map(|e| e.id));
+                let shuffled = self.shuffle_radio();
+                let added = self.queue.enqueue_path(&next, shuffled);
+                self.autoplay_entries.extend(added.iter().map(|e| e.id));
                 self.preload_next();
                 self.publish_player();
                 return;
@@ -810,13 +811,18 @@ impl Worker {
             }
             None => {
                 let (context, ctx) = (context_of(&run.title), run.ctx);
-                // A radio's picks are a path: they keep their order, shuffle
-                // stays as the user set it.
-                self.queue.set_ordered(&ids, 0, Some(context));
+                // A radio's picks are a path: they keep their order (or play
+                // shuffled under shuffle with «Перемешивать радио и
+                // автовоспроизведение»); shuffle stays or goes off as the
+                // setting says.
+                self.new_list();
+                let shuffled = self.shuffle_radio();
+                self.queue.set_path(&ids, Some(context), shuffled);
                 self.play_context = ctx;
                 self.play_context_id = None;
                 let generation = self.queue.generation();
-                let entries: Vec<u64> = self.queue.current().into_iter().chain(self.queue.upcoming().iter().copied()).map(|e| e.id).collect();
+                // In the picks' own order, as `whys` are.
+                let entries: Vec<u64> = self.queue.context_order().iter().map(|e| e.id).collect();
                 self.recs.why.clear();
                 self.explain_entries(&entries, whys);
                 if let Some(run) = self.recs.radio.run.as_mut() {
@@ -829,9 +835,8 @@ impl Worker {
             }
             Some(_) => {
                 let resume = std::mem::take(&mut run.resume);
-                self.queue.enqueue(&ids);
-                let up = self.queue.upcoming();
-                let entries: Vec<u64> = up[up.len().saturating_sub(ids.len())..].iter().map(|e| e.id).collect();
+                let shuffled = self.shuffle_radio();
+                let entries: Vec<u64> = self.queue.enqueue_path(&ids, shuffled).iter().map(|e| e.id).collect();
                 self.explain_entries(&entries, whys);
                 if let Some(run) = self.recs.radio.run.as_mut() {
                     run.added.extend(entries);

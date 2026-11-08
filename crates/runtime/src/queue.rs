@@ -136,6 +136,38 @@ impl Queue {
         self.pos = (!self.items.is_empty()).then(|| start.min(self.items.len() - 1));
     }
 
+    /// A new list is about to replace the queue (an album, a playlist, a
+    /// mix, a radio, a search result): shuffle stays as the user set it
+    /// when `keep` («Перемешивание остаётся включённым»), else it goes off.
+    pub fn new_list(&mut self, keep: bool) {
+        if !keep {
+            self.shuffle = false;
+        }
+    }
+
+    /// Replaces the queue with a radio's picks (a radio, the daylist):
+    /// in their order ([`Self::set_ordered`]), or with `shuffled`
+    /// («Перемешивать радио и автовоспроизведение») and shuffle on as a
+    /// whole list under shuffle ([`Self::set_from`]).
+    pub fn set_path(&mut self, tracks: &[TrackId], context: Option<String>, shuffled: bool) {
+        if shuffled && self.shuffle {
+            self.set_from(tracks, None, context);
+        } else {
+            self.set_ordered(tracks, 0, context);
+        }
+    }
+
+    /// More picks of a radio or autoplay: at the end in their order, or
+    /// with `shuffled` and shuffle on among the upcoming ones
+    /// ([`Self::enqueue_shuffled`]). The new entries, in the given order.
+    pub fn enqueue_path(&mut self, tracks: &[TrackId], shuffled: bool) -> Vec<Entry> {
+        if shuffled {
+            self.enqueue_shuffled(tracks)
+        } else {
+            self.enqueue(tracks)
+        }
+    }
+
     /// Every entry in the order the queue was started with (what shuffle
     /// off goes back to), whatever the play order is now.
     pub fn context_order(&self) -> &[Entry] {
@@ -234,47 +266,48 @@ impl Queue {
         self.current()
     }
 
-    pub fn enqueue(&mut self, tracks: &[TrackId]) {
+    /// Adds the tracks at the end. The new entries, in the given order.
+    pub fn enqueue(&mut self, tracks: &[TrackId]) -> Vec<Entry> {
         let first_new = self.items.len();
-        for &t in tracks {
-            let e = self.entry(t);
-            self.items.push(e);
-            self.original.push(e);
-        }
+        let entries: Vec<Entry> = tracks.iter().map(|&t| self.entry(t)).collect();
+        self.items.extend(entries.iter().copied());
+        self.original.extend(entries.iter().copied());
         // Nothing is current (empty queue, or it has played out): the first
         // added track becomes current, not a track that already played.
         if self.pos.is_none() && self.items.len() > first_new {
             self.pos = Some(first_new);
         }
+        entries
     }
 
     /// More of the list the queue plays (the rest of an album's tracklist):
     /// at the end with shuffle off, each at a random place among the
     /// upcoming ones with shuffle on. Shuffle off brings them back at the
-    /// end in the given order.
-    pub fn enqueue_shuffled(&mut self, tracks: &[TrackId]) {
+    /// end in the given order. The new entries, in the given order.
+    pub fn enqueue_shuffled(&mut self, tracks: &[TrackId]) -> Vec<Entry> {
         if !self.shuffle {
-            self.enqueue(tracks);
-            return;
+            return self.enqueue(tracks);
         }
-        let mut entries: Vec<Entry> = tracks.iter().map(|&t| self.entry(t)).collect();
+        let entries: Vec<Entry> = tracks.iter().map(|&t| self.entry(t)).collect();
         self.original.extend(entries.iter().copied());
         match self.pos {
             Some(p) => {
-                for e in entries {
+                for &e in &entries {
                     let at = fastrand::usize(p + 1..=self.items.len());
                     self.items.insert(at, e);
                 }
             }
             None => {
                 let first_new = self.items.len();
-                fastrand::shuffle(&mut entries);
-                self.items.extend(entries);
+                let mut shuffled = entries.clone();
+                fastrand::shuffle(&mut shuffled);
+                self.items.extend(shuffled);
                 if self.items.len() > first_new {
                     self.pos = Some(first_new);
                 }
             }
         }
+        entries
     }
 
     pub fn play_next(&mut self, tracks: &[TrackId]) {
@@ -721,6 +754,81 @@ mod tests {
         back.restore_modes(&saved);
         assert!(back.shuffle);
         assert_eq!(back.repeat, Repeat::All);
+    }
+
+    #[test]
+    fn a_new_list_keeps_shuffle_only_with_the_setting() {
+        let t = ids(30);
+        // «Перемешивание остаётся включённым» (the default): on stays on.
+        let mut q = Queue::default();
+        q.set_shuffle(true);
+        q.new_list(true);
+        q.set_from(&t, None, None);
+        assert!(q.shuffle);
+        assert!(same_tracks(&q.tracks(), &t));
+        // Off: a new list turns shuffle off and plays from the first track.
+        q.new_list(false);
+        q.set_from(&t, None, None);
+        assert!(!q.shuffle);
+        assert_eq!(q.tracks(), t);
+        assert_eq!(q.current().map(|e| e.track), Some(t[0]));
+        // «Перемешать» still turns it on (as `play_list` does).
+        q.new_list(false);
+        q.shuffle = true;
+        q.set_from(&t, None, None);
+        assert!(q.shuffle);
+        assert!(same_tracks(&q.tracks(), &t));
+        assert_ne!(q.tracks(), t, "the list is shuffled");
+        // Turned off by hand, the list's order comes back in both modes.
+        let cur = q.current().unwrap();
+        q.set_shuffle(false);
+        assert_eq!(q.tracks(), t);
+        assert_eq!(q.current(), Some(cur));
+        q.new_list(true);
+        q.set_shuffle(true);
+        q.set(&t, 3, None);
+        q.set_shuffle(false);
+        assert_eq!(q.tracks(), t);
+        assert_eq!(q.current().map(|e| e.track), Some(t[3]));
+    }
+
+    #[test]
+    fn radio_picks_are_shuffled_only_with_the_setting() {
+        let r = ids(30);
+        let more = ids(5);
+        let mut q = Queue::default();
+        q.set_shuffle(true);
+        // Off (the default): the picks and what joins them keep their order.
+        q.set_path(&r, Some("радио".into()), false);
+        assert!(q.shuffle);
+        assert_eq!(q.tracks(), r);
+        let added = q.enqueue_path(&more, false);
+        assert_eq!(tracks_of(&added), more);
+        let up = tracks_of(q.upcoming());
+        assert_eq!(up[up.len() - 5..].to_vec(), more);
+        // On: the picks play shuffled, the order they came in is kept for
+        // shuffle off.
+        q.set_path(&r, Some("радио".into()), true);
+        assert!(q.shuffle);
+        assert!(q.history().is_empty());
+        assert!(same_tracks(&q.tracks(), &r));
+        assert_ne!(q.tracks(), r, "the picks are shuffled");
+        assert_eq!(tracks_of(q.context_order()), r);
+        let added = q.enqueue_path(&more, true);
+        assert_eq!(tracks_of(&added), more, "the new entries in the given order");
+        assert!(added.iter().all(|a| q.upcoming().iter().any(|e| e.id == a.id)));
+        let cur = q.current().unwrap();
+        q.set_shuffle(false);
+        let mut want = r.clone();
+        want.extend_from_slice(&more);
+        assert_eq!(q.tracks(), want);
+        assert_eq!(q.current(), Some(cur));
+        // Shuffle off: the setting alone shuffles nothing.
+        q.set_path(&r, Some("радио".into()), true);
+        assert_eq!(q.tracks(), r);
+        let added = q.enqueue_path(&more, true);
+        assert_eq!(tracks_of(&added), more);
+        assert_eq!(q.tracks()[r.len()..].to_vec(), more);
     }
 
     #[test]

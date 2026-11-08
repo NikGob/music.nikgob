@@ -437,6 +437,7 @@ impl Worker {
             .and_then(|r| known.iter().position(|k| *k == r))
             .unwrap_or(0);
         self.user_switch(nikgob_core::model::EventOrigin::Manual);
+        self.new_list();
         self.queue.set(&ids, start, Some(context));
         self.play_context = EventContext::Search;
         self.play_context_id = None;
@@ -474,6 +475,7 @@ impl Worker {
             return;
         }
         self.user_switch(nikgob_core::model::EventOrigin::Manual);
+        self.new_list();
         self.queue.set(&ids, start_at, Some(context));
         self.play_context = EventContext::Search;
         self.play_context_id = None;

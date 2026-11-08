@@ -1383,6 +1383,14 @@ pub struct Prefs {
     pub gapless: bool,
     pub crossfade_s: f32,
     pub normalization: bool,
+    /// «Перемешивание остаётся включённым»: a new album, playlist, mix,
+    /// radio or search result keeps shuffle as it was (off: it turns
+    /// shuffle off, «Перемешать» turns it on).
+    pub keep_shuffle: bool,
+    /// «Перемешивать радио и автовоспроизведение»: with shuffle on, the
+    /// picks of a radio, autoplay and the daylist play shuffled too (off:
+    /// they keep their own order).
+    pub shuffle_radio: bool,
     pub opus_bitrate: u32,
     pub check_fake_lossless: bool,
     /// A "lossless" file plainly made from a lossy one is offered in
@@ -2824,6 +2832,8 @@ impl Default for Prefs {
             gapless: true,
             crossfade_s: 0.0,
             normalization: true,
+            keep_shuffle: true,
+            shuffle_radio: false,
             opus_bitrate: 160,
             check_fake_lossless: true,
             convert_fake_lossless: true,

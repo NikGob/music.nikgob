@@ -2596,7 +2596,9 @@ impl Worker {
             return;
         }
         self.user_switch(nikgob_core::model::EventOrigin::Mix);
-        // Shuffle stays as the user set it: on, the mix plays shuffled.
+        // Shuffle stays as the user set it (on, the mix plays shuffled) or
+        // goes off, as the setting says.
+        self.new_list();
         self.queue.set_from(&ids, None, Some(format!("микса «{title}»")));
         // The entries in the mix's own order, as `whys` are.
         let entries: Vec<u64> = self.queue.context_order().iter().map(|e| e.id).collect();

@@ -1454,6 +1454,20 @@ impl Worker {
         self.publish_player();
     }
 
+    /// A new list (an album, a playlist, a mix, a radio, a search result)
+    /// is about to replace the queue: shuffle stays, or goes off without
+    /// «Перемешивание остаётся включённым».
+    pub(crate) fn new_list(&mut self) {
+        let keep = self.state.read().prefs.keep_shuffle;
+        self.queue.new_list(keep);
+    }
+
+    /// «Перемешивать радио и автовоспроизведение»: a radio's, autoplay's
+    /// and the daylist's picks play shuffled while shuffle is on.
+    pub(crate) fn shuffle_radio(&self) -> bool {
+        self.state.read().prefs.shuffle_radio
+    }
+
     fn play_list(
         &mut self,
         ids: Vec<TrackId>,
@@ -1471,7 +1485,8 @@ impl Worker {
         self.user_switch(EventOrigin::Manual);
         // «Перемешать» turns shuffle on; a plain play keeps it as the user
         // set it (on: the list plays shuffled, from a random track unless
-        // one was picked).
+        // one was picked) or turns it off, as the setting says.
+        self.new_list();
         if shuffle {
             self.queue.shuffle = true;
         }
