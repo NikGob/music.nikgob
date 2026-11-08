@@ -529,6 +529,11 @@ impl Shot {
                 nikgob_md3e::screens::lyrics_ui::open_menu(ctx);
                 self.wait = arg.parse().unwrap_or(30);
             }
+            "lyrics_edit" => {
+                // The lyrics editor where the look has it.
+                nikgob_md3e::screens::lyrics_ui::open_editor(ctx, state);
+                self.wait = arg.parse().unwrap_or(60);
+            }
             "search" => {
                 ui.set_search(arg, out);
                 self.wait = 20;

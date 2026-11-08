@@ -4,9 +4,10 @@
 //! the sources as a choice, the shown text in full following the song,
 //! under it «Подсветка» (how the text is seen and the timing to make, or
 //! its progress), and at the foot where the text is kept with «Сохранить
-//! текст».
+//! текст». The lyrics editor opens in the same kind of window
+//! ([`window`]).
 
-use egui::{Align, Area, Context, Id, Key, Layout, Modifiers, Order, Rect, Sense, Stroke, Ui, UiBuilder, vec2};
+use egui::{Align, Area, Context, Id, Key, Layout, Modifiers, Order, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, vec2};
 use nikgob_view::{Command, LyricsAvail, ViewState};
 
 use crate::components::{Button, ConnectedGroup, FilterChip, IconButton, Size, Style, anim, paint, paint::Radii};
@@ -24,8 +25,13 @@ const BESIDE_GAP: f32 = 24.0;
 
 /// Opens the dialog growing out of `from` (the control).
 pub(super) fn open(ctx: &Context, from: Rect) {
+    grow(ctx, OPEN, from);
+}
+
+/// Opens the window `key` ([`window`]) growing out of `from` (the control).
+pub(super) fn grow(ctx: &Context, key: &str, from: Rect) {
     let theme = Theme::get(ctx);
-    let id = Id::new(OPEN);
+    let id = Id::new(key);
     // Both springs start from the control.
     anim::f32(ctx, id.with("k"), 0.0, theme.motion.default_spatial);
     anim::snap_f32(ctx, id.with("k"), 0.0);
@@ -40,7 +46,12 @@ pub(super) fn open(ctx: &Context, from: Rect) {
 }
 
 fn close(ctx: &Context) {
-    ctx.data_mut(|d| d.insert_temp(Id::new(OPEN), false));
+    shut(ctx, OPEN);
+}
+
+/// Closes the window `key` (it shrinks back into the control).
+pub(super) fn shut(ctx: &Context, key: &str) {
+    ctx.data_mut(|d| d.insert_temp(Id::new(key), false));
 }
 
 /// Draws the dialog while it is open or still shrinking back.
@@ -48,19 +59,28 @@ pub(crate) fn show(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
     if super::variant(&state.prefs) != super::Variant::Dialog {
         return;
     }
+    window(ctx, OPEN, vec2(MAX_W, MAX_H), true, |ui, inner| body(ui, inner, state, out));
+}
+
+/// The window `key` while it is open or still shrinking back: a modal
+/// over the dimmed player, as large as `max` allows, that grows out of the
+/// control and back; `body` fills its inner rect (usable once it has
+/// nearly arrived). A click on the scrim closes it, and Escape when
+/// `escape`; true when it was closed so.
+pub(super) fn window(ctx: &Context, key: &str, max: Vec2, escape: bool, body: impl FnOnce(&mut Ui, Rect)) -> bool {
     let theme = Theme::get(ctx);
     let (s, motion) = (theme.scheme, theme.motion);
-    let id = Id::new(OPEN);
+    let id = Id::new(key);
     let open = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
     let k = anim::f32(ctx, id.with("k"), if open { 1.0 } else { 0.0 }, motion.default_spatial);
     let alpha = anim::fraction(ctx, id.with("a"), if open { 1.0 } else { 0.0 }, motion.default_effects).clamp(0.0, 1.0);
     if !open && alpha < 0.002 && k.abs() < 0.002 {
-        return;
+        return false;
     }
     let screen = ctx.content_rect();
     let target = Rect::from_center_size(
         screen.center(),
-        vec2((screen.width() - 96.0).clamp(320.0, MAX_W), (screen.height() - 96.0).clamp(320.0, MAX_H)),
+        vec2((screen.width() - 96.0).clamp(320.0, max.x), (screen.height() - 96.0).clamp(320.0, max.y)),
     );
     // Back into the control where it is now (it may have moved).
     let from = ctx
@@ -101,11 +121,13 @@ pub(crate) fn show(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
             if !(open && k > 0.9) {
                 cui.disable();
             }
-            body(&mut cui, inner, state, out);
+            body(&mut cui, inner);
         });
-    if open && (scrim_clicked || ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))) {
-        close(ctx);
+    let closed = open && (scrim_clicked || (escape && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))));
+    if closed {
+        shut(ctx, key);
     }
+    closed
 }
 
 fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {

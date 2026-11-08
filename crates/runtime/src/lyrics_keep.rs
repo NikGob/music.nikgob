@@ -173,6 +173,9 @@ pub(crate) fn restore_own_at(at: &Path, to: &Path) -> Result<Text, String> {
     if nikgob_import::sanitize::long_path(to).exists() {
         return Err("на его месте уже другой текст".to_owned());
     }
+    if let Some(dir) = nikgob_import::sanitize::long_path(to).parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
     nikgob_import::fsutil::move_file(at, to).map_err(|e| e.to_string())?;
     crate::lyrics::read_ttml(to).map(|(t, _)| t).ok_or_else(|| "пустой текст".to_owned())
 }
