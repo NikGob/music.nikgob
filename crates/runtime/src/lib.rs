@@ -8,6 +8,7 @@
 mod align;
 mod analysis;
 mod quality;
+mod same_audio;
 mod better_covers;
 mod convert;
 mod enrich;
@@ -512,6 +513,9 @@ struct Worker {
     analysis: analysis::FileAnalysis,
     /// The background spectrum check of the files (fake lossless).
     quality: quality::QualityJob,
+    /// Files that hold another song's audio: the background check, the
+    /// pairs in «Подтверди», «В файле другая песня».
+    same_audio: same_audio::SameAudioJob,
     /// Mixes, radio, discovery (stage 4).
     recs: recs::RecsState,
     /// Albums whose larger cover was looked up in this run.
@@ -553,6 +557,7 @@ impl Worker {
         let streaming = streams::Streams::new(internal.clone());
         let analysis = analysis::FileAnalysis::new(internal.clone());
         let quality = quality::QualityJob::new(internal.clone());
+        let same_audio = same_audio::SameAudioJob::new(internal.clone());
         let recs = recs::RecsState::new(internal.clone());
         let models_dir = config.import.as_ref().and_then(|i| i.models_dir.clone());
         let internal_tx = internal.clone();
@@ -618,6 +623,7 @@ impl Worker {
             streaming,
             analysis,
             quality,
+            same_audio,
             hd_asked: Default::default(),
             better_asked: Default::default(),
             album_queue: None,
@@ -650,6 +656,7 @@ impl Worker {
         self.start_streams();
         self.start_analysis();
         self.start_quality();
+        self.start_same_audio();
         self.start_align();
         self.dislikes_load(false);
         loop {
@@ -697,6 +704,7 @@ impl Worker {
             }
             self.analysis.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
             self.quality.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
+            self.same_audio.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
             self.align_playing(matches!(self.status, Status::Playing | Status::Buffering));
         }
         self.save_session();
@@ -708,6 +716,7 @@ impl Worker {
         self.streaming.analysis.shutdown();
         self.analysis.shutdown();
         self.quality.shutdown();
+        self.same_audio.shutdown();
         self.align.shutdown();
     }
 
@@ -1152,9 +1161,14 @@ impl Worker {
             Command::ConfirmPicked { id, sources, accept } if id & quality::QUALITY_ID != 0 => {
                 self.quality_picked(sources, accept);
             }
+            Command::ConfirmChoice { id, option } if id & same_audio::SAME_AUDIO_ID != 0 => {
+                self.same_audio_choice(id, option);
+            }
             Command::ConfirmPicked { .. } => {
                 log::warn!("picked songs of an unknown card");
             }
+            Command::WrongFile(track) => self.wrong_file(track, None),
+            Command::UndoWrongFile(track) => self.undo_wrong_file(track),
             Command::RestoreConvertedFlac => self.restore_converted_flac(),
             Command::LoadLibrary => self.load_library(),
             Command::DownloadsShown(shown) => self.torrents.shown = shown,

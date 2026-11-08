@@ -289,6 +289,7 @@ pub fn show(
                 Act::Sep,
                 Act::Tags,
                 Act::Replace,
+                Act::WrongFile,
                 Act::Sep,
                 Act::Dislike,
                 Act::BanArtist,

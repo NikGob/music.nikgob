@@ -822,6 +822,7 @@ pub fn show(
                 Act::FindSong,
                 Act::Tags,
                 Act::Replace,
+                Act::WrongFile,
                 Act::Visualizer,
                 Act::Sep,
                 Act::Dislike,

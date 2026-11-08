@@ -182,6 +182,19 @@ pub(crate) struct WishState {
     /// and the format of the file that came for a track (its master's, when
     /// the library keeps an Opus of it), for the words once it is done.
     upgrade_came: HashMap<TrackId, String>,
+    /// The offer an item's file comes from, as the importer notes a place
+    /// that gave another song ([`offer_key`]), while it downloads.
+    offer_keys: HashMap<WishlistId, String>,
+    /// Items a file of which held another song's audio: once its import
+    /// ends, the item looks again without that place.
+    wrong: HashSet<WishlistId>,
+}
+
+/// An offer as a place a file comes from (`soulseek:<user\path>`,
+/// `torrents:<id>`): what is not taken again for a track once a file from
+/// it held another song (docs/TODO.md 32).
+pub(crate) fn offer_key(offer: &Offer) -> String {
+    format!("{}:{}", offer.source.as_str(), offer.id)
 }
 
 /// Sources whose downloads turned us away: after [`ASIDE_AFTER`] in a row
@@ -898,6 +911,7 @@ impl Worker {
             // A better copy replaces the item's files or nothing: what else
             // came (another album under the same word) is never imported.
             only_targets: item.origin == WishlistOrigin::Upgrade,
+            from: self.streaming.wish.offer_keys.get(&item.id).cloned(),
         }
     }
 
@@ -1303,6 +1317,18 @@ impl Worker {
             }
             !out
         });
+        // A place a file of which held another song for the track is not
+        // taken for it again.
+        let bad = self.wrong_places(&item);
+        if !bad.is_empty() {
+            offers.retain(|o| {
+                let out = bad.contains(&offer_key(o));
+                if out {
+                    log::info!("wishlist: {} gave another song for {:?} before, left out", o.title, want.title);
+                }
+                !out
+            });
+        }
         for key in aside {
             let left = self.streaming.wish.refusals.aside(key, now).map(|u| u - now);
             log::info!("wishlist: {key:?} is set aside, its offers wait");
@@ -1536,6 +1562,7 @@ impl Worker {
         let dest = self.direct_dir(id);
         let from = if offer.provider.is_empty() { offer.source.display_name().to_owned() } else { offer.provider.clone() };
         self.streaming.wish.from.insert(id, from);
+        self.streaming.wish.offer_keys.insert(id, offer_key(&offer));
         if torrent {
             self.set_item(id, |i| i.note = Some(format!("Раздача: {}", offer.title)));
         } else {
@@ -2423,6 +2450,12 @@ impl Worker {
                         self.set_item(id, |i| i.status = WishlistStatus::Downloading);
                         self.publish_wishlist();
                     }
+                    // A file that held another song's audio (a torrent's
+                    // too): the next offer, or a search without that place.
+                    if item.status == WishlistStatus::Downloading && self.streaming.wish.wrong.remove(&id) {
+                        self.wish_look_again(id);
+                        return;
+                    }
                     // A direct download that did not become the track's
                     // file (another song, a fake): the next offer.
                     if item.status == WishlistStatus::Downloading
@@ -2454,6 +2487,8 @@ impl Worker {
             w.later.remove(&id);
             w.retry_only.remove(&id);
             w.asked.remove(&id);
+            w.offer_keys.remove(&id);
+            w.wrong.remove(&id);
             self.wish_line_drop(id);
         }
         self.set_item(id, |i| {
@@ -2506,6 +2541,62 @@ impl Worker {
             let r = importer.retag(track, changes).map(|_| ()).map_err(|e| e.to_string());
             let _ = tx.send(crate::import::Internal::Relabeled(track, r));
         });
+    }
+
+    /// The places (offer keys) a file of which held another song for the
+    /// item's track: not taken for it again.
+    fn wrong_places(&self, item: &WishlistItem) -> HashSet<String> {
+        let Some(track) = item.track_id.filter(|_| item.scope == WishlistScope::Track) else {
+            return HashSet::new();
+        };
+        self.lib
+            .wrong_sources(&[track])
+            .unwrap_or_default()
+            .into_values()
+            .flatten()
+            .collect()
+    }
+
+    /// A file downloaded for the item held another song's audio (docs/TODO.md
+    /// 32; the importer noted the file and its place for the track): the
+    /// item says so, and looks again once its import ends.
+    pub(crate) fn wish_wrong_audio(&mut self, id: WishlistId, sounds_like: Option<String>) {
+        self.streaming.wish.wrong.insert(id);
+        let what = self.item_title(id);
+        let from = self.streaming.wish.from.get(&id).cloned();
+        let song = sounds_like.map(|s| format!(" — «{s}»")).unwrap_or_default();
+        let text = match from {
+            Some(f) => format!("В файле от {f} другая песня{song} · ищу дальше"),
+            None => format!("В файле другая песня{song} · ищу дальше"),
+        };
+        self.wish_line(id, what, text, None);
+    }
+
+    /// The item's file held another song: the next sure offer, else a
+    /// search again at once (the place that gave it is left out).
+    fn wish_look_again(&mut self, id: WishlistId) {
+        self.streaming.wish.from.remove(&id);
+        self.streaming.wish.offer_keys.remove(&id);
+        if self.streaming.wish.cands.get(&id).is_some_and(|l| l.len() > 1) {
+            self.wish_next_candidate(id);
+            return;
+        }
+        self.streaming.wish.cands.remove(&id);
+        self.streaming.wish.doubtful.remove(&id);
+        self.set_item(id, |i| {
+            i.status = WishlistStatus::New;
+            i.next_try_at = None;
+        });
+        self.publish_wishlist();
+        self.wish_tick();
+    }
+
+    /// The track's file was found holding another song and went to the
+    /// Trash («В файле другая песня»): it is looked for again.
+    pub(crate) fn wish_again(&mut self, track: TrackId) {
+        self.wish_track_now(track);
+        self.publish_wishlist();
+        self.wish_tick();
     }
 
     /// An import of saved stream audio failed: the item goes back.

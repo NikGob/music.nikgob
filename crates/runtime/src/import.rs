@@ -70,6 +70,8 @@ pub(crate) enum Internal {
     Analysis(crate::analysis::Msg),
     /// The background spectrum check, see [`crate::quality`].
     Quality(crate::quality::Msg),
+    /// Files that hold another song's audio, see [`crate::same_audio`].
+    SameAudio(crate::same_audio::Msg),
     /// Recommendations (stage 4), see [`crate::recs`].
     Recs(crate::recs::Msg),
     SeedStopped(Vec<nikgob_torrent::TorrentStatus>),
@@ -103,6 +105,23 @@ struct Progress {
     parked: usize,
     current: Option<(String, Stage)>,
     last_error: Option<String>,
+    /// Titles of the files that held another song's audio.
+    wrong: Vec<String>,
+}
+
+/// The error line of a finished import: which files held another song
+/// (said by title), and how many failed otherwise.
+pub(crate) fn failed_words(failed: usize, wrong: &[String]) -> Option<String> {
+    if failed == 0 && wrong.is_empty() {
+        return None;
+    }
+    let titles = wrong.iter().map(|t| format!("«{t}»")).collect::<Vec<_>>().join(", ");
+    let other = failed.saturating_sub(wrong.len());
+    Some(match (wrong.is_empty(), other) {
+        (true, n) => format!("Не удалось: {n}"),
+        (false, 0) => format!("В файле другая песня: {titles}"),
+        (false, n) => format!("В файле другая песня: {titles} · не удалось ещё: {n}"),
+    })
 }
 
 /// Ids of history entries loaded from the job log (above any job id of
@@ -732,6 +751,7 @@ impl Worker {
             Internal::Stream(m) => self.stream_msg(m),
             Internal::Analysis(m) => self.analysis_msg(m),
             Internal::Quality(m) => self.quality_msg(m),
+            Internal::SameAudio(m) => self.same_audio_msg(m),
             Internal::Recs(m) => self.recs_msg(m),
             Internal::SeedStopped(list) => self.seed_stopped(list),
             Internal::MastersMoveProgress {
@@ -834,6 +854,7 @@ impl Worker {
                 self.wish_imported(*track_id, path);
                 self.analysis.kick();
                 self.quality.kick();
+                self.same_audio.kick();
             }
             ImportEvent::Duplicate { job, kept, path, quality } => {
                 self.lyrics_imported(*kept, path);
@@ -846,6 +867,11 @@ impl Worker {
             ImportEvent::Failed { path, .. } => {
                 self.lyrics_import_failed(path);
                 self.wish_import_failed(path);
+            }
+            ImportEvent::WrongAudio { job, sounds_like, .. } => {
+                if let Some(w) = self.import.as_ref().and_then(|s| s.wish_jobs.get(&job.0).copied()) {
+                    self.wish_wrong_audio(w, sounds_like.clone());
+                }
             }
             _ => {}
         }
@@ -881,6 +907,7 @@ impl Worker {
                         parked: 0,
                         current: None,
                         last_error: None,
+                        wrong: Vec::new(),
                     },
                 );
             }
@@ -910,6 +937,12 @@ impl Worker {
                     p.last_error = Some(format!("{}: {error}", file_name(&path)));
                 }
             }
+            ImportEvent::WrongAudio { job, path, title, sounds_like, .. } => {
+                log::warn!("import: {} is not «{title}» (it sounds like {sounds_like:?})", path.display());
+                if let Some(p) = svc.jobs.get_mut(&job.0) {
+                    p.wrong.push(title);
+                }
+            }
             ImportEvent::NeedsConfirmation { item } => {
                 if let Some(p) = svc.jobs.get_mut(&item.job.0) {
                     p.done += 1;
@@ -926,10 +959,10 @@ impl Worker {
                 left_out,
                 cancelled,
             } => {
-                let title = svc
+                let (title, wrong) = svc
                     .jobs
                     .remove(&job.0)
-                    .map_or_else(|| "Импорт".to_owned(), |p| p.title);
+                    .map_or_else(|| ("Импорт".to_owned(), Vec::new()), |p| (p.title, p.wrong));
                 let summary = if cancelled {
                     "отменено — добавленное убрано".to_owned()
                 } else if upgrade_job {
@@ -954,7 +987,7 @@ impl Worker {
                     }
                     parts.join(" · ")
                 };
-                let error = (failed > 0).then(|| format!("Не удалось: {failed}"));
+                let error = failed_words(failed, &wrong);
                 if let Err(e) = self.lib.log_job("import", &title, &summary, error.as_deref()) {
                     log::warn!("job log: {e}");
                 }
@@ -1311,6 +1344,7 @@ impl Worker {
                 parked: 0,
                 current: None,
                 last_error: None,
+                wrong: Vec::new(),
             },
         );
 

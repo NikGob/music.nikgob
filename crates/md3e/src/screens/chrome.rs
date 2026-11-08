@@ -47,6 +47,9 @@ pub enum Act {
     Dislike,
     /// «Не рекомендовать исполнителя» (or its undo) of the main artist.
     BanArtist,
+    /// «В файле другая песня»: the file to the Trash, the track looked for
+    /// again (only with a file).
+    WrongFile,
     /// A divider.
     Sep,
 }
@@ -194,6 +197,7 @@ impl Chrome {
             Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete).enabled(t.has_local || t.liked),
             Act::Share => MenuItem::new("Поделиться").icon(Icon::Share),
             Act::FindSong => MenuItem::new(super::find_song::label(t).unwrap_or("Найти песню…")).icon(Icon::MusicNote),
+            Act::WrongFile => MenuItem::new(super::pages::WRONG_FILE).icon(Icon::Delete).enabled(t.has_local),
             Act::Sep => MenuItem::new(""),
         }
     }
@@ -219,7 +223,7 @@ impl Chrome {
             .iter()
             .copied()
             .filter(|&a| match a {
-                Act::Tags => track.has_local,
+                Act::Tags | Act::WrongFile => track.has_local,
                 Act::Trash => track.has_local || track.liked,
                 Act::FindSong => super::find_song::label(track).is_some(),
                 _ => true,
@@ -280,6 +284,7 @@ impl Chrome {
             Act::Trash => self.trash = Some((t.id, t.title.clone())),
             Act::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),
             Act::FindSong => out.push(Command::FindSong { track: t.id, query: None }),
+            Act::WrongFile => out.push(Command::WrongFile(t.id)),
             Act::Radio => out.push(super::pages::radio_by_track(t.id)),
             // Handled where the marks are known.
             Act::Dislike | Act::BanArtist | Act::Sep => {}
