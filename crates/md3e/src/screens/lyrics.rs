@@ -413,6 +413,14 @@ fn paint(
             }
         })
         .collect();
+    // How far each item is from the current one, eased with the focus as
+    // the current line changes: the lines' resting brightness follows it,
+    // where every other line stepped brighter or dimmer at once the frame
+    // the next line came in, right as the lines began to move. Kept for
+    // items out of view too, so one scrolled back in is where it should be.
+    let aways: Vec<f32> = (0..items.len())
+        .map(|i| anim::f32(&ctx, id.with(("away", slot_of[i])), (i as f32 - ci as f32).clamp(-9.0, 9.0), AWAY))
+        .collect();
     let shown = |i: usize| {
         let (slot_h, extra) = slots[i];
         !(ys[i] + slot_h + extra < rect.top() - 60.0 || ys[i] > rect.bottom() + 60.0)
@@ -432,7 +440,6 @@ fn paint(
     // hovered in the frame of its click: the click is placed where it was.
     let clicked = if resp.clicked() { item_at(resp.interact_pointer_pos().or(resp.hover_pos())) } else { None };
     for (i, item) in items.iter().enumerate() {
-        let dist = i as i32 - ci as i32;
         let y = ys[i];
         let (slot_h, extra) = slots[i];
         let room = rooms[i];
@@ -525,12 +532,9 @@ fn paint(
         let line = Rect::from_min_size(pos2(side(g.size().x), y + (slot_h - g.size().y) * 0.5), g.size());
         // Brightness of a line at rest: past lines a bit brighter than the
         // ones to come; focus mode pushes the rest far back (from the look
-        // before as the look changes). By how far the line is from the
-        // current one, eased with the focus as the current line changes:
-        // every other line stepped brighter or dimmer at once the frame the
-        // next line came in, right as the lines began to move.
-        let away = anim::f32(&ctx, id.with(("away", slot_of[i])), (dist as f32).clamp(-9.0, 9.0), AWAY);
-        let rest_in = |style: Style| rest_brightness(style, away);
+        // before as the look changes), by how far the line is from the
+        // current one as eased ([`AWAY`]).
+        let rest_in = |style: Style| rest_brightness(style, aways[i]);
         let mut rest = match look_was {
             Some(was) => rest_in(was.style) + (rest_in(look.style) - rest_in(was.style)) * look_mix,
             None => rest_in(look.style),
