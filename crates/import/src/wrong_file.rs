@@ -86,9 +86,25 @@ pub fn mark_wrong_file(
         keys.push(format!("hash:{h}"));
     }
 
+    // What is never taken again goes down first: it is the write most
+    // likely to fail (the library busy with an import), and while no file
+    // has moved a failure leaves everything as it was.
+    lib.put_wrong_audio(track, &keys, sounds_like, print.as_deref())?;
+    let forget = || {
+        if let Err(e) = lib.forget_wrong_audio(track, &keys) {
+            log::warn!("wrong file: the marks of {track} stay: {e}");
+        }
+    };
+
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     let file = if long_path(&path).exists() {
-        let dest = trash_file(&cfg.trash_dir, &path)?;
+        let dest = match trash_file(&cfg.trash_dir, &path) {
+            Ok(d) => d,
+            Err(e) => {
+                forget();
+                return Err(e);
+            }
+        };
         let lrc = path.with_extension("lrc");
         if long_path(&lrc).exists()
             && let Ok(to) = trash_file(&cfg.trash_dir, &lrc)
@@ -103,22 +119,13 @@ pub fn mark_wrong_file(
     if let Err(e) = lib.trash_source(src.id, dest.as_deref()) {
         put_back(file.as_slice());
         put_back(&moved);
+        forget();
         return Err(e.into());
     }
     // The lossless original holds the same sound: it goes too (one still
-    // seeding in Downloads stays with its torrent, only its row goes).
-    if let Some(m) = &master {
-        if let Some(file) = master_file(cfg, &m.file_hash) {
-            match trash_file(&cfg.trash_dir, &file) {
-                Ok(to) => moved.push((file, to)),
-                Err(e) => log::warn!("wrong file: the original {} stays: {e}", file.display()),
-            }
-        }
-        if let Err(e) = lib.delete_master(track) {
-            log::warn!("wrong file: the master row of {track} stays: {e}");
-        }
-    }
-    lib.put_wrong_audio(track, &keys, sounds_like, print.as_deref())?;
+    // seeding in Downloads stays with its torrent, only its row goes). Its
+    // row goes only with its file, so neither is left without the other.
+    let master = master.filter(|m| take_master(lib, cfg, track, m, &mut moved));
     log::info!(
         "wrong file: {} of {track} is in the Trash, not taken again: {}",
         path.display(),
@@ -132,6 +139,36 @@ pub fn mark_wrong_file(
         master,
         keys,
     })
+}
+
+/// Takes the track's master out with its lossless original (when that is in
+/// the masters folder): the file to the Trash (noted in `moved`), then the
+/// row. False when the master stays (the file could not move, or the row
+/// could not go and the file came back).
+fn take_master(
+    lib: &Library,
+    cfg: &ImportConfig,
+    track: TrackId,
+    m: &Master,
+    moved: &mut Vec<(PathBuf, PathBuf)>,
+) -> bool {
+    let file = match master_file(cfg, &m.file_hash) {
+        Some(file) => match trash_file(&cfg.trash_dir, &file) {
+            Ok(to) => Some((file, to)),
+            Err(e) => {
+                log::warn!("wrong file: the original {} stays with its row: {e}", file.display());
+                return false;
+            }
+        },
+        None => None,
+    };
+    if let Err(e) = lib.delete_master(track) {
+        log::warn!("wrong file: the master of {track} stays: {e}");
+        put_back(file.as_slice());
+        return false;
+    }
+    moved.extend(file);
+    true
 }
 
 /// Moves files back from the Trash (never over a file that took the place).
