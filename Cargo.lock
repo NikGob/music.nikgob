@@ -5295,6 +5295,7 @@ dependencies = [
  "tokio",
  "url",
  "wiremock",
+ "zip",
 ]
 
 [[package]]

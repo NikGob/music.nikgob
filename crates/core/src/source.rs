@@ -33,13 +33,29 @@ pub enum SourceKey {
     Qobuz,
     /// Tidal through a public hifi-api instance.
     Tidal,
-    pub const ALL: [Self; 7] = [Self::Torrents, Self::Khinsider, Self::Soulseek, Self::Qobuz, Self::Tidal, Self::Squidify, Self::Archive];
+    /// squidify.org (or any Subsonic server): anime, game and film
+    /// soundtracks in FLAC.
+    Squidify,
+    /// The Internet Archive (archive.org): uploads of CD rips, rare and
+    /// old albums, often in FLAC.
+    Archive,
+    /// Bandcamp's free and name-your-price releases.
+    Bandcamp,
 }
 
 impl SourceKey {
     /// Every key, in the default order of «Источники»: the cheap and
     /// reliable first, the free services last (the poll of docs/stage4.5.md).
-    pub const ALL: [Self; 7] = [Self::Torrents, Self::Khinsider, Self::Soulseek, Self::Qobuz, Self::Tidal, Self::Squidify, Self::Archive];
+    pub const ALL: [Self; 8] = [
+        Self::Torrents,
+        Self::Khinsider,
+        Self::Bandcamp,
+        Self::Soulseek,
+        Self::Qobuz,
+        Self::Tidal,
+        Self::Squidify,
+        Self::Archive,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -48,7 +64,9 @@ impl SourceKey {
             Self::Soulseek => "soulseek",
             Self::Qobuz => "qobuz",
             Self::Tidal => "tidal",
-    pub const ALL: [Self; 7] = [Self::Torrents, Self::Khinsider, Self::Soulseek, Self::Qobuz, Self::Tidal, Self::Squidify, Self::Archive];
+            Self::Squidify => "squidify",
+            Self::Archive => "archive",
+            Self::Bandcamp => "bandcamp",
         }
     }
 
@@ -60,7 +78,9 @@ impl SourceKey {
             Self::Soulseek => "Soulseek",
             Self::Qobuz => "Qobuz",
             Self::Tidal => "Tidal",
-    pub const ALL: [Self; 7] = [Self::Torrents, Self::Khinsider, Self::Soulseek, Self::Qobuz, Self::Tidal, Self::Squidify, Self::Archive];
+            Self::Squidify => "Squidify",
+            Self::Archive => "Internet Archive",
+            Self::Bandcamp => "Bandcamp",
         }
     }
 

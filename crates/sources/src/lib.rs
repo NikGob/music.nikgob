@@ -1,7 +1,8 @@
 //! Download sources behind [`nikgob_core::source::Source`]
 //! (docs/stage4.5.md): torrents through the indexer ([`torrent`]),
 //! khinsider ([`khinsider`]), the free FLAC services ([`qobuz`],
-//! [`tidal`]), a Subsonic server ([`squidify`]); the query variants
+//! [`tidal`]), a Subsonic server ([`squidify`]), the Internet Archive
+//! ([`archive`]), Bandcamp's free releases ([`bandcamp`]); the query variants
 //! ([`text`]), whether an offer is the wished thing ([`matching`]) and the
 //! one quality policy over all of them ([`select`]). Soulseek (crates/soulseek) is one more implementation of
 //! the same trait.
@@ -19,6 +20,7 @@ pub mod squidify;
 pub mod text;
 pub mod tidal;
 pub mod torrent;
+pub mod bandcamp;
 
 use std::sync::Arc;
 
@@ -36,5 +38,6 @@ pub fn web_sources(settings: &Settings) -> Vec<Arc<dyn Source>> {
         Arc::new(tidal::Tidal::new(&s.tidal_instances)),
         Arc::new(squidify::Squidify::from_settings(s)),
         Arc::new(archive::Archive::new(&s.archive_url)),
+        Arc::new(bandcamp::Bandcamp::new()),
     ]
 }

@@ -1,0 +1,51 @@
+{
+ "auto": {
+  "results": [
+   {
+    "type": "a",
+    "id": 2955245981,
+    "name": "UNDERTALE Soundtrack",
+    "band_id": 3021426748,
+    "band_name": "toby fox",
+    "item_url_root": "http://BASE",
+    "item_url_path": "http://BASE/album/undertale-soundtrack",
+    "img": "https://f4.bcbits.com/img/2854475053_3.jpg"
+   },
+   {
+    "type": "a",
+    "id": 65541394,
+    "name": "Undertale LIVE",
+    "band_id": 2863561194,
+    "band_name": "Fifth House Ensemble",
+    "item_url_root": "http://BASE",
+    "item_url_path": "http://BASE/album/undertale-live",
+    "img": "https://f4.bcbits.com/img/0959921152_3.jpg"
+   },
+   {
+    "type": "a",
+    "id": 1414634694,
+    "name": "UNDERTALE: The Underground Radio",
+    "band_id": 2849710999,
+    "band_name": "DM DOKURO",
+    "item_url_root": "http://BASE",
+    "item_url_path": "http://BASE/album/undertale-the-underground-radio",
+    "img": "https://f4.bcbits.com/img/1515763463_3.jpg"
+   },
+   {
+    "type": "a",
+    "id": 2750933706,
+    "name": "Undertale Demo OST",
+    "band_id": 3021426748,
+    "band_name": "Toby Fox",
+    "item_url_root": "http://BASE",
+    "item_url_path": "http://BASE/album/undertale-demo-ost",
+    "img": "https://f4.bcbits.com/img/1313023131_3.jpg"
+   }
+  ],
+  "time_ms": 12
+ },
+ "tag": {
+  "count": 0
+ },
+ "genre": {}
+}
