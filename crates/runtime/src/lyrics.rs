@@ -421,13 +421,32 @@ impl TrackLyrics {
         self.texts.is_empty()
     }
 
-    /// Genius is worth asking now: no text with timing fits the recording
-    /// as this take of the song ([`Self::other_take`]).
+    /// Genius is worth asking now ([`Self::genius_worth`]) and has not
+    /// answered yet.
     fn genius_wanted(&self) -> bool {
         self.genius
             && !self.texts.contains_key(&LyricsSource::Genius)
             && !self.missing.contains(&LyricsSource::Genius)
-            && !self.has_timed_take()
+            && self.genius_worth()
+    }
+
+    /// Genius' plain text is worth a look: no text with timing fits the
+    /// recording as this take of the song ([`Self::other_take`]), or the
+    /// text shown fits only moved by a shift ([`Self::chosen_moved`]).
+    fn genius_worth(&self) -> bool {
+        !self.has_timed_take() || self.chosen_moved()
+    }
+
+    /// The text shown is a source's whose line times the aligner moved by
+    /// one shift to fit (LRCLIB's lines 2.14 s early, «космоцветок»): its
+    /// times were another take's, so Genius is asked once too, and its text
+    /// is there to pick in the source menu.
+    fn chosen_moved(&self) -> bool {
+        use nikgob_align::fit::Timing;
+        self.chosen()
+            .filter(|s| !matches!(s, LyricsSource::Recognized | LyricsSource::Genius))
+            .and_then(|s| self.aligned(s))
+            .is_some_and(|a| a.fits && a.timing == Timing::Shifted)
     }
 
     /// A text with timing fits the recording and its times are this take's.
@@ -454,7 +473,8 @@ impl TrackLyrics {
 
     /// Only confirmed misses enable Better Lyrics; failures never count as
     /// misses. Genius (plain texts) comes last, and only when no text with
-    /// timing that fits the recording is there. When nothing is left to
+    /// timing that fits the recording is there or the shown one was moved
+    /// to fit ([`Self::genius_worth`]). When nothing is left to
     /// ask, nothing stays pending (a source is never shown as searching
     /// without a lookup on its way).
     fn next_lookups(&mut self) -> Vec<LyricsSource> {
@@ -462,7 +482,7 @@ impl TrackLyrics {
         if !online.is_empty() {
             return online;
         }
-        if self.pending.contains(&LyricsSource::Genius) && self.genius && !self.has_timed_take() {
+        if self.pending.contains(&LyricsSource::Genius) && self.genius && self.genius_worth() {
             return vec![LyricsSource::Genius];
         }
         self.pending.clear();
@@ -1725,11 +1745,19 @@ People pleasing planet"));
         tl.pending.insert(LyricsSource::Genius);
         assert_eq!(tl.next_lookups(), [LyricsSource::Genius]);
         // Its words fit, its times are another take's (two seconds off):
-        // Genius is worth a look too; a source's usual few tenths are not.
+        // Genius is worth a look too.
         tl.pending.remove(&LyricsSource::Genius);
         tl.set_aligned(LyricsSource::Lrclib, aligned(&lrc, true, Timing::Shifted, -2140, Vec::new()));
         assert!(tl.genius_wanted());
+        // The shown text fits only moved by a few tenths: still asked once,
+        // so Genius' text is there to pick.
         tl.set_aligned(LyricsSource::Lrclib, aligned(&lrc, true, Timing::Shifted, -300, Vec::new()));
+        assert!(tl.genius_wanted());
+        tl.pending.insert(LyricsSource::Genius);
+        assert_eq!(tl.next_lookups(), [LyricsSource::Genius]);
+        // Its own times fit: no.
+        tl.pending.remove(&LyricsSource::Genius);
+        tl.set_aligned(LyricsSource::Lrclib, aligned(&lrc, true, Timing::Fits, 0, Vec::new()));
         assert!(!tl.genius_wanted());
         // Off in the settings: never.
         let mut off = TrackLyrics::default();
@@ -1743,6 +1771,39 @@ People pleasing planet"));
         let (lines, timed) = back.align_lines();
         assert!(!timed);
         assert_eq!(lines.len(), 2);
+    }
+
+    /// «космоцветок»: Genius is asked once when the shown text fits only
+    /// moved, not when the moved text is not the shown one, and not again
+    /// once it answered (a text or a miss).
+    #[test]
+    fn genius_is_asked_once_when_the_shown_text_was_moved_to_fit() {
+        use nikgob_align::fit::Timing;
+        let lrc = Text::from_lrc(Some("[00:14.60]Слово за слово"), None).unwrap();
+        let mut tl = TrackLyrics { genius: true, ..Default::default() };
+        tl.insert(LyricsSource::Lrclib, Some(lrc.clone()));
+        tl.set_aligned(LyricsSource::Lrclib, aligned(&lrc, true, Timing::Shifted, -2140, made(&[(16_740, "Слово за слово")])));
+        assert_eq!(tl.chosen(), Some(LyricsSource::Lrclib));
+        assert!(tl.chosen_moved());
+        assert!(tl.genius_wanted());
+        // A word-synced text of its own that fits is shown instead: the
+        // moved one is only in the menu, Genius is not needed.
+        let mut words = tl.clone();
+        let w = worded();
+        words.insert(LyricsSource::LyricsPlus, Some(w.clone()));
+        words.set_aligned(LyricsSource::LyricsPlus, aligned(&w, true, Timing::Fits, 0, Vec::new()));
+        assert_eq!(words.chosen(), Some(LyricsSource::LyricsPlus));
+        assert!(!words.genius_wanted());
+        // Answered: never again, whether it found a text or not.
+        let mut found = tl.clone();
+        found.insert(LyricsSource::Genius, Text::from_plain("Слово за слово"));
+        assert!(!found.genius_wanted());
+        let mut miss = tl.clone();
+        miss.insert(LyricsSource::Genius, None);
+        assert!(!miss.genius_wanted());
+        // Off in the settings: never.
+        tl.genius = false;
+        assert!(!tl.genius_wanted());
     }
 
     /// «Summer 15/16»: LRCLIB's lines and lrc.red's text are in the
