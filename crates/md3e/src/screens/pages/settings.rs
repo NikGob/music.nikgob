@@ -365,6 +365,12 @@ fn recs_patches(before: &Prefs, p: &Prefs) -> Vec<PrefPatch> {
     if p.radio_no_repeat_hours != before.radio_no_repeat_hours {
         out.push(PrefPatch::RadioNoRepeat(p.radio_no_repeat_hours));
     }
+    if p.radio_explore != before.radio_explore {
+        out.push(PrefPatch::RadioExplore(p.radio_explore));
+    }
+    if p.radio_unheard != before.radio_unheard {
+        out.push(PrefPatch::RadioUnheard(p.radio_unheard));
+    }
     out
 }
 
@@ -415,6 +421,14 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
     });
     row(ui, Id::RadioNoRepeat, "Не повторять сыгранное", None, |ui| {
         choice_menu(ui, Id::RadioNoRepeat, p);
+    });
+    dimmed(ui, p.mixes_downloaded_only, |ui| {
+        row(ui, Id::RadioExplore, "Подмешивать случайное", None, |ui| {
+            ui.add_enabled_ui(!p.mixes_downloaded_only, |ui| choice_menu(ui, Id::RadioExplore, p));
+        });
+    });
+    row(ui, Id::RadioUnheard, "Преимущественно новые песни", None, |ui| {
+        choice_menu(ui, Id::RadioUnheard, p);
     });
     row(ui, Id::SoundAnalysis, "Анализ звука", Some(&analysis_status(&state.analysis)), |ui| {
         // Stream-only tracks are analysed (or not) on «Источники».

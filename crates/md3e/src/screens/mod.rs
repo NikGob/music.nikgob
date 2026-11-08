@@ -1165,6 +1165,8 @@ impl Md3eUi {
             "soulseek" => S::Soulseek,
             "graph" => S::GraphUse,
             "no-repeat" => S::RadioNoRepeat,
+            "random" => S::RadioExplore,
+            "unheard" => S::RadioUnheard,
             "recs" => S::RadioNewShare,
             "autoplay" => S::Autoplay,
             "mixes" => S::MixesProfiles,

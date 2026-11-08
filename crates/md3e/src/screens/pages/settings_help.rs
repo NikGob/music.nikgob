@@ -168,6 +168,10 @@ pub enum SettingId {
     SoundAnalysis,
     /// «Не повторять сыгранное» in the radio and autoplay.
     RadioNoRepeat,
+    /// «Подмешивать случайное» in the radio and autoplay.
+    RadioExplore,
+    /// «Преимущественно новые песни» in the radio and autoplay.
+    RadioUnheard,
     /// The share of new music of one kind of radio.
     NewShareBy(v::RadioKind),
     /// «Миксы для тебя» with «С новым».
@@ -404,7 +408,7 @@ impl SettingId {
             | YouTubeCookies | LikeDownload | PushLikes | AlbumLike | SingleLike | LikedAlbumsPlace | AutoDownloads | DownloadToasts | UpgradeEvery | UpgradeBar | UpgradeAuto | DownloadSource(_) | PlaylistSync | ImportSpotify
             | ImportYouTube | ImportFiles | ImportSavedSongs | StreamCache | StreamAnalysis | Prowlarr | Soulseek | SoulseekShare | SoulseekUpload | NoSeed | SeedLimit | SeedDays
             | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
-            RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | RadioNoRepeat | NewShareBy(_)
+            RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | RadioNoRepeat | RadioExplore | RadioUnheard | NewShareBy(_)
             | MixesWithNew | BackgroundCountsLess | ProfilesSplit | ProfileNames
             | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | MixClickOpensList | HiddenMixes
             | GraphUse | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste | LastfmKey
@@ -591,6 +595,8 @@ impl SettingId {
             MixesMoods => "Самое спокойное и самое громкое из того, что ты любишь, на любом языке.",
             MixesOnRepeat => "Что ты включал чаще всего за последние недели.",
             RadioNoRepeat => "Радио и автовоспроизведение не ставят то, что уже играло за это время или в этом сеансе, пока есть что-то ещё.",
+            RadioExplore => "Как часто радио и автовоспроизведение ставят новую песню наугад, не зная, похожа ли она по звуку на то, что играет. Похожее новое это не ограничивает.",
+            RadioUnheard => "Сколько в радио и автовоспроизведении песен, которых ты ещё не слышал: из твоей музыки и новых. Когда таких не остаётся, играет как обычно.",
             MixClickOpensList => "Нажатие на карточку микса открывает его страницу с песнями, а играет он по кнопке ▶. Выключи — микс будет играть сразу по нажатию на карточку, а страница откроется из ⋮ → «Список треков».",
             BackgroundCards => "Ровная музыка без слов для фона. Появляется, только если ты так слушаешь.",
             DislikeButton => "Кнопка рядом
@@ -780,6 +786,17 @@ impl SettingId {
                 c!("Два", "До двух: потише и поживее."),
                 c!("До трёх", "Сколько подходит тому, как ты слушаешь фоном, но не больше трёх."),
             ],
+            Self::RadioExplore => &[
+                c!("Никогда", "Только новое, похожее по звуку на то, что играет."),
+                c!("Редко", "Примерно одна песня из десяти."),
+                c!("Иногда", "Примерно одна песня из пяти."),
+                c!("Часто", "Примерно три песни из десяти, если в «Новом» выбрано «Побольше»."),
+            ],
+            Self::RadioUnheard => &[
+                c!("Как обычно", "Слышанное и неслышанное — по тому, что подходит лучше."),
+                c!("Больше новых", "Не меньше половины песен — те, что ты ещё не слышал."),
+                c!("Только новые", "Только неслышанное, пока оно есть."),
+            ],
             Self::RadioNoRepeat => &[
                 c!("Час", "Сыгранное может вернуться через час."),
                 c!("3 часа", "Сыгранное может вернуться через три часа."),
@@ -869,6 +886,8 @@ impl SettingId {
             Self::ProfileNames => usize::from(p.profile_names == v::ProfileNames::Artists),
             Self::BackgroundCards => usize::from(p.background_cards.min(3)),
             Self::RadioNoRepeat => NO_REPEAT.iter().position(|h| *h >= p.radio_no_repeat_hours).unwrap_or(NO_REPEAT.len() - 1),
+            Self::RadioExplore => v::RadioExplore::ALL.iter().position(|e| *e == p.radio_explore).unwrap_or(1),
+            Self::RadioUnheard => v::RadioUnheard::ALL.iter().position(|u| *u == p.radio_unheard).unwrap_or(0),
             _ => 0,
         }
     }
@@ -949,6 +968,8 @@ impl SettingId {
             Self::ProfileNames => p.profile_names = if i == 1 { v::ProfileNames::Artists } else { v::ProfileNames::Kind },
             Self::BackgroundCards => p.background_cards = i.min(3) as u8,
             Self::RadioNoRepeat => p.radio_no_repeat_hours = NO_REPEAT[i.min(NO_REPEAT.len() - 1)],
+            Self::RadioExplore => p.radio_explore = v::RadioExplore::ALL[i.min(v::RadioExplore::ALL.len() - 1)],
+            Self::RadioUnheard => p.radio_unheard = v::RadioUnheard::ALL[i.min(v::RadioUnheard::ALL.len() - 1)],
             _ => {}
         }
     }
@@ -2174,6 +2195,10 @@ mod tests {
         assert!(!SettingId::Autoplay.help().is_empty() && !SettingId::RadioSource.help().is_empty());
         assert_eq!(SettingId::RadioNoRepeat.tab(), TAB_RECS);
         assert!(!SettingId::RadioNoRepeat.help().is_empty());
+        for id in [SettingId::RadioExplore, SettingId::RadioUnheard] {
+            assert_eq!(id.tab(), TAB_RECS);
+            assert!(!id.help().is_empty());
+        }
         for id in [SettingId::RadioNewShare, SettingId::MixesDownloadedOnly, SettingId::SoundAnalysis, SettingId::StreamAnalysis] {
             assert!(!id.help().is_empty());
         }
@@ -2197,7 +2222,7 @@ mod tests {
             S::BgShapes, S::BgColors, S::LyricsStyle, S::LyricsUnit, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::AlbumLike, S::SingleLike, S::LikedAlbumsPlace, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
-            S::RadioNoRepeat, S::LyricsGpu, S::LyricsUi, S::ToastTime, S::LyricsStreamKeep,
+            S::RadioNoRepeat, S::RadioExplore, S::RadioUnheard, S::LyricsGpu, S::LyricsUi, S::ToastTime, S::LyricsStreamKeep,
             S::UpgradeEvery, S::UpgradeBar, S::UpgradeAuto,
         ] {
 
