@@ -1824,8 +1824,9 @@ impl Prefs {
                 .filter_map(|prev| out.iter().position(|o| o.key == *prev))
                 .max()
                 .map_or(0, |p| p + 1);
-            // Soulseek needs the user's own account: off until switched on.
-            out.insert(at, SourceSwitch { key: *k, on: *k != SourceKey::Soulseek });
+            // Soulseek needs the user's own account, and Squidify's owner
+            // keeps downloads closed to guests: off until switched on.
+            out.insert(at, SourceSwitch { key: *k, on: !matches!(*k, SourceKey::Soulseek | SourceKey::Squidify) });
         }
         out
     }

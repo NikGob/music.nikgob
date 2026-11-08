@@ -56,6 +56,8 @@ pub struct SourcesSettings {
     pub subsonic_user: String,
     /// Never reaches logs.
     pub subsonic_password: String,
+    /// The Internet Archive's address (empty: archive.org).
+    pub archive_url: String,
 }
 
 impl fmt::Debug for SourcesSettings {
@@ -67,6 +69,7 @@ impl fmt::Debug for SourcesSettings {
             .field("subsonic_url", &self.subsonic_url)
             .field("subsonic_user", &self.subsonic_user)
             .field("subsonic_password", &"<redacted>")
+            .field("archive_url", &self.archive_url)
             .finish()
     }
 }

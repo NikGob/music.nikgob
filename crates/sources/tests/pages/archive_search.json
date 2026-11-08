@@ -1,0 +1,6 @@
+{"responseHeader":{"status":0,"QTime":42,"params":{"query":"(title:(ночь)) AND (creator:(кино) OR title:(кино) OR subject:(кино)) AND mediatype:(audio)","fields":"identifier,title,creator,format","wt":"json","rows":20,"start":0}},"response":{"numFound":4,"start":0,"docs":[
+{"creator":"Кино","format":["Archive BitTorrent","Item Tile","Metadata","ZIP"],"identifier":"kino-zip-only","title":"Кино - Ночь (zip)"},
+{"creator":"Кино","format":["Archive BitTorrent","Flac","Item Tile","Metadata","PNG","Spectrogram","VBR MP3"],"identifier":"kino-noch-live-1986","title":"Кино - Ночь (live 1986)","year":1986},
+{"format":["Archive BitTorrent","Flac","Item Tile","JPEG","Metadata","PNG","Spectrogram","VBR MP3"],"identifier":"kino-noch-1985","title":"Кино ● Ночь [1985] (2021, Maschina Records, MKK861CD, 3CD)"},
+{"creator":["Кино"],"format":["Archive BitTorrent","Item Tile","Metadata","PNG","Spectrogram","VBR MP3"],"identifier":"kino-noch-mp3","title":"Kino - Noch","year":"1985"}
+]}}

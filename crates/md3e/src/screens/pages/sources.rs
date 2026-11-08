@@ -151,6 +151,7 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
             (v::SourceKey::Soulseek, _) => "Отдельные треки от людей".to_owned(),
             (v::SourceKey::Qobuz | v::SourceKey::Tidal, _) => "Бесплатно, через открытые сервисы".to_owned(),
             (v::SourceKey::Squidify, _) => "Саундтреки аниме и игр".to_owned(),
+            (v::SourceKey::Archive, _) => "Редкое и старое".to_owned(),
         };
         // A source that is not set up shows off (its saved choice stays).
         let mut on = order[at].on && !needs_setup;

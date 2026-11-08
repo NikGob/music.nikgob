@@ -7,6 +7,7 @@
 //! the same trait.
 
 pub mod album;
+pub mod archive;
 pub mod html;
 pub mod http;
 pub mod instances;
@@ -34,5 +35,6 @@ pub fn web_sources(settings: &Settings) -> Vec<Arc<dyn Source>> {
         Arc::new(qobuz::Qobuz::new(&s.qobuz_instances)),
         Arc::new(tidal::Tidal::new(&s.tidal_instances)),
         Arc::new(squidify::Squidify::from_settings(s)),
+        Arc::new(archive::Archive::new(&s.archive_url)),
     ]
 }
