@@ -2,7 +2,9 @@
 //!
 //! * The background check: one thread at the lowest priority hears each
 //!   local file that has no stored print yet (its first 120 s only), one at
-//!   a time with a rest between files (a longer one while music plays), and
+//!   a time, paced by [`crate::quiet`] (a rest five times its work, none
+//!   while a game runs) with a rest between files on top (a longer one
+//!   while music plays), and
 //!   compares it with the files of its album and artist. Two files that
 //!   sound the same under different titles become a pair for «Подтверди».
 //!   Nothing is moved by it. It goes on where it stopped after a restart
@@ -26,7 +28,7 @@ use std::time::Duration;
 use crossbeam_channel::Sender;
 use nikgob_core::model::{SourceId, TrackId};
 use nikgob_import::quality::CheckError;
-use nikgob_import::same_audio::{Heard, Judgement, Known, judge, print_file};
+use nikgob_import::same_audio::{Heard, Judgement, Known, judge, print_file_paced};
 use nikgob_import::{WrongFile, mark_wrong_file, undo_wrong_file};
 use nikgob_library::{AudioPrint, Library, PrintTodo, SameAudioOffer, SameSide};
 use nikgob_view::{self as v, Command};
@@ -34,6 +36,7 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::Worker;
 use crate::import::Internal;
+use crate::quiet::Pacer;
 
 /// Bit of the «Подтверди» ids of the pairs.
 pub(crate) const SAME_AUDIO_ID: u64 = 1 << 44;
@@ -133,7 +136,7 @@ impl Shared {
     }
 
     /// One look over the files without a print; true when one was heard.
-    fn pass(&self, skip: &mut HashSet<SourceId>) -> bool {
+    fn pass(&self, skip: &mut HashSet<SourceId>, pacer: &mut Pacer<'_>) -> bool {
         let todo = match self.lib.prints_todo(None, BATCH + skip.len()) {
             Ok(t) => t,
             Err(e) => {
@@ -151,7 +154,12 @@ impl Shared {
             }
             worked = true;
             let path = file_path(&self.root, &t.locator);
-            let row = match print_file(&path, &self.stop) {
+            if !pacer.begin() {
+                break;
+            }
+            let row = match print_file_paced(&path, &self.stop, &mut || {
+                pacer.step();
+            }) {
                 Ok((print, duration_ms)) => {
                     if let Some((source, track, similarity)) = pair_of(&self.lib, &t, &print, duration_ms) {
                         log::warn!(
@@ -196,6 +204,7 @@ impl Shared {
                 log::warn!("same audio: storing the print of {}: {e}", path.display());
                 skip.insert(t.source_id);
             }
+            pacer.rest();
             self.rest();
         }
         if found {
@@ -212,11 +221,12 @@ impl Shared {
             Ok(n) => log::info!("same audio: {n} rows of files that are gone dropped"),
             Err(e) => log::warn!("same audio: dropping old prints: {e}"),
         }
+        let mut pacer = Pacer::new(&self.stop);
         // Not tried again in this run (could not be opened).
         let mut skip = HashSet::new();
         while !self.stopped() {
             self.wake.lock().kicked = false;
-            if !self.pass(&mut skip) {
+            if !self.pass(&mut skip, &mut pacer) {
                 self.pause(self.idle);
             }
         }

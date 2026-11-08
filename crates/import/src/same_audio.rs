@@ -230,6 +230,12 @@ pub fn marked_before<'a>(keys: &[String], print: Option<&[u32]>, marked: &'a [Wr
 /// The Chromaprint of a file's first [`FINGERPRINT_SECS`] (only that much
 /// is decoded) and the length of the whole file. `stop` aborts.
 pub fn print_file(path: &Path, stop: &AtomicBool) -> Result<(Vec<u32>, Option<u32>), CheckError> {
+    print_file_paced(path, stop, &mut || {})
+}
+
+/// [`print_file`] with `pace` called between the decoded chunks (it may
+/// block: a background pass rests there).
+pub fn print_file_paced(path: &Path, stop: &AtomicBool, pace: &mut dyn FnMut()) -> Result<(Vec<u32>, Option<u32>), CheckError> {
     if !crate::sanitize::long_path(path).exists() {
         return Err(CheckError::Unavailable(format!("{}: not found", path.display())));
     }
@@ -251,6 +257,7 @@ pub fn print_file(path: &Path, stop: &AtomicBool) -> Result<(Vec<u32>, Option<u3
         buf: Vec::new(),
     };
     let mut sink = |chunk: &[f32], spec: PcmSpec| -> ControlFlow<()> {
+        pace();
         if stop.load(Ordering::Relaxed) {
             return ControlFlow::Break(());
         }

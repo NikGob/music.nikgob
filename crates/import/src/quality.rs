@@ -77,10 +77,17 @@ pub enum CheckError {
 
 /// Decodes the whole file into the spectrum check. `stop` aborts the decode.
 pub fn check_file(path: &Path, stop: &AtomicBool) -> std::result::Result<QualityCheck, CheckError> {
+    check_file_paced(path, stop, &mut || {})
+}
+
+/// [`check_file`] with `pace` called between the decoded chunks (it may
+/// block: a background pass rests there).
+pub fn check_file_paced(path: &Path, stop: &AtomicBool, pace: &mut dyn FnMut()) -> std::result::Result<QualityCheck, CheckError> {
     let stamp = file_stamp(path).ok_or_else(|| CheckError::Unavailable(format!("{}: not found", path.display())))?;
     let hint = tags::probe_info(path).map(|i| i.duration).unwrap_or_default();
     let mut collector: Option<SpectrumCollector> = None;
     let mut sink = |chunk: &[f32], spec: PcmSpec| -> ControlFlow<()> {
+        pace();
         if stop.load(Ordering::Relaxed) {
             return ControlFlow::Break(());
         }

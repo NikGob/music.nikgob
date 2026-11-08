@@ -9,7 +9,8 @@
 //! once. A converted file's FLAC waits in the Trash, and «Вернуть FLAC»
 //! brings every one back (see `nikgob_import::quality`).
 //!
-//! One thread at the lowest priority, one file at a time with a rest
+//! One thread at the lowest priority, paced by [`crate::quiet`] (a rest
+//! five times its work, none while a game runs), one file at a time with a rest
 //! between files (a longer one while music plays). Files the import
 //! checked on their way in, and Opus files made from a checked lossless
 //! original, are not decoded again. Rows whose label changed go back to
@@ -24,13 +25,14 @@ use std::time::Duration;
 use crossbeam_channel::Sender;
 use nikgob_core::model::{Source, SourceId, SourceOrigin, TrackId, quality_score, score};
 use nikgob_core::quality::{QualityCheck, Verdict, clear_fake, fake_score};
-use nikgob_import::quality::{CheckError, Mp3Encoder, check_file, convert_fake, file_stamp, is_fake, restore_conversion};
+use nikgob_import::quality::{CheckError, Mp3Encoder, check_file_paced, convert_fake, file_stamp, is_fake, restore_conversion};
 use nikgob_library::{FakeOffer, Library, QualityTodo};
 use nikgob_view as v;
 use parking_lot::{Condvar, Mutex};
 
 use crate::Worker;
 use crate::import::Internal;
+use crate::quiet::Pacer;
 
 /// Rest between two files.
 const REST: Duration = Duration::from_millis(500);
@@ -169,7 +171,7 @@ impl Shared {
     }
 
     /// One look over the library; true when a file was checked.
-    fn pass(&self, skip: &mut HashSet<SourceId>) -> bool {
+    fn pass(&self, skip: &mut HashSet<SourceId>, pacer: &mut Pacer<'_>) -> bool {
         let todo = match self.lib.quality_todo() {
             Ok(t) => t,
             Err(e) => {
@@ -191,7 +193,12 @@ impl Shared {
                 continue;
             }
             worked = true;
-            match check_file(&path, &self.stop) {
+            if !pacer.begin() {
+                break;
+            }
+            match check_file_paced(&path, &self.stop, &mut || {
+                pacer.step();
+            }) {
                 Ok(c) => {
                     changed |= self.store(&t, c);
                     tracks.push(t.track_id);
@@ -213,6 +220,7 @@ impl Shared {
             if tracks.len() >= REPORT_EVERY {
                 self.report(&mut tracks, &mut changed);
             }
+            pacer.rest();
             self.rest();
         }
         self.report(&mut tracks, &mut changed);
@@ -288,11 +296,12 @@ impl Shared {
             }
             Err(e) => log::warn!("quality: putting the checks right: {e}"),
         }
+        let mut pacer = Pacer::new(&self.stop);
         // Not tried again in this run (could not be opened).
         let mut skip = HashSet::new();
         while !self.stopped() {
             self.wake.lock().kicked = false;
-            let worked = self.settings.lock().check && self.pass(&mut skip);
+            let worked = self.settings.lock().check && self.pass(&mut skip, &mut pacer);
             if !worked {
                 self.pause(self.idle);
             }
