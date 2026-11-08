@@ -499,7 +499,7 @@ fn paint(
         let size = (sizes.small + (sizes.big - sizes.small) * focus) * scale(l);
         // Between the two resting sizes the size moves every frame.
         let g = if focus > 0.0 && focus < 1.0 {
-            moving_layout(&painter, &breaks[j].forced, size)
+            moving_layout(&painter, &breaks[j].forced, (sizes.small * scale(l), sizes.big * scale(l)), focus)
         } else {
             fixed_layout(&painter, &breaks[j].forced, size)
         };
@@ -1088,9 +1088,11 @@ struct Breaks {
 
 /// Glyph advances round differently at different sizes. Freeze the BIG
 /// rows as paragraphs: newlines are row separators, never extra glyphs.
-fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, big: f32) -> Breaks {
+///
+/// Kept shared, so taking it every frame for every line copies no text.
+fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, big: f32) -> Arc<Breaks> {
     let ctx = painter.ctx();
-    if let Some(b) = ctx.data(|d| d.get_temp::<Breaks>(id))
+    if let Some(b) = ctx.data(|d| d.get_temp::<Arc<Breaks>>(id))
         && b.text == text && b.wrap == wrap && b.big == big
     {
         return b;
@@ -1100,7 +1102,7 @@ fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, bi
     let g = crate::typography::layout(painter, job);
     let forced = g.rows.iter().map(|r| r.row.glyphs.iter().map(|gl| gl.chr).collect::<String>()).collect::<Vec<_>>().join("\n");
     let size = fixed_layout(painter, &forced, big).size();
-    let b = Breaks { text: text.to_owned(), wrap, big, forced, height: size.y, width: size.x };
+    let b = Arc::new(Breaks { text: text.to_owned(), wrap, big, forced, height: size.y, width: size.x });
     ctx.data_mut(|d| d.insert_temp(id, b.clone()));
     b
 }
@@ -1109,12 +1111,47 @@ fn fixed_layout(painter: &egui::Painter, text: &str, size: f32) -> Arc<Galley> {
     crate::typography::layout(painter, LayoutJob::single_section(text.to_owned(), style_at(size).text_format(Color32::WHITE)))
 }
 
-/// [`fixed_layout`] for a size that is animating (see
-/// [`crate::typography::layout_sized`]).
-fn moving_layout(painter: &egui::Painter, text: &str, size: f32) -> Arc<Galley> {
-    crate::typography::layout_sized(painter, style_at(size), |style, _| {
-        LayoutJob::single_section(text.to_owned(), style.text_format(Color32::WHITE))
-    })
+/// [`fixed_layout`] for a line whose size moves between its resting sizes
+/// `rest` (small, big), `t` (0..1) of the way. It is laid out at a resting
+/// size within half a point of it, else at the nearest whole size, and
+/// scaled to the size: those few layouts are kept across frames and draw
+/// nothing new into the font atlas (see
+/// [`crate::typography::layout_sized`], whose row height moves with the
+/// size and so missed the kept layouts every frame). Its rows and height
+/// go evenly between the two resting layouts', so the line grows without
+/// the whole-pixel steps of each size's own rounded row height (which
+/// moved it in its slot by half a pixel at a time) and meets either
+/// resting layout where it ends.
+fn moving_layout(painter: &egui::Painter, text: &str, rest: (f32, f32), t: f32) -> Arc<Galley> {
+    let size = rest.0 + (rest.1 - rest.0) * t;
+    let base = if (size - rest.1).abs() <= 0.5 {
+        rest.1
+    } else if (size - rest.0).abs() <= 0.5 {
+        rest.0
+    } else {
+        size.round().max(1.0)
+    };
+    let g = crate::typography::scale_galley(&fixed_layout(painter, text, base), size / base);
+    between(g, &fixed_layout(painter, text, rest.0), &fixed_layout(painter, text, rest.1), t)
+}
+
+/// `g` with its rows placed and its height taken `t` (0..1) of the way
+/// from `from`'s to `to`'s (the same rows at two sizes); as it is when the
+/// rows differ.
+fn between(g: Arc<Galley>, from: &Galley, to: &Galley, t: f32) -> Arc<Galley> {
+    if g.rows.len() != from.rows.len() || g.rows.len() != to.rows.len() {
+        return g;
+    }
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    let mut out = Arc::unwrap_or_clone(g);
+    let mut bounds = Rect::NOTHING;
+    for (r, placed) in out.rows.iter_mut().enumerate() {
+        placed.pos.y = lerp(from.rows[r].pos.y, to.rows[r].pos.y);
+        bounds = bounds.union(placed.row.visuals.mesh_bounds.translate(placed.pos.to_vec2()));
+    }
+    out.mesh_bounds = bounds;
+    out.rect = Rect::from_min_size(out.rect.min, vec2(out.rect.width(), lerp(from.rect.height(), to.rect.height())));
+    Arc::new(out)
 }
 
 /// A looping sample for the settings' hover card: the line being sung
@@ -2854,11 +2891,42 @@ mod tests {
         output.textures_delta.clear();
     }
 
-    fn three_rows(painter: &egui::Painter, text: &str) -> Breaks {
+    fn three_rows(painter: &egui::Painter, text: &str) -> Arc<Breaks> {
         (200..900).step_by(10).find_map(|width| {
             let b = fixed_breaks(painter, egui::Id::new("test-breaks"), text, width as f32, 44.0);
             (b.forced.split('\n').count() == 3).then_some(b)
         }).expect("fixture must wrap into three rows")
+    }
+
+    /// A line growing from one resting size to the other: its height and
+    /// rows move a little every frame (never by a rounded row height's
+    /// whole pixel at once), and it starts and ends on the resting layouts.
+    #[test]
+    fn a_growing_line_moves_evenly_and_meets_its_resting_layouts() {
+        with_painter(|painter| {
+            let b = three_rows(painter, "и слова, что не сказаны вслух, звучат громче всего остального, пока город считает шаги до утра");
+            let rest = (32.0 * 1.1, 44.0 * 1.1);
+            let (from, to) = (fixed_layout(painter, &b.forced, rest.0), fixed_layout(painter, &b.forced, rest.1));
+            let per_step = (to.rect.height() - from.rect.height()) / 200.0;
+            let mut was = from.clone();
+            for step in 1..200 {
+                let t = step as f32 / 200.0;
+                let g = moving_layout(painter, &b.forced, rest, t);
+                assert_eq!(g.rows.len(), 3);
+                assert!((g.rect.height() - was.rect.height() - per_step).abs() < 1e-3, "t={t}");
+                for r in 0..3 {
+                    let moved = g.rows[r].pos.y - was.rows[r].pos.y;
+                    let even = (to.rows[r].pos.y - from.rows[r].pos.y) / 200.0;
+                    assert!((moved - even).abs() < 1e-3, "t={t} row {r}");
+                }
+                was = g;
+            }
+            let near = |t: f32| moving_layout(painter, &b.forced, rest, t);
+            for (g, rest) in [(near(1e-4), &from), (near(1.0 - 1e-4), &to)] {
+                assert!((g.rect.height() - rest.rect.height()).abs() < 0.01);
+                assert!((g.rect.width() - rest.rect.width()).abs() < 0.05);
+            }
+        });
     }
 
     #[test]
