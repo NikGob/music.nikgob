@@ -183,7 +183,7 @@ impl AlignService {
         let catalog = Catalog::new(models);
         self.catalog = Some(catalog.clone());
         let spawned = std::thread::Builder::new().name("nikgob-align".into()).spawn(move || {
-            crate::analysis::lower_priority();
+            crate::quiet::lower_priority();
             let mut t = Thread::new(lib, root, catalog, settings, tx, req_rx, stop, start);
             t.cancel = cancel;
             t.checks = checks;

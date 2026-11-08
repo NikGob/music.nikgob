@@ -64,7 +64,8 @@ use nikgob_view::{self as v, Command};
 use serde::{Deserialize, Serialize};
 
 use crate::Worker;
-use crate::analysis::{SoundIndex, lower_priority};
+use crate::analysis::SoundIndex;
+use crate::quiet::lower_priority;
 use crate::import::Internal;
 
 pub(crate) use radio::RadioSave;

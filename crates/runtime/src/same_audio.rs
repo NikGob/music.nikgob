@@ -205,7 +205,7 @@ impl Shared {
     }
 
     fn run(self: &Arc<Self>, start: Duration, alive: Sender<()>) {
-        crate::analysis::lower_priority();
+        crate::quiet::lower_priority();
         self.pause(start);
         match self.lib.drop_orphan_prints() {
             Ok(0) => {}

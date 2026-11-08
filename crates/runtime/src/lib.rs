@@ -22,6 +22,7 @@ mod playlist_cover;
 mod recs;
 mod search;
 mod soulseek;
+mod quiet;
 mod tags;
 mod torrents;
 pub mod queue;

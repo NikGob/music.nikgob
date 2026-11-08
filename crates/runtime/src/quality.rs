@@ -271,7 +271,7 @@ impl Shared {
     }
 
     fn run(self: &Arc<Self>, start: Duration, alive: Sender<()>) {
-        crate::analysis::lower_priority();
+        crate::quiet::lower_priority();
         self.pause(start);
         match self.lib.drop_orphan_checks() {
             Ok(0) => {}
@@ -566,7 +566,7 @@ impl Worker {
         let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
         log::info!("quality: turning {} ticked fake files into MP3s", sources.len());
         svc.spawn_blocking(move || {
-            crate::analysis::lower_priority();
+            crate::quiet::lower_priority();
             let (mut done, mut failed) = (0, 0);
             for id in sources {
                 let src = lib.get_source(id).ok().flatten();

@@ -28,8 +28,9 @@
 //!   [`PREVIEW_DAILY`] a day apart from the library's downloads, so new
 //!   music is placed by its sound (recs-v2 §11.3).
 //!
-//! Both run on one thread of their own at the lowest priority, like the file
-//! job; the worker only hands it jobs and hears back [`Done`]. With
+//! Both run on one thread of their own at the lowest priority, paced like the
+//! file job ([`crate::quiet`]: nothing new starts while a game runs); the
+//! worker only hands it jobs and hears back [`Done`]. With
 //! «Анализ звука стримов» off nothing starts, and a job in flight stops at
 //! its next chunk.
 //!
@@ -53,7 +54,8 @@ use nikgob_view as v;
 use super::Msg;
 use super::resolve::Lookup;
 use crate::Worker;
-use crate::analysis::{FileError, SoundIndex, analyze_bytes, lower_priority, store_vector};
+use crate::analysis::{FileError, SoundIndex, analyze_bytes, store_vector};
+use crate::quiet::{self, Pacer, lower_priority};
 use crate::import::Internal;
 
 /// Most bytes of one stream read for its analysis (8 minutes of YouTube's
@@ -162,12 +164,16 @@ impl StreamAnalysis {
     }
 }
 
-/// The analysis thread: one job at a time, until the worker goes.
+/// The analysis thread: one job at a time, until the worker goes, paced
+/// by [`crate::quiet`] (none of its jobs is one the user waits for).
 fn run(jobs: Receiver<Job>, lib: Library, index: SoundIndex, tx: Sender<Internal>, off: Arc<AtomicBool>) {
     lower_priority();
+    let mut pacer = Pacer::new(&off);
     for job in jobs {
+        // While a game runs the job waits; switched off, it stops at once.
+        pacer.begin();
         let started = Instant::now();
-        let outcome = work(&job, &lib, &index, &off);
+        let outcome = work(&job, &lib, &index, &off, &mut pacer);
         log::debug!(
             "stream analysis: {} ({:?}) {outcome:?} in {:?}",
             job.video,
@@ -182,10 +188,11 @@ fn run(jobs: Receiver<Job>, lib: Library, index: SoundIndex, tx: Sender<Internal
         if tx.send(Internal::Stream(Msg::Analysed(done))).is_err() {
             break;
         }
+        pacer.rest();
     }
 }
 
-fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool) -> Outcome {
+fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool, pacer: &mut Pacer<'_>) -> Outcome {
     if off.load(Ordering::Relaxed) {
         return Outcome::Stopped;
     }
@@ -203,7 +210,7 @@ fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool) -> Outco
         Ok(b) => b,
         Err(o) => return o,
     };
-    match analyze_bytes(bytes, ext, &format!("youtube:{}", job.video), off) {
+    match analyze_bytes(bytes, ext, &format!("youtube:{}", job.video), pacer) {
         Ok(vector) => match store_vector(lib, index, job.track, vector, AnalysisSource::Youtube) {
             Ok(stored) => Outcome::Stored(stored),
             Err(e) => Outcome::Transient(format!("storing: {e}")),
@@ -468,6 +475,10 @@ impl Worker {
         }
         if !self.streaming.resolving.is_empty() {
             self.analysis_held("playback lookups are running");
+            return;
+        }
+        if quiet::busy() {
+            self.analysis_held("a game or a fullscreen app is in front");
             return;
         }
         let daily = self.streaming.schedule.analysis_daily;
