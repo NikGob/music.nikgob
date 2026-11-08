@@ -83,7 +83,11 @@ pub fn build_with(lib: &Library, visit: &crate::home_v2::Visit) -> Home {
         })
         .filter(|(s, _)| *s > 0.0)
         .collect();
+    // A song on two albums is in the pool once (its stats are the
+    // standing copy's already).
+    let spares = lib.recording_spares().unwrap_or_default();
     for id in lib.liked_track_ids().unwrap_or_default() {
+        let id = spares.get(&id).copied().unwrap_or(id);
         pool.push((2.0 + stat.get(&id).map_or(0.0, |s| s.completes as f32 * 0.5), id));
     }
     pool.sort_by(|a, b| b.0.total_cmp(&a.0));
