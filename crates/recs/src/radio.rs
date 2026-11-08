@@ -1070,7 +1070,15 @@ impl RadioState {
                 let wider = model.candidates(&m, &|i| {
                     ok(i) && free(i) && quiet(i) && !near(i) && anchor.goes(model, i) && (own(i) || next(i)) && (!sparse || in_scene(i))
                 });
-                if let Some(b) = best_of(wider).filter(|b| best.as_ref().is_some_and(|a| b.0.0 < a.0.0)) {
+                // The wider step keeps «Преимущественно новые песни» too.
+                let wider_unheard: Vec<usize> = if want_unheard {
+                    wider.iter().copied().filter(|&i| !recs.heard(i)).collect()
+                } else {
+                    Vec::new()
+                };
+                let pick = best_of(wider);
+                let pick_unheard = best_of(wider_unheard).filter(|b| pick.as_ref().is_none_or(|a| b.0.0 <= a.0.0));
+                if let Some(b) = pick_unheard.or(pick).filter(|b| best.as_ref().is_some_and(|a| b.0.0 < a.0.0)) {
                     best = Some(b);
                 }
             }
@@ -2787,7 +2795,9 @@ pub(crate) mod tests {
             let model = UserModel::build(cat, input, ModelInput { index: idx, types: Some(types), weights: None, graph: None }, crate::model::tests::T0);
             let recs = Recs::new(cat, &model.taste, idx).with_model(&model);
             let fresh = |picks: &[u128]| picks.iter().filter(|t| cat.position(tid(**t)).is_some_and(|i| !recs.heard(i))).count();
-            let usual = play_model_radio(&l, OST.0 + 3, 3, 0);
+            // The same «Подмешивать случайное» on both sides: blind service
+            // tracks are unheard too and would tip the count.
+            let usual = play_model_radio_with(&l, OST.0 + 3, 3, 0, |r| r.set_explore(Some(0.0)));
             let only = play_model_radio_with(&l, OST.0 + 3, 3, 0, |r| {
                 r.set_unheard(1.0);
                 r.set_explore(Some(0.0));
@@ -2798,7 +2808,7 @@ pub(crate) mod tests {
             for w in worlds.windows(3) {
                 assert!(!(w[0] == w[1] && w[1] == w[2]), "a world thrice running: {worlds:?}");
             }
-            assert!(fresh(&only) >= fresh(&usual), "omnivore {omnivore}: {} unheard, usually {}", fresh(&only), fresh(&usual));
+            assert!(fresh(&only) >= fresh(&usual), "omnivore {omnivore}: {} unheard of {}, usually {} of {}", fresh(&only), only.len(), fresh(&usual), usual.len());
         }
     }
 
