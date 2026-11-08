@@ -32,6 +32,21 @@ pub fn fmt_total(d: Duration) -> String {
     }
 }
 
+/// "17 мая 2019", or "май 2019" without the day.
+pub fn fmt_release_day(d: nikgob_view::ReleaseDay) -> String {
+    const OF: [&str; 12] = [
+        "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря",
+    ];
+    const MONTH: [&str; 12] = [
+        "январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+    ];
+    let m = usize::from(d.month.clamp(1, 12) - 1);
+    match d.day {
+        Some(day) => format!("{day} {} {}", OF[m], d.year),
+        None => format!("{} {}", MONTH[m], d.year),
+    }
+}
+
 /// Russian plural: 1 трек, 2 трека, 5 треков.
 pub fn plural<'a>(n: u64, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
     let (n10, n100) = (n % 10, n % 100);
@@ -107,5 +122,16 @@ pub fn sound_line(state: &nikgob_view::ViewState) -> Option<String> {
         (Some(s), None) => Some(s),
         (None, Some(q)) => Some(q.to_owned()),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nikgob_view::ReleaseDay;
+
+    #[test]
+    fn release_days_read_in_russian() {
+        assert_eq!(super::fmt_release_day(ReleaseDay { year: 2019, month: 5, day: Some(17) }), "17 мая 2019");
+        assert_eq!(super::fmt_release_day(ReleaseDay { year: 2003, month: 12, day: None }), "декабрь 2003");
     }
 }

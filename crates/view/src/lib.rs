@@ -165,6 +165,47 @@ pub struct ReleaseDetail {
     /// The page's lines in order, one per place the album counts (the
     /// card's «13 из 14» is their count); empty: just the tracks.
     pub lines: Vec<ReleaseLine>,
+    /// The day (or month) it came out, when known beyond the card's year:
+    /// from its files' tags, else from a service.
+    pub released: Option<ReleaseDay>,
+    /// The record label, when its files' tags name one.
+    pub label: Option<String>,
+}
+
+/// The day an album came out, or its month when the day is not known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReleaseDay {
+    pub year: i32,
+    /// 1–12.
+    pub month: u8,
+    /// 1–31.
+    pub day: Option<u8>,
+}
+
+impl ReleaseDay {
+    /// From a tag's or a service's date: `2019-05-17`, `2019-05`,
+    /// `2019-05-17T00:00:00Z`, `2019/05/17`. `None` for a bare year,
+    /// anything else, or a date in another year than `year` (when known: the
+    /// date of a recording is not the release's).
+    pub fn parse(date: &str, year: Option<i32>) -> Option<Self> {
+        let date = date.trim();
+        let date = date.split(['T', ' ']).next().unwrap_or(date);
+        let mut parts = date.split(['-', '/', '.']);
+        let y = parts.next().filter(|p| p.len() == 4)?.parse::<i32>().ok()?;
+        let m = parts.next().filter(|p| (1..=2).contains(&p.len()))?.parse::<u8>().ok()?;
+        let d = match parts.next() {
+            Some(p) if (1..=2).contains(&p.len()) => Some(p.parse::<u8>().ok()?),
+            Some(_) => return None,
+            None => None,
+        };
+        if parts.next().is_some() || !(1000..=9999).contains(&y) || !(1..=12).contains(&m) {
+            return None;
+        }
+        if d.is_some_and(|d| !(1..=31).contains(&d)) || year.is_some_and(|year| year != y) {
+            return None;
+        }
+        Some(Self { year: y, month: m, day: d })
+    }
 }
 
 /// One line of an album page.
@@ -3039,5 +3080,26 @@ mod context_tests {
         assert_eq!(with("альбома «Группа крови»", None), None);
         assert_eq!(with("поиска: лёд", album.clone()), None);
         assert_eq!(with("библиотеки", album), None);
+    }
+}
+
+#[cfg(test)]
+mod release_day_tests {
+    use super::ReleaseDay;
+
+    #[test]
+    fn dates_parse_to_the_day_or_the_month() {
+        let day = |y, m, d| Some(ReleaseDay { year: y, month: m, day: d });
+        assert_eq!(ReleaseDay::parse("2019-05-17", Some(2019)), day(2019, 5, Some(17)));
+        assert_eq!(ReleaseDay::parse(" 2019-05-17T00:00:00Z ", None), day(2019, 5, Some(17)));
+        assert_eq!(ReleaseDay::parse("2019/5/7", None), day(2019, 5, Some(7)));
+        assert_eq!(ReleaseDay::parse("2019-05", Some(2019)), day(2019, 5, None));
+        // A bare year says nothing the card does not.
+        assert_eq!(ReleaseDay::parse("2019", Some(2019)), None);
+        // A recording's date of another year is not the album's.
+        assert_eq!(ReleaseDay::parse("2003-02-01", Some(2019)), None);
+        for bad in ["", "19-05-17", "2019-13-01", "2019-05-32", "2019-05-17-1", "май 2019", "2019-05-00"] {
+            assert_eq!(ReleaseDay::parse(bad, None), None, "{bad}");
+        }
     }
 }

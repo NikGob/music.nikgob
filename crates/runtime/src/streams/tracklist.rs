@@ -68,6 +68,12 @@ fn cache_key(release: ReleaseId) -> String {
     format!("tracklist.{release}")
 }
 
+/// Where the day a service says a library album came out is kept (the
+/// library stores only its year).
+fn released_key(release: ReleaseId) -> String {
+    format!("released.{release}")
+}
+
 /// The same album title: folded alike, or one the transliteration of the
 /// other.
 pub(crate) fn same_album(a: &str, b: &str) -> bool {
@@ -121,6 +127,26 @@ fn found_mark(lib: &nikgob_library::Library, release: ReleaseId) -> &'static str
 }
 
 impl Worker {
+    /// Keeps the day the service's `album` came out for the library album
+    /// `release` (its page shows it when no file of it tells the day).
+    pub(crate) fn keep_released(&self, release: ReleaseId, album: &StreamAlbum) {
+        let Some(day) = album.release_date.as_deref().map(str::trim) else { return };
+        if nikgob_view::ReleaseDay::parse(day, None).is_none() {
+            return;
+        }
+        let key = released_key(release);
+        if self.lib.cache_get(&key).ok().flatten().is_some_and(|(_, kept)| kept == day) {
+            return;
+        }
+        let _ = self.lib.cache_put(&key, nikgob_library::now_ms(), day);
+    }
+
+    /// The day a service said the library album `release` came out, as kept
+    /// by [`Self::keep_released`].
+    pub(crate) fn kept_released(&self, release: ReleaseId) -> Option<String> {
+        self.lib.cache_get(&released_key(release)).ok().flatten().map(|(_, day)| day)
+    }
+
     /// Asks the services for the whole tracklist of a library album that
     /// lacks it (see the module docs).
     pub(crate) fn complete_tracklist(&mut self, release: ReleaseId) {
@@ -199,6 +225,7 @@ impl Worker {
                     Err(e) => log::warn!("album {}: tracklist not stored: {e}", m.release),
                 }
                 let _ = self.lib.cache_put(&key, now, found_mark(&self.lib, m.release));
+                self.keep_released(m.release, &album);
                 self.extend_album_queue(m.release);
                 self.load_library();
                 if self.state.read().release.as_ref().is_some_and(|r| r.card.id == m.release) {

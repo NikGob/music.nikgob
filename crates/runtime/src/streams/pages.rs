@@ -260,10 +260,12 @@ impl Worker {
                 view.subtitle_artists = a.artists.as_slice().into();
                 view.cover_url = a.cover_url.clone();
                 view.year = a.year;
+                view.released = a.release_date.as_deref().and_then(|d| v::ReleaseDay::parse(d, a.year));
                 view.release_type = Some(a.release_type);
                 view.tracks = a.tracks.iter().map(|t| self.stream_row_auto(t)).collect();
                 (view.release, view.have) = self.album_have(a);
                 if let Some(r) = view.release {
+                    self.keep_released(r, a);
                     self.mark_elsewhere(r, &mut view.tracks);
                     view.library = self.library_have(r);
                 }

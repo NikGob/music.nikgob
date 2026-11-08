@@ -134,8 +134,14 @@ pub fn release(
         let mut nav = None;
         let size = cover_size(ui);
         header(ui, size, c.cover.as_ref(), None, |ui| {
-            let line = match c.year {
-                Some(y) => format!("{} · {y}", type_label(c.release_type)),
+            // «АЛЬБОМ · 17 МАЯ 2019» when the day is known, else the year.
+            let when = match (r.released, c.year) {
+                (Some(d), _) => Some(common::fmt_release_day(d).to_uppercase()),
+                (None, Some(y)) => Some(y.to_string()),
+                (None, None) => None,
+            };
+            let line = match when {
+                Some(w) => format!("{} · {w}", type_label(c.release_type)),
                 None => type_label(c.release_type).to_owned(),
             };
             ui.label(TypeRole::LabelLarge.style().rich(line, s.primary));
@@ -156,9 +162,10 @@ pub fn release(
             if let Some(k) = crate::components::link_paragraph(ui, "rel-artists", &line, &links, format).clicked {
                 nav = routes.get(k).cloned();
             }
-            // The formats, quietly: nothing to press.
-            if let Some(q) = &r.quality {
-                ui.label(TypeRole::BodyMedium.style().rich(q, s.on_surface_variant));
+            // The label and the formats, quietly: nothing to press.
+            let facts: Vec<&str> = r.label.iter().chain(&r.quality).map(String::as_str).collect();
+            if !facts.is_empty() {
+                ui.label(TypeRole::BodyMedium.style().rich(facts.join(" · "), s.on_surface_variant));
             }
         });
         ui.add_space(16.0);
