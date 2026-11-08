@@ -65,6 +65,8 @@ pub(crate) fn request_release_delete(ctx: &Context, id: nikgob_view::ReleaseId, 
 
 /// «Радио по треку» in the track menus.
 pub(crate) const RADIO_BY_TRACK: &str = "Радио по треку";
+/// The menu item of a track whose file holds another song.
+pub(crate) const WRONG_FILE: &str = "В файле другая песня";
 
 /// «Не нравится» of a track, or its undo when it is disliked.
 pub(crate) fn dislike_item(disliked: bool) -> MenuItem {
@@ -396,6 +398,10 @@ impl PageState {
         if let Some(find) = super::find_song::label(track) {
             m = m.item(MenuItem::new(find).icon(Icon::MusicNote));
         }
+        // A file that holds another song: to the Trash, looked for again.
+        if track.has_local {
+            m = m.item(MenuItem::new(WRONG_FILE).icon(Icon::Delete));
+        }
         m = m
             .divider()
             .item(MenuItem::new("Удалить из библиотеки").icon(Icon::Delete))
@@ -434,13 +440,22 @@ impl PageState {
         };
         // Without «Источник и качество» the items after it move up one.
         let picked = if !info && picked >= 5 { picked + 1 } else { picked };
-        // The deletes come after the optional «Найти песню…».
+        // The deletes come after the optional «Найти песню…» and «В файле
+        // другая песня» (a track with a file).
         let picked = match picked {
             10 if find => {
                 out.push(Command::FindSong { track: track.id, query: None });
                 return None;
             }
             n if find && n > 10 => n - 1,
+            n => n,
+        };
+        let picked = match picked {
+            10 if track.has_local => {
+                out.push(Command::WrongFile(track.id));
+                return None;
+            }
+            n if track.has_local && n > 10 => n - 1,
             n => n,
         };
         match picked {

@@ -110,6 +110,17 @@ pub enum ImportEvent {
         path: PathBuf,
         error: String,
     },
+    /// The file holds another song's audio (docs/TODO.md 32): it was not
+    /// imported as `title` (a [`Self::Failed`] follows). `track` is the
+    /// track it was taken for; what it is and where it came from are not
+    /// taken for that track again.
+    WrongAudio {
+        job: JobId,
+        path: PathBuf,
+        track: Option<TrackId>,
+        title: String,
+        sounds_like: Option<String>,
+    },
     /// All files of the job are done or parked. `left_out`: files that are
     /// none of the tracks a better copy was fetched for; `cancelled`: the
     /// user stopped it and what it committed was taken back.

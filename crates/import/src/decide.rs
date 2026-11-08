@@ -111,6 +111,11 @@ pub struct ImportTargets {
     /// never imported as something new.
     #[serde(default)]
     pub only_targets: bool,
+    /// Where the files came from (`soulseek:<user\path>`, `qobuz:<id>`,
+    /// `torrents:<id>`): a file that holds another song's audio makes this
+    /// place one that is not taken for its track again.
+    #[serde(default)]
+    pub from: Option<String>,
 }
 
 impl ImportTargets {

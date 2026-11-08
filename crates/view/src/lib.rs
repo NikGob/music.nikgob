@@ -2614,6 +2614,12 @@ pub enum Command {
     /// the fakes become MP3s) or not (kept as they are, never offered
     /// again). Only these sources change, never the rest of the card.
     ConfirmPicked { id: u64, sources: Vec<nikgob_core::model::SourceId>, accept: bool },
+    /// «В файле другая песня» on a local track: its file goes to the
+    /// Trash, the track is looked for again, and that file and the place it
+    /// came from are never taken for it again.
+    WrongFile(nikgob_core::model::TrackId),
+    /// Takes [`Self::WrongFile`] back: the file plays again.
+    UndoWrongFile(nikgob_core::model::TrackId),
     /// Folds the editions of [`EditionOffer::id`] into one album.
     MergeEditions(u64),
     /// Keeps them apart and never offers them again.
