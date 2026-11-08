@@ -181,6 +181,50 @@ pub fn release_bonus(o: &Offer, want: &Want) -> f64 {
     s
 }
 
+/// A release this small is a single (or an EP) at most.
+const SINGLE_MAX: u64 = 200 << 20;
+/// A release this big that is not a collection is a whole album or more.
+const BIG_ALBUM: u64 = 1 << 30;
+
+/// Which of a wish's doubtful torrents to look into first, before any of
+/// their lists comes (higher first), by what their titles and sizes say:
+/// the song named (or its album) is likely; a discography or a collection
+/// may have it; a release of a single's size that names neither is
+/// another single, a big album that names neither another album; with no
+/// seeders not even the list comes.
+pub fn look_first(o: &Offer, want: &Want) -> f64 {
+    let hay = title_key(&o.title).base;
+    let names = |keys: Vec<String>| keys.iter().any(|k| contains_words(&hay, k));
+    let title = want.scope == WantScope::Track && want.title.as_deref().is_some_and(|t| names(title_keys(t)));
+    let album = !want.is_single() && want.album.as_deref().is_some_and(|a| names(album_keys(a)));
+    let collection = o.scope == OfferScope::Collection;
+    let mut s = 0.0;
+    if title {
+        s += 3.0;
+    }
+    if album {
+        s += 2.0;
+    }
+    if collection {
+        s += 1.0;
+    }
+    if !title && !album && !collection
+        && let Some(size) = o.size_bytes
+    {
+        if size <= SINGLE_MAX {
+            s -= 2.0;
+        } else if size >= BIG_ALBUM {
+            s -= 1.0;
+        }
+    }
+    match o.seeders {
+        Some(0) => s -= 2.0,
+        Some(n) => s += (f64::from(n) + 1.0).log2() * 0.05,
+        None => {}
+    }
+    s
+}
+
 impl Source for IndexerSource {
     fn key(&self) -> SourceKey {
         SourceKey::Torrents
@@ -478,6 +522,72 @@ mod tests {
             info_hash: None,
             handle: CandidateHandle::default(),
         }
+    }
+
+    fn sized(title: &str, mb: u64, seeders: u32) -> Offer {
+        offer_of(Candidate { size_bytes: Some(mb << 20), ..cand(title, seeders) })
+    }
+
+    /// The order a wish's doubtful torrents are looked into.
+    fn looked(offers: &[Offer], w: &Want) -> Vec<String> {
+        let mut v: Vec<&Offer> = offers.iter().collect();
+        v.sort_by(|a, b| look_first(b, w).total_cmp(&look_first(a, w)));
+        v.iter().map(|o| o.title.clone()).collect()
+    }
+
+    /// TODO 23: «怪獣» of sakanaction got the single «さよならはエモーション
+    /// / 蓮の花» (46 MB, no seeders) as the one to take.
+    #[test]
+    fn another_single_of_the_artist_is_looked_into_last_and_has_no_file() {
+        let w = Want {
+            artists: vec!["sakanaction".into()],
+            title: Some("怪獣".into()),
+            album: Some("怪獣".into()),
+            scope: WantScope::Track,
+            ..Want::default()
+        };
+        let other = "サカナクション (sakanaction) - さよならはエモーション / 蓮の花 (2014) [FLAC]";
+        let offers = vec![
+            sized(other, 46, 0),
+            sized("sakanaction - Discography (2007-2025) [FLAC]", 20_000, 4),
+            sized("sakanaction - 怪獣 (2025) [FLAC]", 60, 7),
+        ];
+        assert_eq!(
+            looked(&offers, &w),
+            ["sakanaction - 怪獣 (2025) [FLAC]", "sakanaction - Discography (2007-2025) [FLAC]", other]
+        );
+        let v = judge(&offers[0], &w).expect("the artist's: asked, once its list has the song");
+        assert!(!v.sure);
+        let files = vec![
+            (0, "sakanaction - さよならはエモーション/01. さよならはエモーション.flac".into(), 30),
+            (1, "sakanaction - さよならはエモーション/02. 蓮の花.flac".into(), 16),
+        ];
+        assert_eq!(pick_files(&files, &w), None);
+    }
+
+    /// TODO 23: the clip «SawanoHiroyuki[nZk]:Rei『INERTIA』 Music Video»
+    /// got three whole «Attack on Titan» soundtracks (1.3–2.4 GB).
+    #[test]
+    fn a_big_album_that_names_neither_the_song_nor_its_album_comes_last() {
+        let w = Want {
+            artists: vec!["SawanoHiroyuki[nZk]".into()],
+            aliases: vec!["Hiroyuki Sawano".into()],
+            title: Some("SawanoHiroyuki[nZk]:Rei『INERTIA』 Music Video".into()),
+            scope: WantScope::Track,
+            ..Want::default()
+        };
+        let s1 = "[Hi-Res] Attack on Titan Season 1 Original Soundtrack - Hiroyuki Sawano [FLAC 24/96]";
+        let s2 = "Attack on Titan Season 2 Original Soundtrack (Hiroyuki Sawano) [FLAC]";
+        let song = "SawanoHiroyuki[nZk]:Rei - INERTIA (2024) [FLAC]";
+        let offers = vec![sized(s1, 2_400, 30), sized(s2, 1_300, 12), sized(song, 80, 3)];
+        assert_eq!(looked(&offers, &w)[0], song);
+        assert!(look_first(&offers[0], &w) < 0.0 && look_first(&offers[1], &w) < 0.0);
+        let files = vec![
+            (0, "Attack on Titan OST/01. Attack on Titan.flac".into(), 90),
+            (1, "Attack on Titan OST/02. Vogel im Käfig.flac".into(), 90),
+            (2, "Attack on Titan OST/03. YouSeeBIGGIRL T:T.flac".into(), 90),
+        ];
+        assert_eq!(pick_files(&files, &w), None);
     }
 
     #[tokio::test]

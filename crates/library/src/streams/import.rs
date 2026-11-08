@@ -84,6 +84,74 @@ pub struct MatchRow {
 /// Prefix of the cache keys in `meta`.
 const CACHE_PREFIX: &str = "cache.";
 
+/// `meta` key of [`Library::drop_imported_non_music`].
+pub(crate) const NON_MUSIC_KEY: &str = "imported_non_music_entries_dropped.v1";
+
+/// The cache key under which an import keeps what the services said a
+/// video of an export is (its song, or `-`: none agrees).
+fn song_cache_key(service: &str, id: &str) -> String {
+    format!("{CACHE_PREFIX}import.song.{service}:{id}")
+}
+
+/// The entries of the playlists an import brought that the import of today
+/// leaves out of a music playlist as no music, as `(entry, track, title,
+/// playlist)`: a YouTube video with nothing that says it is music — no
+/// file, no like, no mark of a saved song, never played (an import keeps
+/// only the plays that are music), no id in another service and no song
+/// of an import key; the services were asked for its song and none agrees
+/// (every YouTube id of it cached as `-`); its title is known and says
+/// nothing of music (`music_title`). A playlist synced both ways is left
+/// alone: its service's playlist would lose them too.
+fn imported_non_music_in(
+    conn: &rusqlite::Connection,
+    music_title: &dyn Fn(&str) -> bool,
+) -> Result<Vec<(String, String, String, String)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT e.id, t.id, t.title, p.name FROM playlist_entry e
+           JOIN playlist p ON p.id = e.playlist_id
+           JOIN track t ON t.id = e.track_id
+          WHERE e.deleted = 0 AND p.deleted = 0
+            AND p.id IN (SELECT local_id FROM external_id WHERE service = ?1 AND kind = 'playlist')
+            AND NOT EXISTS (SELECT 1 FROM playlist_remote r WHERE r.playlist_id = p.id AND r.sync_mode = 'two_way')
+            AND NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = t.id AND s.kind = 'local_file')
+            AND NOT EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track' AND l.target_id = t.id
+                               AND l.deleted = 0)
+            AND NOT EXISTS (SELECT 1 FROM event v WHERE v.track_id = t.id)
+            AND NOT EXISTS (SELECT 1 FROM external_id x WHERE x.kind = 'track' AND x.local_id = t.id
+                               AND x.service NOT IN ('youtube', ?2))
+            AND EXISTS (SELECT 1 FROM external_id x WHERE x.kind = 'track' AND x.local_id = t.id
+                           AND x.service = 'youtube')
+          ORDER BY p.seq, e.position, e.id",
+    )?;
+    let rows = stmt.query_map(params![IMPORT_SERVICE, SEEN_SERVICE], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+    })?;
+    let rows: Vec<(String, String, String, String)> = rows.collect::<rusqlite::Result<_>>()?;
+    let mut ids = conn.prepare_cached(
+        "SELECT remote_id FROM external_id WHERE service = 'youtube' AND kind = 'track' AND local_id = ?1",
+    )?;
+    let mut out = Vec::new();
+    for (entry, track, title, playlist) in rows {
+        if title.trim().is_empty() || music_title(&title) {
+            continue;
+        }
+        let videos: Vec<String> = ids.query_map([&track], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        // A video never looked up has its id for a title: unknown, it stays.
+        if videos.iter().any(|v| title.trim() == v.as_str()) {
+            continue;
+        }
+        let mut no_song = !videos.is_empty();
+        for v in &videos {
+            no_song &= meta_get(conn, &song_cache_key("youtube", v))?
+                .is_some_and(|c| c.split_once('|').is_some_and(|(_, value)| value == "-"));
+        }
+        if no_song {
+            out.push((entry, track, title, playlist));
+        }
+    }
+    Ok(out)
+}
+
 /// FNV-1a over `bytes`, from `seed`.
 fn fnv(seed: u64, bytes: &[u8]) -> u64 {
     let mut h = seed;
@@ -376,6 +444,32 @@ impl Library {
         })
     }
 
+    /// Once per library (`imported_non_music_entries_dropped.v1`): the
+    /// entries of the playlists an import brought before it left the
+    /// videos that are no music out ([`imported_non_music_in`]; three of
+    /// them stayed in «Save» of an old Takeout import) go, each logged.
+    /// Entries only: the tracks, their files and other playlists stay.
+    /// `music_title` tells a video's title that says it is music. Returns
+    /// how many entries went.
+    pub fn drop_imported_non_music(&self, music_title: impl Fn(&str) -> bool) -> Result<usize> {
+        let device = self.device_id();
+        let now = self.tick();
+        Ok(self
+            .repair(NON_MUSIC_KEY, |tx| {
+                let found = imported_non_music_in(tx, &music_title)?;
+                for (entry, track, title, playlist) in &found {
+                    tx.execute(
+                        "UPDATE playlist_entry SET deleted = 1, updated_at = ?2, updated_by = ?3 WHERE id = ?1",
+                        params![entry, now, device.as_str()],
+                    )?;
+                    refresh_in_library(tx, track)?;
+                    note!("library: «{title}» ({track}) of the imported playlist «{playlist}» is no music, its entry went");
+                }
+                Ok((found.len(), found.len()))
+            })?
+            .unwrap_or(0))
+    }
+
     /// Stream-only tracks of `service` that still lack what the service
     /// knows (an import made them from an export file: no length), as
     /// `(track, remote id)`, oldest first. Unavailable sources are left out.
@@ -554,6 +648,52 @@ mod tests {
         assert_eq!(lib.cache_get("disco.x").unwrap(), None);
         lib.cache_put("disco.x", 42, "[1|2]").unwrap();
         assert_eq!(lib.cache_get("disco.x").unwrap(), Some((42, "[1|2]".to_owned())));
+    }
+
+    /// TODO 18: videos that are no music stayed in «Save» of an old
+    /// Takeout import. Only the entries of an imported playlist with
+    /// nothing that says they are music go, once; the tracks stay.
+    #[test]
+    fn imported_entries_that_are_no_music_go_once() {
+        let lib = lib();
+        let video = |id: &str, title: &str| {
+            let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), title);
+            t.artists = vec![ArtistRef::new(None, "Some Channel")];
+            lib.ensure_stream_tracks(&[t]).unwrap()[0]
+        };
+        let asked = |id: &str, value: &str| lib.cache_put(&format!("import.song.youtube:{id}"), 1, value).unwrap();
+        let vlog = video("vlog0000001", "Как я провёл лето");
+        asked("vlog0000001", "-");
+        let clip = video("clip0000001", "Группа крови (music video)");
+        asked("clip0000001", "-");
+        let liked = video("like0000001", "Обзор клавиатуры");
+        asked("like0000001", "-");
+        lib.like(liked).unwrap();
+        let played = video("play0000001", "Стрим с друзьями");
+        asked("play0000001", "-");
+        lib.import_events(&[event(played, 1_000, EventType::Start)]).unwrap();
+        let unasked = video("ask00000001", "Разбор партии");
+        let untitled = video("noti0000001", "noti0000001");
+        asked("noti0000001", "-");
+        let song = video("song0000009", "Летний вечер");
+        asked("song0000009", "{\"some\":\"song\"}");
+        let save = lib.create_playlist("Save").unwrap();
+        lib.set_import_key(EntityKind::Playlist, "youtube:save", *save.id.as_uuid()).unwrap();
+        let all = [vlog, clip, liked, played, unasked, untitled, song];
+        lib.playlist_add_many(save.id, &all).unwrap();
+        let own = lib.create_playlist("Мой").unwrap();
+        lib.playlist_add(own.id, vlog).unwrap();
+        let music = |t: &str| t.to_lowercase().contains("music");
+        assert_eq!(lib.drop_imported_non_music(music).unwrap(), 1);
+        let left: Vec<TrackId> = lib.playlist_entries(save.id, 0, 100).unwrap().iter().map(|e| e.entry.track_id).collect();
+        assert_eq!(left, all[1..].to_vec());
+        assert_eq!(lib.playlist_len(own.id).unwrap(), 1, "a playlist of the user's own keeps it");
+        assert!(lib.get_track(vlog).unwrap().is_some(), "the track stays");
+        assert!(lib.meta_value(NON_MUSIC_KEY).unwrap().is_some());
+        // Once: put back, it stays.
+        lib.playlist_add(save.id, vlog).unwrap();
+        assert_eq!(lib.drop_imported_non_music(music).unwrap(), 0);
+        assert_eq!(lib.playlist_len(save.id).unwrap(), 7);
     }
 
     /// The albums only an import's playlists brought; one the user liked,

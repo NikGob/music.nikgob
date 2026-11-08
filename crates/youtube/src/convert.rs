@@ -7,7 +7,7 @@ use nikgob_core::streaming::{
 };
 use rustypipe::model::{
     AlbumId, AlbumItem, AlbumType, ArtistId, ArtistItem, MusicAlbum, MusicArtist, MusicPlaylist,
-    MusicPlaylistItem, Thumbnail, TrackItem, TrackType,
+    MusicPlaylistItem, Thumbnail, TrackItem, TrackType, VideoDetails,
 };
 
 /// Edge of the square cover asked from Google's image server (YouTube Music
@@ -87,6 +87,20 @@ pub(crate) fn track(t: &TrackItem) -> StreamTrack {
     out.track_no = t.track_nr.filter(|&n| n > 0).map(u32::from);
     out.cover_url = best_image(&t.cover);
     out.kind = track_kind(t.track_type);
+    out
+}
+
+/// A video from its own YouTube page (YouTube Music has no song details of
+/// it): its title, its channel as the artist (without « - Topic»), no
+/// album, no length, a video (its thumbnails are frames, no cover).
+pub(crate) fn video(v: &VideoDetails) -> StreamTrack {
+    let mut out = StreamTrack::new(rid(&v.id), v.name.clone());
+    let channel = v.channel.name.trim();
+    let channel = channel.strip_suffix(" - Topic").unwrap_or(channel).trim();
+    if !channel.is_empty() {
+        out.artists = vec![ArtistRef::new(None, channel.to_owned())];
+    }
+    out.kind = TrackKind::Video;
     out
 }
 

@@ -637,6 +637,13 @@ impl Worker {
         // Once each, after a backup: doubles of a song, an artist or an
         // album become one, and every album has a line per place it counts.
         self.lib.repair_catalog();
+        // Once: the videos that are no music an old import left in its
+        // playlists go from them (entries only).
+        match self.lib.drop_imported_non_music(streams::music_video_title) {
+            Ok(0) => {}
+            Ok(n) => log::info!("library: repair of imported non-music entries: {n}"),
+            Err(e) => log::warn!("library: repair of imported non-music entries: {e}"),
+        }
         self.export_if_stale();
         self.load_torrent_history();
         self.publish_downloads();
@@ -2202,7 +2209,13 @@ impl Worker {
         let by_id: std::collections::HashMap<_, _> = releases.iter().map(|r| (r.release.id, r)).collect();
         let often: Vec<&nikgob_library::ReleaseRow> = often.iter().filter_map(|id| by_id.get(id).copied()).collect();
         let res = &mut self.res;
-        let releases: Vec<_> = releases.iter().map(|r| res.release(r)).collect();
+        // By when they came, the albums only an import's playlists brought
+        // stay out, as in «Недавно добавлено».
+        let releases: Vec<_> = releases
+            .iter()
+            .filter(|r| sort != nikgob_view::ReleaseSort::Added || !brought.contains(&r.release.id))
+            .map(|r| res.release(r))
+            .collect();
         let artists: Vec<_> = artists
             .iter()
             .map(|a| {

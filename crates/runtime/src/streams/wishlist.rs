@@ -47,7 +47,7 @@ use nikgob_core::streaming::{EntityKind, Service, StreamError};
 use nikgob_import::ImportTargets;
 use nikgob_metadata::text::{artist_key, title_key};
 use nikgob_sources::select::{pick, rank};
-use nikgob_sources::torrent::{candidate_of, offer_of, pick_files};
+use nikgob_sources::torrent::{candidate_of, look_first, offer_of, pick_files};
 use nikgob_view::{self as v, Command};
 
 use super::Msg;
@@ -258,8 +258,15 @@ struct Probe {
     passed: HashSet<usize>,
 }
 
-/// Torrents of a track looked into before «Подтверди», at most.
-const PROBE_MAX: usize = 6;
+/// Torrents of a track looked into before «Подтверди», at most (each
+/// takes up to a minute), the likeliest first ([`look_first`]); the first
+/// that has the file ends the looking.
+const PROBE_MAX: usize = 3;
+
+/// `cache` key prefix of «the item's song is not in this torrent» (per
+/// track, or album, and torrent): such a torrent is never looked into or
+/// offered for it again.
+const MISS_KEY: &str = "wish_torrent_miss.v1";
 
 /// `cache` key: the track items waiting in «Подтверди» with torrents shown
 /// unlooked (before [`Probe`]) were searched for again.
@@ -1314,6 +1321,14 @@ impl Worker {
             .into_iter()
             // With a copy, only what is better than it.
             .filter(|r| copy.is_none_or(|q| r.offer.quality() > q))
+            // A torrent whose list had no file of it before: never again.
+            .filter(|r| {
+                let missed = self.missed_before(&item, &r.offer);
+                if missed {
+                    log::info!("wishlist: {} had no file of it before", r.offer.title);
+                }
+                !missed
+            })
             // A better copy of an album is a folder with the album's songs
             // in it, not one that only shares a word with it.
             .filter(|r| match crate::soulseek::folder_listing(&r.offer) {
@@ -1385,28 +1400,35 @@ impl Worker {
     /// ([`Probe`]).
     fn confirm_after_look(&mut self, id: WishlistId, offers: Vec<Offer>) {
         // A track's torrents, and those of an album a better copy is looked
-        // for (its list must have the album's songs), are looked into first.
-        let track = self
-            .lib
-            .get_wishlist_item(id)
-            .ok()
-            .flatten()
+        // for (its list must have the album's songs), are looked into first,
+        // the likeliest by their titles and sizes first.
+        let item = self.lib.get_wishlist_item(id).ok().flatten();
+        let track = item
+            .as_ref()
             .is_some_and(|i| i.scope == WishlistScope::Track || i.origin == WishlistOrigin::Upgrade);
-        let todo: Vec<usize> = offers
+        let mut looked: Vec<usize> = offers
             .iter()
             .enumerate()
             .filter(|(_, o)| track && o.source == SourceKey::Torrents)
             .map(|(i, _)| i)
-            .take(PROBE_MAX)
             .collect();
-        // Past the looked-into ones, the torrents stay out.
-        let last = todo.last().copied();
-        let all: Vec<Offer> = offers
-            .into_iter()
-            .enumerate()
-            .filter(|(i, o)| !track || o.source != SourceKey::Torrents || last.is_some_and(|l| *i <= l))
-            .map(|(_, o)| o)
-            .collect();
+        if let Some(item) = &item {
+            let want = self.want_of(item);
+            // Stable: alike ones stay in the policy's order.
+            looked.sort_by(|a, b| look_first(&offers[*b], &want).total_cmp(&look_first(&offers[*a], &want)));
+        }
+        looked.truncate(PROBE_MAX);
+        // The torrents not looked into stay out; the rest keep their order.
+        let mut all: Vec<Offer> = Vec::new();
+        let mut at: HashMap<usize, usize> = HashMap::new();
+        for (i, o) in offers.into_iter().enumerate() {
+            if track && o.source == SourceKey::Torrents && !looked.contains(&i) {
+                continue;
+            }
+            at.insert(i, all.len());
+            all.push(o);
+        }
+        let todo: Vec<usize> = looked.iter().filter_map(|i| at.get(i).copied()).collect();
         self.streaming.wish.probe.insert(id, Probe { all, todo, passed: HashSet::new() });
         self.probe_next(id);
     }
@@ -1460,7 +1482,8 @@ impl Worker {
     }
 
     /// The torrent the item's [`Probe`] looks into now has the track's
-    /// file (`found`) or not: on to the next.
+    /// file (`found`) or not: on to the next, or to «Подтверди» with it
+    /// once one has it.
     fn probe_done(&mut self, id: WishlistId, found: bool) {
         if let Some(p) = self.streaming.wish.probe.get_mut(&id)
             && !p.todo.is_empty()
@@ -1468,6 +1491,7 @@ impl Worker {
             let i = p.todo.remove(0);
             if found {
                 p.passed.insert(i);
+                p.todo.clear();
             }
         }
         self.probe_next(id);
@@ -1637,10 +1661,18 @@ impl Worker {
         }
         if self.streaming.wish.probe.contains_key(&id) {
             let want = self.want_of(&item);
-            let found = result.as_ref().is_ok_and(|meta| {
-                let files: Vec<(usize, String, u64)> = meta.files.iter().map(|f| (f.index, f.path.clone(), f.size)).collect();
-                pick_files(&files, &want).is_some() && self.torrent_fits(&item, &files)
-            });
+            let found = match &result {
+                Ok(meta) => {
+                    let files: Vec<(usize, String, u64)> = meta.files.iter().map(|f| (f.index, f.path.clone(), f.size)).collect();
+                    let found = pick_files(&files, &want).is_some() && self.torrent_fits(&item, &files);
+                    if !found {
+                        self.note_miss(&item, &offer, Some(meta.info_hash.as_str()));
+                    }
+                    found
+                }
+                // Not listed (no peers in time): not a miss, asked again later.
+                Err(_) => false,
+            };
             log::info!("wishlist: {} {} of {:?}", offer.title, if found { "has a file" } else { "has no file" }, want.title);
             self.probe_done(id, found);
             return;
@@ -1657,6 +1689,7 @@ impl Worker {
         let want = self.want_of(&item);
         let Some(picked) = pick_files(&files, &want).filter(|_| self.torrent_fits(&item, &files)) else {
             log::info!("wishlist: {} has no file of {:?}", offer.title, want.title.as_ref().or(want.album.as_ref()));
+            self.note_miss(&item, &offer, Some(meta.info_hash.as_str()));
             self.wish_next_candidate(id);
             return;
         };
@@ -1680,6 +1713,52 @@ impl Worker {
         };
         self.add_payload_for(payload, Some(picked), magnet, Some(id));
         self.publish_wishlist();
+    }
+
+    /// What an item's torrent misses are kept under: its track, or its
+    /// album.
+    fn miss_target(item: &WishlistItem) -> Option<String> {
+        match item.scope {
+            WishlistScope::Track => item.track_id.map(|t| format!("t{t}")),
+            _ => item.release_id.map(|r| format!("r{r}")),
+        }
+    }
+
+    /// The torrent's `cache` keys of a miss for the item: its info hash
+    /// (the indexer's, the list's) and the indexer's id of it.
+    fn miss_keys(item: &WishlistItem, offer: &Offer, listed: Option<&str>) -> Vec<String> {
+        let Some(target) = Self::miss_target(item) else { return Vec::new() };
+        let cand = candidate_of(offer);
+        let mut keys: Vec<String> = cand
+            .as_ref()
+            .and_then(|c| c.info_hash.as_deref())
+            .into_iter()
+            .chain(listed)
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(|h| format!("{MISS_KEY}:{target}:{}", h.to_lowercase()))
+            .collect();
+        if !offer.id.is_empty() {
+            keys.push(format!("{MISS_KEY}:{target}:id:{}:{}", offer.provider, offer.id));
+        }
+        keys.dedup();
+        keys
+    }
+
+    /// The torrent's list came without the item's file: kept, so it is
+    /// never looked into or offered for the item again.
+    fn note_miss(&self, item: &WishlistItem, offer: &Offer, listed: Option<&str>) {
+        for key in Self::miss_keys(item, offer, listed) {
+            if let Err(e) = self.lib.cache_put(&key, Self::now(), "1") {
+                log::warn!("wishlist: a torrent's miss is not kept: {e}");
+            }
+        }
+    }
+
+    /// The torrent's list was seen before without the item's file.
+    fn missed_before(&self, item: &WishlistItem, offer: &Offer) -> bool {
+        offer.source == SourceKey::Torrents
+            && Self::miss_keys(item, offer, None).iter().any(|k| self.lib.cache_get(k).ok().flatten().is_some())
     }
 
     /// A torrent's list (path, size) for an item that looks for a better

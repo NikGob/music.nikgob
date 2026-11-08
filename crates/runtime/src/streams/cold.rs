@@ -91,6 +91,10 @@ const HISTORY_BATCH: usize = 1_000;
 /// per [`YT_LOOKUP_EVERY`] (stopping at a rate limit).
 const YT_LOOKUPS: usize = 3_000;
 const YT_LOOKUP_EVERY: Duration = Duration::from_secs(1);
+/// Those look-ups stop after this many failures in a row that are not «no
+/// such video» (the network, answers RustyPipe cannot read): the rest are
+/// completed later ([`Worker::enrich_tick`]).
+const YT_LOOKUP_FAILS: usize = 10;
 /// Tracks completed from a service per batch (one request for Spotify:
 /// `tracks(ids)`; YouTube asks one by one), and the pause between batches
 /// (Spotify's quota is shared).
@@ -98,6 +102,16 @@ const ENRICH_BATCH_SPOTIFY: u32 = 50;
 const ENRICH_BATCH_YOUTUBE: u32 = 10;
 /// Nothing to complete: look again after this.
 const ENRICH_IDLE: Duration = Duration::from_secs(10 * 60);
+/// A track a service could not complete (gone, no details of it, or
+/// details without a length) is asked again after this, not at each start.
+const ENRICH_MISS_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// How far down the list of tracks to complete a batch looks past the
+/// ones tried or set aside, at most.
+const ENRICH_WINDOW_MAX: u32 = 5_000;
+/// Library cache key of a track a service could not complete.
+fn enrich_miss_key(service: Service, id: &str) -> String {
+    format!("enrich.miss.{}:{id}", service.as_str())
+}
 /// A play the app recorded itself within this of a play the API reports
 /// (plus the track's length) is the same play.
 const SAME_PLAY_MS: i64 = 120_000;
@@ -391,26 +405,41 @@ fn wanted(i: &Item, full: &HashMap<String, StreamTrack>) -> Wanted {
 }
 
 /// Looks up YouTube video ids an export lists without a title: one a
-/// second, stopping at a rate limit (the rest keep the id as their title
-/// and are completed later, a few at a time).
+/// second, stopping at a rate limit or after [`YT_LOOKUP_FAILS`] failures
+/// in a row (the rest keep the id as their title and are completed later,
+/// a few at a time). A video YouTube Music has no details of stays unknown.
 async fn youtube_lookups(svc: Arc<dyn StreamService>, ids: Vec<String>) -> HashMap<String, StreamTrack> {
     let mut out = HashMap::new();
     let total = ids.len();
+    let (mut failed, mut gone) = (0, 0);
     for (i, id) in ids.into_iter().enumerate() {
         if i > 0 {
             tokio::time::sleep(YT_LOOKUP_EVERY).await;
         }
         match svc.track(&id).await {
             Ok(t) => {
+                failed = 0;
                 out.insert(id, t);
             }
             Err(e @ StreamError::RateLimited { .. }) => {
                 log::warn!("youtube: export look-ups stopped after {i} of {total}: {e}");
                 break;
             }
-            Err(_) => {}
+            Err(StreamError::Unavailable) => {
+                failed = 0;
+                gone += 1;
+            }
+            Err(e) => {
+                failed += 1;
+                log::debug!("youtube: export look-up of {id}: {e}");
+                if failed >= YT_LOOKUP_FAILS {
+                    log::warn!("youtube: export look-ups stopped after {i} of {total}, {failed} failed in a row: {e}");
+                    break;
+                }
+            }
         }
     }
+    log::info!("youtube: export look-ups: {} of {total} found, {gone} without details", out.len());
     out
 }
 
@@ -1449,14 +1478,30 @@ impl Worker {
                 // `/tracks?ids=`: 50 a request.
                 Service::Soundcloud => ENRICH_BATCH_SPOTIFY,
             };
-            let todo: Vec<(TrackId, String)> = self
-                .lib
-                .stream_tracks_to_enrich(service, batch * 3)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|(t, _)| !e.tried.contains(t))
-                .take(batch as usize)
-                .collect();
+            // Not what was tried this run or could not be completed lately;
+            // past those, further down the list (they never hold it up).
+            let now = nikgob_library::now_ms();
+            let lib = &self.lib;
+            let missed = |id: &str| {
+                lib.cache_get(&enrich_miss_key(service, id))
+                    .ok()
+                    .flatten()
+                    .is_some_and(|(at, _)| now - at < ENRICH_MISS_MS)
+            };
+            let mut window = batch * 3;
+            let todo: Vec<(TrackId, String)> = loop {
+                let rows = lib.stream_tracks_to_enrich(service, window).unwrap_or_default();
+                let more = rows.len() == window as usize && window < ENRICH_WINDOW_MAX;
+                let todo: Vec<(TrackId, String)> = rows
+                    .into_iter()
+                    .filter(|(t, id)| !e.tried.contains(t) && !missed(id.as_str()))
+                    .take(batch as usize)
+                    .collect();
+                if todo.len() == batch as usize || !more {
+                    break todo;
+                }
+                window = (window * 4).min(ENRICH_WINDOW_MAX);
+            };
             if todo.is_empty() {
                 e.next_at = Some(Instant::now() + ENRICH_IDLE);
                 continue;
@@ -1486,19 +1531,26 @@ impl Worker {
         };
         let mut next = Instant::now() + pause;
         let mut done = 0;
+        let now = nikgob_library::now_ms();
         for (track, id, r) in results {
             match r {
                 Ok(t) => {
                     self.streaming.learn(std::slice::from_ref(&t));
+                    // A video's own page has no length: not asked again soon.
+                    if t.duration_ms.is_none() {
+                        let _ = self.lib.cache_put(&enrich_miss_key(service, &id), now, "-");
+                    }
                     if self.lib.upsert_stream_track(&t).is_ok() {
                         done += 1;
                     }
                 }
                 // YouTube Music has no song details for many videos that
-                // play (an upload of a soundtrack, a cover): the video is
-                // set aside only when it fails to play.
+                // play (an upload of a soundtrack, a cover), and a video's
+                // page may be gone: the video is set aside only when it
+                // fails to play, and not asked again soon.
                 Err(StreamError::Unavailable) if service == Service::Youtube => {
                     log::debug!("{service}: no details of {id}; it stays playable");
+                    let _ = self.lib.cache_put(&enrich_miss_key(service, &id), now, "-");
                 }
                 Err(StreamError::Unavailable) => {
                     let kind = service.source_kind();

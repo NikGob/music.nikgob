@@ -11,10 +11,13 @@
 //! is looked for when the torrent's list comes, and it is skipped when it
 //! is not there).
 
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 use nikgob_core::source::{Offer, OfferScope, Want, WantScope};
 use nikgob_metadata::text::{artist_key, similarity, title_key};
 
-use crate::text::{album_keys, artist_keys, franchise_of, is_soundtrack, title_keys};
+use crate::text::{album_keys, artist_keys, artist_names, franchise_of, is_soundtrack, title_keys};
 
 /// Artist names this alike are one.
 const ARTIST: f64 = 0.85;
@@ -61,11 +64,80 @@ pub fn other_version(text: &str, want_text: &str) -> Option<&'static str> {
     OTHER_VERSION.iter().copied().find(|v| has_word(&t, v) && !has_word(&w, v))
 }
 
-/// The artist's name in a free text (a torrent title): its words, or the
-/// head before " - " alike.
-fn names_artist(hay_key: &str, raw: &str, keys: &[String]) -> bool {
-    let head = raw.split(" - ").next().map(|h| title_key(h).base).unwrap_or_default();
-    keys.iter().any(|k| contains_words(hay_key, k) || similarity(&head, k) >= ARTIST)
+/// Format and codec words of release titles («[MP3 320 Kbps]», «WEB FLAC»):
+/// never a part of an artist's name there.
+const FORMAT_WORDS: &[&str] = &[
+    "mp3", "flac", "lossless", "hires", "320", "256", "192", "128", "v0", "kbps", "kbit", "web", "webrip", "cd",
+    "cdrip", "vinyl", "24bit", "16bit", "khz", "aac", "m4a", "alac", "ogg", "opus", "wav", "ape", "mqa", "dsd",
+];
+
+/// [`FORMAT_WORDS`] folded like the keys they are met in.
+static FORMAT_KEYS: LazyLock<HashSet<String>> = LazyLock::new(|| FORMAT_WORDS.iter().map(|w| title_key(w).base).collect());
+
+/// A folded word of a format tag: «mp3», «flac», «320kbps», «48khz».
+fn format_word(w: &str) -> bool {
+    if FORMAT_KEYS.contains(w) {
+        return true;
+    }
+    let rest = w.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.len() < w.len() && ["kbps", "kbit", "k", "bit", "hz", "khz"].contains(&rest)
+}
+
+/// The parts of a release title an artist may open: around its dashes and
+/// a peer's folder slashes.
+fn title_parts(raw: &str) -> Vec<&str> {
+    let mut parts = vec![raw];
+    for sep in [" - ", " – ", " — ", " / "] {
+        parts = parts.into_iter().flat_map(|p| p.split(sep)).collect();
+    }
+    parts
+}
+
+/// The folded words of `key` open `part` (past a year, a number or a
+/// format tag in front).
+fn opens(part: &str, key: &str) -> bool {
+    let words: Vec<&str> = part
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .skip_while(|w| w.chars().all(|c| c.is_ascii_digit()) || format_word(w))
+        .collect();
+    let want: Vec<&str> = key.split(' ').collect();
+    words.len() >= want.len() && words[..want.len()] == want[..]
+}
+
+/// The artist's name (any of `names`, as written) in a free text (a
+/// torrent title, a peer's folders): its words in a row at word
+/// boundaries, or the head before the dash alike. Format and codec words
+/// are never a part of it: a name that has them («nyan.mp3») is met only
+/// as written or as the whole head (not «Happy Nyan! Days … MP3»). A
+/// short name of one word («Eve», «Кино») only where an artist stands:
+/// in the head before the dash, or opening a part of the title.
+fn names_artist(hay_key: &str, raw: &str, names: &[String]) -> bool {
+    let dash = raw.split_once(" - ").or_else(|| raw.split_once(" – ")).or_else(|| raw.split_once(" — "));
+    let head = title_key(dash.map_or(raw, |(h, _)| h)).base;
+    let raw_lower = raw.to_lowercase();
+    names.iter().any(|name| {
+        let key = artist_key(name);
+        if key.is_empty() {
+            return false;
+        }
+        let words: Vec<&str> = key.split(' ').collect();
+        if words.iter().any(|w| format_word(w)) {
+            let written = name.trim().to_lowercase();
+            return (!written.is_empty() && has_word(&raw_lower, &written)) || (dash.is_some() && head == key);
+        }
+        if similarity(&head, &key) >= ARTIST {
+            return true;
+        }
+        if word_runs(hay_key, &key) == 0 {
+            return false;
+        }
+        let len = key.chars().count();
+        let short = words.len() == 1 && (len <= 2 || (len <= 4 && key.is_ascii()));
+        !short
+            || (dash.is_some() && word_runs(&head, &key) > 0)
+            || title_parts(raw).iter().any(|p| opens(&title_key(p).base, &key))
+    })
 }
 
 /// "Someone - …" whose "…" is where the artist's name is: the name is a
@@ -150,7 +222,7 @@ pub fn performer_of(offer: &Offer, want: &Want) -> Option<(String, String)> {
     match (&offer.artist, &offer.track_title) {
         (Some(artist), title) => (similarity(&artist_key(artist), &key) >= ARTIST && !same_artist(artist, want))
             .then(|| (artist.clone(), title.clone().unwrap_or_else(|| song.to_owned()))),
-        (None, _) => names_artist(&title_key(&offer.title).base, &offer.title, std::slice::from_ref(&key))
+        (None, _) => names_artist(&title_key(&offer.title).base, &offer.title, &[head.to_owned()])
             .then(|| (head.to_owned(), song.to_owned())),
     }
 }
@@ -260,7 +332,7 @@ fn judge_release(offer: &Offer, want: &Want) -> Option<Verdict> {
         .and_then(franchise_of)
         .is_some_and(|f| contains_words(&hay, &title_key(&f).base));
     let soundtrack = want.album.as_deref().is_some_and(is_soundtrack) || franchise;
-    let artist = names_artist(&hay, &offer.title, &keys);
+    let artist = names_artist(&hay, &offer.title, &artist_names(want));
     // A soundtrack's torrent names the game, not its composer.
     if !artist && !(soundtrack && (names_album || franchise)) {
         return None;
@@ -277,6 +349,12 @@ fn judge_release(offer: &Offer, want: &Want) -> Option<Verdict> {
     let seeded = offer.seeders.is_none_or(|s| s > 0);
     let lossless = offer.lossless();
     let named = names_album || names_title || franchise;
+    // A song of one soundtrack is not on another work's soundtrack by its
+    // composer («Bâan» of Kevin Penkin is not on «MADE IN ABYSS ORIGINAL
+    // SOUNDTRACK 3»).
+    if want.scope == WantScope::Track && wanted_ost && !named && !collection && is_soundtrack(&offer.title) {
+        return None;
+    }
     // The artist's name only after the dash is the title of another one's
     // release, unless the release names what is wished too.
     if artist && !named && artist_after_dash(&offer.title, &keys) {
@@ -438,6 +516,55 @@ mod tests {
         // The artist's own "Song - Version": nothing to change.
         let w = want("Eve", "Underdog - Acoustic", "Underdog", 194);
         assert_eq!(performer_of(&track("Eve", "Underdog - Acoustic", 194), &w), None);
+    }
+
+    /// TODO 23: «Я не интроверт» of nyan.mp3 got «Happy Nyan! Days» of
+    /// Love Live, «nyan» in its title and «MP3» in its format tag.
+    #[test]
+    fn an_artist_named_with_format_words_is_met_only_as_a_whole() {
+        let w = want("nyan.mp3", "Я не интроверт", "nyan.pop", 0);
+        for t in [
+            "Nijigasaki High School Idol Club - Happy Nyan! Days (2023) [MP3 320]",
+            "[MP3] Happy Nyan! Days / Nijigasaki",
+            "Nyan Nyan Best (2019) [MP3|320 kbps]",
+        ] {
+            assert!(judge(&torrent(t, 9), &w).is_none(), "{t}");
+        }
+        assert!(judge(&torrent("nyan.mp3 - Я не интроверт (2023) [MP3 320]", 2), &w).is_some());
+        assert!(judge(&torrent("nyan.mp3 - nyan.pop (2023) [FLAC]", 2), &w).unwrap().sure);
+        assert!(judge(&torrent("[Hyperpop] nyan.mp3 & Dekko - Night Drive (2022) [MP3 320]", 2), &w).is_some(), "as written");
+        assert!(format_word("mp3") && format_word("320kbps") && format_word(&title_key("WEB").base) && !format_word("nyan"));
+    }
+
+    /// A short name of one word stands where an artist stands, not inside
+    /// another release's name.
+    #[test]
+    fn a_short_name_is_the_artist_only_where_an_artist_stands() {
+        let w = want("Eve", "Underdog", "Underdog", 0);
+        assert!(judge(&torrent("Lucky Star - Happy Eve Days (2020) [FLAC]", 9), &w).is_none());
+        assert!(judge(&torrent("Christmas Eve Underdog Songs [FLAC]", 9), &w).is_none());
+        assert!(judge(&torrent("Eve - Underdog (2023) [FLAC]", 2), &w).unwrap().sure);
+        assert!(judge(&torrent("[Maid-chan] Eve - Underdog [FLAC]", 2), &w).unwrap().sure);
+        assert!(judge(&torrent("(2023) Eve Underdog [FLAC]", 2), &w).is_some());
+        // A longer name anywhere, its words in a row.
+        let w = want("Sawai Miku", "Nakimushi.", "Nakimushi.", 0);
+        assert!(judge(&torrent("Miku Sawai-chan Anime Hits [FLAC]", 2), &w).is_none(), "not in a row");
+    }
+
+    /// TODO 23: «Bâan» of Kevin Penkin (from «Bâan -大人の彊界- Original
+    /// SoundTrack») got his other soundtracks, the song in none.
+    #[test]
+    fn a_song_of_one_soundtrack_is_not_on_another_one() {
+        let w = want("Kevin Penkin", "Bâan", "Bâan -大人の彊界- Original SoundTrack", 0);
+        for t in [
+            "Kevin Penkin - MADE IN ABYSS ORIGINAL SOUNDTRACK 3 (2022) [FLAC]",
+            "Kevin Penkin - Tower of God Original Soundtrack [FLAC]",
+            "Tower of God Original Soundtrack [FLAC]",
+        ] {
+            assert!(judge(&torrent(t, 9), &w).is_none(), "{t}");
+        }
+        assert!(judge(&torrent("Kevin Penkin - Bâan -大人の彊界- Original SoundTrack [FLAC]", 2), &w).unwrap().sure);
+        assert!(judge(&torrent("Kevin Penkin - Discography (2014-2024) [FLAC]", 2), &w).is_some(), "its list is looked into");
     }
 
     #[test]
