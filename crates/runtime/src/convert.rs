@@ -333,6 +333,9 @@ impl Resolver {
             quality,
             liked,
             lines,
+            // From the files' tags, filled by the page's load.
+            released: None,
+            label: None,
         }
     }
 

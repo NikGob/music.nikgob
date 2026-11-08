@@ -18,7 +18,7 @@ pub use nikgob_core::streaming::{
     SoloistPhase, SoloistStatus, TrackKind,
 };
 
-use crate::{ArtistId, PlaylistId, ReleaseId, ReleaseType, StreamArtistLinks, TrackId};
+use crate::{ArtistId, PlaylistId, ReleaseDay, ReleaseId, ReleaseType, StreamArtistLinks, TrackId};
 
 // ---------------------------------------------------------------- accounts
 
@@ -448,6 +448,8 @@ pub struct StreamPageView {
     pub subtitle_artists: StreamArtistLinks,
     pub cover_url: Option<String>,
     pub year: Option<i32>,
+    /// Album: the day it came out, when the service tells it.
+    pub released: Option<ReleaseDay>,
     pub release_type: Option<ReleaseType>,
     /// Album / playlist tracks in order (empty for an artist).
     pub tracks: Vec<StreamTrackRow>,
@@ -481,6 +483,7 @@ impl StreamPageView {
             subtitle_artists: StreamArtistLinks::default(),
             cover_url: None,
             year: None,
+            released: None,
             release_type: None,
             tracks: Vec::new(),
             albums: Vec::new(),

@@ -2271,11 +2271,38 @@ impl Worker {
             return;
         };
         let liked = self.lib.release_liked(id).unwrap_or(false);
-        let detail = self.res.release_detail(&release, &listing, liked);
+        let mut detail = self.res.release_detail(&release, &listing, liked);
+        (detail.released, detail.label) = self.release_facts(&release, &detail.tracks);
         self.publish(|s| {
             s.release = Some(detail);
         });
         self.complete_tracklist(id);
+    }
+
+    /// The day an album came out (beyond its year) and its label: from the
+    /// tags of its first file that reads, the day else from a service.
+    fn release_facts(
+        &self,
+        release: &nikgob_core::model::Release,
+        tracks: &[nikgob_view::TrackRow],
+    ) -> (Option<nikgob_view::ReleaseDay>, Option<String>) {
+        let tags = tracks.iter().filter(|t| t.has_local).find_map(|t| {
+            let src = self.lib.active_source(t.id).ok().flatten().filter(|s| s.kind.is_local())?;
+            nikgob_import::tags::read_tags(&self.res.path(&src.locator)).ok().map(|(tags, _)| tags)
+        });
+        let label = tags
+            .as_ref()
+            .and_then(|t| t.label.as_deref())
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned);
+        let day = |d: &str| nikgob_view::ReleaseDay::parse(d, release.year);
+        let released = tags
+            .as_ref()
+            .and_then(|t| t.date.as_deref())
+            .and_then(day)
+            .or_else(|| self.kept_released(release.id).as_deref().and_then(day));
+        (released, label)
     }
 
     fn load_artist(&mut self, id: nikgob_core::model::ArtistId) {
