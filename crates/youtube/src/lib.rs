@@ -470,6 +470,27 @@ impl Youtube {
     }
 }
 
+/// A video's song details from YouTube Music, else (no song details of it,
+/// or an answer RustyPipe cannot read) the video's own page.
+async fn details_or_page(i: &Inner, id: &str) -> Result<StreamTrack, StreamError> {
+    let details = i
+        .gate
+        .run(Lane::Catalog, async { i.rp.query().music_details(id).await.map_err(map_err) })
+        .await;
+    match details {
+        Ok(d) => Ok(convert::track(&d.track)),
+        Err(e @ (StreamError::Unavailable | StreamError::Parse(_))) => {
+            log::debug!("youtube: no song details of {id} ({e}), its own page then");
+            let v = i
+                .gate
+                .run(Lane::Catalog, async { i.rp.query().video_details(id).await.map_err(map_err) })
+                .await?;
+            Ok(convert::video(&v))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// A spawned task, aborted when dropped.
 struct Joined<T>(JoinHandle<Result<T, StreamError>>);
 
@@ -872,6 +893,27 @@ impl StreamService for Youtube {
                     Ok(convert::track(&d.track))
                 })
                 .await
+        })
+    }
+
+    /// Each video's details, one by one. A video YouTube Music has no song
+    /// details of (a plain upload, one it does not list: `music_details`
+    /// fails for it) comes from its own page, its title and channel without
+    /// a length; one that is gone, or whose answer cannot be read, is
+    /// `None`: it fails alone, not the whole batch. Only a pause (rate
+    /// limit), the login or the network fail them all.
+    fn tracks(&self, ids: &[String]) -> BoxFuture<'_, Result<Vec<Option<StreamTrack>>, StreamError>> {
+        let ids = ids.to_vec();
+        self.run(move |inner| async move {
+            let mut out = Vec::with_capacity(ids.len());
+            for id in &ids {
+                match details_or_page(&inner, id).await {
+                    Ok(t) => out.push(Some(t)),
+                    Err(StreamError::Unavailable | StreamError::Parse(_)) => out.push(None),
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(out)
         })
     }
 
