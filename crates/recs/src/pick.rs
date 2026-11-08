@@ -192,6 +192,15 @@ impl<'a> Recs<'a> {
         self.taste.last_played_at(i).is_some_and(|t| self.now() - t < ms)
     }
 
+    /// The user has heard the track at `i`: it started or played (here or
+    /// in an imported history), or it is liked.
+    pub(crate) fn heard(&self, i: usize) -> bool {
+        self.taste.last_played_at(i).is_some()
+            || self.taste.plays_at(i) > 0
+            || self.taste.liked_at(i)
+            || self.model.is_some_and(|m| m.tracks.get(i).is_some_and(|t| t.last_start.is_some()))
+    }
+
     /// A slot for the catalog track at `i`.
     pub(crate) fn slot(&self, i: usize, reason: Reason, score: f32) -> Slot {
         let t = self.info(i);
@@ -423,12 +432,30 @@ impl Diversity {
 /// share. Short when `cands` are; when too few fit, the rest by score
 /// anyway, so a library of a single world gives as many as there are.
 pub(crate) fn select_diverse(cands: Vec<Slot>, n: usize, rules: &Diversity, taken: &mut HashSet<Item>) -> Vec<Slot> {
-    let (artist_cap, album_cap, _) = rules.caps(n);
-    let worlds: HashSet<u64> = cands.iter().filter_map(|s| s.world).collect();
-    let world_cap = if worlds.len() > 1 { rules.world_cap(n) } else { usize::MAX };
+    select_more(cands, n, n, rules, taken, &[])
+}
+
+/// [`select_diverse`] of `n` more after `prior` (already selected): the
+/// caps are those of `total` picks, and `prior` counts in them.
+pub(crate) fn select_more(cands: Vec<Slot>, n: usize, total: usize, rules: &Diversity, taken: &mut HashSet<Item>, prior: &[Slot]) -> Vec<Slot> {
+    let total = total.max(n + prior.len());
+    let (artist_cap, album_cap, _) = rules.caps(total);
+    let worlds: HashSet<u64> = cands.iter().chain(prior).filter_map(|s| s.world).collect();
+    let world_cap = if worlds.len() > 1 { rules.world_cap(total) } else { usize::MAX };
     let mut per_artist: HashMap<u64, usize> = HashMap::new();
     let mut per_album: HashMap<u64, usize> = HashMap::new();
     let mut per_world: HashMap<u64, usize> = HashMap::new();
+    for s in prior {
+        for a in &s.artists {
+            *per_artist.entry(*a).or_default() += 1;
+        }
+        if let Some(b) = s.album {
+            *per_album.entry(b).or_default() += 1;
+        }
+        if let Some(w) = s.world {
+            *per_world.entry(w).or_default() += 1;
+        }
+    }
     let mut out = Vec::with_capacity(n);
     let mut spare = Vec::new();
     for s in cands {

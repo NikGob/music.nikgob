@@ -23,6 +23,11 @@
 //!   the last tracks the radio played to the end. Each extension logs the
 //!   share of new music queued so far. A new pick plays from the stream
 //!   like any search result.
+//! * «Подмешивать случайное» and «Преимущественно новые песни»
+//!   ([`v::Prefs::radio_explore`], [`v::Prefs::radio_unheard`]) go to the
+//!   engine before each extension and each splice of new music
+//!   ([`Engine::set_explore`], [`Engine::set_unheard`]); a change holds from
+//!   the next ones, what is queued stays.
 
 //! * The radio is saved in `session.json` with the queue, so it goes on
 //!   after a restart. Playing anything else (any command that replaces the
@@ -652,6 +657,8 @@ impl Worker {
         let (id, mut state) = (run.id, run.state.clone());
         state.attune(self.recs.session.clone(), self.recs.weights);
         state.set_no_repeat_ms(i64::from(prefs.radio_no_repeat_hours) * 3_600_000);
+        state.set_explore(Some(prefs.radio_explore.fraction()));
+        state.set_unheard(prefs.radio_unheard.fraction());
         let params = RadioParams { new_share, seed: run.seed };
         let tx = self.recs.tx.clone();
         let spawned = std::thread::Builder::new().name("nikgob-radio".into()).spawn(move || {
@@ -863,7 +870,8 @@ impl Worker {
         if up.is_empty() || have >= want {
             return;
         }
-        let picks = run.state.take_new(&snap.recs().local_only(prefs.mixes_downloaded_only), want - have);
+        run.state.set_explore(Some(prefs.radio_explore.fraction()));
+        let picks = run.state.take_new(&snap.recs().local_only(prefs.mixes_downloaded_only), want - have, up.len(), have);
         let lately = self.played_lately();
         let mut ids: Vec<(TrackId, RemoteId)> = Vec::new();
         for p in picks {
