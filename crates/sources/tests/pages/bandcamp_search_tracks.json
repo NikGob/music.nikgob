@@ -1,0 +1,47 @@
+{
+ "auto": {
+  "results": [
+   {
+    "type": "t",
+    "id": 3541317267,
+    "name": "BONESCUFFLE",
+    "band_id": 2849710999,
+    "band_name": "DM DOKURO",
+    "album_name": "UNDERTALE: The Underground Radio",
+    "album_id": 1414634694,
+    "item_url_root": "http://BASE",
+    "item_url_path": "http://BASE/track/bonescuffle",
+    "img": "https://f4.bcbits.com/img/1515763463_3.jpg"
+   },
+   {
+    "type": "t",
+    "id": 2862158523,
+    "name": "SAVE",
+    "band_id": 2849710999,
+    "band_name": "DM DOKURO",
+    "album_name": "UNDERTALE: The Underground Radio",
+    "album_id": 1414634694,
+    "item_url_root": "http://BASE",
+    "item_url_path": "http://BASE/track/save",
+    "img": "https://f4.bcbits.com/img/1515763463_3.jpg"
+   },
+   {
+    "type": "t",
+    "id": 1323961103,
+    "name": "The Underground Radio",
+    "band_id": 2849710999,
+    "band_name": "DM DOKURO",
+    "album_name": "UNDERTALE: The Underground Radio",
+    "album_id": 1414634694,
+    "item_url_root": "http://BASE",
+    "item_url_path": "http://BASE/track/the-underground-radio",
+    "img": "https://f4.bcbits.com/img/1515763463_3.jpg"
+   }
+  ],
+  "time_ms": 12
+ },
+ "tag": {
+  "count": 0
+ },
+ "genre": {}
+}
