@@ -195,8 +195,8 @@ fn paint(
     // song's (timing made, another source), so nothing moves or dims then.
     // A wait new to a swapped text opens from folded instead of popping
     // open; the first frame of the view shows its state as it is.
-    let first_frame = ctx.data(|d| d.get_temp::<Slots>(id.with("slots"))).is_none();
-    let slot_of = slots(&ctx, id.with("slots"), &item_keys(lines, &items));
+    let (slot_of, swapped) = slots(&ctx, id.with("slots"), &item_keys(lines, &items));
+    let first_frame = swapped.is_none();
     // When the text's timing turns from line times only to real times or
     // back (made timing arrives, «По строкам» picked), the calm Focus and
     // the chosen look fade into each other instead of swapping at once.
@@ -274,7 +274,9 @@ fn paint(
             anim::snap_f32(&ctx, widest_id, widest);
             ctx.data_mut(|d| d.insert_temp(wrap_id, wrap));
         }
-        anim::f32(&ctx, widest_id, widest, BLOCK).clamp(0.0, wrap)
+        // Its overshoot is kept, so it settles instead of stopping dead
+        // at the full width.
+        anim::f32(&ctx, widest_id, widest, BLOCK).clamp(0.0, wrap * 1.1)
     } else {
         wrap
     };
@@ -301,18 +303,22 @@ fn paint(
         }
         let keep = match items[i] {
             // On Material's expressive spatial spring: the lines part (and
-            // close again) in one soft move.
+            // close again) in one soft move, its small overshoot and all
+            // (cut off at open and at folded, the lines stopped dead there
+            // instead of settling).
             DisplayLine::Interlude { .. } => anim::fraction(
                 &ctx,
                 id.with(("wait-room", slot_of[i])),
                 if cur == Some(i) { 1.0 } else { 0.0 },
                 if theme.reduced_motion { WAIT_ROOM.without_bounce() } else { WAIT_ROOM },
             )
-            .clamp(0.0, 1.0),
+            .clamp(-ROOM_OVERSHOOT, 1.0 + ROOM_OVERSHOOT),
             DisplayLine::Line(_) => 1.0,
         };
         y += (h + extra + gap) * keep;
-        rooms.push(keep);
+        // The wait itself (its ring, highlight and pointer) takes the room
+        // it has, within its slot.
+        rooms.push(keep.clamp(0.0, 1.0));
     }
 
     // Where the current line rests: at its share of the whole view, with the
@@ -349,6 +355,20 @@ fn paint(
         ctx.request_repaint();
     }
     let scroll = follow + manual.shift(now);
+    // A text swapped for another (the same song's from another source,
+    // timing made, a wait more or less) is laid out anew at once: the
+    // text's spring is moved by as much as the line it was on moved, so
+    // that line stays where it is and only the rest of the way is
+    // animated, instead of the whole text jumping there and drifting back.
+    let held_id = id.with("held");
+    if swapped == Some(true)
+        && !state.prefs.lyrics_cascade
+        && !manual_on
+        && let Some(moved) = held_moved(ctx.data(|d| d.get_temp::<(u64, f32)>(held_id)), &slot_of, &tops)
+    {
+        anim::shift_f32(&ctx, id.with("scroll"), moved);
+    }
+    ctx.data_mut(|d| d.insert_temp(held_id, (slot_of[ci], tops[ci])));
     // When the view moves or resizes (the window, the layout's span, a card
     // that rises in), the text goes with it at once, kept at its share of
     // the height: the springs are moved with their frame instead of chasing
@@ -616,6 +636,15 @@ fn paint(
     }
 }
 
+/// How far a text laid out anew moved the item the view was on (`held`:
+/// its slot and top the frame before), by the items' slots and `tops` now;
+/// `None` when it is not there any more.
+fn held_moved(held: Option<(u64, f32)>, slot_of: &[u64], tops: &[f32]) -> Option<f32> {
+    let (slot, top) = held?;
+    let i = slot_of.iter().position(|s| *s == slot)?;
+    Some(tops.get(i)? - top)
+}
+
 /// The spring the text follows a scroll by hand on.
 const HAND: Spring = Spring::new(1.0, 1600.0);
 
@@ -691,6 +720,10 @@ fn look_fades(mix: f32) -> (f32, f32) {
 /// Below this share of its slot a folding wait counts as gone: it takes no
 /// pointer and draws nothing.
 const ROOMLESS: f32 = 0.01;
+
+/// How far past open or folded a wait's room may swing (its spring's own
+/// overshoot is a few hundredths); only a bound for safety.
+const ROOM_OVERSHOOT: f32 = 0.1;
 
 /// The Gaussian blur (sigma) of a line at the very edge, relative to the
 /// big text size (at «Сила размытия» 100 %).
@@ -1010,16 +1043,20 @@ struct Slots {
 /// The slot of each item with `keys`: when most of them were there the
 /// frame before (the same song's text, swapped), each keeps its slot and a
 /// new one gets a slot of its own; otherwise (another song) the slots go
-/// by place, as the items do.
-fn slots(ctx: &egui::Context, id: egui::Id, keys: &[u64]) -> Vec<u64> {
-    let was = ctx.data(|d| d.get_temp::<Slots>(id)).unwrap_or_default();
-    if was.keys == keys {
-        return was.slots;
+/// by place, as the items do. With whether the items changed since the
+/// frame before (`None`: the view's first frame).
+fn slots(ctx: &egui::Context, id: egui::Id, keys: &[u64]) -> (Vec<u64>, Option<bool>) {
+    let was = ctx.data(|d| d.get_temp::<Slots>(id));
+    if let Some(was) = &was
+        && was.keys == keys
+    {
+        return (was.slots.clone(), Some(false));
     }
-    let now = carry_slots(&was, keys);
+    let changed = was.is_some().then_some(true);
+    let now = carry_slots(&was.unwrap_or_default(), keys);
     let out = now.slots.clone();
     ctx.data_mut(|d| d.insert_temp(id, now));
-    out
+    (out, changed)
 }
 
 fn carry_slots(was: &Slots, keys: &[u64]) -> Slots {
@@ -2912,6 +2949,39 @@ mod tests {
             let b = fixed_breaks(painter, egui::Id::new("test-breaks"), text, width as f32, 44.0);
             (b.forced.split('\n').count() == 3).then_some(b)
         }).expect("fixture must wrap into three rows")
+    }
+
+    /// A swapped text with two more lines above the one being sung, while
+    /// the view is moving to it: moved with that line, the text stays where
+    /// it is drawn and keeps its speed, and only the rest of the way is
+    /// animated.
+    #[test]
+    fn a_swapped_text_stays_where_it_is_drawn_and_keeps_its_speed() {
+        use nikgob_motion::Animated;
+        let old_tops = [0.0, 60.0, 120.0, 180.0];
+        let old_slots = [10, 11, 12, 13];
+        // The view moves from line 1 to line 2 (scroll = top − anchor 100).
+        let mut scroll = Animated::new(60.0_f32 - 100.0, Spring::new(1.0, 300.0));
+        scroll.set_target(120.0 - 100.0, 0.0);
+        let now = 0.08;
+        let drawn = old_tops[2] - scroll.value(now);
+        let speed = scroll.velocity(now);
+        // Two new lines come in before it; its slot stays with it.
+        let new_tops = [0.0, 60.0, 120.0, 180.0, 240.0, 300.0];
+        let new_slots = [20, 21, 10, 11, 12, 13];
+        let moved = held_moved(Some((old_slots[2], old_tops[2])), &new_slots, &new_tops).unwrap();
+        assert_eq!(moved, 120.0);
+        scroll.shift(moved);
+        assert!((new_tops[4] - scroll.value(now) - drawn).abs() < 1e-3);
+        assert!((scroll.velocity(now) - speed).abs() < 1e-2);
+        // It goes on to the line's place in the new text, on the same spring.
+        scroll.set_target(new_tops[4] - 100.0, now);
+        assert!((new_tops[4] - scroll.value(now) - drawn).abs() < 1e-3);
+        assert!((scroll.velocity(now) - speed).abs() < 1e-2);
+        assert_eq!(scroll.value(5.0), new_tops[4] - 100.0);
+        // A line not in the new text moves nothing.
+        assert_eq!(held_moved(Some((99, 0.0)), &new_slots, &new_tops), None);
+        assert_eq!(held_moved(None, &new_slots, &new_tops), None);
     }
 
     /// At whole distances a line rests as bright as it always did; between
