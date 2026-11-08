@@ -945,7 +945,11 @@ impl UserModel {
         let n = catalog.len();
         let norm = extra.index.normalizer();
         let ids: Vec<TrackId> = catalog.tracks().iter().map(|t| t.id).collect();
-        let pos = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let mut pos: HashMap<TrackId, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        // A copy of a catalog track (one recording on two albums) is it.
+        for (id, i) in catalog.aliases() {
+            pos.entry(id).or_insert(i);
+        }
         let emb: Vec<Option<Vector>> = ids.iter().map(|id| extra.index.get(*id).map(|v| norm.embed(v))).collect();
         let release: Vec<Option<u64>> = catalog.tracks().iter().map(|t| t.release.map(|r| crate::pick::token(r.as_uuid().as_bytes()))).collect();
         let album_pos: Vec<u32> = catalog.tracks().iter().map(|t| t.position).collect();

@@ -188,6 +188,9 @@ pub struct Catalog {
     tracks: Vec<TrackInfo>,
     pos: HashMap<TrackId, u32>,
     by_artist: HashMap<ArtistId, Vec<u32>>,
+    /// Tracks that are another copy of a catalog track (one recording on
+    /// two albums): not picked themselves, looked up as that track.
+    alias: HashMap<TrackId, u32>,
 }
 
 impl Catalog {
@@ -224,9 +227,33 @@ impl Catalog {
         &self.tracks
     }
 
-    /// The catalog position of a track.
+    /// The same catalog with each `(copy, track)`: `copy` is another copy
+    /// of the catalog's `track` (one recording on two albums). It is never
+    /// picked, and its plays, likes and lookups are `track`'s, so a list
+    /// never has both and «Не повторять сыгранное» covers both. A copy that
+    /// is in the catalog itself, or whose track is not, is left alone.
+    #[must_use]
+    pub fn with_aliases(mut self, aliases: impl IntoIterator<Item = (TrackId, TrackId)>) -> Self {
+        for (copy, track) in aliases {
+            if self.pos.contains_key(&copy) {
+                continue;
+            }
+            if let Some(&i) = self.pos.get(&track) {
+                self.alias.insert(copy, i);
+            }
+        }
+        self
+    }
+
+    /// The copies looked up as catalog tracks ([`Self::with_aliases`]),
+    /// with the position of each one's track.
+    pub fn aliases(&self) -> impl Iterator<Item = (TrackId, usize)> + '_ {
+        self.alias.iter().map(|(id, &i)| (*id, i as usize))
+    }
+
+    /// The catalog position of a track (of the track it is a copy of).
     pub fn position(&self, id: TrackId) -> Option<usize> {
-        self.pos.get(&id).map(|&i| i as usize)
+        self.pos.get(&id).or_else(|| self.alias.get(&id)).map(|&i| i as usize)
     }
 
     pub fn get(&self, id: TrackId) -> Option<&TrackInfo> {
@@ -1014,6 +1041,35 @@ mod tests {
         assert!(!taste.blocks(&cat.tracks()[0]));
         assert!(taste.has_history());
         assert!(!Taste::build(&cat, &TasteInput::default(), now).has_history());
+    }
+
+    /// One recording on two albums: the copy is never in the catalog, it is
+    /// looked up as its track, and its plays and like count for the track
+    /// once («Не повторять сыгранное» covers both).
+    #[test]
+    fn a_copy_of_a_track_counts_as_the_track() {
+        let now = 1_000 * DAY_MS;
+        let (track, copy) = (tid(0), tid(50));
+        let cat = Catalog::new((0..3).map(|i| info(i, &[i as u32], None))).with_aliases([(copy, track), (tid(1), tid(2)), (tid(60), tid(99))]);
+        assert_eq!(cat.len(), 3, "the copy is no catalog track");
+        assert_eq!(cat.position(copy), cat.position(track));
+        assert_eq!(cat.get(copy).map(|t| t.id), Some(track));
+        assert_eq!(cat.position(tid(1)), Some(1), "a catalog track is no copy");
+        assert_eq!(cat.position(tid(60)), None, "a copy of nothing in the catalog");
+        assert_eq!(cat.aliases().count(), 1);
+        let input = TasteInput {
+            events: vec![
+                Play::new(track, now - 3 * HOUR_MS, EventType::Start, None),
+                Play::new(copy, now - HOUR_MS, EventType::Start, None),
+            ],
+            likes: vec![track, copy],
+            ..Default::default()
+        };
+        let taste = Taste::build(&cat, &input, now);
+        let i = cat.position(track).unwrap();
+        assert_eq!(taste.plays_at(i), 2, "the plays of both copies");
+        assert_eq!(taste.last_played_at(i), Some(now - HOUR_MS), "the copy played last");
+        assert!(taste.liked_at(i));
     }
 
     /// A song saved in a service's library is long taste without decay,
