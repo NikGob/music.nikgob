@@ -1,6 +1,7 @@
 //! The control's own menu, in every look (docs/lyrics-control.md):
 //! «Автоматически», every source with how its text is timed (picking a
-//! source never needs a window), and «Настройки текста…» until it was
+//! source never needs a window), «Искать текст заново» (every source asked
+//! again, whatever was found before), and «Настройки текста…» until it was
 //! picked once. The window and page looks have just one row more, «Подсветка…»,
 //! that opens them: everything else about the text is there. The `menu`
 //! look does it all right here: how the shown text is seen («По словам»,
@@ -20,6 +21,8 @@ use crate::components::{Menu, MenuItem, anim};
 enum Row {
     Auto,
     Source(nikgob_view::LyricsSource),
+    /// «Искать текст заново».
+    Search,
     /// See the text so.
     Show(LyricsSync),
     /// Make timing so, deep or the normal way.
@@ -101,6 +104,9 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
             }
             m.item(item, Row::Source(o.source));
         }
+        // Every source asked again (not while one still answers).
+        let searching = l.sources.iter().any(|o| o.state == LyricsAvail::Loading);
+        m.item(MenuItem::new("Искать текст заново").enabled(!searching), Row::Search);
         m.split();
     }
     let busy = super::busy(state).is_some();
@@ -162,6 +168,12 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
         Some(Row::Source(source)) => {
             if let Some(track) = l.track {
                 out.push(Command::PickLyricsSource(track, Some(*source)));
+            }
+            false
+        }
+        Some(Row::Search) => {
+            if let Some(track) = l.track {
+                out.push(Command::SearchLyricsAgain(track));
             }
             false
         }

@@ -57,14 +57,24 @@ impl BetterLyrics {
         }
     }
 
+    /// The text from the main address; when it cannot answer (no network,
+    /// a server error), from the mirror. That failure is logged, and stays
+    /// the answer when the mirror has no text: the main one could not say,
+    /// so it is no miss to keep (asked again later).
     pub async fn find(&self, artist: &str, title: &str) -> Result<Option<Vec<LyricLine>>> {
         match self.get(&self.base, artist, title).await {
             Err(
-                MetadataError::Network(_)
+                e @ (MetadataError::Network(_)
                 | MetadataError::Status {
                     status: 500..=599, ..
-                },
-            ) => self.get(&self.mirror, artist, title).await,
+                }),
+            ) => {
+                log::info!("betterlyrics: «{artist} — {title}»: {e}; asking the mirror");
+                match self.get(&self.mirror, artist, title).await {
+                    Ok(None) => Err(e),
+                    other => other,
+                }
+            }
             result => result,
         }
     }

@@ -90,7 +90,8 @@ pub(crate) fn local_lyrics(
 }
 
 /// Asks LRCLIB (with a deadline) and caches the answer, "not found" included.
-/// Only a definite answer is cached: lyrics, or LRCLIB saying it has none.
+/// Only a definite answer is cached: lyrics, or LRCLIB saying it has none
+/// (which never replaces lyrics stored before).
 /// Any error (5xx, 429, network, timeout) is returned and nothing is stored.
 pub(crate) async fn fetch_and_store(
     lrclib: &Lrclib,
@@ -122,6 +123,11 @@ pub(crate) async fn fetch_and_store(
         instrumental: found.as_ref().is_some_and(|l| l.instrumental),
         fetched_at: now_ms(),
     };
+    // A miss never takes the place of lyrics found earlier (a search asked
+    // again): they are kept.
+    if stored.is_miss() && lib.lyrics(row.id).ok().flatten().is_some_and(|old| !old.is_miss()) {
+        return Ok(stored);
+    }
     if let Err(e) = lib.put_lyrics(
         row.id,
         stored.synced.as_deref(),
@@ -134,7 +140,8 @@ pub(crate) async fn fetch_and_store(
 }
 
 /// Fills in the lyrics of every local track that has none, slowly, for as long
-/// as there is work, using the same source chain as playback.
+/// as there is work, using the same source chain as playback. Its requests
+/// give way to the shown song's ([`nikgob_metadata::in_background`]).
 pub(crate) async fn backfill_lyrics(
     meta: Metadata,
     lib: Library,
@@ -165,7 +172,8 @@ pub(crate) async fn backfill_lyrics(
                 .flatten()
                 .filter(|s| s.kind.is_local())
                 .map(|s| resolve(&library_dir, &s.locator));
-            let tl = crate::lyrics::fetch_track_lyrics(meta.clone(), lib.clone(), row, file, genius, None).await;
+            // The playing song's lookups go first (`in_background`).
+            let tl = nikgob_metadata::in_background(crate::lyrics::fetch_track_lyrics(meta.clone(), lib.clone(), row, file, genius, None)).await;
             if tl.failed {
                 failures += 1;
                 if failures >= MAX_FAILURES { return }
@@ -526,6 +534,11 @@ mod tests {
         let st = fetch_and_store(&lrclib, &lib, &row).await.unwrap();
         assert!(st.is_miss());
         assert!(lib.lyrics(miss.id).unwrap().unwrap().is_miss());
+
+        // Lyrics stored earlier stay when LRCLIB has none now (asked again).
+        lib.put_lyrics(miss.id, Some("[00:01.00]Было"), None, false).unwrap();
+        assert!(fetch_and_store(&lrclib, &lib, &row).await.unwrap().is_miss());
+        assert_eq!(lib.lyrics(miss.id).unwrap().unwrap().synced.as_deref(), Some("[00:01.00]Было"));
     }
 
     #[tokio::test]

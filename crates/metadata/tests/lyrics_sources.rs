@@ -139,6 +139,49 @@ async fn better_lyrics_mirrors_server_errors_but_not_misses_or_rate_limits() {
     }
 }
 
+/// The main address failed: the mirror's «no text» is no miss (the
+/// failure is the answer, asked again later), and a failing mirror is an
+/// error too, never a miss.
+#[tokio::test]
+async fn better_lyrics_keeps_the_failure_when_the_mirror_has_nothing() {
+    for mirror_status in [404, 502] {
+        let server = MockServer::start().await;
+        let mirror = MockServer::start().await;
+        Mock::given(path("/getLyrics"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        Mock::given(path("/getLyrics"))
+            .respond_with(ResponseTemplate::new(mirror_status))
+            .expect(1)
+            .mount(&mirror)
+            .await;
+        let client =
+            BetterLyrics::with_base_urls(common::http(), &server.uri(), &mirror.uri()).unwrap();
+        let result = client.find("Artist", "Song").await;
+        assert!(
+            matches!(result, Err(MetadataError::Status { status: 502, .. })),
+            "mirror {mirror_status}: {result:?}"
+        );
+    }
+    // An empty text from the mirror is a miss of the mirror too.
+    let server = MockServer::start().await;
+    let mirror = MockServer::start().await;
+    Mock::given(path("/getLyrics"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ttml": ""})))
+        .mount(&mirror)
+        .await;
+    let client = BetterLyrics::with_base_urls(common::http(), "http://127.0.0.1:9/", &mirror.uri()).unwrap();
+    assert!(matches!(client.find("Artist", "Song").await, Err(MetadataError::Network(_))));
+    // The main address's own «no text» stays a miss.
+    Mock::given(path("/getLyrics"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ttml": ""})))
+        .mount(&server)
+        .await;
+    let client = BetterLyrics::with_base_urls(common::http(), &server.uri(), &mirror.uri()).unwrap();
+    assert!(client.find("Artist", "Song").await.unwrap().is_none());
+}
+
 #[tokio::test]
 async fn better_lyrics_mirrors_transport_failures() {
     let mirror = MockServer::start().await;
