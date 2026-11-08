@@ -222,6 +222,10 @@ impl Worker {
     /// Every tick: a pass when one is due, its next request when it is
     /// time.
     pub(crate) fn suggest_tick(&mut self) {
+        // Not while a game is in front (the tick goes on when it is over).
+        if crate::quiet::busy() {
+            return;
+        }
         self.suggest_load();
         let st = &mut self.recs.suggest;
         let started = *st.started.get_or_insert_with(Instant::now);

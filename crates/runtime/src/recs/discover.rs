@@ -435,6 +435,10 @@ impl Worker {
     /// Every tick (and after each answer): a new pass when it is due, the
     /// next request when it is time.
     pub(crate) fn discover_tick(&mut self) {
+        // Not while a game is in front (the tick goes on when it is over).
+        if crate::quiet::busy() {
+            return;
+        }
         self.discover_load();
         let (yt, dz) = self.discover_services();
         if !yt && !dz {

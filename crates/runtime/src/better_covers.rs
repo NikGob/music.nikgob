@@ -613,6 +613,8 @@ where
     for w in wants {
         let Some(target) = w.target else { continue };
         let (current, title) = (w.current.clone(), w.titles.first().cloned());
+        // Waits while a game is in front (outside the lookup's timeout).
+        crate::quiet::free().await;
         let url = match tokio::time::timeout(LOOKUP_TIMEOUT, look(w)).await {
             Ok(Ok(url)) => url.unwrap_or_default(),
             Ok(Err(e)) => {
@@ -676,6 +678,7 @@ impl Worker {
         self.streaming.spawn_reporting(move |tx| async move {
             if sweep_run {
                 tokio::time::sleep(START).await;
+                crate::quiet::free().await;
             }
             let wants = {
                 let (lib, root, asked) = (lib.clone(), root.clone(), asked.clone());

@@ -2203,6 +2203,11 @@ impl Worker {
         let stale = r.built_at.is_some_and(|t| t.elapsed() >= every)
             || r.home.as_ref().is_some_and(|h| h.day != day || h.daylist_key != daylist)
             || (r.built_at.is_some() && grown);
+        // Nobody looks at the recommendations while a game is in front:
+        // they are built, and new music looked for, when it is over.
+        if crate::quiet::busy() {
+            return;
+        }
         if !r.building && (r.due.is_some_and(|d| now >= d) || stale) {
             self.recs_build();
         }

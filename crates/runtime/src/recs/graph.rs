@@ -657,7 +657,8 @@ impl Worker {
 
     /// Sends the next request of every lane that may ask now.
     fn graph_step(&mut self, meta: Option<&Metadata>) {
-        if self.streaming.search.active() || self.streams_idle() {
+        // Not while a game is in front either (the tick goes on after it).
+        if self.streaming.search.active() || self.streams_idle() || crate::quiet::busy() {
             return;
         }
         if !std::mem::replace(&mut self.recs.graph.warmed, true) {

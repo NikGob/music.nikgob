@@ -151,6 +151,7 @@ pub(crate) async fn backfill_lyrics(
     genius: bool,
 ) {
     tokio::time::sleep(pace.start).await;
+    crate::quiet::free().await;
     let mut failures = 0;
     loop {
         let ids = match lib.tracks_needing_lyrics(now_ms() - LYRICS_RETRY_MS, BATCH) {
@@ -182,6 +183,8 @@ pub(crate) async fn backfill_lyrics(
             }
             let _ = tx.send(Internal::Enrich(Event::LyricsReady(id, tl)));
             tokio::time::sleep(pace.between).await;
+            // Unattended: waits while a game is in front.
+            crate::quiet::free().await;
         }
     }
 }
@@ -295,6 +298,7 @@ pub(crate) async fn run_photos(
     saved: impl Fn(ArtistId),
 ) {
     tokio::time::sleep(pace.start).await;
+    crate::quiet::free().await;
     let mut failures = 0;
     loop {
         let batch = match lib.artists_needing_photo(now_ms() - PHOTO_RETRY_MS, BATCH) {
@@ -326,6 +330,8 @@ pub(crate) async fn run_photos(
                 }
             }
             tokio::time::sleep(pace.between).await;
+            // Unattended: waits while a game is in front.
+            crate::quiet::free().await;
         }
         if !did_any {
             return;

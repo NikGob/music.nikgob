@@ -546,12 +546,18 @@ impl Worker {
     /// the cache size once a minute.
     pub(crate) fn stream_tick(&mut self) {
         let idle = self.streams_idle();
+        // Unattended passes wait while a game is in front.
+        let quiet = crate::quiet::busy();
         self.sync_tick(!idle);
         if !idle {
-            self.tracklist_tick();
-            self.enrich_tick();
+            if !quiet {
+                self.tracklist_tick();
+                self.enrich_tick();
+            }
             self.likes_tick();
-            self.clips_tick();
+            if !quiet {
+                self.clips_tick();
+            }
         }
         self.stream_analysis_tick();
         self.publish_accounts();
@@ -560,7 +566,9 @@ impl Worker {
             self.streaming.last_wish_tick = Some(Instant::now());
             self.publish_stream_cache();
             self.wish_tick();
-            self.upgrade_tick();
+            if !quiet {
+                self.upgrade_tick();
+            }
         }
     }
 
