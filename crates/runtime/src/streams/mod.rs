@@ -137,6 +137,9 @@ pub(crate) enum Msg {
     },
     Resolved {
         track: TrackId,
+        /// Where it was looked up: YouTube Music, or Spotify while
+        /// YouTube Music is off.
+        via: Service,
         found: resolve::Lookup,
         /// The full Deezer track asked for its ISRC on the way.
         filled: Option<Box<StreamTrack>>,
@@ -240,10 +243,13 @@ pub(crate) struct Streams {
     last_soloist: Option<nikgob_core::streaming::SoloistStatus>,
     pub(crate) search: search::SearchState,
     page_seq: u64,
-    /// YouTube lookups running / failed recently (unix ms), by track.
+    /// Copy lookups running / failed recently (unix ms), by track and
+    /// the service asked.
     resolving: HashSet<TrackId>,
+    /// Where each running lookup asks (YouTube Music or Spotify).
+    resolve_via: HashMap<TrackId, Service>,
     resolve_limit: resolve::ResolveLimit,
-    misses: HashMap<TrackId, i64>,
+    misses: HashMap<(TrackId, Service), i64>,
     /// YouTube videos that did not play, by video id (not by track: the
     /// same song has other copies).
     refused: HashMap<String, Instant>,
@@ -302,6 +308,7 @@ impl Streams {
             search: search::SearchState::default(),
             page_seq: 0,
             resolving: HashSet::new(),
+            resolve_via: HashMap::new(),
             resolve_limit: resolve::ResolveLimit::default(),
             misses: HashMap::new(),
             refused: HashMap::new(),
@@ -680,7 +687,7 @@ impl Worker {
             } => self.stream_searched(seq, service, result, partial),
             Msg::SearchRetry { seq, service } => self.search_retry(seq, service),
             Msg::Loaded { key, result } => self.loaded(key, result),
-            Msg::Resolved { track, found, filled } => self.resolved(track, found, filled),
+            Msg::Resolved { track, via, found, filled } => self.resolved(track, via, found, filled),
             Msg::IsrcFilled(track, full) => self.isrc_filled(track, &full),
             Msg::SearchSettle { seq } => self.search_settle(seq),
             Msg::ResolveRetry(track) => self.resolve_retry(track),

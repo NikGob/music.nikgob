@@ -1356,7 +1356,12 @@ impl Worker {
                 "its files are missing".to_owned()
             } else {
                 let services: Vec<&str> = sources.iter().filter_map(|s| s.kind.service()).map(|s| s.as_str()).collect();
-                format!("no audio from {} now ({} sources set aside)", services.join(", "), sources.iter().filter(|s| !s.available).count())
+                let off = if self.service(StreamKind::Youtube).is_none() { ", YouTube Music switched off" } else { "" };
+                format!(
+                    "no audio from {} now ({} sources set aside{off})",
+                    services.join(", "),
+                    sources.iter().filter(|s| !s.available).count()
+                )
             };
             log::warn!("{}: nothing to play: {why}", e.track);
             return None;
@@ -1517,7 +1522,20 @@ impl Worker {
             }
             log::warn!("no playable source for {}", e.track);
             if attempt == 0 {
-                self.toast("Нет файла для этого трека", None);
+                // A stream track's last way to the sound is YouTube Music:
+                // when it is off, that is the reason, not a missing file.
+                let streamed = self
+                    .lib
+                    .sources_of_track(e.track)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|s| s.trashed_at.is_none() && s.kind.service().is_some());
+                let text = if streamed && self.service(StreamKind::Youtube).is_none() {
+                    self.off_text(StreamKind::Youtube)
+                } else {
+                    "Нет файла для этого трека".to_owned()
+                };
+                self.toast(text, None);
             }
             match self.queue.skip_forward() {
                 Some(n) if n.id != e.id => e = n,

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nikgob_core::model::{AnalysisSource, Codec, Source, SourceKind, TrackId};
-use nikgob_core::streaming::{FakeService, StreamService, StreamTrack};
+use nikgob_core::streaming::{FakeService, RemoteId, Service, StreamService, StreamTrack};
 use nikgob_library::Library;
 use nikgob_runtime::{PlayRequest, Playback, PlaybackEvent, Runtime, RuntimeConfig, StreamSchedule};
 use nikgob_view::{Command, Prefs, ViewState};
@@ -252,6 +252,28 @@ fn the_switch_stops_the_analysis_at_once() {
     assert_eq!(rt.state().analysis.streams_done, done);
     assert_eq!(yt.opened().len(), opened);
     assert!(done < 3, "stopped before the end");
+    drop(rt);
+}
+
+#[test]
+fn tracks_that_cannot_be_looked_up_do_not_block_the_older_ones() {
+    let lib = Library::open_in_memory().unwrap();
+    // Logged out: its own likes are not pulled, only the library's count.
+    let yt = Arc::new(youtube().logged_out());
+    let older = lib.upsert_stream_track(&find(&yt, "yt-gruppa-1")).unwrap();
+    lib.like(older).unwrap();
+    // More newer likes than one read of the queue, each missed on YouTube
+    // Music a moment ago: none of them can be looked up now.
+    for n in 0..40 {
+        let t = StreamTrack::new(RemoteId::new(Service::Spotify, format!("sp-missed-{n}")), format!("Missed {n}"));
+        let id = lib.upsert_stream_track(&t).unwrap();
+        lib.like(id).unwrap();
+        lib.cache_put(&format!("yt_miss.{id}"), nikgob_library::now_ms(), "").unwrap();
+    }
+    let (rt, _) = start(&lib, vec![yt.clone()], Prefs::default(), schedule(50, 300));
+
+    wait_until("the older track's analysis", || source_of(&lib, older).is_some());
+    assert_eq!(yt.opened(), vec!["yt-gruppa-1".to_owned()]);
     drop(rt);
 }
 
