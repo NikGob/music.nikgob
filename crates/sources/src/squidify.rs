@@ -281,13 +281,13 @@ impl Squidify {
         for q in catalogue_queries(want).iter().filter(|q| !q.is_empty()) {
             let found = self.search3(q, 0, SONGS).await?;
             out.extend(found.song.iter().filter(|s| playable(s)).map(|s| self.track_offer(s, None)));
-            if sure(&out) {
+            if sure(out.as_slice()) {
                 break;
             }
         }
         // The album's own songs: a soundtrack's are credited to whoever
         // plays them, not to the artist the wish names.
-        if !sure(&out)
+        if !sure(out.as_slice())
             && let (Some(album), Some(title)) = (want.album.as_deref(), want.title.as_deref())
         {
             let wanted = title_keys(title);
@@ -300,7 +300,7 @@ impl Squidify {
                         .fold(0.0, f64::max);
                     let numbered = want.track_no > 0 && s.track == Some(want.track_no) && s.disc_number.unwrap_or(1) == want.disc_no.max(1);
                     if sim >= TITLE || (numbered && sim >= 0.5) {
-                        out.push(self.track_offer(s, Some(&full.name)));
+                        out.push(self.track_offer(s, Some(full.name.as_str())));
                     }
                 }
             }
@@ -391,7 +391,7 @@ struct Envelope {
 }
 
 /// The parts of an answer read here.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Debug)]
 struct Body {
     #[serde(default)]
     status: String,
@@ -412,7 +412,7 @@ pub struct ApiError {
     pub message: String,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Debug)]
 struct Found {
     #[serde(default)]
     album: Vec<Album>,
@@ -738,6 +738,7 @@ mod tests {
     #[test]
     fn album_names_alike() {
         assert!(album_named("Cowboy Bebop OST 1", "COWBOY BEBOP OST 1"));
-        assert!(!album_named("Cowboy Bebop OST 3 - BLUE", "Cowboy Bebop OST 1"));
+        assert!(album_named("Cowboy Bebop Original Soundtrack 1", "Cowboy Bebop OST 1"));
+        assert!(!album_named("Samurai Champloo Music Record: Departure", "Cowboy Bebop OST 1"));
     }
 }
