@@ -660,6 +660,29 @@ impl TrackLyrics {
         !self.pending.is_empty() || self.embedding
     }
 
+    /// Takes a lookup's answer. A miss leaves a text found earlier in
+    /// place: a search asked again keeps what it had.
+    fn found(&mut self, source: LyricsSource, text: Option<Text>) {
+        if text.is_none() && self.texts.contains_key(&source) {
+            self.pending.remove(&source);
+        } else {
+            self.insert(source, text);
+        }
+    }
+
+    /// «Искать текст заново»: every online source is asked again whatever
+    /// the cache says, in the usual order and with the usual gates (Genius
+    /// when it is on and worth asking). The texts found earlier stay shown
+    /// until a source answers with a new one ([`Self::found`]).
+    pub(crate) fn search_again(&mut self) {
+        let online = [LyricsSource::LyricsPlus, LyricsSource::LrcRed, LyricsSource::BetterLyrics, LyricsSource::Lrclib];
+        for source in online.into_iter().chain(self.genius.then_some(LyricsSource::Genius)) {
+            self.missing.remove(&source);
+            self.pending.insert(source);
+        }
+        self.failed = false;
+    }
+
     fn insert(&mut self, source: LyricsSource, text: Option<Text>) {
         self.pending.remove(&source);
         // A songwriters line before the first sung one is not lyrics.
@@ -754,7 +777,9 @@ async fn find_lyricsplus(meta: &Metadata, lib: &Library, row: &TrackRow) -> Resu
 }
 
 /// Asks an online source and caches the answer ("not found" included) as
-/// parsed lines. Network failures are returned and nothing is stored.
+/// parsed lines, keyed by the track's id (a retag keeps it). Network
+/// failures are returned and nothing is stored; a miss leaves a stored
+/// text alone.
 async fn fetch_online(
     meta: Metadata,
     lib: Library,
@@ -784,8 +809,11 @@ async fn fetch_online(
     let text = tokio::time::timeout(LOOKUP_TIMEOUT, lookup)
         .await
         .unwrap_or_else(|_| Err(MetadataError::Network("timeout".into())))?;
+    // A miss never takes the place of a text found earlier (a search
+    // asked again): the text is kept.
+    let kept = text.is_none() && matches!(lib.lyrics_text(row.id, source.key()), Ok(Some((Some(_), _))));
     let body = text.as_ref().and_then(Text::body);
-    if let Err(e) = lib.put_lyrics_text(row.id, source.key(), body.as_deref()) {
+    if !kept && let Err(e) = lib.put_lyrics_text(row.id, source.key(), body.as_deref()) {
         log::warn!("caching lyrics ({}): {e}", source.key());
     }
     Ok(text)
@@ -815,6 +843,21 @@ pub(crate) fn cached_lyrics(
     genius: bool,
     kept: Option<&Path>,
 ) -> TrackLyrics {
+    cached_lyrics_at(lib, track, path, tags, genius, kept, now_ms())
+}
+
+/// [`cached_lyrics`] at `now` (unix ms): a found text is never asked for
+/// again, a miss younger than [`LYRICS_RETRY_MS`] holds ([`miss_holds`]),
+/// anything else is a pending lookup.
+fn cached_lyrics_at(
+    lib: &Library,
+    track: TrackId,
+    path: Option<&Path>,
+    tags: Option<&nikgob_import::tags::TagSet>,
+    genius: bool,
+    kept: Option<&Path>,
+    now: i64,
+) -> TrackLyrics {
     let mut tl = TrackLyrics {
         pick: lib
             .lyrics_pick(track)
@@ -827,7 +870,7 @@ pub(crate) fn cached_lyrics(
         names: lib.get_track(track).ok().flatten().map(|t| t.artist_credit.0.into_iter().map(|p| p.name).collect()).unwrap_or_default(),
         ..Default::default()
     };
-    let fresh_miss = |at: i64| now_ms() - at < LYRICS_RETRY_MS;
+    let fresh_miss = |at: i64| now - at < LYRICS_RETRY_MS;
 
     if let Some(t) = path.and_then(local_ttml) {
         tl.insert(LyricsSource::File, Some(t));
@@ -850,7 +893,7 @@ pub(crate) fn cached_lyrics(
     for source in [LyricsSource::LyricsPlus, LyricsSource::LrcRed, LyricsSource::BetterLyrics, LyricsSource::Genius] {
         match lib.lyrics_text(track, source.key()).ok().flatten() {
             Some((Some(body), _)) => tl.insert(source, stored_lines(&body)),
-            Some((None, at)) if miss_holds(source, at, now_ms()) => tl.insert(source, None),
+            Some((None, at)) if miss_holds(source, at, now) => tl.insert(source, None),
             _ if source == LyricsSource::Genius && !genius => {}
             _ => need.push(source),
         }
@@ -904,7 +947,7 @@ pub(crate) async fn fetch_track_lyrics(meta: Metadata, lib: Library, row: TrackR
                 fetch_online(meta.clone(), lib.clone(), row.clone(), source).await
             };
             match result {
-                Ok(text) => tl.insert(source, text),
+                Ok(text) => tl.found(source, text),
                 Err(e) => {
                     // Logged as a playback lookup is: not a miss, asked again.
                     log::info!("lyrics backfill ({}): {e}", source.key());
@@ -1027,6 +1070,24 @@ impl Worker {
         }
     }
 
+    /// `Command::SearchLyricsAgain`: the track's lyrics are looked up online
+    /// again, whatever the cache holds ([`TrackLyrics::search_again`]).
+    pub(crate) fn search_lyrics_again(&mut self, track: TrackId) {
+        let Some(svc) = self.import.as_mut() else { return };
+        if svc.metadata().is_none() {
+            return;
+        }
+        let Some(tl) = svc.lyrics_cache.get_mut(&track) else { return };
+        tl.search_again();
+        self.start_lyrics_lookups(track);
+        let Some(view) = self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)).map(|tl| tl.view(track)) else { return };
+        self.publish(|s| {
+            if s.lyrics.track == Some(track) {
+                s.lyrics = view;
+            }
+        });
+    }
+
     /// The playing track's texts go to the aligner once they settle.
     fn check_if_playing(&mut self, track: TrackId) {
         if self.queue.current().map(|e| e.track) == Some(track) {
@@ -1109,7 +1170,7 @@ impl Worker {
         svc.lyrics_asking.remove(&(track, source));
         let Some(tl) = svc.lyrics_cache.get_mut(&track) else { return };
         match got {
-            Ok(text) => tl.insert(source, text),
+            Ok(text) => tl.found(source, text),
             Err(e) => {
                 // Not a miss: asked again the next time the song is shown.
                 log::info!("lyrics lookup ({}): {e}", source.key());
@@ -1679,6 +1740,82 @@ People pleasing planet"));
         assert_eq!(tl.texts_of(LyricsSource::Genius).and_then(|t| t.plain.as_deref()), Some("Я невменяемый (Ай)"));
     }
 
+    /// What the library keeps answers for: a found text forever, a miss
+    /// for a week; what was never looked up is asked. Keyed by the track's
+    /// id, so a retag (same id) keeps it all.
+    #[test]
+    fn the_cache_answers_with_found_texts_forever_and_with_misses_for_a_week() {
+        use nikgob_core::model::{ArtistCredit, Track};
+        use nikgob_core::lyrics::LyricsSource::{BetterLyrics, Genius, LrcRed, Lrclib, LyricsPlus};
+        let lib = Library::open_in_memory().unwrap();
+        let track = lib.upsert_track(&Track::new("Song", ArtistCredit::single("Artist", None))).unwrap().id;
+        // Nothing stored: every online source is asked (Genius when on).
+        let tl = cached_lyrics(&lib, track, None, None, false, None);
+        assert_eq!(tl.pending, HashSet::from([Lrclib, LyricsPlus, LrcRed, BetterLyrics]));
+        assert!(cached_lyrics(&lib, track, None, None, true, None).pending.contains(&Genius));
+        // LRCLIB and LyricsPlus found a text, lrc.red and Genius did not.
+        lib.put_lyrics(track, Some("[00:01.00]a"), None, false).unwrap();
+        lib.put_lyrics_text(track, LyricsPlus.key(), worded().body().as_deref()).unwrap();
+        lib.put_lyrics_text(track, LrcRed.key(), None).unwrap();
+        lib.put_lyrics_text(track, Genius.key(), None).unwrap();
+        let now = now_ms();
+        let tl = cached_lyrics_at(&lib, track, None, None, true, None, now);
+        assert!(tl.texts.contains_key(&Lrclib) && tl.texts.contains_key(&LyricsPlus));
+        assert_eq!(tl.missing, HashSet::from([LrcRed, Genius]));
+        assert_eq!(tl.pending, HashSet::from([BetterLyrics]), "never looked up");
+        // A week on: the misses are asked again, the found texts never.
+        let later = now + LYRICS_RETRY_MS + 1;
+        let tl = cached_lyrics_at(&lib, track, None, None, true, None, later);
+        assert!(tl.texts.contains_key(&Lrclib) && tl.texts.contains_key(&LyricsPlus));
+        assert!(tl.missing.is_empty());
+        assert_eq!(tl.pending, HashSet::from([LrcRed, BetterLyrics, Genius]));
+        // An LRCLIB miss holds the same week.
+        let other = lib.upsert_track(&Track::new("Other", ArtistCredit::single("Artist", None))).unwrap().id;
+        lib.put_lyrics(other, None, None, false).unwrap();
+        let now = now_ms();
+        assert!(cached_lyrics_at(&lib, other, None, None, false, None, now).missing.contains(&Lrclib));
+        assert!(cached_lyrics_at(&lib, other, None, None, false, None, now + LYRICS_RETRY_MS + 1).pending.contains(&Lrclib));
+    }
+
+    /// «Искать текст заново»: every source is asked again in the usual
+    /// order; a miss now keeps the text found before, a new text replaces
+    /// it, and Genius keeps its gate.
+    #[test]
+    fn a_search_again_asks_every_source_and_a_miss_keeps_the_text_found_before() {
+        use nikgob_core::lyrics::LyricsSource::{BetterLyrics, Genius, LrcRed, Lrclib, LyricsPlus};
+        let lrc = Text::from_lrc(Some("[00:01.00]a"), None);
+        let mut tl = TrackLyrics { genius: true, ..Default::default() };
+        tl.insert(Lrclib, lrc.clone());
+        for s in [LyricsPlus, LrcRed, BetterLyrics, Genius] {
+            tl.insert(s, None);
+        }
+        tl.failed = true;
+        tl.search_again();
+        assert!(!tl.failed);
+        assert_eq!(tl.next_lookups(), [LyricsPlus, LrcRed]);
+        tl.found(LyricsPlus, None);
+        tl.found(LrcRed, None);
+        assert_eq!(tl.next_lookups(), [BetterLyrics]);
+        tl.found(BetterLyrics, None);
+        assert_eq!(tl.next_lookups(), [Lrclib]);
+        assert_eq!(tl.view(TrackId::new()).source, Some(Lrclib), "shown while it is asked");
+        tl.found(Lrclib, None);
+        assert_eq!(tl.texts_of(Lrclib), lrc.as_ref());
+        assert!(!tl.missing.contains(&Lrclib));
+        // A timed text fits as it is: Genius is not asked.
+        assert!(tl.next_lookups().is_empty());
+        assert!(tl.pending.is_empty());
+        // Asked again, a new text takes the old one's place.
+        let newer = Text::from_lrc(Some("[00:02.00]b"), None);
+        tl.search_again();
+        tl.found(Lrclib, newer.clone());
+        assert_eq!(tl.texts_of(Lrclib), newer.as_ref());
+        // Off in the settings, Genius is not asked again either.
+        let mut off = TrackLyrics::default();
+        off.search_again();
+        assert!(!off.pending.contains(&Genius));
+    }
+
     /// A Genius miss stored before its current matching is asked again; a
     /// newer one, and any other source's, holds for the usual week.
     #[test]
@@ -1917,7 +2054,14 @@ People pleasing planet"));
         assert!(cached_lyrics(&lib, t.id, None, None, false, None).missing.contains(&LyricsSource::LyricsPlus));
         server.reset().await;
         Mock::given(path("/v2/lyrics/get")).respond_with(ResponseTemplate::new(502)).mount(&server).await;
-        assert!(fetch_online(meta, lib.clone(), row, LyricsSource::LyricsPlus).await.is_err());
+        assert!(fetch_online(meta.clone(), lib.clone(), row.clone(), LyricsSource::LyricsPlus).await.is_err());
         assert_eq!(lib.lyrics_text(t.id, "lyricsplus").unwrap().unwrap(), miss);
+        // A text stored earlier stays when the source has nothing now.
+        let body = worded().body();
+        lib.put_lyrics_text(t.id, "lyricsplus", body.as_deref()).unwrap();
+        server.reset().await;
+        Mock::given(path("/v2/lyrics/get")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
+        assert!(fetch_online(meta, lib.clone(), row, LyricsSource::LyricsPlus).await.unwrap().is_none());
+        assert_eq!(lib.lyrics_text(t.id, "lyricsplus").unwrap().unwrap().0, body);
     }
 }

@@ -2477,6 +2477,9 @@ pub enum Command {
     SeekBy(i64),
     /// Show this track's lyrics from another source; `None` = automatic.
     PickLyricsSource(TrackId, Option<LyricsSource>),
+    /// Look this track's lyrics up online again, whatever was found or not
+    /// found before (a text found earlier stays until a new one comes).
+    SearchLyricsAgain(TrackId),
     /// Make line or word timing for a source's text from the recording
     /// ([`AlignView::craft`]); `deep`: with deep mode's parts for this one
     /// timing, whatever `Prefs::lyrics_deep` says (which decides only the

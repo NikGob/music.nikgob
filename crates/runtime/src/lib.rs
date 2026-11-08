@@ -838,6 +838,7 @@ impl Worker {
             }
             Command::Seek(p) => self.seek(p),
             Command::PickLyricsSource(t, src) => self.pick_lyrics_source(t, src),
+            Command::SearchLyricsAgain(t) => self.search_lyrics_again(t),
             Command::CraftLyrics { track, source, target, deep } => self.craft_lyrics(track, source, target, deep),
             Command::ClearCraft => self.clear_craft(),
             Command::CancelCraft => self.cancel_craft(),
