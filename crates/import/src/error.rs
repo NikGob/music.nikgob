@@ -25,7 +25,7 @@ pub enum ImportError {
     Library(#[from] nikgob_library::LibraryError),
     /// The file holds another song's audio (docs/TODO.md 32): it is not
     /// imported as `title`; `sounds_like` is the song it holds, when known.
-    #[error("в файле «{title}» другая песня{}", wrong_tail(.sounds_like))]
+    #[error("в файле «{}» другая песня{}", .title, wrong_tail(.sounds_like))]
     WrongAudio {
         track: Option<TrackId>,
         title: String,
