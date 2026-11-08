@@ -637,6 +637,13 @@ impl Worker {
         // Once each, after a backup: doubles of a song, an artist or an
         // album become one, and every album has a line per place it counts.
         self.lib.repair_catalog();
+        // Once: the videos that are no music an old import left in its
+        // playlists go from them (entries only).
+        match self.lib.drop_imported_non_music(streams::music_video_title) {
+            Ok(0) => {}
+            Ok(n) => log::info!("library: repair of imported non-music entries: {n}"),
+            Err(e) => log::warn!("library: repair of imported non-music entries: {e}"),
+        }
         self.export_if_stale();
         self.load_torrent_history();
         self.publish_downloads();
