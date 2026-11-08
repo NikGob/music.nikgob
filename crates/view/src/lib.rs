@@ -2229,6 +2229,9 @@ pub struct ViewState {
     /// Disliked tracks and artists not to recommend («Не нравится»,
     /// «Не рекомендовать исполнителя»).
     pub dislikes: DislikesView,
+    /// Bumped when cover files on disk may have been rewritten (an import,
+    /// a retag), so a UI looks at the covers it holds again.
+    pub cover_files: u64,
     /// Bumped on every change, so a UI can skip work when nothing changed.
     pub revision: u64,
 }

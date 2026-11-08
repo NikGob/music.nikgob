@@ -397,6 +397,19 @@ impl Md3eUi {
                 .collect();
             crate::covers::pin(ctx, pinned.iter().map(String::as_str));
         }
+        // Cover files rewritten by the app (an import, a retag) or by
+        // anything else while the window was away: the covers held are
+        // looked at again.
+        let files_id = egui::Id::new("md3e-cover-files");
+        let focused = ctx.input(|i| i.focused);
+        let seen = ctx.data(|d| d.get_temp::<(u64, bool)>(files_id));
+        if seen != Some((state.cover_files, focused)) {
+            ctx.data_mut(|d| d.insert_temp(files_id, (state.cover_files, focused)));
+            let came_back = focused && seen.is_some_and(|(_, was)| !was);
+            if came_back || seen.is_some_and(|(n, _)| n != state.cover_files) {
+                crate::covers::refresh(ctx);
+            }
+        }
         // The next one is decoded and uploaded at the sizes the current one
         // is drawn at, while nothing waits for it.
         if let (Some(current), Some(next)) = (state.player.current.as_ref(), state.queue.next.first()) {

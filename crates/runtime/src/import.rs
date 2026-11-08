@@ -1016,6 +1016,10 @@ impl Worker {
             svc.last_reload = Instant::now();
         }
         self.res.invalidate();
+        // An import may have replaced a cover the UI holds, and the palette
+        // of the playing track's album with it.
+        self.publish(|s| s.cover_files += 1);
+        self.publish_now_playing();
         self.load_library();
         self.load_home();
         self.start_enrich();
