@@ -139,7 +139,13 @@ pub fn decode(s: &str) -> String {
     while let Some(pos) = rest.find('&') {
         out.push_str(&rest[..pos]);
         let tail = &rest[pos..];
-        let Some(end) = tail[..tail.len().min(12)].find(';') else {
+        // An entity is short: look for its end in the next few bytes, not
+        // cutting a letter of another script in two.
+        let mut cut = tail.len().min(12);
+        while !tail.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let Some(end) = tail[..cut].find(';') else {
             out.push('&');
             rest = &tail[1..];
             continue;
@@ -190,5 +196,6 @@ mod tests {
         assert!(table(html, "nothing").is_empty());
         assert_eq!(attr(r#"<a class="x" href = "y">"#, "href").as_deref(), Some("y"));
         assert_eq!(attr(r#"<a data-href="z" href="y">"#, "href").as_deref(), Some("y"));
+        assert_eq!(decode("&amp;日本語 &amp;Привет & ok"), "&日本語 &Привет & ok");
     }
 }
