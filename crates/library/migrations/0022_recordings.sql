@@ -2,8 +2,8 @@
 -- stay whole, each on its album with its own number, tags and file, and
 -- become one recording. Rows only: no file is moved or deleted.
 
--- The tracks of one recording share `recording` (the id of the track the
--- group began with). `how`: `ids` (the same ISRC, recording MBID or
+-- The tracks of one recording share `recording` (an id made when the
+-- group began). `how`: `ids` (the same ISRC, recording MBID or
 -- AcoustID), `audio` (near bit-exact audio under one title), `user` (the
 -- user said so on «Подтверди»).
 CREATE TABLE recording_link (

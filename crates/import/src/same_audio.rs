@@ -20,13 +20,19 @@
 //! or one of another album, is imported and asked about
 //! ([`Judgement::Flag`]); the background check asks about every such pair
 //! it finds.
+//!
+//! One song on two albums ([`same_recording`]): the same ISRC, recording
+//! MBID or AcoustID, or near bit-exact audio under one title, on two
+//! albums is one recording (linked, both tracks stay); the same audio under
+//! two titles on two albums is asked about («Одна и та же песня?»); on one
+//! album it is the rule above (a file holds another song).
 
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nikgob_core::clip_title::same_dual_title;
-use nikgob_core::model::{SourceId, TrackId};
+use nikgob_core::model::{ReleaseId, SourceId, TrackId};
 use nikgob_library::WrongAudio;
 use nikgob_metadata::text::title_key;
 use rusty_chromaprint::{Configuration, Fingerprinter, match_fingerprints};
@@ -218,6 +224,165 @@ pub fn judge(heard: &Heard<'_>, known: &[Known<'_>]) -> Judgement {
         }
         Some((similarity, k)) => Judgement::Flag { source: k.source, track: k.track, similarity },
     }
+}
+
+/// Two copies of one recording on two albums are this close in length at
+/// most.
+pub const RECORDING_SLACK_MS: u32 = 2_000;
+
+/// A track as [`same_recording`] sees it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Take<'a> {
+    pub title: &'a str,
+    pub release: Option<ReleaseId>,
+    pub duration_ms: Option<u32>,
+    pub isrc: Option<&'a str>,
+    pub recording_mbid: Option<&'a str>,
+    pub acoustid: Option<&'a str>,
+    /// The stored print of its file, if it has one.
+    pub print: Option<&'a [u32]>,
+}
+
+/// How two tracks were found to be one recording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum How {
+    /// The same ISRC, recording MBID or AcoustID.
+    Ids,
+    /// Near bit-exact audio under one title.
+    Audio,
+}
+
+impl How {
+    /// The `how` of the stored link.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Ids => "ids",
+            Self::Audio => "audio",
+        }
+    }
+}
+
+/// What two tracks are to each other.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Recording {
+    /// One recording on two albums: linked, both stay.
+    Same(How),
+    /// The same audio under two titles on two albums: «Одна и та же песня?».
+    Ask { similarity: f64 },
+    /// On one album, a file holds the other song's audio (the old card).
+    WrongFile { similarity: f64 },
+    /// Nothing ties them.
+    Apart,
+}
+
+/// The words in brackets and after « - » of a title, folded, a credit
+/// («feat. X») left out: «spiral (TV size)» says `tvsize`, «spiral» nothing.
+fn version_words(t: &str) -> Vec<String> {
+    let lower = t.to_lowercase();
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0usize;
+    let mut cur = String::new();
+    for c in lower.chars() {
+        match c {
+            '(' | '[' | '（' | '【' => {
+                if depth == 0 {
+                    cur.clear();
+                } else {
+                    cur.push(c);
+                }
+                depth += 1;
+            }
+            ')' | ']' | '）' | '】' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    parts.push(std::mem::take(&mut cur));
+                } else {
+                    cur.push(c);
+                }
+            }
+            _ if depth > 0 => cur.push(c),
+            _ => {}
+        }
+    }
+    if let Some((_, tail)) = lower.split_once(" - ") {
+        let cut = tail.find(['(', '[', '（', '【']).unwrap_or(tail.len());
+        parts.push(tail[..cut].to_owned());
+    }
+    let credit = |p: &str| ["feat", "ft.", "ft ", "with ", "prod"].iter().any(|w| p.starts_with(w));
+    let mut out: Vec<String> = parts
+        .iter()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty() && !credit(p))
+        .map(|p| p.chars().filter(|c| c.is_alphanumeric()).collect::<String>())
+        .filter(|p| !p.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Two titles of one song where one is a version of the other («spiral
+/// (TV size)» and «spiral», «Song - Remastered» and «Song»): not the same
+/// recording unless the audio says so. A title and its other script
+/// («夏子 - Natsuko» and «夏子») is no version.
+pub fn version_pair(a: &str, b: &str) -> bool {
+    let brackets = |t: &str| t.contains(['(', '[', '（', '【']);
+    if same_dual_title(a, b, |t| title_key(t).base) && !brackets(a) && !brackets(b) {
+        return false;
+    }
+    (same_title(a, b) || versions_of_one_song(a, b)) && version_words(a) != version_words(b)
+}
+
+fn shared_id(a: &Take<'_>, b: &Take<'_>) -> bool {
+    let fold = |s: &str| s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_uppercase();
+    let same = |x: Option<&str>, y: Option<&str>| match (x.map(fold), y.map(fold)) {
+        (Some(x), Some(y)) => !x.is_empty() && x == y,
+        _ => false,
+    };
+    same(a.isrc, b.isrc) || same(a.recording_mbid, b.recording_mbid) || same(a.acoustid, b.acoustid)
+}
+
+fn within(a: Option<u32>, b: Option<u32>, ms: u32) -> bool {
+    matches!((a, b), (Some(a), Some(b)) if a.abs_diff(b) <= ms)
+}
+
+/// Whether `a` and `b` are one recording on two albums, a pair to ask
+/// about, a file that holds another song, or nothing:
+///
+/// * one album (both on it): the same audio under two titles is a file
+///   with another song's audio (as [`judge`] finds it); else nothing.
+/// * two albums (or loose tracks): the same ISRC, recording MBID or
+///   AcoustID and lengths within [`RECORDING_SLACK_MS`] is one recording
+///   (a version of the title, «(TV size)», needs the audio to say so too);
+///   near bit-exact audio ([`overlap`] ≥ [`SAME_SONG`]) within that length
+///   under one title (or a version of it) is one recording; the same audio
+///   under two titles is asked about.
+pub fn same_recording(a: &Take<'_>, b: &Take<'_>) -> Recording {
+    let sim = match (a.print, b.print) {
+        (Some(x), Some(y)) => overlap(x, y),
+        _ => 0.0,
+    };
+    let one_title = same_title(a.title, b.title) || versions_of_one_song(a.title, b.title);
+    if a.release.is_some() && a.release == b.release {
+        if sim >= SAME_SONG && !one_title && lengths_close(a.duration_ms, b.duration_ms) {
+            return Recording::WrongFile { similarity: sim };
+        }
+        return Recording::Apart;
+    }
+    let close = within(a.duration_ms, b.duration_ms, RECORDING_SLACK_MS);
+    let same_audio = sim >= SAME_SONG;
+    if shared_id(a, b) && close && (same_audio || !version_pair(a.title, b.title)) {
+        return Recording::Same(How::Ids);
+    }
+    if same_audio {
+        if one_title {
+            return if close { Recording::Same(How::Audio) } else { Recording::Apart };
+        }
+        if lengths_close(a.duration_ms, b.duration_ms) {
+            return Recording::Ask { similarity: sim };
+        }
+    }
+    Recording::Apart
 }
 
 /// What a file is called among the things not taken for a track again: its
@@ -495,6 +660,89 @@ mod tests {
         let quiet = print_of(&silence(30.0), RATE);
         assert!(informative(&quiet).iter().filter(|x| **x).count() < MIN_ITEMS);
         assert_eq!(overlap(&quiet, &quiet), 0.0);
+    }
+
+    fn take<'a>(title: &'a str, release: Option<ReleaseId>, ms: u32, print: Option<&'a [u32]>) -> Take<'a> {
+        Take { title, release, duration_ms: Some(ms), print, ..Take::default() }
+    }
+
+    /// One song on two albums: the same ISRC is linked; the same audio
+    /// under one title is linked; under two titles it is asked about; on
+    /// one album the old rule (a file holds another song) stays.
+    #[test]
+    fn one_recording_on_two_albums_is_linked_or_asked_about() {
+        let (ost, special) = (Some(ReleaseId::new()), Some(ReleaseId::new()));
+        let song = notes(30.0, 71);
+        let p = print_of(&song, RATE);
+        let quieter: Vec<f32> = song.iter().map(|s| s * 0.8).collect();
+        let q = print_of(&quieter, RATE);
+        let other = print_of(&notes(30.0, 72), RATE);
+
+        // The same ISRC (written another way) on two albums, as long.
+        let a = Take { isrc: Some("JP-A12-3456789"), ..take("Oración", ost, 276_900, None) };
+        let b = Take { isrc: Some("jpa123456789"), ..take("Oración", special, 277_600, None) };
+        assert_eq!(same_recording(&a, &b), Recording::Same(How::Ids));
+        // …but 20 s longer: another cut.
+        let longer = Take { duration_ms: Some(297_000), ..b };
+        assert_eq!(same_recording(&a, &longer), Recording::Apart);
+        // The same ISRC on one album is a tagging slip, nothing more.
+        assert_eq!(same_recording(&a, &Take { release: ost, ..b }), Recording::Apart);
+
+        // Near bit-exact audio under one title (another script too).
+        let a = take("Oración", ost, 276_900, Some(&p));
+        let b = take("Oración", special, 277_600, Some(&q));
+        assert_eq!(same_recording(&a, &b), Recording::Same(How::Audio));
+        assert_eq!(same_recording(&take("夏子 - Natsuko", ost, 200_000, Some(&p)), &take("夏子", special, 200_500, Some(&q))), Recording::Same(How::Audio));
+        // Other music under one title: nothing.
+        assert_eq!(same_recording(&a, &take("Oración", special, 277_600, Some(&other))), Recording::Apart);
+
+        // The same audio under two titles on two albums: asked about.
+        let jp = take("オラシオン", special, 277_600, Some(&q));
+        match same_recording(&a, &jp) {
+            Recording::Ask { similarity } => assert!(similarity >= SAME_SONG),
+            r => panic!("not asked: {r:?}"),
+        }
+        // Two loose tracks are on no one album: asked about too.
+        assert!(matches!(same_recording(&take("Oración", None, 276_900, Some(&p)), &Take { release: None, ..jp }), Recording::Ask { .. }));
+        // On one album: a file holds the other song (the old card).
+        assert!(matches!(same_recording(&a, &Take { release: ost, ..jp }), Recording::WrongFile { .. }));
+        assert_eq!(same_recording(&a, &Take { release: ost, ..b }), Recording::Apart, "one album's song twice is no other song");
+    }
+
+    /// A version («TV size») is linked only when the audio is near
+    /// identical and the lengths agree within 2 s, whatever the ids say.
+    #[test]
+    fn a_version_is_linked_only_when_it_sounds_and_lasts_the_same() {
+        let (ost, single) = (Some(ReleaseId::new()), Some(ReleaseId::new()));
+        let song = notes(30.0, 81);
+        let p = print_of(&song, RATE);
+        let q = print_of(&song.iter().map(|s| s * 0.9).collect::<Vec<f32>>(), RATE);
+        let other = print_of(&notes(30.0, 82), RATE);
+        assert!(version_pair("spiral (TV size)", "spiral"));
+        assert!(version_pair("Song - Remastered", "Song"));
+        assert!(!version_pair("Song (feat. X)", "Song"));
+        assert!(!version_pair("夏子 - Natsuko", "夏子"));
+        assert!(!version_pair("Тмстс", "Сфотографирую"));
+
+        // A TV size is shorter: never one recording.
+        let full = take("spiral", ost, 240_000, Some(&p));
+        let tv = take("spiral (TV size)", single, 89_000, Some(&q));
+        assert_eq!(same_recording(&full, &tv), Recording::Apart);
+        let tv_ids = Take { isrc: Some("JPX000000001"), ..tv };
+        assert_eq!(same_recording(&Take { isrc: Some("JPX000000001"), ..full }, &tv_ids), Recording::Apart);
+        // As long and near identical: one recording.
+        let same_len = take("spiral (TV size)", single, 241_500, Some(&q));
+        assert_eq!(same_recording(&full, &same_len), Recording::Same(How::Audio));
+        // As long with the same ISRC but no audio to compare, or other
+        // audio: not linked.
+        let a = Take { isrc: Some("JPX000000001"), ..take("spiral", ost, 240_000, None) };
+        let b = Take { isrc: Some("JPX000000001"), ..take("spiral (TV size)", single, 241_000, None) };
+        assert_eq!(same_recording(&a, &b), Recording::Apart);
+        let b_other = Take { print: Some(&other), ..b };
+        assert_eq!(same_recording(&Take { print: Some(&p), ..a }, &b_other), Recording::Apart);
+        // The same ISRC and as long, the audio near identical: linked.
+        let b_same = Take { print: Some(&q), ..b };
+        assert_eq!(same_recording(&Take { print: Some(&p), ..a }, &b_same), Recording::Same(How::Ids));
     }
 
     #[test]
