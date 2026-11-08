@@ -543,6 +543,33 @@ pub fn parse_ttml_plain(xml: &str) -> Option<String> {
     (!stanzas.is_empty()).then(|| stanzas.join("\n\n"))
 }
 
+/// The namespace of the mark [`mark_ttml_own`] puts on a TTML.
+const OWN_NS: &str = "urn:nikgob:lyrics";
+
+/// Marks a TTML written by [`serialize_ttml`] or [`serialize_ttml_plain`]
+/// as the user's own text (edited by hand): an attribute on its `<tt>`,
+/// which other readers skip. [`ttml_is_own`] tells it.
+pub fn mark_ttml_own(xml: &str) -> String {
+    if ttml_is_own(xml) {
+        return xml.to_owned();
+    }
+    match xml.find("<tt") {
+        Some(at) => {
+            let (head, rest) = xml.split_at(at + 3);
+            format!("{head} xmlns:nikgob=\"{OWN_NS}\" nikgob:own=\"true\"{rest}")
+        }
+        None => xml.to_owned(),
+    }
+}
+
+/// The TTML is the user's own text ([`mark_ttml_own`]).
+pub fn ttml_is_own(xml: &str) -> bool {
+    let Ok(doc) = Document::parse(xml.trim_start_matches('\u{feff}')) else { return false };
+    let root = doc.root_element();
+    root.tag_name().name() == "tt"
+        && root.attributes().any(|a| a.name() == "own" && a.namespace() == Some(OWN_NS) && a.value() == "true")
+}
+
 /// ` begin=".." end=".."`.
 fn times(out: &mut String, begin: Duration, end: Option<Duration>) {
     out.push_str(&format!(" begin=\"{}\"", clock(begin)));
@@ -585,6 +612,28 @@ mod tests {
 
     fn ms(v: u64) -> Duration {
         Duration::from_millis(v)
+    }
+
+    /// The user's own text keeps its mark and reads back as it was, timed
+    /// or not; an unmarked one is not theirs.
+    #[test]
+    fn the_own_mark_is_told_and_changes_nothing_else() {
+        let mut line = LyricLine::new(ms(1000), "Знаешь, не беда");
+        line.words = vec![
+            LyricWord { start: ms(1000), end: ms(1400), text: "Знаешь, ".into() },
+            LyricWord { start: ms(1400), end: ms(2000), text: "не беда".into() },
+        ];
+        line.end = Some(ms(2000));
+        let timed = serialize_ttml(std::slice::from_ref(&line));
+        let own = mark_ttml_own(&timed);
+        assert!(!ttml_is_own(&timed));
+        assert!(ttml_is_own(&own));
+        assert_eq!(mark_ttml_own(&own), own, "marked once");
+        assert_eq!(parse_ttml(&own).unwrap().lines, parse_ttml(&timed).unwrap().lines);
+        let plain = mark_ttml_own(&serialize_ttml_plain("Раз\nДва"));
+        assert!(ttml_is_own(&plain));
+        assert_eq!(parse_ttml_plain(&plain).as_deref(), Some("Раз\nДва"));
+        assert!(!ttml_is_own("not xml"));
     }
 
     #[test]

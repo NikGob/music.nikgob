@@ -54,6 +54,9 @@ impl LyricLine {
 /// Where a lyrics text came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum LyricsSource {
+    /// The user's own text (edited by hand and saved as a `.ttml` next to
+    /// the file, marked as theirs): shown first, never refetched.
+    Own,
     /// A `.ttml` / `.lrc` next to the file, or the file's own lyrics tag.
     File,
     LyricsPlus,
@@ -68,12 +71,13 @@ pub enum LyricsSource {
 }
 
 impl LyricsSource {
-    pub const ALL: [Self; 7] =
-        [Self::File, Self::LyricsPlus, Self::LrcRed, Self::BetterLyrics, Self::Lrclib, Self::Genius, Self::Recognized];
+    pub const ALL: [Self; 8] =
+        [Self::Own, Self::File, Self::LyricsPlus, Self::LrcRed, Self::BetterLyrics, Self::Lrclib, Self::Genius, Self::Recognized];
 
     /// Stable key for storage.
     pub fn key(self) -> &'static str {
         match self {
+            Self::Own => "own",
             Self::File => "file",
             Self::Lrclib => "lrclib",
             Self::LyricsPlus => "lyricsplus",
@@ -91,6 +95,7 @@ impl LyricsSource {
     /// Short name for the UI.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Own => "Свой текст",
             Self::File => "Файл",
             Self::Lrclib => "LRCLIB",
             Self::LyricsPlus => "LyricsPlus",
