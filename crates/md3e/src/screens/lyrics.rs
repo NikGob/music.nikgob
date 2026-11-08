@@ -413,7 +413,6 @@ fn paint(
     let clicked = if resp.clicked() { item_at(resp.interact_pointer_pos().or(resp.hover_pos())) } else { None };
     for (i, item) in items.iter().enumerate() {
         let dist = i as i32 - ci as i32;
-        let far = dist.unsigned_abs().min(8) as f32;
         let y = ys[i];
         let (slot_h, extra) = slots[i];
         let room = rooms[i];
@@ -506,11 +505,12 @@ fn paint(
         let line = Rect::from_min_size(pos2(side(g.size().x), y + (slot_h - g.size().y) * 0.5), g.size());
         // Brightness of a line at rest: past lines a bit brighter than the
         // ones to come; focus mode pushes the rest far back (from the look
-        // before as the look changes).
-        let rest_in = |style: Style| match style {
-            Style::Focus => 0.62f32.powf(far).max(0.08) * 0.7,
-            _ => (if dist < 0 { 0.5 } else { 0.42 }) * 0.86f32.powf((far - 1.0).max(0.0)),
-        };
+        // before as the look changes). By how far the line is from the
+        // current one, eased with the focus as the current line changes:
+        // every other line stepped brighter or dimmer at once the frame the
+        // next line came in, right as the lines began to move.
+        let away = anim::f32(&ctx, id.with(("away", slot_of[i])), (dist as f32).clamp(-9.0, 9.0), AWAY);
+        let rest_in = |style: Style| rest_brightness(style, away);
         let mut rest = match look_was {
             Some(was) => rest_in(was.style) + (rest_in(look.style) - rest_in(was.style)) * look_mix,
             None => rest_in(look.style),
@@ -618,6 +618,22 @@ fn paint(
 
 /// The spring the text follows a scroll by hand on.
 const HAND: Spring = Spring::new(1.0, 1600.0);
+
+/// The spring a line's distance from the current one eases on (that of
+/// its focus, so its brightness moves with the rest of the change).
+const AWAY: Spring = Spring::new(1.0, 170.0);
+
+/// How bright a line at rest is under `style`, `away` lines from the
+/// current one (before it when negative; fractions between whole lines
+/// while the current line changes): lines sung already a bit brighter
+/// than the ones to come; focus pushes the rest far back.
+fn rest_brightness(style: Style, away: f32) -> f32 {
+    let far = away.abs().min(8.0);
+    match style {
+        Style::Focus => 0.62f32.powf(far).max(0.08) * 0.7,
+        _ => (0.42 + 0.08 * (-away).clamp(0.0, 1.0)) * 0.86f32.powf((far - 1.0).max(0.0)),
+    }
+}
 
 /// The spring mega mode's block of text moves to its new middle on when
 /// the text changes.
@@ -2896,6 +2912,28 @@ mod tests {
             let b = fixed_breaks(painter, egui::Id::new("test-breaks"), text, width as f32, 44.0);
             (b.forced.split('\n').count() == 3).then_some(b)
         }).expect("fixture must wrap into three rows")
+    }
+
+    /// At whole distances a line rests as bright as it always did; between
+    /// them (the current line changing) its brightness moves without a step.
+    #[test]
+    fn resting_brightness_moves_without_steps_as_the_current_line_changes() {
+        for style in [Style::Karaoke, Style::Focus, Style::Wave] {
+            for dist in -12i32..=12 {
+                let far = dist.unsigned_abs().min(8) as f32;
+                let old = match style {
+                    Style::Focus => 0.62f32.powf(far).max(0.08) * 0.7,
+                    _ => (if dist < 0 { 0.5 } else { 0.42 }) * 0.86f32.powf((far - 1.0).max(0.0)),
+                };
+                assert!((rest_brightness(style, dist as f32) - old).abs() < 1e-6, "{style:?} {dist}");
+            }
+            let mut was = rest_brightness(style, -10.0);
+            for k in 1..=2000 {
+                let now = rest_brightness(style, -10.0 + k as f32 * 0.01);
+                assert!((now - was).abs() < 0.006, "{style:?} at {}", -10.0 + k as f32 * 0.01);
+                was = now;
+            }
+        }
     }
 
     /// A line growing from one resting size to the other: its height and
