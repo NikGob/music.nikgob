@@ -59,8 +59,12 @@ const SETTLE_REAPPLY: Duration = Duration::from_millis(100);
 /// A level read back longer ago than this is not trusted: the volume mixer
 /// or a new session may have moved it in a quiet moment, where no captured
 /// sound shows it, and a quiet copy scaled up by the old factor would hiss.
-/// The track gives silence until it is read again.
-const LEVEL_FRESH: Duration = Duration::from_millis(500);
+/// The track gives silence until it is read again. The session thread reads
+/// it on every pass (100 ms apart) and device changes untrust it at once,
+/// so this only covers a pass that held the thread (a slow COM walk over
+/// Bluetooth endpoints, a stalled capture joined): a few seconds, never a
+/// gap in the track for one slow pass.
+const LEVEL_FRESH: Duration = Duration::from_secs(3);
 /// The process plays and the capture's frames stand still this long: it
 /// stalled.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -967,8 +971,11 @@ mod tests {
         // Read just now at the routed level.
         assert!(level_trusted(ROUTED_LEVEL, Some(ms(1000)), None, ms(1100)));
         assert!(level_trusted(ROUTED_LEVEL, Some(ms(1000)), None, ms(1500)));
+        // One slow pass (a COM walk, a stalled capture joined) is no gap.
+        assert!(level_trusted(ROUTED_LEVEL, Some(ms(1000)), None, ms(2500)));
+        assert!(level_trusted(ROUTED_LEVEL, Some(ms(1000)), None, ms(1000) + LEVEL_FRESH));
         // Older than LEVEL_FRESH: silence until read again.
-        assert!(!level_trusted(ROUTED_LEVEL, Some(ms(1000)), None, ms(1501)));
+        assert!(!level_trusted(ROUTED_LEVEL, Some(ms(1000)), None, ms(1001) + LEVEL_FRESH));
         // Another level, or unknown.
         assert!(!level_trusted(1.0, Some(ms(1000)), None, ms(1100)));
         assert!(!level_trusted(f32::NAN, Some(ms(1000)), None, ms(1100)));
