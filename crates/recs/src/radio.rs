@@ -53,6 +53,21 @@
 //! The session is the runtime's own, handed to the radio before it picks
 //! ([`RadioState::attune`]), else the radio's tracks.
 //!
+//! Two of the user's knobs hold for a radio of a track or an artist (and
+//! autoplay, which is one); neither ever stops a radio:
+//! * «Подмешивать случайное» ([`RadioState::set_explore`]): new music whose
+//!   sound is not known to be near the seed (within its sound radius) is a
+//!   blind pick, at most that share of an extension (and of the queue new
+//!   music joins later, [`RadioState::take_new`]); new music that sounds
+//!   like the seed fills the share of new music first.
+//! * «Преимущественно новые песни» ([`RadioState::set_unheard`]): that
+//!   share of the library's picks at least is unheard by the user (never
+//!   started nor played, not liked), each among what the radio would pick
+//!   from anyway (the seed's scene, its sound radius, the profile), so its
+//!   rules hold. With all of them unheard («Только новые») what had to be
+//!   heard makes way for new music that sounds like the seed, while there
+//!   is; with none left either, the usual picks.
+//!
 //! It keeps to a taste profile (profiles-v1 §4.3, §7): «Похоже на X» to
 //! X's, autoplay ([`RadioState::continuing`]) to the one its session is
 //! pure in if X belongs to it (else X's), to none after a mixed session (then in blocks of three or four
@@ -74,6 +89,7 @@
 //! ([`crate::daylist`]) draws from the tracks near its centre on the mood
 //! axes and weighs the bonus of its own part of the day double.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use nikgob_core::model::{ArtistId, TrackId};
@@ -84,7 +100,7 @@ use crate::analysis::{DIM, Vector};
 use crate::index::euclid;
 use crate::model::{F_COOC, F_GRAPH, F_NEXT_ALBUM, F_PGRAPH, F_SAME_LANE, F_SKIP_PUSH, F_SOUND, HAND, UserModel, Weights};
 use crate::mood::Mood;
-use crate::pick::{Diversity, Item, NewTrack, Pick, Placed, Reason, Recs, Seen, Slot, arrange, new_count, select_diverse, take, token_of_artist};
+use crate::pick::{Diversity, Item, NewTrack, Pick, Placed, Reason, Recs, Seen, Slot, arrange, new_count, select_diverse, select_more, take, token_of_artist};
 use crate::rng::Rng;
 use crate::mood::Axes;
 use crate::listening::Mode;
@@ -241,6 +257,15 @@ pub struct RadioState {
     /// What played this long ago or less is not picked again.
     #[serde(default = "no_repeat_default")]
     no_repeat_ms: i64,
+    /// «Подмешивать случайное»: the share of an extension at most that is
+    /// new music not known to sound like the seed (`None`: as much as the
+    /// share of new music).
+    #[serde(default)]
+    explore: Option<f32>,
+    /// «Преимущественно новые песни»: the share of the library's picks at
+    /// least that the user has not heard, while there are.
+    #[serde(default)]
+    unheard: f32,
 }
 
 fn no_repeat_default() -> i64 {
@@ -284,6 +309,8 @@ impl RadioState {
             learned: None,
             seed_facts: None,
             no_repeat_ms: NO_REPEAT_MS,
+            explore: None,
+            unheard: 0.0,
             seed,
         };
         match &s.seed {
@@ -338,6 +365,60 @@ impl RadioState {
         self.no_repeat_ms = ms.max(0);
     }
 
+    /// «Подмешивать случайное»: at most `share` of a radio of a track or an
+    /// artist is new music not known to sound like the seed (`None`: no
+    /// limit but the share of new music).
+    pub fn set_explore(&mut self, share: Option<f32>) {
+        self.explore = share.map(|s| s.clamp(0.0, 1.0));
+    }
+
+    /// «Преимущественно новые песни»: at least `share` of the library's
+    /// picks of a radio of a track or an artist is unheard by the user,
+    /// while there are (1: all, and new music that sounds like the seed
+    /// before what was heard).
+    pub fn set_unheard(&mut self, share: f32) {
+        self.unheard = share.clamp(0.0, 1.0);
+    }
+
+    /// The knobs hold for a radio of a track or an artist: a mix, a
+    /// service's song and «Новое для тебя» go by their own share.
+    fn knobs_hold(&self) -> bool {
+        matches!(self.seed, RadioSeed::Track(_) | RadioSeed::Artist(_))
+    }
+
+    /// The share of blind new music allowed, when limited.
+    fn explore_cap(&self) -> Option<f32> {
+        self.explore.filter(|_| self.knobs_hold())
+    }
+
+    /// The share of unheard library picks wanted.
+    fn unheard_share(&self) -> f32 {
+        if self.knobs_hold() { self.unheard } else { 0.0 }
+    }
+
+    /// Where new music sounds like the seed: the seed's point and its
+    /// sound radius (none for a seed without a sound: nothing is known to).
+    fn fit_zone(&self, recs: &Recs<'_>) -> Option<(Vector, f32)> {
+        match (&self.seed, recs.model) {
+            (RadioSeed::Track(t), Some(m)) => {
+                let a = SeedAnchor::of(m, Some(*t), self.seed_facts.as_ref());
+                a.point.map(|p| (p, a.radius))
+            }
+            _ => self.seed_vector(recs).map(|p| (p, SEED_RADIUS * library_scale(recs))),
+        }
+    }
+
+    /// New music of `slots` that sounds like the seed, and the blind rest
+    /// (all of it counts as sounding like the seed while blind picks are
+    /// not limited). Both keep their order.
+    fn split_fit(&self, recs: &Recs<'_>, slots: Vec<Slot>) -> (Vec<Slot>, Vec<Slot>) {
+        if self.explore_cap().is_none() {
+            return (slots, Vec::new());
+        }
+        let zone = self.fit_zone(recs);
+        slots.into_iter().partition(|s| zone.as_ref().is_some_and(|(p, r)| s.vec.as_ref().is_some_and(|v| euclid(v, p) <= *r)))
+    }
+
     /// How long the session it continues has played.
     fn session_ms(&self) -> i64 {
         match (self.session.tracks().next(), self.session.last_ts()) {
@@ -388,8 +469,10 @@ impl RadioState {
 
     /// Up to `k` new-music picks now, the nearest to the seed first, served
     /// at once: new music that came after the queue was picked joins it
-    /// (the runtime puts them among what is queued).
-    pub fn take_new(&mut self, recs: &Recs<'_>, k: usize) -> Vec<Pick> {
+    /// (the runtime puts them among the `of` picks queued, `have` of them
+    /// new music already). Blind ones stay within «Подмешивать случайное»
+    /// of `of`, the new music queued counted as blind.
+    pub fn take_new(&mut self, recs: &Recs<'_>, k: usize, of: usize, have: usize) -> Vec<Pick> {
         let served: HashSet<Item> = self.served.iter().cloned().collect();
         let seed_vec = self.seed_vector(recs);
         let mut slots: Vec<Slot> = self
@@ -408,7 +491,13 @@ impl RadioState {
             })
             .collect();
         sort_by_score(&mut slots);
-        let picked = select_diverse(slots, k, &Diversity::default(), &mut HashSet::new());
+        let blind_max = self.explore_cap().map_or(usize::MAX, |e| new_count(of, e).saturating_sub(have));
+        let (fit, blind) = self.split_fit(recs, slots);
+        let mut taken = HashSet::new();
+        let mut picked = select_diverse(fit, k, &Diversity::default(), &mut taken);
+        let more = (k - picked.len()).min(blind_max);
+        let blind = select_more(blind, more, k, &Diversity::default(), &mut taken, &picked);
+        picked.extend(blind);
         for s in &picked {
             self.served.push_back(s.item.clone());
         }
@@ -609,7 +698,18 @@ impl RadioState {
             })
             .collect();
         sort_by_score(&mut new_slots);
-        let new_slots = select_diverse(new_slots, want_new, &rules, &mut taken);
+        // What sounds like the seed first, blind picks within «Подмешивать
+        // случайное»; with all of the library unheard, the rest of what
+        // sounds like the seed waits to stand in for what was heard (not in
+        // the background, where new music stays one in six at most).
+        let (fit, blind) = self.split_fit(recs, new_slots);
+        let stand_in = self.unheard_share() >= 1.0 && share > 0.0 && plan.as_ref().is_none_or(|p| !p.background);
+        let reserve: Vec<Slot> = if stand_in { fit.clone() } else { Vec::new() };
+        let mut new_slots = select_diverse(fit, want_new, &rules, &mut taken);
+        let blind_max = self.explore_cap().map_or(usize::MAX, |e| new_count(n, e));
+        let more = (want_new - new_slots.len()).min(blind_max);
+        let blind = select_more(blind, more, want_new, &rules, &mut taken, &new_slots);
+        new_slots.extend(blind);
 
         // 2-4. The library: a track's radio by the user model, in its order.
         let want_lib = n - new_slots.len();
@@ -620,6 +720,7 @@ impl RadioState {
                 let more = self.library(recs, want_lib - lib.len(), &sound, &served, false, &rules, &mut rng, &mut taken);
                 lib.extend(more);
             }
+            make_way(recs, &mut lib, &mut new_slots, reserve, &rules, &mut taken);
             // New music between, evenly.
             let mut out: Vec<Slot> = again.into_iter().collect();
             let every = (lib.len() + new_slots.len()) / (new_slots.len() + 1);
@@ -640,6 +741,7 @@ impl RadioState {
             let more = self.library(recs, want_lib - lib.len(), &sound, &recent, false, &rules, &mut rng, &mut taken);
             lib.extend(more);
         }
+        make_way(recs, &mut lib, &mut new_slots, reserve, &rules, &mut taken);
 
         let mut all = new_slots;
         all.extend(lib);
@@ -799,6 +901,9 @@ impl RadioState {
         let mut per_world: HashMap<u64, usize> = HashMap::new();
         let world_cap = rules.world_cap(n);
         let jitter = rng.next_u64();
+        // «Преимущественно новые песни»: picks unheard so far.
+        let unheard_share = self.unheard_share();
+        let mut fresh = 0usize;
         let mut out: Vec<Slot> = Vec::with_capacity(n);
         for _ in 0..n {
             let mut m = model.moment(&sim, ts);
@@ -814,51 +919,67 @@ impl RadioState {
                 let t = recs.info(i);
                 !taken.contains(&Item::Track(t.id)) && !t.song.is_some_and(|s| taken.contains(&Item::Track(s))) && !lately.contains(&t.id)
             };
+            // This pick is to be unheard: the set of candidates it is taken
+            // from below keeps its unheard part apart (the nearest unheard,
+            // not only the unheard of the nearest), so whatever may follow
+            // stays as it is.
+            let want_unheard = unheard_share > 0.0 && (fresh as f32) < unheard_share * (out.len() + 1) as f32 - 1e-3;
+            let unheard: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+            let gather = |f: &dyn Fn(usize) -> bool| -> Vec<usize> {
+                let c = model.candidates(&m, f);
+                if want_unheard && !c.is_empty() {
+                    *unheard.borrow_mut() = model.candidates(&m, &|i| f(i) && !recs.heard(i));
+                }
+                c
+            };
             // A sparse scene first: what is near of it, then its artists'
             // and their neighbours' tracks of any sound, then its language.
             let mut cands = if sparse {
-                let mut c = model.candidates(&m, &|i| ok(i) && free(i) && quiet(i) && in_scene(i) && near(i));
+                let mut c = gather(&|i| ok(i) && free(i) && quiet(i) && in_scene(i) && near(i));
                 if c.is_empty() {
                     c = kin.keys().copied().filter(|&i| ok(i) && free(i) && quiet(i)).collect();
                     c.sort_unstable();
+                    if want_unheard {
+                        *unheard.borrow_mut() = c.iter().copied().filter(|&i| !recs.heard(i)).collect();
+                    }
                 }
                 if c.is_empty() {
-                    c = model.candidates(&m, &|i| ok(i) && free(i) && quiet(i) && same_lane(i));
+                    c = gather(&|i| ok(i) && free(i) && quiet(i) && same_lane(i));
                 }
                 c
             } else {
                 Vec::new()
             };
             if cands.is_empty() {
-                cands = model.candidates(&m, &|i| ok(i) && free(i) && quiet(i) && ((own(i) && near(i)) || next(i)));
+                cands = gather(&|i| ok(i) && free(i) && quiet(i) && ((own(i) && near(i)) || next(i)));
             }
             if cands.is_empty() && plan.profile.is_some() {
                 // The profile beyond the seed's neighbourhood.
-                cands = model.candidates(&m, &|i| ok(i) && free(i) && quiet(i) && own(i) && anchor.goes(model, i));
+                cands = gather(&|i| ok(i) && free(i) && quiet(i) && own(i) && anchor.goes(model, i));
             }
             if cands.is_empty() && plan.background {
                 // A background profile played through: what rested a day
                 // and a half comes back.
-                cands = model.candidates(&m, &|i| {
+                cands = gather(&|i| {
                     own(i) && quiet(i) && free(i) && !recs.blocked(i) && seed != Some(recs.info(i).id) && !recs.played_within(i, BG_REPEAT_MS)
                 });
             }
             if cands.is_empty() {
-                cands = model.candidates(&m, &|i| ok(i) && free(i) && near(i));
+                cands = gather(&|i| ok(i) && free(i) && near(i));
             }
             if cands.is_empty() && knows_scene {
                 // Its scene of any sound before another scene.
-                cands = model.candidates(&m, &|i| ok(i) && free(i) && in_scene(i));
+                cands = gather(&|i| ok(i) && free(i) && in_scene(i));
             }
             if cands.is_empty() {
-                cands = model.candidates(&m, &|i| ok(i) && free(i));
+                cands = gather(&|i| ok(i) && free(i));
             }
             if cands.is_empty() {
                 // Nothing unplayed is left: what played lately comes back.
-                cands = model.candidates(&m, &|i| base(i) && free(i) && (!knows_scene || in_scene(i)));
+                cands = gather(&|i| base(i) && free(i) && (!knows_scene || in_scene(i)));
             }
             if cands.is_empty() {
-                cands = model.candidates(&m, &|i| base(i) && free(i));
+                cands = gather(&|i| base(i) && free(i));
             }
             if cands.is_empty() {
                 break;
@@ -935,6 +1056,13 @@ impl RadioState {
                 best
             };
             let mut best = best_of(cands);
+            // The best unheard one, unless it breaks more of the rules.
+            let unheard = unheard.take();
+            if !unheard.is_empty()
+                && let Some(b) = best_of(unheard).filter(|b| best.as_ref().is_none_or(|a| b.0.0 <= a.0.0))
+            {
+                best = Some(b);
+            }
             // Only one world left near the seed, and it ran twice: a track a
             // little farther, of a kind that goes with the seed, before a
             // world thrice running (the user's rule; the radius is ours).
@@ -950,6 +1078,7 @@ impl RadioState {
             let Some((_, slot)) = best else { break };
             let Item::Track(id) = slot.item else { break };
             continuing &= m.next_album.is_some_and(|c| model.id(c) == id);
+            fresh += usize::from(model.position(id).is_some_and(|i| !recs.heard(i)));
 
             take(taken, &slot);
             tail.push(Placed::of(&slot));
@@ -1228,14 +1357,58 @@ impl RadioState {
             sort_by_score(&mut own);
             sort_by_score(&mut rest);
             let want_own = ((n as f32) * ARTIST_OWN_SHARE).round() as usize;
-            let mut out = select_diverse(own, want_own, rules, taken);
+            let mut out = select_unheard(recs, own, want_own, self.unheard_share(), rules, taken);
             let left = n - out.len();
-            out.extend(select_diverse(rest, left, rules, taken));
+            out.extend(select_unheard(recs, rest, left, self.unheard_share(), rules, taken));
             return out;
         }
         sort_by_score(&mut slots);
-        select_diverse(slots, n, rules, taken)
+        select_unheard(recs, slots, n, self.unheard_share(), rules, taken)
     }
+}
+
+/// The slot is new music or a track the user has not heard.
+fn slot_unheard(recs: &Recs<'_>, s: &Slot) -> bool {
+    match &s.item {
+        Item::Track(id) => recs.catalog.position(*id).is_some_and(|i| !recs.heard(i)),
+        Item::Stream(_) => true,
+    }
+}
+
+/// The best `n` of `slots` (sorted) under the rules, at least `share` of
+/// them unheard by the user while there are («Преимущественно новые
+/// песни»).
+fn select_unheard(recs: &Recs<'_>, slots: Vec<Slot>, n: usize, share: f32, rules: &Diversity, taken: &mut HashSet<Item>) -> Vec<Slot> {
+    if share <= 0.0 {
+        return select_diverse(slots, n, rules, taken);
+    }
+    let want = ((n as f32 * share).ceil() as usize).min(n);
+    let fresh: Vec<Slot> = slots.iter().filter(|s| slot_unheard(recs, s)).cloned().collect();
+    let mut out = select_more(fresh, want, n, rules, taken, &[]);
+    let more = select_more(slots, n - out.len(), n, rules, taken, &out);
+    out.extend(more);
+    out
+}
+
+/// «Только новые»: the library's picks the user has heard (the last ones
+/// first) make way for the new music of `reserve` that sounds like the
+/// seed, while there is; `new` takes it.
+fn make_way(recs: &Recs<'_>, lib: &mut Vec<Slot>, new: &mut Vec<Slot>, reserve: Vec<Slot>, rules: &Diversity, taken: &mut HashSet<Item>) {
+    if reserve.is_empty() {
+        return;
+    }
+    let heard: Vec<usize> = (0..lib.len()).filter(|&k| !slot_unheard(recs, &lib[k])).collect();
+    if heard.is_empty() {
+        return;
+    }
+    let more = select_more(reserve, heard.len(), new.len() + heard.len(), rules, taken, new);
+    let gone: HashSet<usize> = heard.iter().rev().take(more.len()).copied().collect();
+    let mut k = 0;
+    lib.retain(|_| {
+        k += 1;
+        !gone.contains(&(k - 1))
+    });
+    new.extend(more);
 }
 
 /// A track is of a radio's profile with this membership in it
@@ -1679,6 +1852,11 @@ pub(crate) mod tests {
     /// Plays a model radio of `seed` for `batches` of ten, every pick heard
     /// out (the first `skip` of the first batch skipped early): the picks.
     fn play_model_radio(l: &Listener, seed: u128, batches: usize, skip: usize) -> Vec<u128> {
+        play_model_radio_with(l, seed, batches, skip, |_| {})
+    }
+
+    /// [`play_model_radio`] with the radio's knobs set by `tune`.
+    fn play_model_radio_with(l: &Listener, seed: u128, batches: usize, skip: usize, tune: fn(&mut RadioState)) -> Vec<u128> {
         use crate::model::{ModelInput, UserModel};
         let (cat, idx, input, types) = l;
         let now = crate::model::tests::T0;
@@ -1689,6 +1867,7 @@ pub(crate) mod tests {
         session.start(tid(seed), ts, nikgob_core::model::EventContext::Radio, None);
         session.end(tid(seed), Ended::Complete);
         let mut radio = RadioState::new(RadioSeed::Track(tid(seed)));
+        tune(&mut radio);
         let mut out = Vec::new();
         let mut skipped = 0;
         for b in 0..batches {
@@ -1900,7 +2079,7 @@ pub(crate) mod tests {
             let longest = new.split(|n| *n).map(<[bool]>::len).max().unwrap_or(0);
             assert!(longest <= 5, "{longest} of the library running: {new:?}");
             // New music that came late joins at once.
-            let late = radio.take_new(&recs, 2);
+            let late = radio.take_new(&recs, 2, 10, 0);
             assert_eq!(late.len(), 2);
             assert!(late.iter().all(|p| !picks.contains(p)));
         }
@@ -2296,6 +2475,11 @@ pub(crate) mod tests {
     /// Autoplay after a session of a calm Japanese mix and an album of the
     /// seed's artist: `facts` for a seed the catalog lacks. Thirty picks.
     fn sparse_autoplay(seed: u128, played: &[u128], facts: Option<SeedFacts>) -> Vec<u128> {
+        sparse_autoplay_with(seed, played, facts, |_| {})
+    }
+
+    /// [`sparse_autoplay`] with the radio's knobs set by `tune`.
+    fn sparse_autoplay_with(seed: u128, played: &[u128], facts: Option<SeedFacts>, tune: fn(&mut RadioState)) -> Vec<u128> {
         use crate::model::{ModelInput, UserModel};
         let ((cat, idx, input, types), graph) = sparse_seed();
         let now = crate::model::tests::T0;
@@ -2318,6 +2502,7 @@ pub(crate) mod tests {
             radio = radio.with_seed_facts(f);
         }
         radio.mark_served(played.iter().map(|t| Item::Track(tid(*t))));
+        tune(&mut radio);
         let mut out = Vec::new();
         for _ in 0..3 {
             radio.attune(session.clone(), None);
@@ -2415,5 +2600,218 @@ pub(crate) mod tests {
         let mut radio = RadioState::new(RadioSeed::Track(tid(3)));
         radio.attune(session, None);
         assert!(!radio.extend(&recs, 3, &RadioParams { new_share: 0.0, seed: 1 }).is_empty(), "a small library keeps playing");
+    }
+
+    fn stream(tag: &str, k: usize, vector: Option<Vector>) -> NewTrack {
+        NewTrack {
+            id: RemoteId::new(Service::Youtube, format!("{tag}{k}")),
+            artist: format!("{tag} artist {k}"),
+            album: None,
+            vector,
+        }
+    }
+
+    /// New music of `picks` whose id starts with `tag`.
+    fn streams_of(picks: &[Pick], tag: &str) -> usize {
+        picks.iter().filter(|p| matches!(&p.item, Item::Stream(r) if r.id.starts_with(tag))).count()
+    }
+
+    /// «Подмешивать случайное»: «Никогда» brings no new music that is not
+    /// known to sound like the seed, neither in a batch nor joining later,
+    /// while what sounds like it still comes; «Редко» one in ten; no limit,
+    /// the share of new music as before.
+    #[test]
+    fn explore_limits_the_blind_new_music() {
+        let (cat, idx) = two_regions();
+        let taste = Taste::build(&cat, &TasteInput::default(), NOW);
+        let recs = Recs::new(&cat, &taste, &idx);
+        let params = RadioParams { new_share: 0.2, seed: 9 };
+        let mut never = RadioState::new(RadioSeed::Track(tid(0)));
+        never.set_explore(Some(0.0));
+        never.add_new((0..30).map(|k| stream("b", k, None)));
+        for _ in 0..4 {
+            let picks = never.extend(&recs, 10, &params);
+            assert_eq!(picks.len(), 10, "the library fills in");
+            assert_eq!(streams_of(&picks, "b"), 0, "{picks:?}");
+        }
+        assert!(never.take_new(&recs, 2, 10, 0).is_empty(), "nor later");
+        never.add_new((0..30).map(|k| stream("n", k, Some(point(0.0, 0.0)))));
+        let picks = never.extend(&recs, 10, &params);
+        assert_eq!(streams_of(&picks, "n"), 2, "what sounds like the seed comes: {picks:?}");
+        assert_eq!(streams_of(&picks, "b"), 0);
+
+        let mut rare = RadioState::new(RadioSeed::Track(tid(0)));
+        rare.set_explore(Some(0.1));
+        rare.add_new((0..30).map(|k| stream("b", k, None)));
+        let mut plain = RadioState::new(RadioSeed::Track(tid(0)));
+        plain.add_new((0..30).map(|k| stream("b", k, None)));
+        for _ in 0..4 {
+            assert_eq!(streams_of(&rare.extend(&recs, 10, &params), "b"), 1);
+            assert_eq!(streams_of(&plain.extend(&recs, 10, &params), "b"), 2);
+        }
+        // Joining later, the new music queued counts as blind.
+        assert!(rare.take_new(&recs, 2, 10, 1).is_empty());
+        assert_eq!(rare.take_new(&recs, 2, 10, 0).len(), 1);
+        // The knob survives a restart.
+        let json = serde_json::to_string(&rare).unwrap();
+        let back: RadioState = serde_json::from_str(&json).unwrap();
+        assert_eq!((back.explore, back.unheard), (Some(0.1), 0.0));
+    }
+
+    /// The same in a radio by the user model: «Никогда» no blind new music
+    /// at all, «Редко» one in ten at most, what sounds like the seed comes.
+    #[test]
+    fn explore_limits_a_model_radio_too() {
+        use crate::model::{ModelInput, UserModel};
+        let (cat, idx, input, types) = listener(true);
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None, graph: None }, crate::model::tests::T0);
+        let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
+        let seed = OST.0 + 3;
+        let params = RadioParams { new_share: 0.2, seed: 2 };
+        for (explore, most) in [(Some(0.0), 0), (Some(0.1), 1), (None, 2)] {
+            let mut radio = RadioState::new(RadioSeed::Track(tid(seed)));
+            radio.set_explore(explore);
+            radio.add_new((0..40).map(|k| stream("b", k, None)));
+            let mut total = 0;
+            for _ in 0..4 {
+                let picks = radio.extend(&recs, 10, &params);
+                assert_eq!(picks.len(), 10);
+                let blind = streams_of(&picks, "b");
+                assert!(blind <= most, "{explore:?}: {blind} blind");
+                total += blind;
+            }
+            assert_eq!(total == 0, most == 0, "{explore:?}: {total} blind");
+        }
+        let mut radio = RadioState::new(RadioSeed::Track(tid(seed)));
+        radio.set_explore(Some(0.0));
+        radio.add_new((0..40).map(|k| stream("b", k, None)));
+        radio.add_new((0..40).map(|k| stream("n", k, idx.get(tid(seed)).copied())));
+        let picks: Vec<Pick> = (0..4).flat_map(|_| radio.extend(&recs, 10, &params)).collect();
+        assert!(streams_of(&picks, "n") > 0, "what sounds like the seed comes");
+        assert_eq!(streams_of(&picks, "b"), 0);
+    }
+
+    /// «Только новые»: a radio takes only what the user has not heard (a
+    /// dislike still kept out) while there is, then the usual picks, never
+    /// stopping; with new music that sounds like the seed, that stands in
+    /// for what was heard; with only what has a file, the usual picks.
+    #[test]
+    fn only_new_takes_the_unheard_then_falls_back() {
+        let (cat, idx) = two_regions();
+        let mut input = TasteInput { disliked_tracks: vec![tid(101)], ..TasteInput::default() };
+        for i in 1..=100u128 {
+            let ts = NOW - 10 * crate::taste::DAY_MS + i as i64 * 1_000_000;
+            input.events.push(Play::new(tid(i), ts, EventType::Start, Some(0)));
+            input.events.push(Play::new(tid(i), ts + 200_000, EventType::Complete, Some(200_000)));
+        }
+        let taste = Taste::build(&cat, &input, NOW);
+        let recs = Recs::new(&cat, &taste, &idx);
+        let unheard = |p: &Pick| match &p.item {
+            Item::Track(t) => t.0.as_u128() > 100,
+            Item::Stream(_) => true,
+        };
+        let count = |picks: &[Pick]| picks.iter().filter(|p| unheard(p)).count();
+        let disliked = |picks: &[Pick]| picks.iter().any(|p| p.item == Item::Track(tid(101)));
+
+        // Nineteen unheard (one disliked), then the heard ones.
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        radio.set_unheard(1.0);
+        let params = RadioParams { new_share: 0.0, seed: 3 };
+        let batches: Vec<Vec<Pick>> = (0..3).map(|_| radio.extend(&recs, 10, &params)).collect();
+        assert!(batches.iter().all(|b| b.len() == 10), "it goes on: {batches:?}");
+        assert_eq!(batches.iter().map(|b| count(b)).collect::<Vec<_>>(), vec![10, 9, 0], "{batches:?}");
+        assert!(!batches.iter().any(|b| disliked(b)));
+
+        // New music that sounds like the seed stands in for what was heard;
+        // none of the blind.
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        radio.set_unheard(1.0);
+        radio.set_explore(Some(0.0));
+        radio.add_new((0..30).map(|k| stream("n", k, Some(point(0.0, 0.0)))));
+        radio.add_new((0..30).map(|k| stream("b", k, None)));
+        let params = RadioParams { new_share: 0.2, seed: 3 };
+        let picks: Vec<Pick> = (0..4).flat_map(|_| radio.extend(&recs, 10, &params)).collect();
+        assert_eq!(picks.len(), 40);
+        assert_eq!(count(&picks), 40, "{picks:?}");
+        assert_eq!(streams_of(&picks, "b"), 0);
+        assert!(!disliked(&picks));
+
+        // Only what has a file, and the unheard have none: no new music,
+        // the usual picks.
+        let local = Catalog::new(cat.tracks().iter().cloned().map(|mut t| {
+            t.local = t.id.0.as_u128() <= 100;
+            t
+        }));
+        let taste = Taste::build(&local, &input, NOW);
+        let recs = Recs::new(&local, &taste, &idx).local_only(true);
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        radio.set_unheard(1.0);
+        radio.add_new((0..30).map(|k| stream("n", k, Some(point(0.0, 0.0)))));
+        for _ in 0..3 {
+            let picks = radio.extend(&recs, 10, &params);
+            assert_eq!(picks.len(), 10, "it goes on");
+            assert!(picks.iter().all(|p| !unheard(p)), "{picks:?}");
+        }
+    }
+
+    /// «Больше новых»: at least half of the library's picks unheard while
+    /// there are.
+    #[test]
+    fn more_new_takes_half_unheard() {
+        let (cat, idx) = two_regions();
+        let mut input = TasteInput::default();
+        for i in 1..=100u128 {
+            let ts = NOW - 10 * crate::taste::DAY_MS + i as i64 * 1_000_000;
+            input.events.push(Play::new(tid(i), ts, EventType::Start, Some(0)));
+            input.events.push(Play::new(tid(i), ts + 200_000, EventType::Complete, Some(200_000)));
+        }
+        let taste = Taste::build(&cat, &input, NOW);
+        let recs = Recs::new(&cat, &taste, &idx);
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        radio.set_unheard(0.5);
+        let picks = radio.extend(&recs, 10, &RadioParams { new_share: 0.0, seed: 3 });
+        assert_eq!(picks.len(), 10);
+        let fresh = picks.iter().filter(|p| matches!(&p.item, Item::Track(t) if t.0.as_u128() > 100)).count();
+        assert!(fresh >= 5, "{fresh} unheard: {picks:?}");
+    }
+
+    /// The knobs keep a model radio's rules: with «Только новые» and
+    /// «Никогда» a soundtrack's radio still brings only soundtracks, never a
+    /// world thrice running, and no fewer unheard than usual.
+    #[test]
+    fn the_knobs_keep_a_model_radios_rules() {
+        use crate::model::{ModelInput, UserModel};
+        for omnivore in [false, true] {
+            let l = listener(omnivore);
+            let (cat, idx, input, types) = &l;
+            let model = UserModel::build(cat, input, ModelInput { index: idx, types: Some(types), weights: None, graph: None }, crate::model::tests::T0);
+            let recs = Recs::new(cat, &model.taste, idx).with_model(&model);
+            let fresh = |picks: &[u128]| picks.iter().filter(|t| cat.position(tid(**t)).is_some_and(|i| !recs.heard(i))).count();
+            let usual = play_model_radio(&l, OST.0 + 3, 3, 0);
+            let only = play_model_radio_with(&l, OST.0 + 3, 3, 0, |r| {
+                r.set_unheard(1.0);
+                r.set_explore(Some(0.0));
+            });
+            assert!(only.len() >= 25, "{only:?}");
+            assert!(only.iter().all(|t| kind_of(*t) == OST.0), "omnivore {omnivore}: {only:?}");
+            let worlds: Vec<u128> = only.iter().map(|t| (t - OST.0) / 20).collect();
+            for w in worlds.windows(3) {
+                assert!(!(w[0] == w[1] && w[1] == w[2]), "a world thrice running: {worlds:?}");
+            }
+            assert!(fresh(&only) >= fresh(&usual), "omnivore {omnivore}: {} unheard, usually {}", fresh(&only), fresh(&usual));
+        }
+    }
+
+    /// The knobs keep a sparse seed's scene: with «Только новые» and
+    /// «Никогда» its language still comes before another.
+    #[test]
+    fn the_knobs_keep_a_sparse_seeds_scene() {
+        let picks = sparse_autoplay_with(102, &[100, 101], None, |r| {
+            r.set_unheard(1.0);
+            r.set_explore(Some(0.0));
+        });
+        let ru = LINKED_TRACKS.len() + OTHER_RU.1 as usize;
+        assert!(picks.len() >= 25, "{picks:?}");
+        assert!(picks[..ru].iter().all(|t| russian(*t)), "the Russian first: {picks:?}");
     }
 }
