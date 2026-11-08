@@ -193,12 +193,6 @@ impl<'a> Pacer<'a> {
         Self { gate, stop, cores, slice, since: Instant::now() }
     }
 
-    /// Work on this many cores rests that much longer.
-    pub(crate) fn cores(mut self, cores: usize) -> Self {
-        self.cores = cores.max(1);
-        self
-    }
-
     pub(crate) fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
     }
