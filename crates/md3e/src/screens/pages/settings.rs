@@ -1175,6 +1175,14 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
     row(ui, Id::LyricsUi, "Где делать подсветку", None, |ui| choice(ui, Id::LyricsUi, p));
     lyrics_align(ui, _state, p, out);
 
+    group(ui, "Очередь");
+    row(ui, Id::KeepShuffle, "Перемешивание остаётся включённым", None, |ui| {
+        ui.add(Switch::new(&mut p.keep_shuffle).id_salt("set-keep-shuffle"));
+    });
+    row(ui, Id::ShuffleRadio, "Перемешивать радио и автовоспроизведение", None, |ui| {
+        ui.add(Switch::new(&mut p.shuffle_radio).id_salt("set-shuffle-radio"));
+    });
+
     group(ui, "Звук");
     row(ui, Id::OutputDevice, "Устройство вывода", Some("Переключается сразу, без паузы"), |ui| {
         const DEFAULT: &str = "Системное по умолчанию";
