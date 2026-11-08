@@ -1224,6 +1224,7 @@ impl Worker {
             Command::SetPlaylistCover(id, path) => self.set_playlist_cover(id, path),
             Command::SetMetadata { contact, acoustid_key } => self.set_metadata(contact, acoustid_key),
             Command::SetLastfmKey(key) => self.set_lastfm_key(&key),
+            Command::SetListenbrainzToken(token) => self.set_listenbrainz_token(&token),
             Command::SearchTorrents(q) => self.search_torrents(q),
             c @ (Command::DownloadTorrent { .. }
             | Command::ListTorrentFiles(_)
@@ -3116,28 +3117,46 @@ impl Worker {
     /// The Last.fm key of the graph of similar music → settings.toml
     /// (empty: none), applied live.
     fn set_lastfm_key(&mut self, key: &str) {
+        let Some(configured) = self.set_metadata_secret(|m| &mut m.lastfm_key, key) else { return };
+        self.publish(|s| s.prefs.lastfm_configured = configured);
+        self.toast(if configured { "Сохранено" } else { "Ключ убран" }, None);
+    }
+
+    /// The ListenBrainz token of the graph's popularity → settings.toml
+    /// (empty: none), applied live: the popularity is asked again at once.
+    fn set_listenbrainz_token(&mut self, token: &str) {
+        let Some(configured) = self.set_metadata_secret(|m| &mut m.listenbrainz_token, token) else { return };
+        self.publish(|s| s.prefs.listenbrainz_configured = configured);
+        self.graph_popularity_reopened();
+        self.toast(if configured { "Сохранено" } else { "Токен убран" }, None);
+    }
+
+    /// Keeps one secret of the online metadata in settings.toml (empty:
+    /// none) and applies the config live; whether one is set now, none when
+    /// it could not be kept (a toast says why).
+    fn set_metadata_secret(&mut self, field: impl FnOnce(&mut nikgob_core::settings::MetadataSettings) -> &mut Option<String>, value: &str) -> Option<bool> {
         let Some(path) = self.settings_path.clone() else {
             self.toast("Некуда сохранить настройки", None);
-            return;
+            return None;
         };
         let mut settings = match nikgob_core::settings::Settings::load(&path) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("loading settings: {e}");
                 self.toast("settings.toml не читается — поправь файл вручную", None);
-                return;
+                return None;
             }
         };
-        settings.metadata.lastfm_key = Some(key.trim().to_owned()).filter(|k| !k.is_empty());
+        let slot = field(&mut settings.metadata);
+        *slot = Some(value.trim().to_owned()).filter(|k| !k.is_empty());
+        let configured = slot.is_some();
         if let Err(e) = settings.save(&path) {
             log::error!("saving settings: {e}");
             self.toast("Не удалось сохранить настройки", None);
-            return;
+            return None;
         }
         self.set_metadata_config(&metadata_config(&settings.metadata));
-        let configured = settings.metadata.lastfm_key.is_some();
-        self.publish(|s| s.prefs.lastfm_configured = configured);
-        self.toast(if configured { "Сохранено" } else { "Ключ убран" }, None);
+        Some(configured)
     }
 }
 
@@ -3149,6 +3168,9 @@ fn metadata_config(m: &nikgob_core::settings::MetadataSettings) -> MetadataConfi
     }
     if let Some(k) = &m.lastfm_key {
         cfg = cfg.with_lastfm_key(k.clone());
+    }
+    if let Some(t) = &m.listenbrainz_token {
+        cfg = cfg.with_listenbrainz_token(t.clone());
     }
     cfg
 }

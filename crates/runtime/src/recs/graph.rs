@@ -24,8 +24,13 @@
 //!   и Deezer»); MusicBrainz's artist with its tags (the id ListenBrainz
 //!   needs), ListenBrainz's similar artists, recordings and an artist's
 //!   popular recordings («Спрашивать ListenBrainz и MusicBrainz», with the
-//!   online metadata of the import); Last.fm's similar tracks and artists
-//!   with the user's key.
+//!   online metadata of the import; the popular recordings only with the
+//!   user's token); Last.fm's similar tracks and artists with the user's
+//!   key.
+//! * **Popularity without ListenBrainz** (no token, or it was refused this
+//!   run): Deezer's open top of an artist in ListenBrainz's lane when the
+//!   Deezer lane does not ask its top already, and Last.fm's top tracks
+//!   with the user's key; one log line a run says so.
 //! * **Resolution** ([`resolve`]): an entry is the library's track or artist
 //!   by the service's id, by its MusicBrainz id, else by its song or artist
 //!   key; what the library lacks is left out of the graph, and the similar
@@ -68,9 +73,13 @@ const MIN_PAUSE: Duration = Duration::from_secs(1);
 const S_MUSICBRAINZ: &str = "musicbrainz";
 /// ListenBrainz's popular recordings of an artist…
 const S_POPULARITY: &str = "popularity";
-/// …and Deezer's top tracks of an artist (no key): both are the popularity
-/// of the library's prior.
+/// …Deezer's top tracks of an artist (no key)…
 const S_DEEZER_TOP: &str = "deezer_top";
+/// …and Last.fm's (with the user's key): all are the popularity of the
+/// library's prior.
+const S_LASTFM_TOP: &str = "lastfm_top";
+/// Tracks asked of Deezer's open top of an artist.
+const DZ_TOP_LIMIT: u32 = 25;
 
 /// One request of the pass.
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +94,10 @@ pub(crate) enum Ask {
     FindArtist { artist: ArtistId, service: Service, name: String },
     /// Deezer's top tracks of an artist by its id there.
     DzTop { artist: ArtistId, id: String },
+    /// Deezer's top tracks of an artist from its open API (no account; an
+    /// artist search first without the id): the popularity when
+    /// ListenBrainz gives none and the Deezer lane is off.
+    DzTopOpen { artist: ArtistId, name: String, id: Option<u64> },
     /// MusicBrainz's artist and its tags (by its id, else by name).
     Tags { artist: ArtistId, name: String, mbid: Option<String> },
     LbArtists { artist: ArtistId, mbid: String },
@@ -92,6 +105,9 @@ pub(crate) enum Ask {
     LbRecordings { track: TrackId, mbid: String },
     FmTrack { track: TrackId, artist: String, title: String },
     FmArtist { artist: ArtistId, name: String },
+    /// Last.fm's top tracks of an artist (the popularity without
+    /// ListenBrainz).
+    FmTop { artist: ArtistId, name: String },
 }
 
 impl Ask {
@@ -104,13 +120,14 @@ impl Ask {
             Self::Artists { artist, service, .. } | Self::FindArtist { artist, service, .. } => {
                 ("artist", a(artist), if *service == Service::Youtube { GraphSource::YoutubeArtists.as_str() } else { GraphSource::DeezerArtists.as_str() })
             }
-            Self::DzTop { artist, .. } => ("artist", a(artist), S_DEEZER_TOP),
+            Self::DzTop { artist, .. } | Self::DzTopOpen { artist, .. } => ("artist", a(artist), S_DEEZER_TOP),
             Self::Tags { artist, .. } => ("artist", a(artist), S_MUSICBRAINZ),
             Self::LbArtists { artist, .. } => ("artist", a(artist), GraphSource::ListenBrainz.as_str()),
             Self::LbTop { artist, .. } => ("artist", a(artist), S_POPULARITY),
             Self::LbRecordings { track, .. } => ("track", t(track), GraphSource::ListenBrainz.as_str()),
             Self::FmTrack { track, .. } => ("track", t(track), GraphSource::LastFm.as_str()),
             Self::FmArtist { artist, .. } => ("artist", a(artist), GraphSource::LastFm.as_str()),
+            Self::FmTop { artist, .. } => ("artist", a(artist), S_LASTFM_TOP),
         }
     }
 
@@ -128,8 +145,9 @@ impl Ask {
     pub(crate) fn lane(&self) -> Lane {
         match self {
             Self::Tags { .. } => Lane::MusicBrainz,
-            Self::LbArtists { .. } | Self::LbTop { .. } | Self::LbRecordings { .. } => Lane::ListenBrainz,
-            Self::FmTrack { .. } | Self::FmArtist { .. } => Lane::LastFm,
+            // Deezer's open top stands in for ListenBrainz's popularity.
+            Self::LbArtists { .. } | Self::LbTop { .. } | Self::LbRecordings { .. } | Self::DzTopOpen { .. } => Lane::ListenBrainz,
+            Self::FmTrack { .. } | Self::FmArtist { .. } | Self::FmTop { .. } => Lane::LastFm,
             _ if self.service() == Some(Service::Deezer) => Lane::Deezer,
             _ => Lane::Youtube,
         }
@@ -241,6 +259,8 @@ pub(crate) struct GraphState {
     built_at: Option<Instant>,
     /// Sources that wanted an account or a key this run ([`Failed::Closed`]).
     closed: Vec<&'static str>,
+    /// The log said where the popularity comes from without ListenBrainz.
+    popularity_told: bool,
     /// The online metadata to ask (tests set it; else the import's).
     pub(crate) metadata: Option<Metadata>,
 }
@@ -298,6 +318,32 @@ async fn ask(svc: Option<Arc<dyn StreamService>>, meta: Option<Metadata>, a: Ask
             let fm_client = m.lastfm.ok_or_else(|| Failed::Other("no Last.fm key".into()))?;
             fm(fm_client.similar_artists(&name).await?, "artist")
         }
+        Ask::FmTop { name, .. } => {
+            let m = meta()?;
+            let fm_client = m.lastfm.ok_or_else(|| Failed::Other("no Last.fm key".into()))?;
+            fm(fm_client.top_tracks(&name).await?, "track")
+        }
+        Ask::DzTopOpen { name, id, .. } => {
+            let m = meta()?;
+            let id = match id {
+                Some(id) => id,
+                None => {
+                    // The artist of that name Deezer knows best.
+                    let key = artist_key(&name);
+                    let hits = m.deezer.search_artist(&name, 10).await?;
+                    match hits.into_iter().filter(|h| artist_key(&h.name) == key).max_by_key(|h| h.nb_fan.unwrap_or(0)) {
+                        Some(h) => h.id,
+                        None => return Ok(Answer::Entries(Vec::new())),
+                    }
+                }
+            };
+            let top = m.deezer.artist_top(id, DZ_TOP_LIMIT).await?;
+            Answer::Entries(
+                top.into_iter()
+                    .map(|t| GraphEntry { kind: "track".into(), artist: t.artist_name().to_owned(), name: t.title, remote_id: Some(t.id.to_string()) })
+                    .collect(),
+            )
+        }
     })
 }
 
@@ -341,7 +387,7 @@ impl Names {
         let by_mbid = || e.remote_id.as_ref().and_then(|r| self.mbid.get(r)).filter(|(k, _)| k == "track").map(|(_, id)| id);
         let id = match source {
             "youtube_radio" => by_remote("youtube"),
-            "listenbrainz" | "lastfm" | S_POPULARITY => by_mbid(),
+            "listenbrainz" | "lastfm" | S_POPULARITY | S_LASTFM_TOP => by_mbid(),
             S_DEEZER_TOP => by_remote("deezer"),
             _ => None,
         };
@@ -380,7 +426,7 @@ pub(crate) fn resolve(rows: &[GraphRow], tags: &[GraphTag], names: &Names) -> Re
                     None => out.votes.entry(artist_key(&r.entry.name)).or_default().push((from, rank_weight(r.rank, r.total) * source.trust())),
                 }
             }
-            ("artist", "track") if r.source == S_POPULARITY || r.source == S_DEEZER_TOP => {
+            ("artist", "track") if [S_POPULARITY, S_DEEZER_TOP, S_LASTFM_TOP].contains(&r.source.as_str()) => {
                 if let Some(t) = names.track(&r.source, &r.entry) {
                     out.input.popular.push((t, r.rank, r.total));
                 }
@@ -459,6 +505,20 @@ impl Worker {
         }
     }
 
+    /// Whether ListenBrainz's popularity may be asked: with the user's token,
+    /// unless it was refused this run.
+    fn graph_popularity_open(&self, meta: Option<&Metadata>) -> bool {
+        meta.is_some_and(|m| m.listenbrainz.has_token()) && !self.recs.graph.closed.contains(&S_POPULARITY)
+    }
+
+    /// The ListenBrainz token was set or taken away: its popularity may be
+    /// asked again this run, and the lanes plan at once.
+    pub(crate) fn graph_popularity_reopened(&mut self) {
+        self.recs.graph.closed.retain(|s| *s != S_POPULARITY);
+        self.recs.graph.popularity_told = false;
+        self.graph_now();
+    }
+
     /// Every tick: the next requests of the lanes that ran dry, the next
     /// request of each lane when it is time.
     pub(crate) fn graph_tick(&mut self) {
@@ -477,7 +537,10 @@ impl Worker {
             want[lane.index()] = l.queue.is_empty() && !l.busy && l.covered_at.is_none_or(|t| t.elapsed() >= every);
         }
         if want.contains(&true) {
-            self.graph_plan(want);
+            let popularity = self.graph_popularity_open(meta.as_ref());
+            let dz_lane = self.graph_lane_on(Lane::Deezer, &prefs, meta.as_ref());
+            let lastfm = self.graph_lane_on(Lane::LastFm, &prefs, meta.as_ref());
+            self.graph_plan(want, popularity, dz_lane, lastfm);
         }
         let g = &self.recs.graph;
         if g.running && g.lanes.iter().all(|l| l.queue.is_empty() && !l.busy) {
@@ -490,8 +553,18 @@ impl Worker {
     }
 
     /// Plans the next requests of the lanes `want` names from the snapshot;
-    /// a lane with nothing due is covered.
-    fn graph_plan(&mut self, want: [bool; 5]) {
+    /// a lane with nothing due is covered. Without ListenBrainz's
+    /// `popularity` an artist's popularity comes from Deezer's open top
+    /// (unless the Deezer lane asks its own top: `dz_lane`) and from
+    /// Last.fm's (with its key: `lastfm`).
+    fn graph_plan(&mut self, want: [bool; 5], popularity: bool, dz_lane: bool, lastfm: bool) {
+        // Said once a run, when the lane that would ask it plans.
+        if !popularity && want[Lane::ListenBrainz.index()] && !std::mem::replace(&mut self.recs.graph.popularity_told, true) {
+            let why = if self.recs.graph.closed.contains(&S_POPULARITY) { "ListenBrainz refused its popularity" } else { "no ListenBrainz token" };
+            let deezer = if dz_lane { "Deezer's top" } else { "Deezer's open top" };
+            let from = if lastfm { format!("{deezer} and Last.fm's") } else { deezer.to_owned() };
+            log::info!("graph: {why}, the popularity comes from {from} this run");
+        }
         let Some(snap) = self.snapshot() else { return };
         let now = now_ms();
         let fetches: HashMap<(String, String, String), GraphFetch> = self
@@ -537,13 +610,17 @@ impl Worker {
             // ListenBrainz knows the artist by the id MusicBrainz gave.
             let mbid = mbids.get(&format!("artist:{sid}")).filter(|_| room(&plans, Lane::ListenBrainz) && stands("artist", &sid, S_MUSICBRAINZ));
             let lb = mbid.is_some() && due("artist", &sid, GraphSource::ListenBrainz.as_str());
-            let lb_top = mbid.is_some() && due("artist", &sid, S_POPULARITY);
+            let lb_top = popularity && mbid.is_some() && due("artist", &sid, S_POPULARITY);
+            // Without it: Deezer's open top (unless the Deezer lane asks its
+            // own) and Last.fm's.
+            let dz_open = !popularity && !dz_lane && room(&plans, Lane::ListenBrainz) && due("artist", &sid, S_DEEZER_TOP);
+            let fm_top = !popularity && room(&plans, Lane::LastFm) && due("artist", &sid, S_LASTFM_TOP);
             let fm = room(&plans, Lane::LastFm) && due("artist", &sid, GraphSource::LastFm.as_str());
-            if !(yt || dz || dz_top || mb || lb || lb_top || fm) {
+            if !(yt || dz || dz_top || mb || lb || lb_top || dz_open || fm_top || fm) {
                 continue;
             }
             let Some(name) = self.lib.get_artist(a).ok().flatten().map(|x| x.name) else { continue };
-            let known = if yt || dz || dz_top { self.lib.external_ids(EntityKind::Artist, *a.as_uuid()).unwrap_or_default() } else { Vec::new() };
+            let known = if yt || dz || dz_top || dz_open { self.lib.external_ids(EntityKind::Artist, *a.as_uuid()).unwrap_or_default() } else { Vec::new() };
             let id_in = |service: Service| known.iter().find(|r| r.service == service).map(|r| r.id.clone());
             for (on, service, lane) in [(yt, Service::Youtube, Lane::Youtube), (dz, Service::Deezer, Lane::Deezer)] {
                 if on {
@@ -570,8 +647,15 @@ impl Worker {
                     plans[Lane::ListenBrainz.index()].push(Ask::LbTop { artist: a, mbid: m.clone() });
                 }
             }
+            if dz_open {
+                let id = id_in(Service::Deezer).and_then(|s| s.parse().ok());
+                plans[Lane::ListenBrainz.index()].push(Ask::DzTopOpen { artist: a, name: name.clone(), id });
+            }
             if fm {
                 plans[Lane::LastFm.index()].push(Ask::FmArtist { artist: a, name: name.clone() });
+            }
+            if fm_top {
+                plans[Lane::LastFm.index()].push(Ask::FmTop { artist: a, name: name.clone() });
             }
         }
         // Tracks: the loved first, then the played, then the rest.
@@ -804,7 +888,9 @@ impl Worker {
                 Some((mbid, tags)) => {
                     self.graph_keep(&ask, "ok", Some(&mbid), &[], &tags);
                     // ListenBrainz knows the artist by this id.
-                    self.graph_push(Ask::LbTop { artist: *artist, mbid: mbid.clone() });
+                    if self.graph_popularity_open(self.graph_metadata().as_ref()) {
+                        self.graph_push(Ask::LbTop { artist: *artist, mbid: mbid.clone() });
+                    }
                     self.graph_push(Ask::LbArtists { artist: *artist, mbid });
                 }
                 None => self.graph_keep(&ask, "none", None, &[], &[]),
@@ -887,6 +973,8 @@ mod tests {
             row("artist", &a1, "deezer_top", 0, track("Five", Some("dz-t5"))),
             row("artist", &a1, "deezer_top", 1, track("Four", Some("dz-unknown"))),
             row("artist", &a1, "deezer_top", 2, track("Elsewhere", Some("dz-t9"))),
+            row("artist", &a1, "lastfm_top", 0, track("Three", Some("mb-3"))),
+            row("artist", &a1, "lastfm_top", 1, track("Nowhere", None)),
         ];
         let tags = vec![GraphTag { subject_kind: "artist".into(), subject_id: a1.clone(), tag: "rock".into(), weight: 3.0 }];
         let r = resolve(&rows, &tags, &names);
@@ -894,8 +982,9 @@ mod tests {
         assert_eq!(to, vec![t(2), t(4), t(3)]);
         let to: Vec<ArtistId> = r.input.artists.iter().map(|e| e.to).collect();
         assert_eq!(to, vec![a(3), a(2)]);
-        // Deezer's top resolves by its track ids, else by the song's key.
-        assert_eq!(r.input.popular, vec![(t(4), 0, 10), (t(5), 0, 10), (t(4), 1, 10)]);
+        // Deezer's top resolves by its track ids, else by the song's key;
+        // Last.fm's by the MusicBrainz id.
+        assert_eq!(r.input.popular, vec![(t(4), 0, 10), (t(5), 0, 10), (t(4), 1, 10), (t(3), 0, 10)]);
         assert_eq!(r.input.tags.len(), 1);
         assert_eq!(r.votes.keys().collect::<Vec<_>>(), vec![&artist_key("New Band")]);
         // The new band counts as known by its loved neighbour, capped.
@@ -915,12 +1004,19 @@ mod tests {
             Ask::Tags { artist: a, name: String::new(), mbid: None },
             Ask::LbTop { artist: a, mbid: String::new() },
             Ask::DzTop { artist: a, id: "dz".into() },
+            Ask::DzTopOpen { artist: a, name: String::new(), id: None },
+            Ask::FmTop { artist: a, name: String::new() },
         ];
         let s = subjects(&plan);
-        assert_eq!(s.len(), 5);
+        // Deezer's top is one source whichever way it is asked.
+        assert_eq!(s.len(), 6);
         assert!(s.contains(&("artist", a.to_string(), "deezer_top")));
+        assert!(s.contains(&("artist", a.to_string(), "lastfm_top")));
         let lanes: Vec<Lane> = plan.iter().map(Ask::lane).collect();
-        assert_eq!(lanes, vec![Lane::Youtube, Lane::Youtube, Lane::Deezer, Lane::MusicBrainz, Lane::ListenBrainz, Lane::Deezer]);
+        assert_eq!(
+            lanes,
+            vec![Lane::Youtube, Lane::Youtube, Lane::Deezer, Lane::MusicBrainz, Lane::ListenBrainz, Lane::Deezer, Lane::ListenBrainz, Lane::LastFm]
+        );
         assert!(s.contains(&("artist", a.to_string(), "deezer_artists")));
         assert!(s.contains(&("artist", a.to_string(), "popularity")));
     }

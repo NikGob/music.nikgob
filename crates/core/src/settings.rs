@@ -159,6 +159,9 @@ pub struct MetadataSettings {
     /// The user's own Last.fm API key (https://www.last.fm/api/account/create):
     /// the graph of similar music asks Last.fm only with it.
     pub lastfm_key: Option<String>,
+    /// The user's own ListenBrainz token (https://listenbrainz.org/settings/):
+    /// the graph's popularity asks ListenBrainz only with it.
+    pub listenbrainz_token: Option<String>,
 }
 
 impl Default for MetadataSettings {
@@ -167,6 +170,7 @@ impl Default for MetadataSettings {
             contact: "music.nikgob personal player".into(),
             acoustid_key: None,
             lastfm_key: None,
+            listenbrainz_token: None,
         }
     }
 }
@@ -177,6 +181,7 @@ impl fmt::Debug for MetadataSettings {
             .field("contact", &self.contact)
             .field("acoustid_key", &self.acoustid_key.as_ref().map(|_| "<redacted>"))
             .field("lastfm_key", &self.lastfm_key.as_ref().map(|_| "<redacted>"))
+            .field("listenbrainz_token", &self.listenbrainz_token.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }

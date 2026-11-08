@@ -224,6 +224,8 @@ pub enum SettingId {
     LibraryAsTaste,
     /// «Ключ Last.fm».
     LastfmKey,
+    /// «Токен ListenBrainz».
+    ListenbrainzToken,
     // Источники.
     SpotifyEnabled,
     SpotifyPlayback,
@@ -415,7 +417,7 @@ impl SettingId {
             RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | RadioNoRepeat | RadioExplore | RadioUnheard | NewShareBy(_)
             | MixesWithNew | BackgroundCountsLess | ProfilesSplit | ProfileNames
             | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | MixClickOpensList | HiddenMixes
-            | GraphUse | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste | LastfmKey
+            | GraphUse | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste | LastfmKey | ListenbrainzToken
             | DislikeButton | DislikeSkips | DislikeSkipEverywhere | DislikeInRecs | DislikedTracks | DislikedArtists => {
                 TAB_RECS
             }
@@ -619,6 +621,7 @@ impl SettingId {
             GraphPersonal => "Треки, которые стоят рядом в твоих плейлистах или шли подряд в загруженной истории YouTube Music или Spotify, считаются похожими.",
             LibraryAsTaste => "Пока истории мало, вкус берётся из самой библиотеки: профили и миксы есть с первого запуска, а треки, вокруг которых собрана коллекция, стоят выше. Чем больше ты слушаешь, тем меньше это значит.",
             LastfmKey => "Свой бесплатный ключ Last.fm API: с ним похожие треки и исполнители спрашиваются и у Last.fm. Хранится в settings.toml. Пусто — Last.fm не спрашивается.",
+            ListenbrainzToken => "Свой бесплатный токен ListenBrainz (listenbrainz.org → Settings → User token): с ним популярность треков исполнителя спрашивается и у ListenBrainz. Хранится в settings.toml. Пусто — популярность берётся из топа Deezer и, с ключом, Last.fm.",
         }
     }
 
@@ -2194,7 +2197,15 @@ mod tests {
         assert_eq!(SettingId::ProfileNames.tab(), TAB_RECS);
         assert_eq!(SettingId::BackgroundCards.tab(), TAB_RECS);
         assert_eq!(SettingId::MixesEverything.tab(), TAB_RECS);
-        for id in [SettingId::GraphUse, SettingId::GraphServices, SettingId::GraphOpenData, SettingId::GraphPersonal, SettingId::LibraryAsTaste, SettingId::LastfmKey] {
+        for id in [
+            SettingId::GraphUse,
+            SettingId::GraphServices,
+            SettingId::GraphOpenData,
+            SettingId::GraphPersonal,
+            SettingId::LibraryAsTaste,
+            SettingId::LastfmKey,
+            SettingId::ListenbrainzToken,
+        ] {
             assert_eq!(id.tab(), TAB_RECS);
             assert!(!id.help().is_empty());
         }
