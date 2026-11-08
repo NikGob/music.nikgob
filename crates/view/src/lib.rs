@@ -1737,6 +1737,13 @@ pub struct Prefs {
     /// played this many hours ago or less (and in the session) while
     /// anything else is left.
     pub radio_no_repeat_hours: u8,
+    /// «Подмешивать случайное»: how much of a radio of a track or an artist
+    /// (and autoplay) may be new music not known to sound like what it
+    /// grows from.
+    pub radio_explore: RadioExplore,
+    /// «Преимущественно новые песни»: how much of a radio of a track or an
+    /// artist (and autoplay) is music the user has not heard.
+    pub radio_unheard: RadioUnheard,
 }
 
 /// One line of [`Prefs::download_sources`].
@@ -1921,6 +1928,8 @@ pub enum PrefPatch {
     GraphPersonal(bool),
     LibraryAsTaste(bool),
     RadioNoRepeat(u8),
+    RadioExplore(RadioExplore),
+    RadioUnheard(RadioUnheard),
     /// «Настройки текста…» was picked from the lyrics control's menu.
     LyricsSettingsSeen,
 }
@@ -1985,6 +1994,8 @@ impl PrefPatch {
             Self::LibraryAsTaste(on) => p.library_as_taste = *on,
             Self::LyricsSettingsSeen => p.lyrics_settings_seen = true,
             Self::RadioNoRepeat(h) => p.radio_no_repeat_hours = *h,
+            Self::RadioExplore(e) => p.radio_explore = *e,
+            Self::RadioUnheard(u) => p.radio_unheard = *u,
         }
     }
 }
@@ -2018,6 +2029,62 @@ impl RadioNewShare {
             Self::None => 0.0,
             Self::Some => 0.2,
             Self::More => 0.4,
+        }
+    }
+}
+
+/// «Подмешивать случайное»: how often a radio of a track or an artist (and
+/// autoplay) plays new music not known to sound like what it grows from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RadioExplore {
+    /// «Никогда»: only new music that sounds like it.
+    Never,
+    /// «Редко», about one in ten.
+    #[default]
+    Rare,
+    /// «Иногда», about one in five (as every radio did before).
+    Sometimes,
+    /// «Часто», about three in ten.
+    Often,
+}
+
+impl RadioExplore {
+    pub const ALL: [Self; 4] = [Self::Never, Self::Rare, Self::Sometimes, Self::Often];
+
+    /// The share of a radio at most that may be such new music (within
+    /// its share of new music).
+    pub const fn fraction(self) -> f32 {
+        match self {
+            Self::Never => 0.0,
+            Self::Rare => 0.1,
+            Self::Sometimes => 0.2,
+            Self::Often => 0.3,
+        }
+    }
+}
+
+/// «Преимущественно новые песни»: how much of a radio of a track or an
+/// artist (and autoplay) is music the user has not heard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RadioUnheard {
+    /// «Как обычно».
+    #[default]
+    Usual,
+    /// «Больше новых»: half of the library's picks at least.
+    More,
+    /// «Только новые»: all, while there are.
+    Only,
+}
+
+impl RadioUnheard {
+    pub const ALL: [Self; 3] = [Self::Usual, Self::More, Self::Only];
+
+    /// The share of the library's picks at least that is unheard.
+    pub const fn fraction(self) -> f32 {
+        match self {
+            Self::Usual => 0.0,
+            Self::More => 0.5,
+            Self::Only => 1.0,
         }
     }
 }
@@ -2866,6 +2933,8 @@ impl Default for Prefs {
             library_as_taste: true,
             lastfm_configured: false,
             radio_no_repeat_hours: 3,
+            radio_explore: RadioExplore::Rare,
+            radio_unheard: RadioUnheard::Usual,
         }
     }
 }
