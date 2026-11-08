@@ -33,12 +33,15 @@ pub enum SourceKey {
     Qobuz,
     /// Tidal through a public hifi-api instance.
     Tidal,
+    /// The Internet Archive (archive.org): uploads of CD rips, rare and
+    /// old albums, often in FLAC.
+    Archive,
 }
 
 impl SourceKey {
     /// Every key, in the default order of «Источники»: the cheap and
     /// reliable first, the free services last (the poll of docs/stage4.5.md).
-    pub const ALL: [Self; 5] = [Self::Torrents, Self::Khinsider, Self::Soulseek, Self::Qobuz, Self::Tidal];
+    pub const ALL: [Self; 6] = [Self::Torrents, Self::Khinsider, Self::Soulseek, Self::Qobuz, Self::Tidal, Self::Archive];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -47,6 +50,7 @@ impl SourceKey {
             Self::Soulseek => "soulseek",
             Self::Qobuz => "qobuz",
             Self::Tidal => "tidal",
+            Self::Archive => "archive",
         }
     }
 
@@ -58,6 +62,7 @@ impl SourceKey {
             Self::Soulseek => "Soulseek",
             Self::Qobuz => "Qobuz",
             Self::Tidal => "Tidal",
+            Self::Archive => "Internet Archive",
         }
     }
 

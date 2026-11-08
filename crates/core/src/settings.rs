@@ -49,6 +49,8 @@ pub struct SourcesSettings {
     pub tidal_instances: Vec<String>,
     /// khinsider's address (empty: downloads.khinsider.com).
     pub khinsider_url: String,
+    /// The Internet Archive's address (empty: archive.org).
+    pub archive_url: String,
 }
 
 /// Where Soulseek runs (docs/stage4.5.md, poll answer 3).
