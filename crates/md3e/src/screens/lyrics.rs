@@ -195,8 +195,8 @@ fn paint(
     // song's (timing made, another source), so nothing moves or dims then.
     // A wait new to a swapped text opens from folded instead of popping
     // open; the first frame of the view shows its state as it is.
-    let first_frame = ctx.data(|d| d.get_temp::<Slots>(id.with("slots"))).is_none();
-    let slot_of = slots(&ctx, id.with("slots"), &item_keys(lines, &items));
+    let (slot_of, swapped) = slots(&ctx, id.with("slots"), &item_keys(lines, &items));
+    let first_frame = swapped.is_none();
     // When the text's timing turns from line times only to real times or
     // back (made timing arrives, «По строкам» picked), the calm Focus and
     // the chosen look fade into each other instead of swapping at once.
@@ -274,7 +274,9 @@ fn paint(
             anim::snap_f32(&ctx, widest_id, widest);
             ctx.data_mut(|d| d.insert_temp(wrap_id, wrap));
         }
-        anim::f32(&ctx, widest_id, widest, BLOCK).clamp(0.0, wrap)
+        // Its overshoot is kept, so it settles instead of stopping dead
+        // at the full width.
+        anim::f32(&ctx, widest_id, widest, BLOCK).clamp(0.0, wrap * 1.1)
     } else {
         wrap
     };
@@ -301,18 +303,22 @@ fn paint(
         }
         let keep = match items[i] {
             // On Material's expressive spatial spring: the lines part (and
-            // close again) in one soft move.
+            // close again) in one soft move, its small overshoot and all
+            // (cut off at open and at folded, the lines stopped dead there
+            // instead of settling).
             DisplayLine::Interlude { .. } => anim::fraction(
                 &ctx,
                 id.with(("wait-room", slot_of[i])),
                 if cur == Some(i) { 1.0 } else { 0.0 },
                 if theme.reduced_motion { WAIT_ROOM.without_bounce() } else { WAIT_ROOM },
             )
-            .clamp(0.0, 1.0),
+            .clamp(-ROOM_OVERSHOOT, 1.0 + ROOM_OVERSHOOT),
             DisplayLine::Line(_) => 1.0,
         };
         y += (h + extra + gap) * keep;
-        rooms.push(keep);
+        // The wait itself (its ring, highlight and pointer) takes the room
+        // it has, within its slot.
+        rooms.push(keep.clamp(0.0, 1.0));
     }
 
     // Where the current line rests: at its share of the whole view, with the
@@ -349,6 +355,20 @@ fn paint(
         ctx.request_repaint();
     }
     let scroll = follow + manual.shift(now);
+    // A text swapped for another (the same song's from another source,
+    // timing made, a wait more or less) is laid out anew at once: the
+    // text's spring is moved by as much as the line it was on moved, so
+    // that line stays where it is and only the rest of the way is
+    // animated, instead of the whole text jumping there and drifting back.
+    let held_id = id.with("held");
+    if swapped == Some(true)
+        && !state.prefs.lyrics_cascade
+        && !manual_on
+        && let Some(moved) = held_moved(ctx.data(|d| d.get_temp::<(u64, f32)>(held_id)), &slot_of, &tops)
+    {
+        anim::shift_f32(&ctx, id.with("scroll"), moved);
+    }
+    ctx.data_mut(|d| d.insert_temp(held_id, (slot_of[ci], tops[ci])));
     // When the view moves or resizes (the window, the layout's span, a card
     // that rises in), the text goes with it at once, kept at its share of
     // the height: the springs are moved with their frame instead of chasing
@@ -393,6 +413,14 @@ fn paint(
             }
         })
         .collect();
+    // How far each item is from the current one, eased with the focus as
+    // the current line changes: the lines' resting brightness follows it,
+    // where every other line stepped brighter or dimmer at once the frame
+    // the next line came in, right as the lines began to move. Kept for
+    // items out of view too, so one scrolled back in is where it should be.
+    let aways: Vec<f32> = (0..items.len())
+        .map(|i| anim::f32(&ctx, id.with(("away", slot_of[i])), (i as f32 - ci as f32).clamp(-9.0, 9.0), AWAY))
+        .collect();
     let shown = |i: usize| {
         let (slot_h, extra) = slots[i];
         !(ys[i] + slot_h + extra < rect.top() - 60.0 || ys[i] > rect.bottom() + 60.0)
@@ -412,8 +440,6 @@ fn paint(
     // hovered in the frame of its click: the click is placed where it was.
     let clicked = if resp.clicked() { item_at(resp.interact_pointer_pos().or(resp.hover_pos())) } else { None };
     for (i, item) in items.iter().enumerate() {
-        let dist = i as i32 - ci as i32;
-        let far = dist.unsigned_abs().min(8) as f32;
         let y = ys[i];
         let (slot_h, extra) = slots[i];
         let room = rooms[i];
@@ -499,18 +525,16 @@ fn paint(
         let size = (sizes.small + (sizes.big - sizes.small) * focus) * scale(l);
         // Between the two resting sizes the size moves every frame.
         let g = if focus > 0.0 && focus < 1.0 {
-            moving_layout(&painter, &breaks[j].forced, size)
+            moving_layout(&painter, &breaks[j].forced, (sizes.small * scale(l), sizes.big * scale(l)), focus)
         } else {
             fixed_layout(&painter, &breaks[j].forced, size)
         };
         let line = Rect::from_min_size(pos2(side(g.size().x), y + (slot_h - g.size().y) * 0.5), g.size());
         // Brightness of a line at rest: past lines a bit brighter than the
         // ones to come; focus mode pushes the rest far back (from the look
-        // before as the look changes).
-        let rest_in = |style: Style| match style {
-            Style::Focus => 0.62f32.powf(far).max(0.08) * 0.7,
-            _ => (if dist < 0 { 0.5 } else { 0.42 }) * 0.86f32.powf((far - 1.0).max(0.0)),
-        };
+        // before as the look changes), by how far the line is from the
+        // current one as eased ([`AWAY`]).
+        let rest_in = |style: Style| rest_brightness(style, aways[i]);
         let mut rest = match look_was {
             Some(was) => rest_in(was.style) + (rest_in(look.style) - rest_in(was.style)) * look_mix,
             None => rest_in(look.style),
@@ -616,8 +640,33 @@ fn paint(
     }
 }
 
+/// How far a text laid out anew moved the item the view was on (`held`:
+/// its slot and top the frame before), by the items' slots and `tops` now;
+/// `None` when it is not there any more.
+fn held_moved(held: Option<(u64, f32)>, slot_of: &[u64], tops: &[f32]) -> Option<f32> {
+    let (slot, top) = held?;
+    let i = slot_of.iter().position(|s| *s == slot)?;
+    Some(tops.get(i)? - top)
+}
+
 /// The spring the text follows a scroll by hand on.
 const HAND: Spring = Spring::new(1.0, 1600.0);
+
+/// The spring a line's distance from the current one eases on (that of
+/// its focus, so its brightness moves with the rest of the change).
+const AWAY: Spring = Spring::new(1.0, 170.0);
+
+/// How bright a line at rest is under `style`, `away` lines from the
+/// current one (before it when negative; fractions between whole lines
+/// while the current line changes): lines sung already a bit brighter
+/// than the ones to come; focus pushes the rest far back.
+fn rest_brightness(style: Style, away: f32) -> f32 {
+    let far = away.abs().min(8.0);
+    match style {
+        Style::Focus => 0.62f32.powf(far).max(0.08) * 0.7,
+        _ => (0.42 + 0.08 * (-away).clamp(0.0, 1.0)) * 0.86f32.powf((far - 1.0).max(0.0)),
+    }
+}
 
 /// The spring mega mode's block of text moves to its new middle on when
 /// the text changes.
@@ -675,6 +724,10 @@ fn look_fades(mix: f32) -> (f32, f32) {
 /// Below this share of its slot a folding wait counts as gone: it takes no
 /// pointer and draws nothing.
 const ROOMLESS: f32 = 0.01;
+
+/// How far past open or folded a wait's room may swing (its spring's own
+/// overshoot is a few hundredths); only a bound for safety.
+const ROOM_OVERSHOOT: f32 = 0.1;
 
 /// The Gaussian blur (sigma) of a line at the very edge, relative to the
 /// big text size (at «Сила размытия» 100 %).
@@ -994,16 +1047,20 @@ struct Slots {
 /// The slot of each item with `keys`: when most of them were there the
 /// frame before (the same song's text, swapped), each keeps its slot and a
 /// new one gets a slot of its own; otherwise (another song) the slots go
-/// by place, as the items do.
-fn slots(ctx: &egui::Context, id: egui::Id, keys: &[u64]) -> Vec<u64> {
-    let was = ctx.data(|d| d.get_temp::<Slots>(id)).unwrap_or_default();
-    if was.keys == keys {
-        return was.slots;
+/// by place, as the items do. With whether the items changed since the
+/// frame before (`None`: the view's first frame).
+fn slots(ctx: &egui::Context, id: egui::Id, keys: &[u64]) -> (Vec<u64>, Option<bool>) {
+    let was = ctx.data(|d| d.get_temp::<Slots>(id));
+    if let Some(was) = &was
+        && was.keys == keys
+    {
+        return (was.slots.clone(), Some(false));
     }
-    let now = carry_slots(&was, keys);
+    let changed = was.is_some().then_some(true);
+    let now = carry_slots(&was.unwrap_or_default(), keys);
     let out = now.slots.clone();
     ctx.data_mut(|d| d.insert_temp(id, now));
-    out
+    (out, changed)
 }
 
 fn carry_slots(was: &Slots, keys: &[u64]) -> Slots {
@@ -1088,9 +1145,11 @@ struct Breaks {
 
 /// Glyph advances round differently at different sizes. Freeze the BIG
 /// rows as paragraphs: newlines are row separators, never extra glyphs.
-fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, big: f32) -> Breaks {
+///
+/// Kept shared, so taking it every frame for every line copies no text.
+fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, big: f32) -> Arc<Breaks> {
     let ctx = painter.ctx();
-    if let Some(b) = ctx.data(|d| d.get_temp::<Breaks>(id))
+    if let Some(b) = ctx.data(|d| d.get_temp::<Arc<Breaks>>(id))
         && b.text == text && b.wrap == wrap && b.big == big
     {
         return b;
@@ -1100,7 +1159,7 @@ fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, bi
     let g = crate::typography::layout(painter, job);
     let forced = g.rows.iter().map(|r| r.row.glyphs.iter().map(|gl| gl.chr).collect::<String>()).collect::<Vec<_>>().join("\n");
     let size = fixed_layout(painter, &forced, big).size();
-    let b = Breaks { text: text.to_owned(), wrap, big, forced, height: size.y, width: size.x };
+    let b = Arc::new(Breaks { text: text.to_owned(), wrap, big, forced, height: size.y, width: size.x });
     ctx.data_mut(|d| d.insert_temp(id, b.clone()));
     b
 }
@@ -1109,12 +1168,47 @@ fn fixed_layout(painter: &egui::Painter, text: &str, size: f32) -> Arc<Galley> {
     crate::typography::layout(painter, LayoutJob::single_section(text.to_owned(), style_at(size).text_format(Color32::WHITE)))
 }
 
-/// [`fixed_layout`] for a size that is animating (see
-/// [`crate::typography::layout_sized`]).
-fn moving_layout(painter: &egui::Painter, text: &str, size: f32) -> Arc<Galley> {
-    crate::typography::layout_sized(painter, style_at(size), |style, _| {
-        LayoutJob::single_section(text.to_owned(), style.text_format(Color32::WHITE))
-    })
+/// [`fixed_layout`] for a line whose size moves between its resting sizes
+/// `rest` (small, big), `t` (0..1) of the way. It is laid out at a resting
+/// size within half a point of it, else at the nearest whole size, and
+/// scaled to the size: those few layouts are kept across frames and draw
+/// nothing new into the font atlas (see
+/// [`crate::typography::layout_sized`], whose row height moves with the
+/// size and so missed the kept layouts every frame). Its rows and height
+/// go evenly between the two resting layouts', so the line grows without
+/// the whole-pixel steps of each size's own rounded row height (which
+/// moved it in its slot by half a pixel at a time) and meets either
+/// resting layout where it ends.
+fn moving_layout(painter: &egui::Painter, text: &str, rest: (f32, f32), t: f32) -> Arc<Galley> {
+    let size = rest.0 + (rest.1 - rest.0) * t;
+    let base = if (size - rest.1).abs() <= 0.5 {
+        rest.1
+    } else if (size - rest.0).abs() <= 0.5 {
+        rest.0
+    } else {
+        size.round().max(1.0)
+    };
+    let g = crate::typography::scale_galley(&fixed_layout(painter, text, base), size / base);
+    between(g, &fixed_layout(painter, text, rest.0), &fixed_layout(painter, text, rest.1), t)
+}
+
+/// `g` with its rows placed and its height taken `t` (0..1) of the way
+/// from `from`'s to `to`'s (the same rows at two sizes); as it is when the
+/// rows differ.
+fn between(g: Arc<Galley>, from: &Galley, to: &Galley, t: f32) -> Arc<Galley> {
+    if g.rows.len() != from.rows.len() || g.rows.len() != to.rows.len() {
+        return g;
+    }
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    let mut out = Arc::unwrap_or_clone(g);
+    let mut bounds = Rect::NOTHING;
+    for (r, placed) in out.rows.iter_mut().enumerate() {
+        placed.pos.y = lerp(from.rows[r].pos.y, to.rows[r].pos.y);
+        bounds = bounds.union(placed.row.visuals.mesh_bounds.translate(placed.pos.to_vec2()));
+    }
+    out.mesh_bounds = bounds;
+    out.rect = Rect::from_min_size(out.rect.min, vec2(out.rect.width(), lerp(from.rect.height(), to.rect.height())));
+    Arc::new(out)
 }
 
 /// A looping sample for the settings' hover card: the line being sung
@@ -2854,11 +2948,97 @@ mod tests {
         output.textures_delta.clear();
     }
 
-    fn three_rows(painter: &egui::Painter, text: &str) -> Breaks {
+    fn three_rows(painter: &egui::Painter, text: &str) -> Arc<Breaks> {
         (200..900).step_by(10).find_map(|width| {
             let b = fixed_breaks(painter, egui::Id::new("test-breaks"), text, width as f32, 44.0);
             (b.forced.split('\n').count() == 3).then_some(b)
         }).expect("fixture must wrap into three rows")
+    }
+
+    /// A swapped text with two more lines above the one being sung, while
+    /// the view is moving to it: moved with that line, the text stays where
+    /// it is drawn and keeps its speed, and only the rest of the way is
+    /// animated.
+    #[test]
+    fn a_swapped_text_stays_where_it_is_drawn_and_keeps_its_speed() {
+        use nikgob_motion::Animated;
+        let old_tops = [0.0, 60.0, 120.0, 180.0];
+        let old_slots = [10, 11, 12, 13];
+        // The view moves from line 1 to line 2 (scroll = top − anchor 100).
+        let mut scroll = Animated::new(60.0_f32 - 100.0, Spring::new(1.0, 300.0));
+        scroll.set_target(120.0 - 100.0, 0.0);
+        let now = 0.08;
+        let drawn = old_tops[2] - scroll.value(now);
+        let speed = scroll.velocity(now);
+        // Two new lines come in before it; its slot stays with it.
+        let new_tops = [0.0, 60.0, 120.0, 180.0, 240.0, 300.0];
+        let new_slots = [20, 21, 10, 11, 12, 13];
+        let moved = held_moved(Some((old_slots[2], old_tops[2])), &new_slots, &new_tops).unwrap();
+        assert_eq!(moved, 120.0);
+        scroll.shift(moved);
+        assert!((new_tops[4] - scroll.value(now) - drawn).abs() < 1e-3);
+        assert!((scroll.velocity(now) - speed).abs() < 1e-2);
+        // It goes on to the line's place in the new text, on the same spring.
+        scroll.set_target(new_tops[4] - 100.0, now);
+        assert!((new_tops[4] - scroll.value(now) - drawn).abs() < 1e-3);
+        assert!((scroll.velocity(now) - speed).abs() < 1e-2);
+        assert_eq!(scroll.value(5.0), new_tops[4] - 100.0);
+        // A line not in the new text moves nothing.
+        assert_eq!(held_moved(Some((99, 0.0)), &new_slots, &new_tops), None);
+        assert_eq!(held_moved(None, &new_slots, &new_tops), None);
+    }
+
+    /// At whole distances a line rests as bright as it always did; between
+    /// them (the current line changing) its brightness moves without a step.
+    #[test]
+    fn resting_brightness_moves_without_steps_as_the_current_line_changes() {
+        for style in [Style::Karaoke, Style::Focus, Style::Wave] {
+            for dist in -12i32..=12 {
+                let far = dist.unsigned_abs().min(8) as f32;
+                let old = match style {
+                    Style::Focus => 0.62f32.powf(far).max(0.08) * 0.7,
+                    _ => (if dist < 0 { 0.5 } else { 0.42 }) * 0.86f32.powf((far - 1.0).max(0.0)),
+                };
+                assert!((rest_brightness(style, dist as f32) - old).abs() < 1e-6, "{style:?} {dist}");
+            }
+            let mut was = rest_brightness(style, -10.0);
+            for k in 1..=2000 {
+                let now = rest_brightness(style, -10.0 + k as f32 * 0.01);
+                assert!((now - was).abs() < 0.006, "{style:?} at {}", -10.0 + k as f32 * 0.01);
+                was = now;
+            }
+        }
+    }
+
+    /// A line growing from one resting size to the other: its height and
+    /// rows move a little every frame (never by a rounded row height's
+    /// whole pixel at once), and it starts and ends on the resting layouts.
+    #[test]
+    fn a_growing_line_moves_evenly_and_meets_its_resting_layouts() {
+        with_painter(|painter| {
+            let b = three_rows(painter, "и слова, что не сказаны вслух, звучат громче всего остального, пока город считает шаги до утра");
+            let rest = (32.0 * 1.1, 44.0 * 1.1);
+            let (from, to) = (fixed_layout(painter, &b.forced, rest.0), fixed_layout(painter, &b.forced, rest.1));
+            let per_step = (to.rect.height() - from.rect.height()) / 200.0;
+            let mut was = from.clone();
+            for step in 1..200 {
+                let t = step as f32 / 200.0;
+                let g = moving_layout(painter, &b.forced, rest, t);
+                assert_eq!(g.rows.len(), 3);
+                assert!((g.rect.height() - was.rect.height() - per_step).abs() < 1e-3, "t={t}");
+                for r in 0..3 {
+                    let moved = g.rows[r].pos.y - was.rows[r].pos.y;
+                    let even = (to.rows[r].pos.y - from.rows[r].pos.y) / 200.0;
+                    assert!((moved - even).abs() < 1e-3, "t={t} row {r}");
+                }
+                was = g;
+            }
+            let near = |t: f32| moving_layout(painter, &b.forced, rest, t);
+            for (g, rest) in [(near(1e-4), &from), (near(1.0 - 1e-4), &to)] {
+                assert!((g.rect.height() - rest.rect.height()).abs() < 0.01);
+                assert!((g.rect.width() - rest.rect.width()).abs() < 0.05);
+            }
+        });
     }
 
     #[test]
